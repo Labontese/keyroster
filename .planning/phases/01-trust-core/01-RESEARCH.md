@@ -584,15 +584,23 @@ JSON
 | A10 | A separate `tools/go.mod` is preferable to the `tool` directive in the main module | Alternatives | Minor; CLAUDE.md mentions the tool directive, so the owner decides |
 | A11 | TPM NV counters do not survive vTPM snapshot restore | Pattern 3 | Only affects optional hardening |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All four questions were answered by the owner on 2026-10-04 (01-CONTEXT.md D-13..D-15) or settled within the planner's discretion; the plans implement each resolution.
 
 1. **What authorizes issuance in Phase 1, before WebAuthn (KEY-02, Phase 2)?**
    - What we know: the signer must be default-deny and must verify evidence itself; success criterion 4 needs an issued cert.
    - What's unclear: whether the owner accepts a Phase 1 "bootstrap admin SSHSIG" evidence type (admin pubkeys in the root-signed genesis policy, CLI signs via ssh-agent).
    - Recommendation: adopt it as an explicit, logged evidence type `admin-sshsig/v1`. Phase 2 adds `webauthn/v1` and policy decides which CAs accept which. Confirm with the owner.
+   - RESOLVED: D-13. Issuance requires `admin-sshsig/v1` evidence over the request digest from an admin key in the root-signed genesis policy; implemented in plan 01-07 (assumption A8 confirmed).
 2. **Should log refusals be logged?** Logging every refused request is good visibility but is DoS-able. Recommendation: log refusals rate-limited and aggregated; always log `clock_regression`, bundle installs and `ca_init`.
+   - RESOLVED: D-14. Every refusal goes to slog; refusals enter the Merkle log under a rate limit, and suppressed ones are counted in periodic summary entries; implemented in plan 01-05.
 3. **merkle vs sumdb/tlog** (one fewer dependency). Recommendation: keep the locked merkle unless the owner opts in.
+   - RESOLVED: D-15. `github.com/transparency-dev/merkle` stays; `x/mod/sumdb/tlog` was considered and rejected; plan 01-05 uses merkle for hashing and `sumdb/note` only for checkpoints.
 4. **Bot name.** `keyroster-bot` is free (404 on 2026-10-04). Recommendation: use it.
+   - RESOLVED: planner's discretion under D-05 (01-CONTEXT "Claude's Discretion"). The account is `keyroster-bot`, created by the owner in plan 01-01 Task 2.
+
+Related assumptions settled by the plans rather than by an owner answer: A1/A2 (swtpm transport) by the CI spike order vtpm-proxy → unixio → tcp in plan 01-11, which records the transport it keeps; A3/A4 (ruleset admin role id 5, Actions integration id 15368) by the live API checks and the documented fallback in plan 01-01 Task 3; A5 by keeping the manual Windows 9.5p2 run (plan 01-15) as the Windows evidence.
 
 ## Environment Availability
 

@@ -2,7 +2,7 @@
 
 > Full coverage by default. Opt-outs are explicit, reasoned decisions.
 
-Scope: the keyroster product itself integrates no external API in Phase 1 (self-hosted, no external service in the core path). The phase does use the GitHub REST API, through `gh` and `gh api`, to administer the public repository `Labontese/keyroster` (REPO-01..04, D-04..D-06). The matrix below enumerates that repository-administration surface and records what plans 01-01, 01-02, 01-03, 01-10 and 01-12 integrate. Owner-token calls change settings and rulesets; bot-token calls (`scripts/gh-as-bot.sh`) only push branches, open and auto-merge PRs, and create issues/labels.
+Scope: the keyroster product itself integrates no external API in Phase 1 (self-hosted, no external service in the core path). The phase does use the GitHub REST API, through `gh` and `gh api`, to administer the public repository `Labontese/keyroster` (REPO-01..04, D-04..D-06). The matrix below enumerates that repository-administration surface and records what the plans integrate: 01-01 (repository, settings, rulesets, collaborator, signing keys), 01-03 (security and Actions settings, code scanning), 01-04 (required-check ruleset update), 01-12 (issues and labels), 01-15 (final ruleset, Scorecard analyses), and every plan's PR and merge gate (`scripts/merge-gate.sh`, bot token only). Owner-token calls change settings and rulesets; bot-token calls (`scripts/gh-as-bot.sh`) only push branches, open and auto-merge PRs, and create issues/labels.
 
 | capability | decision | reason |
 |---|---|---|
@@ -24,7 +24,7 @@ Scope: the keyroster product itself integrates no external API in Phase 1 (self-
 | actions workflow dispatch and run listing/watching | INTEGRATE | |
 | code-scanning analyses (read, to verify CodeQL and Scorecard uploads) | INTEGRATE | |
 | commits and check-runs (read: signature and required-check evidence) | INTEGRATE | |
-| pull requests (create, checks, auto-merge squash) | INTEGRATE | |
+| pull requests (create, checks, auto-merge squash; read state, mergeStateStatus and reviews for the merge gate) | INTEGRATE | |
 | issues and labels (create needs-hardware tracking) | INTEGRATE | |
 | classic branch protection | OPT-OUT | explicitly out of scope — superseded by the two-ruleset design, which supports audited bypass in pull_request mode |
 | code-scanning default setup | OPT-OUT | explicitly out of scope — the advanced, SHA-pinned CodeQL workflow (Go + Actions, security-extended) replaces it |
