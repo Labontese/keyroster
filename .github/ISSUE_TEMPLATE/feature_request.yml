@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a change or a new capability.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        keyroster keeps a small, auditable codebase: every feature is attack surface. Requests that explain the access problem they solve are the easiest to weigh.
+
+        Security problems do not belong here; report them privately: https://github.com/Labontese/keyroster/security/advisories/new
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: The change you would like, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: The problem this solves, and how you handle it today.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: How it should work from your point of view (commands, output, configuration).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: keyroster version or commit
+      description: The version or commit you are using, if any.
+    validations:
+      required: false

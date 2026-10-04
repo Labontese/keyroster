@@ -1,0 +1,48 @@
+name: Bug report
+description: Something in keyroster does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problems do not belong here.** If the bug could let someone obtain, keep or hide access, or weakens a security control, report it privately instead: https://github.com/Labontese/keyroster/security/advisories/new
+
+        Remove secrets, private keys, hostnames and addresses from anything you paste.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands, configuration and inputs that trigger the bug.
+      placeholder: |
+        1. keyroster ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What you expected to happen, and what happened instead (include error output).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: keyroster version or commit
+      description: Output of `keyroster version`, or the commit you built from.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and OpenSSH version
+      description: For example "Debian 13, OpenSSH 10.0p2" (`ssh -V`, and `sshd -V` on the server side if relevant).
+    validations:
+      required: true
