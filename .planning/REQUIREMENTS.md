@@ -106,7 +106,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 - [ ] **REPO-01**: Protected `main` via rulesets: PR only, required checks, required review, signed commits, linear history, no force-push
 - [ ] **REPO-02**: GitHub Actions CI: build, test, lint, govulncheck, fuzzing, e2e against real sshd; actions pinned by SHA with least-privilege permissions
 - [ ] **REPO-03**: CodeQL, Dependabot (gomod + actions), secret scanning with push protection, OpenSSF Scorecard
-- [ ] **REPO-04**: SECURITY.md with private vulnerability reporting; README, LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CODEOWNERS, issue/PR templates
+- [x] **REPO-04**: SECURITY.md with private vulnerability reporting; README, LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CODEOWNERS, issue/PR templates
 - [ ] **REPO-05**: Reproducible, static builds (`CGO_ENABLED=0`) for all target platforms
 - [ ] **REPO-06**: Releases via GitHub Releases with cosign signatures, SBOM and SLSA provenance; Conventional Commits + semver
 - [ ] **REPO-07**: Agent self-updates only to releases signed by the project's release key
@@ -122,20 +122,24 @@ Requirements for the first public release. Each maps to roadmap phases.
 Deferred. Tracked but not in current roadmap.
 
 ### Identity
+
 - **AUTH2-01**: OIDC/SSO login (WebAuthn still required for signing)
 - **AUTH2-02**: LDAP/SCIM user provisioning
 
 ### Visibility
+
 - **VIS2-01**: Last-used time per plain key via log correlation
 - **VIS2-02**: Break-glass use alerting (push/email)
 - **VIS2-03**: Separate `sshcm-witness` on another machine cosigning checkpoints
 - **VIS2-04**: Host key inventory
 
 ### Platforms
+
 - **PLAT2-01**: OPNsense/pfSense support via plugin (they regenerate sshd_config)
 - **PLAT2-02**: Agentless mode (generated config for Ansible/manual deploy, network gear, Dropbear)
 
 ### Other
+
 - **MIG2-01**: Guided migration from authorized_keys to certificates
 - **HA2-01**: Threshold signing (FROST) for CA keys
 - **TF2-01**: Terraform provider
@@ -225,7 +229,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REPO-01 | Phase 1 | Pending |
 | REPO-02 | Phase 1 | Pending |
 | REPO-03 | Phase 1 | Pending |
-| REPO-04 | Phase 1 | Pending |
+| REPO-04 | Phase 1 | Complete |
 | REPO-05 | Phase 6 | Pending |
 | REPO-06 | Phase 6 | Pending |
 | REPO-07 | Phase 6 | Pending |
