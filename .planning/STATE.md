@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-02 Task 3 merge gate: PR #2 awaiting owner approval"
-last_updated: "2026-10-04T12:38:25.661Z"
+stopped_at: "01-03 Task 3 merge gate: PR #3 awaiting owner approval"
+last_updated: "2026-10-04T12:57:37.473Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 14ec2595aa4634129438b7582b646d435e5a4a7b
+state_head: 01e111b458ad9a70f6773fbe1e5440424b5f051b
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 3 of 16
+Plan: 4 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0%
 |------|----------|-------|-------|
 | Phase 01 P01 | 54 min | 4 tasks | 23 files |
 | Phase 01 P02 | 31 min | 2 tasks | 32 files |
+| Phase 01 P03 | 14 min | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,9 @@ Recent decisions affecting current work:
 - [Phase 01]: IssueRequest variable fields use uint16 length prefixes (cryptobyte has no uint32 reader); the 64 KiB frame cap is unchanged
 - [Phase 01]: keyroster-signer serve: umask 0077, empty allowlist refused, 32 concurrent connections, single DB connection, SetLastSerial only raises; socket group = first --allow-group
 - [Phase 01]: Finding for 01-13: keyroster-signer has no net/http or crypto/tls in its deps but reaches os/exec transitively via modernc.org/libc; depguard only catches direct imports
+- [Phase 01]: Admin-only repo settings are applied by the owner via scripts/apply-security-settings.sh; the API accepted all of them including sha_pinning_required=true
+- [Phase 01]: Code of Conduct contact is @Labontese via GitHub report-abuse (no private messages on GitHub); flagged for the owner
+- [Phase 01]: New third-party actions need a selected-actions allowlist entry (owner) plus a SHA pin; Scorecard publishes only from main, verified in 01-15
 
 ### Pending Todos
 
@@ -100,6 +104,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T12:38:15.795Z
-Stopped at: 01-02 Task 3 merge gate: PR #2 awaiting owner approval
+Last session: 2026-10-04T12:57:37.425Z
+Stopped at: 01-03 Task 3 merge gate: PR #3 awaiting owner approval
 Resume file: None
