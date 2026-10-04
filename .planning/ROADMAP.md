@@ -22,6 +22,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Phase Details
 
 ### Phase 1: Trust Core
+
 **Goal**: An admin can stand up a hardware-backed, auditable CA whose certificates stock OpenSSH accepts and whose signing rules cannot be bypassed, before any user or host exists.
 **Mode:** mvp
 **Depends on**: Nothing (first phase)
@@ -32,29 +33,53 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Admin can initialise separate user, host and machine CAs whose keys live in a PKCS#11 HSM reached via ssh-agent (SoftHSM2 in CI, YubiHSM 2 on real hardware), a TPM 2.0 or a YubiKey PIV slot, and are only ever used by the network-less `sshcm-signer` process.
   4. A certificate issued through the signer is accepted by real `sshd` on OpenSSH 9.5p2 and on the latest release in CI. It carries a unique non-zero serial that is never reissued, even after the signer's state is restored from an older copy, plus a structured key ID and `permit-pty`-only extensions. The signer refuses empty, wildcard or malformed principals, certificate-type CA keys, and anything other than a client-supplied public key.
   5. Every issuance is in the Merkle audit log before the certificate is released; `sshcm audit verify` checks the log end to end, fails on any tampered or removed entry, and can export it.
+
 **Plans:** 16 plans (11 waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
 
 Plans:
+**Wave 1**
 - [ ] 01-01-PLAN.md — Public repo with signed, scrubbed history, minimal Go module + CI, keyroster-bot identity, rulesets main-integrity/main-review, `scripts/merge-gate.sh` (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 01-02-PLAN.md — Walking skeleton: `keyroster ca issue` → `keyroster-signer` (UDS, agent-held CA) → cert accepted by sshd 10.5p1 (WSL); SignCert guard and signer-no-network lint (wave 2)
 - [ ] 01-03-PLAN.md — CodeQL, Scorecard, Dependabot, secret scanning + push protection, private vulnerability reporting, Actions least privilege, community files (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 01-16-PLAN.md — Signing-boundary refusal suite split out of 01-02: one refusal through the real socket, named tables (principals, key IDs, extensions, keys, serials, wire, agent, DB, concurrency, restore), four decoder fuzz targets (wave 3; after 01-02, before 01-04)
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 01-04-PLAN.md — CI e2e matrix on sshd 9.5p1/10.5p1, sshd and signer negative cases, fuzz job; e2e and fuzz required on main (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 01-05-PLAN.md — Merkle audit log before release, rate-limited refusal logging (D-14), export-log + `keyroster audit verify`, tamper suite (wave 5)
 - [ ] 01-06-PLAN.md — Trust anchor: SSHSIG, canonical trust bundle + genesis policy, `root sign` / `trust verify`, sk-dummy hardware-root stand-in (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 01-07-PLAN.md — Signer under the root-signed bundle: `ca-init` (user/host/machine/ops/log), `install-bundle`, admin-SSHSIG evidence (D-13), policy profiles (wave 6)
-- [ ] 01-08-PLAN.md — Separate user/host/machine CAs proven against real sshd (no TOFU) and root-anchored `audit verify --pin` (wave 7)
 - [ ] 01-09-PLAN.md — Software roots for the homelab (age, two roots, 1-of-2) and the offline ceremony runbook (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 01-08-PLAN.md — Separate user/host/machine CAs proven against real sshd (no TOFU) and root-anchored `audit verify --pin` (wave 7)
+
+**Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 01-10-PLAN.md — PKCS#11/SoftHSM2 through ssh-agent: P-256 and Ed25519 lanes, PKCS#11-held root (wave 8)
 - [ ] 01-11-PLAN.md — TPM 2.0 backend (P-256) with swtpm CI lane and vTPM custody detection; legitimacy gate for go-tpm-keyfiles (wave 8)
+
+**Wave 9** *(blocked on Wave 8 completion)*
 - [ ] 01-12-PLAN.md — Build-tagged YubiKey PIV backend and the needs-hardware tracking for Phase 6 (wave 9)
 - [ ] 01-13-PLAN.md — systemd sandbox, `keyroster-signer doctor`, dependency firewall, capslock baseline, signer install runbook (wave 9)
+
+**Wave 10** *(blocked on Wave 9 completion)*
 - [ ] 01-14-PLAN.md — Homelab vTPM signer and the owner's offline root ceremony; doctor and root-anchored audit on the VM (wave 10)
+
+**Wave 11** *(blocked on Wave 10 completion)*
 - [ ] 01-15-PLAN.md — Windows OpenSSH 9.5p2 manual check (blocking owner checkpoint), final required checks, Scorecard (wave 11)
-- [ ] 01-16-PLAN.md — Signing-boundary refusal suite split out of 01-02: one refusal through the real socket, named tables (principals, key IDs, extensions, keys, serials, wire, agent, DB, concurrency, restore), four decoder fuzz targets (wave 3; after 01-02, before 01-04)
+
 **UI hint**: no
 **Research**: HIGH. Ed25519 via PKCS#11/ssh-agent (OpenSSH 10.1/10.2 caveats), YubiHSM 2 forced-audit semantics, TPM key algorithm (assume P-256), signer sandboxing (own OS user, systemd hardening), restore-safe serial allocation. Decide CA key algorithm and custody together.
 
 ### Phase 2: Passkey Login MVP
+
 **Goal**: A user signs in with a passkey and, with one command, gets a short-lived certificate in ssh-agent that lets them SSH into a host as exactly the principals their role grants: the first end-to-end login.
 **Mode:** mvp
 **Depends on**: Phase 1
@@ -65,11 +90,13 @@ Plans:
   3. Admin defines roles mapping users and groups to principals on host groups; the user's certificate carries exactly those principals and logs them in to a manually configured host running stock OpenSSH.
   4. The signer refuses to sign, whatever the server sends, when the WebAuthn assertion is missing, replayed or bound to a different request digest, or when the policy version is not root/quorum-signed.
   5. Server and signer run on Linux and serve a server-rendered web UI embedded in the binary, with a strict CSP and no npm dependencies; when the CA runs on an encrypted software key, every CLI command and every UI page shows a loud evaluation-only warning.
+
 **Plans**: TBD
 **UI hint**: yes
 **Research**: MEDIUM-HIGH. CLI WebAuthn transport (default: browser loopback with PKCE + state; libfido2 needs cgo), Windows webauthn.dll/CTAP for non-admin users, Windows ssh-agent named pipe, WebAuthn origin rules (hostname + TLS, IP-origin guard).
 
 ### Phase 3: Linux Agent and Revocation
+
 **Goal**: Enrolled Linux hosts are kept in sync automatically (trusted CAs, principals, KRL and host certificates), so access granted, revoked or rotated centrally takes effect across the fleet without hand-edited sshd config and without risking lockout.
 **Mode:** mvp
 **Depends on**: Phase 2
@@ -80,11 +107,13 @@ Plans:
   3. Admin revokes a certificate (by serial or key ID) or a key from the CLI, and every enrolled host refuses it after its next pull. The KRL (own encoder, cross-checked with `ssh-keygen -Q`) is SSHSIG-signed and installed atomically with a last-good copy, older versions are refused, and a corrupt or missing KRL never locks out the fleet.
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
+
 **Plans**: TBD
 **UI hint**: no
 **Research**: MEDIUM. KRL format and fuzzing for the in-house encoder (no maintained Go library), sshd `Include`/drop-in variance across distros, whether `RevokedKeys` is re-read without reload (settle with an integration test). Dogfood on the laptop, zima and Proxmox.
 
 ### Phase 4: Insider Resistance and Web UI
+
 **Goal**: No single admin can grant access unobserved: policy and credential changes need a quorum, sensitive access needs a second person, and the audit log is witnessed. All of it can be operated from the web UI.
 **Mode:** mvp
 **Depends on**: Phase 3
@@ -95,11 +124,13 @@ Plans:
   3. Any single admin can revoke immediately, while un-revoking requires quorum; a single-admin instance is clearly labelled as such, and its sensitive changes wait out a timelock with notification.
   4. Agents and the CLI verify signed checkpoints with consistency proofs and raise an alert if the log ever shrinks or forks (e.g. a DB admin rewriting history); the UI audit browser shows each entry with its inclusion proof.
   5. Admin can issue, revoke and manage roles and policy from the UI with CLI parity, and sees convergence for the current KRL, CA set and policy (e.g. "KRL applied on 47/48 hosts").
+
 **Plans**: TBD
 **UI hint**: yes
 **Research**: Standard patterns. Formalise the policy/quorum model and write threat-model tests (malicious admin, compromised server) before building.
 
 ### Phase 5: Visibility and Cross-Platform Agents
+
 **Goal**: The admin sees in one place who has access to what right now, covering certificates and the plain keys that live outside the CA, with alerts for access we never granted, across Linux, Windows, macOS and BSD hosts.
 **Mode:** mvp
 **Depends on**: Phase 3, Phase 4
@@ -110,11 +141,13 @@ Plans:
   3. A login with a certificate serial that is not in the issuance log raises an alert, and every break-glass login is recorded in the audit log and visible in reconciliation.
   4. One overview shows all certificates, keys, hosts, principals and expiry: who has access to what, now.
   5. The agent's sync and inventory work on Windows OpenSSH 9.5p2+ (correct ACLs, config inserted before `Match Group administrators`, lowercase principals, admin key file; dogfooded on Daniel-PC), on macOS, and on FreeBSD, OpenBSD and NetBSD.
+
 **Plans**: TBD
 **UI hint**: yes
 **Research**: HIGH. Windows ACL semantics, principal case and domain/Entra accounts, `verify-required`, KRL behaviour on 9.5p2, login log formats (`sshd`/`sshd-session`/`sshd-auth`/Windows OpenSSH Operational log), macOS launchd and paths, BSD paths.
 
 ### Phase 6: Hardening and Release
+
 **Goal**: Anyone can verify and safely run a release (reproducible, signed, documented, externally reviewed), and an admin can recover from disaster without breaking serial or audit guarantees.
 **Mode:** mvp
 **Depends on**: Phase 5
@@ -125,6 +158,7 @@ Plans:
   3. Admin can back up and restore server state (encrypted); after a restore no serial is reissued and the audit log is intact and still verifies.
   4. A new admin can install from the install guide and follow published runbooks for CA rotation, break-glass and restore, backed by a documented threat model.
   5. An external security review is completed and its findings are resolved or documented before the first public release.
+
 **Plans**: TBD
 **UI hint**: no
 **Research**: Standard patterns (GoReleaser, cosign, SLSA provenance, cyclonedx-gomod). Also run the PITFALLS "looks done but isn't" checklist and per-platform rotation and break-glass drills.
