@@ -1,0 +1,12 @@
+# Build output
+/bin/
+/dist/
+*.test
+/keyroster
+/keyroster.exe
+coverage.out
+
+# Local caches
+/.cache/
+
+# Note: .planning/ is deliberately tracked; never ignore it.

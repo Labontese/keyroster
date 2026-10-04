@@ -1,0 +1,34 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - depguard
+    - errcheck
+    - errorlint
+    - forbidigo
+    - gosec
+    - revive
+    - staticcheck
+  settings:
+    depguard:
+      rules:
+        main:
+          list-mode: lax
+          files:
+            - $all
+          deny:
+            - pkg: math/rand
+              desc: use crypto/rand
+            - pkg: math/rand/v2
+              desc: use crypto/rand
+            - pkg: github.com/mattn/go-sqlite3
+              desc: cgo; use modernc.org/sqlite
+            - pkg: github.com/stripe/krl
+              desc: archived; use the in-repo KRL encoder
+            - pkg: github.com/google/go-tpm-tools
+              desc: pulls a cgo TPM simulator; use swtpm in tests
+    forbidigo:
+      forbid:
+        - pattern: ^print(ln)?$
+          msg: write to an io.Writer instead of the print builtins
