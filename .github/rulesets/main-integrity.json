@@ -1,0 +1,31 @@
+{
+  "name": "main-integrity",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [],
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "required_linear_history" },
+    { "type": "required_signatures" },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "build-test", "integration_id": 15368 },
+          { "context": "lint", "integration_id": 15368 },
+          { "context": "govulncheck", "integration_id": 15368 },
+          { "context": "pr-title", "integration_id": 15368 }
+        ]
+      }
+    }
+  ]
+}

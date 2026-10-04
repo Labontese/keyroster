@@ -1,0 +1,153 @@
+# Contributing to keyroster
+
+keyroster is pre-alpha security software. Every change reaches `main` through
+a pull request that is signed, green in CI and reviewed. This file describes
+how that works and which exceptions exist.
+
+## Pull request titles: Conventional Commits
+
+`main` only accepts squash merges, and the squash commit takes the PR title as
+its subject and the PR body as its message. The PR title is therefore the
+commit message, and it must follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<optional scope>)!: <description>
+```
+
+Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
+`build`, `ci`, `chore`, `revert`. The scope uses lower-case letters, digits
+and `. _ / -`; the description is 1-100 characters. The `pr-title` check runs
+`scripts/check-pr-title.sh` on every PR. Edit the title and the check runs
+again.
+
+## Signed commits
+
+Every commit on a PR branch must be signed and show as **Verified** on
+GitHub; the `main-integrity` ruleset rejects unsigned commits, and GitHub
+cannot squash-merge a branch that contains one. We sign with SSH keys
+(ordinary ed25519 keys in `ssh-agent`, no per-commit touch):
+
+1. Add your public key to GitHub as a **signing** key, not only as an
+   authentication key:
+
+   ```
+   gh ssh-key add ~/.ssh/id_ed25519.pub --type signing --title "commit signing"
+   ```
+
+2. Commit with an email address that is verified on your GitHub account
+   (your `ID+login@users.noreply.github.com` address works).
+
+3. Configure git (repository-local or global):
+
+   ```
+   git config gpg.format ssh
+   git config user.signingkey "key::$(cat ~/.ssh/id_ed25519.pub)"
+   git config commit.gpgsign true
+   git config tag.gpgsign true
+   ```
+
+   The `key::` form makes git ask `ssh-agent` for the private key, so the
+   key file itself never needs to be on disk.
+
+**Windows:** the `ssh-keygen` bundled with Git for Windows cannot reach the
+Windows OpenSSH agent. Point git at the system OpenSSH instead:
+
+```
+git config gpg.ssh.program C:/Windows/System32/OpenSSH/ssh-keygen.exe
+```
+
+## Required checks
+
+The `main-integrity` ruleset requires these checks, which are the job names in
+`.github/workflows/ci.yml`:
+
+| Check | What it does |
+|---|---|
+| `build-test` | `go mod verify`, static build, cross-compile for windows/darwin/freebsd, `go vet`, `gofmt`, tests with the race detector |
+| `lint` | golangci-lint v2.14.0 with `.golangci.yml` |
+| `govulncheck` | reachable-vulnerability scan with the pinned govulncheck in `tools/go.mod` |
+| `pr-title` | Conventional Commits check of the PR title |
+
+The checks are strict: the branch must be up to date with `main` before it
+can merge. Renaming a job blocks every merge until the ruleset is updated, so
+job names change only together with `.github/rulesets/main-integrity.json`.
+
+## Pull request flow
+
+1. Branch from the current `origin/main` (`git fetch origin && git switch -c
+   <branch> origin/main`).
+2. Commit signed commits, push the branch and open a PR with a Conventional
+   Commits title.
+3. Enable auto-merge with squash (`gh pr merge --auto --squash`). GitHub
+   merges as soon as every rule is satisfied.
+4. The code owner (`@Labontese`, see `.github/CODEOWNERS`) reviews and
+   approves. A new push dismisses an earlier approval, the approval must come
+   from someone other than the last pusher, and every review thread must be
+   resolved.
+
+### Claude's pull requests (keyroster-bot)
+
+Claude works through its own GitHub account, `keyroster-bot`, so that
+required review involves two real identities. The bot is a collaborator with
+write access only: it can push branches and open PRs, but it cannot approve
+its own PRs, bypass a ruleset or administer the repository. It signs its
+commits with its own SSH key.
+
+- `scripts/gh-as-bot.sh` runs `gh` as the bot (its own gh config directory,
+  with `GH_TOKEN` and `GITHUB_TOKEN` unset so the owner's token never
+  applies).
+- Each Claude PR carries the code of one plan together with that plan's
+  planning documents (SUMMARY and tracking updates), and ends at a merge gate
+  driven by `scripts/merge-gate.sh BRANCH`. The script reports whether the
+  owner's approval is pending, waits for auto-merge after approval and then
+  fast-forwards local `main`. It talks to GitHub only as the bot, never
+  submits a review and never merges as administrator.
+- When `main` moved after the PR was opened, the bot rebases the feature
+  branch onto `origin/main`, re-signs the commits, force-pushes with lease and
+  waits for green checks; the owner then approves the new head.
+- **The owner never clicks "Update branch" on a bot PR.** That would make the
+  owner the last pusher, and `require_last_push_approval` would then refuse
+  the owner's own approval. The bot rebases instead.
+- Claude never approves or merges a PR with the owner's credentials.
+
+## Owner bypass policy
+
+The repository has two rulesets on the default branch, and GitHub enforces
+the union of both:
+
+- **`main-integrity`** — no bypass actors at all. It blocks deletion and
+  force pushes, requires linear history and signed commits, and requires the
+  four checks above. Nobody, including the owner, can skip it.
+- **`main-review`** — requires one approving code-owner review with stale
+  review dismissal, last-push approval and resolved threads, and allows only
+  squash merges. Its single bypass actor is the repository **admin** role in
+  `pull_request` mode.
+
+The bypass exists because this is a small team: the owner's own PRs have no
+second human reviewer. The rules for using it:
+
+- It skips **only** the review requirement of `main-review`. Signed commits,
+  CI and every other rule of `main-integrity` still apply.
+- It works **only through a pull request**. A direct push to `main` is
+  rejected for everyone, the owner included (`pull_request` bypass mode, never
+  `exempt`, so GitHub writes an audit entry for every use).
+- Every use is logged by GitHub (rule insights and the audit log).
+- The PR body must declare it with this exact line:
+
+  ```
+  Bypass: owner-authored, no second reviewer
+  ```
+
+- It is never used for a bot PR. Bot PRs always wait for the owner's
+  approval.
+- The bot never holds admin rights, so it can never use the bypass.
+
+## Changing the rulesets
+
+The rulesets live in `.github/rulesets/` as JSON. A change goes through a
+normal PR; after it merges, the owner runs `bash scripts/apply-rulesets.sh`
+with the owner's gh login, which creates or updates each ruleset by name.
+
+## Security issues
+
+Do not open public issues for vulnerabilities. See [SECURITY.md](SECURITY.md).
