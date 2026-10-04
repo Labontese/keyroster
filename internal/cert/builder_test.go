@@ -110,19 +110,20 @@ func newSKECDSA(t testing.TB) ssh.PublicKey {
 }
 
 // dsaBlob assembles an ssh-dss public key blob (p, q, g, y as mpints) by
-// hand; crypto/dsa is deprecated and never used.
+// hand, with the 1024-bit p and 160-bit q that x/crypto's parser expects;
+// crypto/dsa is deprecated and never used.
 func dsaBlob() []byte {
 	var b cryptobyte.Builder
 	addSSHString(&b, []byte("ssh-dss"))
+	// mpint returns an n-byte positive integer with the top bit set,
+	// preceded by the zero byte the mpint encoding then requires.
 	mpint := func(n int, fill byte) []byte {
-		v := bytes.Repeat([]byte{fill}, n)
-		v[0] = 0x7f // positive, no leading zero byte needed
-		return v
+		return append([]byte{0}, bytes.Repeat([]byte{fill}, n)...)
 	}
-	addSSHString(&b, mpint(128, 0xab)) // p
-	addSSHString(&b, mpint(20, 0xcd))  // q
-	addSSHString(&b, mpint(128, 0x11)) // g
-	addSSHString(&b, mpint(128, 0x22)) // y
+	addSSHString(&b, mpint(128, 0xab)) // p: 1024 bits
+	addSSHString(&b, mpint(20, 0xcd))  // q: 160 bits
+	addSSHString(&b, mpint(128, 0x91)) // g
+	addSSHString(&b, mpint(128, 0xa2)) // y
 	return b.BytesOrPanic()
 }
 
@@ -436,6 +437,7 @@ func TestBuildSubjectKeys(t *testing.T) {
 	t.Run("dsa_subject", func(t *testing.T) {
 		pub, err := ssh.ParsePublicKey(dsaBlob())
 		if err != nil {
+			t.Logf("refused by ssh.ParsePublicKey: %v", err)
 			return // refused at parse time: the signer maps this to bad_subject_key
 		}
 		if pub.Type() != "ssh-dss" {
