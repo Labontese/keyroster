@@ -23,7 +23,7 @@ Certificates make access traceable and time-bounded, inventory surfaces access t
 - [ ] Issue longer-lived certificates for machines/automation, with KRL revocation as the emergency brake
 - [ ] Host certificates (host CA) so clients trust hosts without TOFU / known_hosts sprawl
 - [ ] Revocation via KRL, distributed to hosts automatically and quickly
-- [ ] CA private key protection that holds even if the CA server is compromised (storage model decided during research — hardware token / HSM / offline root + online intermediate are candidates)
+- [ ] CA private key protection that holds even if the CA server is compromised: network-less signer process that only signs with verifiable evidence (WebAuthn assertion over the request digest, approvals, quorum-signed policy); CA keys in hardware (YubiHSM 2 / TPM / YubiKey PIV; software key for dev only); offline trust root that signs only trust bundles/KRL authority/policy — never certificates (OpenSSH certs do not chain)
 
 **Authorization**
 - [ ] Roles and principals: map users/groups to which accounts they may log in as on which hosts
@@ -35,7 +35,8 @@ Certificates make access traceable and time-bounded, inventory surfaces access t
 - [ ] WebAuthn / passkey (FIDO2) authentication
 
 **Visibility**
-- [ ] Tamper-evident audit log (hash chain) of every issuance, revocation and admin action
+- [ ] Tamper-evident audit log (Merkle log with signed checkpoints, verified by agents/CLI/witness — a plain hash chain is rewritable by a DB admin) of every issuance, revocation and admin action
+- [ ] Login reconciliation: sshd login records (serial + CA) checked against the issuance log to detect certificates never issued by us
 - [ ] Overview of all certificates, keys, hosts, principals and expiry
 - [ ] Inventory: host agent discovers existing `authorized_keys` and SSH keys per account/host and reports old, weak or unknown keys
 
@@ -50,6 +51,13 @@ Certificates make access traceable and time-bounded, inventory surfaces access t
 - [ ] Signed releases, reproducible builds, SBOM, minimal dependencies
 - [ ] Public, documented, security-reviewed release
 
+**GitHub best practice (repo & process)**
+- [ ] Protected `main` (rulesets): PRs only, required status checks, required review, signed commits, linear history, no force-push
+- [ ] GitHub Actions CI: build, test, lint, govulncheck, fuzzing, e2e against real sshd; actions pinned by SHA, least-privilege `permissions:`
+- [ ] Security hygiene: SECURITY.md + private vulnerability reporting, CodeQL, Dependabot (gomod + actions), secret scanning + push protection, OpenSSF Scorecard
+- [ ] Community files: README, LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CODEOWNERS, issue/PR templates
+- [ ] Conventional Commits + semver; releases via GitHub Releases with signed artifacts, SBOM and provenance attestations
+
 ### Out of Scope
 
 - OIDC / SSO login — deferred to v2; v1 stays self-contained (local accounts + WebAuthn) to minimize attack surface; WebAuthn should remain required for signing even once OIDC lands
@@ -63,7 +71,8 @@ Certificates make access traceable and time-bounded, inventory surfaces access t
 - Competitive landscape: Teleport (powerful, but heavy and proxy-based, key features in enterprise tier), Smallstep step-ca (CA-focused), HashiCorp Vault SSH secrets engine (part of a large platform, BSL licence), Netflix BLESS (archived). Differentiation: **simplicity** (one binary, up in minutes, no proxy), **inventory** of existing keys, **minimal auditable attack surface**, and **fully open** with no paywalled security features.
 - Builds on native OpenSSH certificate support (`TrustedUserCAKeys`, `HostCertificate`, `@cert-authority`, `RevokedKeys`/KRL, `AuthorizedPrincipalsFile`).
 - Owner runs a homelab (Windows Daniel-PC with OpenSSH Server, Ubuntu laptop, ZimaBoard, Proxmox, all on Tailscale) — a natural dogfooding environment, including the Windows `administrators_authorized_keys` special case.
-- Language/stack not yet chosen — research decides (Go and Rust are the main candidates; weigh auditability, SSH library maturity, static cross-platform binaries and dependency footprint).
+- Research completed 2026-10-04 (`.planning/research/`): Go, pure-Go static binaries, SQLite, stdlib server-rendered UI; architecture "the server proposes, the signer disposes". No maintained Go KRL library exists — we own a fuzzed KRL encoder. Windows inbox OpenSSH is 9.5p2 (verified on Daniel-PC) and lacks 10.3 fixes.
+- Hosted on GitHub (account `Labontese`), developed with GitHub best practices from the first commit.
 
 ## Constraints
 
@@ -72,6 +81,7 @@ Certificates make access traceable and time-bounded, inventory surfaces access t
 - **Deployment**: Self-hosted, open source; no dependency on external services for core function
 - **Compatibility**: Must work with stock OpenSSH on all target platforms — no patched sshd
 - **Team**: Owner + Claude, no deadline — quality and security review take the time they take
+- **Process**: GitHub best practice — all changes via PR to protected `main`, CI must pass, Conventional Commits, signed commits/releases
 
 ## Key Decisions
 
@@ -82,8 +92,10 @@ Certificates make access traceable and time-bounded, inventory surfaces access t
 | Short-lived certs for humans, longer + KRL for machines | Short lifetimes make revocation rarely needed; KRL covers automation and emergencies | — Pending |
 | Local accounts + WebAuthn in v1, OIDC in v2 | Self-contained, smaller attack surface for first release | — Pending |
 | Inventory = discover + report only in v1 | Delivers the visibility core value without the risk of automated key changes | — Pending |
-| CA key storage model | Open — decide after research (HW token / HSM / offline root + online CA) | — Pending |
-| Implementation language | Open — decide after research (Go vs Rust) | — Pending |
+| CA key model: verifying signer + HW-backed online CAs + offline trust root (bundles only) | OpenSSH certs don't chain; HW stops theft but not misuse, so signer must verify evidence itself | — Pending |
+| Go (CGO_ENABLED=0), SQLite, stdlib UI | Most mature SSH cert lib, static cross-builds, ~6–10 deps, govulncheck (research) | — Pending |
+| Merkle audit log with witnesses, not hash chain | Hash chain can be recomputed by anyone with DB write access | — Pending |
+| GitHub best practice from day one | Security product must model the supply-chain hygiene it preaches | — Pending |
 
 ## Evolution
 
@@ -103,4 +115,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-04 after initialization*
+*Last updated: 2026-10-04 after research*
