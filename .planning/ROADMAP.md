@@ -32,24 +32,25 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Admin can initialise separate user, host and machine CAs whose keys live in a PKCS#11 HSM reached via ssh-agent (SoftHSM2 in CI, YubiHSM 2 on real hardware), a TPM 2.0 or a YubiKey PIV slot, and are only ever used by the network-less `sshcm-signer` process.
   4. A certificate issued through the signer is accepted by real `sshd` on OpenSSH 9.5p2 and on the latest release in CI. It carries a unique non-zero serial that is never reissued, even after the signer's state is restored from an older copy, plus a structured key ID and `permit-pty`-only extensions. The signer refuses empty, wildcard or malformed principals, certificate-type CA keys, and anything other than a client-supplied public key.
   5. Every issuance is in the Merkle audit log before the certificate is released; `sshcm audit verify` checks the log end to end, fails on any tampered or removed entry, and can export it.
-**Plans:** 15 plans (10 waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol")
+**Plans:** 16 plans (11 waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
 
 Plans:
 - [ ] 01-01-PLAN.md — Public repo with signed, scrubbed history, minimal Go module + CI, keyroster-bot identity, rulesets main-integrity/main-review, `scripts/merge-gate.sh` (wave 1)
-- [ ] 01-02-PLAN.md — Walking skeleton: `keyroster ca issue` → `keyroster-signer` (UDS, agent-held CA) → cert accepted by sshd 10.5p1 (WSL); signing-boundary refusal suite and fuzz targets (wave 2)
+- [ ] 01-02-PLAN.md — Walking skeleton: `keyroster ca issue` → `keyroster-signer` (UDS, agent-held CA) → cert accepted by sshd 10.5p1 (WSL); SignCert guard and signer-no-network lint (wave 2)
 - [ ] 01-03-PLAN.md — CodeQL, Scorecard, Dependabot, secret scanning + push protection, private vulnerability reporting, Actions least privilege, community files (wave 2)
-- [ ] 01-04-PLAN.md — CI e2e matrix on sshd 9.5p1/10.5p1, sshd and signer negative cases, fuzz job; e2e and fuzz required on main (wave 3)
-- [ ] 01-05-PLAN.md — Merkle audit log before release, rate-limited refusal logging (D-14), export-log + `keyroster audit verify`, tamper suite (wave 4)
-- [ ] 01-06-PLAN.md — Trust anchor: SSHSIG, canonical trust bundle + genesis policy, `root sign` / `trust verify`, sk-dummy hardware-root stand-in (wave 4)
-- [ ] 01-07-PLAN.md — Signer under the root-signed bundle: `ca-init` (user/host/machine/ops/log), `install-bundle`, admin-SSHSIG evidence (D-13), policy profiles (wave 5)
-- [ ] 01-08-PLAN.md — Separate user/host/machine CAs proven against real sshd (no TOFU) and root-anchored `audit verify --pin` (wave 6)
-- [ ] 01-09-PLAN.md — Software roots for the homelab (age, two roots, 1-of-2) and the offline ceremony runbook (wave 5)
-- [ ] 01-10-PLAN.md — PKCS#11/SoftHSM2 through ssh-agent: P-256 and Ed25519 lanes, PKCS#11-held root (wave 7)
-- [ ] 01-11-PLAN.md — TPM 2.0 backend (P-256) with swtpm CI lane and vTPM custody detection; legitimacy gate for go-tpm-keyfiles (wave 7)
-- [ ] 01-12-PLAN.md — Build-tagged YubiKey PIV backend and the needs-hardware tracking for Phase 6 (wave 8)
-- [ ] 01-13-PLAN.md — systemd sandbox, `keyroster-signer doctor`, dependency firewall, capslock baseline, signer install runbook (wave 8)
-- [ ] 01-14-PLAN.md — Homelab vTPM signer and the owner's offline root ceremony; doctor and root-anchored audit on the VM (wave 9)
-- [ ] 01-15-PLAN.md — Windows OpenSSH 9.5p2 manual check (blocking owner checkpoint), final required checks, Scorecard (wave 10)
+- [ ] 01-04-PLAN.md — CI e2e matrix on sshd 9.5p1/10.5p1, sshd and signer negative cases, fuzz job; e2e and fuzz required on main (wave 4)
+- [ ] 01-05-PLAN.md — Merkle audit log before release, rate-limited refusal logging (D-14), export-log + `keyroster audit verify`, tamper suite (wave 5)
+- [ ] 01-06-PLAN.md — Trust anchor: SSHSIG, canonical trust bundle + genesis policy, `root sign` / `trust verify`, sk-dummy hardware-root stand-in (wave 5)
+- [ ] 01-07-PLAN.md — Signer under the root-signed bundle: `ca-init` (user/host/machine/ops/log), `install-bundle`, admin-SSHSIG evidence (D-13), policy profiles (wave 6)
+- [ ] 01-08-PLAN.md — Separate user/host/machine CAs proven against real sshd (no TOFU) and root-anchored `audit verify --pin` (wave 7)
+- [ ] 01-09-PLAN.md — Software roots for the homelab (age, two roots, 1-of-2) and the offline ceremony runbook (wave 6)
+- [ ] 01-10-PLAN.md — PKCS#11/SoftHSM2 through ssh-agent: P-256 and Ed25519 lanes, PKCS#11-held root (wave 8)
+- [ ] 01-11-PLAN.md — TPM 2.0 backend (P-256) with swtpm CI lane and vTPM custody detection; legitimacy gate for go-tpm-keyfiles (wave 8)
+- [ ] 01-12-PLAN.md — Build-tagged YubiKey PIV backend and the needs-hardware tracking for Phase 6 (wave 9)
+- [ ] 01-13-PLAN.md — systemd sandbox, `keyroster-signer doctor`, dependency firewall, capslock baseline, signer install runbook (wave 9)
+- [ ] 01-14-PLAN.md — Homelab vTPM signer and the owner's offline root ceremony; doctor and root-anchored audit on the VM (wave 10)
+- [ ] 01-15-PLAN.md — Windows OpenSSH 9.5p2 manual check (blocking owner checkpoint), final required checks, Scorecard (wave 11)
+- [ ] 01-16-PLAN.md — Signing-boundary refusal suite split out of 01-02: one refusal through the real socket, named tables (principals, key IDs, extensions, keys, serials, wire, agent, DB, concurrency, restore), four decoder fuzz targets (wave 3; after 01-02, before 01-04)
 **UI hint**: no
 **Research**: HIGH. Ed25519 via PKCS#11/ssh-agent (OpenSSH 10.1/10.2 caveats), YubiHSM 2 forced-audit semantics, TPM key algorithm (assume P-256), signer sandboxing (own OS user, systemd hardening), restore-safe serial allocation. Decide CA key algorithm and custody together.
 
@@ -135,7 +136,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Trust Core | 0/15 | Planned | - |
+| 1. Trust Core | 0/16 | Planned | - |
 | 2. Passkey Login MVP | 0/TBD | Not started | - |
 | 3. Linux Agent and Revocation | 0/TBD | Not started | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |

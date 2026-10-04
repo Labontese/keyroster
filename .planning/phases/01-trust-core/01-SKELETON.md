@@ -2,7 +2,7 @@
 
 **Phase:** 1 (Trust Core)
 **Generated:** 2026-10-04
-**Delivered by:** plans 01-01 (repository + CI), 01-02 (issuance through the signer, accepted by real sshd 10.5p1), 01-04 (the same path proven in CI on sshd 9.5p1 and 10.5p1, required on `main`) and 01-05 (Merkle audit log + `keyroster audit verify`). The skeleton is complete when the 01-05 PR is merged to `main`.
+**Delivered by:** plans 01-01 (repository + CI), 01-02 (issuance through the signer, accepted by real sshd 10.5p1, with the SignCert guard and signer lint rules), 01-16 (every refusal rule of the signing boundary pinned by named tests, plus the decoder fuzz targets; runs right after 01-02 despite its number, see ROADMAP waves), 01-04 (the same path proven in CI on sshd 9.5p1 and 10.5p1, required on `main`) and 01-05 (Merkle audit log + `keyroster audit verify`). The skeleton is complete when the 01-05 PR is merged to `main`.
 
 ## Capability Proven End-to-End
 
@@ -61,7 +61,9 @@ This is not a web app, so the template's layers map as follows:
 
 **Phase-closing docs.** When 01-15's merge gate passes, Claude switches to a new branch `p01/close` from `origin/main`. The phase-level artifacts written after the last plan (VERIFICATION.md, UAT.md, code review and security reports, phase completion in STATE.md and ROADMAP.md) are committed there; the bot opens `docs(01): close phase 1`, and the same merge gate applies (`bash scripts/merge-gate.sh p01/close`).
 
-**Plan shape.** Each plan has at most three implementation tasks plus the terminal merge gate. The gate does no implementation work: a fresh continuation agent runs one script after the owner's approval, so it adds no implementation context to the plan's budget.
+**Plan shape.** Each plan has at most three implementation tasks plus the terminal merge gate. The gate does no implementation work: a fresh continuation agent runs one script after the owner's approval, so it adds no implementation context to the plan's budget. Plan numbers are identifiers, not execution order: waves and `depends_on` decide order. For example, 01-16 (the refusal suite split out of 01-02 in revision iteration 2) runs in wave 3, before 01-04. Two plans exceed the checker's per-plan file threshold under a recorded, reasoned exception: 01-02 (the Walking Skeleton tracer crosses every layer) and 01-07 (removing the skeleton pin flags forces an atomic e2e migration). Each plan's "Budget Exception" section gives the reasoning.
+
+**Threat IDs.** Threat IDs `T-01-NN` are unique within the phase; a new plan continues after the highest ID in use. `T-01-SC` is GSD's reserved per-plan supply-chain row. Every plan carries it, with content specific to that plan (the modules, actions or installs that plan adds or deliberately does not add). It is therefore intentionally repeated across plans, is excluded from the phase-unique ID rule, and must not be renamed or merged into one phase-level row.
 
 ## Stack Touched in Phase 1
 
