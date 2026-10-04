@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-01 Task 4 merge gate: PR #1 awaiting owner approval"
-last_updated: "2026-10-04T11:46:16.695Z"
+stopped_at: "01-02 Task 3 merge gate: PR #2 awaiting owner approval"
+last_updated: "2026-10-04T12:38:25.661Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 216db487c92c4cdffd52cbb25541da86bf82a2c3
+state_head: 14ec2595aa4634129438b7582b646d435e5a4a7b
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 2 of 16
+Plan: 3 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 54 min | 4 tasks | 23 files |
+| Phase 01 P02 | 31 min | 2 tasks | 32 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,9 @@ Recent decisions affecting current work:
 - [Phase 01]: Required status checks keep integration_id 15368 (GitHub Actions); accepted by the API and resolved on PR #1
 - [Phase 01]: keyroster-bot (id 337682656) signs with ed25519 key 1218459 held only in the Windows ssh-agent; private key file deleted
 - [Phase 01]: scripts/merge-gate.sh rebases with --autostash and an explicit lease so GSD's uncommitted working files cannot block the rebase loop
+- [Phase 01]: IssueRequest variable fields use uint16 length prefixes (cryptobyte has no uint32 reader); the 64 KiB frame cap is unchanged
+- [Phase 01]: keyroster-signer serve: umask 0077, empty allowlist refused, 32 concurrent connections, single DB connection, SetLastSerial only raises; socket group = first --allow-group
+- [Phase 01]: Finding for 01-13: keyroster-signer has no net/http or crypto/tls in its deps but reaches os/exec transitively via modernc.org/libc; depguard only catches direct imports
 
 ### Pending Todos
 
@@ -96,6 +100,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T11:46:16.625Z
-Stopped at: 01-01 Task 4 merge gate: PR #1 awaiting owner approval
+Last session: 2026-10-04T12:38:15.795Z
+Stopped at: 01-02 Task 3 merge gate: PR #2 awaiting owner approval
 Resume file: None
