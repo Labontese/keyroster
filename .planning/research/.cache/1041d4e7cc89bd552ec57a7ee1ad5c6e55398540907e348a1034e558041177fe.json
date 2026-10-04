@@ -1,0 +1,1 @@
+{"content":"CVE-2024-7594 Vault SSH secrets engine (1.7.7-1.17.5) did not require valid_principals; empty principals cert could auth as any user. Fix: allow_empty_principals default false (1.17.6).","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-10-04T06:46:59.668Z","ttl":86400000,"kind":"web"}
