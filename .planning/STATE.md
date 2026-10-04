@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 1
+current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: Phase 1 context gathered
-last_updated: "2026-10-04T10:43:13.578Z"
+stopped_at: "01-01 Task 4 merge gate: PR #1 awaiting owner approval"
+last_updated: "2026-10-04T11:46:16.695Z"
 last_activity: 2026-10-04
-last_activity_desc: Roadmap created (6 phases, 71/71 v1 requirements mapped)
-state_head: 41403c4a91de05ba5cb2782596dbfa7b54d5d90d
+last_activity_desc: Phase 01 execution started
+state_head: 216db487c92c4cdffd52cbb25541da86bf82a2c3
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-04)
 
 **Core value:** Full visibility: at any moment you know exactly who has access to what, and can revoke it immediately.
-**Current focus:** Phase 1: Trust Core
+**Current focus:** Phase 01 — Trust Core
 
 ## Current Position
 
-Phase: 1 (Trust Core) — READY TO EXECUTE
-Plan: 0 of TBD in current phase
+Phase: 01 (Trust Core) — EXECUTING
+Plan: 2 of 16
 Status: Ready to execute
-Last activity: 2026-10-04 — Roadmap created (6 phases, 71/71 v1 requirements mapped)
+Last activity: 2026-10-04 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -52,6 +52,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 54 min | 4 tasks | 23 files |
 
 ## Accumulated Context
 
@@ -65,6 +70,9 @@ Recent decisions affecting current work:
 - [Roadmap]: The who-has-access overview (VIS-04) lands in Phase 5 so it covers plain keys from inventory, not only certificates
 - [Roadmap]: Break-glass access (BREAK-01) is in Phase 3, since a dogfooding lockout is the likeliest early incident; break-glass logging (BREAK-02) reuses login reconciliation (VIS-05) in Phase 5
 - [Roadmap]: Log witnessing by agents and CLI (VIS-02) is an insider-resistance control in Phase 4
+- [Phase 01]: Required status checks keep integration_id 15368 (GitHub Actions); accepted by the API and resolved on PR #1
+- [Phase 01]: keyroster-bot (id 337682656) signs with ed25519 key 1218459 held only in the Windows ssh-agent; private key file deleted
+- [Phase 01]: scripts/merge-gate.sh rebases with --autostash and an explicit lease so GSD's uncommitted working files cannot block the rebase loop
 
 ### Pending Todos
 
@@ -88,6 +96,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T07:27:21.285Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-trust-core/01-CONTEXT.md
+Last session: 2026-10-04T11:46:16.625Z
+Stopped at: 01-01 Task 4 merge gate: PR #1 awaiting owner approval
+Resume file: None
