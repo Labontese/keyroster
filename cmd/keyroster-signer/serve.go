@@ -103,7 +103,7 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 	}
 	socketGID := -1
 	if len(gids) > 0 {
-		socketGID = int(gids[0])
+		socketGID = int(gids[0]) //nolint:gosec // G115: gids are <= math.MaxInt32 (resolveGroups)
 	}
 	l, err := signer.Listen(*socket, socketGID)
 	if err != nil {
@@ -150,7 +150,7 @@ func parseUIDs(vals []string) ([]uint32, error) {
 		if err != nil {
 			return nil, fmt.Errorf("--allow-uid %q: not a uid", v)
 		}
-		out = append(out, uint32(n))
+		out = append(out, uint32(n)) //nolint:gosec // G115: ParseUint with bitSize 32
 	}
 	return out, nil
 }
@@ -171,7 +171,7 @@ func resolveGroups(vals []string) ([]uint32, error) {
 		if err != nil || n > math.MaxInt32 {
 			return nil, fmt.Errorf("--allow-group %q: unusable gid %q", v, gidStr)
 		}
-		out = append(out, uint32(n))
+		out = append(out, uint32(n)) //nolint:gosec // G115: n <= math.MaxInt32, checked above
 	}
 	return out, nil
 }

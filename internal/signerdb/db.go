@@ -86,7 +86,7 @@ func (d *DB) LastSerial(ctx context.Context) (uint64, error) {
 	if last < 0 {
 		return 0, errors.New("signerdb: negative serial high-water mark")
 	}
-	return uint64(last), nil
+	return uint64(last), nil //nolint:gosec // G115: last >= 0, checked above
 }
 
 // SetLastSerial raises the high-water mark to serial inside tx. It refuses
@@ -114,5 +114,5 @@ func toInt64(v uint64) (int64, error) {
 	if v > math.MaxInt64 {
 		return 0, fmt.Errorf("signerdb: value %d does not fit SQLite INTEGER", v)
 	}
-	return int64(v), nil
+	return int64(v), nil //nolint:gosec // G115: v <= math.MaxInt64, checked above
 }

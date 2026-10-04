@@ -70,5 +70,5 @@ func micros(t time.Time) (uint64, error) {
 	if us <= 0 {
 		return 0, ErrClockRegression
 	}
-	return uint64(us), nil
+	return uint64(us), nil //nolint:gosec // G115: us > 0, checked above
 }

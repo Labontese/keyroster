@@ -28,7 +28,47 @@ linters:
               desc: archived; use the in-repo KRL encoder
             - pkg: github.com/google/go-tpm-tools
               desc: pulls a cgo TPM simulator; use swtpm in tests
+        # KEY-01: the signer is network-less by construction. Direct imports
+        # of network, exec and template packages are denied in every signer
+        # package (tests excluded: they may run go and OpenSSH tools).
+        # Transitive dependencies are checked by the go list -deps firewall
+        # and capslock in plan 01-13.
+        signer-no-network:
+          list-mode: lax
+          files:
+            - "**/internal/signer/**"
+            - "**/internal/keystore/**"
+            - "**/internal/cert/**"
+            - "**/internal/serial/**"
+            - "**/internal/signerdb/**"
+            - "**/internal/wire/**"
+            - "**/cmd/keyroster-signer/**"
+            - "!$test"
+          deny:
+            - pkg: net/http
+              desc: the signer is network-less (KEY-01)
+            - pkg: net/rpc
+              desc: the signer is network-less (KEY-01)
+            - pkg: net/smtp
+              desc: the signer is network-less (KEY-01)
+            - pkg: crypto/tls
+              desc: the signer is network-less (KEY-01)
+            - pkg: os/exec
+              desc: the signer never runs other programs (KEY-01)
+            - pkg: html/template
+              desc: no templates in the signer (KEY-01)
+            - pkg: text/template
+              desc: no templates in the signer (KEY-01)
     forbidigo:
       forbid:
         - pattern: ^print(ln)?$
           msg: write to an io.Writer instead of the print builtins
+        - pattern: '\.SignCert\b'
+          msg: certificates are signed only by internal/cert.Build (CA-06, CA-07)
+  exclusions:
+    rules:
+      # internal/cert.Build is the single SignCert call site.
+      - path: ^internal/cert/
+        linters:
+          - forbidigo
+        text: SignCert

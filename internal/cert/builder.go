@@ -77,9 +77,11 @@ func Build(req Request, ca ssh.Signer, rnd io.Reader) (*ssh.Certificate, error) 
 		return nil, fmt.Errorf("%w: key ID serial differs from the certificate serial", ErrSerial)
 	}
 	keyID := req.KeyID.String()
-	if parsed, err := ParseKeyID(keyID); err != nil {
+	parsed, err := ParseKeyID(keyID)
+	if err != nil {
 		return nil, err
-	} else if parsed != req.KeyID {
+	}
+	if parsed != req.KeyID {
 		return nil, fmt.Errorf("%w: key ID does not round-trip", ErrKeyID)
 	}
 
