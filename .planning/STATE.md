@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-03 Task 3 merge gate: PR #3 awaiting owner approval"
-last_updated: "2026-10-04T12:57:37.473Z"
+stopped_at: "01-16 Task 4 merge gate: PR #4 awaiting owner approval"
+last_updated: "2026-10-04T13:27:04.158Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 01e111b458ad9a70f6773fbe1e5440424b5f051b
+state_head: 143d2f8787cef7c07a0c951139d6f94fc5a707e8
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 4 of 16
+Plan: 5 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P01 | 54 min | 4 tasks | 23 files |
 | Phase 01 P02 | 31 min | 2 tasks | 32 files |
 | Phase 01 P03 | 14 min | 2 tasks | 13 files |
+| Phase 01 P16 | 22 min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,9 @@ Recent decisions affecting current work:
 - [Phase 01]: Admin-only repo settings are applied by the owner via scripts/apply-security-settings.sh; the API accepted all of them including sha_pinning_required=true
 - [Phase 01]: Code of Conduct contact is @Labontese via GitHub report-abuse (no private messages on GitHub); flagged for the owner
 - [Phase 01]: New third-party actions need a selected-actions allowlist entry (owner) plus a SHA pin; Scorecard publishes only from main, verified in 01-15
+- [Phase 01]: IssueRequest.SigningBytes starts with the raw keyroster/issue-request/v1 tag (no uint16 length prefix), per the 01-02 contract; 01-07 signs these bytes
+- [Phase 01]: The agent keystore backend skips certificate entries by the -cert-v01@openssh.com key type, since the x/crypto agent client returns entries as agent.Key, never ssh.Certificate
+- [Phase 01]: gsd-tools tdd-red-evidence parses only TAP/Surefire; Go RED evidence is recorded in the plan SUMMARY
 
 ### Pending Todos
 
@@ -104,6 +108,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T12:57:37.425Z
-Stopped at: 01-03 Task 3 merge gate: PR #3 awaiting owner approval
+Last session: 2026-10-04T13:26:44.726Z
+Stopped at: 01-16 Task 4 merge gate: PR #4 awaiting owner approval
 Resume file: None
