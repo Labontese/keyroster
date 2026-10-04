@@ -161,12 +161,83 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| CA-01 | Phase 1 | Pending |
+| CA-02 | Phase 1 | Pending |
+| CA-03 | Phase 1 | Pending |
+| CA-04 | Phase 1 | Pending |
+| CA-05 | Phase 1 | Pending |
+| CA-06 | Phase 1 | Pending |
+| CA-07 | Phase 1 | Pending |
+| CA-08 | Phase 1 | Pending |
+| KEY-01 | Phase 1 | Pending |
+| KEY-02 | Phase 2 | Pending |
+| KEY-03 | Phase 1 | Pending |
+| KEY-04 | Phase 1 | Pending |
+| KEY-05 | Phase 1 | Pending |
+| KEY-06 | Phase 2 | Pending |
+| KEY-07 | Phase 1 | Pending |
+| KEY-08 | Phase 3 | Pending |
+| AUTH-01 | Phase 2 | Pending |
+| AUTH-02 | Phase 2 | Pending |
+| AUTH-03 | Phase 2 | Pending |
+| AUTH-04 | Phase 2 | Pending |
+| AUTH-05 | Phase 4 | Pending |
+| AUTH-06 | Phase 3 | Pending |
+| AUTHZ-01 | Phase 2 | Pending |
+| AUTHZ-02 | Phase 3 | Pending |
+| AUTHZ-03 | Phase 4 | Pending |
+| AUTHZ-04 | Phase 4 | Pending |
+| AUTHZ-05 | Phase 4 | Pending |
+| AUTHZ-06 | Phase 4 | Pending |
+| AUTHZ-07 | Phase 4 | Pending |
+| AGENT-01 | Phase 3 | Pending |
+| AGENT-02 | Phase 3 | Pending |
+| AGENT-03 | Phase 3 | Pending |
+| AGENT-04 | Phase 3 | Pending |
+| AGENT-05 | Phase 3 | Pending |
+| AGENT-06 | Phase 3 | Pending |
+| AGENT-07 | Phase 3 | Pending |
+| REVOKE-01 | Phase 3 | Pending |
+| REVOKE-02 | Phase 3 | Pending |
+| REVOKE-03 | Phase 3 | Pending |
+| REVOKE-04 | Phase 3 | Pending |
+| BREAK-01 | Phase 3 | Pending |
+| BREAK-02 | Phase 5 | Pending |
+| VIS-01 | Phase 1 | Pending |
+| VIS-02 | Phase 4 | Pending |
+| VIS-03 | Phase 1 | Pending |
+| VIS-04 | Phase 5 | Pending |
+| VIS-05 | Phase 5 | Pending |
+| VIS-06 | Phase 4 | Pending |
+| INV-01 | Phase 5 | Pending |
+| INV-02 | Phase 5 | Pending |
+| INV-03 | Phase 5 | Pending |
+| INV-04 | Phase 5 | Pending |
+| UI-01 | Phase 2 | Pending |
+| UI-02 | Phase 4 | Pending |
+| UI-03 | Phase 4 | Pending |
+| UI-04 | Phase 4 | Pending |
+| PLAT-01 | Phase 3 | Pending |
+| PLAT-02 | Phase 5 | Pending |
+| PLAT-03 | Phase 5 | Pending |
+| PLAT-04 | Phase 5 | Pending |
+| PLAT-05 | Phase 2 | Pending |
+| REPO-01 | Phase 1 | Pending |
+| REPO-02 | Phase 1 | Pending |
+| REPO-03 | Phase 1 | Pending |
+| REPO-04 | Phase 1 | Pending |
+| REPO-05 | Phase 6 | Pending |
+| REPO-06 | Phase 6 | Pending |
+| REPO-07 | Phase 6 | Pending |
+| OPS-01 | Phase 6 | Pending |
+| OPS-02 | Phase 6 | Pending |
+| OPS-03 | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 71 total
-- Mapped to phases: 0
-- Unmapped: 71 ⚠️
+- Mapped to phases: 71
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-10-04*
-*Last updated: 2026-10-04 after initial definition*
+*Last updated: 2026-10-04 after roadmap creation (traceability mapped)*
