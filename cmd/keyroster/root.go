@@ -148,7 +148,7 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	caPath := fset.String("ca-pubkeys", "", "ca-pubkeys.json from the CA host (required)")
 	policyPath := fset.String("policy", "", "canonical policy file (required)")
 	rootsPath := fset.String("roots", "", "roots.pub: one root key per line with comment custody=<value> (required)")
-	threshold := fset.Uint("threshold", 0, "number of root signatures a verifier requires (required)")
+	threshold := fset.Int("threshold", 0, "number of root signatures a verifier requires (required)")
 	outDir := fset.String("out-dir", "", "directory for bundle.json, policy.json and their .sigs files (required)")
 	agentKey := fset.String("agent-key", "", "SHA256 fingerprint of the root key in ssh-agent that signs (required)")
 	confirm := fset.String("confirm", "", "first 8 hex digits of the bundle hash (default: prompt on stdin)")
@@ -180,7 +180,7 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return fmt.Errorf("%s: %w", *rootsPath, err)
 	}
-	if *threshold > uint(len(roots)) {
+	if *threshold < 1 || *threshold > len(roots) {
 		return fmt.Errorf("--threshold %d with %d roots", *threshold, len(roots))
 	}
 
