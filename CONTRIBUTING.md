@@ -59,7 +59,7 @@ git config gpg.ssh.program C:/Windows/System32/OpenSSH/ssh-keygen.exe
 ## Required checks
 
 The `main-integrity` ruleset requires these checks, which are the job names in
-`.github/workflows/ci.yml`:
+`.github/workflows/ci.yml` and `.github/workflows/e2e.yml`:
 
 | Check | What it does |
 |---|---|
@@ -67,10 +67,19 @@ The `main-integrity` ruleset requires these checks, which are the job names in
 | `lint` | golangci-lint v2.14.0 with `.golangci.yml` |
 | `govulncheck` | reachable-vulnerability scan with the pinned govulncheck in `tools/go.mod` |
 | `pr-title` | Conventional Commits check of the PR title |
+| `e2e (9.5p1)` | the `test/e2e` suite against a non-root sshd built from portable OpenSSH 9.5p1 (`scripts/build-openssh.sh`: SHA-256-pinned, GPG-verified) |
+| `e2e (10.5p1)` | the same suite against portable OpenSSH 10.5p1 |
+| `fuzz` | `scripts/fuzz.sh`: every native fuzz target for 30 s; fails when any target fails or when zero targets ran |
+
+**OpenSSH 9.5p2 is not covered by CI.** Windows ships Microsoft's own
+`OpenSSH_for_Windows_9.5p2`, which has no upstream release. Portable 9.5p1 is
+the closest upstream code, so CI runs that; the evidence for Windows OpenSSH
+9.5p2 is the manual check on Windows in plan 01-15.
 
 The checks are strict: the branch must be up to date with `main` before it
-can merge. Renaming a job blocks every merge until the ruleset is updated, so
-job names change only together with `.github/rulesets/main-integrity.json`.
+can merge. Renaming a job or changing the e2e matrix blocks every merge until
+the ruleset is updated, so job names change only together with
+`.github/rulesets/main-integrity.json`.
 
 ## Pull request flow
 
@@ -117,7 +126,7 @@ the union of both:
 
 - **`main-integrity`** — no bypass actors at all. It blocks deletion and
   force pushes, requires linear history and signed commits, and requires the
-  four checks above. Nobody, including the owner, can skip it.
+  checks above. Nobody, including the owner, can skip it.
 - **`main-review`** — requires one approving code-owner review with stale
   review dismissal, last-push approval and resolved threads, and allows only
   squash merges. Its single bypass actor is the repository **admin** role in
@@ -147,6 +156,14 @@ second human reviewer. The rules for using it:
 The rulesets live in `.github/rulesets/` as JSON. A change goes through a
 normal PR; after it merges, the owner runs `bash scripts/apply-rulesets.sh`
 with the owner's gh login, which creates or updates each ruleset by name.
+
+A new required check is the exception to "after it merges". A check becomes
+required only after it has reported success on the PR that introduces it,
+because a required check that never reports blocks every merge. The owner
+applies that ruleset from the PR branch once the new check is green on the
+PR, and before approving. The PR then shows that the new context resolves
+before anything merges. If that PR is later abandoned, the owner runs the
+script again from `main` to restore the previous list.
 
 ## Security issues
 

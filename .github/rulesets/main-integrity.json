@@ -23,7 +23,10 @@
           { "context": "build-test", "integration_id": 15368 },
           { "context": "lint", "integration_id": 15368 },
           { "context": "govulncheck", "integration_id": 15368 },
-          { "context": "pr-title", "integration_id": 15368 }
+          { "context": "pr-title", "integration_id": 15368 },
+          { "context": "e2e (9.5p1)", "integration_id": 15368 },
+          { "context": "e2e (10.5p1)", "integration_id": 15368 },
+          { "context": "fuzz", "integration_id": 15368 }
         ]
       }
     }
