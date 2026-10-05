@@ -38,6 +38,9 @@ type CAProfile struct {
 	AllowedCriticalOptions []string `json:"allowed_critical_options"`
 }
 
+// NamespacePolicy is the SSHSIG namespace of root signatures over a policy.
+const NamespacePolicy = "keyroster/policy/v1"
+
 var (
 	adminKeyTypes = set(ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoSKED25519, ssh.KeyAlgoSKECDSA256)
 	// The OpenSSH certificate extensions and critical options

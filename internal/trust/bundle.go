@@ -20,12 +20,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// SSHSIG namespaces of the two root-signed document types. A signature under
-// one namespace never verifies as the other.
-const (
-	NamespaceBundle = "keyroster/trust-bundle/v1"
-	NamespacePolicy = "keyroster/policy/v1"
-)
+// NamespaceBundle is the SSHSIG namespace of root signatures over a trust
+// bundle. A signature under one namespace never verifies under another
+// (NamespacePolicy is in policy.go).
+const NamespaceBundle = "keyroster/trust-bundle/v1"
 
 // GenesisPrev is the prev hash of a version 1 bundle or policy.
 const GenesisPrev = "0000000000000000000000000000000000000000000000000000000000000000"
