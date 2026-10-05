@@ -9,11 +9,11 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Certificate Authority (CA)
 
-- [ ] **CA-01**: Admin can initialise separate user, host and machine CAs, each with its own key
+- [x] **CA-01**: Admin can initialise separate user, host and machine CAs, each with its own key
 - [x] **CA-02**: Signer refuses to sign a certificate with empty principals or principals containing wildcards, commas, whitespace or control characters
 - [x] **CA-03**: Every certificate gets a unique, non-zero, monotonically increasing serial that is never reused, including after restore from backup
-- [ ] **CA-04**: Every certificate gets a structured key ID identifying user/host, request and policy version
-- [ ] **CA-05**: User certificates default to secure extensions (`permit-pty` only); other extensions are granted only by role
+- [x] **CA-04**: Every certificate gets a structured key ID identifying user/host, request and policy version
+- [x] **CA-05**: User certificates default to secure extensions (`permit-pty` only); other extensions are granted only by role
 - [x] **CA-06**: Signer only signs client-generated public keys; the server never generates or sees user private keys
 - [x] **CA-07**: Signer refuses certificate-type keys as CA keys (no chaining)
 - [ ] **CA-08**: Certificates are verified as accepted/rejected by real `sshd` on OpenSSH 9.5p2 (Windows inbox) and the latest OpenSSH release in automated tests
@@ -165,11 +165,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CA-01 | Phase 1 | Pending |
+| CA-01 | Phase 1 | Complete |
 | CA-02 | Phase 1 | Complete |
 | CA-03 | Phase 1 | Complete |
-| CA-04 | Phase 1 | Pending |
-| CA-05 | Phase 1 | Pending |
+| CA-04 | Phase 1 | Complete |
+| CA-05 | Phase 1 | Complete |
 | CA-06 | Phase 1 | Complete |
 | CA-07 | Phase 1 | Complete |
 | CA-08 | Phase 1 | Pending |

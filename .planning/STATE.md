@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-09 Task 3 merge gate: owner approves PR #9"
-last_updated: "2026-10-05T12:21:59.171Z"
+stopped_at: "01-08 Task 3 merge gate: owner approves PR #10"
+last_updated: "2026-10-05T13:17:17.854Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 5bc9e84200526272c0cb4032e90d47b09ce07bee
+state_head: 074247c32b99f242066d087aa61f24ad8c3dbdbe
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 9
+  completed_plans: 10
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 10 of 16
+Plan: 11 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -65,6 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P06 | 38 min | 3 tasks | 29 files |
 | Phase 01 P07 | 35 min | 3 tasks | 28 files |
 | Phase 01 P09 | 30 min | 2 tasks | 14 files |
+| Phase 01 P08 | 25 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -113,6 +114,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-09: --passphrase-fd is read with syscall.Read on the raw descriptor/handle (no os.NewFile finalizer); passphrases need 20 runes and come only from a TTY or an inherited fd
 - [Phase 01]: 01-09: root sign --key refuses a root that roots.pub labels anything but custody=software; every software-root init or sign prints the SOFTWARE ROOT banner, also for --agent-key roots labelled software
 - [Phase 01]: 01-09: TestExportedAPI pins rootceremony methods (Type.Method) and fails on any exported result type that could carry a signer or private key
+- [Phase 01]: 01-08: audit verify trusts only --pin/--threshold; the log key (checkpoint and --previous) and each role's active CA come only from bundle_install entries verified as genesis (pins) or successor (TUF); Phase 1 refuses a log-key change (log key change unsupported)
+- [Phase 01]: 01-08: audit verify requires each issue leaf after the first bundle_install, signed by its role's active CA, a host certificate exactly for the host role, and key ID pol and leaf policy version equal to the policy in force; bundle_install's bundle_version must equal its bundle; --threshold is required
+- [Phase 01]: 01-08: host certificates presented as user certificates are tested with an x/crypto/ssh client because the OpenSSH client never offers a non-user certificate; sshd refuses them (Certificate invalid: not a user certificate)
 
 ### Pending Todos
 
@@ -136,6 +140,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T12:21:49.267Z
-Stopped at: 01-09 Task 3 merge gate: owner approves PR #9
+Last session: 2026-10-05T13:16:57.505Z
+Stopped at: 01-08 Task 3 merge gate: owner approves PR #10
 Resume file: None

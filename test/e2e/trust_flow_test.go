@@ -17,8 +17,9 @@ import (
 // keys, the offline root signs the genesis bundle and policy, install-bundle
 // verifies them against the pinned root, serve takes every key from the
 // bundle, an admin-signed keyroster ca issue yields a certificate that real
-// sshd accepts, and the exported log verifies against the log key from
-// ca-pubkeys.json and starts with the ca_init and bundle_install entries.
+// sshd accepts, and the exported log verifies against the pinned root alone
+// (audit verify --pin takes the log key from the root-signed bundle_install
+// entry) and starts with the ca_init and bundle_install entries.
 func TestTrustFlowEndToEnd(t *testing.T) {
 	login := currentUser(t)
 	env := bootstrapSigner(t, bootstrapOpts{})
@@ -60,7 +61,7 @@ func TestTrustFlowEndToEnd(t *testing.T) {
 	}
 
 	export := env.exportLog(t)
-	code, out := auditVerify(t, env.LogPub, export)
+	code, out := auditVerify(t, env, export)
 	if code != 0 || !strings.HasPrefix(out, "OK: 3 entries,") || !strings.Contains(out, "issued 1") {
 		t.Fatalf("audit verify exited %d, want OK with 3 entries and 1 issued:\n%s", code, out)
 	}

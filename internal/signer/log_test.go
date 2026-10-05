@@ -64,7 +64,6 @@ type logEnv struct {
 	dbPath  string
 	fx      *Fixture
 	backend *memBackend
-	logPub  ssh.PublicKey
 	base    uint64 // leaves written by the bootstrap (ca_init, bundle_install)
 	db      *signerdb.DB
 	s       *Signer
@@ -91,7 +90,6 @@ func newLogEnvFx(t *testing.T, fx *Fixture) *logEnv {
 		dbPath:  filepath.Join(t.TempDir(), "signer.db"),
 		fx:      fx,
 		backend: newMemBackend(fx),
-		logPub:  fx.Roles[keystore.RoleLog].PublicKey(),
 	}
 	db, err := signerdb.Open(e.dbPath)
 	if err != nil {
@@ -177,14 +175,14 @@ func (e *logEnv) counts() (leaves, issued int, last uint64) {
 	return len(hashes), issued, last
 }
 
-// verifyExport exports the log and verifies it with the pinned log key.
+// verifyExport exports the log and verifies it against the pinned root.
 func (e *logEnv) verifyExport() *audit.Report {
 	e.t.Helper()
 	var buf bytes.Buffer
 	if _, err := audit.Export(context.Background(), &buf, e.db); err != nil {
 		e.t.Fatal(err)
 	}
-	rep, err := audit.Verify(&buf, audit.Options{LogKey: e.logPub})
+	rep, err := audit.Verify(&buf, audit.Options{Pins: []string{e.fx.RootPin()}, Threshold: 1})
 	if err != nil {
 		e.t.Fatalf("audit.Verify: %v", err)
 	}
