@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-05 Task 4 merge gate: owner approves PR #6"
-last_updated: "2026-10-05T07:19:40.064Z"
+stopped_at: "01-06 Task 4 merge gate: owner approves PR #7"
+last_updated: "2026-10-05T08:08:09.961Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 95acc74f4e9c3eac594deadc957df6440fedd37a
+state_head: 9b20c92850df65b7dda0ecaf93d81568f6d88d77
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 6
+  completed_plans: 7
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 7 of 16
+Plan: 8 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -62,6 +62,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P16 | 22 min | 3 tasks | 11 files |
 | Phase 01 P04 | 23 min | 2 tasks | 7 files |
 | Phase 01 P05 | 41 min | 3 tasks | 37 files |
+| Phase 01 P06 | 38 min | 3 tasks | 29 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,12 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-05: log origin is keyroster/log/ + 16 hex of SHA-256(log key); the signer refuses to start when stored leaves do not reproduce the latest checkpoint signed by the pinned log key
 - [Phase 01]: 01-05: every refusal goes through Signer.refuse (slog, then a refusal leaf within 10/min burst 10, else a count in the next refusal_summary leaf, flushed every minute and on shutdown); one clock_regression leaf per episode
 - [Phase 01]: 01-05: duplicate_request stays CodeRefused (pinned by 01-16) although detected after cert.Build; every other post-Build failure returns unavailable and no certificate
+- [Phase 01]: 01-06: signed documents are canonical JSON = json.Marshal(struct) + one newline; parsing requires byte equality after a DisallowUnknownFields decode; lists are never null and policy extension lists are sorted
+- [Phase 01]: 01-06: internal/sshsig refuses RSA and certificate signers and a non-empty reserved field, emits and accepts sha512 only, and requires the sk user-presence flag explicitly
+- [Phase 01]: 01-06: root custody fido is exactly the sk-* key types; a CA, ops or log key equal to a root key is refused at bundle validation (ErrKeyIsRoot)
+- [Phase 01]: 01-06: VerifySuccessor needs both the previous and the new root threshold on bundle and policy, version prev+1, prev = SHA-256 of the previous canonical bundle, and issued_at not earlier
+- [Phase 01]: 01-06: scripts/fuzz.sh passes -fuzzminimizetime 5s; with Go's 60s default FuzzParseBundle ran 123 execs in a 30s CI budget
+- [Phase 01]: 01-06: keyroster root sign reaches ssh-agent via SSH_AUTH_SOCK Unix sockets only; a Windows ceremony needs named-pipe support (go-winio) first
 
 ### Pending Todos
 
@@ -118,6 +125,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T07:19:19.863Z
-Stopped at: 01-05 Task 4 merge gate: owner approves PR #6
+Last session: 2026-10-05T08:07:47.032Z
+Stopped at: 01-06 Task 4 merge gate: owner approves PR #7
 Resume file: None
