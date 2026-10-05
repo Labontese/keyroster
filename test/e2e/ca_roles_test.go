@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // readPub returns the single key line of an OpenSSH .pub file.
@@ -180,4 +183,165 @@ func TestHostCertificateNoTOFU(t *testing.T) {
 		res.Bundle != 1 || res.LogKey != fingerprint(t, env.LogPub) {
 		t.Fatalf("audit verify = %+v, want 4 entries with one host and one user issuance under bundle v1 and the bundle's log key", res)
 	}
+}
+
+// caKeysFile writes the given CA public key files into one file, for
+// TrustedUserCAKeys.
+func caKeysFile(t *testing.T, pubs ...string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, p := range pubs {
+		b.WriteString(readPub(t, p) + "\n")
+	}
+	path := filepath.Join(t.TempDir(), "trusted_user_ca_keys")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil { //nolint:gosec // public keys
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestMachineCAIsSeparate (CA-01, CA-04): a machine-CA certificate is a
+// user-type certificate under the machine profile, signed by the machine
+// CA with key ID kr1/ca=machine/... and pol=1. An sshd whose
+// TrustedUserCAKeys holds only the user CA rejects it; the same
+// certificate logs in once the machine CA is added. Each refusal runs
+// against its own sshd (PerSourcePenalties, see TestSSHDRejects).
+func TestMachineCAIsSeparate(t *testing.T) {
+	login := currentUser(t)
+	env := bootstrapSigner(t, bootstrapOpts{})
+
+	key := newUserKey(t, "id_machine")
+	// 24 h is the genesis machine profile's cap and twice the user cap.
+	env.issue(t, "--ca", "machine", "--pubkey", key+".pub", "--principal", login, "--subject", "m:backup", "--ttl", "24h")
+	certFile := key + "-cert.pub"
+	listing := sshKeygen(t, "-L", "-f", certFile)
+	info := parseCertInfo(t, listing)
+	if !strings.Contains(listing, "user certificate") {
+		t.Fatalf("machine certificate is not a user-type certificate:\n%s", listing)
+	}
+	if !strings.HasPrefix(info.keyID, "kr1/ca=machine/") || !strings.Contains(info.keyID, "/pol=1/") {
+		t.Fatalf("machine certificate key ID %q, want kr1/ca=machine/... with pol=1", info.keyID)
+	}
+	if info.signingCAFP != fingerprint(t, env.MachineCAPub) || info.signingCAFP == fingerprint(t, env.UserCAPub) {
+		t.Fatalf("machine certificate signed by %s, want the machine CA %s", info.signingCAFP, fingerprint(t, env.MachineCAPub))
+	}
+	if code, out := env.runIssue(t, "--ca", "machine", "--pubkey", key+".pub", "--principal", login,
+		"--subject", "m:backup", "--ttl", "25h", "--out", filepath.Join(t.TempDir(), "over-cap-cert.pub")); code != 1 || !strings.Contains(out, "bad_validity") {
+		t.Fatalf("machine certificate above the machine profile cap: exited %d, want 1 with bad_validity:\n%s", code, out)
+	}
+
+	principals := map[string][]string{login: {login}}
+	opts := func(port int) loginOptions {
+		return loginOptions{Port: port, Key: key, Cert: certFile, User: login, Command: "true"}
+	}
+	t.Run("user_ca_only_rejects", func(t *testing.T) {
+		port := startSSHD(t, sshdOptions{UserCAPub: caKeysFile(t, env.UserCAPub), Principals: principals})
+		sshExpectDenied(t, opts(port))
+	})
+	t.Run("control_user_cert_on_user_ca_only", func(t *testing.T) {
+		port := startSSHD(t, sshdOptions{UserCAPub: caKeysFile(t, env.UserCAPub), Principals: principals})
+		userKey := newUserKey(t, "id_user_control")
+		env.issue(t, "--pubkey", userKey+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+		sshExpect(t, 0, loginOptions{Port: port, Key: userKey, Cert: userKey + "-cert.pub", User: login, Command: "true"})
+	})
+	t.Run("machine_ca_added_accepts", func(t *testing.T) {
+		port := startSSHD(t, sshdOptions{UserCAPub: caKeysFile(t, env.UserCAPub, env.MachineCAPub), Principals: principals})
+		sshExpect(t, 0, opts(port))
+	})
+
+	export := env.exportLog(t)
+	code, out := auditVerify(t, env, export, "--json")
+	var res struct {
+		ByCA map[string]int `json:"issued_by_ca"`
+	}
+	if code != 0 || json.Unmarshal([]byte(out), &res) != nil || res.ByCA["machine"] != 1 {
+		t.Fatalf("audit verify exited %d, want OK with one machine issuance:\n%s", code, out)
+	}
+}
+
+// presentCert authenticates to sshd at port as user with the private key in
+// keyFile and the certificate in certFile through golang.org/x/crypto/ssh,
+// which, unlike the OpenSSH client, sends any certificate it is given. It
+// returns nil when sshd accepted the certificate.
+func presentCert(t *testing.T, port int, user, keyFile, certFile string) error {
+	t.Helper()
+	keyPEM, err := os.ReadFile(keyFile) //nolint:gosec // test fixture
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.ParsePrivateKey(keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certLine, err := os.ReadFile(certFile) //nolint:gosec // test fixture
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(certLine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, ok := pub.(*ssh.Certificate)
+	if !ok {
+		t.Fatalf("%s holds no certificate", certFile)
+	}
+	certSigner, err := ssh.NewCertSigner(c, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(certSigner)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // G106: the test checks user authentication only
+		Timeout:         10 * time.Second,
+	})
+	if err != nil {
+		return err
+	}
+	return client.Close()
+}
+
+// TestHostCAIsNotUserCA (CA-01, CA-05): a host-type certificate presented
+// as a user certificate is rejected by sshd, even when the operator
+// mistakenly lists the host CA in TrustedUserCAKeys and the principal
+// matches, while a user certificate presented the same way on the same
+// sshd logs in. The stock OpenSSH client does not even offer it.
+func TestHostCAIsNotUserCA(t *testing.T) {
+	login := currentUser(t)
+	env := bootstrapSigner(t, bootstrapOpts{})
+
+	key := newUserKey(t, "id_host_as_user")
+	env.issue(t, "--ca", "host", "--pubkey", key+".pub", "--principal", login, "--subject", "h:"+login, "--ttl", "1h")
+	certFile := key + "-cert.pub"
+	if listing := sshKeygen(t, "-L", "-f", certFile); !strings.Contains(listing, "host certificate") {
+		t.Fatalf("the host CA did not issue a host certificate:\n%s", listing)
+	}
+	userKey := newUserKey(t, "id_user_control")
+	env.issue(t, "--pubkey", userKey+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+
+	principals := map[string][]string{login: {login}}
+	t.Run("host_ca_trusted_as_user_ca_still_rejects", func(t *testing.T) {
+		port := startSSHD(t, sshdOptions{UserCAPub: caKeysFile(t, env.UserCAPub, env.HostCAPub), Principals: principals})
+		if err := presentCert(t, port, login, userKey, userKey+"-cert.pub"); err != nil {
+			t.Fatalf("control: the user certificate was refused: %v", err)
+		}
+		err := presentCert(t, port, login, key, certFile)
+		if err == nil || !strings.Contains(err.Error(), "unable to authenticate") {
+			t.Fatalf("sshd accepted a host certificate as user certificate (err = %v)", err)
+		}
+	})
+	t.Run("user_ca_only_rejects", func(t *testing.T) {
+		port := startSSHD(t, sshdOptions{UserCAPub: caKeysFile(t, env.UserCAPub), Principals: principals})
+		err := presentCert(t, port, login, key, certFile)
+		if err == nil || !strings.Contains(err.Error(), "unable to authenticate") {
+			t.Fatalf("sshd accepted a host certificate as user certificate (err = %v)", err)
+		}
+	})
+	t.Run("openssh_client_does_not_offer_it", func(t *testing.T) {
+		port := startSSHD(t, sshdOptions{UserCAPub: caKeysFile(t, env.UserCAPub, env.HostCAPub), Principals: principals})
+		code, out := sshLogin(t, loginOptions{Port: port, Key: key, Cert: certFile, User: login, Command: "true", Extra: []string{"-v"}})
+		if code != 255 || !strings.Contains(out, "Permission denied") || !strings.Contains(out, "not a user certificate") {
+			t.Fatalf("ssh with a host certificate exited %d, want 255 after ignoring it as not a user certificate:\n%s", code, out)
+		}
+	})
 }

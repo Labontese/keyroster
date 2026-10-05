@@ -209,7 +209,7 @@ func (f *fixture) newCert(serial uint64, now time.Time) *ssh.Certificate {
 // issueBody returns the issue leaf body for c.
 func issueBody(t testing.TB, c *ssh.Certificate, serial uint64) []byte {
 	t.Helper()
-	b, err := (&tlog.IssueBody{CARole: uint8(wire.CARoleUser), Serial: serial, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+	b, err := (&tlog.IssueBody{CARole: uint8(wire.CARoleUser), Serial: serial, PolicyVersion: 1, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,4 +587,293 @@ func TestVerifyPrevious(t *testing.T) {
 			t.Fatalf("Verify error = %v, want a previous-checkpoint error", err)
 		}
 	})
+}
+
+// roleProfile returns a certificate profile of certType for test
+// certificates of any role.
+func roleProfile(certType uint32) cert.Profile {
+	p := cert.Profile{CertType: certType, MaxTTL: 24 * time.Hour}
+	if certType == ssh.UserCert {
+		p.DefaultExtensions = map[string]string{"permit-pty": ""}
+	}
+	return p
+}
+
+// addRoleIssue logs a certificate of certType for CA role, signed by ca,
+// whose key ID carries pol and whose leaf records leafPol.
+func (f *fixture) addRoleIssue(role wire.CARole, ca ssh.Signer, certType uint32, pol, leafPol uint64) {
+	f.t.Helper()
+	f.serial++
+	f.request++
+	keyID := cert.KeyID{CA: role.String(), Subject: "s:e2e", Request: strings.Repeat(hex.EncodeToString([]byte{f.request}), 16), Policy: pol, Serial: f.serial}
+	c, err := cert.Build(cert.Request{
+		Profile: roleProfile(certType), Subject: newSigner(f.t, "ed25519").PublicKey(), Principals: []string{"alice"},
+		Now: time.Now(), ValidFor: time.Hour, KeyID: keyID, Serial: f.serial,
+	}, ca, rand.Reader)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	b, err := (&tlog.IssueBody{CARole: uint8(role), Serial: f.serial, PolicyVersion: leafPol, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.add(tlog.KindIssue, b)
+}
+
+// successor returns the version 2 bundle after the genesis bundle g (the
+// same keys unless edit changes them).
+func (f *fixture) successor(g docs, edit func(*trust.Bundle)) *trust.Bundle {
+	f.t.Helper()
+	prev, err := trust.ParseBundle(g.bundle)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	next := *prev
+	next.Version, next.Prev = 2, trust.SHA256Hex(g.bundle)
+	if edit != nil {
+		edit(&next)
+	}
+	return &next
+}
+
+// TestVerifyAnchoring (VIS-03): audit verify trusts the log key and the CA
+// keys only through bundle_install entries that verify against the
+// operator's pins, and checks every issuance against the bundle and policy
+// in force.
+func TestVerifyAnchoring(t *testing.T) {
+	type tc struct {
+		name      string
+		build     func(t *testing.T) (*fixture, Options)
+		want      string // "" = must verify
+		wantCheck func(t *testing.T, rep *Report)
+	}
+	pinsOf := func(signers ...ssh.Signer) []string {
+		var out []string
+		for _, s := range signers {
+			out = append(out, ssh.FingerprintSHA256(s.PublicKey()))
+		}
+		return out
+	}
+	// standardOpts verifies against the fixture's own root.
+	standardOpts := func(f *fixture) Options { return Options{Pins: f.pins(), Threshold: 1} }
+	// twoRoots is a fixture whose genesis bundle lists roots A and B with
+	// the given threshold and is signed by signers.
+	twoRoots := func(t *testing.T, threshold uint32, signers func(a, b ssh.Signer) []ssh.Signer) (*fixture, ssh.Signer, ssh.Signer) {
+		f := newBareFixture(t, "ed25519")
+		a, b := f.root, newSigner(t, "ed25519")
+		g := f.genesis()
+		g.Root = trust.RootSet{Keys: []trust.RootKey{
+			{Key: trust.FormatKey(a.PublicKey()), Custody: "software"},
+			{Key: trust.FormatKey(b.PublicKey()), Custody: "software"},
+		}, Threshold: threshold}
+		f.addBundle(f.signDocs(g, f.policy(), signers(a, b)...))
+		f.addIssue()
+		return f, a, b
+	}
+	cases := []tc{
+		{"control_ok", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addIssue()
+			return f, standardOpts(f)
+		}, "", func(t *testing.T, rep *Report) {
+			if rep.BundleVersion != 1 || rep.PolicyVersion != 1 || rep.IssuedByCA["user"] != 1 {
+				t.Fatalf("report %+v", rep)
+			}
+		}},
+		{"unpinned_root", func(t *testing.T) (*fixture, Options) {
+			// The bundle lists and is signed by its own root; the operator
+			// pinned another root.
+			f := newFixture(t, "ed25519")
+			f.addIssue()
+			return f, Options{Pins: pinsOf(newSigner(t, "ed25519")), Threshold: 1}
+		}, "not anchored in the pinned roots", nil},
+		{"bundle_signed_by_unpinned_root", func(t *testing.T) (*fixture, Options) {
+			// The bundle lists the pinned root but only another key signed it.
+			f := newBareFixture(t, "ed25519")
+			f.addBundle(f.signDocs(f.genesis(), f.policy(), newSigner(t, "ed25519")))
+			f.addIssue()
+			return f, standardOpts(f)
+		}, "threshold not met", nil},
+		{"pins_name_other_root", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addIssue()
+			return f, Options{Pins: append(f.pins(), pinsOf(newSigner(t, "ed25519"))...), Threshold: 1}
+		}, "not anchored in the pinned roots", nil},
+		{"threshold_not_met", func(t *testing.T) (*fixture, Options) {
+			// Roots A and B at threshold 2, but only A signed.
+			f, a, b := twoRoots(t, 2, func(a, _ ssh.Signer) []ssh.Signer { return []ssh.Signer{a} })
+			return f, Options{Pins: pinsOf(a, b), Threshold: 2}
+		}, "threshold not met", nil},
+		{"threshold_above_bundle", func(t *testing.T) (*fixture, Options) {
+			// Both roots signed a threshold-1 bundle; the operator demands 2.
+			f, a, b := twoRoots(t, 1, func(a, b ssh.Signer) []ssh.Signer { return []ssh.Signer{a, b} })
+			return f, Options{Pins: pinsOf(a, b), Threshold: 2}
+		}, "not anchored in the pinned roots", nil},
+		{"two_roots_threshold_2_ok", func(t *testing.T) (*fixture, Options) {
+			f, a, b := twoRoots(t, 2, func(a, b ssh.Signer) []ssh.Signer { return []ssh.Signer{a, b} })
+			return f, Options{Pins: pinsOf(a, b), Threshold: 2}
+		}, "", nil},
+		{"threshold_zero", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addIssue()
+			return f, Options{Pins: f.pins(), Threshold: 0}
+		}, "threshold", nil},
+		{"no_pins", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addIssue()
+			return f, Options{Threshold: 1}
+		}, "no pinned root", nil},
+		{"host_ca_under_user_role", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addRoleIssue(wire.CARoleUser, f.hostCA, ssh.UserCert, 1, 1)
+			return f, standardOpts(f)
+		}, "not by the role's active CA", nil},
+		{"machine_ca_under_user_role", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addRoleIssue(wire.CARoleUser, f.machineCA, ssh.UserCert, 1, 1)
+			return f, standardOpts(f)
+		}, "not by the role's active CA", nil},
+		{"user_ca_under_host_role", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addRoleIssue(wire.CARoleHost, f.ca, ssh.HostCert, 1, 1)
+			return f, standardOpts(f)
+		}, "not by the role's active CA", nil},
+		{"every_role_ok", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addRoleIssue(wire.CARoleUser, f.ca, ssh.UserCert, 1, 1)
+			f.addRoleIssue(wire.CARoleHost, f.hostCA, ssh.HostCert, 1, 1)
+			f.addRoleIssue(wire.CARoleMachine, f.machineCA, ssh.UserCert, 1, 1)
+			return f, standardOpts(f)
+		}, "", func(t *testing.T, rep *Report) {
+			if rep.IssuedByCA["user"] != 1 || rep.IssuedByCA["host"] != 1 || rep.IssuedByCA["machine"] != 1 {
+				t.Fatalf("issued by CA = %v, want one per role", rep.IssuedByCA)
+			}
+		}},
+		{"user_cert_type_under_host_role", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addRoleIssue(wire.CARoleHost, f.hostCA, ssh.UserCert, 1, 1)
+			return f, standardOpts(f)
+		}, "certificate type", nil},
+		{"host_cert_type_under_machine_role", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addRoleIssue(wire.CARoleMachine, f.machineCA, ssh.HostCert, 1, 1)
+			return f, standardOpts(f)
+		}, "certificate type", nil},
+		{"issue_before_bundle", func(t *testing.T) (*fixture, Options) {
+			f := newBareFixture(t, "ed25519")
+			f.addIssue()
+			f.addBundle(f.signDocs(f.genesis(), f.policy(), f.root))
+			return f, standardOpts(f)
+		}, "before the first bundle_install", nil},
+		{"no_bundle", func(t *testing.T) (*fixture, Options) {
+			f := newBareFixture(t, "ed25519")
+			f.addRefusal()
+			return f, standardOpts(f)
+		}, "no bundle_install", nil},
+		{"policy_version_mismatch", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addRoleIssue(wire.CARoleUser, f.ca, ssh.UserCert, 2, 2)
+			return f, standardOpts(f)
+		}, "pol=2", nil},
+		{"leaf_policy_version_mismatch", func(t *testing.T) (*fixture, Options) {
+			// The certificate says pol=1, the leaf records policy 2.
+			f := newFixture(t, "ed25519")
+			f.addRoleIssue(wire.CARoleUser, f.ca, ssh.UserCert, 1, 2)
+			return f, standardOpts(f)
+		}, "policy version", nil},
+		{"bundle_version_field_mismatch", func(t *testing.T) (*fixture, Options) {
+			f := newBareFixture(t, "ed25519")
+			d := f.signDocs(f.genesis(), f.policy(), f.root)
+			d.version = 7
+			f.addBundle(d)
+			f.addIssue()
+			return f, standardOpts(f)
+		}, "bundle version", nil},
+		{"successor_same_log_key_ok", func(t *testing.T) (*fixture, Options) {
+			f := newBareFixture(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), f.root)
+			f.addBundle(g)
+			f.addIssue()
+			f.addBundle(f.signDocs(f.successor(g, nil), f.policy(), f.root))
+			f.addIssue()
+			return f, standardOpts(f)
+		}, "", func(t *testing.T, rep *Report) {
+			if rep.BundleVersion != 2 || rep.Counts[tlog.KindBundleInstall] != 2 || rep.Serials != 2 {
+				t.Fatalf("report %+v, want bundle v2 after two installs and two issuances", rep)
+			}
+		}},
+		{"successor_not_root_signed", func(t *testing.T) (*fixture, Options) {
+			f := newBareFixture(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), f.root)
+			f.addBundle(g)
+			f.addBundle(f.signDocs(f.successor(g, nil), f.policy(), newSigner(t, "ed25519")))
+			return f, standardOpts(f)
+		}, "not a valid successor", nil},
+		{"log_key_change", func(t *testing.T) (*fixture, Options) {
+			f := newBareFixture(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), f.root)
+			f.addBundle(g)
+			newLog := newSigner(t, "ed25519")
+			f.addBundle(f.signDocs(f.successor(g, func(b *trust.Bundle) {
+				b.Log = trust.LogEntry{Key: trust.FormatKey(newLog.PublicKey()), Alg: newLog.PublicKey().Type(), Custody: "agent", Origin: tlog.Origin(newLog.PublicKey())}
+			}), f.policy(), f.root))
+			return f, standardOpts(f)
+		}, "log key change unsupported", nil},
+		{"successor_ca_rotation_checked", func(t *testing.T) (*fixture, Options) {
+			// A successor makes another key the active user CA: the old
+			// CA's certificates no longer verify after it.
+			f := newBareFixture(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), f.root)
+			f.addBundle(g)
+			f.addIssue()
+			newUser := newSigner(t, "ed25519")
+			f.addBundle(f.signDocs(f.successor(g, func(b *trust.Bundle) {
+				b.CAs[0].Key = trust.FormatKey(newUser.PublicKey())
+			}), f.policy(), f.root))
+			f.addIssue() // still signed by the old user CA
+			return f, standardOpts(f)
+		}, "not by the role's active CA", nil},
+		{"decoded_only_edit_still_ok", func(t *testing.T) (*fixture, Options) {
+			f := newFixture(t, "ed25519")
+			f.addIssue()
+			return f, standardOpts(f)
+		}, "", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, opts := c.build(t)
+			lines := f.lines()
+			if c.name == "decoded_only_edit_still_ok" {
+				// The informational object of the bundle_install line names
+				// another log key and root; Verify never reads it.
+				var line ExportLine
+				if err := json.Unmarshal([]byte(lines[0]), &line); err != nil {
+					t.Fatal(err)
+				}
+				other := trust.FormatKey(newSigner(t, "ed25519").PublicKey())
+				line.Decoded = json.RawMessage(fmt.Sprintf(`{"kind":"bundle_install","bundle_version":1,"log_key":%q,"root":%q}`, other, other))
+				out, err := json.Marshal(line)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lines[0] = string(out)
+			}
+			rep, err := Verify(strings.NewReader(join(lines)), opts)
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("Verify: %v", err)
+				}
+				if c.wantCheck != nil {
+					c.wantCheck(t, rep)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Verify accepted the export: %+v", rep)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Verify error = %q, want it to mention %q", err, c.want)
+			}
+		})
+	}
 }
