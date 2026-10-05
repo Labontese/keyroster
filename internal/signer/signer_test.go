@@ -109,6 +109,8 @@ type testSigner struct {
 	dbPath    string
 	agentSock string
 	caFP      string
+	logFP     string
+	LogPub    ssh.PublicKey
 	CAPub     ssh.PublicKey
 	Socket    string
 	DB        *signerdb.DB
@@ -172,9 +174,19 @@ func newTestSigner(t *testing.T, opts signerOpts) *testSigner {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyring := sshagent.NewKeyring()
-	if err := keyring.Add(sshagent.AddedKey{PrivateKey: caPriv}); err != nil {
+	_, logPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
 		t.Fatal(err)
+	}
+	logSigner, err := ssh.NewSignerFromKey(logPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyring := sshagent.NewKeyring()
+	for _, k := range []ed25519.PrivateKey{caPriv, logPriv} {
+		if err := keyring.Add(sshagent.AddedKey{PrivateKey: k}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ts := &testSigner{
 		t:         t,
@@ -183,6 +195,8 @@ func newTestSigner(t *testing.T, opts signerOpts) *testSigner {
 		dbPath:    filepath.Join(dir, "signer.db"),
 		agentSock: filepath.Join(dir, "agent.sock"),
 		caFP:      ssh.FingerprintSHA256(caSigner.PublicKey()),
+		logFP:     ssh.FingerprintSHA256(logSigner.PublicKey()),
+		LogPub:    logSigner.PublicKey(),
 		CAPub:     caSigner.PublicKey(),
 		Socket:    filepath.Join(dir, "signer.sock"),
 		logs:      &recordSink{},
@@ -214,6 +228,7 @@ func (ts *testSigner) start() {
 	s, err := signer.New(signer.Config{
 		Backend:           backend,
 		UserCAFingerprint: ts.caFP,
+		LogKeyFingerprint: ts.logFP,
 		DB:                db,
 		Clock:             time.Now,
 		AllowUIDs:         allowUIDs,

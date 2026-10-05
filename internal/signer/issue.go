@@ -13,6 +13,7 @@ import (
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/serial"
 	"github.com/Labontese/keyroster/internal/signerdb"
+	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -40,8 +41,8 @@ func refuse(code wire.ErrorCode, reason string, cause error) error {
 // before the request was read; plan 01-07 adds mandatory admin-sshsig/v1
 // evidence (D-13). Evidence items are decoded and size-limited only.
 func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (*wire.IssueResponse, error) {
-	s.issueMu.Lock()
-	defer s.issueMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if req == nil {
 		return nil, refuse(wire.CodeMalformed, "malformed_request", nil)
@@ -91,9 +92,25 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 	if err != nil {
 		return nil, buildRefusal(err)
 	}
+	// The signed certificate exists only in memory until the transaction
+	// below commits the issuance row, the serial high-water mark and the
+	// log leaf holding the full certificate, with a new signed checkpoint
+	// (VIS-01). On any error the certificate is dropped.
 	certBytes := c.Marshal()
-
-	err = s.db.WithTx(ctx, func(tx *sql.Tx) error {
+	leafBody, err := (&tlog.IssueBody{
+		CARole:        uint8(req.CARole),
+		Serial:        ser,
+		PolicyVersion: keyID.Policy,
+		RequestDigest: req.Digest(),
+		Evidence:      req.Evidence,
+		Cert:          certBytes,
+		KeyID:         c.KeyId,
+	}).Encode()
+	if err != nil {
+		return nil, refuse(wire.CodeInternal, "log_encoding", err)
+	}
+	var leafIndex uint64
+	err = s.logTx(ctx, func(tx *sql.Tx) error {
 		if err := s.db.InsertIssuance(tx, signerdb.Issuance{
 			Serial:    ser,
 			RequestID: req.RequestID,
@@ -104,7 +121,16 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 		}); err != nil {
 			return err
 		}
-		return s.db.SetLastSerial(tx, ser)
+		if err := s.db.SetLastSerial(tx, ser); err != nil {
+			return err
+		}
+		idx, err := s.appendLocked(ctx, tx, tlog.Leaf{
+			TimeMicros: uint64(issuedAt.UnixMicro()), //nolint:gosec // G115: issuedAt >= serial > 0 µs (serial.Next)
+			Kind:       tlog.KindIssue,
+			Body:       leafBody,
+		})
+		leafIndex = idx
+		return err
 	})
 	if err != nil {
 		if errors.Is(err, signerdb.ErrDuplicateRequest) {
@@ -112,14 +138,16 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 		}
 		return nil, refuse(wire.CodeUnavailable, "state_unavailable", err)
 	}
+	// Only now, after COMMIT, does the certificate leave the signer.
 	s.log.Info("issued",
 		"serial", ser,
 		"key_id", c.KeyId,
+		"leaf_index", leafIndex,
 		"principals", len(c.ValidPrincipals),
 		"evidence", len(req.Evidence),
 		"uid", peer.UID,
 		"pid", peer.PID)
-	return &wire.IssueResponse{Cert: certBytes, Serial: ser}, nil
+	return &wire.IssueResponse{Cert: certBytes, Serial: ser, LeafIndex: leafIndex}, nil
 }
 
 // buildRefusal maps a cert.Build error to a reason code.

@@ -369,13 +369,13 @@ func TestErrorResponse(t *testing.T) {
 }
 
 func TestIssueResponse(t *testing.T) {
-	r := &IssueResponse{Cert: []byte("cert"), Serial: 7}
+	r := &IssueResponse{Cert: []byte("cert"), Serial: 7, LeafIndex: 3}
 	body, err := r.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := ParseIssueResponse(body)
-	if err != nil || !bytes.Equal(got.Cert, r.Cert) || got.Serial != r.Serial {
+	if err != nil || !bytes.Equal(got.Cert, r.Cert) || got.Serial != r.Serial || got.LeafIndex != r.LeafIndex {
 		t.Fatalf("ParseIssueResponse = %+v, %v", got, err)
 	}
 	if _, err := ParseIssueResponse(append(body, 0)); !errors.Is(err, ErrMalformed) {
