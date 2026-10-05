@@ -20,17 +20,21 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 
+	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -196,17 +200,22 @@ func (h *softHSM) tokenKeys(t *testing.T, conf string) map[string]ssh.PublicKey 
 // agentFingerprints returns the fingerprints of every key the agent holds.
 func agentFingerprints(t *testing.T, sock string) map[string]bool {
 	t.Helper()
-	cmd := exec.Command(filepath.Join(opensshPrefix(t), "bin", "ssh-add"), "-l", "-E", "sha256") //nolint:gosec // G204: OpenSSH under test
-	cmd.Env = append(envWithout("SSH_AUTH_SOCK"), "SSH_AUTH_SOCK="+sock)
-	out, err := cmd.CombinedOutput()
+	conn, err := net.Dial("unix", sock)
 	if err != nil {
-		t.Fatalf("ssh-add -l: %v\n%s", err, out)
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	keys, err := agent.NewClient(conn).List()
+	if err != nil {
+		t.Fatalf("list agent keys: %v", err)
 	}
 	fps := map[string]bool{}
-	for line := range strings.Lines(string(out)) {
-		if f := strings.Fields(line); len(f) >= 2 && strings.HasPrefix(f[1], "SHA256:") {
-			fps[f[1]] = true
+	for _, k := range keys {
+		pub, err := ssh.ParsePublicKey(k.Marshal())
+		if err != nil {
+			t.Fatalf("agent key: %v", err)
 		}
+		fps[ssh.FingerprintSHA256(pub)] = true
 	}
 	return fps
 }
@@ -425,4 +434,232 @@ func runPKCS11FullFlow(t *testing.T, agentBin, keytype string) {
 // keys in KEYROSTER_SSH_AGENT.
 func TestPKCS11FullFlow(t *testing.T) {
 	runPKCS11FullFlow(t, pkcs11Agent(t), pkcs11KeyType(t))
+}
+
+// agentVersion returns the major and minor OpenSSH version of agentBin,
+// read from the ssh client installed next to it.
+func agentVersion(t *testing.T, agentBin string) (major, minor int) {
+	t.Helper()
+	out, err := exec.Command(filepath.Join(filepath.Dir(agentBin), "ssh"), "-V").CombinedOutput() //nolint:gosec // G204: OpenSSH under test
+	if err != nil {
+		t.Fatalf("ssh -V next to %s: %v\n%s", agentBin, err, out)
+	}
+	m := regexp.MustCompile(`OpenSSH_(\d+)\.(\d+)`).FindStringSubmatch(string(out))
+	if m == nil {
+		t.Fatalf("ssh -V next to %s: no OpenSSH version in %q", agentBin, out)
+	}
+	major, _ = strconv.Atoi(m[1])
+	minor, _ = strconv.Atoi(m[2])
+	return major, minor
+}
+
+// TestPKCS11Ed25519 runs the KEY-03 flow with Ed25519 keys in the token
+// when KEYROSTER_SSH_AGENT is OpenSSH 10.1 or newer. An older agent cannot
+// use Ed25519 PKCS#11 keys (research Pitfall 2); there the test asserts
+// that the agent refuses them, so the documented minimum stays true.
+func TestPKCS11Ed25519(t *testing.T) {
+	agentBin := pkcs11Agent(t)
+	if major, minor := agentVersion(t, agentBin); major < 10 || (major == 10 && minor < 1) {
+		h := newSoftHSM(t, "ed25519")
+		a := h.startTokenAgent(t, agentBin, h.caConf)
+		if held := agentFingerprints(t, a.sock); a.addCode == 0 || len(held) != 0 {
+			t.Fatalf("ssh-agent %d.%d loaded Ed25519 PKCS#11 keys (ssh-add exit %d, %d keys); the 10.1 minimum in docs/backends/pkcs11.md is out of date",
+				major, minor, a.addCode, len(held))
+		}
+		t.Logf("ssh-agent %d.%d refuses Ed25519 PKCS#11 keys as expected (needs 10.1+): %s", major, minor, strings.TrimSpace(a.addOut))
+		return
+	}
+	runPKCS11FullFlow(t, agentBin, "ed25519")
+}
+
+// TestPKCS11RootSignsBundle: a root key held in its own PKCS#11 token (the
+// PIV-root stand-in, D-11) signs the genesis bundle through ssh-agent, the
+// verified bundle records custody pkcs11, and install-bundle refuses the
+// same bundle and policy before the root's signatures exist.
+func TestPKCS11RootSignsBundle(t *testing.T) {
+	keytype := pkcs11KeyType(t)
+	s := newPKCS11Setup(t, pkcs11Agent(t), keytype)
+	opts := s.opts()
+	env := initSigner(t, opts)
+	env.signGenesis(t, opts)
+
+	// The same bundle.json and policy.json with no signatures yet: what
+	// root sign had written before it appended the root's signatures.
+	unsigned := t.TempDir()
+	for _, name := range []string{"bundle.json", "policy.json"} {
+		data, err := os.ReadFile(filepath.Join(env.BundleDir, name)) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(unsigned, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(unsigned, name+".sigs"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := []string{"install-bundle", "--state-dir", env.StateDir, "--threshold", "1", "--pin", s.rootFP,
+		"--bundle", filepath.Join(unsigned, "bundle.json"), "--policy", filepath.Join(unsigned, "policy.json")}
+	code, out := env.signerCmd(t, args...)
+	if code == 0 || !strings.Contains(out, "signature") {
+		t.Fatalf("install-bundle without the root's signature exited %d, want a refusal about the missing signature:\n%s", code, out)
+	}
+	t.Logf("install-bundle without the root signature exited %d (expected):\n%s", code, out)
+
+	// With the root's signatures the same documents install, which also
+	// shows that the refused attempt installed nothing.
+	if code, out := env.signerCmd(t, env.installArgs()...); code != 0 {
+		t.Fatalf("install-bundle with the root's signature exited %d:\n%s", code, out)
+	}
+	assertPKCS11Bundle(t, verifiedBundle(t, env), keytype)
+	env.serve(t)
+	pkcs11IssueAndLogin(t, env, s.roleFPs["user"])
+	pkcs11AuditVerify(t, env, 3, 1)
+}
+
+// TestPKCS11CAInitTwiceRefused: a second ca-init with the same PKCS#11 keys
+// on an initialised state directory is refused and changes nothing (KEY-03
+// idempotency): the same ca_keys rows, ca-pubkeys.json and audit log.
+func TestPKCS11CAInitTwiceRefused(t *testing.T) {
+	s := newPKCS11Setup(t, pkcs11Agent(t), pkcs11KeyType(t))
+	env := bootstrapSigner(t, s.opts())
+
+	caKeys := func() []signerdb.CAKey {
+		t.Helper()
+		db, err := signerdb.OpenReadOnly(filepath.Join(env.StateDir, "signer.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		keys, err := db.CAKeys(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return keys
+	}
+	readFile := func(path string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(path) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	keysBefore, pubBefore := caKeys(), readFile(env.CAPubkeys)
+	logBefore := readFile(env.exportLog(t))
+
+	args := []string{"ca-init", "--state-dir", env.StateDir, "--backend", "agent",
+		"--backend-opt", "custody=pkcs11-agent", "--backend-opt", "socket=" + s.ca.sock}
+	for _, role := range roleNames {
+		args = append(args, "--key", role+"="+s.roleFPs[role])
+	}
+	// The default output, ca-pubkeys.json, already exists.
+	if code, out := env.signerCmd(t, args...); code == 0 {
+		t.Fatalf("second ca-init exited 0:\n%s", out)
+	}
+	// With a fresh output path the refusal comes from the initialised
+	// state itself, and the output file is not left behind.
+	fresh := filepath.Join(t.TempDir(), "ca-pubkeys.json")
+	code, out := env.signerCmd(t, append(args, "--out", fresh)...)
+	if code == 0 || !strings.Contains(out, "already initialised") {
+		t.Fatalf("second ca-init with --out exited %d, want a refusal naming the initialised state:\n%s", code, out)
+	}
+	if _, err := os.Stat(fresh); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused ca-init left %s behind (stat: %v)", fresh, err)
+	}
+
+	keysAfter := caKeys()
+	if len(keysAfter) != len(keysBefore) {
+		t.Fatalf("ca_keys has %d rows after the refused ca-init, want %d", len(keysAfter), len(keysBefore))
+	}
+	for i := range keysBefore {
+		b, a := keysBefore[i], keysAfter[i]
+		if b.Role != a.Role || !bytes.Equal(b.PublicKey, a.PublicKey) || b.Alg != a.Alg || b.Custody != a.Custody {
+			t.Fatalf("ca_keys row %d changed: %+v -> %+v", i, b, a)
+		}
+	}
+	if !bytes.Equal(readFile(env.CAPubkeys), pubBefore) {
+		t.Fatal("ca-pubkeys.json changed after the refused ca-init")
+	}
+	if !bytes.Equal(readFile(env.exportLog(t)), logBefore) {
+		t.Fatal("the audit log changed after the refused ca-init")
+	}
+	// ca_init and bundle_install only.
+	pkcs11AuditVerify(t, env, 2, 0)
+}
+
+// TestPKCS11ConcurrentIssue: eight admin-signed ca issue calls in parallel
+// against the PKCS#11-backed signer each get a distinct, valid certificate
+// (KEY-03 concurrency; the agent connection is used under one mutex).
+func TestPKCS11ConcurrentIssue(t *testing.T) {
+	const n = 8
+	s := newPKCS11Setup(t, pkcs11Agent(t), pkcs11KeyType(t))
+	env := bootstrapSigner(t, s.opts())
+	login := currentUser(t)
+
+	keys := make([]string, n)
+	for i := range keys {
+		keys[i] = filepath.Join(t.TempDir(), "id_ed25519")
+		sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "user"+strconv.Itoa(i), "-f", keys[i])
+	}
+	type result struct {
+		code int
+		out  string
+		err  error
+	}
+	results := make([]result, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			// No t.Fatal off the test goroutine: collect, then check below.
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, keyrosterBin, "ca", "issue", "--socket", env.Socket, //nolint:gosec // G204: the binary under test
+				"--admin-key", env.AdminFingerprint, "--pubkey", keys[i]+".pub",
+				"--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+			cmd.Env = append(envWithout("SSH_AUTH_SOCK"), "SSH_AUTH_SOCK="+env.AdminAgent)
+			out, err := cmd.CombinedOutput()
+			r := result{out: string(out)}
+			var ee *exec.ExitError
+			switch {
+			case errors.As(err, &ee):
+				r.code = ee.ExitCode()
+			case err != nil:
+				r.err = err
+			}
+			results[i] = r
+		})
+	}
+	wg.Wait()
+
+	serials := map[string]int{}
+	serialRE := regexp.MustCompile(`(?m)^\s*Serial: (\d+)$`)
+	for i, r := range results {
+		if r.err != nil || r.code != 0 {
+			t.Fatalf("concurrent ca issue %d exited %d (%v):\n%s", i, r.code, r.err, r.out)
+		}
+		info := sshKeygen(t, "-L", "-f", keys[i]+"-cert.pub")
+		if m := pkcs11SigningCA.FindStringSubmatch(info); m == nil || m[1] != s.roleFPs["user"] {
+			t.Fatalf("certificate %d not signed by the token's user CA:\n%s", i, info)
+		}
+		m := serialRE.FindStringSubmatch(info)
+		if m == nil {
+			t.Fatalf("certificate %d: no serial in ssh-keygen -L:\n%s", i, info)
+		}
+		if j, dup := serials[m[1]]; dup {
+			t.Fatalf("certificates %d and %d share serial %s", j, i, m[1])
+		}
+		serials[m[1]] = i
+	}
+
+	// Every certificate must be valid for sshd; eight logins are cheap, so
+	// check them all.
+	port := startSSHD(t, sshdOptions{UserCAPub: env.UserCAPub, Principals: map[string][]string{login: {login}}})
+	for i, key := range keys {
+		if code, out := sshLogin(t, loginOptions{Port: port, Key: key, Cert: key + "-cert.pub", User: login, Command: "true"}); code != 0 {
+			t.Fatalf("ssh login with concurrent certificate %d exited %d:\n%s", i, code, out)
+		}
+	}
+	// ca_init, bundle_install and eight issuances.
+	pkcs11AuditVerify(t, env, 2+n, n)
 }

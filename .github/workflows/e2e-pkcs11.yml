@@ -7,8 +7,9 @@ name: E2E PKCS#11
 # keyroster (CGO_ENABLED=0).
 #
 # Two lanes (research Pitfall 2):
-#   distro-p256     P-256 keys in Ubuntu's own ssh-agent (OpenSSH 9.6p1), which
-#                   cannot use Ed25519 PKCS#11 keys.
+#   distro-p256     P-256 keys in Ubuntu's own ssh-agent (OpenSSH 9.6p1). That
+#                   agent cannot use Ed25519 PKCS#11 keys, and TestPKCS11Ed25519
+#                   asserts that it refuses them.
 #   10.5p1-ed25519  Ed25519 keys in the self-built OpenSSH 10.5p1 ssh-agent
 #                   (Ed25519 over PKCS#11 needs ssh-agent 10.1 or newer).
 # The sshd, ssh and ssh-keygen under test are 10.5p1 in both lanes, built by
