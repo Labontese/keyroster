@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-06 Task 4 merge gate: owner approves PR #7"
-last_updated: "2026-10-05T08:08:09.961Z"
+stopped_at: "01-07 Task 3 merge gate: owner approves PR #8"
+last_updated: "2026-10-05T11:46:27.218Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 9b20c92850df65b7dda0ecaf93d81568f6d88d77
+state_head: bac7b29e43547dfaf3e5d469cdb8d730fa92440e
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 7
+  completed_plans: 8
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 8 of 16
+Plan: 9 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -63,6 +63,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P04 | 23 min | 2 tasks | 7 files |
 | Phase 01 P05 | 41 min | 3 tasks | 37 files |
 | Phase 01 P06 | 38 min | 3 tasks | 29 files |
+| Phase 01 P07 | 35 min | 3 tasks | 28 files |
 
 ## Accumulated Context
 
@@ -102,6 +103,11 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-06: VerifySuccessor needs both the previous and the new root threshold on bundle and policy, version prev+1, prev = SHA-256 of the previous canonical bundle, and issued_at not earlier
 - [Phase 01]: 01-06: scripts/fuzz.sh passes -fuzzminimizetime 5s; with Go's 60s default FuzzParseBundle ran 123 execs in a 30s CI budget
 - [Phase 01]: 01-06: keyroster root sign reaches ssh-agent via SSH_AUTH_SOCK Unix sockets only; a Windows ceremony needs named-pipe support (go-winio) first
+- [Phase 01]: 01-07: IssueRequest gains a signed Extensions field (after CreatedAt, before Evidence) so admin evidence covers requested extensions; critical options have no request field in Phase 1
+- [Phase 01]: 01-07: evidence refusals log under the new refusal class unauthorized (15); the detail names the reason (missing_evidence, evidence_not_admin, evidence_wrong_namespace, evidence_digest_mismatch, admin_quorum_not_met, ...)
+- [Phase 01]: 01-07: install-bundle and serve read the backend from backend_config and accept --backend-opt overrides, but every key must keep the custody ca-init recorded; InstallBundle takes the backend (the bundle_install checkpoint is signed with the log key)
+- [Phase 01]: 01-07: a policy admin key may not be a CA, ops or log key; a successor bundle refuses --pin/--threshold; ca-init requires an empty audit log so ca_init is leaf 0
+- [Phase 01]: 01-07: install-bundle requires exactly one active CA entry per role equal to the ca-init key; CA rotation (next/retired entries) changes checkBundleKeys in Phase 3
 
 ### Pending Todos
 
@@ -125,6 +131,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T08:07:47.032Z
-Stopped at: 01-06 Task 4 merge gate: owner approves PR #7
+Last session: 2026-10-05T11:46:06.054Z
+Stopped at: 01-07 Task 3 merge gate: owner approves PR #8
 Resume file: None
