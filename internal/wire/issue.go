@@ -135,12 +135,12 @@ func (r *IssueRequest) Marshal() ([]byte, error) {
 	return b.Bytes()
 }
 
-// SigningBytes returns the domain tag followed by every field except
-// Evidence. Evidence items sign (a digest of) these bytes, so they cannot be
-// part of them.
+// SigningBytes returns the domain tag IssueRequestDomain, as raw bytes,
+// followed by every field except Evidence. Evidence items sign (a digest of)
+// these bytes, so they cannot be part of them.
 func (r *IssueRequest) SigningBytes() []byte {
 	var b cryptobyte.Builder
-	addBytes16(&b, []byte(IssueRequestDomain))
+	b.AddBytes([]byte(IssueRequestDomain))
 	r.addFields(&b)
 	// The builder fails only when a field exceeds 65535 bytes. Every
 	// request that went through ParseIssueRequest or Marshal is far below

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
@@ -75,7 +76,7 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 	}
 	for _, s := range signers {
 		pub := s.PublicKey()
-		if _, isCert := pub.(*ssh.Certificate); isCert {
+		if isCertificate(pub) {
 			continue
 		}
 		if ssh.FingerprintSHA256(pub) != fingerprint {
@@ -87,6 +88,16 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 		return &caKey{b: b, s: s}, nil
 	}
 	return nil, fmt.Errorf("%w (role %s)", ErrKeyNotPresent, role)
+}
+
+// isCertificate reports whether an agent entry is a certificate. The agent
+// client returns every entry as an *agent.Key, never as *ssh.Certificate,
+// so the wire key type is what identifies a certificate entry.
+func isCertificate(pub ssh.PublicKey) bool {
+	if _, ok := pub.(*ssh.Certificate); ok {
+		return true
+	}
+	return strings.HasSuffix(pub.Type(), "-cert-v01@openssh.com")
 }
 
 func (b *backend) Close() error {
