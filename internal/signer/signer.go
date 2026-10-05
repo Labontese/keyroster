@@ -39,6 +39,11 @@ type Config struct {
 	AllowUIDs         []uint32
 	AllowGIDs         []uint32
 	Logger            *slog.Logger // defaults to slog.Default()
+	// RefusalLogPerMinute and RefusalLogBurst rate-limit individual
+	// refusal leaves (D-14); 0 means the default (10 and 10). Refusals
+	// above the rate are counted in refusal_summary leaves.
+	RefusalLogPerMinute int
+	RefusalLogBurst     int
 }
 
 // Signer issues certificates.
@@ -56,6 +61,11 @@ type Signer struct {
 	// log appends, each through its commit.
 	mu sync.Mutex
 	logState
+	limiter *refusalLimiter // guarded by mu
+	// clockEpisode is set while the clock is behind the serial high-water
+	// mark and that episode's clock_regression leaf is logged; the next
+	// successful issuance clears it. Guarded by mu.
+	clockEpisode bool
 }
 
 // New resolves the user CA key and the log key by their pinned
@@ -77,6 +87,16 @@ func New(cfg Config) (*Signer, error) {
 	}
 	if len(cfg.AllowUIDs) == 0 && len(cfg.AllowGIDs) == 0 {
 		return nil, errors.New("signer: the peer allowlist is empty, so every client would be refused")
+	}
+	if cfg.RefusalLogPerMinute < 0 || cfg.RefusalLogBurst < 0 {
+		return nil, errors.New("signer: negative refusal log rate")
+	}
+	perMinute, burst := cfg.RefusalLogPerMinute, cfg.RefusalLogBurst
+	if perMinute == 0 {
+		perMinute = DefaultRefusalLogPerMinute
+	}
+	if burst == 0 {
+		burst = DefaultRefusalLogBurst
 	}
 	key, err := pinnedKey(cfg.Backend, keystore.RoleUser, cfg.UserCAFingerprint)
 	if err != nil {
@@ -102,6 +122,7 @@ func New(cfg Config) (*Signer, error) {
 	if s.log == nil {
 		s.log = slog.Default()
 	}
+	s.limiter = newRefusalLimiter(perMinute, burst, s.clock())
 	if err := s.initLog(context.Background()); err != nil {
 		return nil, err
 	}

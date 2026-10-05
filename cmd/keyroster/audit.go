@@ -42,7 +42,9 @@ type verifyResult struct {
 	Entries  uint64            `json:"entries"`
 	Root     string            `json:"root"`
 	Issued   int               `json:"issued"`
-	Refusals uint64            `json:"refusals"`
+	Refusals uint64            `json:"refusals"` // logged individually + summarized
+	Logged   uint64            `json:"refusals_logged"`
+	Summed   uint64            `json:"refusals_summarized"`
 	Kinds    map[string]uint64 `json:"kinds"`
 }
 
@@ -84,7 +86,9 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		Entries:  rep.Size,
 		Root:     base64.StdEncoding.EncodeToString(rep.Root),
 		Issued:   rep.Serials,
-		Refusals: rep.Counts[tlog.KindRefusal],
+		Refusals: rep.Counts[tlog.KindRefusal] + rep.SummarizedRefusals,
+		Logged:   rep.Counts[tlog.KindRefusal],
+		Summed:   rep.SummarizedRefusals,
 		Kinds:    map[string]uint64{},
 	}
 	for k, n := range rep.Counts {
