@@ -156,3 +156,9 @@ func pinSet(pins []string) (map[string]bool, error) {
 	}
 	return m, nil
 }
+
+// VerifySuccessor verifies a successor bundle against the previously
+// accepted bundle (TUF rule). Not implemented yet.
+func VerifySuccessor(prev *Bundle, prevCanonical []byte, next, nextSigs, policy, policySigs []byte) (*Bundle, *Policy, error) {
+	return nil, nil, errors.New("trust: VerifySuccessor is not implemented")
+}
