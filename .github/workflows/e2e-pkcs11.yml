@@ -1,0 +1,102 @@
+name: E2E PKCS#11
+
+# PKCS#11 HSM path (KEY-03, D-12): the CA, ops and log keys live in a SoftHSM2
+# token (the stand-in for a YubiHSM 2) and the root key in a second token (the
+# stand-in for a PIV root, D-11). keyroster reaches them only through an
+# OpenSSH ssh-agent and its ssh-pkcs11-helper; no PKCS#11 code is linked into
+# keyroster (CGO_ENABLED=0).
+#
+# Two lanes (research Pitfall 2):
+#   distro-p256     P-256 keys in Ubuntu's own ssh-agent (OpenSSH 9.6p1), which
+#                   cannot use Ed25519 PKCS#11 keys.
+#   10.5p1-ed25519  Ed25519 keys in the self-built OpenSSH 10.5p1 ssh-agent
+#                   (Ed25519 over PKCS#11 needs ssh-agent 10.1 or newer).
+# The sshd, ssh and ssh-keygen under test are 10.5p1 in both lanes, built by
+# scripts/build-openssh.sh exactly as in e2e.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing by default, read-only contents per job.
+permissions: {}
+
+# The check names "e2e-pkcs11 (distro-p256)" and "e2e-pkcs11 (10.5p1-ed25519)"
+# become required status checks in plan 01-15. After that, renaming the job or
+# a lane blocks every merge until the ruleset is updated (see CONTRIBUTING.md).
+jobs:
+  e2e-pkcs11:
+    name: e2e-pkcs11 (${{ matrix.lane }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: distro-p256
+            agent: system
+            keytype: p256
+          - lane: 10.5p1-ed25519
+            agent: openssh-10.5p1
+            keytype: ed25519
+    env:
+      OPENSSH_VERSION: "10.5p1"
+      LANE: ${{ matrix.lane }}
+      AGENT: ${{ matrix.agent }}
+      KEYROSTER_PKCS11_KEYTYPE: ${{ matrix.keytype }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Test-only packages from the Ubuntu archive (T-01-SC); no Go modules.
+      - name: Install SoftHSM2 and OpenSC (pkcs11-tool)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends softhsm2 opensc
+      # Same cache and build as e2e.yml: caches written by a pull_request run
+      # are scoped to that PR's ref, and the key changes with the build script
+      # (which holds the SHA-256 pins).
+      - name: Restore the OpenSSH build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/keyroster/openssh-${{ env.OPENSSH_VERSION }}
+          key: openssh-${{ runner.os }}-${{ env.OPENSSH_VERSION }}-${{ hashFiles('scripts/build-openssh.sh') }}
+      - name: Build OpenSSH (verified tarball)
+        run: bash scripts/build-openssh.sh "$OPENSSH_VERSION"
+      - name: Select the ssh-agent
+        run: |
+          case "$AGENT" in
+          system) agent=/usr/bin/ssh-agent ;;
+          openssh-10.5p1) agent="$HOME/.cache/keyroster/openssh-$OPENSSH_VERSION/bin/ssh-agent" ;;
+          *) echo "unknown agent '$AGENT'" >&2; exit 1 ;;
+          esac
+          test -x "$agent"
+          echo "KEYROSTER_SSH_AGENT=$agent" >>"$GITHUB_ENV"
+      - name: Record tool versions
+        run: |
+          dpkg-query -W softhsm2 libsofthsm2 opensc openssh-client
+          "$(dirname "$KEYROSTER_SSH_AGENT")/ssh" -V
+      - name: Run the PKCS#11 e2e suite
+        run: |
+          mkdir -p e2e-logs
+          KEYROSTER_OPENSSH_PREFIX="$HOME/.cache/keyroster/openssh-$OPENSSH_VERSION" \
+            go test -tags e2e_pkcs11 -count=1 -v ./test/e2e/... 2>&1 | tee "e2e-logs/go-test-pkcs11-$LANE.log"
+      # The harness prints the agent, signer and sshd logs of every failed
+      # test into the go test output captured above.
+      - name: Upload the test logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-pkcs11-logs-${{ matrix.lane }}
+          path: e2e-logs/
+          retention-days: 7
+          if-no-files-found: warn
