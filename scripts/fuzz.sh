@@ -3,6 +3,11 @@
 #
 #   FUZZTIME=30s bash scripts/fuzz.sh
 #
+# FUZZMINIMIZETIME (default 5s) bounds the minimization of each new
+# interesting input. Go's default (60s) exceeds FUZZTIME, so a target whose
+# inputs are slow to minimize (FuzzParseBundle parses seven SSH keys per run)
+# spent its whole budget minimizing and fuzzed almost nothing.
+#
 # go test accepts one -fuzz target per invocation, so the targets are listed
 # per package with `go test -list '^Fuzz'` and run one at a time. The script
 # fails when any target fails (a failing input is written to the package's
@@ -11,6 +16,7 @@
 set -euo pipefail
 
 fuzztime=${FUZZTIME:-30s}
+minimizetime=${FUZZMINIMIZETIME:-5s}
 cd "$(git rev-parse --show-toplevel)"
 
 ran=0
@@ -26,7 +32,7 @@ while IFS=$'\t' read -r pkg dir; do
 	for target in $targets; do
 		echo "fuzz: $pkg $target ($fuzztime)"
 		ran=$((ran + 1))
-		if ! go test -run '^$' -fuzz "^${target}\$" -fuzztime "$fuzztime" "$pkg"; then
+		if ! go test -run '^$' -fuzz "^${target}\$" -fuzztime "$fuzztime" -fuzzminimizetime "$minimizetime" "$pkg"; then
 			echo "fuzz: FAIL $pkg $target; failing input corpus: $dir/testdata/fuzz/$target/" >&2
 			failed+=("$pkg $target")
 		fi
