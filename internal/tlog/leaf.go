@@ -253,7 +253,8 @@ const (
 	ReasonUnavailable         uint8 = 12
 	ReasonInternal            uint8 = 13
 	ReasonOverloaded          uint8 = 14
-	maxReason                       = ReasonOverloaded
+	ReasonUnauthorized        uint8 = 15
+	maxReason                       = ReasonUnauthorized
 )
 
 var reasonNames = [...]string{
@@ -271,6 +272,7 @@ var reasonNames = [...]string{
 	ReasonUnavailable:         "unavailable",
 	ReasonInternal:            "internal",
 	ReasonOverloaded:          "overloaded",
+	ReasonUnauthorized:        "unauthorized",
 }
 
 // ReasonName returns the name of a refusal reason code.

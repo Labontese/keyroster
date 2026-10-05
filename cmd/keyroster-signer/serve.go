@@ -18,9 +18,12 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Labontese/keyroster/internal/keystore"
 	"github.com/Labontese/keyroster/internal/signer"
 	"github.com/Labontese/keyroster/internal/signerdb"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 func init() {
@@ -46,27 +49,18 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	stateDir := fs.String("state-dir", "", "state directory (required; owned by this user, mode 0700); holds signer.db")
 	socket := fs.String("socket", "/run/keyroster-signer/signer.sock", "Unix socket path")
-	backend := fs.String("backend", "agent", "keystore backend")
-	userCAFP := fs.String("user-ca-fp", "", "pinned SHA256 fingerprint of the user CA key (SHA256:...)")
-	logKeyFP := fs.String("log-key-fp", "", "pinned SHA256 fingerprint of the audit-log checkpoint key, role log, in the same backend (SHA256:...)")
 	refusalPerMinute := fs.Int("refusal-log-per-minute", signer.DefaultRefusalLogPerMinute, "refused requests logged individually in the audit log per minute; the rest are counted in summary entries")
 	refusalBurst := fs.Int("refusal-log-burst", signer.DefaultRefusalLogBurst, "refused requests that may be logged individually at once")
 	var allowUIDs, allowGroups, backendOpts listFlag
 	fs.Var(&allowUIDs, "allow-uid", "uid allowed to connect (repeatable)")
 	fs.Var(&allowGroups, "allow-group", "group name or gid allowed to connect (repeatable); the first one also owns the socket")
-	fs.Var(&backendOpts, "backend-opt", "backend option key=value (repeatable)")
+	fs.Var(&backendOpts, "backend-opt", "override a backend option stored by ca-init, key=value (repeatable), e.g. socket=PATH; the keys and their custody must still match the trust bundle")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
-	if fs.NArg() != 0 || *stateDir == "" || *userCAFP == "" || *logKeyFP == "" {
-		_, _ = fmt.Fprintln(stderr, "serve: --state-dir, --user-ca-fp and --log-key-fp are required; no positional arguments")
+	if fs.NArg() != 0 || *stateDir == "" {
+		_, _ = fmt.Fprintln(stderr, "serve: --state-dir is required; no positional arguments")
 		return errUsage
-	}
-	if !strings.HasPrefix(*userCAFP, "SHA256:") {
-		return errors.New("--user-ca-fp must be a SHA256:... fingerprint")
-	}
-	if !strings.HasPrefix(*logKeyFP, "SHA256:") {
-		return errors.New("--log-key-fp must be a SHA256:... fingerprint")
 	}
 	if *refusalPerMinute < 1 || *refusalBurst < 1 {
 		return errors.New("--refusal-log-per-minute and --refusal-log-burst must be at least 1")
@@ -82,27 +76,25 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	opts, err := parseBackendOpts(backendOpts)
+	overrides, err := parseBackendOpts(backendOpts)
 	if err != nil {
 		return err
 	}
 
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
-	be, err := keystore.Open(*backend, opts)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = be.Close() }()
 	db, err := signerdb.Open(filepath.Join(*stateDir, "signer.db"))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = db.Close() }()
+	backend, be, err := openStoredBackend(ctx, db, overrides)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = be.Close() }()
 
 	s, err := signer.New(signer.Config{
 		Backend:             be,
-		UserCAFingerprint:   *userCAFP,
-		LogKeyFingerprint:   *logKeyFP,
 		DB:                  db,
 		AllowUIDs:           uids,
 		AllowGIDs:           gids,
@@ -123,8 +115,11 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 	}
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	logger.Info("serving", "socket", *socket, "backend", *backend, "user_ca", *userCAFP,
-		"log_key", *logKeyFP, "allow_uids", len(uids), "allow_gids", len(gids))
+	logger.Info("serving", "socket", *socket, "backend", backend, "policy_version", s.PolicyVersion(),
+		"user_ca", ssh.FingerprintSHA256(s.CAPublicKey(wire.CARoleUser)),
+		"host_ca", ssh.FingerprintSHA256(s.CAPublicKey(wire.CARoleHost)),
+		"machine_ca", ssh.FingerprintSHA256(s.CAPublicKey(wire.CARoleMachine)),
+		"log_key", ssh.FingerprintSHA256(s.LogPublicKey()), "allow_uids", len(uids), "allow_gids", len(gids))
 	if err := s.Serve(ctx, l); err != nil {
 		return err
 	}
@@ -186,6 +181,37 @@ func resolveGroups(vals []string) ([]uint32, error) {
 		out = append(out, uint32(n)) //nolint:gosec // G115: n <= math.MaxInt32, checked above
 	}
 	return out, nil
+}
+
+// openStoredBackend opens the keystore backend ca-init recorded in db, with
+// its stored options overridden by overrides (for example a new agent
+// socket path). The keys are still selected by the fingerprints in the
+// trust bundle, and their custody must match it, so an override cannot
+// substitute another key.
+func openStoredBackend(ctx context.Context, db *signerdb.DB, overrides map[string]string) (string, keystore.Backend, error) {
+	name, opts, err := db.BackendConfig(ctx)
+	if errors.Is(err, signerdb.ErrNotInitialised) {
+		return "", nil, signer.ErrNotInitialised
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	for k, v := range overrides {
+		opts[k] = v
+	}
+	be, err := keystore.Open(name, opts)
+	if err != nil {
+		return "", nil, err
+	}
+	return name, be, nil
+}
+
+// openState checks the state directory and opens its database.
+func openState(stateDir string) (*signerdb.DB, error) {
+	if err := checkStateDir(stateDir); err != nil {
+		return nil, err
+	}
+	return signerdb.Open(filepath.Join(stateDir, "signer.db"))
 }
 
 func parseBackendOpts(vals []string) (map[string]string, error) {

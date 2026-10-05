@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -56,30 +57,50 @@ func newEd25519(t *testing.T) ssh.Signer {
 }
 
 // logEnv is a signer over a state database in a temporary directory,
+// bootstrapped with a fixture's keys (ca-init and a genesis bundle) and
 // driven through Issue directly.
 type logEnv struct {
 	t       *testing.T
 	dbPath  string
+	fx      *Fixture
 	backend *memBackend
-	caFP    string
-	logFP   string
 	logPub  ssh.PublicKey
+	base    uint64 // leaves written by the bootstrap (ca_init, bundle_install)
 	db      *signerdb.DB
 	s       *Signer
 }
 
+func newMemBackend(fx *Fixture) *memBackend {
+	b := &memBackend{keys: map[string]ssh.Signer{}}
+	for _, s := range fx.Roles {
+		b.keys[ssh.FingerprintSHA256(s.PublicKey())] = s
+	}
+	return b
+}
+
 func newLogEnv(t *testing.T) *logEnv {
 	t.Helper()
-	ca, lk := newEd25519(t), newEd25519(t)
+	fx := NewFixture(t, 1, 1)
 	e := &logEnv{
 		t:       t,
 		dbPath:  filepath.Join(t.TempDir(), "signer.db"),
-		backend: &memBackend{keys: map[string]ssh.Signer{}},
-		caFP:    ssh.FingerprintSHA256(ca.PublicKey()),
-		logFP:   ssh.FingerprintSHA256(lk.PublicKey()),
-		logPub:  lk.PublicKey(),
+		fx:      fx,
+		backend: newMemBackend(fx),
+		logPub:  fx.Roles[keystore.RoleLog].PublicKey(),
 	}
-	e.backend.keys[e.caFP], e.backend.keys[e.logFP] = ca, lk
+	db, err := signerdb.Open(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.Bootstrap(t, db, e.backend, nil)
+	hashes, err := db.LeafHashes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.base = uint64(len(hashes))
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := e.open(); err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +114,8 @@ func (e *logEnv) open() error {
 		return err
 	}
 	s, err := New(Config{
-		Backend: e.backend, UserCAFingerprint: e.caFP, LogKeyFingerprint: e.logFP,
-		DB: db, AllowUIDs: []uint32{1000}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Backend: e.backend,
+		DB:      db, AllowUIDs: []uint32{1000}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		_ = db.Close()
@@ -124,6 +145,7 @@ func (e *logEnv) request() *wire.IssueRequest {
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		e.t.Fatal(err)
 	}
+	req.Evidence = SignRequest(e.t, req, e.fx.Admins...)
 	return req
 }
 
@@ -177,7 +199,7 @@ func (failingSigner) Sign([]byte) ([]byte, error) {
 func TestCheckpointFailureReleasesNoCertificate(t *testing.T) {
 	e := newLogEnv(t)
 	first, err := e.issue()
-	if err != nil || first.LeafIndex != 0 {
+	if err != nil || first.LeafIndex != e.base {
 		t.Fatalf("first issuance: %+v, %v", first, err)
 	}
 	leaves, issued, last := e.counts()
@@ -203,10 +225,10 @@ func TestCheckpointFailureReleasesNoCertificate(t *testing.T) {
 	e.s.cpSigner = orig
 	e.s.mu.Unlock()
 	next, err := e.issue()
-	if err != nil || next.LeafIndex != 1 || next.Serial <= first.Serial {
+	if err != nil || next.LeafIndex != e.base+1 || next.Serial <= first.Serial {
 		t.Fatalf("issuance after the failure: %+v, %v", next, err)
 	}
-	if rep := e.verifyExport(); rep.Size != 2 || rep.Serials != 2 {
+	if rep := e.verifyExport(); rep.Size != e.base+2 || rep.Serials != 2 {
 		t.Fatalf("export after the failure: %+v", rep)
 	}
 }
@@ -220,8 +242,8 @@ func TestIssueResponseCarriesCommittedLeaf(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if resp.LeafIndex != uint64(i) { //nolint:gosec // G115: small test index
-			t.Fatalf("leaf index %d, want %d", resp.LeafIndex, i)
+		if want := e.base + uint64(i); resp.LeafIndex != want { //nolint:gosec // G115: small test index
+			t.Fatalf("leaf index %d, want %d", resp.LeafIndex, want)
 		}
 		var found bool
 		err = e.db.ForEachLeaf(context.Background(), func(idx uint64, raw []byte) error {
@@ -243,7 +265,7 @@ func TestIssueResponseCarriesCommittedLeaf(t *testing.T) {
 			t.Fatalf("leaf %d does not hold the returned certificate (%v)", resp.LeafIndex, err)
 		}
 	}
-	if rep := e.verifyExport(); rep.Size != 3 || rep.Serials != 3 {
+	if rep := e.verifyExport(); rep.Size != e.base+3 || rep.Serials != 3 {
 		t.Fatalf("report %+v", rep)
 	}
 }
@@ -251,16 +273,23 @@ func TestIssueResponseCarriesCommittedLeaf(t *testing.T) {
 // TestStartRefusedOnLogMismatch: a signer whose stored leaves do not
 // reproduce the latest signed checkpoint refuses to start.
 func TestStartRefusedOnLogMismatch(t *testing.T) {
+	// The statements address the bootstrap leaves (0 and 1) and the issue
+	// leaves base+0..base+2 (log size base+3); %[1]d is base.
 	cases := map[string]string{
-		"leaf_bytes_modified":          `UPDATE log_leaf SET leaf = substr(leaf, 1, length(leaf) - 1) || x'00' WHERE idx = 0`,
-		"leaf_and_hash_modified":       `UPDATE log_leaf SET leaf = substr(leaf, 1, length(leaf) - 1) || x'00', leaf_hash = zeroblob(32) WHERE idx = 1`,
-		"last_leaf_deleted":            `DELETE FROM log_leaf WHERE idx = 2`,
-		"latest_checkpoint_deleted":    `DELETE FROM checkpoint WHERE size = 3`,
-		"checkpoint_from_another_size": `UPDATE checkpoint SET note = (SELECT note FROM checkpoint WHERE size = 1) WHERE size = 3`,
+		"ca_init_leaf_modified":        `UPDATE log_leaf SET leaf = substr(leaf, 1, length(leaf) - 1) || x'00' WHERE idx = 0`,
+		"bundle_install_leaf_deleted":  `DELETE FROM log_leaf WHERE idx = 1`,
+		"leaf_bytes_modified":          `UPDATE log_leaf SET leaf = substr(leaf, 1, length(leaf) - 1) || x'00' WHERE idx = %[1]d`,
+		"leaf_and_hash_modified":       `UPDATE log_leaf SET leaf = substr(leaf, 1, length(leaf) - 1) || x'00', leaf_hash = zeroblob(32) WHERE idx = %[1]d + 1`,
+		"last_leaf_deleted":            `DELETE FROM log_leaf WHERE idx = %[1]d + 2`,
+		"latest_checkpoint_deleted":    `DELETE FROM checkpoint WHERE size = %[1]d + 3`,
+		"checkpoint_from_another_size": `UPDATE checkpoint SET note = (SELECT note FROM checkpoint WHERE size = %[1]d + 1) WHERE size = %[1]d + 3`,
 	}
 	for name, stmt := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newLogEnv(t)
+			if strings.Contains(stmt, "%[1]d") {
+				stmt = fmt.Sprintf(stmt, e.base)
+			}
 			for range 3 {
 				if _, err := e.issue(); err != nil {
 					t.Fatal(err)
@@ -292,29 +321,55 @@ func TestStartRefusedOnLogMismatch(t *testing.T) {
 		if err := e.open(); err != nil {
 			t.Fatalf("restart: %v", err)
 		}
-		if resp, err := e.issue(); err != nil || resp.LeafIndex != 1 {
+		if resp, err := e.issue(); err != nil || resp.LeafIndex != e.base+1 {
 			t.Fatalf("issue after restart: %+v, %v", resp, err)
 		}
 	})
 }
 
-func TestLogKeyPinning(t *testing.T) {
-	e := newLogEnv(t)
-	e.close()
-	db, err := signerdb.Open(e.dbPath)
-	if err != nil {
-		t.Fatal(err)
+// TestStartRefusesWithoutTrust (KEY-01): the signer does not start before
+// ca-init and install-bundle, nor when any key of the installed bundle is
+// missing from the backend.
+func TestStartRefusesWithoutTrust(t *testing.T) {
+	newDB := func(t *testing.T) *signerdb.DB {
+		db, err := signerdb.Open(filepath.Join(t.TempDir(), "signer.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return db
 	}
-	defer func() { _ = db.Close() }()
-	for name, cfg := range map[string]Config{
-		"log_key_missing":   {LogKeyFingerprint: ""},
-		"log_key_is_ca_key": {LogKeyFingerprint: e.caFP},
-		"log_key_absent":    {LogKeyFingerprint: "SHA256:absent"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			cfg.Backend, cfg.DB, cfg.UserCAFingerprint, cfg.AllowUIDs = e.backend, db, e.caFP, []uint32{1}
-			if _, err := New(cfg); err == nil {
-				t.Fatal("New accepted the configuration")
+	cfg := func(db *signerdb.DB, be keystore.Backend) Config {
+		return Config{Backend: be, DB: db, AllowUIDs: []uint32{1}, Logger: slog.New(slog.DiscardHandler)}
+	}
+	fx := NewFixture(t, 1, 1)
+	full := newMemBackend(fx)
+	t.Run("not_initialised", func(t *testing.T) {
+		if _, err := New(cfg(newDB(t), full)); !errors.Is(err, ErrNotInitialised) {
+			t.Fatalf("New = %v, want ErrNotInitialised", err)
+		}
+	})
+	t.Run("no_trust_bundle_installed", func(t *testing.T) {
+		db := newDB(t)
+		if _, err := InitCA(context.Background(), db, full, "test", nil, fx.Selection(), nil); err != nil {
+			t.Fatal(err)
+		}
+		_, err := New(cfg(db, full))
+		if !errors.Is(err, ErrNoTrustBundle) || !strings.Contains(err.Error(), "no trust bundle installed") {
+			t.Fatalf("New = %v, want ErrNoTrustBundle", err)
+		}
+	})
+	for _, role := range initRoles {
+		t.Run(string(role)+"_key_missing_from_backend", func(t *testing.T) {
+			db := newDB(t)
+			fx.Bootstrap(t, db, full, nil)
+			partial := newMemBackend(fx)
+			delete(partial.keys, ssh.FingerprintSHA256(fx.Roles[role].PublicKey()))
+			if _, err := New(cfg(db, partial)); err == nil || !strings.Contains(err.Error(), "role "+string(role)) {
+				t.Fatalf("New without the %s key = %v, want a refusal naming the role", role, err)
+			}
+			if _, err := New(cfg(db, full)); err != nil {
+				t.Fatalf("control with every key: %v", err)
 			}
 		})
 	}

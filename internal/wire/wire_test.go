@@ -52,12 +52,17 @@ func TestIssueRequestRoundTrip(t *testing.T) {
 		{"typical", func(*IssueRequest) {}},
 		{"no_evidence", func(r *IssueRequest) { r.Evidence = nil }},
 		{"no_principals", func(r *IssueRequest) { r.Principals = nil }},
+		{"extensions", func(r *IssueRequest) { r.Extensions = []string{"permit-agent-forwarding", "permit-port-forwarding"} }},
 		{"at_every_limit", func(r *IssueRequest) {
 			r.SubjectKey = bytes.Repeat([]byte{1}, MaxSubjectKeyLen)
 			r.Subject = strings.Repeat("s", MaxSubjectLen)
 			r.Principals = make([]string, MaxPrincipals)
 			for i := range r.Principals {
 				r.Principals[i] = strings.Repeat("p", MaxPrincipalLen-2) + string(rune('a'+i%26)) + string(rune('a'+i/26))
+			}
+			r.Extensions = make([]string, MaxExtensions)
+			for i := range r.Extensions {
+				r.Extensions[i] = strings.Repeat("e", MaxExtensionLen-1) + string(rune('a'+i))
 			}
 			r.Evidence = make([]Evidence, MaxEvidence)
 			for i := range r.Evidence {
@@ -123,6 +128,14 @@ func TestParseIssueRequestRefusals(t *testing.T) {
 		{"evidence_blob_above_8k", over(func(r *IssueRequest) {
 			r.Evidence = []Evidence{{Type: "t", Blob: bytes.Repeat([]byte{1}, MaxEvidenceBlob+1)}}
 		})},
+		{"extensions_9", over(func(r *IssueRequest) {
+			r.Extensions = make([]string, MaxExtensions+1)
+			for i := range r.Extensions {
+				r.Extensions[i] = "e" + strings.Repeat("x", i)
+			}
+		})},
+		{"extension_65_bytes", over(func(r *IssueRequest) { r.Extensions = []string{strings.Repeat("e", MaxExtensionLen+1)} })},
+		{"extension_empty", over(func(r *IssueRequest) { r.Extensions = []string{""} })},
 		{"unknown_ca_role_0", over(func(r *IssueRequest) { r.CARole = 0 })},
 		{"unknown_ca_role_4", over(func(r *IssueRequest) { r.CARole = 4 })},
 	}
@@ -198,6 +211,7 @@ func TestSigningBytes(t *testing.T) {
 			"valid_for":   func(r *IssueRequest) { r.ValidForSeconds++ },
 			"request_id":  func(r *IssueRequest) { r.RequestID[15] ^= 1 },
 			"created_at":  func(r *IssueRequest) { r.CreatedAt++ },
+			"extensions":  func(r *IssueRequest) { r.Extensions = []string{"permit-port-forwarding"} },
 		} {
 			m := validRequest()
 			edit(m)

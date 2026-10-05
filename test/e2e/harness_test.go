@@ -1,7 +1,8 @@
 //go:build e2e || e2e_pkcs11 || e2e_tpm
 
 // Package e2e runs keyroster end to end against real OpenSSH binaries:
-// ssh-agent holds the CA key, keyroster-signer issues through its Unix
+// ssh-agent holds the CA keys, keyroster-signer runs under a root-signed
+// trust bundle and issues admin-authorized requests through its Unix
 // socket, and a non-root sshd on 127.0.0.1 decides whether the certificate
 // is accepted. ssh-keygen is used as a test oracle only.
 //
@@ -226,49 +227,8 @@ func sshAdd(t *testing.T, sock, keyfile string) {
 	}
 }
 
-// startSigner runs keyroster-signer serve with a fresh 0700 state dir and a
-// private socket, plus args, and returns the socket path once it exists.
-// A fresh Ed25519 log key is loaded into the agent named by args
-// ("--backend-opt socket=...") and pinned with --log-key-fp.
-func startSigner(t *testing.T, args ...string) string {
-	t.Helper()
-	return startSignerProc(t, args...).Socket
-}
-
-// signerProc is a running keyroster-signer.
-type signerProc struct {
-	Socket   string
-	StateDir string
-	LogPub   string // log public key file (OpenSSH .pub)
-	LogFP    string
-}
-
-// startSignerProc is startSigner returning the state directory and the log
-// key as well.
-func startSignerProc(t *testing.T, args ...string) *signerProc {
-	t.Helper()
-	agentSock := ""
-	for i, a := range args {
-		if a == "--backend-opt" && i+1 < len(args) && strings.HasPrefix(args[i+1], "socket=") {
-			agentSock = strings.TrimPrefix(args[i+1], "socket=")
-		}
-	}
-	if agentSock == "" {
-		t.Fatal("startSigner: args name no agent (--backend-opt socket=...)")
-	}
-	base := shortTempDir(t)
-	state := filepath.Join(base, "state")
-	if err := os.Mkdir(state, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	logPub, logFP := addLogKey(t, agentSock, base)
-	sock := filepath.Join(base, "signer.sock")
-	full := append([]string{"serve", "--state-dir", state, "--socket", sock}, args...)
-	full = append(full, "--log-key-fp", logFP)
-	_, log, done := startDaemon(t, "keyroster-signer", envWithout("SSH_AUTH_SOCK"), signerBin, full...)
-	waitFor(t, "signer socket", done, log, func() bool { return isSocket(sock) })
-	return &signerProc{Socket: sock, StateDir: state, LogPub: logPub, LogFP: logFP}
-}
+// Signers are started by bootstrapSigner (bootstrap_test.go): ca-init,
+// a root-signed genesis bundle installed with pinned roots, then serve.
 
 // addLogKey creates an Ed25519 log key in dir, loads it into the agent at
 // agentSock and returns its public key file and fingerprint.
@@ -397,20 +357,6 @@ func sshLogin(t *testing.T, opts loginOptions) (int, string) {
 		t.Fatalf("ssh: %v\n%s", err, out)
 	}
 	return 0, string(out)
-}
-
-// issue runs keyroster ca issue against the signer socket and fails the
-// test when it does not succeed. It returns the combined output.
-func issue(t *testing.T, socket string, args ...string) string {
-	t.Helper()
-	full := append([]string{"ca", "issue", "--socket", socket}, args...)
-	cmd := exec.Command(keyrosterBin, full...)
-	cmd.Env = envWithout("SSH_AUTH_SOCK")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("keyroster %v: %v\n%s", full, err, out)
-	}
-	return string(out)
 }
 
 // currentUser returns the login name the tests run as; non-root sshd can

@@ -16,6 +16,8 @@ func FuzzParseIssueRequest(f *testing.F) {
 	f.Add(valid)
 	f.Add(seed(func(r *IssueRequest) { r.Evidence = nil }))
 	f.Add(seed(func(r *IssueRequest) { r.Principals = nil }))
+	f.Add(seed(func(r *IssueRequest) { r.Extensions = []string{"permit-port-forwarding"} }))
+	f.Add(seed(func(r *IssueRequest) { r.Extensions = make([]string, MaxExtensions+1) }))
 	f.Add(seed(func(r *IssueRequest) { r.CARole = 0 }))
 	f.Add(seed(func(r *IssueRequest) { r.Evidence = make([]Evidence, MaxEvidence+1) }))
 	f.Add(append(append([]byte(nil), valid...), 0))

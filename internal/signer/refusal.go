@@ -192,6 +192,9 @@ func classify(detail string) uint8 {
 		return tlog.ReasonUnavailable
 	case "too_many_connections":
 		return tlog.ReasonOverloaded
+	case "missing_evidence", "unknown_evidence_type", "bad_evidence", "evidence_not_admin",
+		"evidence_wrong_namespace", "evidence_digest_mismatch", "admin_quorum_not_met", "no_policy":
+		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal
 	}

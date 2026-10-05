@@ -111,9 +111,9 @@ type testSigner struct {
 	dbPath    string
 	agentSock string
 	caFP      string
-	logFP     string
+	fx        *signer.Fixture
 	LogPub    ssh.PublicKey
-	CAPub     ssh.PublicKey
+	CAPub     ssh.PublicKey // the user CA
 	Socket    string
 	DB        *signerdb.DB
 	logs      *recordSink
@@ -165,48 +165,55 @@ func serveAgent(t *testing.T, path string, keyring sshagent.Agent) {
 	})
 }
 
+// newTestSigner serves the fixture's five role keys from an in-memory
+// ssh-agent keyring, runs ca-init and installs a root-signed genesis
+// bundle (one admin, quorum 1), then starts the signer.
 func newTestSigner(t *testing.T, opts signerOpts) *testSigner {
 	t.Helper()
 	dir := shortTempDir(t)
-	_, caPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caSigner, err := ssh.NewSignerFromKey(caPriv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, logPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	logSigner, err := ssh.NewSignerFromKey(logPriv)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fx := signer.NewFixture(t, 1, 1)
 	keyring := sshagent.NewKeyring()
-	for _, k := range []ed25519.PrivateKey{caPriv, logPriv} {
+	for _, k := range fx.RolePriv {
 		if err := keyring.Add(sshagent.AddedKey{PrivateKey: k}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	userCA := fx.Roles[keystore.RoleUser].PublicKey()
 	ts := &testSigner{
 		t:         t,
 		opts:      opts,
 		dir:       dir,
 		dbPath:    filepath.Join(dir, "signer.db"),
 		agentSock: filepath.Join(dir, "agent.sock"),
-		caFP:      ssh.FingerprintSHA256(caSigner.PublicKey()),
-		logFP:     ssh.FingerprintSHA256(logSigner.PublicKey()),
-		LogPub:    logSigner.PublicKey(),
-		CAPub:     caSigner.PublicKey(),
+		caFP:      ssh.FingerprintSHA256(userCA),
+		fx:        fx,
+		LogPub:    fx.Roles[keystore.RoleLog].PublicKey(),
+		CAPub:     userCA,
 		Socket:    filepath.Join(dir, "signer.sock"),
 		logs:      &recordSink{},
 	}
 	serveAgent(t, ts.agentSock, keyring)
+	ts.bootstrap()
 	ts.start()
 	t.Cleanup(ts.stop)
 	return ts
+}
+
+// bootstrap runs ca-init and install-bundle on the state database.
+func (ts *testSigner) bootstrap() {
+	t := ts.t
+	t.Helper()
+	db, err := signerdb.Open(ts.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	backend, err := keystore.Open("agent", map[string]string{"socket": ts.agentSock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = backend.Close() }()
+	ts.fx.Bootstrap(t, db, backend, ts.opts.clock)
 }
 
 // start opens the DB and the backend, builds the signer and serves it.
@@ -232,14 +239,12 @@ func (ts *testSigner) start() {
 		clock = ts.opts.clock
 	}
 	s, err := signer.New(signer.Config{
-		Backend:           backend,
-		UserCAFingerprint: ts.caFP,
-		LogKeyFingerprint: ts.logFP,
-		DB:                db,
-		Clock:             clock,
-		AllowUIDs:         allowUIDs,
-		AllowGIDs:         allowGIDs,
-		Logger:            slog.New(&captureHandler{sink: ts.logs}),
+		Backend:   backend,
+		DB:        db,
+		Clock:     clock,
+		AllowUIDs: allowUIDs,
+		AllowGIDs: allowGIDs,
+		Logger:    slog.New(&captureHandler{sink: ts.logs}),
 	})
 	if err != nil {
 		_ = backend.Close()
@@ -311,8 +316,20 @@ func (ts *testSigner) reasonRecords() []capturedRecord {
 	return out
 }
 
-// issue sends req through the real client and socket.
+// issue sends req through the real client and socket. A request without
+// evidence is sent as a copy signed by the fixture's admin, so tests that
+// edit a request before sending it still carry valid evidence.
 func (ts *testSigner) issue(req *wire.IssueRequest) (*wire.IssueResponse, error) {
+	if req.Evidence == nil {
+		signed := *req
+		signed.Evidence = signer.SignRequest(ts.t, &signed, ts.fx.Admins...)
+		req = &signed
+	}
+	return ts.issueAsIs(req)
+}
+
+// issueAsIs sends req exactly as given.
+func (ts *testSigner) issueAsIs(req *wire.IssueRequest) (*wire.IssueResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	return signerclient.Issue(ctx, ts.Socket, req)
@@ -475,8 +492,13 @@ func TestSignerRefusals(t *testing.T) {
 		code   wire.ErrorCode
 		reason string
 	}{
-		{"host_role", func(_ *testing.T, r *wire.IssueRequest) { r.CARole = wire.CARoleHost }, wire.CodeRefused, "ca_not_configured"},
-		{"machine_role", func(_ *testing.T, r *wire.IssueRequest) { r.CARole = wire.CARoleMachine }, wire.CodeRefused, "ca_not_configured"},
+		{"host_ttl_above_max", func(_ *testing.T, r *wire.IssueRequest) {
+			r.CARole, r.ValidForSeconds = wire.CARoleHost, 720*3600+1
+		}, wire.CodeRefused, "bad_validity"},
+		{"user_extension_not_allowed", func(_ *testing.T, r *wire.IssueRequest) { r.Extensions = []string{"permit-port-forwarding"} }, wire.CodeRefused, "extension_not_allowed"},
+		{"host_extension_not_allowed", func(_ *testing.T, r *wire.IssueRequest) {
+			r.CARole, r.Extensions = wire.CARoleHost, []string{"permit-pty"}
+		}, wire.CodeRefused, "extension_not_allowed"},
 		{"created_301s_past", func(_ *testing.T, r *wire.IssueRequest) { r.CreatedAt = now - 301 }, wire.CodeRefused, "request_time_skew"},
 		{"created_301s_future", func(_ *testing.T, r *wire.IssueRequest) { r.CreatedAt = now + 301 }, wire.CodeRefused, "request_time_skew"},
 		{"created_at_zero", func(_ *testing.T, r *wire.IssueRequest) { r.CreatedAt = 0 }, wire.CodeRefused, "request_time_skew"},
@@ -825,4 +847,57 @@ func TestSignerRestore(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestSignerIssuesEveryRole (CA-01, CA-04, CA-05): user and machine
+// requests yield user certificates and host requests host certificates,
+// each signed by its own CA key from the installed bundle, under its
+// role's policy profile, with pol equal to the installed policy version.
+func TestSignerIssuesEveryRole(t *testing.T) {
+	ts := newTestSigner(t, signerOpts{})
+	for _, tc := range []struct {
+		role     wire.CARole
+		key      keystore.Role
+		certType uint32
+		ext      []string
+		ttl      uint32
+	}{
+		{wire.CARoleUser, keystore.RoleUser, ssh.UserCert, []string{"permit-pty"}, 12 * 3600},
+		{wire.CARoleHost, keystore.RoleHost, ssh.HostCert, nil, 720 * 3600},
+		{wire.CARoleMachine, keystore.RoleMachine, ssh.UserCert, []string{"permit-pty"}, 24 * 3600},
+	} {
+		t.Run(tc.role.String(), func(t *testing.T) {
+			req := newRequest(t, "alice")
+			req.CARole, req.ValidForSeconds = tc.role, tc.ttl
+			resp, err := ts.issue(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pk, err := ssh.ParsePublicKey(resp.Cert)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := pk.(*ssh.Certificate)
+			caPub := ts.fx.Roles[tc.key].PublicKey()
+			if !bytes.Equal(c.SignatureKey.Marshal(), caPub.Marshal()) {
+				t.Fatalf("signed by %s, want the %s CA %s", ssh.FingerprintSHA256(c.SignatureKey), tc.key, ssh.FingerprintSHA256(caPub))
+			}
+			if c.CertType != tc.certType {
+				t.Fatalf("certificate type %d, want %d", c.CertType, tc.certType)
+			}
+			var ext []string
+			for k := range c.Extensions {
+				ext = append(ext, k)
+			}
+			if strings.Join(ext, ",") != strings.Join(tc.ext, ",") || len(c.CriticalOptions) != 0 {
+				t.Fatalf("extensions %v, critical options %v; want %v and none", ext, c.CriticalOptions, tc.ext)
+			}
+			if want := "kr1/ca=" + tc.role.String() + "/"; !strings.HasPrefix(c.KeyId, want) || !strings.Contains(c.KeyId, "/pol=1/") {
+				t.Fatalf("key ID %q, want prefix %q and pol=1", c.KeyId, want)
+			}
+			if got, want := c.ValidBefore-c.ValidAfter, uint64(tc.ttl)+300; got != want {
+				t.Fatalf("validity %d s, want the requested %d s plus the 5 min backdate", got, tc.ttl)
+			}
+		})
+	}
 }

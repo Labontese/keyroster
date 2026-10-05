@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/Labontese/keyroster/internal/signerclient"
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -60,13 +62,15 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	subject := fs.String("subject", "", "subject recorded in the key ID, e.g. u:alice (required)")
 	ttl := fs.Duration("ttl", time.Hour, "certificate validity")
 	out := fs.String("out", "", "certificate output file (default: {pubkey without .pub}-cert.pub)")
-	var principals stringList
+	var principals, adminKeys, extensions stringList
 	fs.Var(&principals, "principal", "principal to certify (repeatable, at least one)")
+	fs.Var(&adminKeys, "admin-key", "SHA256 fingerprint of an admin key in ssh-agent (SSH_AUTH_SOCK) that signs the request (repeatable, at least one; the policy's admin quorum decides how many)")
+	fs.Var(&extensions, "extension", "certificate extension to request on top of the CA's defaults, if its policy profile allows it (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
-	if fs.NArg() != 0 || *pubkeyPath == "" || *subject == "" || len(principals) == 0 {
-		_, _ = fmt.Fprintln(stderr, "ca issue: --pubkey, --subject and at least one --principal are required")
+	if fs.NArg() != 0 || *pubkeyPath == "" || *subject == "" || len(principals) == 0 || len(adminKeys) == 0 {
+		_, _ = fmt.Fprintln(stderr, "ca issue: --pubkey, --subject, at least one --principal and at least one --admin-key are required")
 		return errUsage
 	}
 	role, err := parseCARole(*caName)
@@ -88,10 +92,16 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 		Principals:      principals,
 		ValidForSeconds: uint32(*ttl / time.Second), //nolint:gosec // G115: bounded by math.MaxUint32 above
 		CreatedAt:       uint64(time.Now().Unix()),  //nolint:gosec // G115: the clock is after 1970
+		Extensions:      extensions,
 	}
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		return fmt.Errorf("request id: %w", err)
 	}
+	evidence, err := adminEvidence(req, adminKeys)
+	if err != nil {
+		return err
+	}
+	req.Evidence = evidence
 
 	resp, err := signerclient.Issue(ctx, *socket, req)
 	if err != nil {
@@ -118,6 +128,48 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	}
 	_, _ = fmt.Fprintf(stderr, "serial: %d\nkey id: %s\nlog leaf: %d\ncertificate: %s\n", c.Serial, c.KeyId, resp.LeafIndex, dest)
 	return nil
+}
+
+// adminEvidence signs req.SigningBytes() with each named admin key from
+// the ssh-agent at SSH_AUTH_SOCK, as admin-sshsig/v1 evidence under the
+// namespace keyroster/issue-request/v1 (D-13). The signer checks the
+// signatures against the admins in its root-signed policy.
+func adminEvidence(req *wire.IssueRequest, fingerprints []string) ([]wire.Evidence, error) {
+	if len(fingerprints) > wire.MaxEvidence {
+		return nil, fmt.Errorf("at most %d --admin-key values", wire.MaxEvidence)
+	}
+	conn, err := dialAgent()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	signers, err := agent.NewClient(conn).Signers()
+	if err != nil {
+		return nil, fmt.Errorf("list ssh-agent keys: %w", err)
+	}
+	msg := req.SigningBytes()
+	out := make([]wire.Evidence, 0, len(fingerprints))
+	for _, fp := range fingerprints {
+		if !strings.HasPrefix(fp, "SHA256:") {
+			return nil, fmt.Errorf("--admin-key %q: want a SHA256:... fingerprint", fp)
+		}
+		var s ssh.Signer
+		for _, c := range signers {
+			if ssh.FingerprintSHA256(c.PublicKey()) == fp && !strings.HasSuffix(c.PublicKey().Type(), "-cert-v01@openssh.com") {
+				s = c
+				break
+			}
+		}
+		if s == nil {
+			return nil, fmt.Errorf("ssh-agent does not hold the admin key %s", fp)
+		}
+		sig, err := sshsig.Sign(rand.Reader, s, wire.AdminSSHSIGNamespace, msg)
+		if err != nil {
+			return nil, fmt.Errorf("sign the request with %s: %w", fp, err)
+		}
+		out = append(out, wire.Evidence{Type: wire.EvidenceAdminSSHSIG, Blob: sig})
+	}
+	return out, nil
 }
 
 func parseCARole(s string) (wire.CARole, error) {
