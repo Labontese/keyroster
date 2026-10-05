@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-16 Task 4 merge gate: PR #4 awaiting owner approval"
-last_updated: "2026-10-04T13:27:04.158Z"
+stopped_at: "01-04 Task 3 merge gate: owner applies ruleset, then approves PR #5"
+last_updated: "2026-10-05T06:05:45.833Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 143d2f8787cef7c07a0c951139d6f94fc5a707e8
+state_head: 310c7750aa00bfb52c02380496e3961613e28067
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 4
+  completed_plans: 5
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 5 of 16
+Plan: 6 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -60,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P02 | 31 min | 2 tasks | 32 files |
 | Phase 01 P03 | 14 min | 2 tasks | 13 files |
 | Phase 01 P16 | 22 min | 3 tasks | 11 files |
+| Phase 01 P04 | 23 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,9 @@ Recent decisions affecting current work:
 - [Phase 01]: IssueRequest.SigningBytes starts with the raw keyroster/issue-request/v1 tag (no uint16 length prefix), per the 01-02 contract; 01-07 signs these bytes
 - [Phase 01]: The agent keystore backend skips certificate entries by the -cert-v01@openssh.com key type, since the x/crypto agent client returns entries as agent.Key, never ssh.Certificate
 - [Phase 01]: gsd-tools tdd-red-evidence parses only TAP/Surefire; Go RED evidence is recorded in the plan SUMMARY
+- [Phase 01]: 01-04: a ruleset that adds required checks is applied by the owner from the PR branch after the checks are green on that PR and before approval (Pitfall 10); Claude never applies rulesets
+- [Phase 01]: 01-04: every sshd authentication refusal in e2e runs against its own sshd (OpenSSH >= 9.8 PerSourcePenalties; 9.5p1 lacks the option), and each refusal has a control that succeeds
+- [Phase 01]: 01-04: the plan's -L 0:... forwarding case was replaced by -W (direct-tcpip) and -R with ExitOnForwardFailure, because ssh rejects -L 0:... before connecting
 
 ### Pending Todos
 
@@ -108,6 +112,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-04T13:26:44.726Z
-Stopped at: 01-16 Task 4 merge gate: PR #4 awaiting owner approval
+Last session: 2026-10-05T06:05:45.760Z
+Stopped at: 01-04 Task 3 merge gate: owner applies ruleset, then approves PR #5
 Resume file: None
