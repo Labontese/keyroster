@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -37,9 +38,13 @@ func refusalErr(code wire.ErrorCode, reason string, cause error) error {
 }
 
 // Issue decides on one request and, if it passes, issues the certificate.
-// Authorization in this phase is the peer-credential allowlist checked
-// before the request was read; plan 01-07 adds mandatory admin-sshsig/v1
-// evidence (D-13). Evidence items are decoded and size-limited only.
+// The peer-credential allowlist was checked before the request was read.
+// Then: freshness (CreatedAt within ±300 s), admin-sshsig/v1 evidence from
+// the installed policy's admins over the request's exact signing bytes
+// (D-13), the CA key of the requested role from the installed bundle, that
+// role's policy profile (validity cap and extensions, CA-04, CA-05), a
+// serial, and cert.Build. The certificate leaves only after its log entry
+// committed.
 func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (*wire.IssueResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -47,17 +52,30 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 	if req == nil {
 		return nil, refusalErr(wire.CodeMalformed, "malformed_request", nil)
 	}
-	if req.CARole != wire.CARoleUser {
-		return nil, refusalErr(wire.CodeRefused, "ca_not_configured", nil)
-	}
 	now := s.clock()
 	created := time.Unix(int64(min(req.CreatedAt, uint64(1)<<62)), 0) //nolint:gosec // G115: clamped below 2^63
 	if d := now.Sub(created); d > maxClockSkew || d < -maxClockSkew {
 		return nil, refusalErr(wire.CodeRefused, "request_time_skew", nil)
 	}
+	admins, err := verifyAdminEvidence(req, s.policy)
+	if err != nil {
+		return nil, err
+	}
+	caKey, ok := s.ca[req.CARole]
+	profile, okProfile := s.profiles[req.CARole]
+	if !ok || !okProfile {
+		return nil, refusalErr(wire.CodeRefused, "ca_not_configured", nil)
+	}
 	subject, err := ssh.ParsePublicKey(req.SubjectKey)
 	if err != nil {
 		return nil, refusalErr(wire.CodeRefused, "bad_subject_key", err)
+	}
+	extra := make(map[string]string, len(req.Extensions))
+	for _, e := range req.Extensions {
+		if _, dup := extra[e]; dup {
+			return nil, refusalErr(wire.CodeRefused, "duplicate_extension", nil)
+		}
+		extra[e] = ""
 	}
 
 	last, err := s.db.LastSerial(ctx)
@@ -75,21 +93,22 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 	issuedAt := s.clock()
 
 	keyID := cert.KeyID{
-		CA:      wire.CARoleUser.String(),
+		CA:      req.CARole.String(),
 		Subject: req.Subject,
 		Request: hex.EncodeToString(req.RequestID[:]),
-		Policy:  0, // no policy installed yet; plan 01-07 sets the installed version
+		Policy:  s.policy.Version,
 		Serial:  ser,
 	}
 	c, err := cert.Build(cert.Request{
-		Profile:    cert.DefaultUserProfile(),
-		Subject:    subject,
-		Principals: req.Principals,
-		Now:        issuedAt,
-		ValidFor:   time.Duration(req.ValidForSeconds) * time.Second,
-		KeyID:      keyID,
-		Serial:     ser,
-	}, s.userCA, rand.Reader)
+		Profile:         profile,
+		Subject:         subject,
+		Principals:      req.Principals,
+		Now:             issuedAt,
+		ValidFor:        time.Duration(req.ValidForSeconds) * time.Second,
+		KeyID:           keyID,
+		Serial:          ser,
+		ExtraExtensions: extra,
+	}, caKey, rand.Reader)
 	if err != nil {
 		return nil, buildRefusal(err)
 	}
@@ -147,6 +166,7 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 		"leaf_index", leafIndex,
 		"principals", len(c.ValidPrincipals),
 		"evidence", len(req.Evidence),
+		"admins", strings.Join(admins, ","),
 		"uid", peer.UID,
 		"pid", peer.PID)
 	return &wire.IssueResponse{Cert: certBytes, Serial: ser, LeafIndex: leafIndex}, nil

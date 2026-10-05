@@ -14,34 +14,29 @@ import (
 )
 
 // TestIssueAcceptedBySSHD is the Walking Skeleton: keyroster ca issue ->
-// keyroster-signer (CA key in ssh-agent, pinned by fingerprint) -> a
+// keyroster-signer (CA keys in ssh-agent, selected by fingerprint at
+// ca-init and bound to their roles by the root-signed bundle) -> a
 // certificate that real sshd accepts. A decoy key is loaded into the agent
-// before the CA key, so a signer that picked "the first key" would sign
+// before the role keys, so a signer that picked "the first key" would sign
 // with the decoy and the Signing CA assertion would fail.
 func TestIssueAcceptedBySSHD(t *testing.T) {
 	dir := t.TempDir()
 	login := currentUser(t)
 
 	decoy := filepath.Join(dir, "decoy")
-	caKey := filepath.Join(dir, "user_ca")
 	userKey := filepath.Join(dir, "id_ed25519")
 	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "decoy", "-f", decoy)
-	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "user-ca", "-f", caKey)
 	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "user", "-f", userKey)
-	caFP := fingerprint(t, caKey+".pub")
 	decoyFP := fingerprint(t, decoy+".pub")
 
 	agentSock := startAgent(t)
 	sshAdd(t, agentSock, decoy) // first in the agent's list
-	sshAdd(t, agentSock, caKey)
+	roleKeys, _ := newRoleKeys(t, agentSock, dir)
+	caFP := roleKeys["user"]
 
-	signerSock := startSigner(t,
-		"--allow-uid", strconv.Itoa(os.Getuid()),
-		"--backend", "agent",
-		"--backend-opt", "socket="+agentSock,
-		"--user-ca-fp", caFP)
+	env := bootstrapSigner(t, bootstrapOpts{BackendOpts: map[string]string{"socket": agentSock}, RoleKeys: roleKeys})
 
-	out := issue(t, signerSock,
+	out := env.issue(t,
 		"--pubkey", userKey+".pub",
 		"--principal", login,
 		"--subject", "u:"+login,
@@ -50,7 +45,7 @@ func TestIssueAcceptedBySSHD(t *testing.T) {
 	certFile := userKey + "-cert.pub"
 
 	port := startSSHD(t, sshdOptions{
-		UserCAPub:  caKey + ".pub",
+		UserCAPub:  env.UserCAPub,
 		Principals: map[string][]string{login: {login}},
 	})
 	code, output := sshLogin(t, loginOptions{
@@ -69,8 +64,8 @@ func TestIssueAcceptedBySSHD(t *testing.T) {
 	if err != nil || serial == 0 {
 		t.Errorf("Serial = %q, want a decimal above 0", fields.serial)
 	}
-	if !strings.HasPrefix(fields.keyID, "kr1/ca=user/") {
-		t.Errorf("Key ID = %q, want prefix kr1/ca=user/", fields.keyID)
+	if !strings.HasPrefix(fields.keyID, "kr1/ca=user/") || !strings.Contains(fields.keyID, "/pol=1/") {
+		t.Errorf("Key ID = %q, want prefix kr1/ca=user/ and the installed policy version pol=1", fields.keyID)
 	}
 	if want := "/ser=" + fields.serial; !strings.HasSuffix(fields.keyID, want) {
 		t.Errorf("Key ID = %q, want suffix %q", fields.keyID, want)

@@ -15,45 +15,9 @@ import (
 	"time"
 )
 
-// auditEnv is a user CA in an agent and a signer whose state directory and
-// log key the test can reach.
-type auditEnv struct {
-	caKey  string
-	caFP   string
-	agent  string
-	signer *signerProc
-}
-
-func newAuditEnv(t *testing.T) *auditEnv {
-	t.Helper()
-	dir := t.TempDir()
-	caKey := filepath.Join(dir, "user_ca")
-	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "user-ca", "-f", caKey)
-	env := &auditEnv{caKey: caKey, caFP: fingerprint(t, caKey+".pub")}
-	env.agent = startAgent(t)
-	sshAdd(t, env.agent, caKey)
-	env.signer = startSignerProc(t,
-		"--allow-uid", strconv.Itoa(os.Getuid()),
-		"--backend", "agent",
-		"--backend-opt", "socket="+env.agent,
-		"--user-ca-fp", env.caFP)
-	return env
-}
-
-// exportLog runs keyroster-signer export-log against the running signer's
-// state directory and returns the export file.
-func (e *auditEnv) exportLog(t *testing.T) string {
-	t.Helper()
-	out := filepath.Join(t.TempDir(), "log.jsonl")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, signerBin, "export-log", "--state-dir", e.signer.StateDir, "--out", out)
-	cmd.Env = envWithout("SSH_AUTH_SOCK")
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("keyroster-signer export-log: %v\n%s", err, b)
-	}
-	return out
-}
+// bootstrapLeaves is the number of log entries a bootstrapped signer
+// starts with: ca_init and bundle_install.
+const bootstrapLeaves = 2
 
 // auditVerify runs keyroster audit verify and returns its exit code and
 // output.
@@ -69,31 +33,31 @@ func auditVerify(t *testing.T, logPub, export string, extra ...string) (int, str
 // verifies end to end against the pinned log key.
 func TestAuditVerifiesIssuance(t *testing.T) {
 	login := currentUser(t)
-	env := newAuditEnv(t)
+	env := bootstrapSigner(t, bootstrapOpts{})
 
 	var keys []string
 	for i := range 3 {
 		key := newUserKey(t, "id_audit"+strconv.Itoa(i))
-		out := issue(t, env.signer.Socket,
+		out := env.issue(t,
 			"--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
-		if want := "log leaf: " + strconv.Itoa(i); !strings.Contains(out, want) {
+		if want := "log leaf: " + strconv.Itoa(bootstrapLeaves+i); !strings.Contains(out, want) {
 			t.Fatalf("issue #%d output lacks %q:\n%s", i, want, out)
 		}
 		keys = append(keys, key)
 	}
 
-	port := startSSHD(t, sshdOptions{UserCAPub: env.caKey + ".pub", Principals: map[string][]string{login: {login}}})
+	port := startSSHD(t, sshdOptions{UserCAPub: env.UserCAPub, Principals: map[string][]string{login: {login}}})
 	if code, out := sshLogin(t, loginOptions{Port: port, Key: keys[0], Cert: keys[0] + "-cert.pub", User: login, Command: "true"}); code != 0 {
 		t.Fatalf("ssh login with a logged certificate exited %d:\n%s", code, out)
 	}
 
 	export := env.exportLog(t)
-	code, out := auditVerify(t, env.signer.LogPub, export)
+	code, out := auditVerify(t, env.LogPub, export)
 	if code != 0 {
 		t.Fatalf("keyroster audit verify exited %d:\n%s", code, out)
 	}
-	if !strings.HasPrefix(out, "OK: 3 entries,") || !strings.Contains(out, "issued 3") {
-		t.Fatalf("audit verify output = %q, want OK with 3 entries and 3 issued", out)
+	if !strings.HasPrefix(out, "OK: 5 entries,") || !strings.Contains(out, "issued 3") {
+		t.Fatalf("audit verify output = %q, want OK with 5 entries (ca_init, bundle_install, 3 issuances) and 3 issued", out)
 	}
 	t.Logf("audit verify: %s", strings.TrimSpace(out))
 
@@ -141,10 +105,10 @@ func editExport(t *testing.T, export string, edit func(lines []map[string]any) [
 // signer's log, and checks --previous across two exports of a growing log.
 func TestAuditDetectsTampering(t *testing.T) {
 	login := currentUser(t)
-	env := newAuditEnv(t)
+	env := bootstrapSigner(t, bootstrapOpts{})
 	issueOne := func() {
 		key := newUserKey(t, "id_t")
-		issue(t, env.signer.Socket, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+		env.issue(t, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
 	}
 	issueOne()
 	issueOne()
@@ -152,36 +116,38 @@ func TestAuditDetectsTampering(t *testing.T) {
 	issueOne()
 	second := env.exportLog(t)
 
-	if code, out := auditVerify(t, env.signer.LogPub, second, "--previous", first); code != 0 {
+	if code, out := auditVerify(t, env.LogPub, second, "--previous", first); code != 0 {
 		t.Fatalf("verify --previous <earlier export> exited %d:\n%s", code, out)
 	}
-	if code, out := auditVerify(t, env.signer.LogPub, first, "--previous", second); code == 0 || !strings.Contains(out, "log shrank") {
+	if code, out := auditVerify(t, env.LogPub, first, "--previous", second); code == 0 || !strings.Contains(out, "log shrank") {
 		t.Fatalf("verify of the earlier export against the later checkpoint exited %d, want log shrank:\n%s", code, out)
 	}
 
 	flipped := editExport(t, second, func(lines []map[string]any) []map[string]any {
-		raw, err := base64.StdEncoding.DecodeString(lines[1]["leaf"].(string))
+		second := bootstrapLeaves + 1 // the second issue leaf
+		raw, err := base64.StdEncoding.DecodeString(lines[second]["leaf"].(string))
 		if err != nil {
 			t.Fatal(err)
 		}
 		raw[64] ^= 1 // inside the request digest of an issue leaf
-		lines[1]["leaf"] = base64.StdEncoding.EncodeToString(raw)
+		lines[second]["leaf"] = base64.StdEncoding.EncodeToString(raw)
 		return lines
 	})
-	if code, out := auditVerify(t, env.signer.LogPub, flipped); code != 1 || !strings.Contains(out, "root mismatch") {
+	if code, out := auditVerify(t, env.LogPub, flipped); code != 1 || !strings.Contains(out, "root mismatch") {
 		t.Fatalf("verify of a flipped leaf byte exited %d, want 1 with root mismatch:\n%s", code, out)
 	}
 	removed := editExport(t, second, func(lines []map[string]any) []map[string]any {
-		return append(lines[:1:1], lines[2:]...)
+		second := bootstrapLeaves + 1
+		return append(lines[:second:second], lines[second+1:]...)
 	})
-	if code, out := auditVerify(t, env.signer.LogPub, removed); code != 1 {
+	if code, out := auditVerify(t, env.LogPub, removed); code != 1 {
 		t.Fatalf("verify of an export without one leaf exited %d, want 1:\n%s", code, out)
 	}
 	decodedOnly := editExport(t, second, func(lines []map[string]any) []map[string]any {
-		lines[0]["decoded"] = map[string]any{"kind": "issue", "principals": []string{"root"}}
+		lines[bootstrapLeaves]["decoded"] = map[string]any{"kind": "issue", "principals": []string{"root"}}
 		return lines
 	})
-	if code, out := auditVerify(t, env.signer.LogPub, decodedOnly); code != 0 {
+	if code, out := auditVerify(t, env.LogPub, decodedOnly); code != 0 {
 		t.Fatalf("verify after editing only decoded exited %d:\n%s", code, out)
 	}
 }
@@ -191,19 +157,19 @@ func TestAuditDetectsTampering(t *testing.T) {
 // exported, verified log; and serve documents the refusal rate flags.
 func TestRefusalsAreAudited(t *testing.T) {
 	login := currentUser(t)
-	env := newAuditEnv(t)
+	env := bootstrapSigner(t, bootstrapOpts{})
 	key := newUserKey(t, "id_refused")
 	for _, principal := range []string{"*", "Alice", "a,b"} {
-		code, out := runKeyroster(t, "ca", "issue", "--socket", env.signer.Socket,
+		code, out := env.runIssue(t,
 			"--pubkey", key+".pub", "--principal", principal, "--subject", "u:"+login, "--ttl", "10m")
 		if code != 1 || !strings.Contains(out, "bad_principal") {
 			t.Fatalf("ca issue --principal %q exited %d, want 1 with bad_principal:\n%s", principal, code, out)
 		}
 	}
-	issue(t, env.signer.Socket, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+	env.issue(t, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
 
 	export := env.exportLog(t)
-	code, out := auditVerify(t, env.signer.LogPub, export, "--json")
+	code, out := auditVerify(t, env.LogPub, export, "--json")
 	if code != 0 {
 		t.Fatalf("audit verify exited %d:\n%s", code, out)
 	}
@@ -215,8 +181,9 @@ func TestRefusalsAreAudited(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		t.Fatalf("audit verify --json: %v\n%s", err, out)
 	}
-	if res.Entries != 4 || res.Issued != 1 || res.Kinds["refusal"] != 3 {
-		t.Fatalf("audit verify = %+v, want 4 entries: 3 refusals and 1 issuance", res)
+	if res.Entries != bootstrapLeaves+4 || res.Issued != 1 || res.Kinds["refusal"] != 3 ||
+		res.Kinds["ca_init"] != 1 || res.Kinds["bundle_install"] != 1 {
+		t.Fatalf("audit verify = %+v, want 6 entries: ca_init, bundle_install, 3 refusals and 1 issuance", res)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

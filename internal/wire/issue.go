@@ -12,6 +12,16 @@ import (
 // every other signed format (D-01, D-13).
 const IssueRequestDomain = "keyroster/issue-request/v1"
 
+// EvidenceAdminSSHSIG is the evidence type of an admin's detached SSHSIG
+// signature (armored, as ssh-keygen -Y sign writes it) over a request's
+// SigningBytes, made under the SSHSIG namespace AdminSSHSIGNamespace (D-13).
+const EvidenceAdminSSHSIG = "admin-sshsig/v1"
+
+// AdminSSHSIGNamespace is the SSHSIG namespace of admin-sshsig/v1 evidence.
+// It equals IssueRequestDomain, so a signature over a request can never be
+// mistaken for a signature under any other keyroster namespace.
+const AdminSSHSIGNamespace = IssueRequestDomain
+
 // Field limits of an IssueRequest. ParseIssueRequest and Marshal both
 // enforce them.
 const (
@@ -19,6 +29,8 @@ const (
 	MaxPrincipalLen   = 128
 	MaxSubjectLen     = 64
 	MaxSubjectKeyLen  = 8 << 10
+	MaxExtensions     = 8
+	MaxExtensionLen   = 64
 	MaxEvidence       = 4
 	MaxEvidenceType   = 64
 	MaxEvidenceBlob   = 8 << 10
@@ -65,7 +77,9 @@ type Evidence struct {
 
 // IssueRequest asks the signer for one certificate. SubjectKey is an SSH
 // wire-format public key blob; the signer never receives a private key.
-// CreatedAt is the client's clock in Unix seconds.
+// CreatedAt is the client's clock in Unix seconds. Extensions names
+// certificate extensions requested on top of the role's defaults; the
+// signer grants only those the role's policy profile allows.
 type IssueRequest struct {
 	CARole          CARole
 	SubjectKey      []byte
@@ -74,6 +88,7 @@ type IssueRequest struct {
 	ValidForSeconds uint32
 	RequestID       [16]byte
 	CreatedAt       uint64
+	Extensions      []string
 	Evidence        []Evidence
 }
 
@@ -87,8 +102,15 @@ func (r *IssueRequest) check() error {
 		return fmt.Errorf("%w: subject too long", ErrMalformed)
 	case len(r.Principals) > MaxPrincipals:
 		return fmt.Errorf("%w: too many principals", ErrMalformed)
+	case len(r.Extensions) > MaxExtensions:
+		return fmt.Errorf("%w: too many extensions", ErrMalformed)
 	case len(r.Evidence) > MaxEvidence:
 		return fmt.Errorf("%w: too many evidence items", ErrMalformed)
+	}
+	for _, e := range r.Extensions {
+		if len(e) == 0 || len(e) > MaxExtensionLen {
+			return fmt.Errorf("%w: extension name size", ErrMalformed)
+		}
 	}
 	for _, p := range r.Principals {
 		if len(p) > MaxPrincipalLen {
@@ -116,6 +138,11 @@ func (r *IssueRequest) addFields(b *cryptobyte.Builder) {
 	b.AddUint32(r.ValidForSeconds)
 	b.AddBytes(r.RequestID[:])
 	b.AddUint64(r.CreatedAt)
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		for _, e := range r.Extensions {
+			addBytes16(b, []byte(e))
+		}
+	})
 }
 
 // Marshal encodes the request body. It refuses a request that violates the
@@ -168,6 +195,7 @@ func ParseIssueRequest(body []byte) (*IssueRequest, error) {
 		subject    []byte
 		principals cryptobyte.String
 		reqID      []byte
+		extensions cryptobyte.String
 		evidence   cryptobyte.String
 	)
 	if !s.ReadUint8(&role) ||
@@ -177,6 +205,7 @@ func ParseIssueRequest(body []byte) (*IssueRequest, error) {
 		!s.ReadUint32(&r.ValidForSeconds) ||
 		!s.ReadBytes(&reqID, len(r.RequestID)) ||
 		!s.ReadUint64(&r.CreatedAt) ||
+		!s.ReadUint16LengthPrefixed(&extensions) ||
 		!s.ReadUint16LengthPrefixed(&evidence) ||
 		!s.Empty() {
 		return nil, ErrMalformed
@@ -194,6 +223,16 @@ func ParseIssueRequest(body []byte) (*IssueRequest, error) {
 			return nil, ErrMalformed
 		}
 		r.Principals = append(r.Principals, string(p))
+	}
+	for !extensions.Empty() {
+		if len(r.Extensions) == MaxExtensions {
+			return nil, fmt.Errorf("%w: too many extensions", ErrMalformed)
+		}
+		var e []byte
+		if !readBytes16(&extensions, &e, MaxExtensionLen) {
+			return nil, ErrMalformed
+		}
+		r.Extensions = append(r.Extensions, string(e))
 	}
 	for !evidence.Empty() {
 		if len(r.Evidence) == MaxEvidence {

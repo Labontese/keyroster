@@ -15,7 +15,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 - [ ] **CA-04**: Every certificate gets a structured key ID identifying user/host, request and policy version
 - [ ] **CA-05**: User certificates default to secure extensions (`permit-pty` only); other extensions are granted only by role
 - [x] **CA-06**: Signer only signs client-generated public keys; the server never generates or sees user private keys
-- [ ] **CA-07**: Signer refuses certificate-type keys as CA keys (no chaining)
+- [x] **CA-07**: Signer refuses certificate-type keys as CA keys (no chaining)
 - [ ] **CA-08**: Certificates are verified as accepted/rejected by real `sshd` on OpenSSH 9.5p2 (Windows inbox) and the latest OpenSSH release in automated tests
 
 ### Key Custody (KEY)
@@ -72,7 +72,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Audit & Visibility (VIS)
 
-- [ ] **VIS-01**: Every issuance, revocation, approval and admin action is written to a Merkle audit log before the certificate/action is released
+- [x] **VIS-01**: Every issuance, revocation, approval and admin action is written to a Merkle audit log before the certificate/action is released
 - [ ] **VIS-02**: Log checkpoints are signed; agents and CLI verify the log only grows (consistency proofs)
 - [ ] **VIS-03**: User/admin can run `sshcm audit verify` to verify the log end to end, and export it
 - [ ] **VIS-04**: Overview shows all certificates, keys, hosts, principals and expiry — who has access to what, now
@@ -171,7 +171,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CA-04 | Phase 1 | Pending |
 | CA-05 | Phase 1 | Pending |
 | CA-06 | Phase 1 | Complete |
-| CA-07 | Phase 1 | Pending |
+| CA-07 | Phase 1 | Complete |
 | CA-08 | Phase 1 | Pending |
 | KEY-01 | Phase 1 | Pending |
 | KEY-02 | Phase 2 | Pending |
@@ -207,7 +207,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REVOKE-04 | Phase 3 | Pending |
 | BREAK-01 | Phase 3 | Pending |
 | BREAK-02 | Phase 5 | Pending |
-| VIS-01 | Phase 1 | Pending |
+| VIS-01 | Phase 1 | Complete |
 | VIS-02 | Phase 4 | Pending |
 | VIS-03 | Phase 1 | Pending |
 | VIS-04 | Phase 5 | Pending |

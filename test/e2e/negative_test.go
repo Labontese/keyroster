@@ -14,32 +14,21 @@ import (
 	"time"
 )
 
-// caEnv is one user CA: its key file, an ssh-agent holding it and a
-// keyroster-signer pinned to it.
+// caEnv is one bootstrapped signer and its user CA: the CA key file (for
+// the ssh-keygen -s oracle), the CA public key file and the running
+// signer.
 type caEnv struct {
-	dir    string // scratch directory for keys and certificates
-	caKey  string // CA private key file (ssh-keygen -s oracle only)
-	caFP   string
-	agent  string // agent socket holding the CA key
-	signer string // signer socket
+	*signerEnv
+	caKey string // user CA private key file (ssh-keygen -s oracle only)
+	caPub string // user CA public key file
 }
 
-// newCAEnv creates a CA key, loads it into a private agent and starts a
-// signer pinned to it.
-func newCAEnv(t *testing.T, name string) *caEnv {
+// newCAEnv bootstraps a signer with generated role keys (ca-init, a
+// root-signed genesis bundle, serve).
+func newCAEnv(t *testing.T) *caEnv {
 	t.Helper()
-	dir := t.TempDir()
-	caKey := filepath.Join(dir, name)
-	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", name, "-f", caKey)
-	env := &caEnv{dir: dir, caKey: caKey, caFP: fingerprint(t, caKey+".pub")}
-	env.agent = startAgent(t)
-	sshAdd(t, env.agent, caKey)
-	env.signer = startSigner(t,
-		"--allow-uid", strconv.Itoa(os.Getuid()),
-		"--backend", "agent",
-		"--backend-opt", "socket="+env.agent,
-		"--user-ca-fp", env.caFP)
-	return env
+	env := bootstrapSigner(t, bootstrapOpts{})
+	return &caEnv{signerEnv: env, caKey: env.RoleKeyFiles["user"], caPub: env.UserCAPub}
 }
 
 // newUserKey creates an Ed25519 user key in its own directory, so every
@@ -59,7 +48,7 @@ func (e *caEnv) issueFor(t *testing.T, key string, principals ...string) string 
 	for _, p := range principals {
 		args = append(args, "--principal", p)
 	}
-	issue(t, e.signer, args...)
+	e.issue(t, args...)
 	return key + "-cert.pub"
 }
 
@@ -100,14 +89,14 @@ func sshExpect(t *testing.T, want int, opts loginOptions) string {
 // signer issues are crafted with ssh-keygen -s as a test oracle only.
 func TestSSHDRejects(t *testing.T) {
 	login := currentUser(t)
-	ca := newCAEnv(t, "user_ca")
+	ca := newCAEnv(t)
 	// OpenSSH 9.8+ penalises a source address after repeated failed
 	// authentications (PerSourcePenalties) and then drops its connections.
 	// 9.5p1 does not know the option, so instead of turning it off, every
 	// authentication refusal gets its own sshd with the default config.
 	newSSHD := func() int {
 		return startSSHD(t, sshdOptions{
-			UserCAPub:  ca.caKey + ".pub",
+			UserCAPub:  ca.caPub,
 			Principals: map[string][]string{login: {login}},
 		})
 	}
@@ -139,7 +128,7 @@ func TestSSHDRejects(t *testing.T) {
 	})
 
 	t.Run("ca_not_trusted", func(t *testing.T) {
-		other := newCAEnv(t, "other_ca")
+		other := newCAEnv(t)
 		k := newUserKey(t, "id_other_ca")
 		c := other.issueFor(t, k, login)
 		sshExpectDenied(t, optsAt(newSSHD(), k, c, "true"))
@@ -283,7 +272,7 @@ func runKeyroster(t *testing.T, args ...string) (int, string) {
 // request.
 func TestSignerRefuses(t *testing.T) {
 	login := currentUser(t)
-	ca := newCAEnv(t, "user_ca")
+	ca := newCAEnv(t)
 
 	key := newUserKey(t, "id_ed25519")
 	rsaKey := filepath.Join(t.TempDir(), "id_rsa2048")
@@ -310,9 +299,8 @@ func TestSignerRefuses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "refused-cert.pub")
 			defaultOut := strings.TrimSuffix(tc.pubkey, ".pub") + "-cert.pub"
-			args := append([]string{"ca", "issue", "--socket", ca.signer,
-				"--pubkey", tc.pubkey, "--subject", "u:e2e", "--ttl", "10m", "--out", out}, tc.args...)
-			code, output := runKeyroster(t, args...)
+			args := append([]string{"--pubkey", tc.pubkey, "--subject", "u:e2e", "--ttl", "10m", "--out", out}, tc.args...)
+			code, output := ca.runIssue(t, args...)
 			if code != tc.wantCode || !strings.Contains(output, tc.want) {
 				t.Fatalf("keyroster ca issue exited %d, want %d with %q:\n%s", code, tc.wantCode, tc.want, output)
 			}
@@ -330,40 +318,107 @@ func TestSignerRefuses(t *testing.T) {
 		})
 	}
 
-	// serve refuses to start when the pinned user CA fingerprint names a
-	// certificate held in the agent: certificate entries are never CA keys.
-	t.Run("serve_pinned_certificate_in_agent", func(t *testing.T) {
+	// ca-init refuses a certificate held in the agent as a CA key (CA-07):
+	// certificate entries are never CA keys, and nothing is initialised.
+	t.Run("ca_init_certificate_as_user_ca", func(t *testing.T) {
+		agent := startAgent(t)
+		roleKeys, _ := newRoleKeys(t, agent, t.TempDir())
 		certified := newUserKey(t, "id_agent_cert")
 		agentCert := ca.oracleCert(t, certified, login)
-		agent := startAgent(t)
 		sshAdd(t, agent, certified) // loads the key and its -cert.pub
-		certFP := fingerprint(t, agentCert)
+		roleKeys["user"] = fingerprint(t, agentCert)
 
-		base := shortTempDir(t)
-		state := filepath.Join(base, "state")
+		state := filepath.Join(shortTempDir(t), "state")
 		if err := os.Mkdir(state, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		sock := filepath.Join(base, "signer.sock")
-		_, logFP := addLogKey(t, agent, base) // a valid log key, so only the CA pin can fail
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, signerBin, "serve",
-			"--state-dir", state, "--socket", sock,
-			"--allow-uid", strconv.Itoa(os.Getuid()),
-			"--backend", "agent", "--backend-opt", "socket="+agent,
-			"--user-ca-fp", certFP, "--log-key-fp", logFP)
-		cmd.Env = envWithout("SSH_AUTH_SOCK")
-		output, err := cmd.CombinedOutput()
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) || ctx.Err() != nil {
-			t.Fatalf("serve with a certificate pinned as CA: err %v (ctx %v), want a non-zero exit:\n%s", err, ctx.Err(), output)
+		args := []string{"ca-init", "--state-dir", state, "--backend", "agent", "--backend-opt", "socket=" + agent}
+		for _, role := range roleNames {
+			args = append(args, "--key", role+"="+roleKeys[role])
 		}
-		if !strings.Contains(string(output), "pinned CA key not present") {
-			t.Fatalf("serve exited %d, want the \"pinned CA key not present\" refusal:\n%s", ee.ExitCode(), output)
+		code, output := runBin(t, signerBin, "", args...)
+		if code == 0 || !strings.Contains(output, "pinned CA key not present") {
+			t.Fatalf("ca-init with a certificate as the user CA exited %d, want the \"pinned CA key not present\" refusal:\n%s", code, output)
 		}
-		if isSocket(sock) {
-			t.Errorf("serve created %s although it refused to start", sock)
+		if _, err := os.Stat(filepath.Join(state, "ca-pubkeys.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("ca-init wrote ca-pubkeys.json although it refused (stat: %v)", err)
+		}
+		// Nothing was initialised: a correct ca-init on the same state works.
+		roleKeys["user"] = fingerprint(t, certified+".pub")
+		args = args[:len(args)-2*len(roleNames)]
+		for _, role := range roleNames {
+			args = append(args, "--key", role+"="+roleKeys[role])
+		}
+		if code, output := runBin(t, signerBin, "", args...); code != 0 {
+			t.Fatalf("ca-init with the plain key after the refusal exited %d:\n%s", code, output)
+		}
+	})
+}
+
+// TestTrustRefuses (KEY-07, D-13) checks the trust boundary at the
+// binaries: install-bundle refuses a genesis bundle whose root is not
+// pinned and leaves the signer unable to start, and ca issue is refused
+// without an admin key (by the CLI) and with a key the policy does not
+// list (by the signer), writing no certificate either way.
+func TestTrustRefuses(t *testing.T) {
+	login := currentUser(t)
+
+	t.Run("install_bundle_unpinned_root", func(t *testing.T) {
+		env := initSigner(t, bootstrapOpts{})
+		env.signGenesis(t, bootstrapOpts{})
+		other := newUserKey(t, "not_the_root")
+		args := env.installArgs()
+		for i, a := range args {
+			if a == "--pin" {
+				args[i+1] = fingerprint(t, other+".pub")
+			}
+		}
+		code, out := env.signerCmd(t, args...)
+		if code == 0 || !strings.Contains(out, "pinned root fingerprints do not match") {
+			t.Fatalf("install-bundle with an unpinned root exited %d, want the pin refusal:\n%s", code, out)
+		}
+		code, out = env.signerCmd(t, "serve", "--state-dir", env.StateDir, "--socket", env.Socket, "--allow-uid", strconv.Itoa(os.Getuid()))
+		if code == 0 || !strings.Contains(out, "no trust bundle installed") {
+			t.Fatalf("serve after the refused install exited %d, want \"no trust bundle installed\":\n%s", code, out)
+		}
+		// The correctly pinned install then succeeds.
+		if code, out := env.signerCmd(t, env.installArgs()...); code != 0 {
+			t.Fatalf("install-bundle with the right pin exited %d:\n%s", code, out)
+		}
+	})
+
+	env := bootstrapSigner(t, bootstrapOpts{})
+	key := newUserKey(t, "id_unauthorized")
+	certFile := key + "-cert.pub"
+	noCert := func(t *testing.T) {
+		t.Helper()
+		if _, err := os.Stat(certFile); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("certificate %s exists after a refusal (stat: %v)", certFile, err)
+		}
+	}
+	t.Run("ca_issue_without_admin_key", func(t *testing.T) {
+		code, out := keyrosterWithAgent(t, env.AdminAgent, "ca", "issue", "--socket", env.Socket,
+			"--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+		if code != 2 || !strings.Contains(out, "--admin-key") {
+			t.Fatalf("ca issue without --admin-key exited %d, want 2 naming --admin-key:\n%s", code, out)
+		}
+		noCert(t)
+	})
+	t.Run("ca_issue_with_non_admin_key", func(t *testing.T) {
+		outsider := newUserKey(t, "outsider")
+		sshAdd(t, env.AdminAgent, outsider)
+		code, out := keyrosterWithAgent(t, env.AdminAgent, "ca", "issue", "--socket", env.Socket,
+			"--admin-key", fingerprint(t, outsider+".pub"),
+			"--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+		if code != 1 || !strings.Contains(out, "evidence_not_admin") {
+			t.Fatalf("ca issue signed by a non-admin exited %d, want 1 with evidence_not_admin:\n%s", code, out)
+		}
+		noCert(t)
+	})
+	t.Run("control_admin_key", func(t *testing.T) {
+		env.issue(t, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+		if _, err := os.Stat(certFile); err != nil {
+			t.Fatalf("admin-authorized request: %v", err)
 		}
 	})
 }
