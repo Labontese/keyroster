@@ -1,16 +1,22 @@
 package tlog
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"golang.org/x/crypto/cryptobyte"
+	"golang.org/x/crypto/cryptobyte/asn1"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/mod/sumdb/note"
 )
@@ -46,6 +52,12 @@ func NewNoteSigner(name string, s ssh.Signer) (note.Signer, error) {
 // Ed25519 (type 0x01): key ID = first 4 bytes, big-endian, of
 // SHA-256(name || 0x0A || 0x01 || 32-byte public key); the signature is the
 // raw 64-byte Ed25519 signature over the note text.
+//
+// ECDSA P-256 (type 0x02, as github.com/transparency-dev/witness defines it
+// and C2SP signed-note references): key ID = first 4 bytes, big-endian, of
+// SHA-256 of the DER-encoded SubjectPublicKeyInfo (the key name is not
+// hashed); the signature is an ASN.1 DER ECDSA-Sig-Value over SHA-256 of
+// the note text.
 func NewNoteVerifier(name string, pub ssh.PublicKey) (note.Verifier, error) {
 	if !validName(name) {
 		return nil, fmt.Errorf("tlog: invalid note key name %q", name)
@@ -80,9 +92,51 @@ func NewNoteVerifier(name string, pub ssh.PublicKey) (note.Verifier, error) {
 				return len(sig) == ed25519.SignatureSize && ed25519.Verify(edPub, msg, sig)
 			},
 		}, nil
+	case ssh.KeyAlgoECDSA256:
+		ecPub, ok := cpk.CryptoPublicKey().(*ecdsa.PublicKey)
+		if !ok || ecPub.Curve != elliptic.P256() {
+			return nil, fmt.Errorf("%w: malformed P-256 key", ErrUnsupportedKey)
+		}
+		der, err := x509.MarshalPKIXPublicKey(ecPub)
+		if err != nil {
+			return nil, fmt.Errorf("tlog: log key: %w", err)
+		}
+		sum := sha256.Sum256(der)
+		return &noteVerifier{
+			name:    name,
+			hash:    binary.BigEndian.Uint32(sum[:4]),
+			sshType: ssh.KeyAlgoECDSA256,
+			verify: func(msg, sig []byte) bool {
+				digest := sha256.Sum256(msg)
+				return ecdsa.VerifyASN1(ecPub, digest[:], sig)
+			},
+			fromSSH: ecdsaBlobToDER,
+		}, nil
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedKey, parsed.Type())
 	}
+}
+
+// ecdsaBlobToDER converts an SSH ECDSA signature blob (mpint r, mpint s,
+// RFC 5656 section 3.1.2) to the ASN.1 DER ECDSA-Sig-Value that C2SP type
+// 0x02 signatures carry.
+func ecdsaBlobToDER(blob []byte) ([]byte, error) {
+	var sig struct {
+		R *big.Int
+		S *big.Int
+	}
+	if err := ssh.Unmarshal(blob, &sig); err != nil {
+		return nil, fmt.Errorf("tlog: ECDSA signature blob: %w", err)
+	}
+	if sig.R == nil || sig.S == nil || sig.R.Sign() <= 0 || sig.S.Sign() <= 0 {
+		return nil, errors.New("tlog: ECDSA signature with a non-positive r or s")
+	}
+	var b cryptobyte.Builder
+	b.AddASN1(asn1.SEQUENCE, func(b *cryptobyte.Builder) {
+		b.AddASN1BigInt(sig.R)
+		b.AddASN1BigInt(sig.S)
+	})
+	return b.Bytes()
 }
 
 type noteVerifier struct {

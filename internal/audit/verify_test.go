@@ -381,7 +381,7 @@ func TestVerifyChecksCertificates(t *testing.T) {
 			c = forgeCert(t, c, f.ca, caCert)
 			f.add(tlog.KindIssue, issueBody(t, c, f.serial))
 		}, "certificate"},
-		{"leaf_time_decreases", func(t *testing.T, f *fixture) {
+		{"leaf_time_decreases", func(_ *testing.T, f *fixture) {
 			f.addIssue()
 			f.micros -= 10
 			f.addRefusal()

@@ -310,7 +310,7 @@ func TestLogTables(t *testing.T) {
 		t.Fatalf("LatestCheckpoint = %q, %d, %v", note, size, err)
 	}
 	var seen []string
-	if err := d.ForEachLeaf(ctx, func(idx uint64, leaf []byte) error { seen = append(seen, string(leaf)); return nil }); err != nil || len(seen) != 3 {
+	if err := d.ForEachLeaf(ctx, func(_ uint64, leaf []byte) error { seen = append(seen, string(leaf)); return nil }); err != nil || len(seen) != 3 {
 		t.Fatalf("ForEachLeaf = %q, %v", seen, err)
 	}
 	if err := d.Close(); err != nil {
@@ -323,7 +323,7 @@ func TestLogTables(t *testing.T) {
 	}
 	defer func() { _ = ro.Close() }()
 	seen = nil
-	note, size, err = ro.ReadLog(ctx, func(idx uint64, leaf []byte) error { seen = append(seen, string(leaf)); return nil })
+	note, size, err = ro.ReadLog(ctx, func(_ uint64, leaf []byte) error { seen = append(seen, string(leaf)); return nil })
 	if err != nil || size != 2 || string(note) != "cp2" || strings.Join(seen, ",") != "leaf0,leaf1" {
 		t.Fatalf("ReadLog = %q, %d, %q, %v; want the two checkpointed leaves", note, size, seen, err)
 	}

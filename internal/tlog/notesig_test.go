@@ -99,7 +99,7 @@ func TestEd25519InteropWithSumdbNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := base64.StdEncoding.DecodeString(vk[strings.LastIndex(vk, "+")+1:])
+	raw, err := base64.StdEncoding.DecodeString(strings.SplitN(vk, "+", 3)[2]) // the base64 may contain "+"
 	if err != nil || raw[0] != SigTypeEd25519 {
 		t.Fatalf("vkey %q", vk)
 	}

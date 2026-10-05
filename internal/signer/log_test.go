@@ -167,7 +167,9 @@ func (e *logEnv) verifyExport() *audit.Report {
 // failingSigner is a checkpoint signer whose Sign always fails.
 type failingSigner struct{ note.Signer }
 
-func (failingSigner) Sign([]byte) ([]byte, error) { return nil, errors.New("injected checkpoint signing failure") }
+func (failingSigner) Sign([]byte) ([]byte, error) {
+	return nil, errors.New("injected checkpoint signing failure")
+}
 
 // TestCheckpointFailureReleasesNoCertificate: when the checkpoint cannot be
 // signed inside the issuance transaction, no certificate is returned, no

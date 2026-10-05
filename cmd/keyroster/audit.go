@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -23,7 +24,7 @@ func init() {
 
 func runAudit(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: keyroster audit verify --log-key FILE.pub [--json] EXPORT.jsonl")
+		_, _ = fmt.Fprintln(stderr, "usage: keyroster audit verify --log-key FILE.pub [--previous FILE] [--json] EXPORT.jsonl")
 		return errUsage
 	}
 	switch args[0] {
@@ -49,6 +50,7 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	logKeyPath := fs.String("log-key", "", "pinned log public key, OpenSSH .pub file (required; never taken from the export)")
+	previousPath := fs.String("previous", "", "an earlier signed checkpoint, or an earlier export, that this log must extend")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
@@ -61,13 +63,19 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
+	opts := audit.Options{LogKey: logKey}
+	if *previousPath != "" {
+		if opts.Previous, err = readPrevious(*previousPath); err != nil {
+			return err
+		}
+	}
 	f, err := os.Open(fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
 
-	rep, err := audit.Verify(f, audit.Options{LogKey: logKey})
+	rep, err := audit.Verify(f, opts)
 	if err != nil {
 		return err
 	}
@@ -88,4 +96,25 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	}
 	_, err = fmt.Fprintf(stdout, "OK: %d entries, root %s, issued %d, refusals %d\n", res.Entries, res.Root, res.Issued, res.Refusals)
 	return err
+}
+
+// readPrevious returns the signed checkpoint in path: either a checkpoint
+// note as written by keyroster, or an earlier export, whose final
+// checkpoint line is used. The note is verified later, against the pinned
+// log key.
+func readPrevious(path string) ([]byte, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the file
+	if err != nil {
+		return nil, err
+	}
+	trimmed := bytes.TrimSpace(data)
+	if !bytes.HasPrefix(trimmed, []byte("{")) {
+		return data, nil
+	}
+	last := trimmed[bytes.LastIndexByte(trimmed, '\n')+1:]
+	var line audit.ExportLine
+	if err := json.Unmarshal(last, &line); err != nil || line.Checkpoint == "" {
+		return nil, fmt.Errorf("--previous %s: the last line of the export is not a checkpoint line", path)
+	}
+	return []byte(line.Checkpoint), nil
 }

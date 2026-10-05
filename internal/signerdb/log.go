@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strings"
 )
 
 // ErrNoCheckpoint means the log has no checkpoint yet (no leaf was ever
@@ -187,7 +188,11 @@ func OpenReadOnly(path string) (*DB, error) {
 	}
 	// A file: URI (path escaped by url.URL) so that SQLite applies
 	// mode=ro; the driver strips the parameters of a plain file name.
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
+	p := filepath.ToSlash(abs)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p // a Windows drive path: file:///C:/...
+	}
+	u := url.URL{Scheme: "file", Path: p}
 	sqlDB, err := sql.Open("sqlite", u.String()+"?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)")
 	if err != nil {
 		return nil, fmt.Errorf("signerdb: %w", err)
