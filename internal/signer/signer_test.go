@@ -97,6 +97,8 @@ type signerOpts struct {
 	allowSet  bool
 	allowUIDs []uint32
 	allowGIDs []uint32
+	// clock replaces time.Now as the signer clock.
+	clock func() time.Time
 }
 
 // testSigner is a running signer on a real Unix socket, backed by an
@@ -225,12 +227,16 @@ func (ts *testSigner) start() {
 	if ts.opts.allowSet {
 		allowUIDs, allowGIDs = ts.opts.allowUIDs, ts.opts.allowGIDs
 	}
+	clock := time.Now
+	if ts.opts.clock != nil {
+		clock = ts.opts.clock
+	}
 	s, err := signer.New(signer.Config{
 		Backend:           backend,
 		UserCAFingerprint: ts.caFP,
 		LogKeyFingerprint: ts.logFP,
 		DB:                db,
-		Clock:             time.Now,
+		Clock:             clock,
 		AllowUIDs:         allowUIDs,
 		AllowGIDs:         allowGIDs,
 		Logger:            slog.New(&captureHandler{sink: ts.logs}),

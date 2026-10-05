@@ -185,3 +185,46 @@ func TestAuditDetectsTampering(t *testing.T) {
 		t.Fatalf("verify after editing only decoded exited %d:\n%s", code, out)
 	}
 }
+
+// TestRefusalsAreAudited (D-14): refused requests reach the Merkle log, so
+// three refused keyroster ca issue calls are three refusal entries in the
+// exported, verified log; and serve documents the refusal rate flags.
+func TestRefusalsAreAudited(t *testing.T) {
+	login := currentUser(t)
+	env := newAuditEnv(t)
+	key := newUserKey(t, "id_refused")
+	for _, principal := range []string{"*", "Alice", "a,b"} {
+		code, out := runKeyroster(t, "ca", "issue", "--socket", env.signer.Socket,
+			"--pubkey", key+".pub", "--principal", principal, "--subject", "u:"+login, "--ttl", "10m")
+		if code != 1 || !strings.Contains(out, "bad_principal") {
+			t.Fatalf("ca issue --principal %q exited %d, want 1 with bad_principal:\n%s", principal, code, out)
+		}
+	}
+	issue(t, env.signer.Socket, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+
+	export := env.exportLog(t)
+	code, out := auditVerify(t, env.signer.LogPub, export, "--json")
+	if code != 0 {
+		t.Fatalf("audit verify exited %d:\n%s", code, out)
+	}
+	var res struct {
+		Entries uint64            `json:"entries"`
+		Issued  int               `json:"issued"`
+		Kinds   map[string]uint64 `json:"kinds"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("audit verify --json: %v\n%s", err, out)
+	}
+	if res.Entries != 4 || res.Issued != 1 || res.Kinds["refusal"] != 3 {
+		t.Fatalf("audit verify = %+v, want 4 entries: 3 refusals and 1 issuance", res)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	help, _ := exec.CommandContext(ctx, signerBin, "serve", "--help").CombinedOutput()
+	for _, flag := range []string{"-refusal-log-per-minute", "-refusal-log-burst"} {
+		if !strings.Contains(string(help), flag) {
+			t.Errorf("serve --help does not list %s:\n%s", flag, help)
+		}
+	}
+}
