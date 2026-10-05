@@ -1,6 +1,7 @@
 # keyroster
 
 [![CI](https://github.com/Labontese/keyroster/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Labontese/keyroster/actions/workflows/ci.yml)
+[![E2E](https://github.com/Labontese/keyroster/actions/workflows/e2e.yml/badge.svg?branch=main)](https://github.com/Labontese/keyroster/actions/workflows/e2e.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/Labontese/keyroster/badge)](https://scorecard.dev/viewer/?uri=github.com/Labontese/keyroster)
 
 keyroster is a self-hosted SSH certificate authority and access roster for teams. It issues, tracks, renews and revokes OpenSSH certificates, finds the plain SSH keys that still grant access outside the CA, and keeps a tamper-evident audit log, so that at any moment you know exactly who has access to what and can revoke it immediately. It works with stock OpenSSH and is fully open source, with no security features held back for an enterprise tier.
