@@ -146,7 +146,7 @@ func run(t *testing.T, args ...string) (int, string, string) {
 
 func writeTestFile(t *testing.T, path string, data []byte) {
 	t.Helper()
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // G703: a path inside the test's TempDir
 		t.Fatal(err)
 	}
 }

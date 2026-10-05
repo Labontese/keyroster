@@ -143,7 +143,7 @@ func TestBundleValidation(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 			for _, other := range sentinels {
-				if other != tc.want && errors.Is(err, other) {
+				if !errors.Is(other, tc.want) && errors.Is(err, other) {
 					t.Fatalf("err = %v also matches %v; each refusal needs its own error", err, other)
 				}
 			}
