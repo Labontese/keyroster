@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -197,6 +198,9 @@ func TestRootSignTrustVerifyRoundTrip(t *testing.T) {
 	code, stdout, stderr := c.sign(t, "1", 0)
 	if code != 0 {
 		t.Fatalf("root sign exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "SOFTWARE ROOT:") {
+		t.Fatalf("an --agent-key root labelled custody=software signed without the SOFTWARE ROOT banner:\n%s", stderr)
 	}
 	for _, want := range []string{"Bundle SHA-256: " + hash, "SOFTWARE ROOT", c.fingerprint(t, 0)} {
 		if !strings.Contains(stdout, want) {
@@ -426,7 +430,9 @@ func (c *ceremony) writeRoots(t *testing.T, roots ...softwareRoot) {
 
 // TestSoftwareRoot runs the homelab ceremony end to end (D-10): two
 // age-encrypted software roots from keyroster root init, root sign --key
-// with root A at threshold 1, and trust verify pinning both roots.
+// with root A at threshold 1, and trust verify pinning both roots. The
+// subtests reuse the two roots (each scrypt run costs about a second, many
+// more under the race detector) for the refusals and the 1-of-2 flow.
 func TestSoftwareRoot(t *testing.T) {
 	c := newCeremonyInputs(t)
 	a := initSoftwareRoot(t, c.dir, "root-a", "correct horse battery staple A")
@@ -452,4 +458,204 @@ func TestSoftwareRoot(t *testing.T) {
 	if !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") || !strings.Contains(stdout, "signed by root "+a.fingerprint) {
 		t.Fatalf("trust verify output:\n%s", stdout)
 	}
+
+	sigsOf := func(t *testing.T, dir string) [2][]byte {
+		t.Helper()
+		var out [2][]byte
+		for i, f := range []string{"bundle.json.sigs", "policy.json.sigs"} {
+			data, err := os.ReadFile(filepath.Join(dir, f)) //nolint:gosec // G304: test file
+			if err != nil {
+				t.Fatal(err)
+			}
+			out[i] = data
+		}
+		return out
+	}
+
+	t.Run("wrong_passphrase", func(t *testing.T) {
+		before := sigsOf(t, c.out)
+		wrong := b
+		wrong.passphrase = b.passphrase + "!"
+		code, _, stderr := c.signWithKey(t, "1", wrong)
+		if code != 1 || !strings.Contains(stderr, "nothing was signed") {
+			t.Fatalf("wrong passphrase: exit %d, stderr %q", code, stderr)
+		}
+		if after := sigsOf(t, c.out); !bytes.Equal(after[0], before[0]) || !bytes.Equal(after[1], before[1]) {
+			t.Fatal("a signature file changed after a wrong passphrase")
+		}
+	})
+
+	t.Run("short_passphrase", func(t *testing.T) {
+		path := filepath.Join(c.dir, "short.age")
+		code, _, stderr := run(t, "root", "init", "--out", path, "--passphrase-fd", passphraseFD(t, strings.Repeat("x", 19)))
+		if code != 1 || !strings.Contains(stderr, "at least 20") {
+			t.Fatalf("19-character passphrase: exit %d, stderr %q", code, stderr)
+		}
+		for _, p := range []string{path, path + ".pub"} {
+			if _, err := os.Lstat(p); !os.IsNotExist(err) {
+				t.Fatalf("%s exists after a refused init (stat error %v)", p, err)
+			}
+		}
+	})
+
+	t.Run("existing_output", func(t *testing.T) {
+		before, err := os.ReadFile(a.path) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, _, stderr := run(t, "root", "init", "--out", a.path, "--passphrase-fd", passphraseFD(t, "a different passphrase entirely"))
+		if code != 1 || !strings.Contains(stderr, "already exists") {
+			t.Fatalf("init over an existing key: exit %d, stderr %q", code, stderr)
+		}
+		if after, err := os.ReadFile(a.path); err != nil || !bytes.Equal(after, before) { //nolint:gosec // G304: test file
+			t.Fatalf("the existing key file changed (%v)", err)
+		}
+		// A leftover .pub alone also blocks init: the new key would get a
+		// public key file that is not its own.
+		orphan := filepath.Join(c.dir, "orphan.age")
+		writeTestFile(t, orphan+".pub", []byte("left over\n"))
+		if code, _, stderr := run(t, "root", "init", "--out", orphan, "--passphrase-fd", passphraseFD(t, "a different passphrase entirely")); code != 1 || !strings.Contains(stderr, "already exists") {
+			t.Fatalf("init next to an existing .pub: exit %d, stderr %q", code, stderr)
+		}
+		if _, err := os.Lstat(orphan); !os.IsNotExist(err) {
+			t.Fatalf("%s was created (stat error %v)", orphan, err)
+		}
+	})
+
+	t.Run("custody_mismatch", func(t *testing.T) {
+		// roots.pub claims hardware custody for root A, whose key is in
+		// fact the software file: --key refuses to sign under that label.
+		for _, custody := range []string{"piv", "fido"} {
+			m := newCeremonyInputs(t)
+			apub, err := os.ReadFile(a.pub) //nolint:gosec // G304: test file
+			if err != nil {
+				t.Fatal(err)
+			}
+			bpub, err := os.ReadFile(b.pub) //nolint:gosec // G304: test file
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, m.roots, append([]byte(strings.Replace(string(apub), "custody=software", "custody="+custody, 1)), bpub...))
+			code, _, stderr := m.signWithKey(t, "1", a)
+			if code != 1 || !strings.Contains(stderr, "custody") {
+				t.Fatalf("--key for a root declared custody=%s: exit %d, stderr %q", custody, code, stderr)
+			}
+			if custody != "fido" && !strings.Contains(stderr, "false custody label") {
+				t.Fatalf("custody=%s refused for the wrong reason: %q", custody, stderr)
+			}
+			if _, err := os.Stat(filepath.Join(m.out, "bundle.json.sigs")); !os.IsNotExist(err) {
+				t.Fatalf("custody=%s: a signature file exists (stat error %v)", custody, err)
+			}
+		}
+	})
+
+	t.Run("key_and_agent_key", func(t *testing.T) {
+		base := []string{"root", "sign", "--ca-pubkeys", c.caPubkeys, "--policy", c.policy, "--roots", c.roots, "--threshold", "1", "--out-dir", c.out}
+		for name, extra := range map[string][]string{
+			"both":         {"--key", a.path, "--agent-key", a.fingerprint},
+			"neither":      {},
+			"fd_for_agent": {"--agent-key", a.fingerprint, "--passphrase-fd", "0"},
+		} {
+			before := sigsOf(t, c.out)
+			code, _, stderr := run(t, append(append([]string{}, base...), extra...)...)
+			if code != 2 {
+				t.Fatalf("%s: exit %d, want a usage error (stderr %q)", name, code, stderr)
+			}
+			if after := sigsOf(t, c.out); !bytes.Equal(after[0], before[0]) || !bytes.Equal(after[1], before[1]) {
+				t.Fatalf("%s: a signature file changed", name)
+			}
+		}
+		if code, _, _ := run(t, "root", "init", "--out", filepath.Join(c.dir, "x.age"), "--passphrase", "a passphrase on the command line"); code != 2 {
+			t.Fatalf("root init accepted a --passphrase flag: exit %d", code)
+		}
+	})
+
+	t.Run("two_roots_both_sign", func(t *testing.T) {
+		// The ceremony signs with root B too, proving its medium and
+		// passphrase now rather than in an emergency (D-10).
+		if code, _, stderr := c.signWithKey(t, "1", b); code != 0 {
+			t.Fatalf("root sign --key B: exit %d: %s", code, stderr)
+		}
+		code, stdout, stderr := c.verify(t, "1", a.fingerprint, b.fingerprint)
+		if code != 0 || !strings.Contains(stdout, "OK: signed by 2 of 2 pinned roots (threshold 1)") {
+			t.Fatalf("verify after both roots signed: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+		if code, _, stderr := c.signWithKey(t, "1", a); code != 1 || !strings.Contains(stderr, "already holds a signature") {
+			t.Fatalf("second signature by root A: exit %d, stderr %q", code, stderr)
+		}
+	})
+
+	t.Run("one_of_two_root_b_only", func(t *testing.T) {
+		onlyB := *c
+		onlyB.out = filepath.Join(c.dir, "out-b")
+		if code, _, stderr := onlyB.signWithKey(t, "1", b); code != 0 {
+			t.Fatalf("root sign --key B: exit %d: %s", code, stderr)
+		}
+		code, stdout, stderr := onlyB.verify(t, "1", a.fingerprint, b.fingerprint)
+		if code != 0 || !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") || !strings.Contains(stdout, "signed by root "+b.fingerprint) {
+			t.Fatalf("a bundle signed by root B alone: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+	})
+
+	t.Run("unrelated_root_ignored", func(t *testing.T) {
+		_, thirdPriv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		third, err := ssh.NewSignerFromKey(thirdPriv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		thirdSign := func(t *testing.T, dir string) {
+			t.Helper()
+			for _, doc := range []struct{ file, ns string }{{"bundle.json", trust.NamespaceBundle}, {"policy.json", trust.NamespacePolicy}} {
+				msg, err := os.ReadFile(filepath.Join(dir, doc.file)) //nolint:gosec // G304: test file
+				if err != nil {
+					t.Fatal(err)
+				}
+				sig, err := sshsig.Sign(rand.Reader, third, doc.ns, msg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := appendFile(filepath.Join(dir, doc.file+".sigs"), sig); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		thirdFP := ssh.FingerprintSHA256(third.PublicKey())
+
+		// Next to root B's signature, the third key's is reported and ignored.
+		dirB := filepath.Join(c.dir, "out-b")
+		thirdSign(t, dirB)
+		code, stdout, stderr := c.verifyIn(t, dirB, "1", a.fingerprint, b.fingerprint)
+		if code != 0 || !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") ||
+			!strings.Contains(stdout, "ignored: bundle signature by non-pinned key "+thirdFP) {
+			t.Fatalf("verify with an extra unrelated signature: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+
+		// On its own, the third key's signature counts for nothing.
+		dirC := filepath.Join(c.dir, "out-third")
+		if err := os.MkdirAll(dirC, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{"bundle.json", "policy.json"} {
+			data, err := os.ReadFile(filepath.Join(dirB, f)) //nolint:gosec // G304: test file
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(dirC, f), data)
+		}
+		thirdSign(t, dirC)
+		if code, _, stderr := c.verifyIn(t, dirC, "1", a.fingerprint, b.fingerprint); code != 1 || !strings.Contains(stderr, "threshold not met") {
+			t.Fatalf("verify with only an unrelated signature: exit %d, stderr %q", code, stderr)
+		}
+	})
+}
+
+// verifyIn runs trust verify on the bundle and policy in dir.
+func (c *ceremony) verifyIn(t *testing.T, dir, threshold string, pins ...string) (int, string, string) {
+	t.Helper()
+	other := *c
+	other.out = dir
+	return other.verify(t, threshold, pins...)
 }
