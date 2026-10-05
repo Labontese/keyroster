@@ -11,7 +11,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 - [ ] **CA-01**: Admin can initialise separate user, host and machine CAs, each with its own key
 - [x] **CA-02**: Signer refuses to sign a certificate with empty principals or principals containing wildcards, commas, whitespace or control characters
-- [ ] **CA-03**: Every certificate gets a unique, non-zero, monotonically increasing serial that is never reused, including after restore from backup
+- [x] **CA-03**: Every certificate gets a unique, non-zero, monotonically increasing serial that is never reused, including after restore from backup
 - [ ] **CA-04**: Every certificate gets a structured key ID identifying user/host, request and policy version
 - [ ] **CA-05**: User certificates default to secure extensions (`permit-pty` only); other extensions are granted only by role
 - [x] **CA-06**: Signer only signs client-generated public keys; the server never generates or sees user private keys
@@ -167,7 +167,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | CA-01 | Phase 1 | Pending |
 | CA-02 | Phase 1 | Complete |
-| CA-03 | Phase 1 | Pending |
+| CA-03 | Phase 1 | Complete |
 | CA-04 | Phase 1 | Pending |
 | CA-05 | Phase 1 | Pending |
 | CA-06 | Phase 1 | Complete |
