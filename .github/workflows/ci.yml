@@ -40,7 +40,12 @@ jobs:
         run: go vet ./...
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
+      # ssh-keygen (preinstalled on the runner) is the SSHSIG oracle; with
+      # KEYROSTER_REQUIRE_ORACLE=1 a missing ssh-keygen fails the oracle
+      # tests instead of skipping them.
       - name: Test (race detector)
+        env:
+          KEYROSTER_REQUIRE_ORACLE: "1"
         run: CGO_ENABLED=1 go test -race -count=1 ./...
 
   lint:

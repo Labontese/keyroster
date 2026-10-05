@@ -10,8 +10,13 @@
 # plan 01-15 checks manually on Windows.
 #
 # PREFIX defaults to $HOME/.cache/keyroster/openssh-VERSION. A stamp file
-# ($PREFIX/.keyroster-build) records version and SHA-256; when it matches,
-# the cached build is reused.
+# ($PREFIX/.keyroster-build) records version, SHA-256 and the build layout;
+# when it matches, the cached build is reused.
+#
+# Besides the install, the build puts OpenSSH's test-only FIDO security-key
+# provider regress/misc/sk-dummy/sk-dummy.so into $PREFIX/libexec/. It is a
+# software stand-in for a FIDO token (no touch, no PIN) that the e2e suite
+# uses as a hardware-root stand-in (D-11). It is never part of a release.
 set -euo pipefail
 
 BASE_URL=https://cdn.openbsd.org/pub/OpenBSD/OpenSSH
@@ -41,14 +46,16 @@ if ! SHA256=$(pinned_sha256 "$VERSION"); then
 fi
 PREFIX=${2:-$HOME/.cache/keyroster/openssh-$VERSION}
 STAMP="$PREFIX/.keyroster-build"
-STAMP_LINE="$VERSION $SHA256"
+# The "+sk-dummy" layout tag makes prefixes cached before sk-dummy.so was
+# installed rebuild.
+STAMP_LINE="$VERSION $SHA256 +sk-dummy"
 
 [ "$(id -u)" -ne 0 ] || die "refusing to build as root"
 for tool in curl gpg sha256sum make cc; do
 	command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool"
 done
 
-if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$STAMP_LINE" ] && [ -x "$PREFIX/sbin/sshd" ]; then
+if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$STAMP_LINE" ] && [ -x "$PREFIX/sbin/sshd" ] && [ -f "$PREFIX/libexec/sk-dummy.so" ]; then
 	echo "build-openssh: using cached OpenSSH $VERSION in $PREFIX"
 	exit 0
 fi
@@ -95,6 +102,12 @@ make -j"$(nproc 2>/dev/null || echo 2)" >"$WORK/make.log" 2>&1 ||
 make install-nokeys >"$WORK/install.log" 2>&1 ||
 	{ tail -n 40 "$WORK/install.log" >&2; die "make install-nokeys failed"; }
 [ -x "$PREFIX/sbin/sshd" ] || die "sshd missing after install"
+
+# 4. The test-only FIDO provider (same verified source tree, Makefile.in
+#    target regress/misc/sk-dummy/sk-dummy.so, built -fPIC).
+make regress/misc/sk-dummy/sk-dummy.so >"$WORK/sk-dummy.log" 2>&1 ||
+	{ tail -n 40 "$WORK/sk-dummy.log" >&2; die "building sk-dummy.so failed"; }
+install -m 0755 regress/misc/sk-dummy/sk-dummy.so "$PREFIX/libexec/sk-dummy.so"
 echo "$STAMP_LINE" >"$STAMP"
 "$PREFIX/bin/ssh" -V
 echo "build-openssh: installed OpenSSH $VERSION in $PREFIX"
