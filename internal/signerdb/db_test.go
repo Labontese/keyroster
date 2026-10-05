@@ -345,3 +345,21 @@ func TestOpenReadOnlyRefuses(t *testing.T) {
 		t.Fatalf("OpenReadOnly created %s", missing)
 	}
 }
+
+// TestDurabilityPragmas pins assumption A7: the signer database runs in WAL
+// mode with synchronous=FULL, which SQLite documents as durable (ACID) in
+// WAL mode, so a committed issuance and its log leaf survive power loss.
+func TestDurabilityPragmas(t *testing.T) {
+	d, _ := openTemp(t)
+	var mode string
+	var sync int
+	if err := d.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.db.QueryRow(`PRAGMA synchronous`).Scan(&sync); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "wal" || sync != 2 {
+		t.Fatalf("journal_mode=%s synchronous=%d, want wal and 2 (FULL)", mode, sync)
+	}
+}
