@@ -157,8 +157,66 @@ func pinSet(pins []string) (map[string]bool, error) {
 	return m, nil
 }
 
-// VerifySuccessor verifies a successor bundle against the previously
-// accepted bundle (TUF rule). Not implemented yet.
+// VerifySuccessor verifies next against prev, the previously accepted
+// bundle, whose canonical bytes are prevCanonical (TUF rule). The trust
+// anchors are prev's roots and the roots next declares: at least
+// prev.Root.Threshold distinct previous roots AND at least next's own
+// threshold of its roots must have signed both next and the policy, so
+// neither a stolen old root nor a freshly listed new root can rotate trust
+// alone. next must be version prev+1, carry prev's SHA-256 as prev, not be
+// issued before prev, and carry the policy's SHA-256.
 func VerifySuccessor(prev *Bundle, prevCanonical []byte, next, nextSigs, policy, policySigs []byte) (*Bundle, *Policy, error) {
-	return nil, nil, errors.New("trust: VerifySuccessor is not implemented")
+	if prev == nil {
+		return nil, nil, fmt.Errorf("%w: no previous bundle", ErrVersionChain)
+	}
+	if err := prev.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("previous bundle: %w", err)
+	}
+	pc, err := prev.Canonical()
+	if err != nil || !bytes.Equal(pc, prevCanonical) {
+		return nil, nil, fmt.Errorf("%w: prevCanonical is not the canonical encoding of the previous bundle", ErrVersionChain)
+	}
+	b, err := ParseBundle(next)
+	if err != nil {
+		return nil, nil, fmt.Errorf("bundle: %w", err)
+	}
+	p, err := ParsePolicy(policy)
+	if err != nil {
+		return nil, nil, fmt.Errorf("policy: %w", err)
+	}
+	if b.Version != prev.Version+1 {
+		return nil, nil, fmt.Errorf("%w: version %d after %d", ErrVersionChain, b.Version, prev.Version)
+	}
+	if b.Prev != SHA256Hex(prevCanonical) {
+		return nil, nil, fmt.Errorf("%w: prev %s is not the previous bundle's SHA-256", ErrVersionChain, b.Prev)
+	}
+	// Both timestamps are validated TimeFormat strings, which order
+	// lexicographically.
+	if b.IssuedAt < prev.IssuedAt {
+		return nil, nil, fmt.Errorf("%w: issued_at %s is before the previous bundle's %s", ErrVersionChain, b.IssuedAt, prev.IssuedAt)
+	}
+	if b.PolicySHA256 != SHA256Hex(policy) {
+		return nil, nil, ErrPolicyHash
+	}
+	oldRoots, err := prev.rootKeys()
+	if err != nil {
+		return nil, nil, err
+	}
+	newRoots, err := b.rootKeys()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, check := range []struct {
+		roots     map[string]ssh.PublicKey
+		threshold int
+		who       string
+	}{{oldRoots, int(prev.Root.Threshold), "previous roots"}, {newRoots, int(b.Root.Threshold), "new roots"}} {
+		if err := requireSigners(next, nextSigs, NamespaceBundle, check.roots, check.threshold, "bundle ("+check.who+")"); err != nil {
+			return nil, nil, err
+		}
+		if err := requireSigners(policy, policySigs, NamespacePolicy, check.roots, check.threshold, "policy ("+check.who+")"); err != nil {
+			return nil, nil, err
+		}
+	}
+	return b, p, nil
 }
