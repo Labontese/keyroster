@@ -87,6 +87,9 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 			return fmt.Errorf("bundle_install is not a valid successor of trust bundle v%d: %w", a.bundle.Version, err)
 		}
 	}
+	if body.BundleVersion != b.Version {
+		return fmt.Errorf("bundle_install records bundle version %d, but its bundle is version %d", body.BundleVersion, b.Version)
+	}
 	logKey, err := trust.ParseKey(b.Log.Key)
 	if err != nil {
 		return fmt.Errorf("bundle_install: log key: %w", err)
@@ -112,8 +115,10 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 
 // checkIssue checks an issue leaf's certificate against the bundle and
 // policy in force: it must be signed by the active CA of the leaf's role,
-// and its key ID must carry the policy version in force.
-func (a *anchor) checkIssue(c *ssh.Certificate, kid cert.KeyID, role string) error {
+// be a host certificate exactly for the host role, and carry the policy
+// version in force in its key ID and in the leaf.
+func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyID) error {
+	role := kid.CA
 	if a.bundle == nil {
 		return errors.New("issue entry before the first bundle_install: no root-signed CA key is in force")
 	}
@@ -125,10 +130,31 @@ func (a *anchor) checkIssue(c *ssh.Certificate, kid cert.KeyID, role string) err
 		return fmt.Errorf("certificate for CA role %s signed by %s, not by the role's active CA %s in trust bundle v%d",
 			role, ssh.FingerprintSHA256(c.SignatureKey), ssh.FingerprintSHA256(want), a.bundle.Version)
 	}
+	wantType := uint32(ssh.UserCert)
+	if role == trust.RoleHost {
+		wantType = ssh.HostCert
+	}
+	if c.CertType != wantType {
+		return fmt.Errorf("certificate type %s for CA role %s, want %s", certTypeName(c.CertType), role, certTypeName(wantType))
+	}
 	if kid.Policy != a.policy.Version {
 		return fmt.Errorf("key ID pol=%d, but the policy in force is version %d", kid.Policy, a.policy.Version)
 	}
+	if b.PolicyVersion != a.policy.Version {
+		return fmt.Errorf("leaf records policy version %d, but the policy in force is version %d", b.PolicyVersion, a.policy.Version)
+	}
 	return nil
+}
+
+func certTypeName(t uint32) string {
+	switch t {
+	case ssh.UserCert:
+		return "user"
+	case ssh.HostCert:
+		return "host"
+	default:
+		return fmt.Sprintf("unknown(%d)", t)
+	}
 }
 
 // Verify checks an export read from r. Its only trust anchors are the
@@ -142,13 +168,15 @@ func (a *anchor) checkIssue(c *ssh.Certificate, kid cert.KeyID, role string) err
 //   - the first bundle_install entry holds a genesis bundle and policy
 //     signed by opts.Threshold of the pinned roots, whose root set is
 //     exactly the pinned set; every later one is a root-signed successor of
-//     the bundle in force; all of them name the same log key (Phase 1)
+//     the bundle in force; each records its bundle's version, and all of
+//     them name the same log key (Phase 1)
 //   - every issue leaf comes after the first bundle_install and holds a
 //     certificate whose CA signature verifies over its signed bytes
 //     (expired certificates included), signed by the active CA of the
-//     leaf's role in the bundle in force, whose key ID carries the policy
-//     version in force, whose serial equals the leaf's and the key ID's, and
-//     serials strictly increase across the log
+//     leaf's role in the bundle in force, of the role's type (host
+//     certificates for the host CA only), whose key ID and leaf carry the
+//     policy version in force, whose serial equals the leaf's and the key
+//     ID's, and serials strictly increase across the log
 //   - the RFC 6962 root recomputed from the leaf bytes alone equals the
 //     root of the checkpoint, the checkpoint covers exactly n entries, and
 //     it is signed by the log key of the root-signed bundle
@@ -227,7 +255,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
-			if err := trustState.checkIssue(c, kid, kid.CA); err != nil {
+			if err := trustState.checkIssue(body, c, kid); err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
 			lastSerial = body.Serial
