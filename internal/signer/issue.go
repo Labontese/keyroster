@@ -72,6 +72,9 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 	}
 	extra := make(map[string]string, len(req.Extensions))
 	for _, e := range req.Extensions {
+		if _, dup := extra[e]; dup {
+			return nil, refusalErr(wire.CodeRefused, "duplicate_extension", nil)
+		}
 		extra[e] = ""
 	}
 

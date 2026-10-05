@@ -203,20 +203,25 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err != nil {
 		return nil, err
 	}
-	var b *trust.Bundle
+	var (
+		b *trust.Bundle
+		p *trust.Policy
+	)
 	latest, err := db.LatestBundle(ctx)
 	switch {
 	case errors.Is(err, signerdb.ErrNoBundle):
-		b, _, err = trust.VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs, pins, threshold)
+		b, p, err = trust.VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs, pins, threshold)
 	case err != nil:
 		return nil, err
+	case len(pins) != 0 || threshold != 0:
+		return nil, fmt.Errorf("%w: bundle version %d is installed; a successor is verified against it, so --pin and --threshold apply to the genesis bundle only", ErrBundleInstall, latest.Version)
 	default:
 		var prev *trust.Bundle
 		prev, err = trust.ParseBundle(latest.Bundle)
 		if err != nil {
 			return nil, fmt.Errorf("installed bundle: %w", err)
 		}
-		b, _, err = trust.VerifySuccessor(prev, latest.Bundle, bundle, bundleSigs, policy, policySigs)
+		b, p, err = trust.VerifySuccessor(prev, latest.Bundle, bundle, bundleSigs, policy, policySigs)
 		if err == nil && b.Version <= latest.Version {
 			err = fmt.Errorf("%w: version %d is not above the installed version %d", ErrBundleInstall, b.Version, latest.Version)
 		}
@@ -227,9 +232,12 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err := checkBundleKeys(b, caKeys); err != nil {
 		return nil, err
 	}
-	logKey, err := pinnedKey(be, keystore.RoleLog, keyFingerprint(caKeys, "log"))
+	if err := checkPolicyAdmins(p, caKeys); err != nil {
+		return nil, err
+	}
+	logKey, err := openRoleKey(be, caKeys, "log")
 	if err != nil {
-		return nil, fmt.Errorf("signer: log key: %w", err)
+		return nil, err
 	}
 	if b.Log.Origin != tlog.Origin(logKey.PublicKey()) {
 		return nil, fmt.Errorf("%w: log origin %q is not the log key's %q", ErrBundleKeys, b.Log.Origin, tlog.Origin(logKey.PublicKey()))
@@ -311,6 +319,44 @@ func checkBundleKeys(b *trust.Bundle, caKeys []signerdb.CAKey) error {
 	return nil
 }
 
+// checkPolicyAdmins refuses a policy that names one of the signer's own
+// online keys (a CA, ops or log key) as an admin: the keys that sign
+// certificates must never also authorize them (D-13).
+func checkPolicyAdmins(p *trust.Policy, caKeys []signerdb.CAKey) error {
+	for _, a := range p.Admins {
+		pub, err := trust.ParseKey(a.Key)
+		if err != nil {
+			return fmt.Errorf("%w: admin %s: %w", ErrBundleKeys, a.Name, err)
+		}
+		for _, k := range caKeys {
+			if bytes.Equal(pub.Marshal(), k.PublicKey) {
+				return fmt.Errorf("%w: policy admin %s uses the %s key %s", ErrBundleKeys, a.Name, k.Role, ssh.FingerprintSHA256(pub))
+			}
+		}
+	}
+	return nil
+}
+
+// openRoleKey opens the ca-init key for role in the backend and requires
+// the custody the backend reports to be the recorded one, so a changed
+// backend option cannot present the same key under another custody.
+func openRoleKey(be keystore.Backend, caKeys []signerdb.CAKey, role string) (keystore.CAKey, error) {
+	for _, k := range caKeys {
+		if k.Role != role {
+			continue
+		}
+		key, err := pinnedKey(be, keystore.Role(role), keyFingerprint(caKeys, role))
+		if err != nil {
+			return nil, fmt.Errorf("signer: bundle key for role %s: %w", role, err)
+		}
+		if got := string(key.Custody()); got != k.Custody {
+			return nil, fmt.Errorf("%w: the backend reports custody %s for the %s key, the bundle records %s", ErrBundleKeys, got, role, k.Custody)
+		}
+		return key, nil
+	}
+	return nil, fmt.Errorf("signer: no key for role %s", role)
+}
+
 func fingerprintOf(key string) string {
 	pub, err := trust.ParseKey(key)
 	if err != nil {
@@ -377,12 +423,15 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	if err := checkBundleKeys(b, caKeys); err != nil {
 		return nil, err
 	}
+	if err := checkPolicyAdmins(p, caKeys); err != nil {
+		return nil, err
+	}
 	ts := &trustState{bundle: b, policy: p, ca: map[wire.CARole]keystore.CAKey{}, profiles: map[wire.CARole]cert.Profile{}}
 	keys := map[string]keystore.CAKey{}
 	for _, k := range caKeys {
-		key, err := pinnedKey(be, keystore.Role(k.Role), keyFingerprint(caKeys, k.Role))
+		key, err := openRoleKey(be, caKeys, k.Role)
 		if err != nil {
-			return nil, fmt.Errorf("signer: bundle key for role %s: %w", k.Role, err)
+			return nil, err
 		}
 		keys[k.Role] = key
 	}

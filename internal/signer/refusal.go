@@ -186,7 +186,7 @@ func classify(detail string) uint8 {
 		return tlog.ReasonClockRegression
 	case "bad_subject":
 		return tlog.ReasonBadSubject
-	case "extension_not_allowed":
+	case "extension_not_allowed", "duplicate_extension":
 		return tlog.ReasonExtensionNotAllowed
 	case "state_unavailable", "serial_unavailable":
 		return tlog.ReasonUnavailable
