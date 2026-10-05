@@ -28,7 +28,7 @@ import (
 func init() {
 	register(command{
 		Name:    "root",
-		Summary: "offline root ceremony (genesis-policy, sign)",
+		Summary: "offline root ceremony (init, genesis-policy, sign)",
 		Run:     runRoot,
 	})
 }
@@ -59,10 +59,12 @@ const (
 
 func runRoot(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: keyroster root genesis-policy|sign [flags]")
+		_, _ = fmt.Fprintln(stderr, "usage: keyroster root init|genesis-policy|sign [flags]")
 		return errUsage
 	}
 	switch args[0] {
+	case "init":
+		return runRootInit(ctx, args[1:], stdout, stderr)
 	case "genesis-policy":
 		return runRootGenesisPolicy(ctx, args[1:], stdout, stderr)
 	case "sign":
@@ -71,6 +73,63 @@ func runRoot(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		_, _ = fmt.Fprintf(stderr, "keyroster root: unknown subcommand %q\n", args[0])
 		return errUsage
 	}
+}
+
+// softwareRootBanner is printed whenever a software-held root is created or
+// signs (D-10, D-11): it must never pass for hardware custody.
+const softwareRootBanner = `SOFTWARE ROOT: this root key is held in software, in an age-encrypted
+file protected only by its passphrase. It is weaker than a FIDO2 or PIV
+hardware root: anyone who copies the file and learns the passphrase can sign
+trust bundles. Keep the file on offline media, never on a networked machine,
+and run the ceremony as described in docs/runbooks/root-ceremony.md.
+`
+
+// runRootInit creates an age-encrypted software root (D-10): FILE.age
+// (mode 0600, created exclusively) and FILE.age.pub with custody=software.
+func runRootInit(_ context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("root init", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	out := fset.String("out", "", "encrypted root key file FILE.age; FILE.age and FILE.age.pub must not exist (required)")
+	passFD := fset.Int("passphrase-fd", -1, "read the passphrase from this inherited file descriptor instead of the terminal")
+	if err := fset.Parse(args); err != nil {
+		return errUsage
+	}
+	if fset.NArg() != 0 || *out == "" {
+		_, _ = fmt.Fprintln(stderr, "root init: --out is required")
+		return errUsage
+	}
+	pubPath := *out + ".pub"
+	for _, p := range []string{*out, pubPath} {
+		if _, err := os.Lstat(p); err == nil {
+			return fmt.Errorf("%s already exists; refusing to overwrite a root key", p)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	pass, err := rootceremony.ReadPassphrase(*passFD, "Passphrase for the new root key: ", true)
+	if err != nil {
+		return err
+	}
+	defer clear(pass)
+	if err := rootceremony.ValidatePassphrase(pass); err != nil {
+		return err
+	}
+	encrypted, pub, err := rootceremony.GenerateRoot(rand.Reader, pass)
+	if err != nil {
+		return err
+	}
+	if err := writeExclusive(*out, encrypted, 0o600); err != nil {
+		return err
+	}
+	if err := writeExclusive(pubPath, []byte(trust.FormatKey(pub)+" custody=software\n"), 0o644); err != nil {
+		// Nobody has seen this key yet; do not leave it without its label.
+		_ = os.Remove(*out)
+		return err
+	}
+	_, _ = io.WriteString(stderr, softwareRootBanner)
+	_, _ = fmt.Fprintf(stderr, "root key: %s\npublic key: %s\n", *out, pubPath)
+	_, _ = fmt.Fprintln(stdout, ssh.FingerprintSHA256(pub))
+	return nil
 }
 
 func runRootGenesisPolicy(_ context.Context, args []string, stdout, stderr io.Writer) error {
@@ -150,13 +209,23 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	rootsPath := fset.String("roots", "", "roots.pub: one root key per line with comment custody=<value> (required)")
 	threshold := fset.Int("threshold", 0, "number of root signatures a verifier requires (required)")
 	outDir := fset.String("out-dir", "", "directory for bundle.json, policy.json and their .sigs files (required)")
-	agentKey := fset.String("agent-key", "", "SHA256 fingerprint of the root key in ssh-agent that signs (required)")
+	agentKey := fset.String("agent-key", "", "SHA256 fingerprint of the root key in ssh-agent that signs (this or --key)")
+	keyPath := fset.String("key", "", "age-encrypted software root FILE.age that signs (this or --agent-key)")
+	passFD := fset.Int("passphrase-fd", -1, "with --key: read the passphrase from this inherited file descriptor instead of the terminal")
 	confirm := fset.String("confirm", "", "first 8 hex digits of the bundle hash (default: prompt on stdin)")
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
-	if fset.NArg() != 0 || *caPath == "" || *policyPath == "" || *rootsPath == "" || *threshold == 0 || *outDir == "" || *agentKey == "" {
-		_, _ = fmt.Fprintln(stderr, "root sign: --ca-pubkeys, --policy, --roots, --threshold, --out-dir and --agent-key are required")
+	if fset.NArg() != 0 || *caPath == "" || *policyPath == "" || *rootsPath == "" || *threshold == 0 || *outDir == "" {
+		_, _ = fmt.Fprintln(stderr, "root sign: --ca-pubkeys, --policy, --roots, --threshold, --out-dir and one of --agent-key or --key are required")
+		return errUsage
+	}
+	if (*agentKey == "") == (*keyPath == "") {
+		_, _ = fmt.Fprintln(stderr, "root sign: give exactly one of --agent-key and --key")
+		return errUsage
+	}
+	if *passFD >= 0 && *keyPath == "" {
+		_, _ = fmt.Fprintln(stderr, "root sign: --passphrase-fd needs --key")
 		return errUsage
 	}
 
@@ -188,9 +257,25 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	rootPub, err := rootByFingerprint(b, *agentKey)
+
+	// Resolve the signing root. A software root is decrypted first: its
+	// fingerprint is known only after decryption.
+	var softRoot *rootceremony.Root
+	fp := *agentKey
+	if *keyPath != "" {
+		softRoot, err = openSoftwareRoot(*keyPath, *passFD)
+		if err != nil {
+			return err
+		}
+		defer softRoot.Close()
+		fp = ssh.FingerprintSHA256(softRoot.PublicKey())
+	}
+	rootPub, custody, err := rootByFingerprint(b, fp)
 	if err != nil {
 		return err
+	}
+	if softRoot != nil && custody != "software" {
+		return fmt.Errorf("--key holds root %s in software, but %s declares custody=%s; refusing to sign under a false custody label", fp, *rootsPath, custody)
 	}
 	bundleSigsPath := filepath.Join(*outDir, bundleFile+sigsSuffix)
 	policySigsPath := filepath.Join(*outDir, policyFile+sigsSuffix)
@@ -207,7 +292,7 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	_, _ = io.WriteString(stdout, rootceremony.Summary(b, pol))
 	answer := *confirm
 	if answer == "" {
-		_, _ = fmt.Fprintf(stderr, "Type the first 8 hex digits of the bundle SHA-256 to sign with %s: ", *agentKey)
+		_, _ = fmt.Fprintf(stderr, "Type the first 8 hex digits of the bundle SHA-256 to sign with %s: ", fp)
 		line, err := bufio.NewReader(ceremonyInput).ReadString('\n')
 		if err != nil && line == "" {
 			return fmt.Errorf("no confirmation read: %w", err)
@@ -218,16 +303,23 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		return fmt.Errorf("confirmation %q does not match the bundle hash prefix %s; nothing was signed", answer, hash[:8])
 	}
 
-	signer, closeAgent, err := agentSigner(rootPub)
+	var signer documentSigner = softRoot
+	if softRoot == nil {
+		s, closeAgent, err := agentSigner(rootPub)
+		if err != nil {
+			return err
+		}
+		defer closeAgent()
+		signer = agentRoot{s}
+	}
+	if custody == "software" {
+		_, _ = io.WriteString(stderr, softwareRootBanner)
+	}
+	bundleSig, err := signer.SignBundle(rand.Reader, bundle)
 	if err != nil {
 		return err
 	}
-	defer closeAgent()
-	bundleSig, err := rootceremony.SignBundle(rand.Reader, signer, bundle)
-	if err != nil {
-		return err
-	}
-	policySig, err := rootceremony.SignPolicy(rand.Reader, signer, policy)
+	policySig, err := signer.SignPolicy(rand.Reader, policy)
 	if err != nil {
 		return err
 	}
@@ -237,8 +329,45 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if err := appendFile(policySigsPath, policySig); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(stdout, "signed %s and %s with %s\n", filepath.Join(*outDir, bundleFile), filepath.Join(*outDir, policyFile), *agentKey)
+	_, _ = fmt.Fprintf(stdout, "signed %s and %s with %s\n", filepath.Join(*outDir, bundleFile), filepath.Join(*outDir, policyFile), fp)
 	return nil
+}
+
+// documentSigner is a root that signs exactly the two root-signed document
+// types: a *rootceremony.Root or an ssh-agent root.
+type documentSigner interface {
+	SignBundle(rnd io.Reader, bundleJSON []byte) ([]byte, error)
+	SignPolicy(rnd io.Reader, policyJSON []byte) ([]byte, error)
+}
+
+// agentRoot signs through rootceremony with a root key held in ssh-agent.
+type agentRoot struct{ s ssh.Signer }
+
+func (a agentRoot) SignBundle(rnd io.Reader, bundleJSON []byte) ([]byte, error) {
+	return rootceremony.SignBundle(rnd, a.s, bundleJSON)
+}
+
+func (a agentRoot) SignPolicy(rnd io.Reader, policyJSON []byte) ([]byte, error) {
+	return rootceremony.SignPolicy(rnd, a.s, policyJSON)
+}
+
+// openSoftwareRoot reads the passphrase (terminal or inherited descriptor)
+// and decrypts the root key file in memory.
+func openSoftwareRoot(path string, passFD int) (*rootceremony.Root, error) {
+	encrypted, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the key file
+	if err != nil {
+		return nil, err
+	}
+	pass, err := rootceremony.ReadPassphrase(passFD, "Passphrase for "+path+": ", false)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(pass)
+	root, err := rootceremony.OpenRoot(encrypted, pass)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w; nothing was signed", path, err)
+	}
+	return root, nil
 }
 
 // prepareBundle builds the genesis bundle for the inputs and writes it and a
@@ -330,15 +459,16 @@ func buildBundle(cas *trust.CAPubKeys, roots []trust.RootKey, threshold uint32, 
 	return b, nil
 }
 
-// rootByFingerprint returns the bundle root key with fingerprint fp.
-func rootByFingerprint(b *trust.Bundle, fp string) (ssh.PublicKey, error) {
+// rootByFingerprint returns the bundle root key with fingerprint fp and its
+// declared custody.
+func rootByFingerprint(b *trust.Bundle, fp string) (ssh.PublicKey, string, error) {
 	for _, r := range b.Root.Keys {
 		pub, err := trust.ParseKey(r.Key)
 		if err == nil && ssh.FingerprintSHA256(pub) == fp {
-			return pub, nil
+			return pub, r.Custody, nil
 		}
 	}
-	return nil, fmt.Errorf("--agent-key %s is not one of the bundle's root keys", fp)
+	return nil, "", fmt.Errorf("signing root %s is not one of the bundle's root keys", fp)
 }
 
 // refuseIfSigned fails when the sigs file already holds a valid signature by
@@ -400,7 +530,13 @@ func readParsed[T any](path string, parse func([]byte) (T, error)) (T, error) {
 // writeNew creates path with data and fails if it already exists, so a
 // ceremony never overwrites a document that may already carry signatures.
 func writeNew(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644) //nolint:gosec // G302,G304: signed documents are public; the operator names the path
+	return writeExclusive(path, data, 0o644)
+}
+
+// writeExclusive creates path with mode perm (O_EXCL: never an existing
+// file) and writes data to it.
+func writeExclusive(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm) //nolint:gosec // G304: the operator names the path
 	if err != nil {
 		return err
 	}
