@@ -7,10 +7,13 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +57,28 @@ type ceremony struct {
 // Ed25519 software roots.
 func newCeremony(t *testing.T, n int) *ceremony {
 	t.Helper()
+	c := newCeremonyInputs(t)
+	var roots bytes.Buffer
+	for range n {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := ssh.NewPublicKey(priv.Public())
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots.WriteString(trust.FormatKey(pub) + " custody=software\n")
+		c.rootKeys = append(c.rootKeys, priv)
+	}
+	writeTestFile(t, c.roots, roots.Bytes())
+	return c
+}
+
+// newCeremonyInputs writes the genesis policy and ca-pubkeys.json; roots.pub
+// is left to the caller.
+func newCeremonyInputs(t *testing.T) *ceremony {
+	t.Helper()
 	dir := t.TempDir()
 	c := &ceremony{
 		dir:       dir,
@@ -93,21 +118,6 @@ func newCeremony(t *testing.T, n int) *ceremony {
 		t.Fatal(err)
 	}
 	writeTestFile(t, c.caPubkeys, data)
-
-	var roots bytes.Buffer
-	for range n {
-		_, priv, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		pub, err := ssh.NewPublicKey(priv.Public())
-		if err != nil {
-			t.Fatal(err)
-		}
-		roots.WriteString(trust.FormatKey(pub) + " custody=software\n")
-		c.rootKeys = append(c.rootKeys, priv)
-	}
-	writeTestFile(t, c.roots, roots.Bytes())
 	return c
 }
 
@@ -288,4 +298,158 @@ func sshKeygenOracle(t *testing.T) string {
 		return ""
 	}
 	return p
+}
+
+// softwareRoot is a root created by keyroster root init.
+type softwareRoot struct {
+	path, pub, fingerprint, passphrase string
+}
+
+// passphraseFD returns, as a --passphrase-fd argument, the read end of a
+// pipe that holds pass and a newline; the test owns and closes the pipe.
+func passphraseFD(t *testing.T, pass string) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := w.WriteString(pass + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return strconv.FormatUint(uint64(r.Fd()), 10)
+}
+
+// initSoftwareRoot runs keyroster root init with pass on a pipe and checks
+// its outputs: an armored age file (mode 0600 outside Windows), a .pub
+// labelled custody=software, the fingerprint on stdout and the SOFTWARE
+// ROOT banner on stderr.
+func initSoftwareRoot(t *testing.T, dir, name, pass string) softwareRoot {
+	t.Helper()
+	r := softwareRoot{path: filepath.Join(dir, name+".age"), passphrase: pass}
+	r.pub = r.path + ".pub"
+	code, stdout, stderr := run(t, "root", "init", "--out", r.path, "--passphrase-fd", passphraseFD(t, pass))
+	if code != 0 {
+		t.Fatalf("root init %s: exit %d: %s", name, code, stderr)
+	}
+	if !strings.HasPrefix(stderr, "SOFTWARE ROOT:") || !strings.Contains(stderr, "docs/runbooks/root-ceremony.md") {
+		t.Fatalf("root init stderr lacks the SOFTWARE ROOT banner:\n%s", stderr)
+	}
+	enc, err := os.ReadFile(r.path) //nolint:gosec // G304: test file
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(enc, []byte("-----BEGIN AGE ENCRYPTED FILE-----\n")) {
+		t.Fatalf("%s does not start with the age armor header: %q", r.path, enc[:min(len(enc), 40)])
+	}
+	if bytes.Contains(enc, []byte("OPENSSH PRIVATE KEY")) {
+		t.Fatalf("%s holds a plaintext private key", r.path)
+	}
+	if runtime.GOOS != "windows" {
+		st, err := os.Stat(r.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode %v, want 0600", r.path, st.Mode().Perm())
+		}
+	}
+	pubLine, err := os.ReadFile(r.pub) //nolint:gosec // G304: test file
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(pubLine), " custody=software\n") {
+		t.Fatalf("%s = %q, want a key line ending in custody=software", r.pub, pubLine)
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(pubLine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.fingerprint = ssh.FingerprintSHA256(pub)
+	if strings.TrimSpace(stdout) != r.fingerprint {
+		t.Fatalf("root init stdout = %q, want the fingerprint %s", stdout, r.fingerprint)
+	}
+	return r
+}
+
+// typeHashPrefix answers the next confirmation prompt with the hash prefix
+// of the bundle.json that root sign has written by the time it asks.
+func typeHashPrefix(t *testing.T, outDir string) {
+	t.Helper()
+	prev := ceremonyInput
+	ceremonyInput = &hashPrefixReader{path: filepath.Join(outDir, "bundle.json")}
+	t.Cleanup(func() { ceremonyInput = prev })
+}
+
+type hashPrefixReader struct {
+	path string
+	r    io.Reader
+}
+
+func (h *hashPrefixReader) Read(p []byte) (int, error) {
+	if h.r == nil {
+		data, err := os.ReadFile(h.path) //nolint:gosec // G304: test file
+		if err != nil {
+			return 0, err
+		}
+		h.r = strings.NewReader(trust.SHA256Hex(data)[:8] + "\n")
+	}
+	return h.r.Read(p)
+}
+
+// signWithKey runs root sign --key with the root's passphrase on a pipe.
+func (c *ceremony) signWithKey(t *testing.T, threshold string, r softwareRoot, extra ...string) (int, string, string) {
+	t.Helper()
+	typeHashPrefix(t, c.out)
+	args := []string{"root", "sign", "--ca-pubkeys", c.caPubkeys, "--policy", c.policy, "--roots", c.roots,
+		"--threshold", threshold, "--out-dir", c.out, "--key", r.path, "--passphrase-fd", passphraseFD(t, r.passphrase)}
+	return run(t, append(args, extra...)...)
+}
+
+// writeRoots concatenates the roots' .pub files into the ceremony's
+// roots.pub.
+func (c *ceremony) writeRoots(t *testing.T, roots ...softwareRoot) {
+	t.Helper()
+	var all []byte
+	for _, r := range roots {
+		data, err := os.ReadFile(r.pub) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, data...)
+	}
+	writeTestFile(t, c.roots, all)
+}
+
+// TestSoftwareRoot runs the homelab ceremony end to end (D-10): two
+// age-encrypted software roots from keyroster root init, root sign --key
+// with root A at threshold 1, and trust verify pinning both roots.
+func TestSoftwareRoot(t *testing.T) {
+	c := newCeremonyInputs(t)
+	a := initSoftwareRoot(t, c.dir, "root-a", "correct horse battery staple A")
+	b := initSoftwareRoot(t, c.dir, "root-b", "correct horse battery staple B")
+	c.writeRoots(t, a, b)
+
+	code, stdout, stderr := c.signWithKey(t, "1", a)
+	if code != 0 {
+		t.Fatalf("root sign --key: exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "SOFTWARE ROOT:") {
+		t.Fatalf("root sign --key printed no SOFTWARE ROOT banner:\n%s", stderr)
+	}
+	for _, want := range []string{a.fingerprint, b.fingerprint, "custody=software", "signed "} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("root sign output lacks %q:\n%s", want, stdout)
+		}
+	}
+	code, stdout, stderr = c.verify(t, "1", a.fingerprint, b.fingerprint)
+	if code != 0 {
+		t.Fatalf("trust verify: exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") || !strings.Contains(stdout, "signed by root "+a.fingerprint) {
+		t.Fatalf("trust verify output:\n%s", stdout)
+	}
 }

@@ -3,7 +3,10 @@
 // canonical policy, each under its own SSHSIG namespace. It cannot sign a
 // certificate: it does not import internal/cert, internal/signer or
 // internal/keystore, and its exported API is SignBundle, SignPolicy,
-// Summary and BundleHash (both pinned by tests, KEY-07).
+// Summary, BundleHash, the age-encrypted software root (GenerateRoot,
+// OpenRoot, Root) and its passphrase input (ReadPassphrase,
+// ValidatePassphrase), all pinned by tests (KEY-07). No exported function
+// or method returns a root's signer or private key.
 package rootceremony
 
 import (

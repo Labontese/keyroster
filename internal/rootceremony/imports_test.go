@@ -38,8 +38,10 @@ func TestRootCannotReachCertificateSigning(t *testing.T) {
 	}
 }
 
-// TestExportedAPI pins the package's exported identifiers to exactly
-// SignBundle, SignPolicy, Summary and BundleHash.
+// TestExportedAPI pins the package's exported identifiers, methods
+// included, to exactly the root ceremony API, and pins that no exported
+// function or method returns a signer or private key: a software root is
+// reachable only through Root.SignBundle and Root.SignPolicy (KEY-07).
 func TestExportedAPI(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -64,8 +66,20 @@ func TestExportedAPI(t *testing.T) {
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
-				if d.Name.IsExported() {
-					exported = append(exported, d.Name.Name)
+				if !d.Name.IsExported() {
+					continue
+				}
+				name := d.Name.Name
+				if d.Recv != nil {
+					name = receiverName(t, d.Recv) + "." + name
+				}
+				exported = append(exported, name)
+				if d.Type.Results != nil {
+					for _, res := range d.Type.Results.List {
+						if typ := exprText(src, fset, res.Type); forbiddenResult(typ) {
+							t.Errorf("%s returns %s: no exported API may hand out a root's signer or key", name, typ)
+						}
+					}
 				}
 			case *ast.GenDecl:
 				for _, spec := range d.Specs {
@@ -89,8 +103,42 @@ func TestExportedAPI(t *testing.T) {
 		t.Fatal("no source files parsed")
 	}
 	slices.Sort(exported)
-	want := []string{"BundleHash", "SignBundle", "SignPolicy", "Summary"}
+	want := []string{
+		"BundleHash", "GenerateRoot", "OpenRoot", "ReadPassphrase", "Root",
+		"Root.Close", "Root.PublicKey", "Root.SignBundle", "Root.SignPolicy",
+		"SignBundle", "SignPolicy", "Summary", "ValidatePassphrase",
+	}
 	if !slices.Equal(exported, want) {
 		t.Fatalf("exported identifiers = %v, want exactly %v", exported, want)
 	}
+}
+
+// receiverName returns the type name of a method receiver.
+func receiverName(t *testing.T, recv *ast.FieldList) string {
+	t.Helper()
+	typ := recv.List[0].Type
+	if star, ok := typ.(*ast.StarExpr); ok {
+		typ = star.X
+	}
+	id, ok := typ.(*ast.Ident)
+	if !ok {
+		t.Fatalf("unexpected receiver type %T", typ)
+	}
+	return id.Name
+}
+
+// exprText returns the source text of a type expression.
+func exprText(src []byte, fset *token.FileSet, e ast.Expr) string {
+	return string(src[fset.Position(e.Pos()).Offset:fset.Position(e.End()).Offset])
+}
+
+// forbiddenResult reports whether a result type could carry a usable root
+// key: a signer of any kind or a private key.
+func forbiddenResult(typ string) bool {
+	for _, bad := range []string{"Signer", "PrivateKey", "AlgorithmSigner", "crypto.", "ed25519.", "any", "interface"} {
+		if strings.Contains(typ, bad) {
+			return true
+		}
+	}
+	return false
 }
