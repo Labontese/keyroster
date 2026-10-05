@@ -354,3 +354,71 @@ func TestSignerRefuses(t *testing.T) {
 		}
 	})
 }
+
+// TestTrustRefuses (KEY-07, D-13) checks the trust boundary at the
+// binaries: install-bundle refuses a genesis bundle whose root is not
+// pinned and leaves the signer unable to start, and ca issue is refused
+// without an admin key (by the CLI) and with a key the policy does not
+// list (by the signer), writing no certificate either way.
+func TestTrustRefuses(t *testing.T) {
+	login := currentUser(t)
+
+	t.Run("install_bundle_unpinned_root", func(t *testing.T) {
+		env := initSigner(t, bootstrapOpts{})
+		env.signGenesis(t, bootstrapOpts{})
+		other := newUserKey(t, "not_the_root")
+		args := env.installArgs()
+		for i, a := range args {
+			if a == "--pin" {
+				args[i+1] = fingerprint(t, other+".pub")
+			}
+		}
+		code, out := env.signerCmd(t, args...)
+		if code == 0 || !strings.Contains(out, "pinned root fingerprints do not match") {
+			t.Fatalf("install-bundle with an unpinned root exited %d, want the pin refusal:\n%s", code, out)
+		}
+		code, out = env.signerCmd(t, "serve", "--state-dir", env.StateDir, "--socket", env.Socket, "--allow-uid", strconv.Itoa(os.Getuid()))
+		if code == 0 || !strings.Contains(out, "no trust bundle installed") {
+			t.Fatalf("serve after the refused install exited %d, want \"no trust bundle installed\":\n%s", code, out)
+		}
+		// The correctly pinned install then succeeds.
+		if code, out := env.signerCmd(t, env.installArgs()...); code != 0 {
+			t.Fatalf("install-bundle with the right pin exited %d:\n%s", code, out)
+		}
+	})
+
+	env := bootstrapSigner(t, bootstrapOpts{})
+	key := newUserKey(t, "id_unauthorized")
+	certFile := key + "-cert.pub"
+	noCert := func(t *testing.T) {
+		t.Helper()
+		if _, err := os.Stat(certFile); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("certificate %s exists after a refusal (stat: %v)", certFile, err)
+		}
+	}
+	t.Run("ca_issue_without_admin_key", func(t *testing.T) {
+		code, out := keyrosterWithAgent(t, env.AdminAgent, "ca", "issue", "--socket", env.Socket,
+			"--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+		if code != 2 || !strings.Contains(out, "--admin-key") {
+			t.Fatalf("ca issue without --admin-key exited %d, want 2 naming --admin-key:\n%s", code, out)
+		}
+		noCert(t)
+	})
+	t.Run("ca_issue_with_non_admin_key", func(t *testing.T) {
+		outsider := newUserKey(t, "outsider")
+		sshAdd(t, env.AdminAgent, outsider)
+		code, out := keyrosterWithAgent(t, env.AdminAgent, "ca", "issue", "--socket", env.Socket,
+			"--admin-key", fingerprint(t, outsider+".pub"),
+			"--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+		if code != 1 || !strings.Contains(out, "evidence_not_admin") {
+			t.Fatalf("ca issue signed by a non-admin exited %d, want 1 with evidence_not_admin:\n%s", code, out)
+		}
+		noCert(t)
+	})
+	t.Run("control_admin_key", func(t *testing.T) {
+		env.issue(t, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+		if _, err := os.Stat(certFile); err != nil {
+			t.Fatalf("admin-authorized request: %v", err)
+		}
+	})
+}

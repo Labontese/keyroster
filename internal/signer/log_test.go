@@ -80,7 +80,12 @@ func newMemBackend(fx *Fixture) *memBackend {
 
 func newLogEnv(t *testing.T) *logEnv {
 	t.Helper()
-	fx := NewFixture(t, 1, 1)
+	return newLogEnvFx(t, NewFixture(t, 1, 1))
+}
+
+// newLogEnvFx is newLogEnv with a given fixture.
+func newLogEnvFx(t *testing.T, fx *Fixture) *logEnv {
+	t.Helper()
 	e := &logEnv{
 		t:       t,
 		dbPath:  filepath.Join(t.TempDir(), "signer.db"),

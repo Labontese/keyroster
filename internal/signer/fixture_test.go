@@ -29,6 +29,8 @@ type Fixture struct {
 	AdminPriv []ed25519.PrivateKey
 	Admins    []ssh.Signer
 	Quorum    uint32
+	// PolicyEdit, if set, changes the genesis policy Policy returns.
+	PolicyEdit func(*trust.Policy)
 }
 
 // NewFixture generates the keys; quorum is the policy's admin quorum.
@@ -88,6 +90,9 @@ func (f *Fixture) Policy() *trust.Policy {
 	}{{trust.RoleUser, 12 * 3600, []string{"permit-pty"}}, {trust.RoleHost, 720 * 3600, []string{}}, {trust.RoleMachine, 24 * 3600, []string{"permit-pty"}}} {
 		p.CAProfiles = append(p.CAProfiles, trust.CAProfile{Role: prof.role, MaxTTLSeconds: prof.ttl,
 			DefaultExtensions: prof.ext, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}})
+	}
+	if f.PolicyEdit != nil {
+		f.PolicyEdit(p)
 	}
 	return p
 }
