@@ -23,7 +23,7 @@ const (
 	MaxEvidenceType   = 64
 	MaxEvidenceBlob   = 8 << 10
 	MaxErrorMessage   = 256
-	maxResponseCertSz = MaxFrame - 16
+	maxResponseCertSz = MaxFrame - 32 // room for version, type, length, serial and leaf index
 )
 
 // ErrMalformed reports a message body that does not decode strictly.
@@ -211,10 +211,13 @@ func ParseIssueRequest(body []byte) (*IssueRequest, error) {
 	return &r, nil
 }
 
-// IssueResponse carries the issued certificate in SSH wire format.
+// IssueResponse carries the issued certificate in SSH wire format and the
+// index of the audit-log leaf that recorded it (the signer sends the
+// response only after that leaf and its checkpoint are committed).
 type IssueResponse struct {
-	Cert   []byte
-	Serial uint64
+	Cert      []byte
+	Serial    uint64
+	LeafIndex uint64
 }
 
 // Marshal encodes the response body.
@@ -225,6 +228,7 @@ func (r *IssueResponse) Marshal() ([]byte, error) {
 	var b cryptobyte.Builder
 	addBytes16(&b, r.Cert)
 	b.AddUint64(r.Serial)
+	b.AddUint64(r.LeafIndex)
 	return b.Bytes()
 }
 
@@ -232,7 +236,8 @@ func (r *IssueResponse) Marshal() ([]byte, error) {
 func ParseIssueResponse(body []byte) (*IssueResponse, error) {
 	s := cryptobyte.String(body)
 	var r IssueResponse
-	if !readBytes16(&s, &r.Cert, maxResponseCertSz) || !s.ReadUint64(&r.Serial) || !s.Empty() || len(r.Cert) == 0 {
+	if !readBytes16(&s, &r.Cert, maxResponseCertSz) || !s.ReadUint64(&r.Serial) ||
+		!s.ReadUint64(&r.LeafIndex) || !s.Empty() || len(r.Cert) == 0 {
 		return nil, ErrMalformed
 	}
 	return &r, nil

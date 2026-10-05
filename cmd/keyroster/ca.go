@@ -116,7 +116,7 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	if err := os.WriteFile(dest, ssh.MarshalAuthorizedKey(c), 0o644); err != nil { //nolint:gosec // G306: a certificate is public
 		return err
 	}
-	_, _ = fmt.Fprintf(stderr, "serial: %d\nkey id: %s\ncertificate: %s\n", c.Serial, c.KeyId, dest)
+	_, _ = fmt.Fprintf(stderr, "serial: %d\nkey id: %s\nlog leaf: %d\ncertificate: %s\n", c.Serial, c.KeyId, resp.LeafIndex, dest)
 	return nil
 }
 

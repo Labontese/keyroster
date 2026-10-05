@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -59,13 +60,26 @@ func Listen(path string, gid int) (*net.UnixListener, error) {
 	return l, nil
 }
 
-// Serve accepts connections on l until ctx is cancelled, then closes l and
-// waits for the open connections to finish.
+// Serve accepts connections on l until ctx is cancelled, then closes l,
+// waits for the open connections to finish and flushes the pending refusal
+// counts as a final refusal_summary leaf. While serving, the counts are
+// flushed every minute.
 func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 	stop := context.AfterFunc(ctx, func() { _ = l.Close() })
 	defer stop()
+	loopCtx, cancelLoop := context.WithCancel(ctx)
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		s.flushLoop(loopCtx)
+	}()
 	var wg sync.WaitGroup
-	defer wg.Wait()
+	defer func() {
+		wg.Wait()
+		cancelLoop()
+		<-flushDone
+		s.flushSummaries(context.WithoutCancel(ctx))
+	}()
 	sem := make(chan struct{}, maxConns)
 	for {
 		conn, err := l.AcceptUnix()
@@ -78,8 +92,8 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 		select {
 		case sem <- struct{}{}:
 		default:
-			s.log.Warn("refused", "reason", "too_many_connections")
 			_ = conn.Close()
+			_ = s.refuse(ctx, Peer{UID: tlog.PeerUnknown}, [32]byte{}, tlog.ReasonOverloaded, "too_many_connections") // logged; nothing is sent
 			continue
 		}
 		wg.Add(1)
@@ -92,7 +106,8 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 }
 
 // handle serves one connection: peer check before reading anything, one
-// request frame, one response frame.
+// request frame, one response frame. Every refusal goes through refuse
+// (slog plus the rate-limited audit log, D-14).
 func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(time.Now().Add(connDeadline)); err != nil {
@@ -100,35 +115,36 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 	}
 	peer, err := peerCredentials(conn)
 	if err != nil {
-		s.log.Warn("refused", "reason", "peer_credentials_unavailable")
+		_ = s.refuse(ctx, Peer{UID: tlog.PeerUnknown}, [32]byte{}, tlog.ReasonPeerNotAllowed, "peer_credentials_unavailable") // logged; nothing is sent
 		return
 	}
 	if !s.allowed(peer) {
-		s.log.Warn("refused", "uid", peer.UID, "pid", peer.PID, "reason", "peer_not_allowed")
+		// Nothing is read from or sent to a peer that is not allowed.
+		_ = s.refuse(ctx, peer, [32]byte{}, tlog.ReasonPeerNotAllowed, "peer_not_allowed")
 		return
 	}
 	msgType, body, err := wire.ReadMessage(conn)
 	if err != nil {
-		s.reply(conn, peer, refuse(wire.CodeMalformed, "malformed_frame", err))
+		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_frame"))
 		return
 	}
 	if msgType != wire.TypeIssueRequest {
-		s.reply(conn, peer, refuse(wire.CodeMalformed, "unknown_message_type", nil))
+		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "unknown_message_type"))
 		return
 	}
 	req, err := wire.ParseIssueRequest(body)
 	if err != nil {
-		s.reply(conn, peer, refuse(wire.CodeMalformed, "malformed_request", err))
+		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
 		return
 	}
-	resp, err := s.Issue(ctx, peer, req)
-	if err != nil {
-		s.reply(conn, peer, err)
+	resp, refused := s.issueOrRefuse(ctx, peer, req)
+	if refused != nil {
+		s.reply(conn, refused)
 		return
 	}
 	out, err := resp.Marshal()
 	if err != nil {
-		s.reply(conn, peer, refuse(wire.CodeInternal, "response_encoding", err))
+		s.reply(conn, s.refuse(ctx, peer, req.Digest(), tlog.ReasonInternal, "response_encoding"))
 		return
 	}
 	if err := wire.WriteMessage(conn, wire.TypeIssueResponse, out); err != nil {
@@ -136,16 +152,11 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 	}
 }
 
-// reply logs a refusal and sends it to the peer as an ErrorResponse. Only
-// the reason code leaves the process; request bytes are never echoed.
-func (s *Signer) reply(conn *net.UnixConn, peer Peer, err error) {
-	var r *refusal
-	if !errors.As(err, &r) {
-		r = &refusal{code: wire.CodeInternal, reason: "internal_error", cause: err}
-	}
-	s.log.Warn("refused", "uid", peer.UID, "pid", peer.PID, "reason", r.reason, "code", r.code.String())
-	body, mErr := (&wire.ErrorResponse{Code: r.code, Message: r.reason}).Marshal()
-	if mErr != nil {
+// reply sends a refusal to the peer. Only the reason code leaves the
+// process; request bytes are never echoed.
+func (s *Signer) reply(conn *net.UnixConn, e *wire.ErrorResponse) {
+	body, err := e.Marshal()
+	if err != nil {
 		return
 	}
 	_ = wire.WriteMessage(conn, wire.TypeError, body)

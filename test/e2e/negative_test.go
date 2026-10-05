@@ -345,13 +345,14 @@ func TestSignerRefuses(t *testing.T) {
 			t.Fatal(err)
 		}
 		sock := filepath.Join(base, "signer.sock")
+		_, logFP := addLogKey(t, agent, base) // a valid log key, so only the CA pin can fail
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, signerBin, "serve",
 			"--state-dir", state, "--socket", sock,
 			"--allow-uid", strconv.Itoa(os.Getuid()),
 			"--backend", "agent", "--backend-opt", "socket="+agent,
-			"--user-ca-fp", certFP)
+			"--user-ca-fp", certFP, "--log-key-fp", logFP)
 		cmd.Env = envWithout("SSH_AUTH_SOCK")
 		output, err := cmd.CombinedOutput()
 		var ee *exec.ExitError

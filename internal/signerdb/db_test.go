@@ -257,3 +257,109 @@ func TestSetLastSerial(t *testing.T) {
 		}
 	})
 }
+
+func hash32(b byte) []byte {
+	h := make([]byte, 32)
+	h[0] = b
+	return h
+}
+
+func TestLogTables(t *testing.T) {
+	d, path := openTemp(t)
+	ctx := context.Background()
+	if _, _, err := d.LatestCheckpoint(ctx); !errors.Is(err, ErrNoCheckpoint) {
+		t.Fatalf("LatestCheckpoint on an empty log: %v, want ErrNoCheckpoint", err)
+	}
+	appendLeaf := func(idx uint64, leaf, hash []byte, cp []byte) error {
+		return d.WithTx(ctx, func(tx *sql.Tx) error {
+			if err := d.AppendLeaf(tx, idx, leaf, hash); err != nil {
+				return err
+			}
+			if cp != nil {
+				return d.PutCheckpoint(tx, idx+1, cp)
+			}
+			return nil
+		})
+	}
+	if err := appendLeaf(1, []byte("gap"), hash32(1), nil); err == nil {
+		t.Fatal("AppendLeaf accepted index 1 on an empty log")
+	}
+	if err := appendLeaf(0, []byte("short hash"), make([]byte, 31), nil); err == nil {
+		t.Fatal("AppendLeaf accepted a 31-byte hash")
+	}
+	if err := appendLeaf(0, []byte("leaf0"), hash32(0), []byte("cp1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendLeaf(0, []byte("again"), hash32(9), nil); err == nil {
+		t.Fatal("AppendLeaf accepted index 0 twice")
+	}
+	if err := appendLeaf(1, []byte("leaf1"), hash32(1), []byte("cp2")); err != nil {
+		t.Fatal(err)
+	}
+	// A leaf without its checkpoint (never written by the signer, but a
+	// reader must still stop at the checkpoint size).
+	if err := appendLeaf(2, []byte("leaf2"), hash32(2), nil); err != nil {
+		t.Fatal(err)
+	}
+	hashes, err := d.LeafHashes(ctx)
+	if err != nil || len(hashes) != 3 || hashes[2][0] != 2 {
+		t.Fatalf("LeafHashes = %d hashes, %v", len(hashes), err)
+	}
+	note, size, err := d.LatestCheckpoint(ctx)
+	if err != nil || size != 2 || string(note) != "cp2" {
+		t.Fatalf("LatestCheckpoint = %q, %d, %v", note, size, err)
+	}
+	var seen []string
+	if err := d.ForEachLeaf(ctx, func(_ uint64, leaf []byte) error { seen = append(seen, string(leaf)); return nil }); err != nil || len(seen) != 3 {
+		t.Fatalf("ForEachLeaf = %q, %v", seen, err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer func() { _ = ro.Close() }()
+	seen = nil
+	note, size, err = ro.ReadLog(ctx, func(_ uint64, leaf []byte) error { seen = append(seen, string(leaf)); return nil })
+	if err != nil || size != 2 || string(note) != "cp2" || strings.Join(seen, ",") != "leaf0,leaf1" {
+		t.Fatalf("ReadLog = %q, %d, %q, %v; want the two checkpointed leaves", note, size, seen, err)
+	}
+	if err := appendLeafRO(ro); err == nil {
+		t.Fatal("a read-only database accepted a write")
+	}
+}
+
+func appendLeafRO(d *DB) error {
+	return d.WithTx(context.Background(), func(tx *sql.Tx) error { return d.AppendLeaf(tx, 3, []byte("x"), hash32(3)) })
+}
+
+func TestOpenReadOnlyRefuses(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.db")
+	if _, err := OpenReadOnly(missing); err == nil {
+		t.Fatal("OpenReadOnly opened a missing database")
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("OpenReadOnly created %s", missing)
+	}
+}
+
+// TestDurabilityPragmas pins assumption A7: the signer database runs in WAL
+// mode with synchronous=FULL, which SQLite documents as durable (ACID) in
+// WAL mode, so a committed issuance and its log leaf survive power loss.
+func TestDurabilityPragmas(t *testing.T) {
+	d, _ := openTemp(t)
+	var mode string
+	var sync int
+	if err := d.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.db.QueryRow(`PRAGMA synchronous`).Scan(&sync); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "wal" || sync != 2 {
+		t.Fatalf("journal_mode=%s synchronous=%d, want wal and 2 (FULL)", mode, sync)
+	}
+}

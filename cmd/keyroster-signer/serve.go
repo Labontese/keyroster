@@ -48,6 +48,9 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 	socket := fs.String("socket", "/run/keyroster-signer/signer.sock", "Unix socket path")
 	backend := fs.String("backend", "agent", "keystore backend")
 	userCAFP := fs.String("user-ca-fp", "", "pinned SHA256 fingerprint of the user CA key (SHA256:...)")
+	logKeyFP := fs.String("log-key-fp", "", "pinned SHA256 fingerprint of the audit-log checkpoint key, role log, in the same backend (SHA256:...)")
+	refusalPerMinute := fs.Int("refusal-log-per-minute", signer.DefaultRefusalLogPerMinute, "refused requests logged individually in the audit log per minute; the rest are counted in summary entries")
+	refusalBurst := fs.Int("refusal-log-burst", signer.DefaultRefusalLogBurst, "refused requests that may be logged individually at once")
 	var allowUIDs, allowGroups, backendOpts listFlag
 	fs.Var(&allowUIDs, "allow-uid", "uid allowed to connect (repeatable)")
 	fs.Var(&allowGroups, "allow-group", "group name or gid allowed to connect (repeatable); the first one also owns the socket")
@@ -55,12 +58,18 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
-	if fs.NArg() != 0 || *stateDir == "" || *userCAFP == "" {
-		_, _ = fmt.Fprintln(stderr, "serve: --state-dir and --user-ca-fp are required; no positional arguments")
+	if fs.NArg() != 0 || *stateDir == "" || *userCAFP == "" || *logKeyFP == "" {
+		_, _ = fmt.Fprintln(stderr, "serve: --state-dir, --user-ca-fp and --log-key-fp are required; no positional arguments")
 		return errUsage
 	}
 	if !strings.HasPrefix(*userCAFP, "SHA256:") {
 		return errors.New("--user-ca-fp must be a SHA256:... fingerprint")
+	}
+	if !strings.HasPrefix(*logKeyFP, "SHA256:") {
+		return errors.New("--log-key-fp must be a SHA256:... fingerprint")
+	}
+	if *refusalPerMinute < 1 || *refusalBurst < 1 {
+		return errors.New("--refusal-log-per-minute and --refusal-log-burst must be at least 1")
 	}
 	if err := checkStateDir(*stateDir); err != nil {
 		return err
@@ -91,12 +100,15 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 	defer func() { _ = db.Close() }()
 
 	s, err := signer.New(signer.Config{
-		Backend:           be,
-		UserCAFingerprint: *userCAFP,
-		DB:                db,
-		AllowUIDs:         uids,
-		AllowGIDs:         gids,
-		Logger:            logger,
+		Backend:             be,
+		UserCAFingerprint:   *userCAFP,
+		LogKeyFingerprint:   *logKeyFP,
+		DB:                  db,
+		AllowUIDs:           uids,
+		AllowGIDs:           gids,
+		Logger:              logger,
+		RefusalLogPerMinute: *refusalPerMinute,
+		RefusalLogBurst:     *refusalBurst,
 	})
 	if err != nil {
 		return err
@@ -112,7 +124,7 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	logger.Info("serving", "socket", *socket, "backend", *backend, "user_ca", *userCAFP,
-		"allow_uids", len(uids), "allow_gids", len(gids))
+		"log_key", *logKeyFP, "allow_uids", len(uids), "allow_gids", len(gids))
 	if err := s.Serve(ctx, l); err != nil {
 		return err
 	}

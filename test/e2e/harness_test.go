@@ -228,18 +228,61 @@ func sshAdd(t *testing.T, sock, keyfile string) {
 
 // startSigner runs keyroster-signer serve with a fresh 0700 state dir and a
 // private socket, plus args, and returns the socket path once it exists.
+// A fresh Ed25519 log key is loaded into the agent named by args
+// ("--backend-opt socket=...") and pinned with --log-key-fp.
 func startSigner(t *testing.T, args ...string) string {
 	t.Helper()
+	return startSignerProc(t, args...).Socket
+}
+
+// signerProc is a running keyroster-signer.
+type signerProc struct {
+	Socket   string
+	StateDir string
+	LogPub   string // log public key file (OpenSSH .pub)
+	LogFP    string
+}
+
+// startSignerProc is startSigner returning the state directory and the log
+// key as well.
+func startSignerProc(t *testing.T, args ...string) *signerProc {
+	t.Helper()
+	agentSock := ""
+	for i, a := range args {
+		if a == "--backend-opt" && i+1 < len(args) && strings.HasPrefix(args[i+1], "socket=") {
+			agentSock = strings.TrimPrefix(args[i+1], "socket=")
+		}
+	}
+	if agentSock == "" {
+		t.Fatal("startSigner: args name no agent (--backend-opt socket=...)")
+	}
 	base := shortTempDir(t)
 	state := filepath.Join(base, "state")
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	logPub, logFP := addLogKey(t, agentSock, base)
 	sock := filepath.Join(base, "signer.sock")
 	full := append([]string{"serve", "--state-dir", state, "--socket", sock}, args...)
+	full = append(full, "--log-key-fp", logFP)
 	_, log, done := startDaemon(t, "keyroster-signer", envWithout("SSH_AUTH_SOCK"), signerBin, full...)
 	waitFor(t, "signer socket", done, log, func() bool { return isSocket(sock) })
-	return sock
+	return &signerProc{Socket: sock, StateDir: state, LogPub: logPub, LogFP: logFP}
+}
+
+// addLogKey creates an Ed25519 log key in dir, loads it into the agent at
+// agentSock and returns its public key file and fingerprint.
+func addLogKey(t *testing.T, agentSock, dir string) (pubFile, fp string) {
+	t.Helper()
+	key := filepath.Join(dir, "log_key")
+	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "log-key", "-f", key)
+	sshAdd(t, agentSock, key)
+	out := sshKeygen(t, "-l", "-E", "sha256", "-f", key+".pub")
+	fields := strings.Fields(out)
+	if len(fields) < 2 || !strings.HasPrefix(fields[1], "SHA256:") {
+		t.Fatalf("ssh-keygen -l: unexpected output %q", out)
+	}
+	return key + ".pub", fields[1]
 }
 
 // sshdOptions configures startSSHD.

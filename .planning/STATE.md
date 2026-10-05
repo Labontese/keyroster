@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-04 Task 3 merge gate: owner applies ruleset, then approves PR #5"
-last_updated: "2026-10-05T06:05:45.833Z"
+stopped_at: "01-05 Task 4 merge gate: owner approves PR #6"
+last_updated: "2026-10-05T07:19:40.064Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 310c7750aa00bfb52c02380496e3961613e28067
+state_head: 95acc74f4e9c3eac594deadc957df6440fedd37a
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 6 of 16
+Plan: 7 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P03 | 14 min | 2 tasks | 13 files |
 | Phase 01 P16 | 22 min | 3 tasks | 11 files |
 | Phase 01 P04 | 23 min | 2 tasks | 7 files |
+| Phase 01 P05 | 41 min | 3 tasks | 37 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,11 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-04: a ruleset that adds required checks is applied by the owner from the PR branch after the checks are green on that PR and before approval (Pitfall 10); Claude never applies rulesets
 - [Phase 01]: 01-04: every sshd authentication refusal in e2e runs against its own sshd (OpenSSH >= 9.8 PerSourcePenalties; 9.5p1 lacks the option), and each refusal has a control that succeeds
 - [Phase 01]: 01-04: the plan's -L 0:... forwarding case was replaced by -W (direct-tcpip) and -R with ExitOnForwardFailure, because ssh rejects -L 0:... before connecting
+- [Phase 01]: 01-05: C2SP type 0x02 (P-256) log checkpoints use key ID = first 4 bytes of SHA-256(SPKI DER) without the key name and an ASN.1 DER signature over SHA-256 of the text (transparency-dev/witness); verified against the published Rekor and Pixel 6 checkpoints
+- [Phase 01]: 01-05: A7 confirmed: SQLite documents synchronous=FULL as ACID-durable in WAL mode; TestDurabilityPragmas pins wal + synchronous=2 on the signer DB
+- [Phase 01]: 01-05: log origin is keyroster/log/ + 16 hex of SHA-256(log key); the signer refuses to start when stored leaves do not reproduce the latest checkpoint signed by the pinned log key
+- [Phase 01]: 01-05: every refusal goes through Signer.refuse (slog, then a refusal leaf within 10/min burst 10, else a count in the next refusal_summary leaf, flushed every minute and on shutdown); one clock_regression leaf per episode
+- [Phase 01]: 01-05: duplicate_request stays CodeRefused (pinned by 01-16) although detected after cert.Build; every other post-Build failure returns unavailable and no certificate
 
 ### Pending Todos
 
@@ -112,6 +118,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T06:05:45.760Z
-Stopped at: 01-04 Task 3 merge gate: owner applies ruleset, then approves PR #5
+Last session: 2026-10-05T07:19:19.863Z
+Stopped at: 01-05 Task 4 merge gate: owner approves PR #6
 Resume file: None
