@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-07 Task 3 merge gate: owner approves PR #8"
-last_updated: "2026-10-05T11:46:27.218Z"
+stopped_at: "01-09 Task 3 merge gate: owner approves PR #9"
+last_updated: "2026-10-05T12:21:59.171Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: bac7b29e43547dfaf3e5d469cdb8d730fa92440e
+state_head: 5bc9e84200526272c0cb4032e90d47b09ce07bee
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 8
+  completed_plans: 9
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 9 of 16
+Plan: 10 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P05 | 41 min | 3 tasks | 37 files |
 | Phase 01 P06 | 38 min | 3 tasks | 29 files |
 | Phase 01 P07 | 35 min | 3 tasks | 28 files |
+| Phase 01 P09 | 30 min | 2 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,10 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-07: install-bundle and serve read the backend from backend_config and accept --backend-opt overrides, but every key must keep the custody ca-init recorded; InstallBundle takes the backend (the bundle_install checkpoint is signed with the log key)
 - [Phase 01]: 01-07: a policy admin key may not be a CA, ops or log key; a successor bundle refuses --pin/--threshold; ca-init requires an empty audit log so ca_init is leaf 0
 - [Phase 01]: 01-07: install-bundle requires exactly one active CA entry per role equal to the ca-init key; CA rotation (next/retired entries) changes checkBundleKeys in Phase 3
+- [Phase 01]: 01-09: software root file = armored age with one scrypt recipient at age's default work factor (logN 18) wrapping an OpenSSH Ed25519 key; OpenRoot refuses unarmored, non-scrypt and non-Ed25519 files
+- [Phase 01]: 01-09: --passphrase-fd is read with syscall.Read on the raw descriptor/handle (no os.NewFile finalizer); passphrases need 20 runes and come only from a TTY or an inherited fd
+- [Phase 01]: 01-09: root sign --key refuses a root that roots.pub labels anything but custody=software; every software-root init or sign prints the SOFTWARE ROOT banner, also for --agent-key roots labelled software
+- [Phase 01]: 01-09: TestExportedAPI pins rootceremony methods (Type.Method) and fails on any exported result type that could carry a signer or private key
 
 ### Pending Todos
 
@@ -131,6 +136,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T11:46:06.054Z
-Stopped at: 01-07 Task 3 merge gate: owner approves PR #8
+Last session: 2026-10-05T12:21:49.267Z
+Stopped at: 01-09 Task 3 merge gate: owner approves PR #9
 Resume file: None
