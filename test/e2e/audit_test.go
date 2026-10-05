@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,5 +101,87 @@ func TestAuditVerifiesIssuance(t *testing.T) {
 	otherPub, _ := addLogKey(t, startAgent(t), t.TempDir())
 	if code, out := auditVerify(t, otherPub, export); code == 0 {
 		t.Fatalf("audit verify with another log key exited 0:\n%s", out)
+	}
+}
+
+// editExport parses an export file into one map per line, lets edit change
+// or replace them, and writes the result to a new file.
+func editExport(t *testing.T, export string, edit func(lines []map[string]any) []map[string]any) string {
+	t.Helper()
+	data, err := os.ReadFile(export) //nolint:gosec // test file
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []map[string]any
+	for _, l := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, m)
+	}
+	lines = edit(lines)
+	var b strings.Builder
+	for _, m := range lines {
+		out, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(out)
+		b.WriteByte('\n')
+	}
+	path := filepath.Join(t.TempDir(), "edited.jsonl")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestAuditDetectsTampering runs the CLI against modified exports of a real
+// signer's log, and checks --previous across two exports of a growing log.
+func TestAuditDetectsTampering(t *testing.T) {
+	login := currentUser(t)
+	env := newAuditEnv(t)
+	issueOne := func() {
+		key := newUserKey(t, "id_t")
+		issue(t, env.signer.Socket, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
+	}
+	issueOne()
+	issueOne()
+	first := env.exportLog(t)
+	issueOne()
+	second := env.exportLog(t)
+
+	if code, out := auditVerify(t, env.signer.LogPub, second, "--previous", first); code != 0 {
+		t.Fatalf("verify --previous <earlier export> exited %d:\n%s", code, out)
+	}
+	if code, out := auditVerify(t, env.signer.LogPub, first, "--previous", second); code == 0 || !strings.Contains(out, "log shrank") {
+		t.Fatalf("verify of the earlier export against the later checkpoint exited %d, want log shrank:\n%s", code, out)
+	}
+
+	flipped := editExport(t, second, func(lines []map[string]any) []map[string]any {
+		raw, err := base64.StdEncoding.DecodeString(lines[1]["leaf"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw[64] ^= 1 // inside the request digest of an issue leaf
+		lines[1]["leaf"] = base64.StdEncoding.EncodeToString(raw)
+		return lines
+	})
+	if code, out := auditVerify(t, env.signer.LogPub, flipped); code != 1 || !strings.Contains(out, "root mismatch") {
+		t.Fatalf("verify of a flipped leaf byte exited %d, want 1 with root mismatch:\n%s", code, out)
+	}
+	removed := editExport(t, second, func(lines []map[string]any) []map[string]any {
+		return append(lines[:1:1], lines[2:]...)
+	})
+	if code, out := auditVerify(t, env.signer.LogPub, removed); code != 1 {
+		t.Fatalf("verify of an export without one leaf exited %d, want 1:\n%s", code, out)
+	}
+	decodedOnly := editExport(t, second, func(lines []map[string]any) []map[string]any {
+		lines[0]["decoded"] = map[string]any{"kind": "issue", "principals": []string{"root"}}
+		return lines
+	})
+	if code, out := auditVerify(t, env.signer.LogPub, decodedOnly); code != 0 {
+		t.Fatalf("verify after editing only decoded exited %d:\n%s", code, out)
 	}
 }

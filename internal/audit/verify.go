@@ -23,6 +23,8 @@ type Options struct {
 	// LogKey is the operator-pinned log public key. It is never taken
 	// from the export.
 	LogKey ssh.PublicKey
+	// Previous is an earlier signed checkpoint of the same log (optional).
+	Previous []byte
 }
 
 // Report summarizes a verified export.
