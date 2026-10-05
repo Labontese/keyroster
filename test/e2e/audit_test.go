@@ -19,18 +19,29 @@ import (
 // starts with: ca_init and bundle_install.
 const bootstrapLeaves = 2
 
-// auditVerify runs keyroster audit verify and returns its exit code and
-// output.
-func auditVerify(t *testing.T, logPub, export string, extra ...string) (int, string) {
+// auditVerify runs keyroster audit verify pinned to env's roots at
+// threshold 1 and returns its exit code and output.
+func auditVerify(t *testing.T, env *signerEnv, export string, extra ...string) (int, string) {
 	t.Helper()
-	args := append([]string{"audit", "verify", "--log-key", logPub}, extra...)
+	return auditVerifyPins(t, env.RootFingerprints, export, extra...)
+}
+
+// auditVerifyPins runs keyroster audit verify with the given root pins at
+// threshold 1.
+func auditVerifyPins(t *testing.T, pins []string, export string, extra ...string) (int, string) {
+	t.Helper()
+	args := []string{"audit", "verify", "--threshold", "1"}
+	for _, p := range pins {
+		args = append(args, "--pin", p)
+	}
+	args = append(args, extra...)
 	return runKeyroster(t, append(args, export)...)
 }
 
 // TestAuditVerifiesIssuance completes the Walking Skeleton: three
 // certificates are issued (each logged with a signed checkpoint before it
 // is released), one of them logs in to real sshd, and the exported log
-// verifies end to end against the pinned log key.
+// verifies end to end against the pinned root.
 func TestAuditVerifiesIssuance(t *testing.T) {
 	login := currentUser(t)
 	env := bootstrapSigner(t, bootstrapOpts{})
@@ -52,7 +63,7 @@ func TestAuditVerifiesIssuance(t *testing.T) {
 	}
 
 	export := env.exportLog(t)
-	code, out := auditVerify(t, env.LogPub, export)
+	code, out := auditVerify(t, env, export)
 	if code != 0 {
 		t.Fatalf("keyroster audit verify exited %d:\n%s", code, out)
 	}
@@ -61,10 +72,12 @@ func TestAuditVerifiesIssuance(t *testing.T) {
 	}
 	t.Logf("audit verify: %s", strings.TrimSpace(out))
 
-	// The pinned key matters: another key's verifier rejects the export.
-	otherPub, _ := addLogKey(t, startAgent(t), t.TempDir())
-	if code, out := auditVerify(t, otherPub, export); code == 0 {
-		t.Fatalf("audit verify with another log key exited 0:\n%s", out)
+	// The pin matters: pinned to another root, the bundle_install entry
+	// does not verify, so neither its log key nor its CA keys are trusted.
+	other := filepath.Join(t.TempDir(), "other_root")
+	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "other-root", "-f", other)
+	if code, out := auditVerifyPins(t, []string{fingerprint(t, other+".pub")}, export); code == 0 || !strings.Contains(out, "not anchored in the pinned roots") {
+		t.Fatalf("audit verify pinned to another root exited %d, want a refusal of the bundle_install entry:\n%s", code, out)
 	}
 }
 
@@ -116,10 +129,10 @@ func TestAuditDetectsTampering(t *testing.T) {
 	issueOne()
 	second := env.exportLog(t)
 
-	if code, out := auditVerify(t, env.LogPub, second, "--previous", first); code != 0 {
+	if code, out := auditVerify(t, env, second, "--previous", first); code != 0 {
 		t.Fatalf("verify --previous <earlier export> exited %d:\n%s", code, out)
 	}
-	if code, out := auditVerify(t, env.LogPub, first, "--previous", second); code == 0 || !strings.Contains(out, "log shrank") {
+	if code, out := auditVerify(t, env, first, "--previous", second); code == 0 || !strings.Contains(out, "log shrank") {
 		t.Fatalf("verify of the earlier export against the later checkpoint exited %d, want log shrank:\n%s", code, out)
 	}
 
@@ -133,21 +146,21 @@ func TestAuditDetectsTampering(t *testing.T) {
 		lines[second]["leaf"] = base64.StdEncoding.EncodeToString(raw)
 		return lines
 	})
-	if code, out := auditVerify(t, env.LogPub, flipped); code != 1 || !strings.Contains(out, "root mismatch") {
+	if code, out := auditVerify(t, env, flipped); code != 1 || !strings.Contains(out, "root mismatch") {
 		t.Fatalf("verify of a flipped leaf byte exited %d, want 1 with root mismatch:\n%s", code, out)
 	}
 	removed := editExport(t, second, func(lines []map[string]any) []map[string]any {
 		second := bootstrapLeaves + 1
 		return append(lines[:second:second], lines[second+1:]...)
 	})
-	if code, out := auditVerify(t, env.LogPub, removed); code != 1 {
+	if code, out := auditVerify(t, env, removed); code != 1 {
 		t.Fatalf("verify of an export without one leaf exited %d, want 1:\n%s", code, out)
 	}
 	decodedOnly := editExport(t, second, func(lines []map[string]any) []map[string]any {
 		lines[bootstrapLeaves]["decoded"] = map[string]any{"kind": "issue", "principals": []string{"root"}}
 		return lines
 	})
-	if code, out := auditVerify(t, env.LogPub, decodedOnly); code != 0 {
+	if code, out := auditVerify(t, env, decodedOnly); code != 0 {
 		t.Fatalf("verify after editing only decoded exited %d:\n%s", code, out)
 	}
 }
@@ -169,7 +182,7 @@ func TestRefusalsAreAudited(t *testing.T) {
 	env.issue(t, "--pubkey", key+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
 
 	export := env.exportLog(t)
-	code, out := auditVerify(t, env.LogPub, export, "--json")
+	code, out := auditVerify(t, env, export, "--json")
 	if code != 0 {
 		t.Fatalf("audit verify exited %d:\n%s", code, out)
 	}

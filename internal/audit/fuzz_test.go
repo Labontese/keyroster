@@ -8,18 +8,19 @@ import (
 )
 
 // FuzzVerifyExport: Verify never panics on arbitrary input, and whatever it
-// accepts is a non-empty log whose checkpoint the pinned key signed.
+// accepts is a non-empty log whose checkpoint the log key of a bundle signed
+// by the pinned root signed.
 func FuzzVerifyExport(f *testing.F) {
 	fx := standard(f, "ed25519")
 	lines := fx.lines()
 	f.Add([]byte(join(lines)))
 	f.Add([]byte(join(lines[:2])))
-	f.Add([]byte(join([]string{lines[1], lines[0], lines[4]})))
+	f.Add([]byte(join([]string{lines[0], lines[2], lines[1], lines[5]})))
 	f.Add([]byte(strings.Repeat("{}\n", 3)))
 	f.Add([]byte(`{"index":0,"leaf":"AA=="}` + "\n" + `{"checkpoint":"x"}` + "\n"))
-	pub := fx.logKey.PublicKey()
+	pins := fx.pins()
 	f.Fuzz(func(t *testing.T, data []byte) {
-		rep, err := Verify(strings.NewReader(string(data)), Options{LogKey: pub})
+		rep, err := Verify(strings.NewReader(string(data)), Options{Pins: pins, Threshold: 1})
 		if err != nil {
 			return
 		}

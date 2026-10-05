@@ -18,7 +18,9 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/tlog"
+	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -37,17 +39,23 @@ func (m *memLog) ReadLog(_ context.Context, fn func(uint64, []byte) error) ([]by
 	return m.note, uint64(len(m.leaves)), nil
 }
 
-// fixture builds a log the way the signer does, with a log key and a user
-// CA, so tests can tamper with any part of it and re-sign checkpoints as a
-// log-key holder would.
+// fixture builds a log the way the signer does: a root key signs a genesis
+// trust bundle and policy naming the log key and the user, host and machine
+// CAs; the log starts with their bundle_install entry. Tests can tamper with
+// any part of it and re-sign checkpoints as a log-key holder would.
 type fixture struct {
-	t       testing.TB
-	logKey  ssh.Signer
-	ca      ssh.Signer
-	leaves  [][]byte
-	micros  uint64
-	serial  uint64
-	request byte
+	t         testing.TB
+	root      ssh.Signer
+	logKey    ssh.Signer
+	ca        ssh.Signer // user CA
+	hostCA    ssh.Signer
+	machineCA ssh.Signer
+	ops       ssh.Signer
+	admin     ssh.Signer
+	leaves    [][]byte
+	micros    uint64
+	serial    uint64
+	request   byte
 }
 
 func newSigner(t testing.TB, alg string) ssh.Signer {
@@ -76,12 +84,99 @@ func newSigner(t testing.TB, alg string) ssh.Signer {
 	return s
 }
 
-func newFixture(t testing.TB, logAlg string) *fixture {
+// newBareFixture generates the keys but logs nothing.
+func newBareFixture(t testing.TB, logAlg string) *fixture {
 	t.Helper()
 	return &fixture{
-		t: t, logKey: newSigner(t, logAlg), ca: newSigner(t, "ed25519"),
+		t: t, root: newSigner(t, "ed25519"), logKey: newSigner(t, logAlg),
+		ca: newSigner(t, "ed25519"), hostCA: newSigner(t, "ed25519"), machineCA: newSigner(t, "ed25519"),
+		ops: newSigner(t, "ed25519"), admin: newSigner(t, "ed25519"),
 		micros: uint64(time.Now().UnixMicro()), serial: uint64(time.Now().UnixMicro()), //nolint:gosec // G115: after 1970
 	}
+}
+
+// newFixture is a log that starts with the root-signed genesis
+// bundle_install entry, as every signer log does after ca-init.
+func newFixture(t testing.TB, logAlg string) *fixture {
+	t.Helper()
+	f := newBareFixture(t, logAlg)
+	f.addBundle(f.signDocs(f.genesis(), f.policy(), f.root))
+	return f
+}
+
+// pins are the fixture root's fingerprint.
+func (f *fixture) pins() []string { return []string{ssh.FingerprintSHA256(f.root.PublicKey())} }
+
+// policy is the genesis policy: one admin, one profile per CA role.
+func (f *fixture) policy() *trust.Policy {
+	return &trust.Policy{
+		Version: 1, Prev: trust.GenesisPrev, AdminQuorum: 1,
+		Admins: []trust.AdminKey{{Name: "alice", Key: trust.FormatKey(f.admin.PublicKey())}},
+		CAProfiles: []trust.CAProfile{
+			{Role: trust.RoleUser, MaxTTLSeconds: 43200, DefaultExtensions: []string{"permit-pty"}, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}},
+			{Role: trust.RoleHost, MaxTTLSeconds: 2592000, DefaultExtensions: []string{}, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}},
+			{Role: trust.RoleMachine, MaxTTLSeconds: 86400, DefaultExtensions: []string{"permit-pty"}, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}},
+		},
+	}
+}
+
+// genesis is the version 1 bundle: the fixture root at threshold 1, its
+// CAs, ops key and log key. signDocs sets the policy hash.
+func (f *fixture) genesis() *trust.Bundle {
+	ca := func(role string, s ssh.Signer) trust.CAEntry {
+		return trust.CAEntry{Role: role, Key: trust.FormatKey(s.PublicKey()), Alg: s.PublicKey().Type(), Custody: "agent", State: "active", Generation: 1}
+	}
+	return &trust.Bundle{
+		Version: 1, Prev: trust.GenesisPrev, IssuedAt: time.Now().UTC().Truncate(time.Second).Format(trust.TimeFormat),
+		Root:   trust.RootSet{Keys: []trust.RootKey{{Key: trust.FormatKey(f.root.PublicKey()), Custody: "software"}}, Threshold: 1},
+		CAs:    []trust.CAEntry{ca(trust.RoleUser, f.ca), ca(trust.RoleHost, f.hostCA), ca(trust.RoleMachine, f.machineCA)},
+		OpsKey: trust.KeyEntry{Key: trust.FormatKey(f.ops.PublicKey()), Alg: f.ops.PublicKey().Type(), Custody: "agent"},
+		Log: trust.LogEntry{Key: trust.FormatKey(f.logKey.PublicKey()), Alg: f.logKey.PublicKey().Type(), Custody: "agent",
+			Origin: tlog.Origin(f.logKey.PublicKey())},
+	}
+}
+
+// docs are the four documents of a bundle_install entry.
+type docs struct {
+	version                                uint64
+	bundle, bundleSigs, policy, policySigs []byte
+}
+
+// signDocs sets b's policy hash and returns the canonical bundle and policy
+// with detached SSHSIG signatures by every signer.
+func (f *fixture) signDocs(b *trust.Bundle, pol *trust.Policy, signers ...ssh.Signer) docs {
+	f.t.Helper()
+	d := docs{version: b.Version}
+	var err error
+	if d.policy, err = pol.Canonical(); err != nil {
+		f.t.Fatal(err)
+	}
+	b.PolicySHA256 = trust.SHA256Hex(d.policy)
+	if d.bundle, err = b.Canonical(); err != nil {
+		f.t.Fatal(err)
+	}
+	for _, s := range signers {
+		bs, err := sshsig.Sign(rand.Reader, s, trust.NamespaceBundle, d.bundle)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		ps, err := sshsig.Sign(rand.Reader, s, trust.NamespacePolicy, d.policy)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		d.bundleSigs, d.policySigs = append(d.bundleSigs, bs...), append(d.policySigs, ps...)
+	}
+	return d
+}
+
+// addBundle logs a bundle_install entry for d.
+func (f *fixture) addBundle(d docs) {
+	f.t.Helper()
+	b, err := (&tlog.BundleInstallBody{BundleVersion: d.version, Bundle: d.bundle, BundleSigs: d.bundleSigs, Policy: d.policy, PolicySigs: d.policySigs}).Encode()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.add(tlog.KindBundleInstall, b)
 }
 
 // add appends a leaf of kind with body at the next index.
@@ -100,7 +195,7 @@ func (f *fixture) newCert(serial uint64, now time.Time) *ssh.Certificate {
 	f.t.Helper()
 	subject := newSigner(f.t, "ed25519").PublicKey()
 	f.request++
-	keyID := cert.KeyID{CA: "user", Subject: "u:alice", Request: strings.Repeat(hex.EncodeToString([]byte{f.request}), 16), Serial: serial}
+	keyID := cert.KeyID{CA: "user", Subject: "u:alice", Request: strings.Repeat(hex.EncodeToString([]byte{f.request}), 16), Policy: 1, Serial: serial}
 	c, err := cert.Build(cert.Request{
 		Profile: cert.DefaultUserProfile(), Subject: subject, Principals: []string{"alice"},
 		Now: now, ValidFor: time.Hour, KeyID: keyID, Serial: serial,
@@ -185,7 +280,7 @@ func join(lines []string) string {
 }
 
 func (f *fixture) verify(export string, previous []byte) (*Report, error) {
-	return Verify(strings.NewReader(export), Options{LogKey: f.logKey.PublicKey(), Previous: previous})
+	return Verify(strings.NewReader(export), Options{Pins: f.pins(), Threshold: 1, Previous: previous})
 }
 
 // standard is a log of two issuances, a refusal and an issuance.
@@ -206,7 +301,8 @@ func TestVerifyOK(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Verify: %v", err)
 			}
-			if rep.Size != 4 || rep.Serials != 3 || rep.Counts[tlog.KindIssue] != 3 || rep.Counts[tlog.KindRefusal] != 1 {
+			if rep.Size != 5 || rep.Serials != 3 || rep.Counts[tlog.KindIssue] != 3 || rep.Counts[tlog.KindRefusal] != 1 ||
+				rep.Counts[tlog.KindBundleInstall] != 1 || rep.IssuedByCA["user"] != 3 || rep.BundleVersion != 1 || rep.PolicyVersion != 1 {
 				t.Fatalf("report %+v", rep)
 			}
 		})
@@ -237,7 +333,8 @@ func leafLine(t *testing.T, line string, edit func([]byte) []byte) string {
 // not.
 func TestVerifyDetectsTampering(t *testing.T) {
 	f := standard(t, "ed25519")
-	base := f.lines() // 4 leaf lines + checkpoint
+	all := f.lines() // bundle_install, 4 leaf lines, checkpoint
+	bi, base := all[0], all[1:]
 	cp := base[4]
 	other := newSigner(t, "ed25519")
 	// header (22 domain + 8 index + 8 time + 1 kind + 3 length) + role 1 +
@@ -254,10 +351,10 @@ func TestVerifyDetectsTampering(t *testing.T) {
 			return l
 		}, "root mismatch"},
 		{"removed_leaf_line", func() []string { return append(append([]string(nil), base[:1]...), base[2:]...) }, "missing"},
-		{"truncated_tail_keeps_checkpoint", func() []string { return []string{base[0], base[1], cp} }, "checkpoint covers 4 entries"},
+		{"truncated_tail_keeps_checkpoint", func() []string { return []string{base[0], base[1], cp} }, "checkpoint covers 5 entries"},
 		{"checkpoint_other_key", func() []string {
 			l := append([]string(nil), base[:4]...)
-			forged := f.checkpointWith(other, tlog.Origin(f.logKey.PublicKey()), 4)
+			forged := f.checkpointWith(other, tlog.Origin(f.logKey.PublicKey()), 5)
 			out, _ := json.Marshal(ExportLine{Checkpoint: string(forged)})
 			return append(l, string(out))
 		}, "not signed by the log key"},
@@ -265,9 +362,8 @@ func TestVerifyDetectsTampering(t *testing.T) {
 		{"two_checkpoint_lines", func() []string { return append(append([]string(nil), base...), cp) }, "more than one checkpoint"},
 		{"duplicate_index", func() []string { return []string{base[0], base[1], base[1], base[2], base[3], cp} }, "repeated"},
 		{"swapped_lines", func() []string { return []string{base[1], base[0], base[2], base[3], cp} }, "out of order"},
-		{"empty_export", func() []string { return nil }, "empty log"},
+		{"no_leaf_after_bundle", func() []string { return nil }, "empty log"},
 		{"no_checkpoint", func() []string { return base[:4] }, "empty log"},
-		{"checkpoint_without_entries", func() []string { return []string{cp} }, "empty log"},
 		{"unknown_field", func() []string {
 			l := append([]string(nil), base...)
 			l[0] = strings.Replace(l[0], `{"index"`, `{"extra":1,"index"`, 1)
@@ -288,7 +384,7 @@ func TestVerifyDetectsTampering(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rep, err := f.verify(join(tc.lines()), nil)
+			rep, err := f.verify(join(append([]string{bi}, tc.lines()...)), nil)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("Verify: %v", err)
@@ -300,6 +396,20 @@ func TestVerifyDetectsTampering(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Verify error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifyEmpty: an export without entries or without a checkpoint
+// verifies nothing.
+func TestVerifyEmpty(t *testing.T) {
+	f := newFixture(t, "ed25519")
+	cp := f.lines()[1]
+	for name, export := range map[string]string{"empty_export": "", "checkpoint_without_entries": join([]string{cp})} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := f.verify(export, nil); err == nil || !strings.Contains(err.Error(), "empty log") {
+				t.Fatalf("Verify error = %v, want empty log", err)
 			}
 		})
 	}
@@ -432,7 +542,7 @@ func TestIdenticalRefusalsAreDistinctEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Size != 2 || rep.Counts[tlog.KindRefusal] != 2 {
+	if rep.Size != 3 || rep.Counts[tlog.KindRefusal] != 2 {
 		t.Fatalf("report %+v, want two refusal entries", rep)
 	}
 }
@@ -442,12 +552,12 @@ func TestVerifyPrevious(t *testing.T) {
 	export := join(f.lines())
 
 	t.Run("previous_ok", func(t *testing.T) {
-		if _, err := f.verify(export, f.checkpoint(2)); err != nil {
+		if _, err := f.verify(export, f.checkpoint(3)); err != nil {
 			t.Fatalf("Verify with an earlier checkpoint of this log: %v", err)
 		}
 	})
 	t.Run("previous_same_size_ok", func(t *testing.T) {
-		if _, err := f.verify(export, f.checkpoint(4)); err != nil {
+		if _, err := f.verify(export, f.checkpoint(5)); err != nil {
 			t.Fatalf("Verify with the current checkpoint as previous: %v", err)
 		}
 	})
@@ -455,7 +565,8 @@ func TestVerifyPrevious(t *testing.T) {
 		g := &fixture{t: t, logKey: f.logKey, ca: f.ca, micros: f.micros, serial: f.serial}
 		g.addRefusal()
 		g.addRefusal()
-		_, err := f.verify(export, g.checkpoint(2))
+		g.addRefusal()
+		_, err := f.verify(export, g.checkpoint(3))
 		if err == nil || !strings.Contains(err.Error(), "log rewritten") {
 			t.Fatalf("Verify error = %v, want log rewritten", err)
 		}
@@ -464,14 +575,14 @@ func TestVerifyPrevious(t *testing.T) {
 		g := standard(t, "ed25519")
 		g.logKey = f.logKey
 		g.addRefusal()
-		_, err := f.verify(export, g.checkpoint(5))
+		_, err := f.verify(export, g.checkpoint(6))
 		if err == nil || !strings.Contains(err.Error(), "log shrank") {
 			t.Fatalf("Verify error = %v, want log shrank", err)
 		}
 	})
 	t.Run("previous_other_key", func(t *testing.T) {
 		other := newSigner(t, "ed25519")
-		_, err := f.verify(export, f.checkpointWith(other, tlog.Origin(f.logKey.PublicKey()), 2))
+		_, err := f.verify(export, f.checkpointWith(other, tlog.Origin(f.logKey.PublicKey()), 3))
 		if err == nil || !strings.Contains(err.Error(), "previous") {
 			t.Fatalf("Verify error = %v, want a previous-checkpoint error", err)
 		}
