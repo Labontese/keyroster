@@ -100,7 +100,7 @@ install -m 0755 -o root -g root "$bin/keyroster" "$bin/keyroster-signer" /usr/lo
 keyroster-signer version
 
 step "Install sysusers and units"
-install -m 0644 "$repo/deploy/sysusers.d/keyroster.conf" /etc/sysusers.d/keyroster.conf
+install -D -m 0644 "$repo/deploy/sysusers.d/keyroster.conf" /etc/sysusers.d/keyroster.conf
 systemd-sysusers /etc/sysusers.d/keyroster.conf
 getent passwd keyroster-signer
 getent group keyroster-admin
