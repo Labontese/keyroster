@@ -59,7 +59,9 @@ func runCAInit(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 	defer func() { _ = db.Close() }()
-	be, err := keystore.Open(*backend, opts)
+	// The state directory reaches the backend as the reserved state-dir
+	// option; InitCA stores only the operator's options.
+	be, err := openBackend(*backend, opts, *stateDir)
 	if err != nil {
 		return err
 	}
@@ -88,6 +90,9 @@ func runCAInit(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return fmt.Errorf("the CA keys are initialised, but writing %s failed: %w", dest, err)
 	}
 	var b strings.Builder
+	if d, ok := be.(keystore.Describer); ok {
+		fmt.Fprintln(&b, d.Describe())
+	}
 	for _, k := range cas.Keys {
 		pub, err := trust.ParseKey(k.Key)
 		if err != nil {

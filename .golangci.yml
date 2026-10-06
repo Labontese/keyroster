@@ -28,6 +28,8 @@ linters:
               desc: archived; use the in-repo KRL encoder
             - pkg: github.com/google/go-tpm-tools
               desc: pulls a cgo TPM simulator; use swtpm in tests
+            - pkg: github.com/google/go-tpm/tpm2/transport/simulator
+              desc: cgo TPM simulator that production never uses; use swtpm in tests
         # KEY-01: the signer is network-less by construction. Direct imports
         # of network, exec and template packages are denied in every signer
         # package (tests excluded: they may run go and OpenSSH tools).

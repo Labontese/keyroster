@@ -87,7 +87,7 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
-	backend, be, err := openStoredBackend(ctx, db, overrides)
+	backend, be, err := openStoredBackend(ctx, db, overrides, *stateDir)
 	if err != nil {
 		return err
 	}
@@ -187,8 +187,9 @@ func resolveGroups(vals []string) ([]uint32, error) {
 // its stored options overridden by overrides (for example a new agent
 // socket path). The keys are still selected by the fingerprints in the
 // trust bundle, and their custody must match it, so an override cannot
-// substitute another key.
-func openStoredBackend(ctx context.Context, db *signerdb.DB, overrides map[string]string) (string, keystore.Backend, error) {
+// substitute another key. The backend also gets stateDir as the reserved
+// state-dir option.
+func openStoredBackend(ctx context.Context, db *signerdb.DB, overrides map[string]string, stateDir string) (string, keystore.Backend, error) {
 	name, opts, err := db.BackendConfig(ctx)
 	if errors.Is(err, signerdb.ErrNotInitialised) {
 		return "", nil, signer.ErrNotInitialised
@@ -199,7 +200,7 @@ func openStoredBackend(ctx context.Context, db *signerdb.DB, overrides map[strin
 	for k, v := range overrides {
 		opts[k] = v
 	}
-	be, err := keystore.Open(name, opts)
+	be, err := openBackend(name, opts, stateDir)
 	if err != nil {
 		return "", nil, err
 	}
@@ -221,10 +222,28 @@ func parseBackendOpts(vals []string) (map[string]string, error) {
 		if !ok || k == "" {
 			return nil, fmt.Errorf("--backend-opt %q: want key=value", v)
 		}
+		if k == keystore.OptStateDir {
+			return nil, fmt.Errorf("--backend-opt %s is reserved: it is always the --state-dir directory", k)
+		}
 		if _, dup := opts[k]; dup {
 			return nil, fmt.Errorf("--backend-opt %q given twice", k)
 		}
 		opts[k] = val
 	}
 	return opts, nil
+}
+
+// openBackend opens the keystore backend name with opts plus the reserved
+// state-dir option (the absolute --state-dir), which is never stored.
+func openBackend(name string, opts map[string]string, stateDir string) (keystore.Backend, error) {
+	abs, err := filepath.Abs(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	withDir := make(map[string]string, len(opts)+1)
+	for k, v := range opts {
+		withDir[k] = v
+	}
+	withDir[keystore.OptStateDir] = abs
+	return keystore.Open(name, withDir)
 }

@@ -59,7 +59,8 @@ func Backends() []string {
 }
 
 // CheckOptions returns an error naming the first option key (in sorted
-// order) that is not in allowed.
+// order) that is not in allowed. The reserved OptStateDir is always
+// allowed.
 func CheckOptions(opts map[string]string, allowed ...string) error {
 	keys := make([]string, 0, len(opts))
 	for k := range opts {
@@ -67,7 +68,7 @@ func CheckOptions(opts map[string]string, allowed ...string) error {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		if !slices.Contains(allowed, k) {
+		if k != OptStateDir && !slices.Contains(allowed, k) {
 			return fmt.Errorf("keystore: unknown backend option %q (allowed: %v)", k, allowed)
 		}
 	}
