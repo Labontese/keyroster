@@ -23,7 +23,7 @@ There are two variants:
 > change. The deviation is visible everywhere: `keyroster root init` and
 > `keyroster root sign` print a `SOFTWARE ROOT:` banner, the `.pub` file,
 > `roots.pub`, the bundle and every ceremony summary label the key
-> `custody=software`, and `keyroster doctor` (plan 01-13) flags a
+> `custody=software`, and `keyroster-signer doctor` prints `WARN software_root` for a
 > software-held root (D-11).
 
 ## What you need

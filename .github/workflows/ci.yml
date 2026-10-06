@@ -79,6 +79,44 @@ jobs:
       - name: Scan for reachable vulnerabilities
         run: go tool -modfile=tools/go.mod govulncheck ./...
 
+  # KEY-01: no network, template, exec or plugin package (and no TPM
+  # simulator) in keyroster-signer's dependency graph, with and without the
+  # piv build tag; documented exceptions only. go list needs no C toolchain
+  # or headers, so the piv pass (CGO_ENABLED=1) installs nothing.
+  dependency-firewall:
+    name: dependency-firewall
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Check the signer's dependency graph
+        run: bash scripts/dep-firewall.sh
+
+  # REPO-02, T-01-61: fail when any package in keyroster-signer's graph gains
+  # a capability that is not in test/capslock/keyroster-signer.json.
+  capslock:
+    name: capslock
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Verify the tools module
+        run: cd tools && go mod verify
+      - name: Compare capabilities with the baseline
+        run: bash scripts/capslock-check.sh
+
   fuzz:
     name: fuzz
     runs-on: ubuntu-24.04
