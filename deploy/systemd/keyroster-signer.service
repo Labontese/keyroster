@@ -1,0 +1,86 @@
+# keyroster-signer: the signing process (KEY-01, D-08).
+#
+# Install as /etc/systemd/system/keyroster-signer.service, together with
+# deploy/sysusers.d/keyroster.conf. The TPM backend also needs the drop-in
+# keyroster-signer.service.d/tpm.conf. See docs/runbooks/signer-install.md.
+#
+# The signer is network-less by construction (no network code beyond Unix
+# sockets; scripts/dep-firewall.sh and scripts/capslock-check.sh in CI) and by
+# this sandbox: its network namespace holds only lo, it may create only
+# AF_UNIX sockets, and it runs as its own user without capabilities. The
+# systemd-sandbox CI job (test/systemd/smoke.sh) starts this exact unit on a
+# systemd host, checks the namespace and gates `systemd-analyze security`.
+[Unit]
+Description=keyroster signer (SSH certificate authority signing process)
+Documentation=https://github.com/Labontese/keyroster/blob/main/docs/runbooks/signer-install.md
+# Ordering only: with the agent or PKCS#11 backend, start after the signer's
+# own ssh-agent. The TPM backend does not need it.
+After=keyroster-signer-agent.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/keyroster-signer serve --state-dir /var/lib/keyroster-signer --socket /run/keyroster-signer/signer.sock --allow-group keyroster-admin
+Restart=on-failure
+
+# Identity. keyroster-admin as a supplementary group lets the signer chgrp
+# its socket to that group (mode 0660); it grants nothing else.
+User=keyroster-signer
+Group=keyroster-signer
+SupplementaryGroups=keyroster-admin
+
+# State and socket directories. /var/lib/keyroster-signer holds signer.db
+# (0600); /run/keyroster-signer is traversable so that keyroster-admin
+# members can reach the socket.
+StateDirectory=keyroster-signer
+StateDirectoryMode=0700
+RuntimeDirectory=keyroster-signer
+RuntimeDirectoryMode=0755
+UMask=0077
+
+# Network: a private namespace with only lo, AF_UNIX sockets only, and no IP
+# traffic even if a socket were created.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+# File system.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+
+# Privileges.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+KeyringMode=private
+
+# System calls. @chown is allowed again after the @privileged deny list:
+# the signer chgrps its own socket to keyroster-admin. Without capabilities
+# chown can only hand a file the caller owns to a group the caller is in.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=@chown
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+
+# Kernel and process visibility.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# No core dumps: the process may hold key material (software backends).
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

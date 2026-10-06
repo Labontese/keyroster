@@ -1,0 +1,48 @@
+name: Systemd
+
+# KEY-01, D-08: run keyroster-signer under its real systemd units on a
+# systemd host. test/systemd/smoke.sh installs the units, bootstraps the
+# signer (agent backend), issues a certificate as a keyroster-admin member,
+# checks that the signer's network namespace holds only lo, and gates
+# `systemd-analyze security` on the signer unit.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing by default, read-only contents per job.
+permissions: {}
+
+# The check name "systemd-sandbox" becomes a required status check in plan
+# 01-15. After that, renaming the job blocks every merge until the ruleset is
+# updated (see CONTRIBUTING.md).
+jobs:
+  systemd-sandbox:
+    name: systemd-sandbox
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Record tool versions
+        run: |
+          systemctl --version | head -n 1
+          ssh -V
+          uname -r
+      # sudo resets PATH (secure_path); pass the runner's PATH so the script
+      # finds the setup-go toolchain. The script builds as the runner user.
+      - name: Smoke test the sandboxed signer
+        run: sudo env "PATH=$PATH" bash test/systemd/smoke.sh
+      - name: Print the unit journals
+        if: failure()
+        run: sudo journalctl --no-pager -u keyroster-signer -u keyroster-signer-agent
