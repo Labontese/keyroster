@@ -12,8 +12,11 @@ in the TPM. It ends with `keyroster-signer doctor` reporting no FAIL.
 > 2.0. That run uses the **agent** backend, because the runner has no TPM.
 > The TPM backend itself is tested in CI against swtpm over a Unix socket
 > (`e2e-tpm`), not through `/dev/tpmrm0`. **This runbook's TPM path (the
-> `tpm.conf` drop-in, `/dev/tpmrm0`, group `tss`) has not run in CI.** It is
-> first exercised end to end on the homelab VM in plan 01-14. See
+> `tpm.conf` drop-in, `/dev/tpmrm0`, group `tss`, and the
+> `runuser -g keyroster-signer -G tss` commands below) has not run in CI.**
+> Neither has the agent unit's PKCS#11 path (`-P` loading a module through
+> `ssh-pkcs11-helper` under the unit's sandbox): the smoke test loads plain
+> keys only. Both are first exercised on the homelab VM in plan 01-14. See
 > [docs/security/custody.md](../security/custody.md).
 
 ## What you need
@@ -51,8 +54,12 @@ manager device; it does not use `tpm2-abrmd` or `tpm2-tools`.
 ## 2. Verify and install the binaries
 
 Phase 1 has no signed releases yet (Phase 6). Build from the reviewed commit
-on two independent machines and compare the hashes. The Go toolchain builds
-reproducibly with these flags, so the hashes must match:
+on two independent machines with the **same Go toolchain version** (the one
+in `go.mod`'s `toolchain` line, currently go1.27.1) and compare the
+hashes. Go builds are designed to be reproducible with these flags, so the
+hashes should match; keyroster has not yet verified this itself (release
+reproducibility is checked in Phase 6). Investigate any difference before
+installing:
 
 ```
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o keyroster-signer ./cmd/keyroster-signer
