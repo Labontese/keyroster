@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-13 Task 4 merge gate: owner approves PR #15"
-last_updated: "2026-10-06T12:06:03.058Z"
-last_activity: 2026-10-04
+stopped_at: "01-14 Task 4 merge gate: owner approves PR #17"
+last_updated: "2026-10-06T13:21:35.316Z"
+last_activity: 2026-10-06
 last_activity_desc: Phase 01 execution started
-state_head: 66fd3c3974232f463759def280e007f6593dc2e7
+state_head: 847db5f72c068734e1a88cb6311098ef87b6175a
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 14
+  completed_plans: 15
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 15 of 16
+Plan: 16 of 16
 Status: Ready to execute
 Last activity: 2026-10-06 - Completed quick task 261006-ixz: Fix flaky signer freshness-boundary tests with a deterministic test clock
 
@@ -70,6 +70,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P11 | 40 min | 3 tasks | 19 files |
 | Phase 01 P12 | 22 min | 2 tasks | 12 files |
 | Phase 01 P13 | 47 min | 3 tasks | 26 files |
+| Phase 01 P14 | 45 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -135,6 +136,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-13: capslock baseline is (package, capability) pairs from -output package (22 packages, 73 pairs); a name-only diff would miss almost everything
 - [Phase 01]: 01-13: one dependency-firewall exception, os/exec <- modernc.org/libc (only libc.Xsystem, never referenced by modernc.org/sqlite)
 - [Phase 01]: 01-13: doctor never reports vtpm, agent or software keys as hardware custody; capslock -tags piv deferred to 01-15
+- [Phase 01]: 01-14: owner decision 'Testceremoni nu, riktig sen' - TEST software roots made on the networked workstation (WSL, unshare -r -n); homelab signer is dogfood only until a real offline ceremony plus successor rotation
+- [Phase 01]: 01-14: KEY-07 stays open and must-have truth 2 is unmet; only KEY-04 and VIS-03 marked complete
+- [Phase 01]: 01-14: the ceremony transcript is kept by the owner, not committed (runbook step 7 and template corrected)
 
 ### Pending Todos
 
@@ -164,6 +168,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-06T06:48:37.151Z
-Stopped at: 01-13 Task 4 merge gate: owner approves PR #15
+Last session: 2026-10-06T13:21:35.242Z
+Stopped at: 01-14 Task 4 merge gate: owner approves PR #17
 Resume file: None
