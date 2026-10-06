@@ -85,6 +85,11 @@ tests).
    sha256sum /tmp/keyroster
    ```
 
+   `/media/transfer`, `/media/usbA` and `/media/usbB` in this runbook stand
+   for wherever the sticks are mounted. A live desktop session usually
+   mounts them under `/media/<user>/<LABEL>`;
+   `lsblk -o NAME,LABEL,MOUNTPOINT` shows the actual mount points.
+
 ## 2. Prepare the CA public keys and the genesis policy (signer host)
 
 On the signer host, which has a network but no root key (the
@@ -225,7 +230,10 @@ install as its first audit entry. Record the install time in the transcript.
   the decrypted keys and `/tmp/keyroster` are gone. **Never connect the
   ceremony machine to a network** during the ceremony, and do not reuse its
   live session afterwards.
-- Commit the filled-in transcript (no secrets) to the repository's docs.
+- Keep the filled-in transcript with your own records, away from the
+  sticks. Do not commit it: it says where the root media and passphrases
+  are kept. The public results (root fingerprints, bundle and policy
+  SHA-256) are in the signed bundle and the signer's audit log anyway.
 
 ## Hardware-root variant
 

@@ -1,13 +1,14 @@
 # Root ceremony transcript
 
-Copy this file to `docs/ceremonies/<date>-<purpose>.md`, fill it in during
-the ceremony ([root-ceremony.md](root-ceremony.md)) and commit it through a
-pull request.
+Copy this file, fill it in during the ceremony
+([root-ceremony.md](root-ceremony.md)) and keep it with your own records.
+Do not commit it: the storage section says where the root media and
+passphrases are kept.
 
 **Passphrases, key files and network details are never recorded here.**
 Do not write a passphrase, a hint to a passphrase, the contents of an
 `.age` file, a private key, an IP address or a hostname into this
-transcript. Everything below is public.
+transcript. Nothing below is secret, but the storage section is private.
 
 ## Ceremony
 
