@@ -12,7 +12,7 @@ log. It cannot be hidden by the online CA host.
 | Custody | Where the key lives | Backend | Notes |
 |---|---|---|---|
 | `pkcs11-agent` | A hardware security module (YubiHSM 2, Nitrokey HSM 2, SmartCard-HSM) reached through OpenSSH `ssh-agent` and `ssh-pkcs11-helper` | `agent` with `custody=pkcs11-agent` | See [docs/backends/pkcs11.md](../backends/pkcs11.md). The key cannot be exported. |
-| `piv` | A YubiKey PIV slot | `piv` (build tag, later plan) | The key cannot be exported. Touch and PIN policies are per slot. |
+| `piv` | A YubiKey PIV slot | `piv` (build tag `piv`, not in default binaries) | See [docs/backends/piv.md](../backends/piv.md). The key cannot be exported. Touch and PIN policies are per slot. Not yet validated on a real YubiKey ([needs-hardware.md](needs-hardware.md)). |
 | `tpm` | A physical TPM 2.0 chip or firmware TPM (Intel PTT, AMD fTPM, Infineon, Nuvoton, STMicroelectronics, ...) | `tpm` | The key is created inside the TPM and is wrapped by its storage root key. It cannot be used without that TPM and the key's auth value. |
 | `vtpm` | A virtual or software TPM: swtpm/libtpms (QEMU, Proxmox VE), Hyper-V, Google Cloud | `tpm` | Weaker than a physical TPM, stronger than a software key. See below. |
 | `agent` | A plain private key loaded into `ssh-agent` | `agent` | **Test and development only.** The key exists as a file somewhere. `doctor` flags it. |

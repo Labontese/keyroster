@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-11 Task 4 merge gate: owner approves PR #12"
-last_updated: "2026-10-06T03:58:32.316Z"
+stopped_at: "01-12 Task 3 merge gate: owner approves PR #14"
+last_updated: "2026-10-06T05:51:24.488Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 58a02a4f69244fca004407dcaeb28fccbeb5c9ab
+state_head: 7f5524d67c2b992408393d2c59ef6506034a77b0
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 12
+  completed_plans: 13
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 13 of 16
+Plan: 14 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -68,6 +68,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P08 | 25 min | 2 tasks | 8 files |
 | Phase 01 P10 | 25 min | 2 tasks | 5 files |
 | Phase 01 P11 | 40 min | 3 tasks | 19 files |
+| Phase 01 P12 | 22 min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -125,6 +126,10 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-11: swtpm-tcp transport not built (works with swtpm, but a TCP client in the signer conflicts with KEY-01; unixio needs no root)
 - [Phase 01]: 01-11: TPM custody derived from TPM_PT_MANUFACTURER at open time (IBM/MSFT/GOOG = vtpm); the custody option can only weaken to vtpm
 - [Phase 01]: 01-11: reserved keystore option state-dir is added by ca-init/install-bundle/serve at open time, never stored, refused as --backend-opt
+- [Phase 01]: 01-12: the PIV backend keeps no files; Key() reads each slot's public key and origin through GET METADATA, so firmware below 5.3.0 is refused
+- [Phase 01]: 01-12: only piv-go ErrNotFound counts as an empty slot; Provision checks all five slots before generating anything and refuses imported keys, default PIN and default management key
+- [Phase 01]: 01-12: mgmt-key-file is needed only for provisioning; the guide moves it off the host after ca-init (serve/install-bundle use --backend-opt mgmt-key-file=)
+- [Phase 01]: 01-12: the PIV backend verifies the PIN once at open and refuses on a wrong PIN; piv-go checks the PIN only inside Sign, so otherwise each signing request with a wrong PIN would use up a card PIN retry
 
 ### Pending Todos
 
@@ -148,6 +153,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-06T03:58:32.252Z
-Stopped at: 01-11 Task 4 merge gate: owner approves PR #12
+Last session: 2026-10-06T05:32:39.496Z
+Stopped at: 01-12 Task 3 merge gate: owner approves PR #14
 Resume file: None

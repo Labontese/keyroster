@@ -187,4 +187,5 @@ line.
 **needs-hardware:** no real YubiHSM 2 (or other hardware HSM) has been
 tested yet. Validation on real hardware, including the connector setup and
 the authentication-key capabilities above, is tracked as a needs-hardware
-item for the Phase 6 review (D-12).
+item for the Phase 6 review (D-12); see
+[docs/security/needs-hardware.md](../security/needs-hardware.md).

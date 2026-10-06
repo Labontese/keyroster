@@ -24,7 +24,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 - [ ] **KEY-02**: Signer only issues when the request carries evidence it verifies itself (WebAuthn assertion over the request digest, required approvals, quorum-signed policy version)
 - [x] **KEY-03**: Admin can store CA keys in a PKCS#11 HSM (e.g. YubiHSM 2) via ssh-agent
 - [ ] **KEY-04**: Admin can store CA keys in a TPM 2.0
-- [ ] **KEY-05**: Admin can store CA keys in a YubiKey PIV slot
+- [x] **KEY-05**: Admin can store CA keys in a YubiKey PIV slot
 - [ ] **KEY-06**: Admin can use an encrypted software CA key for evaluation, with a loud warning in CLI and UI
 - [ ] **KEY-07**: Admin can perform an offline trust-root ceremony (M-of-N hardware keys) producing a root that signs only trust bundles, KRL authority and policy
 - [ ] **KEY-08**: Admin can rotate a CA key without fleet outage (old and new trusted in parallel until all hosts converge)
@@ -177,7 +177,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | KEY-02 | Phase 2 | Pending |
 | KEY-03 | Phase 1 | Complete |
 | KEY-04 | Phase 1 | Pending |
-| KEY-05 | Phase 1 | Pending |
+| KEY-05 | Phase 1 | Complete |
 | KEY-06 | Phase 2 | Pending |
 | KEY-07 | Phase 1 | Pending |
 | KEY-08 | Phase 3 | Pending |

@@ -1,0 +1,84 @@
+name: PIV
+
+# YubiKey PIV backend (KEY-05, D-12). The backend is behind the piv build tag
+# and links pcsc-lite through cgo (piv-go). CI has no YubiKey: the unit tests
+# run the backend against an in-memory fake card. Real-hardware validation is
+# tracked in docs/security/needs-hardware.md for the Phase 6 review.
+#
+# The job also proves the exclusion (T-01-53): default builds (CGO_ENABLED=0,
+# no tags) of keyroster and keyroster-signer link neither piv-go nor cgo.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing by default, read-only contents per job.
+permissions: {}
+
+# The check name "build-piv" becomes a required status check in plan 01-15.
+# After that, renaming the job blocks every merge until the ruleset is updated
+# (see CONTRIBUTING.md).
+jobs:
+  build-piv:
+    name: build-piv
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Build-only package from the Ubuntu archive (T-01-SC); no Go modules.
+      - name: Install pcsc-lite headers
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libpcsclite-dev
+      - name: Record tool versions
+        run: |
+          dpkg-query -W libpcsclite-dev libpcsclite1
+          go version
+      - name: Vet the tagged packages
+        run: CGO_ENABLED=1 go vet -tags piv ./internal/keystore/piv/... ./cmd/keyroster-signer/...
+      # The lint job in ci.yml builds without tags, so it never sees the
+      # piv package; lint it here with the same pinned linter and config.
+      - name: Lint the tagged package
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          CGO_ENABLED: "1"
+        with:
+          version: v2.14.0
+          args: --build-tags piv ./internal/keystore/piv/...
+      - name: Run the PIV keystore unit tests (race detector)
+        run: CGO_ENABLED=1 go test -race -tags piv -count=1 -v ./internal/keystore/piv/...
+      - name: Build keyroster-signer with the PIV backend
+        run: |
+          CGO_ENABLED=1 go build -tags piv -o "$RUNNER_TEMP/keyroster-signer-piv" ./cmd/keyroster-signer
+          go version -m "$RUNNER_TEMP/keyroster-signer-piv" | tee "$RUNNER_TEMP/piv-buildinfo.txt"
+          grep -q 'github.com/go-piv/piv-go/v2' "$RUNNER_TEMP/piv-buildinfo.txt"
+          grep -q 'CGO_ENABLED=1' "$RUNNER_TEMP/piv-buildinfo.txt"
+      - name: Default builds exclude piv-go and cgo
+        run: |
+          CGO_ENABLED=0 go build ./...
+          deps=$(CGO_ENABLED=0 go list -deps ./cmd/keyroster-signer ./cmd/keyroster)
+          if grep -q 'github.com/go-piv/piv-go' <<<"$deps"; then
+            echo "a default build links piv-go" >&2
+            exit 1
+          fi
+          for cmd in keyroster keyroster-signer; do
+            CGO_ENABLED=0 go build -o "$RUNNER_TEMP/$cmd" "./cmd/$cmd"
+            go version -m "$RUNNER_TEMP/$cmd" >"$RUNNER_TEMP/$cmd-buildinfo.txt"
+            grep -q 'CGO_ENABLED=0' "$RUNNER_TEMP/$cmd-buildinfo.txt"
+            if grep -q 'go-piv' "$RUNNER_TEMP/$cmd-buildinfo.txt"; then
+              echo "$cmd links piv-go" >&2
+              exit 1
+            fi
+          done
+          echo "default keyroster and keyroster-signer: CGO_ENABLED=0, no piv-go"
