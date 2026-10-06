@@ -50,6 +50,11 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends swtpm
+          # The runner's cloud kernel ships tpm_vtpm_proxy only in the
+          # matching linux-modules-extra package.
+          if [ "$SWTPM_MODE" = vtpm-proxy ]; then
+            sudo apt-get install -y -q --no-install-recommends "linux-modules-extra-$(uname -r)"
+          fi
       - name: Record tool versions
         run: |
           dpkg-query -W swtpm libtpms0
