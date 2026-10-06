@@ -1,0 +1,93 @@
+name: E2E TPM
+
+# TPM 2.0 path (KEY-04, D-07, D-08, D-09): keyroster-signer ca-init --backend
+# tpm creates the CA, ops and log keys as ECDSA P-256 keys inside a TPM. CI uses
+# swtpm (Ubuntu archive), which reports manufacturer IBM, so the keys are
+# recorded as custody vtpm. scripts/swtpm-setup.sh starts it on a Unix socket
+# (unixio). The runner's azure kernel has no tpm_vtpm_proxy module, so the
+# production device path (/dev/tpmrm0) is not exercised here; see
+# docs/security/custody.md.
+#
+# The job also runs the TPM keystore unit tests under -race with swtpm
+# present (KEYROSTER_TPM_REQUIRE=1 turns a missing swtpm into a failure); the
+# build-test job has no swtpm and skips them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing by default, read-only contents per job.
+permissions: {}
+
+# The check name "e2e-tpm" becomes a required status check in plan 01-15.
+# After that, renaming the job blocks every merge until the ruleset is updated
+# (see CONTRIBUTING.md).
+jobs:
+  e2e-tpm:
+    name: e2e-tpm
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      OPENSSH_VERSION: "10.5p1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Test-only packages from the Ubuntu archive (T-01-SC); no Go modules.
+      - name: Install swtpm
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends swtpm
+      - name: Record tool versions
+        run: |
+          dpkg-query -W swtpm libtpms0
+          uname -r
+      # Same cache and build as e2e.yml: caches written by a pull_request run
+      # are scoped to that PR's ref, and the key changes with the build script
+      # (which holds the SHA-256 pins).
+      - name: Restore the OpenSSH build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/keyroster/openssh-${{ env.OPENSSH_VERSION }}
+          key: openssh-${{ runner.os }}-${{ env.OPENSSH_VERSION }}-${{ hashFiles('scripts/build-openssh.sh') }}
+      - name: Build OpenSSH (verified tarball)
+        run: bash scripts/build-openssh.sh "$OPENSSH_VERSION"
+      - name: Run the TPM keystore unit tests (race detector)
+        env:
+          KEYROSTER_TPM_REQUIRE: "1"
+        run: CGO_ENABLED=1 go test -race -count=1 -v ./internal/keystore/tpm/...
+      - name: Start swtpm
+        run: |
+          dir="$RUNNER_TEMP/swtpm"
+          bash scripts/swtpm-setup.sh "$dir" | tail -n 1 >>"$GITHUB_ENV"
+          echo "SWTPM_DIR=$dir" >>"$GITHUB_ENV"
+      - name: Run the TPM e2e suite
+        run: |
+          mkdir -p e2e-logs
+          echo "KEYROSTER_TPM_OPTS=$KEYROSTER_TPM_OPTS"
+          KEYROSTER_OPENSSH_PREFIX="$HOME/.cache/keyroster/openssh-$OPENSSH_VERSION" \
+            go test -tags e2e_tpm -count=1 -v ./test/e2e/... 2>&1 | tee e2e-logs/go-test-tpm.log
+      - name: Collect the swtpm log
+        if: always()
+        run: |
+          mkdir -p e2e-logs
+          cat "$SWTPM_DIR/swtpm.log" >e2e-logs/swtpm.log 2>/dev/null || true
+      # The harness prints the signer and sshd logs of every failed test into
+      # the go test output captured above.
+      - name: Upload the test logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-tpm-logs
+          path: e2e-logs/
+          retention-days: 7
+          if-no-files-found: warn

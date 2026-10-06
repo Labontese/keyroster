@@ -50,6 +50,20 @@ type Backend interface {
 	Close() error
 }
 
+// OptStateDir is the reserved backend option through which keyroster-signer
+// (ca-init, install-bundle and serve) passes its state directory, for
+// backends that keep files there (the TPM backend's key files). Operators
+// cannot set it, it is never stored with the backend configuration, and
+// CheckOptions accepts it for every backend.
+const OptStateDir = "state-dir"
+
+// Describer is implemented by backends that have a one-line description for
+// the operator, for example the TPM manufacturer and the custody derived
+// from it. ca-init prints it.
+type Describer interface {
+	Describe() string
+}
+
 // Provisioner is implemented by backends that can create keys in place (for
 // example inside a TPM), returning the new public keys.
 type Provisioner interface {

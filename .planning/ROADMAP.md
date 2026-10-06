@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A certificate issued through the signer is accepted by real `sshd` on OpenSSH 9.5p2 and on the latest release in CI. It carries a unique non-zero serial that is never reissued, even after the signer's state is restored from an older copy, plus a structured key ID and `permit-pty`-only extensions. The signer refuses empty, wildcard or malformed principals, certificate-type CA keys, and anything other than a client-supplied public key.
   5. Every issuance is in the Merkle audit log before the certificate is released; `sshcm audit verify` checks the log end to end, fails on any tampered or removed entry, and can export it.
 
-**Plans:** 11/16 plans executed (11 waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
+**Plans:** 12/16 plans executed (11 waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
 
 Plans:
 **Wave 1**
@@ -63,7 +63,7 @@ Plans:
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [x] 01-10-PLAN.md — PKCS#11/SoftHSM2 through ssh-agent: P-256 and Ed25519 lanes, PKCS#11-held root (wave 8)
-- [ ] 01-11-PLAN.md — TPM 2.0 backend (P-256) with swtpm CI lane and vTPM custody detection; legitimacy gate for go-tpm-keyfiles (wave 8)
+- [x] 01-11-PLAN.md — TPM 2.0 backend (P-256) with swtpm CI lane and vTPM custody detection; legitimacy gate for go-tpm-keyfiles (wave 8)
 
 **Wave 9** *(blocked on Wave 8 completion)*
 - [ ] 01-12-PLAN.md — Build-tagged YubiKey PIV backend and the needs-hardware tracking for Phase 6 (wave 9)
@@ -170,7 +170,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Trust Core | 11/16 | In Progress|  |
+| 1. Trust Core | 12/16 | In Progress|  |
 | 2. Passkey Login MVP | 0/TBD | Not started | - |
 | 3. Linux Agent and Revocation | 0/TBD | Not started | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
