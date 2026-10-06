@@ -1,0 +1,119 @@
+{
+  "github.com/Labontese/keyroster/cmd/keyroster-signer": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_EXEC",
+    "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_READ_SYSTEM_STATE",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_RUNTIME",
+    "CAPABILITY_SYSTEM_CALLS",
+    "CAPABILITY_UNANALYZED",
+    "CAPABILITY_UNSAFE_POINTER"
+  ],
+  "github.com/Labontese/keyroster/internal/audit": [
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_UNANALYZED"
+  ],
+  "github.com/Labontese/keyroster/internal/cert": [
+    "CAPABILITY_ARBITRARY_EXECUTION"
+  ],
+  "github.com/Labontese/keyroster/internal/keystore": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_FILES",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_SYSTEM_CALLS",
+    "CAPABILITY_UNANALYZED"
+  ],
+  "github.com/Labontese/keyroster/internal/keystore/agent": [
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_UNANALYZED"
+  ],
+  "github.com/Labontese/keyroster/internal/keystore/tpm": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_FILES",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_SYSTEM_CALLS"
+  ],
+  "github.com/Labontese/keyroster/internal/signer": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_RUNTIME"
+  ],
+  "github.com/Labontese/keyroster/internal/signerdb": [
+    "CAPABILITY_EXEC",
+    "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_READ_SYSTEM_STATE",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_RUNTIME",
+    "CAPABILITY_SYSTEM_CALLS",
+    "CAPABILITY_UNANALYZED",
+    "CAPABILITY_UNSAFE_POINTER"
+  ],
+  "github.com/Labontese/keyroster/internal/sshsig": [
+    "CAPABILITY_ARBITRARY_EXECUTION"
+  ],
+  "github.com/Labontese/keyroster/internal/trust": [
+    "CAPABILITY_ARBITRARY_EXECUTION"
+  ],
+  "github.com/google/go-tpm/tpm2": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_SYSTEM_CALLS"
+  ],
+  "github.com/google/go-tpm/tpm2/transport": [
+    "CAPABILITY_FILES",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_SYSTEM_CALLS"
+  ],
+  "github.com/google/go-tpm/tpm2/transport/linuxtpm": [
+    "CAPABILITY_FILES"
+  ],
+  "github.com/google/go-tpm/tpm2/transport/linuxudstpm": [
+    "CAPABILITY_NETWORK"
+  ],
+  "github.com/google/go-tpm/tpmutil": [
+    "CAPABILITY_SYSTEM_CALLS"
+  ],
+  "golang.org/x/crypto/ssh": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_UNANALYZED"
+  ],
+  "golang.org/x/crypto/ssh/agent": [
+    "CAPABILITY_UNANALYZED"
+  ],
+  "golang.org/x/sys/unix": [
+    "CAPABILITY_SYSTEM_CALLS"
+  ],
+  "modernc.org/libc": [
+    "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
+    "CAPABILITY_READ_SYSTEM_STATE",
+    "CAPABILITY_SYSTEM_CALLS"
+  ],
+  "modernc.org/memory": [
+    "CAPABILITY_SYSTEM_CALLS"
+  ],
+  "modernc.org/sqlite": [
+    "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
+    "CAPABILITY_READ_SYSTEM_STATE",
+    "CAPABILITY_RUNTIME",
+    "CAPABILITY_SYSTEM_CALLS",
+    "CAPABILITY_UNSAFE_POINTER"
+  ],
+  "modernc.org/sqlite/lib": [
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
+    "CAPABILITY_RUNTIME",
+    "CAPABILITY_UNSAFE_POINTER"
+  ]
+}

@@ -20,7 +20,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Key Custody (KEY)
 
-- [ ] **KEY-01**: CA keys live in a separate, network-less signer process behind a `Signer` interface
+- [x] **KEY-01**: CA keys live in a separate, network-less signer process behind a `Signer` interface
 - [ ] **KEY-02**: Signer only issues when the request carries evidence it verifies itself (WebAuthn assertion over the request digest, required approvals, quorum-signed policy version)
 - [x] **KEY-03**: Admin can store CA keys in a PKCS#11 HSM (e.g. YubiHSM 2) via ssh-agent
 - [ ] **KEY-04**: Admin can store CA keys in a TPM 2.0
@@ -104,7 +104,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 ### Supply Chain & Repository (REPO)
 
 - [ ] **REPO-01**: Protected `main` via rulesets: PR only, required checks, required review, signed commits, linear history, no force-push
-- [ ] **REPO-02**: GitHub Actions CI: build, test, lint, govulncheck, fuzzing, e2e against real sshd; actions pinned by SHA with least-privilege permissions
+- [x] **REPO-02**: GitHub Actions CI: build, test, lint, govulncheck, fuzzing, e2e against real sshd; actions pinned by SHA with least-privilege permissions
 - [ ] **REPO-03**: CodeQL, Dependabot (gomod + actions), secret scanning with push protection, OpenSSF Scorecard
 - [x] **REPO-04**: SECURITY.md with private vulnerability reporting; README, LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CODEOWNERS, issue/PR templates
 - [ ] **REPO-05**: Reproducible, static builds (`CGO_ENABLED=0`) for all target platforms
@@ -173,7 +173,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CA-06 | Phase 1 | Complete |
 | CA-07 | Phase 1 | Complete |
 | CA-08 | Phase 1 | Pending |
-| KEY-01 | Phase 1 | Pending |
+| KEY-01 | Phase 1 | Complete |
 | KEY-02 | Phase 2 | Pending |
 | KEY-03 | Phase 1 | Complete |
 | KEY-04 | Phase 1 | Pending |
@@ -227,7 +227,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-04 | Phase 5 | Pending |
 | PLAT-05 | Phase 2 | Pending |
 | REPO-01 | Phase 1 | Pending |
-| REPO-02 | Phase 1 | Pending |
+| REPO-02 | Phase 1 | Complete |
 | REPO-03 | Phase 1 | Pending |
 | REPO-04 | Phase 1 | Complete |
 | REPO-05 | Phase 6 | Pending |

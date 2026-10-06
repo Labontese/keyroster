@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/Labontese/keyroster/internal/signerdb"
@@ -73,7 +74,26 @@ func (s *Signer) loadLog(ctx context.Context) error {
 // stored hashes) and requires the latest checkpoint to verify with the log
 // key and to match the recomputed size and root.
 func (s *Signer) rebuildLog(ctx context.Context) (*tlog.Log, uint64, error) {
-	hashes, err := s.db.LeafHashes(ctx)
+	return rebuildLogFrom(ctx, s.db, s.cpVerifier)
+}
+
+// CheckLog runs the start-up log check of serve without starting a signer:
+// the stored leaves must decode, match their stored hashes and reproduce the
+// latest checkpoint, which must verify with logKey (the recorded log key).
+// It only reads db. keyroster-signer doctor uses it; an error wraps the
+// reason.
+func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error {
+	v, err := tlog.NewNoteVerifier(tlog.Origin(logKey), logKey)
+	if err != nil {
+		return fmt.Errorf("signer: log key: %w", err)
+	}
+	_, _, err = rebuildLogFrom(ctx, db, v)
+	return err
+}
+
+// rebuildLogFrom is rebuildLog over db with the checkpoint verifier v.
+func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlog.Log, uint64, error) {
+	hashes, err := db.LeafHashes(ctx)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
@@ -82,7 +102,7 @@ func (s *Signer) rebuildLog(ctx context.Context) (*tlog.Log, uint64, error) {
 		count int
 	)
 	// ForEachLeaf yields idx = 0, 1, 2, ... without gaps, so count == idx.
-	err = s.db.ForEachLeaf(ctx, func(idx uint64, leaf []byte) error {
+	err = db.ForEachLeaf(ctx, func(idx uint64, leaf []byte) error {
 		if count >= len(hashes) {
 			return fmt.Errorf("%w: leaf %d has no stored hash", errLogMismatch, idx)
 		}
@@ -120,7 +140,7 @@ func (s *Signer) rebuildLog(ctx context.Context) (*tlog.Log, uint64, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
-	msg, size, err := s.db.LatestCheckpoint(ctx)
+	msg, size, err := db.LatestCheckpoint(ctx)
 	if errors.Is(err, signerdb.ErrNoCheckpoint) {
 		if tree.Size() != 0 {
 			return nil, 0, fmt.Errorf("%w: %d leaves but no checkpoint", errLogMismatch, tree.Size())
@@ -130,7 +150,7 @@ func (s *Signer) rebuildLog(ctx context.Context) (*tlog.Log, uint64, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
-	cp, err := tlog.OpenCheckpoint(msg, s.cpVerifier)
+	cp, err := tlog.OpenCheckpoint(msg, v)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: latest checkpoint: %w", errLogMismatch, err)
 	}

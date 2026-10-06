@@ -1,0 +1,78 @@
+# keyroster-signer-agent: the signer's own ssh-agent, for the agent and
+# PKCS#11 backends (KEY-01, D-08).
+#
+# Install as /etc/systemd/system/keyroster-signer-agent.service. ca-init then
+# uses --backend agent --backend-opt socket=/run/keyroster-signer-agent/agent.sock.
+#
+# THIS AGENT MUST NEVER BE FORWARDED. Nobody points SSH_AUTH_SOCK at it in an
+# ssh session, and nobody runs ssh -A with it. It holds the CA keys (or the
+# PKCS#11 handles to them) and serves only its own user. OpenSSH 10.5 fixed a
+# bug where a locked, forwarded agent could be made to add PKCS#11 tokens
+# remotely; not forwarding it at all removes that whole class.
+#
+# -P limits the PKCS#11 modules the agent will load (through
+# ssh-pkcs11-helper) to SoftHSM2 (tests), the YubiKey PIV module and the
+# YubiHSM 2 module. Adjust the list to the one module in use.
+[Unit]
+Description=keyroster signer ssh-agent (CA keys; never forwarded)
+Documentation=https://github.com/Labontese/keyroster/blob/main/docs/runbooks/signer-install.md
+Before=keyroster-signer.service
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/ssh-agent -D -a /run/keyroster-signer-agent/agent.sock -P /usr/lib/softhsm/libsofthsm2.so,/usr/lib/x86_64-linux-gnu/libykcs11.so*,/usr/lib/x86_64-linux-gnu/pkcs11/yubihsm_pkcs11.so
+Restart=on-failure
+
+User=keyroster-signer
+Group=keyroster-signer
+RuntimeDirectory=keyroster-signer-agent
+RuntimeDirectoryMode=0700
+UMask=0077
+
+# Network: unlike the signer, the agent keeps the host network namespace,
+# because yubihsm_pkcs11 talks to yubihsm-connector on localhost. IP traffic
+# is limited to localhost.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+# File system.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+
+# Privileges.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+KeyringMode=private
+
+# System calls. ssh-agent drops a historical setgid bit at start with
+# setgid(getgid()) and ignores the result; EPERM instead of the default kill
+# lets that no-op fail quietly under the @privileged deny list.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+
+# Kernel and process visibility.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
