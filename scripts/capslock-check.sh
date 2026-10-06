@@ -53,7 +53,8 @@ check_target() {
 	local name=$1 tags=$2 cgo=$3 baseline=$4 out cur base new gone
 	out=$(mktemp)
 	trap 'rm -f "$out"' RETURN
-	echo "== capslock $(go tool -modfile=tools/go.mod capslock -version 2>&1 | head -n 1): $name (GOOS=linux GOARCH=amd64 CGO_ENABLED=$cgo tags=${tags:-none})"
+	# stderr carries "go: downloading ..." on a cold module cache.
+	echo "== $(go tool -modfile=tools/go.mod capslock -version 2>/dev/null | head -n 1): $name (GOOS=linux GOARCH=amd64 CGO_ENABLED=$cgo tags=${tags:-none})"
 	if ! CGO_ENABLED=$cgo go tool -modfile=tools/go.mod capslock \
 		-packages ./cmd/keyroster-signer -goos linux -goarch amd64 \
 		-buildtags "$tags" -force_local_module -output package >"$out"; then
