@@ -160,12 +160,12 @@ func TestDoctorFailures(t *testing.T) {
 		want   string
 	}{
 		{"state dir 0750", func(t *testing.T, s doctorState) {
-			if err := os.Chmod(s.dir, 0o750); err != nil {
+			if err := os.Chmod(s.dir, 0o750); err != nil { //nolint:gosec // G302: the test widens the mode on purpose
 				t.Fatal(err)
 			}
 		}, "FAIL state_dir_permissions:"},
 		{"db 0644", func(t *testing.T, s doctorState) {
-			if err := os.Chmod(s.db, 0o644); err != nil {
+			if err := os.Chmod(s.db, 0o644); err != nil { //nolint:gosec // G302: the test widens the mode on purpose
 				t.Fatal(err)
 			}
 		}, "FAIL db_permissions:"},

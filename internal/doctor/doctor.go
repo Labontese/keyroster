@@ -231,7 +231,7 @@ func rootResults(roots []trust.RootKey) []Result {
 		fp := keyFingerprint(rk.Key)
 		if rk.Custody == "software" {
 			rs = append(rs, Result{Level: WARN, Code: CodeSoftwareRoot, Message: fmt.Sprintf(
-				"SOFTWARE ROOT: root %s is a software key (an age-encrypted file), not hardware custody; whoever obtains the file and its passphrase can sign trust bundles (D-11, docs/security/custody.md)", fp)})
+				"SOFTWARE ROOT: root %s has custody software, not hardware: whoever copies the key (for example the age-encrypted file and its passphrase) can sign trust bundles (D-11, docs/security/custody.md)", fp)})
 			continue
 		}
 		hardware = append(hardware, fp+" ("+rk.Custody+")")
