@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-08 Task 3 merge gate: owner approves PR #10"
-last_updated: "2026-10-05T13:17:17.854Z"
+stopped_at: "01-10 Task 3 merge gate: owner approves PR #11"
+last_updated: "2026-10-05T14:41:26.348Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 074247c32b99f242066d087aa61f24ad8c3dbdbe
+state_head: 5f6c732e88c2b5c69837c1e767d5f1607dc5f3e3
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 10
+  completed_plans: 11
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 11 of 16
+Plan: 12 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -66,6 +66,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P07 | 35 min | 3 tasks | 28 files |
 | Phase 01 P09 | 30 min | 2 tasks | 14 files |
 | Phase 01 P08 | 25 min | 2 tasks | 8 files |
+| Phase 01 P10 | 25 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -117,6 +118,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-08: audit verify trusts only --pin/--threshold; the log key (checkpoint and --previous) and each role's active CA come only from bundle_install entries verified as genesis (pins) or successor (TUF); Phase 1 refuses a log-key change (log key change unsupported)
 - [Phase 01]: 01-08: audit verify requires each issue leaf after the first bundle_install, signed by its role's active CA, a host certificate exactly for the host role, and key ID pol and leaf policy version equal to the policy in force; bundle_install's bundle_version must equal its bundle; --threshold is required
 - [Phase 01]: 01-08: host certificates presented as user certificates are tested with an x/crypto/ssh client because the OpenSSH client never offers a non-user certificate; sshd refuses them (Certificate invalid: not a user certificate)
+- [Phase 01]: 01-10: CA and root SoftHSM2 tokens use separate token directories and agents (T-01-47); PINs reach pkcs11-tool via env:NAME and ssh-add via SSH_ASKPASS, never argv
+- [Phase 01]: 01-10: TestPKCS11Ed25519 asserts refusal on ssh-agent older than 10.1 instead of skipping; fingerprint_test.go (!e2e && (e2e_pkcs11 || e2e_tpm)) supplies fingerprint for hardware-backend e2e builds
 
 ### Pending Todos
 
@@ -140,6 +143,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T13:16:57.505Z
-Stopped at: 01-08 Task 3 merge gate: owner approves PR #10
+Last session: 2026-10-05T14:41:10.206Z
+Stopped at: 01-10 Task 3 merge gate: owner approves PR #11
 Resume file: None
