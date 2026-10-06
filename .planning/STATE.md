@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
 status: executing
-stopped_at: "01-10 Task 3 merge gate: owner approves PR #11"
-last_updated: "2026-10-05T14:41:26.348Z"
+stopped_at: "01-11 Task 4 merge gate: owner approves PR #12"
+last_updated: "2026-10-06T03:58:32.316Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: 5f6c732e88c2b5c69837c1e767d5f1607dc5f3e3
+state_head: 58a02a4f69244fca004407dcaeb28fccbeb5c9ab
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 11
+  completed_plans: 12
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 01 (Trust Core) — EXECUTING
-Plan: 12 of 16
+Plan: 13 of 16
 Status: Ready to execute
 Last activity: 2026-10-04 — Phase 01 execution started
 
@@ -67,6 +67,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P09 | 30 min | 2 tasks | 14 files |
 | Phase 01 P08 | 25 min | 2 tasks | 8 files |
 | Phase 01 P10 | 25 min | 2 tasks | 5 files |
+| Phase 01 P11 | 40 min | 3 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -120,6 +121,10 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-08: host certificates presented as user certificates are tested with an x/crypto/ssh client because the OpenSSH client never offers a non-user certificate; sshd refuses them (Certificate invalid: not a user certificate)
 - [Phase 01]: 01-10: CA and root SoftHSM2 tokens use separate token directories and agents (T-01-47); PINs reach pkcs11-tool via env:NAME and ssh-add via SSH_ASKPASS, never argv
 - [Phase 01]: 01-10: TestPKCS11Ed25519 asserts refusal on ssh-agent older than 10.1 instead of skipping; fingerprint_test.go (!e2e && (e2e_pkcs11 || e2e_tpm)) supplies fingerprint for hardware-backend e2e builds
+- [Phase 01]: 01-11: CI runs the TPM lane on swtpm unixio; vtpm-proxy rejected (azure runner kernel has no tpm_vtpm_proxy, even in linux-modules-extra); production /dev/tpmrm0 path is exercised by the 01-14 dogfood
+- [Phase 01]: 01-11: swtpm-tcp transport not built (works with swtpm, but a TCP client in the signer conflicts with KEY-01; unixio needs no root)
+- [Phase 01]: 01-11: TPM custody derived from TPM_PT_MANUFACTURER at open time (IBM/MSFT/GOOG = vtpm); the custody option can only weaken to vtpm
+- [Phase 01]: 01-11: reserved keystore option state-dir is added by ca-init/install-bundle/serve at open time, never stored, refused as --backend-opt
 
 ### Pending Todos
 
@@ -143,6 +148,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-05T14:41:10.206Z
-Stopped at: 01-10 Task 3 merge gate: owner approves PR #11
+Last session: 2026-10-06T03:58:32.252Z
+Stopped at: 01-11 Task 4 merge gate: owner approves PR #12
 Resume file: None
