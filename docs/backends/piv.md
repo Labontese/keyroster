@@ -67,9 +67,18 @@ holds a key. It never overwrites a key.
 
 The keys are generated with **PIN policy once** and **touch policy never**.
 The signer is unattended: it signs whenever a request carries valid admin
-evidence (D-13), and nobody is there to touch the card. With PIN policy
-once, the signer verifies the PIN at its first signature and the card then
-signs without the PIN until the card is removed or the signer restarts.
+evidence (D-13), and nobody is there to touch the card. The backend verifies
+the PIN once, when it opens the card at signer start (and in `ca-init` and
+`install-bundle`). With PIN policy once, the card then signs without the PIN
+until the card is removed or the signer restarts.
+
+**A wrong PIN stops the signer at start and uses up one PIN retry.** The
+YubiKey blocks the PIN after three wrong attempts in a row (the default),
+and only the PUK unblocks it. A service manager that restarts the signer in
+a loop with a wrong PIN file therefore blocks the PIN after a few restarts.
+Fix the PIN file before starting the signer again, and limit automatic
+restarts. Verifying the PIN at start, rather than at the first signature,
+means a wrong PIN never costs a retry per signing request.
 
 The trade-off: while the signer runs, any code that can talk to the card in
 that session can sign without knowing the PIN. Two things limit that. piv-go
@@ -215,11 +224,14 @@ The `PIV` workflow (`.github/workflows/piv.yml`, check `build-piv`):
   neither piv-go nor cgo.
 
 The unit tests run the backend's own code: option and secret-file checks,
-the slot map, the algorithm choice by firmware, provisioning and its
-refusals (occupied or unreadable slot, default PIN or management key,
-firmware below 5.3.0), the fingerprint pin, the imported-key refusal,
-signing without the management key, and eight concurrent signers through
-one card. A certificate signed through the backend verifies with
+the slot map, the algorithm choice by firmware, the PIN verification at
+open (a wrong PIN refuses the card after exactly one attempt; a correct one
+is sent once, not per signature), provisioning and its refusals (occupied or
+unreadable slot, default PIN or management key, firmware below 5.3.0), the
+fingerprint pin, the imported-key refusal, signing without the management
+key, and eight concurrent signers through one card. The fake card behaves
+like piv-go as far as the backend can tell (a key signs only after the
+session is logged in with the PIN), but it is not a YubiKey. A certificate signed through the backend verifies with
 `cert.Build` and x/crypto's `CertChecker`.
 
 **needs-hardware:** CI has no YubiKey. Not yet run on hardware:
@@ -227,7 +239,8 @@ one card. A certificate signed through the backend verifies with
 - `internal/keystore/piv/yubikey.go`: finding the card through `pcscd`,
   selection by serial, and the piv-go calls;
 - piv-go's own code on a real card: GET METADATA on an empty slot (expected
-  to return "not found"), key generation, and Ed25519 and ECDSA signatures;
+  to return "not found"), key generation, Ed25519 and ECDSA signatures, and
+  that a session logged in once with the PIN keeps signing PIN-once keys;
 - every `ykman`, `pcscd` and polkit step on this page.
 
 These are tracked in [needs-hardware.md](../security/needs-hardware.md) for

@@ -14,6 +14,9 @@ import (
 type card interface {
 	// Version is the PIV applet's firmware version.
 	Version() (major, minor, patch int)
+	// VerifyPIN logs the card session in with the PIN. A wrong PIN uses up
+	// one of the card's PIN retries.
+	VerifyPIN(pin string) error
 	// KeyInfo returns the slot's metadata, including its public key and
 	// whether the key was generated on the card. An empty slot is an error
 	// that wraps ykpiv.ErrNotFound.

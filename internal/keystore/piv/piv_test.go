@@ -47,9 +47,11 @@ type fakeSlot struct {
 	info ykpiv.KeyInfo
 }
 
-// fakeCard behaves like a YubiKey for what the backend uses: GenerateKey
-// needs the management key and, like a real card, replaces an existing key;
-// PrivateKey needs the PIN. It has no lock of its own, so only the
+// fakeCard behaves like a YubiKey, as driven through piv-go, for what the
+// backend uses: GenerateKey needs the management key and, like a real card,
+// replaces an existing key; PrivateKey checks nothing about the PIN (piv-go
+// only builds a handle); VerifyPIN logs the session in, and a PIN-once key
+// signs only in a logged-in session. It has no lock of its own, so only the
 // backend's mutex keeps concurrent use race-free: signs is updated without
 // synchronisation, and -race reports it if the backend does not serialise.
 type fakeCard struct {
@@ -58,9 +60,21 @@ type fakeCard struct {
 	pin                 string
 	slots               map[uint32]*fakeSlot
 	infoErr             map[uint32]error // injected KeyInfo failures
+	loggedIn            bool
+	pinAttempts         int
 	generateCalls       int
 	signs               int
 	closed              bool
+}
+
+func (f *fakeCard) VerifyPIN(pin string) error {
+	f.pinAttempts++
+	if pin != f.pin {
+		f.loggedIn = false
+		return errors.New("fake card: wrong PIN")
+	}
+	f.loggedIn = true
+	return nil
 }
 
 func newFakeCard(major, minor, patch int) *fakeCard {
@@ -107,8 +121,8 @@ func (f *fakeCard) PrivateKey(slot ykpiv.Slot, pub crypto.PublicKey, auth ykpiv.
 	if !publicEqual(s.priv.Public(), pub) {
 		return nil, errors.New("fake card: public key does not match the slot")
 	}
-	if auth.PIN != f.pin {
-		return nil, errors.New("fake card: wrong PIN")
+	if auth.PINPolicy != ykpiv.PINPolicyOnce {
+		return nil, fmt.Errorf("fake card: unexpected PIN policy %v", auth.PINPolicy)
 	}
 	return &fakeSigner{card: f, priv: s.priv}, nil
 }
@@ -128,6 +142,9 @@ type fakeSigner struct {
 func (s *fakeSigner) Public() crypto.PublicKey { return s.priv.Public() }
 
 func (s *fakeSigner) Sign(r io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	if !s.card.loggedIn {
+		return nil, errors.New("fake card: security status not satisfied (PIN not verified)")
+	}
 	s.card.signs++
 	return s.priv.Sign(r, digest, opts)
 }
@@ -270,6 +287,9 @@ func TestPIVProvisionAndIssue(t *testing.T) {
 			if c.signs == 0 {
 				t.Fatal("the certificate was not signed through the card")
 			}
+			if c.pinAttempts != 1 {
+				t.Fatalf("the PIN was sent to the card %d times, want once (at open)", c.pinAttempts)
+			}
 			if !strings.Contains(b.Describe(), tc.alg) {
 				t.Fatalf("Describe() = %q, want it to name %s", b.Describe(), tc.alg)
 			}
@@ -402,6 +422,9 @@ func TestPIVRefusals(t *testing.T) {
 				}
 				t.Fatalf("got %v, want an error containing %q", err, tc.want)
 			}
+			if c.pinAttempts != 0 {
+				t.Fatalf("an option refusal sent the PIN to the card (%d attempts)", c.pinAttempts)
+			}
 		})
 	}
 
@@ -410,8 +433,8 @@ func TestPIVRefusals(t *testing.T) {
 		if _, err := newWithCard(c, validOpts(t)); err == nil || !strings.Contains(err.Error(), "5.3.0") {
 			t.Fatalf("firmware 5.2.7: got %v, want a refusal", err)
 		}
-		if !c.closed {
-			t.Fatal("a refused card was not closed")
+		if !c.closed || c.pinAttempts != 0 {
+			t.Fatalf("refused firmware: card closed %v, %d PIN attempts; want closed and none", c.closed, c.pinAttempts)
 		}
 	})
 
@@ -446,13 +469,16 @@ func TestPIVRefusals(t *testing.T) {
 			t.Fatalf("Key on an imported key: got %v", err)
 		}
 	})
+	// A wrong PIN fails once, when the backend opens the card, not at every
+	// signing request (each failure costs one of the card's PIN retries).
 	t.Run("wrong_pin_refused", func(t *testing.T) {
 		c := newFakeCard(5, 7, 0)
-		b := openFake(t, c, validOpts(t))
-		pubs := provisionAll(t, b)
 		c.pin = "87654321"
-		if _, err := b.Key(keystore.RoleUser, ssh.FingerprintSHA256(pubs[keystore.RoleUser])); err == nil {
-			t.Fatal("Key with a wrong PIN succeeded")
+		if _, err := newWithCard(c, validOpts(t)); err == nil || !strings.Contains(err.Error(), "refused the PIN") {
+			t.Fatalf("open with a wrong PIN: got %v, want a refusal", err)
+		}
+		if c.pinAttempts != 1 || !c.closed {
+			t.Fatalf("wrong PIN: %d PIN attempts, card closed %v; want 1 attempt and a closed card", c.pinAttempts, c.closed)
 		}
 	})
 }

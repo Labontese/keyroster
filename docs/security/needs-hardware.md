@@ -74,7 +74,9 @@ firmware **5.3 to 5.6** (P-256). For each:
       run `keyroster audit verify --pin`.
 - [ ] Restart the signer: the same keys load, and issuance and `audit
       verify` continue. Leave the signer running for a day and issue again
-      (PIN policy once over a long-lived session).
+      (PIN policy once over a long-lived session: the backend verifies the
+      PIN once at open and every later signature must succeed without
+      another PIN check).
 - [ ] While the signer runs, try `ykman piv info` from another process:
       expected to fail because piv-go holds the card's PC/SC transaction.
 - [ ] Refusals: a second `ca-init` on a fresh state directory with the same
@@ -82,9 +84,10 @@ firmware **5.3 to 5.6** (P-256). For each:
       unchanged; a 0644 PIN file is refused; with two YubiKeys attached and
       no `serial` option the backend refuses, and with `serial=` it picks
       the right card.
-- [ ] Record whether a wrong PIN in the PIN file decrements the card's PIN
-      retry counter at each signer start (`ykman piv info`), so operators
-      know how many bad restarts lock the PIN.
+- [ ] Wrong PIN: put a wrong PIN in the PIN file and start the signer. It
+      must refuse to start, and `ykman piv info` must show exactly one PIN
+      retry used per start, with no further retries used by signing
+      requests. Put the correct PIN back before the counter reaches zero.
 
 ## 3. Hardware root ceremony (D-11)
 

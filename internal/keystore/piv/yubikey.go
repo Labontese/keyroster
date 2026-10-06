@@ -68,6 +68,8 @@ func (y *yubiKey) Version() (major, minor, patch int) {
 	return v.Major, v.Minor, v.Patch
 }
 
+func (y *yubiKey) VerifyPIN(pin string) error { return y.yk.VerifyPIN(pin) }
+
 func (y *yubiKey) KeyInfo(slot ykpiv.Slot) (ykpiv.KeyInfo, error) {
 	return y.yk.KeyInfo(slot)
 }

@@ -16,7 +16,9 @@
 // backend reads each slot's public key and origin through the GET METADATA
 // command that 5.3.0 introduced. Keys use PIN policy once and touch policy
 // never, so the unattended signer can sign after one PIN verification per
-// card session.
+// card session. The backend verifies the PIN when it opens the card and
+// refuses to open on a wrong PIN, so a wrong PIN costs one PIN retry per
+// signer start rather than one per signing request.
 //
 // Options:
 //
@@ -115,12 +117,23 @@ func newWithCard(c card, opts map[string]string) (*backend, error) {
 }
 
 // newBackend takes ownership of c; it closes c when it refuses the card.
+//
+// It verifies the PIN once, here. piv-go checks a PIN only when a key
+// signs, so without this a wrong PIN would surface at every signing request
+// and each request would use up one of the card's PIN retries: a few
+// requests would block the PIN. Verified at open, a wrong PIN costs one
+// retry per signer start and the signer refuses to start; with PIN policy
+// once, the logged-in session then signs without further PIN checks.
 func newBackend(c card, cfg config) (*backend, error) {
 	major, minor, patch := c.Version()
 	b := &backend{card: c, cfg: cfg, ver: [3]int{major, minor, patch}}
 	if !b.atLeast(5, 3, 0) {
 		_ = c.Close()
 		return nil, fmt.Errorf("keystore piv: firmware %d.%d.%d is older than 5.3.0, which the backend needs to read slot metadata", major, minor, patch)
+	}
+	if err := c.VerifyPIN(cfg.pin); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("keystore piv: the card refused the PIN in pin-file (each failure uses one of the card's PIN retries; fix pin-file before starting again): %w", err)
 	}
 	return b, nil
 }
