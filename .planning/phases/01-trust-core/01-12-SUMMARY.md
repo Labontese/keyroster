@@ -19,11 +19,11 @@ provides:
 affects: [01-13, 01-15]
 
 actuals:
-  tokens: 13952
+  tokens: 14813
   tasks: 2
-  commits: 2
+  commits: 4
 plan_head_before: 4e132a609a5ec63676485747ad950e7961b0cb0f
-plan_head_after: bb5ebe6fbac91ae5d430209dea3409e01e44cec5
+plan_head_after: 7f5524d67c2b992408393d2c59ef6506034a77b0
 
 tech-stack:
   added:
@@ -56,6 +56,7 @@ key-decisions:
   - "01-12: keys imported into a slot (KeyInfo origin imported) are refused, so custody piv is never claimed for a key that was not generated on the card"
   - "01-12: the default PIN is refused as well as the default management key; mgmt-key-file is needed only for provisioning, and the guide moves it off the host after ca-init (serve and install-bundle override it with --backend-opt mgmt-key-file=)"
   - "01-12: build-piv also runs golangci-lint with --build-tags piv, because the lint job in ci.yml never sees the tagged package"
+  - "01-12: the backend verifies the PIN once when it opens the card and refuses to open on a wrong PIN; piv-go only checks the PIN inside Sign, so otherwise every signing request with a wrong PIN would use up a card PIN retry"
 
 patterns-established:
   - "Thin hardware adapter plus an interface-level fake, with the unexercised adapter named in needs-hardware.md"
@@ -72,7 +73,7 @@ coverage:
         status: pass
     human_judgment: false
   - id: D2
-    description: "Refusals: occupied slot (no GenerateKey call, the old key untouched), unreadable slot, provisioning without a management key, 0644 PIN file, 0640 management key file, symlinked PIN file, missing PIN file, default PIN, default management key, non-hex key, unknown option, bad serial, firmware 5.2.7, wrong fingerprint, empty slot, unknown role, imported key, wrong PIN"
+    description: "Refusals: occupied slot (no GenerateKey call, the old key untouched), unreadable slot, provisioning without a management key, 0644 PIN file, 0640 management key file, symlinked PIN file, missing PIN file, default PIN, default management key, non-hex key, unknown option, bad serial (option refusals send no PIN to the card), firmware 5.2.7 (no PIN sent), wrong fingerprint, empty slot, unknown role, imported key, and a wrong PIN refused at open after exactly one PIN attempt with the card closed. The fake card models piv-go: PrivateKey ignores the PIN and a key signs only in a session logged in through VerifyPIN; the PIN is sent once per open, not per signature"
     requirement: KEY-05
     verification:
       - kind: unit
@@ -112,7 +113,7 @@ coverage:
     description: "PR #14 with every check green, waiting for the owner at the merge gate"
     verification:
       - kind: other
-        ref: "scripts/gh-as-bot.sh pr checks 14 on bb5ebe6: build-test, lint, govulncheck, pr-title, e2e (9.5p1), e2e (10.5p1), fuzz, build-piv, e2e-pkcs11 (both lanes), e2e-tpm, pinned-actions, CodeQL pass"
+        ref: "scripts/gh-as-bot.sh pr checks 14 on 7f5524d (after the PIN fix; bb5ebe6 and fbbdc0e were green too): build-test, lint, govulncheck, pr-title, e2e (9.5p1), e2e (10.5p1), fuzz, build-piv (run 37419944394), e2e-pkcs11 (both lanes), e2e-tpm, pinned-actions, CodeQL pass"
         status: pass
     human_judgment: true
     rationale: "The owner reviews and approves the PR at the merge gate (Task 3)"
@@ -128,7 +129,7 @@ status: complete
 
 ## Performance
 
-- **Duration:** about 22 min, from 2026-10-06T05:09Z (branch created, after closing 01-11) to 05:31Z (all checks green on PR #14).
+- **Duration:** about 22 min to the first green PR (2026-10-06T05:09Z, branch created after closing 01-11, to 05:31Z). The PIN fix before the merge gate (deviation 7) added about 15 min, so the plan finished around 05:47Z.
 - **Tasks:** 2 of 3. Task 3 is the merge gate.
 - **Files:** 12 (8 created, 4 modified).
 
@@ -153,14 +154,17 @@ The plan defines no package checkpoint. The research audit approved piv-go (T-01
 
 - **Backend `piv`** (`internal/keystore/piv/piv.go`, every file `//go:build piv`):
   - `parseOptions` runs before the card is touched. `pin-file` is required. `mgmt-key-file` is hex, 16, 24 or 32 bytes, and needed only for provisioning. `serial` is optional. Secret files must be regular, non-symlink files with mode 0600 or stricter. The default PIN and the default management key are refused.
-  - `newBackend` refuses firmware below 5.3.0 and closes the card.
+  - `newBackend` refuses firmware below 5.3.0 and closes the card. It then verifies the PIN once (`card.VerifyPIN`); on a wrong PIN it refuses and closes the card, so a wrong PIN costs one card retry per start, never one per signing request.
   - **`Provision`:** under the mutex it checks all target slots with `KeyInfo`, where only `ErrNotFound` means empty. It refuses with `ErrSlotOccupied`, generating nothing, if any slot is taken or unreadable. Then it generates each key with `PINPolicyOnce`/`TouchPolicyNever` and checks the SSH type.
-  - **`Key`:** reads the slot through `KeyInfo` and refuses an empty slot (`ErrKeyNotPresent`), an imported key, a wrong fingerprint or a non-CA algorithm. It then calls `PrivateKey` with the PIN and the slot's PIN policy, asserts `crypto.Signer`, wraps it in a `lockedSigner` that shares the backend mutex, and passes that to `ssh.NewSignerFromSigner`. Custody is `piv`, and `Algorithm()` is the key's SSH type.
+  - **`Key`:** reads the slot through `KeyInfo` and refuses an empty slot (`ErrKeyNotPresent`), an imported key, a wrong fingerprint or a non-CA algorithm. It then calls `PrivateKey` with the PIN and the slot's PIN policy (piv-go only builds a handle; the PIN is not checked there), asserts `crypto.Signer`, wraps it in a `lockedSigner` that shares the backend mutex, and passes that to `ssh.NewSignerFromSigner`. Custody is `piv`, and `Algorithm()` is the key's SSH type.
   - `Describe()` prints `YubiKey PIV firmware X.Y.Z → <alg> keys, custody piv`.
 - **`yubikey.go`:** a thin pass-through to piv-go. It picks the card by serial or requires exactly one attached YubiKey. It is marked **NOT EXERCISED IN CI** in its source.
-- **Tests** (`piv_test.go`): `fakeCard` holds real Ed25519 and P-256 keys. Like a real card, its `GenerateKey` overwrites and checks the management key, and `PrivateKey` checks the PIN. It counts signatures without a lock.
-  - Tests: `TestPIVProvisionAndIssue` (two firmware cases), `TestPIVRefusals` (18 cases), `TestPIVSignWithoutMgmtKey`, `TestPIVConcurrency/concurrent_sign`.
-  - **Mutation check:** with the `lockedSigner` lock removed, `-race` reports 62 `DATA RACE` warnings and the test fails. The file was restored afterwards.
+- **Tests** (`piv_test.go`): `fakeCard` holds real Ed25519 and P-256 keys and models piv-go as the backend sees it. Like a real card, its `GenerateKey` overwrites and checks the management key. `PrivateKey` ignores the PIN, `VerifyPIN` logs the session in, and a key signs only in a logged-in session. It counts signatures and PIN attempts without a lock.
+  - Tests: `TestPIVProvisionAndIssue` (two firmware cases; the PIN is sent once), `TestPIVRefusals` (18 cases; option and firmware refusals send no PIN), `TestPIVSignWithoutMgmtKey`, `TestPIVConcurrency/concurrent_sign`.
+  - **Mutation checks:**
+    - With the `lockedSigner` lock removed, `-race` reports 62 `DATA RACE` warnings and the test fails.
+    - With the PIN verification at open removed, the issue, sign-without-management-key, concurrency and `wrong_pin_refused` tests fail.
+    - The file was restored after each check.
 - **CI `build-piv`** (`.github/workflows/piv.yml`):
   - Setup: `permissions: {}`, read-only contents, SHA-pinned checkout, setup-go and golangci-lint-action (the same pins as `ci.yml` and `e2e-tpm.yml`), `persist-credentials: false`, apt `--no-install-recommends`, recorded package versions.
   - Checks: `go vet -tags piv`, golangci-lint `--build-tags piv` (0 issues), the `-race` tests, the tagged signer build with `go version -m` assertions, and the default-build exclusion through `go list -deps` and `go version -m` on both default binaries.
@@ -176,21 +180,25 @@ The plan defines no package checkpoint. The research audit approved piv-go (T-01
    - Tracer gate (interactive, end-of-phase, automated-only `<verify>`): the tagged test run, the `go list -deps` exclusion and `CGO_ENABLED=0 go build ./...` passed in WSL and on Windows, so execution continued.
 2. **Task 2** (idempotency, concurrency and secret-file tests, PIV guide, needs-hardware checklist and issue, PR): `bb5ebe6` (test, with the docs).
    - Branch pushed, PR **#14** opened with auto-merge (squash) enabled by keyroster-bot, every check green.
+   - `fbbdc0e` (docs): the first version of this SUMMARY and the tracking updates.
+   - `7f5524d` (fix): verifies the PIN once at open (deviation 7), found in the pre-handback review.
 3. **Task 3** (merge gate): pending owner approval (checkpoint).
 
-## CI Evidence (PR #14, head bb5ebe6)
+## CI Evidence (PR #14, head 7f5524d)
+
+The evidence below is for `7f5524d`, the head after the PIN fix. Every check was also green on `bb5ebe6` (`build-piv` run 37418365266) and on `fbbdc0e`.
 
 - **All checks pass:**
   - required: `build-test`, `lint`, `govulncheck`, `pr-title`, `e2e (9.5p1)`, `e2e (10.5p1)`, `fuzz`;
   - not yet required: `build-piv` (new; 01-15 makes it required), `e2e-pkcs11 (distro-p256)`, `e2e-pkcs11 (10.5p1-ed25519)`, `e2e-tpm`;
   - also `pinned-actions`, `CodeQL`.
-- **`build-piv` run 37418365266** shows:
+- **`build-piv`** (run 37418365266 on `bb5ebe6`, run 37419944394 on `7f5524d`) shows:
   - `libpcsclite-dev:amd64 2.0.3-1build1` and `libpcsclite1:amd64 2.0.3-1build1` installed;
   - golangci-lint: `0 issues.`;
-  - `--- PASS` for all 4 tests and all 21 subtests under `-race`;
+  - `--- PASS` for all 4 tests and all 21 subtests under `-race`, including `wrong_pin_refused` on `7f5524d`;
   - the tagged signer's `dep github.com/go-piv/piv-go/v2 v2.6.0 h1:/Z+uqlv5…` and `build CGO_ENABLED=1`;
   - `default keyroster and keyroster-signer: CGO_ENABLED=0, no piv-go`.
-- **Commit signatures:** `79e4c0e` and `bb5ebe6` show `verified: true` on GitHub.
+- **Commit signatures:** `79e4c0e`, `bb5ebe6`, `fbbdc0e` and `7f5524d` show `verified: true` on GitHub.
 - **Flaky test:** the known flaky `TestSignerRefusals/created_301s_future` did not fail, so no rerun was needed.
 
 ## Files Created/Modified
@@ -249,9 +257,25 @@ See `key-decisions` in the frontmatter.
 - `docs/security/custody.md` (the PIV row now links to the guide and states that it is not validated on hardware) and `docs/backends/pkcs11.md` (links needs-hardware.md).
 - **Committed in:** `bb5ebe6`.
 
+**7. [Rule 1 - Bug, found before the merge gate] A wrong PIN would have used up a card PIN retry at every signing request**
+- **Found during:** the review before handing back. The executor had not caught it.
+- **Issue:**
+  - piv-go's `PrivateKey` does not check the PIN; when `KeyAuth.PINPolicy` is given it does not even talk to the card. The PIN is checked inside `Sign` (`KeyAuth.do` → `authTx` → `ykLogin`).
+  - With a wrong PIN, `Key()` therefore succeeded, and every signing request tried to log in and used up one of the card's PIN retries. Three requests from anyone could block the PIN, a denial of service.
+  - The first test version hid this: the fake checked the PIN in `PrivateKey`, which piv-go does not do, so `wrong_pin_refused` proved fake-only behaviour.
+  - The first SUMMARY (`fbbdc0e`) listed "wrong PIN" as verified in CI.
+- **Fix:**
+  - `card.VerifyPIN`; `yubikey.go` passes it to `yk.VerifyPIN`.
+  - `newBackend` verifies the PIN right after the firmware check and refuses, closing the card, on failure.
+  - The fake now models piv-go: `PrivateKey` ignores the PIN, and a key signs only after `VerifyPIN` has logged the session in.
+  - `wrong_pin_refused` asserts exactly one PIN attempt and a closed card. Option and firmware refusals assert that no PIN reached the card. The issue test asserts that the PIN is sent once, not per signature.
+  - `piv.md` explains the start-time check and the restart-loop risk. `needs-hardware.md` checks one retry per start and PIN-once after the explicit login.
+- **Verification:** `-race` tests pass in WSL and in CI (run 37419944394). Removing the `VerifyPIN` call makes 4 tests fail.
+- **Committed in:** `7f5524d`.
+
 ---
 
-**Total deviations:** 6 (1 interface adaptation, 3 security or verification hardening, 1 local environment substitution, 1 doc cross-link).
+**Total deviations:** 7 (1 interface adaptation, 3 security or verification hardening, 1 local environment substitution, 1 doc cross-link, 1 bug fixed before the merge gate).
 **Impact on plan:**
 - All must-haves hold.
 - The must-have "the backend is exercised through the real Provisioner/Backend/cert.Build path with a fake card in CI" is met. The real card path is not, and is stated as such (see Known Limitations).
@@ -264,7 +288,8 @@ See `key-decisions` in the frontmatter.
   - GET METADATA on an empty retired slot. It is expected to return SW 0x6A88, which piv-go maps to `ErrNotFound`; the backend relies on this to treat the slot as empty.
   - `GenerateKey` with the PIN and touch policies.
   - Ed25519 and ECDSA `Sign` on the card.
-  - PIN policy once over a long-lived session.
+  - `VerifyPIN` at open followed by PIN-once signatures without another PIN check, over a long-lived session.
+  - How many card PIN retries a wrong PIN file costs per signer start (expected: exactly one).
 - Every `ykman`, `pcscd` and polkit step in `docs/backends/piv.md`, including whether `ykman piv access change-management-key` prompts for the new key as the guide says.
 
 All of them are items in `docs/security/needs-hardware.md` (item 2) and issue #13.
@@ -281,7 +306,7 @@ None. `yubikey.go` is the production adapter, not a stub; it is unverified on ha
 
 None beyond the plan's threat register:
 - **T-01-53** (cgo in default builds): mitigated and proven by `build-piv`.
-- **T-01-54** (PIN and management key): read only from 0600 files, default credentials refused, never argv. The management key can leave the host after ca-init.
+- **T-01-54** (PIN and management key): read only from 0600 files, default credentials refused, never argv. The management key can leave the host after ca-init. The PIN is verified once at open, so signing requests cannot use up PIN retries.
 - **T-01-55** (other local processes using the card): the guide's polkit rule. piv-go holds a PC/SC transaction while the signer runs. Both are unverified on hardware.
 - **T-01-56** (unverified hardware behaviour): transferred to Phase 6 through needs-hardware.md and #13.
 - **T-01-SC** (piv-go and libpcsclite-dev): covered by the record above.
@@ -294,6 +319,7 @@ None for this plan. A real-hardware run is the Phase 6 needs-hardware item.
 
 - **01-13:**
   - `doctor` could report a `piv` custody and the firmware.
+  - The systemd unit's restart policy should be bounded: each start with a wrong PIN file uses one YubiKey PIN retry.
   - A PIV signer's systemd unit needs access to the `pcscd` socket (`/run/pcscd/pcscd.comm`), and the sandbox must allow it.
   - The capslock gate should be run once with `-tags piv` to record piv-go's capabilities.
 - **01-15:** make `build-piv` a required check (CONTRIBUTING rollout rule).
@@ -302,10 +328,11 @@ None for this plan. A real-hardware run is the Phase 6 needs-hardware item.
 ## Self-Check: PASSED
 
 - All 8 created files exist on disk.
-- Commits `79e4c0e` and `bb5ebe6` are on `origin/p01/12-piv` and show as verified on GitHub.
-- `actuals.commits` (2) is `git rev-list --count 4e132a6..bb5ebe6`. The docs commit is excluded, by convention.
+- Commits `79e4c0e`, `bb5ebe6`, `fbbdc0e` and `7f5524d` are on `origin/p01/12-piv` and show as verified on GitHub.
+- `actuals.commits` (4) is `git rev-list --count 4e132a6..7f5524d`. As in 01-11, it includes the first SUMMARY commit `fbbdc0e`, because the fix landed after it; it excludes the docs commit that records the fix.
 - `actuals.tasks` (2) counts the tasks before the merge gate.
-- `actuals.tokens` (13952) is chars/4 over the added lines of the plan diff (55807 characters).
+- `actuals.tokens` (14813) is chars/4 over the added lines of the code and docs diff `4e132a6..7f5524d`, excluding `.planning` (59253 characters).
+- `gh issue list --label needs-hardware --state open --json number --jq length` prints `1`.
 - Acceptance criteria were re-run:
   - every `.go` file under `internal/keystore/piv/` starts with `//go:build piv`;
   - `backends_piv.go` starts with `//go:build linux && piv`;

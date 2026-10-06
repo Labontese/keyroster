@@ -4,10 +4,10 @@ current_phase: 01
 current_phase_name: Trust Core
 status: executing
 stopped_at: "01-12 Task 3 merge gate: owner approves PR #14"
-last_updated: "2026-10-06T05:32:39.556Z"
+last_updated: "2026-10-06T05:51:24.488Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 01 execution started
-state_head: bb5ebe6fbac91ae5d430209dea3409e01e44cec5
+state_head: 7f5524d67c2b992408393d2c59ef6506034a77b0
 progress:
   total_phases: 6
   completed_phases: 0
@@ -129,6 +129,7 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-12: the PIV backend keeps no files; Key() reads each slot's public key and origin through GET METADATA, so firmware below 5.3.0 is refused
 - [Phase 01]: 01-12: only piv-go ErrNotFound counts as an empty slot; Provision checks all five slots before generating anything and refuses imported keys, default PIN and default management key
 - [Phase 01]: 01-12: mgmt-key-file is needed only for provisioning; the guide moves it off the host after ca-init (serve/install-bundle use --backend-opt mgmt-key-file=)
+- [Phase 01]: 01-12: the PIV backend verifies the PIN once at open and refuses on a wrong PIN; piv-go checks the PIN only inside Sign, so otherwise each signing request with a wrong PIN would use up a card PIN retry
 
 ### Pending Todos
 
