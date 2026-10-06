@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -163,9 +164,12 @@ func TestEvidence(t *testing.T) {
 	})
 	for _, skew := range []int64{-301, 301} {
 		t.Run("created_at_outside_skew_"+map[bool]string{true: "past", false: "future"}[skew < 0], func(t *testing.T) {
-			e := newLogEnv(t)
+			// The signer is pinned to at, so the skew is exactly ±301 s
+			// regardless of elapsed wall time.
+			at := time.Now().Truncate(time.Second)
+			e := newLogEnvClock(t, NewFixture(t, 1, 1), func() time.Time { return at })
 			req := e.request()
-			req.CreatedAt = uint64(int64(req.CreatedAt) + skew) //nolint:gosec // G115: a current timestamp
+			req.CreatedAt = uint64(at.Unix() + skew) //nolint:gosec // G115: a current timestamp
 			req.Evidence = SignRequest(t, req, e.fx.Admins...)
 			e.refuseThroughSigner(t, req, tlog.ReasonStaleRequest, "request_time_skew")
 		})
