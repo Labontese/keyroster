@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +57,7 @@ type fakeCard struct {
 	mgmtKey             []byte
 	pin                 string
 	slots               map[uint32]*fakeSlot
+	infoErr             map[uint32]error // injected KeyInfo failures
 	generateCalls       int
 	signs               int
 	closed              bool
@@ -68,6 +70,9 @@ func newFakeCard(major, minor, patch int) *fakeCard {
 func (f *fakeCard) Version() (int, int, int) { return f.major, f.minor, f.patch }
 
 func (f *fakeCard) KeyInfo(slot ykpiv.Slot) (ykpiv.KeyInfo, error) {
+	if err := f.infoErr[slot.Key]; err != nil {
+		return ykpiv.KeyInfo{}, err
+	}
 	s, ok := f.slots[slot.Key]
 	if !ok {
 		return ykpiv.KeyInfo{}, fmt.Errorf("fake card: slot %s: %w", slot, ykpiv.ErrNotFound)
@@ -270,4 +275,258 @@ func TestPIVProvisionAndIssue(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustSlot(t *testing.T, id uint32) ykpiv.Slot {
+	t.Helper()
+	s, ok := ykpiv.RetiredKeyManagementSlot(id)
+	if !ok {
+		t.Fatalf("no slot %#x", id)
+	}
+	return s
+}
+
+func provisionAll(t *testing.T, b *backend) map[keystore.Role]ssh.PublicKey {
+	t.Helper()
+	pubs, err := b.Provision(allRoles)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	return pubs
+}
+
+// TestPIVRefusals: every refusal leaves the card unchanged and opens or
+// generates nothing it should not.
+func TestPIVRefusals(t *testing.T) {
+	t.Run("slot_occupied_refused", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		old, err := c.GenerateKey(testMgmtKey, mustSlot(t, 0x82), ykpiv.Key{
+			Algorithm: ykpiv.AlgorithmEd25519, PINPolicy: ykpiv.PINPolicyOnce, TouchPolicy: ykpiv.TouchPolicyNever,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.generateCalls = 0
+		b := openFake(t, c, validOpts(t))
+		if _, err := b.Provision(allRoles); !errors.Is(err, ErrSlotOccupied) {
+			t.Fatalf("Provision with slot 0x82 occupied: got %v, want ErrSlotOccupied", err)
+		}
+		if c.generateCalls != 0 || len(c.slots) != 1 || !publicEqual(c.slots[0x82].priv.Public(), old) {
+			t.Fatalf("the card changed: %d GenerateKey calls, %d slots", c.generateCalls, len(c.slots))
+		}
+	})
+	t.Run("slot_unreadable_refused", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		c.infoErr = map[uint32]error{0x84: errors.New("fake card: transmit failed")}
+		b := openFake(t, c, validOpts(t))
+		if _, err := b.Provision(allRoles); err == nil || errors.Is(err, ErrSlotOccupied) {
+			t.Fatalf("Provision with an unreadable slot: got %v, want a read error", err)
+		}
+		if c.generateCalls != 0 {
+			t.Fatalf("%d GenerateKey calls after a refusal", c.generateCalls)
+		}
+	})
+	t.Run("provision_without_mgmt_key_refused", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		opts := validOpts(t)
+		delete(opts, "mgmt-key-file")
+		b := openFake(t, c, opts)
+		if _, err := b.Provision(allRoles); err == nil || !strings.Contains(err.Error(), "mgmt-key-file") {
+			t.Fatalf("Provision without a management key: got %v", err)
+		}
+		if c.generateCalls != 0 {
+			t.Fatalf("%d GenerateKey calls after a refusal", c.generateCalls)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		opts func(t *testing.T) map[string]string
+		want string
+	}{
+		{"pin_file_mode_0644_refused", func(t *testing.T) map[string]string {
+			o := validOpts(t)
+			o["pin-file"] = writeSecret(t, "pin", testPIN, 0o644)
+			return o
+		}, "mode 0644"},
+		{"mgmt_key_file_mode_0640_refused", func(t *testing.T) map[string]string {
+			o := validOpts(t)
+			o["mgmt-key-file"] = writeSecret(t, "mgmt-key", hex.EncodeToString(testMgmtKey), 0o640)
+			return o
+		}, "mode 0640"},
+		{"pin_file_symlink_refused", func(t *testing.T) map[string]string {
+			o := validOpts(t)
+			link := filepath.Join(t.TempDir(), "pin-link")
+			if err := os.Symlink(o["pin-file"], link); err != nil {
+				t.Fatal(err)
+			}
+			o["pin-file"] = link
+			return o
+		}, "not a regular file"},
+		{"pin_file_missing_refused", func(t *testing.T) map[string]string {
+			o := validOpts(t)
+			delete(o, "pin-file")
+			return o
+		}, "pin-file is required"},
+		{"default_pin_refused", func(t *testing.T) map[string]string {
+			o := validOpts(t)
+			o["pin-file"] = writeSecret(t, "pin", ykpiv.DefaultPIN+"\n", 0o600)
+			return o
+		}, "default PIN"},
+		{"default_mgmt_key_refused", func(t *testing.T) map[string]string {
+			o := validOpts(t)
+			o["mgmt-key-file"] = writeSecret(t, "mgmt-key", hex.EncodeToString(ykpiv.DefaultManagementKey)+"\n", 0o600)
+			return o
+		}, "default management key"},
+		{"mgmt_key_not_hex_refused", func(t *testing.T) map[string]string {
+			o := validOpts(t)
+			o["mgmt-key-file"] = writeSecret(t, "mgmt-key", "not hex", 0o600)
+			return o
+		}, "hex"},
+		{"unknown_option_refused", func(t *testing.T) map[string]string {
+			o := validOpts(t)
+			o["pin"] = testPIN
+			return o
+		}, "unknown backend option"},
+		{"bad_serial_refused", func(t *testing.T) map[string]string {
+			o := validOpts(t)
+			o["serial"] = "0x1234"
+			return o
+		}, "serial"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newFakeCard(5, 7, 0)
+			if b, err := newWithCard(c, tc.opts(t)); err == nil || !strings.Contains(err.Error(), tc.want) {
+				if b != nil {
+					_ = b.Close()
+				}
+				t.Fatalf("got %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+
+	t.Run("firmware_5.2.7_refused", func(t *testing.T) {
+		c := newFakeCard(5, 2, 7)
+		if _, err := newWithCard(c, validOpts(t)); err == nil || !strings.Contains(err.Error(), "5.3.0") {
+			t.Fatalf("firmware 5.2.7: got %v, want a refusal", err)
+		}
+		if !c.closed {
+			t.Fatal("a refused card was not closed")
+		}
+	})
+
+	t.Run("wrong_fingerprint_refused", func(t *testing.T) {
+		b := openFake(t, newFakeCard(5, 7, 0), validOpts(t))
+		pubs := provisionAll(t, b)
+		if _, err := b.Key(keystore.RoleUser, ssh.FingerprintSHA256(pubs[keystore.RoleHost])); !errors.Is(err, ErrKeyNotPresent) {
+			t.Fatalf("Key with the fingerprint of the host key: got %v, want ErrKeyNotPresent", err)
+		}
+	})
+	t.Run("empty_slot_refused", func(t *testing.T) {
+		b := openFake(t, newFakeCard(5, 7, 0), validOpts(t))
+		if _, err := b.Key(keystore.RoleUser, "SHA256:AAAA"); !errors.Is(err, ErrKeyNotPresent) {
+			t.Fatalf("Key on an empty slot: got %v, want ErrKeyNotPresent", err)
+		}
+	})
+	t.Run("unknown_role_refused", func(t *testing.T) {
+		b := openFake(t, newFakeCard(5, 7, 0), validOpts(t))
+		if _, err := b.Provision([]keystore.Role{"admin"}); err == nil {
+			t.Fatal("Provision of an unknown role succeeded")
+		}
+		if _, err := b.Key("admin", "SHA256:AAAA"); err == nil {
+			t.Fatal("Key of an unknown role succeeded")
+		}
+	})
+	t.Run("imported_key_refused", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		b := openFake(t, c, validOpts(t))
+		pubs := provisionAll(t, b)
+		c.slots[0x82].info.Origin = ykpiv.OriginImported
+		if _, err := b.Key(keystore.RoleUser, ssh.FingerprintSHA256(pubs[keystore.RoleUser])); err == nil || !strings.Contains(err.Error(), "not generated on the card") {
+			t.Fatalf("Key on an imported key: got %v", err)
+		}
+	})
+	t.Run("wrong_pin_refused", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		b := openFake(t, c, validOpts(t))
+		pubs := provisionAll(t, b)
+		c.pin = "87654321"
+		if _, err := b.Key(keystore.RoleUser, ssh.FingerprintSHA256(pubs[keystore.RoleUser])); err == nil {
+			t.Fatal("Key with a wrong PIN succeeded")
+		}
+	})
+}
+
+// TestPIVSignWithoutMgmtKey: after provisioning, the backend signs with
+// only the PIN (mgmt-key-file overridden to empty, as serve does once the
+// management key is moved off the host) and refuses to provision.
+func TestPIVSignWithoutMgmtKey(t *testing.T) {
+	c := newFakeCard(5, 4, 3)
+	opts := validOpts(t)
+	b, err := newWithCard(c, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubs := provisionAll(t, b)
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opts["mgmt-key-file"] = ""
+	b = openFake(t, c, opts)
+	k, err := b.Key(keystore.RoleUser, ssh.FingerprintSHA256(pubs[keystore.RoleUser]))
+	if err != nil {
+		t.Fatalf("Key without a management key: %v", err)
+	}
+	issue(t, k, pubs[keystore.RoleUser])
+	if _, err := b.Provision([]keystore.Role{keystore.RoleUser}); err == nil {
+		t.Fatal("Provision without a management key succeeded")
+	}
+}
+
+// TestPIVConcurrency: eight goroutines open and use keys of one backend at
+// once. The fake card counts signatures without a lock, so -race fails
+// this test if the backend does not serialise card access.
+func TestPIVConcurrency(t *testing.T) {
+	t.Run("concurrent_sign", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		b := openFake(t, c, validOpts(t))
+		pubs := provisionAll(t, b)
+		const workers, perWorker = 8, 16
+		var wg sync.WaitGroup
+		errs := make(chan error, workers)
+		for w := range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				role := allRoles[w%len(allRoles)]
+				k, err := b.Key(role, ssh.FingerprintSHA256(pubs[role]))
+				if err != nil {
+					errs <- err
+					return
+				}
+				for i := range perWorker {
+					msg := fmt.Appendf(nil, "worker %d message %d", w, i)
+					sig, err := k.Sign(rand.Reader, msg)
+					if err != nil {
+						errs <- err
+						return
+					}
+					if err := pubs[role].Verify(msg, sig); err != nil {
+						errs <- fmt.Errorf("worker %d: signature %d does not verify: %w", w, i, err)
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Error(err)
+		}
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if c.signs != workers*perWorker {
+			t.Fatalf("the card made %d signatures, want %d", c.signs, workers*perWorker)
+		}
+	})
 }
