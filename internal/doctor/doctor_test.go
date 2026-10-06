@@ -124,6 +124,7 @@ func TestFailures(t *testing.T) {
 		{"state dir 0755", func(f *Facts) { f.StateDirMode = 0o755 }, CodeStateDirPermissions},
 		{"state dir 0750", func(f *Facts) { f.StateDirMode = 0o750 }, CodeStateDirPermissions},
 		{"state dir wrong owner", func(f *Facts) { f.StateDirOwner = 0 }, CodeStateDirPermissions},
+		{"state dir missing", func(f *Facts) { f.StateDirError = "lstat /var/lib/keyroster-signer: no such file or directory" }, CodeStateDirPermissions},
 		{"db 0644", func(f *Facts) { f.DBMode = 0o644 }, CodeDBPermissions},
 		{"db 0660", func(f *Facts) { f.DBMode = 0o660 }, CodeDBPermissions},
 		{"integrity", func(f *Facts) { f.IntegrityOK, f.IntegrityDetail = false, "row 3 missing from index" }, CodeDBIntegrity},
@@ -244,9 +245,13 @@ func TestVTPMCustody(t *testing.T) {
 	if !strings.Contains(r.Message, "hypervisor") {
 		t.Fatalf("vtpm_custody must say the keys are only as safe as the hypervisor host: %q", r.Message)
 	}
-	// A vTPM-held key is never reported as hardware custody.
+	// A vTPM-held key is never reported as hardware custody; the TPM line
+	// only confirms that the live TPM matches the recorded custody.
 	requireNone(t, rs, "custody")
 	requireNone(t, rs, CodeCustodyMismatch)
+	if tpm := requireOne(t, rs, OK, "tpm"); !strings.Contains(tpm.Message, "IBM maps to custody vtpm") {
+		t.Fatalf("tpm line = %q", tpm.Message)
+	}
 }
 
 func TestSoftwareKeyInAgent(t *testing.T) {
@@ -292,6 +297,7 @@ func TestCustodyMismatch(t *testing.T) {
 		t.Fatalf("custody_mismatch must name the manufacturer: %q", r.Message)
 	}
 	requireNone(t, rs, "custody")
+	requireNone(t, rs, "tpm")
 }
 
 func TestTPMUnavailable(t *testing.T) {

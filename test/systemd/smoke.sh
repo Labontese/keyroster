@@ -19,6 +19,9 @@
 #   - the running signer's network namespace contains only lo;
 #   - systemd reports the core sandbox settings and the process runs as
 #     keyroster-signer with no capabilities, no_new_privs and seccomp;
+#   - keyroster-signer doctor passes as keyroster-signer and states the
+#     weaker custody of this test setup (SOFTWARE ROOT, plain keys in
+#     ssh-agent), and fails when run as root;
 #   - systemd-analyze security rates the unit at or below THRESHOLD
 #     (exposure x10; 20 = 2.0).
 #
@@ -133,6 +136,9 @@ as_signer keyroster-signer ca-init --state-dir "$STATE" --backend agent \
 
 step "Root ceremony: genesis policy with kradmin's admin key, software root in a temporary agent"
 as_user kradmin ssh-keygen -q -t ed25519 -N '' -C kradmin-admin -f /home/kradmin/admin
+# On the ubuntu-24.04 runner this key came out mode 0644 (observed on PR
+# #15; the cause was not investigated), and ssh-add refuses such a key.
+chmod 0600 /home/kradmin/admin
 admin_fp=$(fp_of /home/kradmin/admin.pub)
 cer=$work/ceremony
 install -d -m 0700 "$cer"
@@ -225,6 +231,29 @@ grep -qx $'CapEff:\t0000000000000000' "/proc/$pid/status" || fail "signer has ef
 grep -qx $'CapBnd:\t0000000000000000' "/proc/$pid/status" || fail "signer has a non-empty bounding set"
 grep -qx $'NoNewPrivs:\t1' "/proc/$pid/status" || fail "no_new_privs not set"
 grep -qx $'Seccomp:\t2' "/proc/$pid/status" || fail "no seccomp filter"
+
+step "keyroster-signer doctor on the live state (expects WARNs for this test custody)"
+if as_signer keyroster-signer doctor --state-dir "$STATE" >"$work/doctor.log" 2>&1; then
+	doctor_rc=0
+else
+	doctor_rc=$?
+fi
+cat "$work/doctor.log"
+[ "$doctor_rc" = 0 ] || fail "doctor exited $doctor_rc"
+grep -q "^WARN software_root: SOFTWARE ROOT: root $root_fp" "$work/doctor.log" || fail "doctor did not flag the software root"
+grep -q '^WARN software_key_in_agent:' "$work/doctor.log" || fail "doctor did not flag plain keys in ssh-agent"
+if grep -q '^OK custody:' "$work/doctor.log"; then
+	fail "doctor reported hardware custody for agent-held keys"
+fi
+# Run as root, doctor fails: the signer's state belongs to keyroster-signer.
+if keyroster-signer doctor --state-dir "$STATE" >"$work/doctor-root.log" 2>&1; then
+	cat "$work/doctor-root.log"
+	fail "doctor passed when run as root"
+fi
+grep -q '^FAIL running_as_root:' "$work/doctor-root.log" || {
+	cat "$work/doctor-root.log"
+	fail "doctor as root did not report running_as_root"
+}
 
 step "systemd-analyze security (threshold $THRESHOLD = exposure $((THRESHOLD / 10)).$((THRESHOLD % 10)))"
 systemd-analyze security --no-pager keyroster-signer-agent.service | tail -n 1

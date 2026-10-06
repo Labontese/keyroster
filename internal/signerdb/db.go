@@ -77,6 +77,29 @@ func (d *DB) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return nil
 }
 
+// IntegrityCheck runs PRAGMA integrity_check and returns its output: "ok"
+// for an intact database, otherwise the problems it found, one per line.
+// It only reads, so it works on a read-only handle.
+func (d *DB) IntegrityCheck(ctx context.Context) (string, error) {
+	rows, err := d.db.QueryContext(ctx, `PRAGMA integrity_check`)
+	if err != nil {
+		return "", fmt.Errorf("signerdb: integrity check: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return "", fmt.Errorf("signerdb: integrity check: %w", err)
+		}
+		lines = append(lines, line)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("signerdb: integrity check: %w", err)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
 // LastSerial returns the serial high-water mark.
 func (d *DB) LastSerial(ctx context.Context) (uint64, error) {
 	var last int64

@@ -44,3 +44,19 @@ func TestManufacturerSWTPM(t *testing.T) {
 		t.Fatalf("Manufacturer = %q, %v; want IBM", id, err)
 	}
 }
+
+// TestInspectSWTPM: Inspect reports swtpm as IBM, custody vtpm, also when
+// the options claim custody tpm (it reports, it does not refuse), and fails
+// for a TPM that is not there.
+func TestInspectSWTPM(t *testing.T) {
+	sock := startSWTPM(t)
+	for _, custody := range []string{"", "vtpm", "tpm"} {
+		id, c, err := Inspect(map[string]string{"swtpm-socket": sock, "custody": custody})
+		if err != nil || id != "IBM" || c != keystore.CustodyVTPM {
+			t.Fatalf("Inspect(custody=%q) = %q, %q, %v; want IBM, vtpm", custody, id, c, err)
+		}
+	}
+	if _, _, err := Inspect(map[string]string{"swtpm-socket": sock + ".missing"}); err == nil {
+		t.Fatal("Inspect of a missing TPM socket succeeded")
+	}
+}

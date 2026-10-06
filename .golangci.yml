@@ -45,6 +45,7 @@ linters:
             - "**/internal/signerdb/**"
             - "**/internal/wire/**"
             - "**/cmd/keyroster-signer/**"
+            - "**/internal/doctor/**"
             - "!$test"
           deny:
             - pkg: net/http
