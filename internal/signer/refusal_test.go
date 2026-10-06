@@ -43,6 +43,17 @@ func (c *fakeClock) Add(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
+// Tick advances the clock by one microsecond and returns the new time. As
+// a signer clock it moves only when read and never reads the wall clock:
+// it is strictly increasing, so serial.Next always progresses, and a
+// test's time checks no longer depend on how long the test takes.
+func (c *fakeClock) Tick() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(time.Microsecond)
+	return c.t
+}
+
 // logLeaves reads every leaf of the signer's log. When the signer is
 // stopped, it opens the database read-only.
 func (ts *testSigner) logLeaves(t *testing.T) []tlog.Leaf {

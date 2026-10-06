@@ -64,7 +64,8 @@ type logEnv struct {
 	dbPath  string
 	fx      *Fixture
 	backend *memBackend
-	base    uint64 // leaves written by the bootstrap (ca_init, bundle_install)
+	base    uint64           // leaves written by the bootstrap (ca_init, bundle_install)
+	clock   func() time.Time // signer and bootstrap clock; nil means time.Now
 	db      *signerdb.DB
 	s       *Signer
 }
@@ -85,17 +86,25 @@ func newLogEnv(t *testing.T) *logEnv {
 // newLogEnvFx is newLogEnv with a given fixture.
 func newLogEnvFx(t *testing.T, fx *Fixture) *logEnv {
 	t.Helper()
+	return newLogEnvClock(t, fx, nil)
+}
+
+// newLogEnvClock is newLogEnvFx with a given signer and bootstrap clock
+// (nil means time.Now).
+func newLogEnvClock(t *testing.T, fx *Fixture, clock func() time.Time) *logEnv {
+	t.Helper()
 	e := &logEnv{
 		t:       t,
 		dbPath:  filepath.Join(t.TempDir(), "signer.db"),
 		fx:      fx,
 		backend: newMemBackend(fx),
+		clock:   clock,
 	}
 	db, err := signerdb.Open(e.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fx.Bootstrap(t, db, e.backend, nil)
+	fx.Bootstrap(t, db, e.backend, e.clock)
 	hashes, err := db.LeafHashes(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -118,6 +127,7 @@ func (e *logEnv) open() error {
 	}
 	s, err := New(Config{
 		Backend: e.backend,
+		Clock:   e.clock,
 		DB:      db, AllowUIDs: []uint32{1000}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {

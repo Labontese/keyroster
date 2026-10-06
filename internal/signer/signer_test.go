@@ -476,11 +476,22 @@ func (ts *testSigner) waitRefusalRecords(t *testing.T, n int) {
 }
 
 func TestSignerRefusals(t *testing.T) {
-	ts := newTestSigner(t, signerOpts{})
-	now := uint64(time.Now().Unix()) //nolint:gosec // G115: the clock is after 1970
+	// CreatedAt holds whole seconds and the signer clock does not. On the
+	// wall clock, now+301 is refused only while the signer's read falls in
+	// the same second as the capture, so created_301s_future flaked under
+	// load. The signer runs on a stepping clock from a whole-second base
+	// instead (1 µs per read): now+301 is exactly 301 s ahead of the signer
+	// minus the reads, whatever the CPU load. A frozen clock would not do:
+	// after the seed issuance, later serial.Next calls would stall.
+	base := time.Now().Truncate(time.Second)
+	clk := &fakeClock{t: base}
+	ts := newTestSigner(t, signerOpts{clock: clk.Tick})
+	now := uint64(base.Unix()) //nolint:gosec // G115: the clock is after 1970
 	certSubject := func(t *testing.T) []byte {
 		// A certificate issued by this signer, offered as a subject key.
-		resp, err := ts.issue(newRequest(t, "seed"))
+		seed := newRequest(t, "seed")
+		seed.CreatedAt = now
+		resp, err := ts.issue(seed)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -516,7 +527,7 @@ func TestSignerRefusals(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := newRequest(t, "alice")
+			req := requestAt(t, clk)
 			tc.edit(t, req)
 			lastBefore, countBefore, recsBefore := ts.lastSerial(t), ts.issuanceCount(t), len(ts.reasonRecords())
 			_, err := ts.issue(req)
@@ -529,6 +540,9 @@ func TestSignerRefusals(t *testing.T) {
 			}
 			ts.wantOneRefusalRecord(t, recsBefore, tc.reason)
 		})
+	}
+	if used := clk.Now().Sub(base); used >= time.Second {
+		t.Fatalf("the stepping clock used %v of reads; the ±301 s cases no longer test the boundary they claim", used)
 	}
 }
 
