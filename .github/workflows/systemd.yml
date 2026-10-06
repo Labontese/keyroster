@@ -41,8 +41,14 @@ jobs:
           uname -r
       # sudo resets PATH (secure_path); pass the runner's PATH so the script
       # finds the setup-go toolchain. The script builds as the runner user.
+      # KEYROSTER_SECURITY_THRESHOLD is the gate for `systemd-analyze
+      # security --threshold` on keyroster-signer.service: exposure x10, so 20
+      # is 2.0. Measured on PR #15: 0.7 (SAFE). Lower it freely; raise it
+      # only in a reviewed PR that records the per-directive report.
       - name: Smoke test the sandboxed signer
-        run: sudo env "PATH=$PATH" bash test/systemd/smoke.sh
+        env:
+          KEYROSTER_SECURITY_THRESHOLD: "20"
+        run: sudo env "PATH=$PATH" "KEYROSTER_SECURITY_THRESHOLD=$KEYROSTER_SECURITY_THRESHOLD" bash test/systemd/smoke.sh
       - name: Print the unit journals
         if: failure()
         run: sudo journalctl --no-pager -u keyroster-signer -u keyroster-signer-agent
