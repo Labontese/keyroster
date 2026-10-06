@@ -93,26 +93,26 @@ against the root.
 CI cannot use a physical TPM, so the `e2e-tpm` workflow runs swtpm from the
 Ubuntu archive. Because swtpm reports manufacturer `IBM`, every key in that
 run is custody `vtpm`; the tests assert that, in `ca-pubkeys.json` and in the
-verified bundle. `scripts/swtpm-setup.sh MODE DIR` starts it in one of two
-modes:
+verified bundle. `scripts/swtpm-setup.sh DIR` starts it on a Unix socket
+carrying raw TPM commands (`unixio`). The backend reaches that socket with
+the test-only option `swtpm-socket=PATH` (go-tpm `linuxudstpm`). No root is
+needed, so local runs (WSL2) use the same setup.
 
-- `vtpm-proxy`: swtpm behind the kernel's `tpm_vtpm_proxy`. The kernel
-  creates a new `/dev/tpmrmN`, and the backend uses its production
-  transport (`device=/dev/tpmrmN`). It needs root and the kernel module.
-- `unixio`: swtpm on a Unix socket carrying raw TPM commands, reached with
-  the test-only option `swtpm-socket=PATH` (go-tpm `linuxudstpm`). It needs
-  no root. WSL2 kernels have no `tpm_vtpm_proxy`, so local runs use this
-  mode.
+**CI exercises the swtpm `unixio` transport only.** The unit tests under
+`-race` and the full e2e suite run over it. The production device path
+(`device=/dev/tpmrm0`, go-tpm `linuxtpm.Open`) is not exercised in CI. It is
+first exercised in plan 01-14, the homelab dogfood on the Proxmox VM's own
+vTPM. Everything above the transport (key creation, key files, signing,
+custody) is the same code in both cases; only the transport differs.
 
-**CI uses `unixio`.** The spike on PR #12 ran both modes on the
-`ubuntu-24.04` runner. `vtpm-proxy` failed: the runner's kernel
-(`6.17.0-1022-azure`) has no `tpm_vtpm_proxy` module, not even in
-`linux-modules-extra-6.17.0-1022-azure`. `unixio` passed: the backend unit
-tests under `-race` and the full e2e suite. The production device path
-(`linuxtpm.Open` on `/dev/tpmrm0`) is therefore not exercised in CI; it is
-exercised on real hardware by the homelab dogfood (plan 01-14). Everything
-above the transport (key creation, key files, signing, custody) is the same
-code in both cases.
+A `vtpm-proxy` mode was attempted and dropped. In that mode swtpm sits behind
+the kernel's `tpm_vtpm_proxy`, and the kernel creates a new `/dev/tpmrmN`,
+which would have put the production transport in CI. On the `ubuntu-24.04`
+runner it never got past loading the module: the runner's kernel
+(`6.17.0-1022-azure`) has no `tpm_vtpm_proxy`, not even in
+`linux-modules-extra-6.17.0-1022-azure` (spike on PR #12). WSL2 kernels lack
+the module too. The mode was removed from the script rather than kept
+untested.
 
 go-tpm's `tpm2/transport/simulator` package is never used: it links a cgo
 TPM simulator that production never runs. depguard denies it, and

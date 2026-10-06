@@ -9,7 +9,7 @@
 //
 //	KEYROSTER_TPM_OPTS  the tpm backend options, comma-separated key=value,
 //	                    as printed by scripts/swtpm-setup.sh, for example
-//	                    device=/dev/tpmrm1 or swtpm-socket=/tmp/x/swtpm.sock
+//	                    swtpm-socket=/tmp/x/swtpm.sock
 package e2e
 
 import (

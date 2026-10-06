@@ -3,8 +3,10 @@ name: E2E TPM
 # TPM 2.0 path (KEY-04, D-07, D-08, D-09): keyroster-signer ca-init --backend
 # tpm creates the CA, ops and log keys as ECDSA P-256 keys inside a TPM. CI uses
 # swtpm (Ubuntu archive), which reports manufacturer IBM, so the keys are
-# recorded as custody vtpm. scripts/swtpm-setup.sh starts it; the mode chosen
-# here and the reason are recorded in docs/security/custody.md.
+# recorded as custody vtpm. scripts/swtpm-setup.sh starts it on a Unix socket
+# (unixio). The runner's azure kernel has no tpm_vtpm_proxy module, so the
+# production device path (/dev/tpmrm0) is not exercised here; see
+# docs/security/custody.md.
 #
 # The job also runs the TPM keystore unit tests under -race with swtpm
 # present (KEYROSTER_TPM_REQUIRE=1 turns a missing swtpm into a failure); the
@@ -30,10 +32,6 @@ jobs:
       contents: read
     env:
       OPENSSH_VERSION: "10.5p1"
-      # unixio: the runner's azure kernel has no tpm_vtpm_proxy module, not
-      # even in linux-modules-extra, so the vtpm-proxy mode cannot run here
-      # (spike on PR #12; see docs/security/custody.md).
-      SWTPM_MODE: unixio
     defaults:
       run:
         shell: bash
@@ -70,7 +68,7 @@ jobs:
       - name: Start swtpm
         run: |
           dir="$RUNNER_TEMP/swtpm"
-          bash scripts/swtpm-setup.sh "$SWTPM_MODE" "$dir" | tail -n 1 >>"$GITHUB_ENV"
+          bash scripts/swtpm-setup.sh "$dir" | tail -n 1 >>"$GITHUB_ENV"
           echo "SWTPM_DIR=$dir" >>"$GITHUB_ENV"
       - name: Run the TPM e2e suite
         run: |
@@ -82,7 +80,7 @@ jobs:
         if: always()
         run: |
           mkdir -p e2e-logs
-          sudo cat "$SWTPM_DIR/swtpm.log" >e2e-logs/swtpm.log 2>/dev/null || true
+          cat "$SWTPM_DIR/swtpm.log" >e2e-logs/swtpm.log 2>/dev/null || true
       # The harness prints the signer and sshd logs of every failed test into
       # the go test output captured above.
       - name: Upload the test logs
