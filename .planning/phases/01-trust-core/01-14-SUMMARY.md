@@ -186,6 +186,7 @@ status: complete
   - KEY-07 is **not** marked complete.
   - The homelab signer must not be treated as a trusted CA.
 - **Follow-up (owner action):** a real offline ceremony, then a successor bundle naming the real roots, signed by a test root. Keep the test roots until then. See `deferred-items.md`.
+- **Gap (found while closing the plan, not exercised):** `install-bundle` already accepts successors (`trust.VerifySuccessor`), but no `keyroster` command builds one; `root sign` produces genesis bundles only (version 1, all-zero `prev`). Either a successor-signing command is added first, or the homelab signer is started over (wipe state, `ca-init` again, real genesis bundle), which does not need the test roots.
 
 **2. Second build machine (Task 1)**
 - The independent `keyroster` rebuild ran on another homelab machine instead of the laptop. The source was carried as a git bundle because that machine has no github.com egress, and the Go toolchain hash was checked against go.dev. The hashes are identical.
