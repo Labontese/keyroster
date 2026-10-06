@@ -121,7 +121,7 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-08: host certificates presented as user certificates are tested with an x/crypto/ssh client because the OpenSSH client never offers a non-user certificate; sshd refuses them (Certificate invalid: not a user certificate)
 - [Phase 01]: 01-10: CA and root SoftHSM2 tokens use separate token directories and agents (T-01-47); PINs reach pkcs11-tool via env:NAME and ssh-add via SSH_ASKPASS, never argv
 - [Phase 01]: 01-10: TestPKCS11Ed25519 asserts refusal on ssh-agent older than 10.1 instead of skipping; fingerprint_test.go (!e2e && (e2e_pkcs11 || e2e_tpm)) supplies fingerprint for hardware-backend e2e builds
-- [Phase 01]: 01-11: CI runs the TPM lane on swtpm unixio; vtpm-proxy rejected (azure runner kernel has no tpm_vtpm_proxy, even in linux-modules-extra); production /dev/tpmrm0 path is exercised by the 01-14 dogfood
+- [Phase 01]: 01-11: CI runs the TPM lane on swtpm unixio, the only transport CI exercises; vtpm-proxy rejected (azure runner kernel has no tpm_vtpm_proxy, even in linux-modules-extra) and removed from swtpm-setup.sh by owner decision because it never ran to completion; production /dev/tpmrm0 path is first exercised by the 01-14 dogfood
 - [Phase 01]: 01-11: swtpm-tcp transport not built (works with swtpm, but a TCP client in the signer conflicts with KEY-01; unixio needs no root)
 - [Phase 01]: 01-11: TPM custody derived from TPM_PT_MANUFACTURER at open time (IBM/MSFT/GOOG = vtpm); the custody option can only weaken to vtpm
 - [Phase 01]: 01-11: reserved keystore option state-dir is added by ca-init/install-bundle/serve at open time, never stored, refused as --backend-opt
