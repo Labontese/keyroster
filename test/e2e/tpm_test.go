@@ -14,6 +14,7 @@ package e2e
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -293,4 +294,88 @@ func TestTPMRestartPersistence(t *testing.T) {
 	}
 	// ca_init, bundle_install and two issuances.
 	tpmAuditVerify(t, env, 4, 2)
+}
+
+// TestTPMCAInitTwiceRefused: ca-init --backend tpm prints the TPM
+// manufacturer and the custody derived from it (swtpm: IBM, vtpm); a second
+// ca-init on the same state is refused and leaves the key files,
+// ca-pubkeys.json and the audit log unchanged (KEY-04 idempotency).
+func TestTPMCAInitTwiceRefused(t *testing.T) {
+	base := shortTempDir(t)
+	state := filepath.Join(base, "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"ca-init", "--state-dir", state, "--backend", "tpm"}
+	opts := tpmOpts(t)
+	for _, k := range sortedKeys(opts) {
+		args = append(args, "--backend-opt", k+"="+opts[k])
+	}
+	code, out := runBin(t, signerBin, "", args...)
+	if code != 0 {
+		t.Fatalf("ca-init exited %d:\n%s", code, out)
+	}
+	if !strings.Contains(out, "TPM manufacturer: IBM → custody vtpm") || strings.Count(out, " ecdsa-sha2-nistp256 vtpm\n") != len(roleNames) {
+		t.Fatalf("ca-init output lacks the manufacturer line or five vtpm keys:\n%s", out)
+	}
+
+	snapshot := func() map[string][]byte {
+		t.Helper()
+		files := map[string][]byte{}
+		for _, dir := range []string{state, filepath.Join(state, "tpm")} {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if e.IsDir() || strings.HasPrefix(e.Name(), "signer.db") {
+					continue
+				}
+				data, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec // test fixture
+				if err != nil {
+					t.Fatal(err)
+				}
+				files[filepath.Join(filepath.Base(dir), e.Name())] = data
+			}
+		}
+		return files
+	}
+	exportLog := func() []byte {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "log.jsonl")
+		if code, out := runBin(t, signerBin, "", "export-log", "--state-dir", state, "--out", path); code != 0 {
+			t.Fatalf("export-log exited %d:\n%s", code, out)
+		}
+		data, err := os.ReadFile(path) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	before, logBefore := snapshot(), exportLog()
+	if len(before) != 1+2*len(roleNames) {
+		t.Fatalf("state holds %d files, want ca-pubkeys.json and 10 key and auth files", len(before))
+	}
+
+	// The default output, ca-pubkeys.json, already exists.
+	if code, out := runBin(t, signerBin, "", args...); code == 0 {
+		t.Fatalf("second ca-init exited 0:\n%s", out)
+	}
+	fresh := filepath.Join(t.TempDir(), "ca-pubkeys.json")
+	code, out = runBin(t, signerBin, "", append(args, "--out", fresh)...)
+	if code == 0 || !strings.Contains(out, "already initialised") {
+		t.Fatalf("second ca-init with --out exited %d, want a refusal naming the initialised state:\n%s", code, out)
+	}
+	after := snapshot()
+	if len(after) != len(before) {
+		t.Fatalf("refused ca-init changed the state files: %d -> %d", len(before), len(after))
+	}
+	for name, data := range before {
+		if !bytes.Equal(after[name], data) {
+			t.Fatalf("refused ca-init changed %s", name)
+		}
+	}
+	if !bytes.Equal(exportLog(), logBefore) {
+		t.Fatal("refused ca-init changed the audit log")
+	}
 }

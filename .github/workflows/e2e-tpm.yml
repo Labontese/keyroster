@@ -24,17 +24,16 @@ permissions: {}
 # (see CONTRIBUTING.md).
 jobs:
   e2e-tpm:
-    name: e2e-tpm (${{ matrix.mode }})
+    name: e2e-tpm
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: [vtpm-proxy, unixio]
     env:
       OPENSSH_VERSION: "10.5p1"
-      SWTPM_MODE: ${{ matrix.mode }}
+      # unixio: the runner's azure kernel has no tpm_vtpm_proxy module, not
+      # even in linux-modules-extra, so the vtpm-proxy mode cannot run here
+      # (spike on PR #12; see docs/security/custody.md).
+      SWTPM_MODE: unixio
     defaults:
       run:
         shell: bash
@@ -50,11 +49,6 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends swtpm
-          # The runner's cloud kernel ships tpm_vtpm_proxy only in the
-          # matching linux-modules-extra package.
-          if [ "$SWTPM_MODE" = vtpm-proxy ]; then
-            sudo apt-get install -y -q --no-install-recommends "linux-modules-extra-$(uname -r)"
-          fi
       - name: Record tool versions
         run: |
           dpkg-query -W swtpm libtpms0
@@ -95,7 +89,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-tpm-logs-${{ matrix.mode }}
+          name: e2e-tpm-logs
           path: e2e-logs/
           retention-days: 7
           if-no-files-found: warn
