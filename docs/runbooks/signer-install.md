@@ -14,9 +14,11 @@ in the TPM. It ends with `keyroster-signer doctor` reporting no FAIL.
 > (`e2e-tpm`), not through `/dev/tpmrm0`. **This runbook's TPM path (the
 > `tpm.conf` drop-in, `/dev/tpmrm0`, group `tss`, and the
 > `runuser -g keyroster-signer -G tss` commands below) has not run in CI.**
-> Neither has the agent unit's PKCS#11 path (`-P` loading a module through
-> `ssh-pkcs11-helper` under the unit's sandbox): the smoke test loads plain
-> keys only. Both are first exercised on the homelab VM in plan 01-14. See
+> It was run by hand, steps 1 to 9 except the issuance example in step 8, on
+> the homelab VM in plan 01-14 (Ubuntu 26.04 guest, Proxmox vTPM, custody
+> `vtpm`). The agent unit's PKCS#11 path (`-P` loading a module through
+> `ssh-pkcs11-helper` under the unit's sandbox) has still not run anywhere:
+> the smoke test loads plain keys only. See
 > [docs/security/custody.md](../security/custody.md).
 
 ## What you need

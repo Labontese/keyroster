@@ -23,7 +23,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 - [x] **KEY-01**: CA keys live in a separate, network-less signer process behind a `Signer` interface
 - [ ] **KEY-02**: Signer only issues when the request carries evidence it verifies itself (WebAuthn assertion over the request digest, required approvals, quorum-signed policy version)
 - [x] **KEY-03**: Admin can store CA keys in a PKCS#11 HSM (e.g. YubiHSM 2) via ssh-agent
-- [ ] **KEY-04**: Admin can store CA keys in a TPM 2.0
+- [x] **KEY-04**: Admin can store CA keys in a TPM 2.0
 - [x] **KEY-05**: Admin can store CA keys in a YubiKey PIV slot
 - [ ] **KEY-06**: Admin can use an encrypted software CA key for evaluation, with a loud warning in CLI and UI
 - [ ] **KEY-07**: Admin can perform an offline trust-root ceremony (M-of-N hardware keys) producing a root that signs only trust bundles, KRL authority and policy
@@ -74,7 +74,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 - [x] **VIS-01**: Every issuance, revocation, approval and admin action is written to a Merkle audit log before the certificate/action is released
 - [ ] **VIS-02**: Log checkpoints are signed; agents and CLI verify the log only grows (consistency proofs)
-- [ ] **VIS-03**: User/admin can run `sshcm audit verify` to verify the log end to end, and export it
+- [x] **VIS-03**: User/admin can run `sshcm audit verify` to verify the log end to end, and export it
 - [ ] **VIS-04**: Overview shows all certificates, keys, hosts, principals and expiry — who has access to what, now
 - [ ] **VIS-05**: Login reconciliation: agents report sshd login events (serial + CA); any login with a serial not in the issuance log raises an alert
 - [ ] **VIS-06**: Convergence view shows which hosts have applied the current KRL, CA set and policy (e.g. 47/48)
@@ -176,7 +176,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | KEY-01 | Phase 1 | Complete |
 | KEY-02 | Phase 2 | Pending |
 | KEY-03 | Phase 1 | Complete |
-| KEY-04 | Phase 1 | Pending |
+| KEY-04 | Phase 1 | Complete |
 | KEY-05 | Phase 1 | Complete |
 | KEY-06 | Phase 2 | Pending |
 | KEY-07 | Phase 1 | Pending |
@@ -209,7 +209,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | BREAK-02 | Phase 5 | Pending |
 | VIS-01 | Phase 1 | Complete |
 | VIS-02 | Phase 4 | Pending |
-| VIS-03 | Phase 1 | Pending |
+| VIS-03 | Phase 1 | Complete |
 | VIS-04 | Phase 5 | Pending |
 | VIS-05 | Phase 5 | Pending |
 | VIS-06 | Phase 4 | Pending |
