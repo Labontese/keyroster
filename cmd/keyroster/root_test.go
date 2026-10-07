@@ -744,3 +744,74 @@ func TestAppendSignatureRefusesUnparseable(t *testing.T) {
 		t.Fatalf("file changed after the refusal: %q, %v", data, err)
 	}
 }
+
+// TestRootSignRerunAfterPartialFailure (B-WR-03): when only the bundle
+// signature was written (the policy append failed), a rerun with the same
+// root signs only the policy; a further rerun is refused. Signature files
+// are replaced atomically, with no temporary file left behind.
+func TestRootSignRerunAfterPartialFailure(t *testing.T) {
+	c := newCeremony(t, 1)
+	useKeyring(t, c.rootKeys...)
+	fp := c.fingerprint(t, 0)
+	if code, _, _ := c.sign(t, "1", 0, "--confirm", "00000000"); code != 1 {
+		t.Fatal("expected the wrong confirmation to fail")
+	}
+	bundle, err := os.ReadFile(filepath.Join(c.out, "bundle.json")) //nolint:gosec // G304: test file
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := trust.SHA256Hex(bundle)[:8]
+	if code, _, stderr := c.sign(t, "1", 0, "--confirm", prefix); code != 0 {
+		t.Fatalf("first root sign: exit %d: %s", code, stderr)
+	}
+	if err := os.Remove(filepath.Join(c.out, "policy.json.sigs")); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := c.sign(t, "1", 0, "--confirm", prefix)
+	if code != 0 {
+		t.Fatalf("rerun after a missing policy signature: exit %d: %s", code, stderr)
+	}
+	for _, want := range []string{
+		filepath.Join(c.out, "bundle.json.sigs") + " already holds a signature by " + fp + "; not signing it again",
+		"signed " + filepath.Join(c.out, "policy.json") + " with " + fp,
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("rerun output lacks %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "signed "+filepath.Join(c.out, "bundle.json")+" with") {
+		t.Fatalf("rerun signed the bundle again:\n%s", stdout)
+	}
+	for _, f := range []string{"bundle.json.sigs", "policy.json.sigs"} {
+		data, err := os.ReadFile(filepath.Join(c.out, f)) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sigs, err := sshsig.ParseAll(data); err != nil || len(sigs) != 1 {
+			t.Fatalf("%s holds %d signatures (%v), want 1", f, len(sigs), err)
+		}
+		if runtime.GOOS != "windows" {
+			if fi, err := os.Stat(filepath.Join(c.out, f)); err != nil || fi.Mode().Perm() != 0o644 {
+				t.Fatalf("%s mode %v (%v), want 0644", f, fi.Mode().Perm(), err)
+			}
+		}
+	}
+	if code, _, stderr := c.verify(t, "1", fp); code != 0 {
+		t.Fatalf("trust verify after the rerun: exit %d: %s", code, stderr)
+	}
+
+	if code, _, stderr := c.sign(t, "1", 0, "--confirm", prefix); code != 1 ||
+		!strings.Contains(stderr, "already holds a signature") || !strings.Contains(stderr, "nothing to sign") {
+		t.Fatalf("rerun with both documents signed: exit %d, stderr %q", code, stderr)
+	}
+	entries, err := os.ReadDir(c.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Fatalf("temporary file %s left in --out-dir", e.Name())
+		}
+	}
+}

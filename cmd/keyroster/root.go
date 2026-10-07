@@ -282,15 +282,31 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if softRoot != nil && custody != "software" {
 		return fmt.Errorf("--key holds root %s in software, but %s declares custody=%s; refusing to sign under a false custody label", fp, *rootsPath, custody)
 	}
-	bundleSigsPath := filepath.Join(*outDir, bundleFile+sigsSuffix)
-	policySigsPath := filepath.Join(*outDir, policyFile+sigsSuffix)
-	for _, f := range []struct {
+	// A rerun after a partial failure (the bundle signature written, the
+	// policy signature not) signs only the document this root has not
+	// signed yet; it is refused only when both already carry its signature.
+	type sigDoc struct {
 		path, ns string
 		doc      []byte
-	}{{bundleSigsPath, trust.NamespaceBundle, bundle}, {policySigsPath, trust.NamespacePolicy, policy}} {
-		if err := refuseIfSigned(f.path, f.ns, f.doc, rootPub); err != nil {
+	}
+	all := []sigDoc{
+		{filepath.Join(*outDir, bundleFile+sigsSuffix), trust.NamespaceBundle, bundle},
+		{filepath.Join(*outDir, policyFile+sigsSuffix), trust.NamespacePolicy, policy},
+	}
+	var todo []sigDoc
+	for _, d := range all {
+		signed, err := hasSignature(d.path, d.ns, d.doc, rootPub)
+		if err != nil {
 			return err
 		}
+		if signed {
+			_, _ = fmt.Fprintf(stdout, "%s already holds a signature by %s; not signing it again\n", d.path, fp)
+			continue
+		}
+		todo = append(todo, d)
+	}
+	if len(todo) == 0 {
+		return fmt.Errorf("%s already holds a signature by %s, and so does %s; nothing to sign", all[0].path, fp, all[1].path)
 	}
 
 	hash := rootceremony.BundleHash(bundle)
@@ -320,21 +336,24 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if custody == "software" {
 		_, _ = io.WriteString(stderr, softwareRootBanner)
 	}
-	bundleSig, err := signer.SignBundle(rand.Reader, bundle)
-	if err != nil {
-		return err
+	// Sign everything first, so a failed signature (a FIDO touch timing
+	// out) writes nothing.
+	sigs := make([][]byte, len(todo))
+	for i, d := range todo {
+		sign := signer.SignBundle
+		if d.ns == trust.NamespacePolicy {
+			sign = signer.SignPolicy
+		}
+		if sigs[i], err = sign(rand.Reader, d.doc); err != nil {
+			return err
+		}
 	}
-	policySig, err := signer.SignPolicy(rand.Reader, policy)
-	if err != nil {
-		return err
+	for i, d := range todo {
+		if err := appendSignature(d.path, sigs[i]); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "signed %s with %s\n", strings.TrimSuffix(d.path, sigsSuffix), fp)
 	}
-	if err := appendSignature(bundleSigsPath, bundleSig); err != nil {
-		return err
-	}
-	if err := appendSignature(policySigsPath, policySig); err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(stdout, "signed %s and %s with %s\n", filepath.Join(*outDir, bundleFile), filepath.Join(*outDir, policyFile), fp)
 	return nil
 }
 
@@ -476,26 +495,27 @@ func rootByFingerprint(b *trust.Bundle, fp string) (ssh.PublicKey, string, error
 	return nil, "", fmt.Errorf("signing root %s is not one of the bundle's root keys", fp)
 }
 
-// refuseIfSigned fails when the sigs file already holds a valid signature by
-// pub over doc.
-func refuseIfSigned(path, namespace string, doc []byte, pub ssh.PublicKey) error {
+// hasSignature reports whether the sigs file holds a valid signature by pub
+// over doc under namespace. A missing file holds none; a file that does not
+// parse is an error.
+func hasSignature(path, namespace string, doc []byte, pub ssh.PublicKey) (bool, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: inside the operator's out-dir
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	sigs, err := sshsig.ParseAll(data)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return false, fmt.Errorf("%s: %w", path, err)
 	}
 	for _, s := range sigs {
 		if bytes.Equal(s.PublicKey().Marshal(), pub.Marshal()) && s.Verify(namespace, doc) == nil {
-			return fmt.Errorf("%s already holds a signature by %s", path, ssh.FingerprintSHA256(pub))
+			return true, nil
 		}
 	}
-	return nil
+	return false, nil
 }
 
 // agentSigner returns the ssh-agent signer for pub.
@@ -549,6 +569,12 @@ func writeExclusive(path string, data []byte, perm os.FileMode) error {
 		_ = f.Close()
 		return err
 	}
+	// The root key goes to removable media and is the only copy: flush it
+	// before success is reported and its public key is distributed.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
 	return f.Close()
 }
 
@@ -558,13 +584,13 @@ func writeExclusive(path string, data []byte, perm os.FileMode) error {
 // newline is added first: a block written straight after "-----END SSH
 // SIGNATURE-----" would make the whole file, and every signature already
 // in it, unparseable. The result must still parse, or the file is left
-// unchanged.
+// unchanged; it is written with replaceFile, so a failed write cannot
+// truncate the signatures already in it.
 func appendSignature(path string, sig []byte) error {
-	old, err := os.ReadFile(path) //nolint:gosec // G304: inside the operator's out-dir
+	data, err := os.ReadFile(path) //nolint:gosec // G304: inside the operator's out-dir
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	data := bytes.Clone(old)
 	if len(data) > 0 && data[len(data)-1] != '\n' {
 		data = append(data, '\n')
 	}
@@ -572,13 +598,38 @@ func appendSignature(path string, sig []byte) error {
 	if _, err := sshsig.ParseAll(data); err != nil {
 		return fmt.Errorf("%s would not parse with the new signature appended, so it was left unchanged: %w", path, err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644) //nolint:gosec // G302,G304: signatures are public; inside the operator's out-dir
+	return replaceFile(path, data, 0o644)
+}
+
+// replaceFile writes data to path atomically: to a temporary file in the
+// same directory, synced to disk, then renamed over path. A failure part way
+// leaves path as it was, never a truncated signature block.
+//
+// UNVERIFIED: the failure paths (disk full, media pulled mid-write) and
+// durability across power loss are not exercised by tests; the parent
+// directory is not fsynced, so the rename itself may still be lost if the
+// media is pulled without unmounting.
+func replaceFile(path string, data []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data[len(old):]); err != nil {
-		_ = f.Close()
-		return err
+	tmp := f.Name()
+	err = f.Chmod(perm)
+	if err == nil {
+		_, err = f.Write(data)
 	}
-	return f.Close()
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
 }

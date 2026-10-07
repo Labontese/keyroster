@@ -179,7 +179,9 @@ Insert USB A. Sign the bundle and the policy with threshold 1:
 Before typing, compare **both root fingerprints in the summary with the
 paper**, and the CA fingerprints with `ca-init`'s output. Then type the hash
 prefix. `root sign` prints the `SOFTWARE ROOT:` banner and appends the
-signatures to `bundle.json.sigs` and `policy.json.sigs`.
+signatures to `bundle.json.sigs` and `policy.json.sigs`. If it stops after
+writing only one of them, run the same command again: it signs only the
+document this root has not signed yet. Do not edit `.sigs` files by hand.
 
 Remove USB A, insert USB B and run the same command with
 `--key /media/usbB/root-b.age` and the same `--out-dir`. `root sign` refuses
