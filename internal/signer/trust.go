@@ -249,7 +249,7 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err := checkBundleKeys(b, caKeys); err != nil {
 		return nil, err
 	}
-	if err := checkPolicyAdmins(p, caKeys); err != nil {
+	if err := checkPolicyAdmins(b, p, caKeys); err != nil {
 		return nil, err
 	}
 	if b.Log.Origin != tlog.Origin(logKey.PublicKey()) {
@@ -330,8 +330,14 @@ func checkBundleKeys(b *trust.Bundle, caKeys []signerdb.CAKey) error {
 
 // checkPolicyAdmins refuses a policy that names one of the signer's own
 // online keys (a CA, ops or log key) as an admin: the keys that sign
-// certificates must never also authorize them (D-13).
-func checkPolicyAdmins(p *trust.Policy, caKeys []signerdb.CAKey) error {
+// certificates must never also authorize them (D-13). Nor may an admin be
+// one of the bundle's roots (KEY-07, trust.CheckAdminsNotRoots); the
+// trust.Verify* functions check that on install already, and this repeats
+// it for a stored record loaded at start.
+func checkPolicyAdmins(b *trust.Bundle, p *trust.Policy, caKeys []signerdb.CAKey) error {
+	if err := trust.CheckAdminsNotRoots(p, b.Root.Keys); err != nil {
+		return err
+	}
 	for _, a := range p.Admins {
 		pub, err := trust.ParseKey(a.Key)
 		if err != nil {
@@ -433,7 +439,7 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	if err := checkBundleKeys(b, caKeys); err != nil {
 		return nil, err
 	}
-	if err := checkPolicyAdmins(p, caKeys); err != nil {
+	if err := checkPolicyAdmins(b, p, caKeys); err != nil {
 		return nil, err
 	}
 	ts := &trustState{stored: stored, bundle: b, policy: p, ca: map[wire.CARole]keystore.CAKey{}, profiles: map[wire.CARole]cert.Profile{}}

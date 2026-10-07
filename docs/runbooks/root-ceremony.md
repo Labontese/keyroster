@@ -105,7 +105,10 @@ On the signer host, which has a network but no root key (the
    ```
 
 2. Write the genesis policy. Each `--admin` names an admin's SSH public key
-   whose signature may authorize issuance:
+   whose signature may authorize issuance. An admin key must not be a root
+   key: a root only signs bundles and policies, so `root sign`,
+   `trust verify` and `install-bundle` refuse a policy that lists a root as
+   an admin.
 
    ```
    keyroster root genesis-policy --admin alice=alice.pub --out /media/transfer/policy.json

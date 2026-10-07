@@ -45,7 +45,7 @@ var caRoles = []string{RoleUser, RoleHost, RoleMachine}
 // operators can tell them apart.
 var (
 	ErrInvalid      = errors.New("trust: invalid document")
-	ErrKeyIsRoot    = errors.New("trust: a CA, ops or log key equals a root key")
+	ErrKeyIsRoot    = errors.New("trust: a CA, ops, log or policy admin key equals a root key")
 	ErrDuplicateKey = errors.New("trust: the same key appears twice")
 	ErrAlgorithm    = errors.New("trust: algorithm not allowed or not the key's type")
 	ErrCustody      = errors.New("trust: custody value not allowed")

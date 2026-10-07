@@ -659,3 +659,28 @@ func (c *ceremony) verifyIn(t *testing.T, dir, threshold string, pins ...string)
 	other.out = dir
 	return other.verify(t, threshold, pins...)
 }
+
+// TestRootSignRefusesRootAsAdmin (B-CR-01, KEY-07): root sign refuses a
+// policy that lists one of the roots as an admin, before it writes anything
+// into --out-dir.
+func TestRootSignRefusesRootAsAdmin(t *testing.T) {
+	c := newCeremony(t, 1)
+	useKeyring(t, c.rootKeys...)
+	pub, err := ssh.NewPublicKey(c.rootKeys[0].Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootFile := filepath.Join(c.dir, "root.pub")
+	writeTestFile(t, rootFile, ssh.MarshalAuthorizedKey(pub))
+	c.policy = filepath.Join(c.dir, "root-admin-policy.json")
+	if code, _, stderr := run(t, "root", "genesis-policy", "--admin", "root="+rootFile, "--out", c.policy); code != 0 {
+		t.Fatalf("genesis-policy exit %d: %s", code, stderr)
+	}
+	code, _, stderr := c.sign(t, "1", 0, "--confirm", "00000000")
+	if code != 1 || !strings.Contains(stderr, "policy admin key equals a root key") || !strings.Contains(stderr, "nothing was written or signed") {
+		t.Fatalf("root sign of a root-as-admin policy: exit %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(c.out); !os.IsNotExist(err) {
+		t.Fatalf("--out-dir exists after the refusal (stat error %v)", err)
+	}
+}

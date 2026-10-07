@@ -252,6 +252,11 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if *threshold < 1 || *threshold > len(roots) {
 		return fmt.Errorf("--threshold %d with %d roots", *threshold, len(roots))
 	}
+	// A root never authorizes issuance (KEY-07). Checked before
+	// prepareBundle, so a refused pair leaves nothing in --out-dir.
+	if err := trust.CheckAdminsNotRoots(pol, roots); err != nil {
+		return fmt.Errorf("%s: %w; nothing was written or signed", *policyPath, err)
+	}
 
 	bundle, b, err := prepareBundle(*outDir, cas, roots, uint32(*threshold), policy) //nolint:gosec // G115: <= len(roots)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -467,6 +468,17 @@ func TestInstallBundleRefusals(t *testing.T) {
 			pol.Admins[0].Key = trust.FormatKey(e.fx.Roles[keystore.RoleUser].PublicKey())
 			return input{[]string{e.fx.RootPin()}, 1, docs4(t, e.fx.GenesisBundle(t, e.cas, pol), pol, e.fx.Root)}
 		}, ErrBundleKeys},
+		// B-CR-01 (KEY-07): a root never authorizes issuance.
+		{"admin_is_root", false, func(t *testing.T, e *installEnv) input {
+			pol := e.fx.Policy()
+			pol.Admins[0].Key = trust.FormatKey(e.fx.Root.PublicKey())
+			return input{[]string{e.fx.RootPin()}, 1, docs4(t, e.fx.GenesisBundle(t, e.cas, pol), pol, e.fx.Root)}
+		}, trust.ErrKeyIsRoot},
+		{"successor_admin_is_root", true, func(t *testing.T, e *installEnv) input {
+			pol := policyV2(t, e.fx)
+			pol.Admins = append(pol.Admins, trust.AdminKey{Name: "root", Key: trust.FormatKey(e.fx.Root.PublicKey())})
+			return input{nil, 0, docs4(t, successor(t, e.genesis(t), pol), pol, e.fx.Root)}
+		}, trust.ErrKeyIsRoot},
 		{"version_not_increasing", true, func(t *testing.T, e *installEnv) input {
 			return input{nil, 0, docs4(t, e.fx.GenesisBundle(t, e.cas, e.fx.Policy()), e.fx.Policy(), e.fx.Root)}
 		}, trust.ErrVersionChain},
@@ -613,6 +625,56 @@ func TestStartRefusesCustodyMismatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// TestStartRefusesRootAsAdmin (B-CR-01, KEY-07): a stored record whose
+// policy lists a root as an admin, as an install-bundle without the check
+// could have written, is refused at start, not served.
+func TestStartRefusesRootAsAdmin(t *testing.T) {
+	ctx := context.Background()
+	fx := NewFixture(t, 1, 1)
+	db := newStateDB(t)
+	be := newMemBackend(fx)
+	cas, err := InitCA(ctx, db, be, "test", map[string]string{}, fx.Selection(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol := fx.Policy()
+	pol.Admins[0].Key = trust.FormatKey(fx.Root.PublicKey())
+	bd, bs, pd, ps := SignDocs(t, fx.GenesisBundle(t, cas, pol), pol, fx.Root)
+
+	// Write the rows and the log entry InstallBundle writes, without its
+	// verification.
+	caKeys, err := db.CAKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logKey, err := openRoleKey(be, caKeys, "log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lw, err := newLogWriter(ctx, db, logKey, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := (&tlog.BundleInstallBody{BundleVersion: 1, Bundle: bd, BundleSigs: bs, Policy: pd, PolicySigs: ps}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := lw.logTx(ctx, func(tx *sql.Tx) error {
+		if err := db.InsertBundle(tx, signerdb.StoredBundle{Version: 1, Bundle: bd, BundleSigs: bs, Policy: pd, PolicySigs: ps, InstalledAt: now}); err != nil {
+			return err
+		}
+		_, err := lw.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(now), Kind: tlog.KindBundleInstall, Body: enc})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := New(Config{Backend: be, DB: db, AllowUIDs: []uint32{1}}); !errors.Is(err, trust.ErrKeyIsRoot) {
+		t.Fatalf("New with a root as policy admin = %v, want trust.ErrKeyIsRoot", err)
+	}
 }
 
 // TestProfiles (CA-04, CA-05): every certificate follows its role's policy
