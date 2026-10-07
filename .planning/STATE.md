@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: Trust Core
-status: executing
-stopped_at: "01-14 Task 4 merge gate: owner approves PR #17"
-last_updated: "2026-10-06T13:21:35.316Z"
+status: verifying
+stopped_at: "01-15 Task 4 merge gate: owner applies main-integrity from PR #18 branch, then approves PR #18"
+last_updated: "2026-10-07T02:35:30.907Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 01 execution started
-state_head: 847db5f72c068734e1a88cb6311098ef87b6175a
+state_head: 2957866fbf36adfaea950ab4cbc2d4cc6b88a978
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 16
-  completed_plans: 15
+  completed_plans: 16
   percent: 0
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 Phase: 01 (Trust Core) — EXECUTING
 Plan: 16 of 16
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-06 - Completed quick task 261006-ixz: Fix flaky signer freshness-boundary tests with a deterministic test clock
 
 Progress: [░░░░░░░░░░] 0%
@@ -71,6 +71,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P12 | 22 min | 2 tasks | 12 files |
 | Phase 01 P13 | 47 min | 3 tasks | 26 files |
 | Phase 01 P14 | 45 min | 3 tasks | 5 files |
+| Phase 01 P15 | 35 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -139,6 +140,10 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-14: owner decision 'Testceremoni nu, riktig sen' - TEST software roots made on the networked workstation (WSL, unshare -r -n); homelab signer is dogfood only until a real offline ceremony plus successor rotation
 - [Phase 01]: 01-14: KEY-07 stays open and must-have truth 2 is unmet; only KEY-04 and VIS-03 marked complete
 - [Phase 01]: 01-14: the ceremony transcript is kept by the owner, not committed (runbook step 7 and template corrected)
+- [Phase 01]: 01-15: the 9.5p2 check ran on a lab Windows Server 2025 (inbox OpenSSH_for_Windows_9.5p2, file version 9.5.5.1) instead of the owner's workstation, by owner choice; accept PASS, reject PASS
+- [Phase 01]: 01-15: the ruleset listing all 17 checks is applied by the owner from the PR branch before approval (admin-only); REPO-01 is marked complete in p01/close after the live-rules check passes
+- [Phase 01]: 01-15: capslock -tags piv re-deferred to the next plan that edits CI (needs libpcsclite-dev and must not change a check in the PR that makes it required)
+- [Phase 01]: 01-15: KEY-07 stays open; the real offline ceremony means reinstalling the homelab signer until a successor-bundle builder exists
 
 ### Pending Todos
 
@@ -168,6 +173,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-06T13:21:35.242Z
-Stopped at: 01-14 Task 4 merge gate: owner approves PR #17
+Last session: 2026-10-07T02:35:30.830Z
+Stopped at: 01-15 Task 4 merge gate: owner applies main-integrity from PR #18 branch, then approves PR #18
 Resume file: None
