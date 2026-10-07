@@ -146,6 +146,9 @@ status: complete
 - **Before the change:** on `main` at 92c6977, all 16 checks that run on push succeeded under app 15368. `pr-title` runs on pull requests only and was already required.
 - **On PR #18 head `2957866`:** all 17 succeeded under app 15368.
 - **CONTRIBUTING.md:** the required-check table lists all 17 with their workflow. The 9.5p2 note points at `test/manual/`.
+- **Live-versus-file comparison (read-only, sorted keys):**
+  - `main-integrity` differs only by the 10 added contexts.
+  - `main-review` differs only by `require_extra_approval_for_unattributed_changes: true` and `required_reviewers: []`. GitHub fills both in, and 01-01 recorded them as its defaults.
 - **Live ruleset:** it still requires the old seven checks. It changes when the owner runs `bash scripts/apply-rulesets.sh` from the PR branch at the merge gate (the rollout rule in CONTRIBUTING.md, "Changing the rulesets"). Task 3 verify 1 (the live-rules comparison) runs at the merge gate.
 
 ## Scorecard (REPO-03)
@@ -200,7 +203,9 @@ The docs commit (this SUMMARY, `deferred-items.md` and tracking) follows separat
 
 **2. Ruleset not applied by Claude.** Plan step 2 says to run `scripts/apply-rulesets.sh` with the owner token. Rulesets are admin-only, and the orchestrator and CONTRIBUTING.md forbid Claude from using the owner token for it. The owner applies the ruleset from the PR branch at the merge gate, before approving. Task 3 verify 1 (live rules) is therefore pending, not passed.
 
-**3. Auto-merge not enabled.** Claude ran `scripts/gh-as-bot.sh pr merge --auto --squash` (Delivery Protocol step 3). The Claude Code permission classifier denied it ("Merge Without Review"), and Claude did not work around the denial. After approving, the owner either enables auto-merge (squash) in the PR or grants the permission. Merging without approval is impossible either way, because main-review still requires the owner's approval.
+**3. Auto-merge not enabled.** Claude ran `scripts/gh-as-bot.sh pr merge --auto --squash` (Delivery Protocol step 3). The Claude Code permission classifier denied it ("Merge Without Review"), and Claude did not work around the denial. After approving, the owner either enables auto-merge (squash) in the PR or grants the permission.
+  - `scripts/merge-gate.sh` only waits for auto-merge on its normal path.
+  - Its rebase path (exit 3) re-enables auto-merge with the bot when the PR has none. A later agent must not take that path unless auto-merge is already on or the owner has granted the permission. Merging without approval is impossible either way, because main-review still requires the owner's approval.
 
 **4. capslock `-tags piv` not added.** `deferred-items.md` assigned it to 01-15, but the plan's files do not include it. Two reasons ruled it out: generating its baseline needs `libpcsclite-dev`, a package install that is not an executor auto-fix, and changing `capslock` in the PR that makes it required would break "succeeded on main before it was required". Moved to the next plan that edits CI.
 
@@ -225,4 +230,5 @@ None.
 
 - `test/manual/windows-openssh-9.5p2.ps1`, `test/manual/README.md` and `.github/rulesets/main-integrity.json` exist on the branch, and commits `f96e985` and `2957866` are in `git log`.
 - `$HOME/keyroster-win-check/` no longer exists on the workstation.
-- No homelab address, hostname, alias or Windows username appears in the committed changes (grep below).
+- No homelab address, hostname, alias or Windows username appears in the committed changes. A grep of the branch diff and the planning docs for the lab addresses, the VM alias, the owner's account names and home paths matched only the PowerShell role name `[WindowsBuiltInRole]::Administrator` and the label "Run as administrator" in the script.
+- Task 3 verify 5 (`scripts/gh-as-bot.sh pr checks p01/15-acceptance --required --watch`) exited 0 against the live seven-check set. The check-runs API shows all 17 phase checks succeeded under app 15368 on the docs head.
