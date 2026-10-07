@@ -62,6 +62,7 @@ type anchor struct {
 	bundle    *trust.Bundle
 	canonical []byte
 	policy    *trust.Policy
+	policyDoc []byte // the policy's bytes, which a successor's policy chains to
 	logKey    ssh.PublicKey
 	activeCA  map[string]ssh.PublicKey // role -> active CA key
 }
@@ -69,7 +70,8 @@ type anchor struct {
 // install verifies one bundle_install entry and makes its bundle the one in
 // force. The first is a genesis bundle checked against opts' pins and
 // threshold; every later one must be a valid successor of the bundle in
-// force (TUF rule). In Phase 1 every bundle must name the same log key.
+// force (TUF rule), with its policy chained to the policy in force. In
+// Phase 1 every bundle must name the same log key.
 func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 	var (
 		b   *trust.Bundle
@@ -82,7 +84,7 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 			return fmt.Errorf("bundle_install is not anchored in the pinned roots: %w", err)
 		}
 	} else {
-		b, p, err = trust.VerifySuccessor(a.bundle, a.canonical, body.Bundle, body.BundleSigs, body.Policy, body.PolicySigs)
+		b, p, err = trust.VerifySuccessor(a.bundle, a.canonical, a.policyDoc, body.Bundle, body.BundleSigs, body.Policy, body.PolicySigs)
 		if err != nil {
 			return fmt.Errorf("bundle_install is not a valid successor of trust bundle v%d: %w", a.bundle.Version, err)
 		}
@@ -109,7 +111,7 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 		}
 		active[ca.Role] = pub
 	}
-	a.bundle, a.canonical, a.policy, a.logKey, a.activeCA = b, body.Bundle, p, logKey, active
+	a.bundle, a.canonical, a.policy, a.policyDoc, a.logKey, a.activeCA = b, body.Bundle, p, body.Policy, logKey, active
 	return nil
 }
 
@@ -168,8 +170,10 @@ func certTypeName(t uint32) string {
 //   - the first bundle_install entry holds a genesis bundle and policy
 //     signed by opts.Threshold of the pinned roots, whose root set is
 //     exactly the pinned set; every later one is a root-signed successor of
-//     the bundle in force; each records its bundle's version, and all of
-//     them name the same log key (Phase 1)
+//     the bundle in force whose policy is either unchanged or the next
+//     policy version chained to the one in force (trust.VerifySuccessor);
+//     each records its bundle's version, and all of them name the same log
+//     key (Phase 1)
 //   - every issue leaf comes after the first bundle_install and holds a
 //     certificate whose CA signature verifies over its signed bytes
 //     (expired certificates included), signed by the active CA of the

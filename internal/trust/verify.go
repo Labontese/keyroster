@@ -165,7 +165,14 @@ func pinSet(pins []string) (map[string]bool, error) {
 // neither a stolen old root nor a freshly listed new root can rotate trust
 // alone. next must be version prev+1, carry prev's SHA-256 as prev, not be
 // issued before prev, and carry the policy's SHA-256.
-func VerifySuccessor(prev *Bundle, prevCanonical []byte, next, nextSigs, policy, policySigs []byte) (*Bundle, *Policy, error) {
+//
+// prevPolicy is the policy document in force under prev (its SHA-256 must
+// be prev's policy_sha256). The policy chains like the bundle: it is either
+// byte-identical to prevPolicy, or it is version prevPolicy.version+1 with
+// prevPolicy's SHA-256 as its prev. So a policy version names exactly one
+// policy, and the key ID's pol=N identifies the admins and profiles that
+// authorized a certificate.
+func VerifySuccessor(prev *Bundle, prevCanonical, prevPolicy, next, nextSigs, policy, policySigs []byte) (*Bundle, *Policy, error) {
 	if prev == nil {
 		return nil, nil, fmt.Errorf("%w: no previous bundle", ErrVersionChain)
 	}
@@ -175,6 +182,13 @@ func VerifySuccessor(prev *Bundle, prevCanonical []byte, next, nextSigs, policy,
 	pc, err := prev.Canonical()
 	if err != nil || !bytes.Equal(pc, prevCanonical) {
 		return nil, nil, fmt.Errorf("%w: prevCanonical is not the canonical encoding of the previous bundle", ErrVersionChain)
+	}
+	if SHA256Hex(prevPolicy) != prev.PolicySHA256 {
+		return nil, nil, fmt.Errorf("%w: prevPolicy is not the previous bundle's policy", ErrVersionChain)
+	}
+	pp, err := ParsePolicy(prevPolicy)
+	if err != nil {
+		return nil, nil, fmt.Errorf("previous policy: %w", err)
 	}
 	b, err := ParseBundle(next)
 	if err != nil {
@@ -197,6 +211,10 @@ func VerifySuccessor(prev *Bundle, prevCanonical []byte, next, nextSigs, policy,
 	}
 	if b.PolicySHA256 != SHA256Hex(policy) {
 		return nil, nil, ErrPolicyHash
+	}
+	if !bytes.Equal(policy, prevPolicy) && (p.Version != pp.Version+1 || p.Prev != SHA256Hex(prevPolicy)) {
+		return nil, nil, fmt.Errorf("%w: a changed policy must be version %d with the previous policy's SHA-256 as prev, got version %d",
+			ErrVersionChain, pp.Version+1, p.Version)
 	}
 	oldRoots, err := prev.rootKeys()
 	if err != nil {

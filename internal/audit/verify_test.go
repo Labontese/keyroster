@@ -809,6 +809,42 @@ func TestVerifyAnchoring(t *testing.T) {
 			f.addBundle(f.signDocs(f.successor(g, nil), f.policy(), newSigner(t, "ed25519")))
 			return f, standardOpts(f)
 		}, "not a valid successor", nil},
+		// A-WR-02, C-WR-05: a successor's policy chains like the bundle,
+		// so pol=N names one policy.
+		{"successor_policy_chained_ok", func(t *testing.T) (*fixture, Options) {
+			f := newBareFixture(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), f.root)
+			f.addBundle(g)
+			pol := f.policy()
+			pol.Version, pol.Prev = 2, trust.SHA256Hex(g.policy)
+			pol.CAProfiles[0].MaxTTLSeconds = 3600
+			f.addBundle(f.signDocs(f.successor(g, nil), pol, f.root))
+			f.addRoleIssue(wire.CARoleUser, f.ca, ssh.UserCert, 2, 2)
+			return f, standardOpts(f)
+		}, "", func(t *testing.T, rep *Report) {
+			if rep.PolicyVersion != 2 || rep.Serials != 1 {
+				t.Fatalf("report %+v, want policy v2 and one issuance", rep)
+			}
+		}},
+		{"successor_policy_same_version_refused", func(t *testing.T) (*fixture, Options) {
+			// Another policy (other profile) under the version in force.
+			f := newBareFixture(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), f.root)
+			f.addBundle(g)
+			pol := f.policy()
+			pol.CAProfiles[0].MaxTTLSeconds = 3600
+			f.addBundle(f.signDocs(f.successor(g, nil), pol, f.root))
+			return f, standardOpts(f)
+		}, "a changed policy must be version 2", nil},
+		{"successor_policy_unchained_refused", func(t *testing.T) (*fixture, Options) {
+			f := newBareFixture(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), f.root)
+			f.addBundle(g)
+			pol := f.policy()
+			pol.Version, pol.Prev = 2, trust.SHA256Hex([]byte("another policy"))
+			f.addBundle(f.signDocs(f.successor(g, nil), pol, f.root))
+			return f, standardOpts(f)
+		}, "a changed policy must be version 2", nil},
 		{"log_key_change", func(t *testing.T) (*fixture, Options) {
 			f := newBareFixture(t, "ed25519")
 			g := f.signDocs(f.genesis(), f.policy(), f.root)

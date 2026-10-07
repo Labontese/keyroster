@@ -477,6 +477,18 @@ func TestInstallBundleRefusals(t *testing.T) {
 			next.Root.Keys = []trust.RootKey{{Key: trust.FormatKey(r2.PublicKey()), Custody: "software"}}
 			return input{nil, 0, docs4(t, next, pol, r2)}
 		}, trust.ErrThreshold},
+		// A-WR-02: a changed policy under the version in force (pol=1 would
+		// name two policies) and one that does not chain to it.
+		{"successor_policy_same_version", true, func(t *testing.T, e *installEnv) input {
+			pol := e.fx.Policy()
+			pol.CAProfiles[0].MaxTTLSeconds = 8 * 3600
+			return input{nil, 0, docs4(t, successor(t, e.genesis(t), pol), pol, e.fx.Root)}
+		}, trust.ErrVersionChain},
+		{"successor_policy_unchained", true, func(t *testing.T, e *installEnv) input {
+			pol := policyV2(t, e.fx)
+			pol.Prev = trust.SHA256Hex([]byte("another policy"))
+			return input{nil, 0, docs4(t, successor(t, e.genesis(t), pol), pol, e.fx.Root)}
+		}, trust.ErrVersionChain},
 		{"successor_with_pins", true, func(t *testing.T, e *installEnv) input {
 			pol := policyV2(t, e.fx)
 			return input{[]string{e.fx.RootPin()}, 1, docs4(t, successor(t, e.genesis(t), pol), pol, e.fx.Root)}

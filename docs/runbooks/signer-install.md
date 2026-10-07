@@ -244,7 +244,9 @@ systemctl start keyroster-signer.service
 ```
 
 A successor takes no `--pin` or `--threshold`: it is verified against the
-installed bundle. `serve`, `ca-init` and `install-bundle` hold an exclusive
+installed bundle. Its policy must be the installed policy unchanged, or
+the next policy version with the installed policy's SHA-256 as `prev`, so
+that `pol=N` in a certificate's key ID names exactly one policy. `serve`, `ca-init` and `install-bundle` hold an exclusive
 lock on `signer.lock` in the state directory, so `install-bundle` refuses
 with "the state directory is in use by another keyroster-signer process"
 while the service runs. If a successor is installed under a running signer

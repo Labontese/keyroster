@@ -238,7 +238,7 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 		if err != nil {
 			return nil, fmt.Errorf("installed bundle: %w", err)
 		}
-		b, p, err = trust.VerifySuccessor(prev, latest.Bundle, bundle, bundleSigs, policy, policySigs)
+		b, p, err = trust.VerifySuccessor(prev, latest.Bundle, latest.Policy, bundle, bundleSigs, policy, policySigs)
 		if err == nil && b.Version <= latest.Version {
 			err = fmt.Errorf("%w: version %d is not above the installed version %d", ErrBundleInstall, b.Version, latest.Version)
 		}

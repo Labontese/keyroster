@@ -218,13 +218,63 @@ func TestVerifySuccessor(t *testing.T) {
 			if tc.prevCanonicalAlt != nil {
 				prevBytes = tc.prevCanonicalAlt
 			}
-			b, p, err := VerifySuccessor(f.prev, prevBytes, tc.next, tc.nextSigs, f.policy, tc.policySigs)
+			b, p, err := VerifySuccessor(f.prev, prevBytes, f.policy, tc.next, tc.nextSigs, f.policy, tc.policySigs)
 			if tc.want == nil {
 				if err != nil {
 					t.Fatalf("refused: %v", err)
 				}
 				if b == nil || p == nil || b.Version != f.prev.Version+1 {
 					t.Fatalf("accepted but returned %v, %v", b, p)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifySuccessorPolicyChain (A-WR-02, B-WR-01, C-WR-05): a successor's
+// policy is either byte-identical to the policy in force or the next
+// version chained to it by its SHA-256, so pol=N names exactly one policy.
+func TestVerifySuccessorPolicyChain(t *testing.T) {
+	f := newSuccessorFixture(t)
+	changed := func(edit func(p *Policy)) []byte {
+		p := goldenPolicy(t)
+		p.CAProfiles[0].MaxTTLSeconds = 3600
+		p.Version, p.Prev = 2, SHA256Hex(f.policy)
+		edit(p)
+		return mustCanonical(t, p)
+	}
+	tests := []struct {
+		name       string
+		policy     []byte
+		prevPolicy []byte // nil means f.policy
+		want       error
+	}{
+		{name: "unchanged_policy_accepted", policy: f.policy},
+		{name: "next_version_chained_accepted", policy: changed(func(*Policy) {})},
+		{name: "same_version_different_policy_refused", policy: changed(func(p *Policy) { p.Version, p.Prev = 1, GenesisPrev }), want: ErrVersionChain},
+		{name: "version_jump_refused", policy: changed(func(p *Policy) { p.Version = 3 }), want: ErrVersionChain},
+		{name: "wrong_prev_refused", policy: changed(func(p *Policy) { p.Prev = SHA256Hex([]byte("another policy")) }), want: ErrVersionChain},
+		{name: "prev_policy_not_the_bundles_refused", policy: changed(func(*Policy) {}), prevPolicy: changed(func(p *Policy) { p.Version = 5 }), want: ErrVersionChain},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			next := goldenBundle(t, tc.policy)
+			next.Version, next.Prev, next.IssuedAt = f.prev.Version+1, SHA256Hex(f.prevBytes), "2026-10-06T00:00:00Z"
+			next.Root = f.prev.Root
+			doc := mustCanonical(t, next)
+			prevPolicy := f.policy
+			if tc.prevPolicy != nil {
+				prevPolicy = tc.prevPolicy
+			}
+			b, p, err := VerifySuccessor(f.prev, f.prevBytes, prevPolicy, doc, signAll(t, NamespaceBundle, doc, f.rootA),
+				tc.policy, signAll(t, NamespacePolicy, tc.policy, f.rootA))
+			if tc.want == nil {
+				if err != nil || b == nil || p == nil {
+					t.Fatalf("refused: %v", err)
 				}
 				return
 			}
