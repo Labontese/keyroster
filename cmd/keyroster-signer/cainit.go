@@ -54,10 +54,11 @@ func runCAInit(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		dest = filepath.Join(*stateDir, "ca-pubkeys.json")
 	}
 
-	db, err := openState(*stateDir)
+	db, unlock, err := openState(*stateDir)
 	if err != nil {
 		return err
 	}
+	defer unlock()
 	defer func() { _ = db.Close() }()
 	// The state directory reaches the backend as the reserved state-dir
 	// option; InitCA stores only the operator's options.

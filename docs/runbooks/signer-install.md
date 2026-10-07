@@ -228,6 +228,38 @@ socket and runs no program.
 On the homelab VM the expected result is no FAIL, `WARN vtpm_custody` and
 one `WARN software_root` per root.
 
+## Install a successor bundle: stop, install, start
+
+The signer loads the trust bundle and its policy once, when it starts.
+Install a successor bundle (from a later ceremony) only with the service
+stopped:
+
+```
+systemctl stop keyroster-signer.service
+runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+  keyroster-signer install-bundle --state-dir /var/lib/keyroster-signer \
+  --bundle /var/lib/keyroster-signer/incoming/bundle.json \
+  --policy /var/lib/keyroster-signer/incoming/policy.json
+systemctl start keyroster-signer.service
+```
+
+A successor takes no `--pin` or `--threshold`: it is verified against the
+installed bundle. `serve`, `ca-init` and `install-bundle` hold an exclusive
+lock on `signer.lock` in the state directory, so `install-bundle` refuses
+with "the state directory is in use by another keyroster-signer process"
+while the service runs. If a successor is installed under a running signer
+anyway (for example by a process that ignores the lock), that signer
+refuses every request with `trust_changed` until it is restarted; it never
+issues under the superseded policy.
+
+> **UNVERIFIED on the homelab signer.** The lock and the `trust_changed`
+> refusal are exercised by the Go tests only (`TestStateDirLock`,
+> `TestTrustChangedUnderLiveSigner`). This stop, install and start
+> sequence for a successor has not been run on the vTPM signer. Creating
+> `signer.lock` inside the systemd sandbox is covered only by the CI
+> `systemd` smoke check (`test/systemd/smoke.sh`, which starts `serve` in
+> the sandbox).
+
 ## Snapshot restore: check the clock first
 
 Certificate serials are microsecond timestamps that only increase (CA-03),

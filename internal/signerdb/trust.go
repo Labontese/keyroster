@@ -151,6 +151,29 @@ func (d *DB) InsertBundle(tx *sql.Tx, b StoredBundle) error {
 	return nil
 }
 
+// LatestBundleVersion returns the highest installed bundle version, or 0
+// when none is installed.
+func (d *DB) LatestBundleVersion(ctx context.Context) (uint64, error) {
+	return latestBundleVersion(ctx, d.db)
+}
+
+// LatestBundleVersionTx is LatestBundleVersion inside tx, so that a check
+// against it holds until tx commits.
+func (d *DB) LatestBundleVersionTx(ctx context.Context, tx *sql.Tx) (uint64, error) {
+	return latestBundleVersion(ctx, tx)
+}
+
+func latestBundleVersion(ctx context.Context, q queryer) (uint64, error) {
+	var v int64
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM trust_bundle`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("signerdb: read bundle version: %w", err)
+	}
+	if v < 0 {
+		return 0, errors.New("signerdb: invalid trust bundle version")
+	}
+	return uint64(v), nil //nolint:gosec // G115: v >= 0, checked above
+}
+
 // LatestBundle returns the installed bundle with the highest version, or
 // ErrNoBundle.
 func (d *DB) LatestBundle(ctx context.Context) (*StoredBundle, error) {

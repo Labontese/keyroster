@@ -67,6 +67,11 @@ type Signer struct {
 	allowGIDs []uint32
 	log       *slog.Logger
 
+	// bundleVersion is the version of the installed bundle that ca,
+	// profiles and policy were loaded from. Issuance refuses once the
+	// database holds another version (trust_changed).
+	bundleVersion uint64
+
 	// mu serializes every state change: serial allocation, issuance and
 	// log appends, each through its commit.
 	mu sync.Mutex
@@ -83,7 +88,9 @@ type Signer struct {
 // rebuilds the audit log from the state database. It refuses to start
 // without an installed bundle, when any bundle key is missing from the
 // backend, and when the stored leaves do not reproduce the latest signed
-// checkpoint.
+// checkpoint. The trust state is loaded only here: once another bundle is
+// installed, the signer refuses every request (trust_changed) until it is
+// restarted and loads it.
 func New(cfg Config) (*Signer, error) {
 	if cfg.Backend == nil || cfg.DB == nil {
 		return nil, errors.New("signer: a keystore backend and a state database are required")
@@ -116,6 +123,8 @@ func New(cfg Config) (*Signer, error) {
 		allowUIDs: slices.Clone(cfg.AllowUIDs),
 		allowGIDs: slices.Clone(cfg.AllowGIDs),
 		log:       cfg.Logger,
+
+		bundleVersion: ts.bundle.Version,
 	}
 	if s.clock == nil {
 		s.clock = time.Now

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Labontese/keyroster/internal/tlog"
@@ -29,12 +30,24 @@ type Peer struct {
 }
 
 // Listen binds a path-based Unix socket at path with mode 0660. A stale
-// socket at path is removed first; any other kind of file there is an
-// error. When gid >= 0 the socket's group is set to gid.
+// socket at path (one that refuses connections) is removed first; a socket
+// that still accepts connections belongs to a running signer and is an
+// error, as is any other kind of file there. When gid >= 0 the socket's
+// group is set to gid.
 func Listen(path string, gid int) (*net.UnixListener, error) {
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode()&fs.ModeSocket == 0 {
 			return nil, fmt.Errorf("signer: %s exists and is not a socket", path)
+		}
+		// Never unlink a live signer's socket: probe it first. The probe
+		// shows up in the running signer's log as a refused connection.
+		conn, derr := net.DialTimeout("unix", path, time.Second)
+		if derr == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("signer: %s accepts connections: another signer is already serving on it", path)
+		}
+		if !errors.Is(derr, syscall.ECONNREFUSED) {
+			return nil, fmt.Errorf("signer: %s exists and cannot be probed, so it is not removed: %w", path, derr)
 		}
 		if err := os.Remove(path); err != nil {
 			return nil, fmt.Errorf("signer: remove stale socket: %w", err)

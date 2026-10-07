@@ -77,6 +77,12 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 		}
 		extra[e] = ""
 	}
+	// Refuse before the CA key is used when the installed bundle is no
+	// longer the one this signer loaded; the check inside the issuance
+	// transaction below is the one that holds until COMMIT.
+	if err := s.checkTrustCurrent(s.db.LatestBundleVersion(ctx)); err != nil {
+		return nil, err
+	}
 
 	last, err := s.db.LastSerial(ctx)
 	if err != nil {
@@ -131,6 +137,13 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 	}
 	var leafIndex uint64
 	err = s.logTx(ctx, func(tx *sql.Tx) error {
+		// The policy, profiles and CA keys used above come from the bundle
+		// loaded at start. Commit only while that bundle is still the
+		// installed one, so no certificate is issued (and logged with
+		// pol=<old version>) after a successor's bundle_install entry.
+		if err := s.checkTrustCurrent(s.db.LatestBundleVersionTx(ctx, tx)); err != nil {
+			return err
+		}
 		if err := s.db.InsertIssuance(tx, signerdb.Issuance{
 			Serial:    ser,
 			RequestID: req.RequestID,
@@ -153,6 +166,10 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 		return err
 	})
 	if err != nil {
+		var r *refusal
+		if errors.As(err, &r) {
+			return nil, err
+		}
 		if errors.Is(err, signerdb.ErrDuplicateRequest) {
 			return nil, refusalErr(wire.CodeRefused, "duplicate_request", err)
 		}
@@ -170,6 +187,29 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 		"uid", peer.UID,
 		"pid", peer.PID)
 	return &wire.IssueResponse{Cert: certBytes, Serial: ser, LeafIndex: leafIndex}, nil
+}
+
+// errTrustChanged means the installed trust bundle is no longer the one the
+// signer loaded at start: install-bundle ran against this state while the
+// signer was serving (keyroster-signer serve holds a lock on the state
+// directory that install-bundle respects, so only a process that bypassed
+// it gets here). The signer refuses every request until it is restarted
+// and loads the new bundle.
+var errTrustChanged = errors.New("signer: the installed trust bundle changed since start")
+
+// checkTrustCurrent refuses with trust_changed when version, the latest
+// installed bundle version (read with err), is not the one this signer
+// loaded. The caller holds s.mu.
+func (s *Signer) checkTrustCurrent(version uint64, err error) error {
+	if err != nil {
+		return refusalErr(wire.CodeUnavailable, "state_unavailable", err)
+	}
+	if version != s.bundleVersion {
+		s.log.Error("trust bundle changed under the running signer: refusing every request until restart",
+			"loaded_version", s.bundleVersion, "installed_version", version)
+		return refusalErr(wire.CodeUnavailable, "trust_changed", errTrustChanged)
+	}
+	return nil
 }
 
 // buildRefusal maps a cert.Build error to a reason code.

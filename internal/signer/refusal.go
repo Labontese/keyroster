@@ -188,7 +188,7 @@ func classify(detail string) uint8 {
 		return tlog.ReasonBadSubject
 	case "extension_not_allowed", "duplicate_extension":
 		return tlog.ReasonExtensionNotAllowed
-	case "state_unavailable", "serial_unavailable":
+	case "state_unavailable", "serial_unavailable", "trust_changed":
 		return tlog.ReasonUnavailable
 	case "too_many_connections":
 		return tlog.ReasonOverloaded
