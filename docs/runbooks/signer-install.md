@@ -8,8 +8,10 @@ in the TPM. It ends with `keyroster-signer doctor` reporting no FAIL.
 > the same units on an Ubuntu 24.04 runner (`test/systemd/smoke.sh`): it
 > installs them, bootstraps the signer, issues a certificate as a
 > `keyroster-admin` member, checks that the signer's network namespace holds
-> only `lo`, runs `doctor`, and gates `systemd-analyze security` at exposure
-> 2.0. That run uses the **agent** backend, because the runner has no TPM.
+> only `lo`, checks the sandbox of the signer and of its ssh-agent unit, runs
+> `doctor`, and gates `systemd-analyze security` at exposure 2.0 for the
+> signer unit and 1.4 for the agent unit. That run uses the **agent**
+> backend, because the runner has no TPM.
 > The TPM backend itself is tested in CI against swtpm over a Unix socket
 > (`e2e-tpm`), not through `/dev/tpmrm0`. **This runbook's TPM path (the
 > `tpm.conf` drop-in, `/dev/tpmrm0`, group `tss`, and the
@@ -113,7 +115,10 @@ systemd-analyze security keyroster-signer.service
 ```
 
 CI measured an overall exposure of **0.7 (SAFE)** for the unit without the
-drop-in; CI fails above 2.0.
+drop-in; CI fails above 2.0. If you use the agent or PKCS#11 backend, check
+`keyroster-signer-agent.service` the same way: CI fails above 1.4. Its
+exposure of **1.3 (OK)** was measured offline (`systemd-analyze security
+--offline=yes`, systemd 255.4), not yet on a CI runner (UNVERIFIED).
 
 ## 4. Create the state directory and the CA keys in the TPM
 

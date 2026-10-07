@@ -22,8 +22,12 @@
 #   - keyroster-signer doctor passes as keyroster-signer and states the
 #     weaker custody of this test setup (SOFTWARE ROOT, plain keys in
 #     ssh-agent), and fails when run as root;
-#   - systemd-analyze security rates the unit at or below THRESHOLD
-#     (exposure x10; 20 = 2.0).
+#   - the signer's ssh-agent unit, which holds the CA keys, runs as
+#     keyroster-signer with no capabilities, no_new_privs and seccomp, and
+#     systemd reports its sandbox settings (MemoryDenyWriteExecute,
+#     localhost-only IP, address families);
+#   - systemd-analyze security rates the signer unit at or below THRESHOLD
+#     and the agent unit at or below AGENT_THRESHOLD (exposure x10; 20 = 2.0).
 #
 # The TPM drop-in is not installed here: the runner has no TPM, and its
 # SupplementaryGroups=tss needs the tss group. The TPM path under systemd is
@@ -31,6 +35,7 @@
 set -euo pipefail
 
 THRESHOLD=${KEYROSTER_SECURITY_THRESHOLD:-20}
+AGENT_THRESHOLD=${KEYROSTER_AGENT_SECURITY_THRESHOLD:-14}
 
 SIGNER_SOCK=/run/keyroster-signer/signer.sock
 AGENT_SOCK=/run/keyroster-signer-agent/agent.sock
@@ -232,6 +237,35 @@ grep -qx $'CapBnd:\t0000000000000000' "/proc/$pid/status" || fail "signer has a 
 grep -qx $'NoNewPrivs:\t1' "/proc/$pid/status" || fail "no_new_privs not set"
 grep -qx $'Seccomp:\t2' "/proc/$pid/status" || fail "no seccomp filter"
 
+step "Sandbox properties of the running ssh-agent unit (holds the CA keys)"
+# E-WR-05: the agent keeps the host network namespace and loads PKCS#11
+# modules, so a weakened agent unit must fail CI as the signer's would.
+# systemd-analyze below misses some regressions (MemoryDenyWriteExecute
+# removed, IPAddressAllow widened), so they are asserted here.
+agent_pid=$(systemctl show -p MainPID --value keyroster-signer-agent.service)
+[ -n "$agent_pid" ] && [ "$agent_pid" != 0 ] || fail "keyroster-signer-agent has no main pid"
+props=$(systemctl show -p NoNewPrivileges,ProtectSystem,ProtectHome,PrivateTmp,MemoryDenyWriteExecute,User,UMask,LimitCORE keyroster-signer-agent.service)
+echo "$props"
+for want in NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes MemoryDenyWriteExecute=yes User=keyroster-signer UMask=0077 LimitCORE=0; do
+	grep -qx "$want" <<<"$props" || fail "agent unit, systemctl show: want $want"
+done
+# List properties are compared as sorted word sets, independent of the order
+# systemd prints them in. localhost is 127.0.0.0/8 and ::1/128; any is
+# 0.0.0.0/0 and ::/0.
+words() { systemctl show -p "$2" --value "$1" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort | paste -sd' ' -; }
+for want in "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX" "IPAddressAllow=127.0.0.0/8 ::1/128" "IPAddressDeny=0.0.0.0/0 ::/0"; do
+	got=$(words keyroster-signer-agent.service "${want%%=*}")
+	echo "${want%%=*}=$got"
+	[ "$got" = "${want#*=}" ] || fail "agent unit, systemctl show: want $want"
+done
+ps -o user=,group=,cmd= -p "$agent_pid"
+[ "$(ps -o user= -p "$agent_pid" | tr -d ' ')" = keyroster-signer ] || fail "agent does not run as keyroster-signer"
+grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):' "/proc/$agent_pid/status"
+grep -qx $'CapEff:\t0000000000000000' "/proc/$agent_pid/status" || fail "agent has effective capabilities"
+grep -qx $'CapBnd:\t0000000000000000' "/proc/$agent_pid/status" || fail "agent has a non-empty bounding set"
+grep -qx $'NoNewPrivs:\t1' "/proc/$agent_pid/status" || fail "agent: no_new_privs not set"
+grep -qx $'Seccomp:\t2' "/proc/$agent_pid/status" || fail "agent: no seccomp filter"
+
 step "keyroster-signer doctor on the live state (expects WARNs for this test custody)"
 if as_signer keyroster-signer doctor --state-dir "$STATE" >"$work/doctor.log" 2>&1; then
 	doctor_rc=0
@@ -255,8 +289,10 @@ grep -q '^FAIL running_as_root:' "$work/doctor-root.log" || {
 	fail "doctor as root did not report running_as_root"
 }
 
-step "systemd-analyze security (threshold $THRESHOLD = exposure $((THRESHOLD / 10)).$((THRESHOLD % 10)))"
-systemd-analyze security --no-pager keyroster-signer-agent.service | tail -n 1
+step "systemd-analyze security, agent unit (threshold $AGENT_THRESHOLD = exposure $((AGENT_THRESHOLD / 10)).$((AGENT_THRESHOLD % 10)))"
+systemd-analyze security --no-pager --threshold="$AGENT_THRESHOLD" keyroster-signer-agent.service
+
+step "systemd-analyze security, signer unit (threshold $THRESHOLD = exposure $((THRESHOLD / 10)).$((THRESHOLD % 10)))"
 systemd-analyze security --no-pager --threshold="$THRESHOLD" keyroster-signer.service
 
 step "PASS"
