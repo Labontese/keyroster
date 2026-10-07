@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -117,8 +118,10 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 
 // checkIssue checks an issue leaf's certificate against the bundle and
 // policy in force: it must be signed by the active CA of the leaf's role,
-// be a host certificate exactly for the host role, and carry the policy
-// version in force in its key ID and in the leaf.
+// be a host certificate exactly for the host role, carry the policy
+// version in force in its key ID and in the leaf, and stay within the
+// role's certificate profile of that policy (cert.CheckIssued: validity
+// cap, extensions, critical options, principals, subject key).
 func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyID) error {
 	role := kid.CA
 	if a.bundle == nil {
@@ -144,6 +147,13 @@ func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyI
 	}
 	if b.PolicyVersion != a.policy.Version {
 		return fmt.Errorf("leaf records policy version %d, but the policy in force is version %d", b.PolicyVersion, a.policy.Version)
+	}
+	profile, err := certprofile.ForRole(role, a.policy)
+	if err != nil {
+		return fmt.Errorf("policy v%d: %w", a.policy.Version, err)
+	}
+	if err := cert.CheckIssued(c, profile); err != nil {
+		return fmt.Errorf("certificate outside the %s profile of policy v%d: %w", role, a.policy.Version, err)
 	}
 	return nil
 }
@@ -180,12 +190,23 @@ func certTypeName(t uint32) string {
 //     leaf's role in the bundle in force, of the role's type (host
 //     certificates for the host CA only), whose key ID and leaf carry the
 //     policy version in force, whose serial equals the leaf's and the key
-//     ID's, and serials strictly increase across the log
+//     ID's, which stays within the role's profile of the policy in force
+//     (validity cap, extensions, critical options, principals, subject
+//     key; cert.CheckIssued), and serials strictly increase across the log
 //   - the RFC 6962 root recomputed from the leaf bytes alone equals the
 //     root of the checkpoint, the checkpoint covers exactly n entries, and
 //     it is signed by the log key of the root-signed bundle
 //   - with opts.Previous, the log neither shrank nor rewrote the entries
 //     that checkpoint covered
+//
+// It does not check that an issuance was authorized. An issue leaf records
+// the admin evidence (SSHSIG signatures over the request's signing bytes)
+// but only a SHA-256 digest of the request, so neither the signatures nor
+// the admin quorum of the policy in force, nor that the certificate is the
+// one the admins approved, can be verified from the log: a signer holding
+// the CA key can log an unauthorized issuance with any evidence and the
+// log still verifies. Without opts.Previous it cannot detect a log
+// rolled back to an earlier prefix either.
 func Verify(r io.Reader, opts Options) (*Report, error) {
 	if len(opts.Pins) == 0 {
 		return nil, errors.New("audit: no pinned root fingerprints")

@@ -162,6 +162,65 @@ func buildExtensions(p Profile, extra map[string]string) (map[string]string, err
 	return ext, nil
 }
 
+// CheckIssued re-checks a signed certificate against the profile p it was
+// issued under, with Build's rules as far as the certificate shows them:
+// p's certificate type, a subject key Build accepts for this CA key,
+// valid principals, a non-zero serial, a validity of at most p.MaxTTL
+// (Build backdates ValidAfter by five minutes, so the certificate spans
+// up to MaxTTL plus those five minutes), no extension other than p's
+// default and allowed ones (none on a host certificate), and no critical
+// option p does not allow. It does not check that the default extensions
+// are present: a certificate without them grants less, not more. The
+// audit log verifier uses it on every logged certificate.
+func CheckIssued(c *ssh.Certificate, p Profile) error {
+	if c == nil || c.SignatureKey == nil {
+		return errors.New("cert: no certificate or no CA key")
+	}
+	switch p.CertType {
+	case ssh.UserCert, ssh.HostCert:
+	default:
+		return fmt.Errorf("%w: unknown certificate type", ErrProfile)
+	}
+	if p.MaxTTL <= 0 {
+		return fmt.Errorf("%w: no maximum TTL", ErrProfile)
+	}
+	if c.CertType != p.CertType {
+		return fmt.Errorf("%w: certificate type %d, the profile issues type %d", ErrProfile, c.CertType, p.CertType)
+	}
+	if err := CheckSubjectKey(c.Key, c.SignatureKey); err != nil {
+		return err
+	}
+	if err := ValidatePrincipals(c.ValidPrincipals); err != nil {
+		return err
+	}
+	if c.Serial == 0 {
+		return fmt.Errorf("%w: serial 0", ErrSerial)
+	}
+	backdateSecs := uint64(backdate / time.Second)
+	maxSecs := uint64(p.MaxTTL / time.Second) //nolint:gosec // G115: MaxTTL > 0, checked above
+	if c.ValidAfter == 0 || c.ValidBefore <= c.ValidAfter {
+		return fmt.Errorf("%w: valid after %d, before %d", ErrValidity, c.ValidAfter, c.ValidBefore)
+	}
+	if span := c.ValidBefore - c.ValidAfter; span <= backdateSecs || span-backdateSecs > maxSecs {
+		return fmt.Errorf("%w: the certificate spans %d s; the profile allows more than the %d s backdate and at most %d s beyond it",
+			ErrValidity, span, backdateSecs, maxSecs)
+	}
+	for k := range c.Extensions {
+		if p.CertType == ssh.HostCert {
+			return fmt.Errorf("%w: host certificates carry no extensions, this one has %q", ErrExtension, k)
+		}
+		if _, isDefault := p.DefaultExtensions[k]; !isDefault && !slices.Contains(p.AllowedExtensions, k) {
+			return fmt.Errorf("%w: extension %q", ErrExtension, k)
+		}
+	}
+	for k := range c.CriticalOptions {
+		if !slices.Contains(p.AllowedCriticalOptions, k) {
+			return fmt.Errorf("%w: critical option %q", ErrExtension, k)
+		}
+	}
+	return nil
+}
+
 // verifySigned re-parses the marshalled certificate and checks that it is
 // byte-identical, names the CA key, and carries a valid signature by it.
 func verifySigned(c *ssh.Certificate, caPub ssh.PublicKey) error {

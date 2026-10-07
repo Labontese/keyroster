@@ -18,6 +18,7 @@ import (
 	sshagent "golang.org/x/crypto/ssh/agent"
 
 	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/keystore"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/tlog"
@@ -783,8 +784,8 @@ func TestProfiles(t *testing.T) {
 		wantRefusal(t, err, "duplicate_extension")
 	})
 	t.Run("profile_for_unknown_role", func(t *testing.T) {
-		if _, err := profileFor("admin", fx.Policy()); err == nil {
-			t.Fatal("profileFor accepted an unknown role")
+		if _, err := certprofile.ForRole("admin", fx.Policy()); err == nil {
+			t.Fatal("ForRole accepted an unknown role")
 		}
 	})
 }

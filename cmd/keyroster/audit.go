@@ -107,7 +107,8 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		enc := json.NewEncoder(stdout)
 		return enc.Encode(res)
 	}
-	_, err = fmt.Fprintf(stdout, "OK: %d entries, root %s, issued %d (user %d, host %d, machine %d), refusals %d, trust bundle v%d, policy v%d, log key %s\n",
+	_, err = fmt.Fprintf(stdout, "OK: %d entries, root %s, issued %d (user %d, host %d, machine %d), refusals %d, trust bundle v%d, policy v%d, log key %s\n"+
+		"not checked: that each issuance was authorized by the policy's admins (the log keeps their evidence, not the signed request it covers)\n",
 		res.Entries, res.Root, res.Issued, res.ByCA["user"], res.ByCA["host"], res.ByCA["machine"], res.Refusals, res.Bundle, res.Policy, res.LogKey)
 	return err
 }

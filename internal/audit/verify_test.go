@@ -508,6 +508,32 @@ func TestVerifyChecksCertificates(t *testing.T) {
 			}
 			f.leaves = append(f.leaves, raw)
 		}, "records index"},
+		// C-WR-06: a CA-key holder signing outside the role's profile of
+		// the policy in force (user: 43200 s, permit-pty only).
+		{"validity_at_policy_cap_ok", func(t *testing.T, f *fixture) {
+			f.serial++
+			c := f.newCert(f.serial, time.Now())
+			c.ValidBefore = c.ValidAfter + 43200 + 300
+			f.add(tlog.KindIssue, issueBody(t, forgeCert(t, c, f.ca, f.ca.PublicKey()), f.serial))
+		}, ""},
+		{"validity_above_policy_cap", func(t *testing.T, f *fixture) {
+			f.serial++
+			c := f.newCert(f.serial, time.Now())
+			c.ValidBefore = c.ValidAfter + 43200 + 300 + 1
+			f.add(tlog.KindIssue, issueBody(t, forgeCert(t, c, f.ca, f.ca.PublicKey()), f.serial))
+		}, "outside the user profile of policy v1"},
+		{"extension_outside_policy", func(t *testing.T, f *fixture) {
+			f.serial++
+			c := f.newCert(f.serial, time.Now())
+			c.Extensions["permit-agent-forwarding"] = ""
+			f.add(tlog.KindIssue, issueBody(t, forgeCert(t, c, f.ca, f.ca.PublicKey()), f.serial))
+		}, "extension"},
+		{"critical_option_outside_policy", func(t *testing.T, f *fixture) {
+			f.serial++
+			c := f.newCert(f.serial, time.Now())
+			c.CriticalOptions = map[string]string{"force-command": "/bin/sh"}
+			f.add(tlog.KindIssue, issueBody(t, forgeCert(t, c, f.ca, f.ca.PublicKey()), f.serial))
+		}, "critical option"},
 		{"expired_certificate_still_ok", func(t *testing.T, f *fixture) {
 			f.serial++
 			f.add(tlog.KindIssue, issueBody(t, f.newCert(f.serial, time.Now().Add(-2*365*24*time.Hour)), f.serial))

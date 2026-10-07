@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/keystore"
 	"github.com/Labontese/keyroster/internal/serial"
 	"github.com/Labontese/keyroster/internal/signerdb"
@@ -473,7 +474,7 @@ func checkStoredTrust(caKeys []signerdb.CAKey, stored *signerdb.StoredBundle) (*
 	}
 	ts := &trustState{stored: stored, bundle: b, policy: p, ca: map[wire.CARole]keystore.CAKey{}, profiles: map[wire.CARole]cert.Profile{}}
 	for role, kr := range caRoles {
-		prof, err := profileFor(string(kr), p)
+		prof, err := certprofile.ForRole(string(kr), p)
 		if err != nil {
 			return nil, err
 		}
