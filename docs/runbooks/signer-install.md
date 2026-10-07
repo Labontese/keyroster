@@ -300,6 +300,6 @@ seen a longer log. Record every restore in the operations log.
 Neither `doctor` nor `serve` can tell a restored database from a current
 one: the whole file is consistent with itself. The same holds for a log
 cut back together with its issuance rows and high-water mark, or cut back
-by trailing entries that issue nothing (refusals). Only a checkpoint kept
-outside the signer shows it: keep the checkpoint line of each export, and
-verify the next export with `keyroster audit verify --previous`.
+by trailing entries that issue nothing (refusals). Only an earlier export
+kept outside the signer shows it: keep each export, and verify the next
+one with `keyroster audit verify --previous <earlier export>`.

@@ -447,3 +447,32 @@ func TestCheckLogAgainstLiveSigner(t *testing.T) {
 		checks++
 	}
 }
+
+// TestCheckLogWithoutCAKeys (C-WR-01): a log with entries but no recorded
+// CA keys contradicts ca-init, which writes both in one transaction.
+func TestCheckLogWithoutCAKeys(t *testing.T) {
+	e := newLogEnv(t)
+	if _, err := e.issue(); err != nil {
+		t.Fatal(err)
+	}
+	e.close()
+	raw, err := sql.Open("sqlite", e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DELETE FROM ca_keys`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := signerdb.OpenReadOnly(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+	if err := CheckLog(context.Background(), ro, e.fx.Roles[keystore.RoleLog].PublicKey()); !errors.Is(err, errLogMismatch) ||
+		!strings.Contains(err.Error(), "no CA keys are recorded") {
+		t.Fatalf("CheckLog with the CA keys deleted = %v, want errLogMismatch naming the missing CA keys", err)
+	}
+}
