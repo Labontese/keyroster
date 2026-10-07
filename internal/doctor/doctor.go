@@ -5,19 +5,24 @@
 //
 // FAIL means the installation is unsafe or broken: running as root, a state
 // directory or database readable by others, a damaged database, an audit
-// log that no longer reproduces its signed checkpoint, an installed trust
-// bundle that serve would refuse at start (it does not list the recorded
-// keys, names an online key or a root as a policy admin, or is not the one
-// the log's last bundle_install entry records), or a clock behind the
-// serial high-water mark. doctor has neither the backend's keys nor the
+// log that no longer reproduces its signed checkpoint or contradicts the
+// tables written with it (the log tables alone rolled back to an earlier
+// signed prefix, or wiped; a rollback of the whole database is not
+// detectable here, see signer.CheckLog), an installed trust bundle that
+// serve would refuse at start (it does not list the recorded keys, names
+// an online key or a root as a policy admin, or is not the one the log's
+// last bundle_install entry records), or a clock behind the serial
+// high-water mark. doctor has neither the backend's keys nor the
 // operator's root pins, so a database rewritten consistently with keys and
 // roots of the rewriter's choosing is caught only by serve (which opens the
 // keys by fingerprint) and by keyroster audit verify --pin; compare the
-// roots doctor prints with your pins. WARN means weaker custody than hardware, stated
-// loudly: a software root (SOFTWARE ROOT), keys in a virtual TPM, plain
-// keys in ssh-agent, or a TPM that no longer matches the recorded custody.
-// doctor never reports a vTPM-held, agent-held or software key as hardware
-// custody.
+// roots doctor prints with your pins.
+//
+// WARN means weaker custody than hardware, stated loudly: a software root
+// (SOFTWARE ROOT), keys in a virtual TPM, plain keys in ssh-agent, a TPM
+// that no longer matches the recorded custody, or TPM custody that could
+// not be confirmed. doctor never reports a vTPM-held, agent-held or
+// software key as hardware custody.
 package doctor
 
 import (
@@ -136,7 +141,9 @@ type Facts struct {
 	IntegrityOK     bool
 	IntegrityDetail string
 	// LogMatches means the stored leaves reproduce the latest checkpoint,
-	// signed by the recorded log key; LogDetail says why not.
+	// signed by the recorded log key, and agree with the CA keys, issuance
+	// rows and serial high-water mark (signer.CheckLog); LogDetail says
+	// why not.
 	LogMatches bool
 	LogDetail  string
 
@@ -203,9 +210,9 @@ func Run(f Facts) []Result {
 		add(OK, codeIntegrity, "PRAGMA integrity_check: ok")
 	}
 	if !f.LogMatches {
-		add(FAIL, CodeLogMismatch, "the stored audit log does not reproduce its latest signed checkpoint (%s); the database was modified outside the signer or restored inconsistently, and serve refuses to start", orUnknown(f.LogDetail))
+		add(FAIL, CodeLogMismatch, "the stored audit log does not reproduce its latest signed checkpoint, or contradicts the CA keys, issuance rows or serial high-water mark recorded with it (%s); the database was modified outside the signer, rolled back or restored inconsistently, and serve refuses to start", orUnknown(f.LogDetail))
 	} else {
-		add(OK, codeLog, "the stored leaves reproduce the latest checkpoint signed by the log key")
+		add(OK, codeLog, "the stored leaves reproduce the latest checkpoint signed by the log key and match the recorded CA keys, issuance rows and serial high-water mark")
 	}
 	rs = append(rs, clockResult(f.NowMicros, f.HighWaterMicros))
 

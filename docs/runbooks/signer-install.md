@@ -216,7 +216,7 @@ socket and runs no program.
 | `FAIL state_dir_permissions` | state directory not 0700 or not owned by the signer's user | `chown keyroster-signer: …; chmod 0700 …` |
 | `FAIL db_permissions` | `signer.db` readable by others | `chmod 0600 /var/lib/keyroster-signer/signer.db` |
 | `FAIL db_integrity` | SQLite integrity check failed, or the database cannot be read | Stop the signer; restore from backup; investigate. |
-| `FAIL log_mismatch` | the stored audit log does not reproduce its signed checkpoint | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
+| `FAIL log_mismatch` | the stored audit log does not reproduce its signed checkpoint, or contradicts what was recorded with it: CA keys but an empty log, or issue entries that do not match the issuance rows and the serial high-water mark (the log tables cut back to an earlier signed prefix, or wiped) | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
 | `FAIL trust_mismatch` | the installed trust bundle is not one `serve` would load: it does not list the keys ca-init recorded (for example another log key), names an online key or a root as a policy admin, or is not the bundle the log's last `bundle_install` entry records | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
 | `FAIL clock_regression` | the wall clock is behind the last issued serial | See [the clock warning](#snapshot-restore-check-the-clock-first). |
 | `WARN no_bundle` | no trust bundle installed | Run step 6. |
@@ -294,3 +294,10 @@ serial high-water mark down by hand.
 A restore also brings back an older audit log. Certificates issued after
 the snapshot are missing from it, while verifiers (and the bundle) may have
 seen a longer log. Record every restore in the operations log.
+
+Neither `doctor` nor `serve` can tell a restored database from a current
+one: the whole file is consistent with itself. The same holds for a log
+cut back together with its issuance rows and high-water mark, or cut back
+by trailing entries that issue nothing (refusals). Only a checkpoint kept
+outside the signer shows it: keep the checkpoint line of each export, and
+verify the next export with `keyroster audit verify --previous`.

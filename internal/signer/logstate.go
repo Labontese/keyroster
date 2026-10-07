@@ -15,8 +15,9 @@ import (
 )
 
 // errLogMismatch means the stored leaves do not reproduce the latest signed
-// checkpoint (or do not decode): the state database was modified outside
-// the signer, or restored inconsistently. The signer refuses to start.
+// checkpoint (or do not decode), or contradict the tables written with
+// them (checkLogCovers): the state database was modified outside the
+// signer, or restored inconsistently. The signer refuses to start.
 var errLogMismatch = errors.New("signer: log state mismatch")
 
 // logState is the signer's in-memory view of the audit log. Every field is
@@ -113,8 +114,9 @@ func checkBundleLogged(stored *signerdb.StoredBundle, install []byte) error {
 
 // CheckLog runs the start-up log check of serve without starting a signer:
 // the stored leaves must decode, match their stored hashes and reproduce the
-// latest checkpoint, which must verify with logKey (the recorded log key).
-// It only reads db. keyroster-signer doctor uses it; an error wraps the
+// latest checkpoint, which must verify with logKey (the recorded log key),
+// and agree with the tables that commit with them (checkLogCovers). It only
+// reads db. keyroster-signer doctor uses it; an error wraps the
 // reason.
 func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error {
 	v, err := tlog.NewNoteVerifier(tlog.Origin(logKey), logKey)
@@ -166,15 +168,17 @@ func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 }
 
 // rebuildLogFrom is rebuildLog over db with the checkpoint verifier v. It
-// reads the leaves, their stored hashes and the latest checkpoint from one
-// snapshot (signerdb.ReadLogWithHashes), so a leaf the signer appends
-// meanwhile cannot make a healthy log look inconsistent (doctor runs
-// against a live signer).
+// reads the leaves, their stored hashes, the latest checkpoint and the
+// tables checkLogCovers compares with them from one snapshot
+// (signerdb.ReadLogWithHashes), so a leaf the signer appends meanwhile
+// cannot make a healthy log look inconsistent (doctor runs against a live
+// signer).
 func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlog.Log, uint64, []byte, error) {
 	var (
 		last    uint64
 		hashes  [][]byte
 		install []byte
+		issued  issuedSummary
 	)
 	// ReadLogWithHashes yields idx = 0, 1, 2, ... without gaps.
 	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
@@ -191,8 +195,16 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		if !bytes.Equal(tlog.HashLeaf(leaf), hash) {
 			return fmt.Errorf("%w: leaf %d does not match its stored hash", errLogMismatch, idx)
 		}
-		if l.Kind == tlog.KindBundleInstall {
+		switch l.Kind {
+		case tlog.KindBundleInstall:
 			install = l.Body
+		case tlog.KindIssue:
+			b, err := tlog.DecodeIssueBody(l.Body)
+			if err != nil {
+				return fmt.Errorf("%w: leaf %d: issue body does not decode", errLogMismatch, idx)
+			}
+			issued.count++
+			issued.lastSerial = b.Serial
 		}
 		last = l.TimeMicros
 		hashes = append(hashes, hash)
@@ -212,6 +224,9 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		if tree.Size() != 0 {
 			return nil, 0, nil, fmt.Errorf("%w: %d leaves but no checkpoint", errLogMismatch, tree.Size())
 		}
+		if err := checkLogCovers(snap, 0, issued); err != nil {
+			return nil, 0, nil, err
+		}
 		return tree, 0, nil, nil
 	}
 	root, err := tree.Root()
@@ -225,7 +240,42 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	if cp.Size != snap.Size || cp.Size != tree.Size() || !bytes.Equal(cp.Root, root) {
 		return nil, 0, nil, fmt.Errorf("%w: checkpoint size %d does not match the %d stored leaves and their root", errLogMismatch, cp.Size, tree.Size())
 	}
+	if err := checkLogCovers(snap, tree.Size(), issued); err != nil {
+		return nil, 0, nil, err
+	}
 	return tree, last, install, nil
+}
+
+// issuedSummary is what the issue leaves of a log record about issuance.
+type issuedSummary struct {
+	count      uint64 // issue leaves
+	lastSerial uint64 // serial of the last one, 0 when there is none
+}
+
+// checkLogCovers compares a log of size entries whose issue leaves sum up
+// to issued with the tables that commit in the same transactions as its
+// leaves (snap, read from the same snapshot): ca-init writes the CA keys
+// with the first leaf, and every issuance writes its issuance row and the
+// serial high-water mark with its issue leaf, and nothing deletes them.
+// So the log is empty exactly when no CA keys are recorded, it has one
+// issue leaf per issuance row, and the last one carries the high-water
+// mark. This catches the log tables alone rolled back to an earlier
+// signed prefix, or wiped. It cannot catch the whole database restored
+// from an older copy, those tables rolled back with the log, or trailing
+// entries without issuance (refusals, clock_regression) cut off: only an
+// earlier checkpoint kept outside the database (keyroster audit verify
+// --previous) shows those.
+func checkLogCovers(snap *signerdb.LogSnapshot, size uint64, issued issuedSummary) error {
+	switch {
+	case snap.CAKeys != nil && size == 0:
+		return fmt.Errorf("%w: CA keys are recorded, but the log is empty (wiped?)", errLogMismatch)
+	case snap.CAKeys == nil && size != 0:
+		return fmt.Errorf("%w: the log has %d entries, but no CA keys are recorded", errLogMismatch, size)
+	case issued.count != snap.Issuances || issued.lastSerial != snap.LastSerial:
+		return fmt.Errorf("%w: the log records %d issued certificates up to serial %d, the state database %d issuance rows and serial high-water mark %d (log or tables rolled back or modified?)",
+			errLogMismatch, issued.count, issued.lastSerial, snap.Issuances, snap.LastSerial)
+	}
+	return nil
 }
 
 // appendLocked appends leaf (its Index is assigned here, and its time is

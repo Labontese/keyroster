@@ -126,12 +126,17 @@ type LogSnapshot struct {
 	// latest installed trust bundle, nil when none is installed.
 	CAKeys []CAKey
 	Bundle *StoredBundle
+	// LastSerial is the serial high-water mark and Issuances the number
+	// of issuance rows; both commit with every issue leaf.
+	LastSerial uint64
+	Issuances  uint64
 }
 
 // ReadLogWithHashes reads the whole log from one consistent snapshot, in
 // one read transaction: it calls fn for every leaf with its stored hash, in
 // index order, and then returns the latest checkpoint (fn has then seen
-// every leaf) together with the ca-init keys and the latest trust bundle.
+// every leaf) together with the ca-init keys, the latest trust bundle, the
+// serial high-water mark and the number of issuance rows.
 // Appends committed meanwhile are not seen, so the leaves, hashes,
 // checkpoint and trust tables always belong together.
 func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, hash []byte) error) (*LogSnapshot, error) {
@@ -179,6 +184,14 @@ func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, ha
 	if snap.Bundle, err = latestBundle(ctx, tx); err != nil && !errors.Is(err, ErrNoBundle) {
 		return nil, err
 	}
+	if snap.LastSerial, err = lastSerial(ctx, tx); err != nil {
+		return nil, err
+	}
+	var n int64
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM issuance`).Scan(&n); err != nil {
+		return nil, fmt.Errorf("signerdb: count issuance rows: %w", err)
+	}
+	snap.Issuances = uint64(n) //nolint:gosec // G115: count(*) >= 0
 	return snap, nil
 }
 

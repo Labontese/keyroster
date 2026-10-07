@@ -296,6 +296,13 @@ func TestStartRefusedOnLogMismatch(t *testing.T) {
 		"last_leaf_deleted":            `DELETE FROM log_leaf WHERE idx = %[1]d + 2`,
 		"latest_checkpoint_deleted":    `DELETE FROM checkpoint WHERE size = %[1]d + 3`,
 		"checkpoint_from_another_size": `UPDATE checkpoint SET note = (SELECT note FROM checkpoint WHERE size = %[1]d + 1) WHERE size = %[1]d + 3`,
+		// C-WR-01: the log tables cut back to an earlier signed prefix,
+		// whose own checkpoint is still stored and genuine, or wiped.
+		"truncated_to_signed_prefix": `DELETE FROM log_leaf WHERE idx >= %[1]d + 2; DELETE FROM checkpoint WHERE size > %[1]d + 2`,
+		"truncated_to_bootstrap":     `DELETE FROM log_leaf WHERE idx >= %[1]d; DELETE FROM checkpoint WHERE size > %[1]d`,
+		"log_wiped":                  `DELETE FROM log_leaf; DELETE FROM checkpoint`,
+		"issuance_row_deleted":       `DELETE FROM issuance WHERE serial = (SELECT max(serial) FROM issuance)`,
+		"high_water_raised":          `UPDATE serial_state SET last_serial = last_serial + 1`,
 	}
 	for name, stmt := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -322,6 +329,15 @@ func TestStartRefusedOnLogMismatch(t *testing.T) {
 			err = e.open()
 			if err == nil || !strings.Contains(err.Error(), "log state mismatch") {
 				t.Fatalf("New after %s: %v, want log state mismatch", name, err)
+			}
+			// doctor's log check refuses it too.
+			ro, err := signerdb.OpenReadOnly(e.dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = ro.Close() }()
+			if err := CheckLog(context.Background(), ro, e.fx.Roles[keystore.RoleLog].PublicKey()); !errors.Is(err, errLogMismatch) {
+				t.Fatalf("CheckLog after %s: %v, want errLogMismatch", name, err)
 			}
 		})
 	}

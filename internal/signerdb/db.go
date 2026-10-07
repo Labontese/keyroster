@@ -102,8 +102,12 @@ func (d *DB) IntegrityCheck(ctx context.Context) (string, error) {
 
 // LastSerial returns the serial high-water mark.
 func (d *DB) LastSerial(ctx context.Context) (uint64, error) {
+	return lastSerial(ctx, d.db)
+}
+
+func lastSerial(ctx context.Context, q queryer) (uint64, error) {
 	var last int64
-	if err := d.db.QueryRowContext(ctx, `SELECT last_serial FROM serial_state WHERE id = 1`).Scan(&last); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT last_serial FROM serial_state WHERE id = 1`).Scan(&last); err != nil {
 		return 0, fmt.Errorf("signerdb: read serial high-water mark: %w", err)
 	}
 	if last < 0 {

@@ -365,8 +365,9 @@ func TestDurabilityPragmas(t *testing.T) {
 }
 
 // TestReadLogWithHashesSnapshot (A-WR-06, C-WR-02): ReadLogWithHashes
-// serves the leaves, their hashes, the latest checkpoint, the CA keys and
-// the latest trust bundle from one snapshot. Rows committed by another
+// serves the leaves, their hashes, the latest checkpoint, the CA keys, the
+// latest trust bundle, the issuance row count and the serial high-water
+// mark from one snapshot (C-WR-01 adds the last two). Rows committed by another
 // connection while it reads are not seen, so the result is always
 // consistent (doctor against a live signer).
 func TestReadLogWithHashesSnapshot(t *testing.T) {
@@ -407,6 +408,12 @@ func TestReadLogWithHashesSnapshot(t *testing.T) {
 				if err := writer.SaveCAKeys(tx, keys); err != nil {
 					return err
 				}
+				if err := writer.InsertIssuance(tx, issuance(77, 1)); err != nil {
+					return err
+				}
+				if err := writer.SetLastSerial(tx, 77); err != nil {
+					return err
+				}
 				return writer.InsertBundle(tx, StoredBundle{Version: 1, Bundle: []byte("b"), BundleSigs: []byte("s"),
 					Policy: []byte("p"), PolicySigs: []byte("t"), InstalledAt: time.Now()})
 			}); err != nil {
@@ -425,8 +432,8 @@ func TestReadLogWithHashesSnapshot(t *testing.T) {
 	if len(seen) != 3 || snap.Size != 3 || string(snap.Checkpoint) != string([]byte{'c', 3}) {
 		t.Fatalf("snapshot read %d leaves and checkpoint size %d (%x); want 3 leaves and checkpoint 3", len(seen), snap.Size, snap.Checkpoint)
 	}
-	if snap.CAKeys != nil || snap.Bundle != nil {
-		t.Fatalf("snapshot of a database without ca-init: keys %v, bundle %v; want none", snap.CAKeys, snap.Bundle)
+	if snap.CAKeys != nil || snap.Bundle != nil || snap.Issuances != 0 || snap.LastSerial != 0 {
+		t.Fatalf("snapshot saw rows committed after it began: %+v", snap)
 	}
 	// The concurrent append did commit; the next read sees it.
 	seen = nil
@@ -436,8 +443,8 @@ func TestReadLogWithHashesSnapshot(t *testing.T) {
 	}); err != nil || len(seen) != 4 || snap.Size != 4 {
 		t.Fatalf("second read: %d leaves, %+v, %v; want 4 leaves and checkpoint 4", len(seen), snap, err)
 	}
-	if len(snap.CAKeys) != len(CARoles) || snap.Bundle == nil || snap.Bundle.Version != 1 {
-		t.Fatalf("second read: keys %v, bundle %+v; want the five keys and bundle version 1", snap.CAKeys, snap.Bundle)
+	if len(snap.CAKeys) != len(CARoles) || snap.Bundle == nil || snap.Bundle.Version != 1 || snap.Issuances != 1 || snap.LastSerial != 77 {
+		t.Fatalf("second read: %+v; want the five keys, bundle version 1, one issuance row and high-water mark 77", snap)
 	}
 
 	t.Run("empty_log", func(t *testing.T) {
