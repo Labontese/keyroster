@@ -98,8 +98,9 @@ firmware **5.3 to 5.6** (P-256). For each:
       it by hand once more: 1 left, status 78. Start again: it refuses
       **without** trying the PIN (message "only 1 PIN retries left") and
       the counter stays at 1. Record the counter after each step. Then
-      put the right PIN back, reset the counter with `ykman piv access
-      verify-pin`, and check that the signer starts.
+      put the right PIN back, reset the counter by entering the correct
+      PIN once by hand with a `ykman piv` command that asks for it (record
+      which command, for piv.md), and check that the signer starts.
 
 - [ ] Attestation evidence for the D-WR-04 design (custody `piv` is
       card-reported today): for each slot 0x82-0x86, record whether

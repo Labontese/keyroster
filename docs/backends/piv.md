@@ -90,11 +90,15 @@ signing request. Three guards keep a restart loop from blocking the PIN:
   and gives up after 5 starts in 10 minutes (`StartLimitBurst=`,
   `StartLimitIntervalSec=`).
 
-After exit status 78: fix the PIN file, check the PIN and the counter by
-hand (`ykman piv info` shows the PIN tries left; `ykman piv access
-verify-pin` resets the counter when the PIN is right), then start the
-service again. If the signer refused because of the counter, it never sent
-the PIN, so the counter is still where you found it.
+After exit status 78: fix the PIN file and check the counter by hand
+(`ykman piv info` shows the PIN tries left). With fewer than 2 left the
+signer will not start even with the right PIN: enter the correct PIN once
+by hand, with any `ykman piv` command that asks for it, to reset the counter
+(which command is convenient for this has not been checked on a card yet;
+needs-hardware item 2). Then start the service again. If the signer refused
+because of the counter, it never sent the PIN, so the counter is still where
+you found it. A card whose PIN retry limit was set below 2 (`ykman piv
+access set-retries`) can therefore never start the signer.
 
 What runs where: the counter check and the exit status are tested in CI
 (fake card, `TestPIVPINRetriesGuard`; `TestCredentialRefusedExitStatus`),
