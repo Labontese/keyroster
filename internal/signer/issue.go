@@ -42,9 +42,10 @@ func refusalErr(code wire.ErrorCode, reason string, cause error) error {
 // Then: freshness (CreatedAt within ±300 s), admin-sshsig/v1 evidence from
 // the installed policy's admins over the request's exact signing bytes
 // (D-13), the CA key of the requested role from the installed bundle, that
-// role's policy profile (validity cap and extensions, CA-04, CA-05), a
-// serial, and cert.Build. The certificate leaves only after its log entry
-// committed.
+// role's policy profile (validity cap and extensions, CA-04, CA-05), the
+// installed bundle still being the one loaded at start, a request id not
+// used before, a serial, and cert.Build. The certificate leaves only after
+// its log entry committed.
 func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (*wire.IssueResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -82,6 +83,15 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 	// transaction below is the one that holds until COMMIT.
 	if err := s.checkTrustCurrent(s.db.LatestBundleVersion(ctx)); err != nil {
 		return nil, err
+	}
+	// Refuse a replayed request id before a serial is allocated and the CA
+	// key signs (s.mu serializes issuance, so this cannot race in-process);
+	// the UNIQUE constraint inside the transaction stays the backstop.
+	switch used, err := s.db.RequestIDUsed(ctx, req.RequestID); {
+	case err != nil:
+		return nil, refusalErr(wire.CodeUnavailable, "state_unavailable", err)
+	case used:
+		return nil, refusalErr(wire.CodeRefused, "duplicate_request", signerdb.ErrDuplicateRequest)
 	}
 
 	last, err := s.db.LastSerial(ctx)

@@ -202,3 +202,46 @@ func TestTrustChangedDuringIssue(t *testing.T) {
 		t.Fatalf("%d issuance rows (%v), want 0", issued, err)
 	}
 }
+
+// TestReplayRefusedBeforeSigning (A-WR-04): a replayed request (same
+// request id, validly signed, within the freshness window) is refused as
+// duplicate_request before a serial is allocated and before the CA key
+// signs, so a replay costs no CA operation (and no PIV touch).
+func TestReplayRefusedBeforeSigning(t *testing.T) {
+	e := newLogEnv(t)
+	e.close()
+	be := newSignHookBackend(e.backend)
+	userFP := ssh.FingerprintSHA256(e.fx.Roles[keystore.RoleUser].PublicKey())
+	db, err := signerdb.Open(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s, err := New(Config{Backend: be, DB: db, AllowUIDs: []uint32{1000}, Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := e.request()
+	if _, err := s.Issue(context.Background(), Peer{UID: 1000}, req); err != nil {
+		t.Fatal(err)
+	}
+	if n := be.count(userFP); n != 1 {
+		t.Fatalf("user CA signed %d times for one issuance, want 1", n)
+	}
+	last, err := db.LastSerial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		resp, refused := s.issueOrRefuse(context.Background(), Peer{UID: 1000}, req)
+		if resp != nil || refused == nil || refused.Message != "duplicate_request" {
+			t.Fatalf("replay: response %+v, refusal %+v; want duplicate_request", resp, refused)
+		}
+	}
+	if n := be.count(userFP); n != 1 {
+		t.Fatalf("user CA signed %d times after three replays, want 1 (no signature for a replay)", n)
+	}
+	if got, err := db.LastSerial(context.Background()); err != nil || got != last {
+		t.Fatalf("serial high-water mark %d (%v) after the replays, want %d", got, err, last)
+	}
+}

@@ -1,6 +1,7 @@
 package signerdb
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -44,4 +45,18 @@ func (d *DB) InsertIssuance(tx *sql.Tx, is Issuance) error {
 		return fmt.Errorf("signerdb: insert issuance: %w", err)
 	}
 	return nil
+}
+
+// RequestIDUsed reports whether an issuance with request id id is
+// recorded.
+func (d *DB) RequestIDUsed(ctx context.Context, id [16]byte) (bool, error) {
+	var one int
+	err := d.db.QueryRowContext(ctx, `SELECT 1 FROM issuance WHERE request_id = ?`, id[:]).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("signerdb: read issuance: %w", err)
+	}
+	return true, nil
 }
