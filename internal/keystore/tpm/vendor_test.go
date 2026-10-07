@@ -8,9 +8,10 @@ import (
 	"github.com/Labontese/keyroster/internal/keystore"
 )
 
-// TestCustodyForManufacturer: software and virtual TPMs are vtpm, physical
-// vendors and unknown IDs are tpm. A vTPM-held key is never reported as
-// hardware TPM custody.
+// TestCustodyForManufacturer (D-WR-02): the mapping fails closed. Only the
+// allowlisted physical and firmware TPM vendors are tpm; the virtual
+// IBM/MSFT/GOOG and every unknown ID are vtpm, so a vTPM-held key is never
+// reported as hardware TPM custody.
 func TestCustodyForManufacturer(t *testing.T) {
 	for id, want := range map[string]keystore.Custody{
 		"IBM":  keystore.CustodyVTPM, // swtpm/libtpms: QEMU, Proxmox VE
@@ -21,10 +22,35 @@ func TestCustodyForManufacturer(t *testing.T) {
 		"IFX":  keystore.CustodyTPM,  // Infineon
 		"NTC":  keystore.CustodyTPM,  // Nuvoton
 		"STM":  keystore.CustodyTPM,  // STMicroelectronics
-		"ibm":  keystore.CustodyTPM,  // IDs are case-sensitive
+		"intc": keystore.CustodyVTPM, // IDs are case-sensitive
+		"XYZ":  keystore.CustodyVTPM, // unknown: not hardware
+		"QEMU": keystore.CustodyVTPM, // unknown: not hardware
 	} {
 		if got := CustodyForManufacturer(id); got != want {
 			t.Errorf("CustodyForManufacturer(%q) = %s, want %s", id, got, want)
+		}
+	}
+}
+
+// TestDeriveCustody (D-WR-02): the test-only swtpm socket is always vtpm,
+// whatever manufacturer the process behind it claims, and custody=vtpm
+// only ever weakens the result.
+func TestDeriveCustody(t *testing.T) {
+	for _, tc := range []struct {
+		id   string
+		opts map[string]string
+		want keystore.Custody
+	}{
+		{"INTC", map[string]string{"device": "/dev/tpmrm0"}, keystore.CustodyTPM},
+		{"INTC", map[string]string{}, keystore.CustodyTPM},
+		{"INTC", map[string]string{"swtpm-socket": "/tmp/s"}, keystore.CustodyVTPM},
+		{"INTC", map[string]string{"custody": "vtpm"}, keystore.CustodyVTPM},
+		{"INTC", map[string]string{"custody": "tpm"}, keystore.CustodyTPM},
+		{"IBM", map[string]string{"custody": "tpm"}, keystore.CustodyVTPM},
+		{"XYZ", map[string]string{}, keystore.CustodyVTPM},
+	} {
+		if got := deriveCustody(tc.id, tc.opts); got != tc.want {
+			t.Errorf("deriveCustody(%q, %v) = %s, want %s", tc.id, tc.opts, got, tc.want)
 		}
 	}
 }

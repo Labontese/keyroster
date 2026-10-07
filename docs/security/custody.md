@@ -13,8 +13,8 @@ log. It cannot be hidden by the online CA host.
 |---|---|---|---|
 | `pkcs11-agent` | A hardware security module (YubiHSM 2, Nitrokey HSM 2, SmartCard-HSM) reached through OpenSSH `ssh-agent` and `ssh-pkcs11-helper` | `agent` with `custody=pkcs11-agent` | See [docs/backends/pkcs11.md](../backends/pkcs11.md). The key cannot be exported. |
 | `piv` | A YubiKey PIV slot | `piv` (build tag `piv`, not in default binaries) | See [docs/backends/piv.md](../backends/piv.md). The key cannot be exported. Touch and PIN policies are per slot. Not yet validated on a real YubiKey ([needs-hardware.md](needs-hardware.md)). |
-| `tpm` | A physical TPM 2.0 chip or firmware TPM (Intel PTT, AMD fTPM, Infineon, Nuvoton, STMicroelectronics, ...) | `tpm` | The key is created inside the TPM and is wrapped by its storage root key. It cannot be used without that TPM and the key's auth value. |
-| `vtpm` | A virtual or software TPM: swtpm/libtpms (QEMU, Proxmox VE), Hyper-V, Google Cloud | `tpm` | Weaker than a physical TPM, stronger than a software key. See below. |
+| `tpm` | A physical TPM 2.0 chip or firmware TPM (Intel PTT, AMD fTPM, Infineon, Nuvoton, STMicroelectronics) | `tpm` | The key is created inside the TPM and is wrapped by its storage root key. It cannot be used without that TPM and the key's auth value. |
+| `vtpm` | A virtual or software TPM: swtpm/libtpms (QEMU, Proxmox VE), Hyper-V, Google Cloud, or any TPM whose manufacturer is not on the allowlist below | `tpm` | Weaker than a physical TPM, stronger than a software key. See below. |
 | `agent` | A plain private key loaded into `ssh-agent` | `agent` | **Test and development only.** The key exists as a file somewhere. `doctor` flags it. |
 | `software` | A key file (for roots: age-encrypted on offline media) | — | For online keys: Phase 2 (KEY-06, with loud UI warnings). For roots: see below. |
 
@@ -62,16 +62,34 @@ for example `TPM manufacturer: IBM → custody vtpm`.
 
 | Manufacturer ID | Meaning | Custody |
 |---|---|---|
+| `INTC`, `AMD`, `IFX`, `NTC`, `STM` | Intel PTT, AMD fTPM, Infineon, Nuvoton, STMicroelectronics | `tpm` |
 | `IBM` | swtpm/libtpms, used by QEMU and Proxmox VE vTPMs | `vtpm` |
 | `MSFT` | Hyper-V vTPM, Microsoft's reference simulator | `vtpm` |
 | `GOOG` | Google Cloud vTPM | `vtpm` |
-| any other | a physical or firmware TPM | `tpm` |
+| any other | unknown: not assumed to be hardware | `vtpm` |
 
-The `custody` backend option can only make this weaker:
-`--backend-opt custody=vtpm` labels a virtual TPM whose manufacturer ID is
-not in the table. `custody=tpm` is refused when the manufacturer is a
-software or virtual TPM, so a vTPM-held key is never reported as hardware
-TPM custody.
+The mapping is an **allowlist and fails closed** (D-WR-02): a manufacturer
+that is not known to make physical or firmware TPMs is custody `vtpm`. A TPM
+reached through the test-only `swtpm-socket` option is always `vtpm`,
+whatever manufacturer the process behind the socket reports. The `custody`
+backend option can only make this weaker: `--backend-opt custody=vtpm`
+labels any TPM as virtual, and `custody=tpm` is refused unless the custody
+already is `tpm`. `doctor` applies the same rule when it compares the live
+TPM with the recorded custody.
+
+**The manufacturer ID is self-reported.** It is whatever the TPM, or the
+hypervisor that emulates it, answers to `TPM2_GetCapability`; nothing
+authenticates it, so a hypervisor that claims `INTC` is recorded as `tpm`.
+Verifying the TPM's endorsement-key certificate against the manufacturer's
+CA would close that gap; it is not implemented (deferred to the phase 1 gap
+plan).
+
+**Upgrade note:** a signer whose keys were recorded as custody `tpm` on a
+TPM whose manufacturer is not on the allowlist now derives `vtpm`. `serve`
+refuses the custody mismatch and `doctor` prints `WARN custody_mismatch`.
+Such a signer must be re-initialised (new keys and bundle) with its custody
+recorded as `vtpm`, or the vendor added to the allowlist through a reviewed
+change with evidence that its ID belongs to hardware TPMs.
 
 **A vTPM is only as safe as its hypervisor host.** The homelab runs the
 signer in a Proxmox VM with a vTPM (D-08). That vTPM is swtpm on the Proxmox
@@ -111,8 +129,8 @@ against the root.
 ## Test setup for the TPM backend (CI and local)
 
 CI cannot use a physical TPM, so the `e2e-tpm` workflow runs swtpm from the
-Ubuntu archive. Because swtpm reports manufacturer `IBM`, every key in that
-run is custody `vtpm`; the tests assert that, in `ca-pubkeys.json` and in the
+Ubuntu archive. Because swtpm reports manufacturer `IBM` and is reached
+through `swtpm-socket`, every key in that run is custody `vtpm`; the tests assert that, in `ca-pubkeys.json` and in the
 verified bundle. `scripts/swtpm-setup.sh DIR` starts it on a Unix socket
 carrying raw TPM commands (`unixio`). The backend reaches that socket with
 the test-only option `swtpm-socket=PATH` (go-tpm `linuxudstpm`). No root is

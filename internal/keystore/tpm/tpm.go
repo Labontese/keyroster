@@ -13,19 +13,22 @@
 // in tests through an swtpm socket. Pure Go, no cgo: go-tpm and
 // go-tpm-keyfiles.
 //
-// Custody is derived from the TPM manufacturer: software and virtual TPMs
-// (swtpm/libtpms, which Proxmox vTPM uses, Microsoft and Google vTPMs)
-// are custody vtpm, every other manufacturer is custody tpm. A vTPM is only
-// as safe as its hypervisor host.
+// Custody is derived from the TPM manufacturer and fails closed: only an
+// allowlist of physical and firmware TPM vendors (Intel, AMD, Infineon,
+// Nuvoton, STMicroelectronics) is custody tpm; software and virtual TPMs
+// (swtpm/libtpms, which Proxmox vTPM uses, Microsoft and Google vTPMs) and
+// every unknown manufacturer are custody vtpm, and so is any TPM reached
+// through swtpm-socket. A vTPM is only as safe as its hypervisor host. The
+// manufacturer ID is self-reported and not authenticated (see vendor.go).
 //
 // Options:
 //
 //	state-dir     the signer's state directory (set by keyroster-signer)
 //	device        TPM resource-manager device (default /dev/tpmrm0)
-//	swtpm-socket  test and development only: swtpm unixio socket path
-//	custody       "vtpm" forces custody vtpm (for a virtual TPM with an
-//	              unrecognised manufacturer); "tpm" is accepted only when
-//	              the manufacturer already maps to tpm
+//	swtpm-socket  test and development only: swtpm unixio socket path;
+//	              always custody vtpm
+//	custody       "vtpm" forces custody vtpm; "tpm" is accepted only when
+//	              the custody already is tpm
 package tpm
 
 import (
@@ -98,13 +101,10 @@ func open(opts map[string]string) (keystore.Backend, error) {
 		_ = t.Close()
 		return nil, fmt.Errorf("keystore tpm: read the TPM manufacturer: %w", err)
 	}
-	custody := CustodyForManufacturer(id)
-	switch {
-	case override == keystore.CustodyVTPM:
-		custody = keystore.CustodyVTPM
-	case override == keystore.CustodyTPM && custody != keystore.CustodyTPM:
+	custody := deriveCustody(id, opts)
+	if override == keystore.CustodyTPM && custody != keystore.CustodyTPM {
 		_ = t.Close()
-		return nil, fmt.Errorf("keystore tpm: custody tpm refused: TPM manufacturer %q is a software or virtual TPM (custody %s)", id, custody)
+		return nil, fmt.Errorf("keystore tpm: custody tpm refused: TPM manufacturer %q maps to custody %s (only a physical TPM vendor on the allowlist, reached through device, is custody tpm; swtpm-socket is always vtpm)", id, custody)
 	}
 	return &backend{tpm: t, dir: filepath.Join(stateDir, "tpm"), manufacturer: id, custody: custody}, nil
 }
