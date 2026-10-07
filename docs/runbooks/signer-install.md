@@ -217,6 +217,7 @@ socket and runs no program.
 | `FAIL db_permissions` | `signer.db` readable by others | `chmod 0600 /var/lib/keyroster-signer/signer.db` |
 | `FAIL db_integrity` | SQLite integrity check failed, or the database cannot be read | Stop the signer; restore from backup; investigate. |
 | `FAIL log_mismatch` | the stored audit log does not reproduce its signed checkpoint | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
+| `FAIL trust_mismatch` | the installed trust bundle is not one `serve` would load: it does not list the keys ca-init recorded (for example another log key), names an online key or a root as a policy admin, or is not the bundle the log's last `bundle_install` entry records | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
 | `FAIL clock_regression` | the wall clock is behind the last issued serial | See [the clock warning](#snapshot-restore-check-the-clock-first). |
 | `WARN no_bundle` | no trust bundle installed | Run step 6. |
 | `WARN software_root` | a root has custody software (`SOFTWARE ROOT:`) | Expected for the homelab (D-10); move to hardware roots (D-11). |
@@ -227,6 +228,12 @@ socket and runs no program.
 
 On the homelab VM the expected result is no FAIL, `WARN vtpm_custody` and
 one `WARN software_root` per root.
+
+doctor has neither the backend's keys nor your root pins. A database
+rewritten consistently, with keys and roots of the rewriter's choosing,
+passes doctor; `serve` refuses it (it opens every key by its recorded
+fingerprint in the backend), and so does `keyroster audit verify --pin`.
+Compare the root fingerprints doctor prints with your pins.
 
 ## Install a successor bundle: stop, install, start
 

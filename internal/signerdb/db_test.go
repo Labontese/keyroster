@@ -364,10 +364,11 @@ func TestDurabilityPragmas(t *testing.T) {
 	}
 }
 
-// TestReadLogWithHashesSnapshot (A-WR-06): ReadLogWithHashes serves the
-// leaves, their hashes and the latest checkpoint from one snapshot. A leaf
-// and checkpoint committed by another connection while it reads are not
-// seen, so the result is always consistent (doctor against a live signer).
+// TestReadLogWithHashesSnapshot (A-WR-06, C-WR-02): ReadLogWithHashes
+// serves the leaves, their hashes, the latest checkpoint, the CA keys and
+// the latest trust bundle from one snapshot. Rows committed by another
+// connection while it reads are not seen, so the result is always
+// consistent (doctor against a live signer).
 func TestReadLogWithHashesSnapshot(t *testing.T) {
 	ctx := context.Background()
 	writer, path := openTemp(t)
@@ -391,10 +392,24 @@ func TestReadLogWithHashesSnapshot(t *testing.T) {
 	t.Cleanup(func() { _ = reader.Close() })
 
 	var seen []uint64
-	note, size, err := reader.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
+	snap, err := reader.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
 		if idx == 0 {
-			// Commit leaf 3 and its checkpoint mid-read.
+			// Commit leaf 3 and its checkpoint, the CA keys and a trust
+			// bundle mid-read.
 			if err := appendOne(3); err != nil {
+				return err
+			}
+			if err := writer.WithTx(ctx, func(tx *sql.Tx) error {
+				keys := make([]CAKey, 0, len(CARoles))
+				for i, role := range CARoles {
+					keys = append(keys, CAKey{Role: role, PublicKey: []byte{'k', byte(i)}, Alg: "a", Custody: "c"})
+				}
+				if err := writer.SaveCAKeys(tx, keys); err != nil {
+					return err
+				}
+				return writer.InsertBundle(tx, StoredBundle{Version: 1, Bundle: []byte("b"), BundleSigs: []byte("s"),
+					Policy: []byte("p"), PolicySigs: []byte("t"), InstalledAt: time.Now()})
+			}); err != nil {
 				return err
 			}
 		}
@@ -407,24 +422,30 @@ func TestReadLogWithHashesSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(seen) != 3 || size != 3 || string(note) != string([]byte{'c', 3}) {
-		t.Fatalf("snapshot read %d leaves and checkpoint size %d (%x); want 3 leaves and checkpoint 3", len(seen), size, note)
+	if len(seen) != 3 || snap.Size != 3 || string(snap.Checkpoint) != string([]byte{'c', 3}) {
+		t.Fatalf("snapshot read %d leaves and checkpoint size %d (%x); want 3 leaves and checkpoint 3", len(seen), snap.Size, snap.Checkpoint)
+	}
+	if snap.CAKeys != nil || snap.Bundle != nil {
+		t.Fatalf("snapshot of a database without ca-init: keys %v, bundle %v; want none", snap.CAKeys, snap.Bundle)
 	}
 	// The concurrent append did commit; the next read sees it.
 	seen = nil
-	if _, size, err = reader.ReadLogWithHashes(ctx, func(idx uint64, _, _ []byte) error {
+	if snap, err = reader.ReadLogWithHashes(ctx, func(idx uint64, _, _ []byte) error {
 		seen = append(seen, idx)
 		return nil
-	}); err != nil || len(seen) != 4 || size != 4 {
-		t.Fatalf("second read: %d leaves, checkpoint %d, %v; want 4 and 4", len(seen), size, err)
+	}); err != nil || len(seen) != 4 || snap.Size != 4 {
+		t.Fatalf("second read: %d leaves, %+v, %v; want 4 leaves and checkpoint 4", len(seen), snap, err)
+	}
+	if len(snap.CAKeys) != len(CARoles) || snap.Bundle == nil || snap.Bundle.Version != 1 {
+		t.Fatalf("second read: keys %v, bundle %+v; want the five keys and bundle version 1", snap.CAKeys, snap.Bundle)
 	}
 
 	t.Run("empty_log", func(t *testing.T) {
 		empty, _ := openTemp(t)
 		calls := 0
-		_, _, err := empty.ReadLogWithHashes(ctx, func(uint64, []byte, []byte) error { calls++; return nil })
-		if !errors.Is(err, ErrNoCheckpoint) || calls != 0 {
-			t.Fatalf("empty log: %d calls, %v; want 0 and ErrNoCheckpoint", calls, err)
+		snap, err := empty.ReadLogWithHashes(ctx, func(uint64, []byte, []byte) error { calls++; return nil })
+		if err != nil || calls != 0 || snap.Checkpoint != nil || snap.Size != 0 {
+			t.Fatalf("empty log: %d calls, %+v, %v; want 0 calls and no checkpoint", calls, snap, err)
 		}
 	})
 }

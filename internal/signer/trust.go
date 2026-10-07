@@ -405,11 +405,11 @@ type trustState struct {
 	logKey   keystore.CAKey
 }
 
-// loadTrust reads the ca-init keys and the latest installed bundle and
-// opens every bundle key in the backend. It refuses when ca-init or
-// install-bundle has not run, when the stored bundle no longer matches the
-// stored keys or its policy, and when any bundle key (CA, ops or log) is
-// missing from the backend (KEY-01).
+// loadTrust reads the ca-init keys and the latest installed bundle,
+// checks them (checkStoredTrust) and opens every bundle key in the
+// backend. It refuses when ca-init or install-bundle has not run, when the
+// stored bundle no longer matches the stored keys or its policy, and when
+// any bundle key (CA, ops or log) is missing from the backend (KEY-01).
 func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trustState, error) {
 	caKeys, err := db.CAKeys(ctx)
 	if errors.Is(err, signerdb.ErrNotInitialised) {
@@ -425,6 +425,35 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	if err != nil {
 		return nil, err
 	}
+	ts, err := checkStoredTrust(caKeys, stored)
+	if err != nil {
+		return nil, err
+	}
+	keys := map[string]keystore.CAKey{}
+	for _, k := range caKeys {
+		key, err := openRoleKey(be, caKeys, k.Role)
+		if err != nil {
+			return nil, err
+		}
+		keys[k.Role] = key
+	}
+	for role, kr := range caRoles {
+		ts.ca[role] = keys[string(kr)]
+	}
+	ts.logKey = keys["log"]
+	if ts.bundle.Log.Origin != tlog.Origin(ts.logKey.PublicKey()) {
+		return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, ts.bundle.Log.Origin)
+	}
+	return ts, nil
+}
+
+// checkStoredTrust is the part of loadTrust that needs no backend, shared
+// with CheckTrust (doctor): the stored bundle record must be consistent
+// (version, policy hash), list exactly the ca-init keys (checkBundleKeys),
+// name none of them nor a root as a policy admin (checkPolicyAdmins),
+// carry a profile for every CA role, and name the recorded log key's
+// origin. It returns the trust state without keys.
+func checkStoredTrust(caKeys []signerdb.CAKey, stored *signerdb.StoredBundle) (*trustState, error) {
 	b, err := trust.ParseBundle(stored.Bundle)
 	if err != nil {
 		return nil, fmt.Errorf("signer: installed bundle: %w", err)
@@ -443,25 +472,24 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 		return nil, err
 	}
 	ts := &trustState{stored: stored, bundle: b, policy: p, ca: map[wire.CARole]keystore.CAKey{}, profiles: map[wire.CARole]cert.Profile{}}
-	keys := map[string]keystore.CAKey{}
-	for _, k := range caKeys {
-		key, err := openRoleKey(be, caKeys, k.Role)
-		if err != nil {
-			return nil, err
-		}
-		keys[k.Role] = key
-	}
 	for role, kr := range caRoles {
-		ts.ca[role] = keys[string(kr)]
 		prof, err := profileFor(string(kr), p)
 		if err != nil {
 			return nil, err
 		}
 		ts.profiles[role] = prof
 	}
-	ts.logKey = keys["log"]
-	if b.Log.Origin != tlog.Origin(ts.logKey.PublicKey()) {
-		return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, b.Log.Origin)
+	for _, k := range caKeys {
+		if k.Role != "log" {
+			continue
+		}
+		pub, err := ssh.ParsePublicKey(k.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("%w: stored log key: %w", ErrBundleKeys, err)
+		}
+		if b.Log.Origin != tlog.Origin(pub) {
+			return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, b.Log.Origin)
+		}
 	}
 	return ts, nil
 }

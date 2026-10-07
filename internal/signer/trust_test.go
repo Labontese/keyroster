@@ -675,6 +675,10 @@ func TestStartRefusesRootAsAdmin(t *testing.T) {
 	if _, err := New(Config{Backend: be, DB: db, AllowUIDs: []uint32{1}}); !errors.Is(err, trust.ErrKeyIsRoot) {
 		t.Fatalf("New with a root as policy admin = %v, want trust.ErrKeyIsRoot", err)
 	}
+	// doctor runs the same check (B-CR-01 via C-WR-02).
+	if err := CheckTrust(ctx, db); !errors.Is(err, trust.ErrKeyIsRoot) {
+		t.Fatalf("CheckTrust with a root as policy admin = %v, want trust.ErrKeyIsRoot", err)
+	}
 }
 
 // TestProfiles (CA-04, CA-05): every certificate follows its role's policy

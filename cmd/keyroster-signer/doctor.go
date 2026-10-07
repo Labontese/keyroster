@@ -159,6 +159,12 @@ func readDBFacts(ctx context.Context, db *signerdb.DB, f *doctor.Facts, override
 			return fmt.Errorf("installed trust bundle: %w", err)
 		}
 	}
+	// The checks serve runs on the bundle at start, except opening the
+	// keys in the backend: the recorded log key above is checked against
+	// the bundle's here.
+	if err := signer.CheckTrust(ctx, db); err != nil {
+		f.TrustError = err.Error()
+	}
 
 	name, opts, err := db.BackendConfig(ctx)
 	if err != nil {

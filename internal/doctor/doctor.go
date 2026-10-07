@@ -5,8 +5,15 @@
 //
 // FAIL means the installation is unsafe or broken: running as root, a state
 // directory or database readable by others, a damaged database, an audit
-// log that no longer reproduces its signed checkpoint, or a clock behind the
-// serial high-water mark. WARN means weaker custody than hardware, stated
+// log that no longer reproduces its signed checkpoint, an installed trust
+// bundle that serve would refuse at start (it does not list the recorded
+// keys, names an online key or a root as a policy admin, or is not the one
+// the log's last bundle_install entry records), or a clock behind the
+// serial high-water mark. doctor has neither the backend's keys nor the
+// operator's root pins, so a database rewritten consistently with keys and
+// roots of the rewriter's choosing is caught only by serve (which opens the
+// keys by fingerprint) and by keyroster audit verify --pin; compare the
+// roots doctor prints with your pins. WARN means weaker custody than hardware, stated
 // loudly: a software root (SOFTWARE ROOT), keys in a virtual TPM, plain
 // keys in ssh-agent, or a TPM that no longer matches the recorded custody.
 // doctor never reports a vTPM-held, agent-held or software key as hardware
@@ -58,6 +65,7 @@ const (
 	CodeDBPermissions       = "db_permissions"
 	CodeDBIntegrity         = "db_integrity"
 	CodeLogMismatch         = "log_mismatch"
+	CodeTrustMismatch       = "trust_mismatch"
 	CodeClockRegression     = "clock_regression"
 	CodeNoBundle            = "no_bundle"
 	CodeSoftwareRoot        = "software_root"
@@ -76,6 +84,7 @@ const (
 	codeDBMode    = "db_permissions"
 	codeIntegrity = "db_integrity"
 	codeLog       = "log"
+	codeTrust     = "trust"
 	codeClock     = "clock"
 	codeBundle    = "bundle"
 	codeRoots     = "roots"
@@ -137,6 +146,10 @@ type Facts struct {
 
 	// Bundle is the installed trust bundle, nil when none is installed.
 	Bundle *trust.Bundle
+	// TrustError says why serve would refuse the installed trust bundle
+	// (signer.CheckTrust); empty when it would load it, or when none is
+	// installed and the log records none.
+	TrustError string
 	// CAKeys are the online keys ca-init recorded.
 	CAKeys []CAKeyFact
 
@@ -201,6 +214,12 @@ func Run(f Facts) []Result {
 	} else {
 		add(OK, codeBundle, "trust bundle version %d installed (%d roots, threshold %d)", f.Bundle.Version, len(f.Bundle.Root.Keys), f.Bundle.Root.Threshold)
 		rs = append(rs, rootResults(f.Bundle.Root.Keys)...)
+	}
+	switch {
+	case f.TrustError != "":
+		add(FAIL, CodeTrustMismatch, "the installed trust bundle is not one serve would load (%s); serve refuses to start", f.TrustError)
+	case f.Bundle != nil:
+		add(OK, codeTrust, "the installed trust bundle lists the recorded keys and is the one the log's last bundle_install entry records (its root signatures are checked by install-bundle and audit verify, not here)")
 	}
 	rs = append(rs, custodyResults(f)...)
 	return rs

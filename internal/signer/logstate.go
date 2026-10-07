@@ -125,6 +125,46 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 	return err
 }
 
+// CheckTrust runs the start-up trust checks of serve that need no
+// keystore backend, on one snapshot of db (it only reads): the installed
+// trust bundle record must be consistent (version, policy hash), list
+// exactly the recorded ca-init keys with no root among them (so the bundle's
+// log key is the recorded one), name no online key or root as a policy
+// admin, carry a usable profile for every CA role and the recorded log
+// key's origin, and be byte-identical to the body of the last
+// bundle_install entry of the log. With no bundle installed, the log must
+// record none. keyroster-signer doctor uses it; an error wraps the reason.
+//
+// It cannot catch a database rewritten consistently with keys and roots of
+// the rewriter's choosing: doctor has neither the backend's keys (serve
+// refuses keys the backend does not hold) nor the operator's root pins
+// (keyroster audit verify --pin).
+func CheckTrust(ctx context.Context, db *signerdb.DB) error {
+	var install []byte
+	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, _ []byte) error {
+		l, err := tlog.DecodeLeaf(leaf)
+		if err != nil {
+			return fmt.Errorf("%w: leaf %d does not decode", errLogMismatch, idx)
+		}
+		if l.Kind == tlog.KindBundleInstall {
+			install = l.Body
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if snap.CAKeys == nil {
+		return ErrNotInitialised
+	}
+	if snap.Bundle != nil {
+		if _, err := checkStoredTrust(snap.CAKeys, snap.Bundle); err != nil {
+			return err
+		}
+	}
+	return checkBundleLogged(snap.Bundle, install)
+}
+
 // rebuildLogFrom is rebuildLog over db with the checkpoint verifier v. It
 // reads the leaves, their stored hashes and the latest checkpoint from one
 // snapshot (signerdb.ReadLogWithHashes), so a leaf the signer appends
@@ -137,7 +177,7 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		install []byte
 	)
 	// ReadLogWithHashes yields idx = 0, 1, 2, ... without gaps.
-	msg, size, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
+	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
 		l, err := tlog.DecodeLeaf(leaf)
 		if err != nil {
 			return fmt.Errorf("%w: leaf %d does not decode", errLogMismatch, idx)
@@ -158,8 +198,7 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		hashes = append(hashes, hash)
 		return nil
 	})
-	noCheckpoint := errors.Is(err, signerdb.ErrNoCheckpoint)
-	if err != nil && !noCheckpoint {
+	if err != nil {
 		if errors.Is(err, errLogMismatch) {
 			return nil, 0, nil, err
 		}
@@ -169,7 +208,7 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
-	if noCheckpoint {
+	if snap.Checkpoint == nil {
 		if tree.Size() != 0 {
 			return nil, 0, nil, fmt.Errorf("%w: %d leaves but no checkpoint", errLogMismatch, tree.Size())
 		}
@@ -179,11 +218,11 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
-	cp, err := tlog.OpenCheckpoint(msg, v)
+	cp, err := tlog.OpenCheckpoint(snap.Checkpoint, v)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("%w: latest checkpoint: %w", errLogMismatch, err)
 	}
-	if cp.Size != size || cp.Size != tree.Size() || !bytes.Equal(cp.Root, root) {
+	if cp.Size != snap.Size || cp.Size != tree.Size() || !bytes.Equal(cp.Root, root) {
 		return nil, 0, nil, fmt.Errorf("%w: checkpoint size %d does not match the %d stored leaves and their root", errLogMismatch, cp.Size, tree.Size())
 	}
 	return tree, last, install, nil

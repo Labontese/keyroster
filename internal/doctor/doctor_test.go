@@ -112,6 +112,20 @@ func TestHealthyHasNoWarnings(t *testing.T) {
 		t.Fatalf("ExitCode = %d, want 0", ExitCode(rs))
 	}
 	requireOne(t, rs, OK, "custody")
+	requireOne(t, rs, OK, "trust")
+}
+
+// TestTrustMismatchIsNotOK (C-WR-02): a trust check failure replaces the
+// trust OK line, and its message names the reason and that serve refuses.
+func TestTrustMismatchIsNotOK(t *testing.T) {
+	f := healthy(t)
+	f.TrustError = "policy admin alice uses the log key"
+	rs := Run(f)
+	r := requireOne(t, rs, FAIL, CodeTrustMismatch)
+	if !strings.Contains(r.Message, f.TrustError) || !strings.Contains(r.Message, "serve refuses to start") {
+		t.Fatalf("trust_mismatch message = %q", r.Message)
+	}
+	requireNone(t, rs, "trust")
 }
 
 func TestFailures(t *testing.T) {
@@ -130,6 +144,10 @@ func TestFailures(t *testing.T) {
 		{"integrity", func(f *Facts) { f.IntegrityOK, f.IntegrityDetail = false, "row 3 missing from index" }, CodeDBIntegrity},
 		{"db unreadable", func(f *Facts) { f.DBError = "open signer.db: permission denied" }, CodeDBIntegrity},
 		{"log mismatch", func(f *Facts) { f.LogMatches, f.LogDetail = false, "leaf 2 does not match its stored hash" }, CodeLogMismatch},
+		{"trust mismatch", func(f *Facts) { f.TrustError = "the log key is SHA256:x, ca-init chose SHA256:y" }, CodeTrustMismatch},
+		{"logged bundle missing", func(f *Facts) {
+			f.Bundle, f.TrustError = nil, "the log records an installed trust bundle, but the state database holds none"
+		}, CodeTrustMismatch},
 		{"clock regression", func(f *Facts) { f.NowMicros = f.HighWaterMicros - 1 }, CodeClockRegression},
 		{"clock an hour behind", func(f *Facts) { f.NowMicros = f.HighWaterMicros - 3_600_000_000 }, CodeClockRegression},
 	}
@@ -195,7 +213,7 @@ func TestDBErrorSkipsDependentChecks(t *testing.T) {
 	rs := Run(f)
 	requireOne(t, rs, FAIL, CodeDBIntegrity)
 	// Nothing read from an unreadable database may be reported as OK.
-	for _, code := range []string{"log", "clock", "custody", "bundle"} {
+	for _, code := range []string{"log", "clock", "custody", "bundle", "trust"} {
 		requireNone(t, rs, code)
 	}
 }
@@ -205,6 +223,7 @@ func TestNoBundle(t *testing.T) {
 	f.Bundle = nil
 	rs := Run(f)
 	requireOne(t, rs, WARN, CodeNoBundle)
+	requireNone(t, rs, "trust")
 	if ExitCode(rs) != 0 {
 		t.Fatal("no_bundle must not fail doctor")
 	}

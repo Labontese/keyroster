@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -75,9 +76,16 @@ func TestStoredBundleMustMatchLog(t *testing.T) {
 			if _, err := New(cfg); err != nil {
 				t.Fatalf("control before tampering: %v", err)
 			}
+			if err := CheckTrust(ctx, e.db); err != nil {
+				t.Fatalf("CheckTrust before tampering: %v", err)
+			}
 			tamper(t, e)
 			if _, err := New(cfg); !errors.Is(err, errLogMismatch) {
 				t.Fatalf("New with a trust_bundle row the log does not record = %v, want errLogMismatch", err)
+			}
+			// doctor runs the same check (A-WR-01 via C-WR-02).
+			if err := CheckTrust(ctx, e.db); !errors.Is(err, errLogMismatch) {
+				t.Fatalf("CheckTrust with a trust_bundle row the log does not record = %v, want errLogMismatch", err)
 			}
 			pol := policyV2(t, e.fx)
 			next := successor(t, e.genesis(t), pol)
@@ -101,5 +109,59 @@ func TestStoredBundleMustMatchLog(t *testing.T) {
 		if !errors.Is(err, errLogMismatch) {
 			t.Fatalf("genesis install over a logged bundle = %v, want errLogMismatch", err)
 		}
+		if err := CheckTrust(ctx, e.db); !errors.Is(err, errLogMismatch) {
+			t.Fatalf("CheckTrust with the logged bundle's row deleted = %v, want errLogMismatch", err)
+		}
 	})
+}
+
+// TestCheckTrustLogKeySwapped (C-WR-02): someone who can write signer.db
+// replaces the recorded log key with their own and re-signs the latest
+// checkpoint with it. The log then checks out against the recorded key
+// (what doctor's log check used alone), but the installed bundle names
+// another log key, so CheckTrust, as serve, refuses it.
+func TestCheckTrustLogKeySwapped(t *testing.T) {
+	ctx := context.Background()
+	e := newInstallEnv(t, NewFixture(t, 1, 1))
+	e.installGenesis(t)
+	if err := CheckTrust(ctx, e.db); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	_, attacker := NewEd25519Key(t)
+	hashes, err := e.db.LeafHashes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := tlog.FromHashes(hashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := tree.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := tlog.Origin(attacker.PublicKey())
+	ns, err := tlog.NewNoteSigner(origin, attacker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := tlog.SignCheckpoint(tlog.Checkpoint{Origin: origin, Size: tree.Size(), Root: root}, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.WithTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE ca_keys SET pubkey = ? WHERE role = 'log'`, attacker.PublicKey().Marshal()); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`UPDATE checkpoint SET note = ? WHERE size = ?`, signed, tree.Size())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckLog(ctx, e.db, attacker.PublicKey()); err != nil {
+		t.Fatalf("CheckLog against the swapped key = %v; the tampering must pass the log check alone for this test to mean anything", err)
+	}
+	if err := CheckTrust(ctx, e.db); !errors.Is(err, ErrBundleKeys) {
+		t.Fatalf("CheckTrust with the recorded log key swapped = %v, want ErrBundleKeys", err)
+	}
 }
