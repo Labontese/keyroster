@@ -617,7 +617,7 @@ func TestSoftwareRoot(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := appendFile(filepath.Join(dir, doc.file+".sigs"), sig); err != nil {
+				if err := appendSignature(filepath.Join(dir, doc.file+".sigs"), sig); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -682,5 +682,65 @@ func TestRootSignRefusesRootAsAdmin(t *testing.T) {
 	}
 	if _, err := os.Stat(c.out); !os.IsNotExist(err) {
 		t.Fatalf("--out-dir exists after the refusal (stat error %v)", err)
+	}
+}
+
+// TestRootSignAppendsAfterMissingNewline (B-WR-02): a .sigs file whose last
+// block lacks its newline still takes the next root's signature, and both
+// signatures count.
+func TestRootSignAppendsAfterMissingNewline(t *testing.T) {
+	c := newCeremony(t, 2)
+	useKeyring(t, c.rootKeys...)
+	pins := []string{c.fingerprint(t, 0), c.fingerprint(t, 1)}
+	if code, _, _ := c.sign(t, "2", 0, "--confirm", "00000000"); code != 1 {
+		t.Fatal("expected the wrong confirmation to fail")
+	}
+	bundle, err := os.ReadFile(filepath.Join(c.out, "bundle.json")) //nolint:gosec // G304: test file
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := trust.SHA256Hex(bundle)[:8]
+	if code, _, stderr := c.sign(t, "2", 0, "--confirm", prefix); code != 0 {
+		t.Fatalf("first root sign: exit %d: %s", code, stderr)
+	}
+	for _, f := range []string{"bundle.json.sigs", "policy.json.sigs"} {
+		path := filepath.Join(c.out, f)
+		data, err := os.ReadFile(path) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, path, bytes.TrimRight(data, "\n"))
+	}
+	if code, _, stderr := c.sign(t, "2", 1, "--confirm", prefix); code != 0 {
+		t.Fatalf("second root sign: exit %d: %s", code, stderr)
+	}
+	if code, _, stderr := c.verify(t, "2", pins...); code != 0 {
+		t.Fatalf("verify after appending to files without a final newline: exit %d, stderr %q", code, stderr)
+	}
+}
+
+// TestAppendSignatureRefusesUnparseable (B-WR-02): appending to a file that
+// does not parse as SSHSIG blocks is refused and the file is unchanged.
+func TestAppendSignatureRefusesUnparseable(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, s, trust.NamespaceBundle, []byte("doc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "bundle.json.sigs")
+	garbage := []byte("not a signature\n")
+	writeTestFile(t, path, garbage)
+	if err := appendSignature(path, sig); err == nil || !strings.Contains(err.Error(), "left unchanged") {
+		t.Fatalf("appendSignature to an unparseable file = %v, want a refusal", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || !bytes.Equal(data, garbage) { //nolint:gosec // G304: test file
+		t.Fatalf("file changed after the refusal: %q, %v", data, err)
 	}
 }

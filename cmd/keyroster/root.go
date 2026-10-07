@@ -328,10 +328,10 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	if err := appendFile(bundleSigsPath, bundleSig); err != nil {
+	if err := appendSignature(bundleSigsPath, bundleSig); err != nil {
 		return err
 	}
-	if err := appendFile(policySigsPath, policySig); err != nil {
+	if err := appendSignature(policySigsPath, policySig); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(stdout, "signed %s and %s with %s\n", filepath.Join(*outDir, bundleFile), filepath.Join(*outDir, policyFile), fp)
@@ -552,13 +552,31 @@ func writeExclusive(path string, data []byte, perm os.FileMode) error {
 	return f.Close()
 }
 
-// appendFile appends data to path, creating it if needed.
-func appendFile(path string, data []byte) error {
+// appendSignature appends the SSHSIG block sig to the signature file path,
+// creating it if needed. sshsig.ParseAll accepts a last block without its
+// newline (a hand-assembled file, an editor that strips it), so a missing
+// newline is added first: a block written straight after "-----END SSH
+// SIGNATURE-----" would make the whole file, and every signature already
+// in it, unparseable. The result must still parse, or the file is left
+// unchanged.
+func appendSignature(path string, sig []byte) error {
+	old, err := os.ReadFile(path) //nolint:gosec // G304: inside the operator's out-dir
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	data := bytes.Clone(old)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	data = append(data, sig...)
+	if _, err := sshsig.ParseAll(data); err != nil {
+		return fmt.Errorf("%s would not parse with the new signature appended, so it was left unchanged: %w", path, err)
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644) //nolint:gosec // G302,G304: signatures are public; inside the operator's out-dir
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
+	if _, err := f.Write(data[len(old):]); err != nil {
 		_ = f.Close()
 		return err
 	}
