@@ -11,6 +11,8 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+
+	"github.com/Labontese/keyroster/internal/keystore"
 )
 
 // command is one keyroster-signer subcommand. Commands (serve, version,
@@ -30,6 +32,15 @@ var registry = map[string]command{}
 // status 2 and prints the command list.
 var errUsage = errors.New("usage error")
 
+// exitCredentialRefused is the exit status for an error that wraps
+// keystore.ErrCredentialRefused: the key store refused the PIN or auth
+// value, or refused to try one with too few attempts left. Restarting would
+// spend another of the device's limited attempts, so
+// deploy/systemd/keyroster-signer.service lists it in
+// RestartPreventExitStatus=. 78 is EX_CONFIG from sysexits.h: the operator
+// must fix a secret file before the next start.
+const exitCredentialRefused = 78
+
 // register adds c to the registry. It panics on an empty name, a nil Run or a
 // duplicate name: all three are programming errors caught at start-up.
 func register(c command) {
@@ -47,7 +58,8 @@ func register(c command) {
 
 // dispatch runs the command named by args[0] with the remaining arguments.
 // It returns the process exit status: 0 on success, 2 for a missing or
-// unknown command or a usage error, and 1 for any other error.
+// unknown command or a usage error, exitCredentialRefused when the key
+// store refused a credential, and 1 for any other error.
 func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printUsage(stderr)
@@ -67,6 +79,9 @@ func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			return 2
 		}
 		_, _ = fmt.Fprintf(stderr, "keyroster-signer %s: %v\n", c.Name, err)
+		if errors.Is(err, keystore.ErrCredentialRefused) {
+			return exitCredentialRefused
+		}
 		return 1
 	}
 	return 0

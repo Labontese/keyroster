@@ -196,6 +196,27 @@ func TestPolicyValidation(t *testing.T) {
 			t.Fatalf("err = %v, want ErrAlgorithm", err)
 		}
 	})
+	// A-WR-03: an issue request carries at most MaxAdminQuorum evidence
+	// items, so a larger quorum would make issuance impossible.
+	withAdmins := func(n int, quorum uint32) *Policy {
+		p := goldenPolicy(t)
+		for i := 1; i < n; i++ {
+			p.Admins = append(p.Admins, AdminKey{Name: "admin" + string(rune('a'+i)), Key: keyOf(edKey(t, byte(70+i)))})
+		}
+		p.AdminQuorum = quorum
+		return p
+	}
+	t.Run("quorum_above_max_refused", func(t *testing.T) {
+		_, err := ParsePolicy(mustCanonical(t, withAdmins(MaxAdminQuorum+1, MaxAdminQuorum+1)))
+		if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "most admin signatures") {
+			t.Fatalf("err = %v, want ErrInvalid naming the evidence limit", err)
+		}
+	})
+	t.Run("quorum_at_max_accepted", func(t *testing.T) {
+		if _, err := ParsePolicy(mustCanonical(t, withAdmins(MaxAdminQuorum+1, MaxAdminQuorum))); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("timelock_zero_accepted", func(t *testing.T) {
 		if _, err := ParsePolicy(mustCanonical(t, goldenPolicy(t))); err != nil {
 			t.Fatal(err)

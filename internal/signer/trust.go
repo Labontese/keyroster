@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/keystore"
 	"github.com/Labontese/keyroster/internal/serial"
 	"github.com/Labontese/keyroster/internal/signerdb"
@@ -182,7 +183,9 @@ func newLogWriter(ctx context.Context, db *signerdb.DB, logKey keystore.CAKey, c
 // least threshold distinct roots among the operator's pins, and its root
 // set must be exactly the pinned set (trust.VerifyGenesisBundle). A later
 // bundle is verified against the installed one by the successor rule
-// (trust.VerifySuccessor); pins and threshold must then be empty. In both
+// (trust.VerifySuccessor); pins and threshold must then be empty, and the
+// installed record must be the one the log's last bundle_install entry
+// records (none for a genesis install). In both
 // cases the bundle's CA, ops and log keys, algorithms and custody must
 // equal the keys ca-init chose, none of them may be a root key, and the
 // log origin must be the log key's. The bundle, the policy and their
@@ -203,11 +206,26 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err != nil {
 		return nil, err
 	}
+	logKey, err := openRoleKey(be, caKeys, "log")
+	if err != nil {
+		return nil, err
+	}
+	lw, err := newLogWriter(ctx, db, logKey, clock)
+	if err != nil {
+		return nil, err
+	}
 	var (
 		b *trust.Bundle
 		p *trust.Policy
 	)
 	latest, err := db.LatestBundle(ctx)
+	if err == nil || errors.Is(err, signerdb.ErrNoBundle) {
+		// A successor is verified against the installed record, so that
+		// record must be the one the verified log carries.
+		if cerr := checkBundleLogged(latest, lw.loadedInstall); cerr != nil {
+			return nil, cerr
+		}
+	}
 	switch {
 	case errors.Is(err, signerdb.ErrNoBundle):
 		b, p, err = trust.VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs, pins, threshold)
@@ -221,7 +239,7 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 		if err != nil {
 			return nil, fmt.Errorf("installed bundle: %w", err)
 		}
-		b, p, err = trust.VerifySuccessor(prev, latest.Bundle, bundle, bundleSigs, policy, policySigs)
+		b, p, err = trust.VerifySuccessor(prev, latest.Bundle, latest.Policy, bundle, bundleSigs, policy, policySigs)
 		if err == nil && b.Version <= latest.Version {
 			err = fmt.Errorf("%w: version %d is not above the installed version %d", ErrBundleInstall, b.Version, latest.Version)
 		}
@@ -232,11 +250,7 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err := checkBundleKeys(b, caKeys); err != nil {
 		return nil, err
 	}
-	if err := checkPolicyAdmins(p, caKeys); err != nil {
-		return nil, err
-	}
-	logKey, err := openRoleKey(be, caKeys, "log")
-	if err != nil {
+	if err := checkPolicyAdmins(b, p, caKeys); err != nil {
 		return nil, err
 	}
 	if b.Log.Origin != tlog.Origin(logKey.PublicKey()) {
@@ -245,10 +259,6 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	enc, err := (&tlog.BundleInstallBody{
 		BundleVersion: b.Version, Bundle: bundle, BundleSigs: bundleSigs, Policy: policy, PolicySigs: policySigs,
 	}).Encode()
-	if err != nil {
-		return nil, err
-	}
-	lw, err := newLogWriter(ctx, db, logKey, clock)
 	if err != nil {
 		return nil, err
 	}
@@ -321,8 +331,14 @@ func checkBundleKeys(b *trust.Bundle, caKeys []signerdb.CAKey) error {
 
 // checkPolicyAdmins refuses a policy that names one of the signer's own
 // online keys (a CA, ops or log key) as an admin: the keys that sign
-// certificates must never also authorize them (D-13).
-func checkPolicyAdmins(p *trust.Policy, caKeys []signerdb.CAKey) error {
+// certificates must never also authorize them (D-13). Nor may an admin be
+// one of the bundle's roots (KEY-07, trust.CheckAdminsNotRoots); the
+// trust.Verify* functions check that on install already, and this repeats
+// it for a stored record loaded at start.
+func checkPolicyAdmins(b *trust.Bundle, p *trust.Policy, caKeys []signerdb.CAKey) error {
+	if err := trust.CheckAdminsNotRoots(p, b.Root.Keys); err != nil {
+		return err
+	}
 	for _, a := range p.Admins {
 		pub, err := trust.ParseKey(a.Key)
 		if err != nil {
@@ -382,6 +398,7 @@ func keyFingerprint(caKeys []signerdb.CAKey, role string) string {
 
 // trustState is what the signer takes from the installed bundle.
 type trustState struct {
+	stored   *signerdb.StoredBundle
 	bundle   *trust.Bundle
 	policy   *trust.Policy
 	ca       map[wire.CARole]keystore.CAKey
@@ -389,11 +406,11 @@ type trustState struct {
 	logKey   keystore.CAKey
 }
 
-// loadTrust reads the ca-init keys and the latest installed bundle and
-// opens every bundle key in the backend. It refuses when ca-init or
-// install-bundle has not run, when the stored bundle no longer matches the
-// stored keys or its policy, and when any bundle key (CA, ops or log) is
-// missing from the backend (KEY-01).
+// loadTrust reads the ca-init keys and the latest installed bundle,
+// checks them (checkStoredTrust) and opens every bundle key in the
+// backend. It refuses when ca-init or install-bundle has not run, when the
+// stored bundle no longer matches the stored keys or its policy, and when
+// any bundle key (CA, ops or log) is missing from the backend (KEY-01).
 func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trustState, error) {
 	caKeys, err := db.CAKeys(ctx)
 	if errors.Is(err, signerdb.ErrNotInitialised) {
@@ -409,6 +426,35 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	if err != nil {
 		return nil, err
 	}
+	ts, err := checkStoredTrust(caKeys, stored)
+	if err != nil {
+		return nil, err
+	}
+	keys := map[string]keystore.CAKey{}
+	for _, k := range caKeys {
+		key, err := openRoleKey(be, caKeys, k.Role)
+		if err != nil {
+			return nil, err
+		}
+		keys[k.Role] = key
+	}
+	for role, kr := range caRoles {
+		ts.ca[role] = keys[string(kr)]
+	}
+	ts.logKey = keys["log"]
+	if ts.bundle.Log.Origin != tlog.Origin(ts.logKey.PublicKey()) {
+		return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, ts.bundle.Log.Origin)
+	}
+	return ts, nil
+}
+
+// checkStoredTrust is the part of loadTrust that needs no backend, shared
+// with CheckTrust (doctor): the stored bundle record must be consistent
+// (version, policy hash), list exactly the ca-init keys (checkBundleKeys),
+// name none of them nor a root as a policy admin (checkPolicyAdmins),
+// carry a profile for every CA role, and name the recorded log key's
+// origin. It returns the trust state without keys.
+func checkStoredTrust(caKeys []signerdb.CAKey, stored *signerdb.StoredBundle) (*trustState, error) {
 	b, err := trust.ParseBundle(stored.Bundle)
 	if err != nil {
 		return nil, fmt.Errorf("signer: installed bundle: %w", err)
@@ -423,29 +469,28 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	if err := checkBundleKeys(b, caKeys); err != nil {
 		return nil, err
 	}
-	if err := checkPolicyAdmins(p, caKeys); err != nil {
+	if err := checkPolicyAdmins(b, p, caKeys); err != nil {
 		return nil, err
 	}
-	ts := &trustState{bundle: b, policy: p, ca: map[wire.CARole]keystore.CAKey{}, profiles: map[wire.CARole]cert.Profile{}}
-	keys := map[string]keystore.CAKey{}
-	for _, k := range caKeys {
-		key, err := openRoleKey(be, caKeys, k.Role)
-		if err != nil {
-			return nil, err
-		}
-		keys[k.Role] = key
-	}
+	ts := &trustState{stored: stored, bundle: b, policy: p, ca: map[wire.CARole]keystore.CAKey{}, profiles: map[wire.CARole]cert.Profile{}}
 	for role, kr := range caRoles {
-		ts.ca[role] = keys[string(kr)]
-		prof, err := profileFor(string(kr), p)
+		prof, err := certprofile.ForRole(string(kr), p)
 		if err != nil {
 			return nil, err
 		}
 		ts.profiles[role] = prof
 	}
-	ts.logKey = keys["log"]
-	if b.Log.Origin != tlog.Origin(ts.logKey.PublicKey()) {
-		return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, b.Log.Origin)
+	for _, k := range caKeys {
+		if k.Role != "log" {
+			continue
+		}
+		pub, err := ssh.ParsePublicKey(k.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("%w: stored log key: %w", ErrBundleKeys, err)
+		}
+		if b.Log.Origin != tlog.Origin(pub) {
+			return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, b.Log.Origin)
+		}
 	}
 	return ts, nil
 }

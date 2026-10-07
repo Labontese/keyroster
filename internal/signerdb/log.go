@@ -114,6 +114,87 @@ func (d *DB) ReadLog(ctx context.Context, fn func(idx uint64, leaf []byte) error
 	return note, size, nil
 }
 
+// LogSnapshot is what ReadLogWithHashes read besides the leaves, from the
+// same snapshot: the latest checkpoint and the trust tables that commit in
+// the same transactions as the log.
+type LogSnapshot struct {
+	// Checkpoint is the latest signed checkpoint and Size the log size it
+	// names; Checkpoint is nil when the log has none.
+	Checkpoint []byte
+	Size       uint64
+	// CAKeys are the ca-init keys, nil before ca-init; Bundle is the
+	// latest installed trust bundle, nil when none is installed.
+	CAKeys []CAKey
+	Bundle *StoredBundle
+	// LastSerial is the serial high-water mark and Issuances the number
+	// of issuance rows; both commit with every issue leaf.
+	LastSerial uint64
+	Issuances  uint64
+}
+
+// ReadLogWithHashes reads the whole log from one consistent snapshot, in
+// one read transaction: it calls fn for every leaf with its stored hash, in
+// index order, and then returns the latest checkpoint (fn has then seen
+// every leaf) together with the ca-init keys, the latest trust bundle, the
+// serial high-water mark and the number of issuance rows.
+// Appends committed meanwhile are not seen, so the leaves, hashes,
+// checkpoint and trust tables always belong together.
+func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, hash []byte) error) (*LogSnapshot, error) {
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("signerdb: begin read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, `SELECT idx, leaf, leaf_hash FROM log_leaf ORDER BY idx`)
+	if err != nil {
+		return nil, fmt.Errorf("signerdb: read log leaves: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var want int64
+	for rows.Next() {
+		var (
+			idx        int64
+			leaf, hash []byte
+		)
+		if err := rows.Scan(&idx, &leaf, &hash); err != nil {
+			return nil, fmt.Errorf("signerdb: read log leaves: %w", err)
+		}
+		if idx != want {
+			return nil, fmt.Errorf("signerdb: log leaf %d missing", want)
+		}
+		want++
+		if err := fn(uint64(idx), leaf, hash); err != nil { //nolint:gosec // G115: idx == want-1 >= 0
+			return nil, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("signerdb: read log leaves: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("signerdb: read log leaves: %w", err)
+	}
+	snap := &LogSnapshot{}
+	snap.Checkpoint, snap.Size, err = latestCheckpoint(ctx, tx)
+	if err != nil && !errors.Is(err, ErrNoCheckpoint) {
+		return nil, err
+	}
+	if snap.CAKeys, err = caKeys(ctx, tx); err != nil && !errors.Is(err, ErrNotInitialised) {
+		return nil, err
+	}
+	if snap.Bundle, err = latestBundle(ctx, tx); err != nil && !errors.Is(err, ErrNoBundle) {
+		return nil, err
+	}
+	if snap.LastSerial, err = lastSerial(ctx, tx); err != nil {
+		return nil, err
+	}
+	var n int64
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM issuance`).Scan(&n); err != nil {
+		return nil, fmt.Errorf("signerdb: count issuance rows: %w", err)
+	}
+	snap.Issuances = uint64(n) //nolint:gosec // G115: count(*) >= 0
+	return snap, nil
+}
+
 type queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row

@@ -83,15 +83,26 @@ func runTrustVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		return err
 	}
 	_, _ = io.WriteString(stdout, rootceremony.Summary(b, p))
+	// Each document met the threshold on its own, and the roots behind the
+	// two counts may differ: report who signed what, not one merged count.
+	both := 0
 	for _, fp := range bundleSigners {
 		if slices.Contains(policySigners, fp) {
+			both++
 			_, _ = fmt.Fprintf(stdout, "signed by root %s\n", fp)
+		} else {
+			_, _ = fmt.Fprintf(stdout, "root %s signed the bundle only\n", fp)
+		}
+	}
+	for _, fp := range policySigners {
+		if !slices.Contains(bundleSigners, fp) {
+			_, _ = fmt.Fprintf(stdout, "root %s signed the policy only\n", fp)
 		}
 	}
 	reportUnpinned(stdout, bundleSigs, pinned, "bundle")
 	reportUnpinned(stdout, policySigs, pinned, "policy")
-	k := min(len(bundleSigners), len(policySigners))
-	_, _ = fmt.Fprintf(stdout, "OK: signed by %d of %d pinned roots (threshold %d)\n", k, len(pinned), *threshold)
+	_, _ = fmt.Fprintf(stdout, "OK: %d of %d pinned roots signed both documents (bundle %d, policy %d, threshold %d)\n",
+		both, len(pinned), len(bundleSigners), len(policySigners), *threshold)
 	return nil
 }
 

@@ -1,0 +1,34 @@
+name: PR title
+
+# The squash commit on main takes the PR title as its subject, so the title
+# must follow Conventional Commits (see CONTRIBUTING.md). This job lives in
+# its own workflow because it must also run on `edited`: without it, a title
+# changed after the check passed would merge unchecked (E-WR-01). The other
+# CI jobs do not need to run when only the title or body changes.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+# Least privilege: nothing by default, read-only contents per job.
+permissions: {}
+
+# The check name "pr-title" is a required status check in the main-integrity
+# ruleset. Renaming the job blocks every merge until the ruleset is updated
+# (see CONTRIBUTING.md).
+jobs:
+  pr-title:
+    name: pr-title
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The title reaches the script only through the environment, never
+      # through an expression inside run:.
+      - name: Check Conventional Commits PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: bash scripts/check-pr-title.sh

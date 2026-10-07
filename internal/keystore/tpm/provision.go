@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	keyfile "github.com/foxboron/go-tpm-keyfiles"
 	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/keystore"
@@ -23,16 +25,20 @@ const authSize = 32
 
 // Provision creates one ECDSA P-256 key per role inside the TPM (D-09),
 // each under the owner hierarchy's storage root key with its own random
-// 32-byte auth value, and writes {role}.tpmkey (TSS2 PEM) and {role}.auth,
-// mode 0600, into the 0700 directory {state-dir}/tpm. It refuses, and
-// writes nothing, when any key or auth file of the requested roles already
-// exists. The custody of the new keys is the backend's (from the TPM
-// manufacturer, see CustodyForManufacturer).
+// 32-byte auth value and with noDA set (keyTemplate), and writes {role}.tpmkey (TSS2 PEM) and {role}.auth,
+// mode 0600, into the 0700 directory {state-dir}/tpm, then fsyncs that
+// directory (and the state directory when it created the key directory).
+// It refuses, and writes nothing, when any key or auth file of the
+// requested roles already exists. The custody of the new keys is the
+// backend's (from the TPM manufacturer, see deriveCustody).
 func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.PublicKey, error) {
 	if len(roles) == 0 {
 		return nil, errors.New("keystore tpm: no roles to provision")
 	}
-	if err := os.Mkdir(b.dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+	createdDir := true
+	if err := os.Mkdir(b.dir, 0o700); errors.Is(err, fs.ErrExist) {
+		createdDir = false
+	} else if err != nil {
 		return nil, fmt.Errorf("keystore tpm: %w", err)
 	}
 	if err := checkPrivateDir(b.dir); err != nil {
@@ -69,8 +75,7 @@ func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.Public
 			return nil, err
 		}
 		tpmMu.Lock()
-		k, err := keyfile.NewLoadableKey(b.tpm, tpm2.TPMAlgECC, 256, nil,
-			keyfile.WithUserAuth(c.auth), keyfile.WithDescription("keyroster "+string(role)+" key"))
+		k, err := createKey(b.tpm, c.auth, "keyroster "+string(role)+" key")
 		tpmMu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("keystore tpm: create the %s key: %w", role, err)
@@ -99,6 +104,11 @@ func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.Public
 
 	// The keys exist only as TPM-wrapped blobs so far: write all files, or none.
 	var written []string
+	removeWritten := func() {
+		for _, p := range written {
+			_ = os.Remove(p)
+		}
+	}
 	for _, role := range roles {
 		c := todo[role]
 		for _, f := range []struct {
@@ -106,15 +116,98 @@ func (b *backend) Provision(roles []keystore.Role) (map[keystore.Role]ssh.Public
 			data []byte
 		}{{c.keyPath, c.pem}, {c.authPath, c.auth}} {
 			if err := writeNew(f.path, f.data); err != nil {
-				for _, p := range written {
-					_ = os.Remove(p)
-				}
+				removeWritten()
 				return nil, err
 			}
 			written = append(written, f.path)
 		}
 	}
+	// The files are the only way to use these keys, and the caller (ca-init)
+	// commits their fingerprints next: make the new directory entries
+	// durable first. A new entry survives a crash only once its directory is
+	// synced; when this run created the key directory, its own entry in the
+	// state directory needs the same.
+	dirs := []string{b.dir}
+	if createdDir {
+		dirs = append(dirs, filepath.Dir(b.dir))
+	}
+	for _, d := range dirs {
+		if err := syncDir(d); err != nil {
+			removeWritten()
+			return nil, fmt.Errorf("keystore tpm: sync %s: %w", d, err)
+		}
+	}
 	return pubs, nil
+}
+
+// syncDir fsyncs a directory. Tests replace it to see which directories
+// Provision syncs and to inject a failure.
+var syncDir = func(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // G304: the signer's own state and key directories
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// keyTemplate is go-tpm-keyfiles' ECC P-256 key template (createECCKey)
+// with noDA added: the TPM does not count a failed authorisation of these
+// keys against its dictionary-attack counter. Their auth value is 32
+// random bytes, so dictionary-attack protection adds nothing, while a
+// corrupt auth file would otherwise push the whole TPM into lockout and
+// break other users of it (for example TPM+PIN disk unlocking). fixedTPM,
+// fixedParent and sensitiveDataOrigin are what Key requires
+// (checkGeneratedInTPM).
+func keyTemplate() tpm2.TPM2BPublic {
+	return tpm2.New2B(tpm2.TPMTPublic{
+		Type:    tpm2.TPMAlgECC,
+		NameAlg: tpm2.TPMAlgSHA256,
+		ObjectAttributes: tpm2.TPMAObject{
+			FixedTPM:            true,
+			FixedParent:         true,
+			SensitiveDataOrigin: true,
+			UserWithAuth:        true,
+			NoDA:                true,
+			SignEncrypt:         true,
+			Decrypt:             true,
+		},
+		Parameters: tpm2.NewTPMUPublicParms(
+			tpm2.TPMAlgECC,
+			&tpm2.TPMSECCParms{
+				CurveID: tpm2.TPMECCNistP256,
+				Scheme:  tpm2.TPMTECCScheme{Scheme: tpm2.TPMAlgNull},
+			},
+		),
+	})
+}
+
+// createKey creates a keyTemplate key with auth value auth under the owner
+// hierarchy's storage root key, the way keyfile.NewLoadableKey does (same
+// parent, same salted session), and returns it as a loadable TSS2 key. The
+// caller holds tpmMu.
+func createKey(t transport.TPMCloser, auth []byte, desc string) (*keyfile.TPMKey, error) {
+	sess := keyfile.NewTPMSession(t)
+	parent, err := keyfile.GetParentHandle(sess, tpm2.TPMRHOwner, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer sess.FlushHandle()
+	rsp, err := tpm2.Create{
+		ParentHandle: *parent,
+		InPublic:     keyTemplate(),
+		InSensitive: tpm2.TPM2BSensitiveCreate{
+			Sensitive: &tpm2.TPMSSensitiveCreate{UserAuth: tpm2.TPM2BAuth{Buffer: auth}},
+		},
+	}.Execute(t, sess.GetHMAC())
+	if err != nil {
+		return nil, err
+	}
+	return keyfile.NewTPMKey(keyfile.OIDLoadableKey, rsp.OutPublic, rsp.OutPrivate,
+		keyfile.WithUserAuth(auth), keyfile.WithDescription(desc)), nil
 }
 
 // writeNew creates path with mode 0600, failing if it exists, and syncs it.

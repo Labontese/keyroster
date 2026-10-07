@@ -9,4 +9,8 @@
 #
 # Set KEYROSTER_BOT_GH_CONFIG to use a config directory other than
 # $HOME/.config/gh-keyroster-bot.
+#
+# scripts/merge-gate.sh does not call this file: it switches to the PR
+# branch, where this file is the PR's unreviewed copy, so it carries the same
+# command as its own bot_gh function. Keep the unset list of both in sync.
 exec env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="${KEYROSTER_BOT_GH_CONFIG:-$HOME/.config/gh-keyroster-bot}" gh "$@"

@@ -17,8 +17,10 @@ commit message, and it must follow [Conventional Commits](https://www.convention
 Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
 `build`, `ci`, `chore`, `revert`. The scope uses lower-case letters, digits
 and `. _ / -`; the description is 1-100 characters. The `pr-title` check runs
-`scripts/check-pr-title.sh` on every PR. Edit the title and the check runs
-again.
+`scripts/check-pr-title.sh` on every PR. Its workflow also triggers on
+`edited`, so editing the title runs the check again, and a title broken
+after the check passed fails it again. UNVERIFIED: the re-run on a title
+edit has not yet been observed on a PR.
 
 ## Signed commits
 
@@ -66,20 +68,20 @@ name (with its matrix value) in one of the workflows under
 |---|---|---|
 | `build-test` | `ci.yml` | `go mod verify`, static build, cross-compile for windows/darwin/freebsd, `go vet`, `gofmt`, tests with the race detector |
 | `lint` | `ci.yml` | golangci-lint v2.14.0 with `.golangci.yml` |
-| `govulncheck` | `ci.yml` | reachable-vulnerability scan with the pinned govulncheck in `tools/go.mod` |
+| `govulncheck` | `ci.yml` | reachable-vulnerability scan of the default build with the pinned govulncheck in `tools/go.mod` (the `-tags piv` build is scanned in `build-piv`) |
 | `dependency-firewall` | `ci.yml` | `scripts/dep-firewall.sh`: no banned package in keyroster-signer's dependency graph, with and without `-tags piv` |
 | `capslock` | `ci.yml` | `scripts/capslock-check.sh`: no new (package, capability) pair for keyroster-signer compared with `test/capslock/keyroster-signer.json` |
 | `fuzz` | `ci.yml` | `scripts/fuzz.sh`: every native fuzz target for 30 s; fails when any target fails or when zero targets ran |
-| `pr-title` | `ci.yml` | Conventional Commits check of the PR title (runs on pull requests only) |
+| `pr-title` | `pr-title.yml` | Conventional Commits check of the PR title (runs on pull requests only, also when the title is edited) |
 | `e2e (9.5p1)` | `e2e.yml` | the `test/e2e` suite against a non-root sshd built from portable OpenSSH 9.5p1 (`scripts/build-openssh.sh`: SHA-256-pinned, GPG-verified) |
 | `e2e (10.5p1)` | `e2e.yml` | the same suite against portable OpenSSH 10.5p1 |
 | `e2e-pkcs11 (distro-p256)` | `e2e-pkcs11.yml` | the PKCS#11 path with P-256 keys in SoftHSM2, reached through Ubuntu's own ssh-agent |
 | `e2e-pkcs11 (10.5p1-ed25519)` | `e2e-pkcs11.yml` | the PKCS#11 path with Ed25519 keys in SoftHSM2, reached through the OpenSSH 10.5p1 ssh-agent |
 | `e2e-tpm` | `e2e-tpm.yml` | `ca-init --backend tpm` and the TPM keystore tests against swtpm |
-| `build-piv` | `piv.yml` | vet, lint, tests and build of the `-tags piv` YubiKey backend, and proof that default builds link neither piv-go nor cgo |
+| `build-piv` | `piv.yml` | govulncheck, vet, lint, tests and build of the `-tags piv` YubiKey backend, and proof that default builds link neither piv-go nor cgo; also runs nightly |
 | `systemd-sandbox` | `systemd.yml` | keyroster-signer under its real systemd units: bootstrap, issuance, `lo`-only network namespace, `systemd-analyze security` gate |
 | `pinned-actions` | `workflow-lint.yml` | `scripts/check-pinned-actions.sh`: every action is pinned to a commit SHA |
-| `Analyze (go)` | `codeql.yml` | CodeQL analysis of the Go code |
+| `Analyze (go)` | `codeql.yml` | CodeQL analysis of the Go code, built both static and with `-tags piv` (UNVERIFIED: that the extractor picks up the piv files from the second build has not been checked in a CI run) |
 | `Analyze (actions)` | `codeql.yml` | CodeQL analysis of the workflows |
 
 **OpenSSH 9.5p2 is not covered by CI.** Windows ships Microsoft's own
@@ -122,7 +124,13 @@ commits with its own SSH key.
   driven by `scripts/merge-gate.sh BRANCH`. The script reports whether the
   owner's approval is pending, waits for auto-merge after approval and then
   fast-forwards local `main`. It talks to GitHub only as the bot, never
-  submits a review and never merges as administrator.
+  submits a review and never merges as administrator. It carries its own
+  copy of the `gh-as-bot.sh` command, because after switching to the PR
+  branch the file on disk is the PR's unreviewed copy, and it stops unless
+  `gh api user` answers `keyroster-bot`. Its `git fetch` and `git push` set
+  their own credential helper (the bot's gh login, `GH_TOKEN` and
+  `GITHUB_TOKEN` unset), so the clone's or the user's git credential
+  configuration cannot make the force-push go out as the owner.
 - When `main` moved after the PR was opened, the bot rebases the feature
   branch onto `origin/main`, re-signs the commits, force-pushes with lease and
   waits for green checks; the owner then approves the new head.

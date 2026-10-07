@@ -81,6 +81,14 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 		return err
 	}
 
+	// Hold the state directory's lock for the whole run, from before the
+	// trust bundle is loaded, so install-bundle and ca-init refuse while
+	// this signer serves.
+	unlock, err := lockStateDir(*stateDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	db, err := signerdb.Open(filepath.Join(*stateDir, "signer.db"))
 	if err != nil {
@@ -207,12 +215,22 @@ func openStoredBackend(ctx context.Context, db *signerdb.DB, overrides map[strin
 	return name, be, nil
 }
 
-// openState checks the state directory and opens its database.
-func openState(stateDir string) (*signerdb.DB, error) {
+// openState checks the state directory, takes its lock (lockStateDir) and
+// opens its database. Close the database before calling unlock.
+func openState(stateDir string) (db *signerdb.DB, unlock func(), err error) {
 	if err := checkStateDir(stateDir); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return signerdb.Open(filepath.Join(stateDir, "signer.db"))
+	unlock, err = lockStateDir(stateDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err = signerdb.Open(filepath.Join(stateDir, "signer.db"))
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	return db, unlock, nil
 }
 
 func parseBackendOpts(vals []string) (map[string]string, error) {

@@ -428,6 +428,13 @@ func runPKCS11FullFlow(t *testing.T, agentBin, keytype string) {
 	verifyOut := pkcs11AuditVerify(t, env, 3, 1)
 	t.Logf("keyroster audit verify:\n%s", verifyOut)
 	s.assertNoPINLeak(t, issueOut, verifyOut)
+
+	// D-WR-03: custody pkcs11-agent is declared, not verified; doctor says
+	// so and never reports it as hardware custody.
+	code, out := env.signerCmd(t, "doctor", "--state-dir", env.StateDir)
+	if code != 0 || !strings.Contains(out, "\nINFO pkcs11_custody_declared: keys user, host, machine, ops, log are declared custody pkcs11-agent") || strings.Contains(out, "OK custody:") {
+		t.Fatalf("doctor exited %d; want 0, the pkcs11_custody_declared line and no OK custody line:\n%s", code, out)
+	}
 }
 
 // TestPKCS11FullFlow runs the KEY-03 flow with KEYROSTER_PKCS11_KEYTYPE
@@ -522,7 +529,10 @@ func TestPKCS11RootSignsBundle(t *testing.T) {
 // idempotency): the same ca_keys rows, ca-pubkeys.json and audit log.
 func TestPKCS11CAInitTwiceRefused(t *testing.T) {
 	s := newPKCS11Setup(t, pkcs11Agent(t), pkcs11KeyType(t))
-	env := bootstrapSigner(t, s.opts())
+	// Without serve: a running serve holds the state directory lock, and
+	// ca-init would then be refused by the lock before it reaches the
+	// initialised-state check this test is about.
+	env := prepareSigner(t, s.opts())
 
 	caKeys := func() []signerdb.CAKey {
 		t.Helper()

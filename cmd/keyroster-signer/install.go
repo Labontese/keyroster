@@ -56,10 +56,11 @@ func runInstallBundle(ctx context.Context, args []string, stdout, stderr io.Writ
 	if err != nil {
 		return err
 	}
-	db, err := openState(*stateDir)
+	db, unlock, err := openState(*stateDir)
 	if err != nil {
 		return err
 	}
+	defer unlock()
 	defer func() { _ = db.Close() }()
 	_, be, err := openStoredBackend(ctx, db, overrides, *stateDir)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -62,6 +63,7 @@ type anchor struct {
 	bundle    *trust.Bundle
 	canonical []byte
 	policy    *trust.Policy
+	policyDoc []byte // the policy's bytes, which a successor's policy chains to
 	logKey    ssh.PublicKey
 	activeCA  map[string]ssh.PublicKey // role -> active CA key
 }
@@ -69,7 +71,8 @@ type anchor struct {
 // install verifies one bundle_install entry and makes its bundle the one in
 // force. The first is a genesis bundle checked against opts' pins and
 // threshold; every later one must be a valid successor of the bundle in
-// force (TUF rule). In Phase 1 every bundle must name the same log key.
+// force (TUF rule), with its policy chained to the policy in force. In
+// Phase 1 every bundle must name the same log key.
 func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 	var (
 		b   *trust.Bundle
@@ -82,7 +85,7 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 			return fmt.Errorf("bundle_install is not anchored in the pinned roots: %w", err)
 		}
 	} else {
-		b, p, err = trust.VerifySuccessor(a.bundle, a.canonical, body.Bundle, body.BundleSigs, body.Policy, body.PolicySigs)
+		b, p, err = trust.VerifySuccessor(a.bundle, a.canonical, a.policyDoc, body.Bundle, body.BundleSigs, body.Policy, body.PolicySigs)
 		if err != nil {
 			return fmt.Errorf("bundle_install is not a valid successor of trust bundle v%d: %w", a.bundle.Version, err)
 		}
@@ -109,14 +112,16 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 		}
 		active[ca.Role] = pub
 	}
-	a.bundle, a.canonical, a.policy, a.logKey, a.activeCA = b, body.Bundle, p, logKey, active
+	a.bundle, a.canonical, a.policy, a.policyDoc, a.logKey, a.activeCA = b, body.Bundle, p, body.Policy, logKey, active
 	return nil
 }
 
 // checkIssue checks an issue leaf's certificate against the bundle and
 // policy in force: it must be signed by the active CA of the leaf's role,
-// be a host certificate exactly for the host role, and carry the policy
-// version in force in its key ID and in the leaf.
+// be a host certificate exactly for the host role, carry the policy
+// version in force in its key ID and in the leaf, and stay within the
+// role's certificate profile of that policy (cert.CheckIssued: validity
+// cap, extensions, critical options, principals, subject key).
 func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyID) error {
 	role := kid.CA
 	if a.bundle == nil {
@@ -143,6 +148,13 @@ func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyI
 	if b.PolicyVersion != a.policy.Version {
 		return fmt.Errorf("leaf records policy version %d, but the policy in force is version %d", b.PolicyVersion, a.policy.Version)
 	}
+	profile, err := certprofile.ForRole(role, a.policy)
+	if err != nil {
+		return fmt.Errorf("policy v%d: %w", a.policy.Version, err)
+	}
+	if err := cert.CheckIssued(c, profile); err != nil {
+		return fmt.Errorf("certificate outside the %s profile of policy v%d: %w", role, a.policy.Version, err)
+	}
 	return nil
 }
 
@@ -168,20 +180,33 @@ func certTypeName(t uint32) string {
 //   - the first bundle_install entry holds a genesis bundle and policy
 //     signed by opts.Threshold of the pinned roots, whose root set is
 //     exactly the pinned set; every later one is a root-signed successor of
-//     the bundle in force; each records its bundle's version, and all of
-//     them name the same log key (Phase 1)
+//     the bundle in force whose policy is either unchanged or the next
+//     policy version chained to the one in force (trust.VerifySuccessor);
+//     each records its bundle's version, and all of them name the same log
+//     key (Phase 1)
 //   - every issue leaf comes after the first bundle_install and holds a
 //     certificate whose CA signature verifies over its signed bytes
 //     (expired certificates included), signed by the active CA of the
 //     leaf's role in the bundle in force, of the role's type (host
 //     certificates for the host CA only), whose key ID and leaf carry the
 //     policy version in force, whose serial equals the leaf's and the key
-//     ID's, and serials strictly increase across the log
+//     ID's, which stays within the role's profile of the policy in force
+//     (validity cap, extensions, critical options, principals, subject
+//     key; cert.CheckIssued), and serials strictly increase across the log
 //   - the RFC 6962 root recomputed from the leaf bytes alone equals the
 //     root of the checkpoint, the checkpoint covers exactly n entries, and
 //     it is signed by the log key of the root-signed bundle
 //   - with opts.Previous, the log neither shrank nor rewrote the entries
 //     that checkpoint covered
+//
+// It does not check that an issuance was authorized. An issue leaf records
+// the admin evidence (SSHSIG signatures over the request's signing bytes)
+// but only a SHA-256 digest of the request, so neither the signatures nor
+// the admin quorum of the policy in force, nor that the certificate is the
+// one the admins approved, can be verified from the log: a signer holding
+// the CA key can log an unauthorized issuance with any evidence and the
+// log still verifies. Without opts.Previous it cannot detect a log
+// rolled back to an earlier prefix either.
 func Verify(r io.Reader, opts Options) (*Report, error) {
 	if len(opts.Pins) == 0 {
 		return nil, errors.New("audit: no pinned root fingerprints")

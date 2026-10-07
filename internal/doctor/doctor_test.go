@@ -112,6 +112,20 @@ func TestHealthyHasNoWarnings(t *testing.T) {
 		t.Fatalf("ExitCode = %d, want 0", ExitCode(rs))
 	}
 	requireOne(t, rs, OK, "custody")
+	requireOne(t, rs, OK, "trust")
+}
+
+// TestTrustMismatchIsNotOK (C-WR-02): a trust check failure replaces the
+// trust OK line, and its message names the reason and that serve refuses.
+func TestTrustMismatchIsNotOK(t *testing.T) {
+	f := healthy(t)
+	f.TrustError = "policy admin alice uses the log key"
+	rs := Run(f)
+	r := requireOne(t, rs, FAIL, CodeTrustMismatch)
+	if !strings.Contains(r.Message, f.TrustError) || !strings.Contains(r.Message, "serve refuses to start") {
+		t.Fatalf("trust_mismatch message = %q", r.Message)
+	}
+	requireNone(t, rs, "trust")
 }
 
 func TestFailures(t *testing.T) {
@@ -130,6 +144,10 @@ func TestFailures(t *testing.T) {
 		{"integrity", func(f *Facts) { f.IntegrityOK, f.IntegrityDetail = false, "row 3 missing from index" }, CodeDBIntegrity},
 		{"db unreadable", func(f *Facts) { f.DBError = "open signer.db: permission denied" }, CodeDBIntegrity},
 		{"log mismatch", func(f *Facts) { f.LogMatches, f.LogDetail = false, "leaf 2 does not match its stored hash" }, CodeLogMismatch},
+		{"trust mismatch", func(f *Facts) { f.TrustError = "the log key is SHA256:x, ca-init chose SHA256:y" }, CodeTrustMismatch},
+		{"logged bundle missing", func(f *Facts) {
+			f.Bundle, f.TrustError = nil, "the log records an installed trust bundle, but the state database holds none"
+		}, CodeTrustMismatch},
 		{"clock regression", func(f *Facts) { f.NowMicros = f.HighWaterMicros - 1 }, CodeClockRegression},
 		{"clock an hour behind", func(f *Facts) { f.NowMicros = f.HighWaterMicros - 3_600_000_000 }, CodeClockRegression},
 	}
@@ -195,7 +213,7 @@ func TestDBErrorSkipsDependentChecks(t *testing.T) {
 	rs := Run(f)
 	requireOne(t, rs, FAIL, CodeDBIntegrity)
 	// Nothing read from an unreadable database may be reported as OK.
-	for _, code := range []string{"log", "clock", "custody", "bundle"} {
+	for _, code := range []string{"log", "clock", "custody", "bundle", "trust"} {
 		requireNone(t, rs, code)
 	}
 }
@@ -205,6 +223,7 @@ func TestNoBundle(t *testing.T) {
 	f.Bundle = nil
 	rs := Run(f)
 	requireOne(t, rs, WARN, CodeNoBundle)
+	requireNone(t, rs, "trust")
 	if ExitCode(rs) != 0 {
 		t.Fatal("no_bundle must not fail doctor")
 	}
@@ -281,10 +300,35 @@ func TestPKCS11Ed25519NeedsAgent101(t *testing.T) {
 	if !strings.Contains(r.Message, "10.1") {
 		t.Fatalf("pkcs11_ed25519 must name ssh-agent 10.1: %q", r.Message)
 	}
-	requireOne(t, rs, OK, "custody")
 
 	f.CAKeys = hardwareKeys("pkcs11-agent", ssh.KeyAlgoECDSA256)
 	requireNone(t, Run(f), CodePKCS11Ed25519)
+}
+
+// TestPKCS11CustodyDeclared (D-WR-03, C-WR-04): custody pkcs11-agent is
+// the operator's declaration (a plain ssh-add key or a SoftHSM token in
+// the agent looks the same), so doctor says so and never prints the OK
+// hardware-custody line for it, alone or mixed with verified custody.
+func TestPKCS11CustodyDeclared(t *testing.T) {
+	f := healthy(t)
+	f.CAKeys = hardwareKeys("pkcs11-agent", ssh.KeyAlgoECDSA256)
+	f.TPMManufacturer, f.TPMCustody = "", ""
+	rs := Run(f)
+	r := requireOne(t, rs, INFO, CodePKCS11CustodyDeclared)
+	if !strings.Contains(r.Message, "user, host, machine, ops, log") || !strings.Contains(r.Message, "cannot verify") {
+		t.Fatalf("pkcs11_custody_declared must name the keys and say it is unverified: %q", r.Message)
+	}
+	requireNone(t, rs, "custody")
+	if ExitCode(rs) != 0 {
+		t.Fatalf("declared custody alone must not fail doctor: %v", rs)
+	}
+
+	// Mixed with keys in a confirmed physical TPM: still no OK line.
+	f = healthy(t)
+	f.CAKeys[0].Custody = "pkcs11-agent"
+	rs = Run(f)
+	requireOne(t, rs, INFO, CodePKCS11CustodyDeclared)
+	requireNone(t, rs, "custody")
 }
 
 func TestCustodyMismatch(t *testing.T) {
@@ -306,6 +350,25 @@ func TestTPMUnavailable(t *testing.T) {
 	rs := Run(f)
 	requireOne(t, rs, WARN, CodeTPMUnavailable)
 	requireNone(t, rs, "custody")
+}
+
+// TestTPMNotInspected (C-WR-03): keys recorded with TPM custody, but no TPM
+// read at all (no custody, no error), never yield the hardware custody OK.
+func TestTPMNotInspected(t *testing.T) {
+	for _, custody := range []string{"tpm", "vtpm"} {
+		t.Run(custody, func(t *testing.T) {
+			f := healthy(t)
+			f.CAKeys = hardwareKeys(custody, ssh.KeyAlgoECDSA256)
+			f.TPMManufacturer, f.TPMCustody, f.TPMError = "", "", ""
+			rs := Run(f)
+			r := requireOne(t, rs, WARN, CodeTPMUnavailable)
+			if !strings.Contains(r.Message, "not inspected") {
+				t.Fatalf("tpm_unavailable must say the TPM was not inspected: %q", r.Message)
+			}
+			requireNone(t, rs, "custody")
+			requireNone(t, rs, "tpm")
+		})
+	}
 }
 
 func TestLevelsAndLines(t *testing.T) {

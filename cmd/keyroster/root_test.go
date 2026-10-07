@@ -217,7 +217,7 @@ func TestRootSignTrustVerifyRoundTrip(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("trust verify exit %d: %s", code, stderr)
 	}
-	if !strings.Contains(stdout, "OK: signed by 1 of 1 pinned roots (threshold 1)") {
+	if !strings.Contains(stdout, "OK: 1 of 1 pinned roots signed both documents (bundle 1, policy 1, threshold 1)") {
 		t.Fatalf("trust verify output:\n%s", stdout)
 	}
 
@@ -279,7 +279,7 @@ func TestRootSignTwoOfTwoRoundTrip(t *testing.T) {
 		t.Fatalf("second root sign: exit %d: %s", code, stderr)
 	}
 	code, stdout, stderr := c.verify(t, "2", pins...)
-	if code != 0 || !strings.Contains(stdout, "OK: signed by 2 of 2 pinned roots (threshold 2)") {
+	if code != 0 || !strings.Contains(stdout, "OK: 2 of 2 pinned roots signed both documents (bundle 2, policy 2, threshold 2)") {
 		t.Fatalf("verify with 2 of 2 signatures: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 	// Pinning only one of the two roots does not match the bundle's root set.
@@ -455,7 +455,7 @@ func TestSoftwareRoot(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("trust verify: exit %d: %s", code, stderr)
 	}
-	if !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") || !strings.Contains(stdout, "signed by root "+a.fingerprint) {
+	if !strings.Contains(stdout, "OK: 1 of 2 pinned roots signed both documents (bundle 1, policy 1, threshold 1)") || !strings.Contains(stdout, "signed by root "+a.fingerprint) {
 		t.Fatalf("trust verify output:\n%s", stdout)
 	}
 
@@ -577,7 +577,7 @@ func TestSoftwareRoot(t *testing.T) {
 			t.Fatalf("root sign --key B: exit %d: %s", code, stderr)
 		}
 		code, stdout, stderr := c.verify(t, "1", a.fingerprint, b.fingerprint)
-		if code != 0 || !strings.Contains(stdout, "OK: signed by 2 of 2 pinned roots (threshold 1)") {
+		if code != 0 || !strings.Contains(stdout, "OK: 2 of 2 pinned roots signed both documents (bundle 2, policy 2, threshold 1)") {
 			t.Fatalf("verify after both roots signed: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 		if code, _, stderr := c.signWithKey(t, "1", a); code != 1 || !strings.Contains(stderr, "already holds a signature") {
@@ -592,7 +592,7 @@ func TestSoftwareRoot(t *testing.T) {
 			t.Fatalf("root sign --key B: exit %d: %s", code, stderr)
 		}
 		code, stdout, stderr := onlyB.verify(t, "1", a.fingerprint, b.fingerprint)
-		if code != 0 || !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") || !strings.Contains(stdout, "signed by root "+b.fingerprint) {
+		if code != 0 || !strings.Contains(stdout, "OK: 1 of 2 pinned roots signed both documents (bundle 1, policy 1, threshold 1)") || !strings.Contains(stdout, "signed by root "+b.fingerprint) {
 			t.Fatalf("a bundle signed by root B alone: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 	})
@@ -617,7 +617,7 @@ func TestSoftwareRoot(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := appendFile(filepath.Join(dir, doc.file+".sigs"), sig); err != nil {
+				if err := appendSignature(filepath.Join(dir, doc.file+".sigs"), sig); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -628,7 +628,7 @@ func TestSoftwareRoot(t *testing.T) {
 		dirB := filepath.Join(c.dir, "out-b")
 		thirdSign(t, dirB)
 		code, stdout, stderr := c.verifyIn(t, dirB, "1", a.fingerprint, b.fingerprint)
-		if code != 0 || !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") ||
+		if code != 0 || !strings.Contains(stdout, "OK: 1 of 2 pinned roots signed both documents (bundle 1, policy 1, threshold 1)") ||
 			!strings.Contains(stdout, "ignored: bundle signature by non-pinned key "+thirdFP) {
 			t.Fatalf("verify with an extra unrelated signature: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
@@ -658,4 +658,218 @@ func (c *ceremony) verifyIn(t *testing.T, dir, threshold string, pins ...string)
 	other := *c
 	other.out = dir
 	return other.verify(t, threshold, pins...)
+}
+
+// TestRootSignRefusesRootAsAdmin (B-CR-01, KEY-07): root sign refuses a
+// policy that lists one of the roots as an admin, before it writes anything
+// into --out-dir.
+func TestRootSignRefusesRootAsAdmin(t *testing.T) {
+	c := newCeremony(t, 1)
+	useKeyring(t, c.rootKeys...)
+	pub, err := ssh.NewPublicKey(c.rootKeys[0].Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootFile := filepath.Join(c.dir, "root.pub")
+	writeTestFile(t, rootFile, ssh.MarshalAuthorizedKey(pub))
+	c.policy = filepath.Join(c.dir, "root-admin-policy.json")
+	if code, _, stderr := run(t, "root", "genesis-policy", "--admin", "root="+rootFile, "--out", c.policy); code != 0 {
+		t.Fatalf("genesis-policy exit %d: %s", code, stderr)
+	}
+	code, _, stderr := c.sign(t, "1", 0, "--confirm", "00000000")
+	if code != 1 || !strings.Contains(stderr, "policy admin key equals a root key") || !strings.Contains(stderr, "nothing was written or signed") {
+		t.Fatalf("root sign of a root-as-admin policy: exit %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(c.out); !os.IsNotExist(err) {
+		t.Fatalf("--out-dir exists after the refusal (stat error %v)", err)
+	}
+}
+
+// TestRootSignAppendsAfterMissingNewline (B-WR-02): a .sigs file whose last
+// block lacks its newline still takes the next root's signature, and both
+// signatures count.
+func TestRootSignAppendsAfterMissingNewline(t *testing.T) {
+	c := newCeremony(t, 2)
+	useKeyring(t, c.rootKeys...)
+	pins := []string{c.fingerprint(t, 0), c.fingerprint(t, 1)}
+	if code, _, _ := c.sign(t, "2", 0, "--confirm", "00000000"); code != 1 {
+		t.Fatal("expected the wrong confirmation to fail")
+	}
+	bundle, err := os.ReadFile(filepath.Join(c.out, "bundle.json")) //nolint:gosec // G304: test file
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := trust.SHA256Hex(bundle)[:8]
+	if code, _, stderr := c.sign(t, "2", 0, "--confirm", prefix); code != 0 {
+		t.Fatalf("first root sign: exit %d: %s", code, stderr)
+	}
+	for _, f := range []string{"bundle.json.sigs", "policy.json.sigs"} {
+		path := filepath.Join(c.out, f)
+		data, err := os.ReadFile(path) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, path, bytes.TrimRight(data, "\n"))
+	}
+	if code, _, stderr := c.sign(t, "2", 1, "--confirm", prefix); code != 0 {
+		t.Fatalf("second root sign: exit %d: %s", code, stderr)
+	}
+	if code, _, stderr := c.verify(t, "2", pins...); code != 0 {
+		t.Fatalf("verify after appending to files without a final newline: exit %d, stderr %q", code, stderr)
+	}
+}
+
+// TestAppendSignatureRefusesUnparseable (B-WR-02): appending to a file that
+// does not parse as SSHSIG blocks is refused and the file is unchanged.
+func TestAppendSignatureRefusesUnparseable(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, s, trust.NamespaceBundle, []byte("doc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "bundle.json.sigs")
+	garbage := []byte("not a signature\n")
+	writeTestFile(t, path, garbage)
+	if err := appendSignature(path, sig); err == nil || !strings.Contains(err.Error(), "left unchanged") {
+		t.Fatalf("appendSignature to an unparseable file = %v, want a refusal", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || !bytes.Equal(data, garbage) { //nolint:gosec // G304: test file
+		t.Fatalf("file changed after the refusal: %q, %v", data, err)
+	}
+}
+
+// TestRootSignRerunAfterPartialFailure (B-WR-03): when only the bundle
+// signature was written (the policy append failed), a rerun with the same
+// root signs only the policy; a further rerun is refused. Signature files
+// are replaced atomically, with no temporary file left behind.
+func TestRootSignRerunAfterPartialFailure(t *testing.T) {
+	c := newCeremony(t, 1)
+	useKeyring(t, c.rootKeys...)
+	fp := c.fingerprint(t, 0)
+	if code, _, _ := c.sign(t, "1", 0, "--confirm", "00000000"); code != 1 {
+		t.Fatal("expected the wrong confirmation to fail")
+	}
+	bundle, err := os.ReadFile(filepath.Join(c.out, "bundle.json")) //nolint:gosec // G304: test file
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := trust.SHA256Hex(bundle)[:8]
+	if code, _, stderr := c.sign(t, "1", 0, "--confirm", prefix); code != 0 {
+		t.Fatalf("first root sign: exit %d: %s", code, stderr)
+	}
+	if err := os.Remove(filepath.Join(c.out, "policy.json.sigs")); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := c.sign(t, "1", 0, "--confirm", prefix)
+	if code != 0 {
+		t.Fatalf("rerun after a missing policy signature: exit %d: %s", code, stderr)
+	}
+	for _, want := range []string{
+		filepath.Join(c.out, "bundle.json.sigs") + " already holds a signature by " + fp + "; not signing it again",
+		"signed " + filepath.Join(c.out, "policy.json") + " with " + fp,
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("rerun output lacks %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "signed "+filepath.Join(c.out, "bundle.json")+" with") {
+		t.Fatalf("rerun signed the bundle again:\n%s", stdout)
+	}
+	for _, f := range []string{"bundle.json.sigs", "policy.json.sigs"} {
+		data, err := os.ReadFile(filepath.Join(c.out, f)) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sigs, err := sshsig.ParseAll(data); err != nil || len(sigs) != 1 {
+			t.Fatalf("%s holds %d signatures (%v), want 1", f, len(sigs), err)
+		}
+		if runtime.GOOS != "windows" {
+			if fi, err := os.Stat(filepath.Join(c.out, f)); err != nil || fi.Mode().Perm() != 0o644 {
+				t.Fatalf("%s mode %v (%v), want 0644", f, fi.Mode().Perm(), err)
+			}
+		}
+	}
+	if code, _, stderr := c.verify(t, "1", fp); code != 0 {
+		t.Fatalf("trust verify after the rerun: exit %d: %s", code, stderr)
+	}
+
+	if code, _, stderr := c.sign(t, "1", 0, "--confirm", prefix); code != 1 ||
+		!strings.Contains(stderr, "already holds a signature") || !strings.Contains(stderr, "nothing to sign") {
+		t.Fatalf("rerun with both documents signed: exit %d, stderr %q", code, stderr)
+	}
+	entries, err := os.ReadDir(c.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Fatalf("temporary file %s left in --out-dir", e.Name())
+		}
+	}
+}
+
+// TestTrustVerifyReportsSignersPerDocument (B-WR-04): with pins {A, B, C}
+// at threshold 2, A and B sign the bundle and B and C the policy. Each
+// document meets the threshold, so verification passes, but only B signed
+// both, and the report must say so rather than "2 of 3".
+func TestTrustVerifyReportsSignersPerDocument(t *testing.T) {
+	c := newCeremony(t, 3)
+	useKeyring(t, c.rootKeys...)
+	if code, _, _ := c.sign(t, "2", 0, "--confirm", "00000000"); code != 1 {
+		t.Fatal("expected the wrong confirmation to fail")
+	}
+	signers := make([]ssh.Signer, len(c.rootKeys))
+	for i, k := range c.rootKeys {
+		s, err := ssh.NewSignerFromKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signers[i] = s
+	}
+	for _, doc := range []struct {
+		file, ns string
+		by       []int
+	}{{"bundle.json", trust.NamespaceBundle, []int{0, 1}}, {"policy.json", trust.NamespacePolicy, []int{1, 2}}} {
+		msg, err := os.ReadFile(filepath.Join(c.out, doc.file)) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, i := range doc.by {
+			sig, err := sshsig.Sign(rand.Reader, signers[i], doc.ns, msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := appendSignature(filepath.Join(c.out, doc.file+".sigs"), sig); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	a, b, cc := c.fingerprint(t, 0), c.fingerprint(t, 1), c.fingerprint(t, 2)
+	code, stdout, stderr := c.verify(t, "2", a, b, cc)
+	if code != 0 {
+		t.Fatalf("trust verify: exit %d: %s", code, stderr)
+	}
+	for _, want := range []string{
+		"signed by root " + b + "\n",
+		"root " + a + " signed the bundle only\n",
+		"root " + cc + " signed the policy only\n",
+		"OK: 1 of 3 pinned roots signed both documents (bundle 2, policy 2, threshold 2)\n",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("trust verify output lacks %q:\n%s", want, stdout)
+		}
+	}
+	for _, wrong := range []string{"signed by root " + a, "signed by root " + cc} {
+		if strings.Contains(stdout, wrong) {
+			t.Fatalf("trust verify reports %q, but that root signed one document only:\n%s", wrong, stdout)
+		}
+	}
 }

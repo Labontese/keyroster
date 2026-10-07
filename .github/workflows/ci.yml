@@ -13,7 +13,8 @@ permissions: {}
 
 # The job ids double as the required status check names in the
 # main-integrity ruleset. Renaming a job blocks every merge until the
-# ruleset is updated (see CONTRIBUTING.md).
+# ruleset is updated (see CONTRIBUTING.md). The required pr-title check
+# lives in pr-title.yml, because it must also run when a PR title is edited.
 jobs:
   build-test:
     name: build-test
@@ -133,18 +134,3 @@ jobs:
         env:
           FUZZTIME: 30s
         run: bash scripts/fuzz.sh
-
-  pr-title:
-    name: pr-title
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Check Conventional Commits PR title
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: bash scripts/check-pr-title.sh

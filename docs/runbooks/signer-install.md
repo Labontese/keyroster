@@ -8,8 +8,10 @@ in the TPM. It ends with `keyroster-signer doctor` reporting no FAIL.
 > the same units on an Ubuntu 24.04 runner (`test/systemd/smoke.sh`): it
 > installs them, bootstraps the signer, issues a certificate as a
 > `keyroster-admin` member, checks that the signer's network namespace holds
-> only `lo`, runs `doctor`, and gates `systemd-analyze security` at exposure
-> 2.0. That run uses the **agent** backend, because the runner has no TPM.
+> only `lo`, checks the sandbox of the signer and of its ssh-agent unit, runs
+> `doctor`, and gates `systemd-analyze security` at exposure 2.0 for the
+> signer unit and 1.4 for the agent unit. That run uses the **agent**
+> backend, because the runner has no TPM.
 > The TPM backend itself is tested in CI against swtpm over a Unix socket
 > (`e2e-tpm`), not through `/dev/tpmrm0`. **This runbook's TPM path (the
 > `tpm.conf` drop-in, `/dev/tpmrm0`, group `tss`, and the
@@ -113,7 +115,10 @@ systemd-analyze security keyroster-signer.service
 ```
 
 CI measured an overall exposure of **0.7 (SAFE)** for the unit without the
-drop-in; CI fails above 2.0.
+drop-in; CI fails above 2.0. If you use the agent or PKCS#11 backend, check
+`keyroster-signer-agent.service` the same way: CI fails above 1.4. Its
+exposure of **1.3 (OK)** was measured offline (`systemd-analyze security
+--offline=yes`, systemd 255.4), not yet on a CI runner (UNVERIFIED).
 
 ## 4. Create the state directory and the CA keys in the TPM
 
@@ -168,6 +173,16 @@ systemctl status keyroster-signer.service
 ls -l /run/keyroster-signer/signer.sock    # srw-rw---- keyroster-signer keyroster-admin
 ```
 
+The unit restarts a failed signer after 5 seconds, at most 5 times in 10
+minutes. It never restarts on **exit status 78**: the key store refused the
+PIV PIN or a TPM key's auth value (the TPM backend proves each key's
+`{role}.auth` with one test signature at start), or the PIV backend
+refused to try the PIN with fewer than 2 retries left. Each restart would
+spend another of the device's limited attempts. `systemctl status` then
+shows `status=78`. Fix the PIN file or restore the `{role}.auth` files from
+backup, check the device by hand ([piv.md](../backends/piv.md)), then run `systemctl
+reset-failed keyroster-signer.service` and start it again.
+
 Check the sandbox on the running process:
 
 ```
@@ -216,17 +231,61 @@ socket and runs no program.
 | `FAIL state_dir_permissions` | state directory not 0700 or not owned by the signer's user | `chown keyroster-signer: …; chmod 0700 …` |
 | `FAIL db_permissions` | `signer.db` readable by others | `chmod 0600 /var/lib/keyroster-signer/signer.db` |
 | `FAIL db_integrity` | SQLite integrity check failed, or the database cannot be read | Stop the signer; restore from backup; investigate. |
-| `FAIL log_mismatch` | the stored audit log does not reproduce its signed checkpoint | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
+| `FAIL log_mismatch` | the stored audit log does not reproduce its signed checkpoint, or contradicts what was recorded with it: CA keys but an empty log, or issue entries that do not match the issuance rows and the serial high-water mark (the log tables cut back to an earlier signed prefix, or wiped) | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
+| `FAIL trust_mismatch` | the installed trust bundle is not one `serve` would load: it does not list the keys ca-init recorded (for example another log key), names an online key or a root as a policy admin, or is not the bundle the log's last `bundle_install` entry records | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
 | `FAIL clock_regression` | the wall clock is behind the last issued serial | See [the clock warning](#snapshot-restore-check-the-clock-first). |
 | `WARN no_bundle` | no trust bundle installed | Run step 6. |
 | `WARN software_root` | a root has custody software (`SOFTWARE ROOT:`) | Expected for the homelab (D-10); move to hardware roots (D-11). |
 | `WARN vtpm_custody` | the online keys are in a virtual TPM | Expected on a Proxmox vTPM (D-08); see above. |
 | `WARN software_key_in_agent` | the online keys are plain keys in ssh-agent | Test and development only. |
 | `WARN custody_mismatch` | the TPM now maps to another custody than the one recorded | The VM may run on another TPM than the bundle claims. Investigate before issuing. |
-| `WARN tpm_unavailable` | doctor could not read the TPM | Check `/dev/tpmrm0` and group `tss`. |
+| `INFO pkcs11_custody_declared` | the online keys are recorded as custody `pkcs11-agent`, which the operator declared at `ca-init` and nothing verifies | Expected with the PKCS#11 backend. Check on the HSM that the keys in `ca-pubkeys.json` are HSM keys ([pkcs11.md](../backends/pkcs11.md)). |
+| `WARN tpm_unavailable` | doctor could not read the TPM, or keys are recorded with TPM custody but the TPM was not inspected | Check `/dev/tpmrm0` and group `tss`, and that the recorded backend is `tpm`. Until then the TPM custody is unconfirmed. |
 
 On the homelab VM the expected result is no FAIL, `WARN vtpm_custody` and
 one `WARN software_root` per root.
+
+doctor has neither the backend's keys nor your root pins. A database
+rewritten consistently, with keys and roots of the rewriter's choosing,
+passes doctor. `serve` refuses it only while the rewriter cannot also put
+their keys into the backend (it opens every key by its recorded
+fingerprint; with the agent backend, whoever can use the agent socket can
+add keys). The check that holds is `keyroster audit verify --pin` with
+your pins. Compare the root fingerprints doctor prints with your pins.
+
+## Install a successor bundle: stop, install, start
+
+The signer loads the trust bundle and its policy once, when it starts.
+Install a successor bundle (from a later ceremony) only with the service
+stopped:
+
+```
+systemctl stop keyroster-signer.service
+runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+  keyroster-signer install-bundle --state-dir /var/lib/keyroster-signer \
+  --bundle /var/lib/keyroster-signer/incoming/bundle.json \
+  --policy /var/lib/keyroster-signer/incoming/policy.json
+systemctl start keyroster-signer.service
+```
+
+A successor takes no `--pin` or `--threshold`: it is verified against the
+installed bundle. Its policy must be the installed policy unchanged, or
+the next policy version with the installed policy's SHA-256 as `prev`, so
+that `pol=N` in a certificate's key ID names exactly one policy. `serve`, `ca-init` and `install-bundle` hold an exclusive
+lock on `signer.lock` in the state directory, so `install-bundle` refuses
+with "the state directory is in use by another keyroster-signer process"
+while the service runs. If a successor is installed under a running signer
+anyway (for example by a process that ignores the lock), that signer
+refuses every request with `trust_changed` until it is restarted; it never
+issues under the superseded policy.
+
+> **UNVERIFIED on the homelab signer.** The lock and the `trust_changed`
+> refusal are exercised by the Go tests only (`TestStateDirLock`,
+> `TestTrustChangedUnderLiveSigner`). This stop, install and start
+> sequence for a successor has not been run on the vTPM signer. Creating
+> `signer.lock` inside the systemd sandbox is covered only by the CI
+> `systemd` smoke check (`test/systemd/smoke.sh`, which starts `serve` in
+> the sandbox).
 
 ## Snapshot restore: check the clock first
 
@@ -253,3 +312,10 @@ serial high-water mark down by hand.
 A restore also brings back an older audit log. Certificates issued after
 the snapshot are missing from it, while verifiers (and the bundle) may have
 seen a longer log. Record every restore in the operations log.
+
+Neither `doctor` nor `serve` can tell a restored database from a current
+one: the whole file is consistent with itself. The same holds for a log
+cut back together with its issuance rows and high-water mark, or cut back
+by trailing entries that issue nothing (refusals). Only an earlier export
+kept outside the signer shows it: keep each export, and verify the next
+one with `keyroster audit verify --previous <earlier export>`.

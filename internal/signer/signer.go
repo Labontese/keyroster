@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -67,11 +68,19 @@ type Signer struct {
 	allowGIDs []uint32
 	log       *slog.Logger
 
+	// bundleVersion is the version of the installed bundle that ca,
+	// profiles and policy were loaded from. Issuance refuses once the
+	// database holds another version (trust_changed).
+	bundleVersion uint64
+
 	// mu serializes every state change: serial allocation, issuance and
 	// log appends, each through its commit.
 	mu sync.Mutex
 	logState
 	limiter *refusalLimiter // guarded by mu
+	// overloaded counts connections refused over capacity by the accept
+	// loop, which never takes mu; flushSummaries moves it into the limiter.
+	overloaded atomic.Uint64
 	// clockEpisode is set while the clock is behind the serial high-water
 	// mark and that episode's clock_regression leaf is logged; the next
 	// successful issuance clears it. Guarded by mu.
@@ -82,8 +91,11 @@ type Signer struct {
 // key (user, host and machine CA, ops and log key) in the backend, and
 // rebuilds the audit log from the state database. It refuses to start
 // without an installed bundle, when any bundle key is missing from the
-// backend, and when the stored leaves do not reproduce the latest signed
-// checkpoint.
+// backend, when the stored leaves do not reproduce the latest signed
+// checkpoint, and when the installed bundle record is not the one the last
+// bundle_install entry of that log records. The trust state is loaded only here: once another bundle is
+// installed, the signer refuses every request (trust_changed) until it is
+// restarted and loads it.
 func New(cfg Config) (*Signer, error) {
 	if cfg.Backend == nil || cfg.DB == nil {
 		return nil, errors.New("signer: a keystore backend and a state database are required")
@@ -116,6 +128,8 @@ func New(cfg Config) (*Signer, error) {
 		allowUIDs: slices.Clone(cfg.AllowUIDs),
 		allowGIDs: slices.Clone(cfg.AllowGIDs),
 		log:       cfg.Logger,
+
+		bundleVersion: ts.bundle.Version,
 	}
 	if s.clock == nil {
 		s.clock = time.Now
@@ -125,6 +139,11 @@ func New(cfg Config) (*Signer, error) {
 	}
 	s.limiter = newRefusalLimiter(perMinute, burst, s.clock())
 	if err := s.initLog(context.Background()); err != nil {
+		return nil, err
+	}
+	// The trust state above came from the trust_bundle table; take it only
+	// if the verified log's last bundle_install entry records exactly it.
+	if err := checkBundleLogged(ts.stored, s.loadedInstall); err != nil {
 		return nil, err
 	}
 	return s, nil

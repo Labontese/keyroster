@@ -105,7 +105,10 @@ On the signer host, which has a network but no root key (the
    ```
 
 2. Write the genesis policy. Each `--admin` names an admin's SSH public key
-   whose signature may authorize issuance:
+   whose signature may authorize issuance. An admin key must not be a root
+   key: a root only signs bundles and policies, so `root sign`,
+   `trust verify` and `install-bundle` refuse a policy that lists a root as
+   an admin.
 
    ```
    keyroster root genesis-policy --admin alice=alice.pub --out /media/transfer/policy.json
@@ -176,7 +179,9 @@ Insert USB A. Sign the bundle and the policy with threshold 1:
 Before typing, compare **both root fingerprints in the summary with the
 paper**, and the CA fingerprints with `ca-init`'s output. Then type the hash
 prefix. `root sign` prints the `SOFTWARE ROOT:` banner and appends the
-signatures to `bundle.json.sigs` and `policy.json.sigs`.
+signatures to `bundle.json.sigs` and `policy.json.sigs`. If it stops after
+writing only one of them, run the same command again: it signs only the
+document this root has not signed yet. Do not edit `.sigs` files by hand.
 
 Remove USB A, insert USB B and run the same command with
 `--key /media/usbB/root-b.age` and the same `--out-dir`. `root sign` refuses
@@ -192,8 +197,16 @@ emergency depends on them.
   --bundle /media/transfer/ceremony/bundle.json --policy /media/transfer/ceremony/policy.json
 ```
 
-It must end with `OK: signed by 2 of 2 pinned roots (threshold 1)`. Record
-the SHA-256 of `bundle.json` and `policy.json` in the transcript.
+It lists each root that signed both documents as `signed by root ...`, and
+any root that signed only one as `root ... signed the bundle only` or
+`... the policy only`. It must end with
+
+```
+OK: 2 of 2 pinned roots signed both documents (bundle 2, policy 2, threshold 1)
+```
+
+Record that line and the SHA-256 of `bundle.json` and `policy.json` in the
+transcript.
 
 The transfer USB now holds `roots.pub`, `ceremony/bundle.json`,
 `ceremony/bundle.json.sigs`, `ceremony/policy.json` and

@@ -12,6 +12,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly, like ci.yml, so that a new advisory against piv-go fails the
+  # govulncheck step without waiting for a code change.
+  schedule:
+    - cron: "29 4 * * *"
   workflow_dispatch:
 
 # Least privilege: nothing by default, read-only contents per job.
@@ -45,6 +49,11 @@ jobs:
         run: |
           dpkg-query -W libpcsclite-dev libpcsclite1
           go version
+      # The govulncheck job in ci.yml scans the default build only, where
+      # piv-go is unreachable. Scan the piv build too (E-WR-04); it needs the
+      # pcsc-lite headers installed above, because piv-go uses cgo.
+      - name: Scan the piv build for reachable vulnerabilities
+        run: CGO_ENABLED=1 go tool -modfile=tools/go.mod govulncheck -tags piv ./...
       - name: Vet the tagged packages
         run: CGO_ENABLED=1 go vet -tags piv ./internal/keystore/piv/... ./cmd/keyroster-signer/...
       # The lint job in ci.yml builds without tags, so it never sees the

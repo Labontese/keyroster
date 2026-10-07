@@ -2,6 +2,7 @@ package trust
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"slices"
@@ -70,6 +71,12 @@ func TestVerifyGenesisBundle(t *testing.T) {
 	version2.Version, version2.Prev = 2, SHA256Hex(oneOfTwo)
 	version2Doc := mustCanonical(t, version2)
 
+	// B-CR-01: root B (which does not even sign) listed as an admin.
+	rootAdmin := goldenPolicy(t)
+	rootAdmin.Admins = append(rootAdmin.Admins, AdminKey{Name: "root-b", Key: keyOf(rootB)})
+	rootAdminPolicy := mustCanonical(t, rootAdmin)
+	rootAdminDoc := mustCanonical(t, goldenBundle(t, rootAdminPolicy))
+
 	tests := []struct {
 		name string
 		in   genesisInput
@@ -91,6 +98,8 @@ func TestVerifyGenesisBundle(t *testing.T) {
 		{"policy_signed_only_by_non_pinned_refused", genesisInput{oneOfTwo, signAll(t, NamespaceBundle, oneOfTwo, rootA), policy, polSigs(attacker), pins, 1}, ErrThreshold},
 		{"policy_hash_mismatch_refused", genesisInput{wrongHashDoc, signAll(t, NamespaceBundle, wrongHashDoc, rootA), policy, polSigs(rootA), pins, 1}, ErrPolicyHash},
 		{"version_2_is_not_genesis", genesisInput{version2Doc, signAll(t, NamespaceBundle, version2Doc, rootA), policy, polSigs(rootA), pins, 1}, ErrVersionChain},
+		{"root_as_policy_admin_refused", genesisInput{rootAdminDoc, signAll(t, NamespaceBundle, rootAdminDoc, rootA), rootAdminPolicy,
+			signAll(t, NamespacePolicy, rootAdminPolicy, rootA), pins, 1}, ErrKeyIsRoot},
 		{"malformed_signature_file_refused", genesisInput{oneOfTwo, []byte("not a signature\n"), policy, polSigs(rootA), pins, 1}, sshsig.ErrMalformed},
 		{"pin_not_a_fingerprint_refused", genesisInput{oneOfTwo, signAll(t, NamespaceBundle, oneOfTwo, rootA), policy, polSigs(rootA), []string{"MD5:00", pins[1]}, 1}, ErrPins},
 	}
@@ -218,7 +227,7 @@ func TestVerifySuccessor(t *testing.T) {
 			if tc.prevCanonicalAlt != nil {
 				prevBytes = tc.prevCanonicalAlt
 			}
-			b, p, err := VerifySuccessor(f.prev, prevBytes, tc.next, tc.nextSigs, f.policy, tc.policySigs)
+			b, p, err := VerifySuccessor(f.prev, prevBytes, f.policy, tc.next, tc.nextSigs, f.policy, tc.policySigs)
 			if tc.want == nil {
 				if err != nil {
 					t.Fatalf("refused: %v", err)
@@ -230,6 +239,113 @@ func TestVerifySuccessor(t *testing.T) {
 			}
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifySuccessorPolicyChain (A-WR-02, B-WR-01, C-WR-05): a successor's
+// policy is either byte-identical to the policy in force or the next
+// version chained to it by its SHA-256, so pol=N names exactly one policy.
+func TestVerifySuccessorPolicyChain(t *testing.T) {
+	f := newSuccessorFixture(t)
+	changed := func(edit func(p *Policy)) []byte {
+		p := goldenPolicy(t)
+		p.CAProfiles[0].MaxTTLSeconds = 3600
+		p.Version, p.Prev = 2, SHA256Hex(f.policy)
+		edit(p)
+		return mustCanonical(t, p)
+	}
+	tests := []struct {
+		name       string
+		policy     []byte
+		prevPolicy []byte // nil means f.policy
+		want       error
+	}{
+		{name: "unchanged_policy_accepted", policy: f.policy},
+		{name: "next_version_chained_accepted", policy: changed(func(*Policy) {})},
+		{name: "same_version_different_policy_refused", policy: changed(func(p *Policy) { p.Version, p.Prev = 1, GenesisPrev }), want: ErrVersionChain},
+		{name: "version_jump_refused", policy: changed(func(p *Policy) { p.Version = 3 }), want: ErrVersionChain},
+		{name: "wrong_prev_refused", policy: changed(func(p *Policy) { p.Prev = SHA256Hex([]byte("another policy")) }), want: ErrVersionChain},
+		{name: "prev_policy_not_the_bundles_refused", policy: changed(func(*Policy) {}), prevPolicy: changed(func(p *Policy) { p.Version = 5 }), want: ErrVersionChain},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			next := goldenBundle(t, tc.policy)
+			next.Version, next.Prev, next.IssuedAt = f.prev.Version+1, SHA256Hex(f.prevBytes), "2026-10-06T00:00:00Z"
+			next.Root = f.prev.Root
+			doc := mustCanonical(t, next)
+			prevPolicy := f.policy
+			if tc.prevPolicy != nil {
+				prevPolicy = tc.prevPolicy
+			}
+			b, p, err := VerifySuccessor(f.prev, f.prevBytes, prevPolicy, doc, signAll(t, NamespaceBundle, doc, f.rootA),
+				tc.policy, signAll(t, NamespacePolicy, tc.policy, f.rootA))
+			if tc.want == nil {
+				if err != nil || b == nil || p == nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifySuccessorAdminNotRoot (B-CR-01, KEY-07): a successor's policy
+// may not list a root as an admin: neither one of the successor's roots,
+// nor a root it retires, nor an existing admin the successor makes a root.
+func TestVerifySuccessorAdminNotRoot(t *testing.T) {
+	f := newSuccessorFixture(t)
+	admin := edKey(t, seedAdmin) // the golden policy's admin alice
+	_, fresh, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshAdmin, err := ssh.NewSignerFromKey(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// policyV2 is the next policy version, chained to f.policy, with one
+	// more admin.
+	policyV2 := func(extra ssh.Signer) []byte {
+		p := goldenPolicy(t)
+		p.Version, p.Prev = 2, SHA256Hex(f.policy)
+		p.Admins = append(p.Admins, AdminKey{Name: "bob", Key: keyOf(extra)})
+		return mustCanonical(t, p)
+	}
+	tests := []struct {
+		name   string
+		roots  []ssh.Signer
+		policy []byte
+		want   error
+	}{
+		{name: "fresh_admin_accepted", roots: []ssh.Signer{f.rootC}, policy: policyV2(freshAdmin)},
+		{name: "admin_is_new_root_refused", roots: []ssh.Signer{f.rootC}, policy: policyV2(f.rootC), want: ErrKeyIsRoot},
+		{name: "admin_is_retired_root_refused", roots: []ssh.Signer{f.rootC}, policy: policyV2(f.rootA), want: ErrKeyIsRoot},
+		{name: "unchanged_policy_admin_made_root_refused", roots: []ssh.Signer{f.rootA, admin}, policy: f.policy, want: ErrKeyIsRoot},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			next := f.next(t, tc.roots...)
+			next.PolicySHA256 = SHA256Hex(tc.policy)
+			doc := mustCanonical(t, next)
+			signers := append([]ssh.Signer{f.rootA}, tc.roots...)
+			b, p, err := VerifySuccessor(f.prev, f.prevBytes, f.policy, doc, signAll(t, NamespaceBundle, doc, signers...),
+				tc.policy, signAll(t, NamespacePolicy, tc.policy, signers...))
+			if tc.want == nil {
+				if err != nil || b == nil || p == nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if b != nil || p != nil {
+				t.Fatal("refused but returned documents")
 			}
 		})
 	}

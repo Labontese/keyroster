@@ -61,8 +61,9 @@ func CountPinnedSigners(doc, sigs []byte, namespace string, pinned map[string]ss
 // the pinned set and its threshold exactly threshold, so a bundle cannot
 // widen its own trust (Pitfall 4); at least threshold distinct pinned roots
 // must have signed each document under its namespace; and policy_sha256
-// must be the SHA-256 of the policy bytes. Non-canonical documents are
-// refused before any signature is checked.
+// must be the SHA-256 of the policy bytes; and no policy admin may be a root
+// key (CheckAdminsNotRoots). Non-canonical documents are refused before any
+// signature is checked.
 func VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs []byte, pins []string, threshold int) (*Bundle, *Policy, error) {
 	pinSet, err := pinSet(pins)
 	if err != nil {
@@ -103,6 +104,9 @@ func VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs []byte, pins []s
 	if b.PolicySHA256 != SHA256Hex(policy) {
 		return nil, nil, ErrPolicyHash
 	}
+	if err := CheckAdminsNotRoots(p, b.Root.Keys); err != nil {
+		return nil, nil, err
+	}
 	if err := requireSigners(bundle, bundleSigs, NamespaceBundle, roots, threshold, "bundle"); err != nil {
 		return nil, nil, err
 	}
@@ -110,6 +114,34 @@ func VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs []byte, pins []s
 		return nil, nil, err
 	}
 	return b, p, nil
+}
+
+// CheckAdminsNotRoots refuses a policy that names a key of any of the root
+// sets as an admin. A root signs only trust bundles and policies (KEY-07);
+// an admin authorizes issuance online, so a root listed as an admin would
+// turn an offline root into a routine issuance authorizer. Keys are
+// compared by their wire encoding.
+func CheckAdminsNotRoots(p *Policy, rootSets ...[]RootKey) error {
+	roots := map[string]bool{}
+	for _, set := range rootSets {
+		for _, rk := range set {
+			pub, err := ParseKey(rk.Key)
+			if err != nil {
+				return fmt.Errorf("%w: root key: %w", ErrInvalid, err)
+			}
+			roots[string(pub.Marshal())] = true
+		}
+	}
+	for _, a := range p.Admins {
+		pub, err := ParseKey(a.Key)
+		if err != nil {
+			return fmt.Errorf("%w: admin %s: %w", ErrInvalid, a.Name, err)
+		}
+		if roots[string(pub.Marshal())] {
+			return fmt.Errorf("%w: policy admin %s is root %s", ErrKeyIsRoot, a.Name, ssh.FingerprintSHA256(pub))
+		}
+	}
+	return nil
 }
 
 // requireSigners requires at least threshold distinct keys of roots to have
@@ -164,8 +196,16 @@ func pinSet(pins []string) (map[string]bool, error) {
 // threshold of its roots must have signed both next and the policy, so
 // neither a stolen old root nor a freshly listed new root can rotate trust
 // alone. next must be version prev+1, carry prev's SHA-256 as prev, not be
-// issued before prev, and carry the policy's SHA-256.
-func VerifySuccessor(prev *Bundle, prevCanonical []byte, next, nextSigs, policy, policySigs []byte) (*Bundle, *Policy, error) {
+// issued before prev, and carry the policy's SHA-256. No policy admin may
+// be one of next's or prev's roots (CheckAdminsNotRoots).
+//
+// prevPolicy is the policy document in force under prev (its SHA-256 must
+// be prev's policy_sha256). The policy chains like the bundle: it is either
+// byte-identical to prevPolicy, or it is version prevPolicy.version+1 with
+// prevPolicy's SHA-256 as its prev. So a policy version names exactly one
+// policy, and the key ID's pol=N identifies the admins and profiles that
+// authorized a certificate.
+func VerifySuccessor(prev *Bundle, prevCanonical, prevPolicy, next, nextSigs, policy, policySigs []byte) (*Bundle, *Policy, error) {
 	if prev == nil {
 		return nil, nil, fmt.Errorf("%w: no previous bundle", ErrVersionChain)
 	}
@@ -175,6 +215,13 @@ func VerifySuccessor(prev *Bundle, prevCanonical []byte, next, nextSigs, policy,
 	pc, err := prev.Canonical()
 	if err != nil || !bytes.Equal(pc, prevCanonical) {
 		return nil, nil, fmt.Errorf("%w: prevCanonical is not the canonical encoding of the previous bundle", ErrVersionChain)
+	}
+	if SHA256Hex(prevPolicy) != prev.PolicySHA256 {
+		return nil, nil, fmt.Errorf("%w: prevPolicy is not the previous bundle's policy", ErrVersionChain)
+	}
+	pp, err := ParsePolicy(prevPolicy)
+	if err != nil {
+		return nil, nil, fmt.Errorf("previous policy: %w", err)
 	}
 	b, err := ParseBundle(next)
 	if err != nil {
@@ -197,6 +244,15 @@ func VerifySuccessor(prev *Bundle, prevCanonical []byte, next, nextSigs, policy,
 	}
 	if b.PolicySHA256 != SHA256Hex(policy) {
 		return nil, nil, ErrPolicyHash
+	}
+	if !bytes.Equal(policy, prevPolicy) && (p.Version != pp.Version+1 || p.Prev != SHA256Hex(prevPolicy)) {
+		return nil, nil, fmt.Errorf("%w: a changed policy must be version %d with the previous policy's SHA-256 as prev, got version %d",
+			ErrVersionChain, pp.Version+1, p.Version)
+	}
+	// A root that next retires may still exist, so it must not become an
+	// admin either.
+	if err := CheckAdminsNotRoots(p, b.Root.Keys, prev.Root.Keys); err != nil {
+		return nil, nil, err
 	}
 	oldRoots, err := prev.rootKeys()
 	if err != nil {

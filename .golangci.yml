@@ -41,6 +41,7 @@ linters:
             - "**/internal/signer/**"
             - "**/internal/keystore/**"
             - "**/internal/cert/**"
+            - "**/internal/certprofile/**"
             - "**/internal/serial/**"
             - "**/internal/signerdb/**"
             - "**/internal/wire/**"

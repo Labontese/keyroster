@@ -363,3 +363,99 @@ func TestDurabilityPragmas(t *testing.T) {
 		t.Fatalf("journal_mode=%s synchronous=%d, want wal and 2 (FULL)", mode, sync)
 	}
 }
+
+// TestReadLogWithHashesSnapshot (A-WR-06, C-WR-02): ReadLogWithHashes
+// serves the leaves, their hashes, the latest checkpoint, the CA keys, the
+// latest trust bundle, the issuance row count and the serial high-water
+// mark from one snapshot (C-WR-01 adds the last two). Rows committed by another
+// connection while it reads are not seen, so the result is always
+// consistent (doctor against a live signer).
+func TestReadLogWithHashesSnapshot(t *testing.T) {
+	ctx := context.Background()
+	writer, path := openTemp(t)
+	// appendOne takes the index as a byte so that the leaf and hash bytes
+	// need no narrowing conversion; the log index is the widened value.
+	appendOne := func(b byte) error {
+		idx := uint64(b)
+		return writer.WithTx(ctx, func(tx *sql.Tx) error {
+			if err := writer.AppendLeaf(tx, idx, []byte{b, 'l'}, hash32(b)); err != nil {
+				return err
+			}
+			return writer.PutCheckpoint(tx, idx+1, []byte{'c', b + 1})
+		})
+	}
+	for i := range byte(3) {
+		if err := appendOne(i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reader, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+
+	var seen []uint64
+	snap, err := reader.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
+		if idx == 0 {
+			// Commit leaf 3 and its checkpoint, the CA keys and a trust
+			// bundle mid-read.
+			if err := appendOne(3); err != nil {
+				return err
+			}
+			if err := writer.WithTx(ctx, func(tx *sql.Tx) error {
+				keys := make([]CAKey, 0, len(CARoles))
+				for i, role := range CARoles {
+					keys = append(keys, CAKey{Role: role, PublicKey: []byte{'k', byte(i)}, Alg: "a", Custody: "c"})
+				}
+				if err := writer.SaveCAKeys(tx, keys); err != nil {
+					return err
+				}
+				if err := writer.InsertIssuance(tx, issuance(77, 1)); err != nil {
+					return err
+				}
+				if err := writer.SetLastSerial(tx, 77); err != nil {
+					return err
+				}
+				return writer.InsertBundle(tx, StoredBundle{Version: 1, Bundle: []byte("b"), BundleSigs: []byte("s"),
+					Policy: []byte("p"), PolicySigs: []byte("t"), InstalledAt: time.Now()})
+			}); err != nil {
+				return err
+			}
+		}
+		if uint64(leaf[0]) != idx || uint64(hash[0]) != idx {
+			t.Errorf("leaf %d: got leaf %x, hash %x", idx, leaf, hash)
+		}
+		seen = append(seen, idx)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 3 || snap.Size != 3 || string(snap.Checkpoint) != string([]byte{'c', 3}) {
+		t.Fatalf("snapshot read %d leaves and checkpoint size %d (%x); want 3 leaves and checkpoint 3", len(seen), snap.Size, snap.Checkpoint)
+	}
+	if snap.CAKeys != nil || snap.Bundle != nil || snap.Issuances != 0 || snap.LastSerial != 0 {
+		t.Fatalf("snapshot saw rows committed after it began: %+v", snap)
+	}
+	// The concurrent append did commit; the next read sees it.
+	seen = nil
+	if snap, err = reader.ReadLogWithHashes(ctx, func(idx uint64, _, _ []byte) error {
+		seen = append(seen, idx)
+		return nil
+	}); err != nil || len(seen) != 4 || snap.Size != 4 {
+		t.Fatalf("second read: %d leaves, %+v, %v; want 4 leaves and checkpoint 4", len(seen), snap, err)
+	}
+	if len(snap.CAKeys) != len(CARoles) || snap.Bundle == nil || snap.Bundle.Version != 1 || snap.Issuances != 1 || snap.LastSerial != 77 {
+		t.Fatalf("second read: %+v; want the five keys, bundle version 1, one issuance row and high-water mark 77", snap)
+	}
+
+	t.Run("empty_log", func(t *testing.T) {
+		empty, _ := openTemp(t)
+		calls := 0
+		snap, err := empty.ReadLogWithHashes(ctx, func(uint64, []byte, []byte) error { calls++; return nil })
+		if err != nil || calls != 0 || snap.Checkpoint != nil || snap.Size != 0 {
+			t.Fatalf("empty log: %d calls, %+v, %v; want 0 calls and no checkpoint", calls, snap, err)
+		}
+	})
+}

@@ -175,3 +175,16 @@ func TestEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestAdminQuorumFitsEvidence (A-WR-03): the largest quorum a policy may
+// require is exactly the evidence an issue request can carry, and a policy
+// at that quorum can issue.
+func TestAdminQuorumFitsEvidence(t *testing.T) {
+	if trust.MaxAdminQuorum != wire.MaxEvidence {
+		t.Fatalf("trust.MaxAdminQuorum = %d, wire.MaxEvidence = %d; they must be equal", trust.MaxAdminQuorum, wire.MaxEvidence)
+	}
+	e := newLogEnvFx(t, NewFixture(t, trust.MaxAdminQuorum, trust.MaxAdminQuorum))
+	if _, err := e.issue(); err != nil {
+		t.Fatalf("issue at the largest quorum, signed by every admin: %v", err)
+	}
+}

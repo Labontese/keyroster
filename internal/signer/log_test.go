@@ -296,6 +296,13 @@ func TestStartRefusedOnLogMismatch(t *testing.T) {
 		"last_leaf_deleted":            `DELETE FROM log_leaf WHERE idx = %[1]d + 2`,
 		"latest_checkpoint_deleted":    `DELETE FROM checkpoint WHERE size = %[1]d + 3`,
 		"checkpoint_from_another_size": `UPDATE checkpoint SET note = (SELECT note FROM checkpoint WHERE size = %[1]d + 1) WHERE size = %[1]d + 3`,
+		// C-WR-01: the log tables cut back to an earlier signed prefix,
+		// whose own checkpoint is still stored and genuine, or wiped.
+		"truncated_to_signed_prefix": `DELETE FROM log_leaf WHERE idx >= %[1]d + 2; DELETE FROM checkpoint WHERE size > %[1]d + 2`,
+		"truncated_to_bootstrap":     `DELETE FROM log_leaf WHERE idx >= %[1]d; DELETE FROM checkpoint WHERE size > %[1]d`,
+		"log_wiped":                  `DELETE FROM log_leaf; DELETE FROM checkpoint`,
+		"issuance_row_deleted":       `DELETE FROM issuance WHERE serial = (SELECT max(serial) FROM issuance)`,
+		"high_water_raised":          `UPDATE serial_state SET last_serial = last_serial + 1`,
 	}
 	for name, stmt := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -322,6 +329,15 @@ func TestStartRefusedOnLogMismatch(t *testing.T) {
 			err = e.open()
 			if err == nil || !strings.Contains(err.Error(), "log state mismatch") {
 				t.Fatalf("New after %s: %v, want log state mismatch", name, err)
+			}
+			// doctor's log check refuses it too.
+			ro, err := signerdb.OpenReadOnly(e.dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = ro.Close() }()
+			if err := CheckLog(context.Background(), ro, e.fx.Roles[keystore.RoleLog].PublicKey()); !errors.Is(err, errLogMismatch) {
+				t.Fatalf("CheckLog after %s: %v, want errLogMismatch", name, err)
 			}
 		})
 	}
@@ -385,5 +401,78 @@ func TestStartRefusesWithoutTrust(t *testing.T) {
 				t.Fatalf("control with every key: %v", err)
 			}
 		})
+	}
+}
+
+// TestCheckLogAgainstLiveSigner (A-WR-06): doctor's log check reads one
+// snapshot, so it never reports a healthy log as inconsistent while the
+// signer appends to it.
+func TestCheckLogAgainstLiveSigner(t *testing.T) {
+	e := newLogEnv(t)
+	ro, err := signerdb.OpenReadOnly(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+	logPub := e.fx.Roles[keystore.RoleLog].PublicKey()
+	done := make(chan error, 1)
+	go func() {
+		for range 60 {
+			if _, err := e.issue(); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	checks := 0
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if checks == 0 {
+				t.Fatal("no log check ran while the signer appended")
+			}
+			if err := CheckLog(context.Background(), ro, logPub); err != nil {
+				t.Fatalf("CheckLog after the appends: %v", err)
+			}
+			return
+		default:
+		}
+		if err := CheckLog(context.Background(), ro, logPub); err != nil {
+			t.Fatalf("CheckLog during append %d: %v", checks, err)
+		}
+		checks++
+	}
+}
+
+// TestCheckLogWithoutCAKeys (C-WR-01): a log with entries but no recorded
+// CA keys contradicts ca-init, which writes both in one transaction.
+func TestCheckLogWithoutCAKeys(t *testing.T) {
+	e := newLogEnv(t)
+	if _, err := e.issue(); err != nil {
+		t.Fatal(err)
+	}
+	e.close()
+	raw, err := sql.Open("sqlite", e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DELETE FROM ca_keys`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := signerdb.OpenReadOnly(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+	if err := CheckLog(context.Background(), ro, e.fx.Roles[keystore.RoleLog].PublicKey()); !errors.Is(err, errLogMismatch) ||
+		!strings.Contains(err.Error(), "no CA keys are recorded") {
+		t.Fatalf("CheckLog with the CA keys deleted = %v, want errLogMismatch naming the missing CA keys", err)
 	}
 }

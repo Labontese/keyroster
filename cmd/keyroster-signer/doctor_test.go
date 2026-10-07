@@ -178,6 +178,15 @@ func TestDoctorFailures(t *testing.T) {
 		{"serial high-water an hour ahead of the clock", func(t *testing.T, s doctorState) {
 			s.exec(t, `UPDATE serial_state SET last_serial = ? WHERE id = 1`, time.Now().Add(time.Hour).UnixMicro())
 		}, "FAIL clock_regression:"},
+		// C-WR-01: the same edit without an issue entry for that serial
+		// contradicts the log.
+		{"serial high-water raised outside the signer", func(t *testing.T, s doctorState) {
+			s.exec(t, `UPDATE serial_state SET last_serial = ? WHERE id = 1`, time.Now().Add(time.Hour).UnixMicro())
+		}, "FAIL log_mismatch:"},
+		{"log wiped", func(t *testing.T, s doctorState) {
+			s.exec(t, `DELETE FROM log_leaf`)
+			s.exec(t, `DELETE FROM checkpoint`)
+		}, "FAIL log_mismatch:"},
 		{"database missing", func(t *testing.T, s doctorState) {
 			for _, suffix := range []string{"", "-wal", "-shm"} {
 				if err := os.Remove(s.db + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {

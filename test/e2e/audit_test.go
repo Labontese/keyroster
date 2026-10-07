@@ -67,7 +67,8 @@ func TestAuditVerifiesIssuance(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("keyroster audit verify exited %d:\n%s", code, out)
 	}
-	if !strings.HasPrefix(out, "OK: 5 entries,") || !strings.Contains(out, "issued 3") {
+	if !strings.HasPrefix(out, "OK: 5 entries,") || !strings.Contains(out, "issued 3") ||
+		!strings.Contains(out, "not checked: that each issuance was authorized") {
 		t.Fatalf("audit verify output = %q, want OK with 5 entries (ca_init, bundle_install, 3 issuances) and 3 issued", out)
 	}
 	t.Logf("audit verify: %s", strings.TrimSpace(out))

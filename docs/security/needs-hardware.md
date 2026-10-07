@@ -39,7 +39,9 @@ as is; run the same flow by hand.
       certificates; the PIN appears in no output and no process command line
       (`ps`).
 - [ ] Record: `ca-pubkeys.json` and the bundle show custody `pkcs11-agent`
-      for all five keys.
+      for all five keys, `doctor` prints `INFO pkcs11_custody_declared`
+      (never `OK custody`), and the five public keys match the HSM's own
+      listing (`yubihsm-shell`), since the custody itself is only declared.
 
 ## 2. YubiKey 5 PIV (KEY-05)
 
@@ -88,6 +90,24 @@ firmware **5.3 to 5.6** (P-256). For each:
       must refuse to start, and `ykman piv info` must show exactly one PIN
       retry used per start, with no further retries used by signing
       requests. Put the correct PIN back before the counter reaches zero.
+- [ ] PIN retry guard (D-CR-01), under the shipped systemd unit: with the
+      correct PIN, the backend reads the retry counter in a fresh session
+      (piv-go `Retries()`) and starts. With a wrong PIN and 3 retries
+      left, `systemctl start` ends with `status=78`, systemd does not
+      restart it (`NRestarts=0`), and `ykman piv info` shows 2 left. Start
+      it by hand once more: 1 left, status 78. Start again: it refuses
+      **without** trying the PIN (message "only 1 PIN retries left") and
+      the counter stays at 1. Record the counter after each step. Then
+      put the right PIN back, reset the counter by entering the correct
+      PIN once by hand with a `ykman piv` command that asks for it (record
+      which command, for piv.md), and check that the signer starts.
+
+- [ ] Attestation evidence for the D-WR-04 design (custody `piv` is
+      card-reported today): for each slot 0x82-0x86, record whether
+      `ykman piv keys attest` produces a certificate, whether it verifies
+      against Yubico's PIV CA with piv-go `Verify`, and whether that holds
+      for Ed25519 slots on firmware 5.7 and for P-256 on 5.3-5.6. Note
+      which Yubico root and intermediates each card's chain uses.
 
 ## 3. Hardware root ceremony (D-11)
 
@@ -112,6 +132,26 @@ a root key in a second SoftHSM2 token as the stand-in for a PIV root.
       machine and sign again, as a later ceremony would.
 - [ ] File the filled-in ceremony transcript
       ([ceremony-transcript-template.md](../runbooks/ceremony-transcript-template.md)).
+
+## 4. Physical TPM 2.0 (KEY-04)
+
+CI stand-in: swtpm (`.github/workflows/e2e-tpm.yml`), which reports
+manufacturer `IBM` and so only ever yields custody `vtpm`. The production
+transport (`/dev/tpmrm0`) and a physical TPM's own behaviour are not run in
+CI ([custody.md](custody.md)).
+
+- [ ] On a host with a physical or firmware TPM (Intel PTT, AMD fTPM, or a
+      discrete chip): `ca-init --backend tpm`, record the printed
+      manufacturer line and custody, and check with `tpm2_readpublic` (or
+      the key file) that each key has `noDA`, `fixedtpm`, `fixedparent` and
+      `sensitivedataorigin`.
+- [ ] Wrong auth (D-WR-01): note `tpm2_getcap properties-variable`
+      (`TPM2_PT_LOCKOUT_COUNTER`), corrupt one `{role}.auth`, start the
+      service: it ends with `status=78`, is not restarted, and the lockout
+      counter is unchanged. Restore the file and start again.
+- [ ] Imported key (D-CR-02): a key made with `tpm2_import` +
+      `tpm2_encodeobject` and selected with `ca-init --key` is refused
+      ("not generated inside this TPM").
 
 ## Sign-off
 

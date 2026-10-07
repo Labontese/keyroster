@@ -266,6 +266,19 @@ func TestOptions(t *testing.T) {
 		if key.Custody() != keystore.CustodyPKCS11Agent {
 			t.Fatalf("Custody = %q, want %q", key.Custody(), keystore.CustodyPKCS11Agent)
 		}
+		// D-WR-03: this software key passes as pkcs11-agent, so ca-init
+		// must say the custody is declared, not verified.
+		d, ok := b.(keystore.Describer)
+		if !ok || !strings.Contains(d.Describe(), "declared by the operator") || !strings.Contains(d.Describe(), "not verified") {
+			t.Fatalf("Describe() of a pkcs11-agent backend must say the custody is declared and not verified (Describer: %v)", ok)
+		}
+	})
+	t.Run("custody_agent_describe", func(t *testing.T) {
+		b := openBackend(t, map[string]string{"socket": sock})
+		d, ok := b.(keystore.Describer)
+		if !ok || !strings.Contains(d.Describe(), "custody agent") {
+			t.Fatalf("Describe() of an agent backend must name custody agent (Describer: %v)", ok)
+		}
 	})
 	tests := []struct {
 		name    string

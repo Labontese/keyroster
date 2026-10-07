@@ -533,3 +533,92 @@ func FuzzValidatePrincipals(f *testing.F) {
 		}
 	})
 }
+
+// TestCheckIssued (C-WR-06): CheckIssued accepts what Build issues under a
+// profile, the full validity cap included, and refuses a certificate a
+// CA-key holder signed outside it.
+func TestCheckIssued(t *testing.T) {
+	ca := newEd25519Signer(t)
+	subject := newEd25519Signer(t).PublicKey()
+	build := func(t *testing.T, edit func(*Request)) (*ssh.Certificate, Profile) {
+		t.Helper()
+		req := validRequest(t, subject)
+		req.Profile.AllowedExtensions = []string{"permit-agent-forwarding"}
+		req.Profile.AllowedCriticalOptions = []string{"source-address"}
+		if edit != nil {
+			edit(&req)
+		}
+		c, err := Build(req, ca, rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, req.Profile
+	}
+	t.Run("built_at_the_cap", func(t *testing.T) {
+		c, p := build(t, func(r *Request) {
+			r.ValidFor = r.Profile.MaxTTL
+			r.ExtraExtensions = map[string]string{"permit-agent-forwarding": ""}
+			r.CriticalOptions = map[string]string{"source-address": "10.0.0.0/8"}
+		})
+		wantErrIs(t, CheckIssued(c, p), nil)
+	})
+	t.Run("built_host", func(t *testing.T) {
+		c, p := build(t, func(r *Request) {
+			r.Profile = Profile{CertType: ssh.HostCert, MaxTTL: 24 * time.Hour}
+			r.Principals = []string{"host.example"}
+		})
+		wantErrIs(t, CheckIssued(c, p), nil)
+	})
+	cases := []struct {
+		name string
+		edit func(c *ssh.Certificate, p *Profile)
+		want error
+	}{
+		{"one_second_over_the_cap", func(c *ssh.Certificate, p *Profile) {
+			c.ValidBefore = c.ValidAfter + uint64((p.MaxTTL+backdate)/time.Second) + 1 //nolint:gosec // G115: a positive test duration
+		}, ErrValidity},
+		{"no_time_after_the_backdate", func(c *ssh.Certificate, _ *Profile) {
+			c.ValidBefore = c.ValidAfter + uint64(backdate/time.Second)
+		}, ErrValidity},
+		{"forever", func(c *ssh.Certificate, _ *Profile) { c.ValidAfter, c.ValidBefore = 0, math.MaxUint64 }, ErrValidity},
+		{"before_not_after_after", func(c *ssh.Certificate, _ *Profile) { c.ValidBefore = c.ValidAfter }, ErrValidity},
+		{"extension_outside_profile", func(c *ssh.Certificate, _ *Profile) { c.Extensions["permit-port-forwarding"] = "" }, ErrExtension},
+		{"critical_option_outside_profile", func(c *ssh.Certificate, _ *Profile) {
+			c.CriticalOptions = map[string]string{"force-command": "/bin/sh"}
+		}, ErrExtension},
+		{"host_cert_with_extension", func(c *ssh.Certificate, p *Profile) {
+			c.CertType, p.CertType = ssh.HostCert, ssh.HostCert
+			p.DefaultExtensions, p.AllowedExtensions = nil, nil
+		}, ErrExtension},
+		{"wrong_cert_type", func(c *ssh.Certificate, _ *Profile) { c.CertType = ssh.HostCert }, ErrProfile},
+		{"no_principals", func(c *ssh.Certificate, _ *Profile) { c.ValidPrincipals = nil }, ErrEmptyPrincipals},
+		{"bad_principal", func(c *ssh.Certificate, _ *Profile) { c.ValidPrincipals = []string{"Alice Smith"} }, ErrPrincipal},
+		{"subject_is_ca", func(c *ssh.Certificate, _ *Profile) { c.Key = c.SignatureKey }, ErrSubjectKey},
+		{"serial_zero", func(c *ssh.Certificate, _ *Profile) { c.Serial = 0 }, ErrSerial},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, p := build(t, nil)
+			tc.edit(c, &p)
+			wantErrIs(t, CheckIssued(c, p), tc.want)
+		})
+	}
+	t.Run("no_certificate", func(t *testing.T) {
+		if err := CheckIssued(nil, DefaultUserProfile()); err == nil {
+			t.Fatal("CheckIssued(nil) accepted")
+		}
+		c, p := build(t, nil)
+		c.SignatureKey = nil
+		if err := CheckIssued(c, p); err == nil {
+			t.Fatal("CheckIssued accepted a certificate without a CA key")
+		}
+	})
+	t.Run("unusable_profile", func(t *testing.T) {
+		c, p := build(t, nil)
+		p.CertType = 3
+		wantErrIs(t, CheckIssued(c, p), ErrProfile)
+		_, p = build(t, nil)
+		p.MaxTTL = 0
+		wantErrIs(t, CheckIssued(c, p), ErrProfile)
+	})
+}

@@ -54,6 +54,13 @@ type fakeSlot struct {
 // signs only in a logged-in session. It has no lock of its own, so only the
 // backend's mutex keeps concurrent use race-free: signs is updated without
 // synchronisation, and -race reports it if the backend does not serialise.
+//
+// Its PIN retry counter follows piv-go against a YubiKey as documented, not
+// as observed on a card: a wrong PIN takes one retry and returns
+// ykpiv.AuthErr with the retries left, the right PIN resets the counter, a
+// counter at zero blocks the PIN (the right PIN no longer helps), and
+// reading the counter in a logged-in session is an error (piv-go's Retries
+// sends an empty VERIFY, which then succeeds).
 type fakeCard struct {
 	major, minor, patch int
 	mgmtKey             []byte
@@ -62,23 +69,44 @@ type fakeCard struct {
 	infoErr             map[uint32]error // injected KeyInfo failures
 	loggedIn            bool
 	pinAttempts         int
+	pinRetries          int   // PIN retries left; 0 means blocked
+	retriesErr          error // injected PINRetries failure
 	generateCalls       int
 	signs               int
 	closed              bool
 }
 
+// fakePINRetries is the fake card's PIN retry limit, the YubiKey default.
+const fakePINRetries = 3
+
 func (f *fakeCard) VerifyPIN(pin string) error {
 	f.pinAttempts++
+	if f.pinRetries == 0 {
+		f.loggedIn = false
+		return fmt.Errorf("fake card: PIN blocked: %w", ykpiv.AuthErr{Retries: 0})
+	}
 	if pin != f.pin {
 		f.loggedIn = false
-		return errors.New("fake card: wrong PIN")
+		f.pinRetries--
+		return fmt.Errorf("fake card: wrong PIN: %w", ykpiv.AuthErr{Retries: f.pinRetries})
 	}
+	f.pinRetries = fakePINRetries
 	f.loggedIn = true
 	return nil
 }
 
+func (f *fakeCard) PINRetries() (int, error) {
+	if f.retriesErr != nil {
+		return 0, f.retriesErr
+	}
+	if f.loggedIn {
+		return 0, errors.New("fake card: expected error code from empty pin")
+	}
+	return f.pinRetries, nil
+}
+
 func newFakeCard(major, minor, patch int) *fakeCard {
-	return &fakeCard{major: major, minor: minor, patch: patch, mgmtKey: testMgmtKey, pin: testPIN, slots: map[uint32]*fakeSlot{}}
+	return &fakeCard{major: major, minor: minor, patch: patch, mgmtKey: testMgmtKey, pin: testPIN, pinRetries: fakePINRetries, slots: map[uint32]*fakeSlot{}}
 }
 
 func (f *fakeCard) Version() (int, int, int) { return f.major, f.minor, f.patch }
@@ -127,8 +155,10 @@ func (f *fakeCard) PrivateKey(slot ykpiv.Slot, pub crypto.PublicKey, auth ykpiv.
 	return &fakeSigner{card: f, priv: s.priv}, nil
 }
 
+// Close ends the card session, so a reopened card is no longer logged in.
 func (f *fakeCard) Close() error {
 	f.closed = true
+	f.loggedIn = false
 	return nil
 }
 
@@ -480,6 +510,71 @@ func TestPIVRefusals(t *testing.T) {
 		if c.pinAttempts != 1 || !c.closed {
 			t.Fatalf("wrong PIN: %d PIN attempts, card closed %v; want 1 attempt and a closed card", c.pinAttempts, c.closed)
 		}
+	})
+}
+
+// TestPIVPINRetriesGuard (D-CR-01): a signer restarted again and again with
+// a wrong PIN in pin-file never spends the card's last PIN retries. Every
+// refusal wraps keystore.ErrCredentialRefused, which keyroster-signer turns
+// into the exit status its systemd unit does not restart on.
+func TestPIVPINRetriesGuard(t *testing.T) {
+	t.Run("restart_loop_keeps_last_retry", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		c.pin = "87654321" // pin-file holds testPIN: wrong for this card
+		opts := validOpts(t)
+		for start := 1; start <= 10; start++ {
+			c.closed = false
+			_, err := newWithCard(c, opts)
+			if err == nil {
+				t.Fatalf("start %d: open with a wrong PIN succeeded", start)
+			}
+			if !errors.Is(err, keystore.ErrCredentialRefused) {
+				t.Fatalf("start %d: %v, want it to wrap keystore.ErrCredentialRefused", start, err)
+			}
+			if !c.closed {
+				t.Fatalf("start %d: the refused card was not closed", start)
+			}
+			if c.pinRetries < 1 {
+				t.Fatalf("start %d: the PIN retry counter reached %d; the backend spent the card's last retry", start, c.pinRetries)
+			}
+		}
+		if c.pinAttempts != fakePINRetries-minPINRetries+1 {
+			t.Fatalf("%d PIN attempts over ten starts, want %d", c.pinAttempts, fakePINRetries-minPINRetries+1)
+		}
+		if c.pinRetries != minPINRetries-1 {
+			t.Fatalf("%d PIN retries left, want %d", c.pinRetries, minPINRetries-1)
+		}
+	})
+	t.Run("too_few_retries_refused_before_verify", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		c.pinRetries = minPINRetries - 1
+		_, err := newWithCard(c, validOpts(t)) // the right PIN: still not tried
+		if !errors.Is(err, keystore.ErrCredentialRefused) || !strings.Contains(err.Error(), "PIN retries left") {
+			t.Fatalf("open with %d retries left: %v, want a retries refusal wrapping keystore.ErrCredentialRefused", minPINRetries-1, err)
+		}
+		if c.pinAttempts != 0 || !c.closed {
+			t.Fatalf("%d PIN attempts, card closed %v; want none and a closed card", c.pinAttempts, c.closed)
+		}
+	})
+	t.Run("retries_unreadable_refused", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		c.retriesErr = errors.New("fake card: transmit failed")
+		_, err := newWithCard(c, validOpts(t))
+		if err == nil || !strings.Contains(err.Error(), "PIN retry counter") {
+			t.Fatalf("open with an unreadable retry counter: %v, want a refusal", err)
+		}
+		if c.pinAttempts != 0 || !c.closed {
+			t.Fatalf("%d PIN attempts, card closed %v; want none and a closed card", c.pinAttempts, c.closed)
+		}
+	})
+	t.Run("right_pin_with_enough_retries_opens", func(t *testing.T) {
+		c := newFakeCard(5, 7, 0)
+		c.pinRetries = minPINRetries
+		b := openFake(t, c, validOpts(t))
+		if c.pinAttempts != 1 || c.pinRetries != fakePINRetries {
+			t.Fatalf("%d PIN attempts, %d retries left; want 1 and a reset counter of %d", c.pinAttempts, c.pinRetries, fakePINRetries)
+		}
+		_ = b
 	})
 }
 

@@ -16,11 +16,23 @@ Documentation=https://github.com/Labontese/keyroster/blob/main/docs/runbooks/sig
 # Ordering only: with the agent or PKCS#11 backend, start after the signer's
 # own ssh-agent. The TPM backend does not need it.
 After=keyroster-signer-agent.service
+# At most 5 starts in 10 minutes; then systemd stops trying until an operator
+# runs `systemctl reset-failed` (D-CR-01). StartLimit* must be in [Unit].
+StartLimitIntervalSec=10min
+StartLimitBurst=5
 
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/keyroster-signer serve --state-dir /var/lib/keyroster-signer --socket /run/keyroster-signer/signer.sock --allow-group keyroster-admin
 Restart=on-failure
+RestartSec=5s
+# Exit status 78: the key store refused the PIV PIN or a TPM key's auth
+# value, or the PIV backend refused to try the PIN with fewer than 2
+# retries left. Every restart would
+# spend another of the device's limited attempts (a blocked PIV PIN can cost
+# the CA keys), so systemd does not restart; fix the secret file, then start
+# the service by hand (docs/runbooks/signer-install.md).
+RestartPreventExitStatus=78
 
 # Identity. keyroster-admin as a supplementary group lets the signer chgrp
 # its socket to that group (mode 0660); it grants nothing else.

@@ -5,12 +5,28 @@
 //
 // FAIL means the installation is unsafe or broken: running as root, a state
 // directory or database readable by others, a damaged database, an audit
-// log that no longer reproduces its signed checkpoint, or a clock behind the
-// serial high-water mark. WARN means weaker custody than hardware, stated
-// loudly: a software root (SOFTWARE ROOT), keys in a virtual TPM, plain
-// keys in ssh-agent, or a TPM that no longer matches the recorded custody.
-// doctor never reports a vTPM-held, agent-held or software key as hardware
-// custody.
+// log that no longer reproduces its signed checkpoint or contradicts the
+// tables written with it (the log tables alone rolled back to an earlier
+// signed prefix, or wiped; a rollback of the whole database is not
+// detectable here, see signer.CheckLog), an installed trust bundle that
+// serve would refuse at start (it does not list the recorded keys, names
+// an online key or a root as a policy admin, or is not the one the log's
+// last bundle_install entry records), or a clock behind the serial
+// high-water mark. doctor has neither the backend's keys nor the
+// operator's root pins, so a database rewritten consistently with keys and
+// roots of the rewriter's choosing passes it. serve refuses such a
+// database only while the rewriter cannot also place their keys in the
+// backend (with the agent backend, whoever can use the agent socket can);
+// the check that holds is keyroster audit verify --pin. Compare the roots
+// doctor prints with your pins.
+//
+// WARN means weaker custody than hardware, stated loudly: a software root
+// (SOFTWARE ROOT), keys in a virtual TPM, plain keys in ssh-agent, a TPM
+// that no longer matches the recorded custody, or TPM custody that could
+// not be confirmed. Custody pkcs11-agent is the operator's declaration,
+// which doctor cannot check, and gets an INFO line saying so. doctor never
+// reports a vTPM-held, agent-held, declared pkcs11-agent or software key as
+// hardware custody.
 package doctor
 
 import (
@@ -53,20 +69,22 @@ func (l Level) String() string {
 
 // Result codes of INFO, WARN and FAIL results.
 const (
-	CodeRunningAsRoot       = "running_as_root"
-	CodeStateDirPermissions = "state_dir_permissions"
-	CodeDBPermissions       = "db_permissions"
-	CodeDBIntegrity         = "db_integrity"
-	CodeLogMismatch         = "log_mismatch"
-	CodeClockRegression     = "clock_regression"
-	CodeNoBundle            = "no_bundle"
-	CodeSoftwareRoot        = "software_root"
-	CodeVTPMCustody         = "vtpm_custody"
-	CodeSoftwareKeyInAgent  = "software_key_in_agent"
-	CodeSoftwareKey         = "software_key"
-	CodePKCS11Ed25519       = "pkcs11_ed25519"
-	CodeCustodyMismatch     = "custody_mismatch"
-	CodeTPMUnavailable      = "tpm_unavailable"
+	CodeRunningAsRoot         = "running_as_root"
+	CodeStateDirPermissions   = "state_dir_permissions"
+	CodeDBPermissions         = "db_permissions"
+	CodeDBIntegrity           = "db_integrity"
+	CodeLogMismatch           = "log_mismatch"
+	CodeTrustMismatch         = "trust_mismatch"
+	CodeClockRegression       = "clock_regression"
+	CodeNoBundle              = "no_bundle"
+	CodeSoftwareRoot          = "software_root"
+	CodeVTPMCustody           = "vtpm_custody"
+	CodeSoftwareKeyInAgent    = "software_key_in_agent"
+	CodeSoftwareKey           = "software_key"
+	CodePKCS11Ed25519         = "pkcs11_ed25519"
+	CodeCustodyMismatch       = "custody_mismatch"
+	CodeTPMUnavailable        = "tpm_unavailable"
+	CodePKCS11CustodyDeclared = "pkcs11_custody_declared"
 )
 
 // Codes of OK results. Each names the check that passed.
@@ -76,6 +94,7 @@ const (
 	codeDBMode    = "db_permissions"
 	codeIntegrity = "db_integrity"
 	codeLog       = "log"
+	codeTrust     = "trust"
 	codeClock     = "clock"
 	codeBundle    = "bundle"
 	codeRoots     = "roots"
@@ -127,7 +146,9 @@ type Facts struct {
 	IntegrityOK     bool
 	IntegrityDetail string
 	// LogMatches means the stored leaves reproduce the latest checkpoint,
-	// signed by the recorded log key; LogDetail says why not.
+	// signed by the recorded log key, and agree with the CA keys, issuance
+	// rows and serial high-water mark (signer.CheckLog); LogDetail says
+	// why not.
 	LogMatches bool
 	LogDetail  string
 
@@ -137,6 +158,10 @@ type Facts struct {
 
 	// Bundle is the installed trust bundle, nil when none is installed.
 	Bundle *trust.Bundle
+	// TrustError says why serve would refuse the installed trust bundle
+	// (signer.CheckTrust); empty when it would load it, or when none is
+	// installed and the log records none.
+	TrustError string
 	// CAKeys are the online keys ca-init recorded.
 	CAKeys []CAKeyFact
 
@@ -150,8 +175,12 @@ type Facts struct {
 }
 
 // hardwareCustody are the online custodies whose keys cannot be copied off
-// a physical device. vtpm, agent and software are not among them.
-var hardwareCustody = map[string]bool{"tpm": true, "piv": true, "pkcs11-agent": true}
+// a physical device and that the backend itself establishes: tpm (also
+// cross-checked against the live TPM below) and piv (the card reports the
+// key as generated on it). vtpm, agent and software are not among them, and
+// neither is pkcs11-agent: that one is the operator's declaration, which
+// nothing checks (custodyResults reports it as pkcs11_custody_declared).
+var hardwareCustody = map[string]bool{"tpm": true, "piv": true}
 
 // Run checks f and returns the results in a fixed order.
 func Run(f Facts) []Result {
@@ -190,9 +219,9 @@ func Run(f Facts) []Result {
 		add(OK, codeIntegrity, "PRAGMA integrity_check: ok")
 	}
 	if !f.LogMatches {
-		add(FAIL, CodeLogMismatch, "the stored audit log does not reproduce its latest signed checkpoint (%s); the database was modified outside the signer or restored inconsistently, and serve refuses to start", orUnknown(f.LogDetail))
+		add(FAIL, CodeLogMismatch, "the stored audit log does not reproduce its latest signed checkpoint, or contradicts the CA keys, issuance rows or serial high-water mark recorded with it (%s); the database was modified outside the signer, rolled back or restored inconsistently, and serve refuses to start", orUnknown(f.LogDetail))
 	} else {
-		add(OK, codeLog, "the stored leaves reproduce the latest checkpoint signed by the log key")
+		add(OK, codeLog, "the stored leaves reproduce the latest checkpoint signed by the log key and match the recorded CA keys, issuance rows and serial high-water mark")
 	}
 	rs = append(rs, clockResult(f.NowMicros, f.HighWaterMicros))
 
@@ -201,6 +230,12 @@ func Run(f Facts) []Result {
 	} else {
 		add(OK, codeBundle, "trust bundle version %d installed (%d roots, threshold %d)", f.Bundle.Version, len(f.Bundle.Root.Keys), f.Bundle.Root.Threshold)
 		rs = append(rs, rootResults(f.Bundle.Root.Keys)...)
+	}
+	switch {
+	case f.TrustError != "":
+		add(FAIL, CodeTrustMismatch, "the installed trust bundle is not one serve would load (%s); serve refuses to start", f.TrustError)
+	case f.Bundle != nil:
+		add(OK, codeTrust, "the installed trust bundle lists the recorded keys and is the one the log's last bundle_install entry records (its root signatures are checked by install-bundle and audit verify, not here)")
 	}
 	rs = append(rs, custodyResults(f)...)
 	return rs
@@ -243,8 +278,8 @@ func rootResults(roots []trust.RootKey) []Result {
 }
 
 // custodyResults reports the custody of the online keys. Only a set of keys
-// that are all in hardware custody, with a TPM (if any) that still matches
-// the recorded custody, yields an OK custody line.
+// that are all in hardware custody (hardwareCustody), with a TPM (if any)
+// that still matches the recorded custody, yields an OK custody line.
 func custodyResults(f Facts) []Result {
 	var rs []Result
 	byCustody := map[string][]string{}
@@ -259,10 +294,15 @@ func custodyResults(f Facts) []Result {
 			ed25519PKCS11 = append(ed25519PKCS11, k.Role)
 		}
 	}
-	weak := false
+	weak, declared := false, false
 	for _, c := range order {
 		roles := strings.Join(byCustody[c], ", ")
 		switch c {
+		case "pkcs11-agent":
+			// Not weak, but not confirmed either: no OK hardware line.
+			declared = true
+			rs = append(rs, Result{Level: INFO, Code: CodePKCS11CustodyDeclared, Message: fmt.Sprintf(
+				"keys %s are declared custody pkcs11-agent (ca-init --backend-opt custody=pkcs11-agent); doctor cannot verify that these agent keys live in a hardware token, since a SoftHSM token or a plain ssh-add key in the same agent looks the same (docs/security/custody.md)", roles)})
 		case "vtpm":
 			weak = true
 			rs = append(rs, Result{Level: WARN, Code: CodeVTPMCustody, Message: fmt.Sprintf(
@@ -311,9 +351,15 @@ func custodyResults(f Facts) []Result {
 				rs = append(rs, Result{Level: OK, Code: codeTPM, Message: fmt.Sprintf(
 					"TPM manufacturer %s maps to custody %s, as recorded", f.TPMManufacturer, f.TPMCustody)})
 			}
+		default:
+			// Nobody read the TPM (the recorded backend is not tpm, or
+			// the read gave no custody): the recorded custody is a claim
+			// only, never an OK.
+			weak = true
+			rs = append(rs, Result{Level: WARN, Code: CodeTPMUnavailable, Message: "keys are recorded with TPM custody, but the TPM was not inspected, so that custody is unconfirmed"})
 		}
 	}
-	if !weak && len(f.CAKeys) > 0 {
+	if !weak && !declared && len(f.CAKeys) > 0 {
 		var parts []string
 		for _, c := range order {
 			parts = append(parts, strings.Join(byCustody[c], ", ")+": "+c)
