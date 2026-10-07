@@ -387,3 +387,47 @@ func TestStartRefusesWithoutTrust(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckLogAgainstLiveSigner (A-WR-06): doctor's log check reads one
+// snapshot, so it never reports a healthy log as inconsistent while the
+// signer appends to it.
+func TestCheckLogAgainstLiveSigner(t *testing.T) {
+	e := newLogEnv(t)
+	ro, err := signerdb.OpenReadOnly(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+	logPub := e.fx.Roles[keystore.RoleLog].PublicKey()
+	done := make(chan error, 1)
+	go func() {
+		for range 60 {
+			if _, err := e.issue(); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	checks := 0
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if checks == 0 {
+				t.Fatal("no log check ran while the signer appended")
+			}
+			if err := CheckLog(context.Background(), ro, logPub); err != nil {
+				t.Fatalf("CheckLog after the appends: %v", err)
+			}
+			return
+		default:
+		}
+		if err := CheckLog(context.Background(), ro, logPub); err != nil {
+			t.Fatalf("CheckLog during append %d: %v", checks, err)
+		}
+		checks++
+	}
+}

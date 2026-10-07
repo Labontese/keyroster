@@ -114,6 +114,49 @@ func (d *DB) ReadLog(ctx context.Context, fn func(idx uint64, leaf []byte) error
 	return note, size, nil
 }
 
+// ReadLogWithHashes reads the whole log from one consistent snapshot, in
+// one read transaction: it calls fn for every leaf with its stored hash, in
+// index order, and then returns the latest checkpoint, or ErrNoCheckpoint
+// when there is none (fn has then seen every leaf). Appends committed
+// meanwhile are not seen, so the leaves, hashes and checkpoint always
+// belong together.
+func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, hash []byte) error) (note []byte, size uint64, err error) {
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, 0, fmt.Errorf("signerdb: begin read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, `SELECT idx, leaf, leaf_hash FROM log_leaf ORDER BY idx`)
+	if err != nil {
+		return nil, 0, fmt.Errorf("signerdb: read log leaves: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var want int64
+	for rows.Next() {
+		var (
+			idx        int64
+			leaf, hash []byte
+		)
+		if err := rows.Scan(&idx, &leaf, &hash); err != nil {
+			return nil, 0, fmt.Errorf("signerdb: read log leaves: %w", err)
+		}
+		if idx != want {
+			return nil, 0, fmt.Errorf("signerdb: log leaf %d missing", want)
+		}
+		want++
+		if err := fn(uint64(idx), leaf, hash); err != nil { //nolint:gosec // G115: idx == want-1 >= 0
+			return nil, 0, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("signerdb: read log leaves: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, 0, fmt.Errorf("signerdb: read log leaves: %w", err)
+	}
+	return latestCheckpoint(ctx, tx)
+}
+
 type queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row

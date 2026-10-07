@@ -125,22 +125,19 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 	return err
 }
 
-// rebuildLogFrom is rebuildLog over db with the checkpoint verifier v.
+// rebuildLogFrom is rebuildLog over db with the checkpoint verifier v. It
+// reads the leaves, their stored hashes and the latest checkpoint from one
+// snapshot (signerdb.ReadLogWithHashes), so a leaf the signer appends
+// meanwhile cannot make a healthy log look inconsistent (doctor runs
+// against a live signer).
 func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlog.Log, uint64, []byte, error) {
-	hashes, err := db.LeafHashes(ctx)
-	if err != nil {
-		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
-	}
 	var (
 		last    uint64
-		count   int
+		hashes  [][]byte
 		install []byte
 	)
-	// ForEachLeaf yields idx = 0, 1, 2, ... without gaps, so count == idx.
-	err = db.ForEachLeaf(ctx, func(idx uint64, leaf []byte) error {
-		if count >= len(hashes) {
-			return fmt.Errorf("%w: leaf %d has no stored hash", errLogMismatch, idx)
-		}
+	// ReadLogWithHashes yields idx = 0, 1, 2, ... without gaps.
+	msg, size, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
 		l, err := tlog.DecodeLeaf(leaf)
 		if err != nil {
 			return fmt.Errorf("%w: leaf %d does not decode", errLogMismatch, idx)
@@ -151,40 +148,34 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		if l.TimeMicros < last {
 			return fmt.Errorf("%w: leaf %d is older than its predecessor", errLogMismatch, idx)
 		}
-		if !bytes.Equal(tlog.HashLeaf(leaf), hashes[count]) {
+		if !bytes.Equal(tlog.HashLeaf(leaf), hash) {
 			return fmt.Errorf("%w: leaf %d does not match its stored hash", errLogMismatch, idx)
 		}
 		if l.Kind == tlog.KindBundleInstall {
 			install = l.Body
 		}
 		last = l.TimeMicros
-		count++
+		hashes = append(hashes, hash)
 		return nil
 	})
-	if err != nil {
+	noCheckpoint := errors.Is(err, signerdb.ErrNoCheckpoint)
+	if err != nil && !noCheckpoint {
 		if errors.Is(err, errLogMismatch) {
 			return nil, 0, nil, err
 		}
 		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
-	if count != len(hashes) {
-		return nil, 0, nil, fmt.Errorf("%w: %d leaves, %d hashes", errLogMismatch, count, len(hashes))
-	}
 	tree, err := tlog.FromHashes(hashes)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
-	root, err := tree.Root()
-	if err != nil {
-		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
-	}
-	msg, size, err := db.LatestCheckpoint(ctx)
-	if errors.Is(err, signerdb.ErrNoCheckpoint) {
+	if noCheckpoint {
 		if tree.Size() != 0 {
 			return nil, 0, nil, fmt.Errorf("%w: %d leaves but no checkpoint", errLogMismatch, tree.Size())
 		}
 		return tree, 0, nil, nil
 	}
+	root, err := tree.Root()
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}

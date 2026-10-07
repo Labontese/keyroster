@@ -363,3 +363,68 @@ func TestDurabilityPragmas(t *testing.T) {
 		t.Fatalf("journal_mode=%s synchronous=%d, want wal and 2 (FULL)", mode, sync)
 	}
 }
+
+// TestReadLogWithHashesSnapshot (A-WR-06): ReadLogWithHashes serves the
+// leaves, their hashes and the latest checkpoint from one snapshot. A leaf
+// and checkpoint committed by another connection while it reads are not
+// seen, so the result is always consistent (doctor against a live signer).
+func TestReadLogWithHashesSnapshot(t *testing.T) {
+	ctx := context.Background()
+	writer, path := openTemp(t)
+	appendOne := func(idx uint64) error {
+		return writer.WithTx(ctx, func(tx *sql.Tx) error {
+			if err := writer.AppendLeaf(tx, idx, []byte{byte(idx), 'l'}, hash32(byte(idx))); err != nil {
+				return err
+			}
+			return writer.PutCheckpoint(tx, idx+1, []byte{'c', byte(idx + 1)})
+		})
+	}
+	for i := range uint64(3) {
+		if err := appendOne(i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reader, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+
+	var seen []uint64
+	note, size, err := reader.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
+		if idx == 0 {
+			// Commit leaf 3 and its checkpoint mid-read.
+			if err := appendOne(3); err != nil {
+				return err
+			}
+		}
+		if leaf[0] != byte(idx) || hash[0] != byte(idx) {
+			t.Errorf("leaf %d: got leaf %x, hash %x", idx, leaf, hash)
+		}
+		seen = append(seen, idx)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 3 || size != 3 || string(note) != string([]byte{'c', 3}) {
+		t.Fatalf("snapshot read %d leaves and checkpoint size %d (%x); want 3 leaves and checkpoint 3", len(seen), size, note)
+	}
+	// The concurrent append did commit; the next read sees it.
+	seen = nil
+	if _, size, err = reader.ReadLogWithHashes(ctx, func(idx uint64, _, _ []byte) error {
+		seen = append(seen, idx)
+		return nil
+	}); err != nil || len(seen) != 4 || size != 4 {
+		t.Fatalf("second read: %d leaves, checkpoint %d, %v; want 4 and 4", len(seen), size, err)
+	}
+
+	t.Run("empty_log", func(t *testing.T) {
+		empty, _ := openTemp(t)
+		calls := 0
+		_, _, err := empty.ReadLogWithHashes(ctx, func(uint64, []byte, []byte) error { calls++; return nil })
+		if !errors.Is(err, ErrNoCheckpoint) || calls != 0 {
+			t.Fatalf("empty log: %d calls, %v; want 0 and ErrNoCheckpoint", calls, err)
+		}
+	})
+}
