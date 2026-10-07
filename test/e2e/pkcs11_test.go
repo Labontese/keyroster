@@ -522,7 +522,10 @@ func TestPKCS11RootSignsBundle(t *testing.T) {
 // idempotency): the same ca_keys rows, ca-pubkeys.json and audit log.
 func TestPKCS11CAInitTwiceRefused(t *testing.T) {
 	s := newPKCS11Setup(t, pkcs11Agent(t), pkcs11KeyType(t))
-	env := bootstrapSigner(t, s.opts())
+	// Without serve: a running serve holds the state directory lock, and
+	// ca-init would then be refused by the lock before it reaches the
+	// initialised-state check this test is about.
+	env := prepareSigner(t, s.opts())
 
 	caKeys := func() []signerdb.CAKey {
 		t.Helper()

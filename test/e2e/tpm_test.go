@@ -328,7 +328,8 @@ func TestTPMCAInitTwiceRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, e := range entries {
-				if e.IsDir() || strings.HasPrefix(e.Name(), "signer.db") {
+				// signer.lock is the (empty) state directory lock file.
+				if e.IsDir() || strings.HasPrefix(e.Name(), "signer.db") || e.Name() == "signer.lock" {
 					continue
 				}
 				data, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec // test fixture
