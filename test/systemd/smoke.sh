@@ -22,6 +22,8 @@
 #   - keyroster-signer doctor passes as keyroster-signer and states the
 #     weaker custody of this test setup (SOFTWARE ROOT, plain keys in
 #     ssh-agent), and fails when run as root;
+#   - systemd parsed the signer's restart policy: no restart on exit 78,
+#     restarts spaced and capped;
 #   - the signer's ssh-agent unit, which holds the CA keys, runs as
 #     keyroster-signer with no capabilities, no_new_privs and seccomp, and
 #     systemd reports its sandbox settings (MemoryDenyWriteExecute,
@@ -236,6 +238,18 @@ grep -qx $'CapEff:\t0000000000000000' "/proc/$pid/status" || fail "signer has ef
 grep -qx $'CapBnd:\t0000000000000000' "/proc/$pid/status" || fail "signer has a non-empty bounding set"
 grep -qx $'NoNewPrivs:\t1' "/proc/$pid/status" || fail "no_new_privs not set"
 grep -qx $'Seccomp:\t2' "/proc/$pid/status" || fail "no seccomp filter"
+
+step "Restart policy of keyroster-signer.service"
+# D-CR-01: exit status 78 (a refused PIV PIN or TPM auth value) must not be
+# restarted, and restarts are spaced and capped, so a wrong secret cannot
+# spend the device's limited attempts in a loop. This checks that systemd
+# parsed the unit as intended (StartLimit* is ignored outside [Unit]); a run
+# that really exits 78 needs a PIV card or a TPM and is not part of CI.
+props=$(systemctl show -p Restart,RestartUSec,RestartPreventExitStatus,StartLimitBurst,StartLimitIntervalUSec keyroster-signer.service)
+echo "$props"
+for want in Restart=on-failure RestartUSec=5s RestartPreventExitStatus=78 StartLimitBurst=5 StartLimitIntervalUSec=10min; do
+	grep -qx "$want" <<<"$props" || fail "systemctl show: want $want"
+done
 
 step "Sandbox properties of the running ssh-agent unit (holds the CA keys)"
 # E-WR-05: the agent keeps the host network namespace and loads PKCS#11
