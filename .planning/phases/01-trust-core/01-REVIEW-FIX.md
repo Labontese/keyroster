@@ -24,7 +24,7 @@ below, unchanged except for their frontmatter.
 
 | ID | Outcome | Commits |
 |----|---------|---------|
-| A-CR-01 (also C-CR-01) | fixed: requires human verification | 5227172, 068ae1e |
+| A-CR-01 (also C-CR-01) | fixed: requires human verification (the e2e tests adapted in 068ae1e, reported below as not run, were later run green in area D's e2e_tpm and e2e_pkcs11 lanes) | 5227172, 068ae1e |
 | A-WR-01 | fixed: requires human verification | 344d212 |
 | A-WR-02 (also B-WR-01, C-WR-05) | fixed: requires human verification | 2ae8aa1 |
 | A-WR-03 | fixed | 50a9472 |
