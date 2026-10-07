@@ -41,6 +41,12 @@ type CAProfile struct {
 // NamespacePolicy is the SSHSIG namespace of root signatures over a policy.
 const NamespacePolicy = "keyroster/policy/v1"
 
+// MaxAdminQuorum is the largest admin quorum a policy may require: an issue
+// request carries at most this many evidence items (wire.MaxEvidence, kept
+// equal by a test in internal/signer), so a larger quorum could never be
+// met and the CA could never issue.
+const MaxAdminQuorum = 4
+
 var (
 	adminKeyTypes = set(ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoSKED25519, ssh.KeyAlgoSKECDSA256)
 	// The OpenSSH certificate extensions and critical options
@@ -77,6 +83,9 @@ func (p *Policy) Validate() error {
 	}
 	if p.AdminQuorum < 1 || int(p.AdminQuorum) > len(p.Admins) {
 		return fmt.Errorf("%w: admin_quorum %d with %d admins", ErrInvalid, p.AdminQuorum, len(p.Admins))
+	}
+	if p.AdminQuorum > MaxAdminQuorum {
+		return fmt.Errorf("%w: admin_quorum %d is above %d, the most admin signatures one issue request can carry", ErrInvalid, p.AdminQuorum, MaxAdminQuorum)
 	}
 	names := map[string]bool{}
 	keys := map[string]bool{}
