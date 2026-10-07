@@ -68,7 +68,7 @@ name (with its matrix value) in one of the workflows under
 |---|---|---|
 | `build-test` | `ci.yml` | `go mod verify`, static build, cross-compile for windows/darwin/freebsd, `go vet`, `gofmt`, tests with the race detector |
 | `lint` | `ci.yml` | golangci-lint v2.14.0 with `.golangci.yml` |
-| `govulncheck` | `ci.yml` | reachable-vulnerability scan with the pinned govulncheck in `tools/go.mod` |
+| `govulncheck` | `ci.yml` | reachable-vulnerability scan of the default build with the pinned govulncheck in `tools/go.mod` (the `-tags piv` build is scanned in `build-piv`) |
 | `dependency-firewall` | `ci.yml` | `scripts/dep-firewall.sh`: no banned package in keyroster-signer's dependency graph, with and without `-tags piv` |
 | `capslock` | `ci.yml` | `scripts/capslock-check.sh`: no new (package, capability) pair for keyroster-signer compared with `test/capslock/keyroster-signer.json` |
 | `fuzz` | `ci.yml` | `scripts/fuzz.sh`: every native fuzz target for 30 s; fails when any target fails or when zero targets ran |
@@ -78,10 +78,10 @@ name (with its matrix value) in one of the workflows under
 | `e2e-pkcs11 (distro-p256)` | `e2e-pkcs11.yml` | the PKCS#11 path with P-256 keys in SoftHSM2, reached through Ubuntu's own ssh-agent |
 | `e2e-pkcs11 (10.5p1-ed25519)` | `e2e-pkcs11.yml` | the PKCS#11 path with Ed25519 keys in SoftHSM2, reached through the OpenSSH 10.5p1 ssh-agent |
 | `e2e-tpm` | `e2e-tpm.yml` | `ca-init --backend tpm` and the TPM keystore tests against swtpm |
-| `build-piv` | `piv.yml` | vet, lint, tests and build of the `-tags piv` YubiKey backend, and proof that default builds link neither piv-go nor cgo |
+| `build-piv` | `piv.yml` | govulncheck, vet, lint, tests and build of the `-tags piv` YubiKey backend, and proof that default builds link neither piv-go nor cgo; also runs nightly |
 | `systemd-sandbox` | `systemd.yml` | keyroster-signer under its real systemd units: bootstrap, issuance, `lo`-only network namespace, `systemd-analyze security` gate |
 | `pinned-actions` | `workflow-lint.yml` | `scripts/check-pinned-actions.sh`: every action is pinned to a commit SHA |
-| `Analyze (go)` | `codeql.yml` | CodeQL analysis of the Go code |
+| `Analyze (go)` | `codeql.yml` | CodeQL analysis of the Go code, built both static and with `-tags piv` (UNVERIFIED: that the extractor picks up the piv files from the second build has not been checked in a CI run) |
 | `Analyze (actions)` | `codeql.yml` | CodeQL analysis of the workflows |
 
 **OpenSSH 9.5p2 is not covered by CI.** Windows ships Microsoft's own
