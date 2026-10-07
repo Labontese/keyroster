@@ -182,7 +182,9 @@ func newLogWriter(ctx context.Context, db *signerdb.DB, logKey keystore.CAKey, c
 // least threshold distinct roots among the operator's pins, and its root
 // set must be exactly the pinned set (trust.VerifyGenesisBundle). A later
 // bundle is verified against the installed one by the successor rule
-// (trust.VerifySuccessor); pins and threshold must then be empty. In both
+// (trust.VerifySuccessor); pins and threshold must then be empty, and the
+// installed record must be the one the log's last bundle_install entry
+// records (none for a genesis install). In both
 // cases the bundle's CA, ops and log keys, algorithms and custody must
 // equal the keys ca-init chose, none of them may be a root key, and the
 // log origin must be the log key's. The bundle, the policy and their
@@ -203,11 +205,26 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err != nil {
 		return nil, err
 	}
+	logKey, err := openRoleKey(be, caKeys, "log")
+	if err != nil {
+		return nil, err
+	}
+	lw, err := newLogWriter(ctx, db, logKey, clock)
+	if err != nil {
+		return nil, err
+	}
 	var (
 		b *trust.Bundle
 		p *trust.Policy
 	)
 	latest, err := db.LatestBundle(ctx)
+	if err == nil || errors.Is(err, signerdb.ErrNoBundle) {
+		// A successor is verified against the installed record, so that
+		// record must be the one the verified log carries.
+		if cerr := checkBundleLogged(latest, lw.loadedInstall); cerr != nil {
+			return nil, cerr
+		}
+	}
 	switch {
 	case errors.Is(err, signerdb.ErrNoBundle):
 		b, p, err = trust.VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs, pins, threshold)
@@ -235,20 +252,12 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err := checkPolicyAdmins(p, caKeys); err != nil {
 		return nil, err
 	}
-	logKey, err := openRoleKey(be, caKeys, "log")
-	if err != nil {
-		return nil, err
-	}
 	if b.Log.Origin != tlog.Origin(logKey.PublicKey()) {
 		return nil, fmt.Errorf("%w: log origin %q is not the log key's %q", ErrBundleKeys, b.Log.Origin, tlog.Origin(logKey.PublicKey()))
 	}
 	enc, err := (&tlog.BundleInstallBody{
 		BundleVersion: b.Version, Bundle: bundle, BundleSigs: bundleSigs, Policy: policy, PolicySigs: policySigs,
 	}).Encode()
-	if err != nil {
-		return nil, err
-	}
-	lw, err := newLogWriter(ctx, db, logKey, clock)
 	if err != nil {
 		return nil, err
 	}
@@ -382,6 +391,7 @@ func keyFingerprint(caKeys []signerdb.CAKey, role string) string {
 
 // trustState is what the signer takes from the installed bundle.
 type trustState struct {
+	stored   *signerdb.StoredBundle
 	bundle   *trust.Bundle
 	policy   *trust.Policy
 	ca       map[wire.CARole]keystore.CAKey
@@ -426,7 +436,7 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 	if err := checkPolicyAdmins(p, caKeys); err != nil {
 		return nil, err
 	}
-	ts := &trustState{bundle: b, policy: p, ca: map[wire.CARole]keystore.CAKey{}, profiles: map[wire.CARole]cert.Profile{}}
+	ts := &trustState{stored: stored, bundle: b, policy: p, ca: map[wire.CARole]keystore.CAKey{}, profiles: map[wire.CARole]cert.Profile{}}
 	keys := map[string]keystore.CAKey{}
 	for _, k := range caKeys {
 		key, err := openRoleKey(be, caKeys, k.Role)

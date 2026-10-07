@@ -87,8 +87,9 @@ type Signer struct {
 // key (user, host and machine CA, ops and log key) in the backend, and
 // rebuilds the audit log from the state database. It refuses to start
 // without an installed bundle, when any bundle key is missing from the
-// backend, and when the stored leaves do not reproduce the latest signed
-// checkpoint. The trust state is loaded only here: once another bundle is
+// backend, when the stored leaves do not reproduce the latest signed
+// checkpoint, and when the installed bundle record is not the one the last
+// bundle_install entry of that log records. The trust state is loaded only here: once another bundle is
 // installed, the signer refuses every request (trust_changed) until it is
 // restarted and loads it.
 func New(cfg Config) (*Signer, error) {
@@ -134,6 +135,11 @@ func New(cfg Config) (*Signer, error) {
 	}
 	s.limiter = newRefusalLimiter(perMinute, burst, s.clock())
 	if err := s.initLog(context.Background()); err != nil {
+		return nil, err
+	}
+	// The trust state above came from the trust_bundle table; take it only
+	// if the verified log's last bundle_install entry records exactly it.
+	if err := checkBundleLogged(ts.stored, s.loadedInstall); err != nil {
 		return nil, err
 	}
 	return s, nil
