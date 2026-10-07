@@ -235,6 +235,24 @@ The backend also refuses a key that was imported into a slot rather than
 generated on the card, and any key whose fingerprint differs from the one
 pinned in the trust bundle.
 
+**Custody `piv` is what the card reports, not what it proves (D-WR-04).**
+The backend picks any PC/SC reader whose name contains "yubikey" (or the one
+with the `serial` you set), and "generated on the card" is the card's own
+answer to GET METADATA. A virtual smart card (for example vsmartcard/vpcd
+under a "Yubico YubiKey" reader name) or an applet that answers the Yubico
+extensions would pass both checks with a key held in software, and be
+recorded as custody `piv`. A real YubiKey can prove origin with a per-slot
+attestation certificate that chains to Yubico's PIV CA (piv-go `Attest` and
+`Verify`); the backend does not check it yet. That is deferred to the phase
+1 gap plan, because it needs decisions that cannot be tested here: which
+Yubico roots to trust (newer firmware uses a different attestation
+hierarchy), whether Ed25519 slots on firmware 5.7 attest, and whether a
+failed attestation refuses the key or only lowers its custody. Until then,
+whoever signs the bundle should check on the card itself that the five
+public keys in `ca-pubkeys.json` are the slot keys (`ykman piv keys info`)
+and, for full assurance, verify each slot's attestation by hand
+(`ykman piv keys attest`).
+
 ## What CI verifies, and what needs hardware
 
 The `PIV` workflow (`.github/workflows/piv.yml`, check `build-piv`):

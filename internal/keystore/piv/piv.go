@@ -35,7 +35,10 @@
 //
 // Both secret files must be regular files with mode 0600 or stricter. The
 // default PIN and the default management key are refused, and so are keys
-// that were imported into the card rather than generated on it.
+// that were imported into the card rather than generated on it. Both the
+// card's identity (a reader name containing "yubikey") and a key's origin
+// are what the card reports; slot attestation is not checked, so custody
+// piv is card-reported, not proven (D-WR-04, docs/backends/piv.md).
 //
 // What CI verifies: everything in this file, through the card interface
 // with an in-memory fake card. What CI does not verify: yubikey.go (the

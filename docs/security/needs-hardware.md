@@ -101,6 +101,13 @@ firmware **5.3 to 5.6** (P-256). For each:
       put the right PIN back, reset the counter with `ykman piv access
       verify-pin`, and check that the signer starts.
 
+- [ ] Attestation evidence for the D-WR-04 design (custody `piv` is
+      card-reported today): for each slot 0x82-0x86, record whether
+      `ykman piv keys attest` produces a certificate, whether it verifies
+      against Yubico's PIV CA with piv-go `Verify`, and whether that holds
+      for Ed25519 slots on firmware 5.7 and for P-256 on 5.3-5.6. Note
+      which Yubico root and intermediates each card's chain uses.
+
 ## 3. Hardware root ceremony (D-11)
 
 CI stand-in: `test/e2e/root_sk_test.go` (`TestRootSK`) signs a bundle with an
