@@ -4,6 +4,7 @@ package signer
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -70,7 +71,7 @@ func TestOverloadDoesNotStallAccept(t *testing.T) {
 		}
 		n, err := c.Read(make([]byte, 1))
 		_ = c.Close()
-		if n != 0 || err != io.EOF {
+		if n != 0 || !errors.Is(err, io.EOF) {
 			t.Fatalf("connection %d over capacity: read %d bytes, %v; want it closed at once (EOF) while s.mu is held", maxConns+i+1, n, err)
 		}
 	}

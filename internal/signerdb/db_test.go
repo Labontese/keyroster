@@ -373,15 +373,18 @@ func TestDurabilityPragmas(t *testing.T) {
 func TestReadLogWithHashesSnapshot(t *testing.T) {
 	ctx := context.Background()
 	writer, path := openTemp(t)
-	appendOne := func(idx uint64) error {
+	// appendOne takes the index as a byte so that the leaf and hash bytes
+	// need no narrowing conversion; the log index is the widened value.
+	appendOne := func(b byte) error {
+		idx := uint64(b)
 		return writer.WithTx(ctx, func(tx *sql.Tx) error {
-			if err := writer.AppendLeaf(tx, idx, []byte{byte(idx), 'l'}, hash32(byte(idx))); err != nil {
+			if err := writer.AppendLeaf(tx, idx, []byte{b, 'l'}, hash32(b)); err != nil {
 				return err
 			}
-			return writer.PutCheckpoint(tx, idx+1, []byte{'c', byte(idx + 1)})
+			return writer.PutCheckpoint(tx, idx+1, []byte{'c', b + 1})
 		})
 	}
-	for i := range uint64(3) {
+	for i := range byte(3) {
 		if err := appendOne(i); err != nil {
 			t.Fatal(err)
 		}
@@ -420,7 +423,7 @@ func TestReadLogWithHashesSnapshot(t *testing.T) {
 				return err
 			}
 		}
-		if leaf[0] != byte(idx) || hash[0] != byte(idx) {
+		if uint64(leaf[0]) != idx || uint64(hash[0]) != idx {
 			t.Errorf("leaf %d: got leaf %x, hash %x", idx, leaf, hash)
 		}
 		seen = append(seen, idx)
