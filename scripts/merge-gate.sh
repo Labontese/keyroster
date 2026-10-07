@@ -17,16 +17,29 @@
 # --check is read-only (apart from `git fetch`): exit 0 only when the PR is
 # merged and local main equals origin/main, otherwise exit 1.
 #
-# Every GitHub call runs as keyroster-bot through scripts/gh-as-bot.sh. The
-# script never submits a review and never merges with administrator rights:
-# approval belongs to the owner in the GitHub UI, and GitHub's auto-merge does
-# the squash merge once the rulesets are satisfied (D-05).
+# Every gh call runs as keyroster-bot through bot_gh below, and the script
+# checks that identity before it does anything else. The script never submits
+# a review and never merges with administrator rights: approval belongs to
+# the owner in the GitHub UI, and GitHub's auto-merge does the squash merge
+# once the rulesets are satisfied (D-05).
 #
 # MERGE_GATE_TIMEOUT (seconds, default 900) bounds the wait for auto-merge
 # after approval.
 #
-# The whole body is one function called on the last line, so bash has parsed
-# the complete script before a branch switch replaces this file on disk.
+# The whole body is functions called on the last line, so bash has parsed
+# the complete script before a branch switch replaces this file on disk. That
+# is also why bot_gh is defined here instead of calling scripts/gh-as-bot.sh:
+# after the switch to the PR branch, that file is the PR's unreviewed copy
+# (E-WR-02).
+
+# bot_gh runs gh as keyroster-bot: the bot's own gh config directory, with
+# GH_TOKEN and GITHUB_TOKEN unset because either one would override that
+# config and make the command run as the owner. Keep the unset list in sync
+# with scripts/gh-as-bot.sh.
+bot_gh() {
+	env -u GH_TOKEN -u GITHUB_TOKEN \
+		GH_CONFIG_DIR="${KEYROSTER_BOT_GH_CONFIG:-$HOME/.config/gh-keyroster-bot}" gh "$@"
+}
 
 main() {
 	set -euo pipefail
@@ -43,11 +56,22 @@ main() {
 	local branch=$1
 
 	cd "$(git rev-parse --show-toplevel)"
+
+	local login
+	login=$(bot_gh api user --jq .login) || {
+		echo "cannot ask GitHub who gh runs as; check KEYROSTER_BOT_GH_CONFIG" >&2
+		return 1
+	}
+	if [ "$login" != keyroster-bot ]; then
+		echo "gh runs as '$login', not keyroster-bot; check KEYROSTER_BOT_GH_CONFIG" >&2
+		return 1
+	fi
+
 	git fetch --quiet origin
 
 	local view number state decision merge_state url
 	# "|" separates the fields: a tab would collapse an empty reviewDecision.
-	view=$(scripts/gh-as-bot.sh pr view "$branch" --json number,state,reviewDecision,mergeStateStatus,url \
+	view=$(bot_gh pr view "$branch" --json number,state,reviewDecision,mergeStateStatus,url \
 		--jq '[(.number | tostring), .state, (.reviewDecision // ""), (.mergeStateStatus // ""), .url] | join("|")')
 	IFS='|' read -r number state decision merge_state url <<<"$view"
 
@@ -96,7 +120,7 @@ main() {
 		fi
 		sleep 15
 		waited=$((waited + 15))
-		view=$(scripts/gh-as-bot.sh pr view "$branch" --json state,mergeStateStatus \
+		view=$(bot_gh pr view "$branch" --json state,mergeStateStatus \
 			--jq '[.state, (.mergeStateStatus // "")] | join("|")')
 		IFS='|' read -r state merge_state <<<"$view"
 	done
@@ -148,9 +172,9 @@ rebase_onto_main() {
 
 	git push --quiet --force-with-lease="refs/heads/$branch:$remote_sha" origin "$branch" || return 1
 
-	auto=$(scripts/gh-as-bot.sh pr view "$branch" --json autoMergeRequest --jq '.autoMergeRequest == null') || return 1
+	auto=$(bot_gh pr view "$branch" --json autoMergeRequest --jq '.autoMergeRequest == null') || return 1
 	if [ "$auto" = true ]; then
-		scripts/gh-as-bot.sh pr merge "$branch" --auto --squash || return 1
+		bot_gh pr merge "$branch" --auto --squash || return 1
 	fi
 
 	wait_for_required_checks "$branch" || return 1
@@ -164,7 +188,7 @@ rebase_onto_main() {
 wait_for_required_checks() {
 	local branch=$1 head tries=0 rc
 	head=$(git rev-parse "$branch")
-	until [ "$(scripts/gh-as-bot.sh pr view "$branch" --json headRefOid --jq .headRefOid)" = "$head" ]; do
+	until [ "$(bot_gh pr view "$branch" --json headRefOid --jq .headRefOid)" = "$head" ]; do
 		tries=$((tries + 1))
 		[ "$tries" -le 24 ] || { echo "GitHub never saw head $head" >&2; return 1; }
 		sleep 5
@@ -172,7 +196,7 @@ wait_for_required_checks() {
 	tries=0
 	while :; do
 		rc=0
-		scripts/gh-as-bot.sh pr checks "$branch" --required >/dev/null 2>&1 || rc=$?
+		bot_gh pr checks "$branch" --required >/dev/null 2>&1 || rc=$?
 		# 0 = all passed, 8 = some pending; anything else usually means the
 		# checks have not been reported yet right after a push.
 		if [ "$rc" -eq 0 ] || [ "$rc" -eq 8 ]; then
@@ -182,7 +206,7 @@ wait_for_required_checks() {
 		[ "$tries" -le 24 ] || break
 		sleep 5
 	done
-	scripts/gh-as-bot.sh pr checks "$branch" --required --watch
+	bot_gh pr checks "$branch" --required --watch
 }
 
 main "$@"; exit

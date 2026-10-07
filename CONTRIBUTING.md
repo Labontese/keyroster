@@ -124,7 +124,10 @@ commits with its own SSH key.
   driven by `scripts/merge-gate.sh BRANCH`. The script reports whether the
   owner's approval is pending, waits for auto-merge after approval and then
   fast-forwards local `main`. It talks to GitHub only as the bot, never
-  submits a review and never merges as administrator.
+  submits a review and never merges as administrator. It carries its own
+  copy of the `gh-as-bot.sh` command, because after switching to the PR
+  branch the file on disk is the PR's unreviewed copy, and it stops unless
+  `gh api user` answers `keyroster-bot`.
 - When `main` moved after the PR was opened, the bot rebases the feature
   branch onto `origin/main`, re-signs the commits, force-pushes with lease and
   waits for green checks; the owner then approves the new head.
