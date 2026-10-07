@@ -96,6 +96,7 @@ func (s *Signer) refuseLogging(ctx context.Context, peer Peer, digest [32]byte, 
 }
 
 // flushSummaries appends one refusal_summary leaf for the refusals counted
+// (including the connections the accept loop refused over capacity)
 // since the window started, if any, and starts a new window. On failure
 // the counts are kept for the next flush.
 func (s *Signer) flushSummaries(ctx context.Context) {
@@ -103,6 +104,9 @@ func (s *Signer) flushSummaries(ctx context.Context) {
 	defer s.mu.Unlock()
 	now := s.clock()
 	l := s.limiter
+	if n := s.overloaded.Swap(0); n > 0 {
+		l.counts[tlog.ReasonOverloaded] += n
+	}
 	if len(l.counts) == 0 {
 		l.windowStart = now
 		return

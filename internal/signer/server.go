@@ -105,8 +105,14 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 		select {
 		case sem <- struct{}{}:
 		default:
+			// Over capacity. The accept loop must not wait for s.mu, which
+			// an in-flight issuance holds across CA signing: close, count
+			// atomically for the next refusal_summary leaf (flushSummaries),
+			// and keep accepting. Nothing is sent.
 			_ = conn.Close()
-			_ = s.refuse(ctx, Peer{UID: tlog.PeerUnknown}, [32]byte{}, tlog.ReasonOverloaded, "too_many_connections") // logged; nothing is sent
+			s.overloaded.Add(1)
+			s.log.Warn("refused", "uid", tlog.PeerUnknown, "pid", 0, "reason", "too_many_connections",
+				"class", tlog.ReasonName(tlog.ReasonOverloaded), "code", codeFor(tlog.ReasonOverloaded).String())
 			continue
 		}
 		wg.Add(1)

@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -77,6 +78,9 @@ type Signer struct {
 	mu sync.Mutex
 	logState
 	limiter *refusalLimiter // guarded by mu
+	// overloaded counts connections refused over capacity by the accept
+	// loop, which never takes mu; flushSummaries moves it into the limiter.
+	overloaded atomic.Uint64
 	// clockEpisode is set while the clock is behind the serial high-water
 	// mark and that episode's clock_regression leaf is logged; the next
 	// successful issuance clears it. Guarded by mu.
