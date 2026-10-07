@@ -231,9 +231,11 @@ one `WARN software_root` per root.
 
 doctor has neither the backend's keys nor your root pins. A database
 rewritten consistently, with keys and roots of the rewriter's choosing,
-passes doctor; `serve` refuses it (it opens every key by its recorded
-fingerprint in the backend), and so does `keyroster audit verify --pin`.
-Compare the root fingerprints doctor prints with your pins.
+passes doctor. `serve` refuses it only while the rewriter cannot also put
+their keys into the backend (it opens every key by its recorded
+fingerprint; with the agent backend, whoever can use the agent socket can
+add keys). The check that holds is `keyroster audit verify --pin` with
+your pins. Compare the root fingerprints doctor prints with your pins.
 
 ## Install a successor bundle: stop, install, start
 

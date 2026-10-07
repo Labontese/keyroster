@@ -138,9 +138,11 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 // record none. keyroster-signer doctor uses it; an error wraps the reason.
 //
 // It cannot catch a database rewritten consistently with keys and roots of
-// the rewriter's choosing: doctor has neither the backend's keys (serve
-// refuses keys the backend does not hold) nor the operator's root pins
-// (keyroster audit verify --pin).
+// the rewriter's choosing: it has neither the backend's keys nor the
+// operator's root pins. serve refuses such a database only while the
+// rewriter cannot also place their keys in the backend (with the agent
+// backend, whoever can use the agent socket can); the check that holds is
+// keyroster audit verify --pin.
 func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 	var install []byte
 	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, _ []byte) error {

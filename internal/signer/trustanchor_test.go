@@ -165,3 +165,12 @@ func TestCheckTrustLogKeySwapped(t *testing.T) {
 		t.Fatalf("CheckTrust with the recorded log key swapped = %v, want ErrBundleKeys", err)
 	}
 }
+
+// TestCheckTrustBeforeCAInit: CheckTrust on a database without CA keys
+// refuses with ErrNotInitialised instead of reporting the trust state as
+// sound.
+func TestCheckTrustBeforeCAInit(t *testing.T) {
+	if err := CheckTrust(context.Background(), newStateDB(t)); !errors.Is(err, ErrNotInitialised) {
+		t.Fatalf("CheckTrust before ca-init = %v, want ErrNotInitialised", err)
+	}
+}

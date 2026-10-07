@@ -14,9 +14,11 @@
 // last bundle_install entry records), or a clock behind the serial
 // high-water mark. doctor has neither the backend's keys nor the
 // operator's root pins, so a database rewritten consistently with keys and
-// roots of the rewriter's choosing is caught only by serve (which opens the
-// keys by fingerprint) and by keyroster audit verify --pin; compare the
-// roots doctor prints with your pins.
+// roots of the rewriter's choosing passes it. serve refuses such a
+// database only while the rewriter cannot also place their keys in the
+// backend (with the agent backend, whoever can use the agent socket can);
+// the check that holds is keyroster audit verify --pin. Compare the roots
+// doctor prints with your pins.
 //
 // WARN means weaker custody than hardware, stated loudly: a software root
 // (SOFTWARE ROOT), keys in a virtual TPM, plain keys in ssh-agent, a TPM
