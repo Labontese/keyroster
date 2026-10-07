@@ -575,7 +575,7 @@ func TestCheckIssued(t *testing.T) {
 		want error
 	}{
 		{"one_second_over_the_cap", func(c *ssh.Certificate, p *Profile) {
-			c.ValidBefore = c.ValidAfter + uint64((p.MaxTTL+backdate)/time.Second) + 1
+			c.ValidBefore = c.ValidAfter + uint64((p.MaxTTL+backdate)/time.Second) + 1 //nolint:gosec // G115: a positive test duration
 		}, ErrValidity},
 		{"no_time_after_the_backdate", func(c *ssh.Certificate, _ *Profile) {
 			c.ValidBefore = c.ValidAfter + uint64(backdate/time.Second)
@@ -603,4 +603,22 @@ func TestCheckIssued(t *testing.T) {
 			wantErrIs(t, CheckIssued(c, p), tc.want)
 		})
 	}
+	t.Run("no_certificate", func(t *testing.T) {
+		if err := CheckIssued(nil, DefaultUserProfile()); err == nil {
+			t.Fatal("CheckIssued(nil) accepted")
+		}
+		c, p := build(t, nil)
+		c.SignatureKey = nil
+		if err := CheckIssued(c, p); err == nil {
+			t.Fatal("CheckIssued accepted a certificate without a CA key")
+		}
+	})
+	t.Run("unusable_profile", func(t *testing.T) {
+		c, p := build(t, nil)
+		p.CertType = 3
+		wantErrIs(t, CheckIssued(c, p), ErrProfile)
+		_, p = build(t, nil)
+		p.MaxTTL = 0
+		wantErrIs(t, CheckIssued(c, p), ErrProfile)
+	})
 }
