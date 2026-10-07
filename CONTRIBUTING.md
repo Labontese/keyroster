@@ -58,26 +58,38 @@ git config gpg.ssh.program C:/Windows/System32/OpenSSH/ssh-keygen.exe
 
 ## Required checks
 
-The `main-integrity` ruleset requires these checks, which are the job names in
-`.github/workflows/ci.yml` and `.github/workflows/e2e.yml`:
+The `main-integrity` ruleset requires these 17 checks. Each name is a job
+name (with its matrix value) in one of the workflows under
+`.github/workflows/`:
 
-| Check | What it does |
-|---|---|
-| `build-test` | `go mod verify`, static build, cross-compile for windows/darwin/freebsd, `go vet`, `gofmt`, tests with the race detector |
-| `lint` | golangci-lint v2.14.0 with `.golangci.yml` |
-| `govulncheck` | reachable-vulnerability scan with the pinned govulncheck in `tools/go.mod` |
-| `pr-title` | Conventional Commits check of the PR title |
-| `e2e (9.5p1)` | the `test/e2e` suite against a non-root sshd built from portable OpenSSH 9.5p1 (`scripts/build-openssh.sh`: SHA-256-pinned, GPG-verified) |
-| `e2e (10.5p1)` | the same suite against portable OpenSSH 10.5p1 |
-| `fuzz` | `scripts/fuzz.sh`: every native fuzz target for 30 s; fails when any target fails or when zero targets ran |
+| Check | Workflow | What it does |
+|---|---|---|
+| `build-test` | `ci.yml` | `go mod verify`, static build, cross-compile for windows/darwin/freebsd, `go vet`, `gofmt`, tests with the race detector |
+| `lint` | `ci.yml` | golangci-lint v2.14.0 with `.golangci.yml` |
+| `govulncheck` | `ci.yml` | reachable-vulnerability scan with the pinned govulncheck in `tools/go.mod` |
+| `dependency-firewall` | `ci.yml` | `scripts/dep-firewall.sh`: no banned package in keyroster-signer's dependency graph, with and without `-tags piv` |
+| `capslock` | `ci.yml` | `scripts/capslock-check.sh`: no new (package, capability) pair for keyroster-signer compared with `test/capslock/keyroster-signer.json` |
+| `fuzz` | `ci.yml` | `scripts/fuzz.sh`: every native fuzz target for 30 s; fails when any target fails or when zero targets ran |
+| `pr-title` | `ci.yml` | Conventional Commits check of the PR title (runs on pull requests only) |
+| `e2e (9.5p1)` | `e2e.yml` | the `test/e2e` suite against a non-root sshd built from portable OpenSSH 9.5p1 (`scripts/build-openssh.sh`: SHA-256-pinned, GPG-verified) |
+| `e2e (10.5p1)` | `e2e.yml` | the same suite against portable OpenSSH 10.5p1 |
+| `e2e-pkcs11 (distro-p256)` | `e2e-pkcs11.yml` | the PKCS#11 path with P-256 keys in SoftHSM2, reached through Ubuntu's own ssh-agent |
+| `e2e-pkcs11 (10.5p1-ed25519)` | `e2e-pkcs11.yml` | the PKCS#11 path with Ed25519 keys in SoftHSM2, reached through the OpenSSH 10.5p1 ssh-agent |
+| `e2e-tpm` | `e2e-tpm.yml` | `ca-init --backend tpm` and the TPM keystore tests against swtpm |
+| `build-piv` | `piv.yml` | vet, lint, tests and build of the `-tags piv` YubiKey backend, and proof that default builds link neither piv-go nor cgo |
+| `systemd-sandbox` | `systemd.yml` | keyroster-signer under its real systemd units: bootstrap, issuance, `lo`-only network namespace, `systemd-analyze security` gate |
+| `pinned-actions` | `workflow-lint.yml` | `scripts/check-pinned-actions.sh`: every action is pinned to a commit SHA |
+| `Analyze (go)` | `codeql.yml` | CodeQL analysis of the Go code |
+| `Analyze (actions)` | `codeql.yml` | CodeQL analysis of the workflows |
 
 **OpenSSH 9.5p2 is not covered by CI.** Windows ships Microsoft's own
 `OpenSSH_for_Windows_9.5p2`, which has no upstream release. Portable 9.5p1 is
 the closest upstream code, so CI runs that; the evidence for Windows OpenSSH
-9.5p2 is the manual check on Windows in plan 01-15.
+9.5p2 is the manual check in `test/manual/` (see its README for the last
+result).
 
 The checks are strict: the branch must be up to date with `main` before it
-can merge. Renaming a job or changing the e2e matrix blocks every merge until
+can merge. Renaming a job or changing a matrix blocks every merge until
 the ruleset is updated, so job names change only together with
 `.github/rulesets/main-integrity.json`.
 

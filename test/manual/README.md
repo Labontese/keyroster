@@ -77,3 +77,11 @@ Run it from an elevated PowerShell:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File test\manual\windows-openssh-9.5p2.ps1 -CertDir C:\path\to\certdir -Principal yourname
 ```
+
+### Last result
+
+2026-10-07 (`finished_at` 2026-10-07T02:19:03Z), on a lab Windows Server 2025
+with the inbox OpenSSH (`sshd.exe` file version 9.5.5.1): `sshd_version`
+`OpenSSH_for_Windows_9.5p2, LibreSSL 3.8.2`, accept **PASS**, reject **PASS**.
+Both certificates came from the homelab signer (plan 01-15), and the service
+on port 22 kept running.
