@@ -127,7 +127,10 @@ commits with its own SSH key.
   submits a review and never merges as administrator. It carries its own
   copy of the `gh-as-bot.sh` command, because after switching to the PR
   branch the file on disk is the PR's unreviewed copy, and it stops unless
-  `gh api user` answers `keyroster-bot`.
+  `gh api user` answers `keyroster-bot`. Its `git fetch` and `git push` set
+  their own credential helper (the bot's gh login, `GH_TOKEN` and
+  `GITHUB_TOKEN` unset), so the clone's or the user's git credential
+  configuration cannot make the force-push go out as the owner.
 - When `main` moved after the PR was opened, the bot rebases the feature
   branch onto `origin/main`, re-signs the commits, force-pushes with lease and
   waits for green checks; the owner then approves the new head.

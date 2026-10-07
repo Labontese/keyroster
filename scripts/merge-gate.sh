@@ -18,7 +18,9 @@
 # merged and local main equals origin/main, otherwise exit 1.
 #
 # Every gh call runs as keyroster-bot through bot_gh below, and the script
-# checks that identity before it does anything else. The script never submits
+# checks that identity before it does anything else. Every git fetch and push
+# uses the same bot login through bot_git, independent of the clone's
+# credential helper. The script never submits
 # a review and never merges with administrator rights: approval belongs to
 # the owner in the GitHub UI, and GitHub's auto-merge does the squash merge
 # once the rulesets are satisfied (D-05).
@@ -39,6 +41,25 @@
 bot_gh() {
 	env -u GH_TOKEN -u GITHUB_TOKEN \
 		GH_CONFIG_DIR="${KEYROSTER_BOT_GH_CONFIG:-$HOME/.config/gh-keyroster-bot}" gh "$@"
+}
+
+# bot_git runs git with the bot's credentials for github.com, whatever
+# credential helper the clone or the user configured (E-WR-03). The empty
+# helper value clears every helper configured before it (system, global,
+# local; -c is read last), and the second one asks gh for the token of the
+# same config directory as bot_gh, with the same unset list. The push in
+# rebase_onto_main therefore goes out as keyroster-bot, not as the owner.
+bot_git() {
+	local dir=${KEYROSTER_BOT_GH_CONFIG:-$HOME/.config/gh-keyroster-bot}
+	case $dir in
+	*"'"*)
+		echo "KEYROSTER_BOT_GH_CONFIG must not contain a single quote" >&2
+		return 1
+		;;
+	esac
+	git -c credential.https://github.com.helper= \
+		-c "credential.https://github.com.helper=!env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR='$dir' gh auth git-credential" \
+		"$@"
 }
 
 main() {
@@ -67,7 +88,7 @@ main() {
 		return 1
 	fi
 
-	git fetch --quiet origin
+	bot_git fetch --quiet origin
 
 	local view number state decision merge_state url
 	# "|" separates the fields: a tab would collapse an empty reviewDecision.
@@ -125,7 +146,7 @@ main() {
 		IFS='|' read -r state merge_state <<<"$view"
 	done
 
-	git fetch --quiet origin
+	bot_git fetch --quiet origin
 	fast_forward_main
 	echo "merged #$number"
 	return 0
@@ -170,7 +191,7 @@ rebase_onto_main() {
 		return 4
 	fi
 
-	git push --quiet --force-with-lease="refs/heads/$branch:$remote_sha" origin "$branch" || return 1
+	bot_git push --quiet --force-with-lease="refs/heads/$branch:$remote_sha" origin "$branch" || return 1
 
 	auto=$(bot_gh pr view "$branch" --json autoMergeRequest --jq '.autoMergeRequest == null') || return 1
 	if [ "$auto" = true ]; then
