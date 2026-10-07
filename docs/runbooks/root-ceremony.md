@@ -197,8 +197,16 @@ emergency depends on them.
   --bundle /media/transfer/ceremony/bundle.json --policy /media/transfer/ceremony/policy.json
 ```
 
-It must end with `OK: signed by 2 of 2 pinned roots (threshold 1)`. Record
-the SHA-256 of `bundle.json` and `policy.json` in the transcript.
+It lists each root that signed both documents as `signed by root ...`, and
+any root that signed only one as `root ... signed the bundle only` or
+`... the policy only`. It must end with
+
+```
+OK: 2 of 2 pinned roots signed both documents (bundle 2, policy 2, threshold 1)
+```
+
+Record that line and the SHA-256 of `bundle.json` and `policy.json` in the
+transcript.
 
 The transfer USB now holds `roots.pub`, `ceremony/bundle.json`,
 `ceremony/bundle.json.sigs`, `ceremony/policy.json` and

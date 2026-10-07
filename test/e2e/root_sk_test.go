@@ -44,7 +44,7 @@ func TestRootSK(t *testing.T) {
 
 		r.sign(t, "1", sk)
 		out := r.verify(t, 0, "1", sk)
-		if !strings.Contains(out, "OK: signed by 1 of 1 pinned roots (threshold 1)") {
+		if !strings.Contains(out, "OK: 1 of 1 pinned roots signed both documents (bundle 1, policy 1, threshold 1)") {
 			t.Fatalf("trust verify output:\n%s", out)
 		}
 		b := r.bundle(t)
@@ -89,7 +89,7 @@ func TestRootSK(t *testing.T) {
 		}
 		r.sign(t, "2", ed)
 		out := r.verify(t, 0, "2", sk, ed)
-		if !strings.Contains(out, "OK: signed by 2 of 2 pinned roots (threshold 2)") {
+		if !strings.Contains(out, "OK: 2 of 2 pinned roots signed both documents (bundle 2, policy 2, threshold 2)") {
 			t.Fatalf("trust verify output:\n%s", out)
 		}
 		b := r.bundle(t)

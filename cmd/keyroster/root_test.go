@@ -217,7 +217,7 @@ func TestRootSignTrustVerifyRoundTrip(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("trust verify exit %d: %s", code, stderr)
 	}
-	if !strings.Contains(stdout, "OK: signed by 1 of 1 pinned roots (threshold 1)") {
+	if !strings.Contains(stdout, "OK: 1 of 1 pinned roots signed both documents (bundle 1, policy 1, threshold 1)") {
 		t.Fatalf("trust verify output:\n%s", stdout)
 	}
 
@@ -279,7 +279,7 @@ func TestRootSignTwoOfTwoRoundTrip(t *testing.T) {
 		t.Fatalf("second root sign: exit %d: %s", code, stderr)
 	}
 	code, stdout, stderr := c.verify(t, "2", pins...)
-	if code != 0 || !strings.Contains(stdout, "OK: signed by 2 of 2 pinned roots (threshold 2)") {
+	if code != 0 || !strings.Contains(stdout, "OK: 2 of 2 pinned roots signed both documents (bundle 2, policy 2, threshold 2)") {
 		t.Fatalf("verify with 2 of 2 signatures: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 	// Pinning only one of the two roots does not match the bundle's root set.
@@ -455,7 +455,7 @@ func TestSoftwareRoot(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("trust verify: exit %d: %s", code, stderr)
 	}
-	if !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") || !strings.Contains(stdout, "signed by root "+a.fingerprint) {
+	if !strings.Contains(stdout, "OK: 1 of 2 pinned roots signed both documents (bundle 1, policy 1, threshold 1)") || !strings.Contains(stdout, "signed by root "+a.fingerprint) {
 		t.Fatalf("trust verify output:\n%s", stdout)
 	}
 
@@ -577,7 +577,7 @@ func TestSoftwareRoot(t *testing.T) {
 			t.Fatalf("root sign --key B: exit %d: %s", code, stderr)
 		}
 		code, stdout, stderr := c.verify(t, "1", a.fingerprint, b.fingerprint)
-		if code != 0 || !strings.Contains(stdout, "OK: signed by 2 of 2 pinned roots (threshold 1)") {
+		if code != 0 || !strings.Contains(stdout, "OK: 2 of 2 pinned roots signed both documents (bundle 2, policy 2, threshold 1)") {
 			t.Fatalf("verify after both roots signed: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 		if code, _, stderr := c.signWithKey(t, "1", a); code != 1 || !strings.Contains(stderr, "already holds a signature") {
@@ -592,7 +592,7 @@ func TestSoftwareRoot(t *testing.T) {
 			t.Fatalf("root sign --key B: exit %d: %s", code, stderr)
 		}
 		code, stdout, stderr := onlyB.verify(t, "1", a.fingerprint, b.fingerprint)
-		if code != 0 || !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") || !strings.Contains(stdout, "signed by root "+b.fingerprint) {
+		if code != 0 || !strings.Contains(stdout, "OK: 1 of 2 pinned roots signed both documents (bundle 1, policy 1, threshold 1)") || !strings.Contains(stdout, "signed by root "+b.fingerprint) {
 			t.Fatalf("a bundle signed by root B alone: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 	})
@@ -628,7 +628,7 @@ func TestSoftwareRoot(t *testing.T) {
 		dirB := filepath.Join(c.dir, "out-b")
 		thirdSign(t, dirB)
 		code, stdout, stderr := c.verifyIn(t, dirB, "1", a.fingerprint, b.fingerprint)
-		if code != 0 || !strings.Contains(stdout, "OK: signed by 1 of 2 pinned roots (threshold 1)") ||
+		if code != 0 || !strings.Contains(stdout, "OK: 1 of 2 pinned roots signed both documents (bundle 1, policy 1, threshold 1)") ||
 			!strings.Contains(stdout, "ignored: bundle signature by non-pinned key "+thirdFP) {
 			t.Fatalf("verify with an extra unrelated signature: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
@@ -812,6 +812,64 @@ func TestRootSignRerunAfterPartialFailure(t *testing.T) {
 	for _, e := range entries {
 		if strings.Contains(e.Name(), ".tmp-") {
 			t.Fatalf("temporary file %s left in --out-dir", e.Name())
+		}
+	}
+}
+
+// TestTrustVerifyReportsSignersPerDocument (B-WR-04): with pins {A, B, C}
+// at threshold 2, A and B sign the bundle and B and C the policy. Each
+// document meets the threshold, so verification passes, but only B signed
+// both, and the report must say so rather than "2 of 3".
+func TestTrustVerifyReportsSignersPerDocument(t *testing.T) {
+	c := newCeremony(t, 3)
+	useKeyring(t, c.rootKeys...)
+	if code, _, _ := c.sign(t, "2", 0, "--confirm", "00000000"); code != 1 {
+		t.Fatal("expected the wrong confirmation to fail")
+	}
+	signers := make([]ssh.Signer, len(c.rootKeys))
+	for i, k := range c.rootKeys {
+		s, err := ssh.NewSignerFromKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signers[i] = s
+	}
+	for _, doc := range []struct {
+		file, ns string
+		by       []int
+	}{{"bundle.json", trust.NamespaceBundle, []int{0, 1}}, {"policy.json", trust.NamespacePolicy, []int{1, 2}}} {
+		msg, err := os.ReadFile(filepath.Join(c.out, doc.file)) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, i := range doc.by {
+			sig, err := sshsig.Sign(rand.Reader, signers[i], doc.ns, msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := appendSignature(filepath.Join(c.out, doc.file+".sigs"), sig); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	a, b, cc := c.fingerprint(t, 0), c.fingerprint(t, 1), c.fingerprint(t, 2)
+	code, stdout, stderr := c.verify(t, "2", a, b, cc)
+	if code != 0 {
+		t.Fatalf("trust verify: exit %d: %s", code, stderr)
+	}
+	for _, want := range []string{
+		"signed by root " + b + "\n",
+		"root " + a + " signed the bundle only\n",
+		"root " + cc + " signed the policy only\n",
+		"OK: 1 of 3 pinned roots signed both documents (bundle 2, policy 2, threshold 2)\n",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("trust verify output lacks %q:\n%s", want, stdout)
+		}
+	}
+	for _, wrong := range []string{"signed by root " + a, "signed by root " + cc} {
+		if strings.Contains(stdout, wrong) {
+			t.Fatalf("trust verify reports %q, but that root signed one document only:\n%s", wrong, stdout)
 		}
 	}
 }
