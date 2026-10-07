@@ -26,7 +26,7 @@ const maxClockSkew = 300 * time.Second
 type refusal struct {
 	code   wire.ErrorCode
 	reason string
-	cause  error // logged as a type only, never sent
+	cause  error // operator log only, for internal and unavailable refusals (refuseErr); never sent
 }
 
 func (r *refusal) Error() string { return r.code.String() + ": " + r.reason }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -63,10 +64,17 @@ func (l *refusalLimiter) allow(now time.Time) bool {
 // instead, so no refusal is dropped from the audit trail (D-14). digest is
 // zero when the request was never decoded.
 func (s *Signer) refuse(ctx context.Context, peer Peer, digest [32]byte, reason uint8, detail string) *wire.ErrorResponse {
+	return s.refuseLogging(ctx, peer, digest, reason, detail, nil)
+}
+
+// refuseLogging is refuse with extra attributes (key-value pairs) for its
+// operator log record.
+func (s *Signer) refuseLogging(ctx context.Context, peer Peer, digest [32]byte, reason uint8, detail string, extra []any) *wire.ErrorResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.log.Warn("refused", "uid", peer.UID, "pid", peer.PID, "reason", detail,
-		"class", tlog.ReasonName(reason), "code", codeFor(reason).String())
+	attrs := append([]any{"uid", peer.UID, "pid", peer.PID, "reason", detail,
+		"class", tlog.ReasonName(reason), "code", codeFor(reason).String()}, extra...)
+	s.log.Warn("refused", attrs...)
 	resp := &wire.ErrorResponse{Code: codeFor(reason), Message: detail}
 	now := s.clock()
 	if !s.limiter.allow(now) {
@@ -154,13 +162,22 @@ func (s *Signer) issueOrRefuse(ctx context.Context, peer Peer, req *wire.IssueRe
 }
 
 // refuseErr records err (a *refusal, or any other error as internal_error)
-// through refuse.
+// through refuse. For the signer's own failures (internal and unavailable
+// refusals: database, backend, encoding) the cause's Go type and text go
+// into the operator log record, so the operator can find the root cause;
+// they never reach the peer or the audit log. A refused request's cause is
+// not logged: its reason code already says what was wrong, and its text
+// can carry peer-supplied bytes (a key algorithm name, a principal).
 func (s *Signer) refuseErr(ctx context.Context, peer Peer, digest [32]byte, err error) *wire.ErrorResponse {
 	var r *refusal
 	if !errors.As(err, &r) {
 		r = &refusal{code: wire.CodeInternal, reason: "internal_error", cause: err}
 	}
-	return s.refuse(ctx, peer, digest, classify(r.reason), r.reason)
+	var extra []any
+	if r.cause != nil && r.code != wire.CodeRefused {
+		extra = []any{"cause_type", fmt.Sprintf("%T", r.cause), "cause", r.cause.Error()}
+	}
+	return s.refuseLogging(ctx, peer, digest, classify(r.reason), r.reason, extra)
 }
 
 // classify maps a signer reason string to its refusal reason class.
