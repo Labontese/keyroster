@@ -17,8 +17,10 @@ commit message, and it must follow [Conventional Commits](https://www.convention
 Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
 `build`, `ci`, `chore`, `revert`. The scope uses lower-case letters, digits
 and `. _ / -`; the description is 1-100 characters. The `pr-title` check runs
-`scripts/check-pr-title.sh` on every PR. Edit the title and the check runs
-again.
+`scripts/check-pr-title.sh` on every PR. Its workflow also triggers on
+`edited`, so editing the title runs the check again, and a title broken
+after the check passed fails it again. UNVERIFIED: the re-run on a title
+edit has not yet been observed on a PR.
 
 ## Signed commits
 
@@ -70,7 +72,7 @@ name (with its matrix value) in one of the workflows under
 | `dependency-firewall` | `ci.yml` | `scripts/dep-firewall.sh`: no banned package in keyroster-signer's dependency graph, with and without `-tags piv` |
 | `capslock` | `ci.yml` | `scripts/capslock-check.sh`: no new (package, capability) pair for keyroster-signer compared with `test/capslock/keyroster-signer.json` |
 | `fuzz` | `ci.yml` | `scripts/fuzz.sh`: every native fuzz target for 30 s; fails when any target fails or when zero targets ran |
-| `pr-title` | `ci.yml` | Conventional Commits check of the PR title (runs on pull requests only) |
+| `pr-title` | `pr-title.yml` | Conventional Commits check of the PR title (runs on pull requests only, also when the title is edited) |
 | `e2e (9.5p1)` | `e2e.yml` | the `test/e2e` suite against a non-root sshd built from portable OpenSSH 9.5p1 (`scripts/build-openssh.sh`: SHA-256-pinned, GPG-verified) |
 | `e2e (10.5p1)` | `e2e.yml` | the same suite against portable OpenSSH 10.5p1 |
 | `e2e-pkcs11 (distro-p256)` | `e2e-pkcs11.yml` | the PKCS#11 path with P-256 keys in SoftHSM2, reached through Ubuntu's own ssh-agent |
