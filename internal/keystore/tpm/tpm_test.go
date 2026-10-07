@@ -531,3 +531,53 @@ func TestCheckGeneratedInTPM(t *testing.T) {
 		}
 	}
 }
+
+// TestProvisionSyncsDirectories (D-WR-05): after writing the key files,
+// Provision fsyncs the key directory, and the state directory too when it
+// created the key directory, so the new entries survive a crash right
+// after ca-init commits. A failed sync removes the files and fails.
+func TestProvisionSyncsDirectories(t *testing.T) {
+	sock := startSWTPM(t)
+	orig := syncDir
+	t.Cleanup(func() { syncDir = orig })
+	var synced []string
+	syncDir = func(dir string) error {
+		synced = append(synced, dir)
+		return orig(dir)
+	}
+
+	state := newStateDir(t)
+	b := openBackend(t, map[string]string{keystore.OptStateDir: state, "swtpm-socket": sock})
+	provision(t, b)
+	dir := filepath.Join(state, "tpm")
+	if len(synced) != 2 || synced[0] != dir || synced[1] != state {
+		t.Fatalf("synced %v, want [%s %s]", synced, dir, state)
+	}
+
+	// The key directory exists already: only it is synced.
+	synced = nil
+	state2 := newStateDir(t)
+	if err := os.Mkdir(filepath.Join(state2, "tpm"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b2 := openBackend(t, map[string]string{keystore.OptStateDir: state2, "swtpm-socket": sock})
+	provision(t, b2)
+	if len(synced) != 1 || synced[0] != filepath.Join(state2, "tpm") {
+		t.Fatalf("synced %v, want only %s", synced, filepath.Join(state2, "tpm"))
+	}
+
+	// A failed sync: Provision fails and leaves no key files behind.
+	syncDir = func(string) error { return errors.New("injected fsync failure") }
+	state3 := newStateDir(t)
+	b3 := openBackend(t, map[string]string{keystore.OptStateDir: state3, "swtpm-socket": sock})
+	if _, err := b3.Provision(allRoles); err == nil || !strings.Contains(err.Error(), "injected fsync failure") {
+		t.Fatalf("Provision with a failing directory sync: %v, want the sync error", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(state3, "tpm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a failed Provision left %d files in the key directory", len(entries))
+	}
+}
