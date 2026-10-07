@@ -16,7 +16,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 - [x] **CA-05**: User certificates default to secure extensions (`permit-pty` only); other extensions are granted only by role
 - [x] **CA-06**: Signer only signs client-generated public keys; the server never generates or sees user private keys
 - [x] **CA-07**: Signer refuses certificate-type keys as CA keys (no chaining)
-- [ ] **CA-08**: Certificates are verified as accepted/rejected by real `sshd` on OpenSSH 9.5p2 (Windows inbox) and the latest OpenSSH release in automated tests
+- [x] **CA-08**: Certificates are verified as accepted/rejected by real `sshd` on OpenSSH 9.5p2 (Windows inbox) and the latest OpenSSH release in automated tests
 
 ### Key Custody (KEY)
 
@@ -105,7 +105,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 - [ ] **REPO-01**: Protected `main` via rulesets: PR only, required checks, required review, signed commits, linear history, no force-push
 - [x] **REPO-02**: GitHub Actions CI: build, test, lint, govulncheck, fuzzing, e2e against real sshd; actions pinned by SHA with least-privilege permissions
-- [ ] **REPO-03**: CodeQL, Dependabot (gomod + actions), secret scanning with push protection, OpenSSF Scorecard
+- [x] **REPO-03**: CodeQL, Dependabot (gomod + actions), secret scanning with push protection, OpenSSF Scorecard
 - [x] **REPO-04**: SECURITY.md with private vulnerability reporting; README, LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CODEOWNERS, issue/PR templates
 - [ ] **REPO-05**: Reproducible, static builds (`CGO_ENABLED=0`) for all target platforms
 - [ ] **REPO-06**: Releases via GitHub Releases with cosign signatures, SBOM and SLSA provenance; Conventional Commits + semver
@@ -172,7 +172,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CA-05 | Phase 1 | Complete |
 | CA-06 | Phase 1 | Complete |
 | CA-07 | Phase 1 | Complete |
-| CA-08 | Phase 1 | Pending |
+| CA-08 | Phase 1 | Complete |
 | KEY-01 | Phase 1 | Complete |
 | KEY-02 | Phase 2 | Pending |
 | KEY-03 | Phase 1 | Complete |
@@ -228,7 +228,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-05 | Phase 2 | Pending |
 | REPO-01 | Phase 1 | Pending |
 | REPO-02 | Phase 1 | Complete |
-| REPO-03 | Phase 1 | Pending |
+| REPO-03 | Phase 1 | Complete |
 | REPO-04 | Phase 1 | Complete |
 | REPO-05 | Phase 6 | Pending |
 | REPO-06 | Phase 6 | Pending |

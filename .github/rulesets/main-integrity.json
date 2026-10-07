@@ -26,7 +26,17 @@
           { "context": "pr-title", "integration_id": 15368 },
           { "context": "e2e (9.5p1)", "integration_id": 15368 },
           { "context": "e2e (10.5p1)", "integration_id": 15368 },
-          { "context": "fuzz", "integration_id": 15368 }
+          { "context": "fuzz", "integration_id": 15368 },
+          { "context": "e2e-pkcs11 (distro-p256)", "integration_id": 15368 },
+          { "context": "e2e-pkcs11 (10.5p1-ed25519)", "integration_id": 15368 },
+          { "context": "e2e-tpm", "integration_id": 15368 },
+          { "context": "build-piv", "integration_id": 15368 },
+          { "context": "systemd-sandbox", "integration_id": 15368 },
+          { "context": "dependency-firewall", "integration_id": 15368 },
+          { "context": "capslock", "integration_id": 15368 },
+          { "context": "pinned-actions", "integration_id": 15368 },
+          { "context": "Analyze (go)", "integration_id": 15368 },
+          { "context": "Analyze (actions)", "integration_id": 15368 }
         ]
       }
     }
