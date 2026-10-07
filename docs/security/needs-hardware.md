@@ -88,6 +88,16 @@ firmware **5.3 to 5.6** (P-256). For each:
       must refuse to start, and `ykman piv info` must show exactly one PIN
       retry used per start, with no further retries used by signing
       requests. Put the correct PIN back before the counter reaches zero.
+- [ ] PIN retry guard (D-CR-01), under the shipped systemd unit: with the
+      correct PIN, the backend reads the retry counter in a fresh session
+      (piv-go `Retries()`) and starts. With a wrong PIN and 3 retries
+      left, `systemctl start` ends with `status=78`, systemd does not
+      restart it (`NRestarts=0`), and `ykman piv info` shows 2 left. Start
+      it by hand once more: 1 left, status 78. Start again: it refuses
+      **without** trying the PIN (message "only 1 PIN retries left") and
+      the counter stays at 1. Record the counter after each step. Then
+      put the right PIN back, reset the counter with `ykman piv access
+      verify-pin`, and check that the signer starts.
 
 ## 3. Hardware root ceremony (D-11)
 

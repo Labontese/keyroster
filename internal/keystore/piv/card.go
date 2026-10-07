@@ -17,6 +17,10 @@ type card interface {
 	// VerifyPIN logs the card session in with the PIN. A wrong PIN uses up
 	// one of the card's PIN retries.
 	VerifyPIN(pin string) error
+	// PINRetries returns the number of PIN attempts the card has left,
+	// without using one (VERIFY with no data). In a session where the PIN
+	// is already verified it is an error.
+	PINRetries() (int, error)
 	// KeyInfo returns the slot's metadata, including its public key and
 	// whether the key was generated on the card. An empty slot is an error
 	// that wraps ykpiv.ErrNotFound.

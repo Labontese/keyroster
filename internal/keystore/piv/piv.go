@@ -18,7 +18,12 @@
 // never, so the unattended signer can sign after one PIN verification per
 // card session. The backend verifies the PIN when it opens the card and
 // refuses to open on a wrong PIN, so a wrong PIN costs one PIN retry per
-// signer start rather than one per signing request.
+// signer start rather than one per signing request. Before it sends the
+// PIN it reads the card's retry counter and refuses, without trying, when
+// fewer than two retries are left, so automatic starts never spend the last
+// one. Both refusals wrap keystore.ErrCredentialRefused, on which
+// keyroster-signer exits with a status its systemd unit does not restart
+// on (D-CR-01).
 //
 // Options:
 //
@@ -67,6 +72,12 @@ var (
 	// generates nothing and overwrites nothing.
 	ErrSlotOccupied = errors.New("keystore piv: slot already holds a key")
 )
+
+// minPINRetries is the fewest PIN retries the card must have left before
+// the backend sends it the PIN. Below that it refuses without trying, so
+// automatic starts never spend the card's last retry: a blocked PIN needs
+// the PUK, and a blocked PUK means a PIV reset, which destroys the CA keys.
+const minPINRetries = 2
 
 // slots maps each role to its retired key-management slot.
 var slots = map[keystore.Role]uint32{
@@ -124,6 +135,12 @@ func newWithCard(c card, opts map[string]string) (*backend, error) {
 // requests would block the PIN. Verified at open, a wrong PIN costs one
 // retry per signer start and the signer refuses to start; with PIN policy
 // once, the logged-in session then signs without further PIN checks.
+//
+// A start loop (a service manager restarting a signer that keeps failing)
+// would still spend one retry per start, so it first reads the retry
+// counter and refuses to try the PIN with fewer than minPINRetries left. An
+// unreadable counter is a refusal too. Every failed VERIFY is treated as a
+// spent retry, whatever the error, because the card may have counted it.
 func newBackend(c card, cfg config) (*backend, error) {
 	major, minor, patch := c.Version()
 	b := &backend{card: c, cfg: cfg, ver: [3]int{major, minor, patch}}
@@ -131,9 +148,20 @@ func newBackend(c card, cfg config) (*backend, error) {
 		_ = c.Close()
 		return nil, fmt.Errorf("keystore piv: firmware %d.%d.%d is older than 5.3.0, which the backend needs to read slot metadata", major, minor, patch)
 	}
+	left, err := c.PINRetries()
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("keystore piv: read the card's PIN retry counter (the PIN was not tried): %w", err)
+	}
+	if left < minPINRetries {
+		_ = c.Close()
+		return nil, fmt.Errorf("keystore piv: only %d PIN retries left on the card, and the signer does not try the PIN with fewer than %d left; fix pin-file, then check the PIN by hand (docs/backends/piv.md): %w",
+			left, minPINRetries, keystore.ErrCredentialRefused)
+	}
 	if err := c.VerifyPIN(cfg.pin); err != nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("keystore piv: the card refused the PIN in pin-file (each failure uses one of the card's PIN retries; fix pin-file before starting again): %w", err)
+		return nil, fmt.Errorf("keystore piv: the card refused the PIN in pin-file (%w); fix pin-file before starting again: %w",
+			err, keystore.ErrCredentialRefused)
 	}
 	return b, nil
 }

@@ -70,6 +70,12 @@ func (y *yubiKey) Version() (major, minor, patch int) {
 
 func (y *yubiKey) VerifyPIN(pin string) error { return y.yk.VerifyPIN(pin) }
 
+// PINRetries is piv-go's Retries (VERIFY with no data). UNVERIFIED on a
+// card: that a fresh session reports the counter here, rather than an
+// error, is piv-go's documented behaviour, not yet observed (needs-hardware
+// item 2).
+func (y *yubiKey) PINRetries() (int, error) { return y.yk.Retries() }
+
 func (y *yubiKey) KeyInfo(slot ykpiv.Slot) (ykpiv.KeyInfo, error) {
 	return y.yk.KeyInfo(slot)
 }

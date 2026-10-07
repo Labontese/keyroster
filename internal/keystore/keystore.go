@@ -4,7 +4,20 @@
 // fingerprint, never by position.
 package keystore
 
-import "golang.org/x/crypto/ssh"
+import (
+	"errors"
+
+	"golang.org/x/crypto/ssh"
+)
+
+// ErrCredentialRefused means the key store refused the credential the
+// signer presented (for example a PIV PIN), or that the backend refused to
+// present one because the device has too few attempts left. Each further
+// try uses up one of the device's limited attempts (for example the card's
+// PIN retry counter), so keyroster-signer exits with a dedicated status
+// that its systemd unit never restarts on: an operator must fix the secret
+// first.
+var ErrCredentialRefused = errors.New("keystore: the key store refused the credential (retrying uses up the device's limited attempts)")
 
 // Custody records where a key lives. It is written into the trust bundle and
 // the audit log, so the weaker custodies stay visible.

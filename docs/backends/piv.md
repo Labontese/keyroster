@@ -74,11 +74,34 @@ until the card is removed or the signer restarts.
 
 **A wrong PIN stops the signer at start and uses up one PIN retry.** The
 YubiKey blocks the PIN after three wrong attempts in a row (the default),
-and only the PUK unblocks it. A service manager that restarts the signer in
-a loop with a wrong PIN file therefore blocks the PIN after a few restarts.
-Fix the PIN file before starting the signer again, and limit automatic
-restarts. Verifying the PIN at start, rather than at the first signature,
-means a wrong PIN never costs a retry per signing request.
+and only the PUK unblocks it; with the PUK blocked too, only a PIV reset
+helps, and that destroys the CA keys. Verifying the PIN at start, rather
+than at the first signature, means a wrong PIN never costs a retry per
+signing request. Three guards keep a restart loop from blocking the PIN:
+
+- Before it sends the PIN, the backend reads the card's PIN retry counter
+  and refuses, without trying the PIN, when fewer than **2** retries are
+  left. Automatic starts therefore never spend the last retry. An
+  unreadable counter is a refusal too.
+- A refused PIN, and the refusal to try one, end `keyroster-signer` with
+  exit status **78**. The shipped unit sets `RestartPreventExitStatus=78`,
+  so systemd does not restart it.
+- For every other failure the unit waits `RestartSec=5s` between restarts
+  and gives up after 5 starts in 10 minutes (`StartLimitBurst=`,
+  `StartLimitIntervalSec=`).
+
+After exit status 78: fix the PIN file, check the PIN and the counter by
+hand (`ykman piv info` shows the PIN tries left; `ykman piv access
+verify-pin` resets the counter when the PIN is right), then start the
+service again. If the signer refused because of the counter, it never sent
+the PIN, so the counter is still where you found it.
+
+What runs where: the counter check and the exit status are tested in CI
+(fake card, `TestPIVPINRetriesGuard`; `TestCredentialRefusedExitStatus`),
+and systemd's handling of the restart settings was checked with a transient
+unit (exit 78 is not restarted, exit 1 is). **UNVERIFIED on a card:** that
+piv-go's `Retries()` reads the counter of a real YubiKey in a fresh session
+and that one wrong PIN lowers it by exactly one (needs-hardware item 2).
 
 The trade-off: while the signer runs, any code that can talk to the card in
 that session can sign without knowing the PIN. Two things limit that. piv-go
@@ -226,7 +249,9 @@ The `PIV` workflow (`.github/workflows/piv.yml`, check `build-piv`):
 The unit tests run the backend's own code: option and secret-file checks,
 the slot map, the algorithm choice by firmware, the PIN verification at
 open (a wrong PIN refuses the card after exactly one attempt; a correct one
-is sent once, not per signature), provisioning and its refusals (occupied or
+is sent once, not per signature), the PIN retry guard (no PIN is sent with
+fewer than 2 retries left or an unreadable counter, so ten starts with a
+wrong PIN leave one retry), provisioning and its refusals (occupied or
 unreadable slot, default PIN or management key, firmware below 5.3.0), the
 fingerprint pin, the imported-key refusal, signing without the management
 key, and eight concurrent signers through one card. The fake card behaves
@@ -237,7 +262,8 @@ session is logged in with the PIN), but it is not a YubiKey. A certificate signe
 **needs-hardware:** CI has no YubiKey. Not yet run on hardware:
 
 - `internal/keystore/piv/yubikey.go`: finding the card through `pcscd`,
-  selection by serial, and the piv-go calls;
+  selection by serial, and the piv-go calls, including the PIN retry
+  counter read (`Retries()`);
 - piv-go's own code on a real card: GET METADATA on an empty slot (expected
   to return "not found"), key generation, Ed25519 and ECDSA signatures, and
   that a session logged in once with the PIN keeps signing PIN-once keys;
