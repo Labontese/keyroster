@@ -11,12 +11,12 @@ import (
 )
 
 // ErrCredentialRefused means the key store refused the credential the
-// signer presented (for example a PIV PIN), or that the backend refused to
-// present one because the device has too few attempts left. Each further
-// try uses up one of the device's limited attempts (for example the card's
-// PIN retry counter), so keyroster-signer exits with a dedicated status
-// that its systemd unit never restarts on: an operator must fix the secret
-// first.
+// signer presented (a PIV PIN, a TPM key's auth value), or that the backend
+// refused to present one because the device has too few attempts left.
+// Each further try uses up one of the device's limited attempts (the card's
+// PIN retry counter, the TPM's dictionary-attack counter for keys without
+// noDA), so keyroster-signer exits with a dedicated status that its systemd
+// unit never restarts on: an operator must fix the secret first.
 var ErrCredentialRefused = errors.New("keystore: the key store refused the credential (retrying uses up the device's limited attempts)")
 
 // Custody records where a key lives. It is written into the trust bundle and

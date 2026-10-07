@@ -36,6 +36,17 @@ Ed25519). For each role the signer keeps two files in
   state directory (for example another member of group `tss`) cannot use the
   key.
 
+The keys are created with **`noDA`**: a wrong auth value does not count
+against the TPM's dictionary-attack counter. That counter is TPM-wide, so
+without `noDA` a corrupt auth file could lock the TPM out for every other
+user of it (for example TPM+PIN disk unlocking); the auth value is 32 random
+bytes, so dictionary-attack protection adds nothing. At start the backend
+proves each key's auth value with one test signature: a wrong one stops the
+signer with exit status 78, which the systemd unit does not restart on
+(D-WR-01). Keys created before `noDA` was set (signer installs from before
+this change) stay dictionary-attack protected; for them the start-up check
+limits a bad auth file to one failed authorisation per manual start.
+
 The backend loads only keys that were **generated inside the TPM** and
 cannot leave it: the key's public area must have `fixedTPM`, `fixedParent`
 and `sensitiveDataOrigin` set (D-CR-02). A key made in software and
@@ -106,6 +117,14 @@ verified bundle. `scripts/swtpm-setup.sh DIR` starts it on a Unix socket
 carrying raw TPM commands (`unixio`). The backend reaches that socket with
 the test-only option `swtpm-socket=PATH` (go-tpm `linuxudstpm`). No root is
 needed, so local runs (WSL2) use the same setup.
+
+Over swtpm, CI checks that a wrong auth value on a provisioned key returns
+`TPM_RC_BAD_AUTH` and leaves `TPM_PT_LOCKOUT_COUNTER` unchanged, while the
+same mistake on a key without `noDA` returns `TPM_RC_AUTH_FAIL` and raises it
+(`TestProvisionNoDA`), and that `serve` then exits 78
+(`TestTPMWrongAuthNotRestartable`). **UNVERIFIED on a physical TPM** (the
+TPM 2.0 specification says it behaves the same; [needs-hardware.md](needs-hardware.md)
+item 4).
 
 **CI exercises the swtpm `unixio` transport only.** The unit tests under
 `-race` and the full e2e suite run over it. The production device path

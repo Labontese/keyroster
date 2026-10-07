@@ -170,10 +170,12 @@ ls -l /run/keyroster-signer/signer.sock    # srw-rw---- keyroster-signer keyrost
 
 The unit restarts a failed signer after 5 seconds, at most 5 times in 10
 minutes. It never restarts on **exit status 78**: the key store refused the
-PIV PIN, or the PIV backend refused to try the PIN with fewer than 2
-retries left. Each restart would spend another of the card's PIN retries.
-`systemctl status` then shows `status=78`. Fix the PIN file, check the
-card by hand ([piv.md](../backends/piv.md)), then run `systemctl
+PIV PIN or a TPM key's auth value (the TPM backend proves each key's
+`{role}.auth` with one test signature at start), or the PIV backend
+refused to try the PIN with fewer than 2 retries left. Each restart would
+spend another of the device's limited attempts. `systemctl status` then
+shows `status=78`. Fix the PIN file or restore the `{role}.auth` files from
+backup, check the device by hand ([piv.md](../backends/piv.md)), then run `systemctl
 reset-failed keyroster-signer.service` and start it again.
 
 Check the sandbox on the running process:

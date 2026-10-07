@@ -123,6 +123,26 @@ a root key in a second SoftHSM2 token as the stand-in for a PIV root.
 - [ ] File the filled-in ceremony transcript
       ([ceremony-transcript-template.md](../runbooks/ceremony-transcript-template.md)).
 
+## 4. Physical TPM 2.0 (KEY-04)
+
+CI stand-in: swtpm (`.github/workflows/e2e-tpm.yml`), which reports
+manufacturer `IBM` and so only ever yields custody `vtpm`. The production
+transport (`/dev/tpmrm0`) and a physical TPM's own behaviour are not run in
+CI ([custody.md](custody.md)).
+
+- [ ] On a host with a physical or firmware TPM (Intel PTT, AMD fTPM, or a
+      discrete chip): `ca-init --backend tpm`, record the printed
+      manufacturer line and custody, and check with `tpm2_readpublic` (or
+      the key file) that each key has `noDA`, `fixedtpm`, `fixedparent` and
+      `sensitivedataorigin`.
+- [ ] Wrong auth (D-WR-01): note `tpm2_getcap properties-variable`
+      (`TPM2_PT_LOCKOUT_COUNTER`), corrupt one `{role}.auth`, start the
+      service: it ends with `status=78`, is not restarted, and the lockout
+      counter is unchanged. Restore the file and start again.
+- [ ] Imported key (D-CR-02): a key made with `tpm2_import` +
+      `tpm2_encodeobject` and selected with `ca-init --key` is refused
+      ("not generated inside this TPM").
+
 ## Sign-off
 
 The Phase 6 review closes the `needs-hardware` issue only when every box above

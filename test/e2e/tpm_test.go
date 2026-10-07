@@ -296,6 +296,23 @@ func TestTPMRestartPersistence(t *testing.T) {
 	tpmAuditVerify(t, env, 4, 2)
 }
 
+// TestTPMWrongAuthNotRestartable (D-WR-01, D-CR-01): with a corrupt auth
+// file, serve refuses at start, after one test signature, with exit
+// status 78, the status keyroster-signer.service does not restart on.
+func TestTPMWrongAuthNotRestartable(t *testing.T) {
+	env := prepareSigner(t, bootstrapOpts{Backend: "tpm", BackendOpts: tpmOpts(t)})
+	if err := os.WriteFile(filepath.Join(env.StateDir, "tpm", "user.auth"), bytes.Repeat([]byte{1}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out := env.signerCmd(t, "serve", "--state-dir", env.StateDir, "--socket", env.Socket, "--allow-uid", strconv.Itoa(os.Getuid()))
+	if code != 78 || !strings.Contains(out, "the TPM refused the auth value") {
+		t.Fatalf("serve with a wrong auth value exited %d, want 78 and the auth refusal:\n%s", code, out)
+	}
+	if isSocket(env.Socket) {
+		t.Fatal("serve created its socket despite the refusal")
+	}
+}
+
 // TestTPMCAInitTwiceRefused: ca-init --backend tpm prints the TPM
 // manufacturer and the custody derived from it (swtpm: IBM, vtpm); a second
 // ca-init on the same state is refused and leaves the key files,

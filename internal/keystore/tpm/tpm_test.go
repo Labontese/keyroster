@@ -232,12 +232,102 @@ func TestKeyRefusals(t *testing.T) {
 	if err := os.WriteFile(auth, bytes.Repeat([]byte{1}, authSize), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	k, err := b.Key(keystore.RoleUser, userFP)
+	// D-WR-01: Key proves the auth value with one signature, so a wrong
+	// one stops the signer at start (keystore.ErrCredentialRefused, a
+	// non-restartable exit) instead of failing every signing request.
+	if _, err := b.Key(keystore.RoleUser, userFP); !errors.Is(err, keystore.ErrCredentialRefused) {
+		t.Fatalf("Key with a wrong auth value: %v, want keystore.ErrCredentialRefused", err)
+	}
+}
+
+// lockoutCounter reads the TPM's dictionary-attack failure counter
+// (TPM_PT_LOCKOUT_COUNTER).
+func lockoutCounter(t *testing.T, b *backend) uint32 {
+	t.Helper()
+	tpmMu.Lock()
+	defer tpmMu.Unlock()
+	rsp, err := tpm2.GetCapability{
+		Capability:    tpm2.TPMCapTPMProperties,
+		Property:      uint32(tpm2.TPMPTLockoutCounter),
+		PropertyCount: 1,
+	}.Execute(b.tpm)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Sign(rand.Reader, []byte("message")); err == nil {
-		t.Fatal("the TPM signed with a wrong auth value")
+	props, err := rsp.CapabilityData.Data.TPMProperties()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range props.TPMProperty {
+		if p.Property == tpm2.TPMPTLockoutCounter {
+			return p.Value
+		}
+	}
+	t.Fatal("the TPM did not report TPM_PT_LOCKOUT_COUNTER")
+	return 0
+}
+
+// TestProvisionNoDA (D-WR-01): Provision creates every key with noDA, so a
+// wrong auth value (refused by Key's start-up signature) does not count
+// against the TPM-wide dictionary-attack counter that also guards other
+// users of the TPM. The control: a key from go-tpm-keyfiles' default
+// template (without noDA) does raise the counter on the same TPM.
+func TestProvisionNoDA(t *testing.T) {
+	sock := startSWTPM(t)
+	state := newStateDir(t)
+	b := openBackend(t, map[string]string{keystore.OptStateDir: state, "swtpm-socket": sock})
+	pubs := provision(t, b)
+	dir := filepath.Join(state, "tpm")
+	for _, role := range allRoles {
+		raw, err := os.ReadFile(filepath.Join(dir, string(role)+".tpmkey")) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		k, err := keyfile.Decode(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := k.Pubkey.Contents()
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := pub.ObjectAttributes
+		if !a.NoDA || !a.FixedTPM || !a.FixedParent || !a.SensitiveDataOrigin || !a.UserWithAuth || !a.SignEncrypt {
+			t.Fatalf("role %s: attributes %+v, want noDA, fixedTPM, fixedParent, sensitiveDataOrigin, userWithAuth, sign", role, a)
+		}
+	}
+
+	before := lockoutCounter(t, b)
+	if err := os.WriteFile(filepath.Join(dir, "user.auth"), bytes.Repeat([]byte{1}, authSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.Key(keystore.RoleUser, ssh.FingerprintSHA256(pubs[keystore.RoleUser]))
+	if !errors.Is(err, keystore.ErrCredentialRefused) || !errors.Is(err, tpm2.TPMRCBadAuth) {
+		t.Fatalf("Key with a wrong auth value: %v, want TPM_RC_BAD_AUTH (a noDA key) wrapped in keystore.ErrCredentialRefused", err)
+	}
+	if after := lockoutCounter(t, b); after != before {
+		t.Fatalf("a wrong auth value on a provisioned key moved the lockout counter from %d to %d", before, after)
+	}
+
+	// Control: a DA-protected key raises the counter on a wrong auth value.
+	tpmMu.Lock()
+	da, err := keyfile.NewLoadableKey(b.tpm, tpm2.TPMAlgECC, 256, nil, keyfile.WithUserAuth(bytes.Repeat([]byte{2}, authSize)))
+	tpmMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("control"))
+	tpmMu.Lock()
+	cs, err := da.Signer(b.tpm, nil, bytes.Repeat([]byte{3}, authSize))
+	if err == nil {
+		_, err = cs.Sign(rand.Reader, digest[:], crypto.SHA256)
+	}
+	tpmMu.Unlock()
+	if !errors.Is(err, tpm2.TPMRCAuthFail) {
+		t.Fatalf("control: signing with a wrong auth value: %v, want TPM_RC_AUTH_FAIL (a DA-protected key)", err)
+	}
+	if after := lockoutCounter(t, b); after != before+1 {
+		t.Fatalf("control: a wrong auth value on a DA-protected key moved the lockout counter from %d to %d, want +1", before, after)
 	}
 }
 
