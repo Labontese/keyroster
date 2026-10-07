@@ -149,7 +149,11 @@ SSH_AUTH_SOCK=/run/keyroster-signer-agent/agent.sock ssh-add -l -E sha256
 
 The second command prints the SHA256 fingerprints of the five keys. The
 agent keeps the token session open; after the agent or the token restarts,
-load the token again before the signer can sign.
+load the token again before the signer can sign. The signer itself does not
+need a restart: after a failed agent request it drops the connection and
+tries once more on a new one, and it gives up on any request the agent has
+not answered within 30 seconds, so a hung agent cannot block it (D-WR-06).
+Until the token is loaded again, signing requests fail.
 
 ### 5. Initialise the CA
 
