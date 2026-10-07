@@ -2,11 +2,12 @@
 
 // Package tpm is the TPM 2.0 keystore backend, registered as "tpm" (KEY-04).
 // The CA, ops and log keys are ECDSA P-256 keys created inside the TPM
-// (D-09); the TPM never reveals them. On disk the signer keeps, per role,
-// a TSS2 PEM key file ({state-dir}/tpm/{role}.tpmkey, the key wrapped by
-// the TPM's storage root key) and a random 32-byte auth value
-// ({role}.auth) that the TPM requires for every signature. Both are mode
-// 0600 in a 0700 directory owned by the signer.
+// (D-09); the TPM never reveals them. Key refuses a key file whose key was
+// imported into the TPM rather than generated in it. On disk the signer
+// keeps, per role, a TSS2 PEM key file ({state-dir}/tpm/{role}.tpmkey, the
+// key wrapped by the TPM's storage root key) and a random 32-byte auth
+// value ({role}.auth) that the TPM requires for every signature. Both are
+// mode 0600 in a 0700 directory owned by the signer.
 //
 // The TPM is reached through the kernel resource manager (/dev/tpmrm0), or
 // in tests through an swtpm socket. Pure Go, no cgo: go-tpm and
@@ -123,9 +124,10 @@ func (b *backend) keyPaths(role keystore.Role) (keyPath, authPath string, err er
 	return base + ".tpmkey", base + ".auth", nil
 }
 
-// Key loads the key file of role, checks that its public key has the
-// pinned fingerprint and is an ECDSA P-256 CA key, and returns a CAKey that
-// signs inside the TPM with the role's auth value.
+// Key loads the key file of role, checks that the key was generated inside
+// the TPM and cannot leave it (checkGeneratedInTPM) and that its public key
+// has the pinned fingerprint and is an ECDSA P-256 CA key, and returns a
+// CAKey that signs inside the TPM with the role's auth value.
 func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, error) {
 	if fingerprint == "" {
 		return nil, fmt.Errorf("keystore tpm: no pinned fingerprint for role %s", role)
@@ -151,6 +153,13 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 	}
 	if !k.Keytype.Equal(keyfile.OIDLoadableKey) || k.KeyAlgo() != tpm2.TPMAlgECC {
 		return nil, fmt.Errorf("keystore tpm: %s is not a loadable ECC key", keyPath)
+	}
+	pubArea, err := k.Pubkey.Contents()
+	if err != nil {
+		return nil, fmt.Errorf("keystore tpm: %s: %w", keyPath, err)
+	}
+	if err := checkGeneratedInTPM(pubArea); err != nil {
+		return nil, fmt.Errorf("keystore tpm: %s: %w", keyPath, err)
 	}
 	cpub, err := k.PublicKey()
 	if err != nil {
@@ -179,6 +188,23 @@ func (b *backend) Key(role keystore.Role, fingerprint string) (keystore.CAKey, e
 		return nil, fmt.Errorf("keystore tpm: key for role %s: %w", role, err)
 	}
 	return &caKey{Signer: s, custody: b.custody}, nil
+}
+
+// checkGeneratedInTPM requires the object attributes of a key created
+// inside a TPM and never allowed to leave it: fixedTPM and fixedParent (it
+// cannot be duplicated) and sensitiveDataOrigin (the TPM generated the
+// private key). A key created in software and brought in with TPM2_Import
+// is still a valid loadable key, but it must be duplicable to be imported,
+// so it has these clear, and whoever created it may keep a copy. The TPM
+// enforces the attributes when it loads the key: they are part of the
+// public area, which the object's name binds to the private blob.
+func checkGeneratedInTPM(pub *tpm2.TPMTPublic) error {
+	a := pub.ObjectAttributes
+	if !a.FixedTPM || !a.FixedParent || !a.SensitiveDataOrigin {
+		return fmt.Errorf("the key was not generated inside this TPM, or may leave it (fixedTPM=%v fixedParent=%v sensitiveDataOrigin=%v), so a copy may exist outside the TPM",
+			a.FixedTPM, a.FixedParent, a.SensitiveDataOrigin)
+	}
+	return nil
 }
 
 func (b *backend) Close() error {

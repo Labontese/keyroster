@@ -36,6 +36,15 @@ Ed25519). For each role the signer keeps two files in
   state directory (for example another member of group `tss`) cannot use the
   key.
 
+The backend loads only keys that were **generated inside the TPM** and
+cannot leave it: the key's public area must have `fixedTPM`, `fixedParent`
+and `sensitiveDataOrigin` set (D-CR-02). A key made in software and
+imported with `TPM2_Import` (for example `tpm2_import` + `tpm2_encodeobject`)
+is still a working TPM key file, but whoever made it may keep a copy, so
+`ca-init` and `serve` refuse it instead of recording custody `tpm`. CI tests
+this over swtpm: such an imported key signs in the TPM, and the backend
+refuses it (`TestImportedKeyRefused`).
+
 The backend reads the TPM's manufacturer ID (`TPM2_GetCapability`,
 `TPM_PT_MANUFACTURER`) and derives the custody from it. ca-init prints it,
 for example `TPM manufacturer: IBM → custody vtpm`.
