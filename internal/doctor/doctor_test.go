@@ -300,10 +300,35 @@ func TestPKCS11Ed25519NeedsAgent101(t *testing.T) {
 	if !strings.Contains(r.Message, "10.1") {
 		t.Fatalf("pkcs11_ed25519 must name ssh-agent 10.1: %q", r.Message)
 	}
-	requireOne(t, rs, OK, "custody")
 
 	f.CAKeys = hardwareKeys("pkcs11-agent", ssh.KeyAlgoECDSA256)
 	requireNone(t, Run(f), CodePKCS11Ed25519)
+}
+
+// TestPKCS11CustodyDeclared (D-WR-03, C-WR-04): custody pkcs11-agent is
+// the operator's declaration (a plain ssh-add key or a SoftHSM token in
+// the agent looks the same), so doctor says so and never prints the OK
+// hardware-custody line for it, alone or mixed with verified custody.
+func TestPKCS11CustodyDeclared(t *testing.T) {
+	f := healthy(t)
+	f.CAKeys = hardwareKeys("pkcs11-agent", ssh.KeyAlgoECDSA256)
+	f.TPMManufacturer, f.TPMCustody = "", ""
+	rs := Run(f)
+	r := requireOne(t, rs, INFO, CodePKCS11CustodyDeclared)
+	if !strings.Contains(r.Message, "user, host, machine, ops, log") || !strings.Contains(r.Message, "cannot verify") {
+		t.Fatalf("pkcs11_custody_declared must name the keys and say it is unverified: %q", r.Message)
+	}
+	requireNone(t, rs, "custody")
+	if ExitCode(rs) != 0 {
+		t.Fatalf("declared custody alone must not fail doctor: %v", rs)
+	}
+
+	// Mixed with keys in a confirmed physical TPM: still no OK line.
+	f = healthy(t)
+	f.CAKeys[0].Custody = "pkcs11-agent"
+	rs = Run(f)
+	requireOne(t, rs, INFO, CodePKCS11CustodyDeclared)
+	requireNone(t, rs, "custody")
 }
 
 func TestCustodyMismatch(t *testing.T) {

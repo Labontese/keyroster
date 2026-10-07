@@ -23,8 +23,10 @@
 // WARN means weaker custody than hardware, stated loudly: a software root
 // (SOFTWARE ROOT), keys in a virtual TPM, plain keys in ssh-agent, a TPM
 // that no longer matches the recorded custody, or TPM custody that could
-// not be confirmed. doctor never reports a vTPM-held, agent-held or
-// software key as hardware custody.
+// not be confirmed. Custody pkcs11-agent is the operator's declaration,
+// which doctor cannot check, and gets an INFO line saying so. doctor never
+// reports a vTPM-held, agent-held, declared pkcs11-agent or software key as
+// hardware custody.
 package doctor
 
 import (
@@ -67,21 +69,22 @@ func (l Level) String() string {
 
 // Result codes of INFO, WARN and FAIL results.
 const (
-	CodeRunningAsRoot       = "running_as_root"
-	CodeStateDirPermissions = "state_dir_permissions"
-	CodeDBPermissions       = "db_permissions"
-	CodeDBIntegrity         = "db_integrity"
-	CodeLogMismatch         = "log_mismatch"
-	CodeTrustMismatch       = "trust_mismatch"
-	CodeClockRegression     = "clock_regression"
-	CodeNoBundle            = "no_bundle"
-	CodeSoftwareRoot        = "software_root"
-	CodeVTPMCustody         = "vtpm_custody"
-	CodeSoftwareKeyInAgent  = "software_key_in_agent"
-	CodeSoftwareKey         = "software_key"
-	CodePKCS11Ed25519       = "pkcs11_ed25519"
-	CodeCustodyMismatch     = "custody_mismatch"
-	CodeTPMUnavailable      = "tpm_unavailable"
+	CodeRunningAsRoot         = "running_as_root"
+	CodeStateDirPermissions   = "state_dir_permissions"
+	CodeDBPermissions         = "db_permissions"
+	CodeDBIntegrity           = "db_integrity"
+	CodeLogMismatch           = "log_mismatch"
+	CodeTrustMismatch         = "trust_mismatch"
+	CodeClockRegression       = "clock_regression"
+	CodeNoBundle              = "no_bundle"
+	CodeSoftwareRoot          = "software_root"
+	CodeVTPMCustody           = "vtpm_custody"
+	CodeSoftwareKeyInAgent    = "software_key_in_agent"
+	CodeSoftwareKey           = "software_key"
+	CodePKCS11Ed25519         = "pkcs11_ed25519"
+	CodeCustodyMismatch       = "custody_mismatch"
+	CodeTPMUnavailable        = "tpm_unavailable"
+	CodePKCS11CustodyDeclared = "pkcs11_custody_declared"
 )
 
 // Codes of OK results. Each names the check that passed.
@@ -172,8 +175,12 @@ type Facts struct {
 }
 
 // hardwareCustody are the online custodies whose keys cannot be copied off
-// a physical device. vtpm, agent and software are not among them.
-var hardwareCustody = map[string]bool{"tpm": true, "piv": true, "pkcs11-agent": true}
+// a physical device and that the backend itself establishes: tpm (also
+// cross-checked against the live TPM below) and piv (the card reports the
+// key as generated on it). vtpm, agent and software are not among them, and
+// neither is pkcs11-agent: that one is the operator's declaration, which
+// nothing checks (custodyResults reports it as pkcs11_custody_declared).
+var hardwareCustody = map[string]bool{"tpm": true, "piv": true}
 
 // Run checks f and returns the results in a fixed order.
 func Run(f Facts) []Result {
@@ -271,8 +278,8 @@ func rootResults(roots []trust.RootKey) []Result {
 }
 
 // custodyResults reports the custody of the online keys. Only a set of keys
-// that are all in hardware custody, with a TPM (if any) that still matches
-// the recorded custody, yields an OK custody line.
+// that are all in hardware custody (hardwareCustody), with a TPM (if any)
+// that still matches the recorded custody, yields an OK custody line.
 func custodyResults(f Facts) []Result {
 	var rs []Result
 	byCustody := map[string][]string{}
@@ -287,10 +294,15 @@ func custodyResults(f Facts) []Result {
 			ed25519PKCS11 = append(ed25519PKCS11, k.Role)
 		}
 	}
-	weak := false
+	weak, declared := false, false
 	for _, c := range order {
 		roles := strings.Join(byCustody[c], ", ")
 		switch c {
+		case "pkcs11-agent":
+			// Not weak, but not confirmed either: no OK hardware line.
+			declared = true
+			rs = append(rs, Result{Level: INFO, Code: CodePKCS11CustodyDeclared, Message: fmt.Sprintf(
+				"keys %s are declared custody pkcs11-agent (ca-init --backend-opt custody=pkcs11-agent); doctor cannot verify that these agent keys live in a hardware token, since a SoftHSM token or a plain ssh-add key in the same agent looks the same (docs/security/custody.md)", roles)})
 		case "vtpm":
 			weak = true
 			rs = append(rs, Result{Level: WARN, Code: CodeVTPMCustody, Message: fmt.Sprintf(
@@ -347,7 +359,7 @@ func custodyResults(f Facts) []Result {
 			rs = append(rs, Result{Level: WARN, Code: CodeTPMUnavailable, Message: "keys are recorded with TPM custody, but the TPM was not inspected, so that custody is unconfirmed"})
 		}
 	}
-	if !weak && len(f.CAKeys) > 0 {
+	if !weak && !declared && len(f.CAKeys) > 0 {
 		var parts []string
 		for _, c := range order {
 			parts = append(parts, strings.Join(byCustody[c], ", ")+": "+c)

@@ -428,6 +428,13 @@ func runPKCS11FullFlow(t *testing.T, agentBin, keytype string) {
 	verifyOut := pkcs11AuditVerify(t, env, 3, 1)
 	t.Logf("keyroster audit verify:\n%s", verifyOut)
 	s.assertNoPINLeak(t, issueOut, verifyOut)
+
+	// D-WR-03: custody pkcs11-agent is declared, not verified; doctor says
+	// so and never reports it as hardware custody.
+	code, out := env.signerCmd(t, "doctor", "--state-dir", env.StateDir)
+	if code != 0 || !strings.Contains(out, "\nINFO pkcs11_custody_declared: keys user, host, machine, ops, log are declared custody pkcs11-agent") || strings.Contains(out, "OK custody:") {
+		t.Fatalf("doctor exited %d; want 0, the pkcs11_custody_declared line and no OK custody line:\n%s", code, out)
+	}
 }
 
 // TestPKCS11FullFlow runs the KEY-03 flow with KEYROSTER_PKCS11_KEYTYPE

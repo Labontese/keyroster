@@ -8,6 +8,13 @@
 //
 //	socket   path of the agent socket (required)
 //	custody  "agent" (default) or "pkcs11-agent"
+//
+// Custody pkcs11-agent is the operator's declaration. The agent protocol
+// does not say where a key lives: a key from a PKCS#11 token, from a
+// SoftHSM token, and a plain key added with ssh-add look the same, and the
+// entry's comment is whatever the loader chose. So the backend cannot
+// verify the claim; Describe (printed by ca-init) and keyroster-signer
+// doctor say that it is declared, not verified (D-WR-03).
 package agent
 
 import (
@@ -59,6 +66,14 @@ func open(opts map[string]string) (keystore.Backend, error) {
 		return nil, fmt.Errorf("keystore agent: connect: %w", err)
 	}
 	return &backend{conn: conn, client: sshagent.NewClient(conn), custody: custody}, nil
+}
+
+// Describe names the custody and, for pkcs11-agent, that it is declared.
+func (b *backend) Describe() string {
+	if b.custody == keystore.CustodyPKCS11Agent {
+		return "ssh-agent: custody pkcs11-agent declared by the operator, not verified (the agent cannot show whether a key lives in a hardware token)"
+	}
+	return "ssh-agent: custody agent (plain keys in ssh-agent: test and development only)"
 }
 
 // Key returns the agent key whose SHA-256 fingerprint equals fingerprint.

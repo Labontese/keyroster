@@ -39,7 +39,9 @@ as is; run the same flow by hand.
       certificates; the PIN appears in no output and no process command line
       (`ps`).
 - [ ] Record: `ca-pubkeys.json` and the bundle show custody `pkcs11-agent`
-      for all five keys.
+      for all five keys, `doctor` prints `INFO pkcs11_custody_declared`
+      (never `OK custody`), and the five public keys match the HSM's own
+      listing (`yubihsm-shell`), since the custody itself is only declared.
 
 ## 2. YubiKey 5 PIV (KEY-05)
 

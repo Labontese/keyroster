@@ -11,7 +11,19 @@ the keyroster binaries stay pure Go.
 The keystore backend is `agent` with the custody label `pkcs11-agent`. The
 custody is recorded in the signer's state, in `ca-pubkeys.json`, in the
 root-signed trust bundle and in the audit log's `ca_init` entry, so anyone
-who verifies the bundle or the log sees that the keys are HSM-held.
+who verifies the bundle or the log sees that the keys are declared
+HSM-held.
+
+**The custody is declared by the operator, not verified (D-WR-03).** The
+ssh-agent protocol does not say where a key lives: a key from the HSM, a
+key from a SoftHSM token and a plain key added with `ssh-add` look the
+same, and an entry's comment is whatever the loader set. The signer
+therefore records `pkcs11-agent` because `ca-init` was told so. `ca-init`
+prints "custody pkcs11-agent declared by the operator, not verified", and
+`doctor` prints `INFO pkcs11_custody_declared` instead of the OK
+hardware-custody line. Whoever signs the bundle should check, on the HSM
+itself, that the five public keys in `ca-pubkeys.json` are HSM keys (for
+example `yubihsm-shell` or `pkcs11-tool --list-objects`) before signing.
 
 ## When to use it
 
@@ -156,7 +168,7 @@ keyroster-signer ca-init --state-dir /var/lib/keyroster-signer \
 `ca-init` runs once per state directory. A second run is refused and changes
 nothing. Then continue with the root ceremony (`keyroster root sign`) and
 `keyroster-signer install-bundle` as for any backend; the bundle records
-custody `pkcs11-agent` for all five keys.
+custody `pkcs11-agent` for all five keys (declared, see above).
 
 ## A root key on a PKCS#11 token
 
