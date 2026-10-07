@@ -9,22 +9,22 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Certificate Authority (CA)
 
-- [x] **CA-01**: Admin can initialise separate user, host and machine CAs, each with its own key
-- [x] **CA-02**: Signer refuses to sign a certificate with empty principals or principals containing wildcards, commas, whitespace or control characters
-- [x] **CA-03**: Every certificate gets a unique, non-zero, monotonically increasing serial that is never reused, including after restore from backup
-- [x] **CA-04**: Every certificate gets a structured key ID identifying user/host, request and policy version
-- [x] **CA-05**: User certificates default to secure extensions (`permit-pty` only); other extensions are granted only by role
-- [x] **CA-06**: Signer only signs client-generated public keys; the server never generates or sees user private keys
-- [x] **CA-07**: Signer refuses certificate-type keys as CA keys (no chaining)
-- [x] **CA-08**: Certificates are verified as accepted/rejected by real `sshd` on OpenSSH 9.5p2 (Windows inbox) and the latest OpenSSH release in automated tests
+- [ ] **CA-01**: Admin can initialise separate user, host and machine CAs, each with its own key
+- [ ] **CA-02**: Signer refuses to sign a certificate with empty principals or principals containing wildcards, commas, whitespace or control characters
+- [ ] **CA-03**: Every certificate gets a unique, non-zero, monotonically increasing serial that is never reused, including after restore from backup
+- [ ] **CA-04**: Every certificate gets a structured key ID identifying user/host, request and policy version
+- [ ] **CA-05**: User certificates default to secure extensions (`permit-pty` only); other extensions are granted only by role
+- [ ] **CA-06**: Signer only signs client-generated public keys; the server never generates or sees user private keys
+- [ ] **CA-07**: Signer refuses certificate-type keys as CA keys (no chaining)
+- [ ] **CA-08**: Certificates are verified as accepted/rejected by real `sshd` on OpenSSH 9.5p2 (Windows inbox) and the latest OpenSSH release in automated tests
 
 ### Key Custody (KEY)
 
-- [x] **KEY-01**: CA keys live in a separate, network-less signer process behind a `Signer` interface
+- [ ] **KEY-01**: CA keys live in a separate, network-less signer process behind a `Signer` interface
 - [ ] **KEY-02**: Signer only issues when the request carries evidence it verifies itself (WebAuthn assertion over the request digest, required approvals, quorum-signed policy version)
-- [x] **KEY-03**: Admin can store CA keys in a PKCS#11 HSM (e.g. YubiHSM 2) via ssh-agent
-- [x] **KEY-04**: Admin can store CA keys in a TPM 2.0
-- [x] **KEY-05**: Admin can store CA keys in a YubiKey PIV slot
+- [ ] **KEY-03**: Admin can store CA keys in a PKCS#11 HSM (e.g. YubiHSM 2) via ssh-agent
+- [ ] **KEY-04**: Admin can store CA keys in a TPM 2.0
+- [ ] **KEY-05**: Admin can store CA keys in a YubiKey PIV slot
 - [ ] **KEY-06**: Admin can use an encrypted software CA key for evaluation, with a loud warning in CLI and UI
 - [ ] **KEY-07**: Admin can perform an offline trust-root ceremony (M-of-N hardware keys) producing a root that signs only trust bundles, KRL authority and policy
 - [ ] **KEY-08**: Admin can rotate a CA key without fleet outage (old and new trusted in parallel until all hosts converge)
@@ -72,9 +72,9 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Audit & Visibility (VIS)
 
-- [x] **VIS-01**: Every issuance, revocation, approval and admin action is written to a Merkle audit log before the certificate/action is released
+- [ ] **VIS-01**: Every issuance, revocation, approval and admin action is written to a Merkle audit log before the certificate/action is released
 - [ ] **VIS-02**: Log checkpoints are signed; agents and CLI verify the log only grows (consistency proofs)
-- [x] **VIS-03**: User/admin can run `sshcm audit verify` to verify the log end to end, and export it
+- [ ] **VIS-03**: User/admin can run `sshcm audit verify` to verify the log end to end, and export it
 - [ ] **VIS-04**: Overview shows all certificates, keys, hosts, principals and expiry — who has access to what, now
 - [ ] **VIS-05**: Login reconciliation: agents report sshd login events (serial + CA); any login with a serial not in the issuance log raises an alert
 - [ ] **VIS-06**: Convergence view shows which hosts have applied the current KRL, CA set and policy (e.g. 47/48)
@@ -104,9 +104,9 @@ Requirements for the first public release. Each maps to roadmap phases.
 ### Supply Chain & Repository (REPO)
 
 - [ ] **REPO-01**: Protected `main` via rulesets: PR only, required checks, required review, signed commits, linear history, no force-push
-- [x] **REPO-02**: GitHub Actions CI: build, test, lint, govulncheck, fuzzing, e2e against real sshd; actions pinned by SHA with least-privilege permissions
-- [x] **REPO-03**: CodeQL, Dependabot (gomod + actions), secret scanning with push protection, OpenSSF Scorecard
-- [x] **REPO-04**: SECURITY.md with private vulnerability reporting; README, LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CODEOWNERS, issue/PR templates
+- [ ] **REPO-02**: GitHub Actions CI: build, test, lint, govulncheck, fuzzing, e2e against real sshd; actions pinned by SHA with least-privilege permissions
+- [ ] **REPO-03**: CodeQL, Dependabot (gomod + actions), secret scanning with push protection, OpenSSF Scorecard
+- [ ] **REPO-04**: SECURITY.md with private vulnerability reporting; README, LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CODEOWNERS, issue/PR templates
 - [ ] **REPO-05**: Reproducible, static builds (`CGO_ENABLED=0`) for all target platforms
 - [ ] **REPO-06**: Releases via GitHub Releases with cosign signatures, SBOM and SLSA provenance; Conventional Commits + semver
 - [ ] **REPO-07**: Agent self-updates only to releases signed by the project's release key
@@ -165,19 +165,19 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CA-01 | Phase 1 | Complete |
-| CA-02 | Phase 1 | Complete |
-| CA-03 | Phase 1 | Complete |
-| CA-04 | Phase 1 | Complete |
-| CA-05 | Phase 1 | Complete |
-| CA-06 | Phase 1 | Complete |
-| CA-07 | Phase 1 | Complete |
-| CA-08 | Phase 1 | Complete |
-| KEY-01 | Phase 1 | Complete |
+| CA-01 | Phase 1 | Gaps Found |
+| CA-02 | Phase 1 | Gaps Found |
+| CA-03 | Phase 1 | Gaps Found |
+| CA-04 | Phase 1 | Gaps Found |
+| CA-05 | Phase 1 | Gaps Found |
+| CA-06 | Phase 1 | Gaps Found |
+| CA-07 | Phase 1 | Gaps Found |
+| CA-08 | Phase 1 | Gaps Found |
+| KEY-01 | Phase 1 | Gaps Found |
 | KEY-02 | Phase 2 | Pending |
-| KEY-03 | Phase 1 | Complete |
-| KEY-04 | Phase 1 | Complete |
-| KEY-05 | Phase 1 | Complete |
+| KEY-03 | Phase 1 | Gaps Found |
+| KEY-04 | Phase 1 | Gaps Found |
+| KEY-05 | Phase 1 | Gaps Found |
 | KEY-06 | Phase 2 | Pending |
 | KEY-07 | Phase 1 | Pending |
 | KEY-08 | Phase 3 | Pending |
@@ -207,9 +207,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REVOKE-04 | Phase 3 | Pending |
 | BREAK-01 | Phase 3 | Pending |
 | BREAK-02 | Phase 5 | Pending |
-| VIS-01 | Phase 1 | Complete |
+| VIS-01 | Phase 1 | Gaps Found |
 | VIS-02 | Phase 4 | Pending |
-| VIS-03 | Phase 1 | Complete |
+| VIS-03 | Phase 1 | Gaps Found |
 | VIS-04 | Phase 5 | Pending |
 | VIS-05 | Phase 5 | Pending |
 | VIS-06 | Phase 4 | Pending |
@@ -227,9 +227,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-04 | Phase 5 | Pending |
 | PLAT-05 | Phase 2 | Pending |
 | REPO-01 | Phase 1 | Pending |
-| REPO-02 | Phase 1 | Complete |
-| REPO-03 | Phase 1 | Complete |
-| REPO-04 | Phase 1 | Complete |
+| REPO-02 | Phase 1 | Gaps Found |
+| REPO-03 | Phase 1 | Gaps Found |
+| REPO-04 | Phase 1 | Gaps Found |
 | REPO-05 | Phase 6 | Pending |
 | REPO-06 | Phase 6 | Pending |
 | REPO-07 | Phase 6 | Pending |
