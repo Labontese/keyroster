@@ -223,7 +223,7 @@ socket and runs no program.
 | `WARN vtpm_custody` | the online keys are in a virtual TPM | Expected on a Proxmox vTPM (D-08); see above. |
 | `WARN software_key_in_agent` | the online keys are plain keys in ssh-agent | Test and development only. |
 | `WARN custody_mismatch` | the TPM now maps to another custody than the one recorded | The VM may run on another TPM than the bundle claims. Investigate before issuing. |
-| `WARN tpm_unavailable` | doctor could not read the TPM | Check `/dev/tpmrm0` and group `tss`. |
+| `WARN tpm_unavailable` | doctor could not read the TPM, or keys are recorded with TPM custody but the TPM was not inspected | Check `/dev/tpmrm0` and group `tss`, and that the recorded backend is `tpm`. Until then the TPM custody is unconfirmed. |
 
 On the homelab VM the expected result is no FAIL, `WARN vtpm_custody` and
 one `WARN software_root` per root.

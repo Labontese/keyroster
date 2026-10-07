@@ -311,6 +311,12 @@ func custodyResults(f Facts) []Result {
 				rs = append(rs, Result{Level: OK, Code: codeTPM, Message: fmt.Sprintf(
 					"TPM manufacturer %s maps to custody %s, as recorded", f.TPMManufacturer, f.TPMCustody)})
 			}
+		default:
+			// Nobody read the TPM (the recorded backend is not tpm, or
+			// the read gave no custody): the recorded custody is a claim
+			// only, never an OK.
+			weak = true
+			rs = append(rs, Result{Level: WARN, Code: CodeTPMUnavailable, Message: "keys are recorded with TPM custody, but the TPM was not inspected, so that custody is unconfirmed"})
 		}
 	}
 	if !weak && len(f.CAKeys) > 0 {

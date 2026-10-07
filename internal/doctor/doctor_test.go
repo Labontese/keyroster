@@ -308,6 +308,25 @@ func TestTPMUnavailable(t *testing.T) {
 	requireNone(t, rs, "custody")
 }
 
+// TestTPMNotInspected (C-WR-03): keys recorded with TPM custody, but no TPM
+// read at all (no custody, no error), never yield the hardware custody OK.
+func TestTPMNotInspected(t *testing.T) {
+	for _, custody := range []string{"tpm", "vtpm"} {
+		t.Run(custody, func(t *testing.T) {
+			f := healthy(t)
+			f.CAKeys = hardwareKeys(custody, ssh.KeyAlgoECDSA256)
+			f.TPMManufacturer, f.TPMCustody, f.TPMError = "", "", ""
+			rs := Run(f)
+			r := requireOne(t, rs, WARN, CodeTPMUnavailable)
+			if !strings.Contains(r.Message, "not inspected") {
+				t.Fatalf("tpm_unavailable must say the TPM was not inspected: %q", r.Message)
+			}
+			requireNone(t, rs, "custody")
+			requireNone(t, rs, "tpm")
+		})
+	}
+}
+
 func TestLevelsAndLines(t *testing.T) {
 	for l, want := range map[Level]string{OK: "OK", INFO: "INFO", WARN: "WARN", FAIL: "FAIL"} {
 		if l.String() != want {
