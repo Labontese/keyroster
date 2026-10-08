@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: trust-core
 status: executing
-stopped_at: "01-17 Task 3 merge gate: owner approves PR #22"
-last_updated: "2026-10-08T06:04:05.797Z"
+stopped_at: "01-19 Task 3 merge gate: owner approves PR #23"
+last_updated: "2026-10-08T09:29:19.462Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 01 execution started
-state_head: f6f419dfdc1f8e167aa96e42f6439df3e7c2d381
+state_head: 4d8069141409768c1fd1b65fcebb675fc914c7b6
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 21
-  completed_plans: 17
+  completed_plans: 18
   percent: 0
 ---
 
@@ -73,6 +73,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P14 | 45 min | 3 tasks | 5 files |
 | Phase 01 P15 | 35 min | 3 tasks | 6 files |
 | Phase 01 P17 | 35 min | 2 tasks | 6 files |
+| Phase 01 P19 | 10 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -147,6 +148,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-15: KEY-07 stays open; the real offline ceremony means reinstalling the homelab signer until a successor-bundle builder exists
 - [Phase 01]: 01-17: root sign --prev DIR builds successor bundles; --ca-pubkeys refused with --prev (CA rotation is KEY-08); a previous or a new root may sign; BuildSuccessor and VerifySuccessor share checkSuccessorChain
 - [Phase 01]: 01-17: KEY-07 not marked complete; it closes in 01-21 after the owner's offline ceremony and destruction of the TEST roots
+- [Phase 01]: 01-19: KEY-07 removed from requirements-completed in 01-06, 01-07 and 01-09 only; coverage rows and bodies unchanged (owner decision 3)
+- [Phase 01]: 01-19: C-WR-06 part 2 and C-WR-01 remainder deferred to Phase 4 (VIS-02); D-WR-02 and D-WR-04 deferred to issue #13 before the Phase 6 external review (owner decision 4)
 
 ### Pending Todos
 
@@ -176,6 +179,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-08T06:04:05.726Z
-Stopped at: 01-17 Task 3 merge gate: owner approves PR #22
+Last session: 2026-10-08T09:29:19.391Z
+Stopped at: 01-19 Task 3 merge gate: owner approves PR #23
 Resume file: None
