@@ -26,7 +26,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 - [ ] **KEY-04**: Admin can store CA keys in a TPM 2.0
 - [ ] **KEY-05**: Admin can store CA keys in a YubiKey PIV slot
 - [ ] **KEY-06**: Admin can use an encrypted software CA key for evaluation, with a loud warning in CLI and UI
-- [ ] **KEY-07**: Admin can perform an offline trust-root ceremony (M-of-N hardware keys) producing a root that signs only trust bundles, KRL authority and policy
+- [ ] **KEY-07**: Admin can perform an offline trust-root ceremony (M-of-N root keys at the security level the admin chooses: software keys on offline media, or hardware keys such as FIDO/PIV) producing a root that signs only trust bundles, KRL authority and policy
 - [ ] **KEY-08**: Admin can rotate a CA key without fleet outage (old and new trusted in parallel until all hosts converge)
 
 ### Identity & Login (AUTH)
