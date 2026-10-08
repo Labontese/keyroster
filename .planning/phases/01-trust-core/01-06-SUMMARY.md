@@ -68,7 +68,7 @@ patterns-established:
   - "Root-signed document = canonical JSON + detached armored SSHSIG blocks appended to FILE.sigs"
   - "Golden vectors from deterministic test keys (Ed25519 seed bytes, P-256 scalar = SHA-256(label||n)), regenerated only with go test -run TestGoldenVectors ./internal/trust/ -args -update"
 
-requirements-completed: [KEY-07]
+requirements-completed: []
 
 coverage:
   - id: D1

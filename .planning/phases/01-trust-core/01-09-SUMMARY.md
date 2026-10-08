@@ -57,7 +57,7 @@ patterns-established:
   - "documentSigner interface in cmd/keyroster: *rootceremony.Root and an agentRoot adapter both sign only bundles and policies, so root sign has one signing path for both custody kinds"
   - "CLI passphrase tests pass secrets through os.Pipe descriptors (--passphrase-fd); the confirmation prompt is answered by a reader that hashes bundle.json lazily, so no throwaway sign run is needed"
 
-requirements-completed: [KEY-07]
+requirements-completed: []
 
 coverage:
   - id: D1

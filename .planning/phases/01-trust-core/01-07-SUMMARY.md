@@ -81,7 +81,7 @@ patterns-established:
   - "bootstrapSigner(t, bootstrapOpts{}) is the only way an e2e test starts a signer; Provisioner backends run ca-init without --key"
   - "signer.Fixture + memBackend/keyringBackend: in-package tests bootstrap a real trust state with real SSHSIG signatures, no verification shortcuts"
 
-requirements-completed: [CA-01, CA-04, CA-05, CA-07, KEY-01, KEY-07, VIS-01]
+requirements-completed: [CA-01, CA-04, CA-05, CA-07, KEY-01, VIS-01]
 
 coverage:
   - id: D1
