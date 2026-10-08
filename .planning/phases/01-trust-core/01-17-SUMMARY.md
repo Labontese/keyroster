@@ -15,11 +15,11 @@ provides:
 affects: [01-18, 01-20, 01-21, KEY-07, KEY-08]
 
 actuals:
-  tokens: 11401
+  tokens: 11814
   tasks: 2
-  commits: 3
+  commits: 5
 plan_head_before: b1bf20605ea89c046c65ab15124f02a781d4cb3e
-plan_head_after: f6f419dfdc1f8e167aa96e42f6439df3e7c2d381
+plan_head_after: bb82a078fd3d58b0e0598dbcc29b3769b4af0089
 
 tech-stack:
   added: []
@@ -46,7 +46,7 @@ key-decisions:
   - "KEY-07 is not marked complete: it closes in 01-21 after the owner's offline ceremony and the destruction of the TEST roots"
 
 patterns-established:
-  - "Successor refusals happen before --out-dir is created: the admin check runs before prepareBundle, and the builder runs before MkdirAll"
+  - "Chain, policy, admin and clock refusals leave no --out-dir: the admin check runs before prepareBundle, and the builder runs before MkdirAll. Signing-root refusals (unknown root, false custody label) come after prepareBundle, so they leave bundle.json and policy.json in --out-dir but write no signature"
 
 requirements-completed: []
 
@@ -68,11 +68,11 @@ coverage:
         status: pass
     human_judgment: false
   - id: D3
-    description: "root sign --prev in the homelab shape (software roots A,B -> C,D): previous root A and new root C sign with --key, VerifySuccessor passes over the --out-dir files; --ca-pubkeys (exit 2), unknown root, admin is a previous/new root, unchained policy, out-dir = prev, non-canonical prev bundle, prev policy mismatch and a clock before the previous issued_at are refused with --out-dir unwritten; a rerun signs only the missing document and --threshold 2 on a rerun is refused"
+    description: "root sign --prev in the homelab shape (software roots A,B -> C,D): previous root A and new root C sign with --key, and VerifySuccessor passes over the --out-dir files. Refused without creating --out-dir: --ca-pubkeys (exit 2), --prev without --roots (exit 2), admin is a previous/new root, unchained policy, non-canonical previous bundle, previous policy mismatch, a clock before the previous issued_at. --out-dir = --prev is refused with the --prev directory unchanged. Refused with no signature written (bundle.json and policy.json are left in --out-dir): unknown signing root, and a --key root that the previous bundle labels custody=piv (error names DIR/bundle.json). A rerun signs only the missing document; --threshold 2 on a rerun is refused"
     requirement: KEY-07
     verification:
       - kind: unit
-        ref: "go test -count=1 -v -run TestRootSignSuccessor ./cmd/keyroster/ (13 subtests)"
+        ref: "go test -count=1 -v -run TestRootSignSuccessor ./cmd/keyroster/ (15 subtests)"
         status: pass
     human_judgment: false
   - id: D4
@@ -100,7 +100,7 @@ coverage:
     description: "PR #22 is green with auto-merge on and waits for the owner's approval at the merge gate"
     verification:
       - kind: other
-        ref: "scripts/gh-as-bot.sh pr checks 22 --required --watch -> all 17 required checks pass on head f6f419d"
+        ref: "scripts/gh-as-bot.sh pr checks 22 --required --watch -> all 17 required checks pass on implementation head bb82a07 (18/18 check runs success)"
         status: pass
     human_judgment: true
     rationale: "The owner's approval and the squash merge happen at the Task 3 blocking-human merge gate, after this SUMMARY is written"
@@ -120,33 +120,37 @@ status: complete
 - **Started:** 2026-10-08T05:27:39Z
 - **Completed:** 2026-10-08T06:02:44Z
 - **Tasks:** 2 of 3 executed before the merge gate (Task 3 is the owner's approval)
-- **Files modified:** 6 (3 created, 3 modified), 963 insertions, 70 deletions
+- **Files modified:** 6 code files (3 created, 3 modified), 1003 insertions, 70 deletions
 
 ## Accomplishments
 
 - **Task 1 (tracer):** `trust.BuildSuccessor`, the `--prev` mode of `root sign`, and the e2e test `TestRootRotationLiveSigner`. The successor header prints `Successor of trust bundle vN, sha256 …`, the previous roots, and `signatures needed: t1 of the n previous roots AND t2 of the m new roots, on both documents`. Genesis output is unchanged.
   - The tracer feedback gate applied row 3 (interactive, `end-of-phase`, automated-only `<verify>`). `<verify>` was re-run and was green before Task 2 started.
-- **Task 2:** `TestBuildSuccessor` (3 round trips, 8 refusals checked against both functions, 2 Validate refusals) and `TestRootSignSuccessor` (13 subtests).
+- **Task 2:** `TestBuildSuccessor` (3 round trips, 8 refusals checked against both functions, 2 Validate refusals) and `TestRootSignSuccessor` (15 subtests).
   - The signature-free rules moved into `checkSuccessorChain`, which `VerifySuccessor` and `BuildSuccessor` both call.
   - The branch was published as PR #22 with auto-merge, and all 17 required checks pass.
+  - **Follow-up commit `bb82a07`, pushed before any approval request.** The final self-review found that the previous-root branch of the `--key` custody refusal (T-01-76) and the `--prev` usage error had no test. Both are now pinned, and the custody test was confirmed by a mutation check.
 
 ## PR
 
 - **PR #22**: `feat(root): build successor trust bundles with root sign --prev` (https://github.com/Labontese/keyroster/pull/22).
   - Branch `p01/17-successor-builder`, opened by keyroster-bot, auto-merge (squash) enabled.
-- **Required checks on implementation head `f6f419d`:** all 17 pass.
+- **Required checks:** all 17 pass on implementation heads `f6f419d` and `bb82a07`, and on the first docs head `8b338d2`. All 18 check runs on `bb82a07` succeeded.
   - Analyze (actions), Analyze (go), build-piv, build-test, capslock, dependency-firewall;
   - e2e (9.5p1), e2e (10.5p1), e2e-pkcs11 (10.5p1-ed25519), e2e-pkcs11 (distro-p256), e2e-tpm;
   - fuzz, govulncheck, lint, pinned-actions, pr-title, systemd-sandbox.
-- **Signatures:** all three implementation commits show `verified: true` (GitHub API).
+- **Signatures:** every commit on the branch shows `verified: true` (GitHub API).
 
 ## Task Commits
 
 1. **Task 1 (tracer): end-to-end rotation of a live signer's roots.** `65ee671` (feat)
-2. **Task 2: successor rules as tests, then one shared chain check.** Tests `0c3f1b2` (test), then `f6f419d` (feat).
+2. **Task 2: successor rules as tests, then one shared chain check.** Tests `0c3f1b2` (test), then `f6f419d` (feat). Follow-up tests `bb82a07` (test).
 3. **Task 3: merge gate.** No commit (owner approval; GitHub squash-merges).
 
-**Plan metadata:** the `docs(01-17): complete successor-builder plan` commit on the same PR branch.
+**Plan metadata:** the `docs(01-17): complete successor-builder plan` commits on the same PR branch.
+- `8b338d2` is the first version.
+- A second commit updates this SUMMARY for `bb82a07`.
+- `actuals.commits` (5) is measured at `bb82a07` and includes `8b338d2`.
 
 ### TDD evidence
 
@@ -190,7 +194,8 @@ The first mutation pass showed two weak spots, and both were fixed before the te
 | `bash scripts/linux.sh '$HOME/go/bin/golangci-lint run ./...'` (v2.14.0) | 0 issues |
 | `bash scripts/linux.sh 'bash scripts/capslock-check.sh && bash scripts/dep-firewall.sh'` | both exit 0 |
 | `bash scripts/linux.sh 'KEYROSTER_OPENSSH_PREFIX=… go test -tags e2e -count=1 -v ./test/e2e/'` | exit 0, all 16 tests PASS |
-| `scripts/gh-as-bot.sh pr checks 22 --required --watch` | exit 0, 17/17 pass |
+| `scripts/gh-as-bot.sh pr checks 22 --required --watch` | exit 0, 17/17 pass (heads `f6f419d`, `8b338d2`, `bb82a07`) |
+| After `bb82a07`: `go test -count=1 ./cmd/keyroster/ ./internal/trust/`; WSL `go test -race -run TestRootSignSuccessor ./cmd/keyroster/`; golangci-lint; gofmt | all pass, 0 issues, gofmt empty |
 
 ## Files Created/Modified
 
@@ -221,6 +226,7 @@ See `key-decisions` above.
 
 **3. [Rule 2 - Correctness] The custody-mismatch error names the right file.**
 - When `--key` resolves to a previous root whose label is not `custody=software`, the error names `DIR/bundle.json` (where that label comes from) instead of `--roots`.
+- Pinned by `previous_root_custody_mismatch_refused` (`bb82a07`). Removing the branch makes that test fail.
 
 **4. [TDD] Unexpected GREEN at RED.** See "TDD evidence" above.
 
@@ -257,4 +263,4 @@ None.
 ## Self-Check: PASSED
 
 - Files exist: `internal/trust/successor.go`, `internal/trust/successor_test.go`, `test/e2e/rotation_test.go`, and this SUMMARY.
-- Commits exist on `p01/17-successor-builder`: `65ee671`, `0c3f1b2`, `f6f419d`.
+- Commits exist on `p01/17-successor-builder`: `65ee671`, `0c3f1b2`, `f6f419d`, `8b338d2`, `bb82a07`.
