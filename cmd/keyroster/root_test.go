@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -872,4 +873,369 @@ func TestTrustVerifyReportsSignersPerDocument(t *testing.T) {
 			t.Fatalf("trust verify reports %q, but that root signed one document only:\n%s", wrong, stdout)
 		}
 	}
+}
+
+// setCeremonyNow fixes the ceremony clock at ts until the test ends.
+func setCeremonyNow(t *testing.T, ts string) {
+	t.Helper()
+	at, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := ceremonyNow
+	ceremonyNow = func() time.Time { return at }
+	t.Cleanup(func() { ceremonyNow = prev })
+}
+
+// TestRootSignSuccessor (KEY-07, owner decision 1) runs root sign --prev in
+// the homelab rotation shape: a genesis bundle by software roots A and B at
+// threshold 1, signed by A, is succeeded by a bundle naming software roots
+// C and D at threshold 1, which the previous root A and the new root C sign
+// with --key. The subtests share the four roots (each scrypt run costs
+// about a second); refusals that come before decryption cost none.
+func TestRootSignSuccessor(t *testing.T) {
+	g := newCeremonyInputs(t)
+	a := initSoftwareRoot(t, g.dir, "root-a", "correct horse battery staple A")
+	b := initSoftwareRoot(t, g.dir, "root-b", "correct horse battery staple B")
+	g.writeRoots(t, a, b)
+	setCeremonyNow(t, "2026-10-05T07:00:00Z")
+	code, stdout, stderr := g.signWithKey(t, "1", a)
+	if code != 0 {
+		t.Fatalf("genesis root sign --key: exit %d: %s", code, stderr)
+	}
+	if strings.Contains(stdout, "Successor of") || strings.Contains(stdout, "signatures needed") {
+		t.Fatalf("a genesis signing printed the successor header:\n%s", stdout)
+	}
+	c := initSoftwareRoot(t, g.dir, "root-c", "correct horse battery staple C")
+	d := initSoftwareRoot(t, g.dir, "root-d", "correct horse battery staple D")
+	newRoots := &ceremony{dir: g.dir, roots: filepath.Join(g.dir, "new-roots.pub")}
+	newRoots.writeRoots(t, c, d)
+	setCeremonyNow(t, "2026-10-06T07:00:00Z")
+	prevPolicy := filepath.Join(g.out, "policy.json")
+
+	// sign runs root sign --prev g.out into out with policy and threshold.
+	// key nil signs with an --agent-key of fingerprint agentFP instead.
+	sign := func(t *testing.T, out, policy, threshold string, key *softwareRoot, extra ...string) (int, string, string) {
+		t.Helper()
+		typeHashPrefix(t, out)
+		args := []string{"root", "sign", "--prev", g.out, "--roots", newRoots.roots, "--threshold", threshold,
+			"--policy", policy, "--out-dir", out}
+		if key != nil {
+			args = append(args, "--key", key.path, "--passphrase-fd", passphraseFD(t, key.passphrase))
+		}
+		return run(t, append(args, extra...)...)
+	}
+	verifyOut := func(t *testing.T, out string) error {
+		t.Helper()
+		read := func(dir, name string) []byte {
+			data, err := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // G304: test file
+			if err != nil {
+				t.Fatal(err)
+			}
+			return data
+		}
+		prevBundle := read(g.out, "bundle.json")
+		prev, err := trust.ParseBundle(prevBundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = trust.VerifySuccessor(prev, prevBundle, read(g.out, "policy.json"),
+			read(out, "bundle.json"), read(out, "bundle.json.sigs"), read(out, "policy.json"), read(out, "policy.json.sigs"))
+		return err
+	}
+	mustNotExist := func(t *testing.T, path string) {
+		t.Helper()
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s exists after a refusal (stat error %v)", path, err)
+		}
+	}
+	// policyV2 writes a policy chained to the genesis policy (version 2,
+	// prev its SHA-256, a shorter user TTL), edited by edit, and returns
+	// its path.
+	policyV2 := func(t *testing.T, name string, edit func(p *trust.Policy)) string {
+		t.Helper()
+		v1, err := os.ReadFile(prevPolicy) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := trust.ParsePolicy(v1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.CAProfiles[0].MaxTTLSeconds = 3600
+		p.Version, p.Prev = 2, trust.SHA256Hex(v1)
+		edit(p)
+		data, err := p.Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(g.dir, name)
+		writeTestFile(t, path, data)
+		return path
+	}
+	rootKey := func(t *testing.T, r softwareRoot) string {
+		t.Helper()
+		line, err := os.ReadFile(r.pub) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, _, _, _, err := ssh.ParseAuthorizedKey(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return trust.FormatKey(pub)
+	}
+	// copyPrev copies the genesis bundle.json and policy.json into a new
+	// directory, the named file transformed by edit, and returns it.
+	copyPrev := func(t *testing.T, name string, edit func([]byte) []byte) string {
+		t.Helper()
+		dir, err := os.MkdirTemp(g.dir, "prev-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{"bundle.json", "policy.json"} {
+			data, err := os.ReadFile(filepath.Join(g.out, f)) //nolint:gosec // G304: test file
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f == name {
+				data = edit(data)
+			}
+			writeTestFile(t, filepath.Join(dir, f), data)
+		}
+		return dir
+	}
+
+	succ := filepath.Join(g.dir, "succ")
+	t.Run("previous_root_signs_with_key", func(t *testing.T) {
+		code, stdout, stderr := sign(t, succ, prevPolicy, "1", &a)
+		if code != 0 {
+			t.Fatalf("root sign --prev --key A: exit %d: %s", code, stderr)
+		}
+		prevBundle, err := os.ReadFile(filepath.Join(g.out, "bundle.json")) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			"Successor of trust bundle v1, sha256 " + trust.SHA256Hex(prevBundle),
+			"signatures needed: 1 of the 2 previous roots AND 1 of the 2 new roots, on both documents",
+			"Trust bundle version 2",
+			"signed " + filepath.Join(succ, "bundle.json") + " with " + a.fingerprint,
+			"signed " + filepath.Join(succ, "policy.json") + " with " + a.fingerprint,
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("root sign --prev output lacks %q:\n%s", want, stdout)
+			}
+		}
+		shown := false
+		for _, line := range strings.Split(stdout, "\n") {
+			shown = shown || (strings.Contains(line, a.fingerprint) && strings.Contains(line, "custody=software"))
+		}
+		if !shown || !strings.Contains(stderr, "SOFTWARE ROOT:") {
+			t.Fatalf("previous root A not shown with custody=software, or no SOFTWARE ROOT banner:\n%s\n%s", stdout, stderr)
+		}
+		if err := verifyOut(t, succ); !errors.Is(err, trust.ErrThreshold) {
+			t.Fatalf("VerifySuccessor with the previous root's signature only: err = %v, want %v", err, trust.ErrThreshold)
+		}
+	})
+
+	t.Run("new_root_signs_with_key", func(t *testing.T) {
+		if code, _, stderr := sign(t, succ, prevPolicy, "1", &c); code != 0 {
+			t.Fatalf("root sign --prev --key C: exit %d: %s", code, stderr)
+		}
+		if err := verifyOut(t, succ); err != nil {
+			t.Fatalf("VerifySuccessor after A and C signed: %v", err)
+		}
+	})
+
+	t.Run("ca_pubkeys_refused", func(t *testing.T) {
+		out := filepath.Join(g.dir, "out-ca")
+		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", a.fingerprint, "--ca-pubkeys", g.caPubkeys)
+		if code != 2 || !strings.Contains(stderr, "--ca-pubkeys is refused with --prev") {
+			t.Fatalf("--ca-pubkeys with --prev: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+
+	t.Run("unknown_root_refused", func(t *testing.T) {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := ssh.NewPublicKey(priv.Public())
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := filepath.Join(g.dir, "out-unknown")
+		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", ssh.FingerprintSHA256(pub))
+		if code != 1 || !strings.Contains(stderr, "not one of") || !strings.Contains(stderr, "previous bundle") {
+			t.Fatalf("unknown signing root: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, filepath.Join(out, "bundle.json.sigs"))
+		mustNotExist(t, filepath.Join(out, "policy.json.sigs"))
+	})
+
+	t.Run("missing_flags_with_prev", func(t *testing.T) {
+		code, _, stderr := run(t, "root", "sign", "--prev", g.out, "--threshold", "1", "--policy", prevPolicy,
+			"--out-dir", filepath.Join(g.dir, "out-usage"), "--agent-key", a.fingerprint)
+		if code != 2 || !strings.Contains(stderr, "with --prev, --policy, --roots, --threshold, --out-dir") {
+			t.Fatalf("--prev without --roots: exit %d, stderr %q", code, stderr)
+		}
+	})
+
+	t.Run("previous_root_custody_mismatch_refused", func(t *testing.T) {
+		// The previous bundle labels A custody=piv: --key holds A in
+		// software, so the label would be false, and the error names the
+		// previous bundle as the label's source.
+		prev := copyPrev(t, "bundle.json", func(data []byte) []byte {
+			pb, err := trust.ParseBundle(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, rk := range pb.Root.Keys {
+				if rk.Key == rootKey(t, a) {
+					pb.Root.Keys[i].Custody = "piv"
+				}
+			}
+			out, err := pb.Canonical()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		})
+		out := filepath.Join(g.dir, "out-custody")
+		code, _, stderr := sign(t, out, prevPolicy, "1", &a, "--prev", prev) // the later --prev wins
+		if code != 1 || !strings.Contains(stderr, filepath.Join(prev, "bundle.json")+" declares custody=piv") || !strings.Contains(stderr, "false custody label") {
+			t.Fatalf("previous root labelled piv signing with --key: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, filepath.Join(out, "bundle.json.sigs"))
+		mustNotExist(t, filepath.Join(out, "policy.json.sigs"))
+	})
+
+	for _, tc := range []struct {
+		name string
+		root softwareRoot
+	}{{"admin_is_previous_root", a}, {"admin_is_new_root", c}} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := policyV2(t, tc.name+".json", func(p *trust.Policy) {
+				p.Admins = append(p.Admins, trust.AdminKey{Name: "root", Key: rootKey(t, tc.root)})
+			})
+			out := filepath.Join(g.dir, "out-"+tc.name)
+			code, _, stderr := sign(t, out, policy, "1", &a)
+			if code != 1 || !strings.Contains(stderr, "policy admin key equals a root key") || !strings.Contains(stderr, "nothing was written or signed") {
+				t.Fatalf("%s: exit %d, stderr %q", tc.name, code, stderr)
+			}
+			mustNotExist(t, out)
+		})
+	}
+
+	t.Run("chained_policy_v2_accepted", func(t *testing.T) {
+		policy := policyV2(t, "policy-v2.json", func(*trust.Policy) {})
+		out := filepath.Join(g.dir, "out-chained")
+		for _, r := range []*softwareRoot{&a, &c} {
+			if code, _, stderr := sign(t, out, policy, "1", r); code != 0 {
+				t.Fatalf("root sign --prev with a chained v2 policy by %s: exit %d: %s", r.path, code, stderr)
+			}
+		}
+		if err := verifyOut(t, out); err != nil {
+			t.Fatalf("VerifySuccessor with a chained v2 policy: %v", err)
+		}
+	})
+
+	t.Run("unchained_policy_refused", func(t *testing.T) {
+		policy := policyV2(t, "policy-unchained.json", func(p *trust.Policy) { p.Version, p.Prev = 1, trust.GenesisPrev })
+		out := filepath.Join(g.dir, "out-unchained")
+		code, _, stderr := sign(t, out, policy, "1", &a)
+		if code != 1 || !strings.Contains(stderr, "a changed policy must be version 2") {
+			t.Fatalf("unchained policy: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+
+	t.Run("out_dir_equals_prev_refused", func(t *testing.T) {
+		before, err := os.ReadDir(g.out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, _, stderr := sign(t, g.out+string(filepath.Separator)+".", prevPolicy, "1", &a)
+		if code != 1 || !strings.Contains(stderr, "is the --prev directory") {
+			t.Fatalf("--out-dir equal to --prev: exit %d, stderr %q", code, stderr)
+		}
+		if after, err := os.ReadDir(g.out); err != nil || len(after) != len(before) {
+			t.Fatalf("the --prev directory changed: %d entries, then %d (%v)", len(before), len(after), err)
+		}
+	})
+
+	t.Run("prev_not_canonical_refused", func(t *testing.T) {
+		prev := copyPrev(t, "bundle.json", func(b []byte) []byte { return append(b[:len(b)-1], ' ', '\n') })
+		out := filepath.Join(g.dir, "out-noncanonical")
+		args := []string{"root", "sign", "--prev", prev, "--roots", newRoots.roots, "--threshold", "1",
+			"--policy", prevPolicy, "--out-dir", out, "--agent-key", a.fingerprint}
+		if code, _, stderr := run(t, args...); code != 1 || !strings.Contains(stderr, "not canonical") {
+			t.Fatalf("non-canonical previous bundle: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+
+	t.Run("prev_policy_mismatch_refused", func(t *testing.T) {
+		other := policyV2(t, "policy-other.json", func(*trust.Policy) {})
+		otherData, err := os.ReadFile(other) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		prev := copyPrev(t, "policy.json", func([]byte) []byte { return otherData })
+		out := filepath.Join(g.dir, "out-policy-mismatch")
+		args := []string{"root", "sign", "--prev", prev, "--roots", newRoots.roots, "--threshold", "1",
+			"--policy", prevPolicy, "--out-dir", out, "--agent-key", a.fingerprint}
+		if code, _, stderr := run(t, args...); code != 1 || !strings.Contains(stderr, "not the previous bundle's policy") {
+			t.Fatalf("previous policy.json not the bundle's policy: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+
+	t.Run("clock_before_prev_refused", func(t *testing.T) {
+		setCeremonyNow(t, "2026-10-05T06:59:59Z")
+		out := filepath.Join(g.dir, "out-clock")
+		code, _, stderr := sign(t, out, prevPolicy, "1", &a)
+		if code != 1 || !strings.Contains(stderr, "2026-10-05T07:00:00Z") || !strings.Contains(stderr, "clock") {
+			t.Fatalf("ceremony clock before the previous issued_at: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+
+	t.Run("rerun_signs_only_missing", func(t *testing.T) {
+		out := filepath.Join(g.dir, "out-rerun")
+		if code, _, stderr := sign(t, out, prevPolicy, "1", &a); code != 0 {
+			t.Fatalf("first signing by A: exit %d: %s", code, stderr)
+		}
+		if err := os.Remove(filepath.Join(out, "policy.json.sigs")); err != nil {
+			t.Fatal(err)
+		}
+		code, stdout, stderr := sign(t, out, prevPolicy, "1", &a)
+		if code != 0 {
+			t.Fatalf("rerun by A after a missing policy signature: exit %d: %s", code, stderr)
+		}
+		for _, want := range []string{
+			filepath.Join(out, "bundle.json.sigs") + " already holds a signature by " + a.fingerprint,
+			"signed " + filepath.Join(out, "policy.json") + " with " + a.fingerprint,
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("rerun output lacks %q:\n%s", want, stdout)
+			}
+		}
+		if strings.Contains(stdout, "signed "+filepath.Join(out, "bundle.json")+" with") {
+			t.Fatalf("the rerun signed the bundle again:\n%s", stdout)
+		}
+		before, err := os.ReadFile(filepath.Join(out, "bundle.json")) //nolint:gosec // G304: test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, _, stderr = sign(t, out, prevPolicy, "2", &a)
+		if code != 1 || !strings.Contains(stderr, "does not match --prev, --roots, --threshold and --policy") {
+			t.Fatalf("rerun with --threshold 2: exit %d, stderr %q", code, stderr)
+		}
+		if after, err := os.ReadFile(filepath.Join(out, "bundle.json")); err != nil || !bytes.Equal(after, before) { //nolint:gosec // G304: test file
+			t.Fatalf("bundle.json changed after a refused rerun (%v)", err)
+		}
+	})
 }

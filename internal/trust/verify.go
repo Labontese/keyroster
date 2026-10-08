@@ -206,52 +206,12 @@ func pinSet(pins []string) (map[string]bool, error) {
 // policy, and the key ID's pol=N identifies the admins and profiles that
 // authorized a certificate.
 func VerifySuccessor(prev *Bundle, prevCanonical, prevPolicy, next, nextSigs, policy, policySigs []byte) (*Bundle, *Policy, error) {
-	if prev == nil {
-		return nil, nil, fmt.Errorf("%w: no previous bundle", ErrVersionChain)
-	}
-	if err := prev.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("previous bundle: %w", err)
-	}
-	pc, err := prev.Canonical()
-	if err != nil || !bytes.Equal(pc, prevCanonical) {
-		return nil, nil, fmt.Errorf("%w: prevCanonical is not the canonical encoding of the previous bundle", ErrVersionChain)
-	}
-	if SHA256Hex(prevPolicy) != prev.PolicySHA256 {
-		return nil, nil, fmt.Errorf("%w: prevPolicy is not the previous bundle's policy", ErrVersionChain)
-	}
-	pp, err := ParsePolicy(prevPolicy)
-	if err != nil {
-		return nil, nil, fmt.Errorf("previous policy: %w", err)
-	}
 	b, err := ParseBundle(next)
 	if err != nil {
 		return nil, nil, fmt.Errorf("bundle: %w", err)
 	}
-	p, err := ParsePolicy(policy)
+	p, err := checkSuccessorChain(prev, prevCanonical, prevPolicy, b, policy)
 	if err != nil {
-		return nil, nil, fmt.Errorf("policy: %w", err)
-	}
-	if b.Version != prev.Version+1 {
-		return nil, nil, fmt.Errorf("%w: version %d after %d", ErrVersionChain, b.Version, prev.Version)
-	}
-	if b.Prev != SHA256Hex(prevCanonical) {
-		return nil, nil, fmt.Errorf("%w: prev %s is not the previous bundle's SHA-256", ErrVersionChain, b.Prev)
-	}
-	// Both timestamps are validated TimeFormat strings, which order
-	// lexicographically.
-	if b.IssuedAt < prev.IssuedAt {
-		return nil, nil, fmt.Errorf("%w: issued_at %s is before the previous bundle's %s", ErrVersionChain, b.IssuedAt, prev.IssuedAt)
-	}
-	if b.PolicySHA256 != SHA256Hex(policy) {
-		return nil, nil, ErrPolicyHash
-	}
-	if !bytes.Equal(policy, prevPolicy) && (p.Version != pp.Version+1 || p.Prev != SHA256Hex(prevPolicy)) {
-		return nil, nil, fmt.Errorf("%w: a changed policy must be version %d with the previous policy's SHA-256 as prev, got version %d",
-			ErrVersionChain, pp.Version+1, p.Version)
-	}
-	// A root that next retires may still exist, so it must not become an
-	// admin either.
-	if err := CheckAdminsNotRoots(p, b.Root.Keys, prev.Root.Keys); err != nil {
 		return nil, nil, err
 	}
 	oldRoots, err := prev.rootKeys()
@@ -275,4 +235,68 @@ func VerifySuccessor(prev *Bundle, prevCanonical, prevPolicy, next, nextSigs, po
 		}
 	}
 	return b, p, nil
+}
+
+// errIssuedBeforePrev marks the issued_at-order refusal of
+// checkSuccessorChain. Its text is ErrVersionChain's and it wraps
+// ErrVersionChain, so the verifier's error text is unchanged while
+// BuildSuccessor can add a hint about the ceremony clock.
+var errIssuedBeforePrev = fmt.Errorf("%w", ErrVersionChain)
+
+// checkSuccessorChain enforces every rule of the successor chain that does
+// not involve a signature, for VerifySuccessor and BuildSuccessor alike, so
+// the builder cannot drift from the verifier. next must already be a
+// structurally valid bundle (ParseBundle or Validate). It checks, in this
+// order: prev validates and prevCanonical is its canonical encoding;
+// prevPolicy is prev's policy; policy parses; next is version prev+1,
+// carries prev's SHA-256 as prev and is not issued before prev; next
+// carries policy's SHA-256; policy is prevPolicy unchanged or chained to it
+// as the next version; and no policy admin is a root of next or of prev.
+// It returns the parsed policy.
+func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *Bundle, policy []byte) (*Policy, error) {
+	if prev == nil {
+		return nil, fmt.Errorf("%w: no previous bundle", ErrVersionChain)
+	}
+	if err := prev.Validate(); err != nil {
+		return nil, fmt.Errorf("previous bundle: %w", err)
+	}
+	pc, err := prev.Canonical()
+	if err != nil || !bytes.Equal(pc, prevCanonical) {
+		return nil, fmt.Errorf("%w: prevCanonical is not the canonical encoding of the previous bundle", ErrVersionChain)
+	}
+	if SHA256Hex(prevPolicy) != prev.PolicySHA256 {
+		return nil, fmt.Errorf("%w: prevPolicy is not the previous bundle's policy", ErrVersionChain)
+	}
+	pp, err := ParsePolicy(prevPolicy)
+	if err != nil {
+		return nil, fmt.Errorf("previous policy: %w", err)
+	}
+	p, err := ParsePolicy(policy)
+	if err != nil {
+		return nil, fmt.Errorf("policy: %w", err)
+	}
+	if next.Version != prev.Version+1 {
+		return nil, fmt.Errorf("%w: version %d after %d", ErrVersionChain, next.Version, prev.Version)
+	}
+	if next.Prev != SHA256Hex(prevCanonical) {
+		return nil, fmt.Errorf("%w: prev %s is not the previous bundle's SHA-256", ErrVersionChain, next.Prev)
+	}
+	// Both timestamps are validated TimeFormat strings, which order
+	// lexicographically.
+	if next.IssuedAt < prev.IssuedAt {
+		return nil, fmt.Errorf("%w: issued_at %s is before the previous bundle's %s", errIssuedBeforePrev, next.IssuedAt, prev.IssuedAt)
+	}
+	if next.PolicySHA256 != SHA256Hex(policy) {
+		return nil, ErrPolicyHash
+	}
+	if !bytes.Equal(policy, prevPolicy) && (p.Version != pp.Version+1 || p.Prev != SHA256Hex(prevPolicy)) {
+		return nil, fmt.Errorf("%w: a changed policy must be version %d with the previous policy's SHA-256 as prev, got version %d",
+			ErrVersionChain, pp.Version+1, p.Version)
+	}
+	// A root that next retires may still exist, so it must not become an
+	// admin either.
+	if err := CheckAdminsNotRoots(p, next.Root.Keys, prev.Root.Keys); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
