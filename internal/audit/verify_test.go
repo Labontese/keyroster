@@ -939,3 +939,179 @@ func TestVerifyAnchoring(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifyAnchorsOnLaterBundle (VIS-03, KEY-07): the pins may name the
+// root set of any trust bundle in the log, not only the genesis bundle.
+// The first bundle whose root set and threshold are exactly the pins is the
+// anchor; the bundles before it are authenticated by the prev-hash chain,
+// the ones after it by VerifySuccessor, and pins that match no bundle fail
+// closed. This test goes red if anchoring becomes genesis-only again.
+func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
+	// check is one Verify call over the case's log.
+	type check struct {
+		pins       []ssh.Signer
+		want       string // "" = must verify
+		why        string // with want: the specific reason, also required
+		wantAnchor uint64
+	}
+	pinsOf := func(signers ...ssh.Signer) []string {
+		var out []string
+		for _, s := range signers {
+			out = append(out, ssh.FingerprintSHA256(s.PublicKey()))
+		}
+		return out
+	}
+	onlyRoot := func(s ssh.Signer) trust.RootSet {
+		return trust.RootSet{Keys: []trust.RootKey{{Key: trust.FormatKey(s.PublicKey()), Custody: "software"}}, Threshold: 1}
+	}
+	// rotated is the homelab rotation: genesis by root A (the fixture
+	// root) and an issuance, then successor v2 naming root C, signed by
+	// v2Signers, and an issuance under v2. edit changes v2 before signing.
+	rotated := func(t *testing.T, edit func(*trust.Bundle), v2Signers func(a, c ssh.Signer) []ssh.Signer) (f *fixture, a, c ssh.Signer) {
+		f = newBareFixture(t, "ed25519")
+		a, c = f.root, newSigner(t, "ed25519")
+		g := f.signDocs(f.genesis(), f.policy(), a)
+		f.addBundle(g)
+		f.addIssue()
+		f.addBundle(f.signDocs(f.successor(g, func(b *trust.Bundle) {
+			b.Root = onlyRoot(c)
+			if edit != nil {
+				edit(b)
+			}
+		}), f.policy(), v2Signers(a, c)...))
+		f.addIssue()
+		return f, a, c
+	}
+	both := func(a, c ssh.Signer) []ssh.Signer { return []ssh.Signer{a, c} }
+
+	cases := []struct {
+		name  string
+		build func(t *testing.T) (*fixture, []check)
+	}{
+		{"rotation_new_pins_anchor_v2", func(t *testing.T) (*fixture, []check) {
+			f, _, c := rotated(t, nil, both)
+			return f, []check{{pins: []ssh.Signer{c}, wantAnchor: 2}}
+		}},
+		{"rotation_old_pins_anchor_v1", func(t *testing.T) (*fixture, []check) {
+			f, a, _ := rotated(t, nil, both)
+			return f, []check{{pins: []ssh.Signer{a}, wantAnchor: 1}}
+		}},
+		{"rotation_twice_pins_middle_anchor_v2", func(t *testing.T) (*fixture, []check) {
+			// v3 rotates on from C to D: pins C anchor on v2, and v3 is
+			// still checked as v2's successor.
+			f := newBareFixture(t, "ed25519")
+			a, c, d := f.root, newSigner(t, "ed25519"), newSigner(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), a)
+			f.addBundle(g)
+			v2 := f.signDocs(f.successor(g, func(b *trust.Bundle) { b.Root = onlyRoot(c) }), f.policy(), a, c)
+			f.addBundle(v2)
+			v3 := f.successor(v2, func(b *trust.Bundle) { b.Root = onlyRoot(d) })
+			v3.Version = 3
+			f.addBundle(f.signDocs(v3, f.policy(), c, d))
+			f.addIssue()
+			return f, []check{
+				{pins: []ssh.Signer{a}, wantAnchor: 1},
+				{pins: []ssh.Signer{c}, wantAnchor: 2},
+				{pins: []ssh.Signer{d}, wantAnchor: 3},
+			}
+		}},
+		{"fork_under_old_pins", func(t *testing.T) (*fixture, []check) {
+			// Accepted property, not a bug: root A, exposed, signs a
+			// separate genesis with its own log key and CAs. Pins of A
+			// anchor whatever A signed, so the fork verifies under them;
+			// pins of the new root C refuse it, because no bundle of the
+			// fork has C's root set. After rotating away from exposed
+			// roots, auditors pin the new roots (root-ceremony.md).
+			_, a, c := rotated(t, nil, both)
+			fork := newBareFixture(t, "ed25519")
+			fork.root = a
+			fork.addBundle(fork.signDocs(fork.genesis(), fork.policy(), a))
+			fork.addIssue()
+			return fork, []check{
+				{pins: []ssh.Signer{a}, wantAnchor: 1},
+				{pins: []ssh.Signer{c}, want: "not anchored in the pinned roots", why: "pinned root set at threshold 1"},
+			}
+		}},
+		{"v2_not_signed_by_previous_root", func(t *testing.T) (*fixture, []check) {
+			f, _, c := rotated(t, nil, func(_, c ssh.Signer) []ssh.Signer { return []ssh.Signer{c} })
+			return f, []check{{pins: []ssh.Signer{c}, want: "not a valid successor", why: "(previous roots) signed by 0"}}
+		}},
+		{"v2_not_signed_by_new_root", func(t *testing.T) (*fixture, []check) {
+			// The previous root alone cannot hand trust to a root set
+			// that never signed.
+			f, a, c := rotated(t, nil, func(a, _ ssh.Signer) []ssh.Signer { return []ssh.Signer{a} })
+			return f, []check{
+				{pins: []ssh.Signer{c}, want: "not a valid successor", why: "(new roots) signed by 0"},
+				{pins: []ssh.Signer{a}, want: "not a valid successor", why: "(new roots) signed by 0"},
+			}
+		}},
+		{"v2_prev_mismatch", func(t *testing.T) (*fixture, []check) {
+			f, _, c := rotated(t, func(b *trust.Bundle) { b.Prev = trust.SHA256Hex([]byte("another bundle")) }, both)
+			return f, []check{{pins: []ssh.Signer{c}, want: "not a valid successor", why: "is not the previous bundle's SHA-256"}}
+		}},
+		{"v1_tampered_anchor_v2", func(t *testing.T) (*fixture, []check) {
+			// The v1 policy bytes are changed in the log: v1 no longer
+			// matches its own policy_sha256.
+			f := newBareFixture(t, "ed25519")
+			a, c := f.root, newSigner(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), a)
+			v2 := f.signDocs(f.successor(g, func(b *trust.Bundle) { b.Root = onlyRoot(c) }), f.policy(), a, c)
+			pol := f.policy()
+			pol.CAProfiles[0].MaxTTLSeconds = 3600
+			tampered := g
+			var err error
+			if tampered.policy, err = pol.Canonical(); err != nil {
+				t.Fatal(err)
+			}
+			f.addBundle(tampered)
+			f.addBundle(v2)
+			return f, []check{{pins: []ssh.Signer{c}, want: "not a valid genesis bundle", why: "policy_sha256 does not match"}}
+		}},
+		{"v1_replaced_and_resigned_anchor_v2", func(t *testing.T) (*fixture, []check) {
+			// A holder of the old root A replaces v1 by another genesis
+			// it signs (another policy, so other bundle bytes) and keeps
+			// the real v2. v1 verifies on its own, but v2's prev names
+			// the real v1, so the chain from the anchor breaks.
+			f := newBareFixture(t, "ed25519")
+			a, c := f.root, newSigner(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), a)
+			v2 := f.signDocs(f.successor(g, func(b *trust.Bundle) { b.Root = onlyRoot(c) }), f.policy(), a, c)
+			pol := f.policy()
+			pol.CAProfiles[0].MaxTTLSeconds = 3600
+			f.addBundle(f.signDocs(f.genesis(), pol, a))
+			f.addIssue()
+			f.addBundle(v2)
+			return f, []check{{pins: []ssh.Signer{c}, want: "not a valid successor", why: "is not the previous bundle's SHA-256"}}
+		}},
+		{"pins_match_no_bundle", func(t *testing.T) (*fixture, []check) {
+			f, _, c := rotated(t, nil, both)
+			return f, []check{{pins: []ssh.Signer{c, newSigner(t, "ed25519")}, want: "not anchored in the pinned roots", why: "2 pins, 1 roots"}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, checks := tc.build(t)
+			export := join(f.lines())
+			for _, ch := range checks {
+				rep, err := Verify(strings.NewReader(export), Options{Pins: pinsOf(ch.pins...), Threshold: 1})
+				if ch.want != "" {
+					if err == nil {
+						t.Fatalf("pins %v: Verify accepted the log, anchored on v%d", pinsOf(ch.pins...), rep.AnchorVersion)
+					}
+					for _, w := range []string{ch.want, ch.why} {
+						if !strings.Contains(err.Error(), w) {
+							t.Fatalf("pins %v: Verify error = %q, want it to mention %q", pinsOf(ch.pins...), err, w)
+						}
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("pins %v: Verify: %v", pinsOf(ch.pins...), err)
+				}
+				if rep.AnchorVersion != ch.wantAnchor {
+					t.Fatalf("pins %v: anchored on trust bundle v%d, want v%d", pinsOf(ch.pins...), rep.AnchorVersion, ch.wantAnchor)
+				}
+			}
+		})
+	}
+}

@@ -350,3 +350,52 @@ func TestVerifySuccessorAdminNotRoot(t *testing.T) {
 		})
 	}
 }
+
+// TestMatchPins: the anchor rule shared by VerifyGenesisBundle, trust
+// verify --prev and audit verify. A bundle matches only its exact root set
+// at its exact threshold; every other pin set is refused with the sentinel
+// VerifyGenesisBundle returns for it.
+func TestMatchPins(t *testing.T) {
+	policy := mustCanonical(t, goldenPolicy(t))
+	b := goldenBundle(t, policy) // roots A and B, threshold 1
+	pins := goldenPins(t)
+	attacker := edKey(t, seedAttacker)
+	tests := []struct {
+		name      string
+		pins      []string
+		threshold int
+		want      error // nil: matches
+		// badPins: the pin list or threshold is wrong on its own, so
+		// CheckPins refuses it without a bundle.
+		badPins bool
+	}{
+		{"exact_set_at_its_threshold", pins, 1, nil, false},
+		{"exact_set_reordered", []string{pins[1], pins[0]}, 1, nil, false},
+		{"missing_pin", pins[:1], 1, ErrPins, false},
+		{"extra_pin", append(slices.Clone(pins), fp(attacker)), 1, ErrPins, false},
+		{"other_root_in_place_of_one", []string{pins[0], fp(attacker)}, 1, ErrPins, false},
+		{"threshold_differs_from_bundle", pins, 2, ErrPins, false},
+		{"threshold_zero", pins, 0, ErrThreshold, true},
+		{"threshold_above_pins", pins, 3, ErrThreshold, true},
+		{"pin_repeated", []string{pins[0], pins[0], pins[1]}, 1, ErrPins, true},
+		{"malformed_pin", []string{"MD5:00", pins[1]}, 1, ErrPins, true},
+		{"no_pins", nil, 1, ErrPins, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := MatchPins(b, tc.pins, tc.threshold)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("MatchPins refused the bundle's own root set: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if pinErr := CheckPins(tc.pins, tc.threshold); (pinErr != nil) != tc.badPins {
+				t.Fatalf("CheckPins = %v, want an error only for a malformed pin list or threshold", pinErr)
+			}
+		})
+	}
+}

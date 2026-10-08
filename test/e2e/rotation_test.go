@@ -162,6 +162,9 @@ func TestRootRotationLiveSigner(t *testing.T) {
 		!strings.Contains(out, "anchored: the pinned roots are the root set of trust bundle v2\n") || !strings.Contains(out, "issued 2") {
 		t.Fatalf("audit verify pinned to the new roots C and D exited %d, want OK anchored on trust bundle v2:\n%s", code, out)
 	}
+	if code, out := auditVerifyPins(t, []string{cFP, dFP}, export, "--json"); code != 0 || !strings.Contains(out, `"anchor_bundle_version":2`) {
+		t.Fatalf("audit verify --json pinned to C and D exited %d, want anchor_bundle_version 2:\n%s", code, out)
+	}
 	if code, out := auditVerifyPins(t, []string{r1FP}, export); code != 0 ||
 		!strings.Contains(out, "anchored: the pinned roots are the root set of trust bundle v1\n") {
 		t.Fatalf("audit verify pinned to the genesis root R1 exited %d, want OK anchored on trust bundle v1:\n%s", code, out)
