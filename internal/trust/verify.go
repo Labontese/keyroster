@@ -65,12 +65,8 @@ func CountPinnedSigners(doc, sigs []byte, namespace string, pinned map[string]ss
 // key (CheckAdminsNotRoots). Non-canonical documents are refused before any
 // signature is checked.
 func VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs []byte, pins []string, threshold int) (*Bundle, *Policy, error) {
-	pinSet, err := pinSet(pins)
-	if err != nil {
+	if err := CheckPins(pins, threshold); err != nil {
 		return nil, nil, err
-	}
-	if threshold < 1 || threshold > len(pinSet) {
-		return nil, nil, fmt.Errorf("%w: threshold %d with %d pins", ErrThreshold, threshold, len(pinSet))
 	}
 	b, err := ParseBundle(bundle)
 	if err != nil {
@@ -86,20 +82,12 @@ func VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs []byte, pins []s
 	if p.Version != 1 {
 		return nil, nil, fmt.Errorf("%w: a genesis policy is version 1", ErrVersionChain)
 	}
+	if err := MatchPins(b, pins, threshold); err != nil {
+		return nil, nil, err
+	}
 	roots, err := b.rootKeys()
 	if err != nil {
 		return nil, nil, err
-	}
-	if len(roots) != len(pinSet) {
-		return nil, nil, fmt.Errorf("%w: %d pins, %d roots", ErrPins, len(pinSet), len(roots))
-	}
-	for fp := range roots {
-		if !pinSet[fp] {
-			return nil, nil, fmt.Errorf("%w: bundle root %s is not pinned", ErrPins, fp)
-		}
-	}
-	if int(b.Root.Threshold) != threshold {
-		return nil, nil, fmt.Errorf("%w: bundle threshold %d, pinned threshold %d", ErrPins, b.Root.Threshold, threshold)
 	}
 	if b.PolicySHA256 != SHA256Hex(policy) {
 		return nil, nil, ErrPolicyHash
@@ -114,6 +102,49 @@ func VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs []byte, pins []s
 		return nil, nil, err
 	}
 	return b, p, nil
+}
+
+// CheckPins checks operator pins on their own: at least one pin, each a
+// SHA256:<base64> fingerprint, none repeated, and a threshold in
+// 1..len(pins). It returns ErrPins or ErrThreshold.
+func CheckPins(pins []string, threshold int) error {
+	set, err := pinSet(pins)
+	if err != nil {
+		return err
+	}
+	if threshold < 1 || threshold > len(set) {
+		return fmt.Errorf("%w: threshold %d with %d pins", ErrThreshold, threshold, len(set))
+	}
+	return nil
+}
+
+// MatchPins reports whether b's root set is exactly the pinned set at
+// exactly the pinned threshold: the pins pass CheckPins, the bundle has as
+// many roots as there are pins, every root is pinned, and the bundle's
+// threshold equals threshold. So a bundle cannot widen its own trust
+// (Pitfall 4). It checks no signature; the caller must have verified b.
+// It returns ErrPins or ErrThreshold.
+func MatchPins(b *Bundle, pins []string, threshold int) error {
+	if err := CheckPins(pins, threshold); err != nil {
+		return err
+	}
+	set, _ := pinSet(pins) // CheckPins accepted pins
+	roots, err := b.rootKeys()
+	if err != nil {
+		return err
+	}
+	if len(roots) != len(set) {
+		return fmt.Errorf("%w: %d pins, %d roots", ErrPins, len(set), len(roots))
+	}
+	for fp := range roots {
+		if !set[fp] {
+			return fmt.Errorf("%w: bundle root %s is not pinned", ErrPins, fp)
+		}
+	}
+	if int(b.Root.Threshold) != threshold {
+		return fmt.Errorf("%w: bundle threshold %d, pinned threshold %d", ErrPins, b.Root.Threshold, threshold)
+	}
+	return nil
 }
 
 // CheckAdminsNotRoots refuses a policy that names a key of any of the root
