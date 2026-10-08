@@ -39,6 +39,14 @@ Out-of-scope discoveries logged by plan executors. Each item names the plan that
     - No successor-bundle builder exists yet. Until one does, the real ceremony means reinstalling the homelab signer: new state, `ca-init`, and a genesis bundle from the real roots.
     - KEY-07 stays open.
     - Real-hardware validation (YubiHSM 2, YubiKey PIV, a hardware root ceremony) is tracked in issue #13 (`needs-hardware`, open).
+  - **Gap closure planned (2026-10-08, owner decision 1: rotate, do not rebuild).** This supersedes "No successor-bundle builder exists yet" above. The gap plans are:
+    - **01-17 (merged, PR #22):** the successor builder, `keyroster root sign --prev`.
+    - **01-18 (planned):** verification against the new roots, and the rotation runbook.
+    - **01-20 (planned):** the owner's offline ceremony and the rotation of the homelab signer to the real roots.
+    - **01-21 (planned):** destruction of the test roots and the closing of KEY-07.
+    - The "Alternative without it" above (start the homelab signer over from a genesis bundle) is not taken.
+    - KEY-07 stays open until 01-21.
+    - The successor builder behind `root sign --prev` (`trust.BuildSuccessor`) accepts a chained v2 policy (`TestBuildSuccessor/round_trip_chained_policy`, 01-17). Authoring a new policy is Phase 4 work (quorum-signed policy changes), so the rotation carries the policy in force unchanged.
 - **01-15: reconciliation of the items assigned to 01-15.**
   - **dependency-firewall piv pass:** confirmed and closed (see the 01-13 entry).
   - **capslock piv:** not done; moved to the next plan that edits CI (see the 01-13 entry).
@@ -49,3 +57,37 @@ Out-of-scope discoveries logged by plan executors. Each item names the plan that
   - **Final required checks:** `.github/rulesets/main-integrity.json` lists all 17 phase checks (PR #18). Each check succeeded on `main` at 92c6977 before the change; `pr-title` runs on pull requests only.
     - **The live ruleset still requires the old seven.** Under the rollout rule in CONTRIBUTING.md, the owner applies the ruleset from the PR branch before approving.
     - Verify the live rules (01-15 Task 3 verify 1) at the merge gate. Mark REPO-01 complete only after that check passes.
+
+## Design items deferred from the phase 1 code review (owner decision 2026-10-08)
+
+The phase 1 code review left four findings whose remainder is design-level (`01-REVIEW-FIX.md`, "Verification gaps this closes"). Owner decision 4 defers them: they are recorded here with the decisions each one needs and a target, and they are not planned in phase 1. Each "Decisions needed" list is copied from the finding's section in `01-REVIEW-FIX.md`. No decision is taken here.
+
+- **C-WR-06 part 2: `audit verify` cannot check issuance authorization offline (deferred, not planned).** An issue leaf records the evidence but only `RequestDigest = SHA-256(SigningBytes)`. The admin SSHSIG signatures, the admin quorum of the policy in force, and the match between the certificate and the approved request therefore cannot be verified offline. Part 1 (profile compliance) is fixed; `keyroster audit verify` states this limitation in its human output.
+  - **Decisions needed:**
+    - whether to log the full request signing bytes (bounded by `wire.MaxFrame`) or selected fields;
+    - leaf-format versioning, and how logs written before the change are reported;
+    - the offline SSHSIG check under the policy in force: namespace, sha512, distinct admins >= `AdminQuorum`, no root and no online key;
+    - binding certificate fields to the request: subject key, principals, validity, extensions, CA role;
+    - size and privacy of logging full requests.
+  - **Target:** with the Phase 4 audit and visibility work (VIS-02 witnessed log, quorum-signed policy changes), because both change what the log carries.
+- **C-WR-01 remainder: some log rollbacks are not detectable locally (deferred, not planned).** The local checks are fixed (`checkLogCovers` in serve and doctor). Still undetectable locally: the whole `signer.db` restored from an older copy (VM snapshot or backup); a cut that also rolls back the issuance rows and the high-water mark; a cut of trailing entries that issue nothing (refusal, refusal_summary, clock_regression). Detecting them needs external anchoring.
+  - **Decisions needed:**
+    - how host agents and the CLI witness checkpoints: keep the last checkpoint, require a consistency proof on every sync;
+    - where operators keep checkpoints, and whether exports must be verified with `--previous`;
+    - whether serve should refuse to start without a witnessed checkpoint at least as new as the local one;
+    - whether to publish a tlog-tiles endpoint for C2SP witnesses.
+  - **Target:** Phase 4 (VIS-02, success criterion 4: agents and the CLI verify signed checkpoints with consistency proofs), as the `deferred:` block of `01-VERIFICATION.md` already records.
+- **D-WR-02: TPM custody is not authenticated through the endorsement-key certificate (deferred, not planned).** The manufacturer ID that decides `tpm` versus `vtpm` custody is self-reported. The bounded fix is committed: an allowlist of manufacturers, and `vtpm` for swtpm and any unknown ID. This hardens the `tpm` custody claim; it does not gate the software or `vtpm` levels, and hardware stays optional.
+  - **Decisions needed:**
+    - which vendor roots to embed;
+    - how to handle fTPMs without an EK cert in NV;
+    - whether a failed check refuses the TPM or only lowers custody to vtpm;
+    - where the EK evidence is recorded (bundle or `ca_init` entry).
+  - **Target:** with the real-hardware validation in issue #13 (`docs/security/needs-hardware.md` item 4, physical TPM), before the Phase 6 external security review.
+- **D-WR-04: PIV custody and key origin are not attested (deferred, not planned).** Custody `piv` and the key origin are what the card reports. The bounded fix is documentation only: the docs say so, and the bundle signer is told to check the slot keys with `ykman piv keys info` and `ykman piv keys attest`. This hardens the `piv` custody claim; it does not gate the software levels, and hardware stays optional.
+  - **Decisions needed:**
+    - which Yubico roots and intermediates to trust (newer firmware uses another hierarchy);
+    - whether Ed25519 slots on firmware 5.7 attest;
+    - whether a failed attestation refuses the key or only lowers its custody;
+    - how to test it without a card (fake roots through `Verifier.Roots`).
+  - **Target:** with issue #13 (`docs/security/needs-hardware.md` item 2, YubiKey PIV, which collects the attestation evidence), before the Phase 6 external security review.
