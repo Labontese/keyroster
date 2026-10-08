@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A certificate issued through the signer is accepted by real `sshd` on OpenSSH 9.5p2 and on the latest release in CI. It carries a unique non-zero serial that is never reissued, even after the signer's state is restored from an older copy, plus a structured key ID and `permit-pty`-only extensions. The signer refuses empty, wildcard or malformed principals, certificate-type CA keys, and anything other than a client-supplied public key.
   5. Every issuance is in the Merkle audit log before the certificate is released; `sshcm audit verify` checks the log end to end, fails on any tampered or removed entry, and can export it.
 
-**Plans:** 17/21 plans executed; 01-17..01-21 close the KEY-07 gap (11 waves plus 4 gap waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
+**Plans:** 18/21 plans executed; 01-17..01-21 close the KEY-07 gap (11 waves plus 4 gap waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
 
 Plans:
 **Wave 1**
@@ -77,7 +77,7 @@ Plans:
 
 **Gap closure: KEY-07 (01-VERIFICATION.md gap 3; owner decisions 2026-10-08). The waves below count within the gap set.**
 - [x] 01-17-PLAN.md — Successor bundle builder: `keyroster root sign --prev`, with BuildSuccessor sharing VerifySuccessor's chain rule; e2e root rotation of a live signer (gap wave 1)
-- [ ] 01-19-PLAN.md — Remove the KEY-07 overclaims from the SUMMARYs; record the deferred review design items (C-WR-06 part 2, C-WR-01 remainder, D-WR-02, D-WR-04) (gap wave 1)
+- [x] 01-19-PLAN.md — Remove the KEY-07 overclaims from the SUMMARYs; record the deferred review design items (C-WR-06 part 2, C-WR-01 remainder, D-WR-02, D-WR-04) (gap wave 1)
 - [ ] 01-18-PLAN.md — Verify rotations against the new roots: `trust verify --prev`, `audit verify` anchored on any bundle, and the rotation runbook (gap wave 2)
 - [ ] 01-20-PLAN.md — The owner's offline ceremony (roots C and D) and the rotation of the homelab signer to bundle v2 (owner checkpoint, one-way) (gap wave 3)
 - [ ] 01-21-PLAN.md — Destroy TEST roots A and B (owner checkpoint), then mark KEY-07 complete (gap wave 4)
@@ -177,7 +177,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Trust Core | 17/21 | In Progress|  |
+| 1. Trust Core | 18/21 | In Progress|  |
 | 2. Passkey Login MVP | 0/TBD | Not started | - |
 | 3. Linux Agent and Revocation | 0/TBD | Not started | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
