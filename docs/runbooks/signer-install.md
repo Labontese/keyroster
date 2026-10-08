@@ -257,7 +257,10 @@ your pins. Compare the root fingerprints doctor prints with your pins.
 
 The signer loads the trust bundle and its policy once, when it starts.
 Install a successor bundle (from a later ceremony) only with the service
-stopped:
+stopped. The successor comes from
+[root-ceremony.md, "Rotate the roots"](root-ceremony.md#rotate-the-roots-successor-bundle),
+and is checked there with `keyroster trust verify --prev` against the new
+roots' paper fingerprints before it is copied to the signer:
 
 ```
 systemctl stop keyroster-signer.service
@@ -281,8 +284,10 @@ issues under the superseded policy.
 
 > **UNVERIFIED on the homelab signer.** The lock and the `trust_changed`
 > refusal are exercised by the Go tests only (`TestStateDirLock`,
-> `TestTrustChangedUnderLiveSigner`). This stop, install and start
-> sequence for a successor has not been run on the vTPM signer. Creating
+> `TestTrustChangedUnderLiveSigner`). `TestRootRotationLiveSigner` runs
+> stop, install and start for a successor with the real binaries on the
+> agent backend; the sequence on the vTPM signer is still owed to plan
+> 01-20. Creating
 > `signer.lock` inside the systemd sandbox is covered only by the CI
 > `systemd` smoke check (`test/systemd/smoke.sh`, which starts `serve` in
 > the sandbox).
