@@ -27,9 +27,11 @@ const rotationPassphrase = "rotation test passphrase, not a secret"
 // successor v2 naming new software roots C and D; install-bundle refuses v2
 // while serve holds the state lock, and after serve is stopped refuses it
 // again while only the new root C has signed; once the previous root R1 has
-// also signed, v2 installs without --pin, serve restarts, issues a
-// certificate that real sshd accepts, and the exported log verifies pinned
-// to the genesis root alone across the rotation.
+// also signed, trust verify --prev checks v2 against the bundle in force and
+// pins it to C and D (and refuses R1 as its pins), v2 installs without
+// --pin, serve restarts, issues a certificate that real sshd accepts, and
+// the exported log verifies across the rotation anchored on v2 under the
+// pins C and D and on v1 under R1, and is refused under C alone.
 func TestRootRotationLiveSigner(t *testing.T) {
 	login := currentUser(t)
 	keys := t.TempDir()
@@ -104,6 +106,26 @@ func TestRootRotationLiveSigner(t *testing.T) {
 	if code, out := keyrosterWithAgent(t, r1Agent, append(sign, "--agent-key", r1FP, "--confirm", prefix)...); code != 0 {
 		t.Fatalf("root sign --prev with the previous root R1 exited %d:\n%s", code, out)
 	}
+
+	// Before the install, the successor is checked against the bundle in
+	// force and pinned to the new roots' out-of-band fingerprints.
+	cFP, dFP := fingerprint(t, rootFiles["c"]+".pub"), fingerprint(t, rootFiles["d"]+".pub")
+	verifyPrev := func(pins ...string) (int, string) {
+		args := []string{"trust", "verify", "--prev", env.BundleDir, "--threshold", "1",
+			"--bundle", filepath.Join(succ, "bundle.json"), "--policy", filepath.Join(succ, "policy.json")}
+		for _, p := range pins {
+			args = append(args, "--pin", p)
+		}
+		return runKeyroster(t, args...)
+	}
+	if code, out := verifyPrev(cFP, dFP); code != 0 || !strings.Contains(out, "OK: successor of trust bundle v1") ||
+		!strings.Contains(out, "signed by previous root "+r1FP) || !strings.Contains(out, "signed by new root "+cFP) {
+		t.Fatalf("trust verify --prev pinned to the new roots C and D exited %d:\n%s", code, out)
+	}
+	if code, out := verifyPrev(r1FP); code == 0 || !strings.Contains(out, "not the pinned roots") {
+		t.Fatalf("trust verify --prev pinned to the previous root R1 exited %d, want the pin refusal:\n%s", code, out)
+	}
+
 	if code, out := env.signerCmd(t, install...); code != 0 || !strings.Contains(out, "installed bundle version 2") {
 		t.Fatalf("install-bundle of the co-signed successor exited %d:\n%s", code, out)
 	}
@@ -131,6 +153,24 @@ func TestRootRotationLiveSigner(t *testing.T) {
 	export := env.exportLog(t)
 	if code, out := auditVerifyPins(t, env.RootFingerprints, export); code != 0 || !strings.Contains(out, "trust bundle v2") || !strings.Contains(out, "issued 2") {
 		t.Fatalf("audit verify pinned to the genesis root exited %d, want OK with trust bundle v2 and 2 issued:\n%s", code, out)
+	}
+
+	// The anchor follows the pins: the new roots anchor on v2 (the earlier
+	// bundle is authenticated by v2's prev hash), the genesis root on v1,
+	// and a set that is the root set of no bundle anchors nothing.
+	if code, out := auditVerifyPins(t, []string{cFP, dFP}, export); code != 0 ||
+		!strings.Contains(out, "anchored: the pinned roots are the root set of trust bundle v2\n") || !strings.Contains(out, "issued 2") {
+		t.Fatalf("audit verify pinned to the new roots C and D exited %d, want OK anchored on trust bundle v2:\n%s", code, out)
+	}
+	if code, out := auditVerifyPins(t, []string{cFP, dFP}, export, "--json"); code != 0 || !strings.Contains(out, `"anchor_bundle_version":2`) {
+		t.Fatalf("audit verify --json pinned to C and D exited %d, want anchor_bundle_version 2:\n%s", code, out)
+	}
+	if code, out := auditVerifyPins(t, []string{r1FP}, export); code != 0 ||
+		!strings.Contains(out, "anchored: the pinned roots are the root set of trust bundle v1\n") {
+		t.Fatalf("audit verify pinned to the genesis root R1 exited %d, want OK anchored on trust bundle v1:\n%s", code, out)
+	}
+	if code, out := auditVerifyPins(t, []string{cFP}, export); code == 0 || !strings.Contains(out, "not anchored in the pinned roots") {
+		t.Fatalf("audit verify pinned to C alone exited %d, want the not-anchored refusal:\n%s", code, out)
 	}
 }
 

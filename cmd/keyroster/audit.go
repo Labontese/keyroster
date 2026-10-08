@@ -51,15 +51,16 @@ type verifyResult struct {
 	ByCA     map[string]int    `json:"issued_by_ca"`
 	Bundle   uint64            `json:"bundle_version"`
 	Policy   uint64            `json:"policy_version"`
-	LogKey   string            `json:"log_key"` // fingerprint, from the root-signed bundle
+	LogKey   string            `json:"log_key"`               // fingerprint, from the root-signed bundle
+	Anchor   uint64            `json:"anchor_bundle_version"` // the trust bundle whose root set the pins name
 }
 
 func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var pins stringList
-	fs.Var(&pins, "pin", "SHA256 fingerprint of an offline root key, obtained out of band (repeatable, required; the only trust anchor: the log key and CA keys come from root-signed bundles in the log)")
-	threshold := fs.Int("threshold", 0, "root signatures the genesis bundle needs (required; must equal the bundle's threshold)")
+	fs.Var(&pins, "pin", "SHA256 fingerprint of an offline root key, obtained out of band (repeatable, required; the only trust anchor). The pins name the root set of one trust bundle in the log (the anchor), for example the current roots after a rotation; the log key and CA keys come from the root-signed bundles chained to it")
+	threshold := fs.Int("threshold", 0, "root signatures the anchor bundle needs (required; must equal that bundle's threshold)")
 	previousPath := fs.String("previous", "", "an earlier signed checkpoint, or an earlier export, that this log must extend")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
 	if err := fs.Parse(args); err != nil {
@@ -99,6 +100,7 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		Bundle:   rep.BundleVersion,
 		Policy:   rep.PolicyVersion,
 		LogKey:   ssh.FingerprintSHA256(rep.LogKey),
+		Anchor:   rep.AnchorVersion,
 	}
 	for k, n := range rep.Counts {
 		res.Kinds[k.String()] = n
@@ -107,9 +109,15 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		enc := json.NewEncoder(stdout)
 		return enc.Encode(res)
 	}
-	_, err = fmt.Fprintf(stdout, "OK: %d entries, root %s, issued %d (user %d, host %d, machine %d), refusals %d, trust bundle v%d, policy v%d, log key %s\n"+
-		"not checked: that each issuance was authorized by the policy's admins (the log keeps their evidence, not the signed request it covers)\n",
-		res.Entries, res.Root, res.Issued, res.ByCA["user"], res.ByCA["host"], res.ByCA["machine"], res.Refusals, res.Bundle, res.Policy, res.LogKey)
+	if _, err := fmt.Fprintf(stdout, "OK: %d entries, root %s, issued %d (user %d, host %d, machine %d), refusals %d, trust bundle v%d, policy v%d, log key %s\n",
+		res.Entries, res.Root, res.Issued, res.ByCA["user"], res.ByCA["host"], res.ByCA["machine"], res.Refusals, res.Bundle, res.Policy, res.LogKey); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "anchored: the pinned roots are the root set of trust bundle v%d\n", res.Anchor); err != nil {
+		return err
+	}
+	_, err = io.WriteString(stdout,
+		"not checked: that each issuance was authorized by the policy's admins (the log keeps their evidence, not the signed request it covers)\n")
 	return err
 }
 

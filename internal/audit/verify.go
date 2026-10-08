@@ -25,12 +25,16 @@ const maxLine = 16 << 20
 // Options configures Verify.
 type Options struct {
 	// Pins are the SHA256 fingerprints of the offline root keys, obtained
-	// out of band. They are the only trust anchor: the log key and the CA
-	// keys are taken from bundle_install entries that verify against them,
-	// never from the export otherwise.
+	// out of band. They are the only trust anchor. They name the root set
+	// of one trust bundle in the log, the anchor bundle: the genesis
+	// bundle, or a later one such as the current roots after a rotation.
+	// The anchor's signatures by the pinned roots cover its prev hash, so
+	// every earlier bundle is authenticated through the prev-hash chain;
+	// the log key and the CA keys are taken from bundle_install entries in
+	// that chain, never from the export otherwise.
 	Pins []string
 	// Threshold is the number of pinned roots that must have signed the
-	// genesis bundle; it must equal the bundle's own threshold.
+	// anchor bundle; it must equal that bundle's own threshold.
 	Threshold int
 	// Previous is an earlier signed checkpoint of the same log (optional).
 	// The export must extend it: at least as many entries, and its first
@@ -54,6 +58,9 @@ type Report struct {
 	BundleVersion uint64
 	PolicyVersion uint64
 	LogKey        ssh.PublicKey
+	// AnchorVersion is the version of the first trust bundle in the log
+	// whose root set and threshold are exactly the pins (the anchor).
+	AnchorVersion uint64
 }
 
 // anchor is the trust state in force at a point of the log: the last
@@ -66,13 +73,21 @@ type anchor struct {
 	policyDoc []byte // the policy's bytes, which a successor's policy chains to
 	logKey    ssh.PublicKey
 	activeCA  map[string]ssh.PublicKey // role -> active CA key
+	// anchorVersion is the version of the first accepted bundle whose root
+	// set and threshold equal the pins (0: none yet); lastMismatch is why
+	// the last accepted bundle did not match them.
+	anchorVersion uint64
+	lastMismatch  error
 }
 
 // install verifies one bundle_install entry and makes its bundle the one in
-// force. The first is a genesis bundle checked against opts' pins and
-// threshold; every later one must be a valid successor of the bundle in
-// force (TUF rule), with its policy chained to the policy in force. In
-// Phase 1 every bundle must name the same log key.
+// force. The first must be a genesis bundle (version 1, all-zero prev)
+// signed by its own root threshold; every later one must be a valid
+// successor of the bundle in force (TUF rule), with its policy chained to
+// the policy in force. In Phase 1 every bundle must name the same log key.
+// The first accepted bundle whose root set and threshold are exactly opts'
+// pins becomes the anchor (trust.MatchPins); Verify fails at the end of the
+// log if there is none.
 func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 	var (
 		b   *trust.Bundle
@@ -80,9 +95,9 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 		err error
 	)
 	if a.bundle == nil {
-		b, p, err = trust.VerifyGenesisBundle(body.Bundle, body.BundleSigs, body.Policy, body.PolicySigs, opts.Pins, opts.Threshold)
+		b, p, err = verifySelfSignedGenesis(body)
 		if err != nil {
-			return fmt.Errorf("bundle_install is not anchored in the pinned roots: %w", err)
+			return fmt.Errorf("bundle_install is not a valid genesis bundle: %w", err)
 		}
 	} else {
 		b, p, err = trust.VerifySuccessor(a.bundle, a.canonical, a.policyDoc, body.Bundle, body.BundleSigs, body.Policy, body.PolicySigs)
@@ -113,7 +128,38 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 		active[ca.Role] = pub
 	}
 	a.bundle, a.canonical, a.policy, a.policyDoc, a.logKey, a.activeCA = b, body.Bundle, p, body.Policy, logKey, active
+	if a.anchorVersion == 0 {
+		// b is the bundle the verifier returned, so its signatures by its
+		// own root threshold were checked; MatchPins adds that this root
+		// set and threshold are exactly the pinned ones.
+		if err := trust.MatchPins(b, opts.Pins, opts.Threshold); err != nil {
+			a.lastMismatch = fmt.Errorf("trust bundle v%d: %w", b.Version, err)
+		} else {
+			a.anchorVersion = b.Version
+		}
+	}
 	return nil
+}
+
+// verifySelfSignedGenesis verifies the first bundle_install entry as a
+// genesis bundle pinned to its own root set and threshold: version 1 with
+// the all-zero prev, its policy hash, and its own threshold of its roots
+// signing both documents. Whether those roots are the operator's is decided
+// by the anchor (trust.MatchPins), not here.
+func verifySelfSignedGenesis(body *tlog.BundleInstallBody) (*trust.Bundle, *trust.Policy, error) {
+	g, err := trust.ParseBundle(body.Bundle)
+	if err != nil {
+		return nil, nil, fmt.Errorf("bundle: %w", err)
+	}
+	own := make([]string, 0, len(g.Root.Keys))
+	for _, rk := range g.Root.Keys {
+		pub, err := trust.ParseKey(rk.Key)
+		if err != nil {
+			return nil, nil, fmt.Errorf("bundle: root key: %w", err)
+		}
+		own = append(own, ssh.FingerprintSHA256(pub))
+	}
+	return trust.VerifyGenesisBundle(body.Bundle, body.BundleSigs, body.Policy, body.PolicySigs, own, int(g.Root.Threshold))
 }
 
 // checkIssue checks an issue leaf's certificate against the bundle and
@@ -177,13 +223,24 @@ func certTypeName(t uint32) string {
 //     line and it is last; the informational "decoded" objects are ignored
 //   - every leaf decodes, records its own index, and leaf times never
 //     decrease
-//   - the first bundle_install entry holds a genesis bundle and policy
-//     signed by opts.Threshold of the pinned roots, whose root set is
-//     exactly the pinned set; every later one is a root-signed successor of
-//     the bundle in force whose policy is either unchanged or the next
+//   - the first bundle_install entry holds a genesis bundle (version 1,
+//     all-zero prev) and policy signed by its own root threshold; every
+//     later one is a successor of the bundle in force, signed by the
+//     previous roots' threshold and its own, whose prev is the SHA-256 of
+//     the bundle in force and whose policy is either unchanged or the next
 //     policy version chained to the one in force (trust.VerifySuccessor);
 //     each records its bundle's version, and all of them name the same log
 //     key (Phase 1)
+//   - the anchor: some bundle in the log has exactly the pinned root set at
+//     exactly opts.Threshold (trust.MatchPins), and the first such bundle
+//     is reported as Report.AnchorVersion. The pinned roots' signatures
+//     over the anchor cover its prev hash, so every earlier bundle (and,
+//     through policy_sha256, its policy) is authenticated by the prev-hash
+//     chain back to the genesis bundle, and every later bundle by
+//     VerifySuccessor. A log in which no bundle matches the pins is
+//     refused. Pins of a root set that is exposed still anchor any chain
+//     that root set signed, so after rotating away from exposed roots,
+//     auditors pin the new roots
 //   - every issue leaf comes after the first bundle_install and holds a
 //     certificate whose CA signature verifies over its signed bytes
 //     (expired certificates included), signed by the active CA of the
@@ -210,6 +267,9 @@ func certTypeName(t uint32) string {
 func Verify(r io.Reader, opts Options) (*Report, error) {
 	if len(opts.Pins) == 0 {
 		return nil, errors.New("audit: no pinned root fingerprints")
+	}
+	if err := trust.CheckPins(opts.Pins, opts.Threshold); err != nil {
+		return nil, fmt.Errorf("audit: %w", err)
 	}
 	rep := &Report{Counts: map[tlog.Kind]uint64{}, IssuedByCA: map[string]int{}}
 	tree := tlog.NewLog()
@@ -312,6 +372,10 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	if trustState.logKey == nil {
 		return nil, errors.New("audit: the export has no bundle_install entry, so no root-signed log key")
 	}
+	if trustState.anchorVersion == 0 {
+		return nil, fmt.Errorf("audit: bundle_install is not anchored in the pinned roots: no trust bundle in the log has exactly the pinned root set at threshold %d (%w)",
+			opts.Threshold, trustState.lastMismatch)
+	}
 	verifier, err := tlog.NewNoteVerifier(tlog.Origin(trustState.logKey), trustState.logKey)
 	if err != nil {
 		return nil, fmt.Errorf("audit: log key: %w", err)
@@ -352,6 +416,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	}
 	rep.Size, rep.Root = cp.Size, root
 	rep.BundleVersion, rep.PolicyVersion, rep.LogKey = trustState.bundle.Version, trustState.policy.Version, trustState.logKey
+	rep.AnchorVersion = trustState.anchorVersion
 	return rep, nil
 }
 

@@ -248,6 +248,144 @@ install as its first audit entry. Record the install time in the transcript.
   are kept. The public results (root fingerprints, bundle and policy
   SHA-256) are in the signed bundle and the signer's audit log anyway.
 
+## Rotate the roots (successor bundle)
+
+A rotation replaces the root set with a **successor bundle**: version N+1
+of the bundle in force, naming the new roots. Rotate when you:
+
+- replace TEST roots, or any roots that may be exposed, with roots from an
+  offline ceremony;
+- retire a lost or compromised root;
+- move from software roots to hardware roots.
+
+**The rule.** The signer, `trust verify --prev` and `audit verify` all
+apply the same rule (`trust.VerifySuccessor`):
+
+- the successor is version N+1, and its `prev` is the SHA-256 of the bundle
+  in force;
+- a threshold of the **current** roots AND a threshold of the **new** roots
+  must sign both the bundle and the policy. A stolen old root cannot rotate
+  trust alone, and neither can a freshly listed new root;
+- the CA, ops and log keys are carried over unchanged (CA rotation comes in
+  Phase 3);
+- the policy is carried over unchanged, or advanced by exactly one version
+  chained to the policy in force.
+
+### What you need
+
+- Everything from [What you need](#what-you-need), with one USB stick per
+  new root.
+- The `bundle.json` and `policy.json` in force, copied to
+  `/media/transfer/prev`. Check their SHA-256 against the values recorded
+  when they were installed (step 5 or the previous rotation).
+- The current roots, or enough of them to meet the current threshold.
+
+### Steps
+
+1. **Prepare.** Do [step 1](#1-prepare-the-binary-and-the-ceremony-machine),
+   then run `date -u`. If the clock is earlier than the `issued_at` of the
+   bundle in force, or clearly wrong, set it before signing:
+   `root sign --prev` refuses a clock earlier than the previous bundle's.
+2. **Generate the new roots offline**, as in
+   [step 3](#3-generate-the-two-software-roots-offline), one stick per root
+   and **each fingerprint on paper**:
+
+   ```
+   /tmp/keyroster root init --out /media/usbC/root-c.age
+   /tmp/keyroster root init --out /media/usbD/root-d.age
+   cat /media/usbC/root-c.age.pub /media/usbD/root-d.age.pub > /media/transfer/new-roots.pub
+   ```
+
+3. **Build the successor and sign it with a new root:**
+
+   ```
+   /tmp/keyroster root sign --prev /media/transfer/prev \
+     --roots /media/transfer/new-roots.pub --threshold 1 \
+     --policy /media/transfer/prev/policy.json \
+     --out-dir /media/transfer/rotation \
+     --key /media/usbC/root-c.age
+   ```
+
+   Before you type the hash prefix, compare:
+   - the `Successor of trust bundle vN, sha256 ...` line with the recorded
+     SHA-256 of the bundle in force;
+   - the new root fingerprints with the paper;
+   - the CA, ops and log fingerprints with the previous ceremony;
+   - the policy hash.
+
+   The summary also prints `signatures needed: t1 of the n previous roots
+   AND t2 of the m new roots, on both documents`. Then repeat the command
+   with `--key /media/usbD/root-d.age` and the same `--out-dir`.
+4. **Sign with a current root.** Run the same command with the current
+   root's key and the same `--out-dir`. Use `--key` for a software root, or
+   `--agent-key SHA256:<fingerprint>` for a root in an `ssh-agent`.
+   - A current root that is still offline signs offline, in the same way.
+   - A current root that is already treated as exposed signs where it is
+     kept, and is never brought to the ceremony machine. An example is the
+     homelab TEST roots of plan 01-14, which were created on a networked
+     machine. Its signature only authorizes the hand-over, so it adds
+     nothing an attacker does not already have. The trust rests on the new
+     roots' signatures and on the paper check in step 5.
+5. **Verify against the paper:**
+
+   ```
+   /tmp/keyroster trust verify --prev /media/transfer/prev \
+     --pin SHA256:<new root C from paper> --pin SHA256:<new root D from paper> --threshold 1 \
+     --bundle /media/transfer/rotation/bundle.json --policy /media/transfer/rotation/policy.json
+   ```
+
+   It lists the signers as `signed by previous root ...` and
+   `signed by new root ...`. It refuses unless both thresholds are met and
+   the new root set is exactly the pinned fingerprints. It must end with an
+   `OK: successor of trust bundle v1: ...` line. In the homelab shape (two
+   current roots at threshold 1, one of which signed, and both new roots
+   signed) that line reads:
+
+   ```
+   OK: successor of trust bundle v1: previous roots 1 of 2 signed both documents (threshold 1); new roots 2 of 2 signed both documents (threshold 1, pinned)
+   ```
+
+   Record that line and the SHA-256 of `rotation/bundle.json`.
+6. **Install** with the signer stopped, as in
+   [signer-install.md, "Install a successor bundle"](signer-install.md#install-a-successor-bundle-stop-install-start).
+   A successor takes no `--pin`: `install-bundle` checks it against the
+   installed bundle. Compare the SHA-256 that `install-bundle` prints with
+   the one you recorded in step 5.
+7. **Audit.** Export the log and verify it pinned to the **new** roots from
+   the paper:
+
+   ```
+   keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/log.jsonl
+   keyroster audit verify --pin SHA256:<new root C from paper> --pin SHA256:<new root D from paper> --threshold 1 /tmp/log.jsonl
+   ```
+
+   It must print `anchored: the pinned roots are the root set of trust
+   bundle v2`. The pins name the root set of one bundle in the log (the
+   anchor). Every bundle before the anchor is authenticated by the prev-hash
+   chain, and every bundle after it by the successor rule.
+
+   **After a rotation away from exposed roots, auditors pin the NEW roots.**
+   Pins of the old roots still verify the real log (anchored on v1). But
+   they would also verify any forked log that the old roots could sign,
+   because the old roots are the anchor of such a fork. Pins of the new
+   roots refuse that fork with "not anchored in the pinned roots": no
+   bundle in it has the new root set.
+8. **Retire the old roots.** Once steps 6 and 7 pass, destroy every copy of
+   the old root keys and their passphrases. The signer then accepts a
+   further successor only with the new roots' signatures. The old roots'
+   public fingerprints stay usable as audit pins.
+
+Steps 1 to 8 use only commands that `TestRootRotationLiveSigner` (e2e, real
+binaries, real sshd) and the unit tests run: `root init`, `root sign --prev`
+with `--key` and `--agent-key`, `trust verify --prev`, `install-bundle`
+without `--pin`, `export-log`, and `audit verify` pinned to the new roots,
+to the old root, and to a set that matches no bundle. The refusals and the
+audit anchoring are covered there too. The tests pass passphrases with
+`--passphrase-fd` and the hash prefix with `--confirm`; at a ceremony,
+type them at the prompts.
+
+> **UNVERIFIED offline and on the homelab signer.** The live-USB steps, separate sticks, paper fingerprints, the vTPM signer install and the destruction of old roots have not been run yet; plans 01-20 and 01-21 run them and remove this note.
+
 ## Hardware-root variant
 
 For the product path (D-11), replace steps 3 and 4 with hardware keys. The
