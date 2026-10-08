@@ -29,12 +29,12 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Requirements**: REPO-01, REPO-02, REPO-03, REPO-04, CA-01, CA-02, CA-03, CA-04, CA-05, CA-06, CA-07, CA-08, KEY-01, KEY-03, KEY-04, KEY-05, KEY-07, VIS-01, VIS-03
 **Success Criteria** (what must be TRUE):
   1. Every change reaches `main` only through a PR with signed commits, a review and green CI (build, test, lint, govulncheck, fuzzing, e2e against real sshd) running SHA-pinned, least-privilege actions; CodeQL, Dependabot (gomod + actions), secret scanning with push protection and OpenSSF Scorecard are active; SECURITY.md with private vulnerability reporting, README, LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CODEOWNERS and issue/PR templates are published.
-  2. Admin can run the offline trust-root ceremony with M-of-N hardware keys (1-of-2 in the homelab) and get a root that signs trust bundles, KRL authority and policy (starting with a genesis policy), and that the tooling refuses to use for signing certificates.
+  2. Admin can run the offline trust-root ceremony with M-of-N root keys, software on offline media or hardware (1-of-2 software roots in the homelab) and get a root that signs trust bundles, KRL authority and policy (starting with a genesis policy), and that the tooling refuses to use for signing certificates.
   3. Admin can initialise separate user, host and machine CAs whose keys live in a PKCS#11 HSM reached via ssh-agent (SoftHSM2 in CI, YubiHSM 2 on real hardware), a TPM 2.0 or a YubiKey PIV slot, and are only ever used by the network-less `sshcm-signer` process.
   4. A certificate issued through the signer is accepted by real `sshd` on OpenSSH 9.5p2 and on the latest release in CI. It carries a unique non-zero serial that is never reissued, even after the signer's state is restored from an older copy, plus a structured key ID and `permit-pty`-only extensions. The signer refuses empty, wildcard or malformed principals, certificate-type CA keys, and anything other than a client-supplied public key.
   5. Every issuance is in the Merkle audit log before the certificate is released; `sshcm audit verify` checks the log end to end, fails on any tampered or removed entry, and can export it.
 
-**Plans:** 16/16 plans executed (11 waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
+**Plans:** 16/21 plans executed; 01-17..01-21 close the KEY-07 gap (11 waves plus 4 gap waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
 
 Plans:
 **Wave 1**
@@ -74,6 +74,13 @@ Plans:
 
 **Wave 11** *(blocked on Wave 10 completion)*
 - [x] 01-15-PLAN.md — Windows OpenSSH 9.5p2 manual check (blocking owner checkpoint), final required checks, Scorecard (wave 11)
+
+**Gap closure: KEY-07 (01-VERIFICATION.md gap 3; owner decisions 2026-10-08). The waves below count within the gap set.**
+- [ ] 01-17-PLAN.md — Successor bundle builder: `keyroster root sign --prev`, with BuildSuccessor sharing VerifySuccessor's chain rule; e2e root rotation of a live signer (gap wave 1)
+- [ ] 01-19-PLAN.md — Remove the KEY-07 overclaims from the SUMMARYs; record the deferred review design items (C-WR-06 part 2, C-WR-01 remainder, D-WR-02, D-WR-04) (gap wave 1)
+- [ ] 01-18-PLAN.md — Verify rotations against the new roots: `trust verify --prev`, `audit verify` anchored on any bundle, and the rotation runbook (gap wave 2)
+- [ ] 01-20-PLAN.md — The owner's offline ceremony (roots C and D) and the rotation of the homelab signer to bundle v2 (owner checkpoint, one-way) (gap wave 3)
+- [ ] 01-21-PLAN.md — Destroy TEST roots A and B (owner checkpoint), then mark KEY-07 complete (gap wave 4)
 
 **UI hint**: no
 **Research**: HIGH. Ed25519 via PKCS#11/ssh-agent (OpenSSH 10.1/10.2 caveats), YubiHSM 2 forced-audit semantics, TPM key algorithm (assume P-256), signer sandboxing (own OS user, systemd hardening), restore-safe serial allocation. Decide CA key algorithm and custody together.
