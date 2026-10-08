@@ -204,7 +204,8 @@ func runRootGenesisPolicy(_ context.Context, args []string, stdout, stderr io.Wr
 func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("root sign", flag.ContinueOnError)
 	fset.SetOutput(stderr)
-	caPath := fset.String("ca-pubkeys", "", "ca-pubkeys.json from the CA host (required)")
+	caPath := fset.String("ca-pubkeys", "", "ca-pubkeys.json from the CA host (required for a genesis bundle; refused with --prev)")
+	prevDir := fset.String("prev", "", "directory holding the bundle.json and policy.json in force; builds their successor (version+1) instead of a genesis bundle, which needs signatures by the previous roots' threshold AND the new roots' threshold")
 	policyPath := fset.String("policy", "", "canonical policy file (required)")
 	rootsPath := fset.String("roots", "", "roots.pub: one root key per line with comment custody=<value> (required)")
 	threshold := fset.Int("threshold", 0, "number of root signatures a verifier requires (required)")
@@ -216,8 +217,17 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
-	if fset.NArg() != 0 || *caPath == "" || *policyPath == "" || *rootsPath == "" || *threshold == 0 || *outDir == "" {
-		_, _ = fmt.Fprintln(stderr, "root sign: --ca-pubkeys, --policy, --roots, --threshold, --out-dir and one of --agent-key or --key are required")
+	successor := *prevDir != ""
+	if successor && *caPath != "" {
+		_, _ = fmt.Fprintln(stderr, "root sign: --ca-pubkeys is refused with --prev: a successor carries the CA, ops and log keys of the previous bundle unchanged (CA rotation is Phase 3)")
+		return errUsage
+	}
+	if fset.NArg() != 0 || (!successor && *caPath == "") || *policyPath == "" || *rootsPath == "" || *threshold == 0 || *outDir == "" {
+		if successor {
+			_, _ = fmt.Fprintln(stderr, "root sign: with --prev, --policy, --roots, --threshold, --out-dir and one of --agent-key or --key are required")
+		} else {
+			_, _ = fmt.Fprintln(stderr, "root sign: --ca-pubkeys, --policy, --roots, --threshold, --out-dir and one of --agent-key or --key are required")
+		}
 		return errUsage
 	}
 	if (*agentKey == "") == (*keyPath == "") {
@@ -229,10 +239,6 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		return errUsage
 	}
 
-	cas, err := readParsed(*caPath, trust.ParseCAPubKeys)
-	if err != nil {
-		return err
-	}
 	policy, err := os.ReadFile(*policyPath) //nolint:gosec // G304: the operator names the file
 	if err != nil {
 		return err
@@ -252,13 +258,41 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if *threshold < 1 || *threshold > len(roots) {
 		return fmt.Errorf("--threshold %d with %d roots", *threshold, len(roots))
 	}
-	// A root never authorizes issuance (KEY-07). Checked before
-	// prepareBundle, so a refused pair leaves nothing in --out-dir.
-	if err := trust.CheckAdminsNotRoots(pol, roots); err != nil {
+	thr := uint32(*threshold) //nolint:gosec // G115: <= len(roots)
+
+	// Genesis mode builds from --ca-pubkeys. Successor mode builds from the
+	// bundle and policy in force in --prev and never takes a CA key.
+	var (
+		prev       *trust.Bundle
+		prevBundle []byte
+		build      func(issuedAt string) (*trust.Bundle, error)
+		inputs     = "--ca-pubkeys, --roots, --threshold and --policy"
+		rootSets   = [][]trust.RootKey{roots}
+	)
+	if successor {
+		prev, prevBundle, build, err = successorBuilder(*prevDir, *outDir, roots, thr, policy)
+		if err != nil {
+			return err
+		}
+		inputs = "--prev, --roots, --threshold and --policy"
+		rootSets = append(rootSets, prev.Root.Keys)
+	} else {
+		cas, err := readParsed(*caPath, trust.ParseCAPubKeys)
+		if err != nil {
+			return err
+		}
+		build = func(issuedAt string) (*trust.Bundle, error) {
+			return buildBundle(cas, roots, thr, policy, issuedAt)
+		}
+	}
+	// A root never authorizes issuance (KEY-07), and a root that a
+	// successor retires may still exist. Checked before prepareBundle, so a
+	// refused pair leaves nothing in --out-dir.
+	if err := trust.CheckAdminsNotRoots(pol, rootSets...); err != nil {
 		return fmt.Errorf("%s: %w; nothing was written or signed", *policyPath, err)
 	}
 
-	bundle, b, err := prepareBundle(*outDir, cas, roots, uint32(*threshold), policy) //nolint:gosec // G115: <= len(roots)
+	bundle, b, err := prepareBundle(*outDir, build, inputs, policy)
 	if err != nil {
 		return err
 	}
@@ -275,12 +309,16 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		defer softRoot.Close()
 		fp = ssh.FingerprintSHA256(softRoot.PublicKey())
 	}
-	rootPub, custody, err := rootByFingerprint(b, fp)
+	rootPub, custody, fromPrev, err := rootByFingerprint(b, prev, fp)
 	if err != nil {
 		return err
 	}
 	if softRoot != nil && custody != "software" {
-		return fmt.Errorf("--key holds root %s in software, but %s declares custody=%s; refusing to sign under a false custody label", fp, *rootsPath, custody)
+		source := *rootsPath
+		if fromPrev {
+			source = filepath.Join(*prevDir, bundleFile)
+		}
+		return fmt.Errorf("--key holds root %s in software, but %s declares custody=%s; refusing to sign under a false custody label", fp, source, custody)
 	}
 	// A rerun after a partial failure (the bundle signature written, the
 	// policy signature not) signs only the document this root has not
@@ -310,6 +348,9 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	}
 
 	hash := rootceremony.BundleHash(bundle)
+	if prev != nil {
+		_, _ = io.WriteString(stdout, successorHeader(prev, prevBundle, b))
+	}
 	_, _ = io.WriteString(stdout, rootceremony.Summary(b, pol))
 	answer := *confirm
 	if answer == "" {
@@ -394,11 +435,12 @@ func openSoftwareRoot(path string, passFD int) (*rootceremony.Root, error) {
 	return root, nil
 }
 
-// prepareBundle builds the genesis bundle for the inputs and writes it and a
-// copy of the policy into dir, or, when dir already holds a bundle (a
-// further root signing), requires that bundle and policy to match the
-// inputs exactly.
-func prepareBundle(dir string, cas *trust.CAPubKeys, roots []trust.RootKey, threshold uint32, policy []byte) ([]byte, *trust.Bundle, error) {
+// prepareBundle builds the bundle for the inputs with build and writes it
+// and a copy of the policy into dir, or, when dir already holds a bundle (a
+// further root signing), rebuilds it with the stored issued_at and requires
+// that bundle and policy to match exactly. inputs names the flags the
+// bundle is built from, for the mismatch error.
+func prepareBundle(dir string, build func(issuedAt string) (*trust.Bundle, error), inputs string, policy []byte) ([]byte, *trust.Bundle, error) {
 	bundlePath := filepath.Join(dir, bundleFile)
 	policyPath := filepath.Join(dir, policyFile)
 	existing, err := os.ReadFile(bundlePath) //nolint:gosec // G304: inside the operator's out-dir
@@ -408,7 +450,7 @@ func prepareBundle(dir string, cas *trust.CAPubKeys, roots []trust.RootKey, thre
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", bundlePath, err)
 		}
-		want, err := buildBundle(cas, roots, threshold, policy, b.IssuedAt)
+		want, err := build(b.IssuedAt)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -417,7 +459,7 @@ func prepareBundle(dir string, cas *trust.CAPubKeys, roots []trust.RootKey, thre
 			return nil, nil, err
 		}
 		if !bytes.Equal(wantData, existing) {
-			return nil, nil, fmt.Errorf("%s does not match --ca-pubkeys, --roots, --threshold and --policy; refusing to sign a different bundle", bundlePath)
+			return nil, nil, fmt.Errorf("%s does not match %s; refusing to sign a different bundle", bundlePath, inputs)
 		}
 		pol, err := os.ReadFile(policyPath) //nolint:gosec // G304: inside the operator's out-dir
 		if err != nil || !bytes.Equal(pol, policy) {
@@ -426,7 +468,7 @@ func prepareBundle(dir string, cas *trust.CAPubKeys, roots []trust.RootKey, thre
 		return existing, b, nil
 	case errors.Is(err, fs.ErrNotExist):
 		issued := ceremonyNow().UTC().Truncate(time.Second).Format(trust.TimeFormat)
-		b, err := buildBundle(cas, roots, threshold, policy, issued)
+		b, err := build(issued)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -483,16 +525,79 @@ func buildBundle(cas *trust.CAPubKeys, roots []trust.RootKey, threshold uint32, 
 	return b, nil
 }
 
-// rootByFingerprint returns the bundle root key with fingerprint fp and its
-// declared custody.
-func rootByFingerprint(b *trust.Bundle, fp string) (ssh.PublicKey, string, error) {
-	for _, r := range b.Root.Keys {
-		pub, err := trust.ParseKey(r.Key)
-		if err == nil && ssh.FingerprintSHA256(pub) == fp {
-			return pub, r.Custody, nil
+// successorBuilder reads the bundle and policy in force from prevDir and
+// returns the previous bundle, its bytes and the builder of its successor
+// (trust.BuildSuccessor). outDir must not be prevDir: the successor never
+// overwrites the documents it chains to.
+func successorBuilder(prevDir, outDir string, roots []trust.RootKey, threshold uint32, policy []byte) (*trust.Bundle, []byte, func(string) (*trust.Bundle, error), error) {
+	absPrev, err := filepath.Abs(prevDir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	absOut, err := filepath.Abs(outDir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if absPrev == absOut {
+		return nil, nil, nil, fmt.Errorf("--out-dir %s is the --prev directory; write the successor to a new directory; nothing was written or signed", outDir)
+	}
+	prevPath := filepath.Join(prevDir, bundleFile)
+	prevBundle, err := os.ReadFile(prevPath) //nolint:gosec // G304: the operator names the directory
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	prev, err := trust.ParseBundle(prevBundle)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%s: %w", prevPath, err)
+	}
+	prevPolicy, err := os.ReadFile(filepath.Join(prevDir, policyFile)) //nolint:gosec // G304: the operator names the directory
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	build := func(issuedAt string) (*trust.Bundle, error) {
+		return trust.BuildSuccessor(prev, prevBundle, prevPolicy, roots, threshold, policy, issuedAt)
+	}
+	return prev, prevBundle, build, nil
+}
+
+// successorHeader describes the bundle a successor chains to, before the
+// successor's own summary: the previous version and SHA-256, the previous
+// roots, and the signatures the successor needs.
+func successorHeader(prev *trust.Bundle, prevBundle []byte, next *trust.Bundle) string {
+	var w strings.Builder
+	fmt.Fprintf(&w, "Successor of trust bundle v%d, sha256 %s\n", prev.Version, trust.SHA256Hex(prevBundle))
+	fmt.Fprintf(&w, "Previous root keys (threshold %d of %d):\n", prev.Root.Threshold, len(prev.Root.Keys))
+	for _, r := range prev.Root.Keys {
+		// ParseBundle validated every root key.
+		pub, _ := trust.ParseKey(r.Key)
+		fmt.Fprintf(&w, "  %s  %-34s custody=%s\n", ssh.FingerprintSHA256(pub), pub.Type(), r.Custody)
+	}
+	fmt.Fprintf(&w, "signatures needed: %d of the %d previous roots AND %d of the %d new roots, on both documents\n",
+		prev.Root.Threshold, len(prev.Root.Keys), next.Root.Threshold, len(next.Root.Keys))
+	return w.String()
+}
+
+// rootByFingerprint returns the root key with fingerprint fp and its
+// declared custody, from the bundle's root set or, for a successor, from
+// the previous bundle's (prev; nil for a genesis bundle). fromPrev reports
+// that the key and its custody label come from prev.
+func rootByFingerprint(b, prev *trust.Bundle, fp string) (pub ssh.PublicKey, custody string, fromPrev bool, err error) {
+	sets := []*trust.Bundle{b}
+	if prev != nil {
+		sets = append(sets, prev)
+	}
+	for i, set := range sets {
+		for _, r := range set.Root.Keys {
+			k, perr := trust.ParseKey(r.Key)
+			if perr == nil && ssh.FingerprintSHA256(k) == fp {
+				return k, r.Custody, i == 1, nil
+			}
 		}
 	}
-	return nil, "", fmt.Errorf("signing root %s is not one of the bundle's root keys", fp)
+	if prev != nil {
+		return nil, "", false, fmt.Errorf("signing root %s is not one of the new root keys nor one of the previous bundle's (v%d) root keys", fp, prev.Version)
+	}
+	return nil, "", false, fmt.Errorf("signing root %s is not one of the bundle's root keys", fp)
 }
 
 // hasSignature reports whether the sigs file holds a valid signature by pub
