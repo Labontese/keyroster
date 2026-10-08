@@ -989,8 +989,8 @@ func TestRootSignSuccessor(t *testing.T) {
 	// directory, the named file transformed by edit, and returns it.
 	copyPrev := func(t *testing.T, name string, edit func([]byte) []byte) string {
 		t.Helper()
-		dir := filepath.Join(g.dir, "prev-"+strings.TrimSuffix(name, ".json"))
-		if err := os.Mkdir(dir, 0o750); err != nil {
+		dir, err := os.MkdirTemp(g.dir, "prev-")
+		if err != nil {
 			t.Fatal(err)
 		}
 		for _, f := range []string{"bundle.json", "policy.json"} {
@@ -1066,10 +1066,50 @@ func TestRootSignSuccessor(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		code, _, stderr := sign(t, filepath.Join(g.dir, "out-unknown"), prevPolicy, "1", nil, "--agent-key", ssh.FingerprintSHA256(pub))
+		out := filepath.Join(g.dir, "out-unknown")
+		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", ssh.FingerprintSHA256(pub))
 		if code != 1 || !strings.Contains(stderr, "not one of") || !strings.Contains(stderr, "previous bundle") {
 			t.Fatalf("unknown signing root: exit %d, stderr %q", code, stderr)
 		}
+		mustNotExist(t, filepath.Join(out, "bundle.json.sigs"))
+		mustNotExist(t, filepath.Join(out, "policy.json.sigs"))
+	})
+
+	t.Run("missing_flags_with_prev", func(t *testing.T) {
+		code, _, stderr := run(t, "root", "sign", "--prev", g.out, "--threshold", "1", "--policy", prevPolicy,
+			"--out-dir", filepath.Join(g.dir, "out-usage"), "--agent-key", a.fingerprint)
+		if code != 2 || !strings.Contains(stderr, "with --prev, --policy, --roots, --threshold, --out-dir") {
+			t.Fatalf("--prev without --roots: exit %d, stderr %q", code, stderr)
+		}
+	})
+
+	t.Run("previous_root_custody_mismatch_refused", func(t *testing.T) {
+		// The previous bundle labels A custody=piv: --key holds A in
+		// software, so the label would be false, and the error names the
+		// previous bundle as the label's source.
+		prev := copyPrev(t, "bundle.json", func(data []byte) []byte {
+			pb, err := trust.ParseBundle(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, rk := range pb.Root.Keys {
+				if rk.Key == rootKey(t, a) {
+					pb.Root.Keys[i].Custody = "piv"
+				}
+			}
+			out, err := pb.Canonical()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		})
+		out := filepath.Join(g.dir, "out-custody")
+		code, _, stderr := sign(t, out, prevPolicy, "1", &a, "--prev", prev) // the later --prev wins
+		if code != 1 || !strings.Contains(stderr, filepath.Join(prev, "bundle.json")+" declares custody=piv") || !strings.Contains(stderr, "false custody label") {
+			t.Fatalf("previous root labelled piv signing with --key: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, filepath.Join(out, "bundle.json.sigs"))
+		mustNotExist(t, filepath.Join(out, "policy.json.sigs"))
 	})
 
 	for _, tc := range []struct {
