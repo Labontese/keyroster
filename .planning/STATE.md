@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: trust-core
 status: executing
-stopped_at: "01-15 Task 4 merge gate: owner applies main-integrity from PR #18 branch, then approves PR #18"
-last_updated: "2026-10-08T05:12:21.072Z"
+stopped_at: "01-17 Task 3 merge gate: owner approves PR #22"
+last_updated: "2026-10-08T06:04:05.797Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 01 execution started
-state_head: 582f932c30b84b3237955db370129de4976fc38b
+state_head: f6f419dfdc1f8e167aa96e42f6439df3e7c2d381
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 21
-  completed_plans: 16
+  completed_plans: 17
   percent: 0
 ---
 
@@ -72,6 +72,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P13 | 47 min | 3 tasks | 26 files |
 | Phase 01 P14 | 45 min | 3 tasks | 5 files |
 | Phase 01 P15 | 35 min | 3 tasks | 6 files |
+| Phase 01 P17 | 35 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -144,6 +145,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-15: the ruleset listing all 17 checks is applied by the owner from the PR branch before approval (admin-only); REPO-01 is marked complete in p01/close after the live-rules check passes
 - [Phase 01]: 01-15: capslock -tags piv re-deferred to the next plan that edits CI (needs libpcsclite-dev and must not change a check in the PR that makes it required)
 - [Phase 01]: 01-15: KEY-07 stays open; the real offline ceremony means reinstalling the homelab signer until a successor-bundle builder exists
+- [Phase 01]: 01-17: root sign --prev DIR builds successor bundles; --ca-pubkeys refused with --prev (CA rotation is KEY-08); a previous or a new root may sign; BuildSuccessor and VerifySuccessor share checkSuccessorChain
+- [Phase 01]: 01-17: KEY-07 not marked complete; it closes in 01-21 after the owner's offline ceremony and destruction of the TEST roots
 
 ### Pending Todos
 
@@ -173,6 +176,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-07T02:35:30.830Z
-Stopped at: 01-15 Task 4 merge gate: owner applies main-integrity from PR #18 branch, then approves PR #18
+Last session: 2026-10-08T06:04:05.726Z
+Stopped at: 01-17 Task 3 merge gate: owner approves PR #22
 Resume file: None
