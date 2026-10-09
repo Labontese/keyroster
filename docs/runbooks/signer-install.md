@@ -286,11 +286,15 @@ issues under the superseded policy.
 > refusal are exercised by the Go tests only (`TestStateDirLock`,
 > `TestTrustChangedUnderLiveSigner`). `TestRootRotationLiveSigner` runs
 > stop, install and start for a successor with the real binaries on the
-> agent backend; the sequence on the vTPM signer is still owed to plan
-> 01-20. Creating
-> `signer.lock` inside the systemd sandbox is covered only by the CI
-> `systemd` smoke check (`test/systemd/smoke.sh`, which starts `serve` in
-> the sandbox).
+> agent backend. On the homelab vTPM signer, the stop, install and start
+> sequence above ran in plan 01-20 (a rehearsal rotation to bundle v2):
+> `install-bundle` printed the SHA-256 checked before the copy, and the
+> signer was serving again under the new bundle. Creating
+> `signer.lock` inside the systemd sandbox is covered by the CI `systemd`
+> smoke check (`test/systemd/smoke.sh`, which starts `serve` in the
+> sandbox). On the homelab signer, the sandboxed `serve` of the current
+> build created it (plan 01-20); the refusal while it is held was not
+> exercised there.
 
 ## Snapshot restore: check the clock first
 
