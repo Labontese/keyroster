@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: trust-core
 status: executing
-stopped_at: "01-18 Task 4 merge gate: owner approves PR #24"
-last_updated: "2026-10-08T12:31:30.758Z"
+stopped_at: "01-20 Task 4 merge gate: owner approves PR #25"
+last_updated: "2026-10-09T16:51:39.472Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 01 execution started
-state_head: 3172a056222c5fe13d7ad7befe68432bc1406aed
+state_head: e59110a234076f99458f9e9b25d127c1cde35547
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 21
-  completed_plans: 19
+  completed_plans: 20
   percent: 0
 ---
 
@@ -75,6 +75,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P17 | 35 min | 2 tasks | 6 files |
 | Phase 01 P19 | 10 min | 2 tasks | 5 files |
 | Phase 01 P18 | 29 min | 3 tasks | 10 files |
+| Phase 01 P20 | 60 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -154,6 +155,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-18: audit verify pins the anchor bundle (first bundle whose root set and threshold equal the pins); earlier bundles are authenticated by the prev-hash chain, no match fails closed
 - [Phase 01]: 01-18: trust verify --prev checks a successor with VerifySuccessor, then MatchPins against the new roots' paper fingerprints before install
 - [Phase 01]: 01-18: fork_under_old_pins is an accepted residual; after rotating away from exposed roots, auditors pin the new roots (runbook)
+- [Phase 01]: 01-20: rehearsal rotation (owner decision 2026-10-09): TEST roots C and D made in WSL with simulated media; homelab signer moved to bundle v2 92dc8ef4; offline ceremony UNVERIFIED, KEY-07 stays open until a later v3 rotation onto offline roots
+- [Phase 01]: 01-20: v2 carries policy v1 unchanged; requirements-completed is VIS-03 only and requirements.mark-complete is skipped
 
 ### Pending Todos
 
@@ -183,6 +186,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-08T12:31:30.687Z
-Stopped at: 01-18 Task 4 merge gate: owner approves PR #24
+Last session: 2026-10-09T16:51:39.387Z
+Stopped at: 01-20 Task 4 merge gate: owner approves PR #25
 Resume file: None
