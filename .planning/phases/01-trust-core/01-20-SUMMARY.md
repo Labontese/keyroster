@@ -15,7 +15,7 @@ affects: [01-21, KEY-07, VIS-03]
 
 actuals:
   tokens: 25400
-  tasks: 4
+  tasks: 3
   commits: 2
 plan_head_before: 69563926eb196232f88d235e85ae49bf1ec35642
 plan_head_after: e59110a234076f99458f9e9b25d127c1cde35547
@@ -263,5 +263,5 @@ None. No new network endpoint, auth path or schema change. `-A` was used for the
 ## Self-Check: PASSED
 
 - Files: `01-20-SUMMARY.md`, `docs/runbooks/root-ceremony.md` and `docs/runbooks/signer-install.md` exist.
-- Commits on the branch: 657e33e (revised plans) and e59110a (runbooks).
+- Commits on the branch: 657e33e (revised plans), e59110a (runbooks) and eb97a1f (this SUMMARY and the tracking updates).
 - Gates: Task 3 verify 1 (doctor v2), 2 (trust verify --prev), 3 (public.sha256 and both audit anchors), 4 (SUMMARY, KEY-07 Pending, runbook labels) and 5 (hygiene) passed before this commit. Verify 6 and the required checks run after the push.
