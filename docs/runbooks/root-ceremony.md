@@ -417,8 +417,11 @@ type them at the prompts.
 > therefore remain **UNVERIFIED**, and so does step 7 as written (pins from
 > paper). The owner's real offline ceremony runs them in a later rotation.
 > `--prev-sha256` was added after that rehearsal, which checked the bundle
-> in force by comparing hashes by hand; the flag and its refusals are
-> exercised by the Go unit tests and `TestRootRotationLiveSigner` only.
+> in force by comparing hashes by hand. The flag is exercised only by
+> tests: `TestRootRotationLiveSigner` (real binaries) runs the accepted
+> path and the wrong-hash refusal of both commands; the in-process unit
+> tests also cover a foreign prev, a missing flag and a prev without its
+> own roots' signatures.
 >
 > Plan 01-21 ran step 8 for TEST roots A and B only, which were held on a
 > networked workstation: their WSL copies were removed with `shred -u` and

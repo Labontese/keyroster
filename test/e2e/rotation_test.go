@@ -134,6 +134,24 @@ func TestRootRotationLiveSigner(t *testing.T) {
 	if code, out := verifyPrev(r1FP); code == 0 || !strings.Contains(out, "not the pinned roots") {
 		t.Fatalf("trust verify --prev pinned to the previous root R1 exited %d, want the pin refusal:\n%s", code, out)
 	}
+	// G-CR-01: a --prev-sha256 that is not the bundle in force's is refused
+	// by both commands, and root sign writes nothing.
+	wrongSHA := trust.SHA256Hex([]byte("not the bundle in force"))
+	if code, out := runKeyroster(t, "trust", "verify", "--prev", env.BundleDir, "--prev-sha256", wrongSHA, "--threshold", "1",
+		"--pin", cFP, "--pin", dFP, "--bundle", filepath.Join(succ, "bundle.json"), "--policy", filepath.Join(succ, "policy.json")); code == 0 ||
+		!strings.Contains(out, "not the recorded --prev-sha256") || strings.Contains(out, "OK:") {
+		t.Fatalf("trust verify --prev with a wrong --prev-sha256 exited %d, want the hash refusal:\n%s", code, out)
+	}
+	refusedDir := filepath.Join(keys, "succ-refused")
+	if code, out := keyrosterWithAgent(t, r1Agent, "root", "sign", "--prev", env.BundleDir, "--prev-sha256", wrongSHA,
+		"--roots", rootsPub, "--threshold", "1", "--policy", filepath.Join(env.BundleDir, "policy.json"),
+		"--out-dir", refusedDir, "--agent-key", r1FP, "--confirm", prefix); code == 0 ||
+		!strings.Contains(out, "not the recorded --prev-sha256") || !strings.Contains(out, "nothing was written or signed") {
+		t.Fatalf("root sign --prev with a wrong --prev-sha256 exited %d, want the hash refusal:\n%s", code, out)
+	}
+	if _, err := os.Stat(refusedDir); !os.IsNotExist(err) {
+		t.Fatalf("%s exists after the refused root sign (stat error %v)", refusedDir, err)
+	}
 
 	if code, out := env.signerCmd(t, install...); code != 0 || !strings.Contains(out, "installed bundle version 2") {
 		t.Fatalf("install-bundle of the co-signed successor exited %d:\n%s", code, out)
