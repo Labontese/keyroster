@@ -3,7 +3,7 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: trust-core
 status: verifying
-stopped_at: "01-21 Task 4 merge gate: owner removes VM passwordless sudo and approves PR #26"
+stopped_at: "Phase 1 re-verified (human_needed): only the real-hardware run (issue #13) and the owed v3 offline ceremony (KEY-07) remain"
 last_updated: "2026-10-10T05:46:05.074Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 01 execution started
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 Phase: 01 (trust-core) — READY TO EXECUTE
 Plan: 16 of 16
-Status: All 21 plans executed — ready for phase re-verification after the 01-21 merge gate; KEY-07 stays open (owed to the owner's real offline ceremony, a v3 rotation)
+Status: Re-verified 2026-10-10: human_needed (3 owner overrides). Remaining: real-hardware run (issue #13); KEY-07 stays open until the owner's real offline ceremony (a v3 rotation)
 Last activity: 2026-10-06 - Completed quick task 261006-ixz: Fix flaky signer freshness-boundary tests with a deterministic test clock
 
 Progress: [░░░░░░░░░░] 0%
@@ -189,5 +189,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-10T05:46:04.943Z
-Stopped at: 01-21 Task 4 merge gate: owner removes VM passwordless sudo and approves PR #26
+Stopped at: Phase 1 re-verified (human_needed): only the real-hardware run (issue #13) and the owed v3 offline ceremony (KEY-07) remain
 Resume file: None

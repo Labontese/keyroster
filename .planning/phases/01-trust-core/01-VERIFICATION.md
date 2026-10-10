@@ -1,8 +1,8 @@
 ---
 phase: 01-trust-core
 verified: 2026-10-10T18:00:00Z
-status: gaps_found
-score: 4/6 roadmap truths verified (SC1, SC4, SC5 and the goal clause "signing rules cannot be bypassed"; SC2's offline-ceremony clause is an owner-accepted open gap; SC3's real-hardware clause is present but behavior-unverified); 150/153 plan must-have truths verified or attested (1 FAILED by owner decision, 1 behavior-unverified, 1 superseded by owner decision)
+status: human_needed
+score: 6/6 roadmap truths verified or passed by override (SC2 offline-ceremony clause and SC3 real-hardware clause by owner override); 152/153 plan must-have truths verified, attested or passed by override (01-14 truth 2 and 01-21 truth 8 by override; the real-card PIV behaviour stays behavior-unverified)
 covered_files:
   - ".github/workflows/ci.yml"
   - ".github/workflows/codeql.yml"
@@ -133,7 +133,7 @@ covered_files:
   - "test/systemd/smoke.sh"
 covered_digest: "v3:sha256:036b3b8c9ea5adf09baa1c3fef12ac96a6a3e8d7044c82582cbe59d439454eea"
 behavior_unverified: 1
-overrides_applied: 0
+overrides_applied: 3
 re_verification:
   previous_status: gaps_found
   previous_score: "3/5 roadmap success criteria verified (goal-level truth FAILED); 119/121 plan must-have truths verified or attested"
@@ -149,20 +149,7 @@ re_verification:
   reclassified:
     - "Gap 6 (SC3 real hardware: YubiHSM 2, real YubiKey PIV) moved from gaps to behavior-unverified / human verification: the code paths are present, wired and CI-tested on SoftHSM2 and a fake card; only owner hardware can close it (issue #13)"
   regressions: []
-gaps:
-  - truth: "SC2/KEY-07 (offline-ceremony clause): the admin has run the offline trust-root ceremony (M-of-N root keys, software on offline media or hardware) and the homelab signer is anchored on roots from it"
-    status: failed
-    accepted_open: true
-    reason: "OWNER-ACCEPTED OPEN GAP, not a code defect. Owner decision 2026-10-09 (deferred-items.md, 01-14 entry 'Rehearsal rotation, not the real ceremony', and the 01-20/01-21 entry; ROADMAP Phase 1 Plans line): KEY-07 stays open until the owner performs the real offline ceremony as a v3 rotation co-signed by TEST root C or D. All tooling the ceremony needs exists and is CI-tested (root init, root sign genesis and --prev with --prev-sha256, trust verify --prev, audit verify anchored on any bundle; e2e TestRootRotationLiveSigner PASS on sshd 9.5p1 and 10.5p1). What has not happened: no ceremony on a live USB with separate physical media and paper fingerprints. The homelab signer runs bundle v2 on TEST roots C and D, generated in WSL on the networked workstation (01-20 coverage D5: fail; 01-21 coverage D5: fail; 01-14 must-have truth 2 still FAILED). No later roadmap phase owns the ceremony, so Step 9b cannot defer it; the recorded owner decision is the reason it is open, not a phase that closes it."
-    artifacts:
-      - path: "docs/runbooks/root-ceremony.md"
-        issue: "Offline steps of 'Rotate the roots' and of the genesis ceremony are labelled UNVERIFIED (lines ~414-435); the --prev-sha256 path has never run outside tests"
-      - path: ".planning/phases/01-trust-core/deferred-items.md"
-        issue: "Records the owed v3 rotation; no target phase"
-    missing:
-      - "Owner action (no code): run the offline ceremony on a live USB, two new roots on separate sticks with paper fingerprints; build successor v3 with root sign --prev --prev-sha256 <recorded v2 hash>; co-sign with C or D; trust verify --prev against the paper fingerprints; stop / install-bundle / start on the homelab signer; audit verify pinned to the new roots; destroy C and D and their passphrase files"
-      - "Then mark KEY-07 complete in REQUIREMENTS.md and flip 01-14 truth 2"
-      - "Or: the owner accepts this deferral formally with the override suggested in this report (the status then becomes human_needed, not passed, because the hardware items remain)"
+gaps: []
 deferred:
   - truth: "SC5: a log rolled back or truncated to an earlier signed prefix is detected without an operator-supplied --previous checkpoint (C-WR-01 remainder)"
     addressed_in: "Phase 4"
@@ -192,16 +179,26 @@ human_verification:
   - test: "SC3 real hardware (issue #13): YubiHSM 2 via ssh-agent and a real YubiKey PIV slot, as in behavior_unverified_items"
     expected: "Issuance, sshd acceptance and audit verify succeed; custody truthful; PIN-retry guard holds on the real card"
     why_human: "Needs owner hardware"
-  - test: "Upgrade the homelab signer from the 6956392 build to d623927 (main after PR #27); start the sandboxed unit; run keyroster-signer doctor; issue one certificate; export and run keyroster audit verify pinned to C and D and to A and B"
-    expected: "serve starts (the new root-as-admin-across-all-bundles and validity-window start-up checks accept the real state), doctor shows no FAIL, audit verify prints OK under both pin sets"
-    why_human: "01-REVIEW-FIX.md 'UNVERIFIED': only audit verify of the post-01-21 export was run with the PR #27 code; serve and doctor with this build have never run on the real homelab state, which is reachable only by the owner"
+overrides:
+  - must_have: "SC2/KEY-07 (offline-ceremony clause): the admin has run the offline trust-root ceremony (M-of-N root keys, software on offline media or hardware) and the homelab signer is anchored on roots from it"
+    reason: "Tooling complete and CI-tested (root sign --prev --prev-sha256, trust verify --prev, audit anchoring; e2e TestRootRotationLiveSigner). The real offline ceremony is owed as a v3 rotation co-signed by TEST root C or D (owner decision 2026-10-09, deferred-items.md); KEY-07 stays Pending in REQUIREMENTS.md until then"
+    accepted_by: "Daniel (owner)"
+    accepted_at: "2026-10-10T18:30:00Z"
+  - must_have: "At the end of the plan the owner has removed /etc/sudoers.d/90-cloud-init-users on the VM, and sudo -n true fails there over SSH"
+    reason: "Owner decision 2026-10-10: the homelab test VM keeps passwordless sudo; it is not reachable from outside (recorded in deferred-items.md)"
+    accepted_by: "Daniel (owner)"
+    accepted_at: "2026-10-10T18:30:00Z"
+  - must_have: "SC3: CA keys in a PKCS#11 HSM reached via ssh-agent (SoftHSM2 in CI, YubiHSM 2 on real hardware) or a YubiKey PIV slot"
+    reason: "Real-device validation is tracked in issue #13 (needs-hardware) before the Phase 6 external security review; SoftHSM2, swtpm and fake-card coverage prove the code paths. The hardware run stays a human_verification item"
+    accepted_by: "Daniel (owner)"
+    accepted_at: "2026-10-10T18:30:00Z"
 ---
 
 # Phase 1: Trust Core Verification Report
 
 **Phase Goal:** An admin can stand up a hardware-backed, auditable CA whose certificates stock OpenSSH accepts and whose signing rules cannot be bypassed, before any user or host exists.
 **Verified:** 2026-10-10
-**Status:** gaps_found (one owner-accepted open gap: the real offline root ceremony, KEY-07; no code gaps remain)
+**Status:** human_needed. Three owner overrides were applied on 2026-10-10: KEY-07 offline ceremony owed as a v3 rotation, VM sudo kept, and SC3 hardware tracked in issue #13. No code gaps remain; the remaining human item is the real-hardware run (issue #13).
 **Re-verification:** Yes, after gap closure (PR #20, gap plans 01-17..01-21 in PRs #21-#26, re-review fixes in PR #27). The previous report is at `git show 31f3eb7:.planning/phases/01-trust-core/01-VERIFICATION.md`.
 **Code under test:** `p01/close-reverify` = origin/main `d623927`. The working tree differs only in `.planning/config.json` (one GSD key) and two untracked planning files.
 
@@ -392,7 +389,7 @@ No code gap remains.
 2. **SC3 real hardware (behavior-unverified, issue #13).** This needs owner hardware. It is now human verification, not a gap.
 3. **Homelab deployment of the PR #27 build (human verification).**
 
-### Override suggestions (not applied; the owner accepts or rejects them)
+### Override suggestions (applied 2026-10-10 by the owner: the first three; the Windows 9.5p2 host item was not needed)
 
 If the owner accepts the first override, the status becomes **human_needed** (items 2 and 3 above remain), not passed.
 
@@ -422,3 +419,24 @@ The third override would only move SC3 out of human verification. It would not c
 
 _Verified: 2026-10-10_
 _Verifier: Claude (gsd-verifier)_
+
+## Human verification item 2: done (2026-10-10, orchestrator, after owner approval)
+
+The homelab signer was upgraded from the 6956392 build to **d623927** (main after PR #27), built in a clean detached worktree with `vcs.modified=false`:
+- keyroster-signer `33f0125e…c891`, keyroster `529c52b4…d0d6`;
+- unit and tpm.conf unchanged;
+- rollback copies `*.69563926` kept.
+
+The sandboxed unit started with `msg=serving … backend=tpm policy_version=1` and `NRestarts=0`:
+- only `lo` in the netns;
+- CapEff 0, NoNewPrivs 1, Seccomp 2.
+
+`keyroster-signer doctor` exited rc 0 with no FAIL:
+- OK user, state_dir, db_permissions, db_integrity, log, clock, bundle v2, trust and tpm;
+- WARN software_root for C and D, and vtpm_custody.
+
+The export has 6 entries and is byte-identical to the post-01-21 export `cc01648e…4f77`. `audit verify` with d623927:
+- pinned to C+D: OK, anchored on bundle v2;
+- pinned to A+B: OK, anchored on bundle v1.
+
+The new start-up checks from PR #27 (root-as-admin across all logged bundles, validity-window start) therefore accept the real homelab state.

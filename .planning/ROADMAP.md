@@ -80,7 +80,7 @@ Plans:
 - [x] 01-19-PLAN.md — Remove the KEY-07 overclaims from the SUMMARYs; record the deferred review design items (C-WR-06 part 2, C-WR-01 remainder, D-WR-02, D-WR-04) (gap wave 1)
 - [x] 01-18-PLAN.md — Verify rotations against the new roots: `trust verify --prev`, `audit verify` anchored on any bundle, and the rotation runbook (gap wave 2)
 - [x] 01-20-PLAN.md — Rehearsal rotation (owner decision 2026-10-09): TEST roots C and D made in WSL with simulated USB media sign bundle v2, the owner approves the one-way install by hash, and the homelab signer moves to v2; the offline ceremony stays UNVERIFIED and KEY-07 stays open (gap wave 3)
-- [x] 01-21-PLAN.md — Destroy TEST roots A and B (owner checkpoint) around pre- and post-destruction audits, record the real offline ceremony as an owed v3 rotation from C and D (KEY-07 stays open), and remove the VM's passwordless sudo at the end (gap wave 4)
+- [x] 01-21-PLAN.md — Destroy TEST roots A and B (owner checkpoint) around pre- and post-destruction audits, record the real offline ceremony as an owed v3 rotation from C and D (KEY-07 stays open); the VM keeps passwordless sudo by owner decision 2026-10-10 (gap wave 4)
 
 **UI hint**: no
 **Research**: HIGH. Ed25519 via PKCS#11/ssh-agent (OpenSSH 10.1/10.2 caveats), YubiHSM 2 forced-audit semantics, TPM key algorithm (assume P-256), signer sandboxing (own OS user, systemd hardening), restore-safe serial allocation. Decide CA key algorithm and custody together.
