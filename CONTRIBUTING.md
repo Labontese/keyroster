@@ -127,7 +127,22 @@ commits with its own SSH key.
   submits a review and never merges as administrator. It carries its own
   copy of the `gh-as-bot.sh` command, because after switching to the PR
   branch the file on disk is the PR's unreviewed copy, and it stops unless
-  `gh api user` answers `keyroster-bot`. Its `git fetch` and `git push` set
+  `gh api user` answers `keyroster-bot`.
+- **The gate runs only as `origin/main`'s reviewed copy.** After its fetch it
+  compares its own blob (`git hash-object`) with `origin/main`'s
+  `scripts/merge-gate.sh` and refuses to run when they differ: from a PR
+  branch that changes the script, from a `main` behind `origin/main`, or from
+  stdin. Run it from an up-to-date `main`
+  (`git switch main && git merge --ff-only origin/main`). When it rebased the
+  PR branch it switches back to `main` before it exits, except on a rebase
+  conflict (exit 4): the rebase then stays in progress on the PR branch, and
+  the gate refuses to run until it is finished or aborted. To resume, resolve
+  the conflicts and `git rebase --continue`, push the branch with the
+  command the gate printed (the bot's credential helper and a
+  `--force-with-lease` on the head it saw, so the owner never becomes the
+  last pusher), `git switch main`, and rerun the gate. A PR that changes `merge-gate.sh` is gated once with the
+  copy already on `main`, the reviewed one; run from `main`, that is the
+  file on disk. Its `git fetch` and `git push` set
   their own credential helper (the bot's gh login, `GH_TOKEN` and
   `GITHUB_TOKEN` unset), so the clone's or the user's git credential
   configuration cannot make the force-push go out as the owner.

@@ -7,15 +7,24 @@
 #
 # Exit codes:
 #   0  merged; local main equals origin/main
-#   1  error: closed PR, failing check, timeout, dirty or diverged checkout
+#   1  error: closed PR, failing check, timeout, dirty or diverged checkout,
+#      a rebase in progress, or this file is not origin/main's copy
 #   2  owner approval pending (the PR URL is printed)
 #   3  main moved: the branch was rebased onto origin/main with signed
 #      commits, force-pushed with lease and is green again; GitHub dismissed
 #      the approval, so the owner must approve the new head
-#   4  rebase conflict; the rebase is left in progress for manual resolution
+#   4  rebase conflict; the rebase is left in progress on BRANCH for manual
+#      resolution, so the checkout cannot return to main (the message says
+#      how to resume; the script refuses to run until the rebase is done)
 #
 # --check is read-only (apart from `git fetch`): exit 0 only when the PR is
 # merged and local main equals origin/main, otherwise exit 1.
+#
+# The script runs only as origin/main's reviewed copy (F-WR-03): after its
+# fetch it compares its own blob with origin/main's scripts/merge-gate.sh and
+# stops when they differ, for example when the checkout is on a PR branch
+# that changes this file. Run it from an up-to-date main. Every exit after it
+# switched to the PR branch switches back to main, except exit 4.
 #
 # Every gh call runs as keyroster-bot through bot_gh below, and the script
 # checks that identity before it does anything else. Every git fetch and push
@@ -32,7 +41,8 @@
 # the complete script before a branch switch replaces this file on disk. That
 # is also why bot_gh is defined here instead of calling scripts/gh-as-bot.sh:
 # after the switch to the PR branch, that file is the PR's unreviewed copy
-# (E-WR-02).
+# (E-WR-02). The same holds for this file, hence the origin/main check in
+# main and the switch back to main.
 
 # bot_gh runs gh as keyroster-bot: the bot's own gh config directory, with
 # GH_TOKEN and GITHUB_TOKEN unset because either one would override that
@@ -65,7 +75,7 @@ bot_git() {
 main() {
 	set -euo pipefail
 
-	local check=0
+	local args="$*" check=0
 	if [ "${1:-}" = "--check" ]; then
 		check=1
 		shift
@@ -76,7 +86,17 @@ main() {
 	fi
 	local branch=$1
 
+	# The blob of the file bash is running, hashed before the cd below so
+	# that a relative $0 still names it. Empty when $0 is no file (bash -s).
+	local self
+	self=$(git hash-object -- "$0" 2>/dev/null) || self=
+
 	cd "$(git rev-parse --show-toplevel)"
+
+	if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
+		echo "a rebase is in progress: finish it as the earlier exit 4 said, or run 'git rebase --abort'; then 'git switch main' and rerun" >&2
+		return 1
+	fi
 
 	local login
 	login=$(bot_gh api user --jq .login) || {
@@ -89,6 +109,16 @@ main() {
 	fi
 
 	bot_git fetch --quiet origin
+
+	# Run only as the reviewed copy (F-WR-03). ls-tree rather than
+	# rev-parse origin/main:path, which Git Bash's path conversion can mangle.
+	local reviewed
+	reviewed=$(git ls-tree origin/main -- scripts/merge-gate.sh | awk '{print $3}')
+	if [ -z "$self" ] || [ "$self" != "$reviewed" ]; then
+		echo "this merge-gate.sh (blob ${self:-unknown: not run from a file}) is not origin/main's reviewed copy (blob ${reviewed:-missing}); refusing to run" >&2
+		echo "run it from an up-to-date main: git switch main && git merge --ff-only origin/main && bash scripts/merge-gate.sh $args" >&2
+		return 1
+	fi
 
 	local view number state decision merge_state url
 	# "|" separates the fields: a tab would collapse an empty reviewDecision.
@@ -162,14 +192,29 @@ fast_forward_main() {
 	git merge --quiet --ff-only origin/main
 }
 
-# Rebase BRANCH onto origin/main with signed commits, force-push it with lease,
-# keep auto-merge enabled and wait for the required checks. Returns 0 when the
-# rebased head is green, 1 on error, 4 on a rebase conflict.
+# Switch back to main (created from origin/main if missing) after
+# rebase_onto_main switched to the PR branch, so that the checkout does not
+# stay on the PR's copy of this script. It does not move main.
+back_to_main() {
+	if git rev-parse --verify --quiet refs/heads/main >/dev/null; then
+		git switch --quiet main
+	else
+		git switch --quiet -c main --track origin/main
+	fi || {
+		echo "could not switch back to main; run 'git switch main' before rerunning this script" >&2
+		return 1
+	}
+}
+
+# Rebase BRANCH onto origin/main with signed commits, then push it and wait
+# for the required checks (push_rebased), and switch back to main. Returns 0
+# when the rebased head is green, 1 on error, 4 on a rebase conflict (the
+# rebase stays in progress on BRANCH).
 #
 # The caller invokes this in an `||` list, where bash suspends errexit, so
 # every step that can fail checks its own status.
 rebase_onto_main() {
-	local branch=$1 url=$2 remote_sha auto
+	local branch=$1 url=$2 remote_sha rc=0
 	remote_sha=$(git rev-parse "origin/$branch") || return 1
 
 	if git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
@@ -187,10 +232,33 @@ rebase_onto_main() {
 	if ! git rebase --quiet --autostash --gpg-sign origin/main; then
 		echo "rebase conflict in:" >&2
 		git diff --name-only --diff-filter=U >&2
-		echo "resolve, run 'git rebase --continue', then rerun this script" >&2
+		echo "The rebase is left in progress on $branch, so the checkout cannot return to main," >&2
+		echo "and this script refuses to run until the rebase is finished or aborted. To resume:" >&2
+		echo "  1. resolve the conflicts, 'git add' them and run 'git rebase --continue';" >&2
+		echo "  2. push the result as keyroster-bot (bot_git's credential helper, never the" >&2
+		echo "     clone's: the owner must not become the last pusher), with a lease on the" >&2
+		echo "     head this script saw:" >&2
+		echo "     git -c credential.https://github.com.helper= -c 'credential.https://github.com.helper=!env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=\"${KEYROSTER_BOT_GH_CONFIG:-$HOME/.config/gh-keyroster-bot}\" gh auth git-credential' push --force-with-lease=refs/heads/$branch:$remote_sha origin $branch" >&2
+		echo "  3. 'git switch main', then rerun this script from main." >&2
+		echo "To give up instead: 'git rebase --abort', then 'git switch main'." >&2
 		return 4
 	fi
 
+	push_rebased "$branch" "$remote_sha" || rc=$?
+	if [ "$rc" -eq 0 ]; then
+		# Before the switch, so a failed switch still reports the push.
+		echo "rebased onto main: owner re-approval needed"
+		echo "$url"
+	fi
+	back_to_main || return 1
+	return "$rc"
+}
+
+# Force-push the rebased BRANCH with a lease on REMOTE_SHA, keep auto-merge
+# enabled and wait for the required checks. Returns 0 when they pass, 1
+# otherwise.
+push_rebased() {
+	local branch=$1 remote_sha=$2 auto
 	bot_git push --quiet --force-with-lease="refs/heads/$branch:$remote_sha" origin "$branch" || return 1
 
 	auto=$(bot_gh pr view "$branch" --json autoMergeRequest --jq '.autoMergeRequest == null') || return 1
@@ -199,9 +267,6 @@ rebase_onto_main() {
 	fi
 
 	wait_for_required_checks "$branch" || return 1
-	echo "rebased onto main: owner re-approval needed"
-	echo "$url"
-	return 0
 }
 
 # Wait until GitHub has registered the required checks for the pushed head,
