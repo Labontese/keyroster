@@ -91,3 +91,4 @@ The phase 1 code review left four findings whose remainder is design-level (`01-
     - whether a failed attestation refuses the key or only lowers its custody;
     - how to test it without a card (fake roots through `Verifier.Roots`).
   - **Target:** with issue #13 (`docs/security/needs-hardware.md` item 2, YubiKey PIV, which collects the attestation evidence), before the Phase 6 external security review.
+- **01-20: signer-install.md has no "upgrade the binaries" section.** Plan 01-20 upgraded the homelab signer from the 24e0ada build to the origin/main 69563926 build: it copied and hash-checked the binaries, kept rollback copies, then ran stop, install of the binaries, unit and drop-in, `daemon-reload` and start. The runbook covers a first install (steps 2 and 3) but not an upgrade: rollback copies, migration check, the order of steps. Add an "Upgrade the binaries" section in a later docs plan. No runbook step proved wrong.
