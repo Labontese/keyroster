@@ -306,8 +306,9 @@ var errIssuedBeforePrev = fmt.Errorf("%w", ErrVersionChain)
 // prevPolicy is prev's policy; policy parses; next is version prev+1,
 // carries prev's SHA-256 as prev and is not issued before prev; next
 // carries policy's SHA-256; policy is prevPolicy unchanged or chained to it
-// as the next version; and no policy admin is a root of next or of prev.
-// It returns the parsed policy.
+// as the next version; a root in both prev and next keeps its custody
+// label; and no policy admin is a root of next or of prev. It returns the
+// parsed policy.
 func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *Bundle, policy []byte) (*Policy, error) {
 	if prev == nil {
 		return nil, fmt.Errorf("%w: no previous bundle", ErrVersionChain)
@@ -348,10 +349,41 @@ func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *B
 		return nil, fmt.Errorf("%w: a changed policy must be version %d with the previous policy's SHA-256 as prev, got version %d",
 			ErrVersionChain, pp.Version+1, p.Version)
 	}
+	if err := checkCarriedCustody(prev, next); err != nil {
+		return nil, err
+	}
 	// A root that next retires may still exist, so it must not become an
 	// admin either.
 	if err := CheckAdminsNotRoots(p, next.Root.Keys, prev.Root.Keys); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// checkCarriedCustody refuses a root key that is in both prev's and next's
+// root sets with another custody label in next. The key, and so whatever
+// exposure it had, is unchanged: a new label would only launder, say, a
+// software key into a hardware claim (D-10, D-11). A key moved into new
+// custody is a new root. Keys are compared by their wire encoding; both
+// bundles have been validated.
+func checkCarriedCustody(prev, next *Bundle) error {
+	custody := make(map[string]string, len(prev.Root.Keys))
+	for _, rk := range prev.Root.Keys {
+		pub, err := ParseKey(rk.Key)
+		if err != nil {
+			return fmt.Errorf("%w: previous root key: %w", ErrInvalid, err)
+		}
+		custody[string(pub.Marshal())] = rk.Custody
+	}
+	for _, rk := range next.Root.Keys {
+		pub, err := ParseKey(rk.Key)
+		if err != nil {
+			return fmt.Errorf("%w: root key: %w", ErrInvalid, err)
+		}
+		if c, ok := custody[string(pub.Marshal())]; ok && c != rk.Custody {
+			return fmt.Errorf("%w: root %s is carried over from the previous bundle but changes custody from %s to %s; a key moved into new custody is a new root",
+				ErrCustody, ssh.FingerprintSHA256(pub), c, rk.Custody)
+		}
+	}
+	return nil
 }

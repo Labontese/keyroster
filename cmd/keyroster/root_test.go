@@ -1221,6 +1221,21 @@ func TestRootSignSuccessor(t *testing.T) {
 		mustNotExist(t, filepath.Join(out, "policy.json.sigs"))
 	})
 
+	t.Run("carried_root_custody_change_refused", func(t *testing.T) {
+		// G-WR-01: the new roots file lists the previous root A again, now
+		// labelled piv. Signing with A from an agent would then show no
+		// SOFTWARE ROOT banner. The successor is refused before anything
+		// is written.
+		relabelled := filepath.Join(g.dir, "relabelled-roots.pub")
+		writeTestFile(t, relabelled, []byte(rootKey(t, a)+" custody=piv\n"+rootKey(t, c)+" custody=software\n"))
+		out := filepath.Join(g.dir, "out-relabelled")
+		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", a.fingerprint, "--roots", relabelled)
+		if code != 1 || !strings.Contains(stderr, "root "+a.fingerprint+" is carried over from the previous bundle but changes custody from software to piv") {
+			t.Fatalf("previous root relabelled piv in the new roots: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+
 	for _, tc := range []struct {
 		name string
 		root softwareRoot

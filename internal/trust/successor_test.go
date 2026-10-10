@@ -148,6 +148,11 @@ func TestBuildSuccessor(t *testing.T) {
 		{name: "admin_is_previous_root", policy: r.policyV2(t, func(p *Policy) {
 			p.Admins = append(p.Admins, AdminKey{Name: "bob", Key: keyOf(r.b)})
 		}), want: ErrKeyIsRoot},
+		// G-WR-01: root A, software in the bundle in force, is carried into
+		// the successor relabelled piv. The key and its exposure are
+		// unchanged, so the label would launder it into a hardware claim.
+		{name: "carried_root_changes_custody", roots: []RootKey{{Key: keyOf(r.a), Custody: "piv"}, {Key: keyOf(r.c), Custody: "software"}},
+			want: ErrCustody, wantText: "changes custody from software to piv"},
 	}
 	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,6 +170,9 @@ func TestBuildSuccessor(t *testing.T) {
 				issuedAt = tc.issuedAt
 			}
 			roots := rootKeysOf(r.c, r.d)
+			if tc.roots != nil {
+				roots = tc.roots
+			}
 			b, err := BuildSuccessor(r.prev, prevCanonical, prevPolicy, roots, 1, policy, issuedAt)
 			if !errors.Is(err, tc.want) || b != nil {
 				t.Fatalf("BuildSuccessor: bundle %v, err = %v, want %v", b, err, tc.want)
