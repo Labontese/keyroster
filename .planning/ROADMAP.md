@@ -98,7 +98,44 @@ Plans:
   4. The signer refuses to sign, whatever the server sends, when the WebAuthn assertion is missing, replayed or bound to a different request digest, or when the policy version is not root/quorum-signed.
   5. Server and signer run on Linux and serve a server-rendered web UI embedded in the binary, with a strict CSP and no npm dependencies; when the CA runs on an encrypted software key, every CLI command and every UI page shows a loud evaluation-only warning.
 
-**Plans**: TBD
+**Plans:** 14 plans in 11 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p02/NN-slug`). Plan numbers are identifiers; waves decide order.
+
+Plans:
+**Wave 1**
+- [ ] 02-01-PLAN.md — Phase tracer: RP in the root-signed policy, admin-signed directory installed online, passkey assertion over a LoginIssueRequest verified in the signer, kr2 certificate, real sshd login
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 02-02-PLAN.md — Gating probes (Windows pipe IdentityAgent A2, GNOME gcr A3), then keyroster's in-memory agent on Windows (D-15 option A), go-winio admin dial, cli-windows/cli-macos CI jobs
+- [ ] 02-03-PLAN.md — Signer boundary: SC4 refusal suite with controls, named refusal matrix, concurrency, restart re-verification, GetDirectory, per-type frame caps, fuzz targets
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 02-04-PLAN.md — `keyroster root successor-policy` (adds the RP) and `audit verify` re-proving every login certificate's passkey authorization
+- [ ] 02-05-PLAN.md — KEY-06 software CA keystore, signer Status (custody from the signer), CLI evaluation-only banner; owner wording checkpoint
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 02-06-PLAN.md — keyroster-server (TLS from files with reload, strict headers, banner on every page, trust endpoint), pinned `keyroster init`, systemd units, server runbook
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 02-07-PLAN.md — SSHSIG-authenticated admin API, server DB, invites, `keyroster user add`
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 02-08-PLAN.md — Owner dependency review of go-webauthn, then passkey registration through invites (pending SPKI credentials, fingerprints), differential oracle, dependency bans
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 02-09-PLAN.md — `keyroster user approve` and the verified-base directory edit pipeline (diff, SSHSIG, co-signing, install through the server); first admin enrolls the same way
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 02-10-PLAN.md — Passkey web sign-in, sessions, read-only account page
+- [ ] 02-11-PLAN.md — D-06 checkpoint, then roles, groups, host groups and the shared principals renderer (`keyroster host principals`)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 02-12-PLAN.md — `keyroster login`: fingerprint on CLI and page, loopback with state and PKCE, mint at redemption, certificate checks, agent with lifetime (Linux, macOS, Windows)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 02-13-PLAN.md — Homelab: D-09 hostname checkpoint, bundle v3 with the RP (KEY-07 offline ceremony becomes v4), keyroster-server with tailscale cert, owner enrolled (D-04)
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [ ] 02-14-PLAN.md — Homelab: real logins from Daniel-PC (Windows) and the laptop (Linux) to a stock OpenSSH host, corroborated by audit log and sshd journal; platform record (macOS UNVERIFIED); cli-windows/cli-macos required
 **UI hint**: yes
 **Research**: MEDIUM-HIGH. CLI WebAuthn transport (default: browser loopback with PKCE + state; libfido2 needs cgo), Windows webauthn.dll/CTAP for non-admin users, Windows ssh-agent named pipe, WebAuthn origin rules (hostname + TLS, IP-origin guard).
 
@@ -178,7 +215,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
-| 2. Passkey Login MVP | 0/TBD | Not started | - |
+| 2. Passkey Login MVP | 0/14 | Planned | - |
 | 3. Linux Agent and Revocation | 0/TBD | Not started | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
