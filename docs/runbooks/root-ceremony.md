@@ -264,8 +264,13 @@ apply the same rule (`trust.VerifySuccessor`):
 - the successor is version N+1, and its `prev` is the SHA-256 of the bundle
   in force;
 - a threshold of the **current** roots AND a threshold of the **new** roots
-  must sign both the bundle and the policy. A stolen old root cannot rotate
-  trust alone, and neither can a freshly listed new root;
+  must sign both the bundle and the policy. The two are counted
+  independently, and a root in both sets counts toward both. A freshly
+  listed new root cannot rotate trust without the current roots'
+  threshold. **At threshold 1, though, any single current root can:** one
+  stolen current root and a key the thief creates meet both thresholds.
+  `root sign --prev` prints a warning when the bundle in force has root
+  threshold 1;
 - the CA, ops and log keys are carried over unchanged (CA rotation comes in
   Phase 3);
 - the policy is carried over unchanged, or advanced by exactly one version

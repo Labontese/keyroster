@@ -248,11 +248,14 @@ func pinSet(pins []string) (map[string]bool, error) {
 // bundle, whose canonical bytes are prevCanonical (TUF rule). The trust
 // anchors are prev's roots and the roots next declares: at least
 // prev.Root.Threshold distinct previous roots AND at least next's own
-// threshold of its roots must have signed both next and the policy, so
-// neither a stolen old root nor a freshly listed new root can rotate trust
-// alone. next must be version prev+1, carry prev's SHA-256 as prev, not be
-// issued before prev, and carry the policy's SHA-256. No policy admin may
-// be one of next's or prev's roots (CheckAdminsNotRoots).
+// threshold of its roots must have signed both next and the policy. The
+// two counts are independent, and a root in both sets counts toward both.
+// So a freshly listed new root cannot rotate trust without
+// prev.Root.Threshold current roots, but at threshold 1 any single current
+// root can: alone, if next keeps it as a root, or together with a fresh
+// key it lists in next. next must be version prev+1, carry prev's SHA-256
+// as prev, not be issued before prev, and carry the policy's SHA-256. No
+// policy admin may be one of next's or prev's roots (CheckAdminsNotRoots).
 //
 // prevPolicy is the policy document in force under prev (its SHA-256 must
 // be prev's policy_sha256). The policy chains like the bundle: it is either

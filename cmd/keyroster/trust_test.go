@@ -191,9 +191,11 @@ func TestTrustVerifySuccessor(t *testing.T) {
 		z := newCeremony(t, 1)
 		useKeyring(t, z.rootKeys[0], keyC)
 		typeHashPrefix(t, z.out)
+		setCeremonyNow(t, "2026-10-05T07:00:00Z")
 		if code, _, stderr := z.sign(t, "1", 0); code != 0 {
 			t.Fatalf("foreign genesis root sign: exit %d: %s", code, stderr)
 		}
+		setCeremonyNow(t, "2026-10-06T07:00:00Z")
 		foreignSHA := fileSHA256(t, filepath.Join(z.out, "bundle.json"))
 		recorded := trust.SHA256Hex(genesis)
 		rootSign := func(t *testing.T, out string, prevSHA []string, fp string) (int, string, string) {

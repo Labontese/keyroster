@@ -84,6 +84,16 @@ trust bundles. Keep the file on offline media, never on a networked machine,
 and run the ceremony as described in docs/runbooks/root-ceremony.md.
 `
 
+// threshold1Warning is printed when root sign --prev builds the successor
+// of a bundle whose root threshold is 1 (G-WR-02): the previous roots' and
+// the new roots' thresholds are counted independently, so any single
+// current root, with a new key of its holder's choosing, meets both.
+const threshold1Warning = `WARNING: the bundle in force has root threshold 1. Any one of its roots,
+together with a new key its holder creates, can sign a successor that meets
+both thresholds: one stolen current root can rotate trust. Compare every new
+root fingerprint with the paper before you sign.
+`
+
 // runRootInit creates an age-encrypted software root (D-10): FILE.age
 // (mode 0600, created exclusively) and FILE.age.pub with custody=software.
 func runRootInit(_ context.Context, args []string, stdout, stderr io.Writer) error {
@@ -354,6 +364,9 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	hash := rootceremony.BundleHash(bundle)
 	if prev != nil {
 		_, _ = io.WriteString(stdout, successorHeader(prev, prevBundle, b))
+		if prev.Root.Threshold == 1 {
+			_, _ = io.WriteString(stderr, threshold1Warning)
+		}
 	}
 	_, _ = io.WriteString(stdout, rootceremony.Summary(b, pol))
 	answer := *confirm

@@ -1062,6 +1062,10 @@ func TestRootSignSuccessor(t *testing.T) {
 				t.Fatalf("root sign --prev output lacks %q:\n%s", want, stdout)
 			}
 		}
+		// G-WR-02: the bundle in force has threshold 1.
+		if !strings.Contains(stderr, "WARNING: the bundle in force has root threshold 1") {
+			t.Fatalf("root sign --prev of a threshold-1 bundle lacks the warning:\n%s", stderr)
+		}
 		shown := false
 		for _, line := range strings.Split(stdout, "\n") {
 			shown = shown || (strings.Contains(line, a.fingerprint) && strings.Contains(line, "custody=software"))
@@ -1364,4 +1368,42 @@ func TestRootSignSuccessor(t *testing.T) {
 			t.Fatalf("bundle.json changed after a refused rerun (%v)", err)
 		}
 	})
+}
+
+// TestRootSignSuccessorThreshold1Warning (G-WR-02): root sign --prev warns
+// that one current root can rotate trust when the bundle in force has root
+// threshold 1, and only then. The roots are held in an in-memory agent; a
+// wrong confirmation stops each run after the warning, before any
+// signature.
+func TestRootSignSuccessorThreshold1Warning(t *testing.T) {
+	const warning = "WARNING: the bundle in force has root threshold 1"
+	keyC := newEd25519Key(t)
+	for _, tc := range []struct {
+		threshold string
+		warns     bool
+	}{{"1", true}, {"2", false}} {
+		t.Run("threshold_"+tc.threshold, func(t *testing.T) {
+			g := newCeremony(t, 2)
+			useKeyring(t, append(append([]ed25519.PrivateKey{}, g.rootKeys...), keyC)...)
+			setCeremonyNow(t, "2026-10-05T07:00:00Z")
+			for i := range g.rootKeys {
+				typeHashPrefix(t, g.out)
+				if code, _, stderr := g.sign(t, tc.threshold, i); code != 0 {
+					t.Fatalf("genesis root sign by root %d: exit %d: %s", i, code, stderr)
+				}
+			}
+			setCeremonyNow(t, "2026-10-06T07:00:00Z")
+			newRoots := filepath.Join(g.dir, "new-roots.pub")
+			writeTestFile(t, newRoots, []byte(rootLine(t, keyC)))
+			code, _, stderr := run(t, "root", "sign", "--prev", g.out, "--prev-sha256", fileSHA256(t, filepath.Join(g.out, "bundle.json")),
+				"--roots", newRoots, "--threshold", "1", "--policy", filepath.Join(g.out, "policy.json"),
+				"--out-dir", filepath.Join(g.dir, "succ"), "--agent-key", keyFingerprint(t, keyC), "--confirm", "00000000")
+			if code != 1 || !strings.Contains(stderr, "nothing was signed") {
+				t.Fatalf("root sign --prev with a wrong confirmation: exit %d: %s", code, stderr)
+			}
+			if strings.Contains(stderr, warning) != tc.warns {
+				t.Fatalf("previous threshold %s: warning shown = %v, want %v:\n%s", tc.threshold, !tc.warns, tc.warns, stderr)
+			}
+		})
+	}
 }
