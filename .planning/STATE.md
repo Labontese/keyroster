@@ -1,17 +1,17 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 01
-current_phase_name: trust-core
+current_phase: 02
+current_phase_name: passkey-login-mvp
 status: verifying
-stopped_at: Phase 2 context gathered
-last_updated: "2026-10-10T18:49:18.752Z"
+stopped_at: Phase 2 planned
+last_updated: "2026-10-10T20:57:14.078Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 01 execution started
-state_head: 9fee1a6a0ff80e97e3def13d2f15847ea8ecaf78
+state_head: 9af307673c2e6e68249c47382bd6265903c1f64a
 progress:
   total_phases: 6
   completed_phases: 0
-  total_plans: 21
+  total_plans: 35
   completed_plans: 21
   percent: 0
 ---
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 ## Current Position
 
-Phase: 01 (trust-core) — READY TO EXECUTE
-Plan: 16 of 16
-Status: Re-verified 2026-10-10: human_needed (3 owner overrides). Remaining: real-hardware run (issue #13); KEY-07 stays open until the owner's real offline ceremony (a v3 rotation)
+Phase: 02 (passkey-login-mvp) — READY TO EXECUTE
+Plan: 0 of 14
+Status: Phase 2 planned 2026-10-10 (14 plans, 11 waves, plan-checker passed). Phase 1 stays human_needed with 3 owner overrides (real-hardware run, issue #13; KEY-07 open until the offline v3 ceremony)
 Last activity: 2026-10-06 - Completed quick task 261006-ixz: Fix flaky signer freshness-boundary tests with a deterministic test clock
 
 Progress: [░░░░░░░░░░] 0%
