@@ -331,6 +331,33 @@ func TestPKCS11CustodyDeclared(t *testing.T) {
 	requireNone(t, rs, "custody")
 }
 
+// TestPIVCustodyReported (F-WR-04, D-WR-04): custody piv is what the card
+// reported at ca-init, slot attestation is not checked, and doctor does
+// not read the card, so it says so in an INFO line and never prints the OK
+// hardware-custody line for it, alone or mixed with verified custody.
+func TestPIVCustodyReported(t *testing.T) {
+	f := healthy(t)
+	f.CAKeys = hardwareKeys("piv", ssh.KeyAlgoED25519)
+	f.TPMManufacturer, f.TPMCustody = "", ""
+	rs := Run(f)
+	r := requireOne(t, rs, INFO, CodePIVCustodyReported)
+	if !strings.Contains(r.Message, "user, host, machine, ops, log") || !strings.Contains(r.Message, "not checked") ||
+		!strings.Contains(r.Message, "did not read the card") {
+		t.Fatalf("piv_custody_reported must name the keys and say the custody is not checked: %q", r.Message)
+	}
+	requireNone(t, rs, "custody")
+	if ExitCode(rs) != 0 {
+		t.Fatalf("card-reported custody alone must not fail doctor: %v", rs)
+	}
+
+	// Mixed with keys in a confirmed physical TPM: still no OK line.
+	f = healthy(t)
+	f.CAKeys[0].Custody = "piv"
+	rs = Run(f)
+	requireOne(t, rs, INFO, CodePIVCustodyReported)
+	requireNone(t, rs, "custody")
+}
+
 func TestCustodyMismatch(t *testing.T) {
 	f := healthy(t)
 	// Recorded as a physical TPM, but the TPM now reports a virtual one.

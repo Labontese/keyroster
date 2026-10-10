@@ -24,8 +24,10 @@
 // (SOFTWARE ROOT), keys in a virtual TPM, plain keys in ssh-agent, a TPM
 // that no longer matches the recorded custody, or TPM custody that could
 // not be confirmed. Custody pkcs11-agent is the operator's declaration,
-// which doctor cannot check, and gets an INFO line saying so. doctor never
-// reports a vTPM-held, agent-held, declared pkcs11-agent or software key as
+// and custody piv what the card reported at ca-init (slot attestation is
+// not checked, and doctor does not read the card); doctor checks neither
+// and gives each an INFO line saying so. doctor never reports a vTPM-held,
+// agent-held, declared pkcs11-agent, card-reported piv or software key as
 // hardware custody.
 package doctor
 
@@ -85,6 +87,7 @@ const (
 	CodeCustodyMismatch       = "custody_mismatch"
 	CodeTPMUnavailable        = "tpm_unavailable"
 	CodePKCS11CustodyDeclared = "pkcs11_custody_declared"
+	CodePIVCustodyReported    = "piv_custody_reported"
 )
 
 // Codes of OK results. Each names the check that passed.
@@ -175,12 +178,13 @@ type Facts struct {
 }
 
 // hardwareCustody are the online custodies whose keys cannot be copied off
-// a physical device and that the backend itself establishes: tpm (also
-// cross-checked against the live TPM below) and piv (the card reports the
-// key as generated on it). vtpm, agent and software are not among them, and
-// neither is pkcs11-agent: that one is the operator's declaration, which
-// nothing checks (custodyResults reports it as pkcs11_custody_declared).
-var hardwareCustody = map[string]bool{"tpm": true, "piv": true}
+// a physical device and that doctor confirms: tpm, cross-checked against
+// the live TPM below. vtpm, agent and software are not among them. Nor are
+// pkcs11-agent, the operator's declaration (pkcs11_custody_declared), and
+// piv, which the card reported at ca-init without slot attestation and
+// which doctor does not read (piv_custody_reported, D-WR-04): both are
+// claims nothing here checks, so they never yield the OK line.
+var hardwareCustody = map[string]bool{"tpm": true}
 
 // Run checks f and returns the results in a fixed order.
 func Run(f Facts) []Result {
@@ -303,6 +307,11 @@ func custodyResults(f Facts) []Result {
 			declared = true
 			rs = append(rs, Result{Level: INFO, Code: CodePKCS11CustodyDeclared, Message: fmt.Sprintf(
 				"keys %s are declared custody pkcs11-agent (ca-init --backend-opt custody=pkcs11-agent); doctor cannot verify that these agent keys live in a hardware token, since a SoftHSM token or a plain ssh-add key in the same agent looks the same (docs/security/custody.md)", roles)})
+		case "piv":
+			// Not weak, but not confirmed either: no OK hardware line.
+			declared = true
+			rs = append(rs, Result{Level: INFO, Code: CodePIVCustodyReported, Message: fmt.Sprintf(
+				"keys %s are custody piv as the card reported at ca-init; slot attestation is not checked and doctor did not read the card, so a virtual smart card holding software keys under a YubiKey reader name would look the same (docs/backends/piv.md)", roles)})
 		case "vtpm":
 			weak = true
 			rs = append(rs, Result{Level: WARN, Code: CodeVTPMCustody, Message: fmt.Sprintf(
