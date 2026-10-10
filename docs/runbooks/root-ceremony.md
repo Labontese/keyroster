@@ -274,7 +274,12 @@ apply the same rule (`trust.VerifySuccessor`):
 - the CA, ops and log keys are carried over unchanged (CA rotation comes in
   Phase 3);
 - the policy is carried over unchanged, or advanced by exactly one version
-  chained to the policy in force.
+  chained to the policy in force;
+- no policy admin is a root, new or retired. `root sign --prev` and
+  `trust verify --prev` hold only the bundle in force, so they check the
+  new roots and the current ones. `install-bundle`, `serve`, `doctor` and
+  `audit verify` hold every earlier bundle and also refuse a root that an
+  earlier rotation retired. Never list a retired root key as an admin.
 
 ### What you need
 

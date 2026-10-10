@@ -187,7 +187,8 @@ func newLogWriter(ctx context.Context, db *signerdb.DB, logKey keystore.CAKey, c
 // installed record must be the one the log's last bundle_install entry
 // records (none for a genesis install). In both
 // cases the bundle's CA, ops and log keys, algorithms and custody must
-// equal the keys ca-init chose, none of them may be a root key, and the
+// equal the keys ca-init chose, none of them may be a root key, no policy
+// admin may be a root of this or of any bundle the log records, and the
 // log origin must be the log key's. The bundle, the policy and their
 // signatures are stored with a bundle_install log entry carrying all four
 // documents, in one transaction; on any refusal nothing is written.
@@ -222,7 +223,7 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	if err == nil || errors.Is(err, signerdb.ErrNoBundle) {
 		// A successor is verified against the installed record, so that
 		// record must be the one the verified log carries.
-		if cerr := checkBundleLogged(latest, lw.loadedInstall); cerr != nil {
+		if cerr := checkBundleLogged(latest, lw.loaded.last); cerr != nil {
 			return nil, cerr
 		}
 	}
@@ -251,6 +252,11 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 		return nil, err
 	}
 	if err := checkPolicyAdmins(b, p, caKeys); err != nil {
+		return nil, err
+	}
+	// The verifiers above saw the roots of b and of the installed bundle
+	// only; no root of an earlier bundle may be an admin either.
+	if err := lw.loaded.checkAdmins(p); err != nil {
 		return nil, err
 	}
 	if b.Log.Origin != tlog.Origin(logKey.PublicKey()) {

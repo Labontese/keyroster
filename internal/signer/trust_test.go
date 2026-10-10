@@ -642,10 +642,23 @@ func TestStartRefusesRootAsAdmin(t *testing.T) {
 	}
 	pol := fx.Policy()
 	pol.Admins[0].Key = trust.FormatKey(fx.Root.PublicKey())
-	bd, bs, pd, ps := SignDocs(t, fx.GenesisBundle(t, cas, pol), pol, fx.Root)
+	writeUnverifiedBundle(t, db, be, 1, docs4(t, fx.GenesisBundle(t, cas, pol), pol, fx.Root))
 
-	// Write the rows and the log entry InstallBundle writes, without its
-	// verification.
+	if _, err := New(Config{Backend: be, DB: db, AllowUIDs: []uint32{1}}); !errors.Is(err, trust.ErrKeyIsRoot) {
+		t.Fatalf("New with a root as policy admin = %v, want trust.ErrKeyIsRoot", err)
+	}
+	// doctor runs the same check (B-CR-01 via C-WR-02).
+	if err := CheckTrust(ctx, db); !errors.Is(err, trust.ErrKeyIsRoot) {
+		t.Fatalf("CheckTrust with a root as policy admin = %v, want trust.ErrKeyIsRoot", err)
+	}
+}
+
+// writeUnverifiedBundle writes the trust_bundle row and the bundle_install
+// log entry InstallBundle writes for docs, without its verification, as
+// an install-bundle without a later check could have written them.
+func writeUnverifiedBundle(t *testing.T, db *signerdb.DB, be keystore.Backend, version uint64, docs [4][]byte) {
+	t.Helper()
+	ctx := context.Background()
 	caKeys, err := db.CAKeys(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -658,13 +671,15 @@ func TestStartRefusesRootAsAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enc, err := (&tlog.BundleInstallBody{BundleVersion: 1, Bundle: bd, BundleSigs: bs, Policy: pd, PolicySigs: ps}).Encode()
+	enc, err := (&tlog.BundleInstallBody{BundleVersion: version, Bundle: docs[0], BundleSigs: docs[1], Policy: docs[2], PolicySigs: docs[3]}).Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
 	if err := lw.logTx(ctx, func(tx *sql.Tx) error {
-		if err := db.InsertBundle(tx, signerdb.StoredBundle{Version: 1, Bundle: bd, BundleSigs: bs, Policy: pd, PolicySigs: ps, InstalledAt: now}); err != nil {
+		if err := db.InsertBundle(tx, signerdb.StoredBundle{
+			Version: version, Bundle: docs[0], BundleSigs: docs[1], Policy: docs[2], PolicySigs: docs[3], InstalledAt: now,
+		}); err != nil {
 			return err
 		}
 		_, err := lw.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(now), Kind: tlog.KindBundleInstall, Body: enc})
@@ -672,14 +687,62 @@ func TestStartRefusesRootAsAdmin(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
 
-	if _, err := New(Config{Backend: be, DB: db, AllowUIDs: []uint32{1}}); !errors.Is(err, trust.ErrKeyIsRoot) {
-		t.Fatalf("New with a root as policy admin = %v, want trust.ErrKeyIsRoot", err)
+// TestRetiredRootNeverAdmin (F-WR-02, KEY-07): a root stays a root after a
+// rotation retires it. Root A signs genesis v1; v2 rotates to root B; v3,
+// signed by B, lists A as an admin. Each bundle's verification sees only
+// its predecessor (v2: root B), so the signer checks the policy against
+// the roots of every bundle the log records: install-bundle, serve and
+// doctor refuse it.
+func TestRetiredRootNeverAdmin(t *testing.T) {
+	ctx := context.Background()
+	// chain installs v1 and v2 and returns v3, whose policy adds admin.
+	chain := func(t *testing.T, admin func(e *installEnv) ssh.PublicKey) (*installEnv, [4][]byte) {
+		t.Helper()
+		e := newInstallEnv(t, NewFixture(t, 1, 1))
+		e.installGenesis(t)
+		_, rootB := NewEd25519Key(t)
+		v2 := successor(t, e.genesis(t), e.fx.Policy())
+		v2.Root.Keys = []trust.RootKey{{Key: trust.FormatKey(rootB.PublicKey()), Custody: "software"}}
+		if _, err := e.install(nil, 0, docs4(t, v2, e.fx.Policy(), e.fx.Root, rootB)); err != nil {
+			t.Fatalf("install v2: %v", err)
+		}
+		pol := policyV2(t, e.fx)
+		pol.Admins = append(pol.Admins, trust.AdminKey{Name: "extra", Key: trust.FormatKey(admin(e))})
+		return e, docs4(t, successor(t, e.genesis(t), pol), pol, rootB)
 	}
-	// doctor runs the same check (B-CR-01 via C-WR-02).
-	if err := CheckTrust(ctx, db); !errors.Is(err, trust.ErrKeyIsRoot) {
-		t.Fatalf("CheckTrust with a root as policy admin = %v, want trust.ErrKeyIsRoot", err)
-	}
+	retiredRoot := func(e *installEnv) ssh.PublicKey { return e.fx.Root.PublicKey() }
+
+	t.Run("install_refused", func(t *testing.T) {
+		e, v3 := chain(t, retiredRoot)
+		leaves := leafCount(t, e.db)
+		if b, err := e.install(nil, 0, v3); !errors.Is(err, trust.ErrKeyIsRoot) {
+			t.Fatalf("InstallBundle v3 with v1's root as admin = %v, %v; want trust.ErrKeyIsRoot", b, err)
+		}
+		if n := leafCount(t, e.db); n != leaves {
+			t.Fatalf("%d leaves after the refusal, want %d", n, leaves)
+		}
+	})
+	t.Run("control_fresh_admin_installed", func(t *testing.T) {
+		e, v3 := chain(t, func(*installEnv) ssh.PublicKey {
+			_, k := NewEd25519Key(t)
+			return k.PublicKey()
+		})
+		if b, err := e.install(nil, 0, v3); err != nil || b.Version != 3 {
+			t.Fatalf("InstallBundle v3 with a fresh admin = %v, %v", b, err)
+		}
+	})
+	t.Run("start_and_doctor_refuse", func(t *testing.T) {
+		e, v3 := chain(t, retiredRoot)
+		writeUnverifiedBundle(t, e.db, e.be, 3, v3)
+		if _, err := New(Config{Backend: e.be, DB: e.db, AllowUIDs: []uint32{1}}); !errors.Is(err, trust.ErrKeyIsRoot) {
+			t.Fatalf("New with v1's root as a v3 admin = %v, want trust.ErrKeyIsRoot", err)
+		}
+		if err := CheckTrust(ctx, e.db); !errors.Is(err, trust.ErrKeyIsRoot) {
+			t.Fatalf("CheckTrust with v1's root as a v3 admin = %v, want trust.ErrKeyIsRoot", err)
+		}
+	})
 }
 
 // TestProfiles (CA-04, CA-05): every certificate follows its role's policy

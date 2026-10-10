@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -1017,6 +1018,51 @@ func TestVerifyAnchoring(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVerifyRefusesRetiredRootAsAdmin (F-WR-02, KEY-07): a root stays a
+// root after a rotation retires it. Root A signs genesis v1, v2 rotates to
+// root B, and v3, signed by B, lists A as an admin. VerifySuccessor sees
+// only v3's predecessor (root B), so Verify checks every policy against
+// the roots of every bundle installed before it.
+func TestVerifyRefusesRetiredRootAsAdmin(t *testing.T) {
+	onlyRoot := func(s ssh.Signer) trust.RootSet {
+		return trust.RootSet{Keys: []trust.RootKey{{Key: trust.FormatKey(s.PublicKey()), Custody: "software"}}, Threshold: 1}
+	}
+	chain := func(t *testing.T, admin func(a ssh.Signer) ssh.PublicKey) (*fixture, ssh.Signer) {
+		f := newBareFixture(t, "ed25519")
+		a, b := f.root, newSigner(t, "ed25519")
+		g := f.signDocs(f.genesis(), f.policy(), a)
+		f.addBundle(g)
+		f.addIssue()
+		v2 := f.signDocs(f.successor(g, func(bd *trust.Bundle) { bd.Root = onlyRoot(b) }), f.policy(), a, b)
+		f.addBundle(v2)
+		p1, err := f.policy().Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pol := f.policy()
+		pol.Version, pol.Prev = 2, trust.SHA256Hex(p1)
+		pol.Admins = append(pol.Admins, trust.AdminKey{Name: "extra", Key: trust.FormatKey(admin(a))})
+		v3 := f.successor(v2, func(bd *trust.Bundle) { bd.Root = onlyRoot(b) })
+		v3.Version = 3
+		f.addBundle(f.signDocs(v3, pol, b))
+		return f, b
+	}
+	t.Run("retired_root_refused", func(t *testing.T) {
+		f, b := chain(t, func(a ssh.Signer) ssh.PublicKey { return a.PublicKey() })
+		_, err := Verify(strings.NewReader(join(f.lines())), Options{Pins: []string{ssh.FingerprintSHA256(b.PublicKey())}, Threshold: 1})
+		if !errors.Is(err, trust.ErrKeyIsRoot) || !strings.Contains(err.Error(), "entry 3") {
+			t.Fatalf("Verify = %v, want trust.ErrKeyIsRoot at entry 3 (the v3 bundle_install)", err)
+		}
+	})
+	t.Run("control_fresh_admin_ok", func(t *testing.T) {
+		f, b := chain(t, func(ssh.Signer) ssh.PublicKey { return newSigner(t, "ed25519").PublicKey() })
+		rep, err := Verify(strings.NewReader(join(f.lines())), Options{Pins: []string{ssh.FingerprintSHA256(b.PublicKey())}, Threshold: 1})
+		if err != nil || rep.BundleVersion != 3 || rep.PolicyVersion != 2 {
+			t.Fatalf("Verify = %+v, %v; want bundle v3, policy v2", rep, err)
+		}
+	})
 }
 
 // TestVerifyAnchorsOnLaterBundle (VIS-03, KEY-07): the pins may name the

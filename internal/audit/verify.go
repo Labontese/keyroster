@@ -80,13 +80,18 @@ type anchor struct {
 	// the last accepted bundle did not match them.
 	anchorVersion uint64
 	lastMismatch  error
+	// roots are the root sets of every accepted bundle, in log order. A
+	// retired root may still exist, so no later policy may name one as an
+	// admin (KEY-07).
+	roots [][]trust.RootKey
 }
 
 // install verifies one bundle_install entry and makes its bundle the one in
 // force. The first must be a genesis bundle (version 1, all-zero prev)
 // signed by its own root threshold; every later one must be a valid
 // successor of the bundle in force (TUF rule), with its policy chained to
-// the policy in force. In Phase 1 every bundle must name the same log key.
+// the policy in force, and its policy must name no root of any earlier
+// bundle as an admin. In Phase 1 every bundle must name the same log key.
 // The first accepted bundle whose root set and threshold are exactly opts'
 // pins becomes the anchor (trust.MatchPins); Verify fails at the end of the
 // log if there is none.
@@ -110,6 +115,11 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 	if body.BundleVersion != b.Version {
 		return fmt.Errorf("bundle_install records bundle version %d, but its bundle is version %d", body.BundleVersion, b.Version)
 	}
+	// VerifySuccessor checks the policy against next's and prev's roots
+	// only; a root retired earlier must not become an admin either.
+	if err := trust.CheckAdminsNotRoots(p, a.roots...); err != nil {
+		return fmt.Errorf("trust bundle v%d: a root of an earlier trust bundle stays a root: %w", b.Version, err)
+	}
 	logKey, err := trust.ParseKey(b.Log.Key)
 	if err != nil {
 		return fmt.Errorf("bundle_install: log key: %w", err)
@@ -130,6 +140,7 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 		active[ca.Role] = pub
 	}
 	a.bundle, a.canonical, a.policy, a.policyDoc, a.logKey, a.activeCA = b, body.Bundle, p, body.Policy, logKey, active
+	a.roots = append(a.roots, b.Root.Keys)
 	if a.anchorVersion == 0 {
 		// b is the bundle the verifier returned, so its signatures by its
 		// own root threshold were checked; MatchPins adds that this root
@@ -257,8 +268,9 @@ func certTypeName(t uint32) string {
 //     previous roots' threshold and its own, whose prev is the SHA-256 of
 //     the bundle in force and whose policy is either unchanged or the next
 //     policy version chained to the one in force (trust.VerifySuccessor);
-//     each records its bundle's version, and all of them name the same log
-//     key (Phase 1)
+//     no policy names a root of that bundle or of any earlier one as an
+//     admin; each records its bundle's version, and all of them name the
+//     same log key (Phase 1)
 //   - the anchor: some bundle in the log has exactly the pinned root set at
 //     exactly opts.Threshold (trust.MatchPins), and the first such bundle
 //     is reported as Report.AnchorVersion. The pinned roots' signatures

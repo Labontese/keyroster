@@ -256,6 +256,11 @@ func pinSet(pins []string) (map[string]bool, error) {
 // key it lists in next. next must be version prev+1, carry prev's SHA-256
 // as prev, not be issued before prev, and carry the policy's SHA-256. No
 // policy admin may be one of next's or prev's roots (CheckAdminsNotRoots).
+// A root retired before prev may still exist too, but VerifySuccessor sees
+// only prev: a caller that holds the earlier bundles (install-bundle,
+// serve and doctor through the signer's log, audit verify) also checks the
+// policy against every one of their root sets. root sign --prev and trust
+// verify --prev hold only the bundle in force and cannot.
 //
 // prevPolicy is the policy document in force under prev (its SHA-256 must
 // be prev's policy_sha256). The policy chains like the bundle: it is either

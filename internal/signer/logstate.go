@@ -12,6 +12,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/tlog"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // errLogMismatch means the stored leaves do not reproduce the latest signed
@@ -32,10 +33,11 @@ type logState struct {
 
 	tree       *tlog.Log // committed state
 	lastMicros uint64    // timestamp of the last committed leaf
-	// loadedInstall is the body of the last bundle_install leaf of the log
-	// as last loaded from the database (nil when it had none). New and
-	// InstallBundle compare it with the stored trust bundle record.
-	loadedInstall []byte
+	// loaded is what the bundle_install leaves of the log record, as last
+	// loaded from the database. New and InstallBundle compare its last
+	// body with the stored trust bundle record and check the policy
+	// against its root sets.
+	loaded loggedInstalls
 
 	// pending is the state after the appends of the open transaction. It
 	// replaces tree only after COMMIT succeeded.
@@ -67,20 +69,54 @@ func (s *Signer) initLog(ctx context.Context) error {
 // loadLog replaces the in-memory log with the one rebuilt from the
 // database.
 func (s *Signer) loadLog(ctx context.Context) error {
-	tree, last, install, err := s.rebuildLog(ctx)
+	tree, last, installs, err := s.rebuildLog(ctx)
 	if err != nil {
 		return err
 	}
-	s.tree, s.lastMicros, s.loadedInstall, s.broken = tree, last, install, nil
+	s.tree, s.lastMicros, s.loaded, s.broken = tree, last, installs, nil
 	return nil
 }
 
 // rebuildLog recomputes the tree from the stored leaf bytes (not only the
 // stored hashes) and requires the latest checkpoint to verify with the log
-// key and to match the recomputed size and root. It also returns the body
-// of the last bundle_install leaf, or nil.
-func (s *Signer) rebuildLog(ctx context.Context) (*tlog.Log, uint64, []byte, error) {
+// key and to match the recomputed size and root. It also returns what the
+// bundle_install leaves record.
+func (s *Signer) rebuildLog(ctx context.Context) (*tlog.Log, uint64, loggedInstalls, error) {
 	return rebuildLogFrom(ctx, s.db, s.cpVerifier)
+}
+
+// loggedInstalls is what the bundle_install leaves of a log record: the
+// body of the last one (nil when there is none) and the root set of every
+// logged trust bundle, in log order.
+type loggedInstalls struct {
+	last  []byte
+	roots [][]trust.RootKey
+}
+
+// add records the bundle_install leaf idx with body.
+func (li *loggedInstalls) add(idx uint64, body []byte) error {
+	b, err := tlog.DecodeBundleInstallBody(body)
+	if err != nil {
+		return fmt.Errorf("%w: leaf %d: bundle_install body does not decode", errLogMismatch, idx)
+	}
+	bundle, err := trust.ParseBundle(b.Bundle)
+	if err != nil {
+		return fmt.Errorf("%w: leaf %d: the logged trust bundle does not parse: %w", errLogMismatch, idx, err)
+	}
+	li.last = body
+	li.roots = append(li.roots, bundle.Root.Keys)
+	return nil
+}
+
+// checkAdmins refuses a policy that names a root of any logged trust
+// bundle as an admin. trust.VerifySuccessor checks only the roots of the
+// bundle it verifies and of its predecessor, but a root retired earlier
+// may still exist, and a root never authorizes issuance (KEY-07).
+func (li *loggedInstalls) checkAdmins(p *trust.Policy) error {
+	if err := trust.CheckAdminsNotRoots(p, li.roots...); err != nil {
+		return fmt.Errorf("%w (a root of a trust bundle the log records, retired or not)", err)
+	}
+	return nil
 }
 
 // checkBundleLogged requires the stored trust bundle record (nil when none
@@ -132,10 +168,11 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 // trust bundle record must be consistent (version, policy hash), list
 // exactly the recorded ca-init keys with no root among them (so the bundle's
 // log key is the recorded one), name no online key or root as a policy
-// admin, carry a usable profile for every CA role and the recorded log
-// key's origin, and be byte-identical to the body of the last
-// bundle_install entry of the log. With no bundle installed, the log must
-// record none. keyroster-signer doctor uses it; an error wraps the reason.
+// admin, nor a root of any trust bundle the log records, carry a usable
+// profile for every CA role and the recorded log key's origin, and be
+// byte-identical to the body of the last bundle_install entry of the log.
+// With no bundle installed, the log must record none. keyroster-signer
+// doctor uses it; an error wraps the reason.
 //
 // It cannot catch a database rewritten consistently with keys and roots of
 // the rewriter's choosing: it has neither the backend's keys nor the
@@ -144,14 +181,14 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 // backend, whoever can use the agent socket can); the check that holds is
 // keyroster audit verify --pin.
 func CheckTrust(ctx context.Context, db *signerdb.DB) error {
-	var install []byte
+	var installs loggedInstalls
 	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, _ []byte) error {
 		l, err := tlog.DecodeLeaf(leaf)
 		if err != nil {
 			return fmt.Errorf("%w: leaf %d does not decode", errLogMismatch, idx)
 		}
 		if l.Kind == tlog.KindBundleInstall {
-			install = l.Body
+			return installs.add(idx, l.Body)
 		}
 		return nil
 	})
@@ -162,11 +199,15 @@ func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 		return ErrNotInitialised
 	}
 	if snap.Bundle != nil {
-		if _, err := checkStoredTrust(snap.CAKeys, snap.Bundle); err != nil {
+		ts, err := checkStoredTrust(snap.CAKeys, snap.Bundle)
+		if err != nil {
+			return err
+		}
+		if err := installs.checkAdmins(ts.policy); err != nil {
 			return err
 		}
 	}
-	return checkBundleLogged(snap.Bundle, install)
+	return checkBundleLogged(snap.Bundle, installs.last)
 }
 
 // rebuildLogFrom is rebuildLog over db with the checkpoint verifier v. It
@@ -175,12 +216,12 @@ func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 // (signerdb.ReadLogWithHashes), so a leaf the signer appends meanwhile
 // cannot make a healthy log look inconsistent (doctor runs against a live
 // signer).
-func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlog.Log, uint64, []byte, error) {
+func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlog.Log, uint64, loggedInstalls, error) {
 	var (
-		last    uint64
-		hashes  [][]byte
-		install []byte
-		issued  issuedSummary
+		last     uint64
+		hashes   [][]byte
+		installs loggedInstalls
+		issued   issuedSummary
 	)
 	// ReadLogWithHashes yields idx = 0, 1, 2, ... without gaps.
 	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
@@ -199,7 +240,9 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		}
 		switch l.Kind {
 		case tlog.KindBundleInstall:
-			install = l.Body
+			if err := installs.add(idx, l.Body); err != nil {
+				return err
+			}
 		case tlog.KindIssue:
 			b, err := tlog.DecodeIssueBody(l.Body)
 			if err != nil {
@@ -214,38 +257,38 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	})
 	if err != nil {
 		if errors.Is(err, errLogMismatch) {
-			return nil, 0, nil, err
+			return nil, 0, loggedInstalls{}, err
 		}
-		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
+		return nil, 0, loggedInstalls{}, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
 	tree, err := tlog.FromHashes(hashes)
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
+		return nil, 0, loggedInstalls{}, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
 	if snap.Checkpoint == nil {
 		if tree.Size() != 0 {
-			return nil, 0, nil, fmt.Errorf("%w: %d leaves but no checkpoint", errLogMismatch, tree.Size())
+			return nil, 0, loggedInstalls{}, fmt.Errorf("%w: %d leaves but no checkpoint", errLogMismatch, tree.Size())
 		}
 		if err := checkLogCovers(snap, 0, issued); err != nil {
-			return nil, 0, nil, err
+			return nil, 0, loggedInstalls{}, err
 		}
-		return tree, 0, nil, nil
+		return tree, 0, installs, nil
 	}
 	root, err := tree.Root()
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("%w: %w", errLogMismatch, err)
+		return nil, 0, loggedInstalls{}, fmt.Errorf("%w: %w", errLogMismatch, err)
 	}
 	cp, err := tlog.OpenCheckpoint(snap.Checkpoint, v)
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("%w: latest checkpoint: %w", errLogMismatch, err)
+		return nil, 0, loggedInstalls{}, fmt.Errorf("%w: latest checkpoint: %w", errLogMismatch, err)
 	}
 	if cp.Size != snap.Size || cp.Size != tree.Size() || !bytes.Equal(cp.Root, root) {
-		return nil, 0, nil, fmt.Errorf("%w: checkpoint size %d does not match the %d stored leaves and their root", errLogMismatch, cp.Size, tree.Size())
+		return nil, 0, loggedInstalls{}, fmt.Errorf("%w: checkpoint size %d does not match the %d stored leaves and their root", errLogMismatch, cp.Size, tree.Size())
 	}
 	if err := checkLogCovers(snap, tree.Size(), issued); err != nil {
-		return nil, 0, nil, err
+		return nil, 0, loggedInstalls{}, err
 	}
-	return tree, last, install, nil
+	return tree, last, installs, nil
 }
 
 // issuedSummary is what the issue leaves of a log record about issuance.
