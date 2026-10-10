@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -167,8 +169,10 @@ func verifySelfSignedGenesis(body *tlog.BundleInstallBody) (*trust.Bundle, *trus
 // be a host certificate exactly for the host role, carry the policy
 // version in force in its key ID and in the leaf, and stay within the
 // role's certificate profile of that policy (cert.CheckIssued: validity
-// cap, extensions, critical options, principals, subject key).
-func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyID) error {
+// cap, extensions, critical options, principals, subject key), with a
+// validity that starts where cert.Build puts it for an issuance between
+// the serial and leafMicros (both microsecond times; see Verify).
+func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyID, leafMicros uint64) error {
 	role := kid.CA
 	if a.bundle == nil {
 		return errors.New("issue entry before the first bundle_install: no root-signed CA key is in force")
@@ -198,10 +202,34 @@ func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyI
 	if err != nil {
 		return fmt.Errorf("policy v%d: %w", a.policy.Version, err)
 	}
-	if err := cert.CheckIssued(c, profile); err != nil {
+	from, to, err := issuanceRange(b.Serial, leafMicros)
+	if err != nil {
+		return err
+	}
+	if err := cert.CheckIssued(c, profile, from, to); err != nil {
 		return fmt.Errorf("certificate outside the %s profile of policy v%d: %w", role, a.policy.Version, err)
 	}
 	return nil
+}
+
+// issuanceRange returns the times between which the signer issued the
+// certificate of an issue leaf with serial and leafMicros. serial.Next
+// allocates the serial from the clock in microseconds and returns only
+// once the clock has reached it, the signer refuses to issue when its
+// next clock reading (the issuance time) is below the serial, and
+// appendLocked records the issuance time as the leaf time, raised to the
+// previous leaf's if the clock went back. So serial <= issuance time <=
+// leaf time, and a serial after the leaf time is one the signer could not
+// have written.
+func issuanceRange(serial, leafMicros uint64) (time.Time, time.Time, error) {
+	if serial > math.MaxInt64 || leafMicros > math.MaxInt64 {
+		return time.Time{}, time.Time{}, fmt.Errorf("serial %d or leaf time %d out of range", serial, leafMicros)
+	}
+	if serial > leafMicros {
+		return time.Time{}, time.Time{}, fmt.Errorf("serial %d is after the leaf time %d: the signer allocates serials from its clock in microseconds, never after the issuance time the leaf records",
+			serial, leafMicros)
+	}
+	return time.UnixMicro(int64(serial)), time.UnixMicro(int64(leafMicros)), nil //nolint:gosec // G115: both <= math.MaxInt64, checked above
 }
 
 func certTypeName(t uint32) string {
@@ -249,7 +277,11 @@ func certTypeName(t uint32) string {
 //     policy version in force, whose serial equals the leaf's and the key
 //     ID's, which stays within the role's profile of the policy in force
 //     (validity cap, extensions, critical options, principals, subject
-//     key; cert.CheckIssued), and serials strictly increase across the log
+//     key; cert.CheckIssued), whose serial is not after the leaf time and
+//     whose ValidAfter is what cert.Build sets for an issuance between the
+//     two (both microsecond times: the serial is allocated from the
+//     signer's clock), so a postdated or backdated certificate is refused,
+//     and serials strictly increase across the log
 //   - the RFC 6962 root recomputed from the leaf bytes alone equals the
 //     root of the checkpoint, the checkpoint covers exactly n entries, and
 //     it is signed by the log key of the root-signed bundle
@@ -340,7 +372,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
-			if err := trustState.checkIssue(body, c, kid); err != nil {
+			if err := trustState.checkIssue(body, c, kid, leaf.TimeMicros); err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
 			lastSerial = body.Serial

@@ -540,9 +540,11 @@ func FuzzValidatePrincipals(f *testing.F) {
 func TestCheckIssued(t *testing.T) {
 	ca := newEd25519Signer(t)
 	subject := newEd25519Signer(t).PublicKey()
+	at := time.Date(2026, 10, 10, 12, 0, 0, 500_000_000, time.UTC) // the issuance time of every built certificate
 	build := func(t *testing.T, edit func(*Request)) (*ssh.Certificate, Profile) {
 		t.Helper()
 		req := validRequest(t, subject)
+		req.Now = at
 		req.Profile.AllowedExtensions = []string{"permit-agent-forwarding"}
 		req.Profile.AllowedCriticalOptions = []string{"source-address"}
 		if edit != nil {
@@ -560,14 +562,14 @@ func TestCheckIssued(t *testing.T) {
 			r.ExtraExtensions = map[string]string{"permit-agent-forwarding": ""}
 			r.CriticalOptions = map[string]string{"source-address": "10.0.0.0/8"}
 		})
-		wantErrIs(t, CheckIssued(c, p), nil)
+		wantErrIs(t, CheckIssued(c, p, at, at), nil)
 	})
 	t.Run("built_host", func(t *testing.T) {
 		c, p := build(t, func(r *Request) {
 			r.Profile = Profile{CertType: ssh.HostCert, MaxTTL: 24 * time.Hour}
 			r.Principals = []string{"host.example"}
 		})
-		wantErrIs(t, CheckIssued(c, p), nil)
+		wantErrIs(t, CheckIssued(c, p, at, at), nil)
 	})
 	cases := []struct {
 		name string
@@ -600,25 +602,52 @@ func TestCheckIssued(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c, p := build(t, nil)
 			tc.edit(c, &p)
-			wantErrIs(t, CheckIssued(c, p), tc.want)
+			wantErrIs(t, CheckIssued(c, p, at, at), tc.want)
+		})
+	}
+	// F-WR-01: where the validity starts, not only how long it is. Build
+	// sets ValidAfter to the issuance time minus the backdate, so a
+	// certificate built at another time than the log records, postdated or
+	// backdated, is refused even with a span within the cap.
+	windows := []struct {
+		name     string
+		built    time.Time
+		from, to time.Time
+		want     error
+	}{
+		{"issued_at_the_recorded_time", at, at, at, nil},
+		{"issued_within_the_range", at, at.Add(-time.Second), at.Add(time.Hour), nil},
+		{"issued_at_the_range_start", at, at, at.Add(time.Minute), nil},
+		{"issued_at_the_range_end", at, at.Add(-time.Minute), at, nil},
+		{"postdated_to_2030", time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), at, at.Add(time.Second), ErrValidity},
+		{"postdated_by_two_seconds", at.Add(2 * time.Second), at, at, ErrValidity},
+		{"backdated_a_year", at.Add(-365 * 24 * time.Hour), at, at, ErrValidity},
+		{"backdated_by_two_seconds", at.Add(-2 * time.Second), at, at, ErrValidity},
+		{"range_reversed", at, at.Add(time.Second), at, ErrValidity},
+		{"no_range", at, time.Time{}, time.Time{}, ErrValidity},
+	}
+	for _, tc := range windows {
+		t.Run(tc.name, func(t *testing.T) {
+			c, p := build(t, func(r *Request) { r.Now = tc.built })
+			wantErrIs(t, CheckIssued(c, p, tc.from, tc.to), tc.want)
 		})
 	}
 	t.Run("no_certificate", func(t *testing.T) {
-		if err := CheckIssued(nil, DefaultUserProfile()); err == nil {
+		if err := CheckIssued(nil, DefaultUserProfile(), at, at); err == nil {
 			t.Fatal("CheckIssued(nil) accepted")
 		}
 		c, p := build(t, nil)
 		c.SignatureKey = nil
-		if err := CheckIssued(c, p); err == nil {
+		if err := CheckIssued(c, p, at, at); err == nil {
 			t.Fatal("CheckIssued accepted a certificate without a CA key")
 		}
 	})
 	t.Run("unusable_profile", func(t *testing.T) {
 		c, p := build(t, nil)
 		p.CertType = 3
-		wantErrIs(t, CheckIssued(c, p), ErrProfile)
+		wantErrIs(t, CheckIssued(c, p, at, at), ErrProfile)
 		_, p = build(t, nil)
 		p.MaxTTL = 0
-		wantErrIs(t, CheckIssued(c, p), ErrProfile)
+		wantErrIs(t, CheckIssued(c, p, at, at), ErrProfile)
 	})
 }
