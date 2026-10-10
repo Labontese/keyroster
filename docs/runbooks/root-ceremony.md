@@ -384,7 +384,7 @@ audit anchoring are covered there too. The tests pass passphrases with
 `--passphrase-fd` and the hash prefix with `--confirm`; at a ceremony,
 type them at the prompts.
 
-> **Step 6 run on the homelab signer; the offline steps are UNVERIFIED.**
+> **Steps 6 and 8 run on the homelab, with TEST roots; the offline steps are UNVERIFIED.**
 > Plan 01-20 ran step 6 (stop, `install-bundle` without `--pin`, start) on
 > the homelab vTPM signer. This was a rehearsal rotation from the 01-14 TEST
 > roots onto two new TEST roots, C and D. In that rehearsal, steps 1 to 5
@@ -392,8 +392,15 @@ type them at the prompts.
 > `unshare -r -n`. Directories stood in for the USB sticks, and the
 > fingerprints printed by `root init` stood in for paper. The live USB, the
 > separate physical sticks, the paper fingerprints and an offline machine
-> therefore remain **UNVERIFIED**, and so do steps 7 and 8 as written. The
-> owner's real offline ceremony runs them in a later rotation.
+> therefore remain **UNVERIFIED**, and so does step 7 as written (pins from
+> paper). The owner's real offline ceremony runs them in a later rotation.
+>
+> Plan 01-21 ran step 8 for TEST roots A and B only, which were held on a
+> networked workstation: their WSL copies were removed with `shred -u` and
+> checked, and the owner attested that no other copy exists. This is not a
+> guaranteed erase, so A and B stay treated as exposed. Destroying roots
+> held on offline media, like the offline steps, remains **UNVERIFIED** until
+> the owner's real offline ceremony.
 
 ## Hardware-root variant
 
