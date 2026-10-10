@@ -85,9 +85,10 @@ The owner delegated every gray area to Claude ("ta det som är bäst", 2026-10-1
 - **D-10: TLS uses an operator-provided certificate and key file.**
   - The certificate can come from `tailscale cert`, an internal CA or the operator's own ACME client.
   - `keyroster-server` does no ACME itself in Phase 2. That keeps core function free of external services and outbound network code.
-  - A self-signed certificate is technically allowed, but the docs must say that browsers refuse WebAuthn on certificate errors unless the certificate is trusted locally.
+  - Self-signed certificates are not a supported path. Browsers refuse WebAuthn on certificate errors, so the docs must say the certificate has to be trusted by the user's browser.
   - The server reloads the certificate without a restart, because Tailscale certificates expire after 90 days. Claude picks the mechanism.
-  - The CLI also pins the server's TLS key by SPKI hash. The pin is delivered in the invite or by `keyroster init` (research ARCHITECTURE.md trust boundary B1).
+  - The CLI also pins the server's TLS identity. The pin is delivered in the invite or by `keyroster init` (research ARCHITECTURE.md trust boundary B1).
+  - **Open research question.** Does `tailscale cert` renewal (and typical ACME renewal) keep the same key? If not, a plain SPKI pin breaks every renewal. The researcher decides between pinning a key the operator keeps across renewals, pinning a CA or a key set, and a signed pin-rotation path.
 - **D-11: Homelab dogfood uses the signer VM's Tailscale MagicDNS name with a `tailscale cert` certificate.** The exact hostname is fixed at the dogfood step, and the owner confirms it there because of D-09.
   - The root-signed policy change (new schema with RP settings, D-01) is signed for the homelab by TEST root C or D. The homelab stays dogfood-only until the owed v3 offline ceremony (KEY-07).
 
@@ -95,9 +96,12 @@ The owner delegated every gray area to Claude ("ta det som är bäst", 2026-10-1
 - **D-12: The login uses a browser loopback with `state` and PKCE.**
   1. The CLI makes an ephemeral Ed25519 key in memory, builds the issue request, starts a 127.0.0.1 listener and opens the server's approval page in the browser. It also prints the URL.
   2. The page performs `navigator.credentials.get` with challenge = SHA-256(domain tag ‖ request signing bytes).
-  3. The result comes back to the CLI only by a redirect to the loopback listener on the browser's machine. The server releases the certificate only to the holder of the code and the PKCE verifier.
-  - This makes a phished approval of an attacker-started request undeliverable to the attacker's remote CLI.
-  - A device-code or polling flow for headless machines is rejected for Phase 2, because it loses that property. It is deferred. Users on remote machines log in locally and forward their agent.
+  3. The result comes back to the CLI by a redirect to the loopback listener on the browser's machine. The server releases the certificate only to the holder of the code and the PKCE verifier.
+  - **What this does and does not protect.** The primary anti-phishing control is the fingerprint comparison (D-13), not the loopback. A certificate is public data, and an attacker who started the request already holds the ephemeral private key.
+    - Today every issue leaf carries the full certificate (`internal/signer/issue.go`: "log leaf holding the full certificate"), and the log will be served as tiles and to witnesses.
+    - So if the signer mints at assertion time, a phished approval yields a certificate the attacker can fetch from the log. Loopback plus PKCE is at best a server-enforced control, and a compromised server can hand over the certificate anyway.
+  - **Open research question.** The researcher must settle minting at redemption (the code and PKCE verifier reach the signer path) against minting at assertion. They must also settle whether the log may expose a certificate before it is redeemed, and what that costs the Merkle log's completeness.
+  - **Headless.** A device-code or polling flow is deferred, to keep Phase 2 small. It is not ruled out on security grounds: its phishing exposure relative to loopback depends on the research question above, and the fingerprint check applies to both. Users on remote machines log in locally and forward their agent.
 - **D-13: The fingerprint is shown before the user touches the key (AUTH-04).**
   - The CLI prints the SHA-256 fingerprint of the ephemeral key, plus the principals and TTL.
   - The approval page shows the same fingerprint, principals and TTL before it calls WebAuthn.
@@ -216,7 +220,7 @@ The owner delegated every gray area to Claude ("ta det som är bäst", 2026-10-1
 <deferred>
 ## Deferred Ideas
 
-- **Headless login.** A device-code or polling flow for machines without a local browser. It was rejected for Phase 2 because it loses the loopback anti-phishing property. Revisit with a mitigation, such as a second-device confirmation of the fingerprint.
+- **Headless login.** A device-code or polling flow for machines without a local browser. Deferred to keep Phase 2 small. Its phishing exposure relative to loopback depends on the D-12 research question.
 - **Per-role "require device-bound credential".** Enforcement based on the BE/BS flags or on attestation. A hardening option for later, never a default.
 - **Native CTAP2.** Via libfido2 or webauthn.dll, if a cgo-free path appears or a build-tagged variant is wanted.
 - **Admin actions in the web UI.** UI-02, a later phase.

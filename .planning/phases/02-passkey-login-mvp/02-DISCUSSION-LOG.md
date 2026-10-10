@@ -33,7 +33,9 @@
 | RP ID | Fixed hostname in server config vs in root-signed policy | Root-signed policy, DNS name only |
 | TLS | Built-in ACME, self-signed with pin, operator-provided cert | Operator-provided cert (homelab: `tailscale cert`), CLI SPKI pin |
 | CLI transport | libfido2/webauthn.dll (cgo), device-code polling, browser loopback with PKCE | Browser loopback with PKCE |
-| Headless | Device-code fallback now vs defer | Defer (loses anti-phishing property) |
+| Headless | Device-code fallback now vs defer | Defer (scope; relative phishing exposure is a research question) |
+
+**Revision before PR (advisor review):** D-12 originally claimed the loopback made a phished approval undeliverable to an attacker. Issue leaves carry the full certificate, so that claim was false. D-13 (fingerprint) is now the primary control, and mint-at-redemption vs mint-at-assertion is an open research question. D-10 dropped the unexercised self-signed path and added the question of whether `tailscale cert` renewal keeps the key.
 | Signer verifier | go-webauthn in the signer vs a minimal in-house verifier | Minimal in-house verifier; go-webauthn in the server only |
 
 ## Claude's Discretion
