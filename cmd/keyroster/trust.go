@@ -47,13 +47,17 @@ func runTrustVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	threshold := fset.Int("threshold", 0, "number of distinct pinned roots that must have signed (required)")
 	bundlePath := fset.String("bundle", "", "bundle.json; signatures are read from bundle.json.sigs (required)")
 	policyPath := fset.String("policy", "", "policy.json; signatures are read from policy.json.sigs (required)")
-	prevDir := fset.String("prev", "", "directory holding the bundle.json and policy.json in force; verifies --bundle as its successor, and --pin/--threshold name the successor's NEW root set")
+	prevDir := fset.String("prev", "", "directory holding the bundle.json and policy.json in force and their .sigs files; verifies --bundle as its successor, and --pin/--threshold name the successor's NEW root set")
+	prevSHA := fset.String("prev-sha256", "", prevSHA256Usage)
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
 	if fset.NArg() != 0 || len(pins) == 0 || *threshold == 0 || *bundlePath == "" || *policyPath == "" {
 		_, _ = fmt.Fprintln(stderr, "trust verify: --pin, --threshold, --bundle and --policy are required")
 		return errUsage
+	}
+	if err := checkPrevFlags(stderr, "trust verify", *prevDir, *prevSHA); err != nil {
+		return err
 	}
 	var files [4][]byte
 	for i, path := range []string{*bundlePath, *bundlePath + sigsSuffix, *policyPath, *policyPath + sigsSuffix} {
@@ -65,7 +69,7 @@ func runTrustVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	}
 	bundle, bundleSigs, policy, policySigs := files[0], files[1], files[2], files[3]
 	if *prevDir != "" {
-		return verifySuccessorBundle(stdout, *prevDir, bundle, bundleSigs, policy, policySigs, pins, *threshold)
+		return verifySuccessorBundle(stdout, *prevDir, *prevSHA, bundle, bundleSigs, policy, policySigs, pins, *threshold)
 	}
 	b, p, err := trust.VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs, pins, *threshold)
 	if err != nil {
@@ -88,25 +92,77 @@ func runTrustVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	return nil
 }
 
-// verifySuccessorBundle is trust verify --prev: it verifies the successor
-// bundle and policy against the bundle and policy in force in prevDir
-// (trust.VerifySuccessor: version, prev hash, policy chain, and the
-// threshold of the previous roots AND of the new roots on both documents),
-// then requires the successor's root set to be exactly the pins at exactly
-// threshold (trust.MatchPins), so the new roots are checked against their
-// out-of-band fingerprints before the successor is installed.
-func verifySuccessorBundle(stdout io.Writer, prevDir string, bundle, bundleSigs, policy, policySigs []byte, pins []string, threshold int) error {
-	prevBundle, err := os.ReadFile(filepath.Join(prevDir, "bundle.json")) //nolint:gosec // G304: the operator names the directory
+// prevSHA256Usage is the --prev-sha256 flag help of root sign and trust
+// verify.
+const prevSHA256Usage = "with --prev (and required by it): the SHA-256 of the bundle.json in force, as recorded in the transcript when it was installed, 64 lowercase hex digits; never take it from the copy in --prev"
+
+// checkPrevFlags checks that --prev and --prev-sha256 come together and
+// that the SHA-256 is 64 lowercase hex digits; cmd names the command.
+func checkPrevFlags(stderr io.Writer, cmd, prevDir, prevSHA string) error {
+	if (prevDir == "") != (prevSHA == "") || (prevSHA != "" && !isSHA256Hex(prevSHA)) {
+		_, _ = fmt.Fprintf(stderr, "%s: --prev needs --prev-sha256 with the SHA-256 of the bundle in force as recorded at its install (64 lowercase hex digits), and --prev-sha256 needs --prev\n", cmd)
+		return errUsage
+	}
+	return nil
+}
+
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// loadPrev reads the bundle and policy in force from dir, for root sign
+// --prev and trust verify --prev, and authenticates them before anything
+// is built, written or reported against them (G-CR-01). bundle.json must
+// have exactly wantSHA, the SHA-256 recorded when it was installed: the new
+// roots sign a successor over its prev hash, and audit verify pinned to the
+// new roots authenticates every earlier bundle only through that hash, so a
+// successor must never chain to a forged --prev. As defence in depth, the
+// bundle's own root threshold must have signed bundle.json and policy.json
+// (the .sigs files beside them; trust.VerifySelfSigned). That check cannot
+// tell a forged root set from the real one; only the hash pin can.
+func loadPrev(dir, wantSHA string) (prev *trust.Bundle, prevBundle, prevPolicy []byte, err error) {
+	bundlePath := filepath.Join(dir, bundleFile)
+	prevBundle, err = os.ReadFile(bundlePath) //nolint:gosec // G304: the operator names the directory
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if got := trust.SHA256Hex(prevBundle); got != wantSHA {
+		return nil, nil, nil, fmt.Errorf("--prev %s has sha256 %s, not the recorded --prev-sha256 %s: it is not the bundle in force", bundlePath, got, wantSHA)
+	}
+	var files [3][]byte
+	for i, name := range []string{bundleFile + sigsSuffix, policyFile, policyFile + sigsSuffix} {
+		if files[i], err = os.ReadFile(filepath.Join(dir, name)); err != nil { //nolint:gosec // G304: the operator names the directory
+			return nil, nil, nil, fmt.Errorf("--prev %s: %w", dir, err)
+		}
+	}
+	prevPolicy = files[1]
+	prev, err = trust.VerifySelfSigned(prevBundle, files[0], prevPolicy, files[2])
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("--prev %s: %w", dir, err)
+	}
+	return prev, prevBundle, prevPolicy, nil
+}
+
+// verifySuccessorBundle is trust verify --prev: it authenticates the bundle
+// and policy in force in prevDir (loadPrev: the recorded SHA-256 prevSHA and
+// its own roots' signatures), verifies the successor bundle and policy
+// against them (trust.VerifySuccessor: version, prev hash, policy chain,
+// and the threshold of the previous roots AND of the new roots on both
+// documents), then requires the successor's root set to be exactly the
+// pins at exactly threshold (trust.MatchPins), so the new roots are checked
+// against their out-of-band fingerprints before the successor is installed.
+func verifySuccessorBundle(stdout io.Writer, prevDir, prevSHA string, bundle, bundleSigs, policy, policySigs []byte, pins []string, threshold int) error {
+	prev, prevBundle, prevPolicy, err := loadPrev(prevDir, prevSHA)
 	if err != nil {
 		return err
-	}
-	prevPolicy, err := os.ReadFile(filepath.Join(prevDir, "policy.json")) //nolint:gosec // G304: the operator names the directory
-	if err != nil {
-		return err
-	}
-	prev, err := trust.ParseBundle(prevBundle)
-	if err != nil {
-		return fmt.Errorf("--prev %s: %w", filepath.Join(prevDir, "bundle.json"), err)
 	}
 	next, p, err := trust.VerifySuccessor(prev, prevBundle, prevPolicy, bundle, bundleSigs, policy, policySigs)
 	if err != nil {

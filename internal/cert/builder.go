@@ -167,12 +167,15 @@ func buildExtensions(p Profile, extra map[string]string) (map[string]string, err
 // p's certificate type, a subject key Build accepts for this CA key,
 // valid principals, a non-zero serial, a validity of at most p.MaxTTL
 // (Build backdates ValidAfter by five minutes, so the certificate spans
-// up to MaxTTL plus those five minutes), no extension other than p's
-// default and allowed ones (none on a host certificate), and no critical
-// option p does not allow. It does not check that the default extensions
-// are present: a certificate without them grants less, not more. The
-// audit log verifier uses it on every logged certificate.
-func CheckIssued(c *ssh.Certificate, p Profile) error {
+// up to MaxTTL plus those five minutes), a validity that starts where
+// Build puts it for an issuance time between issuedFrom and issuedTo
+// (ValidAfter is that time minus the backdate, in whole seconds), no
+// extension other than p's default and allowed ones (none on a host
+// certificate), and no critical option p does not allow. It does not
+// check that the default extensions are present: a certificate without
+// them grants less, not more. The audit log verifier uses it on every
+// logged certificate, with the bounds the log records for its issuance.
+func CheckIssued(c *ssh.Certificate, p Profile, issuedFrom, issuedTo time.Time) error {
 	if c == nil || c.SignatureKey == nil {
 		return errors.New("cert: no certificate or no CA key")
 	}
@@ -205,6 +208,9 @@ func CheckIssued(c *ssh.Certificate, p Profile) error {
 		return fmt.Errorf("%w: the certificate spans %d s; the profile allows more than the %d s backdate and at most %d s beyond it",
 			ErrValidity, span, backdateSecs, maxSecs)
 	}
+	if err := checkValidAfter(c.ValidAfter, issuedFrom, issuedTo); err != nil {
+		return err
+	}
 	for k := range c.Extensions {
 		if p.CertType == ssh.HostCert {
 			return fmt.Errorf("%w: host certificates carry no extensions, this one has %q", ErrExtension, k)
@@ -217,6 +223,24 @@ func CheckIssued(c *ssh.Certificate, p Profile) error {
 		if !slices.Contains(p.AllowedCriticalOptions, k) {
 			return fmt.Errorf("%w: critical option %q", ErrExtension, k)
 		}
+	}
+	return nil
+}
+
+// checkValidAfter requires validAfter to be what Build sets for an
+// issuance time between from and to: that time minus the backdate, in
+// whole seconds (time.Unix rounds down, as in Build).
+func checkValidAfter(validAfter uint64, from, to time.Time) error {
+	if from.IsZero() || to.IsZero() || to.Before(from) {
+		return fmt.Errorf("%w: no issuance time range (from %s to %s)", ErrValidity, from, to)
+	}
+	lo, hi := from.Add(-backdate).Unix(), to.Add(-backdate).Unix()
+	if lo <= 0 {
+		return fmt.Errorf("%w: issuance time %s out of range", ErrValidity, from)
+	}
+	if validAfter < uint64(lo) || validAfter > uint64(hi) { //nolint:gosec // G115: hi >= lo > 0, checked above
+		return fmt.Errorf("%w: valid after %d, but an issuance between %d and %d gives a value from %d to %d (backdate %s)",
+			ErrValidity, validAfter, from.Unix(), to.Unix(), lo, hi, backdate)
 	}
 	return nil
 }

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -78,13 +80,18 @@ type anchor struct {
 	// the last accepted bundle did not match them.
 	anchorVersion uint64
 	lastMismatch  error
+	// roots are the root sets of every accepted bundle, in log order. A
+	// retired root may still exist, so no later policy may name one as an
+	// admin (KEY-07).
+	roots [][]trust.RootKey
 }
 
 // install verifies one bundle_install entry and makes its bundle the one in
 // force. The first must be a genesis bundle (version 1, all-zero prev)
 // signed by its own root threshold; every later one must be a valid
 // successor of the bundle in force (TUF rule), with its policy chained to
-// the policy in force. In Phase 1 every bundle must name the same log key.
+// the policy in force, and its policy must name no root of any earlier
+// bundle as an admin. In Phase 1 every bundle must name the same log key.
 // The first accepted bundle whose root set and threshold are exactly opts'
 // pins becomes the anchor (trust.MatchPins); Verify fails at the end of the
 // log if there is none.
@@ -108,6 +115,11 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 	if body.BundleVersion != b.Version {
 		return fmt.Errorf("bundle_install records bundle version %d, but its bundle is version %d", body.BundleVersion, b.Version)
 	}
+	// VerifySuccessor checks the policy against next's and prev's roots
+	// only; a root retired earlier must not become an admin either.
+	if err := trust.CheckAdminsNotRoots(p, a.roots...); err != nil {
+		return fmt.Errorf("trust bundle v%d: a root of an earlier trust bundle stays a root: %w", b.Version, err)
+	}
 	logKey, err := trust.ParseKey(b.Log.Key)
 	if err != nil {
 		return fmt.Errorf("bundle_install: log key: %w", err)
@@ -128,6 +140,7 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 		active[ca.Role] = pub
 	}
 	a.bundle, a.canonical, a.policy, a.policyDoc, a.logKey, a.activeCA = b, body.Bundle, p, body.Policy, logKey, active
+	a.roots = append(a.roots, b.Root.Keys)
 	if a.anchorVersion == 0 {
 		// b is the bundle the verifier returned, so its signatures by its
 		// own root threshold were checked; MatchPins adds that this root
@@ -167,8 +180,10 @@ func verifySelfSignedGenesis(body *tlog.BundleInstallBody) (*trust.Bundle, *trus
 // be a host certificate exactly for the host role, carry the policy
 // version in force in its key ID and in the leaf, and stay within the
 // role's certificate profile of that policy (cert.CheckIssued: validity
-// cap, extensions, critical options, principals, subject key).
-func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyID) error {
+// cap, extensions, critical options, principals, subject key), with a
+// validity that starts where cert.Build puts it for an issuance between
+// the serial and leafMicros (both microsecond times; see Verify).
+func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyID, leafMicros uint64) error {
 	role := kid.CA
 	if a.bundle == nil {
 		return errors.New("issue entry before the first bundle_install: no root-signed CA key is in force")
@@ -198,10 +213,34 @@ func (a *anchor) checkIssue(b *tlog.IssueBody, c *ssh.Certificate, kid cert.KeyI
 	if err != nil {
 		return fmt.Errorf("policy v%d: %w", a.policy.Version, err)
 	}
-	if err := cert.CheckIssued(c, profile); err != nil {
+	from, to, err := issuanceRange(b.Serial, leafMicros)
+	if err != nil {
+		return err
+	}
+	if err := cert.CheckIssued(c, profile, from, to); err != nil {
 		return fmt.Errorf("certificate outside the %s profile of policy v%d: %w", role, a.policy.Version, err)
 	}
 	return nil
+}
+
+// issuanceRange returns the times between which the signer issued the
+// certificate of an issue leaf with serial and leafMicros. serial.Next
+// allocates the serial from the clock in microseconds and returns only
+// once the clock has reached it, the signer refuses to issue when its
+// next clock reading (the issuance time) is below the serial, and
+// appendLocked records the issuance time as the leaf time, raised to the
+// previous leaf's if the clock went back. So serial <= issuance time <=
+// leaf time, and a serial after the leaf time is one the signer could not
+// have written.
+func issuanceRange(serial, leafMicros uint64) (time.Time, time.Time, error) {
+	if serial > math.MaxInt64 || leafMicros > math.MaxInt64 {
+		return time.Time{}, time.Time{}, fmt.Errorf("serial %d or leaf time %d out of range", serial, leafMicros)
+	}
+	if serial > leafMicros {
+		return time.Time{}, time.Time{}, fmt.Errorf("serial %d is after the leaf time %d: the signer allocates serials from its clock in microseconds, never after the issuance time the leaf records",
+			serial, leafMicros)
+	}
+	return time.UnixMicro(int64(serial)), time.UnixMicro(int64(leafMicros)), nil //nolint:gosec // G115: both <= math.MaxInt64, checked above
 }
 
 func certTypeName(t uint32) string {
@@ -229,8 +268,9 @@ func certTypeName(t uint32) string {
 //     previous roots' threshold and its own, whose prev is the SHA-256 of
 //     the bundle in force and whose policy is either unchanged or the next
 //     policy version chained to the one in force (trust.VerifySuccessor);
-//     each records its bundle's version, and all of them name the same log
-//     key (Phase 1)
+//     no policy names a root of that bundle or of any earlier one as an
+//     admin; each records its bundle's version, and all of them name the
+//     same log key (Phase 1)
 //   - the anchor: some bundle in the log has exactly the pinned root set at
 //     exactly opts.Threshold (trust.MatchPins), and the first such bundle
 //     is reported as Report.AnchorVersion. The pinned roots' signatures
@@ -249,7 +289,11 @@ func certTypeName(t uint32) string {
 //     policy version in force, whose serial equals the leaf's and the key
 //     ID's, which stays within the role's profile of the policy in force
 //     (validity cap, extensions, critical options, principals, subject
-//     key; cert.CheckIssued), and serials strictly increase across the log
+//     key; cert.CheckIssued), whose serial is not after the leaf time and
+//     whose ValidAfter is what cert.Build sets for an issuance between the
+//     two (both microsecond times: the serial is allocated from the
+//     signer's clock), so a postdated or backdated certificate is refused,
+//     and serials strictly increase across the log
 //   - the RFC 6962 root recomputed from the leaf bytes alone equals the
 //     root of the checkpoint, the checkpoint covers exactly n entries, and
 //     it is signed by the log key of the root-signed bundle
@@ -340,7 +384,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
-			if err := trustState.checkIssue(body, c, kid); err != nil {
+			if err := trustState.checkIssue(body, c, kid, leaf.TimeMicros); err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
 			lastSerial = body.Serial

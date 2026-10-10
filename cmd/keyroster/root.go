@@ -84,6 +84,16 @@ trust bundles. Keep the file on offline media, never on a networked machine,
 and run the ceremony as described in docs/runbooks/root-ceremony.md.
 `
 
+// threshold1Warning is printed when root sign --prev builds the successor
+// of a bundle whose root threshold is 1 (G-WR-02): the previous roots' and
+// the new roots' thresholds are counted independently, so any single
+// current root, with a new key of its holder's choosing, meets both.
+const threshold1Warning = `WARNING: the bundle in force has root threshold 1. Any one of its roots,
+together with a new key its holder creates, can sign a successor that meets
+both thresholds: one stolen current root can rotate trust. Compare every new
+root fingerprint with the paper before you sign.
+`
+
 // runRootInit creates an age-encrypted software root (D-10): FILE.age
 // (mode 0600, created exclusively) and FILE.age.pub with custody=software.
 func runRootInit(_ context.Context, args []string, stdout, stderr io.Writer) error {
@@ -205,7 +215,8 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	fset := flag.NewFlagSet("root sign", flag.ContinueOnError)
 	fset.SetOutput(stderr)
 	caPath := fset.String("ca-pubkeys", "", "ca-pubkeys.json from the CA host (required for a genesis bundle; refused with --prev)")
-	prevDir := fset.String("prev", "", "directory holding the bundle.json and policy.json in force; builds their successor (version+1) instead of a genesis bundle, which needs signatures by the previous roots' threshold AND the new roots' threshold")
+	prevDir := fset.String("prev", "", "directory holding the bundle.json and policy.json in force and their .sigs files; builds their successor (version+1) instead of a genesis bundle, which needs signatures by the previous roots' threshold AND the new roots' threshold")
+	prevSHA := fset.String("prev-sha256", "", prevSHA256Usage)
 	policyPath := fset.String("policy", "", "canonical policy file (required)")
 	rootsPath := fset.String("roots", "", "roots.pub: one root key per line with comment custody=<value> (required)")
 	threshold := fset.Int("threshold", 0, "number of root signatures a verifier requires (required)")
@@ -224,11 +235,14 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	}
 	if fset.NArg() != 0 || (!successor && *caPath == "") || *policyPath == "" || *rootsPath == "" || *threshold == 0 || *outDir == "" {
 		if successor {
-			_, _ = fmt.Fprintln(stderr, "root sign: with --prev, --policy, --roots, --threshold, --out-dir and one of --agent-key or --key are required")
+			_, _ = fmt.Fprintln(stderr, "root sign: with --prev, --prev-sha256, --policy, --roots, --threshold, --out-dir and one of --agent-key or --key are required")
 		} else {
 			_, _ = fmt.Fprintln(stderr, "root sign: --ca-pubkeys, --policy, --roots, --threshold, --out-dir and one of --agent-key or --key are required")
 		}
 		return errUsage
+	}
+	if err := checkPrevFlags(stderr, "root sign", *prevDir, *prevSHA); err != nil {
+		return err
 	}
 	if (*agentKey == "") == (*keyPath == "") {
 		_, _ = fmt.Fprintln(stderr, "root sign: give exactly one of --agent-key and --key")
@@ -270,7 +284,7 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		rootSets   = [][]trust.RootKey{roots}
 	)
 	if successor {
-		prev, prevBundle, build, err = successorBuilder(*prevDir, *outDir, roots, thr, policy)
+		prev, prevBundle, build, err = successorBuilder(*prevDir, *prevSHA, *outDir, roots, thr, policy)
 		if err != nil {
 			return err
 		}
@@ -350,6 +364,9 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	hash := rootceremony.BundleHash(bundle)
 	if prev != nil {
 		_, _ = io.WriteString(stdout, successorHeader(prev, prevBundle, b))
+		if prev.Root.Threshold == 1 {
+			_, _ = io.WriteString(stderr, threshold1Warning)
+		}
 	}
 	_, _ = io.WriteString(stdout, rootceremony.Summary(b, pol))
 	answer := *confirm
@@ -525,11 +542,13 @@ func buildBundle(cas *trust.CAPubKeys, roots []trust.RootKey, threshold uint32, 
 	return b, nil
 }
 
-// successorBuilder reads the bundle and policy in force from prevDir and
-// returns the previous bundle, its bytes and the builder of its successor
-// (trust.BuildSuccessor). outDir must not be prevDir: the successor never
-// overwrites the documents it chains to.
-func successorBuilder(prevDir, outDir string, roots []trust.RootKey, threshold uint32, policy []byte) (*trust.Bundle, []byte, func(string) (*trust.Bundle, error), error) {
+// successorBuilder reads and authenticates the bundle and policy in force
+// from prevDir (loadPrev: the recorded SHA-256 prevSHA and its own roots'
+// signatures) and returns the previous bundle, its bytes and the builder of
+// its successor (trust.BuildSuccessor). outDir must not be prevDir: the
+// successor never overwrites the documents it chains to. Every refusal
+// comes before anything is written.
+func successorBuilder(prevDir, prevSHA, outDir string, roots []trust.RootKey, threshold uint32, policy []byte) (*trust.Bundle, []byte, func(string) (*trust.Bundle, error), error) {
 	absPrev, err := filepath.Abs(prevDir)
 	if err != nil {
 		return nil, nil, nil, err
@@ -541,18 +560,9 @@ func successorBuilder(prevDir, outDir string, roots []trust.RootKey, threshold u
 	if absPrev == absOut {
 		return nil, nil, nil, fmt.Errorf("--out-dir %s is the --prev directory; write the successor to a new directory; nothing was written or signed", outDir)
 	}
-	prevPath := filepath.Join(prevDir, bundleFile)
-	prevBundle, err := os.ReadFile(prevPath) //nolint:gosec // G304: the operator names the directory
+	prev, prevBundle, prevPolicy, err := loadPrev(prevDir, prevSHA)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	prev, err := trust.ParseBundle(prevBundle)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%s: %w", prevPath, err)
-	}
-	prevPolicy, err := os.ReadFile(filepath.Join(prevDir, policyFile)) //nolint:gosec // G304: the operator names the directory
-	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("%w; nothing was written or signed", err)
 	}
 	build := func(issuedAt string) (*trust.Bundle, error) {
 		return trust.BuildSuccessor(prev, prevBundle, prevPolicy, roots, threshold, policy, issuedAt)

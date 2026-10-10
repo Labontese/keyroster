@@ -399,3 +399,49 @@ func TestMatchPins(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifySelfSigned (G-CR-01): the bundle in force given to root sign
+// --prev and trust verify --prev must carry signatures by its own root
+// threshold on both documents. Any root set passes if it signed itself;
+// telling a forged root set from the real one is the recorded SHA-256's
+// job, not this check's.
+func TestVerifySelfSigned(t *testing.T) {
+	policy := mustCanonical(t, goldenPolicy(t))
+	rootA, rootB, attacker := edKey(t, seedRootA), p256Key(t, seedRootB), edKey(t, seedAttacker)
+	one := mustCanonical(t, goldenBundle(t, policy)) // roots A and B, threshold 1
+	twoOf2 := goldenBundle(t, policy)
+	twoOf2.Root.Threshold = 2
+	two := mustCanonical(t, twoOf2)
+	foreign := goldenBundle(t, policy)
+	foreign.Root = RootSet{Keys: []RootKey{{Key: keyOf(attacker), Custody: "software"}}, Threshold: 1}
+	foreignDoc := mustCanonical(t, foreign)
+	pol := func(signers ...ssh.Signer) []byte { return signAll(t, NamespacePolicy, policy, signers...) }
+	tests := []struct {
+		name                  string
+		bundle, sigs, polSigs []byte
+		want                  error // nil: accepted
+	}{
+		{"own_root_signed_both", one, signAll(t, NamespaceBundle, one, rootA), pol(rootA), nil},
+		{"two_of_two_signed", two, signAll(t, NamespaceBundle, two, rootA, rootB), pol(rootB, rootA), nil},
+		{"foreign_roots_signed_themselves", foreignDoc, signAll(t, NamespaceBundle, foreignDoc, attacker), pol(attacker), nil},
+		{"bundle_signed_by_non_root", one, signAll(t, NamespaceBundle, one, attacker), pol(rootA), ErrThreshold},
+		{"policy_sigs_empty", one, signAll(t, NamespaceBundle, one, rootA), nil, sshsig.ErrMalformed},
+		{"policy_signed_by_non_root", one, signAll(t, NamespaceBundle, one, rootA), pol(attacker), ErrThreshold},
+		{"one_root_twice_toward_two", two, signAll(t, NamespaceBundle, two, rootA, rootA), pol(rootA, rootA), ErrThreshold},
+		{"not_canonical", append(bytes.Clone(one[:len(one)-1]), ' ', '\n'), signAll(t, NamespaceBundle, one, rootA), pol(rootA), ErrNotCanonical},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := VerifySelfSigned(tc.bundle, tc.sigs, policy, tc.polSigs)
+			if tc.want == nil {
+				if err != nil || b == nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) || b != nil {
+				t.Fatalf("bundle %v, err = %v, want %v", b, err, tc.want)
+			}
+		})
+	}
+}

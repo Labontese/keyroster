@@ -22,6 +22,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
+	"github.com/Labontese/keyroster/internal/rootceremony"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 )
@@ -912,13 +913,17 @@ func TestRootSignSuccessor(t *testing.T) {
 	newRoots.writeRoots(t, c, d)
 	setCeremonyNow(t, "2026-10-06T07:00:00Z")
 	prevPolicy := filepath.Join(g.out, "policy.json")
+	// prevSHA is the SHA-256 of the bundle in force, as recorded at its
+	// install.
+	prevSHA := fileSHA256(t, filepath.Join(g.out, "bundle.json"))
 
-	// sign runs root sign --prev g.out into out with policy and threshold.
-	// key nil signs with an --agent-key of fingerprint agentFP instead.
+	// sign runs root sign --prev g.out --prev-sha256 prevSHA into out with
+	// policy and threshold. key nil signs with an --agent-key in extra
+	// instead; a later --prev and --prev-sha256 in extra win.
 	sign := func(t *testing.T, out, policy, threshold string, key *softwareRoot, extra ...string) (int, string, string) {
 		t.Helper()
 		typeHashPrefix(t, out)
-		args := []string{"root", "sign", "--prev", g.out, "--roots", newRoots.roots, "--threshold", threshold,
+		args := []string{"root", "sign", "--prev", g.out, "--prev-sha256", prevSHA, "--roots", newRoots.roots, "--threshold", threshold,
 			"--policy", policy, "--out-dir", out}
 		if key != nil {
 			args = append(args, "--key", key.path, "--passphrase-fd", passphraseFD(t, key.passphrase))
@@ -985,25 +990,55 @@ func TestRootSignSuccessor(t *testing.T) {
 		}
 		return trust.FormatKey(pub)
 	}
-	// copyPrev copies the genesis bundle.json and policy.json into a new
-	// directory, the named file transformed by edit, and returns it.
-	copyPrev := func(t *testing.T, name string, edit func([]byte) []byte) string {
+	// rootA signs edited copies of the bundle in force (copyPrev). It is
+	// decrypted once, on first use: each scrypt run costs about a second.
+	var rootA *rootceremony.Root
+	outer := t
+	signA := func(t *testing.T, name string, doc []byte) []byte {
+		t.Helper()
+		if rootA == nil {
+			r, err := rootceremony.OpenRoot(readTestFile(t, a.path), []byte(a.passphrase))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rootA = r
+			outer.Cleanup(r.Close)
+		}
+		sign := rootA.SignBundle
+		if name == "policy.json" {
+			sign = rootA.SignPolicy
+		}
+		sig, err := sign(rand.Reader, doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sig
+	}
+	// copyPrev copies the genesis bundle.json, policy.json and their .sigs
+	// into a new directory, the named file transformed by edit. With
+	// resign, the edited file's .sigs is replaced by root A's signature over
+	// it, so the copy passes the prev's own signature check and a refusal
+	// test reaches the check it is about. It returns the directory and the
+	// SHA-256 of its bundle.json, for --prev-sha256.
+	copyPrev := func(t *testing.T, name string, edit func([]byte) []byte, resign bool) (string, string) {
 		t.Helper()
 		dir, err := os.MkdirTemp(g.dir, "prev-")
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, f := range []string{"bundle.json", "policy.json"} {
-			data, err := os.ReadFile(filepath.Join(g.out, f)) //nolint:gosec // G304: test file
-			if err != nil {
-				t.Fatal(err)
-			}
+			data := readTestFile(t, filepath.Join(g.out, f))
+			sigs := readTestFile(t, filepath.Join(g.out, f+".sigs"))
 			if f == name {
 				data = edit(data)
+				if resign {
+					sigs = signA(t, f, data)
+				}
 			}
 			writeTestFile(t, filepath.Join(dir, f), data)
+			writeTestFile(t, filepath.Join(dir, f+".sigs"), sigs)
 		}
-		return dir
+		return dir, fileSHA256(t, filepath.Join(dir, "bundle.json"))
 	}
 
 	succ := filepath.Join(g.dir, "succ")
@@ -1027,6 +1062,10 @@ func TestRootSignSuccessor(t *testing.T) {
 				t.Fatalf("root sign --prev output lacks %q:\n%s", want, stdout)
 			}
 		}
+		// G-WR-02: the bundle in force has threshold 1.
+		if !strings.Contains(stderr, "WARNING: the bundle in force has root threshold 1") {
+			t.Fatalf("root sign --prev of a threshold-1 bundle lacks the warning:\n%s", stderr)
+		}
 		shown := false
 		for _, line := range strings.Split(stdout, "\n") {
 			shown = shown || (strings.Contains(line, a.fingerprint) && strings.Contains(line, "custody=software"))
@@ -1040,11 +1079,21 @@ func TestRootSignSuccessor(t *testing.T) {
 	})
 
 	t.Run("new_root_signs_with_key", func(t *testing.T) {
-		if code, _, stderr := sign(t, succ, prevPolicy, "1", &c); code != 0 {
+		// Its own out-dir, so it does not depend on another subtest: the
+		// new root C signs first, as in the runbook, then the previous root
+		// A completes the successor.
+		out := filepath.Join(g.dir, "succ-new-first")
+		if code, _, stderr := sign(t, out, prevPolicy, "1", &c); code != 0 {
 			t.Fatalf("root sign --prev --key C: exit %d: %s", code, stderr)
 		}
-		if err := verifyOut(t, succ); err != nil {
-			t.Fatalf("VerifySuccessor after A and C signed: %v", err)
+		if err := verifyOut(t, out); !errors.Is(err, trust.ErrThreshold) || !strings.Contains(err.Error(), "(previous roots)") {
+			t.Fatalf("VerifySuccessor with the new root's signature only: err = %v, want the previous roots' %v", err, trust.ErrThreshold)
+		}
+		if code, _, stderr := sign(t, out, prevPolicy, "1", &a); code != 0 {
+			t.Fatalf("root sign --prev --key A: exit %d: %s", code, stderr)
+		}
+		if err := verifyOut(t, out); err != nil {
+			t.Fatalf("VerifySuccessor after C and A signed: %v", err)
 		}
 	})
 
@@ -1078,16 +1127,90 @@ func TestRootSignSuccessor(t *testing.T) {
 	t.Run("missing_flags_with_prev", func(t *testing.T) {
 		code, _, stderr := run(t, "root", "sign", "--prev", g.out, "--threshold", "1", "--policy", prevPolicy,
 			"--out-dir", filepath.Join(g.dir, "out-usage"), "--agent-key", a.fingerprint)
-		if code != 2 || !strings.Contains(stderr, "with --prev, --policy, --roots, --threshold, --out-dir") {
+		if code != 2 || !strings.Contains(stderr, "with --prev, --prev-sha256, --policy, --roots, --threshold, --out-dir") {
 			t.Fatalf("--prev without --roots: exit %d, stderr %q", code, stderr)
 		}
+	})
+
+	// G-CR-01: --prev needs the SHA-256 recorded when the bundle in force
+	// was installed, and that bundle must match it and carry its own roots'
+	// signatures, before anything is written.
+	t.Run("prev_sha256_required", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			args []string
+		}{
+			{"missing", []string{"--prev", g.out}},
+			{"empty", []string{"--prev", g.out, "--prev-sha256", ""}},
+			{"short", []string{"--prev", g.out, "--prev-sha256", prevSHA[:63]}},
+			{"uppercase", []string{"--prev", g.out, "--prev-sha256", strings.ToUpper(prevSHA)}},
+			{"without_prev", []string{"--prev-sha256", prevSHA, "--ca-pubkeys", g.caPubkeys}},
+		} {
+			out := filepath.Join(g.dir, "out-sha-"+tc.name)
+			args := append([]string{"root", "sign"}, tc.args...)
+			args = append(args, "--roots", newRoots.roots, "--threshold", "1", "--policy", prevPolicy, "--out-dir", out, "--agent-key", a.fingerprint)
+			if code, _, stderr := run(t, args...); code != 2 || !strings.Contains(stderr, "--prev-sha256") {
+				t.Fatalf("%s: exit %d, stderr %q", tc.name, code, stderr)
+			}
+			mustNotExist(t, out)
+		}
+	})
+
+	t.Run("prev_sha256_mismatch_refused", func(t *testing.T) {
+		out := filepath.Join(g.dir, "out-sha-mismatch")
+		other := trust.SHA256Hex([]byte("another bundle"))
+		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", a.fingerprint, "--prev-sha256", other)
+		if code != 1 || !strings.Contains(stderr, "has sha256 "+prevSHA+", not the recorded --prev-sha256 "+other) ||
+			!strings.Contains(stderr, "nothing was written or signed") {
+			t.Fatalf("--prev-sha256 of another bundle: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+
+	t.Run("prev_without_sigs_refused", func(t *testing.T) {
+		// The real bundle in force, byte for byte (so the SHA-256 matches),
+		// but without its .sigs files.
+		prev, err := os.MkdirTemp(g.dir, "prev-unsigned-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{"bundle.json", "policy.json"} {
+			writeTestFile(t, filepath.Join(prev, f), readTestFile(t, filepath.Join(g.out, f)))
+		}
+		out := filepath.Join(g.dir, "out-unsigned")
+		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", a.fingerprint, "--prev", prev)
+		if code != 1 || !strings.Contains(stderr, "bundle.json.sigs") || !strings.Contains(stderr, "nothing was written or signed") {
+			t.Fatalf("--prev without .sigs: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
+	})
+
+	t.Run("prev_signed_by_non_root_refused", func(t *testing.T) {
+		// The policy's .sigs holds only a signature by a key that is not a
+		// root of the bundle in force.
+		prev, sha := copyPrev(t, "policy.json", func(p []byte) []byte { return p }, false)
+		other, err := ssh.NewSignerFromKey(newEd25519Key(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sig, err := sshsig.Sign(rand.Reader, other, trust.NamespacePolicy, readTestFile(t, prevPolicy))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, filepath.Join(prev, "policy.json.sigs"), sig)
+		out := filepath.Join(g.dir, "out-non-root")
+		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", a.fingerprint, "--prev", prev, "--prev-sha256", sha)
+		if code != 1 || !strings.Contains(stderr, "policy (its own roots) signed by 0 of 2 roots, need 1") || !strings.Contains(stderr, "nothing was written or signed") {
+			t.Fatalf("--prev policy signed by a non-root: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
 	})
 
 	t.Run("previous_root_custody_mismatch_refused", func(t *testing.T) {
 		// The previous bundle labels A custody=piv: --key holds A in
 		// software, so the label would be false, and the error names the
 		// previous bundle as the label's source.
-		prev := copyPrev(t, "bundle.json", func(data []byte) []byte {
+		prev, sha := copyPrev(t, "bundle.json", func(data []byte) []byte {
 			pb, err := trust.ParseBundle(data)
 			if err != nil {
 				t.Fatal(err)
@@ -1102,14 +1225,29 @@ func TestRootSignSuccessor(t *testing.T) {
 				t.Fatal(err)
 			}
 			return out
-		})
+		}, true)
 		out := filepath.Join(g.dir, "out-custody")
-		code, _, stderr := sign(t, out, prevPolicy, "1", &a, "--prev", prev) // the later --prev wins
+		code, _, stderr := sign(t, out, prevPolicy, "1", &a, "--prev", prev, "--prev-sha256", sha) // the later flags win
 		if code != 1 || !strings.Contains(stderr, filepath.Join(prev, "bundle.json")+" declares custody=piv") || !strings.Contains(stderr, "false custody label") {
 			t.Fatalf("previous root labelled piv signing with --key: exit %d, stderr %q", code, stderr)
 		}
 		mustNotExist(t, filepath.Join(out, "bundle.json.sigs"))
 		mustNotExist(t, filepath.Join(out, "policy.json.sigs"))
+	})
+
+	t.Run("carried_root_custody_change_refused", func(t *testing.T) {
+		// G-WR-01: the new roots file lists the previous root A again, now
+		// labelled piv. Signing with A from an agent would then show no
+		// SOFTWARE ROOT banner. The successor is refused before anything
+		// is written.
+		relabelled := filepath.Join(g.dir, "relabelled-roots.pub")
+		writeTestFile(t, relabelled, []byte(rootKey(t, a)+" custody=piv\n"+rootKey(t, c)+" custody=software\n"))
+		out := filepath.Join(g.dir, "out-relabelled")
+		code, _, stderr := sign(t, out, prevPolicy, "1", nil, "--agent-key", a.fingerprint, "--roots", relabelled)
+		if code != 1 || !strings.Contains(stderr, "root "+a.fingerprint+" is carried over from the previous bundle but changes custody from software to piv") {
+			t.Fatalf("previous root relabelled piv in the new roots: exit %d, stderr %q", code, stderr)
+		}
+		mustNotExist(t, out)
 	})
 
 	for _, tc := range []struct {
@@ -1167,9 +1305,10 @@ func TestRootSignSuccessor(t *testing.T) {
 	})
 
 	t.Run("prev_not_canonical_refused", func(t *testing.T) {
-		prev := copyPrev(t, "bundle.json", func(b []byte) []byte { return append(b[:len(b)-1], ' ', '\n') })
+		// Pinned by its own SHA-256, so the refusal is the parse.
+		prev, sha := copyPrev(t, "bundle.json", func(b []byte) []byte { return append(b[:len(b)-1], ' ', '\n') }, false)
 		out := filepath.Join(g.dir, "out-noncanonical")
-		args := []string{"root", "sign", "--prev", prev, "--roots", newRoots.roots, "--threshold", "1",
+		args := []string{"root", "sign", "--prev", prev, "--prev-sha256", sha, "--roots", newRoots.roots, "--threshold", "1",
 			"--policy", prevPolicy, "--out-dir", out, "--agent-key", a.fingerprint}
 		if code, _, stderr := run(t, args...); code != 1 || !strings.Contains(stderr, "not canonical") {
 			t.Fatalf("non-canonical previous bundle: exit %d, stderr %q", code, stderr)
@@ -1183,9 +1322,10 @@ func TestRootSignSuccessor(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prev := copyPrev(t, "policy.json", func([]byte) []byte { return otherData })
+		// Signed by root A, so the refusal is the policy hash chain.
+		prev, sha := copyPrev(t, "policy.json", func([]byte) []byte { return otherData }, true)
 		out := filepath.Join(g.dir, "out-policy-mismatch")
-		args := []string{"root", "sign", "--prev", prev, "--roots", newRoots.roots, "--threshold", "1",
+		args := []string{"root", "sign", "--prev", prev, "--prev-sha256", sha, "--roots", newRoots.roots, "--threshold", "1",
 			"--policy", prevPolicy, "--out-dir", out, "--agent-key", a.fingerprint}
 		if code, _, stderr := run(t, args...); code != 1 || !strings.Contains(stderr, "not the previous bundle's policy") {
 			t.Fatalf("previous policy.json not the bundle's policy: exit %d, stderr %q", code, stderr)
@@ -1238,4 +1378,42 @@ func TestRootSignSuccessor(t *testing.T) {
 			t.Fatalf("bundle.json changed after a refused rerun (%v)", err)
 		}
 	})
+}
+
+// TestRootSignSuccessorThreshold1Warning (G-WR-02): root sign --prev warns
+// that one current root can rotate trust when the bundle in force has root
+// threshold 1, and only then. The roots are held in an in-memory agent; a
+// wrong confirmation stops each run after the warning, before any
+// signature.
+func TestRootSignSuccessorThreshold1Warning(t *testing.T) {
+	const warning = "WARNING: the bundle in force has root threshold 1"
+	keyC := newEd25519Key(t)
+	for _, tc := range []struct {
+		threshold string
+		warns     bool
+	}{{"1", true}, {"2", false}} {
+		t.Run("threshold_"+tc.threshold, func(t *testing.T) {
+			g := newCeremony(t, 2)
+			useKeyring(t, append(append([]ed25519.PrivateKey{}, g.rootKeys...), keyC)...)
+			setCeremonyNow(t, "2026-10-05T07:00:00Z")
+			for i := range g.rootKeys {
+				typeHashPrefix(t, g.out)
+				if code, _, stderr := g.sign(t, tc.threshold, i); code != 0 {
+					t.Fatalf("genesis root sign by root %d: exit %d: %s", i, code, stderr)
+				}
+			}
+			setCeremonyNow(t, "2026-10-06T07:00:00Z")
+			newRoots := filepath.Join(g.dir, "new-roots.pub")
+			writeTestFile(t, newRoots, []byte(rootLine(t, keyC)))
+			code, _, stderr := run(t, "root", "sign", "--prev", g.out, "--prev-sha256", fileSHA256(t, filepath.Join(g.out, "bundle.json")),
+				"--roots", newRoots, "--threshold", "1", "--policy", filepath.Join(g.out, "policy.json"),
+				"--out-dir", filepath.Join(g.dir, "succ"), "--agent-key", keyFingerprint(t, keyC), "--confirm", "00000000")
+			if code != 1 || !strings.Contains(stderr, "nothing was signed") {
+				t.Fatalf("root sign --prev with a wrong confirmation: exit %d: %s", code, stderr)
+			}
+			if strings.Contains(stderr, warning) != tc.warns {
+				t.Fatalf("previous threshold %s: warning shown = %v, want %v:\n%s", tc.threshold, !tc.warns, tc.warns, stderr)
+			}
+		})
+	}
 }

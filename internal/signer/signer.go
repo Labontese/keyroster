@@ -92,8 +92,9 @@ type Signer struct {
 // rebuilds the audit log from the state database. It refuses to start
 // without an installed bundle, when any bundle key is missing from the
 // backend, when the stored leaves do not reproduce the latest signed
-// checkpoint, and when the installed bundle record is not the one the last
-// bundle_install entry of that log records. The trust state is loaded only here: once another bundle is
+// checkpoint, when the installed bundle record is not the one the last
+// bundle_install entry of that log records, and when its policy names a
+// root of any bundle the log records as an admin. The trust state is loaded only here: once another bundle is
 // installed, the signer refuses every request (trust_changed) until it is
 // restarted and loads it.
 func New(cfg Config) (*Signer, error) {
@@ -143,7 +144,11 @@ func New(cfg Config) (*Signer, error) {
 	}
 	// The trust state above came from the trust_bundle table; take it only
 	// if the verified log's last bundle_install entry records exactly it.
-	if err := checkBundleLogged(ts.stored, s.loadedInstall); err != nil {
+	if err := checkBundleLogged(ts.stored, s.loaded.last); err != nil {
+		return nil, err
+	}
+	// checkStoredTrust above saw only the installed bundle's roots.
+	if err := s.loaded.checkAdmins(ts.policy); err != nil {
 		return nil, err
 	}
 	return s, nil

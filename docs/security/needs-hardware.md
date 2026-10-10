@@ -79,6 +79,8 @@ firmware **5.3 to 5.6** (P-256). For each:
       (PIN policy once over a long-lived session: the backend verifies the
       PIN once at open and every later signature must succeed without
       another PIN check).
+- [ ] `keyroster-signer doctor` prints `INFO piv_custody_reported` naming
+      all five keys and no `OK custody` line (doctor does not read the card).
 - [ ] While the signer runs, try `ykman piv info` from another process:
       expected to fail because piv-go holds the card's PC/SC transaction.
 - [ ] Refusals: a second `ca-init` on a fresh state directory with the same

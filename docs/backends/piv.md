@@ -257,6 +257,10 @@ public keys in `ca-pubkeys.json` are the slot keys (`ykman piv keys info`)
 and, for full assurance, verify each slot's attestation by hand
 (`ykman piv keys attest`).
 
+`keyroster-signer doctor` therefore never prints the OK hardware-custody
+line for `piv` keys. It does not read the card either: it reports them as
+`INFO piv_custody_reported`, the custody the card reported at ca-init.
+
 ## What CI verifies, and what needs hardware
 
 The `PIV` workflow (`.github/workflows/piv.yml`, check `build-piv`):

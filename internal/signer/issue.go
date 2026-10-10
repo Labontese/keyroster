@@ -107,6 +107,13 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 		return nil, refusalErr(wire.CodeUnavailable, "serial_unavailable", err)
 	}
 	issuedAt := s.clock()
+	// serial.Next returned once the clock had reached ser, but this is a
+	// second reading: a clock stepped back in between would put the
+	// certificate and the leaf time below the serial, which audit verify
+	// refuses (serial <= issuance time, F-WR-01). Refuse it here instead.
+	if micros(issuedAt) < ser {
+		return nil, refusalErr(wire.CodeUnavailable, "clock_regression", serial.ErrClockRegression)
+	}
 
 	keyID := cert.KeyID{
 		CA:      req.CARole.String(),
@@ -168,7 +175,7 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 			return err
 		}
 		idx, err := s.appendLocked(ctx, tx, tlog.Leaf{
-			TimeMicros: uint64(issuedAt.UnixMicro()), //nolint:gosec // G115: issuedAt >= serial > 0 µs (serial.Next)
+			TimeMicros: uint64(issuedAt.UnixMicro()), //nolint:gosec // G115: issuedAt >= serial > 0 µs, checked after serial.Next
 			Kind:       tlog.KindIssue,
 			Body:       leafBody,
 		})

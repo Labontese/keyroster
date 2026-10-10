@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -475,4 +476,66 @@ func TestCheckLogWithoutCAKeys(t *testing.T) {
 		!strings.Contains(err.Error(), "no CA keys are recorded") {
 		t.Fatalf("CheckLog with the CA keys deleted = %v, want errLogMismatch naming the missing CA keys", err)
 	}
+}
+
+// stepClock returns a fixed time, and once armed, that time minus back
+// from the (after+1)th read on.
+type stepClock struct {
+	mu    sync.Mutex
+	t     time.Time
+	back  time.Duration
+	after int
+	armed bool
+	reads int
+}
+
+func (c *stepClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.armed {
+		return c.t
+	}
+	c.reads++
+	if c.reads > c.after {
+		return c.t.Add(-c.back)
+	}
+	return c.t
+}
+
+func (c *stepClock) arm(after int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.armed, c.after, c.reads = true, after, 0
+}
+
+// TestIssueRefusesClockStepAfterSerial (F-WR-01): serial.Next returns once
+// the clock has reached the serial, but Issue reads the clock again for
+// the issuance time. A clock stepped back between the two reads would give
+// a certificate and leaf time below the serial, which audit verify refuses
+// (the serial is never after the issuance time). Issue refuses such an
+// issuance as a clock regression instead of logging it.
+func TestIssueRefusesClockStepAfterSerial(t *testing.T) {
+	clk := &stepClock{t: time.Now(), back: time.Second}
+	e := newLogEnvClock(t, NewFixture(t, 1, 1), clk.Now)
+	leaves, issued, last := e.counts()
+	// Issue reads the clock for the request's freshness, twice inside
+	// serial.Next, then for the issuance time: the fourth read steps back.
+	clk.arm(3)
+	resp, err := e.issue()
+	var r *refusal
+	if !errors.As(err, &r) || r.reason != "clock_regression" {
+		t.Fatalf("Issue with the clock stepped back after the serial = %v, %v; want a clock_regression refusal", resp, err)
+	}
+	if l, i, s := e.counts(); l != leaves || i != issued || s != last {
+		t.Fatalf("after the refusal: %d leaves, %d issued, serial %d; want %d, %d, %d unchanged", l, i, s, leaves, issued, last)
+	}
+	// The clock recovered: issuance resumes and the log verifies.
+	clk.mu.Lock()
+	clk.armed = false
+	clk.t = clk.t.Add(time.Second)
+	clk.mu.Unlock()
+	if _, err := e.issue(); err != nil {
+		t.Fatalf("issuance after the clock recovered: %v", err)
+	}
+	e.verifyExport()
 }

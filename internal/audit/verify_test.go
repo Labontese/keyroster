@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -87,11 +88,21 @@ func newSigner(t testing.TB, alg string) ssh.Signer {
 // newBareFixture generates the keys but logs nothing.
 func newBareFixture(t testing.TB, logAlg string) *fixture {
 	t.Helper()
+	return newBareFixtureAt(t, logAlg, time.Now())
+}
+
+// newBareFixtureAt is newBareFixture with a log that starts at start. The
+// leaf time and the serial start at the same microsecond and each add
+// raises the leaf time, so every issue leaf's time is at or after its
+// serial, as the signer writes them (serial.Next).
+func newBareFixtureAt(t testing.TB, logAlg string, start time.Time) *fixture {
+	t.Helper()
+	us := uint64(start.UnixMicro()) //nolint:gosec // G115: test times are after 1970
 	return &fixture{
 		t: t, root: newSigner(t, "ed25519"), logKey: newSigner(t, logAlg),
 		ca: newSigner(t, "ed25519"), hostCA: newSigner(t, "ed25519"), machineCA: newSigner(t, "ed25519"),
 		ops: newSigner(t, "ed25519"), admin: newSigner(t, "ed25519"),
-		micros: uint64(time.Now().UnixMicro()), serial: uint64(time.Now().UnixMicro()), //nolint:gosec // G115: after 1970
+		micros: us, serial: us,
 	}
 }
 
@@ -99,10 +110,21 @@ func newBareFixture(t testing.TB, logAlg string) *fixture {
 // bundle_install entry, as every signer log does after ca-init.
 func newFixture(t testing.TB, logAlg string) *fixture {
 	t.Helper()
-	f := newBareFixture(t, logAlg)
+	return newFixtureAt(t, logAlg, time.Now())
+}
+
+// newFixtureAt is newFixture with a log that starts at start.
+func newFixtureAt(t testing.TB, logAlg string, start time.Time) *fixture {
+	t.Helper()
+	f := newBareFixtureAt(t, logAlg, start)
 	f.addBundle(f.signDocs(f.genesis(), f.policy(), f.root))
 	return f
 }
+
+// issuedAt is the issuance time the signer pairs with serial: serials are
+// allocated from the clock in microseconds (serial.Next), and the
+// certificate is built right after.
+func issuedAt(serial uint64) time.Time { return time.UnixMicro(int64(serial)) } //nolint:gosec // G115: test serials are microsecond times
 
 // pins are the fixture root's fingerprint.
 func (f *fixture) pins() []string { return []string{ssh.FingerprintSHA256(f.root.PublicKey())} }
@@ -220,7 +242,7 @@ func issueBody(t testing.TB, c *ssh.Certificate, serial uint64) []byte {
 func (f *fixture) addIssue() {
 	f.t.Helper()
 	f.serial++
-	f.add(tlog.KindIssue, issueBody(f.t, f.newCert(f.serial, time.Now()), f.serial))
+	f.add(tlog.KindIssue, issueBody(f.t, f.newCert(f.serial, issuedAt(f.serial)), f.serial))
 }
 
 func (f *fixture) addRefusal() {
@@ -445,27 +467,27 @@ func TestVerifyChecksCertificates(t *testing.T) {
 	}{
 		{"cert_bad_signature", func(t *testing.T, f *fixture) {
 			f.serial++
-			c := f.newCert(f.serial, time.Now())
+			c := f.newCert(f.serial, issuedAt(f.serial))
 			c.Signature.Blob = append([]byte(nil), c.Signature.Blob...)
 			c.Signature.Blob[0] ^= 1
 			f.add(tlog.KindIssue, issueBody(t, c, f.serial))
 		}, "CA signature"},
 		{"leaf_serial_differs_from_cert", func(t *testing.T, f *fixture) {
 			f.serial++
-			f.add(tlog.KindIssue, issueBody(t, f.newCert(f.serial, time.Now()), f.serial+1))
+			f.add(tlog.KindIssue, issueBody(t, f.newCert(f.serial, issuedAt(f.serial)), f.serial+1))
 		}, "serial"},
 		{"serial_not_increasing", func(t *testing.T, f *fixture) {
 			f.addIssue()
 			s := f.serial - 10
-			f.add(tlog.KindIssue, issueBody(t, f.newCert(s, time.Now()), s))
+			f.add(tlog.KindIssue, issueBody(t, f.newCert(s, issuedAt(s)), s))
 		}, "serial"},
 		{"serial_repeated", func(t *testing.T, f *fixture) {
 			f.addIssue()
-			f.add(tlog.KindIssue, issueBody(t, f.newCert(f.serial, time.Now()), f.serial))
+			f.add(tlog.KindIssue, issueBody(t, f.newCert(f.serial, issuedAt(f.serial)), f.serial))
 		}, "serial"},
 		{"key_id_serial_differs", func(t *testing.T, f *fixture) {
 			f.serial++
-			c := f.newCert(f.serial, time.Now())
+			c := f.newCert(f.serial, issuedAt(f.serial))
 			c.KeyId = strings.Replace(c.KeyId, fmt.Sprintf("/ser=%d", f.serial), fmt.Sprintf("/ser=%d", f.serial+1), 1)
 			c = forgeCert(t, c, f.ca, f.ca.PublicKey())
 			b, err := (&tlog.IssueBody{CARole: 1, Serial: f.serial, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
@@ -476,7 +498,7 @@ func TestVerifyChecksCertificates(t *testing.T) {
 		}, "key ID"},
 		{"leaf_key_id_differs", func(t *testing.T, f *fixture) {
 			f.serial++
-			c := f.newCert(f.serial, time.Now())
+			c := f.newCert(f.serial, issuedAt(f.serial))
 			b, err := (&tlog.IssueBody{CARole: 1, Serial: f.serial, Cert: c.Marshal(), KeyID: c.KeyId + "x"}).Encode()
 			if err != nil {
 				t.Fatal(err)
@@ -485,9 +507,9 @@ func TestVerifyChecksCertificates(t *testing.T) {
 		}, "key ID"},
 		{"signature_key_is_certificate", func(t *testing.T, f *fixture) {
 			f.serial++
-			caCert := f.newCert(f.serial, time.Now()) // a certificate standing in as the CA key
+			caCert := f.newCert(f.serial, issuedAt(f.serial)) // a certificate standing in as the CA key
 			f.serial++
-			c := f.newCert(f.serial, time.Now())
+			c := f.newCert(f.serial, issuedAt(f.serial))
 			c = forgeCert(t, c, f.ca, caCert)
 			f.add(tlog.KindIssue, issueBody(t, c, f.serial))
 		}, "certificate"},
@@ -512,36 +534,94 @@ func TestVerifyChecksCertificates(t *testing.T) {
 		// the policy in force (user: 43200 s, permit-pty only).
 		{"validity_at_policy_cap_ok", func(t *testing.T, f *fixture) {
 			f.serial++
-			c := f.newCert(f.serial, time.Now())
+			c := f.newCert(f.serial, issuedAt(f.serial))
 			c.ValidBefore = c.ValidAfter + 43200 + 300
 			f.add(tlog.KindIssue, issueBody(t, forgeCert(t, c, f.ca, f.ca.PublicKey()), f.serial))
 		}, ""},
 		{"validity_above_policy_cap", func(t *testing.T, f *fixture) {
 			f.serial++
-			c := f.newCert(f.serial, time.Now())
+			c := f.newCert(f.serial, issuedAt(f.serial))
 			c.ValidBefore = c.ValidAfter + 43200 + 300 + 1
 			f.add(tlog.KindIssue, issueBody(t, forgeCert(t, c, f.ca, f.ca.PublicKey()), f.serial))
 		}, "outside the user profile of policy v1"},
 		{"extension_outside_policy", func(t *testing.T, f *fixture) {
 			f.serial++
-			c := f.newCert(f.serial, time.Now())
+			c := f.newCert(f.serial, issuedAt(f.serial))
 			c.Extensions["permit-agent-forwarding"] = ""
 			f.add(tlog.KindIssue, issueBody(t, forgeCert(t, c, f.ca, f.ca.PublicKey()), f.serial))
 		}, "extension"},
 		{"critical_option_outside_policy", func(t *testing.T, f *fixture) {
 			f.serial++
-			c := f.newCert(f.serial, time.Now())
+			c := f.newCert(f.serial, issuedAt(f.serial))
 			c.CriticalOptions = map[string]string{"force-command": "/bin/sh"}
 			f.add(tlog.KindIssue, issueBody(t, forgeCert(t, c, f.ca, f.ca.PublicKey()), f.serial))
 		}, "critical option"},
-		{"expired_certificate_still_ok", func(t *testing.T, f *fixture) {
-			f.serial++
-			f.add(tlog.KindIssue, issueBody(t, f.newCert(f.serial, time.Now().Add(-2*365*24*time.Hour)), f.serial))
-		}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, "ed25519")
+			f.addIssue()
+			tc.build(t, f)
+			_, err := f.verify(join(f.lines()), nil)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Verify: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifyChecksIssuanceTime (F-WR-01): cert.Build sets ValidAfter to the
+// issuance time minus its five-minute backdate, and the signer issues at a
+// time between the serial (a microsecond clock reading, serial.Next) and
+// the leaf time. A logged certificate whose validity starts anywhere else,
+// postdated or backdated, is one the signer could not have produced, even
+// with a span within the profile's cap.
+func TestVerifyChecksIssuanceTime(t *testing.T) {
+	year := 365 * 24 * time.Hour
+	cases := []struct {
+		name  string
+		start time.Time // the log's first leaf time and serial
+		build func(t *testing.T, f *fixture)
+		want  string
+	}{
+		{"expired_certificate_still_ok", time.Now().Add(-2 * year), func(_ *testing.T, f *fixture) {
+			f.addIssue()
+		}, ""},
+		{"postdated_to_2030", time.Now(), func(t *testing.T, f *fixture) {
+			f.serial++
+			c := f.newCert(f.serial, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)) // a 1 h span, within the 12 h cap
+			f.add(tlog.KindIssue, issueBody(t, c, f.serial))
+		}, "valid after"},
+		{"postdated_by_a_minute", time.Now(), func(t *testing.T, f *fixture) {
+			f.serial++
+			f.add(tlog.KindIssue, issueBody(t, f.newCert(f.serial, issuedAt(f.serial).Add(time.Minute)), f.serial))
+		}, "valid after"},
+		{"backdated_a_year", time.Now(), func(t *testing.T, f *fixture) {
+			f.serial++
+			f.add(tlog.KindIssue, issueBody(t, f.newCert(f.serial, issuedAt(f.serial).Add(-year)), f.serial))
+		}, "valid after"},
+		{"serial_after_leaf_time", time.Now(), func(t *testing.T, f *fixture) {
+			f.serial = f.micros + uint64(time.Second/time.Microsecond)
+			f.add(tlog.KindIssue, issueBody(t, f.newCert(f.serial, issuedAt(f.serial)), f.serial))
+		}, "serial"},
+		// The signer raises a leaf's time to its predecessor's when the
+		// clock stepped back (appendLocked): a refusal logged an hour
+		// ahead, then an issuance at the corrected clock.
+		{"leaf_time_raised_ok", time.Now(), func(_ *testing.T, f *fixture) {
+			f.micros += uint64(time.Hour / time.Microsecond)
+			f.addRefusal()
+			f.addIssue()
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixtureAt(t, "ed25519", tc.start)
 			f.addIssue()
 			tc.build(t, f)
 			_, err := f.verify(join(f.lines()), nil)
@@ -634,7 +714,7 @@ func (f *fixture) addRoleIssue(role wire.CARole, ca ssh.Signer, certType uint32,
 	keyID := cert.KeyID{CA: role.String(), Subject: "s:e2e", Request: strings.Repeat(hex.EncodeToString([]byte{f.request}), 16), Policy: pol, Serial: f.serial}
 	c, err := cert.Build(cert.Request{
 		Profile: roleProfile(certType), Subject: newSigner(f.t, "ed25519").PublicKey(), Principals: []string{"alice"},
-		Now: time.Now(), ValidFor: time.Hour, KeyID: keyID, Serial: f.serial,
+		Now: issuedAt(f.serial), ValidFor: time.Hour, KeyID: keyID, Serial: f.serial,
 	}, ca, rand.Reader)
 	if err != nil {
 		f.t.Fatal(err)
@@ -940,6 +1020,51 @@ func TestVerifyAnchoring(t *testing.T) {
 	}
 }
 
+// TestVerifyRefusesRetiredRootAsAdmin (F-WR-02, KEY-07): a root stays a
+// root after a rotation retires it. Root A signs genesis v1, v2 rotates to
+// root B, and v3, signed by B, lists A as an admin. VerifySuccessor sees
+// only v3's predecessor (root B), so Verify checks every policy against
+// the roots of every bundle installed before it.
+func TestVerifyRefusesRetiredRootAsAdmin(t *testing.T) {
+	onlyRoot := func(s ssh.Signer) trust.RootSet {
+		return trust.RootSet{Keys: []trust.RootKey{{Key: trust.FormatKey(s.PublicKey()), Custody: "software"}}, Threshold: 1}
+	}
+	chain := func(t *testing.T, admin func(a ssh.Signer) ssh.PublicKey) (*fixture, ssh.Signer) {
+		f := newBareFixture(t, "ed25519")
+		a, b := f.root, newSigner(t, "ed25519")
+		g := f.signDocs(f.genesis(), f.policy(), a)
+		f.addBundle(g)
+		f.addIssue()
+		v2 := f.signDocs(f.successor(g, func(bd *trust.Bundle) { bd.Root = onlyRoot(b) }), f.policy(), a, b)
+		f.addBundle(v2)
+		p1, err := f.policy().Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pol := f.policy()
+		pol.Version, pol.Prev = 2, trust.SHA256Hex(p1)
+		pol.Admins = append(pol.Admins, trust.AdminKey{Name: "extra", Key: trust.FormatKey(admin(a))})
+		v3 := f.successor(v2, func(bd *trust.Bundle) { bd.Root = onlyRoot(b) })
+		v3.Version = 3
+		f.addBundle(f.signDocs(v3, pol, b))
+		return f, b
+	}
+	t.Run("retired_root_refused", func(t *testing.T) {
+		f, b := chain(t, func(a ssh.Signer) ssh.PublicKey { return a.PublicKey() })
+		_, err := Verify(strings.NewReader(join(f.lines())), Options{Pins: []string{ssh.FingerprintSHA256(b.PublicKey())}, Threshold: 1})
+		if !errors.Is(err, trust.ErrKeyIsRoot) || !strings.Contains(err.Error(), "entry 3") {
+			t.Fatalf("Verify = %v, want trust.ErrKeyIsRoot at entry 3 (the v3 bundle_install)", err)
+		}
+	})
+	t.Run("control_fresh_admin_ok", func(t *testing.T) {
+		f, b := chain(t, func(ssh.Signer) ssh.PublicKey { return newSigner(t, "ed25519").PublicKey() })
+		rep, err := Verify(strings.NewReader(join(f.lines())), Options{Pins: []string{ssh.FingerprintSHA256(b.PublicKey())}, Threshold: 1})
+		if err != nil || rep.BundleVersion != 3 || rep.PolicyVersion != 2 {
+			t.Fatalf("Verify = %+v, %v; want bundle v3, policy v2", rep, err)
+		}
+	})
+}
+
 // TestVerifyAnchorsOnLaterBundle (VIS-03, KEY-07): the pins may name the
 // root set of any trust bundle in the log, not only the genesis bundle.
 // The first bundle whose root set and threshold are exactly the pins is the
@@ -950,6 +1075,7 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 	// check is one Verify call over the case's log.
 	type check struct {
 		pins       []ssh.Signer
+		threshold  int    // 0 = 1
 		want       string // "" = must verify
 		why        string // with want: the specific reason, also required
 		wantAnchor uint64
@@ -963,6 +1089,28 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 	}
 	onlyRoot := func(s ssh.Signer) trust.RootSet {
 		return trust.RootSet{Keys: []trust.RootKey{{Key: trust.FormatKey(s.PublicKey()), Custody: "software"}}, Threshold: 1}
+	}
+	// rootSet is the root set of roots at threshold.
+	rootSet := func(threshold uint32, roots ...ssh.Signer) trust.RootSet {
+		set := trust.RootSet{Threshold: threshold}
+		for _, r := range roots {
+			set.Keys = append(set.Keys, trust.RootKey{Key: trust.FormatKey(r.PublicKey()), Custody: "software"})
+		}
+		return set
+	}
+	// rotatedTo is genesis by root A (the fixture root) and an issuance,
+	// then successor v2 with the root set and signers v2 returns for A, and
+	// an issuance under v2.
+	rotatedTo := func(t *testing.T, v2 func(a ssh.Signer) (trust.RootSet, []ssh.Signer)) (f *fixture, a ssh.Signer) {
+		f = newBareFixture(t, "ed25519")
+		a = f.root
+		g := f.signDocs(f.genesis(), f.policy(), a)
+		f.addBundle(g)
+		f.addIssue()
+		roots, signers := v2(a)
+		f.addBundle(f.signDocs(f.successor(g, func(b *trust.Bundle) { b.Root = roots }), f.policy(), signers...))
+		f.addIssue()
+		return f, a
 	}
 	// rotated is the homelab rotation: genesis by root A (the fixture
 	// root) and an issuance, then successor v2 naming root C, signed by
@@ -1087,13 +1235,99 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 			f, _, c := rotated(t, nil, both)
 			return f, []check{{pins: []ssh.Signer{c, newSigner(t, "ed25519")}, want: "not anchored in the pinned roots", why: "2 pins, 1 roots"}}
 		}},
+		// G-WR-03: multi-root sets, a root in both sets, duplicate
+		// signatures, and a root set that recurs.
+		{"two_new_roots_threshold_2_anchor_v2", func(t *testing.T) (*fixture, []check) {
+			// v2 names C and D at threshold 2, signed by A, C and D. The
+			// anchor must be the exact set at the exact threshold.
+			c, d := newSigner(t, "ed25519"), newSigner(t, "ed25519")
+			f, a := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, c, d), []ssh.Signer{a, c, d}
+			})
+			return f, []check{
+				{pins: []ssh.Signer{c, d}, threshold: 2, wantAnchor: 2},
+				{pins: []ssh.Signer{d, c}, threshold: 2, wantAnchor: 2},
+				{pins: []ssh.Signer{c, d}, threshold: 1, want: "not anchored in the pinned roots", why: "bundle threshold 2, pinned threshold 1"},
+				{pins: []ssh.Signer{c}, threshold: 1, want: "not anchored in the pinned roots", why: "1 pins, 2 roots"},
+				{pins: []ssh.Signer{a}, wantAnchor: 1},
+			}
+		}},
+		{"two_new_roots_threshold_2_one_signed", func(t *testing.T) (*fixture, []check) {
+			c, d := newSigner(t, "ed25519"), newSigner(t, "ed25519")
+			f, _ := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, c, d), []ssh.Signer{a, c}
+			})
+			return f, []check{{pins: []ssh.Signer{c, d}, threshold: 2, want: "not a valid successor", why: "(new roots) signed by 1 of 2 roots, need 2"}}
+		}},
+		{"duplicate_signature_toward_threshold_2", func(t *testing.T) (*fixture, []check) {
+			// C's signature appears twice on both documents; it counts once.
+			c, d := newSigner(t, "ed25519"), newSigner(t, "ed25519")
+			f, _ := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, c, d), []ssh.Signer{a, c, c}
+			})
+			return f, []check{{pins: []ssh.Signer{c, d}, threshold: 2, want: "not a valid successor", why: "(new roots) signed by 1 of 2 roots, need 2"}}
+		}},
+		{"root_in_both_sets_counts_toward_both", func(t *testing.T) (*fixture, []check) {
+			// v2 keeps A and adds C at threshold 1. A's signature alone
+			// meets the previous AND the new threshold (G-WR-02): C is
+			// listed without ever signing.
+			c := newSigner(t, "ed25519")
+			f, a := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(1, a, c), []ssh.Signer{a}
+			})
+			return f, []check{
+				{pins: []ssh.Signer{a, c}, wantAnchor: 2},
+				{pins: []ssh.Signer{a}, wantAnchor: 1},
+			}
+		}},
+		{"root_in_both_sets_threshold_2", func(t *testing.T) (*fixture, []check) {
+			// v2 keeps A and adds C at threshold 2: A alone meets the
+			// previous threshold but not the new one.
+			c := newSigner(t, "ed25519")
+			alone, _ := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, a, c), []ssh.Signer{a}
+			})
+			if _, err := Verify(strings.NewReader(join(alone.lines())), Options{Pins: []string{ssh.FingerprintSHA256(alone.root.PublicKey())}, Threshold: 1}); err == nil ||
+				!strings.Contains(err.Error(), "(new roots) signed by 1 of 2 roots, need 2") {
+				t.Fatalf("v2 {A, C} at threshold 2 signed by A alone: Verify error = %v, want the new roots' threshold refusal", err)
+			}
+			f, a := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, a, c), []ssh.Signer{a, c}
+			})
+			return f, []check{
+				{pins: []ssh.Signer{a, c}, threshold: 2, wantAnchor: 2},
+				{pins: []ssh.Signer{a, c}, threshold: 1, want: "not anchored in the pinned roots", why: "bundle threshold 2, pinned threshold 1"},
+			}
+		}},
+		{"root_set_recurs_first_match_anchors", func(t *testing.T) (*fixture, []check) {
+			// v1 {A} -> v2 {C} -> v3 {A}: pins A anchor on the first bundle
+			// with that root set, v1.
+			f := newBareFixture(t, "ed25519")
+			a, c := f.root, newSigner(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), a)
+			f.addBundle(g)
+			v2 := f.signDocs(f.successor(g, func(b *trust.Bundle) { b.Root = onlyRoot(c) }), f.policy(), a, c)
+			f.addBundle(v2)
+			v3 := f.successor(v2, func(b *trust.Bundle) { b.Root = onlyRoot(a) })
+			v3.Version = 3
+			f.addBundle(f.signDocs(v3, f.policy(), c, a))
+			f.addIssue()
+			return f, []check{
+				{pins: []ssh.Signer{a}, wantAnchor: 1},
+				{pins: []ssh.Signer{c}, wantAnchor: 2},
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f, checks := tc.build(t)
 			export := join(f.lines())
 			for _, ch := range checks {
-				rep, err := Verify(strings.NewReader(export), Options{Pins: pinsOf(ch.pins...), Threshold: 1})
+				threshold := ch.threshold
+				if threshold == 0 {
+					threshold = 1
+				}
+				rep, err := Verify(strings.NewReader(export), Options{Pins: pinsOf(ch.pins...), Threshold: threshold})
 				if ch.want != "" {
 					if err == nil {
 						t.Fatalf("pins %v: Verify accepted the log, anchored on v%d", pinsOf(ch.pins...), rep.AnchorVersion)
