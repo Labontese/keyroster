@@ -47,6 +47,11 @@ Out-of-scope discoveries logged by plan executors. Each item names the plan that
     - The "Alternative without it" above (start the homelab signer over from a genesis bundle) is not taken.
     - KEY-07 stays open until 01-21.
     - The successor builder behind `root sign --prev` (`trust.BuildSuccessor`) accepts a chained v2 policy (`TestBuildSuccessor/round_trip_chained_policy`, 01-17). Authoring a new policy is Phase 4 work (quorum-signed policy changes), so the rotation carries the policy in force unchanged.
+  - **Rehearsal rotation, not the real ceremony (owner decision 2026-10-09; plans 01-20 and 01-21).** This supersedes three lines of the "Gap closure planned" sub-bullet above: "01-20 (planned): the owner's offline ceremony ...", "01-21 (planned): destruction of the test roots and the closing of KEY-07", and "KEY-07 stays open until 01-21".
+    - **01-20 (PR #25)** rotated the homelab signer to trust bundle v2 (SHA-256 `92dc8ef4…b295`, full value in `01-20-SUMMARY.md`). Its roots are TEST roots C and D (fingerprints in `01-20-SUMMARY.md`). They were generated in WSL on the networked workstation, each command under `unshare -r -n`, with directories standing in for the USB sticks, and with no paper and no offline machine.
+    - **01-21** destroyed TEST roots A and B. Claude checked the WSL copies (removed with `shred -u`); the other copies were destroyed as attested by the owner. Neither is a guaranteed erase, so A and B stay treated as exposed. Their public fingerprints stay valid audit pins for the v1 part of the log.
+    - **Owed (owner action): the real offline ceremony, as a v3 rotation.** On a live USB, two new roots are made on separate sticks, with their fingerprints on paper. Successor bundle v3 names them. One of TEST roots C or D co-signs v3 where it is kept, under the successor rule (`docs/runbooks/root-ceremony.md`, "Rotate the roots", step 4). v3 is installed with stop, install and start, and the audit is pinned to the new roots from the paper. Then C and D, and their passphrase files, are destroyed.
+    - **KEY-07 and must-have truth 2 of 01-14 stay open until then.**
 - **01-15: reconciliation of the items assigned to 01-15.**
   - **dependency-firewall piv pass:** confirmed and closed (see the 01-13 entry).
   - **capslock piv:** not done; moved to the next plan that edits CI (see the 01-13 entry).
@@ -57,6 +62,7 @@ Out-of-scope discoveries logged by plan executors. Each item names the plan that
   - **Final required checks:** `.github/rulesets/main-integrity.json` lists all 17 phase checks (PR #18). Each check succeeded on `main` at 92c6977 before the change; `pr-title` runs on pull requests only.
     - **The live ruleset still requires the old seven.** Under the rollout rule in CONTRIBUTING.md, the owner applies the ruleset from the PR branch before approving.
     - Verify the live rules (01-15 Task 3 verify 1) at the merge gate. Mark REPO-01 complete only after that check passes.
+- **01-20/01-21: the real offline root ceremony is owed as a v3 rotation from TEST roots C and D (owner action).** The homelab signer rests on TEST roots C and D (bundle v2, a rehearsal on the networked workstation), and TEST roots A and B are destroyed; the owner's offline ceremony becomes successor v3, co-signed by C or D, after which C and D are destroyed, and KEY-07 stays open until then. See the "Rehearsal rotation, not the real ceremony" sub-bullet of the 01-14 entry.
 
 ## Design items deferred from the phase 1 code review (owner decision 2026-10-08)
 

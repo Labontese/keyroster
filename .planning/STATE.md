@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: trust-core
-status: executing
-stopped_at: "01-20 Task 4 merge gate: owner approves PR #25"
-last_updated: "2026-10-09T16:51:39.472Z"
+status: verifying
+stopped_at: "01-21 Task 4 merge gate: owner removes VM passwordless sudo and approves PR #26"
+last_updated: "2026-10-10T05:46:05.074Z"
 last_activity: 2026-10-06
 last_activity_desc: Phase 01 execution started
-state_head: e59110a234076f99458f9e9b25d127c1cde35547
+state_head: 9061090037b48a924ff7b21b3e5031545eb2b6ea
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 21
-  completed_plans: 20
+  completed_plans: 21
   percent: 0
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 Phase: 01 (trust-core) — READY TO EXECUTE
 Plan: 16 of 16
-Status: Ready to execute
+Status: All 21 plans executed — ready for phase re-verification after the 01-21 merge gate; KEY-07 stays open (owed to the owner's real offline ceremony, a v3 rotation)
 Last activity: 2026-10-06 - Completed quick task 261006-ixz: Fix flaky signer freshness-boundary tests with a deterministic test clock
 
 Progress: [░░░░░░░░░░] 0%
@@ -76,6 +76,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P19 | 10 min | 2 tasks | 5 files |
 | Phase 01 P18 | 29 min | 3 tasks | 10 files |
 | Phase 01 P20 | 60 min | 3 tasks | 6 files |
+| Phase 01 P21 | 17 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -157,6 +158,7 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-18: fork_under_old_pins is an accepted residual; after rotating away from exposed roots, auditors pin the new roots (runbook)
 - [Phase 01]: 01-20: rehearsal rotation (owner decision 2026-10-09): TEST roots C and D made in WSL with simulated media; homelab signer moved to bundle v2 92dc8ef4; offline ceremony UNVERIFIED, KEY-07 stays open until a later v3 rotation onto offline roots
 - [Phase 01]: 01-20: v2 carries policy v1 unchanged; requirements-completed is VIS-03 only and requirements.mark-complete is skipped
+- [Phase 01]: 01-21: TEST roots A and B retired (owner shred -u, attested); KEY-07 stays open, real offline ceremony owed as v3 rotation co-signed by C or D, then C and D destroyed
 
 ### Pending Todos
 
@@ -186,6 +188,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-09T16:51:39.387Z
-Stopped at: 01-20 Task 4 merge gate: owner approves PR #25
+Last session: 2026-10-10T05:46:04.943Z
+Stopped at: 01-21 Task 4 merge gate: owner removes VM passwordless sudo and approves PR #26
 Resume file: None
