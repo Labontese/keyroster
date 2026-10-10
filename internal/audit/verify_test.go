@@ -950,6 +950,7 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 	// check is one Verify call over the case's log.
 	type check struct {
 		pins       []ssh.Signer
+		threshold  int    // 0 = 1
 		want       string // "" = must verify
 		why        string // with want: the specific reason, also required
 		wantAnchor uint64
@@ -963,6 +964,28 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 	}
 	onlyRoot := func(s ssh.Signer) trust.RootSet {
 		return trust.RootSet{Keys: []trust.RootKey{{Key: trust.FormatKey(s.PublicKey()), Custody: "software"}}, Threshold: 1}
+	}
+	// rootSet is the root set of roots at threshold.
+	rootSet := func(threshold uint32, roots ...ssh.Signer) trust.RootSet {
+		set := trust.RootSet{Threshold: threshold}
+		for _, r := range roots {
+			set.Keys = append(set.Keys, trust.RootKey{Key: trust.FormatKey(r.PublicKey()), Custody: "software"})
+		}
+		return set
+	}
+	// rotatedTo is genesis by root A (the fixture root) and an issuance,
+	// then successor v2 with the root set and signers v2 returns for A, and
+	// an issuance under v2.
+	rotatedTo := func(t *testing.T, v2 func(a ssh.Signer) (trust.RootSet, []ssh.Signer)) (f *fixture, a ssh.Signer) {
+		f = newBareFixture(t, "ed25519")
+		a = f.root
+		g := f.signDocs(f.genesis(), f.policy(), a)
+		f.addBundle(g)
+		f.addIssue()
+		roots, signers := v2(a)
+		f.addBundle(f.signDocs(f.successor(g, func(b *trust.Bundle) { b.Root = roots }), f.policy(), signers...))
+		f.addIssue()
+		return f, a
 	}
 	// rotated is the homelab rotation: genesis by root A (the fixture
 	// root) and an issuance, then successor v2 naming root C, signed by
@@ -1087,13 +1110,99 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 			f, _, c := rotated(t, nil, both)
 			return f, []check{{pins: []ssh.Signer{c, newSigner(t, "ed25519")}, want: "not anchored in the pinned roots", why: "2 pins, 1 roots"}}
 		}},
+		// G-WR-03: multi-root sets, a root in both sets, duplicate
+		// signatures, and a root set that recurs.
+		{"two_new_roots_threshold_2_anchor_v2", func(t *testing.T) (*fixture, []check) {
+			// v2 names C and D at threshold 2, signed by A, C and D. The
+			// anchor must be the exact set at the exact threshold.
+			c, d := newSigner(t, "ed25519"), newSigner(t, "ed25519")
+			f, a := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, c, d), []ssh.Signer{a, c, d}
+			})
+			return f, []check{
+				{pins: []ssh.Signer{c, d}, threshold: 2, wantAnchor: 2},
+				{pins: []ssh.Signer{d, c}, threshold: 2, wantAnchor: 2},
+				{pins: []ssh.Signer{c, d}, threshold: 1, want: "not anchored in the pinned roots", why: "bundle threshold 2, pinned threshold 1"},
+				{pins: []ssh.Signer{c}, threshold: 1, want: "not anchored in the pinned roots", why: "1 pins, 2 roots"},
+				{pins: []ssh.Signer{a}, wantAnchor: 1},
+			}
+		}},
+		{"two_new_roots_threshold_2_one_signed", func(t *testing.T) (*fixture, []check) {
+			c, d := newSigner(t, "ed25519"), newSigner(t, "ed25519")
+			f, _ := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, c, d), []ssh.Signer{a, c}
+			})
+			return f, []check{{pins: []ssh.Signer{c, d}, threshold: 2, want: "not a valid successor", why: "(new roots) signed by 1 of 2 roots, need 2"}}
+		}},
+		{"duplicate_signature_toward_threshold_2", func(t *testing.T) (*fixture, []check) {
+			// C's signature appears twice on both documents; it counts once.
+			c, d := newSigner(t, "ed25519"), newSigner(t, "ed25519")
+			f, _ := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, c, d), []ssh.Signer{a, c, c}
+			})
+			return f, []check{{pins: []ssh.Signer{c, d}, threshold: 2, want: "not a valid successor", why: "(new roots) signed by 1 of 2 roots, need 2"}}
+		}},
+		{"root_in_both_sets_counts_toward_both", func(t *testing.T) (*fixture, []check) {
+			// v2 keeps A and adds C at threshold 1. A's signature alone
+			// meets the previous AND the new threshold (G-WR-02): C is
+			// listed without ever signing.
+			c := newSigner(t, "ed25519")
+			f, a := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(1, a, c), []ssh.Signer{a}
+			})
+			return f, []check{
+				{pins: []ssh.Signer{a, c}, wantAnchor: 2},
+				{pins: []ssh.Signer{a}, wantAnchor: 1},
+			}
+		}},
+		{"root_in_both_sets_threshold_2", func(t *testing.T) (*fixture, []check) {
+			// v2 keeps A and adds C at threshold 2: A alone meets the
+			// previous threshold but not the new one.
+			c := newSigner(t, "ed25519")
+			alone, _ := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, a, c), []ssh.Signer{a}
+			})
+			if _, err := Verify(strings.NewReader(join(alone.lines())), Options{Pins: []string{ssh.FingerprintSHA256(alone.root.PublicKey())}, Threshold: 1}); err == nil ||
+				!strings.Contains(err.Error(), "(new roots) signed by 1 of 2 roots, need 2") {
+				t.Fatalf("v2 {A, C} at threshold 2 signed by A alone: Verify error = %v, want the new roots' threshold refusal", err)
+			}
+			f, a := rotatedTo(t, func(a ssh.Signer) (trust.RootSet, []ssh.Signer) {
+				return rootSet(2, a, c), []ssh.Signer{a, c}
+			})
+			return f, []check{
+				{pins: []ssh.Signer{a, c}, threshold: 2, wantAnchor: 2},
+				{pins: []ssh.Signer{a, c}, threshold: 1, want: "not anchored in the pinned roots", why: "bundle threshold 2, pinned threshold 1"},
+			}
+		}},
+		{"root_set_recurs_first_match_anchors", func(t *testing.T) (*fixture, []check) {
+			// v1 {A} -> v2 {C} -> v3 {A}: pins A anchor on the first bundle
+			// with that root set, v1.
+			f := newBareFixture(t, "ed25519")
+			a, c := f.root, newSigner(t, "ed25519")
+			g := f.signDocs(f.genesis(), f.policy(), a)
+			f.addBundle(g)
+			v2 := f.signDocs(f.successor(g, func(b *trust.Bundle) { b.Root = onlyRoot(c) }), f.policy(), a, c)
+			f.addBundle(v2)
+			v3 := f.successor(v2, func(b *trust.Bundle) { b.Root = onlyRoot(a) })
+			v3.Version = 3
+			f.addBundle(f.signDocs(v3, f.policy(), c, a))
+			f.addIssue()
+			return f, []check{
+				{pins: []ssh.Signer{a}, wantAnchor: 1},
+				{pins: []ssh.Signer{c}, wantAnchor: 2},
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f, checks := tc.build(t)
 			export := join(f.lines())
 			for _, ch := range checks {
-				rep, err := Verify(strings.NewReader(export), Options{Pins: pinsOf(ch.pins...), Threshold: 1})
+				threshold := ch.threshold
+				if threshold == 0 {
+					threshold = 1
+				}
+				rep, err := Verify(strings.NewReader(export), Options{Pins: pinsOf(ch.pins...), Threshold: threshold})
 				if ch.want != "" {
 					if err == nil {
 						t.Fatalf("pins %v: Verify accepted the log, anchored on v%d", pinsOf(ch.pins...), rep.AnchorVersion)

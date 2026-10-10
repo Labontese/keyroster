@@ -1079,11 +1079,21 @@ func TestRootSignSuccessor(t *testing.T) {
 	})
 
 	t.Run("new_root_signs_with_key", func(t *testing.T) {
-		if code, _, stderr := sign(t, succ, prevPolicy, "1", &c); code != 0 {
+		// Its own out-dir, so it does not depend on another subtest: the
+		// new root C signs first, as in the runbook, then the previous root
+		// A completes the successor.
+		out := filepath.Join(g.dir, "succ-new-first")
+		if code, _, stderr := sign(t, out, prevPolicy, "1", &c); code != 0 {
 			t.Fatalf("root sign --prev --key C: exit %d: %s", code, stderr)
 		}
-		if err := verifyOut(t, succ); err != nil {
-			t.Fatalf("VerifySuccessor after A and C signed: %v", err)
+		if err := verifyOut(t, out); !errors.Is(err, trust.ErrThreshold) || !strings.Contains(err.Error(), "(previous roots)") {
+			t.Fatalf("VerifySuccessor with the new root's signature only: err = %v, want the previous roots' %v", err, trust.ErrThreshold)
+		}
+		if code, _, stderr := sign(t, out, prevPolicy, "1", &a); code != 0 {
+			t.Fatalf("root sign --prev --key A: exit %d: %s", code, stderr)
+		}
+		if err := verifyOut(t, out); err != nil {
+			t.Fatalf("VerifySuccessor after C and A signed: %v", err)
 		}
 	})
 
