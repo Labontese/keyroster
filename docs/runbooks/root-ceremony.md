@@ -275,9 +275,19 @@ apply the same rule (`trust.VerifySuccessor`):
 
 - Everything from [What you need](#what-you-need), with one USB stick per
   new root.
-- The `bundle.json` and `policy.json` in force, copied to
-  `/media/transfer/prev`. Check their SHA-256 against the values recorded
-  when they were installed (step 5 or the previous rotation).
+- The `bundle.json` and `policy.json` in force **and their `.sigs` files**,
+  copied to `/media/transfer/prev`. The ceremony directory they came from
+  holds all four: `ceremony/` for the genesis bundle (step 5), `rotation/`
+  for an earlier rotation.
+- The SHA-256 of that `bundle.json` **from the transcript**, as recorded in
+  [step 5](#5-verify-offline-and-copy-the-results) or in step 5 of the
+  previous rotation. Never take it from `sha256sum` of the copy in
+  `/media/transfer/prev`: that only checks the copy against itself.
+  `root sign --prev` and `trust verify --prev` take it as `--prev-sha256`
+  and refuse a `bundle.json` with any other hash before anything is
+  written or reported. They also refuse a `bundle.json` or `policy.json`
+  that its own roots' threshold has not signed. That second check cannot
+  tell a forged root set from the real one; only the recorded hash can.
 - The current roots, or enough of them to meet the current threshold.
 
 ### Steps
@@ -300,15 +310,17 @@ apply the same rule (`trust.VerifySuccessor`):
 
    ```
    /tmp/keyroster root sign --prev /media/transfer/prev \
+     --prev-sha256 <SHA-256 of the bundle in force, from the transcript> \
      --roots /media/transfer/new-roots.pub --threshold 1 \
      --policy /media/transfer/prev/policy.json \
      --out-dir /media/transfer/rotation \
      --key /media/usbC/root-c.age
    ```
 
-   Before you type the hash prefix, compare:
-   - the `Successor of trust bundle vN, sha256 ...` line with the recorded
-     SHA-256 of the bundle in force;
+   It refuses, and writes nothing, if `prev/bundle.json` does not have
+   exactly that SHA-256. Before you type the hash prefix, compare:
+   - the `Successor of trust bundle vN, sha256 ...` line with the
+     transcript once more;
    - the new root fingerprints with the paper;
    - the CA, ops and log fingerprints with the previous ceremony;
    - the policy hash.
@@ -325,18 +337,23 @@ apply the same rule (`trust.VerifySuccessor`):
      homelab TEST roots of plan 01-14, which were created on a networked
      machine. Its signature only authorizes the hand-over, so it adds
      nothing an attacker does not already have. The trust rests on the new
-     roots' signatures and on the paper check in step 5.
+     roots' signatures, on the paper check in step 5, and on the recorded
+     SHA-256 in `--prev-sha256`: the holder of an exposed root can sign a
+     forged bundle in force as easily as the real one, so only that hash
+     shows that the new roots sign a successor of the real one.
 5. **Verify against the paper:**
 
    ```
    /tmp/keyroster trust verify --prev /media/transfer/prev \
+     --prev-sha256 <SHA-256 of the bundle in force, from the transcript> \
      --pin SHA256:<new root C from paper> --pin SHA256:<new root D from paper> --threshold 1 \
      --bundle /media/transfer/rotation/bundle.json --policy /media/transfer/rotation/policy.json
    ```
 
    It lists the signers as `signed by previous root ...` and
-   `signed by new root ...`. It refuses unless both thresholds are met and
-   the new root set is exactly the pinned fingerprints. It must end with an
+   `signed by new root ...`. It refuses unless `prev/bundle.json` has the
+   recorded SHA-256 and its own roots' signatures, both thresholds are met,
+   and the new root set is exactly the pinned fingerprints. It must end with an
    `OK: successor of trust bundle v1: ...` line. In the homelab shape (two
    current roots at threshold 1, one of which signed, and both new roots
    signed) that line reads:
@@ -394,6 +411,9 @@ type them at the prompts.
 > separate physical sticks, the paper fingerprints and an offline machine
 > therefore remain **UNVERIFIED**, and so does step 7 as written (pins from
 > paper). The owner's real offline ceremony runs them in a later rotation.
+> `--prev-sha256` was added after that rehearsal, which checked the bundle
+> in force by comparing hashes by hand; the flag and its refusals are
+> exercised by the Go unit tests and `TestRootRotationLiveSigner` only.
 >
 > Plan 01-21 ran step 8 for TEST roots A and B only, which were held on a
 > networked workstation: their WSL copies were removed with `shred -u` and

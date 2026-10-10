@@ -104,6 +104,30 @@ func VerifyGenesisBundle(bundle, bundleSigs, policy, policySigs []byte, pins []s
 	return b, p, nil
 }
 
+// VerifySelfSigned parses bundle and requires at least its own threshold of
+// its own root keys to have signed both bundle and policy under their
+// namespaces. It says nothing about whose roots those are, nor whether
+// policy is the bundle's policy: a bundle that names an attacker's roots
+// and is signed by them passes. The caller must authenticate the bundle by
+// other means (pinned roots, or the SHA-256 recorded at its install).
+func VerifySelfSigned(bundle, bundleSigs, policy, policySigs []byte) (*Bundle, error) {
+	b, err := ParseBundle(bundle)
+	if err != nil {
+		return nil, fmt.Errorf("bundle: %w", err)
+	}
+	roots, err := b.rootKeys()
+	if err != nil {
+		return nil, err
+	}
+	if err := requireSigners(bundle, bundleSigs, NamespaceBundle, roots, int(b.Root.Threshold), "bundle (its own roots)"); err != nil {
+		return nil, err
+	}
+	if err := requireSigners(policy, policySigs, NamespacePolicy, roots, int(b.Root.Threshold), "policy (its own roots)"); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
 // CheckPins checks operator pins on their own: at least one pin, each a
 // SHA256:<base64> fingerprint, none repeated, and a threshold in
 // 1..len(pins). It returns ErrPins or ErrThreshold.

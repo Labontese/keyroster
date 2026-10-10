@@ -67,10 +67,19 @@ func TestRootRotationLiveSigner(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The SHA-256 of the bundle in force, as recorded at its install: root
+	// sign --prev and trust verify --prev refuse a --prev that does not
+	// have it.
+	genesis, err := os.ReadFile(filepath.Join(env.BundleDir, "bundle.json")) //nolint:gosec // test file
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevSHA := trust.SHA256Hex(genesis)
+
 	// The new root C signs first: a wrong confirmation writes bundle.json
 	// and signs nothing, then the real hash prefix signs.
 	succ := filepath.Join(keys, "succ")
-	sign := []string{"root", "sign", "--prev", env.BundleDir, "--roots", rootsPub, "--threshold", "1",
+	sign := []string{"root", "sign", "--prev", env.BundleDir, "--prev-sha256", prevSHA, "--roots", rootsPub, "--threshold", "1",
 		"--policy", filepath.Join(env.BundleDir, "policy.json"), "--out-dir", succ}
 	signC := append(append([]string{}, sign...), "--key", rootFiles["c"], "--passphrase-fd", "3")
 	if code, out := keyrosterWithPassphrase(t, "", append(signC, "--confirm", "00000000")...); code != 1 || !strings.Contains(out, "nothing was signed") {
@@ -111,7 +120,7 @@ func TestRootRotationLiveSigner(t *testing.T) {
 	// force and pinned to the new roots' out-of-band fingerprints.
 	cFP, dFP := fingerprint(t, rootFiles["c"]+".pub"), fingerprint(t, rootFiles["d"]+".pub")
 	verifyPrev := func(pins ...string) (int, string) {
-		args := []string{"trust", "verify", "--prev", env.BundleDir, "--threshold", "1",
+		args := []string{"trust", "verify", "--prev", env.BundleDir, "--prev-sha256", prevSHA, "--threshold", "1",
 			"--bundle", filepath.Join(succ, "bundle.json"), "--policy", filepath.Join(succ, "policy.json")}
 		for _, p := range pins {
 			args = append(args, "--pin", p)
