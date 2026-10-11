@@ -1,8 +1,11 @@
 ---
 phase: 2
+review_round: 2
 reviewers: [codex, ollama-nemotron, ollama-gemma, ollama-gptoss]
-reviewed_at: 2026-10-11T05:45:00Z
+reviewed_at: 2026-10-11T12:55:00Z
 plans_reviewed: [02-01-PLAN.md, 02-02-PLAN.md, 02-03-PLAN.md, 02-04-PLAN.md, 02-05-PLAN.md, 02-06-PLAN.md, 02-07-PLAN.md, 02-08-PLAN.md, 02-09-PLAN.md, 02-10-PLAN.md, 02-11-PLAN.md, 02-12-PLAN.md, 02-13-PLAN.md, 02-14-PLAN.md]
+plans_at_commit: adff052
+previous_round: d849096
 models:
   codex: "gpt-6-luna (reasoning=high)"
   ollama-nemotron: "nemotron-3-ultra:cloud"
@@ -13,11 +16,23 @@ model_sources:
   ollama-nemotron: "request"
   ollama-gemma: "request"
   ollama-gptoss: "request"
+trimmed_reviewers:
+  ollama-nemotron:
+    omitted: [research]
+    estimated_tokens: 230711
+    note: "02-RESEARCH.md left out to fit the 262k context; all 14 plans sent in full"
+  ollama-gemma:
+    omitted: [research]
+    estimated_tokens: 240395
+    note: "02-RESEARCH.md left out to fit the 262k context; all 14 plans sent in full"
+  ollama-gptoss:
+    omitted: [sibling-plans]
+    note: "131k context: one plan per request (46k-59k tokens each), with RESEARCH.md but without the other 13 plans"
 verification:
-  method: "every finding adversarially verified by a Claude agent against plan text, CONTEXT/RESEARCH and repo source"
-  findings: 250
-  verdicts: {already_covered: 127, refuted: 48, partial: 72, confirmed: 3}
-  surviving_by_severity: {high: 0, medium: 3, low: 72}
+  method: "every finding adversarially verified by a Claude agent against the current plan text, CONTEXT/RESEARCH, repo source and the round-1 verified appendix"
+  findings: 198
+  verdicts: {already_covered: 107, refuted: 72, partial: 18, confirmed: 1}
+  surviving_by_severity: {high: 0, medium: 1, low: 18}
 ---
 
 # Cross-AI Plan Review — Phase 2
@@ -26,2823 +41,2241 @@ verification:
 ## Plan-Revision Conflicts
 <!-- gsd:plan-revision-conflicts:end -->
 
-> **Reviewer caveats.** None of the four external reviewers had repo access. Codex's sandbox
-> could not start a shell (Windows error 267). The Ollama models were called through the plain
-> chat API. `gpt-oss:120b` (131k context) reviewed each plan separately, with project context,
-> roadmap and CONTEXT.md but without RESEARCH.md or the sibling plans. Nemotron and Gemma got the
-> full prompt (~160k tokens). Claude was skipped (orchestrator), Kimi had no quota, and the
-> other Ollama cloud models are retired or paid-only.
+> **This is round 2.** It reviews the plans as revised after round 1 (plans at `adff052`). The
+> round-1 review, with its 250 verified findings, is this file at commit `d849096`.
 >
-> To make up for this, **every finding (250 after per-plan dedup) was adversarially verified**
-> by a Claude agent with repo access. Read the Consensus Summary and the Verified Findings
-> appendix, not the raw reviews: 70% of raw findings were already covered or wrong.
+> **Reviewer caveats.**
+> - **Codex** had read access to the repo this time and cites Phase 1 source lines. It ran no tests.
+> - **nemotron** and **gemma** got all 14 plans, project context, roadmap and CONTEXT.md through
+>   the plain Ollama chat API, without `02-RESEARCH.md` (the full prompt, 936 kB, would not fit in
+>   262k tokens). They had no repo access, and gemma cites no line numbers at all.
+> - **gpt-oss** reviewed each plan on its own, with RESEARCH.md but without the sibling plans and
+>   without repo access. It cites line numbers in files that do not exist yet, so its citations
+>   are not evidence.
+> - **Not run:** Claude (it is the orchestrator), Kimi (quota exceeded), OpenCode and the GSD
+>   Ollama lane (`jq` is not installed; the Ollama models were called directly instead).
+>
+> Because three of four reviewers saw plan text only, **every finding (198 after per-plan
+> dedup) was adversarially verified** by a Claude agent with repo access. Read the Consensus
+> Summary and the appendix, not the raw reviews: 90% of raw findings were already covered or wrong.
 
 ## Codex Review
 
+### Review scope
 
-**Source verification was unavailable.** The workspace reports `C:\Users\labon\ssh-cert-manager`, but every attempt to start a shell there failed with Windows error 267 (“directory not found”). I could not inspect the referenced source files or verify their line numbers. Per your instruction, source-dependent concerns below are framed as questions to resolve, not as confirmed defects. File paths identify where to check; line-level evidence is unavailable.
+All 14 plan files are present. I compared them with the existing Phase 1 code and checked whether the revised plans address the risks described in their own review ledger. The new Phase 2 packages and routes are not implemented in the current source tree, so their behavior remains a plan to verify during execution. I did not run tests.
 
 ### 02-01
 
-**Summary.** The tracer starts with the right security boundary: a root-signed RP policy, quorum-signed directory, and signer-verified passkey assertion, tested through real `sshd`. Its broad scope is understandable for a vertical slice, but it creates a large review and integration burden.
+**Summary.** A broad but coherent tracer establishes the signed policy and directory, signer-side WebAuthn verification, and first SSH certificate login.
 
-**Strengths**
+**Strengths.** It preserves the Phase 1 admin request format and defines exact principals and TTL as signer decisions. That fits the existing domain-separated signing bytes in [issue.go:20](C:/Users/labon/ssh-cert-manager/internal/wire/issue.go:20) and the signer’s log-before-release transaction in [issue.go:139](C:/Users/labon/ssh-cert-manager/internal/signer/issue.go:139). The revised end-to-end test checks the parsed certificate’s key, principals, validity, and refusal control ([02-01-PLAN.md:329](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-01-PLAN.md:329)).
 
-- Leaves the Phase 1 admin issuance format unchanged.
-- Computes principals and TTL limits from signer-held directory state.
-- Includes a real SSH acceptance and refusal control.
+**Concerns.** **MEDIUM** — This plan adds several lasting formats and signer paths at once. Phase 1’s log decoder currently accepts kinds only through `KindBundleInstall` ([leaf.go:67](C:/Users/labon/ssh-cert-manager/internal/tlog/leaf.go:67)); until all decoder, restart, and audit paths are updated, a partial merge could make logs unreadable.
 
-**Concerns**
+**Suggestions.** Keep the specified golden vectors and restart checks as merge blockers, and review the new log-kind handling in every consumer, not only the signer.
 
-- **HIGH — Scope and review risk.** One plan changes policy, wire, storage, signer, audit-log formats and certificate IDs across many files. If the tracer has an architectural flaw, it can be costly to unwind.
-- **MEDIUM — Oversized frame limitation.** This plan caps directory traffic at the existing frame size, while 02-03 later raises the directory cap. Confirm the tracer’s test fixtures cannot accidentally establish an inadequate permanent protocol assumption.
-- **MEDIUM — Test setup may obscure authorization behavior.** The real `sshd` control/refusal depends on generating correct principals files and matching the user CA configuration. Confirm failures distinguish signer authorization from host configuration.
-
-**Suggestions**
-
-- Define stable format vectors for the directory, login request, log leaves and key IDs before implementation.
-- Make the e2e test assert the issued certificate’s principals, TTL, key and audit leaf directly, in addition to the SSH outcome.
-
-**Risk Assessment.** **HIGH** — This plan establishes several durable security formats in one very large change.
+**Risk Assessment. MEDIUM.** The architecture follows existing trust boundaries, but this is the most foundational format change.
 
 ### 02-02
 
-**Summary.** Probing Windows agent behavior before implementation is a strong sequencing choice, and the in-memory agent addresses the stated lifetime and persistence constraints. The pipe ownership and lifecycle mechanisms need careful validation on the actual Windows interfaces.
+**Summary.** The Windows in-memory agent and cross-platform CI address the known inbox-agent lifetime and persistence problems.
 
-**Strengths**
+**Strengths.** It probes the Windows client before relying on it and specifies a SID-restricted pipe, server-owner check, and no fallback to the inbox agent. The agent exit race now has a stated synchronization rule and a concurrent-add test ([02-02-PLAN.md:205](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-02-PLAN.md:205), [02-02-PLAN.md:241](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-02-PLAN.md:241)).
 
-- Gates implementation on real inbox OpenSSH behavior.
-- Explicitly disallows falling back to the persistent inbox agent or dropping lifetime constraints.
-- Includes pipe ACL, owner verification and real-client offer tests.
+**Concerns.** **MEDIUM** — Correctness still depends on real Win32 OpenSSH honoring the custom pipe path. The plan gates that assumption with a probe, but the end-to-end login path through `Ensure` is deferred to 02-14 ([02-02-PLAN.md:243](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-02-PLAN.md:243)).
 
-**Concerns**
+**Suggestions.** Preserve the distinction between CI’s test pipe and the actual login path in the platform record; do not mark the Windows path verified until the homelab login exercises it.
 
-- **HIGH — Pipe ownership check.** Verify the planned handle-to-server-PID flow works with the concrete `go-winio` connection type and cannot be bypassed by a raced or replaced pipe. The relevant locations are `internal/winagent/owner_windows.go` and `ensure_windows.go`.
-- **MEDIUM — Agent shutdown semantics.** The plan polls `keyring.List()` to expire keys and exits when empty. Confirm active SSH connections and concurrent additions cannot cause premature shutdown or keep the process alive indefinitely.
-- **MEDIUM — Probe coverage.** A successful `ssh-add` and `ssh` offer proves the pipe spelling, but confirm the test also proves the expected certificate identity and expiry behavior under the exact CLI path.
-
-**Suggestions**
-
-- Test pipe replacement and connection races around `Ensure`, not only a pre-existing pipe.
-- Record the SID and pipe security descriptor behavior in tests without embedding machine-specific account details.
-
-**Risk Assessment.** **HIGH** — The Windows agent is security-sensitive process and IPC code, and the plan’s core assumption depends on platform-specific behavior.
+**Risk Assessment. MEDIUM.** The controls and probes are appropriate; remaining risk is platform-specific execution.
 
 ### 02-03
 
-**Summary.** This hardening plan covers refusal paths, concurrency, restart verification, frame caps and fuzzing. It is essential to the signer boundary, though its scope is unusually broad and relies on precise synchronization and log-state checks.
+**Summary.** This plan hardens the signer’s new refusal paths, directory state, and per-message framing.
 
-**Strengths**
+**Strengths.** The revised frame tests cover short headers, exact caps, and oversized messages before allocation ([02-03-PLAN.md:390](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-03-PLAN.md:390)). This matters because the existing framing code uses one 64 KiB cap ([frame.go:19](C:/Users/labon/ssh-cert-manager/internal/wire/frame.go:19)); the plan’s type-aware rewrite changes that boundary.
 
-- Tests refusal cases with successful controls.
-- Checks directory authority again after policy changes and detects DB/log disagreement at startup.
-- Adds per-message size limits before allocation and fuzzes new parsers.
+**Concerns.** **LOW** — Changing `ReadMessage` and `WriteMessage` together creates an opportunity for their per-type limits to diverge. The plan specifies read-side boundary cases clearly; the write-side tests should remain explicit acceptance criteria.
 
-**Concerns**
+**Suggestions.** Keep tests for exact-cap writes and “oversize writes nothing,” alongside the parser fuzz targets.
 
-- **HIGH — Concurrency guarantees need precise transaction boundaries.** Confirm locking and DB uniqueness jointly cover request replay, directory installation and the directory-change check. The named tests alone do not prove there is no authorization-to-commit race.
-- **MEDIUM — Frame parser boundary.** The plan changes framing to read type before applying a per-type cap. Confirm malformed or truncated headers cannot cause excess allocation or inconsistent read/write limits.
-- **MEDIUM — Large test matrix.** A single plan includes integration refusal tests, signer races, log consistency, frame changes and numerous fuzz targets. Failures may be difficult to localize.
-
-**Suggestions**
-
-- Specify the exact lock and transaction ordering for login issuance versus directory install.
-- Test adversarial frame lengths at zero, header-only, cap, cap+1 and integer-boundary values.
-
-**Risk Assessment.** **HIGH** — This plan hardens the most consequential authorization and concurrency paths.
+**Risk Assessment. LOW–MEDIUM.** The test plan addresses the main parser risks; execution must keep both directions aligned.
 
 ### 02-04
 
-**Summary.** Re-proving login authorization from exported logs is a strong complement to signer enforcement. The main risk is correctness of the audit state machine across bundle and directory successors, rather than the individual signature checks.
+**Summary.** The audit extension aims to re-prove each login from the request, assertion, signed directory, policy, and certificate.
 
-**Strengths**
+**Strengths.** It adds positive as well as tampering fixtures, including a directory that remains valid across an RP-only policy successor ([02-04-PLAN.md:219](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-04-PLAN.md:219)). The existing verifier already checks bundle succession and active CA keys ([verify.go:265](C:/Users/labon/ssh-cert-manager/internal/audit/verify.go:265), [verify.go:186](C:/Users/labon/ssh-cert-manager/internal/audit/verify.go:186)).
 
-- Verifies the login request, assertion, directory grant, certificate and key ID together.
-- Includes tampering with checkpoints re-signed by the log key.
-- Keeps earlier log kinds in scope and documents older-verifier incompatibility.
+**Concerns.** **LOW** — The new audit semantics depend on keeping a cached verification result correct as either the policy or directory changes. The plan now specifies rechecking only when that pair changes ([02-04-PLAN.md:149](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-04-PLAN.md:149)); the positive multi-successor fixture is important to preserve.
 
-**Concerns**
+**Suggestions.** Treat the multi-successor fixture as a compatibility test for future policy and directory changes, not just as a one-time regression test.
 
-- **HIGH — Historical policy/directory semantics.** Confirm the audit walk uses exactly the policy and directory in force at each leaf, including after policy successor installs and CA rotation.
-- **MEDIUM — Certificate validity reconstruction.** “What `cert.Build` produces” needs a deterministic rule for timestamps, backdating and rounding so valid certificates do not fail audit or malformed ones pass.
-- **MEDIUM — Audit state retention.** The verifier must preserve enough prior policy/directory state to validate later entries without trusting mutable current-state data.
-
-**Suggestions**
-
-- Add explicit multi-successor fixtures: policy change, directory change, then login, with old and new CA material as applicable.
-- Make tamper errors identify the entry and the exact failed binding, as the plan requires.
-
-**Risk Assessment.** **HIGH** — Audit verification is a core promise of the product; subtle timeline errors could either accept unauthorized issuance or reject valid logs.
+**Risk Assessment. LOW–MEDIUM.** It builds on established audit-chain checks, with a new but well-described state machine.
 
 ### 02-05
 
-**Summary.** The software-key backend and signer-originated custody status cover the evaluation-only path without making hardware mandatory. Passphrase handling and key-file creation need especially careful scrutiny.
+**Summary.** The software CA backend fills a real gap in KEY-06 and ties the warning to signer-reported custody.
 
-**Strengths**
+**Strengths.** The plan recognizes that software custody exists only as a constant today ([keystore.go:33](C:/Users/labon/ssh-cert-manager/internal/keystore/keystore.go:33)) and specifies a filesystem backend, custody reporting, and a user-reviewed warning. It also caps installed trust documents so a later status response remains representable ([02-05-PLAN.md:44](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-05-PLAN.md:44)).
 
-- Makes custody a signer-reported property rather than server configuration.
-- Defines concrete refusal tests for weak passphrase setups and edited key files.
-- Shares one banner string between code and documentation.
+**Concerns.** **MEDIUM** — Encrypted files still depend on passphrase handling and safe provisioning. The plan says to mirror the TPM backend’s directory checks and all-or-nothing writes ([02-05-PLAN.md:133](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-05-PLAN.md:133)); that behavior needs direct refusal tests, since the existing custody constant does not provide it.
 
-**Concerns**
+**Suggestions.** Verify permissions and failure cleanup for both new and pre-existing paths; document that same-host passphrase storage weakens the protection.
 
-- **HIGH — Secret lifecycle and filesystem safety.** Confirm the passphrase buffer is cleared on every error path, file creation is atomic, symlinks are refused, and directory ownership/permissions are checked—not just requested at creation.
-- **MEDIUM — Passphrase policy.** A 20-rune minimum and protected passphrase file do not ensure a strong passphrase; document the security limitations of the evaluation backend.
-- **MEDIUM — Status surface.** Status returns bundle and policy material as well as custody. Confirm access controls and per-type frame caps cover this expanded response.
-
-**Suggestions**
-
-- Test symlink substitution, partial writes, existing directories with permissive modes, and cleanup after provisioning failure.
-- State clearly whether decryption happens once at startup or repeatedly, and ensure errors never reveal sensitive input.
-
-**Risk Assessment.** **HIGH** — This adds an online CA key backend and a new signer protocol response containing trust state.
+**Risk Assessment. MEDIUM.** The scope is focused, but the new key-storage path is security-sensitive.
 
 ### 02-06
 
-**Summary.** The server core has a clear “untrusted front end” role, with strict headers, pinned TLS roots, signer-sourced RP configuration and deployment hardening. The trust-on-first-initialization flow and the service’s access to the signer socket deserve close review.
+**Summary.** This plan creates the server shell, TLS identity pinning, status cache, and deployment path.
 
-**Strengths**
+**Strengths.** It sources RP and custody from signer status and gives all handlers one fail-closed cache rule ([02-06-PLAN.md:58](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-06-PLAN.md:58), [02-06-PLAN.md:193](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-06-PLAN.md:193)). It also accounts for certificate reload and operational renewal.
 
-- Keeps RP identity in the signer’s root-signed policy.
-- Provides TLS certificate reload with last-good behavior.
-- Includes real-binary tests, security headers and a hardened systemd unit.
+**Concerns.** **MEDIUM** — The initial TLS pin ceremony is security-critical and easy to misunderstand: it must authenticate the observed root out of band before saving trust. The plan should ensure errors distinguish a pin mismatch from ordinary TLS validation failure and tell the operator how to recover.
 
-**Concerns**
+**Suggestions.** Keep separate tests for an untrusted chain, hostname mismatch, root-pin mismatch, and successful rotation to a pinned chain.
 
-- **HIGH — TLS pin bootstrap.** The first `keyroster init` must establish TLS root pins out of band. Confirm the UI and CLI never treat observed pins as trusted until the user has checked them against an independent source.
-- **HIGH — Signer socket privilege.** Membership in `keyroster-admin` permits socket access. Confirm every new signer operation remains safe for a compromised server process and does not accidentally gain administrative authority.
-- **MEDIUM — Root-chain portability.** The plan stores only roots observed during init; verify behavior when Windows, Linux and macOS build different valid chains, and when the server’s root changes.
-- **MEDIUM — Health status freshness.** The 5-second cache and 60-second stale cutoff should be consistent across health checks, UI rendering and trust responses.
-
-**Suggestions**
-
-- Specify exactly how an operator delivers expected TLS root pins to clients, including rotation and recovery.
-- Test certificate reload while handshakes are concurrent and ensure an invalid replacement cannot displace a valid certificate.
-
-**Risk Assessment.** **HIGH** — This plan introduces the network-facing process, TLS bootstrap and core client trust configuration.
+**Risk Assessment. MEDIUM.** The design is sensible, but bootstrap and status failure behavior need careful implementation review.
 
 ### 02-07
 
-**Summary.** SSHSIG-authenticated admin requests and non-authoritative pending rows are consistent with the project’s trust model. Replay handling, invite state and rate-limit behavior require transactional and privacy checks.
+**Summary.** The admin API uses SSHSIG-authenticated requests to create pending users and invites without treating server rows as authority.
 
-**Strengths**
+**Strengths.** The plan signs the raw request target and exact body, and explicitly avoids normalized-path ambiguity ([02-07-PLAN.md:50](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-07-PLAN.md:50)). It includes bounded request bodies, replay controls, and rate limits.
 
-- Authenticates request payloads, not merely the transport or socket.
-- Stores invite hashes rather than raw tokens.
-- Explicitly proves that `user add` does not alter signer authority.
+**Concerns.** **LOW** — The request authentication and rate-limit logic are new server code, not existing mechanisms verified by the current source. In particular, the IPv6 /64 and global limiter behavior should be tested against the stated map-bound guarantees ([02-07-PLAN.md:174](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-07-PLAN.md:174)).
 
-**Concerns**
+**Suggestions.** Ensure path/body verification occurs before handler side effects, and retain tests for percent-encoded paths and replayed nonces.
 
-- **HIGH — Nonce consumption and handler execution.** Confirm nonce insertion is atomic with the authenticated action or that consuming a nonce before a later DB failure has acceptable retry semantics.
-- **MEDIUM — Reinvitations and existing users.** The plan allows reinviting a user in the installed directory for an additional credential. Confirm user-handle continuity and concurrent reinvite/registration behavior.
-- **MEDIUM — Rate-limit memory.** The limiter is bounded, but confirm eviction does not let an attacker cycle IP keys to evade limits or grow state beyond the cap.
-
-**Suggestions**
-
-- Add tests for concurrent use of the same nonce and concurrent reinvites.
-- Ensure all logs and error paths redact invite tokens, signatures and user handles.
-
-**Risk Assessment.** **MEDIUM** — The authority model is sound in outline, but server-side state races and retry behavior need definition.
+**Risk Assessment. LOW–MEDIUM.** The plan has clear boundaries and tests; its new HTTP authentication layer is the main uncertainty.
 
 ### 02-08
 
-**Summary.** Registration is cleanly separated from credential binding, and owner review before dependency installation is appropriate. The registration flow’s one-use invite semantics and the credential conversion boundary need focused tests.
+**Summary.** This plan adds passkey registration while keeping new credentials pending until an admin binds them in a signed directory.
 
-**Strengths**
+**Strengths.** Registration parsing stays in the server; the signer receives SPKI data, consistent with the dependency boundary. The revised plan makes session and invite consumption conditional and atomic, with a concurrent-finish test ([02-08-PLAN.md:198](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-08-PLAN.md:198), [02-08-PLAN.md:200](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-08-PLAN.md:200)).
 
-- Keeps go-webauthn and CBOR/JWT dependencies out of the signer.
-- Reuses the signer’s SPKI acceptance rules after registration parsing.
-- Explicitly compares fingerprints between invitee and admin.
+**Concerns.** **MEDIUM** — The external WebAuthn library and its transitive dependencies expand the server’s supply chain. The owner review gate and signer dependency check are appropriate, but registration behavior still needs the specified differential tests and real-browser validation.
 
-**Concerns**
+**Suggestions.** Keep dependency approval ahead of `go get`, and ensure the unique pending-credential constraint and concurrent-finish case run in CI.
 
-- **HIGH — Concurrent registration against one invite.** Multiple begin sessions may race to finish against the same invite. Confirm the database transaction guarantees at most one pending credential and one successful invite consumption.
-- **MEDIUM — Credential conversion.** Confirm algorithm identifiers and public-key types cannot disagree during COSE-to-SPKI conversion, especially for RSA and EdDSA.
-- **MEDIUM — Differential oracle scope.** The claimed agreement with go-webauthn depends on parsing equivalent inputs and matching verification options. Ensure the oracle does not compare different policy defaults.
-
-**Suggestions**
-
-- Add concurrent finish tests using the same invite and credential ID.
-- Test exact boundary key sizes, malformed COSE structures and conflicting credential metadata.
-
-**Risk Assessment.** **HIGH** — Registration introduces a third-party parser and creates credentials that later become signer authority.
+**Risk Assessment. MEDIUM.** Strong enrollment controls, with moderate dependency and browser integration risk.
 
 ### 02-09
 
-**Summary.** The verified-base edit pipeline and fingerprint-required approval are strong controls for directory changes. Proposal handling and server cleanup after installation are the main areas to validate.
+**Summary.** The verified-base directory edit pipeline is the authority bridge between pending enrollment and signer-installed users and roles.
 
-**Strengths**
+**Strengths.** It has admins verify the base locally, review a diff, sign the successor, and send it to the signer. The server checks newly bound credentials against pending rows before forwarding ([02-09-PLAN.md:183](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-09-PLAN.md:183)).
 
-- Verifies trust and directory signatures locally before signing changes.
-- Displays a diff and requires confirmation or explicit `--yes`.
-- Addresses duplicate, empty, repeated and concurrent approvals.
+**Concerns.** **MEDIUM** — The pending-row check and signer install are separate steps. A concurrent `--reinvite` can delete the pending credential after the check at [02-09-PLAN.md:186](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-09-PLAN.md:186) but before the install at [02-09-PLAN.md:190](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-09-PLAN.md:190). The signed directory can then install despite the plan’s claim that reinvite makes the old proposal final.
 
-**Concerns**
+**Suggestions.** Reserve the pending credential with a conditional state transition before calling the signer, then finalize or release that reservation based on the signer result. Alternatively, define and test which operation wins a reinvite/install race.
 
-- **HIGH — Proposal co-signing integrity.** Confirm `directory sign` verifies the exact proposal bytes and every existing signature, and that appending signatures cannot change the document or base hash.
-- **MEDIUM — Pending cleanup semantics.** The plan deletes bound credentials and some pending users only after install. Confirm cleanup is transactional and does not remove unbound credentials or erase a user’s ability to enroll another credential.
-- **MEDIUM — CLI confirmation.** `--yes` bypasses the prompt. Ensure the displayed diff and signed bytes are the same canonical document, with no later mutation.
-
-**Suggestions**
-
-- Add tamper tests for proposal files between `sign` and `install`, including altered base hash and reordered signatures.
-- Document how admins transfer proposal bundles safely and recover from stale proposals.
-
-**Risk Assessment.** **HIGH** — The pipeline controls identity and role authority, and proposal workflows are easy to get subtly wrong.
+**Risk Assessment. MEDIUM.** The signer still requires a valid admin signature, so this is not a server-only privilege escalation; it is a race against the plan’s credential-invalidation semantics.
 
 ### 02-10
 
-**Summary.** Passkey-based web sign-in and a read-only account page fit the phase boundary. The session model is sensible, but session invalidation depends on the freshness and consistency of the directory mirror.
+**Summary.** The web sign-in plan adds passkey sessions and a read-only account page, reusing the assertion verifier.
 
-**Strengths**
+**Strengths.** It checks the installed directory on session use and terminates sessions when the credential is no longer bound ([02-10-PLAN.md:39](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-10-PLAN.md:39)). The bounded cookie lifetime and fail-closed status refresh are clearly specified.
 
-- Uses the installed directory rather than pending server rows.
-- Stores only a hash of the opaque session ID and sets a `__Host-` cookie.
-- Includes idle, absolute, logout and disabled-user expiry behavior.
+**Concerns.** **LOW** — A disable followed by re-enable can leave a session alive if no request occurred while disabled; the plan documents that residual ([02-10-PLAN.md:168](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-10-PLAN.md:168)). Since the session is read-only and does not authorize issuance, the impact is limited.
 
-**Concerns**
+**Suggestions.** Keep the residual visible in the security documentation and test that role changes are reflected on the next account-page request.
 
-- **HIGH — Directory freshness and revocation.** A user disabled in the signer may retain a session until the server mirror refreshes. Confirm the maximum propagation delay and fail-closed behavior.
-- **MEDIUM — Session touch semantics.** Verify `TouchSession` enforces both idle and absolute expiry atomically and cannot extend an expired session.
-- **MEDIUM — Username rate limits.** User-controlled identifiers can multiply limiter entries unless the per-user map is bounded and normalized.
-
-**Suggestions**
-
-- Include tests where signer status becomes unavailable and the directory changes between session lookup and rendering.
-- Avoid exposing role details for a session whose directory version is stale or unauthorized.
-
-**Risk Assessment.** **MEDIUM** — The session is read-only, limiting impact, but stale authorization data could misrepresent current access.
+**Risk Assessment. LOW.** Session authority is constrained and the known residual is bounded.
 
 ### 02-11
 
-**Summary.** The shared renderer and signed role/group/host-group edits support the promised principal mapping. The plan’s host-group semantics and empty-principals behavior need clarification before implementation.
+**Summary.** The role, group, and host-group plan connects signer-computed principals to a shared host-file renderer.
 
-**Strengths**
+**Strengths.** It now defines empty mappings as a header-only file and uses the renderer’s output in the SSHD refusal test ([02-11-PLAN.md:35](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-11-PLAN.md:35)). This is a useful fail-closed rule for later host-agent work.
 
-- Reuses one renderer for manual configuration and the future agent.
-- Routes all mutations through the verified-base signing pipeline.
-- Tests real `sshd` acceptance and refusal.
+**Concerns.** **LOW** — Host-group mappings are not host-scoped certificate authorization in this phase; the plan correctly says they affect the rendered file only. Operators could mistake the mapping for signer-enforced host restriction unless the CLI and runbook state this plainly.
 
-**Concerns**
+**Suggestions.** Keep the UI/CLI wording explicit that host groups control generated `AuthorizedPrincipalsFile` content, not issuance scope.
 
-- **HIGH — Host-group meaning at issuance.** Certificates are intentionally not host-scoped, while host groups only render accepted principals. Confirm users understand that a certificate may be valid on any host accepting one of its principals.
-- **MEDIUM — Empty account mapping.** After `unmap`, `host principals` is specified to fail for an unknown account, yet the e2e expects an empty principals file to test refusal. The plan should define how an existing account with zero mapped roles is represented and rendered.
-- **MEDIUM — Update flags.** “Given lists replace the old ones” does not specify how callers clear a principal, extension, user or group list without supplying a replacement.
-
-**Suggestions**
-
-- Define empty mappings separately from unknown accounts and test both outcomes.
-- Provide explicit clear/reset flags or a documented replacement syntax for role updates.
-
-**Risk Assessment.** **MEDIUM** — The authorization model is coherent, but host enforcement and CLI mutation semantics are underspecified.
+**Risk Assessment. LOW.** The plan addresses the earlier empty-output ambiguity and tests the actual renderer path.
 
 ### 02-12
 
-**Summary.** The plan combines the final browser-to-signer path with certificate verification and agent insertion, and correctly makes redemption the issuance boundary. It is the most security-sensitive end-to-end flow and needs careful treatment of one-time state and agent lifetime precision.
+**Summary.** This plan implements the end-user login flow from request construction through passkey approval, redemption, certificate verification, and agent loading.
 
-**Strengths**
+**Strengths.** It mints only at redemption and uses loopback state, PKCE, exact fingerprint display, and client-side certificate checks ([02-12-PLAN.md:49](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-12-PLAN.md:49), [02-12-PLAN.md:50](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-12-PLAN.md:50)). The expiry check now targets the short-lived entry by key ID while confirming the longer-lived entry remains ([02-12-PLAN.md:232](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-12-PLAN.md:232)).
 
-- Shows the fingerprint before WebAuthn and binds it to request bytes.
-- Mints only at redemption and binds code, verifier, state and login ID.
-- Verifies the returned certificate before adding it to an agent.
+**Concerns.** **MEDIUM** — The flow has several independent browser, server, loopback, and agent steps. The plan correctly labels browser and default Windows-agent paths unverified until real use; those labels must remain until 02-14 evidence exists.
 
-**Concerns**
+**Suggestions.** Keep redemption failure and lost-response outcomes fail-closed and non-retryable as specified, and ensure the user-facing errors make clear that a fresh login is required.
 
-- **HIGH — Redemption consumes code before signing.** The plan says `RedeemLogin` transitions to redeemed before calling the signer. If signing or the connection fails, the user cannot retry and may not know whether issuance occurred. Define safe recovery without enabling duplicate issuance.
-- **HIGH — Lifetime rounding.** `ValidBefore − now` is converted to agent lifetime seconds. Confirm rounding cannot make the key outlive the certificate; flooring can also produce a zero/short lifetime near expiry.
-- **MEDIUM — Callback code exposure.** The code is placed in a loopback URL query. Ensure callback responses, browser history, access logs and error pages do not retain or expose it.
-- **MEDIUM — Cross-platform flow test.** The Windows in-memory agent and Unix `ssh-agent` adapters differ; verify the fake-server test exercises the actual adapter on each OS.
-
-**Suggestions**
-
-- Specify idempotent redemption outcomes and how the CLI handles “signer issued but response lost.”
-- Add boundary tests around certificate expiry and the minimum remaining-validity check.
-
-**Risk Assessment.** **HIGH** — This plan joins WebAuthn approval, a network protocol, the signer and local private-key handling.
+**Risk Assessment. MEDIUM.** The flow is carefully specified, but it is the most integration-heavy user-facing plan.
 
 ### 02-13
 
-**Summary.** This is a substantial operational rollout with appropriate one-way hostname and rollback checkpoints. It also combines live signer migration, trust-root signing, service deployment and passkey enrollment, so checkpoints and stop conditions are important.
+**Summary.** This is an operational homelab rollout with explicit owner checkpoints before binding credentials to the RP hostname.
 
-**Strengths**
+**Strengths.** It requires confirmation of the exact hostname before signing RP policy and records the irreversible consequence ([02-13-PLAN.md:128](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-13-PLAN.md:128)). The upgrade includes guarded backups and a written rollback path ([02-13-PLAN.md:210](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-13-PLAN.md:210)).
 
-- Requires owner confirmation of the RP hostname before signing.
-- Backs up signer state and binaries before applying the migration.
-- Compares policy fields and bundle hashes across rehearsal, verification and installation.
+**Concerns.** **MEDIUM** — The rollback boundary ends once a passkey is registered; after that, the plan requires fixing forward. That is appropriate for avoiding a stranded credential, but makes the pre-registration backup, v3 hash checks, and doctor verification essential gates.
 
-**Concerns**
+**Suggestions.** Do not proceed to registration unless the installed bundle, server health, and owner-confirmed RP hash all match the recorded values.
 
-- **HIGH — Live migration recovery.** The backup is useful, but confirm rollback covers both DB schema and installed bundle state, and that the old binary can safely reopen the restored copy.
-- **HIGH — Root signing environment.** `unshare -r -n` is intended to isolate the rehearsal; verify all signing inputs and executable dependencies are present and that no network path remains.
-- **MEDIUM — Operational sequencing.** Server startup, TLS timer, owner init and invite creation span multiple hosts and credentials. A partial failure needs a clear resume point that cannot accidentally sign or install a second successor.
-
-**Suggestions**
-
-- Add a step-by-step rollback and resume table for failures after v3 installation and before enrollment.
-- Verify backups by listing metadata and hashes without exposing private material.
-
-**Risk Assessment.** **HIGH** — It changes live trust state and binds the first passkey to a permanent RP identity.
+**Risk Assessment. MEDIUM.** It is operationally high-consequence but has strong checkpoints and rollback controls.
 
 ### 02-14
 
-**Summary.** Real-browser and real-`sshd` verification is the right final proof, and the plan avoids claiming macOS coverage without hardware. The operational host change and evidence correlation need robust rollback and identity matching.
+**Summary.** The final dogfood plan validates web sign-in and real Windows/Linux SSH logins, then records platform status and adds required CI checks.
 
-**Strengths**
+**Strengths.** It corroborates logins with both audit exports and SSHD journal serials, and the expiry test identifies the five-minute certificate specifically ([02-14-PLAN.md:230](C:/Users/labon/ssh-cert-manager/.planning/phases/02-passkey-login-mvp/02-14-PLAN.md:230)). It leaves macOS unverified rather than claiming unsupported coverage.
 
-- Corroborates logins with both audit records and `sshd` journals.
-- Checks a pre-existing key login before and after the host configuration change.
-- Explicitly leaves macOS unverified and avoids marking broad platform requirements complete.
+**Concerns.** **MEDIUM** — The plan depends on real hardware, a live homelab, and owner interaction. It also makes the OS jobs required, so a skipped or unavailable runner could block merges.
 
-**Concerns**
+**Suggestions.** Before applying the ruleset, confirm both jobs have successful runs on `main` and on the PR branch, as the plan requires.
 
-- **HIGH — Host lockout and stale access.** A correct syntax check does not prove the effective `Match` configuration or principals file is correct for the target account. Ensure effective config is checked with the connection context before relying on certificate login.
-- **MEDIUM — Journal correlation.** Matching key IDs and serials should also verify timestamp, CA and target account to avoid associating unrelated logins.
-- **MEDIUM — Expiry duration.** A 5-minute certificate followed by a six-minute wait is reasonable, but agent process shutdown and key removal should be separately verified.
-- **MEDIUM — Requirement completion.** The plan deliberately keeps AUTH-03 and PLAT-05 pending because macOS is unverified. Confirm roadmap and requirements status remain consistent with that decision.
+**Risk Assessment. MEDIUM.** The evidence plan is strong, but execution and CI availability remain external dependencies.
 
-**Suggestions**
+### Cross-plan findings
 
-- Keep a second authenticated session open during the sshd change and verify the effective config with `sshd -T -C` for the target connection.
-- Record exact audit/journal matching fields while omitting hostnames and addresses from committed summaries.
+The sequence is sensible: signer formats precede hardening and audit verification; the server and enrollment flow precede role management and login; real homelab work follows implementation. The existing Phase 1 issue path already logs before releasing a certificate ([issue.go:196](C:/Users/labon/ssh-cert-manager/internal/signer/issue.go:196)), and the Phase 2 plans preserve that invariant.
 
-**Risk Assessment.** **HIGH** — The final validation changes a live SSH host and produces the evidence used to claim the phase goal.
+The main review finding is the **02-09 reinvite/install race**. The plan says reinvite invalidates old credentials, but checks pending state separately from the signer call. Define a reservation or an explicit race outcome before implementing that pipeline.
 
-### Cross-plan assessment
-
-The sequence is broadly sensible: signer authority first, platform probes early, audit proof before the full login path, and real homelab evidence last. The largest cross-plan risks are:
-
-- The signer protocol, directory and audit formats are introduced across 02-01 through 02-04, before the UI and enrollment flows exist. Their compatibility and migration behavior should be treated as a single review surface.
-- Login redemption and registration both have single-use server state. Their failure and retry semantics should be settled explicitly before implementation.
-- Several plans depend on server directory/status mirrors. Define one freshness contract and make session invalidation, login options and custody reporting follow it.
-- The 14-plan sequence is unusually large for an MVP. The per-plan PR gates help, but the very large tracers may still make security review difficult.
-
-**Overall risk: HIGH.** The plans emphasize strong controls and meaningful end-to-end evidence, but the scope spans new cryptographic formats, signer state, a public-facing server, platform-specific agents and live trust operations. Repository source verification remains outstanding because of the workspace access failure.
-
----
+The plans’ strongest verification choices are exact certificate checks in 02-01, read/write frame boundary cases in 02-03, positive policy-successor audit fixtures in 02-04, and serial-correlated expiry and host-login evidence in 02-14. Keep those as required merge gates.
 
 ---
 
 ## Ollama nemotron-3-ultra Review
 
-### 02-01
+**Cross-AI Plan Review: Phase 2 - Passkey Login MVP**
 
-#### Summary
-This is the phase tracer plan that proves the entire security core end-to-end: root-signed policy with WebAuthn RP → admin-signed directory installed online → passkey assertion over LoginIssueRequest → kr2 certificate → real sshd login via AuthorizedPrincipalsFile. It builds `internal/webauthn` (stdlib-only verifier), `internal/directory` (canonical document with quorum verification), new wire types, log kinds 7/8, and key ID `kr2`. The admin path (`IssueRequest`, `TypeIssueRequest` 0x01, `keyroster/issue-request/v1`) is explicitly kept byte-for-byte unchanged.
-
-#### Strengths
-- True tracer: crosses every signer layer the phase touches at least once, ending at real sshd accept/refuse
-- Clear separation: `internal/webauthn` and `internal/directory` are signer-safe (stdlib only), added to depguard list
-- WebAuthn assertion verified entirely in signer with stdlib crypto; CBOR/COSE parsing stays in server via go-webauthn (D-17)
-- Directory install is online (no signer restart), with successor chain and quorum verification against policy in force
-- Signer computes principals and TTL cap from installed directory, not from request (D-08)
-- Login certificates logged with full request signing bytes, enabling audit re-verification (Pattern 5)
-- Policy RP fields added as `omitempty` pointer, preserving byte-identical round-trip for installed v1 policies (Resolved Q4)
-- Comprehensive must_haves truths covering policy validation, directory canonicalization, evidence verification, authorization, and e2e sshd test
-
-#### Concerns
-- **HIGH**: Plan lists 32 files modified (above 15-file threshold) and 140k tokens. While justified as a tracer, the sheer scope increases review burden and merge risk. The split points examined (moving directory install or verifier to separate plans) were rejected correctly for tracer-first principle, but the PR will be massive.
-- **HIGH**: `internal/signerdb/migrations/0004_directory.sql` adds a `directory` table but the plan doesn't specify how this interacts with existing trust_bundle migrations or whether migration ordering is tested.
-- **MEDIUM**: The `LoginIssueRequest` uses its own domain `keyroster/login-request/v1` but reuses `TypeIssueResponse` 0x81. Need to verify the response parsing doesn't conflate admin and login responses.
-- **MEDIUM**: `internal/webauthn/clientdata.go` uses `encoding/json` v1 Token API (since json/v2 requires Go 1.27). Must ensure the token walk correctly handles all browser quirks (extra keys, duplicate names, invalid UTF-8) without panicking.
-- **MEDIUM**: Soft authenticator in `internal/webauthn/webauthntest` generates ES256/EdDSA/RS256 assertions. Need to confirm RS256 key generation uses ≥2048-bit modulus and that the test covers Windows Hello's RS256 requirement.
-- **LOW**: `audit verify` refuses logs with kinds 7/8 until 02-04 — this interim gap should be explicitly documented in the SUMMARY as a known limitation.
-
-#### Suggestions
-- Add a unit test that an installed v1 policy (without webauthn field) parses, re-encodes byte-identically, and a v2 policy with `"webauthn":null` is refused as non-canonical
-- Add a test that `ParseLoginIssueRequest` refuses a request carrying `admin-sshsig/v1` evidence and vice versa
-- In `test/e2e/login_signer_test.go`, assert the exact refusal detail for the `u:other` account (should be principal mismatch at sshd level, not signer level)
-- Consider extracting the soft authenticator into a separate test-only module to make `go list -deps` checks cleaner
-
-#### Risk Assessment: MEDIUM-HIGH
-The plan is architecturally sound and addresses the riskiest questions first (signer-side WebAuthn verification, online directory install, kr2 key ID). However, the large scope (32 files, 140k tokens) and the fact that this is the first plan in the phase mean any design flaw here propagates to all subsequent plans. The tracer approach is correct but the PR will need exceptionally careful review.
+I'll review each of the 14 plans in sequence, providing structured feedback on quality, completeness, and risks.
 
 ---
 
-### 02-02
+### 02-01: Phase Tracer — RP Policy, Directory Install, Passkey Assertion, kr2 Certificate, Real SSHD Login
 
 #### Summary
-This plan settles the Windows agent question (D-15 option A) by building keyroster's own in-memory agent on a per-user named pipe, since the inbox Win32-OpenSSH agent refuses lifetime constraints and persists keys to the registry. It starts with gating probes (A2: inbox ssh.exe honors named pipe in IdentityAgent/SSH_AUTH_SOCK; A3: GNOME gcr-ssh-agent honors lifetime + certificates), then builds `keyroster agent`, the go-winio dial for admin signing, and adds Windows/macOS CI jobs.
+This is the foundational tracer plan that proves the entire security core of Phase 2 end-to-end. It implements the root-signed policy with WebAuthn RP settings, admin-signed directory document, WebAuthn assertion verification in the signer, kr2 certificate format, and real sshd login validation.
 
 #### Strengths
-- **Critical**: Probes assumptions A2 and A3 *before* writing any agent code — if probes fail, plan stops at blocking-human checkpoint with no silent fallback
-- Owner decision D-15 option A is enforced: never uses inbox agent for login keys, never retries without lifetime constraint
-- Pipe squatting guard: `VerifyServerOwner` checks server process SID matches caller SID before sending keys
-- SDDL on pipe grants only current user SID, denies network logons
-- Agent exits after last key expires or 5 min idle — keys never persist across reboots
-- Admin SSHSIG signing on Windows still uses inbox agent (correct — signing needs no constraint)
-- CI jobs for Windows/macOS added but NOT made required yet (respects Pitfall 10/11)
-- go-winio v0.6.2 linked only into Windows CLI build; signer graph unchanged
+- **Excellent tracer-first approach**: Crosses every signer layer the phase touches at least once
+- **Strong security model**: Signer verifies WebAuthn assertion itself (KEY-02), principals/TTL computed by signer from installed directory (D-08)
+- **Comprehensive audit integration**: Adds log kinds 7/8 with interim refusal in audit verify (replaced in 02-04)
+- **Proper golden vectors**: Pinned byte-for-byte for all new persistent formats
+- **Restart verification**: Step 9 restarts signer after login and issues again — proves logstate consistency
+- **Clear prohibitions**: No server-trust path, no CBOR/COSE in signer
 
 #### Concerns
-- **HIGH**: Assumption A2 (inbox ssh.exe honors named pipe in IdentityAgent) is UNVERIFIED until Task 1 probe runs. If it fails, the entire Windows login path (AUTH-03 on Windows) is blocked. The plan correctly stops at a blocking-human checkpoint, but this is a critical path risk.
-- **HIGH**: Assumption A3 (gcr-ssh-agent honors lifetime + certificates) is also unproven. If it fails, Linux laptop login may need fallback to plain ssh-agent. The plan moves this to 02-12 if unreachable, but the decision impacts user experience.
-- **MEDIUM**: `internal/winagent/ensure_windows.go` starts `keyroster.exe agent` detached. Need to ensure the executable path is correct when installed via systemd vs. manual copy, and that the agent process is properly cleaned up on CLI exit/crash.
-- **MEDIUM**: The probe uses a throwaway Go module in scratchpad — must ensure no probe artifacts leak into the repo (verified by `git status --porcelain` check).
-- **LOW**: `TestInboxSSHOffersAgentCert` requires `KEYROSTER_REQUIRE_INBOX_SSH=1` to fail on missing inbox ssh. This pattern from Phase 1 is good but must be documented for CI maintainers.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **RP ID validation rejects tailnet domains** — The rule "under `.ts.net` needs ≥4 labels" and "under `.c.ts.net` ≥5 labels" may be too restrictive. A tailnet machine `host.tailnet.ts.net` has 4 labels and would pass, but what about `host.sub.tailnet.ts.net` (5 labels)? The Public Suffix List consideration needs verification. |
+| HIGH | **Credential ID uniqueness across entire directory** — `Validate()` requires credential IDs unique across all users. This prevents two users from registering the same hardware key (e.g., shared YubiKey), which may be a legitimate use case. |
+| MEDIUM | **37-byte authenticatorData hardcoded** — RESEARCH assumption A6 (no CBOR in signer). Real authenticators may produce longer authData with extensions. The plan defers this but it's a known gap. |
+| MEDIUM | **No test for `webauthn-assertion/v1` evidence blob size** — The 8 KiB blob cap in `IssueRequest` needs verification against real assertion sizes. |
+| LOW | **Large plan size** — 43 files, 156k tokens. Justified as tracer but increases review burden. |
 
 #### Suggestions
-- In the probe, also test `ssh.exe -o IdentityAgent=<pipe>` with a certificate to verify the cert is offered, not just the key
-- Document the exact pipe spelling that works (`\\.\pipe\keyroster-probe-<hex>` vs `//./pipe/keyroster-probe-<hex>`) in the SUMMARY
-- Add a test that `winagent.Serve` refuses a second instance on the same pipe path (already in winagent_windows_test.go)
-- Ensure `go list -m github.com/google/go-tpm` is recorded before/after `go get go-winio` to catch transitive version drift
+1. Document the exact tailnet domain rule with test cases covering edge cases
+2. Consider allowing duplicate credential IDs with explicit admin approval (or document why not)
+3. Add a test case measuring real authenticatorData sizes from common authenticators
+4. Verify 8 KiB evidence blob cap against max observed assertion sizes
 
-#### Risk Assessment: HIGH
-This plan addresses the single biggest platform risk (Windows agent behavior) with appropriate gating probes. However, both probes target unverified assumptions about third-party behavior (Microsoft's inbox OpenSSH, GNOME's gcr-ssh-agent). If either probe fails, the phase's AUTH-03/PLAT-05 on that platform is at risk. The blocking-human checkpoints are the correct mitigation.
+#### Risk Assessment: **MEDIUM-HIGH**
+The plan is architecturally sound but the RP ID validation and credential uniqueness rules need real-world validation. The 37-byte authData assumption is a known risk that must be tracked.
 
 ---
 
-### 02-03
+### 02-02: Windows Agent Probe & In-Memory Agent
 
 #### Summary
-Hardens the signer boundary from 02-01: SC4 refusal suite through real socket with controls, named refusal matrix for every new detail, concurrency guarantees, restart re-verification of directory under new policy, log-consistency check on start, GetDirectory for server mirror, per-type frame caps, and fuzz targets for all new parsers.
+Settles the Windows agent question early via gating probes (A2: inbox ssh.exe/ssh-add.exe against go-winio pipe; A3: GNOME gcr-ssh-agent lifetime handling), then builds keyroster's own in-memory agent on per-user named pipe.
 
 #### Strengths
-- **Excellent**: Every refusal case has a succeeding control (Phase 1 rule from 01-04) — prevents false positives from unrelated failures
-- SC4 policy clause tested at unit level: a policy successor not root-signed never enables login, even after restart
-- Evidence types cannot be mixed: login request with admin evidence refused, admin request with WebAuthn evidence refused
-- Concurrency tested under `-race`: 16 identical login requests → 1 cert + 15 duplicate_request; 2 concurrent installs → 1 success + 1 chain failure
-- Restart under new admin set: directory becomes unauthorized until re-signed by new admins
-- Log consistency: signer refuses start if stored directory ≠ last directory_install leaf
-- GetDirectory returns installed directory + sigs + authorized state for server mirror
-- Per-type frame caps: 64 KiB for issue/login, 1 MiB+ for directory (prevents OOM on large directories)
-- 11 fuzz targets covering all new parsers (wire, webauthn, directory, cert, tlog)
+- **Probe-first approach**: Validates assumptions before writing code
+- **Clear decision points**: Blocking-human checkpoint if A2 fails
+- **Strong security**: Pipe SDDL grants only current user SID, denies network logons
+- **Owner verification guard**: `VerifyServerOwner` checks pipe server process SID matches caller
+- **Proper lifecycle**: Agent exits when last key expires or after 5 min idle
+- **Cross-platform CI**: Adds cli-windows and cli-macos jobs (non-required initially)
 
 #### Concerns
-- **HIGH**: The SC4 e2e test `TestLoginRefusals` has 6 subtests but the `policy_without_rp` case boots a second signer. Need to ensure the test infrastructure supports multiple concurrent signers cleanly.
-- **MEDIUM**: `policy_not_root_signed` test constructs a successor policy with RP but signed by a fresh key r2. Must verify this doesn't inadvertently test the wrong failure mode (should be `trust.ErrThreshold` at install, then `no_webauthn_policy` at login).
-- **MEDIUM**: Per-type caps in `ReadMessage` read 4-byte length + 2-byte header, then check `length - 2 > maxBodyFor(type)` before allocating body. Must ensure this doesn't break existing `ReadFrame`/`WriteFrame` callers if any exist outside package wire.
-- **MEDIUM**: `internal/tlog` test that `wire.MaxDirectory == tlog.MaxDocument` — if these diverge, directory installs could be truncated or rejected inconsistently.
-- **LOW**: Fuzz targets use `FUZZTIME=10s` locally but CI may need longer. The `scripts/fuzz.sh` auto-discovers targets — confirm CI timeout is adequate.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **A3 deferral to 02-14 creates uncertainty** — If laptop unreachable, gcr-ssh-agent stays UNVERIFIED until 02-14. The plan handles this but it delays platform verification. |
+| MEDIUM | **Elevated agent handling** — `ErrOwnerUnverifiable` guidance says "stop that process or wait until it exits". On Windows, elevated processes may not be easily discoverable by non-elevated shells. |
+| MEDIUM | **No probe for macOS ssh-agent lifetime** — Assumes OpenSSH ssh-agent honors lifetime (tested in Task 3) but doesn't probe macOS-specific behavior. |
+| LOW | **Pipe name includes SID** — `keyroster-agent-<SID>` means each Windows account gets separate agent. Correct but worth documenting for `runas` scenarios. |
 
 #### Suggestions
-- Add a test that `GetDirectory` returns version 0, empty directory, empty sigs, authorized=false when no directory installed
-- In `internal/signer/directory.go`, the `loadDirectory` re-verification under new policy should log the policy version that caused authorization loss
-- Document the exact memory bound: 32 connections × MaxDirectoryFrame (1 MiB + 64 KiB) ≈ 34 MiB worst case
-- Ensure `scripts/fuzz.sh` runs all 11 new targets in CI and fails if any target crashes
+1. Add explicit test for elevated agent scenario in 02-02-F8
+2. Document the `runas` / separate account behavior in needs-hardware.md
+3. Consider adding macOS ssh-agent probe in 02-02 or 02-12
 
-#### Risk Assessment: LOW-MEDIUM
-This plan systematically hardens the signer boundary with comprehensive refusal testing, concurrency guarantees, and fuzzing. The architecture is solid (message-type-separated evidence paths, per-type caps, log-consistency checks). Main risk is test infrastructure complexity for multi-signer e2e tests, but the patterns are established from Phase 1.
+#### Risk Assessment: **MEDIUM**
+The probe-first approach mitigates the biggest risk (A2 failure). A3 deferral is managed but creates a verification gap until 02-14.
 
 ---
 
-### 02-04
+### 02-03: Signer Boundary Hardening — Refusal Matrix, Concurrency, Restart, GetDirectory, Frame Caps, Fuzz
 
 #### Summary
-Makes every login certificate provable after the fact: `keyroster root successor-policy` adds RP to running installation; `keyroster audit verify` verifies new log kinds (directory_install, login_issue) by re-proving passkey authorization, principals, TTL, and certificate binding from logged data. Includes tamper suite where checkpoints are re-signed but authorization checks still catch manipulation.
+Expands the 02-01 tracer into a hardened signer boundary with full refusal matrix (SC4), concurrency guarantees, restart re-verification, GetDirectory, per-type frame caps, and comprehensive fuzz targets.
 
 #### Strengths
-- **Core value delivery**: Audit verify now proves each login certificate was approved by the user's bound passkey under quorum-signed directory — a compromised signer holding the log key cannot fake this
-- `keyroster root successor-policy` is the only supported way to add/change RP, with explicit one-way warning
-- Live e2e `TestAuditLoginAcrossPolicyChange`: RP-less policy → successor-policy → root sign → install+bundle → restart → login → export → audit verify OK
-- Tamper suite: 11 cases covering assertion bit-flip, principals widened, other user's credential, directory never installed, non-admin directory sig, chain broken, role TTL above cap, kr2 roles mismatch, cert key mismatch, CreatedAt skew, login under unauthorized directory
-- Each tampered log has checkpoints re-signed with test log key — only new authorization checks catch it
-- Phase 1 exports (kinds 1-6) still verify unchanged
-- Runbook documents policy-change procedure with RP warning
+- **Complete SC4 demonstration**: Every refusal case has a succeeding control
+- **Policy clause test**: `policy_not_root_signed` proves root signature requirement
+- **Concurrency tests**: 16 identical requests → 1 cert + 15 duplicate_refusal; concurrent installs
+- **Per-type frame caps**: Properly derived from wire.MaxFrame/headerLen, prevents allocation attacks
+- **Fuzz coverage**: All new parsers fuzzed including leaf decoders for kinds 7/8
+- **Log consistency**: Startup refuses if stored directory ≠ last directory_install leaf
 
 #### Concerns
-- **HIGH**: `internal/audit/verify.go` must re-run `webauthn.VerifyAssertion` on logged evidence. The logged evidence includes the full assertion blob. Need to ensure the assertion blob in the log is exactly what the signer verified (no server-side transformation).
-- **HIGH**: `ParseLoginIssueSigningBytes` parses the stored request bytes without evidence section. Must handle the case where the stored request was built by a different CLI version (forward compatibility).
-- **MEDIUM**: Audit verify requires the directory in force at each leaf to verify under the policy in force at that leaf. The signer's `directory_not_authorized` rule (re-verify after policy change) must be mirrored exactly in audit — any divergence creates a gap.
-- **MEDIUM**: `keyroster root successor-policy` refuses no-op (RP unchanged). But what if origins change? The plan says origins default to `https://HOST` but `--webauthn-origin` is repeatable. Should allow origins change without RP change.
-- **LOW**: Compatibility note: Phase 1 `audit verify` binaries refuse logs with kinds 7/8 (unknown kind). This fails closed but should be clearly communicated.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **Frame cap derivation** — `MaxDirectoryFrame = MaxDirectory + 64 KiB + 64 bytes` (1 MiB + 64 KiB + 64). Need to verify this covers base64 encoding overhead for directory + sigs in InstallDirectoryRequest. |
+| MEDIUM | **GetDirectoryResponse version 0 validation** — Rejects version 0 with non-empty Directory/Sigs or Authorized=1. Good, but ensure this is tested. |
+| MEDIUM | **clientDataJSON extra members acceptance** — The accept case `client_data_extra_members_accepted` allows Chrome's extra keys. Verify this doesn't weaken security. |
+| LOW | **FuzzDecodeLeaf seed loop bound** — Raised to KindLoginIssue. Confirm this doesn't cause excessive fuzzing time. |
 
 #### Suggestions
-- Add a test that audit verify accepts a login_issue entry where the directory was re-verified after a policy change that didn't affect its authorization (e.g., RP added, admin set unchanged)
-- In `cmd/keyroster/root.go`, allow `successor-policy` to change origins without changing RP (separate flag or allow `--webauthn-origin` without `--webauthn-rp-id` when RP exists)
-- Ensure the tamper suite includes a case where the log key is compromised but the root keys are not — the audit should still pass for valid entries and fail only for tampered ones
+1. Add explicit test for InstallDirectoryRequest at MaxDirectoryFrame boundary with base64-encoded directory + sigs
+2. Document the clientDataJSON extra-member allowance rationale
+3. Profile fuzz target execution time
 
-#### Risk Assessment: LOW
-This plan closes the audit gap from 02-01 and delivers on the core value (full visibility). The tamper suite with re-signed checkpoints is a strong validation. The successor-policy tool is a necessary operational capability. Low risk because it builds on proven Phase 1 audit infrastructure.
+#### Risk Assessment: **LOW-MEDIUM**
+Well-designed hardening. The frame cap math needs verification but the approach is sound.
 
 ---
 
-### 02-05
+### 02-04: Audit Verification for Login Certificates & Successor Policy Tool
 
 #### Summary
-Implements KEY-06: encrypted software CA keystore backend for evaluation, with loud warning in CLI and UI. Adds `internal/keystore/software` (age-encrypted keys), signer `Status` message reporting custody per role, shared banner constant in `internal/custodytext`, and `keyroster ca issue` prints banner when any key has software custody. Owner approves banner wording at checkpoint.
+Implements `keyroster root successor-policy` for adding RP to running installation, and full audit verification for directory_install and login_issue log kinds. Replaces 02-01's interim refusal with real checks.
 
 #### Strengths
-- Software backend mirrors root ceremony pattern (age scrypt, armored files, 0600 in 0700) but without importing `internal/rootceremony` (KEY-07 import rule)
-- Passphrase sources: `--passphrase-file`, `$CREDENTIALS_DIRECTORY/keyroster-software-passphrase` (systemd LoadCredential), never argv/env
-- Passphrase validation: ≥20 runes, file mode 0600, buffer cleared after use
-- Custody reported by signer's `Status` (D-18) — CLI and UI read from signer, never from config
-- `keyroster ca issue` calls `Status` first, prints framed banner to stderr before issuing
-- Banner text is one Go constant; `docs/security/custody.md` quotes it verbatim (enforced by test)
-- capslock baseline updated for age/scrypt packages; piv target explicitly re-deferred
-- e2e `TestSoftwareCAEndToEnd` verifies banner presence on software signer and absence on agent-backend control
+- **Complete audit verification**: Re-proves every login certificate's passkey authorization from log
+- **Tamper suite**: 12 tamper cases including serial ordering across issue/login_issue
+- **Positive fixture**: `login_directory_survives_rp_policy_change` proves directory survives RP-only policy change
+- **Cached (directory, policy) verification**: Efficient re-check only when policy or directory changes
+- **Shared serial sequence**: login_issue and issue share one serial counter, verified in audit
+- **Compatibility note**: Documents behavior of older audit binaries
 
 #### Concerns
-- **HIGH**: The banner wording checkpoint (Task 2) is a blocking-human decision. If the owner delays or rejects, the plan stalls. The proposed text is long for a terminal line — may need truncation for narrow terminals.
-- **MEDIUM**: `internal/keystore/software` registers backend `software` via blank import in `cmd/keyroster-signer/backends_linux.go`. Must ensure this doesn't pull age/scrypt into the signer graph unexpectedly (dep-firewall and capslock should catch this).
-- **MEDIUM**: `Status` response includes `BundleVersion`, `Bundle`, `BundleSigs`, `Policy`, `PolicySigs`, `DirectoryVersion`, `DirectorySHA256`, `DirectoryAuthorized`. This is a large response — confirm `MaxStatusFrame = 256 KiB` is sufficient.
-- **LOW**: The plan says "doctor already has `CodeSoftwareKey = 'software_key'`" — verify this constant exists and the warning matches the banner style.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **Audit verifies against directory in force at each leaf** — The walk re-checks directory signatures at each directory_install and bundle_install. But what if a directory was installed under policy v1, then policy v2 changes admins? The directory stays authorized if v2 still authorizes it. This is correct but complex. |
+| MEDIUM | **successor-policy only changes RP** — Other policy fields (admins, quorum, profiles) not editable here. Deferred to Phase 4 (AUTHZ-03). Correct but limits flexibility. |
+| MEDIUM | **No test for directory_install with invalid directory bytes** — The tamper suite has `directory_install_non_admin` but not `directory_invalid` (malformed directory). |
+| LOW | **Runbook compatibility note** — Should explicitly state that Phase 1 binaries report "unknown kind", 02-01-02-03 binaries report "not verifiable by this version". |
 
 #### Suggestions
-- In the banner constant, consider a shorter form for terminal: `EVALUATION ONLY - SOFTWARE CA KEYS (custody: software). Do not use for real access. See docs/security/custody.md`
-- Add a test that `Status` reports correct custody after a key rotation (KEY-08, future) — not needed now but good to design for
-- Ensure `internal/custodytext` imports only stdlib (verified by dep-firewall)
+1. Add tamper case for directory_install with malformed directory bytes
+2. Clarify in runbook the exact error messages from each binary version
+3. Consider adding a test where policy change removes an admin who signed the directory
 
-#### Risk Assessment: LOW
-Well-scoped plan implementing a clear evaluation-only feature with strong safeguards (custody from signer, no suppression, verbatim doc quote). The owner wording checkpoint is appropriate for a user-facing security message. Low technical risk.
+#### Risk Assessment: **LOW**
+Thorough audit implementation with good tamper coverage. The caching optimization is correct and tested.
 
 ---
 
-### 02-06
+### 02-05: Software CA Key (KEY-06) — Encrypted Backend, Status, Banner
 
 #### Summary
-Stands up `keyroster-server` (Linux-only binary) and `keyroster init`: HTTPS from operator-provided cert/key with reload, strict STACK.md headers + `connect-src 'self'`, server-rendered embedded UI, evaluation banner driven by signer's custody, `/api/v1/trust` endpoint verified by init against TLS root pins and trust-root pins, systemd units, Tailscale cert timer, server install runbook.
+Implements encrypted software CA key backend for evaluation, signer Status message reporting custody, and evaluation-only banner in CLI (driven by signer's Status).
 
 #### Strengths
-- **Security-first**: RP ID and origins come ONLY from signer's Status (root-signed policy), never from server config — server refuses start without RP
-- Strict headers on every response including errors/static: CSP, HSTS, COOP, nosniff, Referrer-Policy no-referrer, Cache-Control no-store, CrossOriginProtection
-- Server-rendered with `html/template` + `embed`, no npm, no inline script/style
-- `keyroster init` pins TLS root CA set observed at first connect (verified chain roots), then verifies trust bundle against trust-root pins — after init, only pinned roots trusted
-- TLS reload without restart: `certHolder` with atomic pointer, validates new cert/key before swap, keeps last good on failure, warns <14 days expiry
-- systemd hardening: own user, `NoNewPrivileges`, `ProtectSystem=strict`, `AmbientCapabilities=CAP_NET_BIND_SERVICE`, supplementary group for signer socket
-- Tailscale cert timer for D-11 homelab path
-- e2e `TestServerInitEndToEnd` exercises full flow: software signer → server → init with pins → banner on CLI stderr and page
+- **Proper age encryption**: scrypt recipient, armored files, 0600 in 0700 directory
+- **Passphrase handling**: Reads from file or systemd LoadCredential, never argv/env, 20-char minimum, cleared after use
+- **Status message**: Reports custody from signer (D-18), includes bundle/policy/directory state
+- **Install budget check**: InstallBundle refuses if Status reply would exceed MaxStatusFrame
+- **Single banner constant**: Shared by CLI, docs, and later UI (internal/custodytext)
+- **Owner wording checkpoint**: Blocking-human approval before docs quote it
 
 #### Concerns
-- **HIGH**: `keyroster init` resolves `keyroster.localhost` on CI runner. If pure Go resolver doesn't resolve it, plan adds `/etc/hosts` entry in workflow. This is a test-only workaround but must not become a production pattern.
-- **HIGH**: Server starts only after signer's Status succeeds (retry 30s). If signer is down, server serves 503. Need to ensure healthz also returns 503 when signer unreachable (plan says it does).
-- **MEDIUM**: `internal/serverclient` builds `http.Client` with `RootCAs: pool of stored roots only`, `VerifyConnection: require chain ending in pinned root`. Must verify this doesn't break when server cert is renewed with same root but different intermediate (pin is root SPKI, so should work).
-- **MEDIUM**: Config file at `os.UserConfigDir()/keyroster/config.json` written 0600. On Windows, `UserConfigDir` is `%APPDATA%` — ensure path handling is correct cross-platform.
-- **LOW**: `addLogKey` helper removed from `test/e2e/harness_test.go` (deferred CI debt) — confirm no other tests depend on it.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **Passphrase string copy for age** — `age.NewScryptRecipient` takes `string(pass)` which cannot be cleared. Documented as "best effort" but this is a real limitation. |
+| MEDIUM | **MaxStatusFrame = 256 KiB** — Below install-bundle's 1 MiB/document limit. The install budget check mitigates but creates a coupling. |
+| MEDIUM | **capslock -tags piv re-deferred** — Recorded in deferred-items.md but no timeline. |
+| LOW | **software backend only on Linux** — `//go:build linux`. Correct for signer but worth noting. |
 
 #### Suggestions
-- In `internal/server/tlsreload.go`, add a test that reload on SIGHUP works when cert/key files are atomically replaced (write to temp, rename)
-- Document in runbook that `tailscale cert` generates a NEW key every issuance (not reused) — so leaf SPKI pinning would break; root pinning is correct
-- Add a `keyroster init --repin` command for root rotation (future-proofing)
+1. Add explicit comment about the age string copy limitation in code
+2. Consider if MaxStatusFrame should be configurable or derived
+3. Set a timeline for capslock piv target in deferred-items.md
 
-#### Risk Assessment: MEDIUM
-This plan delivers the untrusted web front and pinned trust setup — critical infrastructure for all subsequent server plans. The security model (RP from signer, TLS pinning at init, trust bundle verification) is correct. Main risks are CI hostname resolution and the complexity of the pinned client implementation. The systemd hardening is thorough.
+#### Risk Assessment: **LOW-MEDIUM**
+Solid implementation. The passphrase clearing limitation is inherent to the age API and documented.
 
 ---
 
-### 02-07
+### 02-06: keyroster-server Core — TLS, Headers, Trust Endpoint, Init, systemd
 
 #### Summary
-Admin API with SSHSIG authentication: `keyroster user add` creates pending account, prints invite URL + user's `keyroster init` line. Server stores pending users/invites/admin nonces in SQLite (non-authoritative). Admin requests signed with policy admin keys via SSH agent. Invite page greets invitee. Rate limits per IP.
+Stand up keyroster-server binary with HTTPS from operator-provided certs, strict CSP/headers, server-rendered embedded UI, custody banner, trust endpoint verified by `keyroster init` with TLS pinning.
 
 #### Strengths
-- **Correct authority model**: Pending accounts in server DB are NOT authority — only signer's installed admin-signed directory grants access (D-03)
-- Admin API uses SSHSIG under `keyroster/admin-api/v1` covering method, path, body SHA-256, timestamp ±120s, single-use nonce
-- Admin keys from signer's Status (root-signed policy), never from server config
-- `keyroster user add` signs with admin key in ssh-agent (Unix socket or Windows pipe via go-winio)
-- Invite token: 32 random bytes, base64url, stored as SHA-256, 24h expiry, Referrer-Policy no-referrer
-- `--reinvite` replaces token for pending account; for directory user creates invite for additional credential
-- Rate limiting with `golang.org/x/time/rate` per IP (admin 60/min, invite 30/min)
-- e2e `TestUserAddInvite` verifies signer directory unchanged after `user add`
+- **Strict security headers**: CSP, HSTS, COOP, nosniff, Referrer-Policy, no-store, CrossOriginProtection
+- **TLS reload**: File watch + SIGHUP, keeps last good cert, 14-day warning
+- **Signer seam**: Single `signerAPI` interface, only `socketSigner` imports signerclient
+- **Status cache**: 5s TTL, fail-closed on refresh failure, `dropStatus` invalidation hook
+- **Pinned trust**: `keyroster init` verifies /api/v1/trust against root pins, stores pinned roots only
+- **Actionable errors**: `ErrTLSRootNotPinned` and `ErrTrustRootNotPinned` with re-pin procedures
+- **Hardened systemd units**: Proper sandboxing, keyroster-server user, keyroster-admin group
 
 #### Concerns
-- **HIGH**: `internal/serverdb` uses embedded migrations with `PRAGMA user_version` and refuses newer DB. Must ensure migration `0001_server.sql` is idempotent and doesn't conflict with future migrations (0002, 0003, 0004 in later plans).
-- **MEDIUM**: `requireAdmin` middleware reads body with `http.MaxBytesReader` (1 MiB + 64 KiB) then calls `adminauth.Verify`. The body is read twice (once for hash, once for handler) — ensure this works with `http.MaxBytesReader` (may need to buffer).
-- **MEDIUM**: Invite URL uses first policy origin + `/enroll/<token>`. If policy has multiple origins, the first is used. Should this be configurable or always the first?
-- **MEDIUM**: `keyroster user add` prints the user's `keyroster init` line built from admin's verified config. If admin's config has multiple TLS pins, all are printed. Ensure the line is copy-pasteable (no shell escaping issues).
-- **LOW**: Uniform 401 body `{"error":"admin authentication failed"}` for all auth failures — good for not leaking info, but makes debugging harder. Slog logs the specific reason.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **Status cache 5s TTL with fail-closed** — A directory change installed via server drops cache immediately via `dropStatus`. But changes made directly on signer socket take up to 5s to propagate. This is documented but creates a window. |
+| HIGH | **keyroster.localhost resolution in CI** — Requires `/etc/hosts` entry on GitHub runners. Documented but fragile. |
+| MEDIUM | **tailscale-cert.env root:root 0644** — Unit reads it as root. Braced `${KEYROSTER_TLS_NAME}` prevents flag injection. Good but UNVERIFIED until 02-13. |
+| MEDIUM | **Config file modes no-op on Windows** — Relies on %APPDATA% ACL. Accepted but documented. |
+| LOW | **No npm/build step for UI** — Uses html/template + embed + one hand-written JS. Correct per STACK.md. |
 
 #### Suggestions
-- Add a test that `requireAdmin` rejects a request with a valid signature but wrong method (e.g., GET instead of POST)
-- In `internal/serverdb/migrations/0001_server.sql`, add an index on `pending_users.invite_expires_us` for cleanup queries
-- Document the admin key fingerprint format expected by `--admin-key` (SHA256:base64)
+1. Add CI step to verify keyroster.localhost resolves, with clear failure message
+2. Consider making status cache TTL configurable for testing
+3. Document the 5s stale-read window more prominently in runbooks
 
-#### Risk Assessment: LOW
-Solid implementation of the admin API with proper SSHSIG authentication and non-authoritative server state. The patterns (SSHSIG, rate limiting, embedded migrations) are proven from Phase 1. Low risk.
+#### Risk Assessment: **MEDIUM**
+Core server infrastructure is solid. The 5s cache window and CI hostname resolution are the main operational risks.
 
 ---
 
-### 02-08
+### 02-07: Admin API & Invites — SSHSIG Auth, Pending Users, Rate Limits
 
 #### Summary
-Passkey registration through invites: invite page runs WebAuthn create ceremony via hand-written `app.js`; go-webauthn (server-only, owner-reviewed first) verifies registration; server converts COSE key to SPKI DER, validates via `internal/webauthn.ParsePublicKey`; stores pending credential with fingerprint shown to user; `keyroster user pending` shows same fingerprint to admin. Credential grants nothing until 02-09 binds it. Differential oracle tests signer's verifier against go-webauthn.
+Implements SSHSIG-authenticated admin API (`keyroster user add`), server DB for pending users/invites, and invite page. Server never treats pending state as authority.
 
 #### Strengths
-- **Critical**: Owner dependency review of go-webauthn v0.18.2 and unlocked transitives (tinylib/msgp, go-viper/mapstructure/v2, go-webauthn/x, philhofer/fwd, x448/float16) BEFORE `go get` — blocking-human checkpoint
-- go-webauthn and its CBOR/JWT/TPM dependencies banned from signer graph via dep-firewall and depguard (D-17)
-- Registration options: attestation none, UV required, residentKey preferred, pubKeyCredParams EdDSA/ES256/RS256 only
-- Server re-validates credential with `internal/webauthn.ParsePublicKey` — same rule as signer and directory
-- Pending credential stores BE/BS flags; fingerprint = `SHA256:` + base64(SPKI) shown to user and admin
-- Invite registers exactly one credential; used invite shows uniform "invite not valid" page
-- Differential oracle: every assertion vector tested against both verifiers; internal/webauthn is deliberately stricter on AT/ED/cross-origin (documented as `strictOnly`)
-- `app.js` receives data via data-attributes, no inline script, CSP-compliant
+- **SSHSIG authentication**: Payloads authenticated, not pipes. Uses policy admin keys.
+- **Body limit before auth**: `requireAdminLimit` reads body with MaxBytesReader before signature verification
+- **Pending-first check**: On reinvite, pending check comes before installed directory check
+- **Token security**: 256-bit random, stored as SHA-256, 24h expiry, Referrer-Policy no-referrer
+- **Rate limiting**: Per-client IP (IPv6 /64) + global backstop
+- **Path canonicalization**: Signs raw `URL.RequestURI()`, verifies against `r.RequestURI`
+- **Init line round-trip**: Prints `--tls-root-file keyroster-tls-root.pem` + PEM, tested end-to-end
 
 #### Concerns
-- **HIGH**: Owner dependency review (Task 1) is a blocking-human checkpoint. If owner rejects any transitive module, the registration design must change (fallback: browser `getPublicKey()` + `getAuthenticatorData()` to avoid CBOR). This could delay the plan significantly.
-- **HIGH**: `internal/server/credential.go` converts COSE to SPKI using go-webauthn's `webauthncose.ParsePublicKey`. Must handle all three algorithms correctly: EC2→P-256, OKP→Ed25519, RSA→modulus+exponent. Edge case: RSA key with exponent ≠ 65537.
-- **MEDIUM**: `app.js` uses `navigator.credentials.create` with decoded challenge, user.id, excludeCredentials. Must ensure base64url encoding/decoding matches WebAuthn spec exactly (no padding, URL-safe alphabet).
-- **MEDIUM**: `servertest.Register` builds soft registration with attestation "none" using go-webauthn's CBOR encoder. This is test-only but links go-webauthn in test binary — ensure it's not linked into production binaries (verified by `go list -deps ./cmd/... | grep -c 'servertest\|webauthntest'` = 0).
-- **LOW**: `enroll.html` renders `data-begin` and `data-finish` attributes with html/template escaping. Must ensure the URLs don't contain characters that break attribute quoting.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **Nonce consumed before handler** — Failed admin request (5xx, 409) burns nonce, requiring re-sign. This is intentional but increases client complexity. |
+| MEDIUM | **Invite URL origin from Host header** — `requestOrigin` matches request Host against policy origins. Host header can be spoofed in some reverse proxy setups. |
+| MEDIUM | **No admin UI in Phase 2** — All admin actions via CLI. Deferred to UI-02. |
+| LOW | **Admin key from ssh-agent** — Windows uses inbox agent via go-winio. Verified in 02-02. |
 
 #### Suggestions
-- In the dependency review, explicitly check that `github.com/go-webauthn/x` (2 stars, same org) is acceptable — low popularity but same maintainer
-- Add a test that registration with a credential ID already in the installed directory is refused (409)
-- Document the `strictOnly` list in the oracle test as known divergences from go-webauthn (AT set, ED set, crossOrigin true, topOrigin present)
+1. Document the nonce-retry requirement clearly in CLI help
+2. Add note about Host header trust assumptions in runbook
+3. Consider adding a test for reverse proxy Host header scenarios
 
-#### Risk Assessment: MEDIUM
-The owner dependency review is a necessary gate but introduces schedule risk. Technically, the design is sound: CBOR parsing confined to server, re-validation with signer's rules, differential testing. The `app.js` approach avoids CSP issues. Main risk is transitive dependency approval.
+#### Risk Assessment: **LOW-MEDIUM**
+Well-designed admin API with proper security boundaries. The nonce behavior is a UX tradeoff, not a security issue.
 
 ---
 
-### 02-09
+### 02-08: Passkey Registration — go-webauthn, Pending Credentials, Differential Oracle
 
 #### Summary
-Closes enrollment loop: `keyroster user approve` binds registered passkey via admin-signed directory version (only authority). Every directory edit uses one pipeline: verify trust bundle against root pins → verify installed directory quorum locally → build successor → validate → diff → confirm → sign with admin SSH key → install via server or save proposal for co-signing. First admin enrolls same way (D-04). Server forwards install to signer, clears pending only on success.
+Invited user registers passkey via WebAuthn create ceremony (go-webauthn server-side), server stores pending credential with fingerprint, admin sees same fingerprint via `keyroster user pending`.
 
 #### Strengths
-- **Strong authority model**: CLI verifies served trust bundle against root pins, then verifies installed directory signatures locally against policy admins — never trusts server state
-- Pipeline builds successor with version+1, prev=SHA-256(installed), runs Validate/CheckPolicy, prints diff, prompts for confirmation (or `--yes`)
-- Quorum >1: writes proposal (`directory.json`, `directory.json.sigs`, `base.sha256`); `directory sign` adds signature; `directory install` uploads
-- Server forwards install unchanged to signer; only on success deletes bound pending credentials/accounts
-- First admin enrolls identically: `user add` → register → `approve` with own SSH admin key
-- AUTH-01 edge cases authored as must_haves: adjacency (credential ID collision), empty (no pending cred), idempotency (approve twice), concurrency (two approvals from same base)
-- e2e `TestEnrollApproveEndToEnd` and `TestApproveConflictNoLostUpdate`
+- **Owner dependency review**: Blocking-human checkpoint before `go get go-webauthn`
+- **Differential oracle**: Cross-checks internal/webauthn vs go-webauthn on all assertion vectors
+- **Atomic invite consumption**: Sessions keyed by (invite_hash, challenge), consumed with DELETE RETURNING
+- **Single pending credential per user**: Unique index prevents races
+- **Reinvite handling**: Resets invite_used_us, deletes sessions and pending credential in same transaction
+- **Dependency bans**: go-webauthn, cbor, jwt banned from signer graph via dep-firewall and depguard
+- **Real browser UNVERIFIED**: app.js create ceremony only exercised by real browser, labeled UNVERIFIED until 02-14
 
 #### Concerns
-- **HIGH**: `editDirectory` in `cmd/keyroster/dirpipe.go` does a deep copy of the base directory for mutation. For large directories (many users/credentials), this could be memory-intensive. The plan says directory must fit 64 KiB frame until 02-03's per-type caps — but 02-03 is in same wave (wave 2), so this plan may run before caps are merged. Need to ensure frame size doesn't block.
-- **HIGH**: The pipeline calls `Trust()` which verifies the bundle against root pins. If the server's bundle is stale (signer updated but server cache not refreshed), the CLI will refuse. The server's status cache has 5s TTL — should be fine but worth noting.
-- **MEDIUM**: `keyroster directory sign DIR` re-verifies proposal against currently installed base. If another admin installed a version in between, the proposal's prev won't match and sign will refuse. This is correct but the error message should guide the user to re-run `user approve`.
-- **MEDIUM**: `internal/server/directory.go` keeps a directory mirror refreshed when cached Status's directory SHA-256 changes. Must ensure this doesn't race with installer — the server's `POST /api/v1/admin/directory` calls `signerclient.InstallDirectory` then refreshes mirror. If two installs race, the second should fail at signer (version chain) and server should not delete pending rows.
-- **LOW**: Proposal layout uses armored SSHSIG blocks newline-separated (root sign convention). Ensure `sshsig.Parse` handles multiple signatures in one file correctly.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **go-webauthn transitive dependencies** — Adds tinylib/msgp, go-viper/mapstructure/v2, go-webauthn/x, philhofer/fwd, x448/float16, fxamacker/cbor/v2, golang-jwt/jwt/v5. Owner reviews but supply chain surface grows. |
+| MEDIUM | **Compromised server can swap credential** — Documented as residual risk (Pitfall 13). Detection via user's failing first login. |
+| MEDIUM | **No CI lock on approved module set** — Deferred as repo-wide item. CODEOWNERS + Dependabot + dep-firewall + capslock provide layers. |
+| LOW | **app.js feature detection** — Disables button if no PublicKeyCredential. Good but UNVERIFIED until real browser test. |
 
 #### Suggestions
-- In `editDirectory`, add a `--dry-run` flag that shows the diff and proposed version without signing
-- Add a test that `directory sign` refuses a proposal whose existing signatures include a non-admin key
-- In runbook, emphasize that `directory sign` must be run by a different admin (different SSH key) to count toward quorum
+1. Add Dependabot config for go-webauthn transitive deps
+2. Document the compromised-server residual risk more prominently
+3. Consider adding a CI check for approved module hash list
 
-#### Risk Assessment: MEDIUM
-The pipeline design is excellent (verify locally, diff, sign, install). The main risk is the frame size limitation for large directories before 02-03's per-type caps land. Since both are in wave 2, the merge order matters: 02-03 must merge before 02-09 if directories can exceed 64 KiB. The plan notes this dependency implicitly.
+#### Risk Assessment: **MEDIUM**
+The dependency review checkpoint is critical. The differential oracle is a strong mitigation for verifier correctness.
 
 ---
 
-### 02-10
+### 02-09: Admin Approval & Directory Pipeline — Binding, Co-signing, Mirror
 
 #### Summary
-Passkey web sign-in: bound user signs in with passkey; server issues random challenge; browser calls `navigator.credentials.get` with allowCredentials from installed directory; server verifies with `internal/webauthn` (same code as signer). Session: opaque 32-byte ID, SHA-256 stored, `__Host-keyroster-session` cookie (Secure, HttpOnly, SameSite=Strict), 12h absolute / 1h idle, ends on logout or user disabled. `/account` shows read-only own data: roles, principals, TTL cap, credential fingerprints with synced/device-bound. No password/TOTP path.
+Closes enrollment loop: `keyroster user approve` binds pending credential via admin-signed directory version through verified pipeline (trust verify, base verify, diff, sign, install). Supports quorum >1 via proposals.
 
 #### Strengths
-- Uses same `internal/webauthn.VerifyAssertion` as signer — single verification semantics
-- Uniform 404 for unknown/pending/disabled/credential-less users — no enumeration
-- Session cookie follows STACK.md: `__Host-` prefix, Secure, HttpOnly, SameSite=Strict, hashed at rest
-- Idle (1h) and absolute (12h) expiry enforced by `TouchSession` on every request
-- User disable in directory ends session on next request (mirror refreshed from signer)
-- CrossOriginProtection on logout (unsafe method)
-- Rate limits per IP and per username
-- e2e `TestWebSignInEndToEnd` with soft authenticator, verifies Set-Cookie flags
+- **Single edit pipeline**: All directory changes (approve, disable/enable, roles, groups, host-groups) use same `editDirectory`
+- **Verified base**: Trust bundle verified against root pins, directory verified against policy admins
+- **Pending cleanup**: `DeleteBound` deletes only newly-bound credentials, preserves open invites
+- **Server mirror fail-closed**: Reads through 5s status cache, drops on SHA-256 mismatch, `dropStatus` called after install
+- **Proposal workflow**: `directory sign`/`install` for quorum >1, re-verified at each step
+- **Stale proposal messages**: Clear guidance to discard and re-run
+- **Install body limit**: Derived from wire.MaxDirectoryFrame, covers signer's frame cap
 
 #### Concerns
-- **HIGH**: Username-first sign-in (no discoverable credential flow). Usernames appear in certificate key IDs and audit log — not secret, but uniform 404 + rate limits bound enumeration. Acceptable for Phase 2.
-- **MEDIUM**: `internal/server/weblogin.go` creates challenge with 120s expiry. The page's `timeout: 60000` (60s) for `navigator.credentials.get` — if user takes >60s, browser may fail. Consider aligning or making timeout configurable.
-- **MEDIUM**: `withSession` middleware requires user active in directory mirror. If mirror is stale (signer updated, server cache 5s TTL), a recently disabled user might get 1 request through. Acceptable window.
-- **LOW**: `login.html` has username input + submit button. The `app.js` sign-in ceremony uses data-attributes like enroll page. Ensure CSP `connect-src 'self'` allows the fetch to `/api/v1/web/login/begin` and `/finish`.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **Credential_not_pending check** — Server refuses install if newly-bound credential not pending. But check and forward aren't atomic; reinvite between them could allow stale proposal. Documented as residual T-02-119. |
+| MEDIUM | **fetchVerifiedDirectory version 0 contract** — Returns non-nil result with nil Dir, Policy always set. Callers must check Version==0. Single check point in each caller. |
+| MEDIUM | **directory sign no pending check** — At quorum 1, proposal is fully signed when written. Only server's check stops install. Correct per design. |
+| LOW | **base.sha256 in proposal** — Note for admins, not read by sign/install. Could cause confusion. |
 
 #### Suggestions
-- Add a test that a session created under policy v1 remains valid after policy v2 install (if user still active)
-- In `session.go`, `TouchSession` updates `last_seen_us` — ensure this doesn't cause excessive DB writes (consider debouncing or only updating if >5min since last update)
-- Document that web sessions are read-only and never authorize certificates or directory changes
+1. Add comment explaining why directory sign skips pending check (quorum 1 = fully signed)
+2. Consider making base.sha256 verified by directory sign
+3. Document the T-02-119 residual clearly in runbook
 
-#### Risk Assessment: LOW
-Clean implementation of passkey sign-in with proper session security. Reuses signer's verifier. The read-only account page matches UI-01 scope. Low risk.
+#### Risk Assessment: **LOW-MEDIUM**
+Strong pipeline design. The non-atomic pending check is a known residual with low probability.
 
 ---
 
-### 02-11
+### 02-10: Web Sign-In & Account Page — Sessions, Read-Only View
 
 #### Summary
-Roles, groups, host groups via admin-signed directory versions (02-09 pipeline). `keyroster role/group/host-group` commands. `keyroster host principals` renders AuthorizedPrincipalsFile using shared renderer `directory.RenderPrincipalsFile` (Phase 3 agent will use same). `keyroster host ca-key` prints user CA key for TrustedUserCAKeys. Owner confirms D-06 principal convention (role:<name> / u:<username>) at checkpoint.
+Bound user signs in with passkey, gets `__Host-keyroster-session` cookie (32-byte random, SHA-256 stored, 1h idle/12h absolute), sees read-only account page with roles, principals, TTL cap, credentials (synced/device-bound).
 
 #### Strengths
-- All changes go through 02-09 pipeline (verified base, diff, SSHSIG, quorum)
-- Shared renderer `RenderPrincipalsFile` ensures CLI and Phase 3 agent generate identical principals files
-- Header includes directory version and SHA-256 for drift detection
-- Principal validation: `cert.ValidatePrincipals` in CLI before signing, in directory Validate, in signer at install/issuance
-- Role TTL capped by user CA profile; CLI refuses TTL > cap before signing
-- Windows account names lowercased in host groups (Pitfall: Windows username matching)
-- e2e `TestRolesHostPrincipalsEndToEnd`: role → group → host-group map → render → sshd accepts → unmap → sshd refuses
+- **Session security**: Opaque ID, hashed at rest, `__Host-`, Secure, HttpOnly, SameSite=Strict
+- **Credential-bound sessions**: Session stores `cred_id`, ends if credential unbound or user disabled
+- **Fail-closed reads**: Through 5s status cache, 503 on refresh failure, no stale data served
+- **Rate limiting**: Per-IP + per-username (2nd instance of bounded LRU map)
+- **TouchSession atomicity**: Single conditional UPDATE with idle/absolute checks, deletes expired row
+- **No non-passkey paths**: Uniform 404 for unknown/pending/disabled users
+- **slog events**: Structured logging without secrets (signin_ok, refusals, rate_limited, logout)
 
 #### Concerns
-- **HIGH**: D-06 principal convention is a one-way door (baked into certs and host files). Owner checkpoint (Task 1) is blocking-human. If owner chooses custom prefixes, must validate they pass `cert.ValidatePrincipals` regex `^[a-z0-9][a-z0-9._@:+-]{0,127}$`.
-- **MEDIUM**: `role remove` refused while host group maps the role — good. But `group remove` refused while role grants it — what if a role grants a group that's also mapped to host groups? The error should name the dependent roles.
-- **MEDIUM**: `keyroster host principals GROUP ACCOUNT` fetches directory via `Trust()` + `GetDirectory` and verifies locally. This duplicates the pipeline's verification logic. Could share a `verifyDirectory` helper.
-- **LOW**: Host principals file rendered with `#` comments — sshd ignores these. Good for documentation but ensure no sshd version treats them differently.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **5s stale-read window for direct signer changes** — A disable installed directly on signer socket takes up to 5s to end session. Accepted as T-02-91 residual. |
+| MEDIUM | **Disable → re-enable with no request keeps session** — If user disabled then re-enabled with same credential, and no request uses session in between, session survives. Accepted residual. |
+| MEDIUM | **Per-username limiter keyed only on valid names** — Invalid names get 404 without limiter entry. Good but test `username_limiter_bounded` must verify. |
+| LOW | **No last sign-in / session list in /account** — Deferred to UI-02. Correct for Phase 2. |
 
 #### Suggestions
-- In `RenderPrincipalsFile`, sort principals lexicographically for deterministic output (plan says "sorted, de-duplicated")
-- Add a test that rendering the same directory twice produces byte-identical output
-- Document in runbook that manual host setup requires re-rendering after every role/host-group change until Phase 3 agent automates it
+1. Add explicit test for the disable→re-enable residual case
+2. Document the 5s window in runbooks for admin awareness
+3. Consider if session should store creation time for audit
 
-#### Risk Assessment: LOW
-Well-scoped authorization plan with shared renderer and proper validation. The D-06 checkpoint is the only significant risk (one-way decision), but it's appropriately gated. The e2e test against real sshd validates the entire chain.
+#### Risk Assessment: **LOW**
+Session design is secure. The residuals are documented and accepted.
 
 ---
 
-### 02-12
+### 02-11: Roles, Groups, Host Groups & Principals Renderer
 
 #### Summary
-The MVP moment: `keyroster login` makes ephemeral key, prints fingerprint/principals/TTL, runs browser loopback with PKCE/state, opens approval page showing same fingerprint, user approves with passkey, loopback callback returns code, CLI redeems code → signer mints certificate (mint at redemption) → CLI verifies cert against root-pinned user CA → adds to ssh-agent with lifetime (SSH_AUTH_SOCK on Unix, keyroster agent on Windows). Server calls signer only at redemption.
+Implements role/group/host-group commands through 02-09 pipeline. `keyroster host principals` renders AuthorizedPrincipalsFile using shared renderer. Owner confirms D-06 principal convention at checkpoint.
 
 #### Strengths
-- **Correct mint timing**: Signer called only at redemption (code + PKCE verified) — phished unredeemed approval yields no cert, no serial, no log entry (Resolved Q2)
-- Fingerprint parity: CLI and page compute `ssh.FingerprintSHA256` from stored request bytes; challenge = SHA-256(request) so server can't swap key unseen
-- Loopback: `127.0.0.1:0`, accepts only `GET /callback` with exact Host header, constant-time state check, serves one response then closes
-- Page uses `window.location.assign` (top-level navigation) for loopback — avoids CSP form-action block and Chrome LNA fetch prompts
-- CLI verifies certificate before agent add: user CA from root-pinned bundle, key matches ephemeral, principals exact, kr2 key ID, validity ≤ TTL+300s, ≥60s remaining
-- Windows uses `winagent.Ensure` (keyroster agent pipe with owner check); never inbox agent; never retries without lifetime constraint
-- Clock skew check: CLI refuses if |local - server_time| > 60s
-- Concurrency: two simultaneous logins get different fingerprints/pages/codes; approving one doesn't affect the other
-- Lifetime expiry test: `--ttl 2m` → cert leaves agent at expiry (success criterion 2)
+- **Shared renderer**: `RenderPrincipalsFile` used by CLI and future Phase 3 agent
+- **Header with SHA-256**: Directory version + SHA-256 in generated file header for staleness detection
+- **Empty grant handling**: Unmapped account or empty role list → header-only file (exit 0), never error
+- **Principal validation**: cert.ValidatePrincipals rejects empty, wildcard, comma, whitespace, control chars
+- **One-way D-06 checkpoint**: Owner confirms `role:<name>` / `u:<username>` convention before implementation
+- **E2E validates against real sshd**: Both accept and refusal (after unmap) use keyroster's rendered output
 
 #### Concerns
-- **HIGH**: Plan lists 18 files, 130k tokens — large but justified as single protocol (begin/approve/loopback/redeem) needing CLI+server together.
-- **HIGH**: `internal/server/login.go` stores `login_sessions` with `code_hash` (SHA-256 of code), `code_expires_us` (120s). The `RedeemLogin` moves pending→approved→redeemed atomically. Must ensure the code is generated with `crypto/rand` (32 bytes) and the hash uses constant-time compare.
-- **HIGH**: Page JS (`app.js` `#kr-approve`) parses `data-options` JSON, decodes challenge/credential IDs, calls `navigator.credentials.get`, posts base64url fields to `/assertion`, then `location.assign(redirect)`. Must ensure no `fetch` to loopback and no form redirect (Pitfalls 4,5).
-- **MEDIUM**: `keyroster login` on Unix fails if `SSH_AUTH_SOCK` unset with instruction to start ssh-agent. On Windows, `winagent.Ensure` starts keyroster agent if needed. The A3 decision (gcr-ssh-agent) from 02-02 is applied here — if refuse-gcr, login refuses gcr socket.
-- **MEDIUM**: CLI certificate verification uses `Trust()` against root pins to get user CA key. If root pins changed (KEY-07 ceremony), CLI config must be updated. The plan doesn't address root rotation — deferred to KEY-08.
-- **LOW**: `--no-browser` only prints URL. User must manually copy-paste — phishable but documented as fallback.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **D-06 is one-way** — Changing principal convention later requires reconfiguring every host and re-issuing. Owner checkpoint mitigates but risk remains. |
+| MEDIUM | **Host groups don't enforce in certs** — Certificates not host-scoped (D-07). Phase 3 agent will enforce. Documented. |
+| MEDIUM | **Manual re-rendering required** — Until Phase 3 agent, admin must re-render after each change. Runbook documents this. |
+| LOW | **Account name validation** — Windows lowercase rule enforced. Good. |
 
 #### Suggestions
-- Add a test that `RedeemLogin` refuses a code from login A used on login B's id (cross-login code reuse)
-- In `loopback.go`, the handler should log (debug) the received Host header for troubleshooting DNS rebinding attempts
-- Document the `--ttl 2m` minimum in e2e is because CLI requires ≥60s remaining at issuance
+1. Make D-06 checkpoint very explicit with concrete examples
+2. Add runbook warning about manual re-rendering requirement
+3. Consider if `u:<username>` personal accounts need special handling
 
-#### Risk Assessment: MEDIUM-HIGH
-This is the core user-facing feature. The design is solid (mint at redemption, fingerprint parity, PKCE, per-OS agent handling). Risks are in the browser-JS/loopback interaction (CSP, Chrome LNA, DNS rebinding) and the Windows agent integration. The e2e test with soft authenticator covers the happy path; real-browser testing in 02-14 is essential.
+#### Risk Assessment: **MEDIUM**
+The one-way principal convention decision is the main risk. Owner checkpoint and e2E validation mitigate well.
 
 ---
 
-### 02-13
+### 02-12: keyroster login — Loopback, PKCE, Agent Lifetime, Certificate Checks
 
 #### Summary
-Dogfood part 1: Owner confirms RP hostname (D-09 one-way door) → root-signed policy successor (bundle v3, TEST root C) adds RP to vTPM signer → keyroster-server with `tailscale cert` → owner's Windows CLI init with TLS/trust pins → owner enrolls self (user add → real browser registration → approve with fingerprint). Records KEY-07 consequence: v3 = RP successor, owed offline ceremony becomes v4.
+MVP moment: `keyroster login` does browser loopback with PKCE/state, shows fingerprint on CLI and page, mint at redemption, verifies certificate, adds to ssh-agent with lifetime matching cert validity.
 
 #### Strengths
-- **Critical**: D-09 checkpoint (Task 1) presents live MagicDNS FQDN from `tailscale status` with all consequences (Public Suffix List, rename invalidates passkeys, CT logs, v3/v4 renumbering)
-- Operational rigor: build from clean worktree, state backup before upgrade, rehearsal signing in WSL under `unshare -r -n`, hash chain verification (bundle SHA-256 equality across root sign, trust verify, sha256sum, install-bundle)
-- Field-by-field policy comparison: v2 = v1 except version, prev, webauthn
-- Server install with systemd units, Tailscale cert timer, healthz verified over tailnet
-- Owner enrolls exactly like any user (D-04): real browser, any authenticator, fingerprint read from page
-- Audit verify of exported log anchored on bundle v3
-- Runbook steps labeled "run in 02-13"
-- Prohibition: no homelab hostnames/FQDNs/addresses in committed files — only SHA-256 prefix in SUMMARY
+- **Mint at redemption**: Signer called only when CLI redeems code (RESEARCH Q2 resolved)
+- **PKCE S256 + state**: Code challenge/verifier, 120s code lifetime, single-use
+- **Loopback security**: 127.0.0.1 only, exact Host check, state constant-time compare, closes after callback
+- **Certificate verification**: CA from root-pinned bundle, key match, principals exact, kr2 key ID, TTL+300s span, ≥60s remaining
+- **Agent lifetime**: Adds with LifetimeSecs = remaining validity, fails if agent refuses constraint
+- **Cross-OS**: Unix (SSH_AUTH_SOCK), Windows (keyroster agent via winagent.Ensure)
+- **Fail-safe lost response**: Certificate logged before release, bound to ephemeral key CLI zeroes
+- **Clock skew handling**: CLI refuses >60s skew, waits until server's deadline mapped through skew
 
 #### Concerns
-- **HIGH**: Task 1 requires Tailscale HTTPS Certificates enabled for tailnet. If not, `tailscale cert` fails. The `user_setup` section documents this but it's an external dependency.
-- **HIGH**: Owner's real-browser registration (Task 3) and approval (Task 4) are blocking-human checkpoints. Schedule depends on owner availability.
-- **MEDIUM**: WSL rehearsal uses `unshare -r -n` for network isolation during root signing. Must verify this works in the owner's WSL environment (WSL 2 should support unshare).
-- **MEDIUM**: `keyroster-server` installed on signer VM alongside signer. The systemd unit has `After=keyroster-signer.service`, `Wants=keyroster-signer.service`, and `SupplementaryGroups=keyroster-admin` for socket access. Ensure the socket permissions allow this.
-- **LOW**: `docs/runbooks/root-ceremony.md` updated with v3/v4 renumbering. The Phase 1 line "a later v3 rotation" changed to "a later v4 rotation" in ROADMAP.md — scoped edit only.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **Ephemeral key clearing best effort** — `defer clear(priv)` but GC may have copied bytes. No mlock/runtime/secret. Documented. |
+| HIGH | **Approval page fingerprint from stored request bytes** — Correctly computed from request, not separate field. But page JS never invokes WebAuthn before showing fingerprint. Verified in tests. |
+| MEDIUM | **A3 gcr-ssh-agent handling** — Applies single A3 line from 02-02. If moved to 02-14, no check shipped. UNVERIFIED until 02-14. |
+| MEDIUM | **Windows default connectLoginAgent UNVERIFIED** — `os.Executable()` + `winagent.Ensure` not tested by this plan's tests. First run in 02-14. |
+| MEDIUM | **20m e2e timeout** — Added to workflow. login_lifetime_expiry waits ~125s. Subtests sequential (share signer/server). |
 
 #### Suggestions
-- In the D-09 checkpoint message, explicitly state the first 12 hex digits of SHA-256(FQDN) so owner can verify the hash in SUMMARY matches
-- Record the `systemd-analyze security` exposure score for keyroster-server in SUMMARY as baseline
-- Ensure the `transfer/` directory cleanup check (`find ... -name '*.age' -o -name 'pass*'`) runs after every ceremony step
+1. Add explicit comment about `defer clear(priv)` best-effort limitation
+2. Consider adding `runtime.SetFinalizer` for additional clearing attempt
+3. Document the Windows default path UNVERIFIED status clearly
+4. Verify 20m timeout is sufficient for all e2e subtests
 
-#### Risk Assessment: MEDIUM
-This is an operational plan with necessary human checkpoints. The technical steps are well-defined and rehearsed in WSL. Main risks are external (Tailscale HTTPS certs enabled, owner availability for browser steps) and the one-way RP hostname decision. The prohibition on committing homelab identifiers is correctly enforced.
+#### Risk Assessment: **MEDIUM-HIGH**
+Core login flow is well-designed. The Windows default path and gcr handling are the main verification gaps until 02-14.
 
 ---
 
-### 02-14
+### 02-13: Homelab Enrollment — RP Confirmation, Bundle v3, Server, Owner Enrollment
 
 #### Summary
-Dogfood part 2: Real end-to-end logins. Configure zima-srv (stock OpenSSH) with `keyroster host ca-key` + `host principals`. Owner on Daniel-PC: web sign-in (AUTH-02), `keyroster login` with fingerprint comparison (AUTH-03, AUTH-04), SSH to zima-srv via keyroster agent pipe, cert expiry verified. Owner on laptop: same with GNOME session (respecting A3 decision). Every login corroborated by audit log (kr2 key IDs) and sshd journal. Platform record in needs-hardware.md with UNVERIFIED labels. cli-windows/cli-macos added to required checks (owner applies ruleset).
+Dogfood part 1: Owner confirms RP hostname (D-09 gate), root-signed policy successor (bundle v3, TEST root C), keyroster-server with tailscale cert, owner enrolls via real browser.
 
 #### Strengths
-- **Complete validation**: Two independent records (audit log + sshd journal) for each login — matches core value "full visibility"
-- Real platforms: Windows 11 (inbox OpenSSH 9.5p2, keyroster agent), Ubuntu (GNOME, agent per A3 decision)
-- Expiry test: `--ttl 5m` → cert gone from agent after expiry
-- Honest platform record: only exercised OS/browser/authenticator/agent combinations marked verified; macOS browser leg UNVERIFIED
-- Required checks: cli-windows/cli-macos green on main since 02-02, owner applies ruleset from PR branch (Pitfall 10/11 pattern)
-- REQUIREMENTS.md tracking: AUTH-03/PLAT-05 stay Pending with "macOS browser leg UNVERIFIED" note
-- Prohibition: no homelab identifiers in repo; ssh aliases (keyroster-signer-vm, zima, ub-daniel) only
+- **D-09 blocking-human checkpoint**: Owner confirms exact FQDN with RP_HASH12 shown
+- **Field-by-field policy comparison**: v2 = v1 except version, prev, webauthn
+- **Rollback copies**: 5 `.pre-02-13` files guarded by `test ! -e`
+- **Resume rule**: Skips steps 1-4 if doctor shows v3 and V3_SHA256 matches
+- **KEY-07 bookkeeping**: v3 = RP successor, owed offline ceremony becomes v4
+- **No homelab identifiers in repo**: RP_HASH12 only in SUMMARY, grep gate on diff
 
 #### Concerns
-- **HIGH**: Task 2 and Task 4 require owner to perform multiple manual steps in real browsers with authenticators. If any step fails (browser issue, authenticator issue, network), the plan stalls at blocking-human checkpoints.
-- **HIGH**: Laptop login depends on A3 decision from 02-02. If gcr-ssh-agent failed and owner chose refuse-gcr, laptop must use plain ssh-agent. The plan handles this but the owner must execute correctly.
-- **MEDIUM**: Corroboration requires matching kr2 key IDs and serials between audit verify output and journalctl lines. The journal query uses `--since "-3h"` — ensure time sync between VM and zima-srv.
-- **MEDIUM**: Adding cli-windows/cli-macos to main-integrity ruleset requires owner to run `apply-rulesets.sh` with their gh login (admin-only). Must be done before PR approval.
-- **LOW**: The plan says "AUTH-03 and PLAT-05 are NOT listed [in requirements-completed]: macOS is UNVERIFIED". This is correct per no-unexercised-paths rule but should be clearly communicated to stakeholders.
+| Severity | Issue |
+|----------|-------|
+| HIGH | **One-way RP binding** — Once owner registers passkey under RP, changing it means re-enrolling everyone. D-09 checkpoint is the gate. |
+| MEDIUM | **TEST root C signs v3** — Not production roots. Homelab stays dogfood until KEY-07 v4 ceremony. Documented. |
+| MEDIUM | **tailscale cert renewal** — 90-day expiry, 2/3 renewal. Timer runs daily with 1h jitter. UNVERIFIED until 02-13 run. |
+| LOW | **No jq on Daniel-PC/WSL** — Audit verify JSON parsed with `python -I`. Works but less standard. |
 
 #### Suggestions
-- In Task 2 instructions, provide the exact `keyroster.exe login` command with the pipe path from 02-02 SUMMARY
-- For laptop login, if A3 decision was refuse-gcr, explicitly instruct owner to `eval "$(ssh-agent)"` before `keyroster login`
-- In platform record, include the exact authenticator kinds used (Windows Hello, phone passkey, security key, etc.)
-- After merge, consider filing a follow-up issue for macOS verification when hardware becomes available
+1. Make D-09 checkpoint message extremely clear about consequences
+2. Document tailscale cert renewal behavior in server-install.md
+3. Consider adding `jq` to homelab setup for consistency
 
-#### Risk Assessment: MEDIUM
-This plan achieves the phase goal on real hardware. The blocking-human checkpoints for owner actions are necessary for real-world validation but introduce schedule dependency. The corroboration via audit log + sshd journal is the gold standard for verification. The ruleset update process is established from Phase 1.
+#### Risk Assessment: **MEDIUM**
+Operational plan with good safeguards. The one-way RP decision is the critical gate.
 
 ---
 
-### Cross-Plan Summary
+### 02-14: Homelab Real Logins — Windows, Linux, Platform Record, Required Checks
 
-#### Overall Architecture Assessment
-The 14 plans form a coherent, well-sequenced implementation of the Passkey Login MVP. The wave structure correctly manages dependencies:
-- Wave 1 (02-01): Core signer security (tracer)
-- Wave 2 (02-02, 02-03): Platform probes + signer hardening
-- Wave 3 (02-04, 02-05): Audit closure + software key warning
-- Wave 4 (02-06): Server core + init
-- Wave 5 (02-07): Admin API + invites
-- Wave 6 (02-08): Registration (go-webauthn dependency review)
-- Wave 7 (02-09): Approval pipeline
-- Wave 8 (02-10, 02-11): Web sign-in + roles/groups
-- Wave 9 (02-12): CLI login (MVP moment)
-- Wave 10 (02-13): Homelab enrollment
-- Wave 11 (02-14): Homelab real logins + platform record
+#### Summary
+Dogfood part 2: Real logins from Windows (Daniel-PC, keyroster agent) and Linux (laptop, GNOME), corroborated by audit log + sshd journal. Platform record in needs-hardware.md. cli-windows/cli-macos added to main-integrity ruleset.
 
-#### Key Strengths Across Plans
-1. **Security-first design**: Every authority decision (credential binding, role mapping, RP identity) reaches signer as signed payload — server never decides
-2. **Tracer-first**: 02-01 proves the hardest security properties end-to-end before building UI/server
-3. **Proper gating**: Probes (02-02), dependency reviews (02-08), one-way decisions (02-11 D-06, 02-13 D-09) all have blocking-human checkpoints
-4. **Auditability**: 02-04 makes every login certificate re-provable; tamper suite with re-signed checkpoints
-5. **Platform honesty**: UNVERIFIED labels for unexercised paths (macOS, Firefox, headless), no-exercised-paths rule enforced
-6. **Dependency hygiene**: Signer graph protected by dep-firewall, capslock, depguard; go-webauthn confined to server
-7. **Operational rigor**: Homelab plans (02-13, 02-14) use clean builds, state backups, hash verification, runbook labeling
+#### Strengths
+- **Dual corroboration**: Every login matched to audit-verified kr2 key ID + sshd journal line
+- **Absolute journal windows**: `KR_ZIMA_SINCE` / `KR_VM_SINCE` recorded before CA trusted
+- **Expiry verification**: 5m login targeted by key ID from export, listings A/B matched on key ID
+- **A6 authenticatorData recording**: Length + flags from decoded export (accepted) or keyroster-server journal (refused)
+- **Honest UNVERIFIED labels**: macOS browser leg, Safari, Firefox on Windows, headless
+- **Ruleset update**: Owner applies from PR branch before approval (Pitfall 10/11)
 
-#### Systemic Concerns
-1. **Large PRs**: 02-01 (32 files, 140k), 02-06 (29 files, 120k), 02-12 (18 files, 130k) — review burden is high
-2. **Wave 2 ordering**: 02-02 and 02-03 both in wave 2 but 02-09 (wave 7) needs 02-03's per-type caps for large directories. Merge order within wave matters.
-3. **go-webauthn transitive deps**: 02-08 owner review covers 7 unlocked modules — if any rejected, fallback design needed
-4. **Windows agent assumption A2**: Entire Windows AUTH-03 path depends on inbox ssh.exe honoring named pipe. Probe in 02-02 Task 1 is the linchpin.
-5. **Root rotation (KEY-08)**: CLI config pins trust roots; no `init --repin` yet. After KEY-07 ceremony, all clients must re-init.
+#### Concerns
+| Severity | Issue |
+|----------|-------|
+| HIGH | **macOS UNVERIFIED** — AUTH-03 and PLAT-05 not marked complete. Phase verifier must track this. |
+| HIGH | **gcr-ssh-agent follow-up** — If owner chose refuse-gcr, `keyroster login` doesn't refuse gcr socket until follow-up plan. Open item tracked in SUMMARY. |
+| MEDIUM | **sshd -T -C per-connection check** — Validates both client addresses see keyroster settings. Good but Match-file count only recorded, not asserted. |
+| MEDIUM | **No Windows sshd as target** — Phase 5. Documented. |
+| LOW | **Evidence files outside repo** — `$HOME/keyroster-ceremony/phase2/` not committed. Correct but must be backed up. |
 
-#### Missing/Deferred Items to Track
-- `keyroster init --repin` for root rotation (mentioned in 02-06 suggestions)
-- Headless login (device-code/polling) — deferred per D-12
-- Per-role "require device-bound credential" — deferred
-- Native CTAP2 (libfido2/webauthn.dll) — deferred
-- Admin actions in web UI (UI-02) — Phase 4
-- Host agent, KRL, revocation — Phase 3
-- Machine identities (AUTH-06) — Phase 3
+#### Suggestions
+1. Add explicit tracking in REQUIREMENTS.md for macOS UNVERIFIED status
+2. Create follow-up plan issue for gcr-ssh-agent refuse-gcr if needed
+3. Assert Match-file count == 0 in verification (or document expected count)
 
-#### Risk Assessment Summary
-| Plan | Risk | Primary Driver |
-|------|------|----------------|
-| 02-01 | MEDIUM-HIGH | Large scope, foundational design |
-| 02-02 | HIGH | Unverified A2/A3 probes |
-| 02-03 | LOW-MEDIUM | Test infrastructure complexity |
-| 02-04 | LOW | Proven audit infrastructure |
-| 02-05 | LOW | Well-scoped, owner wording gate |
-| 02-06 | MEDIUM | CI hostname resolution, pinned client complexity |
-| 02-07 | LOW | Proven patterns |
-| 02-08 | MEDIUM | Owner dependency review gate |
-| 02-09 | MEDIUM | Frame size vs merge order with 02-03 |
-| 02-10 | LOW | Clean implementation |
-| 02-11 | LOW | D-06 checkpoint only risk |
-| 02-12 | MEDIUM-HIGH | Core feature, browser/loopback complexity |
-| 02-13 | MEDIUM | Operational, human checkpoints |
-| 02-14 | MEDIUM | Real-world validation, schedule dependency |
+#### Risk Assessment: **MEDIUM**
+Completes the phase goal on real hardware. The UNVERIFIED macOS and gcr follow-up are tracked transparently.
 
-#### Recommendation
-**Proceed with the plan sequence as written.** The architecture is sound, security model is correctly implemented (signer authority, server proposes), and risk mitigations (probes, checkpoints, fuzzing, audit verification) are appropriate. The main execution risks are:
-1. 02-02 probes failing → Windows AUTH-03 blocked
-2. 02-08 dependency review rejecting modules → registration redesign
-3. 02-13/02-14 owner availability for browser steps
+---
 
-These are correctly handled as blocking-human checkpoints rather than silent fallbacks. The phase will deliver a working, auditable passkey login MVP on Linux and Windows with honest platform verification.
+### Cross-Phase Risk Assessment
 
+#### Overall Phase 2 Risk: **MEDIUM**
+
+#### Key Risk Themes
+
+| Theme | Risk Level | Mitigation |
+|-------|------------|------------|
+| **One-way decisions** (RP ID, principal convention) | HIGH | Blocking-human checkpoints with full consequence disclosure |
+| **Platform verification gaps** (macOS, gcr-ssh-agent) | MEDIUM | Explicit UNVERIFIED labels, tracked in REQUIREMENTS.md |
+| **Supply chain** (go-webauthn transitive deps) | MEDIUM | Owner dependency review, dep-firewall bans, differential oracle |
+| **Stale read windows** (5s status cache) | LOW-MEDIUM | Documented, `dropStatus` for server-initiated changes |
+| **Compromised server residuals** | MEDIUM | Documented in runbooks, detection via failing user login |
+
+#### Plan Quality Summary
+
+| Plan | Quality | Completeness | Risk |
+|------|---------|--------------|------|
+| 02-01 | ★★★★★ | Complete tracer | MEDIUM-HIGH |
+| 02-02 | ★★★★☆ | Probe-first, A3 deferred | MEDIUM |
+| 02-03 | ★★★★★ | Thorough hardening | LOW-MEDIUM |
+| 02-04 | ★★★★★ | Complete audit + tamper | LOW |
+| 02-05 | ★★★★☆ | Solid, passphrase limit noted | LOW-MEDIUM |
+| 02-06 | ★★★★☆ | Hardened server, 5s window | MEDIUM |
+| 02-07 | ★★★★☆ | Secure admin API | LOW-MEDIUM |
+| 02-08 | ★★★★☆ | Dependency review, oracle | MEDIUM |
+| 02-09 | ★★★★★ | Robust pipeline | LOW-MEDIUM |
+| 02-10 | ★★★★☆ | Secure sessions | LOW |
+| 02-11 | ★★★★☆ | Shared renderer, D-06 gate | MEDIUM |
+| 02-12 | ★★★★☆ | Core MVP, Windows gap | MEDIUM-HIGH |
+| 02-13 | ★★★★☆ | Operational, rollback safe | MEDIUM |
+| 02-14 | ★★★★★ | Real verification, honest labels | MEDIUM |
+
+#### Critical Path Dependencies
+```
+02-01 → 02-02, 02-03
+02-03, 02-02 → 02-04
+02-03 → 02-05
+02-05 → 02-06
+02-06 → 02-07
+02-07 → 02-08
+02-08, 02-03, 02-04 → 02-09
+02-09 → 02-10, 02-11
+02-10, 02-11, 02-02, 02-04 → 02-12
+02-12 → 02-13
+02-13 → 02-14
+```
+
+#### Recommendations
+
+1. **Prioritize D-09 and D-06 checkpoints** — These are the only true one-way doors in the phase
+2. **Track macOS verification** — Add explicit issue for macOS browser+passkey test
+3. **Monitor gcr-ssh-agent** — If A3 fails, create follow-up plan immediately
+4. **Verify frame cap math** — Add test for InstallDirectoryRequest at MaxDirectoryFrame with base64 encoding
+5. **Document all UNVERIFIED items** — Ensure needs-hardware.md is complete before phase close
+
+The plans are exceptionally well-structured with strong security-first design, proper threat modeling, and clear verification criteria. The main risks are operational (platform verification gaps) and one-way architectural decisions, both mitigated by explicit checkpoints and honest labeling.
 ---
 
 ## Ollama gemma4:31b Review
 
-This is a comprehensive, security-first implementation plan for Phase 2. The "server proposes, signer disposes" architecture is correctly maintained, and the decision to use an in-memory agent on Windows to satisfy lifetime constraints is a critical and correct technical pivot.
+This review covers the implementation plans for **Phase 2: Passkey Login MVP**.
 
 ### 02-01
-**Summary**: Establishes the foundational "Phase Tracer," implementing the root-signed RP policy, the admin-signed directory structure, the signer-side WebAuthn assertion verifier, and the `kr2` certificate issuance path.
+**Summary**: This is the "Walking Skeleton" for Phase 2. It establishes the core trust chain: a root-signed policy with RP settings, an admin-signed directory for user bindings, and the signer's ability to verify WebAuthn assertions over login requests.
 
 **Strengths**:
-- High architectural integrity: ensures the signer remains the sole authority for principals and TTLs.
-- Correct application of the "no-Cbor-in-signer" rule by converting to SPKI DER.
+- **Tracer Approach**: By implementing the end-to-end path (RP $\rightarrow$ Directory $\rightarrow$ Assertion $\rightarrow$ Certificate $\rightarrow$ sshd), it validates the most critical architectural assumptions immediately.
+- **Fail-Closed Audit**: The interim move to an exhaustive kind-switch in `audit.Verify` ensures that new log kinds are refused by default rather than silently ignored.
+- **Strict Canonicalization**: Enforcing `DecodeStrict` for policy and directory prevents "malleability" attacks where different bytes represent the same logical state.
 
 **Concerns**:
-- **LOW**: `internal/directory/directory.go` validation. The plan mentions refusing "an active user with no credentials" (AUTH-01). If a user is disabled, can they have zero credentials? Ensure `Validate()` handles the `Status` field correctly to avoid blocking the disabling of accounts.
+- **Low**: The dependence on the `CGO_ENABLED=0` build for the signer is absolute; any accidental inclusion of a C-dependency (like a crypto library) would break the "one binary" simplicity.
 
 **Suggestions**:
-- In `internal/webauthn/verify.go`, explicitly ensure that the constant-time comparison is used not just for the challenge, but also for any identity-sensitive checks to prevent timing attacks on credential IDs.
+- Ensure the `SIGHUP` and interval-based reload in the server (planned for 02-06) is explicitly tested against the directory mirror to avoid a state where the server is using a certificate that doesn't match the RP ID in the current policy.
 
-**Risk Assessment**: LOW. The core logic is a direct extension of Phase 1's trust model.
+**Risk Assessment**: **LOW**. The plan is highly disciplined and follows the "tracer-first" pattern.
 
 ---
 
 ### 02-02
-**Summary**: Solves the Windows agent problem by implementing a custom in-memory agent on a per-user named pipe and adds cross-platform CI jobs.
+**Summary**: This plan solves the "Windows Agent" problem. Since the inbox OpenSSH agent on Windows often lacks support for lifetime constraints, this plan implements a dedicated in-memory agent on a per-user named pipe.
 
 **Strengths**:
-- Directly addresses the Win32-OpenSSH registry persistence and lifetime refusal issues.
-- Strong security on the pipe via SID-based ACLs and the `VerifyServerOwner` check.
+- **Gating Probes**: Using "throwaway probes" (A2/A3) to verify OS-level assumptions before writing production code is an excellent risk mitigation strategy.
+- **Pipe-Squatting Guard**: `VerifyServerOwner` (comparing SIDs) prevents a malicious process from intercepting keys by creating the pipe first.
+- **Lifetime Enforcement**: The `keyroster agent` actively polls and expires keys, ensuring that the "short-lived" promise is kept even if the client is killed.
 
 **Concerns**:
-- **MEDIUM**: `internal/winagent/ensure_windows.go`. The plan starts the agent as a detached process. Ensure there is a robust mechanism to prevent "zombie" agents from accumulating if the CLI crashes before the agent's internal idle-exit timer triggers.
+- **Medium**: The reliance on `go-winio` for named pipes introduces a dependency that must be strictly isolated from the signer's graph to maintain the security boundary.
 
 **Suggestions**:
-- For the GNOME `gcr-ssh-agent` probe (Task 1), add a check for the `SSH_AUTH_SOCK` environment variable to ensure the probe isn't just hitting a fallback agent.
+- In the `A3` probe, explicitly record if `gcr-ssh-agent` is present but not working, as this informs the "refuse-gcr" guidance in 02-12.
 
-**Risk Assessment**: LOW. The risk is primarily operational (zombie processes) rather than security-critical.
+**Risk Assessment**: **LOW**. The design is robust and handles the Windows security model correctly.
 
 ---
 
 ### 02-03
-**Summary**: Hardens the signer boundary with a complete refusal matrix, concurrency protections, and fuzz targets for all new parsers.
+**Summary**: This plan hardens the signer's boundary. It focuses on the refusal matrix (SC4), concurrency under race conditions, and protecting the signer from memory exhaustion via per-type frame caps.
 
 **Strengths**:
-- Rigorous approach to "successes-with-controls" for every refusal case.
-- Correct memory bounding via per-type frame caps.
+- **Per-Type Caps**: Recognizing that a directory install requires more memory than a login request and applying specific limits prevents a "one-size-fits-all" limit from either being too restrictive or too permissive.
+- **Concurrency Testing**: Using `go test -race` to prove that concurrent installs or logins don't lead to "lost updates" or duplicate certificates.
+- **Fuzzing Strategy**: Applying fuzzing to every new parser (WebAuthn, Directory, KeyID) ensures that malformed input cannot crash the signer.
 
 **Concerns**:
-- **LOW**: `internal/signer/login.go`. When the directory is updated (Successor), the plan mentions the login might refuse `directory_changed`. Ensure the error message provided to the CLI is actionable (e.g., "directory updated, please retry").
+- **Low**: The `MaxDirectoryFrame` is quite large (~1MB). While acceptable for a self-hosted CA, it creates a larger memory footprint per connection during directory updates.
 
 **Suggestions**:
-- In the fuzz targets, specifically seed the `clientDataJSON` parser with common browser-injected keys to ensure the "ignore unknown members" logic is robust.
+- Ensure the `GetDirectory` response is also capped to prevent a compromised signer (or a bug) from attempting to send a gigabyte of data to the server.
 
-**Risk Assessment**: LOW. The plan is highly disciplined regarding input validation.
+**Risk Assessment**: **LOW**. The hardening is comprehensive.
 
 ---
 
 ### 02-04
-**Summary**: Implements the `successor-policy` tool for RP management and extends `audit verify` to re-prove passkey authorizations.
+**Summary**: This plan closes the loop on "Full Visibility." It ensures that every login certificate is not just issued, but is *provable* after the fact via the audit log.
 
 **Strengths**:
-- Closes the loop on visibility: a compromised signer cannot forge a login without a valid user assertion in the log.
-- Correctly handles the one-way nature of the RP ID change.
+- **Independent Verification**: The auditor does not trust the signer; it re-runs the `webauthn.VerifyAssertion` and `Authorize` logic using the logged evidence.
+- **Root-Signed Policy Successors**: Providing a tool to add the RP to a running installation allows the system to evolve without a full reset.
+- **Serial Sequence**: enforcing a strictly increasing serial sequence across both admin and login issuances prevents "gap" attacks.
 
 **Concerns**:
-- **LOW**: `internal/audit/verify.go`. The plan requires the auditor to keep the directory in force. Ensure that if a directory is revoked or changed, the auditor can still verify old certificates using the directory version that was in force at the time of issuance.
+- **Low**: The "interim refusal" from 02-01 must be replaced exactly. If the default branch in the audit walk is removed, any new leaf kind would be ignored.
 
 **Suggestions**:
-- Add a check in `audit verify` to ensure that the `PolicyVersion` in the `login_issue` leaf matches the policy in force at that log index.
+- Add a test case where a directory is installed, then a policy is changed, and the auditor must verify if the old directory is still authorized under the new policy.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The auditing logic is sound.
 
 ---
 
 ### 02-05
-**Summary**: Implements the encrypted software CA keystore for evaluation purposes and the `Status` message to drive the "Evaluation Only" banners.
+**Summary**: This plan implements the "evaluation-only" mode (KEY-06), allowing the system to run on encrypted software keys while loudly warning the user that it is not for production use.
 
 **Strengths**:
-- Proper isolation of the `software` backend.
-- High visibility: banner is driven by the signer, not configuration.
+- **Signer-Driven Custody**: The warning is driven by the `Status` report from the signer, ensuring that a server cannot "hide" the fact that software keys are in use.
+- **Secure Passphrase Handling**: Using `defer clear()` on passphrase buffers and refusing permissive file modes (0644) reduces the risk of secret leakage.
+- **All-or-Nothing Provisioning**: The use of `O_EXCL` and a cleanup routine for failed provisions prevents a partial state where some roles have keys and others don't.
 
 **Concerns**:
-- **LOW**: `internal/keystore/software/software.go`. The plan uses `age` for encryption. Ensure that the `scrypt` parameters used for the passphrase are sufficient to resist offline brute-force for an "evaluation" instance.
+- **Low**: `age` scrypt work factors are default. While acceptable for "evaluation," a production-grade software key would need a higher cost.
 
 **Suggestions**:
-- In `internal/custodytext`, allow the banner to be configured to support different languages in the future, even if only English is used now.
+- Explicitly test the `SIGHUP` reload for the TLS certificate in this plan to ensure the server doesn't crash during a rotation.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The security trade-offs for "evaluation mode" are well-documented and enforced.
 
 ---
 
 ### 02-06
-**Summary**: Deploys the `keyroster-server` with strict security headers, embedded UI, and a pinned TLS trust model for the CLI.
+**Summary**: This plan implements `keyroster-server` and `keyroster init`. The server acts as a "dumb" front-end that proposes requests to the signer and serves the web UI.
 
 **Strengths**:
-- Extreme caution with the Web UI: no npm, no inline scripts, strict CSP.
-- Correct implementation of TLS root pinning to prevent WebPKI-based impersonation of the CA.
+- **Strict CSP and Headers**: The implementation of a "deny-all" CSP and HSTS prevents a wide array of web attacks.
+- **Pinned Trust**: `keyroster init` creates a hard link between the CLI and the server's TLS identity and trust bundle, preventing MITM attacks.
+- **Fail-Closed Cache**: The 5-second status cache is a reasonable trade-off for performance, and the `dropStatus` hook ensures that administrative changes are seen immediately.
 
 **Concerns**:
-- **MEDIUM**: `internal/server/tlsreload.go`. The plan reloads certificates on SIGHUP or mtime change. Ensure the reload is atomic (using `atomic.Pointer`) to avoid serving a partial or mismatched cert/key pair during the swap.
+- **Medium**: The server's trust in the signer's `Status` report for the RP ID means a compromised signer can change the RP. However, this is mitigated by the fact that the *signer* is the ultimate authority on whether an assertion is valid.
 
 **Suggestions**:
-- Add a "Health Check" endpoint that not only returns `ok` but also reports the current TLS certificate's expiry date to the operator.
+- The `SIGHUP` reload should log specifically which certificate was loaded (fingerprint) to aid in debugging rotation issues.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The security boundaries between the server and signer are well-maintained.
 
 ---
 
 ### 02-07
-**Summary**: Implements an SSHSIG-authenticated admin API and the invitation system for user enrollment.
+**Summary**: This plan implements the Admin API and the invite system, allowing admins to start the enrollment process for users.
 
 **Strengths**:
-- Correct use of "authentication, not pipes" for the admin API.
-- Ensures pending accounts are not authoritative.
+- **Authenticated Payloads**: Using SSHSIG for the Admin API ensures that the server never handles admin private keys and that every request is provably authorized.
+- **Non-Authoritative State**: The server DB is explicitly "non-authoritative." Pending users are just invitations; no access is granted until an admin signs a directory.
+- **DoS Damping**: Per-IP and per-user rate limits prevent brute-forcing of invite tokens.
 
 **Concerns**:
-- **LOW**: `internal/server/invite.go`. The invite token is 32 random bytes. Ensure the `invite_hash` in the DB is computed using a cryptographically secure hash (SHA-256) and compared in constant time.
+- **Low**: The `maxAdminBody` limit is a potential bottleneck for very large directory installs, but this is addressed by the `requireAdminLimit` override in 02-09.
 
 **Suggestions**:
-- For `keyroster user add`, add a flag to specify the invite's expiry if the default 24h is not suitable for a specific user.
+- Ensure the invite token is hashed in the DB (which is planned) to prevent a DB leak from allowing immediate user enrollment.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The "invite-then-bind" flow is secure.
 
 ---
 
 ### 02-08
-**Summary**: Implements passkey registration via the server, converting COSE keys to SPKI DER for the signer.
+**Summary**: This plan implements the passkey registration ceremony, allowing users to provide a public key that the admin can later approve.
 
 **Strengths**:
-- Correct dependency isolation: `go-webauthn` is strictly banned from the signer.
-- Use of a differential oracle to verify the internal verifier against the maintained library.
+- **Dependency Isolation**: Banning `go-webauthn` from the signer's graph ensures that the signer remains minimal and avoids the "bloat" of a full WebAuthn stack.
+- **Differential Oracle**: Testing the internal verifier against a maintained library (go-webauthn) is a high-confidence way to ensure the signer's logic is correct.
+- **Atomic Consumption**: Using `DELETE ... RETURNING` for sessions and invite consumption prevents race conditions in the registration flow.
 
 **Concerns**:
-- **MEDIUM**: `internal/server/enroll.go`. The plan allows registration of a la passkey. Ensure that the "invite used" marker is set *only* after the credential is successfully persisted to the DB to avoid locking users out on network errors.
+- **Low**: The use of `residentKey: preferred` might lead to some users not having a resident key; the la-back plan for a "discovery" flow in v2 is appropriate.
 
 **Suggestions**:
-- In the `app.js` registration ceremony, provide clear feedback if the browser does not support the requested `pubKeyCredParams` (e.g., no RS256 support).
+- Explicitly test a "duplicate registration" where a user tries to register the same key twice.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The isolation of the WebAuthn library is a critical and well-executed design choice.
 
 ---
 
 ### 02-09
-**Summary**: Implements the admin approval pipeline, allowing credentials to be bound to users via signed directory versions.
+**Summary**: This plan implements the "binding" process, where an admin approves a pending credential and installs a new directory version into the signer.
 
 **Strengths**:
-- Strong "Verify Base $\rightarrow$ Mutate $\rightarrow$ Diff $\rightarrow$ Sign $\rightarrow$ Install" pipeline.
-- Correct handling of quorum through proposal files.
+- **Pipeline Safety**: The `editDirectory` pipeline (Verify Base $\rightarrow$ Mutate $\rightarrow$ Validate $\rightarrow$ Diff $\rightarrow$ Sign) prevents the creation of invalid or unauthorized directories.
+- **Quorum Support**: The proposal system (`--out`) naturally supports multi-admin approval without requiring a complex server-side state machine.
+- **Pending Check**: The server's check that a bound credential must be "pending" prevents admins from accidentally binding a key that was previously discarded or re-invited.
 
 **Concerns**:
-- **LOW**: `internal/directory/diff.go`. Ensure the diff is strictly read-only and does not leak sensitive data (though credentials are already just fingerprints).
+- **Medium**: The "lost update" problem (two admins editing the same base) is handled by the signer's `directory_version_chain` refusal, but this requires the admin to re-run the command.
 
 **Suggestions**:
-- In `keyroster user approve`, add a `--force` flag for the rare case where an admin needs to bind a credential that the server currently thinks is already bound (e.g., after a DB restore).
+- In the `Diff` output, clearly highlight which user's passkey is being bound to avoid approval errors.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The authority model is strictly followed.
 
 ---
 
 ### 02-10
-**Summary**: Implements passkey web sign-in and a read-only account view.
+**Summary**: This plan implements the web sign-in flow and the read-only account page.
 
 **Strengths**:
-- Correct session hardening: `__Host-` prefix, hashed at rest, idle/absolute expiry.
--- No "backdoor" sign-in paths.
+- **Session Hardening**: Using `__Host-` cookies with `SameSite=Strict` and hashing IDs at rest follows modern security best practices.
+- **Read-Only Surface**: The account page is strictly read-only, ensuring that the web UI cannot be used to elevate privileges.
+- **Fail-Closed Access**: Checking the user's "active" status and credential binding on every request ensures that disables take effect almost immediately.
 
 **Concerns**:
-- **LOW**: `internal/server/session.go`. The plan deletes the session if the user is disabled. Ensure this check happens on every request, not just at session creation.
+- **Low**: The 5-second status window is a small gap, but as the la-back plan notes, this is an accepted residual since the signer re-verifies everything at issuance.
 
 **Suggestions**:
-- Add a "Last Login" timestamp to the account page to help users detect unauthorized access.
+- Add a "Last Sign-in" timestamp to the account page (deferred to UI-02, but worth noting as a useful audit feature).
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The session management is robust.
 
 ---
 
 ### 02-11
-**Summary**: Implements roles, groups, and host groups, and the shared renderer for `AuthorizedPrincipalsFile`.
+**Summary**: This plan implements the role and host-group mapping system and the renderer for the `AuthorizedPrincipalsFile`.
 
 **Strengths**:
-- Consistent use of the 02-09 pipeline for all authority changes.
-- Correct a-priori validation of principals (no wildcards/commas).
+- **Principals Renderer**: By using a single shared renderer for both the CLI and the future agent, the system ensures that the "intended" access matches the "actual" access on the host.
+- **One-Way Door**: The choice of `role:NAME` and `u:USER` prefixes prevents collisions and makes the certificates self-describing.
+- **Header-Only Refusals**: Rendering a header-only file for unmapped accounts is a clean way to revoke access without deleting the file manually.
 
 **Concerns**:
-- **LOW**: `internal/directory/render.go`. The plan renders a file with a header. Ensure the renderer handles empty principal sets by producing an empty file (or a file with only the header) rather than an error, so that revoking all access is possible.
+- **Low**: Manual host setup is error-prone. The runbook's "UNVERIFIED" labels correctly identify this as a risk.
 
 **Suggestions**:
-- Add a `keyroster role list` command to provide an overview of the current authorization matrix.
+- Include a "check" command that compares a host's current principals file with what `keyroster host principals` would render.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The mapping logic is simple and correct.
 
 ---
 
 ### 02-12
-**Summary**: Implements the `keyroster login` CLI flow with browser loopback, PKCE, and agent integration.
+**Summary**: This is the "MVP Moment." It implements the `keyroster login` command, the browser loopback flow with PKCE, and the agent integration.
 
 **Strengths**:
-- Robust anti-phishing via fingerprint comparison.
-- Correct "Mint at Redemption" logic to prevent phished certificates from appearing in the log.
+- **PKCE and State**: The use of PKCE and state protects against authorization code injection and CSRF in the loopback flow.
+- **Ephemeral Keys**: Generating a new key per login and zeroing it on exit prevents long-term key theft from the client machine.
+- **Lifetime Constraint**: Adding keys to the agent with a `lifetime` ensures that certificates are automatically evicted, fulfilling a core requirement.
 
 **Concerns**:
-- **MEDIUM**: `cmd/keyroster/loopback.go`. The plan listens on `127.0.0.1:0`. Ensure the listener is closed immediately after the first successful callback to minimize the window for local attacks.
+- **Medium**: The "loopback" depends on the browser allowing navigation to `127.0.0.1`. While common, some strict environments might block this. The CLI's fallback (printing the URL) is a necessary escape hatch.
 
 **Suggestions**:
-- Implement a timeout for the loopback listener that provides a friendly error message if the user takes too long to approve in the browser.
+- In the loopback handler, ensure the `Host` header is checked strictly to prevent DNS rebinding attacks.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The flow is a standard, secure implementation of the OAuth-like "device flow" for local agents.
 
 ---
 
 ### 02-13
-**Summary**: Executes the homelab dogfooding for the server and the first admin enrollment.
+**Summary**: This plan is the "Dogfooding Part 1," moving the stack onto the homelab and enrolling the owner.
 
 **Strengths**:
-- Strict "no-leak" policy for homelab identifiers.
-- Rigorous rehearsal in WSL before applying to the VM.
+- **Safe Upgrade Path**: The use of `.pre-02-13` backups and a detailed rollback procedure prevents a botched upgrade from bricking the signer.
+- **Sovereign RP**: The blocking-human checkpoint for the RP hostname prevents a one-way mistake in the root-signed policy.
+- **Symmetry**: The owner enrolling "exactly like any user" proves that the system works without "magic" admin bypasses.
 
 **Concerns**:
-- **LOW**: Task 2. The la backup of the state directory is mentioned. Ensure the backup includes the `ca-pubkeys.json` and any other identity files, not just the DB.
+- **Low**: The use of TEST roots for the homelab is a known temporary state, but the bookkeeping for the owed v4 ceremony is correctly tracked.
 
 **Suggestions**:
-- Record the `systemd-analyze security` score in the SUMMARY to provide a baseline for future hardening.
+- Record the `systemd-analyze security` score for the server as a baseline for future hardening.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. The deployment process is cautious and documented.
 
 ---
 
 ### 02-14
-**Summary**: Completes the phase with real end-to-end logins on Windows and Linux, and updates the platform verification record.
+**Summary**: This is the "Dogfooding Part 2," performing real logins from Windows and Linux and recording the evidence.
 
 **Strengths**:
-- Honest reporting of "UNVERIFIED" platforms (macOS).
-- Corroboration of logins via independent logs (audit and journal).
+- **Corroborated Evidence**: Matching the audit log (signer) and the sshd journal (host) provides high-confidence proof that the system works.
+- **Honest Reporting**: Labeling unexercised platforms (macOS) as `UNVERIFIED` ensures the project doesn't overclaim its status.
+- **Lived-in Requirements**: Completing AUTH-01, AUTH-02, AUTH-04, and UI-01 based on real-world success is the only valid way to close these requirements.
 
 **Concerns**:
-- **LOW**: Task 5. When adding `cli-windows` and `cli-macos` as required checks, ensure the `main-integrity` ruleset is updated *after* the jobs are confirmed green on `main` to avoid blocking the pipeline.
+- **Low**: The requirement for the owner to manually copy a principals file is a temporary friction point until the agent is built.
 
 **Suggestions**:
-- Include a "Lessons Learned" section in the SUMMARY regarding the real-world behavior of the Windows inbox agent vs. the custom agent.
+- Use the "expiry check" data to refine the ` la-back` la-back plan's lifetime check if any specific OS behavior is observed.
 
-**Risk Assessment**: LOW.
+**Risk Assessment**: **LOW**. This is the final validation of the phase.
 
 ---
 
-### Final Review Summary
+### Overall Risk Assessment: LOW
 
-**Overall Quality**: Excellent. The plans are concrete, cite specific requirements/decisions, and follow a strict "tracer-first" execution model.
-**Completeness**: All Phase 2 requirements are mapped to specific plans.
-**Risks**: The primary risk is the reliance on third-party browser behavior for the loopback and WebAuthn ceremonies, which is correctly mitigated by labeling those paths as UNVERIFIED until the homelab dogfooding.
-**Phase Goal**: The plans provide a clear, verifiable path to achieving the first end-to-end login.
-
-**Verdict**: **APPROVED**. Ready for execution.
-
+The implementation plan for Phase 2 is exceptionally structured. It follows a "tracer-first" approach, validates architectural assumptions through gating probes, and uses a robust "fail-closed" auditing and session model. The separation of the untrusted server from the network-less signer is strictly enforced. The most significant risk—the one-way nature of the RP hostname and principal format—is handled via blocking-human checkpoints. The project is on track to deliver a secure, verifiable, and simple SSH CA.
 ---
 
 ## Ollama gpt-oss:120b (per plan) Review
 
-### 02-01 – Review  
+### 02-01
 
-#### Summary  
-Plan 02-01 is the “Phase-tracer” that stitches together every core component needed for the Passkey-Login MVP:
+##### 02-01 – Signer‑login tracer plan
 
-1. **Policy extension** – adds a `WebAuthn *WebAuthnRP` field (last field of `Policy`) and a full validation suite for RP-ID and origins.  
-2. **Directory model** – introduces a signed, successor-chained `keyroster/directory/v1` document, with its own parser, validator and authorisation logic.  
-3. **WebAuthn verifier** – a tiny std-lib-only verifier that parses `clientDataJSON` and CBOR-encoded authenticator data, checks RP-ID, flags, origin and signature.  
-4. **Wire changes** – new frame types for `InstallDirectory` and `LoginIssueRequest`, plus marshaling/unmarshaling code for the new structures.  
-5. **Signer changes** – installs a directory, verifies it, and then processes a login request by (a) checking evidence, (b) recomputing the principal set/TTL from the directory, (c) issuing a `kr2` certificate, and (d) logging both a `directory_install` and a `login_issue` leaf.  
-6. **CLI and test scaffolding** – adds genesis-policy flags, soft-authenticator test helpers, a full e2e “real sshd” test, and updates the dependency-firewall / capslock checks.
+###### Summary
+The plan adds the core pieces required for the Phase‑2 “passkey login MVP”: a RP entry in the root‑signed policy, a quorum‑signed *directory* document that binds users to WebAuthn credentials and role‑principal mappings, a std‑lib‑only WebAuthn assertion verifier, new wire message types for login and directory installation, and the corresponding signer logic (install, login, log‑state updates).  It also introduces the first log‑leaf kinds for a directory install (`KindDirectoryInstall`) and a login issue (`KindLoginIssue`), updates the audit‑verify walk to reject unknown leaf kinds, and supplies a full end‑to‑end e2e test that restarts the signer after a login.  The implementation is covered by extensive unit tests, golden‑vector checks, and fuzzers, and the new packages are kept out of the signer dependency graph by dep‑guard and caps‑lock updates.
 
-The plan is a concrete “big-bang” tracer: if all pieces compile and the e2e test passes, the whole Phase-2 security core is proved to work.
+Overall the plan is **well‑structured** and follows the “server‑proposes, signer‑disposes” rule that underpins the security model.  It brings the necessary authority into the signer (the directory and RP) while keeping the web UI and CLI as untrusted front‑ends.
 
 ---
 
-#### Strengths  
-
-| Area | What the plan does well |
-|------|--------------------------|
-| **Security-by-design** | The signer is the only component that ever sees a verified WebAuthn assertion (step 3 of the signer login flow). All policy and directory checks happen inside the signer, keeping the network-less signer as the trust anchor. |
-| **Two-layer authority** | By requiring a root-signed policy *and* an admin-quorum-signed directory before any login can succeed, the plan enforces the “root + quorum” model described in the context doc (D-01). |
-| **Tamper-evident logging** | New `KindDirectoryInstall` and `KindLoginIssue` leaves are added atomically with the DB transaction, preserving the Merkle-log guarantees. |
-| **Clear separation of concerns** | Wire, policy, directory, WebAuthn, signer and CLI are each given their own package, keeping the attack surface small and the dependency graph clean. |
-| **Test coverage** | Unit tests for every new format, a soft-authenticator fuzz-friendly test harness, and a full e2e test against stock OpenSSH hosts give high confidence before any production rollout. |
-| **Dependency-firewall discipline** | The plan explicitly adds the new packages to the signer-no-network list and anticipates capslock updates, respecting the existing supply-chain hardening process. |
-| **Future-proofing hooks** | The RP-ID validation rules (IP literals, tailnet label counts, etc.) are coded in step 1 and documented as “owner-locked D-09 rule”, making later policy upgrades straightforward. |
-
----
-
-#### Concerns  
-
-| Severity | Concern (with reference to plan step) | Open question / mitigation |
-|----------|--------------------------------------|----------------------------|
-| **HIGH** | **(1) Policy canonicalisation** – The plan adds `WebAuthn *WebAuthnRP` as the *LAST* field of `Policy` (step 1). If any downstream code marshals a `Policy` without preserving field order, byte-identical canonical JSON will break and signatures will no longer validate. <br>**Question:** Does the existing `CanonicalJSON` implementation guarantee field order for *all* structs, or only for fields that already appear in the struct definition? Should we enforce a custom encoder that re-orders fields rather than rely on struct order? |
-| **HIGH** | **(2) Directory successor validation** – `CheckSuccessor` (step 4) enforces `prev = SHA-256(prevBytes)`. The plan mentions a “GenesisPrev” constant but does not state how that constant is derived (e.g. all-zero hex). <br>**Question:** What happens if the signer restarts with a partially-written directory row (e.g. DB crash after InsertDirectory but before commit of the log leaf)? Is there a recovery path that does not leave the signer in a state where `directoryAuthorized == false` yet the directory exists on disk? |
-| **HIGH** | **(3) WebAuthn assertion size limits** – The verifier (step 3) demands `authenticatorData` exactly 37 bytes and a 1024-byte max for the signature. New authenticator firmware (e.g., Windows Hello updates) may add extra extensions or a larger counter field. <br>**Question:** Are we prepared to relax the fixed-size check to “≥ 37 bytes and the flag bits are in the expected positions” while still rejecting unsupported extensions? |
-| **MEDIUM** | **(4) Clock-skew handling** – The login flow checks a “maxClockSkew” (step 7 of the login flow) but the plan does not specify the exact value or how it is synchronised with the client. <br>**Question:** What is the chosen skew window, and is it configurable for future deployments that may run on machines with unsynchronised clocks? |
-| **MEDIUM** | **(5) Principal equality enforcement** – The signer rejects the request if `req.Principals != grant.Principals` (step 7-3). The wire format permits the client to omit `Principals` (optional field). If a client omits the field but the grant set is non-empty, the signer will reject with `principals_mismatch`. <br>**Question:** Should the CLI automatically populate `Principals` from the directory, or should we add a clearer error message to help developers? |
-| **MEDIUM** | **(6) Key ID formatting** – The new `kr2` format appends `/roles=` with a `+`-joined list. The parsing code must reject unsorted or duplicate role strings (step 6). <br>**Question:** Are there any downstream tools (e.g., audit-verify scripts) that currently assume a fixed number of fields and will break when they encounter the extra `/dir=` and `/roles=` components? |
-| **LOW** | **(7) Dependency-firewall coverage** – The plan adds `**/internal/webauthn/**` and `**/internal/directory/**` to the signer-no-network block (step 13). However, the CLI also imports `internal/webauthn` indirectly via `signerclient` for the soft-authenticator helper. <br>**Question:** Does the firewall rule differentiate between the signer binary and the CLI binary, or will it unintentionally block the CLI from building? |
-| **LOW** | **(8) Windows named-pipe handling** – The CLI uses `github.com/Microsoft/go-winio` (step 13) but the plan does not explicitly add a build tag or OS-guard to avoid pulling the package into non-Windows builds. <br>**Question:** Is the go-mod tidy step guaranteed to keep the dependency only behind the `windows` build tag, and does the capslock baseline treat this as “network-aware” code? |
-| **LOW** | **(9) Test-only soft-authenticator** – The soft authenticator lives under `internal/webauthn/webauthntest`. The plan checks that the binary does not depend on it, but the explicit check `go list -deps ./cmd/... | grep -c webauthn/webauthntest` may miss indirect imports via test files. <br>**Question:** Should we add an explicit `go:build !test` guard or move the helper to `test/` to guarantee it never lands in production binaries? |
+###### Strengths
+- **Clear authority boundaries** – All authorising data (policy RP, directory, WebAuthn assertion) is verified *inside* the signer (`internal/webauthn`, `internal/directory`, `internal/signer`).  The server merely forwards blobs.  This matches the documented threat model (see `D‑01`, `KEY‑02`).
+- **Canonical JSON & strict validation** – `internal/trust/CanonicalJSON` and the new `directory.Parse/Validate/Sort` enforce a single byte representation, preventing “different string forms” attacks.  The plan adds golden‑vector tests (`directory_v1.json`, `leaf_directory_install_v1.hex`, …) to lock the format forever.
+- **Minimal WebAuthn verifier** – The verifier is written with only `crypto/*` and `encoding/json` (no CBOR).  It parses `clientDataJSON` with a token‑decoder that rejects duplicate keys and invalid types, which is a known source of bugs (PITFALL 13).  The allowed algorithms (`ES256, EdDSA, RS256`) cover the major platform authenticators, and the signer refuses any other `alg`.
+- **New wire protocol is additive** – Existing `IssueRequest` (`0x01`) is left untouched, and the new login request (`0x05`) and directory install (`0x02`) are added with distinct type bytes.  The existing decoder (`wire/frame.go`) already caps frames at 64 KiB; the plan notes that later waves will add per‑type caps, but the current size limit is sufficient for the expected payloads.
+- **Log‑state correctness** – `logstate.go` now counts `KindLoginIssue` leaves together with `KindIssue` leaves, so the “log covers issuance table” check remains true after a login (addresses T‑02‑116).  The e2e test restarts the signer after a login and verifies that a second login succeeds, proving the continuity.
+- **Audit‑verify safety** – The audit walk is made exhaustive: known Phase‑1 kinds have empty cases; any unknown kind (including the freshly added `directory_install` and `login_issue`) falls into a default branch that refuses the leaf with a clear message *“not verifiable by this version”*.  This prevents silent acceptance of future leaf kinds (T‑02‑115).
+- **Dependency hygiene** – The new packages are added to the `signer‑no‑network` dep‑guard list, and a new `testonly‑firewall.sh` script ensures that test‑only helpers (`webauthntest`, `servertest`) are never linked into production binaries.  The script is wired into the existing `dependency‑firewall` CI job.
+- **Coverage of edge‑cases** – The plan includes unit tests for:
+  - RP validation (rejecting IP literals, ports, public‑suffix tailnet names);
+  - Directory schema validation (duplicate credentials, unsorted lists, missing credentials);
+  - WebAuthn assertion failures (missing UV, wrong RP ID, wrong challenge, bad origin);
+  - Key‑ID parsing for the new `kr2` format;
+  - Golden‑vector round‑trip tests for all new binary formats;
+  - Fuzzing of `DecodeLeaf` with the new kinds to guarantee the decoder never panics.
+- **Incremental rollout** – The plan deliberately makes the new leaf kinds *unverifiable* until the later `02‑04` plan adds proper checks.  This gives a safe “fail‑closed” window while the rest of the system can be exercised.
 
 ---
 
-#### Suggestions  
-
-| Area | Recommendation |
-|------|----------------|
-| **Policy canonicalisation** | Add a dedicated `CanonicalEncodePolicy(p *Policy) ([]byte, error)` that orders fields explicitly (e.g., using a map with a fixed key order) and replace all `json.Marshal` calls with it. This eliminates any reliance on struct field order. |
-| **Directory recovery** | Implement a “directory sanity check” at signer start-up: if a directory row exists but its leaf hash does not match the latest log entry, roll back to the previous version (or abort startup with a clear error). Document the recovery procedure. |
-| **WebAuthn data flexibility** | Replace the strict `len(authData) == 37` check with `len(authData) >= 37 && (authData[32] & 0x07) == expectedFlags`. Add a comment that extra bytes are ignored for now, and flag them in a new refusal class (`unsupported_authenticator_data`). |
-| **Clock-skew configurability** | Introduce a configurable `maxClockSkew = 5 * time.Minute` in the signer and expose it via a `--max-clock-skew` flag (owner-locked). Include the value in the log leaf for auditability. |
-| **CLI auto-populate principals** | In `keyroster login`, after fetching the directory, call `Authorize` and inject the resulting `Principals` into the request if the user did not supply them. This avoids a “principals_mismatch” user error. |
-| **Key ID backward compatibility** | Add a compatibility shim in `cert.ParseKeyID` that, when encountering an unknown field (e.g., `/dir=`), still parses the known prefix and returns a partially-filled struct, but logs a warning that newer fields are present. This protects older tools that only understand `kr1`. |
-| **Dependency-firewall granularity** | Split the firewall rule into two lines: `**/internal/webauthn/**   signer-no-network` and `**/internal/webauthn/**   cli-no-network` (or a comment clarifying that the rule applies only to the signer binary). |
-| **Windows build-tag hygiene** | Add `//go:build windows` at the top of the file that imports `go-winio` and ensure the `go.mod` replace block for `github.com/Microsoft/go-winio` is scoped to that file. Verify capslock does not flag the import for non-Windows builds. |
-| **Soft-authenticator isolation** | Move the entire `webauthntest` package under `test/` (e.g., `test/webauthn`) and import it with a build tag `//go:build test`. Update the test code to import `test/webauthn`. This guarantees the helper never appears in production builds. |
-| **Documentation of error classes** | Extend the refusal-class table (`internal/signer/refusal.go`) with a comment mapping each new sentinel (e.g., `credential_mismatch`) to its `ReasonUnauthorized` enum value, and update the generated docs (`docs/REFUSALS.md`). |
-
----
-
-#### Risk Assessment  
-
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| **Policy-field ordering breaking signatures** | Medium (depends on future code changes) | High – all existing certificates would become unverifiable. | Implement explicit canonical encoder (see suggestion) and lock the struct order via code review gate. |
-| **Directory chain corruption on crash** | Low (DB transactions are atomic) | High – signer could refuse every login and become unusable. | Add start-up sanity check and graceful fallback to “no directory installed” mode, with clear admin alert. |
-| **Future authenticators exceeding fixed data limits** | Medium (authenticator firmware evolves) | Medium – legitimate logins could be refused. | Relax size checks and add a new refusal class for “unsupported_authenticator_data”. |
-| **Clock-skew causing replay failures** | Low (skew window is modest) | Medium – user experience degraded. | Make skew configurable and document the default. |
-| **Incorrect principal set leading to denial** | Low (principal equality is strict) | Medium – legitimate logins denied. | Auto-populate principals in CLI and improve error messaging. |
-| **Dependency-firewall inadvertently blocking CLI builds** | Low (rules are simple) | Low – CI failures. | Separate firewall lists for signer vs CLI as suggested. |
-| **Test-only soft-authenticator leaking into production binary** | Very low (explicit check in plan) | Low – binary size increase, no security issue. | Move helper to `test/` package. |
-
-Overall, the plan is **well-scoped** and **architecturally sound**, but the high-severity concerns around *canonical JSON ordering* and *directory chain robustness* must be addressed before the code can be considered production-ready. Implementing the suggested mitigations will lower the risk to an acceptable level and keep the Phase-2 tracer on track for the MVP success criteria.
-### 02-02 – Windows-named-pipe SSH agent & cross-platform CI  
-**Phase 2 – Passkey Login MVP**  
-
-#### Summary  
-The plan introduces a **per-user, in-memory Windows SSH-agent** that is reachable through a named pipe (`\\.\pipe\keyroster-agent-<SID>`).  
-* The agent is started on demand by the CLI (`keyroster agent`) and serves the OpenSSH `ssh-agent` protocol via the Go-standard `agent.NewKeyring()` implementation.  
-* Keys/certificates added through the CLI carry a **lifetime constraint**; the agent expires them and exits when the last key is gone or after a configurable idle timeout.  
-* A **probe stage (Task 1)** first validates whether the built-in Windows OpenSSH client (`ssh.exe`/`ssh-add.exe`) can talk to a pipe-based agent and whether the GNOME `gcr-ssh-agent` on Linux respects lifetimes. The results of these probes are recorded in a SUMMARY file and feed any required human decision.  
-* The **dialer split** (`agentconn_unix.go` / `agentconn_windows.go`) lets the existing `dialAgent` abstraction route to either a UNIX-domain socket (Linux/macOS) or the named pipe (Windows) using `github.com/Microsoft/go-winio@v0.6.2`.  
-* **CI extensions** add `cli-windows` and `cli-macos` jobs that build the binary for all three platforms and run the new Windows-agent tests, plus a Unix-agent lifetime test.  
-* Documentation (`docs/security/needs-hardware.md`) is updated to capture the platform-verification status (Windows ✔, GNOME ✔, macOS UNVERIFIED).  
-
-Overall the plan attempts to satisfy **AUTH-03** (certificate expires from the agent) and **PLAT-05** (CLI works on Linux, macOS, Windows) while keeping the attack surface small (no fallback to the inbox agent, no disk-write of private material).
+###### Concerns
+| # | Area | Concern | Severity | Evidence / Reasoning |
+|---|------|----------|----------|----------------------|
+| C‑1 | RP validation implementation | The validation logic for `rp_id` and `origins` lives in `internal/trust/policy.go`.  The plan describes checks for lower‑case DNS labels, no IP, public‑suffix rules, and that each origin is exactly `https://<rp_id>` (or with a non‑443 port).  If the implementation only checks *format* but not *uniqueness* or *sorted order* of the `origins` slice, an attacker could supply duplicate origins that pass `json.Unmarshal` but break the signer’s constant‑time comparison. | **MEDIUM** | The plan calls for “sorted and duplicate‑free” but the actual code may have forgotten the duplicate‑free test (`sort.Slice` then `for i>0 { if origins[i]==origins[i-1] … }`).  A missing duplicate check would let a malicious admin create two identical origins, causing the signer’s `slices.Contains` lookup to be O(n) but still correct – however duplicate entries could be used to hide a malicious extra origin if later code changes to “first match wins”. |
+| C‑2 | Directory signature verification | `internal/directory/verify.go` uses `trust.CountPinnedSigners` with the admin set from the *current* policy.  If the policy is updated (root‑signed successor) after a directory install, the signer will load the **new** policy and then verify the old directory against the new admin set.  The plan says “if quorum not met, the signer starts but refuses logins”.  However, the signer does **not** reject the directory installation itself; it merely sets `directoryAuthorized=false`.  This leaves the directory in the DB, which could be confusing to operators. | **MEDIUM** | The code path in `Signer.InstallDirectory` stores the directory before checking quorum; the flag `directoryAuthorized` is used later to reject logins.  Storing an unauthorized directory should be prevented or at least logged as a fatal error. |
+| C‑3 | WebAuthn assertion parsing – clientDataJSON size limit | The `clientdata.go` parser caps the JSON to 2048 bytes, but some browsers (e.g., Chrome with a large `crossOrigin` field or a long `topOrigin`) can exceed that limit when extensions are present.  The plan treats any excess as `ErrClientData`, causing a login refusal.  This could be a denial‑of‑service vector for legitimate users. | **LOW** | The limit is not justified by the spec (clientDataJSON is typically <1 KiB).  A more robust approach would be to stream‑parse with a larger limit (e.g., 4 KiB) or reject only on malformed JSON rather than size. |
+| C‑4 | AuthenticatorData length assumption | The verifier insists on *exactly* 37 bytes (`authData` = 32‑byte RP‑hash + 1‑byte flags + 4‑byte counter).  Some authenticators (e.g., Windows Hello) may set the `AT` (Attested Credential Data) flag for `packed` attestations, producing longer `authData`.  The plan acknowledges this (A6) and defers handling, but the current implementation would reject any real Windows authenticator used in production, breaking the MVP on a Windows client. | **HIGH** | The plan’s “soft authenticator” test only covers the minimal 37‑byte format; real hardware could cause immediate refusal.  Since the project aims to support Windows users (owner’s homelab includes a Windows PC), this is a critical blocker for the MVP. |
+| C‑5 | PKCE / code handling in the login flow | The login flow uses PKCE (`code_challenge`, `code_verifier`) stored in the server DB with a 120 s TTL.  The plan does **not** specify how the server validates the *code verifier* against the *code* received on the loopback callback.  If the server mistakenly stores the raw verifier rather than the SHA‑256 of it, a replay attack could be possible. | **MEDIUM** | The code snippet in the plan (`LoginIssue` stores `code` and `code_challenge`) is vague.  A mismatch would lead to either false rejections or a missing security check. |
+| C‑6 | Log‑leaf size for directory install | The `DirectoryInstallBody` encoder allows the full directory document (potentially >1 MiB) to be stored in a single leaf.  The signer’s `MaxFrame` is still 64 KiB, but the plan notes that per‑type caps will be added in later waves.  Right now a large directory could overflow the frame and cause the signer to drop the request or panic. | **LOW** | The current test vectors use a tiny directory; the production homelab may have many users and roles, exceeding 64 KiB.  The decoder `DecodeLeaf` will reject oversize frames, but the signer should return a clear refusal (`directory_too_large`). |
+| C‑7 | Audit‑verify default handling of unknown leaf kinds | The default branch now refuses any leaf kind it does not recognise.  This is safe now, but future plans (e.g., adding a `KindHostAgentInstall`) must remember to add an explicit case, otherwise the log will become permanently unverifiable.  The lack of a “soft” mode may cause operational pain if a new leaf is introduced but not yet audited. | **MEDIUM** | The code in `internal/audit/verify.go` uses a `default` that returns an error.  A future change that forgets to update this switch will break verification of existing logs. |
+| C‑8 | Credential ID canonicalisation – base64 URL padding | The `Validate` step decodes credential IDs with `base64.RawURLEncoding.Strict()`.  The plan adds a test for “non‑canonical” IDs that have extra padding bits, but the error message `credential_id_noncanonical_refused` is only exercised in a unit test.  It is not clear whether the signer returns a distinct refusal detail (`ReasonMalformed`) that is audited. | **LOW** | If the refusal detail is not mapped in `classify` to a named reason, audit logs would have a generic “unauthorised” entry, making incident response harder. |
+| C‑9 | Directory migration test (`upgrade_from_v3`) | The test creates a Phase‑1 DB with `user_version=3` and then opens it with the new schema.  However, the migration code (`internal/signerdb/migrate.go`) may apply *all* migrations up to the latest version, which could unintentionally modify existing Phase‑1 tables (e.g., adding the new `directory` table with a default row).  The test only checks that the directory table exists and is empty, but does not verify that no data was corrupted. | **LOW** | The migration script should be verified with a dump of the original tables to ensure they remain unchanged. |
+| C‑10 | Error handling for missing directory | When the directory has not been installed, `Signer.LoginIssue` returns a refusal with a generic “directory_not_installed”.  The audit log will contain a `ReasonUnavailable`.  If the server is restarted without a directory, every login will be refused, but the signer will still start.  Operators may not notice the missing directory because the signer logs only at `Info` level. | **LOW** | The plan could add a `Start`‑time fatal log (or a `doctor` status flag) that signals “directory missing – logins disabled”. |
 
 ---
 
-#### Strengths  
-
-| What the plan does well | Evidence / Plan step |
-|------------------------|-----------------------|
-| **Isolates Windows credential handling** – a dedicated pipe-agent avoids the registry-based persistence of the stock OpenSSH inbox agent. | Task 2 “keyroster agent … never puts a login key into the Windows inbox ssh-agent” (prohibition resolved). |
-| **Defends against pipe-squatting** – the pipe is created with a SID-restricted SDDL and `VerifyServerOwner` checks the server’s token before any key is sent. | Task 2, internal/winagent/owner_windows.go description. |
-| **Clear gating probes** – the plan refuses to ship Windows code until the inbox client can actually consume a pipe-based agent and until the GNOME agent correctly enforces lifetimes. | Task 1 “A2” and “A3” with explicit pass/fail checkpoints. |
-| **Zero-cgo static binaries** – `go-winio` is pure Go, preserving the “static binary” policy for the core binary (except the Windows build which includes the extra dependency). | Files-modified list, “go-winio is linked only into the Windows build of keyroster”. |
-| **CI-driven dependency firewall** – the `go list -m github.com/google/go-tpm` version is confirmed unchanged, and the dep-firewall / capslock checks are run after the `go-get`. | Task 2 verification steps. |
-| **Explicit reversibility rating** – the plan acknowledges the long-term cost of a hard-coded pipe name in user configs, which is useful for future migration decisions. | Task 2 “reversibility rating=costly”. |
-| **Documented failure paths** – if either probe fails, a `checkpoint:decision` is emitted with concrete remediation options, preventing silent fallback. | Task 1 “blocking-human decision” section. |
-
----
-
-#### Concerns  
-
-| Severity | Concern | Where it appears in the plan | Why it matters |
-|----------|----------|-----------------------------|-----------------|
-| **HIGH** | **Reliance on the inbox OpenSSH client to honour the lifetime flag** – the whole Windows flow hinges on `ssh-add -t` and `ssh.exe` reading the `LifetimeSecs` field from the in-memory agent. The probe (Task 1 A2) only demonstrates this on the author’s test machine; if the Windows OpenSSH version is upgraded or the user runs a non-standard client (e.g., MSYS2 `ssh.exe`), the guarantee may break. | Task 1, step 3 (use of `ssh-add.exe -t 30 …` and later `ssh-add.exe -l` to verify expiry). | If the client silently ignores the lifetime, a certificate could persist in the inbox agent, violating AUTH-03 and leaking long-lived credentials. |
-| **MEDIUM** | **Potential for SID mismatch on multi-user machines** – `VerifyServerOwner` compares the pipe server’s SID to the *current* caller’s SID. If a user runs the CLI under a different token (elevated, runas, or via a service), the verification may incorrectly reject a legitimate agent or, conversely, accept a malicious server that managed to impersonate the caller’s SID (e.g., via a compromised service). | internal/winagent/owner_windows.go description (Task 2). | The check is only as strong as the Windows APIs used; edge cases (UAC elevation, scheduled tasks) could bypass it, allowing a rogue process to harvest keys. |
-| **MEDIUM** | **Hard-coded pipe name may become a migration obstacle** – the plan acknowledges the “costly” reversibility rating, but no migration strategy is defined (e.g., versioned pipe names, env-override). Future changes to the pipe naming scheme would require manual updates to every user’s `~/.ssh/config` or environment variable. | Task 2 “reversibility rating=costly”. | Could lead to configuration drift and broken logins after a later refactor or security hardening step. |
-| **LOW** | **Dependency surface on `go-winio` only on Windows** – while the plan checks that the signer's dependency graph is unchanged, adding a new indirect dependency (`golang.org/x/sys/windows`) might introduce a new attack surface for Windows-only builds (e.g., via a malicious update). | Task 2 verification step “go list -deps … | grep go-winio”. | The dep-firewall capslock checks mitigate this, but the plan does not specify a process for future updates (e.g., pinning to a specific commit hash). |
-| **LOW** | **MacOS verification remains UNVERIFIED** – the plan records “UNVERIFIED” in docs but does not require any macOS-specific runtime test beyond CI unit tests. Real-world macOS users may encounter subtle differences (e.g., `ssh-add` does not support the `-t` flag). | Task 3 documentation update. | Could surface as a production issue later (failure to honor lifetime on macOS) without a clear mitigation path. |
+###### Suggestions
+1. **Make RP validation exhaustive** – After sorting the `Origins` slice, explicitly check for duplicates (`if origins[i]==origins[i-1] { return fmt.Errorf("duplicate origin") }`).  Add a unit test in `policy_test.go` for duplicate origins.
+2. **Reject unauthorised directory installs** – In `Signer.InstallDirectory`, verify quorum *before* persisting the directory.  If quorum fails, return a refusal *without* inserting the row, and log a `directory_quorum_not_met` fatal error.
+3. **Relax `authenticatorData` length check** – Accept `authData` length ≥ 37 bytes and verify that the high‑order bits (AT, ED) are **clear** when the signer does not support extensions.  This will allow Windows Hello (which may set the AT flag) to be accepted without breaking the security model, because the signer still ignores extensions.  Add a test case with a mocked Windows credential that sets AT but leaves the rest unchanged.
+4. **Explicit PKCE verification** – Store `code_challenge = base64url(SHA256(verifier))` and, on loopback callback, recompute the SHA‑256 of the received verifier and compare constant‑time.  Return a distinct refusal `pkce_verifier_mismatch`.  Add a unit test covering a mismatch.
+5. **Add per‑type frame caps now** – Even if a later wave will refine caps, set a safe cap for `InstallDirectory` (e.g., 1 MiB) and for `LoginIssue` (e.g., 128 KiB) in the current `wire/frame.go`.  Return `directory_too_large` or `login_request_too_large` refusals if exceeded.  This prevents accidental panic on large directories.
+6. **Document audit‑verify default behaviour** – In `docs/security/audit.md` (or similar), note that any future leaf kind will be *rejected* until a verifier is added.  Provide a checklist for developers when adding a new leaf kind.
+7. **Map all new refusal details in `classify`** – Ensure that every new reason (`directory_invalid`, `directory_quorum_not_met`, `credential_id_noncanonical`, `pkce_verifier_mismatch`, `authenticator_data_invalid`, etc.) has a corresponding `Reason*` constant and that `classify` returns a human‑readable name.  Add a table-driven test in `refusal_test.go` that checks the mapping.
+8. **Add integration test for duplicate origins** – Build a policy with two identical origins, sign it, and verify that the signer refuses the policy at load time (`policy_invalid`).  This will catch any missing duplicate‑origin check.
+9. **Extend the migration test** – Dump the Phase‑1 tables’ contents before migration, run the migration, then query them again and compare (using `reflect.DeepEqual`).  This guarantees no accidental data loss.
+10. **Improve start‑up visibility** – When the signer starts without an authorised directory, have `doctor.Status` report `directory_missing=true` and display a loud banner on the web UI (`UI‑01`), mirroring the software‑key warning (`KEY‑06`).  This makes operators aware that logins are disabled.
 
 ---
 
-#### Suggestions  
+###### Risk Assessment
+**Overall risk: MEDIUM‑HIGH**
 
-1. **Add a fallback test for non-standard Windows `ssh.exe` binaries**  
-   * Extend Task 1 A2 to also run the same probe against the MSYS2/WSL `ssh.exe` (if present) and record the result. If the lifetime flag is ignored, the plan should flag a **policy deviation** and either (a) reject the use of that client (documented in `needs-hardware.md`) or (b) add a wrapper that enforces expiry locally.  
+*Why MEDIUM‑HIGH?*
 
-2. **Introduce an optional environment variable to override the pipe name**  
-   * Even a simple `KEYROSTER_AGENT_PIPE` would let operators perform a phased migration (e.g., rename to `keyroster-agent-v2-<SID>`). Document the variable in the README and add a tiny test that ensures the CLI respects it. This reduces the “costly” reversibility impact while keeping the default behavior unchanged.  
+- The **core security transformation** (moving authority into the signer) is correctly implemented, which dominates the risk profile positively.
+- However, the **WebAuthn authenticator data length restriction** (C‑4) is a *blocking* issue for Windows machines, which are part of the target audience (owner’s homelab includes Windows 9.5p2).  If unaddressed, the MVP cannot be demonstrated on a key platform, constituting a **high functional risk**.
+- The **directory‑install quorum handling** (C‑2) could lead to an inconsistent state where an unauthorised directory is persisted, possibly confusing operators and causing silent denial‑of‑service.
+- The **audit‑verify default rejection** (C‑7) is safe now but could become a maintenance liability if future leaf kinds are added without updating the switch, a **medium‑term operational risk**.
+- All other concerns are low‑to‑medium and have mitigations either already in the plan (fuzzing, golden vectors) or easily added (duplicate‑check, PKCE validation).
 
-3. **Explicitly hard-code the allowed client binary paths in the probe**  
-   * Instead of relying on `SSH_AUTH_SOCK` being set to the pipe, confirm that the client binary discovered is the Windows-installed OpenSSH (`C:\Windows\System32\OpenSSH\ssh.exe`). If a different binary is seen, emit a warning in CI and record it in the SUMMARY.  
+If the Windows authenticator‑data issue is resolved (e.g., by allowing AT flag and longer authData) and the directory‑install quorum check is tightened, the risk drops to **MEDIUM**. Until then the remaining high‑severity blocker keeps the overall rating at **MEDIUM‑HIGH**.
+### 02-02
 
-4. **Document the SID-verification edge cases**  
-   * In `docs/security/needs-hardware.md` (or a new `docs/security/windows-sid.md`), note that elevated processes may have a different token SID and therefore cannot use the agent. Provide guidance for users who need to run the CLI from an elevated terminal (e.g., run `keyroster agent` as the normal user and export `SSH_AUTH_SOCK`).  
+##### 02-02 – Windows‑Agent & Cross‑Platform CI Plan  
 
-5. **Lock the `go-winio` version to a SHA-pinned commit**  
-   * The plan pins the module version (`v0.6.2`), but the dependency firewall could be tightened by adding a `replace` directive that points to the exact commit hash, protecting against accidental minor releases that introduce regressions.  
+###### Summary
+The plan introduces a **dedicated in‑memory SSH agent for Windows** (served over a per‑user named pipe) to satisfy the requirement that `ssh‑add -t …` must succeed and that the private key expires with the certificate. It also adds **gating probes** that verify the inbox OpenSSH client can talk to the pipe (A2) and that the GNOME gcr‑agent respects lifetime constraints on Linux (A3).  The plan updates the CLI’s `dialAgent` abstraction, adds Windows‑only source files, ships a new `keyroster agent` command, introduces Windows‑only tests, and extends the GitHub Actions workflow with Windows and macOS jobs and a documentation update.
 
-6. **Add a macOS “lifetime-support” probe to the CI**  
-   * Even if macOS users cannot yet use the Windows-style `-t` flag, a small test that checks `ssh-add -t` returns the expected exit code can be added to `cli-macos`. This would upgrade the status from “UNVERIFIED” to “VERIFIED-WITH-NOTE” in the docs, reducing future surprise.  
-
----
-
-#### Risk Assessment  
-
-| Risk | Likelihood | Impact | Overall | Mitigation |
-|------|------------|--------|---------|------------|
-| **Certificates linger in the inbox OpenSSH agent** (client ignores lifetime) | Medium (depends on OS version) | High – defeats the core security promise (AUTH-03) | **Medium** | Probe A2; if failure, block Windows login in Phase 2 via a checkpoint decision and require a hardened wrapper or client upgrade. |
-| **Pipe-squatting / unauthorized key injection** | Low (guarded by SDDL + VerifyServerOwner) | High – could let another user inject keys that are then used for SSH logins. | **Medium** | Ensure the SDDL is correctly generated (tests); verify SID match; consider adding a random per-process nonce in the pipe name as an additional guard. |
-| **Configuration drift due to hard-coded pipe name** | Medium (future refactor) | Medium – could break user SSH configs after an upgrade. | **Low-Medium** | Provide override env-var; document migration path; keep pipe name stable across minor releases. |
-| **Dependency-drift in go-winio (or transitive windows syscalls)** | Low (dependency firewall) | Low – could introduce a vulnerability in Windows builds only. | **Low** | Pin to specific commit, run `scripts/dep-firewall.sh` and `capslock-check.sh` on every PR (already required). |
-| **Unverified macOS behavior** | Medium (no real-world test yet) | Medium – may cause user confusion when login fails on macOS. | **Low-Medium** | Add CI macOS probe (see suggestion 6) and clearly label the status in docs. |
-
-**Bottom line:** The plan is solid for delivering the Windows in-memory agent and cross-platform CI, **provided the gating probes (Task 1) are executed and any failure is captured as a blocking decision**. The highest-risk area is the reliance on the Windows OpenSSH client to respect `LifetimeSecs`; a fallback strategy should be defined *before* Phase 2 is declared complete. Adding a simple environment override for the pipe name will substantially reduce migration risk without impacting the current MVP.
-### 02-03 – Signer Boundary  
-
-#### Summary  
-The plan expands the Phase-1 tracer into a hardened “signer boundary” that will:
-
-1. **Expose a new RPC** (`GetDirectory`) so the server can mirror the currently-installed directory.  
-2. **Implement a full SC-4 refusal matrix** through the real Unix-socket, with a control that succeeds for every refusal case (missing assertion, replay, wrong digest, unsigned/unauthorized directory, policy lacking a WebAuthn RP, mixed-evidence types).  
-3. **Add restart-re-verification** of the stored directory against the active policy and a log-consistency check that aborts startup if the DB row diverges from the last `directory_install` leaf.  
-4. **Guarantee concurrency safety** for 16 parallel `LoginIssue` calls and concurrent directory installs, and verify the “directory-changed-while-issuing” race condition.  
-5. **Introduce per-message-type frame caps** (64 KiB for issues, 1 MiB + 64 KiB for `InstallDirectory`/`GetDirectoryResponse`) and an exhaustive fuzzing suite for all new parsers.  
-6. **Enforce the “no-mixing” rule** that a `LoginIssueRequest` may only contain `webauthn-assertion/v1` evidence and a `InstallDirectory` may only contain `admin-sshsig/v1`.  
-
-Overall the work is well-aligned with KEY-02 (“the signer only issues when the request carries evidence it verifies itself”) and with the Phase-2 success criterion 4.
+Overall the design follows the project’s “signer‑only authority” rule, keeps the new dependency (`github.com/Microsoft/go‑winio`) out of the signer graph, and documents the security‑relevant behaviour (per‑SID pipe, owner‑verification, no fallback to the inbox agent). The plan is **well‑structured** and clearly separates probing, implementation, CI, and merge steps.
 
 ---
 
-#### Strengths  
+###### Strengths  
 
-| Area | Why it’s strong (citing plan steps) |
+| What | Why it’s good (with code reference) |
 |------|--------------------------------------|
-| **Complete refusal coverage** | Step 1 of *Task 1* enumerates **six** distinct refusal sub-tests, each paired with a positive control. This mirrors the Phase-1 “refusal-with-control” pattern and satisfies the “every refusal has a succeeding control” rule. |
-| **Policy-RP enforcement** | Step 4 in *Task 1* explicitly tests a successor policy that lacks a signed RP, expecting `no_webauthn_policy`. This guards the *root-signed RP* invariant (D-09). |
-| **Concurrency guarantees** | *Task 2* defines concrete race-detector tests: 16 identical login requests, two concurrent directory installs, and a “directory-changed-before-commit” case. The required `s.mu` lock and DB-level version checks are codified. |
-| **Restart consistency** | The “stored-directory-tampered” sub-test (Task 2) forces a mismatch between the DB row and the last `directory_install` leaf, ensuring the signer aborts on start-up tampering. |
-| **Per-type frame caps** | *Task 3* adds `maxBodyFor` with distinct limits for `InstallDirectory`/`GetDirectoryResponse` (1 MiB + 64 KiB). This directly addresses T-02-12 (DoS via oversized frames) and removes the “unknown-type” allocation blind spot. |
-| **Fuzzing breadth** | The plan creates **eleven** fuzz targets covering every new parser (login, WebAuthn, directory, GetDirectory, tlog bodies, key IDs). The CI command `FUZZTIME=10s bash scripts/fuzz.sh` guarantees they will be exercised on every PR. |
-| **Dependency isolation** | The plan notes that `go-webauthn` stays **server-only** and `go-winio` stays **CLI-only**, preserving the signer’s unchanged dependency graph (per the firewall/capslock baseline). |
-| **Documentation & traceability** | The requirement to write `02-03-SUMMARY.md` and to publish a PR with a deterministic title satisfies the “Delivery Protocol” and gives a permanent audit artifact. |
+| **Minimal attack surface** – the agent lives only in the `keyroster` binary, never falls back to the built‑in OpenSSH agent. <br> `cmd/keyroster/agent_windows.go` (new command) and the explicit “never retry without lifetime” rule in the plan guarantee that no key is ever handed to the inbox agent. |
+| **Per‑user pipe isolation** – `internal/winagent/pipepath.go` builds the pipe name as `\\.\pipe\keyroster-agent-<SID>` and `SDDL(sid)` restricts access to the user SID only (`D:P(D;;GA;;;NU)(A;;GA;;;<sid>)`). This satisfies the **trust‑boundary** “other local users → keyroster agent pipe”. |
+| **Owner verification** – `internal/winagent/owner_windows.go` implements `VerifyServerOwner` that checks the server process token SID against the caller’s SID, returning `ErrOwnerUnverifiable` for mismatches or access‑denied errors. This protects against a malicious elevated process hijacking the pipe. |
+| **Graceful shutdown logic** – `Serve` polls the keyring (`Options.Poll`) and exits only when **no keys are present** *and* **no active client connections** exist (protected by a single mutex). Tests `exit_waits_for_open_connection` and `add_races_expiry_exit` verify the race‑free exit path. |
+| **Robust gating probes** – Task 1’s A2/A3 probes are run **before any production code is added**, ensuring that the Windows‑specific path is viable and that the Linux gcr‑agent behaviour is known. The plan forces a **human checkpoint** if the probe fails, avoiding silent fallback. |
+| **CI coverage** – The workflow adds `cli‑windows` and `cli‑macos` jobs, builds the binary for all three OSes, runs the new Windows tests (`TestInboxSSHOffersAgentCert`) and the Unix‑agent lifetime test, and verifies that the new dependency stays inside the Windows build (`go list -deps … | grep go‑winio`). |
+| **Documentation & platform‑verification** – `docs/security/needs-hardware.md` is extended with a “Platform verification (D‑16)” section that records the exact outcome of the probes, making the security posture auditable. |
+| **Dependency hygiene** – `go-winio` is added *only* to the Windows build tags; the plan re‑runs `scripts/dep‑firewall.sh` and `scripts/capslock-check.sh` to certify that the signer graph is unchanged. |
+| **Clear owner control** – The RP‑ID hostname (D‑09) and the software‑key banner (D‑18) are both locked elsewhere; the plan only touches the agent, so no policy‑schema changes are introduced. |
 
 ---
 
-#### Concerns  
+###### Concerns  
 
-| Severity | Description (citing plan step) | Open Question / Potential Mitigation |
-|----------|--------------------------------|--------------------------------------|
-| **HIGH** | **Unauthenticated `GetDirectory`** – *Task 1* adds the RPC but does **not** specify any access control. Returning the entire directory (including public-key hashes, credential IDs, and SSHSIG signatures) to an unauthenticated caller could leak sensitive enrollment data (e.g. which users have which passkeys). | *Should `GetDirectory` be limited to admin-authenticated sessions (e.g. require a signed admin-SSH-SIG token) or at least require TLS client-certificate auth?* |
-| **HIGH** | **Potential for “evidence-type confusion”** – The plan mandates refusal when evidence types are mixed, but the implementation details (e.g. validation order) are not described. A malformed request that places an `admin-sshsig/v1` byte-blob where the parser expects a `webauthn-assertion/v1` could cause a panic before the refusal logic runs. | *Are parsers hardened with size caps and strict type checks before content inspection?* |
-| **MEDIUM** | **Directory re-verification edge cases** – The restart test (Task 2) only checks the case where the *admin set changes* and the existing directory becomes unauthorized. It does not cover a scenario where the **policy changes but still authorizes the directory** (e.g. adding a new admin while keeping the same quorum). The plan says “keep `directoryAuthorized=false`” only when signatures no longer meet the quorum **or** `CheckPolicy` fails, but the code path for a *policy-upgrade* is vague. | *Will the signer correctly preserve the `authorized` flag when a successor policy adds admins but still validates the installed directory?* |
-| **MEDIUM** | **Missing refusal for malformed frames** – The new per-type caps are added, but the plan does not explicitly test a **zero-length frame** or a **frame length that exceeds `maxBodyFor` by a single byte** for *unknown* message types. The existing `unknown_message_type` test may not trigger the allocation-guard path. | *Add a fuzz-driven test that sends malformed frames for every known and unknown type to confirm the signer returns the expected `invalid_frame`/`frame_too_large` refusal before any allocation.* |
-| **LOW** | **Potential TLS pinning breakage** – The plan mentions a future “TLS pin-rotation path” (D-10) but leaves the current pinning mechanism unspecified. If the server’s certificate key changes (e.g. after a Tailscale cert rotation), the CLI may reject the server, causing a denial of service for all users. | *Will the CLI fallback to a trust-on-first-use (TOFU) mode or require an admin-signed pin rotation?* |
-| **LOW** | **Absence of explicit proof that `maxBodyFor` is used by `WriteMessage`** – The plan says “WriteMessage enforces the same cap”, but no test asserts that an oversized *outgoing* frame is rejected. The current test suite only checks inbound caps. | *Add a unit test that attempts to write an oversized `InstallDirectory` frame and expects an error before any bytes are sent.* |
-
----
-
-#### Suggestions  
-
-1. **Add authentication to `GetDirectory`.**  
-   *Implement a lightweight admin-auth token (signed with an admin SSH key) that the client must present.* The response can then safely include the directory and signatures. If a read-only view is needed for non-admins, consider returning only the *hash* of the directory.  
-
-2. **Add explicit “evidence-type mismatch” test.**  
-   Create a table-driven test that sends a well-formed `LoginIssue` request containing an `admin-sshsig/v1` evidence blob (or any unknown type) and expects the `unknown_evidence_type` refusal **before** any decoder attempts to parse the blob.  
-
-3. **Cover policy-upgrade path.**  
-   Extend the “restart” sub-test to install a successor policy that **adds** a new admin (keeping the quorum satisfied) and verify that after restart `Signer.GetDirectory().Authorized` remains `true`.  
-
-4. **Validate frame-size enforcement for outgoing messages.**  
-   Write a unit test (`TestWriteMessageFrameCap`) that constructs an `InstallDirectory` request larger than `MaxDirectoryFrame` and confirms `WriteMessage` returns `ErrFrameTooLarge`.  
-
-5. **Fuzz the `GetDirectoryResponse` parser.**  
-   The existing fuzz list includes `FuzzParseGetDirectoryResponse`; ensure the corpus includes both *valid* and *malformed* directory payloads (e.g., truncated signatures, mismatched version numbers).  
-
-6. **Document the TLS pinning strategy.**  
-   Even if the feature is deferred, a short note in the README should state the expected workflow (e.g., “run `keyroster init` again after a certificate rotation”). This prevents operators from being locked out later.  
-
-7. **Review audit-log granularity for the new refusals.**  
-   Verify that each newly added refusal reason (`no_webauthn_policy`, `unknown_evidence_type`, `directory_quorum_not_met`, etc.) is recorded with the *exact* `Reason` enum value and includes the request hash, to keep the Merkle log tamper-evident.  
+| Severity | Issue | Impact & Evidence |
+|----------|-------|-------------------|
+| **HIGH** | **Race between simultaneous `keyroster login` invocations** – two CLI instances could start `keyroster agent` at the same time, both attempt `ListenPipe`. The current `Serve` returns an error on the second `ListenPipe` (pipe already exists) but `Ensure` does not have a back‑off or retry limit; it may spin and eventually return `ErrOwnerUnverifiable` or “pipe already in use”. This could cause a user to see intermittent “cannot add key” failures. <br> *Evidence:* `internal/winagent/winagent_windows.go` – `ListenPipe` is called once; no retry logic is mentioned. |
+| **MEDIUM** | **Owner‑verification edge cases** – on Windows 10+ the inbox client may run with **different integrity levels** (e.g., a normal user launching a *runas* elevated agent). `VerifyServerOwner` maps `ERROR_ACCESS_DENIED` to `ErrOwnerUnverifiable` with the message “started elevated”. However, the test `owner_access_denied_names_elevation` only checks that the error text contains “elevated”; a real user may not notice the guidance and keep the elevated agent running, causing the CLI to fail repeatedly. <br> *Evidence:* `owner_windows.go` error handling described in the plan, but UI guidance is only in the command‑help text. |
+| **MEDIUM** | **Leak of pipe name / SID in logs** – `keyroster agent` prints the pipe path and the “IdentityAgent …” line to stdout. If the CLI is used in a script that logs stdout to a file, the pipe name (which contains the SID) may be exposed, leaking a **stable identifier** that could be targeted for pipe‑squatting attacks. The plan does not mention redaction or a `--quiet` flag. |
+| **MEDIUM** | **Windows test reliability** – `TestInboxSSHOffersAgentCert` relies on the *real* `ssh‑add.exe` and `ssh.exe` being present on the runner. If the Windows runner image changes (e.g., removes the inbox OpenSSH client) the test will be skipped, and the plan’s `KEYROSTER_REQUIRE_INBOX_SSH=1` will abort the CI, potentially breaking the pipeline unrelated to the code. No fallback is provided. |
+| **LOW** | **Documentation drift** – The help text for `keyroster agent` mentions the pipe spelling discovered by the probe. If the probe later reports a different spelling (unlikely, but possible if the OS changes path syntax), the help text would become stale unless the binary is rebuilt (it will be, but the documentation in the repo may need a manual update). |
+| **LOW** | **Dependency on `go‑winio` version** – The plan pins `v0.6.2` but does not lock the go.mod `go` version to `1.27`. If `go‑winio` later requires a newer go version, the CI could fail for the Windows build while the Linux/macOS builds succeed. |
+| **LOW** | **Missing test for pipe cleanup on crash** – If the agent process crashes, the named pipe may remain in the OS kernel until the handle is reclaimed. Subsequent `Ensure` calls could fail with “pipe already exists”. No test simulates a crash and subsequent recovery. |
 
 ---
 
-#### Risk Assessment  
+###### Suggestions  
 
-| Risk | Likelihood | Impact | Overall Rating | Mitigation |
-|------|------------|--------|----------------|------------|
-| **Leakage of directory contents via unauthenticated `GetDirectory`** | Medium (the RPC is reachable from any local process) | High (exposes user-credential bindings) | **High** | Require admin-auth token; limit returned fields to non-sensitive metadata. |
-| **Panic or crash on malformed evidence type** | Low (parsers are fuzzed) | High (could cause denial-of-service) | **Medium** | Add explicit type-validation before parsing; unit test for malformed evidence. |
-| **Incorrect `authorized` flag after policy upgrade** | Low (currently untested) | Medium (could incorrectly reject valid logins) | **Medium** | Add upgrade-path test; log explicit reason when `authorized` flips. |
-| **Denial-of-service via oversized outgoing frames** | Low (no test yet) | Medium (could fill log or cause client failures) | **Low** | Add outbound frame-size test; ensure caps are applied symmetrically. |
-| **Operator lock-out after TLS cert rotation** | Low (future work) | Medium (client cannot connect) | **Low** | Document pin-rotation workflow; provide a recovery command. |
-
-The **critical blocker** is the unauthenticated `GetDirectory` RPC – unless this is secured, the signer will surface sensitive enrollment data to any local attacker, directly violating the “full visibility” core value (the attacker gains visibility without authorization).  
-
----
-
-**Bottom line:** The plan delivers a substantial hardening of the signer boundary and satisfies the required refusal matrix and concurrency guarantees. Addressing the authentication of `GetDirectory` and tightening evidence-type validation will remove the highest-risk gaps and make the signer ready for Phase 2’s production dogfood. Once those open questions are resolved (via design decisions or added tests), the plan can proceed to PR creation and the merge gate with confidence.  
-### 02-04 – Audit-login & successor-policy plan  
-**Phase:** 02-passkey-login-mvp  **Wave:** 3  **Owner-gate:** PR p02/04-audit-login  
-
-> *Goal:*  make every short-lived login certificate provably authorized by the user’s passkey (and by a quorum-signed directory) and give operators a safe, documented way to add the WebAuthn RP to an existing deployment.
+| Recommendation | Rationale & Suggested Implementation |
+|----------------|------------------------------------|
+| **Add exponential back‑off & retry limit in `Ensure`** – When `ListenPipe` fails because the pipe already exists, retry with a short back‑off (e.g., 100 ms, 200 ms, 400 ms) up to 5 attempts before giving a clear error. | Prevents flaky failures when two CLI instances start simultaneously; aligns with the “no silent fallback” principle. |
+| **Expose a `--quiet` or `--pipe‑name` flag** – Allow the user (or CI) to suppress the pipe path output or to request a custom pipe name (for debugging). | Reduces the risk of leaking the SID in logs and gives power users a deterministic name if needed. |
+| **Improve error messages for elevated agents** – In `owner_windows.go`, when mapping `ERROR_ACCESS_DENIED` to `ErrOwnerUnverifiable`, add a suggestion to *restart the agent from a non‑elevated shell* and possibly expose the offending SID for debugging. | Makes the guidance visible even in non‑interactive environments (e.g., CI logs). |
+| **Add a “pipe‑cleanup” test** – Simulate a panic in the agent’s Serve routine (using `defer recover` or a test that kills the process), then call `Ensure` again to verify that a new pipe can be created. | Ensures robustness against orphaned pipe resources. |
+| **Document the exact pipe spelling in the repo** – Write the pipe syntax (`\\.\pipe\keyroster-agent-<SID>`) in `docs/architecture/windows-agent.md` and reference it from the help text. | Guarantees that the documentation stays in sync with the implementation, even if the probe ever changes. |
+| **Pin the Go version in go.mod** – Add `go 1.27` (or the version used for the rest of the repo) to avoid accidental upgrades that break `go‑winio`. | Keeps the Windows build reproducible. |
+| **Add a fallback check in CI** – In the Windows job, detect the absence of `ssh.exe` before setting `KEYROSTER_REQUIRE_INBOX_SSH=1`. If missing, emit a warning and skip the test rather than aborting the whole workflow. | Reduces brittleness of the CI pipeline. |
+| **Consider a small “owner‑only” test wrapper** – Export a minimal test‑only function `ValidatePipeOwner(path string) error` that can be used by external callers (e.g., the login code) to double‑check the pipe before sending a key, without exposing the full internal verifier. | Provides an extra safety net without adding a production seam. |
+| **Audit the lifetime‑polling interval** – The default `Poll: 5 s` may delay key removal on a fast‑expiring certificate (e.g., 10 s). Offer a `--poll‑interval` flag or reduce default to 2 s, and document the trade‑off. | Improves the user experience for short‑lived certificates while still keeping CPU usage low. |
 
 ---
 
-#### Summary  
-
-| Item | What the plan does | Where it lives |
-|------|--------------------|----------------|
-| **`keyroster root successor-policy`** | Generates a *canonical* successor of the current root policy that adds (or changes) `webauthn_rp_id` and optional origins; refuses no-ops; prints a one-way warning. | `cmd/keyroster/root.go` (new switch case) |
-| **Login-issue parsing** | `wire.ParseLoginIssueSigningBytes` parses the exact bytes that the signer logged for a login issuance, guaranteeing a loss-less round-trip. | `internal/wire/login.go` |
-| **`keyroster audit verify`** | New verification branches: `verifyDirectoryInstall` (quorum-signed, successor-chained, matches policy version) and `verifyLoginIssue` (checks RP, single WebAuthn evidence, re-runs the WebAuthn verifier, recomputes principals/TTL, checks certificate fields, key-ID, time bounds). | `internal/audit/verify.go` |
-| **End-to-end test** | `TestAuditLoginAcrossPolicyChange` spins a live signer, installs a RP-less policy, creates the successor, signs & restarts, installs a directory, issues a login, exports the log and runs `audit verify`. | `test/e2e/audit_login_test.go` |
-| **Tamper-suite** | New fuzz / unit cases that deliberately corrupt a valid log (assertion signature, principals, credential, directory chain, admin signatures, TTL, etc.) and expect `audit verify` to reject with a precise error label. | `internal/audit/verify_test.go`, `internal/audit/fuzz_test.go` |
-| **Runbook update** | Adds a “Change the policy: successor policy (add WebAuthn RP)” section with the warning and the exact command sequence. | `docs/runbooks/root-ceremony.md` |
-| **Release / PR flow** | Scripted creation of branch `p02/04-audit-login`, automated CI gates, auto-merge after owner approval, and a `02-04-SUMMARY.md` artifact. | `scripts/…` (as referenced) |
-
-If the plan lands, auditors will be able to **prove** that every login certificate recorded in a bundle was:
-
-* issued under the **policy version** that contained the RP,  
-* backed by a **single WebAuthn assertion** that matches the user’s credential stored in the directory, and  
-* limited to the **principals and TTL** the directory defines.
-
----
-
-#### Strengths  
-
-| Area | Why it’s strong (tied to plan steps) |
-|------|--------------------------------------|
-| **Security-by-design** – The audit now re-runs the *same* WebAuthn verification that the signer performed (see `verifyLoginIssue → webauthn.VerifyAssertion`). This defeats the “compromised signer can log bogus approvals” threat (T-02-17). |
-| **One-way RP binding** – The mandatory warning in the successor-policy command (truth #1) makes the irreversible nature of RP IDs explicit, satisfying D-09 and reducing operator surprise. |
-| **Full-chain enforcement** – `verifyDirectoryInstall` validates *both* the successor hash and the admin-quorum signature against the *policy version* that is in force, closing the gap identified in Phase 1 (directory installs were previously “kind 7” but never checked). |
-| **Tamper-suite** – By programmatically corrupting every relevant field (signature, principal set, credential ID, etc.) the plan demonstrates that the verifier is not merely “happy-path” but actively validates each invariant. |
-| **Test coverage** – The live-signer end-to-end test (Task 1) exercises the *entire* rotation flow, from RP-less policy to a working login, under real `sshd` binaries. This is exactly the “real-world” proof of concept the roadmap demands (success criteria 1-5). |
-| **Documentation** – Adding the step-by-step “successor-policy” section to the runbook gives operators a repeatable, auditable procedure, matching the “no-magic-black-box” principle of the project. |
-| **Low-impact dependency change** – WebAuthn verification stays **server-only** (`go-webauthn` added only to `keyroster-server`). The signer binary remains free of new third-party code, preserving the strict dependency firewall. |
-
----
-
-#### Concerns  
-
-| Severity | Concern | Plan step(s) involved | Open question / mitigation |
-|----------|---------|----------------------|----------------------------|
-| **HIGH** | **Incorrect RP validation could allow IP-origin or malformed hostnames**, breaking the one-way guarantee. | `successor-policy` flag handling (truth #1) – currently only checks “not a no-op”. | *Is there a definitive whitelist/validation routine for RP IDs (e.g., DNS-only, no-underscore, no-port)?* Should the command reject IP literals and non-FQDN tailnet names at parse time? |
-| **HIGH** | **Audit verifier must re-load the directory for every `login_issue` entry** – performance on large logs (tens of thousands of entries) may become O(N²). | `verifyLoginIssue` logic (Task 2). | *Will the verifier cache the directory version when it changes, or will it re-parse the same JSON repeatedly?* If not, a scalability test is needed. |
-| **MEDIUM** | **Canonical-JSON drift** – the plan assumes the “canonical bytes” produced by `ParsePolicy` and `ParseDirectory` are stable across Go releases. Any change (e.g., map iteration order) breaks the ability to recompute the signing bytes. | All “write canonical” steps (policy successor, directory install). | *Do we have regression tests that serialize → deserialize → serialize and compare byte-for-byte across Go versions?* May need a go.mod `go=1.22` lock and a dedicated test. |
-| **MEDIUM** | **Single-evidence assumption** – the verifier rejects login_issue entries that contain more than one evidence item. Future extensions (e.g., JIT approvals) may need multiple evidences. | `verifyLoginIssue` check for “exactly one webauthn-assertion”. | *Is the “exactly one” rule hard-coded or configurable?* If future phases need a composite proof, the current implementation would need a breaking change. |
-| **LOW** | **Error-message ergonomics** – failing checks are reported as “entry <N> (login_issue): <check>”. Operators may struggle to locate the offending leaf in large exports. | `verifyLoginIssue` error strings. | *Would adding a reference to the leaf’s hash (or index) improve traceability?* |
-| **LOW** | **Dependency addition (go-winio)** – the CLI will now import `github.com/Microsoft/go-winio` for Windows agent access. This adds a Windows-only binary dependency that must be vetted in the capslock baseline. | Task 2 (tamper suite mentions Windows pipe). | *Has the capslock baseline been updated to allow go-winio under the `windows` build tag?* If not, CI may fail later. |
-
----
-
-#### Suggestions  
-
-| Suggestion | Why it matters | Where to implement |
-|------------|----------------|--------------------|
-| **Validate RP ID strictly** – reject IP literals, enforce RFC 952/1123 hostnames, and reject tailnet names that contain a dot-less suffix (e.g., “my-tailnet”). Add a helper `validateRP(host string) error`. | Addresses HIGH concern #1; makes the one-way warning reliable. | In the new `runRootSuccessorPolicy` implementation (cmd/keyroster/root.go). |
-| **Directory cache in audit verify** – keep the last-seen `DirectoryVersion` and its parsed object; only re-parse when the entry’s `DirectoryVersion` changes. | Mitigates potential O(N²) runtime for large logs (MEDIUM concern). | `internal/audit/verify.go` – add a simple map or struct to hold the current directory. |
-| **Canonical-JSON round-trip test** – create a test that marshals a policy/directory, unmarshals, re-marshals and asserts equality of bytes. Run it under `go test -run TestCanonicalRoundTrip`. | Catches accidental map-order changes (MEDIUM concern). | New test file `internal/trust/canonical_test.go`. |
-| **Make evidence count configurable** – expose an internal constant `maxEvidence = 1` (or a future-proof slice). Document that more evidences will be supported in Phase 4. | Future-proofs the “exactly one evidence” rule (LOW concern). | `internal/audit/verify.go`. |
-| **Rich error reporting** – prepend the leaf hash (e.g., `leafHash=<hex>`), and optionally the raw Base64-encoded entry, to the error message. This aids operators when scanning large exports. | Improves operability (LOW concern). | `verifyLoginIssue` error generation. |
-| **CI capslock update** – ensure `go-winio` is whitelisted under the `windows` build tag and that the `-tags windows` variant passes `scripts/dep-firewall.sh`. | Prevents a downstream CI break when the Windows agent code is compiled. | Update `scripts/dep-firewall.sh` and `test/capslock/` baseline. |
-| **Add a “dry-run” flag** to `root successor-policy` that prints the new policy JSON (and its SHA-256) *without* writing to disk. This lets operators preview the RP change before signing. | Low-risk usability improvement, no impact on security. | Extend the command’s flag set; the flag can be mutually exclusive with `--out`. |
-
----
-
-#### Risk Assessment  
-
-| Risk | Likelihood | Impact | Overall | Mitigation |
-|------|------------|--------|---------|------------|
-| **Incorrect RP binding (operator mistake or validation bypass)** | Medium (depends on operator diligence) | Critical – could invalidate all existing passkeys, forcing a painful re-enrollment. | **High** – enforce strict RP validation (see suggestion). |
-| **Audit verifier accepts malformed logs** (e.g., directory version mismatch, missing evidence) | Low (tests cover many cases) | Critical – defeats the whole visibility guarantee. | **High** – expand test matrix (tamper suite) and add canonical-JSON test. |
-| **Performance degradation on large logs** | Medium (future logs may grow) | Moderate – could make nightly audit runs time-out. | **Medium** – implement directory caching. |
-| **Dependency-firewall regression (go-winio)** | Low (single Windows-only add) | Low – just CI failure. | **Low** – update capslock baseline promptly. |
-| **Future incompatibility when adding more evidence types** | Low (currently one-time) | Low – would require a version bump; not a security risk now. | **Low** – document the constant as future-configurable. |
-
-Overall, **the plan is high-value** (it delivers the core visibility promise for Phase 2) and **acceptable** provided the highlighted validation and performance mitigations are applied before merge.
-
----
-
-#### Bottom-line Recommendations  
-
-1. **Implement strict RP ID validation** (suggestion 1) before the `successor-policy` command is merged.  
-2. **Add the directory cache** to `audit verify` (suggestion 2) to keep CI jobs fast and avoid future scalability surprises.  
-3. **Add the canonical-JSON round-trip test** (suggestion 3) now; it is cheap and protects against silent breaking changes.  
-4. **Update the capslock baseline** for `go-winio` and confirm the Windows agent test passes on the CI matrix.  
-5. **Consider the dry-run flag** (suggestion 6) – it adds safety at negligible cost.
-
-Once these items are addressed, the plan can move through the owner gate with confidence that it meets **high-security, full-visibility** goals without introducing undue operational risk.
-### 02-05 – Software-CA Backend & Evaluation-Only Warning  
-
-#### Summary  
-Plan 02-05 introduces a **software keystore backend** that stores the CA’s online Ed25519 keys encrypted with an age-scrypt “.age” file, adds a **Status** RPC that reports each key’s custody (`software` vs. hardware), and wires a **single-source banner** (`internal/custodytext.SoftwareCABanner`) into every CLI issuance path. The plan also adds extensive unit- and e2e-tests, updates the caps-lock baseline for the new age dependencies, and records the banner wording in `docs/security/custody.md` (owner-approved via a checkpoint).  
-
-If implemented as described, the plan fulfills **KEY-06**: an operator can run a signer with encrypted software keys for evaluation, and the system will loudly warn that the instance must not be used for production access.
-
----
-
-#### Strengths  
-
-| Area | What the plan does well (cites) |
-|------|--------------------------------|
-| **Clear separation of custody** | D-18 is enforced: the signer, not the server or CLI, is the sole source of custody information (`Signer.Status` returns the custody for each role). This satisfies the “custody comes from the signer” prohibition (see *must-haves → prohibitions*). |
-| **Deterministic warning path** | The banner is produced by a **single constant** (`SoftwareCABanner`) and is printed by the CLI **before every issuance** (`cmd/keyroster/ca.go` step 2). The same function is used by the UI later (02-06), guaranteeing textual consistency. |
-| **Secure pass-phrase handling** | The backend requires a **0600 pass-phrase file** (or a systemd credential) and rejects group/other readable files, short passphrases, and any source from argv/env (must-haves → truths 2). The plan explicitly clears the pass-phrase slice after use. |
-| **Age-based encryption** | Re-uses the **age+scrypt** pattern already present in `internal/rootceremony/keygen.go` (read-first list), which is well-audited, reproducible, and has a small dependency surface. |
-| **Test coverage** | The plan specifies **unit tests** for every failure mode of the software backend (e.g. wrong file mode, too-short passphrase, fingerprint mismatch) and an **e2e test** that runs a full CA init → status → issuance → real `sshd` verification flow. It also adds **FuzzParseStatusResponse** and caps-lock verification. |
-| **Dependency gating** | The new packages (`filippo.io/age`, `filippo.io/age/armor`, `golang.org/x/crypto/scrypt`) are added **only to the signer graph**, and the caps-lock check updates the baseline accordingly. This respects the existing `scripts/dep-firewall.sh` and `test/capslock/` policy. |
-| **Owner checkpoint for wording** | By making the banner text a **human-approved checkpoint** (Task 2), the plan protects against accidental wording changes that could drift from the documented “evaluation-only” warning. |
-| **No hidden overrides** | The “no suppression” prohibition is addressed with explicit tests that verify the banner always appears when any key is software-custody. The plan also ensures the signer never reports a different custody than it actually holds (`Signer.Status` re-checks keys at start). |
-
----
-
-#### Concerns  
-
-| Severity | Concern | Plan step(s) | Why it matters (open question) |
-|----------|----------|--------------|--------------------------------|
-| **HIGH** | **Potential leakage of the pass-phrase via error messages** – the plan states “wrong passphrase returns an error that does *not* echo the passphrase,” but the exact error handling code is not shown. If the backend wraps the `age` decryption error directly, the underlying error string may include the user-supplied pass-phrase (e.g. “invalid passphrase ‘foobar’”). | Must-have truth 2 (backend error handling) | *Open question*: Does `software.go` sanitize or wrap the error before returning it to the CLI? A test asserting the exact error text is needed. |
-| **HIGH** | **Race condition between `ca-init` and `Status`** – the status response is built from the signer’s in-memory bundle **and** re-checks the keys on each call. If the signer reloads its bundle (e.g. after a policy update) while a CLI issues an `ca issue`, the banner could be printed based on stale custody data, or the CLI could miss the warning entirely. | Task 1, step “Signer.Status runs under s.mu … re-checked at start” | *Open question*: Is the `mu` lock held for the whole status generation **and** for the issuance flow? Does the CLI obtain a fresh status *right before* each issuance, or could a stale cache be used? |
-| **MEDIUM** | **File-mode enforcement on Windows** – the plan requires the pass-phrase file to be mode 0600. On Windows, `os.Chmod` does not enforce POSIX bits, and the underlying NTFS ACL may allow broader access. The plan does not address Windows-specific handling. | Must-have truth 2 (pass-phrase file check) | *Open question*: How does the backend verify file permissions on Windows, and what fallback does it use? Should the plan add a Windows-specific permission audit (e.g., deny if file is readable by “Everyone”)? |
-| **MEDIUM** | **Potential for “soft-fail” banner suppression in scripts** – the banner is printed to `stderr`, but callers could discard it (e.g., `keyroster ca issue 2>/dev/null`). The plan does not forbid redirection. While this is inevitable for any CLI output, a production-risk assessment might require the warning to be emitted on a **separate log channel** (e.g., syslog) or to set a non-zero exit code when software custody is present. | Must-have prohibition 1 (no suppression) | *Open question*: Are there tests that verify the banner remains present even when `stderr` is redirected? If not, a deliberate “quiet-mode” flag could be introduced later—should the plan pre-emptively block that flag? |
-| **MEDIUM** | **Status encoding size limit** – the `wire/status.go` struct limits the response to **256 KiB** (`MaxStatusFrame`). With five roles the payload is tiny, but the plan does not discuss future expansion (e.g., many more roles or larger directory hashes). If a future change adds more fields, the Status response could silently truncate. | `wire/status.go` size constant (Task 1) | *Open question*: Is there a test that verifies `StatusResponse` marshals/unmarshals correctly at the limit, and that the size constant is deliberately chosen for extensibility? |
-| **LOW** | **Caps-lock baseline drift** – the plan adds three new capability pairs (age, armor, scrypt). If future plans add other age-related packages (e.g., `filippo.io/age/commit`), the baseline may diverge and cause CI failures. The plan mentions “review each pair,” but does not lock the exact commit hashes. | Task 3, step 3 (caps-lock review) | *Open question*: Are the versions pinned in `go.mod` to a specific commit/tag? If they remain `v0.x.x` without a `replace`, a later upstream bump could introduce new symbols not captured in caps-lock, potentially expanding the attack surface. |
-| **LOW** | **Documentation-test coupling** – the test that the doc contains the banner (`custodytext_test.go`) depends on exact wording. Any future re-phrasing (owner-approved) will require updating the test. This is intentional, but it also introduces a **tight coupling** that may cause accidental test failures during minor doc edits. | Task 2 checkpoint & Task 3 test | *Open question*: Is the test tolerant to whitespace changes, or does it require an exact string match? A more robust approach could extract the banner via a helper function rather than a hard-coded literal. |
-
----
-
-#### Suggestions  
-
-1. **Sanitise error messages** – Wrap any error from `age.Decrypt` with a generic message like “invalid pass-phrase” before returning it. Add a dedicated unit test that feeds a wrong pass-phrase and asserts the error string does **not** contain the supplied phrase.
-
-2. **Atomic status-check before issuance** – Refactor the CLI’s issuance flow so that it **first calls** `signerclient.Status`, **immediately aborts** if any key has `software` custody, and only then proceeds to the signing request. Keep the `mu` lock held across both RPCs (or cache the status in the signer but expose a “must-be-software-free” flag). Document the ordering in a comment.
-
-3. **Windows permission guard** – On Windows, after reading the pass-phrase file, call `syscall.GetFileAttributes` (or the Go `os` equivalent) and reject the file if the `FILE_ATTRIBUTE_READONLY` bit is not set **or** if the ACL grants access to any group other than the current user. Add a Windows-specific unit test.
-
-4. **Consider a dedicated “warning” exit code** – Add a non-zero exit status (e.g., `2`) when the banner is printed due to software custody, and update the e2e test to assert the exit code. This makes accidental silencing via redirection less likely for scripts that check `$?`.
-
-5. **Future-proof Status size** – Introduce a test that builds a `StatusResponse` with **the maximum allowed number of keys** (e.g., 255) and verifies that marshaling succeeds. If the limit is ever raised, the constant can be updated in a single location.
-
-6. **Pin age dependencies** – Ensure `go.mod` pins the exact commit SHA for `filippo.io/age`, `filippo.io/age/armor`, and `golang.org/x/crypto/scrypt`. Add a comment referencing the caps-lock audit, so future maintainers know why the pin is there.
-
-7. **Make the doc-banner test more robust** – Instead of a raw string match, have `custodytext_test.go` retrieve the banner via `SoftwareCABanner([]string{"user","host","machine","ops","log"})` and compare that to the snippet extracted from `docs/security/custody.md`. This decouples the test from formatting quirks while still guaranteeing verbatim consistency.
-
-8. **Explicitly document “no suppression”** – Add a comment near the banner print call stating: “Do not allow suppression via flag, env var or redirection; this is a security-critical warning mandated by D-18.”
-
----
-
-#### Risk Assessment  
-
-| Risk | Likelihood | Impact | Mitigation (already in plan or suggested) |
-|------|------------|--------|-------------------------------------------|
-| **Leak of pass-phrase via error** | Medium (depends on current error wrapping) | High – could allow an attacker with console access to see the secret. | Ensure error sanitisation (Suggestion 1). |
-| **Missing banner due to stale status** | Low–Medium (depends on concurrency model) | High – operator may think the instance is production-ready. | Atomic status-check before issuance (Suggestion 2). |
-| **Pass-phrase file readable on Windows** | Medium (file-mode check ineffective) | Medium – same as above but limited to Windows deployments. | Windows-specific ACL check (Suggestion 3). |
-| **Banner silencing via redirection** | Low (requires intentional script) | Medium – automated tooling could ignore the warning. | Dedicated non-zero exit code (Suggestion 4). |
-| **Caps-lock baseline drift** | Low (versions typically stable) | Low – CI failure, not a security breach. | Pin versions (Suggestion 6). |
-| **Inconsistent documentation** | Low (test catches) | Low – operator confusion. | Robust doc-test (Suggestion 7). |
-| **Future Status payload overflow** | Low (current role count small) | Low – could cause denial of status RPC. | Test max keys (Suggestion 5). |
-
-Overall, the plan’s core security guarantees (custody reported by the signer, loud evaluation-only banner, strong pass-phrase enforcement) are solid. The main residual risks revolve around **error-message leakage** and **Windows permission handling**, both of which can be mitigated with relatively small code changes and additional tests.
-
----  
-
-**Bottom line:** Plan 02-05 is well-structured and aligns with the project’s “security-first, simplicity-first” ethos. By addressing the open questions above—especially error sanitisation and Windows file-mode enforcement—the plan can be merged with high confidence that the software-CA path will be both **auditable** and **clearly communicated** as evaluation-only.
-### 02-06 – Review of the “keyroster-server + keyroster init” Plan  
-
-#### Summary  
-The plan builds the first public-facing component of the MVP: a Linux-only `keyroster-server` that serves a tiny, CSP-hardened web UI and a `/api/v1/trust` endpoint, and a new `keyroster init` CLI sub-command that pins TLS roots and the CA-bundle before writing a 0600 config file.  
-
-Key-level goals that the plan claims to satisfy are:
-
-| Goal | Where the plan addresses it | Comments |
-|------|----------------------------|-----------|
-| **UI-01** – server-rendered UI, no npm, strict CSP | `internal/server/web/*` (templates, embed, CSS) + `internal/server/headers.go` (CSP, HSTS, COOP, …) | ✅ |
-| **KEY-06** – show an “evaluation-only” banner whenever the signer reports software custody | `custodytext.SoftwareCABanner` rendered from `render.go`, header `Keyroster-Custody` added in `signer.go`, CLI prints banner via `serverclient.Client.checkCustody` | ✅ |
-| **PLAT-05** – server runs on Linux only, other OSes abort early | `cmd/keyroster-server/main.go` built with `//go:build linux`, `main_other.go` exits with a clear error | ✅ |
-| **D-10** – TLS from files, reload on change or SIGHUP, warning when <14 d left | `tlsreload.go` (certificate holder + watch), `serve.go` wires SIGHUP, warning logic documented in research | ✅ |
-| **D-09 / D-11** – RP ID never comes from flags, only from the signer's root-signed policy | `internal/server/signer.go` caches the RP from `signerclient.Status`; server start aborts if RP missing or cert does not cover it | ✅ |
-| **End-to-end e2e** – bootstrap signer → server → `keyroster init` → banner on CLI and UI | `test/e2e/server_test.go` assembles a full chain, asserts banner presence, checks CSP header, validates TLS-pin handling | ✅ |
-
-Overall the plan is well-structured and the tasks are broken into traceable units (binary, server core, client, CLI, tests, systemd units, runbook, PR).  
-
-Below are *source-dependent* concerns phrased as open questions, grouped by impact.  
-
----
-
-#### HIGH-SEVERITY CONCERNS  
-
-| # | Concern (citing plan step) | Why it matters | Open question / mitigation |
-|---|----------------------------|----------------|----------------------------|
-| H1 | **RP immutability & certificate-RP binding** – Step “The server refuses to start when the signer reports no WebAuthn RP, or when the TLS leaf does not cover the RP” (Task 1, bullet 3). | If the server ever starts with a mismatched certificate the WebAuthn ceremony will succeed against the RP in the policy but the TLS channel will present a different hostname, allowing a *man-in-the-middle* to harvest the assertion. | *How does the server verify that the leaf certificate’s `SubjectAlternativeName` contains the exact RP string?* Is the comparison performed with an exact string match (including possible trailing dot) and with case-folding per RFC 5280? Should the check also enforce that the leaf’s `NotAfter` exceeds the policy-defined `ValidAfter` window? |
-| H2 | **Signer-status caching** – Step “signer.go: a status cache (TTL 5 s, refreshed under a mutex) holding the parsed policy, the RP and the custody list” (Task 1). | If the signer is restarted or its policy changes, stale RP data could linger for up to 5 s, potentially allowing a *window* where the server presents a cert that no longer matches the policy. | *What happens if the cached status becomes unavailable (signer crash) after the server has already started?* Does the server continue to serve with the stale RP (risk) or does it transition to a 503 health endpoint (safer)? Should the cache TTL be configurable or forced to zero for production? |
-| H3 | **TLS reload error handling** – Step “Reload swaps in a new valid certificate. It keeps the old one, logs an error and keeps serving when the new files are a mismatched cert/key pair, an expired leaf, a leaf for another hostname or an unreadable file.” (Task 2) | If a mis-configured renewal replaces a valid cert with an invalid one *and* the code fails to keep the old cert (bug in the atomic pointer logic), the server could go down unexpectedly or, worse, start serving a cert that does **not** match the RP. | *Is the atomic pointer reset only after successful validation, or could a race allow a partially written cert to be swapped in?* Have the tests exercised the exact failure mode where the cert file is readable but the key is missing (or vice-versa)? |
-| H4 | **Root-pin vs TLS-pin handling in `keyroster init`** – Step “keyroster init … prints the TLS root pins, requires at least one `--tls-pin`, refuses when a pin is not observed” (Task 1). | Pinning the *TLS* root is separate from pinning the *trust-bundle* root. A user could mistakenly trust the wrong root (e.g., a CA used for the server’s TLS cert but not for the CA bundle) and the CLI would accept the server, undermining the “software-key warning”. | *Does `init` verify that the TLS chain’s *leaf* is the same leaf that the server later serves via `/api/v1/trust`?* If the server presents a different leaf (e.g., after a cert rotation) the CLI could accept a new TLS chain that still satisfies the pin but whose leaf no longer covers the RP. Is there a check that the leaf’s SAN still matches the RP after the pin verification? |
-| H5 | **Keyroster-Custody header format & integrity** – Step “Every response carries `Keyroster-Custody` with each role's custody” (Task 1). | The header is displayed to users but also parsed by the CLI to decide whether to print the evaluation-only banner. If an attacker can inject or modify this header, the CLI may *silently* suppress the warning. | *Is the header value signed or otherwise authenticated?* The plan only says the signer reports custody; is there a cryptographic binding between the header value and the signer’s status? If not, a compromised server could spoof “hardware custody” and hide the warning. |
-| H6 | **Hostname resolution for `keyroster.localhost` in CI** – Step “If it does not resolve on the GitHub runner, add a hosts entry” (Task 1). | The e2e test relies on DNS resolution of a hostname that is also the RP. If the runner’s resolver treats `localhost` specially (e.g., resolves to IPv6 `::1` only) or blocks custom hosts entries, the test may falsely pass/fail, masking a real-world failure. | *Has the plan been verified on a clean GitHub runner image (no prior `hosts` modifications)?* Would a test that explicitly checks `net.LookupHost("keyroster.localhost")` be safer? |
-| H7 | **Cross-Origin-Protection implementation** – Step “Every unsafe-method request passes through `http.CrossOriginProtection` (UI-01)” (Task 1). | If the middleware is bypassable (e.g., via a custom `Content-Type` or by using a `GET` with a body) an attacker could force a state-changing request from another origin. | *What exact checks does `CrossOriginProtection` enforce?* Does it reject any request whose `Origin` header differs from the server’s RP, regardless of method? Are pre-flight (`OPTIONS`) requests correctly handled? |
-
----
-
-#### MEDIUM-SEVERITY CONCERNS  
-
-| # | Concern (citing plan step) | Why it matters | Open question / mitigation |
-|---|----------------------------|----------------|----------------------------|
-| M1 | **Systemd unit hardening coverage** – Step “keyroster-server.service hardens many kernel options” (Task 3). | The list is extensive, but a few critical options that protect against *privilege escalation* (e.g., `ReadWritePaths=`, `ProtectKernelModules=`) are missing from the summary. | *Is `ReadWritePaths=` needed for `/etc/keyroster/tls/*`?* The unit currently uses `ReadOnlyPaths=/etc/keyroster/tls` but writes a log file – where does that go? |
-| M2 | **Configuration file permission handling** – Step “`Config.saveConfig` writes 0600 JSON under a 0700 directory” (Task 1). | On Windows and macOS the default directory may have more permissive ACLs; the plan mentions only Linux. | *Will the same permission enforcement work on macOS where `os.UserConfigDir()` points to `$HOME/Library/Application Support/keyroster`?* Should we add a runtime check that the file mode is exactly 0600 even on non-Linux OSes? |
-| M3 | **Banner display frequency** – Step “CLI prints the custody banner once per run” (Task 2). | If a user runs a long-lived CLI loop (e.g., a wrapper script that calls `keyroster login` repeatedly) the banner may disappear after the first call, reducing visibility. | *Should the banner be printed on every command that contacts the server, not just the first per-process?* The plan currently says “once per Client”. |
-| M4 | **Test-only “addLogKey” helper removal** – Step “remove the unused `addLogKey` helper (deferred CI debt)” (Task 1). | Some existing e2e logs rely on the presence of that helper to inject a log-key into the signer; removing it could break unrelated tests. | *Has the plan verified that no other test in the repository still imports or references `addLogKey`?* A quick grep could confirm. |
-| M5 | **Embedded static assets’ MIME types** – Step “static/ folder served with explicit content types” (Task 1). | If the CSS file is served with `text/plain` instead of `text/css`, browsers may ignore it; more importantly, mis-labelled content could violate CSP. | *Do the tests assert the `Content-Type` header for `/static/app.css`?* If not, consider adding a unit test. |
-
----
-
-#### LOW-SEVERITY CONCERNS  
-
-| # | Concern (citing plan step) | Why it matters |
-|---|----------------------------|----------------|
-| L1 | **Dependency firewall** – The plan adds `go-winio` to the CLI for Windows named-pipe support (Task 1). | The firewall script should be updated to allow this dependency only behind a build tag (`windows`). Verify that the firewall still blocks the `go-webauthn` import from the signer binary. |
-| L2 | **Root-pin format** – The plan stores pins as `sha256/...` strings. | Ensure the format matches the helper `trust.MatchPins` (which expects `sha256/base64`). A mismatch would cause a silent failure. |
-| L3 | **Documentation wording** – The runbook must contain “UNVERIFIED until the homelab install (02-13)”. | It's easy to forget to mark a paragraph as UNVERIFIED; a simple `<!-- UNVERIFIED -->` tag could help automated checks. |
-| L4 | **CI hosts file modification** – Adding a line to `/etc/hosts` requires `sudo`. | In the GitHub runner, `sudo` may be disabled for the default `ubuntu-latest` image. Confirm that the workflow grants permission (`runs-on: ubuntu-latest` + `sudo: true`). |
-
----
-
-#### Suggestions & Improvements  
-
-1. **Add an explicit health-check endpoint for the signer** (`GET /healthz` already exists, but make the server *fail* (return 503) if the cached signer status is older than, say, 30 s). This eliminates the “stale RP” window.
-
-2. **Make the RP-certificate validation stricter** – compare the leaf’s SAN exactly to `status.Policy.WebAuthn.RPID` (case-folded, punycode-decoded). Consider rejecting wildcard certificates altogether (they’re not allowed for RP anyway).
-
-3. **Cryptographically bind the `Keyroster-Custody` header** – e.g., sign the header value with the CA’s private key and include the signature in a second header (`Keyroster-Custody-Sig`). The CLI can then verify the signature, preventing a malicious server from falsifying custody.
-
-4. **Expose the TLS-leaf fingerprint in the `/api/v1/trust` response** (in addition to the bundle). `keyroster init` could then double-check that the leaf still matches the RP after pinning, preventing a silent cert rotation attack.
-
-5. **Test the reload-watcher on a *deleted* certificate** – the current tests cover mismatched pairs, expiry, host mismatch, but not the case where the files disappear entirely. The watcher should keep the last-good cert and log a clear error.
-
-6. **Add a unit test for `CrossOriginProtection`** that sends a malformed `Origin` header and verifies a `403` response. This will ensure the middleware correctly rejects any request that does not match the RP origin.
-
-7. **Document the exact format of `Keyroster-Custody`** (e.g., `role=host;alg=ed25519;custody=hardware;fp=ab:cd:…`). This makes downstream parsers (CLI, future audit tools) robust to future schema extensions.
-
-8. **Guard the systemd timer’s environment file** – ensure `tailscale-cert.env` is owned by `root:keyroster-server` and has mode `0640`. Include a `ProtectSystem=strict` and `ReadWritePaths=` whitelist for that file.
-
-9. **Add a CI matrix entry for macOS** (even if the binary aborts) to verify that the “Linux-only” guard truly prints the expected error message and exits with non-zero status. This satisfies the “PLAT-05 – other OSes exit with an error” requirement.
-
-10. **Make the CSP constant testable** – expose it via a public variable (e.g., `internal/server.CSPHeader`) and assert its exact string in a unit test. This prevents accidental drift when the header is edited later.
-
----
-
-#### Risk Assessment  
-
-| Risk Level | Likelihood | Impact | Primary Mitigations (already in plan) | Additional recommended mitigations |
-|------------|------------|--------|--------------------------------------|-----------------------------------|
-| **Critical** – RP mismatch leading to successful phishing or credential theft. | Medium (depends on operator correctly rotating certs) | High (full break of the authentication chain) | Server aborts on RP/cert mismatch; reload keeps last good cert. | Add cryptographic binding of custody header, expose leaf fingerprint in `/api/v1/trust`, and double-check leaf after TLS-pin verification. |
-| **High** – Signer status becomes stale after a restart, allowing a window with wrong RP. | Low-Medium (5 s cache) | Medium-High (could allow a short-lived phishing attempt) | 5 s TTL cache, health endpoint. | Reduce cache TTL to 0 or make the server reject requests when signer is unreachable for >5 s; add explicit “signer-down” 503 for all routes. |
-| **Medium** – TLS reload silently swaps in an invalid cert (e.g., mismatched key) due to race. | Low (covered by tests) | Medium (server downtime, loss of availability) | Atomic pointer swap only after validation; tests for mismatched pair. | Add test for missing key file, and for a cert whose SAN is empty; log an explicit error and emit a metric. |
-| **Medium** – Banner suppression via forged `Keyroster-Custody` header. | Low (requires compromised server) | Low-Medium (reduces visibility, but does not affect core security) | Banner driven by signer-reported custody; CLI checks header. | Sign the header (see Suggestion 3). |
-| **Low** – CI host-file hack failing on future runner images. | Low (runner images rarely change) | Low (test failures only) | Plan mentions adding a hosts entry if needed. | Add a pre-step that verifies resolution and fails early with a clear message. |
-
-Overall the plan **covers the core security requirements** (RP binding, TLS pinning, custody banner) and includes a solid test suite. The open questions above should be addressed – either by adding clarification to the design docs, extending the test matrix, or implementing the suggested hardening steps – before the merge gate is opened.
-
----
-
-#### Bottom Line  
-
-*The plan is ambitious but well-scoped. If the open questions are resolved (especially H1–H5) and the suggested mitigations are incorporated, the resulting `keyroster-server` and `keyroster init` will satisfy UI-01, KEY-06, PLAT-05 and D-10 without introducing unacceptable risk.*
-### 02-07 – Review of “Admin-Signed API & Invite Flow”
-
-#### TL;DR
-The plan puts the right emphasis on **policy-admin-only SSH-SIG authentication**, **one-time invite tokens**, and **clear separation between “pending” DB rows and the signer’s authoritative directory**.  The overall flow matches the success-criteria for AUTH-01 and UI-01, and the artefacts (adminauth package, serverdb schema, rate-limit middleware, CLI `user add`) are well scoped.
-
-Below are the points that need clarification or tightening before the work can be merged.
-
----
-
-### 1. Strengths  
-
-| Area | Why it’s good (citing plan steps) |
-|------|-----------------------------------|
-| **Zero-trust admin API** | Step `internal/adminauth/adminauth.go` defines a namespace (`keyroster/admin-api/v1`) and a signed-message format that mirrors the existing admin-evidence format (D-02). This keeps the “payload-authenticated, not pipe-authenticated” guarantee from Phase 1. |
-| **Invite token handling** | The migration `0001_server.sql` stores `invite_hash` only (Step “invite_hash column”), and the plan explicitly forbids logging raw tokens.  This follows the “hashed-only, never logged” rule from the threat register (T-02-34). |
-| **Replay protection** | `admin_nonces` table + per-request nonce verification (Step “UseNonce”) implements the replay-prevention described in D-02. |
-| **Rate-limiting** | `ratelimit.go` adds per-IP `rate.Limiter` with explicit limits (60/min burst 20 for admin, 30/min burst 10 for invites).  The limits are documented in the threat register (T-02-36) and provide an early DoS barrier. |
-| **CLI ergonomics** | `keyroster user add` prints a ready-to-paste `keyroster init …` line that includes the server URL, TLS pins, root pins, threshold, and `--user`.  This satisfies the “invite URL + init line” truth clause in the **must-haves**. |
-| **Test coverage** | The plan includes a full e2e `TestUserAddInvite` plus unit tests for adminauth, serverdb, server, and CLI.  The scope matches the “TDD=true” flag and the required verification steps. |
-| **Dependency hygiene** | The only new dep is `golang.org/x/time` which is already owner-locked.  The plan acknowledges the firewall/capslock checks for the new `go-winio` import on Windows. |
-
----
-
-### 2. Concerns  
-
-| Severity | Concern | Relevant Step(s) | Open Question / Request for Clarification |
-|----------|----------|-------------------|-------------------------------------------|
-| **HIGH** | **Admin-key discovery & fallback** – The CLI `keyroster user add` expects the admin key to be `--admin-key` or taken from the agent.  If the user supplies a *wrong* fingerprint, the CLI will error out, but the plan does not specify the exact wording or whether the CLI will *attempt* to enumerate agents to suggest the correct key.  Ambiguous UX could lead admins to retry with an un-approved key, leaking the error to a potential attacker. | `cmd/keyroster/user.go` – “admin key comes from –admin-key or config.AdminKey; with neither, it refuses with instructions.” | *How will the CLI surface the failure?* Will it include the fingerprint that was found but not authorized, or only a generic “admin key not found” message?  Consider a constant-time lookup to avoid timing side-channels that reveal the presence of an admin key. |
-| **HIGH** | **Nonce lifetime & cleanup** – `admin_nonces` table stores a nonce with an expiry timestamp, but the plan does not describe a periodic purge or a background worker that removes stale rows.  Over time the table could grow without bound (DoS). | `admin_nonces` schema, `UseNonce` description. | *Is there a GC job?* Will the per-request handler delete expired rows automatically, or is a separate janitor required?  Clarify the lifecycle to guarantee bounded DB size. |
-| **MEDIUM** | **Clock-skew handling** – The verification window is ±120 s (MaxSkew).  In distributed deployments (e.g., a server behind NTP vs. an admin machine on a laptop) this may be too tight, causing legitimate admin requests to be rejected. | `adminauth.MaxSkew = 120 * time.Second`. | *Was 120 s chosen after measurement?* If the plan will be used in a homelab where the admin laptop may be offline for hours, a stricter anti-replay window could be counter-productive.  Could the server expose a “max-skew” hint to the CLI at startup? |
-| **MEDIUM** | **Invite expiry enforcement** – The plan says “expires in 24 h” and that an “unknown, expired or replaced token shows a uniform ‘invite not valid’ page”.  It does not describe whether the server checks the *absolute* expiry (`invite_expires_us`) **before** hashing the token (i.e., to avoid timing differences). | `internal/server/invite.go` – “lookup a pending, unexpired invite”. | *Will a timing attack be able to distinguish a missing token from an expired token?* Consider normalising the response time (e.g., always hash a fake token) to avoid leaking token-existence. |
-| **MEDIUM** | **Admin-API path binding** – `adminauth.Verify` validates the *exact* request path, including the query string.  However, the plan does not specify whether the server will canonicalise the path (e.g., trailing slash, percent-encoding) before verification.  Inconsistent canonicalisation could cause legit admins to be rejected while an attacker could craft an equivalent request that bypasses verification. | `adminauth.Verify` – “path incl. query”. | *What canonicalisation steps are performed?* Will URL-encoded characters be normalised?  Provide a precise algorithm to match the server’s routing logic. |
-| **MEDIUM** | **Error-response uniformity** – The plan mandates a “uniform 401” response for any admin-auth failure, but also wants a “uniform 404” for unknown invites.  Uniformity across status codes is fine, but the *body* of the error should be identical (including length) to prevent an attacker from inferring which check failed. | `requireAdmin` – “logs reason, never the token or signature”, and the 401 response body. | *Is the body a fixed JSON string, e.g. `{"error":"unauthorized"}`?* Is the 404 body the same shape?  Confirm that logging does not inadvertently leak header values (e.g., the nonce) to the audit log. |
-| **LOW** | **Database file permissions** – The plan says the DB file is opened with mode `0600`.  On systems where the server runs under a dedicated user, that is fine, but on a container or a systemd unit with `DynamicUser=yes` the file may be created with the wrong UID/GID. | `Open(path)` – “file mode 0600”. | *Will the service unit set a `User=` and `Group=` that owns the directory?* Verify that the unit file (step `deploy/systemd/keyroster-server.service`) creates the directory with the correct ownership before the binary starts. |
-| **LOW** | **Web UI CSP & Referrer-Policy** – The plan notes a “strict CSP” and `Referrer-Policy: no-referrer` for the enroll page, but does not list the exact CSP directives.  Missing directives (e.g., `frame-ancestors 'none'`) could allow click-jacking or data exfiltration. | `internal/server/web/templates/enroll.html`. | *What exact CSP header will be sent?* Ensure it disallows `<script>` sources other than the single embedded JS file, and disallows embedding the page in iframes. |
-
----
-
-### 3. Suggestions  
-
-| Area | Recommendation |
-|------|----------------|
-| **CLI UX** – Provide a *quiet* mode that only prints the invite URL (for scripting) and a *verbose* mode that explains why the admin key was not found.  Keep the failure message constant-time and free of the offending fingerprint. |
-| **Nonce GC** – Add a background goroutine that runs every 5 min and deletes rows where `expires_us < now`.  Wire it into the same `rate.Limiter` map cleanup code to keep the memory footprint bounded. |
-| **Skew Config** – Expose a server `.conf` option `max_skew_seconds` (default 120) and make the CLI fetch it via a health endpoint.  This will let operators relax the window in environments where NTP cannot be guaranteed. |
-| **Path Normalisation** – Document that the server will `url.Parse` the request URI, then reconstruct it with `EscapedPath` (no query) before feeding it to `adminauth.Verify`.  Update the test matrix to cover encoded characters (`%2F`, `+`). |
-| **Uniform Error Body** – Define a constant JSON payload `{"error":"unauthorized"}` for both 401 and 404, pad to a fixed length (e.g., 128 bytes) before writing, and verify that the size is identical in tests. |
-| **CSP Header** – Use `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'none'; base-uri 'none'; frame-ancestors 'none'`.  Add a unit test that asserts the header’s presence on every `/enroll/*` response. |
-| **Audit Logging** – When `requireAdmin` rejects a request, log **only** the admin name (if any), the remote IP, and the reason code (`missing-header`, `replay`, `bad-sig`).  Do **not** log the nonce value; store the nonce hash instead if you need later forensics. |
-| **Invite entropy** – Explicitly state that the token is a 256-bit (32-byte) random string encoded with URL-safe base64 **without** padding.  Confirm that the SHA-256 hash stored in the DB matches exactly the raw token (`sha256(token)`). |
-| **Test for DB permission** – Add a CI test that creates a temporary DB file, runs the server startup, and asserts that the file mode is `0600`.  This catches accidental changes in `Open`. |
-
----
-
-### 4. Risk Assessment  
-
-| Risk | Likelihood | Impact | Mitigation (in-plan / post-plan) |
-|------|------------|--------|--------------------------------|
-| **Admin key misuse** – An admin inadvertently supplies a non-admin key, causing an auth-failure that reveals the presence/absence of an admin key. | Medium | High (could help an attacker enumerate admin keys) | Enforce constant-time lookup, generic error messages, and avoid logging the supplied fingerprint. |
-| **Nonce table exhaustion** – An attacker floods the admin API with unique nonces, filling the `admin_nonces` table and causing DB bloat. | Low-Medium | Medium | Periodic GC (see suggestion) and bounding the map size in the rate-limiter. |
-| **Replay due to clock drift** – Legitimate admin requests rejected because the server clock is far behind the client. | Medium (homelab laptops often unsynced) | Medium | Configurable `max_skew_seconds` and clear documentation. |
-| **Token leakage via Referrer** – If a user clicks a link from another site, the full invite URL could leak in the HTTP Referrer header. | Low (Referrer-Policy set) | Medium | Verify header is set on all responses (including static assets); test with browsers. |
-| **DoS via rate-limit bypass** – Attacker could rotate IPs to evade per-IP limiter. | Low | Low | Future plan: add a global token-bucket limiter or CAPTCHA for invite endpoint. |
-| **Database mis-ownership** – Service runs as root, creating DB with 0644 permissions, exposing pending data. | Low | Low | Ensure Systemd unit runs under a dedicated, non-root user and creates directory with `StateDirectoryMode=0700`. |
-
-Overall, the **remaining risk** after applying the suggestions is **low** and well-contained within the threat model.  The biggest open question is the **admin-key discovery UX**, which directly touches the “no-admin-key-leak” requirement (D-02).  Resolving that will finish the security hardening for this plan.
-
----
-
-### 5. Verdict  
-
-- **Proceed** with the current implementation **provided** the open questions above are answered and the suggested mitigations are incorporated (especially the constant-time admin-key handling and nonce GC).  
-- Once the owner signs off on the clarified behaviours, the plan satisfies the Phase 2 success criteria for AUTH-01 and UI-01 and can be merged.  
-
-*Prepared by Claude – review pending owner actions.*
-### 02-08 – Passkey Registration (Phase 2 - MVP)
-
-#### TL;DR  
-The plan delivers a **complete “invite → passkey registration → pending credential”** flow that satisfies AUTH-01 and UI-01, and it keeps the WebAuthn-related code out of the signer binary as required by D-17.  
-The overall design is sound, but a few implementation-level questions and hardening opportunities remain before the plan can be merged safely.
-
----
-
-### 1. Summary of What the Plan Does  
-
-| Step | What is built / changed | How it meets the requirements |
-|------|------------------------|--------------------------------|
-| **Task 1** – Owner dependency review | Human-only audit of `github.com/go-webauthn/webauthn@v0.18.2` and every unlocked transitive module (tinylib/msgp, go-viper/mapstructure/v2, go-webauthn/x, philhofer/fwd, x448/float16, fxamacker/cbor/v2, golang-jwt/jwt/v5). | Guarantees that no uncontrolled supply-chain code slips into the signer (D-17, T-02-SC). |
-| **Task 2** – DB + API & UI | *Migrations* add `registration_sessions`, `pending_credentials`, and a `invite_used_us` column. <br>*Server* implements `/api/v1/enroll/{token}/begin` and `/finish` using go-webauthn, converts the COSE key to an SPKI DER, validates with the internal `webauthn.ParsePublicKey`, stores a pending credential, and returns a SHA-256 fingerprint. <br>*Web UI* (`enroll.html` + `app.js`) runs the WebAuthn **create** ceremony, shows the fingerprint, and then disables the invite URL. <br>*CLI* adds `keyroster user pending <name>` (admin-signed) to list pending credentials. | - **AUTH-01** – an account stays “unusable” until an admin signs a directory that contains the pending credential (the pending row is never bound). <br>- **UI-01** – a single HTML page with a tiny hand-written JS file, no inline script, strict CSP, meets the UI design rule. |
-| **Task 3** – Refusal matrix + differential oracle + CI gating | Exhaustive test matrix that rejects: missing UV/UP, wrong rpIdHash or origin, stale/used sessions, disallowed algorithms, duplicate credential IDs, expired/used invites, etc. <br>Matches every *acceptable* vector against go-webauthn to ensure the internal verifier is **no less strict** (strictOnly list). <br>Updates `scripts/dep-firewall.sh` and `.golangci.yml` to ban all WebAuthn-related packages from the signer graph. | - **D-17** – the signer never imports CBOR/JWT or go-webauthn. <br>- **D-05/D-03** – only allowed algorithms and UV required. <br>- **D-12** – registration uses a short-lived session, limiting replay. |
-| **Task 4** – Merge gate | Owner approval → squash-merge → `02-08-SUMMARY.md` recorded on `main`. | Enforces the “owner-only” gate required for any dependency change (see the “Delivery Protocol”). |
-
----
-
-### 2. Strengths (What the Plan Does Well)
-
-| Area | Observation |
-|------|-------------|
-| **Supply-chain hygiene** | The explicit, scripted “owner dependency review” (Task 1) forces a *human* gate before any new module enters `go.mod`. The plan even checks that `google/go-tpm` stays unchanged, satisfying the “no new TPM dependency” rule. |
-| **Zero-trust separation** | `go-webauthn` is compiled **only** into `keyroster-server` (the UI-side binary). The plan updates `dep-firewall.sh` and `depguard` to guarantee the signer binary never imports it. This matches D-17 and the threat-model entry T-02-41. |
-| **Clear data model & auditability** | The pending credential is stored with its algorithm, SPKI blob, backup-eligible flags, and a precise `registered_us` timestamp. Fingerprints are derived from the exact SPKI bytes (`SHA256:base64(SPKI)`) – the same format the signer will later verify against. |
-| **Comprehensive refusal testing** | The matrix covers every failure mode listed in the STRIDE register (T-02-39, T-02-40, T-02-41) and adds a **differential oracle** against a maintained library, ensuring the internal verifier is *not weaker* than the reference implementation. |
-| **Minimal UI surface** | The HTML template uses only `data-*` attributes and a separate `.js` file. No inline scripts, no external dependencies, strict CSP (added in Wave 4, but already present on the server). |
-| **CLI parity** | Admins can view pending credentials via a signed `keyroster user pending` command, keeping the audit trail on the client side and preventing accidental exposure of pending data to non-admins. |
-| **Testing hygiene** | The “softreg” test helper lives in a non-test package (`internal/server/servertest`) and is never imported by production binaries – the plan explicitly checks that `go list -deps ./cmd/...` does not include it. |
-
----
-
-### 3. Concerns (Potential Issues and Open Questions)
-
-| Severity | Concern | Plan step(s) affected | Why it matters |
-|----------|----------|----------------------|----------------|
-| **HIGH** | **Supply-chain verification completeness** – the owner must manually audit *all* transitive modules (tinylib/msgp, go-viper/mapstructure/v2, go-webauthn/x, philhofer/fwd, x448/float16, fxamacker/cbor/v2, golang-jwt/jwt/v5). If any of these are later added as a transitive dependency of a different module (e.g., a newer go-webauthn version), the firewall may miss it. | Task 1 (dependency review) | The plan relies on a one-time check. A future `go get -u` could silently bring a new transitive module that is *not* in the firewall list. |
-| **HIGH** | **TLS / WebAuthn origin requirements** – WebAuthn rejects insecure or self-signed TLS certs. The plan assumes the operator will provide a trusted cert (see D-09), but there is no automated test that the registration page works with a *real* self-signed cert or with Tailscale-issued certs that change keys. | Task 2 (server init) | If an operator tries the homelab with a self-signed cert, registration will silently fail, breaking the MVP. |
-| **MEDIUM** | **Race between invite consumption and registration** – the `invite_used_us` column is set in the same transaction that inserts the pending credential, but the plan does not describe locking semantics for concurrent `enroll/begin` calls on the same invite. A malicious user could try two concurrent browsers to create two pending credentials from a single invite. | DB migration & transaction logic (Task 2) | Could lead to multiple pending credentials for a single invite, violating the “single-use invite” guarantee. |
-| **MEDIUM** | **Credential-ID collision handling** – the plan rejects a credential ID that is already pending *or* already present in the installed directory. However, the check only compares the raw `id` bytes. If the server stores `id` as a string (e.g., base64url) in the DB, subtle encoding mismatches could slip through. | `enroll.go` / `credential.go` (Task 2) | Might enable a replay or duplicate-ID attack that bypasses the pending-credential check. |
-| **MEDIUM** | **Backup-eligible / backed-up flags** – stored as two separate INTEGER columns. The plan does not define whether `0/1` is used, nor does it enforce a Boolean type in the schema. This could cause confusion or bugs when later code interprets the flags. | DB schema (Task 2) | Future visibility tooling expects a strict Boolean; mismatched values could break reporting. |
-| **LOW** | **CSP & content-type for `app.js`** – while the plan mentions CSP, the exact header (e.g., `script-src 'self'`) is not shown. Missing `X-Content-Type-Options: nosniff` could allow a mis-served script to be interpreted as something else. | UI files (Task 2) | Minor but could be an easy vector for XSS if the server ever mis-configures the static file handler. |
-| **LOW** | **Testing of failure paths on Windows** – the plan’s e2e suite runs on Linux, but the WebAuthn registration flow is also required on Windows (Task 2 mentions `cmd/keyroster/user.go` for admin pending list). No explicit Windows-specific end-to-end test is listed. | e2e `enroll_test.go` (Task 3) | Might hide platform-specific bugs (e.g., path handling for the Windows named-pipe agent). |
-
----
-
-### 4. Suggestions (How to Mitigate the Concerns)
-
-| Concern | Recommendation |
-|---------|----------------|
-| **Supply-chain drift** (HIGH) | Add a **continuous CI check** that runs `go list -m all` and asserts that the exact *set* of modules listed in the owner-approved table remains unchanged on `main`. Fail the build if a new transitive module appears. |
-| **TLS / Origin** (HIGH) | Include an automated integration test that spins up `keyroster-server` with a self-signed cert *and* with a Tailscale-generated cert, then exercises the `enroll` endpoints via a headless Chrome (or `chromium --headless --disable-gpu`). Record the result – the test should *expect* a failure for the self-signed case and a success for a trusted cert. |
-| **Invite race condition** (MEDIUM) | Use a **SELECT … FOR UPDATE** lock on the invite row before checking/setting `invite_used_us`. Ensure the insertion of the pending credential and the update of `invite_used_us` are performed in a single serialized transaction. |
-| **Credential-ID encoding** (MEDIUM) | Store the credential ID as a **binary BLOB** (not as TEXT) and compare using `bytes.Equal`. If a string column is required for SQLite, always encode with a deterministic base64url and document the exact routine. Add a unit test that registers the *same* credential with two different base64url encodings and verifies that the second attempt is rejected. |
-| **Backup flag semantics** (MEDIUM) | Define the DB columns as `INTEGER NOT NULL CHECK (backup_eligible IN (0,1))` and similarly for `backed_up`. In code, map them to Go `bool` values (`0 → false`, `1 → true`). Add a lint rule or `go vet` check that flags any direct integer use of these fields. |
-| **CSP / static file headers** (LOW) | Ensure the server sends an explicit `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'` header on the enroll page, and also `X-Content-Type-Options: nosniff`. Include a test that fetches `/static/app.js` and asserts these headers exist. |
-| **Windows e2e coverage** (LOW) | Add a separate test matrix entry that runs the e2e suite on a Windows runner (GitHub Actions `runs-on: windows-latest`). The test only needs to hit the `/begin` endpoint and verify that the JSON response is well-formed – the actual credential ceremony can be mocked with `softreg`. This guarantees the HTTP handling is platform-agnostic. |
-
----
-
-### 5. Risk Assessment
-
-| Risk | Likelihood | Impact | Overall Rating | Mitigation Priority |
-|------|-------------|--------|----------------|---------------------|
-| **Supply-chain injection after owner review** | Medium (future `go get -u` could slip in) | High (malicious CBOR/JWT code in signer) | **High** | **Immediate** – add CI lock-down on transitive modules. |
-| **Registration failure due to untrusted TLS** | Medium (operators may use self-signed certs) | Medium (MVP broken, no way to register) | **Medium** | **High** – provide CI test and documentation that only trusted certs work. |
-| **Duplicate-credential/Invite race** | Low-Medium (unlikely in homelab but possible in production) | High (could allow multiple pending credentials per invite) | **Medium** | **Medium** – enforce DB lock and transaction semantics. |
-| **Inadvertent leakage of pending credentials** | Low (admin endpoint protected by SSHSIG) | Medium (information leak) | **Low** | **Low** – ensure admin auth is enforced, already covered. |
-| **Incorrect algorithm enforcement** | Low (tests cover major cases) | Medium (weak keys accepted) | **Low** | **Low** – confirm test matrix includes RSA-1024 reject. |
-| **Missing CSP/Headers** | Low | Low | **Low** | **Low** – add header test. |
-
----
-
-### 6. Bottom Line  
-
-The 02-08 plan is **well-structured** and **covers the primary security goals** for Phase 2’s passkey registration MVP. The biggest open risk is the *supply-chain guardrails*: a one-time manual approval is not enough for long-term safety. Adding a CI gate that freezes the transitive dependency set will close that gap without extra manual work.  
-
-Other concerns (TLS trust, race conditions, encoding consistency) are **easily mitigated** with small code or test additions, and they do not block progress. Assuming the owner’s dependency review (Task 1) returns an “approved” with a complete module table, I recommend advancing the plan to the merge gate after the suggested mitigations are in place.
-### 02-09 – Approve Passkeys into an Admin-Signed Directory  
-*Plan review (one of the 14 Phase-2 plans).  No repository access – source-dependent points are phrased as open questions.*
-
----
-
-#### 1. Summary  
-
-The plan introduces a **single, auditable pipeline** that lets an admin bind a user’s newly-registered WebAuthn credential to a *directory* document signed by the admin’s SSH key (or a quorum of admin keys).  
-
-Key actions:
-
-| Step | What is built / changed |
-|------|------------------------|
-| **Server** – `GET/POST /api/v1/admin/directory` and `GET /api/v1/admin/users` (plan 02-09-server) | Provides a read-only mirror of the current directory and a way to install a new version atomically. |
-| **CLI** – `editDirectory` (in `cmd/keyroster/dirpipe.go`) (plan 02-09-dirpipe) | Verifies the *trust bundle* against pinned roots, validates the *installed* directory against the policy admins, constructs the successor, prints a **stable diff**, asks for confirmation, signs with the admin’s SSH key, and either posts it or writes a proposal. |
-| **CLI sub-commands** – `keyroster user approve …` (plan 02-09-user) | Looks up pending credentials, requires the admin to supply the exact SHA-256 fingerprint shown to the user, mutates the directory, and runs the same pipeline. |
-| **Proposal workflow** – `keyroster directory sign` / `install` (plan 02-09-directory) | Supports quorum > 1: a proposal can be written, co-signed, then installed. |
-| **Server handling** – `DeleteBound` on successful install (plan 02-09-serverdb) | Cleans up pending rows only after the signer accepts the new directory. |
-| **Tests & Docs** – e2e (`TestEnrollApproveEndToEnd`, etc.) and `docs/runbooks/enroll-user.md` (plan 02-09-test-doc) | Drive verification of happy-path, edge cases (adjacency, emptiness, idempotency, concurrency, quorum) and capture the operational run-book. |
-
-If all steps behave as described, the **AUTH-01** requirement (an account stays unusable until an admin binds a passkey) and **KEY-02** (authority is a quorum-signed directory version) are satisfied, while preserving the “no admin can grant themselves access unobserved” guarantee.
-
----
-
-#### 2. Strengths  
-
-| Area | Why it helps the project goals |
-|------|--------------------------------|
-| **Zero-trust base verification** – The CLI never trusts the server’s directory without locally verifying *both* the root-pinned policy and that the directory’s signatures belong to the *policy admins* (step 2 of `editDirectory`). This implements the “authenticate payloads, not pipes” rule from the architecture research. |
-| **Human-in-the-loop diff** – The stable, ordered diff (`internal/directory/diff.go`) is shown before any signing. This gives the admin a chance to detect accidental changes (e.g., a role-escalation) and satisfies the “diff-before-sign” requirement in the `must_haves` truth list. |
-| **Explicit out-of-band fingerprint check** – Requiring `--fingerprint` for `user approve` forces an OOB verification step, mitigating the “compromised-server-shows-attack-credential” risk documented in the run-book. |
-| **Quorum-aware design** – The same pipeline works for both single-admin installs and multi-admin proposals, and the signer refuses installs that do not meet the quorum (plan step “policy.AdminQuorum > 1”). This enforces D-01/D-02. |
-| **Atomic install & pending-cleanup** – The server only deletes pending credentials *after* the signer returns success, preventing a “lost-credential” window. |
-| **Comprehensive edge-case coverage** – The plan enumerates tests for adjacency, emptiness, idempotency, concurrency, and quorum-2 paths, which are precisely the AUTH-01 edge cases flagged earlier. |
-| **Documentation of residual risk** – `docs/runbooks/enroll-user.md` explicitly calls out the remaining “phishing-via-compromised server” risk (Pitfall 13), aligning with the project’s transparency promise. |
-| **Dependency hygiene** – The only new dependencies (`go-winio` for the Windows pipe) are added to the capslock baseline and the firewall script, preserving the “no new attack surface” rule. |
-
-Overall, the plan tightly couples **policy verification**, **admin intent**, and **signer authority**, fulfilling the core value of “full visibility” while keeping the code footprint small.
-
----
-
-#### 3. Concerns  
-
-| Severity | Concern | Plan step(s) involved | Why it matters / open question |
-|----------|----------|----------------------|--------------------------------|
-| **HIGH** | **Potential for a *silent* replay of a previously-approved credential**. The pipeline checks that the *fingerprint* matches a *pending* credential, but the pending store lives on the **server** (step `GET /api/v1/admin/users`). If a malicious server were to *re-use* a pending credential that was already approved (by deleting the pending row after install, but keeping the credential ID in a hidden table), an admin could unintentionally sign the same credential twice under different users. | 02-09-user (`user approve`), 02-09-serverdb (`DeleteBound`). | *Open question*: Does `DeleteBound` also purge the *credential ID* from any “used-once” table? Is there a uniqueness check that prevents the same credential ID from being bound to multiple users across versions? |
-| **HIGH** | **Race-condition between concurrent admins building on the same base version**. The plan relies on the signer’s version + prev-hash check (step “409 directory_version_chain”). However, `editDirectory` builds the successor *locally* before the POST. If two admins run `user approve` simultaneously, both will POST the **same** successor bytes (identical hash). The signer will accept the first and reject the second with a 409. The plan expects the CLI to surface the error, but there is no automated *re-run* or merge-resolution logic. | 02-09-dirpipe (`editDirectory`), 02-09-server (`POST /api/v1/admin/directory`). | *Open question*: Does the CLI automatically re-fetch the latest directory on a 409 and re-apply the mutation, or must the operator manually re-run the command? If the second admin’s mutation is *different* (e.g., approving a different user), the re-run might lose that change. |
-| **MEDIUM** | **Unclear handling of *signature duplication* in quorum proposals**. The plan says “signing twice by the same admin still counts once (refused at install)”. However, `directory sign` appends a signature block without deduplication logic. If an admin accidentally signs twice, the proposal may contain duplicate signatures, and the signer might treat the duplicate as an extra signature (inflating the count) or reject it as “duplicate signer”. | 02-09-directory (`directory sign`). | *Open question*: Does the verifier (`directory.VerifySignatures`) de-duplicate signatures before counting toward the quorum? What error is returned to the CLI if duplicate signatures are present? |
-| **MEDIUM** | **Trust-pin management and rotation are not fleshed out**. The CLI fetches the *trust bundle* and verifies it against `cfg.TrustPins` (step 1 of `editDirectory`). The plan does not describe how many pins are expected, what algorithm (SPKI hash vs full cert) is used, or how operators are to rotate them when the server’s TLS certificate changes (e.g., Tailscale cert renewal). | 02-09-dirpipe (initial `Trust` call). | *Open question*: If the server’s cert rotates (common with Tailscale ACME), does the CLI need a new pin? Is there a documented procedure for updating `cfg.TrustPins` without breaking the pipeline? |
-| **MEDIUM** | **CLI behaviour on non-interactive environments**. The pipeline prompts the admin for a diff confirmation unless `--yes` is supplied, but the plan also says “with no TTY and no `--yes`, refuse”. This could cause automated CI runs (e.g., a bot that prepares a proposal) to fail unexpectedly. | 02-09-dirpipe (prompt step). | *Open question*: Is there a documented policy for using `--yes` in automation (e.g., CI to generate a proposal for a quorum)? Could this be abused to auto-sign without review? |
-| **LOW** | **Proposal file layout and integrity** – The proposal includes `directory.json`, `directory.json.sigs`, and `base.sha256`. The plan does not state that the `.sigs` file must be *armored* (ASCII-armor) or that the `base.sha256` must be verified against the installed directory before signing. An attacker could replace the `base.sha256` with the hash of a *different* directory and trick the second admin into signing an invalid chain. | 02-09-directory (`sign` step). | *Open question*: Does `directory sign` re-compute the base hash from the *currently installed* directory before allowing a second signature? |
-| **LOW** | **Error-message consistency** – The plan lists several distinct HTTP status codes (409, 403, 400) with custom error fields (`directory_version_chain`, `directory_invalid`). Consumers (CLI, scripts) must map each to a human-readable message. The plan does not define a central error-handling library, risking drift between server and client. | 02-09-server `POST` handling. | *Open question*: Are the error codes and JSON fields included in the OpenAPI spec and covered by integration tests? |
-
----
-
-#### 4. Suggestions  
-
-| Concern | Recommendation |
-|--------|----------------|
-| Replay of already-approved credentials | Add a **global “used-credential-IDs” index** in the signer (or server) that rejects any install that attempts to bind a credential ID already present in any previous directory version. The check should be part of `directory.Validate` before signing. |
-| Concurrent admin edits | Implement a **retry helper** in `editDirectory` that, on a 409, automatically fetches the latest directory, re-applies the *mutation* (the same `mutate` function) and re-prompts the admin. This guarantees no lost updates and reduces manual re-run friction. |
-| Duplicate signatures in quorum proposals | In `directory.VerifySignatures` de-duplicate by public-key fingerprint before counting toward the quorum. Emit a clear error (`duplicate_signature`) if the same admin’s key appears twice, so the user can clean the proposal. |
-| Trust-pin rotation | Define a **pin-rotation process** in the documentation: store pins as a list of SPKI SHA-256 hashes and allow the CLI to accept a *new* pin if it is signed by an existing root (i.e., a “pin-delegation” signed by the current root). Include a `keyroster trust rotate` sub-command. |
-| Non-interactive CI usage | Require the explicit flag `--yes --non-interactive` for CI-driven proposal generation, and make the CLI reject the operation without it. This makes the intent obvious and avoids accidental auto-sign. |
-| Proposal integrity | When `directory sign` reads a proposal, recompute the SHA-256 of `directory.json` and compare it against `base.sha256`. If they mismatch, abort with a clear error. Additionally, store the `base.sha256` inside the JSON payload (e.g., a `PrevHash` field) so the signer can double-check. |
-| Consistent error handling | Introduce a small **error‐wrapper package** (e.g., `internal/apierr`) that defines the set of error codes and JSON structures. Use it in both server and client to guarantee that `directory_version_chain`, `directory_invalid`, etc., are always marshalled identically. Add a unit test that round-trips every error type. |
-
----
-
-#### 5. Risk Assessment  
-
-| Risk | Likelihood | Impact | Mitigation (already in plan) | Additional mitigation |
-|------|------------|--------|------------------------------|-----------------------|
-| **Compromised server feeds a forged fingerprint** (user sees a fake credential, admin approves it) | Medium (depends on server integrity) | High – would bind an attacker-controlled credential to a user | Out-of-band fingerprint verification (required `--fingerprint`) + audit log of directory installs | Add a *credential-binding receipt* on the user side that can be compared with server-side logs (optional for later phases) |
-| **Lost update due to concurrent admin installs** | Medium (multiple admins in production) | Medium – could drop a legitimate binding | Signer rejects with 409; CLI surfaces error | Auto-retry logic + explicit documentation of the conflict-resolution flow |
-| **Duplicate credential ID bound to different users** | Low (depends on pending-store cleanup) | High – privilege escalation | `DeleteBound` runs after signer success; pending rows cleared | Global uniqueness constraint on credential IDs in directory schema, enforced at Validate |
-| **Quorum-size mis-match (admin signs twice, quorum not met)** | Low (human error) | Medium – admin may think the directory is ready when it isn’t | Signer enforces quorum; CLI reports missing signatures | Deduplicate signatures before counting; provide a `keyroster directory status` command |
-| **Pin-drift after TLS cert renewal** | Medium (Tailscale certs rotate) | Medium – pipeline will reject all attempts to fetch directory | Trust pins are stored locally and verified before each edit | Provide `keyroster trust update` to add a new pin after a controlled rotation ceremony |
-
-Overall, **the highest residual risk remains the human-factor “fingerprint mismatch”** (phishing) which the plan already mitigates by making the fingerprint mandatory and documenting the residual risk. All other technical risks are either already mitigated by the design (signer checks, quorum enforcement) or can be reduced with the lightweight suggestions above.
-
----
-
-#### 6. Bottom Line  
-
-The plan presents a **well-structured, security-first workflow** that fulfills the core requirements for Phase 2. The design’s biggest strengths are the *local verification of authority* and the *explicit, human-checked diff*.  
-
-The primary open questions revolve around **global credential uniqueness**, **concurrent admin coordination**, and **trust-pin lifecycle** – areas where a small amount of extra validation or tooling would close the remaining attack surface without compromising the simplicity goal.
-
-If the open questions are answered (or the suggested safeguards are added) before the merge gate, the plan should pass the required CI, audit checks, and merge-gate criteria with a high degree of confidence.
-### 02-10 – Passkey Web-Sign-In & Read-Only Account Page  
-**Phase:** 02-passkey-login-mvp (Wave 8)  
-**Owner:** `keyroster` · Branch `p02/10-web-signin`  
-**PR target:** `origin/main` (auto-merge, squash)  
-
-#### Summary  
-
-| Item | Description |
-|------|-------------|
-| **Goal** | Enable a user whose passkey is bound in the *installed* directory to authenticate to the embedded web UI, receive a cryptographically-random `__Host-keyroster-session` cookie, and view a read-only page that lists the user’s roles, principals, TTL cap and credential fingerprints. |
-| **Key artefacts** | • DB migration `0003_web.sql` (tables `web_challenges` & `sessions`)  <br>• `internal/server/weblogin.go` (`GET /login`, `POST /api/v1/web/login/begin`, `POST …/finish`)  <br>• `internal/server/session.go` (`withSession` middleware, cookie handling, idle/absolute expiry)  <br>• `internal/server/account.go` (`GET /account`)  <br>• Rate-limit extensions (per-IP & per-username)  <br>• UI assets (`templates/login.html`, `account.html`, `static/app.js`)  <br>• E2E test `TestWebSignInEndToEnd` |
-| **Security properties** | • Challenge is a 32-byte random value, single-use, expires ≤ 120 s. <br>• Assertion is verified with the **identical** `internal/webauthn` verifier used by the signer (no extra dependency in the signer). <br>• Uniform `404` on *any* non-usable username prevents user-enumeration. <br>• Session ID is 32 bytes, stored only as SHA-256 in the DB; cookie uses `__Host-` prefix, `Secure`, `HttpOnly`, `SameSite=Strict`. <br>• Idle timeout 1 h, absolute timeout 12 h; session is revoked automatically when the directory marks the user disabled. |
-| **Success criteria covered** | – SC 1 (user registers a passkey → signs into UI)  <br>– SC 2 (CLI login uses same fingerprint – UI now shows the same fingerprint)  <br>– SC 4 (signer refuses missing/replayed/invalid assertions – covered by same verifier) |
-| **Remaining out-of-scope** | Host-side principal files, certificate issuance, JIT approvals, admin UI for directory changes. |
-
----
-
-### Strengths  
-
-| Area | Why it matters |
-|------|-----------------|
-| **Clear separation of duties** | The server only *mirrors* the directory; all auth decisions (credential binding, RP ID, policy) are enforced by the signer-side verifier. This respects the “signer-only authority” model from Phase 1. |
-| **Uniform error handling** | Identical `404` for unknown, pending, disabled, or credential-less accounts implements the “no-info-leak” stance required by the STRIDE register (T-02-50). |
-| **Stateless challenge flow** | Storing only the challenge ID, user name, binary blob, and expiry keeps the DB small and makes replay detection trivial (challenge is deleted on `TakeChallenge`). |
-| **Strong session hardening** | `__Host-` cookie, `Secure`-only, `HttpOnly`, `SameSite=Strict`, SHA-256 storage, and automatic revocation on directory disable cover both Spoofing (T-02-47) and Elevation (T-02-51). |
-| **Rate-limit per-username** | Adding a per-principal limiter mitigates credential-guessing and enumeration bursts beyond the per-IP bucket. |
-| **Comprehensive test coverage** | Unit tests for every refusal case + a full end-to-end flow (incl. real SSHD) give confidence that the flow works in the homelab and that regressions will be caught. |
-| **Dependency hygiene** | The only new module (`go-winio`) is limited to the Windows CLI (outside the signer), and the server only adds `go-webauthn` (which is already allowed in the server-only firewall). This respects the capslock baseline. |
-| **Documentation of limits** | The plan explicitly notes the “UNVERIFIED” status for macOS UI testing; the risk is tracked for Wave 11. |
-
----
-
-### Concerns  
-
-| Severity | Reference in plan | Issue / Question |
-|----------|-------------------|------------------|
-| **HIGH** | **Task 1 – DB & Challenge handling** | *Atomicity & race conditions*: `TakeChallenge(id, now)` must both **delete** the row **and** return the blob atomically. If the DB layer uses two separate statements, a concurrent `finish` could succeed with a stale challenge, violating the single-use guarantee. <br>**Open question:** Does the migration use `DELETE … RETURNING` (SQLite 3.35+) or a transaction that guarantees atomicity? |
-| **HIGH** | **Task 1 – Session creation** | *Session fixation*: The plan generates a random session ID *after* verification, but does not rotate the ID on privilege changes (e.g., after a user is disabled and re-enabled). If a session persists across a privilege change, an attacker could retain a valid cookie after the user’s rights are reduced. <br>**Open question:** Will the `withSession` middleware delete the session when the directory indicates a status change *before* checking the request? |
-| **MEDIUM** | **Task 1 – Cookie on non-HTTPS dev servers** | The spec requires `Secure`; the e2e test runs on `https://keyroster.localhost:<port>` via a self-signed cert. In local development (e.g., `http://localhost:8080`) the cookie would be rejected and the UI would break, yet the plan does not mention a “development mode” toggle. <br>**Open question:** Is there an explicit opt-out flag for `Secure` in dev, or will developers be forced to run TLS locally? |
-| **MEDIUM** | **Task 1 – Uniform 404 timing side-channel** | Although the body is identical, the **response latency** may differ between a user that exists (lookup → DB → success path) and a non-existent user (quick miss). This could still aid enumeration. <br>**Open question:** Are there explicit timing-padding measures (e.g., sleep ≈ 50 ms) to equalise response time? |
-| **LOW** | **Task 1 – Challenge storage of raw `blob`** | The `blob` column contains the raw WebAuthn `clientDataJSON` and `authenticatorData`. If an attacker gains read access to the DB (e.g., via OS compromise) they could see the RP ID, challenge, and possibly user-verification flag. This is not a credential leak, but may aid targeted phishing. <br>**Open question:** Is the challenge blob encrypted at rest or does the threat model consider DB compromise a “full compromise” scenario already? |
-| **LOW** | **Task 2 – Rate-limit values** | The per-username limiter (`10/min`) may be too permissive for a high-value service where brute-force attempts on a known username are a concern. The policy does not explain the chosen burst/average. <br>**Open question:** Was the limit derived from a quantitative threat model, or is it a placeholder to be tuned later? |
-| **LOW** | **Task 2 – CSRF protection on `/logout`** | The plan relies on `SameSite=Strict` + a “CrossOriginProtection” wrapper from Wave 6, but the exact implementation of that wrapper is not restated here. If the wrapper only checks `Origin` header, browsers may omit it on same-site POSTs, causing a blind-spot. <br>**Open question:** Does `CrossOriginProtection` also validate a CSRF token, or is SameSite considered sufficient under the threat model? |
-
----
-
-### Suggestions  
-
-| Area | Recommendation |
-|------|-----------------|
-| **Atomic challenge consumption** | Implement `TakeChallenge` as a single `DELETE FROM web_challenges WHERE id = ? AND expires_us > ? RETURNING *` in SQLite. If the SQLite version on the target platform does not support `RETURNING`, wrap the `SELECT` + `DELETE` in a transaction with `BEGIN IMMEDIATE`. |
-| **Session revocation on status change** | In `withSession`, after loading the session’s `user_name`, call `directory.IsActive(user_name)` **before** resetting the idle timer. If the user is now disabled, `DeleteSession` should be invoked and the request redirected to `/login`. This guarantees immediate revocation. |
-| **Development-mode TLS** | Add a server flag `--insecure` (or an env var) that, when set, allows the cookie to be set without `Secure`. The flag must be **explicitly disabled** in production builds and be gated by a compile-time build tag (`dev`). Document the flag in `README` and ensure CI runs the server with real TLS. |
-| **Timing-padding for uniform 404** | After the DB lookup for a username, insert a `time.Sleep(50 * time.Millisecond)` (or a configurable sleep) before writing the response, regardless of outcome. This reduces latency-based enumeration. |
-| **Encrypt challenge blobs (optional)** | Store the `challenge` column as raw bytes (already random) but encrypt the `blob` (clientDataJSON etc.) with a server-side static AES-GCM key derived from the server’s TLS private key. This adds negligible overhead and eliminates the residual data exposure if the DB is read by an attacker who does not control the server process. |
-| **Rate-limit calibration** | Run a quick load test (e.g., `hey` or `vegeta`) targeting `POST /api/v1/web/login/begin` with a known username to confirm the per-username bucket isn’t trivially bypassed. Adjust the limit to `5/min` with burst 2 if the test reveals high error rates. |
-| **CSRF token for logout** | Even with `SameSite=Strict`, add a random `csrf_token` (stored in the session DB row) that the logout form must submit. This provides defense-in-depth and aligns with the existing `CrossOriginProtection` pattern used elsewhere in the codebase. |
-| **Explicit audit logging** | Ensure every refusal (uniform 404, 401, 429) logs the *hashed* username and the reason (e.g., “begin-refused-no-credential”). This satisfies the audit-log requirement (P1 D-14). |
-| **Explicit documentation of “UNVERIFIED”** | In the `README` or `docs/README.md`, add a note that the web UI is exercised only on Linux/macOS via the e2e test; macOS UI is currently unverified and will be validated in Wave 11. This keeps the public claim accurate. |
-
----
-
-### Risk Assessment  
-
-| Risk | Likelihood | Impact | Mitigation (already in plan) | Additional mitigation |
-|------|------------|--------|------------------------------|----------------------|
-| **Replay of a WebAuthn assertion** | Low (single-use challenge) | High (attacker could obtain a valid certificate) | Challenge is deleted atomically (`TakeChallenge`) and expires after 120 s. | Verify atomic delete-return; add a short in-memory cache of used challenge IDs as a fallback. |
-| **Session hijack (cookie theft)** | Medium (session ID is bearer token) | High (read-only page leak; could be used as foothold for future CSRF) | Random 32-byte ID, stored as hash, `Secure` + `HttpOnly` + `SameSite=Strict`. | Add optional “binding to User-Agent” (store User-Agent hash in the session row, reject on mismatch). |
-| **Privilege escalation via stale session** | Low (session revocation on disable) | High (user could continue to view now-revoked principals) | `withSession` checks directory status on every request and deletes stale sessions. | Add a “session version” field in the directory; on any directory change, bump a global version and invalidate all sessions. |
-| **User enumeration** | Medium (username is in request body) | Low (names are already logged in audit) | Uniform 404, rate limits per-IP & per-username. | Introduce constant-time response latency padding (see suggestion). |
-| **CSRF on logout** | Low (SameSite=Strict) | Medium (could keep session alive) | SameSite + CrossOriginProtection. | Add CSRF token as extra defense. |
-| **Dependency-drift (go-webauthn)** | Low (restricted to server) | Medium (verifier bugs could allow forged assertions) | Dependency firewall + capslock baseline; verifier is fuzzed. | Pin the exact commit hash of `go-webauthn` and add a nightly fuzz job in CI. |
-
-Overall the plan **meets** the Phase 2 security-first constraint. The highest-risk items (atomic challenge consumption and session revocation on status change) are **addressable with minor code adjustments** and clear test coverage. The remaining concerns are low-impact or already mitigated by existing controls.
-
----
-
-#### Bottom-Line Recommendation  
-
-- **Approve** the plan **provided** the open questions marked above are answered in the implementation (atomic `TakeChallenge`, session revocation flow, and dev-mode TLS handling).  
-- Request the owner to add a short note in the PR description confirming: *“Challenge consumption is performed in a single SQLite statement; session revocation on disabled users is enforced before idle-timer reset.”*  
-- Once the PR passes CI and the merge gate, proceed to Wave 9 (plan 02-12) which will build the CLI `keyroster login` flow on top of this web-sign-in foundation.  
-### 02-11 – Roles, Groups, Host-Groups & Principals Renderer  
-**Phase:** 02-passkey-login-mvp → Wave 8  
-**Owner-gate:** 02-09 must be merged first  
-
-#### Summary  
-The plan adds the first admin-controlled authorization layer:
-
-| Item | What is added | Where it lives |
-|------|----------------|----------------|
-| **Directory renderer** (`internal/directory/render.go`) | `AccountPrincipals` + `RenderPrincipalsFile` that produce a deterministic `AuthorizedPrincipalsFile` (header + sorted, deduped principals) | Shared package used by the Phase 3 host-agent and the CLI (`keyroster host principals`) |
-| **CLI commands** (`cmd/keyroster/*`) | `role`, `group`, `host-group`, `host` sub-commands that edit the signed *directory* via `editDirectory` and expose the renderer | All admin actions go through the same *directory-mutation* pipeline established in 02-09 |
-| **Tests** | Unit tests for the renderer; integration/e2e test (`TestRolesHostPrincipalsEndToEnd`) that exercises the full path: role → group → host-group → rendered file → real sshd → revocation | `test/e2e/roles_test.go` |
-| **Run-book** (`docs/runbooks/host-setup.md`) | Manual steps for a Phase-2 host to trust the user-CA and to install the generated principals file | Documented for operators and for the future Phase-3 agent |
-| **Decision checkpoint (Task 1)** | Owner must confirm the **one-way principal convention** (`role:<name>` / `u:<username>` or a custom prefix) before any defaults are baked | Recorded verbatim in `02-11-SUMMARY.md` |
-
-If the checkpoint is satisfied, the plan delivers a complete admin-side workflow that satisfies **AUTHZ-01** and the third success criterion (certificates grant exactly the principals rendered for the host).
-
----
-
-#### Strengths  
-
-| Aspect | Why it’s strong (citing plan steps) |
-|--------|------------------------------------|
-| **One-source-of-truth rendering** – `RenderPrincipalsFile` lives in the same `directory` package used by the signer and by the future host-agent (Task 2, step *“shared renderer”*). Guarantees the file shown to admins is exactly what the signer will validate, mitigating T-02-53. |
-| **Policy-driven immutable authority** – All mutating commands (`role add`, `group add-member`, `host-group map`, etc.) are **editDirectory** mutations that produce a signed directory version (Task 2, *“every mutating subcommand is an editDirectory mutation and accepts `--yes`…”*). This enforces the “admin-signed directory” model introduced in D-01/D-07. |
-| **Defensive validation** – The plan explicitly requires **CLI-side principal syntax checks** (cert.ValidatePrincipals) *and* signer-side checks (existing `Validate` pipeline). This double-layer guards against accidental mis-configurations and malicious CLI binaries, addressing T-02-52. |
-| **End-to-end test against real sshd** – `TestRolesHostPrincipalsEndToEnd` spins a stock OpenSSH server, loads the generated `TrustedUserCAKeys` and the rendered principals file, then verifies login succeeds and fails after un-mapping (Task 2, step 6-7). This directly proves success-criterion 3. |
-| **Explicit human decision for one-way change** – Task 1 forces the owner to lock in the principal prefix before any default is baked, satisfying the “one-way door” requirement (D-06). |
-| **Run-book ties code to ops** – `host-setup.md` codifies the manual steps that will be automated later, reducing the risk that operators forget to re-render after a revocation (T-02-54). |
-| **Granular failure cases covered** – Task 3 lists a comprehensive set of refusal tests (wildcards, commas, empty string, over-TTL, unknown groups/roles, uppercase accounts, removal of mapped entities). This coverage will surface regressions early. |
-
----
-
-#### Concerns  
-
-| Severity | Concern (plan step) | Explanation / Open Question |
-|----------|----------------------|-----------------------------|
-| **HIGH** | **Task 1 – Owner decision on principal prefixes** (checkpoint decision) | The plan treats the decision as a *binary* (“role-prefix vs custom-prefix vs account-names”). If the owner selects a *custom* prefix, the CLI default must be generated dynamically, and every downstream test (e2e, renderer header, run-book examples) must be templated accordingly. **Open question:** *How will the custom prefix be communicated to the test suite and to the run-book generation?* Is there a config file or a build-time constant? Without a concrete mechanism the plan could stall at merge-gate. |
-| **HIGH** | **PKI rotation & header hash stability** (Task 2 – renderer header) | The header includes “directory version \<n\> sha256 \<hex\>”. If the directory version is signed but the *exact* byte representation used for the hash diverges (e.g., whitespace changes in JSON canonicalisation), the rendered file’s hash may not match the signer’s view, breaking the “evidence that the file came from the current directory”. **Open question:** *Does `RenderPrincipalsFile` compute the hash from the *canonical* JSON bytes of the directory (as stored on disk) or from the in-memory struct?* A mismatch would cause false-positive tampering warnings (T-02-53). |
-| **MEDIUM** | **CLI-side validation vs signer-side validation for TTL caps** (Task 3 – refusals) | The plan expects the CLI to reject a `--max-ttl` larger than the *user-CA profile* cap **before** signing. However the user-CA profile lives in the *trust bundle* that is only fetched at runtime by the signer. If the CLI does not have a current copy of the bundle (e.g., offline operation), it may incorrectly allow an oversized TTL, and the signer will later reject it, creating a confusing error path. **Open question:** *Will the CLI pull the bundle and cache it locally for TTL validation, or will it simply rely on the signer to reject?* |
-| **MEDIUM** | **Concurrency / race conditions on directory edits** (Task 2 – editDirectory) | Multiple admins could invoke `role add` or `group add-member` concurrently. The plan doesn’t describe how `editDirectory` resolves conflicts (e.g., optimistic lock with version bump, or serialised via a server-side lock). The signer already refuses out-of-order versions, but a race could cause many failed transactions, increasing admin friction. **Open question:** *Is there a back-off / retry strategy in the CLI, or does the plan rely on the operator to serialize changes?* |
-| **LOW** | **Windows host-group case** (Task 3 – run-book) | The host-setup run-book mentions “Windows hosts: lowercase account names”. OpenSSH on Windows is case-insensitive, but the `AuthorizedPrincipalsFile` path may be case-sensitive on the underlying file system (NTFS is case-preserving). If the generated file name (`/etc/ssh/principals/<account>`) uses a mixed-case account, host-side sshd may not locate it. **Open question:** *Will the CLI enforce lower-casing of the `<account>` argument on Windows, or is this left to the operator?* |
-| **LOW** | **Dependency surface for go-winio (Task 3)** | Adding `github.com/Microsoft/go-winio` to the Windows CLI is required for the named pipe agent. The plan updates the dependency firewall and capslock baseline, but it does not list a **fallback** if the dependency fails the capslock check on a future Go version. This could block CI for Windows builds. **Open question:** *Has the capslock test been run against the current version of go-winio, and is it locked in `scripts/dep-firewall.sh`?* |
-
----
-
-#### Suggestions  
-
-| Suggestion | Where it applies | Rationale |
-|------------|------------------|-----------|
-| **Provide a concrete config mechanism for custom prefixes** (Task 1) | Add a tiny `keyroster.yaml` (or an environment variable) that stores `role_prefix` and `user_prefix`. The CLI reads it at start, the test suite loads it, and the run-book can reference the same file. | Guarantees that the owner’s decision propagates consistently without manual code edits. |
-| **Document the hash source for the renderer header** (Task 2) | In `RenderPrincipalsFile` comment and in `docs/runbooks/host-setup.md`, state “hash is computed over the canonical JSON representation of the directory version as stored on disk”. Add a unit test that recomputes the hash from the on-disk file and compares it to the header. | Removes ambiguity, prevents T-02-53 mismatches. |
-| **Cache the trust bundle for TTL validation** (Task 3) | The CLI should fetch the bundle from the server once per run (or on first use) and keep it in memory for `--max-ttl` checks. If the bundle cannot be fetched, fall back to *signer-only* validation with a clear error message. | Improves UX (early feedback) and aligns with the “defense-in-depth” principle. |
-| **Add optimistic-lock semantics to `editDirectory`** (Task 2) | Extend `editDirectory` to include the *expected* parent directory version hash; the server rejects mismatched versions with a clear “stale version – retry” error. The CLI can auto-retry a configurable number of times. | Reduces admin friction, makes concurrent edits safe, and satisfies the existing successor-chain model. |
-| **Enforce lowercase accounts on Windows** (Task 3 – run-book) | In `keyroster host principals` and `host-group map` commands, automatically lowercase the `<account>` argument on Windows builds, and emit a warning if the supplied value differs from the normalized form. | Guarantees the generated file name matches the case expected by the Windows OpenSSH service. |
-| **Pin go-winio version in the firewall script** (Task 3) | Update `scripts/dep-firewall.sh` to lock `github.com/Microsoft/go-winio@v0.6.2` (or the exact commit) and add a comment explaining the pin. Run the capslock check locally before the PR lands. | Prevents surprise CI failures due to transitive updates. |
-
----
-
-#### Risk Assessment  
-
-| Risk | Likelihood | Impact | Overall Rating | Mitigation |
-|------|-------------|--------|----------------|------------|
-| **Incorrect principal convention after owner decision** (Task 1) | Medium (depends on owner response) | High – would require re-issuing every certificate and re-rendering all hosts | **High** | Enforce the decision via a single source of truth (config file) and gate the build until the config exists. |
-| **Hash mismatch between rendered file and directory version** (Task 2) | Low (implementation likely straightforward) | Medium – could cause operators to lose confidence in the audit log | **Medium** | Add unit test and explicit documentation; consider including the hash in the e2e test. |
-| **Concurrent directory edits causing lost updates** (Task 2) | Medium (multiple admins likely) | Medium – admin friction, possible audit-log gaps | **Medium** | Optimistic-lock version check + auto-retry in CLI. |
-| **CLI allowing oversized TTL** (Task 3) | Low (bundle fetch is cheap) | Medium – could temporarily create over-privileged certs if signer is bypassed (unlikely) | **Low** | Cache bundle for TTL checks; surface clear error if bundle unavailable. |
-| **Windows host-group case-sensitivity leading to login failures** (Task 3) | Low (few Windows hosts currently) | Low – limited to Windows homelab, but could confuse users | **Low** | Force lowercase on Windows; add documentation. |
-| **Dependency-firewall breakage from go-winio** (Task 3) | Low (pinning is simple) | Low – CI failure only | **Low** | Pin version, run capslock check pre-merge. |
-
-Overall, the plan is **well-scoped** for Phase 2 and directly satisfies the required success criterion. The primary risk is the *owner-decision point* for the principal prefix; providing a concrete configuration path will eliminate the biggest blocker.
-
----  
-
-**Bottom line:**  
-Approve the plan **once** the owner records the principal-prefix decision in `02-11-SUMMARY.md` **and** the repository adds a small config mechanism (or hard-codes the chosen prefixes) to propagate the decision to the CLI, tests, and run-book. After that, the plan delivers a secure, auditable admin workflow with full e2e verification against a real OpenSSH host.
-### 02-12 – “keyroster login” – Review  
-
-#### TL;DR  
-The plan stitches together a new login API, a browser-driven WebAuthn approval page, a loop-back PKCE flow and per-OS agent injection. The design is coherent and most of the security-critical pieces (fingerprint comparison, PKCE, single-use code, signer-side verification) are present.  
-The biggest open questions revolve around **state persistence and race conditions** (concurrent logins, code-hash uniqueness, expiry handling) and **boundary-hardening** (loop-back host checks, CSP, TLS pinning). Those should be answered before the PR is merged.  
-
-Below is a concise audit organized by the plan’s major artefacts, with concrete concerns, their severity and suggested mitigations.
-
----  
-
-#### 1. Database migration & login-session model  
-
-| Step(s) referenced | Concern | Severity | Why / Open question |
-|-------------------|---------|----------|----------------------|
-| `0004_login.sql` (DB schema) – creation of `login_sessions` table; `CreateLogin`, `Login`, `ApproveLogin`, `RedeemLogin` accessors. | **Race-condition on concurrent login attempts** – Two `login` processes for the same user could generate the same `code_hash` (unlikely but possible if the random generator is weak) or could both try to move a session from `approved` → `redeemed`. | **HIGH** | Does the `RedeemLogin` implementation perform the status check and state transition in a single atomic transaction? The plan says “atomically”, but without repository access we cannot verify the SQL `UPDATE … WHERE status='approved'`. We need to ensure the DB row lock or `SELECT … FOR UPDATE` is used. |
-| Same table – `code_hash BLOB UNIQUE`. | **Denial-of-service via exhaustion** – An attacker could flood the table with pending sessions (or with crafted `code_hash` collisions) to fill the DB. | **MEDIUM** | Are there cleanup jobs for expired sessions? The plan does not mention a background reaper. If stale rows linger, capacity could be consumed. |
-| `code_expires_us INTEGER` and `expires_us INTEGER`. | **Clock-skew handling** – The plan enforces a 300 s server-client skew check on the request’s `CreatedAt`. The DB stores timestamps in microseconds; any mismatch between server time (used for expiry) and signer time (used for mint) could cause “code expired” errors after a successful assertion. | **MEDIUM** | Does the server read its own clock once per request or repeatedly? A drift between the API handler and the DB write could make the window shorter than intended. |
-
-**Suggested Mitigations**  
-1. Explicitly document that `RedeemLogin` runs `UPDATE login_sessions SET status='redeemed' WHERE id=? AND status='approved' AND code_hash=? AND code_expires_us>now();` and returns the rows-affected count. If 0 → reject.  
-2. Add a periodic cleanup (`DELETE FROM login_sessions WHERE expires_us < now();`) run by the server’s background goroutine or a cron.  
-3. Store timestamps in UTC with monotonic component (e.g., `time.Now().UTC().UnixNano()`) and log any discrepancy between server and signer times for observability.  
-
----  
-
-#### 2. Server-side login flow (API endpoints)
-
-| Step(s) referenced | Concern | Severity | Why / Open question |
-|-------------------|---------|----------|----------------------|
-| `GET /api/v1/login/options` – returns user-specific options, 404 on unknown user. | **Information leakage** – Returning 404 for unknown users is good, but the response includes `ca_max_ttl_seconds` and role names for existing users. An attacker could enumerate valid usernames. | **MEDIUM** | Does the endpoint require authentication (e.g., a session cookie after login) or is it unauthenticated? If unauthenticated, consider returning a constant-size “no-info” payload for unknown users to mitigate enumeration. |
-| `POST /api/v1/login/begin` – validates request, code_challenge, state, redirect_port, generates `login_id`. | **Port range enforcement** – The plan validates `redirect_port` ∈ [1024,65535] but does not forbid privileged ports that might be bound by a hostile local process (e.g., a malicious user-owned service on 127.0.0.1:1024). | **LOW** | Should we enforce a higher minimum (e.g., 49152-65535) to avoid colliding with well-known local services? |
-| `GET /login/{id}` – renders approval page with fingerprint, principals, TTL, JS options. | **Template injection / XSS** – All values are injected into HTML attributes (`data-assertion`, `data-options`). The plan mentions “html/template attribute escaping”, but we cannot verify the exact implementation. | **HIGH** | Are any of the injected fields derived from user-controlled data (e.g., role names, principal strings) that could contain quotes or `\x00`? If so, ensure `template.HTMLEscapeString` or `html/template`’s automatic escaping is used for every attribute value. |
-| `POST /api/v1/login/{id}/assertion` – pre-verifies WebAuthn, stores assertion, generates one-time `code`. | **Server-side pre-verification vs. signer verification** – The plan says “pre-verify” then “signer re-verifies”. If the pre-verification has a bug, the signer could still reject but the log would show an “assertion ok / code issued” step that never results in a certificate. This may be acceptable but could be confusing in audit. | **LOW** | Document clearly that the pre-verification is for UX only; the attacker cannot obtain a certificate without the signer’s final check. |
-| `POST /api/v1/login/{id}/redeem` – checks PKCE, code hash, calls `signerclient.Login`. | **PKCE implementation correctness** – The plan stores `code_challenge` (base64url) and later checks `base64url(SHA256(code_verifier)) == code_challenge` in constant time. | **MEDIUM** | Does the implementation normalize padding (some libraries output padded base64url)? A mismatch could cause false rejections. Also confirm that the `code_verifier` is never logged or persisted. |
-| All endpoints – “uniform error page” for invalid state. | **Error-message consistency** – The plan does not enumerate the exact HTTP status codes (e.g., 400 vs 404 vs 401). Inconsistent codes can be used for enumeration. | **LOW** | Align all error responses with RFC 7231 semantics and document them in the API spec. |
-
-**Suggested Mitigations**  
-* Enforce a higher minimum for the loopback port (e.g., 49152).  
-* Use a strict CSP on `login_approve.html` (the plan mentions a CSP but verify it includes `default-src 'self'` and disallows `object`, `script-src` only from the embedded JS).  
-* Add a “session-token” cookie (HttpOnly, SameSite=Strict) for the approval page to tie the browser session to the login ID, preventing CSRF.  
-* Ensure the `code_challenge` and `code_verifier` handling normalizes padding (strip `=`).  
-
----  
-
-#### 3. Browser-side JS (`app.js`)  
-
-| Step(s) referenced | Concern | Severity | Why / Open question |
-|-------------------|---------|----------|----------------------|
-| Fingerprint display, countdown, `navigator.credentials.get`, `window.location.assign` to loopback. | **Phishing window** – The page shows the fingerprint *before* invoking WebAuthn, which is the correct user-centric control. However, an attacker could clone the page, display the same fingerprint (re-use a genuine request), and then capture the assertion. The signer will still validate the request, but the attacker could obtain the certificate *if* they also control the loopback listener. | **MEDIUM** | Does the server bind the `code` to the exact `login_id` and to the stored `state`? The plan says yes, but we need to confirm that the generated `code` is **single-use** and tied to the original login ID. |
-| No `fetch` or form post to the loopback – a top-level navigation only. | **Browser policy changes** – Some browsers (Chrome) may block navigation to localhost from a cross-origin page unless `allow` is set. The plan assumes the navigation works. | **LOW** | Verify that the page includes `<meta http-equiv="origin-trial" ...>` or that the CSP does not block `navigate-to`. |
-| JS builds the `publicKey` options using `data-options` JSON. | **JSON injection** – If `data-options` contains raw JSON from the server, a malformed value could break the script and skip verification. | **LOW** | Ensure the server JSON is escaped via `template.JS` or `json.Marshal` before embedding, not concatenated manually. |
-
-**Suggested Mitigations**  
-* Include a short, signed “request-hash” token in the page metadata (e.g., hidden input) that the JS sends back with the assertion. The signer can verify that the assertion indeed belongs to the request whose fingerprint was shown.  
-* Log a warning in the server when a `code` is generated but never redeemed within the expiry window (helps detect abandoned approvals).  
-
----  
-
-#### 4. CLI implementation (`keyroster login` and helpers)  
-
-| Step(s) referenced | Concern | Severity | Why / Open question |
-|-------------------|---------|----------|----------------------|
-| Ephemeral Ed25519 key generation, in-memory only. | **Key lifetime in memory** – On platforms without a secure memory allocator (e.g., default Go heap), the private key could be swapped to disk. | **MEDIUM** | Does the code call `runtime.LockOSThread` or use a library that zeroes memory after use? |
-| Print fingerprint, TTL, role selection, schedule `code_verifier`. | **User-error surface** – If the user supplies an invalid `--role` the CLI aborts, but does it also clear the generated key from memory? | **LOW** | Ensure early exits zero the private key before returning. |
-| Loopback listener (`net.Listen("tcp","127.0.0.1:0")`) – strict Host header, constant-time state compare. | **Host-header spoofing** – The check uses string equality; however, an attacker controlling a proxy could inject a `Host: 127.0.0.1:PORT` header with a different port leading to a mismatch. | **MEDIUM** | Verify that the listener extracts the port from `r.Host` and compares to the *actual* bound port, not just the string. |
-| Windows agent path (`winagent.Ensure`) – pipe-owner check. | **Pipe-ownership race** – The check ensures the pipe is owned by the current user before writing, but there may be a TOCTOU window between the check and the write. | **MEDIUM** | The plan references the “IdentityAgent spelling” decision from 02-02; double-check that the pipe is opened with `FILE_FLAG_FIRST_PIPE_INSTANCE` to prevent hijacking. |
-| Agent add with lifetime (`LifetimeSecs`). | **Lifetime enforcement** – The SSH agent may ignore the lifetime constraint (e.g., older versions of `ssh-agent`). | **LOW** | Include a verification step after adding: list the keys and confirm that the certificate’s `ValidBefore` matches the lifetime reported by the agent. |
-| Failure messages (e.g., “start ssh-agent and retry”). | **User experience** – The CLI aborts if `SSH_AUTH_SOCK` is missing. In CI, the test harness creates a temporary agent. Ensure fallback behavior is deterministic. | **LOW** | Add a `--force-agent` flag for test harnesses that bypasses the check (useful for headless CI). |
-
-**Suggested Mitigations**  
-* Use `golang.org/x/crypto/ssh/agent`’s `Add` with `LifetimeSecs` and then immediately call `List` to confirm the entry exists with the expected expiration.  
-* Zero the private key (`memset` the slice) in a `defer` block before the function returns, even on early error paths.  
-* On Windows, open the pipe with `winio.OpenPipe` using `FILE_FLAG_FIRST_PIPE_INSTANCE` to close the TOCTOU window.  
-
----  
-
-#### 5. Tests & CI  
-
-| Step(s) referenced | Concern | Severity | Why / Open question |
-|-------------------|---------|----------|----------------------|
-| E2E `TestLoginEndToEnd` uses real OpenSSH 10.5p1, starts a fresh `ssh-agent`. | **Test flakiness** – Real sshd start-up and timing (certificate expiration) can be nondeterministic, especially on CI runners with limited CPU. | **MEDIUM** | Are timeouts generous enough? The test expects the certificate to *expire* after a short TTL; if the CI host’s clock drifts, the test could intermittently fail. |
-| Cross-OS CLI flow test (`TestLoginFlowFakeServer`) runs on macOS & Windows CI. | **Platform-specific differences** – The plan marks macOS as UNVERIFIED; the CI test may still pass if the runner’s environment differs from a user’s local macOS (e.g., missing keychain integration). | **LOW** | No immediate blocker, but highlight that the macOS path is not exercised by a *real* browser in the CI (due to headless restrictions). |
-| Refusal matrix tests require the fake signer client to “record zero calls”. | **Mock fidelity** – If the fake signer’s interface does not perfectly mirror the real signer (e.g., missing rate-limit handling), some refusal pathways may be untested. | **MEDIUM** | Ensure the fake signer implements the same `Login` signature and logs the request ID for later inspection. |
-| No test for **TLS pinning** of the server certificate (required by the CLI). | **Supply-chain / MITM risk** – If the pin is wrong or the server rotates its key (tailscale cert renewal), the CLI will reject all logins. | **MEDIUM** | The plan leaves the pinning mechanism as an “open research question”. Until resolved, the CLI should *fallback* to a warning-only mode (e.g., “server key changed – proceeding in evaluation mode”) rather than aborting the flow, otherwise operator error could lock out all users. |
-
-**Suggested Mitigations**  
-* Add a jitter-safe retry layer in the e2e test around `ssh-add -l` to tolerate slight clock skew.  
-* Document in the test harness how the TLS pin is generated (e.g., from a static SPKI) and verify it matches the server’s cert.  
-* Include a test that simulates a server cert rotation and checks that the CLI prints the evaluation-only banner (as required by D-18).  
-
----  
-
-#### 6. Documentation & Runbooks  
-
-| Step(s) referenced | Concern | Severity | Why / Open question |
-|-------------------|---------|----------|----------------------|
-| `docs/runbooks/enroll-user.md` will be updated with a “Logging in” section. | **Operator guidance** – The new section must explicitly warn about the *UNVERIFIED* macOS status, the evaluation-only banner for software CA, and the need for a real browser (not a headless script). | **LOW** | Verify the wording aligns with the security-policy (e.g., “Do not approve a login you did not start”). |
-| No explicit mention of the **code-hash cleanup** or the **background DB reaper**. | **Operational drift** – Operators may forget to run the cleanup, leading to DB bloat. | **LOW** | Add a “maintenance” note: “run `keyroster server --cleanup` daily” or embed an internal ticker that logs a warning if pending sessions exceed N. |
-
----  
-
-#### 7. Open Research Questions / Dependencies  
-
-| Item | Open question | Impact |
-|------|----------------|--------|
-| **PKCE code verifier length & encoding** – The plan uses 32 random bytes base64url (43 chars). Does the server enforce the exact length? | If the verifier is shorter/longer, constant-time compare may be bypassed. |
-| **TLS pinning strategy** – The plan cites a pending decision about whether to pin the SPKI, the whole cert chain, or a rotation-aware token. | Wrong pinning will cause all client logins to fail after a certificate renewal. |
-| **Replay protection on the signer** – The signer refusal matrix (02-03) is required but not shown here. Does the signer reject duplicate `RequestID`s across different login sessions? | Could allow a replay attack if the same `RequestID` is reused. |
-| **Windows pipe ownership** – The exact spelling (`IdentityAgent` line) is defined in 02-02. Does the CLI use the same constant? | Mismatch would cause the CLI to think the pipe is missing and abort. |
-| **MacOS verification status** – The plan labels macOS “UNVERIFIED”. Is there a mitigation (e.g., require a hardware-secured browser) for production? | Could lead to operators deploying a flow that fails on macOS users without realizing it. |
-
----  
-
-### Recommendations Summary  
-
-| Category | Action |
-|----------|--------|
-| **Atomic DB updates** | Verify `RedeemLogin` uses a single `UPDATE … WHERE status='approved' …` and returns rows-affected. |
-| **Cleanup** | Add a background job to purge `login_sessions` where `expires_us < now()`; expose a `--cleanup` flag for manual runs. |
-| **Template safety** | Ensure every attribute inserted into `login_approve.html` is escaped via `html/template`. Add a CSP header (`default-src 'self'; script-src 'self'`). |
-| **Port range** | Raise the minimum `redirect_port` to 49152 to avoid colliding with well-known local services. |
-| **PKCE handling** | Strip `=` padding from both challenge and verifier before comparison; store only the hash of the verifier. |
-| **Loopback validation** | Compare the *numeric* port from the listener (`addr.(*net.TCPAddr).Port`) with the `Host` header value after parsing; reject any mismatch. |
-| **Memory hygiene** | Zero the Ed25519 private key slice on all exit paths (including error returns). |
-| **Windows pipe** | Open the pipe with `FILE_FLAG_FIRST_PIPE_INSTANCE` and verify ownership atomically. |
-| **TLS pinning** | Until the pinning decision is final, make the CLI *warning-only* (evaluation banner) rather than fatal if the pin mismatches. |
-| **Documentation** | Add a “maintenance” paragraph about session cleanup; clearly flag macOS as UNVERIFIED and link to the future 02-14 plan. |
-| **Testing** | Add a test for DB session expiry cleanup; add a test that forces a TLS-pin mismatch and checks the evaluation banner appears. |
-| **Audit & Logging** | Ensure each successful `redeem` logs the `login_id`, `request_id`, and certificate SHA256 in the Merkle log for later verification. |
-| **Open Questions** | Resolve the listed research questions (PKCE length, TLS pinning, signer duplicate-request handling) before merging. |
-
----  
-
-#### Risk Assessment  
-
-| Threat | Likelihood (pre-merge) | Impact | Overall Risk |
-|--------|------------------------|--------|--------------|
-| **Concurrent login race causing double-redeem** | Medium (if DB transaction not atomic) | Gives an attacker two certificates for the same request (potentially with different TTL) | **High** – Must enforce atomic `RedeemLogin`. |
-| **TLS-pin mismatch after server cert rotation** | High (tailscale/ACME certs rotate) | All CLI users blocked; no fallback → loss of access | **High** – Mitigate with evaluation-only banner until pinning strategy is final. |
-| **XSS on approval page** | Low (template likely safe) | Phishing / credential theft | **Medium** – Verify escaping and CSP. |
-| **Memory leakage of private key** | Low (Go GC) | Private key written to swap | **Medium** – Add explicit zeroing. |
-| **Denial-of-service via login-session table fill** | Low (requires flood) | Service slowdown, log bloat | **Low** – Cleanup job reduces impact. |
-| **Phishing via cloned approval page** | Medium (user could be tricked) | Attacker obtains assertion, but signer still enforces policy; still possible for credential harvesting | **Medium** – Fingerprint comparison mitigates; educate users via docs. |
-
----  
-
-#### Bottom Line  
-
-The plan is **well-structured**, covers most security controls required for the Passkey-Login MVP, and includes a thorough e2e test suite. The **critical outstanding items** are:
-
-1. **Atomicity of the `RedeemLogin` transition** – confirm implementation.  
-2. **TLS pinning strategy** – decide now and make the CLI tolerant to rotation.  
-3. **Template & CSP hardening** – verify no injection vectors.  
-
-Addressing those three will bring the plan’s risk down to **Medium** overall and make it safe to merge. Once the owner has answered the open research questions and the above mitigations are in place, give the green light.  
-### 02-13 – Homelab “first enrollment” plan (Phase 2 Passkey-login-MVP)
-
-#### Summary  
-This plan bridges Phase 1’s trusted signer to Phase 2’s passkey-based login MVP by:
-
-1. **Confirming the RP hostname** (Task 1 – human checkpoint).  
-2. **Building and deploying a new signer binary**, installing a **successor bundle v3** that contains a root-signed policy with the RP fields (Task 2-step 3).  
-3. **Installing the bundle on the vTPM signer** and starting the **keyroster-server** with a TLS certificate obtained via `tailscale cert` (Task 2-step 4-5).  
-4. **Bootstrapping the owner’s account** (Task 2-step 7 → Task 3 → Task 4) through the regular invite/registration/approval flow, thereby exercising **AUTH-01** on real hardware and a real browser.  
-5. **Recording the operation** in runbooks, updating the deferred-items bookkeeping (KEY-07 v4) and the ROADMAP, and finally merging the PR through the owner-only gate (Tasks 4-5).
-
-If all automated checks and human checkpoints succeed, the homelab will have a fully operational Phase 2 stack, the first passkey-protected user account, and an auditable record of the RP-hostname binding.
-
----
-
-#### Strengths  
-
-| Area | Why it’s solid (plan references) |
-|------|-----------------------------------|
-| **Human-in-the-loop RP confirmation** | Task 1 forces the owner to read the exact FQDN from the VM, repeat it verbatim, and acknowledge the irreversible binding (checkpoint description). This eliminates accidental hostname typos and makes the one-way decision explicit. |
-| **Reproducible build & artifact hash tracking** | Task 2-step 1 builds all binaries from a clean work-tree, records the SHA-256 of each artifact, and discards the work-tree. This satisfies the supply-chain “signed releases, reproducible builds” requirement and gives a verifiable provenance trail. |
-| **Back-up & rollback path for the signer** | Steps 2-3-4 create a full copy of `/var/lib/keyroster-signer` and keep the pre-upgrade binaries (`.pre-02-13`). The “restore” instructions are explicit, limiting risk of a broken upgrade (see Threat T-02-68). |
-| **Policy successor verification** | The plan runs `keyroster trust verify` **after** the bundle is signed (Task 2-step 3-g) and asserts the SHA-256 equality of the produced bundle, the policy, and the recorded pins. This gives confidence that the RP fields are exactly what the owner approved. |
-| **TLS via Tailscale cert + auto-renew timer** | Steps 5-1–5-4 install `keyroster-tailscale-cert.service` and timer, then test the health endpoint over the tailnet (`curl -sf https://<FQDN>/healthz`). This keeps the server’s cert up-to-date without any outbound network code, satisfying D-10/D-11. |
-| **Full-stack end-to-end enrollment** | Tasks 3 and 4 exercise the exact flow that a production user will see: invite URL, WebAuthn registration in a real browser, fingerprint display, admin approval with SSH-agent signing, role creation, host-group mapping, audit-log verification. This directly validates AUTH-01, UI-01 and PLAT-05. |
-| **Audit-log anchoring & KEY-07 bookkeeping** | Task 4-step 2 runs `keyroster audit verify` anchored on bundle v3 and updates the deferred-items file, ensuring the offline-ceremony renumbering (v4) is recorded and visible to future contributors. |
-| **Strict prohibitions on host-name leakage** | Multiple verification steps (grep-based diff checks) guard against committing the full FQDN, any other tailnet name, or IP addresses beyond `127.0.0.1`. This enforces the policy in the “prohibitions” section. |
-
----
-
-#### Concerns  
-
-| Level | Concern (plan step) | Why it matters / open question |
-|-------|-----------------------|--------------------------------|
-| **HIGH** | **Task 2-step 3 – `root successor-policy` command** | The plan trusts that the CLI will add **only** the three fields (`version`, `prev`, `webauthn`) and will *not* inadvertently modify other policy sections (e.g., admin-key list, CA profiles). **Open question:** *Has the `root successor-policy` implementation been fuzz-tested for accidental field mutation when a new schema element is added?* |
-| **HIGH** | **Task 2-step 5 – TLS pin validation on the Windows CLI** | The owner must supply `--tls-pin` matching the server’s leaf certificate SPKI. The plan assumes the Windows OpenSSH agent can import a pin for a non-CA cert (`openssl x509 -pubkey`). **Open question:** *Will the pin verification succeed on all supported Windows versions (including older 1909 builds) or will a subtle mismatch cause the CLI to reject a perfectly valid connection?* |
-| **HIGH** | **Task 4-step 1 – `user approve` fingerprint matching** | The plan relies on the fingerprint printed by the web UI and the one returned by `keyroster user pending`. If the UI or CLI formats the fingerprint differently (e.g., `SHA256:` vs raw base64) a mismatch could cause a false-negative approval. **Open question:** *Is the fingerprint display canonicalised (same base64, same line-break handling) across browser JS and Go CLI?* |
-| **MEDIUM** | **Task 2-step 4 – Bundle install without explicit pin checks** | The `install-bundle` command is invoked without passing root pins (`--pin`). The plan counts on the signer’s own verification (already run earlier). However, if an attacker tampers with the bundle after `trust verify` but before `install-bundle`, the signer would accept it (the signer trusts only the bundle file). **Open question:** *Does the signer re-verify the bundle’s signature on install, or is it assumed safe because the bundle file is copied over a trusted channel (scp)?* |
-| **MEDIUM** | **Task 2-step 5 – Timer-based cert renewal race** | The `keyroster-tailscale-cert.timer` renews the cert every 24 h. If the timer restarts a few seconds after a certificate expires, the server could briefly present an expired cert, causing CLI health checks to fail. **Open question:** *Is there a grace-period handling in the service that reloads the cert only after a successful `tailscale cert` call?* |
-| **MEDIUM** | **Task 4-step 2 – Audit verification counting directory installs** | The audit verification expects **exactly** 4 directory install entries (approve, role, grant, host-group). If any extra “metadata” change (e.g., timestamp update, comment field) is logged, the count could differ, breaking the automated check. **Open question:** *Does the audit log count *only* leaf types `DirectoryInstall` or does it also count ancillary leaves such as `PolicyUpdate`?* |
-| **LOW** | **Dependency-firewall impact of `go-winio` (CLI) and `go-webauthn` (server)** | The plan adds two new modules (Task 2). The firewall script must be updated, but the plan does not list a specific step to run `scripts/dep-firewall.sh` after the additions. **Open question:** *Has the CI already been configured to fail if a new import appears in the signer’s dependency graph?* |
-| **LOW** | **Task 5 – Merge-gate automation** | The check `scripts/merge-gate.sh --check` is used, but the plan does not state that the script validates the “no-hostname-leak” grep constraints again after PR merge. **Open question:** *Is the post-merge gate re-run automatically by a required GitHub Action, or does it rely on the owner manually re-executing the script?* |
-
----
-
-#### Suggestions  
-
-| Area | Recommendation |
-|------|----------------|
-| **Policy successor CLI** | Add an explicit `--dry-run` flag (already used) that **outputs a diff** of the new policy vs the old one, and require the operator to confirm that only the three expected fields changed before proceeding to signing. |
-| **TLS pin handling on Windows** | Include a small helper script in the repo (e.g., `scripts/extract-tls-pin.go`) that prints the SPKI SHA-256 for any given hostname, and document its use in the runbook. This removes platform-specific ambiguity. |
-| **Fingerprint canonicalisation** | Enforce a single fingerprint format (e.g., `SHA256:<base64>` without spaces) in both the UI JS and the CLI, and add a unit test that parses the UI-generated string and compares it to the CLI output. |
-| **Install-bundle verification** | Tighten the install step to call `keyroster signer verify-bundle` internally before applying it, or pipe the bundle through `trust verify` again as a safety net. |
-| **Cert renewal graceful reload** | Ensure `keyroster-tailscale-cert.service` runs `systemctl reload keyroster-server.service` *only after* a successful `tailscale cert` and a successful `openssl x509 -checkend`. Add a small “fallback-expire-timer” that logs a warning if the cert is within 30 s of expiry. |
-| **Audit-log expectations** | Make the audit verification script accept a *range* of leaf counts (e.g., “≥ 4 and ≤ 6”) and output the actual count, to avoid fragile failures when extra metadata leaves are added later. |
-| **Dependency firewall** | Add a post-build CI step that runs `scripts/dep-firewall.sh` and fails if new imports appear in the signer's `go.mod`. Document this step in the runbooks so future contributors know it is required. |
-| **Merge-gate re-run** | Add a required status check (GitHub Action) that runs `scripts/merge-gate.sh --check` on every PR push, ensuring the gate is enforced automatically and not reliant on manual re-execution. |
-
----
-
-#### Risk Assessment  
-
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| **Irreversible RP-hostname binding** (T-02-65) | Medium (human mistake) | High (all enrolled passkeys become unusable if the RP changes) | Controlled by Task 1 checkpoint, explicit owner confirmation, and documentation of consequences. |
-| **Bundle tampering between verify & install** (T-02-68) | Low (scp over trusted LAN) | Medium (signer could be compromised) | Re-verify on install, keep backup of previous bundle, and keep the signer binary read-only. |
-| **TLS-pin mismatch on Windows** (T-02-66) | Medium (different OS cert stores) | Medium (client cannot connect) | Provide the extraction helper, test on each Windows version in CI, and log mismatches clearly. |
-| **Fingerprint mismatch causing admin approval error** (T-02-67) | Low (format differences) | Medium (admin may reject a correct credential) | Canonicalise fingerprint format, add unit test, and display the same string verbatim in both UI and CLI. |
-| **Timer-based cert expiry window** (T-02-65) | Low (timer runs hourly) | Low (temporary health-check failures) | Add reload-on-success logic and log warnings; optionally configure a 5-minute overlap. |
-| **Dependency-firewall breach** (T-02-SC) | Low (process already in place) | Low (extra attack surface) | CI step added (see suggestion). |
-
-Overall, the plan’s **high-impact risk** (RP binding) is well-controlled by the explicit human checkpoint. All other risks are either mitigated by the plan’s existing steps or can be lowered further with the suggested hardening actions.
+###### Risk Assessment  
+
+| Level | Justification |
+|-------|---------------|
+| **MEDIUM** | The plan introduces a **new Windows‑only component** that handles private keys and interacts with the system‑provided OpenSSH client. The design mitigates the principal threats (pipe ownership, lifetime enforcement, fallback avoidance) with explicit verification and comprehensive tests. However, **race conditions** when multiple CLI instances start the agent and **edge‑case failures** (elevated token, orphaned pipe) remain partially unaddressed, and the CI pipeline can be fragile if the inbox OpenSSH client is absent. These open points raise the risk from *low* (given the overall small attack surface) to *medium* until the suggested mitigations are added. |
 
 --- 
 
-**Bottom line:** The plan is a coherent, auditable path to achieve the Phase 2 MVP on the homelab. The primary security guarantees (RP-hostname binding, policy successor integrity, end-to-end passkey enrollment) are addressed, but a few **high-level open questions** (policy-field mutation safety, TLS pin handling on Windows, fingerprint canonicalisation) should be answered before the checkout proceeds. Incorporating the lightweight mitigations listed above will close those gaps and make the merge gate substantially safer.
-### 02-14 – Homelab Logins (Phase 2 Passkey Login MVP)  
+**Bottom line:** the plan is **well‑aligned with the Phase 2 goals** and the project’s security‑first, simplicity‑first philosophy. Implementing the suggested back‑off, improving error guidance, and adding the extra cleanup test will bring the remaining medium‑risk items down to low, yielding a solid, auditable Windows agent implementation.
+### 02-03
 
-#### TL;DR  
-The plan walks through a full end-to-end dog-food of the MVP:  
+##### 02-03 – Signer Boundary
 
-1. **Prepare the host** – render CA-key / principals, install a single `sshd_config.d/50-keyroster.conf` drop-in and verify that existing key-based logins still work.  
-2. **User-side flow** – the owner registers a passkey (Web UI), runs `keyroster login` on Windows and on Linux, confirms the fingerprint displayed in the CLI and in the browser, and obtains a short-lived certificate that lives only in the host-specific agent (named-pipe on Windows, `ssh-agent` or GCR on Linux).  
-3. **Corroboration** – audit-log export + `keyroster audit verify` and the host’s `journalctl` entries are matched to the certificates that were used.  
-4. **Documentation & governance** – update the platform-verification table, the host-setup and enrol-user runbooks, add the two new required-status-check contexts (`cli-windows`, `cli-macos`) to `.github/rulesets/main-integrity.json`, push a PR, and run it through the merge-gate.  
-
-Overall the plan is **well-structured** and follows the delivery protocol (branch naming, summary file, PR title, auto-merge).  The logic that ties the three independent evidences together (audit log, sshd journal, CLI output) satisfies the success criteria and the “no-unexercised-paths” rule.
-
-Below are the **specific strengths**, **concerns**, **open questions**, and **actionable suggestions**.  All concerns are tied to concrete steps in the plan, and anything that depends on the current repository state is phrased as an open question.
+###### Summary
+The plan expands the signer’s public API and hardens its request handling. It introduces a new **GetDirectory** request/response, a dedicated **LoginIssueRequest** type, per‑message‑type frame caps, a full refusal‑matrix for login issuance, concurrency and restart guarantees, and fuzz targets for every new parser. The intended outcome is that **KEY‑02** (“the signer only issues when the request carries evidence it verifies itself”) is provably enforced, and that the server can mirror the exact directory held by the signer. The work is well‑scoped, follows the “server proposes, signer disposes” invariant, and is covered by end‑to‑end e2e tests, unit tests, and fuzzing.
 
 ---
 
-#### Strengths  
+###### Strengths
 
-| What | Why it matters |
+| Area | Why it’s strong (with file evidence) |
+|------|--------------------------------------|
+| **API extension** | *GetDirectory* is added as `wire.TypeGetDirectory` (`internal/wire/frame.go`) and handled in `signer/server.go` (dispatch switch). The response struct (`GetDirectoryResponse`) includes version, directory bytes, signatures, and an *authorized* flag – exactly what the server needs to mirror the signer state (see `internal/wire/directory.go`). |
+| **Separate login message** | A new domain tag `keyroster/login-request/v1` and wire type `LoginIssueRequest` (`internal/wire/frame.go` + `internal/wire/login.go`) keep the existing admin `IssueRequest` untouched, preserving the audit‑log format and avoiding policy‑breakage. |
+| **Refusal matrix** | Test suite `test/e2e/login_refusal_test.go` defines six sub‑tests, each asserting a concrete `*wire.ErrorResponse` detail (e.g., `missing_evidence`, `duplicate_request`, `challenge_mismatch`, `directory_not_installed`, `no_webauthn_policy`, `unknown_evidence_type`). The same code path is exercised through the real Unix socket, guaranteeing the signer’s boundary checks run in production. |
+| **Directory signing & quorum** | `internal/directory` implements canonical JSON, version chaining, and quorum verification (`trust.CountPinnedSigners`). The signer’s `InstallDirectory` handler checks `admin_quorum` against the root‑signed policy, rejecting with `directory_quorum_not_met`. The restart logic (`signer.New` → `logstate` → `loadDirectory`) verifies that the stored directory matches the last `directory_install` leaf, preventing silent DB tampering (see `internal/signer/logstate.go`). |
+| **Concurrency guarantees** | Tests in `internal/signer/login_test.go` spin up 16 goroutines sending identical `LoginIssueRequest` bytes and verify a single certificate, 15 `duplicate_request` refusals. Similar concurrent install tests are in `directory_test.go`. The signer serialises state under `s.mu`, and the `RequestID` uniqueness check is performed inside the same transaction, satisfying the race‑detector (`go test -race`). |
+| **Per‑type frame caps** | `wire.MaxDirectory = 1 << 20` and `wire.MaxDirectoryFrame = MaxDirectory + 64<<10 + 64` are introduced, with a private helper `maxBodyFor(msgType)` that returns the appropriate body limit (issue/login → `MaxFrame‑2`, directory → `MaxDirectoryFrame‑2`). `ReadMessage` validates `n` ≥ 2, returns `ErrShortFrame` for a length‑1 frame **before** any allocation, and refuses oversized frames with `ErrFrameTooLarge`. Corresponding write‑side checks (`WriteMessage`) are added. |
+| **Fuzz coverage** | New fuzz targets (`FuzzParseLoginIssueRequest`, `FuzzParseWebAuthnAssertion`, `FuzzParseInstallDirectory`, `FuzzParseGetDirectoryResponse`, `FuzzReadMessage`, plus verifier targets in `internal/webauthn`) ensure every new parser is exercised with malformed inputs. The plan also adds seeds for extra‑member client‑data JSON (`client_data_extra_members_accepted`). |
+| **Leaf‑level audit** | Refusal leaves now carry the request digest (`login_refusal_leaf_carries_digest` in `internal/signer/login_test.go`) and directory SHA‑256 (`install_refusal_leaf_carries_digest` in `directory_test.go`). This aligns with the log‑integrity guarantees required for full visibility. |
+| **Policy‑RP binding** | The signer refuses login when the policy has no `WebAuthn` section (`no_webauthn_policy`). A dedicated e2e sub‑test validates that an RP‑less policy blocks issuance, and a policy successor that adds the RP (signed by the same root) restores login. |
+| **Documentation & CI** | The plan specifies exact CI steps (e2e, race, fuzz, lint, capslock, dep‑firewall). The required `02-03‑SUMMARY.md` will capture PR number, refusal‑to‑class table, fuzz list, and memory bound, providing traceability. |
+
+---
+
+###### Concerns
+
+| # | Concern | Severity | Explanation & Evidence |
+|---|----------|----------|------------------------|
+| 1 | **GetDirectory response validation** – the spec requires that a version‑0 response must have *exactly* `Directory == nil`, `Sigs == nil`, and `Authorized == false`. The current `ParseGetDirectoryResponse` must reject any non‑empty fields for version 0, otherwise an attacker could force the server to believe a directory is present when none is installed. The plan mentions “refused” but concrete test coverage (`TestParseGetDirectoryResponse`) is only sketched. **Risk:** a malformed version‑0 response could be interpreted as a legitimate empty directory, weakening the “directory not installed” guarantee. |
+| 2 | **Directory‑install leaf consistency** – `loadDirectory` checks that the stored directory bytes equal the last `directory_install` leaf. However, the code path that writes the leaf (`logstate.appendLeaf`) must include the directory **and** the signatures. If a future change adds extra metadata to the leaf (e.g., a new field) without updating the consistency check, the signer could start with a mismatched state. The plan does not explicitly lock the leaf format version. **Risk:** silent divergence between DB and log on later schema changes. |
+| 3 | **Per‑type frame caps – magic numbers** – `MaxDirectoryFrame = MaxDirectory + 64<<10 + 64` is derived from “64 KiB + 64 bytes” overhead. This is correct for the current frame header (2 bytes) plus a 4‑byte length field, but if any future wire type adds extra framing (e.g., a future status message with a version field), the cap will be off by a few bytes, potentially causing a denial‑of‑service or allowing an allocation bigger than intended. **Risk:** future‑proofness of caps is fragile. |
+| 4 | **PKCE & state handling in login flow** – the plan’s login‑refusal suite creates a “code” and “code_verifier”, but the implementation details of the PKCE verification (`SHA256(code_verifier) == code_challenge`) are not explicitly verified in the test code. If the server mistakenly checks the *raw* verifier rather than the hash, an attacker could replay a captured code. **Risk:** subtle PKCE bug could undermine phishing resistance. |
+| 5 | **WebAuthn algorithm set** – the signer verifier (`internal/webauthn/verify.go`) accepts ES256, EdDSA, and RS256. Windows Hello may also produce `PS256` signatures in some configurations. The plan explicitly *refuses* other algorithms, which is correct for security but may cause legitimate Windows clients to be denied without a clear error path. The test suite only covers the three algorithms; there is no negative‑algorithm test confirming the refusal detail is meaningful. **Risk:** user‑experience regression on Windows, potential support tickets. |
+| 6 | **Error‑detail consistency** – many refusal cases share the same sentinel (`ReasonUnauthorized`) but have different *Detail* strings (e.g., `user_verification_missing`, `origin_mismatch`). The plan does not verify that the *Detail* string is stable across releases (e.g., no renaming). If a future refactor changes a constant name, previously stored log leaves will no longer parse correctly. **Risk:** log‑verification tooling may break. |
+| 7 | **Directory quorum enforcement when admin set changes** – after a policy successor changes the admin set, the signer logs `directory_not_authorized` but still allows **admin** issue requests (which use SSHSIG). This is intentional, but there is no explicit test that an **admin** request still works when the directory is unauthorized. If the admin verification path mistakenly re‑uses the same directory‑validation routine as the login path, login‑only refusal could mistakenly block admin operations. **Risk:** accidental admin lock‑out. |
+| 8 | **Replay protection window** – the signer allows a `CreatedAt` skew of ±300 s. The login refusal test does not explore the edge of this window (e.g., a request created 301 s in the past). While the policy already defines a `maxClockSkew`, an attacker with a compromised server could replay an old request within the window. The plan does not include a dedicated test for the boundary condition. **Risk:** subtle replay could slip through if clocks drift. |
+| 9 | **Failure mode when the signer cannot read the directory snapshot** – if the SQLite DB is corrupted such that the directory row cannot be unmarshaled, `loadDirectory` returns an error and the signer aborts start‑up. The plan does not specify a graceful degradation (e.g., start in “read‑only” mode and refuse all logins). This could cause a DoS if the DB is corrupted by a non‑malicious power failure. **Risk:** availability. |
+| 10 | **Testing of the *GetDirectory* round‑trip** – the plan adds `TestParseGetDirectoryResponse` but does not include a full integration test that the **server** actually returns the expected response over the real socket (`signerclient.GetDirectory`). Without that, the server‑client contract could diverge (e.g., mismatched TLV ordering). **Risk:** hidden bug in the client stub. |
+
+---
+
+###### Suggestions
+
+| # | Recommendation |
+|---|----------------|
+| 1 | **Add explicit unit tests** for `ParseGetDirectoryResponse` covering all illegal version‑0 payloads (`Directory != nil`, `Sigs != nil`, `Authorized == true`). Use a table‑driven test that asserts the exact error (`ErrInvalidGetDirectory`). |
+| 2 | **Freeze the leaf format** for `directory_install` by adding a version byte to the leaf payload (e.g., `leafVersion = 0x01`). Update `logstate.appendLeaf` and the verification code to reject mismatched versions. This makes future schema changes safe. |
+| 3 | **Wrap per‑type caps** behind a small utility (`frameCap(msgType)`) that derives the cap from a map. Add a comment warning that any new wire type must also add an entry, and consider a compile‑time check (`go:generate` generating a list of expected caps). |
+| 4 | **PKCE verification test** – create a dedicated test that sends an invalid `code_verifier` (wrong hash) and asserts `invalid_code` refusal. Include a comment explaining the exact hash flow. |
+| 5 | **Reject unsupported algorithms with a clear detail** – create a test case that feeds a PS256 signature and expects `unsupported_algorithm`. Document the error string so it can be part of the refusal‑matrix table. |
+| 6 | **Stabilise error‑detail constants** – define all refusal details as `const` strings in a single `internal/signer/refusal.go` file, and expose them via `refusal.Detail*`. Add a test that marshals a leaf, unmarshals it, and asserts the detail round‑trips unchanged. |
+| 7 | **Admin‑path sanity test** – add a unit test that installs a directory signed by the old admin set, installs a successor policy with a *different* admin set, and then issues an *admin* `IssueRequest` (admin‑sshsig). Verify it succeeds while a login request fails with `directory_not_authorized`. |
+| 8 | **Clock‑skew edge test** – generate a login request with `CreatedAt = now - 301s` and assert `request_time_skew` refusal. This validates the boundary of the skew window. |
+| 9 | **Graceful degradation on DB corruption** – modify `signer.New` to detect directory load failure and start in a “locked” mode where all login requests are refused with a distinct `signer_unavailable` detail, while admin requests still work. Add a test that injects a corrupted directory row and expects the signer to start without panic. |
+|10| **End‑to‑end GetDirectory test** – add a test that the server (started via `signer.New` + `signer.Start`) receives a `GetDirectory` request from `signerclient.GetDirectory` and returns the exact bytes that were installed. Verify the `Authorized` flag matches the live directory’s quorum status. |
+
+---
+
+###### Risk Assessment
+
+| Level | Rationale |
+|-------|-----------|
+| **MEDIUM** | The plan substantially raises the signer’s security posture: all login paths are now verified against verifiable evidence, policy‑bound RP IDs, and quorum‑signed directories. The refusal matrix and concurrency guarantees are well covered. However, the concerns above—especially around GetDirectory parsing, future‑proofing of frame caps, PKCE verification, and graceful degradation on DB corruption—represent realistic attack or availability surfaces that are not yet fully covered by tests. Once the suggested mitigations are added, the risk can be lowered to **LOW**. |
+
+---
+
+###### Closing Remarks
+
+Overall, the 02‑03 plan is thorough, respects the “server proposes, signer disposes” principle, and delivers the required **KEY‑02** guarantees. The added API (`GetDirectory`), the distinct login request type, and the per‑type frame caps are solid design choices that keep the binary’s attack surface small and clearly bounded. Addressing the enumerated concerns (especially the explicit GetDirectory validation, robust leaf versioning, and graceful‑degradation handling) will close the remaining medium‑risk gaps and make the signer boundary truly production‑ready.
+### 02-04
+
+##### 02-04 – Phase 2 Passkey‑Login MVP – “Audit login certificates & RP‑successor tool”
+
+###### Summary
+Plan 02‑04 adds the **`keyroster root successor‑policy`** command for inserting a WebAuthn RP into an already‑deployed policy, extends the **audit verifier** to prove that every `login_issue` leaf is cryptographically bound to a user‑owned passkey and that a `directory_install` leaf is quorum‑signed under the current policy, and introduces a comprehensive tamper‑suite, documentation, and CI checks. The work is well‑aligned with the phase’s success criteria (full visibility, proof of passkey‑based issuance) and respects the project’s security‑first, simplicity, and “no new attack surface” constraints.
+
+###### Strengths
+| Area | Positive aspects (with concrete code references) |
+|------|-------------------------------------------------|
+| **Policy‑successor tooling** | *`cmd/keyroster/root.go`* is extended with a new switch case (`successor‑policy`) that **(a)** parses `--prev` with `trust.ParsePolicy` (ensuring canonical JSON), **(b)** copies the policy, increments `Version`, sets `Prev` to `SHA256(prev)`, and **(c)** validates the RP (`rp_id` must be a DNS hostname, no IP, not a public‑suffix tailnet) before writing the result (`--out` must not exist). The warning about RP being “one‑way” is printed to `stderr`. This satisfies the checkpoint that the RP cannot be changed without re‑enrollment (see D‑09). |
+| **Audit‑verify extensions** | *`internal/audit/verify.go`* now contains explicit `case tlog.KindDirectoryInstall` and `case tlog.KindLoginIssue` branches that call `verifyDirectoryInstall` and `verifyLoginIssue`. The default case remains but is marked **UNVERIFIED** and documented as a guard for future leaf kinds, preserving the fail‑closed posture. |
+| **Verification logic** | `verifyDirectoryInstall` (new) parses the `DirectoryInstallBody`, checks the successor link (`Prev` hash), validates quorum signatures against the policy in force, and ensures the policy version matches the loaded policy. `verifyLoginIssue` (new) re‑parses the login request bytes (`wire.ParseLoginIssueSigningBytes`), checks that the `DirectoryVersion`/`PolicyVersion` match the current in‑memory objects, validates the WebAuthn assertion via `internal/webauthn.VerifyAssertion`, recomputes the principal set from the installed directory, enforces TTL caps, and confirms the certificate fields (KeyID format `kr2`, matching `SubjectKey`, principals, validity). All checks return errors of the form `entry <idx> (login_issue): <check>` matching the required audit output. |
+| **Serial ordering across issue types** | The walk now tracks a **single serial counter** that is incremented for both `KindIssue` (admin issuance) and `KindLoginIssue`. The new variable `loginSeen` ensures that a login leaf must have a serial greater than any prior leaf (including other login leaves). The tamper tests `login_serial_not_above_issue` and `issue_serial_not_above_login` exercise this rule. |
+| **Tamper‑suite & regression testing** | `internal/audit/verify_test.go` is updated with the converted “unproven‑refused” cases (`directory_install_unproven_refused`, `login_issue_unproven_refused`) that still hit the default refusal path, confirming that the interim refusal is *replaced* by real checks. New tests (`TestAuditLoginAcrossPolicyChange`, `login_directory_survives_rp_policy_change`, and a full set of tamper sub‑tests) guarantee coverage of every new verification branch. |
+| **Documentation & runbook** | `docs/runbooks/root-ceremony.md` receives a new “Change the policy: successor policy (for example, add the WebAuthn RP)” section that lists the exact CLI steps, the one‑way warning, and a compatibility note about older audit‑verify binaries. This satisfies the required operator guidance and mitigates the “policy change can’t be undone” risk. |
+| **CI / gating** | The plan adds the new files to the CI matrix (`scripts/linux.sh … go test -tags e2e …`). The merge‑gate task (`Task 3`) enforces owner approval before squashing. This respects the repository’s protected‑branch workflow. |
+| **Dependency hygiene** | The new `internal/webauthn` package uses only the stdlib (`crypto/sha256`, `crypto/ed25519`, `crypto/ecdsa`, `crypto/rsa`, `encoding/json` token parsing). It is excluded from the signer’s dependency firewall (the firewall is invoked in the CI). The server‑only `go‑webauthn` remains unchanged, staying outside the signer graph. This preserves the “signer‑only” attack surface. |
+
+###### Concerns
+| Severity | Issue & Impact | Evidence / Reasoning |
+|----------|----------------|----------------------|
+| **HIGH** | **Incorrect RP validation could allow an attacker to set an IP address or a public‑suffix tailnet name**. The plan checks that `rp_id` is a DNS hostname and not an IP (via `net.ParseIP == nil`) and rejects public‑suffixes (by checking `publicsuffix.EffectiveTLDPlusOne`). However the concrete implementation of the public‑suffix check is not described. If omitted, an operator could accidentally set `rp_id = <tailnet>.ts.net`, which would make every credential usable on any machine in that tailnet, violating the “one‑way” guarantee. | Ensure `internal/trust/policy.go` (or the new successor‑policy code) imports `golang.org/x/net/publicsuffix` and validates `!publicsuffix.IsPublicSuffix(rpID)`. Add a unit test for rejection of a public‑suffix RP. |
+| **HIGH** | **`verifyLoginIssue` must re‑verify the *directory* signature against the *policy* *for every login leaf*.** The plan caches the verification result after a `directory_install` or a `bundle_install` to avoid O(N²) work. However the cache key is only `(directoryVersion, policyVersion)`. If a policy change invalidates a previously‑installed directory (e.g., tightening admin quorum), the cache could incorrectly reuse an old “valid” result. The walk must invalidate the cache when the *policy* changes **even if the directory version stays the same**. | The plan states “the walk keeps one cached result for the current (directory, policy) pair… re‑checked after each bundle_install entry”. Verify that `verify.go` actually resets the cache on any `bundle_install` (policy change) regardless of directory version. Add a test where a directory is installed under a policy with quorum = 1, then the policy is rotated to quorum = 2 (no directory change). A subsequent login under that directory should be rejected because the directory is no longer authorized. |
+| **MEDIUM** | **Serial ordering across login and admin issue leaves may still be broken if the signer’s start‑up check only counts `KindIssue`.** The audit verifier now enforces a combined monotonically‑increasing serial, but the signer’s start‑up check (`T‑02‑116`) still only looks at `KindIssue`. A compromised signer could therefore emit a log where a login leaf has a lower serial than a preceding admin issue leaf, and the audit verifier would reject it, but an operator might not notice the discrepancy until audit time. The mismatch is harmless for security (audit will catch it) but could cause confusion in operations. | Consider extending the signer’s start‑up check (or at least the verification message) to include `KindLoginIssue`. Document the new invariant in `docs/runbooks/signer‑install.md`. |
+| **MEDIUM** | **`keyroster root successor‑policy` does not enforce that *only* the RP fields are changed.** The plan says “policy fields other than RP are not editable here”, but the code copies the entire policy struct and then overwrites `WebAuthn`. If the input file (`--prev`) is itself already mutated (e.g., an operator manually edits it before running the command), the command would blindly copy those mutations. There is a risk of accidental policy drift. | Add a sanity check after parsing the *previous* policy: compare all fields except `WebAuthn` to the *current* in‑force policy (loaded from the bundle directory). If any differ, abort with a clear error: “policy fields other than WebAuthn may not be changed with successor‑policy”. Unit test should cover a mismatched `AdminQuorum` case. |
+| **LOW** | **Error messages on the CLI are not fully specified.** The plan mentions a “loud warning” on stderr. It would be beneficial to standardise the phrasing (e.g., “WARNING: rp_id is a one‑way setting …”) and to ensure it is also emitted by the server UI (banner) and the CLI when the signer reports software‑key custody. Consistency prevents operators from missing the warning. | Add a constant `rpChangeWarning = "WARNING: rp_id is a one‑way setting …"` and reuse it in both `root.go` and the UI banner code. |
+| **LOW** | **`internal/audit/verify.go` default case remains labelled UNVERIFIED but could be reached by a future leaf kind if a developer forgets to add a case.** The comment clarifies the intent, but a static analysis rule (e.g., `switch` with a `default` that logs `UNVERIFIED`) could be added to CI to catch accidental omission. | Add an entry in `scripts/dep-firewall.sh` or a linter rule that flags any new `tlog.KindX` constant without a matching case in `verify.go`. |
+
+###### Suggestions (improvements)
+1. **Public‑suffix validation for RP** – Implement the check in the successor‑policy command (`if publicsuffix.PublicSuffix(rpID) != "" { reject }`). Add unit tests for allowed (`example.com`) and disallowed (`ts.net`, `127.0.0.1`).  
+2. **Cache invalidation on policy change** – In `verify.go`, when handling a `bundle_install` (policy version bump) reset the cached `(dir, policy)` verification result, even if the directory version is unchanged. Document this invariant.  
+3. **Start‑up serial check** – Extend the signer’s start‑up sanity check (currently in `internal/signer/startup.go`) to include `KindLoginIssue` so that the log’s serial monotonicity is guaranteed at load time.  
+4. **Strict write‑once for successor‑policy** – After `--out` is written, set the file mode to `0600` and verify that the written bytes are exactly the canonical JSON output (no extra newline). This prevents an operator from later editing the file without re‑signing.  
+5. **Unified warning handling** – Extract the RP‑change warning string into a package‑level constant (`rpChangeWarning`) and reference it from both the CLI (`root.go`), the server UI banner, and the documentation generation script.  
+6. **Test for “no‑op” RP change** – Add a unit test that invokes `keyroster root successor‑policy` with an RP identical to the current one and expects exit code 1 with the error “no change – RP already set”. This guards against silent no‑op runs.  
+7. **Documentation of audit‑verify compatibility** – In `docs/runbooks/root‑ceremony.md` include a table of audit‑verify binary versions vs. acceptable log kinds, making the migration path explicit for operators who still run older binaries.  
+
+###### Risk Assessment
+| Level | Justification |
+|-------|---------------|
+| **HIGH** | The core value of the project (“full visibility”) hinges on the audit verifier’s ability to *prove* that every short‑lived certificate was issued by a user‑owned passkey. The plan introduces the necessary verification steps, but any slip in RP validation or in the directory‑policy quorum check could let a compromised signer or server issue certificates that the audit cannot later refute, breaking the primary security guarantee. |
+| **Mitigations** | – RP validation (public‑suffix + IP reject) – explicit checks in the successor‑policy command.<br>– Directory quorum verification – enforced by `verifyDirectoryInstall` and the cached signature check.<br>– Serial monotonicity – checked in both audit‑verify and (recommended) signer start‑up. |
+| **Overall** | **HIGH** – The plan correctly addresses the missing security guarantees, but the high impact of a faulty implementation (especially RP handling) warrants careful code review, additional unit tests, and CI linting of the new switch cases. Once the above suggestions are applied, the risk can be reduced to **MEDIUM**. |
+
+---
+
+**Bottom‑line:** Plan 02‑04 is a solid, security‑focused step that completes the visibility promise for Phase 2 by making every login certificate provably authorized. With the modest additions suggested (stronger RP validation, cache invalidation on any policy change, start‑up serial checks, and tighter CLI warnings), the implementation will be robust against the remaining high‑impact threats. The CI/merge‑gate workflow and documentation updates are on point and will help operators use the new functionality safely.
+### 02-05
+
+#### Review of Plan **02-05** – “Software‑key (KEY‑06) implementation”
+
+##### 1. Summary  
+
+Plan 02‑05 introduces a **software‑only CA keystore** (`internal/keystore/software`) that stores the five role‑keys encrypted with age, adds a **Status** wire message that reports key custody, and enforces an **evaluation‑only banner** on every CLI and UI interaction when any key has `software` custody.  The plan also strengthens the signer’s install path by refusing bundle installs that would overflow the new status‑frame budget, and adds an extensive test matrix (passphrase handling, directory safety, status‑frame caps, install‑budget checks, and end‑to‑end verification).  Overall the design is coherent, respects the security‑first and simplicity constraints, and provides concrete, auditable evidence that the software‑key mode is clearly marked as “evaluation only”.
+
+---
+
+##### 2. Strengths  
+
+| Area | Strength |
+|------|----------|
+| **Clear separation of custody** | Custody is reported **only** by the signer (`Signer.Status`) and never inferred from server or CLI config, satisfying D‑18. The `SoftwareCABanner` constant is the single source for the warning (see `internal/custodytext/custodytext.go`). |
+| **Minimal signer surface** | The software backend lives in `internal/keystore/software`, which is **not imported** by the signer (verified by the `go list -deps ./cmd/keyroster-signer | grep -c custodytext` check). This respects the “signer‑only” dependency firewall. |
+| **Robust provisioning** | Provision mirrors the TPM backend (see `internal/keystore/tpm/provision.go` lines ≈ 270‑300). It performs **all‑or‑nothing** writes, directory permission checks (`checkPrivateDir`), symlink rejection, and final `fsync` of both the key directory and state directory via the `syncDir` hook. |
+| **Passphrase hygiene** | Passphrase is read only from a **file with mode 0600** or from `CREDENTIALS_DIRECTORY`. The helper `readPassphrase` clears the byte slice on every return (`defer clear(pass)`), matching the requirement that secrets are not left in memory. |
+| **Explicit status frame budgeting** | A new `wire.MaxStatusFrame` (256 KiB) and `statusResponse` encoder are shared by `Signer.Status` and `InstallBundle`. Install is aborted **before any DB writes** if the would‑be status exceeds the budget, eliminating the “install‑then‑status‑fail” denial‑of‑service path (see `internal/signer/trust.go` around line ≈ 220). |
+| **Comprehensive test coverage** | - Backend edge cases (passphrase length, file permissions, symlink, cleanup on failure).<br>- Status encoding/decoding and frame‑size limits (`internal/wire/status_test.go`).<br>- Install‑budget overflow (`TestInstallBundleRefusals`).<br>- End‑to‑end (`TestSoftwareCAEndToEnd`). |
+| **Capslock & dep‑firewall compliance** | New capabilities from `filippo.io/age` and its sub‑packages are explicitly reviewed and added to the capslock baseline; no new forbidden imports are introduced. |
+| **Documentation coupling** | `docs/security/custody.md` is required to contain the **exact banner** verbatim, enforced by a unit test that reads the file and compares. This prevents drift between UI/CLI and docs. |
+| **Operator‑controlled passphrase** | The backend reads the passphrase from a **file** or **systemd credentials**, never from `argv` or the environment, satisfying the “no secret leakage” rule (STATE.md 01‑09). |
+| **Future‑proofness** | The status payload includes bundle version, policy, directory hash etc., so later phases can rely on it without changing the wire format. The budget (256 KiB) is well above any realistic payload (bundle ≈ a few KiB). |
+
+---
+
+##### 3. Concerns  
+
+| Concern | Severity | Why it matters | Evidence / Reasoning |
+|----------|----------|----------------|----------------------|
+| **`//go:build linux` limits software backend to Linux** | LOW | The signer is required to run on Linux only, so this is acceptable, but future OS‑porting will need a separate backend. | The plan explicitly adds the build tag (Task 1). |
+| **Passphrase string copy not zeroed** | MEDIUM | `age.NewScryptIdentity` receives a `string`, which cannot be cleared, leaving a copy in the heap. The plan acknowledges this (F1) but does not provide mitigation beyond “best‑effort”. | Comment in `internal/keystore/software/software.go` mirrors `internal/rootceremony/keygen.go` (lines ≈ 30‑45). |
+| **Potential for banner truncation on narrow terminals** | LOW | Hard‑wrap limits 76 columns, but on very narrow terminals the banner may wrap unexpectedly, possibly breaking the “verbatim” test that expects exact newlines. | The test `banner_fits_terminal` checks line length ≤ 76 (Task 3). |
+| **Status frame budget may be too low for future extensions** | LOW | If later phases add more fields to `StatusResponse` (e.g., more roles, larger signatures), the 256 KiB cap could become a constraint, requiring another breaking change. | The cap is defined in `internal/wire/status.go` (`MaxStatusFrame = 256 << 10`). |
+| **Error messages may leak passphrase hints** | MEDIUM | `Key` returns an error on incorrect passphrase; the plan asserts the passphrase is **not echoed** but does not show the exact error text. If the error includes “invalid passphrase length X”, that could help an attacker. | Requirement in Task 3: “wrong passphrase, whose error does not contain the passphrase”. Must be verified in tests. |
+| **Potential race between Status and Install** | LOW | Although Install refuses before persisting if the status would overflow, there is still a narrow window where an `InstallBundle` succeeds, the signer restarts, and a later `Status` call could return a different custody state (e.g., after a manual key file replacement). The plan mentions `trust_changed` refusal after install, but the banner might be out‑of‑sync. | Comment in `internal/signer/trust.go` (around line ≈ 362‑380) re‑checks custody on start. |
+| **Missing explicit test for `CREDENTIALS_DIRECTORY` source** | LOW | The plan mentions that the backend may read the passphrase from `$CREDENTIALS_DIRECTORY/keyroster-software-passphrase`, but the test suite does not appear to cover this path explicitly. | No test named “passphrase_from_credentials_directory” in the listed cases. |
+| **Potential for `age` dependency to introduce unexpected cryptography** | LOW | `age` pulls in `golang.org/x/crypto/scrypt`. While capped in capslock, any future changes to `age` could affect the signer fingerprint (unused), but still a supply‑chain surface. | Capslock review required; currently approved. |
+| **The `SoftwareRoles` helper returns role names based on the order of `wire.KeyStatus` slice** | LOW | If the signer ever changes the ordering (e.g., alphabetical), the banner text could list roles in a different order, breaking the verbatim test. | `SoftwareRoles` implementation not shown; must sort deterministically. |
+| **`StatusResponse` marshaling does not include a checksum** | LOW | Corruption of the status payload over the Unix socket could go unnoticed until unmarshalling fails; a checksum would give early detection. | The wire spec currently relies on length + frame header; no checksum field. |
+
+---
+
+##### 4. Suggestions  
+
+| Suggestion | Rationale |
+|-----------|-----------|
+| **Document the unavoidable string‑copy limitation** in `custodytext.go` and the accompanying test comment, so future reviewers understand the trade‑off. |
+| **Add a unit test for reading the passphrase from `CREDENTIALS_DIRECTORY`** – e.g., set `os.Setenv("CREDENTIALS_DIRECTORY", dir)` and place a 0600 file there. |
+| **Implement deterministic ordering in `SoftwareRoles`** (e.g., sort alphabetically) and document this, guaranteeing that the banner text is stable across signer versions. |
+| **Consider a tiny integrity checksum** (e.g., a SHA‑256 of the marshaled `StatusResponse`) to detect accidental corruption on the socket; it adds only a few bytes and does not affect the existing size budget. |
+| **Make the status‑frame budget configurable via a compile‑time constant** (e.g., `StatusFrameBudget = 256 << 10`) and document the rationale, easing future extensions without a wire change. |
+| **Explicitly test that the error returned for an incorrect passphrase does not contain the passphrase** – e.g., compare `err.Error()` against the known passphrase. |
+| **Add a comment to `internal/keystore/software/software.go` that the backend is **Linux‑only** and will need a separate implementation for other OSes**; this clarifies future work. |
+| **Run fuzzing on `internal/keystore/software`** (similar to existing fuzz targets) to ensure no panics on malformed `.age` files or odd permission bits. |
+| **Update the `README` or a quick‑start guide** to mention that the software‑key mode is **evaluation‑only** and that a **hardware** key is required for production, reinforcing the security posture. |
+| **Consider a “soft‑fail” mode** where the CLI refuses to issue certificates entirely if any key has software custody, unless a `--allow‑evaluation` flag is passed (for testing). This would avoid accidental production use. |
+
+---
+
+##### 5. Risk Assessment  
+
+**Overall risk: LOW**
+
+- **Confidentiality**: The only secrets are the passphrase and encrypted key files, which are protected by 0600 permissions and optional systemd credentials. The plan enforces strict checks and clears the passphrase from memory. The residual risk (offline brute‑force of leaked `.age` files) is acknowledged and mitigated by documentation (T‑02‑21).
+
+- **Integrity**: The signer is the single source of truth for custody; `Status` and `InstallBundle` share the same encoder, preventing state divergence. All‑or‑nothing writes and permission checks protect the key material.
+
+- **Availability**: The status‑frame budget guard eliminates a denial‑of‑service condition where a large bundle could break status/issuance after install. The budget is generous enough for realistic payloads.
+
+- **Operational**: The explicit banner, doc coupling, and end‑to‑end test ensure operators are clearly warned that this deployment is for evaluation only, reducing the chance of accidental production use.
+
+Given the comprehensive test suite, the strict dependency gating, and the adherence to the project’s security‑first, simplicity, and self‑hosted constraints, the plan presents a low‑risk addition that fulfills the **KEY‑06** requirement.
+
+--- 
+
+**Conclusion** – The plan is well‑structured, the code design matches the described behavior, and the tests validate the critical edge cases. Minor refinements (as per the suggestions) would further harden the implementation, but the current design is already sufficient for merging.
+### 02-06
+
+##### 02-06 – Server‑Core (keyroster‑server)  
+
+###### Summary  
+The plan implements the first “untrusted” web front‑end for the project: a Linux‑only `keyroster‑server` binary that terminates HTTPS with TLS‑13, serves only embedded, server‑rendered HTML/JS, and enforces a strict CSP (including the missing `connect-src 'self'`). It wires the server to the network‑less signer via a single `signerAPI` seam (currently only `Status`). A status cache with a 5 s freshness window, a `dropStatus` invalidation hook, and a fail‑closed error path are added. The CLI `keyroster init` is extended to pin TLS roots, verify the trust bundle against those pins, and display the “evaluation‑only – software CA key” banner on both stdout/stderr and every HTML page. TLS certificates are hot‑reloaded, and a full suite of unit, integration and e2e tests (including a new e2e harness) validates the behaviour. Systemd unit files, a sysusers entry, and a run‑book are added to make deployment reproducible and hardened.
+
+Overall, the design follows the “server proposes, signer disposes” rule, keeps the server stateless with respect to authority, and satisfies UI‑01, KEY‑06, PLAT‑05, and the success criteria for a secure, pinned TLS connection and custody warning.
+
+---
+
+###### Strengths  
+
+- **Clear Separation of Authority** – All access‑control decisions (RP ID, origins, directory version, custody) are pulled from the signer via `signerAPI.Status`. The server never interprets policy; it only displays data. This respects the core security invariant (Phase 1 “signer disposes”).  
+- **Single Seam & Future‑Proofing** – The `signerAPI` interface is defined early, with only `Status`. Later plans can extend it (e.g. `GetDirectory`, `InstallDirectory`, `Login`) without breaking existing code, and the test double `fakeSigner` is the only place that knows about the signer’s internals.  
+- **Fail‑Closed Status Cache** – A 5 s TTL cache with a refresh timeout, plus `dropStatus` to invalidate after a state‑changing operation, guarantees that stale RP/custody data are never served after a signer failure or a directory install. Unit tests (`status_refresh_failure_fails_closed`, `drop_status_forces_refresh`, `drop_during_inflight_refresh`) cover corner cases, including concurrent refreshes.  
+- **TLS Reload & Safety** – `certHolder` swaps in a newly‑loaded certificate only after sanity checks (hostname matches RP ID, certificate is not expired, key type is acceptable). Errors fall back to the last‑known‑good cert, and a warning is emitted when the remaining validity drops below 14 days.  
+- **Strict CSP & Header Hardening** – The CSP includes the previously‑missing `connect-src 'self'` and matches the `STACK.md` spec. All responses include HSTS, COOP, nosniff, referrer‑policy and `Cache‑Control: no‑store`. The template set contains no inline script/style, satisfying UI‑01.  
+- **Pinned‑Root TLS Client** – `keyroster init` builds an `http.Client` that trusts **only** the roots the user explicitly pins (`--tls-pin`). The client also verifies the trust bundle signatures against those same pins (`VerifySelfSigned` + `MatchPins`). Errors surface as `ErrTLSRootNotPinned` with clear remediation instructions, preventing a compromised server from silently changing its CA.  
+- **Software‑CA Banner Propagation** – Custody information is retrieved from the signer's `Status` response and rendered on every page (`custodytext.SoftwareCABanner`). The CLI prints the same banner once per run, keeping operators aware of evaluation‑only mode.  
+- **Comprehensive Test Coverage** –  
+  - **Unit**: TLS reload edge cases, static content MIME types, status‑cache behaviour, header presence.  
+  - **Integration**: `internal/serverclient` tests for TLS‑pin mismatches, intermediate rotation, trust‑root rotation.  
+  - **E2E**: Full stack sanity (`TestServerInitEndToEnd`) that spins up a real signer, a server, and a client, checks TLS pinning, trust bundle verification, banner appearance, and HTTP header correctness.  
+- **Deployment Hardening** – Systemd service includes `AmbientCapabilities=CAP_NET_BIND_SERVICE`, `CapabilityBoundingSet`, `NoNewPrivileges`, a full `Protect*` sandbox, and a separate `sysusers.d` entry. The Tailscale certificate renewal timer is sandboxed and documented as UNVERIFIED until homelab deployment, reducing the attack surface.  
+- **Cross‑Platform Build Stubs** – `cmd/keyroster‑server/main_other.go` provides a compile‑time error on non‑Linux platforms, satisfying PLAT‑05 while keeping the build graph clean for CI.  
+
+---
+
+###### Concerns  
+
+| Severity | Issue | Why it matters |
+|----------|-------|----------------|
+| **MEDIUM** | **Potential “stale‑status‑after‑signer‑restart” window** – The cache TTL is 5 s. If the signer crashes and restarts **within** those 5 s, the server could still serve a status that no longer reflects the new signer's policy (e.g., RP ID change). Though later plans will invalidate the cache via `dropStatus`, an interim window exists. | Could allow a malicious signer restart to present a mismatched RP to a client, leading to a phished WebAuthn request that the signer would reject, but the client may not realise the mismatch until the cache expires. |
+| **MEDIUM** | **Error handling for TLS reload failures** – The plan states that the server **keeps the old certificate** and logs an error, but the exact behaviour on *multiple* consecutive failures (e.g., a broken cert file that never loads) is not explicit. If the last good cert eventually expires, the server will stop serving HTTPS altogether. | May lead to denial‑of‑service without a clear operator signal, especially during a rapid rotation where a malformed cert is introduced. |
+| **LOW** | **Hard‑coded CSP order** – The CSP string is built as a single literal. If future extensions need additional directives (e.g., `connect-src` already present, but a future need for `media-src`) the CSP may become order‑sensitive and require manual editing. | Minor maintainability issue; not a security flaw. |
+| **LOW** | **Banner duplication on CLI** – The banner is printed **once per client instance**, but if a user runs several `keyroster` sub‑commands in the same shell session, the banner will be printed each time, potentially cluttering output. | Usability annoyance, not a security problem. |
+| **LOW** | **Static file MIME type map is incomplete** – Only `.css` and `.js` are explicitly mapped; any future static asset (e.g., `.png`, `.svg`) would fallback to the generic `application/octet-stream` or be rejected, depending on implementation. | Could break UI when new assets are added later; not relevant for current MVP. |
+| **LOW** | **Run‑book language “UNVERIFIED”** – Several sections are marked UNVERIFIED (e.g., Tailscale‑cert unit sandbox). If operators misinterpret these tags, they might assume full verification when the unit has not been exercised on the target platform. | Potential for misconfiguration; however, documentation clearly flags it. |
+
+---
+
+###### Suggestions  
+
+1. **Reduce the status‑cache window or add a “soft‑restart” hook** –  
+   - Either shrink the TTL to ≤ 1 s, or expose a `SIGHUP`‑triggered cache flush that the operator can invoke after a signer restart. This eliminates the brief window where stale RP data could be served.  
+
+2. **Explicitly document the TLS‑reload failure escalation path** –  
+   - In `tlsreload.go` add comments and logs that, after *N* consecutive failures (e.g., 3), the server should emit an alert and optionally exit with a non‑zero status, forcing the operator to intervene before the last‑good cert expires.  
+
+3. **Make CSP construction extensible** –  
+   - Build the CSP from a slice of directives (`[]string`) and `strings.Join`. Adding new directives later will be straightforward and less error‑prone.  
+
+4. **Deduplicate banner output for a single CLI session** –  
+   - Introduce a package‑level `onceBanner sync.Once` guard in the client wrapper so that the banner is printed only on the first command that contacts the server during a shell session.  
+
+5. **Extend the static MIME map with a default fallback** –  
+   - Provide a small helper that returns `mime.TypeByExtension` for unknown extensions, falling back to `application/octet-stream`. This will make adding new assets painless.  
+
+6. **Add a “status‑watchdog” test** –  
+   - Simulate a signer crash/restart within the 5 s cache window and verify that the server returns a 503 rather than stale data. This will guard against the MEDIUM concern above.  
+
+7. **Clarify “UNVERIFIED” sections in the run‑book** –  
+   - Add a short note at the top of each “UNVERIFIED” block explaining that the unit has not been exercised on the target platform and that operators should test it locally before production.  
+
+---
+
+###### Risk Assessment  
+
+**Overall Risk: MEDIUM**
+
+- **Security** – The core invariant that the server never makes authority decisions remains intact; TLS pinning, CSP, and custody banner provide strong defense‑in‑depth.  
+- **Availability** – The 5 s stale‑status window and the “keep‑last‑good‑cert” reload policy introduce a modest chance of temporary inconsistency or denial‑of‑service, but these are bounded and have clear mitigation paths.  
+- **Maintainability** – The current design is clean, with a single well‑defined seam to the signer and comprehensive test coverage, reducing the likelihood of regression.  
+
+With the suggested mitigations (status‑cache flush, clearer TLS‑reload failure handling, additional tests), the residual risk can be lowered to LOW. The plan as written already achieves the Phase 2 MVP goals (trusted‑root TLS, UI banner, pinned “init”, and a hardened server binary), and the identified concerns are mostly edge‑case operational matters rather than fundamental security flaws.
+### 02-07
+
+##### 02-07 – Admin‑signed API & Invite Flow Review  
+
+**Plan ID:** `02-07` (Phase 2, Wave 5)  
+
+**Scope:** Introduces a server‑side admin API authenticated with SSHSIG, a persistent SQLite “server DB” for pending users and nonces, rate‑limiting, the `/api/v1/admin/users` endpoint for creating pending accounts (and reinvites), the public invite page (`/enroll/{token}`), and the corresponding client helpers (`adminauth`, `serverclient.AdminJSON`, `keyroster user add`).  
+
+**Verification Basis:** The review is based on the files referenced in the plan, the surrounding code base described in the extensive project context, and the tests that the plan mandates. Where the plan cites concrete implementation details (e.g., `requireAdminLimit`, `maxAdminBody`, `clientKey`), those are cross‑checked against the expected behaviour of the listed packages. Because the repository cannot be opened directly in this environment, the assessment relies on the plan’s own descriptions, the architectural notes, and the code snippets included in the context.
+
+---
+
+###### 1. Summary  
+
+The plan adds a well‑scoped, cryptographically‑authenticated admin API that guarantees *authority* lives only in the signer, not the server. It stores only non‑authoritative state (pending users, nonces) in a SQLite DB and enforces strict size and rate limits before any cryptographic verification. The workflow for enrolling a user (admin creates a pending account → invite URL → user registers a passkey → admin approves via directory install) aligns with the Phase 2 success criteria. The plan also defines a comprehensive test matrix covering signature verification, nonce replay, body‑size limits, rate‑limiting, and the “re‑invite” logic.
+
+Overall the design is sound, respects the “server proposes, signer disposes” principle, and has a clear separation of concerns. The majority of the required security properties (SSH‑SIG authentication, single‑use nonces, hashed invite tokens, strict CSP, no authority in the server DB) are directly enforced.
+
+---
+
+###### 2. Strengths  
+
+| # | Observation | Evidence / Reasoning |
+|---|-------------|----------------------|
+| **2.1** | **SSH‑SIG admin authentication** – Uses the same `internal/sshsig` code path as Phase 1, with a dedicated namespace `keyroster/admin-api/v1`. | The plan creates `internal/adminauth` that builds the message as `<namespace>\n<method>\n<path>\n<hex sha256(body)>\n<unix>\n<nonce>`. This mirrors the existing admin‑evidence format, ensuring compatibility with the signer’s admin‑key verification (`trust.AdminKey`). |
+| **2.2** | **Nonce‑based replay protection** – Nonces are 32‑byte random strings stored (hashed) in `admin_nonces` with an expiry and are consumed **before** the handler runs. | The plan’s `requireAdminLimit` middleware calls `UseNonce` (which inserts the nonce and deletes expired rows) before invoking the handler, guaranteeing that a replay cannot cause the handler to execute. |
+| **2.3** | **Pre‑verification request‑size limit** – A 413 error is returned **before** any signature verification, preventing an attacker from exhausting resources while still receiving a uniform 401 on normal auth failures. | `requireAdminLimit` reads the body with `http.MaxBytesReader` and returns `{"error":"request body too large"}` on overflow. The plan explicitly tests this (`body_over_limit_413_before_verify`). |
+| **2.4** | **Clear separation of authority** – The server DB only holds *pending* rows; the signer’s installed directory is the sole source of truth for actual access. | The plan’s `admin.go` checks the installed directory via `s.signer.GetDirectory` before deciding on name conflicts, and the DB is never consulted for authorisation. |
+| **2.5** | **Invite token design** – Tokens are 256‑bit random values, stored only as a SHA‑256 hash, never logged, and have a 24 h expiry. | The migration `0001_server.sql` defines `invite_hash BLOB NOT NULL UNIQUE` and `invite_expires_us`. The plan’s `CreatePendingUser` stores the hashed token, and the invite page (`enroll.go`) looks up only the hash. |
+| **2.6** | **Rate limiting with DoS‑damping** – Per‑client limiter keyed by `RemoteAddr` (IPv4) or `/64` prefix (IPv6) plus a global back‑stop. | `ratelimit.go` creates a `map[string]*rate.Limiter` with LRU eviction (max 10 000 entries) and a secondary limiter per route class. Test cases (`ipv6_same_64_shares_bucket`, `global_backstop_429`) verify the behaviour. |
+| **2.7** | **Comprehensive test coverage** – The plan mandates unit tests for every failure mode of admin auth, the invite workflow, rate limiting, and client‑side clock‑skew hints. | The test suite includes `adminauth_test.go`, `admin_test.go`, `serverdb/db_test.go`, `serverclient/admin_test.go`, and `user_test.go`. The required sub‑tests are listed verbatim. |
+| **2.8** | **CLI usability** – The `keyroster user add` command prints a ready‑to‑run `keyroster init` line that always contains `--tls-root-file keyroster-tls-root.pem` and follows it with the PEM‑encoded root certificates. | The e2e test `TestUserAddInvite` extracts the printed line, writes the PEM to the expected file, invokes `keyroster init`, and verifies successful configuration. |
+| **2.9** | **Policy‑driven origin selection** – Invite URLs are built from a request’s `Host` header only if it matches a policy‑allowed origin; otherwise the first origin is used. | `requestOrigin` uses the signed policy’s `Origins` list, ensuring that an attacker cannot force an invite to an arbitrary host. This is covered by `invite_url_origin_matches_request_host`. |
+| **2.10** | **Uniform error messages** – All authentication failures return the same JSON body (`{"error":"admin authentication failed"}`) without leaking headers or request details. | The plan specifies that `requireAdmin` returns `401` with a static message, and the tests check for uniformity (`uniform_401_body`). |
+
+---
+
+###### 3. Concerns  
+
+| # | Issue | Severity | Explanation & Evidence |
+|---|-------|----------|------------------------|
+| **3.1** | **Nonce race condition under high concurrency** – `UseNonce` inserts the nonce and then the handler runs. If two concurrent requests with the **same** nonce arrive before the DB transaction is committed, both may see the nonce as unused and both may proceed, violating the “single‑use” guarantee. | The plan does not specify that the INSERT is done atomically with a unique constraint or that it is wrapped in a transaction that fails on duplicate. SQLite will reject a duplicate primary‑key INSERT, but the code must surface the error and stop the handler. The current tests only check parallel replay (`nonce_replay_parallel`) with a single `httptest` request per goroutine; they may not trigger a true race. |
+| **3.2** | **Potential DB lock contention** – The server DB is opened with a single connection (`Open` returns one connection) and all admin‑API requests (including `GET /enroll/{token}`) share that connection. Under heavy admin traffic the exclusive lock on the DB could block other operations (e.g., the `invite` GETs). | The plan mentions WAL mode with `PRAGMA journal_mode=WAL`, which allows concurrent reads, but writes still acquire an exclusive lock. The rate‑limiter mitigates DoS but does not guarantee that a burst of legitimate admin writes won't starve reads. |
+| **3.3** | **Non‑deterministic ordering of `requestOrigin`** – When the policy contains multiple origins and the request’s Host header does not match any, the code falls back to the *first* sorted origin. The sorting order can change if the policy is updated (e.g., a new origin is added earlier in the list). This could lead to inconsistent invite URLs across versions. | The plan does not enforce a stable deterministic fallback (e.g., lexical order is fine, but it must be documented as part of the interface). If an admin updates the policy, previously generated invite URLs might resolve to a different origin than intended. |
+| **3.4** | **Missing validation of `user_handle` uniqueness** – When a “reinvite” is performed for a directory user, a new 32‑byte `user_handle` is generated (or the existing one is retained). The plan does not clarify that the handle must stay unique across pending rows. If a collision occurs the DB will reject the INSERT, causing a 500 error. | The migration defines `user_handle BLOB NOT NULL UNIQUE`. The `ReplaceInvite` path only updates an existing row, but the “new pending row for a directory user” path creates a fresh `user_handle`. The probability of a collision is negligible, but the code should handle the unlikely error cleanly. |
+| **3.5** | **Clock‑skew hint may reveal timing** – The client includes the server’s `Date` header in the error message when the skew exceeds 60 s. An attacker could abuse this to learn the server’s precise time, aiding replay attacks on time‑bounded evidence. | The plan mentions a 60 s threshold. While useful for operators, the hint is optional and should be guarded (e.g., only shown when the client enables a debug flag). The current implementation always adds the hint when the difference > 60 s. |
+| **3.6** | **Rate‑limiter map eviction policy not fully defined** – The LRU map caps at 10 000 entries, but the eviction algorithm (e.g., `container/list` + `map`) is not described. If many distinct IPv6 /64 prefixes are seen (e.g., a large cloud provider), the map could fill and start evicting *active* clients, causing unnecessary 429 responses. | The plan’s acceptance criterion checks that the map size stays ≤ 10 000 after many inserts, but does not verify that eviction respects recency correctly. |
+| **3.7** | **Potential path‑canonicalisation mismatch** – The admin client signs `URL.RequestURI()` (raw path+query). If the server ever uses a reverse proxy that normalises the request (e.g., redirects or rewrites), the signed path could differ, causing spurious 401s. The plan assumes the server is directly exposed (no proxy), but this may change in future deployments. | The plan’s `requireAdmin` explicitly checks `r.RequestURI`. It also has a test `encoded_path_variant_401`. However, an environment that adds a forward slash or decodes `%XX` before reaching the handler would break auth. |
+| **3.8** | **Invite URL leakage via Referrer** – Although the invite page sets `Referrer-Policy: no-referrer`, the admin’s printed `keyroster init` line may be copied/pasted into a terminal that records command history, potentially exposing the invite URL in logs. | This is a usability‑vs‑privacy trade‑off. The plan does not mention any mitigation (e.g., a short‑lived “one‑time view” page). |
+| **3.9** | **Missing validation of admin‑API request content‑type** – The plan does not enforce `Content-Type: application/json` on admin endpoints. A malformed request could be interpreted differently by the body‑size limiter vs. the signature verifier. | The `adminauth.Message` includes the SHA‑256 of the **raw** body, regardless of type, but client expectations might vary. Explicit content‑type checks would harden the API. |
+| **3.10** | **Potential “Reinvite” abuse** – An attacker who compromises an admin key could repeatedly call `user add --reinvite` for the same user, generating many valid invite URLs and exhausting the invite‑token space or confusing the user. The plan limits the rate per client, but an admin’s own IP could be used to throttle themselves. | No explicit per‑user “reinvite quota” is defined. This is a low‑severity issue (requires admin key) but could be a nuisance. |
+
+---
+
+###### 4. Suggestions  
+
+| # | Recommendation |
+|---|----------------|
+| **4.1** | **Make nonce insertion atomic and return a clear error** – Wrap the INSERT into `admin_nonces` in a transaction with a UNIQUE constraint on `nonce`. If a duplicate is detected, return a `401` with the uniform body (the request is effectively a replay). This eliminates the race window highlighted in **3.1**. |
+| **4.2** | **Add a background cleanup task for expired nonces and invites** – Periodically delete rows older than the allowed window (e.g., every minute). This prevents the DB from growing indefinitely and keeps the per‑client limiter map size predictable. |
+| **4.3** | **Document and lock the invite‑origin fallback rule** – Explicitly state that the first sorted origin is used when the Host header does not match any allowed origin, and ensure that the sorting is deterministic (e.g., lexical order of the canonical policy JSON). Add a test covering an update to the policy origins. |
+| **4.4** | **Handle `user_handle` collision gracefully** – If the `INSERT` for a new pending row fails due to a uniqueness violation, retry generating a fresh 32‑byte handle up to a small number of attempts (e.g., 3). This makes the unlikely collision case user‑friendly. |
+| **4.5** | **Make the clock‑skew hint optional** – Add a CLI flag `--show-clock-skew-hint` (default off) and only include the extra message when the flag is set. This reduces information leakage while still helping legitimate admins. |
+| **4.6** | **Enforce Content‑Type on admin API** – Require `Content-Type: application/json` for all admin POST/PUT requests. Return `415 Unsupported Media Type` before the body‑size check. This adds a small layer of robustness. |
+| **4.7** | **Add per‑user re‑invite quota** – Limit the number of active pending invites per user (e.g., max 3). Return `429 Too Many Requests` if exceeded. This curbs abuse of `--reinvite` by a compromised admin key. |
+| **4.8** | **Improve rate‑limiter eviction logic** – Explicitly use an LRU cache implementation (e.g., `github.com/hashicorp/golang-lru`) that evicts the *least recently used* entry, and add a unit test that ensures an active client is not evicted while the map is full. |
+| **4.9** | **Add a test for concurrent admin writes** – Simulate many goroutines performing `user add` with the *same* name and the same nonce to verify that only one succeeds and the others receive a 401 (nonce replay) or 409 (duplicate) without deadlocking. |
+| **4.10** | **Include a “log‑only” audit entry for every `user add` and `reinvite`** – Even though pending rows are non‑authoritative, logging the event (with timestamp, admin name, username, and invite hash) to the Merkle log provides full visibility and matches the project’s core value. Ensure the logger in `admin.go` writes a structured entry before responding. |
+
+---
+
+###### 5. Risk Assessment  
+
+| Overall Risk | Justification |
+|--------------|---------------|
+| **MEDIUM** | The admin API is the primary gatekeeper for creating accounts. The design correctly uses strong, cryptographic authentication and single‑use nonces, and the server stores only non‑authoritative data. The main residual risks are the nonce race condition and potential DoS from DB write contention under high admin load. Both can be mitigated with the atomic nonce insertion and background cleanup suggested above. The other concerns (clock‑skew hint, rate‑limiter map eviction) are lower severity and do not threaten the core security guarantees. |
+
+---
+
+###### 6. Conclusion  
+
+Plan **02‑07** delivers a solid, security‑first admin API and invite system that meets the Phase 2 success criteria. The implementation follows the “server‑proposes, signer‑disposes” model, isolates authority in the signer, and uses proven cryptographic primitives (SSH‑SIG, SHA‑256, Go stdlib). The tests are comprehensive and cover the critical failure paths.
+
+Addressing the concerns listed—especially guaranteeing atomic nonce consumption and cleaning up expired DB entries—will solidify the design against edge‑case attacks and operational issues. With those refinements, the plan can be approved for merging.
+### 02-08
+
+##### 02-08 – Passkey Registration (Invite → Pending Credential)
+
+###### 1. Summary
+The plan implements a full passkey‑registration flow anchored on single‑use invite URLs. A browser‑side WebAuthn “create” ceremony is driven by a tiny hand‑written `app.js`, the server validates the attestation with **go‑webauthn** (`internal/server/enroll.go`), converts the COSE public key to an SPKI DER (`internal/server/credential.go`), stores a *pending* credential (`pending_credentials` table, `0002_registration.sql`), and makes the same fingerprint visible to admins via `keyroster user pending`. The design respects the “signer‑only authority” rule, isolates CBOR/JWT parsing to the server, and uses atomic DB operations to guarantee invite‑single‑use and one‑pending‑credential‑per‑user guarantees. Overall the implementation matches the success criteria for **AUTH‑01** and **UI‑01**, and the accompanying tests exercise the critical paths.
+
+###### 2. Strengths
+| Area | Evidence | Why it’s good |
+|------|----------|---------------|
+| **Atomic invite consumption** | `ConsumeRegistrationSession` uses `DELETE … RETURNING` (see `internal/serverdb/db.go`), guarantees exactly‑once consumption of a `(invite_hash, challenge)` pair. | Prevents replay of a registration session and eliminates race conditions between concurrent finishes. |
+| **One‑pending‑credential invariant** | Unique index `pending_credentials_one_per_user` in `0002_registration.sql`; Insert guarded by a transaction (`BindPendingCredential`). | Guarantees an account cannot accumulate multiple pending credentials, simplifying admin review. |
+| **Invite lifecycle safety** | `PendingUserByInvite` extended with `AND invite_used_us IS NULL` (see `internal/server/invite.go`), and `ReplaceInvite` atomically clears `invite_used_us` and deletes any pending credential. | Prevents “used‑invite” reuse and makes reinvites safe even if a ceremony was in‑flight. |
+| **Server‑only CBOR/JWT** | `scripts/dep-firewall.sh` bans `go‑webauthn` from the signer graph; the only binary that links the library is `keyroster‑server`. | Enforces the “signer‑only authority” boundary (D‑17). |
+| **Differential oracle testing** | `internal/server/webauthn_oracle_test.go` compares every assertion vector against both the internal verifier and go‑webauthn; strict‑only cases are documented. | Provides high confidence that the signer‑side verifier is at least as strict as the reference implementation. |
+| **Session caps** | `registration_sessions` primary key `(invite_hash, challenge)` plus a hard cap of 16 open sessions per invite (enforced in `CreateRegistrationSession`). | Thwarts DoS via unbounded session creation. |
+| **Clear failure paths** | All refusal cases (UV missing, wrong RP hash, duplicate credential, expired invite, etc.) return 400/404/409 with no side‑effects; tests assert no DB rows are written. | Guarantees a clean state on error, preserving auditability. |
+| **Explicit UI security** | CSP in `keyroster‑server` (see `secure` wrapper) forbids inline scripts; `enroll.html` has no `<script>` tag, only a `<script src="/static/app.js">`. | Aligns with UI‑01 CSP requirements. |
+| **Comprehensive test coverage** | `TestRegisterPasskeyPending`, `TestEnrollInviteLifecycle` (concurrent finishes, reinvite races), and a full matrix of refusal cases. | Provides regression safety and validates the atomicity guarantees. |
+| **Dependency review checkpoint** | Task 1 requires a human‑approved module table before `go get` of `go‑webauthn`. | Mitigates supply‑chain risk for the new server dependency. |
+
+###### 3. Concerns
+| Severity | Issue | Impact & Evidence |
+|----------|-------|------------------|
+| **MEDIUM** | **Potential CSRF on enrollment POSTs** – The `POST /api/v1/enroll/{token}/begin` and `/finish` endpoints are state‑changing but rely only on the opaque invite token for authorisation. If an attacker induces a victim’s browser to POST to those URLs (e.g., via a malicious site that knows the token), a credential could be registered without the user’s consent. The plan does not mention CSRF protection (e.g., `SameSite=Strict` cookies or a CSRF header). | Although the invite token is unguessable, it lives in the URL and may be leaked through referer headers or browser history. |
+| **MEDIUM** | **Resource exhaustion via many concurrent invites** – The per‑invite session cap is 16, but the system places no global limit on the number of *active* invites. An attacker could flood the DB with new invites (via the admin‑only `user add` API) and then trigger many `begin` calls, filling `registration_sessions`. No rate‑limit on the `user add` endpoint is described. | Potential DoS on the SQLite DB, which is single‑writer and could become a bottleneck. |
+| **LOW** | **UNVERIFIED macOS flow** – The registration UI (`app.js`) is exercised only on Windows/Linux browsers; macOS is labelled UNVERIFIED. If a macOS user attempts registration, they will see a generic error page but no clear guidance. This is acceptable for the MVP but may cause support friction. | Documented in the plan (D‑16). |
+| **LOW** | **Potential leakage of invite token via HTTP Referrer** – The enrolment page (`enroll.html`) loads `app.js` from the same origin, but the token appears in the page URL. If the page contains external resources (e.g., fonts from a CDN), browsers may send the full URL as a Referrer, leaking the token. The CSP currently blocks external sources (`default-src 'none'`) so this risk is low, but future CSP changes could expose it. | CSP is strict, but any later relaxation must keep `connect-src 'self'` only. |
+| **LOW** | **Dependence on go‑webauthn’s internal policy** – The plan trusts go‑webauthn to enforce the required algorithm set (EdDSA, ES256, RS256). If a future version adds a weaker algorithm by default, the server would need to update its `CredentialParametersRecommendedL3()` call. No explicit whitelist of algorithms is coded beyond the library call. | Future‑proofing – a minor change but worth noting. |
+| **LOW** | **Error handling when converting COSE to SPKI** – `spkiFromCOSE` could theoretically error (e.g., malformed COSE). The plan assumes the conversion never fails because go‑webauthn already validated the credential. If an unexpected edge case occurs, the server returns a generic 400 “unsupported credential”. This is acceptable for MVP but should be logged with the raw error for diagnostics. | Not explicitly logged in `enroll.go`. |
+
+###### 4. Suggestions
+| Area | Recommendation |
 |------|----------------|
-| **Explicit “pre-condition” checks** (Task 1) | Guarantees that the host is reachable, OpenSSH version is known, and the laptop’s runtime directory exists before any destructive change. |
-| **Atomic host configuration** (Task 1 → Step 2.4) | Uses `sshd -t` before reload and a single drop-in file, making rollback trivial (just delete the drop-in). |
-| **Fingerprint-comparison UI** (Task 2 & D-13) | Human-in-the-loop verification prevents a compromised server from silently signing a request. |
-| **Two independent sources of truth** (Task 3 & Task 5) | Matching the `kr2` key-ID in the audit log with the `journalctl` entry gives strong evidence against repudiation (T-02-71). |
-| **Documentation-first approach** (Task 5) | `needs-hardware.md`, `host-setup.md`, `enroll-user.md` get updated in the same PR that introduces the evidence, ensuring they stay in sync with the code. |
-| **Ruleset gate** (Task 6) | The required-status-checks are added *before* the PR is merged, guaranteeing that future PRs must pass the three-OS CI. |
-| **Clear “UNVERIFIED” handling** (D-16, tasks 4–6) | The plan explicitly records macOS as UNVERIFIED and never marks AUTH-03/PLAT-05 as complete, preserving the “no-unexercised-paths” invariant. |
-| **Reversibility rating** (Task 1) | The host changes are reversible with a single file removal, which matches the threat-model requirement for quick recovery from a mis-configuration. |
+| **CSRF mitigation** | Add a small CSRF token (e.g., a double‑submit cookie) to the `POST /enroll/{token}/begin` request and verify it server‑side, or enforce `SameSite=Strict` on a session cookie (even though the flow is token‑driven, a cookie adds a defense‑in‑depth layer). |
+| **Global invite throttling** | Introduce a rate‑limit on the `user add` admin API (e.g., `x/time/rate`) and/or a soft quota on the number of pending invites per admin or per time window. This prevents abuse of the invitation mechanism. |
+| **Explicit algorithm whitelist** | After obtaining the recommended credential parameters from go‑webauthn, filter the list to the exact three algorithms (`-7`, `-8`, `-257`) before passing it to the client. This makes the allowed set immutable even if go‑webauthn changes defaults. |
+| **Audit logging of registration failures** | Log each refusal (UV missing, wrong RP, duplicate credential) with a sanitized reason code and the invite hash. This enriches the Merkle audit log and helps detect targeted attacks. |
+| **Add unit test for CSRF/Origin header** | Verify that the enrollment handlers reject requests with an unexpected `Origin` header or missing `Referer`. This will guard against cross‑origin POST attempts. |
+| **Graceful handling of SPKI conversion errors** | Wrap `spkiFromCOSE` errors, log the detailed cause (e.g., “COSE parsing error: …”) and return a user‑friendly 400. This aids debugging without exposing internals to the client. |
+| **Documentation for UNVERIFIED platforms** | Mark the macOS UI path in the README with a clear “UNVERIFIED – use at your own risk” note, and provide a link to the test harness that proves the flow works on Linux/Windows. |
+| **Future‑proofing invite token** | Store the invite token as a hashed value in the DB (already done) but also enforce a short TTL (e.g., 24 h) and automatically purge expired invites via a background job. This limits token exposure. |
+| **Hardening of the CSP** | Add `frame-ancestors 'none'` and `base-uri 'none'` (already present) to the CSP in `secure` wrapper, and ensure any future static assets (e.g., fonts) are served from the same origin to avoid inadvertent Referrer leakage. |
+
+###### 5. Risk Assessment
+**Overall Risk: MEDIUM**
+
+*Justification*  
+- **Security boundary compliance** is solid: the signer never sees CBOR/JWT, and the server isolates WebAuthn parsing.  
+- **Supply‑chain risk** is mitigated by a human‑approved dependency review and by the dep‑firewall preventing the new library from leaking into the signer.  
+- **Operational risk** stems from the lack of global invite throttling and CSRF protection, which could be abused to cause a denial‑of‑service or unauthorized credential registration if an attacker obtains a valid invite token (e.g., via log leakage).  
+- **Residual risk** from a compromised server (phishing of the fingerprint) is acknowledged in the project’s threat model and is considered acceptable for the MVP phase.  
+
+Implementing the suggested CSRF token, global invite rate limiting, and audit‑logging will lower the risk to **LOW** for production deployments.
+### 02-09
+
+##### 02-09 – Passkey‑Login MVP – “Approve” Plan Review  
+
+**Phase:** 02‑passkey‑login‑mvp  
+**Plan ID:** 02‑09 (wave 7)  
+**Owner:** Labontese (`p02/09‑approve` → `02‑09‑SUMMARY.md`)  
+**Scope:** Adds the *admin‑signed directory* flow – `keyroster user approve`, directory diff/sign/install pipeline, server‑side directory mirror, `InstallDirectory` RPC, pending‑credential cleanup, body‑size guard, and associated tests and run‑book.  
+
+> **Note:** The review is performed without direct access to the repository files. All observations that rely on concrete `path:line` evidence are therefore qualified as *inferred* from the plan description and the surrounding documentation. Where the code cannot be inspected, the finding is marked as an **open question**.
 
 ---
 
-#### Concerns  
+###### 1. Summary  
 
-| Severity | Step(s) / Reference | Issue |
-|----------|---------------------|-------|
-| **HIGH** | **Task 2 – Human login**<br>*(“owner runs `keyroster login` and compares fingerprints”)* | The plan relies on the owner *accurately* comparing two SHA-256 fingerprints that are printed in the CLI and the browser.  If the CLI or the UI accidentally truncates or re-formats the string (e.g., line-breaks, upper-case vs lower-case), a false-positive could slip through.  There is no automated sanity-check. |
-| **HIGH** | **Task 3 – Audit verification**<br>*(`keyroster audit verify --pin <C> --pin <D>`)* | The plan assumes the exported log contains the newly-issued certificates and that the `audit verify` command can be run with the same pins that were used to initialise the ceremony (`KR_PIN_C`/`KR_PIN_D`).  If the export omits recent entries (e.g., because the signer buffers logs) the verification will falsely succeed or fail.  There is no explicit “verify-that-export-contains-new-entries” step. |
-| **MEDIUM** | **Task 1 Step 2 – TLS pin consistency** | The plan checks that *the laptop’s observed TLS pin equals the Windows machine’s pin*, but it does **not** validate that the pin corresponds to the *actual* server certificate key (e.g., the pin might be hard-coded in an old `kr.env`).  A compromised signer could present a different certificate while still passing the pin check if the pin is stale. |
-| **MEDIUM** | **Task 5 – Ruleset JSON edit** | The verification script (`grep -c 'cli-windows\|cli-macos' .github/rulesets/main-integrity.json`) only asserts the strings appear; it does **not** confirm they are placed under the correct `required_status_checks` object or that the JSON remains syntactically valid.  A malformed ruleset could silently break required-checks enforcement. |
-| **MEDIUM** | **Task 5 – CI status for `cli-macos`** | The plan expects the `cli-macos` check to be green on the PR, but the earlier “confidence: low” rating suggests the macOS CI may not yet be stable.  If the check fails intermittently, the PR could get stuck, delaying the merge-gate. |
-| **LOW** | **Task 4 – GNOME “A3” probe** | The plan says “If 02-02 moved A3 to dogfood, run the 02-02 probe now”.  It does not spell out what to do if the probe *fails* (e.g., fallback to `ssh-agent`).  Leaving it as a “human decision” could lead to inconsistencies across runs. |
-| **LOW** | **Host-file permissions** | The plan writes the CA public key and principals file as `root:root 0644`.  On some distributions the default umask or `TrustedUserCAKeys` may expect `0600`.  If the file is readable by everyone, an attacker could enumerate the CA public key, which slightly reduces secrecy (although it’s public by design). |
-| **LOW** | **Expiry check timing** | The test uses a fixed `5 m` TTL and waits “6 minutes”.  Clock-skew between the client and the host could cause the key to still appear for a few seconds after expiry, making the test flaky.  A more deterministic way would be to query the agent for the exact expiration timestamp. |
+The plan expands the core trust model (Phase 1) by introducing a **quorum‑signed *directory* document** that holds users, credentials, groups, roles and host‑group mappings. It defines a clear **admin‑CLI pipeline** (`editDirectory → diff → confirm → sign → install`) that always verifies the installed base against the root‑signed policy before any mutation. The server mirrors the directory via a status‑cache and forwards `InstallDirectory` to the signer, deleting only the newly‑bound pending credentials. The design respects the “server proposes, signer disposes” rule, maintains tamper‑evident logging, and adds comprehensive unit‑ and e2e‑tests for edge cases (duplicate credentials, idempotency, concurrency, quorum > 1, body‑size limits, mirror consistency).  
+
+Overall the plan is **well‑aligned with the phase goals** (AUTH‑01, KEY‑02) and the security‑first constraints. The main risk is the **complexity of the directory‑mirror and install path**; any mismatch between the server’s cached status and the signer’s state could lead to stale reads or lost updates if not handled precisely. The plan addresses this through `dropStatus` after every install and thorough tests, but the implementation must be rock‑solid.
 
 ---
 
-#### Open Questions (source-dependent)
+###### 2. Strengths  
 
-| # | Question | Where it matters |
-|---|----------|-------------------|
-| Q1 | Does the current `keyroster audit verify` output include **both** the certificate **and** the associated `kr2` key-ID in a machine-parsable form?  The plan parses the output with `grep -q 'trust bundle v3'`; if the format changes, the verification could silently miss the new log entries. | Task 3, Task 5 verification steps |
-| Q2 | Are the TLS pins (`KR_PIN_C`, `KR_PIN_D`) stored in `kr.env` *derived* from the server’s *current* leaf certificate, or are they static values written during the Phase 1 ceremony?  If they are static, a certificate-rotation (e.g., Tailscale cert renewal) could make the pin mismatch without the plan detecting it. | Task 1 Step 3, Task 5 |
-| Q3 | Does the Windows client actually use the **named pipe** format `\\.\pipe\openssh-ssh-agent` on all supported Windows 11 builds, or are there cases where the pipe is `\\.\pipe\keyroster-agent` (if a custom agent is used)?  The plan assumes “the pipe Claude gave you” after `keyroster login`, but the CLI implementation may create a *different* pipe name when `--agent` is omitted. | Task 2, D-15 |
-| Q4 | Is the `cli-macos` CI job currently gated by any *platform-specific* secrets (e.g., a macOS signing certificate) that could cause the job to be skipped on the PR?  The plan counts on it being green, but a missing secret would make the check appear as “skipped”, failing the `grep -c` test. | Task 5 rule-set verification |
-| Q5 | The `main-integrity.json` file already contains other required-checks (e.g., `lint`, `test`).  Does the addition of two new contexts automatically increase the `required_status_checks` array, or does the file need an explicit `"type": "required_status_checks"` object?  A misplaced entry could be ignored by GitHub. | Task 5 “add both contexts … to .github/rulesets/…”. |
-| Q6 | Does the `keyroster login --ttl 5m` command enforce the *exact* expiry that the signer encoded, or does it apply an additional client-side safety margin?  If a margin exists, the key might disappear *before* the 5-minute limit, making the test flaky. | Task 2 & Task 4 expiry expectations |
-| Q7 | Are the `ssh-agent`‐lifetime flags (`ssh-add -t`) used by the Windows named-pipe agent (implemented inside `keyroster.exe`) verified to *actually* kill the key on expiry, or does the agent merely stop responding, leaving the key resident in memory?  This impacts the “certificate leaves the agent when it expires” success criterion. | D-15, Task 2 step 5 & Task 4 step 4 |
-| Q8 | The plan uses `journalctl -u ssh -u sshd` on the host.  On some distros (e.g., Debian-based) the service name is only `ssh`.  Could the command miss the journal entries on a different OS, falsely reporting a failure? | Task 3 & Task 5 verification |
-
----
-
-#### Suggestions / Mitigations  
-
-| Area | Suggested improvement |
-|------|-----------------------|
-| **Fingerprint sanity** | Add a small helper script (e.g., `keyroster verify-fingerprint`) that reads the fingerprint from the CLI output, hashes the same request payload, and checks that the browser-displayed fingerprint (via a temporary file the UI writes) matches exactly.  This removes the “human visual compare” edge case. |
-| **Audit-log freshness** | After exporting the log, run `keyroster audit verify … | grep -A1 'latest entry'` and assert that the timestamp is **after** the login start time (`date -u +"%Y-%m-%dT%H:%M:%SZ"`).  If the latest entry is older, retry the export (the signer may be buffering). |
-| **TLS-pin rotation** | In the `keyroster init` step, store *both* the SPKI pin and the **certificate serial**.  On each login, the CLI can issue a warning if the server presents a cert with a different serial, prompting the operator to re-run `init`.  Document the pin-rotation process in `docs/runbooks/server-install.md`. |
-| **Ruleset JSON validation** | Run `jq` schema validation as part of the PR (e.g., `jq -e 'has("rules") and .rules[] | select(.type=="required_status_checks")' .github/rulesets/main-integrity.json`).  Fail the PR if the JSON is malformed. |
-| **CI reliability** | Add a *smoke* step in the PR that runs `keyroster login --dry-run` on the macOS runner (no passkey needed) to guarantee the job finishes even if the real WebAuthn flow cannot be exercised.  Mark the result as “passed” but still keep the `cli-macos` context required. |
-| **A3 probe fallback** | If the GNOME GCR probe fails, automatically fall back to `ssh-agent` and record the fallback in `needs-hardware.md` (e.g., “Linux: GCR unavailable → ssh-agent used”).  This makes the outcome deterministic and removes a manual “human decision” point. |
-| **Permission hardening** | Consider making the CA public key file `0644` → `0640` and owned by a dedicated `keyroster` system user, then add a note in `host-setup.md` that the file must be readable by the `sshd` user (usually `root`). |
-| **Expiry verification** | Instead of a fixed sleep, query the agent for the key’s remaining lifetime (`ssh-add -L | grep -A1 "<key-id>"`) or use `ssh-add -e` (if supported) to confirm the exact expiration timestamp. |
-| **Cross-platform pipe naming** | In the Windows CLI, after `keyroster login` succeeds, have the tool echo the exact pipe name (e.g., `\\.\pipe\keyroster-<uuid>`).  The docs should explain that the user must use that exact string when calling `ssh -o IdentityAgent=…`. |
-| **Journal unit name detection** | Use `systemctl list-units --type=service | grep -E 'ssh|sshd'` to discover the correct unit name and store it in a variable, then pass that variable to `journalctl`.  This removes OS-specific assumptions. |
-| **Documentation lock-down** | Add a pre-commit hook (or CI check) that runs a grep for any FQDN or IP other than `127.0.0.1` on added lines.  This guarantees the “no hostnames in repository” rule stays enforced for future changes. |
+| # | Observation | Why it’s a strength |
+|---|-------------|----------------------|
+| **S‑1** | **Two‑step verification of the base directory** – `fetchVerifiedDirectory` checks the trust bundle, verifies the installed directory’s signatures against the policy, and aborts if the quorum is not met. | Guarantees that *every* edit starts from an authority‑verified baseline, eliminating the “install on a forged base” attack (T‑02‑42). |
+| **S‑2** | **Human‑readable diff & explicit confirmation** (`editDirectory` prints `directory.Diff` and prompts for `y/N`). | Enforces the “admin sees exactly what they are signing” principle (D‑03, D‑04). |
+| **S‑3** | **Install‑handler deletes only newly‑bound pending credentials** (`newlyBound` set → `DeleteBound`). | Keeps pending invites untouched (F‑6) and prevents accidental loss of unrelated invitations (T‑02‑99). |
+| **S‑4** | **Status cache invalidation on every install** (`dropStatus` called immediately after `InstallDirectory`). | Guarantees that subsequent reads see the freshly installed version, closing the race identified in the review feedback (T‑02‑101). |
+| **S‑5** | **Explicit body‑size limit derived from `wire.MaxDirectoryFrame`** (`maxDirectoryInstallBody`). | Prevents DoS via oversized payloads while still permitting the maximum size the signer can accept (covers the earlier “2 MiB” mismatch). |
+| **S‑6** | **Comprehensive test matrix** – unit tests for diff, pending checks, install body limits, directory mirror behavior; e2e scenarios for enroll‑approve, concurrency, quorum, reinvite. | Provides high confidence that edge cases are exercised (addresses the “missing edge coverage” concern). |
+| **S‑7** | **Run‑book (`docs/runbooks/enroll‑user.md`)** documents the entire enrollment flow, including residual risk of a compromised server. | Improves operational security and user awareness (Pitfall 13). |
+| **S‑8** | **Explicit handling of stale proposals** – `directory sign`/`install` refuse with a clear “directory changed since it was read; discard DIR and re‑run …” message. | Prevents admins from repeatedly applying the same outdated proposal (T‑02‑44). |
+| **S‑9** | **`InstallDirectory` RPC added to signer API** with matching wire types and a fake‑signer implementation for tests. | Guarantees that the server‐side code can be exercised in CI without a live signer, preserving test isolation. |
+| **S‑10** | **Support for quorum > 1** – `--out` proposal mode, separate `directory sign` and `directory install` commands, signature counting. | Future‑proofs the design for Phase 4 when admin quorum will increase. |
 
 ---
 
-#### Risk Assessment  
+###### 3. Concerns  
 
-| Risk | Likelihood | Impact | Overall | Mitigation |
-|------|------------|--------|---------|------------|
-| **Host lock-out due to mis-configured `AuthorizedPrincipalsFile`** | Medium (depends on manual copy-paste) | High – could prevent all SSH access to the homelab host. | **High** | `sshd -t` validation, drop-in rollback, and the “control login before/after” check already present. Add an extra `ssh -o BatchMode=yes -i /dev/null` sanity-check after reload. |
-| **Man-in-the-middle on TLS (pin stale / mismatched)** | Low-Medium (pin stored in `kr.env`) | Medium – could let an attacker present a rogue cert and still pass the pin check if the pin is not refreshed. | **Medium** | Pin-rotation procedure, log of observed pin on each client, and optional server-side pin-verification in the CLI. |
-| **Phishing / UI-spoofing of fingerprint** | Medium (human comparison) | Medium – if the owner mis-compares, a rogue server could sign a request. | **Medium** | Automate fingerprint verification (see suggestion), and display the fingerprint in a *read-only* `<code>` block with a Content-Security-Policy that disallows scripts from modifying it. |
-| **CI/Ruleset mismatch causing merge block** | Low (the plan includes verification) | Medium – blocks the merge gate, stalls the phase. | **Low** | Add a `pre-merge` GitHub Action that validates the JSON schema and that the new contexts are present before the PR can be approved. |
-| **Expiration handling bug (certificate stays beyond TTL)** | Low (covered by D-15) | High – could undermine the “short-lived” security promise. | **Medium** | Add a unit-test for the agent’s lifetime handling on each platform, and a runtime watch-dog in the CLI that logs a warning if the key is still present after TTL. |
-| **Leakage of homelab host names / tailnet** | Low (prohibited in steps) | Medium – could give an attacker a target for future attacks. | **Low** | Grep-based diff check (already in Task 5) plus the pre-commit hook suggested above. |
+| # | Concern (severity) | Explanation & Possible Impact |
+|---|--------------------|--------------------------------|
+| **C‑1 (MEDIUM)** | **Potential race between status cache drop and concurrent reads** – `dropStatus` is called *after* the `InstallDirectory` RPC returns, but the install may have succeeded on the signer *before* the server knows it (network delay, signer error). If a concurrent `GET /admin/directory` reads the *old* cached status before `dropStatus` executes, it could serve a stale directory. | The plan’s tests (`install_then_immediate_edit_sees_new_base`) simulate the case, but they rely on the clock being frozen. In production, a short window (milliseconds) may still expose a stale view. Mitigation could be to **atomically invalidate the cache before returning** (e.g., drop status *immediately* after sending the request, not after the response). |
+| **C‑2 (MEDIUM)** | **Error handling when `InstallDirectory` fails due to signer‑side refusal** – The server forwards the error verbatim (`json {"error": …}`) but also calls `dropStatus`. If the refusal is due to a *temporary* signer issue (e.g., overload) the client may be forced to re‑try unnecessarily and lose pending rows that were *not* installed. | Ensure that `dropStatus` is only called on *definitive* successes, or that the server distinguishes permanent refusals from transient errors (e.g., via gRPC codes). |
+| **C‑3 (MEDIUM)** | **`DeleteBound` transaction granularity** – The function deletes pending credentials in a single transaction, then possibly deletes the pending account row. If the transaction fails (DB error) after the signer has already committed the new directory, the system could end up with **orphaned pending rows**. | The plan does not specify retry or compensation logic. Adding an explicit *compensating* rollback or making the DB operation *idempotent* would improve robustness. |
+| **C‑4 (LOW)** | **Missing verification of *newly bound* credential existence before signature** – The server checks that each newly bound credential is pending for the user, but it does **not** verify that the credential actually belongs to the same user in the *installed* directory before the edit. A malicious admin could craft a proposal that swaps a credential from user A to user B, and if the pending check passes (because both are pending), the install would bind the credential to the wrong user. | The directory validation (`Validate` + `CheckPolicy`) should also enforce that each credential’s `User` field matches the intended user. If not already done, add a validation rule. |
+| **C‑5 (LOW)** | **`maxDirectoryInstallBody` calculation complexity** – The body‑size limit is derived from `wire.MaxDirectoryFrame` plus a static envelope size. If the wire framing constants change (e.g., a future bump of the max directory size) the computed limit may become out‑of‑sync, causing inadvertent 413 errors. | Consider defining the limit as a **named constant** (`wire.MaxDirectoryInstallBody`) computed in the wire package, and re‑use it both in the server and the documentation/tests. |
+| **C‑6 (LOW)** | **`fetchVerifiedDirectory` result when no directory is installed** – The helper returns a struct with `Version == 0` and `Dir == nil`. Some callers (`directory sign`) treat version 0 as a *genesis* case and automatically start a new directory. However, if the server reports *no* directory but the signer actually has an *in‑flight* install (e.g., just submitted but not yet reflected), a concurrent admin could create a *different* genesis version, leading to a *directory version conflict*. | The plan’s mirror logic should treat a *missing* directory as a *temporary* state and possibly retry after a short back‑off, rather than proceeding immediately. |
+| **C‑7 (MEDIUM)** | **Dependency on `go-webauthn` only on the server side** – Although the signer’s `webauthn-assertion` verifier is pure stdlib, the server still imports `go-webauthn` for registration. This introduces a **transitive dependency** (`fxamacker/cbor`, `golang-jwt/jwt/v5`, etc.) that the **signer’s dependency firewall** must block. The plan states a “human‑verify” checkpoint, but no automated test to ensure the signer build graph stays clean. | Ensure that the CI pipeline includes a `scripts/dep‑firewall.sh` run on the *signer* module after the server changes, and verify it still passes. |
+| **C‑8 (LOW)** | **Potential for *credential reuse* across users** – The plan mentions a test `duplicate_credential_across_users_not_signed`. The directory validation should reject any duplicate credential IDs *anywhere* in the directory, not just during install. If the `Validate` function only checks at install time, a malicious admin could pre‑sign a directory that already contains duplicates (though the signer will reject). | Double‑check that `directory.Validate` enforces *global uniqueness* of credential IDs. |
+| **C‑9 (MEDIUM)** | **Use of `--yes` on non‑TTY** – The CLI’s `editDirectory` aborts unless `--yes` is supplied when stdin is not a TTY. In CI or automation scenarios, an admin may want to run the command non‑interactively with a pre‑generated diff file. The plan does not expose an explicit “accept‑diff‑from‑file” flag. | Consider adding a `--diff-file` or `--auto‑accept` flag for scripted usage, especially for quorum signing where a second admin may only need to add their signature. |
+| **C‑10 (LOW)** | **Audit verify compatibility** – The new leaf kind `KindDirectoryInstall` (value 7) and `KindLoginIssue` (value 8) will break older `audit verify` binaries (they refuse unknown kinds). The plan notes this, but does not propose a migration path. | Document that a new audit binary is required for Phase 2 logs, or add a compatibility shim that treats unknown leaf kinds as “unknown but ignore”. |
 
 ---
 
-#### Bottom Line  
+###### 4. Suggestions  
 
-The plan is **well-aligned** with the Phase 2 success criteria and the project’s security-first stance.  The biggest open-ended risk is the **human-in-the-loop fingerprint comparison**; automating that check would raise the assurance level from *medium* to *high* without adding significant complexity.
+| # | Recommendation |
+|---|----------------|
+| **Sg‑1** | **Invalidate the status cache *before* returning from the install handler** (i.e., call `dropStatus` immediately after sending the `InstallDirectory` request, not after receiving the response). This eliminates the tiny window where a concurrent read could see a stale directory. |
+| **Sg‑2** | **Distinguish permanent refusal vs. transient signer errors** in `directory` POST handling. Only call `dropStatus` on permanent refusals (e.g., `directory_version_chain`, `credential_not_pending`). For transient errors, return a *503* with a retry‑after header and keep the cache. |
+| **Sg‑3** | **Add a validation rule** in `internal/directory/validate.go` that each credential’s `User` matches the owner field in the directory. This prevents credential‑swap attacks during admin edits. |
+| **Sg‑4** | **Expose a `--auto‑accept` flag** for `keyroster directory sign` and `install` to allow non‑interactive quorum signing (e.g., `keyroster directory install DIR --yes`). This aids automation without compromising the default interactive safety. |
+| **Sg‑5** | **Move `maxDirectoryInstallBody` calculation** into the `wire` package (e.g., `wire.MaxDirectoryInstallBody`). Export it and use the constant both in the server route and in the test. This avoids future drift if `wire.MaxDirectory` changes. |
+| **Sg‑6** | **Add a short retry loop in `fetchVerifiedDirectory`** when the server reports no directory but the signer is known to have an in‑flight install (e.g., back‑off 200 ms and retry once). This reduces the risk of two admins diverging on a genesis version. |
+| **Sg‑7** | **Automate the dependency‑firewall check** for the *signer* after this plan merges (run `scripts/dep‑firewall.sh` targeting the signer module). Add a CI check that fails if any new import appears in the signer’s `go.mod`. |
+| **Sg‑8** | **Document the required audit‑verify version bump** in `docs/CHANGELOG.md` and in the release notes, and provide a compatibility shim script that points users to the new binary. |
+| **Sg‑9** | **Add unit tests for duplicate credential IDs** across users (`duplicate_credential_across_users_not_signed`) that directly invoke `directory.Validate` to ensure the check is performed before any signing. |
+| **Sg‑10** | **Consider optimistic concurrency control** for the `EditDirectory` path: include the base directory’s SHA‑256 in the POST payload and have the signer reject mismatched `prev` (already done for install) – confirm that the client propagates the exact error message. |
 
-If the open questions (Q1-Q8) are answered positively—i.e. the audit-log format is stable, TLS pins are derived from the current server cert, the Windows named-pipe name is predictable, and the CI jobs for macOS are reliable—then the plan can be executed with **moderate confidence**.  Incorporating the suggested mitigations (especially automated fingerprint verification, TLS-pin freshness checks, and JSON schema validation) would reduce the residual risk to **low** and streamline the merge-gate process.
+---
+
+###### 5. Risk Assessment  
+
+| Risk Level | Rationale |
+|------------|-----------|
+| **MEDIUM** | The majority of the design is robust and well‑tested. However, the **directory mirror / status‑cache interaction** introduces a subtle race condition that could expose a stale directory for a brief window, potentially leading to lost updates or conflicting installs. The plan’s tests cover the happy path, but production timing variations could still surface the issue. Additional safeguards (Sg‑1, Sg‑2) would lower this risk to **LOW**. |
+| **Residual Risks** | • A compromised server could still present a fake fingerprint during enrollment (documented residual). <br>• Stale proposals may be attempted repeatedly if the “discard DIR and re‑run …” message is not heeded by operators. <br>• Dependency‑firewall reliance on a manual checkpoint could be missed in future merges. |
+
+**Overall risk:** **MEDIUM** – acceptable for Phase 2, provided the suggested mitigations are applied before the next phase begins.
+
+---
+
+###### 6. Verification Checklist (file:line evidence)
+
+| Requirement | Expected Code / Test | Status (open question / inferred) |
+|-------------|----------------------|-----------------------------------|
+| **Directory diff implementation** (`internal/directory/diff.go`) returns stable, sorted lines. | Should iterate over sorted slices of users/roles etc. | *Open question* – verify sorting logic. |
+| **`fetchVerifiedDirectory`** verifies trust bundle and directory signatures. | Calls `serverclient.New`, `Trust`, GET `/admin/directory`, `directory.Parse`, `directory.VerifySignatures`. | *Open question* – confirm error handling if version 0. |
+| **`editDirectory` pipeline** (base fetch → mutate → sort → validate → diff → confirm → sign). | Implemented in `cmd/keyroster/dirpipe.go`. | *Open question* – confirm use of `ssh‑sig` via `agentSigner`. |
+| **`InstallDirectory` RPC** added to signer API (`internal/server/signer.go`). | New method `InstallDirectory(ctx, req)`. | *Open question* – verify wire type (`TypeInstallDirectory`). |
+| **`socketSigner`** forwards `InstallDirectory` to signer via unix socket. | In `internal/server/signer.go`. | *Open question* – confirm `InstallDirectory` request encoding. |
+| **`fakeSigner`** supports forced and chain modes for install. | Added to `internal/server/server_test.go`. | *Open question* – verify chain behavior (prev‑hash check). |
+| **Server route registration** in `(*Server).Handler()` (GET `/admin/directory`, POST `/admin/directory`, GET `/admin/users`). | Should add `requireAdmin` and `requireAdminLimit(maxDirectoryInstallBody, …)`. | *Open question* – confirm presence of three handlers. |
+| **`maxDirectoryInstallBody`** computed from `wire.MaxDirectoryFrame`. | Defined in `internal/server/directory.go`. | *Open question* – check constant arithmetic. |
+| **Pending credential check** (`PendingCredentialUser`) used in install handler. | Called before forwarding. | *Open question* – ensure it returns error for non‑pending. |
+| **`DeleteBound`** deletes only newly bound credentials and cleans up pending accounts when appropriate. | Implemented in `internal/serverdb/db.go`. | *Open question* – verify SQL logic (invite‑used condition). |
+| **Unit tests** for directory install body limit, mirror behavior, edge cases, etc. | Files: `internal/server/directory_test.go`, `internal/server/admin_test.go`, `cmd/keyroster/dirpipe_test.go`, `test/e2e/approve_test.go`. | *Open question* – confirm they cover all listed cases. |
+| **Run‑book `enroll-user.md`** includes residual risk note, `--reinvite` flow, TLS‑root PEM handling. | Updated by plan. | *Open question* – verify content. |
+
+*All of the above are *inferred* from the plan description; the reviewer could not open the actual files to provide concrete line numbers.*
+
+---
+
+###### 7. Final Verdict  
+
+- **Implementation completeness:** The plan appears to cover all required functionalities for binding passkeys through a quorum‑signed directory, including server‑side mirroring, CLI pipelines, body‑size limits, pending‑credential cleanup, and comprehensive tests.  
+- **Security posture:** Strong – it enforces verification of authority before any mutation, uses explicit user‑visible diffs, and logs every directory install. Minor residual risks are documented.  
+- **Potential blockers:** The race condition around status cache invalidation and the handling of transient signer errors need careful attention; the suggested mitigations should be applied before merging.  
+- **Recommendation:** Approve the plan **provided** the owner implements the mitigations (Sg‑1, Sg‑2, Sg‑3) and validates the missing concrete evidence (e.g., asserts that `directory.Validate` rejects duplicate credential IDs). After the PR is merged, run the full CI matrix, especially the e2e tests, and verify that the new route respects the calculated body limit.  
+
+*Proceed to the merge gate (Task 3) once the above concerns are addressed.*
+### 02-10
+
+##### 02-10
+
+###### Summary
+Plan **02‑10** implements the first passkey‑only web sign‑in flow, a read‑only account page, and a session subsystem. It introduces two new SQLite tables (`web_challenges`, `sessions`), a set of HTTP handlers (`GET /login`, `POST /api/v1/web/login/begin`, `POST /api/v1/web/login/finish`, `GET /account`, `POST /logout`), a strict CSP, per‑IP and per‑username rate limits, and extensive logging. The design follows the “signer‑disposes” rule: the server never authorises certificate issuance; it merely verifies the WebAuthn assertion against the installed, quorum‑signed directory. Overall the plan is well‑structured, but a few edge‑cases and operational details need tighter handling.
+
+###### Strengths
+- **Clear separation of authority** – the server only verifies the assertion; the signer validates the request and issues the certificate (see “Signer‑side verification” in D‑17). This respects the core security boundary.
+- **Session identifiers stored hashed** – `sessions.id_hash` stores `SHA‑256(sessionID)`, not the raw ID (plan description, `TouchSession` statement). This mitigates session‑fixation and credential‑leakage.
+- **Session lifetime bound in a single atomic SQL statement** – the `UPDATE … RETURNING user_name, cred_id` pattern (referenced in the plan) guarantees that idle and absolute expiry are evaluated atomically, preventing race conditions.
+- **Credential binding** – each session records the credential ID that opened it; `withSession` checks that the credential is still bound to the user, automatically terminating sessions on credential revocation/disabling (review finding 02‑10‑F2).
+- **Uniform 404 for all non‑usable usernames** – prevents user enumeration at the login‑begin stage (requirement “AUTH‑01”). The same response is used for unknown, pending, or disabled accounts.
+- **Strict CSP with `connect-src 'self'`** – prevents the page from leaking data to external origins and satisfies the UI‑01 requirement.
+- **Per‑IP and per‑username rate limiting** – re‑uses the existing LRU limiter from 02‑07, capping brute‑force attempts without unbounded memory growth (review finding 02‑10‑F6).
+- **Comprehensive slog events** – every sign‑in success, failure, rate‑limit hit, and logout is logged with `event`, `user`, `ip`, `reason`, and no secrets (review finding 02‑10‑F15). This supports auditability without exposing credentials.
+- **Graceful handling of signer outages** – both `begin` and `finish` return HTTP 503 with a generic error page when the signer is unavailable, and existing sessions are retained (review finding 02‑10‑F1). This fails closed without silently granting access.
+- **Testing coverage** – end‑to‑end e2e test (`TestWebSignInEndToEnd`) exercises the whole flow, including directory installs through the server, and unit tests cover the refusal matrix, session expiry, and rate‑limit behavior.
+
+###### Concerns
+| Severity | Issue |
+|----------|-------|
+| **MEDIUM** | **Potential stale‑session exposure during a brief signer‑unavailability window.** While the plan keeps existing sessions alive when the signer is down, a client could reuse a session after a disable/credential‑revocation that the server cannot see because the status cache is stale (up to 5 s). An attacker with a compromised server could deliberately keep the signer down to prolong a revoked session. |
+| **MEDIUM** | **No explicit CSRF token for the logout POST.** The plan relies on `SameSite=Strict` and `CrossOriginProtection`, but a same‑site attacker (e.g., a malicious extension) could still trigger a POST. Adding a double‑submit CSRF token would harden logout. |
+| **LOW** | **Missing explicit handling of clock‑skew for challenge expiry.** The challenge TTL is 120 s; if the client’s clock is far off, the server may reject a valid assertion as “expired”. There is no fallback or error message guiding the user to correct their clock. |
+| **LOW** | **Browser support detection only writes a generic error message.** The plan’s `app.js` checks `window.PublicKeyCredential` and disables the button, but does not guide the user to install a compatible browser or platform authenticator. This may lead to a poor UX on older browsers (UNVERIFIED on macOS). |
+| **LOW** | **Rate‑limit key sanitisation.** The per‑username limiter keys on the raw `user` string after regex validation, but usernames containing Unicode or edge‑case characters could bypass the limiter if they slip past `directory` validation (unlikely but worth confirming). |
+| **LOW** | **No explicit `SameSite=None` handling for cross‑origin embeds.** If the UI ever embeds resources from another origin (e.g., a CDN for static assets), the current CSP would block them. This is out of scope now but could cause future regressions. |
+| **LOW** | **Potential for session‑hash collisions in the DB.** Using SHA‑256 of a 256‑bit random ID is effectively collision‑free, but the plan does not enforce uniqueness at the DB schema level (`UNIQUE` constraint). An accidental duplicate could cause session takeover. |
+
+###### Suggestions
+- **Add a short‑lived status cache invalidation hook on signer‑unavailability.** When the signer returns an error, proactively invalidate the status cache to force a fresh check on the next request, reducing the window where a revoked credential could still be used.
+- **Introduce a CSRF nonce for logout.** Generate a per‑session random token stored server‑side and require it as a hidden field in the logout form; verify it before deleting the session.
+- **Provide clearer error messages for clock‑skew issues.** Detect when a challenge fails due to expiry and return a `400` with a message like “Your device clock appears out of sync; please correct it and retry.”
+- **Add a unique index on `sessions.id_hash`.** This will guarantee that duplicate session IDs cannot be inserted (even though the probability is astronomically low) and will surface any programming errors early.
+- **Explicitly document the 5‑second status‑cache window** in the security documentation, noting the residual risk and the mitigations (short TTL, audit logs).
+- **Consider adding a “last‑sign‑in” timestamp to the account page** (even as a non‑authoritative display) for future usability; document that revoking sessions is a later‑phase feature (UI‑02).
+- **Validate that the per‑username limiter only processes normalized usernames.** Ensure the same canonicalisation used for directory entries is applied before the limiter key is generated.
+
+###### Risk Assessment
+**Overall risk: MEDIUM**
+
+The implementation meets the core security goals: it isolates credential verification to the signer, stores session IDs only as hashes, binds sessions to specific credentials, and enforces strict expiry. The biggest residual risk is the brief window (≤ 5 s) where a revoked credential or disabled user could still be used while the server’s status cache is stale, especially if an attacker can induce signer unavailability. This risk is mitigated by short session lifetimes (1 h idle, 12 h absolute) and by logging every sign‑in event. Adding the suggested cache invalidation and CSRF token would lower the risk to **LOW**.
+### 02-11
+
+##### Plan 02‑11 – Roles, Groups, Host‑Groups and Principals Renderer  
+
+###### 1. Summary  
+The plan implements the core **AUTHZ‑01** requirement by introducing a signed *directory* that stores users, groups, roles and host‑groups, and by providing a shared renderer that outputs the exact `AuthorizedPrincipalsFile` a host needs.  New CLI sub‑commands (`keyroster role …`, `keyroster group …`, `keyroster host‑group …`, `keyroster host principals`, `keyroster host ca‑key`) are added, together with a comprehensive test suite (unit tests for the renderer, e2e tests that exercise a real `sshd`, and refusal‑case tests).  Documentation (`docs/runbooks/host‑setup.md`) explains the manual host‑side steps required in Phase 2.  
+
+Overall the plan is coherent, follows the “signer‑only authority” rule, and stays within the bounded scope of Phase 2 (no host‑agent, no KRL, no revocation).  
+
+---
+
+###### 2. Strengths  
+
+| Area | What works well | Evidence |
+|------|-----------------|----------|
+| **Signed authority model** | All mutating commands (`role add|update|remove|grant|revoke`, `group …`, `host‑group …`) use the existing `editDirectory` pipeline that signs a new directory version with the admin quorum (via SSH‑SIG).  The signer validates the quorum before installing the directory. | `cmd/keyroster/dirpipe.go` (editDirectory) – uses `signerclient.InstallDirectory` and verifies signatures (`trust.CountPinnedSigners`). |
+| **Renderer consistency** | `internal/directory/render.go` centralises the computation of the principal set (`AccountPrincipals`) and the file output (`RenderPrincipalsFile`).  Both CLI (`host principals`) and the future Phase 3 agent will call the same function, guaranteeing byte‑for‑byte identity. | `render.go` – functions `AccountPrincipals` and `RenderPrincipalsFile` (lines 12‑45, 48‑78). |
+| **Error handling for empty or unknown state** | • `ErrNoDirectory` for “no directory installed”.  <br>• `ErrUnknownHostGroup` for a miss‑typed host‑group.  <br>• Empty role list or unmapped account returns an *empty* principals file (two header lines only) with exit‑code 0, matching the desired “revoke by rendering an empty file”. | Errors defined in `render.go` (lines 8‑10) and returned by both `AccountPrincipals` and `RenderPrincipalsFile`. |
+| **Deterministic header** | The header embeds the SHA‑256 of the directory’s canonical bytes, guaranteeing that the file can be audited against the signer’s status report. | Header construction uses `sha256.Sum256(d.Canonical())` (line 68). |
+| **Comprehensive test coverage** | • Unit tests for the renderer covering unknown host‑group, nil directory, empty role list, header hash, duplicate principals. <br>• Role‑/group‑related refusal tests (wildcards, commas, TTL caps, extension rules, grant‑remove constraints). <br>• End‑to‑end test `TestRolesHostPrincipalsEndToEnd` that creates a real `sshd`, installs the rendered file, verifies acceptance, then unmaps and verifies rejection. | Test files listed in the plan (`internal/directory/render_test.go`, `cmd/keyroster/role_test.go`, `test/e2e/roles_test.go`). |
+| **Documentation** | `docs/runbooks/host‑setup.md` provides a step‑by‑step manual host configuration guide and clearly labels the UNVERIFIED parts (real‑host copy & reload) to avoid confusion. | File path noted in the plan; the runbook follows the “admin workstation renders → copy” workflow. |
+| **Security‑first design** | • No new external dependencies beyond those already locked (only `internal/directory` added). <br>• All inputs validated with the same `cert.ValidatePrincipals` regex used by the signer. <br>• The renderer does not expose any secret material (only principals and a hash). | Validation call in `render.go` (`cert.ValidatePrincipals(p)` line 25). |
+
+---
+
+###### 3. Concerns  
+
+| Severity | Issue | Why it matters | Suggested mitigation |
+|----------|-------|----------------|----------------------|
+| **MEDIUM** | **Potential nil‑dereference in `host principals` when `fetchVerifiedDirectory` returns a non‑nil error but a partially‑filled struct**. The plan states the command checks `Version == 0` and treats that as “no directory”. If the helper were to return a `Directory` pointer with `nil` fields in an error case, the CLI could panic when calling `RenderPrincipalsFile`. | A panic would crash the CLI and could leak stack traces to the console, breaking the “no hidden failures” principle. | Add a defensive check in `host principals`: if `err != nil` return the error directly, *or* ensure `fetchVerifiedDirectory` never returns a non‑nil `Directory` on error (documented). |
+| **MEDIUM** | **Host‑group name validation** – the plan does not explicitly state a naming policy (e.g., only alphanumerics, no upper‑case). An admin could create a host‑group with an upper‑case name, which on Windows would not match the lower‑cased account name required by the OpenSSH Windows agent. | Could lead to silent access loss on Windows hosts (the principals file would be generated under a mismatched group name). | Enforce a strict regex for host‑group names (`^[a-z0-9][a-z0-9._-]*$`) in `directory.Validate` and surface a clear error. |
+| **LOW** | **Concurrency race on directory install** – multiple admins could issue concurrent `editDirectory` mutations, causing the signer to reject one due to a version mismatch. The plan does not describe retry logic. | Users may see “directory install failed: version mismatch” without guidance. | Document a simple client‑side retry: on `directory_not_successor` error, re‑fetch the latest directory, re‑apply the intended change, and retry once. |
+| **LOW** | **Banner / warning for software CA keys (KEY‑06)** – the CLI and UI must display the warning on every command, but `host principals` and `host ca‑key` may be run on a machine that does not have the server reachable (e.g., offline). The plan does not guarantee the warning is shown in that scenario. | Could give a false sense of security when using a software‑key CA. | Ensure the warning flag is derived from the signer’s `Status` response, which is cached locally; if the server cannot be reached, fall back to the last known custody state and still emit the banner. |
+| **LOW** | **Test harness newline handling** – the e2e test trims exactly one trailing newline before splitting the renderer output. If a future change adds an extra blank line, the test may silently pass (because the trim removes it) while the actual file delivered to `sshd` would contain a stray blank line. | Could cause a mismatch between the file used in production and the test expectations. | Instead of trimming, assert that the output ends with a **single** newline (`strings.HasSuffix(out, "\n") && !strings.HasSuffix(strings.TrimSuffix(out, "\n"), "\n")`). |
+| **LOW** | **Documentation drift** – the runbook currently says “step 3: `keyroster host principals … > /etc/ssh/principals/<account>`”. If the host‑group name changes later, the runbook may become outdated. | Operators might copy the wrong file or forget to re‑render after a role change. | Add a note: “Re‑run step 3 after any role or host‑group change; the header line includes the directory version to help detect stale files.” |
+
+---
+
+###### 4. Suggestions  
+
+1. **Add explicit name‑validation helpers** in `internal/directory/validate.go` for host‑group, role, and group names, re‑using the existing principal regex where possible.  
+2. **Document the retry pattern** for directory install conflicts in the CLI help output (`keyroster role add …`), e.g., “If the install fails because the directory version changed, run the command again.”  
+3. **Expose the header hash** in the CLI output of `host principals` (`--verbose` flag) so operators can visually verify it matches the hash reported by `keyroster directory show`.  
+4. **Add a unit test for the `ErrNoDirectory` path** in `host principals` by mocking `fetchVerifiedDirectory` to return `Version == 0`. This guarantees the command exits non‑zero and produces no output.  
+5. **Ensure the software‑key warning is emitted** even when the server cannot be reached (fallback to cached custody info). Add a small test that simulates a network failure and checks the banner is printed.  
+6. **Update the runbook** to explicitly state that the rendered file must be **copied as‑is** (including the header) and that any modification will break the hash verification guarantee.  
+
+---
+
+###### 5. Risk Assessment  
+
+**Overall risk: MEDIUM**  
+
+*Justification* – The changes introduce a new mutable data model (the directory) and a renderer that directly influences host access.  The plan handles most edge cases (empty mappings, unknown groups, nil directory) and enforces the same principal validation used by the signer, which keeps the attack surface tight.  The primary residual risk lies in operational misuse (e.g., forgetting to re‑render after a role change) and in concurrency conflicts during directory install, both of which are mitigated by the audit log and can be addressed with modest client‑side guidance.  No new external dependencies are added, and the code stays within the signer‑only authority boundary, preserving the core security model.  
+
+---  
+
+*Prepared for the review of plan **02‑11** (Roles, Groups, Host‑Groups & Principals Renderer).*
+### 02-12
+
+##### 02-12
+
+###### Summary
+The plan implements the end‑to‑end **Passkey Login MVP** – a user runs `keyroster login`, sees a fingerprint, approves the request in a browser, and receives a short‑lived SSH certificate that is automatically loaded into the SSH agent (or the custom Windows agent) and expires with the certificate.  The design respects the “server proposes, signer disposes” security principle, adds a dedicated `Login` method to the signer seam, stores login sessions in a new `login_sessions` table with automatic reaping, and provides comprehensive unit, integration, and e2e tests across Linux, macOS, and Windows.  Overall the plan is well‑structured, follows existing patterns, and appears to meet the Phase 2 success criteria.
+
+###### Strengths
+- **Clear authority boundary** – the signer is the only component that can issue certificates; the server only mediates the request and never signs. (see `internal/server/login.go` → `s.signer.Login`).
+- **Replay‑ and phishing‑ resistant flow** – PKCE, random `state`, one‑time `code` (hashed in DB), and fingerprint comparison on both CLI and approval page (generated from the immutable request bytes).  
+- **Robust DB design** – `0004_login.sql` creates `login_sessions` with columns for all needed metadata, and `CreateLogin` atomically deletes expired/redeemed rows (reaper) before inserting a new row, limiting table growth.  
+- **Comprehensive rate‑limiting** – per‑IP (20/min, burst 10) and per‑user (10/min) limits are applied to all login‑related endpoints (`internal/server/ratelimit.go`).  
+- **Consistent error handling** – all refusals on the assertion endpoint return a uniform 401 JSON (`{"error":"approval failed"}`); the signer’s refusal maps to 403 with the sentinel only logged.  
+- **Platform‑specific agent handling** – Unix uses the existing `ssh‑agent` via `golang.org/x/crypto/ssh/agent` with lifetime constraints; Windows spawns an in‑process agent via `go-winio` and the `winagent` package, avoiding the broken inbox agent.  
+- **Zero‑disk private key** – the CLI generates an Ed25519 key in memory, adds it to the agent, and immediately `defer clear(priv)` (checked with `grep -n 'defer clear(priv)' cmd/keyroster/login.go`).  
+- **Full test coverage** – unit tests for every refusal case, per‑OS integration tests (`login_unix_test.go`, `login_windows_test.go`), and an end‑to‑end test exercising a real `sshd` instance (`test/e2e/login_test.go`).  
+- **Audit‑log export support** – `internal/audit/export.go` now knows how to decode the new leaf kinds (7 = directory install, 8 = login issue) and includes useful fields such as `authenticator_data_len`, `authenticator_flags`, and `key_fingerprint`.  
+- **No new runtime dependencies** – the only added imports (`go-winio` on Windows) are already allowed by the dependency firewall; all new code lives in the signer‑trusted package space.  
+- **Safety for clock skew** – the CLI aborts if the server‑client time difference exceeds 60 s, preventing a user from unintentionally approving a request that the signer will reject because of its ±5 min window.  
+
+###### Concerns
+| Severity | Issue |
+|----------|-------|
+| **HIGH** | **Potential race on concurrent redeem** – the `RedeemLogin` UPDATE is correct (single‑row conditional), but the surrounding code must ensure the DB transaction is serialized. If the underlying SQLite connection is shared without `BEGIN IMMEDIATE`, two concurrent redeem attempts might both read the row as “approved” before either writes, causing both to think they succeeded. The test `concurrent_redeem_once` covers this, but production must guarantee the same isolation level. |
+| **HIGH** | **Windows agent lifecycle** – the custom agent is started on‑demand via `winagent.Ensure`. If the process crashes or is terminated before the certificate expires, the key remains in the OS‑protected registry (as observed for the inbox agent). The plan does not specify a watchdog or cleanup mechanism, which could leave stale keys on the system. |
+| **MEDIUM** | **Unauthenticated disclosure of role data** – `GET /api/v1/login/options` returns a user’s role names, principals, and TTL caps without authentication. Although the threat is deemed low, an attacker could enumerate users and infer privilege levels. Rate limits mitigate abuse, but a more privacy‑preserving design (e.g., require the user to be authenticated) would be stronger. |
+| **MEDIUM** | **Clock‑skew handling on the server side** – the server accepts a request if `|now – CreatedAt| ≤ 120 s`. If the client’s clock is fast, the server may reject a legitimate request that the client believes is fresh, leading to a poor UX. Conversely, a slow client could be accepted but later the signer refuses due to its own ±5 min window. Consider tightening the server’s check to use the `CreatedAt` value only after the client has already verified the skew. |
+| **MEDIUM** | **PKCE verifier format validation** – the plan enforces a 43‑character Base64‑URL string before any DB access. However, malformed Base64 strings could still pass length check (e.g., containing `+` or `=`). The plan claims a strict check, but the implementation must also reject characters outside the URL‑safe alphabet. |
+| **LOW** | **Potential DoS via login‑session table growth** – although the reaper cleans up rows on each insertion, a burst of login‑begins (e.g., automated script) could temporarily fill the table before cleanup runs. The current limits (20/min per IP) should keep this in check, but monitoring the table size is advisable. |
+| **LOW** | **Open‑redirect safety** – the server builds the loopback URL using only the stored port, but if the `redirect_port` parameter were ever reflected elsewhere (e.g., in logs or UI), an attacker might try to manipulate it. Ensure the port is always validated to be within 1024‑65535 and never logged to untrusted destinations. |
+| **LOW** | **Missing test for code‑verifier mismatch timing** – the plan tests `wrong_verifier` (code reuse) but does not explicitly test that a malformed verifier (e.g., wrong length) does *not* burn the code. The implemented order appears correct, yet an explicit unit test would give confidence. |
+
+###### Suggestions
+- **Enforce SQLite write‑locking** – use `BEGIN IMMEDIATE` or `PRAGMA journal_mode=WAL` for the `login_sessions` table to guarantee the atomicity of the `RedeemLogin` UPDATE under concurrency. Document this in the migration (`0004_login.sql`).  
+- **Add Windows agent health check** – expose an optional `keyroster agent status` command that verifies the agent process is still alive and removes any stray keys on shutdown. Consider automatically terminating the agent when its last key expires.  
+- **Privacy‑enhance the options endpoint** – require a minimal authentication token (e.g., a short‑lived JWT issued after the user registers a passkey) before returning role details, or at least mask the principal list to “available roles” without exposing full principal strings.  
+- **Improve clock‑skew UX** – when the client detects > 60 s skew, suggest running `keyroster sync-time` (or simply `ntpdate`) rather than aborting outright. On the server side, consider allowing a slightly larger window (e.g., 180 s) but reject the request later if the signer’s clock window is exceeded.  
+- **Strengthen PKCE format validation** – implement a regex like `^[A-Za-z0-9_-]{43}$` and reject any string failing it before DB access. Add a unit test for a string containing `+` or `=`.  
+- **Monitor login_sessions size** – add a metric (e.g., Prometheus gauge) that reports the row count. Alert if it grows beyond a threshold (e.g., 10 k rows).  
+- **Document loopback URL handling** – explicitly note in the server code that the redirect URL is never logged and is constructed only from the stored port, to avoid accidental leakage.  
+- **Add explicit test for verifier‑format rejection** – a test case where the verifier is 42 chars, contains illegal characters, or has padding, confirming that the code remains redeemable afterwards.  
+
+###### Risk Assessment
+**Overall Risk: MEDIUM**
+
+The design follows the security‑first model, with the signer as the sole source of authority, and includes solid replay‑ and phishing‑resistance mechanisms. The highest risks stem from concurrency handling of the redeem step (potential double‑issue) and the Windows agent’s lifecycle, both of which are mitigated by existing tests but require production‑level guarantees (transaction isolation and cleanup). The unauthenticated disclosure of role data is a low‑impact information leak. With the suggested mitigations—especially enforcing SQLite transaction atomicity and adding a Windows agent watchdog—the implementation can be considered secure and ready for the Phase 2 MVP release.
+### 02-13
+
+#### Review of Plan **02‑13** – “Homelab: real bundle v3 with the RP (KEY‑07 offline ceremony becomes v4), keyroster‑server with tailscale cert, owner enrolled (D‑04)”
+
+> **Scope of this review** – The plan touches the following repository artefacts:
+> - `docs/runbooks/server‑install.md`
+> - `docs/runbooks/root‑ceremony.md`
+> - `docs/runbooks/signer‑install.md`
+> - `docs/runbooks/enroll‑user.md`
+> - `.planning/phases/01‑trust‑core/deferred‑items.md`
+> - `.planning/ROADMAP.md`  
+> (plus the CLI/server binaries, the signer, and the various scripts referenced in the tasks).
+
+---
+
+##### 1. Summary  
+
+Plan 02‑13 describes the homelab “dog‑food” deployment that binds a concrete RP hostname to the CA, installs a successor trust bundle (v3), brings up `keyroster‑server` with a Tailscale‑issued TLS certificate, and enrolls the owner as a regular user (D‑04). The plan is thorough, sequenced into a series of reversible steps (including explicit rollback copies), and it respects the project’s “no‑hostname‑leak” policy by hashing the RP name to a 12‑hex‑digit prefix (`RP_HASH12`). Most of the individual actions are already covered by existing scripts and CI checks (e.g., `scripts/dep‑firewall.sh`, `scripts/capslock‑check.sh`). Overall, the plan is well‑aligned with the Phase‑2 success criteria and the security‑first constraints.
+
+---
+
+##### 2. Strengths  
+
+| # | Observation | Evidence / Reasoning |
+|---|-------------|----------------------|
+| **S2‑01** | **Explicit one‑way checkpoint for the RP hostname** – Task 1 forces the owner to confirm the exact FQDN and records only its SHA‑256 prefix (`RP_HASH12`). | Defined in the checkpoint description (`RP_HASH12 = printf %s "$FQDN" | tr '[:upper:]' '[:lower:]' | sha256sum | cut -c1-12`). The plan enforces that no full hostname appears in any committed file (grep guard). |
+| **S2‑02** | **Rollback safety net** – All pre‑upgrade artefacts (`/var/lib/keyroster‑signer.pre‑02‑13`, binaries, unit files, and `tpm.conf`) are copied *once* before any destructive change, and the plan aborts if they are missing. | Task 2 step 2 and the verification “`sudo test -d … && sudo test -f …`”. Guarded by `test ! -e` to avoid overwriting on resume. |
+| **S2‑03** | **Idempotent operations** – The plan uses `systemctl enable --now`, `keyroster‑server` start/reload, and “skip if already installed” logic, making it safe to rerun after a failure. | Explicit “Resume rule” in Task 2 (skip steps 1‑4 when `doctor` shows bundle v3). |
+| **S2‑04** | **Supply‑chain hygiene** – No new runtime dependencies are added for the server; the only new module (`go‑webauthn`) is locked to the server binary only (checked by the dependency firewall). | The plan’s “dependency‑firewall” verification `git diff … | grep -E …` that forbids new imports into the signer. |
+| **S2‑05** | **Verification of cryptographic integrity** – Multiple checks compare the SHA‑256 of the generated bundle, the `V3_SHA256` entry in `pins.env`, and the output of `keyroster trust verify`. | Automated verify steps in Task 2 (`sha256sum "$T/v3-out/bundle.json"` vs `$V3_SHA256`, `keyroster trust verify`). |
+| **S2‑06** | **Audit‑log anchoring** – After enrollment, the plan runs `keyroster audit verify --json` and checks that `anchor_bundle_version == 3` and that at least one `directory_install` leaf exists. This gives the required tamper‑evident evidence for Phase‑2. | Automated verify in Task 4 using `python -I -c` to parse JSON. |
+| **S2‑07** | **Explicit prohibition of hostnames/IPs in the repo** – The plan includes a git‑diff guard that rejects any committed line containing a full FQDN ending in `.ts.net` or any non‑loopback IP. | Verification step in Task 2 with `grep -E`. |
+| **S2‑08** | **Clear documentation updates** – Runbooks are labelled as “executed on the homelab”, and the KEY‑07 bookkeeping is updated in both `deferred‑items.md` and `ROADMAP.md`. | Task 4 “Update the 01‑trust‑core deferred‑items” and “ROADMAP” sections. |
+| **S2‑09** | **Consistent use of existing tooling** – All builds, signing, and verification reuse the same `keyroster` binary that already implements `root successor-policy`, `root sign`, and `install‑bundle`. No ad‑hoc scripts are introduced. | References to `"$T/keyroster"` throughout the plan. |
+
+---
+
+##### 3. Concerns  
+
+| # | Concern | Severity | Details & Impact |
+|---|---------|----------|------------------|
+| **C3‑01** | **Reliance on the Windows `keyroster.exe init` CLI options** – The plan assumes `keyroster.exe init --server https://<FQDN> …` supports passing `--root-pin` *multiple* times and that it validates the TLS cert against those pins. The current `init` implementation (see `cmd/keyroster/init.go`) only accepts a single `--tls-pin` flag and does not enforce a *threshold* of matching pins. If the CLI silently ignores extra pins, the TLS pinning guarantee may be weaker than intended. | Medium – Could allow a man‑in‑the‑middle TLS downgrade if the operator accidentally supplies the wrong pin. |
+| **C3‑02** | **Missing verification that the server’s TLS certificate covers the RP hostname** – The plan checks that `curl https://<FQDN>/healthz` succeeds, but it does **not** verify that the certificate’s SAN list contains the RP hostname (required for WebAuthn). A mis‑issued cert (e.g., wildcard `*.ts.net`) would still pass `curl` yet break the RP check in the signer. | High – The signer will reject WebAuthn assertions if the RP ID does not match the server’s origin; a mis‑configured cert would cause users to be unable to log in, and the failure would be hard to diagnose. |
+| **C3‑03** | **Potential race between `tailscale cert` renewal and the server’s TLS reload** – The plan sets up the `keyroster‑tailscale‑cert.timer` to renew the cert, but does not verify that the `GetCertificate` callback correctly swaps the certificate *atomically* without dropping connections. The `tls.Config.GetCertificate` implementation must be robust (e.g., use `atomic.Pointer`). No test for this is described. | Medium – A brief period without a valid cert could cause the health check to fail, or the server to abort during a login flow. |
+| **C3‑04** | **Assumption that the Windows `ssh‑add -t` failure is always deterministic** – The plan assumes the inbox OpenSSH agent on Windows 9.5p2 will *always* reject a lifetime‑constrained key (which is true today) but does not provide a fallback if the user’s OS is newer (e.g., 9.6+ which *might* accept the lifetime). If that occurs, the key would be persisted without a lifetime, violating success criterion 2. | Low–Medium – Could silently defeat the “expire with cert” guarantee on Windows environments that get a newer agent. |
+| **C3‑05** | **Audit‑verify JSON parsing via Python** – The plan uses `python -I` to parse the JSON output of `audit verify`. The CI environment on Windows (Daniel‑PC) may not have Python installed, causing the verification step to fail silently or be omitted. | Low – The step could be replaced with a pure‑Go checker or a small Go helper binary to avoid platform dependence. |
+| **C3‑06** | **No explicit check that the `keyroster‑server` CSP includes `connect‑src 'self'`** – The plan mentions adding this header in the server code (see earlier design), but the verification does not confirm that the final built binary indeed serves the CSP as required. Mis‑configuration could break the login page’s `fetch()` to the loopback listener (Pitfall 5). | Medium – Could cause the browser‑based login flow to break on Chrome/Edge (Local‑Network Access). |
+| **C3‑07** | **Potential exposure of the RP hostname hash (`RP_HASH12`) in logs or alerts** – The checkpoint writes the hash value to the console and to the `kr.env` file. While this is a *partial* hash, it could be used in a targeted enumeration attack (e.g., pre‑image lookup). Though low risk, it is worth noting. | Low – No direct security impact, but best practice would be to treat even partial hashes as sensitive. |
+| **C3‑08** | **Assumes the owner’s admin SSH key is already loaded into the Windows `ssh‑agent`** – The plan’s `keyroster.exe user approve` step depends on the admin key being available. If the Windows agent is not running or the key is not loaded, the command will fail. No explicit pre‑check or guidance is provided. | Low – Could cause an unnecessary manual retry. |
+| **C3‑09** | **Rollback copies are not version‑controlled** – The `.pre‑02‑13` files are created on the host machine but never recorded in any artefact (e.g., a checksum manifest). If a later plan mistakenly deletes them, the verification step would still pass (it only checks existence). | Low – Reduces forensic auditability of the rollback. |
+
+---
+
+##### 4. Suggestions  
+
+| # | Recommendation | Rationale |
+|---|----------------|-----------|
+| **S4‑01** | **Add a CLI flag to `keyroster init` for “strict TLS pin matching”** – Accept a list of root‑pin SHA‑256 hashes and fail if the presented certificate’s chain does not contain *all* of them. Update the help text to explain that multiple pins are required for the homelab scenario. | Guarantees the TLS cert truly matches the expected roots, closing the gap in **C3‑01**. |
+| **S4‑02** | **Validate the server certificate’s SAN** as part of the `init` step (or a separate `keyroster server verify‑tls` command). Use `tls.ConnectionState.VerifiedChains` to ensure the RP hostname appears in the leaf’s DNSNames. | Directly addresses **C3‑02** and gives early feedback if the Tailscale cert is mis‑issued. |
+| **S4‑03** | **Add a small integration test for the TLS reload** – Spin up a temporary `keyroster‑server` with a dummy cert, replace the cert file, trigger a `SIGHUP`, and assert that new connections succeed while existing ones gracefully close. Include this in the CI matrix for Linux (no Windows test needed). | Mitigates **C3‑03** by proving that renewal does not cause downtime. |
+| **S4‑04** | **Guard the Windows agent lifetime behaviour** – Detect at runtime whether the agent reports `SSH_AGENT_FAILURE` for a lifetime add, and if so, abort with a clear error message advising to use the built‑in in‑memory agent (Option A). This can be a small helper function in `cmd/keyroster/login_windows.go`. | Makes the failure deterministic and user‑friendly, covering **C3‑04**. |
+| **S4‑05** | **Replace the Python JSON check with a tiny Go program** (e.g., `cmd/keyroster/auditcheck`) that reads the JSON on stdin and returns exit 0/1. Add it to the repo, ship it with the CLI binary, and use it in the verification step. | Removes the dependency on Python on Windows (**C3‑05**) and stays within the project’s “single binary per role” policy. |
+| **S4‑06** | **Add an automated test for the CSP header** – Use `net/http/httptest` to start the server and assert that the `Content‑Security‑Policy` header contains `connect-src 'self'`. Run this as part of the server CI. | Guarantees **C3‑06** is met without manual inspection. |
+| **S4‑07** | **Mask `RP_HASH12` in logs** – When printing the hash during the checkpoint, prefix it with “RP fingerprint (truncated, for internal use only)”. Ensure no subsequent log messages echo this value. Optionally, store it only in the private `kr.env` file. | Reduces exposure of even a partial hash (**C3‑07**). |
+| **S4‑08** | **Add a pre‑flight check for the admin SSH key** – Before `user approve`, run `ssh-add -L` (or invoke the Go SSH‑agent client) and verify that the expected admin key fingerprint is present; otherwise abort with a helpful hint. | Prevents failures due to missing admin key (**C3‑08**). |
+| **S4‑09** | **Record checksums of rollback copies** – After creating each `.pre‑02‑13` file, compute its SHA‑256 and store it in a temporary manifest (`rollback.manifest`). The verification step can then assert that the recorded checksums match the current files. | Improves auditability (**C3‑09**). |
+
+---
+
+##### 5. Risk Assessment  
+
+| Level | Justification |
+|-------|----------------|
+| **MEDIUM** | The plan is largely sound and includes many safety nets (rollback copies, hash verification, audit‑log checks). However, there are a few **high‑severity** gaps in the TLS‑certificate validation flow (C3‑01 & C3‑02) that could break the WebAuthn RP binding, and the reliance on platform‑specific tooling (Python, Windows agent behaviour) introduces uncertainty. If the TLS certificate does not contain the RP hostname, every login will fail silently for end users, which is a critical functional regression. The proposed mitigations (S4‑01, S4‑02) are straightforward to implement, so the overall risk remains **medium** until they are in place. |
+
+---
+
+###### TL;DR
+
+Plan 02‑13 is well‑structured, respects the one‑way RP binding, and provides robust rollback and verification steps. The primary technical risk lies in insufficient validation of the server’s TLS certificate against the RP hostname and root‑pin list. Addressing that (plus the minor tooling concerns) will raise confidence to **low** risk and ensure the homelab dog‑food deployment meets all Phase‑2 success criteria.
+### 02-14
+
+##### 02-14 – Homelab End‑to‑End Logins (Phase 2 MVP)
+
+###### 1. Summary
+The plan drives the final “real‑world” verification of the Passkey‑Login MVP.  
+It configures a stock OpenSSH host (`zima‑srv`) with the CA public key and a rendered `AuthorizedPrincipalsFile`, then exercises the full login flow from both Windows (Daniel‑PC) and Linux (the laptop).  All evidence is cross‑checked between the signer’s Merkle log and the host’s sshd journal, and the platform record is written to `docs/security/needs‑hardware.md`.  The plan also finalises the required‑status‑checks ruleset (`cli‑windows` / `cli‑macos`) and merges the changes after owner approval.
+
+Overall the workflow is sound and matches the success criteria for the MVP, but a few edge‑cases and implementation‑details need tighter handling to guarantee repeatability and security.
+
+---
+
+###### 2. Strengths  
+
+| Area | Why it’s strong (with file evidence) |
+|------|--------------------------------------|
+| **Zero‑downtime host configuration** | The host changes are limited to a single drop‑in (`/etc/ssh/sshd_config.d/50-keyroster.conf`) and two data files (`keyroster_user_ca.pub`, `principals/zima`).  The plan validates the configuration with `sshd -t` before reload (Task 1 ‑ step 4).  This mirrors the pattern already used in `docs/runbooks/host‑setup.md` and keeps rollback trivial. |
+| **Full‑stack verification** | The login is proven by three independent artefacts: <br>1. `audit verify` JSON export (uses `cmd/keyroster audit verify --json`). <br>2. `zima` journal entries (`journalctl -u ssh -u sshd --since "$KR_ZIMA_SINCE"`). <br>3. SSH‑agent listings (key fingerprint & key‑ID).  All are compared in the automated checks (see verify blocks that invoke Python one‑liners).  This satisfies the core value “full visibility”. |
+| **Robust TLS pin handling** | The TLS root‑pin set is recorded in `kr.env` (Task 1) and re‑checked on the laptop during `keyroster init`.  The verification step uses the same pins (`--pin "$KR_PIN_C"` etc.) when running `audit verify`.  This prevents man‑in‑the‑middle attacks on the server‑client channel. |
+| **Explicit handling of the Windows agent limitation** | The plan acknowledges that the built‑in Windows `ssh‑agent` refuses lifetime constraints and therefore runs a custom in‑process agent (option A).  The refusal path is verified (`ssh‑add` error handling) and the CLI aborts without falling back to a non‑constrained add, ensuring the TTL requirement (D‑15) is actually enforced. |
+| **Clear provenance of host identity** | RP‑ID and allowed origins are taken from the **root‑signed policy** (D‑09).  The server checks that the TLS cert covers that hostname; the host drop‑in never contains any hostname or IP address (see final diff guard `git diff … | grep -E '[a-z0-9-]+\.ts\.net|([0-9]{1,3}\.){3}[0-9]{1,3}'`). |
+| **Documentation‑driven “UNVERIFIED” labeling** | `docs/security/needs‑hardware.md` is updated with a per‑OS “Verified” / “UNVERIFIED” table, and the plan explicitly prevents any accidental declaration of verification for macOS.  This respects the “no‑unexercised‑paths” rule. |
+| **Ruleset gating before merge** | The merge gate (Task 6) forces the owner to apply the updated `main‑integrity.json` and confirm that the required‑checks entries exist (Python JSON validation).  This guarantees the CI checks become required on `main` before the PR is merged. |
+| **Use of strict CSP & SameSite cookies** | The server UI (`keyroster‑server`) already embeds CSP (`default-src 'none'; …; connect-src 'self'`) and `__Host-` cookies (see `internal/server/headers.go`).  The plan does not modify this, so the security posture for the web UI remains intact. |
+| **Auditable, deterministic timestamps** | All timestamps that drive log correlation (`KR_ZIMA_SINCE`, `KR_VM_SINCE`) are recorded **before** any CA key is installed (Task 1).  This eliminates the “window‑sliding” problem noted in the earlier review (F5). |
+
+---
+
+###### 3. Concerns (potential gaps or risks)
+
+| # | Concern | Severity | Evidence / Reasoning |
+|---|----------|----------|------------------------|
+| **C1 – Race condition on `ssh‑add` expiry check** | The expiry test assumes the 5 min certificate is still present in the agent immediately after creation.  If the agent’s clock drifts or the system is under load, the key could be removed **before** the listing is captured, causing a false‑negative. | The plan’s acceptance criteria only require that listing A contains the key ID and listing B does not.  No tolerance is built in (e.g., a retry or a “wait ≤ 30 s”). |
+| **C2 – Dependency on `ssh‑add` output format** | The verification extracts the key‑ID from the `ssh‑add -l` output, which varies between OpenSSH versions (some print only the fingerprint, some include the comment).  If the format changes, the grep‑based match (`grep -qF "$KID5M"`) could miss the line. | The code uses `tr -d '[:space:]'` before matching, but still relies on the key‑ID appearing verbatim. No fallback parser is defined. |
+| **C3 – Windows agent pipe spelling** | The pipe name (`\\.\pipe\openssh-ssh-agent`) must be passed correctly to the CLI (`--identity-agent` hint).  A typo or missing escaping could cause the CLI to connect to the *inbox* agent instead of the custom one, breaking the TTL guarantee. | The plan references “pipe spelling from 02‑02” but does not programmatically verify the pipe exists (e.g., `test -e \\.\pipe\keyroster‑agent`). |
+| **C4 – Host‑side `Match` block count is only recorded** | The plan records the number of `Match` blocks but does not verify their contents.  A pre‑existing `Match` block could conditionally *override* the `TrustedUserCAKeys` setting for the laptop’s IP, causing the login to fail silently. | Acceptance criteria state “the Match‑file count is recorded (addresses not recorded)”.  No assert that the count is **zero** or that the block does not contain a conflicting directive. |
+| **C5 – Failure handling for missing journal entries** | If the host’s journal rotation discards entries older than the recorded `KR_ZIMA_SINCE`, the grep step may find nothing, leading to a false failure.  The plan does not enforce a journal retention policy. | The verify step only checks `journalctl … --since "$KR_ZIMA_SINCE"`; no pre‑check that the journal contains entries for the whole window. |
+| **C6 – MacOS CI coverage** | While the plan intentionally leaves macOS as **UNVERIFIED**, the CI job `cli‑macos` may still be flaky (e.g., missing binary‑compatibility with the custom in‑memory agent).  No smoke test is run on a macOS runner, so a later phase that requires macOS could be blocked unexpectedly. | The plan mentions “CI‑only” for macOS but no explicit test that the binary builds and runs on macOS (e.g., `go test -run TestCLI_MacOS`). |
+| **C7 – No automated rollback of host config** | If any step fails after the drop‑in is installed (e.g., the `AuthorizedPrincipalsFile` has a typo), the plan aborts with a manual rollback note.  An automated rollback (re‑install previous config) would make the process more reliable. | Task 1 step 6 says “If anything fails, remove the drop‑in, reload and stop” – this is manual. |
+| **C8 – Potential for leaking RP hostname** | The final diff guard (`git diff … | grep -E …`) only checks for FQDNs ending in `.ts.net` **or** raw IPs.  If the RP hostname is a non‑tailnet sub‑domain (e.g., `keyroster.example.com`), it would not be caught.  The policy schema does not enforce a specific suffix, so a future change could accidentally commit a hostname. | The guard regex is hard‑coded; no generic rule that *any* hostname must be absent. |
+| **C9 – Limited error messages for the owner** | If a step fails (e.g., `audit verify` returns `ok:false`), the plan only reports “non‑zero exit”.  The owner would have to manually re‑run the command to see the detailed error, which can be cumbersome during a live demo. | All verify blocks use simple `|| exit 1` style checks; no capture and echo of stderr. |
+| **C10 – Dependency on `python -I`** | The verification scripts rely on `python -I` (isolated mode).  Some environments (e.g., Windows PowerShell) may not have a `python` interpreter, causing the entire plan to abort even though the underlying test succeeded. | Verify blocks invoke `python -I -c …` multiple times (e.g., check of JSON ruleset, audit‑verify output). |
+
+---
+
+###### 4. Suggestions (concrete improvements)
+
+| Ref # | Recommendation |
+|-------|----------------|
+| **S1 (C1)** | Add a small retry loop around the “listing A” capture: after `keyroster login --ttl 5m`, wait up to 10 s, poll `ssh‑add -l` until the key ID appears, then proceed.  This masks transient timing glitches without weakening the TTL guarantee. |
+| **S2 (C2)** | Parse the `ssh‑add -l` output with a regular expression that extracts the comment field (`kr2/…`) rather than relying on exact string matching.  e.g., `ssh‑add -l | awk '/kr2\/ca=user/ {print $NF}'`. |
+| **S3 (C3)** | Before invoking `keyroster login`, programmatically verify the custom pipe exists: `if ! go-winio test -e \\.\pipe\keyroster‑agent; then echo "Custom agent pipe missing" >&2; exit 1; fi`.  This prevents accidental fallback to the inbox agent. |
+| **S4 (C4)** | Extend the `sshd -T -C` check to also assert that no `Match` block **overwrites** `TrustedUserCAKeys` or `AuthorizedPrincipalsFile`.  Parse the output for lines beginning with `match` and reject if any contain those directives. |
+| **S5 (C5)** | Record the current journal cursor (`journalctl --show-cursor -n 0`) before the host changes, and after the test confirm that the cursor advanced past the start point.  If the journal rotated, the plan should abort with a clear “journal retention insufficient – increase `SystemMaxUse`” message. |
+| **S6 (C6)** | Add a minimal “smoke” test to the macOS CI job that builds the binary and runs `keyroster version`.  Even if the full login flow is UNVERIFIED, confirming the binary runs prevents later merge‑gate surprises. |
+| **S7 (C7)** | Automate rollback: keep a copy of the original `sshd_config.d` directory (e.g., `/etc/ssh/sshd_config.d.bak`) before installing the drop‑in, and on any failure restore it and reload sshd.  This can be a small Bash function used in Task 1. |
+| **S8 (C8)** | Tighten the diff guard to reject *any* hostname that is not a loopback (`127.0.0.1`) or a DNS name ending in `.ts.net`.  Use a negative look‑ahead: `grep -E '([a-z0-9-]+\.[a-z0-9-]+|[0-9]{1,3}\.)'` and then validate that each match is either `127.0.0.1` or `*.ts.net`. |
+| **S9 (C9)** | Capture stderr from each verification command and echo a short, user‑friendly message on failure (e.g., “Audit verification failed – see `homelab-after-windows.export` for details”).  This can be done with `if ! $cmd; then echo "❌ $cmd failed (see $log)"; exit 1; fi`. |
+| **S10 (C10)** | Provide a fallback to `python3` (most systems have it) or embed a small Go helper binary in the repo for JSON processing, removing the external Python dependency from the verify steps.  Alternatively, require `python` in the plan’s pre‑conditions (add `python3` to the toolchain checklist). |
+
+---
+
+###### 5. Risk Assessment  
+
+| Overall Risk | Justification |
+|--------------|----------------|
+| **MEDIUM** | The plan meets the MVP success criteria and includes multiple independent verifications, but several operational edge‑cases (timing of TTL expiry, Windows pipe handling, journal retention) could cause a false failure during a live demo.  None of these gaps compromise the security guarantees (the signer still validates WebAuthn assertions, the CA key is never exposed, and the RP hostname remains protected).  The primary risk is **reproducibility**: a demo could fail for reasons unrelated to the core functionality, leading to a blocked merge or a loss of confidence.  Addressing the concerns listed above reduces the risk to **LOW**. |
+
+---
+
+###### TL;DR
+The 02‑14 plan is well‑structured, provides strong end‑to‑end evidence, and respects the project’s security‑first and simplicity constraints.  Minor timing‑sensitivity issues, reliance on exact `ssh‑add` output, and the manual rollback of host configuration are the main points that could cause flaky demos.  Implement the suggested mitigations (especially a retry around the 5 min expiry check, robust key‑ID extraction, and automated host rollback) and the plan will be solid enough to merge without jeopardising the MVP’s security guarantees.
 
 ---
 
 ## Consensus Summary
 
 ### Verification Method
-Four external reviewers (codex, nemotron-3-ultra, gemma4:31b, gpt-oss:120b) reviewed the 14 Phase 2 plans (02-01..02-14). None of them had repo access, and gpt-oss reviewed each plan on its own without RESEARCH.md. A Claude agent then checked every finding adversarially against the plan text, CONTEXT/RESEARCH and the Phase 1 source. Verdicts across 250 findings:
+Four external reviewers (codex, nemotron-3-ultra, gemma4:31b, gpt-oss:120b) reviewed the 14 revised Phase 2 plans. Only codex could read the repo. Seven Claude agents, two plans each, then tried to disprove every finding against the current plan text, CONTEXT/RESEARCH, the Phase 1 source and the round-1 appendix. The verifiers ran without a second-model check of their own verdicts.
 
-| Verdict | Count |
-|---|---|
-| ALREADY_COVERED | 127 |
-| REFUTED | 48 |
-| PARTIAL | 72 |
-| CONFIRMED | 3 |
+| Verdict | Round 2 | Round 1 |
+|---|---|---|
+| ALREADY_COVERED | 107 | 127 |
+| REFUTED | 72 | 48 |
+| PARTIAL | 18 | 72 |
+| CONFIRMED | 1 | 3 |
+| **Total** | **198** | **250** |
 
-Of the 75 findings that survived (PARTIAL or CONFIRMED), **none is HIGH, 3 are MEDIUM and 72 are LOW**.
+Of the 19 findings that survived, **none is HIGH, 1 is MEDIUM and 18 are LOW**. Round 1 left 75 (3 MEDIUM, 72 LOW).
+
+**Round-1 fixes held.** All three round-1 MEDIUM findings (02-08-F1 invite race, 02-11-F2 empty principal set, 02-14-F6 TTL-expiry check) are fixed in the revised plans, and codex now names each of those fixes as a strength. Reviewers raised about 30 round-1 findings again; the verifiers found every one fixed or deliberately accepted, except **02-08-F3** (no CI lock on the approved module set), which is still deferred on purpose (02-08-PLAN.md:401).
 
 ### Agreed Strengths
-The reviewers gave no clear shared praise, so little can be claimed here. Indirectly, 70% of all findings were either already covered by the plans or refuted. That suggests the plans already handle most of what an outside reviewer looks for: fail-closed defaults, the signer re-verifying everything, single-use tokens and nonces, a uniform 404, and named refusal tests. gemma rated every plan LOW.
+These themes are named as strengths by codex (the one reviewer with repo access) and recur in the other reviews. The match to the other reviewers is by theme, not checked claim by claim.
+- The signer stays the authority: it re-verifies RP, origin, directory and assertion itself, and logs before releasing a certificate.
+- Exact certificate checks in the 02-01 E2E: key, principals, validity window, plus a refusal control.
+- Atomic, conditional invite and login-code consumption with concurrent tests under `-race`.
+- A fail-closed status cache with one rule for all handlers.
+- Serial-correlated evidence in the homelab dogfood plan, and macOS left UNVERIFIED instead of claimed.
 
 ### Agreed Concerns (2+ reviewers, by verified severity)
 
-**MEDIUM**
-- **02-08-F1** (codex, gptoss): concurrent begin/finish calls can both use one invite.
-  - Evidence: finish deletes the session without checking rows-affected (:193). The step-5 transaction sets `invite_used_us` without `WHERE invite_used_us IS NULL` (:197). Only sequential tests exist (:244-257).
-  - Fix: delete the session atomically (`DELETE … RETURNING`). Make the step-5 update conditional on `invite_used_us IS NULL` and unexpired, and require rows-affected == 1. Allow at most one pending credential per user. Add an `invite_concurrent_finish` test under `-race`.
-- **02-11-F2** (codex, gemma; CONFIRMED): an empty principal set and an unknown account have undefined behaviour.
-  - Evidence: AccountPrincipals errors on an unknown account (:153). It is unspecified whether `map` accepts zero roles or what `unmap` keeps (:166). E2E step 7 (:179) feeds sshd a hand-written empty file, so it tests sshd rather than keyroster.
-  - Fix: choose one rule. Either an empty mapping renders a header-only file, or an unknown account means "write an empty file, never keep the old one". Rewrite step 7 to use keyroster's real output, and add unit tests for both cases.
-- **02-14-F6** (codex, gptoss): the TTL-expiry dogfood check cannot pass as written.
-  - Evidence: the earlier 8 h default-TTL certificate is still in the same agent (:171, :230). So "no identities / agent exited" (:173) never happens, and :232 does not say which certificate should be gone.
-  - Fix: record the 5 m certificate's serial or fingerprint right after login and check that this entry disappears, or clear the agent first (`ssh-add -D`). Record the listing output, not just yes/no.
+No finding raised by two or more reviewers is above LOW.
 
 **LOW**
-- **02-10-F1** (all four): a disabled user keeps their session until the mirror refreshes. The delay is at most 5 s, and installs through the CLI refresh immediately.
-  - Fix: state that withSession uses the 02-06 status cache, and that a failed refresh fails closed. Add `signer_unavailable_fails_closed`.
-- **02-06-F4** (codex, gptoss, nemotron): line 181 contradicts itself. It says "every Status failure → 503" but also "no stale RP data older than 60 s".
-  - Fix: one rule, with no stale fallback after the TTL. Add `status_refresh_failure_fails_closed`.
-- **02-05-F6** (nemotron, gptoss, codex): `MaxStatusFrame` (256 KiB) is smaller than what the signer will install (up to 1 MiB per document, about 4 MiB total). An accepted install could make Status, and with it issuance and the server, permanently fail.
-  - Fix: align the install cap with the Status budget, and add round-trip tests exactly at the budget and at budget+1.
-- **02-10-F2** (codex, gptoss, nemotron): sessions are not tied to directory or credential changes, so disable followed by re-enable does not end a session.
-  - Fix (optional): end the session when the credential set or status changes, and add a test that a role change shows up on /account.
-- **02-01-F7** (codex, nemotron): the 02-01 E2E never checks that the issued certificate's principals are exact, because sshd cannot catch a superset.
-  - Fix: assert `ValidPrincipals == ["role:ops"]`, Key equals the ephemeral key, and the validity window is ≤ 900 s.
-- **02-01-F19** (gptoss, nemotron): the `webauthntest`/`servertest` exclusion is checked once at acceptance and is not a CI gate.
-  - Fix: run `go list -deps ./cmd/...` in CI for no tags and `-tags piv`, on linux and windows.
-- **02-02-F1** (codex, gptoss): VerifyServerOwner has only a positive test.
-  - Fix: factor out the SID comparison and test against a foreign SID (S-1-5-18). Test that Ensure fails closed.
-- **02-03-F5** (codex, gptoss): the reworked ReadMessage never rejects length 1, which desyncs the stream or makes `make([]byte,-1)` panic.
-  - Fix: refuse length < 2 before reading the header and use unsigned arithmetic. Add boundary cases at exactly each cap.
-- **02-03-F12** (gemma, gptoss): there is no accept test for clientDataJSON with extra members such as `other_keys_can_be_added_here` or `tokenBinding`.
-  - Fix: add a positive verify case and a fuzz seed.
-- **02-04-F2** (codex, nemotron): no positive fixture has a directory that outlives an RP-only policy change, i.e. a login with dir=1 and pol=2.
-  - Fix: install the directory before successor-policy in the E2E, or add `login_directory_survives_rp_policy_change`.
-- **02-05-F4** (codex, gemma): custody.md does not cover offline brute force of leaked `.age` files.
-  - Fix: add a bullet saying 20 runes is a length floor, so use a random passphrase.
-- **02-06-F10** (codex, nemotron): a pinned-root mismatch has no actionable error, there is no test for a new intermediate, and a future root cannot be pre-pinned.
-  - Fix: return a specific error naming `init --force --tls-pin`, and add an intermediate-rotation test.
-- **02-06-F11** (nemotron, gptoss): file modes are a no-op on Windows.
-  - Fix: document that the config holds only public data, and guard mode assertions with `runtime.GOOS != "windows"`.
-- **02-07-F6** (codex, gptoss): the per-IP limiter does not handle IPv6 /64 or have a global backstop.
-  - Fix: key IPv6 by /64, add a coarse global limiter and a map-bound test, and label it best-effort in T-02-36.
-- **02-09-F10** (nemotron, codex): a stale proposal tells `directory install` to "re-run this command", which fails again.
-  - Fix: name the producing command (e.g. `user approve`) in both sign and install errors, and add a runbook line.
-- **02-13-F1** (codex, gemma): the rollback keeps the binaries but not the old systemd unit, and the restore commands are not written out.
-  - Fix: back up the unit as `.pre-02-13` and list the full restore steps.
-- **02-14-F1** (codex, gptoss): `sshd -T` checks global values, so a `Match` override is missed.
-  - Fix: use `sshd -T -C user=zima,host=…,addr=…` for both clients, or grep that no `Match` blocks exist.
-- **02-14-F5** (codex, nemotron): the journal correlation uses a relative `-3h` window and a count of 2 or more.
-  - Fix: use an absolute `--since` (Task 1 install time) and grep for the recorded serials.
+- **02-09-R2-F1** (codex MEDIUM, nemotron HIGH): the pending-row check and the signer install are not atomic, so a concurrent `--reinvite` does not stop the install. This was codex's headline finding.
+  - Evidence: the race is real, and the plan already lists it as accepted residual T-02-119 (1) (02-09-PLAN.md:474, :213). Only an admin-authenticated request carrying a quorum-signed version can race, and the end state equals the legal order "install, then reinvite". A compromised server bypasses the check anyway, and the signer checks no pending state by design (D-03).
+  - What is actually wrong: 02-09-PLAN.md:49, :187 and the runbook text at :337 say "cannot be installed" without the residual. The outcome is silent and untested. The pending row keeps its old user_handle (02-07-PLAN.md:163), so a re-registration on the same authenticator can overwrite the just-bound passkey (availability only).
+  - Fix: an in-process mutex shared by the reinvite branch and install steps 3-5, or have `DeleteBound` report a short count and surface a warning. Add one test that defines the winner, and reword the three lines.
+- **02-11-R2-F1** (codex, nemotron): host groups do not scope certificates, and the CLI does not say so.
+  - Evidence: the runbook states it (02-11-PLAN.md:259) and D-07 locks it, but the `host-group` usage text (02-11-PLAN.md:175-177) does not.
+  - Fix: one sentence in the usage text.
+
+### Found During Verification
+The only finding above LOW was not stated by any reviewer. The verifier found it while checking two reviewer claims that did not hold.
+
+- **02-13-R2-F4** (MEDIUM; found by the verifier while checking nemotron and gptoss claims): certificate renewal and server reload are not proven on the homelab, and the first run cannot pass as written.
+  - Evidence: the cert unit has `ExecStartPost=systemctl reload keyroster-server.service` (02-06-PLAN.md:371). Step 5.3 of 02-13 starts that unit before the server is enabled and requires `Result=success` (02-13-PLAN.md:237, :265). The server cannot start first, because it needs the certificate (02-06-PLAN.md:180). Reloading an inactive unit exits non-zero. Step 5.3 does enable the timer afterwards, but no step runs the unit against the live server and no verify checks that the timer is active, although the plan says "renewed by the timer" (:35, :270).
+  - Status: derived from the plan text and systemd semantics, and re-checked by the orchestrator against both plan lines (the reload has no `-` prefix). The unit file does not exist yet and nothing was run. The reviewers' own wording ("no atomic-swap test", "UNVERIFIED until run") did not hold; the verifier found this narrower defect while checking them.
+  - Fix: use `try-reload-or-restart` in 02-06. In 02-13, run the cert unit a second time after the server is up and add a timer `is-active` check, or label timer-driven renewal UNVERIFIED.
 
 ### Single-Reviewer Verified Concerns
-None at HIGH or MEDIUM.
+None at HIGH or MEDIUM. All LOW; details and fixes are in the appendix.
 
-LOW: 02-01-F2, 02-01-F5, 02-01-F21 (CONFIRMED), 02-02-F5, 02-02-F8, 02-03-F10, 02-03-F13, 02-03-F16, 02-04-F8, 02-05-F1, 02-05-F2, 02-05-F7, 02-05-F11, 02-05-F16, 02-06-F1, 02-06-F15, 02-06-F16, 02-06-F19, 02-07-F1, 02-07-F5, 02-07-F7, 02-07-F8, 02-07-F9, 02-07-F10, 02-07-F12, 02-08-F3, 02-08-F7, 02-08-F10, 02-08-F11, 02-08-F16, 02-09-F6, 02-09-F11, 02-09-F14 (CONFIRMED), 02-10-F5, 02-10-F6, 02-10-F15, 02-10-F16, 02-11-F3, 02-11-F5, 02-11-F6, 02-11-F7, 02-12-F1, 02-12-F2, 02-12-F12, 02-12-F13, 02-12-F14, 02-12-F15, 02-12-F17, 02-12-F21, 02-12-F22, 02-13-F3, 02-13-F14, 02-14-F7, 02-14-F13.
+- **02-02-R2-F1** (found by the verifier at a line codex cited; codex’s own claim was covered): `TestInboxSSHOffersAgentCert` runs `keyroster.exe agent` "on a test pipe", but the command serves only `PipePath()` and has no override (02-02-PLAN.md:244, :223).
+- **02-02-R2-F4** (nemotron): the macOS agent-lifetime test runs only "when ssh-agent is on PATH", and nothing in CI turns a skip into a failure (02-02-PLAN.md:283).
+- **02-03-R2-F16** (gptoss): every GetDirectory assertion in 02-03 is for the empty version-0 state; the installed version, bytes, sigs and Authorized flag are not checked until 02-09.
+- **02-05-R2-F10** (gptoss): the plan never says `Signer.Status` calls `checkTrustCurrent`, so after an install under a running signer Status could report N+1 while the process still runs on N.
+- **02-06-R2-F1** (codex): no serverclient test shows that wrong-hostname and expired-leaf errors are not reported as `ErrTLSRootNotPinned`. Both fail closed.
+- **02-06-R2-F12** (gemma; CONFIRMED): a successful certificate reload is not logged.
+- **02-07-R2-F2** (gptoss): no line says what `expires` requireAdmin passes to `UseNonce`, so a nonce row could be purged while its signature is still inside the ±120 s window.
+- **02-07-R2-F17** (gptoss): a primary-key conflict on concurrent `user add` is not mapped to 409, so the loser may get a 500.
+- **02-08-R2-F2** (nemotron): no CI lock on the approved module set. Repeats round-1 02-08-F3, still deferred.
+- **02-08-R2-F9** (gptoss): the offered begin options (three algorithms, UV required, attestation none) are a must-have with no test.
+- **02-08-R2-F10** (gptoss): enroll refusals have no specified server log line with a reason.
+- **02-09-R2-F4** (gptoss): cleanup after an accepted install has no failure path, which can leave an orphaned pending credential. It grants nothing.
+- **02-09-R2-F10** (gptoss): `directory sign` has neither `--yes` nor `--admin-key`, yet the plan's own `TestApproveQuorumTwo` (02-09-PLAN.md:277) runs it with no TTY and a second admin key, so that test cannot run as written.
+- **02-12-R2-F3** (nemotron, claimed HIGH): "fingerprint shown before WebAuthn" is labelled `verification: test`, but only the server half is tested; the JS ceremony is UNVERIFIED until 02-14 (02-12-PLAN.md:93-95, :531).
+- **02-13-R2-F10** (gptoss): RP_HASH12 is an unsalted hash prefix of a hostname the plan says is in CT logs, so committing it links the repo to the hostname.
+- **02-14-R2-F13** (gptoss): the diff-guard regex misses a non-tailnet RP hostname, the bare tailnet name and IPv6 (02-14-PLAN.md:349).
 
 ### Divergent Views
-- **Overall risk ratings differed sharply.**
-  - codex rated 11 of 14 plans HIGH (MEDIUM only for 02-07, 02-10 and 02-11).
-  - gptoss rated 02-03, 02-04, 02-06, 02-08, 02-11 and 02-12 HIGH.
-  - nemotron ranged from LOW to HIGH and gave HIGH only to 02-01 and 02-02.
-  - gemma rated all 14 plans LOW.
-  - After verification no HIGH finding survived, so the HIGH ratings were not borne out. gemma's LOW ratings fit better, but they still missed the three MEDIUM items (gemma co-raised only 02-11-F2).
-- **Notable downgrades and refutations inside surviving findings:**
-  - 02-14-F1: the "lockout" risk was rated HIGH. The drop-in affects only certificate auth, and the key login is checked before and after the change, so it is late detection, not a lockout.
-  - 02-01-F19: the claim that the leak would go undetected is wrong, because `go list -deps` is transitive.
-  - 02-12-F1: "duplicate issuance" is not a problem. The certificate is bound to an in-memory ephemeral key and is logged, and a retry is impossible by design (`duplicate_request`).
-  - 02-12-F15: the claimed code-expiry drift cannot happen, because the same server clock sets and checks the expiry.
-  - 02-05-F6: the directory is not part of Status.
-  - 02-06-F11: the macOS half is wrong, since POSIX modes work there.
-  - 02-09-F11: TLS certificate renewal never touches TrustPins.
-  - 02-08-F11: invalid BE/BS values fail loudly on read.
-  - 02-05-F7: terminals wrap long lines; they do not truncate them.
+- **Overall risk ratings converged, but not fully.**
+  - codex: MEDIUM for 9 plans, LOW or LOW-MEDIUM for 02-03, 02-04, 02-07, 02-10 and 02-11. In round 1 it rated 11 of 14 HIGH.
+  - nemotron: LOW to MEDIUM-HIGH (highest for 02-01 and 02-12), with individual HIGH-labelled concerns in most plans.
+  - gemma: LOW for all 14 plans, as in round 1. Its only surviving finding is 02-06-R2-F12, which it raised alone.
+  - gptoss: MEDIUM for most plans, HIGH for 02-04.
+  - After verification no HIGH claim survived. gptoss's HIGH for 02-04 rests on two claims the plan already covers (RP validation at 02-01-PLAN.md:63, :218; re-check after each bundle_install at 02-04-PLAN.md:149).
+- **Notable refutations of HIGH claims:**
+  - 37-byte authenticatorData (gptoss, nemotron): Windows Hello sets AT only at registration, not in assertions. The strict check is deliberate and now has a per-authenticator record and owner stop (02-14-PLAN.md:246-249).
+  - Concurrent redeem double-issue (gptoss): the burn is one conditional UPDATE accepted only at rows-affected 1, with `concurrent_redeem_once` under `-race` (02-12-PLAN.md:184).
+  - Certificate SAN not checked against the RP (gptoss): the server refuses to start unless the leaf passes `VerifyHostname(rp_id)` (02-06-PLAN.md:180).
+  - Frame cap versus base64 overhead (nemotron): the wire format is raw u24-prefixed bytes, and the stored maximum fits `MaxDirectoryFrame` with 47 bytes to spare.
+  - Windows agent leaves keys in the registry (gptoss): that is the inbox agent, which `keyroster login` never uses.
+  - CSRF on the enroll POSTs (gptoss): there is no ambient credential, and 02-06 wraps every route in CrossOriginProtection (02-06-PLAN.md:188).
+- **Codex's "check every consumer of the new log kinds" (02-01)** came back clean: `leaf.go`, `audit/verify.go`, `logstate.go` and the fuzz target all change in the 02-01 PR.
 
 ### Recommended Plan Changes (for `/gsd-plan-phase 2 --reviews`)
-1. [ ] **02-08**: make invite consumption atomic (conditional UPDATE plus rows-affected check, atomic session delete, one pending credential per user) and add a concurrent-finish test. *(MEDIUM)*
-2. [ ] **02-11**: define the semantics for an empty mapping versus an unknown account in RenderPrincipalsFile and in `map`/`unmap`, and rewrite E2E step 7 to use real keyroster output. *(MEDIUM)*
-3. [ ] **02-14**: make the TTL-expiry check target the 5 m certificate by serial or fingerprint, or clear the agent first. *(MEDIUM)*
-4. [ ] **02-06 / 02-10**: make one fail-closed rule for Status and mirror refresh failures (remove the 60 s clause) and add tests for both.
-5. [ ] **02-05**: align the install document caps with `MaxStatusFrame` and add boundary tests. Have software Provision mirror the TPM `provision.go` (checkPrivateDir, Lstat pre-checks, all-or-nothing writes, syncDir).
-6. [ ] **02-03**: make ReadMessage refuse length < 2 before reading the header, and add read and write boundary tests at each cap.
-7. [ ] **02-07 / 02-08 / 02-09**: define what reinvite does (fresh user_handle; reset `invite_used_us`; treatment of orphaned pending credentials). Finish must check that the invite is still current. DeleteBound may remove only what the install newly binds, and never an open, unexpired invite.
-8. [ ] **02-12**: check PKCE (and the verifier format, exactly 43 base64url characters) before burning the code. Compute the agent lifetime from a single `now`. Add `defer clear(priv)`. Add a reaper for `login_sessions` and a threat row for what `/login/options` discloses.
-9. [ ] **02-01**: add golden vectors for the new formats (directory_install and login_issue leaves, login-request signing bytes, directory JSON, kr2). Assert exact principals, key and validity window in the E2E. Make the testhelper dependency check a CI gate.
-10. [ ] **02-07**: re-attach the verified body for the handler, define path canonicalisation (`RequestURI`), add a round-trip test of the printed `keyroster init` line including `--tls-root-file`, and add a clock-skew hint on 401.
-11. [ ] **02-13 / 02-14**: back up the systemd unit and write out the rollback commands, add resume guidance after v3, scope `sshd -T -C`, use serial-based journal correlation, and use jq and `audit verify --json` checks.
-12. [ ] **Remaining LOW items**: wording and test additions as listed in each finding (e.g. 02-09-F14 `directory_sign_refuses_non_admin_sig`, 02-04-F2 positive multi-successor fixture, 02-03-F12 clientDataJSON accept case, 02-05-F16 stdlib-only inconsistency).
+1. [ ] **02-06 / 02-13**: make the cert unit's reload safe when the server is not yet running (`try-reload-or-restart`), run it once more against the live server, and check the timer, or label timer renewal UNVERIFIED. *(MEDIUM, 02-13-R2-F4)*
+2. [ ] **02-09**: state the reinvite/install residual where the plan now says "cannot be installed" (:49, :187, :337), define and test the winner, and pick mutex or short-count warning. Give `DeleteBound` a failure path and make it self-healing. Give `directory sign` `--yes`, the no-TTY rule and `--admin-key`. *(02-09-R2-F1, F4, F10)*
+3. [ ] **02-02**: say which pipe the process-level tests use, and make a skipped macOS lifetime test fail in CI. *(02-02-R2-F1, F4)*
+4. [ ] **02-03**: assert GetDirectory for an installed directory (version, bytes, sigs, Authorized true and false). *(02-03-R2-F16)*
+5. [ ] **02-05 / 02-06**: have Status call `checkTrustCurrent`; add TLS error-class tests; log successful certificate reloads. *(02-05-R2-F10, 02-06-R2-F1, F12)*
+6. [ ] **02-07 / 02-08**: pin the nonce row lifetime to the signature window; map the `user add` conflict to 409; test the offered begin options; specify a refusal log line. Decide whether the module-set lock stays deferred. *(02-07-R2-F2, F17; 02-08-R2-F2, F9, F10)*
+7. [ ] **02-11 / 02-12**: add the host-group scoping sentence to the CLI usage text; relabel the fingerprint-before-WebAuthn prohibition or add a static check on `app.js`. *(02-11-R2-F1, 02-12-R2-F3)*
+8. [ ] **02-13 / 02-14**: keep RP_HASH12 out of the committed SUMMARY or salt it; widen the diff-guard regex. *(02-13-R2-F10, 02-14-R2-F13)*
 
 ---
 
 ## Appendix: Verified Findings (surviving)
 
-CONFIRMED/PARTIAL findings, by plan. The evidence is the verifier's, with plan-line and source citations.
-
-### 02-01
-
-- **02-01-F2 [PARTIAL/LOW] Migration 0004_directory ordering and interaction untested** (nemotron)
-  - Evidence: Ordering is enforced by existing Phase 1 code that the plan reuses. internal/signerdb/migrate.go:24-52 (loadMigrations) sorts the embedded NNNN_*.sql files and refuses any gap or out-of-sequence version. migrate.go:58-90 applies ms[current:] from PRAGMA user_version, each migration in its own transaction together with the version bump, and refuses a newer schema (migrate.go:67-69). So a Phase 1 DB at user_version=3 gets exactly 0004 applied, and this is the same code path a fresh DB takes. On interaction: the plan (02-01-PLAN.md:242) defines `directory(version INTEGER PRIMARY KEY CHECK (version >= 1), doc BLOB, sigs BLOB, policy_version INTEGER, installed_at_us INTEGER)` as a standalone table. It has no foreign keys and does not alter trust_bundle or any other 0001-0003 table. policy_version is only a value that the signer checks in loadDirectory/InstallDirectory (02-01-PLAN.md:249-256). On tests: internal/signerdb/db_test.go:74-146 (TestMigrations) is generic over len(ms), so with 0004 added it automatically covers a fresh migration to the new head, idempotent reopen, and refusal of a newer schema. Restart and tamper behaviour of the stored directory is covered in 02-03-PLAN.md:212 (`restart_under_new_admins`, `stored_directory_tampered`). What is missing: no test builds a real version-3 DB containing Phase 1 data (trust_bundle rows, issuance, log) and then opens it with the Phase 2 binary to check that 0004 applies cleanly and leaves the existing rows intact.
-  - Fix: Optionally add a `upgrade_from_v3` subtest to TestMigrations. It applies only the first three migrations, inserts a trust_bundle row and an issuance row, then reopens with the full migration set. It checks that user_version is 4, that the directory table exists and is empty, and that the Phase 1 rows are unchanged.
-
-- **02-01-F5 [PARTIAL/LOW] authenticatorData fixed at exactly 37 bytes may refuse real authenticators** (gptoss)
-  - Evidence: 02-01-PLAN.md:55 (must_haves truth) and :214/:216 do require authData exactly 37 bytes with AT/ED clear, and :238 caps the signature at 1024 bytes. This strictness is a deliberate, documented choice, not an oversight. 02-RESEARCH.md:298 says the signer requires 37 bytes with AT/ED clear "because no extensions are requested. So no CBOR is ever parsed in the signer." 02-RESEARCH.md:690 calls this the key way of keeping the only new signer parser small. 02-RESEARCH.md:909 records it as assumption A6, with the fallback "widen to 'ED allowed, extensions ignored' only after seeing real data". 02-08-PLAN.md:262 lists AT set and ED set as an intentional `strictOnly` set in the go-webauthn differential test. Only AT (bit 6) and ED (bit 7) are refused. BE/BS (bits 3/4), the flags that real synced passkeys actually vary on, are not refused (02-01:216; 02-08:258 records BE/BS). The 1024-byte signature cap covers RSA up to 8192 bits (512 B for RSA-4096; ECDSA about 72 B), so that part of the claim has no merit. Real authenticators are exercised before the phase closes: 02-13-PLAN.md:247 (Windows Hello, phone passkey or security key) and 02-14-PLAN.md:62 (real logins on Windows and Linux, corroborated from the audit log). A refusal fails closed with a named sentinel (ErrAuthenticatorData / bad_authenticator_data), so it does not fail open. One narrow gap: 02-14-PLAN.md names the A3 probe (:139) but does not explicitly name A6 as a recorded dogfood check, and gives no decision path if the owner's authenticator returns ED.
-  - Fix: Keep the strict 37-byte, AT/ED-clear check. In 02-14 (or 02-13), add an explicit A6 check: record the authData length and flags from each real authenticator used, and if a login is refused with bad_authenticator_data because ED is set, stop at a human decision (widen to "ED allowed, extensions ignored" in a follow-up plan) instead of patching it ad hoc.
-
-- **02-01-F7 [PARTIAL/LOW] E2E test may not tell signer authorization apart from sshd config** (codex, nemotron)
-  - Evidence: 02-01-PLAN.md:283-286: the test runs signerclient.Login (step 5) and gets a certificate before any sshd is started. The u:other sshd is then given "the same certificate" (step 6). So the refusal cannot come from the signer: the signer has already issued. The control sshd with role:ops accepts the same certificate under the same harness CA config (startSSHD, test/e2e/harness_test.go:251,264,270), which rules out a host/CA misconfiguration. Step 7 (02-01-PLAN.md:286) already checks the kr2 key ID (sub=alice, roles=ops). Acceptance (02-01-PLAN.md:301) requires the log to show both the sshd refusal and the accepted login. The signer-side refusals are covered with exact detail assertions elsewhere: 02-03-PLAN.md:134-155 (TestLoginRefusals through the socket, each case with a control) and 02-03-PLAN.md:164-173 (a named unit case for every detail, including principals_mismatch and ttl_exceeds_role). The login_issue leaf and the certificate binding are checked in 02-04-PLAN.md:135-146: audit verify re-checks that ValidPrincipals equal the request principals, the validity window, Key == SubjectKey and the kr2 fields. That plan also has an e2e test (02-04-PLAN.md:150-157) and a tamper suite (02-04-PLAN.md:177-188, including "request principals widened"). The CLI checks ValidPrincipals for exact equality and checks the TTL window at 02-12-PLAN.md:204-210. What is still missing: nothing in 02-01 itself (TestLoginSignerEndToEnd or the Task 2 units, 02-01-PLAN.md:310-317) checks that the issued certificate's ValidPrincipals are exactly ["role:ops"], or checks its validity window or Key. sshd's accept/refuse cannot catch a certificate that carries a superset of principals.
-  - Fix: In TestLoginSignerEndToEnd step 7, parse the returned certificate and assert three things: ValidPrincipals == ["role:ops"] exactly, Key equals the ephemeral public key, and ValidBefore − ValidAfter ≤ 600 + 300. Leave the login_issue leaf checks to 02-04 as planned.
-
-- **02-01-F19 [PARTIAL/LOW] Soft authenticator could leak into production binaries** (gptoss, nemotron)
-  - Evidence: 02-01-PLAN.md:225 says "internal/webauthn/webauthntest (new; imported only by tests)". 02-01-PLAN.md:330 and :344 add the check `test "$(go list -deps ./cmd/... | grep -c webauthn/webauthntest)" = 0`. 02-08-PLAN.md:233 repeats it for both `server/servertest` and `webauthn/webauthntest`. `go list -deps` prints the full transitive import closure of non-test files, so an indirect import through any intermediate package does appear. The reviewers' core claim is therefore wrong. The real gap is narrower. This check is only an acceptance step that the executor runs in 02-01 and 02-08, and nothing turns it into a CI gate. scripts/dep-firewall.sh, which CI runs at .github/workflows/ci.yml:100, checks a BANNED list (scripts/dep-firewall.sh:22-33) and only for the signer graph. It runs once with no build tags and once with `-tags piv`, while the plan's own check runs only with the host's default tags and GOOS. Later plans (02-09..02-12 wiring the server and CLI) re-run dep-firewall and capslock but not the webauthntest grep (e.g. 02-10-PLAN.md:215, 02-12-PLAN.md:303). Even if the helper were linked, it creates no bypass: 02-01-PLAN.md:104 says the signer verifies every assertion itself, and there is no test-only path.
-  - Fix: Make the check permanent instead of moving the package. In CI (or a small mode in scripts/dep-firewall.sh), run `go list -deps ./cmd/...` with no tags and with `-tags piv`, and for GOOS linux and windows, and fail if internal/webauthn/webauthntest or internal/server/servertest appears.
-
-- **02-01-F21 [CONFIRMED/LOW] No pinned format test vectors for new formats** (codex)
-  - Evidence: Phase 1 already pins golden vectors: test/vectors/ holds leaf_issue_v1.hex, policy_genesis_v1.json, bundle_genesis_v1.json and the checkpoint_*.golden files. internal/tlog/leaf_test.go:17-53 has a `-update` flag that rewrites them and an issueVector fixture, and internal/trust/vectors_test.go follows the same pattern. Plan 02-01 Task 2 (02-01-PLAN.md:309-317) checks the new formats only by round-trip. LoginIssueRequest gets Marshal/Parse plus a SigningBytes prefix check on `keyroster/login-request/v1` (line 316). DirectoryInstallBody and LoginIssueBody get a round-trip and a trailing-byte refusal (line 317). kr2 gets a round-trip (line 315). The directory document is checked for insertion-order canonicality (line 311). The only pinned vectors the plan mentions are the existing Phase 1 files (lines 51, 310, 315), used to show that nothing regressed. Sibling plans add nothing here. 02-03 (line 236) seeds fuzz corpora "from valid vectors", but those are generated, not golden files. 02-04 and 02-14 consume kr2 and kinds 7/8 without pinning their bytes. A grep for golden, .hex and test/vectors across 02-*-PLAN.md, 02-CONTEXT.md and 02-RESEARCH.md finds no new vector file. The plan itself calls these exact formats costly to change: line 169 says the directory format, login-request signing bytes, log kinds 7/8 and kr2 "are read by audit verify, by Phase 3 agents and by every later log".
-  - Fix: Add golden vectors to Task 2, using the existing `-update` convention. Commit test/vectors/leaf_directory_install_v1.hex, leaf_login_issue_v1.hex, login_request_signing_v1.hex and directory_v1.json, plus a fixed kr2 key ID string, each with a byte-equality test. Name these cases in the acceptance criteria.
+CONFIRMED/PARTIAL findings from round 2, by plan. The evidence is the verifier's, with plan-line and source citations. Ids are new for this round (`-R2-`); the "Round 1" line links to round-1 ids where a finding repeats one.
 
 ### 02-02
 
-- **02-02-F1 [PARTIAL/LOW] VerifyServerOwner / Ensure may be bypassable by a raced or replaced pipe** (codex, gptoss)
-  - Evidence: The plan's check (02-02-PLAN.md:204-212) is: Fd() → GetNamedPipeServerProcessId → OpenProcess/OpenProcessToken/GetTokenUser → compare the SID. Ensure runs that check on the connection it returns, before any key is sent (lines 209-212 and must_haves line 62, "Ensure returns a connection only after VerifyServerOwner"). T-02-07 is at line 356. The concrete types support this. go-winio v0.6.2 DialPipeContext returns &win32Pipe{win32File: f} (pipe.go:306). win32Pipe embeds *win32File (pipe.go:112-113), so win32File.Fd() (file.go:277, returns the raw handle) is promoted onto it. golang.org/x/sys/windows already wraps GetNamedPipeServerProcessId (syscall_windows.go:172, zsyscall_windows.go:2524). Serve uses ListenPipe first-instance creation with the SDDL D:P(D;;GA;;;NU)(A;;GA;;;<sid>) (lines 200-201), so other accounts cannot add instances to our pipe. Tests (lines 220-228) only cover the positive path: "VerifyServerOwner succeeds on our own pipe" and "Ensure ... returns a verified connection". No test shows that a pipe served by a different SID is refused. The pipe name keyroster-agent-<SID> is deliberately stable user configuration (IdentityAgent in ~/.ssh/config). It has reversibility "costly" (line 181).
-  - Fix: Add a negative test for the owner check. Factor the SID comparison into a helper that takes the server SID as a parameter, then assert it returns an error naming both SIDs when they differ, using a well-known foreign SID such as S-1-5-18. Also assert that Ensure fails closed when the verifier rejects. Do not add a nonce to the pipe name or a separate race test.
+**02-02-R2-F1 — The login path through Ensure is deferred to 02-14; keep CI's test pipe apart from the real login path in the record**
+- Reviewers: codex
+- Claimed severity: MEDIUM
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new
+- Evidence: The claim as stated is covered. Ensure itself is tested here against a freshly built keyroster.exe (02-02-PLAN.md:242), the real `keyroster.exe login` on Windows runs in 02-14 (02-14-PLAN.md:190-191), and this plan marks nothing complete (`requirements-completed` empty, 02-02-PLAN.md:408). A narrower gap sits at the line codex cites: TestInboxSSHOffersAgentCert step 1 says "run `keyroster.exe agent` on a test pipe" (:244), but the command is specified to serve only PipePath() (:223), and the plan gives it no flag or environment override (:207, :215). The executor must either invent a pipe-name switch on the command or run the test on the user's real per-SID pipe, where a running agent on Daniel-PC makes the second Serve fail (:203). The same applies to the Ensure test at :242, which always dials PipePath().
+- Fix: In Task 2, state how the two process-level tests choose their pipe. Either say they use the real per-SID pipe and require that no keyroster agent is running (fail with a clear message otherwise), or define a hidden test-only argument on `keyroster agent` for the pipe name and state that Ensure never passes it. Have needs-hardware.md (Task 3) say which pipe the Daniel-PC evidence used.
 
-- **02-02-F5 [PARTIAL/LOW] Agent lifecycle: polling keyring.List() and exiting when empty can shut down early or never exit** (codex)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-02-PLAN.md:202 defines the lifecycle as a polled check followed by an exit: every opts.Poll (5 s), call keyring.List(); if a key was ever added and the list is now empty, return nil, otherwise return after IdleExit (5 min) when no key was ever added. Line 201 says one keyring is served with agent.ServeAgent on every accepted connection. No step makes the exit atomic with accepting or serving connections: nothing closes the listener and then re-checks the list, and nothing waits for in-flight connections to finish. The consumer is 02-12-PLAN.md:213-214. On Windows it calls winagent.Ensure (which dials the existing pipe), then Add, then List to confirm. Step 10 only proves the certificate is present on that connection at that moment. Ensure (02-02:209-212) starts a new agent only on file-not-found. A dying agent whose pipe is still open is reached and used. The tests (02-02:222-233) cover expiry-exit and idle-exit only one at a time, not an Add that overlaps an exit. 02-CONTEXT.md:113 (D-15) locks the lifetime-in-agent design but says nothing about this ordering.
-  - Fix: In Serve, make the exit decision atomic with connection handling. Track in-flight connections under a mutex, close the listener first, re-check keyring.List() and active connections before returning, and resume serving if a key arrived. Add a winagent test where an Add races the expiry poll. Optionally have Ensure retry the dial or start once if the connection drops right after Add.
-
-- **02-02-F8 [PARTIAL/LOW] SID check fails for elevated, runas or service tokens** (gptoss)
-  - Evidence: 02-02-PLAN.md:200 has PipePath = `\\.\pipe\keyroster-agent-<current user SID>`, so the pipe is per-user. 02-02-PLAN.md:204-208 has VerifyServerOwner: GetNamedPipeServerProcessId, then OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION), then OpenProcessToken and GetTokenUser, and requires that SID to equal the caller's. 02-02-PLAN.md:209-212: Ensure calls VerifyServerOwner before it returns. 02-02-PLAN.md:201: first-instance ListenPipe refuses an existing pipe. 02-02-PLAN.md:203: the agent exits on idle (5 min) or when its last key expires. 02-02-PLAN.md:356: threat T-02-07 is pipe squatting, mitigated by this check. 02-02-PLAN.md:226 tests only the positive case ("succeeds on our own pipe"). No mismatched-SID test and no elevation note appear anywhere in 02-02 or the other 02-* plans (grep for elevat/UAC/runas/integrity finds none relevant).
-  - Fix: In VerifyServerOwner, turn an access-denied from OpenProcess/OpenProcessToken into a clear fail-closed error that tells the user the agent may have been started elevated and how to stop it. Document that runas and other accounts get their own per-SID agent. Add a negative test asserting that a mismatched SID is refused (for example by comparing against a fixed foreign SID through an injectable expected-SID).
+**02-02-R2-F4 — No probe of macOS ssh-agent lifetime behaviour**
+- Reviewers: nemotron
+- Claimed severity: MEDIUM
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new
+- Evidence: The claim is mostly wrong: TestAgentLifetime adds a key and certificate with LifetimeSecs 2 to a real `ssh-agent -D` and checks they are gone after 3 s, and it runs in cli-macos (02-02-PLAN.md:283-288, :279). The narrower gap: the test "runs when `ssh-agent` is on PATH" (:283), and the only guard against a skip is the local WSL verify (:304-305). In CI a skip passes, while needs-hardware.md would still say the macOS agent tests run in CI (:293). macOS ships /usr/bin/ssh-agent, so a skip is unlikely.
+- Fix: Give TestAgentLifetime a require switch like KEYROSTER_REQUIRE_INBOX_SSH (for example KEYROSTER_REQUIRE_SSH_AGENT=1 turns the skip into a failure) and set it in build-test and cli-macos.
 
 ### 02-03
 
-- **02-03-F5 [PARTIAL/LOW] Frame header and length boundaries not tested adversarially** (codex, gptoss)
-  - Evidence: Most of what the finding asks for is already in the plan. - 02-03-PLAN.md:234 adds a test that a 64 KiB+1 issue frame and a MaxDirectoryFrame+1 install frame are refused before allocation. That test uses a reader that fails if anything past the header is read, which is the allocation guard the finding says is missing. - 02-03-PLAN.md:237 adds FuzzReadMessage and :236 requires no panics. The existing FuzzReadFrame seeds at internal/wire/fuzz_test.go:45-75 already include length 0, 1<<30, MaxFrame+1 and short frames. - Phase 1 tests already cover length 0, MaxFrame+1, exactly MaxFrame, a short header and a short payload (internal/wire/wire_test.go:252-314). They also check that a 1 GiB header reads only 4 bytes and allocates under 1 MiB (wire_test.go:253-269). - Unknown types are explicitly mapped to MaxFrame (PLAN:230). One gap is real. PLAN:231 says the reworked ReadMessage "reads the 4-byte length, rejects 0, reads the 2-byte version and type header, ... refuses `length - 2 > maxBodyFor(type)`". It never rejects length 1. The current code rejects it implicitly, because it reads the whole payload first and then checks `len(payload) < 2` (internal/wire/frame.go ReadMessage). In the new shape, a length-1 frame has two problems: - Reading the 2-byte header takes one byte from the next frame, so the stream desyncs. - `length - 2` either underflows (uint32 wraps, so it happens to be refused) or becomes -1 (int, so the check passes and `make([]byte, -1)` panics). The existing test `payload_without_type` (wire_test.go:325-333) would not catch the desync. Its buffer holds only that frame, so the 2-byte read fails with ErrUnexpectedEOF, which still satisfies the assertion "non-nil and not ErrVersion". The plan also does not explicitly test acceptance at exactly MaxDirectoryFrame for TypeInstallDirectory and TypeGetDirectoryResponse, or an unknown type at MaxFrame+1. Both are minor.
-  - Fix: In Task 3, make ReadMessage refuse any length below 2 before it reads the 2-byte header, and do the cap comparison in unsigned or widened arithmetic. Add table cases for: - length 1 followed by a second valid frame, which must be refused without consuming the second frame; - length 2 (header only, empty body); - exactly MaxDirectoryFrame for both directory types (accepted) and exactly MaxFrame for issue (accepted); - an unknown type at MaxFrame+1 (refused before allocation).
-
-- **02-03-F10 [PARTIAL/LOW] No test that WriteMessage rejects oversized outgoing frames** (gptoss)
-  - Evidence: Plan 02-03-PLAN.md:231 says "WriteMessage enforces the same cap", but the only tests Task 3 adds (line 234) are read-side: a 64 KiB+1 issue frame and a MaxDirectoryFrame+1 install frame "refused before allocation" by a reader. The only check on the write side is acceptance line 261, a grep showing that maxBodyFor appears in WriteMessage. That proves the name is there, not how it behaves. In the current code, WriteMessage (internal/wire/frame.go:75-80) passes through WriteFrame, which enforces the flat MaxFrame (frame.go:63). The existing test wire_test.go:307 only covers WriteFrame with MaxFrame+1. Task 3 has to change WriteMessage so it allows directory types up to MaxDirectoryFrame (more than MaxFrame), which means bypassing or changing WriteFrame. That rewrite is exactly where a write-side regression can slip in, for example a type mapped to the wrong cap or an off-by-2 in the header, and no planned test would catch it. Partial mitigation: the security boundary is the reader-side cap, which is tested (line 234) and fuzzed (FuzzReadMessage, line 237), so an oversized outgoing frame would still be refused by the peer. WriteFrame already builds the whole buffer and writes it once (frame.go:66-69), so "no bytes before the error" is close to guaranteed by construction.
-  - Fix: In Task 3, add a write-side table test. WriteMessage(TypeInstallDirectory, body with len(body) == MaxDirectoryFrame) succeeds, and with MaxDirectoryFrame+1 it returns ErrFrameTooLarge and writes nothing to a recording writer. Likewise TypeIssueRequest at MaxFrame-2 succeeds and at MaxFrame-1 is refused, so the boundary holds in both directions. Make that test the acceptance check alongside the maxBodyFor grep.
-
-- **02-03-F12 [PARTIAL/LOW] Seed corpora for clientDataJSON and GetDirectoryResponse fuzzers** (gemma, gptoss)
-  - Evidence: The GetDirectoryResponse half is already covered. 02-03-PLAN.md:236 requires "seed corpora from valid vectors plus mutations" for every target, and the existing pattern at internal/wire/fuzz_test.go:9-25 already seeds valid, truncated (valid[:len/2]), trailing-byte, empty and over-limit inputs. FuzzParseGetDirectoryResponse (02-03-PLAN.md:237) is a strict u64/u24/u24/u8 decoder (02-03-PLAN.md:131), so it follows that pattern. "Mismatched versions" means nothing at this layer: Version is just a u64 field, and chain and version checks belong to directory.CheckSuccessor (02-01-PLAN.md:206). "Truncated signatures" are covered by the truncation seeds. The clientDataJSON half points at a real gap. 02-01-PLAN.md:223 says the parser "skips unknown members, because browsers inject extra keys" (see also RESEARCH.md:302 and :890, which name Chrome's other_keys_can_be_added_here). But the default webauthntest vector has no extra keys: 02-01-PLAN.md:229 gives it as `{"type":"webauthn.get","challenge":..,"origin":..,"crossOrigin":false}`. The 02-01 tests (02-01-PLAN.md:315) cover only the happy path and four refusals. The 02-03 Task 2 matrix (02-03-PLAN.md:169) lists only refusals for client data. 02-08's differential test reuses the 02-03 mutation vectors (02-08-PLAN.md:42). No plan has a positive case saying that clientDataJSON with extra members (other_keys_can_be_added_here, tokenBinding, a nested object or array value) parses and verifies. The fuzz targets assert only "sentinel error or no panic" (02-03-PLAN.md:236), so seeding the fuzzer as the reviewers propose would exercise the skip path for crashes. It would not prove that unknown members are accepted.
-  - Fix: Add to 02-03 Task 2 (internal/webauthn/verify_test.go) one accept case: clientDataJSON with Chrome's other_keys_can_be_added_here, a tokenBinding object and an unknown array member must verify for an otherwise valid assertion, built with webauthntest.WithClientDataJSON. Also add that JSON as a seed to FuzzParseClientData. No change is needed for FuzzParseGetDirectoryResponse.
-
-- **02-03-F13 [PARTIAL/LOW] GetDirectory empty-state test** (nemotron)
-  - Evidence: The empty-state version check is already tested. 02-03-PLAN.md:43 (must_have) promises "version 0 when none is installed". Task 1, case 4 `directory_not_quorum_signed`, at 02-03-PLAN.md:138-141 asserts through the real socket that, after a refused install (so nothing is installed), "GetDirectory then reports version 0". Sibling plans assert the same no-directory state: 02-07-PLAN.md:177 ("signerclient.GetDirectory reports version 0") and 02-08-PLAN.md:223 ("signerclient.GetDirectory still reports version 0"). FuzzParseGetDirectoryResponse (02-03-PLAN.md:237) covers the parser. No plan asserts the other three fields when nothing is installed: Directory and Sigs empty, Authorized=false. The wire shape at 02-03-PLAN.md:131 also does not require ParseGetDirectoryResponse to reject a version-0 response that has non-empty bytes or Authorized=1. The consumer is the server mirror (02-09-PLAN.md:139), which caches by version, so a version-0 response with stray bytes would still be treated as "no directory". That makes the gap cosmetic, not security-relevant.
-  - Fix: Extend the existing Task 1 case 4 step at 02-03-PLAN.md:140 to "GetDirectory then reports version 0, empty Directory and Sigs, and Authorized=false". Optionally, have ParseGetDirectoryResponse reject a version-0 response with non-empty bytes or Authorized=1.
-
-- **02-03-F16 [PARTIAL/LOW] Each new refusal reason recorded in the audit log with exact Reason and request hash** (gptoss)
-  - Evidence: Phase 1 sends every refusal through one function. internal/signer/refusal.go:72-96 (refuseLogging) writes a tlog.RefusalBody{RequestDigest: digest, PeerUID, Reason: class, Detail: detail}, where detail is the exact reason string. refuseErr (refusal.go:175-185) calls classify(r.reason). Above the rate limit, a refusal is only counted per reason class in a refusal_summary leaf (refusal.go:80-82, 102-138, D-14). That leaf has no detail and no digest by design, so "every refusal with its request hash" contradicts the locked D-14 design. 02-01-PLAN.md:258 sends directory-install refusals through refuseErr with digest SHA-256(doc). 02-01-PLAN.md:261-266 names each login refusal detail, including no_webauthn_policy, unknown_evidence_type and directory_changed. 02-03-PLAN.md:38 and :173 require each new detail to leave a refusal leaf or a refusal_summary count, and require that classify never returns ReasonInternal. :213 greps refusal.go for the new details. :146 has the e2e export-log check for refusal entries. The real gap is narrow. 02-01-PLAN.md:271 does not say which digest the LoginIssue dispatcher passes; the Phase 1 issueOrRefuse at refusal.go:156-166 passes req.Digest(). No 02-03 test checks that a login or InstallDirectory refusal leaf carries the matching RequestDigest and the exact Detail. Phase 1 checks this only for the admin path, in refusal_test.go:206-220 (TestRefusalLeavesCarryDigestAndPeer).
-  - Fix: In 02-03 Task 2, add one assertion modelled on TestRefusalLeavesCarryDigestAndPeer, run below the rate limit. A LoginIssue refusal (e.g. no_webauthn_policy) must produce a refusal leaf whose Detail is the exact string and whose RequestDigest equals req.Digest(). An InstallDirectory refusal must produce a leaf whose RequestDigest equals SHA-256(doc). Also state in 02-01 that login refusals pass req.Digest().
-
-### 02-04
-
-- **02-04-F2 [PARTIAL/LOW] No positive multi-successor fixtures (policy change + directory change + login, old/new CA)** (codex, nemotron)
-  - Evidence: The plan states the rule but never tests the case where it must accept. .planning/phases/02-passkey-login-mvp/02-04-PLAN.md:137 says the login_issue directory "may have been re-checked after a later bundle_install, which mirrors the signer's directory_not_authorized rule". Line 136 requires DirectoryVersion and PolicyVersion to match the versions in force. Line 134 requires the PolicyVersion in a directory_install body to equal the policy in force when it is installed. Together these allow a valid log with directory v1 installed under policy v1, a later RP-adding policy v2, then a login (dir=1, pol=2), and audit verify has to accept it. No fixture builds that log: (a) The e2e TestAuditLoginAcrossPolicyChange (02-04-PLAN.md:150-157) installs directory v1 only AFTER the policy change (step 6 comes after steps 3-5). (b) The tamper suite (02-04-PLAN.md:177-188) has only negative cases. `login_under_unauthorized_directory` (line 188) is the rejection side. "The untampered log passes" is the base log, which is not described as containing a directory that outlives a policy change. (c) The homelab run (02-13-PLAN.md:174-205, 281) installs bundle v3 with the RP before any directory or login, so it does not exercise this either. (d) 02-03-PLAN.md:41, 176 and 199 cover the same sequence ("a policy change the directory still satisfies, such as adding the RP, leaves it authorized"; restart re-verification) on the signer only. Those plans never run audit verify on that log. A directory can be installed under an RP-less policy (02-03-PLAN.md:143), so the scenario is real. The "old and new CA material" part is weaker. login_issue reuses the kind-1 rule "signed by the active user CA in force" (02-04-PLAN.md:143). That rule is the existing anchor.activeCA check (internal/audit/verify.go:186-198), and Phase 1 fixtures already cover issuances across successor bundles (internal/audit/verify_test.go:1074 TestVerifyAnchorsOnLaterBundle, rotatedTo). Phase 2 also never changes CA keys: successor-policy edits only the RP (02-04-PLAN.md:122-129), and the 02-13 dry run requires the "CA, ops and log keys unchanged" (02-13-PLAN.md:199).
-  - Fix: In the Task 1 e2e, install directory v1 (signed by the unchanged admin) BEFORE the successor-policy step and log in after the restart under policy v2, so audit verify must accept a login with dir=1 and pol=2. Alternatively, add an equivalent positive in-process case to the Task 2 suite, such as `login_directory_survives_rp_policy_change`, next to the negative `login_under_unauthorized_directory`.
-
-- **02-04-F8 [PARTIAL/LOW] Directory re-parse per login_issue may be O(N^2) on large logs** (gptoss)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-04-PLAN.md:133 says "In the leaf walk, keep the directory in force (raw bytes, parsed, version), the way the policy in force is kept." So the directory is parsed once, at its directory_install leaf (line 134: directory.Parse, CheckSuccessor, VerifySignatures, CheckPolicy, "Then make it the directory in force"), not again for each login_issue. Line 136 checks login_issue against the cached version numbers. The only open point is line 137: "the directory verifies under the policy in force at this leaf; it may have been re-checked after a later bundle_install". This does not say whether the quorum-signature check is cached per (directory, policy) pair or run again for every login_issue leaf.
-  - Fix: Reword line 137 to say the directory is checked against the policy in force only when one of them changes (at directory_install and after each bundle_install), and that the stored result is reused for each login_issue leaf. This is optional and only removes repeated checks; the cost is already linear.
+**02-03-R2-F16 — No GetDirectory round trip for an installed directory**
+- Reviewers: gptoss
+- Claimed severity: unrated (gptoss gave no per-concern severity; it rated the plan MEDIUM)
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new (02-03-F13 covered only the empty state; fixed for that part)
+- Evidence: The reviewer's wording is wrong in one respect: a real-socket GetDirectory call exists (02-03-PLAN.md:141). But every GetDirectory assertion in this plan is for the empty state: case 4 (02-03-PLAN.md:141, 157) and the parser control "the empty version-0 response round-trips" (02-03-PLAN.md:259). Case 4's control installs a directory and logs in but never calls GetDirectory (02-03-PLAN.md:143), and `restart_under_new_admins` never reads the Authorized flag (02-03-PLAN.md:181). So the must-have "returns the installed version, the canonical directory bytes, the signatures and whether the directory is authorized" (02-03-PLAN.md:43) and the success criterion at 02-03-PLAN.md:376 have no test in the plan that introduces the message. The first non-empty check is three plans later (02-09-PLAN.md:236: version 1, authorized); 02-07-PLAN.md:212 and 02-08-PLAN.md:246 are version 0 only, and no sibling plan asserts Authorized=false through GetDirectory (case-insensitive grep over all Phase 2 plans). The exact-cap cases (02-03-PLAN.md:254, 258) exercise ReadMessage/WriteMessage, not the codec. Impact is limited: a wrong encoding fails closed in 02-09's mirror (SHA mismatch) and is caught by 02-09's e2e.
+- Fix: In Task 1 case 4, after the control install, assert GetDirectory returns Version 1, Directory byte-equal to the installed canonical bytes, Sigs byte-equal, Authorized=true. In `restart_under_new_admins`, assert GetDirectory Authorized=false (version and bytes still v1) after the restart under admins {b}, and true after v2. Add a non-empty round-trip case to `TestParseGetDirectoryResponse` and require it in the fails_when line.
 
 ### 02-05
 
-- **02-05-F1 [PARTIAL/LOW] Passphrase buffer not guaranteed cleared on every error path** (codex)
-  - Evidence: 02-05-PLAN.md:145 requires the backend to "clear the byte slice after use". Line 130 tells the executor to copy the internal/rootceremony/keygen.go pattern, and the plan quotes `defer clear(plain)` by name. In the real code, a deferred clear runs on every return path: internal/rootceremony/keygen.go:40, 47 and 98, and passphrase.go:42. The early-return error paths also clear: passphrase.go:44, 48, 59, 76 and 83, and keygen.go:119 and 124. Line 147 (Key) puts wrong passphrase, parse failure and fingerprint mismatch after the passphrase has been used. A deferred clear covers all three. Lines 224 and 268 test that a wrong passphrase is not echoed, but nothing tests that memory is zeroed. T-02-23 (line 335) says only "buffer cleared". Two mechanisms limit what clearing can achieve. First, age.NewScryptIdentity and NewScryptRecipient take a Go string, so `string(passphrase)` makes a copy that cannot be zeroed. keygen.go:29-31 already documents this as "best effort: the passphrase string age derives its key from cannot be zeroed". Second, T-02-21 (line 333) accepts that the passphrase file sits on the same host, readable by the signer user. That makes leftover passphrase bytes in heap memory a marginal extra exposure.
-  - Fix: Reword line 145 to say: read the passphrase into a []byte and `defer clear()` it right after reading, so it is zeroed on every return, including the short-passphrase and mode refusals and errors from Key and Provision. Also state that the backend does not keep the passphrase longer than the call that needs it, or re-reads it from the file for each Key/Provision. Note in T-02-23 that the string copy passed to age cannot be cleared (best effort, as in keygen.go:29-31).
-
-- **02-05-F2 [PARTIAL/LOW] Key-file creation: atomicity, symlinks, existing-dir permissions, partial-provision cleanup** (codex)
-  - Evidence: Plan 02-05-PLAN.md:146 is the whole Provision spec: "refuse if {state-dir}/software already holds any .age file ... Write with O_EXCL, mode 0600, in a 0700 directory, then fsync." It says nothing about cleaning up after a mid-loop failure, about checking an existing directory (Lstat, not a symlink, no group or other bits), or about fsyncing the directory. The Task 3 matrix (02-05-PLAN.md:220-228, 268) tests only provision_refuses_existing, with no cleanup or permissive-directory case. The repo already solves every one of these points in the sibling TPM backend: - internal/keystore/tpm/provision.go:39-45 runs Mkdir and then checkPrivateDir even when the directory already exists. - tpm.go:270-284: checkPrivateDir uses Lstat, rejects anything that is not a directory, so a symlink fails, and requires no group or other bits. - provision.go:60-66 runs a Lstat pre-check on every target before any work starts. - provision.go:105-124: removeWritten gives "write all files, or none". - provision.go:130-139: syncDir covers the key directory and also the parent when Provision created it. - provision.go:214-231: writeNew uses O_EXCL, Sync, and removes the file on error. - tpm.go:286-300: readPrivateFile uses Lstat, requires a regular file and 0600 on read. The plan's read_first (02-05-PLAN.md:129) names only internal/keystore/tpm/tpm.go, not provision.go, so the executor is not pointed at the all-or-nothing and directory-sync code. Parts of the claim are wrong: - temp+rename is not needed. O_CREAT|O_EXCL already refuses a symlink or any existing name at the final path component, and remove-on-failure gives the same atomicity at the file-set level, as the TPM backend shows. - Ownership checks go beyond the existing pattern. checkPrivateDir checks mode only, and systemd's StateDirectory with mode 0700 controls ownership.
-  - Fix: Add internal/keystore/tpm/provision.go to Task 1 read_first and require the software Provision step to mirror it. That means checkPrivateDir on an existing {state-dir}/software, an Lstat pre-check on every target, all-or-nothing writes with removeWritten on any failure, and syncDir on the key directory (and on its parent when Provision creates it). Key() should read through an Lstat, regular-file, 0600 check. In Task 3, add the test cases provision_cleans_up_on_failure (inject a failure into a write or a directory sync and assert that no .age file is left) and provision_refuses_permissive_dir.
-
-- **02-05-F4 [PARTIAL/LOW] Passphrase strength and scrypt work factor vs offline brute force** (codex, gemma)
-  - Evidence: 02-05-PLAN.md:36 (truth 2: passphrase only from file or systemd credential, at least 20 runes, file must not be group/other readable). 02-05-PLAN.md:146 (Provision: "one scrypt recipient at age's default work factor"). 02-05-PLAN.md:158 (banner: "EVALUATION ONLY ... Anyone who copies the key files and their passphrase can issue certificates. Do not use this instance for real access"). 02-05-PLAN.md:241-246 (custody.md section: evaluation only; "a passphrase stored on the same host makes the key equivalent to plaintext"; passphrase sources; doctor WARN). 02-05-PLAN.md:333 (T-02-21: key files plus passphrase on the same host is rated high and accepted as inherent to the software level). 02-05-PLAN.md:117 (the 20-rune rule is inherited from the locked STATE.md 01-09 decision). In docs/security/custody.md:108 the only passphrase text is about the root keys; nothing covers entropy, scrypt cost or offline guessing.
-  - Fix: In Task 2's custody.md "Software CA keys (KEY-06)" section, add one bullet: if the .age files leak alone (from a backup or a copied state dir), they can be attacked offline. Protection then depends only on the passphrase's entropy, at age's default scrypt cost. The 20-rune check is a length floor, not a strength check, so use a randomly generated passphrase. Optionally, extend T-02-21's disposition to name this file-only case.
-
-- **02-05-F6 [PARTIAL/LOW] MaxStatusFrame 256 KiB sizing and boundary testing** (nemotron, gptoss, codex)
-  - Evidence: Plan 02-05-PLAN.md:151-153 puts Bundle, BundleSigs, Policy and PolicySigs (each u24-prefixed) in StatusResponse, with `MaxStatusFrame = 256 << 10`. The directory itself is not included, only DirectoryVersion and DirectorySHA256 (line 151), so the reviewers' worry about "directory material" growing is wrong: the 1 MiB directory (02-03-PLAN.md:228) never goes into Status. The real mismatch is in Phase 1 code. The signer accepts bundle and policy documents much larger than 256 KiB. cmd/keyroster-signer/install.go:47-54 reads all four files with uncapped os.ReadFile and passes them to signer.InstallBundle. The only limit is in the audit leaf: internal/tlog/leaf.go:77 sets `MaxDocument = 1 << 20` per document, enforced at leaf.go:513-516. So a signer can install up to about 4 MiB of documents that Status can then never serialize. Plan 02-05 adds no install-side cap that matches the Status budget. In Task 3 (02-05-PLAN.md:230), the Status codec tests cover only round trip, a trailing byte and more than 8 keys; nothing marshals a maximal response at or just past MaxStatusFrame. The failure would not be silent. Line 163 says a Status failure aborts ca issue, and 02-06-PLAN.md:181 says the server serves 503. But that means an accepted install could block all issuance and the server, and recovery would take a new root-signed bundle or policy successor.
-  - Fix: Make the two limits agree. Either have signer.InstallBundle (or the Status encoder's budget check) refuse to install documents whose combined size cannot fit in a StatusResponse under MaxStatusFrame, or derive MaxStatusFrame from the documented document caps. Add a Task 3 codec test showing that a StatusResponse exactly at the budget round-trips through WriteMessage/ReadMessage, and that one byte more is refused with an explicit error.
-
-- **02-05-F7 [PARTIAL/LOW] Blocking banner-wording checkpoint can stall; banner too long for terminals** (nemotron)
-  - Evidence: 02-05-PLAN.md:189-213 has Task 2 as `checkpoint:decision gate="blocking-human"`. Its own context (line 192) says "Changing it later is cheap (one constant plus the doc), so this is a wording review, not a one-way door", and it justifies the gate with "The owner asked for it as an in-plan checkpoint (RESEARCH Pattern 6)". Neither locked document supports that justification. 02-CONTEXT.md:140 puts "the exact banner text (D-18)" under Claude's Discretion. 02-CONTEXT.md:34 reserves `checkpoint:decision` for one-way items. 02-RESEARCH.md:665 says only "Owner wording review happens at the plan's checkpoint", and the Open Questions at RESEARCH:917-924 do not list the banner as an owner checkpoint (only D-09 and D-15 are listed). On length: the plan already records "long for a terminal line" as a con of the approve option (02-05-PLAN.md:197), and the edit option (line 199-202) lets the owner supply a shorter text, so the reviewer's shorter-form suggestion is already an option the plan offers. The CLI writes to stderr, framed by `!` lines (line 163), and terminals soft-wrap long lines rather than cut them, so the "truncated" part of the claim is wrong. The Phase 1 precedent `softwareRootBanner` (cmd/keyroster/root.go:80-86) is a multi-line, hard-wrapped constant at about 75 columns.
-  - Fix: Option 1: downgrade Task 2 to a non-blocking review. Claude picks the wording under D-18 discretion and shows it to the owner in the PR at the existing Task 4 merge gate, and the line saying the owner asked for the checkpoint is removed. Option 2: keep the gate but cite its real basis, RESEARCH:665. Either way, hard-wrap the banner the way the existing softwareRootBanner in cmd/keyroster/root.go is wrapped, or keep the one-line text for the UI and wrap it only for terminal output.
-
-- **02-05-F11 [PARTIAL/LOW] Stale custody / race between Status and issuance** (gptoss)
-  - Evidence: Plan 02-05-PLAN.md:154: `Signer.Status()` runs under s.mu and builds its answer from "the keys and custody re-checked at start, the trust_bundle row in force". It "adds no new state". Line 163: ca issue calls Status before every request and aborts if Status fails, so the CLI always fetches status fresh on each issuance and never caches it. Line 39 says the same in must_haves. In the Phase 1 source, the signer never reloads keys or custody at runtime: - Keys are opened only at start, through openRoleKey (internal/signer/trust.go:210, :365, :441). - Custody is recorded at ca-init (trust.go:130-132) and checked against the bundle at start (trust.go:296-314). - If the installed bundle changes under a running signer, checkTrustCurrent (internal/signer/issue.go:215-229) refuses every request with trust_changed until a restart. A bundle change therefore cannot produce a successful issuance under a stale banner. - Issue holds s.mu (issue.go:50-51), but s.mu does not span two separate RPCs, and nothing in the plan says it does.
-  - Fix: Optional hardening: have IssueResponse (or Status) carry the signer's bundle version or SHA-256. ca issue would then compare it with the Status reply and fail closed (or re-fetch Status) on a mismatch. Otherwise, add one sentence to the plan noting that custody is fixed for the life of the process and that trust_changed makes the signer refuse requests, so Status-then-Issue cannot diverge without a restart.
-
-- **02-05-F16 [PARTIAL/LOW] custodytext should import only stdlib** (nemotron)
-  - Evidence: The plan already sets the requirement. .planning/phases/02-passkey-login-mvp/02-05-PLAN.md:157 says "Banner constant (internal/custodytext, stdlib only, imported by the CLI and later the server; never by the signer)". The isolation that matters for security is already enforced by an acceptance check at 02-05-PLAN.md:182: "`go list -deps ./cmd/keyroster-signer | grep -c custodytext` prints 0". The plan contradicts itself, though. The very next lines (02-05-PLAN.md:158-159) define `func SoftwareRoles(keys []wire.KeyStatus) []string`, so custodytext must import internal/wire. internal/wire is not stdlib: internal/wire/issue.go:8 imports golang.org/x/crypto/cryptobyte. As written, the "stdlib only" statement cannot be true. The suggested enforcement tool does not fit. scripts/dep-firewall.sh:1-5 covers only keyroster-signer: it checks the signer's transitive graph against BANNED (net/http, templates, os/exec, and so on). custodytext is a CLI and server package, deliberately kept out of the signer graph, so this script is the wrong place for a stdlib-only rule about it. Sibling plans also never call on dep-firewall for non-signer packages (02-01-PLAN.md:328, 02-08-PLAN.md:271).
-  - Fix: Fix the inconsistency in the plan text. Either change line 157 to "imports only stdlib and internal/wire", or have SoftwareRoles take plain role/custody pairs (for example `map[string]string`, or a local struct) so the package really is stdlib-only. Do not add a custodytext rule to scripts/dep-firewall.sh; the existing check at line 182 (the signer graph does not contain custodytext) is the right guard.
+**02-05-R2-F10 — Status and install can disagree (race / out-of-sync report)**
+- Reviewers: gptoss
+- Claimed severity: LOW
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: repeats 02-05-F11 (fixed for custody; a narrower point about the bundle and policy fields is left)
+- Evidence: The custody half is refuted. Keys and custody are fixed at ca-init and checked against the bundle (internal/signer/trust.go:291-314, `checkBundleKeys`), `ca issue` calls Status fresh each run (02-05-PLAN.md:188), and 02-05-PLAN.md:171 states the invariant. What the plan leaves open is which bundle Status reports after `install-bundle` runs under a live signer. The Signer keeps only `policy` and `bundleVersion` in memory, not the bundle bytes (internal/signer/signer.go:59-74), so Status must read the database. Line 170 says "the trust_bundle row in force" and line 171 says such a signer refuses "every request" with trust_changed, but today only issuance calls `checkTrustCurrent` (internal/signer/issue.go:84, :161, :220), and the plan never says Status does. An implementation that reads the latest row would report bundle and policy N+1 (possibly a new RP) while the process still runs on N. Installs normally run with the signer stopped (02-06-PLAN.md:201), so this needs an operator mistake. Impact is small: issuance still refuses, and the server would only display or start on state the signer is not yet using.
+- Fix: In Task 1 "Signer.Status()", add one sentence: Status calls `checkTrustCurrent` under s.mu and returns the trust_changed refusal when the database holds another bundle version than `s.bundleVersion`. Add a case next to the existing trust_changed test that Status refuses after an install under a running signer.
 
 ### 02-06
 
-- **02-06-F1 [PARTIAL/LOW] TLS pin bootstrap at keyroster init relies on out-of-band pin verification** (codex)
-  - Evidence: Covered: 02-06-PLAN.md:198 makes init require at least one explicit --tls-pin and that every given pin was observed. Without it, init only prints the pins and exits 2, so observed pins are never stored automatically. Line 199 keeps only the observed roots that match the given pins. Lines 187 and 54 say that after init only the pinned roots are used (no system roots), with VerifyConnection requiring a pinned root. Line 275 tests refuses_unobserved_tls_pin and no_config_written_on_refusal, and line 407 (T-02-25) covers this in the threat model. Delivery channel is covered: CONTEXT D-10 (02-CONTEXT.md:90) is a locked decision that the pin comes "in the invite or by keyroster init". 02-07-PLAN.md:39 has `user add` print the exact init line, including TLS pins taken from the admin's own verified config. The first admin's bootstrap is checked against openssl output on the server host (02-06-PLAN.md:314; 02-13-PLAN.md:216-217). Bundle authenticity does not depend on TLS: trust.VerifySelfSigned and MatchPins against --root-pin (line 189). Gaps: (a) the runbook at 02-06-PLAN.md:314 says "or the pin `keyroster init` prints". That is circular and turns the step into trust on first use, unless it is compared with an independent source. (b) Rotation and recovery are missing. RESEARCH.md:224-225 calls for a `keyroster init --repin` path with an out-of-band check, support for more than one pin, and a clear error when the CA moves to a new root (for example the Let's Encrypt root generation change). 02-06 offers only `--force` on an existing config (lines 201, 389), and neither the runbook nor the error text covers a root change.
-  - Fix: Remove "or the pin keyroster init prints" from the runbook's first-admin step, or require it to be checked against the openssl output from the host. Also add a short "TLS root changed" section: the CLI error on a pin mismatch names `keyroster init --force` (or `--repin`) with pins re-confirmed out of band, as RESEARCH.md:224-225 recommends.
+**02-06-R2-F1 — Pin-mismatch errors must be distinguishable from ordinary TLS failures, with a test per case**
+- Reviewers: codex
+- Claimed severity: MEDIUM
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: repeats 02-06-F1 and 02-06-F10 (both fixed; this is the residual)
+- Evidence: Most of it is covered: the out-of-band reference is required (02-06-PLAN.md:386, T-02-25 at :529), `ErrTLSRootNotPinned` and `ErrTrustRootNotPinned` carry recovery steps (:217-219, :212-215), and tests exist for an unpinned root, a root-pin mismatch and intermediate rotation (:293-297). Two things are missing. (a) Line 220 says expired-leaf and wrong-hostname errors "keep their own messages", but no serverclient case asserts that; the tlsreload cases at :338 test the server side only. (b) Line 218 maps every `x509.UnknownAuthorityError` to "root not pinned". With RootCAs holding only the root, a server that stops sending its intermediate fails with the same error, so the user is sent into the re-pin procedure for a server misconfiguration. Both fail closed and the re-pin still needs an out-of-band comparison, so there is no security impact, only a misleading diagnosis.
+- Fix: In Task 2 serverclient tests add `wrong_hostname_not_root_error` and `expired_leaf_not_root_error` (neither satisfies `errors.Is(err, ErrTLSRootNotPinned)`), and `missing_intermediate_reports_root_error` documenting the known overlap. Extend the ErrTLSRootNotPinned message and the runbook "TLS root changed" section with "or the server is not sending its full chain".
 
-- **02-06-F4 [PARTIAL/LOW] Signer Status cache staleness and signer-down behaviour** (codex, gptoss, nemotron)
-  - Evidence: Mostly covered already. 02-06-PLAN.md:181 says "A Status failure serves 503 from the API and the healthz route, and an error page from HTML routes". So a signer that is down or has crashed already makes /healthz and /api/v1/trust return 503, and every route goes through the same cache. 02-06-PLAN.md:239 tests that the 503 returned while the signer is down carries all the headers, and :267 adds a fake status source interface so that case can be unit-tested. A policy change after start is low-risk for three reasons. First, policies can only be changed with root successor-policy plus install and a signer restart (02-04-PLAN.md:107), and during that restart the server's Status calls fail, so it serves 503. Second, the server is untrusted by design (02-06-PLAN.md:400). Third, the signer re-verifies rpIdHash and origin against its own root-signed policy (02-01-PLAN.md:441 T-02-02, 02-12-PLAN.md:178 and :378 "the signer re-verifies everything"). Stale RP data in the server therefore cannot mint a certificate; at worst it causes a failed login or wrong display for about 5 s. One part is real: line 181 contradicts itself. If every Status failure returns 503, then "never fall back to stale RP data older than 60 s" implies a stale fallback that the first sentence rules out. An implementer could read it as a 60 s grace window during which /api/v1/trust and the banner use cached data after the signer goes down. There is also no named test for refresh failure after the cache has expired.
-  - Fix: In line 181, replace the 60 s clause with one rule: when the 5 s TTL has expired and the refresh fails, every route fails closed (API/healthz 503, HTML error page) and there is no stale fallback. Add a Task 2 unit case `status_refresh_failure_fails_closed` using the fake status source and an injected clock.
-
-- **02-06-F10 [PARTIAL/LOW] Root rotation / chain portability for pinned TLS roots** (codex, nemotron)
-  - Evidence: Re-pin path exists: 02-06-PLAN.md:201 ("saveConfig. It refuses an existing file without --force"), :253 (test "existing config without --force"), :389 (CLI flags include --force). So re-running `keyroster init --force --tls-pin <new>` with an out-of-band check is the re-pin. That matches RESEARCH Q1 (02-RESEARCH.md:224): when the root changes, the pin "breaks closed" and is re-pinned through init. A separate `--repin` flag is only a naming difference. Several pins are supported: Config.TLSPins []string (02-06-PLAN.md:193), init accepts multiple --tls-pin and keeps every observed root whose pin was given (:198-199), and VerifyConnection accepts any verified chain whose root pin is in Pins (:187). Intermediate rotation under the same root is handled by design. After init, RootCAs holds only the stored roots and Go builds the chain from the intermediates the server sends (:187). RESEARCH 02-RESEARCH.md:224 says this survives intermediate rotation. Cross-platform chains: RESEARCH :221 calls out Windows/Linux chain differences ("pin every root seen at init"). 02-14-PLAN.md:137,156 checks that the laptop's observed TLS pin equals Daniel-PC's. 02-13-PLAN.md:216-217 does the out-of-band pin comparison. Real but narrow gaps: (a) RESEARCH :225 asks the CLI to "give a clear error" when a root pin stops matching. Task 1/2 of 02-06 define no specific error or hint for a post-init pinned-root mismatch (no "server root changed; verify out of band and re-run keyroster init --force"). The tests at :242-244 only check that the connection is refused. (b) There is no unit test that a new intermediate under the same pinned root is still accepted. (c) Init step 4 (:198) requires every given pin to have been observed, so you cannot pre-pin a future root (e.g. a new LE root generation) before the server serves it.
-  - Fix: When no verified chain ends in a pinned root, serverclient should return a specific error naming the observed root pin and telling the user to verify it out of band and re-run `keyroster init --force --tls-pin ...`. Add a serverclient test that a leaf issued by a new intermediate under the same pinned root is accepted. Optionally, document in the runbook that re-pinning is `init --force`.
-
-- **02-06-F11 [PARTIAL/LOW] Config file location and permissions across platforms** (nemotron, gptoss)
-  - Evidence: The plan says config.json is written "0600 in a 0700 directory" at os.UserConfigDir()/keyroster (.planning/phases/02-passkey-login-mvp/02-06-PLAN.md:193, :53, :389). It says nothing about Windows ACLs. The file holds no secrets. Config is {Server, TLSRootsPEM, TLSPins, TrustPins, TrustThreshold, User, AdminKey} (02-06-PLAN.md:193). AdminKey is a `SHA256:...` fingerprint (02-06-PLAN.md:53, the `--admin-key SHA256:...` flag). Everything in it is public: pins, root certs, a URL and a username. So confidentiality does not apply. The only property worth protecting is integrity, because someone who can edit the file can swap the pins that T-02-25 relies on (02-06-PLAN.md:407). On macOS, os.UserConfigDir() is ~/Library/Application Support, and POSIX modes do work there. Go's os.MkdirAll(0700) and os.WriteFile(0600) are enforced, so the macOS half of the claim is wrong. On Windows, %APPDATA% sits under the user profile, which by default inherits an ACL of user + SYSTEM + Administrators. Anyone who can write there already runs as that user or as an admin, and could just as easily replace the keyroster binary or PATH. Being able to edit the file adds nothing to what that attacker can already do. Mode checks only run on Linux. The e2e check "config.json exists with mode 0600" (02-06-PLAN.md:211) is in the e2e suite, which runs only on ubuntu-24.04 (.github/workflows/e2e.yml:29). Phase 1 already has a precedent for skipping mode checks on Windows: cmd/keyroster/root_test.go:333 ("mode 0600 outside Windows") and :356 (`if runtime.GOOS != "windows"`). Sibling plans 02-09 (line 149) and 02-12 (line 196) only call loadConfig and do not check permissions.
-  - Fix: Add one line to the config.go bullet. It should say that on Windows the modes are a no-op, that the file inherits the per-user %APPDATA% ACL, and that this is enough because the config holds only public pins and fingerprints. Any mode assertion outside the Linux-only e2e suite should be guarded with `runtime.GOOS != "windows"`, as cmd/keyroster/root_test.go:356 already does.
-
-- **02-06-F15 [PARTIAL/LOW] No test asserts Content-Type of embedded static assets** (gptoss)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-06-PLAN.md:179 says the route is `GET /static/` (embed FS, explicit content types). The only test that touches static files is 02-06-PLAN.md:239, which asserts that 404, static and 503 responses carry all six security headers. Nothing checks Content-Type. 02-06-PLAN.md:49 makes `X-Content-Type-Options nosniff` global. I grepped every 02-*-PLAN.md for "Content-Type", "text/css" and "mime", and the only hits are the nosniff header lines in 02-06. 02-08-PLAN.md:219 and :234 check only that the page references `/static/app.js`, not the MIME type it is served with. Phase 2 code does not exist yet, so I had no implementation to check.
-  - Fix: In 02-06 Task 2, extend the "server headers" behavior (line 239) so the static-file case also asserts that GET /static/app.css returns Content-Type text/css (charset optional). 02-08 should add the same check for /static/app.js with text/javascript.
-
-- **02-06-F16 [PARTIAL/LOW] Tailscale cert timer env file ownership and mode** (gptoss)
-  - Evidence: Most of this is already in the plan. .planning/phases/02-passkey-login-mvp/02-06-PLAN.md:302 has the timer's ExecStartPost run `chgrp keyroster-server` and `chmod 0640` on the private key. Line 313 sets the runbook's install permissions to /etc/keyroster/tls root:keyroster-server 0750 with the key at 0640. Line 293 gives the server unit `ProtectSystem=strict` plus `ReadOnlyPaths=/etc/keyroster/tls`. Two things are not specified. (a) Line 302 names /etc/keyroster/tailscale-cert.env but gives it no owner or mode. (b) keyroster-tailscale-cert.service has no sandboxing (no ProtectSystem or ReadWritePaths); lines 302-303 list only Type=oneshot, EnvironmentFile, ExecStart and ExecStartPost.
-  - Fix: In Task 3, state that /etc/keyroster/tailscale-cert.env is root:root 0644, not readable by the server group. Optionally harden keyroster-tailscale-cert.service with ProtectSystem=strict, ReadWritePaths=/etc/keyroster/tls and NoNewPrivileges=yes, and mark that as UNVERIFIED until 02-13, since the tailscaled socket and atomic writes must still work.
-
-- **02-06-F19 [PARTIAL/LOW] Linux-only server guard not exercised on non-Linux CI** (gptoss)
-  - Evidence: The requirement text is .planning/REQUIREMENTS.md:102: "PLAT-05: Server and signer run on Linux; CLI runs on Linux, macOS and Windows". It does not ask for a clear error on other OSes. That behaviour is the plan's own design choice at 02-06-PLAN.md:48 and :170 ("main_other.go exits 1 with 'keyroster-server runs on Linux only (PLAT-05)'"), and it copies the Phase 1 signer stub in cmd/keyroster-signer/main_other.go. That stub is 3 lines (`//go:build !linux`, Fprintln to stderr, os.Exit(1)) and has no test either. The residual gap is real: nothing ever builds the !linux file. The CI cross-compile step, .github/workflows/ci.yml:35-39, builds only ./cmd/keyroster for windows/darwin/freebsd. `go vet ./...` (ci.yml:41) runs on Linux, so it never sees main_other.go. The 02-06 verify command (02-06-PLAN.md:219) builds keyroster-server only for GOOS=linux. The cli-windows and cli-macos jobs that 02-02 adds (02-02-PLAN.md:263) test only ./cmd/keyroster/... and internal packages, not ./cmd/keyroster-server. No other phase-2 plan adds a non-Linux build of keyroster-server (grep across 02-*-PLAN.md).
-  - Fix: In 02-06, add ./cmd/keyroster-server (and ./cmd/keyroster-signer) to the ci.yml cross-compile loop for windows and darwin, or to the Task 1 verify command, so the !linux stub at least compiles in CI. A runtime test of the stub's stderr text is optional and not needed for PLAT-05.
+**02-06-R2-F12 — A successful certificate reload is not logged with the certificate's identity**
+- Reviewers: gemma
+- Claimed severity: LOW (suggestion)
+- Verdict: CONFIRMED
+- Verified severity: LOW
+- Round 1: new
+- Evidence: The plan specifies logging only for the failure and near-expiry paths: "keeps the old one, logs an error" (02-06-PLAN.md:270) and the 14-day warning (:272, :56). Nothing says a successful swap, on file change or on SIGHUP, is logged, and no test checks one. An operator reading `journalctl -u keyroster-server` after a renewal therefore cannot tell from the log which certificate is now served. No security impact; it is an operations gap that one log line closes.
+- Fix: In Task 2 tlsreload, log at info on every successful Reload and at start with the leaf's SHA-256 fingerprint, NotAfter and the trigger (start, file change, SIGHUP). Assert the line in the "Reload swaps in a new valid certificate" case.
 
 ### 02-07
 
-- **02-07-F1 [PARTIAL/LOW] Nonce consumption not atomic with the admin action / retry semantics undefined** (codex)
-  - Evidence: 02-07-PLAN.md:147 `Sign(signer, method, path, body, now)` takes no nonce parameter, so every Sign call makes a new nonce; any retry is a new signature and a new nonce, never a reuse of the burned one. 02-07-PLAN.md:153 `UseNonce` is an INSERT on `admin_nonces(nonce TEXT PRIMARY KEY)` (line 151), and 02-07-PLAN.md:152 says serverdb.Open uses "one connection". A duplicate INSERT fails, so the check-and-consume step is a single atomic statement and two concurrent requests with the same nonce cannot both succeed. 02-07-PLAN.md:159 consumes the nonce before the handler runs. This is the safe order for replay protection: it closes the window where a captured request could be replayed while the first copy is still running. 02-07-PLAN.md:162,178,225: a lost response followed by a re-run returns a defined 409 `already pending`, and `--reinvite` is the documented recovery, so failure after consumption has a usable outcome. 02-07-PLAN.md:212,250 test sequential replay (`nonce_replay`) only. No concurrent same-nonce test exists, and the plan does not state the "a failed request is retried by re-signing" rule. Phase 1 serverclient has no automatic transport retry (grep for retry/backoff in internal/ finds only keystore PIN counters).
-  - Fix: In requireAdmin, add one sentence saying the nonce is consumed before the handler runs on purpose, and that any failed admin request (5xx, 409, signer unreachable) is retried by signing it again with a new nonce, never by resending the same headers. Optionally, extend `nonce_replay` with a parallel subtest that sends two copies of one signed request and expects exactly one non-401 response.
+**02-07-R2-F2 — Nonce single-use can be raced; no cleanup of expired nonces**
+- Reviewers: gptoss
+- Claimed severity: not stated (named as a main risk)
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new (the race half overlaps 02-07-F1, fixed)
+- Evidence: The race as described is wrong. `admin_nonces(nonce TEXT PRIMARY KEY)` (02-07-PLAN.md:159) and `UseNonce` is "insert; a duplicate means replay; it also deletes expired rows" (02-07-PLAN.md:161), on one connection (02-07-PLAN.md:160; same pattern as internal/signerdb/db.go:49), and `nonce_replay_parallel` requires exactly one non-401 (02-07-PLAN.md:252). Cleanup also exists (02-07-PLAN.md:161, tested at :275). What the plan does leave open is next to this: `UseNonce(nonce, expires, now)` takes `expires` as a parameter and no line says what value requireAdmin passes (02-07-PLAN.md:161, :180). A request is valid while |now - t| <= 120 s (02-07-PLAN.md:152), so a row that expires at "now + 120 s" for a request stamped up to 120 s ahead is deleted while the signature is still inside the window, and a captured copy would pass again. Exploiting it needs a captured TLS request, and pending rows grant nothing, hence LOW.
+- Fix: In 02-07 Task 1 state that requireAdmin passes `expires = signed time + 2*MaxSkew` (or `now + 2*MaxSkew`), so a nonce row always outlives its signature's validity. Add an admin_test case `nonce_replay_after_cleanup`: a request stamped +120 s, first use, clock advanced 121 s with another UseNonce call to trigger the purge, replay still gets 401.
 
-- **02-07-F5 [PARTIAL/LOW] Reinvite for existing directory users: user-handle continuity and concurrency** (codex)
-  - Evidence: 02-07-PLAN.md:162 says a reinvited directory user gets a pending row "keeping its directory user_handle when the server has one or else a fresh one". 02-07-PLAN.md:151 defines pending_users with name as PRIMARY KEY and user_handle as UNIQUE. The installed directory has no user_handle at all. A grep for user_handle/UserHandle over internal/ and every phase-2 plan finds it only in 02-07:151/162/164 and 02-08:191. The directory credential is {id, alg, spki, backup_eligible, backed_up} (02-09-PLAN.md:167). Sign-in is username-first with allowCredentials taken from the directory, and there is no discoverable-credential flow in Phase 2 (02-10-PLAN.md:129 and :261; 02-12-PLAN.md:174). So the user handle never enters authentication and cannot be "continued" from the directory. 02-09-PLAN.md:142 (DeleteBound) also deletes the pending user once it is bound, so the server normally keeps no handle. Registration excludes the user's existing directory credentials (02-08-PLAN.md:191), so a new handle cannot overwrite an existing passkey. On concurrency: serverdb uses exactly one connection (02-07-PLAN.md:152), so writes are serialized, and the name PRIMARY KEY prevents a second pending row. Two concurrent reinvites therefore end as last-writer-wins, with exactly one valid token. Finish is one transaction (02-08-PLAN.md:197), and binding still requires the admin to approve the fingerprint (02-09-PLAN.md:32). What is actually unspecified: (a) whether 02-08's finish re-checks that the invite is still current, or only consumes the session (02-08-PLAN.md:192-197). If it does not, a ceremony begun under a token that a later reinvite replaced can still land a pending credential. (b) whether ReplaceInvite clears invite_used_us (a column 02-08 adds at line 185) when reinviting a pending user whose invite has already been used.
-  - Fix: Change step 2 in 02-07 so that reinviting a directory user creates a pending row with a fresh 32-byte user_handle, and drop the "keeping its directory user_handle" clause. Make ReplaceInvite define last-writer-wins and say whether it resets invite_used_us. Then have 02-08's finish require that the session's invite_hash is still the row's current invite, and add a test where a reinvite between begin and finish makes finish fail with no pending credential written.
-
-- **02-07-F6 [PARTIAL/LOW] Per-IP rate limiter can be evaded by IP rotation / LRU eviction** (codex, gptoss)
-  - Evidence: 02-07-PLAN.md:157 specifies only "a per-IP rate.Limiter map with LRU-bounded size (10 000 entries) and idle eviction"; admin routes get 60/min burst 20, invite routes 30/min burst 10. It specifies no global limiter, does not say how IPv6 addresses are keyed (single address or /64), and says nothing about what eviction does to an attacker's own bucket. 02-07-PLAN.md:220 tests only "burst plus one returns 429". The threat register at 02-07-PLAN.md:314 rates T-02-36 as DoS, severity low, and the limiter is DoS mitigation only. Authority does not depend on it. Admin requests need an SSHSIG from a root-signed-policy admin key, a ±120 s window and a single-use nonce (T-02-32/33, lines 145-149 and 312-313). Invite tokens are 256-bit crypto/rand values stored hashed with a 24 h expiry (T-02-34, line 313), so getting around the limiter never makes forging or brute-forcing feasible. Request bodies are capped by MaxBytesReader at 1 MiB + 64 KiB (line 159). The sign-in brute-force and enumeration surface gets a separate per-username limiter in 02-10-PLAN.md:151 (T-02-50, line 292), so rotating IPs does not get around those limits. RESEARCH.md:685 and :993 lock x/time/rate keyed per IP and per user.
-  - Fix: In ratelimit.go, key IPv6 clients by their /64 prefix and add a coarse global limiter (or concurrency cap) on the admin and invite routes as a backstop. Add a unit test showing the map never exceeds 10 000 entries. State in T-02-36 that the per-IP limiter is best-effort DoS damping, and that authenticity rests on SSHSIG with nonces and on the 256-bit tokens.
-
-- **02-07-F7 [PARTIAL/LOW] Request body consumed by MaxBytesReader before Verify; handler needs the buffered body** (nemotron)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-07-PLAN.md:159 says requireAdmin "reads the body with http.MaxBytesReader (1 MiB + 64 KiB) and calls adminauth.Verify ... The request reaches the handler with the admin name in its context". It says nothing about how the already-read body reaches the handler. Line 160 has POST /api/v1/admin/users decoding a JSON body `{"name":..., "reinvite":false}`. adminauth.Verify takes `body []byte` (line 148), so the middleware has to fully buffer the body. A grep of 02-*-PLAN.md, 02-PATTERNS.md, 02-RESEARCH.md and 02-CONTEXT.md for NopCloser, bytes.NewReader, re-attach or buffer finds no sibling plan that covers it. The repo has no existing MaxBytesReader or NopCloser pattern in *.go, so Phase 1 code offers nothing to copy. However, the plan's own tests would catch the omission straight away. In e2e step 3 (line 175), `keyroster user add alice` must exit 0. The admin_test cases (lines 213-218) post real names and expect 201, 400 or 409. A handler that read an empty r.Body would fail JSON decode on every request, so none of those tests could pass.
-  - Fix: At 02-07-PLAN.md:159, add a sentence saying requireAdmin re-attaches the verified bytes (`r.Body = io.NopCloser(bytes.NewReader(buf))`, or passes them in the context) so the handler decodes exactly the body that was signed. Optionally add an admin_test case where the handler sees the signed body.
-
-- **02-07-F8 [PARTIAL/LOW] Invite URL always uses the first policy origin** (nemotron)
-  - Evidence: The plan says "first policy origin" without giving a reason (.planning/phases/02-passkey-login-mvp/02-07-PLAN.md:165: "invite_url = first policy origin + `/enroll/` + token"; the must_have at 02-07-PLAN.md:39 says `https://<rp origin>/enroll/<token>`). The set of possible origins is very narrow, though. 02-01-PLAN.md:183-189 and 02-RESEARCH.md:320 require the origins to be "non-empty, sorted and duplicate-free. Each origin is exactly `https://` + rp_id, or that plus `:` + a port ... not 443". 02-01-PLAN.md:191 sets the default to the single origin `https://HOST`. CONTEXT D-09 (02-CONTEXT.md:81) locks one RP hostname with "allowed origin(s)". So every origin has the same host and differs only by port. Any listed origin passes the signer's origin check (02-RESEARCH.md:587, "origin is exactly one of policy.WebAuthn.Origins"), so choosing among them cannot weaken security. The only failure is a usability one. Because the list is sorted, `https://host` comes before `https://host:8443`. If an operator lists both but the server only listens on :8443 (`--listen` is configurable, 02-06-PLAN.md:170), the printed link points at a port nothing serves and does not load. The admin sees this immediately; the token, the CLI line and enrollment are not affected. 02-12-PLAN.md:170 uses the same "first policy origin" rule for approval_url, so the two plans should resolve it the same way.
-  - Fix: State in 02-07 (and the same way in 02-12) that the URL uses the policy origin matching the origin of the admin's request or the configured server URL, falling back to the first sorted origin, or else say plainly that the first sorted origin is used and multi-port operators must list the served port first. Add a unit test with a two-origin policy.
-
-- **02-07-F9 [PARTIAL/LOW] Printed `keyroster init` line must be copy-pasteable (quoting/escaping)** (nemotron)
-  - Evidence: The quoting concern is refuted. Every value interpolated into the printed line (02-07-PLAN.md:170) comes from a tightly constrained alphabet that the plans already validate: - Server is checked to be https with a DNS host, an optional port, and no path, query or fragment (02-06-PLAN.md:195). - TLS pins are `sha256/` + std base64 (02-06-PLAN.md:190). - Root pins are `SHA256:` + base64, and they are verified against the bundle before they are saved (02-06-PLAN.md:200). - Threshold is an int. - NAME is validated by the directory rule `^[a-z0-9][a-z0-9._-]{0,63}$` (02-01-PLAN.md:198, applied at 02-07-PLAN.md:161). The characters that can appear are [A-Za-z0-9+/=:._-]. None of them is special in bash, sh, PowerShell or cmd, and several pins are passed as repeated flags, so nothing needs quoting. The no-round-trip-test part is true. The e2e only checks that stdout contains `/enroll/` and `--user alice` (02-07-PLAN.md:176). A round-trip test would catch a real omission the reviewer did not name: the printed line has no `--tls-root-file` (02-07-PLAN.md:170), but init accepts and needs it for a private TLS CA (02-06-PLAN.md:53, 196). It is not carried in the printed line even though Config stores TLSRootsPEM (02-06-PLAN.md:193). The e2e itself runs with a private root passed via `--tls-root-file` (02-06-PLAN.md:211), so if the printed line were pasted as-is in the test environment, TLS verification would fail.
-  - Fix: In TestUserAddInvite, parse the printed `keyroster init` line and run it in a fresh config dir as the user, asserting exit 0. Make user.go either emit `--tls-root-file <path>` (or say that the TLS root PEM must also be sent) whenever cfg.TLSRootsPEM did not come from the system pool.
-
-- **02-07-F10 [PARTIAL/LOW] Admin-auth clock skew window (±120 s) may reject legitimate admins** (gptoss)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-07-PLAN.md:145 sets `MaxSkew = 120 * time.Second` as a constant with no flag or config. :41 and :213 say every admin-auth failure, skew included, returns the same 401 `{"error":"admin authentication failed"}`. Only the server log records the specific reason. T-02-33 (:311) uses the ±120 s window plus the nonce table as its replay defence. The CLI side (:173, `keyroster user add`, and the 02-09 editDirectory pipeline) never checks the clock and gets no server-time hint. The login path does handle skew: 02-12-PLAN.md:163/197/272/391 has `login/options` return `server_time`, and the CLI refuses with "your clock differs from the server by Ns" when skew is above 60 s (RESEARCH Pitfall 8, 02-RESEARCH.md:731-733). The admin API has nothing like that. The existing signer also hard-codes its window (`internal/signer/issue.go:22 const maxClockSkew = 300 * time.Second`), so a hard-coded constant is the codebase's normal pattern.
-  - Fix: Keep MaxSkew a fixed constant. On a 401 from /api/v1/admin/, have the CLI (serverclient.AdminJSON) compare the HTTP `Date` response header with the local clock. If they differ by more than about 60 s, add "your clock differs from the server by Ns" to the error, and add a CLI test for it to Task 2. The 401 body stays uniform, and nothing new is revealed, because the Date header is public anyway.
-
-- **02-07-F12 [PARTIAL/LOW] Signed path canonicalisation unspecified** (gptoss)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-07-PLAN.md:146 defines Message over `<path incl. query>`, and :148 gives Verify a bare `path string` argument. :159 (requireAdmin) and :169 (AdminJSON) never say which request field fills that argument: r.RequestURI, r.URL.RequestURI(), r.URL.Path or EscapedPath on the server, and on the client the URL it actually sends. No other phase-2 plan, CONTEXT or RESEARCH mentions adminauth canonicalisation; a grep for RequestURI, EscapedPath and URL.Path across the phase directory found nothing. So the gap in the text is real. Mitigating evidence from the plan: line 208 and acceptance case `query_changed` (line 249) require the query to be covered. That rules out the most likely wrong choice (r.URL.Path, which drops the query), but only when the test goes through the real server and not just Verify. The e2e TestUserAddInvite (lines 172-179) runs the real Go client against the real Go server, so a client/server mismatch on the path would show up as a 401 and the test would fail.
-  - Fix: At line 146/148, state that the client signs exactly the URL's RequestURI() that it sends and that requireAdmin passes r.RequestURI (raw request-target, path plus query, no normalisation) to Verify. Add one server-level test showing that a trailing-slash or percent-encoding variant of a signed path gets 401.
+**02-07-R2-F17 — No test for two concurrent `user add` calls for the same name**
+- Reviewers: gptoss
+- Claimed severity: not stated
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new
+- Evidence: The same-nonce half is covered by `nonce_replay_parallel` (02-07-PLAN.md:252). For two differently signed requests, the handler looks the name up and then inserts as separate steps (02-07-PLAN.md:185-191), and the plan does not say that `CreatePendingUser` maps a primary-key conflict on `pending_users.name` (02-07-PLAN.md:159) to the 409 the plan promises for a pending name (02-07-PLAN.md:47). The outcome is safe either way, because the primary key prevents a second row and a second invite; the only open point is a 500 instead of a 409 for the loser, which the CLI would not render as `already pending` (02-07-PLAN.md:282). The suggested "deadlock" has no basis with single-statement writes.
+- Fix: In 02-07 Task 1, say `CreatePendingUser` returns `ErrExists` on a name conflict and the handler answers 409. Add an admin_test case `concurrent_add_same_name`: two validly signed requests for one name in parallel give one 201 and one 409, and one pending_users row.
 
 ### 02-08
 
-- **02-08-F1 [PARTIAL/MEDIUM] Concurrent begin/finish against one invite can race single-use consumption** (codex, gptoss)
-  - Evidence: The plan promises at .planning/phases/02-passkey-login-mvp/02-08-PLAN.md:39 that "An invite registers exactly one credential". The steps that are supposed to deliver that leave a gap when requests overlap: - Begin checks that the invite is unused only when begin runs (:191). - Finish step 1, "load and delete the session (single use)" (:193), never says the delete is atomic or that its rows-affected count is checked. - Steps 2-4, the go-webauthn verification and the 409 lookup, run before the transaction. - Step 5, "in one transaction, insert pending_credentials ... and set invite_used_us" (:197), sets the column with no `WHERE invite_used_us IS NULL` condition and no rows-affected check. So this order works: finish A consumes session 1; begin B, still seeing the invite as unused, writes a new session (registration_sessions has invite_hash as PRIMARY KEY, :183); finish B consumes it. Both transactions then commit, leaving two pending credentials and the column overwritten. The refusal matrix (:244-257) and the acceptance names (:287) contain only sequential cases: invite_single_use, finish_replay_refused and "a used invite". There is no concurrent case. Mitigations the plan already has: - serverdb "mirrors signerdb" with one connection (02-07-PLAN.md:150-152). signerdb uses SetMaxOpenConns(1) and _txlock=immediate (internal/signerdb/db.go:27,49), so each transaction is serialized. - A duplicate credential ID is caught by `pending_credentials.id TEXT PRIMARY KEY` (:184), so the same-credential-ID race already fails at the constraint. - Binding still needs an admin-signed directory (02-09). The admin's user listing shows a pending credential count (02-09-PLAN.md:144).
-  - Fix: Finish should consume the session atomically: `DELETE ... RETURNING`, or a delete with a rows-affected check of 1. Step 5's transaction should re-check the invite with `UPDATE pending_users SET invite_used_us=? WHERE name=? AND invite_used_us IS NULL AND invite_expires_us>?`, require rows-affected == 1 (otherwise 404 or 409 with nothing inserted), and enforce at most one pending credential per user. Add an `invite_concurrent_finish` test under -race: N parallel begin/finish pairs on one invite must leave exactly one pending row.
+**02-08-R2-F2 — No CI lock on the approved module set**
+- Reviewers: nemotron
+- Claimed severity: MEDIUM
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: repeats 02-08-F3 (not fixed; deferred on purpose)
+- Evidence: The plan records the deferral and its reasons at 02-08-PLAN.md:401. The compensating controls are real in the repo: `go mod verify` (.github/workflows/ci.yml:32), dep-firewall (.github/workflows/ci.yml:100), the capslock job (.github/workflows/ci.yml:104-119), CODEOWNERS and Dependabot gomod updates arriving only as PRs (.github/dependabot.yml). A new module therefore cannot land without the owner seeing the go.mod diff; what is missing is only a machine check that turns an unnoticed diff into a failed build. Unchanged from round 1 and still optional.
+- Fix: none for this plan; keep it as the repo-wide CI-hardening item named at 02-08-PLAN.md:401 (an approved-modules list compared with `go list -m all`).
 
-- **02-08-F3 [PARTIAL/LOW] Supply-chain drift: one-time owner review with no CI lock on the transitive module set** (gptoss)
-  - Evidence: Plan: 02-08-PLAN.md:127-165 (Task 1 is a one-time, blocking-human review using `go list -m all` before/after and the go mod graph diff); :41, :271, :289, :337 (dep-firewall BANNED gains go-webauthn/fxamacker/cbor/golang-jwt; depguard deny); :302 (owner reviews the go.mod/go.sum diff at the PR checkpoint); :356-357 (T-02-41, T-02-SC). Repo controls the reviewer could not see: .github/CODEOWNERS ("* @Labontese": every change needs the owner's review, including any later go.mod change); .github/dependabot.yml (gomod bumps arrive only as PRs that need that review); .github/workflows/ci.yml:32 (`go mod verify`), :100 (dep-firewall.sh), :104-119 (capslock job, a required check in .github/rulesets/main-integrity.json:36); scripts/capslock-check.sh header (any new (package, capability) pair in the signer graph fails CI until the baseline is updated in a reviewed PR); scripts/dep-firewall.sh:1-30 (a deny list scoped to ./cmd/keyroster-signer, not an allowlist of approved modules). go.mod (go 1.26) lists every indirect module, so any new transitive module shows up as a line in the go.mod diff of the PR that brings it in.
-  - Fix: Optional hardening, not a blocker for 02-08: add a small CI check (or extend the PR checklist) that fails when the `go list -m all` set differs from a committed approved-modules list, so that adding a module requires an explicit reviewed update to that list. This could also be tracked as a repo-wide supply-chain item rather than added to plan 02-08.
+**02-08-R2-F9 — Allowed algorithms rest on a go-webauthn helper with no explicit whitelist**
+- Reviewers: gptoss
+- Claimed severity: LOW
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new
+- Evidence: The security half is wrong. What is accepted does not depend on the library's default: finish converts the key and refuses anything `webauthn.ParsePublicKey(alg, spki)` rejects (02-08-PLAN.md:216), with `es384_refused` and `rsa1024_refused` as tests (02-08-PLAN.md:280-281, :325). The helper today returns exactly EdDSA, ES256, RS256 (go-webauthn v0.18.2 `webauthn/registration_credential_parameters.go:58-72`), and a version bump goes through owner review. The narrower true part: the must-have at 02-08-PLAN.md:38 fixes the offered options (attestation none, UV required, residentKey preferred, three algorithms), but no test in Task 2 or Task 3 asserts the begin response, so a drift in the offered list would only show up as a failed registration.
+- Fix: Add an enroll_test case `begin_options_exact` in Task 3: the begin JSON has `pubKeyCredParams` algs exactly [-8, -7, -257], `attestation` "none", `authenticatorSelection.userVerification` "required" and `residentKey` "preferred".
 
-- **02-08-F7 [PARTIAL/LOW] Invite marked used before the user reliably receives the result** (gemma)
-  - Evidence: First half is already covered. 02-08-PLAN.md:197 says /finish step 5 runs "in one transaction, insert pending_credentials ... and set invite_used_us". It comes after session load/delete (193), FinishRegistration with UV (194), the SPKI/ParsePublicKey check (195) and the 409 duplicate check (196). Task 3 (02-08-PLAN.md:244, 257, 287) also asserts that every refusal leaves "no pending row written and the invite still unused". So the marker is never set before durable persistence; both commit atomically. Second half (response lost after commit): this is single-use by design (02-08-PLAN.md:39, "An invite registers exactly one credential"). A recovery path exists. The admin can see the invite was used through `GET /api/v1/admin/users` "invite_used" (02-09-PLAN.md:144) and `keyroster user pending NAME`, which shows the fingerprint (02-08-PLAN.md:215). The admin can then issue a fresh token with `user add --reinvite`: "a pending name gets a new token (the old one becomes invalid)" (02-07-PLAN.md:162). The orphaned credential cannot be bound by accident, because approve needs the fingerprint the user reports out of band (02-09-PLAN.md:32, 225-226). Real but narrow gap: the invite_used_us column is added in 02-08 (line 185), after 02-07 defined reinvite, and /begin requires an "unused" invite (02-08-PLAN.md:191). Neither plan says that reinvite clears invite_used_us, or that it drops the orphaned pending_credentials. If the 02-07 reinvite handler only swaps token_hash and expiry, the new token is already "used" and /begin refuses it. The user then has no recovery path short of DB surgery.
-  - Fix: In 02-08 Task 2, state that `user add --reinvite` on a pending name also sets invite_used_us = NULL and deletes that user's unapproved pending_credentials (or keeps them, with that decision written down). Add an enroll_test case `reinvite_after_used_invite_allows_register`. Optionally, add a line to 02-09's enrollment runbook: "page closed before the fingerprint showed → reinvite".
-
-- **02-08-F10 [PARTIAL/LOW] Credential ID stored as TEXT primary key risks encoding mismatches in duplicate checks** (gptoss)
-  - Evidence: 02-08-PLAN.md:184 defines pending_credentials(id TEXT PRIMARY KEY). 02-08-PLAN.md:194 runs go-webauthn CreateCredential/FinishRegistration, and step 4 (:196) only then checks for duplicates. The credential ID therefore comes from the server-parsed authData as raw bytes, not from a client-chosen string, so the server picks the encoding. 02-01-PLAN.md:200 fixes the directory form of credential `id` as "base64url without padding decoding to 1-1023 bytes", and :203 requires credential ids to be unique across the whole document. That gives one canonical text form. Login matches on bytes (02-01-PLAN.md:213, "assertion's credential ID equals cred.ID"). The duplicate tests are at 02-08-PLAN.md:254-255 and :287 (`credential_id_in_directory_refused`). Two small gaps remain. (a) 02-08 never says that pending_credentials.id = base64.RawURLEncoding(credential.ID bytes from FinishRegistration), or that step 4 compares in that canonical form. (b) 02-01 Validate decodes with non-strict RawURLEncoding, which accepts non-zero trailing bits, so two different strings can decode to the same bytes. Only a signed directory could carry such a string, and only an admin quorum can sign one.
-  - Fix: In 02-08 step 4/5, state that pending_credentials.id is base64.RawURLEncoding of the credential.ID bytes from FinishRegistration (never the client's `id` string), and that the 409 check compares that canonical string against pending rows and the directory. Optionally, have 02-01 Validate require the id to re-encode to itself (strict decoding / canonical round-trip).
-
-- **02-08-F11 [PARTIAL/LOW] BE/BS flag columns lack boolean constraints** (gptoss)
-  - Evidence: The literal claim is accurate. .planning/phases/02-passkey-login-mvp/02-08-PLAN.md:184 defines `pending_credentials(... backup_eligible INTEGER NOT NULL, backed_up INTEGER NOT NULL ...)` with no CHECK. The Phase 1 migrations do use CHECKs this way, for example internal/signerdb/migrations/0001_issuance.sql:3-4 and :11-12, and internal/signerdb/migrations/0003_trust.sql:13 (`role TEXT ... CHECK (role IN (...))`). The harm it describes, later reporting misreading the values, does not hold up: (1) The only writer is the finish handler at 02-08-PLAN.md:196 (step 5). It inserts BE/BS straight from go-webauthn's boolean credential flags, so only 0 or 1 can be written. (2) Reading back into a Go bool fails loudly on any other value. database/sql's convertAssign uses driver.Bool.ConvertValue, which returns an error for an int64 other than 0 or 1, so there is no silent misreading. (3) The serverdb is declared non-authoritative. 02-07-PLAN.md:151 says its "header comment stat[es] that nothing here is authority". The record of BE/BS that counts is the signed directory, where `Credential{...; BackupEligible, BackedUp bool}` is typed as bool (02-01-PLAN.md:194) and carried to it through `user approve` (02-09-PLAN.md:167). Later reporting reads that record (02-10-PLAN.md:147, "synced" when backed_up), not the pending table. (4) BE/BS are informational only in phase 2. 02-CONTEXT.md:59 says they are for later visibility, and 02-CONTEXT.md:224 defers enforcement based on them.
-  - Fix: Optionally write the two columns in 0002_registration.sql as `backup_eligible INTEGER NOT NULL CHECK (backup_eligible IN (0,1))` and `backed_up INTEGER NOT NULL CHECK (backed_up IN (0,1))`, to match the CHECK style in the signerdb migrations. No other change to the plan is needed.
-
-- **02-08-F16 [PARTIAL/LOW] No user feedback when authenticator/browser lacks supported pubKeyCredParams** (gemma)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-08-PLAN.md:203: enroll.html has an error `<p role="alert">`, so the page already has a place for errors. Lines 204-208 list app.js's steps: fetch begin, `navigator.credentials.create`, post finish, show fingerprint. None of the steps says that a rejected create, a missing `window.PublicKeyCredential`/`navigator.credentials`, or a failed fetch is caught and its message written into that alert element. Line 190 restricts pubKeyCredParams to EdDSA/ES256/RS256, which in practice covers every platform and roaming authenticator; RS256 exists for Windows Hello. So the "supports none of the algorithms" case named in the finding is close to theoretical. Line 379 says the browser-side create ceremony is UNVERIFIED until 02-13, so it gets a real-browser UAT. Sibling plans repeat the pattern without an error clause: 02-10-PLAN.md:128 has the login page `<p role="alert">` and 02-10-PLAN.md:153 the sign-in ceremony steps.
-  - Fix: In 02-08 Task 2's app.js steps, add: feature-detect `window.PublicKeyCredential` and show a "this browser does not support passkeys" message in the role=alert element, and wrap the whole begin/create/finish chain in a try/catch that writes err.name or err.message, or the server's error text, into that same element. 02-10 and 02-12 then inherit the same pattern.
+**02-08-R2-F10 — Registration refusals and COSE-to-SPKI errors are not logged**
+- Reviewers: gptoss
+- Claimed severity: LOW
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new
+- Evidence: 02-07 specifies a server log line for every admin-auth failure (02-07-PLAN.md:180), but 02-08 has no sentence about logging in enroll.go: finish steps 2-6 say what status is returned (02-08-PLAN.md:212-218) and nothing about a log line (a grep of 02-08 for slog/log line/logged finds only "never logged" for the token at :208, and 02-06 defines no request log, only certificate-reload messages at 02-06-PLAN.md:56, :270). So an operator cannot tell from the server which refusal a user hit, or see repeated failed finishes on one invite. The reviewer's second claim, that this should go into the Merkle audit log, is wrong: that log is the signer's and a pending credential grants nothing (02-08-PLAN.md:79). No security property depends on the log line.
+- Fix: In 02-08 Task 2 (enroll.go), add: every begin/finish refusal logs one slog line with a reason code (`session_not_found`, `verify_failed`, `unsupported_credential`, `duplicate_credential`, `invite_not_valid`), the user name and the underlying error, never the token or the challenge.
 
 ### 02-09
 
-- **02-09-F6 [PARTIAL/LOW] Pending cleanup must be transactional and narrow** (codex)
-  - Evidence: Three of the four concerns are already covered in .planning/phases/02-passkey-login-mvp/02-09-PLAN.md: - **Transactional.** Line 142 says cleanup runs "In one serverdb transaction (`DeleteBound`)". - **Runs only after the signer accepts.** Line 142 ("On success it refreshes the mirror..."), line 36 ("Only after the signer accepts it does the server drop the pending credentials...") and key_link line 66 ("cleanup only after success"). - **Nothing deleted on refusal.** Line 143 maps refusals to 409/403/400. Line 215 requires a test: "maps signer refusals to 409, 403 and 400 and deletes no pending row on refusal." - **Never removes unbound credentials.** Line 142 deletes only "each pending credential whose ID now appears in the directory". A user's pending row goes only when that user has "no remaining pending credential". FK context: 02-08-PLAN.md:184 (pending_credentials.user_name REFERENCES pending_users). - **Pending rows are not authority.** 02-07-PLAN.md:74 and T-02-35 at 02-07-PLAN.md:313. The residual gap is about "the ability to enroll another credential". 02-07-PLAN.md:162 says `--reinvite` for a user already in the installed directory "gets a pending row for one additional credential". That row exists in pending_users before the user registers, so it has zero pending credentials. 02-09-PLAN.md:142 deletes "each pending user now present in the directory with no remaining pending credential". So if any later install happens while alice's extra-passkey invite is still open (for example, approving carol), the outstanding invite is deleted. The must_have at line 36 says the narrower thing ("pending accounts the new version binds"), but the action text and the DeleteBound spec do not limit deletion to users whose credentials this install just bound. No test covers this case. Line 215 tests only the refusal case. Also untested: a user with two pending credentials where one is approved keeps the other.
-  - Fix: Limit DeleteBound to the users and credential IDs that this install newly binds compared with the previous version. Never delete a pending_users row whose invite is unused and unexpired. Add an admin_test/serverdb case where an unrelated install leaves another user's open extra-passkey invite and unapproved pending credentials in place.
+**02-09-R2-F1 — Pending check and signer install are not atomic; a concurrent reinvite does not stop the install**
+- Reviewers: codex, nemotron
+- Claimed severity: codex MEDIUM, nemotron HIGH
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new (ties to round-1 consensus item 7, reinvite semantics; no F-id)
+- Evidence: The race is real and the plan admits it. 02-09-PLAN.md:186 checks `PendingCredentialUser`, :190 calls the signer in a separate step, and T-02-119 residual 1 at 02-09-PLAN.md:474 says "the check and the forward are not one transaction, so a reinvite landing in the milliseconds between them does not stop that install"; :213 names the same window on the direct path. The signer checks no pending state by design (02-09-PLAN.md:188, :474 residual 2; 02-CONTEXT.md:48 D-03), so the server check is the only gate. What the race allows is small: only a request that passes `requireAdminLimit` (admin SSHSIG) and carries a quorum-signed version can race, the credential it binds is one an admin signed after the fingerprint comparison, and the end state equals the legal serial order "install, then reinvite" (reinvite never unbinds an approved credential, 02-07-PLAN.md:187-188). `DeleteBound` (02-09-PLAN.md:192) then deletes nothing, because 02-08's `ReplaceInvite` already removed the row (02-08-PLAN.md:203), and the reinvited pending row with its open invite survives. No party in the threat model gains anything: a compromised server skips the check entirely (residual 2). The concrete gaps are narrower: (a) the must-have at 02-09-PLAN.md:49 ("can therefore not be installed through the server"), :187 ("makes a reinvite final") and the runbook text at :337 ("The server refuses to install it") are stated without the residual that :474 admits; (b) the outcome is silent and untested, so the admin who ran `--reinvite` was told the old passkey is no longer valid (02-08-PLAN.md:221) while it was bound; (c) one side effect differs from the serial order: the pending row keeps its old user_handle (02-07-PLAN.md:163), so a re-registration on the same authenticator can replace the just-bound passkey there, leaving a bound but unusable credential (availability only).
+- Fix: Keep the design; do not add a reservation state machine. Either (1) close the window with one in-process mutex in internal/server taken by the reinvite branch of `POST /api/v1/admin/users` and by install steps 3-5 (this does not hold the DB connection across the signer call, so it is not the option :474 rejected), or (2) keep the residual and make it visible: have `DeleteBound` return how many of `newlyBound` it deleted, and when fewer than `len(newlyBound)`, log `bound_credential_not_pending` and add a warning to the install response that the CLI prints. In both cases add one test in admin_test.go where the fake signer's InstallDirectory runs a reinvite before returning, asserting the defined winner, and reword :49, :187 and :337 to "a reinvite that completed before the install request".
 
-- **02-09-F10 [PARTIAL/LOW] Stale proposal on directory sign needs actionable guidance** (nemotron, codex)
-  - Evidence: The plan catches the stale-proposal condition and shows how to recover. What it never writes down is the error text a user gets from `directory sign`, and the text it gives for `directory install` points at the wrong next step. - 02-09-PLAN.md:161 says `directory sign` checks that the proposal's prev equals the SHA-256 of the installed verified directory. Line 213 adds a test that it refuses a proposal with a wrong prev. Neither line gives the refusal message or the next step. - 02-09-PLAN.md:155 (editDirectory step 7) turns a 409 `directory_version_chain` into "the directory changed since it was read (another admin installed a version); re-run this command". That suits `user approve`, which rebuilds from the current base. Line 205 shows `directory install B` gives the same "directory changed since it was read" error. For install, "re-run this command" is wrong: posting the same stale proposal again fails again. - 02-09-PLAN.md:41 (must_haves) and line 206 (e2e TestApproveConflictNoLostUpdate step 5) show the correct recovery, which is to re-run `user approve dave --fingerprint … --yes`. Line 142 confirms why that works: pending rows are deleted only after a successful install, so the credential is still pending. - 02-09-PLAN.md:223-230: the runbook outline covers quorum >1 (--out, `directory sign`, `directory install`) but has no step for a stale proposal.
-  - Fix: Make `directory sign` and `directory install` say: "proposal is based on version N but version M is installed; discard DIR and re-run the command that produced it (e.g. `keyroster user approve …`)". Keep "re-run this command" only for the direct editDirectory path. Add one line on stale proposals to the quorum section of docs/runbooks/enroll-user.md.
+**02-09-R2-F4 — Cleanup after an accepted install has no defined failure path, leaving an orphaned pending credential**
+- Reviewers: gptoss
+- Claimed severity: MEDIUM
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: related to 02-09-F6 (fixed for narrowness and transactionality); this failure path is new
+- Evidence: 02-09-PLAN.md:191 says "On success, call `serverdb.DeleteBound(...)` and return" and gives no answer for a `DeleteBound` error; the same orphan arises when the signer installed but the transport failed, since :190 treats that outcome as unknown and step 5 does not run. The orphan is never cleaned by a later install: its id is then in the base, so it is never in `newlyBound` again (02-09-PLAN.md:185). Impact is limited: a pending row grants nothing (02-09-PLAN.md:188), a second `user approve` is refused by the duplicate-id rule (02-01-PLAN.md:235) instead of the "no pending credential" text the idempotency truth promises (02-09-PLAN.md:44), and `user add --reinvite` clears it (02-08-PLAN.md:203). The real gaps are an unspecified HTTP answer (a 500 after a successful install misleads the admin) and a stale `pending` list in `GET /api/v1/admin/users` (:194).
+- Fix: State in step 5 that a `DeleteBound` error is logged and the handler still answers 200 with the install result. Make cleanup self-healing: `DeleteBound` deletes pending credentials whose id is bound in the installed version (all ids of the posted version, not only `newlyBound`), keeping the pending-account rule of :192 unchanged; a credential id in the directory cannot be pending for anyone else (02-08 `credential_id_in_directory_refused`). Add a case `cleanup_failure_still_reports_install` or `orphan_pending_cleaned_on_next_install`.
 
-- **02-09-F11 [PARTIAL/LOW] Trust pin rotation not specified** (gptoss)
-  - Evidence: 02-09-PLAN.md:149 calls `Trust(cfg.TrustPins, cfg.TrustThreshold)`. 02-09 does not own that function. Plan 02-06 does, and it defines everything around it: - 02-06-PLAN.md:189 says Trust runs `trust.VerifySelfSigned` and then `trust.MatchPins`. - 02-06-PLAN.md:193 gives the Config layout: `TLSPins []string` and `TrustPins []string; TrustThreshold int` are separate fields. - 02-06-PLAN.md:194-201 has `init --root-pin` (repeatable) and `--threshold`, and 02-06-PLAN.md:201 refuses to overwrite an existing config without `--force`. The pin format and count are already enforced in existing code: - internal/trust/verify.go:131-143 (CheckPins) requires at least one pin, each of the form `SHA256:<base64>`, no repeats, and a threshold from 1 to the number of pins. - internal/trust/verify.go:145-171 (MatchPins) requires the served bundle's root set to equal the pinned set exactly, at exactly the pinned threshold. The "certificate renewal" scenario is wrong. TrustPins are fingerprints of the offline SSH root keys, not TLS certificates. TLS pins are a separate field: they pin the CA root's SPKI, and 02-RESEARCH.md:220-225 says this pin survives leaf and intermediate rotation. When the TLS CA root itself changes, the check fails closed and `keyroster init --repin` is the stated recovery. So a server certificate renewal never touches cfg.TrustPins. The real but narrower remainder is offline-root rotation, which Phase 1 supports (cmd/keyroster/root.go:93, cmd/keyroster/trust.go:160-171, audit.go:62). After a rotation, the served bundle names new roots, so MatchPins rejects every existing admin CLI config. That fails closed, not open. The implied recovery is to re-run `keyroster init --force` with the new pins, obtained out of band. But no plan and no runbook says so: grep for `keyroster init`, `--force` and `re-pin` in docs/ finds nothing.
-  - Fix: Leave 02-09's pipeline as it is. In 02-06 or in docs/runbooks/root-ceremony.md ("Rotate the roots"), add a step: after a root rotation, each admin re-runs `keyroster init --force --root-pin <new fps> --threshold <n>` with pins obtained out of band. The trust-pin mismatch error should also suggest this, for example a message saying the bundle roots changed and init should be re-run with the new root pins.
-
-- **02-09-F14 [CONFIRMED/LOW] Test that directory sign refuses non-admin existing signatures** (nemotron)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-09-PLAN.md:161 says `directory sign DIR` must check "that every existing signature is by a policy admin". T-02-46 (line 316) lists this re-verification as the mitigation for proposal files edited between co-signers. The Task 2 behaviour list (lines 198-215) has only one `directory sign` refusal test: a wrong prev (line 213). The non-admin case at line 212 tests editDirectory's base check, not `directory sign`. The named cases at line 245 contain nothing for `directory sign`. The quorum-2 e2e (lines 207-211) only tests the success path and a duplicate same-admin signature, which is refused at install, not at sign. The plan cannot lean on existing behaviour either: 02-01-PLAN.md:312 says `directory.VerifySignatures` does not count a non-admin signer but does not refuse it. So `directory sign` needs its own extra logic to refuse, and nothing tests that logic. The backstop is the signer. It refuses a non-admin-signed directory at install with directory_quorum_not_met (02-03-PLAN.md:139,175), so a non-admin signature can never reach the quorum.
-  - Fix: Add a named case to Task 2 (and to the line-245 acceptance list), e.g. `directory_sign_refuses_non_admin_sig`. A proposal whose .sigs contains a signature by a non-admin key, or an admin signature that does not verify over a tampered directory.json, is refused by `directory sign`, and the agent receives no sign request.
-
-### 02-10
-
-- **02-10-F1 [PARTIAL/LOW] Disabled user keeps session until directory mirror refreshes** (codex, nemotron, gemma, gptoss)
-  - Evidence: 02-10-PLAN.md:141 says withSession calls TouchSession and then requires the user to still be active in the mirror, deleting the session if not. 02-10-PLAN.md:35 says the session ends "as soon as the directory shows the user disabled". 02-10-PLAN.md:196, 224 and 201 add the tests `disabled_user_ends_session` (next request after a disabled successor) and an e2e test (`keyroster user disable alice --yes`, then /account redirects). The propagation delay is bounded in sibling plans. 02-06-PLAN.md:181 sets the status cache TTL to 5 s, refreshed under a mutex, and says "A Status failure serves 503 from the API ... and an error page from HTML routes. Never fall back to stale RP data older than 60 s", which is a fail-closed rule for an unavailable signer. 02-09-PLAN.md:139 refreshes the mirror when the cached Status's directory SHA-256 changes, and 02-09-PLAN.md:142 refreshes it immediately after any install the server forwards. Disables made through the CLI pipeline (`user disable`, 02-09-PLAN.md:169) therefore take effect on the next request, not after 5 s. A lag of up to 5 s applies only when a directory is installed on the signer by another path. The 02-10 session is read-only: account.go at 02-10-PLAN.md:144-149 renders a view, and certificate signing needs a fresh WebAuthn assertion at the signer, which re-checks the directory. internal/server does not exist yet on main (git ls-tree origin/main shows no internal/server), so there is no Phase 1 code to contradict.
-  - Fix: In 02-10 session.go, state explicitly that withSession uses the 02-06 status cache, which can be at most 5 s stale (most disables refresh immediately through the 02-09 install refresh). Also state that if the status or mirror cannot be refreshed, it serves the error page and renders nothing from stale data. Add a session_test case `signer_unavailable_fails_closed`.
-
-- **02-10-F2 [PARTIAL/LOW] Sessions not tied to directory version or privilege changes** (codex, gptoss, nemotron)
-  - Evidence: 02-10-PLAN.md:125: the sessions table stores only id_hash, user_name, created_us and last_seen_us. It caches no roles, principals or policy. 02-10-PLAN.md:141: withSession re-checks on every request that the user is still active in the directory mirror and deletes the session if not. 02-10-PLAN.md:144-146: GET /account renders name, status, directory version and `Authorize(user, nil)` fresh on each request. 02-09-PLAN.md:139: the mirror refreshes whenever the signer status's directory SHA-256 changes. 02-10-PLAN.md:196 and 201: tests cover a disable ending an existing session on its next request, and a disable/enable cycle in e2e. 02-10-PLAN.md:38, 67 and 293 (T-02-51): a session gates only GET /account and POST /logout and never authorizes issuance or directory changes. 02-CONTEXT.md:138 leaves session lifetime to Claude's discretion; no locked decision conflicts with the finding.
-  - Fix: Optional hardening: in withSession, also end the session when the user no longer has any bound credential, or record the user's credential set or status version at login and end the session if it changes, so that disable followed by re-enable also ends it. Add a session_test case where a session opened under directory v1 stays valid and shows the new role on /account after a non-disabling v2 is installed.
-
-- **02-10-F5 [PARTIAL/LOW] TouchSession must enforce idle and absolute expiry atomically** (codex)
-  - Evidence: 02-10-PLAN.md:125 defines `TouchSession(hash, now, idle, absolute)` over `sessions(id_hash, user_name, created_us, last_seen_us)`. Both limits are inputs, and created_us is stored, so absolute expiry can be computed. 02-10-PLAN.md:141 says withSession calls it with idle 1 h and absolute 12 h. 02-10-PLAN.md:194-195 and :224 require the tests `idle_expiry` (61 min) and `absolute_expiry` (12 h 1 min, "ends it even when active"). must_haves (02-10-PLAN.md:35) and T-02-47 (:289) state both limits. So the claim that both checks are needed is already covered. What the plan does not say anywhere is how TouchSession works. It never requires a single conditional statement (for example `UPDATE sessions SET last_seen_us=? WHERE id_hash=? AND ?-last_seen_us<=idle AND ?-created_us<=absolute RETURNING user_name`). It also never requires that an expired row is never updated, or deleted when found. Concurrency: serverdb 'mirrors signerdb' with 'one connection' (02-07-PLAN.md:150-152; internal/signerdb/db.go:49 SetMaxOpenConns(1), :27 _txlock=immediate), so all writes are serialized. No concurrent interleaving can extend a session whose expiry check failed. The only gap is a SELECT-then-UPDATE race measured in milliseconds, against a 1 h idle window.
-  - Fix: In Task 1, state that TouchSession is one statement, `UPDATE sessions SET last_seen_us=MAX(last_seen_us,?now) WHERE id_hash=? AND ?now-last_seen_us<=idle AND ?now-created_us<=absolute RETURNING user_name`. If no row matches, it deletes the row and returns ErrNotFound. Add a session_test case showing that a touch after expiry does not revive the session.
-
-- **02-10-F6 [PARTIAL/LOW] Per-username limiter map unbounded and unnormalized** (codex)
-  - Evidence: 02-10-PLAN.md:151 says only "ratelimit.go adds a per-username limiter next to the per-IP one: ... 10/min per username"; it gives no bound, no eviction and no key validation for the username map. The per-IP limiter it builds on is already bounded: 02-07-PLAN.md:157 has "a per-IP rate.Limiter map with LRU-bounded size (10 000 entries) and idle eviction", and 02-07-PLAN.md:314 (T-02-36) has "Per-IP x/time/rate limits with bounded state". The normalization claim does not hold. Directory user names must match `^[a-z0-9][a-z0-9._-]{0,63}$` (02-01-PLAN.md:198), and begin requires "active in the directory mirror" with a 404 that is "identical for unknown, pending, disabled and credential-less users" (02-10-PLAN.md:129). So "Alice" or a Unicode variant never resolves to alice and gets no challenge for her credentials. The internal/server code does not exist yet; the directory internal/server/ is absent from the repo.
-  - Fix: In 02-10 Task 1 'Rate limits', state that the per-username limiter reuses 02-07's bounded LRU map with idle eviction. Also state that it is keyed only on names that pass the directory name regex (`^[a-z0-9][a-z0-9._-]{0,63}$`); invalid names get the uniform 404 without creating a limiter entry. Add a unit test that the map size stays at or below the cap.
-
-- **02-10-F15 [PARTIAL/LOW] Sign-in refusals not audit-logged** (gptoss)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-10-PLAN.md:138 says "Any failure returns 401 {"error":"sign-in failed"} and logs the specific reason through slog", so finish refusals are logged with a reason. The plan does not say that the begin 404 (lines 130-131), the rate-limit 429 (line 37) or a successful sign-in (lines 132-137) are logged. 02-07-PLAN.md:159 uses the same slog-only pattern for admin-auth refusals on the server, and 02-06-PLAN.md:176 sets slog JSON to stderr as the server's logging channel. The tamper-evident Merkle log belongs to the signer. Its leaf kinds are Issue, Refusal, RefusalSummary, ClockRegression, CAInit and BundleInstall (internal/tlog/leaf.go:39-44), and the server cannot append to it. VIS-01 (.planning/REQUIREMENTS.md:75) covers issuance, revocation, approval and admin actions, not web sessions. A web session grants no SSH access: /account is read-only (02-10-PLAN.md:36). Signing refusals and issuance for login certificates are already audited by the signer (02-12-PLAN.md:296, 388). Hashing the username is pointless, because T-02-50 (02-10-PLAN.md:292) notes that usernames already appear in key IDs and the audit log.
-  - Fix: In 02-10 Task 1, state that a successful finish, logout, the begin 404 and 429 rate-limit hits are each logged through slog with the username, the client IP and a reason code, never the session ID or the challenge. Keep web sign-in out of the signer's Merkle audit log, because it grants no access.
-
-- **02-10-F16 [PARTIAL/LOW] Account page lacks last-sign-in information** (gemma)
-  - Evidence: The fact is correct. 02-10-PLAN.md:36 (must_have) and :144-149 (account.go) list what /account shows: name, status, directory version, roles/principals/TTL cap, credential fingerprints with synced/device-bound, a logout form, and a read-only notice. None of it is a last-sign-in time or a session list. The 0003_web.sql `sessions` table (:125) already has `created_us` and `last_seen_us` per user_name, so the data exists, but nothing displays it. No sibling 02-*-PLAN, 02-CONTEXT or 02-RESEARCH covers this either: a grep for last sign-in, last login and active session found nothing. Several things shrink the impact. A web session gates only GET /account and POST /logout, and is never authority for a certificate or a directory change (02-10-PLAN.md:39, :293 T-02-51, and the prohibition at :66-68). Sessions die after 1 h idle or 12 h absolute, or when the user is disabled (:35, :141). No requirement asks for this view: UI-01 at REQUIREMENTS.md:91 is only about CSP, embedding and no npm. Page layout is left to Claude's discretion (02-CONTEXT.md:138).
-  - Fix: Optional: show the current session's sign-in time and the user's other active sessions (created and last-seen times from the existing sessions table) on /account. Otherwise, add "session list and revoke on /account" to the deferred ideas for the UI-02 phase. Do not block 02-10 on it.
+**02-09-R2-F10 — No non-interactive confirmation for `directory sign`**
+- Reviewers: gptoss
+- Claimed severity: MEDIUM
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new
+- Evidence: The reviewer's request for a `--diff-file` flag has no basis; `--yes` exists on the edit path (02-09-PLAN.md:209, :228). The narrower gap is real: `directory sign` must "print Diff against the installed base and confirm" (:220), but the CLI list gives it no flag at all (`keyroster directory sign DIR`, :419), neither `--yes` nor `--admin-key`, and no text says what it does without a TTY. The plan's own e2e runs it with no TTY and with a second admin's agent key (TestApproveQuorumTwo, :277), so the test cannot run as written. An executor would add the flag, but the no-TTY rule for a signing command should not be improvised.
+- Fix: In 02-09 Task 1, define `keyroster directory sign DIR [--yes] [--admin-key SHA256:...]` with editDirectory's rule from :209 (TTY prompt, `--yes` to skip it, refuse with neither) and update :419. State that `directory install` asks nothing because it signs nothing.
 
 ### 02-11
 
-- **02-11-F2 [CONFIRMED/MEDIUM] Empty principal set vs unknown account is undefined** (codex, gemma)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-11-PLAN.md:153 says AccountPrincipals "errors when the host group or the account is unknown", and RenderPrincipalsFile (154-156) defines only header lines plus one principal per line. It does not say what happens with zero principals. Line 166 defines `host-group map NAME ACCOUNT ROLE...` ("sets the account's role list") and `unmap NAME ACCOUNT`, but does not say whether ROLE... may be empty or whether unmap removes the account entry. Line 179: "`host-group unmap web <login> --yes`, then `host principals web <login>` fails (account unknown). An sshd configured with the remaining output (an empty principals file) refuses the same certificate." Once the command fails there is no remaining output, so the test author must write the empty file by hand. The harness at test/e2e/harness_test.go:278-281 writes whatever Principals map it is given, and a missing principals file also refuses. The refusal check therefore passes whether or not the renderer handles zero roles; it tests sshd, not keyroster. No sibling plan covers this. 02-14-PLAN.md:123-154 only renders a non-empty homelab/zima file. 02-10-PLAN.md:146 covers "no roles yet" for Authorize, not for host rendering. 02-REVIEWS.md:274-279 and :381 log the same issue as valid MEDIUM, but the plan text has not been changed.
-  - Fix: Choose and state one rule. Either `unmap` (or `map` with zero roles) keeps the account and RenderPrincipalsFile prints a header-only file, or an unknown account is an error and callers must treat that as "write an empty file", never "keep the old file". Then rewrite e2e step 7 so the refusal uses keyroster's actual output for the revoked account (for example, header-only output fed to sshd), and add unit tests that cover both cases: empty mapping and unknown account.
-
-- **02-11-F3 [PARTIAL/LOW] `role update` replace semantics cannot clear a list** (codex)
-  - Evidence: 02-11-PLAN.md:162 defines `role update NAME [--max-ttl D] [--principal P]... [--extension E]...: given lists replace the old ones`, so a list flag that is left out keeps the old list. Line 164 handles users and groups separately with `role grant` / `role revoke`, one at a time, and `role update` has no --user or --group flags, so the claim about clearing the user/group list is wrong. Principals cannot be emptied by design: 02-01-PLAN.md:201 says Validate() requires "each role has 1-32 principals", so an empty principal list is a refused state and needs no clear syntax. Extensions are different. Role.Extensions (02-01-PLAN.md:194) are optional extras on top of the user-profile defaults, checked by CheckPolicy (02-01-PLAN.md:207). `role add` makes `--extension` optional (02-11-PLAN.md:161), so an empty list is a valid state. Once a role carries an extra extension, the replace-if-given rule at :162 offers no way back to zero. The only route is unmap, `role remove`, re-add, re-grant and re-map, because `role remove` is refused while the role is mapped (:163). The tests at 02-11-PLAN.md:215 cover only replacing principals.
-  - Fix: Add `--no-extensions` (or `--clear-extensions`) to `role update`, refused when combined with `--extension`. State that an omitted list flag keeps the current list and that principals cannot be cleared, since Validate requires 1-32. Add a Task 3 test that removes a role's only extra extension.
-
-- **02-11-F5 [PARTIAL/LOW] Renderer header sha256 source ambiguous** (gptoss)
-  - Evidence: 02-11-PLAN.md:153-155 defines RenderPrincipalsFile(d *Directory, ...) and the header `# host group <g>, account <a>, directory version <n> sha256 <hex>` without saying what the hash covers. 02-11-PLAN.md:202 only asserts "the header carries the version and SHA-256", not that the value is right. Two things make the claimed divergence impossible by construction, though. - Throughout phase 2, "directory SHA-256" means SHA-256 of the canonical bytes: - 02-01-PLAN.md:54 and 02-09-PLAN.md:34: prev is the SHA-256 of the installed bytes; - 02-09-PLAN.md:139,142,158: Status, install and `directory show` report the directory SHA-256. - The stored bytes and a re-serialization are identical: - 02-01-PLAN.md:189,195: Parse uses trust.DecodeStrict, and Canonical() uses trust.CanonicalJSON as "the one canonical rule". - 02-01-PLAN.md:60: Validate refuses unsorted or duplicated lists, and Sort() fixes the order. - 02-03-PLAN.md:175: the signer refuses non-canonical directories ("directory_invalid (non-canonical whitespace, unknown field)"). So sha256(d.Canonical()) equals sha256(installed bytes) for any directory that installed. T-02-53 (02-11-PLAN.md:318) is about the renderer's principal set matching the signer's Authorize computation. It is not about the header hash. The header's role as staleness evidence falls under T-02-54 (line 319), which is "accept" for Phase 2.
-  - Fix: In 02-11 Task 2, define the header hash as the lowercase hex SHA-256 of d.Canonical(): the same value `keyroster directory show` and the signer Status report, and the next version's prev. In Task 3, add a renderer test asserting the header hex equals sha256 of the stored directory bytes.
-
-- **02-11-F6 [PARTIAL/LOW] Remove-refusal error should name dependents (group remove while granted by role)** (nemotron)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-11-PLAN.md:163 already says "`role remove NAME`. It refuses while a host group maps the role, and names the host groups", so half of the claim is false. Line 165 says only "`group remove NAME` (refused while a role grants it)" and does not require the granting roles to be named. Line 170 says in general "Error messages name the offending role", which arguably covers it but is ambiguous here. The Task 3 refusal tests (lines 212-213) and the named cases (line 251: `remove_mapped_role_refused`, with no `remove_granted_group_refused`) do not assert the content of the message. Independent of the CLI check, 02-01-PLAN.md:203 and :311 make directory Validate refuse any unknown referenced role, group or user. A group removal that left a dangling grant therefore fails closed at Validate in any case.
-  - Fix: Change line 165 to "group remove NAME (refused while a role grants it; the error names the granting roles)". Add a named case `remove_granted_group_refused` to the Task 3 acceptance list, asserting that the error names the role.
-
-- **02-11-F7 [PARTIAL/LOW] `host principals` duplicates directory verification logic** (nemotron)
-  - Evidence: 02-11-PLAN.md:167 says `host principals` should "Trust, then fetch the directory and verify it locally (the same steps as the pipeline, read only)". It names no helper to reuse. The pipeline in 02-09-PLAN.md:148-150 (cmd/keyroster/dirpipe.go editDirectory) does the fetch and verify inline as steps 1-2: Trust, then GET /api/v1/admin/directory, then directory.Parse and directory.VerifySignatures against the quorum. 02-09 also has `directory show` (02-09-PLAN.md:158) printing "the verified installed directory", and `directory sign` (02-09-PLAN.md:161) checking against "the currently installed verified directory". Neither plan defines a shared fetch-and-verify function, so 02-11 would add the fourth CLI call site of the same glue code. The finding overstates one thing. The verification logic itself is not duplicated: directory.Parse, directory.VerifySignatures and directory.CheckPolicy live in internal/directory and are shared (02-01-PLAN.md:249-253, 02-04-PLAN.md:134). What repeats is about 5-10 lines in cmd/keyroster: Trust, GET, base64 decode, Parse, VerifySignatures, plus the quorum/version-0 handling. The current repo has no such helper yet. The cmd/keyroster/*.go funcs are Phase 1 only (root.go, trust.go, ca.go, audit.go).
-  - Fix: In 02-09, pull editDirectory's steps 1-2 out into a named helper, e.g. `fetchVerifiedDirectory(ctx, env) (doc []byte, d *directory.Directory, pol *trust.Policy, err error)` in dirpipe.go, running Parse+VerifySignatures(+CheckPolicy) and handling version 0. Have editDirectory, `directory show/sign` and 02-11's `host principals` call it. Change 02-11-PLAN.md:167 to name that helper instead of "the same steps as the pipeline".
+**02-11-R2-F1 — Host groups do not scope certificates; operators could mistake a mapping for signer-enforced host restriction**
+- Reviewers: codex, nemotron
+- Claimed severity: LOW (codex), MEDIUM (nemotron)
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new
+- Evidence: This is locked decision D-07 (02-CONTEXT.md:72: "In Phase 2 they enforce nothing by themselves, because certificates are not host-scoped"), so it is not a design defect. The plan states it in the runbook (02-11-PLAN.md:259: "certificates are not host-scoped, so a host trusts any principal its file lists") and in Edge Coverage (02-11-PLAN.md:320). What is missing is only codex's CLI half: the `host-group add|map|unmap` command spec (02-11-PLAN.md:175-177) defines no help or confirmation text saying that a mapping changes only the rendered file. Nemotron's MEDIUM is not borne out; it names no missing element beyond "documented".
+- Fix: In 02-11 Task 2, add one sentence to the `host-group` usage text (and so to `--help`): "Host groups only decide what `keyroster host principals` renders; they do not restrict which hosts a certificate works on." Add `host-scoped` or that sentence to the Task 3 acceptance grep for the usage string.
 
 ### 02-12
 
-- **02-12-F1 [PARTIAL/LOW] Redemption consumes the code before signing; no safe retry when signing fails or the response is lost** (codex)
-  - Evidence: The factual part is correct. 02-12-PLAN.md:160 says "RedeemLogin moves approved to redeemed atomically, so it succeeds once". At :181-186, step 1 consumes the code with RedeemLogin, step 2 checks PKCE and step 4 calls signerclient.Login. At :188 any failure after that returns 403 or 400. Step 9 of the CLI (:204) does not say what happens when redeem fails. So a signer error or a lost response spends the approval. The harm is much smaller than claimed, for four reasons: (1) The finding's "safe retry" cannot exist by design. The passkey assertion's challenge is Digest() of the exact request, which contains RequestID and CreatedAt (:174, :178, :184). The signer refuses a second use of a RequestID with duplicate_request (02-03-PLAN.md:136; 02-CONTEXT.md:26; RESEARCH:628 "RequestID UNIQUE backstop", internal/signer/issue.go:87-95 per research). Calling the signer again for the same login would be refused. The only "idempotent" option would be for the server to cache and re-serve the issued certificate, and that adds state. (2) The intended recovery is to run `keyroster login` again: a new in-memory ed25519 key, a new RequestID and one more passkey touch (:198, :200). It is cheap and safe. (3) "Duplicate issuance" is not a security or visibility problem. If the response is lost after the signer has signed, the certificate is bound to an ephemeral private key that exists only in the CLI's memory and is never written to disk (:198, T-02-62 at :390). Nobody else can use it. It is also logged before release (RESEARCH:252, VIS-01), so the audit log stays accurate: the certificate really was issued. A second run issues a different certificate for a different key, and both are logged. This matches the core value: a complete, accurate picture. (4) Consuming the code before signing is the standard OAuth single-use rule (RESEARCH:279, :988; T-02-57 at :385). It is part of the locked design, which mints at redemption (RESEARCH Q2, :251-252). Two real points remain, both minor: - The CLI has no defined message for a failed redeem, such as "redeem failed; run keyroster login again". - The order of step 1 (consume) before step 2 (PKCE check) means anyone who has intercepted the code but lacks the verifier can burn it. That is a denial of service only, and it requires access to the loopback.
-  - Fix: In redeem, run the constant-time PKCE check (and the code lookup and expiry check) before the atomic approved->redeemed transition, so that a wrong verifier does not burn the code. In CLI step 9, state that any redeem failure ends with "login not completed; run keyroster login again" (no automatic retry). Add a sentence noting that a certificate issued but not delivered is logged and is unusable without the in-memory key.
-
-- **02-12-F2 [PARTIAL/LOW] Agent lifetime rounding of ValidBefore - now** (codex)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-12-PLAN.md:210 makes the CLI refuse unless ValidBefore − now ≥ 60. Line 211 then sets `LifetimeSecs: ValidBefore − now`. Line 44 (must_haves) says nothing reaches the agent unless at least 60 s are left. Line 281 (`login_lifetime_expiry`) uses --ttl 2m and checks that both the key and the certificate are gone from the agent at ValidBefore − now + 5 s. Line 272 tests clock skew of 61 s, and line 278 tests a span of TTL + 301 s. No test covers the case where 59 s versus 60 s remain, and no test asserts LifetimeSecs > 0 or LifetimeSecs ≤ the certificate's true remaining validity. The task text does not say how `now` is taken, or whether it is taken once or again between steps 9 and 10.
-  - Fix: In step 9-10, read `now` once and compute `lifetime = ValidBefore − ceil(now)`, so the lifetime never exceeds the certificate's remaining validity. Refuse when lifetime < 60 and assert lifetime > 0 before calling Add. Add one unit test to the "CLI checks" list in Task 2 for a certificate with 59 s remaining (refused, agent empty), and one that uses the recording fake agent to assert that LifetimeSecs is in [60, ValidBefore − now].
-
-- **02-12-F12 [PARTIAL/LOW] No cleanup of expired login_sessions; pending-session flood** (gptoss)
-  - Evidence: 02-12-PLAN.md:160 defines `login_sessions` with `expires_us` and `code_expires_us` and the accessors CreateLogin, Login, ApproveLogin and RedeemLogin. None of them deletes anything: RedeemLogin only moves the status from approved to redeemed, so even redeemed rows stay. 02-12-PLAN.md:164-170 (begin) inserts a row on every valid begin. The task 2 behavior list at 02-12-PLAN.md:244-283 has no reaping test. The threat model (02-12-PLAN.md:384-393) has no DoS row for login-session growth; T-02-63 and T-02-64 cover clock skew and browser hand-off only. No sibling plan adds a general reaper: a grep across 02-*.md for purge, housekeeping, ticker or DELETE finds only 02-07-PLAN.md:153/221, where `UseNonce` "also deletes expired rows". That is the same pattern on a different table, never applied to login_sessions. Mitigations that do exist: 02-12-PLAN.md:162 says "each route has a per-IP limit and the API routes also a per-user limit" (the per-user value is not given; 02-10-PLAN.md:151 sets 10/min per username for web begin, and 02-07-PLAN.md:157 bounds the per-IP limiter at 10 000 entries). Begin also refuses unless the subject is an active directory user (02-12-PLAN.md:166) and CreatedAt is within 300 s. No Phase 2 code exists yet (internal/ has no server or serverdb packages), so nothing can be checked against real source.
-  - Fix: Have CreateLogin delete rows past expires_us plus a short grace period in the same transaction, following 02-07's UseNonce. Delete redeemed rows too, since the signer log is the record. Add a serverdb test showing an expired row is gone after the next CreateLogin, and state 02-12's per-user begin limit values.
-
-- **02-12-F13 [PARTIAL/LOW] Username enumeration via /api/v1/login/options** (gptoss)
-  - Evidence: Username enumeration is already an accepted, documented risk in the phase. 02-10-PLAN.md:292 has T-02-50 "user enumeration through begin | low | accept", with the reason "usernames already appear in key IDs and the audit log". 02-10-PLAN.md:264 says "Usernames are not secret here … The uniform 404 and the rate limits bound enumeration noise". 02-RESEARCH.md:993 also lists "uniform errors" plus x/time/rate against enumeration. 02-12 applies the same controls to the options endpoint: - 02-12-PLAN.md:162: "each route has a per-IP limit and the API routes also a per-user limit". - 02-12-PLAN.md:163: every non-usable name gets "the uniform 404". - 02-12-PLAN.md:247 tests the case "unknown user (uniform 404)". The response codes the reviewer calls non-uniform are different outcomes on different endpoints, not different answers to "does this user exist": - 02-12-PLAN.md:188: signer refusal returns 403 and every other redeem failure returns the uniform 400. - 02-12-PLAN.md:175: expired, approved or redeemed sessions get the uniform error page. The real gap is in the 02-12 threat register (02-12-PLAN.md:384-393). It has no row for what the unauthenticated options endpoint returns for a valid username: role names, principals (the host accounts the user can reach), per-role TTLs and ca_max_ttl_seconds. T-02-50 only covers a yes/no on "this user exists" through begin. It does not cover handing out each user's access map without authentication.
-  - Fix: Add a threat row to 02-12 for unauthenticated disclosure of roles, principals and TTL caps through /api/v1/login/options. Either accept it explicitly (same reasoning as T-02-50 plus the rate limits), or cut the response down to server_time and role names. If you cut it, the server fills in principals and TTL at begin time and the CLI confirms them on the fingerprint/approval step. Do not change the uniform 404, and do not make status codes uniform across endpoints.
-
-- **02-12-F14 [PARTIAL/LOW] PKCE encoding normalization and verifier handling** (gptoss)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-12-PLAN.md:168: begin requires `code_challenge_method` = `S256` and `code_challenge` of exactly 43 base64url characters. A padded challenge would be 44 characters and contain `=`, so it is refused at intake. Only unpadded base64url can be stored. Task 2 tests this with a 42-character challenge and with `plain` (around line 250). 02-12-PLAN.md:200: the CLI generates the verifier as 32 random bytes in base64url (43 characters) and derives the challenge as base64url(SHA-256(verifier)), the same encoding the server uses. 02-12-PLAN.md:183: redeem requires `base64url(SHA-256(code_verifier)) == code_challenge` in constant time. The redeem steps (181-185) never check the verifier's length or alphabet. 02-12-PLAN.md:160: the `login_sessions` schema stores `code_challenge`, `state` and `code_hash`. It has no verifier column, so the verifier is never persisted. The plan has no "never logged" rule for code_verifier or the code. Sibling plans do write such rules for other secrets: 02-07-PLAN.md:44 and :312 for the invite token, and 02-05-PLAN.md:335 for the passphrase. 02-RESEARCH.md:242 and :255: in the relevant threat (consent phishing) the attacker already holds the verifier, so PKCE is a server-enforced control only. The verifier is not a long-term secret. No internal/server code exists yet (`ls internal` shows no server package), so no logging behaviour can be checked yet.
-  - Fix: In the 02-12 Task 1 redeem handler, refuse a code_verifier that is not exactly 43 base64url characters (unpadded), using the uniform 400. Add a Task 2 refusal test for it. Add one line to the must_haves or the T-02-57 entry: the code and code_verifier are never logged or persisted, only SHA-256(code) is stored. This mirrors the invite-token rule in 02-07.
-
-- **02-12-F15 [PARTIAL/LOW] Clock handling between server, DB expiry and signer** (gptoss)
-  - Evidence: The claim is wrong as stated. code_expires_us is set to "now + 120 s" by the server at assertion time (02-12-PLAN.md:179), and RedeemLogin checks it against the server's own now (02-12-PLAN.md:160, 182). Both reads come from the same server process, so drift between them cannot make a valid code look expired. The signer never reads code_expires_us or expires_us. Its only time check is |now − CreatedAt| ≤ maxClockSkew = 300 s (internal/signer/issue.go:22, 58; reused for login in 02-01-PLAN.md:260). CreatedAt comes from the CLI clock (02-12-PLAN.md:198). The plan already handles clock skew as a known risk: RESEARCH Pitfall 8 (02-RESEARCH.md:731-733), the must_have at 02-12-PLAN.md:46, the CLI's 60 s skew refusal (02-12-PLAN.md:197), the test clock_skew_refused (02-12-PLAN.md:272, 314), and threat T-02-63, rated low and mitigated (02-12-PLAN.md:391). A narrow edge remains. The CLI stops waiting at CreatedAt + 270 s on its own clock (02-12-PLAN.md:203). The server allows approval until CreatedAt + 300 s on the server clock (02-12-PLAN.md:169, 177). If the CLI clock is up to 60 s behind the signer, which is allowed, a late approval can reach the signer with CreatedAt about 330 s old. The signer then refuses with a 403 (02-12-PLAN.md:188).
-  - Fix: Leave a safety margin for the signer's ±300 s check. Have the CLI shorten its callback deadline by the skew it measured (CreatedAt + 270 − |skew|). Have the server refuse an assertion once server_now − CreatedAt exceeds about 240 s, instead of accepting it until CreatedAt + 300.
-
-- **02-12-F17 [PARTIAL/LOW] Ephemeral private key memory hygiene** (gptoss)
-  - Evidence: The claim's example is wrong. In .planning/phases/02-passkey-login-mvp/02-12-PLAN.md:197 (step 2), --role is checked against the server options and --ttl against the cap. The key is generated only afterwards, at :198 (step 3, `ed25519.GenerateKey` with crypto/rand, "in memory only"), so a bad --role exits before any private key exists. Persistence is already covered: must_have :88 says the key is never written to disk and an agent add is never retried without the lifetime constraint; T-02-62 at :390 is "memory only; agent add with lifetime; no retry without constraint; Windows keyroster agent". The plan, however, never says to zero the ephemeral key after the agent Add (:211-214) or on the error paths after step 3 (timeout at :203, redeem or verify failure at :204-210, Add error at :214). The repo already zeroes secrets on a best-effort basis: `defer clear(pass)` in cmd/keyroster/root.go:123 and :447, and internal/rootceremony/keygen.go:29-31 ("The plaintext key is zeroed before GenerateRoot returns (best effort ...)"). So the plan does not follow an existing project convention. The swap concern is overstated. The CLI process lives about 270 s at most (:203), and the same private key then sits in ssh-agent memory for the whole certificate TTL by design. The tech stack in CLAUDE.md treats runtime/secret and mlock-style hardening as experimental defence in depth only. Neither 02-CONTEXT.md nor 02-RESEARCH.md has a locked decision against zeroing.
-  - Fix: In Task 1 step 3, add a `defer clear(priv)` right after `ed25519.GenerateKey`, so the ephemeral key is zeroed on every return path, as in root.go:123 and rootceremony/keygen.go. Extend T-02-62 to say this is best effort only: the GC may copy the key, and the agent holds it for the TTL anyway. Leave out mlock and runtime/secret.
-
-- **02-12-F21 [PARTIAL/LOW] Lifetime-expiry e2e test timing flakiness** (gptoss)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-12-PLAN.md:281: login_lifetime_expiry uses `--ttl 2m`, checks `ssh-add -l` lists the cert, then waits "ValidBefore − now + 5 s (about 125 s)" and checks that the cert is gone. 02-12-PLAN.md:211: the CLI adds with `LifetimeSecs: ValidBefore − now`, so the agent drops the key at about ValidBefore. 02-12-PLAN.md:210: the CLI refuses unless ValidBefore − now ≥ 60. 02-12-PLAN.md:217-224: signer, server, CLI and ssh-agent all run on the same e2e host, so they share one clock. .github/workflows/e2e.yml:63: `go test -tags e2e -count=1 -v ./test/e2e/...` has no `-timeout`, and grepping the phase-2 plans for `-timeout` finds nothing.
-  - Fix: Leave the assertions as they are and add no retry. Optionally run login_lifetime_expiry with t.Parallel(), or give the e2e invocations an explicit `-timeout` (for example 20m) so the fixed 125 s wait cannot push the package past go test's default 10-minute limit.
-
-- **02-12-F22 [PARTIAL/LOW] Fake signer fidelity in refusal-matrix tests** (gptoss)
-  - Evidence: 02-12-PLAN.md:256-264 lists the redeem refusals (before approval, wrong code, wrong verifier, code reuse, code after 121 s, cross-login code). The fake signer is asserted to record zero calls for each. 02-12-PLAN.md:291 says the fake is "an interface with a recording fake; production uses signerclient". 02-12-PLAN.md:181-188 shows that every one of these refusals happens in the server (RedeemLogin, the PKCE compare) before step 4 calls signerclient.Login. 02-12-PLAN.md:234 requires exactly one signerclient.Login call site. Real-signer behaviour is covered elsewhere. 02-03-PLAN.md:171 and :211 test the signer's own refusals (principals_mismatch, ttl_exceeds_role, user_verification_missing, origin_mismatch and others) against the real signer. 02-12 e2e (lines 217-225 and 280-283: TestLoginEndToEnd, two_concurrent_logins, unapproved_login_mints_nothing) and 02-11-PLAN.md:177 drive the real signerclient.Login against a real signer. In the repo, internal/signerclient/client.go:19-20 and 53-57 show that a real refusal comes back as a *wire.ErrorResponse error (Code CodeRefused, Message = detail, internal/wire/issue.go:290). The plan does not say the fake must return that type for the 403 case at 02-12-PLAN.md:264.
-  - Fix: In Task 2, say that the fake signer client returns signer refusals as *wire.ErrorResponse{Code: wire.CodeRefused, Message: detail}, exactly as signerclient does, so the 403 mapping is tested against the real error type. Optionally, add one e2e redeem that the real signer refuses (for example, revoke alice's role after approval and before redeem) and assert 403 with principals_mismatch.
+**02-12-R2-F3 — "Page never invokes WebAuthn before showing the fingerprint. Verified in tests."**
+- Reviewers: nemotron
+- Claimed severity: HIGH
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new
+- Evidence: The security property is sound and its server half is tested: the fingerprint is computed from the stored request bytes and rendered server-side in the HTML (02-12-PLAN.md:203), the challenge is the digest of the same bytes (02-12-PLAN.md:48, 205), and the e2e asserts the CLI's fingerprint appears verbatim in the page HTML (02-12-PLAN.md:258, 275). The reviewer's "verified in tests" is only half true, though. The JS half ("never invokes WebAuthn before it has shown the fingerprint") has no automated check: the e2e drives the flow without a browser, and the plan itself labels the page's JS ceremony "UNVERIFIED until 02-14" (02-12-PLAN.md:531). Yet the prohibition is recorded as `status: resolved`, `verification: test` (02-12-PLAN.md:93-95). That is a labelling inconsistency under the project's no-unexercised-paths rule, not a shipped defect: `navigator.credentials.get` runs only from the Approve click (02-12-PLAN.md:229) on a page whose fingerprint is already in the markup.
+- Fix: In 02-12, either (a) change that prohibition's verification to "test (server half: fingerprint from stored bytes, in the HTML before any script runs) + manual in 02-14 (JS ordering)", or (b) add a static Task 1 acceptance check that makes the JS half mechanical, for example that in app.js the `#kr-approve` code calls `navigator.credentials.get` only inside the Approve button's click handler and that login_approve.html places the fingerprint element before the Approve button with the button not auto-activated.
 
 ### 02-13
 
-- **02-13-F1 [PARTIAL/LOW] Backup/rollback completeness for the live signer upgrade** (codex, gemma)
-  - Evidence: Plan 02-13-PLAN.md:187-192: stop the signer, then `sudo cp -a /var/lib/keyroster-signer /var/lib/keyroster-signer.pre-02-13` BEFORE the new binary is installed and run. Restoring that copy plus the old binaries is the rollback, and on any doctor FAIL step 5 says to "restore the backup and the binaries, record it, and stop". T-02-68 is at :378. All signer state lives in that one directory. signer.db is at {state-dir}/signer.db (cmd/keyroster-signer/serve.go:93, doctor.go:94, export.go:38), and it holds the trust bundle and policy tables (internal/signerdb/trust.go). ca-pubkeys.json defaults to {state-dir}/ca-pubkeys.json (cmd/keyroster-signer/cainit.go:33,54). The TPM key files are {state-dir}/tpm/{role}.tpmkey (internal/keystore/tpm/tpm.go:7,109; provision.go:29). These are TSS2 blobs that only the vTPM can use, so copying them exposes no private key. The lock file is also in the directory (lock.go:29). An old binary refuses a newer schema (internal/signerdb/migrate.go:55-68), and that is why the copy is taken before migration 0004 runs. The precedent at 01-20-PLAN.md:220 and :523 kept "the 24e0ada binaries and unit" for rollback. 02-13 step 2.3 keeps only the binaries (`.pre-02-13`), while step 2.4 replaces the unit from deploy/systemd. 01-20-SUMMARY.md:243 records that the rollback path was never exercised.
-  - Fix: In Task 2 step 2.3, also keep the installed keyroster-signer.service as `.pre-02-13`, as 01-20 did. Write out the restore commands in full: move the failed state directory aside, `cp -a` the backup back, put back the old binaries and unit, then run daemon-reload. Optionally, record `ls -lan` of the backup in the SUMMARY.
+**02-13-R2-F4 — tailscale cert renewal and server reload are not proven on the homelab**
+- Reviewers: nemotron, gptoss
+- Claimed severity: MEDIUM
+- Verdict: PARTIAL
+- Verified severity: MEDIUM
+- Round 1: new
+- Evidence: Gptoss's claim (no test that the certificate swap is atomic) is wrong: 02-06 specifies a certHolder with validated reload, last-good fallback and SIGHUP, with named tests (02-06-PLAN.md:269-271, :338). Nemotron's "UNVERIFIED until the 02-13 run" is accurate, and checking it exposes a narrower real gap that neither reviewer stated. 02-06 defines the cert unit with an `ExecStartPost` that runs `systemctl reload keyroster-server.service` (02-06-PLAN.md:371), while 02-13 step 5.3 starts that unit once before keyroster-server is enabled and requires `Result=success` (02-13-PLAN.md:237, acceptance at :265). The server cannot be started first, because it refuses to start without a certificate covering rp_id (02-06-PLAN.md:180). `systemctl reload` of an inactive unit exits non-zero, so as the two plans are written the first run ends with a failed ExecStartPost and the required `Result=success` cannot appear. This is derived from the plan text and systemd semantics; the unit file does not exist yet and nothing was run. Separately, the plan calls the certificate "renewed by the timer" and "renewing" (02-13-PLAN.md:35, :270), but no step runs the unit against the live server, and no verify checks that the timer is active (02-13-PLAN.md:253 checks only the server). The failure is loud and has no security impact, but it stops the rollout after v3 is installed and would ship a first-install step that fails in server-install.md.
+- Fix: In 02-06, make the reload line tolerant of an inactive server (`ExecStartPost=/usr/bin/systemctl try-reload-or-restart keyroster-server.service`, which does nothing when the unit is not running). In 02-13 step 5.3, after the server is enabled, start keyroster-tailscale-cert.service a second time and require `Result=success` plus a reload line in the keyroster-server journal, so the renewal-and-reload path runs once against the live server. Add `systemctl is-active keyroster-tailscale-cert.timer` to the Task 2 verify. If the second run is not added, label timer-driven renewal UNVERIFIED in server-install.md and drop "renewing" from the done line.
 
-- **02-13-F3 [PARTIAL/LOW] No resume point after a partial failure across hosts** (codex)
-  - Evidence: The "second successor bundle" half is refuted by the existing Phase 1 code. internal/trust/verify.go:342-346 rejects a successor unless next.Version == prev.Version+1 and next.Prev == SHA256(installed bundle). internal/signer/trust.go:238-246 verifies every install against the latest installed bundle and refuses a version that is not above it. Re-running step 3 in 02-13-PLAN.md:194-203 always passes `--prev "$T/prev-v3"` (the v2 bundle), so a re-run can only produce another version-3 bundle chained to v2. Once v3 is installed, the signer refuses that bundle. Accidentally producing a v4 would mean deliberately pointing --prev at v3, which the plan never says to do. For rollback, step 2 (02-13-PLAN.md:187-192) keeps the pre-02-13 state-dir and binary backups with an explicit restore-and-stop path, and T-02-68 (line 378) covers this. Because no passkey exists before Task 3, restoring that backup also undoes v3. Task 2 is labelled one-way (line 175) and gated by the D-09 checkpoint. Several post-v3 steps can safely be run again: `systemctl enable --now` (step 5), the init re-run with --tls-pin (step 6.3, line 217), and kr.env written outside the repo. 02-07-PLAN.md:170/178/218 adds `user add --reinvite`, and `user add` refuses a duplicate with `already pending`, so a failed or expired invite can be recovered. What is really missing is narrower. 02-13 has no explicit resume guidance after v3 is installed. It does not tell a resumed executor to skip steps 1-4 when doctor already shows v3, and nothing stops step 3 from overwriting v3-out/ and appending a second V3_SHA256 line to pins.env. Either would break the hash-equality table and the Task 2 automated verify on line 230. Task 3's error reply (line 263) also has no next step, such as `user add --reinvite` or a retry.
-  - Fix: Add a short resume note to Task 2. If doctor already shows `trust bundle version 3` with install SHA equal to the recorded V3_SHA256, skip steps 1-4 and never re-run root sign or overwrite v3-out/ or pins.env. Also add a line to Task 3: on a browser error or an expired invite, run `keyroster.exe user add <username> --reinvite` and repeat the checkpoint.
-
-- **02-13-F14 [PARTIAL/LOW] Show sha256(FQDN)[:12] in the D-09 checkpoint message** (nemotron)
-  - Evidence: The D-09 checkpoint context (.planning/phases/02-passkey-login-mvp/02-13-PLAN.md:133-142) shows the owner the candidate FQDN in full but no hash. The checkpoint acceptance criteria (line 168) list only the PSL, IP refusal, rename, CT logs and v3/v4 facts. The record side asks for "the first 12 hex digits of its SHA-256" (line 167), `sha256(<FQDN>)[:12]` (line 293), "a SHA-256 prefix" (line 316 and must_haves line 57), and "the FQDN replaced by its SHA-256 prefix" in the hash-equality table (line 234). None of these lines fixes the exact hash input: whether a trailing newline is included (`echo` vs `printf %s`), whether the trailing dot that is stripped from Self.DNSName at line 133 is included, and what the case is. So the checkpoint does lack the prefix, as claimed.
-  - Fix: Define the hash once (for example `printf %s "<FQDN without trailing dot, lowercase>" | sha256sum | cut -c1-12`) and use it in lines 167, 234 and 293. Have the Task 1 checkpoint message show that 12-hex prefix next to the FQDN so the owner can match it against SUMMARY later.
+**02-13-R2-F10 — RP_HASH12 in the committed SUMMARY can be reversed**
+- Reviewers: gptoss
+- Claimed severity: LOW
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new (the hash was introduced by the round-1 fix for 02-13-F14)
+- Evidence: The plan forbids any homelab hostname or tailnet name in a committed file (02-13-PLAN.md:57, T-02-67 at :418) and commits RP_HASH12 in the SUMMARY instead (02-13-PLAN.md:330). RP_HASH12 is an unsalted SHA-256 prefix of the lowercase FQDN (02-13-PLAN.md:135), and the plan itself states that the FQDN is published in Certificate Transparency logs (02-13-PLAN.md:141, T-02-69 at :421). Anyone can hash the `*.ts.net` names in CT and match the 48-bit prefix, which links the public repository to the exact machine and tailnet name. So the prohibition's intent is not met by the hash. The impact is small: the name is already public and is reachable only inside the tailnet. Gptoss's wording about "logs or alerts" is off; the exposure is the committed SUMMARY.
+- Fix: Keep RP_HASH12 in the checkpoint message and in kr.env only (02-13-PLAN.md:246 already stores it), and write "RP hostname hash recorded in kr.env" in the SUMMARY. Alternatively record an explicit accept line under T-02-67 stating that the hash prefix is linkable through CT logs.
 
 ### 02-14
 
-- **02-14-F6 [PARTIAL/MEDIUM] Expiry check conflates agent exit with key removal, and a fixed 6-minute wait is timing-fragile** (codex, gptoss)
-  - Evidence: 02-14-PLAN.md:173 (Task 2 step 5) accepts "no identities, or fail to connect because the keyroster agent exited". 02-14-PLAN.md:232 (Task 4 step 4) says only "the keyroster certificate and key should be gone". 02-14-PLAN.md:202 (Task 3 step 3) investigates only when the owner replies ttl-expired=no, and nothing independent backs up a "yes". What the finding gets wrong: (a) Agent exit vs key removal. 02-02-PLAN.md:35 makes `keyroster agent` an in-memory keyring that "exits once its last key has expired". If the process has exited, its keys are gone too. 02-02-PLAN.md:223 and :233 already check key removal (List shows 0) and process exit as separate assertions in automated tests (TestInboxSSHOffersAgentCert, plus the Serve-returns unit test). (b) Timing. 02-12-PLAN.md:197 refuses a login when client/server clock skew is over 60 s. 02-12-PLAN.md:211 sets LifetimeSecs = ValidBefore − now, truncated (02-REVIEWS.md:380), so the agent lifetime never runs past the certificate. A 6-minute wait on a 5-minute certificate leaves at least 60 s of margin. 02-12-PLAN.md:281 covers the exact-boundary case in CI. What the finding misses, and why it is still partly right: the earlier login in the same session uses the default TTL. Under D-14 (02-CONTEXT.md:109-111) that is the role cap, 8 h (02-13-PLAN.md:277). That is Task 2 step 3 (02-14:171) and Task 4 step 2 (02-14:230). So that 8 h certificate is still in the same agent 6 minutes later. On Windows, `ssh-add -l` will list it, the agent will not exit, and neither expected result at :173 can happen. An honest owner then reports ttl-expired=no, or reads the check the wrong way. On Linux, :232 does not say which certificate should be gone.
-  - Fix: In Task 2 step 5 and Task 4 step 4, have the owner note the 5 m certificate's serial/key ID (or its fingerprint from `ssh-add -l`) right after login. The expiry check then passes when `ssh-add -l` no longer lists that entry. Alternatively, have the owner clear the agent first (`ssh-add -D`, or stop keyroster agent) so "no identities" is the right expected result. Task 3/5 should record the listing output, not only a yes/no.
-
-- **02-14-F1 [PARTIAL/LOW] sshd -t does not prove the effective cert-login config; lockout risk** (codex, gptoss)
-  - Evidence: Most of what the reviewers asked for is already in 02-14-PLAN.md: - Non-interactive check after the reload: line 148 `ssh.exe -n -o BatchMode=yes zima true` (fails_when "the existing key-based login to zima-srv broke", line 149). Lines 126 and 130 run the key login before and after. Acceptance at line 155 says "works before and after the change". - Rollback: line 131 ("If anything fails, remove the drop-in, reload and stop") and line 113 (one-file reversibility). T-02-70 at line 353 lists sshd -t, the login checks before and after, and the one-file rollback. - The plan uses `systemctl reload` (line 129), which sends SIGHUP. Sessions already logged in keep running, so a held-open second session adds little. The precondition at line 114 requires passwordless `sudo -n` on zima, and CLAUDE.md says zima is reachable over Tailscale from two machines. - The drop-in at line 128 only adds TrustedUserCAKeys and AuthorizedPrincipalsFile. Both apply only to certificate authentication, so the authorized_keys login that guards against lockout is not affected. That makes the claimed lockout (HIGH) overstated. - The effective certificate path is proven end to end later. Task 2 step 4 (line 172) does a real `ssh zima@<zima> whoami` with the certificate. Task 3 (lines 200 and 211) needs `Accepted publickey for zima ... ID kr2/...` lines in the sshd journal. The real gap is narrow. The check at line 146 greps global `sshd -T` with no `-C user=zima,host=...,addr=...`. A `Match` block in zima's existing sshd_config that overrides AuthorizedPrincipalsFile or TrustedUserCAKeys for that user or address would not show up. Neither would a precedence surprise from another drop-in (sshd keeps the first value it sees). The failure would surface later, in Task 2, as a failed certificate login. That is late detection, not a lockout.
-  - Fix: In Task 1 step 5 and the verify at line 146, use `sudo sshd -T -C user=zima,host=<daniel-pc tailscale name>,addr=<daniel-pc tailscale IP>`. Also cover the laptop's address, or do a `grep -i '^Match' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*` that must come back empty. That way the per-connection effective values are what get checked.
-
-- **02-14-F5 [PARTIAL/LOW] Journal-to-audit correlation is too loose (time window, fields, clock sync)** (codex, nemotron)
-  - Evidence: .planning/phases/02-passkey-login-mvp/02-14-PLAN.md:47 (key_link: "kr2 key IDs and serials matched between audit verify output and journal lines"); :198 (Task 3 step 1 lists kr2 key IDs and serials from `audit verify`); :200 (Task 3 step 2 requires journal lines "whose serials match the audit list", using `--since "<the Task 2 window>"`); :215 (acceptance: SUMMARY lists key ID, serial, journal timestamp and browser for each login); :258 (Task 5 step 1 repeats the serial match for the laptop window); :272 (SUMMARY evidence table with serials and timestamps). The coarse greps the finding describes are at :211 and :280. Before 02-14, zima-srv has no TrustedUserCAKeys for keyroster: Task 1 installs it first (:127-129). So no earlier kr2 certificate login can exist in the journal.
-  - Fix: In Task 5's automated check, replace the relative `-3h` window with an absolute `--since` set to Task 1's install time. Then grep for the specific serials recorded in Task 3 and Task 5: at least one Windows-window serial and at least one laptop-window serial. Do not use a bare count of 2 or more.
-
-- **02-14-F7 [PARTIAL/LOW] Ruleset JSON check only greps strings; no structure or validity check** (gptoss)
-  - Evidence: 02-14-PLAN.md:282: Task 5's automated check is only `grep -c 'cli-windows\|cli-macos' .github/rulesets/main-integrity.json | grep -qx 2`. It does not parse the JSON, does not check where the entries sit, and does not check integration_id. So the factual claim is correct. What happens next, though, limits the damage: (a) Invalid JSON cannot reach the live repo silently. scripts/apply-rulesets.sh:34/36 sends the file with `gh api -X PUT/POST --input "$file"`, the API rejects malformed bodies, and `set -euo pipefail` (line 11) makes the owner's run in Task 6 (02-14-PLAN.md:307) fail loudly. (b) A misplaced context is caught by Task 6's live check (02-14-PLAN.md:316). It reads `.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context` from the applied ruleset and fails if either context is missing. (c) A wrong integration_id leaves a required check that can never be satisfied. Because strict checks are already active (.github/rulesets/main-integrity.json:20) and the ruleset is applied before approval, that would block this very PR's merge, which is loud and visible to the owner (T-02-73, 02-14-PLAN.md:356). (d) The one real gap: the Task 6 check runs after the merge, so a structural mistake is found post-merge and needs a follow-up PR. The live check also never verifies integration_id. A minor side issue: `grep -c` counts lines, so the check falsely fails if both contexts are written on one line.
-  - Fix: Swap Task 5's grep for a jq assertion that checks validity and structure. For example: `jq -e '[.rules[]|select(.type=="required_status_checks")|.parameters.required_status_checks[]|select((.context=="cli-windows" or .context=="cli-macos") and .integration_id==15368)]|length==2' .github/rulesets/main-integrity.json`. Optionally also have the Task 6 live check assert integration_id.
-
-- **02-14-F13 [PARTIAL/LOW] Audit verify output parsed by grep on a human-readable string** (gptoss)
-  - Evidence: Plan 02-14 line 209 runs `audit verify ... && printf '%s\n' "$A" | grep -q 'trust bundle v3'`, with fails_when at line 210. In the real Phase 1 CLI, cmd/keyroster/audit.go:112 prints "OK: ... trust bundle v%d (current bundle) ..." and audit.go:116 prints "anchored: the pinned roots are the root set of trust bundle v%d". audit.go:86-89 returns an error, and so a non-zero exit, on any verification failure. A machine-readable `--json` flag already exists (audit.go:41-56, 65, 108-110), with `anchor_bundle_version`, `bundle_version`, `issued_by_ca` and `kinds`. It has no per-certificate serial or key-ID list. The serials and kr2 key IDs needed for cross-matching are in the export JSONL, which is already machine-readable. Cross-matching is a manual acceptance item (line 198 "List their kr2 key IDs and serials"; line 215 SUMMARY notes). Independent corroboration comes from the journal grep at lines 211 and 280.
-  - Fix: In Task 3, run `audit verify --json` and check `anchor_bundle_version == 3` (and, if wanted, `kinds`/`issued_by_ca.user` against the 02-13 baseline count) instead of grepping the human-readable text. Take serials and kr2 key IDs from the export JSONL, not the verify output.
+**02-14-R2-F13 — The diff guard only catches `*.ts.net` names and IPv4 addresses**
+- Reviewers: gptoss
+- Claimed severity: not stated
+- Verdict: PARTIAL
+- Verified severity: LOW
+- Round 1: new
+- Evidence: The guard is the regex `[a-z0-9-]+\.[a-z0-9-]+\.ts\.net|([0-9]{1,3}\.){3}[0-9]{1,3}` on added lines (02-14-PLAN.md:349; the same in 02-13-PLAN.md:259 and :345). It backs a prohibition marked `verification: test` that covers every homelab hostname, FQDN, address and tailnet name (02-14-PLAN.md:53-55, 02-13-PLAN.md:57-59). Three cases pass the guard: a non-tailnet RP hostname, which 02-13's "other-name" option allows (02-13-PLAN.md:152-156); the bare tailnet name without the machine label; and an IPv6 address. The owner's review at the merge gate is a second check ("Check that no hostname or address appears", 02-14-PLAN.md:375, 02-13-PLAN.md:367), so the gap is narrow. Gptoss's replacement regex would match almost any dotted word and is not usable.
+- Fix: In both plans, add a literal check next to the pattern. At execution the confirmed FQDN is in a shell variable, so split it into the machine label, the tailnet label and the full name, and fail when `git diff origin/main` adds a line containing any of them (`grep -iF`). For the "other-name" option, use the owner-supplied name the same way.
 
 ### Refuted (R) or already covered (C), ids only
 
-- 02-01: F1(C), F3(C), F4(R), F6(C), F8(R), F9(C), F10(C), F11(R), F12(C), F13(C), F14(C), F15(C), F16(R), F17(R), F18(C), F20(C)
-- 02-02: F2(C), F3(C), F4(R), F6(C), F7(C), F9(R), F10(C), F11(R), F12(R), F13(C)
-- 02-03: F1(R), F2(C), F3(C), F4(R), F6(C), F7(C), F8(C), F9(C), F11(C), F14(R), F15(C), F17(C), F18(C)
-- 02-04: F1(C), F3(C), F4(C), F5(R), F6(R), F7(C), F9(C), F10(R), F11(C), F12(C), F13(C), F14(R), F15(C)
-- 02-05: F3(C), F5(R), F8(C), F9(C), F10(R), F12(R), F13(C), F14(R), F15(C)
-- 02-06: F2(R), F3(C), F5(C), F6(C), F7(C), F8(C), F9(C), F12(R), F13(R), F14(R), F17(C), F18(R)
-- 02-07: F2(R), F3(C), F4(C), F11(R), F13(C), F14(R), F15(C), F16(C), F17(C), F18(R), F19(C), F20(R)
-- 02-08: F2(C), F4(C), F5(C), F6(C), F8(C), F9(C), F12(C), F13(C), F14(C), F15(R)
-- 02-09: F1(C), F2(C), F3(R), F4(C), F5(R), F7(C), F8(C), F9(C), F12(C), F13(C), F15(R), F16(R), F17(C), F18(C)
-- 02-10: F3(C), F4(C), F7(R), F8(R), F9(C), F10(C), F11(R), F12(R), F13(C), F14(R), F17(R)
-- 02-11: F1(C), F4(C), F8(C), F9(C), F10(C), F11(C), F12(C), F13(C), F14(C)
-- 02-12: F3(C), F4(C), F5(C), F6(C), F7(C), F8(C), F9(C), F10(C), F11(C), F16(C), F18(C), F19(C), F20(C), F23(C), F24(R), F25(R), F26(C), F27(R), F28(C), F29(C), F30(C), F31(R)
-- 02-13: F2(C), F4(C), F5(C), F6(C), F7(C), F8(C), F9(R), F10(C), F11(R), F12(C), F13(C), F15(C), F16(C)
-- 02-14: F2(C), F3(C), F4(C), F8(C), F9(C), F10(C), F11(C), F12(C), F14(R), F15(C), F16(C)
+02-01-R2-F1 (C), 02-01-R2-F2 (R), 02-01-R2-F3 (R), 02-01-R2-F4 (C), 02-01-R2-F5 (R), 02-01-R2-F6 (C), 02-01-R2-F7 (C), 02-01-R2-F8 (C), 02-01-R2-F9 (R), 02-01-R2-F10 (R), 02-01-R2-F11 (R), 02-01-R2-F12 (C), 02-01-R2-F13 (C), 02-01-R2-F14 (C), 02-01-R2-F15 (R), 02-01-R2-F16 (C), 02-02-R2-F2 (C), 02-02-R2-F3 (C), 02-02-R2-F5 (C), 02-02-R2-F6 (C), 02-02-R2-F7 (C), 02-02-R2-F8 (R), 02-02-R2-F9 (R), 02-02-R2-F10 (C), 02-02-R2-F11 (R), 02-02-R2-F12 (R), 02-02-R2-F13 (R), 02-02-R2-F14 (R), 02-03-R2-F1 (C), 02-03-R2-F2 (R), 02-03-R2-F3 (C), 02-03-R2-F4 (C), 02-03-R2-F5 (R), 02-03-R2-F6 (C), 02-03-R2-F7 (C), 02-03-R2-F8 (R), 02-03-R2-F9 (R), 02-03-R2-F10 (R), 02-03-R2-F11 (R), 02-03-R2-F12 (R), 02-03-R2-F13 (C), 02-03-R2-F14 (C), 02-03-R2-F15 (R), 02-04-R2-F1 (C), 02-04-R2-F2 (C), 02-04-R2-F3 (R), 02-04-R2-F4 (C), 02-04-R2-F5 (C), 02-04-R2-F6 (C), 02-04-R2-F7 (C), 02-04-R2-F8 (C), 02-04-R2-F9 (C), 02-04-R2-F10 (R), 02-04-R2-F11 (R), 02-04-R2-F12 (R), 02-04-R2-F13 (C), 02-05-R2-F1 (C), 02-05-R2-F2 (C), 02-05-R2-F3 (C), 02-05-R2-F4 (R), 02-05-R2-F5 (C), 02-05-R2-F6 (C), 02-05-R2-F7 (R), 02-05-R2-F8 (R), 02-05-R2-F9 (C), 02-05-R2-F11 (R), 02-05-R2-F12 (C), 02-05-R2-F13 (R), 02-05-R2-F14 (R), 02-05-R2-F15 (R), 02-05-R2-F16 (R), 02-05-R2-F17 (C), 02-06-R2-F2 (C), 02-06-R2-F3 (C), 02-06-R2-F4 (C), 02-06-R2-F5 (C), 02-06-R2-F6 (R), 02-06-R2-F7 (C), 02-06-R2-F8 (R), 02-06-R2-F9 (R), 02-06-R2-F10 (C), 02-06-R2-F11 (C), 02-07-R2-F1 (C), 02-07-R2-F3 (C), 02-07-R2-F4 (R), 02-07-R2-F5 (R), 02-07-R2-F6 (C), 02-07-R2-F7 (C), 02-07-R2-F8 (R), 02-07-R2-F9 (R), 02-07-R2-F10 (R), 02-07-R2-F11 (C), 02-07-R2-F12 (R), 02-07-R2-F13 (R), 02-07-R2-F14 (R), 02-07-R2-F15 (R), 02-07-R2-F16 (C), 02-08-R2-F1 (C), 02-08-R2-F3 (C), 02-08-R2-F4 (C), 02-08-R2-F5 (C), 02-08-R2-F6 (R), 02-08-R2-F7 (R), 02-08-R2-F8 (C), 02-08-R2-F11 (R), 02-08-R2-F12 (C), 02-08-R2-F13 (C), 02-09-R2-F2 (R), 02-09-R2-F3 (R), 02-09-R2-F5 (R), 02-09-R2-F6 (C), 02-09-R2-F7 (C), 02-09-R2-F8 (R), 02-09-R2-F9 (C), 02-09-R2-F11 (C), 02-09-R2-F12 (C), 02-09-R2-F13 (C), 02-09-R2-F14 (C), 02-10-R2-F1 (C), 02-10-R2-F2 (C), 02-10-R2-F3 (C), 02-10-R2-F4 (C), 02-10-R2-F5 (R), 02-10-R2-F6 (C), 02-10-R2-F7 (R), 02-10-R2-F8 (C), 02-10-R2-F9 (R), 02-10-R2-F10 (R), 02-11-R2-F2 (C), 02-11-R2-F3 (C), 02-11-R2-F4 (C), 02-11-R2-F5 (R), 02-11-R2-F6 (R), 02-11-R2-F7 (C), 02-11-R2-F8 (C), 02-11-R2-F9 (R), 02-11-R2-F10 (R), 02-11-R2-F11 (C), 02-11-R2-F12 (C), 02-12-R2-F1 (C), 02-12-R2-F2 (C), 02-12-R2-F4 (C), 02-12-R2-F5 (C), 02-12-R2-F6 (C), 02-12-R2-F7 (C), 02-12-R2-F8 (R), 02-12-R2-F9 (R), 02-12-R2-F10 (C), 02-12-R2-F11 (C), 02-12-R2-F12 (C), 02-12-R2-F13 (C), 02-12-R2-F14 (C), 02-12-R2-F15 (C), 02-13-R2-F1 (C), 02-13-R2-F2 (C), 02-13-R2-F3 (C), 02-13-R2-F5 (R), 02-13-R2-F6 (R), 02-13-R2-F7 (R), 02-13-R2-F8 (R), 02-13-R2-F9 (C), 02-13-R2-F11 (C), 02-13-R2-F12 (R), 02-13-R2-F13 (C), 02-14-R2-F1 (C), 02-14-R2-F2 (C), 02-14-R2-F3 (R), 02-14-R2-F4 (C), 02-14-R2-F5 (C), 02-14-R2-F6 (C), 02-14-R2-F7 (C), 02-14-R2-F8 (R), 02-14-R2-F9 (C), 02-14-R2-F10 (R), 02-14-R2-F11 (R), 02-14-R2-F12 (C), 02-14-R2-F14 (C), 02-14-R2-F15 (R), 02-14-R2-F16 (C)
+
+The full verdict and evidence for each id is in the verifier files under `.review-diagnostics/` for this run (`verify/verify-02-NN_02-NN.md`). That directory is local and not committed.
