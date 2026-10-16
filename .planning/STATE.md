@@ -168,7 +168,7 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+- [2026-10-16] [auth] Bind admin-signed directories to a deployment — [todo file](.planning/todos/pending/2026-10-16-bind-admin-signed-directories-to-a-deployment.md) — Needs Options:.
 
 ### Blockers/Concerns
 
