@@ -119,6 +119,21 @@ func TestValidate(t *testing.T) {
 		{"duplicate_credential_across_users", func(d *Directory) {
 			d.Users = append(d.Users, User{Name: "bob", Status: StatusActive, Credentials: []Credential{d.Users[0].Credentials[0]}})
 		}},
+		// The decoders skip CR and LF even in strict mode, so these are
+		// second text forms of the same bytes (T-02-77).
+		{"credential_id_with_newline", func(d *Directory) {
+			id := d.Users[0].Credentials[0].ID
+			d.Users[0].Credentials[0].ID = id[:4] + "\n" + id[4:]
+		}},
+		{"duplicate_credential_across_users_newline_variant", func(d *Directory) {
+			c := d.Users[0].Credentials[0]
+			c.ID = c.ID[:4] + "\r\n" + c.ID[4:]
+			d.Users = append(d.Users, User{Name: "bob", Status: StatusActive, Credentials: []Credential{c}})
+		}},
+		{"credential_spki_with_newline", func(d *Directory) {
+			spki := d.Users[0].Credentials[0].SPKI
+			d.Users[0].Credentials[0].SPKI = spki[:8] + "\n" + spki[8:]
+		}},
 		{"active_user_without_credentials", func(d *Directory) { d.Users[0].Credentials = []Credential{} }},
 		{"unknown_role_referenced", func(d *Directory) { d.HostGroups[0].Accounts[0].Roles = []string{"nope"} }},
 		{"unknown_group_referenced", func(d *Directory) { d.Roles[0].Groups = []string{"nope"} }},

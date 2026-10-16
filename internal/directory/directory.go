@@ -330,12 +330,13 @@ func (d *Directory) Validate() error {
 	return nil
 }
 
-// validate checks one credential. The ID and SPKI are decoded with the
-// strict encodings, so each credential has exactly one text form and the
-// uniqueness check compares canonical strings (T-02-77).
+// validate checks one credential. The ID and SPKI must be the re-encoding
+// of their decoded bytes (the strict decoders still skip CR and LF), so
+// each credential has exactly one text form and the uniqueness check
+// compares canonical strings (T-02-77).
 func (c Credential) validate() error {
 	id, err := base64.RawURLEncoding.Strict().DecodeString(c.ID)
-	if err != nil || len(id) == 0 || len(id) > maxCredentialID {
+	if err != nil || len(id) == 0 || len(id) > maxCredentialID || base64.RawURLEncoding.EncodeToString(id) != c.ID {
 		return fmt.Errorf("%w: credential id %q is not 1 to %d bytes of unpadded base64url", ErrInvalid, c.ID, maxCredentialID)
 	}
 	switch c.Alg {
@@ -344,7 +345,7 @@ func (c Credential) validate() error {
 		return fmt.Errorf("%w: credential %s: algorithm %d (want -7, -8 or -257)", ErrInvalid, c.ID, c.Alg)
 	}
 	spki, err := base64.StdEncoding.Strict().DecodeString(c.SPKI)
-	if err != nil || len(spki) == 0 {
+	if err != nil || len(spki) == 0 || base64.StdEncoding.EncodeToString(spki) != c.SPKI {
 		return fmt.Errorf("%w: credential %s: spki is not standard base64", ErrInvalid, c.ID)
 	}
 	if _, err := webauthn.ParsePublicKey(c.Alg, spki); err != nil {
