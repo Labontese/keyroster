@@ -177,7 +177,13 @@ must not be presented as working.
   certificate, both were gone after the lifetime, and the agent exited by
   itself.
 - **Pipe-squatting guard:** before keyroster sends a key, `VerifyServerOwner`
-  checks that the pipe's server process runs as the caller's SID. The pipe's
+  checks that the pipe's server process runs as the caller's SID, at Medium
+  integrity or above (which also excludes AppContainers, always Low), and
+  without a restricted token. Sandboxed processes of the same user can create
+  the pipe while no agent runs; `low_integrity_squatter_refused` and
+  `restricted_squatter_refused` run such a squatter (Low integrity; restricted
+  token at Medium) on Daniel-PC and check that it gets no key. No AppContainer
+  squatter was run. The pipe's
   DACL grants only that SID and denies network logons, and a second agent or
   another process cannot create the pipe while it exists. The SID comparison
   (`checkOwner` with LocalSystem) and the fail-closed path are unit-tested.

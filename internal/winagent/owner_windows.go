@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -31,8 +32,10 @@ func unverifiable(step string, err error) error {
 }
 
 // VerifyServerOwner checks that the process serving the named pipe behind
-// conn runs as the current user (pipe-squatting guard, T-02-07). It fails
-// closed: any error means the caller must not send a key on conn.
+// conn runs as the current user, at Medium integrity or above, and without a
+// restricted token (pipe-squatting guard, T-02-07): a sandboxed process of
+// the same user can create the pipe while no agent runs. It fails closed:
+// any error means the caller must not send a key on conn.
 func VerifyServerOwner(conn net.Conn) error {
 	fc, ok := conn.(interface{ Fd() uintptr })
 	if !ok {
@@ -61,7 +64,50 @@ func VerifyServerOwner(conn net.Conn) error {
 	if err != nil {
 		return fmt.Errorf("verify agent pipe owner: read server process user: %w", err)
 	}
-	return checkOwner(tu.User.Sid, me)
+	if err := checkOwner(tu.User.Sid, me); err != nil {
+		return err
+	}
+	if err := checkIntegrity(tok); err != nil {
+		return err
+	}
+	// A restricted token (a sandbox that keeps Medium integrity) can create
+	// the pipe as well.
+	restricted, err := tok.IsRestricted()
+	if err != nil {
+		return fmt.Errorf("verify agent pipe owner: read server token restriction: %w", err)
+	}
+	if restricted {
+		return errors.New("agent pipe is served by a process of the current user with a restricted token (a sandboxed process); refusing to send a key to it")
+	}
+	return nil
+}
+
+// mediumIntegrityRID is SECURITY_MANDATORY_MEDIUM_RID, the integrity level of
+// a normal shell and of the agent it starts.
+const mediumIntegrityRID = 0x2000
+
+// checkIntegrity refuses a server below Medium integrity: a sandboxed process
+// of the same user (Low integrity, which includes every AppContainer) can
+// create the pipe while no agent runs, and would pass the SID check. The bar
+// is Medium, not the caller's level, so an elevated client still accepts the
+// agent of a normal shell.
+func checkIntegrity(tok windows.Token) error {
+	n := uint32(64)
+	for {
+		buf := make([]byte, n)
+		err := windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, &buf[0], n, &n)
+		if errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("verify agent pipe owner: read server integrity level: %w", err)
+		}
+		il := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buf[0])).Label.Sid //nolint:gosec // G103: GetTokenInformation fills buf with a TOKEN_MANDATORY_LABEL
+		if c := il.SubAuthorityCount(); c == 0 || il.SubAuthority(uint32(c-1)) < mediumIntegrityRID {
+			return fmt.Errorf("agent pipe is served by a process of the current user at integrity level %s, below Medium (a sandboxed or low-integrity process); refusing to send a key to it", il.String())
+		}
+		return nil
+	}
 }
 
 // deniedServer handles a server process this process may not inspect. The

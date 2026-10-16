@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -32,6 +33,10 @@ import (
 var keyrosterExe string
 
 func TestMain(m *testing.M) {
+	// The test binary run as a squatter child (see startSquatter).
+	if path := os.Getenv(squatEnv); path != "" {
+		os.Exit(squat(path))
+	}
 	dir, err := os.MkdirTemp("", "winagent-test-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -47,6 +52,109 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// squatEnv names the pipe a squatter child serves.
+const squatEnv = "KEYROSTER_WINAGENT_TEST_SQUAT"
+
+// squat is the squatter child: it creates path with the agent's own DACL
+// and serves a working keyring on it until it is killed.
+func squat(path string) int {
+	me, err := currentSID()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	l, err := winio.ListenPipe(path, &winio.PipeConfig{SecurityDescriptor: SDDL(me.String())})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	keyring := agent.NewKeyring()
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return 1
+		}
+		go func() { _ = agent.ServeAgent(keyring, c); _ = c.Close() }()
+	}
+}
+
+// startSquatter runs this test binary as a squatter child under tok on a
+// fresh test pipe, waits for the pipe and returns its path. The child is
+// killed at test end.
+func startSquatter(t *testing.T, tok windows.Token) string {
+	t.Helper()
+	path := testPipe(t)
+	cmd := exec.Command(os.Args[0]) //nolint:gosec // G204: the test binary itself, run as a squatter child
+	cmd.Env = append(os.Environ(), squatEnv+"="+path)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(tok)}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitForPipe(t, path)
+	return path
+}
+
+// tokenAtIntegrity returns a primary copy of this process's token with its
+// integrity level set to il (lowering needs no privilege).
+func tokenAtIntegrity(t *testing.T, il string) windows.Token {
+	t.Helper()
+	ilSID, err := windows.StringToSid(il)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT|windows.TOKEN_ASSIGN_PRIMARY, &tok); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tok.Close() }()
+	var dup windows.Token
+	if err := windows.DuplicateTokenEx(tok, 0, nil, windows.SecurityImpersonation, windows.TokenPrimary, &dup); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dup.Close() })
+	tml := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: ilSID, Attributes: windows.SE_GROUP_INTEGRITY}}
+	if err := windows.SetTokenInformation(dup, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&tml)), tml.Size()); err != nil { //nolint:gosec // G103: SetTokenInformation takes the label struct as a byte pointer
+		t.Fatal(err)
+	}
+	return dup
+}
+
+// restrictedToken returns a restricted primary copy of this process's token
+// (CreateRestrictedToken, which x/sys/windows does not wrap). Its restricting
+// SIDs are the user and the usual interactive groups, enough for the child to
+// start and create a pipe.
+func restrictedToken(t *testing.T) windows.Token {
+	t.Helper()
+	var tok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT|windows.TOKEN_ASSIGN_PRIMARY, &tok); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tok.Close() }()
+	me, err := currentSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restrict := []windows.SIDAndAttributes{{Sid: me}}
+	for _, s := range []string{"S-1-1-0", "S-1-5-32-545", "S-1-5-11", "S-1-5-4"} {
+		sid, err := windows.StringToSid(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restrict = append(restrict, windows.SIDAndAttributes{Sid: sid})
+	}
+	var out windows.Token
+	r, _, err := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken").Call(
+		uintptr(tok), 0, 0, 0, 0, 0, uintptr(len(restrict)),
+		uintptr(unsafe.Pointer(&restrict[0])), //nolint:gosec // G103: CreateRestrictedToken takes a SID_AND_ATTRIBUTES array
+		uintptr(unsafe.Pointer(&out)))         //nolint:gosec // G103: out receives the new token handle
+	if r == 0 {
+		t.Fatalf("CreateRestrictedToken: %v", err)
+	}
+	t.Cleanup(func() { _ = out.Close() })
+	return out
 }
 
 // testPipe returns a fresh random pipe path that is not the account's agent
@@ -419,6 +527,42 @@ func TestAgent(t *testing.T) {
 			t.Fatalf("server process not readable: error %q does not name the pipe owner %s as another account", err, owner)
 		}
 		t.Logf("server process not readable (normal shell): %v", err)
+	})
+
+	t.Run("low_integrity_squatter_refused", func(t *testing.T) {
+		// A sandboxed (Low integrity) process of the same user that took the
+		// pipe name while no agent ran must not get the login key.
+		low := startSquatter(t, tokenAtIntegrity(t, "S-1-16-4096"))
+		conn, err := ensure(context.Background(), low, noStart(t), VerifyServerOwner)
+		if conn != nil || err == nil || !strings.Contains(err.Error(), "S-1-16-4096") {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			t.Fatalf("ensure on a Low-integrity squatter = %v, %v; want a refusal naming its integrity level", conn, err)
+		}
+		t.Logf("refused: %v", err)
+
+		// Control: the same child at Medium integrity is accepted.
+		medium := startSquatter(t, tokenAtIntegrity(t, "S-1-16-8192"))
+		conn, err = ensure(context.Background(), medium, noStart(t), VerifyServerOwner)
+		if err != nil {
+			t.Fatalf("control: ensure on a Medium-integrity server of our own: %v", err)
+		}
+		_ = conn.Close()
+	})
+
+	t.Run("restricted_squatter_refused", func(t *testing.T) {
+		// A same-user process with a restricted token (a sandbox at Medium
+		// integrity) can create the pipe as well and must be refused.
+		path := startSquatter(t, restrictedToken(t))
+		conn, err := ensure(context.Background(), path, noStart(t), VerifyServerOwner)
+		if conn != nil || err == nil || !strings.Contains(err.Error(), "restricted token") {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			t.Fatalf("ensure on a restricted-token squatter = %v, %v; want a refusal naming the restricted token", conn, err)
+		}
+		t.Logf("refused: %v", err)
 	})
 
 	t.Run("dial_access_denied_names_both_causes", func(t *testing.T) {
