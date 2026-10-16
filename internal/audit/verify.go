@@ -385,6 +385,11 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
+			if kid.Roles != nil {
+				// The admin path issues kr1 key IDs; kr2 is the login
+				// path's, which an issue leaf must not pass itself off as.
+				return nil, fmt.Errorf("audit: entry %d: an issue entry must carry a kr1 key ID, not kr2", want)
+			}
 			if err := trustState.checkIssue(body, c, kid, leaf.TimeMicros); err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
