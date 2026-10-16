@@ -183,8 +183,7 @@ must not be presented as working.
   the pipe while no agent runs; `low_integrity_squatter_refused` and
   `restricted_squatter_refused` run such a squatter (Low integrity; restricted
   token at Medium) on Daniel-PC and check that it gets no key. No AppContainer
-  squatter was run. The pipe's
-  DACL grants only that SID and denies network logons, and a second agent or
+  squatter was run. The pipe's DACL grants only that SID and denies network logons, and a second agent or
   another process cannot create the pipe while it exists. The SID comparison
   (`checkOwner` with LocalSystem) and the fail-closed path are unit-tested.
   `foreign_pipe_refused` runs `VerifyServerOwner` end to end on the EventLog
@@ -192,8 +191,10 @@ must not be presented as working.
   be opened, so it exercises only the access-denied branch, which names the
   pipe's owner (`S-1-5-19`) as another account. The branch that reads a
   foreign server's token and refuses its SID runs only where that token is
-  readable, as on the elevated `cli-windows` runner; it has not run on
-  Daniel-PC.
+  readable. It is **UNVERIFIED**: it has not run on Daniel-PC, and a green
+  `cli-windows` run cannot show it either, because that job runs `go test`
+  without `-v` and a passing test's "server token readable" log line is not
+  printed (the elevated runner may also be denied that token).
 - **Residual risk (T-02-07), inbox OpenSSH clients:** the owner check guards
   only keyroster's own connection. The inbox `ssh.exe` and `ssh-add.exe` do
   not check who serves a pipe (the 02-02 pre-merge review found no reference
