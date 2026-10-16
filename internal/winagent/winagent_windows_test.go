@@ -124,8 +124,8 @@ func tokenAtIntegrity(t *testing.T, il string) windows.Token {
 
 // restrictedToken returns a restricted primary copy of this process's token
 // (CreateRestrictedToken, which x/sys/windows does not wrap). Its restricting
-// SIDs are the user and the usual interactive groups, enough for the child to
-// start and create a pipe.
+// SIDs are the user and the token's own enabled groups (logon SID included),
+// so the child can start and create a pipe in any kind of session.
 func restrictedToken(t *testing.T) windows.Token {
 	t.Helper()
 	var tok windows.Token
@@ -137,13 +137,15 @@ func restrictedToken(t *testing.T) windows.Token {
 	if err != nil {
 		t.Fatal(err)
 	}
+	groups, err := tok.GetTokenGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
 	restrict := []windows.SIDAndAttributes{{Sid: me}}
-	for _, s := range []string{"S-1-1-0", "S-1-5-32-545", "S-1-5-11", "S-1-5-4"} {
-		sid, err := windows.StringToSid(s)
-		if err != nil {
-			t.Fatal(err)
+	for _, g := range groups.AllGroups() {
+		if g.Attributes&windows.SE_GROUP_ENABLED != 0 && g.Attributes&windows.SE_GROUP_INTEGRITY == 0 {
+			restrict = append(restrict, windows.SIDAndAttributes{Sid: g.Sid})
 		}
-		restrict = append(restrict, windows.SIDAndAttributes{Sid: sid})
 	}
 	var out windows.Token
 	r, _, err := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken").Call(
