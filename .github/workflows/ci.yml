@@ -55,8 +55,9 @@ jobs:
   # PLAT-05: the CLI on Windows and macOS. Not required checks yet: a new
   # required check must run green on main first, and the owner applies the
   # ruleset (Pitfall 10/11); 02-14 adds both to main-integrity.
-  # cli-windows runs keyroster agent against the inbox OpenSSH client when
-  # the runner image has it, and then requires it (KEYROSTER_REQUIRE_INBOX_SSH).
+  # cli-windows runs keyroster agent against the inbox OpenSSH client and
+  # requires it: KEYROSTER_REQUIRE_INBOX_SSH=1 turns a missing ssh.exe into a
+  # failure of TestInboxSSHOffersAgentCert instead of a skip.
   cli-windows:
     name: cli-windows
     runs-on: windows-2025
@@ -69,17 +70,18 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Detect the inbox OpenSSH client
+      - name: Show the inbox OpenSSH client
         shell: bash
         run: |
           if [ -f /c/Windows/System32/OpenSSH/ssh.exe ]; then
             echo "inbox ssh.exe present: $(/c/Windows/System32/OpenSSH/ssh.exe -V 2>&1)"
-            echo "KEYROSTER_REQUIRE_INBOX_SSH=1" >> "$GITHUB_ENV"
           else
-            echo "inbox ssh.exe absent; TestInboxSSHOffersAgentCert will skip"
+            echo "inbox ssh.exe absent; TestInboxSSHOffersAgentCert will fail"
           fi
       - name: Test
         shell: bash
+        env:
+          KEYROSTER_REQUIRE_INBOX_SSH: "1"
         run: go test -count=1 ./cmd/keyroster/... ./internal/winagent/... ./internal/webauthn/... ./internal/wire/... ./internal/trust/... ./internal/sshsig/... ./internal/directory/...
 
   cli-macos:
