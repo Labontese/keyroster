@@ -1,10 +1,12 @@
 package webauthn_test
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -91,6 +93,15 @@ func TestWebAuthnClientData(t *testing.T) {
 	cdj := string(auth.Assert(testRP, testOrigin, testChallenge).ClientDataJSON)
 	b64 := cdj[strings.Index(cdj, `"challenge":"`)+len(`"challenge":"`):]
 	b64 = b64[:strings.Index(b64, `"`)]
+	// The 43rd character of a 32-byte challenge carries two unused low
+	// bits. Setting one gives another text for the same bytes, which only
+	// the strict decoding refuses.
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := strings.IndexByte(alphabet, b64[len(b64)-1])
+	nonCanonical := b64[:len(b64)-1] + string(alphabet[last^1])
+	if lax, err := base64.RawURLEncoding.DecodeString(nonCanonical); err != nil || !bytes.Equal(lax, testChallenge[:]) {
+		t.Fatalf("lax decode of the non-canonical challenge = %x, %v; want the challenge bytes", lax, err)
+	}
 	for _, tc := range []struct {
 		name string
 		cd   string
@@ -106,6 +117,7 @@ func TestWebAuthnClientData(t *testing.T) {
 		{"cross_origin_true", `{"type":"webauthn.get","challenge":"` + b64 + `","origin":"` + testOrigin + `","crossOrigin":true}`, webauthn.ErrCrossOrigin},
 		{"top_origin_present", `{"type":"webauthn.get","challenge":"` + b64 + `","origin":"` + testOrigin + `","topOrigin":"https://x.example"}`, webauthn.ErrCrossOrigin},
 		{"padded_challenge", `{"type":"webauthn.get","challenge":"` + b64 + `=","origin":"` + testOrigin + `"}`, webauthn.ErrChallenge},
+		{"non_canonical_challenge", `{"type":"webauthn.get","challenge":"` + nonCanonical + `","origin":"` + testOrigin + `"}`, webauthn.ErrChallenge},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := auth.Assert(testRP, testOrigin, testChallenge, webauthntest.WithClientDataJSON([]byte(tc.cd)))
