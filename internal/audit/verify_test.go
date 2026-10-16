@@ -496,6 +496,19 @@ func TestVerifyChecksCertificates(t *testing.T) {
 			}
 			f.add(tlog.KindIssue, b)
 		}, "key ID"},
+		// The admin path issues kr1; a kr2 (login) key ID on an issue
+		// leaf would pass an admin issuance off as a passkey login.
+		{"issue_with_kr2_key_id", func(t *testing.T, f *fixture) {
+			f.serial++
+			c := f.newCert(f.serial, issuedAt(f.serial))
+			kid, err := cert.ParseKeyID(c.KeyId)
+			if err != nil {
+				t.Fatal(err)
+			}
+			kid.Directory, kid.Roles = 1, []string{"ops"}
+			c.KeyId = kid.String()
+			f.add(tlog.KindIssue, issueBody(t, forgeCert(t, c, f.ca, f.ca.PublicKey()), f.serial))
+		}, "kr1"},
 		{"leaf_key_id_differs", func(t *testing.T, f *fixture) {
 			f.serial++
 			c := f.newCert(f.serial, issuedAt(f.serial))

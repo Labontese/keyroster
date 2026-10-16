@@ -119,6 +119,21 @@ func TestValidate(t *testing.T) {
 		{"duplicate_credential_across_users", func(d *Directory) {
 			d.Users = append(d.Users, User{Name: "bob", Status: StatusActive, Credentials: []Credential{d.Users[0].Credentials[0]}})
 		}},
+		// The decoders skip CR and LF even in strict mode, so these are
+		// second text forms of the same bytes (T-02-77).
+		{"credential_id_with_newline", func(d *Directory) {
+			id := d.Users[0].Credentials[0].ID
+			d.Users[0].Credentials[0].ID = id[:4] + "\n" + id[4:]
+		}},
+		{"duplicate_credential_across_users_newline_variant", func(d *Directory) {
+			c := d.Users[0].Credentials[0]
+			c.ID = c.ID[:4] + "\r\n" + c.ID[4:]
+			d.Users = append(d.Users, User{Name: "bob", Status: StatusActive, Credentials: []Credential{c}})
+		}},
+		{"credential_spki_with_newline", func(d *Directory) {
+			spki := d.Users[0].Credentials[0].SPKI
+			d.Users[0].Credentials[0].SPKI = spki[:8] + "\n" + spki[8:]
+		}},
 		{"active_user_without_credentials", func(d *Directory) { d.Users[0].Credentials = []Credential{} }},
 		{"unknown_role_referenced", func(d *Directory) { d.HostGroups[0].Accounts[0].Roles = []string{"nope"} }},
 		{"unknown_group_referenced", func(d *Directory) { d.Roles[0].Groups = []string{"nope"} }},
@@ -268,6 +283,15 @@ func TestVerifySignatures(t *testing.T) {
 func TestCheckSuccessor(t *testing.T) {
 	v1 := fixture(t)
 	raw1 := mustCanonical(t, v1)
+	// An installed v1 that no longer parses (here: a role TTL below the
+	// minimum, as if a later release tightened Validate) still has a
+	// version and a SHA-256, which is all the chain rule needs.
+	stale := fixture(t)
+	stale.Roles[0].MaxTTLSeconds = MinRoleTTLSeconds - 1
+	rawStale := mustCanonical(t, stale)
+	if _, err := Parse(rawStale); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("the stale directory parses (%v); the case would test nothing", err)
+	}
 	next := func(version uint64, prev string) *Directory {
 		d := fixture(t)
 		d.Version, d.Prev = version, prev
@@ -285,6 +309,9 @@ func TestCheckSuccessor(t *testing.T) {
 		{"wrong_prev", raw1, next(2, trust.SHA256Hex([]byte("other"))), ErrChain},
 		{"v3_after_v1", raw1, next(3, trust.SHA256Hex(raw1)), ErrChain},
 		{"v1_again", raw1, v1, ErrChain},
+		{"v2_after_unparsable_installed", rawStale, next(2, trust.SHA256Hex(rawStale)), nil},
+		{"v3_after_unparsable_installed", rawStale, next(3, trust.SHA256Hex(rawStale)), ErrChain},
+		{"wrong_prev_after_unparsable_installed", rawStale, next(2, trust.SHA256Hex(raw1)), ErrChain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckSuccessor(tc.installed, tc.next)

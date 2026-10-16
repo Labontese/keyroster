@@ -1,6 +1,7 @@
 package directory
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 
@@ -39,7 +40,9 @@ func VerifySignatures(doc, sigs []byte, pol *trust.Policy) ([]string, error) {
 // CheckSuccessor checks that next may follow the installed directory's
 // canonical bytes (nil when none is installed): version 1 with the all-zero
 // prev first, then the installed version + 1 with prev = SHA-256 of the
-// installed bytes. Anything else is ErrChain.
+// installed bytes. Anything else is ErrChain. Only the version is read
+// from installed, which is not re-validated: a directory that fails
+// today's rules must not block installing its successor.
 func CheckSuccessor(installed []byte, next *Directory) error {
 	if installed == nil {
 		if next.Version != 1 || next.Prev != trust.GenesisPrev {
@@ -47,9 +50,11 @@ func CheckSuccessor(installed []byte, next *Directory) error {
 		}
 		return nil
 	}
-	cur, err := Parse(installed)
-	if err != nil {
-		return fmt.Errorf("%w: installed directory: %w", ErrChain, err)
+	var cur struct {
+		Version uint64 `json:"version"`
+	}
+	if err := json.Unmarshal(installed, &cur); err != nil || cur.Version < 1 {
+		return fmt.Errorf("%w: the installed directory has no readable version", ErrChain)
 	}
 	if next.Version != cur.Version+1 {
 		return fmt.Errorf("%w: version %d does not follow the installed version %d", ErrChain, next.Version, cur.Version)
