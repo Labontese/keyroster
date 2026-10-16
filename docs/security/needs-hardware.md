@@ -194,6 +194,20 @@ must not be presented as working.
   foreign server's token and refuses its SID runs only where that token is
   readable, as on the elevated `cli-windows` runner; it has not run on
   Daniel-PC.
+- **Residual risk (T-02-07), inbox OpenSSH clients:** the owner check guards
+  only keyroster's own connection. The inbox `ssh.exe` and `ssh-add.exe` do
+  not check who serves a pipe (the 02-02 pre-merge review found no reference
+  to `GetNamedPipeServerProcessId` or `GetSecurityInfo` in either
+  `OpenSSH_for_Windows_9.5p2` binary). The pipe name is derived from the user's SID,
+  which is not secret, and is free whenever no agent runs, which is most of
+  the time: the agent exits when its last key expires. A persistent
+  `IdentityAgent` line or `$env:SSH_AUTH_SOCK` therefore points the inbox
+  clients at a name that another local account's process can create between
+  logins. Such a process sees every signing request, chooses which keys are
+  offered, and receives any key added with `ssh-add` or `AddKeysToAgent`.
+  `keyroster agent` warns against `ssh-add` and `AddKeysToAgent` on the pipe.
+  Whether to keep advising the persistent settings is an open owner decision
+  (02-02 pre-merge review).
 - **runas and elevated shells:** each Windows account, including one reached
   through `runas`, gets its own agent on its own per-SID pipe. An agent
   started from an elevated ("Run as administrator") shell cannot be used from

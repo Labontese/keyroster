@@ -123,6 +123,9 @@ func TestInboxSSHOffersAgentCert(t *testing.T) {
 	if !strings.Contains(agentOut.String(), "IdentityAgent "+sockPath) {
 		t.Fatalf("agent output does not print the IdentityAgent line:\n%s", agentOut.String())
 	}
+	if !strings.Contains(agentOut.String(), "do not use ssh-add or AddKeysToAgent with this pipe") {
+		t.Fatalf("agent output does not warn against ssh-add on the pipe:\n%s", agentOut.String())
+	}
 }
 
 // writeKeyFiles writes a fresh key, its public key and a user certificate

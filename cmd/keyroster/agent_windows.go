@@ -34,6 +34,11 @@ Point the Windows OpenSSH client at it in one of two ways:
   PowerShell:     $env:SSH_AUTH_SOCK = '//./pipe/keyroster-agent-<your SID>'
 (Use forward slashes: OpenSSH reads backslashes in IdentityAgent as escapes.)
 
+Only keyroster login adds keys to this agent. Do not add keys to the pipe
+with ssh-add or AddKeysToAgent: the Windows OpenSSH tools do not check who
+serves it, and while no keyroster agent runs (between logins) a process of
+another local account can create a pipe with this name.
+
 Each Windows account, including one reached through runas, gets its own agent
 on its own per-SID pipe. An agent started from an elevated ("Run as
 administrator") shell cannot be used from a normal shell: keyroster refuses
@@ -58,6 +63,6 @@ func runAgent(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	}
 	ssh := winagent.OpenSSHSpelling(path)
 	// When keyroster login starts the agent detached, stdout is discarded.
-	_, _ = fmt.Fprintf(stdout, "keyroster agent: serving %s\n\nTo use it, add this line to ~/.ssh/config:\n  IdentityAgent %s\nor set it in PowerShell:\n  $env:SSH_AUTH_SOCK = '%s'\n", path, ssh, ssh)
+	_, _ = fmt.Fprintf(stdout, "keyroster agent: serving %s\n\nTo use it, add this line to ~/.ssh/config:\n  IdentityAgent %s\nor set it in PowerShell:\n  $env:SSH_AUTH_SOCK = '%s'\n\nOnly keyroster login adds keys here: do not use ssh-add or AddKeysToAgent with this pipe (see keyroster agent -h).\n", path, ssh, ssh)
 	return winagent.Serve(ctx, path, winagent.Options{})
 }
