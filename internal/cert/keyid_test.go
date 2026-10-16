@@ -177,13 +177,26 @@ func TestKeyIDKr2(t *testing.T) {
 		{"missing_dir", "kr2/ca=user/sub=alice/req=" + r + "/pol=1/roles=ops/ser=1"},
 		{"leading_zero_dir", "kr2/ca=user/sub=alice/req=" + r + "/pol=1/dir=01/roles=ops/ser=1"},
 		{"kr1_with_dir", "kr1/ca=user/sub=alice/req=" + r + "/pol=1/dir=1/ser=1"},
-		{"over_1024_bytes", "kr2/ca=user/sub=alice/req=" + r + "/pol=1/dir=1/roles=" + strings.Repeat("a", 1000) + "/ser=1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := ParseKeyID(tc.in); !errors.Is(err, ErrKeyID) {
 				t.Fatalf("ParseKeyID(%q) = %v, want ErrKeyID", tc.in, err)
 			}
 		})
+	}
+
+	// The length cap is checked before anything else. No key ID that is
+	// otherwise valid reaches 1024 bytes (the longest kr2 is about 730), so
+	// the cap is pinned by its error text: 1025 bytes hit it, 1024 do not.
+	long := func(n int) string {
+		s := pre + "ops/ser=1"
+		return s + strings.Repeat("x", n-len(s))
+	}
+	if _, err := ParseKeyID(long(MaxKeyIDLen + 1)); !errors.Is(err, ErrKeyID) || !strings.Contains(err.Error(), "longer than 1024 bytes") {
+		t.Fatalf("ParseKeyID of %d bytes = %v, want the length limit", MaxKeyIDLen+1, err)
+	}
+	if _, err := ParseKeyID(long(MaxKeyIDLen)); !errors.Is(err, ErrKeyID) || strings.Contains(err.Error(), "longer than") {
+		t.Fatalf("ParseKeyID of %d bytes = %v, want a refusal other than the length limit", MaxKeyIDLen, err)
 	}
 }
 
