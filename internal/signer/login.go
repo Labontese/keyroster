@@ -69,14 +69,21 @@ func (s *Signer) LoginIssue(ctx context.Context, peer Peer, req *wire.LoginIssue
 		return nil, refusalErr(wire.CodeRefused, "ttl_exceeds_role", nil)
 	}
 	extra := make(map[string]string, len(req.Extensions))
+	seen := make(map[string]bool, len(req.Extensions))
 	for _, e := range req.Extensions {
-		if _, dup := extra[e]; dup {
+		if seen[e] {
 			return nil, refusalErr(wire.CodeRefused, "duplicate_extension", nil)
 		}
+		seen[e] = true
 		if !slices.Contains(grant.Extensions, e) {
 			return nil, refusalErr(wire.CodeRefused, "extension_not_allowed", nil)
 		}
-		extra[e] = ""
+		// A role may grant a profile default (directory.CheckPolicy);
+		// every certificate already carries those, and cert.Build takes
+		// only allowed extensions as extras.
+		if _, isDefault := profile.DefaultExtensions[e]; !isDefault {
+			extra[e] = ""
+		}
 	}
 	subject, err := ssh.ParsePublicKey(req.SubjectKey)
 	if err != nil {
