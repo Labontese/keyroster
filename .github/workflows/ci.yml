@@ -44,10 +44,61 @@ jobs:
       # ssh-keygen (preinstalled on the runner) is the SSHSIG oracle; with
       # KEYROSTER_REQUIRE_ORACLE=1 a missing ssh-keygen fails the oracle
       # tests instead of skipping them.
+      # KEYROSTER_REQUIRE_SSH_AGENT=1 does the same for ssh-agent in
+      # TestAgentLifetime (same openssh-client package as ssh-keygen).
       - name: Test (race detector)
         env:
           KEYROSTER_REQUIRE_ORACLE: "1"
+          KEYROSTER_REQUIRE_SSH_AGENT: "1"
         run: CGO_ENABLED=1 go test -race -count=1 ./...
+
+  # PLAT-05: the CLI on Windows and macOS. Not required checks yet: a new
+  # required check must run green on main first, and the owner applies the
+  # ruleset (Pitfall 10/11); 02-14 adds both to main-integrity.
+  # cli-windows runs keyroster agent against the inbox OpenSSH client when
+  # the runner image has it, and then requires it (KEYROSTER_REQUIRE_INBOX_SSH).
+  cli-windows:
+    name: cli-windows
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Detect the inbox OpenSSH client
+        shell: bash
+        run: |
+          if [ -f /c/Windows/System32/OpenSSH/ssh.exe ]; then
+            echo "inbox ssh.exe present: $(/c/Windows/System32/OpenSSH/ssh.exe -V 2>&1)"
+            echo "KEYROSTER_REQUIRE_INBOX_SSH=1" >> "$GITHUB_ENV"
+          else
+            echo "inbox ssh.exe absent; TestInboxSSHOffersAgentCert will skip"
+          fi
+      - name: Test
+        shell: bash
+        run: go test -count=1 ./cmd/keyroster/... ./internal/winagent/... ./internal/webauthn/... ./internal/wire/... ./internal/trust/... ./internal/sshsig/... ./internal/directory/...
+
+  cli-macos:
+    name: cli-macos
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # A missing ssh-agent fails TestAgentLifetime instead of skipping it.
+      - name: Test
+        env:
+          KEYROSTER_REQUIRE_SSH_AGENT: "1"
+        run: go test -count=1 ./cmd/keyroster/... ./internal/winagent/... ./internal/webauthn/... ./internal/wire/... ./internal/trust/... ./internal/sshsig/... ./internal/directory/...
 
   lint:
     name: lint

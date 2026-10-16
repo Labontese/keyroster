@@ -22,6 +22,8 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/sys/windows"
+
+	"github.com/Labontese/keyroster/internal/cert"
 )
 
 // keyrosterExe is a keyroster.exe built from this tree by TestMain, for the
@@ -127,8 +129,10 @@ func requireAccountPipeFree(t *testing.T) string {
 	return path
 }
 
-// testKey returns a fresh Ed25519 key and a user certificate for it.
-func testKey(t *testing.T, keyID string) (ed25519.PrivateKey, *ssh.Certificate) {
+// testKey returns a fresh Ed25519 key and a user certificate for it, issued
+// by a throwaway CA through internal/cert.Build (the module's only signing
+// call site) with key ID subject u:<name>.
+func testKey(t *testing.T, name string) (ed25519.PrivateKey, *ssh.Certificate) {
 	t.Helper()
 	_, caPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -146,18 +150,19 @@ func testKey(t *testing.T, keyID string) (ed25519.PrivateKey, *ssh.Certificate) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now()
-	cert := &ssh.Certificate{
-		Key: sshPub, Serial: 1, CertType: ssh.UserCert, KeyId: keyID,
-		ValidPrincipals: []string{"probe"},
-		ValidAfter:      uint64(now.Add(-time.Minute).Unix()), //nolint:gosec // G115: positive Unix time
-		ValidBefore:     uint64(now.Add(10 * time.Minute).Unix()),
-	}
-	//nolint:forbidigo // test fixture: a throwaway CA so ssh-add.exe and the SSH server can parse the certificate; no keyroster certificate is minted here
-	if err := cert.SignCert(rand.Reader, caSigner); err != nil {
+	c, err := cert.Build(cert.Request{
+		Profile:    cert.DefaultUserProfile(),
+		Subject:    sshPub,
+		Principals: []string{"probe"},
+		Now:        time.Now(),
+		ValidFor:   10 * time.Minute,
+		KeyID:      cert.KeyID{CA: "user", Subject: "u:" + name, Request: "0123456789abcdef0123456789abcdef", Serial: 1},
+		Serial:     1,
+	}, caSigner, rand.Reader)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return priv, cert
+	return priv, c
 }
 
 // addKeyAndCert adds priv and its certificate, both with lifetime secs.

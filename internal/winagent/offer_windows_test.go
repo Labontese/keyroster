@@ -81,7 +81,7 @@ func TestInboxSSHOffersAgentCert(t *testing.T) {
 
 	// 2. Load key and certificate with the inbox ssh-add.exe.
 	dir := t.TempDir()
-	keyPath := writeKeyFiles(t, dir)
+	keyPath, keyID := writeKeyFiles(t, dir)
 	env := envWithAgent("SSH_AUTH_SOCK=" + sockPath)
 	out := inbox(t, env, "ssh-add.exe", "-t", "4", keyPath)
 	added := time.Now()
@@ -100,7 +100,7 @@ func TestInboxSSHOffersAgentCert(t *testing.T) {
 			"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile="+filepath.Join(dir, "known_hosts"),
 			"-p", port, "probe@127.0.0.1", "exit")
 	})
-	if !containsOffer(offers, "ssh-ed25519-cert-v01@openssh.com keyid=offer-test") {
+	if !containsOffer(offers, "ssh-ed25519-cert-v01@openssh.com keyid="+keyID) {
 		t.Fatalf("server saw offers %q, want the agent's certificate", offers)
 	}
 
@@ -126,12 +126,13 @@ func TestInboxSSHOffersAgentCert(t *testing.T) {
 }
 
 // writeKeyFiles writes a fresh key, its public key and a user certificate
-// (key ID offer-test) as OpenSSH files and returns the private key path. The
+// as OpenSSH files and returns the private key path and the certificate's
+// key ID. The
 // files get an owner-only protected DACL: Windows OpenSSH refuses a private
 // key file that inherits wider access ("UNPROTECTED PRIVATE KEY FILE").
-func writeKeyFiles(t *testing.T, dir string) string {
+func writeKeyFiles(t *testing.T, dir string) (string, string) {
 	t.Helper()
-	priv, cert := testKey(t, "offer-test")
+	priv, cert := testKey(t, "offertest")
 	keyPath := filepath.Join(dir, "id_test")
 	blk, err := ssh.MarshalPrivateKey(priv, "offer-test-key")
 	if err != nil {
@@ -163,7 +164,7 @@ func writeKeyFiles(t *testing.T, dir string) string {
 			t.Fatal(err)
 		}
 	}
-	return keyPath
+	return keyPath, cert.KeyId
 }
 
 // envWithAgent returns the environment with SSH_AUTH_SOCK replaced by kv.

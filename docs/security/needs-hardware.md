@@ -155,6 +155,51 @@ CI ([custody.md](custody.md)).
       `tpm2_encodeobject` and selected with `ca-init --key` is refused
       ("not generated inside this TPM").
 
+## Platform verification (D-16)
+
+What has and has not been run for the login agent on each client platform
+(Phase 2, plan 02-02). Anything marked UNVERIFIED has not been exercised and
+must not be presented as working.
+
+- **Windows: verified on Daniel-PC** (Windows 11, inbox
+  `OpenSSH_for_Windows_9.5p2`). Login keys go to `keyroster agent`, keyroster's
+  own in-memory agent (owner decision D-15 option A), never to the inbox
+  `ssh-agent` service, which refuses lifetime constraints and stores keys in the
+  registry. The inbox `ssh.exe` and `ssh-add.exe` reach a named-pipe agent
+  only in the spelling `//./pipe/<name>` in `IdentityAgent` (the `-o` option
+  and `~/.ssh/config`). `\\.\pipe\<name>` in `IdentityAgent` fails with "No
+  such file or directory", because OpenSSH reads the backslashes as escapes.
+  `SSH_AUTH_SOCK` accepts both spellings. The evidence:
+  `TestInboxSSHOffersAgentCert` and the `ensure_starts_real_agent` case each
+  ran a freshly built `keyroster.exe` on the account's own per-SID pipe,
+  `\\.\pipe\keyroster-agent-<SID>`, with no other keyroster agent running.
+  `ssh-add.exe -t 4` loaded the key and certificate, `ssh.exe` offered the
+  certificate, both were gone after the lifetime, and the agent exited by
+  itself.
+- **Pipe-squatting guard:** before keyroster sends a key, `VerifyServerOwner`
+  checks that the pipe's server process runs as the caller's SID. The pipe's
+  DACL grants only that SID and denies network logons, and a second agent or
+  another process cannot create the pipe while it exists. The refusal of a
+  foreign SID (LocalSystem) and the fail-closed path are unit-tested.
+- **runas and elevated shells:** each Windows account, including one reached
+  through `runas`, gets its own agent on its own per-SID pipe. An agent
+  started from an elevated ("Run as administrator") shell cannot be used from
+  a normal shell. keyroster refuses it with the "started elevated" guidance
+  (`ErrOwnerUnverifiable`); stop that agent or let it exit. The mapping is
+  unit-tested, but the elevated case itself is **UNVERIFIED**: no agent was
+  started from an elevated shell on Daniel-PC.
+- **GNOME gcr-ssh-agent (Ubuntu 26.04):** UNVERIFIED: A3 moved to 02-14. The
+  laptop was offline when 02-02 ran, so the lifetime and certificate probe has
+  not been run.
+- **Linux, OpenSSH ssh-agent:** `TestAgentLifetime` adds a key and certificate
+  with a 2 s lifetime to a real `ssh-agent` and checks that both are gone
+  after 3 s. It runs in `build-test`, where `KEYROSTER_REQUIRE_SSH_AGENT=1`
+  turns a missing `ssh-agent` into a failure.
+- **macOS:** the CLI unit tests and `TestAgentLifetime` run in CI (`cli-macos`),
+  where `KEYROSTER_REQUIRE_SSH_AGENT=1` makes a missing `ssh-agent` fail the
+  job instead of skipping the lifetime test. A browser and passkey login on
+  macOS is **UNVERIFIED**: there is no Mac in the homelab.
+
 ## Sign-off
 
 The Phase 6 review closes the `needs-hardware` issue only when every box above
