@@ -1,9 +1,11 @@
 package signerdb
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -134,6 +136,75 @@ func TestMigrations(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "schema version 99 is newer than this binary supports") {
 			t.Fatalf("Open error = %v, want the newer-schema refusal", err)
+		}
+	})
+	// upgrade_from_v3 builds a populated Phase 1 database (schema version 3,
+	// the first three migrations applied by direct SQL) and opens it: the
+	// 0004 directory migration applies, the directory table is empty, and
+	// the Phase 1 rows read back unchanged (T-02-78; the 02-13 homelab
+	// signer takes exactly this path).
+	t.Run("upgrade_from_v3", func(t *testing.T) {
+		if len(ms) < 4 || ms[3].name != "0004_directory.sql" {
+			t.Fatalf("want migration 4 to be 0004_directory.sql, have %d migrations", len(ms))
+		}
+		path := filepath.Join(t.TempDir(), "signer.db")
+		raw, err := sql.Open("sqlite", path+"?"+dsnParams)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range ms[:3] {
+			if _, err := raw.Exec(m.sql); err != nil {
+				t.Fatalf("apply %s: %v", m.name, err)
+			}
+			if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		reqID := bytes.Repeat([]byte{0x42}, 16)
+		if _, err := raw.Exec(`INSERT INTO issuance (serial, request_id, ca_role, key_id, cert, issued_at_us) VALUES (?, ?, ?, ?, ?, ?)`,
+			1700000000000001, reqID, "user", "kr1/key", []byte("cert"), 1700000000000002); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := raw.Exec(`INSERT INTO trust_bundle (version, bundle, bundle_sigs, policy, policy_sigs, installed_at_us) VALUES (?, ?, ?, ?, ?, ?)`,
+			1, []byte("bundle"), []byte("bsigs"), []byte("policy"), []byte("psigs"), 1700000000000003); err != nil {
+			t.Fatal(err)
+		}
+		var v int
+		if err := raw.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 3 {
+			t.Fatalf("Phase 1 database user_version = %d, %v; want 3", v, err)
+		}
+		if err := raw.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		d, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open of a version 3 database: %v", err)
+		}
+		defer func() { _ = d.Close() }()
+		if got := userVersion(t, d); got != len(ms) {
+			t.Fatalf("user_version after the upgrade = %d, want %d", got, len(ms))
+		}
+		var dirs int
+		if err := d.db.QueryRow(`SELECT count(*) FROM directory`).Scan(&dirs); err != nil || dirs != 0 {
+			t.Fatalf("directory rows after the upgrade = %d, %v; want an empty directory table", dirs, err)
+		}
+		if got, err := d.LatestDirectory(context.Background()); err != nil || got != nil {
+			t.Fatalf("LatestDirectory after the upgrade = %+v, %v; want none", got, err)
+		}
+		var (
+			serial          int64
+			gotReq, gotCert []byte
+			role, keyID     string
+		)
+		if err := d.db.QueryRow(`SELECT serial, request_id, ca_role, key_id, cert FROM issuance`).Scan(&serial, &gotReq, &role, &keyID, &gotCert); err != nil ||
+			serial != 1700000000000001 || !bytes.Equal(gotReq, reqID) || role != "user" || keyID != "kr1/key" || string(gotCert) != "cert" {
+			t.Fatalf("issuance row after the upgrade: %d %x %s %s %q, %v", serial, gotReq, role, keyID, gotCert, err)
+		}
+		b, err := d.LatestBundle(context.Background())
+		if err != nil || b.Version != 1 || string(b.Bundle) != "bundle" || string(b.BundleSigs) != "bsigs" ||
+			string(b.Policy) != "policy" || string(b.PolicySigs) != "psigs" || b.InstalledAt.UnixMicro() != 1700000000000003 {
+			t.Fatalf("trust_bundle row after the upgrade: %+v, %v", b, err)
 		}
 	})
 	t.Run("unusable_path", func(t *testing.T) {

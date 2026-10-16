@@ -6,8 +6,12 @@
 // The signer runs under a root-signed trust bundle (KEY-07): ca-init
 // chooses its five keys, install-bundle verifies the bundle and policy
 // against pinned roots, and serve takes every key and the issuance policy
-// from the installed bundle. Every request must carry admin-sshsig/v1
-// evidence from the policy's admins (D-13).
+// from the installed bundle. Every admin issue request must carry
+// admin-sshsig/v1 evidence from the policy's admins (D-13). A passkey
+// login request must carry one webauthn-assertion/v1 item that the signer
+// verifies itself against a credential the admin-signed directory binds,
+// and the signer computes its principals and TTL cap from that directory
+// (KEY-02, D-08); directory versions are installed online.
 //
 // Every issued certificate is appended to the Merkle audit log, with a new
 // signed checkpoint, in the same transaction as the issuance row and the
@@ -77,6 +81,7 @@ type Signer struct {
 	// log appends, each through its commit.
 	mu sync.Mutex
 	logState
+	directoryState
 	limiter *refusalLimiter // guarded by mu
 	// overloaded counts connections refused over capacity by the accept
 	// loop, which never takes mu; flushSummaries moves it into the limiter.
@@ -149,6 +154,12 @@ func New(cfg Config) (*Signer, error) {
 	}
 	// checkStoredTrust above saw only the installed bundle's roots.
 	if err := s.loaded.checkAdmins(ts.policy); err != nil {
+		return nil, err
+	}
+	// The installed directory comes last, after the trust and log checks.
+	// A directory that is not authorized under the policy in force does not
+	// stop the signer (the admin path needs none); logins are refused.
+	if err := s.loadDirectory(context.Background()); err != nil {
 		return nil, err
 	}
 	return s, nil

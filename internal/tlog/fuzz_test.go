@@ -12,19 +12,25 @@ import (
 // so does its kind-specific body.
 func FuzzDecodeLeaf(f *testing.F) {
 	issue, _ := issueVector(f)
+	dirInstall, dirBody := directoryInstallVector(f)
+	login, loginBody := loginIssueVector(f)
 	f.Add(EncodeLeaf(issue))
+	f.Add(EncodeLeaf(dirInstall))
+	f.Add(EncodeLeaf(login))
 	for _, b := range []interface{ Encode() ([]byte, error) }{
 		&RefusalBody{PeerUID: 1, Reason: ReasonMalformed, Detail: "malformed_frame"},
 		&RefusalSummaryBody{WindowEndMicros: 1, Counts: []ReasonCount{{ReasonPeerNotAllowed, 2}}},
 		&ClockRegressionBody{NowMicros: 1, HighWaterMicros: 2},
 		&CAInitBody{Keys: []CAInitKey{{Role: "log", PublicKey: []byte{1}, Alg: "a", Custody: "agent"}}},
 		&BundleInstallBody{BundleVersion: 1, Bundle: []byte{1}, BundleSigs: []byte{2}, Policy: []byte{3}, PolicySigs: []byte{4}},
+		dirBody,
+		loginBody,
 	} {
 		body, err := b.Encode()
 		if err != nil {
 			f.Fatal(err)
 		}
-		for k := KindIssue; k <= KindBundleInstall; k++ {
+		for k := KindIssue; k <= KindLoginIssue; k++ {
 			f.Add(EncodeLeaf(Leaf{Index: 1, TimeMicros: 2, Kind: k, Body: body}))
 		}
 	}
@@ -54,6 +60,10 @@ func FuzzDecodeLeaf(f *testing.F) {
 			body, err = DecodeCAInitBody(l.Body)
 		case KindBundleInstall:
 			body, err = DecodeBundleInstallBody(l.Body)
+		case KindDirectoryInstall:
+			body, err = DecodeDirectoryInstallBody(l.Body)
+		case KindLoginIssue:
+			body, err = DecodeLoginIssueBody(l.Body)
 		default:
 			t.Fatalf("DecodeLeaf accepted kind %d", l.Kind)
 		}

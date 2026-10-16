@@ -2,6 +2,7 @@ package signer
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -125,7 +126,10 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 }
 
 // handle serves one connection: peer check before reading anything, one
-// request frame, one response frame. Every refusal goes through refuse
+// request frame, one response frame. The message type selects the request
+// and its evidence path: an IssueRequest takes admin evidence only, a
+// LoginIssueRequest a WebAuthn assertion only (T-02-05), and an
+// InstallDirectory request the admins' directory signatures. Every refusal goes through refuse
 // (slog plus the rate-limited audit log, D-14).
 func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 	defer func() { _ = conn.Close() }()
@@ -147,27 +151,62 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_frame"))
 		return
 	}
-	if msgType != wire.TypeIssueRequest {
+	switch msgType {
+	case wire.TypeIssueRequest:
+		req, err := wire.ParseIssueRequest(body)
+		if err != nil {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		resp, refused := s.issueOrRefuse(ctx, peer, req)
+		if refused != nil {
+			s.reply(conn, refused)
+			return
+		}
+		s.respond(ctx, conn, peer, req.Digest(), wire.TypeIssueResponse, resp, resp.Serial)
+	case wire.TypeLoginIssueRequest:
+		req, err := wire.ParseLoginIssueRequest(body)
+		if err != nil {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		resp, refused := s.loginOrRefuse(ctx, peer, req)
+		if refused != nil {
+			s.reply(conn, refused)
+			return
+		}
+		s.respond(ctx, conn, peer, req.Digest(), wire.TypeIssueResponse, resp, resp.Serial)
+	case wire.TypeInstallDirectory:
+		req, err := wire.ParseInstallDirectoryRequest(body)
+		if err != nil {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		resp, refused := s.installDirectoryOrRefuse(ctx, peer, req)
+		if refused != nil {
+			s.reply(conn, refused)
+			return
+		}
+		s.respond(ctx, conn, peer, sha256.Sum256(req.Directory), wire.TypeInstallDirectoryResponse, resp, 0)
+	default:
 		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "unknown_message_type"))
-		return
 	}
-	req, err := wire.ParseIssueRequest(body)
-	if err != nil {
-		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
-		return
-	}
-	resp, refused := s.issueOrRefuse(ctx, peer, req)
-	if refused != nil {
-		s.reply(conn, refused)
-		return
-	}
+}
+
+// marshaler is a response body.
+type marshaler interface{ Marshal() ([]byte, error) }
+
+// respond sends a successful response of msgType. An encoding failure is
+// refused (and logged) with digest, the request's; serial is logged when
+// the response is not delivered (0 when it carries none).
+func (s *Signer) respond(ctx context.Context, conn *net.UnixConn, peer Peer, digest [32]byte, msgType byte, resp marshaler, serial uint64) {
 	out, err := resp.Marshal()
 	if err != nil {
-		s.reply(conn, s.refuse(ctx, peer, req.Digest(), tlog.ReasonInternal, "response_encoding"))
+		s.reply(conn, s.refuse(ctx, peer, digest, tlog.ReasonInternal, "response_encoding"))
 		return
 	}
-	if err := wire.WriteMessage(conn, wire.TypeIssueResponse, out); err != nil {
-		s.log.Warn("response not delivered", "uid", peer.UID, "pid", peer.PID, "serial", resp.Serial)
+	if err := wire.WriteMessage(conn, msgType, out); err != nil {
+		s.log.Warn("response not delivered", "uid", peer.UID, "pid", peer.PID, "serial", serial)
 	}
 }
 

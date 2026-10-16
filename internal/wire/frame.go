@@ -21,11 +21,16 @@ const MaxFrame = 64 << 10
 // Version is the protocol version byte at the start of every payload.
 const Version = 1
 
-// Message types.
+// Message types. A LoginIssueRequest is answered with an IssueResponse
+// (0x81). Until per-type frame caps exist (plan 02-03), an
+// InstallDirectory request must fit one MaxFrame frame.
 const (
-	TypeIssueRequest  byte = 0x01
-	TypeIssueResponse byte = 0x81
-	TypeError         byte = 0xFF
+	TypeIssueRequest             byte = 0x01
+	TypeInstallDirectory         byte = 0x02
+	TypeLoginIssueRequest        byte = 0x05
+	TypeIssueResponse            byte = 0x81
+	TypeInstallDirectoryResponse byte = 0x82
+	TypeError                    byte = 0xFF
 )
 
 // Framing errors.

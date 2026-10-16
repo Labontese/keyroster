@@ -307,7 +307,8 @@ func certTypeName(t uint32) string {
 // one the admins approved, can be verified from the log: a signer holding
 // the CA key can log an unauthorized issuance with any evidence and the
 // log still verifies. Without opts.Previous it cannot detect a log
-// rolled back to an earlier prefix either.
+// rolled back to an earlier prefix either. A leaf kind this version has no
+// check for is refused, never skipped.
 func Verify(r io.Reader, opts Options) (*Report, error) {
 	if len(opts.Pins) == 0 {
 		return nil, errors.New("audit: no pinned root fingerprints")
@@ -396,6 +397,13 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
 			rep.SummarizedRefusals += body.Total()
+		case tlog.KindRefusal, tlog.KindClockRegression, tlog.KindCAInit:
+			// No check beyond the strict decode DecodeLeaf already did.
+		default:
+			// A kind this version has no check for (directory_install and
+			// login_issue until plan 02-04, and any kind added later) is
+			// refused before it is hashed or counted, never skipped.
+			return nil, fmt.Errorf("audit: entry %d (%s): not verifiable by this version", want, leaf.Kind)
 		}
 		hash := tlog.HashLeaf(raw)
 		if err := tree.Append(hash); err != nil {

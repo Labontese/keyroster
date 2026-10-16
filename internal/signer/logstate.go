@@ -250,6 +250,15 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			}
 			issued.count++
 			issued.lastSerial = b.Serial
+		case tlog.KindLoginIssue:
+			// A login certificate shares the issuance table and the serial
+			// sequence with the admin path, so it counts the same way.
+			b, err := tlog.DecodeLoginIssueBody(l.Body)
+			if err != nil {
+				return fmt.Errorf("%w: leaf %d: login_issue body does not decode", errLogMismatch, idx)
+			}
+			issued.count++
+			issued.lastSerial = b.Serial
 		}
 		last = l.TimeMicros
 		hashes = append(hashes, hash)
@@ -291,20 +300,22 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	return tree, last, installs, nil
 }
 
-// issuedSummary is what the issue leaves of a log record about issuance.
+// issuedSummary is what the issue and login_issue leaves of a log record
+// about issuance, in log order: both kinds write an issuance row and raise
+// the one serial high-water mark.
 type issuedSummary struct {
-	count      uint64 // issue leaves
+	count      uint64 // issue and login_issue leaves
 	lastSerial uint64 // serial of the last one, 0 when there is none
 }
 
-// checkLogCovers compares a log of size entries whose issue leaves sum up
-// to issued with the tables that commit in the same transactions as its
+// checkLogCovers compares a log of size entries whose issue and
+// login_issue leaves sum up to issued with the tables that commit in the same transactions as its
 // leaves (snap, read from the same snapshot): ca-init writes the CA keys
 // with the first leaf, and every issuance writes its issuance row and the
-// serial high-water mark with its issue leaf, and nothing deletes them.
-// So the log is empty exactly when no CA keys are recorded, it has one
-// issue leaf per issuance row, and the last one carries the high-water
-// mark. This catches the log tables alone rolled back to an earlier
+// serial high-water mark with its issue or login_issue leaf, and nothing
+// deletes them. So the log is empty exactly when no CA keys are recorded,
+// it has one issue or login_issue leaf per issuance row, and the last one
+// carries the high-water mark. This catches the log tables alone rolled back to an earlier
 // signed prefix, or wiped. It cannot catch the whole database restored
 // from an older copy, those tables rolled back with the log, or trailing
 // entries without issuance (refusals, clock_regression) cut off: only an
@@ -317,7 +328,7 @@ func checkLogCovers(snap *signerdb.LogSnapshot, size uint64, issued issuedSummar
 	case snap.CAKeys == nil && size != 0:
 		return fmt.Errorf("%w: the log has %d entries, but no CA keys are recorded", errLogMismatch, size)
 	case issued.count != snap.Issuances || issued.lastSerial != snap.LastSerial:
-		return fmt.Errorf("%w: the log records %d issued certificates up to serial %d, the state database %d issuance rows and serial high-water mark %d (log or tables rolled back or modified?)",
+		return fmt.Errorf("%w: the log records %d issued certificates (issue and login_issue leaves) up to serial %d, the state database %d issuance rows and serial high-water mark %d (log or tables rolled back or modified?)",
 			errLogMismatch, issued.count, issued.lastSerial, snap.Issuances, snap.LastSerial)
 	}
 	return nil

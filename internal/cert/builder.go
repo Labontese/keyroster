@@ -81,7 +81,7 @@ func Build(req Request, ca ssh.Signer, rnd io.Reader) (*ssh.Certificate, error) 
 	if err != nil {
 		return nil, err
 	}
-	if parsed != req.KeyID {
+	if !parsed.Equal(req.KeyID) {
 		return nil, fmt.Errorf("%w: key ID does not round-trip", ErrKeyID)
 	}
 

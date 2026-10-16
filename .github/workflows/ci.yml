@@ -84,6 +84,8 @@ jobs:
   # simulator) in keyroster-signer's dependency graph, with and without the
   # piv build tag; documented exceptions only. go list needs no C toolchain
   # or headers, so the piv pass (CGO_ENABLED=1) installs nothing.
+  # T-02-75: no ./cmd/... binary links a test-only helper (linux, windows,
+  # darwin; with and without piv).
   dependency-firewall:
     name: dependency-firewall
     runs-on: ubuntu-24.04
@@ -98,6 +100,8 @@ jobs:
           go-version-file: go.mod
       - name: Check the signer's dependency graph
         run: bash scripts/dep-firewall.sh
+      - name: Check that no binary links a test-only helper
+        run: bash scripts/testonly-firewall.sh
 
   # REPO-02, T-01-61: fail when any package in keyroster-signer's graph gains
   # a capability that is not in test/capslock/keyroster-signer.json.

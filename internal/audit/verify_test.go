@@ -1349,3 +1349,63 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifyKindsWithoutChecks: from plan 02-01 until 02-04 adds their
+// checks, tlog.DecodeLeaf accepts directory_install and login_issue
+// leaves, and audit verify must refuse them at their entry instead of
+// counting them as verified (T-02-115). Each export carries a checkpoint
+// correctly signed over all its leaves, so only the kind check can fail it.
+// The control shows every Phase 1 kind still verifies.
+func TestVerifyKindsWithoutChecks(t *testing.T) {
+	encode := func(t *testing.T, b interface{ Encode() ([]byte, error) }) []byte {
+		t.Helper()
+		out, err := b.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		kind tlog.Kind
+		body func(t *testing.T) []byte
+	}{
+		{"directory_install_not_verifiable", tlog.KindDirectoryInstall, func(t *testing.T) []byte {
+			return encode(t, &tlog.DirectoryInstallBody{Version: 1, PolicyVersion: 1, Directory: []byte("not a directory"), Sigs: []byte("no signatures")})
+		}},
+		{"login_issue_not_verifiable", tlog.KindLoginIssue, func(t *testing.T) []byte {
+			return encode(t, &tlog.LoginIssueBody{Serial: 1 << 60, PolicyVersion: 1, DirectoryVersion: 1, Request: []byte("request"),
+				Evidence: []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: []byte("assertion")}}, Cert: []byte("cert"), KeyID: "kr2"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := standard(t, "ed25519")
+			idx := len(f.leaves)
+			f.add(tc.kind, tc.body(t))
+			rep, err := f.verify(join(f.lines()), nil)
+			want := fmt.Sprintf("audit: entry %d (%s): not verifiable by this version", idx, tc.kind)
+			if err == nil || rep != nil || err.Error() != want {
+				t.Fatalf("Verify = %+v, %v; want no report and %q", rep, err, want)
+			}
+			if !strings.Contains(err.Error(), "not verifiable by this version") {
+				t.Fatalf("error %q lacks the refusal text", err)
+			}
+		})
+	}
+	t.Run("phase1_kinds_still_verify", func(t *testing.T) {
+		f := standard(t, "ed25519")
+		f.add(tlog.KindCAInit, encode(t, &tlog.CAInitBody{Keys: []tlog.CAInitKey{{Role: "log", PublicKey: []byte{1}, Alg: "ssh-ed25519", Custody: "agent"}}}))
+		f.add(tlog.KindClockRegression, encode(t, &tlog.ClockRegressionBody{NowMicros: 1, HighWaterMicros: 2}))
+		f.add(tlog.KindRefusalSummary, encode(t, &tlog.RefusalSummaryBody{WindowStartMicros: 1, WindowEndMicros: 2,
+			Counts: []tlog.ReasonCount{{Reason: tlog.ReasonMalformed, Count: 3}}}))
+		rep, err := f.verify(join(f.lines()), nil)
+		if err != nil {
+			t.Fatalf("Verify of a log of Phase 1 kinds: %v", err)
+		}
+		for _, k := range []tlog.Kind{tlog.KindIssue, tlog.KindRefusal, tlog.KindRefusalSummary, tlog.KindClockRegression, tlog.KindCAInit, tlog.KindBundleInstall} {
+			if rep.Counts[k] < 1 {
+				t.Fatalf("report counts no %s leaf: %+v", k, rep.Counts)
+			}
+		}
+	})
+}

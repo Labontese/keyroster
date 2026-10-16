@@ -33,15 +33,20 @@ var ErrMalformedLeaf = errors.New("tlog: malformed leaf")
 // Kind is the type of a leaf.
 type Kind uint8
 
-// Leaf kinds. The set is complete for format v1; plan 01-07 emits CAInit
-// and BundleInstall.
+// Leaf kinds of format v1. Kinds 1 to 6 are Phase 1's (plan 01-07 emits
+// CAInit and BundleInstall). Kinds 7 and 8 joined format v1 in Phase 2:
+// DirectoryInstall records an admin-signed directory the signer installed,
+// LoginIssue a certificate issued on a passkey login. A reader that has no
+// check for a kind must refuse it, never skip it (audit verify does).
 const (
-	KindIssue           Kind = 1
-	KindRefusal         Kind = 2
-	KindRefusalSummary  Kind = 3
-	KindClockRegression Kind = 4
-	KindCAInit          Kind = 5
-	KindBundleInstall   Kind = 6
+	KindIssue            Kind = 1
+	KindRefusal          Kind = 2
+	KindRefusalSummary   Kind = 3
+	KindClockRegression  Kind = 4
+	KindCAInit           Kind = 5
+	KindBundleInstall    Kind = 6
+	KindDirectoryInstall Kind = 7
+	KindLoginIssue       Kind = 8
 )
 
 // String returns the kind name used in exports and reports.
@@ -59,12 +64,16 @@ func (k Kind) String() string {
 		return "ca_init"
 	case KindBundleInstall:
 		return "bundle_install"
+	case KindDirectoryInstall:
+		return "directory_install"
+	case KindLoginIssue:
+		return "login_issue"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(k))
 	}
 }
 
-func (k Kind) valid() bool { return k >= KindIssue && k <= KindBundleInstall }
+func (k Kind) valid() bool { return k >= KindIssue && k <= KindLoginIssue }
 
 // Size limits enforced by the encoders and the strict decoders.
 const (
@@ -76,6 +85,8 @@ const (
 	maxCAInitField = 8 << 10
 	MaxDocument    = 1 << 20
 	maxCounts      = 256
+	MaxSigs        = 64 << 10
+	MaxRequest     = 64 << 10
 )
 
 // Leaf is one log entry.
@@ -151,6 +162,10 @@ func checkBody(k Kind, body []byte) error {
 		_, err = DecodeCAInitBody(body)
 	case KindBundleInstall:
 		_, err = DecodeBundleInstallBody(body)
+	case KindDirectoryInstall:
+		_, err = DecodeDirectoryInstallBody(body)
+	case KindLoginIssue:
+		_, err = DecodeLoginIssueBody(body)
 	default:
 		err = fmt.Errorf("%w: unknown kind %d", ErrMalformedLeaf, k)
 	}
@@ -539,6 +554,145 @@ func DecodeBundleInstallBody(data []byte) (*BundleInstallBody, error) {
 	}
 	if !s.Empty() {
 		return nil, ErrMalformedLeaf
+	}
+	return &b, nil
+}
+
+// DirectoryInstallBody records an admin-signed directory version the
+// signer installed (kind 7): its version, the policy version it was
+// verified under, its canonical bytes (at most MaxDocument) and the admins'
+// SSHSIG signatures (at most MaxSigs), so an export is self-contained for
+// re-verifying the directory chain and its quorum.
+type DirectoryInstallBody struct {
+	Version       uint64
+	PolicyVersion uint64
+	Directory     []byte
+	Sigs          []byte
+}
+
+func (b *DirectoryInstallBody) check() error {
+	if len(b.Directory) == 0 || len(b.Directory) > MaxDocument || len(b.Sigs) == 0 || len(b.Sigs) > MaxSigs {
+		return fmt.Errorf("%w: directory_install document size", ErrMalformedLeaf)
+	}
+	return nil
+}
+
+// Encode encodes the body.
+func (b *DirectoryInstallBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	c.AddUint64(b.Version)
+	c.AddUint64(b.PolicyVersion)
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Directory) })
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Sigs) })
+	return c.Bytes()
+}
+
+// DecodeDirectoryInstallBody decodes a directory-install body strictly.
+// Every error wraps ErrMalformedLeaf.
+func DecodeDirectoryInstallBody(data []byte) (*DirectoryInstallBody, error) {
+	s := cryptobyte.String(data)
+	var (
+		b         DirectoryInstallBody
+		doc, sigs cryptobyte.String
+	)
+	if !s.ReadUint64(&b.Version) || !s.ReadUint64(&b.PolicyVersion) ||
+		!s.ReadUint24LengthPrefixed(&doc) || !s.ReadUint24LengthPrefixed(&sigs) || !s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	b.Directory = append([]byte(nil), doc...)
+	b.Sigs = append([]byte(nil), sigs...)
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// LoginIssueBody records one certificate issued on a passkey login (kind
+// 8): the serial, the policy and directory versions the signer authorized
+// it under, the login request's full signing bytes (at most MaxRequest),
+// the evidence presented (the WebAuthn assertion over SHA-256 of those
+// bytes), the full certificate and its key ID. With the request bytes, an
+// auditor can re-check that the user's bound credential approved exactly
+// this request.
+type LoginIssueBody struct {
+	Serial           uint64
+	PolicyVersion    uint64
+	DirectoryVersion uint64
+	Request          []byte
+	Evidence         []wire.Evidence
+	Cert             []byte
+	KeyID            string
+}
+
+func (b *LoginIssueBody) check() error {
+	if len(b.Request) == 0 || len(b.Request) > MaxRequest || len(b.Evidence) > wire.MaxEvidence ||
+		len(b.Cert) == 0 || len(b.Cert) > MaxCert || len(b.KeyID) == 0 || len(b.KeyID) > MaxKeyID {
+		return fmt.Errorf("%w: login_issue body size", ErrMalformedLeaf)
+	}
+	for _, e := range b.Evidence {
+		if len(e.Type) == 0 || len(e.Type) > wire.MaxEvidenceType || len(e.Blob) > wire.MaxEvidenceBlob {
+			return fmt.Errorf("%w: evidence size", ErrMalformedLeaf)
+		}
+	}
+	return nil
+}
+
+// Encode encodes the body.
+func (b *LoginIssueBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	c.AddUint64(b.Serial)
+	c.AddUint64(b.PolicyVersion)
+	c.AddUint64(b.DirectoryVersion)
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Request) })
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+		for _, e := range b.Evidence {
+			add16(c, []byte(e.Type))
+			add16(c, e.Blob)
+		}
+	})
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Cert) })
+	add16(&c, []byte(b.KeyID))
+	return c.Bytes()
+}
+
+// DecodeLoginIssueBody decodes a login-issue body strictly. Every error
+// wraps ErrMalformedLeaf.
+func DecodeLoginIssueBody(data []byte) (*LoginIssueBody, error) {
+	s := cryptobyte.String(data)
+	var (
+		b        LoginIssueBody
+		request  cryptobyte.String
+		evidence cryptobyte.String
+		certB    cryptobyte.String
+		keyID    []byte
+	)
+	if !s.ReadUint64(&b.Serial) || !s.ReadUint64(&b.PolicyVersion) || !s.ReadUint64(&b.DirectoryVersion) ||
+		!s.ReadUint24LengthPrefixed(&request) || !s.ReadUint24LengthPrefixed(&evidence) ||
+		!s.ReadUint24LengthPrefixed(&certB) || !read16(&s, &keyID, MaxKeyID) || !s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	for !evidence.Empty() {
+		if len(b.Evidence) == wire.MaxEvidence {
+			return nil, fmt.Errorf("%w: too many evidence items", ErrMalformedLeaf)
+		}
+		var typ, blob []byte
+		if !read16(&evidence, &typ, wire.MaxEvidenceType) || len(typ) == 0 ||
+			!read16(&evidence, &blob, wire.MaxEvidenceBlob) {
+			return nil, ErrMalformedLeaf
+		}
+		b.Evidence = append(b.Evidence, wire.Evidence{Type: string(typ), Blob: blob})
+	}
+	b.Request = append([]byte(nil), request...)
+	b.Cert = append([]byte(nil), certB...)
+	b.KeyID = string(keyID)
+	if err := b.check(); err != nil {
+		return nil, err
 	}
 	return &b, nil
 }

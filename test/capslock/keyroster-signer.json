@@ -16,7 +16,7 @@
     "CAPABILITY_REFLECT",
     "CAPABILITY_UNANALYZED"
   ],
-  "github.com/Labontese/keyroster/internal/cert": [
+  "github.com/Labontese/keyroster/internal/directory": [
     "CAPABILITY_ARBITRARY_EXECUTION"
   ],
   "github.com/Labontese/keyroster/internal/keystore": [
