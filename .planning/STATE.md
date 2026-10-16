@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
 current_phase: 02
-current_phase_name: passkey-login-mvp
-status: verifying
-stopped_at: Phase 2 planned
-last_updated: "2026-10-11T13:56:13.940Z"
-last_activity: 2026-10-06
-last_activity_desc: Phase 01 execution started
-state_head: b4390737bf81f94ec12066c6e9ce3aa5a386eeaf
+current_phase_name: Passkey Login MVP
+status: executing
+stopped_at: "02-01 PR #33 open, checks green; awaiting owner merge gate (Task 3)"
+last_updated: "2026-10-16T19:33:39.520Z"
+last_activity: 2026-10-16
+last_activity_desc: Phase 02 execution started
+state_head: 70bf886bc15b010e3689a68da2b6facd5d83d7ab
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 21
+  completed_plans: 22
   percent: 0
 ---
 
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-04)
 
 **Core value:** Full visibility: at any moment you know exactly who has access to what, and can revoke it immediately.
-**Current focus:** Phase 01 — Trust Core
+**Current focus:** Phase 02 — Passkey Login MVP
 
 ## Current Position
 
-Phase: 02 (passkey-login-mvp) — READY TO EXECUTE
-Plan: 0 of 14
-Status: Phase 2 planned 2026-10-10 (14 plans, 11 waves, plan-checker passed). Phase 1 stays human_needed with 3 owner overrides (real-hardware run, issue #13; KEY-07 open until the offline v3 ceremony)
-Last activity: 2026-10-06 - Completed quick task 261006-ixz: Fix flaky signer freshness-boundary tests with a deterministic test clock
+Phase: 02 (Passkey Login MVP) — EXECUTING
+Plan: 2 of 14
+Status: 02-01 awaiting the owner merge gate (PR #33, checks green); 02-02 starts after it merges
+Last activity: 2026-10-16 — Phase 02 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -77,6 +77,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P18 | 29 min | 3 tasks | 10 files |
 | Phase 01 P20 | 60 min | 3 tasks | 6 files |
 | Phase 01 P21 | 17 min | 3 tasks | 3 files |
+| Phase 02 P01 | 47 min | 2 tasks | 48 files |
 
 ## Accumulated Context
 
@@ -159,6 +160,11 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-20: rehearsal rotation (owner decision 2026-10-09): TEST roots C and D made in WSL with simulated media; homelab signer moved to bundle v2 92dc8ef4; offline ceremony UNVERIFIED, KEY-07 stays open until a later v3 rotation onto offline roots
 - [Phase 01]: 01-20: v2 carries policy v1 unchanged; requirements-completed is VIS-03 only and requirements.mark-complete is skipped
 - [Phase 01]: 01-21: TEST roots A and B retired (owner shred -u, attested); KEY-07 stays open, real offline ceremony owed as v3 rotation co-signed by C or D, then C and D destroyed
+- [Phase 02]: 02-01: audit verify refuses every leaf kind it has no check for (not verifiable by this version); kinds 7 and 8 reach that default until 02-04
+- [Phase 02]: 02-01: cert.KeyID gains Directory and Roles (nil Roles = kr1); KeyID.Equal replaces struct comparison in cert.Build
+- [Phase 02]: 02-01: InstallDirectory re-checks the trust bundle in force inside its transaction (trust_changed), like issuance
+- [Phase 02]: 02-01: loadDirectory keeps a stored directory's bytes and version even when not authorized, so the next install still chains to it
+- [Phase 02]: 02-01: capslock baseline moves CAPABILITY_ARBITRARY_EXECUTION from internal/cert to internal/directory (same ssh.PublicKey.Verify over-approximation); requirements-completed empty (KEY-02 in 02-04, AUTHZ-01 in 02-11)
 
 ### Pending Todos
 
@@ -188,6 +194,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-10T18:49:18.541Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-passkey-login-mvp/02-CONTEXT.md
+Last session: 2026-10-16T19:33:39.307Z
+Stopped at: 02-01 PR #33 open, checks green; awaiting owner merge gate (Task 3)
+Resume file: None
