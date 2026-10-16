@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: "02-01 code on main via PR #33; SUMMARY and flag test on PR #34, awaiting owner merge gate (Task 3)"
-last_updated: "2026-10-16T19:33:39.520Z"
+stopped_at: "02-02 Tasks 1-3 done on p02/02-windows-agent (A2 passed, A3 moved to 02-14); PR open, awaiting owner merge gate (Task 4)"
+last_updated: "2026-10-16T21:09:54.000Z"
 last_activity: 2026-10-16
-last_activity_desc: Phase 02 execution started
+last_activity_desc: 02-02 windows-agent executed; PR awaiting merge gate
 state_head: 3bbce21886943baac0c11084afa9f4004a74ae6a
 progress:
   total_phases: 6
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
 Plan: 2 of 14
-Status: 02-01 awaiting the owner merge gate for PR #34 (SUMMARY, flag test; code reached main via PR #33); 02-02 starts after it merges
-Last activity: 2026-10-16 — Phase 02 execution started
+Status: 02-02 awaiting the owner merge gate for its PR (p02/02-windows-agent); 02-01 is merged
+Last activity: 2026-10-16 — 02-02 windows-agent executed (A2 passed, A3 moved to 02-14)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -78,6 +78,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P20 | 60 min | 3 tasks | 6 files |
 | Phase 01 P21 | 17 min | 3 tasks | 3 files |
 | Phase 02 P01 | 47 min | 2 tasks | 48 files |
+| Phase 02 P02 | 40 min | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -165,6 +166,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-01: InstallDirectory re-checks the trust bundle in force inside its transaction (trust_changed), like issuance
 - [Phase 02]: 02-01: loadDirectory keeps a stored directory's bytes and version even when not authorized, so the next install still chains to it
 - [Phase 02]: 02-01: capslock baseline moves CAPABILITY_ARBITRARY_EXECUTION from internal/cert to internal/directory (same ssh.PublicKey.Verify over-approximation); requirements-completed empty (KEY-02 in 02-04, AUTHZ-01 in 02-11)
+- [Phase 02]: 02-02: A2 passed: inbox ssh.exe 9.5p2 honours a pipe agent only as //./pipe/<name> in IdentityAgent (backslash spelling fails); SSH_AUTH_SOCK takes both; keyroster agent prints the forward-slash spelling
+- [Phase 02]: 02-02: A3 moved to 02-14 (laptop offline); 02-12 ships no gcr check, gcr-ssh-agent UNVERIFIED
+- [Phase 02]: 02-02: winagent ensure confirms with List through a serial (non-Closer) client, since x/crypto NewClient on a net.Conn leaves a background reader; one retry only on a closing-agent transport error
 
 ### Pending Todos
 
@@ -194,6 +198,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-16T19:33:39.307Z
-Stopped at: 02-01 code on main via PR #33; SUMMARY and flag test on PR #34, awaiting owner merge gate (Task 3)
+Last session: 2026-10-16T21:09:54.000Z
+Stopped at: 02-02 Tasks 1-3 done; PR open on p02/02-windows-agent, awaiting owner merge gate (Task 4)
 Resume file: None
