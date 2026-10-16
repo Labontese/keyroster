@@ -346,6 +346,34 @@ func TestAgent(t *testing.T) {
 		waitDone(t, done, 3*opts.Poll+schedSlack, "after the last connection closed (3 polls)")
 	})
 
+	t.Run("unexpired_key_keeps_agent_without_connection", func(t *testing.T) {
+		// keyroster login adds the key and closes its connection; ssh.exe
+		// connects later. The agent must stay up in between.
+		path := testPipe(t)
+		opts := Options{Poll: 50 * time.Millisecond, IdleExit: time.Second}
+		done := startServe(t, path, opts)
+		conn := dialTest(t, path)
+		priv, cert := testKey(t, "stayup")
+		if err := addKeyAndCert(agent.NewClient(conn), priv, cert, 3); err != nil {
+			t.Fatal(err)
+		}
+		added := time.Now()
+		_ = conn.Close()
+		time.Sleep(time.Second) // about 20 polls with no connection open
+		select {
+		case err := <-done:
+			t.Fatalf("Serve returned %v with no connection open while its key was still valid", err)
+		default:
+		}
+		conn = dialTest(t, path)
+		keys, err := agent.NewClient(conn).List()
+		_ = conn.Close()
+		if err != nil || len(keys) != 2 {
+			t.Fatalf("List on a new connection 1 s after the add = %d keys, %v; want 2", len(keys), err)
+		}
+		waitDone(t, done, time.Until(added.Add(3*time.Second))+3*opts.Poll+schedSlack, "after the key expired (3 s plus 3 polls)")
+	})
+
 	t.Run("idle_exit", func(t *testing.T) {
 		path := testPipe(t)
 		opts := Options{Poll: 50 * time.Millisecond, IdleExit: time.Second}
@@ -756,14 +784,27 @@ func TestAgent(t *testing.T) {
 			t.Fatalf("pipeInUse(PipePath()) while our agent serves it = %v, %v; want true", inUse, err)
 		}
 		priv, _ := testKey(t, "real")
-		if err := agent.NewClient(conn).Add(agent.AddedKey{PrivateKey: priv, LifetimeSecs: 1}); err != nil {
+		if err := agent.NewClient(conn).Add(agent.AddedKey{PrivateKey: priv, LifetimeSecs: 7}); err != nil {
 			_ = conn.Close()
 			t.Fatalf("Add: %v", err)
 		}
 		added := time.Now()
 		_ = conn.Close()
-		// 1 s lifetime + two default 5 s polls + 5 s slack.
-		deadline := added.Add(16 * time.Second)
+		// Past the first default 5 s poll with no connection open, the agent
+		// still serves the unexpired key (noStart: a second agent would hide
+		// an early exit).
+		time.Sleep(time.Until(added.Add(6 * time.Second)))
+		conn, err = ensure(context.Background(), path, noStart(t), VerifyServerOwner)
+		if err != nil {
+			t.Fatalf("Ensure 6 s after the add (7 s lifetime): %v", err)
+		}
+		keys, err := agent.NewClient(conn).List()
+		_ = conn.Close()
+		if err != nil || len(keys) != 1 {
+			t.Fatalf("List 6 s after the add (7 s lifetime) = %d keys, %v; want 1", len(keys), err)
+		}
+		// 7 s lifetime + two default 5 s polls + 5 s slack.
+		deadline := added.Add(22 * time.Second)
 		for {
 			inUse, err := pipeInUse(path)
 			if err != nil {
@@ -774,7 +815,7 @@ func TestAgent(t *testing.T) {
 				return
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("the agent Ensure started still serves %s 16 s after its only key (1 s lifetime) was added", path)
+				t.Fatalf("the agent Ensure started still serves %s 22 s after its only key (7 s lifetime) was added", path)
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
