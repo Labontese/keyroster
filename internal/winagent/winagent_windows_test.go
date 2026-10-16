@@ -17,6 +17,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	winio "github.com/Microsoft/go-winio"
 	"golang.org/x/crypto/ssh"
@@ -292,11 +293,44 @@ func TestAgent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		live := sd.String()
-		t.Logf("live pipe DACL: %s", strings.ReplaceAll(live, me.String(), "<SID>"))
-		if strings.Count(live, "(A;") != 1 || !strings.Contains(live, ";;;"+me.String()+")") ||
-			!strings.Contains(live, "(D;") || !strings.Contains(live, ";;;NU)") || !strings.HasPrefix(live, "D:P") {
-			t.Fatalf("live pipe DACL does not match SDDL %q", sddl)
+		// Compare ACEs structurally: the SDDL rendering uses aliases for some
+		// SIDs (LA for the built-in Administrator on CI runners).
+		t.Logf("live pipe DACL: %s", strings.ReplaceAll(sd.String(), me.String(), "<SID>"))
+		control, _, err := sd.Control()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if control&windows.SE_DACL_PROTECTED == 0 {
+			t.Fatal("live pipe DACL is not protected (inherits ACEs)")
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var allows, denies int
+		for i := range uint32(dacl.AceCount) {
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(dacl, i, &ace); err != nil {
+				t.Fatal(err)
+			}
+			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			switch ace.Header.AceType {
+			case windows.ACCESS_ALLOWED_ACE_TYPE:
+				allows++
+				if !sid.Equals(me) {
+					t.Errorf("live pipe DACL allows %s, not only the current user", sid)
+				}
+			case windows.ACCESS_DENIED_ACE_TYPE:
+				denies++
+				if !sid.IsWellKnown(windows.WinNetworkSid) {
+					t.Errorf("live pipe DACL denies %s, want the network logon SID", sid)
+				}
+			default:
+				t.Errorf("live pipe DACL has ACE type %d", ace.Header.AceType)
+			}
+		}
+		if allows != 1 || denies != 1 {
+			t.Fatalf("live pipe DACL has %d allow and %d deny ACEs, want 1 and 1 (SDDL %q)", allows, denies, sddl)
 		}
 	})
 

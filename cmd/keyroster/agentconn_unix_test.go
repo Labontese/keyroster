@@ -40,7 +40,7 @@ func TestAgentLifetime(t *testing.T) {
 	sock := filepath.Join(dir, "agent.sock")
 
 	// 1. A foreground ssh-agent on its own socket.
-	cmd := exec.Command(sshAgent, "-D", "-a", sock)
+	cmd := exec.Command(sshAgent, "-D", "-a", sock) //nolint:gosec // G204: the ssh-agent under test, found on PATH
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
