@@ -38,29 +38,51 @@ func VerifyServerOwner(conn net.Conn) error {
 	if !ok {
 		return fmt.Errorf("verify agent pipe owner: %T is not a named-pipe connection", conn)
 	}
+	me, err := currentSID()
+	if err != nil {
+		return err
+	}
+	pipe := windows.Handle(fc.Fd())
 	var pid uint32
-	if err := windows.GetNamedPipeServerProcessId(windows.Handle(fc.Fd()), &pid); err != nil {
+	if err := windows.GetNamedPipeServerProcessId(pipe, &pid); err != nil {
 		return fmt.Errorf("verify agent pipe owner: server process id: %w", err)
 	}
 	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
-		return unverifiable(fmt.Sprintf("verify agent pipe owner: open server process %d", pid), err)
+		return deniedServer(pipe, me, fmt.Sprintf("verify agent pipe owner: open server process %d", pid), err)
 	}
 	defer func() { _ = windows.CloseHandle(proc) }()
 	var tok windows.Token
 	if err := windows.OpenProcessToken(proc, windows.TOKEN_QUERY, &tok); err != nil {
-		return unverifiable(fmt.Sprintf("verify agent pipe owner: open token of server process %d", pid), err)
+		return deniedServer(pipe, me, fmt.Sprintf("verify agent pipe owner: open token of server process %d", pid), err)
 	}
 	defer func() { _ = tok.Close() }()
 	tu, err := tok.GetTokenUser()
 	if err != nil {
 		return fmt.Errorf("verify agent pipe owner: read server process user: %w", err)
 	}
-	me, err := currentSID()
-	if err != nil {
-		return err
-	}
 	return checkOwner(tu.User.Sid, me)
+}
+
+// deniedServer handles a server process this process may not inspect. The
+// pipe object's owner, readable through the client handle, tells the two
+// causes apart: a pipe owned by neither the current user nor Administrators
+// (the owner of a pipe an elevated agent creates) was created by another
+// account. Every access-denied err becomes ErrOwnerUnverifiable.
+func deniedServer(pipe windows.Handle, me *windows.SID, step string, err error) error {
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return unverifiable(step, err)
+	}
+	sd, serr := windows.GetSecurityInfo(pipe, windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if serr != nil {
+		return unverifiable(step, err)
+	}
+	owner, _, serr := sd.Owner()
+	if serr != nil || owner == nil || owner.Equals(me) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		return unverifiable(step, err)
+	}
+	return fmt.Errorf("%w: %s: the agent pipe was created by %s, not by the current user %s: another account's process holds the pipe name (possible squatting) and does not exit on its own; refusing to send a key to it (%w)",
+		ErrOwnerUnverifiable, step, owner.String(), me.String(), err)
 }
 
 // checkOwner returns nil only when the pipe server's SID equals want. It is

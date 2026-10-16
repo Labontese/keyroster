@@ -179,8 +179,15 @@ must not be presented as working.
 - **Pipe-squatting guard:** before keyroster sends a key, `VerifyServerOwner`
   checks that the pipe's server process runs as the caller's SID. The pipe's
   DACL grants only that SID and denies network logons, and a second agent or
-  another process cannot create the pipe while it exists. The refusal of a
-  foreign SID (LocalSystem) and the fail-closed path are unit-tested.
+  another process cannot create the pipe while it exists. The SID comparison
+  (`checkOwner` with LocalSystem) and the fail-closed path are unit-tested.
+  `foreign_pipe_refused` runs `VerifyServerOwner` end to end on the EventLog
+  service's pipe. From a normal shell (Daniel-PC) the service process cannot
+  be opened, so it exercises only the access-denied branch, which names the
+  pipe's owner (`S-1-5-19`) as another account. The branch that reads a
+  foreign server's token and refuses its SID runs only where that token is
+  readable, as on the elevated `cli-windows` runner; it has not run on
+  Daniel-PC.
 - **runas and elevated shells:** each Windows account, including one reached
   through `runas`, gets its own agent on its own per-SID pipe. An agent
   started from an elevated ("Run as administrator") shell cannot be used from

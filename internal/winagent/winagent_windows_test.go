@@ -382,6 +382,45 @@ func TestAgent(t *testing.T) {
 		}
 	})
 
+	t.Run("foreign_pipe_refused", func(t *testing.T) {
+		// \\.\pipe\eventlog is served by the EventLog service, never by this
+		// user. From a normal shell the service process cannot be opened, so
+		// the refusal must name the pipe's owner; from an elevated shell (the
+		// CI runner) the process token is read and checkOwner refuses it.
+		me, err := currentSID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn := dialTest(t, `\\.\pipe\eventlog`)
+		defer func() { _ = conn.Close() }()
+		err = VerifyServerOwner(conn)
+		if err == nil {
+			t.Fatal("VerifyServerOwner accepted the EventLog service's pipe")
+		}
+		if !errors.Is(err, ErrOwnerUnverifiable) {
+			if !strings.Contains(err.Error(), "not by the current user "+me.String()) {
+				t.Fatalf("server token readable: error %q does not name the foreign server", err)
+			}
+			t.Logf("server token readable (elevated shell): %v", err)
+			return
+		}
+		sd, err2 := windows.GetSecurityInfo(windows.Handle(conn.(interface{ Fd() uintptr }).Fd()), windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if err2 != nil {
+			t.Fatal(err2)
+		}
+		owner, _, err2 := sd.Owner()
+		if err2 != nil {
+			t.Fatal(err2)
+		}
+		if owner.Equals(me) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+			t.Fatalf("test precondition: the eventlog pipe is owned by %s", owner)
+		}
+		if !strings.Contains(err.Error(), "created by "+owner.String()) || !strings.Contains(err.Error(), "another account") {
+			t.Fatalf("server process not readable: error %q does not name the pipe owner %s as another account", err, owner)
+		}
+		t.Logf("server process not readable (normal shell): %v", err)
+	})
+
 	t.Run("dial_access_denied_names_both_causes", func(t *testing.T) {
 		// A pipe whose DACL leaves this user out, as another account that
 		// took the name first could create it: the dial is refused, and the
