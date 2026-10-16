@@ -268,6 +268,15 @@ func TestVerifySignatures(t *testing.T) {
 func TestCheckSuccessor(t *testing.T) {
 	v1 := fixture(t)
 	raw1 := mustCanonical(t, v1)
+	// An installed v1 that no longer parses (here: a role TTL below the
+	// minimum, as if a later release tightened Validate) still has a
+	// version and a SHA-256, which is all the chain rule needs.
+	stale := fixture(t)
+	stale.Roles[0].MaxTTLSeconds = MinRoleTTLSeconds - 1
+	rawStale := mustCanonical(t, stale)
+	if _, err := Parse(rawStale); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("the stale directory parses (%v); the case would test nothing", err)
+	}
 	next := func(version uint64, prev string) *Directory {
 		d := fixture(t)
 		d.Version, d.Prev = version, prev
@@ -285,6 +294,9 @@ func TestCheckSuccessor(t *testing.T) {
 		{"wrong_prev", raw1, next(2, trust.SHA256Hex([]byte("other"))), ErrChain},
 		{"v3_after_v1", raw1, next(3, trust.SHA256Hex(raw1)), ErrChain},
 		{"v1_again", raw1, v1, ErrChain},
+		{"v2_after_unparsable_installed", rawStale, next(2, trust.SHA256Hex(rawStale)), nil},
+		{"v3_after_unparsable_installed", rawStale, next(3, trust.SHA256Hex(rawStale)), ErrChain},
+		{"wrong_prev_after_unparsable_installed", rawStale, next(2, trust.SHA256Hex(raw1)), ErrChain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckSuccessor(tc.installed, tc.next)
