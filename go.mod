@@ -6,6 +6,7 @@ toolchain go1.27.1
 
 require (
 	filippo.io/age v1.3.2
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/foxboron/go-tpm-keyfiles v0.0.0-20260902202739-8c9c2d1005f4
 	github.com/go-piv/piv-go/v2 v2.6.0
 	github.com/google/go-tpm v0.9.9-0.20260124013517-8f8f42cba0de
