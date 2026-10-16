@@ -14,15 +14,18 @@ import (
 // this process may not inspect. Callers fail closed: no key is sent.
 var ErrOwnerUnverifiable = errors.New("cannot verify who serves the keyroster agent pipe")
 
-// elevationGuidance explains the usual cause of ErrOwnerUnverifiable.
-const elevationGuidance = "the agent pipe is served by a process this shell cannot inspect, most likely a keyroster agent started from an elevated (\"Run as administrator\") shell; " +
-	"stop that process, or wait until it exits on its own (when its last key expires, or 5 minutes after start without a key), then run the command again from a normal shell"
+// elevationGuidance explains the two causes of ErrOwnerUnverifiable. The pipe
+// name is derived from the user's SID, which is not secret, and any local
+// account can create it while no agent of ours runs.
+const elevationGuidance = "the agent pipe is held by a process this shell cannot use or inspect. " +
+	"Either it is a keyroster agent started from an elevated (\"Run as administrator\") shell: stop that process, or wait until it exits on its own (when its last key expires, or 5 minutes after start without a key), then run the command again from a normal shell. " +
+	"Or another account's process took this pipe name first, which does not exit on its own: if the pipe is still there after 5 minutes, ask an administrator to find and stop the process holding it"
 
 // unverifiable maps an access-denied result to ErrOwnerUnverifiable with the
-// elevation guidance and returns every other error unchanged.
+// guidance and returns every other error unchanged.
 func unverifiable(step string, err error) error {
 	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-		return fmt.Errorf("%w: %s: %s (%v)", ErrOwnerUnverifiable, step, elevationGuidance, err)
+		return fmt.Errorf("%w: %s: %s (%w)", ErrOwnerUnverifiable, step, elevationGuidance, err)
 	}
 	return fmt.Errorf("%s: %w", step, err)
 }

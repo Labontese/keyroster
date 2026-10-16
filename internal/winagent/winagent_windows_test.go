@@ -382,6 +382,25 @@ func TestAgent(t *testing.T) {
 		}
 	})
 
+	t.Run("dial_access_denied_names_both_causes", func(t *testing.T) {
+		// A pipe whose DACL leaves this user out, as another account that
+		// took the name first could create it: the dial is refused, and the
+		// guidance must not blame only an elevated agent of our own.
+		path := testPipe(t)
+		l, err := winio.ListenPipe(path, &winio.PipeConfig{SecurityDescriptor: "D:P(A;;GA;;;SY)"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = l.Close() }()
+		conn, err := ensure(context.Background(), path, noStart(t), VerifyServerOwner)
+		if conn != nil || !errors.Is(err, ErrOwnerUnverifiable) || !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			t.Fatalf("ensure on a pipe that refuses us = %v, %v; want ErrOwnerUnverifiable wrapping access denied", conn, err)
+		}
+		if !strings.Contains(err.Error(), "elevated") || !strings.Contains(err.Error(), "another account") {
+			t.Fatalf("guidance %q: want both causes, an elevated agent and another account's process", err)
+		}
+	})
+
 	t.Run("ensure_fails_closed", func(t *testing.T) {
 		path := testPipe(t)
 		opts := Options{Poll: 50 * time.Millisecond, IdleExit: time.Second}

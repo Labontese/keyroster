@@ -184,10 +184,13 @@ must not be presented as working.
 - **runas and elevated shells:** each Windows account, including one reached
   through `runas`, gets its own agent on its own per-SID pipe. An agent
   started from an elevated ("Run as administrator") shell cannot be used from
-  a normal shell. keyroster refuses it with the "started elevated" guidance
-  (`ErrOwnerUnverifiable`); stop that agent or let it exit. The mapping is
-  unit-tested, but the elevated case itself is **UNVERIFIED**: no agent was
-  started from an elevated shell on Daniel-PC.
+  a normal shell. keyroster refuses it with `ErrOwnerUnverifiable`, whose
+  guidance names both causes of an access-denied pipe: an elevated agent of
+  your own (stop it or let it exit), or another account's process that took
+  the pipe name first (it does not exit on its own). The mapping, and the
+  refusal of a pipe whose DACL leaves the user out, are unit-tested, but the
+  elevated case itself is **UNVERIFIED**: no agent was started from an
+  elevated shell on Daniel-PC.
 - **GNOME gcr-ssh-agent (Ubuntu 26.04):** UNVERIFIED: A3 moved to 02-14. The
   laptop was offline when 02-02 ran, so the lifetime and certificate probe has
   not been run.

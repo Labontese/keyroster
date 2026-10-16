@@ -105,7 +105,8 @@ func dialOrStart(ctx context.Context, path string, start func() error) (net.Conn
 
 // dial opens path once (go-winio retries a busy pipe until startWait). An
 // access-denied result means the pipe belongs to a process this one cannot
-// use, usually an elevated agent: that is ErrOwnerUnverifiable, fail closed.
+// use: an elevated agent, or another account's process that took the name.
+// That is ErrOwnerUnverifiable, fail closed.
 func dial(ctx context.Context, path string) (net.Conn, error) {
 	dctx, cancel := context.WithTimeout(ctx, startWait)
 	defer cancel()
