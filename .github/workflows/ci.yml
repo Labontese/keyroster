@@ -149,6 +149,14 @@ jobs:
           go-version-file: go.mod
       - name: Scan for reachable vulnerabilities
         run: go tool -modfile=tools/go.mod govulncheck ./...
+      # The scan above loads the Linux build only, so it never sees
+      # internal/winagent or go-winio. govulncheck is built for the runner
+      # first: `GOOS=windows go tool ...` would build a Windows binary.
+      - name: Scan the Windows and macOS builds
+        run: |
+          go build -modfile=tools/go.mod -o "$RUNNER_TEMP/govulncheck" golang.org/x/vuln/cmd/govulncheck
+          GOOS=windows "$RUNNER_TEMP/govulncheck" ./...
+          GOOS=darwin "$RUNNER_TEMP/govulncheck" ./...
 
   # KEY-01: no network, template, exec or plugin package (and no TPM
   # simulator) in keyroster-signer's dependency graph, with and without the
