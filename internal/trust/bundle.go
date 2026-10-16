@@ -124,7 +124,7 @@ func set(vs ...string) map[string]bool {
 // ParseBundle decodes a canonical bundle and validates it.
 func ParseBundle(data []byte) (*Bundle, error) {
 	var b Bundle
-	if err := decodeStrict(data, &b); err != nil {
+	if err := DecodeStrict(data, &b); err != nil {
 		return nil, err
 	}
 	if err := b.Validate(); err != nil {
@@ -134,7 +134,7 @@ func ParseBundle(data []byte) (*Bundle, error) {
 }
 
 // Canonical returns the canonical encoding of b (the bytes roots sign).
-func (b *Bundle) Canonical() ([]byte, error) { return canonical(b) }
+func (b *Bundle) Canonical() ([]byte, error) { return CanonicalJSON(b) }
 
 // Validate checks every structural rule of a bundle. It does not check
 // signatures, pins or the policy hash against a policy document.

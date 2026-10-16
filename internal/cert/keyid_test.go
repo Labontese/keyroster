@@ -25,7 +25,7 @@ func TestKeyIDRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseKeyID(%q): %v", s, err)
 			}
-			if got != tc.k {
+			if !got.Equal(tc.k) {
 				t.Fatalf("ParseKeyID(%q) = %+v, want %+v", s, got, tc.k)
 			}
 		})

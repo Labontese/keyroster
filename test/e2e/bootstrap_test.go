@@ -43,6 +43,11 @@ type bootstrapOpts struct {
 	// AdminQuorum is the genesis policy's admin quorum; that many admin
 	// keys are generated (default 1).
 	AdminQuorum int
+	// WebAuthnRPID and WebAuthnOrigins set the genesis policy's WebAuthn
+	// relying party (root genesis-policy --webauthn-rp-id and
+	// --webauthn-origin); empty means a policy without one.
+	WebAuthnRPID    string
+	WebAuthnOrigins []string
 }
 
 // signerEnv is a running keyroster-signer under a root-signed genesis
@@ -187,6 +192,12 @@ func (e *signerEnv) signGenesis(t *testing.T, opts bootstrapOpts) {
 		args = append(args, "--admin", name+"="+key+".pub")
 	}
 	e.AdminFingerprint = e.AdminFPs[0]
+	if opts.WebAuthnRPID != "" {
+		args = append(args, "--webauthn-rp-id", opts.WebAuthnRPID)
+	}
+	for _, o := range opts.WebAuthnOrigins {
+		args = append(args, "--webauthn-origin", o)
+	}
 	if code, out := keyrosterWithAgent(t, "", args...); code != 0 {
 		t.Fatalf("root genesis-policy exited %d:\n%s", code, out)
 	}

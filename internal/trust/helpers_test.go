@@ -102,7 +102,7 @@ func goldenBundle(t testing.TB, policy []byte) *Bundle {
 // mustCanonical returns v's canonical bytes.
 func mustCanonical(t testing.TB, v any) []byte {
 	t.Helper()
-	b, err := canonical(v)
+	b, err := CanonicalJSON(v)
 	if err != nil {
 		t.Fatal(err)
 	}

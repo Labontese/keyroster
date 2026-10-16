@@ -3,7 +3,11 @@ package trust
 import (
 	"fmt"
 	"math"
+	"net"
+	"regexp"
 	"sort"
+	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -19,6 +23,21 @@ type Policy struct {
 	Admins          []AdminKey  `json:"admins"`
 	CAProfiles      []CAProfile `json:"ca_profiles"`
 	TimelockSeconds uint64      `json:"timelock_seconds"`
+	// WebAuthn is the WebAuthn relying party passkey logins are bound to
+	// (Phase 2, D-09). It is a pointer with omitempty and the last field,
+	// so a policy without it (every Phase 1 policy) keeps its exact bytes,
+	// and "webauthn":null is refused as non-canonical. The signer refuses
+	// every login issuance while it is absent.
+	WebAuthn *WebAuthnRP `json:"webauthn,omitempty"`
+}
+
+// WebAuthnRP is the WebAuthn relying party of a policy: the RP ID (one DNS
+// hostname, which every enrolled passkey is bound to forever) and the
+// exact origins a login page may be served from. The signer checks
+// rpIdHash against RPID and the clientDataJSON origin against Origins.
+type WebAuthnRP struct {
+	RPID    string   `json:"rp_id"`
+	Origins []string `json:"origins"`
 }
 
 // AdminKey is one admin's SSH public key.
@@ -58,7 +77,7 @@ var (
 // ParsePolicy decodes a canonical policy and validates it.
 func ParsePolicy(data []byte) (*Policy, error) {
 	var p Policy
-	if err := decodeStrict(data, &p); err != nil {
+	if err := DecodeStrict(data, &p); err != nil {
 		return nil, err
 	}
 	if err := p.Validate(); err != nil {
@@ -68,7 +87,7 @@ func ParsePolicy(data []byte) (*Policy, error) {
 }
 
 // Canonical returns the canonical encoding of p (the bytes roots sign).
-func (p *Policy) Canonical() ([]byte, error) { return canonical(p) }
+func (p *Policy) Canonical() ([]byte, error) { return CanonicalJSON(p) }
 
 // Validate checks every structural rule of a policy.
 func (p *Policy) Validate() error {
@@ -121,7 +140,84 @@ func (p *Policy) Validate() error {
 			return fmt.Errorf("ca_profiles[%d] (%s): %w", i, prof.Role, err)
 		}
 	}
+	if p.WebAuthn != nil {
+		if err := p.WebAuthn.validate(); err != nil {
+			return fmt.Errorf("webauthn: %w", err)
+		}
+	}
 	return nil
+}
+
+// rpLabelRE is one lowercase DNS label.
+var rpLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// validate checks the relying party (D-09). The RP ID is a lowercase DNS
+// hostname of at least two labels: no IP literal, no port, no trailing
+// dot, no all-digit last label. A Tailscale name must be a machine name
+// (machine.tailnet.ts.net, or one more label under c.ts.net): ts.net is a
+// public suffix, so a bare tailnet domain could be claimed as RP by any
+// machine of that tailnet (RESEARCH Pitfall 6). Every origin is exactly
+// https://<rp_id>, optionally with a port other than 443 (browsers drop
+// the default port), and the list is sorted and duplicate-free.
+func (w *WebAuthnRP) validate() error {
+	rp := w.RPID
+	if len(rp) == 0 || len(rp) > 253 {
+		return fmt.Errorf("%w: rp_id must be 1 to 253 bytes", ErrInvalid)
+	}
+	if net.ParseIP(strings.Trim(rp, "[]")) != nil {
+		return fmt.Errorf("%w: rp_id %q is an IP address; WebAuthn needs a DNS name", ErrInvalid, rp)
+	}
+	labels := strings.Split(rp, ".")
+	if len(labels) < 2 {
+		return fmt.Errorf("%w: rp_id %q needs at least two labels", ErrInvalid, rp)
+	}
+	for _, l := range labels {
+		if !rpLabelRE.MatchString(l) {
+			return fmt.Errorf("%w: rp_id %q is not a lowercase DNS hostname without port or trailing dot", ErrInvalid, rp)
+		}
+	}
+	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
+		return fmt.Errorf("%w: rp_id %q has an all-digit last label", ErrInvalid, rp)
+	}
+	if (rp == "ts.net" || strings.HasSuffix(rp, ".ts.net")) && len(labels) < 4 {
+		return fmt.Errorf("%w: rp_id %q is a tailnet domain; use the machine name (machine.tailnet.ts.net)", ErrInvalid, rp)
+	}
+	if (rp == "c.ts.net" || strings.HasSuffix(rp, ".c.ts.net")) && len(labels) < 5 {
+		return fmt.Errorf("%w: rp_id %q is a tailnet domain; use the machine name (machine.tailnet.c.ts.net)", ErrInvalid, rp)
+	}
+	if len(w.Origins) == 0 {
+		return fmt.Errorf("%w: origins must list at least one origin", ErrInvalid)
+	}
+	if !sort.StringsAreSorted(w.Origins) {
+		return fmt.Errorf("%w: origins must be sorted", ErrInvalid)
+	}
+	for i, o := range w.Origins {
+		if i > 0 && w.Origins[i-1] == o {
+			return fmt.Errorf("%w: origins: duplicate %q", ErrInvalid, o)
+		}
+		if !validOrigin(o, rp) {
+			return fmt.Errorf("%w: origin %q is not https://%s with an optional port other than 443", ErrInvalid, o, rp)
+		}
+	}
+	return nil
+}
+
+// validOrigin reports whether o is exactly https://rp or https://rp:PORT
+// with PORT a decimal 1-65535 without leading zeros, other than 443.
+func validOrigin(o, rp string) bool {
+	rest, ok := strings.CutPrefix(o, "https://"+rp)
+	if !ok {
+		return false
+	}
+	if rest == "" {
+		return true
+	}
+	port, ok := strings.CutPrefix(rest, ":")
+	if !ok || port == "" || len(port) > 5 || port[0] == '0' || strings.Trim(port, "0123456789") != "" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535 && n != 443
 }
 
 func (c *CAProfile) validate() error {

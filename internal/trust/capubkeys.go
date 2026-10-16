@@ -23,7 +23,7 @@ var CAPubKeyRoles = []string{RoleUser, RoleHost, RoleMachine, "ops", "log"}
 // ParseCAPubKeys decodes a canonical ca-pubkeys document and validates it.
 func ParseCAPubKeys(data []byte) (*CAPubKeys, error) {
 	var c CAPubKeys
-	if err := decodeStrict(data, &c); err != nil {
+	if err := DecodeStrict(data, &c); err != nil {
 		return nil, err
 	}
 	if err := c.Validate(); err != nil {
@@ -33,7 +33,7 @@ func ParseCAPubKeys(data []byte) (*CAPubKeys, error) {
 }
 
 // Canonical returns the canonical encoding of c.
-func (c *CAPubKeys) Canonical() ([]byte, error) { return canonical(c) }
+func (c *CAPubKeys) Canonical() ([]byte, error) { return CanonicalJSON(c) }
 
 // Validate checks roles, order, algorithms, custody and key distinctness.
 func (c *CAPubKeys) Validate() error {

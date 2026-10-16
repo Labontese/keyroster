@@ -2,6 +2,7 @@ package signer
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -165,6 +166,34 @@ func (s *Signer) issueOrRefuse(ctx context.Context, peer Peer, req *wire.IssueRe
 	return nil, s.refuseErr(ctx, peer, digest, err)
 }
 
+// loginOrRefuse runs LoginIssue and records a refusal through refuseErr,
+// with the digest of the exact login request that was refused.
+func (s *Signer) loginOrRefuse(ctx context.Context, peer Peer, req *wire.LoginIssueRequest) (*wire.IssueResponse, *wire.ErrorResponse) {
+	resp, err := s.LoginIssue(ctx, peer, req)
+	if err == nil {
+		return resp, nil
+	}
+	var digest [32]byte
+	if req != nil {
+		digest = req.Digest()
+	}
+	return nil, s.refuseErr(ctx, peer, digest, err)
+}
+
+// installDirectoryOrRefuse runs InstallDirectory and records a refusal
+// through refuseErr, with the SHA-256 of the refused directory document.
+func (s *Signer) installDirectoryOrRefuse(ctx context.Context, peer Peer, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, *wire.ErrorResponse) {
+	resp, err := s.InstallDirectory(ctx, peer, req)
+	if err == nil {
+		return resp, nil
+	}
+	var digest [32]byte
+	if req != nil {
+		digest = sha256.Sum256(req.Directory)
+	}
+	return nil, s.refuseErr(ctx, peer, digest, err)
+}
+
 // refuseErr records err (a *refusal, or any other error as internal_error)
 // through refuse. For the signer's own failures (internal and unavailable
 // refusals: database, backend, encoding) the cause's Go type and text go
@@ -189,15 +218,15 @@ func classify(detail string) uint8 {
 	switch detail {
 	case "peer_not_allowed", "peer_credentials_unavailable":
 		return tlog.ReasonPeerNotAllowed
-	case "malformed_frame", "unknown_message_type", "malformed_request":
+	case "malformed_frame", "unknown_message_type", "malformed_request", "directory_invalid":
 		return tlog.ReasonMalformed
 	case "ca_not_configured":
 		return tlog.ReasonCANotConfigured
-	case "bad_principal", "empty_principals":
+	case "bad_principal", "empty_principals", "principals_mismatch":
 		return tlog.ReasonBadPrincipal
 	case "bad_subject_key":
 		return tlog.ReasonBadSubjectKey
-	case "bad_validity":
+	case "bad_validity", "ttl_exceeds_role":
 		return tlog.ReasonTTLExceeded
 	case "request_time_skew":
 		return tlog.ReasonStaleRequest
@@ -209,12 +238,19 @@ func classify(detail string) uint8 {
 		return tlog.ReasonBadSubject
 	case "extension_not_allowed", "duplicate_extension":
 		return tlog.ReasonExtensionNotAllowed
-	case "state_unavailable", "serial_unavailable", "trust_changed":
+	case "state_unavailable", "serial_unavailable", "trust_changed", "directory_changed":
 		return tlog.ReasonUnavailable
 	case "too_many_connections":
 		return tlog.ReasonOverloaded
 	case "missing_evidence", "unknown_evidence_type", "bad_evidence", "evidence_not_admin",
-		"evidence_wrong_namespace", "evidence_digest_mismatch", "admin_quorum_not_met", "no_policy":
+		"evidence_wrong_namespace", "evidence_digest_mismatch", "admin_quorum_not_met", "no_policy",
+		// Login evidence and directory details (Phase 2).
+		"too_many_evidence", "no_webauthn_policy", "directory_not_installed", "directory_not_authorized",
+		"unknown_user", "user_disabled", "role_not_granted", "unknown_credential",
+		"credential_mismatch", "bad_authenticator_data", "rp_mismatch", "user_presence_missing",
+		"user_verification_missing", "bad_client_data", "type_mismatch", "challenge_mismatch",
+		"origin_mismatch", "cross_origin_refused", "assertion_signature_invalid", "unsupported_algorithm",
+		"directory_version_chain", "directory_quorum_not_met", "directory_exceeds_policy":
 		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal

@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -152,7 +153,14 @@ func runRootGenesisPolicy(_ context.Context, args []string, stdout, stderr io.Wr
 	hostTTL := fset.Duration("host-max-ttl", 720*time.Hour, "maximum host certificate validity")
 	machineTTL := fset.Duration("machine-max-ttl", 24*time.Hour, "maximum machine certificate validity")
 	out := fset.String("out", "", "policy output file; must not exist (required)")
+	rpID := fset.String("webauthn-rp-id", "", "WebAuthn relying party ID: the DNS hostname every passkey is bound to, forever (optional; logins need it)")
+	var origins stringList
+	fset.Var(&origins, "webauthn-origin", "allowed WebAuthn origin https://HOST[:PORT] (repeatable; default https://<rp-id>; needs --webauthn-rp-id)")
 	if err := fset.Parse(args); err != nil {
+		return errUsage
+	}
+	if len(origins) > 0 && *rpID == "" {
+		_, _ = fmt.Fprintln(stderr, "root genesis-policy: --webauthn-origin needs --webauthn-rp-id")
 		return errUsage
 	}
 	if fset.NArg() != 0 || len(admins) == 0 || *out == "" {
@@ -196,6 +204,14 @@ func runRootGenesisPolicy(_ context.Context, args []string, stdout, stderr io.Wr
 			prof.DefaultExtensions = []string{"permit-pty"}
 		}
 		p.CAProfiles = append(p.CAProfiles, prof)
+	}
+	if *rpID != "" {
+		rp := &trust.WebAuthnRP{RPID: *rpID, Origins: []string(origins)}
+		if len(rp.Origins) == 0 {
+			rp.Origins = []string{"https://" + *rpID}
+		}
+		slices.Sort(rp.Origins)
+		p.WebAuthn = rp
 	}
 	if err := p.Validate(); err != nil {
 		return err

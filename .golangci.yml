@@ -47,6 +47,8 @@ linters:
             - "**/internal/wire/**"
             - "**/cmd/keyroster-signer/**"
             - "**/internal/doctor/**"
+            - "**/internal/webauthn/**"
+            - "**/internal/directory/**"
             - "!$test"
           deny:
             - pkg: net/http
