@@ -43,7 +43,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	keyrosterExe = filepath.Join(dir, "keyroster.exe")
-	out, err := exec.Command("go", "build", "-trimpath", "-o", keyrosterExe, "github.com/Labontese/keyroster/cmd/keyroster").CombinedOutput()
+	out, err := exec.Command("go", "build", "-trimpath", "-o", keyrosterExe, "github.com/Labontese/keyroster/cmd/keyroster").CombinedOutput() //nolint:gosec // G204: builds this tree's keyroster.exe into the test's temp dir
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "build keyroster.exe: %v\n%s", err, out)
 		_ = os.RemoveAll(dir)
@@ -449,7 +449,7 @@ func TestAgent(t *testing.T) {
 			if err := windows.GetAce(dacl, i, &ace); err != nil {
 				t.Fatal(err)
 			}
-			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)) //nolint:gosec // G103: an ACE's SID starts at SidStart
 			switch ace.Header.AceType {
 			case windows.ACCESS_ALLOWED_ACE_TYPE:
 				allows++

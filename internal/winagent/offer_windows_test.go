@@ -185,7 +185,7 @@ func inbox(t *testing.T, env []string, tool string, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, inboxOpenSSH+tool, args...)
+	cmd := exec.CommandContext(ctx, inboxOpenSSH+tool, args...) //nolint:gosec // G204: a fixed inbox OpenSSH tool with test-built arguments
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	t.Logf("%s %s: %v\n%s", tool, strings.Join(args, " "), err, out)
@@ -209,7 +209,7 @@ func offeredKeys(t *testing.T, client func(port string)) []string {
 		mu     sync.Mutex
 		offers []string
 	)
-	cfg := &ssh.ServerConfig{PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
+	cfg := &ssh.ServerConfig{PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) { //nolint:gosec // G408: records each offer and refuses every key; nothing authenticates
 		s := k.Type()
 		if c, ok := k.(*ssh.Certificate); ok {
 			s += " keyid=" + c.KeyId
