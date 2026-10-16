@@ -21,9 +21,9 @@ affects: [02-12, 02-14, AUTH-03, PLAT-05]
 actuals:
   tokens: 14000   # chars/4 over the added lines of the code, test, CI and doc diff (55885 chars); planning docs excluded
   tasks: 3        # Tasks 1-3; Task 4 is the owner merge gate
-  commits: 2      # git rev-list --count plan_head_before..HEAD at SUMMARY write (Task 1 committed nothing); this docs commit follows
+  commits: 4      # git rev-list --count plan_head_before..HEAD before this SUMMARY update: 0a454a1, c66306b, 4b32003 (first docs commit), a65e4dd (CI fix); Task 1 committed nothing; this docs update follows
 plan_head_before: 133704e061a3800c959b3afd25512c23203df8a1
-plan_head_after: c66306b907694226b0dd5dd9afa9bfb92959ad00
+plan_head_after: a65e4ddaa017b997e2bfc94334b49721e2b9fdcf
 
 tech-stack:
   added: ["github.com/Microsoft/go-winio v0.6.2 (Windows build of keyroster only)"]
@@ -110,10 +110,10 @@ coverage:
         ref: "cmd/keyroster/agentconn_unix_test.go#TestAgentLifetime (WSL, KEYROSTER_REQUIRE_SSH_AGENT=1; failing branch with PATH=/nonexistent)"
         status: pass
       - kind: other
-        ref: "CI jobs cli-windows, cli-macos, build-test on the PR"
-        status: unknown
+        ref: "PR #36 first run: cli-macos and build-test ok cmd/keyroster with KEYROSTER_REQUIRE_SSH_AGENT=1; cli-windows ran the offer test with KEYROSTER_REQUIRE_INBOX_SSH=1 (only sddl_single_allow failed, fixed in a65e4dd)"
+        status: pass
     human_judgment: true
-    rationale: "The CI runs on the PR head are recorded in the PR; their result was not known when this SUMMARY was written"
+    rationale: "The run on the final head is read from PR #36's checks; the owner confirms it is green at the merge gate"
 
 duration: 40min
 completed: 2026-10-16
@@ -222,16 +222,24 @@ Consequence for 02-12: no gcr check ships. gcr-ssh-agent stays UNVERIFIED until 
 
 ## CI and PR
 
-- PR: opened after this commit; its number and the CI results are recorded in the follow-up docs commit on this branch.
-- Whether the cli-windows runner image has the inbox ssh.exe is pending that run (recorded in the follow-up).
+- **PR #36** (`feat(cli): in-memory ssh agent for Windows and CLI CI on Windows and macOS`). It was opened without auto-merge, which is enabled only after this SUMMARY update is pushed.
+- **First run, on head 4b32003:** 17 checks passed and 2 failed, both caused by this plan and both fixed in a65e4dd (deviation 10):
+  - lint: gosec G204.
+  - cli-windows: `sddl_single_allow` compared rendered SDDL strings.
+- **cli-windows runner (windows-2025):** the inbox `OpenSSH_for_Windows_9.5p2, LibreSSL 3.8.2` is present, and the job set `KEYROSTER_REQUIRE_INBOX_SSH=1`, so a skip of TestInboxSSHOffersAgentCert would have failed.
+  - In the first run only `sddl_single_allow` failed in internal/winagent. TestInboxSSHOffersAgentCert and `ensure_starts_real_agent` therefore ran and passed on the runner.
+  - The runner account is the built-in Administrator in an elevated session. Agent and client share that token, so this does not exercise the mixed elevated/normal case.
+- **cli-macos (image macos-15-arm64):** `ok cmd/keyroster` with `KEYROSTER_REQUIRE_SSH_AGENT=1`, so TestAgentLifetime ran and passed against the runner's ssh-agent.
+- **build-test (ubuntu-24.04):** `ok cmd/keyroster` with `KEYROSTER_REQUIRE_SSH_AGENT=1` under `-race`.
+- **The run on the head that carries this update:** see PR #36's checks. This SUMMARY records pre-merge evidence only.
 
 ## Task Commits
 
 1. **Task 1: Gating probes A2/A3**: no commit (scratchpad only, by design)
 2. **Task 2: keyroster agent tracer**: `0a454a1` (feat)
-3. **Task 3: CI jobs, Unix lifetime test, platform record**: `c66306b` (ci)
+3. **Task 3: CI jobs, Unix lifetime test, platform record**: `c66306b` (ci); CI fix `a65e4dd` (fix)
 
-**Plan metadata:** the docs commit `docs(02-02): complete windows-agent plan` (this file and STATE.md)
+**Plan metadata:** `4b32003` (`docs(02-02): complete windows-agent plan`), plus the PR #36 update in the same push as a65e4dd
 
 ## Files Created/Modified
 
@@ -301,16 +309,23 @@ See `key-decisions` in the frontmatter. No owner decision was needed: A2 passed,
 - Not in the plan's artifact list. It converts `\\.\pipe\x` to `//./pipe/x`, the spelling A2 proved, for the agent output and 02-12's login output.
 
 **9. PR order**
-- The PR number and CI results cannot be known before the push. This commit carries the complete SUMMARY with those facts pending. A follow-up docs commit fills them in, and auto-merge is enabled only after that, so the owner cannot squash a head that lacks them.
+- The PR number and CI results cannot be known before the push. The first pushed head (4b32003) carried the complete SUMMARY with those facts pending. This update fills them in, in the same push as the CI fix, and auto-merge is enabled only after that, so the owner cannot squash a head that lacks them.
 
-**Total deviations:** 6 auto-fixed (3 bugs, 1 blocking, 2 correctness) plus test adjustments and one small API addition. **Impact:** no scope change. Each fix closes a defect in the plan's literal instructions, which would otherwise have broken 02-12 or produced false test results.
+**10. [Rule 1 - Bug] Two CI failures on PR #36's first run**
+- **Found during:** Task 3 (publish)
+- **Issue 1:** cli-windows `sddl_single_allow` compared rendered SDDL strings. On windows-2025 the account is the built-in Administrator (RID 500), and SDDL renders its SID as the alias `LA`, so the string check failed although the DACL was right (`D:P(D;;FA;;;NU)(A;;FA;;;LA)`).
+- **Fix 1:** the test walks the live DACL's ACEs and checks that the DACL is protected, has exactly one allow ACE whose SID `Equals` ours, and has one deny ACE for the network logon SID.
+- **Issue 2:** lint (gosec G204) flagged TestAgentLifetime's `exec.Command` of the ssh-agent found on PATH.
+- **Fix 2:** a `//nolint:gosec // G204` annotation, as the other oracle tests in the repo use.
+- **Commit:** a65e4dd
+
+**Total deviations:** 7 auto-fixed (4 bugs, 1 blocking, 2 correctness) plus test adjustments and one small API addition. **Impact:** no scope change. Each fix closes a defect in the plan's literal instructions, which would otherwise have broken 02-12 or produced false test results.
 
 ## UNVERIFIED
 
 - GNOME gcr-ssh-agent lifetime and certificate handling: A3 moved to 02-14 (laptop offline).
 - A browser and passkey login on macOS: there is no Mac.
-- Whether the cli-macos and build-test runners have ssh-agent on PATH, and whether the cli-windows image has the inbox ssh.exe: pending the PR's CI runs.
-- The elevated-shell case: no agent was started from an elevated shell on Daniel-PC. Only the access-denied mapping is unit-tested.
+- The mixed elevated case (agent started elevated, client in a normal shell): not run on Daniel-PC. The CI runner is elevated on both sides, which is a different case. Only the access-denied mapping is unit-tested.
 - The t.Fatalf in the real-binary tests when a foreign agent already serves the account's pipe: no run arranged that (both answers of pipeInUse are asserted).
 - The 02-12 caller of Ensure does not exist yet. Ensure is exercised by ensure_starts_real_agent and the in-package cases.
 

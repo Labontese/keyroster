@@ -3,7 +3,7 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: "02-02 Tasks 1-3 done on p02/02-windows-agent (A2 passed, A3 moved to 02-14); PR open, awaiting owner merge gate (Task 4)"
+stopped_at: "02-02 Tasks 1-3 done on p02/02-windows-agent (A2 passed, A3 moved to 02-14); PR #36 open, awaiting owner merge gate (Task 4)"
 last_updated: "2026-10-16T21:09:54.000Z"
 last_activity: 2026-10-16
 last_activity_desc: 02-02 windows-agent executed; PR awaiting merge gate
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
 Plan: 2 of 14
-Status: 02-02 awaiting the owner merge gate for its PR (p02/02-windows-agent); 02-01 is merged
+Status: 02-02 awaiting the owner merge gate for PR #36 (p02/02-windows-agent); 02-01 is merged
 Last activity: 2026-10-16 — 02-02 windows-agent executed (A2 passed, A3 moved to 02-14)
 
 Progress: [░░░░░░░░░░] 0%
@@ -199,5 +199,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-16T21:09:54.000Z
-Stopped at: 02-02 Tasks 1-3 done; PR open on p02/02-windows-agent, awaiting owner merge gate (Task 4)
+Stopped at: 02-02 Tasks 1-3 done; PR #36 open on p02/02-windows-agent, awaiting owner merge gate (Task 4)
 Resume file: None
