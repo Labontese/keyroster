@@ -8,6 +8,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -21,7 +22,7 @@ func vectorPath(name string) string { return filepath.Join("..", "..", "test", "
 
 // golden compares got with the named golden file, or rewrites the file
 // when -update is set.
-func readGolden(t *testing.T, name string) []byte {
+func readGolden(t testing.TB, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(vectorPath(name)) //nolint:gosec // G304: fixed test vector path
 	if err != nil {
@@ -228,5 +229,180 @@ func TestRefusalSummaryCanonical(t *testing.T) {
 				t.Fatalf("Encode error = %v, want ErrMalformedLeaf", err)
 			}
 		})
+	}
+}
+
+// directoryInstallVector is the fixed directory_install leaf of
+// test/vectors/leaf_directory_install_v1.hex.
+func directoryInstallVector(t testing.TB) (Leaf, *DirectoryInstallBody) {
+	t.Helper()
+	body := &DirectoryInstallBody{
+		Version:       1,
+		PolicyVersion: 1,
+		Directory:     []byte("directory bytes (test vector)"),
+		Sigs:          []byte("sigs (test vector)"),
+	}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 8, TimeMicros: 1_700_000_000_000_004, Kind: KindDirectoryInstall, Body: enc}, body
+}
+
+// loginIssueVector is the fixed login_issue leaf of
+// test/vectors/leaf_login_issue_v1.hex. Its request is the login request
+// of test/vectors/login_request_signing_v1.hex, and its evidence blob a
+// WebAuthnAssertion of literal bytes, so the leaf vector also pins the
+// evidence-blob encoding.
+func loginIssueVector(t testing.TB) (Leaf, *LoginIssueBody) {
+	t.Helper()
+	request, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "login_request_signing_v1.hex"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credID := make([]byte, 16)
+	authData := make([]byte, 37)
+	for i := range credID {
+		credID[i] = byte(i + 1)
+	}
+	for i := range authData {
+		authData[i] = byte(0xa0 + i)
+	}
+	blob, err := (&wire.WebAuthnAssertion{
+		CredentialID:      credID,
+		AuthenticatorData: authData,
+		ClientDataJSON:    []byte(`{"type":"webauthn.get","challenge":"test-vector","origin":"https://keyroster.example.org","crossOrigin":false}`),
+		Signature:         []byte("signature (test vector)"),
+	}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &LoginIssueBody{
+		Serial:           1_700_000_000_000_003,
+		PolicyVersion:    2,
+		DirectoryVersion: 1,
+		Request:          request,
+		Evidence:         []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: blob}},
+		Cert:             []byte("certificate bytes (test vector)"),
+		KeyID:            "kr2/ca=user/sub=alice/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=1/roles=admin+ops/ser=1700000000000003",
+	}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 9, TimeMicros: 1_700_000_000_000_005, Kind: KindLoginIssue, Body: enc}, body
+}
+
+// checkLeafVector compares the encoding of leaf with the named golden
+// file (rewritten under -update) and decodes the file back with DecodeLeaf
+// and decode, which must reproduce want.
+func checkLeafVector(t *testing.T, name string, leaf Leaf, want any, decode func([]byte) (any, error)) {
+	t.Helper()
+	got, err := MarshalLeaf(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *update {
+		writeGolden(t, name, []byte(hex.EncodeToString(got)+"\n"))
+	}
+	file, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, name))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, file) {
+		t.Fatalf("%s differs from the fixture leaf\ngot:  %x\nwant: %x", name, got, file)
+	}
+	l, err := DecodeLeaf(file)
+	if err != nil {
+		t.Fatalf("DecodeLeaf(%s): %v", name, err)
+	}
+	if l.Kind != leaf.Kind || l.Index != leaf.Index || l.TimeMicros != leaf.TimeMicros {
+		t.Fatalf("%s decodes to kind %s index %d time %d", name, l.Kind, l.Index, l.TimeMicros)
+	}
+	body, err := decode(l.Body)
+	if err != nil {
+		t.Fatalf("decode the body of %s: %v", name, err)
+	}
+	if !reflect.DeepEqual(body, want) {
+		t.Fatalf("%s body decodes to %+v, want %+v", name, body, want)
+	}
+}
+
+// TestDirectoryInstallLeafVector pins the kind-7 leaf encoding.
+func TestDirectoryInstallLeafVector(t *testing.T) {
+	leaf, body := directoryInstallVector(t)
+	checkLeafVector(t, "leaf_directory_install_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeDirectoryInstallBody(b) })
+}
+
+// TestLoginIssueLeafVector pins the kind-8 leaf encoding, including the
+// webauthn-assertion/v1 evidence blob.
+func TestLoginIssueLeafVector(t *testing.T) {
+	leaf, body := loginIssueVector(t)
+	checkLeafVector(t, "leaf_login_issue_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeLoginIssueBody(b) })
+}
+
+// bodyCases runs the three cases every kind-7/8 body test shares:
+// round_trip, trailing_byte_refused and decode_leaf_checks_body.
+func bodyCases(t *testing.T, leaf Leaf, want any, decode func([]byte) (any, error)) {
+	t.Run("round_trip", func(t *testing.T) {
+		got, err := decode(leaf.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("round trip: %+v, want %+v", got, want)
+		}
+		re, err := got.(interface{ Encode() ([]byte, error) }).Encode()
+		if err != nil || !bytes.Equal(re, leaf.Body) {
+			t.Fatalf("re-encoding differs (%v)", err)
+		}
+	})
+	t.Run("trailing_byte_refused", func(t *testing.T) {
+		if _, err := decode(append(bytes.Clone(leaf.Body), 0)); !errors.Is(err, ErrMalformedLeaf) {
+			t.Fatalf("decode with a trailing byte = %v, want ErrMalformedLeaf", err)
+		}
+	})
+	t.Run("decode_leaf_checks_body", func(t *testing.T) {
+		enc, err := MarshalLeaf(leaf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := DecodeLeaf(enc)
+		if err != nil {
+			t.Fatalf("DecodeLeaf of a valid %s leaf: %v", leaf.Kind, err)
+		}
+		if again := EncodeLeaf(l); !bytes.Equal(again, enc) {
+			t.Fatal("the leaf does not re-encode to the same bytes")
+		}
+		cut := leaf
+		cut.Body = leaf.Body[:len(leaf.Body)-1]
+		bad, err := MarshalLeaf(cut)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeLeaf(bad); !errors.Is(err, ErrMalformedLeaf) {
+			t.Fatalf("DecodeLeaf of a %s leaf with its body cut by one byte = %v, want ErrMalformedLeaf", leaf.Kind, err)
+		}
+	})
+}
+
+// TestDirectoryInstallBody covers the kind-7 body decoder.
+func TestDirectoryInstallBody(t *testing.T) {
+	leaf, body := directoryInstallVector(t)
+	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeDirectoryInstallBody(b) })
+	if _, err := (&DirectoryInstallBody{Version: 1, Directory: []byte("d")}).Encode(); !errors.Is(err, ErrMalformedLeaf) {
+		t.Fatalf("a body without signatures encodes: %v", err)
+	}
+}
+
+// TestLoginIssueBody covers the kind-8 body decoder.
+func TestLoginIssueBody(t *testing.T) {
+	leaf, body := loginIssueVector(t)
+	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeLoginIssueBody(b) })
+	if _, err := (&LoginIssueBody{Serial: 1, Cert: []byte("c"), KeyID: "k"}).Encode(); !errors.Is(err, ErrMalformedLeaf) {
+		t.Fatalf("a body without the request encodes: %v", err)
+	}
+	if _, err := (&LoginIssueBody{Serial: 1, Request: make([]byte, MaxRequest+1), Cert: []byte("c"), KeyID: "k"}).Encode(); !errors.Is(err, ErrMalformedLeaf) {
+		t.Fatalf("a request above MaxRequest encodes: %v", err)
 	}
 }

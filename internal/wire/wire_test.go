@@ -2,15 +2,22 @@ package wire
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"flag"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/cryptobyte"
+	"golang.org/x/crypto/ssh"
 )
 
 // validRequest returns a request within every limit.
@@ -397,5 +404,185 @@ func TestIssueResponse(t *testing.T) {
 	}
 	if _, err := (&IssueResponse{Serial: 1}).Marshal(); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("empty certificate: error = %v, want ErrMalformed", err)
+	}
+}
+
+var update = flag.Bool("update", false, "rewrite the golden vectors in test/vectors")
+
+const vectorDir = "../../test/vectors"
+
+// TestIssueRequestBytesUnchanged pins the Phase 1 admin request: the
+// SHA-256 of validRequest's body and signing bytes, computed with
+// internal/wire/issue.go as on main before Phase 2 (keyroster/issue-request/v1
+// and admin-sshsig/v1 stay byte-for-byte unchanged).
+func TestIssueRequestBytesUnchanged(t *testing.T) {
+	r := validRequest()
+	body, err := r.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, bb := sha256.Sum256(r.SigningBytes()), sha256.Sum256(body)
+	if got := hex.EncodeToString(sb[:]); got != "1156dfdbebdacbbbd273d9a8545ba53ec571cf8bb70749e42548c8dd535a3c20" {
+		t.Fatalf("IssueRequest signing bytes changed: sha256 %s", got)
+	}
+	if got := hex.EncodeToString(bb[:]); got != "d730e405f20155e35dbb861050607d3c0aef9c5213c297da7a09f703fcc7d4f9" {
+		t.Fatalf("IssueRequest body changed: sha256 %s", got)
+	}
+	if TypeIssueRequest != 0x01 || AdminSSHSIGNamespace != "keyroster/issue-request/v1" || EvidenceAdminSSHSIG != "admin-sshsig/v1" {
+		t.Fatal("an admin-path constant changed")
+	}
+}
+
+// loginVector is the login request of
+// test/vectors/login_request_signing_v1.hex: the SSH encoding of the
+// Ed25519 key with seed 0x00..0x1f, alice, role ops, principal role:ops,
+// 600 s, request id 0x00..0x0f, created 1700000000, no extensions.
+func loginVector(t testing.TB) *LoginIssueRequest {
+	t.Helper()
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	pub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(seed).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &LoginIssueRequest{
+		SubjectKey:      pub.Marshal(),
+		Subject:         "alice",
+		Roles:           []string{"ops"},
+		Principals:      []string{"role:ops"},
+		ValidForSeconds: 600,
+		CreatedAt:       1700000000,
+	}
+	for i := range r.RequestID {
+		r.RequestID[i] = byte(i)
+	}
+	return r
+}
+
+// TestLoginRequestSigningVector pins the login request's signing bytes
+// (the WebAuthn challenge rule, D-12): they equal the golden file, start
+// with the raw domain tag, and Digest is their SHA-256.
+func TestLoginRequestSigningVector(t *testing.T) {
+	r := loginVector(t)
+	got := r.SigningBytes()
+	path := filepath.Join(vectorDir, "login_request_signing_v1.hex")
+	if *update {
+		if err := os.WriteFile(path, []byte(hex.EncodeToString(got)+"\n"), 0o644); err != nil { //nolint:gosec // G306: public test vector
+			t.Fatal(err)
+		}
+	}
+	file, err := os.ReadFile(path) //nolint:gosec // G304: fixed test vector path
+	if err != nil {
+		t.Fatalf("%v (create it with -update only for a deliberate format change)", err)
+	}
+	want, err := hex.DecodeString(strings.TrimSpace(string(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("login request signing bytes differ from %s\ngot:  %x\nwant: %x", path, got, want)
+	}
+	if !bytes.HasPrefix(got, []byte("keyroster/login-request/v1")) || LoginRequestDomain != "keyroster/login-request/v1" {
+		t.Fatalf("signing bytes do not start with the raw domain tag: %q", got[:min(len(got), 32)])
+	}
+	if r.Digest() != sha256.Sum256(want) {
+		t.Fatal("Digest is not the SHA-256 of the signing bytes")
+	}
+}
+
+// TestLoginIssueRequest covers the round trip, evidence outside the
+// signing bytes, every field bound, and strict parsing.
+func TestLoginIssueRequest(t *testing.T) {
+	r := loginVector(t)
+	blob, err := (&WebAuthnAssertion{CredentialID: []byte{1, 2, 3}, AuthenticatorData: bytes.Repeat([]byte{7}, 37),
+		ClientDataJSON: []byte(`{"type":"webauthn.get"}`), Signature: []byte("sig")}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Extensions = []string{"permit-agent-forwarding"}
+	r.Evidence = []Evidence{{Type: EvidenceWebAuthnAssertion, Blob: blob}}
+	body, err := r.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseLoginIssueRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, r) {
+		t.Fatalf("round trip:\n got %+v\nwant %+v", got, r)
+	}
+	a, err := ParseWebAuthnAssertion(got.Evidence[0].Blob)
+	if err != nil || !bytes.Equal(a.CredentialID, []byte{1, 2, 3}) || len(a.AuthenticatorData) != 37 {
+		t.Fatalf("assertion blob round trip: %+v, %v", a, err)
+	}
+	noEvidence := loginVector(t)
+	noEvidence.Extensions = r.Extensions
+	if noEvidence.Digest() != r.Digest() {
+		t.Fatal("the evidence is part of the login signing bytes")
+	}
+	for name, edit := range map[string]func(*LoginIssueRequest){
+		"subject_key": func(r *LoginIssueRequest) { r.SubjectKey[len(r.SubjectKey)-1] ^= 1 },
+		"subject":     func(r *LoginIssueRequest) { r.Subject = "bob" },
+		"roles":       func(r *LoginIssueRequest) { r.Roles = nil },
+		"principals":  func(r *LoginIssueRequest) { r.Principals = []string{"role:dev"} },
+		"valid_for":   func(r *LoginIssueRequest) { r.ValidForSeconds++ },
+		"request_id":  func(r *LoginIssueRequest) { r.RequestID[0] ^= 1 },
+		"created_at":  func(r *LoginIssueRequest) { r.CreatedAt++ },
+		"extensions":  func(r *LoginIssueRequest) { r.Extensions = []string{"permit-pty"} },
+	} {
+		m := loginVector(t)
+		m.Extensions = r.Extensions
+		edit(m)
+		if m.Digest() == r.Digest() {
+			t.Errorf("changing %s leaves the login digest unchanged", name)
+		}
+	}
+	if _, err := ParseLoginIssueRequest(append(body, 0)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("trailing byte: %v, want ErrMalformed", err)
+	}
+	if _, err := ParseWebAuthnAssertion(append(blob, 0)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("assertion blob with a trailing byte: %v, want ErrMalformed", err)
+	}
+	tooMany := loginVector(t)
+	for i := range MaxLoginRoles + 1 {
+		tooMany.Roles = append(tooMany.Roles, "r"+strings.Repeat("x", i))
+	}
+	if _, err := tooMany.Marshal(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("17 roles: %v, want ErrMalformed", err)
+	}
+}
+
+// TestInstallDirectoryMessages: round trip and strict parsing of the
+// directory install request and response.
+func TestInstallDirectoryMessages(t *testing.T) {
+	req := &InstallDirectoryRequest{Directory: []byte("{}\n"), Sigs: []byte("-----BEGIN SSH SIGNATURE-----")}
+	body, err := req.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseInstallDirectoryRequest(body)
+	if err != nil || !reflect.DeepEqual(got, req) {
+		t.Fatalf("request round trip: %+v, %v", got, err)
+	}
+	if _, err := ParseInstallDirectoryRequest(append(body, 0)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("trailing byte: %v", err)
+	}
+	if _, err := (&InstallDirectoryRequest{Directory: []byte("x")}).Marshal(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("no signatures: %v", err)
+	}
+	resp := &InstallDirectoryResponse{Version: 2, LeafIndex: 9, SHA256: sha256.Sum256([]byte("doc"))}
+	rb, err := resp.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gr, err := ParseInstallDirectoryResponse(rb)
+	if err != nil || *gr != *resp {
+		t.Fatalf("response round trip: %+v, %v", gr, err)
+	}
+	if TypeInstallDirectory != 0x02 || TypeInstallDirectoryResponse != 0x82 || TypeLoginIssueRequest != 0x05 {
+		t.Fatal("a Phase 2 message type number changed")
 	}
 }
