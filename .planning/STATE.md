@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-03 Tasks 1-3 done on p02/03-signer-boundary; PR awaiting owner merge gate (Task 4)
-last_updated: "2026-10-17T04:59:02.368Z"
+stopped_at: 02-04 Tasks 1-2 done on p02/04-audit-login; PR awaiting owner merge gate (Task 3)
+last_updated: "2026-10-17T14:32:49.867Z"
 last_activity: 2026-10-17
-last_activity_desc: 02-03 signer-boundary executed; PR awaiting merge gate
-state_head: c984266e16631bf348c1c71f49f1c1ce1d5c105a
+last_activity_desc: 02-04 audit-login executed; PR awaiting merge gate
+state_head: 9273038f3d7377424e5c11bf094d826880a2e618
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 24
+  completed_plans: 25
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 3 of 14
-Status: 02-03 awaiting the owner merge gate (p02/03-signer-boundary); 02-01 and 02-02 are merged
-Last activity: 2026-10-17 — 02-03 signer-boundary executed (SC4 refusal suite, directory cross-check, frame caps, 11 fuzz targets)
+Plan: 4 of 14
+Status: 02-04 awaiting the owner merge gate (p02/04-audit-login); 02-01, 02-02 and 02-03 are merged
+Last activity: 2026-10-17 — 02-04 audit-login executed (audit verify re-proves login certificates, root successor-policy, 59-case tamper suite)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -80,6 +80,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P01 | 47 min | 2 tasks | 48 files |
 | Phase 02 P02 | 40 min | 3 tasks | 14 files |
 | Phase 02 P03 | 40 min | 3 tasks | 21 files |
+| Phase 02 P04 | 50 min | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -175,6 +176,10 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-03: frames are capped per message type (MaxDirectoryFrame for InstallDirectory and GetDirectoryResponse, MaxFrame otherwise); ReadFrame/WriteFrame removed
 - [Phase 02]: 02-03 pre-merge review: readers pass the types they accept (wire.Caps); the signer reads only InstallDirectory at MaxDirectoryFrame, a client only its awaited type and errors; directory signatures are checked before parsing; refused installs log from their own refusal bucket; doctor runs the directory cross-check
 - [Phase 02]: owner decision 2026-10-17: T-02-14 covers only the directory table rolled back or substituted alone; the log and tables rolled back together, or an older signer.db restored, is the C-WR-01 residual, and in Phase 4 keyroster-signer serve refuses to start without a witnessed checkpoint at least as new as the local one
+- [Phase 02]: 02-04: audit verify re-proves every login_issue entry from the log; the (directory, policy) authorization is cached and recomputed only at directory_install and after each bundle_install
+- [Phase 02]: 02-04: a login request ID used by any earlier issue or login_issue entry is refused as a replay; two issue entries are still not compared (Phase 1 unchanged)
+- [Phase 02]: 02-04: a login certificate must carry exactly the profile defaults plus the requested extensions, no critical option, and span exactly ValidForSeconds + 300 s; freshness is compared in whole seconds
+- [Phase 02]: 02-04: keyroster root successor-policy changes only the WebAuthn RP (version+1, prev hash), warns that rp_id is one-way, refuses a no-op
 
 ### Pending Todos
 
@@ -205,6 +210,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-17T04:59:01.975Z
-Stopped at: 02-03 Tasks 1-3 done on p02/03-signer-boundary; PR awaiting owner merge gate (Task 4)
+Last session: 2026-10-17T14:32:49.630Z
+Stopped at: 02-04 Tasks 1-2 done on p02/04-audit-login; PR awaiting owner merge gate (Task 3)
 Resume file: None
