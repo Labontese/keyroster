@@ -29,10 +29,14 @@ only, leave it when their lifetime ends, and the agent exits once its last
 key has expired (or 5 minutes after start when no key was added).
 keyroster login starts it on its own; run it by hand only to inspect it.
 
-Point the Windows OpenSSH client at it in one of two ways:
-  ~/.ssh/config:  IdentityAgent //./pipe/keyroster-agent-<your SID>
-  PowerShell:     $env:SSH_AUTH_SOCK = '//./pipe/keyroster-agent-<your SID>'
+Point the Windows OpenSSH client at it for your keyroster hosts only, with
+this block in ~/.ssh/config (put your keyroster hosts in place of
+<your keyroster hosts>):
+  Host <your keyroster hosts>
+      IdentityAgent //./pipe/keyroster-agent-<your SID>
 (Use forward slashes: OpenSSH reads backslashes in IdentityAgent as escapes.)
+Keep it host-scoped: the inbox ssh.exe and ssh-add.exe do not check who
+serves the pipe, so only your keyroster hosts should rely on it.
 
 Only keyroster login adds keys to this agent. Do not add keys to the pipe
 with ssh-add or AddKeysToAgent: the Windows OpenSSH tools do not check who
@@ -63,6 +67,6 @@ func runAgent(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	}
 	ssh := winagent.OpenSSHSpelling(path)
 	// When keyroster login starts the agent detached, stdout is discarded.
-	_, _ = fmt.Fprintf(stdout, "keyroster agent: serving %s\n\nTo use it, add this line to ~/.ssh/config:\n  IdentityAgent %s\nor set it in PowerShell:\n  $env:SSH_AUTH_SOCK = '%s'\n\nOnly keyroster login adds keys here: do not use ssh-add or AddKeysToAgent with this pipe (see keyroster agent -h).\n", path, ssh, ssh)
+	_, _ = fmt.Fprintf(stdout, "keyroster agent: serving %s\n\nTo use it, add this block to ~/.ssh/config, with your keyroster hosts in place of <your keyroster hosts>:\n  Host <your keyroster hosts>\n      IdentityAgent %s\nKeep it host-scoped: the inbox ssh.exe and ssh-add.exe do not check who serves this pipe.\n\nOnly keyroster login adds keys here: do not use ssh-add or AddKeysToAgent with this pipe (see keyroster agent -h).\n", path, ssh)
 	return winagent.Serve(ctx, path, winagent.Options{})
 }

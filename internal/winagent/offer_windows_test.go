@@ -120,8 +120,15 @@ func TestInboxSSHOffersAgentCert(t *testing.T) {
 	case <-time.After(time.Until(added.Add(19 * time.Second))):
 		t.Fatalf("keyroster agent still running 19 s after the add; output:\n%s", agentOut.String())
 	}
-	if !strings.Contains(agentOut.String(), "IdentityAgent "+sockPath) {
-		t.Fatalf("agent output does not print the IdentityAgent line:\n%s", agentOut.String())
+	// The printed advice is a host-scoped IdentityAgent block only (owner
+	// decision 2026-10-17), never SSH_AUTH_SOCK. The test itself still sets
+	// SSH_AUTH_SOCK for ssh-add.exe above.
+	printed := strings.Join(strings.Fields(agentOut.String()), " ")
+	if !strings.Contains(printed, "Host <your keyroster hosts> IdentityAgent "+sockPath) {
+		t.Fatalf("agent output does not print the host-scoped IdentityAgent block:\n%s", agentOut.String())
+	}
+	if strings.Contains(agentOut.String(), "SSH_AUTH_SOCK") {
+		t.Fatalf("agent output still advises SSH_AUTH_SOCK:\n%s", agentOut.String())
 	}
 	if !strings.Contains(agentOut.String(), "do not use ssh-add or AddKeysToAgent with this pipe") {
 		t.Fatalf("agent output does not warn against ssh-add on the pipe:\n%s", agentOut.String())
