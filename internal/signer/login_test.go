@@ -265,25 +265,35 @@ func (e *logEnv) refuseLogin(t *testing.T, req *wire.LoginIssueRequest, detail s
 // again under it. It returns b.
 func (e *logEnv) restartUnderNewAdmins(t *testing.T) ssh.Signer {
 	t.Helper()
+	_, b := NewEd25519Key(t)
+	e.restartUnderPolicy(t, func(p *trust.Policy) {
+		p.Admins = []trust.AdminKey{{Name: "adminb", Key: trust.FormatKey(b.PublicKey())}}
+	})
+	return b
+}
+
+// restartUnderPolicy stops e's signer, installs bundle version 2 whose
+// policy is policyV2 changed by edit, as install-bundle would, and starts
+// the signer again under it.
+func (e *logEnv) restartUnderPolicy(t *testing.T, edit func(*trust.Policy)) {
+	t.Helper()
 	e.close()
 	db, err := signerdb.Open(e.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ie := &installEnv{fx: e.fx, db: db, be: e.backend}
-	_, b := NewEd25519Key(t)
 	pol := policyV2(t, e.fx)
-	pol.Admins = []trust.AdminKey{{Name: "adminb", Key: trust.FormatKey(b.PublicKey())}}
+	edit(pol)
 	if _, err := ie.install(nil, 0, docs4(t, successor(t, ie.genesis(t), pol), pol, e.fx.Root)); err != nil {
-		t.Fatalf("install the successor with admin b: %v", err)
+		t.Fatalf("install the successor bundle: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.open(); err != nil {
-		t.Fatalf("restart under admin b: %v", err)
+		t.Fatalf("restart under the successor policy: %v", err)
 	}
-	return b
 }
 
 // TestLoginDefaultExtension: CheckPolicy lets a role list one of the user

@@ -279,10 +279,11 @@ func TestDirectoryRefusalBudget(t *testing.T) {
 // TestDirectoryRestart (T-02-15): the signer re-verifies the stored
 // directory under the policy in force at start. After a restart under a
 // successor policy whose admin set no longer meets the installed
-// directory's quorum, the signer starts, refuses logins
+// directory's quorum, or whose user CA cap is below a role's TTL, the
+// signer starts, refuses logins
 // (directory_not_authorized) and still issues on the admin path; a
-// directory signed by the new admin restores logins. GetDirectory reports
-// the state at each point.
+// directory that conforms to the new policy restores logins. GetDirectory
+// reports the state at each point.
 func TestDirectoryRestart(t *testing.T) {
 	pk := newPasskeys(t)
 	t.Run("restart_under_new_admins", func(t *testing.T) {
@@ -304,6 +305,35 @@ func TestDirectoryRestart(t *testing.T) {
 		}
 
 		doc2, sigs2 := signDirectory(t, loginDirectory(pk, 2, trust.SHA256Hex(doc1)), b)
+		e.installDirectory(t, doc2, sigs2)
+		e.wantDirectory(t, 2, doc2, sigs2, true)
+		if c := e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil)); !strings.Contains(c.KeyId, "/pol=2/dir=2/") {
+			t.Fatalf("key ID %q, want pol=2 and dir=2", c.KeyId)
+		}
+	})
+	t.Run("restart_under_tighter_cap", func(t *testing.T) {
+		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, false)
+		doc1, sigs1 := signDirectory(t, loginDirectory(pk, 1, trust.GenesisPrev), e.fx.Admins[0])
+		e.installDirectory(t, doc1, sigs1)
+		e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil))
+
+		// The same admins, but a user CA cap below the roles' 3600 s.
+		const tighter = 1800
+		e.restartUnderPolicy(t, func(p *trust.Policy) { p.CAProfiles[0].MaxTTLSeconds = tighter })
+		e.wantDirectory(t, 1, doc1, sigs1, false)
+		e.refuseLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil), "directory_not_authorized")
+		admin := e.request()
+		admin.Evidence = SignRequest(t, admin, e.fx.Admins[0])
+		if _, err := e.s.Issue(context.Background(), Peer{UID: 1000}, admin); err != nil {
+			t.Fatalf("admin issuance while logins are refused: %v", err)
+		}
+
+		// Control: a v2 within the new cap, signed by the same admin.
+		d2 := loginDirectory(pk, 2, trust.SHA256Hex(doc1))
+		for i := range d2.Roles {
+			d2.Roles[i].MaxTTLSeconds = tighter
+		}
+		doc2, sigs2 := signDirectory(t, d2, e.fx.Admins[0])
 		e.installDirectory(t, doc2, sigs2)
 		e.wantDirectory(t, 2, doc2, sigs2, true)
 		if c := e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil)); !strings.Contains(c.KeyId, "/pol=2/dir=2/") {
