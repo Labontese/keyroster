@@ -155,6 +155,88 @@ CI ([custody.md](custody.md)).
       `tpm2_encodeobject` and selected with `ca-init --key` is refused
       ("not generated inside this TPM").
 
+## Platform verification (D-16)
+
+What has and has not been run for the login agent on each client platform
+(Phase 2, plan 02-02). Anything marked UNVERIFIED has not been exercised and
+must not be presented as working.
+
+- **Windows: verified on Daniel-PC** (Windows 11, inbox
+  `OpenSSH_for_Windows_9.5p2`). Login keys go to `keyroster agent`, keyroster's
+  own in-memory agent (owner decision D-15 option A), never to the inbox
+  `ssh-agent` service, which refuses lifetime constraints and stores keys in the
+  registry. The inbox `ssh.exe` and `ssh-add.exe` reach a named-pipe agent
+  only in the spelling `//./pipe/<name>` in `IdentityAgent` (the `-o` option
+  and `~/.ssh/config`). `\\.\pipe\<name>` in `IdentityAgent` fails with "No
+  such file or directory", because OpenSSH reads the backslashes as escapes.
+  `SSH_AUTH_SOCK` accepts both spellings. The evidence:
+  `TestInboxSSHOffersAgentCert` and the `ensure_starts_real_agent` case each
+  ran a freshly built `keyroster.exe` on the account's own per-SID pipe,
+  `\\.\pipe\keyroster-agent-<SID>`, with no other keyroster agent running.
+  `ssh-add.exe -t 4` loaded the key and certificate, `ssh.exe` offered the
+  certificate, both were gone after the lifetime, and the agent exited by
+  itself.
+- **Pipe-squatting guard:** before keyroster sends a key, `VerifyServerOwner`
+  checks that the pipe's server process runs as the caller's SID, with that
+  SID not deny-only, at Medium integrity or above (which also excludes
+  AppContainers, always Low), and without a restricted token. Sandboxed
+  processes of the same user can create the pipe while no agent runs;
+  `low_integrity_squatter_refused`, `restricted_squatter_refused` and
+  `deny_only_squatter_refused` run such a squatter (Low integrity; restricted
+  token at Medium; user SID deny-only with no restricting SIDs, serving the
+  pipe with a DACL of its own that grants Authenticated Users) on Daniel-PC
+  and check that it gets no key. No AppContainer squatter was run. The pipe's DACL grants only that SID and denies network logons, and a second agent or
+  another process cannot create the pipe while it exists. The SID comparison
+  (`checkOwner` with LocalSystem) and the fail-closed path are unit-tested.
+  `foreign_pipe_refused` runs `VerifyServerOwner` end to end on the EventLog
+  service's pipe. From a normal shell (Daniel-PC) the service process cannot
+  be opened, so it exercises only the access-denied branch, which names the
+  pipe's owner (`S-1-5-19`) as another account. The branch that reads a
+  foreign server's token and refuses its SID runs only where that token is
+  readable. It is **UNVERIFIED**: it has not run on Daniel-PC, and a green
+  `cli-windows` run cannot show it either, because that job runs `go test`
+  without `-v` and a passing test's "server token readable" log line is not
+  printed (the elevated runner may also be denied that token).
+- **Residual risk (T-02-07), inbox OpenSSH clients:** the owner check guards
+  only keyroster's own connection. The inbox `ssh.exe` and `ssh-add.exe` do
+  not check who serves a pipe (the 02-02 pre-merge review found no reference
+  to `GetNamedPipeServerProcessId` or `GetSecurityInfo` in either
+  `OpenSSH_for_Windows_9.5p2` binary). The pipe name is derived from the user's SID,
+  which is not secret, and is free whenever no agent runs, which is most of
+  the time: the agent exits when its last key expires. Between agent runs the
+  name can be taken by another local account's process or by a sandboxed
+  process of the same user (Low integrity, or a restricted or deny-only
+  token). keyroster's own connection refuses all of these, but an inbox
+  client pointed at the name does not. Such a process sees every signing
+  request from that client, chooses which keys are offered, and receives any
+  key added with `ssh-add` or `AddKeysToAgent`. `keyroster agent` warns
+  against `ssh-add` and `AddKeysToAgent` on the pipe. By owner decision
+  (2026-10-17) keyroster advises only a host-scoped `Host <your keyroster
+  hosts>` block with `IdentityAgent` and no longer advises
+  `$env:SSH_AUTH_SOCK`, which limits the inbox clients' exposure to such a
+  pipe to keyroster hosts. Those hosts still trust whatever serves the name.
+- **runas and elevated shells:** each Windows account, including one reached
+  through `runas`, gets its own agent on its own per-SID pipe. An agent
+  started from an elevated ("Run as administrator") shell cannot be used from
+  a normal shell. keyroster refuses it with `ErrOwnerUnverifiable`, whose
+  guidance names both causes of an access-denied pipe: an elevated agent of
+  your own (stop it or let it exit), or another account's process that took
+  the pipe name first (it does not exit on its own). The mapping, and the
+  refusal of a pipe whose DACL leaves the user out, are unit-tested, but the
+  elevated case itself is **UNVERIFIED**: no agent was started from an
+  elevated shell on Daniel-PC.
+- **GNOME gcr-ssh-agent (Ubuntu 26.04):** UNVERIFIED: A3 moved to 02-14. The
+  laptop was offline when 02-02 ran, so the lifetime and certificate probe has
+  not been run.
+- **Linux, OpenSSH ssh-agent:** `TestAgentLifetime` adds a key and certificate
+  with a 2 s lifetime to a real `ssh-agent` and checks that both are gone
+  after 3 s. It runs in `build-test`, where `KEYROSTER_REQUIRE_SSH_AGENT=1`
+  turns a missing `ssh-agent` into a failure.
+- **macOS:** the CLI unit tests and `TestAgentLifetime` run in CI (`cli-macos`),
+  where `KEYROSTER_REQUIRE_SSH_AGENT=1` makes a missing `ssh-agent` fail the
+  job instead of skipping the lifetime test. A browser and passkey login on
+  macOS is **UNVERIFIED**: there is no Mac in the homelab.
+
 ## Sign-off
 
 The Phase 6 review closes the `needs-hardware` issue only when every box above

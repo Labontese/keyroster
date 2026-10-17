@@ -11,7 +11,6 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -34,20 +33,10 @@ func init() {
 	})
 }
 
-// Hooks replaced by tests: the ssh-agent connection, the operator's
-// confirmation input and the clock.
+// Hooks replaced by tests: the operator's confirmation input and the clock.
+// The ssh-agent connection hook, dialAgent, is per OS: agentconn_unix.go and
+// agentconn_windows.go.
 var (
-	dialAgent = func() (net.Conn, error) {
-		sock := os.Getenv("SSH_AUTH_SOCK")
-		if sock == "" {
-			return nil, errors.New("ssh-agent: SSH_AUTH_SOCK is not set; start ssh-agent and load the root key")
-		}
-		conn, err := net.Dial("unix", sock)
-		if err != nil {
-			return nil, fmt.Errorf("connect to ssh-agent: %w", err)
-		}
-		return conn, nil
-	}
 	ceremonyInput io.Reader = os.Stdin
 	ceremonyNow             = time.Now
 )
