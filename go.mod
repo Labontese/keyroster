@@ -11,10 +11,10 @@ require (
 	github.com/go-piv/piv-go/v2 v2.6.0
 	github.com/google/go-tpm v0.9.9-0.20260124013517-8f8f42cba0de
 	github.com/transparency-dev/merkle v0.0.2
-	golang.org/x/crypto v0.57.0
-	golang.org/x/mod v0.41.0
-	golang.org/x/sys v0.48.0
-	golang.org/x/term v0.46.0
+	golang.org/x/crypto v0.58.0
+	golang.org/x/mod v0.42.0
+	golang.org/x/sys v0.49.0
+	golang.org/x/term v0.47.0
 	modernc.org/sqlite v1.60.1
 )
 
