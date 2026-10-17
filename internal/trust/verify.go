@@ -182,16 +182,34 @@ func MatchPins(b *Bundle, pins []string, threshold int) error {
 // turn an offline root into a routine issuance authorizer. Keys are
 // compared by their wire encoding.
 func CheckAdminsNotRoots(p *Policy, rootSets ...[]RootKey) error {
-	roots := map[string]bool{}
+	roots := RootKeySet{}
 	for _, set := range rootSets {
-		for _, rk := range set {
-			pub, err := ParseKey(rk.Key)
-			if err != nil {
-				return fmt.Errorf("%w: root key: %w", ErrInvalid, err)
-			}
-			roots[string(pub.Marshal())] = true
+		if err := roots.Add(set); err != nil {
+			return err
 		}
 	}
+	return CheckAdminsNotRootSet(p, roots)
+}
+
+// RootKeySet holds the wire encodings of root keys, for a caller that
+// checks policy after policy against a growing set of roots (audit verify
+// walking a log) without parsing every earlier root again each time.
+type RootKeySet map[string]bool
+
+// Add adds the keys of set.
+func (s RootKeySet) Add(set []RootKey) error {
+	for _, rk := range set {
+		pub, err := ParseKey(rk.Key)
+		if err != nil {
+			return fmt.Errorf("%w: root key: %w", ErrInvalid, err)
+		}
+		s[string(pub.Marshal())] = true
+	}
+	return nil
+}
+
+// CheckAdminsNotRootSet is CheckAdminsNotRoots against the roots in s.
+func CheckAdminsNotRootSet(p *Policy, roots RootKeySet) error {
 	for _, a := range p.Admins {
 		pub, err := ParseKey(a.Key)
 		if err != nil {

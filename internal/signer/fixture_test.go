@@ -1,9 +1,12 @@
 package signer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
+	"math/big"
 	"testing"
 	"time"
 
@@ -61,6 +64,32 @@ func NewEd25519Key(t testing.TB) (ed25519.PrivateKey, ssh.Signer) {
 		t.Fatal(err)
 	}
 	return priv, s
+}
+
+// NonCanonicalRSAKey returns the wire encoding of a fresh 3072-bit ssh-rsa
+// public key whose exponent mpint carries a superfluous leading zero byte
+// (00 01 00 01). ssh.ParsePublicKey accepts it, and its Marshal is the
+// canonical encoding, one byte shorter; the helper checks both, so a test
+// that uses it cannot pass vacuously.
+func NonCanonicalRSAKey(t testing.TB) []byte {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 3072)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := ssh.Marshal(struct {
+		Name string
+		E    []byte
+		N    *big.Int
+	}{ssh.KeyAlgoRSA, []byte{0, 1, 0, 1}, k.N})
+	pub, err := ssh.ParsePublicKey(blob)
+	if err != nil {
+		t.Fatalf("the padded RSA key does not parse: %v", err)
+	}
+	if bytes.Equal(pub.Marshal(), blob) || k.E != 65537 {
+		t.Fatal("the padded RSA key is canonical")
+	}
+	return blob
 }
 
 // Selection returns the role fingerprints for InitCA.

@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serial"
@@ -85,7 +83,7 @@ func (s *Signer) LoginIssue(ctx context.Context, peer Peer, req *wire.LoginIssue
 			extra[e] = ""
 		}
 	}
-	subject, err := ssh.ParsePublicKey(req.SubjectKey)
+	subject, err := parseSubjectKey(req.SubjectKey)
 	if err != nil {
 		return nil, refusalErr(wire.CodeRefused, "bad_subject_key", err)
 	}

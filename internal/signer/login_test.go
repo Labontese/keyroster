@@ -541,6 +541,14 @@ func TestLoginRefusalMatrix(t *testing.T) {
 			req.Extensions = []string{"permit-port-forwarding"}
 			return approve(t, pk.eddsa, req, nil)
 		}},
+		// A subject key that parses but is not canonically encoded: the
+		// certificate would carry its canonical encoding, and audit verify
+		// binds the logged request bytes to the certificate key.
+		{"bad_subject_key/non_canonical_rsa", "bad_subject_key", func(t *testing.T, e *logEnv) *wire.LoginIssueRequest {
+			req := e.loginReq(t, "alice")
+			req.SubjectKey = NonCanonicalRSAKey(t)
+			return approve(t, pk.eddsa, req, nil)
+		}},
 		// Request freshness and replay.
 		{"request_time_skew/plus_301_s", "request_time_skew", func(t *testing.T, e *logEnv) *wire.LoginIssueRequest {
 			req := e.loginReq(t, "alice")
@@ -603,6 +611,43 @@ func TestLoginRefusalMatrix(t *testing.T) {
 		e.installDirectory(t, doc, sigs)
 		e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil))
 	})
+}
+
+// TestLoginAfterClockStepBackVerifies: a forward wall-clock excursion of
+// 600 s during which one login is refused (request_time_skew, logged as a
+// refusal leaf at the excursion time), then the clock is stepped back and
+// the next login is issued. appendLocked raises that login's leaf time to
+// the refusal's; the signer's own export must still verify, because audit
+// verify measures freshness against the serial and the certificate's
+// issuance time, never raised, not against the entry time.
+func TestLoginAfterClockStepBackVerifies(t *testing.T) {
+	pk := newPasskeys(t)
+	var offset atomic.Int64
+	base := tickClock()
+	clock := func() time.Time { return base().Add(time.Duration(offset.Load())) }
+	fx := NewFixture(t, 1, 1)
+	fx.PolicyEdit = func(p *trust.Policy) {
+		p.WebAuthn = &trust.WebAuthnRP{RPID: loginRP, Origins: []string{loginOrigin}}
+	}
+	e := newLogEnvClock(t, fx, clock)
+	doc, sigs := signDirectory(t, loginDirectory(pk, 1, trust.GenesisPrev), fx.Admins[:fx.Quorum]...)
+	e.installDirectory(t, doc, sigs)
+	e.verifyExport()
+
+	realNow := uint64(base().Unix()) //nolint:gosec // G115: after 1970
+	offset.Store(int64(600 * time.Second))
+	req := e.loginReq(t, "alice")
+	req.CreatedAt = realNow // the client's clock is right
+	e.refuseLogin(t, approve(t, pk.eddsa, req, nil), "request_time_skew")
+
+	offset.Store(0) // NTP steps the signer's clock back
+	e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil))
+	leaves := e.leavesOf()
+	if last := leaves[len(leaves)-1]; last.Kind != tlog.KindLoginIssue || last.TimeMicros < leaves[len(leaves)-2].TimeMicros ||
+		last.TimeMicros/1e6 < realNow+300 {
+		t.Fatalf("the login leaf (%s at %d us) was not raised to the refusal's time: the case does not test the raise", last.Kind, last.TimeMicros)
+	}
+	e.verifyExport()
 }
 
 // TestLoginRefusalLeaves (T-02-83): a refused login is logged with its

@@ -764,6 +764,73 @@ func TestLoginIssueRequest(t *testing.T) {
 	}
 }
 
+// TestParseLoginIssueSigningBytes: the signing bytes a login_issue leaf
+// stores (02-04) parse back to the request, from the golden vector, and
+// every other encoding is refused: no or another domain tag, a request
+// body (Marshal's encoding, evidence included), an evidence section after
+// the fields, a truncation, and field limits.
+func TestParseLoginIssueSigningBytes(t *testing.T) {
+	file, err := os.ReadFile(filepath.Join(vectorDir, "login_request_signing_v1.hex")) //nolint:gosec // G304: fixed test vector path
+	if err != nil {
+		t.Fatal(err)
+	}
+	vector, err := hex.DecodeString(strings.TrimSpace(string(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("golden_vector_round_trip", func(t *testing.T) {
+		got, err := ParseLoginIssueSigningBytes(vector)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := loginVector(t); !reflect.DeepEqual(got, want) {
+			t.Fatalf("parsed vector:\n got %+v\nwant %+v", got, want)
+		}
+		if !bytes.Equal(got.SigningBytes(), vector) || got.Evidence != nil {
+			t.Fatal("the parsed vector does not re-encode to itself, or carries evidence")
+		}
+	})
+	t.Run("with_extensions_and_roles", func(t *testing.T) {
+		r := loginVector(t)
+		r.Roles = []string{"dev", "ops"}
+		r.Extensions = []string{"permit-agent-forwarding"}
+		got, err := ParseLoginIssueSigningBytes(r.SigningBytes())
+		if err != nil || !reflect.DeepEqual(got, r) {
+			t.Fatalf("round trip = %+v, %v; want %+v", got, err, r)
+		}
+	})
+	r := loginVector(t)
+	r.Evidence = []Evidence{{Type: EvidenceWebAuthnAssertion, Blob: []byte("assertion")}}
+	body, err := r.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooMany := loginVector(t)
+	for i := range MaxLoginRoles + 1 {
+		tooMany.Roles = append(tooMany.Roles, "r"+strings.Repeat("x", i))
+	}
+	emptyRole := loginVector(t)
+	emptyRole.Roles = []string{""}
+	for name, in := range map[string][]byte{
+		"empty":                    {},
+		"no_domain_tag":            vector[len(LoginRequestDomain):],
+		"other_domain_tag":         append([]byte("keyroster/issue-request/v1"), vector[len(LoginRequestDomain):]...),
+		"request_body_not_signing": body,
+		"evidence_section_after":   append(append([]byte(nil), vector...), 0, 0),
+		"trailing_byte":            append(append([]byte(nil), vector...), 0),
+		"truncated":                vector[:len(vector)-1],
+		"tag_only":                 []byte(LoginRequestDomain),
+		"too_many_roles":           tooMany.SigningBytes(),
+		"empty_role_name":          emptyRole.SigningBytes(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := ParseLoginIssueSigningBytes(in); !errors.Is(err, ErrMalformed) || got != nil {
+				t.Fatalf("ParseLoginIssueSigningBytes = %+v, %v; want nil and ErrMalformed", got, err)
+			}
+		})
+	}
+}
+
 // TestInstallDirectoryMessages: round trip and strict parsing of the
 // directory install request and response.
 func TestInstallDirectoryMessages(t *testing.T) {

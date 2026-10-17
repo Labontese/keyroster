@@ -91,6 +91,31 @@ func TestSignBundleAndPolicy(t *testing.T) {
 	}
 }
 
+// TestSummaryShowsWebAuthnRP: the summary a root signer reads before
+// signing, and trust verify prints, names the policy's WebAuthn relying
+// party, a one-way setting, or says that there is none.
+func TestSummaryShowsWebAuthnRP(t *testing.T) {
+	b, err := trust.ParseBundle(readVector(t, "bundle_genesis_v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := trust.ParsePolicy(readVector(t, "policy_genesis_v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.WebAuthn != nil {
+		t.Fatal("the genesis policy vector names a WebAuthn RP")
+	}
+	if sum, want := Summary(b, p), "  webauthn: none (passkey logins refused)\n"; !strings.Contains(sum, want) {
+		t.Fatalf("Summary lacks %q:\n%s", want, sum)
+	}
+	p.WebAuthn = &trust.WebAuthnRP{RPID: "keyroster.example.org", Origins: []string{"https://keyroster.example.org", "https://keyroster.example.org:8443"}}
+	want := "  webauthn rp_id keyroster.example.org  origins [https://keyroster.example.org https://keyroster.example.org:8443]\n"
+	if sum := Summary(b, p); !strings.Contains(sum, want) {
+		t.Fatalf("Summary lacks %q:\n%s", want, sum)
+	}
+}
+
 // TestSignRefusesOtherDocuments checks that the root signs nothing but a
 // canonical, valid document of the requested type.
 func TestSignRefusesOtherDocuments(t *testing.T) {

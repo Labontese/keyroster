@@ -371,6 +371,27 @@ func TestDirectoryRestart(t *testing.T) {
 			t.Fatalf("key ID %q, want pol=2 and dir=2", c.KeyId)
 		}
 	})
+	t.Run("restart_under_rp_only_policy", func(t *testing.T) {
+		// 02-04 (root-ceremony.md, "Change the policy"): a directory
+		// installed under a policy without an RP stays authorized after a
+		// restart under a successor that changes only the version, prev and
+		// RP (the successor-policy output), and logins work under it
+		// without reinstalling it.
+		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), false, false)
+		doc1, sigs1 := signDirectory(t, loginDirectory(pk, 1, trust.GenesisPrev), e.fx.Admins[0])
+		e.installDirectory(t, doc1, sigs1)
+		e.refuseLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil), "no_webauthn_policy")
+
+		capV1 := e.fx.Policy().CAProfiles[0].MaxTTLSeconds
+		e.restartUnderPolicy(t, func(p *trust.Policy) {
+			p.CAProfiles[0].MaxTTLSeconds = capV1 // policyV2 changes it; keep v1's
+			p.WebAuthn = &trust.WebAuthnRP{RPID: loginRP, Origins: []string{loginOrigin}}
+		})
+		e.wantDirectory(t, 1, doc1, sigs1, true)
+		if c := e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil)); !strings.Contains(c.KeyId, "/pol=2/dir=1/") {
+			t.Fatalf("key ID %q, want pol=2 and dir=1", c.KeyId)
+		}
+	})
 }
 
 // checkTrustAt runs doctor's trust check (CheckTrust) on the state

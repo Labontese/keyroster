@@ -546,3 +546,35 @@ func TestIssueRefusesClockStepAfterSerial(t *testing.T) {
 	}
 	e.verifyExport()
 }
+
+// TestIssueRefusesNonCanonicalSubjectKey: a subject key that parses but is
+// not canonically encoded (an RSA exponent with a superfluous leading zero)
+// is refused as bad_subject_key, with nothing issued, so the logged request
+// bytes always encode exactly the certificate's key. The login path refuses
+// it the same way (TestLoginRefusalMatrix/bad_subject_key/non_canonical_rsa).
+func TestIssueRefusesNonCanonicalSubjectKey(t *testing.T) {
+	e := newLogEnv(t)
+	leaves, issued, last := e.counts()
+	req := e.request()
+	req.SubjectKey = NonCanonicalRSAKey(t)
+	req.Evidence = SignRequest(t, req, e.fx.Admins...)
+	resp, refused := e.s.issueOrRefuse(context.Background(), Peer{UID: 1000}, req)
+	if resp != nil || refused == nil || refused.Message != "bad_subject_key" {
+		t.Fatalf("Issue of a non-canonical subject key: issued %t, refusal %+v; want the refusal bad_subject_key", resp != nil, refused)
+	}
+	if l, i, s := e.counts(); l != leaves+1 || i != issued || s != last {
+		t.Fatalf("after the refusal: %d leaves, %d issued, serial %d; want %d (one refusal leaf), %d, %d", l, i, s, leaves+1, issued, last)
+	}
+	// Control: the canonical encoding of the same key issues.
+	pub, err := ssh.ParsePublicKey(req.SubjectKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := e.request()
+	ok.SubjectKey = pub.Marshal()
+	ok.Evidence = SignRequest(t, ok, e.fx.Admins...)
+	if _, err := e.s.Issue(context.Background(), Peer{UID: 1000}, ok); err != nil {
+		t.Fatalf("Issue of the canonical encoding: %v", err)
+	}
+	e.verifyExport()
+}

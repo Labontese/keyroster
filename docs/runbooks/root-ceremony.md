@@ -435,6 +435,170 @@ type them at the prompts.
 > held on offline media, like the offline steps, remains **UNVERIFIED** until
 > the owner's real offline ceremony.
 
+## Change the policy: successor policy (for example, add the WebAuthn RP)
+
+The policy is root-signed, so changing it means a **successor bundle**
+with the same roots, CAs, ops key and log key, and a successor policy:
+version N+1 whose `prev` is the SHA-256 of the policy in force. The
+signer, `trust verify --prev` and `audit verify` apply the same rule as
+for a rotation (`trust.VerifySuccessor`).
+
+In Phase 2 the only field you can change this way is the **WebAuthn
+relying party** (`rp_id` and its origins), which passkey logins need.
+`keyroster root successor-policy` carries every other field over
+unchanged: admins, admin quorum, CA profiles and timelock. A quorum-gated
+policy change for those fields comes in Phase 4 (AUTHZ-03).
+
+> **`rp_id` is a one-way setting.** Every passkey enrolled under it works
+> only for that exact hostname. Renaming the host or changing `rp_id`
+> later makes every enrolled passkey unusable, and every user must enrol
+> again. Choose the hostname users will reach keyroster under for good,
+> not an IP address or a tailnet domain (both are refused).
+
+You need everything from [What you need](#what-you-need), plus:
+
+- the `bundle.json` and `policy.json` in force and their `.sigs` files,
+  copied to `/media/transfer/prev` (as for a rotation);
+- the SHA-256 of that `bundle.json` from the transcript;
+- the `roots.pub` of the bundle in force (the roots do not change), and
+  enough of those roots to meet its threshold.
+
+0. **Prepare.** Do [step 1](#1-prepare-the-binary-and-the-ceremony-machine)
+   first: build the binary and compare its SHA-256 with a second machine's
+   build, boot the live USB offline, and check that only `lo` is up. Then
+   run `date -u`. If the clock is earlier than the `issued_at` of the
+   bundle in force, or clearly wrong, set it before signing:
+   `root sign --prev` refuses a clock earlier than the previous bundle's.
+   Step 3 decrypts a root; never do that on a networked machine or with a
+   binary whose hash you have not compared.
+1. **Take the policy in force.** It is `/media/transfer/prev/policy.json`.
+2. **Write the successor policy:**
+
+   ```
+   /tmp/keyroster root successor-policy --prev /media/transfer/prev/policy.json \
+     --webauthn-rp-id keyroster.example.org --out /media/transfer/policy-next.json
+   ```
+
+   Add `--webauthn-origin https://keyroster.example.org:8443` (repeatable)
+   when the login page is served on another port; the default origin is
+   `https://<rp-id>`. It prints the old and the new `rp_id` and origins,
+   the new policy's SHA-256 and, on stderr:
+
+   ```
+   WARNING: rp_id is a one-way setting. Every passkey enrolled under it works only for that exact hostname; renaming the host or changing rp_id makes every enrolled passkey unusable.
+   ```
+
+   It refuses, and writes nothing, when `--out` exists, when `--prev` is
+   not a canonical policy, when the RP would not change, and when the RP
+   is not valid (an IP address, a tailnet domain, an origin with a path).
+   The output is not signed; nothing trusts it until step 3.
+3. **Sign the successor bundle** with the roots in force, as in
+   [Rotate the roots](#rotate-the-roots-successor-bundle) step 3, but with
+   the **same** roots file and threshold and the new policy:
+
+   ```
+   /tmp/keyroster root sign --prev /media/transfer/prev \
+     --prev-sha256 <SHA-256 of the bundle in force, from the transcript> \
+     --roots /media/transfer/roots.pub --threshold 1 \
+     --policy /media/transfer/policy-next.json \
+     --out-dir /media/transfer/policy-change \
+     --key /media/usbA/root-a.age
+   ```
+
+   Before you confirm, check two lines of the summary:
+
+   - `webauthn rp_id <hostname>  origins [...]` must name exactly the
+     hostname and origins you chose. `rp_id` is one-way, and this is the
+     only place `root sign` shows it. Every root custodian who signs
+     checks it, including one who did not see step 2's output.
+   - `policy sha256:` must equal the **last** `sha256:` line of step 2's
+     output, which is the new policy's hash. The first line of that output
+     (`successor of policy vN, sha256 ...`) is the hash of the previous
+     policy.
+
+   A root in both the previous and the new root set counts toward both
+   thresholds, so the roots' threshold of signatures is enough.
+4. **Verify against the paper:**
+
+   ```
+   /tmp/keyroster trust verify --prev /media/transfer/prev \
+     --prev-sha256 <SHA-256 of the bundle in force, from the transcript> \
+     --pin SHA256:<root A from paper> --pin SHA256:<root B from paper> --threshold 1 \
+     --bundle /media/transfer/policy-change/bundle.json \
+     --policy /media/transfer/policy-change/policy.json
+   ```
+
+   It must end with `OK: successor of trust bundle vN: ...`, and its
+   summary must show the same `webauthn rp_id ... origins [...]` line you
+   checked in step 3.
+5. **Install** with the signer stopped:
+   [signer-install.md, "Install a successor bundle"](signer-install.md#install-a-successor-bundle-stop-install-start).
+6. **Audit.** Export the log and run `keyroster audit verify` pinned to the
+   roots in force (from paper), with the commands of
+   [Rotate the roots](#rotate-the-roots-successor-bundle) step 7. The
+   expected output differs from that step's:
+
+   - The `OK:` line names the new trust bundle and policy versions
+     (`trust bundle vN+1, policy vN+1`) and counts
+     `login certificates N, directory installs N`.
+   - The `anchored:` line names the bundle where the current roots
+     **first** appeared, not the new bundle: a policy change keeps the
+     roots. On an installation whose roots were never rotated it prints
+     `anchored: the pinned roots are the root set of trust bundle v1`;
+     after one rotation, the rotation's bundle version.
+
+**The trust bundle version goes up by one.** A policy change is a new
+trust bundle, so record its version and SHA-256 in the transcript like a
+rotation's (KEY-07 bookkeeping): the next rotation or policy change chains
+to it with `--prev-sha256`.
+
+**A directory installed before the change stays in force** if the new
+policy still authorizes it (its admins signed it and its roles fit the
+user CA profile). Adding the RP changes neither, so logins work under the
+existing directory right after the restart, and `audit verify` accepts
+logins under it (`pol=N+1`, `dir` unchanged). The unit tests
+`TestDirectoryRestart/restart_under_rp_only_policy` (signer) and
+`TestVerifyLoginTampering/login_directory_survives_rp_policy_change`
+(audit) run exactly that; the e2e test below installs its directory after
+the change.
+
+> **Compatibility: update every `audit verify` binary.** From this change
+> on, the log can hold `directory_install` and `login_issue` entries, and
+> an `audit verify` binary older than plan 02-04 refuses every log that
+> holds one. A Phase 1 binary stops at the first `bundle_install` whose
+> policy names the WebAuthn RP, which is this procedure's successor
+> bundle, before it reaches any login:
+>
+> ```
+> audit: entry N: bundle_install is not a valid successor of trust bundle vN-1: policy: trust: document is not canonical JSON: json: unknown field "webauthn"
+> ```
+>
+> This error does not mean the bundle was tampered with: a Phase 1
+> binary does not know the policy's `webauthn` field. Update the binary.
+> Only a log whose `directory_install` comes before any policy with the RP
+> gives `tlog: malformed leaf: unknown kind 7` from a Phase 1 binary. A
+> binary built between plans 02-01 and 02-04 reports
+> `audit: entry N (directory_install): not verifiable by this version`.
+> None of them ever reports such a log as verified, so auditors must
+> update before they can verify it. These three messages come from
+> Phase 1 (`c526edf`) and 02-03 (`d6f53b3`) builds run on exports from
+> the audit test fixture, in this procedure's order and with the
+> directory first; they were not run on a real signer's export.
+
+> **What has run.** `TestAuditLoginAcrossPolicyChange` (e2e, real
+> binaries, real sshd, in CI) runs steps 2 to 6 on the agent backend, with
+> a root in an `ssh-agent` (`--agent-key`) instead of `--key`, the hash
+> prefix passed with `--confirm`, and directories instead of USB sticks:
+> successor-policy adds the RP to a signer whose genesis policy has none,
+> `root sign --prev` and `trust verify --prev` accept the successor, the
+> signer is stopped, the bundle installed and the signer restarted, a
+> directory is installed and a login certificate is issued under policy
+> v2 that sshd accepts, and the exported log verifies with
+> `login certificates 1, directory installs 1`. The successor-policy
+> refusals are unit-tested (`TestRootSuccessorPolicy`). Running this
+> procedure on the homelab signer, offline, from paper fingerprints, is
+> **UNVERIFIED**; plan 02-13 does it.
+
 ## Hardware-root variant
 
 For the product path (D-11), replace steps 3 and 4 with hardware keys. The
