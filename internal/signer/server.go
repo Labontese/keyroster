@@ -20,8 +20,13 @@ import (
 const connDeadline = 10 * time.Second
 
 // maxConns bounds concurrently handled connections, and so the request
-// memory: each reads at most one frame, of at most wire.MaxDirectoryFrame
-// (about 1.06 MiB), so about 34 MiB in all (T-02-12).
+// frame buffers: each connection reads one request frame, of at most
+// wire.MaxDirectoryFrame (about 1.06 MiB) for InstallDirectory and
+// wire.MaxFrame for every other type, so at most about 34 MiB of request
+// frame buffers in all (T-02-12). That is not a bound on the signer's
+// memory: a GetDirectory reply makes three to four short-lived copies of
+// the installed directory, for example. The pre-merge review measured
+// about 34 MiB in steady state with 32 connections.
 const maxConns = 32
 
 // Peer is the kernel-reported identity of a connected client.
