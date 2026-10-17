@@ -495,13 +495,15 @@ func verifyLoginIssue(index uint64, body *tlog.LoginIssueBody, leafMicros uint64
 		return fmt.Errorf("request ID %s replayed: issue entry %d already used it", reqID, prev)
 	}
 	// The signer refuses a CreatedAt more than 300 s from its clock when the
-	// request arrives; the entry time is that clock read a little later,
-	// when the certificate is issued. Both are compared in whole seconds,
-	// CreatedAt's unit.
-	leafSecs := leafMicros / 1e6
-	if d := absDiff(leafSecs, req.CreatedAt); d > maxLoginSkewSeconds {
-		return fmt.Errorf("request CreatedAt is %d s from the entry time (created %d, entry %d); the signer accepts at most %d s",
-			d, req.CreatedAt, leafSecs, maxLoginSkewSeconds)
+	// request arrives; the serial is that clock read a little later, in
+	// microseconds (serial.Next), and checkIssue bounded it above. The
+	// entry time is not used: appendLocked raises it to the previous
+	// leaf's time when the clock went back, so it can lie far after the
+	// issuance. Both are compared in whole seconds, CreatedAt's unit.
+	serialSecs := body.Serial / 1e6
+	if d := absDiff(serialSecs, req.CreatedAt); d > maxLoginSkewSeconds {
+		return fmt.Errorf("request CreatedAt is %d s from the serial's time (created %d, serial %d s); the signer accepts at most %d s",
+			d, req.CreatedAt, serialSecs, maxLoginSkewSeconds)
 	}
 	iss.loginIDs[reqID] = index
 	iss.next(body.Serial)

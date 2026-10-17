@@ -1994,9 +1994,30 @@ func TestVerifyLoginTampering(t *testing.T) {
 
 		// Freshness.
 		{name: "login_created_301s_before", build: oneLogin(func(l *login) { l.req.CreatedAt -= 301 }, nil),
-			want: "(login_issue): request CreatedAt is 301 s from the entry time"},
+			want: "(login_issue): request CreatedAt is 301 s from the serial's time"},
 		{name: "login_created_301s_after", build: oneLogin(func(l *login) { l.req.CreatedAt += 301 }, nil),
-			want: "(login_issue): request CreatedAt is 301 s from the entry time"},
+			want: "(login_issue): request CreatedAt is 301 s from the serial's time"},
+		// The signer logged a refusal while its clock ran 600 s ahead, then
+		// the clock was stepped back and a login was issued on the
+		// corrected clock: appendLocked raises the login's leaf time to the
+		// refusal's, but its serial and CreatedAt are the real time.
+		{name: "login_after_leaf_time_raised_ok", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.micros += 600e6
+			lf.addRefusal()
+			lf.addLogin(func(l *login) { l.req.CreatedAt = l.serial / 1e6 }, nil)
+			return lf
+		}},
+		// The same raised leaf time cannot excuse a CreatedAt 600 s from
+		// the serial: the signer checks CreatedAt against its clock, which
+		// the serial is read from.
+		{name: "login_created_at_raised_leaf_time", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.micros += 600e6
+			lf.addRefusal()
+			lf.addLogin(nil, nil) // CreatedAt = the raised leaf time
+			return lf
+		}, want: "(login_issue): request CreatedAt is 600 s from the serial's time"},
 
 		// Replay: request IDs are single-use for logins.
 		{name: "login_request_replayed", build: func(t *testing.T) *loginFixture {
