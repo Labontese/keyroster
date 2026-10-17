@@ -294,6 +294,9 @@ func TestDirectoryLogConsistency(t *testing.T) {
 		{"signatures_replaced", 1, func(t *testing.T, e *logEnv) {
 			execSQL(t, e.dbPath, `UPDATE directory SET sigs = 'x' WHERE version = 1`)
 		}},
+		{"policy_version_replaced", 1, func(t *testing.T, e *logEnv) {
+			execSQL(t, e.dbPath, `UPDATE directory SET policy_version = 2 WHERE version = 1`)
+		}},
 		// The older, validly signed version 1 is left.
 		{"newest_row_deleted", 2, func(t *testing.T, e *logEnv) {
 			execSQL(t, e.dbPath, `DELETE FROM directory WHERE version = 2`)

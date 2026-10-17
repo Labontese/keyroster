@@ -23,7 +23,7 @@ import (
 // larger than MaxFrame installs and GetDirectory returns it byte for byte,
 // because the directory messages have their own frame cap; a frame one
 // byte above that cap is refused after its header, and the signer keeps
-// serving (control).
+// serving (control). A GetDirectory request must have an empty body.
 func TestDirectoryOverSocket(t *testing.T) {
 	ts := newTestSigner(t, signerOpts{})
 	ctx := context.Background()
@@ -84,6 +84,31 @@ func TestDirectoryOverSocket(t *testing.T) {
 		// Control: the signer still serves, and still holds version 1.
 		if got, err := signerclient.GetDirectory(ctx, ts.Socket); err != nil || got.Version != 1 {
 			t.Fatalf("GetDirectory after the refused frame: %+v, %v", got, err)
+		}
+	})
+
+	t.Run("get_directory_with_body_refused", func(t *testing.T) {
+		conn, err := net.Dial("unix", ts.Socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := wire.WriteMessage(conn, wire.TypeGetDirectory, []byte{0}); err != nil {
+			t.Fatal(err)
+		}
+		typ, body, err := wire.ReadMessage(conn)
+		if err != nil || typ != wire.TypeError {
+			t.Fatalf("response %#x, %v; want an error response", typ, err)
+		}
+		if e, err := wire.ParseErrorResponse(body); err != nil || e.Message != "malformed_request" {
+			t.Fatalf("refusal %+v, %v; want malformed_request", e, err)
+		}
+		// Control: the same request with the empty body is answered.
+		if got, err := signerclient.GetDirectory(ctx, ts.Socket); err != nil || got.Version != 1 {
+			t.Fatalf("GetDirectory with an empty body: %+v, %v", got, err)
 		}
 	})
 }
