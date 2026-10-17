@@ -19,7 +19,14 @@ import (
 // connDeadline bounds one connection: peer check, one request, one response.
 const connDeadline = 10 * time.Second
 
-// maxConns bounds concurrently handled connections.
+// maxConns bounds concurrently handled connections, and so the request
+// frame buffers: each connection reads one request frame, of at most
+// wire.MaxDirectoryFrame (about 1.06 MiB) for InstallDirectory and
+// wire.MaxFrame for every other type, so at most about 34 MiB of request
+// frame buffers in all (T-02-12). That is not a bound on the signer's
+// memory: a GetDirectory reply makes three to four short-lived copies of
+// the installed directory, for example. The pre-merge review measured
+// about 34 MiB in steady state with 32 connections.
 const maxConns = 32
 
 // Peer is the kernel-reported identity of a connected client.
@@ -129,8 +136,10 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 // request frame, one response frame. The message type selects the request
 // and its evidence path: an IssueRequest takes admin evidence only, a
 // LoginIssueRequest a WebAuthn assertion only (T-02-05), and an
-// InstallDirectory request the admins' directory signatures. Every refusal goes through refuse
-// (slog plus the rate-limited audit log, D-14).
+// InstallDirectory request the admins' directory signatures. A
+// GetDirectory request (empty body) reads the installed directory. Every
+// refusal goes through refuse (slog plus the rate-limited audit log,
+// D-14).
 func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(time.Now().Add(connDeadline)); err != nil {
@@ -146,7 +155,7 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 		_ = s.refuse(ctx, peer, [32]byte{}, tlog.ReasonPeerNotAllowed, "peer_not_allowed")
 		return
 	}
-	msgType, body, err := wire.ReadMessage(conn)
+	msgType, body, err := wire.ReadMessage(conn, wire.RequestCaps)
 	if err != nil {
 		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_frame"))
 		return
@@ -188,6 +197,12 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 			return
 		}
 		s.respond(ctx, conn, peer, sha256.Sum256(req.Directory), wire.TypeInstallDirectoryResponse, resp, 0)
+	case wire.TypeGetDirectory:
+		if len(body) != 0 {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		s.respond(ctx, conn, peer, [32]byte{}, wire.TypeGetDirectoryResponse, s.GetDirectory(), 0)
 	default:
 		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "unknown_message_type"))
 	}

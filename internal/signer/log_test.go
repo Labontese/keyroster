@@ -69,6 +69,9 @@ type logEnv struct {
 	clock   func() time.Time // signer and bootstrap clock; nil means time.Now
 	db      *signerdb.DB
 	s       *Signer
+	// logOut receives the operator log of every signer open starts, as
+	// text; nil discards it.
+	logOut io.Writer
 }
 
 func newMemBackend(fx *Fixture) *memBackend {
@@ -126,10 +129,14 @@ func (e *logEnv) open() error {
 	if err != nil {
 		return err
 	}
+	out := e.logOut
+	if out == nil {
+		out = io.Discard
+	}
 	s, err := New(Config{
 		Backend: e.backend,
 		Clock:   e.clock,
-		DB:      db, AllowUIDs: []uint32{1000}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DB:      db, AllowUIDs: []uint32{1000}, Logger: slog.New(slog.NewTextHandler(out, nil)),
 	})
 	if err != nil {
 		_ = db.Close()

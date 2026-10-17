@@ -36,14 +36,19 @@ func CountPinnedSigners(doc, sigs []byte, namespace string, pinned map[string]ss
 	if err != nil {
 		return nil, err
 	}
+	// doc is hashed once, and a key that already counts is not verified
+	// again: a sigs input full of blocks carrying a pinned public key with
+	// junk signatures costs one small signature check each, not one hash
+	// of doc each.
+	digest := sshsig.DigestOf(doc)
 	signed := map[string]bool{}
 	for _, s := range parsed {
 		fp := ssh.FingerprintSHA256(s.PublicKey())
 		pub, ok := pinned[fp]
-		if !ok || !bytes.Equal(pub.Marshal(), s.PublicKey().Marshal()) {
+		if !ok || signed[fp] || !bytes.Equal(pub.Marshal(), s.PublicKey().Marshal()) {
 			continue
 		}
-		if s.Verify(namespace, doc) != nil {
+		if s.VerifyDigest(namespace, digest) != nil {
 			continue
 		}
 		signed[fp] = true

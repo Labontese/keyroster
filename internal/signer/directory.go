@@ -22,6 +22,8 @@ type directoryState struct {
 	// directoryRaw is the canonical bytes of the installed directory (nil
 	// when none is installed): the next version's prev is their SHA-256.
 	directoryRaw []byte
+	// directorySigs is the admins' signatures it was installed with.
+	directorySigs []byte
 	// directoryVersion is the installed directory's version, 0 for none.
 	directoryVersion uint64
 	// directoryAuthorized is set when the installed directory parses, is
@@ -30,21 +32,27 @@ type directoryState struct {
 	directoryAuthorized bool
 }
 
-// loadDirectory reads the installed directory at start and checks it
-// against the policy in force (s.policy): it must parse, carry the admin
-// quorum's signatures and fit the user CA profile. On any failure the
-// signer still starts, because the admin path needs no directory, but
-// refuses every login (directory_not_authorized) until a directory signed
-// under the policy in force is installed.
+// loadDirectory reads the installed directory at start. The stored row
+// must be exactly the one the verified log's last directory_install entry
+// records (checkDirectoryLogged), or the signer refuses to start (T-02-14).
+// Then it checks the directory against the policy in force (s.policy): it
+// must parse, carry the admin quorum's signatures and fit the user CA
+// profile. On any of those failures the signer still starts, because the
+// admin path needs no directory, but refuses every login
+// (directory_not_authorized) until a directory signed under the policy in
+// force is installed (T-02-15).
 func (s *Signer) loadDirectory(ctx context.Context) error {
 	stored, err := s.db.LatestDirectory(ctx)
 	if err != nil {
 		return err
 	}
+	if err := checkDirectoryLogged(stored, s.loaded.lastDirectory); err != nil {
+		return err
+	}
 	if stored == nil {
 		return nil
 	}
-	s.directoryRaw, s.directoryVersion = stored.Doc, stored.Version
+	s.directoryRaw, s.directorySigs, s.directoryVersion = stored.Doc, stored.Sigs, stored.Version
 	d, err := directory.Parse(stored.Doc)
 	if err != nil {
 		s.log.Error("installed directory does not parse: logins are refused until a valid directory is installed",
@@ -68,11 +76,14 @@ func (s *Signer) loadDirectory(ctx context.Context) error {
 }
 
 // InstallDirectory installs a new directory version online, without a
-// restart (D-01). Under s.mu it parses the document strictly
-// (directory_invalid), checks that it follows the installed version
-// (directory_version_chain), that the policy in force's admin quorum
-// signed it (directory_quorum_not_met) and that it fits the user CA
-// profile (directory_exceeds_policy). Then one transaction stores it and
+// restart (D-01). Under s.mu it checks that the policy in force's admin
+// quorum signed the document (directory_quorum_not_met) and that its
+// version and prev follow the installed version (directory_version_chain)
+// before it parses the document, so neither an unsigned document nor a
+// replayed older version is parsed (T-02-12). Then it parses the
+// document strictly (directory_invalid), checks the chain again on the
+// parsed document, and checks that it fits the user CA profile
+// (directory_exceeds_policy). Then one transaction stores it and
 // appends a directory_install leaf with the document and its signatures,
 // and only after COMMIT does the signer switch to it.
 func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
@@ -82,16 +93,22 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 	if req == nil {
 		return nil, refusalErr(wire.CodeMalformed, "malformed_request", nil)
 	}
+	admins, err := directory.VerifySignatures(req.Directory, req.Sigs, s.policy)
+	if err != nil {
+		return nil, refusalErr(wire.CodeRefused, "directory_quorum_not_met", err)
+	}
+	if err := directory.CheckSuccessorBytes(s.directoryRaw, req.Directory); err != nil {
+		return nil, refusalErr(wire.CodeRefused, "directory_version_chain", err)
+	}
 	d, err := directory.Parse(req.Directory)
 	if err != nil {
 		return nil, refusalErr(wire.CodeMalformed, "directory_invalid", err)
 	}
+	// Not reachable today: Parse accepts only canonical bytes, whose
+	// version and prev CheckSuccessorBytes read the same way. Kept so the
+	// chain is checked on the parsed document should that ever change.
 	if err := directory.CheckSuccessor(s.directoryRaw, d); err != nil {
 		return nil, refusalErr(wire.CodeRefused, "directory_version_chain", err)
-	}
-	admins, err := directory.VerifySignatures(req.Directory, req.Sigs, s.policy)
-	if err != nil {
-		return nil, refusalErr(wire.CodeRefused, "directory_quorum_not_met", err)
 	}
 	if err := directory.CheckPolicy(d, s.policy); err != nil {
 		return nil, refusalErr(wire.CodeRefused, "directory_exceeds_policy", err)
@@ -135,6 +152,7 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 	}
 	s.directory = d
 	s.directoryRaw = append([]byte(nil), req.Directory...)
+	s.directorySigs = append([]byte(nil), req.Sigs...)
 	s.directoryVersion = d.Version
 	s.directoryAuthorized = true
 	sum := sha256.Sum256(req.Directory)
@@ -148,4 +166,24 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 		"uid", peer.UID,
 		"pid", peer.PID)
 	return &wire.InstallDirectoryResponse{Version: d.Version, LeafIndex: leafIndex, SHA256: sum}, nil
+}
+
+// GetDirectory reports the installed directory as the signer holds it:
+// its version (0 when none is installed), its canonical bytes and
+// signatures as installed, and whether it is authorized under the policy
+// in force. A stored directory that no longer verifies is reported with
+// its bytes and Authorized false, so the server can mirror exactly what
+// the signer holds.
+func (s *Signer) GetDirectory() *wire.GetDirectoryResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.directoryRaw == nil {
+		return &wire.GetDirectoryResponse{}
+	}
+	return &wire.GetDirectoryResponse{
+		Version:    s.directoryVersion,
+		Directory:  append([]byte(nil), s.directoryRaw...),
+		Sigs:       append([]byte(nil), s.directorySigs...),
+		Authorized: s.directoryAuthorized,
+	}
 }

@@ -232,7 +232,7 @@ socket and runs no program.
 | `FAIL db_permissions` | `signer.db` readable by others | `chmod 0600 /var/lib/keyroster-signer/signer.db` |
 | `FAIL db_integrity` | SQLite integrity check failed, or the database cannot be read | Stop the signer; restore from backup; investigate. |
 | `FAIL log_mismatch` | the stored audit log does not reproduce its signed checkpoint, or contradicts what was recorded with it: CA keys but an empty log, or issue entries that do not match the issuance rows and the serial high-water mark (the log tables cut back to an earlier signed prefix, or wiped) | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
-| `FAIL trust_mismatch` | the installed trust bundle is not one `serve` would load: it does not list the keys ca-init recorded (for example another log key), names an online key or a root (of any bundle the log records) as a policy admin, or is not the bundle the log's last `bundle_install` entry records | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
+| `FAIL trust_mismatch` | the installed trust bundle is not one `serve` would load: it does not list the keys ca-init recorded (for example another log key), names an online key or a root (of any bundle the log records) as a policy admin, or is not the bundle the log's last `bundle_install` entry records; or the stored directory is not the one the log's last `directory_install` entry records | The database was changed outside the signer. Stop, keep a copy, investigate. `serve` refuses to start. |
 | `FAIL clock_regression` | the wall clock is behind the last issued serial | See [the clock warning](#snapshot-restore-check-the-clock-first). |
 | `WARN no_bundle` | no trust bundle installed | Run step 6. |
 | `WARN software_root` | a root has custody software (`SOFTWARE ROOT:`) | Expected for the homelab (D-10); move to hardware roots (D-11). |
@@ -325,6 +325,99 @@ seen a longer log. Record every restore in the operations log.
 Neither `doctor` nor `serve` can tell a restored database from a current
 one: the whole file is consistent with itself. The same holds for a log
 cut back together with its issuance rows and high-water mark, or cut back
-by trailing entries that issue nothing (refusals). Only an earlier export
-kept outside the signer shows it: keep each export, and verify the next
-one with `keyroster audit verify --previous <earlier export>`.
+by trailing entries that issue nothing (refusals, and trust bundle and
+directory installs). Only an earlier export kept outside the signer shows
+it: keep each export, and verify the next one with
+`keyroster audit verify --previous <earlier export>`.
+
+### A restore brings back the older trust bundle, policy and directory
+
+> **Warning.** Restoring an older `signer.db` also restores the trust
+> bundle, policy and directory it held. Admins removed since are accepted
+> again, users disabled since can log in again, and credentials removed
+> since work again. `serve` and `doctor` accept it, because the older state
+> is exactly what the older log records. The same happens when someone
+> with write access to `signer.db` cuts the log and those tables back to
+> an earlier signed prefix. The CA, ops and log keys cannot be rolled back
+> this way (the bundle must list the keys ca-init recorded). Phase 4 makes
+> `serve` refuse to start without a witnessed checkpoint at least as new
+> as the local one; until then this check is the operator's.
+
+Before starting the signer after a restore:
+
+1. Keep the service stopped, and export the restored log:
+
+   ```
+   systemctl stop keyroster-signer.service      # if it auto-started
+   runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+     keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/restored.jsonl
+   ```
+
+2. Compare it with the latest export you kept from before the restore:
+
+   ```
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     --previous /root/latest-saved.jsonl /tmp/restored.jsonl
+   ```
+
+   A restored log that is older than the saved one is reported as shrunk
+   or rewritten. **Until plan 02-04, `audit verify` refuses every log that
+   contains a `directory_install` entry** ("not verifiable by this
+   version"), so on a signer with a directory this step fails either way.
+   Compare the versions by hand instead, in both files:
+
+   ```
+   grep -o '"bundle_version":[0-9]*' /root/latest-saved.jsonl | tail -n 1
+   grep -o '"bundle_version":[0-9]*' /tmp/restored.jsonl | tail -n 1
+   grep -c '"kind":"directory_install"' /root/latest-saved.jsonl
+   grep -c '"kind":"directory_install"' /tmp/restored.jsonl
+   ```
+
+   The first pair is the installed trust bundle version. The second pair
+   counts directory installs, which is the installed directory version
+   (each install is the next version, starting at 1). If the restored
+   numbers are lower, the restore reinstated an older bundle or directory.
+   `doctor` also prints the restored bundle version (`OK bundle`).
+
+3. Reinstall what the restore lost, with the same bytes as before and
+   before anyone installs anything new. Install the exact versions that
+   were lost: a different version 2 built on the restored version 1 is
+   accepted too, and the disablements of the lost version are then gone
+   for good.
+
+   **Replay the lost installs in log order**, not all bundles first. A
+   directory version is checked against the policy in force when it is
+   installed (its admin quorum and the user CA cap), so a directory version
+   that was installed under bundle v1 can be refused once a later bundle
+   v2 with other admins or a lower cap is back. List the order from the
+   saved export; the lost entries are the ones after the restored log's
+   last entry:
+
+   ```
+   grep -n -o '"kind":"\(bundle\|directory\)_install"' /root/latest-saved.jsonl
+   ```
+
+   - **A lost `bundle_install`:** stop the signer, run `install-bundle`
+     with that bundle (see
+     [Install a successor bundle](#install-a-successor-bundle-stop-install-start)),
+     and start it again only if a lost directory version follows.
+   - **A lost `directory_install`: not possible yet at this point in
+     Phase 2.** A directory version goes in only through the running
+     signer's socket (its InstallDirectory request), and no keyroster
+     command sends that request until plan 02-09 adds
+     `keyroster directory install`. Nor can the signer run without login
+     peers: the shipped unit allows only `--allow-group keyroster-admin`,
+     which also owns the socket, so removing it removes every peer,
+     admins included.
+
+   So at this point in Phase 2, replay the lost bundles up to the first
+   lost directory version, and from there keep the restored signer
+   **stopped** until the lost directory versions can be reinstalled in
+   order. Starting it serves the restored, older directory: a user
+   disabled in a lost version can log in again.
+
+> **UNVERIFIED.** This procedure has not been run against a restored
+> database, and its directory half cannot be carried out yet (step 3).
+> The `grep` patterns match the export line format written by
+> `keyroster-signer export-log` (checked against its decoder, `audit.Decode`,
+> for `directory_install`), not a real export of a restored signer.

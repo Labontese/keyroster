@@ -65,6 +65,23 @@ func CheckSuccessor(installed []byte, next *Directory) error {
 	return nil
 }
 
+// CheckSuccessorBytes is CheckSuccessor on the version and prev of doc,
+// read without parsing or validating the rest of it, so a document that
+// cannot follow the installed version (a replayed older version, for
+// example) is refused before the cost of Parse. A doc whose version and
+// prev do not decode is not refused here: Parse refuses it. The caller
+// still runs CheckSuccessor on the parsed document.
+func CheckSuccessorBytes(installed, doc []byte) error {
+	var next struct {
+		Version uint64 `json:"version"`
+		Prev    string `json:"prev"`
+	}
+	if err := json.Unmarshal(doc, &next); err != nil {
+		return nil
+	}
+	return CheckSuccessor(installed, &Directory{Version: next.Version, Prev: next.Prev})
+}
+
 // CheckPolicy checks d against the policy in force: every role's max TTL
 // is at most the user CA profile's max_ttl_seconds, and every role
 // extension is one of that profile's default or allowed extensions.

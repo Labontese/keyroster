@@ -31,7 +31,10 @@ func (d *Directory) Authorize(user string, roles []string) (Grant, error) {
 	if d.Users[idx].Status != StatusActive {
 		return Grant{}, ErrUserDisabled
 	}
-	effective := d.effectiveRoles(user)
+	effective, err := d.userRoles(user)
+	if err != nil {
+		return Grant{}, err
+	}
 	selected := effective
 	if len(roles) > 0 {
 		selected = make([]string, 0, len(roles))

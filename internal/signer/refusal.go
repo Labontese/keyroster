@@ -59,18 +59,20 @@ func (l *refusalLimiter) allow(now time.Time) bool {
 }
 
 // refuse records one refusal and returns the response for the peer. Every
-// refusal is logged through slog. Within the rate it is appended to the
-// Merkle log as a refusal leaf (in its own transaction); above the rate, or
-// if that append fails, it is counted toward the next refusal_summary leaf
-// instead, so no refusal is dropped from the audit trail (D-14). digest is
-// zero when the request was never decoded.
+// refusal is logged through slog. Within the rate of the shared bucket
+// (s.limiter) it is appended to the Merkle log as a refusal leaf (in its
+// own transaction); above the rate, or if that append fails, it is counted
+// toward the next refusal_summary leaf instead, so no refusal is dropped
+// from the audit trail (D-14). digest is zero when the request was never
+// decoded.
 func (s *Signer) refuse(ctx context.Context, peer Peer, digest [32]byte, reason uint8, detail string) *wire.ErrorResponse {
-	return s.refuseLogging(ctx, peer, digest, reason, detail, nil)
+	return s.refuseLogging(ctx, s.limiter, peer, digest, reason, detail, nil)
 }
 
-// refuseLogging is refuse with extra attributes (key-value pairs) for its
-// operator log record.
-func (s *Signer) refuseLogging(ctx context.Context, peer Peer, digest [32]byte, reason uint8, detail string, extra []any) *wire.ErrorResponse {
+// refuseLogging is refuse with the rate of bucket and extra attributes
+// (key-value pairs) for its operator log record. Whatever bucket is used,
+// unlogged refusals are counted in s.limiter, which flushSummaries writes.
+func (s *Signer) refuseLogging(ctx context.Context, bucket *refusalLimiter, peer Peer, digest [32]byte, reason uint8, detail string, extra []any) *wire.ErrorResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	attrs := append([]any{"uid", peer.UID, "pid", peer.PID, "reason", detail,
@@ -78,7 +80,7 @@ func (s *Signer) refuseLogging(ctx context.Context, peer Peer, digest [32]byte, 
 	s.log.Warn("refused", attrs...)
 	resp := &wire.ErrorResponse{Code: codeFor(reason), Message: detail}
 	now := s.clock()
-	if !s.limiter.allow(now) {
+	if !bucket.allow(now) {
 		s.limiter.counts[reason]++
 		return resp
 	}
@@ -163,7 +165,7 @@ func (s *Signer) issueOrRefuse(ctx context.Context, peer Peer, req *wire.IssueRe
 	if req != nil {
 		digest = req.Digest()
 	}
-	return nil, s.refuseErr(ctx, peer, digest, err)
+	return nil, s.refuseErr(ctx, s.limiter, peer, digest, err)
 }
 
 // loginOrRefuse runs LoginIssue and records a refusal through refuseErr,
@@ -177,11 +179,15 @@ func (s *Signer) loginOrRefuse(ctx context.Context, peer Peer, req *wire.LoginIs
 	if req != nil {
 		digest = req.Digest()
 	}
-	return nil, s.refuseErr(ctx, peer, digest, err)
+	return nil, s.refuseErr(ctx, s.limiter, peer, digest, err)
 }
 
 // installDirectoryOrRefuse runs InstallDirectory and records a refusal
-// through refuseErr, with the SHA-256 of the refused directory document.
+// through refuseErr, with the SHA-256 of the refused directory document,
+// on the install bucket (s.installLimiter): a flood of malformed frames or
+// login refusals cannot leave a forged install as an anonymous count in
+// the next refusal_summary. A frame that does not decode as an install
+// request is refused on the shared bucket, so it cannot drain this one.
 func (s *Signer) installDirectoryOrRefuse(ctx context.Context, peer Peer, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, *wire.ErrorResponse) {
 	resp, err := s.InstallDirectory(ctx, peer, req)
 	if err == nil {
@@ -191,17 +197,17 @@ func (s *Signer) installDirectoryOrRefuse(ctx context.Context, peer Peer, req *w
 	if req != nil {
 		digest = sha256.Sum256(req.Directory)
 	}
-	return nil, s.refuseErr(ctx, peer, digest, err)
+	return nil, s.refuseErr(ctx, s.installLimiter, peer, digest, err)
 }
 
 // refuseErr records err (a *refusal, or any other error as internal_error)
-// through refuse. For the signer's own failures (internal and unavailable
+// through refuseLogging on bucket. For the signer's own failures (internal and unavailable
 // refusals: database, backend, encoding) the cause's Go type and text go
 // into the operator log record, so the operator can find the root cause;
 // they never reach the peer or the audit log. A refused request's cause is
 // not logged: its reason code already says what was wrong, and its text
 // can carry peer-supplied bytes (a key algorithm name, a principal).
-func (s *Signer) refuseErr(ctx context.Context, peer Peer, digest [32]byte, err error) *wire.ErrorResponse {
+func (s *Signer) refuseErr(ctx context.Context, bucket *refusalLimiter, peer Peer, digest [32]byte, err error) *wire.ErrorResponse {
 	var r *refusal
 	if !errors.As(err, &r) {
 		r = &refusal{code: wire.CodeInternal, reason: "internal_error", cause: err}
@@ -210,7 +216,7 @@ func (s *Signer) refuseErr(ctx context.Context, peer Peer, digest [32]byte, err 
 	if r.cause != nil && r.code != wire.CodeRefused {
 		extra = []any{"cause_type", fmt.Sprintf("%T", r.cause), "cause", r.cause.Error()}
 	}
-	return s.refuseLogging(ctx, peer, digest, classify(r.reason), r.reason, extra)
+	return s.refuseLogging(ctx, bucket, peer, digest, classify(r.reason), r.reason, extra)
 }
 
 // classify maps a signer reason string to its refusal reason class.

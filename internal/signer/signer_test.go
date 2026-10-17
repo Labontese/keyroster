@@ -578,7 +578,7 @@ func TestSignerFraming(t *testing.T) {
 			if err := wire.WriteMessage(conn, tc.msgType, tc.body); err != nil {
 				t.Fatal(err)
 			}
-			typ, body, err := wire.ReadMessage(conn)
+			typ, body, err := wire.ReadMessage(conn, wire.ResponseCaps(wire.TypeError))
 			if err != nil || typ != wire.TypeError {
 				t.Fatalf("response type %#x, error %v; want an error response", typ, err)
 			}

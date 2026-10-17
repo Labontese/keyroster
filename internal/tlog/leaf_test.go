@@ -406,3 +406,13 @@ func TestLoginIssueBody(t *testing.T) {
 		t.Fatalf("a request above MaxRequest encodes: %v", err)
 	}
 }
+
+// TestDirectoryLimitsMatchWire: every directory and signature set that
+// fits the wire messages (InstallDirectory, GetDirectoryResponse) fits a
+// directory_install leaf, and no larger one does.
+func TestDirectoryLimitsMatchWire(t *testing.T) {
+	if wire.MaxDirectory != MaxDocument || wire.MaxDirectorySigs != MaxSigs {
+		t.Fatalf("wire.MaxDirectory %d, wire.MaxDirectorySigs %d; want tlog.MaxDocument %d and tlog.MaxSigs %d",
+			wire.MaxDirectory, wire.MaxDirectorySigs, MaxDocument, MaxSigs)
+	}
+}

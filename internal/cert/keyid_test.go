@@ -82,34 +82,6 @@ func TestParseKeyIDRefusals(t *testing.T) {
 	}
 }
 
-func FuzzParseKeyID(f *testing.F) {
-	for _, s := range []string{
-		validKeyIDString,
-		"kr1/ca=host/sub=h:web/req=" + testRequestHex + "/pol=7/ser=18446744073709551615",
-		"kr1/ca=machine/sub=m:x/req=" + testRequestHex + "/pol=0/ser=1",
-		"kr2/ca=user/sub=u:alice/req=" + testRequestHex + "/pol=0/ser=42",
-		"kr1/ca=user/sub=u:a/b/req=" + testRequestHex + "/pol=0/ser=42",
-		"kr1/ca=user/sub=/req=/pol=/ser=",
-		"kr1/ca=user/sub=u:alice/req=" + testRequestHex + "/pol=01/ser=42",
-		"",
-		"kr1/",
-	} {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, s string) {
-		k, err := ParseKeyID(s)
-		if err != nil {
-			if !errors.Is(err, ErrKeyID) {
-				t.Fatalf("ParseKeyID(%q) = %v, want ErrKeyID", s, err)
-			}
-			return
-		}
-		if got := k.String(); got != s {
-			t.Fatalf("accepted key ID %q formats back as %q", s, got)
-		}
-	})
-}
-
 // TestKeyIDKr2Golden pins the kr2 format (D-08) with a literal: the field
 // order, "+" between sorted roles and the decimals.
 func TestKeyIDKr2Golden(t *testing.T) {

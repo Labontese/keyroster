@@ -183,6 +183,11 @@ func TestDoctorFailures(t *testing.T) {
 		{"serial high-water raised outside the signer", func(t *testing.T, s doctorState) {
 			s.exec(t, `UPDATE serial_state SET last_serial = ? WHERE id = 1`, time.Now().Add(time.Hour).UnixMicro())
 		}, "FAIL log_mismatch:"},
+		// T-02-14: a directory row the log records no directory_install
+		// entry for, which serve refuses to start on.
+		{"directory row without a log entry", func(t *testing.T, s doctorState) {
+			s.exec(t, `INSERT INTO directory (version, doc, sigs, policy_version, installed_at_us) VALUES (1, 'x', 'x', 1, 1)`)
+		}, "FAIL trust_mismatch:"},
 		{"log wiped", func(t *testing.T, s doctorState) {
 			s.exec(t, `DELETE FROM log_leaf`)
 			s.exec(t, `DELETE FROM checkpoint`)

@@ -83,6 +83,10 @@ type Signer struct {
 	logState
 	directoryState
 	limiter *refusalLimiter // guarded by mu
+	// installLimiter is the refusal-log bucket of refused directory
+	// installs, so a flood of other refusals cannot drain it (D-14); what
+	// it does not log is counted in limiter. Guarded by mu.
+	installLimiter *refusalLimiter
 	// overloaded counts connections refused over capacity by the accept
 	// loop, which never takes mu; flushSummaries moves it into the limiter.
 	overloaded atomic.Uint64
@@ -98,8 +102,10 @@ type Signer struct {
 // without an installed bundle, when any bundle key is missing from the
 // backend, when the stored leaves do not reproduce the latest signed
 // checkpoint, when the installed bundle record is not the one the last
-// bundle_install entry of that log records, and when its policy names a
-// root of any bundle the log records as an admin. The trust state is loaded only here: once another bundle is
+// bundle_install entry of that log records, when its policy names a
+// root of any bundle the log records as an admin, and when the latest
+// stored directory is not the one the last directory_install entry
+// records. The trust state is loaded only here: once another bundle is
 // installed, the signer refuses every request (trust_changed) until it is
 // restarted and loads it.
 func New(cfg Config) (*Signer, error) {
@@ -144,6 +150,7 @@ func New(cfg Config) (*Signer, error) {
 		s.log = slog.Default()
 	}
 	s.limiter = newRefusalLimiter(perMinute, burst, s.clock())
+	s.installLimiter = newRefusalLimiter(perMinute, burst, s.clock())
 	if err := s.initLog(context.Background()); err != nil {
 		return nil, err
 	}

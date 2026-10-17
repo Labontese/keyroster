@@ -181,6 +181,12 @@ func TestLoginSignerEndToEnd(t *testing.T) {
 // and attaches auth's assertion over its Digest as the only evidence.
 func loginRequest(t *testing.T, auth *webauthntest.Authenticator, key ssh.PublicKey) *wire.LoginIssueRequest {
 	t.Helper()
+	return withAssertion(t, auth, unsignedLoginRequest(t, key))
+}
+
+// unsignedLoginRequest is loginRequest without evidence.
+func unsignedLoginRequest(t *testing.T, key ssh.PublicKey) *wire.LoginIssueRequest {
+	t.Helper()
 	req := &wire.LoginIssueRequest{
 		SubjectKey:      key.Marshal(),
 		Subject:         "alice",
@@ -191,6 +197,13 @@ func loginRequest(t *testing.T, auth *webauthntest.Authenticator, key ssh.Public
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		t.Fatal(err)
 	}
+	return req
+}
+
+// withAssertion replaces req's evidence with auth's assertion over req's
+// Digest, as it is at the time of the call, and returns req.
+func withAssertion(t *testing.T, auth *webauthntest.Authenticator, req *wire.LoginIssueRequest) *wire.LoginIssueRequest {
+	t.Helper()
 	a := auth.Assert(loginRPID, loginOrigin, req.Digest())
 	blob, err := (&wire.WebAuthnAssertion{
 		CredentialID:      a.CredentialID,

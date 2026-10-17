@@ -162,8 +162,8 @@ type Facts struct {
 	// Bundle is the installed trust bundle, nil when none is installed.
 	Bundle *trust.Bundle
 	// TrustError says why serve would refuse the installed trust bundle
-	// (signer.CheckTrust); empty when it would load it, or when none is
-	// installed and the log records none.
+	// or directory (signer.CheckTrust); empty when it would load them, or
+	// when none is installed and the log records none.
 	TrustError string
 	// CAKeys are the online keys ca-init recorded.
 	CAKeys []CAKeyFact
@@ -237,9 +237,9 @@ func Run(f Facts) []Result {
 	}
 	switch {
 	case f.TrustError != "":
-		add(FAIL, CodeTrustMismatch, "the installed trust bundle is not one serve would load (%s); serve refuses to start", f.TrustError)
+		add(FAIL, CodeTrustMismatch, "the installed trust bundle or directory is not one serve would load (%s); serve refuses to start", f.TrustError)
 	case f.Bundle != nil:
-		add(OK, codeTrust, "the installed trust bundle lists the recorded keys and is the one the log's last bundle_install entry records (its root signatures are checked by install-bundle and audit verify, not here)")
+		add(OK, codeTrust, "the installed trust bundle lists the recorded keys and is the one the log's last bundle_install entry records, and the stored directory is the one its last directory_install entry records (the root signatures are checked by install-bundle and audit verify, the admin signatures by the signer at install and at start, not here)")
 	}
 	rs = append(rs, custodyResults(f)...)
 	return rs

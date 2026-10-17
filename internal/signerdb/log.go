@@ -115,8 +115,8 @@ func (d *DB) ReadLog(ctx context.Context, fn func(idx uint64, leaf []byte) error
 }
 
 // LogSnapshot is what ReadLogWithHashes read besides the leaves, from the
-// same snapshot: the latest checkpoint and the trust tables that commit in
-// the same transactions as the log.
+// same snapshot: the latest checkpoint and the trust and directory tables
+// that commit in the same transactions as the log.
 type LogSnapshot struct {
 	// Checkpoint is the latest signed checkpoint and Size the log size it
 	// names; Checkpoint is nil when the log has none.
@@ -126,6 +126,9 @@ type LogSnapshot struct {
 	// latest installed trust bundle, nil when none is installed.
 	CAKeys []CAKey
 	Bundle *StoredBundle
+	// Directory is the latest installed directory, nil when none is
+	// installed.
+	Directory *StoredDirectory
 	// LastSerial is the serial high-water mark and Issuances the number
 	// of issuance rows; both commit with every issue leaf.
 	LastSerial uint64
@@ -136,7 +139,8 @@ type LogSnapshot struct {
 // one read transaction: it calls fn for every leaf with its stored hash, in
 // index order, and then returns the latest checkpoint (fn has then seen
 // every leaf) together with the ca-init keys, the latest trust bundle, the
-// serial high-water mark and the number of issuance rows.
+// latest directory, the serial high-water mark and the number of issuance
+// rows.
 // Appends committed meanwhile are not seen, so the leaves, hashes,
 // checkpoint and trust tables always belong together.
 func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, hash []byte) error) (*LogSnapshot, error) {
@@ -182,6 +186,9 @@ func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, ha
 		return nil, err
 	}
 	if snap.Bundle, err = latestBundle(ctx, tx); err != nil && !errors.Is(err, ErrNoBundle) {
+		return nil, err
+	}
+	if snap.Directory, err = latestDirectory(ctx, tx); err != nil {
 		return nil, err
 	}
 	if snap.LastSerial, err = lastSerial(ctx, tx); err != nil {

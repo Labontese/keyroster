@@ -312,13 +312,13 @@ func (d *Directory) Validate() error {
 		}
 	}
 
+	effective, err := d.roleGrants()
+	if err != nil {
+		return err
+	}
 	for _, u := range d.Users {
-		effective := d.effectiveRoles(u.Name)
-		if len(effective) > MaxRolesPerUser {
-			return fmt.Errorf("%w: user %s has %d roles (at most %d)", ErrInvalid, u.Name, len(effective), MaxRolesPerUser)
-		}
 		principals := map[string]bool{}
-		for _, rn := range effective {
+		for _, rn := range effective[u.Name] {
 			for _, p := range roles[rn].Principals {
 				principals[p] = true
 			}
@@ -354,9 +354,53 @@ func (c Credential) validate() error {
 	return nil
 }
 
-// effectiveRoles returns the sorted names of the roles that grant user
-// directly or through a group.
-func (d *Directory) effectiveRoles(user string) []string {
+// roleGrants returns, for every user a role grants directly or through a
+// group, the sorted names of those roles, each once. It refuses
+// (ErrInvalid) as soon as one user holds more than MaxRolesPerUser roles.
+// That bounds the work by the size of d instead of users times roles
+// (T-02-12): a role visits each of its users once and the members of each
+// of its groups once, and every role listing a non-empty group grants each
+// member one more role, so at most MaxRolesPerUser + 1 roles visit a group
+// before the refusal.
+func (d *Directory) roleGrants() (map[string][]string, error) {
+	members := make(map[string][]string, len(d.Groups))
+	for _, g := range d.Groups {
+		members[g.Name] = g.Members
+	}
+	out := map[string][]string{}
+	for _, r := range d.Roles {
+		grant := func(user string) error {
+			held := out[user]
+			if n := len(held); n > 0 && held[n-1] == r.Name {
+				return nil // already granted by this role
+			}
+			if len(held) == MaxRolesPerUser {
+				return fmt.Errorf("%w: user %s has more than %d roles", ErrInvalid, user, MaxRolesPerUser)
+			}
+			out[user] = append(held, r.Name)
+			return nil
+		}
+		for _, u := range r.Users {
+			if err := grant(u); err != nil {
+				return nil, err
+			}
+		}
+		for _, g := range r.Groups {
+			for _, u := range members[g] {
+				if err := grant(u); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return out, nil // d.Roles is sorted, so every list is too
+}
+
+// userRoles is roleGrants for the one user Authorize serves, which the
+// signer runs under its lock for every login: one scan of d for that
+// user, not every user's roles (T-02-12). Same result and the same
+// MaxRolesPerUser refusal as roleGrants (TestUserRolesMatchesRoleGrants).
+func (d *Directory) userRoles(user string) ([]string, error) {
 	inGroup := map[string]bool{}
 	for _, g := range d.Groups {
 		if slices.Contains(g.Members, user) {
@@ -365,17 +409,15 @@ func (d *Directory) effectiveRoles(user string) []string {
 	}
 	var out []string
 	for _, r := range d.Roles {
-		granted := slices.Contains(r.Users, user)
-		for _, g := range r.Groups {
-			if inGroup[g] {
-				granted = true
-			}
+		if !slices.Contains(r.Users, user) && !slices.ContainsFunc(r.Groups, func(g string) bool { return inGroup[g] }) {
+			continue
 		}
-		if granted {
-			out = append(out, r.Name)
+		if len(out) == MaxRolesPerUser {
+			return nil, fmt.Errorf("%w: user %s has more than %d roles", ErrInvalid, user, MaxRolesPerUser)
 		}
+		out = append(out, r.Name)
 	}
-	return out // d.Roles is sorted, so out is too
+	return out, nil // d.Roles is sorted, so out is too
 }
 
 // checkSorted requires list to be sorted and duplicate-free.
