@@ -9,13 +9,17 @@ import (
 	"encoding/base64"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/webauthn"
@@ -402,5 +406,130 @@ func TestAuthorize(t *testing.T) {
 	}
 	if _, ok := d.Credential("bob", id); ok {
 		t.Fatal("Credential(bob, alice's id) found a credential")
+	}
+}
+
+// rolesFixture is the fixture with n more roles r00, r01, ... each
+// granting principal role:rNN: the even ones to alice directly, the odd
+// ones through group ops-team, of which alice is a member.
+func rolesFixture(t testing.TB, n int) *Directory {
+	t.Helper()
+	d := fixture(t)
+	for i := range n {
+		r := Role{Name: fmt.Sprintf("r%02d", i), Principals: []string{fmt.Sprintf("role:r%02d", i)}, MaxTTLSeconds: 600,
+			Extensions: []string{}, Users: []string{}, Groups: []string{}}
+		if i%2 == 0 {
+			r.Users = []string{"alice"}
+		} else {
+			r.Groups = []string{"ops-team"}
+		}
+		d.Roles = append(d.Roles, r)
+	}
+	d.Sort()
+	return d
+}
+
+// TestValidateRoleBounds (D-08): a user's effective roles, direct and
+// through groups, count each role once and are at most MaxRolesPerUser,
+// and the union of their principals is at most cert.MaxPrincipals.
+func TestValidateRoleBounds(t *testing.T) {
+	t.Run("at_cap_direct_group_and_both", func(t *testing.T) {
+		// ops (direct) and 15 more: a role granted both directly and
+		// through two groups counts once.
+		d := rolesFixture(t, MaxRolesPerUser-1)
+		d.Groups = append(d.Groups, Group{Name: "ops-two", Members: []string{"alice"}})
+		d.Roles[0].Users, d.Roles[0].Groups = []string{"alice"}, []string{"ops-team", "ops-two"}
+		d.Sort()
+		if err := d.Validate(); err != nil {
+			t.Fatalf("Validate with %d roles = %v, want nil", MaxRolesPerUser, err)
+		}
+		g, err := d.Authorize("alice", nil)
+		if err != nil || len(g.Roles) != MaxRolesPerUser || len(g.Principals) != MaxRolesPerUser {
+			t.Fatalf("Authorize = %+v, %v; want %d roles and principals", g, err, MaxRolesPerUser)
+		}
+	})
+	t.Run("above_cap", func(t *testing.T) {
+		d := rolesFixture(t, MaxRolesPerUser)
+		err := d.Validate()
+		if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "user alice has more than 16 roles") {
+			t.Fatalf("Validate with %d roles = %v, want ErrInvalid naming alice's roles", MaxRolesPerUser+1, err)
+		}
+		// Authorize on a directory that was never validated refuses too.
+		if _, err := d.Authorize("alice", nil); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Authorize with %d roles = %v, want ErrInvalid", MaxRolesPerUser+1, err)
+		}
+	})
+	t.Run("principals_at_cap_shared_counted_once", func(t *testing.T) {
+		d := rolesFixture(t, 2)
+		d.Roles[0].Principals = principalList("p", 31)                       // ops
+		d.Roles[1].Principals = append(principalList("p", 30), "role:extra") // r00
+		d.Roles[2].Principals = append(principalList("p", 1), "role:extra")  // r01
+		d.Sort()
+		if err := d.Validate(); err != nil {
+			t.Fatalf("Validate with %d distinct principals = %v, want nil", cert.MaxPrincipals, err)
+		}
+	})
+	t.Run("principals_above_cap", func(t *testing.T) {
+		d := rolesFixture(t, 1)
+		d.Roles[0].Principals = principalList("p", 32)
+		d.Roles[1].Principals = principalList("q", 1)
+		d.Sort()
+		err := d.Validate()
+		if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "user alice would get 33 principals") {
+			t.Fatalf("Validate with 33 principals = %v, want ErrInvalid naming alice's principals", err)
+		}
+	})
+}
+
+// principalList returns n principals prefix:00, prefix:01, ...
+func principalList(prefix string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%s:%02d", prefix, i)
+	}
+	return out
+}
+
+// largeDirectory is a directory of n disabled users (no credentials), a
+// group listing all of them and MaxRolesPerUser roles, half granting every
+// user directly and half through the group: the shape of a directory near
+// the 1 MiB cap at n = 9000.
+func largeDirectory(n int) *Directory {
+	d := &Directory{Version: 1, Prev: trust.GenesisPrev, Users: []User{}, Groups: []Group{}, Roles: []Role{}, HostGroups: []HostGroup{}}
+	names := make([]string, n)
+	for i := range n {
+		names[i] = fmt.Sprintf("u%05d", i)
+		d.Users = append(d.Users, User{Name: names[i], Status: StatusDisabled, Credentials: []Credential{}})
+	}
+	d.Groups = append(d.Groups, Group{Name: "everyone", Members: names})
+	for i := range MaxRolesPerUser {
+		r := Role{Name: fmt.Sprintf("r%02d", i), Principals: []string{fmt.Sprintf("role:r%02d", i)}, MaxTTLSeconds: 600,
+			Extensions: []string{}, Users: []string{}, Groups: []string{}}
+		if i%2 == 0 {
+			r.Users = names
+		} else {
+			r.Groups = []string{"everyone"}
+		}
+		d.Roles = append(d.Roles, r)
+	}
+	return d
+}
+
+// TestValidateLinear (T-02-12): Validate's per-user role computation is
+// linear in the directory, not quadratic: 20000 users, a group of all of
+// them and 16 roles granting each of them validate in well under a second
+// (the quadratic computation took tens of seconds on this shape). Skipped
+// under the race detector, whose slowdown makes a time bound meaningless.
+func TestValidateLinear(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing bound not meaningful under -race")
+	}
+	d := largeDirectory(20000)
+	start := time.Now()
+	if err := d.Validate(); err != nil {
+		t.Fatalf("Validate = %v, want nil", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("Validate of %d users took %v, want well under 1 s (linear)", len(d.Users), took)
 	}
 }

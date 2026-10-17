@@ -127,6 +127,16 @@ func TestDirectoryInstallRefusals(t *testing.T) {
 			doc, sigs := signDirectory(t, loginDirectory(pk, 2, prev), outsider)
 			return &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}
 		}},
+		// Signatures are checked before the document is parsed (T-02-12):
+		// a document that does not parse, signed by a non-admin, is
+		// refused for its signatures, so parsing never runs under s.mu
+		// for a peer the admins did not authorize.
+		{"directory_quorum_not_met/unparsable_signed_by_non_admin", "directory_quorum_not_met", 1, 1, func(t *testing.T, _ *logEnv, prev string) *wire.InstallDirectoryRequest {
+			_, outsider := NewEd25519Key(t)
+			doc, _ := signDirectory(t, loginDirectory(pk, 2, prev))
+			doc = append([]byte(`{"comment":"x",`), doc[1:]...)
+			return &wire.InstallDirectoryRequest{Directory: doc, Sigs: signDoc(t, doc, outsider)}
+		}},
 		{"directory_quorum_not_met/same_admin_twice", "directory_quorum_not_met", 2, 2, func(t *testing.T, e *logEnv, prev string) *wire.InstallDirectoryRequest {
 			doc, sigs := signDirectory(t, loginDirectory(pk, 2, prev), e.fx.Admins[0], e.fx.Admins[0])
 			return &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}

@@ -82,10 +82,23 @@ type Signature struct {
 // the caller matches it against a pinned key.
 func (s *Signature) PublicKey() ssh.PublicKey { return s.pub }
 
+// Digest is the hash of a signed message (sha512, the only hash algorithm
+// accepted). A verifier that checks many signatures over one message
+// hashes it once (DigestOf) and checks each with VerifyDigest.
+type Digest [sha512.Size]byte
+
+// DigestOf returns the Digest of msg.
+func DigestOf(msg []byte) Digest { return sha512.Sum512(msg) }
+
 // Verify checks that s is a valid signature over msg under namespace, which
 // must be non-empty and equal to the signed namespace. It does not decide
 // whether the signer is trusted.
 func (s *Signature) Verify(namespace string, msg []byte) error {
+	return s.VerifyDigest(namespace, DigestOf(msg))
+}
+
+// VerifyDigest is Verify for the message whose DigestOf is digest.
+func (s *Signature) VerifyDigest(namespace string, digest Digest) error {
 	if namespace == "" || s.namespace != namespace {
 		return fmt.Errorf("%w: signed under %q, want %q", ErrNamespace, s.namespace, namespace)
 	}
@@ -95,7 +108,7 @@ func (s *Signature) Verify(namespace string, msg []byte) error {
 	if err := checkFormat(s.pub, s.sig); err != nil {
 		return err
 	}
-	if err := s.pub.Verify(signedData(namespace, msg), s.sig); err != nil {
+	if err := s.pub.Verify(signedData(namespace, digest), s.sig); err != nil {
 		return fmt.Errorf("sshsig: invalid signature: %w", err)
 	}
 	return nil
@@ -113,7 +126,7 @@ func Sign(rnd io.Reader, s ssh.Signer, namespace string, msg []byte) ([]byte, er
 	if err := checkKeyType(pub); err != nil {
 		return nil, err
 	}
-	data := signedData(namespace, msg)
+	data := signedData(namespace, DigestOf(msg))
 	sig, err := s.Sign(rnd, data)
 	if err != nil {
 		return nil, fmt.Errorf("sshsig: sign: %w", err)
@@ -164,10 +177,9 @@ func ParseAll(data []byte) ([]*Signature, error) {
 }
 
 // signedData is the message the key signs (PROTOCOL.sshsig): the magic
-// preamble, then namespace, reserved, hash algorithm and H(msg) as SSH
+// preamble, then namespace, reserved, hash algorithm and H(msg) (h) as SSH
 // strings.
-func signedData(namespace string, msg []byte) []byte {
-	h := sha512.Sum512(msg)
+func signedData(namespace string, h Digest) []byte {
 	var b cryptobyte.Builder
 	b.AddBytes([]byte(magic))
 	for _, f := range [][]byte{[]byte(namespace), nil, []byte(hashAlgorithm), h[:]} {

@@ -76,11 +76,12 @@ func (s *Signer) loadDirectory(ctx context.Context) error {
 }
 
 // InstallDirectory installs a new directory version online, without a
-// restart (D-01). Under s.mu it parses the document strictly
-// (directory_invalid), checks that it follows the installed version
-// (directory_version_chain), that the policy in force's admin quorum
-// signed it (directory_quorum_not_met) and that it fits the user CA
-// profile (directory_exceeds_policy). Then one transaction stores it and
+// restart (D-01). Under s.mu it checks that the policy in force's admin
+// quorum signed the document (directory_quorum_not_met), first, so a peer
+// the admins did not authorize never gets it parsed (T-02-12). Then it
+// parses the document strictly (directory_invalid) and checks that it
+// follows the installed version (directory_version_chain) and fits the
+// user CA profile (directory_exceeds_policy). Then one transaction stores it and
 // appends a directory_install leaf with the document and its signatures,
 // and only after COMMIT does the signer switch to it.
 func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
@@ -90,16 +91,16 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 	if req == nil {
 		return nil, refusalErr(wire.CodeMalformed, "malformed_request", nil)
 	}
+	admins, err := directory.VerifySignatures(req.Directory, req.Sigs, s.policy)
+	if err != nil {
+		return nil, refusalErr(wire.CodeRefused, "directory_quorum_not_met", err)
+	}
 	d, err := directory.Parse(req.Directory)
 	if err != nil {
 		return nil, refusalErr(wire.CodeMalformed, "directory_invalid", err)
 	}
 	if err := directory.CheckSuccessor(s.directoryRaw, d); err != nil {
 		return nil, refusalErr(wire.CodeRefused, "directory_version_chain", err)
-	}
-	admins, err := directory.VerifySignatures(req.Directory, req.Sigs, s.policy)
-	if err != nil {
-		return nil, refusalErr(wire.CodeRefused, "directory_quorum_not_met", err)
 	}
 	if err := directory.CheckPolicy(d, s.policy); err != nil {
 		return nil, refusalErr(wire.CodeRefused, "directory_exceeds_policy", err)

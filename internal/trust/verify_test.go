@@ -7,6 +7,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -443,5 +444,36 @@ func TestVerifySelfSigned(t *testing.T) {
 				t.Fatalf("bundle %v, err = %v, want %v", b, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestCountPinnedSignersForgedBlocks (T-02-12): signature blocks that carry
+// a pinned public key with junk signatures cost a small signature check
+// each, not a hash of the document each. 64 KiB of such blocks over a
+// 1 MiB document are checked in well under 150 ms (hashing the document
+// per block took about 300 ms), and a valid signature by the same key after
+// them still counts. The time bound is skipped under the race detector.
+func TestCountPinnedSignersForgedBlocks(t *testing.T) {
+	admin := edKey(t, seedRootA)
+	doc := bytes.Repeat([]byte("a"), 1<<20)
+	forged := signAll(t, NamespaceBundle, []byte("another document\n"), admin)
+	var sigs []byte
+	for len(sigs)+len(forged) <= 64<<10 {
+		sigs = append(sigs, forged...)
+	}
+	pinned := map[string]ssh.PublicKey{fp(admin): admin.PublicKey()}
+	start := time.Now()
+	got, err := CountPinnedSigners(doc, sigs, NamespaceBundle, pinned)
+	took := time.Since(start)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("CountPinnedSigners over junk blocks = %v, %v; want no signer", got, err)
+	}
+	if !raceEnabled && took > 150*time.Millisecond {
+		t.Fatalf("%d junk blocks over a 1 MiB document took %v, want well under 150 ms", len(sigs)/len(forged), took)
+	}
+	// Control: a valid signature by the same key after the junk counts.
+	got, err = CountPinnedSigners(doc, append(sigs, signAll(t, NamespaceBundle, doc, admin)...), NamespaceBundle, pinned)
+	if err != nil || !slices.Equal(got, []string{fp(admin)}) {
+		t.Fatalf("CountPinnedSigners with a valid signature after the junk = %v, %v; want the admin", got, err)
 	}
 }

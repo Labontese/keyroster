@@ -74,7 +74,7 @@ func customBlob(t *testing.T, s ssh.Signer, namespace, reserved, hashAlg string,
 		h := sha256.Sum256(msg)
 		digest = h[:]
 	default:
-		data := signedData(namespace, msg)
+		data := signedData(namespace, DigestOf(msg))
 		return armor(blobWith(t, s, namespace, reserved, hashAlg, data))
 	}
 	var b cryptobyte.Builder
