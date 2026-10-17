@@ -22,6 +22,8 @@ type directoryState struct {
 	// directoryRaw is the canonical bytes of the installed directory (nil
 	// when none is installed): the next version's prev is their SHA-256.
 	directoryRaw []byte
+	// directorySigs is the admins' signatures it was installed with.
+	directorySigs []byte
 	// directoryVersion is the installed directory's version, 0 for none.
 	directoryVersion uint64
 	// directoryAuthorized is set when the installed directory parses, is
@@ -44,7 +46,7 @@ func (s *Signer) loadDirectory(ctx context.Context) error {
 	if stored == nil {
 		return nil
 	}
-	s.directoryRaw, s.directoryVersion = stored.Doc, stored.Version
+	s.directoryRaw, s.directorySigs, s.directoryVersion = stored.Doc, stored.Sigs, stored.Version
 	d, err := directory.Parse(stored.Doc)
 	if err != nil {
 		s.log.Error("installed directory does not parse: logins are refused until a valid directory is installed",
@@ -135,6 +137,7 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 	}
 	s.directory = d
 	s.directoryRaw = append([]byte(nil), req.Directory...)
+	s.directorySigs = append([]byte(nil), req.Sigs...)
 	s.directoryVersion = d.Version
 	s.directoryAuthorized = true
 	sum := sha256.Sum256(req.Directory)
@@ -148,4 +151,24 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 		"uid", peer.UID,
 		"pid", peer.PID)
 	return &wire.InstallDirectoryResponse{Version: d.Version, LeafIndex: leafIndex, SHA256: sum}, nil
+}
+
+// GetDirectory reports the installed directory as the signer holds it:
+// its version (0 when none is installed), its canonical bytes and
+// signatures as installed, and whether it is authorized under the policy
+// in force. A stored directory that no longer verifies is reported with
+// its bytes and Authorized false, so the server can mirror exactly what
+// the signer holds.
+func (s *Signer) GetDirectory() *wire.GetDirectoryResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.directoryRaw == nil {
+		return &wire.GetDirectoryResponse{}
+	}
+	return &wire.GetDirectoryResponse{
+		Version:    s.directoryVersion,
+		Directory:  append([]byte(nil), s.directoryRaw...),
+		Sigs:       append([]byte(nil), s.directorySigs...),
+		Authorized: s.directoryAuthorized,
+	}
 }

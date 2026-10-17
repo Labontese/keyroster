@@ -22,14 +22,15 @@ const MaxFrame = 64 << 10
 const Version = 1
 
 // Message types. A LoginIssueRequest is answered with an IssueResponse
-// (0x81). Until per-type frame caps exist (plan 02-03), an
-// InstallDirectory request must fit one MaxFrame frame.
+// (0x81). A GetDirectory request has an empty body.
 const (
 	TypeIssueRequest             byte = 0x01
 	TypeInstallDirectory         byte = 0x02
+	TypeGetDirectory             byte = 0x03
 	TypeLoginIssueRequest        byte = 0x05
 	TypeIssueResponse            byte = 0x81
 	TypeInstallDirectoryResponse byte = 0x82
+	TypeGetDirectoryResponse     byte = 0x83
 	TypeError                    byte = 0xFF
 )
 

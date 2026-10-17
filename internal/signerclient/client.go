@@ -59,6 +59,18 @@ func InstallDirectory(ctx context.Context, socket string, req *wire.InstallDirec
 	return wire.ParseInstallDirectoryResponse(respBody)
 }
 
+// GetDirectory asks the signer for its installed directory: version (0 for
+// none), canonical bytes, signatures and whether it is authorized under
+// the policy in force. A refusal comes back as a *wire.ErrorResponse
+// error.
+func GetDirectory(ctx context.Context, socket string) (*wire.GetDirectoryResponse, error) {
+	respBody, err := roundTrip(ctx, socket, wire.TypeGetDirectory, nil, wire.TypeGetDirectoryResponse)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseGetDirectoryResponse(respBody)
+}
+
 // roundTrip sends one message of msgType and returns the body of the
 // response, which must be of type want; an error response comes back as a
 // *wire.ErrorResponse error.

@@ -88,3 +88,75 @@ func ParseInstallDirectoryResponse(body []byte) (*InstallDirectoryResponse, erro
 	copy(r.SHA256[:], sum)
 	return &r, nil
 }
+
+// GetDirectoryResponse is what the signer holds as its installed
+// directory: the version (0 when none is installed), the canonical bytes
+// and the admins' signatures as installed, and whether the directory is
+// authorized under the policy in force (logins are refused while it is
+// not). The server mirrors exactly this. Version 0 has one encoding only:
+// no directory bytes, no signatures, not authorized.
+type GetDirectoryResponse struct {
+	Version    uint64
+	Directory  []byte
+	Sigs       []byte
+	Authorized bool
+}
+
+func (r *GetDirectoryResponse) check() error {
+	if r.Version == 0 {
+		if len(r.Directory) != 0 || len(r.Sigs) != 0 || r.Authorized {
+			return fmt.Errorf("%w: a version 0 directory response carries a directory", ErrMalformed)
+		}
+		return nil
+	}
+	if len(r.Directory) == 0 || len(r.Directory) > MaxDirectory || len(r.Sigs) == 0 || len(r.Sigs) > MaxDirectorySigs {
+		return fmt.Errorf("%w: directory or signature size", ErrMalformed)
+	}
+	return nil
+}
+
+// Marshal encodes the response body: the version as uint64, the directory
+// and the signatures uint24-length-prefixed, and Authorized as one byte 0
+// or 1.
+func (r *GetDirectoryResponse) Marshal() ([]byte, error) {
+	if err := r.check(); err != nil {
+		return nil, err
+	}
+	var b cryptobyte.Builder
+	b.AddUint64(r.Version)
+	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(r.Directory) })
+	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(r.Sigs) })
+	var auth uint8
+	if r.Authorized {
+		auth = 1
+	}
+	b.AddUint8(auth)
+	return b.Bytes()
+}
+
+// ParseGetDirectoryResponse decodes a response body strictly: Authorized
+// must be 0 or 1, nothing may follow it, and a version 0 response must
+// carry no directory, no signatures and Authorized 0.
+func ParseGetDirectoryResponse(body []byte) (*GetDirectoryResponse, error) {
+	s := cryptobyte.String(body)
+	var (
+		r         GetDirectoryResponse
+		doc, sigs cryptobyte.String
+		auth      uint8
+	)
+	if !s.ReadUint64(&r.Version) || !s.ReadUint24LengthPrefixed(&doc) || !s.ReadUint24LengthPrefixed(&sigs) ||
+		!s.ReadUint8(&auth) || !s.Empty() || auth > 1 {
+		return nil, ErrMalformed
+	}
+	r.Authorized = auth == 1
+	if len(doc) > 0 {
+		r.Directory = append([]byte(nil), doc...)
+	}
+	if len(sigs) > 0 {
+		r.Sigs = append([]byte(nil), sigs...)
+	}
+	if err := r.check(); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}

@@ -129,8 +129,10 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 // request frame, one response frame. The message type selects the request
 // and its evidence path: an IssueRequest takes admin evidence only, a
 // LoginIssueRequest a WebAuthn assertion only (T-02-05), and an
-// InstallDirectory request the admins' directory signatures. Every refusal goes through refuse
-// (slog plus the rate-limited audit log, D-14).
+// InstallDirectory request the admins' directory signatures. A
+// GetDirectory request (empty body) reads the installed directory. Every
+// refusal goes through refuse (slog plus the rate-limited audit log,
+// D-14).
 func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(time.Now().Add(connDeadline)); err != nil {
@@ -188,6 +190,12 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 			return
 		}
 		s.respond(ctx, conn, peer, sha256.Sum256(req.Directory), wire.TypeInstallDirectoryResponse, resp, 0)
+	case wire.TypeGetDirectory:
+		if len(body) != 0 {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		s.respond(ctx, conn, peer, [32]byte{}, wire.TypeGetDirectoryResponse, s.GetDirectory(), 0)
 	default:
 		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "unknown_message_type"))
 	}
