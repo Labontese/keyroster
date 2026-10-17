@@ -403,6 +403,17 @@ func TestDirectoryLogConsistency(t *testing.T) {
 			doc, sigs := signDirectory(t, d, e.fx.Admins[0])
 			execSQL(t, e.dbPath, `UPDATE directory SET doc = ?, sigs = ? WHERE version = 1`, doc, sigs)
 		}},
+		// Each compared field alone: the document with the logged
+		// signatures kept, and the version with everything else kept.
+		{"doc_only_replaced", 1, func(t *testing.T, e *logEnv) {
+			d := loginDirectory(pk, 1, trust.GenesisPrev)
+			d.Roles[1].MaxTTLSeconds = 7200
+			doc, _ := signDirectory(t, d)
+			execSQL(t, e.dbPath, `UPDATE directory SET doc = ? WHERE version = 1`, doc)
+		}},
+		{"version_only_replaced", 1, func(t *testing.T, e *logEnv) {
+			execSQL(t, e.dbPath, `UPDATE directory SET version = 5 WHERE version = 1`)
+		}},
 		{"signatures_replaced", 1, func(t *testing.T, e *logEnv) {
 			execSQL(t, e.dbPath, `UPDATE directory SET sigs = 'x' WHERE version = 1`)
 		}},
