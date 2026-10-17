@@ -13,7 +13,7 @@ provides:
   - "Per-type frame caps: MaxDirectoryFrame for InstallDirectory and GetDirectoryResponse, MaxFrame for every other type, ErrShortFrame, unexported maxBodyFor and headerLen"
   - "The start-up cross-check: the signer refuses to start when the latest stored directory is not the one the last directory_install leaf records (T-02-14: the directory table rolled back or substituted alone; the log and tables rolled back together, or an older signer.db restored, is the C-WR-01 residual owned by Phase 4)"
   - "TestLoginRefusals (SC4 through the real socket, six cases with controls) and the unit refusal matrix, restart, log-consistency and concurrency suites"
-  - "11 new fuzz targets; scripts/fuzz.sh now runs 19"
+  - "10 new fuzz targets (FuzzReadMessage replaces FuzzReadFrame); scripts/fuzz.sh runs 19, up from 10"
 affects: [02-04, 02-05, 02-06, 02-08, 02-13, KEY-02]
 
 actuals:
@@ -69,7 +69,7 @@ requirements-completed: []
 
 coverage:
   - id: D1
-    description: "SC4 through the real socket: missing assertion, replayed request, wrong digest, a directory not signed by the admin quorum, a policy without an RP and admin evidence on a login request are each refused with their detail and no certificate, each with a succeeding control; the exported log records each refusal with its request digest"
+    description: "SC4 through the real socket: missing assertion, replayed request, wrong digest, a directory not signed by the admin quorum, a policy without an RP and admin evidence on a login request are each refused with their detail, each with a succeeding control. The exported-log check covers the RP signer only: its log records the four refusals made on it (missing_assertion, replayed_request, wrong_digest, wrong_evidence_type) with their request digests and, since the pre-merge review, no login_issue entry for them beyond the controls' certificates; the two cases on their own signers (directory_not_quorum_signed, policy_without_rp) are checked through the socket only"
     requirement: KEY-02
     verification:
       - kind: e2e
@@ -137,7 +137,7 @@ coverage:
         status: pass
     human_judgment: false
   - id: D10
-    description: "Every new parser is fuzzed: 11 new targets, 19 in all, each 10 s locally"
+    description: "Every new parser is fuzzed: 10 new targets (one replaces FuzzReadFrame), 19 in all, each 10 s locally"
     verification:
       - kind: other
         ref: "FUZZTIME=10s bash scripts/fuzz.sh (WSL): fuzz: all 19 targets passed (10s each)"
@@ -164,7 +164,7 @@ status: complete
 ## Delivery
 
 - **Branch:** `p02/03-signer-boundary`, cut from origin/main `a641cc1`. It also carries the orchestrator's `fe755c6 docs(phase-02): mark 02-02 complete in roadmap`.
-- **PR:** opened by keyroster-bot with the title `test(signer): refuse every unauthorized login path and fuzz the new parsers` after the single push that carries this SUMMARY. The PR number and the required-check results are not known when this file is written. They are reported in the merge-gate checkpoint, read from GitHub (Delivery Protocol step 4: merge facts are never committed).
+- **PR:** #38, opened by keyroster-bot at 2026-10-17T05:03:45Z with the title `test(signer): refuse every unauthorized login path and fuzz the new parsers`, after the single push that carried this SUMMARY (see Deviation 7). At head `ae57f1a` all 20 checks passed (read from GitHub before the review fixes): Analyze (actions), Analyze (go), CodeQL, build-piv, build-test, capslock, cli-macos, cli-windows, dependency-firewall, e2e (10.5p1), e2e (9.5p1), e2e-pkcs11 (10.5p1-ed25519), e2e-pkcs11 (distro-p256), e2e-tpm, fuzz, govulncheck, lint, pinned-actions, pr-title, systemd-sandbox. The pre-merge review fixes below change the head; the checks on the new head and the merge itself are reported in the merge-gate checkpoint, not committed (Delivery Protocol step 4).
 - **Commits:** signed by keyroster-bot (each carries an SSH signature; GitHub verifies them, locally `%G?` shows N because no allowedSignersFile is configured).
 
 ## Accomplishments
@@ -174,15 +174,15 @@ status: complete
   - Version 0 has exactly one encoding: no bytes, no signatures, not authorized.
   - A stored directory that no longer verifies is reported with its bytes and `Authorized=false`.
   - `Signer.GetDirectory` runs under `s.mu`. `directoryState` now keeps the installed signatures (`directorySigs`), from `loadDirectory` and after an install's COMMIT.
-- **SC4 through the socket (Task 1).** `TestLoginRefusals` covers six cases, and each asserts the refusal detail and that no certificate came back:
+- **SC4 through the socket (Task 1).** `TestLoginRefusals` covers six cases, and each asserts the refusal detail. (Its "no certificate came back" check was vacuous, since `signerclient.Login` never returns a response with an error; since the pre-merge review the RP signer's exported log must hold no login_issue entry for a refused request beyond the controls' certificates.)
   - `missing_assertion` gives `missing_evidence`. Control: the same request approved, with a fresh request id.
   - `replayed_request`: the identical bytes are sent twice and the second is refused `duplicate_request`.
   - `wrong_digest`: only the request id changes after approval, giving exactly `challenge_mismatch`. Control: an assertion over the changed request.
   - `directory_not_quorum_signed`, on its own signer: an install signed only by a non-admin is refused `directory_quorum_not_met`. GetDirectory then reports version 0, empty, empty and false, and a login is refused `directory_not_installed`. Control: the admin-signed install, after which GetDirectory reports version 1, the exact sent bytes and signatures, and true; the login then issues.
   - `policy_without_rp`: a signer without an RP accepts the directory and refuses the login `no_webauthn_policy`.
   - `wrong_evidence_type`: admin SSHSIG evidence on a login request is refused `unknown_evidence_type`. Control: `keyroster ca issue` by the same admin.
-  - The RP signer's export-log records every refused request's digest with its detail as an individual refusal leaf.
-- **Named unit matrix (Task 2).** `TestLoginRefusalMatrix` has 39 table cases and 3 state cases. Each runs on a fresh signer through `loginOrRefuse` with real soft-authenticator assertions and an admin-signed directory. Each asserts the detail, a class other than internal, exactly one new refusal leaf carrying `req.Digest()`, nothing issued, and then a control login on the same signer. The table cases cover:
+  - The RP signer's export-log records every request refused on it with its digest and detail as an individual refusal leaf. The two cases on their own signers are not checked in an exported log.
+- **Named unit matrix (Task 2).** `TestLoginRefusalMatrix` has 38 table cases and 3 state cases (41 subtests). Each runs on a fresh signer through `loginOrRefuse` with real soft-authenticator assertions and an admin-signed directory. Each asserts the detail, a class other than internal, exactly one new refusal leaf carrying `req.Digest()`, nothing issued, and then a control login on the same signer. The table cases cover:
   - the evidence checks;
   - user and credential: unknown, disabled, role not granted, another user's credential;
   - authenticator data: 36 bytes, 38 bytes, AT set, ED set, RP, UP, UV;
@@ -193,13 +193,13 @@ status: complete
   - ±301 s skew (on a whole-second tick clock, so the boundary is exact);
   - `duplicate_request` after a login and after an admin issuance with the same id.
 - **Policy clause, evidence mixing, concurrency (Task 2).** See coverage D3 and D4, plus `TestEvidenceMix` (webauthn evidence on an admin IssueRequest, and admin evidence on a login request, are both refused `unknown_evidence_type`, each with a control).
-- **Restart and log consistency (Task 2).** See D5 and D6. `loadDirectory` now calls `checkDirectoryLogged` against `loggedInstalls.lastDirectory`, which `rebuildLogFrom` records for every `directory_install` leaf. This is the only production behaviour change in Task 2. Re-verification under the policy in force, the error log naming the policy version, and installing a successor while unauthorized already worked since 02-01; they are now tested.
+- **Restart and log consistency (Task 2).** See D5 and D6. `loadDirectory` now calls `checkDirectoryLogged` against `loggedInstalls.lastDirectory`, which `rebuildLogFrom` records for every `directory_install` leaf. This is the only production behaviour change in Task 2. Re-verification under the policy in force and installing a successor while unauthorized already worked since 02-01; they are now tested. **Correction (pre-merge review):** the error log naming the policy version was not asserted by any test at SUMMARY time (every test logger discarded its output), and the CheckPolicy branch of the re-verification had no test; both are tested since the review fixes (`deb1069`, `1b13c8c`).
 - **Frame caps (Task 3).**
   - `MaxDirectoryFrame = MaxDirectory + 64 KiB + 64` (1,114,176 bytes) applies to InstallDirectory and GetDirectoryResponse. `MaxFrame` (64 KiB) applies to every other type, unknown types included.
   - `ReadMessage` reads the 4-byte length and refuses 0 (`ErrEmptyFrame`) and 1 (`ErrShortFrame`) before reading on. It then reads the 2 header bytes, checks the version, and checks `uint64(n) - 2` against `maxBodyFor` before allocating.
   - `WriteMessage` refuses before writing any byte, and writes in one `Write`.
   - Issue and login frames keep the Phase 1 limit byte for byte.
-  - **New memory bound:** 32 connections × MaxDirectoryFrame ≈ 34 MiB of request buffers (documented on `maxConns`, T-02-12).
+  - **New memory bound:** 32 connections × MaxDirectoryFrame ≈ 34 MiB bounds the request frame buffers only, not the signer's memory: a GetDirectory reply makes three to four short-lived copies of the directory (the pre-merge review measured about 34 MiB in steady state with 32 connections). Documented on `maxConns` (T-02-12). Since the review, the signer reads only InstallDirectory at MaxDirectoryFrame and every other type at MaxFrame.
 
 ### Refusal details and their class
 
@@ -221,7 +221,7 @@ status: complete
 - **New:** FuzzReadMessage (replaces FuzzReadFrame), FuzzParseLoginIssueRequest, FuzzParseWebAuthnAssertion, FuzzParseInstallDirectory and FuzzParseGetDirectoryResponse (internal/wire); FuzzParseClientData and FuzzVerifyAssertion (internal/webauthn); FuzzParseDirectory (internal/directory); FuzzDecodeDirectoryInstallBody and FuzzDecodeLoginIssueBody (internal/tlog).
 - **Moved:** FuzzParseKeyID, from internal/cert/keyid_test.go to the new internal/cert/fuzz_test.go, with kr2 seeds added.
 - **Unchanged:** FuzzDecodeLeaf keeps its `case KindDirectoryInstall` and `case KindLoginIssue` (the grep count is 2).
-- **Run:** `FUZZTIME=10s bash scripts/fuzz.sh` in WSL ended with `fuzz: all 19 targets passed (10s each)`, against 10 targets before this plan.
+- **Run:** `FUZZTIME=10s bash scripts/fuzz.sh` in WSL ended with `fuzz: all 19 targets passed (10s each)`, against 10 targets before this plan (10 new names, one of which replaces FuzzReadFrame).
 - **Seeds:** FuzzReadMessage's seeds include a length-1 frame followed by a valid frame, a length-2 frame, and frames at exactly MaxFrame and MaxDirectoryFrame. FuzzParseClientData's seeds include the extra-members JSON (`webauthn.ClientDataExtraMembers`, shared with the accept test).
 
 ## Where the three 02-01 review findings this plan owns are covered
@@ -272,6 +272,51 @@ status: complete
 | Task 3 verify: `FUZZTIME=10s bash scripts/fuzz.sh` | WSL | `fuzz: all 19 targets passed (10s each)` |
 | Task 3 verify: `go test -race ./...`, `go vet ./...`, `go vet -tags e2e`, gofmt, golangci-lint, capslock-check, dep-firewall | WSL, from a script file so gofmt really runs | all passed; lint 0 issues; capslock 73 pairs, baseline 73 |
 | Required CI checks on the PR head | GitHub | pending at SUMMARY time, reported in the checkpoint |
+
+## Pre-merge review fixes
+
+The pre-merge review of PR #38 at `ae57f1a` verified eight findings (each with a probe or a mutant) and one MEDIUM finding that the owner decided on. The fixes are the commits from `ae57f1a` to this docs commit, each SSH-signed by keyroster-bot. Fails-before evidence was taken on the code before each fix; for test gaps, a mutant of the checked line was run and the production file restored (`git diff --exit-code` clean after each).
+
+| # | Finding | Commit | Test | Fails before / bite |
+|---|---|---|---|---|
+| 1 | The frame cap was keyed on the declared type only, so a hostile socket answering Issue with a 0x83 frame of MaxDirectoryFrame made the client read 1.06 MiB | `a9c1dab` fix(wire) | `internal/signerclient/client_test.go#TestReadResponseRefusesUnexpectedType`; `internal/wire/wire_test.go#TestReadMessageCaps` (new response-side rows); FuzzReadMessage under three cap sets | before: `readResponse read 1114180 bytes of a refused 0x83 frame, want only the 6 bytes`; after: 6 bytes, `wire.ErrUnexpectedType` |
+| 2 | An unsigned InstallDirectory held s.mu for over a second (parse before signatures, quadratic role computation) | `5e3821d` fix(signer) | `directory_quorum_not_met/unparsable_signed_by_non_admin` in `TestDirectoryInstallRefusals`; `internal/directory#TestValidateLinear`, `TestValidateRoleBounds`; `internal/trust#TestCountPinnedSignersForgedBlocks` | before: `directory_invalid; want directory_quorum_not_met`; Validate of 20000 users `7.9176355s, want well under 1 s` (after 0.08 s); 203 junk blocks over 1 MiB `342.7042ms, want well under 150 ms` (after 0.03 s) |
+| 3 | Ten cheap malformed frames drained the single refusal bucket, hiding a forged install in the next refusal_summary | `c13534b` fix(signer) | `internal/signer#TestDirectoryRefusalBudget` | before: `0 new leaves after the refusal, want exactly one refusal leaf` |
+| 4 | doctor did not run the start-up directory cross-check | `cd92070` fix(signer) | the CheckTrust assertions in `TestDirectoryLogConsistency` (every tamper case, `table_wiped` is `DELETE FROM directory`); `cmd/keyroster-signer#TestDoctorFailures/directory_row_without_a_log_entry` | before: `CheckTrust (doctor) with a directory table the log does not record = <nil>` in all six cases; doctor `exited 0, want 1` |
+| 5 | Start-up CheckPolicy re-verification untested (T-02-15) | `1b13c8c` test | `TestDirectoryRestart/restart_under_tighter_cap` (user cap 1800 s below the roles' 3600 s; a conforming v2 as control) | mutant `false && err != nil` on the CheckPolicy branch: `GetDirectory = ... authorized true; want ... false` |
+| 6 | The Doc and Version comparisons of checkDirectoryLogged not tested on their own | `932d703` test | `TestDirectoryLogConsistency/doc_only_replaced`, `/version_only_replaced` | dropping `body.Version != stored.Version` fails only `version_only_replaced`; dropping the Directory comparison fails only `doc_only_replaced` |
+| 7 | The SUMMARY claimed the policy_version error log was tested, but every test logger discarded | `deb1069` test | `wantStartLog` in both TestDirectoryRestart cases, through `logEnv.logOut` (a TextHandler on a buffer, the pattern of refusalcause_test.go; `captureHandler` is in the Linux-only external test package, so it was not used) | dropping `policy_version` from either log line fails its case |
+| 8 | INFO: counts, D1 scope, PR facts, the vacuous e2e check, the maxConns comment | `6ecf9f6` test(e2e), `8fea286` docs(signer), this commit | `test/e2e#TestLoginRefusals` exported-log check | comparing the login_issue count with 0 instead of the controls' count fails for the two digests the controls issued, so the check reads real entries |
+| M | T-02-14 claimed rollback is mitigated; the log and tables rolled back together, or an older signer.db restored, reinstate the older directory and trust bundle (C-WR-01 residual). Owner decision 2026-10-17: document now, and in Phase 4 serve refuses to start without a witnessed checkpoint | `ed105bd` docs(02-03), `70acb79` docs(runbooks) | none (docs and comments only, no behaviour change) | n/a |
+
+Notes on the fixes:
+
+- **1.** `wire.ReadMessage(r, caps)` takes the reader's `wire.Caps`. The signer passes `wire.RequestCaps`: InstallDirectory up to MaxDirectoryFrame, every other type (responses and unknown types included) up to MaxFrame, so `unknown_message_type` still answers. A client passes `wire.ResponseCaps(want)`, which accepts only `want` and TypeError. The client's old "unexpected message type in response" branch could no longer be reached and was removed.
+- **2.** Signatures are now verified before the document is parsed, so an unsigned invalid document is refused `directory_quorum_not_met` instead of `directory_invalid`; admin-signed `directory_invalid` cases are unchanged. `roleGrants` computes every user's roles in one pass and stops as soon as one user holds more than MaxRolesPerUser; Authorize uses it too. **Deviation from the finding's wording:** CountPinnedSigners does not stop at one verification attempt per fingerprint, which would let a stale invalid signature block a later valid one by the same key. Instead it hashes the document once (`sshsig.DigestOf`, `VerifyDigest`) and skips keys that already count, which bounds the junk-block cost to one small signature check per block. The two timing assertions are skipped under `-race`.
+- **3.** Refused installs draw on `installLimiter`, a bucket of the same rate. Unlogged refusals of either bucket are still counted in the shared limiter. **The tlog format and the reason classes are unchanged**, so 02-04's verifier is not affected. A frame that does not decode as an install request stays on the shared bucket, so it cannot drain the install bucket.
+- **4.** `signerdb.LogSnapshot.Directory` is read in the same read transaction; `CheckTrust` calls `checkDirectoryLogged`. It is not in `rebuildLogFrom`, because `logTx`'s reload path calls that. doctor's `trust_mismatch` message and the runbook row now name the directory. The deferred-items entry and the "Not exercised" bullet for this gap are removed.
+- **M.** T-02-14 (plan and this SUMMARY) is narrowed to the directory table rolled back or substituted alone. The logstate.go comments, Phase 1's C-WR-01 entry, a blocker todo (`.planning/todos/pending/2026-10-17-serve-refuses-without-witnessed-checkpoint.md`), STATE.md and the runbook's "Snapshot restore" section record the residual and the decision. Also recorded for 02-12 (phase 02 deferred-items): its false-fingerprint claim holds against page tampering, not against a compromised server.
+
+Local runs after the fixes (code at `8fea286`; the two docs commits after it change comments and docs only, re-checked with gofmt, vet and the signer tests on Windows):
+
+| Check | Where | Result |
+|---|---|---|
+| `gofmt -l .` | WSL, from a script file; Windows | empty |
+| `go vet ./...` for linux, windows, darwin; `go vet -tags e2e ./...` | WSL; Windows | clean |
+| `go test -count=1 ./...` | Windows | PASS, 16 packages with tests (the Linux-tagged signer tests do not build there) |
+| `go test -race -count=1 ./...` and `./internal/signer/... ./internal/wire/... ./internal/signerclient/... ./internal/directory/...` | WSL | PASS, no DATA RACE |
+| e2e suite (`-tags e2e`), sshd 10.5p1 and 9.5p1 | WSL | PASS both |
+| golangci-lint v2 (GOOS linux, windows, darwin) | WSL | 0 issues each |
+| dep-firewall, testonly-firewall, capslock-check | WSL | clean; capslock 73 pairs, baseline 73 |
+| `FUZZTIME=5s bash scripts/fuzz.sh` (FuzzReadMessage changed) | WSL | `fuzz: all 19 targets passed (5s each)` |
+
+Not run or not verified:
+
+- **CI on the new head.** The required checks have not run on the fixed head when this is written; they are reported in the merge-gate checkpoint.
+- **The restore procedure in the runbook** is UNVERIFIED: it was not run against a restored database. Its `grep` patterns match the export decoder's output (checked for `directory_install` only).
+- **Rolling back the root set** by the same database cut is UNVERIFIED (from the review).
+- **The finding-2 timing bounds** are measured on this workstation only and skipped under `-race`; the timing-independent check is the refusal order.
+- The e2e-pkcs11 and e2e-tpm lanes ran only in CI (at `ae57f1a`), not locally.
 
 ## Decisions Made
 
@@ -330,7 +375,11 @@ See `key-decisions` in the frontmatter.
 
 ---
 
-**Total deviations:** 6 (1 interpretation of the unexport rule, 1 coverage addition, 1 unreachable-detail interpretation, 1 observation, 1 lint fix, 1 scope note).
+**7. [Process] The branch was pushed, and the PR opened, after the SUMMARY commit**
+- **Issue:** the SUMMARY was committed before the single push, so it could not name PR #38 or its check results; this file first said they were unknown.
+- **What was done:** the pre-merge review fixes record PR #38 and the 20 check results at `ae57f1a` under Delivery.
+
+**Total deviations:** 7 (1 interpretation of the unexport rule, 1 coverage addition, 1 unreachable-detail interpretation, 1 observation, 1 lint fix, 1 scope note, 1 process note).
 **Impact on plan:** no new dependency and no production code path added for tests. The one production behaviour change of Task 2 is the cross-check the plan asked for.
 
 ## Issues Encountered
@@ -343,7 +392,6 @@ See `key-decisions` in the frontmatter.
 - **CI.** At SUMMARY time none of the required checks has run on this branch: build-test, lint, fuzz, e2e (9.5p1), e2e (10.5p1), e2e-pkcs11, e2e-tpm, Windows/macOS CLI and the rest. In particular, **the e2e suite against sshd 9.5p1 ran only in CI**, never locally. Their results go in the merge-gate checkpoint.
 - **Real authenticators and browsers.** Every assertion comes from the soft authenticator, as in 02-01. That includes the 37-byte authenticatorData rule and the extra-members accept case modelled on Chrome's clientDataJSON. **UNVERIFIED** until the 02-13/02-14 dogfood.
 - **credential_mismatch and unsupported_algorithm through LoginIssue.** Unreachable by construction (Deviation 3). Only the mapping is tested.
-- **`keyroster-signer doctor` does not run the directory cross-check.** serve refuses to start on a tampered directory table, but doctor would report it healthy. Logged in deferred-items.md.
 - **A directory at the full 1 MiB through the socket.** The socket test uses about 100 KiB. Exactly MaxDirectoryFrame is covered by the wire tables only.
 
 ## Known Stubs
@@ -378,7 +426,7 @@ None.
   - the refusal.go grep count is 3;
   - `client_data_extra_members_accepted` sits in TestWebAuthnClientDataExtraMembers and passes for all three algorithms.
 - Task 3 acceptance:
-  - `go test -list '^Fuzz'` lists the 11 targets and FuzzDecodeLeaf;
+  - `go test -list '^Fuzz'` lists the 10 new targets and FuzzDecodeLeaf;
   - the fuzz_test.go case grep count is 2;
   - maxBodyFor is defined and used in ReadMessage and WriteMessage;
   - ErrShortFrame is defined and used in ReadMessage;
