@@ -237,6 +237,45 @@ func TestDirectoryRefusalLeaves(t *testing.T) {
 	})
 }
 
+// TestDirectoryRefusalBudget (D-14, T-02-83): a refused install draws on
+// its own refusal-log bucket. A flood of cheap malformed frames that
+// drains the shared bucket cannot hide a quorum-less install inside the
+// next refusal_summary: it still gets its own refusal leaf with its detail
+// and digest. Controls: the flood's last frames are counted, not logged,
+// before and after the install, and the summary counts exactly them.
+func TestDirectoryRefusalBudget(t *testing.T) {
+	pk := newPasskeys(t)
+	e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, false)
+	ctx := context.Background()
+	malformed := func() int {
+		before := len(e.leavesOf())
+		_ = e.s.refuse(ctx, Peer{UID: 1000}, [32]byte{}, tlog.ReasonMalformed, "malformed_frame")
+		return len(e.leavesOf()) - before
+	}
+	for i := range DefaultRefusalLogBurst {
+		if n := malformed(); n != 1 {
+			t.Fatalf("malformed frame %d: %d new leaves, want its refusal leaf (the bucket is not drained yet)", i+1, n)
+		}
+	}
+	if n := malformed(); n != 0 {
+		t.Fatalf("malformed frame %d: %d new leaves, want none (the shared bucket is drained)", DefaultRefusalLogBurst+1, n)
+	}
+	_, outsider := NewEd25519Key(t)
+	doc, sigs := signDirectory(t, loginDirectory(pk, 1, trust.GenesisPrev), outsider)
+	e.refuseInstall(t, &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}, "directory_quorum_not_met")
+	if n := malformed(); n != 0 {
+		t.Fatalf("malformed frame after the install: %d new leaves, want none (the shared bucket is still drained)", n)
+	}
+	e.s.flushSummaries(ctx)
+	all := e.leavesOf()
+	last := all[len(all)-1]
+	sum, err := tlog.DecodeRefusalSummaryBody(last.Body)
+	if last.Kind != tlog.KindRefusalSummary || err != nil || len(sum.Counts) != 1 ||
+		sum.Counts[0] != (tlog.ReasonCount{Reason: tlog.ReasonMalformed, Count: 2}) {
+		t.Fatalf("last leaf %s (%v) %+v, want a refusal_summary counting the 2 unlogged malformed frames", last.Kind, err, sum)
+	}
+}
+
 // TestDirectoryRestart (T-02-15): the signer re-verifies the stored
 // directory under the policy in force at start. After a restart under a
 // successor policy whose admin set no longer meets the installed

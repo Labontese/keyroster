@@ -83,6 +83,10 @@ type Signer struct {
 	logState
 	directoryState
 	limiter *refusalLimiter // guarded by mu
+	// installLimiter is the refusal-log bucket of refused directory
+	// installs, so a flood of other refusals cannot drain it (D-14); what
+	// it does not log is counted in limiter. Guarded by mu.
+	installLimiter *refusalLimiter
 	// overloaded counts connections refused over capacity by the accept
 	// loop, which never takes mu; flushSummaries moves it into the limiter.
 	overloaded atomic.Uint64
@@ -146,6 +150,7 @@ func New(cfg Config) (*Signer, error) {
 		s.log = slog.Default()
 	}
 	s.limiter = newRefusalLimiter(perMinute, burst, s.clock())
+	s.installLimiter = newRefusalLimiter(perMinute, burst, s.clock())
 	if err := s.initLog(context.Background()); err != nil {
 		return nil, err
 	}
