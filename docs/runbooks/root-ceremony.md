@@ -534,9 +534,18 @@ You need everything from [What you need](#what-you-need), plus:
 5. **Install** with the signer stopped:
    [signer-install.md, "Install a successor bundle"](signer-install.md#install-a-successor-bundle-stop-install-start).
 6. **Audit.** Export the log and run `keyroster audit verify` pinned to the
-   roots, as in [Rotate the roots](#rotate-the-roots-successor-bundle)
-   step 7. The `OK:` line names the new trust bundle and policy versions,
-   and counts `login certificates N, directory installs N`.
+   roots in force (from paper), with the commands of
+   [Rotate the roots](#rotate-the-roots-successor-bundle) step 7. The
+   expected output differs from that step's:
+
+   - The `OK:` line names the new trust bundle and policy versions
+     (`trust bundle vN+1, policy vN+1`) and counts
+     `login certificates N, directory installs N`.
+   - The `anchored:` line names the bundle where the current roots
+     **first** appeared, not the new bundle: a policy change keeps the
+     roots. On an installation whose roots were never rotated it prints
+     `anchored: the pinned roots are the root set of trust bundle v1`;
+     after one rotation, the rotation's bundle version.
 
 **The trust bundle version goes up by one.** A policy change is a new
 trust bundle, so record its version and SHA-256 in the transcript like a
