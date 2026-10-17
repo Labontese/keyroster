@@ -212,8 +212,10 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 // admin, nor a root of any trust bundle the log records, carry a usable
 // profile for every CA role and the recorded log key's origin, and be
 // byte-identical to the body of the last bundle_install entry of the log.
-// With no bundle installed, the log must record none. keyroster-signer
-// doctor uses it; an error wraps the reason.
+// With no bundle installed, the log must record none. The latest stored
+// directory must likewise be the one the last directory_install entry
+// records (checkDirectoryLogged), as serve requires at start.
+// keyroster-signer doctor uses it; an error wraps the reason.
 //
 // It cannot catch a database rewritten consistently with keys and roots of
 // the rewriter's choosing: it has neither the backend's keys nor the
@@ -228,8 +230,11 @@ func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 		if err != nil {
 			return fmt.Errorf("%w: leaf %d does not decode", errLogMismatch, idx)
 		}
-		if l.Kind == tlog.KindBundleInstall {
+		switch l.Kind {
+		case tlog.KindBundleInstall:
 			return installs.add(idx, l.Body)
+		case tlog.KindDirectoryInstall:
+			return installs.addDirectory(idx, l.Body)
 		}
 		return nil
 	})
@@ -248,7 +253,10 @@ func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 			return err
 		}
 	}
-	return checkBundleLogged(snap.Bundle, installs.last)
+	if err := checkBundleLogged(snap.Bundle, installs.last); err != nil {
+		return err
+	}
+	return checkDirectoryLogged(snap.Directory, installs.lastDirectory)
 }
 
 // rebuildLogFrom is rebuildLog over db with the checkpoint verifier v. It

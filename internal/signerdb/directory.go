@@ -49,13 +49,17 @@ func (d *DB) InsertDirectory(tx *sql.Tx, dir StoredDirectory) error {
 // LatestDirectory returns the installed directory with the highest
 // version, or nil and no error when none is installed.
 func (d *DB) LatestDirectory(ctx context.Context) (*StoredDirectory, error) {
+	return latestDirectory(ctx, d.db)
+}
+
+func latestDirectory(ctx context.Context, q queryer) (*StoredDirectory, error) {
 	var (
 		dir     StoredDirectory
 		version int64
 		pol     int64
 		at      int64
 	)
-	err := d.db.QueryRowContext(ctx, `SELECT version, doc, sigs, policy_version, installed_at_us FROM directory ORDER BY version DESC LIMIT 1`).
+	err := q.QueryRowContext(ctx, `SELECT version, doc, sigs, policy_version, installed_at_us FROM directory ORDER BY version DESC LIMIT 1`).
 		Scan(&version, &dir.Doc, &dir.Sigs, &pol, &at)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // no directory installed

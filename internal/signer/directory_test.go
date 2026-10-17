@@ -312,12 +312,26 @@ func TestDirectoryRestart(t *testing.T) {
 	})
 }
 
+// checkTrustAt runs doctor's trust check (CheckTrust) on the state
+// database at path, opened read-only as doctor opens it.
+func checkTrustAt(t *testing.T, path string) error {
+	t.Helper()
+	ro, err := signerdb.OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ro.Close() }()
+	return CheckTrust(context.Background(), ro)
+}
+
 // TestDirectoryLogConsistency (T-02-14): the signer takes its directory
 // from the directory table only when the verified log's last
 // directory_install entry records exactly that row (version, bytes and
 // signatures). A row overwritten, deleted, wiped or written without a log
-// entry stops the signer from starting. Control: each state starts before
-// tampering, and a state with neither row nor entry starts.
+// entry stops the signer from starting, and doctor's trust check
+// (CheckTrust) refuses the same state. Control: each state starts and
+// passes CheckTrust before tampering, and a state with neither row nor
+// entry starts.
 func TestDirectoryLogConsistency(t *testing.T) {
 	pk := newPasskeys(t)
 	t.Run("fresh_state_starts", func(t *testing.T) {
@@ -371,10 +385,16 @@ func TestDirectoryLogConsistency(t *testing.T) {
 				t.Fatalf("control: restart before tampering: %v", err)
 			}
 			e.close()
+			if err := checkTrustAt(t, e.dbPath); err != nil {
+				t.Fatalf("control: CheckTrust before tampering: %v", err)
+			}
 			tc.tamper(t, e)
 			err := e.open()
 			if !errors.Is(err, errLogMismatch) || !strings.Contains(err.Error(), "directory_install") {
 				t.Fatalf("start with a directory table the log does not record = %v, want errLogMismatch naming the directory_install entry", err)
+			}
+			if err := checkTrustAt(t, e.dbPath); !errors.Is(err, errLogMismatch) || !strings.Contains(err.Error(), "directory_install") {
+				t.Fatalf("CheckTrust (doctor) with a directory table the log does not record = %v, want errLogMismatch naming the directory_install entry", err)
 			}
 		})
 	}
