@@ -325,6 +325,72 @@ seen a longer log. Record every restore in the operations log.
 Neither `doctor` nor `serve` can tell a restored database from a current
 one: the whole file is consistent with itself. The same holds for a log
 cut back together with its issuance rows and high-water mark, or cut back
-by trailing entries that issue nothing (refusals). Only an earlier export
-kept outside the signer shows it: keep each export, and verify the next
-one with `keyroster audit verify --previous <earlier export>`.
+by trailing entries that issue nothing (refusals, and trust bundle and
+directory installs). Only an earlier export kept outside the signer shows
+it: keep each export, and verify the next one with
+`keyroster audit verify --previous <earlier export>`.
+
+### A restore brings back the older trust bundle, policy and directory
+
+> **Warning.** Restoring an older `signer.db` also restores the trust
+> bundle, policy and directory it held. Admins removed since are accepted
+> again, users disabled since can log in again, and credentials removed
+> since work again. `serve` and `doctor` accept it, because the older state
+> is exactly what the older log records. The same happens when someone
+> with write access to `signer.db` cuts the log and those tables back to
+> an earlier signed prefix. The CA, ops and log keys cannot be rolled back
+> this way (the bundle must list the keys ca-init recorded). Phase 4 makes
+> `serve` refuse to start without a witnessed checkpoint at least as new
+> as the local one; until then this check is the operator's.
+
+Before starting the signer after a restore:
+
+1. Keep the service stopped, and export the restored log:
+
+   ```
+   systemctl stop keyroster-signer.service      # if it auto-started
+   runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+     keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/restored.jsonl
+   ```
+
+2. Compare it with the latest export you kept from before the restore:
+
+   ```
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     --previous /path/to/latest-saved.jsonl /tmp/restored.jsonl
+   ```
+
+   A restored log that is older than the saved one is reported as shrunk
+   or rewritten. **Until plan 02-04, `audit verify` refuses every log that
+   contains a `directory_install` entry** ("not verifiable by this
+   version"), so on a signer with a directory this step fails either way.
+   Compare the versions by hand instead, in both files:
+
+   ```
+   grep -o '"bundle_version":[0-9]*' latest-saved.jsonl | tail -n 1
+   grep -o '"bundle_version":[0-9]*' /tmp/restored.jsonl | tail -n 1
+   grep -c '"kind":"directory_install"' latest-saved.jsonl
+   grep -c '"kind":"directory_install"' /tmp/restored.jsonl
+   ```
+
+   The first pair is the installed trust bundle version. The second pair
+   counts directory installs, which is the installed directory version
+   (each install is the next version, starting at 1). If the restored
+   numbers are lower, the restore reinstated an older bundle or directory.
+   `doctor` also prints the restored bundle version (`OK bundle`).
+
+3. Reinstall what the restore lost, in order and with the same bytes as
+   before, before anyone installs anything new: the newer trust bundles
+   with `install-bundle` (see
+   [Install a successor bundle](#install-a-successor-bundle-stop-install-start)),
+   then the newer directory versions. Install the exact versions that were
+   lost: a different version 2 built on the restored version 1 is accepted
+   too, and the disablements of the lost version are then gone for good.
+   At this point in Phase 2 no keyroster command installs a directory (the
+   server mirror comes in later plans); the directory goes in through the
+   signer socket's InstallDirectory request.
+
+> **UNVERIFIED.** This procedure has not been run against a restored
+> database. The `grep` patterns match the export line format written by
+> `keyroster-signer export-log` (checked against its decoder, `audit.Decode`,
+> for `directory_install`), not a real export of a restored signer.
