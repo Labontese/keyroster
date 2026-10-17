@@ -150,7 +150,7 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 		_ = s.refuse(ctx, peer, [32]byte{}, tlog.ReasonPeerNotAllowed, "peer_not_allowed")
 		return
 	}
-	msgType, body, err := wire.ReadMessage(conn)
+	msgType, body, err := wire.ReadMessage(conn, wire.RequestCaps)
 	if err != nil {
 		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_frame"))
 		return

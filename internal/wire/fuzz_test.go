@@ -45,9 +45,10 @@ func FuzzParseIssueRequest(f *testing.F) {
 	})
 }
 
-// FuzzReadMessage (T-02-12, T-02-81): ReadMessage never panics, every
-// error is a framing sentinel or a short read, and an accepted frame is
-// within its type's cap and is exactly what WriteMessage writes for it.
+// FuzzReadMessage (T-02-12, T-02-81): under the signer's caps and two
+// clients', ReadMessage never panics, every error is a framing sentinel or
+// a short read, and an accepted frame is of a type the caps accept, within
+// their cap for it and exactly what WriteMessage writes for it.
 func FuzzReadMessage(f *testing.F) {
 	valid := frameOf(f, TypeIssueRequest, len(marshalUnchecked(validRequest())))
 	f.Add(valid)
@@ -57,31 +58,40 @@ func FuzzReadMessage(f *testing.F) {
 	f.Add(frameOf(f, TypeInstallDirectory, MaxDirectoryFrame-headerLen))
 	f.Add(append(frameHeader(MaxFrame+1), Version, TypeIssueRequest))
 	f.Add(append(frameHeader(MaxDirectoryFrame+1), Version, TypeGetDirectoryResponse))
+	f.Add(append(frameHeader(MaxDirectoryFrame), Version, TypeGetDirectoryResponse))
 	f.Add(frameHeader(0))
 	f.Add(frameHeader(1 << 30))
 	f.Add(append(frameHeader(3), Version+1, TypeError, 0))
 	f.Add([]byte{0, 0})
 	f.Fuzz(func(t *testing.T, in []byte) {
-		typ, body, err := ReadMessage(bytes.NewReader(in))
-		if err != nil {
-			for _, want := range []error{ErrEmptyFrame, ErrShortFrame, ErrVersion, ErrFrameTooLarge, io.EOF, io.ErrUnexpectedEOF} {
-				if errors.Is(err, want) {
-					return
-				}
-			}
-			t.Fatalf("ReadMessage error = %v, want a framing sentinel or a short read", err)
-		}
-		if len(body) > maxBodyFor(typ) {
-			t.Fatalf("ReadMessage returned a %d-byte body for type %#x, above its cap", len(body), typ)
-		}
-		var out bytes.Buffer
-		if err := WriteMessage(&out, typ, body); err != nil {
-			t.Fatalf("WriteMessage of a read frame: %v", err)
-		}
-		if !bytes.Equal(out.Bytes(), in[:out.Len()]) {
-			t.Fatal("WriteMessage does not reproduce the frame that was read")
+		for _, caps := range []Caps{RequestCaps, ResponseCaps(TypeIssueResponse), ResponseCaps(TypeGetDirectoryResponse)} {
+			readFuzzFrame(t, in, caps)
 		}
 	})
+}
+
+// readFuzzFrame is one FuzzReadMessage check of in under caps.
+func readFuzzFrame(t *testing.T, in []byte, caps Caps) {
+	t.Helper()
+	typ, body, err := ReadMessage(bytes.NewReader(in), caps)
+	if err != nil {
+		for _, want := range []error{ErrEmptyFrame, ErrShortFrame, ErrVersion, ErrFrameTooLarge, ErrUnexpectedType, io.EOF, io.ErrUnexpectedEOF} {
+			if errors.Is(err, want) {
+				return
+			}
+		}
+		t.Fatalf("ReadMessage error = %v, want a framing sentinel or a short read", err)
+	}
+	if maxFrame, ok := caps(typ); !ok || headerLen+len(body) > maxFrame || len(body) > maxBodyFor(typ) {
+		t.Fatalf("ReadMessage returned a %d-byte body for type %#x, which the caps refuse or cap lower", len(body), typ)
+	}
+	var out bytes.Buffer
+	if err := WriteMessage(&out, typ, body); err != nil {
+		t.Fatalf("WriteMessage of a read frame: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), in[:out.Len()]) {
+		t.Fatal("WriteMessage does not reproduce the frame that was read")
+	}
 }
 
 // FuzzParseLoginIssueRequest: a body that parses re-encodes to exactly

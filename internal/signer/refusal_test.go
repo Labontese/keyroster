@@ -134,7 +134,7 @@ func (ts *testSigner) sendMalformed(t *testing.T) {
 	if err := wire.WriteMessage(conn, wire.TypeError, []byte{1}); err != nil {
 		t.Fatal(err)
 	}
-	if typ, _, err := wire.ReadMessage(conn); err != nil || typ != wire.TypeError {
+	if typ, _, err := wire.ReadMessage(conn, wire.ResponseCaps(wire.TypeError)); err != nil || typ != wire.TypeError {
 		t.Fatalf("response type %#x, %v; want an error response", typ, err)
 	}
 }

@@ -73,7 +73,7 @@ func TestDirectoryOverSocket(t *testing.T) {
 		if _, err := conn.Write(append(hdr, wire.Version, wire.TypeInstallDirectory)); err != nil {
 			t.Fatal(err)
 		}
-		typ, body, err := wire.ReadMessage(conn)
+		typ, body, err := wire.ReadMessage(conn, wire.ResponseCaps(wire.TypeError))
 		if err != nil || typ != wire.TypeError {
 			t.Fatalf("response %#x, %v; want an error response", typ, err)
 		}
@@ -99,7 +99,7 @@ func TestDirectoryOverSocket(t *testing.T) {
 		if err := wire.WriteMessage(conn, wire.TypeGetDirectory, []byte{0}); err != nil {
 			t.Fatal(err)
 		}
-		typ, body, err := wire.ReadMessage(conn)
+		typ, body, err := wire.ReadMessage(conn, wire.ResponseCaps(wire.TypeError))
 		if err != nil || typ != wire.TypeError {
 			t.Fatalf("response %#x, %v; want an error response", typ, err)
 		}

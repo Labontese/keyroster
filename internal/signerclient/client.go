@@ -4,8 +4,8 @@ package signerclient
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -94,20 +94,26 @@ func roundTrip(ctx context.Context, socket string, msgType byte, body []byte, wa
 	if err := wire.WriteMessage(conn, msgType, body); err != nil {
 		return nil, fmt.Errorf("signerclient: send: %w", err)
 	}
-	respType, respBody, err := wire.ReadMessage(conn)
+	return readResponse(conn, want)
+}
+
+// readResponse reads one response frame from r and returns its body, which
+// must be of type want; an error response comes back as a
+// *wire.ErrorResponse error. A frame of any other type is refused after its
+// 6 bytes of length and header, before its body is allocated or read.
+func readResponse(r io.Reader, want byte) ([]byte, error) {
+	respType, respBody, err := wire.ReadMessage(r, wire.ResponseCaps(want))
 	if err != nil {
 		return nil, fmt.Errorf("signerclient: receive (the signer closes connections from peers that are not on its allowlist): %w", err)
 	}
-	switch respType {
-	case want:
-		return respBody, nil
-	case wire.TypeError:
+	if respType == wire.TypeError {
 		e, err := wire.ParseErrorResponse(respBody)
 		if err != nil {
 			return nil, err
 		}
 		return nil, e
-	default:
-		return nil, errors.New("signerclient: unexpected message type in response")
 	}
+	// ResponseCaps(want) accepts only want and TypeError: any other type
+	// was refused after its header (wire.ErrUnexpectedType).
+	return respBody, nil
 }

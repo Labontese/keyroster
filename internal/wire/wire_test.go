@@ -275,7 +275,7 @@ func TestReadFrame(t *testing.T) {
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
-		_, _, err := ReadMessage(r)
+		_, _, err := ReadMessage(r, RequestCaps)
 		runtime.ReadMemStats(&after)
 		if !errors.Is(err, ErrFrameTooLarge) {
 			t.Fatalf("ReadMessage error = %v, want ErrFrameTooLarge", err)
@@ -301,7 +301,7 @@ func TestReadFrame(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := ReadMessage(bytes.NewReader(tc.in))
+			_, _, err := ReadMessage(bytes.NewReader(tc.in), RequestCaps)
 			switch {
 			case tc.wantEOF:
 				if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
@@ -317,13 +317,13 @@ func TestReadFrame(t *testing.T) {
 func TestReadMessage(t *testing.T) {
 	t.Run("unknown_version", func(t *testing.T) {
 		in := append(frameHeader(3), Version+1, TypeIssueRequest, 0)
-		if _, _, err := ReadMessage(bytes.NewReader(in)); !errors.Is(err, ErrVersion) {
+		if _, _, err := ReadMessage(bytes.NewReader(in), RequestCaps); !errors.Is(err, ErrVersion) {
 			t.Fatalf("ReadMessage error = %v, want ErrVersion", err)
 		}
 	})
 	t.Run("payload_without_type", func(t *testing.T) {
 		in := append(frameHeader(1), Version)
-		if _, _, err := ReadMessage(bytes.NewReader(in)); !errors.Is(err, ErrShortFrame) {
+		if _, _, err := ReadMessage(bytes.NewReader(in), RequestCaps); !errors.Is(err, ErrShortFrame) {
 			t.Fatalf("ReadMessage error = %v, want ErrShortFrame", err)
 		}
 	})
@@ -332,7 +332,7 @@ func TestReadMessage(t *testing.T) {
 		if err := WriteMessage(&buf, TypeIssueRequest, []byte("body")); err != nil {
 			t.Fatal(err)
 		}
-		typ, body, err := ReadMessage(&buf)
+		typ, body, err := ReadMessage(&buf, RequestCaps)
 		if err != nil || typ != TypeIssueRequest || string(body) != "body" {
 			t.Fatalf("ReadMessage = %#x, %q, %v", typ, body, err)
 		}
@@ -347,7 +347,7 @@ func TestReadMessageCaps(t *testing.T) {
 	t.Run("length_one_refused_without_consuming_next", func(t *testing.T) {
 		next := frameOf(t, TypeIssueRequest, 10)
 		r := bytes.NewReader(append(append(frameHeader(1), 0x5a), next...))
-		if _, _, err := ReadMessage(r); !errors.Is(err, ErrShortFrame) {
+		if _, _, err := ReadMessage(r, RequestCaps); !errors.Is(err, ErrShortFrame) {
 			t.Fatalf("ReadMessage of a length-1 frame = %v, want ErrShortFrame", err)
 		}
 		rest, err := io.ReadAll(r)
@@ -359,20 +359,27 @@ func TestReadMessageCaps(t *testing.T) {
 		}
 	})
 	t.Run("length_two_header_only", func(t *testing.T) {
-		typ, body, err := ReadMessage(bytes.NewReader(append(frameHeader(2), Version, TypeIssueRequest)))
+		typ, body, err := ReadMessage(bytes.NewReader(append(frameHeader(2), Version, TypeIssueRequest)), RequestCaps)
 		if err != nil || typ != TypeIssueRequest || len(body) != 0 {
 			t.Fatalf("ReadMessage of a header-only frame = %#x, %d body bytes, %v; want the issue type, no body, no error", typ, len(body), err)
 		}
 	})
+	// RequestCaps is the signer's; ResponseCaps(want) a client's waiting
+	// for want.
+	issueClient, directoryClient := ResponseCaps(TypeIssueResponse), ResponseCaps(TypeGetDirectoryResponse)
 	accepted := []struct {
 		name    string
+		caps    Caps
 		msgType byte
 		length  int
 	}{
-		{"issue_exactly_max_frame", TypeIssueRequest, MaxFrame},
-		{"install_exactly_max_directory_frame", TypeInstallDirectory, MaxDirectoryFrame},
-		{"get_directory_response_exactly_max_directory_frame", TypeGetDirectoryResponse, MaxDirectoryFrame},
-		{"unknown_type_exactly_max_frame", 0x7e, MaxFrame},
+		{"issue_exactly_max_frame", RequestCaps, TypeIssueRequest, MaxFrame},
+		{"install_exactly_max_directory_frame", RequestCaps, TypeInstallDirectory, MaxDirectoryFrame},
+		{"unknown_type_exactly_max_frame", RequestCaps, 0x7e, MaxFrame},
+		{"get_directory_response_to_signer_exactly_max_frame", RequestCaps, TypeGetDirectoryResponse, MaxFrame},
+		{"get_directory_response_exactly_max_directory_frame", directoryClient, TypeGetDirectoryResponse, MaxDirectoryFrame},
+		{"issue_response_exactly_max_frame", issueClient, TypeIssueResponse, MaxFrame},
+		{"error_exactly_max_frame", issueClient, TypeError, MaxFrame},
 	}
 	for _, tc := range accepted {
 		t.Run(tc.name, func(t *testing.T) {
@@ -380,7 +387,7 @@ func TestReadMessageCaps(t *testing.T) {
 			if got := binary.BigEndian.Uint32(in); got != uint32(tc.length) { //nolint:gosec // G115: test lengths fit
 				t.Fatalf("frame length %d, want %d", got, tc.length)
 			}
-			typ, body, err := ReadMessage(bytes.NewReader(in))
+			typ, body, err := ReadMessage(bytes.NewReader(in), tc.caps)
 			if err != nil || typ != tc.msgType || len(body) != tc.length-headerLen {
 				t.Fatalf("ReadMessage = %#x, %d body bytes, %v; want %#x with %d body bytes", typ, len(body), err, tc.msgType, tc.length-headerLen)
 			}
@@ -388,14 +395,24 @@ func TestReadMessageCaps(t *testing.T) {
 	}
 	refused := []struct {
 		name    string
+		caps    Caps
 		msgType byte
 		length  uint32
+		wantErr error
 	}{
-		{"issue_max_frame_plus_one", TypeIssueRequest, MaxFrame + 1},
-		{"login_max_frame_plus_one", TypeLoginIssueRequest, MaxFrame + 1},
-		{"install_max_directory_frame_plus_one", TypeInstallDirectory, MaxDirectoryFrame + 1},
-		{"get_directory_response_max_directory_frame_plus_one", TypeGetDirectoryResponse, MaxDirectoryFrame + 1},
-		{"unknown_type_max_frame_plus_one", 0x7e, MaxFrame + 1},
+		{"issue_max_frame_plus_one", RequestCaps, TypeIssueRequest, MaxFrame + 1, ErrFrameTooLarge},
+		{"login_max_frame_plus_one", RequestCaps, TypeLoginIssueRequest, MaxFrame + 1, ErrFrameTooLarge},
+		{"install_max_directory_frame_plus_one", RequestCaps, TypeInstallDirectory, MaxDirectoryFrame + 1, ErrFrameTooLarge},
+		{"unknown_type_max_frame_plus_one", RequestCaps, 0x7e, MaxFrame + 1, ErrFrameTooLarge},
+		// The signer reads no response type at the directory cap.
+		{"get_directory_response_to_signer_max_frame_plus_one", RequestCaps, TypeGetDirectoryResponse, MaxFrame + 1, ErrFrameTooLarge},
+		{"get_directory_response_max_directory_frame_plus_one", directoryClient, TypeGetDirectoryResponse, MaxDirectoryFrame + 1, ErrFrameTooLarge},
+		{"error_max_frame_plus_one", issueClient, TypeError, MaxFrame + 1, ErrFrameTooLarge},
+		// A client refuses every type but the one it waits for and errors.
+		{"get_directory_response_on_issue", issueClient, TypeGetDirectoryResponse, MaxDirectoryFrame, ErrUnexpectedType},
+		{"install_directory_on_issue", issueClient, TypeInstallDirectory, MaxDirectoryFrame, ErrUnexpectedType},
+		{"issue_response_on_get_directory", directoryClient, TypeIssueResponse, MaxFrame, ErrUnexpectedType},
+		{"unknown_type_on_issue", issueClient, 0x7e, 3, ErrUnexpectedType},
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
@@ -403,10 +420,10 @@ func TestReadMessageCaps(t *testing.T) {
 			var before, after runtime.MemStats
 			runtime.GC()
 			runtime.ReadMemStats(&before)
-			_, _, err := ReadMessage(r)
+			_, _, err := ReadMessage(r, tc.caps)
 			runtime.ReadMemStats(&after)
-			if !errors.Is(err, ErrFrameTooLarge) {
-				t.Fatalf("ReadMessage error = %v, want ErrFrameTooLarge", err)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ReadMessage error = %v, want %v", err, tc.wantErr)
 			}
 			if r.read != 6 {
 				t.Fatalf("ReadMessage consumed %d bytes, want only the 6 bytes of length and header", r.read)
@@ -426,10 +443,11 @@ func TestWriteMessageCaps(t *testing.T) {
 		name    string
 		msgType byte
 		maxBody int
+		caps    Caps // of the reader that reads it back
 	}{
-		{"issue", TypeIssueRequest, MaxFrame - headerLen},
-		{"install_directory", TypeInstallDirectory, MaxDirectoryFrame - headerLen},
-		{"get_directory_response", TypeGetDirectoryResponse, MaxDirectoryFrame - headerLen},
+		{"issue", TypeIssueRequest, MaxFrame - headerLen, RequestCaps},
+		{"install_directory", TypeInstallDirectory, MaxDirectoryFrame - headerLen, RequestCaps},
+		{"get_directory_response", TypeGetDirectoryResponse, MaxDirectoryFrame - headerLen, ResponseCaps(TypeGetDirectoryResponse)},
 	} {
 		t.Run(tc.name+"_at_cap", func(t *testing.T) {
 			var buf bytes.Buffer
@@ -440,7 +458,7 @@ func TestWriteMessageCaps(t *testing.T) {
 			if buf.Len() != 4+headerLen+tc.maxBody {
 				t.Fatalf("wrote %d bytes, want %d", buf.Len(), 4+headerLen+tc.maxBody)
 			}
-			typ, got, err := ReadMessage(&buf)
+			typ, got, err := ReadMessage(&buf, tc.caps)
 			if err != nil || typ != tc.msgType || !bytes.Equal(got, body) {
 				t.Fatalf("round trip: %#x, %d bytes, %v", typ, len(got), err)
 			}
