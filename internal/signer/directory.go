@@ -32,15 +32,21 @@ type directoryState struct {
 	directoryAuthorized bool
 }
 
-// loadDirectory reads the installed directory at start and checks it
-// against the policy in force (s.policy): it must parse, carry the admin
-// quorum's signatures and fit the user CA profile. On any failure the
-// signer still starts, because the admin path needs no directory, but
-// refuses every login (directory_not_authorized) until a directory signed
-// under the policy in force is installed.
+// loadDirectory reads the installed directory at start. The stored row
+// must be exactly the one the verified log's last directory_install entry
+// records (checkDirectoryLogged), or the signer refuses to start (T-02-14).
+// Then it checks the directory against the policy in force (s.policy): it
+// must parse, carry the admin quorum's signatures and fit the user CA
+// profile. On any of those failures the signer still starts, because the
+// admin path needs no directory, but refuses every login
+// (directory_not_authorized) until a directory signed under the policy in
+// force is installed (T-02-15).
 func (s *Signer) loadDirectory(ctx context.Context) error {
 	stored, err := s.db.LatestDirectory(ctx)
 	if err != nil {
+		return err
+	}
+	if err := checkDirectoryLogged(stored, s.loaded.lastDirectory); err != nil {
 		return err
 	}
 	if stored == nil {

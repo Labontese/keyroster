@@ -33,10 +33,11 @@ type logState struct {
 
 	tree       *tlog.Log // committed state
 	lastMicros uint64    // timestamp of the last committed leaf
-	// loaded is what the bundle_install leaves of the log record, as last
+	// loaded is what the install leaves of the log record, as last
 	// loaded from the database. New and InstallBundle compare its last
-	// body with the stored trust bundle record and check the policy
-	// against its root sets.
+	// bundle_install body with the stored trust bundle record and check
+	// the policy against its root sets; loadDirectory compares its last
+	// directory_install body with the stored directory.
 	loaded loggedInstalls
 
 	// pending is the state after the appends of the open transaction. It
@@ -85,12 +86,14 @@ func (s *Signer) rebuildLog(ctx context.Context) (*tlog.Log, uint64, loggedInsta
 	return rebuildLogFrom(ctx, s.db, s.cpVerifier)
 }
 
-// loggedInstalls is what the bundle_install leaves of a log record: the
-// body of the last one (nil when there is none) and the root set of every
-// logged trust bundle, in log order.
+// loggedInstalls is what the install leaves of a log record: the body of
+// the last bundle_install leaf (nil when there is none), the root set of
+// every logged trust bundle, in log order, and the body of the last
+// directory_install leaf (nil when there is none).
 type loggedInstalls struct {
-	last  []byte
-	roots [][]trust.RootKey
+	last          []byte
+	roots         [][]trust.RootKey
+	lastDirectory []byte
 }
 
 // add records the bundle_install leaf idx with body.
@@ -105,6 +108,15 @@ func (li *loggedInstalls) add(idx uint64, body []byte) error {
 	}
 	li.last = body
 	li.roots = append(li.roots, bundle.Root.Keys)
+	return nil
+}
+
+// addDirectory records the directory_install leaf idx with body.
+func (li *loggedInstalls) addDirectory(idx uint64, body []byte) error {
+	if _, err := tlog.DecodeDirectoryInstallBody(body); err != nil {
+		return fmt.Errorf("%w: leaf %d: directory_install body does not decode", errLogMismatch, idx)
+	}
+	li.lastDirectory = body
 	return nil
 }
 
@@ -144,6 +156,35 @@ func checkBundleLogged(stored *signerdb.StoredBundle, install []byte) error {
 		!bytes.Equal(body.Policy, stored.Policy) || !bytes.Equal(body.PolicySigs, stored.PolicySigs) {
 		return fmt.Errorf("%w: the stored trust bundle (version %d) is not the one the last bundle_install entry records (version %d)",
 			errLogMismatch, stored.Version, body.BundleVersion)
+	}
+	return nil
+}
+
+// checkDirectoryLogged requires the latest stored directory (nil when
+// none is stored) to be exactly what install, the body of the last
+// directory_install leaf of the verified log (nil when there is none),
+// records: the same version and policy version and byte-identical
+// document and signatures (T-02-14). The directory table is not anchored
+// in the signed checkpoint, so a row overwritten, deleted or written
+// outside InstallDirectory (an offline edit, a tampered backup) is
+// refused instead of trusted.
+func checkDirectoryLogged(stored *signerdb.StoredDirectory, install []byte) error {
+	switch {
+	case stored == nil && install == nil:
+		return nil
+	case stored == nil:
+		return fmt.Errorf("%w: the log's last directory_install entry records an installed directory, but the state database holds none", errLogMismatch)
+	case install == nil:
+		return fmt.Errorf("%w: directory version %d is stored, but the log records no directory_install entry", errLogMismatch, stored.Version)
+	}
+	body, err := tlog.DecodeDirectoryInstallBody(install)
+	if err != nil {
+		return fmt.Errorf("%w: last directory_install entry: %w", errLogMismatch, err)
+	}
+	if body.Version != stored.Version || body.PolicyVersion != stored.PolicyVersion ||
+		!bytes.Equal(body.Directory, stored.Doc) || !bytes.Equal(body.Sigs, stored.Sigs) {
+		return fmt.Errorf("%w: the stored directory (version %d) is not the one the last directory_install entry records (version %d)",
+			errLogMismatch, stored.Version, body.Version)
 	}
 	return nil
 }
@@ -241,6 +282,10 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		switch l.Kind {
 		case tlog.KindBundleInstall:
 			if err := installs.add(idx, l.Body); err != nil {
+				return err
+			}
+		case tlog.KindDirectoryInstall:
+			if err := installs.addDirectory(idx, l.Body); err != nil {
 				return err
 			}
 		case tlog.KindIssue:
