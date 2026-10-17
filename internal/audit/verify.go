@@ -453,7 +453,15 @@ func verifyLoginIssue(index uint64, body *tlog.LoginIssueBody, leafMicros uint64
 	if err := a.checkIssue(ib, c, kid, leafMicros); err != nil {
 		return err
 	}
-	if !bytes.Equal(c.Key.Marshal(), req.SubjectKey) {
+	// The key is compared by identity, not by the request's bytes: the
+	// passkey approved bytes that decode to exactly one key, and a signer
+	// before the canonical-encoding refusal logged a non-canonical
+	// encoding (an RSA mpint with a leading zero) verbatim.
+	subject, err := ssh.ParsePublicKey(req.SubjectKey)
+	if err != nil {
+		return fmt.Errorf("request subject key does not parse: %w", err)
+	}
+	if !bytes.Equal(c.Key.Marshal(), subject.Marshal()) {
 		return fmt.Errorf("certificate key %s is not the request's subject key", ssh.FingerprintSHA256(c.Key))
 	}
 	if !slices.Equal(c.ValidPrincipals, req.Principals) {

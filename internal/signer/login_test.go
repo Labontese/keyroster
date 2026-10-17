@@ -541,6 +541,14 @@ func TestLoginRefusalMatrix(t *testing.T) {
 			req.Extensions = []string{"permit-port-forwarding"}
 			return approve(t, pk.eddsa, req, nil)
 		}},
+		// A subject key that parses but is not canonically encoded: the
+		// certificate would carry its canonical encoding, and audit verify
+		// binds the logged request bytes to the certificate key.
+		{"bad_subject_key/non_canonical_rsa", "bad_subject_key", func(t *testing.T, e *logEnv) *wire.LoginIssueRequest {
+			req := e.loginReq(t, "alice")
+			req.SubjectKey = NonCanonicalRSAKey(t)
+			return approve(t, pk.eddsa, req, nil)
+		}},
 		// Request freshness and replay.
 		{"request_time_skew/plus_301_s", "request_time_skew", func(t *testing.T, e *logEnv) *wire.LoginIssueRequest {
 			req := e.loginReq(t, "alice")

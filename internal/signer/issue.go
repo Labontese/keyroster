@@ -1,6 +1,7 @@
 package signer
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -67,7 +68,7 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 	if !ok || !okProfile {
 		return nil, refusalErr(wire.CodeRefused, "ca_not_configured", nil)
 	}
-	subject, err := ssh.ParsePublicKey(req.SubjectKey)
+	subject, err := parseSubjectKey(req.SubjectKey)
 	if err != nil {
 		return nil, refusalErr(wire.CodeRefused, "bad_subject_key", err)
 	}
@@ -213,6 +214,24 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 // it gets here). The signer refuses every request until it is restarted
 // and loads the new bundle.
 var errTrustChanged = errors.New("signer: the installed trust bundle changed since start")
+
+// errNonCanonicalKey means a subject key parses but is not in its canonical
+// wire encoding (for example an RSA mpint with a superfluous leading zero).
+var errNonCanonicalKey = errors.New("signer: the subject key is not canonically encoded")
+
+// parseSubjectKey parses a request's subject key and requires its canonical
+// encoding: the certificate carries the parsed key's Marshal, and the log
+// carries the request's bytes, so the two must be the same bytes.
+func parseSubjectKey(blob []byte) (ssh.PublicKey, error) {
+	pub, err := ssh.ParsePublicKey(blob)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(pub.Marshal(), blob) {
+		return nil, errNonCanonicalKey
+	}
+	return pub, nil
+}
 
 // checkTrustCurrent refuses with trust_changed when version, the latest
 // installed bundle version (read with err), is not the one this signer

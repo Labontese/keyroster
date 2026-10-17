@@ -7,11 +7,13 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"slices"
 	"strings"
 	"testing"
@@ -1689,6 +1691,38 @@ func (lf *loginFixture) addLogin(pre, post func(*login)) *login {
 	return l
 }
 
+// paddedKey is an ssh-rsa key blob that parses but is not canonical, and
+// the key it denotes.
+type paddedKey struct {
+	blob []byte
+	key  ssh.PublicKey
+}
+
+// nonCanonicalRSAKey returns a fresh 3072-bit ssh-rsa key whose exponent
+// mpint carries a superfluous leading zero byte (00 01 00 01).
+// ssh.ParsePublicKey accepts it and its Marshal is one byte shorter; both
+// are checked, so a case that uses it cannot pass vacuously.
+func nonCanonicalRSAKey(t testing.TB) paddedKey {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 3072)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := ssh.Marshal(struct {
+		Name string
+		E    []byte
+		N    *big.Int
+	}{ssh.KeyAlgoRSA, []byte{0, 1, 0, 1}, k.N})
+	pub, err := ssh.ParsePublicKey(blob)
+	if err != nil {
+		t.Fatalf("the padded RSA key does not parse: %v", err)
+	}
+	if bytes.Equal(pub.Marshal(), blob) || k.E != 65537 {
+		t.Fatal("the padded RSA key is canonical")
+	}
+	return paddedKey{blob: blob, key: pub}
+}
+
 // addIssueWithRequest logs an admin issue entry under the policy in force
 // whose kr1 key ID names request ID reqHex, with the next serial.
 func (lf *loginFixture) addIssueWithRequest(reqHex string) {
@@ -1731,6 +1765,7 @@ func TestVerifyLoginTampering(t *testing.T) {
 	}
 	other := func(t *testing.T) ssh.Signer { return newSigner(t, "ed25519") }
 	stranger := newSigner(t, "ed25519").PublicKey()
+	rsaPadded := nonCanonicalRSAKey(t)
 	widened := []string{"role:ops", "root"}
 	cases := []struct {
 		name  string
@@ -1918,6 +1953,19 @@ func TestVerifyLoginTampering(t *testing.T) {
 		// The certificate.
 		{name: "login_cert_key_not_subject", build: oneLogin(nil, func(l *login) { l.certKey = stranger }),
 			want: "(login_issue): certificate key SHA256:"},
+		// A subject key that parses but is not canonically encoded denotes
+		// exactly one key: the certificate carries that key's canonical
+		// encoding, and the log verifies (an entry from a signer that did
+		// not yet refuse such a key). A certificate for another key is
+		// still refused.
+		{name: "login_rsa_non_canonical_subject_key_ok", build: oneLogin(func(l *login) {
+			l.req.SubjectKey, l.certKey = rsaPadded.blob, rsaPadded.key
+		}, nil)},
+		{name: "login_rsa_non_canonical_subject_key_cert_key_not_subject", build: oneLogin(func(l *login) {
+			l.req.SubjectKey = rsaPadded.blob
+		}, nil), want: "(login_issue): certificate key SHA256:"},
+		{name: "login_subject_key_unparseable", build: oneLogin(func(l *login) { l.req.SubjectKey = []byte("not a key") }, nil),
+			want: "(login_issue): request subject key does not parse:"},
 		{name: "login_cert_principals_differ", build: oneLogin(nil, func(l *login) { l.principals = widened }),
 			want: `(login_issue): certificate principals ["role:ops" "root"] differ from the request's ["role:ops"]`},
 		{name: "login_cert_span_wrong", build: oneLogin(nil, func(l *login) { l.validFor = 3600 * time.Second }),
