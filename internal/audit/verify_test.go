@@ -1420,14 +1420,15 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 		name string
 		kind tlog.Kind
 		body func(t *testing.T) []byte
+		want string // the check that must refuse it ("": any but the interim refusal)
 	}{
 		{"directory_install_unproven_refused", tlog.KindDirectoryInstall, func(t *testing.T) []byte {
 			return encode(t, &tlog.DirectoryInstallBody{Version: 1, PolicyVersion: 1, Directory: []byte("not a directory"), Sigs: []byte("no signatures")})
-		}},
+		}, ""},
 		{"login_issue_unproven_refused", tlog.KindLoginIssue, func(t *testing.T) []byte {
 			return encode(t, &tlog.LoginIssueBody{Serial: 1 << 60, PolicyVersion: 1, DirectoryVersion: 1, Request: []byte("request"),
 				Evidence: []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: []byte("assertion")}}, Cert: []byte("cert"), KeyID: "kr2"})
-		}},
+		}, "logged request: "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := standard(t, "ed25519")
@@ -1442,6 +1443,9 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "not verifiable by this version") {
 				t.Fatalf("error %q is the interim refusal, not a check of the %s entry", err, tc.kind)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q, want the check %q", err, tc.want)
 			}
 			t.Logf("refused by its check: %v", err)
 		})
@@ -1641,6 +1645,9 @@ type login struct {
 	serial     uint64
 	dirVersion uint64
 	polVersion uint64
+	// request is what the entry logs as the request (nil: the request's
+	// SigningBytes, as the signer logs it).
+	request []byte
 }
 
 // leafSecs is the whole-second time of the next leaf.
@@ -1708,8 +1715,12 @@ func (lf *loginFixture) addLogin(pre, post func(*login)) *login {
 		}
 		evidence = []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: blob}}
 	}
+	request := l.request
+	if request == nil {
+		request = l.req.SigningBytes()
+	}
 	body, err := (&tlog.LoginIssueBody{Serial: l.serial, PolicyVersion: l.polVersion, DirectoryVersion: l.dirVersion,
-		Request: l.req.SigningBytes(), Evidence: evidence, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+		Request: request, Evidence: evidence, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
 	if err != nil {
 		lf.t.Fatal(err)
 	}
@@ -1976,6 +1987,28 @@ func TestVerifyLoginTampering(t *testing.T) {
 			lf.addDirectory(lf.directory(nil), nil)
 			return lf
 		}, want: "(directory_install): directory_install before the first bundle_install"},
+		{name: "login_before_bundle", build: func(t *testing.T) *loginFixture {
+			// A login_issue as the log's first entry: no root-signed
+			// policy is in force to check it against.
+			f := newBareFixture(t, "ed25519")
+			lf := &loginFixture{fixture: f, pol: f.loginPolicy(true)}
+			var err error
+			if lf.alice, err = webauthntest.New(webauthn.AlgEdDSA); err != nil {
+				t.Fatal(err)
+			}
+			lf.bob = lf.alice
+			lf.addLogin(nil, nil)
+			return lf
+		}, want: "(login_issue): login_issue before the first bundle_install"},
+		{name: "login_request_not_signing_bytes", build: oneLogin(nil, func(l *login) {
+			// The wire body (fields and evidence, no domain tag) logged
+			// instead of the signing bytes the passkey approved.
+			body, err := l.req.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			l.request = body
+		}), want: "(login_issue): logged request: "},
 
 		// The certificate.
 		{name: "login_cert_key_not_subject", build: oneLogin(nil, func(l *login) { l.certKey = stranger }),
