@@ -396,6 +396,30 @@ func (d *Directory) roleGrants() (map[string][]string, error) {
 	return out, nil // d.Roles is sorted, so every list is too
 }
 
+// userRoles is roleGrants for the one user Authorize serves, which the
+// signer runs under its lock for every login: one scan of d for that
+// user, not every user's roles (T-02-12). Same result and the same
+// MaxRolesPerUser refusal as roleGrants (TestUserRolesMatchesRoleGrants).
+func (d *Directory) userRoles(user string) ([]string, error) {
+	inGroup := map[string]bool{}
+	for _, g := range d.Groups {
+		if slices.Contains(g.Members, user) {
+			inGroup[g.Name] = true
+		}
+	}
+	var out []string
+	for _, r := range d.Roles {
+		if !slices.Contains(r.Users, user) && !slices.ContainsFunc(r.Groups, func(g string) bool { return inGroup[g] }) {
+			continue
+		}
+		if len(out) == MaxRolesPerUser {
+			return nil, fmt.Errorf("%w: user %s has more than %d roles", ErrInvalid, user, MaxRolesPerUser)
+		}
+		out = append(out, r.Name)
+	}
+	return out, nil // d.Roles is sorted, so out is too
+}
+
 // checkSorted requires list to be sorted and duplicate-free.
 func checkSorted(what string, list []string) error {
 	for i := 1; i < len(list); i++ {

@@ -533,3 +533,95 @@ func TestValidateLinear(t *testing.T) {
 		t.Fatalf("Validate of %d users took %v, want well under 1 s (linear)", len(d.Users), took)
 	}
 }
+
+// TestAuthorizeOneUser (T-02-12): Authorize, which the signer runs under
+// its lock for every login, computes the roles of the one user it
+// authorizes, not those of every user. On the large directory it takes
+// less than a twentieth of Validate, which computes every user's roles
+// (computing all of them per login took about half of Validate). Skipped
+// under the race detector, like TestValidateLinear.
+func TestAuthorizeOneUser(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing bound not meaningful under -race")
+	}
+	d := largeDirectory(20000)
+	start := time.Now()
+	if err := d.Validate(); err != nil {
+		t.Fatalf("Validate = %v, want nil", err)
+	}
+	validate := time.Since(start)
+	last := &d.Users[len(d.Users)-1]
+	last.Status = StatusActive // Authorize does not look at credentials
+	start = time.Now()
+	g, err := d.Authorize(last.Name, nil)
+	took := time.Since(start)
+	if err != nil || len(g.Roles) != MaxRolesPerUser {
+		t.Fatalf("Authorize(%s) = %+v, %v; want all %d roles", last.Name, g, err, MaxRolesPerUser)
+	}
+	if took > validate/20 {
+		t.Fatalf("Authorize of one user took %v, Validate of %d users %v: want less than a twentieth", took, len(d.Users), validate)
+	}
+	t.Logf("Authorize %v, Validate %v", took, validate)
+}
+
+// TestUserRolesMatchesRoleGrants: Authorize's one-user computation
+// (userRoles) gives every user of 2000 pseudo-random directories exactly
+// the roles Validate's all-users computation (roleGrants) gives them, and
+// both refuse the same directories for a user above MaxRolesPerUser.
+func TestUserRolesMatchesRoleGrants(t *testing.T) {
+	state := uint64(0x9e3779b97f4a7c15)
+	next := func(n int) int { // xorshift64: deterministic, no math/rand
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		return int(state % uint64(n)) //nolint:gosec // G115: n is small and positive
+	}
+	pick := func(names []string) []string {
+		out := []string{}
+		for _, n := range names {
+			if next(3) == 0 {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	refusals := 0
+	for range 2000 {
+		d := &Directory{}
+		users := principalList("u", 1+next(8))
+		for _, u := range users {
+			d.Users = append(d.Users, User{Name: u, Status: StatusDisabled})
+		}
+		groups := principalList("g", next(5))
+		for _, g := range groups {
+			d.Groups = append(d.Groups, Group{Name: g, Members: pick(users)})
+		}
+		for _, r := range principalList("r", next(MaxRolesPerUser+6)) {
+			d.Roles = append(d.Roles, Role{Name: r, Users: pick(users), Groups: pick(groups)})
+		}
+		all, allErr := d.roleGrants()
+		failed := false
+		for _, u := range users {
+			one, err := d.userRoles(u)
+			if err != nil {
+				failed = true
+				if allErr == nil {
+					t.Fatalf("userRoles(%s) = %v, but roleGrants accepts the directory %+v", u, err, d)
+				}
+				continue
+			}
+			if !slices.Equal(one, all[u]) && allErr == nil {
+				t.Fatalf("userRoles(%s) = %v, roleGrants gives %v for %+v", u, one, all[u], d)
+			}
+		}
+		if (allErr != nil) != failed {
+			t.Fatalf("roleGrants = %v, but userRoles refused no user of %+v", allErr, d)
+		}
+		if failed {
+			refusals++
+		}
+	}
+	if refusals == 0 || refusals == 2000 {
+		t.Fatalf("%d of 2000 directories refused, want some of each", refusals)
+	}
+}
