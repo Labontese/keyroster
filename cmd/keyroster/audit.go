@@ -109,8 +109,12 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		enc := json.NewEncoder(stdout)
 		return enc.Encode(res)
 	}
-	if _, err := fmt.Fprintf(stdout, "OK: %d entries, root %s, issued %d (user %d, host %d, machine %d), refusals %d, trust bundle v%d, policy v%d, log key %s\n",
-		res.Entries, res.Root, res.Issued, res.ByCA["user"], res.ByCA["host"], res.ByCA["machine"], res.Refusals, res.Bundle, res.Policy, res.LogKey); err != nil {
+	// issued counts admin issuances (issue entries) only; login certificates
+	// and directory installs are the counts of their own kinds.
+	if _, err := fmt.Fprintf(stdout, "OK: %d entries, root %s, issued %d (user %d, host %d, machine %d), login certificates %d, directory installs %d, refusals %d, trust bundle v%d, policy v%d, log key %s\n",
+		res.Entries, res.Root, res.Issued, res.ByCA["user"], res.ByCA["host"], res.ByCA["machine"],
+		rep.Counts[tlog.KindLoginIssue], rep.Counts[tlog.KindDirectoryInstall],
+		res.Refusals, res.Bundle, res.Policy, res.LogKey); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(stdout, "anchored: the pinned roots are the root set of trust bundle v%d\n", res.Anchor); err != nil {

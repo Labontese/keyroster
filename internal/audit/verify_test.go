@@ -1363,12 +1363,16 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 	}
 }
 
-// TestVerifyKindsWithoutChecks: from plan 02-01 until 02-04 adds their
-// checks, tlog.DecodeLeaf accepts directory_install and login_issue
-// leaves, and audit verify must refuse them at their entry instead of
-// counting them as verified (T-02-115). Each export carries a checkpoint
-// correctly signed over all its leaves, so only the kind check can fail it.
-// The control shows every Phase 1 kind still verifies.
+// TestVerifyKindsWithoutChecks: from plan 02-01 until 02-04, audit verify
+// refused every directory_install and login_issue leaf with "not
+// verifiable by this version" (T-02-115). Plan 02-04 gave both kinds real
+// checks; these cases keep 02-01's leaves, whose bodies only encode (the
+// directory bytes are no directory, the request bytes prove nothing), and
+// show that the interim refusal was replaced by a check, not by a pass:
+// Verify still returns an error and no report, the error names the entry
+// and its kind, and it is not the interim text. Each export carries a
+// checkpoint correctly signed over all its leaves. The control shows every
+// Phase 1 kind still verifies.
 func TestVerifyKindsWithoutChecks(t *testing.T) {
 	encode := func(t *testing.T, b interface{ Encode() ([]byte, error) }) []byte {
 		t.Helper()
@@ -1383,10 +1387,10 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 		kind tlog.Kind
 		body func(t *testing.T) []byte
 	}{
-		{"directory_install_not_verifiable", tlog.KindDirectoryInstall, func(t *testing.T) []byte {
+		{"directory_install_unproven_refused", tlog.KindDirectoryInstall, func(t *testing.T) []byte {
 			return encode(t, &tlog.DirectoryInstallBody{Version: 1, PolicyVersion: 1, Directory: []byte("not a directory"), Sigs: []byte("no signatures")})
 		}},
-		{"login_issue_not_verifiable", tlog.KindLoginIssue, func(t *testing.T) []byte {
+		{"login_issue_unproven_refused", tlog.KindLoginIssue, func(t *testing.T) []byte {
 			return encode(t, &tlog.LoginIssueBody{Serial: 1 << 60, PolicyVersion: 1, DirectoryVersion: 1, Request: []byte("request"),
 				Evidence: []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: []byte("assertion")}}, Cert: []byte("cert"), KeyID: "kr2"})
 		}},
@@ -1396,13 +1400,16 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 			idx := len(f.leaves)
 			f.add(tc.kind, tc.body(t))
 			rep, err := f.verify(join(f.lines()), nil)
-			want := fmt.Sprintf("audit: entry %d (%s): not verifiable by this version", idx, tc.kind)
-			if err == nil || rep != nil || err.Error() != want {
-				t.Fatalf("Verify = %+v, %v; want no report and %q", rep, err, want)
+			if err == nil || rep != nil {
+				t.Fatalf("Verify = %+v, %v; want no report and the refusal of entry %d", rep, err, idx)
 			}
-			if !strings.Contains(err.Error(), "not verifiable by this version") {
-				t.Fatalf("error %q lacks the refusal text", err)
+			if prefix := fmt.Sprintf("audit: entry %d (%s): ", idx, tc.kind); !strings.HasPrefix(err.Error(), prefix) {
+				t.Fatalf("error %q, want it to start with %q", err, prefix)
 			}
+			if strings.Contains(err.Error(), "not verifiable by this version") {
+				t.Fatalf("error %q is the interim refusal, not a check of the %s entry", err, tc.kind)
+			}
+			t.Logf("refused by its check: %v", err)
 		})
 	}
 	t.Run("phase1_kinds_still_verify", func(t *testing.T) {

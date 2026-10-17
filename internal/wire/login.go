@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 
@@ -134,6 +135,56 @@ func (r *LoginIssueRequest) Digest() [32]byte {
 // is enforced and trailing bytes are refused.
 func ParseLoginIssueRequest(body []byte) (*LoginIssueRequest, error) {
 	s := cryptobyte.String(body)
+	r, err := readLoginFields(&s)
+	if err != nil {
+		return nil, err
+	}
+	var evidence cryptobyte.String
+	if !s.ReadUint16LengthPrefixed(&evidence) || !s.Empty() {
+		return nil, ErrMalformed
+	}
+	if r.Evidence, err = readEvidence(&evidence); err != nil {
+		return nil, err
+	}
+	if err := r.check(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// ParseLoginIssueSigningBytes decodes the signing bytes of a login request
+// (SigningBytes: the raw LoginRequestDomain tag, then every field except
+// Evidence), as a login_issue log leaf stores them. It is as strict as
+// ParseLoginIssueRequest: every limit is enforced, there is no evidence
+// section, trailing bytes are refused, and the bytes must be exactly what
+// SigningBytes encodes for the decoded request, so that the request an
+// auditor reads is the one whose SHA-256 the passkey signed. The returned
+// request has no Evidence.
+func ParseLoginIssueSigningBytes(b []byte) (*LoginIssueRequest, error) {
+	s := cryptobyte.String(b)
+	var tag []byte
+	if !s.ReadBytes(&tag, len(LoginRequestDomain)) || string(tag) != LoginRequestDomain {
+		return nil, fmt.Errorf("%w: not a %s signing encoding", ErrMalformed, LoginRequestDomain)
+	}
+	r, err := readLoginFields(&s)
+	if err != nil {
+		return nil, err
+	}
+	if !s.Empty() {
+		return nil, fmt.Errorf("%w: trailing bytes after the login request fields", ErrMalformed)
+	}
+	if err := r.check(); err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(r.SigningBytes(), b) {
+		return nil, fmt.Errorf("%w: login request signing bytes are not canonical", ErrMalformed)
+	}
+	return r, nil
+}
+
+// readLoginFields reads every LoginIssueRequest field except Evidence, in
+// the order addFields writes them. Per-entry minimums are left to check().
+func readLoginFields(s *cryptobyte.String) (*LoginIssueRequest, error) {
 	var (
 		r          LoginIssueRequest
 		subjectKey []byte
@@ -142,18 +193,15 @@ func ParseLoginIssueRequest(body []byte) (*LoginIssueRequest, error) {
 		principals cryptobyte.String
 		reqID      []byte
 		extensions cryptobyte.String
-		evidence   cryptobyte.String
 	)
-	if !readBytes16(&s, &subjectKey, MaxSubjectKeyLen) ||
-		!readBytes16(&s, &subject, MaxSubjectLen) ||
+	if !readBytes16(s, &subjectKey, MaxSubjectKeyLen) ||
+		!readBytes16(s, &subject, MaxSubjectLen) ||
 		!s.ReadUint16LengthPrefixed(&roles) ||
 		!s.ReadUint16LengthPrefixed(&principals) ||
 		!s.ReadUint32(&r.ValidForSeconds) ||
 		!s.ReadBytes(&reqID, len(r.RequestID)) ||
 		!s.ReadUint64(&r.CreatedAt) ||
-		!s.ReadUint16LengthPrefixed(&extensions) ||
-		!s.ReadUint16LengthPrefixed(&evidence) ||
-		!s.Empty() {
+		!s.ReadUint16LengthPrefixed(&extensions) {
 		return nil, ErrMalformed
 	}
 	r.SubjectKey = subjectKey
@@ -167,12 +215,6 @@ func ParseLoginIssueRequest(body []byte) (*LoginIssueRequest, error) {
 		return nil, err
 	}
 	if r.Extensions, err = readList16(&extensions, MaxExtensions, MaxExtensionLen); err != nil {
-		return nil, err
-	}
-	if r.Evidence, err = readEvidence(&evidence); err != nil {
-		return nil, err
-	}
-	if err := r.check(); err != nil {
 		return nil, err
 	}
 	return &r, nil

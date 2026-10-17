@@ -28,7 +28,7 @@ import (
 func init() {
 	register(command{
 		Name:    "root",
-		Summary: "offline root ceremony (init, genesis-policy, sign)",
+		Summary: "offline root ceremony (init, genesis-policy, successor-policy, sign)",
 		Run:     runRoot,
 	})
 }
@@ -49,7 +49,7 @@ const (
 
 func runRoot(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: keyroster root init|genesis-policy|sign [flags]")
+		_, _ = fmt.Fprintln(stderr, "usage: keyroster root init|genesis-policy|successor-policy|sign [flags]")
 		return errUsage
 	}
 	switch args[0] {
@@ -57,6 +57,8 @@ func runRoot(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return runRootInit(ctx, args[1:], stdout, stderr)
 	case "genesis-policy":
 		return runRootGenesisPolicy(ctx, args[1:], stdout, stderr)
+	case "successor-policy":
+		return runRootSuccessorPolicy(ctx, args[1:], stdout, stderr)
 	case "sign":
 		return runRootSign(ctx, args[1:], stdout, stderr)
 	default:
@@ -213,6 +215,98 @@ func runRootGenesisPolicy(_ context.Context, args []string, stdout, stderr io.Wr
 		return err
 	}
 	_, _ = fmt.Fprintf(stdout, "policy: %s\nsha256: %s\n", *out, trust.SHA256Hex(data))
+	return nil
+}
+
+// rpOneWayWarning is printed whenever successor-policy sets or changes the
+// WebAuthn RP (D-09).
+const rpOneWayWarning = "WARNING: rp_id is a one-way setting. Every passkey enrolled under it works only for that exact hostname; renaming the host or changing rp_id makes every enrolled passkey unusable.\n"
+
+// successorPolicyUsage is the flag set's usage header.
+const successorPolicyUsage = `usage: keyroster root successor-policy --prev POLICY --out FILE --webauthn-rp-id HOST [--webauthn-origin URL]...
+
+Writes the successor of the policy in force (policy.json of the bundle in
+force): version + 1, prev = SHA-256 of that policy, every other field
+unchanged, and the WebAuthn relying party set or changed. The output is
+unsigned: sign it into a successor bundle with "keyroster root sign --prev",
+check it with "keyroster trust verify --prev", then install it.
+
+Only the WebAuthn RP can be changed here. Admins, admin quorum, CA profiles
+and every other policy field are carried over unchanged; a quorum-gated
+policy change is Phase 4 (AUTHZ-03).
+
+`
+
+// runRootSuccessorPolicy writes the successor of the policy in force that
+// sets or changes its WebAuthn RP (D-09). It refuses an existing --out, a
+// --prev that is not a canonical policy, an RP equal to the one in force
+// and an RP the policy rules refuse, and writes nothing then.
+func runRootSuccessorPolicy(_ context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("root successor-policy", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	fset.Usage = func() {
+		_, _ = io.WriteString(stderr, successorPolicyUsage)
+		fset.PrintDefaults()
+	}
+	prevPath := fset.String("prev", "", "the canonical policy in force: policy.json of the bundle in force (required)")
+	out := fset.String("out", "", "successor policy output file; must not exist (required)")
+	rpID := fset.String("webauthn-rp-id", "", "WebAuthn relying party ID: the DNS hostname every passkey is bound to, forever (required)")
+	var origins stringList
+	fset.Var(&origins, "webauthn-origin", "allowed WebAuthn origin https://HOST[:PORT] (repeatable; default https://<rp-id>)")
+	if err := fset.Parse(args); err != nil {
+		return errUsage
+	}
+	if fset.NArg() != 0 || *prevPath == "" || *out == "" || *rpID == "" {
+		_, _ = fmt.Fprintln(stderr, "root successor-policy: --prev, --out and --webauthn-rp-id are required")
+		return errUsage
+	}
+	if _, err := os.Lstat(*out); err == nil {
+		return fmt.Errorf("%s already exists; refusing to overwrite a policy; nothing was written", *out)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	prevData, err := os.ReadFile(*prevPath) //nolint:gosec // G304: the operator names the file
+	if err != nil {
+		return err
+	}
+	prev, err := trust.ParsePolicy(prevData)
+	if err != nil {
+		return fmt.Errorf("%s: %w; nothing was written", *prevPath, err)
+	}
+	rp := &trust.WebAuthnRP{RPID: *rpID, Origins: slices.Clone([]string(origins))}
+	if len(rp.Origins) == 0 {
+		rp.Origins = []string{"https://" + *rpID}
+	}
+	slices.Sort(rp.Origins)
+	if prev.WebAuthn != nil && prev.WebAuthn.RPID == rp.RPID && slices.Equal(prev.WebAuthn.Origins, rp.Origins) {
+		return fmt.Errorf("the policy in force (v%d) already has rp_id %s with origins %s: nothing to change; nothing was written",
+			prev.Version, rp.RPID, strings.Join(rp.Origins, " "))
+	}
+	if prev.Version == math.MaxUint64 {
+		return fmt.Errorf("the policy in force has the last possible version; nothing was written")
+	}
+	next := *prev
+	next.Version = prev.Version + 1
+	next.Prev = trust.SHA256Hex(prevData)
+	next.WebAuthn = rp
+	if err := next.Validate(); err != nil {
+		return fmt.Errorf("successor policy: %w; nothing was written", err)
+	}
+	data, err := next.Canonical()
+	if err != nil {
+		return err
+	}
+	if err := writeNew(*out, data); err != nil {
+		return err
+	}
+	oldRP, oldOrigins := "(none)", "(none)"
+	if prev.WebAuthn != nil {
+		oldRP, oldOrigins = prev.WebAuthn.RPID, strings.Join(prev.WebAuthn.Origins, " ")
+	}
+	_, _ = fmt.Fprintf(stdout, "successor of policy v%d, sha256 %s\n", prev.Version, next.Prev)
+	_, _ = fmt.Fprintf(stdout, "rp_id:   %s -> %s\norigins: %s -> %s\n", oldRP, rp.RPID, oldOrigins, strings.Join(rp.Origins, " "))
+	_, _ = fmt.Fprintf(stdout, "policy: %s (version %d)\nsha256: %s\n", *out, next.Version, trust.SHA256Hex(data))
+	_, _ = io.WriteString(stderr, rpOneWayWarning)
 	return nil
 }
 

@@ -3,20 +3,26 @@ package audit
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
+	"slices"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/certprofile"
+	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/webauthn"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -243,6 +249,264 @@ func issuanceRange(serial, leafMicros uint64) (time.Time, time.Time, error) {
 	return time.UnixMicro(int64(serial)), time.UnixMicro(int64(leafMicros)), nil //nolint:gosec // G115: both <= math.MaxInt64, checked above
 }
 
+// directoryInForce is the directory the log's last directory_install entry
+// installed (D-01), kept as the walk goes, the way anchor keeps the policy
+// in force.
+type directoryInForce struct {
+	raw     []byte // canonical bytes; nil while no directory is installed
+	sigs    []byte // the admins' signatures it was installed with
+	dir     *directory.Directory
+	version uint64
+	// authErr is why the directory is not authorized under the policy in
+	// force (nil: it is). It is the one cached result for the current
+	// (directory, policy) pair: authorizeDirectory runs only when one side
+	// changes, at a directory_install entry and after each bundle_install
+	// entry, and every login_issue entry reads it (review finding
+	// 02-04-F8). A directory installed under an earlier policy therefore
+	// stays in force across a policy change that still authorizes it,
+	// such as one that only adds the WebAuthn RP, as the signer's start-up
+	// check (loadDirectory) treats it.
+	authErr error
+}
+
+// authorizeDirectory checks a directory against pol the way the signer
+// authorizes one (InstallDirectory, loadDirectory): signed by at least
+// pol's admin quorum of distinct admins, and every role within pol's user
+// CA profile.
+func authorizeDirectory(raw, sigs []byte, d *directory.Directory, pol *trust.Policy) error {
+	if _, err := directory.VerifySignatures(raw, sigs, pol); err != nil {
+		return fmt.Errorf("not signed by the admin quorum of policy v%d: %w", pol.Version, err)
+	}
+	if err := directory.CheckPolicy(d, pol); err != nil {
+		return fmt.Errorf("outside the user CA profile of policy v%d: %w", pol.Version, err)
+	}
+	return nil
+}
+
+// install verifies one directory_install entry (kind 7) against the trust
+// state in force and makes its directory the one in force: the document
+// parses, is the successor of the directory in force (version + 1, prev =
+// SHA-256 of its bytes; version 1 with the all-zero prev first), is
+// signed by the admin quorum of the policy in force and fits that policy's
+// user CA profile, and the entry records that policy's version and the
+// document's own version.
+func (ds *directoryInForce) install(body *tlog.DirectoryInstallBody, a *anchor) error {
+	if a.policy == nil {
+		return errors.New("directory_install before the first bundle_install: no root-signed policy is in force")
+	}
+	if body.PolicyVersion != a.policy.Version {
+		return fmt.Errorf("entry records policy version %d, but the policy in force is version %d", body.PolicyVersion, a.policy.Version)
+	}
+	d, err := directory.Parse(body.Directory)
+	if err != nil {
+		return fmt.Errorf("directory does not parse: %w", err)
+	}
+	if body.Version != d.Version {
+		return fmt.Errorf("entry records directory version %d, but its document is version %d", body.Version, d.Version)
+	}
+	if err := directory.CheckSuccessor(ds.raw, d); err != nil {
+		return fmt.Errorf("directory v%d is not the successor of the directory in force (v%d): %w", d.Version, ds.version, err)
+	}
+	if err := authorizeDirectory(body.Directory, body.Sigs, d, a.policy); err != nil {
+		return fmt.Errorf("directory v%d is %w", d.Version, err)
+	}
+	ds.raw, ds.sigs, ds.dir, ds.version, ds.authErr = body.Directory, body.Sigs, d, d.Version, nil
+	return nil
+}
+
+// recheck recomputes the cached authorization of the directory in force
+// under pol, after a bundle_install entry made pol the policy in force.
+func (ds *directoryInForce) recheck(pol *trust.Policy) {
+	if ds.dir == nil {
+		return
+	}
+	ds.authErr = authorizeDirectory(ds.raw, ds.sigs, ds.dir, pol)
+}
+
+// issuance is the walk's state shared by issue and login_issue entries.
+// The signer issues both from one serial counter and one issuance table,
+// and its start-up check counts both kinds together (02-01, T-02-116), so
+// serials form one strictly increasing sequence across the two kinds, and
+// a request ID is used at most once by a login.
+type issuance struct {
+	lastSerial uint64
+	// seen is whether any certificate (of either kind) came before. It is
+	// its own variable: Report.Serials counts issue entries only.
+	seen bool
+	// issueIDs and loginIDs map the request IDs (32 hex digits, the key
+	// ID's req field) of issue and login_issue entries to their entry
+	// index. A login request ID must be new to both, and an issue entry
+	// must not reuse a login's. Two issue entries are not compared, which
+	// keeps the Phase 1 checks of issue entries unchanged.
+	issueIDs map[string]uint64
+	loginIDs map[string]uint64
+}
+
+// next records a verified certificate with serial.
+func (s *issuance) next(serial uint64) {
+	s.lastSerial, s.seen = serial, true
+}
+
+const (
+	// maxLoginSkewSeconds is the signer's freshness window for a login
+	// request's CreatedAt (internal/signer maxClockSkew).
+	maxLoginSkewSeconds = 300
+	// backdateSeconds is how far cert.Build puts ValidAfter before the
+	// issuance time, so a certificate for ValidForSeconds spans exactly
+	// ValidForSeconds + backdateSeconds. The login fixtures build their
+	// certificates with cert.Build, so a change there fails them.
+	backdateSeconds = 300
+)
+
+// verifyLoginIssue re-proves one login_issue entry (kind 8) from the log
+// alone (KEY-02, T-02-17): the logged request bytes, the directory and the
+// policy in force, and the certificate. Every failure names its check.
+func verifyLoginIssue(index uint64, body *tlog.LoginIssueBody, leafMicros uint64, a *anchor, ds *directoryInForce, iss *issuance) error {
+	req, err := wire.ParseLoginIssueSigningBytes(body.Request)
+	if err != nil {
+		return fmt.Errorf("logged request: %w", err)
+	}
+	if a.policy == nil {
+		return errors.New("login_issue before the first bundle_install: no root-signed policy is in force")
+	}
+	if body.PolicyVersion != a.policy.Version {
+		return fmt.Errorf("entry records policy version %d, but the policy in force is version %d", body.PolicyVersion, a.policy.Version)
+	}
+	if ds.dir == nil {
+		return fmt.Errorf("entry records directory version %d, but no directory is installed", body.DirectoryVersion)
+	}
+	if body.DirectoryVersion != ds.version {
+		return fmt.Errorf("entry records directory version %d, but the directory in force is version %d", body.DirectoryVersion, ds.version)
+	}
+	if ds.authErr != nil {
+		return fmt.Errorf("the directory in force (v%d) is not authorized under the policy in force: directory v%d is %w", ds.version, ds.version, ds.authErr)
+	}
+	rp := a.policy.WebAuthn
+	if rp == nil {
+		return fmt.Errorf("policy v%d has no WebAuthn relying party, so no login could be approved", a.policy.Version)
+	}
+	switch {
+	case len(body.Evidence) != 1:
+		return fmt.Errorf("entry carries %d evidence items, want exactly one %s", len(body.Evidence), wire.EvidenceWebAuthnAssertion)
+	case body.Evidence[0].Type != wire.EvidenceWebAuthnAssertion:
+		return fmt.Errorf("evidence type %q, want %s", body.Evidence[0].Type, wire.EvidenceWebAuthnAssertion)
+	}
+	asrt, err := wire.ParseWebAuthnAssertion(body.Evidence[0].Blob)
+	if err != nil {
+		return fmt.Errorf("passkey assertion does not parse: %w", err)
+	}
+	grant, err := ds.dir.Authorize(req.Subject, req.Roles)
+	if err != nil {
+		return fmt.Errorf("directory v%d grants no login to user %q for roles %q: %w", ds.version, req.Subject, req.Roles, err)
+	}
+	cred, ok := ds.dir.Credential(req.Subject, asrt.CredentialID)
+	if !ok {
+		return fmt.Errorf("directory v%d binds no credential %s to user %q", ds.version,
+			base64.RawURLEncoding.EncodeToString(asrt.CredentialID), req.Subject)
+	}
+	if err := webauthn.VerifyAssertion(cred, rp.RPID, rp.Origins, sha256.Sum256(body.Request), webauthn.Assertion{
+		CredentialID:      asrt.CredentialID,
+		AuthenticatorData: asrt.AuthenticatorData,
+		ClientDataJSON:    asrt.ClientDataJSON,
+		Signature:         asrt.Signature,
+	}); err != nil {
+		return fmt.Errorf("passkey assertion of user %q does not approve the logged request: %w", req.Subject, err)
+	}
+	if !slices.Equal(req.Principals, grant.Principals) {
+		return fmt.Errorf("request principals %q differ from what directory v%d grants for roles %q: %q",
+			req.Principals, ds.version, grant.Roles, grant.Principals)
+	}
+	profile, err := certprofile.ForRole(trust.RoleUser, a.policy)
+	if err != nil {
+		return fmt.Errorf("policy v%d: %w", a.policy.Version, err)
+	}
+	profileCap := uint64(profile.MaxTTL / time.Second) //nolint:gosec // G115: the profile cap is positive (certprofile.ForRole)
+	if ttl := uint64(req.ValidForSeconds); ttl > min(grant.MaxTTLSeconds, profileCap) {
+		return fmt.Errorf("request TTL %d s is above the cap: role %d s, user CA profile %d s", ttl, grant.MaxTTLSeconds, profileCap)
+	}
+	// The certificate must carry exactly what cert.Build gives the signer's
+	// request: the profile defaults plus the requested extensions, each
+	// named once and granted by the selected roles.
+	wantExt := maps.Clone(profile.DefaultExtensions)
+	named := make(map[string]bool, len(req.Extensions))
+	for _, e := range req.Extensions {
+		if named[e] {
+			return fmt.Errorf("request names extension %q twice", e)
+		}
+		named[e] = true
+		if !slices.Contains(grant.Extensions, e) {
+			return fmt.Errorf("request extension %q is not granted by roles %q", e, grant.Roles)
+		}
+		wantExt[e] = ""
+	}
+
+	// The certificate: the issue-entry checks with the user CA role, then
+	// the binding to the request.
+	ib := &tlog.IssueBody{CARole: uint8(wire.CARoleUser), Serial: body.Serial, PolicyVersion: body.PolicyVersion, Cert: body.Cert, KeyID: body.KeyID}
+	c, kid, err := checkIssue(ib, iss.lastSerial, iss.seen)
+	if err != nil {
+		return err
+	}
+	if kid.Roles == nil {
+		return errors.New("a login_issue entry must carry a kr2 key ID, not kr1")
+	}
+	if err := a.checkIssue(ib, c, kid, leafMicros); err != nil {
+		return err
+	}
+	if !bytes.Equal(c.Key.Marshal(), req.SubjectKey) {
+		return fmt.Errorf("certificate key %s is not the request's subject key", ssh.FingerprintSHA256(c.Key))
+	}
+	if !slices.Equal(c.ValidPrincipals, req.Principals) {
+		return fmt.Errorf("certificate principals %q differ from the request's %q", c.ValidPrincipals, req.Principals)
+	}
+	if span, want := c.ValidBefore-c.ValidAfter, uint64(req.ValidForSeconds)+uint64(backdateSeconds); span != want {
+		return fmt.Errorf("certificate spans %d s, but cert.Build gives %d s for the requested %d s", span, want, req.ValidForSeconds)
+	}
+	if !maps.Equal(c.Extensions, wantExt) {
+		return fmt.Errorf("certificate extensions %q, want exactly the profile defaults and the requested extensions %q",
+			slices.Sorted(maps.Keys(c.Extensions)), slices.Sorted(maps.Keys(wantExt)))
+	}
+	if len(c.CriticalOptions) != 0 {
+		return fmt.Errorf("certificate carries critical options %q; a login request sets none", slices.Sorted(maps.Keys(c.CriticalOptions)))
+	}
+	reqID := hex.EncodeToString(req.RequestID[:])
+	switch {
+	case kid.Subject != req.Subject:
+		return fmt.Errorf("key ID sub=%s, but the request's subject is %q", kid.Subject, req.Subject)
+	case kid.Request != reqID:
+		return fmt.Errorf("key ID req=%s, but the request ID is %s", kid.Request, reqID)
+	case kid.Directory != body.DirectoryVersion:
+		return fmt.Errorf("key ID dir=%d, but the entry records directory version %d", kid.Directory, body.DirectoryVersion)
+	case !slices.Equal(kid.Roles, grant.Roles):
+		return fmt.Errorf("key ID roles %q differ from the roles the directory grants %q", kid.Roles, grant.Roles)
+	}
+	if prev, used := iss.loginIDs[reqID]; used {
+		return fmt.Errorf("request ID %s replayed: entry %d already issued a login certificate for it", reqID, prev)
+	}
+	if prev, used := iss.issueIDs[reqID]; used {
+		return fmt.Errorf("request ID %s replayed: issue entry %d already used it", reqID, prev)
+	}
+	// The signer refuses a CreatedAt more than 300 s from its clock when the
+	// request arrives; the entry time is that clock read a little later,
+	// when the certificate is issued. Both are compared in whole seconds,
+	// CreatedAt's unit.
+	leafSecs := leafMicros / 1e6
+	if d := absDiff(leafSecs, req.CreatedAt); d > maxLoginSkewSeconds {
+		return fmt.Errorf("request created at %d, %d s from the entry time %d; the signer accepts at most %d s",
+			req.CreatedAt, d, leafSecs, maxLoginSkewSeconds)
+	}
+	iss.loginIDs[reqID] = index
+	iss.next(body.Serial)
+	return nil
+}
+
+func absDiff(a, b uint64) uint64 {
+	if a > b {
+		return a - b
+	}
+	return b - a
+}
+
 func certTypeName(t uint32) string {
 	switch t {
 	case ssh.UserCert:
@@ -293,22 +557,49 @@ func certTypeName(t uint32) string {
 //     whose ValidAfter is what cert.Build sets for an issuance between the
 //     two (both microsecond times: the serial is allocated from the
 //     signer's clock), so a postdated or backdated certificate is refused,
-//     and serials strictly increase across the log
+//     and serials strictly increase across the log, in one sequence with
+//     the login_issue entries'
+//   - every directory_install entry holds a directory that parses, is the
+//     successor of the directory installed before it (version + 1, prev =
+//     its SHA-256; version 1 with the all-zero prev first), is signed by at
+//     least the admin quorum of the policy in force and fits that policy's
+//     user CA profile, and records that policy's version and its own
+//   - every login_issue entry is re-proven from the log (KEY-02): its
+//     logged request bytes parse canonically, it records the policy and
+//     directory in force, and that directory is authorized under that
+//     policy (re-checked after each bundle_install); it carries exactly one
+//     webauthn-assertion/v1 item that verifies against the credential the
+//     directory binds to the request's active user, under the policy's
+//     WebAuthn RP and origins, with challenge = SHA-256 of the logged
+//     request bytes; the request's principals equal the directory's grant
+//     for its roles, its TTL is within the role and user CA caps, and its
+//     extensions are granted; the certificate passes the issue-entry checks
+//     for the user CA, is for the request's subject key with exactly its
+//     principals, spans what cert.Build gives the requested TTL, carries
+//     exactly the profile defaults and the requested extensions and no
+//     critical option, and its kr2 key ID names the request's subject,
+//     request ID, the policy and directory versions, the granted roles and
+//     the serial; its request ID was used by no earlier issue or
+//     login_issue entry; and its CreatedAt is within 300 s of the entry
+//     time (in whole seconds)
 //   - the RFC 6962 root recomputed from the leaf bytes alone equals the
 //     root of the checkpoint, the checkpoint covers exactly n entries, and
 //     it is signed by the log key of the root-signed bundle
 //   - with opts.Previous, the log neither shrank nor rewrote the entries
 //     that checkpoint covered
 //
-// It does not check that an issuance was authorized. An issue leaf records
-// the admin evidence (SSHSIG signatures over the request's signing bytes)
-// but only a SHA-256 digest of the request, so neither the signatures nor
-// the admin quorum of the policy in force, nor that the certificate is the
-// one the admins approved, can be verified from the log: a signer holding
-// the CA key can log an unauthorized issuance with any evidence and the
-// log still verifies. Without opts.Previous it cannot detect a log
-// rolled back to an earlier prefix either. A leaf kind this version has no
-// check for is refused, never skipped.
+// Login issuances are re-proven from the log, as above: a signer holding
+// the CA key and the log key cannot log a login certificate that passes
+// unless the user's bound passkey approved exactly the logged request.
+// Admin issuances (issue entries, kind 1) are still not: an issue leaf
+// records the admin evidence (SSHSIG signatures over the request's
+// signing bytes) but only a SHA-256 digest of the request, so neither the
+// signatures nor the admin quorum of the policy in force, nor that the
+// certificate is the one the admins approved, can be verified from the
+// log: a signer holding the CA key can log an unauthorized admin issuance
+// with any evidence and the log still verifies. Without opts.Previous it
+// cannot detect a log rolled back to an earlier prefix either. A leaf kind
+// this version has no check for is refused, never skipped.
 func Verify(r io.Reader, opts Options) (*Report, error) {
 	if len(opts.Pins) == 0 {
 		return nil, errors.New("audit: no pinned root fingerprints")
@@ -320,12 +611,13 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	tree := tlog.NewLog()
 	var (
 		trustState anchor
+		dirState   directoryInForce
 		hashes     [][]byte
 		checkpoint []byte
 		lineNo     int
 		lastTime   uint64
-		lastSerial uint64
 	)
+	iss := issuance{issueIDs: map[string]uint64{}, loginIDs: map[string]uint64{}}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), maxLine)
 	for sc.Scan() {
@@ -376,12 +668,15 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err := trustState.install(body, opts); err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
+			// The policy in force may have changed: re-check the directory
+			// in force under it, once, for every later login_issue entry.
+			dirState.recheck(trustState.policy)
 		case tlog.KindIssue:
 			body, err := tlog.DecodeIssueBody(leaf.Body)
 			if err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
-			c, kid, err := checkIssue(body, lastSerial, rep.Serials > 0)
+			c, kid, err := checkIssue(body, iss.lastSerial, iss.seen)
 			if err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
@@ -393,9 +688,31 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err := trustState.checkIssue(body, c, kid, leaf.TimeMicros); err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
-			lastSerial = body.Serial
+			if prev, used := iss.loginIDs[kid.Request]; used {
+				return nil, fmt.Errorf("audit: entry %d: request ID %s replayed: login_issue entry %d already used it", want, kid.Request, prev)
+			}
+			if _, used := iss.issueIDs[kid.Request]; !used {
+				iss.issueIDs[kid.Request] = want
+			}
+			iss.next(body.Serial)
 			rep.Serials++
 			rep.IssuedByCA[kid.CA]++
+		case tlog.KindDirectoryInstall:
+			body, err := tlog.DecodeDirectoryInstallBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			if err := dirState.install(body, &trustState); err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+		case tlog.KindLoginIssue:
+			body, err := tlog.DecodeLoginIssueBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			if err := verifyLoginIssue(want, body, leaf.TimeMicros, &trustState, &dirState, &iss); err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
 		case tlog.KindRefusalSummary:
 			body, err := tlog.DecodeRefusalSummaryBody(leaf.Body)
 			if err != nil {
@@ -405,9 +722,12 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		case tlog.KindRefusal, tlog.KindClockRegression, tlog.KindCAInit:
 			// No check beyond the strict decode DecodeLeaf already did.
 		default:
-			// A kind this version has no check for (directory_install and
-			// login_issue until plan 02-04, and any kind added later) is
-			// refused before it is hashed or counted, never skipped.
+			// A kind this version has no check for is refused before it is
+			// hashed or counted, never skipped. Since plan 02-04 every kind
+			// tlog.DecodeLeaf accepts has a case above, so no leaf reaches
+			// this branch and no test exercises it: UNVERIFIED in this
+			// version. It is kept as the guard that makes a kind added to
+			// tlog later fail closed until audit verify has a check for it.
 			return nil, fmt.Errorf("audit: entry %d (%s): not verifiable by this version", want, leaf.Kind)
 		}
 		hash := tlog.HashLeaf(raw)
