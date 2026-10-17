@@ -564,8 +564,11 @@ func TestAgent(t *testing.T) {
 	t.Run("foreign_pipe_refused", func(t *testing.T) {
 		// \\.\pipe\eventlog is served by the EventLog service, never by this
 		// user. From a normal shell the service process cannot be opened, so
-		// the refusal must name the pipe's owner; from an elevated shell (the
-		// CI runner) the process token is read and checkOwner refuses it.
+		// the refusal must name the pipe's owner. Where the service token is
+		// readable, the token is read and checkOwner refuses it. That branch is
+		// expected on the elevated CI runner but UNVERIFIED: cli-windows runs
+		// go test without -v, so the branch taken is not visible, and the
+		// runner may be denied the token too.
 		me, err := currentSID()
 		if err != nil {
 			t.Fatal(err)
