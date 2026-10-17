@@ -2,6 +2,8 @@ package webauthn_test
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -162,5 +164,145 @@ func TestWebAuthnParsePublicKey(t *testing.T) {
 	}
 	if fp := webauthn.Fingerprint(ed); !strings.HasPrefix(fp, "SHA256:") || strings.HasSuffix(fp, "=") {
 		t.Fatalf("Fingerprint = %q, want SHA256: and unpadded base64", fp)
+	}
+}
+
+// TestWebAuthnMutationMatrix: every mutation of an otherwise valid
+// assertion is refused with its own sentinel, for each algorithm the
+// signer accepts, with the unmutated assertion verifying as the control.
+func TestWebAuthnMutationMatrix(t *testing.T) {
+	b64 := base64.RawURLEncoding.EncodeToString(testChallenge[:])
+	cd := func(text string) webauthntest.Option {
+		return webauthntest.WithClientDataJSON([]byte(strings.NewReplacer("CHALLENGE", b64, "ORIGIN", testOrigin).Replace(text)))
+	}
+	otherChallenge := sha256.Sum256([]byte("another request"))
+	for _, alg := range []struct {
+		name string
+		alg  int64
+	}{{"eddsa", webauthn.AlgEdDSA}, {"es256", webauthn.AlgES256}, {"rs256", webauthn.AlgRS256}} {
+		t.Run(alg.name, func(t *testing.T) {
+			auth := newAuth(t, alg.alg)
+			cred := auth.Credential()
+			origins := []string{testOrigin}
+			valid := func(opts ...webauthntest.Option) webauthn.Assertion {
+				return auth.Assert(testRP, testOrigin, testChallenge, opts...)
+			}
+			if err := webauthn.VerifyAssertion(cred, testRP, origins, testChallenge, valid()); err != nil {
+				t.Fatalf("control: valid assertion refused: %v", err)
+			}
+			edit := func(a webauthn.Assertion, f func(*webauthn.Assertion)) webauthn.Assertion {
+				a.AuthenticatorData = bytes.Clone(a.AuthenticatorData)
+				a.Signature = bytes.Clone(a.Signature)
+				f(&a)
+				return a
+			}
+			for _, tc := range []struct {
+				name string
+				a    webauthn.Assertion
+				want error
+			}{
+				// authenticatorData is exactly 37 bytes with AT and ED clear.
+				{"auth_data_36_bytes", edit(valid(), func(a *webauthn.Assertion) { a.AuthenticatorData = a.AuthenticatorData[:36] }), webauthn.ErrAuthenticatorData},
+				{"auth_data_38_bytes", edit(valid(), func(a *webauthn.Assertion) { a.AuthenticatorData = append(a.AuthenticatorData, 0) }), webauthn.ErrAuthenticatorData},
+				{"at_flag_set", valid(webauthntest.WithFlags(0x45)), webauthn.ErrAuthenticatorData},
+				{"ed_flag_set", valid(webauthntest.WithFlags(0x85)), webauthn.ErrAuthenticatorData},
+				{"rp_mismatch", auth.Assert("other.example.org", testOrigin, testChallenge), webauthn.ErrRPMismatch},
+				{"user_presence_missing", valid(webauthntest.WithFlags(0x04)), webauthn.ErrUserPresence},
+				{"user_verification_missing", valid(webauthntest.WithFlags(0x01)), webauthn.ErrUserVerification},
+				{"duplicate_type", valid(cd(`{"type":"webauthn.get","type":"webauthn.get","challenge":"CHALLENGE","origin":"ORIGIN"}`)), webauthn.ErrClientData},
+				{"invalid_utf8", valid(cd("{\"type\":\"webauthn.get\xff\",\"challenge\":\"CHALLENGE\",\"origin\":\"ORIGIN\"}")), webauthn.ErrClientData},
+				{"cross_origin_string_false", valid(cd(`{"type":"webauthn.get","challenge":"CHALLENGE","origin":"ORIGIN","crossOrigin":"false"}`)), webauthn.ErrClientData},
+				{"trailing_data", valid(cd(`{"type":"webauthn.get","challenge":"CHALLENGE","origin":"ORIGIN"}{}`)), webauthn.ErrClientData},
+				{"type_create", valid(webauthntest.WithType("webauthn.create")), webauthn.ErrType},
+				{"challenge_mismatch", auth.Assert(testRP, testOrigin, otherChallenge), webauthn.ErrChallenge},
+				{"origin_http_scheme", auth.Assert(testRP, "http://keyroster.example.org", testChallenge), webauthn.ErrOrigin},
+				{"origin_other_host", auth.Assert(testRP, "https://other.example.org", testChallenge), webauthn.ErrOrigin},
+				{"origin_extra_port", auth.Assert(testRP, testOrigin+":8443", testChallenge), webauthn.ErrOrigin},
+				{"cross_origin_true", valid(cd(`{"type":"webauthn.get","challenge":"CHALLENGE","origin":"ORIGIN","crossOrigin":true}`)), webauthn.ErrCrossOrigin},
+				{"top_origin_present", valid(cd(`{"type":"webauthn.get","challenge":"CHALLENGE","origin":"ORIGIN","crossOrigin":false,"topOrigin":"https://other.example.org"}`)), webauthn.ErrCrossOrigin},
+				{"signature_bit_flipped", edit(valid(), func(a *webauthn.Assertion) { a.Signature[len(a.Signature)/2] ^= 0x01 }), webauthn.ErrSignature},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if err := webauthn.VerifyAssertion(cred, testRP, origins, testChallenge, tc.a); !errors.Is(err, tc.want) {
+						t.Fatalf("VerifyAssertion = %v, want %v", err, tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+// clientDataExtraMembers is a clientDataJSON template (CHALLENGE and
+// ORIGIN are replaced) with what browsers add besides type, challenge,
+// origin and crossOrigin: Chrome's other_keys_can_be_added_here string,
+// a tokenBinding object, an unknown array holding a nested object and
+// literals, and an unknown object that itself contains "type" keys.
+const clientDataExtraMembers = `{"type":"webauthn.get","challenge":"CHALLENGE","origin":"ORIGIN","crossOrigin":false,` +
+	`"other_keys_can_be_added_here":"do not compare clientDataJSON against a template. See https://goo.gl/yabPex",` +
+	`"tokenBinding":{"status":"not-supported"},` +
+	`"x_list":[1,"two",{"three":3},true,null,[false]],` +
+	`"x_object":{"type":"webauthn.create","nested":{"type":"webauthn.create"}}}`
+
+// TestWebAuthnClientDataExtraMembers (T-02-82): unknown clientDataJSON
+// members of any JSON type are skipped, and a nested "type" key neither
+// counts as a duplicate nor overrides the top-level one, for each
+// algorithm. The same JSON with the top-level type duplicated is still
+// refused (control).
+func TestWebAuthnClientDataExtraMembers(t *testing.T) {
+	r := strings.NewReplacer("CHALLENGE", base64.RawURLEncoding.EncodeToString(testChallenge[:]), "ORIGIN", testOrigin)
+	accepted := r.Replace(clientDataExtraMembers)
+	duplicated := strings.TrimSuffix(accepted, "}") + `,"type":"webauthn.get"}`
+	for _, alg := range []struct {
+		name string
+		alg  int64
+	}{{"eddsa", webauthn.AlgEdDSA}, {"es256", webauthn.AlgES256}, {"rs256", webauthn.AlgRS256}} {
+		t.Run(alg.name, func(t *testing.T) {
+			auth := newAuth(t, alg.alg)
+			cred := auth.Credential()
+			t.Run("client_data_extra_members_accepted", func(t *testing.T) {
+				a := auth.Assert(testRP, testOrigin, testChallenge, webauthntest.WithClientDataJSON([]byte(accepted)))
+				if err := webauthn.VerifyAssertion(cred, testRP, []string{testOrigin}, testChallenge, a); err != nil {
+					t.Fatalf("clientDataJSON with extra members refused: %v", err)
+				}
+			})
+			t.Run("top_level_type_duplicated_refused", func(t *testing.T) {
+				a := auth.Assert(testRP, testOrigin, testChallenge, webauthntest.WithClientDataJSON([]byte(duplicated)))
+				if err := webauthn.VerifyAssertion(cred, testRP, []string{testOrigin}, testChallenge, a); !errors.Is(err, webauthn.ErrClientData) {
+					t.Fatalf("duplicated top-level type: %v, want ErrClientData", err)
+				}
+			})
+		})
+	}
+}
+
+// TestWebAuthnParsePublicKeyRefusals: ES256 takes only P-256 and RS256
+// only RSA keys of at least 2048 bits, each with a control.
+func TestWebAuthnParsePublicKeyRefusals(t *testing.T) {
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(&p384.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := webauthn.ParsePublicKey(webauthn.AlgES256, spki); !errors.Is(err, webauthn.ErrPublicKey) {
+		t.Fatalf("P-384 for ES256: %v, want ErrPublicKey", err)
+	}
+	if _, err := webauthn.ParsePublicKey(webauthn.AlgES256, newAuth(t, webauthn.AlgES256).Credential().SPKI); err != nil {
+		t.Fatalf("control: P-256 for ES256: %v", err)
+	}
+	small, err := rsa.GenerateKey(rand.Reader, 1024) //nolint:gosec // G403: the point is a too-short key
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spki, err = x509.MarshalPKIXPublicKey(&small.PublicKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := webauthn.ParsePublicKey(webauthn.AlgRS256, spki); !errors.Is(err, webauthn.ErrPublicKey) {
+		t.Fatalf("RSA-1024 for RS256: %v, want ErrPublicKey", err)
+	}
+	if _, err := webauthn.ParsePublicKey(webauthn.AlgRS256, newAuth(t, webauthn.AlgRS256).Credential().SPKI); err != nil {
+		t.Fatalf("control: RSA-2048 for RS256: %v", err)
 	}
 }
