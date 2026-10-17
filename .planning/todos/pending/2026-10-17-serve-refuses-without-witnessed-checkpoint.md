@@ -1,5 +1,5 @@
 ---
-created: 2026-10-17T08:30:00.000Z
+created: 2026-10-17T06:32:28.000Z
 title: Serve refuses to start without a witnessed checkpoint
 area: auth
 severity: blocker

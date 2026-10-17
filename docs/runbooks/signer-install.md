@@ -380,15 +380,22 @@ Before starting the signer after a restore:
    `doctor` also prints the restored bundle version (`OK bundle`).
 
 3. Reinstall what the restore lost, in order and with the same bytes as
-   before, before anyone installs anything new: the newer trust bundles
-   with `install-bundle` (see
-   [Install a successor bundle](#install-a-successor-bundle-stop-install-start)),
-   then the newer directory versions. Install the exact versions that were
-   lost: a different version 2 built on the restored version 1 is accepted
-   too, and the disablements of the lost version are then gone for good.
-   At this point in Phase 2 no keyroster command installs a directory (the
-   server mirror comes in later plans); the directory goes in through the
-   signer socket's InstallDirectory request.
+   before, before anyone installs anything new. Install the exact versions
+   that were lost: a different version 2 built on the restored version 1
+   is accepted too, and the disablements of the lost version are then gone
+   for good.
+   - **The trust bundles first, with the signer still stopped**, with
+     `install-bundle` (see
+     [Install a successor bundle](#install-a-successor-bundle-stop-install-start)).
+   - **Then the directory versions.** A directory is installed through the
+     running signer's socket (its InstallDirectory request; at this point
+     in Phase 2 no keyroster command does it, the server mirror comes in
+     later plans). While the signer runs with the restored directory, a
+     user disabled in a lost version can log in again. So start it with
+     no peer that makes login requests on its socket: leave the uid of the
+     keyroster server off `--allow-uid` and its group off `--allow-group`
+     (or keep the server stopped) until the directory versions are back,
+     then restart the signer with the normal allowlist.
 
 > **UNVERIFIED.** This procedure has not been run against a restored
 > database. The `grep` patterns match the export line format written by
