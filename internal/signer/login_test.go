@@ -694,7 +694,8 @@ func TestEvidenceMix(t *testing.T) {
 // TestLoginConcurrency (KEY-02 edge: concurrency, T-02-16): identical
 // login requests in parallel yield exactly one certificate, and a
 // directory row written by another process between authorization and
-// commit refuses the login with nothing issued or logged.
+// commit refuses the login (directory_changed, logged as a refusal) with
+// nothing issued.
 func TestLoginConcurrency(t *testing.T) {
 	pk := newPasskeys(t)
 	ctx := context.Background()
@@ -802,17 +803,28 @@ func TestLoginConcurrency(t *testing.T) {
 			})
 		}
 		leaves, issuedBefore, serialBefore := e.counts()
-		resp, err := s.LoginIssue(ctx, Peer{UID: 1000}, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil))
-		var r *refusal
-		if resp != nil || !errors.As(err, &r) || r.reason != "directory_changed" {
-			t.Fatalf("login with a directory written before commit: %+v, %v; want directory_changed", resp, err)
+		// Through the dispatch path, as the socket server runs it.
+		req := approve(t, pk.eddsa, e.loginReq(t, "alice"), nil)
+		resp, er := s.loginOrRefuse(ctx, Peer{UID: 1000}, req)
+		if resp != nil || er == nil || er.Message != "directory_changed" {
+			t.Fatalf("login with a directory written before commit: %+v, %+v; want directory_changed", resp, er)
 		}
 		if n := be.count(userFP); n != 1 {
 			t.Fatalf("user CA signed %d times, want 1 (the dropped certificate)", n)
 		}
-		if n, issued, serial := e.counts(); n != leaves || issued != issuedBefore || serial != serialBefore {
-			t.Fatalf("after the refusal: %d leaves, %d issuance rows, serial %d; want %d, %d, %d (nothing issued or logged)",
-				n, issued, serial, leaves, issuedBefore, serialBefore)
+		// Nothing issued: no issuance row, no serial, no login_issue leaf.
+		// The refusal itself is logged (D-14): one refusal leaf with the
+		// request's digest.
+		n, issued, serial := e.counts()
+		if issued != issuedBefore || serial != serialBefore || n != leaves+1 {
+			t.Fatalf("after the refusal: %d leaves, %d issuance rows, serial %d; want %d, %d, %d (only the refusal leaf)",
+				n, issued, serial, leaves+1, issuedBefore, serialBefore)
+		}
+		all := e.leavesOf()
+		b, err := tlog.DecodeRefusalBody(all[len(all)-1].Body)
+		if all[len(all)-1].Kind != tlog.KindRefusal || err != nil || b.Detail != "directory_changed" ||
+			b.Reason != tlog.ReasonUnavailable || b.RequestDigest != req.Digest() {
+			t.Fatalf("last leaf %s (%v) %+v, want an unavailable/directory_changed refusal with the request digest", all[len(all)-1].Kind, err, b)
 		}
 	})
 }
