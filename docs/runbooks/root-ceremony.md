@@ -548,11 +548,25 @@ the change.
 > **Compatibility: update every `audit verify` binary.** From this change
 > on, the log can hold `directory_install` and `login_issue` entries, and
 > an `audit verify` binary older than plan 02-04 refuses every log that
-> holds one. A Phase 1 binary reports the entry as an unknown kind
-> (`tlog: malformed leaf: unknown kind 7`, or 8). A binary built between
-> plans 02-01 and 02-04 reports `not verifiable by this version`. Neither
-> ever reports such a log as verified, so auditors must update before
-> they can verify it.
+> holds one. A Phase 1 binary stops at the first `bundle_install` whose
+> policy names the WebAuthn RP, which is this procedure's successor
+> bundle, before it reaches any login:
+>
+> ```
+> audit: entry N: bundle_install is not a valid successor of trust bundle vN-1: policy: trust: document is not canonical JSON: json: unknown field "webauthn"
+> ```
+>
+> This error does not mean the bundle was tampered with: a Phase 1
+> binary does not know the policy's `webauthn` field. Update the binary.
+> Only a log whose `directory_install` comes before any policy with the RP
+> gives `tlog: malformed leaf: unknown kind 7` from a Phase 1 binary. A
+> binary built between plans 02-01 and 02-04 reports
+> `audit: entry N (directory_install): not verifiable by this version`.
+> None of them ever reports such a log as verified, so auditors must
+> update before they can verify it. These three messages come from
+> Phase 1 (`c526edf`) and 02-03 (`d6f53b3`) builds run on exports from
+> the audit test fixture, in this procedure's order and with the
+> directory first; they were not run on a real signer's export.
 
 > **What has run.** `TestAuditLoginAcrossPolicyChange` (e2e, real
 > binaries, real sshd, in CI) runs steps 2 to 6 on the agent backend, with

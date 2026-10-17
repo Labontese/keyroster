@@ -363,9 +363,12 @@ Before starting the signer after a restore:
    A restored log that is older than the saved one is reported as shrunk
    (`log shrank`) or rewritten. Since plan 02-04, `audit verify` verifies
    logs that contain `directory_install` and `login_issue` entries; an
-   older `audit verify` binary refuses them ("not verifiable by this
-   version", or an unknown kind from a Phase 1 binary), so use a current
-   one. `TestAuditLoginAcrossPolicyChange` (e2e) runs this command on two
+   older `audit verify` binary refuses them, so use a current one. A
+   binary built between plans 02-01 and 02-04 says "not verifiable by this
+   version". A Phase 1 binary usually stops earlier, at the bundle whose
+   policy added the WebAuthn RP (`json: unknown field "webauthn"`), which
+   is not a sign of tampering; see the compatibility note in
+   [root-ceremony.md](root-ceremony.md#change-the-policy-successor-policy-for-example-add-the-webauthn-rp). `TestAuditLoginAcrossPolicyChange` (e2e) runs this command on two
    exports of a signer with a directory and login certificates: the later
    export verifies with `--previous` set to the earlier one, and the
    earlier export is refused as `log shrank` with `--previous` set to the
