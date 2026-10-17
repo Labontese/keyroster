@@ -16,6 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
+	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/signerclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -85,6 +86,11 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Custody comes only from the signer (D-18): ask it before issuing,
+	// and never issue without knowing it.
+	if err := warnCustody(ctx, *socket, stderr); err != nil {
+		return err
+	}
 	req := &wire.IssueRequest{
 		CARole:          role,
 		SubjectKey:      pub.Marshal(),
@@ -127,6 +133,25 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 		return err
 	}
 	_, _ = fmt.Fprintf(stderr, "serial: %d\nkey id: %s\nlog leaf: %d\ncertificate: %s\n", c.Serial, c.KeyId, resp.LeafIndex, dest)
+	return nil
+}
+
+// bannerFrame is the line printed above and below a custody warning.
+var bannerFrame = strings.Repeat("!", 76)
+
+// warnCustody asks the signer at socket for its Status and, when the
+// signer reports any key with custody software, writes the evaluation-only
+// banner to stderr as its own block, framed by lines of '!'. No flag,
+// environment variable or configuration suppresses it. A Status failure
+// is an error: the caller must not issue without knowing custody.
+func warnCustody(ctx context.Context, socket string, stderr io.Writer) error {
+	st, err := signerclient.Status(ctx, socket)
+	if err != nil {
+		return fmt.Errorf("signer status (custody must be known before issuing): %w", err)
+	}
+	if roles := custodytext.SoftwareRoles(st.Keys); len(roles) > 0 {
+		_, _ = fmt.Fprintf(stderr, "%s\n%s\n%s\n", bannerFrame, custodytext.SoftwareCABanner(roles), bannerFrame)
+	}
 	return nil
 }
 

@@ -191,7 +191,10 @@ func newLogWriter(ctx context.Context, db *signerdb.DB, logKey keystore.CAKey, c
 // admin may be a root of this or of any bundle the log records, and the
 // log origin must be the log key's. The bundle, the policy and their
 // signatures are stored with a bundle_install log entry carrying all four
-// documents, in one transaction; on any refusal nothing is written.
+// documents, in one transaction; on any refusal nothing is written. Before
+// any of that, it refuses a bundle and policy whose Status reply would
+// exceed wire.MaxStatusFrame (wire.ErrStatusTooLarge), the limit Status
+// itself enforces.
 func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pins []string, threshold int,
 	bundle, bundleSigs, policy, policySigs []byte, clock serial.Clock) (*trust.Bundle, error) {
 	if db == nil || be == nil {
@@ -206,6 +209,16 @@ func InstallBundle(ctx context.Context, db *signerdb.DB, be keystore.Backend, pi
 	}
 	if err != nil {
 		return nil, err
+	}
+	// One budget for install and Status: refuse, before any verification
+	// or write, a bundle and policy whose Status reply would not fit
+	// wire.MaxStatusFrame, so every installed trust state can be reported.
+	// The directory fields are fixed-size, so zero values size them.
+	if _, err := statusResponse(caKeys, 0, bundle, bundleSigs, policy, policySigs, statusDirectory{}).Marshal(); err != nil {
+		if errors.Is(err, wire.ErrStatusTooLarge) {
+			return nil, fmt.Errorf("%w: the bundle, policy and signatures make the Status reply too large: %w", ErrBundleInstall, err)
+		}
+		return nil, fmt.Errorf("%w: %w", ErrBundleInstall, err)
 	}
 	logKey, err := openRoleKey(be, caKeys, "log")
 	if err != nil {
@@ -404,6 +417,9 @@ func keyFingerprint(caKeys []signerdb.CAKey, role string) string {
 
 // trustState is what the signer takes from the installed bundle.
 type trustState struct {
+	// caKeys are the ca-init keys, each opened in the backend with its
+	// recorded custody (openRoleKey) by loadTrust; Status reports them.
+	caKeys   []signerdb.CAKey
 	stored   *signerdb.StoredBundle
 	bundle   *trust.Bundle
 	policy   *trust.Policy
@@ -448,6 +464,7 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 		ts.ca[role] = keys[string(kr)]
 	}
 	ts.logKey = keys["log"]
+	ts.caKeys = caKeys
 	if ts.bundle.Log.Origin != tlog.Origin(ts.logKey.PublicKey()) {
 		return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, ts.bundle.Log.Origin)
 	}

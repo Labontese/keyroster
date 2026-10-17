@@ -137,7 +137,9 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 // and its evidence path: an IssueRequest takes admin evidence only, a
 // LoginIssueRequest a WebAuthn assertion only (T-02-05), and an
 // InstallDirectory request the admins' directory signatures. A
-// GetDirectory request (empty body) reads the installed directory. Every
+// GetDirectory request (empty body) reads the installed directory, and a
+// Status request (empty body) the signer's own report of its keys'
+// custody and its trust state (D-18). Every
 // refusal goes through refuse (slog plus the rate-limited audit log,
 // D-14).
 func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
@@ -203,6 +205,17 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 			return
 		}
 		s.respond(ctx, conn, peer, [32]byte{}, wire.TypeGetDirectoryResponse, s.GetDirectory(), 0)
+	case wire.TypeStatus:
+		if len(body) != 0 {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		resp, refused := s.statusOrRefuse(ctx, peer)
+		if refused != nil {
+			s.reply(conn, refused)
+			return
+		}
+		s.respond(ctx, conn, peer, [32]byte{}, wire.TypeStatusResponse, resp, 0)
 	default:
 		s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "unknown_message_type"))
 	}

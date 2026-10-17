@@ -77,6 +77,11 @@ type Signer struct {
 	// database holds another version (trust_changed).
 	bundleVersion uint64
 
+	// caKeys are the ca-init keys as recorded, each opened in the
+	// backend at start with that custody (openRoleKey). Fixed for the
+	// life of the process; Status reports them.
+	caKeys []signerdb.CAKey
+
 	// mu serializes every state change: serial allocation, issuance and
 	// log appends, each through its commit.
 	mu sync.Mutex
@@ -135,6 +140,7 @@ func New(cfg Config) (*Signer, error) {
 		profiles:  ts.profiles,
 		policy:    ts.policy,
 		logKey:    ts.logKey,
+		caKeys:    ts.caKeys,
 		db:        cfg.DB,
 		clock:     cfg.Clock,
 		allowUIDs: slices.Clone(cfg.AllowUIDs),

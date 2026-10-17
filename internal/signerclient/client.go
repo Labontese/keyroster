@@ -71,6 +71,20 @@ func GetDirectory(ctx context.Context, socket string) (*wire.GetDirectoryRespons
 	return wire.ParseGetDirectoryResponse(respBody)
 }
 
+// Status asks the signer for its own report (D-18): each online key's
+// algorithm, custody and fingerprint, the trust bundle and policy it runs
+// on with their signatures, and the installed directory's version, hash
+// and authorization. Custody shown to users comes only from here. A
+// refusal (for example trust_changed after a bundle install under the
+// running signer) comes back as a *wire.ErrorResponse error.
+func Status(ctx context.Context, socket string) (*wire.StatusResponse, error) {
+	respBody, err := roundTrip(ctx, socket, wire.TypeStatus, nil, wire.TypeStatusResponse)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseStatusResponse(respBody)
+}
+
 // roundTrip sends one message of msgType and returns the body of the
 // response, which must be of type want; an error response comes back as a
 // *wire.ErrorResponse error.
