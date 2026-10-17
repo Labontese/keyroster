@@ -13,7 +13,8 @@ import (
 // Summary renders what a root signature over b and p would vouch for, for
 // the operator to read before confirming: every root, CA, ops and log key
 // with fingerprint, role, algorithm and custody, the root threshold, the
-// admins and quorum, the CA profiles and the bundle hash. Software-held
+// admins and quorum, the CA profiles, the WebAuthn relying party (a
+// one-way setting) and the bundle hash. Software-held
 // roots are flagged loudly (D-10, D-11).
 func Summary(b *trust.Bundle, p *trust.Policy) string {
 	var w strings.Builder
@@ -48,6 +49,11 @@ func Summary(b *trust.Bundle, p *trust.Policy) string {
 			fmt.Fprintf(&w, "  profile %-8s max ttl %s  default extensions [%s]  allowed extensions [%s]  allowed critical options [%s]\n",
 				c.Role, seconds(c.MaxTTLSeconds), strings.Join(c.DefaultExtensions, " "),
 				strings.Join(c.AllowedExtensions, " "), strings.Join(c.AllowedCriticalOptions, " "))
+		}
+		if rp := p.WebAuthn; rp != nil {
+			fmt.Fprintf(&w, "  webauthn rp_id %s  origins [%s]\n", rp.RPID, strings.Join(rp.Origins, " "))
+		} else {
+			w.WriteString("  webauthn: none (passkey logins refused)\n")
 		}
 		fmt.Fprintf(&w, "  timelock %s\n", seconds(p.TimelockSeconds))
 	}

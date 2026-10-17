@@ -497,9 +497,19 @@ You need everything from [What you need](#what-you-need), plus:
      --key /media/usbA/root-a.age
    ```
 
-   Compare the policy hash in the summary with the SHA-256 printed in
-   step 2. A root in both the previous and the new root set counts toward
-   both thresholds, so the roots' threshold of signatures is enough.
+   Before you confirm, check two lines of the summary:
+
+   - `webauthn rp_id <hostname>  origins [...]` must name exactly the
+     hostname and origins you chose. `rp_id` is one-way, and this is the
+     only place `root sign` shows it. Every root custodian who signs
+     checks it, including one who did not see step 2's output.
+   - `policy sha256:` must equal the **last** `sha256:` line of step 2's
+     output, which is the new policy's hash. The first line of that output
+     (`successor of policy vN, sha256 ...`) is the hash of the previous
+     policy.
+
+   A root in both the previous and the new root set counts toward both
+   thresholds, so the roots' threshold of signatures is enough.
 4. **Verify against the paper:**
 
    ```
@@ -510,7 +520,9 @@ You need everything from [What you need](#what-you-need), plus:
      --policy /media/transfer/policy-change/policy.json
    ```
 
-   It must end with `OK: successor of trust bundle vN: ...`.
+   It must end with `OK: successor of trust bundle vN: ...`, and its
+   summary must show the same `webauthn rp_id ... origins [...]` line you
+   checked in step 3.
 5. **Install** with the signer stopped:
    [signer-install.md, "Install a successor bundle"](signer-install.md#install-a-successor-bundle-stop-install-start).
 6. **Audit.** Export the log and run `keyroster audit verify` pinned to the
