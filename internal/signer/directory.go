@@ -77,11 +77,13 @@ func (s *Signer) loadDirectory(ctx context.Context) error {
 
 // InstallDirectory installs a new directory version online, without a
 // restart (D-01). Under s.mu it checks that the policy in force's admin
-// quorum signed the document (directory_quorum_not_met), first, so a peer
-// the admins did not authorize never gets it parsed (T-02-12). Then it
-// parses the document strictly (directory_invalid) and checks that it
-// follows the installed version (directory_version_chain) and fits the
-// user CA profile (directory_exceeds_policy). Then one transaction stores it and
+// quorum signed the document (directory_quorum_not_met) and that its
+// version and prev follow the installed version (directory_version_chain)
+// before it parses the document, so neither an unsigned document nor a
+// replayed older version is parsed (T-02-12). Then it parses the
+// document strictly (directory_invalid), checks the chain again on the
+// parsed document, and checks that it fits the user CA profile
+// (directory_exceeds_policy). Then one transaction stores it and
 // appends a directory_install leaf with the document and its signatures,
 // and only after COMMIT does the signer switch to it.
 func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
@@ -95,10 +97,16 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 	if err != nil {
 		return nil, refusalErr(wire.CodeRefused, "directory_quorum_not_met", err)
 	}
+	if err := directory.CheckSuccessorBytes(s.directoryRaw, req.Directory); err != nil {
+		return nil, refusalErr(wire.CodeRefused, "directory_version_chain", err)
+	}
 	d, err := directory.Parse(req.Directory)
 	if err != nil {
 		return nil, refusalErr(wire.CodeMalformed, "directory_invalid", err)
 	}
+	// Not reachable today: Parse accepts only canonical bytes, whose
+	// version and prev CheckSuccessorBytes read the same way. Kept so the
+	// chain is checked on the parsed document should that ever change.
 	if err := directory.CheckSuccessor(s.directoryRaw, d); err != nil {
 		return nil, refusalErr(wire.CodeRefused, "directory_version_chain", err)
 	}

@@ -118,6 +118,18 @@ func TestDirectoryInstallRefusals(t *testing.T) {
 			doc, sigs := signDirectory(t, loginDirectory(pk, 2, trust.SHA256Hex([]byte("another directory"))), e.fx.Admins[0])
 			return &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}
 		}},
+		// The chain is checked before the document is parsed: a replayed
+		// admin-signed version 1 that does not parse is refused for its
+		// version, so Parse never runs for it under s.mu.
+		{"directory_version_chain/replayed_v1_refused_before_parse", "directory_version_chain", 1, 1, func(t *testing.T, e *logEnv, _ string) *wire.InstallDirectoryRequest {
+			doc, _ := signDirectory(t, loginDirectory(pk, 1, trust.GenesisPrev))
+			doc = append([]byte("{ "), doc[1:]...)
+			return &wire.InstallDirectoryRequest{Directory: doc, Sigs: signDoc(t, doc, e.fx.Admins[0])}
+		}},
+		{"directory_invalid/not_json", "directory_invalid", 1, 1, func(t *testing.T, e *logEnv, _ string) *wire.InstallDirectoryRequest {
+			doc := []byte("not a directory\n")
+			return &wire.InstallDirectoryRequest{Directory: doc, Sigs: signDoc(t, doc, e.fx.Admins[0])}
+		}},
 		{"directory_version_chain/reinstall_v1", "directory_version_chain", 1, 1, func(_ *testing.T, e *logEnv, _ string) *wire.InstallDirectoryRequest {
 			v1 := e.s.GetDirectory()
 			return &wire.InstallDirectoryRequest{Directory: v1.Directory, Sigs: v1.Sigs}
