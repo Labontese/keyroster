@@ -57,7 +57,8 @@ key-decisions:
   - "A3 moved to 02-14: the laptop was offline (Tailscale last seen 2 days earlier, LAN address timed out); 02-12 ships no gcr check"
   - "Serve tracks 'a key was ever added' by wrapping Add, not by watching List at polls, so a 1 s key between two 5 s polls still ends the agent"
   - "ensure confirms the connection with one List through a serial client (no background reader), and retries once only on a transport error that means the agent closed the connection"
-  - "Exported winagent.OpenSSHSpelling for the printed IdentityAgent/SSH_AUTH_SOCK lines (02-12 reuses it)"
+  - "Exported winagent.OpenSSHSpelling for the printed IdentityAgent line (02-12 reuses it)"
+  - "Owner decision 2026-10-17: keyroster advises only a host-scoped `Host <your keyroster hosts>` block with IdentityAgent and no longer advises $env:SSH_AUTH_SOCK; 02-12 Task 1 step 11 must print the same host-scoped form"
 
 patterns-established:
   - "KEYROSTER_REQUIRE_SSH_AGENT / KEYROSTER_REQUIRE_INBOX_SSH: a missing external binary fails CI instead of skipping (same shape as KEYROSTER_REQUIRE_ORACLE)"
@@ -80,11 +81,11 @@ coverage:
         status: pass
     human_judgment: false
   - id: D2
-    description: "Pipe-squatting guard and ACL: VerifyServerOwner/checkOwner (user SID, Medium integrity or above, no restricted token), fail-closed ensure, ErrOwnerUnverifiable naming both an elevated agent and another account's process, a foreign pipe owner named, live pipe DACL"
+    description: "Pipe-squatting guard and ACL: VerifyServerOwner/checkOwner (user SID, not deny-only, Medium integrity or above, no restricted token), fail-closed ensure, ErrOwnerUnverifiable naming both an elevated agent and another account's process, a foreign pipe owner named, live pipe DACL"
     requirement: AUTH-03
     verification:
       - kind: unit
-        ref: "internal/winagent/winagent_windows_test.go#TestAgent/{owner_mismatch_refused,owner_access_denied_names_elevation,ensure_fails_closed,verify_own_pipe,sddl_single_allow,second_serve_refused,foreign_pipe_refused,low_integrity_squatter_refused,restricted_squatter_refused,dial_access_denied_names_both_causes}"
+        ref: "internal/winagent/winagent_windows_test.go#TestAgent/{owner_mismatch_refused,owner_access_denied_names_elevation,ensure_fails_closed,verify_own_pipe,sddl_single_allow,second_serve_refused,foreign_pipe_refused,low_integrity_squatter_refused,restricted_squatter_refused,deny_only_squatter_refused,dial_access_denied_names_both_causes}"
         status: pass
     human_judgment: false
   - id: D3
@@ -174,7 +175,7 @@ $ SSH_AUTH_SOCK=\\.\pipe\keyroster-probe-45f10b8a ssh-add.exe -l
 The agent has no identities.
 ```
 
-**Result: A2 passed.** The working spelling is `//./pipe/<name>`. It works in `IdentityAgent`, both as `-o` and in a config file, and in `SSH_AUTH_SOCK`. `\\.\pipe\<name>` works in `SSH_AUTH_SOCK` but fails in `IdentityAgent`. `keyroster agent` prints `IdentityAgent //./pipe/keyroster-agent-<SID>` and `$env:SSH_AUTH_SOCK = '//./pipe/keyroster-agent-<SID>'`. The probe key files were overwritten and deleted, and the probe module and raw output were removed from the scratchpad.
+**Result: A2 passed.** The working spelling is `//./pipe/<name>`. It works in `IdentityAgent`, both as `-o` and in a config file, and in `SSH_AUTH_SOCK`. `\\.\pipe\<name>` works in `SSH_AUTH_SOCK` but fails in `IdentityAgent`. `keyroster agent` printed `IdentityAgent //./pipe/keyroster-agent-<SID>` and `$env:SSH_AUTH_SOCK = '//./pipe/keyroster-agent-<SID>'`; superseded by the owner decision of 2026-10-17, after which it prints only a host-scoped `Host <your keyroster hosts>` block with the IdentityAgent line (see Pre-merge review fixes, round 2). The probe key files were overwritten and deleted, and the probe module and raw output were removed from the scratchpad.
 
 ### A3: GNOME gcr-ssh-agent on the laptop
 
@@ -259,7 +260,7 @@ Consequence for 02-12: no gcr check ships. gcr-ssh-agent stays UNVERIFIED until 
 
 ## Decisions Made
 
-See `key-decisions` in the frontmatter. No owner decision was needed: A2 passed, and A3 moved to 02-14 rather than failing.
+See `key-decisions` in the frontmatter. The plan itself needed no owner decision: A2 passed, and A3 moved to 02-14 rather than failing. The pre-merge review raised one, decided by the owner on 2026-10-17: keyroster advises only a host-scoped IdentityAgent block (Pre-merge review fixes, round 2).
 
 ## Deviations from Plan
 
@@ -373,7 +374,7 @@ Fixed:
   - 16c0ae2 (follow-up for CI): `restricted_squatter_refused` takes its restricting SIDs from the test token's own enabled groups (logon SID included) instead of a hard-coded interactive set, so the restricted child also starts in a runner session that lacks some of those groups.
   - Mutation check in the final local run: with both the integrity check and the restricted-token check disabled, both subtests fail.
   - AppContainers are always Low integrity, so the integrity check covers them. No AppContainer squatter was run.
-  - A token with the user SID set to deny-only was tried and could not create the pipe, so no check was added for it.
+  - A token with the user SID set to deny-only was not covered by this commit. That was a gap, closed in round 2 below (e42380a, `deny_only_squatter_refused`). Until round 2 the test's squatter helper always gave the pipe the agent's own DACL, and with that DACL a deny-only child's pipe does not appear (reproduced in round 2). A squatter picks its own DACL, and with one granting Authenticated Users it served the pipe and passed the owner check.
 - **No test covered an unexpired key keeping the agent up with no connection open** (finding "No test checks that the agent keeps running while an unexpired key is held"): b2957f9.
   - `unexpired_key_keeps_agent_without_connection` runs in process.
   - `ensure_starts_real_agent` now keeps a 7 s key on the real keyroster.exe past its first 5 s poll, and dials without a start function.
@@ -391,15 +392,36 @@ Fixed:
 
 Skipped:
 
-- **Whether keyroster should keep advising a persistent `IdentityAgent` / `$env:SSH_AUTH_SOCK` for the fixed per-SID pipe:** this is an owner design decision, and the advice is unchanged. Options:
+- **Whether keyroster should keep advising a persistent `IdentityAgent` / `$env:SSH_AUTH_SOCK` for the fixed per-SID pipe:** owner design decision, **DECIDED on 2026-10-17: option 1** (host-scoped IdentityAgent only, SSH_AUTH_SOCK dropped), applied in round 2 below (1641013). 02-12 Task 1 step 11 must print the same host-scoped form. The options were:
   1. Advise only a host-scoped `Host ... IdentityAgent` block and drop the SSH_AUTH_SOCK line. This narrows exposure to keyroster hosts and also removes the admin-signing redirect below, but those hosts still trust whatever serves the name.
   2. Add `Match exec "keyroster agent --check"` before IdentityAgent, so a verified owner is required for every ssh run. The cost is a process start per connection and new CLI surface.
   3. Print only a per-invocation `-o IdentityAgent=` after keyroster has just verified the owner. This is the safest option and the least convenient.
   4. Use a per-login random pipe name, published per session. This closes the squat for the inbox clients, but makes the config line change on every login (round 1 rejected a nonce for the CLI side, 02-02-F1).
-  02-12 Task 1 step 11 prints the same line, so the decision affects 02-12 as well.
-- **The `$env:SSH_AUTH_SOCK` advice redirecting Windows admin SSHSIG signing to keyroster's agent** (split, one skeptic refuted): not changed. It fails closed, and the error names the pipe that was tried. Option 1 above would remove it; so would having dialAgent ignore a keyroster-agent-* SSH_AUTH_SOCK. Both belong to the owner decision.
+  02-12 Task 1 step 11 prints the same line, so the decision affects 02-12 as well: it must print the host-scoped block, not a bare IdentityAgent line or SSH_AUTH_SOCK.
+- **The `$env:SSH_AUTH_SOCK` advice redirecting Windows admin SSHSIG signing to keyroster's agent** (split, one skeptic refuted): resolved by the owner decision (option 1, 2026-10-17). keyroster no longer advises setting SSH_AUTH_SOCK to its pipe, so it no longer steers admin signing there. dialAgent is unchanged: a user who sets it by hand still gets a fail-closed error naming the pipe.
 - **Optional parts of the confirmed findings, not done:**
   - A capslock baseline for `cmd/keyroster` on GOOS=windows: optional in the finding, and the capslock job covers only keyroster-signer.
   - A deadline on `listOnce`, for a same-SID server that accepts and never answers: a hang, not a key leak.
   - Opening the offer test's `hold` connection only after the ssh.exe step: timing-sensitive on CI; the two stay-up tests above cover the property.
   - Reading the pipe owner instead of `GetNamedPipeServerProcessId` for the main check: a larger redesign of the guard.
+
+### Round 2 (on eb6cc64, 2026-10-17)
+
+Four commits on eb6cc64, plus this docs update. Each test below failed before its change and passes after it on Daniel-PC (normal, non-elevated shell).
+
+- **Owner decision: host-scoped IdentityAgent only** (DECIDED 2026-10-17, option 1 of the design item above): 1641013. `keyroster agent` help and printed output show a `Host <your keyroster hosts>` block with the `IdentityAgent` line (the printed one carries the real `//./pipe/` path), say in one sentence why it is host-scoped (the inbox `ssh.exe` and `ssh-add.exe` do not check who serves the pipe), keep the `ssh-add` / `AddKeysToAgent` warnings, and no longer mention `SSH_AUTH_SOCK`.
+  - Tests: `TestAgentHelpWarnsAgainstSSHAdd` asserts the block and the absence of SSH_AUTH_SOCK; `TestInboxSSHOffersAgentCert` asserts the same on the real keyroster.exe output. Against the old output, the help test failed on both assertions and the offer test failed on the missing host-scoped block. The offer test still sets `SSH_AUTH_SOCK` for its own `ssh-add.exe` calls; only the printed advice changed.
+  - 02-12 Task 1 step 11 must print the same host-scoped form. 02-12-PLAN.md is not edited here.
+- **A same-user squatter with a deny-only user SID passed the owner check** (independent checker's reproduction): e42380a. `VerifyServerOwner` now refuses when the token user carries `SE_GROUP_USE_FOR_DENY_ONLY`. Such a token (no restricting SIDs) is neither restricted nor below Medium, and its user is still the current user.
+  - Test: `deny_only_squatter_refused` runs the test binary as a squatter under `CreateRestrictedToken` with the user SID deny-only and no restricting SIDs, serving the pipe with `D:P(A;;GA;;;AU)`. Without the check, `ensure` returned a connection to it; with the check, it is refused with the deny-only message.
+  - With the agent's own DACL instead, the deny-only child's pipe did not appear within 5 s (the cause was not captured). That is the likely basis of the earlier "could not create the pipe" note, corrected above.
+- **Docs: who can take the pipe name, and what the host-scoped block limits**: 63673a2. The help text and needs-hardware.md T-02-07 now say the name can be taken between agent runs by another local account's process or by a sandboxed process of the same user (Low integrity, or a restricted or deny-only token), and that the host-scoped IdentityAgent block limits the inbox clients' exposure to keyroster hosts. The pipe-squatting guard paragraph lists the deny-only check and test. `TestAgentHelpWarnsAgainstSSHAdd` failed on the old wording.
+- **A test comment stated an unverified CI branch as fact**: 8f97a8c. The `foreign_pipe_refused` comment now says the token branch is expected on the elevated CI runner but UNVERIFIED (cli-windows runs `go test` without `-v`).
+
+Local run on Daniel-PC, on head 8f97a8c plus this docs update (Go 1.27.1):
+
+- gofmt reports no changed Go file; `go vet ./...` passes for GOOS=windows, linux and darwin.
+- `KEYROSTER_REQUIRE_INBOX_SSH=1 go test -count=1 -v ./internal/winagent/... ./cmd/keyroster/...` passes with no skips; `go test -count=1 ./...` passes.
+- golangci-lint v2.14.0 (the `go install` build in the session scratchpad, not the CI action's release binary) reports 0 issues with GOOS=windows, linux and darwin.
+- `-race` was not run: it needs cgo, which this host does not have.
+- UNVERIFIED locally: whether `deny_only_squatter_refused` starts its child and passes in the cli-windows runner session. That is read from PR #36's checks.

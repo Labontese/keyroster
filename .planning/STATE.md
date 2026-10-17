@@ -169,6 +169,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-02: A2 passed: inbox ssh.exe 9.5p2 honours a pipe agent only as //./pipe/<name> in IdentityAgent (backslash spelling fails); SSH_AUTH_SOCK takes both; keyroster agent prints the forward-slash spelling
 - [Phase 02]: 02-02: A3 moved to 02-14 (laptop offline); 02-12 ships no gcr check, gcr-ssh-agent UNVERIFIED
 - [Phase 02]: 02-02: winagent ensure confirms with List through a serial (non-Closer) client, since x/crypto NewClient on a net.Conn leaves a background reader; one retry only on a closing-agent transport error
+- [Phase 02]: 02-02: owner decision 2026-10-17: keyroster advises only a host-scoped `Host <your keyroster hosts>` IdentityAgent block for the Windows agent pipe and no longer advises $env:SSH_AUTH_SOCK; 02-12 Task 1 step 11 must print the same form
 
 ### Pending Todos
 
