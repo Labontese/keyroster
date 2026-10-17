@@ -25,7 +25,8 @@ func TestAgentHelpWarnsAgainstSSHAdd(t *testing.T) {
 		"Only keyroster login adds keys to this agent.",
 		"Do not add keys to the pipe with ssh-add or AddKeysToAgent",
 		"do not check who serves it",
-		"another local account can create a pipe with this name",
+		"the pipe name can be taken by a process of another local account or by a sandboxed process of your own (Low integrity, or a restricted or deny-only token)",
+		"limits the inbox clients' exposure to such a pipe to your keyroster hosts",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("keyroster agent -h does not say %q:\n%s", want, stderr.String())

@@ -177,13 +177,15 @@ must not be presented as working.
   certificate, both were gone after the lifetime, and the agent exited by
   itself.
 - **Pipe-squatting guard:** before keyroster sends a key, `VerifyServerOwner`
-  checks that the pipe's server process runs as the caller's SID, at Medium
-  integrity or above (which also excludes AppContainers, always Low), and
-  without a restricted token. Sandboxed processes of the same user can create
-  the pipe while no agent runs; `low_integrity_squatter_refused` and
-  `restricted_squatter_refused` run such a squatter (Low integrity; restricted
-  token at Medium) on Daniel-PC and check that it gets no key. No AppContainer
-  squatter was run. The pipe's DACL grants only that SID and denies network logons, and a second agent or
+  checks that the pipe's server process runs as the caller's SID, with that
+  SID not deny-only, at Medium integrity or above (which also excludes
+  AppContainers, always Low), and without a restricted token. Sandboxed
+  processes of the same user can create the pipe while no agent runs;
+  `low_integrity_squatter_refused`, `restricted_squatter_refused` and
+  `deny_only_squatter_refused` run such a squatter (Low integrity; restricted
+  token at Medium; user SID deny-only with no restricting SIDs, serving the
+  pipe with a DACL of its own that grants Authenticated Users) on Daniel-PC
+  and check that it gets no key. No AppContainer squatter was run. The pipe's DACL grants only that SID and denies network logons, and a second agent or
   another process cannot create the pipe while it exists. The SID comparison
   (`checkOwner` with LocalSystem) and the fail-closed path are unit-tested.
   `foreign_pipe_refused` runs `VerifyServerOwner` end to end on the EventLog
@@ -201,14 +203,18 @@ must not be presented as working.
   to `GetNamedPipeServerProcessId` or `GetSecurityInfo` in either
   `OpenSSH_for_Windows_9.5p2` binary). The pipe name is derived from the user's SID,
   which is not secret, and is free whenever no agent runs, which is most of
-  the time: the agent exits when its last key expires. A persistent
-  `IdentityAgent` line or `$env:SSH_AUTH_SOCK` therefore points the inbox
-  clients at a name that another local account's process can create between
-  logins. Such a process sees every signing request, chooses which keys are
-  offered, and receives any key added with `ssh-add` or `AddKeysToAgent`.
-  `keyroster agent` warns against `ssh-add` and `AddKeysToAgent` on the pipe.
-  Whether to keep advising the persistent settings is an open owner decision
-  (02-02 pre-merge review).
+  the time: the agent exits when its last key expires. Between agent runs the
+  name can be taken by another local account's process or by a sandboxed
+  process of the same user (Low integrity, or a restricted or deny-only
+  token). keyroster's own connection refuses all of these, but an inbox
+  client pointed at the name does not. Such a process sees every signing
+  request from that client, chooses which keys are offered, and receives any
+  key added with `ssh-add` or `AddKeysToAgent`. `keyroster agent` warns
+  against `ssh-add` and `AddKeysToAgent` on the pipe. By owner decision
+  (2026-10-17) keyroster advises only a host-scoped `Host <your keyroster
+  hosts>` block with `IdentityAgent` and no longer advises
+  `$env:SSH_AUTH_SOCK`, which limits the inbox clients' exposure to such a
+  pipe to keyroster hosts. Those hosts still trust whatever serves the name.
 - **runas and elevated shells:** each Windows account, including one reached
   through `runas`, gets its own agent on its own per-SID pipe. An agent
   started from an elevated ("Run as administrator") shell cannot be used from

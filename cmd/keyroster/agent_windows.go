@@ -40,8 +40,11 @@ serves the pipe, so only your keyroster hosts should rely on it.
 
 Only keyroster login adds keys to this agent. Do not add keys to the pipe
 with ssh-add or AddKeysToAgent: the Windows OpenSSH tools do not check who
-serves it, and while no keyroster agent runs (between logins) a process of
-another local account can create a pipe with this name.
+serves it, and while no keyroster agent runs (between logins) the pipe name
+can be taken by a process of another local account or by a sandboxed process
+of your own (Low integrity, or a restricted or deny-only token). keyroster
+itself refuses such a pipe; the host-scoped block above limits the inbox
+clients' exposure to such a pipe to your keyroster hosts.
 
 Each Windows account, including one reached through runas, gets its own agent
 on its own per-SID pipe. An agent started from an elevated ("Run as
