@@ -54,18 +54,27 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// squatEnv names the pipe a squatter child serves.
-const squatEnv = "KEYROSTER_WINAGENT_TEST_SQUAT"
+// squatEnv names the pipe a squatter child serves; squatSDDLEnv, when set,
+// is the security descriptor the child gives it instead of the agent's own.
+const (
+	squatEnv     = "KEYROSTER_WINAGENT_TEST_SQUAT"
+	squatSDDLEnv = "KEYROSTER_WINAGENT_TEST_SQUAT_SDDL"
+)
 
-// squat is the squatter child: it creates path with the agent's own DACL
-// and serves a working keyring on it until it is killed.
+// squat is the squatter child: it creates path with the agent's own DACL (or
+// the one in squatSDDLEnv) and serves a working keyring on it until it is
+// killed.
 func squat(path string) int {
-	me, err := currentSID()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
+	sddl := os.Getenv(squatSDDLEnv)
+	if sddl == "" {
+		me, err := currentSID()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		sddl = SDDL(me.String())
 	}
-	l, err := winio.ListenPipe(path, &winio.PipeConfig{SecurityDescriptor: SDDL(me.String())})
+	l, err := winio.ListenPipe(path, &winio.PipeConfig{SecurityDescriptor: sddl})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -81,13 +90,17 @@ func squat(path string) int {
 }
 
 // startSquatter runs this test binary as a squatter child under tok on a
-// fresh test pipe, waits for the pipe and returns its path. The child is
-// killed at test end.
-func startSquatter(t *testing.T, tok windows.Token) string {
+// fresh test pipe, waits for the pipe and returns its path. sddl is the
+// pipe's security descriptor, "" for the agent's own. The child is killed at
+// test end.
+func startSquatter(t *testing.T, tok windows.Token, sddl string) string {
 	t.Helper()
 	path := testPipe(t)
 	cmd := exec.Command(os.Args[0]) //nolint:gosec // G204: the test binary itself, run as a squatter child
 	cmd.Env = append(os.Environ(), squatEnv+"="+path)
+	if sddl != "" {
+		cmd.Env = append(cmd.Env, squatSDDLEnv+"="+sddl)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(tok)}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -152,6 +165,34 @@ func restrictedToken(t *testing.T) windows.Token {
 		uintptr(tok), 0, 0, 0, 0, 0, uintptr(len(restrict)),
 		uintptr(unsafe.Pointer(&restrict[0])), //nolint:gosec // G103: CreateRestrictedToken takes a SID_AND_ATTRIBUTES array
 		uintptr(unsafe.Pointer(&out)))         //nolint:gosec // G103: out receives the new token handle
+	if r == 0 {
+		t.Fatalf("CreateRestrictedToken: %v", err)
+	}
+	t.Cleanup(func() { _ = out.Close() })
+	return out
+}
+
+// denyOnlyUserToken returns a primary copy of this process's token in which
+// the user SID is deny-only and that has no restricting SIDs, so the token is
+// not restricted (IsTokenRestricted is false) and keeps its integrity level.
+func denyOnlyUserToken(t *testing.T) windows.Token {
+	t.Helper()
+	var tok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT|windows.TOKEN_ASSIGN_PRIMARY, &tok); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tok.Close() }()
+	me, err := currentSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	disable := []windows.SIDAndAttributes{{Sid: me}}
+	var out windows.Token
+	r, _, err := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken").Call(
+		uintptr(tok), 0, uintptr(len(disable)),
+		uintptr(unsafe.Pointer(&disable[0])), //nolint:gosec // G103: CreateRestrictedToken takes a SID_AND_ATTRIBUTES array
+		0, 0, 0, 0,
+		uintptr(unsafe.Pointer(&out))) //nolint:gosec // G103: out receives the new token handle
 	if r == 0 {
 		t.Fatalf("CreateRestrictedToken: %v", err)
 	}
@@ -562,7 +603,7 @@ func TestAgent(t *testing.T) {
 	t.Run("low_integrity_squatter_refused", func(t *testing.T) {
 		// A sandboxed (Low integrity) process of the same user that took the
 		// pipe name while no agent ran must not get the login key.
-		low := startSquatter(t, tokenAtIntegrity(t, "S-1-16-4096"))
+		low := startSquatter(t, tokenAtIntegrity(t, "S-1-16-4096"), "")
 		conn, err := ensure(context.Background(), low, noStart(t), VerifyServerOwner)
 		if conn != nil || err == nil || !strings.Contains(err.Error(), "S-1-16-4096") {
 			if conn != nil {
@@ -573,7 +614,7 @@ func TestAgent(t *testing.T) {
 		t.Logf("refused: %v", err)
 
 		// Control: the same child at Medium integrity is accepted.
-		medium := startSquatter(t, tokenAtIntegrity(t, "S-1-16-8192"))
+		medium := startSquatter(t, tokenAtIntegrity(t, "S-1-16-8192"), "")
 		conn, err = ensure(context.Background(), medium, noStart(t), VerifyServerOwner)
 		if err != nil {
 			t.Fatalf("control: ensure on a Medium-integrity server of our own: %v", err)
@@ -584,13 +625,30 @@ func TestAgent(t *testing.T) {
 	t.Run("restricted_squatter_refused", func(t *testing.T) {
 		// A same-user process with a restricted token (a sandbox at Medium
 		// integrity) can create the pipe as well and must be refused.
-		path := startSquatter(t, restrictedToken(t))
+		path := startSquatter(t, restrictedToken(t), "")
 		conn, err := ensure(context.Background(), path, noStart(t), VerifyServerOwner)
 		if conn != nil || err == nil || !strings.Contains(err.Error(), "restricted token") {
 			if conn != nil {
 				_ = conn.Close()
 			}
 			t.Fatalf("ensure on a restricted-token squatter = %v, %v; want a refusal naming the restricted token", conn, err)
+		}
+		t.Logf("refused: %v", err)
+	})
+
+	t.Run("deny_only_squatter_refused", func(t *testing.T) {
+		// A same-user process whose user SID is deny-only and whose token
+		// has no restricting SIDs is neither restricted nor below Medium,
+		// and its token user is still this user. It picks its own DACL for
+		// the pipe (here: any authenticated user), so it can create and
+		// serve the pipe; it must be refused.
+		path := startSquatter(t, denyOnlyUserToken(t), "D:P(A;;GA;;;AU)")
+		conn, err := ensure(context.Background(), path, noStart(t), VerifyServerOwner)
+		if conn != nil || err == nil || !strings.Contains(err.Error(), "deny-only") {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			t.Fatalf("ensure on a deny-only-user squatter = %v, %v; want a refusal naming the deny-only user SID", conn, err)
 		}
 		t.Logf("refused: %v", err)
 	})

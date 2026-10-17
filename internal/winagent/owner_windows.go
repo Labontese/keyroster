@@ -32,9 +32,10 @@ func unverifiable(step string, err error) error {
 }
 
 // VerifyServerOwner checks that the process serving the named pipe behind
-// conn runs as the current user, at Medium integrity or above, and without a
-// restricted token (pipe-squatting guard, T-02-07): a sandboxed process of
-// the same user can create the pipe while no agent runs. It fails closed:
+// conn runs as the current user, with that user SID not deny-only, at Medium
+// integrity or above, and without a restricted token (pipe-squatting guard,
+// T-02-07): a sandboxed process of the same user can create the pipe while
+// no agent runs. It fails closed:
 // any error means the caller must not send a key on conn.
 func VerifyServerOwner(conn net.Conn) error {
 	fc, ok := conn.(interface{ Fd() uintptr })
@@ -66,6 +67,12 @@ func VerifyServerOwner(conn net.Conn) error {
 	}
 	if err := checkOwner(tu.User.Sid, me); err != nil {
 		return err
+	}
+	// A token whose user SID is deny-only (a sandbox without restricting
+	// SIDs, so neither restricted nor below Medium) still names this user and
+	// can create the pipe with a DACL of its own choosing.
+	if tu.User.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY != 0 {
+		return errors.New("agent pipe is served by a process of the current user whose user SID is deny-only (a sandboxed process); refusing to send a key to it")
 	}
 	if err := checkIntegrity(tok); err != nil {
 		return err
