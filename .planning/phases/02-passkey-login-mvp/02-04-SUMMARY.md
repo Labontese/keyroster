@@ -327,3 +327,47 @@ None.
   - the non-comment `VerifySignatures(` count is 1 (`authorizeDirectory`), and `verifyLoginIssue` reads `ds.authErr`;
   - root-ceremony.md has the `successor policy` heading, `one-way` (2) and `not verifiable by this version` (1).
 - The IP scrub of the docs diff is clean.
+
+## Pre-merge review fixes
+
+Findings from the pre-merge review of PR #39 (head 0218ee9). Each finding has one commit, and each code fix has a test that failed before the fix and passes after it. Two pairs of findings were duplicates, so each pair shares a commit.
+
+- **Fixed `1a3c684`: a non-canonical RSA SubjectKey permanently broke audit verify** (2 findings, high).
+  - Signer: Issue and LoginIssue now refuse `bad_subject_key` unless the key is in its canonical encoding.
+  - Audit: verify compares the certificate key with the parsed request key, so logs that already hold such an entry still verify.
+  - Tests:
+    - `TestLoginRefusalMatrix/bad_subject_key/non_canonical_rsa` and `TestIssueRefusesNonCanonicalSubjectKey` (signer);
+    - `TestVerifyLoginTampering/login_rsa_non_canonical_subject_key_ok`, `.../login_rsa_non_canonical_subject_key_cert_key_not_subject` and `.../login_subject_key_unparseable` (audit).
+- **Fixed `4a331b0`: freshness was measured against a leaf time that appendLocked can raise** (2 findings, low and medium).
+  - Verify now bounds |serial time − CreatedAt| ≤ 300 s in whole seconds. This supersedes the "entry time" wording of Deviation 5 and of the must-have.
+  - What changes, for the owner: only the serial is tied to the approval now. The entry time, and with it the certificate's issuance window [serial, entry time], can lie well after CreatedAt when no other certificate comes between. This is exactly what an honest signer writes after a clock step back.
+  - The "Freshness residual" below shrinks. CA signing (`cert.Build`) happens after the serial is read, so it no longer counts. What remains is the time between the signer's freshness read and `serial.Next`: evidence verification and database reads.
+  - Tests:
+    - `TestLoginAfterClockStepBackVerifies` (signer, the reviewers' reproducer);
+    - `TestVerifyLoginTampering/login_after_leaf_time_raised_ok` and `.../login_created_at_raised_leaf_time` (audit).
+- **Fixed `1b9c0ea`: the retired-root check made audit verify quadratic in bundles** (pre-existing from Phase 1).
+  - The anchor keeps one `trust.RootKeySet`, and `CheckAdminsNotRoots` delegates to `CheckAdminsNotRootSet`.
+  - Test: `TestVerifyBundleChainLinear`. The allocation ratio from 100 to 400 bundles was 10.1 before and 4.0 after.
+  - The signer's start-up replay (`internal/signer/logstate.go`, `li.roots`) uses the same pattern over its own log. It was left as is, because the finding covers hostile exports.
+- **Fixed `f3205ef`: root signers never saw the WebAuthn RP.**
+  - `rootceremony.Summary` prints `webauthn rp_id ... origins [...]` or `webauthn: none (passkey logins refused)`.
+  - Runbook steps 3 and 4 check that line. Step 3 now names the last `sha256:` line of step 2.
+  - Test: `TestSummaryShowsWebAuthnRP`.
+- **Fixed `3a9eca4`: the compatibility note gave the wrong Phase 1 error** (root-ceremony.md and signer-install.md). Docs only.
+  - Check: Phase 1 (c526edf) and 02-03 (d6f53b3) binaries were run on fixture exports, one in runbook order and one with the directory first.
+  - Phase 1 gave `json: unknown field "webauthn"` on the runbook-order export and `unknown kind 7` on the directory-first export. 02-03 gave `not verifiable by this version`.
+- **Fixed `a5d7b23`: the policy change had no prepare step.** Docs only. Step 0 points to runbook step 1 (hash check, offline boot, only `lo` up) and the `date -u` check.
+- **Fixed `659d51f`: step 6 pointed at a "must print" anchored line that does not hold.** Docs only.
+  - Step 6 now names the expected `OK:` and `anchored:` lines.
+  - Check: the current binary on the runbook-order export printed `trust bundle v2, policy v2` and `anchored: ... trust bundle v1`.
+- **Fixed `a0700d3`: two login_issue guards in verify were never reached by a test.**
+  - Tests: `TestVerifyLoginTampering/login_before_bundle` and `.../login_request_not_signing_bytes`. `login_issue_unproven_refused` now requires `logged request:`.
+  - Mutation check: with either guard replaced by a no-op, the new case fails or panics.
+- **Skipped:** none.
+
+Verification:
+- `gofmt -l` is empty.
+- `go vet ./...` passes on windows, linux and darwin.
+- `go test -count=1` passes on the signer, audit, trust, rootceremony and cmd/keyroster packages, and `go test ./...` passes, all on Windows.
+- `-race` was not run (no cgo).
+- The Linux-only signer socket tests (`//go:build linux`) and the e2e suite (`-tags e2e`, checked with `GOOS=linux go vet -tags e2e ./test/e2e/`) compiled, but they were not run locally because WSL was not reachable from this session. CI runs them.
