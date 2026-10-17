@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -33,10 +34,11 @@ import (
 // the assertion approves another request digest, when the directory was
 // not signed by the admin quorum of the policy in force, when the policy
 // carries no WebAuthn RP, and when the login request carries admin
-// evidence. Every refusal returns no certificate and names its detail,
-// and each case has a control that succeeds, so a refusal cannot pass
-// because of an unrelated failure. The RP signer's exported log records
-// the refusals with the refused requests' digests.
+// evidence. Every refusal names its detail, and each case has a control
+// that succeeds, so a refusal cannot pass because of an unrelated failure.
+// The RP signer's exported log records the refusals with the refused
+// requests' digests, and a login_issue entry for a refused request's
+// digest only for each certificate a control got for that same digest.
 func TestLoginRefusals(t *testing.T) {
 	ctx := context.Background()
 	rpPolicy := bootstrapOpts{WebAuthnRPID: loginRPID, WebAuthnOrigins: []string{loginOrigin}}
@@ -53,12 +55,13 @@ func TestLoginRefusals(t *testing.T) {
 	}
 	// refused maps the digest of every request the RP signer refused to
 	// the detail it was refused with; the exported log must record each.
-	refused := map[[32]byte]string{}
+	// certs counts the certificates controls got for those same digests.
+	refused, certs := map[[32]byte]string{}, map[[32]byte]int{}
 
 	t.Run("missing_assertion", func(t *testing.T) {
 		req := unsignedLoginRequest(t, ephemeralKey(t))
-		resp, err := signerclient.Login(ctx, env.Socket, req)
-		wantLoginRefused(t, resp, err, "missing_evidence")
+		_, err := signerclient.Login(ctx, env.Socket, req)
+		wantLoginRefused(t, err, "missing_evidence")
 		refused[req.Digest()] = "missing_evidence"
 
 		// Control: the same request, approved, with a fresh request id.
@@ -75,12 +78,13 @@ func TestLoginRefusals(t *testing.T) {
 			t.Fatal(err)
 		}
 		wantLoginCert(t, env.Socket, req)
+		certs[req.Digest()]++
 		again, err := req.Marshal()
 		if err != nil || !bytes.Equal(again, first) {
 			t.Fatalf("the replayed request does not have the identical bytes (%v)", err)
 		}
-		resp, err := signerclient.Login(ctx, env.Socket, req)
-		wantLoginRefused(t, resp, err, "duplicate_request")
+		_, err = signerclient.Login(ctx, env.Socket, req)
+		wantLoginRefused(t, err, "duplicate_request")
 		refused[req.Digest()] = "duplicate_request"
 	})
 
@@ -96,12 +100,13 @@ func TestLoginRefusals(t *testing.T) {
 		if req.Digest() == approved {
 			t.Fatal("changing the request id left the digest unchanged")
 		}
-		resp, err := signerclient.Login(ctx, env.Socket, req)
-		wantLoginRefused(t, resp, err, "challenge_mismatch")
+		_, err := signerclient.Login(ctx, env.Socket, req)
+		wantLoginRefused(t, err, "challenge_mismatch")
 		refused[req.Digest()] = "challenge_mismatch"
 
 		// Control: an assertion over the modified request.
 		wantLoginCert(t, env.Socket, withAssertion(t, auth, req))
+		certs[req.Digest()]++
 	})
 
 	t.Run("directory_not_quorum_signed", func(t *testing.T) {
@@ -129,8 +134,8 @@ func TestLoginRefusals(t *testing.T) {
 			t.Fatalf("GetDirectory after the refused install = version %d, %d directory bytes, %d signature bytes, authorized %v; want version 0, empty, empty, false",
 				got.Version, len(got.Directory), len(got.Sigs), got.Authorized)
 		}
-		resp, err := signerclient.Login(ctx, fresh.Socket, loginRequest(t, auth, ephemeralKey(t)))
-		wantLoginRefused(t, resp, err, "directory_not_installed")
+		_, err = signerclient.Login(ctx, fresh.Socket, loginRequest(t, auth, ephemeralKey(t)))
+		wantLoginRefused(t, err, "directory_not_installed")
 
 		// Control: the admin-signed directory installs, GetDirectory
 		// reports exactly what was sent, and the login issues.
@@ -156,8 +161,8 @@ func TestLoginRefusals(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("a signer without an RP refused the admin-signed directory: %v", err)
 		}
-		resp, err := signerclient.Login(ctx, noRP.Socket, loginRequest(t, auth, ephemeralKey(t)))
-		wantLoginRefused(t, resp, err, "no_webauthn_policy")
+		_, err := signerclient.Login(ctx, noRP.Socket, loginRequest(t, auth, ephemeralKey(t)))
+		wantLoginRefused(t, err, "no_webauthn_policy")
 		// Control: the same login on the RP signer issues (as in
 		// missing_assertion's control).
 		wantLoginCert(t, env.Socket, loginRequest(t, auth, ephemeralKey(t)))
@@ -166,8 +171,8 @@ func TestLoginRefusals(t *testing.T) {
 	t.Run("wrong_evidence_type", func(t *testing.T) {
 		req := unsignedLoginRequest(t, ephemeralKey(t))
 		req.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: adminSign(t, env, wire.AdminSSHSIGNamespace, req.SigningBytes())}}
-		resp, err := signerclient.Login(ctx, env.Socket, req)
-		wantLoginRefused(t, resp, err, "unknown_evidence_type")
+		_, err := signerclient.Login(ctx, env.Socket, req)
+		wantLoginRefused(t, err, "unknown_evidence_type")
 		refused[req.Digest()] = "unknown_evidence_type"
 
 		// Control: the same admin key still issues on the admin path.
@@ -180,11 +185,16 @@ func TestLoginRefusals(t *testing.T) {
 	})
 
 	// Every refusal above is within the default refusal rate (10 per
-	// minute, burst 10), so each one is an individual refusal leaf.
-	logged := exportedRefusals(t, env)
+	// minute, burst 10), so each one is an individual refusal leaf. A
+	// refusal that issued anyway would add a login_issue entry beyond the
+	// controls' certificates.
+	logged, issued := exportedLog(t, env)
 	for digest, detail := range refused {
 		if got, ok := logged[digest]; !ok || got != detail {
 			t.Errorf("the exported log records the refused request %x as %q (present %v), want %q", digest[:4], got, ok, detail)
+		}
+		if issued[digest] != certs[digest] {
+			t.Errorf("the exported log has %d login_issue entries for the request %x refused %s, want %d (the controls' certificates)", issued[digest], digest[:4], detail, certs[digest])
 		}
 	}
 }
@@ -233,12 +243,11 @@ func isRefusal(err error, detail string) bool {
 	return errors.As(err, &e) && e.Message == detail
 }
 
-// wantLoginRefused requires a refusal with detail and no certificate.
-func wantLoginRefused(t *testing.T, resp *wire.IssueResponse, err error, detail string) {
+// wantLoginRefused requires the refusal with detail. signerclient.Login
+// returns no response with an error, so whether a certificate was issued
+// anyway is checked in the exported log (TestLoginRefusals).
+func wantLoginRefused(t *testing.T, err error, detail string) {
 	t.Helper()
-	if resp != nil {
-		t.Fatalf("a certificate came back (serial %d), want the refusal %s", resp.Serial, detail)
-	}
 	if !isRefusal(err, detail) {
 		t.Fatalf("login: %v, want the refusal %s", err, detail)
 	}
@@ -256,16 +265,17 @@ func wantLoginCert(t *testing.T, socket string, req *wire.LoginIssueRequest) {
 	}
 }
 
-// exportedRefusals exports env's log and returns the detail of every
-// individual refusal leaf by request digest.
-func exportedRefusals(t *testing.T, env *signerEnv) map[[32]byte]string {
+// exportedLog exports env's log and returns the detail of every individual
+// refusal leaf by request digest, and the number of login_issue leaves by
+// the digest of the request they issued for.
+func exportedLog(t *testing.T, env *signerEnv) (map[[32]byte]string, map[[32]byte]int) {
 	t.Helper()
 	f, err := os.Open(env.exportLog(t)) //nolint:gosec // test file
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	out := map[[32]byte]string{}
+	out, issued := map[[32]byte]string{}, map[[32]byte]int{}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 1<<20), 8<<20)
 	for sc.Scan() {
@@ -286,6 +296,15 @@ func exportedRefusals(t *testing.T, env *signerEnv) map[[32]byte]string {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if l.Kind == tlog.KindLoginIssue {
+			b, err := tlog.DecodeLoginIssueBody(l.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Request is the signing bytes; Digest is their SHA-256.
+			issued[sha256.Sum256(b.Request)]++
+			continue
+		}
 		if l.Kind != tlog.KindRefusal {
 			continue
 		}
@@ -298,5 +317,5 @@ func exportedRefusals(t *testing.T, env *signerEnv) map[[32]byte]string {
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
 	}
-	return out
+	return out, issued
 }
