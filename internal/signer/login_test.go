@@ -618,7 +618,8 @@ func TestLoginRefusalMatrix(t *testing.T) {
 // refusal leaf at the excursion time), then the clock is stepped back and
 // the next login is issued. appendLocked raises that login's leaf time to
 // the refusal's; the signer's own export must still verify, because audit
-// verify measures freshness against the serial, never raised.
+// verify measures freshness against the serial and the certificate's
+// issuance time, never raised, not against the entry time.
 func TestLoginAfterClockStepBackVerifies(t *testing.T) {
 	pk := newPasskeys(t)
 	var offset atomic.Int64

@@ -501,15 +501,26 @@ func verifyLoginIssue(index uint64, body *tlog.LoginIssueBody, leafMicros uint64
 		return fmt.Errorf("request ID %s replayed: issue entry %d already used it", reqID, prev)
 	}
 	// The signer refuses a CreatedAt more than 300 s from its clock when the
-	// request arrives; the serial is that clock read a little later, in
-	// microseconds (serial.Next), and checkIssue bounded it above. The
-	// entry time is not used: appendLocked raises it to the previous
-	// leaf's time when the clock went back, so it can lie far after the
-	// issuance. Both are compared in whole seconds, CreatedAt's unit.
+	// request arrives, then reads the serial from that clock (serial.Next,
+	// microseconds) and the issuance time right after it. Both must lie
+	// within 300 s of CreatedAt, in whole seconds, CreatedAt's unit. The
+	// issuance time is recovered from the certificate (ValidAfter is it
+	// minus the backdate, rounded down); checkIssue put it between the
+	// serial and the entry time. The entry time itself is not compared:
+	// appendLocked raises it to the previous leaf's time when the clock
+	// went back, so an honest login's entry time can lie far after its
+	// issuance. Without the issuance bound, a signer could hold an
+	// approval and issue against it later, under a serial taken when it
+	// arrived and a raised entry time.
 	serialSecs := body.Serial / 1e6
 	if d := absDiff(serialSecs, req.CreatedAt); d > maxLoginSkewSeconds {
 		return fmt.Errorf("request CreatedAt is %d s from the serial's time (created %d, serial %d s); the signer accepts at most %d s",
 			d, req.CreatedAt, serialSecs, maxLoginSkewSeconds)
+	}
+	issuedSecs := c.ValidAfter + backdateSeconds
+	if d := absDiff(issuedSecs, req.CreatedAt); d > maxLoginSkewSeconds {
+		return fmt.Errorf("request CreatedAt is %d s from the certificate's issuance time (created %d, issued %d s: ValidAfter + %d s backdate); the signer accepts at most %d s",
+			d, req.CreatedAt, issuedSecs, backdateSeconds, maxLoginSkewSeconds)
 	}
 	iss.loginIDs[reqID] = index
 	iss.next(body.Serial)
@@ -596,8 +607,12 @@ func certTypeName(t uint32) string {
 //     critical option, and its kr2 key ID names the request's subject,
 //     request ID, the policy and directory versions, the granted roles and
 //     the serial; its request ID was used by no earlier issue or
-//     login_issue entry; and its CreatedAt is within 300 s of the entry
-//     time (in whole seconds)
+//     login_issue entry; and its CreatedAt is within 300 s, in whole
+//     seconds, of both the serial's time and the certificate's issuance
+//     time (ValidAfter + the 300 s backdate, which the issue-entry checks
+//     put between the serial and the entry time). The entry time itself
+//     is not compared with CreatedAt: the signer raises it to the previous
+//     leaf's time after a clock step back
 //   - the RFC 6962 root recomputed from the leaf bytes alone equals the
 //     root of the checkpoint, the checkpoint covers exactly n entries, and
 //     it is signed by the log key of the root-signed bundle

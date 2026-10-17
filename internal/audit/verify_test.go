@@ -1643,6 +1643,7 @@ type login struct {
 	extra      map[string]string
 	critical   map[string]string
 	serial     uint64
+	issued     time.Time // the certificate's issuance time (zero: issuedAt(serial))
 	dirVersion uint64
 	polVersion uint64
 	// request is what the entry logs as the request (nil: the request's
@@ -1702,7 +1703,11 @@ func (lf *loginFixture) addLogin(pre, post func(*login)) *login {
 	if ca == nil {
 		ca = lf.ca
 	}
-	c, err := cert.Build(cert.Request{Profile: profile, Subject: l.certKey, Principals: l.principals, Now: issuedAt(l.serial),
+	issued := l.issued
+	if issued.IsZero() {
+		issued = issuedAt(l.serial)
+	}
+	c, err := cert.Build(cert.Request{Profile: profile, Subject: l.certKey, Principals: l.principals, Now: issued,
 		ValidFor: l.validFor, KeyID: l.keyID, Serial: l.serial, ExtraExtensions: l.extra, CriticalOptions: l.critical}, ca, rand.Reader)
 	if err != nil {
 		lf.t.Fatal(err)
@@ -2078,6 +2083,36 @@ func TestVerifyLoginTampering(t *testing.T) {
 			lf.addLogin(nil, nil) // CreatedAt = the raised leaf time
 			return lf
 		}, want: "(login_issue): request CreatedAt is 600 s from the serial's time"},
+		// A compromised signer holds a passkey approval (CreatedAt = T) and
+		// logs the login a week later: the serial right after T (no
+		// certificate came in between), the leaf time T+7d and a
+		// certificate issued at T+7d, inside [serial, leaf time]. The
+		// serial agrees with CreatedAt, but the certificate was not issued
+		// within the approval's freshness window.
+		{name: "login_held_approval_refused", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.micros += uint64(7 * 24 * time.Hour / time.Microsecond)
+			lf.addLogin(func(l *login) { l.req.CreatedAt = l.serial / 1e6 },
+				func(l *login) { l.issued = issuedAt(lf.micros + 1) }) // the next leaf's time
+			return lf
+		}, want: "(login_issue): request CreatedAt is 6048"}, // 604800 s, or 604801 across a second boundary
+		// The issuance-time bound at its edges, with the serial at
+		// CreatedAt and the leaf time raised 600 s so the issuance range
+		// allows both certificates.
+		{name: "login_issued_300s_after_created_ok", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.micros += 600e6
+			lf.addLogin(func(l *login) { l.req.CreatedAt = l.serial / 1e6 },
+				func(l *login) { l.issued = time.Unix(int64(l.req.CreatedAt)+300, 0) }) //nolint:gosec // G115: test times are after 1970
+			return lf
+		}},
+		{name: "login_issued_301s_after_created", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.micros += 600e6
+			lf.addLogin(func(l *login) { l.req.CreatedAt = l.serial / 1e6 },
+				func(l *login) { l.issued = time.Unix(int64(l.req.CreatedAt)+301, 0) }) //nolint:gosec // G115: test times are after 1970
+			return lf
+		}, want: "(login_issue): request CreatedAt is 301 s from the certificate's issuance time"},
 
 		// Replay: request IDs are single-use for logins.
 		{name: "login_request_replayed", build: func(t *testing.T) *loginFixture {
