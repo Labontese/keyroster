@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: "02-02 Tasks 1-3 done on p02/02-windows-agent (A2 passed, A3 moved to 02-14); PR #36 open, awaiting owner merge gate (Task 4)"
-last_updated: "2026-10-16T21:09:54.000Z"
-last_activity: 2026-10-16
-last_activity_desc: 02-02 windows-agent executed; PR awaiting merge gate
-state_head: 3bbce21886943baac0c11084afa9f4004a74ae6a
+stopped_at: 02-03 Tasks 1-3 done on p02/03-signer-boundary; PR awaiting owner merge gate (Task 4)
+last_updated: "2026-10-17T04:59:02.368Z"
+last_activity: 2026-10-17
+last_activity_desc: 02-03 signer-boundary executed; PR awaiting merge gate
+state_head: c984266e16631bf348c1c71f49f1c1ce1d5c105a
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 22
+  completed_plans: 24
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 2 of 14
-Status: 02-02 awaiting the owner merge gate for PR #36 (p02/02-windows-agent); 02-01 is merged
-Last activity: 2026-10-16 — 02-02 windows-agent executed (A2 passed, A3 moved to 02-14)
+Plan: 3 of 14
+Status: 02-03 awaiting the owner merge gate (p02/03-signer-boundary); 02-01 and 02-02 are merged
+Last activity: 2026-10-17 — 02-03 signer-boundary executed (SC4 refusal suite, directory cross-check, frame caps, 11 fuzz targets)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -79,6 +79,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P21 | 17 min | 3 tasks | 3 files |
 | Phase 02 P01 | 47 min | 2 tasks | 48 files |
 | Phase 02 P02 | 40 min | 3 tasks | 14 files |
+| Phase 02 P03 | 40 min | 3 tasks | 21 files |
 
 ## Accumulated Context
 
@@ -170,6 +171,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-02: A3 moved to 02-14 (laptop offline); 02-12 ships no gcr check, gcr-ssh-agent UNVERIFIED
 - [Phase 02]: 02-02: winagent ensure confirms with List through a serial (non-Closer) client, since x/crypto NewClient on a net.Conn leaves a background reader; one retry only on a closing-agent transport error
 - [Phase 02]: 02-02: owner decision 2026-10-17: keyroster advises only a host-scoped `Host <your keyroster hosts>` IdentityAgent block for the Windows agent pipe and no longer advises $env:SSH_AUTH_SOCK; 02-12 Task 1 step 11 must print the same form
+- [Phase 02]: 02-03: the signer refuses to start when the latest stored directory is not the one the last directory_install leaf records (T-02-14)
+- [Phase 02]: 02-03: frames are capped per message type (MaxDirectoryFrame for InstallDirectory and GetDirectoryResponse, MaxFrame otherwise); ReadFrame/WriteFrame removed
 
 ### Pending Todos
 
@@ -199,6 +202,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-16T21:09:54.000Z
-Stopped at: 02-02 Tasks 1-3 done; PR #36 open on p02/02-windows-agent, awaiting owner merge gate (Task 4)
+Last session: 2026-10-17T04:59:01.975Z
+Stopped at: 02-03 Tasks 1-3 done on p02/03-signer-boundary; PR awaiting owner merge gate (Task 4)
 Resume file: None
