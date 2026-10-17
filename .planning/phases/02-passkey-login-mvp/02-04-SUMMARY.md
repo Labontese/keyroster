@@ -338,13 +338,26 @@ Findings from the pre-merge review of PR #39 (head 0218ee9). Each finding has on
   - Tests:
     - `TestLoginRefusalMatrix/bad_subject_key/non_canonical_rsa` and `TestIssueRefusesNonCanonicalSubjectKey` (signer);
     - `TestVerifyLoginTampering/login_rsa_non_canonical_subject_key_ok`, `.../login_rsa_non_canonical_subject_key_cert_key_not_subject` and `.../login_subject_key_unparseable` (audit).
-- **Fixed `4a331b0`: freshness was measured against a leaf time that appendLocked can raise** (2 findings, low and medium).
-  - Verify now bounds |serial time − CreatedAt| ≤ 300 s in whole seconds. This supersedes the "entry time" wording of Deviation 5 and of the must-have.
-  - What changes, for the owner: only the serial is tied to the approval now. The entry time, and with it the certificate's issuance window [serial, entry time], can lie well after CreatedAt when no other certificate comes between. This is exactly what an honest signer writes after a clock step back.
-  - The "Freshness residual" below shrinks. CA signing (`cert.Build`) happens after the serial is read, so it no longer counts. What remains is the time between the signer's freshness read and `serial.Next`: evidence verification and database reads.
+- **Fixed `4a331b0`, completed in `d94727a`: freshness was measured against a leaf time that appendLocked can raise** (2 findings, low and medium; plus a follow-up finding against `4a331b0`, high).
+  - The problem: `appendLocked` raises a leaf's time to the previous leaf's when the clock went back. After a clock step back, an honest login's entry time can lie far after its CreatedAt, and verify refused the log permanently.
+  - `4a331b0` compared CreatedAt with the serial's time instead of the entry time. That alone was too weak:
+    - `checkIssue` accepts any issuance time (ValidAfter + 300 s backdate) between the serial and the entry time, and nothing bounded the entry time any more.
+    - So a compromised signer could hold a passkey approval (CreatedAt = T) and log the login a week later. It would use serial T + 1 µs (when no other certificate came in between), entry time T + 7 d, and a certificate valid from T + 7 d. Verify at `9f461a9` accepted that log; before `4a331b0` it was refused.
+    - The earlier claim that a floating issuance window "is exactly what an honest signer writes after a clock step back" was wrong. An honest signer reads its issuance time right after `serial.Next` (`internal/signer/login.go`), so its ValidAfter + backdate stays at the serial. Only the entry time is raised.
+  - The rule now (`d94727a`), all in whole seconds, CreatedAt's unit:
+    - |serial time − CreatedAt| ≤ 300 s;
+    - and |ValidAfter + 300 s − CreatedAt| ≤ 300 s, where ValidAfter + 300 s is the issuance time recovered from the certificate. The issue-entry checks already put it between the serial and the entry time.
+  - The entry time itself is no longer compared with CreatedAt. This supersedes the "entry time" wording of Deviation 5, of Accomplishments item 16 and of the key decision in the frontmatter.
+  - The plan's must-have ("CreatedAt to be within ±300 s of the entry time", PLAN lines 32 and 159) holds in substance through the certificate's issuance time, not through the literal leaf time:
+    - the certificate is proven to be issued within the approval's 300 s window;
+    - but the leaf time of a login is not bounded above by verify, by design, so honest raises still verify.
+  - Residual, for the owner: the log proves when the certificate was issued, not when its entry was appended. A compromised signer holding the CA key can issue on time and log the entry later. This is subsumed by the existing residual that a CA-key holder can issue without logging at all. Holding an approval and issuing later is refused.
+  - The "Freshness residual" above shrinks. CA signing (`cert.Build`) happens after the issuance time is read, so it no longer counts. What remains is the time between the signer's freshness read and its issuance-time read: evidence verification, database reads, and `serial.Next`, which waits at most about one second.
   - Tests:
     - `TestLoginAfterClockStepBackVerifies` (signer, the reviewers' reproducer);
-    - `TestVerifyLoginTampering/login_after_leaf_time_raised_ok` and `.../login_created_at_raised_leaf_time` (audit).
+    - `TestVerifyLoginTampering/login_after_leaf_time_raised_ok` and `.../login_created_at_raised_leaf_time` (audit);
+    - `TestVerifyLoginTampering/login_held_approval_refused`. It failed at `9f461a9` (Verify accepted the log) and passes after `d94727a`;
+    - `.../login_issued_300s_after_created_ok` and `.../login_issued_301s_after_created`: the issuance bound at its edges, with the serial at CreatedAt and a raised leaf time.
 - **Fixed `1b9c0ea`: the retired-root check made audit verify quadratic in bundles** (pre-existing from Phase 1).
   - The anchor keeps one `trust.RootKeySet`, and `CheckAdminsNotRoots` delegates to `CheckAdminsNotRootSet`.
   - Test: `TestVerifyBundleChainLinear`. The allocation ratio from 100 to 400 bundles was 10.1 before and 4.0 after.
@@ -371,3 +384,11 @@ Verification:
 - `go test -count=1` passes on the signer, audit, trust, rootceremony and cmd/keyroster packages, and `go test ./...` passes, all on Windows.
 - `-race` was not run (no cgo).
 - The Linux-only signer socket tests (`//go:build linux`) and the e2e suite (`-tags e2e`, checked with `GOOS=linux go vet -tags e2e ./test/e2e/`) compiled, but they were not run locally because WSL was not reachable from this session. CI runs them.
+
+Verification of `d94727a` (the issuance-time bound):
+- `gofmt -l` is empty, and `go vet ./...` passes on windows, linux and darwin.
+- `go test -count=1 ./internal/audit/... ./internal/signer/... ./cmd/keyroster/...` passes on Windows.
+- In WSL, on a `git archive` copy of the commit:
+  - the same packages pass, the Linux-only signer tests included;
+  - `-race` passes on audit, signer and cmd/keyroster;
+  - golangci-lint v2.14.0 reports 0 issues on audit and signer.
