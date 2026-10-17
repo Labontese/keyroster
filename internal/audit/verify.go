@@ -492,8 +492,8 @@ func verifyLoginIssue(index uint64, body *tlog.LoginIssueBody, leafMicros uint64
 	// CreatedAt's unit.
 	leafSecs := leafMicros / 1e6
 	if d := absDiff(leafSecs, req.CreatedAt); d > maxLoginSkewSeconds {
-		return fmt.Errorf("request created at %d, %d s from the entry time %d; the signer accepts at most %d s",
-			req.CreatedAt, d, leafSecs, maxLoginSkewSeconds)
+		return fmt.Errorf("request CreatedAt is %d s from the entry time (created %d, entry %d); the signer accepts at most %d s",
+			d, req.CreatedAt, leafSecs, maxLoginSkewSeconds)
 	}
 	iss.loginIDs[reqID] = index
 	iss.next(body.Serial)

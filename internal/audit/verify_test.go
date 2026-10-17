@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,9 +20,13 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/certprofile"
+	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/webauthn"
+	"github.com/Labontese/keyroster/internal/webauthn/webauthntest"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -1428,4 +1433,606 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The relying party of the audit login fixtures.
+const (
+	auditRPID   = "keyroster.example.org"
+	auditOrigin = "https://keyroster.example.org"
+)
+
+// loginFixture is a fixture whose log also holds directory_install and
+// login_issue entries, built with the real directory, webauthn, wire, cert
+// and certprofile packages the way the signer writes them (internal/signer
+// InstallDirectory and LoginIssue). Like every fixture, its export carries
+// a checkpoint signed with the test's own log key over all its leaves, so a
+// tampered entry is caught only by the entry checks, never by the
+// checkpoint: it models a compromised signer that holds the log key.
+type loginFixture struct {
+	*fixture
+	docs       docs          // the bundle and policy in force
+	pol        *trust.Policy // the policy in force
+	alice, bob *webauthntest.Authenticator
+	dirRaw     []byte // the directory in force
+	dirVersion uint64
+}
+
+// loginPolicy is the fixture policy, with the WebAuthn RP when withRP and a
+// user CA profile that also allows agent and port forwarding as extras and
+// the source-address critical option, so cases can tamper with them.
+func (f *fixture) loginPolicy(withRP bool) *trust.Policy {
+	p := f.policy()
+	p.CAProfiles[0].AllowedExtensions = []string{"permit-agent-forwarding", "permit-port-forwarding"}
+	p.CAProfiles[0].AllowedCriticalOptions = []string{"source-address"}
+	if withRP {
+		p.WebAuthn = &trust.WebAuthnRP{RPID: auditRPID, Origins: []string{auditOrigin}}
+	}
+	return p
+}
+
+// newLoginFixture is a log that starts with the genesis bundle_install
+// entry under loginPolicy(withRP), on a whole second, with soft
+// authenticators for alice (EdDSA) and bob (ES256).
+func newLoginFixture(t testing.TB, withRP bool) *loginFixture {
+	t.Helper()
+	return newLoginFixtureRoot(t, withRP, nil)
+}
+
+// newLoginFixtureRoot is newLoginFixture with root as the genesis root
+// (nil: a new one).
+func newLoginFixtureRoot(t testing.TB, withRP bool, root ssh.Signer) *loginFixture {
+	t.Helper()
+	f := newBareFixtureAt(t, "ed25519", time.Now().Truncate(time.Second))
+	if root != nil {
+		f.root = root
+	}
+	lf := &loginFixture{fixture: f, pol: f.loginPolicy(withRP)}
+	lf.docs = f.signDocs(f.genesis(), lf.pol, f.root)
+	f.addBundle(lf.docs)
+	var err error
+	if lf.alice, err = webauthntest.New(webauthn.AlgEdDSA); err != nil {
+		t.Fatal(err)
+	}
+	if lf.bob, err = webauthntest.New(webauthn.AlgES256); err != nil {
+		t.Fatal(err)
+	}
+	return lf
+}
+
+// installPolicy logs a successor bundle (the same roots, CAs and log key,
+// signed by the fixture root) whose policy is the successor of the policy
+// in force (version + 1, prev = its SHA-256), changed by edit.
+func (lf *loginFixture) installPolicy(edit func(*trust.Policy)) {
+	lf.t.Helper()
+	prev, err := trust.ParseBundle(lf.docs.bundle)
+	if err != nil {
+		lf.t.Fatal(err)
+	}
+	next := *prev
+	next.Version, next.Prev = prev.Version+1, trust.SHA256Hex(lf.docs.bundle)
+	p := *lf.pol
+	p.Version, p.Prev = lf.pol.Version+1, trust.SHA256Hex(lf.docs.policy)
+	edit(&p)
+	lf.docs = lf.signDocs(&next, &p, lf.root)
+	lf.addBundle(lf.docs)
+	lf.pol = &p
+}
+
+// directory returns the next directory version, chained to the directory
+// in force: alice (her EdDSA credential) holds role ops (principal
+// role:ops, 3600 s, extension permit-agent-forwarding), bob (his ES256
+// credential) role dev (role:dev, 1800 s). edit changes it before Sort.
+func (lf *loginFixture) directory(edit func(*directory.Directory)) *directory.Directory {
+	prev := trust.GenesisPrev
+	if lf.dirRaw != nil {
+		prev = trust.SHA256Hex(lf.dirRaw)
+	}
+	cred := func(a *webauthntest.Authenticator) []directory.Credential {
+		c := a.Credential()
+		return []directory.Credential{{ID: base64.RawURLEncoding.EncodeToString(c.ID), Alg: c.Alg, SPKI: base64.StdEncoding.EncodeToString(c.SPKI)}}
+	}
+	d := &directory.Directory{
+		Version: lf.dirVersion + 1,
+		Prev:    prev,
+		Users: []directory.User{
+			{Name: "alice", Status: directory.StatusActive, Credentials: cred(lf.alice)},
+			{Name: "bob", Status: directory.StatusActive, Credentials: cred(lf.bob)},
+		},
+		Roles: []directory.Role{
+			{Name: "ops", Principals: []string{"role:ops"}, MaxTTLSeconds: 3600, Extensions: []string{"permit-agent-forwarding"}, Users: []string{"alice"}},
+			{Name: "dev", Principals: []string{"role:dev"}, MaxTTLSeconds: 1800, Users: []string{"bob"}},
+		},
+	}
+	if edit != nil {
+		edit(d)
+	}
+	d.Sort()
+	return d
+}
+
+// role returns d's role name, for edits.
+func role(d *directory.Directory, name string) *directory.Role {
+	for i := range d.Roles {
+		if d.Roles[i].Name == name {
+			return &d.Roles[i]
+		}
+	}
+	panic("no role " + name)
+}
+
+// addDirectory logs a directory_install entry for d, signed by signers
+// (default: the policy admin) under the policy in force, with the body
+// changed by edit, and makes d the directory in force.
+func (lf *loginFixture) addDirectory(d *directory.Directory, edit func(*tlog.DirectoryInstallBody), signers ...ssh.Signer) {
+	lf.t.Helper()
+	doc, err := d.Canonical()
+	if err != nil {
+		lf.t.Fatal(err)
+	}
+	if len(signers) == 0 {
+		signers = []ssh.Signer{lf.admin}
+	}
+	var sigs []byte
+	for _, s := range signers {
+		sig, err := sshsig.Sign(rand.Reader, s, directory.Namespace, doc)
+		if err != nil {
+			lf.t.Fatal(err)
+		}
+		sigs = append(sigs, sig...)
+	}
+	b := &tlog.DirectoryInstallBody{Version: d.Version, PolicyVersion: lf.pol.Version, Directory: doc, Sigs: sigs}
+	if edit != nil {
+		edit(b)
+	}
+	body, err := b.Encode()
+	if err != nil {
+		lf.t.Fatal(err)
+	}
+	lf.add(tlog.KindDirectoryInstall, body)
+	lf.dirRaw, lf.dirVersion = doc, d.Version
+}
+
+// login is one login issuance as the fixture builds it, in the order of
+// the signer's steps. A case changes it before the assertion (pre: what
+// the user's passkey then approves) or after it (post: what a compromised
+// signer logs on its own).
+type login struct {
+	req        *wire.LoginIssueRequest
+	auth       *webauthntest.Authenticator // signs the assertion (default alice's)
+	bob        *webauthntest.Authenticator // bob's, for cases that use it
+	assertion  *wire.WebAuthnAssertion
+	evidence   []wire.Evidence // nil: the assertion as the only item
+	ca         ssh.Signer      // nil: the user CA
+	certKey    ssh.PublicKey
+	principals []string // the certificate's
+	validFor   time.Duration
+	keyID      cert.KeyID
+	extra      map[string]string
+	critical   map[string]string
+	serial     uint64
+	dirVersion uint64
+	polVersion uint64
+}
+
+// leafSecs is the whole-second time of the next leaf.
+func (lf *loginFixture) leafSecs() uint64 { return (lf.micros + 1) / 1e6 }
+
+// addLogin logs a login_issue entry: by default alice's request for all
+// her roles (principals [role:ops], 600 s, created at the entry time)
+// approved by her passkey, and the certificate cert.Build gives the user
+// CA for it under the policy and directory in force, with the next serial.
+// It returns the login as logged.
+func (lf *loginFixture) addLogin(pre, post func(*login)) *login {
+	lf.t.Helper()
+	key := newSigner(lf.t, "ed25519").PublicKey()
+	l := &login{
+		req: &wire.LoginIssueRequest{SubjectKey: key.Marshal(), Subject: "alice", Principals: []string{"role:ops"},
+			ValidForSeconds: 600, CreatedAt: lf.leafSecs()},
+		auth: lf.alice, bob: lf.bob, certKey: key, serial: lf.serial + 1, dirVersion: lf.dirVersion, polVersion: lf.pol.Version,
+	}
+	if _, err := rand.Read(l.req.RequestID[:]); err != nil {
+		lf.t.Fatal(err)
+	}
+	if pre != nil {
+		pre(l)
+	}
+	a := l.auth.Assert(auditRPID, auditOrigin, l.req.Digest())
+	l.assertion = &wire.WebAuthnAssertion{CredentialID: a.CredentialID, AuthenticatorData: a.AuthenticatorData, ClientDataJSON: a.ClientDataJSON, Signature: a.Signature}
+	roles := []string{"ops"}
+	if d, err := directory.Parse(lf.dirRaw); err == nil {
+		if g, err := d.Authorize(l.req.Subject, l.req.Roles); err == nil {
+			roles = g.Roles
+		}
+	}
+	profile, err := certprofile.ForRole(trust.RoleUser, lf.pol)
+	if err != nil {
+		lf.t.Fatal(err)
+	}
+	l.principals = slices.Clone(l.req.Principals)
+	l.validFor = time.Duration(l.req.ValidForSeconds) * time.Second
+	l.keyID = cert.KeyID{CA: "user", Subject: l.req.Subject, Request: hex.EncodeToString(l.req.RequestID[:]),
+		Policy: l.polVersion, Directory: l.dirVersion, Roles: roles}
+	l.extra = map[string]string{}
+	for _, e := range l.req.Extensions {
+		if _, isDefault := profile.DefaultExtensions[e]; !isDefault {
+			l.extra[e] = ""
+		}
+	}
+	if post != nil {
+		post(l)
+	}
+	l.keyID.Serial = l.serial
+	ca := l.ca
+	if ca == nil {
+		ca = lf.ca
+	}
+	c, err := cert.Build(cert.Request{Profile: profile, Subject: l.certKey, Principals: l.principals, Now: issuedAt(l.serial),
+		ValidFor: l.validFor, KeyID: l.keyID, Serial: l.serial, ExtraExtensions: l.extra, CriticalOptions: l.critical}, ca, rand.Reader)
+	if err != nil {
+		lf.t.Fatal(err)
+	}
+	evidence := l.evidence
+	if evidence == nil {
+		blob, err := l.assertion.Marshal()
+		if err != nil {
+			lf.t.Fatal(err)
+		}
+		evidence = []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: blob}}
+	}
+	body, err := (&tlog.LoginIssueBody{Serial: l.serial, PolicyVersion: l.polVersion, DirectoryVersion: l.dirVersion,
+		Request: l.req.SigningBytes(), Evidence: evidence, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+	if err != nil {
+		lf.t.Fatal(err)
+	}
+	lf.add(tlog.KindLoginIssue, body)
+	lf.serial = max(lf.serial, l.serial)
+	return l
+}
+
+// addIssueWithRequest logs an admin issue entry under the policy in force
+// whose kr1 key ID names request ID reqHex, with the next serial.
+func (lf *loginFixture) addIssueWithRequest(reqHex string) {
+	lf.t.Helper()
+	lf.serial++
+	keyID := cert.KeyID{CA: "user", Subject: "u:alice", Request: reqHex, Policy: lf.pol.Version, Serial: lf.serial}
+	c, err := cert.Build(cert.Request{Profile: cert.DefaultUserProfile(), Subject: newSigner(lf.t, "ed25519").PublicKey(),
+		Principals: []string{"alice"}, Now: issuedAt(lf.serial), ValidFor: time.Hour, KeyID: keyID, Serial: lf.serial}, lf.ca, rand.Reader)
+	if err != nil {
+		lf.t.Fatal(err)
+	}
+	body, err := (&tlog.IssueBody{CARole: uint8(wire.CARoleUser), Serial: lf.serial, PolicyVersion: lf.pol.Version, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+	if err != nil {
+		lf.t.Fatal(err)
+	}
+	lf.add(tlog.KindIssue, body)
+}
+
+// TestVerifyLoginTampering (KEY-02, T-02-17, T-02-18, T-02-84): audit
+// verify re-proves every directory_install and login_issue entry from the
+// log. Each case builds a valid log in process with the real packages and
+// then changes one thing as a compromised signer could: it holds the CA
+// key and the log key, so every checkpoint is re-signed over the changed
+// entries, and only the entry checks can catch it. Each tampered case must
+// fail with its named check; the controls (want "") verify.
+func TestVerifyLoginTampering(t *testing.T) {
+	// base is a log with the RP policy and directory v1 installed.
+	base := func(t *testing.T) *loginFixture {
+		lf := newLoginFixture(t, true)
+		lf.addDirectory(lf.directory(nil), nil)
+		return lf
+	}
+	// oneLogin is base plus one login changed by pre and post.
+	oneLogin := func(pre, post func(*login)) func(t *testing.T) *loginFixture {
+		return func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addLogin(pre, post)
+			return lf
+		}
+	}
+	other := func(t *testing.T) ssh.Signer { return newSigner(t, "ed25519") }
+	stranger := newSigner(t, "ed25519").PublicKey()
+	widened := []string{"role:ops", "root"}
+	cases := []struct {
+		name  string
+		build func(t *testing.T) *loginFixture
+		want  string // "" = must verify
+		check func(t *testing.T, rep *Report)
+	}{
+		// Controls.
+		{name: "login_ok", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addLogin(nil, nil)
+			lf.addLogin(nil, nil)
+			return lf
+		}, check: func(t *testing.T, rep *Report) {
+			if rep.Counts[tlog.KindLoginIssue] != 2 || rep.Counts[tlog.KindDirectoryInstall] != 1 || rep.Serials != 0 || rep.IssuedByCA["user"] != 0 {
+				t.Fatalf("report %+v: want 2 login certificates, 1 directory install, and no issue entries counted as issued", rep)
+			}
+		}},
+		{name: "login_named_role_ok", build: oneLogin(func(l *login) { l.req.Roles = []string{"ops"} }, nil)},
+		{name: "login_granted_extension_ok", build: oneLogin(func(l *login) { l.req.Extensions = []string{"permit-agent-forwarding"} }, nil)},
+		{name: "login_bob_ok", build: oneLogin(func(l *login) {
+			l.auth, l.req.Subject, l.req.Principals, l.req.ValidForSeconds = l.bob, "bob", []string{"role:dev"}, 1800
+		}, nil)},
+		{name: "login_created_300s_before_ok", build: oneLogin(func(l *login) { l.req.CreatedAt -= 300 }, nil)},
+		{name: "login_created_300s_after_ok", build: oneLogin(func(l *login) { l.req.CreatedAt += 300 }, nil)},
+		{name: "login_ttl_at_role_cap_ok", build: oneLogin(func(l *login) { l.req.ValidForSeconds = 3600 }, nil)},
+
+		// The passkey authorization.
+		{name: "login_assertion_bit_flip", build: oneLogin(nil, func(l *login) { l.assertion.Signature[7] ^= 0x10 }),
+			want: `(login_issue): passkey assertion of user "alice" does not approve the logged request: webauthn: assertion signature does not verify`},
+		{name: "login_principals_widened_after_approval", build: oneLogin(nil, func(l *login) { l.req.Principals, l.principals = widened, widened }),
+			want: `(login_issue): passkey assertion of user "alice" does not approve the logged request: webauthn: challenge mismatch`},
+		{name: "login_other_users_credential", build: oneLogin(func(l *login) { l.auth = l.bob }, nil), want: "(login_issue): directory v1 binds no credential"},
+		{name: "login_two_evidence_items", build: oneLogin(nil, func(l *login) {
+			blob, _ := l.assertion.Marshal()
+			l.evidence = []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: blob}, {Type: wire.EvidenceWebAuthnAssertion, Blob: blob}}
+		}), want: "(login_issue): entry carries 2 evidence items, want exactly one webauthn-assertion/v1"},
+		{name: "login_admin_evidence", build: oneLogin(nil, func(l *login) {
+			l.evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sshsig")}}
+		}), want: `(login_issue): evidence type "admin-sshsig/v1", want webauthn-assertion/v1`},
+		{name: "login_assertion_unparseable", build: oneLogin(nil, func(l *login) {
+			l.evidence = []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: []byte("not an assertion")}}
+		}), want: "(login_issue): passkey assertion does not parse"},
+		{name: "login_without_rp", build: func(t *testing.T) *loginFixture {
+			lf := newLoginFixture(t, false)
+			lf.addDirectory(lf.directory(nil), nil)
+			lf.addLogin(nil, nil)
+			return lf
+		}, want: "(login_issue): policy v1 has no WebAuthn relying party"},
+
+		// The directory grant.
+		{name: "login_principals_widened", build: oneLogin(func(l *login) { l.req.Principals = widened }, nil),
+			want: `(login_issue): request principals ["role:ops" "root"] differ from what directory v1 grants for roles ["ops"]: ["role:ops"]`},
+		{name: "login_unknown_user", build: oneLogin(func(l *login) { l.req.Subject = "mallory" }, nil),
+			want: `(login_issue): directory v1 grants no login to user "mallory"`},
+		{name: "login_disabled_user", build: func(t *testing.T) *loginFixture {
+			lf := newLoginFixture(t, true)
+			lf.addDirectory(lf.directory(func(d *directory.Directory) { d.Users[0].Status = directory.StatusDisabled }), nil)
+			lf.addLogin(nil, nil)
+			return lf
+		}, want: `(login_issue): directory v1 grants no login to user "alice"`},
+		{name: "login_role_not_granted", build: oneLogin(func(l *login) { l.req.Roles = []string{"dev"} }, nil),
+			want: `(login_issue): directory v1 grants no login to user "alice" for roles ["dev"]`},
+		{name: "login_ttl_above_role", build: oneLogin(func(l *login) { l.req.ValidForSeconds = 3601 }, nil),
+			want: "(login_issue): request TTL 3601 s is above the cap: role 3600 s, user CA profile 43200 s"},
+		{name: "login_extension_not_granted", build: oneLogin(func(l *login) { l.req.Extensions = []string{"permit-port-forwarding"} }, nil),
+			want: `(login_issue): request extension "permit-port-forwarding" is not granted by roles ["ops"]`},
+		{name: "login_extension_twice", build: oneLogin(func(l *login) {
+			l.req.Extensions = []string{"permit-agent-forwarding", "permit-agent-forwarding"}
+		}, nil), want: `(login_issue): request names extension "permit-agent-forwarding" twice`},
+
+		// The directory and policy in force.
+		{name: "login_under_never_installed_directory", build: oneLogin(func(l *login) { l.dirVersion = 2 }, nil),
+			want: "(login_issue): entry records directory version 2, but the directory in force is version 1"},
+		{name: "login_before_any_directory", build: func(t *testing.T) *loginFixture {
+			lf := newLoginFixture(t, true)
+			lf.addLogin(nil, nil)
+			return lf
+		}, want: "(login_issue): entry records directory version 0, but no directory is installed"},
+		{name: "login_policy_version_wrong", build: oneLogin(func(l *login) { l.polVersion = 2 }, nil),
+			want: "(login_issue): entry records policy version 2, but the policy in force is version 1"},
+		{name: "login_under_unauthorized_directory", build: func(t *testing.T) *loginFixture {
+			// Policy v2 replaces the admin who signed directory v1: v1
+			// stays in force but is no longer authorized.
+			lf := base(t)
+			carol := other(t)
+			lf.installPolicy(func(p *trust.Policy) {
+				p.Admins = []trust.AdminKey{{Name: "carol", Key: trust.FormatKey(carol.PublicKey())}}
+			})
+			lf.addLogin(nil, nil)
+			return lf
+		}, want: "(login_issue): the directory in force (v1) is not authorized under the policy in force: directory v1 is not signed by the admin quorum of policy v2"},
+		{name: "login_under_directory_above_new_cap", build: func(t *testing.T) *loginFixture {
+			// Policy v2 lowers the user CA cap below role ops's 3600 s.
+			lf := base(t)
+			lf.installPolicy(func(p *trust.Policy) {
+				p.CAProfiles = slices.Clone(p.CAProfiles)
+				p.CAProfiles[0].MaxTTLSeconds = 1800
+			})
+			lf.addLogin(nil, nil)
+			return lf
+		}, want: "(login_issue): the directory in force (v1) is not authorized under the policy in force: directory v1 is outside the user CA profile of policy v2"},
+		{name: "login_after_resigned_directory_ok", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			carol := other(t)
+			lf.installPolicy(func(p *trust.Policy) {
+				p.Admins = []trust.AdminKey{{Name: "carol", Key: trust.FormatKey(carol.PublicKey())}}
+			})
+			lf.addDirectory(lf.directory(nil), nil, carol)
+			lf.addLogin(nil, nil)
+			return lf
+		}},
+		{name: "login_directory_survives_rp_policy_change", build: func(t *testing.T) *loginFixture {
+			// T-02-84 (02-04-F2): directory v1 installed under policy v1
+			// without RP; policy v2 changes only the version, prev and
+			// RP; a login under dir=1, pol=2; directory v2 under pol=2;
+			// a login under dir=2, pol=2.
+			lf := newLoginFixture(t, false)
+			lf.addDirectory(lf.directory(nil), nil)
+			lf.installPolicy(func(p *trust.Policy) {
+				p.WebAuthn = &trust.WebAuthnRP{RPID: auditRPID, Origins: []string{auditOrigin}}
+			})
+			if l := lf.addLogin(nil, nil); l.dirVersion != 1 || l.polVersion != 2 {
+				t.Fatalf("first login under dir=%d pol=%d, want dir=1 pol=2", l.dirVersion, l.polVersion)
+			}
+			lf.addDirectory(lf.directory(nil), nil)
+			if l := lf.addLogin(nil, nil); l.dirVersion != 2 || l.polVersion != 2 {
+				t.Fatalf("second login under dir=%d pol=%d, want dir=2 pol=2", l.dirVersion, l.polVersion)
+			}
+			return lf
+		}, check: func(t *testing.T, rep *Report) {
+			if rep.Counts[tlog.KindLoginIssue] != 2 || rep.Counts[tlog.KindDirectoryInstall] != 2 || rep.PolicyVersion != 2 || rep.BundleVersion != 2 {
+				t.Fatalf("report %+v: want 2 login certificates and 2 directory installs under bundle v2, policy v2", rep)
+			}
+		}},
+
+		// directory_install entries.
+		{name: "directory_install_non_admin", build: func(t *testing.T) *loginFixture {
+			lf := newLoginFixture(t, true)
+			lf.addDirectory(lf.directory(nil), nil, other(t))
+			return lf
+		}, want: "(directory_install): directory v1 is not signed by the admin quorum of policy v1"},
+		{name: "directory_prev_wrong", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addDirectory(lf.directory(func(d *directory.Directory) { d.Prev = trust.SHA256Hex([]byte("not the directory in force")) }), nil)
+			return lf
+		}, want: "(directory_install): directory v2 is not the successor of the directory in force (v1)"},
+		{name: "directory_version_skipped", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addDirectory(lf.directory(func(d *directory.Directory) { d.Version = 3 }), nil)
+			return lf
+		}, want: "(directory_install): directory v3 is not the successor of the directory in force (v1)"},
+		{name: "directory_first_not_v1", build: func(t *testing.T) *loginFixture {
+			lf := newLoginFixture(t, true)
+			lf.addDirectory(lf.directory(func(d *directory.Directory) { d.Version = 2 }), nil)
+			return lf
+		}, want: "(directory_install): directory v2 is not the successor of the directory in force (v0)"},
+		{name: "directory_role_ttl_above_user_cap", build: func(t *testing.T) *loginFixture {
+			lf := newLoginFixture(t, true)
+			lf.addDirectory(lf.directory(func(d *directory.Directory) { role(d, "ops").MaxTTLSeconds = 43201 }), nil)
+			return lf
+		}, want: "(directory_install): directory v1 is outside the user CA profile of policy v1"},
+		{name: "directory_policy_version_wrong", build: func(t *testing.T) *loginFixture {
+			lf := newLoginFixture(t, true)
+			lf.addDirectory(lf.directory(nil), func(b *tlog.DirectoryInstallBody) { b.PolicyVersion = 2 })
+			return lf
+		}, want: "(directory_install): entry records policy version 2, but the policy in force is version 1"},
+		{name: "directory_version_mismatch", build: func(t *testing.T) *loginFixture {
+			lf := newLoginFixture(t, true)
+			lf.addDirectory(lf.directory(nil), func(b *tlog.DirectoryInstallBody) { b.Version = 2 })
+			return lf
+		}, want: "(directory_install): entry records directory version 2, but its document is version 1"},
+		{name: "directory_before_bundle", build: func(t *testing.T) *loginFixture {
+			f := newBareFixture(t, "ed25519")
+			lf := &loginFixture{fixture: f, pol: f.loginPolicy(true)}
+			var err error
+			if lf.alice, err = webauthntest.New(webauthn.AlgEdDSA); err != nil {
+				t.Fatal(err)
+			}
+			lf.bob = lf.alice
+			lf.addDirectory(lf.directory(nil), nil)
+			return lf
+		}, want: "(directory_install): directory_install before the first bundle_install"},
+
+		// The certificate.
+		{name: "login_cert_key_not_subject", build: oneLogin(nil, func(l *login) { l.certKey = stranger }),
+			want: "(login_issue): certificate key SHA256:"},
+		{name: "login_cert_principals_differ", build: oneLogin(nil, func(l *login) { l.principals = widened }),
+			want: `(login_issue): certificate principals ["role:ops" "root"] differ from the request's ["role:ops"]`},
+		{name: "login_cert_span_wrong", build: oneLogin(nil, func(l *login) { l.validFor = 3600 * time.Second }),
+			want: "(login_issue): certificate spans 3900 s, but cert.Build gives 900 s for the requested 600 s"},
+		{name: "login_cert_extra_extension", build: oneLogin(nil, func(l *login) { l.extra["permit-port-forwarding"] = "" }),
+			want: "(login_issue): certificate extensions"},
+		{name: "login_cert_critical_option", build: oneLogin(nil, func(l *login) { l.critical = map[string]string{"source-address": "192.0.2.0/24"} }),
+			want: `(login_issue): certificate carries critical options ["source-address"]`},
+		{name: "login_cert_by_host_ca", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addLogin(nil, func(l *login) { l.ca = lf.hostCA })
+			return lf
+		}, want: "(login_issue): certificate for CA role user signed by"},
+		{name: "login_kr1_key_id", build: oneLogin(nil, func(l *login) { l.keyID.Roles, l.keyID.Directory = nil, 0 }),
+			want: "(login_issue): a login_issue entry must carry a kr2 key ID, not kr1"},
+		{name: "login_kr2_roles_not_grant", build: oneLogin(nil, func(l *login) { l.keyID.Roles = []string{"dev", "ops"} }),
+			want: `(login_issue): key ID roles ["dev" "ops"] differ from the roles the directory grants ["ops"]`},
+		{name: "login_kr2_subject_wrong", build: oneLogin(nil, func(l *login) { l.keyID.Subject = "bob" }),
+			want: `(login_issue): key ID sub=bob, but the request's subject is "alice"`},
+		{name: "login_kr2_request_wrong", build: oneLogin(nil, func(l *login) { l.keyID.Request = strings.Repeat("ab", 16) }),
+			want: "(login_issue): key ID req=abababababababababababababababab, but the request ID is"},
+		{name: "login_kr2_dir_wrong", build: oneLogin(nil, func(l *login) { l.keyID.Directory = 2 }),
+			want: "(login_issue): key ID dir=2, but the entry records directory version 1"},
+		{name: "login_kr2_pol_wrong", build: oneLogin(nil, func(l *login) { l.keyID.Policy = 2 }),
+			want: "(login_issue): key ID pol=2, but the policy in force is version 1"},
+
+		// Freshness.
+		{name: "login_created_301s_before", build: oneLogin(func(l *login) { l.req.CreatedAt -= 301 }, nil),
+			want: "(login_issue): request CreatedAt is 301 s from the entry time"},
+		{name: "login_created_301s_after", build: oneLogin(func(l *login) { l.req.CreatedAt += 301 }, nil),
+			want: "(login_issue): request CreatedAt is 301 s from the entry time"},
+
+		// Replay: request IDs are single-use for logins.
+		{name: "login_request_replayed", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			first := lf.addLogin(nil, nil)
+			lf.addLogin(func(l *login) { cp := *first.req; l.req, l.certKey = &cp, first.certKey }, nil)
+			return lf
+		}, want: "(login_issue): request ID "},
+		{name: "login_reuses_issue_request_id", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addIssueWithRequest(strings.Repeat("cd", 16))
+			lf.addLogin(func(l *login) { copy(l.req.RequestID[:], bytes.Repeat([]byte{0xcd}, 16)) }, nil)
+			return lf
+		}, want: "(login_issue): request ID cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd replayed: issue entry 2 already used it"},
+		{name: "issue_reuses_login_request_id", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			first := lf.addLogin(nil, nil)
+			lf.addIssueWithRequest(hex.EncodeToString(first.req.RequestID[:]))
+			return lf
+		}, want: "replayed: login_issue entry 2 already used it"},
+		{name: "issue_request_ids_not_compared_with_each_other", build: func(t *testing.T) *loginFixture {
+			// Phase 1 behaviour, unchanged: two issue entries are not
+			// compared with each other (verify.go, issuance).
+			lf := base(t)
+			lf.addIssueWithRequest(strings.Repeat("ef", 16))
+			lf.addIssueWithRequest(strings.Repeat("ef", 16))
+			return lf
+		}},
+
+		// One serial sequence across issue and login_issue entries.
+		{name: "login_after_issue_ascending_ok", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addIssue()
+			lf.addLogin(nil, nil)
+			lf.addIssue()
+			return lf
+		}},
+		{name: "login_serial_not_above_issue", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addIssue()
+			lf.addLogin(nil, func(l *login) { l.serial = lf.serial })
+			return lf
+		}, want: "(login_issue): serials not strictly increasing"},
+		{name: "login_serial_below_issue", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addIssue()
+			lf.addLogin(nil, func(l *login) { l.serial = lf.serial - 1 })
+			return lf
+		}, want: "(login_issue): serials not strictly increasing"},
+		{name: "issue_after_login_ascending_ok", build: func(t *testing.T) *loginFixture {
+			lf := base(t)
+			lf.addLogin(nil, nil)
+			lf.addIssue()
+			return lf
+		}},
+		{name: "issue_serial_not_above_login", build: func(t *testing.T) *loginFixture {
+			// The log's first certificate is a login; the next issue
+			// entry reuses its serial.
+			lf := base(t)
+			lf.addLogin(nil, nil)
+			lf.serial--
+			lf.addIssue()
+			return lf
+		}, want: "serials not strictly increasing"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lf := tc.build(t)
+			rep, err := lf.verify(join(lf.lines()), nil)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Verify: %v", err)
+				}
+				if tc.check != nil {
+					tc.check(t, rep)
+				}
+				return
+			}
+			if err == nil || rep != nil {
+				t.Fatalf("Verify accepted the tampered log: %+v", rep)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
 }

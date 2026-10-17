@@ -9,11 +9,13 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1416,4 +1418,179 @@ func TestRootSignSuccessorThreshold1Warning(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRootSuccessorPolicy covers keyroster root successor-policy (D-09):
+// the successor of a policy without an RP and of one with another RP
+// (version + 1, prev = SHA-256 of the policy in force, every other field
+// unchanged, the one-way warning on stderr), and its refusals, each of
+// which writes nothing: an existing --out, a non-canonical --prev, an
+// unchanged RP, an IP literal, a tailnet domain, an origin with a path,
+// a policy at the last version, and missing flags.
+func TestRootSuccessorPolicy(t *testing.T) {
+	dir := t.TempDir()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(priv.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := filepath.Join(dir, "alice.pub")
+	writeTestFile(t, admin, ssh.MarshalAuthorizedKey(pub))
+	plain := filepath.Join(dir, "plain.json")
+	if code, _, stderr := run(t, "root", "genesis-policy", "--admin", "alice="+admin, "--user-max-ttl", "8h", "--out", plain); code != 0 {
+		t.Fatalf("genesis-policy exited %d: %s", code, stderr)
+	}
+	withRP := filepath.Join(dir, "with-rp.json")
+	if code, _, stderr := run(t, "root", "genesis-policy", "--admin", "alice="+admin, "--webauthn-rp-id", "keyroster.example.org", "--out", withRP); code != 0 {
+		t.Fatalf("genesis-policy with RP exited %d: %s", code, stderr)
+	}
+	read := func(t *testing.T, path string) ([]byte, *trust.Policy) {
+		t.Helper()
+		data, err := os.ReadFile(path) //nolint:gosec // G304: a file inside the test's TempDir
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := trust.ParsePolicy(data)
+		if err != nil {
+			t.Fatalf("%s does not parse as a canonical policy: %v", path, err)
+		}
+		return data, p
+	}
+	successor := func(name string, extra ...string) (int, string, string, string) {
+		out := filepath.Join(dir, name)
+		code, stdout, stderr := run(t, append([]string{"root", "successor-policy", "--out", out}, extra...)...)
+		return code, stdout, stderr, out
+	}
+	// wantSuccessor checks next against prev: version + 1, prev hash, the
+	// RP, and every other field unchanged.
+	wantSuccessor := func(t *testing.T, prevPath, nextPath, rpID string, origins []string) {
+		t.Helper()
+		prevData, prev := read(t, prevPath)
+		_, next := read(t, nextPath)
+		if next.Version != prev.Version+1 || next.Prev != trust.SHA256Hex(prevData) {
+			t.Fatalf("successor version %d prev %s, want version %d prev %s", next.Version, next.Prev, prev.Version+1, trust.SHA256Hex(prevData))
+		}
+		if next.WebAuthn == nil || next.WebAuthn.RPID != rpID || !slices.Equal(next.WebAuthn.Origins, origins) {
+			t.Fatalf("successor RP %+v, want %s %q", next.WebAuthn, rpID, origins)
+		}
+		rest, prevRest := *next, *prev
+		rest.Version, rest.Prev, rest.WebAuthn = 0, "", nil
+		prevRest.Version, prevRest.Prev, prevRest.WebAuthn = 0, "", nil
+		a, errA := rest.Canonical()
+		b, errB := prevRest.Canonical()
+		if errA != nil || errB != nil || !bytes.Equal(a, b) {
+			t.Fatalf("successor changed a field besides version, prev and RP (%v, %v):\n%s\nwas\n%s", errA, errB, a, b)
+		}
+	}
+	wantNothing := func(t *testing.T, path string) {
+		t.Helper()
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s written despite the refusal (stat %v)", path, err)
+		}
+	}
+
+	t.Run("adds_rp", func(t *testing.T) {
+		code, stdout, stderr, out := successor("v2.json", "--prev", plain, "--webauthn-rp-id", "keyroster.example.org")
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, stderr)
+		}
+		wantSuccessor(t, plain, out, "keyroster.example.org", []string{"https://keyroster.example.org"})
+		if !strings.Contains(stderr, "WARNING: rp_id is a one-way setting.") || strings.Contains(stdout, "WARNING") {
+			t.Fatalf("the one-way warning is not on stderr only:\nstdout %s\nstderr %s", stdout, stderr)
+		}
+		data, _ := read(t, out)
+		for _, want := range []string{"rp_id:   (none) -> keyroster.example.org", "origins: (none) -> https://keyroster.example.org",
+			"sha256: " + trust.SHA256Hex(data), "successor of policy v1"} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("stdout lacks %q:\n%s", want, stdout)
+			}
+		}
+	})
+	t.Run("changes_rp_with_origins", func(t *testing.T) {
+		code, stdout, stderr, out := successor("changed.json", "--prev", withRP, "--webauthn-rp-id", "login.example.org",
+			"--webauthn-origin", "https://login.example.org:8443", "--webauthn-origin", "https://login.example.org")
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, stderr)
+		}
+		wantSuccessor(t, withRP, out, "login.example.org", []string{"https://login.example.org", "https://login.example.org:8443"})
+		if !strings.Contains(stdout, "rp_id:   keyroster.example.org -> login.example.org") || !strings.Contains(stderr, "one-way") {
+			t.Fatalf("old and new RP or warning missing:\nstdout %s\nstderr %s", stdout, stderr)
+		}
+	})
+	t.Run("out_exists", func(t *testing.T) {
+		existing := filepath.Join(dir, "existing.json")
+		writeTestFile(t, existing, []byte("keep me"))
+		code, _, stderr := run(t, "root", "successor-policy", "--prev", plain, "--webauthn-rp-id", "keyroster.example.org", "--out", existing)
+		data, _ := os.ReadFile(existing) //nolint:gosec // G304: a file inside the test's TempDir
+		if code == 0 || !strings.Contains(stderr, "already exists") || string(data) != "keep me" {
+			t.Fatalf("exit %d, stderr %q, file %q; want the refusal and the file unchanged", code, stderr, data)
+		}
+	})
+	t.Run("prev_not_canonical", func(t *testing.T) {
+		data, _ := read(t, plain)
+		reformatted := filepath.Join(dir, "reformatted.json")
+		writeTestFile(t, reformatted, append(bytes.TrimSuffix(data, []byte("\n")), ' ', '\n'))
+		code, _, stderr, out := successor("from-reformatted.json", "--prev", reformatted, "--webauthn-rp-id", "keyroster.example.org")
+		if code == 0 || !strings.Contains(stderr, "not canonical") {
+			t.Fatalf("exit %d, stderr %q; want the canonical refusal", code, stderr)
+		}
+		wantNothing(t, out)
+	})
+	t.Run("rp_unchanged", func(t *testing.T) {
+		code, _, stderr, out := successor("same.json", "--prev", withRP, "--webauthn-rp-id", "keyroster.example.org")
+		if code == 0 || !strings.Contains(stderr, "nothing to change") {
+			t.Fatalf("exit %d, stderr %q; want the nothing-to-change refusal", code, stderr)
+		}
+		wantNothing(t, out)
+	})
+	for _, tc := range []struct {
+		name, rpID, why string
+		origins         []string
+	}{
+		{"rp_id_ip_literal", "192.0.2.10", "IP address", nil},
+		{"rp_id_tailnet_domain", "tail1234.ts.net", "tailnet domain", nil},
+		{"origin_with_path", "keyroster.example.org", "is not https://keyroster.example.org", []string{"https://keyroster.example.org/login"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"--prev", plain, "--webauthn-rp-id", tc.rpID}
+			for _, o := range tc.origins {
+				args = append(args, "--webauthn-origin", o)
+			}
+			code, _, stderr, out := successor(tc.name+".json", args...)
+			if code == 0 || !strings.Contains(stderr, tc.why) || strings.Contains(stderr, "WARNING") {
+				t.Fatalf("exit %d, stderr %q; want a refusal naming %q and no warning", code, stderr, tc.why)
+			}
+			wantNothing(t, out)
+		})
+	}
+	t.Run("last_version", func(t *testing.T) {
+		_, p := read(t, plain)
+		p.Version = math.MaxUint64
+		data, err := p.Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		last := filepath.Join(dir, "last.json")
+		writeTestFile(t, last, data)
+		code, _, stderr, out := successor("after-last.json", "--prev", last, "--webauthn-rp-id", "keyroster.example.org")
+		if code == 0 || !strings.Contains(stderr, "last possible version") {
+			t.Fatalf("exit %d, stderr %q; want the last-version refusal", code, stderr)
+		}
+		wantNothing(t, out)
+	})
+	t.Run("missing_flags", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"--prev", plain, "--out", filepath.Join(dir, "x.json")},
+			{"--prev", plain, "--webauthn-rp-id", "keyroster.example.org"},
+			{"--out", filepath.Join(dir, "y.json"), "--webauthn-rp-id", "keyroster.example.org"},
+		} {
+			code, _, stderr := run(t, append([]string{"root", "successor-policy"}, args...)...)
+			if code == 0 || !strings.Contains(stderr, "--prev, --out and --webauthn-rp-id are required") {
+				t.Fatalf("%v: exit %d, stderr %q; want the usage refusal", args, code, stderr)
+			}
+		}
+	})
 }

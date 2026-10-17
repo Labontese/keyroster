@@ -18,7 +18,21 @@ func FuzzVerifyExport(f *testing.F) {
 	f.Add([]byte(join([]string{lines[0], lines[2], lines[1], lines[5]})))
 	f.Add([]byte(strings.Repeat("{}\n", 3)))
 	f.Add([]byte(`{"index":0,"leaf":"AA=="}` + "\n" + `{"checkpoint":"x"}` + "\n"))
+	// Kind 7 and 8 entries (02-04): a log under the same root with a
+	// directory install and two logins, which verifies under the same pins,
+	// plus a truncation and a reordering of it.
+	lf := newLoginFixtureRoot(f, true, fx.root)
+	lf.addDirectory(lf.directory(nil), nil)
+	lf.addLogin(nil, nil)
+	lf.addLogin(nil, nil)
+	login := lf.lines() // bundle_install, directory_install, 2 login_issue, checkpoint
 	pins := fx.pins()
+	if _, err := Verify(strings.NewReader(join(login)), Options{Pins: pins, Threshold: 1}); err != nil {
+		f.Fatalf("the login seed does not verify under the pins: %v", err)
+	}
+	f.Add([]byte(join(login)))
+	f.Add([]byte(join([]string{login[0], login[1], login[2], login[4]})))
+	f.Add([]byte(join([]string{login[0], login[2], login[1], login[3], login[4]})))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		rep, err := Verify(strings.NewReader(string(data)), Options{Pins: pins, Threshold: 1})
 		if err != nil {

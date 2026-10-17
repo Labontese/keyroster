@@ -143,6 +143,42 @@ func FuzzParseLoginIssueRequest(f *testing.F) {
 	})
 }
 
+// FuzzParseLoginIssueSigningBytes: logged login request bytes that parse
+// re-encode to exactly themselves (so the challenge an auditor recomputes
+// is over the bytes that parsed), carry no evidence, and every refusal is
+// ErrMalformed.
+func FuzzParseLoginIssueSigningBytes(f *testing.F) {
+	valid := loginVector(f).SigningBytes()
+	f.Add(valid)
+	withLists := loginVector(f)
+	withLists.Roles = []string{"dev", "ops"}
+	withLists.Extensions = []string{"permit-pty"}
+	f.Add(withLists.SigningBytes())
+	f.Add(valid[len(LoginRequestDomain):])
+	f.Add(append(append([]byte(nil), valid...), 0, 0))
+	f.Add(valid[:len(valid)/2])
+	f.Add([]byte(LoginRequestDomain))
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, in []byte) {
+		r, err := ParseLoginIssueSigningBytes(in)
+		if err != nil {
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseLoginIssueSigningBytes error = %v, want ErrMalformed", err)
+			}
+			return
+		}
+		if !bytes.Equal(r.SigningBytes(), in) {
+			t.Fatalf("SigningBytes does not reproduce the input:\n in  %x\n out %x", in, r.SigningBytes())
+		}
+		if r.Evidence != nil {
+			t.Fatal("parsed signing bytes carry evidence")
+		}
+		if _, err := r.Marshal(); err != nil {
+			t.Fatalf("a parsed request does not marshal: %v", err)
+		}
+	})
+}
+
 // FuzzParseWebAuthnAssertion: an evidence blob that parses re-encodes to
 // exactly itself, and every refusal is ErrMalformed.
 func FuzzParseWebAuthnAssertion(f *testing.F) {

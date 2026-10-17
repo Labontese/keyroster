@@ -176,6 +176,10 @@ func ParseLoginIssueSigningBytes(b []byte) (*LoginIssueRequest, error) {
 	if err := r.check(); err != nil {
 		return nil, err
 	}
+	// Not reachable today: readLoginFields reads every byte and addFields
+	// is its exact inverse (FuzzParseLoginIssueSigningBytes asserts the
+	// round trip). Kept so a later decoder change cannot let an auditor
+	// read a request other than the one whose SHA-256 was signed.
 	if !bytes.Equal(r.SigningBytes(), b) {
 		return nil, fmt.Errorf("%w: login request signing bytes are not canonical", ErrMalformed)
 	}
