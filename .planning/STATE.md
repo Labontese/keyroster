@@ -173,10 +173,13 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-02: owner decision 2026-10-17: keyroster advises only a host-scoped `Host <your keyroster hosts>` IdentityAgent block for the Windows agent pipe and no longer advises $env:SSH_AUTH_SOCK; 02-12 Task 1 step 11 must print the same form
 - [Phase 02]: 02-03: the signer refuses to start when the latest stored directory is not the one the last directory_install leaf records (T-02-14)
 - [Phase 02]: 02-03: frames are capped per message type (MaxDirectoryFrame for InstallDirectory and GetDirectoryResponse, MaxFrame otherwise); ReadFrame/WriteFrame removed
+- [Phase 02]: 02-03 pre-merge review: readers pass the types they accept (wire.Caps); the signer reads only InstallDirectory at MaxDirectoryFrame, a client only its awaited type and errors; directory signatures are checked before parsing; refused installs log from their own refusal bucket; doctor runs the directory cross-check
+- [Phase 02]: owner decision 2026-10-17: T-02-14 covers only the directory table rolled back or substituted alone; the log and tables rolled back together, or an older signer.db restored, is the C-WR-01 residual, and in Phase 4 keyroster-signer serve refuses to start without a witnessed checkpoint at least as new as the local one
 
 ### Pending Todos
 
 - [2026-10-16] [auth] Bind admin-signed directories to a deployment — [todo file](.planning/todos/pending/2026-10-16-bind-admin-signed-directories-to-a-deployment.md) — Needs Options:.
+- [2026-10-17] [auth] Serve refuses to start without a witnessed checkpoint (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-17-serve-refuses-without-witnessed-checkpoint.md) — owner decision taken; options: witness cosignatures checked at start, or an operator-supplied minimum checkpoint as an interim measure.
 
 ### Blockers/Concerns
 

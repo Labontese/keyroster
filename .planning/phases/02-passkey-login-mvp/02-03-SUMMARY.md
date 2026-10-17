@@ -11,7 +11,7 @@ provides:
   - "wire: TypeGetDirectory (0x03) -> TypeGetDirectoryResponse (0x83), GetDirectoryResponse and ParseGetDirectoryResponse (version 0 has one encoding only)"
   - "Signer.GetDirectory and signerclient.GetDirectory: version, canonical bytes, signatures and the authorized flag, as the signer holds them"
   - "Per-type frame caps: MaxDirectoryFrame for InstallDirectory and GetDirectoryResponse, MaxFrame for every other type, ErrShortFrame, unexported maxBodyFor and headerLen"
-  - "The start-up cross-check: the signer refuses to start when the latest stored directory is not the one the last directory_install leaf records (T-02-14)"
+  - "The start-up cross-check: the signer refuses to start when the latest stored directory is not the one the last directory_install leaf records (T-02-14: the directory table rolled back or substituted alone; the log and tables rolled back together, or an older signer.db restored, is the C-WR-01 residual owned by Phase 4)"
   - "TestLoginRefusals (SC4 through the real socket, six cases with controls) and the unit refusal matrix, restart, log-consistency and concurrency suites"
   - "11 new fuzz targets; scripts/fuzz.sh now runs 19"
 affects: [02-04, 02-05, 02-06, 02-08, 02-13, KEY-02]
@@ -108,7 +108,7 @@ coverage:
         status: pass
     human_judgment: false
   - id: D6
-    description: "Start-up cross-check (T-02-14): a stored directory row overwritten, with replaced signatures or policy version, the newest row deleted, the table wiped, or a row without a log entry stops the signer; the fresh state starts"
+    description: "Start-up cross-check (T-02-14, the directory table alone): a stored directory row overwritten, with replaced signatures or policy version, the newest row deleted, the table wiped, or a row without a log entry stops the signer; the fresh state starts. Not covered: the log rolled back with the table to an earlier signed prefix, or an older signer.db restored (C-WR-01 residual, Phase 4)"
     verification:
       - kind: unit
         ref: "internal/signer/directory_test.go#TestDirectoryLogConsistency (RED before the change, GREEN after)"
@@ -226,7 +226,7 @@ status: complete
 
 ## Where the three 02-01 review findings this plan owns are covered
 
-1. **The start-up cross-check (T-02-14)** is in `internal/signer/directory_test.go#TestDirectoryLogConsistency`. Each case first restarts once as a control.
+1. **The start-up cross-check (T-02-14)** is in `internal/signer/directory_test.go#TestDirectoryLogConsistency`. Each case first restarts once as a control. It covers the directory table rolled back or substituted **alone**, with the log left as it is. The log and its tables rolled back together to an earlier signed prefix, or an older signer.db restored, reinstate the older directory (and trust bundle) without any local check noticing: that is the C-WR-01 residual, owned by Phase 4 (owner decision 2026-10-17: serve will refuse to start without a witnessed checkpoint at least as new as the local one; `.planning/todos/pending/2026-10-17-serve-refuses-without-witnessed-checkpoint.md`).
    - The newest row deleted, leaving an older validly signed directory: `newest_row_deleted`.
    - The row overwritten at the same version: `stored_directory_tampered`, with another validly admin-signed v1; also `signatures_replaced` and `policy_version_replaced`.
    - The whole table wiped while the log holds a directory_install leaf: `table_wiped`.

@@ -166,8 +166,11 @@ func checkBundleLogged(stored *signerdb.StoredBundle, install []byte) error {
 // records: the same version and policy version and byte-identical
 // document and signatures (T-02-14). The directory table is not anchored
 // in the signed checkpoint, so a row overwritten, deleted or written
-// outside InstallDirectory (an offline edit, a tampered backup) is
-// refused instead of trusted.
+// outside InstallDirectory, with the log left as it is, is refused
+// instead of trusted. It cannot catch the log rolled back together with
+// the table to an earlier signed prefix, or a whole older database
+// restored: the older directory is then exactly what the shorter log
+// records (the C-WR-01 residual, see checkLogCovers).
 func checkDirectoryLogged(stored *signerdb.StoredDirectory, install []byte) error {
 	switch {
 	case stored == nil && install == nil:
@@ -371,9 +374,11 @@ type issuedSummary struct {
 // carries the high-water mark. This catches the log tables alone rolled back to an earlier
 // signed prefix, or wiped. It cannot catch the whole database restored
 // from an older copy, those tables rolled back with the log, or trailing
-// entries without issuance (refusals, clock_regression) cut off: only an
-// earlier checkpoint kept outside the database (keyroster audit verify
-// --previous) shows those.
+// entries without issuance cut off: refusals, clock_regression, and
+// bundle_install and directory_install entries together with their
+// trust_bundle and directory rows, which brings back the older policy and
+// directory. Only an earlier checkpoint kept outside the database
+// (keyroster audit verify --previous) shows those (C-WR-01, Phase 4).
 func checkLogCovers(snap *signerdb.LogSnapshot, size uint64, issued issuedSummary) error {
 	switch {
 	case snap.CAKeys != nil && size == 0:

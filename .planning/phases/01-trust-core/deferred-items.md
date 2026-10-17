@@ -77,10 +77,18 @@ The phase 1 code review left four findings whose remainder is design-level (`01-
     - size and privacy of logging full requests.
   - **Target:** with the Phase 4 audit and visibility work (VIS-02 witnessed log, quorum-signed policy changes), because both change what the log carries.
 - **C-WR-01 remainder: some log rollbacks are not detectable locally (deferred, not planned).** The local checks are fixed (`checkLogCovers` in serve and doctor). Still undetectable locally: the whole `signer.db` restored from an older copy (VM snapshot or backup); a cut that also rolls back the issuance rows and the high-water mark; a cut of trailing entries that issue nothing (refusal, refusal_summary, clock_regression). Detecting them needs external anchoring.
+  - **Authorization consequence (pre-merge review of PR #38, 2026-10-17, reproduced in WSL on `ae57f1a`).** Trailing `bundle_install` and `directory_install` entries also issue nothing, so they can be cut together with their rows:
+    - With SQL write access to `signer.db` and no keys, truncating `log_leaf` and `checkpoint` back to an earlier, genuinely signed prefix and deleting the newer stored row makes `serve` start with the **older directory**: a user disabled in v2 gets a certificate again.
+    - The same works for the **trust bundle**: deleting trust_bundle v2 brings back the old policy, admin set and quorum, CA profiles and WebAuthn RP, so a removed admin is accepted again. The CA, ops and log keys cannot be rolled back (`checkBundleKeys`). Rolling back the root set is UNVERIFIED.
+    - An honest restore of an older `signer.db` backup has exactly the same effect, with no attacker.
+    - `keyroster audit verify` without `--previous` says OK; with `--previous` it reports the log shrunk or rewritten. Until plan 02-04, `audit verify` refuses logs that contain `directory_install` entries ("not verifiable by this version").
+    - Recovery: reinstalling the newest bundle and directory afterwards is accepted. But a different v2' built on the rolled-back v1 is accepted too, so a disablement can be lost for good.
+    - The runbook warns about this (`docs/runbooks/signer-install.md`, "A restore brings back the older trust bundle, policy and directory"), and 02-03's T-02-14 is narrowed to the directory table rolled back or substituted alone.
+  - **Owner decision (2026-10-17):** "In Phase 4, keyroster-signer serve refuses to start without a witnessed checkpoint at least as new as the local one": prevention at start, not only detection. Tracked as `.planning/todos/pending/2026-10-17-serve-refuses-without-witnessed-checkpoint.md` (blocker for Phase 4).
   - **Decisions needed:**
     - how host agents and the CLI witness checkpoints: keep the last checkpoint, require a consistency proof on every sync;
     - where operators keep checkpoints, and whether exports must be verified with `--previous`;
-    - whether serve should refuse to start without a witnessed checkpoint at least as new as the local one;
+    - ~~whether serve should refuse to start without a witnessed checkpoint at least as new as the local one~~: decided 2026-10-17, it must (see the owner decision above);
     - whether to publish a tlog-tiles endpoint for C2SP witnesses.
   - **Target:** Phase 4 (VIS-02, success criterion 4: agents and the CLI verify signed checkpoints with consistency proofs), as the `deferred:` block of `01-VERIFICATION.md` already records.
 - **D-WR-02: TPM custody is not authenticated through the endorsement-key certificate (deferred, not planned).** The manufacturer ID that decides `tpm` versus `vtpm` custody is self-reported. The bounded fix is committed: an allowlist of manufacturers, and `vtpm` for swtpm and any unknown ID. This hardens the `tpm` custody claim; it does not gate the software or `vtpm` levels, and hardware stays optional.
