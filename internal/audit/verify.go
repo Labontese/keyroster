@@ -86,10 +86,11 @@ type anchor struct {
 	// the last accepted bundle did not match them.
 	anchorVersion uint64
 	lastMismatch  error
-	// roots are the root sets of every accepted bundle, in log order. A
-	// retired root may still exist, so no later policy may name one as an
-	// admin (KEY-07).
-	roots [][]trust.RootKey
+	// roots are the root keys of every accepted bundle. A retired root
+	// may still exist, so no later policy may name one as an admin
+	// (KEY-07). It is one set, added to once per bundle, so the check
+	// costs each bundle its own admins, not every earlier root again.
+	roots trust.RootKeySet
 }
 
 // install verifies one bundle_install entry and makes its bundle the one in
@@ -123,7 +124,7 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 	}
 	// VerifySuccessor checks the policy against next's and prev's roots
 	// only; a root retired earlier must not become an admin either.
-	if err := trust.CheckAdminsNotRoots(p, a.roots...); err != nil {
+	if err := trust.CheckAdminsNotRootSet(p, a.roots); err != nil {
 		return fmt.Errorf("trust bundle v%d: a root of an earlier trust bundle stays a root: %w", b.Version, err)
 	}
 	logKey, err := trust.ParseKey(b.Log.Key)
@@ -146,7 +147,12 @@ func (a *anchor) install(body *tlog.BundleInstallBody, opts Options) error {
 		active[ca.Role] = pub
 	}
 	a.bundle, a.canonical, a.policy, a.policyDoc, a.logKey, a.activeCA = b, body.Bundle, p, body.Policy, logKey, active
-	a.roots = append(a.roots, b.Root.Keys)
+	if a.roots == nil {
+		a.roots = trust.RootKeySet{}
+	}
+	if err := a.roots.Add(b.Root.Keys); err != nil {
+		return fmt.Errorf("trust bundle v%d: %w", b.Version, err)
+	}
 	if a.anchorVersion == 0 {
 		// b is the bundle the verifier returned, so its signatures by its
 		// own root threshold were checked; MatchPins adds that this root

@@ -1085,6 +1085,33 @@ func TestVerifyRefusesRetiredRootAsAdmin(t *testing.T) {
 	})
 }
 
+// TestVerifyBundleChainLinear: the retired-root check (KEY-07) costs each
+// bundle_install entry work for its own roots and admins only, not for the
+// roots of every earlier bundle, so verifying a hostile export of B
+// successor bundles is linear in B, not quadratic. Allocations are
+// deterministic where time is not: four times the bundles must cost about
+// four times the allocations (quadratic growth gave about ten times).
+func TestVerifyBundleChainLinear(t *testing.T) {
+	allocs := func(bundles int) float64 {
+		lf := newLoginFixture(t, false)
+		for range bundles {
+			lf.installPolicy(func(*trust.Policy) {})
+		}
+		export := join(lf.lines())
+		return testing.AllocsPerRun(1, func() {
+			if _, err := lf.verify(export, nil); err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+		})
+	}
+	small, large := allocs(100), allocs(400)
+	ratio := large / small
+	if ratio > 6 {
+		t.Fatalf("Verify of 400 successor bundles allocates %.0f times, of 100 %.0f times: ratio %.1f, want about 4 (linear)", large, small, ratio)
+	}
+	t.Logf("allocations: 100 bundles %.0f, 400 bundles %.0f, ratio %.1f", small, large, ratio)
+}
+
 // TestVerifyAnchorsOnLaterBundle (VIS-03, KEY-07): the pins may name the
 // root set of any trust bundle in the log, not only the genesis bundle.
 // The first bundle whose root set and threshold are exactly the pins is the
