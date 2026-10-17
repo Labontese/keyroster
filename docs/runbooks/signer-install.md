@@ -357,7 +357,7 @@ Before starting the signer after a restore:
 
    ```
    keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
-     --previous /path/to/latest-saved.jsonl /tmp/restored.jsonl
+     --previous /root/latest-saved.jsonl /tmp/restored.jsonl
    ```
 
    A restored log that is older than the saved one is reported as shrunk
@@ -367,9 +367,9 @@ Before starting the signer after a restore:
    Compare the versions by hand instead, in both files:
 
    ```
-   grep -o '"bundle_version":[0-9]*' latest-saved.jsonl | tail -n 1
+   grep -o '"bundle_version":[0-9]*' /root/latest-saved.jsonl | tail -n 1
    grep -o '"bundle_version":[0-9]*' /tmp/restored.jsonl | tail -n 1
-   grep -c '"kind":"directory_install"' latest-saved.jsonl
+   grep -c '"kind":"directory_install"' /root/latest-saved.jsonl
    grep -c '"kind":"directory_install"' /tmp/restored.jsonl
    ```
 
@@ -379,25 +379,45 @@ Before starting the signer after a restore:
    numbers are lower, the restore reinstated an older bundle or directory.
    `doctor` also prints the restored bundle version (`OK bundle`).
 
-3. Reinstall what the restore lost, in order and with the same bytes as
-   before, before anyone installs anything new. Install the exact versions
-   that were lost: a different version 2 built on the restored version 1
-   is accepted too, and the disablements of the lost version are then gone
+3. Reinstall what the restore lost, with the same bytes as before and
+   before anyone installs anything new. Install the exact versions that
+   were lost: a different version 2 built on the restored version 1 is
+   accepted too, and the disablements of the lost version are then gone
    for good.
-   - **The trust bundles first, with the signer still stopped**, with
-     `install-bundle` (see
-     [Install a successor bundle](#install-a-successor-bundle-stop-install-start)).
-   - **Then the directory versions.** A directory is installed through the
-     running signer's socket (its InstallDirectory request; at this point
-     in Phase 2 no keyroster command does it, the server mirror comes in
-     later plans). While the signer runs with the restored directory, a
-     user disabled in a lost version can log in again. So start it with
-     no peer that makes login requests on its socket: leave the uid of the
-     keyroster server off `--allow-uid` and its group off `--allow-group`
-     (or keep the server stopped) until the directory versions are back,
-     then restart the signer with the normal allowlist.
+
+   **Replay the lost installs in log order**, not all bundles first. A
+   directory version is checked against the policy in force when it is
+   installed (its admin quorum and the user CA cap), so a directory version
+   that was installed under bundle v1 can be refused once a later bundle
+   v2 with other admins or a lower cap is back. List the order from the
+   saved export; the lost entries are the ones after the restored log's
+   last entry:
+
+   ```
+   grep -n -o '"kind":"\(bundle\|directory\)_install"' /root/latest-saved.jsonl
+   ```
+
+   - **A lost `bundle_install`:** stop the signer, run `install-bundle`
+     with that bundle (see
+     [Install a successor bundle](#install-a-successor-bundle-stop-install-start)),
+     and start it again only if a lost directory version follows.
+   - **A lost `directory_install`: not possible yet at this point in
+     Phase 2.** A directory version goes in only through the running
+     signer's socket (its InstallDirectory request), and no keyroster
+     command sends that request until plan 02-09 adds
+     `keyroster directory install`. Nor can the signer run without login
+     peers: the shipped unit allows only `--allow-group keyroster-admin`,
+     which also owns the socket, so removing it removes every peer,
+     admins included.
+
+   So at this point in Phase 2, replay the lost bundles up to the first
+   lost directory version, and from there keep the restored signer
+   **stopped** until the lost directory versions can be reinstalled in
+   order. Starting it serves the restored, older directory: a user
+   disabled in a lost version can log in again.
 
 > **UNVERIFIED.** This procedure has not been run against a restored
-> database. The `grep` patterns match the export line format written by
+> database, and its directory half cannot be carried out yet (step 3).
+> The `grep` patterns match the export line format written by
 > `keyroster-signer export-log` (checked against its decoder, `audit.Decode`,
 > for `directory_install`), not a real export of a restored signer.
