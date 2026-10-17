@@ -276,11 +276,24 @@ func TestDirectoryRefusalBudget(t *testing.T) {
 	}
 }
 
+// wantStartLog requires the operator log of a signer start to carry an
+// error record with msg and policy_version 2, the version of the policy
+// it was checked against.
+func wantStartLog(t *testing.T, log, msg string) {
+	t.Helper()
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "level=ERROR") && strings.Contains(line, msg) && strings.Contains(line, " policy_version=2 ") {
+			return
+		}
+	}
+	t.Fatalf("no error record %q with policy_version=2 in the start-up log:\n%s", msg, log)
+}
+
 // TestDirectoryRestart (T-02-15): the signer re-verifies the stored
 // directory under the policy in force at start. After a restart under a
 // successor policy whose admin set no longer meets the installed
 // directory's quorum, or whose user CA cap is below a role's TTL, the
-// signer starts, refuses logins
+// signer starts, logs an error naming the policy version, refuses logins
 // (directory_not_authorized) and still issues on the admin path; a
 // directory that conforms to the new policy restores logins. GetDirectory
 // reports the state at each point.
@@ -288,6 +301,8 @@ func TestDirectoryRestart(t *testing.T) {
 	pk := newPasskeys(t)
 	t.Run("restart_under_new_admins", func(t *testing.T) {
 		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, false)
+		var log bytes.Buffer
+		e.logOut = &log
 		doc1, sigs1 := signDirectory(t, loginDirectory(pk, 1, trust.GenesisPrev), e.fx.Admins[0])
 		e.installDirectory(t, doc1, sigs1)
 		// One login before the restart, so the start-up log check also
@@ -296,6 +311,7 @@ func TestDirectoryRestart(t *testing.T) {
 		e.wantDirectory(t, 1, doc1, sigs1, true)
 
 		b := e.restartUnderNewAdmins(t)
+		wantStartLog(t, log.String(), "installed directory is not signed by the admin quorum of the policy in force")
 		e.wantDirectory(t, 1, doc1, sigs1, false)
 		e.refuseLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil), "directory_not_authorized")
 		admin := e.request()
@@ -313,6 +329,8 @@ func TestDirectoryRestart(t *testing.T) {
 	})
 	t.Run("restart_under_tighter_cap", func(t *testing.T) {
 		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, false)
+		var log bytes.Buffer
+		e.logOut = &log
 		doc1, sigs1 := signDirectory(t, loginDirectory(pk, 1, trust.GenesisPrev), e.fx.Admins[0])
 		e.installDirectory(t, doc1, sigs1)
 		e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil))
@@ -320,6 +338,7 @@ func TestDirectoryRestart(t *testing.T) {
 		// The same admins, but a user CA cap below the roles' 3600 s.
 		const tighter = 1800
 		e.restartUnderPolicy(t, func(p *trust.Policy) { p.CAProfiles[0].MaxTTLSeconds = tighter })
+		wantStartLog(t, log.String(), "installed directory exceeds the policy in force")
 		e.wantDirectory(t, 1, doc1, sigs1, false)
 		e.refuseLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil), "directory_not_authorized")
 		admin := e.request()
