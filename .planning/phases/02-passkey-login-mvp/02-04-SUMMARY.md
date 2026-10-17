@@ -52,7 +52,7 @@ key-decisions:
   - "audit verify caches the (directory, policy) authorization and recomputes it only at directory_install and after each bundle_install; a directory installed under an earlier policy stays in force while the new policy still authorizes it"
   - "A login request ID used by any earlier issue or login_issue entry is refused (replay); two issue entries are still not compared, so Phase 1 checks of issue entries are unchanged"
   - "A login certificate must carry exactly the profile defaults plus the requested extensions, no critical option, and span exactly ValidForSeconds + 300 s"
-  - "Login freshness is |entry time - CreatedAt| <= 300 s in whole seconds of the entry time, CreatedAt's unit"
+  - "Login freshness, in whole seconds (CreatedAt's unit): |serial time - CreatedAt| <= 300 s and |ValidAfter + 300 s - CreatedAt| <= 300 s, where ValidAfter + 300 s is the issuance time recovered from the certificate; the entry time is not compared, because the signer may raise it"
   - "successor-policy changes only the RP, prints old and new RP and the new SHA-256 on stdout and the one-way warning on stderr, and refuses a no-op"
   - "requirements-completed is [KEY-02] per the plan's output; REQUIREMENTS.md is not marked because 02-09 also declares KEY-02 and has no SUMMARY yet (shared-ID gate)"
 
@@ -147,7 +147,7 @@ status: complete
     13. certificate key = SubjectKey, principals = the request's, span = TTL + 300 s, extensions = profile defaults plus the requested ones, no critical option;
     14. kr2 sub, req, dir and roles;
     15. a request ID no earlier issue or login_issue entry used;
-    16. CreatedAt within 300 s of the entry time.
+    16. CreatedAt within 300 s of the serial's time and of the certificate's issuance time (ValidAfter + 300 s), as fixed in `d94727a` (see "Pre-merge review fixes").
 
     Each failure reads `audit: entry N (login_issue): <check>`.
   - **Serials:** one strictly increasing sequence across issue and login_issue entries. "Any serial seen" is its own walk variable (`issuance.seen`), not `rep.Serials > 0`, which counts issue entries only.
@@ -261,7 +261,7 @@ See `key-decisions` in the frontmatter.
 
 **5. [Interpretation] Freshness in whole seconds**
 - **What was done:** the plan's `|entry time − CreatedAt| ≤ 300 s` compares the entry time in whole seconds, CreatedAt's unit.
-- **Why:** an honest signer checks CreatedAt against its clock when the request arrives and writes the entry time after signing. A strict microsecond comparison would refuse a valid log whenever the request was within a fraction of a second of the limit. With whole seconds it takes at least one second of processing at the exact boundary.
+- **Why:** an honest signer checks CreatedAt against its clock when the request arrives and reads its issuance time a little later, after evidence verification, database reads and `serial.Next` (CA signing comes after that read). A strict microsecond comparison would refuse a valid log whenever the request was within a fraction of a second of the limit. With whole seconds it takes at least one second of processing at the exact boundary.
 - **Residual:** that case remains; see "Not exercised". The 301 s tamper cases and the 300 s controls run on a fixture that starts on a whole second.
 
 **6. [Interpretation] successor-policy output**
@@ -285,7 +285,7 @@ See `key-decisions` in the frontmatter.
 
 - **The default refusal in the kind switch.** No leaf that `tlog.DecodeLeaf` accepts reaches it in this version, so no test runs it. It is kept as the fail-closed guard for a later kind and is labelled `UNVERIFIED` in its comment.
 - **`ParseLoginIssueSigningBytes`'s canonical re-encode refusal.** It is unreachable today, because the field reader consumes every byte and the encoder is its inverse; the fuzz target asserts the round trip. It is labelled in its comment.
-- **Freshness residual.** An honest signer whose issuance takes a second or more, on a request within a second of the 300 s limit, writes a log that `audit verify` refuses. Hardware signing with touch could take that long. No test covers this; it is a documented consequence of Deviation 5.
+- **Freshness residual.** An honest signer that takes a second or more between its freshness check and its issuance-time read (evidence verification, database reads, `serial.Next`), on a request within a second of the 300 s limit, writes a log that `audit verify` refuses. CA signing, including hardware touch, happens after the issuance time is read and does not count. No test covers this; it is a documented consequence of Deviation 5.
 - **Real authenticators.** Every assertion comes from the soft authenticator (EdDSA, ES256). That stays UNVERIFIED until the 02-13 and 02-14 dogfood.
 - **The policy-change runbook on the homelab,** offline and from paper fingerprints: UNVERIFIED. Plan 02-13 runs it. Only the e2e commands (agent root, `--confirm`, directories for sticks) ran.
 - **The restore procedure** in signer-install.md is still UNVERIFIED against a restored database. Step 2's `--previous` behaviour ran on two exports of one live signer.
@@ -352,7 +352,7 @@ Findings from the pre-merge review of PR #39 (head 0218ee9). Each finding has on
     - the certificate is proven to be issued within the approval's 300 s window;
     - but the leaf time of a login is not bounded above by verify, by design, so honest raises still verify.
   - Residual, for the owner: the log proves when the certificate was issued, not when its entry was appended. A compromised signer holding the CA key can issue on time and log the entry later. This is subsumed by the existing residual that a CA-key holder can issue without logging at all. Holding an approval and issuing later is refused.
-  - The "Freshness residual" above shrinks. CA signing (`cert.Build`) happens after the issuance time is read, so it no longer counts. What remains is the time between the signer's freshness read and its issuance-time read: evidence verification, database reads, and `serial.Next`, which waits at most about one second.
+  - The "Freshness residual" above is unchanged by this fix: it is the time between the signer's freshness read and its issuance-time read (evidence verification, database reads, and `serial.Next`, which waits at most about one second). CA signing (`cert.Build`) has always come after the issuance-time read, so it never counted.
   - Tests:
     - `TestLoginAfterClockStepBackVerifies` (signer, the reviewers' reproducer);
     - `TestVerifyLoginTampering/login_after_leaf_time_raised_ok` and `.../login_created_at_raised_leaf_time` (audit);
