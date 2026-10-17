@@ -256,22 +256,35 @@ func frameHeader(n uint32) []byte {
 	return h[:]
 }
 
+// frameOf returns a frame of msgType with a body of n bytes (0x07 each).
+func frameOf(t testing.TB, msgType byte, n int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := WriteMessage(&buf, msgType, bytes.Repeat([]byte{7}, n)); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestReadFrame covers the framing errors of ReadMessage that do not
+// depend on the message type: a 1 GiB length refused after the 6 header
+// bytes without allocating the body, an empty frame, and truncated input.
 func TestReadFrame(t *testing.T) {
 	t.Run("one_gib_header_refused_before_body", func(t *testing.T) {
-		r := &countingReader{hdr: frameHeader(1 << 30)}
+		r := &countingReader{hdr: append(frameHeader(1<<30), Version, TypeIssueRequest)}
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
-		_, err := ReadFrame(r)
+		_, _, err := ReadMessage(r)
 		runtime.ReadMemStats(&after)
 		if !errors.Is(err, ErrFrameTooLarge) {
-			t.Fatalf("ReadFrame error = %v, want ErrFrameTooLarge", err)
+			t.Fatalf("ReadMessage error = %v, want ErrFrameTooLarge", err)
 		}
-		if r.read != 4 {
-			t.Fatalf("ReadFrame consumed %d bytes, want only the 4-byte header", r.read)
+		if r.read != 6 {
+			t.Fatalf("ReadMessage consumed %d bytes, want only the 4-byte length and the 2-byte header", r.read)
 		}
 		if grew := after.TotalAlloc - before.TotalAlloc; grew >= 1<<20 {
-			t.Fatalf("ReadFrame allocated %d bytes for a refused 1 GiB frame, want below 1 MiB", grew)
+			t.Fatalf("ReadMessage allocated %d bytes for a refused 1 GiB frame, want below 1 MiB", grew)
 		}
 	})
 	tests := []struct {
@@ -280,63 +293,38 @@ func TestReadFrame(t *testing.T) {
 		wantErr error
 		wantEOF bool
 	}{
-		{name: "max_frame_plus_one", in: frameHeader(MaxFrame + 1), wantErr: ErrFrameTooLarge},
 		{name: "empty_frame", in: frameHeader(0), wantErr: ErrEmptyFrame},
-		{name: "no_header", in: nil, wantEOF: true},
-		{name: "short_header", in: []byte{0, 0}, wantEOF: true},
-		{name: "short_payload", in: append(frameHeader(10), 1, 2, 3), wantEOF: true},
+		{name: "no_length", in: nil, wantEOF: true},
+		{name: "short_length", in: []byte{0, 0}, wantEOF: true},
+		{name: "short_header", in: append(frameHeader(10), Version), wantEOF: true},
+		{name: "short_body", in: append(frameHeader(10), Version, TypeIssueRequest, 1, 2, 3), wantEOF: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ReadFrame(bytes.NewReader(tc.in))
+			_, _, err := ReadMessage(bytes.NewReader(tc.in))
 			switch {
 			case tc.wantEOF:
 				if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-					t.Fatalf("ReadFrame error = %v, want EOF or unexpected EOF", err)
+					t.Fatalf("ReadMessage error = %v, want EOF or unexpected EOF", err)
 				}
 			case !errors.Is(err, tc.wantErr):
-				t.Fatalf("ReadFrame error = %v, want %v", err, tc.wantErr)
+				t.Fatalf("ReadMessage error = %v, want %v", err, tc.wantErr)
 			}
 		})
 	}
-	t.Run("exactly_max_frame", func(t *testing.T) {
-		payload := bytes.Repeat([]byte{7}, MaxFrame)
-		var buf bytes.Buffer
-		if err := WriteFrame(&buf, payload); err != nil {
-			t.Fatal(err)
-		}
-		got, err := ReadFrame(&buf)
-		if err != nil || !bytes.Equal(got, payload) {
-			t.Fatalf("ReadFrame of a MaxFrame payload: err %v", err)
-		}
-	})
-	t.Run("write_frame_refuses_oversize", func(t *testing.T) {
-		if err := WriteFrame(io.Discard, make([]byte, MaxFrame+1)); !errors.Is(err, ErrFrameTooLarge) {
-			t.Fatalf("WriteFrame error = %v, want ErrFrameTooLarge", err)
-		}
-		if err := WriteFrame(io.Discard, nil); !errors.Is(err, ErrEmptyFrame) {
-			t.Fatalf("WriteFrame error = %v, want ErrEmptyFrame", err)
-		}
-	})
 }
 
 func TestReadMessage(t *testing.T) {
 	t.Run("unknown_version", func(t *testing.T) {
-		var buf bytes.Buffer
-		if err := WriteFrame(&buf, []byte{Version + 1, TypeIssueRequest, 0}); err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := ReadMessage(&buf); !errors.Is(err, ErrVersion) {
+		in := append(frameHeader(3), Version+1, TypeIssueRequest, 0)
+		if _, _, err := ReadMessage(bytes.NewReader(in)); !errors.Is(err, ErrVersion) {
 			t.Fatalf("ReadMessage error = %v, want ErrVersion", err)
 		}
 	})
 	t.Run("payload_without_type", func(t *testing.T) {
-		var buf bytes.Buffer
-		if err := WriteFrame(&buf, []byte{Version}); err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := ReadMessage(&buf); err == nil || errors.Is(err, ErrVersion) {
-			t.Fatalf("ReadMessage error = %v, want a short-payload error", err)
+		in := append(frameHeader(1), Version)
+		if _, _, err := ReadMessage(bytes.NewReader(in)); !errors.Is(err, ErrShortFrame) {
+			t.Fatalf("ReadMessage error = %v, want ErrShortFrame", err)
 		}
 	})
 	t.Run("type_and_body_round_trip", func(t *testing.T) {
@@ -349,6 +337,209 @@ func TestReadMessage(t *testing.T) {
 			t.Fatalf("ReadMessage = %#x, %q, %v", typ, body, err)
 		}
 	})
+}
+
+// TestReadMessageCaps is the read-side boundary table of the per-type
+// frame caps (T-02-12, T-02-81). A cap limits the frame length, which
+// counts the 2 header bytes. Every refusal reads only the length (and the
+// header when it got that far) and allocates no body.
+func TestReadMessageCaps(t *testing.T) {
+	t.Run("length_one_refused_without_consuming_next", func(t *testing.T) {
+		next := frameOf(t, TypeIssueRequest, 10)
+		r := bytes.NewReader(append(append(frameHeader(1), 0x5a), next...))
+		if _, _, err := ReadMessage(r); !errors.Is(err, ErrShortFrame) {
+			t.Fatalf("ReadMessage of a length-1 frame = %v, want ErrShortFrame", err)
+		}
+		rest, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := append([]byte{0x5a}, next...); !bytes.Equal(rest, want) {
+			t.Fatalf("after the refusal %d bytes remain, want the length-1 frame's byte and the whole next frame (%d bytes)", len(rest), len(want))
+		}
+	})
+	t.Run("length_two_header_only", func(t *testing.T) {
+		typ, body, err := ReadMessage(bytes.NewReader(append(frameHeader(2), Version, TypeIssueRequest)))
+		if err != nil || typ != TypeIssueRequest || len(body) != 0 {
+			t.Fatalf("ReadMessage of a header-only frame = %#x, %d body bytes, %v; want the issue type, no body, no error", typ, len(body), err)
+		}
+	})
+	accepted := []struct {
+		name    string
+		msgType byte
+		length  int
+	}{
+		{"issue_exactly_max_frame", TypeIssueRequest, MaxFrame},
+		{"install_exactly_max_directory_frame", TypeInstallDirectory, MaxDirectoryFrame},
+		{"get_directory_response_exactly_max_directory_frame", TypeGetDirectoryResponse, MaxDirectoryFrame},
+		{"unknown_type_exactly_max_frame", 0x7e, MaxFrame},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			in := frameOf(t, tc.msgType, tc.length-headerLen)
+			if got := binary.BigEndian.Uint32(in); got != uint32(tc.length) { //nolint:gosec // G115: test lengths fit
+				t.Fatalf("frame length %d, want %d", got, tc.length)
+			}
+			typ, body, err := ReadMessage(bytes.NewReader(in))
+			if err != nil || typ != tc.msgType || len(body) != tc.length-headerLen {
+				t.Fatalf("ReadMessage = %#x, %d body bytes, %v; want %#x with %d body bytes", typ, len(body), err, tc.msgType, tc.length-headerLen)
+			}
+		})
+	}
+	refused := []struct {
+		name    string
+		msgType byte
+		length  uint32
+	}{
+		{"issue_max_frame_plus_one", TypeIssueRequest, MaxFrame + 1},
+		{"login_max_frame_plus_one", TypeLoginIssueRequest, MaxFrame + 1},
+		{"install_max_directory_frame_plus_one", TypeInstallDirectory, MaxDirectoryFrame + 1},
+		{"get_directory_response_max_directory_frame_plus_one", TypeGetDirectoryResponse, MaxDirectoryFrame + 1},
+		{"unknown_type_max_frame_plus_one", 0x7e, MaxFrame + 1},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &countingReader{hdr: append(frameHeader(tc.length), Version, tc.msgType)}
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			_, _, err := ReadMessage(r)
+			runtime.ReadMemStats(&after)
+			if !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("ReadMessage error = %v, want ErrFrameTooLarge", err)
+			}
+			if r.read != 6 {
+				t.Fatalf("ReadMessage consumed %d bytes, want only the 6 bytes of length and header", r.read)
+			}
+			if grew := after.TotalAlloc - before.TotalAlloc; grew >= 1<<20 {
+				t.Fatalf("ReadMessage allocated %d bytes for a refused frame, want below 1 MiB", grew)
+			}
+		})
+	}
+}
+
+// TestWriteMessageCaps is the write-side boundary table: a body at its
+// type's cap is written and reads back; one byte more is refused with
+// nothing written.
+func TestWriteMessageCaps(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		msgType byte
+		maxBody int
+	}{
+		{"issue", TypeIssueRequest, MaxFrame - headerLen},
+		{"install_directory", TypeInstallDirectory, MaxDirectoryFrame - headerLen},
+		{"get_directory_response", TypeGetDirectoryResponse, MaxDirectoryFrame - headerLen},
+	} {
+		t.Run(tc.name+"_at_cap", func(t *testing.T) {
+			var buf bytes.Buffer
+			body := bytes.Repeat([]byte{9}, tc.maxBody)
+			if err := WriteMessage(&buf, tc.msgType, body); err != nil {
+				t.Fatalf("WriteMessage of a %d-byte body: %v", tc.maxBody, err)
+			}
+			if buf.Len() != 4+headerLen+tc.maxBody {
+				t.Fatalf("wrote %d bytes, want %d", buf.Len(), 4+headerLen+tc.maxBody)
+			}
+			typ, got, err := ReadMessage(&buf)
+			if err != nil || typ != tc.msgType || !bytes.Equal(got, body) {
+				t.Fatalf("round trip: %#x, %d bytes, %v", typ, len(got), err)
+			}
+		})
+		t.Run(tc.name+"_cap_plus_one", func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteMessage(&buf, tc.msgType, make([]byte, tc.maxBody+1)); !errors.Is(err, ErrFrameTooLarge) {
+				t.Fatalf("WriteMessage of a %d-byte body = %v, want ErrFrameTooLarge", tc.maxBody+1, err)
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("the writer received %d bytes for a refused frame, want 0", buf.Len())
+			}
+		})
+	}
+}
+
+// TestParseGetDirectoryResponse: strict decoding of the GetDirectory
+// response (02-03-F13, 02-03-R2-F16). Version 0 has exactly one encoding;
+// an installed directory round-trips whether or not it is authorized.
+func TestParseGetDirectoryResponse(t *testing.T) {
+	raw := func(version uint64, doc, sigs []byte, auth uint8) []byte {
+		var b cryptobyte.Builder
+		b.AddUint64(version)
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(doc) })
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(sigs) })
+		b.AddUint8(auth)
+		return b.BytesOrPanic()
+	}
+	t.Run("get_directory_v0_with_bytes_refused", func(t *testing.T) {
+		for name, body := range map[string][]byte{
+			"directory":  raw(0, []byte("{}"), nil, 0),
+			"signatures": raw(0, nil, []byte("sig"), 0),
+		} {
+			if _, err := ParseGetDirectoryResponse(body); !errors.Is(err, ErrMalformed) {
+				t.Errorf("version 0 with %s bytes: %v, want ErrMalformed", name, err)
+			}
+		}
+		if _, err := (&GetDirectoryResponse{Directory: []byte("{}")}).Marshal(); !errors.Is(err, ErrMalformed) {
+			t.Errorf("Marshal of version 0 with a directory: %v, want ErrMalformed", err)
+		}
+	})
+	t.Run("get_directory_v0_authorized_refused", func(t *testing.T) {
+		if _, err := ParseGetDirectoryResponse(raw(0, nil, nil, 1)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("version 0 authorized: %v, want ErrMalformed", err)
+		}
+	})
+	t.Run("get_directory_v0_round_trips", func(t *testing.T) {
+		body, err := (&GetDirectoryResponse{}).Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(body, raw(0, nil, nil, 0)) {
+			t.Fatalf("empty response encodes as %x", body)
+		}
+		got, err := ParseGetDirectoryResponse(body)
+		if err != nil || got.Version != 0 || got.Directory != nil || got.Sigs != nil || got.Authorized {
+			t.Fatalf("empty response round trip: %+v, %v", got, err)
+		}
+	})
+	t.Run("get_directory_installed_round_trips", func(t *testing.T) {
+		for _, authorized := range []bool{true, false} {
+			want := &GetDirectoryResponse{Version: 1, Directory: []byte(`{"version":1}`), Sigs: []byte("-----BEGIN SSH SIGNATURE-----"), Authorized: authorized}
+			body, err := want.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := ParseGetDirectoryResponse(body)
+			if err != nil {
+				t.Fatalf("authorized %v: %v", authorized, err)
+			}
+			if got.Version != want.Version || !bytes.Equal(got.Directory, want.Directory) || !bytes.Equal(got.Sigs, want.Sigs) || got.Authorized != authorized {
+				t.Fatalf("authorized %v: round trip %+v, want %+v", authorized, got, want)
+			}
+			again, err := got.Marshal()
+			if err != nil || !bytes.Equal(again, body) {
+				t.Fatalf("authorized %v: re-encoding differs (%v)", authorized, err)
+			}
+		}
+	})
+	t.Run("strict", func(t *testing.T) {
+		valid := raw(1, []byte("{}"), []byte("sig"), 1)
+		for name, body := range map[string][]byte{
+			"authorized_byte_2":       raw(1, []byte("{}"), []byte("sig"), 2),
+			"trailing_byte":           append(append([]byte(nil), valid...), 0),
+			"truncated":               valid[:len(valid)-1],
+			"installed_without_bytes": raw(1, nil, nil, 0),
+			"installed_without_sigs":  raw(1, []byte("{}"), nil, 0),
+		} {
+			if _, err := ParseGetDirectoryResponse(body); !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s: %v, want ErrMalformed", name, err)
+			}
+		}
+		if _, err := ParseGetDirectoryResponse(valid); err != nil {
+			t.Fatalf("control: %v", err)
+		}
+	})
+	if TypeGetDirectory != 0x03 || TypeGetDirectoryResponse != 0x83 {
+		t.Fatal("a GetDirectory message type number changed")
+	}
 }
 
 func TestErrorResponse(t *testing.T) {

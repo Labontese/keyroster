@@ -232,25 +232,14 @@ func TestWebAuthnMutationMatrix(t *testing.T) {
 	}
 }
 
-// clientDataExtraMembers is a clientDataJSON template (CHALLENGE and
-// ORIGIN are replaced) with what browsers add besides type, challenge,
-// origin and crossOrigin: Chrome's other_keys_can_be_added_here string,
-// a tokenBinding object, an unknown array holding a nested object and
-// literals, and an unknown object that itself contains "type" keys.
-const clientDataExtraMembers = `{"type":"webauthn.get","challenge":"CHALLENGE","origin":"ORIGIN","crossOrigin":false,` +
-	`"other_keys_can_be_added_here":"do not compare clientDataJSON against a template. See https://goo.gl/yabPex",` +
-	`"tokenBinding":{"status":"not-supported"},` +
-	`"x_list":[1,"two",{"three":3},true,null,[false]],` +
-	`"x_object":{"type":"webauthn.create","nested":{"type":"webauthn.create"}}}`
-
 // TestWebAuthnClientDataExtraMembers (T-02-82): unknown clientDataJSON
-// members of any JSON type are skipped, and a nested "type" key neither
+// members of any JSON type (webauthn.ClientDataExtraMembers) are skipped, and a nested "type" key neither
 // counts as a duplicate nor overrides the top-level one, for each
 // algorithm. The same JSON with the top-level type duplicated is still
 // refused (control).
 func TestWebAuthnClientDataExtraMembers(t *testing.T) {
 	r := strings.NewReplacer("CHALLENGE", base64.RawURLEncoding.EncodeToString(testChallenge[:]), "ORIGIN", testOrigin)
-	accepted := r.Replace(clientDataExtraMembers)
+	accepted := r.Replace(webauthn.ClientDataExtraMembers)
 	duplicated := strings.TrimSuffix(accepted, "}") + `,"type":"webauthn.get"}`
 	for _, alg := range []struct {
 		name string

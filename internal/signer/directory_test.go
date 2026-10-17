@@ -118,7 +118,7 @@ func TestDirectoryInstallRefusals(t *testing.T) {
 			doc, sigs := signDirectory(t, loginDirectory(pk, 2, trust.SHA256Hex([]byte("another directory"))), e.fx.Admins[0])
 			return &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}
 		}},
-		{"directory_version_chain/reinstall_v1", "directory_version_chain", 1, 1, func(t *testing.T, e *logEnv, _ string) *wire.InstallDirectoryRequest {
+		{"directory_version_chain/reinstall_v1", "directory_version_chain", 1, 1, func(_ *testing.T, e *logEnv, _ string) *wire.InstallDirectoryRequest {
 			v1 := e.s.GetDirectory()
 			return &wire.InstallDirectoryRequest{Directory: v1.Directory, Sigs: v1.Sigs}
 		}},

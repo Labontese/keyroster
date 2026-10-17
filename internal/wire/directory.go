@@ -6,8 +6,10 @@ import (
 	"golang.org/x/crypto/cryptobyte"
 )
 
-// Limits of an InstallDirectoryRequest. The frame cap (MaxFrame) is the
-// tighter bound until plan 02-03 adds per-type caps.
+// Limits of a directory and its signatures in an InstallDirectoryRequest
+// and a GetDirectoryResponse. Both messages travel in frames of up to
+// MaxDirectoryFrame. MaxDirectory equals tlog.MaxDocument, so every
+// directory that installs fits its directory_install leaf.
 const (
 	MaxDirectory     = 1 << 20
 	MaxDirectorySigs = 64 << 10

@@ -3,6 +3,7 @@ package tlog
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"testing"
 
 	"golang.org/x/mod/sumdb/note"
@@ -73,6 +74,63 @@ func FuzzDecodeLeaf(f *testing.F) {
 		enc, err := body.Encode()
 		if err != nil || !bytes.Equal(enc, l.Body) {
 			t.Fatalf("body is not canonical: %v", err)
+		}
+	})
+}
+
+// FuzzDecodeDirectoryInstallBody (T-02-13): a directory_install body that
+// decodes re-encodes to exactly itself, and every refusal is
+// ErrMalformedLeaf.
+func FuzzDecodeDirectoryInstallBody(f *testing.F) {
+	_, body := directoryInstallVector(f)
+	enc, err := body.Encode()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(enc)
+	f.Add(append(append([]byte(nil), enc...), 0))
+	f.Add(enc[:len(enc)-1])
+	f.Add(enc[:16])
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		b, err := DecodeDirectoryInstallBody(data)
+		if err != nil {
+			if !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("DecodeDirectoryInstallBody error = %v, want ErrMalformedLeaf", err)
+			}
+			return
+		}
+		again, err := b.Encode()
+		if err != nil || !bytes.Equal(again, data) {
+			t.Fatalf("decode-encode changed the body (%v)", err)
+		}
+	})
+}
+
+// FuzzDecodeLoginIssueBody (T-02-13): a login_issue body that decodes
+// re-encodes to exactly itself, and every refusal is ErrMalformedLeaf.
+func FuzzDecodeLoginIssueBody(f *testing.F) {
+	_, body := loginIssueVector(f)
+	enc, err := body.Encode()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(enc)
+	f.Add(append(append([]byte(nil), enc...), 0))
+	f.Add(enc[:len(enc)-1])
+	f.Add(enc[:24])
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		b, err := DecodeLoginIssueBody(data)
+		if err != nil {
+			if !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("DecodeLoginIssueBody error = %v, want ErrMalformedLeaf", err)
+			}
+			return
+		}
+		again, err := b.Encode()
+		if err != nil || !bytes.Equal(again, data) {
+			t.Fatalf("decode-encode changed the body (%v)", err)
 		}
 	})
 }

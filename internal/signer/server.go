@@ -19,7 +19,9 @@ import (
 // connDeadline bounds one connection: peer check, one request, one response.
 const connDeadline = 10 * time.Second
 
-// maxConns bounds concurrently handled connections.
+// maxConns bounds concurrently handled connections, and so the request
+// memory: each reads at most one frame, of at most wire.MaxDirectoryFrame
+// (about 1.06 MiB), so about 34 MiB in all (T-02-12).
 const maxConns = 32
 
 // Peer is the kernel-reported identity of a connected client.
