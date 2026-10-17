@@ -463,6 +463,14 @@ You need everything from [What you need](#what-you-need), plus:
 - the `roots.pub` of the bundle in force (the roots do not change), and
   enough of those roots to meet its threshold.
 
+0. **Prepare.** Do [step 1](#1-prepare-the-binary-and-the-ceremony-machine)
+   first: build the binary and compare its SHA-256 with a second machine's
+   build, boot the live USB offline, and check that only `lo` is up. Then
+   run `date -u`. If the clock is earlier than the `issued_at` of the
+   bundle in force, or clearly wrong, set it before signing:
+   `root sign --prev` refuses a clock earlier than the previous bundle's.
+   Step 3 decrypts a root; never do that on a networked machine or with a
+   binary whose hash you have not compared.
 1. **Take the policy in force.** It is `/media/transfer/prev/policy.json`.
 2. **Write the successor policy:**
 
