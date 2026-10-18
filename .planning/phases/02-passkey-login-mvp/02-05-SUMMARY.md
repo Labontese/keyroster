@@ -342,6 +342,7 @@ See `key-decisions` in the frontmatter.
 **8. [Interpretation] The mode check applies to the operator's file only**
 - The passphrase-file must have no group or other bits. The systemd credential file must only be a regular file, per the plan's wording ("For an operator file").
 - **Committed in:** c874e3e
+- **Narrowed by the pre-merge review fixes (5cae667):** the credential must now also have no other bits. Group bits stay allowed, so must-have truth 2 ("refuses ... a passphrase file readable by group or others") still holds in full only for the passphrase-file option. The plan is left unedited, and custody.md states both rules.
 
 **9. [Rule 2] Close zeroes the private keys Key handed out (best effort)**
 - **Committed in:** c874e3e
@@ -386,7 +387,7 @@ See `key-decisions` in the frontmatter.
 
 - **CI.** No required check has run on this branch at SUMMARY time. In particular the e2e-pkcs11, e2e-tpm, cli-windows, cli-macos, systemd-sandbox and build-piv lanes ran only in CI, or not yet.
 - **A real systemd `LoadCredential=` / `LoadCredentialEncrypted=`.** The `CREDENTIALS_DIRECTORY` source is tested only with `t.Setenv` in a unit test. custody.md labels this path UNVERIFIED.
-- **`keyroster ca issue` and the server (02-06) failing closed on exactly the `trust_changed` refusal** (the plan's own label, T-02-120). `ca issue` aborts on any Status error; its dial-failure path is covered by the existing `TestCAIssueRefusesPrivateKey/public_key_dials_signer`. No test feeds it this refusal.
+- **`keyroster ca issue` and the server (02-06) failing closed on a real signer's `trust_changed` refusal** (the plan's own label, T-02-120). `ca issue` aborts on any Status error. Until the pre-merge review fixes, no test covered that abort: `TestCAIssueRefusesPrivateKey/public_key_dials_signer` (an earlier wording here claimed it did) only sees "signerclient: connect", which the Issue dial prints too. `TestCAIssueStatusGate` now feeds a **synthetic** `trust_changed` and `internal_error` from a fake signer and requires that no IssueRequest is sent. A real signer's `trust_changed` reaching `ca issue` is still not exercised, and the server half (02-06) does not exist yet.
 - **The capslock MODIFY_SYSTEM_STATE widening and the internal/trust UNANALYZED cause** (see above).
 - **A trust state from Phase 1 code above the Status budget.** Status would refuse it with ErrStatusTooLarge (Marshal is tested); no such state was built against a running signer.
 - **Status on the UI (02-06).** The server banner does not exist yet, which is why KEY-06 stays open.
@@ -436,3 +437,39 @@ None.
 ---
 *Phase: 02-passkey-login-mvp*
 *Completed: 2026-10-18 (before the merge gate)*
+
+## Pre-merge review fixes
+
+These are verified findings from the pre-merge review of PR #40 at head 32f77d5. Each fix has a test that failed before the fix and passes after it. For a test that passed vacuously, the entry names the mutant that the rewritten test now kills.
+
+**Fixed**
+- **A FIFO at the passphrase path made ca-init, install-bundle and serve hang** (low). Fixed in 89b4be6. The file is now opened with O_NONBLOCK, and the fstat checks are unchanged. Test: `TestSoftwareBackend/passphrase_fifo_refused_without_blocking`, which covers a FIFO, a symlink to a FIFO and a FIFO credential. Before the fix the open was still blocked after 2 s.
+- **A relative passphrase-file resolved against each process's working directory** (low). Fixed in 27c89c4. A relative path is now refused with an error that names the option, and custody.md says the path must be absolute. Test: `TestSoftwareBackend/relative_passphrase_file_refused`. It chdirs to a valid 0600 file and opens it by its relative name. Before the fix that succeeded.
+- **Nothing tested ca issue's fail-closed abort on a Status error, although the SUMMARY claimed a test did** (medium, rated low by both skeptics). Fixed in 4023ed5. Test: `TestCAIssueStatusGate`, with a fake signer on a Unix socket.
+  - A Status error (`trust_changed`, `internal_error`) must give exit 1 with no IssueRequest sent.
+  - For custody software, the framed banner must already be on stderr when the IssueRequest arrives. For custody agent, there must be no banner.
+  - Mutants: ignoring the warnCustody error fails both abort cases, and removing the banner print fails the software case.
+  - It passes natively on Windows and in WSL.
+  - The UNVERIFIED bullet above is reworded. A real signer's `trust_changed` is still not exercised.
+- **Two Provision refusal tests passed even with their guards removed** (low). Fixed in 671e881.
+  - The new `provision_refuses_any_age_file` plants `stray.age`. It kills X1, the any-.age scan replaced by false.
+  - `provision_refuses_bad_roles` now requires the "given twice" refusal. It kills X2, the duplicate-role guard replaced by false.
+  - The misleading "even for other roles" comment is fixed.
+- **Split finding: a world-readable systemd credential was accepted** (low). Fixed in 5cae667. The credential must now have no other bits, and group bits stay allowed for systemd's ACL case, which is UNVERIFIED. Test: `TestSoftwareBackend/credential_world_readable_refused`. 0644, 0666 and 0604 are refused; 0400 and 0440 are accepted. Before the fix, 0644 was accepted.
+- **Split finding: custody.md said every group- or other-readable passphrase file is refused** (low). Fixed in 5693a78. custody.md now states each rule exactly: passphrase-file has no group or other bits, the credential has no other bits, a non-regular file is refused, and CREDENTIALS_DIRECTORY must not be set by hand to a shared directory. The behaviour is pinned by the subtests above. `TestSoftwareCABanner` (custody.md quotes the banner) still passes.
+- **Split finding: a passphrase-file stored by ca-init locks out the systemd credential** (low). Fixed in 2f8eabd, **doc part only**. custody.md now says the stored option is permanent for the state directory, so adding LoadCredential= later changes nothing. It also says how to choose the credential at ca-init. The behaviour is pinned by `credentials_directory_source` (the option wins) and `unknown_option` (an empty override is refused).
+
+**Skipped**
+- **The code change for the locked-in passphrase source.** All three fixes change the precedence or the storage that the plan specifies, so the choice goes to the owner:
+  - (a) Prefer the credential when it is present. This can switch the source silently.
+  - (b) Let `--backend-opt passphrase-file=` mean "unset". Every serve would then have to pass it, because the backend_config row is insert-only.
+  - (c) Stop storing passphrase-file and require it on every command.
+- **O_NOFOLLOW on the passphrase file.** Whether to refuse a symlinked passphrase file is a design question. Symlinks are still followed, and the fstat checks apply to the target.
+
+**Gate run** on 4023ed5:
+- `gofmt -l .` is empty.
+- `go vet ./...` passes on Windows, and with GOOS=linux and GOOS=darwin.
+- `go test -count=1` passes in WSL on internal/keystore/software, cmd/keyroster and internal/custodytext, and natively on Windows on cmd/keyroster and internal/custodytext.
+- `go test ./...` in WSL exits 0.
+- `-race` was not run (no cgo).
+- The e2e lane (`-tags e2e`) was not run locally because no OpenSSH prefix is built here; it runs only in CI.
