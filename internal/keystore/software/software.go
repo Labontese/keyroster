@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"unicode/utf8"
 
 	"filippo.io/age"
@@ -143,7 +144,10 @@ func (b *backend) readPassphrase() ([]byte, error) {
 		}
 		path = filepath.Join(dir, credentialName)
 	}
-	f, err := os.Open(path) //nolint:gosec // G304: the operator's passphrase file or the systemd credential
+	// O_NONBLOCK: opening a FIFO without a writer must not block before
+	// the regular-file check below refuses it. It has no effect on reads
+	// of a regular file.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: the operator's passphrase file or the systemd credential
 	if err != nil {
 		return nil, fmt.Errorf("keystore software: passphrase: %w", err)
 	}

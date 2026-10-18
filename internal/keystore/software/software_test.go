@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -193,6 +195,54 @@ func TestSoftwareBackend(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "mode") {
 				t.Fatalf("passphrase file mode %04o: %v, want a mode refusal", mode, err)
 			}
+		}
+	})
+	t.Run("passphrase_fifo_refused_without_blocking", func(t *testing.T) {
+		// A FIFO without a writer would block a plain open forever, before
+		// the regular-file check (and serve would hang holding the state
+		// directory lock). The open must not wait for a writer.
+		openTimed := func(t *testing.T, opts map[string]string) error {
+			t.Helper()
+			done := make(chan error, 1)
+			go func() {
+				be, err := keystore.Open("software", opts)
+				if err == nil {
+					_ = be.Close()
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				return err
+			case <-time.After(2 * time.Second):
+				t.Fatal("open blocked on a FIFO passphrase file")
+				return nil
+			}
+		}
+		mkfifo := func(t *testing.T, p string) {
+			t.Helper()
+			if err := syscall.Mkfifo(p, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fifo := filepath.Join(t.TempDir(), "passphrase")
+		mkfifo(t, fifo)
+		link := filepath.Join(t.TempDir(), "passphrase-link")
+		if err := os.Symlink(fifo, link); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CREDENTIALS_DIRECTORY", "")
+		for name, p := range map[string]string{"fifo": fifo, "symlink_to_fifo": link} {
+			err := openTimed(t, map[string]string{keystore.OptStateDir: newStateDir(t), optPassphraseFile: p})
+			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+				t.Fatalf("%s: %v, want a not-a-regular-file refusal", name, err)
+			}
+		}
+		creds := t.TempDir()
+		mkfifo(t, filepath.Join(creds, credentialName))
+		t.Setenv("CREDENTIALS_DIRECTORY", creds)
+		if err := openTimed(t, map[string]string{keystore.OptStateDir: newStateDir(t)}); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("credential FIFO: %v, want a not-a-regular-file refusal", err)
 		}
 	})
 	t.Run("passphrase_too_short", func(t *testing.T) {
