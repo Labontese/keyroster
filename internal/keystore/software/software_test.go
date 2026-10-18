@@ -366,8 +366,7 @@ func TestSoftwareBackend(t *testing.T) {
 		if _, err := be.(keystore.Provisioner).Provision(allRoles); !errors.Is(err, ErrKeyFilesExist) {
 			t.Fatalf("second Provision = %v, want ErrKeyFilesExist", err)
 		}
-		// Any .age file in the directory refuses provisioning, even for
-		// other roles.
+		// The same role again is refused by its own file.
 		if _, err := be.(keystore.Provisioner).Provision([]keystore.Role{"user"}); !errors.Is(err, ErrKeyFilesExist) {
 			t.Fatalf("Provision of one role over existing files = %v, want ErrKeyFilesExist", err)
 		}
@@ -380,6 +379,28 @@ func TestSoftwareBackend(t *testing.T) {
 			if !bytes.Equal(b, before[f]) {
 				t.Fatalf("%s changed", f)
 			}
+		}
+	})
+	t.Run("provision_refuses_any_age_file", func(t *testing.T) {
+		// Any .age file in the key directory refuses provisioning, even
+		// one that is no role's file: here no role being provisioned has
+		// a file yet.
+		fastScrypt(t)
+		state := newStateDir(t)
+		keyDir := filepath.Join(state, "software")
+		if err := os.Mkdir(keyDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		stray := filepath.Join(keyDir, "stray.age")
+		if err := os.WriteFile(stray, []byte("not a key"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		be := mustOpen(t, state, writePassFile(t, testPassphrase, 0o600))
+		if _, err := be.(keystore.Provisioner).Provision([]keystore.Role{"user"}); !errors.Is(err, ErrKeyFilesExist) || !strings.Contains(err.Error(), "stray.age") {
+			t.Fatalf("Provision beside stray.age = %v, want ErrKeyFilesExist naming it", err)
+		}
+		if f := ageFiles(t, keyDir); len(f) != 1 || f[0] != stray {
+			t.Fatalf("key directory after the refusal: %v, want only %s", f, stray)
 		}
 	})
 	t.Run("provision_refuses_permissive_dir", func(t *testing.T) {
@@ -436,8 +457,11 @@ func TestSoftwareBackend(t *testing.T) {
 	t.Run("provision_refuses_bad_roles", func(t *testing.T) {
 		be := mustOpen(t, newStateDir(t), writePassFile(t, testPassphrase, 0o600))
 		p := be.(keystore.Provisioner)
-		if _, err := p.Provision([]keystore.Role{"user", "user"}); err == nil {
-			t.Fatal("a role given twice was accepted")
+		// Refused before any key is written: without the check, the
+		// second exclusive write of user.age would still fail, but only
+		// after the first one.
+		if _, err := p.Provision([]keystore.Role{"user", "user"}); err == nil || !strings.Contains(err.Error(), "given twice") {
+			t.Fatalf("a role given twice: %v, want a given-twice refusal", err)
 		}
 		if _, err := p.Provision([]keystore.Role{"../user"}); err == nil {
 			t.Fatal("an unknown role was accepted")
