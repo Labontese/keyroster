@@ -60,10 +60,11 @@ func TestSoftwareCABanner(t *testing.T) {
 }
 
 func TestSoftwareRoles(t *testing.T) {
-	ks := func(pairs ...string) []wire.KeyStatus {
+	type kv = [2]string
+	ks := func(pairs ...kv) []wire.KeyStatus {
 		var out []wire.KeyStatus
-		for i := 0; i < len(pairs); i += 2 {
-			out = append(out, wire.KeyStatus{Role: pairs[i], Alg: "ssh-ed25519", Custody: pairs[i+1], Fingerprint: "SHA256:x"})
+		for _, p := range pairs {
+			out = append(out, wire.KeyStatus{Role: p[0], Alg: "ssh-ed25519", Custody: p[1], Fingerprint: "SHA256:x"})
 		}
 		return out
 	}
@@ -72,11 +73,11 @@ func TestSoftwareRoles(t *testing.T) {
 		keys []wire.KeyStatus
 		want []string
 	}{
-		{"all_software_in_role_order", ks("log", "software", "ops", "software", "machine", "software", "host", "software", "user", "software"), allRoles},
-		{"some_software", ks("user", "tpm", "host", "software", "machine", "tpm", "ops", "software", "log", "tpm"), []string{"host", "ops"}},
-		{"none_software", ks("user", "agent", "host", "tpm", "machine", "vtpm", "ops", "piv", "log", "pkcs11-agent"), []string{}},
+		{"all_software_in_role_order", ks(kv{"log", "software"}, kv{"ops", "software"}, kv{"machine", "software"}, kv{"host", "software"}, kv{"user", "software"}), allRoles},
+		{"some_software", ks(kv{"user", "tpm"}, kv{"host", "software"}, kv{"machine", "tpm"}, kv{"ops", "software"}, kv{"log", "tpm"}), []string{"host", "ops"}},
+		{"none_software", ks(kv{"user", "agent"}, kv{"host", "tpm"}, kv{"machine", "vtpm"}, kv{"ops", "piv"}, kv{"log", "pkcs11-agent"}), []string{}},
 		{"no_keys", nil, []string{}},
-		{"unknown_role_after_known", ks("zeta", "software", "user", "software"), []string{"user", "zeta"}},
+		{"unknown_role_after_known", ks(kv{"zeta", "software"}, kv{"user", "software"}), []string{"user", "zeta"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := SoftwareRoles(tc.keys)

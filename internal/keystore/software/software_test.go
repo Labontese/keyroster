@@ -338,7 +338,7 @@ func TestSoftwareBackend(t *testing.T) {
 		if err := os.Mkdir(keyDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(keyDir, 0o750); err != nil {
+		if err := os.Chmod(keyDir, 0o750); err != nil { //nolint:gosec // G302: a permissive mode on purpose, to see it refused
 			t.Fatal(err)
 		}
 		be := mustOpen(t, state, writePassFile(t, testPassphrase, 0o600))
@@ -405,7 +405,7 @@ func TestSoftwareBackend(t *testing.T) {
 		keyDir := filepath.Join(state, "software")
 		userFile := filepath.Join(keyDir, "user.age")
 		fp := ssh.FingerprintSHA256(pubs[keystore.RoleUser])
-		if err := os.Chmod(userFile, 0o644); err != nil {
+		if err := os.Chmod(userFile, 0o644); err != nil { //nolint:gosec // G302: a permissive mode on purpose, to see it refused
 			t.Fatal(err)
 		}
 		if _, err := be.Key(keystore.RoleUser, fp); err == nil || !strings.Contains(err.Error(), "0644") {
@@ -429,7 +429,7 @@ func TestSoftwareBackend(t *testing.T) {
 			t.Fatalf("Key through a symlinked key file = %v, want a refusal", err)
 		}
 		// A key directory that became permissive is refused too.
-		if err := os.Chmod(keyDir, 0o755); err != nil {
+		if err := os.Chmod(keyDir, 0o755); err != nil { //nolint:gosec // G302: a permissive mode on purpose, to see it refused
 			t.Fatal(err)
 		}
 		if _, err := be.Key(keystore.RoleHost, ssh.FingerprintSHA256(pubs[keystore.RoleHost])); err == nil {
