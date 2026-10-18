@@ -22,8 +22,9 @@
 // Options:
 //
 //	state-dir        the signer's state directory (set by keyroster-signer)
-//	passphrase-file  file holding the passphrase (no group or other
-//	                 permissions; one trailing newline is ignored)
+//	passphrase-file  absolute path of the file holding the passphrase (no
+//	                 group or other permissions; one trailing newline is
+//	                 ignored)
 package software
 
 import (
@@ -108,6 +109,11 @@ func open(opts map[string]string) (keystore.Backend, error) {
 	passFile, set := opts[optPassphraseFile]
 	if set && passFile == "" {
 		return nil, errors.New("keystore software: option passphrase-file is empty")
+	}
+	// ca-init stores the option as given, and serve runs from another
+	// working directory: only an absolute path names the same file.
+	if set && !filepath.IsAbs(passFile) {
+		return nil, errors.New("keystore software: option passphrase-file must be an absolute path")
 	}
 	b := &backend{dir: filepath.Join(stateDir, "software"), passFile: passFile}
 	// Fail at open, not at the first key, when no passphrase is reachable.

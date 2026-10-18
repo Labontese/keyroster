@@ -132,10 +132,11 @@ mode 0600 in a 0700 directory. The bundle, `ca-pubkeys.json` and the
 The passphrase comes only from a file, never from argv or the environment,
 and keyroster never logs or prints it:
 
-- `--backend-opt passphrase-file=FILE`: a regular file with no group or
-  other permissions (mode 0600 or 0400). Exactly one trailing newline is
-  ignored. ca-init stores the option (the path, not the passphrase), so
-  `install-bundle` and `serve` read the same file.
+- `--backend-opt passphrase-file=FILE`: the absolute path of a regular file
+  with no group or other permissions (mode 0600 or 0400); a relative path
+  is refused. Exactly one trailing newline is ignored. ca-init stores the
+  option (the path, not the passphrase), so `install-bundle` and `serve`
+  read the same file.
 - Without that option, `$CREDENTIALS_DIRECTORY/keyroster-software-passphrase`,
   as systemd provides it with `LoadCredential=keyroster-software-passphrase:PATH`
   or `LoadCredentialEncrypted=`. This path is tested with

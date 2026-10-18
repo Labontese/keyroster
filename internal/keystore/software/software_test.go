@@ -498,4 +498,19 @@ func TestSoftwareBackend(t *testing.T) {
 			t.Fatal("an empty passphrase-file option was accepted")
 		}
 	})
+	t.Run("relative_passphrase_file_refused", func(t *testing.T) {
+		// ca-init stores the option verbatim and serve runs from another
+		// working directory, so a relative path would resolve elsewhere
+		// later. It is refused even when it resolves here.
+		state := newStateDir(t)
+		abs := writePassFile(t, testPassphrase, 0o600)
+		t.Chdir(filepath.Dir(abs))
+		_, err := openWith(t, state, filepath.Base(abs))
+		if err == nil || !strings.Contains(err.Error(), optPassphraseFile) || !strings.Contains(err.Error(), "absolute") {
+			t.Fatalf("a relative passphrase-file that resolves in the working directory: %v, want a refusal naming the option", err)
+		}
+		if _, err := openWith(t, state, abs); err != nil {
+			t.Fatalf("control: the same file by its absolute path: %v", err)
+		}
+	})
 }
