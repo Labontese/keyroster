@@ -136,14 +136,24 @@ and keyroster never logs or prints it:
   with no group or other permissions (mode 0600 or 0400); a relative path
   is refused. Exactly one trailing newline is ignored. ca-init stores the
   option (the path, not the passphrase), so `install-bundle` and `serve`
-  read the same file.
+  read the same file. **The choice is permanent for that state
+  directory:** the stored option takes precedence over a systemd
+  credential, and nothing removes it later. `serve` and `install-bundle`
+  can point it at another file with `--backend-opt passphrase-file=FILE`,
+  but an empty value is refused, so adding `LoadCredential=` or
+  `LoadCredentialEncrypted=` to the unit afterwards changes nothing: the
+  signer still reads the plaintext file. To use a systemd credential,
+  run ca-init without this option.
 - Without that option, `$CREDENTIALS_DIRECTORY/keyroster-software-passphrase`,
   as systemd provides it with `LoadCredential=keyroster-software-passphrase:PATH`
-  or `LoadCredentialEncrypted=`. It must be a regular file with no other
-  permissions. Group bits are allowed, because systemd may give the
-  service user access through an ACL, which shows as group bits. Do not
-  set `CREDENTIALS_DIRECTORY` by hand to a directory other users can
-  read. This path is tested with `CREDENTIALS_DIRECTORY` set by a unit
+  or `LoadCredentialEncrypted=`. ca-init, and every later
+  `install-bundle` run outside the unit, then need `CREDENTIALS_DIRECTORY`
+  set to a private directory that holds the same passphrase. The
+  credential must be a regular file with no other permissions. Group
+  bits are allowed, because systemd may give the service user access
+  through an ACL, which shows as group bits. Do not set
+  `CREDENTIALS_DIRECTORY` by hand to a directory other users can read.
+  This path is tested with `CREDENTIALS_DIRECTORY` set by a unit
   test; it has **not been run under a real systemd unit (UNVERIFIED)**,
   so the modes systemd gives the file are not checked here either.
 
