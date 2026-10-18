@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-04 Tasks 1-2 done on p02/04-audit-login; PR awaiting owner merge gate (Task 3)
-last_updated: "2026-10-17T14:32:49.867Z"
-last_activity: 2026-10-17
-last_activity_desc: 02-04 audit-login executed; PR awaiting merge gate
-state_head: 9273038f3d7377424e5c11bf094d826880a2e618
+stopped_at: 02-05 Tasks 1-3 done on p02/05-software-key; PR awaiting owner merge gate (Task 4)
+last_updated: "2026-10-18T10:07:33.647Z"
+last_activity: 2026-10-18
+last_activity_desc: 02-05 software-key executed; PR awaiting merge gate
+state_head: e959951bd1a61648188d5498ff8ca4960ecb4dba
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 25
+  completed_plans: 26
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 4 of 14
-Status: 02-04 awaiting the owner merge gate (p02/04-audit-login); 02-01, 02-02 and 02-03 are merged
-Last activity: 2026-10-17 — 02-04 audit-login executed (audit verify re-proves login certificates, root successor-policy, 59-case tamper suite)
+Plan: 5 of 14
+Status: 02-05 awaiting the owner merge gate (p02/05-software-key); 02-01 to 02-04 are merged
+Last activity: 2026-10-18 — 02-05 software-key executed (encrypted software CA keys, signer Status with custody, owner-approved evaluation-only banner in ca issue)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -81,6 +81,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P02 | 40 min | 3 tasks | 14 files |
 | Phase 02 P03 | 40 min | 3 tasks | 21 files |
 | Phase 02 P04 | 50 min | 2 tasks | 13 files |
+| Phase 02 P05 | 45 min | 2 tasks | 22 files |
 
 ## Accumulated Context
 
@@ -180,6 +181,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-04: a login request ID used by any earlier issue or login_issue entry is refused as a replay; two issue entries are still not compared (Phase 1 unchanged)
 - [Phase 02]: 02-04: a login certificate must carry exactly the profile defaults plus the requested extensions, no critical option, and span exactly ValidForSeconds + 300 s; freshness is compared in whole seconds
 - [Phase 02]: 02-04: keyroster root successor-policy changes only the WebAuthn RP (version+1, prev hash), warns that rp_id is one-way, refuses a no-op
+- [Phase 02]: 02-05: owner decision A (2026-10-18): the KEY-06 banner names a compromised signer host; one constant in internal/custodytext, quoted verbatim in custody.md
+- [Phase 02]: 02-05: owner decision B (2026-10-18): capslock baseline accepts 11 pairs outside the plan's list as over-approximations (age WriterFunc, error dispatch); causes of MODIFY_SYSTEM_STATE widening and trust UNANALYZED UNVERIFIED
+- [Phase 02]: 02-05: Status (0x04/0x84) reports custody from the signer only (D-18), refuses trust_changed after a foreign install; InstallBundle refuses a trust state whose Status reply exceeds MaxStatusFrame
 
 ### Pending Todos
 
@@ -210,6 +214,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-17T14:32:49.630Z
-Stopped at: 02-04 Tasks 1-2 done on p02/04-audit-login; PR awaiting owner merge gate (Task 3)
+Last session: 2026-10-18T10:07:33.411Z
+Stopped at: 02-05 Tasks 1-3 done on p02/05-software-key; PR awaiting owner merge gate (Task 4)
 Resume file: None
