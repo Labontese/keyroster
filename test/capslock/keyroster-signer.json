@@ -1,4 +1,12 @@
 {
+  "filippo.io/age/armor": [
+    "CAPABILITY_UNANALYZED"
+  ],
+  "filippo.io/age/internal/format": [
+    "CAPABILITY_FILES",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_UNANALYZED"
+  ],
   "github.com/Labontese/keyroster/cmd/keyroster-signer": [
     "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_EXEC",
@@ -13,6 +21,7 @@
     "CAPABILITY_UNSAFE_POINTER"
   ],
   "github.com/Labontese/keyroster/internal/audit": [
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
     "CAPABILITY_REFLECT",
     "CAPABILITY_UNANALYZED"
   ],
@@ -22,18 +31,26 @@
   "github.com/Labontese/keyroster/internal/keystore": [
     "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
     "CAPABILITY_NETWORK",
+    "CAPABILITY_READ_SYSTEM_STATE",
     "CAPABILITY_REFLECT",
     "CAPABILITY_SYSTEM_CALLS",
     "CAPABILITY_UNANALYZED"
   ],
   "github.com/Labontese/keyroster/internal/keystore/agent": [
-    "CAPABILITY_NETWORK",
+    "CAPABILITY_NETWORK"
+  ],
+  "github.com/Labontese/keyroster/internal/keystore/software": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_FILES",
+    "CAPABILITY_READ_SYSTEM_STATE",
     "CAPABILITY_UNANALYZED"
   ],
   "github.com/Labontese/keyroster/internal/keystore/tpm": [
     "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
     "CAPABILITY_NETWORK",
     "CAPABILITY_REFLECT",
     "CAPABILITY_SYSTEM_CALLS"
@@ -62,10 +79,15 @@
     "CAPABILITY_ARBITRARY_EXECUTION"
   ],
   "github.com/Labontese/keyroster/internal/trust": [
-    "CAPABILITY_ARBITRARY_EXECUTION"
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_UNANALYZED"
   ],
   "github.com/google/go-tpm/tpm2": [
     "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
     "CAPABILITY_REFLECT",
     "CAPABILITY_SYSTEM_CALLS"
   ],
@@ -85,10 +107,9 @@
   ],
   "golang.org/x/crypto/ssh": [
     "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_FILES",
+    "CAPABILITY_NETWORK",
     "CAPABILITY_REFLECT",
-    "CAPABILITY_UNANALYZED"
-  ],
-  "golang.org/x/crypto/ssh/agent": [
     "CAPABILITY_UNANALYZED"
   ],
   "golang.org/x/sys/unix": [

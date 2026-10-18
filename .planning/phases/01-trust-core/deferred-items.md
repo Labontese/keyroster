@@ -22,6 +22,10 @@ Out-of-scope discoveries logged by plan executors. Each item names the plan that
     - Add the apt install of `libpcsclite-dev` to the `capslock` job.
     - Generate the baseline with `--update` on a host that has the headers, and review it.
     - Confirm in that PR that `capslock` stays green.
+  - **Re-deferred in 02-05, not picked up there.** 02-05 updates the default capslock baseline, for the age and scrypt packages its software backend adds to the signer, but does not add the `-tags piv` target. Two reasons:
+    - Generating that baseline needs `libpcsclite-dev` on a host that can run capslock with cgo. The workstation's WSL lacks it, and installing it needs sudo there, which is not an executor auto-fix.
+    - It changes the definition of `capslock`, a required job, so it belongs in its own CI plan, where the changed check runs on `main` first (Pitfall 10).
+  - **Moved to the Phase 6 review list** (release and external review), unless an earlier plan edits the `capslock` job anyway.
 - **01-13: the dependency firewall's `-tags piv` pass is identical to the default pass until 01-12 lands.** `scripts/dep-firewall.sh` runs `go list -deps` with and without `-tags piv` (the plan's must-have). On the 01-13 branch no file carries the `piv` tag, so the piv pass lists the same packages plus `runtime/cgo`. It starts checking the PIV backend's dependencies as soon as 01-12 and 01-13 are both on one branch: whichever PR merges second is rebased by `scripts/merge-gate.sh` and runs `dependency-firewall` with the piv code. Confirm that run in 01-15.
   - **Confirmed and closed in 01-15.**
     - The piv pass checks the PIV backend: it downloads `github.com/go-piv/piv-go/v2 v2.6.0` and lists 228 packages, against 224 for the default pass.
