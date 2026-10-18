@@ -139,14 +139,19 @@ and keyroster never logs or prints it:
   read the same file.
 - Without that option, `$CREDENTIALS_DIRECTORY/keyroster-software-passphrase`,
   as systemd provides it with `LoadCredential=keyroster-software-passphrase:PATH`
-  or `LoadCredentialEncrypted=`. This path is tested with
-  `CREDENTIALS_DIRECTORY` set by a unit test; it has **not been run under a
-  real systemd unit (UNVERIFIED)**.
+  or `LoadCredentialEncrypted=`. It must be a regular file with no other
+  permissions. Group bits are allowed, because systemd may give the
+  service user access through an ACL, which shows as group bits. Do not
+  set `CREDENTIALS_DIRECTORY` by hand to a directory other users can
+  read. This path is tested with `CREDENTIALS_DIRECTORY` set by a unit
+  test; it has **not been run under a real systemd unit (UNVERIFIED)**,
+  so the modes systemd gives the file are not checked here either.
 
-A passphrase shorter than 20 characters, a passphrase file readable by
-group or others, a key file or key directory that is not private or is a
-symlink, and a key file that does not decrypt to the recorded key are all
-refused.
+A passphrase shorter than 20 characters, a `passphrase-file` readable by
+group or others, a credential readable by others, a passphrase file that
+is not a regular file (a FIFO, for example), a key file or key directory
+that is not private or is a symlink, and a key file that does not decrypt
+to the recorded key are all refused.
 
 `doctor` reports `WARN software_key`. The signer reports the custody of
 every key itself, over its `Status` message, and nothing else is trusted
