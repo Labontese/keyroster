@@ -133,7 +133,8 @@ func (b *backend) Describe() string {
 // readPassphrase reads the passphrase from the passphrase-file option or,
 // without it, from $CREDENTIALS_DIRECTORY/keyroster-software-passphrase.
 // An operator's passphrase file must be a regular file without group or
-// other permissions. Exactly one trailing newline is removed, and the
+// other permissions, the credential a regular file without other
+// permissions. Exactly one trailing newline is removed, and the
 // passphrase must be valid UTF-8 of at least 20 characters. Every caller
 // clears the returned buffer (defer clear) right after a successful read;
 // on an error nothing is returned and the buffer read so far is cleared.
@@ -167,6 +168,13 @@ func (b *backend) readPassphrase() ([]byte, error) {
 	}
 	if operator && fi.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("keystore software: passphrase file %s has mode %04o, want no group or other permissions (0600 or 0400)", path, fi.Mode().Perm())
+	}
+	// systemd creates a credential 0400, or 0440 when it grants access
+	// through an ACL (shown as group bits), never with other bits (not
+	// run under a real systemd unit here, UNVERIFIED). Other bits mean a
+	// CREDENTIALS_DIRECTORY set by hand to a file anyone can read.
+	if !operator && fi.Mode().Perm()&0o007 != 0 {
+		return nil, fmt.Errorf("keystore software: credential %s has mode %04o, want no other permissions", path, fi.Mode().Perm())
 	}
 	pass, err := io.ReadAll(io.LimitReader(f, maxPassphraseFile+1))
 	if err != nil {

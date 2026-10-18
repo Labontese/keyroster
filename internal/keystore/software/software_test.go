@@ -197,6 +197,35 @@ func TestSoftwareBackend(t *testing.T) {
 			}
 		}
 	})
+	t.Run("credential_world_readable_refused", func(t *testing.T) {
+		// The credential file must have no other bits. Group bits are
+		// allowed: systemd may grant the service user access through an
+		// ACL, which shows as group bits.
+		creds := t.TempDir()
+		cred := filepath.Join(creds, credentialName)
+		if err := os.WriteFile(cred, []byte(testPassphrase), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CREDENTIALS_DIRECTORY", creds)
+		for _, tc := range []struct {
+			mode os.FileMode
+			ok   bool
+		}{{0o644, false}, {0o666, false}, {0o604, false}, {0o400, true}, {0o440, true}} {
+			if err := os.Chmod(cred, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			be, err := keystore.Open("software", map[string]string{keystore.OptStateDir: newStateDir(t)})
+			if err == nil {
+				_ = be.Close()
+			}
+			if tc.ok && err != nil {
+				t.Fatalf("credential mode %04o: %v, want it accepted", tc.mode, err)
+			}
+			if !tc.ok && (err == nil || !strings.Contains(err.Error(), "mode")) {
+				t.Fatalf("credential mode %04o: %v, want a mode refusal", tc.mode, err)
+			}
+		}
+	})
 	t.Run("passphrase_fifo_refused_without_blocking", func(t *testing.T) {
 		// A FIFO without a writer would block a plain open forever, before
 		// the regular-file check (and serve would hang holding the state
