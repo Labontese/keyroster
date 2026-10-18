@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/signerclient"
 	"github.com/Labontese/keyroster/internal/trust"
 )
@@ -133,8 +134,10 @@ func TestSoftwareCAEndToEnd(t *testing.T) {
 	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "user", "-f", userKey)
 	out = env.issue(t, "--pubkey", userKey+".pub", "--principal", login, "--subject", "u:"+login, "--ttl", "10m")
 	t.Logf("keyroster ca issue (software custody), stderr:\n%s", out)
-	if !strings.Contains(out, softwareBannerPhrase) || !strings.Contains(out, "user, host, machine, ops, log keys") {
-		t.Fatalf("ca issue on software custody printed no evaluation-only banner naming all five keys:\n%s", out)
+	frame := strings.Repeat("!", 76)
+	banner := frame + "\n" + custodytext.SoftwareCABanner(roleNames) + "\n" + frame + "\n"
+	if !strings.Contains(out, softwareBannerPhrase) || !strings.Contains(out, banner) || !strings.Contains(out, "or controls the signer host,") {
+		t.Fatalf("ca issue on software custody did not print the framed, owner-approved banner naming all five keys:\n%s", out)
 	}
 	if strings.Index(out, softwareBannerPhrase) > strings.Index(out, "serial:") {
 		t.Fatalf("the banner came after the issuance:\n%s", out)

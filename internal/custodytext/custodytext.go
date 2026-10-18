@@ -19,11 +19,13 @@ import (
 // is hard-wrapped so that with all five roles no line is longer than 76
 // columns, and its first line starts with "EVALUATION ONLY - SOFTWARE CA
 // KEY", which tests grep for. HTML collapses the newlines, so a web page
-// renders it as one paragraph.
+// renders it as one paragraph. The owner approved this wording at 02-05's
+// Task 2 checkpoint (2026-10-18), adding the compromised signer host.
 const softwareCABanner = `EVALUATION ONLY - SOFTWARE CA KEY: the %s keys
 of this keyroster signer are software keys (custody software). Anyone who
-copies the key files and their passphrase can issue certificates. Do not
-use this instance for real access (docs/security/custody.md).`
+copies the key files and their passphrase, or controls the signer host,
+can issue certificates. Do not use this instance for real access
+(docs/security/custody.md).`
 
 // roleOrder is the signer's fixed role order.
 var roleOrder = []string{"user", "host", "machine", "ops", "log"}
