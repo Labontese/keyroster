@@ -19,9 +19,9 @@ affects: [02-07, 02-08, 02-09, 02-10, 02-11, 02-12, 02-13, 02-14, KEY-06, UI-01,
 actuals:
   tokens: 42700   # chars/4 over the added lines of the code, test, deploy and docs diff (170707 chars); planning docs excluded
   tasks: 3        # Tasks 1-3 executed; Task 4 is the owner merge gate
-  commits: 5      # git rev-list --count plan_head_before..HEAD at SUMMARY write; this docs commit follows
+  commits: 7      # git rev-list --count plan_head_before..HEAD at this SUMMARY update (5 code commits, the first docs commit, one test fix); this docs commit follows
 plan_head_before: 2d9fc80b547e11d653279b1bbdb6510def09d66a
-plan_head_after: 4d222d0a4e48e71fc9059b11ac71bef24b550f0e
+plan_head_after: 8e81eb2d85ba069481b035578da7bd2e5b2fb995
 
 tech-stack:
   added: []   # stdlib only: net/http, html/template, embed, crypto/tls, crypto/x509, log/slog
@@ -236,7 +236,7 @@ status: complete
    - `c1fdc74` (test, RED; includes a Watch stub so the suite compiles);
    - `7b623da` (feat, GREEN);
    - `46fe011` (test: fuzz targets).
-3. **Task 3.** `4d222d0` (docs: units, sysusers, runbooks).
+3. **Task 3.** `4d222d0` (docs: units, sysusers, runbooks). After the first SUMMARY commit, the pre-push privacy grep led to `8e81eb2` (test: a documentation address for the IP-literal URL cases; Deviation 17).
 4. **Task 4, merge gate.** Not attempted. It is the owner's `checkpoint:human-action`.
 
 **Plan metadata:** `docs(02-06): complete server-core plan` (this file, STATE.md, REQUIREMENTS.md).
@@ -374,13 +374,19 @@ See `key-decisions` in the frontmatter.
 - The environment forbids marking 02-06 complete, and `roadmap.update-plan-progress` counts SUMMARY files, so it was not run.
 - STATE.md position and metrics were updated, and REQUIREMENTS.md marks KEY-06 complete. `requirements.ready-ids` reported KEY-06 ready and UI-01 and PLAT-05 blocked by later plans.
 
+**17. [Privacy rule] The IP-literal URL cases use 192.0.2.1**
+- The pre-push grep of the whole diff found an address from the 10/8 private range in `TestParseServerURL` and the `FuzzParseServerURL` seeds. It is not a real address, but the rule is no 10.x addresses in committed files.
+- Both now use 192.0.2.1 (RFC 5737 documentation range), as `cmd/keyroster/root_test.go` already does. `TestParseServerURL` and the fuzz seeds pass natively on Windows.
+- **Commit:** 8e81eb2, made after the first SUMMARY commit and before the push. This SUMMARY's commit count and plan_head_after were updated in the follow-up docs commit.
+
 ---
 
-**Total deviations:** 16:
+**Total deviations:** 17:
 - 7 interpretations and naming;
 - 5 Rule 2 additions;
 - 1 scope item;
-- 3 process notes.
+- 3 process notes;
+- 1 privacy fix.
 
 **Impact on plan:** there is no new module dependency. No production code path exists only for tests. The signer's dependency graph is unchanged: dep-firewall and capslock are 90/90 and the signer does not import internal/server.
 
