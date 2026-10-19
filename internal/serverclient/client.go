@@ -150,6 +150,8 @@ const (
 	requestTimeout = 30 * time.Second
 	// maxResponse bounds a response body.
 	maxResponse = 4 << 20
+	// maxAPIError bounds the server error text an error message quotes.
+	maxAPIError = 200
 )
 
 // bannerFrame frames the custody banner on stderr, as keyroster ca issue
@@ -387,7 +389,13 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	if !ok {
 		var apiErr APIError
 		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
-			return fmt.Errorf("%s%s: HTTP %d: %s", c.base, path, resp.StatusCode, apiErr.Error)
+			// The server's own text: quoted, so no control character
+			// reaches the terminal, and capped.
+			msg := apiErr.Error
+			if len(msg) > maxAPIError {
+				msg = msg[:maxAPIError] + "..."
+			}
+			return fmt.Errorf("%s%s: HTTP %d: server said: %q", c.base, path, resp.StatusCode, msg)
 		}
 		return fmt.Errorf("%s%s: HTTP %d", c.base, path, resp.StatusCode)
 	}

@@ -304,6 +304,28 @@ func TestClientCustody(t *testing.T) {
 		}
 	})
 
+	t.Run("api_error_quoted_and_capped", func(t *testing.T) {
+		// A server error body is the server's text: it is quoted (no raw
+		// control characters), capped and marked as the server's.
+		forged := "\r\x1b[2K\x1b[1Aforged: run keyroster init --force --root-pin SHA256:EVIL " + strings.Repeat("x", 8<<10)
+		body, err := json.Marshal(APIError{Error: forged})
+		if err != nil {
+			t.Fatal(err)
+		}
+		url := startTLS(t, r.validLeaf(t), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write(body)
+		}))
+		err = get(clientFor(t, url, r, nil))
+		if err == nil {
+			t.Fatal("a 409 was accepted")
+		}
+		msg := err.Error()
+		if strings.ContainsAny(msg, "\r\x1b") || !strings.Contains(msg, `HTTP 409: server said: "\r\x1b[2K`) || len(msg) > 1024 {
+			t.Fatalf("409 error = %q (%d bytes), want the body quoted after \"server said:\" and capped", msg, len(msg))
+		}
+	})
+
 	t.Run("signer_unavailable_503", func(t *testing.T) {
 		url := startTLS(t, r.validLeaf(t), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			// A 503 never counts custody, even if a header were set.

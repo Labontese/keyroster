@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // command is one keyroster subcommand. Command groups (ca, audit, root,
@@ -61,10 +62,30 @@ func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			printUsage(stderr)
 			return 2
 		}
-		_, _ = fmt.Fprintf(stderr, "keyroster %s: %v\n", c.Name, err)
+		_, _ = fmt.Fprintf(stderr, "keyroster %s: %s\n", c.Name, printable(err.Error()))
 		return 1
 	}
 	return 0
+}
+
+// printable escapes every rune of s that is neither graphic nor a newline
+// (C0 and C1 controls, DEL, bidi and other format characters) as \xHH or
+// \uHHHH. An error can carry server-chosen text, such as a JSON error body
+// or a certificate's host names; printed raw, an ESC sequence or a
+// carriage return could erase the real message and forge an instruction.
+func printable(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n' || unicode.IsGraphic(r):
+			b.WriteRune(r)
+		case r < 0x100:
+			fmt.Fprintf(&b, `\x%02x`, r)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+	}
+	return b.String()
 }
 
 // printUsage writes the sorted command list to w.
