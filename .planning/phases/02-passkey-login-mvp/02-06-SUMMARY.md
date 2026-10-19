@@ -478,6 +478,8 @@ PR #43 was squash-merged as 5e7e88f before the review fixes, so they are on bran
   - `post_json`.
   - `TestServerStatus/non_token_custody_fails_closed`.
 
+Contract note for 02-09 and 02-10, from 7a62b75: the status cache mutex is no longer held across the signer call. The "dropStatus takes the same mutex" line under Accomplishments, and the "dropStatus without the mutex" bite row, describe the mechanism at 5e7e88f. dropStatus now waits for the refresh in flight, which takes at most statusTimeout (3 s), and then drops the entry. The guarantee is unchanged: an answer read before a change is never put back after the drop. 02-09's bound ("plus up to 3 s") and its lock order (pendingMu outermost) still hold, and `drop_during_inflight_refresh` passes unchanged.
+
 Mutation proofs: the eight coverage-only tests were not mutation-run. The permission classifier refused the temporary edit that would weaken a security check. For each of them, a control or an assertion that only the checked code can satisfy shows the test is not vacuous. Findings skipped: none.
 
 Checks run on Windows with go1.27.2:
