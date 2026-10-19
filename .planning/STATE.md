@@ -184,11 +184,13 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-05: owner decision A (2026-10-18): the KEY-06 banner names a compromised signer host; one constant in internal/custodytext, quoted verbatim in custody.md
 - [Phase 02]: 02-05: owner decision B (2026-10-18): capslock baseline accepts 11 pairs outside the plan's list as over-approximations (age WriterFunc, error dispatch); causes of MODIFY_SYSTEM_STATE widening and trust UNANALYZED UNVERIFIED
 - [Phase 02]: 02-05: Status (0x04/0x84) reports custody from the signer only (D-18), refuses trust_changed after a foreign install; InstallBundle refuses a trust state whose Status reply exceeds MaxStatusFrame
+- [Phase 02]: 02-05 pre-merge review, owner decisions 2026-10-19: the stored passphrase source (locked at ca-init) is deferred to Phase 6 (todo); symlinks to the passphrase file stay allowed (no O_NOFOLLOW), with the regular-file and mode checks on the target
 
 ### Pending Todos
 
 - [2026-10-16] [auth] Bind admin-signed directories to a deployment — [todo file](.planning/todos/pending/2026-10-16-bind-admin-signed-directories-to-a-deployment.md) — Needs Options:.
 - [2026-10-17] [auth] Serve refuses to start without a witnessed checkpoint (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-17-serve-refuses-without-witnessed-checkpoint.md) — owner decision taken; options: witness cosignatures checked at start, or an operator-supplied minimum checkpoint as an interim measure.
+- [2026-10-19] [auth] Choose the software passphrase source at every start (minor, Phase 6) — [todo file](.planning/todos/pending/2026-10-19-choose-the-software-passphrase-source-at-every-start.md) — deferred by the owner; suggested option (c): store nothing at ca-init.
 
 ### Blockers/Concerns
 
