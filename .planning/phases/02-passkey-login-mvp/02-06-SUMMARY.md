@@ -455,6 +455,38 @@ None for CI. Installing on a host follows docs/runbooks/server-install.md (02-13
   - step 9 "Re-pin every client" with `--root-pin` and `--force`.
 - The PR acceptance (open, auto-merge, green, SUMMARY on its head) is checked after the push and reported in the checkpoint.
 
+## Post-merge review fixes
+
+PR #43 was squash-merged as 5e7e88f before the review fixes, so they are on branch `p02/06-review-fixes`. There is one commit per confirmed finding; findings 1 and 5 are the same defect and share one commit. "RED" means the test failed on 5e7e88f and passes after the fix.
+
+- **Status cache serialized failed refreshes (medium).** 7a62b75. The mutex is no longer held across the signer call. Callers that arrive during a refresh take its result, a failure included, and a waiter leaves when its request ends. dropStatus waits only for the refresh in flight. Tests: `TestServerStatus/concurrent_callers_share_one_failed_refresh` (RED: 8 callers made 8 Status calls) and `waiter_leaves_on_cancel` (RED: a cancelled request made a signer call).
+- **A failed refresh was not shared (low, same defect).** 7a62b75, same tests. The optional ~1 s negative cache was not added: it would conflict with the plan's rule that a failure is never cached. That is left to the owner.
+- **Server-chosen control characters reached the terminal (medium).** e70b871. `dispatch` escapes every rune that is neither graphic nor a newline. APIError text is printed as `server said: %q`, capped at 200 bytes. Tests: `TestDispatchEscapesControlCharacters` (cases: an ESC in an x509 SAN, an API error body, a plain newline kept) and `TestClientCustody/api_error_quoted_and_capped` (both RED).
+- **ParseServerURL accepted a zone or a trailing dot (low).** b9820a2. It now refuses a host containing ':' or '%', an address left after trimming a trailing dot, and a numeric last label (127.1, 2130706433, 0x7f000001). Tests: `TestParseServerURL` (RED: all 9 new forms were accepted). `FuzzParseServerURL` now checks with netip; it ran for 20 s with no failure.
+- **Redirect refusal, the 4 MiB cap and Proxy nil had no test (low).** 3d87856. Test: `TestClientTransport`, with a control for each check: the same transport following the 302, and a body of exactly maxResponse bytes decoding.
+- **The CertHolder RP ID stayed fixed while the status followed a new rp_id (low).** 0d686c1. `server.Config.RPID` is now required. A status whose policy names another RP ID gives 503 and an error log asking for a restart. root-ceremony.md (Change the policy, step 5) and server-install.md (Logs) document the restart. Test: `TestServerStatus/rp_id_change_fails_closed` (RED: 200).
+- **Refused certificate files were never retried after a chmod or chgrp (low).** 4b39de0. The stamp is recorded only on a successful load, so refused files are retried at every interval. server-install.md adds `systemctl reload` after a later manual replacement. Test: `TestCertHolder/retries_refused_file_change` (RED: timed out). Side effect: a persistently refused file now logs `tls certificate reload refused` once per 60 s tick.
+- **The runbooks did not enforce the go1.27.2 toolchain (low).** 952b88e. signer-install.md and server-install.md now export `GOTOOLCHAIN` from go.mod's toolchain line and check the binaries with `go version`. Test: `TestRunbookGoToolchain` (RED).
+- **Re-pin commands dropped --user and --admin-key (low).** 3065f15. Both runbook commands and both re-pin errors now name `--user` and `--admin-key` and say that `--force` replaces the whole config. Test: `TestRepinInstructionsKeepIdentity` (RED). Making `init --force` keep `user` and `admin_key` would change init's behaviour, so that is left to the owner.
+- **TestServerRefusesStart accepted a server killed by the timeout (medium).** ac995b9. It now requires exit 1 and main's `keyroster-server serve: the certificate ...` line. **UNVERIFIED (not run):** e2e needs Linux, and this run had no WSL access. Only `GOOS=linux go vet -tags e2e` ran.
+- **Init step 5 (store only the pinned roots) had no test (low).** ca8f437. Test: `TestInit/stores_only_pinned_of_two_observed_roots`. One intermediate is signed by roots A and B, A is pinned, and only A is saved. Control: init prints both observed pins.
+- **The TLS 1.3 minimum was never asserted (low).** b991a49. Test: `TestServerInitEndToEnd/refuses_tls12`, which needs a protocol version alert. Control: a TLS 1.3 handshake succeeds. **UNVERIFIED (not run):** same reason as above.
+- **Deviation 3's Trust checks had no test (low).** b92b432. Tests: `TestClientTrust/reported_bundle_version_mismatch_refused` and `admin_is_root_refused`. The second requires `trust.ErrKeyIsRoot`; its control shows the document passes VerifySelfSigned.
+- **Deviation 4/5 hardening and PostJSON had no test (low).** ee92fe5 (redirect and cap: 3d87856). Tests:
+  - `TestClientCustody/duplicate_custody_header_refused`: each value is valid on its own.
+  - `custody_header_value_refuses_non_tokens`.
+  - `post_json`.
+  - `TestServerStatus/non_token_custody_fails_closed`.
+
+Mutation proofs: the eight coverage-only tests were not mutation-run. The permission classifier refused the temporary edit that would weaken a security check. For each of them, a control or an assertion that only the checked code can satisfy shows the test is not vacuous. Findings skipped: none.
+
+Checks run on Windows with go1.27.2:
+- `gofmt -l` printed nothing.
+- `go vet ./...` passed for windows, linux and darwin, and `GOOS=linux go vet -tags e2e ./test/e2e/` passed.
+- `go test -count=1` passed on internal/server, internal/serverclient and cmd/keyroster, and `go test ./...` passed.
+- internal/server also passed `-count=10`.
+- `-race` was not run, because cgo is not available.
+
 ---
 *Phase: 02-passkey-login-mvp*
 *Completed: 2026-10-19 (before the merge gate)*
