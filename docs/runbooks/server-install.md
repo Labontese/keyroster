@@ -92,10 +92,15 @@ validity remain, it logs `tls certificate expires soon` once a day.
 ## 1. Install the binary
 
 Build it on a trusted machine from the reviewed commit (there are no signed
-releases before Phase 6):
+releases before Phase 6), with the Go toolchain in `go.mod`'s `toolchain`
+line. A local Go of an older version would otherwise build it too, with a
+standard library whose fixed vulnerabilities this network-facing server
+reaches:
 
 ```
+export GOTOOLCHAIN=$(awk '$1 == "toolchain" {print $2}' go.mod)
 CGO_ENABLED=0 go build -trimpath -o keyroster-server ./cmd/keyroster-server
+go version keyroster-server      # must print the toolchain line's version
 ```
 
 Copy it to the server host and install it:
