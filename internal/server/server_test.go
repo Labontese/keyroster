@@ -547,6 +547,27 @@ func TestServerStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("non_token_custody_fails_closed", func(t *testing.T) {
+		// A role or custody that is not a lowercase token is a failed
+		// refresh: 503 and no custody header, never a header built from it.
+		for _, bad := range []func(*wire.StatusResponse){
+			func(st *wire.StatusResponse) { st.Keys[0].Custody = "Software" },
+			func(st *wire.StatusResponse) { st.Keys[1].Role = "User" },
+			func(st *wire.StatusResponse) { st.Keys[2].Custody = "agent\r\nX-Evil: 1" },
+		} {
+			st := testStatus(t, "agent", 0)
+			bad(st)
+			s, _, _ := newTestServer(t, newFakeSigner(st))
+			requireUnavailable(t, "GET /healthz with a non-token custody report", do(s, http.MethodGet, "/healthz", nil), false)
+			requireUnavailable(t, "GET / with a non-token custody report", do(s, http.MethodGet, "/", nil), true)
+		}
+		// Control: the same status unchanged is served.
+		s, _, _ := newTestServer(t, newFakeSigner(testStatus(t, "agent", 0)))
+		if rec := do(s, http.MethodGet, "/healthz", nil); rec.Code != http.StatusOK {
+			t.Fatalf("control: GET /healthz = %d", rec.Code)
+		}
+	})
+
 	t.Run("policy_without_rp_fails_closed", func(t *testing.T) {
 		st := testStatus(t, "agent", 0)
 		st.Policy = testPolicy(t, false)

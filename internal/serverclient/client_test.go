@@ -28,6 +28,7 @@ import (
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // tlsCA is a test certificate authority: a root or an intermediate.
@@ -302,6 +303,72 @@ func TestClientCustody(t *testing.T) {
 			if err := get(clientFor(t, url, r, nil)); err == nil {
 				t.Errorf("%s %q accepted", CustodyHeader, v)
 			}
+		}
+	})
+
+	t.Run("duplicate_custody_header_refused", func(t *testing.T) {
+		// Each value parses on its own, so only the count refuses them.
+		url := startTLS(t, r.validLeaf(t), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Add(CustodyHeader, "user=agent")
+			w.Header().Add(CustodyHeader, "user=software")
+			_, _ = w.Write([]byte("{}"))
+		}))
+		var stderr bytes.Buffer
+		if err := get(clientFor(t, url, r, &stderr)); err == nil || !strings.Contains(err.Error(), "more than one "+CustodyHeader) {
+			t.Fatalf("two %s headers: %v, want a refusal naming more than one", CustodyHeader, err)
+		}
+		for _, v := range []string{"user=agent", "user=software"} {
+			if _, err := ParseCustodyHeader(v); err != nil {
+				t.Fatalf("control: %q alone does not parse: %v", v, err)
+			}
+		}
+	})
+
+	t.Run("custody_header_value_refuses_non_tokens", func(t *testing.T) {
+		// The server formats the signer's report with CustodyHeaderValue;
+		// anything but a lowercase token is refused, never put in a
+		// header.
+		ok := []wire.KeyStatus{{Role: "user", Custody: "agent"}, {Role: "log", Custody: "software"}}
+		if v, err := CustodyHeaderValue(ok); err != nil || v != "user=agent, log=software" {
+			t.Fatalf("control: CustodyHeaderValue = %q, %v", v, err)
+		}
+		for _, k := range []wire.KeyStatus{
+			{Role: "user", Custody: "Software"}, {Role: "User", Custody: "agent"}, {Role: "user", Custody: "agent\r\nX-Evil: 1"},
+			{Role: "user", Custody: "agent, host=software"}, {Role: "", Custody: "agent"}, {Role: "user", Custody: ""},
+		} {
+			if v, err := CustodyHeaderValue([]wire.KeyStatus{k}); err == nil {
+				t.Errorf("CustodyHeaderValue(%+v) = %q, want a refusal", k, v)
+			}
+		}
+		if _, err := CustodyHeaderValue(nil); err == nil {
+			t.Error("CustodyHeaderValue(nil) accepted")
+		}
+	})
+
+	t.Run("post_json", func(t *testing.T) {
+		type msg struct {
+			Name string `json:"name"`
+		}
+		url := startTLS(t, r.validLeaf(t), http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			var in msg
+			if req.Method != http.MethodPost || req.URL.Path != "/api/v1/echo" || req.Header.Get("Content-Type") != "application/json" ||
+				json.NewDecoder(req.Body).Decode(&in) != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Header().Set(CustodyHeader, agentCustody)
+			_ = json.NewEncoder(w).Encode(msg{Name: "echo " + in.Name})
+		}))
+		c := clientFor(t, url, r, nil)
+		var out msg
+		if err := c.PostJSON(context.Background(), "/api/v1/echo", msg{Name: "alice"}, &out); err != nil || out.Name != "echo alice" {
+			t.Fatalf("PostJSON = %+v, %v; want echo alice", out, err)
+		}
+		if err := c.PostJSON(context.Background(), "/api/v1/echo", msg{Name: "bob"}, nil); err != nil {
+			t.Fatalf("PostJSON with out nil: %v", err)
+		}
+		if err := c.PostJSON(context.Background(), "/elsewhere", msg{}, nil); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+			t.Fatalf("PostJSON to a refusing route: %v, want HTTP 400", err)
 		}
 	})
 
