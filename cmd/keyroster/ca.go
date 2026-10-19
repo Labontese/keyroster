@@ -16,6 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
+	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/signerclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -123,6 +124,11 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	}
 	if !bytes.Equal(c.Key.Marshal(), pub.Marshal()) || c.Serial != resp.Serial {
 		return errors.New("signer returned a certificate for another key or serial")
+	}
+	// The key ID is printed below: it must be a keyroster key ID, whose
+	// charset carries no control character, space or padding.
+	if _, err := cert.ParseKeyID(c.KeyId); err != nil {
+		return errors.New("signer returned a certificate whose key ID is not a keyroster key ID; nothing was written")
 	}
 
 	dest := *out

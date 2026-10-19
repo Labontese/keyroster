@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/custodytext"
@@ -37,8 +38,9 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// fakeSigner answers Status with a fixed reply and refuses every
-// IssueRequest. It records the type of every request frame and the CLI's
+// fakeSigner answers Status with a fixed reply and answers every
+// IssueRequest with a fixed IssueResponse body, or refuses it when that
+// body is nil. It records the type of every request frame and the CLI's
 // stderr at the moment an IssueRequest arrived.
 type fakeSigner struct {
 	mu            sync.Mutex
@@ -55,7 +57,7 @@ func (f *fakeSigner) seen() []byte {
 // startFakeSigner listens on a Unix socket in a short temporary directory
 // (t.TempDir can exceed macOS's 104-byte socket path limit) and serves
 // one request per connection.
-func startFakeSigner(t *testing.T, statusType byte, statusBody []byte, stderr *lockedBuffer) (string, *fakeSigner) {
+func startFakeSigner(t *testing.T, statusType byte, statusBody, issueBody []byte, stderr *lockedBuffer) (string, *fakeSigner) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "kr")
 	if err != nil {
@@ -94,6 +96,12 @@ func startFakeSigner(t *testing.T, statusType byte, statusBody []byte, stderr *l
 				switch msgType {
 				case wire.TypeStatus:
 					_ = wire.WriteMessage(conn, statusType, statusBody)
+				case wire.TypeIssueRequest:
+					if issueBody != nil {
+						_ = wire.WriteMessage(conn, wire.TypeIssueResponse, issueBody)
+						return
+					}
+					_ = wire.WriteMessage(conn, wire.TypeError, refusal)
 				default:
 					_ = wire.WriteMessage(conn, wire.TypeError, refusal)
 				}
@@ -177,7 +185,7 @@ func TestCAIssueStatusGate(t *testing.T) {
 	} {
 		t.Run(tc.name+"_aborts_before_issue", func(t *testing.T) {
 			stderr := &lockedBuffer{}
-			socket, f := startFakeSigner(t, wire.TypeError, statusError(t, tc.code, tc.msg), stderr)
+			socket, f := startFakeSigner(t, wire.TypeError, statusError(t, tc.code, tc.msg), nil, stderr)
 			if code := run(t, socket, stderr); code != 1 {
 				t.Fatalf("exit status %d, want 1 (stderr %q)", code, stderr.String())
 			}
@@ -195,7 +203,7 @@ func TestCAIssueStatusGate(t *testing.T) {
 
 	t.Run("software_custody_banner_before_issue", func(t *testing.T) {
 		stderr := &lockedBuffer{}
-		socket, f := startFakeSigner(t, wire.TypeStatusResponse, statusWith(t, "software"), stderr)
+		socket, f := startFakeSigner(t, wire.TypeStatusResponse, statusWith(t, "software"), nil, stderr)
 		if code := run(t, socket, stderr); code != 1 {
 			t.Fatalf("exit status %d, want 1 from the fake refusal (stderr %q)", code, stderr.String())
 		}
@@ -215,7 +223,7 @@ func TestCAIssueStatusGate(t *testing.T) {
 
 	t.Run("agent_custody_no_banner", func(t *testing.T) {
 		stderr := &lockedBuffer{}
-		socket, f := startFakeSigner(t, wire.TypeStatusResponse, statusWith(t, "agent"), stderr)
+		socket, f := startFakeSigner(t, wire.TypeStatusResponse, statusWith(t, "agent"), nil, stderr)
 		if code := run(t, socket, stderr); code != 1 {
 			t.Fatalf("exit status %d, want 1 from the fake refusal (stderr %q)", code, stderr.String())
 		}
@@ -226,4 +234,84 @@ func TestCAIssueStatusGate(t *testing.T) {
 			t.Fatalf("stderr = %q: a banner for custody agent", s)
 		}
 	})
+
+	// Signer-supplied text the CLI prints (D: a role name in the custody
+	// banner, the key ID) must be a token or a keyroster key ID: a signer
+	// report with control characters or padding is refused, and nothing
+	// is issued or written.
+	const padded = "                                                                " +
+		"keyroster init --force --root-pin SHA256:EVIL"
+	t.Run("status_role_with_control_characters_refused", func(t *testing.T) {
+		for _, role := range []string{"user\x1b[2K", padded} {
+			stderr := &lockedBuffer{}
+			body := rawStatus([]wire.KeyStatus{{Role: role, Alg: ssh.KeyAlgoED25519, Custody: "software", Fingerprint: "SHA256:fake"}})
+			socket, f := startFakeSigner(t, wire.TypeStatusResponse, body, nil, stderr)
+			if code := run(t, socket, stderr); code != 1 {
+				t.Fatalf("role %q: exit status %d, want 1 (stderr %q)", role, code, stderr.String())
+			}
+			if got := f.seen(); !bytes.Equal(got, []byte{wire.TypeStatus}) {
+				t.Fatalf("role %q: the signer received request types %x, want only Status: a malformed custody report must stop the issue", role, got)
+			}
+			if s := stderr.String(); strings.Contains(s, "EVIL") || strings.Contains(s, "[2K") {
+				t.Fatalf("role %q: stderr repeats the signer's role: %q", role, s)
+			}
+		}
+	})
+	t.Run("key_id_not_keyroster_refused", func(t *testing.T) {
+		_, caKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		caSigner, err := ssh.NewSignerFromKey(caKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, keyID := range []string{"kr1/ca=user\x1b[2K\r" + padded, padded} {
+			c := &ssh.Certificate{Key: subjectPub, Serial: 42, CertType: ssh.UserCert, KeyId: keyID,
+				ValidPrincipals: []string{"alice"}, ValidBefore: ssh.CertTimeInfinity}
+			// A hostile signer's certificate: cert.Build refuses such a key ID.
+			if err := c.SignCert(rand.Reader, caSigner); err != nil { //nolint:forbidigo // a test double of a signer that breaks CA-04
+				t.Fatal(err)
+			}
+			issued, err := (&wire.IssueResponse{Cert: c.Marshal(), Serial: 42, LeafIndex: 1}).Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stderr := &lockedBuffer{}
+			socket, f := startFakeSigner(t, wire.TypeStatusResponse, statusWith(t, "agent"), issued, stderr)
+			if code := run(t, socket, stderr); code != 1 {
+				t.Fatalf("key ID %q: exit status %d, want 1 (stderr %q)", keyID, code, stderr.String())
+			}
+			if got := f.seen(); !bytes.Equal(got, []byte{wire.TypeStatus, wire.TypeIssueRequest}) {
+				t.Fatalf("the signer received request types %x, want Status then IssueRequest", got)
+			}
+			if s := stderr.String(); strings.Contains(s, "EVIL") || strings.Contains(s, "[2K") || !strings.Contains(s, "not a keyroster key ID") {
+				t.Fatalf("key ID %q: stderr = %q, want the refusal without the key ID", keyID, s)
+			}
+			if _, err := os.Stat(certFile); !os.IsNotExist(err) {
+				t.Fatalf("a certificate with a forged key ID was written (stat error %v)", err)
+			}
+		}
+	})
+}
+
+// rawStatus encodes a StatusResponse body with keys as given, without the
+// checks of StatusResponse.Marshal: what a signer that does not follow
+// them could send.
+func rawStatus(keys []wire.KeyStatus) []byte {
+	var b cryptobyte.Builder
+	b.AddUint8(uint8(len(keys))) //nolint:gosec // G115: a handful of test keys
+	for _, k := range keys {
+		for _, f := range []string{k.Role, k.Alg, k.Custody, k.Fingerprint} {
+			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes([]byte(f)) })
+		}
+	}
+	b.AddUint64(1)
+	for range 4 {
+		b.AddUint24LengthPrefixed(func(*cryptobyte.Builder) {})
+	}
+	b.AddUint64(0)
+	b.AddBytes(make([]byte, 32))
+	b.AddUint8(0)
+	return b.BytesOrPanic()
 }

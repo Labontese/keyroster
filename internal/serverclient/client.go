@@ -76,9 +76,6 @@ type APIError struct {
 	Error string `json:"error"`
 }
 
-// custodyToken is the form of a role or custody name in CustodyHeader.
-var custodyToken = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
-
 // CustodyHeaderValue formats keys as the CustodyHeader value, in the order
 // given. It refuses a role or custody that is not a short lowercase token,
 // so a signer report can never inject anything into a header.
@@ -88,7 +85,7 @@ func CustodyHeaderValue(keys []wire.KeyStatus) (string, error) {
 	}
 	parts := make([]string, 0, len(keys))
 	for _, k := range keys {
-		if !custodyToken.MatchString(k.Role) || !custodyToken.MatchString(k.Custody) {
+		if !wire.IsToken(k.Role) || !wire.IsToken(k.Custody) {
 			return "", fmt.Errorf("custody: role %q or custody %q is not a lowercase token", k.Role, k.Custody)
 		}
 		parts = append(parts, k.Role+"="+k.Custody)
@@ -104,7 +101,7 @@ func ParseCustodyHeader(v string) ([]wire.KeyStatus, error) {
 	seen := map[string]bool{}
 	for _, part := range strings.Split(v, ",") {
 		role, custody, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok || !custodyToken.MatchString(role) || !custodyToken.MatchString(custody) || seen[role] {
+		if !ok || !wire.IsToken(role) || !wire.IsToken(custody) || seen[role] {
 			return nil, fmt.Errorf("malformed %s header %s", CustodyHeader, peerExcerpt(v))
 		}
 		seen[role] = true
