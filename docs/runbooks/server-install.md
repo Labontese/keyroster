@@ -69,8 +69,9 @@ supported.**
 
 The server checks the files every 60 s and on SIGHUP. It swaps in new files
 only when they are a matching pair, the leaf covers the RP ID, and the leaf
-is valid now. Otherwise it keeps the last good certificate and logs
-`tls certificate reload refused`. Every successful load is logged as
+is valid now. Otherwise it keeps the last good certificate, logs
+`tls certificate reload refused`, and tries the files again every 60 s
+until they load (so fixing only the key's group or mode is picked up too). Every successful load is logged as
 `tls certificate loaded` (see "Logs" below). When less than 14 days of
 validity remain, it logs `tls certificate expires soon` once a day.
 
@@ -133,7 +134,10 @@ install -o root -g keyroster-server -m 0644 fullchain.pem /etc/keyroster/tls/ful
 install -o root -g keyroster-server -m 0640 key.pem /etc/keyroster/tls/key.pem
 ```
 
-Then continue with step 4.
+Then continue with step 4. When you replace the files later, while the
+server runs, use the same two `install` lines and then run
+`systemctl reload keyroster-server` so it loads them at once instead of
+at the next 60 s check.
 
 **With Tailscale**, do the following before the server is ever started.
 Order matters: **certificate unit, timer, server**. The server needs the

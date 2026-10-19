@@ -343,6 +343,31 @@ func TestCertHolder(t *testing.T) {
 		waitUntil(t, "the file_change reload", func() bool { return string(e.served(t)) == string(next.der) })
 	})
 
+	t.Run("retries_refused_file_change", func(t *testing.T) {
+		// New files refused at one tick are tried again at the next,
+		// without another change to their mtime or size: the cause (here
+		// a leaf not valid yet; on a host a key mode fixed with chmod,
+		// which changes neither) may go away on its own.
+		e := newHolderEnv(t, days90)
+		if err := e.h.Reload("start"); err != nil {
+			t.Fatal(err)
+		}
+		e.startWatch(t, 20*time.Millisecond, make(chan os.Signal, 1))
+		early := e.ca.issue(t, e.dir, "early", testRPID, t0.Add(time.Hour), t0.Add(days90))
+		install(t, e.live, early, 1)
+		waitUntil(t, "a refused file_change reload", func() bool {
+			for _, r := range e.records(t, "tls certificate reload refused") {
+				if r["trigger"] == "file_change" && strings.Contains(r["err"].(string), "is valid from") {
+					return true
+				}
+			}
+			return false
+		})
+		e.clock.set(t0.Add(2 * time.Hour))
+		waitUntil(t, "the retried load", func() bool { return string(e.served(t)) == string(early.der) })
+		e.requireLoaded(t, 1, early, "file_change")
+	})
+
 	t.Run("warns_under_14_days", func(t *testing.T) {
 		e := newHolderEnv(t, 10*24*time.Hour)
 		if err := e.h.Reload("start"); err != nil {
