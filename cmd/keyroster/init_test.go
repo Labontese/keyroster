@@ -166,7 +166,7 @@ func requireNoConfig(t *testing.T, path string) {
 func TestRepinInstructionsKeepIdentity(t *testing.T) {
 	found := 0
 	for _, name := range []string{"root-ceremony.md", "server-install.md"} {
-		data, err := os.ReadFile(filepath.Join("..", "..", "docs", "runbooks", name))
+		data, err := os.ReadFile(filepath.Join("..", "..", "docs", "runbooks", name)) //nolint:gosec // G304: a constant runbook name under docs/runbooks
 		if err != nil {
 			t.Fatal(err)
 		}

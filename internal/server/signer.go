@@ -119,7 +119,9 @@ func (s *Server) currentStatus(ctx context.Context) (*statusView, error) {
 		}
 		r = &refresh{done: make(chan struct{})}
 		s.inflight = r
-		go s.refresh(r, now)
+		// Detached: a refresh shared by every waiting caller must not end
+		// with this caller's request.
+		go s.refresh(context.WithoutCancel(ctx), r, now)
 	}
 	s.mu.Unlock()
 	select {
@@ -130,12 +132,13 @@ func (s *Server) currentStatus(ctx context.Context) (*statusView, error) {
 	}
 }
 
-// refresh asks the signer for its Status, bounded by statusTimeout and
-// detached from every request, so one caller hanging up does not fail the
-// others. It stores a good answer as the cache entry and hands the result
-// to every caller waiting on r.
-func (s *Server) refresh(r *refresh, now time.Time) {
-	rctx, cancel := context.WithTimeout(context.Background(), statusTimeout)
+// refresh asks the signer for its Status, bounded by statusTimeout. ctx
+// must carry no cancellation (context.WithoutCancel of the starting
+// caller's ctx): the refresh is detached from every request, so one caller
+// hanging up does not fail the others. It stores a good answer as the
+// cache entry and hands the result to every caller waiting on r.
+func (s *Server) refresh(ctx context.Context, r *refresh, now time.Time) {
+	rctx, cancel := context.WithTimeout(ctx, statusTimeout)
 	defer cancel()
 	st, err := s.signer.Status(rctx)
 	var v *statusView

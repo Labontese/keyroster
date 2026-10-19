@@ -25,7 +25,7 @@ func TestRunbookGoToolchain(t *testing.T) {
 	toolchain := string(m[1])
 	goVersion := regexp.MustCompile(`go1\.[0-9]+\.[0-9]+`)
 	for _, name := range []string{"signer-install.md", "server-install.md"} {
-		data, err := os.ReadFile(filepath.Join("..", "..", "docs", "runbooks", name))
+		data, err := os.ReadFile(filepath.Join("..", "..", "docs", "runbooks", name)) //nolint:gosec // G304: a constant runbook name under docs/runbooks
 		if err != nil {
 			t.Fatal(err)
 		}

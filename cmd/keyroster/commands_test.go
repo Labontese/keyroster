@@ -112,7 +112,7 @@ func TestDispatchEscapesControlCharacters(t *testing.T) {
 	}
 	for name, cmdErr := range map[string]error{
 		"x509_san":   fmt.Errorf("tls: failed to verify certificate: %w", x509.HostnameError{Certificate: cert, Host: "localhost"}),
-		"api_error":  errors.New("HTTP 409: \r\x1b[2K\x1b[1Aforged‮\u009b2J\x7f\x00end"),
+		"api_error":  errors.New("HTTP 409: \r\x1b[2K\x1b[1Aforged\u202e\u009b2J\x7f\x00end"),
 		"multi_line": errors.New("first line\nsecond line"),
 	} {
 		t.Run(name, func(t *testing.T) {
