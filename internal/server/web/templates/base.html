@@ -1,0 +1,17 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} - keyroster</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+{{if .Banner}}<div class="kr-banner" role="alert">{{.Banner}}</div>
+{{end}}<header class="kr-header">keyroster</header>
+<main>
+{{template "content" .}}
+</main>
+</body>
+</html>
+{{end}}

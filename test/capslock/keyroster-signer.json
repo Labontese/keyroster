@@ -83,6 +83,7 @@
     "CAPABILITY_FILES",
     "CAPABILITY_MODIFY_SYSTEM_STATE",
     "CAPABILITY_NETWORK",
+    "CAPABILITY_REFLECT",
     "CAPABILITY_UNANALYZED"
   ],
   "github.com/google/go-tpm/tpm2": [

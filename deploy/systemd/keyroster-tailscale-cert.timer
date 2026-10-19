@@ -1,0 +1,18 @@
+# keyroster-tailscale-cert.timer: renew keyroster-server's tailscale cert
+# daily. `tailscale cert` renews a certificate once two thirds of its 90-day
+# lifetime have passed and otherwise keeps the files it has; the files on
+# disk change only when this runs (RESEARCH Pitfall 7).
+#
+# UNVERIFIED: a renewal started by this timer has not been observed; 02-13
+# starts the service by hand and checks that the timer is active.
+[Unit]
+Description=keyroster: daily tailscale cert renewal for keyroster-server
+Documentation=https://github.com/Labontese/keyroster/blob/main/docs/runbooks/server-install.md
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

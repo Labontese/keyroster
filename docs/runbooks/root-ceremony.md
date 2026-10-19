@@ -401,6 +401,26 @@ apply the same rule (`trust.VerifySuccessor`):
    the old root keys and their passphrases. The signer then accepts a
    further successor only with the new roots' signatures. The old roots'
    public fingerprints stay usable as audit pins.
+9. **Re-pin every client.** Every admin and every user whose `keyroster`
+   config pins the old roots re-runs init with the new root fingerprints:
+
+   ```
+   keyroster init --force --server <URL> --tls-pin <current TLS pin> \
+     --root-pin SHA256:<new root C from paper> --root-pin SHA256:<new root D from paper> --threshold <n>
+   ```
+
+   For a private TLS CA, add the same `--tls-root-file` as at the first
+   init. They take the new fingerprints and the threshold from the paper
+   record of step 2, handed over out of band, **never from the server or
+   from an error message**. Until they re-pin, their commands fail with
+   "the server's trust bundle is signed by roots that do not match the
+   --root-pin set" (`ErrTrustRootNotPinned`). That error never names the
+   served roots.
+
+   The error and init's refusal of a wrong `--root-pin` are unit-tested
+   (`rotated_roots_error_names_reinit`, `refuses_wrong_root_pin`).
+   Re-pinning real clients after a real rotation is **UNVERIFIED** until
+   the next rotation that has `keyroster` clients.
 
 Steps 1 to 8 use only commands that `TestRootRotationLiveSigner` (e2e, real
 binaries, real sshd) and the unit tests run: `root init`, `root sign --prev`

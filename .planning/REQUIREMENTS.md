@@ -25,7 +25,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 - [x] **KEY-03**: Admin can store CA keys in a PKCS#11 HSM (e.g. YubiHSM 2) via ssh-agent
 - [x] **KEY-04**: Admin can store CA keys in a TPM 2.0
 - [x] **KEY-05**: Admin can store CA keys in a YubiKey PIV slot
-- [ ] **KEY-06**: Admin can use an encrypted software CA key for evaluation, with a loud warning in CLI and UI
+- [x] **KEY-06**: Admin can use an encrypted software CA key for evaluation, with a loud warning in CLI and UI
 - [ ] **KEY-07**: Admin can perform an offline trust-root ceremony (M-of-N root keys at the security level the admin chooses: software keys on offline media, or hardware keys such as FIDO/PIV) producing a root that signs only trust bundles, KRL authority and policy
 - [ ] **KEY-08**: Admin can rotate a CA key without fleet outage (old and new trusted in parallel until all hosts converge)
 
@@ -178,7 +178,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | KEY-03 | Phase 1 | Complete |
 | KEY-04 | Phase 1 | Complete |
 | KEY-05 | Phase 1 | Complete |
-| KEY-06 | Phase 2 | Pending |
+| KEY-06 | Phase 2 | Complete |
 | KEY-07 | Phase 1 | Pending |
 | KEY-08 | Phase 3 | Pending |
 | AUTH-01 | Phase 2 | Pending |

@@ -1,0 +1,68 @@
+# keyroster-server: the web front (UI-01, PLAT-05, D-10).
+#
+# Install as /etc/systemd/system/keyroster-server.service, together with
+# deploy/sysusers.d/keyroster.conf. See docs/runbooks/server-install.md.
+#
+# The server is untrusted by design: it proposes, the signer decides. It
+# takes its WebAuthn relying party and every custody fact from the signer's
+# Status and refuses to start without an RP in the root-signed policy or
+# with a certificate that does not cover it. This unit gives it its own
+# user, only the capability to bind port 443, and a read-only view of the
+# system apart from its sockets.
+[Unit]
+Description=keyroster server (web UI and API in front of the signer)
+Documentation=https://github.com/Labontese/keyroster/blob/main/docs/runbooks/server-install.md
+# The server asks the signer for its Status at start (and retries for 30 s).
+After=keyroster-signer.service
+Wants=keyroster-signer.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/keyroster-server serve --listen :443 --tls-cert /etc/keyroster/tls/fullchain.pem --tls-key /etc/keyroster/tls/key.pem --signer-socket /run/keyroster-signer/signer.sock
+# SIGHUP reloads the certificate files (the server also checks them every
+# 60 s). The server registers SIGHUP before anything else, so a reload sent
+# while it still waits for the signer does not end it.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# Identity. keyroster-admin is the signer socket's group (mode 0660): the
+# membership lets the server connect, and the signer still requires admin
+# or passkey evidence for everything it signs.
+User=keyroster-server
+Group=keyroster-server
+SupplementaryGroups=keyroster-admin
+UMask=0077
+
+# Capabilities: binding port 443 only.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+# File system: everything read-only; the TLS files are read-only too
+# (root:keyroster-server, directory 0750, key 0640).
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadOnlyPaths=/etc/keyroster/tls
+
+# Network: the HTTPS listener (IPv4 and IPv6) and the signer's Unix socket.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Kernel and process.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

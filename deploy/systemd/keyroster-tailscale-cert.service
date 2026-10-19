@@ -1,0 +1,44 @@
+# keyroster-tailscale-cert: fetch or renew keyroster-server's TLS certificate
+# with `tailscale cert` (optional; the D-11 homelab deployment).
+#
+# Install as /etc/systemd/system/keyroster-tailscale-cert.service with
+# keyroster-tailscale-cert.timer. /etc/keyroster/tailscale-cert.env
+# (root:root 0644) sets KEYROSTER_TLS_NAME to the machine's full name, for
+# example KEYROSTER_TLS_NAME=<server>.<tailnet>.ts.net. That name is also
+# the WebAuthn RP ID: see docs/runbooks/server-install.md before choosing
+# it. Only root may write the env file, because this unit runs as root.
+#
+# Order on a new host: start this unit once, then enable the timer, then
+# enable and start keyroster-server (it refuses to start without the
+# certificate).
+[Unit]
+Description=keyroster: fetch the server's TLS certificate with tailscale cert
+Documentation=https://github.com/Labontese/keyroster/blob/main/docs/runbooks/server-install.md
+After=tailscaled.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/keyroster/tailscale-cert.env
+# ${KEYROSTER_TLS_NAME} in braces is passed as exactly one argument, so the
+# env file cannot add flags to this command.
+ExecStart=/usr/bin/tailscale cert --cert-file /etc/keyroster/tls/fullchain.pem --key-file /etc/keyroster/tls/key.pem ${KEYROSTER_TLS_NAME}
+# keyroster-server reads the key through its group.
+ExecStartPost=/usr/bin/chgrp keyroster-server /etc/keyroster/tls/key.pem
+ExecStartPost=/usr/bin/chmod 0640 /etc/keyroster/tls/key.pem
+# try-reload-or-restart, not reload: the first run happens before
+# keyroster-server has ever started (it needs this certificate to start),
+# and a plain reload of a unit that is not running fails this oneshot. The
+# systemctl manual says of try-reload-or-restart: "This does nothing if the
+# units are not running." With the server running it runs ExecReload
+# (SIGHUP), and the server logs "tls certificate loaded" with trigger
+# sighup. It does not start a server that is stopped or failed.
+# UNVERIFIED until the homelab install (02-13): no host has run this unit,
+# neither before the first server start nor against a running server.
+ExecStartPost=/usr/bin/systemctl try-reload-or-restart keyroster-server.service
+
+# Sandbox. UNVERIFIED until the homelab install (02-13): connecting to the
+# tailscaled socket, tailscale's write-and-rename inside /etc/keyroster/tls
+# and the reload call above must still work under these lines.
+ProtectSystem=strict
+ReadWritePaths=/etc/keyroster/tls
+NoNewPrivileges=yes
