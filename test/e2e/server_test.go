@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -218,6 +219,19 @@ func (e *serverEnv) initArgs() []string {
 func TestServerInitEndToEnd(t *testing.T) {
 	env := startServerEnv(t, serverOpts{Software: true})
 
+	t.Run("logs_start_load_json", func(t *testing.T) {
+		// Counted on the exact string with its key: the 1 h test leaf
+		// also gets the "tls certificate expires soon" warning at start.
+		lines := env.loadedLines()
+		if len(lines) != 1 {
+			t.Fatalf("%d lines with \"msg\":\"tls certificate loaded\" after start, want 1:\n%s", len(lines), env.Stderr.String())
+		}
+		requireJSONLine(t, lines[0])
+		if !strings.Contains(lines[0], `"trigger":"start"`) {
+			t.Fatalf("the start load line lacks \"trigger\":\"start\": %s", lines[0])
+		}
+	})
+
 	cli := newCLIEnv(t)
 	code, stdout, stderr := cli.run(t, env.initArgs()...)
 	if code != 0 {
@@ -283,6 +297,34 @@ func TestServerInitEndToEnd(t *testing.T) {
 	}
 	requireSecurityHeaders(t, "GET /static/app.css", css)
 
+	t.Run("sighup_reload_logs_json", func(t *testing.T) {
+		if err := env.Cmd.Process.Signal(syscall.SIGHUP); err != nil {
+			t.Fatal(err)
+		}
+		var hit string
+		deadline := time.Now().Add(5 * time.Second)
+		for hit == "" && time.Now().Before(deadline) {
+			for _, l := range env.loadedLines() {
+				if strings.Contains(l, `"trigger":"sighup"`) {
+					hit = l
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if hit == "" {
+			t.Fatalf("no \"tls certificate loaded\" line with \"trigger\":\"sighup\" within 5 s of SIGHUP:\n%s", env.Stderr.String())
+		}
+		requireJSONLine(t, hit)
+		select {
+		case <-env.Done:
+			t.Fatalf("keyroster-server exited after SIGHUP:\n%s", env.Stderr.String())
+		default:
+		}
+		if r := env.mustGet(t, "/healthz"); r.code != http.StatusOK {
+			t.Fatalf("GET /healthz after SIGHUP = %d", r.code)
+		}
+	})
+
 	// Control: agent custody, no banner on the page or in init.
 	ctl := startServerEnv(t, serverOpts{})
 	ctlCLI := newCLIEnv(t)
@@ -301,4 +343,103 @@ func TestServerInitEndToEnd(t *testing.T) {
 		t.Errorf("GET / (agent control) %s = %q", serverclient.CustodyHeader, got)
 	}
 	requireSecurityHeaders(t, "GET / (agent control)", cr)
+}
+
+// loadedLines returns the server's stderr lines that carry the exact
+// string `"msg":"tls certificate loaded"`.
+func (e *serverEnv) loadedLines() []string {
+	var out []string
+	for _, l := range strings.Split(e.Stderr.String(), "\n") {
+		if strings.Contains(l, `"msg":"tls certificate loaded"`) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// requireJSONLine fails unless l is one JSON object.
+func requireJSONLine(t *testing.T, l string) {
+	t.Helper()
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(l), &obj); err != nil {
+		t.Fatalf("log line is not a JSON object: %q: %v", l, err)
+	}
+}
+
+// TestServerSIGHUPDuringStartup: a SIGHUP that reaches keyroster-server
+// while it still retries the signer's Status (start-up step 1) does not
+// end the process. An unregistered SIGHUP ends a Go program, and systemd
+// would not restart a service ended by SIGHUP under Restart=on-failure.
+func TestServerSIGHUPDuringStartup(t *testing.T) {
+	ca := newTestCA(t, serverRPID)
+	socket := filepath.Join(shortTempDir(t), "nothing.sock") // nothing listens here
+	port := freePort(t)
+	cmd, log, done := startDaemon(t, "keyroster-server", envWithout("SSH_AUTH_SOCK"), serverBin, "serve",
+		"--listen", "127.0.0.1:"+strconv.Itoa(port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", socket)
+	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatalf("keyroster-server exited before the SIGHUP:\n%s", log.String())
+	default:
+	}
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Second)
+	select {
+	case <-done:
+		t.Fatalf("keyroster-server ended on a SIGHUP during start-up (state %v):\n%s", cmd.ProcessState, log.String())
+	default:
+	}
+	if !strings.Contains(log.String(), "signer status unavailable; retrying") {
+		t.Fatalf("keyroster-server is not in start-up step 1:\n%s", log.String())
+	}
+	_ = cmd.Process.Kill()
+	<-done
+}
+
+// TestServerRefusesStart: keyroster-server does not start without a
+// WebAuthn RP in the signer's policy, nor with a certificate that does
+// not cover the RP ID or has expired.
+func TestServerRefusesStart(t *testing.T) {
+	serve := func(t *testing.T, socket, cert, key string) (int, string) {
+		t.Helper()
+		return runBin(t, serverBin, "", "serve", "--listen", "127.0.0.1:"+strconv.Itoa(freePort(t)),
+			"--tls-cert", cert, "--tls-key", key, "--signer-socket", socket)
+	}
+	ca := newTestCA(t, serverRPID)
+
+	t.Run("no_rp_in_policy", func(t *testing.T) {
+		sg := bootstrapSigner(t, bootstrapOpts{})
+		code, out := serve(t, sg.Socket, ca.CertPath, ca.KeyPath)
+		if code == 0 || !strings.Contains(out, "the installed policy has no WebAuthn RP") {
+			t.Fatalf("serve on a policy without an RP: exit %d:\n%s", code, out)
+		}
+	})
+
+	rp := bootstrapSigner(t, bootstrapOpts{WebAuthnRPID: serverRPID, WebAuthnOrigins: []string{"https://" + serverRPID + ":8443"}})
+	t.Run("leaf_not_covering_rp_id", func(t *testing.T) {
+		cert, key := ca.otherNameLeaf(t)
+		code, out := serve(t, rp.Socket, cert, key)
+		if code == 0 || !strings.Contains(out, "does not cover the RP ID "+serverRPID) {
+			t.Fatalf("serve with a leaf for another name: exit %d:\n%s", code, out)
+		}
+	})
+	t.Run("expired_leaf", func(t *testing.T) {
+		cert, key := ca.expiredLeaf(t, serverRPID)
+		code, out := serve(t, rp.Socket, cert, key)
+		if code == 0 || !strings.Contains(out, "the certificate is valid from") {
+			t.Fatalf("serve with an expired leaf: exit %d:\n%s", code, out)
+		}
+	})
+	t.Run("control_starts", func(t *testing.T) {
+		e := &serverEnv{CA: ca, Port: freePort(t)}
+		e.URL = "https://" + serverRPID + ":" + strconv.Itoa(e.Port)
+		e.Cmd, e.Stderr, e.Done = startDaemon(t, "keyroster-server", envWithout("SSH_AUTH_SOCK"), serverBin, "serve",
+			"--listen", "127.0.0.1:"+strconv.Itoa(e.Port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", rp.Socket)
+		waitFor(t, "keyroster-server /healthz", e.Done, e.Stderr, func() bool {
+			r, err := e.get("/healthz")
+			return err == nil && r.code == http.StatusOK
+		})
+	})
 }

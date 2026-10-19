@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync/atomic"
 	"time"
 )
@@ -85,4 +87,9 @@ func (h *CertHolder) load() (*tls.Certificate, error) {
 			leaf.NotBefore.UTC().Format(time.RFC3339), leaf.NotAfter.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	}
 	return &c, nil
+}
+
+// Watch is not implemented yet (TDD RED stub): it only waits for ctx.
+func (h *CertHolder) Watch(ctx context.Context, _ time.Duration, _ <-chan os.Signal) {
+	<-ctx.Done()
 }

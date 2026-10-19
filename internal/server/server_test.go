@@ -1,0 +1,580 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+
+	"github.com/Labontese/keyroster/internal/custodytext"
+	"github.com/Labontese/keyroster/internal/server/web"
+	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
+)
+
+// testRPID is the relying party of the test policies.
+const testRPID = "keyroster.example"
+
+// logBuffer is the recorder of server log lines: a bytes.Buffer behind a
+// mutex, so a test can read it while handlers write. Every slog JSON
+// record is one line.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// Lines returns the complete lines written so far.
+func (b *logBuffer) Lines() []string {
+	s := b.String()
+	if s == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
+
+// newLogger returns a JSON logger that writes into a new logBuffer.
+func newLogger() (*slog.Logger, *logBuffer) {
+	buf := &logBuffer{}
+	return slog.New(slog.NewJSONHandler(buf, nil)), buf
+}
+
+// fakeSigner is the one test double of the signerAPI seam. It is safe for
+// concurrent use. Each method has a settable result and a call counter,
+// and a blocking hook can be armed for one method by name (hold).
+//
+// Every method calls enter(method) before it returns; a later plan that
+// adds a method adds that step with the method's name and no second hook.
+// A method reads its result when the call starts, so a call held in the
+// hook returns the answer from before any later change.
+type fakeSigner struct {
+	mu        sync.Mutex
+	status    *wire.StatusResponse
+	statusErr error
+	calls     map[string]int
+
+	heldMethod string
+	entered    chan struct{}
+	gate       chan struct{}
+}
+
+func newFakeSigner(st *wire.StatusResponse) *fakeSigner {
+	return &fakeSigner{status: st, calls: map[string]int{}}
+}
+
+// setStatus sets the next Status result.
+func (f *fakeSigner) setStatus(st *wire.StatusResponse, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.status, f.statusErr = st, err
+}
+
+// count returns the number of calls to method so far.
+func (f *fakeSigner) count(method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[method]
+}
+
+// hold arms the hook for method: each later call to method signals
+// entered once and blocks until release, which also disarms the hook.
+// Calls to any other method are not held.
+func (f *fakeSigner) hold(method string) (entered <-chan struct{}, release func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.heldMethod = method
+	f.entered = make(chan struct{}, 16)
+	f.gate = make(chan struct{})
+	gate := f.gate
+	var once sync.Once
+	return f.entered, func() {
+		once.Do(func() {
+			f.mu.Lock()
+			f.heldMethod = ""
+			f.mu.Unlock()
+			close(gate)
+		})
+	}
+}
+
+// enter is the hook step every fake method takes: it holds the call when
+// the hook is armed for method, and returns at once otherwise.
+func (f *fakeSigner) enter(method string) {
+	f.mu.Lock()
+	if f.heldMethod != method {
+		f.mu.Unlock()
+		return
+	}
+	entered, gate := f.entered, f.gate
+	f.mu.Unlock()
+	entered <- struct{}{}
+	<-gate
+}
+
+func (f *fakeSigner) Status(context.Context) (*wire.StatusResponse, error) {
+	f.mu.Lock()
+	f.calls["Status"]++
+	st, err := f.status, f.statusErr
+	f.mu.Unlock()
+	f.enter("Status")
+	return st, err
+}
+
+// testClock is an injectable clock.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = t
+}
+
+// t0 is the start of every test clock.
+var t0 = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+
+// newTestServer builds a Server on fake with an injected clock at t0 and
+// a recording logger, and returns the buffer the logger writes to.
+func newTestServer(t *testing.T, fake *fakeSigner) (*Server, *testClock, *logBuffer) {
+	t.Helper()
+	clock := &testClock{now: t0}
+	logger, buf := newLogger()
+	s, err := newServer(Config{Clock: clock.Now, Logger: logger}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, clock, buf
+}
+
+// testPolicy returns a canonical version-1 policy; withRP adds the
+// WebAuthn RP testRPID.
+func testPolicy(t *testing.T, withRP bool) []byte {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(priv.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &trust.Policy{
+		Version:     1,
+		Prev:        trust.GenesisPrev,
+		AdminQuorum: 1,
+		Admins:      []trust.AdminKey{{Name: "alice", Key: trust.FormatKey(pub)}},
+		CAProfiles: []trust.CAProfile{
+			{Role: trust.RoleUser, MaxTTLSeconds: 43200, DefaultExtensions: []string{"permit-pty"}, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}},
+			{Role: trust.RoleHost, MaxTTLSeconds: 2592000, DefaultExtensions: []string{}, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}},
+			{Role: trust.RoleMachine, MaxTTLSeconds: 86400, DefaultExtensions: []string{"permit-pty"}, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}},
+		},
+	}
+	if withRP {
+		p.WebAuthn = &trust.WebAuthnRP{RPID: testRPID, Origins: []string{"https://" + testRPID}}
+	}
+	data, err := p.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trust.ParsePolicy(data); err != nil {
+		t.Fatalf("test policy does not parse: %v", err)
+	}
+	return data
+}
+
+// testStatus returns a Status for custody (every key) at directory
+// version dir, with a policy that names testRPID.
+func testStatus(t *testing.T, custody string, dir uint64) *wire.StatusResponse {
+	t.Helper()
+	st := &wire.StatusResponse{
+		BundleVersion: 1,
+		Bundle:        []byte(`{"bundle":"opaque to the server"}`),
+		BundleSigs:    []byte("bundle sigs"),
+		Policy:        testPolicy(t, true),
+		PolicySigs:    []byte("policy sigs"),
+	}
+	for _, role := range []string{"user", "host", "machine", "ops", "log"} {
+		st.Keys = append(st.Keys, wire.KeyStatus{Role: role, Alg: "ssh-ed25519", Custody: custody, Fingerprint: "SHA256:" + role})
+	}
+	if dir > 0 {
+		st.DirectoryVersion = dir
+		st.DirectorySHA256[0] = byte(dir)
+		st.DirectoryAuthorized = true
+	}
+	return st
+}
+
+// withDirectory returns a copy of st at directory version dir.
+func withDirectory(st *wire.StatusResponse, dir uint64) *wire.StatusResponse {
+	c := *st
+	c.DirectoryVersion = dir
+	c.DirectorySHA256 = [32]byte{byte(dir)}
+	c.DirectoryAuthorized = dir > 0
+	return &c
+}
+
+// do sends one request through the Server's handler.
+func do(s *Server, method, target string, hdr map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "https://"+testRPID+target, nil)
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// wantSecurityHeaders are the six headers every response carries.
+var wantSecurityHeaders = map[string]string{
+	"Content-Security-Policy":    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+	"Strict-Transport-Security":  "max-age=63072000",
+	"Cross-Origin-Opener-Policy": "same-origin",
+	"X-Content-Type-Options":     "nosniff",
+	"Referrer-Policy":            "no-referrer",
+	"Cache-Control":              "no-store",
+}
+
+func requireHeaders(t *testing.T, what string, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	for k, want := range wantSecurityHeaders {
+		if got := rec.Header().Values(k); len(got) != 1 || got[0] != want {
+			t.Errorf("%s: %s = %q, want exactly %q", what, k, got, want)
+		}
+	}
+}
+
+// requireUnavailable checks a fail-closed answer: 503, the signer
+// unavailable body, and nothing from any status.
+func requireUnavailable(t *testing.T, what string, rec *httptest.ResponseRecorder, html bool) {
+	t.Helper()
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("%s = %d, want 503:\n%s", what, rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	if html {
+		if !strings.Contains(body, "Signer unavailable") || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
+			t.Fatalf("%s: not the error page:\n%s", what, body)
+		}
+	} else if strings.TrimSpace(body) != `{"error":"signer unavailable"}` {
+		t.Fatalf("%s body = %q, want {\"error\":\"signer unavailable\"}", what, body)
+	}
+	for _, leak := range []string{testRPID, "kr-banner", custodytext.SoftwareCABanner([]string{"user"})[:30], "alice", "Directory version", "opaque to the server"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("%s carries status data %q:\n%s", what, leak, body)
+		}
+	}
+	if v := rec.Header().Values(serverclient.CustodyHeader); len(v) != 0 {
+		t.Fatalf("%s carries %s %q", what, serverclient.CustodyHeader, v)
+	}
+	requireHeaders(t, what, rec)
+}
+
+func TestServerStatus(t *testing.T) {
+	t.Run("status_refresh_failure_fails_closed", func(t *testing.T) {
+		fake := newFakeSigner(testStatus(t, "software", 0))
+		s, clock, _ := newTestServer(t, fake)
+		for _, p := range []string{"/", "/api/v1/trust", "/healthz"} {
+			if rec := do(s, http.MethodGet, p, nil); rec.Code != http.StatusOK {
+				t.Fatalf("t0 GET %s = %d", p, rec.Code)
+			}
+		}
+		down := &wire.ErrorResponse{Code: wire.CodeUnavailable, Message: "trust_changed"}
+		fake.setStatus(nil, down)
+		clock.set(t0.Add(4 * time.Second))
+		for _, p := range []string{"/", "/api/v1/trust", "/healthz"} {
+			if rec := do(s, http.MethodGet, p, nil); rec.Code != http.StatusOK {
+				t.Fatalf("t0+4s GET %s = %d, want 200 from the cache", p, rec.Code)
+			}
+		}
+		clock.set(t0.Add(6 * time.Second))
+		requireUnavailable(t, "t0+6s GET /api/v1/trust", do(s, http.MethodGet, "/api/v1/trust", nil), false)
+		requireUnavailable(t, "t0+6s GET /healthz", do(s, http.MethodGet, "/healthz", nil), false)
+		requireUnavailable(t, "t0+6s GET /", do(s, http.MethodGet, "/", nil), true)
+		fake.setStatus(testStatus(t, "software", 0), nil)
+		clock.set(t0.Add(7 * time.Second))
+		if rec := do(s, http.MethodGet, "/", nil); rec.Code != http.StatusOK {
+			t.Fatalf("t0+7s GET / = %d, want 200 after the signer is back", rec.Code)
+		}
+	})
+
+	t.Run("drop_status_forces_refresh", func(t *testing.T) {
+		st1 := testStatus(t, "agent", 1)
+		fake := newFakeSigner(st1)
+		s, _, _ := newTestServer(t, fake)
+		page := func() *httptest.ResponseRecorder { return do(s, http.MethodGet, "/", nil) }
+		dirOf := func(rec *httptest.ResponseRecorder) string {
+			b := rec.Body.String()
+			i := strings.Index(b, "<dt>Directory version</dt><dd>")
+			if i < 0 {
+				t.Fatalf("no directory version on the page:\n%s", b)
+			}
+			rest := b[i+len("<dt>Directory version</dt><dd>"):]
+			return rest[:strings.Index(rest, "<")]
+		}
+		if rec := page(); rec.Code != http.StatusOK || dirOf(rec) != "1" || fake.count("Status") != 1 {
+			t.Fatalf("first GET / = %d, directory %q, %d Status calls; want 200, 1, 1", rec.Code, dirOf(rec), fake.count("Status"))
+		}
+		fake.setStatus(withDirectory(st1, 2), nil)
+		if rec := page(); dirOf(rec) != "1" || fake.count("Status") != 1 {
+			t.Fatalf("control: GET / within the TTL shows directory %q after %d Status calls; want the cached 1 and no call", dirOf(rec), fake.count("Status"))
+		}
+		s.dropStatus()
+		if rec := page(); rec.Code != http.StatusOK || dirOf(rec) != "2" || fake.count("Status") != 2 {
+			t.Fatalf("GET / after dropStatus = %d, directory %q, %d Status calls; want 200, 2 and exactly one new call", rec.Code, dirOf(rec), fake.count("Status"))
+		}
+		fake.setStatus(nil, errors.New("signer down"))
+		s.dropStatus()
+		requireUnavailable(t, "GET / after dropStatus with the signer down", page(), true)
+	})
+
+	t.Run("drop_during_inflight_refresh", func(t *testing.T) {
+		st1 := testStatus(t, "agent", 1)
+		fake := newFakeSigner(st1)
+		s, _, _ := newTestServer(t, fake)
+		entered, release := fake.hold("Status")
+		defer release()
+		refreshed := make(chan *statusView, 1)
+		go func() {
+			v, err := s.currentStatus(context.Background())
+			if err != nil {
+				t.Error(err)
+			}
+			refreshed <- v
+		}()
+		<-entered // the refresh is inside the signer call
+		dropped := make(chan struct{})
+		go func() {
+			s.dropStatus()
+			close(dropped)
+		}()
+		select {
+		case <-dropped:
+			t.Fatal("dropStatus returned while a refresh was in flight; it must wait for the refresh's mutex")
+		case <-time.After(50 * time.Millisecond):
+		}
+		fake.setStatus(withDirectory(st1, 2), nil)
+		release()
+		if v := <-refreshed; v == nil || v.raw.DirectoryVersion != 1 {
+			t.Fatalf("the held refresh returned %+v, want the answer read before the change (directory 1)", v)
+		}
+		<-dropped
+		v, err := s.currentStatus(context.Background())
+		if err != nil || v.raw.DirectoryVersion != 2 || fake.count("Status") != 2 {
+			t.Fatalf("currentStatus after the drop = %+v, %v after %d Status calls; want directory 2 from a new call", v, err, fake.count("Status"))
+		}
+	})
+
+	t.Run("fake_hook_holds_only_armed_method", func(t *testing.T) {
+		st := testStatus(t, "agent", 0)
+		fake := newFakeSigner(st)
+		ctx := context.Background()
+
+		entered, release := fake.hold("GetDirectory")
+		if got, err := fake.Status(ctx); got != st || err != nil {
+			t.Fatalf("Status with the hook armed for GetDirectory = %v, %v", got, err)
+		}
+		select {
+		case <-entered:
+			t.Fatal("a Status call entered a hook armed for GetDirectory")
+		default:
+		}
+		release()
+
+		entered, release = fake.hold("Status")
+		done := make(chan *wire.StatusResponse, 1)
+		go func() {
+			got, _ := fake.Status(ctx)
+			done <- got
+		}()
+		<-entered
+		select {
+		case <-done:
+			t.Fatal("a Status call held by the hook returned before release")
+		case <-time.After(50 * time.Millisecond):
+		}
+		fake.enter("GetDirectory") // returns at once while Status is held
+		select {
+		case <-entered:
+			t.Fatal("entered received a second value for one held call")
+		default:
+		}
+		release()
+		if got := <-done; got != st {
+			t.Fatalf("released Status = %v, want its set result", got)
+		}
+		returned := make(chan struct{})
+		go func() {
+			_, _ = fake.Status(ctx)
+			close(returned)
+		}()
+		select {
+		case <-returned:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Status after release is still held: release must disarm the hook")
+		}
+	})
+
+	t.Run("policy_without_rp_fails_closed", func(t *testing.T) {
+		st := testStatus(t, "agent", 0)
+		st.Policy = testPolicy(t, false)
+		s, _, _ := newTestServer(t, newFakeSigner(st))
+		requireUnavailable(t, "GET / without an RP", do(s, http.MethodGet, "/", nil), true)
+		requireUnavailable(t, "GET /healthz without an RP", do(s, http.MethodGet, "/healthz", nil), false)
+	})
+}
+
+func TestServerPages(t *testing.T) {
+	t.Run("software_custody_banner", func(t *testing.T) {
+		s, _, _ := newTestServer(t, newFakeSigner(testStatus(t, "software", 0)))
+		rec := do(s, http.MethodGet, "/", nil)
+		want := `<div class="kr-banner" role="alert">` + custodytext.SoftwareCABanner([]string{"user", "host", "machine", "ops", "log"}) + `</div>`
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("GET / = %d without the banner:\n%s", rec.Code, rec.Body)
+		}
+		if got := rec.Header().Get(serverclient.CustodyHeader); got != "user=software, host=software, machine=software, ops=software, log=software" {
+			t.Fatalf("%s = %q", serverclient.CustodyHeader, got)
+		}
+	})
+	t.Run("mixed_custody_names_software_roles", func(t *testing.T) {
+		st := testStatus(t, "tpm", 0)
+		st.Keys[4].Custody = "software"
+		s, _, _ := newTestServer(t, newFakeSigner(st))
+		rec := do(s, http.MethodGet, "/", nil)
+		if !strings.Contains(rec.Body.String(), custodytext.SoftwareCABanner([]string{"log"})) {
+			t.Fatalf("GET / does not name the log key:\n%s", rec.Body)
+		}
+	})
+	t.Run("no_banner_without_software", func(t *testing.T) {
+		s, _, _ := newTestServer(t, newFakeSigner(testStatus(t, "tpm", 0)))
+		rec := do(s, http.MethodGet, "/", nil)
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "kr-banner") || strings.Contains(rec.Body.String(), "EVALUATION ONLY") {
+			t.Fatalf("GET / = %d with a banner:\n%s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("trust_document", func(t *testing.T) {
+		st := testStatus(t, "agent", 3)
+		s, _, _ := newTestServer(t, newFakeSigner(st))
+		rec := do(s, http.MethodGet, "/api/v1/trust", nil)
+		var doc serverclient.TrustResponse
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &doc) != nil {
+			t.Fatalf("GET /api/v1/trust = %d:\n%s", rec.Code, rec.Body)
+		}
+		if !bytes.Equal(doc.Bundle, st.Bundle) || !bytes.Equal(doc.BundleSigs, st.BundleSigs) || !bytes.Equal(doc.Policy, st.Policy) ||
+			!bytes.Equal(doc.PolicySigs, st.PolicySigs) || doc.BundleVersion != 1 || doc.DirectoryVersion != 3 || len(doc.Custody) != 5 ||
+			doc.Custody[0] != (serverclient.KeyCustody{Role: "user", Alg: "ssh-ed25519", Custody: "agent", Fingerprint: "SHA256:user"}) {
+			t.Fatalf("trust document = %+v", doc)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []string{"bundle", "bundle_sigs", "policy", "policy_sigs", "bundle_version", "directory_version", "custody"} {
+			if _, ok := raw[k]; !ok {
+				t.Errorf("trust document lacks %q", k)
+			}
+		}
+	})
+}
+
+func TestServerHeaders(t *testing.T) {
+	fake := newFakeSigner(testStatus(t, "agent", 0))
+	s, clock, _ := newTestServer(t, fake)
+	for _, c := range []struct {
+		method, target string
+		hdr            map[string]string
+		code           int
+	}{
+		{http.MethodGet, "/", nil, http.StatusOK},
+		{http.MethodGet, "/api/v1/trust", nil, http.StatusOK},
+		{http.MethodGet, "/healthz", nil, http.StatusOK},
+		{http.MethodGet, "/static/app.css", nil, http.StatusOK},
+		{http.MethodGet, "/static/missing.css", nil, http.StatusNotFound},
+		{http.MethodGet, "/no/such/page", nil, http.StatusNotFound},
+		{http.MethodPost, "/", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
+	} {
+		rec := do(s, c.method, c.target, c.hdr)
+		if rec.Code != c.code {
+			t.Errorf("%s %s = %d, want %d", c.method, c.target, rec.Code, c.code)
+		}
+		requireHeaders(t, c.method+" "+c.target, rec)
+	}
+	fake.setStatus(nil, errors.New("signer down"))
+	clock.set(t0.Add(time.Minute))
+	requireUnavailable(t, "GET / with the signer down", do(s, http.MethodGet, "/", nil), true)
+
+	t.Run("cross_origin_protection", func(t *testing.T) {
+		if rec := do(s, http.MethodPost, "/", map[string]string{"Sec-Fetch-Site": "cross-site"}); rec.Code != http.StatusForbidden {
+			t.Fatalf("cross-site POST = %d, want 403", rec.Code)
+		}
+		if rec := do(s, http.MethodPost, "/", map[string]string{"Origin": "https://evil.example"}); rec.Code != http.StatusForbidden {
+			t.Fatalf("POST with a foreign Origin = %d, want 403", rec.Code)
+		}
+		// Same origin passes the protection; the route then answers
+		// 405, since no POST route exists yet.
+		if rec := do(s, http.MethodPost, "/", map[string]string{"Sec-Fetch-Site": "same-origin"}); rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("same-origin POST = %d, want 405 from the router (not 403)", rec.Code)
+		}
+	})
+
+	t.Run("static_content_types", func(t *testing.T) {
+		n := 0
+		err := fs.WalkDir(web.FS, "static", func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			n++
+			want, ok := staticTypes[path.Ext(p)]
+			if !ok {
+				t.Errorf("embedded static file %s has no entry in staticTypes", p)
+				return nil
+			}
+			rec := do(s, http.MethodGet, "/"+p, nil)
+			if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != want {
+				t.Errorf("GET /%s = %d %q, want 200 %q", p, rec.Code, rec.Header().Get("Content-Type"), want)
+			}
+			return nil
+		})
+		if err != nil || n == 0 {
+			t.Fatalf("walk static: %v, %d files", err, n)
+		}
+		if rec := do(s, http.MethodGet, "/static/", nil); rec.Code != http.StatusNotFound {
+			t.Fatalf("GET /static/ = %d, want 404 (no listing)", rec.Code)
+		}
+		if rec := do(s, http.MethodGet, "/static/app.txt", nil); rec.Code != http.StatusNotFound {
+			t.Fatalf("GET /static/app.txt = %d, want 404 (unmapped extension)", rec.Code)
+		}
+	})
+}
