@@ -172,7 +172,7 @@ func newTestServer(t *testing.T, fake *fakeSigner) (*Server, *testClock, *logBuf
 	t.Helper()
 	clock := &testClock{now: t0}
 	logger, buf := newLogger()
-	s, err := newServer(Config{Clock: clock.Now, Logger: logger}, fake)
+	s, err := newServer(Config{RPID: testRPID, Clock: clock.Now, Logger: logger}, fake)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,6 +517,33 @@ func TestServerStatus(t *testing.T) {
 		case <-returned:
 		case <-time.After(5 * time.Second):
 			t.Fatal("Status after release is still held: release must disarm the hook")
+		}
+	})
+
+	t.Run("rp_id_change_fails_closed", func(t *testing.T) {
+		// The certificate holder checks every reload against the RP ID
+		// the server started with, so a policy that names another RP ID
+		// is refused until keyroster-server restarts.
+		fake := newFakeSigner(testStatus(t, "agent", 0))
+		s, clock, logs := newTestServer(t, fake)
+		if rec := do(s, http.MethodGet, "/", nil); rec.Code != http.StatusOK {
+			t.Fatalf("GET / = %d", rec.Code)
+		}
+		st := testStatus(t, "agent", 0)
+		p, err := trust.ParsePolicy(st.Policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.WebAuthn = &trust.WebAuthnRP{RPID: "other.example", Origins: []string{"https://other.example"}}
+		if st.Policy, err = p.Canonical(); err != nil {
+			t.Fatal(err)
+		}
+		fake.setStatus(st, nil)
+		clock.set(t0.Add(time.Minute))
+		requireUnavailable(t, "GET / after an rp_id change", do(s, http.MethodGet, "/", nil), true)
+		requireUnavailable(t, "GET /healthz after an rp_id change", do(s, http.MethodGet, "/healthz", nil), false)
+		if !strings.Contains(logs.String(), "restart keyroster-server") || !strings.Contains(logs.String(), "other.example") {
+			t.Fatalf("no log line naming the new RP ID and the restart:\n%s", logs)
 		}
 	})
 

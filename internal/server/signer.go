@@ -143,6 +143,11 @@ func (s *Server) refresh(r *refresh, now time.Time) {
 		s.log.Warn("signer status unavailable", "err", err)
 	} else if v, err = newStatusView(st, now); err != nil {
 		s.log.Warn("signer status refused", "err", err)
+	} else if v.rp.RPID != s.rpID {
+		// The TLS certificate was checked against the start-up RP ID,
+		// and the certificate holder keeps checking against it.
+		err = fmt.Errorf("the signer's policy names RP ID %s, but this server started with %s", v.rp.RPID, s.rpID)
+		s.log.Error("signer status refused; restart keyroster-server to serve the new RP ID", "err", err)
 	}
 	s.mu.Lock()
 	if err == nil {

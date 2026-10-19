@@ -213,6 +213,10 @@ records. Lines to look for:
 - `tls certificate reload refused`, with the reason, when new files were
   not swapped in;
 - `tls certificate expires soon`, with `not_after`;
+- `signer status refused; restart keyroster-server to serve the new RP ID`,
+  after a successor policy changed `rp_id` while the server ran. The server
+  answers 503 until you install a certificate for the new hostname and run
+  `systemctl restart keyroster-server`;
 - `signer status unavailable`. While the server cannot reach its signer,
   it answers every page and API call with 503 and shows no RP, policy,
   custody or directory data.

@@ -553,6 +553,12 @@ You need everything from [What you need](#what-you-need), plus:
    checked in step 3.
 5. **Install** with the signer stopped:
    [signer-install.md, "Install a successor bundle"](signer-install.md#install-a-successor-bundle-stop-install-start).
+   If `keyroster-server` runs on the host and the `rp_id` changed, put a
+   certificate for the new hostname in place and then **restart
+   keyroster-server** (`systemctl restart keyroster-server`). It checks
+   its certificate against the RP ID it started with, so until the
+   restart every page, API call and `/healthz` answers 503 and it logs
+   `restart keyroster-server to serve the new RP ID`.
 6. **Audit.** Export the log and run `keyroster audit verify` pinned to the
    roots in force (from paper), with the commands of
    [Rotate the roots](#rotate-the-roots-successor-bundle) step 7. The
