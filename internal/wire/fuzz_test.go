@@ -45,7 +45,7 @@ func FuzzParseIssueRequest(f *testing.F) {
 	})
 }
 
-// FuzzReadMessage (T-02-12, T-02-81): under the signer's caps and two
+// FuzzReadMessage (T-02-12, T-02-81): under the signer's caps and three
 // clients', ReadMessage never panics, every error is a framing sentinel or
 // a short read, and an accepted frame is of a type the caps accept, within
 // their cap for it and exactly what WriteMessage writes for it.
@@ -63,8 +63,11 @@ func FuzzReadMessage(f *testing.F) {
 	f.Add(frameHeader(1 << 30))
 	f.Add(append(frameHeader(3), Version+1, TypeError, 0))
 	f.Add([]byte{0, 0})
+	f.Add(frameOf(f, TypeStatusResponse, MaxStatusFrame-headerLen))
+	f.Add(append(frameHeader(MaxStatusFrame+1), Version, TypeStatusResponse))
+	f.Add(append(frameHeader(2), Version, TypeStatus))
 	f.Fuzz(func(t *testing.T, in []byte) {
-		for _, caps := range []Caps{RequestCaps, ResponseCaps(TypeIssueResponse), ResponseCaps(TypeGetDirectoryResponse)} {
+		for _, caps := range []Caps{RequestCaps, ResponseCaps(TypeIssueResponse), ResponseCaps(TypeGetDirectoryResponse), ResponseCaps(TypeStatusResponse)} {
 			readFuzzFrame(t, in, caps)
 		}
 	})

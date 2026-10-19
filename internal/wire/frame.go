@@ -19,7 +19,8 @@ import (
 )
 
 // MaxFrame is the largest frame length (header and body) of every message
-// type except the two that carry a directory.
+// type except the two that carry a directory and the StatusResponse
+// (MaxStatusFrame).
 const MaxFrame = 64 << 10
 
 // MaxDirectoryFrame is the largest frame length of InstallDirectory and
@@ -36,15 +37,17 @@ const headerLen = 2
 const Version = 1
 
 // Message types. A LoginIssueRequest is answered with an IssueResponse
-// (0x81). A GetDirectory request has an empty body.
+// (0x81). GetDirectory and Status requests have an empty body.
 const (
 	TypeIssueRequest             byte = 0x01
 	TypeInstallDirectory         byte = 0x02
 	TypeGetDirectory             byte = 0x03
+	TypeStatus                   byte = 0x04
 	TypeLoginIssueRequest        byte = 0x05
 	TypeIssueResponse            byte = 0x81
 	TypeInstallDirectoryResponse byte = 0x82
 	TypeGetDirectoryResponse     byte = 0x83
+	TypeStatusResponse           byte = 0x84
 	TypeError                    byte = 0xFF
 )
 
@@ -64,6 +67,8 @@ func maxBodyFor(msgType byte) int {
 	switch msgType {
 	case TypeInstallDirectory, TypeGetDirectoryResponse:
 		return MaxDirectoryFrame - headerLen
+	case TypeStatusResponse:
+		return MaxStatusFrame - headerLen
 	default:
 		return MaxFrame - headerLen
 	}

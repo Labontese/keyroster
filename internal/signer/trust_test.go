@@ -1,6 +1,7 @@
 package signer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -535,6 +536,59 @@ func TestInstallBundleRefusals(t *testing.T) {
 			case wantVersion != 0 && (lerr != nil || latest.Version != wantVersion):
 				t.Fatalf("LatestBundle after the refusal: %v, %v; want version %d", latest, lerr, wantVersion)
 			}
+		})
+	}
+
+	// 02-05-F6: one budget for install and Status. policySigs is padded
+	// with trailing bytes until the would-be Status body (statusResponse
+	// of the ca-init keys and the four documents) has exactly the given
+	// size.
+	padTo := func(t *testing.T, e *installEnv, body int) [4][]byte {
+		t.Helper()
+		in := docs4(t, e.fx.GenesisBundle(t, e.cas, e.fx.Policy()), e.fx.Policy(), e.fx.Root)
+		caKeys, err := e.db.CAKeys(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		base, err := statusResponse(caKeys, 0, in[0], in[1], in[2], in[3], statusDirectory{}).Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		in[3] = append(append([]byte(nil), in[3]...), bytes.Repeat([]byte{'x'}, body-len(base))...)
+		if got, err := statusResponse(caKeys, 0, in[0], in[1], in[2], in[3], statusDirectory{}).Marshal(); body <= wire.MaxStatusFrame-2 && (err != nil || len(got) != body) {
+			t.Fatalf("padded Status body: %d bytes, %v; want %d", len(got), err, body)
+		}
+		return in
+	}
+	for _, tc := range []struct {
+		name     string
+		body     int
+		tooLarge bool
+	}{
+		{"status_budget_exceeded", wire.MaxStatusFrame - 1, true},
+		{"status_budget_at_limit_not_size_refused", wire.MaxStatusFrame - 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInstallEnv(t, NewFixture(t, 1, 1))
+			in := padTo(t, e, tc.body)
+			leaves := leafCount(t, e.db)
+			b, err := e.install([]string{e.fx.RootPin()}, 1, in)
+			if b != nil || err == nil {
+				t.Fatalf("InstallBundle with padded policy signatures = %v, %v; want a refusal", b, err)
+			}
+			if got := errors.Is(err, wire.ErrStatusTooLarge); got != tc.tooLarge {
+				t.Fatalf("InstallBundle error %v: errors.Is ErrStatusTooLarge = %v, want %v", err, got, tc.tooLarge)
+			}
+			if tc.tooLarge && !errors.Is(err, ErrBundleInstall) {
+				t.Fatalf("InstallBundle error %v does not wrap ErrBundleInstall", err)
+			}
+			if n := leafCount(t, e.db); n != leaves {
+				t.Fatalf("%d leaves after the refusal, want %d", n, leaves)
+			}
+			if _, err := e.db.LatestBundle(context.Background()); !errors.Is(err, signerdb.ErrNoBundle) {
+				t.Fatalf("LatestBundle after the refusal: %v, want ErrNoBundle", err)
+			}
+			t.Logf("refusal: %v", err)
 		})
 	}
 

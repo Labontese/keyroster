@@ -16,7 +16,7 @@ log. It cannot be hidden by the online CA host.
 | `tpm` | A physical TPM 2.0 chip or firmware TPM (Intel PTT, AMD fTPM, Infineon, Nuvoton, STMicroelectronics) | `tpm` | The key is created inside the TPM and is wrapped by its storage root key. It cannot be used without that TPM and the key's auth value. |
 | `vtpm` | A virtual or software TPM: swtpm/libtpms (QEMU, Proxmox VE), Hyper-V, Google Cloud, or any TPM whose manufacturer is not on the allowlist below | `tpm` | Weaker than a physical TPM, stronger than a software key. See below. |
 | `agent` | A plain private key loaded into `ssh-agent` | `agent` | **Test and development only.** The key exists as a file somewhere. `doctor` flags it. |
-| `software` | A key file (for roots: age-encrypted on offline media) | — | For online keys: Phase 2 (KEY-06, with loud UI warnings). For roots: see below. |
+| `software` | A key file, age-encrypted with a passphrase (for roots: on offline media) | `software` (online keys) | **Evaluation only.** For online keys see [Software CA keys (KEY-06)](#software-ca-keys-key-06); for roots see [Software root](#software-root-d-10-d-11). `doctor` flags it. |
 
 Hardware custody guarantees one thing: **the key cannot be copied**. It does
 not stop an attacker who controls the signer host from asking the device to
@@ -101,6 +101,86 @@ software key**: the guest VM alone cannot export the keys, so a compromise of
 the signer VM gives an attacker a signing oracle only while they are present,
 not a copy of the keys. `doctor` reports custody `vtpm` as a warning (plan
 01-13), and the bundle shows it to every verifier.
+
+## Software CA keys (KEY-06)
+
+keyroster runs without any hardware. `keyroster-signer ca-init --backend
+software --backend-opt passphrase-file=FILE` creates the five online keys
+(user, host and machine CA, ops key, log key) as **Ed25519** keys. Each is
+stored as an armored age file encrypted to the passphrase, with one scrypt
+recipient at age's default work factor: `{state-dir}/software/{role}.age`,
+mode 0600 in a 0700 directory. The bundle, `ca-pubkeys.json` and the
+`ca_init` log entry record custody `software` for every key.
+
+**This custody is for evaluation only.** It does not protect against:
+
+- **A compromised signer host.** `serve` decrypts the keys into memory at
+  start and keeps them there. Whoever controls the signer host can read
+  them, copy them and issue certificates, even after leaving.
+- **A passphrase stored on the same host.** `serve` must read the
+  passphrase at every start, so it is normally on the signer host, in a
+  file or a systemd credential. A passphrase stored next to the key files
+  makes the keys equivalent to plaintext for anyone who can read both.
+- **Offline guessing of leaked key files.** If the `.age` files leak on
+  their own, for example from a backup or a copied state directory, they
+  can be attacked offline. The only protection left is the passphrase's
+  entropy at age's default scrypt work factor. keyroster requires at least
+  20 characters, but that is a length floor, not a strength check. Use a
+  randomly generated passphrase, for example `openssl rand -base64 32`,
+  never a memorable phrase.
+
+The passphrase comes only from a file, never from argv or the environment,
+and keyroster never logs or prints it:
+
+- `--backend-opt passphrase-file=FILE`: the absolute path of a regular file
+  with no group or other permissions (mode 0600 or 0400); a relative path
+  is refused. Exactly one trailing newline is ignored. ca-init stores the
+  option (the path, not the passphrase), so `install-bundle` and `serve`
+  read the same file. **The choice is permanent for that state
+  directory:** the stored option takes precedence over a systemd
+  credential, and nothing removes it later. `serve` and `install-bundle`
+  can point it at another file with `--backend-opt passphrase-file=FILE`,
+  but an empty value is refused, so adding `LoadCredential=` or
+  `LoadCredentialEncrypted=` to the unit afterwards changes nothing: the
+  signer still reads the plaintext file. To use a systemd credential,
+  run ca-init without this option.
+- Without that option, `$CREDENTIALS_DIRECTORY/keyroster-software-passphrase`,
+  as systemd provides it with `LoadCredential=keyroster-software-passphrase:PATH`
+  or `LoadCredentialEncrypted=`. ca-init, and every later
+  `install-bundle` run outside the unit, then need `CREDENTIALS_DIRECTORY`
+  set to a private directory that holds the same passphrase. The
+  credential must be a regular file with no other permissions. Group
+  bits are allowed, because systemd may give the service user access
+  through an ACL, which shows as group bits. Do not set
+  `CREDENTIALS_DIRECTORY` by hand to a directory other users can read.
+  This path is tested with `CREDENTIALS_DIRECTORY` set by a unit
+  test; it has **not been run under a real systemd unit (UNVERIFIED)**,
+  so the modes systemd gives the file are not checked here either.
+
+A passphrase shorter than 20 characters, a `passphrase-file` readable by
+group or others, a credential readable by others, a passphrase file that
+is not a regular file (a FIFO, for example), a key file or key directory
+that is not private or is a symlink, and a key file that does not decrypt
+to the recorded key are all refused.
+
+`doctor` reports `WARN software_key`. The signer reports the custody of
+every key itself, over its `Status` message, and nothing else is trusted
+for it: no flag, environment variable or configuration of the CLI or the
+server can hide or soften the warning. Every `keyroster ca issue` asks the
+signer for its status before it issues and, while any key has custody
+`software`, prints this banner to stderr, framed by lines of `!`. The
+server's web UI (plan 02-06) will show the same text on every page:
+
+```
+EVALUATION ONLY - SOFTWARE CA KEY: the user, host, machine, ops, log keys
+of this keyroster signer are software keys (custody software). Anyone who
+copies the key files and their passphrase, or controls the signer host,
+can issue certificates. Do not use this instance for real access
+(docs/security/custody.md).
+```
+
+The text is one constant in `internal/custodytext`. A test requires this
+document to quote it verbatim.
 
 ## Software root (D-10, D-11)
 
