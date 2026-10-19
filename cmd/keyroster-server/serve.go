@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -31,9 +32,21 @@ const (
 	statusAttempt = 3 * time.Second
 	// shutdownGrace bounds a graceful shutdown.
 	shutdownGrace = 5 * time.Second
+	// certWatch is how often the certificate files are checked for a
+	// change.
+	certWatch = 60 * time.Second
 )
 
 func runServe(ctx context.Context, args []string, stderr io.Writer) error {
+	// SIGHUP first (02-13-R2-F4). Until a Go program registers SIGHUP,
+	// the signal ends it, and systemd does not restart a service ended by
+	// SIGHUP under Restart=on-failure. The certificate unit's reload can
+	// arrive while start-up still retries the signer (step 1); it waits
+	// in this buffer and becomes one reload once Watch runs. Only the
+	// moments before this statement are left unprotected.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -53,7 +66,7 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 
 	// Logger first: every line of every start-up step, the first
 	// certificate load included, is one JSON object on stderr.
-	logger := slog.New(slog.NewJSONHandler(stderr, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
 	// 1. The signer's Status, retried for up to statusWait.
 	st, err := probeStatus(ctx, *socket, logger)
@@ -95,6 +108,8 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 		MaxHeaderBytes:    16 << 10,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
+	// Reload on a file change (checked every certWatch) and on SIGHUP.
+	go holder.Watch(ctx, certWatch, hup)
 	served := make(chan error, 1)
 	go func() { served <- hs.ServeTLS(l, "", "") }()
 	logger.Info("serving", "listen", l.Addr().String(), "rp_id", rpID, "origins", policy.WebAuthn.Origins,

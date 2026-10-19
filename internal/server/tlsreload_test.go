@@ -104,9 +104,15 @@ func install(t *testing.T, live, src leafFiles, step int) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		writeFile(t, p[1], data)
+		// Each file appears complete, with its final mtime, in one
+		// rename, as certificate tools write them.
+		tmp := p[1] + ".tmp"
+		writeFile(t, tmp, data)
 		mt := time.Now().Add(time.Duration(step) * time.Second)
-		if err := os.Chtimes(p[1], mt, mt); err != nil {
+		if err := os.Chtimes(tmp, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, p[1]); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -292,12 +298,16 @@ func TestCertHolder(t *testing.T) {
 		waitUntil(t, "a sighup load", func() bool { return len(e.records(t, "tls certificate loaded")) == 3 })
 		e.requireLoaded(t, 2, next, "sighup")
 
-		// A refused reload writes its error and no loaded record.
+		// A refused reload writes its error and no loaded record. (The
+		// watcher may also have seen a half-copied pair above and refused
+		// it, so count from here.)
+		refusedBefore := len(e.records(t, "tls certificate reload refused"))
 		if err := os.Remove(e.live.key); err != nil {
 			t.Fatal(err)
 		}
 		hup <- syscall.SIGHUP
-		waitUntil(t, "a refused reload", func() bool { return len(e.records(t, "tls certificate reload refused")) == 1 })
+		waitUntil(t, "a refused reload", func() bool { return len(e.records(t, "tls certificate reload refused")) > refusedBefore })
+		time.Sleep(60 * time.Millisecond)
 		if n := len(e.records(t, "tls certificate loaded")); n != 3 {
 			t.Fatalf("%d tls certificate loaded records after a refused reload, want 3", n)
 		}

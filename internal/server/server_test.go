@@ -231,7 +231,7 @@ func testStatus(t *testing.T, custody string, dir uint64) *wire.StatusResponse {
 	}
 	if dir > 0 {
 		st.DirectoryVersion = dir
-		st.DirectorySHA256[0] = byte(dir)
+		st.DirectorySHA256[0] = byte(dir & 0xff)
 		st.DirectoryAuthorized = true
 	}
 	return st
@@ -241,7 +241,7 @@ func testStatus(t *testing.T, custody string, dir uint64) *wire.StatusResponse {
 func withDirectory(st *wire.StatusResponse, dir uint64) *wire.StatusResponse {
 	c := *st
 	c.DirectoryVersion = dir
-	c.DirectorySHA256 = [32]byte{byte(dir)}
+	c.DirectorySHA256 = [32]byte{byte(dir & 0xff)}
 	c.DirectoryAuthorized = dir > 0
 	return &c
 }
