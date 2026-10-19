@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -394,7 +395,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if err != nil {
-		return fmt.Errorf("%s%s: %w", c.base, path, err)
+		return fmt.Errorf("%s%s: %w", c.base, path, PeerError(err))
 	}
 	if len(data) > maxResponse {
 		return fmt.Errorf("%s%s: response larger than %d bytes", c.base, path, maxResponse)
@@ -424,20 +425,70 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		return nil
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("%s%s: decode: %w", c.base, path, err)
+		return fmt.Errorf("%s%s: decode: %w", c.base, path, PeerError(err))
 	}
 	return nil
 }
 
 // mapError turns a pinned-root failure into ErrTLSRootNotPinned. Other
 // failures (a wrong host name, an expired leaf, a network error) keep
-// their own error and get no re-pin hint.
+// their own error and get no re-pin hint. Either way the transport's
+// error is a PeerError: a handshake error lists the host names of the
+// peer's certificate, which any network-position attacker chooses.
 func (c *Client) mapError(err error) error {
 	var unknown x509.UnknownAuthorityError
 	if errors.As(err, &unknown) || errors.Is(err, errRootPinMismatch) {
-		return fmt.Errorf("%s: %w (%w)", c.base, ErrTLSRootNotPinned, err)
+		return fmt.Errorf("%s: %w (%w)", c.base, ErrTLSRootNotPinned, PeerError(err))
 	}
-	return err
+	return PeerError(err)
+}
+
+// peerError is an error whose text the peer chose in part. Its Error
+// escapes that text (escapeText); Unwrap returns the original, so
+// errors.Is and errors.As still see it.
+type peerError struct{ err error }
+
+func (e *peerError) Error() string { return escapeText(e.err.Error()) }
+func (e *peerError) Unwrap() error { return e.err }
+
+// PeerError wraps err, whose text may come from the server or from a
+// network-position attacker (a certificate's host names in a handshake
+// error, a response body), so that its message escapes every control and
+// format character, newlines and carriage returns included. The text
+// then stays on one line: it cannot scroll the CLI's own message away,
+// erase it, or leave a forged instruction as the last line (T-02-93). A
+// nil err stays nil.
+func PeerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &peerError{err: err}
+}
+
+// escapeText returns s with every rune that is not graphic escaped: a
+// newline, carriage return or tab as \n, \r or \t, any other as \xHH,
+// \uHHHH or \UHHHHHHHH.
+func escapeText(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case unicode.IsGraphic(r):
+			b.WriteRune(r)
+		case r < 0x100:
+			fmt.Fprintf(&b, `\x%02x`, r)
+		case r < 0x10000:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			fmt.Fprintf(&b, `\U%08x`, r)
+		}
+	}
+	return b.String()
 }
 
 // checkCustody parses the CustodyHeader of a response and prints the
@@ -487,7 +538,7 @@ func (c *Client) Trust(ctx context.Context, rootPins []string, threshold int) (*
 	}
 	b, err := trust.VerifySelfSigned(tr.Bundle, tr.BundleSigs, tr.Policy, tr.PolicySigs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("the server's trust bundle does not verify under its own roots: %w", err)
+		return nil, nil, fmt.Errorf("the server's trust bundle does not verify under its own roots: %w", PeerError(err))
 	}
 	// MatchPins' own message names a served root; never show it.
 	if err := trust.MatchPins(b, rootPins, threshold); err != nil {
@@ -501,10 +552,10 @@ func (c *Client) Trust(ctx context.Context, rootPins []string, threshold int) (*
 	}
 	p, err := trust.ParsePolicy(tr.Policy)
 	if err != nil {
-		return nil, nil, fmt.Errorf("the server's policy: %w", err)
+		return nil, nil, fmt.Errorf("the server's policy: %w", PeerError(err))
 	}
 	if err := trust.CheckAdminsNotRoots(p, b.Root.Keys); err != nil {
-		return nil, nil, err
+		return nil, nil, PeerError(err)
 	}
 	return b, p, nil
 }

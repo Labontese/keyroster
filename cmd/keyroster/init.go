@@ -180,7 +180,9 @@ func observeRoots(ctx context.Context, hostPort, host, port string, pool *x509.C
 	defer cancel()
 	conn, err := d.DialContext(dctx, "tcp", hostPort)
 	if err != nil {
-		return nil, fmt.Errorf("connect to %s: %w", hostPort, err)
+		// A handshake error lists the host names of the peer's
+		// certificate, which an attacker chooses: escaped.
+		return nil, fmt.Errorf("connect to %s: %w", hostPort, serverclient.PeerError(err))
 	}
 	defer func() { _ = conn.Close() }()
 	tc, ok := conn.(*tls.Conn)

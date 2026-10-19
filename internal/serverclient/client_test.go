@@ -236,6 +236,22 @@ func TestClientTLS(t *testing.T) {
 		}
 	})
 
+	t.Run("peer_san_escaped", func(t *testing.T) {
+		// The peer chooses the host names a HostnameError lists (an
+		// IA5String may hold '\n' and ESC). The error text escapes them
+		// all and keeps the x509 error for errors.As.
+		forged := strings.Repeat("\n", 40) + "\r\x1b[2Kkeyroster init --force --tls-pin sha256/ATTACKER"
+		url := startTLS(t, r.leaf(t, forged, time.Now().Add(-time.Hour), time.Now().Add(time.Hour)), custodyHandler(agentCustody))
+		err := get(clientFor(t, url, r, nil))
+		var he x509.HostnameError
+		if !errors.As(err, &he) {
+			t.Fatalf("forged SAN: err = %v, want an x509.HostnameError", err)
+		}
+		if msg := err.Error(); strings.ContainsAny(msg, "\n\r\x1b") || !strings.Contains(msg, `\n\r\x1b[2Kkeyroster init --force`) {
+			t.Fatalf("forged SAN: the error text carries the peer's raw control characters or hides them: %q", msg)
+		}
+	})
+
 	t.Run("expired_leaf_not_root_error", func(t *testing.T) {
 		url := startTLS(t, r.leaf(t, "localhost", time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour)), custodyHandler(agentCustody))
 		err := get(clientFor(t, url, r, nil))
@@ -705,5 +721,24 @@ func TestPinOf(t *testing.T) {
 		if CheckPin(bad) == nil {
 			t.Errorf("CheckPin(%q) accepted", bad)
 		}
+	}
+}
+
+// TestEscapeText: every rune that is not graphic is escaped, each form
+// once; graphic text, spaces and a backslash pass unchanged.
+func TestEscapeText(t *testing.T) {
+	for in, want := range map[string]string{
+		`a b\c åäö`:             `a b\c åäö`,
+		"1\n2\r3\t4":            `1\n2\r3\t4`,
+		"\x00\x1b[2K\x7f\u0085": `\x00\x1b[2K\x7f\x85`,
+		"x\u202ey\u2066z\ufeff": `x\u202ey\u2066z\ufeff`,
+		"tag\U000E0041":         `tag\U000e0041`,
+	} {
+		if got := escapeText(in); got != want {
+			t.Errorf("escapeText(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if PeerError(nil) != nil {
+		t.Error("PeerError(nil) != nil")
 	}
 }

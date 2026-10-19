@@ -73,6 +73,9 @@ func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // \uHHHH. An error can carry server-chosen text, such as a JSON error body
 // or a certificate's host names; printed raw, an ESC sequence or a
 // carriage return could erase the real message and forge an instruction.
+// Such text is already escaped where it enters, newlines included
+// (serverclient.PeerError); printable is the backstop, and it keeps the
+// newlines of the CLI's own multi-line messages.
 func printable(s string) string {
 	var b strings.Builder
 	for _, r := range s {

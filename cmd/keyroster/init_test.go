@@ -33,8 +33,9 @@ type initServer struct {
 	url      string
 	rootFile string // the test root, PEM
 	rootPin  string
-	rootFP   string // the trust root's SHA256 fingerprint
-	otherPin string // a well-formed pin of a root the server never presents
+	rootFP   string          // the trust root's SHA256 fingerprint
+	otherPin string          // a well-formed pin of a root the server never presents
+	leaf     tls.Certificate // the server's localhost certificate under the test root
 }
 
 // newInitServer signs a genesis bundle with one software root (the
@@ -58,12 +59,14 @@ func newInitServer(t *testing.T, custody string) *initServer {
 		t.Fatal(err)
 	}
 	other, _ := initTestRoot(t)
+	cert := tls.Certificate{Certificate: [][]byte{leaf}, PrivateKey: leafKey}
 	is := &initServer{
-		url:      serveTrustDoc(t, doc, custody, tls.Certificate{Certificate: [][]byte{leaf}, PrivateKey: leafKey}),
+		url:      serveTrustDoc(t, doc, custody, cert),
 		rootFile: filepath.Join(t.TempDir(), "root.pem"),
 		rootPin:  serverclient.PinOf(root),
 		rootFP:   rootFP,
 		otherPin: serverclient.PinOf(other),
+		leaf:     cert,
 	}
 	writeTestFile(t, is.rootFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw}))
 	return is
