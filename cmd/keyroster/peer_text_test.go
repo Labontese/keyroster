@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"io"
 	"math/big"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // Full-length pins an attacker wants the user to type. Short markers such
@@ -148,7 +150,8 @@ func trustCommand(t *testing.T, srv *initServer, url string) {
 }
 
 // TestPeerTextCannotForgeAdvice: whatever text a network-position attacker
-// (A, B) chooses, stderr never carries a forged re-pin instruction: no attacker pin, no
+// (A, B) or a server holding a TLS key under the pinned root (C) chooses,
+// stderr never carries a forged re-pin instruction: no attacker pin, no
 // padding, and the CLI's own advice, when printed, comes last (T-02-93).
 // Each case is a real TLS handshake or HTTP exchange through dispatch.
 func TestPeerTextCannotForgeAdvice(t *testing.T) {
@@ -204,4 +207,104 @@ func TestPeerTextCannotForgeAdvice(t *testing.T) {
 		url := serveTLS(t, hintChain(t), http.NotFoundHandler())
 		requirePeerTextContained(t, trustAt(t, url), serverclient.ErrTLSRootNotPinned)
 	})
+	// C: the server holds a TLS key under the pinned root.
+	doc := func(t *testing.T, bundle []byte) []byte {
+		t.Helper()
+		var tr serverclient.TrustResponse
+		if err := json.Unmarshal(srvDoc(t, srv), &tr); err != nil {
+			t.Fatal(err)
+		}
+		tr.Bundle = bundle
+		out, err := json.Marshal(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	t.Run("C_unknown_field_no_roots", func(t *testing.T) {
+		// A bundle with no root set at all, whose only field name is the
+		// padded advice: trust.DecodeStrict would name it.
+		bundle, err := json.Marshal(map[string]int{paddedAdvice: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		url := serveTrustDoc(t, doc(t, bundle), softwareCustody, srv.leaf)
+		requirePeerTextContained(t, initAt(t, url), serverclient.ErrTrustRootNotPinned)
+		requirePeerTextContained(t, trustAt(t, url), serverclient.ErrTrustRootNotPinned)
+	})
+	t.Run("C_pinned_root_padded_issued_at", func(t *testing.T) {
+		// The real bundle, pinned root included, with issued_at replaced
+		// by the padded advice: canonical, but no longer what the root
+		// signed. trust.ParseBundle would quote issued_at.
+		var tr serverclient.TrustResponse
+		if err := json.Unmarshal(srvDoc(t, srv), &tr); err != nil {
+			t.Fatal(err)
+		}
+		var b trust.Bundle
+		if err := json.Unmarshal(tr.Bundle, &b); err != nil {
+			t.Fatal(err)
+		}
+		b.IssuedAt = paddedAdvice
+		bundle, err := trust.CanonicalJSON(&b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		url := serveTrustDoc(t, doc(t, bundle), softwareCustody, srv.leaf)
+		const refused = "the server's trust bundle is signed by 0 of your pinned roots, below your threshold of 1"
+		for _, stderr := range []string{initAt(t, url), trustAt(t, url)} {
+			requirePeerTextContained(t, stderr, nil)
+			if !strings.HasSuffix(strings.TrimSpace(stderr), refused) {
+				t.Errorf("stderr does not end in %q: %.2000s", refused, stderr)
+			}
+		}
+	})
+	t.Run("C_api_error_padded", func(t *testing.T) {
+		body, err := json.Marshal(serverclient.APIError{Error: paddedAdvice})
+		if err != nil {
+			t.Fatal(err)
+		}
+		url := serveTLS(t, srv.leaf, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write(body)
+		}))
+		stderr := initAt(t, url)
+		requirePeerTextContained(t, stderr, nil)
+		if !strings.Contains(stderr, `HTTP 409: [peer text, cut to 64 bytes: "keyroster init: the server's TLS`) {
+			t.Errorf("stderr does not show the body as a short excerpt: %.2000s", stderr)
+		}
+	})
+	t.Run("C_custody_header_padded", func(t *testing.T) {
+		url := serveTrustDoc(t, srvDoc(t, srv), "user=software,"+paddedAdvice, srv.leaf)
+		stderr := initAt(t, url)
+		requirePeerTextContained(t, stderr, nil)
+		if !strings.Contains(stderr, `malformed Keyroster-Custody header [peer text, cut to 64 bytes: "user=software, keyroster init:`) {
+			t.Errorf("stderr does not show the header as a short excerpt: %.2000s", stderr)
+		}
+	})
+}
+
+// srvDoc fetches the trust document srv serves, as the server sent it.
+func srvDoc(t *testing.T, srv *initServer) []byte {
+	t.Helper()
+	pool := x509.NewCertPool()
+	roots, err := serverclient.ParseRoots(readTestFile(t, srv.rootFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.AddCert(roots[0])
+	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool}}}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.url+serverclient.TrustPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }

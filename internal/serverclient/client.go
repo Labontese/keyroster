@@ -32,6 +32,8 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -103,7 +105,7 @@ func ParseCustodyHeader(v string) ([]wire.KeyStatus, error) {
 	for _, part := range strings.Split(v, ",") {
 		role, custody, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok || !custodyToken.MatchString(role) || !custodyToken.MatchString(custody) || seen[role] {
-			return nil, fmt.Errorf("malformed %s header %q", CustodyHeader, v)
+			return nil, fmt.Errorf("malformed %s header %s", CustodyHeader, peerExcerpt(v))
 		}
 		seen[role] = true
 		out = append(out, wire.KeyStatus{Role: role, Custody: custody})
@@ -153,8 +155,6 @@ const (
 	requestTimeout = 30 * time.Second
 	// maxResponse bounds a response body.
 	maxResponse = 4 << 20
-	// maxAPIError bounds the server error text an error message quotes.
-	maxAPIError = 200
 )
 
 // bannerFrame frames the custody banner on stderr, as keyroster ca issue
@@ -411,13 +411,8 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	if !ok {
 		var apiErr APIError
 		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
-			// The server's own text: quoted, so no control character
-			// reaches the terminal, and capped.
-			msg := apiErr.Error
-			if len(msg) > maxAPIError {
-				msg = msg[:maxAPIError] + "..."
-			}
-			return fmt.Errorf("%s%s: HTTP %d: server said: %q", c.base, path, resp.StatusCode, msg)
+			// The server's own text, as a short delimited excerpt.
+			return fmt.Errorf("%s%s: HTTP %d: %w", c.base, path, resp.StatusCode, PeerError(errors.New(apiErr.Error)))
 		}
 		return fmt.Errorf("%s%s: HTTP %d", c.base, path, resp.StatusCode)
 	}
@@ -514,21 +509,28 @@ func invalidReason(r x509.InvalidReason) string {
 	}
 }
 
-// peerError is an error whose text the peer chose in part. Its Error
-// escapes that text (escapeText); Unwrap returns the original, so
-// errors.Is and errors.As still see it.
+// maxPeerExcerpt bounds the escaped peer text a PeerError shows, in
+// bytes, delimiters not counted.
+const maxPeerExcerpt = 64
+
+// peerError is an error whose text the peer chose in part. Its Error is
+// only a short excerpt of that text (peerExcerpt); Unwrap returns the
+// original, so errors.Is and errors.As still see it.
 type peerError struct{ err error }
 
-func (e *peerError) Error() string { return escapeText(e.err.Error()) }
+func (e *peerError) Error() string { return peerExcerpt(e.err.Error()) }
 func (e *peerError) Unwrap() error { return e.err }
 
 // PeerError wraps err, whose text may come from the server or from a
-// network-position attacker (a certificate's host names in a handshake
-// error, a response body), so that its message escapes every control and
-// format character, newlines and carriage returns included. The text
-// then stays on one line: it cannot scroll the CLI's own message away,
-// erase it, or leave a forged instruction as the last line (T-02-93). A
-// nil err stays nil.
+// network-position attacker (a response body, a malformed document), so
+// that its message is at most a short, escaped, delimited excerpt of that
+// text: [peer text: "..."]. Every run of white space becomes one space,
+// everything but printable ASCII is escaped (strconv.QuoteToASCII, so a
+// quote cannot end the excerpt early), and the escaped text is cut at
+// maxPeerExcerpt bytes. The excerpt is still untrusted text, but it is
+// too short to carry a forged command with full-length pins, and padding
+// cannot push the CLI's message off the screen (T-02-93). A caller never
+// puts the CLI's own advice after a PeerError. A nil err stays nil.
 func PeerError(err error) error {
 	if err == nil {
 		return nil
@@ -536,30 +538,31 @@ func PeerError(err error) error {
 	return &peerError{err: err}
 }
 
-// escapeText returns s with every rune that is not graphic escaped: a
-// newline, carriage return or tab as \n, \r or \t, any other as \xHH,
-// \uHHHH or \UHHHHHHHH.
-func escapeText(s string) string {
+// peerExcerpt returns s as PeerError shows it.
+func peerExcerpt(s string) string {
 	var b strings.Builder
+	space, cut := false, false
 	for _, r := range s {
-		switch {
-		case r == '\n':
-			b.WriteString(`\n`)
-		case r == '\r':
-			b.WriteString(`\r`)
-		case r == '\t':
-			b.WriteString(`\t`)
-		case unicode.IsGraphic(r):
-			b.WriteRune(r)
-		case r < 0x100:
-			fmt.Fprintf(&b, `\x%02x`, r)
-		case r < 0x10000:
-			fmt.Fprintf(&b, `\u%04x`, r)
-		default:
-			fmt.Fprintf(&b, `\U%08x`, r)
+		if unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
 		}
+		q := strconv.QuoteToASCII(string(r))
+		piece := q[1 : len(q)-1]
+		if space {
+			piece = " " + piece
+		}
+		if b.Len()+len(piece) > maxPeerExcerpt {
+			cut = true
+			break
+		}
+		b.WriteString(piece)
+		space = false
 	}
-	return b.String()
+	if cut {
+		return fmt.Sprintf(`[peer text, cut to %d bytes: "%s"]`, maxPeerExcerpt, b.String())
+	}
+	return `[peer text: "` + b.String() + `"]`
 }
 
 // checkCustody parses the CustodyHeader of a response and prints the
@@ -593,12 +596,14 @@ func (c *Client) checkCustody(h http.Header, required bool) error {
 	return nil
 }
 
-// Trust fetches /api/v1/trust and verifies it: the bundle must carry its
-// own threshold of its own roots' signatures on bundle and policy
-// (trust.VerifySelfSigned), its root set must be exactly rootPins at
-// exactly threshold (trust.MatchPins; otherwise ErrTrustRootNotPinned),
-// the policy must be the one the bundle names (ErrPolicyNotBundled), and
-// no policy admin may be a root. It returns the verified bundle and policy.
+// Trust fetches /api/v1/trust and verifies it. First, before anything else
+// in the documents is parsed, the bundle's root set must be exactly
+// rootPins at exactly threshold (otherwise ErrTrustRootNotPinned, with no
+// served text) and threshold of those roots must have signed bundle and
+// policy. Then the bundle must pass trust.VerifySelfSigned and
+// trust.MatchPins, the policy must be the one the bundle names
+// (ErrPolicyNotBundled), and no policy admin may be a root. It returns the
+// verified bundle and policy.
 func (c *Client) Trust(ctx context.Context, rootPins []string, threshold int) (*trust.Bundle, *trust.Policy, error) {
 	if err := trust.CheckPins(rootPins, threshold); err != nil {
 		return nil, nil, err
@@ -607,6 +612,29 @@ func (c *Client) Trust(ctx context.Context, rootPins []string, threshold int) (*
 	if err := c.GetJSON(ctx, TrustPath, &tr); err != nil {
 		return nil, nil, err
 	}
+	// Authenticate before parsing (T-02-93): the served root set must be
+	// exactly the pins, and those roots must have signed both documents,
+	// before anything else in them is parsed or can appear in an error.
+	roots, err := pinnedRoots(tr.Bundle, rootPins, threshold)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, d := range []struct {
+		what, namespace string
+		doc, sigs       []byte
+	}{
+		{"trust bundle", trust.NamespaceBundle, tr.Bundle, tr.BundleSigs},
+		{"policy", trust.NamespacePolicy, tr.Policy, tr.PolicySigs},
+	} {
+		signed, err := trust.CountPinnedSigners(d.doc, d.sigs, d.namespace, roots)
+		if err != nil {
+			return nil, nil, fmt.Errorf("the server's %s signatures are malformed: %w", d.what, PeerError(err))
+		}
+		if len(signed) < threshold {
+			return nil, nil, fmt.Errorf("the server's %s is signed by %d of your pinned roots, below your threshold of %d", d.what, len(signed), threshold)
+		}
+	}
+	// From here on the documents are root-signed.
 	b, err := trust.VerifySelfSigned(tr.Bundle, tr.BundleSigs, tr.Policy, tr.PolicySigs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("the server's trust bundle does not verify under its own roots: %w", PeerError(err))
@@ -629,4 +657,32 @@ func (c *Client) Trust(ctx context.Context, rootPins []string, threshold int) (*
 		return nil, nil, PeerError(err)
 	}
 	return b, p, nil
+}
+
+// pinnedRoots reads only the root set of a served bundle and returns its
+// keys by fingerprint when they are exactly pins at exactly threshold.
+// Any other root set, none included, is ErrTrustRootNotPinned. The read
+// is lenient on purpose: the roots sign only canonical bytes, so a
+// document they signed reads the same here as in the strict parse that
+// follows. No error repeats the bundle's text.
+func pinnedRoots(bundle []byte, pins []string, threshold int) (map[string]ssh.PublicKey, error) {
+	var doc struct {
+		Root trust.RootSet `json:"root"`
+	}
+	if json.Unmarshal(bundle, &doc) != nil {
+		return nil, errors.New("the server's trust bundle is not a JSON document")
+	}
+	if trust.MatchPins(&trust.Bundle{Root: doc.Root}, pins, threshold) != nil {
+		// MatchPins' own message names a served root; never show it.
+		return nil, ErrTrustRootNotPinned
+	}
+	roots := make(map[string]ssh.PublicKey, len(doc.Root.Keys))
+	for _, rk := range doc.Root.Keys {
+		pub, err := trust.ParseKey(rk.Key)
+		if err != nil {
+			return nil, ErrTrustRootNotPinned // unreachable: MatchPins parsed every key
+		}
+		roots[ssh.FingerprintSHA256(pub)] = pub
+	}
+	return roots, nil
 }

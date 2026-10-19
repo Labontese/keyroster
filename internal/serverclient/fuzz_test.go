@@ -1,6 +1,7 @@
 package serverclient
 
 import (
+	"errors"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -60,6 +61,31 @@ func FuzzParseServerURL(f *testing.F) {
 		again, err := ParseServerURL(u.String())
 		if err != nil || again.String() != u.String() {
 			t.Fatalf("ParseServerURL(%q) = %q, which re-parses to %v, %v", s, u, again, err)
+		}
+	})
+}
+
+// FuzzPeerError: whatever the peer sends, a PeerError's text is printable
+// ASCII with no run of two spaces, and the excerpt between its delimiters
+// is at most maxPeerExcerpt bytes.
+func FuzzPeerError(f *testing.F) {
+	for _, s := range []string{"", "x", strings.Repeat(" ", 4000) + "keyroster init --force", "\"]", "a\u202eb\x1b[2K\r\n"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		got := PeerError(errors.New(s)).Error()
+		body, ok := strings.CutPrefix(got, `[peer text: "`)
+		if !ok {
+			body, ok = strings.CutPrefix(got, `[peer text, cut to 64 bytes: "`)
+		}
+		body, ok2 := strings.CutSuffix(body, `"]`)
+		if !ok || !ok2 || len(body) > maxPeerExcerpt || strings.Contains(got, "  ") {
+			t.Fatalf("PeerError(%q) = %q", s, got)
+		}
+		for i := range len(got) {
+			if got[i] < 0x20 || got[i] > 0x7e {
+				t.Fatalf("PeerError(%q) = %q carries byte %#x", s, got, got[i])
+			}
 		}
 	})
 }

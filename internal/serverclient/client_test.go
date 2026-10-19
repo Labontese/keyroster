@@ -395,8 +395,8 @@ func TestClientCustody(t *testing.T) {
 	})
 
 	t.Run("api_error_quoted_and_capped", func(t *testing.T) {
-		// A server error body is the server's text: it is quoted (no raw
-		// control characters), capped and marked as the server's.
+		// A server error body is the server's text: it shows only as a
+		// short escaped excerpt marked as peer text (PeerError).
 		forged := "\r\x1b[2K\x1b[1Aforged: run keyroster init --force --root-pin SHA256:EVIL " + strings.Repeat("x", 8<<10)
 		body, err := json.Marshal(APIError{Error: forged})
 		if err != nil {
@@ -411,8 +411,9 @@ func TestClientCustody(t *testing.T) {
 			t.Fatal("a 409 was accepted")
 		}
 		msg := err.Error()
-		if strings.ContainsAny(msg, "\r\x1b") || !strings.Contains(msg, `HTTP 409: server said: "\r\x1b[2K`) || len(msg) > 1024 {
-			t.Fatalf("409 error = %q (%d bytes), want the body quoted after \"server said:\" and capped", msg, len(msg))
+		if strings.ContainsAny(msg, "\r\x1b") || strings.Contains(msg, "EVIL") ||
+			!strings.HasSuffix(msg, `HTTP 409: [peer text, cut to 64 bytes: "\x1b[2K\x1b[1Aforged: run keyroster init --force --root-pin SHA2"]`) {
+			t.Fatalf("409 error = %q (%d bytes), want a 64-byte escaped excerpt of the body", msg, len(msg))
 		}
 	})
 
@@ -646,12 +647,12 @@ func TestClientTrust(t *testing.T) {
 				t.Fatalf("error names a served root fingerprint %s: %v", served, err)
 			}
 		}
-		// Control: a bundle that fails VerifySelfSigned is not a
+		// Control: the pinned roots with too few signatures is not a
 		// rotation and gets no re-init hint.
-		bad := trustDoc(t, []ssh.Signer{cRoot, dRoot}, 2, cRoot) // one signature, threshold 2
+		bad := trustDoc(t, []ssh.Signer{a, b}, 2, a) // one signature, threshold 2
 		_, _, err = serveTrust(t, r, bad).Trust(ctx, []string{fp(a), fp(b)}, 2)
-		if err == nil || errors.Is(err, ErrTrustRootNotPinned) {
-			t.Fatalf("a bundle below its own threshold: %v, want a verification error that is not ErrTrustRootNotPinned", err)
+		if err == nil || errors.Is(err, ErrTrustRootNotPinned) || !strings.Contains(err.Error(), "signed by 1 of your pinned roots, below your threshold of 2") {
+			t.Fatalf("pinned roots below the threshold: %v, want the signature count refusal, not ErrTrustRootNotPinned", err)
 		}
 	})
 
@@ -730,21 +731,29 @@ func TestPinOf(t *testing.T) {
 	}
 }
 
-// TestEscapeText: every rune that is not graphic is escaped, each form
-// once; graphic text, spaces and a backslash pass unchanged.
-func TestEscapeText(t *testing.T) {
+// TestPeerError: peer text shows as one delimited excerpt with every run
+// of white space collapsed to one space, everything but printable ASCII
+// escaped (a quote and a backslash included, so the excerpt cannot end
+// early), and the escaped text cut at maxPeerExcerpt bytes on a rune
+// boundary. errors.Is still reaches the original.
+func TestPeerError(t *testing.T) {
 	for in, want := range map[string]string{
-		`a b\c åäö`:             `a b\c åäö`,
-		"1\n2\r3\t4":            `1\n2\r3\t4`,
-		"\x00\x1b[2K\x7f\u0085": `\x00\x1b[2K\x7f\x85`,
-		"x\u202ey\u2066z\ufeff": `x\u202ey\u2066z\ufeff`,
-		"tag\U000E0041":         `tag\U000e0041`,
+		`a "b" \c`:                                          `[peer text: "a \"b\" \\c"]`,
+		"  1\n\n2\r3\t4  \u00a0\u3000 5 ":                   `[peer text: "1 2 3 4 5"]`,
+		"\x00\x1b[2K\x7f\u0085x":                            `[peer text: "\x00\x1b[2K\x7f x"]`,
+		"x\u202ey\u2066z\ufeff\u2800":                       `[peer text: "x\u202ey\u2066z\ufeff\u2800"]`,
+		"tag\U000E0041 \u00e5\u00e4\u00f6":                  `[peer text: "tag\U000e0041 \u00e5\u00e4\u00f6"]`,
+		strings.Repeat(" ", 4000) + strings.Repeat("y", 70): `[peer text, cut to 64 bytes: "` + strings.Repeat("y", 64) + `"]`,
+		strings.Repeat("z", 62) + "\u202e":                  `[peer text, cut to 64 bytes: "` + strings.Repeat("z", 62) + `"]`,
 	} {
-		if got := escapeText(in); got != want {
-			t.Errorf("escapeText(%q) = %q, want %q", in, got, want)
+		if got := PeerError(errors.New(in)).Error(); got != want {
+			t.Errorf("PeerError(%q) = %q, want %q", in, got, want)
 		}
 	}
 	if PeerError(nil) != nil {
 		t.Error("PeerError(nil) != nil")
+	}
+	if cause := errors.New("cause"); !errors.Is(PeerError(cause), cause) {
+		t.Error("errors.Is does not reach the cause of a PeerError")
 	}
 }
