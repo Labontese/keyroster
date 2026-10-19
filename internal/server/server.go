@@ -39,8 +39,9 @@ type Server struct {
 	static  fs.FS
 	handler http.Handler
 
-	mu     sync.Mutex  // held for a whole status refresh
-	status *statusView // nil when there is no current entry
+	mu       sync.Mutex  // guards status and inflight; never held across a signer call
+	status   *statusView // nil when there is no current entry
+	inflight *refresh    // the status refresh in flight, or nil
 }
 
 // New builds a Server that reaches the signer at cfg.SignerSocket.

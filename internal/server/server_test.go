@@ -397,6 +397,79 @@ func TestServerStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("concurrent_callers_share_one_failed_refresh", func(t *testing.T) {
+		// Callers that arrive while a refresh is in flight take its
+		// result, a failure included; none of them starts a refresh of
+		// its own after it (no queue of serial 3 s attempts).
+		fake := newFakeSigner(nil)
+		fake.setStatus(nil, errors.New("signer down"))
+		s, _, _ := newTestServer(t, fake)
+		entered, release := fake.hold("Status")
+		defer release()
+		const n = 8
+		errs := make(chan error, n)
+		call := func() {
+			_, err := s.currentStatus(context.Background())
+			errs <- err
+		}
+		go call()
+		<-entered // the first refresh is inside the signer call
+		for range n - 1 {
+			go call()
+		}
+		time.Sleep(100 * time.Millisecond) // let the others join the refresh
+		release()
+		for range n {
+			select {
+			case err := <-errs:
+				if err == nil {
+					t.Fatal("a caller got a status from a failed refresh")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("a caller is still waiting after the refresh ended")
+			}
+		}
+		if got := fake.count("Status"); got != 1 {
+			t.Fatalf("%d concurrent callers made %d Status calls, want 1 shared refresh", n, got)
+		}
+	})
+
+	t.Run("waiter_leaves_on_cancel", func(t *testing.T) {
+		// A request whose client went away stops waiting for the refresh,
+		// and a request already cancelled starts no signer call.
+		fake := newFakeSigner(testStatus(t, "agent", 0))
+		s, _, _ := newTestServer(t, fake)
+		cancelled, cancelNow := context.WithCancel(context.Background())
+		cancelNow()
+		if _, err := s.currentStatus(cancelled); err == nil || fake.count("Status") != 0 {
+			t.Fatalf("currentStatus with a cancelled context = %v after %d Status calls; want an error and no call", err, fake.count("Status"))
+		}
+		entered, release := fake.hold("Status")
+		defer release()
+		go func() { _, _ = s.currentStatus(context.Background()) }()
+		<-entered
+		ctx, cancel := context.WithCancel(context.Background())
+		left := make(chan error, 1)
+		go func() {
+			_, err := s.currentStatus(ctx)
+			left <- err
+		}()
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+		select {
+		case err := <-left:
+			if err == nil {
+				t.Fatal("a cancelled waiter got a status")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a cancelled waiter is still waiting for the held refresh")
+		}
+		release()
+		if got := fake.count("Status"); got != 1 {
+			t.Fatalf("%d Status calls, want 1", got)
+		}
+	})
+
 	t.Run("fake_hook_holds_only_armed_method", func(t *testing.T) {
 		st := testStatus(t, "agent", 0)
 		fake := newFakeSigner(st)
