@@ -19,12 +19,12 @@ affects: [02-07, 02-08, 02-09, 02-10, 02-11, 02-12, 02-13, 02-14, KEY-06, UI-01,
 actuals:
   tokens: 42700   # chars/4 over the added lines of the code, test, deploy and docs diff (170707 chars); planning docs excluded
   tasks: 3        # Tasks 1-3 executed; Task 4 is the owner merge gate
-  commits: 7      # git rev-list --count plan_head_before..HEAD at this SUMMARY update (5 code commits, the first docs commit, one test fix); this docs commit follows
+  commits: 9      # git rev-list --count plan_head_before..HEAD at this SUMMARY update (5 code commits, 2 docs commits, the test fix, the toolchain fix); this docs commit follows
 plan_head_before: 2d9fc80b547e11d653279b1bbdb6510def09d66a
-plan_head_after: 8e81eb2d85ba069481b035578da7bd2e5b2fb995
+plan_head_after: 0e514ff9e6a52802af35e20f1ed128e968576dc9
 
 tech-stack:
-  added: []   # stdlib only: net/http, html/template, embed, crypto/tls, crypto/x509, log/slog
+  added: []   # stdlib only: net/http, html/template, embed, crypto/tls, crypto/x509, log/slog; toolchain go1.27.1 -> go1.27.2 (Deviation 18)
   patterns:
     - "One signer seam per package: an interface in signer.go, one production adapter, one test fake with a per-method blocking hook"
     - "One status accessor with a fail-closed rule; handlers set Keyroster-Custody only from a current status"
@@ -213,7 +213,7 @@ status: complete
 
 **How keyroster.localhost resolved:**
 - **WSL:** natively. The CGO_ENABLED=0 resolver got `[::1 127.0.0.1]` from WSL's DNS, so no hosts entry and no flag were needed.
-- **CI:** `.github/workflows/e2e.yml` gets no /etc/hosts step in this push. Whether the GitHub runner resolves the name natively is shown by the e2e lanes of this PR and reported in the merge-gate checkpoint. If it does not, the step is added and this paragraph is updated in the same push.
+- **CI:** natively too. `.github/workflows/e2e.yml` has no /etc/hosts step, and on the PR's first head (dc31dd7) both required e2e lanes passed on ubuntu-24.04, `e2e (9.5p1)` and `e2e (10.5p1)`, with TestServerInitEndToEnd and TestServerSIGHUPDuringStartup in them. So the runner resolves the name without the step.
 
 **Unit hardening (keyroster-server.service):**
 - **Identity:** `User=`/`Group=keyroster-server`, `SupplementaryGroups=keyroster-admin` (socket access only).
@@ -236,7 +236,7 @@ status: complete
    - `c1fdc74` (test, RED; includes a Watch stub so the suite compiles);
    - `7b623da` (feat, GREEN);
    - `46fe011` (test: fuzz targets).
-3. **Task 3.** `4d222d0` (docs: units, sysusers, runbooks). After the first SUMMARY commit, the pre-push privacy grep led to `8e81eb2` (test: a documentation address for the IP-literal URL cases; Deviation 17).
+3. **Task 3.** `4d222d0` (docs: units, sysusers, runbooks). After the first SUMMARY commit, the pre-push privacy grep led to `8e81eb2` (test: a documentation address for the IP-literal URL cases; Deviation 17). The first CI run led to `0e514ff` (fix: Go 1.27.2 toolchain and one capslock pair; Deviation 18).
 4. **Task 4, merge gate.** Not attempted. It is the owner's `checkpoint:human-action`.
 
 **Plan metadata:** `docs(02-06): complete server-core plan` (this file, STATE.md, REQUIREMENTS.md).
@@ -298,11 +298,13 @@ status: complete
 | Task 2 acceptance greps (named cases; one `"tls certificate expires soon"`; SIGHUP and the JSON logger before the first Status call; fake, hook, enter and logBuffer greps; slog grep = 0; sentinels; currentStatus) | Windows host | all PASS |
 | Task 3 verify 1 (unit and sysusers greps) | Windows host | PASS |
 | Task 3 verify 2: `systemd-analyze verify` | WSL, systemd 255 | 0 unknown key, section, invalid or parse lines. The only complaints are the missing `/usr/local/bin/keyroster-server` and `/usr/bin/tailscale` on the workstation, and the DrvFs file modes |
-| Task 3 verify 3: `go test -race ./...`, `go vet ./...`, `go vet -tags e2e`, gofmt (GOROOT gofmt, from a script file), golangci-lint (linux, windows, darwin), capslock-check, dep-firewall, testonly-firewall | WSL | all pass. Lint: 0 issues for each OS. capslock 90/90. dep-firewall: only the documented libc exception. testonly-firewall: clean, 6 combinations |
+| Task 3 verify 3: `go test -race ./...`, `go vet ./...`, `go vet -tags e2e`, gofmt (GOROOT gofmt, from a script file), golangci-lint (linux, windows, darwin), capslock-check, dep-firewall, testonly-firewall | WSL | all pass. Lint: 0 issues for each OS. capslock 90/90 on go1.27.1 (91/91 after Deviation 18). dep-firewall: only the documented libc exception. testonly-firewall: clean, 6 combinations |
 | Full e2e suite (`-tags e2e`) | WSL | sshd 10.5p1: 23 PASS, 0 FAIL, 0 SKIP. sshd 9.5p1: 23 PASS, 0 FAIL, 0 SKIP |
 | `go test -count=1 ./...`; `go vet` for darwin and windows | Windows (native) | PASS |
 | openssl pin line from the runbook vs `serverclient.PinOf` | WSL, OpenSSL 3.0.13 | identical. The runbook's fingerprint statement (openssl `-fingerprint -sha256`, colons removed, lower case, equals the SHA-256 of the DER) was also checked |
-| Task 3 verify 4 (SUMMARY on the pushed head) and 5 (required checks) | GitHub | after the push; reported in the merge-gate checkpoint |
+| Re-run on go1.27.2 (Deviation 18): `go test -race ./...`, vet, gofmt, golangci-lint, capslock-check, dep-firewall, e2e `TestServer*\|TestSoftwareCAEndToEnd` (10.5p1); govulncheck for linux, windows and darwin | WSL; Windows natively for the three touched packages | all pass. capslock 91/91. govulncheck: 0 vulnerabilities on each OS. The piv govulncheck needs pcsclite headers, which WSL lacks, so it runs in CI only |
+| First CI run, head dc31dd7 | GitHub | every required check passed except `govulncheck` and `build-piv` (its govulncheck step), which failed on the go1.27.1 standard library; fixed by Deviation 18. `fuzz` was still running |
+| Task 3 verify 4 (SUMMARY on the pushed head) and 5 (required checks) on the fixed head | GitHub | after the second push; reported in the merge-gate checkpoint |
 
 `TestCheckLogAgainstLiveSigner` (the known ~1-in-40 `-race` flake) did not fail in this run.
 
@@ -381,14 +383,22 @@ See `key-decisions` in the frontmatter.
 
 ---
 
-**Total deviations:** 17:
+**18. [Rule 3, CI blocker] Go toolchain go1.27.1 -> go1.27.2, and one capslock pair. The owner should review it at the merge gate.**
+- **Found by:** the required `govulncheck` check (and the govulncheck step of `build-piv`) on the PR's first head. It reported 11 standard-library vulnerabilities, all fixed in go1.27.2: GO-2026-6599, 6600 (html/template), 6603, 6610, 6611, 6612, 6617 (net/http/internal/http2), 6605, 6613 (net/http), 6607 (crypto/tls) and 6608 (net/textproto). This plan's net/http server, net/http client and html/template made them reachable. On main they were not.
+- **Fix:** `toolchain go1.27.2` in go.mod (the `go 1.26.0` directive is unchanged). govulncheck now reports 0 for linux, windows and darwin.
+- **Consequence:** under go1.27.2 capslock reports one new pair for keyroster-signer, `internal/trust CAPABILITY_REFLECT`. The traced path is `trust.CanonicalJSON -> encoding/json.Marshal -> encoding/json/v2.Marshal -> encoding/json.transformMarshalError`. It is a standard-library change in JSON's error path; no keyroster code in the signer graph changed. The baseline takes that one line (`bash scripts/capslock-check.sh --update`, a one-line diff).
+- **Why it is flagged:** 02-05's precedent took capslock pairs to the owner. This pair is accepted on the trace above, so the owner should confirm it at the merge gate.
+- **Commit:** 0e514ff.
+
+**Total deviations:** 18:
 - 7 interpretations and naming;
 - 5 Rule 2 additions;
 - 1 scope item;
 - 3 process notes;
-- 1 privacy fix.
+- 1 privacy fix;
+- 1 toolchain fix (with one capslock pair for owner review).
 
-**Impact on plan:** there is no new module dependency. No production code path exists only for tests. The signer's dependency graph is unchanged: dep-firewall and capslock are 90/90 and the signer does not import internal/server.
+**Impact on plan:** there is no new module dependency. No production code path exists only for tests. The signer's own imports are unchanged and it does not import internal/server. dep-firewall is clean. The one new capslock pair comes from the go1.27.2 standard library (Deviation 18).
 
 ## Issues Encountered
 
@@ -406,7 +416,8 @@ See `key-decisions` in the frontmatter.
 - **The few milliseconds between process start and the SIGHUP registration** are uncovered, as the plan says.
 - **Root pinning when the server's root is also in the system pool.** The client never consults the system pool (RootCAs holds only the pinned roots), so the planned case "refused even if that root is in the system pool" holds by construction. The test cannot add a root to the real system pool; it uses a root outside the pinned set.
 - **Re-pinning real clients after a real root rotation** (root-ceremony step 9). UNVERIFIED until the next rotation that has keyroster clients.
-- **`keyroster.localhost` on the GitHub runner, and every CI lane of this PR.** The results come after the push and are reported in the merge-gate checkpoint.
+- **The CI lanes on the fixed head (0e514ff and the docs commit after it).** The results come after the second push and are reported in the merge-gate checkpoint.
+- **Why go1.27.2 adds REFLECT to internal/trust under capslock.** The path is traced (Deviation 18), but which change in the 1.27.2 `encoding/json` error path caused it was not identified.
 - **Browsers.** No browser has loaded the pages, so CSP behaviour in Chrome, Edge and Firefox is UNVERIFIED. The headers are asserted byte for byte in e2e.
 
 ## Known Stubs
@@ -436,7 +447,7 @@ None for CI. Installing on a host follows docs/runbooks/server-install.md (02-13
 
 ## Self-Check: PASSED
 
-- Every file in key-files.created exists. Commits c2038c3, c1fdc74, 7b623da, 46fe011 and 4d222d0 are ancestors of HEAD.
+- Every file in key-files.created exists. Commits c2038c3, c1fdc74, 7b623da, 46fe011, 4d222d0, 8e81eb2 and 0e514ff are ancestors of HEAD.
 - Every acceptance criterion of Tasks 1-3 was re-run and passes:
   - the server-install.md words (Public Suffix List, Certificate Transparency, self-signed, UNVERIFIED, TLS root changed, --force, the openssl pin line, root:root 0644, tls certificate loaded, not sending its full chain);
   - the order "certificate unit, timer, server", and the timer-renewal sentence carrying UNVERIFIED;
