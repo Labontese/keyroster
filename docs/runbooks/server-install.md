@@ -344,8 +344,10 @@ Otherwise the CA has moved to a new root:
    verified and no pin is printed.
 3. Compare the two out of band.
 4. Re-run init with
-   `--tls-pin <new pin> --root-pin ... --threshold ... --force`, plus the
-   same `--tls-root-file` for a private CA.
+   `--tls-pin <new pin> --root-pin ... --threshold ... --user <your name> [--admin-key SHA256:<your admin key>] --force`,
+   plus the same `--tls-root-file` for a private CA. `--force` replaces
+   the whole config, so pass `--user` and, for an admin, `--admin-key`
+   again.
 
 A new intermediate or a new leaf under the same root needs nothing: root
 pins survive both (RESEARCH Q1). You cannot pin a future root in advance.

@@ -116,7 +116,8 @@ func ParseCustodyHeader(v string) ([]wire.KeyStatus, error) {
 var ErrTLSRootNotPinned = errors.New("the server's TLS certificate does not chain to a root you pinned with keyroster init. " +
 	"If its CA changed roots, run `keyroster init --server <URL>` without --tls-pin (add --tls-root-file <new root PEM> for a private CA) " +
 	"to print the roots it now presents, compare the pins out of band (docs/runbooks/server-install.md \"TLS root changed\"), " +
-	"then re-run init with --tls-pin and --force. " +
+	"then re-run init with --tls-pin and --force, plus your --root-pin, --threshold, --user and (for an admin) --admin-key, " +
+	"since --force replaces the whole config. " +
 	"The same error appears when the server is not sending its full chain (a missing intermediate certificate); " +
 	"in that case fix the server's certificate file and do not re-pin")
 
@@ -127,7 +128,8 @@ var ErrTLSRootNotPinned = errors.New("the server's TLS certificate does not chai
 var ErrTrustRootNotPinned = errors.New("the server's trust bundle is signed by roots that do not match the --root-pin set you gave keyroster init. " +
 	"If the roots were rotated (docs/runbooks/root-ceremony.md \"Rotate the roots\"), get the new root fingerprints and threshold " +
 	"out of band from the root holders' records, never from the server, and run " +
-	"`keyroster init --force --server <URL> --tls-pin <pin> --root-pin <new fp> [--root-pin ...] --threshold <n>`")
+	"`keyroster init --force --server <URL> --tls-pin <pin> --root-pin <new fp> [--root-pin ...] --threshold <n> " +
+	"--user <name> [--admin-key <your admin key>]` (--force replaces the whole config)")
 
 // ErrSignerUnavailable is a 503 from the server: it cannot reach its
 // signer, so it reports nothing about the signer's state, custody included.

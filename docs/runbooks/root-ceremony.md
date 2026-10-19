@@ -406,8 +406,13 @@ apply the same rule (`trust.VerifySuccessor`):
 
    ```
    keyroster init --force --server <URL> --tls-pin <current TLS pin> \
-     --root-pin SHA256:<new root C from paper> --root-pin SHA256:<new root D from paper> --threshold <n>
+     --root-pin SHA256:<new root C from paper> --root-pin SHA256:<new root D from paper> --threshold <n> \
+     --user <your name> [--admin-key SHA256:<your admin key>]
    ```
+
+   `init --force` replaces the whole config with what its flags say, so
+   pass `--user` and, for an admin, `--admin-key` again; without them
+   they are dropped from the config.
 
    For a private TLS CA, add the same `--tls-root-file` as at the first
    init. They take the new fingerprints and the threshold from the paper

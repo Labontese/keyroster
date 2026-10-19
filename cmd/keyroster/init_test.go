@@ -159,6 +159,37 @@ func requireNoConfig(t *testing.T, path string) {
 	}
 }
 
+// TestRepinInstructionsKeepIdentity: init --force builds the config from
+// its flags alone, so every documented re-pin command and both re-pin
+// error messages must pass --user and --admin-key again; otherwise an
+// admin who follows them loses admin_key and user from the config.
+func TestRepinInstructionsKeepIdentity(t *testing.T) {
+	found := 0
+	for _, name := range []string{"root-ceremony.md", "server-install.md"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "docs", "runbooks", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, para := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n\n") {
+			if !strings.Contains(para, "init") || !strings.Contains(para, "--force") || !strings.Contains(para, "--root-pin") {
+				continue
+			}
+			found++
+			if !strings.Contains(para, "--user") || !strings.Contains(para, "--admin-key") {
+				t.Errorf("%s: a re-pin instruction without --user and --admin-key:\n%s", name, para)
+			}
+		}
+	}
+	if found < 2 {
+		t.Fatalf("found %d re-pin instructions in the runbooks, want at least 2 (root-ceremony step 9, server-install TLS root changed)", found)
+	}
+	for _, err := range []error{serverclient.ErrTrustRootNotPinned, serverclient.ErrTLSRootNotPinned} {
+		if !strings.Contains(err.Error(), "--user") || !strings.Contains(err.Error(), "--admin-key") {
+			t.Errorf("re-pin error without --user and --admin-key: %v", err)
+		}
+	}
+}
+
 const softwareCustody = "user=software, host=software, machine=software, ops=software, log=software"
 
 func TestInit(t *testing.T) {
