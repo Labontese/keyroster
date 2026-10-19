@@ -1,0 +1,43 @@
+/* keyroster-server: plain CSS, no external fonts or assets (UI-01). */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+}
+body {
+  margin: 0 auto;
+  max-width: 60rem;
+  padding: 0 1rem 2rem;
+}
+.kr-header {
+  font-weight: bold;
+  padding: 1rem 0;
+  border-bottom: 1px solid #8884;
+}
+.kr-banner {
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 3px solid #b00020;
+  background: #fde7ea;
+  color: #5c000f;
+  font-weight: bold;
+}
+.kr-facts dt {
+  font-weight: bold;
+}
+.kr-facts dd {
+  margin: 0 0 0.5rem 0;
+}
+.kr-keys {
+  border-collapse: collapse;
+}
+.kr-keys th,
+.kr-keys td {
+  border: 1px solid #8886;
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+}
+code {
+  font-size: 0.9em;
+  word-break: break-all;
+}

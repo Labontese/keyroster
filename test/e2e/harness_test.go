@@ -36,6 +36,7 @@ import (
 var (
 	keyrosterBin string
 	signerBin    string
+	serverBin    string
 )
 
 func TestMain(m *testing.M) {
@@ -56,7 +57,8 @@ func runMain(m *testing.M) int {
 	}
 	keyrosterBin = filepath.Join(dir, "keyroster")
 	signerBin = filepath.Join(dir, "keyroster-signer")
-	for bin, pkg := range map[string]string{keyrosterBin: "./cmd/keyroster", signerBin: "./cmd/keyroster-signer"} {
+	serverBin = filepath.Join(dir, "keyroster-server")
+	for bin, pkg := range map[string]string{keyrosterBin: "./cmd/keyroster", signerBin: "./cmd/keyroster-signer", serverBin: "./cmd/keyroster-server"} {
 		cmd := exec.Command("go", "build", "-trimpath", "-o", bin, pkg)
 		cmd.Dir = root
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
@@ -229,21 +231,6 @@ func sshAdd(t *testing.T, sock, keyfile string) {
 
 // Signers are started by bootstrapSigner (bootstrap_test.go): ca-init,
 // a root-signed genesis bundle installed with pinned roots, then serve.
-
-// addLogKey creates an Ed25519 log key in dir, loads it into the agent at
-// agentSock and returns its public key file and fingerprint.
-func addLogKey(t *testing.T, agentSock, dir string) (pubFile, fp string) {
-	t.Helper()
-	key := filepath.Join(dir, "log_key")
-	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "log-key", "-f", key)
-	sshAdd(t, agentSock, key)
-	out := sshKeygen(t, "-l", "-E", "sha256", "-f", key+".pub")
-	fields := strings.Fields(out)
-	if len(fields) < 2 || !strings.HasPrefix(fields[1], "SHA256:") {
-		t.Fatalf("ssh-keygen -l: unexpected output %q", out)
-	}
-	return key + ".pub", fields[1]
-}
 
 // sshdOptions configures startSSHD.
 type sshdOptions struct {

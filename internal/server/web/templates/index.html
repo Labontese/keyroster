@@ -1,0 +1,14 @@
+{{define "content"}}<h1>{{.RPID}}</h1>
+<dl class="kr-facts">
+<dt>Trust bundle version</dt><dd>{{.BundleVersion}}</dd>
+<dt>Policy version</dt><dd>{{.PolicyVersion}}</dd>
+<dt>Directory version</dt><dd>{{if .DirectoryVersion}}{{.DirectoryVersion}}{{else}}none installed{{end}}</dd>
+</dl>
+<h2>Signer keys</h2>
+<table class="kr-keys">
+<thead><tr><th>Role</th><th>Algorithm</th><th>Custody</th><th>Fingerprint</th></tr></thead>
+<tbody>
+{{range .Keys}}<tr><td>{{.Role}}</td><td>{{.Alg}}</td><td>{{.Custody}}</td><td><code>{{.Fingerprint}}</code></td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
