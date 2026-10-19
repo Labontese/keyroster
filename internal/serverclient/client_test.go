@@ -480,6 +480,12 @@ func TestClientTransport(t *testing.T) {
 // and is signed by signers, with a matching policy.
 func trustDoc(t *testing.T, roots []ssh.Signer, threshold uint32, signers ...ssh.Signer) TrustResponse {
 	t.Helper()
+	return trustDocAdmin(t, nil, roots, threshold, signers...)
+}
+
+// trustDocAdmin is trustDoc whose policy admin is admin (nil: a new key).
+func trustDocAdmin(t *testing.T, admin ssh.Signer, roots []ssh.Signer, threshold uint32, signers ...ssh.Signer) TrustResponse {
+	t.Helper()
 	edKey := func() ssh.Signer {
 		_, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
@@ -492,9 +498,12 @@ func trustDoc(t *testing.T, roots []ssh.Signer, threshold uint32, signers ...ssh
 		return s
 	}
 	keyOf := func(s ssh.Signer) string { return trust.FormatKey(s.PublicKey()) }
+	if admin == nil {
+		admin = edKey()
+	}
 	p := &trust.Policy{
 		Version: 1, Prev: trust.GenesisPrev, AdminQuorum: 1,
-		Admins: []trust.AdminKey{{Name: "alice", Key: keyOf(edKey())}},
+		Admins: []trust.AdminKey{{Name: "alice", Key: keyOf(admin)}},
 		CAProfiles: []trust.CAProfile{
 			{Role: trust.RoleUser, MaxTTLSeconds: 43200, DefaultExtensions: []string{"permit-pty"}, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}},
 			{Role: trust.RoleHost, MaxTTLSeconds: 2592000, DefaultExtensions: []string{}, AllowedExtensions: []string{}, AllowedCriticalOptions: []string{}},
@@ -630,6 +639,29 @@ func TestClientTrust(t *testing.T) {
 		doc.Policy, doc.PolicySigs = other.Policy, other.PolicySigs // signed by a, but not this bundle's policy
 		if _, _, err := serveTrust(t, r, doc).Trust(ctx, []string{fp(a)}, 1); !errors.Is(err, ErrPolicyNotBundled) {
 			t.Fatalf("a root-signed policy the bundle does not name: %v, want ErrPolicyNotBundled", err)
+		}
+	})
+
+	t.Run("reported_bundle_version_mismatch_refused", func(t *testing.T) {
+		// The signed bundle is version 1; the server reports 2.
+		doc := trustDoc(t, []ssh.Signer{a}, 1, a)
+		doc.BundleVersion = 2
+		_, _, err := serveTrust(t, r, doc).Trust(ctx, []string{fp(a)}, 1)
+		if err == nil || !strings.Contains(err.Error(), "reports bundle version 2 for a bundle of version 1") {
+			t.Fatalf("a mismatched bundle_version: %v, want the version refusal", err)
+		}
+	})
+
+	t.Run("admin_is_root_refused", func(t *testing.T) {
+		// Trust's own check: VerifySelfSigned does not compare admins
+		// with roots.
+		doc := trustDocAdmin(t, a, []ssh.Signer{a}, 1, a)
+		if _, err := trust.VerifySelfSigned(doc.Bundle, doc.BundleSigs, doc.Policy, doc.PolicySigs); err != nil {
+			t.Fatalf("control: the document does not pass VerifySelfSigned: %v", err)
+		}
+		_, _, err := serveTrust(t, r, doc).Trust(ctx, []string{fp(a)}, 1)
+		if !errors.Is(err, trust.ErrKeyIsRoot) {
+			t.Fatalf("a root-signed policy whose admin is the root: %v, want ErrKeyIsRoot", err)
 		}
 	})
 
