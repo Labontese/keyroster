@@ -87,12 +87,23 @@ func requireOneEscapedLine(t *testing.T, stderr, want string) {
 	}
 }
 
+// requireNoSAN fails unless stderr is one line that states the host name
+// failure in the CLI's own words and repeats nothing of the forged SAN.
+func requireNoSAN(t *testing.T, stderr string) {
+	t.Helper()
+	requireOneEscapedLine(t, stderr, "the server's TLS certificate is not valid for localhost")
+	if strings.Contains(stderr, "ATTACKER") || strings.Contains(stderr, "[2K") {
+		t.Fatalf("stderr repeats the forged SAN: %q", stderr)
+	}
+}
+
 // TestRemoteTextEscaped: text the server or a network-position attacker
-// chooses (a certificate's host names in a handshake error, a JSON error
-// field) reaches stderr with every control character escaped, newlines
-// included, so it cannot scroll the real message away and leave a forged
-// re-pin instruction as the last line (T-02-93). Each case is a real TLS
-// handshake or HTTP exchange through the CLI's dispatch.
+// chooses never reaches stderr raw. A certificate's host names in a
+// handshake error are not printed at all (serverclient.ConnectError); a
+// JSON error field is escaped, newlines included, so it cannot scroll the
+// real message away and leave a forged re-pin instruction as the last line
+// (T-02-93). Each case is a real TLS handshake or HTTP exchange through
+// the CLI's dispatch.
 func TestRemoteTextEscaped(t *testing.T) {
 	srv := newInitServer(t, softwareCustody)
 	evilURL := serveTLS(t, forgedLeaf(t), http.NotFoundHandler())
@@ -106,7 +117,7 @@ func TestRemoteTextEscaped(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("init against a forged SAN: exit %d: %s", code, stderr)
 		}
-		requireOneEscapedLine(t, stderr, `\x1b[2K`+forgedInstruction)
+		requireNoSAN(t, stderr)
 	})
 
 	t.Run("serverclient_handshake_san", func(t *testing.T) {
@@ -128,7 +139,7 @@ func TestRemoteTextEscaped(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("Trust against a forged SAN: exit %d: %s", code, stderr)
 		}
-		requireOneEscapedLine(t, stderr, `\x1b[2K`+forgedInstruction)
+		requireNoSAN(t, stderr)
 	})
 
 	t.Run("init_json_error", func(t *testing.T) {

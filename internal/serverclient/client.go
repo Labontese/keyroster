@@ -390,7 +390,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return c.mapError(err)
+		return c.mapError(path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
@@ -430,17 +430,88 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	return nil
 }
 
-// mapError turns a pinned-root failure into ErrTLSRootNotPinned. Other
-// failures (a wrong host name, an expired leaf, a network error) keep
-// their own error and get no re-pin hint. Either way the transport's
-// error is a PeerError: a handshake error lists the host names of the
-// peer's certificate, which any network-position attacker chooses.
-func (c *Client) mapError(err error) error {
-	var unknown x509.UnknownAuthorityError
-	if errors.As(err, &unknown) || errors.Is(err, errRootPinMismatch) {
-		return fmt.Errorf("%s: %w (%w)", c.base, ErrTLSRootNotPinned, PeerError(err))
+// mapError states a failed request through ConnectError: a chain that
+// does not end in a pinned root is ErrTLSRootNotPinned, with nothing
+// after it.
+func (c *Client) mapError(path string, err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		// Its text repeats the URL; c.base and path say the same.
+		err = ue.Err
+	}
+	return fmt.Errorf("%s%s: %w", c.base, path, ConnectError(c.base.Hostname(), err, ErrTLSRootNotPinned))
+}
+
+// connectFailure is a failed certificate verification stated only in the
+// CLI's own words. Error never includes the cause's text, which repeats
+// names from the peer's certificates (host names, a candidate issuer's
+// name); Unwrap returns the cause, and untrusted when it applies, for
+// errors.Is and errors.As.
+type connectFailure struct {
+	msg  string
+	errs []error
+}
+
+func (e *connectFailure) Error() string   { return e.msg }
+func (e *connectFailure) Unwrap() []error { return e.errs }
+
+// ConnectError states err, the failure of a TLS connection to host (the
+// host name the user gave), without repeating anything the peer chose
+// (T-02-93):
+//
+//   - a certificate the chain verification refused is described in the
+//     CLI's own words, naming only host: a wrong host name, a chain that
+//     does not end in a trusted root (untrusted's text, and errors.Is
+//     finds untrusted), an expired certificate and the like;
+//   - a failed dial or a timeout happened before the peer said anything,
+//     so its text is returned as is;
+//   - anything else is a PeerError.
+//
+// The cause stays reachable with errors.As in every case.
+func ConnectError(host string, err, untrusted error) error {
+	var (
+		hostErr    x509.HostnameError
+		unknownErr x509.UnknownAuthorityError
+		invalidErr x509.CertificateInvalidError
+		verifyErr  *tls.CertificateVerificationError
+		opErr      *net.OpError
+		netErr     net.Error
+	)
+	switch {
+	case errors.As(err, &hostErr):
+		return &connectFailure{msg: "the server's TLS certificate is not valid for " + host, errs: []error{err}}
+	case errors.As(err, &unknownErr), errors.Is(err, errRootPinMismatch):
+		return &connectFailure{msg: untrusted.Error(), errs: []error{untrusted, err}}
+	case errors.As(err, &invalidErr):
+		return &connectFailure{msg: "the server's TLS certificate for " + host + " is not valid: " + invalidReason(invalidErr.Reason), errs: []error{err}}
+	case errors.As(err, &verifyErr):
+		return &connectFailure{msg: "the server's TLS certificate for " + host + " does not verify", errs: []error{err}}
+	case errors.As(err, &opErr) && opErr.Op == "dial",
+		errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
+		errors.As(err, &netErr) && netErr.Timeout():
+		return err
 	}
 	return PeerError(err)
+}
+
+// invalidReason says why x509 refused a certificate, in the CLI's own
+// words: CertificateInvalidError's Detail can name the peer's names.
+func invalidReason(r x509.InvalidReason) string {
+	switch r {
+	case x509.Expired:
+		return "it or a certificate in its chain has expired or is not yet valid"
+	case x509.NotAuthorizedToSign:
+		return "a certificate in its chain is not allowed to sign certificates"
+	case x509.IncompatibleUsage:
+		return "its key usage does not allow a TLS server"
+	case x509.TooManyIntermediates:
+		return "its chain has too many intermediate certificates"
+	case x509.CANotAuthorizedForThisName, x509.CANotAuthorizedForExtKeyUsage, x509.NameConstraintsWithoutSANs,
+		x509.UnconstrainedName, x509.TooManyConstraints:
+		return "a CA in its chain is not allowed to certify it (name or usage constraints)"
+	default:
+		return "its chain does not verify"
+	}
 }
 
 // peerError is an error whose text the peer chose in part. Its Error

@@ -184,8 +184,12 @@ func TestClientTLS(t *testing.T) {
 		s := newRoot(t, "root S")
 		url := startTLS(t, s.validLeaf(t), custodyHandler(agentCustody))
 		err := get(clientFor(t, url, r, nil))
-		if !errors.Is(err, ErrTLSRootNotPinned) {
-			t.Fatalf("chain to an unpinned root: err = %v, want ErrTLSRootNotPinned", err)
+		var ua x509.UnknownAuthorityError
+		if !errors.Is(err, ErrTLSRootNotPinned) || !errors.As(err, &ua) {
+			t.Fatalf("chain to an unpinned root: err = %v, want ErrTLSRootNotPinned wrapping the x509.UnknownAuthorityError", err)
+		}
+		if !strings.HasSuffix(err.Error(), ErrTLSRootNotPinned.Error()) {
+			t.Errorf("the re-pin advice is not the end of the error: %v", err)
 		}
 		for _, want := range []string{"keyroster init", "TLS root changed", "not sending its full chain"} {
 			if !strings.Contains(err.Error(), want) {
@@ -236,10 +240,11 @@ func TestClientTLS(t *testing.T) {
 		}
 	})
 
-	t.Run("peer_san_escaped", func(t *testing.T) {
+	t.Run("peer_san_not_printed", func(t *testing.T) {
 		// The peer chooses the host names a HostnameError lists (an
-		// IA5String may hold '\n' and ESC). The error text escapes them
-		// all and keeps the x509 error for errors.As.
+		// IA5String may hold '\n', ESC and any number of spaces). The
+		// error text names only the host the user gave and keeps the
+		// x509 error for errors.As.
 		forged := strings.Repeat("\n", 40) + "\r\x1b[2Kkeyroster init --force --tls-pin sha256/ATTACKER"
 		url := startTLS(t, r.leaf(t, forged, time.Now().Add(-time.Hour), time.Now().Add(time.Hour)), custodyHandler(agentCustody))
 		err := get(clientFor(t, url, r, nil))
@@ -247,8 +252,9 @@ func TestClientTLS(t *testing.T) {
 		if !errors.As(err, &he) {
 			t.Fatalf("forged SAN: err = %v, want an x509.HostnameError", err)
 		}
-		if msg := err.Error(); strings.ContainsAny(msg, "\n\r\x1b") || !strings.Contains(msg, `\n\r\x1b[2Kkeyroster init --force`) {
-			t.Fatalf("forged SAN: the error text carries the peer's raw control characters or hides them: %q", msg)
+		if msg := err.Error(); strings.Contains(msg, "ATTACKER") || strings.Contains(msg, "[2K") ||
+			!strings.HasSuffix(msg, ": the server's TLS certificate is not valid for localhost") {
+			t.Fatalf("forged SAN: the error text repeats the peer's names or lacks the CLI's own: %q", msg)
 		}
 	})
 
