@@ -38,7 +38,7 @@ func FuzzParseCustodyHeader(f *testing.F) {
 func FuzzParseServerURL(f *testing.F) {
 	for _, s := range []string{
 		"https://keyroster.example", "https://keyroster.example:8443", "http://keyroster.example",
-		"https://10.0.0.1", "https://[::1]", "https://keyroster.example/x", "https://u@h.example", "https://h.example:0",
+		"https://192.0.2.1", "https://[::1]", "https://keyroster.example/x", "https://u@h.example", "https://h.example:0",
 	} {
 		f.Add(s)
 	}

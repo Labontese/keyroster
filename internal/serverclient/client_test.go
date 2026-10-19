@@ -490,7 +490,7 @@ func TestParseServerURL(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{
-		"http://keyroster.example", "https://10.0.0.1", "https://[::1]:8443", "https://keyroster.example/path",
+		"http://keyroster.example", "https://192.0.2.1", "https://[::1]:8443", "https://keyroster.example/path",
 		"https://keyroster.example/", "https://keyroster.example?x=1", "https://keyroster.example#f",
 		"https://user@keyroster.example", "https://keyroster.example:0", "https://keyroster.example:99999", "keyroster.example",
 	} {
