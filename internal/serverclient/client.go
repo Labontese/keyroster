@@ -203,7 +203,7 @@ func ParseServerURL(s string) (*url.URL, error) {
 	if host == "" {
 		return nil, fmt.Errorf("server URL %q: no host", s)
 	}
-	if net.ParseIP(strings.Trim(host, "[]")) != nil {
+	if isIPLiteral(host) {
 		return nil, fmt.Errorf("server URL %q: the host is an IP address; use the server's DNS name (the WebAuthn RP ID)", s)
 	}
 	if p := u.Port(); p != "" {
@@ -213,6 +213,25 @@ func ParseServerURL(s string) (*url.URL, error) {
 		}
 	}
 	return &url.URL{Scheme: "https", Host: u.Host}, nil
+}
+
+// numericLabel is a last host label that resolvers read as (part of) an
+// IPv4 address: decimal, or hexadecimal with 0x. No DNS top-level domain
+// has this form.
+var numericLabel = regexp.MustCompile(`^([0-9]+|0x[0-9a-f]*)$`)
+
+// isIPLiteral reports whether host (a URL's Hostname) is an IP address in
+// any form: with ':' or an IPv6 zone ('%'), with a trailing dot, or with a
+// numeric last label such as 127.1 or 2130706433.
+func isIPLiteral(host string) bool {
+	if strings.ContainsAny(host, ":%") {
+		return true
+	}
+	h := strings.TrimSuffix(host, ".")
+	if net.ParseIP(h) != nil {
+		return true
+	}
+	return numericLabel.MatchString(strings.ToLower(h[strings.LastIndexByte(h, '.')+1:]))
 }
 
 // PinOf returns the pin of a certificate: "sha256/" and the standard

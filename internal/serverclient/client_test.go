@@ -515,6 +515,11 @@ func TestParseServerURL(t *testing.T) {
 		"http://keyroster.example", "https://192.0.2.1", "https://[::1]:8443", "https://keyroster.example/path",
 		"https://keyroster.example/", "https://keyroster.example?x=1", "https://keyroster.example#f",
 		"https://user@keyroster.example", "https://keyroster.example:0", "https://keyroster.example:99999", "keyroster.example",
+		// IP literals that net.ParseIP alone does not see: an IPv6 zone,
+		// a trailing dot, and the short and numeric forms OS resolvers
+		// read as IPv4 addresses.
+		"https://[fe80::1%25eth0]:8443", "https://[fe80::1%25eth0]", "https://[::1%25lo]", "https://192.0.2.1.", "https://192.0.2.1.:8443",
+		"https://127.1", "https://2130706433", "https://0x7f000001", "https://keyroster.123",
 	} {
 		if _, err := ParseServerURL(bad); err == nil {
 			t.Errorf("ParseServerURL(%q) accepted", bad)

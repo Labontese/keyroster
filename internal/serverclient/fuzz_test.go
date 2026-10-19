@@ -1,7 +1,7 @@
 package serverclient
 
 import (
-	"net"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -39,6 +39,7 @@ func FuzzParseServerURL(f *testing.F) {
 	for _, s := range []string{
 		"https://keyroster.example", "https://keyroster.example:8443", "http://keyroster.example",
 		"https://192.0.2.1", "https://[::1]", "https://keyroster.example/x", "https://u@h.example", "https://h.example:0",
+		"https://[fe80::1%25eth0]:8443", "https://192.0.2.1.", "https://127.1",
 	} {
 		f.Add(s)
 	}
@@ -47,8 +48,13 @@ func FuzzParseServerURL(f *testing.F) {
 		if err != nil {
 			return
 		}
+		// Checked here with netip, not with the function's own net.ParseIP.
+		h := strings.TrimSuffix(u.Hostname(), ".")
+		last := h[strings.LastIndexByte(h, '.')+1:]
+		_, addrErr := netip.ParseAddr(h)
+		allDigits := last != "" && strings.Trim(last, "0123456789") == ""
 		if u.Scheme != "https" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil ||
-			u.Hostname() == "" || net.ParseIP(strings.Trim(u.Hostname(), "[]")) != nil {
+			u.Hostname() == "" || strings.ContainsAny(h, ":%") || addrErr == nil || allDigits {
 			t.Fatalf("ParseServerURL(%q) accepted %q", s, u)
 		}
 		again, err := ParseServerURL(u.String())
