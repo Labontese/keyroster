@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -41,21 +42,7 @@ type initServer struct {
 // TLS with custody.
 func newInitServer(t *testing.T, custody string) *initServer {
 	t.Helper()
-	g := newCeremony(t, 1)
-	useKeyring(t, g.rootKeys...)
-	typeHashPrefix(t, g.out)
-	if code, _, stderr := g.sign(t, "1", 0); code != 0 {
-		t.Fatalf("root sign: exit %d: %s", code, stderr)
-	}
-	read := func(name string) []byte { return readTestFile(t, filepath.Join(g.out, name)) }
-	doc, err := json.Marshal(serverclient.TrustResponse{
-		Bundle: read("bundle.json"), BundleSigs: read("bundle.json.sigs"),
-		Policy: read("policy.json"), PolicySigs: read("policy.json.sigs"), BundleVersion: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	doc, rootFP := initTrustDoc(t)
 	root, rootKey := initTestRoot(t)
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -70,6 +57,44 @@ func newInitServer(t *testing.T, custody string) *initServer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	other, _ := initTestRoot(t)
+	is := &initServer{
+		url:      serveTrustDoc(t, doc, custody, tls.Certificate{Certificate: [][]byte{leaf}, PrivateKey: leafKey}),
+		rootFile: filepath.Join(t.TempDir(), "root.pem"),
+		rootPin:  serverclient.PinOf(root),
+		rootFP:   rootFP,
+		otherPin: serverclient.PinOf(other),
+	}
+	writeTestFile(t, is.rootFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw}))
+	return is
+}
+
+// initTrustDoc signs a genesis bundle with one software root (the
+// in-process ceremony of root_test.go) and returns the /api/v1/trust
+// document and the trust root's fingerprint.
+func initTrustDoc(t *testing.T) ([]byte, string) {
+	t.Helper()
+	g := newCeremony(t, 1)
+	useKeyring(t, g.rootKeys...)
+	typeHashPrefix(t, g.out)
+	if code, _, stderr := g.sign(t, "1", 0); code != 0 {
+		t.Fatalf("root sign: exit %d: %s", code, stderr)
+	}
+	read := func(name string) []byte { return readTestFile(t, filepath.Join(g.out, name)) }
+	doc, err := json.Marshal(serverclient.TrustResponse{
+		Bundle: read("bundle.json"), BundleSigs: read("bundle.json.sigs"),
+		Policy: read("policy.json"), PolicySigs: read("policy.json.sigs"), BundleVersion: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc, g.fingerprint(t, 0)
+}
+
+// serveTrustDoc serves doc at /api/v1/trust with custody over TLS with
+// cert and returns https://localhost:PORT.
+func serveTrustDoc(t *testing.T, doc []byte, custody string, cert tls.Certificate) string {
+	t.Helper()
 	s := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != serverclient.TrustPath {
 			http.NotFound(w, r)
@@ -78,23 +103,14 @@ func newInitServer(t *testing.T, custody string) *initServer {
 		w.Header().Set(serverclient.CustodyHeader, custody)
 		_, _ = w.Write(doc)
 	}))
-	s.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{{Certificate: [][]byte{leaf}, PrivateKey: leafKey}}}
+	s.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}}
 	s.StartTLS()
 	t.Cleanup(s.Close)
 	_, port, err := net.SplitHostPort(s.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, _ := initTestRoot(t)
-	is := &initServer{
-		url:      "https://localhost:" + port,
-		rootFile: filepath.Join(t.TempDir(), "root.pem"),
-		rootPin:  serverclient.PinOf(root),
-		rootFP:   g.fingerprint(t, 0),
-		otherPin: serverclient.PinOf(other),
-	}
-	writeTestFile(t, is.rootFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw}))
-	return is
+	return "https://localhost:" + port
 }
 
 func initTestRoot(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
@@ -196,6 +212,78 @@ func TestInit(t *testing.T) {
 		}
 		if c, err := loadConfig(); err != nil || c.User != "bob" {
 			t.Fatalf("config after --force = %+v, %v", c, err)
+		}
+	})
+
+	t.Run("stores_only_pinned_of_two_observed_roots", func(t *testing.T) {
+		// The server chains to two roots: one intermediate (one key and
+		// subject) is signed by root A and by root B, and both copies are
+		// served. Init pins A only and must store A alone, never the
+		// observed but unpinned B.
+		doc, rootFP := initTrustDoc(t)
+		rootA, keyA := initTestRoot(t)
+		rootB, keyB := initTestRoot(t)
+		interKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		interTmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(10), Subject: pkix.Name{CommonName: "init test intermediate"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+			KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true, IsCA: true,
+		}
+		interA, err := x509.CreateCertificate(rand.Reader, interTmpl, rootA, &interKey.PublicKey, keyA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		interTmpl.SerialNumber = big.NewInt(11)
+		interB, err := x509.CreateCertificate(rand.Reader, interTmpl, rootB, &interKey.PublicKey, keyB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inter, err := x509.ParseCertificate(interA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leafTmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(12), Subject: pkix.Name{CommonName: "localhost"}, DNSNames: []string{"localhost"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}
+		leaf, err := x509.CreateCertificate(rand.Reader, leafTmpl, inter, &leafKey.PublicKey, interKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		url := serveTrustDoc(t, doc, softwareCustody, tls.Certificate{Certificate: [][]byte{leaf, interA, interB}, PrivateKey: leafKey})
+		rootFile := filepath.Join(t.TempDir(), "roots.pem")
+		writeTestFile(t, rootFile, append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootA.Raw}),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootB.Raw})...))
+		pinA, pinB := serverclient.PinOf(rootA), serverclient.PinOf(rootB)
+
+		useConfigDir(t)
+		code, stdout, stderr := run(t, "init", "--server", url, "--tls-root-file", rootFile, "--tls-pin", pinA,
+			"--root-pin", rootFP, "--threshold", "1", "--user", "alice")
+		if code != 0 {
+			t.Fatalf("init exit %d:\n%s\n%s", code, stdout, stderr)
+		}
+		// Control: init observed both roots.
+		if !strings.Contains(stdout, pinA) || !strings.Contains(stdout, pinB) {
+			t.Fatalf("init did not print both observed roots:\n%s", stdout)
+		}
+		c, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(c.TLSPins) != 1 || c.TLSPins[0] != pinA || len(c.TLSRootsPEM) != 1 {
+			t.Fatalf("saved TLS pins %q and %d roots, want only %s", c.TLSPins, len(c.TLSRootsPEM), pinA)
+		}
+		block, _ := pem.Decode([]byte(c.TLSRootsPEM[0]))
+		if block == nil || !bytes.Equal(block.Bytes, rootA.Raw) {
+			t.Fatal("the saved root is not root A")
 		}
 	})
 
