@@ -68,10 +68,12 @@ func newLogger() (*slog.Logger, *logBuffer) {
 // concurrent use. Each method has a settable result and a call counter,
 // and a blocking hook can be armed for one method by name (hold).
 //
-// Every method calls enter(method) before it returns; a later plan that
-// adds a method adds that step with the method's name and no second hook.
-// A method reads its result when the call starts, so a call held in the
-// hook returns the answer from before any later change.
+// Every method calls enter(ctx, method) before it returns; a later plan
+// that adds a method adds that step with the method's name and no second
+// hook. A held call honours its ctx as a real signer call does: it
+// returns ctx's error when ctx ends before release. A method reads its
+// result when the call starts, so a call held in the hook returns the
+// answer from before any later change.
 type fakeSigner struct {
 	mu        sync.Mutex
 	status    *wire.StatusResponse
@@ -123,25 +125,33 @@ func (f *fakeSigner) hold(method string) (entered <-chan struct{}, release func(
 }
 
 // enter is the hook step every fake method takes: it holds the call when
-// the hook is armed for method, and returns at once otherwise.
-func (f *fakeSigner) enter(method string) {
+// the hook is armed for method, until release or the end of ctx (then it
+// returns ctx's error), and returns nil at once otherwise.
+func (f *fakeSigner) enter(ctx context.Context, method string) error {
 	f.mu.Lock()
 	if f.heldMethod != method {
 		f.mu.Unlock()
-		return
+		return nil
 	}
 	entered, gate := f.entered, f.gate
 	f.mu.Unlock()
 	entered <- struct{}{}
-	<-gate
+	select {
+	case <-gate:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-func (f *fakeSigner) Status(context.Context) (*wire.StatusResponse, error) {
+func (f *fakeSigner) Status(ctx context.Context) (*wire.StatusResponse, error) {
 	f.mu.Lock()
 	f.calls["Status"]++
 	st, err := f.status, f.statusErr
 	f.mu.Unlock()
-	f.enter("Status")
+	if err := f.enter(ctx, "Status"); err != nil {
+		return nil, err
+	}
 	return st, err
 }
 
@@ -470,6 +480,55 @@ func TestServerStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("refresh_survives_starter_cancel", func(t *testing.T) {
+		// The refresh is detached from the request that started it: when
+		// that caller goes away, a second caller waiting on the same
+		// refresh still gets the signer's answer.
+		fake := newFakeSigner(testStatus(t, "agent", 0))
+		s, _, _ := newTestServer(t, fake)
+		entered, release := fake.hold("Status")
+		defer release()
+		starter, cancelStarter := context.WithCancel(context.Background())
+		defer cancelStarter()
+		started := make(chan error, 1)
+		go func() {
+			_, err := s.currentStatus(starter)
+			started <- err
+		}()
+		<-entered // the starter's refresh is inside the signer call
+		type result struct {
+			v   *statusView
+			err error
+		}
+		waited := make(chan result, 1)
+		go func() {
+			v, err := s.currentStatus(context.Background())
+			waited <- result{v, err}
+		}()
+		time.Sleep(50 * time.Millisecond) // let the second caller join the refresh
+		cancelStarter()
+		if err := <-started; err == nil {
+			t.Fatal("the cancelled starter got a status")
+		}
+		select {
+		case r := <-waited:
+			t.Fatalf("the waiter returned %+v, %v before the signer answered: the refresh ended with the starter's cancel", r.v, r.err)
+		case <-time.After(200 * time.Millisecond):
+		}
+		release()
+		select {
+		case r := <-waited:
+			if r.err != nil || r.v == nil {
+				t.Fatalf("the waiter got %+v, %v; want the status from the shared refresh", r.v, r.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the waiter is still waiting after release")
+		}
+		if got := fake.count("Status"); got != 1 {
+			t.Fatalf("%d Status calls, want 1 shared refresh", got)
+		}
+	})
+
 	t.Run("fake_hook_holds_only_armed_method", func(t *testing.T) {
 		st := testStatus(t, "agent", 0)
 		fake := newFakeSigner(st)
@@ -498,7 +557,7 @@ func TestServerStatus(t *testing.T) {
 			t.Fatal("a Status call held by the hook returned before release")
 		case <-time.After(50 * time.Millisecond):
 		}
-		fake.enter("GetDirectory") // returns at once while Status is held
+		_ = fake.enter(ctx, "GetDirectory") // returns at once while Status is held
 		select {
 		case <-entered:
 			t.Fatal("entered received a second value for one held call")
