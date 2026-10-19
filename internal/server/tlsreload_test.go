@@ -357,7 +357,7 @@ func TestCertHolder(t *testing.T) {
 		install(t, e.live, early, 1)
 		waitUntil(t, "a refused file_change reload", func() bool {
 			for _, r := range e.records(t, "tls certificate reload refused") {
-				if r["trigger"] == "file_change" && strings.Contains(r["err"].(string), "is valid from") {
+				if msg, _ := r["err"].(string); r["trigger"] == "file_change" && strings.Contains(msg, "is valid from") {
 					return true
 				}
 			}
