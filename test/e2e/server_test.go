@@ -418,18 +418,22 @@ func TestServerRefusesStart(t *testing.T) {
 	})
 
 	rp := bootstrapSigner(t, bootstrapOpts{WebAuthnRPID: serverRPID, WebAuthnOrigins: []string{"https://" + serverRPID + ":8443"}})
+	// The certificate refusals must be the server's own exit: status 1 with
+	// main's final "keyroster-server serve: <err>" line. The holder logs
+	// the same reason as JSON, so a server that kept running until
+	// runBin's timeout killed it (exit -1) would otherwise pass.
 	t.Run("leaf_not_covering_rp_id", func(t *testing.T) {
 		cert, key := ca.otherNameLeaf(t)
 		code, out := serve(t, rp.Socket, cert, key)
-		if code == 0 || !strings.Contains(out, "does not cover the RP ID "+serverRPID) {
-			t.Fatalf("serve with a leaf for another name: exit %d:\n%s", code, out)
+		if code != 1 || !strings.Contains(out, "keyroster-server serve: the certificate does not cover the RP ID "+serverRPID) {
+			t.Fatalf("serve with a leaf for another name: exit %d, want 1 with the serve error line:\n%s", code, out)
 		}
 	})
 	t.Run("expired_leaf", func(t *testing.T) {
 		cert, key := ca.expiredLeaf(t, serverRPID)
 		code, out := serve(t, rp.Socket, cert, key)
-		if code == 0 || !strings.Contains(out, "the certificate is valid from") {
-			t.Fatalf("serve with an expired leaf: exit %d:\n%s", code, out)
+		if code != 1 || !strings.Contains(out, "keyroster-server serve: the certificate is valid from") {
+			t.Fatalf("serve with an expired leaf: exit %d, want 1 with the serve error line:\n%s", code, out)
 		}
 	})
 	t.Run("control_starts", func(t *testing.T) {
