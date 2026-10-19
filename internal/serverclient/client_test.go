@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -336,6 +337,74 @@ func TestClientCustody(t *testing.T) {
 		var stderr bytes.Buffer
 		if err := get(clientFor(t, url, r, &stderr)); !errors.Is(err, ErrSignerUnavailable) || stderr.Len() != 0 {
 			t.Fatalf("503: %v, stderr %q; want ErrSignerUnavailable and no banner", err, stderr.String())
+		}
+	})
+}
+
+// TestClientTransport: the transport hardening of New. Redirects are not
+// followed, a body over maxResponse is refused, and no proxy is used.
+func TestClientTransport(t *testing.T) {
+	r := newRoot(t, "root R")
+
+	t.Run("redirect_not_followed", func(t *testing.T) {
+		var followed atomic.Bool
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, req *http.Request) {
+			http.Redirect(w, req, "/elsewhere", http.StatusFound)
+		})
+		mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, _ *http.Request) {
+			followed.Store(true)
+			w.Header().Set(CustodyHeader, agentCustody)
+			_, _ = w.Write([]byte("{}"))
+		})
+		c := clientFor(t, startTLS(t, r.validLeaf(t), mux), r, nil)
+		err := get(c)
+		if err == nil || !strings.Contains(err.Error(), "HTTP 302") || followed.Load() {
+			t.Fatalf("302: err = %v, followed = %v; want an HTTP 302 error and no request to the target", err, followed.Load())
+		}
+		// Control: the same transport with Go's default redirect policy
+		// reaches the target, so only CheckRedirect stops it above.
+		follow := &http.Client{Transport: c.http.Transport}
+		resp, err := follow.Get(c.Server() + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !followed.Load() {
+			t.Fatalf("control: a following client got %d, followed = %v", resp.StatusCode, followed.Load())
+		}
+	})
+
+	t.Run("oversized_body_refused", func(t *testing.T) {
+		// A valid JSON string of n bytes, so only the size check can
+		// refuse it.
+		jsonString := func(n int) []byte {
+			return append(append([]byte(`"`), bytes.Repeat([]byte("a"), n-2)...), '"')
+		}
+		var body atomic.Pointer[[]byte]
+		url := startTLS(t, r.validLeaf(t), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(CustodyHeader, agentCustody)
+			_, _ = w.Write(*body.Load())
+		}))
+		c := clientFor(t, url, r, nil)
+		over := jsonString(maxResponse + 1)
+		body.Store(&over)
+		var out string
+		if err := c.GetJSON(context.Background(), "/healthz", &out); err == nil || !strings.Contains(err.Error(), "larger than") {
+			t.Fatalf("a %d-byte body: err = %v, want \"response larger than\"", len(over), err)
+		}
+		// Control: exactly maxResponse bytes decode.
+		limit := jsonString(maxResponse)
+		body.Store(&limit)
+		if err := c.GetJSON(context.Background(), "/healthz", &out); err != nil || len(out) != maxResponse-2 {
+			t.Fatalf("control: a %d-byte body: %v, decoded %d bytes", len(limit), err, len(out))
+		}
+	})
+
+	t.Run("no_proxy", func(t *testing.T) {
+		tr, ok := clientFor(t, "https://keyroster.example", r, nil).http.Transport.(*http.Transport)
+		if !ok || tr.Proxy != nil {
+			t.Fatalf("transport %T with Proxy set; want an *http.Transport with Proxy nil", tr)
 		}
 	})
 }
