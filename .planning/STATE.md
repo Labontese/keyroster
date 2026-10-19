@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-05 Tasks 1-3 done on p02/05-software-key; PR awaiting owner merge gate (Task 4)
-last_updated: "2026-10-18T10:07:33.647Z"
-last_activity: 2026-10-18
-last_activity_desc: 02-05 software-key executed; PR awaiting merge gate
-state_head: e959951bd1a61648188d5498ff8ca4960ecb4dba
+stopped_at: 02-06 Tasks 1-3 done on p02/06-server-core; PR awaiting owner merge gate (Task 4)
+last_updated: "2026-10-19T09:30:20.523Z"
+last_activity: 2026-10-19
+last_activity_desc: 02-06 server-core executed; PR awaiting merge gate
+state_head: 4d222d0a4e48e71fc9059b11ac71bef24b550f0e
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 26
+  completed_plans: 27
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 5 of 14
-Status: 02-05 awaiting the owner merge gate (p02/05-software-key); 02-01 to 02-04 are merged
-Last activity: 2026-10-18 — 02-05 software-key executed (encrypted software CA keys, signer Status with custody, owner-approved evaluation-only banner in ca issue)
+Plan: 6 of 14
+Status: 02-06 awaiting the owner merge gate (p02/06-server-core); 02-01 to 02-05 are merged
+Last activity: 2026-10-19 — 02-06 server-core executed (keyroster-server with strict headers and the custody banner, pinned keyroster init, certificate reload, systemd units and server runbook)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -82,6 +82,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P03 | 40 min | 3 tasks | 21 files |
 | Phase 02 P04 | 50 min | 2 tasks | 13 files |
 | Phase 02 P05 | 45 min | 2 tasks | 22 files |
+| Phase 02 P06 | 45 min | 3 tasks | 30 files |
 
 ## Accumulated Context
 
@@ -185,6 +186,10 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-05: owner decision B (2026-10-18): capslock baseline accepts 11 pairs outside the plan's list as over-approximations (age WriterFunc, error dispatch); causes of MODIFY_SYSTEM_STATE widening and trust UNANALYZED UNVERIFIED
 - [Phase 02]: 02-05: Status (0x04/0x84) reports custody from the signer only (D-18), refuses trust_changed after a foreign install; InstallBundle refuses a trust state whose Status reply exceeds MaxStatusFrame
 - [Phase 02]: 02-05 pre-merge review, owner decisions 2026-10-19: the stored passphrase source (locked at ca-init) is deferred to Phase 6 (todo); symlinks to the passphrase file stay allowed (no O_NOFOLLOW), with the regular-file and mode checks on the target
+- [Phase 02]: 02-06: keyroster-server takes RP, origins and custody only from the signer's Status through one 5 s fail-closed cache (currentStatus) with a dropStatus hook; the signerAPI interface in internal/server/signer.go is the only signer seam, fakeSigner the only test double
+- [Phase 02]: 02-06: the /api/v1/trust document and the Keyroster-Custody header are defined once in internal/serverclient (the server imports them); a 2xx without Keyroster-Custody is refused (ErrNoCustody) and a 503 is never parsed for custody
+- [Phase 02]: 02-06: serverclient.Trust also requires the bundle's policy_sha256 to match the served policy (ErrPolicyNotBundled); ErrTrustRootNotPinned never names the served roots
+- [Phase 02]: 02-06: keyroster-server registers SIGHUP as the first statement of serve; every successful certificate load logs 'tls certificate loaded' (fingerprint, not_after, trigger start|file_change|sighup) as JSON on stderr
 
 ### Pending Todos
 
@@ -216,6 +221,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-18T10:07:33.411Z
-Stopped at: 02-05 Tasks 1-3 done on p02/05-software-key; PR awaiting owner merge gate (Task 4)
+Last session: 2026-10-19T09:30:20.304Z
+Stopped at: 02-06 Tasks 1-3 done on p02/06-server-core; PR awaiting owner merge gate (Task 4)
 Resume file: None
