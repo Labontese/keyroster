@@ -194,7 +194,7 @@ type stallingReader struct {
 	release <-chan struct{}
 }
 
-func (s *stallingReader) Read(p []byte) (int, error) {
+func (s *stallingReader) Read(_ []byte) (int, error) {
 	s.n.Add(1)
 	s.once.Do(func() { close(s.started) })
 	<-s.release
