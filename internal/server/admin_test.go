@@ -1132,6 +1132,25 @@ func TestRateLimit(t *testing.T) {
 		}
 	})
 
+	t.Run("invite_token_not_logged_on_429", func(t *testing.T) {
+		e := newAdminEnv(t, Limits{})
+		out := e.mustAdd(t, "carol", false)
+		path := out.InviteURL[strings.Index(out.InviteURL, "/enroll/"):]
+		token := strings.TrimPrefix(path, "/enroll/")
+		last := 0
+		for range defaultInviteBurst + 1 {
+			req := httptest.NewRequest(http.MethodGet, "https://"+testRPID+path, nil)
+			req.RemoteAddr = "192.0.2.30:1"
+			last = serve(e.s.Handler(), req).Code
+		}
+		if last != http.StatusTooManyRequests || !strings.Contains(e.log.String(), `"msg":"rate limited"`) {
+			t.Fatalf("invite request burst+1 = %d, want 429 with its log line:\n%s", last, e.log)
+		}
+		if strings.Contains(e.log.String(), token) {
+			t.Fatalf("the log carries the invite token after a 429:\n%s", e.log)
+		}
+	})
+
 	t.Run("limiter_map_bounded", func(t *testing.T) {
 		l := newLimiter(60, 20, 1<<30, 1<<30)
 		for i := range 20000 {
