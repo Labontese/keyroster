@@ -42,7 +42,8 @@ type AddUserResponse struct {
 
 // ErrAdminAuth is a 401 from an admin route: the server did not accept
 // the request's admin signature (not a policy admin, a clock too far off,
-// a replayed nonce; the server's log says which).
+// a replayed nonce, a server URL that is not one of the policy's webauthn
+// origins; the server's log says which).
 var ErrAdminAuth = errors.New("admin authentication failed")
 
 // ErrAdminBodyTooLarge is a 413 from an admin route.
@@ -77,10 +78,12 @@ func (e *HTTPError) APIErrorIs(s string) bool { return e.api != "" && e.api == s
 // AdminJSON sends an admin API request: in as the JSON body of method to
 // path, signed with signer (in the CLI, agentSigner over the per-OS
 // dialAgent, so the private key never leaves ssh-agent), and decodes a 2xx
-// JSON answer into out. The signature covers the exact request-target the
-// request is sent with (its URL.RequestURI()) and a new nonce, so a failed
-// request is retried only by calling AdminJSON again; nothing resends old
-// headers and the client has no transport-level retry.
+// JSON answer into out. The signature covers the Client's canonical server
+// URL (the origin the request is for, see adminauth), the exact
+// request-target the request is sent with (its URL.RequestURI()), the
+// body's SHA-256 and a new nonce, so a failed request is retried only by
+// calling AdminJSON again; nothing resends old headers and the client has
+// no transport-level retry.
 //
 // The refusals are stated in the CLI's own words: a 401 is ErrAdminAuth,
 // with the clock difference when the server's Date differs from the local
@@ -92,7 +95,7 @@ func (c *Client) AdminJSON(ctx context.Context, method, path string, in, out any
 		return err
 	}
 	err = c.send(ctx, method, path, body, out, func(req *http.Request) error {
-		h, err := adminauth.Sign(signer, req.Method, req.URL.RequestURI(), body, time.Now())
+		h, err := adminauth.Sign(signer, c.base.String(), req.Method, req.URL.RequestURI(), body, time.Now())
 		if err != nil {
 			return fmt.Errorf("sign the admin request with %s: %w", ssh.FingerprintSHA256(signer.PublicKey()), err)
 		}

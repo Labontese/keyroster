@@ -35,19 +35,31 @@ func statusAnswer(code int, body string, hdr map[string]string) http.HandlerFunc
 	}
 }
 
-// TestAdminJSONSigns: the request carries a signature over exactly the
-// request-target it was sent with, the method and the body, which
-// adminauth.Verify accepts on the server side; each call has a new nonce.
+// TestAdminJSONSigns: the request carries a signature over the canonical
+// origin of the configured server URL, exactly the request-target it was
+// sent with, the method and the body's digest, which adminauth.Verify and
+// CheckBody accept on the server side; each call has a new nonce. The
+// client is configured with a non-canonical spelling of the URL (an
+// upper-case host and a trailing dot), and the request still names and
+// signs the canonical origin.
 func TestAdminJSONSigns(t *testing.T) {
 	admin := edSigner(t)
 	admins := []trust.AdminKey{{Name: "root-admin", Key: trust.FormatKey(admin.PublicKey())}}
 	var nonces []string
-	c := adminServer(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Error(err)
+	root := newRoot(t, "admin test root")
+	url := startTLS(t, root.validLeaf(t), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, port, _ := strings.Cut(r.Host, ":")
+		if r.Host != "localhost:"+port {
+			t.Errorf("Host %q, want the canonical localhost:PORT", r.Host)
 		}
-		name, nonce, err := adminauth.Verify(r.Header, r.Method, r.RequestURI, body, time.Now(), admins)
+		name, nonce, digest, err := adminauth.Verify(r.Header, "https://localhost:"+port, r.Method, r.RequestURI, time.Now(), admins)
+		if err == nil {
+			body, rerr := io.ReadAll(r.Body)
+			if rerr != nil {
+				t.Error(rerr)
+			}
+			err = adminauth.CheckBody(digest, body)
+		}
 		if err != nil || name != "root-admin" {
 			t.Errorf("server-side Verify = %q, %v", name, err)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -55,7 +67,8 @@ func TestAdminJSONSigns(t *testing.T) {
 		}
 		nonces = append(nonces, nonce)
 		statusAnswer(http.StatusCreated, `{"name":"carol","invite_url":"u","expires_at":"e"}`, nil)(w, r)
-	})
+	}))
+	c := clientFor(t, strings.Replace(url, "https://localhost:", "https://LocalHost.:", 1), root, &bytes.Buffer{})
 	for range 2 {
 		var out AddUserResponse
 		if err := c.AdminJSON(context.Background(), http.MethodPost, AdminUsersPath+"?x=%61", AddUserRequest{Name: "carol"}, &out, admin); err != nil {

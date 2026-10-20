@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,14 +81,15 @@ func adminOf(name string, s ssh.Signer) trust.AdminKey {
 var tNow = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 
 const (
-	testPath = "/api/v1/admin/users?x=1"
-	testBody = `{"name":"alice","reinvite":false}`
+	testOrigin = "https://keyroster.example"
+	testPath   = "/api/v1/admin/users?x=1"
+	testBody   = `{"name":"alice","reinvite":false}`
 )
 
 func TestMessage(t *testing.T) {
 	sum := sha256.Sum256([]byte("b"))
-	got := string(Message("POST", "/p?q=1", sum, 1760961600, "0123456789abcdef0123456789abcdef"))
-	want := "keyroster/admin-api/v1\nPOST\n/p?q=1\n" +
+	got := string(Message("https://keyroster.example:8443", "POST", "/p?q=1", sum, 1760961600, "0123456789abcdef0123456789abcdef"))
+	want := "keyroster/admin-api/v1\nhttps://keyroster.example:8443\nPOST\n/p?q=1\n" +
 		"3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d\n" +
 		"1760961600\n0123456789abcdef0123456789abcdef\n"
 	if got != want {
@@ -102,22 +105,55 @@ func TestVerify(t *testing.T) {
 
 	sign := func(t *testing.T, s ssh.Signer, method, path, body string, at time.Time) http.Header {
 		t.Helper()
-		h, err := Sign(s, method, path, []byte(body), at)
+		h, err := Sign(s, testOrigin, method, path, []byte(body), at)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return h
 	}
+	// verify runs the server's two steps: Verify over the headers, then
+	// CheckBody over the body that was read.
+	verifyAt := func(h http.Header, origin, method, path, body string) (string, error) {
+		name, _, digest, err := Verify(h, origin, method, path, tNow, admins)
+		if err == nil {
+			err = CheckBody(digest, []byte(body))
+		}
+		if err != nil {
+			return "", err
+		}
+		return name, nil
+	}
 	verify := func(h http.Header, method, path, body string) (string, error) {
-		name, _, err := Verify(h, method, path, []byte(body), tNow, admins)
-		return name, err
+		return verifyAt(h, testOrigin, method, path, body)
 	}
 
 	t.Run("ed25519_admin_key_accepted", func(t *testing.T) {
 		h := sign(t, adminKey, "POST", testPath, testBody, tNow)
-		name, nonce, err := Verify(h, "POST", testPath, []byte(testBody), tNow, admins)
-		if err != nil || name != "alice" || nonce != h.Get(HeaderNonce) || len(nonce) != 32 {
-			t.Fatalf("Verify = %q, %q, %v; want alice, the request's nonce", name, nonce, err)
+		name, nonce, digest, err := Verify(h, testOrigin, "POST", testPath, tNow, admins)
+		if err != nil || name != "alice" || nonce != h.Get(HeaderNonce) || len(nonce) != 32 || digest != sha256.Sum256([]byte(testBody)) {
+			t.Fatalf("Verify = %q, %q, %x, %v; want alice, the request's nonce and the body's digest", name, nonce, digest, err)
+		}
+		if h.Get(HeaderBodySHA256) != hex.EncodeToString(digest[:]) {
+			t.Fatalf("digest header %q, want the lowercase hex of the body's SHA-256", h.Get(HeaderBodySHA256))
+		}
+	})
+	t.Run("empty_body_digest", func(t *testing.T) {
+		h := sign(t, adminKey, "GET", testPath, "", tNow)
+		if h.Get(HeaderBodySHA256) != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+			t.Fatalf("digest header of an empty body %q", h.Get(HeaderBodySHA256))
+		}
+		if name, err := verify(h, "GET", testPath, ""); err != nil || name != "alice" {
+			t.Fatalf("Verify = %q, %v; want alice", name, err)
+		}
+	})
+	t.Run("other_deployment_origin_refused", func(t *testing.T) {
+		// Signed for one deployment, presented to another that trusts the
+		// same admin key.
+		h := sign(t, adminKey, "POST", testPath, testBody, tNow)
+		for _, origin := range []string{"https://staging.example", "https://keyroster.example:8443", "https://KEYROSTER.example"} {
+			if name, err := verifyAt(h, origin, "POST", testPath, testBody); !errors.Is(err, ErrMismatch) || name != "" {
+				t.Fatalf("verified for %s: %q, %v; want ErrMismatch", origin, name, err)
+			}
 		}
 	})
 	t.Run("sk_admin_key_accepted", func(t *testing.T) {
@@ -147,6 +183,40 @@ func TestVerify(t *testing.T) {
 			h.Del(HeaderSignature)
 			return h
 		}, "POST", testPath, testBody, ErrMissingHeaders},
+		{"missing_digest", func(t *testing.T) http.Header {
+			h := sign(t, adminKey, "POST", testPath, testBody, tNow)
+			h.Del(HeaderBodySHA256)
+			return h
+		}, "POST", testPath, testBody, ErrMissingHeaders},
+		{"digest_upper_case", func(t *testing.T) http.Header {
+			h := sign(t, adminKey, "POST", testPath, testBody, tNow)
+			h.Set(HeaderBodySHA256, strings.ToUpper(h.Get(HeaderBodySHA256)))
+			return h
+		}, "POST", testPath, testBody, ErrBadDigest},
+		{"digest_base64", func(t *testing.T) http.Header {
+			h := sign(t, adminKey, "POST", testPath, testBody, tNow)
+			sum := sha256.Sum256([]byte(testBody))
+			h.Set(HeaderBodySHA256, base64.StdEncoding.EncodeToString(sum[:]))
+			return h
+		}, "POST", testPath, testBody, ErrBadDigest},
+		{"digest_short", func(t *testing.T) http.Header {
+			h := sign(t, adminKey, "POST", testPath, testBody, tNow)
+			h.Set(HeaderBodySHA256, h.Get(HeaderBodySHA256)[:62])
+			return h
+		}, "POST", testPath, testBody, ErrBadDigest},
+		{"digest_prefixed", func(t *testing.T) http.Header {
+			h := sign(t, adminKey, "POST", testPath, testBody, tNow)
+			h.Set(HeaderBodySHA256, "sha256:"+h.Get(HeaderBodySHA256))
+			return h
+		}, "POST", testPath, testBody, ErrBadDigest},
+		{"digest_changed", func(t *testing.T) http.Header {
+			// A well-formed digest of another body: the signature covers
+			// the digest, so it no longer verifies.
+			h := sign(t, adminKey, "POST", testPath, testBody, tNow)
+			sum := sha256.Sum256([]byte(`{"name":"mallory","reinvite":false}`))
+			h.Set(HeaderBodySHA256, hex.EncodeToString(sum[:]))
+			return h
+		}, "POST", testPath, `{"name":"mallory","reinvite":false}`, ErrMismatch},
 		{"stale_time", func(t *testing.T) http.Header {
 			return sign(t, adminKey, "POST", testPath, testBody, tNow.Add(-121*time.Second))
 		}, "POST", testPath, testBody, ErrStale},
@@ -173,7 +243,7 @@ func TestVerify(t *testing.T) {
 		}, "POST", testPath, testBody, ErrNotAdmin},
 		{"wrong_namespace", func(t *testing.T) http.Header {
 			h := sign(t, adminKey, "POST", testPath, testBody, tNow)
-			msg := Message("POST", testPath, sha256.Sum256([]byte(testBody)), tNow.Unix(), h.Get(HeaderNonce))
+			msg := Message(testOrigin, "POST", testPath, sha256.Sum256([]byte(testBody)), tNow.Unix(), h.Get(HeaderNonce))
 			sig, err := sshsig.Sign(rand.Reader, adminKey, "keyroster/issue-request/v1", msg)
 			if err != nil {
 				t.Fatal(err)
@@ -182,8 +252,10 @@ func TestVerify(t *testing.T) {
 			return h
 		}, "POST", testPath, testBody, ErrNamespace},
 		{"body_changed", func(t *testing.T) http.Header {
+			// The headers verify; the body read afterwards is not the
+			// signed one.
 			return sign(t, adminKey, "POST", testPath, testBody, tNow)
-		}, "POST", testPath, `{"name":"mallory","reinvite":false}`, ErrMismatch},
+		}, "POST", testPath, `{"name":"mallory","reinvite":false}`, ErrBodyMismatch},
 		{"path_changed", func(t *testing.T) http.Header {
 			return sign(t, adminKey, "POST", testPath, testBody, tNow)
 		}, "POST", "/api/v1/admin/other?x=1", testBody, ErrMismatch},
@@ -204,7 +276,7 @@ func TestVerify(t *testing.T) {
 			return h
 		}, "POST", testPath, testBody, ErrMismatch},
 	}
-	all := []error{ErrMissingHeaders, ErrBadTime, ErrStale, ErrFuture, ErrBadNonce, ErrBadSignature, ErrNotAdmin, ErrNamespace, ErrMismatch, ErrBadPolicy}
+	all := []error{ErrMissingHeaders, ErrBadTime, ErrStale, ErrFuture, ErrBadNonce, ErrBadDigest, ErrBadSignature, ErrNotAdmin, ErrNamespace, ErrMismatch, ErrBadPolicy, ErrBodyMismatch}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			name, err := verify(tc.h(t), tc.method, tc.path, tc.body)

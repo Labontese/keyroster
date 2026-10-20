@@ -66,36 +66,39 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 }
 
 // requireAdminLimit authenticates an admin API request before next runs.
+// No byte of the body is read before the signature has verified
+// (02-07 pre-merge review, owner decision D2):
 //
-//  1. The whole body is read through http.MaxBytesReader with limit, before
-//     any signature work: the SSHSIG covers the body's SHA-256, so it must
-//     be read first, and limit bounds that read. A body over the limit gets
-//     413 at once; nothing is verified and no nonce is consumed. 413, not
-//     the uniform 401, because an oversized body is not an authentication
+//  1. A request whose declared Content-Length is over limit gets 413 at
+//     once: nothing is verified and no nonce is consumed. 413, not the
+//     uniform 401, because an oversized body is not an authentication
 //     failure; the limit is public and the check reads no secret.
-//  2. adminauth.Verify checks the signature over r.RequestURI (the raw
-//     request-target, never a decoded or cleaned path) against the admins
-//     of the root-signed policy in the signer's current Status. The server
-//     has no admin list of its own.
-//  3. The nonce is consumed before next runs, so a captured request cannot
+//  2. The request's origin, "https://" + r.Host with a ":443" suffix
+//     removed, must be exactly one of the webauthn origins of the
+//     root-signed policy in the signer's current Status. That origin is
+//     what the signature is checked against, so a request signed for
+//     another deployment does not verify here (D1). Unlike requestOrigin
+//     there is no fallback.
+//  3. adminauth.Verify checks the headers: the signature over the origin,
+//     the method, r.RequestURI (the raw request-target, never a decoded or
+//     cleaned path), the body digest header, the timestamp and the nonce,
+//     against the policy's admins. The server has no admin list of its
+//     own.
+//  4. Only then is the body read, through http.MaxBytesReader with limit.
+//     A body that turns out larger gets 413, with the nonce unused.
+//  5. The body's SHA-256 must equal the signed digest (adminauth.CheckBody).
+//  6. The nonce is consumed before next runs, so a captured request cannot
 //     be replayed while the first copy is still running. A failed admin
 //     request is retried only by signing it again with a new nonce.
 //
-// Every authentication failure gets the same 401 body and a specific log
-// line; the signature and the body are never logged. next sees the
-// verified bytes as r.Body and the admin's name in the request context.
+// Every authentication failure gets the same 401 body and a log line with
+// a fixed reason; the signature, the digest, the Host header and the body
+// are never logged. next sees the verified bytes as r.Body and the admin's
+// name in the request context.
 func (s *Server) requireAdminLimit(limit int64, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
-		if err != nil {
-			var tooBig *http.MaxBytesError
-			if errors.As(err, &tooBig) {
-				s.log.Warn("admin request body too large", "route", r.Pattern, "limit", limit)
-				s.writeJSON(w, nil, http.StatusRequestEntityTooLarge, serverclient.APIError{Error: "request body too large"})
-				return
-			}
-			s.log.Warn("admin request body unreadable", "route", r.Pattern, "err", err)
-			s.writeJSON(w, nil, http.StatusBadRequest, serverclient.APIError{Error: "bad request"})
+		if r.ContentLength > limit {
+			s.adminBodyTooLarge(w, r, limit)
 			return
 		}
 		v, err := s.currentStatus(r.Context())
@@ -103,10 +106,32 @@ func (s *Server) requireAdminLimit(limit int64, next http.Handler) http.Handler 
 			s.signerUnavailable(w, false)
 			return
 		}
+		origin := "https://" + strings.TrimSuffix(r.Host, ":443")
+		if !slices.Contains(v.rp.Origins, origin) {
+			s.log.Warn("admin authentication failed", "route", r.Pattern, "client", clientKey(r), "reason", "request origin is not a policy origin")
+			s.writeJSON(w, v, http.StatusUnauthorized, errAdminAuth)
+			return
+		}
 		now := s.clock()
-		admin, nonce, err := adminauth.Verify(r.Header, r.Method, r.RequestURI, body, now, v.policy.Admins)
+		admin, nonce, digest, err := adminauth.Verify(r.Header, origin, r.Method, r.RequestURI, now, v.policy.Admins)
 		if err != nil {
 			s.log.Warn("admin authentication failed", "route", r.Pattern, "client", clientKey(r), "reason", err.Error())
+			s.writeJSON(w, v, http.StatusUnauthorized, errAdminAuth)
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				s.adminBodyTooLarge(w, r, limit)
+				return
+			}
+			s.log.Warn("admin request body unreadable", "route", r.Pattern, "err", err)
+			s.writeJSON(w, nil, http.StatusBadRequest, serverclient.APIError{Error: "bad request"})
+			return
+		}
+		if err := adminauth.CheckBody(digest, body); err != nil {
+			s.log.Warn("admin authentication failed", "route", r.Pattern, "client", clientKey(r), "admin", admin, "reason", err.Error())
 			s.writeJSON(w, v, http.StatusUnauthorized, errAdminAuth)
 			return
 		}
@@ -123,6 +148,12 @@ func (s *Server) requireAdminLimit(limit int64, next http.Handler) http.Handler 
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), adminCtxKey{}, admin)))
 	})
+}
+
+// adminBodyTooLarge answers an admin request whose body is over limit.
+func (s *Server) adminBodyTooLarge(w http.ResponseWriter, r *http.Request, limit int64) {
+	s.log.Warn("admin request body too large", "route", r.Pattern, "limit", limit)
+	s.writeJSON(w, nil, http.StatusRequestEntityTooLarge, serverclient.APIError{Error: "request body too large"})
 }
 
 // handleAddUser creates a pending account, or replaces its invite, and

@@ -72,7 +72,12 @@ func newUserAddEnv(t *testing.T, custody string, handler func(w http.ResponseWri
 			t.Error(err)
 			return
 		}
-		name, _, err := adminauth.Verify(r.Header, r.Method, r.RequestURI, body, time.Now(), admins)
+		// The server's checks: signed for the origin the request reached,
+		// and the body is the signed one.
+		name, _, digest, err := adminauth.Verify(r.Header, "https://"+r.Host, r.Method, r.RequestURI, time.Now(), admins)
+		if err == nil {
+			err = adminauth.CheckBody(digest, body)
+		}
 		w.Header().Set(serverclient.CustodyHeader, custody)
 		if err != nil {
 			w.WriteHeader(http.StatusUnauthorized)

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,15 +97,25 @@ func newAdminEnv(t *testing.T, lim Limits, origins ...string) *adminEnv {
 	return &adminEnv{s: s, fake: fake, clock: clock, log: log, admin: admin}
 }
 
+// testOrigin is the one webauthn origin of newAdminEnv's default policy,
+// the origin of a request with Host testRPID.
+const testOrigin = "https://" + testRPID
+
 // signedReq builds an admin request for the origin-form target, signed
-// with signer over signedPath (usually target) at at, from RemoteAddr
-// 192.0.2.1 with Host testRPID.
+// with signer for testOrigin over signedPath (usually target) at at, from
+// RemoteAddr 192.0.2.1 with Host testRPID.
 func signedReq(t *testing.T, signer ssh.Signer, method, target, signedPath string, body []byte, at time.Time) *http.Request {
+	t.Helper()
+	return signedReqFor(t, signer, testOrigin, method, target, signedPath, body, at)
+}
+
+// signedReqFor is signedReq with the signed origin given.
+func signedReqFor(t *testing.T, signer ssh.Signer, origin, method, target, signedPath string, body []byte, at time.Time) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(method, target, bytes.NewReader(body))
 	req.Host = testRPID
 	if signer != nil {
-		h, err := adminauth.Sign(signer, method, signedPath, body, at)
+		h, err := adminauth.Sign(signer, origin, method, signedPath, body, at)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,6 +170,20 @@ func (rc *recorder) count() int {
 	return rc.calls
 }
 
+// countingReader is an endless body of 'a' bytes that counts what was
+// read from it.
+type countingReader struct{ n atomic.Int64 }
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'a'
+	}
+	c.n.Add(int64(len(p)))
+	return len(p), nil
+}
+
+func (c *countingReader) read() int64 { return c.n.Load() }
+
 const probePath = "/api/v1/admin/probe?x=1"
 
 var probeBody = []byte(`{"probe":true}`)
@@ -171,7 +196,7 @@ func TestAdminAuth(t *testing.T) {
 		other := newSigner(t)
 		wrongNS := func() *http.Request {
 			req := signedReq(t, e.admin, "POST", probePath, probePath, probeBody, t0)
-			msg := adminauth.Message("POST", probePath, sha256.Sum256(probeBody), t0.Unix(), req.Header.Get(adminauth.HeaderNonce))
+			msg := adminauth.Message(testOrigin, "POST", probePath, sha256.Sum256(probeBody), t0.Unix(), req.Header.Get(adminauth.HeaderNonce))
 			sig, err := sshsig.Sign(rand.Reader, e.admin, wire.AdminSSHSIGNamespace, msg)
 			if err != nil {
 				t.Fatal(err)
@@ -195,7 +220,32 @@ func TestAdminAuth(t *testing.T) {
 			{"body_changed", func() *http.Request {
 				req := signedReq(t, e.admin, "POST", probePath, probePath, probeBody, t0)
 				return clone(t, req, []byte(`{"probe":false}`))
+			}(), "body does not match the signed digest"},
+			{"digest_changed", func() *http.Request {
+				// The digest header of another body, sent with that body.
+				other := []byte(`{"probe":false}`)
+				req := clone(t, signedReq(t, e.admin, "POST", probePath, probePath, probeBody, t0), other)
+				sum := sha256.Sum256(other)
+				req.Header.Set(adminauth.HeaderBodySHA256, hex.EncodeToString(sum[:]))
+				return req
 			}(), "signature does not match the request"},
+			{"missing_digest", func() *http.Request {
+				req := signedReq(t, e.admin, "POST", probePath, probePath, probeBody, t0)
+				req.Header.Del(adminauth.HeaderBodySHA256)
+				return req
+			}(), "missing admin headers"},
+			{"malformed_digest", func() *http.Request {
+				req := signedReq(t, e.admin, "POST", probePath, probePath, probeBody, t0)
+				req.Header.Set(adminauth.HeaderBodySHA256, strings.ToUpper(req.Header.Get(adminauth.HeaderBodySHA256)))
+				return req
+			}(), "malformed body digest"},
+			{"other_deployment_origin", signedReqFor(t, e.admin, "https://staging.example", "POST", probePath, probePath, probeBody, t0),
+				"signature does not match the request"},
+			{"host_not_a_policy_origin", func() *http.Request {
+				req := signedReqFor(t, e.admin, "https://staging.example", "POST", probePath, probePath, probeBody, t0)
+				req.Host = "staging.example"
+				return req
+			}(), "request origin is not a policy origin"},
 			{"path_changed", signedReq(t, e.admin, "POST", probePath, "/api/v1/admin/other?x=1", probeBody, t0), "signature does not match the request"},
 			{"query_changed", signedReq(t, e.admin, "POST", probePath, "/api/v1/admin/probe?x=2", probeBody, t0), "signature does not match the request"},
 			{"method_changed", func() *http.Request {
@@ -217,10 +267,103 @@ func TestAdminAuth(t *testing.T) {
 		if rec.count() != 0 {
 			t.Fatalf("the handler ran %d times for refused requests", rec.count())
 		}
+		probeSum := sha256.Sum256(probeBody)
 		for _, l := range e.log.Lines() {
-			if strings.Contains(l, "BEGIN SSH SIGNATURE") || strings.Contains(l, adminauth.HeaderSignature) {
-				t.Fatalf("a log line carries signature data: %s", l)
+			if strings.Contains(l, "BEGIN SSH SIGNATURE") || strings.Contains(l, adminauth.HeaderSignature) ||
+				strings.Contains(l, hex.EncodeToString(probeSum[:])) || strings.Contains(l, "staging.example") {
+				t.Fatalf("a log line carries signature data, a digest or the Host header: %s", l)
 			}
+		}
+	})
+
+	t.Run("cross_deployment_replay_401_nonce_unused", func(t *testing.T) {
+		// Staging and this deployment trust the same admin key. A request
+		// the admin signed while talking to staging is relayed here within
+		// the window, with this deployment's own Host: it does not verify,
+		// and its nonce stays unused.
+		e := newAdminEnv(t, Limits{})
+		rec := &recorder{}
+		req := signedReqFor(t, e.admin, "https://staging.example", "POST", probePath, probePath, probeBody, t0)
+		nonce := req.Header.Get(adminauth.HeaderNonce)
+		if res := serve(e.s.requireAdmin(rec), req); res.Code != http.StatusUnauthorized || res.Body.String() != uniform401 || rec.count() != 0 {
+			t.Fatalf("relayed request = %d %q (handler calls %d), want the uniform 401", res.Code, res.Body, rec.count())
+		}
+		if err := e.s.db.UseNonce(context.Background(), nonce, t0.Add(time.Minute), t0); err != nil {
+			t.Fatalf("the relayed request consumed its nonce: %v", err)
+		}
+		// Control: signed for this deployment's origin, it passes.
+		if res := serve(e.s.requireAdmin(rec), signedReq(t, e.admin, "POST", probePath, probePath, probeBody, t0)); res.Code != http.StatusNoContent {
+			t.Fatalf("signed for %s: %d, want the handler", testOrigin, res.Code)
+		}
+	})
+
+	t.Run("origin_matched_exactly", func(t *testing.T) {
+		// Only an exact policy origin is verified against; a ":443" suffix
+		// is the default port. No other spelling, and no fallback to the
+		// first policy origin as requestOrigin has.
+		e := newAdminEnv(t, Limits{}, testOrigin, testOrigin+":8443")
+		rec := &recorder{}
+		for _, tc := range []struct {
+			host, origin string
+			want         int
+		}{
+			{testRPID + ":8443", testOrigin + ":8443", http.StatusNoContent},
+			{testRPID + ":443", testOrigin, http.StatusNoContent},
+			{testRPID, testOrigin, http.StatusNoContent},
+			{testRPID + ":8443", testOrigin, http.StatusUnauthorized},
+			{strings.ToUpper(testRPID), testOrigin, http.StatusUnauthorized},
+			{testRPID + ".", testOrigin, http.StatusUnauthorized},
+			{testRPID + ":9000", testOrigin, http.StatusUnauthorized},
+		} {
+			req := signedReqFor(t, e.admin, tc.origin, "POST", probePath, probePath, probeBody, t0)
+			req.Host = tc.host
+			if res := serve(e.s.requireAdmin(rec), req); res.Code != tc.want {
+				t.Fatalf("Host %s signed for %s: %d, want %d", tc.host, tc.origin, res.Code, tc.want)
+			}
+		}
+	})
+
+	t.Run("unauthenticated_body_never_read", func(t *testing.T) {
+		// Requests that do not verify, with bodies of maxAdminBody bytes:
+		// no admin headers, a key that is no admin, and the real admin key
+		// with a signature made for another request. None of their body
+		// bytes is read.
+		e := newAdminEnv(t, Limits{})
+		rec := &recorder{}
+		junk := signedReqFor(t, e.admin, "https://staging.example", "POST", probePath, probePath, probeBody, t0).Header
+		for name, hdr := range map[string]http.Header{
+			"no_headers":       {},
+			"non_admin_key":    signedReq(t, newSigner(t), "POST", probePath, probePath, probeBody, t0).Header,
+			"admin_junk_sig":   junk,
+			"malformed_digest": func() http.Header { h := junk.Clone(); h.Set(adminauth.HeaderBodySHA256, "00"); return h }(),
+		} {
+			body := &countingReader{}
+			req := httptest.NewRequest("POST", probePath, body)
+			req.Host = testRPID
+			req.ContentLength = maxAdminBody
+			req.Header = hdr
+			if res := serve(e.s.requireAdmin(rec), req); res.Code != http.StatusUnauthorized || res.Body.String() != uniform401 {
+				t.Fatalf("%s: %d %q, want the uniform 401", name, res.Code, res.Body)
+			}
+			if n := body.read(); n != 0 {
+				t.Fatalf("%s: the server read %d bytes of an unauthenticated body", name, n)
+			}
+		}
+		if rec.count() != 0 {
+			t.Fatalf("the handler ran %d times", rec.count())
+		}
+	})
+
+	t.Run("body_digest_mismatch_401_nonce_unused", func(t *testing.T) {
+		e := newAdminEnv(t, Limits{})
+		rec := &recorder{}
+		req := clone(t, signedReq(t, e.admin, "POST", probePath, probePath, probeBody, t0), []byte(`{"probe":false}`))
+		nonce := req.Header.Get(adminauth.HeaderNonce)
+		if res := serve(e.s.requireAdmin(rec), req); res.Code != http.StatusUnauthorized || res.Body.String() != uniform401 || rec.count() != 0 {
+			t.Fatalf("= %d %q (calls %d), want the uniform 401", res.Code, res.Body, rec.count())
+		}
+		if err := e.s.db.UseNonce(context.Background(), nonce, t0.Add(time.Minute), t0); err != nil {
+			t.Fatalf("a request whose body is not the signed one consumed its nonce: %v", err)
 		}
 	})
 
@@ -376,6 +519,32 @@ func TestAdminAuth(t *testing.T) {
 		}
 	})
 
+	t.Run("streamed_body_over_limit_413_after_verify", func(t *testing.T) {
+		// No Content-Length: the size shows only while the body is read,
+		// which happens after Verify. A verified request gets 413 with its
+		// nonce unused; an unverified one gets the uniform 401 unread.
+		e := newAdminEnv(t, Limits{})
+		rec := &recorder{}
+		h := e.s.requireAdminLimit(64, rec)
+		big := bytes.Repeat([]byte("b"), 65)
+		streamed := func(req *http.Request) *http.Request {
+			req.Body = io.NopCloser(bytes.NewReader(big))
+			req.ContentLength = -1
+			return req
+		}
+		req := streamed(signedReq(t, e.admin, "POST", probePath, probePath, big, t0))
+		nonce := req.Header.Get(adminauth.HeaderNonce)
+		if res := serve(h, req); res.Code != http.StatusRequestEntityTooLarge || rec.count() != 0 {
+			t.Fatalf("verified, streamed 65-byte body under limit 64 = %d (calls %d), want 413", res.Code, rec.count())
+		}
+		if err := e.s.db.UseNonce(context.Background(), nonce, t0.Add(time.Minute), t0); err != nil {
+			t.Fatalf("the oversized request consumed its nonce: %v", err)
+		}
+		if res := serve(h, streamed(signedReq(t, newSigner(t), "POST", probePath, probePath, big, t0))); res.Code != http.StatusUnauthorized {
+			t.Fatalf("unverified, streamed 65-byte body = %d, want the uniform 401 (verified before any read)", res.Code)
+		}
+	})
+
 	t.Run("signer_unavailable_503", func(t *testing.T) {
 		e := newAdminEnv(t, Limits{})
 		e.fake.setStatus(nil, errors.New("down"))
@@ -388,14 +557,20 @@ func TestAdminAuth(t *testing.T) {
 }
 
 // addUser sends a signed POST /api/v1/admin/users through the full
-// handler and returns the response.
+// handler and returns the response. With host set, the request goes to
+// that Host and is signed for its origin, as the CLI signs the server URL
+// it talks to.
 func (e *adminEnv) addUser(t *testing.T, name string, reinvite bool, host string) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(serverclient.AddUserRequest{Name: name, Reinvite: reinvite})
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := signedReq(t, e.admin, http.MethodPost, serverclient.AdminUsersPath, serverclient.AdminUsersPath, body, e.clock.Now())
+	origin := testOrigin
+	if host != "" {
+		origin = "https://" + strings.TrimSuffix(host, ":443")
+	}
+	req := signedReqFor(t, e.admin, origin, http.MethodPost, serverclient.AdminUsersPath, serverclient.AdminUsersPath, body, e.clock.Now())
 	if host != "" {
 		req.Host = host
 	}
@@ -659,13 +834,17 @@ func TestAdminUsers(t *testing.T) {
 			{testRPID + ":8443", "https://" + testRPID + ":8443/enroll/"},
 			{testRPID + ":443", "https://" + testRPID + "/enroll/"},
 			{testRPID, "https://" + testRPID + "/enroll/"},
-			{"other.example:9000", "https://" + testRPID + "/enroll/"},
 		} {
 			res := e.addUser(t, "user"+strconv.Itoa(i), false, tc.host)
 			var out serverclient.AddUserResponse
 			if res.Code != http.StatusCreated || json.Unmarshal(res.Body.Bytes(), &out) != nil || !strings.HasPrefix(out.InviteURL, tc.want) {
 				t.Fatalf("Host %s: %d %s, want an invite URL starting %s", tc.host, res.Code, res.Body, tc.want)
 			}
+		}
+		// A Host that is not a policy origin no longer reaches the handler:
+		// the admin signature is bound to a policy origin (requireAdmin).
+		if res := e.addUser(t, "user9", false, "other.example:9000"); res.Code != http.StatusUnauthorized || e.pendingRows(t, "user9") != 0 {
+			t.Fatalf("Host other.example:9000: %d, want the uniform 401 and no row", res.Code)
 		}
 	})
 
