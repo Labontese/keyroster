@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/serverdb"
 )
 
 // Config configures a Server.
@@ -32,6 +33,12 @@ type Config struct {
 	// Logger receives every log line of the Server and its handlers
 	// (nil: discarded).
 	Logger *slog.Logger
+	// DB is the server state database (required): pending accounts,
+	// invites and used admin nonces. Nothing in it is authority.
+	DB *serverdb.DB
+	// Limits are the rate limits of the admin and invite routes (zero
+	// fields: the defaults).
+	Limits Limits
 }
 
 // Server serves keyroster's pages and API.
@@ -40,9 +47,14 @@ type Server struct {
 	rpID    string
 	clock   func() time.Time
 	log     *slog.Logger
+	db      *serverdb.DB
 	pages   map[string]*template.Template
 	static  fs.FS
 	handler http.Handler
+
+	adminLimit  *limiter // admin API routes
+	inviteLimit *limiter // invite pages
+	dir         dirCache // the last installed directory read
 
 	mu       sync.Mutex  // guards status and inflight; never held across a signer call
 	status   *statusView // nil when there is no current entry
@@ -62,6 +74,9 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	if cfg.RPID == "" {
 		return nil, errors.New("server: no RP ID")
 	}
+	if cfg.DB == nil {
+		return nil, errors.New("server: no state database")
+	}
 	pages, err := parsePages()
 	if err != nil {
 		return nil, err
@@ -70,7 +85,12 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{signer: sg, rpID: cfg.RPID, clock: cfg.Clock, log: cfg.Logger, pages: pages, static: static}
+	lim := cfg.Limits.withDefaults()
+	s := &Server{
+		signer: sg, rpID: cfg.RPID, clock: cfg.Clock, log: cfg.Logger, db: cfg.DB, pages: pages, static: static,
+		adminLimit:  newLimiter(lim.AdminPerMinute, lim.AdminBurst, globalFactor*lim.AdminPerMinute, globalFactor*lim.AdminBurst),
+		inviteLimit: newLimiter(lim.InvitePerMinute, lim.InviteBurst, globalFactor*lim.InvitePerMinute, globalFactor*lim.InviteBurst),
+	}
 	if s.clock == nil {
 		s.clock = time.Now
 	}
@@ -82,6 +102,8 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	mux.HandleFunc("GET /static/", s.handleStatic)
 	mux.HandleFunc("GET "+serverclient.TrustPath, s.handleTrust)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.Handle("POST "+serverclient.AdminUsersPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleAddUser))))
+	mux.Handle("GET /enroll/{token}", s.rateLimited(s.inviteLimit, true, http.HandlerFunc(s.handleEnroll)))
 	s.handler = secure(mux)
 	return s, nil
 }

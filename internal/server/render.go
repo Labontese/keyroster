@@ -16,7 +16,7 @@ import (
 
 // pageNames are the pages under templates/; each is parsed together with
 // base.html into its own template set.
-var pageNames = []string{"index", "error"}
+var pageNames = []string{"index", "error", "enroll"}
 
 // parsePages parses every page once from the embedded templates.
 func parsePages() (map[string]*template.Template, error) {
@@ -40,6 +40,8 @@ type pageData struct {
 	Message string
 
 	RPID             string
+	User             string
+	Expires          string
 	BundleVersion    uint64
 	PolicyVersion    uint64
 	DirectoryVersion uint64

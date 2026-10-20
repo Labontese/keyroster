@@ -18,7 +18,7 @@ Wants=keyroster-signer.service
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/keyroster-server serve --listen :443 --tls-cert /etc/keyroster/tls/fullchain.pem --tls-key /etc/keyroster/tls/key.pem --signer-socket /run/keyroster-signer/signer.sock
+ExecStart=/usr/local/bin/keyroster-server serve --listen :443 --tls-cert /etc/keyroster/tls/fullchain.pem --tls-key /etc/keyroster/tls/key.pem --signer-socket /run/keyroster-signer/signer.sock --state-dir /var/lib/keyroster-server
 # SIGHUP reloads the certificate files (the server also checks them every
 # 60 s). The server registers SIGHUP before anything else, so a reload sent
 # while it still waits for the signer does not end it.
@@ -46,6 +46,11 @@ ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ReadOnlyPaths=/etc/keyroster/tls
+# The state database (pending accounts, invites, used admin nonces; none
+# of it is authority) is the one writable path: /var/lib/keyroster-server,
+# owned by the service user, mode 0700.
+StateDirectory=keyroster-server
+StateDirectoryMode=0700
 
 # Network: the HTTPS listener (IPv4 and IPv6) and the signer's Unix socket.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

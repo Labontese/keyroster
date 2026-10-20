@@ -25,6 +25,7 @@ import (
 // before something calls it.
 type signerAPI interface {
 	Status(ctx context.Context) (*wire.StatusResponse, error)
+	GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error)
 }
 
 // socketSigner reaches keyroster-signer over its Unix socket.
@@ -32,6 +33,10 @@ type socketSigner struct{ socket string }
 
 func (s socketSigner) Status(ctx context.Context) (*wire.StatusResponse, error) {
 	return signerclient.Status(ctx, s.socket)
+}
+
+func (s socketSigner) GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error) {
+	return signerclient.GetDirectory(ctx, s.socket)
 }
 
 const (

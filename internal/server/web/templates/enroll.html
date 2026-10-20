@@ -1,0 +1,10 @@
+{{define "content"}}<h1>Welcome, {{.User}}</h1>
+<p>An admin has invited you to keyroster at <strong>{{.RPID}}</strong>.</p>
+<dl class="kr-facts">
+<dt>User name</dt><dd>{{.User}}</dd>
+<dt>Server</dt><dd>{{.RPID}}</dd>
+<dt>Invite valid until</dt><dd>{{.Expires}}</dd>
+</dl>
+<p>Your admin will give you a keyroster init command; run it before keyroster login.</p>
+<p>Passkey registration on this page comes in a later release. Keep this link private: it works only for you, only until it expires, and stops working when your admin sends a new one.</p>
+{{end}}

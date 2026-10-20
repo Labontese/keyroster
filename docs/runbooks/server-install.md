@@ -191,7 +191,11 @@ journalctl -u keyroster-server
 
 The unit runs the server as `keyroster-server` with only
 `CAP_NET_BIND_SERVICE`. Everything else is read-only (`ProtectSystem=strict`,
-`ReadOnlyPaths=/etc/keyroster/tls`). Network access is limited to IPv4,
+`ReadOnlyPaths=/etc/keyroster/tls`), except its state directory
+`/var/lib/keyroster-server` (`StateDirectory=`, mode 0700, `--state-dir`). That
+directory holds `server.db`: pending accounts, invites (as SHA-256 only) and
+used admin nonces. Nothing in it is authority; only the admin-signed directory
+the signer installs binds a passkey to a user. Network access is limited to IPv4,
 IPv6 and Unix sockets. At start the server asks the signer for its Status,
 retrying for up to 30 s. It then exits non-zero if:
 

@@ -14,10 +14,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/Labontese/keyroster/internal/server"
+	"github.com/Labontese/keyroster/internal/serverdb"
 	"github.com/Labontese/keyroster/internal/signerclient"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -56,6 +58,7 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 	certFile := fs.String("tls-cert", "", "TLS certificate chain file, leaf first (required)")
 	keyFile := fs.String("tls-key", "", "TLS private key file (required)")
 	socket := fs.String("signer-socket", "/run/keyroster-signer/signer.sock", "keyroster-signer Unix socket")
+	stateDir := fs.String("state-dir", "/var/lib/keyroster-server", "directory of the server's state database (created 0700); nothing in it is authority")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -88,7 +91,12 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 
-	srv, err := server.New(server.Config{SignerSocket: *socket, RPID: rpID, Logger: logger})
+	db, err := openStateDB(*stateDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	srv, err := server.New(server.Config{SignerSocket: *socket, RPID: rpID, Logger: logger, DB: db})
 	if err != nil {
 		return err
 	}
@@ -127,6 +135,17 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// openStateDB creates dir (0700) if needed and opens server.db in it.
+func openStateDB(dir string) (*serverdb.DB, error) {
+	if dir == "" {
+		return nil, errors.New("--state-dir is empty")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("state directory: %w", err)
+	}
+	return serverdb.Open(filepath.Join(dir, "server.db"))
 }
 
 // probeStatus asks the signer for its Status until it answers or

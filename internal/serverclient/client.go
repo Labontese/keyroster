@@ -377,6 +377,13 @@ func (c *Client) PostJSON(ctx context.Context, path string, in, out any) error {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
+	return c.send(ctx, method, path, body, out, nil)
+}
+
+// send is do with a prepare step, which runs on the finished request just
+// before it is sent (AdminJSON signs it there). A non-2xx answer other
+// than 503 is an *HTTPError.
+func (c *Client) send(ctx context.Context, method, path string, body []byte, out any, prepare func(*http.Request) error) error {
 	if !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("serverclient: path %q must start with /", path)
 	}
@@ -391,6 +398,11 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if prepare != nil {
+		if err := prepare(req); err != nil {
+			return err
+		}
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -414,12 +426,16 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		return fmt.Errorf("%s%s: %w", c.base, path, err)
 	}
 	if !ok {
+		he := &HTTPError{Code: resp.StatusCode, date: resp.Header.Get("Date"), retryAfter: resp.Header.Get("Retry-After")}
 		var apiErr APIError
 		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
 			// The server's own text, as a short delimited excerpt.
-			return fmt.Errorf("%s%s: HTTP %d: %w", c.base, path, resp.StatusCode, PeerError(errors.New(apiErr.Error)))
+			he.api = apiErr.Error
+			he.err = fmt.Errorf("%s%s: HTTP %d: %w", c.base, path, resp.StatusCode, PeerError(errors.New(apiErr.Error)))
+		} else {
+			he.err = fmt.Errorf("%s%s: HTTP %d", c.base, path, resp.StatusCode)
 		}
-		return fmt.Errorf("%s%s: HTTP %d", c.base, path, resp.StatusCode)
+		return he
 	}
 	if out == nil {
 		return nil

@@ -121,6 +121,13 @@ var (
 	accountRE = regexp.MustCompile(`^[a-z_][a-z0-9_.-]{0,31}$`)
 )
 
+// ValidUserName reports whether s is a valid directory user name: 1 to 64
+// characters from a-z, 0-9, '.', '_' and '-', starting with a letter or a
+// digit. The same rule applies to a name before it enters a directory
+// (keyroster user add), so every user name keyroster prints is free of
+// shell metacharacters.
+func ValidUserName(s string) bool { return nameRE.MatchString(s) }
+
 // Parse decodes a canonical directory and validates it.
 func Parse(data []byte) (*Directory, error) {
 	var d Directory
@@ -214,7 +221,7 @@ func (d *Directory) Validate() error {
 	}
 	for i := range d.Users {
 		u := &d.Users[i]
-		if !nameRE.MatchString(u.Name) {
+		if !ValidUserName(u.Name) {
 			return fmt.Errorf("%w: user %q: invalid name", ErrInvalid, u.Name)
 		}
 		if u.Status != StatusActive && u.Status != StatusDisabled {
