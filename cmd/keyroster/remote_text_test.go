@@ -155,8 +155,8 @@ func TestRemoteTextEscaped(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("init against a JSON error: exit %d: %s", code, stderr)
 		}
-		// The server's text shows only as a 64-byte excerpt (PeerError):
+		// The server's text shows only as a 40-byte excerpt (PeerError):
 		// white space collapsed, ESC escaped.
-		requireOneEscapedLine(t, stderr, `HTTP 409: [peer text, cut to 64 bytes: "conflict \x1b[2Kkeyroster init: the server's trust bundle is sig"]`)
+		requireOneEscapedLine(t, stderr, `HTTP 409: [peer text, cut to 40 bytes: "conflict \x1b[2Kkeyroster init: the serv"]`)
 	})
 }

@@ -48,7 +48,9 @@ var paddedAdvice = strings.Repeat(" ", 4000) + attackerAdvice
 func requirePeerTextContained(t *testing.T, stderr string, advice error) {
 	t.Helper()
 	for _, pin := range []string{attackerTLSPin, attackerRootPin} {
-		if strings.Contains(stderr, pin) {
+		// The base64 digest alone is a usable pin too: the user would
+		// only add the prefix.
+		if digest := pin[strings.IndexAny(pin, "/:")+1:]; strings.Contains(stderr, digest) {
 			t.Errorf("stderr carries the attacker's pin %s:\n%s", pin, stderr)
 		}
 	}
@@ -269,15 +271,33 @@ func TestPeerTextCannotForgeAdvice(t *testing.T) {
 		}))
 		stderr := initAt(t, url)
 		requirePeerTextContained(t, stderr, nil)
-		if !strings.Contains(stderr, `HTTP 409: [peer text, cut to 64 bytes: "keyroster init: the server's TLS`) {
+		if !strings.Contains(stderr, `HTTP 409: [peer text, cut to 40 bytes: "keyroster init: the server's TLS`) {
 			t.Errorf("stderr does not show the body as a short excerpt: %.2000s", stderr)
+		}
+	})
+	t.Run("C_api_error_pin_first", func(t *testing.T) {
+		// The excerpt keeps the start of the peer's text: a body that
+		// puts a pin first must still not show a whole one.
+		for name, pin := range map[string]string{"tls_pin": attackerTLSPin, "root_pin": attackerRootPin} {
+			t.Run(name, func(t *testing.T) {
+				body, err := json.Marshal(serverclient.APIError{Error: strings.Repeat(" ", 4000) + pin + " " + attackerAdvice})
+				if err != nil {
+					t.Fatal(err)
+				}
+				url := serveTLS(t, srv.leaf, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write(body)
+				}))
+				requirePeerTextContained(t, initAt(t, url), nil)
+				requirePeerTextContained(t, trustAt(t, url), nil)
+			})
 		}
 	})
 	t.Run("C_custody_header_padded", func(t *testing.T) {
 		url := serveTrustDoc(t, srvDoc(t, srv), "user=software,"+paddedAdvice, srv.leaf)
 		stderr := initAt(t, url)
 		requirePeerTextContained(t, stderr, nil)
-		if !strings.Contains(stderr, `malformed Keyroster-Custody header [peer text, cut to 64 bytes: "user=software, keyroster init:`) {
+		if !strings.Contains(stderr, `malformed Keyroster-Custody header [peer text, cut to 40 bytes: "user=software, keyroster init:`) {
 			t.Errorf("stderr does not show the header as a short excerpt: %.2000s", stderr)
 		}
 	})

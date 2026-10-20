@@ -2,6 +2,7 @@ package serverclient
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -76,7 +77,7 @@ func FuzzPeerError(f *testing.F) {
 		got := PeerError(errors.New(s)).Error()
 		body, ok := strings.CutPrefix(got, `[peer text: "`)
 		if !ok {
-			body, ok = strings.CutPrefix(got, `[peer text, cut to 64 bytes: "`)
+			body, ok = strings.CutPrefix(got, fmt.Sprintf(`[peer text, cut to %d bytes: "`, maxPeerExcerpt))
 		}
 		body, ok2 := strings.CutSuffix(body, `"]`)
 		if !ok || !ok2 || len(body) > maxPeerExcerpt || strings.Contains(got, "  ") {

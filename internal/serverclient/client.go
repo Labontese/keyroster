@@ -507,8 +507,9 @@ func invalidReason(r x509.InvalidReason) string {
 }
 
 // maxPeerExcerpt bounds the escaped peer text a PeerError shows, in
-// bytes, delimiters not counted.
-const maxPeerExcerpt = 64
+// bytes, delimiters not counted. It is below 43, the length of a SHA-256
+// digest in unpadded base64, so no excerpt holds a whole TLS or root pin.
+const maxPeerExcerpt = 40
 
 // peerError is an error whose text the peer chose in part. Its Error is
 // only a short excerpt of that text (peerExcerpt); Unwrap returns the
@@ -524,10 +525,13 @@ func (e *peerError) Unwrap() error { return e.err }
 // text: [peer text: "..."]. Every run of white space becomes one space,
 // everything but printable ASCII is escaped (strconv.QuoteToASCII, so a
 // quote cannot end the excerpt early), and the escaped text is cut at
-// maxPeerExcerpt bytes. The excerpt is still untrusted text, but it is
-// too short to carry a forged command with full-length pins, and padding
-// cannot push the CLI's message off the screen (T-02-93). A caller never
-// puts the CLI's own advice after a PeerError. A nil err stays nil.
+// maxPeerExcerpt bytes, cut marked. What this holds, and no more: the
+// excerpt is one line of at most maxPeerExcerpt printable ASCII bytes
+// inside its delimiters, with no run of two spaces, so padding cannot
+// push the CLI's message off the screen and no whole pin fits in it
+// (T-02-93). The excerpt is still untrusted text: up to maxPeerExcerpt
+// bytes of it are the peer's words. Callers keep the CLI's own advice
+// out of any message that carries a PeerError. A nil err stays nil.
 func PeerError(err error) error {
 	if err == nil {
 		return nil

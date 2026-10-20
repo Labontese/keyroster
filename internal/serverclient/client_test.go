@@ -412,8 +412,8 @@ func TestClientCustody(t *testing.T) {
 		}
 		msg := err.Error()
 		if strings.ContainsAny(msg, "\r\x1b") || strings.Contains(msg, "EVIL") ||
-			!strings.HasSuffix(msg, `HTTP 409: [peer text, cut to 64 bytes: "\x1b[2K\x1b[1Aforged: run keyroster init --force --root-pin SHA2"]`) {
-			t.Fatalf("409 error = %q (%d bytes), want a 64-byte escaped excerpt of the body", msg, len(msg))
+			!strings.HasSuffix(msg, `HTTP 409: [peer text, cut to 40 bytes: "\x1b[2K\x1b[1Aforged: run keyroster init"]`) {
+			t.Fatalf("409 error = %q (%d bytes), want a 40-byte escaped excerpt of the body", msg, len(msg))
 		}
 	})
 
@@ -743,8 +743,8 @@ func TestPeerError(t *testing.T) {
 		"\x00\x1b[2K\x7f\u0085x":                            `[peer text: "\x00\x1b[2K\x7f x"]`,
 		"x\u202ey\u2066z\ufeff\u2800":                       `[peer text: "x\u202ey\u2066z\ufeff\u2800"]`,
 		"tag\U000E0041 \u00e5\u00e4\u00f6":                  `[peer text: "tag\U000e0041 \u00e5\u00e4\u00f6"]`,
-		strings.Repeat(" ", 4000) + strings.Repeat("y", 70): `[peer text, cut to 64 bytes: "` + strings.Repeat("y", 64) + `"]`,
-		strings.Repeat("z", 62) + "\u202e":                  `[peer text, cut to 64 bytes: "` + strings.Repeat("z", 62) + `"]`,
+		strings.Repeat(" ", 4000) + strings.Repeat("y", 70): `[peer text, cut to 40 bytes: "` + strings.Repeat("y", 40) + `"]`,
+		strings.Repeat("z", 38) + "\u202e":                  `[peer text, cut to 40 bytes: "` + strings.Repeat("z", 38) + `"]`,
 	} {
 		if got := PeerError(errors.New(in)).Error(); got != want {
 			t.Errorf("PeerError(%q) = %q, want %q", in, got, want)
