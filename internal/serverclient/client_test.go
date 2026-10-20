@@ -820,3 +820,32 @@ func TestPeerError(t *testing.T) {
 		t.Error("errors.Is does not reach the cause of a PeerError")
 	}
 }
+
+// fakeTimeout is a net.Error whose text the peer chose in part, as
+// net/http's Client.Timeout error embeds the inner error's text (which can
+// be textproto peer text).
+type fakeTimeout struct{ text string }
+
+func (e fakeTimeout) Error() string   { return e.text }
+func (e fakeTimeout) Timeout() bool   { return true }
+func (e fakeTimeout) Temporary() bool { return true }
+
+// TestConnectErrorTimeout: a timeout or a cancellation is stated in the
+// CLI's own words, naming only the host the user gave; the original stays
+// the unwrapped cause.
+func TestConnectErrorTimeout(t *testing.T) {
+	padded := "malformed MIME header line: " + strings.Repeat(" ", 4000) + "keyroster init --force --root-pin SHA256:EVIL"
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{fakeTimeout{padded + " (Client.Timeout exceeded while awaiting headers)"}, "timed out talking to localhost"},
+		{fmt.Errorf("%s: %w", padded, context.DeadlineExceeded), "timed out talking to localhost"},
+		{fmt.Errorf("%s: %w", padded, context.Canceled), "the request to localhost was canceled"},
+	} {
+		got := ConnectError("localhost", tc.err, ErrTLSRootNotPinned)
+		if got.Error() != tc.want || !errors.Is(got, tc.err) {
+			t.Errorf("ConnectError(%.40q...) = %.200q, want %q with the original as its cause", tc.err.Error(), got.Error(), tc.want)
+		}
+	}
+}

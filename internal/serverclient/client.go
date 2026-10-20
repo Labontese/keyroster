@@ -441,11 +441,12 @@ func (c *Client) mapError(path string, err error) error {
 	return fmt.Errorf("%s%s: %w", c.base, path, ConnectError(c.base.Hostname(), err, ErrTLSRootNotPinned))
 }
 
-// connectFailure is a failed certificate verification stated only in the
-// CLI's own words. Error never includes the cause's text, which repeats
-// names from the peer's certificates (host names, a candidate issuer's
-// name); Unwrap returns the cause, and untrusted when it applies, for
-// errors.Is and errors.As.
+// connectFailure is a failed connection or request stated only in the
+// CLI's own words: a refused certificate, a timeout, a cancellation.
+// Error never includes the cause's text, which can repeat names from the
+// peer's certificates (host names, a candidate issuer's name) or embed
+// text the peer sent; Unwrap returns the cause, and untrusted when it
+// applies, for errors.Is and errors.As.
 type connectFailure struct {
 	msg  string
 	errs []error
@@ -462,8 +463,11 @@ func (e *connectFailure) Unwrap() []error { return e.errs }
 //     CLI's own words, naming only host: a wrong host name, a chain that
 //     does not end in a trusted root (untrusted's text, and errors.Is
 //     finds untrusted), an expired certificate and the like;
-//   - a failed dial or a timeout happened before the peer said anything,
-//     so its text is returned as is;
+//   - a timeout is "timed out talking to <host>" and a cancellation
+//     "the request to <host> was canceled": net/http's timeout error
+//     embeds the inner error's text, which can be the peer's;
+//   - a failed dial happened before the peer said anything, so its text
+//     is returned as is;
 //   - anything else is a PeerError.
 //
 // The cause stays reachable with errors.As in every case.
@@ -489,9 +493,11 @@ func ConnectError(host string, err, untrusted error) error {
 		return &connectFailure{msg: "the server's TLS certificate for " + host + " is not valid: " + invalidReason(invalidErr, leaf, time.Now()), errs: []error{err}}
 	case errors.As(err, &verifyErr):
 		return &connectFailure{msg: "the server's TLS certificate for " + host + " does not verify", errs: []error{err}}
-	case errors.As(err, &opErr) && opErr.Op == "dial",
-		errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
-		errors.As(err, &netErr) && netErr.Timeout():
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return &connectFailure{msg: "timed out talking to " + host, errs: []error{err}}
+	case errors.Is(err, context.Canceled):
+		return &connectFailure{msg: "the request to " + host + " was canceled", errs: []error{err}}
+	case errors.As(err, &opErr) && opErr.Op == "dial":
 		return err
 	}
 	return PeerError(err)
