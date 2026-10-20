@@ -119,7 +119,7 @@ func runUserAdd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	var resp serverclient.AddUserResponse
 	err = client.AdminJSON(ctx, http.MethodPost, serverclient.AdminUsersPath, serverclient.AddUserRequest{Name: name, Reinvite: *reinvite}, &resp, signer)
 	if err != nil {
-		return userAddError(name, err)
+		return adminOriginDiagnosis(userAddError(name, err), client.Server(), policy.WebAuthn.Origins)
 	}
 	origin, inviteURL, err := parseInviteURL(resp.InviteURL)
 	if err != nil {
@@ -151,6 +151,28 @@ func userAddError(name string, err error) error {
 		return fmt.Errorf("%s is already in directory; nothing was changed. Use --reinvite to let %s register one more passkey", name, name)
 	}
 	return err
+}
+
+// errAdminOriginAdvice is the CLI's own advice that ends the diagnosis of
+// adminOriginDiagnosis.
+var errAdminOriginAdvice = errors.New("run keyroster init again with --server set to one of them")
+
+// adminOriginDiagnosis names the cause of an admin authentication failure
+// when server, the Client's canonical server URL, is not one of origins,
+// the webauthn origins of the root-verified policy: the server accepts an
+// admin request only at one of those, and answers any other with the same
+// 401 as a bad signature. The origins printed are root-verified values in
+// their validated canonical form, never text from the server's answer,
+// and the CLI's own advice comes last (T-02-93). The diagnosis follows
+// err's own text, so AdminJSON's clock hint stays as it wrote it. Any
+// other error, and the failure at a server URL that is a policy origin,
+// are returned unchanged.
+func adminOriginDiagnosis(err error, server string, origins []string) error {
+	if !errors.Is(err, serverclient.ErrAdminAuth) || slices.Contains(origins, server) {
+		return err
+	}
+	return fmt.Errorf("%w. The saved server URL %s is not a webauthn origin of the root-signed policy (%s), and the server accepts admin requests only there; %w",
+		err, server, strings.Join(origins, ", "), errAdminOriginAdvice)
 }
 
 // adminSigner finds the admin key with fingerprint fp in ssh-agent and

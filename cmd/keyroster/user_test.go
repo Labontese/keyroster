@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -351,6 +352,24 @@ func TestUserAdd(t *testing.T) {
 		}
 	})
 
+	t.Run("server_url_not_policy_origin_diagnosed", func(t *testing.T) {
+		// The saved server URL (https://localhost:PORT) is not a webauthn
+		// origin of the verified policy (inviteOrigin). The request is
+		// still sent; the server's uniform 401 is printed with that cause,
+		// the policy's origin and the CLI's own advice last.
+		e := newUserAddEnv(t, agentCustody, answer(http.StatusUnauthorized, `{"error":"admin authentication failed"}`))
+		code, stdout, stderr := run(t, "user", "add", "carol")
+		want := "admin authentication failed. The saved server URL " + e.cfg.Server +
+			" is not a webauthn origin of the root-signed policy (" + inviteOrigin + ")"
+		if code != 1 || stdout != "" || !strings.Contains(stderr, want) ||
+			!strings.HasSuffix(strings.TrimSuffix(stderr, "\n"), errAdminOriginAdvice.Error()) {
+			t.Fatalf("exit %d, stdout %q, stderr %q; want the 401 diagnosed as %q", code, stdout, stderr, want)
+		}
+		if len(e.requests) != 1 {
+			t.Fatalf("server saw admin requests %q, want the one admin request sent", e.requests)
+		}
+	})
+
 	t.Run("bad_name_refused_locally", func(t *testing.T) {
 		e := newUserAddEnv(t, agentCustody, answer(http.StatusCreated, "{}"))
 		for _, name := range []string{"Carol", "-x", "a;b", strings.Repeat("a", 65)} {
@@ -360,6 +379,40 @@ func TestUserAdd(t *testing.T) {
 		}
 		if len(e.requests) != 0 {
 			t.Fatalf("a bad name reached the server: %q", e.requests)
+		}
+	})
+}
+
+// TestAdminOriginDiagnosis: an admin authentication failure at a server URL
+// the policy does not name gets the cause, the policy's origins and the
+// advice appended, with AdminJSON's text (clock hint included) kept in
+// front; at a policy origin, and for any other error, nothing changes.
+func TestAdminOriginDiagnosis(t *testing.T) {
+	origins := []string{"https://keyroster.example", "https://keyroster.example:8443"}
+	authErr := fmt.Errorf("https://localhost:9443/api/v1/admin/users: %w (your clock differs from the server by 120s)", serverclient.ErrAdminAuth)
+
+	t.Run("not_policy_origin", func(t *testing.T) {
+		got := adminOriginDiagnosis(authErr, "https://localhost:9443", origins)
+		if !errors.Is(got, serverclient.ErrAdminAuth) || !strings.HasPrefix(got.Error(), authErr.Error()+". ") ||
+			!strings.Contains(got.Error(), "https://localhost:9443 is not a webauthn origin of the root-signed policy (https://keyroster.example, https://keyroster.example:8443)") ||
+			!strings.HasSuffix(got.Error(), errAdminOriginAdvice.Error()) {
+			t.Fatalf("got %q; want the 401 text kept and the diagnosis appended", got)
+		}
+	})
+	t.Run("policy_origin_unchanged", func(t *testing.T) {
+		for _, server := range origins {
+			if got := adminOriginDiagnosis(authErr, server, origins); !errors.Is(got, authErr) || got.Error() != authErr.Error() {
+				t.Fatalf("server %s: got %q, want the error unchanged", server, got)
+			}
+		}
+	})
+	t.Run("other_error_unchanged", func(t *testing.T) {
+		other := errors.New("the server is rate-limiting requests from this address; try again later")
+		if got := adminOriginDiagnosis(other, "https://localhost:9443", origins); !errors.Is(got, other) || got.Error() != other.Error() {
+			t.Fatalf("got %q, want the error unchanged", got)
+		}
+		if got := adminOriginDiagnosis(nil, "https://localhost:9443", origins); got != nil {
+			t.Fatalf("got %q for no error", got)
 		}
 	})
 }
@@ -397,7 +450,9 @@ func TestUserAddPeerText(t *testing.T) {
 		{"invite_url_policy_host_other_port", forged(inviteOrigin+":8443/enroll/"+inviteToken, "2026-10-21T12:00:00Z"), notPolicyOrigin},
 		{"padded_expiry", forged(good, "2026-10-21T12:00:00Z"+paddedAdvice), "the server's answer has no valid invite expiry"},
 		{"padded_409", answer(http.StatusConflict, mustJSON(t, serverclient.APIError{Error: paddedAdvice})), ""},
-		{"padded_401", answer(http.StatusUnauthorized, mustJSON(t, serverclient.APIError{Error: paddedAdvice})), serverclient.ErrAdminAuth.Error()},
+		// The test server's URL is not a policy origin, so the CLI's own
+		// last words are the diagnosis's advice (adminOriginDiagnosis).
+		{"padded_401", answer(http.StatusUnauthorized, mustJSON(t, serverclient.APIError{Error: paddedAdvice})), errAdminOriginAdvice.Error()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			newUserAddEnv(t, agentCustody, tc.handler)
