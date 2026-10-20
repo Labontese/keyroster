@@ -448,7 +448,7 @@ These fix the verified findings of the pre-merge review of PR 45 at b880289, und
 
 ### Follow-up check of c69db17
 
-An independent check of the PR at c69db17 found three more non-blocking problems. Two are fixed below and one is skipped.
+An independent check of the PR at c69db17 found three more non-blocking problems. Two are fixed below. The third was skipped in that round and is now handled by a diagnosis (0b3f77e).
 
 - **c69db17, the orchestrator's lint fix.** `stallingReader.Read` names its unused parameter `_`, for revive's unused-parameter rule. It is test-only and changes no behaviour.
 - **requestOrigin's fallback had no test** (low). Fixed in d108bef.
@@ -466,12 +466,11 @@ An independent check of the PR at c69db17 found three more non-blocking problems
     - Deviations 1, 2 and 6 (T-02-36);
     - the 02-09 deferred-items row, items 2 and 3.
   - The D6 todo now records stalled admin-route bodies as part of the connection exposure, with the check's figures (httptest server, byte-counting listener). No code was added: `Connection: close` was measured and does not stop the drain.
-- **user add does not check its own server URL against the verified policy** (info). Skipped; no code change.
-  - The suggested test setup cannot be built. The fake server runs at `https://localhost:PORT`, and `trust.WebAuthnRP.validate` refuses an RP ID with fewer than two labels. Every origin must be `https://<rp_id>[:port]`, so no root-signed policy can name `https://localhost:PORT`.
-  - The CLI check would make every user add test need a server URL that is a policy origin.
-  - Using `keyroster.localhost` would need it to resolve on the cli-macos lane, which is UNVERIFIED. It resolves on this Windows host and in WSL.
-  - A test dial hook in serverclient would change a library API.
-  - Left to the owner. Until then, such an admin gets the server's uniform 401, printed as "admin authentication failed".
+- **user add does not check its own server URL against the verified policy** (info). Skipped in this round. Handled in the follow-up check of ddc07d6 below, by 0b3f77e, as a diagnosis rather than a refusal (an owner-level choice, made by the orchestrator).
+  - What 0b3f77e does. The admin request is still sent. When it fails with the uniform 401 (`serverclient.ErrAdminAuth`) and the canonical `client.Server()` is not one of the verified policy's webauthn origins, user add appends the cause and the policy's origins, then its own advice last (T-02-93). The origins are root-verified values in their validated canonical form, never text from the server's answer. AdminJSON's text, with its clock hint, stays in front.
+  - Why not refuse before sending. A refusal test does work on the existing harness: its policy names only `https://keyroster.example`, and the fake server runs at `https://localhost:PORT`. What breaks is every passing case. Trust policy validation requires an RP ID with at least two labels and origins of exactly `https://<rp_id>[:port]`, so no policy can name the fake server's URL. A probe of the refuse-before-send variant on top of 0b3f77e failed 19 existing subtests: 6 in TestUserAdd and 13 in TestUserAddPeerText, plus the new diagnosis test. The probe was removed afterwards, and `git diff --exit-code` was clean.
+  - Keeping those 19 cases passing would need the fake server at a policy origin. That means either `keyroster.localhost` resolving on every CI lane (UNVERIFIED on cli-macos; it resolves on this Windows host and in WSL) or a test dial hook in internal/serverclient. The server already enforces the origin.
+  - The earlier wording of this record was partly inaccurate. It said the suggested test setup "cannot be built", that the check would affect "every user add test" and that a dial hook "would change a library API". In fact the refusal test can be built, the cases that break are the 19 passing-case subtests, and serverclient is an internal package, not a library API.
 
 Verification of this round:
 - `gofmt -l .` printed nothing.
