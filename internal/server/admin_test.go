@@ -577,7 +577,7 @@ func TestAdminUsers(t *testing.T) {
 					}()
 				}
 				wg.Wait()
-				if !((codes[0] == 201 && codes[1] == 409) || (codes[0] == 409 && codes[1] == 201)) || e.pendingRows(t, "erin") != 1 {
+				if oneEach := (codes[0] == 201 && codes[1] == 409) || (codes[0] == 409 && codes[1] == 201); !oneEach || e.pendingRows(t, "erin") != 1 {
 					t.Fatalf("two parallel adds = %v, rows %d; want one 201, one 409, one row", codes, e.pendingRows(t, "erin"))
 				}
 			}

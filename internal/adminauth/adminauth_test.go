@@ -141,7 +141,7 @@ func TestVerify(t *testing.T) {
 		method, path, body string
 		want               error
 	}{
-		{"missing_headers", func(t *testing.T) http.Header { return http.Header{} }, "POST", testPath, testBody, ErrMissingHeaders},
+		{"missing_headers", func(*testing.T) http.Header { return http.Header{} }, "POST", testPath, testBody, ErrMissingHeaders},
 		{"missing_signature", func(t *testing.T) http.Header {
 			h := sign(t, adminKey, "POST", testPath, testBody, tNow)
 			h.Del(HeaderSignature)
@@ -212,7 +212,7 @@ func TestVerify(t *testing.T) {
 				t.Fatalf("Verify = %q, %v; want %v", name, err, tc.want)
 			}
 			for _, other := range all {
-				if other != tc.want && errors.Is(err, other) {
+				if !errors.Is(tc.want, other) && errors.Is(err, other) {
 					t.Fatalf("Verify error %v also matches %v; each refusal must be distinct", err, other)
 				}
 			}
