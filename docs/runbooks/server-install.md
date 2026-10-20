@@ -307,6 +307,14 @@ a bundle that the pinned roots did not sign.
    Take the `--root-pin` fingerprints and `--threshold` from the root
    ceremony's paper record, never from the server.
 
+   For an admin, `--server` must be one of the policy's webauthn origins,
+   the URL the login page is served from. Admin commands sign that origin,
+   and the server refuses an admin request signed for any other origin
+   with "admin authentication failed", so a signed request cannot be
+   replayed against another deployment that trusts the same admin key.
+   Init stores the URL in canonical form: a lowercase host, no trailing
+   dot and no `:443`.
+
    Init checks two things:
    - the served trust bundle carries its own roots' signatures;
    - its root set is exactly your pins at exactly that threshold.
