@@ -260,11 +260,43 @@ func TestClientTLS(t *testing.T) {
 	})
 
 	t.Run("expired_leaf_not_root_error", func(t *testing.T) {
-		url := startTLS(t, r.leaf(t, "localhost", time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour)), custodyHandler(agentCustody))
-		err := get(clientFor(t, url, r, nil))
-		var ie x509.CertificateInvalidError
-		if err == nil || errors.Is(err, ErrTLSRootNotPinned) || !errors.As(err, &ie) || ie.Reason != x509.Expired || strings.Contains(err.Error(), "keyroster init") {
-			t.Fatalf("expired leaf: err = %v, want an x509.CertificateInvalidError (Expired) without the re-pin hint", err)
+		// An expired or not yet valid leaf: the error names its validity
+		// period and the local time, in the CLI's own format, so a wrong
+		// clock is as easy to see as an expired certificate.
+		for name, period := range map[string][2]time.Duration{
+			"expired":       {-2 * time.Hour, -time.Hour},
+			"not_yet_valid": {time.Hour, 2 * time.Hour},
+		} {
+			leaf := r.leaf(t, "localhost", time.Now().Add(period[0]), time.Now().Add(period[1]))
+			url := startTLS(t, leaf, custodyHandler(agentCustody))
+			before := time.Now().UTC()
+			err := get(clientFor(t, url, r, nil))
+			after := time.Now().UTC()
+			var ie x509.CertificateInvalidError
+			if err == nil || errors.Is(err, ErrTLSRootNotPinned) || !errors.As(err, &ie) || ie.Reason != x509.Expired || strings.Contains(err.Error(), "keyroster init") {
+				t.Fatalf("%s leaf: err = %v, want an x509.CertificateInvalidError (Expired) without the re-pin hint", name, err)
+			}
+			// DER keeps whole seconds: take the period from the parsed leaf.
+			parsed, perr := x509.ParseCertificate(leaf.Certificate[0])
+			if perr != nil {
+				t.Fatal(perr)
+			}
+			want := "the server's TLS certificate for localhost is not valid: it is valid from " +
+				parsed.NotBefore.UTC().Format(time.RFC3339) + " until " + parsed.NotAfter.UTC().Format(time.RFC3339) +
+				", and the local time is "
+			msg := err.Error()
+			i := strings.Index(msg, want)
+			if i < 0 {
+				t.Fatalf("%s leaf: err = %q, want %q followed by the local time", name, msg, want)
+			}
+			rest := msg[i+len(want):]
+			if len(rest) < len("2006-01-02T15:04:05Z") {
+				t.Fatalf("%s leaf: err = %q, want the local time after %q", name, msg, want)
+			}
+			now, terr := time.Parse(time.RFC3339, rest[:len("2006-01-02T15:04:05Z")])
+			if terr != nil || now.Before(before.Truncate(time.Second)) || now.After(after) {
+				t.Fatalf("%s leaf: err = %q, want the local time between %v and %v (%v)", name, msg, before, after, terr)
+			}
 		}
 	})
 

@@ -482,7 +482,11 @@ func ConnectError(host string, err, untrusted error) error {
 	case errors.As(err, &unknownErr), errors.Is(err, errRootPinMismatch):
 		return &connectFailure{msg: untrusted.Error(), errs: []error{untrusted, err}}
 	case errors.As(err, &invalidErr):
-		return &connectFailure{msg: "the server's TLS certificate for " + host + " is not valid: " + invalidReason(invalidErr.Reason), errs: []error{err}}
+		var leaf *x509.Certificate
+		if errors.As(err, &verifyErr) && len(verifyErr.UnverifiedCertificates) > 0 {
+			leaf = verifyErr.UnverifiedCertificates[0]
+		}
+		return &connectFailure{msg: "the server's TLS certificate for " + host + " is not valid: " + invalidReason(invalidErr, leaf, time.Now()), errs: []error{err}}
 	case errors.As(err, &verifyErr):
 		return &connectFailure{msg: "the server's TLS certificate for " + host + " does not verify", errs: []error{err}}
 	case errors.As(err, &opErr) && opErr.Op == "dial",
@@ -494,11 +498,22 @@ func ConnectError(host string, err, untrusted error) error {
 }
 
 // invalidReason says why x509 refused a certificate, in the CLI's own
-// words: CertificateInvalidError's Detail can name the peer's names.
-func invalidReason(r x509.InvalidReason) string {
-	switch r {
+// words: CertificateInvalidError's Detail can name the peer's names. For a
+// certificate outside its validity period it gives that period and now
+// as fixed-format UTC times (validity fields, never free text), naming
+// the certificate "it" when it is leaf, the server's own certificate.
+func invalidReason(e x509.CertificateInvalidError, leaf *x509.Certificate, now time.Time) string {
+	switch e.Reason {
 	case x509.Expired:
-		return "it or a certificate in its chain has expired or is not yet valid"
+		if e.Cert == nil {
+			return "it or a certificate in its chain has expired or is not yet valid"
+		}
+		which := "a certificate in its chain"
+		if leaf != nil && leaf.Equal(e.Cert) {
+			which = "it"
+		}
+		return fmt.Sprintf("%s is valid from %s until %s, and the local time is %s (check the certificate and this computer's clock)",
+			which, e.Cert.NotBefore.UTC().Format(time.RFC3339), e.Cert.NotAfter.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	case x509.NotAuthorizedToSign:
 		return "a certificate in its chain is not allowed to sign certificates"
 	case x509.IncompatibleUsage:
