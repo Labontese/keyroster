@@ -1113,6 +1113,25 @@ func TestRateLimit(t *testing.T) {
 		}
 	})
 
+	t.Run("client_bucket_checked_before_global", func(t *testing.T) {
+		// One client far over its own limit, and over the global burst:
+		// its refused requests take no global token, so another client
+		// still gets through.
+		e := newAdminEnv(t, Limits{InvitePerMinute: 1, InviteBurst: 1})
+		for i := range 3 * globalFactor {
+			want := http.StatusTooManyRequests
+			if i == 0 {
+				want = http.StatusNotFound
+			}
+			if c := get(e.s, "198.51.100.1:1", nil); c != want {
+				t.Fatalf("request %d from the hammering client = %d, want %d", i, c, want)
+			}
+		}
+		if c := get(e.s, "198.51.100.2:1", nil); c != http.StatusNotFound {
+			t.Fatalf("another client after one client's %d refused requests = %d, want 404 (the global bucket is not drained)", 3*globalFactor-1, c)
+		}
+	})
+
 	t.Run("limiter_map_bounded", func(t *testing.T) {
 		l := newLimiter(60, 20, 1<<30, 1<<30)
 		for i := range 20000 {
