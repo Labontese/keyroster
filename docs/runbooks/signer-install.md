@@ -58,16 +58,20 @@ manager device; it does not use `tpm2-abrmd` or `tpm2-tools`.
 ## 2. Verify and install the binaries
 
 Phase 1 has no signed releases yet (Phase 6). Build from the reviewed commit
-on two independent machines with the **same Go toolchain version** (the one
-in `go.mod`'s `toolchain` line, currently go1.27.1) and compare the
-hashes. Go builds are designed to be reproducible with these flags, so the
-hashes should match; keyroster has not yet verified this itself (release
-reproducibility is checked in Phase 6). Investigate any difference before
-installing:
+on two independent machines with the **same Go toolchain version**, the one
+in `go.mod`'s `toolchain` line, and compare the hashes. Set `GOTOOLCHAIN`
+from that line as below: a local Go of an older version would otherwise
+build the binaries too, with a standard library whose fixed
+vulnerabilities they reach. Go builds are designed to be reproducible with
+these flags, so the hashes should match; keyroster has not yet verified
+this itself (release reproducibility is checked in Phase 6). Investigate
+any difference before installing:
 
 ```
+export GOTOOLCHAIN=$(awk '$1 == "toolchain" {print $2}' go.mod)
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o keyroster-signer ./cmd/keyroster-signer
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o keyroster ./cmd/keyroster
+go version keyroster-signer keyroster      # both must print the toolchain line's version
 sha256sum keyroster-signer keyroster
 ```
 

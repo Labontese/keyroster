@@ -3,6 +3,7 @@ package wire
 import (
 	"errors"
 	"fmt"
+	"regexp"
 
 	"golang.org/x/crypto/cryptobyte"
 )
@@ -20,6 +21,16 @@ const MaxStatusKeys = 8
 
 // maxStatusString bounds each string field of a KeyStatus.
 const maxStatusString = 255
+
+// token is the form of a key's role and custody in a StatusResponse.
+var token = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+// IsToken reports whether s is a short lowercase token: 1 to 64 of a-z,
+// 0-9 and '-', not starting with '-'. A StatusResponse's role and custody
+// names must be tokens, so text that the CLI and keyroster-server print or
+// put in a header from a signer report cannot carry control characters,
+// spaces or padding.
+func IsToken(s string) bool { return token.MatchString(s) }
 
 // ErrStatusTooLarge means a StatusResponse body would exceed the
 // MaxStatusFrame budget. The signer refuses to install a bundle and policy
@@ -71,6 +82,9 @@ func (r *StatusResponse) check() error {
 				return fmt.Errorf("%w: status key field length", ErrMalformed)
 			}
 		}
+		if !IsToken(k.Role) || !IsToken(k.Custody) {
+			return fmt.Errorf("%w: a status key's role or custody is not a lowercase token", ErrMalformed)
+		}
 	}
 	if r.DirectoryVersion == 0 && (r.DirectorySHA256 != [32]byte{} || r.DirectoryAuthorized) {
 		return fmt.Errorf("%w: a status without a directory carries a directory hash or authorization", ErrMalformed)
@@ -121,7 +135,8 @@ func (r *StatusResponse) Marshal() ([]byte, error) {
 }
 
 // ParseStatusResponse decodes a response body strictly: at most
-// MaxStatusKeys keys with non-empty fields, Authorized 0 or 1, nothing
+// MaxStatusKeys keys with non-empty fields, each role and custody a token
+// (IsToken), Authorized 0 or 1, nothing
 // after it, and a status without a directory carrying no hash and no
 // authorization.
 func ParseStatusResponse(body []byte) (*StatusResponse, error) {

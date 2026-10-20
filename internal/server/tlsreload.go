@@ -43,7 +43,7 @@ type CertHolder struct {
 	cur atomic.Pointer[tls.Certificate]
 
 	mu       sync.Mutex
-	stamp    fileStamp // the files as last attempted
+	stamp    fileStamp // the files as last loaded
 	lastWarn time.Time // last expiry warning
 }
 
@@ -82,17 +82,19 @@ func (h *CertHolder) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, err
 // "tls certificate loaded" with the leaf's fingerprint (lowercase hex
 // SHA-256 of its DER), not_after (RFC 3339, UTC) and trigger. A refused
 // load writes an error record, returns its error and keeps the current
-// certificate.
+// certificate. Only a successful load records the files' stamp, so Watch
+// tries refused files again at every interval until they load: a fix such
+// as chmod or chgrp on the key changes neither mtime nor size.
 func (h *CertHolder) Reload(trigger string) error {
 	st := h.statFiles()
-	h.mu.Lock()
-	h.stamp = st
-	h.mu.Unlock()
 	c, err := h.load()
 	if err != nil {
 		h.cfg.Logger.Error("tls certificate reload refused", "trigger", trigger, "err", err)
 		return err
 	}
+	h.mu.Lock()
+	h.stamp = st
+	h.mu.Unlock()
 	h.cur.Store(c)
 	sum := sha256.Sum256(c.Leaf.Raw)
 	h.cfg.Logger.Info("tls certificate loaded", "fingerprint", hex.EncodeToString(sum[:]),
@@ -102,7 +104,8 @@ func (h *CertHolder) Reload(trigger string) error {
 }
 
 // Watch reloads the certificate until ctx ends: on every interval when
-// the files' mtime or size changed since the last attempt, and on every
+// the files' mtime or size differ from the last successful load (so
+// refused files are tried again at every interval), and on every
 // signal from hup whether or not the files changed. A signal already
 // waiting in hup (for example a SIGHUP that arrived during start-up) is
 // handled as one reload. Each interval also repeats the expiry check.
@@ -124,7 +127,7 @@ func (h *CertHolder) Watch(ctx context.Context, interval time.Duration, hup <-ch
 	}
 }
 
-// changed reports whether the files differ from the last attempt.
+// changed reports whether the files differ from the last successful load.
 func (h *CertHolder) changed() bool {
 	st := h.statFiles()
 	h.mu.Lock()

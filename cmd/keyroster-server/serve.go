@@ -88,7 +88,7 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 
-	srv, err := server.New(server.Config{SignerSocket: *socket, Logger: logger})
+	srv, err := server.New(server.Config{SignerSocket: *socket, RPID: rpID, Logger: logger})
 	if err != nil {
 		return err
 	}

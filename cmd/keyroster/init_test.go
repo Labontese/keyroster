@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -32,14 +34,49 @@ type initServer struct {
 	url      string
 	rootFile string // the test root, PEM
 	rootPin  string
-	rootFP   string // the trust root's SHA256 fingerprint
-	otherPin string // a well-formed pin of a root the server never presents
+	rootFP   string          // the trust root's SHA256 fingerprint
+	otherPin string          // a well-formed pin of a root the server never presents
+	leaf     tls.Certificate // the server's localhost certificate under the test root
 }
 
 // newInitServer signs a genesis bundle with one software root (the
 // in-process ceremony of root_test.go) and serves it at /api/v1/trust over
 // TLS with custody.
 func newInitServer(t *testing.T, custody string) *initServer {
+	t.Helper()
+	doc, rootFP := initTrustDoc(t)
+	root, rootKey := initTestRoot(t)
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "localhost"}, DNSNames: []string{"localhost"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leaf, err := x509.CreateCertificate(rand.Reader, tmpl, root, &leafKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := initTestRoot(t)
+	cert := tls.Certificate{Certificate: [][]byte{leaf}, PrivateKey: leafKey}
+	is := &initServer{
+		url:      serveTrustDoc(t, doc, custody, cert),
+		rootFile: filepath.Join(t.TempDir(), "root.pem"),
+		rootPin:  serverclient.PinOf(root),
+		rootFP:   rootFP,
+		otherPin: serverclient.PinOf(other),
+		leaf:     cert,
+	}
+	writeTestFile(t, is.rootFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw}))
+	return is
+}
+
+// initTrustDoc signs a genesis bundle with one software root (the
+// in-process ceremony of root_test.go) and returns the /api/v1/trust
+// document and the trust root's fingerprint.
+func initTrustDoc(t *testing.T) ([]byte, string) {
 	t.Helper()
 	g := newCeremony(t, 1)
 	useKeyring(t, g.rootKeys...)
@@ -55,21 +92,13 @@ func newInitServer(t *testing.T, custody string) *initServer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return doc, g.fingerprint(t, 0)
+}
 
-	root, rootKey := initTestRoot(t)
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "localhost"}, DNSNames: []string{"localhost"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	leaf, err := x509.CreateCertificate(rand.Reader, tmpl, root, &leafKey.PublicKey, rootKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+// serveTrustDoc serves doc at /api/v1/trust with custody over TLS with
+// cert and returns https://localhost:PORT.
+func serveTrustDoc(t *testing.T, doc []byte, custody string, cert tls.Certificate) string {
+	t.Helper()
 	s := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != serverclient.TrustPath {
 			http.NotFound(w, r)
@@ -78,23 +107,14 @@ func newInitServer(t *testing.T, custody string) *initServer {
 		w.Header().Set(serverclient.CustodyHeader, custody)
 		_, _ = w.Write(doc)
 	}))
-	s.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{{Certificate: [][]byte{leaf}, PrivateKey: leafKey}}}
+	s.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}}
 	s.StartTLS()
 	t.Cleanup(s.Close)
 	_, port, err := net.SplitHostPort(s.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, _ := initTestRoot(t)
-	is := &initServer{
-		url:      "https://localhost:" + port,
-		rootFile: filepath.Join(t.TempDir(), "root.pem"),
-		rootPin:  serverclient.PinOf(root),
-		rootFP:   g.fingerprint(t, 0),
-		otherPin: serverclient.PinOf(other),
-	}
-	writeTestFile(t, is.rootFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw}))
-	return is
+	return "https://localhost:" + port
 }
 
 func initTestRoot(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
@@ -140,6 +160,37 @@ func requireNoConfig(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("a refused init wrote %s (%v)", path, err)
+	}
+}
+
+// TestRepinInstructionsKeepIdentity: init --force builds the config from
+// its flags alone, so every documented re-pin command and both re-pin
+// error messages must pass --user and --admin-key again; otherwise an
+// admin who follows them loses admin_key and user from the config.
+func TestRepinInstructionsKeepIdentity(t *testing.T) {
+	found := 0
+	for _, name := range []string{"root-ceremony.md", "server-install.md"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "docs", "runbooks", name)) //nolint:gosec // G304: a constant runbook name under docs/runbooks
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, para := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n\n") {
+			if !strings.Contains(para, "init") || !strings.Contains(para, "--force") || !strings.Contains(para, "--root-pin") {
+				continue
+			}
+			found++
+			if !strings.Contains(para, "--user") || !strings.Contains(para, "--admin-key") {
+				t.Errorf("%s: a re-pin instruction without --user and --admin-key:\n%s", name, para)
+			}
+		}
+	}
+	if found < 2 {
+		t.Fatalf("found %d re-pin instructions in the runbooks, want at least 2 (root-ceremony step 9, server-install TLS root changed)", found)
+	}
+	for _, err := range []error{serverclient.ErrTrustRootNotPinned, serverclient.ErrTLSRootNotPinned} {
+		if !strings.Contains(err.Error(), "--user") || !strings.Contains(err.Error(), "--admin-key") {
+			t.Errorf("re-pin error without --user and --admin-key: %v", err)
+		}
 	}
 }
 
@@ -196,6 +247,78 @@ func TestInit(t *testing.T) {
 		}
 		if c, err := loadConfig(); err != nil || c.User != "bob" {
 			t.Fatalf("config after --force = %+v, %v", c, err)
+		}
+	})
+
+	t.Run("stores_only_pinned_of_two_observed_roots", func(t *testing.T) {
+		// The server chains to two roots: one intermediate (one key and
+		// subject) is signed by root A and by root B, and both copies are
+		// served. Init pins A only and must store A alone, never the
+		// observed but unpinned B.
+		doc, rootFP := initTrustDoc(t)
+		rootA, keyA := initTestRoot(t)
+		rootB, keyB := initTestRoot(t)
+		interKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		interTmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(10), Subject: pkix.Name{CommonName: "init test intermediate"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+			KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true, IsCA: true,
+		}
+		interA, err := x509.CreateCertificate(rand.Reader, interTmpl, rootA, &interKey.PublicKey, keyA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		interTmpl.SerialNumber = big.NewInt(11)
+		interB, err := x509.CreateCertificate(rand.Reader, interTmpl, rootB, &interKey.PublicKey, keyB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inter, err := x509.ParseCertificate(interA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leafTmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(12), Subject: pkix.Name{CommonName: "localhost"}, DNSNames: []string{"localhost"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}
+		leaf, err := x509.CreateCertificate(rand.Reader, leafTmpl, inter, &leafKey.PublicKey, interKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		url := serveTrustDoc(t, doc, softwareCustody, tls.Certificate{Certificate: [][]byte{leaf, interA, interB}, PrivateKey: leafKey})
+		rootFile := filepath.Join(t.TempDir(), "roots.pem")
+		writeTestFile(t, rootFile, append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootA.Raw}),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootB.Raw})...))
+		pinA, pinB := serverclient.PinOf(rootA), serverclient.PinOf(rootB)
+
+		useConfigDir(t)
+		code, stdout, stderr := run(t, "init", "--server", url, "--tls-root-file", rootFile, "--tls-pin", pinA,
+			"--root-pin", rootFP, "--threshold", "1", "--user", "alice")
+		if code != 0 {
+			t.Fatalf("init exit %d:\n%s\n%s", code, stdout, stderr)
+		}
+		// Control: init observed both roots.
+		if !strings.Contains(stdout, pinA) || !strings.Contains(stdout, pinB) {
+			t.Fatalf("init did not print both observed roots:\n%s", stdout)
+		}
+		c, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(c.TLSPins) != 1 || c.TLSPins[0] != pinA || len(c.TLSRootsPEM) != 1 {
+			t.Fatalf("saved TLS pins %q and %d roots, want only %s", c.TLSPins, len(c.TLSRootsPEM), pinA)
+		}
+		block, _ := pem.Decode([]byte(c.TLSRootsPEM[0]))
+		if block == nil || !bytes.Equal(block.Bytes, rootA.Raw) {
+			t.Fatal("the saved root is not root A")
 		}
 	})
 
@@ -256,4 +379,26 @@ func TestInit(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestObserveRootsTransportText: init's first connection has no
+// http.Client, so plain HTTP on the TLS port shows as Go's record-header
+// error. Go wrote that text, so it is printed whole, not as a cut
+// peer-text excerpt.
+func TestObserveRootsTransportText(t *testing.T) {
+	s := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(s.Close)
+	_, port, err := net.SplitHostPort(s.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = observeRoots(context.Background(), "localhost:"+port, "localhost", port, x509.NewCertPool())
+	var recErr tls.RecordHeaderError
+	if !errors.As(err, &recErr) {
+		t.Fatalf("plain HTTP: err = %v, want a tls.RecordHeaderError", err)
+	}
+	want := "connect to localhost:" + port + ": tls: first record does not look like a TLS handshake"
+	if err.Error() != want {
+		t.Fatalf("plain HTTP: err = %q, want %q", err.Error(), want)
+	}
 }

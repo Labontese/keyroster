@@ -16,6 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
+	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/signerclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -115,7 +116,8 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	}
 	pk, err := ssh.ParsePublicKey(resp.Cert)
 	if err != nil {
-		return fmt.Errorf("signer returned an unparsable certificate: %w", err)
+		// x/crypto's text repeats the algorithm name the signer chose.
+		return &ownWordsError{msg: "signer returned a certificate that does not parse; nothing was written", cause: err}
 	}
 	c, ok := pk.(*ssh.Certificate)
 	if !ok {
@@ -123,6 +125,11 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	}
 	if !bytes.Equal(c.Key.Marshal(), pub.Marshal()) || c.Serial != resp.Serial {
 		return errors.New("signer returned a certificate for another key or serial")
+	}
+	// The key ID is printed below: it must be a keyroster key ID, whose
+	// charset carries no control character, space or padding.
+	if _, err := cert.ParseKeyID(c.KeyId); err != nil {
+		return errors.New("signer returned a certificate whose key ID is not a keyroster key ID; nothing was written")
 	}
 
 	dest := *out
@@ -135,6 +142,17 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	_, _ = fmt.Fprintf(stderr, "serial: %d\nkey id: %s\nlog leaf: %d\ncertificate: %s\n", c.Serial, c.KeyId, resp.LeafIndex, dest)
 	return nil
 }
+
+// ownWordsError states a failure only in the CLI's own words: its Error
+// never includes the cause's text, which the signer may have chosen.
+// Unwrap returns the cause, for errors.Is and errors.As.
+type ownWordsError struct {
+	msg   string
+	cause error
+}
+
+func (e *ownWordsError) Error() string { return e.msg }
+func (e *ownWordsError) Unwrap() error { return e.cause }
 
 // bannerFrame is the line printed above and below a custody warning.
 var bannerFrame = strings.Repeat("!", 76)

@@ -297,6 +297,29 @@ func TestServerInitEndToEnd(t *testing.T) {
 	}
 	requireSecurityHeaders(t, "GET /static/app.css", css)
 
+	t.Run("refuses_tls12", func(t *testing.T) {
+		// Every other client here sets MinVersion TLS 1.3 itself, so only
+		// a client capped at TLS 1.2 shows that the server refuses it.
+		dial := func(maxVersion uint16) error {
+			d := tls.Dialer{
+				NetDialer: &net.Dialer{Timeout: 10 * time.Second},
+				Config:    &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: maxVersion, RootCAs: env.CA.pool(), ServerName: serverRPID},
+			}
+			conn, err := d.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(env.Port)))
+			if err == nil {
+				_ = conn.Close()
+			}
+			return err
+		}
+		if err := dial(tls.VersionTLS12); err == nil || !strings.Contains(err.Error(), "protocol version") {
+			t.Fatalf("a TLS 1.2 handshake: %v, want a protocol version alert", err)
+		}
+		// Control: the same client allowed TLS 1.3 connects.
+		if err := dial(tls.VersionTLS13); err != nil {
+			t.Fatalf("control: a TLS 1.3 handshake: %v", err)
+		}
+	})
+
 	t.Run("sighup_reload_logs_json", func(t *testing.T) {
 		if err := env.Cmd.Process.Signal(syscall.SIGHUP); err != nil {
 			t.Fatal(err)
@@ -418,18 +441,22 @@ func TestServerRefusesStart(t *testing.T) {
 	})
 
 	rp := bootstrapSigner(t, bootstrapOpts{WebAuthnRPID: serverRPID, WebAuthnOrigins: []string{"https://" + serverRPID + ":8443"}})
+	// The certificate refusals must be the server's own exit: status 1 with
+	// main's final "keyroster-server serve: <err>" line. The holder logs
+	// the same reason as JSON, so a server that kept running until
+	// runBin's timeout killed it (exit -1) would otherwise pass.
 	t.Run("leaf_not_covering_rp_id", func(t *testing.T) {
 		cert, key := ca.otherNameLeaf(t)
 		code, out := serve(t, rp.Socket, cert, key)
-		if code == 0 || !strings.Contains(out, "does not cover the RP ID "+serverRPID) {
-			t.Fatalf("serve with a leaf for another name: exit %d:\n%s", code, out)
+		if code != 1 || !strings.Contains(out, "keyroster-server serve: the certificate does not cover the RP ID "+serverRPID) {
+			t.Fatalf("serve with a leaf for another name: exit %d, want 1 with the serve error line:\n%s", code, out)
 		}
 	})
 	t.Run("expired_leaf", func(t *testing.T) {
 		cert, key := ca.expiredLeaf(t, serverRPID)
 		code, out := serve(t, rp.Socket, cert, key)
-		if code == 0 || !strings.Contains(out, "the certificate is valid from") {
-			t.Fatalf("serve with an expired leaf: exit %d:\n%s", code, out)
+		if code != 1 || !strings.Contains(out, "keyroster-server serve: the certificate is valid from") {
+			t.Fatalf("serve with an expired leaf: exit %d, want 1 with the serve error line:\n%s", code, out)
 		}
 	})
 	t.Run("control_starts", func(t *testing.T) {

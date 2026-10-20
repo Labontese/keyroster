@@ -32,6 +32,11 @@ func init() {
 // initDialTimeout bounds init's TLS probe of the server.
 const initDialTimeout = 15 * time.Second
 
+// errInitUntrusted is init's refusal of a server chain that ends in none
+// of the roots it verifies with.
+var errInitUntrusted = errors.New("the server's TLS certificate does not chain to a root in --tls-root-file, " +
+	"or to a system root when --tls-root-file is not given (or the server is not sending its full chain)")
+
 // observedRoot is a root certificate that ends a chain the server
 // presented, with its pin.
 type observedRoot struct {
@@ -180,7 +185,9 @@ func observeRoots(ctx context.Context, hostPort, host, port string, pool *x509.C
 	defer cancel()
 	conn, err := d.DialContext(dctx, "tcp", hostPort)
 	if err != nil {
-		return nil, fmt.Errorf("connect to %s: %w", hostPort, err)
+		// A handshake error repeats names from the peer's certificates,
+		// which an attacker chooses: ConnectError never prints them.
+		return nil, fmt.Errorf("connect to %s: %w", hostPort, serverclient.ConnectError(host, err, errInitUntrusted))
 	}
 	defer func() { _ = conn.Close() }()
 	tc, ok := conn.(*tls.Conn)

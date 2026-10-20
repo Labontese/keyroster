@@ -23,6 +23,10 @@ import (
 type Config struct {
 	// SignerSocket is keyroster-signer's Unix socket.
 	SignerSocket string
+	// RPID is the WebAuthn RP ID the server started with, the one its TLS
+	// certificate was checked against (required). A signer status whose
+	// policy names another RP ID is refused until the server restarts.
+	RPID string
 	// Clock is the time source of the status cache (nil: time.Now).
 	Clock func() time.Time
 	// Logger receives every log line of the Server and its handlers
@@ -33,14 +37,16 @@ type Config struct {
 // Server serves keyroster's pages and API.
 type Server struct {
 	signer  signerAPI
+	rpID    string
 	clock   func() time.Time
 	log     *slog.Logger
 	pages   map[string]*template.Template
 	static  fs.FS
 	handler http.Handler
 
-	mu     sync.Mutex  // held for a whole status refresh
-	status *statusView // nil when there is no current entry
+	mu       sync.Mutex  // guards status and inflight; never held across a signer call
+	status   *statusView // nil when there is no current entry
+	inflight *refresh    // the status refresh in flight, or nil
 }
 
 // New builds a Server that reaches the signer at cfg.SignerSocket.
@@ -53,6 +59,9 @@ func New(cfg Config) (*Server, error) {
 
 // newServer builds a Server on sg; tests pass fakeSigner.
 func newServer(cfg Config, sg signerAPI) (*Server, error) {
+	if cfg.RPID == "" {
+		return nil, errors.New("server: no RP ID")
+	}
 	pages, err := parsePages()
 	if err != nil {
 		return nil, err
@@ -61,7 +70,7 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{signer: sg, clock: cfg.Clock, log: cfg.Logger, pages: pages, static: static}
+	s := &Server{signer: sg, rpID: cfg.RPID, clock: cfg.Clock, log: cfg.Logger, pages: pages, static: static}
 	if s.clock == nil {
 		s.clock = time.Now
 	}

@@ -3,6 +3,7 @@ package wire
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -135,6 +136,29 @@ func TestStatusResponseCodec(t *testing.T) {
 		}
 		if _, err := ParseStatusResponse(append([]byte{0}, body[1:]...)); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("a zero key count = %v, want ErrMalformed", err)
+		}
+	})
+	t.Run("role_and_custody_must_be_tokens", func(t *testing.T) {
+		// The CLI prints role names and keyroster-server puts role and
+		// custody in a header: neither may carry anything but a token.
+		for _, bad := range []string{"USER", "us r", "-user", strings.Repeat("u", 65)} {
+			r := validStatus()
+			r.Keys[0].Role = bad
+			if _, err := r.Marshal(); !errors.Is(err, ErrMalformed) {
+				t.Errorf("Marshal with role %q = %v, want ErrMalformed", bad, err)
+			}
+			r = validStatus()
+			r.Keys[0].Custody = bad
+			if _, err := r.Marshal(); !errors.Is(err, ErrMalformed) {
+				t.Errorf("Marshal with custody %q = %v, want ErrMalformed", bad, err)
+			}
+		}
+		for _, patch := range []string{"USER", "us r", "-use"} {
+			// The first "user" in the body is the first key's role.
+			raw := bytes.Replace(body, []byte("user"), []byte(patch), 1)
+			if _, err := ParseStatusResponse(raw); !errors.Is(err, ErrMalformed) {
+				t.Errorf("ParseStatusResponse with role %q = %v, want ErrMalformed", patch, err)
+			}
 		}
 	})
 	t.Run("authorized_byte_above_one_refused", func(t *testing.T) {

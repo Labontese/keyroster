@@ -85,47 +85,99 @@ func newStatusView(st *wire.StatusResponse, now time.Time) (*statusView, error) 
 	}, nil
 }
 
+// refresh is one signer Status call in flight. done closes when it has
+// ended; v and err are its result, set before done closes.
+type refresh struct {
+	done chan struct{}
+	v    *statusView
+	err  error
+}
+
 // currentStatus returns the signer's state, the only way a handler gets
 // RP, policy, custody or directory data. An entry younger than statusTTL
-// comes from the cache. Otherwise the caller refreshes it while holding
-// s.mu for the whole signer call, so concurrent callers wait for that one
-// refresh. A failed refresh drops the entry and returns the error: it is
-// never cached, and the next request tries again.
+// comes from the cache. Otherwise one refresh asks the signer, and every
+// caller that arrives while it is in flight waits for it and takes its
+// result, a failure included; none starts a second signer call. A caller
+// whose ctx ends stops waiting, and a caller whose ctx has already ended
+// starts no refresh. A failed refresh is never cached: the first caller
+// after it has ended starts a new one.
 func (s *Server) currentStatus(ctx context.Context) (*statusView, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	now := s.clock()
 	if v := s.status; v != nil {
 		if age := now.Sub(v.fetched); age >= 0 && age < statusTTL {
+			s.mu.Unlock()
 			return v, nil
 		}
 	}
 	s.status = nil
-	// One caller hanging up must not fail the others waiting on this
-	// refresh.
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusTimeout)
+	r := s.inflight
+	if r == nil {
+		if err := ctx.Err(); err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		r = &refresh{done: make(chan struct{})}
+		s.inflight = r
+		// Detached: a refresh shared by every waiting caller must not end
+		// with this caller's request.
+		go s.refresh(context.WithoutCancel(ctx), r, now)
+	}
+	s.mu.Unlock()
+	select {
+	case <-r.done:
+		return r.v, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// refresh asks the signer for its Status, bounded by statusTimeout. ctx
+// must carry no cancellation (context.WithoutCancel of the starting
+// caller's ctx): the refresh is detached from every request, so one caller
+// hanging up does not fail the others. It stores a good answer as the
+// cache entry and hands the result to every caller waiting on r.
+func (s *Server) refresh(ctx context.Context, r *refresh, now time.Time) {
+	rctx, cancel := context.WithTimeout(ctx, statusTimeout)
 	defer cancel()
 	st, err := s.signer.Status(rctx)
+	var v *statusView
 	if err != nil {
 		s.log.Warn("signer status unavailable", "err", err)
-		return nil, err
-	}
-	v, err := newStatusView(st, now)
-	if err != nil {
+	} else if v, err = newStatusView(st, now); err != nil {
 		s.log.Warn("signer status refused", "err", err)
-		return nil, err
+	} else if v.rp.RPID != s.rpID {
+		// The TLS certificate was checked against the start-up RP ID,
+		// and the certificate holder keeps checking against it.
+		err = fmt.Errorf("the signer's policy names RP ID %s, but this server started with %s", v.rp.RPID, s.rpID)
+		s.log.Error("signer status refused; restart keyroster-server to serve the new RP ID", "err", err)
 	}
-	s.status = v
-	return v, nil
+	s.mu.Lock()
+	if err == nil {
+		s.status = v
+	} else {
+		v = nil
+	}
+	s.inflight = nil
+	r.v, r.err = v, err
+	s.mu.Unlock()
+	close(r.done)
 }
 
 // dropStatus removes the cached status, so the next currentStatus asks the
-// signer again, under the same fail-closed rule. It takes the mutex a
-// refresh holds for its whole signer call, so an answer read before a
-// change can never be put back after the drop. Handlers call it right
-// after the server asked the signer to change something Status reports
-// (the directory install, 02-09). It makes no signer call and cannot fail.
+// signer again, under the same fail-closed rule. It first waits for the
+// refresh in flight, if any (at most statusTimeout), so an answer read
+// before a change can never be put back after the drop. Handlers call it
+// right after the server asked the signer to change something Status
+// reports (the directory install, 02-09). It makes no signer call and
+// cannot fail.
 func (s *Server) dropStatus() {
+	s.mu.Lock()
+	r := s.inflight
+	s.mu.Unlock()
+	if r != nil {
+		<-r.done
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status = nil

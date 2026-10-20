@@ -26,10 +26,14 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -73,9 +77,6 @@ type APIError struct {
 	Error string `json:"error"`
 }
 
-// custodyToken is the form of a role or custody name in CustodyHeader.
-var custodyToken = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
-
 // CustodyHeaderValue formats keys as the CustodyHeader value, in the order
 // given. It refuses a role or custody that is not a short lowercase token,
 // so a signer report can never inject anything into a header.
@@ -85,7 +86,7 @@ func CustodyHeaderValue(keys []wire.KeyStatus) (string, error) {
 	}
 	parts := make([]string, 0, len(keys))
 	for _, k := range keys {
-		if !custodyToken.MatchString(k.Role) || !custodyToken.MatchString(k.Custody) {
+		if !wire.IsToken(k.Role) || !wire.IsToken(k.Custody) {
 			return "", fmt.Errorf("custody: role %q or custody %q is not a lowercase token", k.Role, k.Custody)
 		}
 		parts = append(parts, k.Role+"="+k.Custody)
@@ -94,15 +95,21 @@ func CustodyHeaderValue(keys []wire.KeyStatus) (string, error) {
 }
 
 // ParseCustodyHeader parses a CustodyHeader value into keys with Role and
-// Custody set, in header order. Every entry must be role=custody with both
-// a lowercase token, and no role may repeat.
+// Custody set, in header order. It has at most wire.MaxStatusKeys entries,
+// each role=custody with role one of the signer's roles (user, host,
+// machine, ops, log) and custody a lowercase token, and no role may
+// repeat. The header arrives before Trust has verified anything, so it
+// cannot fill the evaluation-only banner with roles of its own.
 func ParseCustodyHeader(v string) ([]wire.KeyStatus, error) {
+	if strings.Count(v, ",") >= wire.MaxStatusKeys {
+		return nil, fmt.Errorf("malformed %s header %s", CustodyHeader, peerExcerpt(v))
+	}
 	var out []wire.KeyStatus
 	seen := map[string]bool{}
 	for _, part := range strings.Split(v, ",") {
 		role, custody, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok || !custodyToken.MatchString(role) || !custodyToken.MatchString(custody) || seen[role] {
-			return nil, fmt.Errorf("malformed %s header %q", CustodyHeader, v)
+		if !ok || !slices.Contains(trust.CAPubKeyRoles, role) || !wire.IsToken(custody) || seen[role] {
+			return nil, fmt.Errorf("malformed %s header %s", CustodyHeader, peerExcerpt(v))
 		}
 		seen[role] = true
 		out = append(out, wire.KeyStatus{Role: role, Custody: custody})
@@ -116,7 +123,8 @@ func ParseCustodyHeader(v string) ([]wire.KeyStatus, error) {
 var ErrTLSRootNotPinned = errors.New("the server's TLS certificate does not chain to a root you pinned with keyroster init. " +
 	"If its CA changed roots, run `keyroster init --server <URL>` without --tls-pin (add --tls-root-file <new root PEM> for a private CA) " +
 	"to print the roots it now presents, compare the pins out of band (docs/runbooks/server-install.md \"TLS root changed\"), " +
-	"then re-run init with --tls-pin and --force. " +
+	"then re-run init with --tls-pin and --force, plus your --root-pin, --threshold, --user and (for an admin) --admin-key, " +
+	"since --force replaces the whole config. " +
 	"The same error appears when the server is not sending its full chain (a missing intermediate certificate); " +
 	"in that case fix the server's certificate file and do not re-pin")
 
@@ -127,7 +135,8 @@ var ErrTLSRootNotPinned = errors.New("the server's TLS certificate does not chai
 var ErrTrustRootNotPinned = errors.New("the server's trust bundle is signed by roots that do not match the --root-pin set you gave keyroster init. " +
 	"If the roots were rotated (docs/runbooks/root-ceremony.md \"Rotate the roots\"), get the new root fingerprints and threshold " +
 	"out of band from the root holders' records, never from the server, and run " +
-	"`keyroster init --force --server <URL> --tls-pin <pin> --root-pin <new fp> [--root-pin ...] --threshold <n>`")
+	"`keyroster init --force --server <URL> --tls-pin <pin> --root-pin <new fp> [--root-pin ...] --threshold <n> " +
+	"--user <name> [--admin-key <your admin key>]` (--force replaces the whole config)")
 
 // ErrSignerUnavailable is a 503 from the server: it cannot reach its
 // signer, so it reports nothing about the signer's state, custody included.
@@ -201,7 +210,7 @@ func ParseServerURL(s string) (*url.URL, error) {
 	if host == "" {
 		return nil, fmt.Errorf("server URL %q: no host", s)
 	}
-	if net.ParseIP(strings.Trim(host, "[]")) != nil {
+	if isIPLiteral(host) {
 		return nil, fmt.Errorf("server URL %q: the host is an IP address; use the server's DNS name (the WebAuthn RP ID)", s)
 	}
 	if p := u.Port(); p != "" {
@@ -211,6 +220,25 @@ func ParseServerURL(s string) (*url.URL, error) {
 		}
 	}
 	return &url.URL{Scheme: "https", Host: u.Host}, nil
+}
+
+// numericLabel is a last host label that resolvers read as (part of) an
+// IPv4 address: decimal, or hexadecimal with 0x. No DNS top-level domain
+// has this form.
+var numericLabel = regexp.MustCompile(`^([0-9]+|0x[0-9a-f]*)$`)
+
+// isIPLiteral reports whether host (a URL's Hostname) is an IP address in
+// any form: with ':' or an IPv6 zone ('%'), with a trailing dot, or with a
+// numeric last label such as 127.1 or 2130706433.
+func isIPLiteral(host string) bool {
+	if strings.ContainsAny(host, ":%") {
+		return true
+	}
+	h := strings.TrimSuffix(host, ".")
+	if net.ParseIP(h) != nil {
+		return true
+	}
+	return numericLabel.MatchString(strings.ToLower(h[strings.LastIndexByte(h, '.')+1:]))
 }
 
 // PinOf returns the pin of a certificate: "sha256/" and the standard
@@ -366,12 +394,13 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return c.mapError(err)
+		return c.mapError(path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if err != nil {
-		return fmt.Errorf("%s%s: %w", c.base, path, err)
+		// A transport failure, as for the request itself.
+		return c.mapError(path, err)
 	}
 	if len(data) > maxResponse {
 		return fmt.Errorf("%s%s: response larger than %d bytes", c.base, path, maxResponse)
@@ -387,7 +416,8 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	if !ok {
 		var apiErr APIError
 		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
-			return fmt.Errorf("%s%s: HTTP %d: %s", c.base, path, resp.StatusCode, apiErr.Error)
+			// The server's own text, as a short delimited excerpt.
+			return fmt.Errorf("%s%s: HTTP %d: %w", c.base, path, resp.StatusCode, PeerError(errors.New(apiErr.Error)))
 		}
 		return fmt.Errorf("%s%s: HTTP %d", c.base, path, resp.StatusCode)
 	}
@@ -395,20 +425,232 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		return nil
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("%s%s: decode: %w", c.base, path, err)
+		return fmt.Errorf("%s%s: decode: %w", c.base, path, decodeError(err))
 	}
 	return nil
 }
 
-// mapError turns a pinned-root failure into ErrTLSRootNotPinned. Other
-// failures (a wrong host name, an expired leaf, a network error) keep
-// their own error and get no re-pin hint.
-func (c *Client) mapError(err error) error {
-	var unknown x509.UnknownAuthorityError
-	if errors.As(err, &unknown) || errors.Is(err, errRootPinMismatch) {
-		return fmt.Errorf("%s: %w (%w)", c.base, ErrTLSRootNotPinned, err)
+// decodeError states why a response did not decode, in the CLI's own
+// words and from typed fields only: encoding/json's text can repeat what
+// the peer sent (a number literal of any length, for one). Anything else
+// is a PeerError. The cause stays reachable with errors.As.
+func decodeError(err error) error {
+	var (
+		syntaxErr *json.SyntaxError
+		typeErr   *json.UnmarshalTypeError
+		b64Err    base64.CorruptInputError
+		msg       string
+	)
+	switch {
+	case errors.As(err, &syntaxErr):
+		msg = fmt.Sprintf("the response is not valid JSON (at byte %d)", syntaxErr.Offset)
+	case errors.As(err, &typeErr):
+		msg = fmt.Sprintf("the response has a JSON value of the wrong type (at byte %d)", typeErr.Offset)
+	case errors.As(err, &b64Err):
+		msg = fmt.Sprintf("the response has a field that is not valid base64 (at byte %d of the field)", int64(b64Err))
+	default:
+		return PeerError(err)
 	}
-	return err
+	return &connectFailure{msg: msg, errs: []error{err}}
+}
+
+// mapError states a failed request, or a failed read of its response
+// body, through ConnectError: a chain that does not end in a pinned root
+// is ErrTLSRootNotPinned, with nothing after it.
+func (c *Client) mapError(path string, err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		// Its text repeats the URL; c.base and path say the same.
+		err = ue.Err
+	}
+	return fmt.Errorf("%s%s: %w", c.base, path, ConnectError(c.base.Hostname(), err, ErrTLSRootNotPinned))
+}
+
+// connectFailure is a failed connection or request stated in the CLI's
+// own words (a refused certificate, a timeout, a cancellation) or in the
+// text Go wrote for one error in its cause (goText). Error never includes
+// the whole cause's text, which can repeat names from the peer's
+// certificates (host names, a candidate issuer's name) or embed text the
+// peer sent; Unwrap returns the cause, and untrusted when it applies, for
+// errors.Is and errors.As.
+type connectFailure struct {
+	msg  string
+	errs []error
+}
+
+func (e *connectFailure) Error() string   { return e.msg }
+func (e *connectFailure) Unwrap() []error { return e.errs }
+
+// ConnectError states err, the failure of a TLS connection to host (the
+// host name the user gave), without repeating anything the peer chose
+// (T-02-93):
+//
+//   - a certificate the chain verification refused is described in the
+//     CLI's own words, naming only host: a wrong host name, a chain that
+//     does not end in a trusted root (untrusted's text, and errors.Is
+//     finds untrusted), an expired certificate and the like;
+//   - a timeout is "timed out talking to <host>" and a cancellation
+//     "the request to <host> was canceled": net/http's timeout error
+//     embeds the inner error's text, which can be the peer's;
+//   - a transport failure whose text Go wrote, not the peer, is printed
+//     whole: a *net.OpError of any Op (the addresses it resolved and a
+//     system error, or a TLS alert's name from a fixed table, as in
+//     "remote error: tls: protocol version not supported"), a
+//     tls.AlertError, a tls.RecordHeaderError (a fixed message with at
+//     most a version or length number), http.ErrSchemeMismatch,
+//     io.ErrUnexpectedEOF and io.EOF. Only the matched error's own text
+//     is printed, never the errors wrapping it, which may carry received
+//     bytes;
+//   - anything else is a PeerError: a malformed header line or status
+//     line, for example, repeats the bytes the peer sent.
+//
+// The cause stays reachable with errors.As in every case.
+func ConnectError(host string, err, untrusted error) error {
+	var (
+		hostErr    x509.HostnameError
+		unknownErr x509.UnknownAuthorityError
+		invalidErr x509.CertificateInvalidError
+		verifyErr  *tls.CertificateVerificationError
+		netErr     net.Error
+	)
+	switch {
+	case errors.As(err, &hostErr):
+		return &connectFailure{msg: "the server's TLS certificate is not valid for " + host, errs: []error{err}}
+	case errors.As(err, &unknownErr), errors.Is(err, errRootPinMismatch):
+		return &connectFailure{msg: untrusted.Error(), errs: []error{untrusted, err}}
+	case errors.As(err, &invalidErr):
+		var leaf *x509.Certificate
+		if errors.As(err, &verifyErr) && len(verifyErr.UnverifiedCertificates) > 0 {
+			leaf = verifyErr.UnverifiedCertificates[0]
+		}
+		return &connectFailure{msg: "the server's TLS certificate for " + host + " is not valid: " + invalidReason(invalidErr, leaf, time.Now()), errs: []error{err}}
+	case errors.As(err, &verifyErr):
+		return &connectFailure{msg: "the server's TLS certificate for " + host + " does not verify", errs: []error{err}}
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return &connectFailure{msg: "timed out talking to " + host, errs: []error{err}}
+	case errors.Is(err, context.Canceled):
+		return &connectFailure{msg: "the request to " + host + " was canceled", errs: []error{err}}
+	}
+	if text, ok := goText(err); ok {
+		return &connectFailure{msg: text, errs: []error{err}}
+	}
+	return PeerError(err)
+}
+
+// goText returns the text of the first error in err's chain whose text Go
+// wrote from fixed strings and values it resolved, never from bytes the
+// peer sent (see ConnectError), and whether there is one.
+func goText(err error) (string, bool) {
+	var (
+		opErr    *net.OpError
+		alertErr tls.AlertError
+		recErr   tls.RecordHeaderError
+	)
+	switch {
+	case errors.As(err, &opErr):
+		return opErr.Error(), true
+	case errors.As(err, &alertErr):
+		return alertErr.Error(), true
+	case errors.As(err, &recErr):
+		return recErr.Error(), true
+	}
+	for _, sentinel := range []error{http.ErrSchemeMismatch, io.ErrUnexpectedEOF, io.EOF} {
+		if errors.Is(err, sentinel) {
+			return sentinel.Error(), true
+		}
+	}
+	return "", false
+}
+
+// invalidReason says why x509 refused a certificate, in the CLI's own
+// words: CertificateInvalidError's Detail can name the peer's names. For a
+// certificate outside its validity period it gives that period and now
+// as fixed-format UTC times (validity fields, never free text), naming
+// the certificate "it" when it is leaf, the server's own certificate.
+func invalidReason(e x509.CertificateInvalidError, leaf *x509.Certificate, now time.Time) string {
+	switch e.Reason {
+	case x509.Expired:
+		if e.Cert == nil {
+			return "it or a certificate in its chain has expired or is not yet valid"
+		}
+		which := "a certificate in its chain"
+		if leaf != nil && leaf.Equal(e.Cert) {
+			which = "it"
+		}
+		return fmt.Sprintf("%s is valid from %s until %s, and the local time is %s (check the certificate and this computer's clock)",
+			which, e.Cert.NotBefore.UTC().Format(time.RFC3339), e.Cert.NotAfter.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
+	case x509.NotAuthorizedToSign:
+		return "a certificate in its chain is not allowed to sign certificates"
+	case x509.IncompatibleUsage:
+		return "its key usage does not allow a TLS server"
+	case x509.TooManyIntermediates:
+		return "its chain has too many intermediate certificates"
+	case x509.CANotAuthorizedForThisName, x509.CANotAuthorizedForExtKeyUsage, x509.NameConstraintsWithoutSANs,
+		x509.UnconstrainedName, x509.TooManyConstraints:
+		return "a CA in its chain is not allowed to certify it (name or usage constraints)"
+	default:
+		return "its chain does not verify"
+	}
+}
+
+// maxPeerExcerpt bounds the escaped peer text a PeerError shows, in
+// bytes, delimiters not counted. It is below 43, the length of a SHA-256
+// digest in unpadded base64, so no excerpt holds a whole TLS or root pin.
+const maxPeerExcerpt = 40
+
+// peerError is an error whose text the peer chose in part. Its Error is
+// only a short excerpt of that text (peerExcerpt); Unwrap returns the
+// original, so errors.Is and errors.As still see it.
+type peerError struct{ err error }
+
+func (e *peerError) Error() string { return peerExcerpt(e.err.Error()) }
+func (e *peerError) Unwrap() error { return e.err }
+
+// PeerError wraps err, whose text may come from the server or from a
+// network-position attacker (a response body, a malformed document), so
+// that its message is at most a short, escaped, delimited excerpt of that
+// text: [peer text: "..."]. Every run of white space becomes one space,
+// everything but printable ASCII is escaped (strconv.QuoteToASCII, so a
+// quote cannot end the excerpt early), and the escaped text is cut at
+// maxPeerExcerpt bytes, cut marked. What this holds, and no more: the
+// excerpt is one line of at most maxPeerExcerpt printable ASCII bytes
+// inside its delimiters, with no run of two spaces, so padding cannot
+// push the CLI's message off the screen and no whole pin fits in it
+// (T-02-93). The excerpt is still untrusted text: up to maxPeerExcerpt
+// bytes of it are the peer's words. Callers keep the CLI's own advice
+// out of any message that carries a PeerError. A nil err stays nil.
+func PeerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &peerError{err: err}
+}
+
+// peerExcerpt returns s as PeerError shows it.
+func peerExcerpt(s string) string {
+	var b strings.Builder
+	space, cut := false, false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		q := strconv.QuoteToASCII(string(r))
+		piece := q[1 : len(q)-1]
+		if space {
+			piece = " " + piece
+		}
+		if b.Len()+len(piece) > maxPeerExcerpt {
+			cut = true
+			break
+		}
+		b.WriteString(piece)
+		space = false
+	}
+	if cut {
+		return fmt.Sprintf(`[peer text, cut to %d bytes: "%s"]`, maxPeerExcerpt, b.String())
+	}
+	return `[peer text: "` + b.String() + `"]`
 }
 
 // checkCustody parses the CustodyHeader of a response and prints the
@@ -442,12 +684,14 @@ func (c *Client) checkCustody(h http.Header, required bool) error {
 	return nil
 }
 
-// Trust fetches /api/v1/trust and verifies it: the bundle must carry its
-// own threshold of its own roots' signatures on bundle and policy
-// (trust.VerifySelfSigned), its root set must be exactly rootPins at
-// exactly threshold (trust.MatchPins; otherwise ErrTrustRootNotPinned),
-// the policy must be the one the bundle names (ErrPolicyNotBundled), and
-// no policy admin may be a root. It returns the verified bundle and policy.
+// Trust fetches /api/v1/trust and verifies it. First, before anything else
+// in the documents is parsed, the bundle's root set must be exactly
+// rootPins at exactly threshold (otherwise ErrTrustRootNotPinned, with no
+// served text) and threshold of those roots must have signed bundle and
+// policy. Then the bundle must pass trust.VerifySelfSigned and
+// trust.MatchPins, the policy must be the one the bundle names
+// (ErrPolicyNotBundled), and no policy admin may be a root. It returns the
+// verified bundle and policy.
 func (c *Client) Trust(ctx context.Context, rootPins []string, threshold int) (*trust.Bundle, *trust.Policy, error) {
 	if err := trust.CheckPins(rootPins, threshold); err != nil {
 		return nil, nil, err
@@ -456,9 +700,32 @@ func (c *Client) Trust(ctx context.Context, rootPins []string, threshold int) (*
 	if err := c.GetJSON(ctx, TrustPath, &tr); err != nil {
 		return nil, nil, err
 	}
+	// Authenticate before parsing (T-02-93): the served root set must be
+	// exactly the pins, and those roots must have signed both documents,
+	// before anything else in them is parsed or can appear in an error.
+	roots, err := pinnedRoots(tr.Bundle, rootPins, threshold)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, d := range []struct {
+		what, namespace string
+		doc, sigs       []byte
+	}{
+		{"trust bundle", trust.NamespaceBundle, tr.Bundle, tr.BundleSigs},
+		{"policy", trust.NamespacePolicy, tr.Policy, tr.PolicySigs},
+	} {
+		signed, err := trust.CountPinnedSigners(d.doc, d.sigs, d.namespace, roots)
+		if err != nil {
+			return nil, nil, fmt.Errorf("the server's %s signatures are malformed: %w", d.what, PeerError(err))
+		}
+		if len(signed) < threshold {
+			return nil, nil, fmt.Errorf("the server's %s is signed by %d of your pinned roots, below your threshold of %d", d.what, len(signed), threshold)
+		}
+	}
+	// From here on the documents are root-signed.
 	b, err := trust.VerifySelfSigned(tr.Bundle, tr.BundleSigs, tr.Policy, tr.PolicySigs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("the server's trust bundle does not verify under its own roots: %w", err)
+		return nil, nil, fmt.Errorf("the server's trust bundle does not verify under its own roots: %w", PeerError(err))
 	}
 	// MatchPins' own message names a served root; never show it.
 	if err := trust.MatchPins(b, rootPins, threshold); err != nil {
@@ -472,10 +739,38 @@ func (c *Client) Trust(ctx context.Context, rootPins []string, threshold int) (*
 	}
 	p, err := trust.ParsePolicy(tr.Policy)
 	if err != nil {
-		return nil, nil, fmt.Errorf("the server's policy: %w", err)
+		return nil, nil, fmt.Errorf("the server's policy: %w", PeerError(err))
 	}
 	if err := trust.CheckAdminsNotRoots(p, b.Root.Keys); err != nil {
-		return nil, nil, err
+		return nil, nil, PeerError(err)
 	}
 	return b, p, nil
+}
+
+// pinnedRoots reads only the root set of a served bundle and returns its
+// keys by fingerprint when they are exactly pins at exactly threshold.
+// Any other root set, none included, is ErrTrustRootNotPinned. The read
+// is lenient on purpose: the roots sign only canonical bytes, so a
+// document they signed reads the same here as in the strict parse that
+// follows. No error repeats the bundle's text.
+func pinnedRoots(bundle []byte, pins []string, threshold int) (map[string]ssh.PublicKey, error) {
+	var doc struct {
+		Root trust.RootSet `json:"root"`
+	}
+	if json.Unmarshal(bundle, &doc) != nil {
+		return nil, errors.New("the server's trust bundle is not a JSON document")
+	}
+	if trust.MatchPins(&trust.Bundle{Root: doc.Root}, pins, threshold) != nil {
+		// MatchPins' own message names a served root; never show it.
+		return nil, ErrTrustRootNotPinned
+	}
+	roots := make(map[string]ssh.PublicKey, len(doc.Root.Keys))
+	for _, rk := range doc.Root.Keys {
+		pub, err := trust.ParseKey(rk.Key)
+		if err != nil {
+			return nil, ErrTrustRootNotPinned // unreachable: MatchPins parsed every key
+		}
+		roots[ssh.FingerprintSHA256(pub)] = pub
+	}
+	return roots, nil
 }
