@@ -68,7 +68,8 @@ key-files:
 
 key-decisions:
   - "The admin-api/v1 signed message is keyroster/admin-api/v1\\nMETHOD\\nraw request-target\\nhex sha256(body)\\nunix seconds\\n32-hex nonce\\n, SSHSIG under the same namespace; the signature header is standard base64 of the armored SSHSIG"
-  - "The CLI parses the server's invite_url as an origin (ParseServerURL) + /enroll/ + 43 base64url characters and prints the rebuilt URL; it does not check that the origin is one of the policy's origins (it does not fetch the trust document for user add)"
+  - "The CLI parses the server's invite_url as an origin (ParseServerURL) + /enroll/ + 43 base64url characters and prints the rebuilt URL; it does not check that the origin is one of the policy's origins (it does not fetch the trust document for user add). Superseded by the pre-merge fixes (062a59e): user add verifies the trust document and requires a policy origin"
+  - "Pre-merge fixes: the admin message covers the canonical server origin and the body digest (sent in Keyroster-Admin-Body-SHA256); the server verifies against an exactly matched policy origin before it reads any body; the admin route has no global rate-limit bucket"
   - "ParseServerURL now requires a letter-digit-hyphen DNS host and a non-empty port, so neither a server URL nor an invite URL can carry a shell metacharacter (found by FuzzParseInviteURL)"
   - "The server reads the installed directory per user add through GetDirectory and caches the user list only while the Status reports the same directory version and SHA-256"
   - "A timed-out *net.OpError keeps Go's own text in ConnectError (the 02-06 round 4 deferred item)"
@@ -158,6 +159,8 @@ status: complete
 
 ## The admin-api/v1 contract
 
+> **Superseded by the pre-merge fixes** (see "Pre-merge review fixes" at the end). The message now also carries the origin on line 2. The body digest travels in `Keyroster-Admin-Body-SHA256`, and the server verifies before it reads the body. The admin route has no global rate-limit bucket. The contract below is the one this plan first shipped.
+
 Signed message (every line ends in `\n`):
 
 ```
@@ -187,7 +190,7 @@ keyroster/admin-api/v1
 
 | Class | Per client | Global backstop | Retry-After |
 |---|---|---|---|
-| Admin API | 60/min, burst 20 | 600/min, burst 200 | 1 s |
+| Admin API | 60/min, burst 20 | none since the pre-merge fixes (was 600/min, burst 200) | 1 s |
 | Invite pages | 30/min, burst 10 | 300/min, burst 100 | 2 s |
 
 Key: host of `r.RemoteAddr` only (IPv4 and IPv4-mapped as the address, other IPv6 by /64; `X-Forwarded-For` and `Forwarded` ignored). The per-client map holds at most 10 000 entries (LRU) and drops entries idle for 10 min. `server.Config.Limits` overrides the per-client values; zero fields take the defaults.
@@ -239,7 +242,7 @@ Key: host of `r.RemoteAddr` only (IPv4 and IPv4-mapped as the address, other IPv
   | empty port accepted | `TestParseServerURL` |
   | op timeout pass-through removed | `TestConnectErrorOpTimeout` (RED before f060546's fix) |
 
-  One mutant is not counted: printing the received invite URL instead of the rebuilt one survives, because every URL the validation accepts already equals its rebuilt form apart from a harmless empty fragment marker. The rebuild is defence in depth; the validation is what the tests pin.
+  One mutant was not counted at first: printing the received invite URL instead of the rebuilt one survived. The reason given here was that every accepted URL already equals its rebuilt form apart from a harmless empty fragment marker. That was untrue: an upper-case scheme also differed, and since the pre-merge fixes so do an upper-case host, a trailing dot and `:443`. The pre-merge fixes added a kill test, `TestUserAddPeerText/invite_url_printed_rebuilt` (264efc8), which fails under this mutant.
 
 ## Verification run
 
@@ -330,3 +333,111 @@ None for CI. A server install picks up the state directory from the unit.
 ---
 *Phase: 02-passkey-login-mvp*
 *Completed: 2026-10-20 (before the merge gate)*
+
+## Pre-merge review fixes
+
+These fix the verified findings of the pre-merge review of PR 45 at b880289, under the owner's decisions D1 to D6 of 2026-10-20. The commits sit on top of b880289, signed as keyroster-bot. For each mutant named below, the test was run against the mutant and the code was then restored.
+
+### Fixed
+
+- **The admin signature did not bind the deployment** (confirmed, low; owner decision D1). Fixed in af7a2e5, which builds on c4e8264. A request signed for one deployment no longer verifies at another that trusts the same admin key.
+  - The signed message now covers the canonical origin of the CLI's server URL.
+  - The server verifies only against a root-verified policy origin. It matches that origin exactly from the Host header, with `:443` stripped and no fallback. A request for an origin the policy does not name gets the uniform 401 and consumes no nonce.
+  - Tests:
+    - `TestAdminAuth/cross_deployment_replay_401_nonce_unused`. Before the fix it was 204 and the nonce was consumed.
+    - `TestAdminAuth/origin_matched_exactly`. The mutant that falls back like `requestOrigin` fails it.
+    - The `other_deployment_origin` and `host_not_a_policy_origin` cases in `TestAdminAuth/uniform_401_body`.
+    - `TestVerify/other_deployment_origin_refused`.
+    - `TestAdminJSONSigns`: a non-canonical config still signs the canonical origin.
+  - Why the origin is derived from Host rather than stated by the client in a header:
+    - It is the origin the request actually reached.
+    - It needs no new header to parse.
+    - A client-stated origin would still need the same membership check, plus a rule for when it disagrees with Host.
+    - It is `requestOrigin` without its fallback.
+- **ParseServerURL did not normalize** (confirmed, low). Fixed in c4e8264.
+  - ParseServerURL lowercases the host, strips one trailing dot (stripped, not refused) and drops an explicit `:443`.
+  - `loadConfig` canonicalizes a server URL saved in an earlier form, so the printed init line and the signed origin are canonical.
+  - Tests:
+    - `TestParseServerURL`, canonical table. It failed before the fix.
+    - `TestUserAdd/non_canonical_saved_server`. Before the fix it refused with "the saved config has no valid server URL".
+- **Unauthenticated clients could make the admin route hold large request bodies** (split finding; owner decision D2). Fixed in af7a2e5 and b8a54cb.
+  - The body's SHA-256 travels in `Keyroster-Admin-Body-SHA256`. It must be exactly 64 lowercase hex digits; any other form is refused. It is signed together with D1's origin in one change to the message, and the namespace stays `keyroster/admin-api/v1`.
+  - `requireAdminLimit` now runs in this order:
+    1. the per-client limiter;
+    2. the declared Content-Length check (413);
+    3. Status (503);
+    4. the exact policy origin;
+    5. `adminauth.Verify` over the headers;
+    6. the body read through `MaxBytesReader` (413);
+    7. `adminauth.CheckBody` (401);
+    8. `UseNonce`.
+  - The admin route class has no global bucket any more (b8a54cb).
+  - Tests:
+    - `TestAdminAuth/unauthenticated_body_never_read`. Before the fix the server read 1 114 113 bytes of an unsigned body. The read-before-verify mutant fails it.
+    - `body_digest_mismatch_401_nonce_unused`.
+    - The `missing_digest`, `malformed_digest` and `digest_changed` cases.
+    - `body_over_limit_413_before_verify`, for a declared length.
+    - `streamed_body_over_limit_413_after_verify`, with the nonce unused.
+    - `TestRateLimit/admin_valid_request_not_refused_by_others`. It sends 250 unsigned or junk-signed requests from distinct client keys, with stalling `maxAdminBody` bodies; half of them name the real admin key. None of the bodies is read, and a valid add gets 201 meanwhile. Before b8a54cb the valid add got 429.
+    - `TestVerify` digest cases. `FuzzVerify` now fuzzes the origin and the digest.
+- **Deferred-items row resolved by 02-07 overclaimed** (confirmed, low; TLS handshake). Fixed in f354c27.
+  - net/http's fixed text `net/http: TLS handshake timeout` now prints "the TLS handshake with <host> timed out".
+  - The ConnectError comment no longer claims that a handshake read is an OpError. The dial and DNS cases are labelled as tested with synthetic errors only (UNVERIFIED), and the deferred-items row is narrowed to match.
+  - Test: `TestConnectErrorTLSHandshakeTimeout`, against a real server that reads the ClientHello and stalls. Before the fix it printed "timed out talking to localhost".
+- **The limiter check order was not pinned** (confirmed, low). Fixed in ab591ff. Test: `TestRateLimit/client_bucket_checked_before_global`, on the invite route. The global-first mutant fails it.
+- **"Invite token never logged" was not pinned on the 429 path** (confirmed, low). Fixed in 2862326. Test: `TestRateLimit/invite_token_not_logged_on_429`, which rate-limits a real invite URL. The mutant that logs `r.URL.Path` fails it.
+- **A GetDirectory error was not pinned to fail closed** (confirmed, low). Fixed in 51323f1. Test: `TestAdminUsers/directory_read_error_fails_closed`, which expects 503 and no pending row. The error-to-empty-map mutant answers 201 and fails it.
+- **checkInviteConfig was never exercised** (confirmed, low). Fixed in a91c099. Test: `TestUserAdd/bad_saved_config_refused`, seven cases: a root pin with metacharacters, a malformed root pin, threshold 0, a threshold above the pin count, a bad TLS pin, a TLS root that is not PEM, and a server URL with a path. Each is refused in checkInviteConfig's own words, with no request sent. The mutant that skips the call and the mutant that drops the root-pin check both fail it.
+- **The SUMMARY's near-equivalent-mutant note was incomplete** (confirmed, info). Fixed in 264efc8, which adds the kill test `TestUserAddPeerText/invite_url_printed_rebuilt` (an `HTTPS://`, upper-case host, `:443` and trailing `#` invite must print the rebuilt URL). The TDD record above is reworded; the print-raw mutant fails the test.
+- **A reinvite of a name in neither place was untested at the server** (confirmed, info). Fixed in d1e2d01. Test: `TestAdminUsers/reinvite_unknown_name_is_plain_add`. The 404 mutant fails it.
+- **user add printed an invite URL whose origin the server chose freely** (split finding, low as the owner rated it). Fixed in 062a59e.
+  - user add verifies the trust document with the saved root pins and threshold before it creates the account.
+  - It prints the invite only when the invite's canonical origin is one of the verified policy's webauthn origins. There is no hostname-equality fallback.
+  - Otherwise it refuses without repeating the URL. A policy without a WebAuthn RP is refused before any admin request.
+  - The test server now serves a root-signed trust document whose policy names `https://keyroster.example`.
+  - Tests:
+    - The `TestUserAddPeerText` cases `invite_url_foreign_origin`, `invite_url_server_url_not_in_policy` and `invite_url_policy_host_other_port`. All three exited 0 before the fix; the mutant that skips the membership check fails them.
+    - `TestUserAdd/policy_without_relying_party_refused`.
+- **Docs.**
+  - 6114886: the runbook says an admin's `--server` must be a policy origin.
+  - 590fb8d: the D6 todo, `.planning/todos/pending/2026-10-20-cap-server-connections-and-memory.md` (severity minor, Phase 6, server). The memory figures in it are a skeptic's measurements, UNVERIFIED on a host.
+  - b6925bc: deferred-items rows for later plan text that assumes the old order, the old message layout or the admin global backstop (02-09 L51, L182, L183, L320, L469 and L497; 02-08 L236 and 02-09 L193 and L210 for the empty-body digest of a GET; 02-10 L178).
+
+### Skipped, no code change
+
+- **D3, CodeQL.** keyroster-bot dismissed the go/log-injection alerts #8 to #11 (internal/server/admin.go:197, 218, 223) as false positives on 2026-10-20. #8 to #10 log `req.Name`, which ValidUserName checks before any log call. #11 logs `req.Reinvite`, a bool. The logger is slog's JSONHandler. No code was changed to quiet CodeQL. The log calls added or moved here log only fixed reason strings, adminauth error values and the verified admin name, never the Host header, the digest, URLs, header values or tokens; `uniform_401_body` asserts that the digest and the foreign host never appear in the log.
+- **D4.** The "signer's directory changed" assertions in the reinvite tests (`reinvite_directory_user*`) cannot fail. 02-09 owns this, because it adds InstallDirectory to the seam.
+- **D5, refuted by both skeptics.** No CLI range check on the invite expiry (cmd/keyroster/user.go, the expiry parse).
+- **D5, refuted by both skeptics.** No tightening of the mode of an existing server.db or state directory (internal/serverdb/db.go:49).
+- **The phase-4 blocker todo stays open.** `.planning/todos/pending/2026-10-16-bind-admin-signed-directories-to-a-deployment.md` covers admin-signed directories. D1 binds the admin API only, not directories.
+
+### Deviations from the plan's must_haves (PLAN not edited)
+
+1. **Body limit.** `maxAdminBody` is unchanged at 1 MiB + 64 KiB. It now bounds only the body of a request whose signature has verified; no unauthenticated body is read.
+2. **`body_over_limit_413_before_verify`.** It holds for a declared Content-Length: 413 before any signature work, nonce unused. A body sent without a length is read only after Verify. If that body is oversized and the request verified, it gets 413 with the nonce unused. If the request did not verify, it gets the uniform 401, unread.
+3. **The admin global limiter is removed.** The admin route keeps the per-client bucket in front of everything; the invite route keeps its global backstop unchanged.
+   - Why removal rather than keeping a global bucket only for requests that fail verification: a bucket charged after a failed Verify bounds nothing the per-client bucket does not already bound, and one charged before Verify would refuse valid admins too. Removal is the only choice that provably never refuses a valid admin because of other clients' traffic.
+   - `newLimiter(..., 0, 0)` means "no global bucket".
+4. **503 order.** Status is read before the body, so a 503 comes before any body read.
+5. **Server URL.** An admin's server URL must be a policy origin; any other gets the uniform 401. `requestOrigin`'s fallback is no longer reachable on an admin route. user add makes one more request, GET `/api/v1/trust`, before the admin POST.
+6. **T-02-36, rewritten.**
+   - **Admin route.** Pre-auth work is a header parse plus at most one signature check, done only when the presented key is a policy admin, and it is bounded per client. No unauthenticated body is ever read.
+   - **Invite route.** It keeps the global backstop. The accepted residual, from a skeptic's simulation against the real limiter code with realistic timing, is partial delay from about 10 to 16 full-rate client keys, and near-total denial from about 128 or more keys (or one IPv6 /56 or wider).
+   - **Remaining admin-route residuals.**
+     - There is no cap across many client keys on the CPU spent on headers and signature checks.
+     - The nonce is consumed only after the digest matches. So a holder of a valid header set for this origin, inside MaxSkew, can drive concurrent body reads, each bounded by the limit. Only the admin, or the server itself, holds such a set.
+     - Idle connections are the cheaper memory path. They are recorded in the D6 todo for Phase 6.
+
+### Verification
+
+- `gofmt -l .` printed nothing. `go vet ./...`, `GOOS=linux go vet ./...` and `GOOS=darwin go vet ./...` are clean.
+- `go test -count=1` passes for cmd/keyroster, internal/adminauth, internal/server and internal/serverclient.
+- `go test ./...` timed out on the first run in internal/winagent, at `TestAgent/ensure_retries_once_on_closing_agent`, a package these fixes do not touch. Every package passed on the second run.
+- Fuzzing found no failure: `FuzzVerify` for 30 s, `FuzzParseServerURL` for 20 s, `FuzzParseInviteURL` for 20 s.
+- e2e ran in WSL (OpenSSH 10.5p1) from a git-archive scratch copy of b6925bc, whose code is the pushed code; the copy was deleted afterwards. `TestUserAddInvite`, `TestServerInitEndToEnd`, `TestServerSIGHUPDuringStartup` and `TestServerRefusesStart` pass. keyroster.localhost resolved natively. The other e2e tests and the 9.5p1 lane were not run locally; CI runs them.
+- `-race` was not run: the Windows toolchain has no cgo.
+
+### Still UNVERIFIED
+
+- Real dial and DNS timeouts. Only synthetic `net.OpError` values test them.
+- The connection and memory figures in the D6 todo on a real host.
