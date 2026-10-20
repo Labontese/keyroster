@@ -427,7 +427,7 @@ These fix the verified findings of the pre-merge review of PR 45 at b880289, und
      - There is no cap across many client keys on the CPU spent on headers and signature checks.
      - A client that shares the admin's client key (the same IPv4 address, or the same IPv6 /64) can use up the admin's per-client bucket.
      - The nonce is consumed only after the digest matches. So a holder of a valid header set for this origin, inside MaxSkew, can drive concurrent body reads, each bounded by the limit. Only the admin, or the server itself, holds such a set.
-     - Idle connections are the cheaper memory path. They are recorded in the D6 todo for Phase 6.
+     - Idle connections are the cheaper memory path, and stalled admin-route bodies hold connections the same way. Both are recorded in the D6 todo for Phase 6.
 
 ### Verification
 
@@ -442,3 +442,38 @@ These fix the verified findings of the pre-merge review of PR 45 at b880289, und
 
 - Real dial and DNS timeouts. Only synthetic `net.OpError` values test them.
 - The connection and memory figures in the D6 todo on a real host.
+
+### Follow-up check of c69db17
+
+An independent check of the PR at c69db17 found three more non-blocking problems. Two are fixed below and one is skipped.
+
+- **c69db17, the orchestrator's lint fix.** `stallingReader.Read` names its unused parameter `_`, for revive's unused-parameter rule. It is test-only and changes no behaviour.
+- **requestOrigin's fallback had no test** (low). Fixed in d108bef.
+  - af7a2e5 had rewritten the only test of the fallback to expect 401. With that, replacing `return sorted[0]` by `return "https://attacker.example"` passed the whole internal/server suite. 02-12 reuses requestOrigin for the approval URL on an unauthenticated route (T-02-96).
+  - Test: `TestRequestOrigin`, with an unsorted origin list. It checks the exact Host match, including the `:443` strip. Eleven Hosts that are not a policy origin (among them CRLF, `[::1]:443`, upper case, a trailing dot and an empty Host) must give the first sorted origin, always a member of the list. An empty or nil list must give "".
+  - Mutants: the attacker-origin mutant passes the rest of the suite (`-skip TestRequestOrigin`) and fails TestRequestOrigin. TestRequestOrigin also fails against `return origins[0]`, the mutant without the `:443` strip, and one that returns a foreign origin for an empty list; each of these three was run against TestRequestOrigin only. Each mutant was restored, and `git diff --exit-code` was clean afterwards.
+- **"No unauthenticated admin body is ever read" overclaimed** (low). Fixed in 38b9bd5. This is a wording change only, with no test.
+  - The claim holds for the handler: it never reads or buffers an unauthenticated body. It does not hold for the real net/http server. net/http may read and discard up to 256 KiB of the unread body when the refusal is written (`maxPostHandlerReadBytes`). A stalled body holds the connection until ReadTimeout (30 s in serve.go).
+  - The reworded places:
+    - the requireAdminLimit doc;
+    - the Limits doc;
+    - three test comments;
+    - the key decision and the contract note above;
+    - `admin_valid_request_not_refused_by_others`;
+    - Deviations 1, 2 and 6 (T-02-36);
+    - the 02-09 deferred-items row, items 2 and 3.
+  - The D6 todo now records stalled admin-route bodies as part of the connection exposure, with the check's figures (httptest server, byte-counting listener). No code was added: `Connection: close` was measured and does not stop the drain.
+- **user add does not check its own server URL against the verified policy** (info). Skipped; no code change.
+  - The suggested test setup cannot be built. The fake server runs at `https://localhost:PORT`, and `trust.WebAuthnRP.validate` refuses an RP ID with fewer than two labels. Every origin must be `https://<rp_id>[:port]`, so no root-signed policy can name `https://localhost:PORT`.
+  - The CLI check would make every user add test need a server URL that is a policy origin.
+  - Using `keyroster.localhost` would need it to resolve on the cli-macos lane, which is UNVERIFIED. It resolves on this Windows host and in WSL.
+  - A test dial hook in serverclient would change a library API.
+  - Left to the owner. Until then, such an admin gets the server's uniform 401, printed as "admin authentication failed".
+
+Verification of this round:
+- `gofmt -l .` printed nothing.
+- `go vet ./...`, `GOOS=linux go vet ./...` and `GOOS=darwin go vet ./...` are clean.
+- `go test -count=1 ./internal/server` passes.
+- `go test ./...`: every other package passed on the first run (replayed from cache on the second). internal/winagent timed out on the first run, again at `TestAgent/ensure_retries_once_on_closing_agent`, and passed on the second.
+- golangci-lint v2.14.0 (WSL) reports 0 issues on internal/server.
+- `-race` was not run: the Windows toolchain has no cgo.
