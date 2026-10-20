@@ -16,6 +16,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,8 @@ import (
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
-// userAddEnv is a localhost TLS server under a test root that answers
+// userAddEnv is a localhost TLS server under a test root that serves a
+// root-signed trust document whose policy names inviteOrigin and answers
 // the admin API with handler, a saved CLI config pinned to it, and an
 // ssh-agent keyring holding the admin key.
 type userAddEnv struct {
@@ -38,6 +40,7 @@ type userAddEnv struct {
 	root     *x509.Certificate
 	requests []string // verified admin names, one per request
 	hits     int      // every request the server saw
+	trustDoc []byte   // the /api/v1/trust document served
 }
 
 func newUserAddEnv(t *testing.T, custody string, handler func(w http.ResponseWriter, r *http.Request, body []byte)) *userAddEnv {
@@ -67,8 +70,15 @@ func newUserAddEnv(t *testing.T, custody string, handler func(w http.ResponseWri
 	if err != nil {
 		t.Fatal(err)
 	}
+	var rootFP string
+	e.trustDoc, rootFP = userAddTrustDoc(t)
 	url := serveTLS(t, tls.Certificate{Certificate: [][]byte{leaf}, PrivateKey: leafKey}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.hits++
+		if r.URL.Path == serverclient.TrustPath {
+			w.Header().Set(serverclient.CustodyHeader, custody)
+			_, _ = w.Write(e.trustDoc)
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Error(err)
@@ -89,19 +99,11 @@ func newUserAddEnv(t *testing.T, custody string, handler func(w http.ResponseWri
 		e.requests = append(e.requests, name)
 		handler(w, r, body)
 	}))
-	rootPub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rootSSH, err := ssh.NewPublicKey(rootPub)
-	if err != nil {
-		t.Fatal(err)
-	}
 	e.cfg = &Config{
 		Server:         url,
 		TLSRootsPEM:    []string{string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw}))},
 		TLSPins:        []string{serverclient.PinOf(root)},
-		TrustPins:      []string{ssh.FingerprintSHA256(rootSSH)},
+		TrustPins:      []string{rootFP},
 		TrustThreshold: 1,
 		User:           "admin",
 		AdminKey:       e.adminFP,
@@ -117,8 +119,44 @@ func newUserAddEnv(t *testing.T, custody string, handler func(w http.ResponseWri
 // inviteToken is a well-formed invite token.
 var inviteToken = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
 
-// created answers 201 with an invite at the server's own URL.
-func (e *userAddEnv) created(w http.ResponseWriter, r *http.Request, body []byte) {
+// inviteRPID is the relying party of the policy in userAddTrustDoc, and
+// inviteOrigin its one webauthn origin. The CLI never connects to it; it
+// only checks that an invite URL names it.
+const (
+	inviteRPID   = "keyroster.example"
+	inviteOrigin = "https://" + inviteRPID
+)
+
+// userAddTrustDoc signs a genesis bundle whose policy names the WebAuthn
+// RP inviteRPID with one software root (the in-process ceremony of
+// root_test.go) and returns the /api/v1/trust document and the root's
+// fingerprint.
+func userAddTrustDoc(t *testing.T) ([]byte, string) {
+	t.Helper()
+	g := newCeremony(t, 1)
+	g.policy = filepath.Join(g.dir, "webauthn-policy.json")
+	if code, _, stderr := run(t, "root", "genesis-policy", "--admin", "alice="+filepath.Join(g.dir, "alice.pub"),
+		"--webauthn-rp-id", inviteRPID, "--out", g.policy); code != 0 {
+		t.Fatalf("genesis-policy exit %d: %s", code, stderr)
+	}
+	useKeyring(t, g.rootKeys...)
+	typeHashPrefix(t, g.out)
+	if code, _, stderr := g.sign(t, "1", 0); code != 0 {
+		t.Fatalf("root sign: exit %d: %s", code, stderr)
+	}
+	read := func(name string) []byte { return readTestFile(t, filepath.Join(g.out, name)) }
+	doc, err := json.Marshal(serverclient.TrustResponse{
+		Bundle: read("bundle.json"), BundleSigs: read("bundle.json.sigs"),
+		Policy: read("policy.json"), PolicySigs: read("policy.json.sigs"), BundleVersion: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc, g.fingerprint(t, 0)
+}
+
+// created answers 201 with an invite at inviteOrigin.
+func (e *userAddEnv) created(w http.ResponseWriter, _ *http.Request, body []byte) {
 	var req serverclient.AddUserRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -126,7 +164,7 @@ func (e *userAddEnv) created(w http.ResponseWriter, r *http.Request, body []byte
 	}
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(serverclient.AddUserResponse{
-		Name: req.Name, InviteURL: "https://" + r.Host + "/enroll/" + inviteToken, ExpiresAt: "2026-10-21T12:00:00Z",
+		Name: req.Name, InviteURL: inviteOrigin + "/enroll/" + inviteToken, ExpiresAt: "2026-10-21T12:00:00Z",
 	})
 }
 
@@ -148,7 +186,7 @@ func TestUserAdd(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("exit %d: %s", code, stderr)
 		}
-		if !strings.Contains(stdout, "Invite for carol: "+e.cfg.Server+"/enroll/"+inviteToken+"\n") {
+		if !strings.Contains(stdout, "Invite for carol: "+inviteOrigin+"/enroll/"+inviteToken+"\n") {
 			t.Fatalf("no invite line:\n%s", stdout)
 		}
 		wantLine := "keyroster init --server " + e.cfg.Server + " --tls-root-file keyroster-tls-root.pem --tls-pin " + e.cfg.TLSPins[0] +
@@ -296,6 +334,23 @@ func TestUserAdd(t *testing.T) {
 		}
 	})
 
+	t.Run("policy_without_relying_party_refused", func(t *testing.T) {
+		// A policy with no WebAuthn RP has no origin an invite could be
+		// at: refused before the account is created.
+		e := newUserAddEnv(t, agentCustody, answer(http.StatusCreated, "{}"))
+		var rootFP string
+		e.trustDoc, rootFP = initTrustDoc(t)
+		useKeyring(t, e.adminKey)
+		e.cfg.TrustPins = []string{rootFP}
+		if _, err := saveConfig(e.cfg, true); err != nil {
+			t.Fatal(err)
+		}
+		code, _, stderr := run(t, "user", "add", "carol")
+		if code != 1 || !strings.Contains(stderr, "names no WebAuthn relying party") || len(e.requests) != 0 {
+			t.Fatalf("exit %d, stderr %q, admin requests %q; want a refusal before any admin request", code, stderr, e.requests)
+		}
+	})
+
 	t.Run("bad_name_refused_locally", func(t *testing.T) {
 		e := newUserAddEnv(t, agentCustody, answer(http.StatusCreated, "{}"))
 		for _, name := range []string{"Carol", "-x", "a;b", strings.Repeat("a", 65)} {
@@ -321,7 +376,8 @@ func TestUserAddPeerText(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(serverclient.AddUserResponse{Name: "carol", InviteURL: url, ExpiresAt: expires})
 		}
 	}
-	good := "https://localhost:443/enroll/" + inviteToken
+	good := inviteOrigin + "/enroll/" + inviteToken
+	notPolicyOrigin := errNotPolicyOrigin.Error()
 	for _, tc := range []struct {
 		name    string
 		handler func(http.ResponseWriter, *http.Request, []byte)
@@ -333,6 +389,12 @@ func TestUserAddPeerText(t *testing.T) {
 		{"invite_token_carries_pin", forged("https://localhost/enroll/"+attackerTLSPin, "2026-10-21T12:00:00Z"), "the server's answer has no valid invite URL"},
 		{"invite_url_shell_host", forged("https://a$(id).example/enroll/"+inviteToken, "2026-10-21T12:00:00Z"), "the server's answer has no valid invite URL"},
 		{"invite_url_ip_host", forged("https://192.0.2.1/enroll/"+inviteToken, "2026-10-21T12:00:00Z"), "the server's answer has no valid invite URL"},
+		// A well-formed invite URL at an origin the root-signed policy does
+		// not name: a compromised server cannot send the new user to a
+		// host of its choosing under the admin's name.
+		{"invite_url_foreign_origin", forged("https://your-admin-says-run-curl-evil-sh-pipe-bash.attacker.example/enroll/"+inviteToken, "2026-10-21T12:00:00Z"), notPolicyOrigin},
+		{"invite_url_server_url_not_in_policy", forged("https://localhost/enroll/"+inviteToken, "2026-10-21T12:00:00Z"), notPolicyOrigin},
+		{"invite_url_policy_host_other_port", forged(inviteOrigin+":8443/enroll/"+inviteToken, "2026-10-21T12:00:00Z"), notPolicyOrigin},
 		{"padded_expiry", forged(good, "2026-10-21T12:00:00Z"+paddedAdvice), "the server's answer has no valid invite expiry"},
 		{"padded_409", answer(http.StatusConflict, mustJSON(t, serverclient.APIError{Error: paddedAdvice})), ""},
 		{"padded_401", answer(http.StatusUnauthorized, mustJSON(t, serverclient.APIError{Error: paddedAdvice})), serverclient.ErrAdminAuth.Error()},
@@ -348,13 +410,15 @@ func TestUserAddPeerText(t *testing.T) {
 				advice = errors.New(tc.advice)
 			}
 			requirePeerTextContained(t, stderr, advice)
+			if strings.Contains(stderr, "attacker.example") || strings.Contains(stderr, "/enroll/") {
+				t.Fatalf("stderr repeats the server's invite URL: %q", stderr)
+			}
 		})
 	}
 	t.Run("control_well_formed_answer", func(t *testing.T) {
 		newUserAddEnv(t, agentCustody, forged(good, "2026-10-21T12:00:00+02:00"))
 		code, stdout, stderr := run(t, "user", "add", "carol")
-		// Printed in canonical form: the default port 443 is dropped.
-		if code != 0 || !strings.Contains(stdout, "Invite for carol: https://localhost/enroll/"+inviteToken+"\n") ||
+		if code != 0 || !strings.Contains(stdout, "Invite for carol: "+good+"\n") ||
 			!strings.Contains(stdout, "expires at 2026-10-21T10:00:00Z") {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}

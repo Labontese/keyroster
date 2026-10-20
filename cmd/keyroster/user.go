@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -52,10 +53,12 @@ func runUser(ctx context.Context, args []string, stdout, stderr io.Writer) error
 }
 
 // runUserAdd is keyroster user add NAME [--reinvite] [--admin-key FP]. It
-// asks the server, through the SSHSIG-authenticated admin API, for a
-// pending account and an invite, and prints what the user needs: the
-// invite URL, the keyroster init line built from the admin's own verified
-// config, and the pinned TLS root PEM that line reads. The pending account
+// verifies the server's trust document against the saved root pins, asks
+// the server, through the SSHSIG-authenticated admin API, for a pending
+// account and an invite, and prints what the user needs: the invite URL,
+// only when it is at a webauthn origin of the verified policy, the
+// keyroster init line built from the admin's own verified config, and the
+// pinned TLS root PEM that line reads. The pending account
 // is not authority: it grants nothing until an admin-signed directory
 // binds a passkey (D-03).
 func runUserAdd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -102,14 +105,28 @@ func runUserAdd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if err != nil {
 		return err
 	}
+	// The invite's origin is checked against the policy the saved root
+	// pins verify, read before the account is created: the server chooses
+	// the invite URL, and a compromised one must not send the new user to
+	// an origin of its own under the admin's name.
+	_, policy, err := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold)
+	if err != nil {
+		return err
+	}
+	if policy.WebAuthn == nil {
+		return errors.New("the root-signed policy names no WebAuthn relying party, so the server cannot serve invites")
+	}
 	var resp serverclient.AddUserResponse
 	err = client.AdminJSON(ctx, http.MethodPost, serverclient.AdminUsersPath, serverclient.AddUserRequest{Name: name, Reinvite: *reinvite}, &resp, signer)
 	if err != nil {
 		return userAddError(name, err)
 	}
-	inviteURL, err := parseInviteURL(resp.InviteURL)
+	origin, inviteURL, err := parseInviteURL(resp.InviteURL)
 	if err != nil {
 		return err
+	}
+	if !slices.Contains(policy.WebAuthn.Origins, origin) {
+		return errNotPolicyOrigin
 	}
 	expires, err := time.Parse(time.RFC3339, resp.ExpiresAt)
 	if err != nil {
@@ -188,25 +205,31 @@ func checkInviteConfig(cfg *Config) error {
 	return nil
 }
 
+// errNotPolicyOrigin refuses an invite URL whose origin the verified
+// policy does not name. It never repeats the URL.
+var errNotPolicyOrigin = errors.New("the server's invite URL is not at a webauthn origin of the root-signed policy, so it was not printed. " +
+	"Check the server before you re-run with --reinvite (the account may now be pending)")
+
 // parseInviteURL reads the server's invite URL as structured data, never
 // as text: an origin that ParseServerURL accepts, the path /enroll/ and a
-// 43-character base64url token, nothing else. It returns the URL rebuilt
-// from those parts.
-func parseInviteURL(s string) (string, error) {
+// 43-character base64url token, nothing else. It returns the canonical
+// origin and the URL rebuilt from those parts; the caller checks the
+// origin against the verified policy.
+func parseInviteURL(s string) (origin, inviteURL string, err error) {
 	bad := errors.New("the server's answer has no valid invite URL")
 	u, err := url.Parse(s)
 	if err != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil || u.RawPath != "" {
-		return "", bad
+		return "", "", bad
 	}
 	token, ok := strings.CutPrefix(u.Path, "/enroll/")
 	if !ok || !validToken(token) {
-		return "", bad
+		return "", "", bad
 	}
-	origin, err := serverclient.ParseServerURL(u.Scheme + "://" + u.Host)
+	o, err := serverclient.ParseServerURL(u.Scheme + "://" + u.Host)
 	if err != nil {
-		return "", bad
+		return "", "", bad
 	}
-	return origin.String() + "/enroll/" + token, nil
+	return o.String(), o.String() + "/enroll/" + token, nil
 }
 
 // validToken reports whether t is 32 bytes as unpadded base64url.

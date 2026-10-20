@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -12,7 +13,8 @@ import (
 var inviteURLRE = regexp.MustCompile(`^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/enroll/[A-Za-z0-9_-]{43}$`)
 
 // FuzzParseInviteURL: the invite URL comes from the server, so whatever
-// parseInviteURL accepts must be a plain invite URL and parse to itself.
+// parseInviteURL accepts must be a plain invite URL under the origin it
+// returns, and parse to itself.
 func FuzzParseInviteURL(f *testing.F) {
 	for _, s := range []string{
 		"https://keyroster.example/enroll/" + inviteToken,
@@ -27,16 +29,16 @@ func FuzzParseInviteURL(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		out, err := parseInviteURL(s)
+		origin, out, err := parseInviteURL(s)
 		if err != nil {
 			return
 		}
-		if !inviteURLRE.MatchString(out) {
-			t.Fatalf("parseInviteURL(%q) = %q, not a plain invite URL", s, out)
+		if !inviteURLRE.MatchString(out) || !strings.HasPrefix(out, origin+"/enroll/") {
+			t.Fatalf("parseInviteURL(%q) = %q, %q: not a plain invite URL under its origin", s, origin, out)
 		}
-		again, err := parseInviteURL(out)
-		if err != nil || again != out {
-			t.Fatalf("parseInviteURL(%q) = %q, %v; want %q", out, again, err, out)
+		againOrigin, again, err := parseInviteURL(out)
+		if err != nil || again != out || againOrigin != origin {
+			t.Fatalf("parseInviteURL(%q) = %q, %q, %v; want %q, %q", out, againOrigin, again, err, origin, out)
 		}
 	})
 }
