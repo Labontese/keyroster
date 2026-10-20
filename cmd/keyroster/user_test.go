@@ -37,6 +37,7 @@ type userAddEnv struct {
 	adminFP  string
 	root     *x509.Certificate
 	requests []string // verified admin names, one per request
+	hits     int      // every request the server saw
 }
 
 func newUserAddEnv(t *testing.T, custody string, handler func(w http.ResponseWriter, r *http.Request, body []byte)) *userAddEnv {
@@ -67,6 +68,7 @@ func newUserAddEnv(t *testing.T, custody string, handler func(w http.ResponseWri
 		t.Fatal(err)
 	}
 	url := serveTLS(t, tls.Certificate{Certificate: [][]byte{leaf}, PrivateKey: leafKey}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		e.hits++
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Error(err)
@@ -255,6 +257,42 @@ func TestUserAdd(t *testing.T) {
 		})
 		if code, _, stderr := run(t, "user", "add", "--reinvite", "carol"); code != 0 || !got.Reinvite || got.Name != "carol" {
 			t.Fatalf("exit %d (%s), request %+v", code, stderr, got)
+		}
+	})
+
+	t.Run("bad_saved_config_refused", func(t *testing.T) {
+		// Every saved value the printed init line repeats is checked
+		// before anything is sent: a tampered or hand-edited config is
+		// refused in checkInviteConfig's own words, and the server sees no
+		// request.
+		for _, tc := range []struct {
+			name   string
+			edit   func(*Config)
+			advice string
+		}{
+			{"root_pin_metacharacters", func(c *Config) { c.TrustPins = []string{c.TrustPins[0] + ";curl${IFS}x|sh"} }, "the saved config's root pins"},
+			{"root_pin_malformed", func(c *Config) { c.TrustPins = []string{"SHA256:short"} }, "the saved config's root pins"},
+			{"threshold_zero", func(c *Config) { c.TrustThreshold = 0 }, "the saved config's root pins"},
+			{"threshold_above_pins", func(c *Config) { c.TrustThreshold = 2 }, "the saved config's root pins"},
+			{"tls_pin_malformed", func(c *Config) { c.TLSPins = []string{"sha256/$(id)"} }, "the saved config: TLS pin"},
+			{"tls_root_not_pem", func(c *Config) { c.TLSRootsPEM = []string{"not a certificate"} }, "the saved config: TLS roots"},
+			{"server_url_with_path", func(c *Config) { c.Server += "/x;id" }, "the saved config has no valid server URL"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var e *userAddEnv
+				e = newUserAddEnv(t, agentCustody, func(w http.ResponseWriter, r *http.Request, b []byte) { e.created(w, r, b) })
+				tc.edit(e.cfg)
+				if _, err := saveConfig(e.cfg, true); err != nil {
+					t.Fatal(err)
+				}
+				code, stdout, stderr := run(t, "user", "add", "carol")
+				if code != 1 || stdout != "" || !strings.Contains(stderr, tc.advice) {
+					t.Fatalf("exit %d, stdout %q, stderr %q; want a refusal saying %q", code, stdout, stderr, tc.advice)
+				}
+				if e.hits != 0 {
+					t.Fatalf("the server saw %d requests for a bad saved config", e.hits)
+				}
+			})
 		}
 	})
 
