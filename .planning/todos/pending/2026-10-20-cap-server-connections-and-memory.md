@@ -12,7 +12,9 @@ files:
 
 ## Problem
 
-keyroster-server's listener has no connection cap, so idle keep-alive TLS connections are a cheaper way to grow the server's memory than any request body. The 02-07 pre-merge review closed the request-body path: the admin route now verifies the signature before it reads any body, and the invite routes take no body. The connection path is still open.
+keyroster-server's listener has no connection cap, so idle keep-alive TLS connections are a cheaper way to grow the server's memory than any request body. The 02-07 pre-merge review closed the request-body memory path: the admin route's handler now verifies the signature before it reads any body and never buffers an unauthenticated one, and the invite routes take no body. The connection path is still open.
+
+Stalled admin-route bodies are part of that exposure. When requireAdmin refuses without reading the body, net/http still reads and discards up to 256 KiB of it (`maxPostHandlerReadBytes`) before the response goes out, and a body that stalls holds the goroutine and the connection until `ReadTimeout` (30 s in serve.go). A check on PR 45 measured this with an httptest server and a byte-counting listener, counting every byte read from the connection (headers and chunk framing included): 204 918 bytes before the 401 for a 200 KiB body with Content-Length, 205 031 for the same body chunked, and 266 490 for a chunked 1.1 MiB body. Nothing is buffered. `Connection: close` did not stop the drain.
 
 A skeptic's probe during that review measured about 28 KB of heap plus stack per idle HTTP/1.1 connection. It held 3000 connections with serve.go's timeouts over TLS 1.3. Extrapolated from that, about 21 000 connections would hold about 560 MiB, for about 2.3 Mbit/s of ramp-up traffic. These are the skeptic's measurements and arithmetic. Nothing was run on a deployed host, so the effect on a real 1 to 2 GiB host is UNVERIFIED: whether it ends in an OOM kill or a crash loop, and what it does to the co-located keyroster-signer.
 

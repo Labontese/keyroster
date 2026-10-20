@@ -69,7 +69,7 @@ key-files:
 key-decisions:
   - "The admin-api/v1 signed message is keyroster/admin-api/v1\\nMETHOD\\nraw request-target\\nhex sha256(body)\\nunix seconds\\n32-hex nonce\\n, SSHSIG under the same namespace; the signature header is standard base64 of the armored SSHSIG"
   - "The CLI parses the server's invite_url as an origin (ParseServerURL) + /enroll/ + 43 base64url characters and prints the rebuilt URL; it does not check that the origin is one of the policy's origins (it does not fetch the trust document for user add). Superseded by the pre-merge fixes (062a59e): user add verifies the trust document and requires a policy origin"
-  - "Pre-merge fixes: the admin message covers the canonical server origin and the body digest (sent in Keyroster-Admin-Body-SHA256); the server verifies against an exactly matched policy origin before it reads any body; the admin route has no global rate-limit bucket"
+  - "Pre-merge fixes: the admin message covers the canonical server origin and the body digest (sent in Keyroster-Admin-Body-SHA256); the server verifies against an exactly matched policy origin before its handler reads any body; the admin route has no global rate-limit bucket"
   - "ParseServerURL now requires a letter-digit-hyphen DNS host and a non-empty port, so neither a server URL nor an invite URL can carry a shell metacharacter (found by FuzzParseInviteURL)"
   - "The server reads the installed directory per user add through GetDirectory and caches the user list only while the Status reports the same directory version and SHA-256"
   - "A timed-out *net.OpError keeps Go's own text in ConnectError (the 02-06 round 4 deferred item)"
@@ -159,7 +159,7 @@ status: complete
 
 ## The admin-api/v1 contract
 
-> **Superseded by the pre-merge fixes** (see "Pre-merge review fixes" at the end). The message now also carries the origin on line 2. The body digest travels in `Keyroster-Admin-Body-SHA256`, and the server verifies before it reads the body. The admin route has no global rate-limit bucket. The contract below is the one this plan first shipped.
+> **Superseded by the pre-merge fixes** (see "Pre-merge review fixes" at the end). The message now also carries the origin on line 2. The body digest travels in `Keyroster-Admin-Body-SHA256`, and the server's handler verifies before it reads the body. The admin route has no global rate-limit bucket. The contract below is the one this plan first shipped.
 
 Signed message (every line ends in `\n`):
 
@@ -378,7 +378,7 @@ These fix the verified findings of the pre-merge review of PR 45 at b880289, und
     - The `missing_digest`, `malformed_digest` and `digest_changed` cases.
     - `body_over_limit_413_before_verify`, for a declared length.
     - `streamed_body_over_limit_413_after_verify`, with the nonce unused.
-    - `TestRateLimit/admin_valid_request_not_refused_by_others`. It sends 250 unsigned or junk-signed requests from distinct client keys, with stalling `maxAdminBody` bodies; half of them name the real admin key. None of the bodies is read, and a valid add gets 201 meanwhile. Before b8a54cb the valid add got 429.
+    - `TestRateLimit/admin_valid_request_not_refused_by_others`. It sends 250 unsigned or junk-signed requests from distinct client keys, with stalling `maxAdminBody` bodies; half of them name the real admin key. The handler reads none of the bodies, and a valid add gets 201 meanwhile. Before b8a54cb the valid add got 429.
     - `TestVerify` digest cases. `FuzzVerify` now fuzzes the origin and the digest.
 - **Deferred-items row resolved by 02-07 overclaimed** (confirmed, low; TLS handshake). Fixed in f354c27.
   - net/http's fixed text `net/http: TLS handshake timeout` now prints "the TLS handshake with <host> timed out".
@@ -413,15 +413,15 @@ These fix the verified findings of the pre-merge review of PR 45 at b880289, und
 
 ### Deviations from the plan's must_haves (PLAN not edited)
 
-1. **Body limit.** `maxAdminBody` is unchanged at 1 MiB + 64 KiB. It now bounds only the body of a request whose signature has verified; no unauthenticated body is read.
-2. **`body_over_limit_413_before_verify`.** It holds for a declared Content-Length: 413 before any signature work, nonce unused. A body sent without a length is read only after Verify. If that body is oversized and the request verified, it gets 413 with the nonce unused. If the request did not verify, it gets the uniform 401, unread.
+1. **Body limit.** `maxAdminBody` is unchanged at 1 MiB + 64 KiB. It now bounds only the body of a request whose signature has verified. The handler never reads or buffers an unauthenticated body; net/http may discard up to 256 KiB of it after the refusal, and a stalled body holds the connection until ReadTimeout (30 s in serve.go).
+2. **`body_over_limit_413_before_verify`.** It holds for a declared Content-Length: 413 before any signature work, nonce unused. A body sent without a length is read only after Verify. If that body is oversized and the request verified, it gets 413 with the nonce unused. If the request did not verify, it gets the uniform 401 and the handler does not read the body (net/http may still discard up to 256 KiB of it).
 3. **The admin global limiter is removed.** The admin route keeps the per-client bucket in front of everything; the invite route keeps its global backstop unchanged.
    - Why removal rather than keeping a global bucket only for requests that fail verification: a bucket charged after a failed Verify bounds nothing the per-client bucket does not already bound, and one charged before Verify would refuse valid admins too. Removal is the only choice that provably never refuses a valid admin because of traffic from other client keys. A client that shares the admin's client key (the same IPv4 address behind NAT, or the same IPv6 /64) can still use up the admin's per-client bucket. That is an accepted residual of keeping the per-client bucket.
    - `newLimiter(..., 0, 0)` means "no global bucket".
 4. **503 order.** Status is read before the body, so a 503 comes before any body read.
 5. **Server URL.** An admin's server URL must be a policy origin; any other gets the uniform 401. `requestOrigin`'s fallback is no longer reachable on an admin route. user add makes one more request, GET `/api/v1/trust`, before the admin POST.
 6. **T-02-36, rewritten.**
-   - **Admin route.** Pre-auth work is a header parse plus at most one signature check, done only when the presented key is a policy admin, and it is bounded per client. No unauthenticated body is ever read.
+   - **Admin route.** Pre-auth work is a header parse plus at most one signature check, done only when the presented key is a policy admin, and it is bounded per client. The handler never reads or buffers an unauthenticated body. net/http may discard up to 256 KiB of it after the refusal, and a stalled body holds the connection until ReadTimeout (30 s in serve.go); nothing is buffered, so D2's memory goal holds.
    - **Invite route.** It keeps the global backstop. The accepted residual, from a skeptic's simulation against the real limiter code with realistic timing, is partial delay from about 10 to 16 full-rate client keys, and near-total denial from about 128 or more keys (or one IPv6 /56 or wider).
    - **Remaining admin-route residuals.**
      - There is no cap across many client keys on the CPU spent on headers and signature checks.

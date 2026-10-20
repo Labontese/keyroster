@@ -66,8 +66,11 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 }
 
 // requireAdminLimit authenticates an admin API request before next runs.
-// No byte of the body is read before the signature has verified
-// (02-07 pre-merge review, owner decision D2):
+// The handler reads no byte of the body before the signature has verified
+// and never reads or buffers an unauthenticated body (02-07 pre-merge
+// review, owner decision D2). net/http itself may still read up to 256 KiB
+// of an unread body into io.Discard when the refusal is written, and a
+// stalled body holds the connection until the server's ReadTimeout:
 //
 //  1. A request whose declared Content-Length is over limit gets 413 at
 //     once: nothing is verified and no nonce is consumed. 413, not the

@@ -346,8 +346,8 @@ func TestAdminAuth(t *testing.T) {
 	t.Run("unauthenticated_body_never_read", func(t *testing.T) {
 		// Requests that do not verify, with bodies of maxAdminBody bytes:
 		// no admin headers, a key that is no admin, and the real admin key
-		// with a signature made for another request. None of their body
-		// bytes is read.
+		// with a signature made for another request. The handler reads
+		// none of their body bytes.
 		e := newAdminEnv(t, Limits{})
 		rec := &recorder{}
 		junk := signedReqFor(t, e.admin, "https://staging.example", "POST", probePath, probePath, probeBody, t0).Header
@@ -542,7 +542,8 @@ func TestAdminAuth(t *testing.T) {
 	t.Run("streamed_body_over_limit_413_after_verify", func(t *testing.T) {
 		// No Content-Length: the size shows only while the body is read,
 		// which happens after Verify. A verified request gets 413 with its
-		// nonce unused; an unverified one gets the uniform 401 unread.
+		// nonce unused; an unverified one gets the uniform 401, its body
+		// unread by the handler.
 		e := newAdminEnv(t, Limits{})
 		rec := &recorder{}
 		h := e.s.requireAdminLimit(64, rec)
@@ -1118,8 +1119,8 @@ func TestRateLimit(t *testing.T) {
 		// Shaped like the pre-merge critic's probe: more unsigned or
 		// junk-signed admin requests than the old global burst, each from
 		// its own client key with a body of maxAdminBody bytes that stalls
-		// once read. None of the bodies is read, and a validly signed
-		// request from another key succeeds meanwhile.
+		// once read. The handler reads none of the bodies, and a validly
+		// signed request from another key succeeds meanwhile.
 		e := newAdminEnv(t, Limits{})
 		const n = globalFactor*defaultAdminBurst + 50
 		junk := signedReqFor(t, e.admin, "https://staging.example", http.MethodPost, serverclient.AdminUsersPath, serverclient.AdminUsersPath, probeBody, t0).Header

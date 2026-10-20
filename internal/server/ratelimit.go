@@ -20,9 +20,12 @@ import (
 // because of traffic from other client keys (a client sharing the admin's
 // key, the same IPv4 address or IPv6 /64, still shares its bucket), and
 // an admin request that does not verify costs a header parse and at most
-// one signature check, with no body read (requireAdminLimit), so the
-// per-client bucket alone bounds it (02-07 pre-merge review, owner
-// decision D2).
+// one signature check, and the handler never reads or buffers its body
+// (requireAdminLimit), so the per-client bucket alone bounds it (02-07
+// pre-merge review, owner decision D2). net/http may still discard up to
+// 256 KiB of that body after the refusal, and a stalled body holds the
+// connection until ReadTimeout: the connection exposure of the Phase 6
+// todo.
 //
 // The limits are best-effort damping of floods only. Authenticity rests
 // on SSHSIG with single-use nonces (admin routes) and on 256-bit hashed
