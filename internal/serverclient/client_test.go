@@ -763,7 +763,7 @@ func TestClientTrust(t *testing.T) {
 }
 
 func TestParseServerURL(t *testing.T) {
-	for _, ok := range []string{"https://keyroster.example", "https://keyroster.example:8443"} {
+	for _, ok := range []string{"https://keyroster.example", "https://keyroster.example:8443", "https://key-roster.example", "https://localhost:8443", "https://" + strings.Repeat("a", 63) + ".example"} {
 		if u, err := ParseServerURL(ok); err != nil || u.String() != ok {
 			t.Errorf("ParseServerURL(%q) = %v, %v", ok, u, err)
 		}
@@ -777,6 +777,11 @@ func TestParseServerURL(t *testing.T) {
 		// read as IPv4 addresses.
 		"https://[fe80::1%25eth0]:8443", "https://[fe80::1%25eth0]", "https://[::1%25lo]", "https://192.0.2.1.", "https://192.0.2.1.:8443",
 		"https://127.1", "https://2130706433", "https://0x7f000001", "https://keyroster.123",
+		// Hosts url.Parse accepts that are not DNS names: RFC 3986
+		// sub-delimiters (shell metacharacters among them), empty labels,
+		// a hyphen at a label's edge, an underscore.
+		"https://a!b.example", "https://a$(id).example", "https://a;b.example", "https://a&b.example", "https://a'b.example",
+		"https://keyroster.example:", "https://a..b.example", "https://-x.example", "https://x-.example", "https://a_b.example", "https://" + strings.Repeat("a", 64) + ".example",
 	} {
 		if _, err := ParseServerURL(bad); err == nil {
 			t.Errorf("ParseServerURL(%q) accepted", bad)

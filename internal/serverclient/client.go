@@ -213,6 +213,12 @@ func ParseServerURL(s string) (*url.URL, error) {
 	if isIPLiteral(host) {
 		return nil, fmt.Errorf("server URL %q: the host is an IP address; use the server's DNS name (the WebAuthn RP ID)", s)
 	}
+	if !isDNSName(host) {
+		return nil, fmt.Errorf("server URL %q: the host must be a DNS name: dot-separated labels of letters, digits and inner hyphens", s)
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return nil, fmt.Errorf("server URL %q: empty port", s)
+	}
 	if p := u.Port(); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 1 || n > 65535 || p[0] == '0' {
@@ -239,6 +245,32 @@ func isIPLiteral(host string) bool {
 		return true
 	}
 	return numericLabel.MatchString(strings.ToLower(h[strings.LastIndexByte(h, '.')+1:]))
+}
+
+// isDNSName reports whether host is a DNS name in letter-digit-hyphen
+// form: at most 253 characters (one trailing dot allowed), labels of 1 to
+// 63 letters, digits and hyphens, no label starting or ending with a
+// hyphen. url.Parse also accepts RFC 3986 sub-delimiters such as '!', '$',
+// '(' and ';' in a host; none of them is part of a DNS name, and a server
+// URL keyroster prints (in an invite or a keyroster init line) must carry
+// no shell metacharacter.
+func isDNSName(host string) bool {
+	h := strings.TrimSuffix(host, ".")
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(h, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // PinOf returns the pin of a certificate: "sha256/" and the standard

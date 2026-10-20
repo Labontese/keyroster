@@ -271,6 +271,7 @@ func TestUserAddPeerText(t *testing.T) {
 		{"invite_url_with_newlines", forged("https://localhost/enroll/"+inviteToken+"\n\n"+attackerAdvice, "2026-10-21T12:00:00Z"), "the server's answer has no valid invite URL"},
 		{"invite_url_query", forged(good+"?next="+attackerTLSPin, "2026-10-21T12:00:00Z"), "the server's answer has no valid invite URL"},
 		{"invite_token_carries_pin", forged("https://localhost/enroll/"+attackerTLSPin, "2026-10-21T12:00:00Z"), "the server's answer has no valid invite URL"},
+		{"invite_url_shell_host", forged("https://a$(id).example/enroll/"+inviteToken, "2026-10-21T12:00:00Z"), "the server's answer has no valid invite URL"},
 		{"invite_url_ip_host", forged("https://192.0.2.1/enroll/"+inviteToken, "2026-10-21T12:00:00Z"), "the server's answer has no valid invite URL"},
 		{"padded_expiry", forged(good, "2026-10-21T12:00:00Z"+paddedAdvice), "the server's answer has no valid invite expiry"},
 		{"padded_409", answer(http.StatusConflict, mustJSON(t, serverclient.APIError{Error: paddedAdvice})), ""},
