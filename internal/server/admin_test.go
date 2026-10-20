@@ -907,6 +907,17 @@ func TestAdminUsers(t *testing.T) {
 		}
 	})
 
+	t.Run("directory_read_error_fails_closed", func(t *testing.T) {
+		// alice is in the installed directory, but GetDirectory fails: the
+		// add is refused 503 and writes nothing, never a plain add.
+		e := newAdminEnv(t, Limits{})
+		e.installDirectory(t)
+		e.fake.setDirectory(nil, errors.New("signer read failed"))
+		if res := e.addUser(t, "alice", false, ""); res.Code != http.StatusServiceUnavailable || e.pendingRows(t, "alice") != 0 {
+			t.Fatalf("= %d %s (rows %d), want 503 and no pending row: a failed directory read is never \"no such user\"", res.Code, res.Body, e.pendingRows(t, "alice"))
+		}
+	})
+
 	t.Run("unparsable_directory_fails_closed", func(t *testing.T) {
 		e := newAdminEnv(t, Limits{})
 		e.fake.setDirectory(&wire.GetDirectoryResponse{Version: 1, Directory: []byte(`{"version":1}`), Sigs: []byte("s"), Authorized: true}, nil)
