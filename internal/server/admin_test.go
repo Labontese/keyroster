@@ -847,6 +847,21 @@ func TestAdminUsers(t *testing.T) {
 		}
 	})
 
+	t.Run("reinvite_unknown_name_is_plain_add", func(t *testing.T) {
+		// Neither pending nor in the directory: --reinvite continues as a
+		// plain add, with a new row and a working invite.
+		e := newAdminEnv(t, Limits{})
+		e.installDirectory(t)
+		out := e.mustAdd(t, "dave", true)
+		u, err := e.s.db.PendingUser(context.Background(), "dave")
+		if err != nil || len(u.UserHandle) != 32 || u.CreatedBy != "root-admin" {
+			t.Fatalf("pending row %+v, %v; want a new row with a 32-byte handle by root-admin", u, err)
+		}
+		if r := e.getInvite(t, out.InviteURL); r.Code != http.StatusOK {
+			t.Fatalf("invite = %d, want 200", r.Code)
+		}
+	})
+
 	t.Run("invite_url_origin_matches_request_host", func(t *testing.T) {
 		e := newAdminEnv(t, Limits{}, "https://"+testRPID, "https://"+testRPID+":8443")
 		for i, tc := range []struct{ host, want string }{
