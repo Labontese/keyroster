@@ -399,7 +399,8 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if err != nil {
-		return fmt.Errorf("%s%s: %w", c.base, path, PeerError(err))
+		// A transport failure, as for the request itself.
+		return c.mapError(path, err)
 	}
 	if len(data) > maxResponse {
 		return fmt.Errorf("%s%s: response larger than %d bytes", c.base, path, maxResponse)
@@ -424,14 +425,38 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		return nil
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("%s%s: decode: %w", c.base, path, PeerError(err))
+		return fmt.Errorf("%s%s: decode: %w", c.base, path, decodeError(err))
 	}
 	return nil
 }
 
-// mapError states a failed request through ConnectError: a chain that
-// does not end in a pinned root is ErrTLSRootNotPinned, with nothing
-// after it.
+// decodeError states why a response did not decode, in the CLI's own
+// words and from typed fields only: encoding/json's text can repeat what
+// the peer sent (a number literal of any length, for one). Anything else
+// is a PeerError. The cause stays reachable with errors.As.
+func decodeError(err error) error {
+	var (
+		syntaxErr *json.SyntaxError
+		typeErr   *json.UnmarshalTypeError
+		b64Err    base64.CorruptInputError
+		msg       string
+	)
+	switch {
+	case errors.As(err, &syntaxErr):
+		msg = fmt.Sprintf("the response is not valid JSON (at byte %d)", syntaxErr.Offset)
+	case errors.As(err, &typeErr):
+		msg = fmt.Sprintf("the response has a JSON value of the wrong type (at byte %d)", typeErr.Offset)
+	case errors.As(err, &b64Err):
+		msg = fmt.Sprintf("the response has a field that is not valid base64 (at byte %d of the field)", int64(b64Err))
+	default:
+		return PeerError(err)
+	}
+	return &connectFailure{msg: msg, errs: []error{err}}
+}
+
+// mapError states a failed request, or a failed read of its response
+// body, through ConnectError: a chain that does not end in a pinned root
+// is ErrTLSRootNotPinned, with nothing after it.
 func (c *Client) mapError(path string, err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
@@ -441,12 +466,13 @@ func (c *Client) mapError(path string, err error) error {
 	return fmt.Errorf("%s%s: %w", c.base, path, ConnectError(c.base.Hostname(), err, ErrTLSRootNotPinned))
 }
 
-// connectFailure is a failed connection or request stated only in the
-// CLI's own words: a refused certificate, a timeout, a cancellation.
-// Error never includes the cause's text, which can repeat names from the
-// peer's certificates (host names, a candidate issuer's name) or embed
-// text the peer sent; Unwrap returns the cause, and untrusted when it
-// applies, for errors.Is and errors.As.
+// connectFailure is a failed connection or request stated in the CLI's
+// own words (a refused certificate, a timeout, a cancellation) or in the
+// text Go wrote for one error in its cause (goText). Error never includes
+// the whole cause's text, which can repeat names from the peer's
+// certificates (host names, a candidate issuer's name) or embed text the
+// peer sent; Unwrap returns the cause, and untrusted when it applies, for
+// errors.Is and errors.As.
 type connectFailure struct {
 	msg  string
 	errs []error
@@ -466,9 +492,17 @@ func (e *connectFailure) Unwrap() []error { return e.errs }
 //   - a timeout is "timed out talking to <host>" and a cancellation
 //     "the request to <host> was canceled": net/http's timeout error
 //     embeds the inner error's text, which can be the peer's;
-//   - a failed dial happened before the peer said anything, so its text
-//     is returned as is;
-//   - anything else is a PeerError.
+//   - a transport failure whose text Go wrote, not the peer, is printed
+//     whole: a *net.OpError of any Op (the addresses it resolved and a
+//     system error, or a TLS alert's name from a fixed table, as in
+//     "remote error: tls: protocol version not supported"), a
+//     tls.AlertError, a tls.RecordHeaderError (a fixed message with at
+//     most a version or length number), http.ErrSchemeMismatch,
+//     io.ErrUnexpectedEOF and io.EOF. Only the matched error's own text
+//     is printed, never the errors wrapping it, which may carry received
+//     bytes;
+//   - anything else is a PeerError: a malformed header line or status
+//     line, for example, repeats the bytes the peer sent.
 //
 // The cause stays reachable with errors.As in every case.
 func ConnectError(host string, err, untrusted error) error {
@@ -477,7 +511,6 @@ func ConnectError(host string, err, untrusted error) error {
 		unknownErr x509.UnknownAuthorityError
 		invalidErr x509.CertificateInvalidError
 		verifyErr  *tls.CertificateVerificationError
-		opErr      *net.OpError
 		netErr     net.Error
 	)
 	switch {
@@ -497,10 +530,36 @@ func ConnectError(host string, err, untrusted error) error {
 		return &connectFailure{msg: "timed out talking to " + host, errs: []error{err}}
 	case errors.Is(err, context.Canceled):
 		return &connectFailure{msg: "the request to " + host + " was canceled", errs: []error{err}}
-	case errors.As(err, &opErr) && opErr.Op == "dial":
-		return err
+	}
+	if text, ok := goText(err); ok {
+		return &connectFailure{msg: text, errs: []error{err}}
 	}
 	return PeerError(err)
+}
+
+// goText returns the text of the first error in err's chain whose text Go
+// wrote from fixed strings and values it resolved, never from bytes the
+// peer sent (see ConnectError), and whether there is one.
+func goText(err error) (string, bool) {
+	var (
+		opErr    *net.OpError
+		alertErr tls.AlertError
+		recErr   tls.RecordHeaderError
+	)
+	switch {
+	case errors.As(err, &opErr):
+		return opErr.Error(), true
+	case errors.As(err, &alertErr):
+		return alertErr.Error(), true
+	case errors.As(err, &recErr):
+		return recErr.Error(), true
+	}
+	for _, sentinel := range []error{http.ErrSchemeMismatch, io.ErrUnexpectedEOF, io.EOF} {
+		if errors.Is(err, sentinel) {
+			return sentinel.Error(), true
+		}
+	}
+	return "", false
 }
 
 // invalidReason says why x509 refused a certificate, in the CLI's own

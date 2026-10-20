@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -378,4 +379,26 @@ func TestInit(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestObserveRootsTransportText: init's first connection has no
+// http.Client, so plain HTTP on the TLS port shows as Go's record-header
+// error. Go wrote that text, so it is printed whole, not as a cut
+// peer-text excerpt.
+func TestObserveRootsTransportText(t *testing.T) {
+	s := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(s.Close)
+	_, port, err := net.SplitHostPort(s.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = observeRoots(context.Background(), "localhost:"+port, "localhost", port, x509.NewCertPool())
+	var recErr tls.RecordHeaderError
+	if !errors.As(err, &recErr) {
+		t.Fatalf("plain HTTP: err = %v, want a tls.RecordHeaderError", err)
+	}
+	want := "connect to localhost:" + port + ": tls: first record does not look like a TLS handshake"
+	if err.Error() != want {
+		t.Fatalf("plain HTTP: err = %q, want %q", err.Error(), want)
+	}
 }

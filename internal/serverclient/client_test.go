@@ -1,6 +1,7 @@
 package serverclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -14,6 +15,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -848,4 +850,178 @@ func TestConnectErrorTimeout(t *testing.T) {
 			t.Errorf("ConnectError(%.40q...) = %.200q, want %q with the original as its cause", tc.err.Error(), got.Error(), tc.want)
 		}
 	}
+}
+
+// rawServer listens on 127.0.0.1, hands each accepted connection to
+// handle, and returns https://localhost:PORT and PORT.
+func rawServer(t *testing.T, l net.Listener, handle func(net.Conn)) (string, string) {
+	t.Helper()
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				handle(conn)
+			}()
+		}
+	}()
+	_, port, err := net.SplitHostPort(l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "https://localhost:" + port, port
+}
+
+func listenTCP(t *testing.T) net.Listener {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// readHello reads the client's first TLS record (its ClientHello) whole:
+// a close with unread data would send a reset instead of a FIN.
+func readHello(conn net.Conn) {
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	hdr := make([]byte, 5)
+	if _, err := io.ReadFull(conn, hdr); err != nil {
+		return
+	}
+	_, _ = io.ReadFull(conn, make([]byte, int(hdr[3])<<8|int(hdr[4])))
+}
+
+// requireGoText checks that a transport failure Go itself described is
+// printed with Go's whole text, never as a cut peer-text excerpt.
+func requireGoText(t *testing.T, what string, err error, goText string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s: no error", what)
+	}
+	if msg := err.Error(); !strings.HasSuffix(msg, ": "+goText) || strings.Contains(msg, "peer text") {
+		t.Fatalf("%s: err = %q, want it to end in Go's whole text %q, with no peer-text label", what, msg, goText)
+	}
+}
+
+// TestConnectErrorTransport: a transport failure whose text Go wrote
+// (addresses it resolved, a TLS alert's fixed name, a record-header or
+// scheme-mismatch sentinel) is printed whole, through real connections;
+// text the peer can choose (a malformed header line, a JSON value) is
+// still never printed whole.
+func TestConnectErrorTransport(t *testing.T) {
+	r := newRoot(t, "root R")
+
+	t.Run("connection_reset", func(t *testing.T) {
+		url, port := rawServer(t, listenTCP(t), func(conn net.Conn) {
+			readHello(conn)
+			_ = conn.(*net.TCPConn).SetLinger(0) // close with RST
+		})
+		err := get(clientFor(t, url, r, nil))
+		var opErr *net.OpError
+		if !errors.As(err, &opErr) {
+			t.Fatalf("reset: err = %v, want a *net.OpError", err)
+		}
+		t.Logf("reset: %v", err)
+		requireGoText(t, "reset", err, opErr.Error())
+		if _, p, _ := net.SplitHostPort(opErr.Addr.String()); p != port {
+			t.Fatalf("reset: the cause names port %q, want the server's %q (%q)", p, port, opErr.Error())
+		}
+	})
+
+	t.Run("connection_closed_during_handshake", func(t *testing.T) {
+		url, _ := rawServer(t, listenTCP(t), readHello)
+		err := get(clientFor(t, url, r, nil))
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("close: err = %v, want io.EOF", err)
+		}
+		requireGoText(t, "close", err, io.EOF.Error())
+	})
+
+	t.Run("plain_http_on_tls_port", func(t *testing.T) {
+		s := httptest.NewServer(custodyHandler(agentCustody))
+		t.Cleanup(s.Close)
+		err := get(clientFor(t, "https://localhost:"+s.URL[strings.LastIndex(s.URL, ":")+1:], r, nil))
+		if !errors.Is(err, http.ErrSchemeMismatch) {
+			t.Fatalf("plain HTTP: err = %v, want http.ErrSchemeMismatch", err)
+		}
+		requireGoText(t, "plain HTTP", err, http.ErrSchemeMismatch.Error())
+	})
+
+	t.Run("tls_version_mismatch", func(t *testing.T) {
+		s := httptest.NewUnstartedServer(custodyHandler(agentCustody))
+		s.TLS = &tls.Config{Certificates: []tls.Certificate{r.validLeaf(t)}, MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS12} //nolint:gosec // G402: a server that offers only TLS 1.2, to test the version mismatch
+		s.StartTLS()
+		t.Cleanup(s.Close)
+		err := get(clientFor(t, "https://localhost:"+s.URL[strings.LastIndex(s.URL, ":")+1:], r, nil))
+		var opErr *net.OpError
+		if !errors.As(err, &opErr) || opErr.Op != "remote error" {
+			t.Fatalf("TLS 1.2 server: err = %v, want a remote TLS alert", err)
+		}
+		requireGoText(t, "TLS 1.2 server", err, "remote error: tls: protocol version not supported")
+	})
+
+	t.Run("non_tls_first_record", func(t *testing.T) {
+		url, _ := rawServer(t, listenTCP(t), func(conn net.Conn) {
+			readHello(conn)
+			_, _ = io.WriteString(conn, "SSH-2.0-OpenSSH_9.9\r\n")
+			readHello(conn)
+		})
+		err := get(clientFor(t, url, r, nil))
+		var recErr tls.RecordHeaderError
+		if !errors.As(err, &recErr) {
+			t.Fatalf("SSH banner: err = %v, want a tls.RecordHeaderError", err)
+		}
+		requireGoText(t, "SSH banner", err, "tls: first record does not look like a TLS handshake")
+	})
+
+	t.Run("malformed_header_still_capped", func(t *testing.T) {
+		// textproto repeats the received header line, which has no
+		// colon: peer text.
+		junk := strings.Repeat("X", 200) + " keyroster init --force --root-pin EVIL"
+		l, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{r.validLeaf(t)}, MinVersion: tls.VersionTLS13})
+		if err != nil {
+			t.Fatal(err)
+		}
+		url, _ := rawServer(t, l, func(conn net.Conn) {
+			// Read the whole request, then answer it.
+			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := http.ReadRequest(bufio.NewReader(conn)); err != nil {
+				return
+			}
+			_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\n"+junk+"\r\n\r\n")
+		})
+		err = get(clientFor(t, url, r, nil))
+		if err == nil {
+			t.Fatal("a malformed header line was accepted")
+		}
+		if msg := err.Error(); strings.Contains(msg, "EVIL") || strings.Contains(msg, strings.Repeat("X", 41)) ||
+			!strings.Contains(msg, `[peer text, cut to 40 bytes: "`) {
+			t.Fatalf("malformed header: err = %q, want a 40-byte peer-text excerpt", msg)
+		}
+	})
+
+	t.Run("json_errors_in_own_words", func(t *testing.T) {
+		for body, want := range map[string]string{
+			`{"a":1` + strings.Repeat("0", 4000) + `e999}`: "decode: the response has a JSON value of the wrong type (at byte ",
+			`{"a":` + strings.Repeat(" ", 4000) + `x}`:     "decode: the response is not valid JSON (at byte ",
+		} {
+			url := startTLS(t, r.validLeaf(t), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set(CustodyHeader, agentCustody)
+				_, _ = io.WriteString(w, body)
+			}))
+			err := get(clientFor(t, url, r, nil))
+			if err == nil {
+				t.Errorf("body %.20q... accepted", body)
+				continue
+			}
+			if msg := err.Error(); !strings.Contains(msg, want) || strings.Contains(msg, "peer text") || strings.Contains(msg, "000") {
+				t.Errorf("body %.20q...: err = %.300q, want %q in the CLI's own words", body, msg, want)
+			}
+		}
+	})
 }
