@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -940,6 +941,47 @@ func TestAdminUsers(t *testing.T) {
 			t.Fatalf("= %d, want 503: a directory that does not parse is never \"no such user\"", res.Code)
 		}
 	})
+}
+
+func TestRequestOrigin(t *testing.T) {
+	// requestOrigin names the policy origin the Host reached, and otherwise
+	// the first policy origin in sorted order: never anything outside the
+	// list (T-02-96). 02-12's approval URL reaches the fallback on an
+	// unauthenticated route. The list is deliberately unsorted.
+	origins := []string{"https://b.example", "https://a.example:8443", "https://a.example"}
+	for _, tc := range []struct{ host, want string }{
+		{"a.example", "https://a.example"},
+		{"a.example:443", "https://a.example"},
+		{"a.example:8443", "https://a.example:8443"},
+		{"b.example", "https://b.example"},
+		{"b.example:443", "https://b.example"},
+		// Not a policy origin: the first sorted origin.
+		{"attacker.example", "https://a.example"},
+		{"b.example:9000", "https://a.example"},
+		{"a.example.attacker.example", "https://a.example"},
+		{"attacker.example/https://a.example", "https://a.example"},
+		{"A.EXAMPLE", "https://a.example"},
+		{"a.example.", "https://a.example"},
+		{"a.example:", "https://a.example"},
+		{"a.example:443:443", "https://a.example"},
+		{"[::1]:443", "https://a.example"},
+		{"a.example\r\nX-Evil: 1", "https://a.example"},
+		{"", "https://a.example"},
+	} {
+		r := httptest.NewRequest("GET", "/enroll/x", nil)
+		r.Host = tc.host
+		got := requestOrigin(r, origins)
+		if got != tc.want || !slices.Contains(origins, got) {
+			t.Fatalf("Host %q: requestOrigin = %q, want %q (a member of %q)", tc.host, got, tc.want, origins)
+		}
+	}
+	for _, empty := range [][]string{nil, {}} {
+		r := httptest.NewRequest("GET", "/enroll/x", nil)
+		r.Host = "a.example"
+		if got := requestOrigin(r, empty); got != "" {
+			t.Fatalf("no policy origins %#v: requestOrigin = %q, want \"\"", empty, got)
+		}
+	}
 }
 
 func TestInvitePage(t *testing.T) {
