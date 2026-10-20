@@ -22,9 +22,12 @@ import (
 // an admin request that does not verify costs a header parse and at most
 // one signature check, and the handler never reads or buffers its body
 // (requireAdminLimit), so the per-client bucket alone bounds it (02-07
-// pre-merge review, owner decision D2). net/http may still discard up to
-// 256 KiB of that body after the refusal, and a stalled body holds the
-// connection until ReadTimeout: the connection exposure of the Phase 6
+// pre-merge review, owner decision D2). net/http still reads some of that
+// body: over HTTP/1.1 it may discard up to 256 KiB after the refusal, and
+// a stalled body holds the connection until ReadTimeout; over HTTP/2 it
+// buffers the stream's DATA in memory, up to the receive windows (by
+// default 1 MiB per stream and per connection), until the handler
+// returns. Both are in the connection and memory exposure of the Phase 6
 // todo.
 //
 // The limits are best-effort damping of floods only. Authenticity rests
