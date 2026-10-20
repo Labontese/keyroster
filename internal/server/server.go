@@ -88,7 +88,7 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	lim := cfg.Limits.withDefaults()
 	s := &Server{
 		signer: sg, rpID: cfg.RPID, clock: cfg.Clock, log: cfg.Logger, db: cfg.DB, pages: pages, static: static,
-		adminLimit:  newLimiter(lim.AdminPerMinute, lim.AdminBurst, globalFactor*lim.AdminPerMinute, globalFactor*lim.AdminBurst),
+		adminLimit:  newLimiter(lim.AdminPerMinute, lim.AdminBurst, 0, 0), // per client only (Limits)
 		inviteLimit: newLimiter(lim.InvitePerMinute, lim.InviteBurst, globalFactor*lim.InvitePerMinute, globalFactor*lim.InviteBurst),
 	}
 	if s.clock == nil {

@@ -184,6 +184,25 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 func (c *countingReader) read() int64 { return c.n.Load() }
 
+// stallingReader is a body that, once read, closes started and blocks
+// until release closes, the way a client that sends all but the last byte
+// and then stalls holds a server's read open.
+type stallingReader struct {
+	n       atomic.Int64
+	once    sync.Once
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (s *stallingReader) Read(p []byte) (int, error) {
+	s.n.Add(1)
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (s *stallingReader) read() int64 { return s.n.Load() }
+
 const probePath = "/api/v1/admin/probe?x=1"
 
 var probeBody = []byte(`{"probe":true}`)
@@ -1024,6 +1043,61 @@ func TestRateLimit(t *testing.T) {
 		}
 		if c := get(e.s, "192.0.2.20:1", map[string]string{"X-Forwarded-For": "198.51.100.2"}); c != http.StatusTooManyRequests {
 			t.Fatalf("a different X-Forwarded-For from the same address = %d, want 429", c)
+		}
+	})
+
+	t.Run("admin_valid_request_not_refused_by_others", func(t *testing.T) {
+		// Shaped like the pre-merge critic's probe: more unsigned or
+		// junk-signed admin requests than the old global burst, each from
+		// its own client key with a body of maxAdminBody bytes that stalls
+		// once read. None of the bodies is read, and a validly signed
+		// request from another key succeeds meanwhile.
+		e := newAdminEnv(t, Limits{})
+		const n = globalFactor*defaultAdminBurst + 50
+		junk := signedReqFor(t, e.admin, "https://staging.example", http.MethodPost, serverclient.AdminUsersPath, serverclient.AdminUsersPath, probeBody, t0).Header
+		release := make(chan struct{})
+		bodies := make([]*stallingReader, n)
+		codes := make([]int, n)
+		dones := make([]chan struct{}, n)
+		for i := range n {
+			bodies[i] = &stallingReader{started: make(chan struct{}), release: release}
+			req := httptest.NewRequest(http.MethodPost, serverclient.AdminUsersPath, bodies[i])
+			req.Host = testRPID
+			req.ContentLength = maxAdminBody
+			req.RemoteAddr = "198.51.100." + strconv.Itoa(i%250+1) + ":40000"
+			if i >= 250 {
+				req.RemoteAddr = "203.0.113." + strconv.Itoa(i-250+1) + ":40000"
+			}
+			if i%2 == 1 {
+				req.Header = junk.Clone() // names the real admin key
+			}
+			dones[i] = make(chan struct{})
+			go func() {
+				defer close(dones[i])
+				codes[i] = serve(e.s.Handler(), req).Code
+			}()
+		}
+		// Every request has either been answered or is held in a body read.
+		for i := range n {
+			select {
+			case <-dones[i]:
+			case <-bodies[i].started:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("request %d neither answered nor reading", i)
+			}
+		}
+		res := e.addUser(t, "carol", false, "")
+		close(release)
+		for i := range n {
+			<-dones[i]
+		}
+		if res.Code != http.StatusCreated {
+			t.Fatalf("the valid admin request = %d %s, want 201 while %d other clients were refused", res.Code, res.Body, n)
+		}
+		for i := range n {
+			if bodies[i].read() != 0 || codes[i] != http.StatusUnauthorized {
+				t.Fatalf("request %d: %d, %d bytes of its body read; want the uniform 401 and nothing read", i, codes[i], bodies[i].read())
+			}
 		}
 	})
 

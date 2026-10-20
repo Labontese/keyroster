@@ -14,8 +14,13 @@ import (
 )
 
 // Limits are the per-client rate limits of the admin and invite routes.
-// A zero field takes its default. Each route class also has one global
-// limiter at globalFactor times its per-client rate and burst.
+// A zero field takes its default. The invite routes also have one global
+// limiter at globalFactor times their per-client rate and burst. The
+// admin routes have none: a validly signed admin request is never refused
+// because of other clients' traffic, and an admin request that does not
+// verify costs a header parse and at most one signature check, with no
+// body read (requireAdminLimit), so the per-client bucket alone bounds it
+// (02-07 pre-merge review, owner decision D2).
 //
 // The limits are best-effort damping of floods only. Authenticity rests
 // on SSHSIG with single-use nonces (admin routes) and on 256-bit hashed
@@ -36,8 +41,8 @@ const (
 )
 
 const (
-	// globalFactor is the global limiter's rate and burst over the
-	// per-client ones.
+	// globalFactor is the invite routes' global limiter's rate and burst
+	// over their per-client ones.
 	globalFactor = 10
 	// maxLimiterEntries bounds the per-client limiter map; the least
 	// recently used client is evicted first.
@@ -65,15 +70,15 @@ func (l Limits) withDefaults() Limits {
 }
 
 // limiter is the rate limit of one route class: a token bucket per client
-// key, kept in an LRU-bounded map, and one global bucket as a coarse
-// backstop. It is safe for concurrent use.
+// key, kept in an LRU-bounded map, and optionally one global bucket as a
+// coarse backstop. It is safe for concurrent use.
 type limiter struct {
 	perMinute int
 	burst     int
 	max       int
 
 	mu      sync.Mutex
-	global  *rate.Limiter
+	global  *rate.Limiter            // nil: no global bucket
 	entries map[string]*list.Element // of *limiterEntry
 	lru     *list.List               // most recently used at the front
 }
@@ -84,21 +89,30 @@ type limiterEntry struct {
 	last time.Time
 }
 
+// newLimiter returns a limiter with a per-client bucket of perMinute and
+// burst and a global bucket of globalPerMinute and globalBurst, or none
+// when globalPerMinute is 0.
 func newLimiter(perMinute, burst, globalPerMinute, globalBurst int) *limiter {
-	return &limiter{
+	l := &limiter{
 		perMinute: perMinute,
 		burst:     burst,
 		max:       maxLimiterEntries,
-		global:    rate.NewLimiter(perMinuteRate(globalPerMinute), globalBurst),
 		entries:   map[string]*list.Element{},
 		lru:       list.New(),
 	}
+	if globalPerMinute > 0 {
+		l.global = rate.NewLimiter(perMinuteRate(globalPerMinute), globalBurst)
+	}
+	return l
 }
 
 func perMinuteRate(n int) rate.Limit { return rate.Limit(float64(n) / 60) }
 
-// allow reports whether one request from client key at now passes both
-// the client's bucket and the global one.
+// allow reports whether one request from client key at now passes the
+// client's bucket and then, if there is one, the global bucket. The
+// client's bucket comes first: a request it refuses takes no global token,
+// so one client over its own limit cannot drain the global bucket for
+// everyone else.
 func (l *limiter) allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -125,7 +139,7 @@ func (l *limiter) allow(key string, now time.Time) bool {
 	if !le.lim.AllowN(now, 1) {
 		return false
 	}
-	return l.global.AllowN(now, 1)
+	return l.global == nil || l.global.AllowN(now, 1)
 }
 
 func (l *limiter) remove(e *list.Element) {
