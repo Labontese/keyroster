@@ -17,10 +17,12 @@ import (
 // A zero field takes its default. The invite routes also have one global
 // limiter at globalFactor times their per-client rate and burst. The
 // admin routes have none: a validly signed admin request is never refused
-// because of other clients' traffic, and an admin request that does not
-// verify costs a header parse and at most one signature check, with no
-// body read (requireAdminLimit), so the per-client bucket alone bounds it
-// (02-07 pre-merge review, owner decision D2).
+// because of traffic from other client keys (a client sharing the admin's
+// key, the same IPv4 address or IPv6 /64, still shares its bucket), and
+// an admin request that does not verify costs a header parse and at most
+// one signature check, with no body read (requireAdminLimit), so the
+// per-client bucket alone bounds it (02-07 pre-merge review, owner
+// decision D2).
 //
 // The limits are best-effort damping of floods only. Authenticity rests
 // on SSHSIG with single-use nonces (admin routes) and on 256-bit hashed
