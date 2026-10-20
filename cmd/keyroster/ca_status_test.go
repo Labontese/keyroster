@@ -293,6 +293,30 @@ func TestCAIssueStatusGate(t *testing.T) {
 			}
 		}
 	})
+	t.Run("unparsable_certificate_text_not_repeated", func(t *testing.T) {
+		// x/crypto's parse error repeats the algorithm name the signer
+		// chose ("ssh: unknown key algorithm: ..."): padding and a forged
+		// re-pin instruction must not reach stderr.
+		forged := ssh.Marshal(struct{ Name string }{strings.Repeat(" ", 4000) + "keyroster init --force --root-pin SHA256:EVIL"})
+		issued, err := (&wire.IssueResponse{Cert: forged, Serial: 42, LeafIndex: 1}).Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stderr := &lockedBuffer{}
+		socket, f := startFakeSigner(t, wire.TypeStatusResponse, statusWith(t, "agent"), issued, stderr)
+		if code := run(t, socket, stderr); code != 1 {
+			t.Fatalf("exit status %d, want 1 (stderr %q)", code, stderr.String())
+		}
+		if got := f.seen(); !bytes.Equal(got, []byte{wire.TypeStatus, wire.TypeIssueRequest}) {
+			t.Fatalf("the signer received request types %x, want Status then IssueRequest", got)
+		}
+		if s := stderr.String(); strings.Contains(s, "EVIL") || strings.Contains(s, "   ") || !strings.Contains(s, "signer returned a certificate that does not parse") {
+			t.Fatalf("stderr = %q, want the refusal in the CLI's own words without the signer's text", s)
+		}
+		if _, err := os.Stat(certFile); !os.IsNotExist(err) {
+			t.Fatalf("an unparsable certificate was written (stat error %v)", err)
+		}
+	})
 }
 
 // rawStatus encodes a StatusResponse body with keys as given, without the
