@@ -505,9 +505,12 @@ func (e *connectFailure) Unwrap() []error { return e.errs }
 //     CLI's own words, naming only host: a wrong host name, a chain that
 //     does not end in a trusted root (untrusted's text, and errors.Is
 //     finds untrusted), an expired certificate and the like;
-//   - a timeout is "timed out talking to <host>" and a cancellation
-//     "the request to <host> was canceled": net/http's timeout error
-//     embeds the inner error's text, which can be the peer's;
+//   - a timeout of a network operation (a *net.OpError whose Timeout is
+//     true: a dial, a DNS lookup, a handshake read) is Go's own text,
+//     with the address and the operation; any other timeout is "timed
+//     out talking to <host>" and a cancellation "the request to <host>
+//     was canceled": net/http's timeout error embeds the inner error's
+//     text, which can be the peer's;
 //   - a transport failure whose text Go wrote, not the peer, is printed
 //     whole: a *net.OpError of any Op (the addresses it resolved and a
 //     system error, or a TLS alert's name from a fixed table, as in
@@ -527,6 +530,7 @@ func ConnectError(host string, err, untrusted error) error {
 		unknownErr x509.UnknownAuthorityError
 		invalidErr x509.CertificateInvalidError
 		verifyErr  *tls.CertificateVerificationError
+		opErr      *net.OpError
 		netErr     net.Error
 	)
 	switch {
@@ -542,6 +546,10 @@ func ConnectError(host string, err, untrusted error) error {
 		return &connectFailure{msg: "the server's TLS certificate for " + host + " is not valid: " + invalidReason(invalidErr, leaf, time.Now()), errs: []error{err}}
 	case errors.As(err, &verifyErr):
 		return &connectFailure{msg: "the server's TLS certificate for " + host + " does not verify", errs: []error{err}}
+	case errors.As(err, &opErr) && opErr.Timeout():
+		// Go's own text: the operation, the address it resolved and
+		// "i/o timeout", so the user sees which address and phase.
+		return &connectFailure{msg: opErr.Error(), errs: []error{err}}
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
 		return &connectFailure{msg: "timed out talking to " + host, errs: []error{err}}
 	case errors.Is(err, context.Canceled):

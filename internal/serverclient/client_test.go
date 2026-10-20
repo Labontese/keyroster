@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -849,6 +850,32 @@ func TestConnectErrorTimeout(t *testing.T) {
 		if got.Error() != tc.want || !errors.Is(got, tc.err) {
 			t.Errorf("ConnectError(%.40q...) = %.200q, want %q with the original as its cause", tc.err.Error(), got.Error(), tc.want)
 		}
+	}
+}
+
+// TestConnectErrorOpTimeout: a timed-out network operation keeps Go's own
+// text, with the address and the operation, also inside net/http's
+// wrapping (deferred from 02-06 round 4).
+func TestConnectErrorOpTimeout(t *testing.T) {
+	dial := &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 443}, Err: os.ErrDeadlineExceeded}
+	dns := &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "i/o timeout", Name: "keyroster.example", Server: "192.0.2.53:53", IsTimeout: true}}
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{dial, "dial tcp 192.0.2.1:443: i/o timeout"},
+		{fmt.Errorf("Get: %w", dial), "dial tcp 192.0.2.1:443: i/o timeout"},
+		{dns, "dial tcp: lookup keyroster.example on 192.0.2.53:53: i/o timeout"},
+	} {
+		got := ConnectError("keyroster.example", tc.err, ErrTLSRootNotPinned)
+		if got.Error() != tc.want || !errors.Is(got, tc.err) {
+			t.Errorf("ConnectError(%q) = %q, want %q with the original as its cause", tc.err, got, tc.want)
+		}
+	}
+	// Control: a timeout that is not a network operation's keeps the
+	// CLI's own words.
+	if got := ConnectError("keyroster.example", fakeTimeout{"padded"}, ErrTLSRootNotPinned); got.Error() != "timed out talking to keyroster.example" {
+		t.Errorf("ConnectError(fakeTimeout) = %q", got)
 	}
 }
 
