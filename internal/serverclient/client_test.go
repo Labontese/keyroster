@@ -909,6 +909,36 @@ func TestConnectErrorOpTimeout(t *testing.T) {
 	}
 }
 
+// TestConnectErrorTLSHandshakeTimeout runs a real server that reads the
+// ClientHello and then stalls. net/http gives up after the transport's
+// TLSHandshakeTimeout with its own fixed-text error, not a *net.OpError,
+// and the CLI names the phase. The Client's 10 s handshake timeout is cut
+// to 300 ms for the test; nothing else of the Client changes.
+func TestConnectErrorTLSHandshakeTimeout(t *testing.T) {
+	r := newRoot(t, "root R")
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	url, _ := rawServer(t, listenTCP(t), func(conn net.Conn) {
+		readHello(conn)
+		<-release
+	})
+	c := clientFor(t, url, r, nil)
+	c.http.Transport.(*http.Transport).TLSHandshakeTimeout = 300 * time.Millisecond
+	start := time.Now()
+	err := get(c)
+	if err == nil || time.Since(start) > 10*time.Second {
+		t.Fatalf("err = %v after %v, want the handshake timeout", err, time.Since(start))
+	}
+	t.Logf("stalled handshake: %v", err)
+	if !strings.HasSuffix(err.Error(), ": the TLS handshake with localhost timed out") {
+		t.Fatalf("err = %q, want it to name the TLS handshake phase", err)
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() || ne.Error() != "net/http: TLS handshake timeout" {
+		t.Fatalf("the cause %v is not net/http's handshake timeout", ne)
+	}
+}
+
 // rawServer listens on 127.0.0.1, hands each accepted connection to
 // handle, and returns https://localhost:PORT and PORT.
 func rawServer(t *testing.T, l net.Listener, handle func(net.Conn)) (string, string) {

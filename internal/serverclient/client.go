@@ -522,6 +522,12 @@ func (c *Client) mapError(path string, err error) error {
 	return fmt.Errorf("%s%s: %w", c.base, path, ConnectError(c.base.Hostname(), err, ErrTLSRootNotPinned))
 }
 
+// tlsHandshakeTimeout is the text of net/http's error for a TLS handshake
+// that exceeded the transport's TLSHandshakeTimeout. The type is
+// unexported, so the fixed text identifies it; Go writes it, never the
+// peer.
+const tlsHandshakeTimeout = "net/http: TLS handshake timeout"
+
 // connectFailure is a failed connection or request stated in the CLI's
 // own words (a refused certificate, a timeout, a cancellation) or in the
 // text Go wrote for one error in its cause (goText). Error never includes
@@ -546,11 +552,15 @@ func (e *connectFailure) Unwrap() []error { return e.errs }
 //     does not end in a trusted root (untrusted's text, and errors.Is
 //     finds untrusted), an expired certificate and the like;
 //   - a timeout of a network operation (a *net.OpError whose Timeout is
-//     true: a dial, a DNS lookup, a handshake read) is Go's own text,
-//     with the address and the operation; any other timeout is "timed
-//     out talking to <host>" and a cancellation "the request to <host>
-//     was canceled": net/http's timeout error embeds the inner error's
-//     text, which can be the peer's;
+//     true: a dial or a DNS lookup) is Go's own text, with the address
+//     and the operation. Only synthetic errors test this; no real dial or
+//     DNS timeout has been run (UNVERIFIED). A TLS handshake that stalls
+//     ends in net/http's own timeout error instead, whose text is the
+//     fixed "net/http: TLS handshake timeout": it is "the TLS handshake
+//     with <host> timed out" (a real stalled server tests it). Any other
+//     timeout is "timed out talking to <host>" and a cancellation "the
+//     request to <host> was canceled": net/http's timeout error embeds the
+//     inner error's text, which can be the peer's;
 //   - a transport failure whose text Go wrote, not the peer, is printed
 //     whole: a *net.OpError of any Op (the addresses it resolved and a
 //     system error, or a TLS alert's name from a fixed table, as in
@@ -590,6 +600,8 @@ func ConnectError(host string, err, untrusted error) error {
 		// Go's own text: the operation, the address it resolved and
 		// "i/o timeout", so the user sees which address and phase.
 		return &connectFailure{msg: opErr.Error(), errs: []error{err}}
+	case errors.As(err, &netErr) && netErr.Timeout() && netErr.Error() == tlsHandshakeTimeout:
+		return &connectFailure{msg: "the TLS handshake with " + host + " timed out", errs: []error{err}}
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
 		return &connectFailure{msg: "timed out talking to " + host, errs: []error{err}}
 	case errors.Is(err, context.Canceled):
