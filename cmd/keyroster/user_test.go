@@ -423,6 +423,16 @@ func TestUserAddPeerText(t *testing.T) {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
 	})
+	t.Run("invite_url_printed_rebuilt", func(t *testing.T) {
+		// An upper-case scheme and host, the default port and an empty
+		// fragment marker are accepted, and the URL printed is the one
+		// rebuilt from its parts, never the received text.
+		newUserAddEnv(t, agentCustody, forged("HTTPS://KeyRoster.Example:443/enroll/"+inviteToken+"#", "2026-10-21T12:00:00Z"))
+		code, stdout, stderr := run(t, "user", "add", "carol")
+		if code != 0 || !strings.Contains(stdout, "Invite for carol: "+good+"\n") || strings.Contains(stdout, "KeyRoster") || strings.Contains(stdout, "#") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s\nwant the invite printed as %s", code, stderr, stdout, good)
+		}
+	})
 }
 
 func mustJSON(t *testing.T, v any) string {
