@@ -405,7 +405,7 @@ These fix the verified findings of the pre-merge review of PR 45 at b880289, und
 
 ### Skipped, no code change
 
-- **D3, CodeQL.** keyroster-bot dismissed the go/log-injection alerts #8 to #11 (internal/server/admin.go:197, 218, 223) as false positives on 2026-10-20. #8 to #10 log `req.Name`, which ValidUserName checks before any log call. #11 logs `req.Reinvite`, a bool. The logger is slog's JSONHandler. No code was changed to quiet CodeQL. The log calls added or moved here log only fixed reason strings, adminauth error values and the verified admin name, never the Host header, the digest, URLs, header values or tokens; `uniform_401_body` asserts that the digest and the foreign host never appear in the log.
+- **D3, CodeQL.** keyroster-bot dismissed the go/log-injection alerts #8 to #11 (internal/server/admin.go:197, 218, 223) as false positives on 2026-10-20. #8 to #10 log `req.Name`, which ValidUserName checks before any log call. #11 logs `req.Reinvite`, a bool. The logger is slog's JSONHandler. No code was changed to quiet CodeQL. The log calls added or moved here log only fixed reason strings, the verified admin name and adminauth's error text. That error text is the same Verify reason as at b880289, and it can carry escaped fields from the SSHSIG parse, quoted by internal/sshsig: the namespace, the hash algorithm, the signature format or the key type. The Host header, the digest, URLs and tokens are never logged; `uniform_401_body` asserts that neither the digest nor the foreign host appears in the log.
 - **D4.** The "signer's directory changed" assertions in the reinvite tests (`reinvite_directory_user*`) cannot fail. 02-09 owns this, because it adds InstallDirectory to the seam.
 - **D5, refuted by both skeptics.** No CLI range check on the invite expiry (cmd/keyroster/user.go, the expiry parse).
 - **D5, refuted by both skeptics.** No tightening of the mode of an existing server.db or state directory (internal/serverdb/db.go:49).
@@ -416,7 +416,7 @@ These fix the verified findings of the pre-merge review of PR 45 at b880289, und
 1. **Body limit.** `maxAdminBody` is unchanged at 1 MiB + 64 KiB. It now bounds only the body of a request whose signature has verified; no unauthenticated body is read.
 2. **`body_over_limit_413_before_verify`.** It holds for a declared Content-Length: 413 before any signature work, nonce unused. A body sent without a length is read only after Verify. If that body is oversized and the request verified, it gets 413 with the nonce unused. If the request did not verify, it gets the uniform 401, unread.
 3. **The admin global limiter is removed.** The admin route keeps the per-client bucket in front of everything; the invite route keeps its global backstop unchanged.
-   - Why removal rather than keeping a global bucket only for requests that fail verification: a bucket charged after a failed Verify bounds nothing the per-client bucket does not already bound, and one charged before Verify would refuse valid admins too. Removal is the only choice that provably never refuses a valid admin because of other clients' traffic.
+   - Why removal rather than keeping a global bucket only for requests that fail verification: a bucket charged after a failed Verify bounds nothing the per-client bucket does not already bound, and one charged before Verify would refuse valid admins too. Removal is the only choice that provably never refuses a valid admin because of traffic from other client keys. A client that shares the admin's client key (the same IPv4 address behind NAT, or the same IPv6 /64) can still use up the admin's per-client bucket. That is an accepted residual of keeping the per-client bucket.
    - `newLimiter(..., 0, 0)` means "no global bucket".
 4. **503 order.** Status is read before the body, so a 503 comes before any body read.
 5. **Server URL.** An admin's server URL must be a policy origin; any other gets the uniform 401. `requestOrigin`'s fallback is no longer reachable on an admin route. user add makes one more request, GET `/api/v1/trust`, before the admin POST.
@@ -425,6 +425,7 @@ These fix the verified findings of the pre-merge review of PR 45 at b880289, und
    - **Invite route.** It keeps the global backstop. The accepted residual, from a skeptic's simulation against the real limiter code with realistic timing, is partial delay from about 10 to 16 full-rate client keys, and near-total denial from about 128 or more keys (or one IPv6 /56 or wider).
    - **Remaining admin-route residuals.**
      - There is no cap across many client keys on the CPU spent on headers and signature checks.
+     - A client that shares the admin's client key (the same IPv4 address, or the same IPv6 /64) can use up the admin's per-client bucket.
      - The nonce is consumed only after the digest matches. So a holder of a valid header set for this origin, inside MaxSkew, can drive concurrent body reads, each bounded by the limit. Only the admin, or the server itself, holds such a set.
      - Idle connections are the cheaper memory path. They are recorded in the D6 todo for Phase 6.
 
