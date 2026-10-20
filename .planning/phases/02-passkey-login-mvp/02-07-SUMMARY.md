@@ -479,3 +479,41 @@ Verification of this round:
 - `go test ./...`: every other package passed on the first run (replayed from cache on the second). internal/winagent timed out on the first run, again at `TestAgent/ensure_retries_once_on_closing_agent`, and passed on the second.
 - golangci-lint v2.14.0 (WSL) reports 0 issues on internal/server.
 - `-race` was not run: the Windows toolchain has no cgo.
+
+### Follow-up check of ddc07d6
+
+An independent check of the PR at ddc07d6 found two more non-blocking problems and an inaccurate record. All three are fixed below.
+
+- **The body wording covered HTTP/1.1 only** (low). Fixed in 1759056. This is a wording change only, with no test and no behaviour change.
+  - keyroster-server negotiates HTTP/2 by default: serve.go calls `ServeTLS` with a TLS 1.3 config and sets no `TLSNextProto` or `Protocols`. Over h2 net/http's `processData` writes an open stream's DATA into a memory buffer whether or not the handler reads. The receive windows bound it: `MaxReceiveBufferPerStream` and `MaxReceiveBufferPerConnection`, both 1 MiB by default (Go 1.27.2, `net/http/internal/http2/config.go:55,60`). `runHandler` closes the request body when the handler returns, which frees the buffer, and the stream is then reset. Over h2 there is no 256 KiB drain.
+  - The check measured this with serve.go's exact `http.Server` settings. It sent a 4 MiB POST to a handler that held 1.5 s without reading: net/http read 1 053 797 bytes from the connection over h2, and 2 785 over HTTP/1.1. The admin 401 returns at once, so its buffer is short-lived and D2 still holds.
+  - The reworded places:
+    - the requireAdminLimit doc;
+    - the Limits doc;
+    - Deviations 1, 2 and 6 (T-02-36) and the c69db17 record above;
+    - the 02-09 deferred-items row;
+    - the D6 todo. Its measured figures are now marked as HTTP/1.1. It adds h2's receive windows to the exposure analysis, and a Phase 6 option to lower them through `http.Server.HTTP2`.
+  - UNVERIFIED and recorded in the D6 todo:
+    - how long other routes' handlers can hold the h2 buffer;
+    - how long an h2 connection with a stalled body stays open after the reset;
+    - the memory of an idle h2 connection;
+    - what smaller windows would cost a verified admin's upload.
+- **user add printed only "admin authentication failed" at a server URL that is not a policy origin** (info). Fixed in 0b3f77e.
+  - `adminOriginDiagnosis` is a pure function. When the error is `serverclient.ErrAdminAuth` and the canonical `client.Server()` is not one of the verified policy's webauthn origins, it appends the cause, the origins and the CLI's own advice, which comes last. Otherwise it returns the error unchanged. AdminJSON's text, with the clock hint, stays in front. The request is still sent; see the corrected record in the c69db17 section for why.
+  - Tests:
+    - `TestAdminOriginDiagnosis`. Its three cases cover a server URL that is not a policy origin (the clock hint survives), each policy origin (the error is unchanged), and another error or nil (unchanged).
+    - `TestUserAdd/server_url_not_policy_origin_diagnosed`, on the newUserAddEnv harness. The fake server answers the admin POST with 401, and the policy names only `https://keyroster.example`. The test asserts the diagnosis, the named origin, the advice last and that one admin request was sent.
+    - `TestUserAddPeerText/padded_401` now expects the diagnosis's advice as the CLI's last words, because its fake server is not at a policy origin. Its meaning is unchanged: the CLI's own words come last, and the padded server text stays contained.
+  - Mutants:
+    - Without the call (`return userAddError(name, err)`), `server_url_not_policy_origin_diagnosed` and `padded_401` fail.
+    - Without the membership check, `TestAdminOriginDiagnosis/policy_origin_unchanged` fails.
+    - Both mutants were restored.
+- **The c69db17 record of the skipped server URL check was partly inaccurate** (low). Fixed in 33e29b1. This is a wording change only.
+
+Verification of this round:
+- `gofmt -l .` printed nothing.
+- `go vet ./...`, `GOOS=linux go vet ./...` and `GOOS=darwin go vet ./...` are clean.
+- `go test -count=1 ./cmd/keyroster ./internal/server` passes.
+- `go test ./...` passed on the first run.
+- golangci-lint v2.14.0 (WSL, via scripts/linux.sh) reports 0 issues on cmd/keyroster and internal/server. Its first run flagged two `!=` error comparisons in the new unit test (errorlint), and they were changed to `errors.Is` plus a text comparison.
+- `-race` was not run: the Windows toolchain has no cgo.
