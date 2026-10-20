@@ -768,6 +768,31 @@ func TestParseServerURL(t *testing.T) {
 			t.Errorf("ParseServerURL(%q) = %v, %v", ok, u, err)
 		}
 	}
+	// Accepted spellings of one origin come back as its canonical form,
+	// the serialization of the policy's webauthn origins: a lowercase
+	// host, no trailing dot and no default port 443.
+	for in, want := range map[string]string{
+		"https://Keyroster.Example.COM":    "https://keyroster.example.com",
+		"https://LOCALHOST:8443":           "https://localhost:8443",
+		"https://keyroster.example.":       "https://keyroster.example",
+		"https://keyroster.example.:8443":  "https://keyroster.example:8443",
+		"https://keyroster.example:443":    "https://keyroster.example",
+		"https://KeyRoster.Example.:443":   "https://keyroster.example",
+		"HTTPS://keyroster.example:8443":   "https://keyroster.example:8443",
+		"https://keyroster.example:4430":   "https://keyroster.example:4430",
+		"https://keyroster.example:443443": "",
+	} {
+		u, err := ParseServerURL(in)
+		if want == "" {
+			if err == nil {
+				t.Errorf("ParseServerURL(%q) accepted %q", in, u)
+			}
+			continue
+		}
+		if err != nil || u.String() != want || u.Host != strings.TrimPrefix(want, "https://") {
+			t.Errorf("ParseServerURL(%q) = %v, %v; want %s", in, u, err, want)
+		}
+	}
 	for _, bad := range []string{
 		"http://keyroster.example", "https://192.0.2.1", "https://[::1]:8443", "https://keyroster.example/path",
 		"https://keyroster.example/", "https://keyroster.example?x=1", "https://keyroster.example#f",

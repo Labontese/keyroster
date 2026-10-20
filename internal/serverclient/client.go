@@ -191,7 +191,11 @@ type Client struct {
 
 // ParseServerURL validates a server URL: scheme https, a DNS host name
 // (never an IP literal), an optional port, and no user info, path, query
-// or fragment. It returns the URL normalized to https://host[:port].
+// or fragment. It returns the URL normalized to https://host[:port], the
+// serialization of the policy's webauthn origins: the host lowercased,
+// one trailing dot removed and a port of 443 dropped. The admin API signs
+// that origin (internal/adminauth), so every spelling of one server URL
+// signs the same bytes.
 func ParseServerURL(s string) (*url.URL, error) {
 	u, err := url.Parse(s)
 	if err != nil {
@@ -219,13 +223,17 @@ func ParseServerURL(s string) (*url.URL, error) {
 	if strings.HasSuffix(u.Host, ":") {
 		return nil, fmt.Errorf("server URL %q: empty port", s)
 	}
+	hostport := strings.ToLower(strings.TrimSuffix(host, "."))
 	if p := u.Port(); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 1 || n > 65535 || p[0] == '0' {
 			return nil, fmt.Errorf("server URL %q: bad port", s)
 		}
+		if n != 443 {
+			hostport += ":" + p
+		}
 	}
-	return &url.URL{Scheme: "https", Host: u.Host}, nil
+	return &url.URL{Scheme: "https", Host: hostport}, nil
 }
 
 // numericLabel is a last host label that resolvers read as (part of) an

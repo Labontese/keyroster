@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/Labontese/keyroster/internal/serverclient"
 )
 
 // Config is the keyroster CLI's saved server setup, written by keyroster
@@ -75,6 +77,12 @@ func loadConfig() (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
+	}
+	// A server URL saved before ParseServerURL canonicalized it (an
+	// upper-case host, a trailing dot, :443) loads as its canonical form.
+	// One it refuses is left as saved, for the command's own check.
+	if u, err := serverclient.ParseServerURL(c.Server); err == nil {
+		c.Server = u.String()
 	}
 	return &c, nil
 }

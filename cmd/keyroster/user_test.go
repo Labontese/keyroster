@@ -173,6 +173,23 @@ func TestUserAdd(t *testing.T) {
 		}
 	})
 
+	t.Run("non_canonical_saved_server", func(t *testing.T) {
+		// A config saved before ParseServerURL canonicalized the host loads
+		// as the canonical origin: the request goes out and the printed init
+		// line names the canonical form.
+		var e *userAddEnv
+		e = newUserAddEnv(t, agentCustody, func(w http.ResponseWriter, r *http.Request, b []byte) { e.created(w, r, b) })
+		canonical := e.cfg.Server
+		e.cfg.Server = strings.Replace(canonical, "https://localhost:", "https://LocalHost.:", 1)
+		if _, err := saveConfig(e.cfg, true); err != nil {
+			t.Fatal(err)
+		}
+		code, stdout, stderr := run(t, "user", "add", "carol")
+		if code != 0 || !strings.Contains(stdout, "keyroster init --server "+canonical+" ") || strings.Contains(stdout, "LocalHost") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s\nwant the init line with %s", code, stderr, stdout, canonical)
+		}
+	})
+
 	t.Run("software_custody_banner_once", func(t *testing.T) {
 		var e *userAddEnv
 		e = newUserAddEnv(t, "user=software, host=software, machine=software, ops=software, log=software",
@@ -293,7 +310,8 @@ func TestUserAddPeerText(t *testing.T) {
 	t.Run("control_well_formed_answer", func(t *testing.T) {
 		newUserAddEnv(t, agentCustody, forged(good, "2026-10-21T12:00:00+02:00"))
 		code, stdout, stderr := run(t, "user", "add", "carol")
-		if code != 0 || !strings.Contains(stdout, "Invite for carol: "+good+"\n") ||
+		// Printed in canonical form: the default port 443 is dropped.
+		if code != 0 || !strings.Contains(stdout, "Invite for carol: https://localhost/enroll/"+inviteToken+"\n") ||
 			!strings.Contains(stdout, "expires at 2026-10-21T10:00:00Z") {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
