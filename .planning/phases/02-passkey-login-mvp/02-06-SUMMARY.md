@@ -491,6 +491,18 @@ PR #43 was squash-merged as 5e7e88f before the review fixes, so they are on bran
   - `custody_header_value_refuses_non_tokens`.
   - `post_json`.
   - `TestServerStatus/non_token_custody_fails_closed`.
+- **Round 4: five items skeptics found after c553064.** One commit per item. RED was shown literally on c553064: an archive of it, with HEAD's three test files laid over it (`ca_status_test.go`, `init_test.go`, `client_test.go`), failed every new test except the cap guard named below. Every new test passes after its fix.
+  - **`ca issue` printed the signer's algorithm name (medium; precondition: control of the signer socket).** bcf10bb. An unparsable certificate gave x/crypto's `ssh: unknown key algorithm: %v`, and the signer chooses that name. 4000 spaces and a forged re-pin instruction reached stderr. The refusal is now the CLI's own text, "signer returned a certificate that does not parse; nothing was written". The parse error stays the unwrapped cause. Test: `TestCAIssueStatusGate/unparsable_certificate_text_not_repeated`, which sits next to `key_id_not_keyroster_refused`. It was RED with the padding on stderr.
+  - **Go's own transport errors were labelled peer text and cut (medium, usefulness).** 11765a6. `ConnectError`, the body read and the decode error sent every transport error through `PeerError`. A reset therefore showed as `[peer text, cut to 40 bytes: "read tcp 127.0.0.1:36682->127.0.0.1:3668"]`, which loses both the cause and the last digit of the port.
+    - `ConnectError` now prints in full the text of a `*net.OpError` of any Op, a `tls.AlertError`, a `tls.RecordHeaderError`, `http.ErrSchemeMismatch`, `io.ErrUnexpectedEOF` and `io.EOF`. Go writes all of these from fixed strings plus values it resolved itself: addresses, a TLS alert's name from a fixed table, a version or length number.
+    - Only the matched error's own text is printed. The errors wrapping it can carry received bytes, so they are left out.
+    - The body read now goes through `mapError` as well.
+    - JSON decode errors are stated in the CLI's own words from typed fields (byte offset). The reason: encoding/json repeats a number literal of any length.
+    - Anything else stays a `PeerError`, for example textproto's malformed header line, which repeats the received bytes.
+    - Tests: `TestConnectErrorTransport`, over real connections. The reset case checks Go's whole text and the server's port. The other cases are a close during the handshake (`EOF`), plain HTTP on the TLS port, a TLS 1.2-only server ("remote error: tls: protocol version not supported"), an SSH banner as the first record, and JSON errors (both bodies, a 4000-digit number and a syntax error). All of these subtests were RED. `malformed_header_still_capped` passes both before and after the fix: it guards that the cap stays. `TestObserveRootsTransportText` covers init's own dial, where plain HTTP shows as the record-header error. It was RED.
+  - **The custody header could bury the banner (low).** c44f1f6. `ParseCustodyHeader` accepted any number of parts and any token as a role. `checkCustody` printed every software role in the evaluation-only banner before Trust had verified anything. It now refuses a header with more than `wire.MaxStatusKeys` parts, counted before the split. It also refuses any role other than user, host, machine, ops and log (`trust.CAPubKeyRoles`). Test: `TestClientCustody/unknown_or_too_many_roles_refused_without_banner` (`evil=software`, 9 roles, 3000 roles, too many commas). It was RED: the banner named "evil". `FuzzParseCustodyHeader` ran for 20 s with no failure.
+  - **A timeout was returned as is (low).** 2821c90. net/http's `Client.Timeout` error embeds the inner error's text, and that text can be textproto peer text. The doc comment said a timeout carries none. A timeout is now "timed out talking to HOST", and a cancellation is "the request to HOST was canceled". The original stays the unwrapped cause, and the comments are corrected. Test: `TestConnectErrorTimeout`, a unit test with padded peer text inside a `net.Error` timeout, a `context.DeadlineExceeded` and a `context.Canceled`. It was RED. It is a unit test because `requestTimeout` is a 30 s constant.
+  - **An expired certificate lost its times (low).** a29b4eb. The reason now gives the failing certificate's NotBefore and NotAfter and the local time, all as fixed-format UTC RFC 3339 times. It says "it" for the server's own certificate and "a certificate in its chain" otherwise. Test: `TestClientTLS/expired_leaf_not_root_error`, with an expired leaf and a not-yet-valid one, and times read back from the parsed DER. It was RED.
 
 Contract note for 02-09 and 02-10, from 7a62b75: the status cache mutex is no longer held across the signer call. The "dropStatus takes the same mutex" line under Accomplishments, and the "dropStatus without the mutex" bite row, describe the mechanism at 5e7e88f. dropStatus now waits for the refresh in flight, which takes at most statusTimeout (3 s), and then drops the entry. The guarantee is unchanged: an answer read before a change is never put back after the drop. 02-09's bound ("plus up to 3 s") and its lock order (pendingMu outermost) still hold, and `drop_during_inflight_refresh` passes unchanged.
 
@@ -516,6 +528,19 @@ Checks for 5570ceb through b914560 (Windows, go1.27.2 through the toolchain line
 - golangci-lint v2.14.0 reported 0 issues for GOOS linux, windows and darwin.
 - `go test -count=1 ./...` passed (19 packages).
 - In WSL, on an archive of b914560, `CGO_ENABLED=1 go test -race -count=1 ./...` passed, and so did `refresh_survives_starter_cancel` with `-race -count=20`. `go test -tags e2e -count=1 ./test/e2e/...` passed against OpenSSH 9.5p1 (23 tests).
+
+Checks for bcf10bb through 11765a6, the round 4 fixes (Windows, go1.27.2 through the toolchain line):
+- `gofmt -l` printed nothing.
+- `go vet ./...` passed for windows, linux and darwin, and `GOOS=linux go vet -tags e2e ./test/e2e/` passed.
+- golangci-lint v2.14.0 reported 0 issues for GOOS linux, windows and darwin. The TLS 1.2-only test server carries a `//nolint:gosec // G402`.
+- `go test -count=1 ./...` passed. One run hit `TestCertHolder/logs_successful_load` with a Windows "Access is denied" on a rename. That test is in internal/server, which this round did not touch, and it passed on 3 reruns.
+- In WSL, on an archive of 31cf2d2:
+  - `CGO_ENABLED=1 go test -race -count=1 ./...` passed.
+  - internal/serverclient passed with `-race -count=5`.
+  - `go test -tags e2e -count=1 ./test/e2e/...` passed against OpenSSH 9.5p1 (23 tests).
+- In WSL, on an archive of 11765a6, which changed only how the test servers read the request:
+  - internal/serverclient passed `-race -count=5`. The new tests ran verbosely, and the reset case printed `read tcp 127.0.0.1:50402->127.0.0.1:46491: read: connection reset by peer`.
+  - internal/serverclient and cmd/keyroster passed `-race -count=1`.
 
 ---
 *Phase: 02-passkey-login-mvp*
