@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,14 +95,20 @@ func CustodyHeaderValue(keys []wire.KeyStatus) (string, error) {
 }
 
 // ParseCustodyHeader parses a CustodyHeader value into keys with Role and
-// Custody set, in header order. Every entry must be role=custody with both
-// a lowercase token, and no role may repeat.
+// Custody set, in header order. It has at most wire.MaxStatusKeys entries,
+// each role=custody with role one of the signer's roles (user, host,
+// machine, ops, log) and custody a lowercase token, and no role may
+// repeat. The header arrives before Trust has verified anything, so it
+// cannot fill the evaluation-only banner with roles of its own.
 func ParseCustodyHeader(v string) ([]wire.KeyStatus, error) {
+	if strings.Count(v, ",") >= wire.MaxStatusKeys {
+		return nil, fmt.Errorf("malformed %s header %s", CustodyHeader, peerExcerpt(v))
+	}
 	var out []wire.KeyStatus
 	seen := map[string]bool{}
 	for _, part := range strings.Split(v, ",") {
 		role, custody, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok || !wire.IsToken(role) || !wire.IsToken(custody) || seen[role] {
+		if !ok || !slices.Contains(trust.CAPubKeyRoles, role) || !wire.IsToken(custody) || seen[role] {
 			return nil, fmt.Errorf("malformed %s header %s", CustodyHeader, peerExcerpt(v))
 		}
 		seen[role] = true

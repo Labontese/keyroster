@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -325,6 +326,36 @@ func TestClientCustody(t *testing.T) {
 			if err := get(clientFor(t, url, r, nil)); err == nil {
 				t.Errorf("%s %q accepted", CustodyHeader, v)
 			}
+		}
+	})
+
+	t.Run("unknown_or_too_many_roles_refused_without_banner", func(t *testing.T) {
+		// Before Trust has verified anything, the header must not fill
+		// the evaluation-only banner with roles the server made up: only
+		// the signer's five roles, at most wire.MaxStatusKeys parts.
+		var nine, many []string
+		for i := range 3000 {
+			many = append(many, fmt.Sprintf("r%04d=software", i))
+		}
+		for i := range wire.MaxStatusKeys + 1 {
+			nine = append(nine, fmt.Sprintf("r%d=software", i))
+		}
+		for _, v := range []string{
+			"evil=software",
+			"user=software, evil=software",
+			strings.Join(nine, ", "),
+			strings.Join(many, ", "),
+			"user=agent, host=agent, machine=agent, ops=agent, log=agent" + strings.Repeat(",", wire.MaxStatusKeys),
+		} {
+			url := startTLS(t, r.validLeaf(t), custodyHandler(v))
+			var stderr bytes.Buffer
+			err := get(clientFor(t, url, r, &stderr))
+			if err == nil || stderr.Len() != 0 {
+				t.Fatalf("%s %.60q...: err %v, stderr %.200q; want a refusal and no banner", CustodyHeader, v, err, stderr.String())
+			}
+		}
+		if _, err := ParseCustodyHeader(agentCustody); err != nil {
+			t.Fatalf("control: the five roles do not parse: %v", err)
 		}
 	})
 
