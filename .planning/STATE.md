@@ -191,7 +191,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-06: the /api/v1/trust document and the Keyroster-Custody header are defined once in internal/serverclient (the server imports them); a 2xx without Keyroster-Custody is refused (ErrNoCustody) and a 503 is never parsed for custody
 - [Phase 02]: 02-06: serverclient.Trust also requires the bundle's policy_sha256 to match the served policy (ErrPolicyNotBundled); ErrTrustRootNotPinned never names the served roots
 - [Phase 02]: 02-06: keyroster-server registers SIGHUP as the first statement of serve; every successful certificate load logs 'tls certificate loaded' (fingerprint, not_after, trigger start|file_change|sighup) as JSON on stderr
-- [Phase 02]: 02-07: admin-api/v1 SSHSIG over method, raw request-target, body SHA-256, timestamp (+-120 s) and nonce; nonces kept 241 s
+- [Phase 02]: 02-07: admin-api/v1 SSHSIG over method, raw request-target, body SHA-256, timestamp (+-120 s) and nonce; nonces kept 241 s (superseded by the pre-merge owner decisions below)
+- [Phase 02]: 02-07 pre-merge review, owner decisions 2026-10-20: (1) the admin signature also covers the request origin, which must exactly match a webauthn origin of the root-signed policy (no fallback; cross-deployment replay refused); (2) the body SHA-256 travels in the signed Keyroster-Admin-Body-SHA256 header and the server verifies before the handler reads any body, with no global limiter on the admin route; (3) CodeQL go/log-injection #8-#11 dismissed as false positives. An earlier proposal (requests naming an admin key skip the global limiter) was withdrawn: admin keys are public
 - [Phase 02]: 02-07: ParseServerURL accepts only letter-digit-hyphen DNS hosts and a non-empty port (found by FuzzParseInviteURL)
 - [Phase 02]: 02-07: the CLI parses the server's invite URL as structured data and prints it rebuilt
 
@@ -200,6 +201,7 @@ Recent decisions affecting current work:
 - [2026-10-16] [auth] Bind admin-signed directories to a deployment — [todo file](.planning/todos/pending/2026-10-16-bind-admin-signed-directories-to-a-deployment.md) — Needs Options:.
 - [2026-10-17] [auth] Serve refuses to start without a witnessed checkpoint (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-17-serve-refuses-without-witnessed-checkpoint.md) — owner decision taken; options: witness cosignatures checked at start, or an operator-supplied minimum checkpoint as an interim measure.
 - [2026-10-19] [auth] Choose the software passphrase source at every start (minor, Phase 6) — [todo file](.planning/todos/pending/2026-10-19-choose-the-software-passphrase-source-at-every-start.md) — deferred by the owner; suggested option (c): store nothing at ca-init.
+- [2026-10-20] [server] Cap keyroster-server connections and memory (minor, Phase 6) — [todo file](.planning/todos/pending/2026-10-20-cap-server-connections-and-memory.md) — found in the 02-07 pre-merge review: no listener connection cap, idle HTTP/1.1 and h2 connections and h2 receive windows; options listed.
 
 ### Blockers/Concerns
 
