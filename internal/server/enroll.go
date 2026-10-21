@@ -237,26 +237,28 @@ func (s *Server) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 // handleEnrollFinish serves POST /api/v1/enroll/{token}/finish. The order
 // makes consuming an invite atomic (02-08-F1):
 //
-//  1. at most maxEnrollFinishBody bytes are read (H3), and the body is
-//     parsed with go-webauthn's creation-response parser; the challenge in
-//     its clientDataJSON is untrusted and used only as the key of the
-//     session lookup (go-webauthn compares it in step 4). An attestation
-//     format other than "none" is refused here, before any session is
-//     consumed and before go-webauthn could run that format's verifier
-//     (H1): packed, tpm (go-tpm), android-key, android-safetynet (JWT and
-//     mapstructure), fido-u2f, apple and compound, with their x509 chain
-//     building, never see client input;
+//  1. at most maxEnrollFinishBody bytes are read (H3);
 //  2. the pending user of the invite is looked up with the invite page's
-//     lookup, so a used, expired or replaced invite gets the uniform 404;
-//  3. the session under the invite hash and that challenge is consumed,
+//     lookup, so a used, expired, replaced or unknown invite gets the
+//     uniform 404 before any third-party parser sees the body: only a
+//     live invite's holder reaches go-webauthn's JSON and CBOR parsing;
+//  3. the body is parsed with go-webauthn's creation-response parser; the
+//     challenge in its clientDataJSON is untrusted and used only as the
+//     key of the session lookup (go-webauthn compares it in step 5). An
+//     attestation format other than "none" is refused here, before any
+//     session is consumed and before go-webauthn could run that format's
+//     verifier (H1): packed, tpm (go-tpm), android-key, android-safetynet
+//     (JWT and mapstructure), fido-u2f, apple and compound, with their
+//     x509 chain building, never see client input;
+//  4. the session under the invite hash and that challenge is consumed,
 //     once, atomically;
-//  4. go-webauthn verifies the registration (UV required, the offered
+//  5. go-webauthn verifies the registration (UV required, the offered
 //     algorithms, the policy's RP ID and origins);
-//  5. the COSE key becomes SPKI DER and must pass webauthn.ParsePublicKey;
-//  6. the canonical credential ID, the unpadded base64url of the ID bytes
+//  6. the COSE key becomes SPKI DER and must pass webauthn.ParsePublicKey;
+//  7. the canonical credential ID, the unpadded base64url of the ID bytes
 //     go-webauthn verified, must be neither pending nor in the installed
 //     directory (409);
-//  7. BindPendingCredential sets invite_used_us only while the invite is
+//  8. BindPendingCredential sets invite_used_us only while the invite is
 //     still current and stores the pending credential, in one transaction.
 //
 // It answers the fingerprint, the algorithm and the backup state.
@@ -277,15 +279,6 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 		s.enrollRefuse(w, v, http.StatusNotFound, errEnrollInviteNotValid, route, reasonInviteNotValid, "", nil)
 		return
 	}
-	parsed, err := protocol.ParseCredentialCreationResponseBytes(body)
-	if err != nil {
-		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollBadRequest, route, reasonBadRequest, "", err)
-		return
-	}
-	if parsed.Response.AttestationObject.Format != string(protocol.AttestationFormatNone) {
-		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollAttestation, route, reasonUnsupportedAttestation, "", errNotNone)
-		return
-	}
 	now := s.clock()
 	u, err := s.db.PendingUserByInvite(ctx, hash, now)
 	if errors.Is(err, serverdb.ErrNotFound) {
@@ -294,6 +287,15 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		s.enrollRefuse(w, v, http.StatusInternalServerError, errEnrollInternal, route, reasonInternalError, "", err)
+		return
+	}
+	parsed, err := protocol.ParseCredentialCreationResponseBytes(body)
+	if err != nil {
+		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollBadRequest, route, reasonBadRequest, u.Name, err)
+		return
+	}
+	if parsed.Response.AttestationObject.Format != string(protocol.AttestationFormatNone) {
+		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollAttestation, route, reasonUnsupportedAttestation, u.Name, errNotNone)
 		return
 	}
 	data, err := s.db.ConsumeRegistrationSession(ctx, hash, parsed.Response.CollectedClientData.Challenge, now.UnixMicro())

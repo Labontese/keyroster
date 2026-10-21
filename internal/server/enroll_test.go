@@ -408,6 +408,52 @@ func TestEnrollRefusals(t *testing.T) {
 	})
 }
 
+// TestEnrollFinishInviteFirst (pre-merge review): finish looks the invite
+// up before go-webauthn parses the body, so a token that is not a live
+// invite gets the uniform 404 whatever the body holds, and no third-party
+// parser or the H1 gate ever sees what such a client sends. Each body
+// here would otherwise answer a distinguishable 400 (malformed
+// registration or unsupported attestation).
+func TestEnrollFinishInviteFirst(t *testing.T) {
+	const notValid = `{"error":"invite not valid"}`
+	e := newEnrollEnv(t, Limits{InvitePerMinute: 1 << 20, InviteBurst: 1 << 20})
+	a := newAuthenticator(t, webauthn.AlgES256)
+	// A packed body and a none body, made from a ceremony of a live
+	// invite so they parse.
+	live := e.invite(t, "dave", false)
+	options := e.mustBegin(t, live)
+	packed := finishBody(t, a, options, 0, servertest.WithAttestation(packedSelf(a)))
+	tpm := finishBody(t, a, options, 0, servertest.WithAttestation(fixedAttestation("tpm", map[string]any{"ver": "2.0"})))
+	none := finishBody(t, a, options, 0)
+	never := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{5}, 32))
+	used := e.invite(t, "carol", false)
+	if rec := e.register(t, used, newAuthenticator(t, webauthn.AlgEdDSA), 0); rec.Code != http.StatusOK {
+		t.Fatalf("registration on carol's invite = %d %s", rec.Code, rec.Body)
+	}
+	expired := e.invite(t, "erin", false)
+	e.clock.set(e.clock.Now().Add(inviteTTL))
+	for _, tok := range []struct{ name, token string }{{"never_issued", never}, {"used", used}, {"expired", expired}} {
+		for _, b := range []struct {
+			name string
+			body []byte
+		}{{"malformed", []byte(`{}`)}, {"not_json", []byte("\x00\xff")}, {"packed", packed}, {"tpm", tpm}, {"none", none}} {
+			t.Run(tok.name+"_"+b.name, func(t *testing.T) {
+				before := attestationCalls.Load()
+				rec := e.finish(tok.token, b.body)
+				if rec.Code != http.StatusNotFound || strings.TrimSpace(rec.Body.String()) != notValid {
+					t.Fatalf("= %d %s, want the uniform 404\nlog:\n%s", rec.Code, rec.Body, e.log)
+				}
+				if got := lastReason(t, e.log); got != reasonInviteNotValid {
+					t.Fatalf("logged reason %q, want %q", got, reasonInviteNotValid)
+				}
+				if n := attestationCalls.Load() - before; n != 0 {
+					t.Fatalf("go-webauthn ran an attestation verifier %d times", n)
+				}
+			})
+		}
+	}
+}
+
 // TestEnrollRecordsCredential: BE/BS are recorded as backup_eligible and
 // backed_up, and the pending id is the canonical text of the credential
 // ID bytes go-webauthn verified (02-08-F10).
