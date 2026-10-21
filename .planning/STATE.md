@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-07 Tasks 1-2 done on p02/07-admin-api; PR awaiting owner merge gate (Task 3)
-last_updated: "2026-10-21T04:44:28.754Z"
-last_activity: 2026-10-20
-last_activity_desc: 02-07 admin-api executed; PR awaiting merge gate
-state_head: 10ba623d22ba5c62bb29e31ac832d68d14b7618a
+stopped_at: 02-08 Tasks 1-3 done on p02/08-registration; PR awaiting owner merge gate (Task 4)
+last_updated: "2026-10-21T05:13:16.926Z"
+last_activity: 2026-10-21
+last_activity_desc: 02-08 registration executed; PR awaiting merge gate
+state_head: 949b713ad6987a5ad832d485b7c5fa3de97e509c
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 28
+  completed_plans: 29
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 7 of 14
-Status: 02-07 awaiting the owner merge gate (p02/07-admin-api); 02-01 to 02-06 are merged
-Last activity: 2026-10-21 - Completed quick task 261021-76k: Make internal/directory TestAuthorizeOneUser robust against one slow wall-clock sample (take the fastest of several Authorize runs; the R1 regression must still fail)
+Plan: 8 of 14
+Status: 02-08 awaiting the owner merge gate (p02/08-registration); 02-01 to 02-07 are merged
+Last activity: 2026-10-21 — 02-08 registration executed (go-webauthn registration through invites, pending SPKI credentials, keyroster user pending, owner hardening H1-H4)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -84,6 +84,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P05 | 45 min | 2 tasks | 22 files |
 | Phase 02 P06 | 45 min | 3 tasks | 30 files |
 | Phase 02 P07 | 5h40m | 2 tasks | 34 files |
+| Phase 02 P08 | about 1h | 2 tasks | 31 files |
 
 ## Accumulated Context
 
@@ -195,6 +196,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-07 pre-merge review, owner decisions 2026-10-20: (1) the admin signature also covers the request origin, which must exactly match a webauthn origin of the root-signed policy (no fallback; cross-deployment replay refused); (2) the body SHA-256 travels in the signed Keyroster-Admin-Body-SHA256 header and the server verifies before the handler reads any body, with no global limiter on the admin route; (3) CodeQL go/log-injection #8-#11 dismissed as false positives. An earlier proposal (requests naming an admin key skip the global limiter) was withdrawn: admin keys are public
 - [Phase 02]: 02-07: ParseServerURL accepts only letter-digit-hyphen DNS hosts and a non-empty port (found by FuzzParseInviteURL)
 - [Phase 02]: 02-07: the CLI parses the server's invite URL as structured data and prints it rebuilt
+- [Phase 02]: 02-08: go-webauthn v0.18.2 (server only) approved by the owner on 2026-10-21 together with hardening H1-H4: attestation none only before any verifier, RS256 2048-4096 bits and e=65537 in the shared verifier, enroll bodies capped (1 KiB begin, 64 KiB finish), no FIDO metadata
+- [Phase 02]: 02-08: registration sessions keyed by (invite hash, challenge) and consumed with DELETE ... RETURNING; the invite is used only by an UPDATE conditioned on current, unused and unexpired; one pending credential per user
 
 ### Pending Todos
 
@@ -229,6 +232,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T11:05:56.685Z
-Stopped at: 02-07 Tasks 1-2 done on p02/07-admin-api; PR awaiting owner merge gate (Task 3)
+Last session: 2026-10-21T05:13:16.704Z
+Stopped at: 02-08 Tasks 1-3 done on p02/08-registration; PR awaiting owner merge gate (Task 4)
 Resume file: None
