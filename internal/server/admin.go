@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -19,6 +20,7 @@ import (
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/serverdb"
+	"github.com/Labontese/keyroster/internal/webauthn"
 )
 
 const (
@@ -269,6 +271,56 @@ func (s *Server) handleAddUser(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handlePendingCredentials serves GET /api/v1/admin/users/{name}/pending:
+// the credentials the pending account name registered through its invite
+// and that no admin-signed directory binds yet, with the same fingerprint
+// the registration page showed the user. A name with no pending account
+// is 404 not pending. Nothing here is authority: the admin compares the
+// fingerprint out of band and binds the credential with a signed
+// directory (02-09).
+func (s *Server) handlePendingCredentials(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !directory.ValidUserName(name) {
+		s.writeAdminError(w, r, http.StatusBadRequest, "invalid user name")
+		return
+	}
+	ctx := r.Context()
+	if _, err := s.db.PendingUser(ctx, name); err != nil {
+		if errors.Is(err, serverdb.ErrNotFound) {
+			s.writeAdminError(w, r, http.StatusNotFound, serverclient.AdminErrNotPending)
+			return
+		}
+		s.log.Error("read pending account", "err", err)
+		s.writeAdminError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	creds, err := s.db.PendingCredentials(ctx, name)
+	if err != nil {
+		s.log.Error("read pending credentials", "name", name, "err", err)
+		s.writeAdminError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	v, err := s.currentStatus(ctx)
+	if err != nil {
+		s.signerUnavailable(w, false)
+		return
+	}
+	out := make([]serverclient.PendingCredential, 0, len(creds))
+	for _, c := range creds {
+		out = append(out, serverclient.PendingCredential{
+			ID:             c.ID,
+			Alg:            c.Alg,
+			SPKI:           base64.StdEncoding.EncodeToString(c.SPKI),
+			Fingerprint:    webauthn.Fingerprint(c.SPKI),
+			BackupEligible: c.BackupEligible,
+			BackedUp:       c.BackedUp,
+			RegisteredAt:   c.Registered.UTC().Format(time.RFC3339),
+		})
+	}
+	s.log.Info("pending credentials listed", "name", name, "admin", adminName(ctx), "count", len(out))
+	s.writeJSON(w, v, http.StatusOK, out)
+}
+
 // writeAdminError answers an admin request that passed requireAdmin with
 // code and msg, with the custody header of a current status when there is
 // one.
@@ -310,12 +362,20 @@ func requestOrigin(r *http.Request, origins []string) string {
 	return sorted[0]
 }
 
-// dirUsers is the user names of one installed directory version, keyed
-// by that version and the SHA-256 of its canonical bytes.
+// dirUsers is the user names and credential IDs of one installed
+// directory version, keyed by that version and the SHA-256 of its
+// canonical bytes.
 type dirUsers struct {
 	version uint64
 	sha256  [32]byte
 	users   map[string]bool
+	// creds holds each user's credential IDs as raw bytes, for the
+	// registration's excludeCredentials.
+	creds map[string][][]byte
+	// credIDs holds every credential ID of the directory, as the string
+	// of its raw bytes, for the registration's duplicate check (bytes
+	// compared, never a client's text form; 02-08-F10).
+	credIDs map[string]bool
 }
 
 // dirCache holds the last directory read whose version and hash matched
@@ -333,11 +393,21 @@ type dirCache struct {
 // it matches v. A directory that does not parse is an error, never "no
 // such user".
 func (s *Server) installedUsers(ctx context.Context, v *statusView) (map[string]bool, error) {
+	d, err := s.installedDirectory(ctx, v)
+	if err != nil {
+		return nil, err
+	}
+	return d.users, nil
+}
+
+// installedDirectory is installedUsers with the credential IDs as well,
+// under the same cache rule.
+func (s *Server) installedDirectory(ctx context.Context, v *statusView) (*dirUsers, error) {
 	s.dir.mu.Lock()
 	e := s.dir.entry
 	s.dir.mu.Unlock()
 	if e != nil && e.version == v.raw.DirectoryVersion && e.sha256 == v.raw.DirectorySHA256 {
-		return e.users, nil
+		return e, nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
 	defer cancel()
@@ -345,7 +415,7 @@ func (s *Server) installedUsers(ctx context.Context, v *statusView) (map[string]
 	if err != nil {
 		return nil, err
 	}
-	fresh := &dirUsers{version: resp.Version, users: map[string]bool{}}
+	fresh := &dirUsers{version: resp.Version, users: map[string]bool{}, creds: map[string][][]byte{}, credIDs: map[string]bool{}}
 	if resp.Version != 0 {
 		d, err := directory.Parse(resp.Directory)
 		if err != nil {
@@ -353,6 +423,15 @@ func (s *Server) installedUsers(ctx context.Context, v *statusView) (map[string]
 		}
 		for _, u := range d.Users {
 			fresh.users[u.Name] = true
+			for _, c := range u.Credentials {
+				// Parse validated every ID as canonical unpadded base64url.
+				id, err := base64.RawURLEncoding.Strict().DecodeString(c.ID)
+				if err != nil {
+					return nil, fmt.Errorf("installed directory: credential id: %w", err)
+				}
+				fresh.creds[u.Name] = append(fresh.creds[u.Name], id)
+				fresh.credIDs[string(id)] = true
+			}
 		}
 		fresh.sha256 = sha256.Sum256(resp.Directory)
 	}
@@ -361,5 +440,5 @@ func (s *Server) installedUsers(ctx context.Context, v *statusView) (map[string]
 		s.dir.entry = fresh
 		s.dir.mu.Unlock()
 	}
-	return fresh.users, nil
+	return fresh, nil
 }

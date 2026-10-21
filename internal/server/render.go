@@ -42,6 +42,8 @@ type pageData struct {
 	RPID             string
 	User             string
 	Expires          string
+	BeginURL         string // the invite's registration begin URL
+	FinishURL        string // the invite's registration finish URL
 	BundleVersion    uint64
 	PolicyVersion    uint64
 	DirectoryVersion uint64

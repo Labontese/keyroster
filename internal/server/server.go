@@ -103,7 +103,12 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	mux.HandleFunc("GET "+serverclient.TrustPath, s.handleTrust)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.Handle("POST "+serverclient.AdminUsersPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleAddUser))))
+	mux.Handle("GET "+serverclient.AdminUsersPath+"/{name}/pending", s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handlePendingCredentials))))
 	mux.Handle("GET /enroll/{token}", s.rateLimited(s.inviteLimit, true, http.HandlerFunc(s.handleEnroll)))
+	// The registration ceremony of an invite (02-08): JSON routes in the
+	// invite class, under the same limiter as the invite page.
+	mux.Handle("POST "+enrollBeginPath, s.rateLimited(s.inviteLimit, false, http.HandlerFunc(s.handleEnrollBegin)))
+	mux.Handle("POST "+enrollFinishPath, s.rateLimited(s.inviteLimit, false, http.HandlerFunc(s.handleEnrollFinish)))
 	s.handler = secure(mux)
 	return s, nil
 }

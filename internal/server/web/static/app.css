@@ -41,3 +41,13 @@ code {
   font-size: 0.9em;
   word-break: break-all;
 }
+.kr-error {
+  color: #b00020;
+  font-weight: bold;
+}
+.kr-error:empty {
+  display: none;
+}
+.kr-fingerprint code {
+  font-size: 1.5em;
+}

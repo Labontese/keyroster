@@ -28,7 +28,22 @@ var (
 	ErrNotFound = errors.New("serverdb: not found")
 	// ErrNonceUsed means an admin nonce was already used: a replay.
 	ErrNonceUsed = errors.New("serverdb: admin nonce already used")
+	// ErrExpired means the row was found but had expired; it is gone now.
+	ErrExpired = errors.New("serverdb: expired")
+	// ErrTooManySessions means the invite already has MaxOpenSessions
+	// unexpired registration sessions.
+	ErrTooManySessions = errors.New("serverdb: too many open registration sessions for this invite")
+	// ErrInviteNotValid means the invite is not current: used, expired or
+	// replaced by a reinvite.
+	ErrInviteNotValid = errors.New("serverdb: invite not valid")
+	// ErrDuplicateCredential means the credential ID is already pending,
+	// or the user already has a pending credential.
+	ErrDuplicateCredential = errors.New("serverdb: credential already pending")
 )
+
+// MaxOpenSessions is the most unexpired registration sessions one invite
+// may hold at a time.
+const MaxOpenSessions = 16
 
 // DB is an open server state database.
 type DB struct {
@@ -103,23 +118,42 @@ func (d *DB) CreatePendingUser(ctx context.Context, u PendingUser) error {
 
 // ReplaceInvite gives the pending account name a new invite: inviteHash
 // and expiresUS replace the old ones in place, and the user handle stays.
-// The old token stops matching at once. It is last-writer-wins: the single
-// connection serializes concurrent reinvites, so exactly one token stays
-// valid. No pending account with that name returns ErrNotFound.
+// The old token stops matching at once. In the same transaction it marks
+// the new invite unused, deletes every registration session of the old
+// invite and deletes the account's pending credential: an unapproved
+// passkey registered through a replaced invite is discarded, and the user
+// registers again under the new one (02-08-F7, 02-07-F5). It is
+// last-writer-wins: the single connection serializes concurrent
+// reinvites, so exactly one token stays valid. No pending account with
+// that name returns ErrNotFound.
 func (d *DB) ReplaceInvite(ctx context.Context, name string, inviteHash []byte, expiresUS int64) error {
 	if len(inviteHash) == 0 {
 		return errors.New("serverdb: empty invite hash")
 	}
-	res, err := d.db.ExecContext(ctx, `UPDATE pending_users SET invite_hash = ?, invite_expires_us = ? WHERE name = ?`, inviteHash, expiresUS, name)
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("serverdb: replace invite: %w", err)
+		return fmt.Errorf("serverdb: begin: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("serverdb: replace invite: %w", err)
-	}
-	if n != 1 {
+	defer func() { _ = tx.Rollback() }()
+	var old []byte
+	err = tx.QueryRowContext(ctx, `SELECT invite_hash FROM pending_users WHERE name = ?`, name).Scan(&old)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("serverdb: replace invite: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM registration_sessions WHERE invite_hash = ?`, old); err != nil {
+		return fmt.Errorf("serverdb: replace invite: drop sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pending_credentials WHERE user_name = ?`, name); err != nil {
+		return fmt.Errorf("serverdb: replace invite: drop pending credential: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pending_users SET invite_hash = ?, invite_expires_us = ?, invite_used_us = NULL WHERE name = ?`, inviteHash, expiresUS, name); err != nil {
+		return fmt.Errorf("serverdb: replace invite: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
 	}
 	return nil
 }
@@ -130,13 +164,12 @@ func (d *DB) PendingUser(ctx context.Context, name string) (*PendingUser, error)
 }
 
 // PendingUserByInvite returns the pending account whose invite hash is
-// hash and whose invite has not expired at now, or ErrNotFound.
-//
-// Under migration 0001 no invite can be used yet. 02-08 adds the
-// invite_used_us column and extends this lookup to require an unused
-// invite as well.
+// hash, whose invite has not expired at now and has not registered a
+// credential yet, or ErrNotFound. It is the one invite lookup: the invite
+// page and the registration begin both use it, so a used, expired,
+// replaced or unknown invite gets the same answer everywhere.
 func (d *DB) PendingUserByInvite(ctx context.Context, hash []byte, now time.Time) (*PendingUser, error) {
-	return d.pendingUser(ctx, `SELECT name, user_handle, invite_hash, invite_expires_us, created_us, created_by FROM pending_users WHERE invite_hash = ? AND invite_expires_us > ?`,
+	return d.pendingUser(ctx, `SELECT name, user_handle, invite_hash, invite_expires_us, created_us, created_by FROM pending_users WHERE invite_hash = ? AND invite_expires_us > ? AND invite_used_us IS NULL`,
 		hash, now.UnixMicro())
 }
 
@@ -183,4 +216,185 @@ func (d *DB) UseNonce(ctx context.Context, nonce string, expires, now time.Time)
 		return fmt.Errorf("serverdb: commit: %w", err)
 	}
 	return nil
+}
+
+// CreateRegistrationSession stores session, the registration session data
+// the server itself produced for one begun ceremony, under the invite hash
+// and the ceremony's challenge until expiresUS. In one transaction it
+// first deletes every session that expired at or before nowUS, then
+// refuses with ErrTooManySessions when the invite already holds
+// MaxOpenSessions sessions, and otherwise inserts.
+func (d *DB) CreateRegistrationSession(ctx context.Context, inviteHash []byte, challenge string, session []byte, expiresUS, nowUS int64) error {
+	if len(inviteHash) == 0 || challenge == "" || len(session) == 0 {
+		return errors.New("serverdb: incomplete registration session")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM registration_sessions WHERE expires_us <= ?`, nowUS); err != nil {
+		return fmt.Errorf("serverdb: purge registration sessions: %w", err)
+	}
+	var open int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM registration_sessions WHERE invite_hash = ?`, inviteHash).Scan(&open); err != nil {
+		return fmt.Errorf("serverdb: count registration sessions: %w", err)
+	}
+	if open >= MaxOpenSessions {
+		return ErrTooManySessions
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO registration_sessions (invite_hash, challenge, session, expires_us) VALUES (?, ?, ?, ?)`,
+		inviteHash, challenge, session, expiresUS); err != nil {
+		return fmt.Errorf("serverdb: insert registration session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return nil
+}
+
+// ConsumeRegistrationSession deletes the session stored under the invite
+// hash and challenge and returns its data, in one statement (DELETE ...
+// RETURNING), so a session is used at most once even when two finishes
+// race. No such session is ErrNotFound; one that expired at or before
+// nowUS is ErrExpired (and is gone as well).
+func (d *DB) ConsumeRegistrationSession(ctx context.Context, inviteHash []byte, challenge string, nowUS int64) ([]byte, error) {
+	var (
+		session []byte
+		expires int64
+	)
+	err := d.db.QueryRowContext(ctx, `DELETE FROM registration_sessions WHERE invite_hash = ? AND challenge = ? RETURNING session, expires_us`,
+		inviteHash, challenge).Scan(&session, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("serverdb: consume registration session: %w", err)
+	}
+	if expires <= nowUS {
+		return nil, ErrExpired
+	}
+	return session, nil
+}
+
+// PendingCredential is a credential registered through an invite and not
+// yet bound by an admin-signed directory.
+type PendingCredential struct {
+	ID             string // unpadded base64url of the credential ID
+	UserName       string
+	Alg            int64  // COSE algorithm
+	SPKI           []byte // public key, SPKI DER
+	BackupEligible bool
+	BackedUp       bool
+	Registered     time.Time
+}
+
+// BindPendingCredential records cred as the credential the invite with
+// inviteHash registered, in one transaction:
+//
+//  1. UPDATE pending_users SET invite_used_us ... WHERE invite_hash = ? AND
+//     invite_used_us IS NULL AND invite_expires_us > ? RETURNING name. No
+//     row means the invite was used, expired or replaced by a reinvite:
+//     ErrInviteNotValid, nothing written. When cred.UserName is set, the
+//     returned name must equal it.
+//  2. INSERT INTO pending_credentials for that name. An ID already pending
+//     or a user who already has a pending credential is
+//     ErrDuplicateCredential, and the transaction rolls back.
+func (d *DB) BindPendingCredential(ctx context.Context, inviteHash []byte, nowUS int64, cred PendingCredential) error {
+	if len(inviteHash) == 0 || cred.ID == "" || len(cred.SPKI) == 0 {
+		return errors.New("serverdb: incomplete pending credential")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var name string
+	err = tx.QueryRowContext(ctx, `UPDATE pending_users SET invite_used_us = ? WHERE invite_hash = ? AND invite_used_us IS NULL AND invite_expires_us > ? RETURNING name`,
+		nowUS, inviteHash, nowUS).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrInviteNotValid
+	}
+	if err != nil {
+		return fmt.Errorf("serverdb: use invite: %w", err)
+	}
+	if cred.UserName != "" && cred.UserName != name {
+		return ErrInviteNotValid
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO pending_credentials (id, user_name, alg, spki, backup_eligible, backed_up, registered_us) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		cred.ID, name, cred.Alg, cred.SPKI, boolInt(cred.BackupEligible), boolInt(cred.BackedUp), nowUS)
+	if err != nil {
+		var se *sqlite.Error
+		if errors.As(err, &se) && (se.Code() == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY || se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE) {
+			return ErrDuplicateCredential
+		}
+		return fmt.Errorf("serverdb: insert pending credential: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return nil
+}
+
+// PendingCredentialExists reports whether a pending credential has the
+// canonical ID id.
+func (d *DB) PendingCredentialExists(ctx context.Context, id string) (bool, error) {
+	var one int
+	err := d.db.QueryRowContext(ctx, `SELECT 1 FROM pending_credentials WHERE id = ?`, id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("serverdb: read pending credential: %w", err)
+	}
+	return true, nil
+}
+
+// PendingCredentials returns the pending credentials of the account name,
+// oldest first (at most one under the one-per-user index).
+func (d *DB) PendingCredentials(ctx context.Context, name string) ([]PendingCredential, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT id, user_name, alg, spki, backup_eligible, backed_up, registered_us FROM pending_credentials WHERE user_name = ? ORDER BY registered_us, id`, name)
+	if err != nil {
+		return nil, fmt.Errorf("serverdb: read pending credentials: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []PendingCredential
+	for rows.Next() {
+		var (
+			c      PendingCredential
+			be, bs int
+			reg    int64
+		)
+		if err := rows.Scan(&c.ID, &c.UserName, &c.Alg, &c.SPKI, &be, &bs, &reg); err != nil {
+			return nil, fmt.Errorf("serverdb: read pending credentials: %w", err)
+		}
+		c.BackupEligible, c.BackedUp = be == 1, bs == 1
+		c.Registered = time.UnixMicro(reg).UTC()
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("serverdb: read pending credentials: %w", err)
+	}
+	return out, nil
+}
+
+// InviteUsed reports whether the current invite of the account name has
+// registered a credential.
+func (d *DB) InviteUsed(ctx context.Context, name string) (bool, error) {
+	var used sql.NullInt64
+	err := d.db.QueryRowContext(ctx, `SELECT invite_used_us FROM pending_users WHERE name = ?`, name).Scan(&used)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("serverdb: read pending account: %w", err)
+	}
+	return used.Valid, nil
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

@@ -5,6 +5,19 @@
 <dt>Server</dt><dd>{{.RPID}}</dd>
 <dt>Invite valid until</dt><dd>{{.Expires}}</dd>
 </dl>
+<section id="kr-enroll" data-begin="{{.BeginURL}}" data-finish="{{.FinishURL}}">
+<h2>Register your passkey</h2>
+<p>Register one passkey for this account. Your browser asks you to unlock it (a PIN, fingerprint or face), because keyroster requires user verification.</p>
+<p><button type="button" id="kr-register">Register passkey</button></p>
+<p id="kr-error" class="kr-error" role="alert"></p>
+<div id="kr-result" class="kr-result" hidden>
+<p>Your passkey is registered. Its fingerprint:</p>
+<p class="kr-fingerprint"><code id="kr-fingerprint"></code></p>
+<p id="kr-details"></p>
+<p>Tell your admin this fingerprint. Your account works only after your admin approves it.</p>
+</div>
+</section>
 <p>Your admin will give you a keyroster init command; run it before keyroster login.</p>
-<p>Passkey registration on this page comes in a later release. Keep this link private: it works only for you, only until it expires, and stops working when your admin sends a new one.</p>
+<p>Keep this link private: it works only for you, only until it expires or registers a passkey, and stops working when your admin sends a new one.</p>
+<script src="/static/app.js" defer></script>
 {{end}}

@@ -996,8 +996,19 @@ func TestInvitePage(t *testing.T) {
 			!strings.Contains(r.Body.String(), "run it before keyroster login") {
 			t.Fatalf("= %d:\n%s", r.Code, r.Body)
 		}
-		if r.Header().Get("Referrer-Policy") != "no-referrer" || strings.Contains(r.Body.String(), "<script") {
-			t.Fatal("the invite page lacks Referrer-Policy no-referrer or carries a script")
+		body := r.Body.String()
+		if r.Header().Get("Referrer-Policy") != "no-referrer" {
+			t.Fatal("the invite page lacks Referrer-Policy no-referrer")
+		}
+		// One script, the embedded app.js, and no inline script (02-08):
+		// the page's data reaches it through data- attributes only.
+		if strings.Count(body, "<script") != 1 || !strings.Contains(body, `<script src="/static/app.js" defer></script>`) {
+			t.Fatalf("the invite page does not carry exactly the one app.js script:\n%s", body)
+		}
+		for _, want := range []string{`data-begin="/api/v1/enroll/` + token + `/begin"`, `data-finish="/api/v1/enroll/` + token + `/finish"`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("the invite page lacks %s:\n%s", want, body)
+			}
 		}
 		requireHeaders(t, "invite page", r)
 	})

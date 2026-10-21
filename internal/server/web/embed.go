@@ -1,6 +1,7 @@
 // Package web holds keyroster-server's pages and static assets, embedded
-// in the binary: html/template files and plain CSS (and, from 02-07, one
-// hand-written JS file). No npm package, third-party asset, inline script
+// in the binary: html/template files, plain CSS and one hand-written JS
+// file, static/app.js, which runs the passkey registration ceremony
+// (02-08). No npm package, third-party asset, inline script
 // or inline style (UI-01).
 package web
 

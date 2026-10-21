@@ -115,6 +115,11 @@ type response struct {
 // verifies serverRPID, and dials 127.0.0.1 directly, so the test process
 // itself needs no name resolution.
 func (e *serverEnv) request(method, path string, hdr map[string]string) (*response, error) {
+	return e.requestBody(method, path, nil, hdr)
+}
+
+// requestBody is request with body as the request body (nil: none).
+func (e *serverEnv) requestBody(method, path string, body []byte, hdr map[string]string) (*response, error) {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(e.Port))
 	tr := &http.Transport{
 		Proxy:           nil,
@@ -126,7 +131,11 @@ func (e *serverEnv) request(method, path string, hdr map[string]string) (*respon
 	}
 	defer tr.CloseIdleConnections()
 	c := &http.Client{Transport: tr, Timeout: 10 * time.Second}
-	req, err := http.NewRequest(method, e.URL+path, nil)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, e.URL+path, rd)
 	if err != nil {
 		return nil, err
 	}
