@@ -903,10 +903,11 @@ func init() {
 // credential key over authData ‖ SHA-256(clientDataJSON), as an
 // authenticator without an attestation key makes it.
 func packedSelf(a *webauthntest.Authenticator) servertest.AttestationFunc {
-	return packedSelfWith(a, func(m map[string]any) {})
+	return packedSelfWith(a, nil)
 }
 
-// packedSelfWith is packedSelf with its attStmt changed by edit.
+// packedSelfWith is packedSelf with its attStmt changed by edit (none
+// when edit is nil).
 func packedSelfWith(a *webauthntest.Authenticator, edit func(map[string]any)) servertest.AttestationFunc {
 	return func(authData, cdHash []byte) (string, any, error) {
 		sig, err := a.Sign(append(append([]byte(nil), authData...), cdHash...))
@@ -914,7 +915,9 @@ func packedSelfWith(a *webauthntest.Authenticator, edit func(map[string]any)) se
 			return "", nil, err
 		}
 		m := map[string]any{"alg": a.Credential().Alg, "sig": sig}
-		edit(m)
+		if edit != nil {
+			edit(m)
+		}
 		return "packed", m, nil
 	}
 }
