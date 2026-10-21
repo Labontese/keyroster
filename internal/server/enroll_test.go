@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-webauthn/webauthn/metadata"
 	"github.com/go-webauthn/webauthn/protocol"
@@ -141,16 +142,58 @@ func TestEnrollRegister(t *testing.T) {
 // pending lists name's pending credentials through the admin API.
 func (e *enrollEnv) pending(t *testing.T, name string) []serverclient.PendingCredential {
 	t.Helper()
+	return e.pendingAnswer(t, name).Credentials
+}
+
+// pendingAnswer is the admin API's whole pending answer for name.
+func (e *enrollEnv) pendingAnswer(t *testing.T, name string) serverclient.PendingAnswer {
+	t.Helper()
 	path := serverclient.AdminPendingPath(name)
 	rec := serve(e.s.Handler(), signedReq(t, e.admin, http.MethodGet, path, path, nil, e.clock.Now()))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET %s = %d %s\nlog:\n%s", path, rec.Code, rec.Body, e.log)
 	}
-	var out []serverclient.PendingCredential
+	var out serverclient.PendingAnswer
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// TestPendingInviteState (pre-merge review): the pending answer carries
+// the current invite's state under the server clock, with the boundary
+// the invite lookup uses: open before its expiry, expired at it (when the
+// page and begin answer 404), used once a passkey registered, and open
+// again after a reinvite.
+func TestPendingInviteState(t *testing.T) {
+	e := newEnrollEnv(t, Limits{AdminPerMinute: 1 << 20, AdminBurst: 1 << 20})
+	token := e.invite(t, "carol", false)
+	expires := e.clock.Now().Add(inviteTTL).UTC().Format(time.RFC3339)
+	want := func(state string) {
+		t.Helper()
+		got := e.pendingAnswer(t, "carol")
+		if got.Invite.State != state || got.Invite.ExpiresAt != expires || got.Credentials == nil {
+			t.Fatalf("pending answer %+v, want state %s, expires_at %s and a credential list", got, state, expires)
+		}
+	}
+	want(serverclient.InviteOpen)
+	start := e.clock.Now()
+	e.clock.set(start.Add(inviteTTL - time.Microsecond))
+	want(serverclient.InviteOpen)
+	e.clock.set(start.Add(inviteTTL))
+	want(serverclient.InviteExpired)
+	if rec := e.begin(token); rec.Code != http.StatusNotFound {
+		t.Fatalf("begin at the expiry = %d, want 404 like the expired state", rec.Code)
+	}
+	fresh := e.invite(t, "carol", true)
+	expires = e.clock.Now().Add(inviteTTL).UTC().Format(time.RFC3339)
+	want(serverclient.InviteOpen)
+	if rec := e.register(t, fresh, newAuthenticator(t, webauthn.AlgES256), 0); rec.Code != http.StatusOK {
+		t.Fatalf("registration = %d %s", rec.Code, rec.Body)
+	}
+	want(serverclient.InviteUsed)
+	e.clock.set(e.clock.Now().Add(inviteTTL))
+	want(serverclient.InviteUsed) // used wins over expired
 }
 
 // requireUnused fails unless name has no pending credential and its

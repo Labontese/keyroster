@@ -35,6 +35,30 @@ const AdminErrNotPending = "not pending"
 // satisfy directory.ValidUserName, whose alphabet needs no escaping.
 func AdminPendingPath(name string) string { return AdminUsersPath + "/" + name + "/pending" }
 
+// PendingAnswer is the 200 answer of AdminPendingPath: the state of the
+// pending account's current invite and the passkeys registered with it.
+type PendingAnswer struct {
+	Invite      PendingInvite       `json:"invite"`
+	Credentials []PendingCredential `json:"credentials"`
+}
+
+// The states of PendingInvite: a current invite that has not expired and
+// has registered no passkey, one that expired unused, and one that
+// registered its passkey.
+const (
+	InviteOpen    = "open"
+	InviteExpired = "expired"
+	InviteUsed    = "used"
+)
+
+// PendingInvite is the state of a pending account's current invite:
+// State is InviteOpen, InviteExpired or InviteUsed, and ExpiresAt the RFC
+// 3339 UTC time the invite expires or expired.
+type PendingInvite struct {
+	State     string `json:"state"`
+	ExpiresAt string `json:"expires_at"`
+}
+
 // PendingCredential is one entry of the answer of AdminPendingPath: a
 // passkey registered through an invite and not yet bound by an
 // admin-signed directory. ID is the unpadded base64url credential ID, SPKI

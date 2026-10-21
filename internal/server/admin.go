@@ -272,12 +272,14 @@ func (s *Server) handleAddUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePendingCredentials serves GET /api/v1/admin/users/{name}/pending:
-// the credentials the pending account name registered through its invite
-// and that no admin-signed directory binds yet, with the same fingerprint
-// the registration page showed the user. A name with no pending account
-// is 404 not pending. Nothing here is authority: the admin compares the
-// fingerprint out of band and binds the credential with a signed
-// directory (02-09).
+// the state of the pending account's current invite (open, expired or
+// used, under the server clock and the comparison the invite lookup
+// uses, with its expiry) and the credentials the account registered
+// through its invite that no admin-signed directory binds yet, with the
+// same fingerprint the registration page showed the user. A name with no
+// pending account is 404 not pending. Nothing here is authority: the
+// admin compares the fingerprint out of band and binds the credential
+// with a signed directory (02-09).
 func (s *Server) handlePendingCredentials(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !directory.ValidUserName(name) {
@@ -285,7 +287,8 @@ func (s *Server) handlePendingCredentials(w http.ResponseWriter, r *http.Request
 		return
 	}
 	ctx := r.Context()
-	if _, err := s.db.PendingUser(ctx, name); err != nil {
+	u, err := s.db.PendingUser(ctx, name)
+	if err != nil {
 		if errors.Is(err, serverdb.ErrNotFound) {
 			s.writeAdminError(w, r, http.StatusNotFound, serverclient.AdminErrNotPending)
 			return
@@ -293,6 +296,20 @@ func (s *Server) handlePendingCredentials(w http.ResponseWriter, r *http.Request
 		s.log.Error("read pending account", "err", err)
 		s.writeAdminError(w, r, http.StatusInternalServerError, "internal error")
 		return
+	}
+	used, err := s.db.InviteUsed(ctx, name)
+	if err != nil {
+		s.log.Error("read pending account", "err", err)
+		s.writeAdminError(w, r, http.StatusInternalServerError, "internal error")
+		return
+	}
+	invite := serverclient.PendingInvite{State: serverclient.InviteOpen, ExpiresAt: u.InviteExpires.UTC().Format(time.RFC3339)}
+	switch {
+	case used:
+		invite.State = serverclient.InviteUsed
+	case u.InviteExpires.UnixMicro() <= s.clock().UnixMicro():
+		// PendingUserByInvite's invite_expires_us > now, negated.
+		invite.State = serverclient.InviteExpired
 	}
 	creds, err := s.db.PendingCredentials(ctx, name)
 	if err != nil {
@@ -317,8 +334,8 @@ func (s *Server) handlePendingCredentials(w http.ResponseWriter, r *http.Request
 			RegisteredAt:   c.Registered.UTC().Format(time.RFC3339),
 		})
 	}
-	s.log.Info("pending credentials listed", "name", name, "admin", adminName(ctx), "count", len(out))
-	s.writeJSON(w, v, http.StatusOK, out)
+	s.log.Info("pending credentials listed", "name", name, "admin", adminName(ctx), "count", len(out), "invite", invite.State)
+	s.writeJSON(w, v, http.StatusOK, serverclient.PendingAnswer{Invite: invite, Credentials: out})
 }
 
 // writeAdminError answers an admin request that passed requireAdmin with

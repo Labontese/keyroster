@@ -32,15 +32,25 @@ func pendingEntry(t *testing.T, alg int64) (serverclient.PendingCredential, stri
 	}, fp
 }
 
-// list answers 200 with entries, after checking that the request is the
-// body-less signed GET of carol's pending route.
+// list answers 200 with entries under a used invite (an open one when
+// there are none), after checking that the request is the body-less
+// signed GET of carol's pending route.
 func list(t *testing.T, entries ...serverclient.PendingCredential) func(http.ResponseWriter, *http.Request, []byte) {
+	state := serverclient.InviteUsed
+	if len(entries) == 0 {
+		state = serverclient.InviteOpen
+	}
+	return answerPending(t, serverclient.PendingInvite{State: state, ExpiresAt: "2026-10-22T12:00:00+02:00"}, entries...)
+}
+
+// answerPending is list with the invite state given.
+func answerPending(t *testing.T, inv serverclient.PendingInvite, entries ...serverclient.PendingCredential) func(http.ResponseWriter, *http.Request, []byte) {
 	return func(w http.ResponseWriter, r *http.Request, body []byte) {
 		if r.Method != http.MethodGet || r.URL.Path != serverclient.AdminPendingPath("carol") || len(body) != 0 {
 			t.Errorf("request %s %s with %d body bytes, want a body-less GET %s", r.Method, r.URL.Path, len(body), serverclient.AdminPendingPath("carol"))
 		}
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(append([]serverclient.PendingCredential{}, entries...))
+		_ = json.NewEncoder(w).Encode(serverclient.PendingAnswer{Invite: inv, Credentials: append([]serverclient.PendingCredential{}, entries...)})
 	}
 }
 
@@ -76,7 +86,25 @@ func TestUserPending(t *testing.T) {
 	t.Run("none_registered_yet", func(t *testing.T) {
 		newUserAddEnv(t, agentCustody, list(t))
 		code, stdout, stderr := run(t, "user", "pending", "carol")
-		if code != 0 || !strings.Contains(stdout, "carol has an open invite but has not registered a passkey yet") {
+		if code != 0 || stdout != "carol has an open invite, valid until 2026-10-22T10:00:00Z, but has not registered a passkey yet.\n" {
+			t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+	})
+	// Pre-merge review: an expired invite is never described as open, and
+	// the advice to reinvite comes last.
+	t.Run("invite_expired", func(t *testing.T) {
+		newUserAddEnv(t, agentCustody, answerPending(t, serverclient.PendingInvite{State: serverclient.InviteExpired, ExpiresAt: "2026-10-22T10:00:00Z"}))
+		code, stdout, stderr := run(t, "user", "pending", "carol")
+		if code != 0 || strings.Contains(stdout, "open") || !strings.HasPrefix(stdout, "The invite for carol expired at 2026-10-22T10:00:00Z") ||
+			!strings.HasSuffix(stdout, "Run keyroster user add carol --reinvite to send a new invite.\n") {
+			t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+	})
+	t.Run("invite_used_none_pending", func(t *testing.T) {
+		newUserAddEnv(t, agentCustody, answerPending(t, serverclient.PendingInvite{State: serverclient.InviteUsed, ExpiresAt: "2026-10-22T10:00:00Z"}))
+		code, stdout, stderr := run(t, "user", "pending", "carol")
+		if code != 0 || strings.Contains(stdout, "open") || !strings.HasPrefix(stdout, "The invite for carol was used") ||
+			!strings.HasSuffix(stdout, "run keyroster user add carol --reinvite.\n") {
 			t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 	})
@@ -138,6 +166,10 @@ func TestUserPendingPeerText(t *testing.T) {
 		{"padded_id", list(t, edit(func(c *serverclient.PendingCredential) { c.ID = attackerAdvice })), bad},
 		{"padded_time", list(t, edit(func(c *serverclient.PendingCredential) { c.RegisteredAt = "2026-10-21T12:00:00Z" + paddedAdvice })), bad},
 		{"backed_up_not_eligible", list(t, edit(func(c *serverclient.PendingCredential) { c.BackupEligible, c.BackedUp = false, true })), bad},
+		{"padded_invite_state", answerPending(t, serverclient.PendingInvite{State: paddedAdvice, ExpiresAt: "2026-10-22T10:00:00Z"}), bad},
+		{"unknown_invite_state", answerPending(t, serverclient.PendingInvite{State: "Open", ExpiresAt: "2026-10-22T10:00:00Z"}), bad},
+		{"padded_invite_expiry", answerPending(t, serverclient.PendingInvite{State: serverclient.InviteExpired, ExpiresAt: "2026-10-22T10:00:00Z" + paddedAdvice}), bad},
+		{"missing_invite", answerPending(t, serverclient.PendingInvite{}), bad},
 		{"padded_404", answer(http.StatusNotFound, mustJSON(t, serverclient.APIError{Error: paddedAdvice})), nil},
 		// The test server is not at a policy origin, so the diagnosis's
 		// advice is the CLI's last word (adminOriginDiagnosis).

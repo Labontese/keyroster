@@ -327,11 +327,14 @@ func parseInterspersed(fset *flag.FlagSet, args []string) ([]string, error) {
 // the pending account NAME registered through its invite, and prints its
 // fingerprint, algorithm, backup flags and registration time, so the admin
 // can compare the fingerprint with the one the user read off the
-// registration page. Every value printed is re-derived from validated
-// data: the fingerprint is computed from the SPKI after
-// webauthn.ParsePublicKey accepted it for its algorithm, never taken from
-// the server's text (T-02-93). A pending passkey grants nothing until an
-// admin-signed directory binds it (02-09).
+// registration page. With no passkey yet it says whether the invite is
+// open (until when), expired or used, and advises a reinvite for the last
+// two. Every value printed is re-derived from validated data: the
+// fingerprint is computed from the SPKI after webauthn.ParsePublicKey
+// accepted it for its algorithm, never taken from the server's text, and
+// the invite state is one of three known words with an RFC 3339 time
+// (T-02-93). A pending passkey grants nothing until an admin-signed
+// directory binds it (02-09).
 func runUserPending(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("user pending", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -374,7 +377,7 @@ func runUserPending(ctx context.Context, args []string, stdout, stderr io.Writer
 	if err != nil {
 		return err
 	}
-	var resp []serverclient.PendingCredential
+	var resp serverclient.PendingAnswer
 	err = client.AdminJSON(ctx, http.MethodGet, serverclient.AdminPendingPath(name), nil, &resp, signer)
 	if err != nil {
 		if errors.Is(err, serverclient.ErrAdminAuth) {
@@ -390,15 +393,19 @@ func runUserPending(ctx context.Context, args []string, stdout, stderr io.Writer
 		}
 		return err
 	}
-	creds := make([]pendingCredential, 0, len(resp))
-	for _, c := range resp {
+	inv, err := checkPendingInvite(resp.Invite)
+	if err != nil {
+		return err
+	}
+	creds := make([]pendingCredential, 0, len(resp.Credentials))
+	for _, c := range resp.Credentials {
 		pc, err := checkPendingCredential(c)
 		if err != nil {
 			return err
 		}
 		creds = append(creds, pc)
 	}
-	_, err = io.WriteString(stdout, pendingText(name, creds))
+	_, err = io.WriteString(stdout, pendingText(name, inv, creds))
 	return err
 }
 
@@ -459,10 +466,43 @@ func checkPendingCredential(c serverclient.PendingCredential) (pendingCredential
 	return pendingCredential{fingerprint: fp, alg: alg, backupEligible: c.BackupEligible, backedUp: c.BackedUp, registered: reg.UTC()}, nil
 }
 
-// pendingText is what user pending prints.
-func pendingText(name string, creds []pendingCredential) string {
+// pendingInvite is the invite state user pending prints, validated by
+// checkPendingInvite.
+type pendingInvite struct {
+	state   string // serverclient.InviteOpen, InviteExpired or InviteUsed
+	expires time.Time
+}
+
+// checkPendingInvite validates the invite state of the server's pending
+// answer: one of the three states and an RFC 3339 time. It never repeats
+// the server's text.
+func checkPendingInvite(i serverclient.PendingInvite) (pendingInvite, error) {
+	switch i.State {
+	case serverclient.InviteOpen, serverclient.InviteExpired, serverclient.InviteUsed:
+	default:
+		return pendingInvite{}, errBadPendingAnswer
+	}
+	exp, err := time.Parse(time.RFC3339, i.ExpiresAt)
+	if err != nil {
+		return pendingInvite{}, errBadPendingAnswer
+	}
+	return pendingInvite{state: i.State, expires: exp.UTC()}, nil
+}
+
+// pendingText is what user pending prints: with no passkey yet, the
+// invite's state in the CLI's own words, and the advice last.
+func pendingText(name string, inv pendingInvite, creds []pendingCredential) string {
 	if len(creds) == 0 {
-		return fmt.Sprintf("%s has an open invite but has not registered a passkey yet.\n", name)
+		at := inv.expires.Format(time.RFC3339)
+		switch inv.state {
+		case serverclient.InviteExpired:
+			return fmt.Sprintf("The invite for %s expired at %s, and no passkey was registered with it. "+
+				"Run keyroster user add %s --reinvite to send a new invite.\n", name, at, name)
+		case serverclient.InviteUsed:
+			return fmt.Sprintf("The invite for %s was used, and no passkey is pending approval. "+
+				"To let %s register a passkey again, run keyroster user add %s --reinvite.\n", name, name, name)
+		}
+		return fmt.Sprintf("%s has an open invite, valid until %s, but has not registered a passkey yet.\n", name, at)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Pending passkey for %s, not approved yet:\n", name)
