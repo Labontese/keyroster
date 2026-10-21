@@ -310,3 +310,89 @@ func TestBindPendingCredential(t *testing.T) {
 		}
 	})
 }
+
+// TestPendingState (pre-merge review): PendingState reads the invite and
+// the credentials in one transaction, so a write that commits while it
+// reads is seen whole or not at all. The hook starts the write between
+// the two reads and returns once the write has either committed (the
+// reads are not isolated) or is waiting for the one connection the
+// snapshot holds. Both are events, not timings.
+func TestPendingState(t *testing.T) {
+	ctx := context.Background()
+	cred := PendingCredential{ID: "first", Alg: -7, SPKI: []byte{0x30, 0x01}, BackupEligible: true}
+	oldExpires, newExpires := tNow.Add(24*time.Hour), tNow.Add(48*time.Hour)
+	for _, tc := range []struct {
+		name string
+		// registered: carol's invite registered cred before the read.
+		registered bool
+		write      func(d *DB, u PendingUser) error
+		// What PendingState must see during the write (the state before
+		// it) and after it.
+		beforeUsed, afterUsed       bool
+		beforeExpires, afterExpires time.Time
+	}{
+		// The finding's scenario: admin B's reinvite lands while admin A
+		// reads a used invite with its credential.
+		{"reinvite_during_read", true, func(d *DB, _ PendingUser) error {
+			return d.ReplaceInvite(ctx, "carol", bytes.Repeat([]byte{7}, 32), newExpires.UnixMicro())
+		}, true, false, oldExpires, newExpires},
+		{"registration_during_read", false, func(d *DB, u PendingUser) error {
+			return d.BindPendingCredential(ctx, u.InviteHash, tNow.UnixMicro(), cred)
+		}, false, true, oldExpires, oldExpires},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := openTemp(t)
+			u := pending("carol", 1)
+			if err := d.CreatePendingUser(ctx, u); err != nil {
+				t.Fatal(err)
+			}
+			if tc.registered {
+				if err := d.BindPendingCredential(ctx, u.InviteHash, tNow.UnixMicro(), cred); err != nil {
+					t.Fatal(err)
+				}
+			}
+			check := func(what string, st *PendingState, used bool, expires time.Time) {
+				t.Helper()
+				if st.User.Name != "carol" || st.InviteUsed != used || len(st.Credentials) != boolInt(used) || !st.User.InviteExpires.Equal(expires) {
+					t.Fatalf("%s: used %v with %d credentials, expires %s; want used %v with %d, expires %s",
+						what, st.InviteUsed, len(st.Credentials), st.User.InviteExpires, used, boolInt(used), expires)
+				}
+			}
+			written := make(chan error, 1)
+			ran := false
+			d.afterPendingInvite = func() {
+				ran = true
+				waits := d.db.Stats().WaitCount
+				go func() { written <- tc.write(d, u) }()
+				deadline := time.Now().Add(10 * time.Second)
+				for len(written) == 0 && d.db.Stats().WaitCount == waits {
+					if time.Now().After(deadline) {
+						t.Error("the write neither committed nor waited for the connection")
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			st, err := d.PendingState(ctx, "carol")
+			d.afterPendingInvite = nil
+			if err != nil || !ran {
+				t.Fatalf("PendingState = %v (hook ran: %v)", err, ran)
+			}
+			if err := <-written; err != nil {
+				t.Fatalf("the write during the read = %v", err)
+			}
+			check("read during the write", st, tc.beforeUsed, tc.beforeExpires)
+			after, err := d.PendingState(ctx, "carol")
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("read after the write", after, tc.afterUsed, tc.afterExpires)
+		})
+	}
+	t.Run("not_found", func(t *testing.T) {
+		d, _ := openTemp(t)
+		if _, err := d.PendingState(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("PendingState(nobody) = %v, want ErrNotFound", err)
+		}
+	})
+}

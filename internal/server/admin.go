@@ -287,7 +287,10 @@ func (s *Server) handlePendingCredentials(w http.ResponseWriter, r *http.Request
 		return
 	}
 	ctx := r.Context()
-	u, err := s.db.PendingUser(ctx, name)
+	// One snapshot: a reinvite or a registration committing between
+	// separate reads would give an answer no state ever held (02-08
+	// pre-merge review).
+	st, err := s.db.PendingState(ctx, name)
 	if err != nil {
 		if errors.Is(err, serverdb.ErrNotFound) {
 			s.writeAdminError(w, r, http.StatusNotFound, serverclient.AdminErrNotPending)
@@ -297,33 +300,21 @@ func (s *Server) handlePendingCredentials(w http.ResponseWriter, r *http.Request
 		s.writeAdminError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	used, err := s.db.InviteUsed(ctx, name)
-	if err != nil {
-		s.log.Error("read pending account", "err", err)
-		s.writeAdminError(w, r, http.StatusInternalServerError, "internal error")
-		return
-	}
-	invite := serverclient.PendingInvite{State: serverclient.InviteOpen, ExpiresAt: u.InviteExpires.UTC().Format(time.RFC3339)}
+	invite := serverclient.PendingInvite{State: serverclient.InviteOpen, ExpiresAt: st.User.InviteExpires.UTC().Format(time.RFC3339)}
 	switch {
-	case used:
+	case st.InviteUsed:
 		invite.State = serverclient.InviteUsed
-	case u.InviteExpires.UnixMicro() <= s.clock().UnixMicro():
+	case st.User.InviteExpires.UnixMicro() <= s.clock().UnixMicro():
 		// PendingUserByInvite's invite_expires_us > now, negated.
 		invite.State = serverclient.InviteExpired
-	}
-	creds, err := s.db.PendingCredentials(ctx, name)
-	if err != nil {
-		s.log.Error("read pending credentials", "name", name, "err", err)
-		s.writeAdminError(w, r, http.StatusInternalServerError, "internal error")
-		return
 	}
 	v, err := s.currentStatus(ctx)
 	if err != nil {
 		s.signerUnavailable(w, false)
 		return
 	}
-	out := make([]serverclient.PendingCredential, 0, len(creds))
-	for _, c := range creds {
+	out := make([]serverclient.PendingCredential, 0, len(st.Credentials))
+	for _, c := range st.Credentials {
 		out = append(out, serverclient.PendingCredential{
 			ID:             c.ID,
 			Alg:            c.Alg,

@@ -48,6 +48,10 @@ const MaxOpenSessions = 16
 // DB is an open server state database.
 type DB struct {
 	db *sql.DB
+	// afterPendingInvite, when a test sets it, runs inside PendingState
+	// between the read of the invite and the read of the credentials. It
+	// is nil outside tests.
+	afterPendingInvite func()
 }
 
 // dsnParams: WAL with synchronous=FULL, a 5 s busy timeout, and BEGIN
@@ -353,7 +357,16 @@ func (d *DB) PendingCredentialExists(ctx context.Context, id string) (bool, erro
 // PendingCredentials returns the pending credentials of the account name,
 // oldest first (at most one under the one-per-user index).
 func (d *DB) PendingCredentials(ctx context.Context, name string) ([]PendingCredential, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT id, user_name, alg, spki, backup_eligible, backed_up, registered_us FROM pending_credentials WHERE user_name = ? ORDER BY registered_us, id`, name)
+	return pendingCredentials(ctx, d.db, name)
+}
+
+// queryer is the read method *sql.DB and *sql.Tx share.
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func pendingCredentials(ctx context.Context, q queryer, name string) ([]PendingCredential, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, user_name, alg, spki, backup_eligible, backed_up, registered_us FROM pending_credentials WHERE user_name = ? ORDER BY registered_us, id`, name)
 	if err != nil {
 		return nil, fmt.Errorf("serverdb: read pending credentials: %w", err)
 	}
@@ -390,6 +403,56 @@ func (d *DB) InviteUsed(ctx context.Context, name string) (bool, error) {
 		return false, fmt.Errorf("serverdb: read pending account: %w", err)
 	}
 	return used.Valid, nil
+}
+
+// PendingState is one consistent read of a pending account: the account
+// with its current invite, whether that invite has registered a
+// credential, and the account's pending credentials.
+type PendingState struct {
+	User        PendingUser
+	InviteUsed  bool
+	Credentials []PendingCredential
+}
+
+// PendingState reads the pending account name, whether its current
+// invite is used and its pending credentials in one transaction, so a
+// write that commits meanwhile (a reinvite, a registration) is seen whole
+// or not at all. BindPendingCredential and ReplaceInvite each change the
+// invite and the credential together, so a used invite comes with its
+// credential and an unused one with none (02-08 pre-merge review). No
+// pending account returns ErrNotFound.
+func (d *DB) PendingState(ctx context.Context, name string) (*PendingState, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var (
+		st                 PendingState
+		expires, createdUS int64
+		used               sql.NullInt64
+	)
+	err = tx.QueryRowContext(ctx, `SELECT name, user_handle, invite_hash, invite_expires_us, created_us, created_by, invite_used_us FROM pending_users WHERE name = ?`, name).
+		Scan(&st.User.Name, &st.User.UserHandle, &st.User.InviteHash, &expires, &createdUS, &st.User.CreatedBy, &used)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("serverdb: read pending account: %w", err)
+	}
+	st.User.InviteExpires = time.UnixMicro(expires).UTC()
+	st.User.Created = time.UnixMicro(createdUS).UTC()
+	st.InviteUsed = used.Valid
+	if d.afterPendingInvite != nil {
+		d.afterPendingInvite()
+	}
+	if st.Credentials, err = pendingCredentials(ctx, tx, name); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return &st, nil
 }
 
 func boolInt(b bool) int {
