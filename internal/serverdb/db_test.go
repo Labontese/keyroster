@@ -222,3 +222,91 @@ func TestUseNonce(t *testing.T) {
 		}
 	})
 }
+
+// TestBindPendingCredential (pre-merge review, T-02-97): the conditional
+// UPDATE and the one-per-user index make an invite register exactly one
+// credential, deterministically, without the handler's earlier invite
+// lookup in front of them.
+func TestBindPendingCredential(t *testing.T) {
+	ctx := context.Background()
+	cred := func(id string) PendingCredential {
+		return PendingCredential{ID: id, Alg: -7, SPKI: []byte{0x30, 0x01}, BackupEligible: true}
+	}
+	usedAt := func(t *testing.T, d *DB, name string) any {
+		t.Helper()
+		var v any
+		if err := d.db.QueryRow(`SELECT invite_used_us FROM pending_users WHERE name = ?`, name).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	setup := func(t *testing.T) (*DB, PendingUser) {
+		t.Helper()
+		d, _ := openTemp(t)
+		u := pending("alice", 1)
+		if err := d.CreatePendingUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+		return d, u
+	}
+	t.Run("second_bind_on_one_invite_refused", func(t *testing.T) {
+		d, u := setup(t)
+		if err := d.BindPendingCredential(ctx, u.InviteHash, tNow.UnixMicro(), cred("first")); err != nil {
+			t.Fatal(err)
+		}
+		before := usedAt(t, d, "alice")
+		err := d.BindPendingCredential(ctx, u.InviteHash, tNow.Add(time.Second).UnixMicro(), cred("second"))
+		if !errors.Is(err, ErrInviteNotValid) || count(t, d, "pending_credentials") != 1 || usedAt(t, d, "alice") != before {
+			t.Fatalf("second bind = %v, %d credentials, used %v (was %v); want ErrInviteNotValid, 1 and unchanged",
+				err, count(t, d, "pending_credentials"), usedAt(t, d, "alice"), before)
+		}
+	})
+	t.Run("replaced_invite_refused", func(t *testing.T) {
+		d, u := setup(t)
+		if err := d.ReplaceInvite(ctx, "alice", bytes.Repeat([]byte{7}, 32), tNow.Add(48*time.Hour).UnixMicro()); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.BindPendingCredential(ctx, u.InviteHash, tNow.UnixMicro(), cred("x")); !errors.Is(err, ErrInviteNotValid) || count(t, d, "pending_credentials") != 0 {
+			t.Fatalf("bind on the replaced invite = %v, want ErrInviteNotValid and nothing written", err)
+		}
+	})
+	t.Run("at_expiry_refused", func(t *testing.T) {
+		d, u := setup(t)
+		if err := d.BindPendingCredential(ctx, u.InviteHash, u.InviteExpires.UnixMicro(), cred("x")); !errors.Is(err, ErrInviteNotValid) || usedAt(t, d, "alice") != nil {
+			t.Fatalf("bind at the expiry = %v (used %v), want ErrInviteNotValid and the invite unused", err, usedAt(t, d, "alice"))
+		}
+		if err := d.BindPendingCredential(ctx, u.InviteHash, u.InviteExpires.UnixMicro()-1, cred("x")); err != nil {
+			t.Fatalf("bind a microsecond before the expiry = %v", err)
+		}
+	})
+	t.Run("credential_id_of_another_user_refused", func(t *testing.T) {
+		d, u := setup(t)
+		b := pending("bob", 2)
+		if err := d.CreatePendingUser(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.BindPendingCredential(ctx, u.InviteHash, tNow.UnixMicro(), cred("same")); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.BindPendingCredential(ctx, b.InviteHash, tNow.UnixMicro(), cred("same")); !errors.Is(err, ErrDuplicateCredential) || usedAt(t, d, "bob") != nil {
+			t.Fatalf("bob binding alice's credential ID = %v (used %v), want ErrDuplicateCredential and bob's invite unused", err, usedAt(t, d, "bob"))
+		}
+	})
+	t.Run("one_credential_per_user", func(t *testing.T) {
+		d, u := setup(t)
+		if err := d.BindPendingCredential(ctx, u.InviteHash, tNow.UnixMicro(), cred("first")); err != nil {
+			t.Fatal(err)
+		}
+		// Only the unique index stands in the way: the invite is made
+		// unused again without dropping the credential, which ReplaceInvite
+		// would do.
+		if _, err := d.db.Exec(`UPDATE pending_users SET invite_used_us = NULL WHERE name = 'alice'`); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.BindPendingCredential(ctx, u.InviteHash, tNow.UnixMicro(), cred("second")); !errors.Is(err, ErrDuplicateCredential) ||
+			count(t, d, "pending_credentials") != 1 || usedAt(t, d, "alice") != nil {
+			t.Fatalf("second credential for alice = %v, %d credentials, used %v; want ErrDuplicateCredential, 1 and the UPDATE rolled back",
+				err, count(t, d, "pending_credentials"), usedAt(t, d, "alice"))
+		}
+	})
+}
