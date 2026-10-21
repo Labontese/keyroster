@@ -703,13 +703,13 @@ func runUserSetStatus(ctx context.Context, verb, status string, args []string, s
 // repeats the server's text.
 var errBadUsersAnswer = errors.New("the server's user list does not check out, so nothing was printed")
 
-// runUserList is keyroster user list [--admin-key FP]: the installed
-// directory's users with their credentials, and the server's pending
-// accounts, as the server reports them. Every field printed is validated
-// first (names by the directory's grammar, statuses and algorithms from
-// closed sets, fingerprints by their exact form, times as RFC 3339), so no
-// text the server chose reaches the admin; keyroster directory show
-// prints the directory after verifying its admin signatures.
+// runUserList is keyroster user list [--admin-key FP]: the users of the
+// installed directory, verified against the admins of the root-verified
+// policy (fetchVerifiedDirectory), with the fingerprints the CLI computes
+// from their keys, and the server's pending accounts from GET
+// /api/v1/admin/users. Every pending field printed is validated first
+// (names by the directory's grammar, times as RFC 3339, the used-invite
+// invariant), so no text the server chose reaches the admin (T-02-93).
 func runUserList(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("user list", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -722,11 +722,15 @@ func runUserList(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return err
 	}
 	defer s.close()
+	vd, err := fetchVerifiedDirectory(ctx, s)
+	if err != nil {
+		return err
+	}
 	var ans serverclient.UsersAnswer
 	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminUsersPath, nil, &ans, s.signer); err != nil {
-		return s.diagnose(ctx, err)
+		return adminError(err, s, vd.Policy)
 	}
-	text, err := usersText(ans)
+	text, err := usersText(vd, ans)
 	if err != nil {
 		return err
 	}
@@ -734,28 +738,26 @@ func runUserList(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	return err
 }
 
-// usersText validates a user list and formats it.
-func usersText(ans serverclient.UsersAnswer) (string, error) {
+// usersText formats the users of the verified directory vd, with the
+// fingerprints the CLI computes from their keys, and the server's pending
+// accounts, after validating every field of those (ans.Users, the
+// server's own view of the directory, is not printed: a fingerprint there
+// would be text the server chose).
+func usersText(vd *verifiedDirectory, ans serverclient.UsersAnswer) (string, error) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Directory version %d, as the server reports it (keyroster directory show verifies the admin-signed directory)\n", ans.DirectoryVersion)
-	if len(ans.Users) == 0 {
-		b.WriteString("No users in the directory.\n")
-	}
-	for _, u := range ans.Users {
-		if !directory.ValidUserName(u.Name) || (u.Status != directory.StatusActive && u.Status != directory.StatusDisabled) {
-			return "", errBadUsersAnswer
-		}
-		fmt.Fprintf(&b, "  %-24s %s\n", u.Name, u.Status)
-		for _, c := range u.Credentials {
-			if !validFingerprint(c.Fingerprint) {
-				return "", errBadUsersAnswer
+	if vd.Version == 0 {
+		b.WriteString("No directory installed, so no user can sign in yet.\n")
+	} else {
+		fmt.Fprintf(&b, "Directory version %d, verified against the root-signed policy:\n", vd.Version)
+		for _, u := range vd.Dir.Users {
+			fmt.Fprintf(&b, "  %-24s %s\n", u.Name, u.Status)
+			for _, c := range u.Credentials {
+				spki, err := base64.StdEncoding.DecodeString(c.SPKI) // Parse validated it
+				if err != nil {
+					return "", err
+				}
+				fmt.Fprintf(&b, "    passkey %s %s synced %s\n", webauthn.Fingerprint(spki), directory.AlgName(c.Alg), yesNo(c.BackedUp))
 			}
-			switch c.Alg {
-			case webauthn.AlgEdDSA, webauthn.AlgES256, webauthn.AlgRS256:
-			default:
-				return "", errBadUsersAnswer
-			}
-			fmt.Fprintf(&b, "    passkey %s %s synced %s\n", c.Fingerprint, directory.AlgName(c.Alg), yesNo(c.Synced))
 		}
 	}
 	if len(ans.Pending) == 0 {
