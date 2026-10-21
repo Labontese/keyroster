@@ -4,10 +4,10 @@ current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
 stopped_at: 02-07 Tasks 1-2 done on p02/07-admin-api; PR awaiting owner merge gate (Task 3)
-last_updated: "2026-10-20T11:05:56.924Z"
+last_updated: "2026-10-21T04:44:28.754Z"
 last_activity: 2026-10-20
 last_activity_desc: 02-07 admin-api executed; PR awaiting merge gate
-state_head: 1b61c5bfd72f5dcaad023d155cae5509c49677c4
+state_head: 2fd917ff6f94f141ec35a0b8ed71eee6602a6272
 progress:
   total_phases: 6
   completed_phases: 0
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 Phase: 02 (Passkey Login MVP) — EXECUTING
 Plan: 7 of 14
 Status: 02-07 awaiting the owner merge gate (p02/07-admin-api); 02-01 to 02-06 are merged
-Last activity: 2026-10-20 — 02-07 admin-api executed (SSHSIG admin API, pending accounts with hashed invites, invite page, rate limits, keyroster user add)
+Last activity: 2026-10-21 - Completed quick task 261021-8av: Bump the Go toolchain pin to go1.27.3 for GO-2026-6809 (crypto/x509), which fails govulncheck in CI
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -214,6 +214,7 @@ Recent decisions affecting current work:
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261006-ixz | Fix flaky signer freshness-boundary tests with a deterministic test clock | 2026-10-06 | 66fd3c3 | [261006-ixz-fix-flaky-signer-test-created-301s-futur](./quick/261006-ixz-fix-flaky-signer-test-created-301s-futur/) |
+| 261021-8av | Bump the Go toolchain pin to go1.27.3 for GO-2026-6809 (crypto/x509), which fails govulncheck in CI | 2026-10-21 | 2fd917f | [261021-8av-bump-the-go-toolchain-pin-to-go1-27-3-fo](./quick/261021-8av-bump-the-go-toolchain-pin-to-go1-27-3-fo/) |
 
 ## Deferred Items
 
