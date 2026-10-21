@@ -534,34 +534,53 @@ func TestValidateLinear(t *testing.T) {
 	}
 }
 
-// TestAuthorizeOneUser (T-02-12): Authorize, which the signer runs under
-// its lock for every login, computes the roles of the one user it
-// authorizes, not those of every user. On the large directory it takes
-// less than a twentieth of Validate, which computes every user's roles
-// (computing all of them per login took about half of Validate). Skipped
-// under the race detector, like TestValidateLinear.
+// TestAuthorizeOneUser (T-02-12, R1): Authorize, which the signer runs
+// under its lock for every login, computes the roles of the one user it
+// authorizes, not those of every user. On the large directory its fastest
+// run takes less than a twentieth of Validate's fastest run; Validate
+// computes every user's roles, and computing all of them per login took
+// about a third of Validate (22-33 ms against 71-88 ms at b4b3d02). Both
+// calls are timed as the fastest of five interleaved rounds. The fastest
+// Authorize discards a sample hit by a scheduler or GC stall (one 9.5 ms
+// sample failed cli-windows); the fastest Validate keeps one stalled
+// Validate from loosening the bound enough to let the all-users
+// computation pass. Skipped under the race detector, like
+// TestValidateLinear.
 func TestAuthorizeOneUser(t *testing.T) {
 	if raceEnabled {
 		t.Skip("timing bound not meaningful under -race")
 	}
+	const rounds = 5
 	d := largeDirectory(20000)
-	start := time.Now()
-	if err := d.Validate(); err != nil {
-		t.Fatalf("Validate = %v, want nil", err)
-	}
-	validate := time.Since(start)
-	last := &d.Users[len(d.Users)-1]
+	// Authorize runs on a copy whose last user is active: Validate, which
+	// runs on d, refuses an active user without a credential.
+	authz := *d
+	authz.Users = slices.Clone(d.Users)
+	last := &authz.Users[len(authz.Users)-1]
 	last.Status = StatusActive // Authorize does not look at credentials
-	start = time.Now()
-	g, err := d.Authorize(last.Name, nil)
-	took := time.Since(start)
-	if err != nil || len(g.Roles) != MaxRolesPerUser {
-		t.Fatalf("Authorize(%s) = %+v, %v; want all %d roles", last.Name, g, err, MaxRolesPerUser)
+	validates := make([]time.Duration, 0, rounds)
+	authorizes := make([]time.Duration, 0, rounds)
+	for range rounds {
+		start := time.Now()
+		if err := d.Validate(); err != nil {
+			t.Fatalf("Validate = %v, want nil", err)
+		}
+		validates = append(validates, time.Since(start))
+		start = time.Now()
+		g, err := authz.Authorize(last.Name, nil)
+		took := time.Since(start)
+		if err != nil || len(g.Roles) != MaxRolesPerUser {
+			t.Fatalf("Authorize(%s) = %+v, %v; want all %d roles", last.Name, g, err, MaxRolesPerUser)
+		}
+		authorizes = append(authorizes, took)
 	}
-	if took > validate/20 {
-		t.Fatalf("Authorize of one user took %v, Validate of %d users %v: want less than a twentieth", took, len(d.Users), validate)
+	authorize, validate := slices.Min(authorizes), slices.Min(validates)
+	if authorize > validate/20 {
+		t.Fatalf("Authorize of one user took at fastest %v (runs %v), Validate of %d users at fastest %v (runs %v): want less than a twentieth",
+			authorize, authorizes, len(d.Users), validate, validates)
 	}
-	t.Logf("Authorize %v, Validate %v", took, validate)
+	t.Logf("Authorize at fastest %v (runs %v), Validate of %d users at fastest %v (runs %v)",
+		authorize, authorizes, len(d.Users), validate, validates)
 }
 
 // TestUserRolesMatchesRoleGrants: Authorize's one-user computation
