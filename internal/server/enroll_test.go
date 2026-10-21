@@ -427,13 +427,10 @@ func TestEnrollRecordsCredential(t *testing.T) {
 	t.Run("pending_id_is_canonical", func(t *testing.T) {
 		e := newEnrollEnv(t, Limits{})
 		token := e.invite(t, "carol", false)
-		// 33 bytes ending in 0xfb..: their unpadded base64url text uses
-		// '-' and '_', which the padded and the standard-alphabet forms a
-		// client might send do not.
-		raw := make([]byte, 33)
-		for i := range raw {
-			raw[i] = byte(0xfb + i)
-		}
+		// 33 bytes whose unpadded base64url text is "--__" repeated: it
+		// uses '-' and '_', which the standard-alphabet form a client might
+		// send does not.
+		raw := bytes.Repeat([]byte{0xfb, 0xef, 0xff}, 11)
 		if rec := e.register(t, token, newAuthenticator(t, webauthn.AlgES256), 0, servertest.WithCredentialID(raw)); rec.Code != http.StatusOK {
 			t.Fatalf("finish = %d %s", rec.Code, rec.Body)
 		}
