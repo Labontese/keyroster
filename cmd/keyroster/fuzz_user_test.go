@@ -1,9 +1,14 @@
 package main
 
 import (
+	"encoding/base64"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/webauthn"
 )
 
 // inviteURLRE is everything parseInviteURL may return: an https origin
@@ -39,6 +44,35 @@ func FuzzParseInviteURL(f *testing.F) {
 		againOrigin, again, err := parseInviteURL(out)
 		if err != nil || again != out || againOrigin != origin {
 			t.Fatalf("parseInviteURL(%q) = %q, %q, %v; want %q, %q", out, againOrigin, again, err, origin, out)
+		}
+	})
+}
+
+// FuzzCheckPendingCredential: the pending list comes from the server, so
+// whatever checkPendingCredential accepts must print only values the CLI
+// re-derived: a fingerprint computed from the SPKI, one of three algorithm
+// names and a UTC time.
+func FuzzCheckPendingCredential(f *testing.F) {
+	f.Add("AQIDBAUGBwgJCgsMDQ4PEA", int64(-8), "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+		"SHA256:x", true, false, "2026-10-21T12:00:00Z")
+	f.Add("", int64(-7), "", "", false, true, "")
+	f.Fuzz(func(t *testing.T, id string, alg int64, spki, fp string, be, bs bool, at string) {
+		c := serverclient.PendingCredential{ID: id, Alg: alg, SPKI: spki, Fingerprint: fp, BackupEligible: be, BackedUp: bs, RegisteredAt: at}
+		got, err := checkPendingCredential(c)
+		if err != nil {
+			return
+		}
+		der, derr := base64.StdEncoding.Strict().DecodeString(spki)
+		if derr != nil || got.fingerprint != webauthn.Fingerprint(der) || got.fingerprint != fp {
+			t.Fatalf("accepted fingerprint %q is not the SPKI's", got.fingerprint)
+		}
+		switch got.alg {
+		case "EdDSA", "ES256", "RS256":
+		default:
+			t.Fatalf("accepted algorithm name %q", got.alg)
+		}
+		if got.registered.Location() != time.UTC || (got.backedUp && !got.backupEligible) {
+			t.Fatalf("accepted %+v", got)
 		}
 	})
 }
