@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/webauthn"
 	"github.com/Labontese/keyroster/internal/webauthn/webauthntest"
@@ -60,6 +61,16 @@ func TestUserPending(t *testing.T) {
 		}
 		if len(e.requests) != 1 {
 			t.Fatalf("%d admin requests, want 1", len(e.requests))
+		}
+	})
+	// KEY-06: the evaluation-only banner reaches the admin on this
+	// server-talking command too, exactly once.
+	t.Run("software_custody_banner_once", func(t *testing.T) {
+		entry, _ := pendingEntry(t, webauthn.AlgES256)
+		newUserAddEnv(t, "user=software, host=software, machine=software, ops=software, log=software", list(t, entry))
+		code, _, stderr := run(t, "user", "pending", "carol")
+		if code != 0 || strings.Count(stderr, custodytext.SoftwareCABanner([]string{"user", "host", "machine", "ops", "log"})) != 1 {
+			t.Fatalf("exit %d, stderr:\n%s\nwant the evaluation-only banner once", code, stderr)
 		}
 	})
 	t.Run("none_registered_yet", func(t *testing.T) {
