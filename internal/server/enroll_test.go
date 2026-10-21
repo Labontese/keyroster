@@ -284,6 +284,16 @@ func TestEnrollRefusals(t *testing.T) {
 		{"unknown_challenge_refused", http.StatusBadRequest, reasonSessionNotFound, func(t *testing.T, e *enrollEnv, token string) *httptest.ResponseRecorder {
 			return e.register(t, token, es256(t), 0, servertest.WithChallenge(base64.RawURLEncoding.EncodeToString(make([]byte, 32))))
 		}},
+		{"session_single_use_after_failed_finish", http.StatusBadRequest, reasonSessionNotFound, func(t *testing.T, e *enrollEnv, token string) *httptest.ResponseRecorder {
+			// A finish that fails verification has still used its
+			// session: the same ceremony cannot be tried again.
+			a := es256(t)
+			options := e.mustBegin(t, token)
+			if rec := e.finish(token, finishBody(t, a, options, servertest.FlagUP|servertest.FlagAT)); rec.Code != http.StatusBadRequest {
+				t.Fatalf("first finish = %d %s, want 400", rec.Code, rec.Body)
+			}
+			return e.finish(token, finishBody(t, a, options, 0))
+		}},
 		{"session_expired_refused", http.StatusBadRequest, reasonSessionNotFound, func(t *testing.T, e *enrollEnv, token string) *httptest.ResponseRecorder {
 			options := e.mustBegin(t, token)
 			e.clock.set(e.clock.Now().Add(registrationTTL))
@@ -833,14 +843,14 @@ func TestEnrollAttestationFormats(t *testing.T) {
 			options := e.mustBegin(t, token)
 			before := attestationCalls.Load()
 			rec := e.finish(token, finishBody(t, a, options, 0, servertest.WithAttestation(tc.att(a))))
+			if n := attestationCalls.Load() - before; n != 0 {
+				t.Fatalf("go-webauthn ran an attestation verifier %d times", n)
+			}
 			if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != `{"error":"unsupported attestation"}` {
 				t.Fatalf("= %d %s, want 400 unsupported attestation\nlog:\n%s", rec.Code, rec.Body, e.log)
 			}
 			if got := lastReason(t, e.log); got != reasonUnsupportedAttestation {
 				t.Fatalf("logged reason %q, want %q", got, reasonUnsupportedAttestation)
-			}
-			if n := attestationCalls.Load() - before; n != 0 {
-				t.Fatalf("go-webauthn ran an attestation verifier %d times", n)
 			}
 			e.requireUnused(t, "carol")
 			// The session was not consumed: the same ceremony finishes
@@ -848,6 +858,45 @@ func TestEnrollAttestationFormats(t *testing.T) {
 			if rec := e.finish(token, finishBody(t, a, options, 0)); rec.Code != http.StatusOK {
 				t.Fatalf("the none finish of the same ceremony = %d %s, want 200", rec.Code, rec.Body)
 			}
+		})
+	}
+}
+
+// TestEnrollRSABounds (owner hardening H2, 2026-10-21): the server takes
+// an RS256 credential only with a modulus of 2048 to 4096 bits and the
+// exponent 65537, the rule of the verifier the signer shares
+// (webauthn.ParsePublicKey). go-webauthn accepts every one of these keys
+// at an attestation-none registration.
+func TestEnrollRSABounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bits int
+		e    int
+		ok   bool
+	}{
+		{"rsa1024", 1024, 65537, false},
+		{"rsa2048", 2048, 65537, true},
+		{"rsa4096", 4096, 65537, true},
+		{"rsa4097", 4097, 65537, false},
+		{"rsa8192", 8192, 65537, false},
+		{"rsa65536_huge", 65536, 65537, false},
+		{"exponent_3", 2048, 3, false},
+		{"exponent_65539", 2048, 65539, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnrollEnv(t, Limits{})
+			token := e.invite(t, "carol", false)
+			rec := e.register(t, token, newAuthenticator(t, webauthn.AlgES256), 0, servertest.WithCOSEKey(rsaCOSE(t, tc.bits, tc.e)))
+			if tc.ok {
+				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"algorithm":"RS256"`) {
+					t.Fatalf("= %d %s, want 200 RS256", rec.Code, rec.Body)
+				}
+				return
+			}
+			if rec.Code != http.StatusBadRequest || lastReason(t, e.log) != reasonUnsupportedCredential {
+				t.Fatalf("= %d %s, want 400 unsupported_credential\nlog:\n%s", rec.Code, rec.Body, e.log)
+			}
+			e.requireUnused(t, "carol")
 		})
 	}
 }
@@ -906,6 +955,28 @@ func TestEnrollBodyLimits(t *testing.T) {
 				t.Fatalf("begin %d = %d, want 429", serverdb.MaxOpenSessions+1, rec.Code)
 			}
 		})
+		if !streamedBody {
+			// A declared length over the limit is refused before a byte
+			// of the body is read, on both routes.
+			t.Run("declared_over_limit_not_read", func(t *testing.T) {
+				e := newEnrollEnv(t, Limits{})
+				token := e.invite(t, "carol", false)
+				for _, tc := range []struct {
+					route string
+					limit int64
+				}{{"begin", maxEnrollBeginBody}, {"finish", maxEnrollFinishBody}} {
+					body := &countingReader{}
+					req := httptest.NewRequest(http.MethodPost, "https://"+testRPID+"/api/v1/enroll/"+token+"/"+tc.route, body)
+					req.ContentLength = tc.limit + 1
+					rec := httptest.NewRecorder()
+					e.s.Handler().ServeHTTP(rec, req)
+					if rec.Code != http.StatusRequestEntityTooLarge || body.read() != 0 {
+						t.Fatalf("%s with a declared length over the limit = %d, %d bytes read; want 413 and none read", tc.route, rec.Code, body.read())
+					}
+				}
+				e.requireUnused(t, "carol")
+			})
+		}
 		t.Run("begin_"+mode+"_at_limit_accepted", func(t *testing.T) {
 			e := newEnrollEnv(t, Limits{})
 			token := e.invite(t, "carol", false)

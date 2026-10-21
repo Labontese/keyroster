@@ -75,7 +75,15 @@ var (
 	errEnrollUnsupported    = serverclient.APIError{Error: "unsupported credential"}
 	errEnrollDuplicate      = serverclient.APIError{Error: "this passkey is already registered"}
 	errEnrollInternal       = serverclient.APIError{Error: "internal error"}
+	// H1 and H3 (owner hardening, 2026-10-21).
+	errEnrollAttestation = serverclient.APIError{Error: "unsupported attestation"}
+	errEnrollTooLarge    = serverclient.APIError{Error: "request body too large"}
 )
+
+// errNotNone is the logged cause of an unsupported_attestation refusal.
+// It is a fixed text: the format the client sent is request data and is
+// never logged.
+var errNotNone = errors.New("attestation format is not none")
 
 // EnrollFinishResponse is the 200 answer of the registration finish: what
 // the page shows the user to read to the admin.
@@ -162,6 +170,9 @@ func (s *Server) enrollRefuse(w http.ResponseWriter, v *statusView, code int, ms
 // creation options. An invite with 16 open sessions is refused 429.
 func (s *Server) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 	const route = "begin"
+	if _, ok := s.readEnrollBody(w, r, route, maxEnrollBeginBody); !ok {
+		return
+	}
 	ctx := r.Context()
 	v, err := s.currentStatus(ctx)
 	if err != nil {
@@ -226,9 +237,15 @@ func (s *Server) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 // handleEnrollFinish serves POST /api/v1/enroll/{token}/finish. The order
 // makes consuming an invite atomic (02-08-F1):
 //
-//  1. the body is parsed with go-webauthn's creation-response parser; the
-//     challenge in its clientDataJSON is untrusted and used only as the
-//     key of the session lookup (go-webauthn compares it in step 4);
+//  1. at most maxEnrollFinishBody bytes are read (H3), and the body is
+//     parsed with go-webauthn's creation-response parser; the challenge in
+//     its clientDataJSON is untrusted and used only as the key of the
+//     session lookup (go-webauthn compares it in step 4). An attestation
+//     format other than "none" is refused here, before any session is
+//     consumed and before go-webauthn could run that format's verifier
+//     (H1): packed, tpm (go-tpm), android-key, android-safetynet (JWT and
+//     mapstructure), fido-u2f, apple and compound, with their x509 chain
+//     building, never see client input;
 //  2. the pending user of the invite is looked up with the invite page's
 //     lookup, so a used, expired or replaced invite gets the uniform 404;
 //  3. the session under the invite hash and that challenge is consumed,
@@ -245,6 +262,10 @@ func (s *Server) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 // It answers the fingerprint, the algorithm and the backup state.
 func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	const route = "finish"
+	body, ok := s.readEnrollBody(w, r, route, maxEnrollFinishBody)
+	if !ok {
+		return
+	}
 	ctx := r.Context()
 	v, err := s.currentStatus(ctx)
 	if err != nil {
@@ -256,14 +277,13 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 		s.enrollRefuse(w, v, http.StatusNotFound, errEnrollInviteNotValid, route, reasonInviteNotValid, "", nil)
 		return
 	}
-	body, err := io.ReadAll(r.Body)
+	parsed, err := protocol.ParseCredentialCreationResponseBytes(body)
 	if err != nil {
 		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollBadRequest, route, reasonBadRequest, "", err)
 		return
 	}
-	parsed, err := protocol.ParseCredentialCreationResponseBytes(body)
-	if err != nil {
-		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollBadRequest, route, reasonBadRequest, "", err)
+	if parsed.Response.AttestationObject.Format != string(protocol.AttestationFormatNone) {
+		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollAttestation, route, reasonUnsupportedAttestation, "", errNotNone)
 		return
 	}
 	now := s.clock()
@@ -347,6 +367,29 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("passkey registered", "user", u.Name, "algorithm", algName(alg), "fingerprint", fp,
 		"backup_eligible", cred.Flags.BackupEligible, "backed_up", cred.Flags.BackupState)
 	s.writeJSON(w, v, http.StatusOK, EnrollFinishResponse{Fingerprint: fp, Algorithm: algName(alg), Synced: cred.Flags.BackupState})
+}
+
+// readEnrollBody reads the body of a registration request, at most limit
+// bytes, before anything else looks at the request (owner hardening H3).
+// A declared Content-Length over limit is refused at once; a body without
+// one is read through http.MaxBytesReader and refused as soon as it passes
+// limit. Both get 413 with nothing written and no session touched.
+func (s *Server) readEnrollBody(w http.ResponseWriter, r *http.Request, route string, limit int64) ([]byte, bool) {
+	if r.ContentLength > limit {
+		s.enrollRefuse(w, nil, http.StatusRequestEntityTooLarge, errEnrollTooLarge, route, reasonBodyTooLarge, "", errors.New("declared body length over the limit"))
+		return nil, false
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			s.enrollRefuse(w, nil, http.StatusRequestEntityTooLarge, errEnrollTooLarge, route, reasonBodyTooLarge, "", errors.New("body over the limit"))
+			return nil, false
+		}
+		s.enrollRefuse(w, nil, http.StatusBadRequest, errEnrollBadRequest, route, reasonBadRequest, "", err)
+		return nil, false
+	}
+	return body, true
 }
 
 // inviteHash returns the SHA-256 of the request's invite token when the
