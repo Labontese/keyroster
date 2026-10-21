@@ -117,7 +117,7 @@ type InstallDirectoryAnswer struct {
 // AdminErrVersionChain (409), AdminErrQuorum and AdminErrExceedsPolicy
 // (403), AdminErrInvalid (400).
 const (
-	AdminErrNotPendingCredential = "credential_not_pending"
+	AdminErrNotPendingCredential = "credential_not_pending" //nolint:gosec // G101: a refusal reason code, not a credential
 	AdminErrVersionChain         = "directory_version_chain"
 	AdminErrQuorum               = "directory_quorum_not_met"
 	AdminErrExceedsPolicy        = "directory_exceeds_policy"
