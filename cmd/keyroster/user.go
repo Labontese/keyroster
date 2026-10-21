@@ -389,7 +389,12 @@ func runUserPending(ctx context.Context, args []string, stdout, stderr io.Writer
 		}
 		var he *serverclient.HTTPError
 		if errors.As(err, &he) && he.Code == http.StatusNotFound && he.APIErrorIs(serverclient.AdminErrNotPending) {
-			return fmt.Errorf("%s is not pending: no invite is open for that name. Use keyroster user add %s to invite them", name, name)
+			// True both for a name never invited and for a user already in
+			// the directory, whose pending entry ends with the approval
+			// (pre-merge review).
+			return fmt.Errorf("%s has no pending enrollment on this server: no invite and no unapproved passkey. "+
+				"To invite a new user, run keyroster user add %s; to let a user already in the directory register another passkey, run keyroster user add %s --reinvite",
+				name, name, name)
 		}
 		return err
 	}

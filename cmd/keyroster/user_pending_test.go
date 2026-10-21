@@ -111,7 +111,12 @@ func TestUserPending(t *testing.T) {
 	t.Run("not_pending", func(t *testing.T) {
 		newUserAddEnv(t, agentCustody, answer(http.StatusNotFound, mustJSON(t, serverclient.APIError{Error: serverclient.AdminErrNotPending})))
 		code, stdout, stderr := run(t, "user", "pending", "carol")
-		if code != 1 || stdout != "" || !strings.Contains(stderr, "carol is not pending") {
+		// The advice holds for a new name (plain add) and for a user
+		// already in the directory, whom a plain add refuses (--reinvite).
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "carol has no pending enrollment") ||
+			strings.Contains(stderr, "carol is not pending") ||
+			!strings.Contains(stderr, "To invite a new user, run keyroster user add carol;") ||
+			!strings.HasSuffix(strings.TrimSpace(stderr), "run keyroster user add carol --reinvite") {
 			t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 	})
