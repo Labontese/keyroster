@@ -9,6 +9,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/webauthn"
+	"github.com/Labontese/keyroster/internal/webauthn/webauthntest"
 )
 
 // inviteURLRE is everything parseInviteURL may return: an https origin
@@ -51,12 +52,39 @@ func FuzzParseInviteURL(f *testing.F) {
 // FuzzCheckPendingCredential: the pending list comes from the server, so
 // whatever checkPendingCredential accepts must print only values the CLI
 // re-derived: a fingerprint computed from the SPKI, one of three algorithm
-// names and a UTC time.
+// names and a UTC time. The seeds carry the real fingerprints of real
+// keys of each algorithm, and every seed meant to be accepted is checked
+// to be accepted, so the property checks run (pre-merge review). With
+// recompute set, the fingerprint is replaced by the one of whatever the
+// fuzzed SPKI decodes to: the fuzzer cannot produce a SHA-256 itself, and
+// this lets mutated SPKIs, IDs, times and flags reach acceptance.
 func FuzzCheckPendingCredential(f *testing.F) {
-	f.Add("AQIDBAUGBwgJCgsMDQ4PEA", int64(-8), "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
-		"SHA256:x", true, false, "2026-10-21T12:00:00Z")
-	f.Add("", int64(-7), "", "", false, true, "")
-	f.Fuzz(func(t *testing.T, id string, alg int64, spki, fp string, be, bs bool, at string) {
+	for _, alg := range []int64{webauthn.AlgEdDSA, webauthn.AlgES256, webauthn.AlgRS256} {
+		a, err := webauthntest.New(alg)
+		if err != nil {
+			f.Fatal(err)
+		}
+		cred := a.Credential()
+		id, spki := base64.RawURLEncoding.EncodeToString(cred.ID), base64.StdEncoding.EncodeToString(cred.SPKI)
+		fp := webauthn.Fingerprint(cred.SPKI)
+		c := serverclient.PendingCredential{ID: id, Alg: alg, SPKI: spki, Fingerprint: fp, BackupEligible: true, BackedUp: true, RegisteredAt: "2026-10-21T12:00:00+02:00"}
+		if _, err := checkPendingCredential(c); err != nil {
+			f.Fatalf("seed for algorithm %d refused: %v", alg, err)
+		}
+		f.Add(id, alg, spki, fp, true, true, "2026-10-21T12:00:00+02:00", false)
+		f.Add(id, alg, spki, fp, false, false, "2026-10-21T12:00:00Z", false)
+		// BS without BE, with the real fingerprint: refused only by the
+		// BS-implies-BE rule.
+		f.Add(id, alg, spki, fp, false, true, "2026-10-21T12:00:00Z", false)
+		f.Add(id, alg, spki, "SHA256:x", true, false, "2026-10-21T12:00:00Z", true)
+	}
+	f.Add("", int64(-7), "", "", false, true, "", false)
+	f.Fuzz(func(t *testing.T, id string, alg int64, spki, fp string, be, bs bool, at string, recompute bool) {
+		if recompute {
+			if der, err := base64.StdEncoding.DecodeString(spki); err == nil {
+				fp = webauthn.Fingerprint(der)
+			}
+		}
 		c := serverclient.PendingCredential{ID: id, Alg: alg, SPKI: spki, Fingerprint: fp, BackupEligible: be, BackedUp: bs, RegisteredAt: at}
 		got, err := checkPendingCredential(c)
 		if err != nil {
