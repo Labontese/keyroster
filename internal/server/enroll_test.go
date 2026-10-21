@@ -837,9 +837,10 @@ func TestEnrollInviteLifecycle(t *testing.T) {
 // test binary, to the verifier of any attestation format other than
 // "none". init replaces every such verifier in go-webauthn's registry by
 // one that only counts and fails: the registry is a plain package map, so
-// the replacement holds for the whole binary, and no test here registers
-// with a format other than none except to see it refused before
-// verification (owner hardening H1).
+// the replacement holds for the whole binary. No test here may make it
+// count: a format other than none is either refused before verification
+// (owner hardening H1) or, for a packed self-attestation, rewritten to
+// none before go-webauthn sees it (owner decision E1).
 var attestationCalls atomic.Int64
 
 func init() {
@@ -859,12 +860,19 @@ func init() {
 // credential key over authData ‖ SHA-256(clientDataJSON), as an
 // authenticator without an attestation key makes it.
 func packedSelf(a *webauthntest.Authenticator) servertest.AttestationFunc {
+	return packedSelfWith(a, func(m map[string]any) {})
+}
+
+// packedSelfWith is packedSelf with its attStmt changed by edit.
+func packedSelfWith(a *webauthntest.Authenticator, edit func(map[string]any)) servertest.AttestationFunc {
 	return func(authData, cdHash []byte) (string, any, error) {
 		sig, err := a.Sign(append(append([]byte(nil), authData...), cdHash...))
 		if err != nil {
 			return "", nil, err
 		}
-		return "packed", map[string]any{"alg": a.Credential().Alg, "sig": sig}, nil
+		m := map[string]any{"alg": a.Credential().Alg, "sig": sig}
+		edit(m)
+		return "packed", m, nil
 	}
 }
 
@@ -873,36 +881,122 @@ func fixedAttestation(format string, attStmt any) servertest.AttestationFunc {
 	return func([]byte, []byte) (string, any, error) { return format, attStmt, nil }
 }
 
-// TestEnrollAttestationFormats (owner hardening H1, 2026-10-21): every
-// attestation format other than "none" is refused right after the body is
-// parsed, before the session is consumed and before go-webauthn runs any
-// attestation verifier, so the packed, TPM (go-tpm), SafetyNet (JWT,
-// mapstructure) and x509-chain code paths never see client input.
+// TestEnrollAttestationFormats (owner hardening H1 as refined by owner
+// decision E1, 2026-10-21). A packed self-attestation of exactly the
+// shape W3C WebAuthn L3 §5.1.3 tells a client to forward under
+// attestation "none" (attStmt {alg, sig} only, alg the credential key's
+// and offered, a zero AAGUID) registers: it is rewritten to "none" before
+// go-webauthn sees it, and its self-signature is not verified. Every
+// other attestation is refused right after the body is parsed, before the
+// session is consumed. In both cases go-webauthn runs no attestation
+// verifier other than none's, so the packed, TPM (go-tpm), SafetyNet
+// (JWT, mapstructure) and x509-chain code paths never see client input.
 func TestEnrollAttestationFormats(t *testing.T) {
+	type attFunc func(a *webauthntest.Authenticator) servertest.AttestationFunc
+	t.Run("packed_self_registers", func(t *testing.T) {
+		for _, alg := range []int64{webauthn.AlgEdDSA, webauthn.AlgES256, webauthn.AlgRS256} {
+			t.Run(servertest.Algorithm(alg), func(t *testing.T) {
+				e := newEnrollEnv(t, Limits{})
+				token := e.invite(t, "carol", false)
+				a := newAuthenticator(t, alg)
+				options := e.mustBegin(t, token)
+				before := attestationCalls.Load()
+				rec := e.finish(token, finishBody(t, a, options, 0, servertest.WithAttestation(packedSelf(a))))
+				if n := attestationCalls.Load() - before; n != 0 {
+					t.Fatalf("go-webauthn ran an attestation verifier %d times", n)
+				}
+				if rec.Code != http.StatusOK {
+					t.Fatalf("= %d %s, want 200\nlog:\n%s", rec.Code, rec.Body, e.log)
+				}
+				var got EnrollFinishResponse
+				if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+					t.Fatal(err)
+				}
+				want := webauthn.Fingerprint(a.Credential().SPKI)
+				if got.Fingerprint != want || got.Algorithm != servertest.Algorithm(alg) {
+					t.Fatalf("finish answer %+v, want fingerprint %s, algorithm %s", got, want, servertest.Algorithm(alg))
+				}
+				if p := e.pending(t, "carol"); len(p) != 1 || p[0].Fingerprint != want {
+					t.Fatalf("pending %+v, want the fingerprint %s", p, want)
+				}
+			})
+		}
+	})
+
 	x5c := [][]byte{{0x30, 0x00}}
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	es384Label, err := servertest.COSEKey(-35, &k.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name string
 		alg  int64
-		att  func(a *webauthntest.Authenticator) servertest.AttestationFunc
+		att  attFunc
+		opts []servertest.Option
 	}{
-		{"packed_self_es256", webauthn.AlgES256, packedSelf},
-		{"packed_self_rs256", webauthn.AlgRS256, packedSelf},
+		// Packed, but not the pass-through shape.
+		{"packed_with_x5c", webauthn.AlgES256, func(a *webauthntest.Authenticator) servertest.AttestationFunc {
+			return packedSelfWith(a, func(m map[string]any) { m["x5c"] = x5c })
+		}, nil},
+		{"packed_self_extra_key", webauthn.AlgES256, func(a *webauthntest.Authenticator) servertest.AttestationFunc {
+			return packedSelfWith(a, func(m map[string]any) { m["extra"] = []byte{1} })
+		}, nil},
+		{"packed_self_ecdaa_key_id", webauthn.AlgES256, func(a *webauthntest.Authenticator) servertest.AttestationFunc {
+			return packedSelfWith(a, func(m map[string]any) { m["ecdaaKeyId"] = []byte{1} })
+		}, nil},
+		{"packed_self_without_sig", webauthn.AlgES256, func(a *webauthntest.Authenticator) servertest.AttestationFunc {
+			return packedSelfWith(a, func(m map[string]any) { delete(m, "sig"); m["x"] = []byte{1} })
+		}, nil},
+		{"packed_self_sig_not_bytes", webauthn.AlgES256, func(a *webauthntest.Authenticator) servertest.AttestationFunc {
+			return packedSelfWith(a, func(m map[string]any) { m["sig"] = "c2ln" })
+		}, nil},
+		{"packed_self_alg_text", webauthn.AlgES256, func(a *webauthntest.Authenticator) servertest.AttestationFunc {
+			return packedSelfWith(a, func(m map[string]any) { m["alg"] = "-7" })
+		}, nil},
+		{"packed_self_alg_mismatch", webauthn.AlgES256, func(a *webauthntest.Authenticator) servertest.AttestationFunc {
+			return packedSelfWith(a, func(m map[string]any) { m["alg"] = webauthn.AlgRS256 })
+		}, nil},
+		// The key and the statement agree on an algorithm keyroster does
+		// not offer (ES384 on a P-256 key).
+		{"packed_self_alg_not_offered", webauthn.AlgES256, func(a *webauthntest.Authenticator) servertest.AttestationFunc {
+			return packedSelfWith(a, func(m map[string]any) { m["alg"] = int64(-35) })
+		}, []servertest.Option{servertest.WithCOSEKey(es384Label)}},
+		// A conforming client erases a self-attestation with an AAGUID to
+		// none itself; this one did not.
+		{"packed_self_nonzero_aaguid", webauthn.AlgES256, packedSelf,
+			[]servertest.Option{servertest.WithAAGUID([16]byte{0xee, 0x88, 0x28, 0x79})}},
 		{"tpm", webauthn.AlgRS256, func(*webauthntest.Authenticator) servertest.AttestationFunc {
 			return fixedAttestation("tpm", map[string]any{"ver": "2.0", "alg": int64(-257), "x5c": x5c,
 				"sig": []byte{1, 2, 3}, "certInfo": []byte{4, 5, 6}, "pubArea": []byte{7, 8, 9}})
-		}},
+		}, nil},
+		{"tpm_self_shape", webauthn.AlgES256, func(a *webauthntest.Authenticator) servertest.AttestationFunc {
+			return func(authData, cdHash []byte) (string, any, error) {
+				_, m, err := packedSelf(a)(authData, cdHash)
+				return "tpm", m, err
+			}
+		}, nil},
+		{"android_key", webauthn.AlgES256, func(*webauthntest.Authenticator) servertest.AttestationFunc {
+			return fixedAttestation("android-key", map[string]any{"alg": int64(-7), "sig": []byte{1}, "x5c": x5c})
+		}, nil},
 		{"android_safetynet", webauthn.AlgES256, func(*webauthntest.Authenticator) servertest.AttestationFunc {
 			return fixedAttestation("android-safetynet", map[string]any{"ver": "1", "response": []byte("eyJhbGciOiJSUzI1NiJ9.e30.c2ln")})
-		}},
+		}, nil},
 		{"fido_u2f", webauthn.AlgES256, func(*webauthntest.Authenticator) servertest.AttestationFunc {
 			return fixedAttestation("fido-u2f", map[string]any{"sig": []byte{1}, "x5c": x5c})
-		}},
+		}, nil},
 		{"apple", webauthn.AlgES256, func(*webauthntest.Authenticator) servertest.AttestationFunc {
 			return fixedAttestation("apple", map[string]any{"x5c": x5c})
-		}},
+		}, nil},
+		{"compound", webauthn.AlgES256, func(*webauthntest.Authenticator) servertest.AttestationFunc {
+			return fixedAttestation("compound", []any{map[string]any{"fmt": "none", "attStmt": map[string]any{}}})
+		}, nil},
 		{"unknown_format", webauthn.AlgES256, func(*webauthntest.Authenticator) servertest.AttestationFunc {
 			return fixedAttestation("x-keyroster-test", map[string]any{})
-		}},
+		}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnrollEnv(t, Limits{})
@@ -910,7 +1004,8 @@ func TestEnrollAttestationFormats(t *testing.T) {
 			a := newAuthenticator(t, tc.alg)
 			options := e.mustBegin(t, token)
 			before := attestationCalls.Load()
-			rec := e.finish(token, finishBody(t, a, options, 0, servertest.WithAttestation(tc.att(a))))
+			opts := append([]servertest.Option{servertest.WithAttestation(tc.att(a))}, tc.opts...)
+			rec := e.finish(token, finishBody(t, a, options, 0, opts...))
 			if n := attestationCalls.Load() - before; n != 0 {
 				t.Fatalf("go-webauthn ran an attestation verifier %d times", n)
 			}

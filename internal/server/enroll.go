@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/protocol/webauthncbor"
+	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/Labontese/keyroster/internal/serverclient"
@@ -80,9 +83,10 @@ var (
 	errEnrollTooLarge    = serverclient.APIError{Error: "request body too large"}
 )
 
-// errNotNone is the logged cause of an unsupported_attestation refusal.
-// It is a fixed text: the format the client sent is request data and is
-// never logged.
+// errNotNone is the logged cause of an unsupported_attestation refusal:
+// an attestation that is neither "none" nor the packed self-attestation
+// rewritten to "none" (E1). It is a fixed text: the format the client sent
+// is request data and is never logged.
 var errNotNone = errors.New("attestation format is not none")
 
 // EnrollFinishResponse is the 200 answer of the registration finish: what
@@ -282,12 +286,15 @@ func (s *Server) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 //     live invite's holder reaches go-webauthn's JSON and CBOR parsing;
 //  3. the body is parsed with go-webauthn's creation-response parser; the
 //     challenge in its clientDataJSON is untrusted and used only as the
-//     key of the session lookup (go-webauthn compares it in step 5). An
-//     attestation format other than "none" is refused here, before any
-//     session is consumed and before go-webauthn could run that format's
-//     verifier (H1): packed, tpm (go-tpm), android-key, android-safetynet
-//     (JWT and mapstructure), fido-u2f, apple and compound, with their
-//     x509 chain building, never see client input;
+//     key of the session lookup (go-webauthn compares it in step 5). A
+//     packed self-attestation, which a conforming client forwards
+//     unchanged under attestation "none", is rewritten to "none"
+//     (isPackedSelfAttestation, owner decision E1). Any other attestation
+//     format than "none" is refused here, before any session is consumed
+//     and before go-webauthn could run that format's verifier (H1):
+//     packed, tpm (go-tpm), android-key, android-safetynet (JWT and
+//     mapstructure), fido-u2f, apple and compound, with their x509 chain
+//     building, never see client input;
 //  4. the session under the invite hash and that challenge is consumed,
 //     once, atomically;
 //  5. go-webauthn verifies the registration (UV required, the offered
@@ -331,6 +338,12 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollBadRequest, route, reasonBadRequest, u.Name, webauthnCause(err))
 		return
+	}
+	if isPackedSelfAttestation(&parsed.Response.AttestationObject) {
+		if parsed, err = asNoneAttestation(parsed); err != nil {
+			s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollBadRequest, route, reasonBadRequest, u.Name, webauthnCause(err))
+			return
+		}
 	}
 	if parsed.Response.AttestationObject.Format != string(protocol.AttestationFormatNone) {
 		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollAttestation, route, reasonUnsupportedAttestation, u.Name, errNotNone)
@@ -407,6 +420,65 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("passkey registered", "user", u.Name, "algorithm", algName(alg), "fingerprint", fp,
 		"backup_eligible", cred.Flags.BackupEligible, "backed_up", cred.Flags.BackupState)
 	s.writeJSON(w, v, http.StatusOK, EnrollFinishResponse{Fingerprint: fp, Algorithm: algName(alg), Synced: cred.Flags.BackupState})
+}
+
+// isPackedSelfAttestation reports whether att is exactly the packed
+// self-attestation that W3C WebAuthn L3 §5.1.3 tells a client to forward
+// unchanged when the relying party asks for attestation "none": fmt
+// "packed"; an attStmt of exactly alg and sig, so no x5c, no ecdaaKeyId
+// and nothing else; alg an integer equal to the credential public key's
+// COSE algorithm and one of the three offered (EdDSA, ES256, RS256); sig
+// a byte string; and an AAGUID of 16 zero bytes. A conforming client
+// erases every other attestation to "none" itself (owner decision E1,
+// 2026-10-21).
+func isPackedSelfAttestation(att *protocol.AttestationObject) bool {
+	if att.Format != string(protocol.AttestationFormatPacked) || len(att.AttStatement) != 2 || len(att.SubStatements) != 0 {
+		return false
+	}
+	alg, ok := att.AttStatement["alg"].(int64)
+	if !ok {
+		return false
+	}
+	if sig, ok := att.AttStatement["sig"].([]byte); !ok || len(sig) == 0 {
+		return false
+	}
+	switch alg {
+	case webauthn.AlgEdDSA, webauthn.AlgES256, webauthn.AlgRS256:
+	default:
+		return false
+	}
+	aaguid := att.AuthData.AttData.AAGUID
+	if len(aaguid) != 16 || !bytes.Equal(aaguid, make([]byte, 16)) {
+		return false
+	}
+	var pk webauthncose.PublicKeyData
+	if err := webauthncbor.Unmarshal(att.AuthData.AttData.CredentialPublicKey, &pk); err != nil {
+		return false
+	}
+	return pk.Algorithm == alg
+}
+
+// asNoneAttestation is parsed with its attestation object replaced by
+// {fmt: "none", attStmt: {}, authData} over the same authenticator data,
+// encoded with go-webauthn's canonical CBOR and parsed again by
+// go-webauthn, so the library takes its "none" path and no format
+// verifier runs. Only a packed self-attestation (isPackedSelfAttestation)
+// is passed in. Its self-signature is NOT verified: verifying it would be
+// cryptography on a key the client chose, at registration, and proves
+// nothing keyroster relies on (attestation is not required, D-05); the
+// signer checks possession of the private key at every login.
+func asNoneAttestation(parsed *protocol.ParsedCredentialCreationData) (*protocol.ParsedCredentialCreationData, error) {
+	obj, err := webauthncbor.Marshal(map[string]any{
+		"fmt":      string(protocol.AttestationFormatNone),
+		"attStmt":  map[string]any{},
+		"authData": parsed.Response.AttestationObject.RawAuthData,
+	})
+	if err != nil {
+		return nil, err
+	}
+	raw := parsed.Raw
+	raw.AttestationResponse.AttestationObject = obj
+	return raw.Parse()
 }
 
 // readEnrollBody reads the body of a registration request, at most limit

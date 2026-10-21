@@ -53,6 +53,7 @@ type regOptions struct {
 	typ         string
 	credID      []byte
 	extResults  map[string]any
+	aaguid      []byte
 }
 
 // Option changes one part of the registration Register produces.
@@ -87,12 +88,18 @@ func WithClientExtensionResults(r map[string]any) Option {
 	return func(o *regOptions) { o.extResults = r }
 }
 
+// WithAAGUID puts the 16-byte aaguid into the attested credential data
+// instead of 16 zero bytes.
+func WithAAGUID(aaguid [16]byte) Option {
+	return func(o *regOptions) { o.aaguid = append([]byte(nil), aaguid[:]...) }
+}
+
 // Register returns the body of a registration finish for options, the
 // JSON a begin answered ({"publicKey":{...}}): the soft authenticator a
 // registers its credential for rpID from origin with the authenticatorData
 // flags (0: DefaultFlags). authenticatorData is SHA-256(rpID) ‖ flags ‖ a
-// zero counter ‖ a zero AAGUID ‖ the credential ID length and ID ‖ the
-// COSE key built from a's public key; the attestation object is {fmt:
+// zero counter ‖ a zero AAGUID (see WithAAGUID) ‖ the credential ID length
+// and ID ‖ the COSE key built from a's public key; the attestation object is {fmt:
 // "none", attStmt: {}, authData}, encoded with go-webauthn's CTAP2 CBOR;
 // clientDataJSON has type webauthn.create, the options' challenge and
 // origin.
@@ -140,7 +147,11 @@ func Register(a *webauthntest.Authenticator, rpID, origin string, options []byte
 	rp := sha256.Sum256([]byte(rpID))
 	authData := append([]byte(nil), rp[:]...)
 	authData = append(authData, flags, 0, 0, 0, 0)
-	authData = append(authData, make([]byte, 16)...)                    // AAGUID
+	aaguid := o.aaguid
+	if aaguid == nil {
+		aaguid = make([]byte, 16)
+	}
+	authData = append(authData, aaguid...)                              // AAGUID
 	authData = binary.BigEndian.AppendUint16(authData, uint16(len(id))) //nolint:gosec // G115: len(id) <= 0xffff, checked above
 	authData = append(authData, id...)
 	authData = append(authData, cose...)
