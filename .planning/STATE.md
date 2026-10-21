@@ -198,6 +198,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-07: the CLI parses the server's invite URL as structured data and prints it rebuilt
 - [Phase 02]: 02-08: go-webauthn v0.18.2 (server only) approved by the owner on 2026-10-21 together with hardening H1-H4: attestation none only before any verifier, RS256 2048-4096 bits and e=65537 in the shared verifier, enroll bodies capped (1 KiB begin, 64 KiB finish), no FIDO metadata
 - [Phase 02]: 02-08: registration sessions keyed by (invite hash, challenge) and consumed with DELETE ... RETURNING; the invite is used only by an UPDATE conditioned on current, unused and unexpired; one pending credential per user
+- [Phase 02]: 02-08 pre-merge review, owner decision E1 (2026-10-21): packed self-attestation (attStmt exactly {alg, sig}, alg equal to the key's and one of the offered three, zero AAGUID) is rewritten to "none" before go-webauthn sees it, without verifying the self-signature (WebAuthn L3 5.1.3: Chromium and Firefox forward it under attestation "none"; D-05 any authenticator); every other format stays refused before any verifier runs
+- [Phase 02]: 02-08 pre-merge review: GET /api/v1/admin/users/{name}/pending answers serverclient.PendingAnswer {invite:{state open|expired|used, expires_at}, credentials} read from one transaction (invariant: used iff one pending credential); the finish route looks up the live invite before parsing the body; the enroll refusal log never carries go-webauthn's client-derived Details
 
 ### Pending Todos
 
