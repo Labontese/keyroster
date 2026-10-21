@@ -668,6 +668,31 @@ func TestEnrollRefusalLog(t *testing.T) {
 			}
 		}
 	})
+	// Pre-merge review: go-webauthn's Error() is its Details text, which
+	// quotes client-chosen names (an unsolicited clientExtensionResults
+	// member here). The line logs only the error's library-constant Type,
+	// so no request text reaches it and its length stays bounded.
+	t.Run("client_text_never_logged", func(t *testing.T) {
+		e := newEnrollEnv(t, Limits{})
+		token := e.invite(t, "carol", false)
+		const marker = "KR-CLIENT-MARKER"
+		name := marker + strings.Repeat("Z", 20000) + "\n{\"msg\":\"forged\"}"
+		rec := e.register(t, token, newAuthenticator(t, webauthn.AlgES256), 0,
+			servertest.WithClientExtensionResults(map[string]any{name: true, "credProps": map[string]any{"rk": true}}))
+		if rec.Code != http.StatusBadRequest || lastReason(t, e.log) != reasonVerifyFailed {
+			t.Fatalf("= %d %s, want 400 verify_failed\nlog:\n%s", rec.Code, rec.Body, e.log)
+		}
+		e.requireUnused(t, "carol")
+		got := refusals(t, e.log)
+		if l := got[len(got)-1]; l["err"] != "go-webauthn: invalid_request" {
+			t.Fatalf("logged err %q, want the library error type only", l["err"])
+		}
+		for _, l := range e.log.Lines() {
+			if strings.Contains(l, marker) || strings.Contains(l, "credProps") || len(l) > 512 {
+				t.Fatalf("a log line of %d bytes carries client text: %.300q", len(l), l)
+			}
+		}
+	})
 }
 
 // TestEnrollInviteLifecycle: an invite registers exactly one credential

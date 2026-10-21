@@ -132,14 +132,52 @@ func webauthnConfig(v *statusView) *gowebauthn.Config {
 	}
 }
 
+// webauthnErrorTypes is the Type of every error go-webauthn's protocol
+// package declares: constants of the library, never request data.
+var webauthnErrorTypes = func() map[string]bool {
+	m := map[string]bool{}
+	for _, e := range []*protocol.Error{
+		protocol.ErrBadRequest, protocol.ErrPolicyRestriction, protocol.ErrChallengeMismatch, protocol.ErrParsingData,
+		protocol.ErrAuthData, protocol.ErrVerification, protocol.ErrAttestation, protocol.ErrInvalidAttestation,
+		protocol.ErrMetadata, protocol.ErrAttestationFormat, protocol.ErrAttestationCertificate,
+		protocol.ErrAssertionSignature, protocol.ErrUnsupportedKey, protocol.ErrUnsupportedAlgorithm,
+		protocol.ErrNotSpecImplemented, protocol.ErrNotImplemented,
+	} {
+		m[e.Type] = true
+	}
+	return m
+}()
+
+// errWebAuthnOther is the logged cause of a go-webauthn error that is not
+// a *protocol.Error of a declared type (a raw CBOR decoding error, for
+// one).
+var errWebAuthnOther = errors.New("go-webauthn: unclassified error")
+
+// webauthnCause is what the enroll refused line logs for an error that
+// go-webauthn returned, from parsing or from CreateCredential. go-webauthn's
+// Error() is its Details text, which can quote what the client chose: the
+// name of every unsolicited clientExtensionResults member, for one, or a
+// duplicate CBOR map key. So only the Type of a *protocol.Error is logged,
+// and only when it is one the library declares; any other error is a
+// fixed text (pre-merge review).
+func webauthnCause(err error) error {
+	var pe *protocol.Error
+	if errors.As(err, &pe) && webauthnErrorTypes[pe.Type] {
+		return errors.New("go-webauthn: " + pe.Type)
+	}
+	return errWebAuthnOther
+}
+
 // logEnrollRefusal writes the one log line of a begin or finish answer
 // that is not a 2xx: message "enroll refused" with exactly route, reason,
-// user and err (02-08-R2-F10). err is only ever the error's Error() text;
-// for a go-webauthn *protocol.Error that is its Details field alone, never
-// its debug field, which quotes the expected and received challenge on a
-// mismatch. No token, token hash, challenge, session data, credential ID,
-// SPKI or request byte is ever passed in. The level is error for the two
-// server-side failures and info for every refusal.
+// user and err (02-08-R2-F10). err is the Error() text of an error the
+// caller passes in, which never holds request text: an error from
+// go-webauthn's parsing or verification is passed through webauthnCause
+// first, so neither its Details (which can quote client-chosen names) nor
+// its debug field (which quotes the expected and received challenge on a
+// mismatch) is ever logged. No token, token hash, challenge, session data,
+// credential ID, SPKI or request byte is ever passed in. The level is
+// error for the two server-side failures and info for every refusal.
 func logEnrollRefusal(log *slog.Logger, route, reason, user string, err error) {
 	level := slog.LevelInfo
 	if reason == reasonSignerUnavailable || reason == reasonInternalError {
@@ -291,7 +329,7 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	parsed, err := protocol.ParseCredentialCreationResponseBytes(body)
 	if err != nil {
-		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollBadRequest, route, reasonBadRequest, u.Name, err)
+		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollBadRequest, route, reasonBadRequest, u.Name, webauthnCause(err))
 		return
 	}
 	if parsed.Response.AttestationObject.Format != string(protocol.AttestationFormatNone) {
@@ -319,7 +357,7 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := wa.CreateCredential(enrollUser{handle: u.UserHandle, name: u.Name}, session, parsed)
 	if err != nil {
-		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollVerify, route, reasonVerifyFailed, u.Name, err)
+		s.enrollRefuse(w, v, http.StatusBadRequest, errEnrollVerify, route, reasonVerifyFailed, u.Name, webauthnCause(err))
 		return
 	}
 	alg, spki, err := spkiFromCOSE(cred.PublicKey)

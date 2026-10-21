@@ -52,6 +52,7 @@ type regOptions struct {
 	challenge   *string
 	typ         string
 	credID      []byte
+	extResults  map[string]any
 }
 
 // Option changes one part of the registration Register produces.
@@ -78,6 +79,12 @@ func WithType(t string) Option { return func(o *regOptions) { o.typ = t } }
 // attested credential data and in id and rawId alike.
 func WithCredentialID(id []byte) Option {
 	return func(o *regOptions) { o.credID = append([]byte(nil), id...) }
+}
+
+// WithClientExtensionResults sets the finish body's
+// clientExtensionResults (default an empty object).
+func WithClientExtensionResults(r map[string]any) Option {
+	return func(o *regOptions) { o.extResults = r }
 }
 
 // Register returns the body of a registration finish for options, the
@@ -156,6 +163,10 @@ func Register(a *webauthntest.Authenticator, rpID, origin string, options []byte
 	if err != nil {
 		return nil, err
 	}
+	ext := o.extResults
+	if ext == nil {
+		ext = map[string]any{}
+	}
 	enc := base64.RawURLEncoding.EncodeToString
 	return json.Marshal(map[string]any{
 		"id":                      enc(id),
@@ -167,7 +178,7 @@ func Register(a *webauthntest.Authenticator, rpID, origin string, options []byte
 			"attestationObject": enc(attObj),
 			"transports":        []string{"usb"},
 		},
-		"clientExtensionResults": map[string]any{},
+		"clientExtensionResults": ext,
 	})
 }
 
