@@ -7,7 +7,7 @@ stopped_at: 02-07 Tasks 1-2 done on p02/07-admin-api; PR awaiting owner merge ga
 last_updated: "2026-10-21T04:44:28.754Z"
 last_activity: 2026-10-20
 last_activity_desc: 02-07 admin-api executed; PR awaiting merge gate
-state_head: 2fd917ff6f94f141ec35a0b8ed71eee6602a6272
+state_head: 10ba623d22ba5c62bb29e31ac832d68d14b7618a
 progress:
   total_phases: 6
   completed_phases: 0
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 Phase: 02 (Passkey Login MVP) — EXECUTING
 Plan: 7 of 14
 Status: 02-07 awaiting the owner merge gate (p02/07-admin-api); 02-01 to 02-06 are merged
-Last activity: 2026-10-21 - Completed quick task 261021-8av: Bump the Go toolchain pin to go1.27.3 for GO-2026-6809 (crypto/x509), which fails govulncheck in CI
+Last activity: 2026-10-21 - Completed quick task 261021-76k: Make internal/directory TestAuthorizeOneUser robust against one slow wall-clock sample (take the fastest of several Authorize runs; the R1 regression must still fail)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -214,6 +214,7 @@ Recent decisions affecting current work:
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261006-ixz | Fix flaky signer freshness-boundary tests with a deterministic test clock | 2026-10-06 | 66fd3c3 | [261006-ixz-fix-flaky-signer-test-created-301s-futur](./quick/261006-ixz-fix-flaky-signer-test-created-301s-futur/) |
+| 261021-76k | Make internal/directory TestAuthorizeOneUser robust against one slow wall-clock sample (take the fastest of several Authorize runs; the R1 regression must still fail) | 2026-10-21 | 10ba623 | [261021-76k-make-internal-directory-testauthorizeone](./quick/261021-76k-make-internal-directory-testauthorizeone/) |
 | 261021-8av | Bump the Go toolchain pin to go1.27.3 for GO-2026-6809 (crypto/x509), which fails govulncheck in CI | 2026-10-21 | 2fd917f | [261021-8av-bump-the-go-toolchain-pin-to-go1-27-3-fo](./quick/261021-8av-bump-the-go-toolchain-pin-to-go1-27-3-fo/) |
 
 ## Deferred Items
