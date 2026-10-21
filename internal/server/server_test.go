@@ -213,6 +213,13 @@ func (f *fakeSigner) GetDirectory(ctx context.Context) (*wire.GetDirectoryRespon
 	return d, err
 }
 
+// statusNow returns the Status result set last.
+func (f *fakeSigner) statusNow() *wire.StatusResponse {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.status
+}
+
 // setInstall sets forced mode's InstallDirectory result.
 func (f *fakeSigner) setInstall(resp *wire.InstallDirectoryResponse, err error) {
 	f.mu.Lock()

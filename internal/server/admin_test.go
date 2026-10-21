@@ -823,6 +823,11 @@ func TestAdminUsers(t *testing.T) {
 		if err != nil || d.Version != 1 || !bytes.Equal(d.Directory, doc) {
 			t.Fatal("the signer's directory changed")
 		}
+		// The assertion above cannot fail in forced mode; this one can: a
+		// reinvite never asks the signer to install anything (02-07 D4).
+		if n := e.fake.count("InstallDirectory"); n != 0 {
+			t.Fatalf("the reinvite made %d InstallDirectory calls, want 0", n)
+		}
 	})
 
 	t.Run("reinvite_directory_user_with_pending_row", func(t *testing.T) {
@@ -844,8 +849,8 @@ func TestAdminUsers(t *testing.T) {
 		if err != nil || !bytes.Equal(after.UserHandle, before.UserHandle) || e.pendingRows(t, "alice") != 1 {
 			t.Fatalf("after the second reinvite %+v, %v; want one row with the same handle", after, err)
 		}
-		if d, _ := e.fake.GetDirectory(context.Background()); d.Version != 1 {
-			t.Fatal("the signer's directory changed")
+		if d, _ := e.fake.GetDirectory(context.Background()); d.Version != 1 || e.fake.count("InstallDirectory") != 0 {
+			t.Fatal("the signer's directory changed, or the reinvite asked the signer to install a version (02-07 D4)")
 		}
 		// Control: without reinvite the pending check refuses first.
 		if res := e.addUser(t, "alice", false, ""); res.Code != http.StatusConflict || strings.TrimSpace(res.Body.String()) != `{"error":"already pending"}` {
@@ -945,7 +950,7 @@ func TestAdminUsers(t *testing.T) {
 		e.fake.setDirectory(&wire.GetDirectoryResponse{Version: 1, Directory: bad, Sigs: []byte("s"), Authorized: true}, nil)
 		// Status reports exactly those bytes, so the mirror reads and parses
 		// them (02-09: a Status at version 0 is answered without a read).
-		st := withDirectory(e.fake.status, 1)
+		st := withDirectory(e.fake.statusNow(), 1)
 		st.DirectorySHA256 = sha256.Sum256(bad)
 		e.fake.setStatus(st, nil)
 		if res := e.addUser(t, "carol", false, ""); res.Code != http.StatusServiceUnavailable {
@@ -1317,6 +1322,214 @@ func TestRateLimit(t *testing.T) {
 		l.allow("b", t0.Add(limiterIdle))
 		if n := l.size(); n != 1 {
 			t.Fatalf("%d entries, want 1 after a's idle time", n)
+		}
+	})
+}
+
+// urlInviteHash returns the stored hash of an invite URL's token.
+func urlInviteHash(t *testing.T, inviteURL string) []byte {
+	t.Helper()
+	i := strings.Index(inviteURL, "/enroll/")
+	if i < 0 {
+		t.Fatalf("invite URL %q has no /enroll/", inviteURL)
+	}
+	sum := sha256.Sum256([]byte(inviteURL[i+len("/enroll/"):]))
+	return sum[:]
+}
+
+// TestDirectoryInstallCleanup: an accepted install deletes exactly the
+// pending state its version makes obsolete, and refuses a version that
+// newly binds a credential which is not pending for the user it binds it
+// to (02-09-F6, cross-plan audit).
+func TestDirectoryInstallCleanup(t *testing.T) {
+	t.Run("install_keeps_unrelated_pending", func(t *testing.T) {
+		v1 := vectorV1(t) // alice is in the directory
+		e := chainEnv(t, v1)
+		p1, p2 := newCredential(t), newCredential(t)
+		e.storePending(t, "dave", p1)  // registered, approved by this install
+		e.storePending(t, "carol", p2) // registered, not approved
+		alice := e.mustAdd(t, "alice", true)
+		before, err := e.s.db.PendingUser(context.Background(), "alice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res := e.postDirectory(t, successor(t, v1, bind("dave", p1))); res.Code != http.StatusOK {
+			t.Fatalf("install binding dave = %d %s", res.Code, res.Body)
+		}
+		if ids := e.pendingOf(t, "dave"); len(ids) != 0 || e.pendingRows(t, "dave") != 0 {
+			t.Fatalf("dave after the install: pending %v, %d rows; want none", ids, e.pendingRows(t, "dave"))
+		}
+		if ids := e.pendingOf(t, "carol"); len(ids) != 1 || ids[0] != p2.ID || e.pendingRows(t, "carol") != 1 {
+			t.Fatalf("carol after the install: pending %v, %d rows; want P2 and the row unchanged", ids, e.pendingRows(t, "carol"))
+		}
+		after, err := e.s.db.PendingUser(context.Background(), "alice")
+		if err != nil || !bytes.Equal(after.InviteHash, before.InviteHash) {
+			t.Fatalf("alice's open invite after the install: %+v, %v; want it unchanged", after, err)
+		}
+		if r := e.getInvite(t, alice.InviteURL); r.Code != http.StatusOK {
+			t.Fatalf("alice's open invite = %d after the install, want 200", r.Code)
+		}
+	})
+
+	t.Run("install_refuses_credential_no_longer_pending", func(t *testing.T) {
+		e := chainEnv(t, nil)
+		p1, p2, p3 := newCredential(t), newCredential(t), newCredential(t)
+		first := e.mustAdd(t, "dave", false)
+		e.bindPending(t, urlInviteHash(t, first.InviteURL), "dave", p1)
+		withP1 := successor(t, nil, bind("dave", p1)) // built before the reinvite
+		second := e.mustAdd(t, "dave", true)          // ReplaceInvite discards P1
+		e.bindPending(t, urlInviteHash(t, second.InviteURL), "dave", p2)
+		e.storePending(t, "carol", p3)
+		requireAnswer(t, "install of the version binding the discarded P1", e.postDirectory(t, withP1), http.StatusConflict, "credential_not_pending")
+		requireAnswer(t, "install binding carol's credential to dave", e.postDirectory(t, successor(t, nil, bind("dave", p3))), http.StatusConflict, "credential_not_pending")
+		if n := e.fake.count("InstallDirectory"); n != 0 {
+			t.Fatalf("InstallDirectory called %d times, want 0", n)
+		}
+		if ids := e.pendingOf(t, "dave"); len(ids) != 1 || ids[0] != p2.ID || e.pendingRows(t, "dave") != 1 {
+			t.Fatalf("dave after the refusals: pending %v, %d rows; want P2 and the row", ids, e.pendingRows(t, "dave"))
+		}
+		// Control: the version binding P2 to dave installs.
+		if res := e.postDirectory(t, successor(t, nil, bind("dave", p2))); res.Code != http.StatusOK {
+			t.Fatalf("install binding P2 = %d %s", res.Code, res.Body)
+		}
+		if ids := e.pendingOf(t, "dave"); len(ids) != 0 {
+			t.Fatalf("dave still has pending %v after P2 was bound", ids)
+		}
+	})
+}
+
+// TestDirectoryInstallPending: pendingMu orders an install against a
+// reinvite, and the install's cleanup heals itself (02-09-R2-F1,
+// 02-09-R2-F4).
+func TestDirectoryInstallPending(t *testing.T) {
+	t.Run("reinvite_waits_for_running_install", func(t *testing.T) {
+		e := chainEnv(t, nil)
+		p1 := newCredential(t)
+		first := e.mustAdd(t, "dave", false)
+		e.bindPending(t, urlInviteHash(t, first.InviteURL), "dave", p1)
+		before, err := e.s.db.PendingUser(context.Background(), "dave")
+		if err != nil {
+			t.Fatal(err)
+		}
+		h1 := before.UserHandle
+		version := successor(t, nil, bind("dave", p1))
+
+		entered, release := e.fake.hold("InstallDirectory")
+		defer release()
+		installed := make(chan *httptest.ResponseRecorder, 1)
+		go func() { installed <- e.postDirectory(t, version) }()
+		select {
+		case <-entered: // the install handler holds pendingMu
+		case <-time.After(10 * time.Second):
+			t.Fatal("the install never reached the signer")
+		}
+		gd := e.fake.count("GetDirectory")
+		reinvited := make(chan *httptest.ResponseRecorder, 1)
+		go func() { reinvited <- e.addUser(t, "dave", true, "") }()
+		time.Sleep(200 * time.Millisecond)
+		select {
+		case res := <-reinvited:
+			t.Fatalf("the reinvite answered %d while the install was in flight, want it to wait", res.Code)
+		default:
+		}
+		if n := e.fake.count("GetDirectory"); n != gd {
+			t.Fatalf("the reinvite made %d GetDirectory calls while waiting, want 0 (it stops before its lookups)", n-gd)
+		}
+		if u, err := e.s.db.PendingUser(context.Background(), "dave"); err != nil || !bytes.Equal(u.InviteHash, before.InviteHash) || !bytes.Equal(u.UserHandle, h1) {
+			t.Fatalf("dave's row changed while the install held the lock: %+v, %v", u, err)
+		}
+		release()
+		if res := <-installed; res.Code != http.StatusOK {
+			t.Fatalf("install = %d %s", res.Code, res.Body)
+		}
+		res := <-reinvited
+		if res.Code != http.StatusCreated {
+			t.Fatalf("reinvite = %d %s, want 201 after the install", res.Code, res.Body)
+		}
+		// The end state is the install's: P1 bound, and the reinvite is an
+		// invite for one more passkey under a fresh user handle.
+		d, err := directory.Parse(e.fake.heldDirectory())
+		if err != nil || len(d.Users) != 1 || d.Users[0].Name != "dave" || len(d.Users[0].Credentials) != 1 || d.Users[0].Credentials[0].ID != p1.ID {
+			t.Fatalf("the signer holds %+v, %v; want dave with P1", d, err)
+		}
+		if n := e.fake.count("InstallDirectory"); n != 1 {
+			t.Fatalf("InstallDirectory called %d times, want 1", n)
+		}
+		st, err := e.s.db.PendingState(context.Background(), "dave")
+		if err != nil || len(st.Credentials) != 0 || st.InviteUsed || !st.User.InviteExpires.After(e.clock.Now()) || bytes.Equal(st.User.UserHandle, h1) {
+			t.Fatalf("dave's pending state %+v, %v; want one row with an open invite, no credential and a user handle other than H1", st, err)
+		}
+		var out serverclient.AddUserResponse
+		if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if r := e.getInvite(t, out.InviteURL); r.Code != http.StatusOK {
+			t.Fatalf("the reinvite's URL = %d, want 200", r.Code)
+		}
+	})
+
+	t.Run("orphan_pending_cleaned_on_next_install", func(t *testing.T) {
+		x := newCredential(t)
+		base := successor(t, nil, bind("frank", x))
+		e := chainEnv(t, base)
+		p1, p3 := newCredential(t), newCredential(t)
+		e.storePending(t, "erin", x) // the same ID as frank's bound X
+		e.storePending(t, "carol", p3)
+		e.storePending(t, "dave", p1)
+
+		e.fake.setLoseAnswer(true)
+		v2 := successor(t, base, bind("dave", p1))
+		requireAnswer(t, "install whose answer is lost", e.postDirectory(t, v2), http.StatusServiceUnavailable, "signer unavailable")
+		if !bytes.Equal(e.fake.heldDirectory(), v2) {
+			t.Fatal("the fake does not hold the version whose answer was lost")
+		}
+		if ids := e.pendingOf(t, "dave"); len(ids) != 1 || e.pendingRows(t, "dave") != 1 {
+			t.Fatalf("dave after the lost answer: pending %v, %d rows; want the orphan", ids, e.pendingRows(t, "dave"))
+		}
+
+		e.fake.setLoseAnswer(false)
+		if res := e.postDirectory(t, successor(t, v2, withRole("dev"))); res.Code != http.StatusOK {
+			t.Fatalf("role-only install = %d %s", res.Code, res.Body)
+		}
+		if ids := e.pendingOf(t, "dave"); len(ids) != 0 || e.pendingRows(t, "dave") != 0 {
+			t.Fatalf("dave after the next install: pending %v, %d rows; want none", ids, e.pendingRows(t, "dave"))
+		}
+		if ids := e.pendingOf(t, "carol"); len(ids) != 1 || ids[0] != p3.ID {
+			t.Fatalf("carol's pending %v, want P3 unchanged", ids)
+		}
+		if ids := e.pendingOf(t, "erin"); len(ids) != 1 || ids[0] != x.ID || e.pendingRows(t, "erin") != 1 {
+			t.Fatalf("erin's pending %v, want X unchanged: X is bound to frank, not erin", ids)
+		}
+	})
+
+	t.Run("cleanup_failure_still_reports_install", func(t *testing.T) {
+		e := chainEnv(t, nil)
+		p1 := newCredential(t)
+		e.storePending(t, "dave", p1)
+		version := successor(t, nil, bind("dave", p1))
+		entered, release := e.fake.hold("InstallDirectory")
+		defer release()
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() { done <- e.postDirectory(t, version) }()
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the install never reached the signer")
+		}
+		if err := e.s.db.Close(); err != nil { // steps 1 to 3 have used it already
+			t.Fatal(err)
+		}
+		release()
+		res := <-done
+		var ans serverclient.InstallDirectoryAnswer
+		if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &ans) != nil || ans.Version != 1 || ans.SHA256 != trust.SHA256Hex(version) || ans.LeafIndex != 1 {
+			t.Fatalf("install with a failing cleanup = %d %s, want 200 with version 1, its SHA-256 and leaf 1", res.Code, res.Body)
+		}
+		if !bytes.Equal(e.fake.heldDirectory(), version) {
+			t.Fatal("the fake does not hold the installed version")
+		}
+		if n := strings.Count(e.log.String(), `"msg":"pending_cleanup_failed"`); n != 1 {
+			t.Fatalf("%d pending_cleanup_failed lines, want 1:\n%s", n, e.log)
 		}
 	})
 }

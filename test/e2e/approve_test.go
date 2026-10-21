@@ -3,10 +3,13 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +215,19 @@ func TestEnrollApproveEndToEnd(t *testing.T) {
 	requireBound(t, d2, "admin1", auth1)
 	requireBound(t, d2, "alice", auth2)
 
+	t.Run("approve_twice", func(t *testing.T) {
+		// AUTH-01 edge, idempotency: the same approval again finds no
+		// pending passkey (the first one's install removed it), refuses and
+		// creates no version.
+		code, out, errOut := env.keyroster(t, admin, "", "user", "approve", "alice", "--fingerprint", fp2, "--yes")
+		if code == 0 || !strings.Contains(errOut, "no pending credential") {
+			t.Fatalf("second user approve alice: exit %d, want non-zero with \"no pending credential\":\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+		}
+		if resp, _ := signerDirectory(t, env); resp.Version != 2 {
+			t.Fatalf("signer directory version %d after the second approval, want 2", resp.Version)
+		}
+	})
+
 	t.Run("audit_verify_counts_installs", func(t *testing.T) {
 		export := env.Signer.exportLog(t)
 		code, out := auditVerifyPins(t, env.Signer.RootFingerprints, export)
@@ -219,4 +235,149 @@ func TestEnrollApproveEndToEnd(t *testing.T) {
 			t.Fatalf("audit verify: exit %d, want 0 with \"directory installs 2\":\n%s", code, out)
 		}
 	})
+}
+
+// TestApproveConflictNoLostUpdate (AUTH-01 edge, concurrency): two
+// approvals written as proposals (--out) from the same installed version
+// are installed one after the other. The first installs; the second is
+// refused before it is posted, with advice to rebuild it, never to repeat
+// the install. Re-running the second approval builds on the new version,
+// and the directory then holds both bindings: no update is lost.
+func TestApproveConflictNoLostUpdate(t *testing.T) {
+	env := startServerEnv(t, serverOpts{})
+	admin := adminCLI(t, env, env.Signer.AdminFingerprint)
+	carol, fpCarol := enroll(t, env, admin, "carol", webauthn.AlgES256)
+	dave, fpDave := enroll(t, env, admin, "dave", webauthn.AlgEdDSA)
+	work := t.TempDir()
+	for _, a := range [][]string{{"carol", fpCarol, "A"}, {"dave", fpDave, "B"}} {
+		if code, out, errOut := env.keyroster(t, admin, work, "user", "approve", a[0], "--fingerprint", a[1], "--out", a[2], "--yes"); code != 0 ||
+			!strings.Contains(out, "1 of 1 admin signatures") {
+			t.Fatalf("user approve %s --out %s: exit %d:\nstdout:\n%s\nstderr:\n%s", a[0], a[2], code, out, errOut)
+		}
+	}
+	if code, out, errOut := env.keyroster(t, admin, work, "directory", "install", "A"); code != 0 || !strings.Contains(out, "Installed directory version 1") {
+		t.Fatalf("directory install A: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	code, out, errOut := env.keyroster(t, admin, work, "directory", "install", "B")
+	if code == 0 || !strings.Contains(errOut, "directory changed since it was read") || !strings.Contains(errOut, "re-run the command that produced it") ||
+		strings.Contains(errOut, "re-run this command") {
+		t.Fatalf("directory install B: exit %d, want the stale-proposal refusal:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	if resp, _ := signerDirectory(t, env); resp.Version != 1 {
+		t.Fatalf("signer directory version %d after the refused install, want 1", resp.Version)
+	}
+	if code, out, errOut := env.keyroster(t, admin, work, "user", "approve", "dave", "--fingerprint", fpDave, "--yes"); code != 0 ||
+		!strings.Contains(out, "Installed directory version 2") {
+		t.Fatalf("re-run of user approve dave: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	_, d := signerDirectory(t, env)
+	if d.Version != 2 {
+		t.Fatalf("signer directory version %d, want 2", d.Version)
+	}
+	requireBound(t, d, "carol", carol)
+	requireBound(t, d, "dave", dave)
+}
+
+// TestApproveQuorumTwo: at an admin quorum of 2, user approve writes a
+// proposal with one signature; the signer refuses to install it; a
+// co-signer's directory sign without --yes and without a terminal is
+// refused and changes nothing; a second signature by the same admin counts
+// once; the co-signer's signature (--yes, --admin-key) makes it install
+// (02-09-R2-F10).
+func TestApproveQuorumTwo(t *testing.T) {
+	env := startServerEnv(t, serverOpts{AdminQuorum: 2})
+	if len(env.Signer.AdminFPs) != 2 {
+		t.Fatalf("%d admin keys, want 2", len(env.Signer.AdminFPs))
+	}
+	first, second := env.Signer.AdminFPs[0], env.Signer.AdminFPs[1]
+	admin := adminCLI(t, env, first)
+	bob, fp := enroll(t, env, admin, "bob", webauthn.AlgES256)
+	work := t.TempDir()
+	code, out, errOut := env.keyroster(t, admin, work, "user", "approve", "bob", "--fingerprint", fp, "--yes")
+	if code != 0 || !strings.Contains(out, "1 of 2 admin signatures") || !strings.Contains(out, "keyroster-directory-v1") {
+		t.Fatalf("user approve bob at quorum 2: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	dir := filepath.Join(work, "keyroster-directory-v1")
+	sigsFile := filepath.Join(dir, "directory.json.sigs")
+	one := mustRead(t, sigsFile)
+
+	code, out, errOut = env.keyroster(t, admin, work, "directory", "install", dir)
+	if code == 0 || !strings.Contains(errOut, "does not carry signatures by 2 distinct policy admins") {
+		t.Fatalf("directory install with one signature: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	if !strings.Contains(env.Stderr.String(), "directory_quorum_not_met") {
+		t.Fatalf("the server log does not show the signer's quorum refusal:\n%s", env.Stderr.String())
+	}
+
+	code, out, errOut = env.keyroster(t, admin, work, "directory", "sign", dir, "--admin-key", second)
+	if code == 0 || !strings.Contains(errOut, "stdin is not a terminal") || !bytes.Equal(mustRead(t, sigsFile), one) {
+		t.Fatalf("directory sign without --yes: exit %d, want a refusal that leaves the signatures unchanged:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+
+	t.Run("same_admin_counts_once", func(t *testing.T) {
+		code, out, errOut := env.keyroster(t, admin, work, "directory", "sign", dir, "--yes", "--admin-key", first)
+		if code == 0 || !strings.Contains(errOut, "already holds a signature by "+first) {
+			t.Fatalf("directory sign by the admin who signed: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+		}
+		// Two signatures by one admin, assembled by hand, still count once.
+		twice := t.TempDir()
+		if err := os.WriteFile(filepath.Join(twice, "directory.json"), mustRead(t, filepath.Join(dir, "directory.json")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(twice, "directory.json.sigs"), append(append([]byte(nil), one...), one...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errOut = env.keyroster(t, admin, work, "directory", "install", twice)
+		if code == 0 || !strings.Contains(errOut, "does not carry signatures by 2 distinct policy admins") {
+			t.Fatalf("directory install with one admin's signature twice: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+		}
+	})
+
+	code, out, errOut = env.keyroster(t, admin, work, "directory", "sign", dir, "--yes", "--admin-key", second)
+	if code != 0 || !strings.Contains(out, "2 of 2 admin signatures") {
+		t.Fatalf("directory sign by the second admin: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	code, out, errOut = env.keyroster(t, admin, work, "directory", "install", dir)
+	if code != 0 || !strings.Contains(out, "Installed directory version 1") {
+		t.Fatalf("directory install with both signatures: exit %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
+	}
+	resp, d := signerDirectory(t, env)
+	if resp.Version != 1 || !resp.Authorized {
+		t.Fatalf("signer directory version %d (authorized %v), want 1", resp.Version, resp.Authorized)
+	}
+	requireBound(t, d, "bob", bob)
+}
+
+// TestApproveProposalAfterReinvite: a proposal written before a reinvite
+// names the passkey the reinvite discarded; the server refuses to install
+// it (credential_not_pending) and the signer's directory is unchanged.
+// The user registers again and the admin approves the new passkey, which
+// is then the user's only credential (cross-plan audit).
+func TestApproveProposalAfterReinvite(t *testing.T) {
+	env := startServerEnv(t, serverOpts{})
+	admin := adminCLI(t, env, env.Signer.AdminFingerprint)
+	_, fp1 := enroll(t, env, admin, "erin", webauthn.AlgES256)
+	work := t.TempDir()
+	if code, out, errOut := env.keyroster(t, admin, work, "user", "approve", "erin", "--fingerprint", fp1, "--out", "DIR", "--yes"); code != 0 {
+		t.Fatalf("user approve erin --out DIR: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	code, out, errOut := env.keyroster(t, admin, work, "user", "add", "erin", "--reinvite")
+	if code != 0 || !strings.Contains(out, "discard it") {
+		t.Fatalf("user add erin --reinvite: exit %d, want the advice to discard a proposal:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	a2, fp2 := registerInvite(t, env, inviteToken(t, env, "erin", out), webauthn.AlgEdDSA)
+
+	code, out, errOut = env.keyroster(t, admin, work, "directory", "install", "DIR")
+	if code == 0 || !strings.Contains(errOut, "no longer pending") {
+		t.Fatalf("directory install DIR after the reinvite: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	if resp, _ := signerDirectory(t, env); resp.Version != 0 {
+		t.Fatalf("signer directory version %d after the refused install, want 0 (no erin)", resp.Version)
+	}
+
+	if code, out, errOut := env.keyroster(t, admin, work, "user", "approve", "erin", "--fingerprint", fp2, "--yes"); code != 0 {
+		t.Fatalf("user approve erin with the new passkey: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	_, d := signerDirectory(t, env)
+	requireBound(t, d, "erin", a2)
 }
