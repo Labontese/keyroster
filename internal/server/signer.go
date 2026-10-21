@@ -26,6 +26,7 @@ import (
 type signerAPI interface {
 	Status(ctx context.Context) (*wire.StatusResponse, error)
 	GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error)
+	InstallDirectory(ctx context.Context, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error)
 }
 
 // socketSigner reaches keyroster-signer over its Unix socket.
@@ -37,6 +38,10 @@ func (s socketSigner) Status(ctx context.Context) (*wire.StatusResponse, error) 
 
 func (s socketSigner) GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error) {
 	return signerclient.GetDirectory(ctx, s.socket)
+}
+
+func (s socketSigner) InstallDirectory(ctx context.Context, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
+	return signerclient.InstallDirectory(ctx, s.socket, req)
 }
 
 const (

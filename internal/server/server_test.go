@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -76,6 +77,17 @@ func newLogger() (*slog.Logger, *logBuffer) {
 // returns ctx's error when ctx ends before release. A method reads its
 // result when the call starts, so a call held in the hook returns the
 // answer from before any later change.
+//
+// InstallDirectory has two modes. In forced mode (the default) it returns
+// the result setInstall set. In chain mode (setChain) the fake behaves
+// like the signer for the version chain: it accepts a version whose prev
+// is the SHA-256 of the bytes it holds (the all-zero genesis prev when it
+// holds none) and whose version is one more, holds the new bytes from then
+// on, and reports them from Status (version, SHA-256, authorized) and
+// GetDirectory; any other version gets the signer's refusal
+// directory_version_chain. With loseAnswer set, chain mode accepts and
+// holds the version and then returns a transport error, as when the
+// signer commits and its reply is lost. Both modes keep the last request.
 type fakeSigner struct {
 	mu        sync.Mutex
 	status    *wire.StatusResponse
@@ -83,6 +95,16 @@ type fakeSigner struct {
 	dir       *wire.GetDirectoryResponse
 	dirErr    error
 	calls     map[string]int
+
+	install     *wire.InstallDirectoryResponse
+	installErr  error
+	lastInstall *wire.InstallDirectoryRequest
+	chain       bool   // chain mode
+	held        []byte // chain mode: the installed directory, nil for none
+	heldSigs    []byte
+	heldVersion uint64
+	leaf        uint64
+	loseAnswer  bool
 
 	heldMethod string
 	entered    chan struct{}
@@ -159,6 +181,14 @@ func (f *fakeSigner) Status(ctx context.Context) (*wire.StatusResponse, error) {
 	f.mu.Lock()
 	f.calls["Status"]++
 	st, err := f.status, f.statusErr
+	if f.chain && st != nil {
+		c := *st
+		c.DirectoryVersion, c.DirectorySHA256, c.DirectoryAuthorized = 0, [32]byte{}, false
+		if f.held != nil {
+			c.DirectoryVersion, c.DirectorySHA256, c.DirectoryAuthorized = f.heldVersion, sha256.Sum256(f.held), true
+		}
+		st = &c
+	}
 	f.mu.Unlock()
 	if err := f.enter(ctx, "Status"); err != nil {
 		return nil, err
@@ -170,11 +200,107 @@ func (f *fakeSigner) GetDirectory(ctx context.Context) (*wire.GetDirectoryRespon
 	f.mu.Lock()
 	f.calls["GetDirectory"]++
 	d, err := f.dir, f.dirErr
+	if f.chain && err == nil {
+		d = &wire.GetDirectoryResponse{}
+		if f.held != nil {
+			d = &wire.GetDirectoryResponse{Version: f.heldVersion, Directory: f.held, Sigs: f.heldSigs, Authorized: true}
+		}
+	}
 	f.mu.Unlock()
 	if err := f.enter(ctx, "GetDirectory"); err != nil {
 		return nil, err
 	}
 	return d, err
+}
+
+// setInstall sets forced mode's InstallDirectory result.
+func (f *fakeSigner) setInstall(resp *wire.InstallDirectoryResponse, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.chain, f.install, f.installErr = false, resp, err
+}
+
+// setChain switches to chain mode holding doc with sigs (nil doc: no
+// directory installed), as if doc had been installed on the signer
+// directly, without the server.
+func (f *fakeSigner) setChain(doc, sigs []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.chain, f.held, f.heldSigs, f.heldVersion = true, doc, sigs, 0
+	if doc != nil {
+		f.heldVersion = chainVersion(doc)
+	}
+}
+
+// setLoseAnswer sets chain mode's loseAnswer switch.
+func (f *fakeSigner) setLoseAnswer(lose bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loseAnswer = lose
+}
+
+// heldDirectory returns the bytes chain mode holds.
+func (f *fakeSigner) heldDirectory() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.held
+}
+
+// lastInstallRequest returns the last request InstallDirectory was given.
+func (f *fakeSigner) lastInstallRequest() *wire.InstallDirectoryRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastInstall
+}
+
+// chainVersion reads the version field of a directory document, 0 when
+// it does not decode.
+func chainVersion(doc []byte) uint64 {
+	var v struct {
+		Version uint64 `json:"version"`
+		Prev    string `json:"prev"`
+	}
+	_ = json.Unmarshal(doc, &v)
+	return v.Version
+}
+
+// errLostAnswer is chain mode's transport error under loseAnswer.
+var errLostAnswer = errors.New("signerclient: receive: connection reset (the answer was lost)")
+
+func (f *fakeSigner) InstallDirectory(ctx context.Context, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
+	f.mu.Lock()
+	f.calls["InstallDirectory"]++
+	f.lastInstall = &wire.InstallDirectoryRequest{Directory: append([]byte(nil), req.Directory...), Sigs: append([]byte(nil), req.Sigs...)}
+	chain, resp, err := f.chain, f.install, f.installErr
+	f.mu.Unlock()
+	if err := f.enter(ctx, "InstallDirectory"); err != nil {
+		return nil, err
+	}
+	if !chain {
+		return resp, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var next struct {
+		Version uint64 `json:"version"`
+		Prev    string `json:"prev"`
+	}
+	if json.Unmarshal(req.Directory, &next) != nil {
+		return nil, &wire.ErrorResponse{Code: wire.CodeMalformed, Message: "directory_invalid"}
+	}
+	want := trust.GenesisPrev
+	if f.held != nil {
+		want = trust.SHA256Hex(f.held)
+	}
+	if next.Version != f.heldVersion+1 || next.Prev != want {
+		return nil, &wire.ErrorResponse{Code: wire.CodeRefused, Message: "directory_version_chain"}
+	}
+	f.held, f.heldSigs, f.heldVersion = append([]byte(nil), req.Directory...), append([]byte(nil), req.Sigs...), next.Version
+	f.leaf++
+	if f.loseAnswer {
+		return nil, errLostAnswer
+	}
+	return &wire.InstallDirectoryResponse{Version: next.Version, LeafIndex: f.leaf, SHA256: sha256.Sum256(req.Directory)}, nil
 }
 
 // testClock is an injectable clock.

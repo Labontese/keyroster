@@ -455,6 +455,127 @@ func (d *DB) PendingState(ctx context.Context, name string) (*PendingState, erro
 	return &st, nil
 }
 
+// PendingCredentialUser returns the name of the pending account whose
+// pending credential has the canonical ID id, or ErrNotFound when no
+// pending credential has it.
+func (d *DB) PendingCredentialUser(ctx context.Context, id string) (string, error) {
+	var name string
+	err := d.db.QueryRowContext(ctx, `SELECT user_name FROM pending_credentials WHERE id = ?`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("serverdb: read pending credential: %w", err)
+	}
+	return name, nil
+}
+
+// Binding is one credential an installed directory version binds: its
+// canonical ID and the user that holds it in that version.
+type Binding struct {
+	ID   string
+	User string
+}
+
+// DeleteBound removes, in one transaction, the pending state that an
+// installed directory version has made obsolete. bound is every binding
+// of that version, not only the ones the install added, so a pending row
+// left behind by an earlier install (whose cleanup failed, or whose
+// signer answer was lost) goes with the next accepted install (02-09-R2-F4).
+//
+//  1. For each binding it deletes the pending credential whose ID and user
+//     name both equal the binding's. A pending credential of another user
+//     with the same ID is never touched.
+//  2. For each user whose pending credential it deleted, it deletes the
+//     pending account, with its registration sessions, only when the
+//     account has no pending credential left and its invite is not open:
+//     used, or expired at nowUS. An open invite (unused and unexpired,
+//     such as a directory user's invite for one more passkey) stays.
+//
+// The invariant of BindPendingCredential and ReplaceInvite holds after it:
+// an account's invite is used exactly when it has its one pending
+// credential. Deleting a used account's credential deletes the account.
+func (d *DB) DeleteBound(ctx context.Context, bound []Binding, nowUS int64) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	emptied := map[string]bool{}
+	for _, b := range bound {
+		res, err := tx.ExecContext(ctx, `DELETE FROM pending_credentials WHERE id = ? AND user_name = ?`, b.ID, b.User)
+		if err != nil {
+			return fmt.Errorf("serverdb: delete bound credential: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("serverdb: delete bound credential: %w", err)
+		} else if n > 0 {
+			emptied[b.User] = true
+		}
+	}
+	for name := range emptied {
+		var hash []byte
+		err := tx.QueryRowContext(ctx, `SELECT invite_hash FROM pending_users WHERE name = ?
+			AND NOT EXISTS (SELECT 1 FROM pending_credentials WHERE user_name = ?)
+			AND (invite_used_us IS NOT NULL OR invite_expires_us <= ?)`, name, name, nowUS).Scan(&hash)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("serverdb: read emptied pending account: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM registration_sessions WHERE invite_hash = ?`, hash); err != nil {
+			return fmt.Errorf("serverdb: delete emptied account's sessions: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM pending_users WHERE name = ?`, name); err != nil {
+			return fmt.Errorf("serverdb: delete emptied pending account: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return nil
+}
+
+// PendingSummary is one pending account as keyroster user list shows it.
+type PendingSummary struct {
+	Name          string
+	InviteExpires time.Time
+	InviteUsed    bool
+	Credentials   int
+}
+
+// ListPending returns every pending account, sorted by name, with its
+// invite's expiry, whether the invite is used and how many pending
+// credentials it holds, read in one statement.
+func (d *DB) ListPending(ctx context.Context) ([]PendingSummary, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT u.name, u.invite_expires_us, u.invite_used_us,
+		(SELECT COUNT(*) FROM pending_credentials c WHERE c.user_name = u.name)
+		FROM pending_users u ORDER BY u.name`)
+	if err != nil {
+		return nil, fmt.Errorf("serverdb: list pending accounts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []PendingSummary
+	for rows.Next() {
+		var (
+			p       PendingSummary
+			expires int64
+			used    sql.NullInt64
+		)
+		if err := rows.Scan(&p.Name, &expires, &used, &p.Credentials); err != nil {
+			return nil, fmt.Errorf("serverdb: list pending accounts: %w", err)
+		}
+		p.InviteExpires = time.UnixMicro(expires).UTC()
+		p.InviteUsed = used.Valid
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("serverdb: list pending accounts: %w", err)
+	}
+	return out, nil
+}
+
 func boolInt(b bool) int {
 	if b {
 		return 1

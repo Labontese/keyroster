@@ -657,6 +657,9 @@ func (e *adminEnv) pendingRows(t *testing.T, name string) int {
 func TestAdminUsers(t *testing.T) {
 	t.Run("add_creates_pending_account_and_invite", func(t *testing.T) {
 		e := newAdminEnv(t, Limits{})
+		// An installed directory, so the add's directory lookup is a signer
+		// read (at version 0 the mirror answers without one, 02-09).
+		e.installDirectory(t)
 		res := e.addUser(t, "carol", false, "")
 		if res.Code != http.StatusCreated || res.Header().Get(serverclient.CustodyHeader) == "" {
 			t.Fatalf("= %d (custody %q) %s", res.Code, res.Header().Get(serverclient.CustodyHeader), res.Body)
@@ -734,6 +737,7 @@ func TestAdminUsers(t *testing.T) {
 		const want409 = `{"error":"already pending"}`
 		t.Run("held", func(t *testing.T) {
 			e := newAdminEnv(t, Limits{})
+			e.installDirectory(t) // at version 0 the mirror reads nothing (02-09)
 			entered, release := e.fake.hold("GetDirectory")
 			defer release()
 			done := make(chan *httptest.ResponseRecorder, 1)
@@ -937,7 +941,13 @@ func TestAdminUsers(t *testing.T) {
 
 	t.Run("unparsable_directory_fails_closed", func(t *testing.T) {
 		e := newAdminEnv(t, Limits{})
-		e.fake.setDirectory(&wire.GetDirectoryResponse{Version: 1, Directory: []byte(`{"version":1}`), Sigs: []byte("s"), Authorized: true}, nil)
+		bad := []byte(`{"version":1}`)
+		e.fake.setDirectory(&wire.GetDirectoryResponse{Version: 1, Directory: bad, Sigs: []byte("s"), Authorized: true}, nil)
+		// Status reports exactly those bytes, so the mirror reads and parses
+		// them (02-09: a Status at version 0 is answered without a read).
+		st := withDirectory(e.fake.status, 1)
+		st.DirectorySHA256 = sha256.Sum256(bad)
+		e.fake.setStatus(st, nil)
 		if res := e.addUser(t, "carol", false, ""); res.Code != http.StatusServiceUnavailable {
 			t.Fatalf("= %d, want 503: a directory that does not parse is never \"no such user\"", res.Code)
 		}

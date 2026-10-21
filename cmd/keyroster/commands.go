@@ -26,6 +26,18 @@ var registry = map[string]command{}
 // status 2 and prints the command list.
 var errUsage = errors.New("usage error")
 
+// exitError is an error that ends the command with exit status code and
+// prints only its own message, without the command list. keyroster user
+// approve without --fingerprint uses it for exit status 2 after it has
+// listed the pending fingerprints.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
+
 // register adds c to the registry. It panics on an empty name, a nil Run or a
 // duplicate name: all three are programming errors caught at start-up.
 func register(c command) {
@@ -43,7 +55,8 @@ func register(c command) {
 
 // dispatch runs the command named by args[0] with the remaining arguments.
 // It returns the process exit status: 0 on success, 2 for a missing or
-// unknown command or a usage error, and 1 for any other error.
+// unknown command or a usage error, an exitError's own code, and 1 for any
+// other error.
 func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printUsage(stderr)
@@ -63,6 +76,10 @@ func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			return 2
 		}
 		_, _ = fmt.Fprintf(stderr, "keyroster %s: %s\n", c.Name, printable(err.Error()))
+		var ee *exitError
+		if errors.As(err, &ee) {
+			return ee.code
+		}
 		return 1
 	}
 	return 0

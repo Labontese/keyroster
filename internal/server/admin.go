@@ -8,12 +8,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Labontese/keyroster/internal/adminauth"
@@ -184,7 +182,9 @@ func (s *Server) adminBodyTooLarge(w http.ResponseWriter, r *http.Request, limit
 //
 // The lookups and the insert are separate statements, so two adds for one
 // new name can both pass the lookups; the pending_users primary key
-// decides, and the loser gets the same 409 as a pending name.
+// decides, and the loser gets the same 409 as a pending name. A reinvite
+// holds pendingMu from its lookups through its write, so a directory
+// install never runs between them (02-09-R2-F1).
 func (s *Server) handleAddUser(w http.ResponseWriter, r *http.Request) {
 	var req serverclient.AddUserRequest
 	dec := json.NewDecoder(r.Body)
@@ -198,24 +198,29 @@ func (s *Server) handleAddUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	if req.Reinvite {
+		// A reinvite discards the pending credential a directory install
+		// may be about to bind: it waits for an install in flight, from
+		// before its lookups until its row is written, and an install
+		// waits for it (pendingMu, 02-09-R2-F1). A plain add discards
+		// nothing an install checks and does not take the lock.
+		s.pendingMu.Lock()
+		defer s.pendingMu.Unlock()
+	}
 	pending, err := s.db.PendingUser(ctx, req.Name)
 	if err != nil && !errors.Is(err, serverdb.ErrNotFound) {
 		s.log.Error("read pending account", "err", err)
 		s.writeAdminError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	v, err := s.currentStatus(ctx)
-	if err != nil {
-		s.signerUnavailable(w, false)
-		return
-	}
-	users, err := s.installedUsers(ctx, v)
+	dir, err := s.currentDirectory(ctx)
 	if err != nil {
 		s.log.Error("read the installed directory", "err", err)
 		s.signerUnavailable(w, false)
 		return
 	}
-	inDirectory := users[req.Name]
+	v := dir.status
+	inDirectory := dir.users[req.Name]
 	switch {
 	case !req.Reinvite && pending != nil:
 		s.writeAdminError(w, r, http.StatusConflict, serverclient.AdminErrPending)
@@ -368,85 +373,4 @@ func requestOrigin(r *http.Request, origins []string) string {
 		return ""
 	}
 	return sorted[0]
-}
-
-// dirUsers is the user names and credential IDs of one installed
-// directory version, keyed by that version and the SHA-256 of its
-// canonical bytes.
-type dirUsers struct {
-	version uint64
-	sha256  [32]byte
-	users   map[string]bool
-	// creds holds each user's credential IDs as raw bytes, for the
-	// registration's excludeCredentials.
-	creds map[string][][]byte
-	// credIDs holds every credential ID of the directory, as the string
-	// of its raw bytes, for the registration's duplicate check (bytes
-	// compared, never a client's text form; 02-08-F10).
-	credIDs map[string]bool
-}
-
-// dirCache holds the last directory read whose version and hash matched
-// the signer's Status. A directory reply can be 1 MiB and costs about
-// 4.4 MiB of allocation, so it is not read again while the Status reports
-// the same version and hash.
-type dirCache struct {
-	mu    sync.Mutex
-	entry *dirUsers
-}
-
-// installedUsers returns the user names of the signer's installed
-// directory, read with GetDirectory. A cached read is used only while v
-// reports exactly its version and hash; a fresh read is cached only when
-// it matches v. A directory that does not parse is an error, never "no
-// such user".
-func (s *Server) installedUsers(ctx context.Context, v *statusView) (map[string]bool, error) {
-	d, err := s.installedDirectory(ctx, v)
-	if err != nil {
-		return nil, err
-	}
-	return d.users, nil
-}
-
-// installedDirectory is installedUsers with the credential IDs as well,
-// under the same cache rule.
-func (s *Server) installedDirectory(ctx context.Context, v *statusView) (*dirUsers, error) {
-	s.dir.mu.Lock()
-	e := s.dir.entry
-	s.dir.mu.Unlock()
-	if e != nil && e.version == v.raw.DirectoryVersion && e.sha256 == v.raw.DirectorySHA256 {
-		return e, nil
-	}
-	cctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
-	defer cancel()
-	resp, err := s.signer.GetDirectory(cctx)
-	if err != nil {
-		return nil, err
-	}
-	fresh := &dirUsers{version: resp.Version, users: map[string]bool{}, creds: map[string][][]byte{}, credIDs: map[string]bool{}}
-	if resp.Version != 0 {
-		d, err := directory.Parse(resp.Directory)
-		if err != nil {
-			return nil, err
-		}
-		for _, u := range d.Users {
-			fresh.users[u.Name] = true
-			for _, c := range u.Credentials {
-				// Parse validated every ID as canonical unpadded base64url.
-				id, err := base64.RawURLEncoding.Strict().DecodeString(c.ID)
-				if err != nil {
-					return nil, fmt.Errorf("installed directory: credential id: %w", err)
-				}
-				fresh.creds[u.Name] = append(fresh.creds[u.Name], id)
-				fresh.credIDs[string(id)] = true
-			}
-		}
-		fresh.sha256 = sha256.Sum256(resp.Directory)
-	}
-	if fresh.version == v.raw.DirectoryVersion && fresh.sha256 == v.raw.DirectorySHA256 {
-		s.dir.mu.Lock()
-		s.dir.entry = fresh
-		s.dir.mu.Unlock()
-	}
-	return fresh, nil
 }
