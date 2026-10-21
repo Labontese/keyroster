@@ -100,12 +100,15 @@ func TestUserPending(t *testing.T) {
 			t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 	})
-	t.Run("invite_used_none_pending", func(t *testing.T) {
+	// Pre-merge review: a used invite always has its pending passkey, so
+	// "used, none pending" is an answer no server state holds. It is
+	// refused, and never answered with advice to reinvite, which would
+	// replace an invite another admin may just have sent.
+	t.Run("invite_used_none_pending_refused", func(t *testing.T) {
 		newUserAddEnv(t, agentCustody, answerPending(t, serverclient.PendingInvite{State: serverclient.InviteUsed, ExpiresAt: "2026-10-22T10:00:00Z"}))
 		code, stdout, stderr := run(t, "user", "pending", "carol")
-		if code != 0 || strings.Contains(stdout, "open") || !strings.HasPrefix(stdout, "The invite for carol was used") ||
-			!strings.HasSuffix(stdout, "run keyroster user add carol --reinvite.\n") {
-			t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		if code != 1 || stdout != "" || !strings.Contains(stderr, errBadPendingAnswer.Error()) || strings.Contains(stderr, "--reinvite") {
+			t.Fatalf("exit %d, stdout %q, stderr %q; want the refusal and no reinvite advice", code, stdout, stderr)
 		}
 	})
 	t.Run("not_pending", func(t *testing.T) {
@@ -175,6 +178,10 @@ func TestUserPendingPeerText(t *testing.T) {
 		{"unknown_invite_state", answerPending(t, serverclient.PendingInvite{State: "Open", ExpiresAt: "2026-10-22T10:00:00Z"}), bad},
 		{"padded_invite_expiry", answerPending(t, serverclient.PendingInvite{State: serverclient.InviteExpired, ExpiresAt: "2026-10-22T10:00:00Z" + paddedAdvice}), bad},
 		{"missing_invite", answerPending(t, serverclient.PendingInvite{}), bad},
+		// The invite is used exactly when its passkey is pending.
+		{"used_invite_without_credential", answerPending(t, serverclient.PendingInvite{State: serverclient.InviteUsed, ExpiresAt: "2026-10-22T10:00:00Z"}), bad},
+		{"open_invite_with_credential", answerPending(t, serverclient.PendingInvite{State: serverclient.InviteOpen, ExpiresAt: "2026-10-22T10:00:00Z"}, good), bad},
+		{"expired_invite_with_credential", answerPending(t, serverclient.PendingInvite{State: serverclient.InviteExpired, ExpiresAt: "2026-10-22T10:00:00Z"}, good), bad},
 		{"padded_404", answer(http.StatusNotFound, mustJSON(t, serverclient.APIError{Error: paddedAdvice})), nil},
 		// The test server is not at a policy origin, so the diagnosis's
 		// advice is the CLI's last word (adminOriginDiagnosis).

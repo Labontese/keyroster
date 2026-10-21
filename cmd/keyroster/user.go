@@ -410,6 +410,14 @@ func runUserPending(ctx context.Context, args []string, stdout, stderr io.Writer
 		}
 		creds = append(creds, pc)
 	}
+	// An invite is used exactly when it registered the passkey now
+	// pending: registration and reinvite each change both in one
+	// transaction, and the server reads both in one. Any other
+	// combination is refused, never answered with advice to reinvite,
+	// which would replace an invite another admin may just have sent.
+	if (inv.state == serverclient.InviteUsed) != (len(creds) > 0) {
+		return errBadPendingAnswer
+	}
 	_, err = io.WriteString(stdout, pendingText(name, inv, creds))
 	return err
 }
@@ -495,17 +503,14 @@ func checkPendingInvite(i serverclient.PendingInvite) (pendingInvite, error) {
 }
 
 // pendingText is what user pending prints: with no passkey yet, the
-// invite's state in the CLI's own words, and the advice last.
+// invite's state (open or expired; a used invite always has its passkey)
+// in the CLI's own words, and the advice last.
 func pendingText(name string, inv pendingInvite, creds []pendingCredential) string {
 	if len(creds) == 0 {
 		at := inv.expires.Format(time.RFC3339)
-		switch inv.state {
-		case serverclient.InviteExpired:
+		if inv.state == serverclient.InviteExpired {
 			return fmt.Sprintf("The invite for %s expired at %s, and no passkey was registered with it. "+
 				"Run keyroster user add %s --reinvite to send a new invite.\n", name, at, name)
-		case serverclient.InviteUsed:
-			return fmt.Sprintf("The invite for %s was used, and no passkey is pending approval. "+
-				"To let %s register a passkey again, run keyroster user add %s --reinvite.\n", name, name, name)
 		}
 		return fmt.Sprintf("%s has an open invite, valid until %s, but has not registered a passkey yet.\n", name, at)
 	}
