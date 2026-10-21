@@ -15,11 +15,17 @@ import (
 const inviteTokenLen = 43
 
 // handleEnroll serves GET /enroll/{token}: the invite page of a pending
-// account whose current invite has not expired. An unknown, expired or
-// replaced token gets the same "invite not valid" page with 404. The token
-// is looked up only as its SHA-256 and is never logged; the page carries
-// Referrer-Policy no-referrer (secure), so it does not leak to another
-// site. The page has no script yet; 02-08 adds the registration ceremony.
+// account whose current invite has not expired and has not registered a
+// passkey yet. An unknown, expired, replaced or used token gets the same
+// "invite not valid" page with 404, from the same lookup the registration
+// begin uses (PendingUserByInvite). The token is looked up only as its
+// SHA-256 and is never logged; the page carries Referrer-Policy
+// no-referrer (secure), so it does not leak to another site. For a valid
+// invite the page gets the begin and finish URLs of its registration
+// ceremony, built from the token the lookup has just accepted; the token
+// reaches the page only inside those two attribute values, which
+// html/template escapes, and the page's one script (static/app.js) reads
+// them from data- attributes.
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	v, err := s.currentStatus(r.Context())
 	if err != nil {
@@ -46,6 +52,8 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	d.User = u.Name
 	d.RPID = v.rp.RPID
 	d.Expires = u.InviteExpires.UTC().Format(time.RFC3339)
+	d.BeginURL = "/api/v1/enroll/" + token + "/begin"
+	d.FinishURL = "/api/v1/enroll/" + token + "/finish"
 	s.renderPage(w, v, http.StatusOK, "enroll", d)
 }
 

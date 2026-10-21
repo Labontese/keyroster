@@ -25,15 +25,26 @@ import (
 
 // COSE algorithm identifiers the signer accepts (RESEARCH Q3): ES256 (ECDSA
 // P-256 with SHA-256, ASN.1 DER signature), EdDSA (Ed25519) and RS256
-// (RSASSA-PKCS1-v1_5 with SHA-256, modulus of at least 2048 bits).
+// (RSASSA-PKCS1-v1_5 with SHA-256, a modulus of 2048 to 4096 bits and the
+// exponent 65537).
 const (
 	AlgES256 int64 = -7
 	AlgEdDSA int64 = -8
 	AlgRS256 int64 = -257
 )
 
-// minRSABits is the smallest RS256 modulus accepted.
-const minRSABits = 2048
+// The RS256 key bounds (owner hardening H2, 2026-10-21): a modulus of
+// minRSABits to maxRSABits bits and the public exponent rsaExponent. The
+// upper bound keeps verification cheap: go-webauthn v0.18.2 accepts an
+// RSA credential key of any size, and verifying even a garbage signature
+// under a 64k-bit modulus takes a noticeable fraction of a second. Every
+// authenticator in use makes 2048-bit keys with e = 65537 (Windows Hello
+// among them).
+const (
+	minRSABits  = 2048
+	maxRSABits  = 4096
+	rsaExponent = 65537
+)
 
 // authenticatorData flag bits (W3C WebAuthn L3 §6.1).
 const (
@@ -83,8 +94,11 @@ type Assertion struct {
 }
 
 // ParsePublicKey parses spki and requires the key type alg names: a P-256
-// ECDSA key for ES256, an Ed25519 key for EdDSA, an RSA key of at least
-// 2048 bits for RS256. Any other algorithm is ErrAlgorithm.
+// ECDSA key for ES256, an Ed25519 key for EdDSA, an RSA key of 2048 to 4096
+// bits with the exponent 65537 for RS256. Any other algorithm is
+// ErrAlgorithm. The server applies it at registration and the signer at
+// login and when it installs a directory, so all three accept the same
+// keys.
 func ParsePublicKey(alg int64, spki []byte) (crypto.PublicKey, error) {
 	switch alg {
 	case AlgES256, AlgEdDSA, AlgRS256:
@@ -105,7 +119,7 @@ func ParsePublicKey(alg int64, spki []byte) (crypto.PublicKey, error) {
 			return k, nil
 		}
 	case *rsa.PublicKey:
-		if alg == AlgRS256 && k.N.BitLen() >= minRSABits {
+		if n := k.N.BitLen(); alg == AlgRS256 && n >= minRSABits && n <= maxRSABits && k.E == rsaExponent {
 			return k, nil
 		}
 	}

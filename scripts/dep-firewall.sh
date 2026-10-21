@@ -30,6 +30,12 @@ BANNED=(
 	plugin
 	github.com/google/go-tpm-tools
 	github.com/google/go-tpm/tpm2/transport/simulator
+	# D-17: WebAuthn attestation, CBOR and JWT parsing stays in
+	# keyroster-server (02-08). The signer verifies assertions with
+	# internal/webauthn only, over SPKI DER, and never parses CBOR.
+	github.com/go-webauthn
+	github.com/fxamacker/cbor
+	github.com/golang-jwt
 )
 
 # EXCEPTIONS: "BANNED_PACKAGE IMPORTER" pairs.

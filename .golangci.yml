@@ -65,6 +65,8 @@ linters:
               desc: no templates in the signer (KEY-01)
             - pkg: text/template
               desc: no templates in the signer (KEY-01)
+            - pkg: github.com/go-webauthn
+              desc: "D-17: the signer verifies assertions with internal/webauthn only"
     forbidigo:
       forbid:
         - pattern: ^print(ln)?$

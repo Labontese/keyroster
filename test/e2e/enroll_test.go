@@ -17,7 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Labontese/keyroster/internal/server/servertest"
 	"github.com/Labontese/keyroster/internal/signerclient"
+	"github.com/Labontese/keyroster/internal/webauthn"
+	"github.com/Labontese/keyroster/internal/webauthn/webauthntest"
 )
 
 // runCLIIn runs the keyroster binary bin with c's config directories,
@@ -183,6 +186,127 @@ func TestUserAddInvite(t *testing.T) {
 		code, out, errOut = runCLIIn(t, admin, env.Signer.AdminAgent, "", keyrosterBin, "user", "add", "bob")
 		if code != 0 || !strings.Contains(out, "--user bob") {
 			t.Fatalf("control: the admin's user add bob exited %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
+		}
+	})
+
+	t.Run("token_never_logged", func(t *testing.T) {
+		if strings.Contains(env.Stderr.String(), token) {
+			t.Fatalf("the server log carries the invite token:\n%s", env.Stderr.String())
+		}
+	})
+}
+
+// TestRegisterPasskeyPending: an invited user registers a passkey through
+// the invite page's ceremony (begin, a soft ES256 authenticator, finish),
+// and keyroster user pending shows the admin the same fingerprint the
+// page got, byte for byte. The invite is then used up (the uniform 404),
+// and the signer's directory stays at version 0: the pending credential
+// grants nothing until an admin-signed directory binds it (AUTH-01, D-03).
+// The browser's own create() call is not exercised here (UNVERIFIED until
+// 02-13); servertest.Register stands in for it.
+func TestRegisterPasskeyPending(t *testing.T) {
+	env := startServerEnv(t, serverOpts{})
+	admin := newCLIEnv(t)
+	initArgs := []string{"init", "--server", env.URL, "--tls-root-file", env.CA.RootPEM, "--tls-pin", env.CA.RootPin,
+		"--root-pin", env.Signer.RootFingerprints[0], "--threshold", "1", "--user", "admin", "--admin-key", env.Signer.AdminFingerprint}
+	if code, stdout, stderr := runCLIIn(t, admin, env.Signer.AdminAgent, "", keyrosterBin, initArgs...); code != 0 {
+		t.Fatalf("admin keyroster init exited %d:\n%s\n%s", code, stdout, stderr)
+	}
+	code, stdout, stderr := runCLIIn(t, admin, env.Signer.AdminAgent, "", keyrosterBin, "user", "add", "alice")
+	if code != 0 {
+		t.Fatalf("keyroster user add alice exited %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", code, stdout, stderr, env.Stderr.String())
+	}
+	var inviteURL string
+	for _, l := range strings.Split(stdout, "\n") {
+		if strings.HasPrefix(l, "Invite for alice: ") {
+			inviteURL = strings.TrimPrefix(l, "Invite for alice: ")
+		}
+	}
+	if !strings.HasPrefix(inviteURL, env.URL+"/enroll/") {
+		t.Fatalf("no invite URL under %s:\n%s", env.URL, stdout)
+	}
+	token := strings.TrimPrefix(inviteURL, env.URL+"/enroll/")
+
+	// The page carries the ceremony's URLs and loads the one script.
+	page := env.mustGet(t, "/enroll/"+token)
+	if page.code != http.StatusOK || !strings.Contains(page.body, `data-begin="/api/v1/enroll/`+token+`/begin"`) ||
+		!strings.Contains(page.body, `<script src="/static/app.js" defer></script>`) {
+		t.Fatalf("GET invite = %d, want 200 with data-begin and /static/app.js:\n%s", page.code, page.body)
+	}
+	js := env.mustGet(t, "/static/app.js")
+	if js.code != http.StatusOK || !strings.Contains(js.body, "navigator.credentials.create") {
+		t.Fatalf("GET /static/app.js = %d", js.code)
+	}
+
+	post := func(path string, body []byte) *response {
+		t.Helper()
+		r, err := env.requestBody(http.MethodPost, path, body, map[string]string{"Content-Type": "application/json"})
+		if err != nil {
+			t.Fatalf("POST %s: %v\nserver log:\n%s", path, err, env.Stderr.String())
+		}
+		return r
+	}
+	begin := post("/api/v1/enroll/"+token+"/begin", nil)
+	if begin.code != http.StatusOK {
+		t.Fatalf("begin = %d %s\nserver log:\n%s", begin.code, begin.body, env.Stderr.String())
+	}
+	auth, err := webauthntest.New(webauthn.AlgES256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := servertest.Register(auth, serverRPID, env.URL, []byte(begin.body), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := post("/api/v1/enroll/"+token+"/finish", body)
+	if finish.code != http.StatusOK {
+		t.Fatalf("finish = %d %s\nserver log:\n%s", finish.code, finish.body, env.Stderr.String())
+	}
+	var got struct {
+		Fingerprint string `json:"fingerprint"`
+		Algorithm   string `json:"algorithm"`
+	}
+	if err := json.Unmarshal([]byte(finish.body), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Fingerprint != webauthn.Fingerprint(auth.Credential().SPKI) || got.Algorithm != "ES256" {
+		t.Fatalf("finish answer %+v, want the soft authenticator's fingerprint and ES256", got)
+	}
+
+	t.Run("user_pending_same_fingerprint", func(t *testing.T) {
+		code, out, errOut := runCLIIn(t, admin, env.Signer.AdminAgent, "", keyrosterBin, "user", "pending", "alice")
+		if code != 0 {
+			t.Fatalf("keyroster user pending alice exited %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
+		}
+		t.Logf("keyroster user pending alice:\n%s", out)
+		var shown string
+		for _, l := range strings.Split(out, "\n") {
+			if f := strings.Fields(l); len(f) == 2 && f[0] == "fingerprint" {
+				shown = f[1]
+			}
+		}
+		if shown != got.Fingerprint {
+			t.Fatalf("user pending shows fingerprint %q, the page got %q:\n%s", shown, got.Fingerprint, out)
+		}
+	})
+
+	t.Run("invite_used_up", func(t *testing.T) {
+		r := env.mustGet(t, "/enroll/"+token)
+		unknown := env.mustGet(t, "/enroll/"+strings.Repeat("A", 43))
+		if r.code != http.StatusNotFound || r.body != unknown.body {
+			t.Fatalf("GET used invite = %d, want the uniform 404:\n%s", r.code, r.body)
+		}
+	})
+
+	t.Run("signer_directory_unchanged", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		d, err := signerclient.GetDirectory(ctx, env.Signer.Socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Version != 0 || d.Authorized {
+			t.Fatalf("signer directory version %d (authorized %v) after registration, want 0", d.Version, d.Authorized)
 		}
 	})
 

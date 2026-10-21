@@ -944,6 +944,64 @@ func TestAdminUsers(t *testing.T) {
 	})
 }
 
+// TestAdminPendingRoute (pre-merge review): GET
+// /api/v1/admin/users/{name}/pending is wrapped like POST
+// /api/v1/admin/users, through the full handler. Every request requireAdmin
+// refuses gets the uniform 401 and never reaches the handler (no "pending
+// credentials listed" line, and an unknown name is not told apart), and
+// the per-client admin limiter answers 429 past its burst.
+func TestAdminPendingRoute(t *testing.T) {
+	listed := func(e *adminEnv) int { return strings.Count(e.log.String(), `"msg":"pending credentials listed"`) }
+	carol := serverclient.AdminPendingPath("carol")
+	t.Run("refused_requests_uniform_401", func(t *testing.T) {
+		e := newAdminEnv(t, Limits{})
+		e.mustAdd(t, "carol", false)
+		now := e.clock.Now()
+		digestOfOther := signedReq(t, e.admin, http.MethodGet, carol, carol, nil, now)
+		sum := sha256.Sum256([]byte("x"))
+		digestOfOther.Header.Set(adminauth.HeaderBodySHA256, hex.EncodeToString(sum[:]))
+		for _, tc := range []struct {
+			name string
+			req  *http.Request
+		}{
+			{"unsigned", signedReq(t, nil, http.MethodGet, carol, carol, nil, now)},
+			{"unsigned_unknown_name", signedReq(t, nil, http.MethodGet, serverclient.AdminPendingPath("nobody"), serverclient.AdminPendingPath("nobody"), nil, now)},
+			{"other_deployment_origin", signedReqFor(t, e.admin, "https://staging.example", http.MethodGet, carol, carol, nil, now)},
+			{"digest_mismatch", digestOfOther},
+			{"non_admin_key", signedReq(t, newSigner(t), http.MethodGet, carol, carol, nil, now)},
+			{"signed_for_another_name", signedReq(t, e.admin, http.MethodGet, carol, serverclient.AdminPendingPath("dave"), nil, now)},
+		} {
+			res := serve(e.s.Handler(), tc.req)
+			if res.Code != http.StatusUnauthorized || res.Body.String() != uniform401 {
+				t.Fatalf("%s: %d %q, want the uniform 401", tc.name, res.Code, res.Body)
+			}
+		}
+		if n := listed(e); n != 0 {
+			t.Fatalf("the pending handler ran %d times for refused requests", n)
+		}
+		// Control: the correctly signed GET is answered and logged.
+		if res := serve(e.s.Handler(), signedReq(t, e.admin, http.MethodGet, carol, carol, nil, now)); res.Code != http.StatusOK || listed(e) != 1 {
+			t.Fatalf("signed GET = %d %s (listed %d), want 200 and one line", res.Code, res.Body, listed(e))
+		}
+	})
+	t.Run("admin_limiter_429", func(t *testing.T) {
+		e := newAdminEnv(t, Limits{})
+		e.mustAdd(t, "carol", false) // one token of the burst
+		for i := range defaultAdminBurst - 1 {
+			if res := serve(e.s.Handler(), signedReq(t, e.admin, http.MethodGet, carol, carol, nil, e.clock.Now())); res.Code != http.StatusOK {
+				t.Fatalf("GET %d = %d %s, want 200 (within the burst)", i+1, res.Code, res.Body)
+			}
+		}
+		res := serve(e.s.Handler(), signedReq(t, e.admin, http.MethodGet, carol, carol, nil, e.clock.Now()))
+		if res.Code != http.StatusTooManyRequests {
+			t.Fatalf("GET burst+1 = %d %s, want 429", res.Code, res.Body)
+		}
+		if n := listed(e); n != defaultAdminBurst-1 {
+			t.Fatalf("%d pending lists answered, want %d", n, defaultAdminBurst-1)
+		}
+	})
+}
+
 func TestRequestOrigin(t *testing.T) {
 	// requestOrigin names the policy origin the Host reached, and otherwise
 	// the first policy origin in sorted order: never anything outside the
@@ -996,8 +1054,19 @@ func TestInvitePage(t *testing.T) {
 			!strings.Contains(r.Body.String(), "run it before keyroster login") {
 			t.Fatalf("= %d:\n%s", r.Code, r.Body)
 		}
-		if r.Header().Get("Referrer-Policy") != "no-referrer" || strings.Contains(r.Body.String(), "<script") {
-			t.Fatal("the invite page lacks Referrer-Policy no-referrer or carries a script")
+		body := r.Body.String()
+		if r.Header().Get("Referrer-Policy") != "no-referrer" {
+			t.Fatal("the invite page lacks Referrer-Policy no-referrer")
+		}
+		// One script, the embedded app.js, and no inline script (02-08):
+		// the page's data reaches it through data- attributes only.
+		if strings.Count(body, "<script") != 1 || !strings.Contains(body, `<script src="/static/app.js" defer></script>`) {
+			t.Fatalf("the invite page does not carry exactly the one app.js script:\n%s", body)
+		}
+		for _, want := range []string{`data-begin="/api/v1/enroll/` + token + `/begin"`, `data-finish="/api/v1/enroll/` + token + `/finish"`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("the invite page lacks %s:\n%s", want, body)
+			}
 		}
 		requireHeaders(t, "invite page", r)
 	})

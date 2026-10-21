@@ -20,12 +20,13 @@ import (
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/webauthn"
 )
 
 func init() {
 	register(command{
 		Name:    "user",
-		Summary: "manage keyroster users on the server (add: create a pending account and its invite)",
+		Summary: "manage keyroster users on the server (add: create a pending account and its invite; pending: show the passkey it registered)",
 		Run:     runUser,
 	})
 }
@@ -40,14 +41,16 @@ var errNoAdminKey = errors.New("no admin key: pass --admin-key SHA256:<fingerpri
 
 func runUser(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "user: want a subcommand: add")
+		_, _ = fmt.Fprintln(stderr, "user: want a subcommand: add or pending")
 		return errUsage
 	}
 	switch args[0] {
 	case "add":
 		return runUserAdd(ctx, args[1:], stdout, stderr)
+	case "pending":
+		return runUserPending(ctx, args[1:], stdout, stderr)
 	default:
-		_, _ = fmt.Fprintf(stderr, "user: unknown subcommand %q; want add\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "user: unknown subcommand %q; want add or pending\n", args[0])
 		return errUsage
 	}
 }
@@ -132,8 +135,22 @@ func runUserAdd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if err != nil {
 		return errors.New("the server's answer has no valid invite expiry")
 	}
-	_, err = io.WriteString(stdout, inviteText(cfg, name, inviteURL, expires.UTC()))
+	text := inviteText(cfg, name, inviteURL, expires.UTC())
+	if *reinvite {
+		text += reinviteText(name)
+	}
+	_, err = io.WriteString(stdout, text)
 	return err
+}
+
+// reinviteText is what user add --reinvite adds: the old invite is gone,
+// and so is any passkey registered with it that no directory binds yet. A
+// proposal directory already written for the user still names that
+// passkey; the server refuses to install it (02-09), and the admin
+// discards it.
+func reinviteText(name string) string {
+	return fmt.Sprintf("\nThe previous invite for %s no longer works, and neither does any passkey %s registered with it that you have not approved yet. "+
+		"If you already wrote a proposal directory for %s (keyroster user approve --out), discard it.\n", name, name, name)
 }
 
 // userAddError states the server's refusal of user add in the CLI's own
@@ -303,4 +320,215 @@ func parseInterspersed(fset *flag.FlagSet, args []string) ([]string, error) {
 		pos = append(pos, args[0])
 		args = args[1:]
 	}
+}
+
+// runUserPending is keyroster user pending NAME [--admin-key FP]: it asks
+// the server, through the SSHSIG-authenticated admin API, for the passkey
+// the pending account NAME registered through its invite, and prints its
+// fingerprint, algorithm, backup flags and registration time, so the admin
+// can compare the fingerprint with the one the user read off the
+// registration page. With no passkey yet it says whether the invite is
+// open (until when), expired or used, and advises a reinvite for the last
+// two. Every value printed is re-derived from validated data: the
+// fingerprint is computed from the SPKI after webauthn.ParsePublicKey
+// accepted it for its algorithm, never taken from the server's text, and
+// the invite state is one of three known words with an RFC 3339 time
+// (T-02-93). A pending passkey grants nothing until an admin-signed
+// directory binds it (02-09).
+func runUserPending(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("user pending", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	names, err := parseInterspersed(fset, args)
+	if err != nil {
+		return errUsage
+	}
+	if len(names) != 1 {
+		_, _ = fmt.Fprintln(stderr, "user pending: want exactly one user name")
+		return errUsage
+	}
+	name := names[0]
+	if !directory.ValidUserName(name) {
+		return fmt.Errorf("user name %q: use 1 to 64 characters a-z, 0-9, '.', '_' or '-', starting with a letter or digit", name)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := checkInviteConfig(cfg); err != nil {
+		return err
+	}
+	fp := *adminKey
+	if fp == "" {
+		fp = cfg.AdminKey
+	}
+	if fp == "" {
+		return errNoAdminKey
+	}
+	if err := trust.CheckPins([]string{fp}, 1); err != nil {
+		return fmt.Errorf("--admin-key: %w", err)
+	}
+	signer, closeAgent, err := adminSigner(fp)
+	if err != nil {
+		return err
+	}
+	defer closeAgent()
+	client, err := serverclient.New(serverclient.Config{Server: cfg.Server, RootsPEM: cfg.TLSRootsPEM, Pins: cfg.TLSPins, Stderr: stderr})
+	if err != nil {
+		return err
+	}
+	var resp serverclient.PendingAnswer
+	err = client.AdminJSON(ctx, http.MethodGet, serverclient.AdminPendingPath(name), nil, &resp, signer)
+	if err != nil {
+		if errors.Is(err, serverclient.ErrAdminAuth) {
+			// Name the cause when the saved server URL is not a policy
+			// origin, from the root-verified policy only.
+			if _, policy, terr := client.Trust(ctx, cfg.TrustPins, cfg.TrustThreshold); terr == nil && policy.WebAuthn != nil {
+				return adminOriginDiagnosis(err, client.Server(), policy.WebAuthn.Origins)
+			}
+		}
+		var he *serverclient.HTTPError
+		if errors.As(err, &he) && he.Code == http.StatusNotFound && he.APIErrorIs(serverclient.AdminErrNotPending) {
+			// True both for a name never invited and for a user already in
+			// the directory, whose pending entry ends with the approval
+			// (pre-merge review).
+			return fmt.Errorf("%s has no pending enrollment on this server: no invite and no unapproved passkey. "+
+				"To invite a new user, run keyroster user add %s; to let a user already in the directory register another passkey, run keyroster user add %s --reinvite",
+				name, name, name)
+		}
+		return err
+	}
+	inv, err := checkPendingInvite(resp.Invite)
+	if err != nil {
+		return err
+	}
+	creds := make([]pendingCredential, 0, len(resp.Credentials))
+	for _, c := range resp.Credentials {
+		pc, err := checkPendingCredential(c)
+		if err != nil {
+			return err
+		}
+		creds = append(creds, pc)
+	}
+	// An invite is used exactly when it registered the passkey now
+	// pending: registration and reinvite each change both in one
+	// transaction, and the server reads both in one. Any other
+	// combination is refused, never answered with advice to reinvite,
+	// which would replace an invite another admin may just have sent.
+	if (inv.state == serverclient.InviteUsed) != (len(creds) > 0) {
+		return errBadPendingAnswer
+	}
+	_, err = io.WriteString(stdout, pendingText(name, inv, creds))
+	return err
+}
+
+// pendingCredential is one pending passkey as user pending prints it,
+// every field re-derived or re-formatted by the CLI.
+type pendingCredential struct {
+	fingerprint    string
+	alg            string
+	backupEligible bool
+	backedUp       bool
+	registered     time.Time
+}
+
+// errBadPendingAnswer refuses a pending list the CLI cannot check. It
+// never repeats the server's text.
+var errBadPendingAnswer = errors.New("the server's pending passkey list does not check out, so nothing was printed")
+
+// checkPendingCredential validates one entry of the server's pending
+// list: the ID is canonical unpadded base64url of 1 to 1023 bytes, the
+// SPKI canonical standard base64 that webauthn.ParsePublicKey accepts for
+// the algorithm (EdDSA, ES256 or RS256), the server's fingerprint equals
+// the one computed from that SPKI, and the time is RFC 3339. The
+// fingerprint returned is the computed one.
+func checkPendingCredential(c serverclient.PendingCredential) (pendingCredential, error) {
+	id, err := base64.RawURLEncoding.Strict().DecodeString(c.ID)
+	if err != nil || len(id) == 0 || len(id) > 1023 || base64.RawURLEncoding.EncodeToString(id) != c.ID {
+		return pendingCredential{}, errBadPendingAnswer
+	}
+	var alg string
+	switch c.Alg {
+	case webauthn.AlgEdDSA:
+		alg = "EdDSA"
+	case webauthn.AlgES256:
+		alg = "ES256"
+	case webauthn.AlgRS256:
+		alg = "RS256"
+	default:
+		return pendingCredential{}, errBadPendingAnswer
+	}
+	spki, err := base64.StdEncoding.Strict().DecodeString(c.SPKI)
+	if err != nil || len(spki) == 0 || base64.StdEncoding.EncodeToString(spki) != c.SPKI {
+		return pendingCredential{}, errBadPendingAnswer
+	}
+	if _, err := webauthn.ParsePublicKey(c.Alg, spki); err != nil {
+		return pendingCredential{}, errBadPendingAnswer
+	}
+	fp := webauthn.Fingerprint(spki)
+	if c.Fingerprint != fp {
+		return pendingCredential{}, errBadPendingAnswer
+	}
+	if c.BackedUp && !c.BackupEligible {
+		return pendingCredential{}, errBadPendingAnswer
+	}
+	reg, err := time.Parse(time.RFC3339, c.RegisteredAt)
+	if err != nil {
+		return pendingCredential{}, errBadPendingAnswer
+	}
+	return pendingCredential{fingerprint: fp, alg: alg, backupEligible: c.BackupEligible, backedUp: c.BackedUp, registered: reg.UTC()}, nil
+}
+
+// pendingInvite is the invite state user pending prints, validated by
+// checkPendingInvite.
+type pendingInvite struct {
+	state   string // serverclient.InviteOpen, InviteExpired or InviteUsed
+	expires time.Time
+}
+
+// checkPendingInvite validates the invite state of the server's pending
+// answer: one of the three states and an RFC 3339 time. It never repeats
+// the server's text.
+func checkPendingInvite(i serverclient.PendingInvite) (pendingInvite, error) {
+	switch i.State {
+	case serverclient.InviteOpen, serverclient.InviteExpired, serverclient.InviteUsed:
+	default:
+		return pendingInvite{}, errBadPendingAnswer
+	}
+	exp, err := time.Parse(time.RFC3339, i.ExpiresAt)
+	if err != nil {
+		return pendingInvite{}, errBadPendingAnswer
+	}
+	return pendingInvite{state: i.State, expires: exp.UTC()}, nil
+}
+
+// pendingText is what user pending prints: with no passkey yet, the
+// invite's state (open or expired; a used invite always has its passkey)
+// in the CLI's own words, and the advice last.
+func pendingText(name string, inv pendingInvite, creds []pendingCredential) string {
+	if len(creds) == 0 {
+		at := inv.expires.Format(time.RFC3339)
+		if inv.state == serverclient.InviteExpired {
+			return fmt.Sprintf("The invite for %s expired at %s, and no passkey was registered with it. "+
+				"Run keyroster user add %s --reinvite to send a new invite.\n", name, at, name)
+		}
+		return fmt.Sprintf("%s has an open invite, valid until %s, but has not registered a passkey yet.\n", name, at)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Pending passkey for %s, not approved yet:\n", name)
+	for _, c := range creds {
+		fmt.Fprintf(&b, "\n  fingerprint  %s\n", c.fingerprint)
+		fmt.Fprintf(&b, "  algorithm    %s\n", c.alg)
+		fmt.Fprintf(&b, "  synced       %s (backup eligible: %s)\n", yesNo(c.backedUp), yesNo(c.backupEligible))
+		fmt.Fprintf(&b, "  registered   %s\n", c.registered.Format(time.RFC3339))
+	}
+	fmt.Fprintf(&b, "\nCompare the fingerprint with the one %s read off the registration page, over a channel you trust, before you approve it.\n", name)
+	return b.String()
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
 }

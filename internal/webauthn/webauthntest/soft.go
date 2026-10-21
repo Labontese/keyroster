@@ -68,11 +68,24 @@ func (a *Authenticator) Credential() webauthn.Credential {
 	return webauthn.Credential{ID: append([]byte(nil), a.id...), Alg: a.alg, SPKI: append([]byte(nil), a.spki...)}
 }
 
+// Sign signs data with the credential's private key the way its algorithm
+// signs WebAuthn data: Ed25519 over data itself, ECDSA (ASN.1 DER) and
+// RSASSA-PKCS1-v1_5 over SHA-256(data). Tests use it for attestation
+// statements that a credential signs itself (packed self-attestation).
+func (a *Authenticator) Sign(data []byte) ([]byte, error) {
+	if a.alg == webauthn.AlgEdDSA {
+		return a.key.Sign(rand.Reader, data, crypto.Hash(0))
+	}
+	h := sha256.Sum256(data)
+	return a.key.Sign(rand.Reader, h[:], crypto.SHA256)
+}
+
 // options are the knobs of Assert.
 type options struct {
 	flags      byte
 	typ        string
 	clientData []byte
+	authSuffix []byte
 }
 
 // Option changes one part of the assertion Assert produces.
@@ -83,6 +96,13 @@ func WithFlags(f byte) Option { return func(o *options) { o.flags = f } }
 
 // WithType sets the clientDataJSON type (default webauthn.get).
 func WithType(t string) Option { return func(o *options) { o.typ = t } }
+
+// WithAuthDataSuffix appends b to authenticatorData after the counter
+// (attested credential data or an extensions map, to go with an AT or ED
+// flag); the signature covers it.
+func WithAuthDataSuffix(b []byte) Option {
+	return func(o *options) { o.authSuffix = append([]byte(nil), b...) }
+}
 
 // WithClientDataJSON replaces the whole clientDataJSON; the signature is
 // made over it.
@@ -103,6 +123,7 @@ func (a *Authenticator) Assert(rpID, origin string, challenge [32]byte, opts ...
 	}
 	rp := sha256.Sum256([]byte(rpID))
 	authData := append(rp[:], o.flags, 0, 0, 0, 0)
+	authData = append(authData, o.authSuffix...)
 	cd := o.clientData
 	if cd == nil {
 		cd = fmt.Appendf(nil, `{"type":%q,"challenge":%q,"origin":%q,"crossOrigin":false}`,

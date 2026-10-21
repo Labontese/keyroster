@@ -26,6 +26,55 @@ const (
 	AdminErrInDirectory = "already in directory"
 )
 
+// AdminErrNotPending is the 404 refusal of AdminPendingPath for a name
+// that has no pending account.
+const AdminErrNotPending = "not pending"
+
+// AdminPendingPath is the admin route that lists the pending credentials
+// of the pending account name (keyroster user pending). name must already
+// satisfy directory.ValidUserName, whose alphabet needs no escaping.
+func AdminPendingPath(name string) string { return AdminUsersPath + "/" + name + "/pending" }
+
+// PendingAnswer is the 200 answer of AdminPendingPath: the state of the
+// pending account's current invite and the passkeys registered with it.
+type PendingAnswer struct {
+	Invite      PendingInvite       `json:"invite"`
+	Credentials []PendingCredential `json:"credentials"`
+}
+
+// The states of PendingInvite: a current invite that has not expired and
+// has registered no passkey, one that expired unused, and one that
+// registered its passkey.
+const (
+	InviteOpen    = "open"
+	InviteExpired = "expired"
+	InviteUsed    = "used"
+)
+
+// PendingInvite is the state of a pending account's current invite:
+// State is InviteOpen, InviteExpired or InviteUsed, and ExpiresAt the RFC
+// 3339 UTC time the invite expires or expired.
+type PendingInvite struct {
+	State     string `json:"state"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// PendingCredential is one entry of the answer of AdminPendingPath: a
+// passkey registered through an invite and not yet bound by an
+// admin-signed directory. ID is the unpadded base64url credential ID, SPKI
+// the standard base64 of the public key's SPKI DER, Fingerprint
+// "SHA256:" and the unpadded base64 of SHA-256(SPKI DER), RegisteredAt RFC
+// 3339. The CLI shows only values it re-derives from ID, Alg and SPKI.
+type PendingCredential struct {
+	ID             string `json:"id"`
+	Alg            int64  `json:"alg"`
+	SPKI           string `json:"spki"`
+	Fingerprint    string `json:"fingerprint"`
+	BackupEligible bool   `json:"backup_eligible"`
+	BackedUp       bool   `json:"backed_up"`
+	RegisteredAt   string `json:"registered_at"`
+}
+
 // AddUserRequest is the body of a POST to AdminUsersPath.
 type AddUserRequest struct {
 	Name     string `json:"name"`
@@ -76,7 +125,8 @@ func (e *HTTPError) Unwrap() error { return e.err }
 func (e *HTTPError) APIErrorIs(s string) bool { return e.api != "" && e.api == s }
 
 // AdminJSON sends an admin API request: in as the JSON body of method to
-// path, signed with signer (in the CLI, agentSigner over the per-OS
+// path (a nil in sends no body, and the signature covers the SHA-256 of the
+// empty body, as for a GET), signed with signer (in the CLI, agentSigner over the per-OS
 // dialAgent, so the private key never leaves ssh-agent), and decodes a 2xx
 // JSON answer into out. The signature covers the Client's canonical server
 // URL (the origin the request is for, see adminauth), the exact
@@ -90,11 +140,14 @@ func (e *HTTPError) APIErrorIs(s string) bool { return e.api != "" && e.api == s
 // clock by more than a minute; a 413 is ErrAdminBodyTooLarge; a 429 says
 // to wait. Any other non-2xx answer is an *HTTPError.
 func (c *Client) AdminJSON(ctx context.Context, method, path string, in, out any, signer ssh.Signer) error {
-	body, err := json.Marshal(in)
-	if err != nil {
-		return err
+	var body []byte
+	if in != nil {
+		var err error
+		if body, err = json.Marshal(in); err != nil {
+			return err
+		}
 	}
-	err = c.send(ctx, method, path, body, out, func(req *http.Request) error {
+	err := c.send(ctx, method, path, body, out, func(req *http.Request) error {
 		h, err := adminauth.Sign(signer, c.base.String(), req.Method, req.URL.RequestURI(), body, time.Now())
 		if err != nil {
 			return fmt.Errorf("sign the admin request with %s: %w", ssh.FingerprintSHA256(signer.PublicKey()), err)
