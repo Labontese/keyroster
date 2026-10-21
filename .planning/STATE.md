@@ -3,11 +3,11 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-08 Tasks 1-3 done on p02/08-registration; PR awaiting owner merge gate (Task 4)
-last_updated: "2026-10-21T05:13:16.926Z"
+stopped_at: 02-09 Tasks 1-2 done on p02/09-approve; PR awaiting owner merge gate (Task 3)
+last_updated: "2026-10-21T18:17:18.126Z"
 last_activity: 2026-10-21
-last_activity_desc: 02-08 registration executed; PR awaiting merge gate
-state_head: 949b713ad6987a5ad832d485b7c5fa3de97e509c
+last_activity_desc: 02-09 approve executed; PR awaiting merge gate
+state_head: d7a62182576bbac7540759dd690e87fd322ae264
 progress:
   total_phases: 6
   completed_phases: 0
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 8 of 14
-Status: 02-08 awaiting the owner merge gate (p02/08-registration); 02-01 to 02-07 are merged
-Last activity: 2026-10-21 — 02-08 registration executed (go-webauthn registration through invites, pending SPKI credentials, keyroster user pending, owner hardening H1-H4)
+Plan: 9 of 14
+Status: 02-09 awaiting the owner merge gate (p02/09-approve); 02-01 to 02-08 are merged
+Last activity: 2026-10-21 — 02-09 approve executed (admin-signed directory pipeline, user approve/list/disable/enable, directory show/sign/install, server directory mirror and install forwarding under pendingMu, enrollment runbook)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -85,6 +85,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P06 | 45 min | 3 tasks | 30 files |
 | Phase 02 P07 | 5h40m | 2 tasks | 34 files |
 | Phase 02 P08 | about 1h | 2 tasks | 31 files |
+| Phase 02 P09 | about 40 min | 2 tasks | 21 files |
 
 ## Accumulated Context
 
@@ -200,6 +201,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-08: registration sessions keyed by (invite hash, challenge) and consumed with DELETE ... RETURNING; the invite is used only by an UPDATE conditioned on current, unused and unexpired; one pending credential per user
 - [Phase 02]: 02-08 pre-merge review, owner decision E1 (2026-10-21): packed self-attestation (attStmt exactly {alg, sig}, alg equal to the key's and one of the offered three, zero AAGUID) is rewritten to "none" before go-webauthn sees it, without verifying the self-signature (WebAuthn L3 5.1.3: Chromium and Firefox forward it under attestation "none"; D-05 any authenticator); every other format stays refused before any verifier runs
 - [Phase 02]: 02-08 pre-merge review: GET /api/v1/admin/users/{name}/pending answers serverclient.PendingAnswer {invite:{state open|expired|used, expires_at}, credentials} read from one transaction (invariant: used iff one pending credential); the finish route looks up the live invite before parsing the body; the enroll refusal log never carries go-webauthn's client-derived Details
+- [Phase 02]: 02-09: one directory pipeline (verify trust and base, build, Validate, CheckPolicy, diff, confirmSign or --yes, SSHSIG under keyroster/directory/v1, install or proposal); proposals are directory.json + directory.json.sigs (+ base.sha256 note), default keyroster-directory-v<N> when quorum > 1
+- [Phase 02]: 02-09: currentDirectory is the one directory mirror (replaces 02-07's dirCache): reads only through currentStatus, version 0 without a signer read, fails closed on a failed or mismatched refresh; the install handler drops the status cache after every InstallDirectory
+- [Phase 02]: 02-09: POST /api/v1/admin/directory runs under pendingMu (also taken by a reinvite), refuses credential_not_pending, and cleans up with self-healing DeleteBound (ID and user matched); keyroster user list prints users from the verified directory, never the server's fingerprints
 
 ### Pending Todos
 
@@ -234,6 +238,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T05:13:16.704Z
-Stopped at: 02-08 Tasks 1-3 done on p02/08-registration; PR awaiting owner merge gate (Task 4)
+Last session: 2026-10-21T18:17:17.897Z
+Stopped at: 02-09 Tasks 1-2 done on p02/09-approve; PR awaiting owner merge gate (Task 3)
 Resume file: None
