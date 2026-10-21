@@ -10,6 +10,8 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
+	"math/big"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -293,5 +295,78 @@ func TestWebAuthnParsePublicKeyRefusals(t *testing.T) {
 	}
 	if _, err := webauthn.ParsePublicKey(webauthn.AlgRS256, newAuth(t, webauthn.AlgRS256).Credential().SPKI); err != nil {
 		t.Fatalf("control: RSA-2048 for RS256: %v", err)
+	}
+}
+
+// rsaSPKI is the SPKI DER of an RSA public key whose modulus is a random
+// odd number of exactly bits bits and whose exponent is e. It has no
+// private key: the bounds are checked before anything uses the key.
+func rsaSPKI(t *testing.T, bits, e int) []byte {
+	t.Helper()
+	buf := make([]byte, (bits+7)/8)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	n := new(big.Int).SetBytes(buf)
+	for i := bits; i < len(buf)*8; i++ {
+		n.SetBit(n, i, 0)
+	}
+	n.SetBit(n, bits-1, 1)
+	n.SetBit(n, 0, 1)
+	spki, err := x509.MarshalPKIXPublicKey(&rsa.PublicKey{N: n, E: e})
+	if err != nil {
+		t.Fatalf("marshal a %d-bit key with e=%d: %v", bits, e, err)
+	}
+	return spki
+}
+
+// TestWebAuthnRSABounds (owner hardening H2, 2026-10-21): RS256 takes only
+// a modulus of 2048 to 4096 bits and the exponent 65537. go-webauthn
+// v0.18.2 puts no upper bound on an RSA credential key, and verifying
+// even a garbage signature under a 64k-bit modulus costs a noticeable
+// fraction of a second, so the shared verifier bounds it at registration
+// (the server) and at login (the signer) alike.
+func TestWebAuthnRSABounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bits int
+		e    int
+		ok   bool
+	}{
+		{"rsa1024", 1024, 65537, false},
+		{"rsa2047", 2047, 65537, false},
+		{"rsa2048", 2048, 65537, true},
+		{"rsa3072", 3072, 65537, true},
+		{"rsa4096", 4096, 65537, true},
+		{"rsa4097", 4097, 65537, false},
+		{"rsa8192", 8192, 65537, false},
+		{"rsa65536_huge", 65536, 65537, false},
+		{"exponent_3", 2048, 3, false},
+		{"exponent_65539", 2048, 65539, false},
+		{"exponent_2_pow_31_minus_1", 2048, 1<<31 - 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := webauthn.ParsePublicKey(webauthn.AlgRS256, rsaSPKI(t, tc.bits, tc.e))
+			if tc.ok && err != nil {
+				t.Fatalf("ParsePublicKey = %v, want accepted", err)
+			}
+			if !tc.ok && !errors.Is(err, webauthn.ErrPublicKey) {
+				t.Fatalf("ParsePublicKey = %v, want ErrPublicKey", err)
+			}
+		})
+	}
+	// At login the bound holds before any signature work: a credential
+	// with an 8192-bit or a 64k-bit key fails as ErrPublicKey, not as a
+	// signature that did not verify.
+	for _, bits := range []int{8192, 65536} {
+		t.Run("login_refuses_"+strconv.Itoa(bits), func(t *testing.T) {
+			auth := newAuth(t, webauthn.AlgRS256)
+			cred := auth.Credential()
+			cred.SPKI = rsaSPKI(t, bits, 65537)
+			err := webauthn.VerifyAssertion(cred, testRP, []string{testOrigin}, testChallenge, auth.Assert(testRP, testOrigin, testChallenge))
+			if !errors.Is(err, webauthn.ErrSignature) || !errors.Is(err, webauthn.ErrPublicKey) {
+				t.Fatalf("VerifyAssertion = %v, want ErrSignature wrapping ErrPublicKey", err)
+			}
+		})
 	}
 }

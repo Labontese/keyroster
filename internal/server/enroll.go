@@ -48,6 +48,20 @@ const (
 	reasonDuplicateCredential   = "duplicate_credential"
 	reasonSignerUnavailable     = "signer_unavailable"
 	reasonInternalError         = "internal_error"
+	// Added with the owner's hardening decisions of 2026-10-21 (H1, H3).
+	reasonUnsupportedAttestation = "unsupported_attestation"
+	reasonBodyTooLarge           = "body_too_large"
+)
+
+// The body limits of the registration routes (owner hardening H3). Begin
+// takes no input beyond the URL's token, so 1 KiB only leaves room for a
+// client that sends an empty JSON object. A finish with attestation none
+// is a few KiB even at the largest credential ID (1023 bytes) and an
+// RSA-4096 key, base64url-encoded; 64 KiB leaves room for the extra
+// members browsers add, and bounds what the parser ever sees.
+const (
+	maxEnrollBeginBody  = 1 << 10
+	maxEnrollFinishBody = 64 << 10
 )
 
 // The client answers of the registration routes. They are fixed texts: no

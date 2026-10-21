@@ -133,7 +133,7 @@ func Register(a *webauthntest.Authenticator, rpID, origin string, options []byte
 	rp := sha256.Sum256([]byte(rpID))
 	authData := append([]byte(nil), rp[:]...)
 	authData = append(authData, flags, 0, 0, 0, 0)
-	authData = append(authData, make([]byte, 16)...) // AAGUID
+	authData = append(authData, make([]byte, 16)...)                    // AAGUID
 	authData = binary.BigEndian.AppendUint16(authData, uint16(len(id))) //nolint:gosec // G115: len(id) <= 0xffff, checked above
 	authData = append(authData, id...)
 	authData = append(authData, cose...)
