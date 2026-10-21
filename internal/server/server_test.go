@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/server/web"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/serverdb"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
 )
@@ -78,6 +80,8 @@ type fakeSigner struct {
 	mu        sync.Mutex
 	status    *wire.StatusResponse
 	statusErr error
+	dir       *wire.GetDirectoryResponse
+	dirErr    error
 	calls     map[string]int
 
 	heldMethod string
@@ -86,7 +90,7 @@ type fakeSigner struct {
 }
 
 func newFakeSigner(st *wire.StatusResponse) *fakeSigner {
-	return &fakeSigner{status: st, calls: map[string]int{}}
+	return &fakeSigner{status: st, dir: &wire.GetDirectoryResponse{}, calls: map[string]int{}}
 }
 
 // setStatus sets the next Status result.
@@ -94,6 +98,13 @@ func (f *fakeSigner) setStatus(st *wire.StatusResponse, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.status, f.statusErr = st, err
+}
+
+// setDirectory sets the next GetDirectory result.
+func (f *fakeSigner) setDirectory(d *wire.GetDirectoryResponse, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dir, f.dirErr = d, err
 }
 
 // count returns the number of calls to method so far.
@@ -155,6 +166,17 @@ func (f *fakeSigner) Status(ctx context.Context) (*wire.StatusResponse, error) {
 	return st, err
 }
 
+func (f *fakeSigner) GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error) {
+	f.mu.Lock()
+	f.calls["GetDirectory"]++
+	d, err := f.dir, f.dirErr
+	f.mu.Unlock()
+	if err := f.enter(ctx, "GetDirectory"); err != nil {
+		return nil, err
+	}
+	return d, err
+}
+
 // testClock is an injectable clock.
 type testClock struct {
 	mu  sync.Mutex
@@ -176,17 +198,35 @@ func (c *testClock) set(t time.Time) {
 // t0 is the start of every test clock.
 var t0 = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 
-// newTestServer builds a Server on fake with an injected clock at t0 and
-// a recording logger, and returns the buffer the logger writes to.
+// newTestServer builds a Server on fake with an injected clock at t0, a
+// recording logger and a fresh state database in a temporary directory,
+// and returns the buffer the logger writes to.
 func newTestServer(t *testing.T, fake *fakeSigner) (*Server, *testClock, *logBuffer) {
+	t.Helper()
+	return newTestServerLimits(t, fake, Limits{})
+}
+
+// newTestServerLimits is newTestServer with rate limits lim.
+func newTestServerLimits(t *testing.T, fake *fakeSigner, lim Limits) (*Server, *testClock, *logBuffer) {
 	t.Helper()
 	clock := &testClock{now: t0}
 	logger, buf := newLogger()
-	s, err := newServer(Config{RPID: testRPID, Clock: clock.Now, Logger: logger}, fake)
+	s, err := newServer(Config{RPID: testRPID, Clock: clock.Now, Logger: logger, DB: openTestDB(t), Limits: lim}, fake)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s, clock, buf
+}
+
+// openTestDB opens a fresh server state database in a temporary directory.
+func openTestDB(t *testing.T) *serverdb.DB {
+	t.Helper()
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 // testPolicy returns a canonical version-1 policy; withRP adds the

@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-06 Tasks 1-3 done on p02/06-server-core; PR awaiting owner merge gate (Task 4)
-last_updated: "2026-10-19T09:30:20.523Z"
-last_activity: 2026-10-19
-last_activity_desc: 02-06 server-core executed; PR awaiting merge gate
-state_head: 4d222d0a4e48e71fc9059b11ac71bef24b550f0e
+stopped_at: 02-07 Tasks 1-2 done on p02/07-admin-api; PR awaiting owner merge gate (Task 3)
+last_updated: "2026-10-20T11:05:56.924Z"
+last_activity: 2026-10-20
+last_activity_desc: 02-07 admin-api executed; PR awaiting merge gate
+state_head: 1b61c5bfd72f5dcaad023d155cae5509c49677c4
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 27
+  completed_plans: 28
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 6 of 14
-Status: 02-06 awaiting the owner merge gate (p02/06-server-core); 02-01 to 02-05 are merged
-Last activity: 2026-10-19 — 02-06 server-core executed (keyroster-server with strict headers and the custody banner, pinned keyroster init, certificate reload, systemd units and server runbook)
+Plan: 7 of 14
+Status: 02-07 awaiting the owner merge gate (p02/07-admin-api); 02-01 to 02-06 are merged
+Last activity: 2026-10-20 — 02-07 admin-api executed (SSHSIG admin API, pending accounts with hashed invites, invite page, rate limits, keyroster user add)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -83,6 +83,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P04 | 50 min | 2 tasks | 13 files |
 | Phase 02 P05 | 45 min | 2 tasks | 22 files |
 | Phase 02 P06 | 45 min | 3 tasks | 30 files |
+| Phase 02 P07 | 5h40m | 2 tasks | 34 files |
 
 ## Accumulated Context
 
@@ -190,6 +191,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-06: the /api/v1/trust document and the Keyroster-Custody header are defined once in internal/serverclient (the server imports them); a 2xx without Keyroster-Custody is refused (ErrNoCustody) and a 503 is never parsed for custody
 - [Phase 02]: 02-06: serverclient.Trust also requires the bundle's policy_sha256 to match the served policy (ErrPolicyNotBundled); ErrTrustRootNotPinned never names the served roots
 - [Phase 02]: 02-06: keyroster-server registers SIGHUP as the first statement of serve; every successful certificate load logs 'tls certificate loaded' (fingerprint, not_after, trigger start|file_change|sighup) as JSON on stderr
+- [Phase 02]: 02-07: admin-api/v1 SSHSIG over method, raw request-target, body SHA-256, timestamp (+-120 s) and nonce; nonces kept 241 s
+- [Phase 02]: 02-07: ParseServerURL accepts only letter-digit-hyphen DNS hosts and a non-empty port (found by FuzzParseInviteURL)
+- [Phase 02]: 02-07: the CLI parses the server's invite URL as structured data and prints it rebuilt
 
 ### Pending Todos
 
@@ -221,6 +225,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-19T09:30:20.304Z
-Stopped at: 02-06 Tasks 1-3 done on p02/06-server-core; PR awaiting owner merge gate (Task 4)
+Last session: 2026-10-20T11:05:56.685Z
+Stopped at: 02-07 Tasks 1-2 done on p02/07-admin-api; PR awaiting owner merge gate (Task 3)
 Resume file: None

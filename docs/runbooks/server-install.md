@@ -191,7 +191,11 @@ journalctl -u keyroster-server
 
 The unit runs the server as `keyroster-server` with only
 `CAP_NET_BIND_SERVICE`. Everything else is read-only (`ProtectSystem=strict`,
-`ReadOnlyPaths=/etc/keyroster/tls`). Network access is limited to IPv4,
+`ReadOnlyPaths=/etc/keyroster/tls`), except its state directory
+`/var/lib/keyroster-server` (`StateDirectory=`, mode 0700, `--state-dir`). That
+directory holds `server.db`: pending accounts, invites (as SHA-256 only) and
+used admin nonces. Nothing in it is authority; only the admin-signed directory
+the signer installs binds a passkey to a user. Network access is limited to IPv4,
 IPv6 and Unix sockets. At start the server asks the signer for its Status,
 retrying for up to 30 s. It then exits non-zero if:
 
@@ -302,6 +306,14 @@ a bundle that the pinned roots did not sign.
 
    Take the `--root-pin` fingerprints and `--threshold` from the root
    ceremony's paper record, never from the server.
+
+   For an admin, `--server` must be one of the policy's webauthn origins,
+   the URL the login page is served from. Admin commands sign that origin,
+   and the server refuses an admin request signed for any other origin
+   with "admin authentication failed", so a signed request cannot be
+   replayed against another deployment that trusts the same admin key.
+   Init stores the URL in canonical form: a lowercase host, no trailing
+   dot and no `:443`.
 
    Init checks two things:
    - the served trust bundle carries its own roots' signatures;

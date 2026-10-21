@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -35,13 +36,17 @@ func FuzzParseCustodyHeader(f *testing.F) {
 	})
 }
 
-// FuzzParseServerURL: an accepted server URL is https, has a DNS host and
-// no path, and normalizes to itself.
+// ldhHost is a DNS name in letter-digit-hyphen form, checked here with a
+// regular expression rather than the function's own loop.
+var ldhHost = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
+
+// FuzzParseServerURL: an accepted server URL is https, has a DNS host in
+// letter-digit-hyphen form and no path, and normalizes to itself.
 func FuzzParseServerURL(f *testing.F) {
 	for _, s := range []string{
 		"https://keyroster.example", "https://keyroster.example:8443", "http://keyroster.example",
 		"https://192.0.2.1", "https://[::1]", "https://keyroster.example/x", "https://u@h.example", "https://h.example:0",
-		"https://[fe80::1%25eth0]:8443", "https://192.0.2.1.", "https://127.1",
+		"https://[fe80::1%25eth0]:8443", "https://192.0.2.1.", "https://127.1", "https://a!b.example", "https://a$b.example",
 	} {
 		f.Add(s)
 	}
@@ -56,8 +61,11 @@ func FuzzParseServerURL(f *testing.F) {
 		_, addrErr := netip.ParseAddr(h)
 		allDigits := last != "" && strings.Trim(last, "0123456789") == ""
 		if u.Scheme != "https" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil ||
-			u.Hostname() == "" || strings.ContainsAny(h, ":%") || addrErr == nil || allDigits {
+			u.Hostname() == "" || strings.ContainsAny(h, ":%") || addrErr == nil || allDigits || !ldhHost.MatchString(h) {
 			t.Fatalf("ParseServerURL(%q) accepted %q", s, u)
+		}
+		if strings.HasSuffix(u.Host, ":") {
+			t.Fatalf("ParseServerURL(%q) accepted %q with an empty port", s, u)
 		}
 		again, err := ParseServerURL(u.String())
 		if err != nil || again.String() != u.String() {

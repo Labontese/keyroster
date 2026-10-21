@@ -81,7 +81,8 @@ func startServerEnv(t *testing.T, opts serverOpts) *serverEnv {
 	ca := newTestCA(t, serverRPID)
 	e := &serverEnv{Signer: sg, CA: ca, Port: port, URL: "https://" + serverRPID + ":" + strconv.Itoa(port)}
 	e.Cmd, e.Stderr, e.Done = startDaemon(t, "keyroster-server", envWithout("SSH_AUTH_SOCK"), serverBin, "serve",
-		"--listen", "127.0.0.1:"+strconv.Itoa(port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", sg.Socket)
+		"--listen", "127.0.0.1:"+strconv.Itoa(port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", sg.Socket,
+		"--state-dir", filepath.Join(t.TempDir(), "state"))
 	waitFor(t, "keyroster-server /healthz", e.Done, e.Stderr, func() bool {
 		r, err := e.get("/healthz")
 		return err == nil && r.code == http.StatusOK
@@ -398,7 +399,8 @@ func TestServerSIGHUPDuringStartup(t *testing.T) {
 	socket := filepath.Join(shortTempDir(t), "nothing.sock") // nothing listens here
 	port := freePort(t)
 	cmd, log, done := startDaemon(t, "keyroster-server", envWithout("SSH_AUTH_SOCK"), serverBin, "serve",
-		"--listen", "127.0.0.1:"+strconv.Itoa(port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", socket)
+		"--listen", "127.0.0.1:"+strconv.Itoa(port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", socket,
+		"--state-dir", filepath.Join(t.TempDir(), "state"))
 	time.Sleep(500 * time.Millisecond)
 	select {
 	case <-done:
@@ -428,7 +430,7 @@ func TestServerRefusesStart(t *testing.T) {
 	serve := func(t *testing.T, socket, cert, key string) (int, string) {
 		t.Helper()
 		return runBin(t, serverBin, "", "serve", "--listen", "127.0.0.1:"+strconv.Itoa(freePort(t)),
-			"--tls-cert", cert, "--tls-key", key, "--signer-socket", socket)
+			"--tls-cert", cert, "--tls-key", key, "--signer-socket", socket, "--state-dir", filepath.Join(t.TempDir(), "state"))
 	}
 	ca := newTestCA(t, serverRPID)
 
@@ -463,7 +465,8 @@ func TestServerRefusesStart(t *testing.T) {
 		e := &serverEnv{CA: ca, Port: freePort(t)}
 		e.URL = "https://" + serverRPID + ":" + strconv.Itoa(e.Port)
 		e.Cmd, e.Stderr, e.Done = startDaemon(t, "keyroster-server", envWithout("SSH_AUTH_SOCK"), serverBin, "serve",
-			"--listen", "127.0.0.1:"+strconv.Itoa(e.Port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", rp.Socket)
+			"--listen", "127.0.0.1:"+strconv.Itoa(e.Port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", rp.Socket,
+			"--state-dir", filepath.Join(t.TempDir(), "state"))
 		waitFor(t, "keyroster-server /healthz", e.Done, e.Stderr, func() bool {
 			r, err := e.get("/healthz")
 			return err == nil && r.code == http.StatusOK

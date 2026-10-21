@@ -191,7 +191,11 @@ type Client struct {
 
 // ParseServerURL validates a server URL: scheme https, a DNS host name
 // (never an IP literal), an optional port, and no user info, path, query
-// or fragment. It returns the URL normalized to https://host[:port].
+// or fragment. It returns the URL normalized to https://host[:port], the
+// serialization of the policy's webauthn origins: the host lowercased,
+// one trailing dot removed and a port of 443 dropped. The admin API signs
+// that origin (internal/adminauth), so every spelling of one server URL
+// signs the same bytes.
 func ParseServerURL(s string) (*url.URL, error) {
 	u, err := url.Parse(s)
 	if err != nil {
@@ -213,13 +217,23 @@ func ParseServerURL(s string) (*url.URL, error) {
 	if isIPLiteral(host) {
 		return nil, fmt.Errorf("server URL %q: the host is an IP address; use the server's DNS name (the WebAuthn RP ID)", s)
 	}
+	if !isDNSName(host) {
+		return nil, fmt.Errorf("server URL %q: the host must be a DNS name: dot-separated labels of letters, digits and inner hyphens", s)
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return nil, fmt.Errorf("server URL %q: empty port", s)
+	}
+	hostport := strings.ToLower(strings.TrimSuffix(host, "."))
 	if p := u.Port(); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 1 || n > 65535 || p[0] == '0' {
 			return nil, fmt.Errorf("server URL %q: bad port", s)
 		}
+		if n != 443 {
+			hostport += ":" + p
+		}
 	}
-	return &url.URL{Scheme: "https", Host: u.Host}, nil
+	return &url.URL{Scheme: "https", Host: hostport}, nil
 }
 
 // numericLabel is a last host label that resolvers read as (part of) an
@@ -239,6 +253,32 @@ func isIPLiteral(host string) bool {
 		return true
 	}
 	return numericLabel.MatchString(strings.ToLower(h[strings.LastIndexByte(h, '.')+1:]))
+}
+
+// isDNSName reports whether host is a DNS name in letter-digit-hyphen
+// form: at most 253 characters (one trailing dot allowed), labels of 1 to
+// 63 letters, digits and hyphens, no label starting or ending with a
+// hyphen. url.Parse also accepts RFC 3986 sub-delimiters such as '!', '$',
+// '(' and ';' in a host; none of them is part of a DNS name, and a server
+// URL keyroster prints (in an invite or a keyroster init line) must carry
+// no shell metacharacter.
+func isDNSName(host string) bool {
+	h := strings.TrimSuffix(host, ".")
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(h, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // PinOf returns the pin of a certificate: "sha256/" and the standard
@@ -377,6 +417,13 @@ func (c *Client) PostJSON(ctx context.Context, path string, in, out any) error {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
+	return c.send(ctx, method, path, body, out, nil)
+}
+
+// send is do with a prepare step, which runs on the finished request just
+// before it is sent (AdminJSON signs it there). A non-2xx answer other
+// than 503 is an *HTTPError.
+func (c *Client) send(ctx context.Context, method, path string, body []byte, out any, prepare func(*http.Request) error) error {
 	if !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("serverclient: path %q must start with /", path)
 	}
@@ -391,6 +438,11 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if prepare != nil {
+		if err := prepare(req); err != nil {
+			return err
+		}
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -414,12 +466,16 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		return fmt.Errorf("%s%s: %w", c.base, path, err)
 	}
 	if !ok {
+		he := &HTTPError{Code: resp.StatusCode, date: resp.Header.Get("Date"), retryAfter: resp.Header.Get("Retry-After")}
 		var apiErr APIError
 		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
 			// The server's own text, as a short delimited excerpt.
-			return fmt.Errorf("%s%s: HTTP %d: %w", c.base, path, resp.StatusCode, PeerError(errors.New(apiErr.Error)))
+			he.api = apiErr.Error
+			he.err = fmt.Errorf("%s%s: HTTP %d: %w", c.base, path, resp.StatusCode, PeerError(errors.New(apiErr.Error)))
+		} else {
+			he.err = fmt.Errorf("%s%s: HTTP %d", c.base, path, resp.StatusCode)
 		}
-		return fmt.Errorf("%s%s: HTTP %d", c.base, path, resp.StatusCode)
+		return he
 	}
 	if out == nil {
 		return nil
@@ -466,6 +522,12 @@ func (c *Client) mapError(path string, err error) error {
 	return fmt.Errorf("%s%s: %w", c.base, path, ConnectError(c.base.Hostname(), err, ErrTLSRootNotPinned))
 }
 
+// tlsHandshakeTimeout is the text of net/http's error for a TLS handshake
+// that exceeded the transport's TLSHandshakeTimeout. The type is
+// unexported, so the fixed text identifies it; Go writes it, never the
+// peer.
+const tlsHandshakeTimeout = "net/http: TLS handshake timeout"
+
 // connectFailure is a failed connection or request stated in the CLI's
 // own words (a refused certificate, a timeout, a cancellation) or in the
 // text Go wrote for one error in its cause (goText). Error never includes
@@ -489,9 +551,16 @@ func (e *connectFailure) Unwrap() []error { return e.errs }
 //     CLI's own words, naming only host: a wrong host name, a chain that
 //     does not end in a trusted root (untrusted's text, and errors.Is
 //     finds untrusted), an expired certificate and the like;
-//   - a timeout is "timed out talking to <host>" and a cancellation
-//     "the request to <host> was canceled": net/http's timeout error
-//     embeds the inner error's text, which can be the peer's;
+//   - a timeout of a network operation (a *net.OpError whose Timeout is
+//     true: a dial or a DNS lookup) is Go's own text, with the address
+//     and the operation. Only synthetic errors test this; no real dial or
+//     DNS timeout has been run (UNVERIFIED). A TLS handshake that stalls
+//     ends in net/http's own timeout error instead, whose text is the
+//     fixed "net/http: TLS handshake timeout": it is "the TLS handshake
+//     with <host> timed out" (a real stalled server tests it). Any other
+//     timeout is "timed out talking to <host>" and a cancellation "the
+//     request to <host> was canceled": net/http's timeout error embeds the
+//     inner error's text, which can be the peer's;
 //   - a transport failure whose text Go wrote, not the peer, is printed
 //     whole: a *net.OpError of any Op (the addresses it resolved and a
 //     system error, or a TLS alert's name from a fixed table, as in
@@ -511,6 +580,7 @@ func ConnectError(host string, err, untrusted error) error {
 		unknownErr x509.UnknownAuthorityError
 		invalidErr x509.CertificateInvalidError
 		verifyErr  *tls.CertificateVerificationError
+		opErr      *net.OpError
 		netErr     net.Error
 	)
 	switch {
@@ -526,6 +596,12 @@ func ConnectError(host string, err, untrusted error) error {
 		return &connectFailure{msg: "the server's TLS certificate for " + host + " is not valid: " + invalidReason(invalidErr, leaf, time.Now()), errs: []error{err}}
 	case errors.As(err, &verifyErr):
 		return &connectFailure{msg: "the server's TLS certificate for " + host + " does not verify", errs: []error{err}}
+	case errors.As(err, &opErr) && opErr.Timeout():
+		// Go's own text: the operation, the address it resolved and
+		// "i/o timeout", so the user sees which address and phase.
+		return &connectFailure{msg: opErr.Error(), errs: []error{err}}
+	case errors.As(err, &netErr) && netErr.Timeout() && netErr.Error() == tlsHandshakeTimeout:
+		return &connectFailure{msg: "the TLS handshake with " + host + " timed out", errs: []error{err}}
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
 		return &connectFailure{msg: "timed out talking to " + host, errs: []error{err}}
 	case errors.Is(err, context.Canceled):

@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -762,9 +763,34 @@ func TestClientTrust(t *testing.T) {
 }
 
 func TestParseServerURL(t *testing.T) {
-	for _, ok := range []string{"https://keyroster.example", "https://keyroster.example:8443"} {
+	for _, ok := range []string{"https://keyroster.example", "https://keyroster.example:8443", "https://key-roster.example", "https://localhost:8443", "https://" + strings.Repeat("a", 63) + ".example"} {
 		if u, err := ParseServerURL(ok); err != nil || u.String() != ok {
 			t.Errorf("ParseServerURL(%q) = %v, %v", ok, u, err)
+		}
+	}
+	// Accepted spellings of one origin come back as its canonical form,
+	// the serialization of the policy's webauthn origins: a lowercase
+	// host, no trailing dot and no default port 443.
+	for in, want := range map[string]string{
+		"https://Keyroster.Example.COM":    "https://keyroster.example.com",
+		"https://LOCALHOST:8443":           "https://localhost:8443",
+		"https://keyroster.example.":       "https://keyroster.example",
+		"https://keyroster.example.:8443":  "https://keyroster.example:8443",
+		"https://keyroster.example:443":    "https://keyroster.example",
+		"https://KeyRoster.Example.:443":   "https://keyroster.example",
+		"HTTPS://keyroster.example:8443":   "https://keyroster.example:8443",
+		"https://keyroster.example:4430":   "https://keyroster.example:4430",
+		"https://keyroster.example:443443": "",
+	} {
+		u, err := ParseServerURL(in)
+		if want == "" {
+			if err == nil {
+				t.Errorf("ParseServerURL(%q) accepted %q", in, u)
+			}
+			continue
+		}
+		if err != nil || u.String() != want || u.Host != strings.TrimPrefix(want, "https://") {
+			t.Errorf("ParseServerURL(%q) = %v, %v; want %s", in, u, err, want)
 		}
 	}
 	for _, bad := range []string{
@@ -776,6 +802,11 @@ func TestParseServerURL(t *testing.T) {
 		// read as IPv4 addresses.
 		"https://[fe80::1%25eth0]:8443", "https://[fe80::1%25eth0]", "https://[::1%25lo]", "https://192.0.2.1.", "https://192.0.2.1.:8443",
 		"https://127.1", "https://2130706433", "https://0x7f000001", "https://keyroster.123",
+		// Hosts url.Parse accepts that are not DNS names: RFC 3986
+		// sub-delimiters (shell metacharacters among them), empty labels,
+		// a hyphen at a label's edge, an underscore.
+		"https://a!b.example", "https://a$(id).example", "https://a;b.example", "https://a&b.example", "https://a'b.example",
+		"https://keyroster.example:", "https://a..b.example", "https://-x.example", "https://x-.example", "https://a_b.example", "https://" + strings.Repeat("a", 64) + ".example",
 	} {
 		if _, err := ParseServerURL(bad); err == nil {
 			t.Errorf("ParseServerURL(%q) accepted", bad)
@@ -849,6 +880,62 @@ func TestConnectErrorTimeout(t *testing.T) {
 		if got.Error() != tc.want || !errors.Is(got, tc.err) {
 			t.Errorf("ConnectError(%.40q...) = %.200q, want %q with the original as its cause", tc.err.Error(), got.Error(), tc.want)
 		}
+	}
+}
+
+// TestConnectErrorOpTimeout: a timed-out network operation keeps Go's own
+// text, with the address and the operation, also inside net/http's
+// wrapping (deferred from 02-06 round 4).
+func TestConnectErrorOpTimeout(t *testing.T) {
+	dial := &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 443}, Err: os.ErrDeadlineExceeded}
+	dns := &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "i/o timeout", Name: "keyroster.example", Server: "192.0.2.53:53", IsTimeout: true}}
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{dial, "dial tcp 192.0.2.1:443: i/o timeout"},
+		{fmt.Errorf("Get: %w", dial), "dial tcp 192.0.2.1:443: i/o timeout"},
+		{dns, "dial tcp: lookup keyroster.example on 192.0.2.53:53: i/o timeout"},
+	} {
+		got := ConnectError("keyroster.example", tc.err, ErrTLSRootNotPinned)
+		if got.Error() != tc.want || !errors.Is(got, tc.err) {
+			t.Errorf("ConnectError(%q) = %q, want %q with the original as its cause", tc.err, got, tc.want)
+		}
+	}
+	// Control: a timeout that is not a network operation's keeps the
+	// CLI's own words.
+	if got := ConnectError("keyroster.example", fakeTimeout{"padded"}, ErrTLSRootNotPinned); got.Error() != "timed out talking to keyroster.example" {
+		t.Errorf("ConnectError(fakeTimeout) = %q", got)
+	}
+}
+
+// TestConnectErrorTLSHandshakeTimeout runs a real server that reads the
+// ClientHello and then stalls. net/http gives up after the transport's
+// TLSHandshakeTimeout with its own fixed-text error, not a *net.OpError,
+// and the CLI names the phase. The Client's 10 s handshake timeout is cut
+// to 300 ms for the test; nothing else of the Client changes.
+func TestConnectErrorTLSHandshakeTimeout(t *testing.T) {
+	r := newRoot(t, "root R")
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	url, _ := rawServer(t, listenTCP(t), func(conn net.Conn) {
+		readHello(conn)
+		<-release
+	})
+	c := clientFor(t, url, r, nil)
+	c.http.Transport.(*http.Transport).TLSHandshakeTimeout = 300 * time.Millisecond
+	start := time.Now()
+	err := get(c)
+	if err == nil || time.Since(start) > 10*time.Second {
+		t.Fatalf("err = %v after %v, want the handshake timeout", err, time.Since(start))
+	}
+	t.Logf("stalled handshake: %v", err)
+	if !strings.HasSuffix(err.Error(), ": the TLS handshake with localhost timed out") {
+		t.Fatalf("err = %q, want it to name the TLS handshake phase", err)
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() || ne.Error() != "net/http: TLS handshake timeout" {
+		t.Fatalf("the cause %v is not net/http's handshake timeout", ne)
 	}
 }
 
