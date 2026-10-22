@@ -350,7 +350,7 @@ func (l *loginRun) plan(opts *loginOptions, roles []string, ttl time.Duration) (
 		}
 		byName[r.Name] = r
 	}
-	skew := time.Unix(opts.ServerTime, 0).Sub(loginNow()).Truncate(time.Second)
+	skew := time.Duration(opts.ServerTime-loginNow().Unix()) * time.Second // whole seconds on both sides
 	if skew > maxLoginSkew || skew < -maxLoginSkew {
 		return nil, fmt.Errorf("your clock differs from the server by %ds; fix it before logging in", int64(skew/time.Second))
 	}
