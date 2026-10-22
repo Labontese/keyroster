@@ -26,7 +26,7 @@ import (
 func init() {
 	register(command{
 		Name:    "user",
-		Summary: "manage keyroster users on the server (add: create a pending account and its invite; pending: show the passkey it registered)",
+		Summary: "manage keyroster users (add, pending, approve, list, disable, enable)",
 		Run:     runUser,
 	})
 }
@@ -41,7 +41,7 @@ var errNoAdminKey = errors.New("no admin key: pass --admin-key SHA256:<fingerpri
 
 func runUser(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "user: want a subcommand: add or pending")
+		_, _ = fmt.Fprintln(stderr, "user: want a subcommand: add, pending, approve, list, disable or enable")
 		return errUsage
 	}
 	switch args[0] {
@@ -49,8 +49,16 @@ func runUser(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return runUserAdd(ctx, args[1:], stdout, stderr)
 	case "pending":
 		return runUserPending(ctx, args[1:], stdout, stderr)
+	case "approve":
+		return runUserApprove(ctx, args[1:], stdout, stderr)
+	case "list":
+		return runUserList(ctx, args[1:], stdout, stderr)
+	case "disable":
+		return runUserSetStatus(ctx, "disable", directory.StatusDisabled, args[1:], stdout, stderr)
+	case "enable":
+		return runUserSetStatus(ctx, "enable", directory.StatusActive, args[1:], stdout, stderr)
 	default:
-		_, _ = fmt.Fprintf(stderr, "user: unknown subcommand %q; want add or pending\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "user: unknown subcommand %q; want add, pending, approve, list, disable or enable\n", args[0])
 		return errUsage
 	}
 }
@@ -531,4 +539,246 @@ func yesNo(b bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+// runUserApprove is keyroster user approve NAME --fingerprint FP [--yes]
+// [--out DIR] [--admin-key FP]. It binds a pending passkey of NAME through
+// an admin-signed directory version (D-03): it reads NAME's pending
+// passkeys from the server, validated field by field as user pending
+// does, selects the one whose fingerprint (computed by the CLI from its
+// key) equals FP, the fingerprint the user read off the registration page
+// and told the admin out of band, and runs the directory pipeline
+// (editDirectory) with that credential added to NAME. Without
+// --fingerprint it lists the pending fingerprints and exits 2; with a
+// fingerprint that matches none, or no pending passkey at all, it refuses
+// and signs nothing. The first admin enrolls exactly this way (D-04).
+func runUserApprove(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("user approve", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	fingerprint := fset.String("fingerprint", "", "SHA256:... fingerprint of the passkey, as the user read it off the registration page")
+	yes := fset.Bool("yes", false, "sign without asking (needed when stdin is not a terminal); check the printed diff first")
+	out := fset.String("out", "", "write a proposal directory for co-signing (keyroster directory sign, install) instead of installing")
+	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	names, err := parseInterspersed(fset, args)
+	if err != nil {
+		return errUsage
+	}
+	if len(names) != 1 {
+		_, _ = fmt.Fprintln(stderr, "user approve: want exactly one user name")
+		return errUsage
+	}
+	name := names[0]
+	if !directory.ValidUserName(name) {
+		return fmt.Errorf("user name %q: use 1 to 64 characters a-z, 0-9, '.', '_' or '-', starting with a letter or digit", name)
+	}
+	if *fingerprint != "" && !validFingerprint(*fingerprint) {
+		return errors.New("--fingerprint: want SHA256: followed by 43 characters of unpadded base64, as the registration page shows it")
+	}
+	s, err := openAdminSession(*adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	var ans serverclient.PendingAnswer
+	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminPendingPath(name), nil, &ans, s.signer); err != nil {
+		var he *serverclient.HTTPError
+		if errors.As(err, &he) && he.Code == http.StatusNotFound && he.APIErrorIs(serverclient.AdminErrNotPending) {
+			return fmt.Errorf("no pending credential for %s: %s has no pending enrollment on this server, so nothing was signed. "+
+				"A user approved already is listed by keyroster user list", name, name)
+		}
+		return s.diagnose(ctx, err)
+	}
+	inv, err := checkPendingInvite(ans.Invite)
+	if err != nil {
+		return err
+	}
+	type candidate struct {
+		shown pendingCredential
+		raw   serverclient.PendingCredential
+	}
+	var cands []candidate
+	shown := make([]pendingCredential, 0, len(ans.Credentials))
+	for _, c := range ans.Credentials {
+		pc, err := checkPendingCredential(c)
+		if err != nil {
+			return err
+		}
+		cands = append(cands, candidate{pc, c})
+		shown = append(shown, pc)
+	}
+	// The invite is used exactly when its one passkey is pending (02-08).
+	if (inv.state == serverclient.InviteUsed) != (len(cands) > 0) {
+		return errBadPendingAnswer
+	}
+	if len(cands) == 0 {
+		return fmt.Errorf("no pending credential for %s: the invite has registered no passkey yet, so nothing was signed", name)
+	}
+	if *fingerprint == "" {
+		_, _ = io.WriteString(stdout, pendingText(name, inv, shown))
+		return &exitError{code: 2, err: errors.New("compare with the fingerprint the user saw and re-run with --fingerprint")}
+	}
+	idx := slices.IndexFunc(cands, func(c candidate) bool { return c.shown.fingerprint == *fingerprint })
+	if idx < 0 {
+		return fmt.Errorf("no pending credential with fingerprint %s for %s; nothing was signed", *fingerprint, name)
+	}
+	raw := cands[idx].raw
+	cred := directory.Credential{ID: raw.ID, Alg: raw.Alg, SPKI: raw.SPKI, BackupEligible: raw.BackupEligible, BackedUp: raw.BackedUp}
+	return editDirectory(ctx, s, editOpts{Yes: *yes, Out: *out, User: name}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
+		for i := range d.Users {
+			if d.Users[i].Name == name {
+				d.Users[i].Credentials = append(d.Users[i].Credentials, cred)
+				return nil
+			}
+		}
+		d.Users = append(d.Users, directory.User{Name: name, Status: directory.StatusActive, Credentials: []directory.Credential{cred}})
+		return nil
+	})
+}
+
+// diagnose adds adminOriginDiagnosis, from the root-verified policy only,
+// to an admin authentication failure; any other error is returned as is.
+func (s *adminSession) diagnose(ctx context.Context, err error) error {
+	if errors.Is(err, serverclient.ErrAdminAuth) {
+		if _, policy, terr := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold); terr == nil {
+			return adminError(err, s, policy)
+		}
+	}
+	return err
+}
+
+// validFingerprint reports whether fp is "SHA256:" and the unpadded
+// standard base64 of 32 bytes, the form webauthn.Fingerprint produces.
+func validFingerprint(fp string) bool {
+	b64, ok := strings.CutPrefix(fp, "SHA256:")
+	if !ok {
+		return false
+	}
+	raw, err := base64.RawStdEncoding.Strict().DecodeString(b64)
+	return err == nil && len(raw) == 32 && base64.RawStdEncoding.EncodeToString(raw) == b64
+}
+
+// runUserSetStatus is keyroster user disable|enable NAME [--yes] [--out DIR]
+// [--admin-key FP]: the directory pipeline with NAME's status set to
+// status. A disabled user keeps its credentials and cannot sign in; an
+// enabled user needs at least one credential (Validate).
+func runUserSetStatus(ctx context.Context, verb, status string, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("user "+verb, flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	yes := fset.Bool("yes", false, "sign without asking (needed when stdin is not a terminal); check the printed diff first")
+	out := fset.String("out", "", "write a proposal directory for co-signing (keyroster directory sign, install) instead of installing")
+	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	names, err := parseInterspersed(fset, args)
+	if err != nil {
+		return errUsage
+	}
+	if len(names) != 1 {
+		_, _ = fmt.Fprintf(stderr, "user %s: want exactly one user name\n", verb)
+		return errUsage
+	}
+	name := names[0]
+	if !directory.ValidUserName(name) {
+		return fmt.Errorf("user name %q: use 1 to 64 characters a-z, 0-9, '.', '_' or '-', starting with a letter or digit", name)
+	}
+	s, err := openAdminSession(*adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	return editDirectory(ctx, s, editOpts{Yes: *yes, Out: *out, User: name}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
+		for i := range d.Users {
+			if d.Users[i].Name != name {
+				continue
+			}
+			if d.Users[i].Status == status {
+				return fmt.Errorf("%s is already %s; nothing was signed", name, status)
+			}
+			d.Users[i].Status = status
+			return nil
+		}
+		return fmt.Errorf("%s is not in the installed directory; nothing was signed", name)
+	})
+}
+
+// errBadUsersAnswer refuses a user list the CLI cannot check. It never
+// repeats the server's text.
+var errBadUsersAnswer = errors.New("the server's user list does not check out, so nothing was printed")
+
+// runUserList is keyroster user list [--admin-key FP]: the users of the
+// admin-signed directory the server serves, its signatures verified
+// against the admins of the root-verified policy (fetchVerifiedDirectory;
+// that the signer installed it is the server's word, and the output says
+// so), with the fingerprints the CLI computes
+// from their keys, and the server's pending accounts from GET
+// /api/v1/admin/users. Every pending field printed is validated first
+// (names by the directory's grammar, times as RFC 3339, the used-invite
+// invariant), so no text the server chose reaches the admin (T-02-93).
+func runUserList(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("user list", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	if pos, err := parseInterspersed(fset, args); err != nil || len(pos) != 0 {
+		return errUsage
+	}
+	s, err := openAdminSession(*adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	vd, err := fetchVerifiedDirectory(ctx, s)
+	if err != nil {
+		return err
+	}
+	var ans serverclient.UsersAnswer
+	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminUsersPath, nil, &ans, s.signer); err != nil {
+		return adminError(err, s, vd.Policy)
+	}
+	text, err := usersText(vd, ans)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(stdout, text)
+	return err
+}
+
+// usersText formats the users of the verified directory vd, with the
+// fingerprints the CLI computes from their keys, and the server's pending
+// accounts, after validating every field of those (ans.Users, the
+// server's own view of the directory, is not printed: a fingerprint there
+// would be text the server chose).
+func usersText(vd *verifiedDirectory, ans serverclient.UsersAnswer) (string, error) {
+	var b strings.Builder
+	if vd.Version == 0 {
+		b.WriteString("The server serves no directory; by its word, no user can sign in yet.\n")
+	} else {
+		fmt.Fprintf(&b, "The admin-signed directory the server serves: version %d, signatures verified against the root-signed policy.\n", vd.Version)
+		b.WriteString(serverServesNote)
+		for _, u := range vd.Dir.Users {
+			fmt.Fprintf(&b, "  %-24s %s\n", u.Name, u.Status)
+			for _, c := range u.Credentials {
+				spki, err := base64.StdEncoding.DecodeString(c.SPKI) // Parse validated it
+				if err != nil {
+					return "", err
+				}
+				fmt.Fprintf(&b, "    passkey %s %s synced %s\n", webauthn.Fingerprint(spki), directory.AlgName(c.Alg), yesNo(c.BackedUp))
+			}
+		}
+	}
+	if len(ans.Pending) == 0 {
+		b.WriteString("No pending accounts.\n")
+		return b.String(), nil
+	}
+	b.WriteString("Pending accounts (not authority until approved):\n")
+	for _, p := range ans.Pending {
+		exp, err := time.Parse(time.RFC3339, p.InviteExpiresAt)
+		// An invite is used exactly when it holds its one pending passkey.
+		if !directory.ValidUserName(p.Name) || err != nil || p.Credentials < 0 || p.Credentials > 1 || p.InviteUsed != (p.Credentials == 1) {
+			return "", errBadUsersAnswer
+		}
+		state := "invite unused, expires " + exp.UTC().Format(time.RFC3339)
+		if p.InviteUsed {
+			state = "passkey registered, waiting for approval (keyroster user pending " + p.Name + ")"
+		}
+		fmt.Fprintf(&b, "  %-24s %s\n", p.Name, state)
+	}
+	return b.String(), nil
 }

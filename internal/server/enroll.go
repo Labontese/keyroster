@@ -236,7 +236,7 @@ func (s *Server) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 		s.enrollRefuse(w, v, http.StatusInternalServerError, errEnrollInternal, route, reasonInternalError, "", err)
 		return
 	}
-	dir, err := s.installedDirectory(ctx, v)
+	dir, err := s.currentDirectory(ctx)
 	if err != nil {
 		s.enrollRefuse(w, nil, http.StatusServiceUnavailable, serverclient.APIError{Error: "signer unavailable"}, route, reasonSignerUnavailable, u.Name, err)
 		return
@@ -392,7 +392,7 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 		s.enrollRefuse(w, v, http.StatusConflict, errEnrollDuplicate, route, reasonDuplicateCredential, u.Name, errors.New("credential ID already pending"))
 		return
 	}
-	dir, err := s.installedDirectory(ctx, v)
+	dir, err := s.currentDirectory(ctx)
 	if err != nil {
 		s.enrollRefuse(w, nil, http.StatusServiceUnavailable, serverclient.APIError{Error: "signer unavailable"}, route, reasonSignerUnavailable, u.Name, err)
 		return

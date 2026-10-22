@@ -15,7 +15,8 @@ import (
 )
 
 // AdminUsersPath is the admin route that creates a pending account and
-// its invite (keyroster user add).
+// its invite (POST, keyroster user add) and lists the directory's users
+// and the pending accounts (GET, keyroster user list).
 const AdminUsersPath = "/api/v1/admin/users"
 
 // The two 409 refusals of AdminUsersPath. The CLI compares a refusal with
@@ -73,6 +74,91 @@ type PendingCredential struct {
 	BackupEligible bool   `json:"backup_eligible"`
 	BackedUp       bool   `json:"backed_up"`
 	RegisteredAt   string `json:"registered_at"`
+}
+
+// AdminDirectoryPath is the admin route of the installed directory: GET
+// answers DirectoryAnswer, POST installs an InstallDirectoryRequest
+// through the signer (02-09).
+const AdminDirectoryPath = "/api/v1/admin/directory"
+
+// DirectoryAnswer is the answer of a GET to AdminDirectoryPath: the
+// signer's installed directory as the server mirrors it, version 0 with
+// no bytes when none is installed. Directory and Sigs are standard base64
+// with padding in JSON. Nothing in it is trusted by the CLI until it has
+// verified Sigs against the admins of the root-verified policy.
+type DirectoryAnswer struct {
+	Version    uint64 `json:"version"`
+	Directory  []byte `json:"directory"`
+	Sigs       []byte `json:"sigs"`
+	Authorized bool   `json:"authorized"`
+}
+
+// InstallDirectoryRequest is the body of a POST to AdminDirectoryPath: a
+// directory version's canonical bytes and the admins' armored SSHSIG
+// signatures over them, both standard base64 with padding in JSON.
+type InstallDirectoryRequest struct {
+	Directory []byte `json:"directory"`
+	Sigs      []byte `json:"sigs"`
+}
+
+// InstallDirectoryAnswer is the 200 answer of a POST to
+// AdminDirectoryPath: the installed version, the lowercase hex SHA-256 of
+// its bytes and the index of the log leaf that recorded the install.
+type InstallDirectoryAnswer struct {
+	Version   uint64 `json:"version"`
+	SHA256    string `json:"sha256"`
+	LeafIndex uint64 `json:"leaf_index"`
+}
+
+// The refusals of a POST to AdminDirectoryPath that the CLI tells apart.
+// AdminErrNotPendingCredential (409) is the server's own: the version
+// binds a credential that is not a pending credential of the user it
+// binds it to. The others are the signer's reason codes, passed through:
+// AdminErrVersionChain (409), AdminErrQuorum and AdminErrExceedsPolicy
+// (403), AdminErrInvalid (400).
+const (
+	AdminErrNotPendingCredential = "credential_not_pending" //nolint:gosec // G101: a refusal reason code, not a credential
+	AdminErrVersionChain         = "directory_version_chain"
+	AdminErrQuorum               = "directory_quorum_not_met"
+	AdminErrExceedsPolicy        = "directory_exceeds_policy"
+	AdminErrInvalid              = "directory_invalid"
+)
+
+// UsersAnswer is the answer of a GET to AdminUsersPath: the users of the
+// installed directory, as the server mirrors it, and the pending accounts
+// of the server. It is the server's view; the CLI validates every field
+// it prints, and keyroster directory show prints the admin-signed
+// directory itself.
+type UsersAnswer struct {
+	DirectoryVersion uint64           `json:"directory_version"`
+	Users            []DirectoryUser  `json:"users"`
+	Pending          []PendingAccount `json:"pending"`
+}
+
+// DirectoryUser is one user of the installed directory: its name, status
+// (active or disabled) and bound credentials.
+type DirectoryUser struct {
+	Name        string           `json:"name"`
+	Status      string           `json:"status"`
+	Credentials []UserCredential `json:"credentials"`
+}
+
+// UserCredential is one bound credential: the fingerprint of its key, its
+// COSE algorithm and whether it is synced (backed up).
+type UserCredential struct {
+	Fingerprint string `json:"fingerprint"`
+	Alg         int64  `json:"alg"`
+	Synced      bool   `json:"synced"`
+}
+
+// PendingAccount is one pending account of the server: when its current
+// invite expires (RFC 3339), whether it registered a passkey, and how
+// many unapproved passkeys it holds.
+type PendingAccount struct {
+	Name            string `json:"name"`
+	InviteExpiresAt string `json:"invite_expires_at"`
+	InviteUsed      bool   `json:"invite_used"`
+	Credentials     int    `json:"credentials"`
 }
 
 // AddUserRequest is the body of a POST to AdminUsersPath.

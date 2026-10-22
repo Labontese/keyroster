@@ -49,6 +49,9 @@ type serverOpts struct {
 	// Software runs the signer on the software backend (custody
 	// software); the default is the agent backend.
 	Software bool
+	// AdminQuorum is the genesis policy's admin quorum (default 1); that
+	// many admin keys are generated, all in Signer.AdminAgent.
+	AdminQuorum int
 }
 
 // serverEnv is a running signer with a keyroster-server in front of it.
@@ -72,7 +75,7 @@ type serverEnv struct {
 func startServerEnv(t *testing.T, opts serverOpts) *serverEnv {
 	t.Helper()
 	port := freePort(t)
-	bopts := bootstrapOpts{WebAuthnRPID: serverRPID, WebAuthnOrigins: []string{"https://" + serverRPID + ":" + strconv.Itoa(port)}}
+	bopts := bootstrapOpts{WebAuthnRPID: serverRPID, WebAuthnOrigins: []string{"https://" + serverRPID + ":" + strconv.Itoa(port)}, AdminQuorum: opts.AdminQuorum}
 	if opts.Software {
 		bopts.Backend = "software"
 		bopts.BackendOpts = map[string]string{"passphrase-file": passphraseFile(t)}

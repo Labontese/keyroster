@@ -52,9 +52,17 @@ type Server struct {
 	static  fs.FS
 	handler http.Handler
 
-	adminLimit  *limiter // admin API routes
-	inviteLimit *limiter // invite pages
-	dir         dirCache // the last installed directory read
+	adminLimit  *limiter  // admin API routes
+	inviteLimit *limiter  // invite pages
+	mirror      dirMirror // the installed directory, as of the last Status that matched
+
+	// pendingMu orders a directory install (its pending check, forward
+	// and cleanup) against a reinvite (its lookups and write), so neither
+	// runs inside the other (02-09-R2-F1). It is always the outermost
+	// lock: a handler takes it after requireAdmin, and nothing that holds
+	// mu or the mirror's lock takes it. It orders requests inside this
+	// process only.
+	pendingMu sync.Mutex
 
 	mu       sync.Mutex  // guards status and inflight; never held across a signer call
 	status   *statusView // nil when there is no current entry
@@ -104,6 +112,11 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.Handle("POST "+serverclient.AdminUsersPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleAddUser))))
 	mux.Handle("GET "+serverclient.AdminUsersPath+"/{name}/pending", s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handlePendingCredentials))))
+	// The directory (02-09): the users list, the mirror, and the install,
+	// the only route that names its own body limit.
+	mux.Handle("GET "+serverclient.AdminUsersPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleListUsers))))
+	mux.Handle("GET "+serverclient.AdminDirectoryPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleGetDirectory))))
+	mux.Handle("POST "+serverclient.AdminDirectoryPath, s.rateLimited(s.adminLimit, false, s.requireAdminLimit(maxDirectoryInstallBody, http.HandlerFunc(s.handleInstallDirectory))))
 	mux.Handle("GET /enroll/{token}", s.rateLimited(s.inviteLimit, true, http.HandlerFunc(s.handleEnroll)))
 	// The registration ceremony of an invite (02-08): JSON routes in the
 	// invite class, under the same limiter as the invite page.
