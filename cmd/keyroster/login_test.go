@@ -544,6 +544,32 @@ func useLoginClock(t *testing.T) time.Time {
 	return fixed
 }
 
+// requireTwoMinuteLogin runs a 2-minute --role ops login against e, whose
+// signer stamps the certificate 2 s before the CLI checks it, and requires
+// it to succeed with one agent add whose lifetime is at least 60 s and at
+// most what the certificate has left at serverNow, the server's clock when
+// the CLI checks it.
+func requireTwoMinuteLogin(t *testing.T, e *loginServer, a *recordingAgent, serverNow time.Time) {
+	t.Helper()
+	e.setCert(func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
+		p.now = p.now.Add(-2 * time.Second)
+		return nil
+	})
+	stderr, wait := e.start(t, "--role", "ops", "--ttl", "2m")
+	e.drive(t, stderr)
+	if r := wait(); r.code != 0 {
+		t.Fatalf("login exit %d:\n%s", r.code, r.stderr)
+	}
+	adds := a.added()
+	if len(adds) != 1 || adds[0].Certificate == nil {
+		t.Fatalf("adds = %v, want one certificate add", adds)
+	}
+	left := time.Unix(int64(adds[0].Certificate.ValidBefore), 0).Sub(serverNow) //nolint:gosec // G115: a test certificate
+	if got := time.Duration(adds[0].LifetimeSecs) * time.Second; got < 60*time.Second || got > left {
+		t.Fatalf("agent lifetime %v; want at least 60 s and at most %v, what the certificate has left on the server's clock", got, left)
+	}
+}
+
 // useEmptyHomes points HOME and the temporary directory at fresh empty
 // directories and returns them, so a test can require that keyroster
 // login wrote no file.
@@ -913,23 +939,57 @@ func TestLoginRefusals(t *testing.T) {
 				e := newLoginServer(t)
 				a := useRecordingAgent(t)
 				e.skew = skew
-				e.setCert(func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
-					p.now = p.now.Add(-2 * time.Second)
-					return nil
-				})
-				stderr, wait := e.start(t, "--role", "ops", "--ttl", "2m")
-				e.drive(t, stderr)
-				if r := wait(); r.code != 0 {
-					t.Fatalf("login exit %d:\n%s", r.code, r.stderr)
+				requireTwoMinuteLogin(t, e, a, now.Add(skew))
+			})
+		}
+	})
+	t.Run("two_minute_login_at_fractional_skew", func(t *testing.T) {
+		// The server's clock runs 0.9 s past a whole second of the CLI's,
+		// so the skew, measured in whole seconds, is 0.9 s short: the extra
+		// second checkLoginCert adds must cover that (02-12 pre-merge review).
+		for _, skew := range []time.Duration{-60 * time.Second, 0, 59 * time.Second} {
+			skew += 900 * time.Millisecond
+			t.Run(fmt.Sprintf("skew_%v", skew), func(t *testing.T) {
+				now := useLoginClock(t)
+				e := newLoginServer(t)
+				a := useRecordingAgent(t)
+				e.skew = skew
+				requireTwoMinuteLogin(t, e, a, now.Add(skew))
+			})
+		}
+	})
+	t.Run("two_minute_login_with_options_latency", func(t *testing.T) {
+		// 5 s pass between the server reading its clock for the options
+		// answer and the CLI receiving it. The CLI reads its own clock
+		// before the request, so the measured skew errs toward the server
+		// being ahead: a -60 s skew is still accepted, and the agent
+		// lifetime still fits the certificate (02-12 pre-merge review).
+		for _, skew := range []time.Duration{-60 * time.Second, 0, 60 * time.Second} {
+			t.Run(fmt.Sprintf("skew_%ds", int(skew/time.Second)), func(t *testing.T) {
+				start := useLoginClock(t)
+				var mu sync.Mutex
+				cur := start
+				loginNow = func() time.Time {
+					mu.Lock()
+					defer mu.Unlock()
+					return cur
 				}
-				adds := a.added()
-				if len(adds) != 1 || adds[0].Certificate == nil {
-					t.Fatalf("adds = %v, want one certificate add", adds)
+				e := newLoginServer(t)
+				a := useRecordingAgent(t)
+				e.skew = skew
+				e.mu.Lock()
+				e.override[loginOptionsRoute] = func(w http.ResponseWriter) {
+					e.mu.Lock()
+					roles := e.roles
+					e.mu.Unlock()
+					opts := loginOptions{ServerTime: e.now().Unix(), User: "alice", CAMaxTTLSeconds: e.caMax, Roles: roles}
+					mu.Lock()
+					cur = cur.Add(5 * time.Second)
+					mu.Unlock()
+					e.writeJSON(w, http.StatusOK, opts)
 				}
-				left := time.Unix(int64(adds[0].Certificate.ValidBefore), 0).Sub(now.Add(skew)) //nolint:gosec // G115: a test certificate
-				if got := time.Duration(adds[0].LifetimeSecs) * time.Second; got < 60*time.Second || got > left {
-					t.Fatalf("agent lifetime %v; want at least 60 s and at most %v, what the certificate has left on the server's clock", got, left)
-				}
+				e.mu.Unlock()
+				requireTwoMinuteLogin(t, e, a, start.Add(5*time.Second+skew))
 			})
 		}
 	})
