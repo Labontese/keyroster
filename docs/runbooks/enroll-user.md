@@ -243,3 +243,15 @@ and every later edit builds on the version you signed, so none of them can
 be installed before it. Until the CLI verifies a receipt signed by the
 signer (Phase 4), the signer's own log is the only proof:
 [Confirm on the signer host](#confirm-on-the-signer-host).
+
+The CLI also keeps no record of the newest trust bundle and policy it has
+seen: it accepts any bundle and policy your root pins signed, the oldest
+included. So a **compromised server** can serve an older policy, and an
+admin key that policy names but a newer one removed (a lost or stolen
+admin key) can then sign a directory that `directory show` and
+`user list` print as verified. The signer is not fooled: it checks against
+the policy in force. When you remove an admin, treat what the CLI shows as
+the server's word until you have checked the signer's log on the signer
+host; `keyroster audit verify` prints the trust bundle and policy versions
+it ends at (`trust bundle vN, policy vN`). The CLI keeps no high-water mark
+until Phase 4.
