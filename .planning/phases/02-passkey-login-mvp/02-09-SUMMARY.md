@@ -335,7 +335,7 @@ See `key-decisions` in the frontmatter.
 
 **Impact on plan:**
 - No new module and no capslock change.
-- Every security property the plan names is pinned by a test that bites.
+- Every security property the plan names is pinned by a test that bites. *Corrected in the pre-merge review:* T-02-43 was not pinned on the edit path. The `confirmSign` mutant above changed the shared helper, which only `directory sign` exercised. The call site in `editDirectory` and the diff-before-sign order survived mutation. `TestEditConfirm` now pins them (see "Pre-merge review fixes").
 - The one design change with an outward effect: `user list` prints the verified directory instead of the server's users.
 
 ## Relation to the phase-4 todo (bind admin-signed directories to a deployment)
@@ -360,7 +360,7 @@ There is one incidental narrowing. Through B's server such a proposal is refused
 
 - **Whether a re-registration on the same authenticator after a reinvite replaces a passkey already bound there.** The pending row gets a new user handle when an install wins, and `reinvite_waits_for_running_install` asserts that. The authenticator side is authenticator behaviour, and no real authenticator ran.
 - **The real signer receiving a full-size directory through the server.** The server side runs in `at_signer_cap_forwarded`. The signer's frame acceptance rests on 02-03's `install_exactly_max_directory_frame`.
-- **`stdinIsTerminal` against a real terminal.** The tests replace the variable, and the e2e runs without a terminal: the refusal path is real, the prompt path is unit-tested only.
+- **`stdinIsTerminal` against a real terminal.** The tests replace the variable, and the e2e runs without a terminal. In the e2e, only `directory sign` takes the refusal path; no e2e command reaches the prompt. *Corrected in the pre-merge review:* this line used to imply that both signing commands were covered. At review time `user approve`, `disable` and `enable` had neither their refusal path nor their prompt path tested. `TestEditConfirm` now covers both against the fake server.
 - **HTTP/2 buffering on the larger install route.** It is derived from 02-07's measurement (the D6 todo), not measured here.
 - **Registration in a real browser** (02-13).
 - **CI-only:** govulncheck, the e2e 9.5p1 lane, the rest of the e2e suite and the macOS/Windows lanes. They are reported in the checkpoint.
@@ -401,3 +401,63 @@ None.
 ---
 *Phase: 02-passkey-login-mvp*
 *Completed: 2026-10-21 (before the merge gate)*
+
+## Pre-merge review fixes
+
+Review of PR #49 at `3f67e3c`. Every finding below was confirmed by both skeptics, unless marked split. Fixed on 2026-10-22, one commit per finding (overlapping findings share one), each with a test shown to fail before the fix, or for a test-only finding, a mutant shown to survive before and to be killed after.
+
+### Owner decisions (2026-10-21, Daniel, through the orchestrator; replies verbatim)
+
+- **F1, install confirmation:** "Ärligt nu, kvitto i fas 4 (Rekommenderas)".
+  - In this PR: honest wording, a check on the signer host, threat rows, and the todo [2026-10-21-cli-verifies-directory-install-receipts](../../todos/pending/2026-10-21-cli-verifies-directory-install-receipts.md) (blocker, Phase 4).
+  - Phase 4: a signer-signed receipt.
+- **F2, the executor's five unsettled choices:** "Godkänn alla fem (Rekommenderas)". They are now owner-approved deviations:
+  1. `user list` prints the verified directory with fingerprints the CLI computes itself (deviation 8);
+  2. `currentDirectory`, one fail-closed mirror, replaces 02-07's `dirCache` (deviation 7);
+  3. the default proposal directory is `keyroster-directory-v<N>` at quorum above 1 without `--out` (deviation 13);
+  4. `directory sign` refuses an admin who already signed (deviation 13);
+  5. 503 `signer unavailable` for unavailable or internal refusals, and 400 `malformed request` for fields over the signer's caps (deviations 14 and 15).
+- **F3, recovery after an admin-set or quorum change:** "Blocker för fas 4 (Rekommenderas)".
+  - No code change, because the refusal is T-02-42, and phase-2 tooling cannot reach the state (`root successor-policy` changes only the RP).
+  - Todo: [2026-10-21-recover-directory-after-admin-set-change](../../todos/pending/2026-10-21-recover-directory-after-admin-set-change.md) (blocker, Phase 4).
+
+### Fixed
+
+| Finding | Commit | Test |
+|---|---|---|
+| The CLI cannot tell an admin-signed version from an installed one (approval-integrity, medium) | `7dac758` | `TestDirectoryPipeline/fetch_no_directory_installed`, `approve_disable_enable_round_trip` and `quorum_two_writes_proposal` pin the wording of `reportInstalled`, `directory show` and `user list`. The tests do not compile against the old code. e2e assertions follow. Runbook "Confirm on the signer host", plus the todo and STATE line |
+| A compromised server can withhold or delay any install, even a disable (signer-install, medium) | `7dac758` (same fix) | the same. The CLI prints the log leaf so it can be compared with an export |
+| Diff renders a credential without its ID or backup_eligible (low) | `9278a9b` | `TestDiff/credential_id_or_flag_change_visible` covers an ID-only change, an ID that differs only in its last character, and a backup_eligible-only change. Before the fix it printed two identical lines. The ID is shown as a 128-bit SHA-256 digest, not a prefix, because an attacker chooses the new ID |
+| Cleanup after an accepted install runs on the request context (low) | `5dd3a45` | `TestDirectoryInstallPending/cleanup_survives_client_hangup`. Before the fix: 1 pending row, and `pending_cleanup_failed ... context canceled` |
+| The install pending check matches only ID and user, not the key (low) | `64e4fe7` | `TestDirectoryInstallCleanup/install_refuses_reused_id_with_other_key`; before the fix it answered 200. `TestDeleteBound/same_id_other_key_untouched` kills the old `WHERE id = ? AND user_name = ?` |
+| A retry after a lost install answer calls the proposal stale (cli, low) | `c34c2f3` | `TestDirectoryPipeline/proposal_already_served` (install exits 0 "nothing to do"; sign refuses without discard advice) |
+| `directory install` reports the proposal's own base after a 409 (cli, low) | `c34c2f3` | `stale_proposal_install_message` now asserts "based on version 1, but the server serves version 2" on the 409 path. The old call (`staleProposal(p, vd.Version)`) fails it with "version 1 ... version 1" |
+| Stale message wrong after a mid-flight 409, and misdiagnoses an already installed proposal (plan-tests, low) | `c34c2f3` | both of the above. The runbook gains a "Proposal already served" paragraph |
+| T-02-43 is not pinned on the edit path (medium) | `8c28cc0` | `TestEditConfirm`, plus a diff-before-prompt check in `TestDirectorySignConfirm`. It kills all three of the reviewer's mutants: `confirmSign(true, ...)` in `editDirectory`, and `printChanges` moved after `sshsig.Sign` in `editDirectory` and in `directory sign` |
+| No test pins dropStatus after a transport error from InstallDirectory (low) | `27e8bce` | `orphan_pending_cleaned_on_next_install` GETs at the same instant after the lost answer. It kills the conditional-drop mutant ("version 1; want ... version 2") |
+| No test covers user approve appending a passkey to a directory user (low) | `ec489e9` | `TestDirectoryPipeline/approve_appends_passkey_to_directory_user`. It kills the replace-the-slice mutant |
+| enroll-user.md claims the e2e tests run every command (low) | `ea93811` | doc only. The note lists the commands the four e2e tests run, and labels `user disable`, `user enable`, `directory show` and the interactive prompt UNVERIFIED end to end |
+| Directory free text can carry terminal escape sequences (critic, orchestrator note) | `6c1fa0c` | `TestDiff/extension_control_bytes_escaped` and `TestDirectoryPeerText/show_escapes_extension_control_bytes`. Before the fix the output held a raw 0x1b. The second test fails again under a no-escape mutant |
+
+### Documented, not fixed in code
+
+| Finding | Commit | Reason |
+|---|---|---|
+| fetchVerifiedDirectory has no bundle or policy version floor, so a removed admin key plus a compromised server can forge a "verified" view (critic, medium) | `8cbcfe9` | Owner decision F1 puts the high-water marks into the Phase 4 receipts todo. The finding's own note assigns the floor in `Trust` to 02-06. This PR adds the runbook residual and a threat row (below) |
+| Once a successor policy changes the admin set, no CLI path can install the re-signed directory (plan-tests, medium), and both split findings on the same mechanism | `e142c53` | Owner decision F3 is a Phase 4 blocker; this PR adds the todo and the STATE.md line. The split findings were checked against the code: the mechanism holds, and is covered by F3 |
+
+### Threat rows added (accept/document)
+
+| ID | Category | Component | Severity | Disposition | Residual |
+|---|---|---|---|---|---|
+| R-02-09-1 | Tampering / Repudiation | server to CLI: install answer and directory reads | medium | accept, document | The server withholds or delays an install, including `user disable`, or serves a signed but uninstalled version as installed. The CLI words installs and views as the server's word, and the runbook confirms every revocation on the signer host (`export-log` and `audit verify`, `directory installs N`). This stays a residual until the CLI verifies a signer-signed install receipt (checkpoint and inclusion proof; todo 2026-10-21-cli-verifies-directory-install-receipts, Phase 4) |
+| R-02-09-2 | Spoofing | served trust bundle and policy | medium | accept, document | The server serves an older root-signed policy, so a removed admin key it still names makes a forged directory show as verified. The signer is not affected. This stays a residual until the CLI keeps bundle, policy and directory high-water marks (same todo) |
+
+### Verification
+
+- `gofmt -l` printed nothing.
+- `go vet ./...` passed on Windows, `GOOS=linux` and `GOOS=darwin`, also with `-tags e2e ./test/e2e/`.
+- `go test -count=1` passed on the touched packages (cmd/keyroster, internal/directory, internal/server, internal/serverdb), and `go test -count=1 ./...` passed once on Windows.
+- In WSL with OpenSSH 10.5p1, these e2e tests passed: `TestEnrollApproveEndToEnd`, `TestApproveConflictNoLostUpdate`, `TestApproveQuorumTwo` and `TestApproveProposalAfterReinvite`.
+- `-race` was not run: no cgo on the Windows toolchain.
+- Not run: the rest of the e2e suite and the CI-only lanes.
