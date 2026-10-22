@@ -82,7 +82,13 @@ keyroster host ca-key > keyroster_user_ca.pub
 ```
 
 The line is the active user CA key of the root-verified trust bundle, with
-the comment `keyroster user CA (bundle vN)`. Copy `keyroster_user_ca.pub`
+the comment `keyroster user CA (bundle vN)`. The bundle version is the
+server's word: a compromised server can serve an older root-signed bundle
+whose user CA key has since been replaced. Before the first host, and
+after every CA change, check that `keyroster audit verify` on the signer
+host prints `trust bundle vN` with the same N
+([Confirm on the signer host](enroll-user.md#confirm-on-the-signer-host);
+step 5). Copy `keyroster_user_ca.pub`
 to the host as `/etc/ssh/keyroster_user_ca.pub`, owned by root, mode 0644,
 and add to `/etc/ssh/sshd_config`:
 
@@ -123,7 +129,8 @@ role:ops
 ```
 
 sshd ignores the `#` lines. The second header line names the directory
-version and its SHA-256, as `keyroster directory show` prints it. An
+version and its SHA-256, as `keyroster directory show` prints it. Both
+read the same server, so that version is the server's word (step 5). An
 account the host group does not map gets the two header lines only: it
 accepts no keyroster certificate. An unknown host group is an error, so a
 mistyped name never produces a file.
@@ -145,8 +152,35 @@ CI only (`TestRolesHostPrincipalsEndToEnd`); UNVERIFIED on a real host.
 
 Re-render and re-install the files (step 3) after every role, group or
 host-group change that touches the host's accounts. Until Phase 3 nothing
-does it for you, and a stale file keeps the old access. Compare the second
-header line with `keyroster directory show` to recognise a stale file.
+does it for you, and a stale file keeps the old access. Comparing the
+second header line with `keyroster directory show` catches a file you
+forgot to re-render, but both read the same server: that is the
+server's word, not proof.
+
+**The rendered version is the server's word.** `keyroster host principals`
+and `keyroster host ca-key` check the admins' and the roots' signatures,
+not that what the server serves is the newest version: the CLI keeps no
+high-water mark until Phase 4 (as for `directory show`, see the residual
+risk in [enroll-user.md](enroll-user.md#residual-risk)). A compromised
+server can therefore serve an older signed directory, for example the one
+from before an unmap, or an older trust bundle whose user CA key has since
+been replaced, and the rendered file looks valid. After every revocation
+(unmap, role revoke, group member removal) and every CA change, and before
+you install a rendered file on a new host,
+[confirm on the signer host](enroll-user.md#confirm-on-the-signer-host):
+
+- `keyroster audit verify` must print `directory installs N` with the same
+  N as the `directory version N` in the file's header (every directory
+  version is one install);
+- it must print `trust bundle vN` with the same N as the `(bundle vN)`
+  comment of the `keyroster host ca-key` line.
+
+If the signer's number is larger, re-render (step 3) and check again. If
+the file's number is larger, the signer never installed that version; if
+it is still smaller after a re-render, the server serves an older version.
+In both cases do not install the file and treat the server as compromised.
+The two counters run in the end-to-end tests; the comparison itself is a
+manual step and UNVERIFIED.
 
 After `keyroster host-group unmap <group> <account>`, re-rendering prints a
 header-only file. Install it as-is: never keep the old file, and never
