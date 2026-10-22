@@ -45,6 +45,9 @@ const (
 	inviteTokenBytes = 32
 	// signerCallTimeout bounds one signer call made by a handler.
 	signerCallTimeout = 10 * time.Second
+	// pendingCleanupTimeout bounds the pending cleanup after an accepted
+	// install, which runs detached from the request (handleInstallDirectory).
+	pendingCleanupTimeout = 5 * time.Second
 )
 
 // errAdminAuth is the one body of every admin authentication failure.

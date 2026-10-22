@@ -261,7 +261,9 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 //     ever refuses; a pending row grants nothing (D-03).
 //  4. Forward, then dropStatus as soon as InstallDirectory returns,
 //     whatever it returned, so the next request reads the signer's state.
-//  5. On success, DeleteBound with bound. A cleanup failure is logged as
+//  5. On success, DeleteBound with bound, on a context detached from the
+//     request's cancellation (a client that hung up must not leave the
+//     approved passkey pending). A cleanup failure is logged as
 //     pending_cleanup_failed and the install is still reported (200): the
 //     signer has installed the version. The next accepted install removes
 //     what was left.
@@ -336,7 +338,11 @@ func (s *Server) handleInstallDirectory(w http.ResponseWriter, r *http.Request) 
 		s.signerUnavailable(w, false)
 		return
 	}
-	if err := s.db.DeleteBound(ctx, bound, s.clock().UnixMicro()); err != nil {
+	// The signer has installed the version: the cleanup runs even when the
+	// client has gone away meanwhile, bounded by its own timeout.
+	dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), pendingCleanupTimeout)
+	defer dcancel()
+	if err := s.db.DeleteBound(dctx, bound, s.clock().UnixMicro()); err != nil {
 		s.log.Error("pending_cleanup_failed", "version", resp.Version, "err", err)
 	}
 	sum := hex.EncodeToString(resp.SHA256[:])

@@ -1428,6 +1428,15 @@ func TestDirectoryInstallCleanup(t *testing.T) {
 	})
 }
 
+// sentSigner is the fake signer whose InstallDirectory, once called, is
+// not stopped by the end of ctx, as signerclient's call is not once the
+// request is sent.
+type sentSigner struct{ *fakeSigner }
+
+func (s sentSigner) InstallDirectory(ctx context.Context, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
+	return s.fakeSigner.InstallDirectory(context.WithoutCancel(ctx), req)
+}
+
 // TestDirectoryInstallPending: pendingMu orders an install against a
 // reinvite, and the install's cleanup heals itself (02-09-R2-F1,
 // 02-09-R2-F4).
@@ -1529,6 +1538,42 @@ func TestDirectoryInstallPending(t *testing.T) {
 		}
 		if ids := e.pendingOf(t, "erin"); len(ids) != 1 || ids[0] != x.ID || e.pendingRows(t, "erin") != 1 {
 			t.Fatalf("erin's pending %v, want X unchanged: X is bound to frank, not erin", ids)
+		}
+	})
+
+	t.Run("cleanup_survives_client_hangup", func(t *testing.T) {
+		// The client goes away while the signer installs: signerclient uses
+		// ctx only for the dial and the deadline, so the signer's success
+		// still arrives, and the cleanup must not run on the cancelled
+		// request context (pre-merge review, 02-09).
+		e := chainEnv(t, nil)
+		e.s.signer = sentSigner{e.fake}
+		p1 := newCredential(t)
+		e.storePending(t, "dave", p1)
+		version := successor(t, nil, bind("dave", p1))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		req := signedReq(t, e.admin, http.MethodPost, serverclient.AdminDirectoryPath, serverclient.AdminDirectoryPath, installBody(t, version, testSigs), e.clock.Now()).WithContext(ctx)
+		entered, release := e.fake.hold("InstallDirectory")
+		defer release()
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() { done <- serve(e.s.Handler(), req) }()
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the install never reached the signer")
+		}
+		cancel() // the client hangs up
+		release()
+		<-done
+		if !bytes.Equal(e.fake.heldDirectory(), version) {
+			t.Fatal("the fake does not hold the installed version")
+		}
+		if ids := e.pendingOf(t, "dave"); len(ids) != 0 || e.pendingRows(t, "dave") != 0 {
+			t.Fatalf("dave after an install whose client hung up: pending %v, %d rows; want none\nlog:\n%s", ids, e.pendingRows(t, "dave"), e.log)
+		}
+		if strings.Contains(e.log.String(), "pending_cleanup_failed") {
+			t.Fatalf("the cleanup failed:\n%s", e.log)
 		}
 	})
 
