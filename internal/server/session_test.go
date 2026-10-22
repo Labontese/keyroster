@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverdb"
 	"github.com/Labontese/keyroster/internal/webauthn"
@@ -317,6 +318,20 @@ func TestSession(t *testing.T) {
 		e.requireAccount(t, "after the refused logout", cookie, "alice")
 		if n := e.sessionRows(t); n != 1 {
 			t.Fatalf("%d session rows, want 1", n)
+		}
+	})
+	t.Run("custody_banner_on_signin_pages", func(t *testing.T) {
+		// KEY-06: the software-custody banner is on the sign-in and account
+		// pages too.
+		e := newSignInEnv(t, highSignInLimits)
+		e.fake.setStatus(testStatus(t, "software", 0), nil)
+		banner := `<div class="kr-banner" role="alert">` + custodytext.SoftwareCABanner([]string{"user", "host", "machine", "ops", "log"}) + `</div>`
+		if rec := e.request(http.MethodGet, "/login", "", "", "", nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), banner) {
+			t.Fatalf("GET /login = %d without the banner:\n%s", rec.Code, rec.Body)
+		}
+		cookie := e.signIn(t, "alice", e.alice)
+		if rec := e.account(cookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), banner) {
+			t.Fatalf("GET /account = %d without the banner:\n%s", rec.Code, rec.Body)
 		}
 	})
 	t.Run("login_page", func(t *testing.T) {
