@@ -349,3 +349,68 @@ None.
   - `KEYROSTER_REQUIRE_SSH_AGENT` 3 non-comment lines in login_unix_test.go and ≥2 in ci.yml;
   - exactly one `-timeout 20m` in e2e.yml.
 - No private network detail in any changed file (grep for 10.x, 100.x, 192.168.x, host and account names: none).
+
+## Pre-merge review fixes
+
+These fix the verified findings of the pre-merge review of PR 52 (head `1753113`). Each code fix has a test that failed before the fix and passes after it. Each test-only finding was proven by a mutation: the checked line was broken, the suite failed, and the line was restored.
+
+**Owner decision 2026-10-22:** the 13 open choices (deviations 16-28) are approved as owner-approved deviations ("Godkänn (Rekommenderas)"). Three of them are adjusted below:
+- **Choice 16:** each route now also has its own global backstop.
+- **Choices 18 and 19:** the 2-minute floor now holds at any accepted skew, and the skew is now read from a local time taken before the options request.
+
+**Fixed:**
+- **Per-route global backstop** (server login.go:130; medium). Commit `89eb62d`, fix(server).
+  - Before: the five login routes shared one global backstop sized for one bucket per client.
+  - Now each route has its own limiter (`newLoginLimits`), with a backstop of `globalFactor` × the per-client values. The per-client and per-(user, client) buckets are unchanged.
+  - Tests in `TestLoginLimits`:
+    - `junk_on_every_route_leaves_others_open`: 2 addresses × 5 routes × 10 junk requests, then a third client's options and begin get 200.
+    - `route_backstop_applies_per_route`: 10 addresses drain the options backstop, so an 11th address's options gets 429 while its begin gets 200.
+  - Both failed before the fix (429).
+- **Login certificate roles, extensions and critical options** (CLI login.go:514; the SPLIT finding, fixed per the orchestrator note). Commit `ab3ab1f`, fix(cli).
+  - The key ID must name exactly the plan's roles: the `--role` subset, or every role of the options, sorted like the signer's grant.
+  - The extensions must be exactly the requested ones plus the root-signed user CA profile's defaults.
+  - A critical option is refused by name before CertChecker runs.
+  - New table cases:
+    - `cert_extra_role_refused`;
+    - `cert_unrequested_role_refused` (`--role ops`, certificate names dev+ops);
+    - `cert_extra_extension_refused`;
+    - `cert_critical_option_refused`.
+  - The control `role_extensions_accepted` shows that a role granting `permit-agent-forwarding` still logs in.
+  - All four refusal cases failed before the fix. The critical-option case was already refused before, but only with CertChecker's vaguer "CA signature or validity" text.
+  - The fake now issues the honest roles and extensions the way the signer does.
+- **Skew in the remaining validity and the agent lifetime** (CLI login.go:520 and :524, two duplicate findings, both low). Commit `2d0d65b`, fix(cli).
+  - `checkLoginCert` now reads the server's clock as local + measured skew + 1 s, to cover the whole-second truncation. It uses that clock for CertChecker, the 60 s floor and the agent lifetime.
+  - The skew is measured from a local reading taken before the options request, so it errs toward a shorter lifetime.
+  - Test `two_minute_login_at_accepted_skew`: a `--ttl 2m` login whose certificate is minted 2 s before the check, at skew -60, 0 and +60 s. It requires success and a lifetime of at least 60 s and at most what the certificate has left on the server's clock.
+  - Before the fix, -60 s was refused with "less than 60 s left", and +60 s gave a lifetime of 2m58s against 1m58s left.
+  - enroll-user.md now states the lifetime rule.
+- **Options validation untested** (CLI login.go:335/340). Commit `c12326c`, test(cli).
+  - `options_checked` has 11 cases: other user, `server_time` 0, a CA cap other than the policy's, too many roles, a bad role name, a zero role TTL, no principals, a principal with ESC, a principal with CR, a bad extension, and a duplicate role.
+  - Each case requires `errBadLoginOptions`, no begin, no agent add, and none of the text on stderr.
+  - Mutants killed: line 335 changed to `if false {` (4 cases fail), and line 340 reduced to `if r.MaxTTLSeconds == 0 {` (4 cases fail).
+- **checkBegin's https and expiry checks untested** (CLI login.go:434). Commit `ef3b2fc`, test(cli).
+  - `begin_answer_fields_checked` covers: an http URL on the configured host, a query, a fragment, user info, another login's path, `expires_at` equal to the server time, and `expires_at` at +601 s. The control is +600 s, which is offered.
+  - Mutants killed: dropping the expiry bound (2 cases fail) and dropping `u.Scheme != "https"` (`http_scheme` fails).
+- **Server begin state format untested** (server login.go:350). Commit `385c7e2`, test(server).
+  - `bad_state_refused_nothing_stored` covers a 42-character state and a state containing `&`, `+`, `#` or `=` padding. It requires the malformed-request 400 and an unchanged `login_sessions` row count.
+  - Mutant killed: removing `|| !pkceRE.MatchString(in.State)`.
+
+**Judged, no code change:**
+- **CodeQL #14 (server login.go:118, `logLogin`):** every logged value is constrained, so this is a false positive.
+  - `event` and `reason` are constants.
+  - `user` is "", a name that passed `directory.ValidUserName`, or the stored `l.User`, which begin wrote only after that check.
+  - `login_id` is "" until it passes `loginIDRE` (32 lowercase hex), or it is the server-made ID.
+  - `client` is `remoteIP`, a parsed `netip` address.
+  - The server logs through `slog.NewJSONHandler`, which escapes control characters anyway.
+- **CodeQL #15 (server login.go:767, `loginInternal`):** a false positive.
+  - `event` is a constant.
+  - `err` is an internal error from the database, the RNG or `directory.Authorize`, and Authorize quotes names with `%q`.
+  - The JSON handler escapes the value.
+
+**Skipped:** none.
+
+**Checks:**
+- `gofmt -l .` printed nothing.
+- `go vet ./...` passed natively (windows) and with `GOOS=linux` and `GOOS=darwin`. `GOOS=linux go vet -tags e2e ./test/e2e/` also passed.
+- `go test -count=1 ./cmd/keyroster/ ./internal/server/` and `go test ./...` passed.
+- `-race` was not run: there is no cgo toolchain here. The e2e lane is CI-only.
