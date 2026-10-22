@@ -141,10 +141,11 @@ var signerLoginRefusals = []string{
 // state, has the user approve the exact request with a passkey on the
 // approval page, takes the code from its 127.0.0.1 loopback and redeems
 // it. The certificate is accepted only from the root-pinned user CA, for
-// its own key, with exactly the requested principals, a kr2 key ID naming
-// the user and the request, and at least 60 s left; then it goes into the
-// agent with a lifetime equal to its remaining validity. The private key
-// is never written to a file.
+// its own key, with exactly the requested principals, roles and extensions
+// and no critical option, a kr2 key ID naming the user and the request,
+// and at least 60 s left; then it goes into the agent with a lifetime of
+// its remaining validity on the server's clock. The private key is never
+// written to a file.
 func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("login", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -209,6 +210,12 @@ type loginPlan struct {
 	extensions []string
 	ttl        time.Duration
 	skew       time.Duration // server time minus local time
+	// granted are the sorted roles the certificate's key ID must name: the
+	// --role subset, or every role of the options. certExtensions are the
+	// sorted extensions it must carry: extensions plus the root-verified
+	// user CA profile's defaults.
+	granted        []string
+	certExtensions []string
 }
 
 func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, noBrowser bool) error {
@@ -329,9 +336,11 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 // the local clock read just before the options were requested.
 func (l *loginRun) plan(opts *loginOptions, roles []string, ttl time.Duration, asked time.Time) (*loginPlan, error) {
 	caCap := uint64(0)
+	var defaults []string
 	for _, p := range l.policy.CAProfiles {
 		if p.Role == trust.RoleUser {
 			caCap = p.MaxTTLSeconds
+			defaults = p.DefaultExtensions
 		}
 	}
 	if opts.User != l.cfg.User || opts.ServerTime <= 0 || caCap == 0 || opts.CAMaxTTLSeconds != caCap || len(opts.Roles) > wire.MaxLoginRoles*4 {
@@ -398,6 +407,11 @@ func (l *loginRun) plan(opts *loginOptions, roles []string, ttl time.Duration, a
 	}
 	p.principals = sortedSet(principals)
 	p.extensions = sortedSet(extensions)
+	p.granted = selected
+	for _, e := range defaults {
+		extensions[e] = true
+	}
+	p.certExtensions = sortedSet(extensions)
 	if len(p.principals) > wire.MaxPrincipals {
 		return nil, errBadLoginOptions
 	}
@@ -482,8 +496,10 @@ func redeemFailure(err error) error {
 // skew plus one second, which covers the skew's whole-second truncation
 // (02-12 pre-merge review). It must be a user certificate signed
 // (signature verified) by ca, the root-pinned user CA, valid then, for
-// key, with exactly the requested principals, a kr2 key ID naming the user
-// and the request ID, spanning at most the TTL plus cert.Build's backdate,
+// key, with exactly the requested principals, a kr2 key ID naming the user,
+// the request ID and exactly the plan's roles, exactly the plan's
+// extensions and no critical option (02-12 pre-merge review), spanning at
+// most the TTL plus cert.Build's backdate,
 // and with at least minLoginRemaining seconds left. It returns the
 // certificate and its remaining whole seconds, counted from that server
 // time rounded up, so the agent lifetime never outlasts the certificate.
@@ -499,6 +515,10 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 	}
 	if !bytes.Equal(c.SignatureKey.Marshal(), ca.Marshal()) {
 		return nil, 0, errors.New("it is not signed by the user CA of your root-signed trust bundle")
+	}
+	// Checked here, before CertChecker refuses them with a vaguer text.
+	if len(c.CriticalOptions) != 0 {
+		return nil, 0, errors.New("it carries critical options, which a login never requests")
 	}
 	checker := ssh.CertChecker{
 		IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), ca.Marshal()) },
@@ -520,6 +540,17 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 	kid, err := cert.ParseKeyID(c.KeyId)
 	if err != nil || kid.Roles == nil || kid.CA != wire.CARoleUser.String() || kid.Subject != req.Subject || kid.Request != hex.EncodeToString(req.RequestID[:]) {
 		return nil, 0, errors.New("its key ID does not name this user and request")
+	}
+	if !slices.Equal(kid.Roles, plan.granted) {
+		return nil, 0, errors.New("its key ID does not name the roles requested")
+	}
+	exts := make([]string, 0, len(c.Extensions))
+	for e := range c.Extensions {
+		exts = append(exts, e)
+	}
+	slices.Sort(exts)
+	if !slices.Equal(exts, plan.certExtensions) {
+		return nil, 0, errors.New("its extensions are not the ones requested")
 	}
 	if c.ValidBefore <= c.ValidAfter || c.ValidBefore-c.ValidAfter > uint64(plan.ttl/time.Second)+certBackdate { //nolint:gosec // G115: a positive TTL
 		return nil, 0, errors.New("it is valid for longer than requested")

@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -299,34 +300,59 @@ type certParams struct {
 	subject    string
 	now        time.Time
 	validFor   time.Duration
+	roles      []string          // the key ID's roles
+	extra      map[string]string // extensions beyond the profile's permit-pty
+	critical   map[string]string
 }
 
-// params are the honest parameters for l.
+// params are the honest parameters for l, as the signer issues them: the
+// requested roles (or all of the user's, sorted) and the requested
+// extensions on top of the profile default.
 func (e *loginServer) params(t *testing.T, l *fakeLogin) certParams {
 	t.Helper()
 	k, err := ssh.ParsePublicKey(l.req.SubjectKey)
 	if err != nil {
 		t.Error(err)
 	}
+	roles := l.req.Roles
+	if len(roles) == 0 {
+		e.mu.Lock()
+		for _, r := range e.roles {
+			roles = append(roles, r.Name)
+		}
+		e.mu.Unlock()
+		slices.Sort(roles)
+	}
+	extra := map[string]string{}
+	for _, x := range l.req.Extensions {
+		if x != "permit-pty" {
+			extra[x] = ""
+		}
+	}
 	return certParams{ca: e.ca, key: k, principals: l.req.Principals, subject: l.req.Subject, now: e.now(),
-		validFor: time.Duration(l.req.ValidForSeconds) * time.Second}
+		validFor: time.Duration(l.req.ValidForSeconds) * time.Second, roles: roles, extra: extra}
 }
 
 // build issues a certificate with p through cert.Build.
 func (e *loginServer) build(t *testing.T, l *fakeLogin, p certParams) []byte {
 	t.Helper()
-	roles := l.req.Roles
-	if len(roles) == 0 {
-		roles = []string{"dev", "ops"}
-	}
 	e.mu.Lock()
 	e.serial++
 	ser := e.serial
 	e.mu.Unlock()
+	prof := cert.DefaultUserProfile()
+	for x := range p.extra {
+		prof.AllowedExtensions = append(prof.AllowedExtensions, x)
+	}
+	for o := range p.critical {
+		prof.AllowedCriticalOptions = append(prof.AllowedCriticalOptions, o)
+	}
 	c, err := cert.Build(cert.Request{
-		Profile: cert.DefaultUserProfile(), Subject: p.key, Principals: p.principals, Now: p.now, ValidFor: p.validFor,
-		KeyID:  cert.KeyID{CA: "user", Subject: p.subject, Request: hex.EncodeToString(l.req.RequestID[:]), Policy: 1, Directory: 1, Roles: roles, Serial: ser},
-		Serial: ser,
+		Profile: prof, Subject: p.key, Principals: p.principals, Now: p.now, ValidFor: p.validFor,
+		KeyID:           cert.KeyID{CA: "user", Subject: p.subject, Request: hex.EncodeToString(l.req.RequestID[:]), Policy: 1, Directory: 1, Roles: p.roles, Serial: ser},
+		Serial:          ser,
+		ExtraExtensions: p.extra,
+		CriticalOptions: p.critical,
 	}, p.ca, rand.Reader)
 	if err != nil {
 		t.Error(err)
@@ -759,34 +785,52 @@ func TestLoginRefusals(t *testing.T) {
 	for _, c := range []struct {
 		name, want string
 		mutate     func(t *testing.T, l *fakeLogin, p *certParams) []byte
+		args       []string
 	}{
+		{"cert_extra_role_refused", "key ID does not name the roles requested", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
+			p.roles = []string{"admin", "dev", "ops"}
+			return nil
+		}, nil},
+		{"cert_unrequested_role_refused", "key ID does not name the roles requested", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
+			p.roles = []string{"dev", "ops"}
+			return nil
+		}, []string{"--role", "ops"}},
+		{"cert_extra_extension_refused", "extensions are not the ones requested", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
+			p.extra["permit-agent-forwarding"] = ""
+			p.extra["permit-port-forwarding"] = ""
+			return nil
+		}, nil},
+		{"cert_critical_option_refused", "carries critical options", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
+			p.critical = map[string]string{"force-command": "/bin/true"}
+			return nil
+		}, nil},
 		{"cert_other_ca_refused", "not signed by the user CA", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
 			_, k, _ := ed25519.GenerateKey(rand.Reader)
 			p.ca, _ = ssh.NewSignerFromKey(k)
 			return nil
-		}},
-		{"cert_bad_signature_refused", "CA signature or validity", nil},
+		}, nil},
+		{"cert_bad_signature_refused", "CA signature or validity", nil, nil},
 		{"cert_other_key_refused", "for another key", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
 			pub, _, _ := ed25519.GenerateKey(rand.Reader)
 			p.key, _ = ssh.NewPublicKey(pub)
 			return nil
-		}},
+		}, nil},
 		{"cert_extra_principal_refused", "principals are not the ones requested", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
 			p.principals = append(append([]string(nil), p.principals...), "root")
 			return nil
-		}},
+		}, nil},
 		{"cert_other_user_refused", "key ID does not name this user", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
 			p.subject = "bob"
 			return nil
-		}},
+		}, nil},
 		{"cert_span_ttl_301_refused", "valid for longer than requested", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
 			p.validFor += time.Second
 			return nil
-		}},
+		}, nil},
 		{"cert_59s_remaining_refused", "less than 60 s left", func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
 			p.now = p.now.Add(-p.validFor + 59*time.Second)
 			return nil
-		}},
+		}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			useLoginClock(t)
@@ -807,7 +851,7 @@ func TestLoginRefusals(t *testing.T) {
 					return crt.Marshal()
 				}
 			}
-			stderr, wait := e.start(t)
+			stderr, wait := e.start(t, c.args...)
 			e.drive(t, stderr)
 			r := wait()
 			requireLoginRefused(t, r, c.want)
@@ -834,6 +878,28 @@ func TestLoginRefusals(t *testing.T) {
 		left := int64(adds[0].Certificate.ValidBefore) - now.Unix() //nolint:gosec // G115: a test certificate
 		if adds[0].LifetimeSecs < 60 || int64(adds[0].LifetimeSecs) > left || adds[0].Comment != adds[0].Certificate.KeyId {
 			t.Fatalf("lifetime %d s, comment %q; want 60 <= lifetime <= %d and the key ID", adds[0].LifetimeSecs, adds[0].Comment, left)
+		}
+	})
+	t.Run("role_extensions_accepted", func(t *testing.T) {
+		// A role that grants an extension: the honest certificate carries
+		// it next to the profile default, and the login succeeds.
+		e := newLoginServer(t)
+		a := useRecordingAgent(t)
+		e.roles[0].Extensions = []string{"permit-agent-forwarding"}
+		stderr, wait := e.start(t)
+		e.drive(t, stderr)
+		if r := wait(); r.code != 0 {
+			t.Fatalf("login exit %d:\n%s", r.code, r.stderr)
+		}
+		adds := a.added()
+		if len(adds) != 1 || adds[0].Certificate == nil {
+			t.Fatalf("adds = %v, want one certificate add", adds)
+		}
+		ext := adds[0].Certificate.Extensions
+		_, pty := ext["permit-pty"]
+		_, fwd := ext["permit-agent-forwarding"]
+		if len(ext) != 2 || !pty || !fwd {
+			t.Fatalf("extensions %v, want permit-pty and permit-agent-forwarding", ext)
 		}
 	})
 	t.Run("two_minute_login_at_accepted_skew", func(t *testing.T) {

@@ -243,7 +243,8 @@ keyroster login --role ops --ttl 30m
 - After the passkey prompt the browser hands the result to
   `keyroster login` on `127.0.0.1`. The CLI checks the certificate against
   the user CA of your root-signed trust bundle (its own key, exactly the
-  principals it asked for, at least 60 s left) and adds it to the agent
+  principals, roles and extensions it asked for, no critical options, at
+  least 60 s left) and adds it to the agent
   with a lifetime of its remaining validity, counted on the server's clock
   (your clock plus the measured difference, plus one second), so the agent
   never keeps it past its expiry. It never writes the key
