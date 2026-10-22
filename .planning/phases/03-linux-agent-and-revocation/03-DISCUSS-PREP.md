@@ -4,14 +4,16 @@ These are the questions for `/gsd-discuss-phase 3`. Each has a short set of opti
 
 ## Facts that frame the questions
 
-1. **sshd re-reads the CA file, the KRL and the principals files on every login attempt.**
+1. **Current OpenSSH re-reads the CA file, the KRL and the principals files on every login attempt.** A container test will settle older versions.
    - Revocations and principal changes need no sshd reload.
    - Host certificate renewals and sshd config changes do need one.
    - Source: OpenSSH source, verified.
 2. **A corrupt or unreadable KRL makes sshd refuse every public key on that host,** including plain `authorized_keys` keys. The agent must test each new KRL with the host's own `ssh-keygen` before installing it.
 3. **sshd can scope trust to one account** with a `Match User` block, and a `Match` inside our drop-in cannot spill into the main config. Break-glass can therefore be isolated.
 4. **A KRL entry by key ID revokes exactly one certificate,** because our key IDs contain the request ID. Revoking a person means revoking all their live serials.
-5. **RHEL 8 has no `sshd_config.d`.** RHEL 9, Debian, Ubuntu, Alpine, Arch and Proxmox all read drop-ins first.
+5. **RHEL 8 has no `sshd_config.d`.**
+   - RHEL 9, Alpine and Arch packaging read drop-ins first (verified in their package sources).
+   - Debian, Ubuntu and Proxmox are documented to do the same, but this is not yet tested.
 
 ## Questions
 
@@ -51,7 +53,8 @@ These are the questions for `/gsd-discuss-phase 3`. Each has a short set of opti
    - (a) Check only that sshd is up and serves the right host certificate.
    - (b) Also check that a probe certificate would be accepted.
    - (c) Also check that a revoked probe is refused, which proves the KRL is enforced.
-   - *Recommended: (c), once per apply. It needs a locked local account, `keyroster-probe`.*
+   - *Recommended: (c), once per apply.*
+   - (c) costs a new signer path: probe certificates from the machine CA, issued to each host by proof of possession, plus a locked local account `keyroster-probe`. If that is too much for Phase 3, take (a) now and (c) later.
 9. **Hosts without drop-in support (RHEL 8) or with an unusual config.**
    - (a) Not supported; the agent refuses and explains.
    - (b) The agent edits `sshd_config`.
@@ -88,6 +91,10 @@ These are the questions for `/gsd-discuss-phase 3`. Each has a short set of opti
     - (a) Unsupported in Phase 3.
     - (b) Add a P-256 CA generation.
     - *Recommended: (a), documented.*
+18. **AGENT-01 says the agent "pins the server key".**
+    - (a) Read it as pinning the TLS root CA plus the hostname, as the CLI already does, and reword the requirement.
+    - (b) Pin the server's own key, which breaks at every `tailscale cert` renewal.
+    - *Recommended: (a).*
 
 ## Owner actions this phase will need
 

@@ -61,7 +61,7 @@ OpenSSH source references are to openssh-portable `master` at commit `26b1363c7c
 
 | ID | Description (REQUIREMENTS.md) | Research support |
 |----|-------------------------------|------------------|
-| AGENT-01 | Enroll a host with a one-time join token; the agent pins the server key and trust root | §Enrollment and transport |
+| AGENT-01 | Enroll a host with a one-time join token; the agent pins the server key and trust root | §Enrollment and transport. **Reinterpretation:** "server key" is read as the TLS root-CA SPKI pin set plus the hostname (the P2 Q1 rule), because `tailscale cert` rotates the leaf key at every renewal. The owner confirms this reading or rewords the requirement (OQ18) |
 | AGENT-02 | Pull-only mTLS, closed set of typed operations, no remote exec, no inbound ports | §Enrollment and transport, the closed operation set |
 | AGENT-03 | Apply only CA sets, policy and KRLs signed by the pinned root or delegated keys; refuse unsigned or older | §Signed state the agent applies |
 | AGENT-04 | Write sshd config, CA keys, principals and KRL atomically; `sshd -t`; reload; self-test; roll back | §Atomic apply, §Distro variance, §Self-test |
@@ -175,7 +175,7 @@ The agent keeps one local state record: pins, last accepted bundle and policy (b
   - A genesis bundle is checked against the pins.
   - Each later bundle needs `version = prev+1`, the previous hash, and the threshold of the previous **and** new roots.
   - The agent refuses a version that is not newer, and also a successor that skips a version.
-  - **Gap:** the server must therefore serve the whole chain since the agent's last version, not only the newest bundle. The `/api/v1/trust` endpoint serves only the current one today (`internal/serverclient`).
+  - **Gap:** the server must therefore serve the whole chain since the agent's last version, not only the newest bundle. `handleTrust` serves only the current bundle and policy from the signer's Status today (`internal/server/server.go:196-216`) [VERIFIED].
 - **Directory.** The agent verifies it against the policy in force: admin quorum SSHSIG under `keyroster/directory/v1`, version chained by hash (`internal/directory/verify.go`).
   - Today the directory GET endpoint is admin-authenticated (`internal/server/server.go:131`).
   - Agents need their own read path over mTLS.
@@ -460,6 +460,16 @@ After a change, the agent needs evidence that sshd still accepts what it should 
     - it is mapped only to a locked account `keyroster-probe` with no shell;
     - it uses a key whose private half the agent holds.
   - A second, **revoked** probe certificate must be refused. That proves the KRL is enforced, which nothing else proves.
+- **The probe certificates are a new issuance path.**
+  - The signer must issue user-type certificates *to hosts*. That means its own evidence type (host PoP, as for host certificates), its own leaf kind and audit-verify rule, and a renewal loop.
+  - Recommendation: issue them from the **machine** CA, not the user CA. The user CA cap is hours, and a probe for every host would then renew constantly.
+  - Principal `keyroster-probe:<host>`, accepted only by the locked probe account. A compromised host gains nothing from its own probe certificate.
+  - This needs a threat-table row (T3-11).
+- **The negative probe must not expire into "proof".**
+  - A revoked-*serial* probe that has expired is refused for expiry too, and PK_OK does not say why. The refusal would then prove nothing about the KRL.
+  - Instead, revoke the probe **key** with an explicit-key KRL entry, which is never pruned, so the refusal can come only from the KRL.
+  - Confirm on the host by sshd's "revoked by file" log line (auth.c:569-571) if the agent can read the journal.
+  - The matrix must test that an explicit-key entry refuses a *certificate* for that key. `user_key_allowed` checks the certificate key itself (auth2-pubkey.c:833), and `ssh_krl_check_key` checks the plain key for certificates, so this is expected but UNVERIFIED end to end.
 - **Cost.** Failed probe attempts count toward `PerSourcePenalties` (OpenSSH ≥ 9.8; authfail 5 s, enforcement after `min:15s` accrues, sshd_config.5) [VERIFIED defaults]. So the negative probe must be rare (once per apply, at most a few per hour) or run against `addr=` loopback with an exemption. Adding `PerSourcePenaltyExemptList` would mean editing global sshd config, so the recommendation is low frequency instead.
 
 ---
@@ -478,7 +488,7 @@ After a change, the agent needs evidence that sshd still accepts what it should 
      - the nonce is fresh;
      - then it logs a `host_issue` leaf and signs with the active host CA.
 - **Initial issuance.** The first certificate needs nothing more than the approved directory entry plus PoP, because the admin's directory signature is the approval.
-- **Lifetime.** Recommendation: 30 d TTL, renewal at 2/3 of the lifetime, with jitter. One certificate per host key type the host serves (Ed25519 and ECDSA). RSA host keys get no certificate (policy refuses RSA).
+- **Lifetime.** Recommendation: 30 d TTL, renewal at 2/3 of the lifetime, with jitter. One certificate per host key type the host serves. `cert.ValidateSubjectKey` accepts Ed25519, ECDSA, sk keys and RSA of at least 3072 bits (`internal/cert/validate.go:66-89`) [VERIFIED]. So an RSA-3072 host key can be certified, and a shorter RSA host key is refused. Whether to certify RSA host keys at all is a planner detail; recommendation: Ed25519 and ECDSA only.
 - **Install.** Write `HostCertificate` next to the keys (`/etc/ssh/keyroster/host/<type>-cert.pub`), then `sshd -t`, reload (finding 1), and check the served certificate.
 - **Key ID.** A new format is needed. kr2 requires 1-16 roles, which a host or machine certificate does not have. Proposal: `kr3/ca=host/sub=<host>/req=…/pol=…/dir=…/ser=…`. `audit verify` re-proves it from the directory entry, like `login_issue`.
 - **Why PoP matters when root on the host already holds the key.** PoP stops anyone who merely *knows* a host's public key (the server, another host) from getting a certificate for it. Combined with admin-signed names, a compromised host can at most renew its own certificate for its own approved names.
@@ -622,6 +632,7 @@ The bundle already has generations and the states `active`, `next` and `retired`
 | T3-8 | Network attacker with a mis-issued WebPKI certificate | Root-SPKI pinning (P2 Q1) plus payload signatures | none for authority |
 | T3-9 | Agent becomes a remote-exec channel | Closed operation set, allowlisted paths, exec allowlist test, privilege split (OQ2) | Agent supply chain → Phase 6 signed agent updates |
 | T3-10 | Break-glass CA misuse | Offline custody, the `Match` scope keeps it to one account, TTL ≤ 1 h | Login alert is Phase 5 (BREAK-02) |
+| T3-11 | Probe certificates (if OQ8 b/c) are user-type certificates held by every host | Machine CA, principal `keyroster-probe:<host>` accepted only by a locked no-shell account, host PoP required, explicit-key revocation of the negative probe | A host's root can use its own probe certificate only against its own probe account on hosts that map it (none, by design) |
 
 ---
 
@@ -659,6 +670,21 @@ The bundle already has generations and the states `active`, `next` and `retired`
 | Dogfood | owner's Ubuntu 26.04 laptop, the ZimaBoard (distro to confirm), Proxmox; break-glass drill; CA rotation drill; deliberate corrupt-KRL drill on one host | owner checkpoints |
 
 The containerised sshd tests extend the Phase 1 e2e harness (real sshd, `PerSourcePenalties` reset per refusal case, 01-04).
+
+## Environment Availability
+
+The matrix has two halves, and they test different things:
+- **Version builds** test sshd *code* across versions.
+- **Distro containers** test packaged *config layout* (Include, drop-ins, crypto-policies, binary names).
+
+| Item | Status |
+|------|--------|
+| CI runners | `ubuntu-24.04` (distro OpenSSH 9.6p1) [VERIFIED `.github/workflows/ci.yml`, `e2e-pkcs11.yml`] |
+| Self-built OpenSSH in CI | `scripts/build-openssh.sh` already builds 10.5p1 for e2e [VERIFIED `e2e-pkcs11.yml`]. The same script can build 8.7p1 / 9.2p1 / 9.9p1 for the no-reload test without containers |
+| Docker on GitHub-hosted Ubuntu runners | preinstalled [CITED, GitHub runner images; not checked this session] |
+| systemd or OpenRC inside CI containers | not available by default, so the reload paths are UNVERIFIED in CI |
+| SELinux enforcing | not available in containers; needs an EL9 VM (dogfood or a later lane) |
+| Owner hosts | Ubuntu 26.04 laptop (OpenSSH 10.2p1 per Launchpad); ZimaBoard **distro unconfirmed**; Proxmox **VE 8 or 9 unconfirmed** |
 
 ---
 
@@ -702,7 +728,9 @@ The containerised sshd tests extend the Phase 1 e2e harness (real sshd, `PerSour
    - (a) Listener and host certificate check only.
    - (b) Add the positive PK_OK probe certificate.
    - (c) Add the positive and the revoked probe, proving KRL enforcement.
-   - **Recommendation:** (c) at apply time only, once per apply, rate-limited (PerSourcePenalties). It needs a locked `keyroster-probe` account and probe certificates.
+   - **Recommendation:** (c) at apply time only, once per apply, rate-limited (PerSourcePenalties).
+   - It needs a locked `keyroster-probe` account and probe certificates, which are a **new signer issuance path**: machine CA, host PoP, a leaf kind and a renewal loop. The negative probe is revoked by key, not by serial.
+   - If that path is too much for Phase 3, choose (a) now and add (c) later.
 9. **Hosts without a drop-in directory (RHEL 8) or with a non-standard config.**
    - (a) Unsupported in Phase 3: the agent refuses and prints instructions.
    - (b) The agent inserts an `Include` line into `sshd_config`.
@@ -729,9 +757,14 @@ The containerised sshd tests extend the Phase 1 e2e harness (real sshd, `PerSour
     - **Recommendation:** (a) for Phase 3. It matches the renderer's signature and keeps mappings legible.
 16. **Supported distro floor and the CI matrix.**
     - **Recommendation:** Debian 12+, Ubuntu 24.04+, EL9+, current Alpine, Arch, Proxmox VE 8+. CI tests sshd behaviour in containers; service-manager paths stay UNVERIFIED until dogfood.
+    - "EL9+" includes older EL9 minor releases, which shipped OpenSSH 8.7p1 [ASSUMED; c9s is now 9.9p1, VERIFIED]. Either the matrix also builds 8.7p1 (with `scripts/build-openssh.sh`, as e2e does for 10.5p1) or the floor is "current EL9 minor".
 17. **CA algorithm for RHEL FIPS hosts.**
     - FIPS mode is expected to reject Ed25519 CAs [ASSUMED]. Either a P-256 user CA generation is available, or FIPS hosts are unsupported.
     - **Recommendation:** document FIPS hosts as unsupported in Phase 3. Verify the crypto-policies `CASignatureAlgorithms` value on a stock EL9 container.
+18. **AGENT-01 wording ("pins the server key").**
+    - (a) Read it as the TLS root-CA SPKI set plus the hostname, as the CLI does (P2 Q1), and reword the requirement.
+    - (b) Pin the leaf key. That breaks at every `tailscale cert` renewal, because it makes a new key each time.
+    - **Recommendation:** (a).
 
 ---
 
