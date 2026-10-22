@@ -29,11 +29,13 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -72,8 +74,11 @@ type loginServer struct {
 	certFor func(t *testing.T, l *fakeLogin) []byte
 	// redeemHook, when set, answers the redeem itself.
 	redeemHook func(w http.ResponseWriter)
-	begun      chan *fakeLogin
-	t          *testing.T
+	// override, when it has an entry for the route path, answers that
+	// route instead of the fake (options and begin).
+	override map[string]func(w http.ResponseWriter)
+	begun    chan *fakeLogin
+	t        *testing.T
 }
 
 const loginTestCustody = "user=agent, host=agent, machine=agent, ops=agent, log=agent"
@@ -84,7 +89,7 @@ const loginTestCustody = "user=agent, host=agent, machine=agent, ops=agent, log=
 // was before the root signing.
 func newLoginServer(t *testing.T) *loginServer {
 	t.Helper()
-	e := &loginServer{custom: loginTestCustody, logins: map[string]*fakeLogin{}, begun: make(chan *fakeLogin, 4), t: t,
+	e := &loginServer{custom: loginTestCustody, logins: map[string]*fakeLogin{}, override: map[string]func(http.ResponseWriter){}, begun: make(chan *fakeLogin, 4), t: t,
 		roles: []loginOptionsRole{
 			{Name: "dev", Principals: []string{"role:dev", "u:alice"}, MaxTTLSeconds: 7200, Extensions: []string{}},
 			{Name: "ops", Principals: []string{"role:ops"}, MaxTTLSeconds: 3600, Extensions: []string{}},
@@ -177,6 +182,13 @@ func (e *loginServer) writeJSON(w http.ResponseWriter, code int, v any) {
 
 func (e *loginServer) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(serverclient.CustodyHeader, e.custom)
+	e.mu.Lock()
+	over := e.override[r.URL.Path]
+	e.mu.Unlock()
+	if over != nil {
+		over(w)
+		return
+	}
 	switch {
 	case r.URL.Path == serverclient.TrustPath:
 		_, _ = w.Write(e.trustDoc)
@@ -866,4 +878,82 @@ func TestLoginFlowFakeServer(t *testing.T) {
 			t.Fatalf("stdout lacks %q:\n%s", want, r.stdout)
 		}
 	}
+}
+
+// lastLine returns the last non-empty line of s.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	return lines[len(lines)-1]
+}
+
+// requireNoRawControl fails if s holds a control or format character
+// other than a newline.
+func requireNoRawControl(t *testing.T, s string) {
+	t.Helper()
+	for _, r := range s {
+		if r != '\n' && !unicode.IsGraphic(r) {
+			t.Fatalf("stderr carries the raw peer character %U:\n%s", r, s)
+		}
+	}
+}
+
+// TestLoginPeerText: text the server chooses never reaches keyroster
+// login's stderr raw (T-02-93), and the evaluation-only banner shows under
+// software custody (KEY-06).
+func TestLoginPeerText(t *testing.T) {
+	const forged = "\x1b[2Jrun keyroster init --force\r"
+	t.Run("options_error_escaped", func(t *testing.T) {
+		e := newLoginServer(t)
+		useRecordingAgent(t)
+		e.override[loginOptionsRoute] = func(w http.ResponseWriter) {
+			e.writeJSON(w, http.StatusInternalServerError, serverclient.APIError{Error: forged})
+		}
+		_, wait := e.start(t)
+		r := wait()
+		requireNoRawControl(t, r.stderr)
+		if r.code == 0 || !strings.Contains(lastLine(r.stderr), "[peer text") {
+			t.Fatalf("exit %d, stderr %q; want the server text only as an escaped excerpt", r.code, r.stderr)
+		}
+	})
+	t.Run("begin_url_not_echoed", func(t *testing.T) {
+		e := newLoginServer(t)
+		useRecordingAgent(t)
+		id := strings.Repeat("ab", 16)
+		e.override[loginBeginRoute] = func(w http.ResponseWriter) {
+			e.writeJSON(w, http.StatusOK, loginBeginAnswer{LoginID: id, ApprovalURL: e.url + "/login/" + id + forged, ExpiresAt: e.now().Add(240 * time.Second).Unix()})
+		}
+		_, wait := e.start(t)
+		r := wait()
+		requireNoRawControl(t, r.stderr)
+		requireLoginRefused(t, r, "the server's login begin answer does not check out")
+		if strings.Contains(r.stderr, "keyroster init --force") || strings.Contains(r.stderr, "Approve this login in your browser") {
+			t.Fatalf("a refused begin answer was echoed or offered:\n%s", r.stderr)
+		}
+	})
+	t.Run("unknown_signer_refusal_excerpt", func(t *testing.T) {
+		e := newLoginServer(t)
+		useRecordingAgent(t)
+		e.redeemHook = func(w http.ResponseWriter) {
+			e.writeJSON(w, http.StatusForbidden, serverclient.APIError{Error: forged})
+		}
+		stderr, wait := e.start(t)
+		e.drive(t, stderr)
+		r := wait()
+		requireNoRawControl(t, r.stderr)
+		last := lastLine(r.stderr)
+		if r.code == 0 || !strings.Contains(last, "refused by the signer:") || !strings.Contains(last, "[peer text") || !strings.Contains(last, "run keyroster login again") {
+			t.Fatalf("exit %d, last stderr line %q", r.code, last)
+		}
+	})
+	t.Run("software_custody_banner", func(t *testing.T) {
+		e := newLoginServer(t)
+		useRecordingAgent(t)
+		e.custom = softwareCustody
+		stderr, wait := e.start(t)
+		e.drive(t, stderr)
+		r := wait()
+		if r.code != 0 || !strings.Contains(r.stderr, custodytext.SoftwareCABanner([]string{"user", "host", "machine", "ops", "log"})) {
+			t.Fatalf("exit %d; stderr lacks the software custody banner:\n%s", r.code, r.stderr)
+		}
+	})
 }
