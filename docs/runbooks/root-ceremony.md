@@ -649,9 +649,19 @@ the change.
 > - Step 5 ran before `keyroster-server` was installed, so no restart was
 >   needed.
 >
+> - Step 6 ran after the first enrollment, before any login. On the signer
+>   host, `export-log` ran with the `runuser` wrapper of
+>   [signer-install.md](signer-install.md) and wrote to standard output
+>   instead of `--out`. `keyroster audit verify` ran on the admin's Windows
+>   computer, on a copy of that export, pinned to TEST roots C and D (from
+>   `root init` output, not paper) at threshold 1. The `OK:` line named
+>   `trust bundle v3, policy v2` and counted `login certificates 0,
+>   directory installs 5`. The `anchored:` line named trust bundle v2, where
+>   C and D first became the root set, not v3: as this step predicts after
+>   one rotation.
+>
 > Still **UNVERIFIED**: step 0 (live USB, offline machine, second-machine
-> build), paper fingerprints, and step 6 (audit) until 02-13 runs it after
-> the first enrollment.
+> build) and paper fingerprints.
 
 ## Hardware-root variant
 
