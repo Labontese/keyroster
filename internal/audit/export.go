@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 
 	"golang.org/x/crypto/ssh"
@@ -153,6 +154,77 @@ func decodeLeaf(data []byte) map[string]any {
 			return map[string]any{"error": err.Error()}
 		}
 		m["bundle_version"] = b.BundleVersion
+	case tlog.KindDirectoryInstall:
+		b, err := tlog.DecodeDirectoryInstallBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		m["version"] = b.Version
+		m["policy_version"] = b.PolicyVersion
+	case tlog.KindLoginIssue:
+		b, err := tlog.DecodeLoginIssueBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		decodeLoginIssue(m, b)
 	}
 	return m
 }
+
+// decodeLoginIssue renders a login_issue body into m (02-12). Each part
+// degrades on its own: a certificate or an evidence blob that does not
+// parse adds cert_error or authenticator_error and keeps the body's other
+// fields, so the serial and key ID of every login issuance stay readable.
+// authenticator_data_len and authenticator_flags (the flags byte in hex)
+// record what each real authenticator sent (02-01-F5).
+func decodeLoginIssue(m map[string]any, b *tlog.LoginIssueBody) {
+	types := make([]string, 0, len(b.Evidence))
+	for _, e := range b.Evidence {
+		types = append(types, e.Type)
+	}
+	m["serial"] = b.Serial
+	m["policy_version"] = b.PolicyVersion
+	m["directory_version"] = b.DirectoryVersion
+	m["key_id"] = b.KeyID
+	m["evidence_types"] = types
+	if c, err := parseCert(b.Cert); err != nil {
+		m["cert_error"] = err.Error()
+	} else {
+		m["principals"] = c.ValidPrincipals
+		m["valid_after"] = c.ValidAfter
+		m["valid_before"] = c.ValidBefore
+		m["ca_fingerprint"] = ssh.FingerprintSHA256(c.SignatureKey)
+		m["ca_algorithm"] = c.SignatureKey.Type()
+		m["key_fingerprint"] = ssh.FingerprintSHA256(c.Key)
+	}
+	for _, e := range b.Evidence {
+		if e.Type != wire.EvidenceWebAuthnAssertion {
+			continue
+		}
+		a, err := wire.ParseWebAuthnAssertion(e.Blob)
+		if err != nil {
+			m["authenticator_error"] = err.Error()
+			continue
+		}
+		m["authenticator_data_len"] = len(a.AuthenticatorData)
+		if len(a.AuthenticatorData) > 32 {
+			m["authenticator_flags"] = hex.EncodeToString(a.AuthenticatorData[32:33])
+		}
+	}
+}
+
+// parseCert parses certificate wire bytes.
+func parseCert(raw []byte) (*ssh.Certificate, error) {
+	pk, err := ssh.ParsePublicKey(raw)
+	if err != nil {
+		return nil, err
+	}
+	c, ok := pk.(*ssh.Certificate)
+	if !ok {
+		return nil, errNotCertificate
+	}
+	return c, nil
+}
+
+// errNotCertificate is a log leaf's certificate field holding a plain key.
+var errNotCertificate = errors.New("not a certificate")
