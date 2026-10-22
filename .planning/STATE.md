@@ -204,6 +204,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-09: one directory pipeline (verify trust and base, build, Validate, CheckPolicy, diff, confirmSign or --yes, SSHSIG under keyroster/directory/v1, install or proposal); proposals are directory.json + directory.json.sigs (+ base.sha256 note), default keyroster-directory-v<N> when quorum > 1
 - [Phase 02]: 02-09: currentDirectory is the one directory mirror (replaces 02-07's dirCache): reads only through currentStatus, version 0 without a signer read, fails closed on a failed or mismatched refresh; the install handler drops the status cache after every InstallDirectory
 - [Phase 02]: 02-09: POST /api/v1/admin/directory runs under pendingMu (also taken by a reinvite), refuses credential_not_pending, and cleans up with self-healing DeleteBound (ID and user matched); keyroster user list prints users from the verified directory, never the server's fingerprints
+- [Phase 02]: 02-09 pre-merge review, owner decisions 2026-10-21: (F1) the CLI says only that the server reports a version installed (no signer receipt yet; check with keyroster audit verify on the signer host; receipts are a Phase 4 blocker todo); (F2) the executor's five unsettled choices approved; (F3) recovery after an admin-set or quorum change is a Phase 4 blocker todo. The pending check at install matches ID, user, alg and SPKI; the diff shows credential IDs and BE; directory display escapes control bytes. CodeQL go/log-injection #12 (directory.go, a Validate-checked user name) dismissed as a false positive
 
 ### Pending Todos
 
