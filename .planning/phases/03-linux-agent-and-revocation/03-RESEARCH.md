@@ -11,7 +11,7 @@ There is no `03-CONTEXT.md` yet. The constraints below come from ROADMAP.md (Pha
 - **CITED:** from documentation or a secondary source, not checked against code.
 - **ASSUMED:** Claude's knowledge or inference, not checked this session.
 
-OpenSSH source references are to openssh-portable `master` at commit `26b1363c7cbf5d01c730f45fc0b4abc5686beaf7` (2026-10-18, `version.h` = OpenSSH_10.6). Behaviour on older releases (9.2p1 bookworm, 9.6p1 noble, 9.9p1 c9s, 10.0p1 trixie, 10.2p1 Ubuntu 26.04) is ASSUMED to match until the integration test in "Validation Architecture" runs on each.
+OpenSSH source references are to openssh-portable `master` at commit `26b1363c7cbf5d01c730f45fc0b4abc5686beaf7` (2026-10-18, `version.h` = OpenSSH_10.6) unless a release tag is named. An independent source check (2026-10-23) also read the tags `V_9_2_P1` (bookworm), `V_9_6_P1` (noble) and `V_10_2_P1` (Ubuntu 26.04) for the re-read behaviour, the KRL parser and the Match copy rules; those results are labelled per tag below. Releases nobody read (9.9p1 c9s, 10.0p1 trixie) stay ASSUMED to match, and every target still needs the integration test in "Validation Architecture".
 
 ---
 
@@ -54,6 +54,7 @@ OpenSSH source references are to openssh-portable `master` at commit `26b1363c7c
   - Signed install receipts (2026-10-21 todo).
   - Witnessed checkpoints (VIS-02, 2026-10-17 todo).
   - These are not Phase 3 scope, but the agent's local state (last bundle, directory and KRL versions) should be stored so Phase 4 can add checkpoint witnessing without a migration.
+  - Binding admin-signed directories to a deployment (2026-10-16 todo, blocker for Phase 4). Agents make it a Phase 3 concern, because an agent pins its trust at enrollment (§Binding the agent to one deployment, OQ22).
 
 ---
 
@@ -69,14 +70,14 @@ OpenSSH source references are to openssh-portable `master` at commit `26b1363c7c
 | AGENT-06 | Host certificates by proof of possession of the host key | §Host certificates |
 | AGENT-07 | Heartbeats with hashes of the applied config, CA set and KRL version | §Heartbeats and convergence |
 | AUTHZ-02 | `AuthorizedPrincipalsFile` generated from signed host policy | §Signed state (the directory), renderer reuse |
-| REVOKE-01 | Revoke by serial or key ID, or a key, from the CLI or UI | §Revocation model |
+| REVOKE-01 | Revoke by serial or key ID, or a key, from the CLI or UI | §Revocation model (CLI only). **Proposed rewording:** the UI part moves to Phase 4, the web UI phase; the owner approves (OQ20) |
 | REVOKE-02 | KRL from our own encoder, checked with `ssh-keygen -Q`, distributed automatically | §KRL encoder |
 | REVOKE-03 | KRL signed with detached SSHSIG, atomic install, last-good copy, rollback refused, no fleet lockout | §KRL encoder, §Atomic apply, Pitfalls 1-3 |
 | REVOKE-04 | Clients trust hosts via a CLI-managed `@cert-authority` line and a revoked host keys list | §Client side |
 | AUTH-06 | Machine identities get day-scale certificates within role caps | §Machine identities |
-| KEY-08 | Rotate a CA key without fleet outage | §CA rotation |
+| KEY-08 | Rotate a CA key without fleet outage | §CA rotation, including log-key rotation (`anchor.install`, `activeCA`) and lifting the `root sign --prev --ca-pubkeys` refusal |
 | BREAK-01 | An offline break-glass CA, distributed by the agent, grants login to a dedicated emergency account only | §Break-glass |
-| PLAT-01 | Generic Unix agent on Debian/Ubuntu, RHEL family, Alpine, Arch and Proxmox | §Distro variance |
+| PLAT-01 | Generic Unix agent on Debian/Ubuntu, RHEL family, Alpine, Arch and Proxmox | §Distro variance, §Migrating Phase 2 hosts. **Proposed rewording:** "RHEL family" becomes "RHEL family 9 and later, not in FIPS mode", here and in success criterion 1; the owner approves (OQ21) |
 
 ---
 
@@ -108,10 +109,11 @@ Files are swapped in atomically. sshd is reloaded only when the drop-in or the h
 
 **Primary findings** (each is detailed below):
 
-1. **sshd re-reads all three trust files on every authentication attempt** [VERIFIED, source]. So CA-set, principal and KRL updates need **no reload**: a reload is a risk we can avoid for the most frequent change.
-   - `TrustedUserCAKeys` is `fopen`ed by `sshkey_in_file` (authfile.c:383), called from auth2-pubkey.c:564.
-   - Each `RevokedKeys` file is loaded by `ssh_krl_file_contains_key` (krl.c:1305) through `auth_key_is_revoked` (auth.c:548), for the presented key **and** its CA key (auth2-pubkey.c:833-836).
-   - Principals files are opened by `auth_openfile` (auth2-pubkeyfile.c:455).
+1. **sshd re-reads all three trust files on every authentication attempt** [VERIFIED in source for master, 9.2p1, 9.6p1 and 10.2p1; the runtime integration test is still required]. So CA-set, principal and KRL updates need **no reload**: a reload is a risk we can avoid for the most frequent change.
+   - `TrustedUserCAKeys` is `fopen`ed by `sshkey_in_file` (authfile.c:383, body read in master), called from auth2-pubkey.c:564 in master, :504 in 9.2p1, :500 in 9.6p1 and :535 in 10.2p1.
+   - The `RevokedKeys` file is loaded by `ssh_krl_file_contains_key` (krl.c:1305) through `auth_key_is_revoked` (auth.c:548), for the presented key **and** its CA key: auth2-pubkey.c:833/836 in master, 767/770 in 9.2p1, 763/766 in 9.6p1, 804/807 in 10.2p1.
+   - **Only master takes several `RevokedKeys` files** (`SSHCONF_STRARRAY`, servconf.h:226). 9.2p1, 9.6p1 and 10.2p1 hold a single string (`char *revoked_keys_file`, copied with `M_CP_STROPT`). Our drop-in therefore names exactly one KRL path per scope.
+   - Principals files are opened by `auth_openfile` (auth2-pubkeyfile.c:455) in master, and by `auth_openprincipals` from auth2-pubkey.c (9.2p1:334, 9.6p1:328, 10.2p1:350) in the tags.
    - sshd_config(5) agrees: the RevokedKeys file "may be consulted for each public key authentication attempt ... it should only be atomically replaced".
    - **Host certificates are loaded once, by the listener** (sshd.c:1719, `sshkey_load_public(options.host_cert_files[i] ...)`). A host certificate renewal therefore **does** need a reload.
    - Changing a **path** in the config also needs a reload: the listener passes its parsed config to `sshd-session`.
@@ -120,6 +122,8 @@ Files are swapped in atomically. sshd is reloaded only when the drop-in or the h
    - That covers plain `authorized_keys` keys and a break-glass certificate whose account uses the same `RevokedKeys`.
    - A file without the KRL magic is parsed as a plain key list (authfile.c:444-461), so an *empty* file revokes nothing.
    - The agent must therefore check every new KRL **with the host's own `ssh-keygen -Q`** before the swap, not only with our parser.
+   - **The CA file has the same failure mode, for certificate logins** [VERIFIED, source check 2026-10-23]. `sshkey_in_file` (authfile.c:371-421) jumps to `out` on the first line `sshkey_read` cannot parse and returns that error, so one unparsable line in `TrustedUserCAKeys` fails **every** certificate login for the scope that names the file, even when a valid CA key sits on a later line. The one exception is `SSH_ERR_KEY_LENGTH`, which skips the line (authfile.c:410). Plain `authorized_keys` keys never consult the CA file and are unaffected.
+   - So the agent validates every line of every CA file before the swap, just as it does the KRL. It renders each line from a parsed bundle key (`ssh.MarshalAuthorizedKey`, no comments it did not write), and checks every key with the host's own `ssh-keygen -l` on a one-key file, because the host's OpenSSH may lack a key type our Go code accepts. The exact command is a planner detail; whether `ssh-keygen -l` on a multi-line file fails on one bad line is UNVERIFIED, hence one key per check.
 3. **`Match` blocks can scope trust per account, and an `Include`d file cannot leak a `Match` into the main file** [VERIFIED].
    - `TrustedUserCAKeys`, `RevokedKeys` and `AuthorizedPrincipalsFile` are all `SSHCFG_COPY_MATCH` (servconf.h:226-230).
    - Values set by a matching block override the global ones (`parse_server_match_config`, servconf.c:2716-2725, with lines outside Match inactive during the re-parse, servconf.c:4139).
@@ -127,7 +131,7 @@ Files are swapped in atomically. sshd is reloaded only when the drop-in or the h
    - This is what makes a safe break-glass design possible: a `Match User <emergency>` block in our drop-in, with its own CA file, principals file and KRL.
 4. **KRL signatures belong outside the file.**
    - PROTOCOL.krl (rev 1.7) says OpenSSH ≥ 9.4 "will refuse to load KRLs that contain signatures" and recommends SSHSIG.
-   - In master, `ssh_krl_from_blob` skips a signature section rather than refusing it (krl.c:1149). Either way the encoder never emits one.
+   - **The code does not match that sentence in the versions checked** [VERIFIED, source check 2026-10-23]. 9.6p1 (krl.c:1124) and 10.2p1 (krl.c:1129) parse a signature section without error, and master skips it (krl.c:1149). This does not matter to us: our encoder never writes a signature section, and our strict parser refuses one, so the agent never installs a KRL that carries one.
    - Our KRL travels with a detached SSHSIG by the ops key over a small signed manifest.
 5. **A KRL cannot revoke "a user".**
    - kr1/kr2 key IDs embed the request ID (`internal/cert/keyid.go`), so a key-ID entry revokes exactly one certificate.
@@ -142,7 +146,7 @@ Files are swapped in atomically. sshd is reloaded only when the drop-in or the h
    - The agent therefore always runs `sshd -t` itself, with the exact binary the service runs (Alpine can run `/usr/sbin/sshd.pam`).
 8. **RHEL 8 has no drop-in directory.**
    - c8s ships OpenSSH 8.0p1, and its spec has no `sshd_config.d` [VERIFIED, c8s `openssh.spec`].
-   - c9s ships 9.9p1 with `Include` first and `40-redhat-crypto-policies.conf` / `50-redhat.conf` [VERIFIED, c9s spec].
+   - c9s ships 9.9p1 and installs `50-redhat.conf` into `sshd_config.d` (c9s spec line 655), and its `%post` may create `25-permitrootlogin.conf` (line 714) [VERIFIED, c9s spec]. `40-redhat-crypto-policies.conf` is **Fedora only** (Fedora spec line 360), not c9s. That the `Include` comes first on c9s rests only on the changelog line "Move sshd_config include before any other definitions" (c9s spec line 1246); the patch text was not seen [MEDIUM].
    - Debian, Ubuntu, Arch (prepended by its PKGBUILD) and Alpine (`include-config-dir.patch`) all put `Include /etc/ssh/sshd_config.d/*.conf` first [VERIFIED for Arch and Alpine; Debian/Ubuntu CITED from packaging and the Phase 2 host-setup runbook].
    - Recommendation: Phase 3 supports only hosts whose effective config honours our drop-in, which `sshd -T` checks, and never edits `sshd_config` itself (Open Question 9).
 9. **Host certificate names must come from an admin signature, not from the agent or the server** (Pitfall 8, ARCHITECTURE.md §1). Recommendation: the directory gains a `hosts` section (host name, host key fingerprints, host group, approved certificate principals). The signer issues a host certificate only to a key listed there, and only when the request carries a proof-of-possession signature by that key.
@@ -268,6 +272,19 @@ The agent keeps one local state record: pins, last accepted bundle and policy (b
 - **Join string contents.** The token, the server URL, the TLS root SPKI pin set (the P2 Q1 rule) and the trust-root fingerprints with threshold, so the agent's first contact is TOFU-free.
 - **Format.** One opaque line, base64url of canonical JSON, with a `kr-join-v1:` prefix so tooling can recognise it as a secret. It must never be logged; the classifier rule means the owner handles it.
 
+### Binding the agent to one deployment (OQ22)
+
+The 2026-10-16 todo "Bind admin-signed directories to a deployment" (`.planning/todos/pending/`, `severity: blocker`, `resolves_phase: 4`) found that a directory carries nothing that names the instance it was signed for. The namespace `keyroster/directory/v1` is global, and a v1 directory (all-zero prev) signed for one instance is a valid genesis on any instance whose policy admins overlap (for example staging and prod sharing the owner's admin keys).
+
+Agents inherit this. An agent that accepts "a v1 directory" at enrollment can be handed the genesis directory of another deployment whose admin set overlaps. The root pins in the join token do not prevent it, because they bind the bundle and policy, and the directory carries no field that ties it to them.
+
+Options:
+- (a) Leave it to Phase 4, as the todo says. Phase 3 agents then ship with the gap, and Phase 4 must migrate enrolled agents.
+- (b) Pull the format part of the todo into Phase 3: add a deployment binding to the directory's signed bytes (the todo's options: SHA-256 of the genesis bundle, of the root set or policy, or the audit log origin; or a per-deployment namespace). The agent pins it at enrollment, next to the root pins, and refuses any directory, KRL manifest or bundle chain that names another.
+- (c) Agent-only mitigation: the agent pins the hash of the genesis bundle and the first directory it accepts, and refuses a different genesis later. This stops a later swap, but not a wrong directory at first contact.
+
+**Recommendation: (b).** The agent pins a deployment identity at enrollment: the root pin set plus a deployment ID carried in the root-signed bundle (so it is fixed by the root ceremony of OQ1) and repeated in every directory and KRL manifest. This needs the directory format change from the todo, so it must be defined in Phase 3, not only in Phase 4. The same field is most of what the todo needs on the signer side, so the todo would then shrink to its signer install check. The trade-offs the todo lists (restore, re-bootstrap, promoting staging to prod, and migrating directories already signed) are settled in discuss-phase.
+
 ### Enrollment request
 
 The agent:
@@ -349,7 +366,7 @@ A compromised fetcher or server can then only withhold or delay. Phase 1 already
 3. Validate it:
    - our KRL parser;
    - `ssh-keygen -Q -f revoked.krl <probe.pub>`, which must report not revoked;
-   - CA keys parse;
+   - every line of every CA file (`user_ca_keys`, `breakglass_ca_keys`) parses, with our code and with the host's `ssh-keygen` (finding 2: one bad line fails every certificate login);
    - principals render through `directory.RenderPrincipalsFile`.
 4. Write a pending marker `{from: M, to: N, deadline}` to `/var/lib/keyroster-agent/`.
 5. Swap `current`.
@@ -367,11 +384,31 @@ The agent **never** deletes `authorized_keys`, never changes `PasswordAuthentica
 
 Write a generation that already contains a valid (possibly empty) KRL and the CA file **before** the drop-in that names them first appears. Otherwise there is a window where `RevokedKeys` names a missing file, and every public key is refused (finding 2).
 
+### Migrating Phase 2 hosts (OQ19)
+
+Hosts set up by hand with `docs/runbooks/host-setup.md` already set two of our keywords, so OQ10(a) as written would refuse every one of them. The runbook has **two** layouts:
+- **Drop-in** (its step 2 under "Where the sshd settings go"): `/etc/ssh/sshd_config.d/50-keyroster.conf` with `TrustedUserCAKeys /etc/ssh/keyroster_user_ca.pub` and `AuthorizedPrincipalsFile /etc/ssh/principals/%u`, plus `/etc/ssh/keyroster_user_ca.pub` and one file per account under `/etc/ssh/principals/`.
+- **In `sshd_config` itself** (its step 3, for hosts without an `Include` first): the same two lines above the first `Match`.
+
+Options:
+- (a) Refuse every host that sets our keywords, and tell the owner to undo the Phase 2 setup first. Simple, but the undo opens a window with no certificate login.
+- (b) Adopt the exact Phase 2 drop-in layout, and refuse everything else. The agent recognises it only when every piece matches: the file names above, the drop-in's content equal to the two runbook lines, the CA file holding exactly the active user CA key of the installed bundle (the key compared, not the `(bundle vN)` comment, which `keyroster host ca-key` writes with the bundle version of the day), and each principals file equal byte for byte to `directory.RenderPrincipalsFile` for the installed directory. A principals file rendered from an older directory version does not match; the agent then refuses and tells the owner to re-render first (or to run the agent's dry run, which shows the diff).
+- (c) Adopt anything that looks similar. Too loose: it would take over foreign settings, which OQ10 forbids.
+
+**Recommendation: (b).** The sequence is:
+1. Write the agent's first generation.
+2. Write `00-keyroster.conf`, which wins because it sorts first.
+3. Confirm with `sshd -T` and `sshd -T -C` per account that our values are in force.
+4. Self-test.
+5. Only then remove `50-keyroster.conf`, `/etc/ssh/keyroster_user_ca.pub` and `/etc/ssh/principals/`.
+
+This needs one-time allowlist entries for exactly those three Phase 2 paths, pinned by the path test. The `sshd_config` layout (runbook step 3) cannot be adopted, because the agent never edits `sshd_config` (OQ9); the agent refuses it and prints the lines to remove. The runbook gains a "moving to the agent" section.
+
 ---
 
 ## Does sshd re-read the files without reload? (the Phase 3 STATE blocker)
 
-**Answer from source: yes for content, no for paths and host certificates.**
+**Answer from source: yes for content, no for paths and host certificates.** The table cites master; the source check of 2026-10-23 found the same call sites in 9.2p1, 9.6p1 and 10.2p1 (finding 1 gives the line numbers per tag). That settles the code, not the runtime behaviour on the packaged builds, so the test below stays required.
 
 | Setting | Read when | Source |
 |---------|-----------|--------|
@@ -408,10 +445,10 @@ Each refusal case gets its own sshd instance or a reset, as already required by 
 | Debian 12 bookworm | 9.2p1 [VERIFIED sources.debian.org] | yes [CITED] | `ssh.service` (`Alias=sshd.service` only when enabled) | `ExecReload=sshd -t` then `kill -HUP` [VERIFIED salsa `ssh.service`] | |
 | Debian 13 trixie | 10.0p1 [VERIFIED] | yes [CITED] | as above | as above | `sshd-session` split (≥ 9.8) |
 | Ubuntu 24.04 noble | 9.6p1 [VERIFIED Launchpad] | yes [CITED] | **`ssh.socket` activation** (since 22.10) + `ssh.service` [CITED Ubuntu Discourse] | `ExecReload=sshd -t` + HUP [VERIFIED ubuntu/devel `ssh.service`] | `ssh.service` may be inactive until the first connection. A new connection starts it with `ExecStartPre=sshd -t`, so "reload" means: if inactive, do nothing; if active, reload. Never touch `Port`/`ListenAddress` (a generator rewrites the socket) |
-| Ubuntu 26.04 | 10.2p1 [VERIFIED Launchpad release pocket] | yes [ASSUMED] | as noble [ASSUMED] | as noble | the owner's laptop |
-| RHEL/Alma/Rocky 9 (c9s) | 9.9p1 [VERIFIED c9s spec] | yes, plus `40-redhat-crypto-policies.conf`, `50-redhat.conf` [VERIFIED] | `sshd.service` | `kill -HUP`, **no `-t`** [VERIFIED c9s `sshd.service`] | crypto-policies may restrict `CASignatureAlgorithms`, and FIPS mode excludes Ed25519 [ASSUMED]; SELinux labels |
+| Ubuntu 26.04 | 10.2p1 [VERIFIED Launchpad release pocket] | yes [ASSUMED] | as noble [ASSUMED] | as noble | the owner's laptop, and the Proxmox test VM that 02-14 used as its target host (OpenSSH 10.2p1) while the ZimaBoard was offline |
+| RHEL/Alma/Rocky 9 (c9s) | 9.9p1 [VERIFIED c9s spec] | yes [MEDIUM: only the changelog line "Move sshd_config include before any other definitions", spec line 1246; patch text unseen]; installs `50-redhat.conf` (spec line 655), and `%post` may create `25-permitrootlogin.conf` (line 714) [VERIFIED] | `sshd.service` | `kill -HUP`, **no `-t`** [VERIFIED c9s `sshd.service`] | crypto-policies may restrict `CASignatureAlgorithms`, and FIPS mode excludes Ed25519 [ASSUMED]; SELinux labels. `25-permitrootlogin.conf` sorts after `00-` and sets none of our keywords |
 | RHEL 8 (c8s) | 8.0p1 [VERIFIED c8s spec] | **no** `sshd_config.d` [VERIFIED] | `sshd.service` | HUP | Unsupported in Phase 3 unless the owner adds `Include` by hand (OQ9) |
-| Fedora | current | yes; the include was moved before all other definitions in 8.3p1-3 (2020) [VERIFIED spec changelog] | `sshd.service` | HUP, no `-t` | |
+| Fedora | current | yes; the include was moved before all other definitions in 8.3p1-3 (2020) [VERIFIED spec changelog]; installs `40-redhat-crypto-policies.conf` and `50-redhat.conf` (Fedora spec lines 360-361) [VERIFIED] | `sshd.service` | HUP, no `-t` | `40-redhat-crypto-policies.conf` is Fedora only, not c9s |
 | Alpine (edge) | 10.6p1 [VERIFIED APKBUILD] | yes, via `include-config-dir.patch` [VERIFIED] | OpenRC `sshd` | `reload()` runs `checkconfig` (`sshd -t`) then HUP [VERIFIED `sshd.initd`] | Binary may be `/usr/sbin/sshd.pam`; `ssh-keygen` is in a separate `openssh-keygen` package [ASSUMED], so the agent's pre-swap oracle needs it as a dependency |
 | Arch | 10.6p1 [VERIFIED PKGBUILD] | yes, prepended by the PKGBUILD; ships `99-archlinux.conf` [VERIFIED] | `sshd.service` | **`Type=notify-reload`: systemd sends SIGHUP itself with no `-t`** [VERIFIED] | Always run `-t` first ourselves |
 | Proxmox VE 8 / 9 | Debian 12 / 13 packages [ASSUMED] | as Debian | `ssh.service` | as Debian | Cluster nodes ssh as root with keys under `/etc/pve/priv/` (root's `authorized_keys` is a symlink) [CITED, MEDIUM]. The agent must not touch `AuthorizedKeysFile`, root's keys or known_hosts. Adding `TrustedUserCAKeys` does not affect plain-key auth |
@@ -423,7 +460,8 @@ Each refusal case gets its own sshd instance or a reset, as already required by 
 - **Drop-in prefix.**
   - Because the first value wins, the drop-in must sort before every other drop-in that sets our keywords: `00-keyroster.conf`.
   - Correctness never rests on the name: after every apply, `sshd -T` must show our values, or it is a failed apply that rolls back.
-  - If any other file sets `TrustedUserCAKeys`, `RevokedKeys` or `AuthorizedPrincipalsFile` (outside our break-glass `Match` block), the agent refuses to manage the host and reports it (OQ10).
+  - If any other file sets `TrustedUserCAKeys`, `RevokedKeys` or `AuthorizedPrincipalsFile` (outside our break-glass `Match` block), the agent refuses to manage the host and reports it (OQ10). The one exception is the exact Phase 2 runbook layout, which the agent adopts (§Migrating Phase 2 hosts, OQ19).
+  - The agent also refuses (or reports) a host whose effective config, for any managed account, the probe account or the break-glass account, has `AllowUsers`, `AllowGroups`, `DenyUsers` or `DenyGroups` that excludes that account (§Self-test, OQ8). It checks with `sshd -T -C user=<account>,...` per account, because these lists can sit inside `Match` blocks.
 
 ---
 
@@ -457,13 +495,28 @@ After a change, the agent needs evidence that sshd still accepts what it should 
   - No private key is used, and no session opens.
   - It needs a probe certificate from a trusted CA:
     - the signer issues it at enrollment for principal `keyroster-probe:<host>`;
-    - it is mapped only to a locked account `keyroster-probe` with no shell;
+    - it is mapped only to a dedicated account `keyroster-probe` (see "The probe account" below);
     - it uses a key whose private half the agent holds.
   - A second, **revoked** probe certificate must be refused. That proves the KRL is enforced, which nothing else proves.
+- **The probe account, as first described, does not work** [VERIFIED, source check 2026-10-23].
+  - PK_OK is sent only when `authctxt->valid` is set (auth2-pubkey.c:298). `valid` comes from `allowed_user` (auth.c).
+  - With `UsePAM no` (Alpine's default sshd), `allowed_user` rejects a **locked** account (auth.c:108, `platform_locked_account`, which also counts an expired shadow account as locked).
+  - With or without PAM, it rejects an account whose shell **does not exist or is not executable** (auth.c:115-136), and one excluded by `AllowUsers`, `AllowGroups`, `DenyUsers` or `DenyGroups` (auth.c:136 onward).
+  - So a "locked account with no shell" never gets PK_OK. On Alpine the positive probe would fail on every apply, and the dead-man switch would **roll back every apply forever**. That is why the design is broken, not merely weak.
+  - Hardened hosts with `AllowUsers`/`AllowGroups` lists block the probe account, and also the break-glass account, the same way.
+- **Redesign (recommendation).**
+  - The probe account must count as valid to sshd while being useless for a login:
+    - a shell that exists and is executable but refuses a session, such as `/usr/sbin/nologin` (the path differs by distro, for example `/sbin/nologin` on Alpine, so the agent resolves it and checks it is executable);
+    - a password field that is not a lock marker but matches no password, such as `*` rather than `!`. Which strings `platform_locked_account` treats as locked depends on the build (`LOCKED_PASSWD_STRING`/`_PREFIX`/`_SUBSTR`, platform-misc.c:159+), so the matrix tests the chosen value per distro;
+    - no shadow expiry date.
+  - A certificate accepted for this account still cannot open a shell, and the probe never completes a login anyway (PK_OK only).
+  - The agent detects `AllowUsers`, `AllowGroups`, `DenyUsers` and `DenyGroups` with `sshd -T -C user=<account>,...` for the probe and the break-glass account, and refuses to manage the host (or reports that break-glass is excluded) rather than self-testing against a host that can never pass. It never edits these lists.
+  - **Who creates the account.** `/etc/passwd` and `/etc/shadow` are outside the agent's path allowlist. Either the runbook or the host's configuration management creates `keyroster-probe` (as for break-glass), and the agent only checks it; or the exec allowlist gains `useradd` with fixed arguments. Recommendation: the runbook creates it and the agent checks it (OQ8).
+- **Open: do PK_OK probes cost penalties?** Whether a refused PK_OK query counts as `PerSourcePenalties` authfail is still undetermined (A9). The source check also found that master (not the released versions checked) has a new `PubkeyOptions` option `max-pk-ok`, default 6: the number of public key queries permitted before further queries count as failed authentications against `MaxAuthTries` (sshd_config.5, master). Whether those counted queries also feed `PerSourcePenalties` is undetermined. Two probes per connection stay well under 6. Both are settled by the probe test with `-d` logging, not by reading.
 - **The probe certificates are a new issuance path.**
   - The signer must issue user-type certificates *to hosts*. That means its own evidence type (host PoP, as for host certificates), its own leaf kind and audit-verify rule, and a renewal loop.
   - Recommendation: issue them from the **machine** CA, not the user CA. The user CA cap is hours, and a probe for every host would then renew constantly.
-  - Principal `keyroster-probe:<host>`, accepted only by the locked probe account. A compromised host gains nothing from its own probe certificate.
+  - Principal `keyroster-probe:<host>`, accepted only by the probe account (valid to sshd, nologin shell, unusable password). A compromised host gains nothing from its own probe certificate.
   - This needs a threat-table row (T3-11).
 - **The negative probe must not expire into "proof".**
   - A revoked-*serial* probe that has expired is refused for expiry too, and PK_OK does not say why. The refusal would then prove nothing about the KRL.
@@ -527,6 +580,10 @@ The bundle already has generations and the states `active`, `next` and `retired`
 - `trusted_until` is a new optional field.
 - `checkBundleKeys` must accept several entries per role, with exactly one `active` that the keystore holds.
 - `cert.Build` / audit verify must check certificates against the generation active at issue time; the bundle_install leaves already provide this history.
+- **Audit verify's anchor** (01-08 SUMMARY, "Next Phase Readiness") needs two changes [VERIFIED in code]:
+  - `anchor.install` refuses any log-key change today ("log key change unsupported", `internal/audit/verify.go`, in `install`). It must accept a log-key change that arrives through a valid root-signed successor, so log-key rotation is possible at all. Log-key rotation belongs under KEY-08 for the same reason as CA rotation: the log key is a bundle key, and a compromised or lost log key otherwise forces a new deployment.
+  - `activeCA` holds exactly one key per role, the `active` one (`internal/audit/verify.go:83`). It must also cover `next` and `draining`/`retired` entries for as long as certificates from those generations can still be valid, or audit verify will reject issuance leaves signed by the old generation after the switch.
+- **`keyroster root sign --prev` refuses `--ca-pubkeys`** with the usage error "a successor carries the CA, ops and log keys of the previous bundle unchanged (CA rotation is Phase 3)" (`cmd/keyroster/root.go:332`, from 01-17/01-18). KEY-08 must lift this: a successor must be able to add `next` CAs, switch states and change the log key, with the ceremony summary showing every key change for the root holders to confirm.
 - **Emergency rotation** (CA key compromised) skips step 1. The root signs a bundle with a pre-provisioned spare `active` and the old key `retired`, and the ops key adds the old CA key to the KRL. That KRL entry kills every certificate it signed at once (auth2-pubkey.c:836 checks the CA key against `RevokedKeys`).
 - **Convergence is the server's word.** Heartbeats prove nothing to the admin if the server lies. The failure mode is availability only, a premature switch. The integrity direction is protected by root signatures.
 
@@ -551,8 +608,10 @@ The bundle already has generations and the states `active`, `next` and `retired`
   - The global `user_ca_keys` never contains the break-glass CA, so it grants nothing to other accounts.
   - The block replaces the user CA for this account, so normal certificates do not work on it.
   - It has its own small KRL, built only from root-signed data (an empty or tiny KRL), so a broken main KRL cannot lock it out (finding 2).
+  - Its own CA file also isolates it from a bad line in the main `user_ca_keys` (finding 2: one unparsable line fails every certificate login for the scope that names the file).
   - The `Match` cannot leak into the main config (finding 3).
-  - [VERIFIED: COPY_MATCH and Include scoping. UNVERIFIED end to end, so the integration matrix must test: the break-glass cert works for the emergency account, fails for every other account, and keeps working with a corrupt main KRL.]
+  - The account must be valid to sshd (an existing, executable shell; not locked under `UsePAM no`) and must not be excluded by `AllowUsers`, `AllowGroups`, `DenyUsers` or `DenyGroups`, or break-glass fails silently (§Self-test, the probe account). The agent checks this with `sshd -T -C user=keyroster-breakglass,...` and reports it.
+  - [VERIFIED: COPY_MATCH and Include scoping. UNVERIFIED end to end, so the integration matrix must test, **per OpenSSH version**: the break-glass cert works for the emergency account, fails for every other account, and keeps working with a corrupt main KRL and a corrupt main CA file. Match handling does regress between releases: the source check of 2026-10-23 found that 10.4 could no longer set `PAMServiceName` inside `Match` after a rewrite of the config code (commit of 2026-08-06). We do not set `PAMServiceName`, but the same kind of regression in the keywords we do set would break break-glass on one version only.]
 - **Issuing.** Certificates are issued offline (`keyroster breakglass sign`, on the ceremony machine) with principal `breakglass`, TTL ≤ 1 h. The emergency login is logged by sshd with the CA fingerprint. Detection and alerting is BREAK-02 (Phase 5); in Phase 3 the agent only reports the presence and state of the account.
 
 ---
@@ -632,7 +691,7 @@ The bundle already has generations and the states `active`, `next` and `retired`
 | T3-8 | Network attacker with a mis-issued WebPKI certificate | Root-SPKI pinning (P2 Q1) plus payload signatures | none for authority |
 | T3-9 | Agent becomes a remote-exec channel | Closed operation set, allowlisted paths, exec allowlist test, privilege split (OQ2) | Agent supply chain → Phase 6 signed agent updates |
 | T3-10 | Break-glass CA misuse | Offline custody, the `Match` scope keeps it to one account, TTL ≤ 1 h | Login alert is Phase 5 (BREAK-02) |
-| T3-11 | Probe certificates (if OQ8 b/c) are user-type certificates held by every host | Machine CA, principal `keyroster-probe:<host>` accepted only by a locked no-shell account, host PoP required, explicit-key revocation of the negative probe | A host's root can use its own probe certificate only against its own probe account on hosts that map it (none, by design) |
+| T3-11 | Probe certificates (if OQ8 b/c) are user-type certificates held by every host | Machine CA, principal `keyroster-probe:<host>` accepted only by the probe account, which sshd counts as valid (so PK_OK works) but which cannot log in: a nologin shell, a non-lock but unusable password (`*`), no expiry; host PoP required; explicit-key revocation of the negative probe; `AllowUsers`/`AllowGroups`/`DenyUsers`/`DenyGroups` detected with `sshd -T -C`, and such hosts refused or reported | A host's root can use its own probe certificate only against its own probe account on hosts that map it (none, by design). A probe account misconfigured with a real shell would accept a full login with that certificate; the agent checks the shell before every self-test |
 
 ---
 
@@ -641,7 +700,7 @@ The bundle already has generations and the states `active`, `next` and `retired`
 1. **A corrupt KRL locks out every key on the host,** including plain `authorized_keys` keys (auth.c:586). Validate with the host's own `ssh-keygen -Q` before the swap, keep last-good, and give break-glass its own KRL.
 2. **An empty `RevokedKeys` path or a missing file locks everyone out** (sshd_config.5). Write the file before the directive exists, and never delete a generation that `current` or `last-good` points to.
 3. **A reload with broken config kills the listener.** SIGHUP re-execs sshd (sshd.c:515). Arch and RHEL reload without `-t`. Always run `-t` first, with the service's binary.
-4. **First value wins and drop-in order.** A `00-` prefix helps, but only `sshd -T` proves it. `50-cloud-init.conf`, `40-redhat-crypto-policies.conf` and `99-archlinux.conf` exist.
+4. **First value wins and drop-in order.** A `00-` prefix helps, but only `sshd -T` proves it. `50-cloud-init.conf`, `40-redhat-crypto-policies.conf` (Fedora), `50-redhat.conf` and `25-permitrootlogin.conf` (c9s and Fedora) and `99-archlinux.conf` exist.
 5. **A `Match` block elsewhere overrides our values for some users.** Run `sshd -T -C` for every managed account.
 6. **Ubuntu socket activation.** `ssh.service` can be inactive, so `systemctl reload ssh` fails. Treat inactive as "next connection reads fresh config". Never touch the port settings.
 7. **SELinux labels.** Create temporary files in the target directory.
@@ -654,6 +713,9 @@ The bundle already has generations and the states `active`, `next` and `retired`
 14. **Proxmox.** Do not touch root's `authorized_keys` or the cluster's known_hosts under `/etc/pve`.
 15. **Alpine.** `sshd.pam` vs `sshd`, and the `ssh-keygen` package.
 16. **The classifier refuses agent runs of admin-signed commands.** `host approve`, `host-group` changes and join-token minting are owner-run during dogfood. Plan the dogfood steps as owner checkpoints.
+17. **One bad line in the CA file fails every certificate login** for its scope (authfile.c `goto out`). Validate every CA key line before the swap, as for the KRL.
+18. **A locked or shell-less account never gets PK_OK** under `UsePAM no`, and an `AllowUsers`/`AllowGroups`/`DenyUsers`/`DenyGroups` exclusion never gets it at all. That breaks the probe self-test (endless rollback) and break-glass. Make the probe account valid to sshd and detect the lists with `sshd -T -C`.
+19. **Phase 2 hosts already set our keywords** in `50-keyroster.conf` or in `sshd_config`. Adopt only the exact runbook drop-in; refuse the rest with instructions (OQ19).
 
 ---
 
@@ -663,11 +725,11 @@ The bundle already has generations and the states `active`, `next` and `retired`
 |-------|------|-------|
 | Unit and fuzz | `internal/krl` encode and parse (round trip, determinism, refusals); manifest canonical form; directory `hosts`/`machines` validation; apply renderer; path allowlist; exec-site allowlist | `go test`, `scripts/fuzz.sh` |
 | Oracle | KRL vs `ssh-keygen -Q`, `-Q -l`, `-k` (both directions) | CI `e2e` job (needs OpenSSH) |
-| sshd behaviour matrix | the no-reload test above; break-glass `Match` (works for the emergency account only, survives a corrupt main KRL); StrictModes through the symlinked generation; PK_OK probe; host certificate reload | Containers: debian:12, debian:13, ubuntu:24.04, ubuntu:26.04, almalinux:9 (or c9s), alpine, archlinux. Sshd started directly (`-D -e`), with no systemd in the container |
+| sshd behaviour matrix | the no-reload test above; a corrupt line in the CA file fails every certificate login; break-glass `Match` (works for the emergency account only, survives a corrupt main KRL and a corrupt main CA file), **run per OpenSSH version** because Match handling regresses between releases (10.4 lost `PAMServiceName` inside `Match` after a config-code rewrite, commit of 2026-08-06); StrictModes through the symlinked generation; PK_OK probe against the redesigned probe account (nologin shell, `*` password) under both `UsePAM yes` and `UsePAM no`, and refusal when `AllowUsers`/`AllowGroups`/`DenyUsers`/`DenyGroups` exclude it; host certificate reload | Containers: debian:12, debian:13, ubuntu:24.04, ubuntu:26.04, almalinux:9 (or c9s), alpine, archlinux. Sshd started directly (`-D -e`), with no systemd in the container |
 | Service-manager reload paths | systemd (`reload` with and without `-t`), OpenRC, Ubuntu socket activation | **UNVERIFIED in CI**: dogfood hosts only (systemd-in-container is possible but adds surface); each path labelled UNVERIFIED until run |
 | Signer | revoke, krl_publish, host_issue, machine_issue leaves; audit verify re-derives the revocation set and KRL hash; bundle with `next`/`draining` accepted; break-glass field | existing signer test harness |
 | End to end | signer + server + agent in one CI job: enroll → approve (test admin key) → apply → login → revoke → refused after the next poll → rotate CA (prepare/switch) with no failed login | CI e2e |
-| Dogfood | owner's Ubuntu 26.04 laptop, the ZimaBoard (distro to confirm), Proxmox; break-glass drill; CA rotation drill; deliberate corrupt-KRL drill on one host | owner checkpoints |
+| Dogfood | owner's Ubuntu 26.04 laptop, a Proxmox test VM (Ubuntu 26.04, OpenSSH 10.2p1, as used in 02-14), the ZimaBoard when it is online (distro to confirm), Proxmox itself; Phase 2 host migration (OQ19); break-glass drill; CA rotation drill; deliberate corrupt-KRL drill on one host | owner checkpoints |
 
 The containerised sshd tests extend the Phase 1 e2e harness (real sshd, `PerSourcePenalties` reset per refusal case, 01-04).
 
@@ -684,7 +746,7 @@ The matrix has two halves, and they test different things:
 | Docker on GitHub-hosted Ubuntu runners | preinstalled [CITED, GitHub runner images; not checked this session] |
 | systemd or OpenRC inside CI containers | not available by default, so the reload paths are UNVERIFIED in CI |
 | SELinux enforcing | not available in containers; needs an EL9 VM (dogfood or a later lane) |
-| Owner hosts | Ubuntu 26.04 laptop (OpenSSH 10.2p1 per Launchpad); ZimaBoard **distro unconfirmed**; Proxmox **VE 8 or 9 unconfirmed** |
+| Owner hosts | Ubuntu 26.04 laptop (OpenSSH 10.2p1 per Launchpad); a Proxmox test VM with Ubuntu 26.04 and OpenSSH 10.2p1, which 02-14 used as its target host because the ZimaBoard was offline; ZimaBoard **distro unconfirmed**; Proxmox **VE 8 or 9 unconfirmed** |
 
 ---
 
@@ -728,8 +790,10 @@ The matrix has two halves, and they test different things:
    - (a) Listener and host certificate check only.
    - (b) Add the positive PK_OK probe certificate.
    - (c) Add the positive and the revoked probe, proving KRL enforcement.
-   - **Recommendation:** (c) at apply time only, once per apply, rate-limited (PerSourcePenalties).
-   - It needs a locked `keyroster-probe` account and probe certificates, which are a **new signer issuance path**: machine CA, host PoP, a leaf kind and a renewal loop. The negative probe is revoked by key, not by serial.
+   - **Recommendation:** (c) at apply time only, once per apply, rate-limited (PerSourcePenalties; whether PK_OK queries count is still undetermined, A9).
+   - It needs a `keyroster-probe` account and probe certificates, which are a **new signer issuance path**: machine CA, host PoP, a leaf kind and a renewal loop. The negative probe is revoked by key, not by serial.
+   - **The account must be valid to sshd, not locked.** A locked or shell-less account never gets PK_OK under `UsePAM no` (Alpine), and the self-test would then roll back every apply (§Self-test). Use a nologin shell that exists and is executable, a password field like `*` (unusable, but not a lock marker), and no expiry. Hosts whose `AllowUsers`/`AllowGroups`/`DenyUsers`/`DenyGroups` exclude the probe or break-glass account are detected with `sshd -T -C` and refused or reported.
+   - Sub-question: who creates the account? (i) The runbook or config management, and the agent only checks it; (ii) the agent runs `useradd` from its exec allowlist. **Recommendation: (i)**, as for break-glass; `/etc/passwd` stays outside the agent's paths.
    - If that path is too much for Phase 3, choose (a) now and add (c) later.
 9. **Hosts without a drop-in directory (RHEL 8) or with a non-standard config.**
    - (a) Unsupported in Phase 3: the agent refuses and prints instructions.
@@ -739,7 +803,7 @@ The matrix has two halves, and they test different things:
     - (a) Refuse to manage the host and report.
     - (b) Override through drop-in order.
     - (c) Merge.
-    - **Recommendation:** (a). The owner removes the foreign setting, and `sshd -T` proves it.
+    - **Recommendation:** (a). The owner removes the foreign setting, and `sshd -T` proves it. The exception is the exact Phase 2 runbook drop-in, which the agent adopts (OQ19).
 11. **Client `@cert-authority` patterns.**
     - (a) The exact host names from directory `hosts` entries.
     - (b) Admin-signed wildcard patterns per host group.
@@ -765,6 +829,24 @@ The matrix has two halves, and they test different things:
     - (a) Read it as the TLS root-CA SPKI set plus the hostname, as the CLI does (P2 Q1), and reword the requirement.
     - (b) Pin the leaf key. That breaks at every `tailscale cert` renewal, because it makes a new key each time.
     - **Recommendation:** (a).
+19. **Hosts set up by hand in Phase 2** (`docs/runbooks/host-setup.md`: `50-keyroster.conf`, or the same lines in `sshd_config`). OQ10(a) would refuse them all. See §Migrating Phase 2 hosts.
+    - (a) Refuse; the owner undoes the Phase 2 setup first.
+    - (b) Adopt the exact Phase 2 drop-in layout (names and contents match the rendered files byte for byte, the CA by key), write `00-keyroster.conf`, prove it with `sshd -T`, self-test, then remove the old files. Refuse every other layout, including the `sshd_config` variant, with instructions.
+    - (c) Adopt anything similar.
+    - **Recommendation:** (b).
+20. **REVOKE-01 says "from CLI or UI".** This research covers the CLI only (`keyroster revoke ...`). The web UI arrives in Phase 4.
+    - (a) Build a revoke page in Phase 3 on the current minimal UI.
+    - (b) Reword REVOKE-01 to "from the CLI" for Phase 3, and add the UI revoke action to the Phase 4 UI requirements (UI-03 or a new ID).
+    - **Recommendation:** (b). It is a requirement wording change, so the owner must approve it; the traceability table in REQUIREMENTS.md changes with it.
+21. **PLAT-01 and Phase 3 success criterion 1 say "RHEL family".** OQ9 (no RHEL 8, no `sshd_config.d`) and OQ17 (no FIPS mode) narrow that, and OQ16 may narrow EL9 to current minors.
+    - (a) Keep the wording and support RHEL 8 and FIPS too (agent edits `sshd_config`, P-256 CA generation).
+    - (b) Reword PLAT-01 and success criterion 1 to "RHEL family 9 and later, not in FIPS mode" (plus the EL9 floor from OQ16), with RHEL 8 and FIPS listed as out of scope for Phase 3.
+    - **Recommendation:** (b). It is a requirement and roadmap wording change, so the owner must approve it.
+22. **Binding agents to one deployment** (the 2026-10-16 todo, a Phase 4 blocker). An agent that accepts a v1 directory at enrollment inherits the genesis-replay-across-installs risk. See §Binding the agent to one deployment.
+    - (a) Leave it to Phase 4.
+    - (b) Define the deployment binding in Phase 3: a deployment ID in the root-signed bundle, repeated in every directory and KRL manifest; the agent pins it with the root pins at enrollment and refuses anything else.
+    - (c) The agent pins only the first genesis it sees.
+    - **Recommendation:** (b). It pulls the directory format change of the todo into Phase 3.
 
 ---
 
@@ -772,7 +854,7 @@ The matrix has two halves, and they test different things:
 
 | # | Assumption | Confidence | How to settle |
 |---|-----------|-----------|---------------|
-| A1 | Older OpenSSH (9.2p1-10.2p1) re-reads the three files per attempt as master does | HIGH (code unchanged in spirit for years) | no-reload integration test per container |
+| A1 | Older OpenSSH re-reads the three files per attempt as master does | **Confirmed in source** for master, 9.2p1, 9.6p1 and 10.2p1 (auth2-pubkey.c 767/770, 763/766, 804/807 for the KRL; `sshkey_in_file` for the CA file; `auth_openprincipals` for principals), source check 2026-10-23. 9.9p1 and 10.0p1 not read, ASSUMED. `RevokedKeys` takes several files only in master (STRARRAY); 9.2p1-10.2p1 take one | no-reload integration test per container, still required for runtime behaviour |
 | A2 | `safe_path_fd` accepts a principals file reached through the `current` symlink | MEDIUM | integration test with `StrictModes yes` |
 | A3 | Match-scoped `TrustedUserCAKeys`/`RevokedKeys` apply before `user_key_allowed` for the emergency account | HIGH from servconf code, UNVERIFIED end to end | break-glass matrix test |
 | A4 | Ubuntu 26.04 keeps `ssh.socket` activation | MEDIUM | dogfood laptop (`systemctl status ssh.socket`) |
@@ -780,7 +862,9 @@ The matrix has two halves, and they test different things:
 | A6 | Proxmox root and cluster SSH keys live under `/etc/pve/priv` | MEDIUM | inspect the Proxmox host (owner) |
 | A7 | Alpine ships `ssh-keygen` in a separate package | MEDIUM | `apk info -L` in the alpine container |
 | A8 | Temp files created in `/etc/ssh/keyroster` get a label sshd can read under SELinux | MEDIUM | alma:9 test with SELinux enforcing (VM, not container) |
-| A9 | `PerSourcePenalties` counts a refused PK_OK query as authfail | LOW | probe test with `-d` logging |
+| A9 | `PerSourcePenalties` counts a refused PK_OK query as authfail | LOW; **still undetermined** after the source check. Master adds `PubkeyOptions max-pk-ok` (default 6), after which queries count against `MaxAuthTries`; how that interacts with penalties is also undetermined | probe test with `-d` logging |
+| A10 | `*` (not `!`) in the probe account's password field is not treated as locked by `platform_locked_account` on every target | MEDIUM (depends on `LOCKED_PASSWD_*` per build) | probe test under `UsePAM no` per distro |
+| A11 | The c9s `Include` comes before all other definitions | MEDIUM (changelog line only, patch unseen) | `sshd -T` in an alma:9 container with a test drop-in |
 
 ---
 
@@ -800,7 +884,7 @@ The matrix has two halves, and they test different things:
 8. Machine identities (AUTH-06).
 9. CA rotation drill (prepare/switch) end to end in CI.
 10. Break-glass: offline signing command, agent `Match` block, runbook, drill.
-11. Dogfood and the ceremony checkpoint (OQ1): laptop, ZimaBoard, Proxmox; corrupt-KRL drill; rotation drill; owner-run admin steps.
+11. Dogfood and the ceremony checkpoint (OQ1): laptop, a Proxmox test VM, the ZimaBoard when online, Proxmox; Phase 2 host migration (OQ19); corrupt-KRL drill; rotation drill; owner-run admin steps.
 
 ---
 
@@ -820,14 +904,17 @@ The matrix has two halves, and they test different things:
   - PROTOCOL.krl rev 1.7;
   - sshd_config.5 (`RevokedKeys`, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile`, `Include`, `HostCertificate`, `CASignatureAlgorithms`, `PerSourcePenalties`);
   - ssh_config.5 (`RevokedHostKeys`);
-  - ssh-keygen.1 (`-Q`, `-k`, KEY REVOCATION LISTS).
+  - ssh-keygen.1 (`-Q`, `-k`, KEY REVOCATION LISTS);
+  - auth.c (`allowed_user`, 108, 115-136), platform-misc.c (`platform_locked_account`, 159+), auth2-pubkey.c:298 (PK_OK only when `authctxt->valid`), authfile.c:405-421 (`goto out` on an unparsable CA line), sshd_config.5 (`PubkeyOptions max-pk-ok`) — independent source check, 2026-10-23.
+- **openssh-portable release tags `V_9_2_P1`, `V_9_6_P1`, `V_10_2_P1`** (independent source check, 2026-10-23): auth2-pubkey.c (CA file, principals and `auth_key_is_revoked` call sites), servconf.h (`revoked_keys_file` single string), krl.c (signature section parsed: 9.6p1:1124, 10.2p1:1129).
+- **The 10.4 `PAMServiceName`-in-`Match` regression** (config-code rewrite, commit of 2026-08-06): as reported by the source check; the commit text was not read for this document.
 - **Distro packaging, fetched 2026-10-22:**
   - Debian salsa `debian/systemd/ssh.service`, `ssh.socket`;
   - Ubuntu Launchpad `ubuntu/devel` `ssh.service`, `ssh.socket`;
   - Arch `PKGBUILD` (10.6p1-2), `sshd.service`;
   - Alpine `APKBUILD` (10.6_p1-r1), `sshd.initd`, `include-config-dir.patch`;
   - Fedora rawhide `openssh.spec`, `sshd.service`;
-  - CentOS Stream c9s `openssh.spec` (9.9p1), `sshd.service`;
+  - CentOS Stream c9s `openssh.spec` (9.9p1; lines 655, 714, 1246), `sshd.service`;
   - CentOS Stream c8s `openssh.spec` (8.0p1).
 - **Package version indexes:** sources.debian.org API (openssh per suite); Launchpad `getPublishedSources` (openssh per Ubuntu series).
 - **proxy.golang.org `@latest`:** x/crypto v0.58.0, x/sys v0.49.0, go-authn/krl v0.6.1, stripe/krl pseudo-version 2025-04-03, coreos/go-systemd v22.7.0.
@@ -855,6 +942,6 @@ The matrix has two halves, and they test different things:
 
 ## Metadata
 
-- Research date: 2026-10-22. Valid until the next OpenSSH release or a change to the bundle or directory formats.
+- Research date: 2026-10-22. Updated 2026-10-23 with an independent check against OpenSSH source (master and three release tags) and distro packaging, and with the coverage gaps it found (Phase 2 migration, log-key rotation, requirement wording, deployment binding). Valid until the next OpenSSH release or a change to the bundle or directory formats.
 - Inputs not available: no `03-CONTEXT.md`; the owner has not discussed Phase 3.
 - No code was changed. No command touched a homelab host.
