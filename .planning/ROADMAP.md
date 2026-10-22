@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A certificate issued through the signer is accepted by real `sshd` on OpenSSH 9.5p2 and on the latest release in CI. It carries a unique non-zero serial that is never reissued, even after the signer's state is restored from an older copy, plus a structured key ID and `permit-pty`-only extensions. The signer refuses empty, wildcard or malformed principals, certificate-type CA keys, and anything other than a client-supplied public key.
   5. Every issuance is in the Merkle audit log before the certificate is released; `sshcm audit verify` checks the log end to end, fails on any tampered or removed entry, and can export it.
 
-**Plans:** 21/21 plans executed; 01-17..01-21 work the KEY-07 gap, and KEY-07 stays open after them until the owner's real offline ceremony (a later v3 rotation; owner decision 2026-10-09) (11 waves plus 4 gap waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
+**Plans:** 21/21 plans executed; 01-17..01-21 work the KEY-07 gap, and KEY-07 stays open after them until the owner's real offline ceremony (a later v4 rotation (v3 became the Phase 2 RP successor, 02-13); owner decision 2026-10-09) (11 waves plus 4 gap waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
 
 Plans:
 **Wave 1**
