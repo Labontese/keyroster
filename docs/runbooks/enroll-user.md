@@ -130,6 +130,13 @@ re-run the command that produced it, for example
 pending. Running
 `directory install` again on the same proposal fails again.
 
+**Proposal already served.** If `directory install` says the server
+already serves the proposal as directory version N ("nothing to do"), the
+proposal itself was installed, for example by an earlier attempt whose
+answer was lost, or by another admin at the same moment. Do not rebuild
+it; `directory sign` of it refuses with "there is nothing to sign". After a
+revocation, confirm on the signer host as below.
+
 ## After a reinvite, discard any proposal for that user
 
 A proposal written before the reinvite (`user approve --out`, or one

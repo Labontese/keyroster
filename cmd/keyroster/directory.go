@@ -150,9 +150,16 @@ func loadProposal(dir string) (*proposal, error) {
 	return &proposal{dir: dir, doc: doc, sigs: sigs, d: d}, nil
 }
 
-// checkProposalBase requires the proposal to follow the installed verified
-// directory: the version after it with prev = the SHA-256 of its bytes, or
-// the genesis version when none is installed. A stale proposal is refused
+// errProposalServed is checkProposalBase's answer for a proposal that is
+// itself the verified version the server serves (same version, same
+// SHA-256), as after an install whose answer was lost: not stale, and
+// nothing to sign or install.
+var errProposalServed = errors.New("the proposal is the version the server serves")
+
+// checkProposalBase requires the proposal to follow the verified directory
+// the server serves: the version after it with prev = the SHA-256 of its
+// bytes, or the genesis version when it serves none. A proposal that is
+// that version itself gets errProposalServed. A stale proposal is refused
 // with advice to rebuild it, never to repeat this command, which would
 // fail again (02-09-F10).
 func checkProposalBase(p *proposal, vd *verifiedDirectory) error {
@@ -163,15 +170,49 @@ func checkProposalBase(p *proposal, vd *verifiedDirectory) error {
 	if p.d.Version == vd.Version+1 && p.d.Prev == want {
 		return nil
 	}
+	if vd.Version > 0 && p.d.Version == vd.Version && trust.SHA256Hex(p.doc) == vd.SHA256 {
+		return errProposalServed
+	}
 	return staleProposal(p, vd.Version)
 }
 
 // staleProposal is the refusal of a proposal built on a version that is no
-// longer the installed one.
-func staleProposal(p *proposal, installed uint64) error {
-	return fmt.Errorf("the directory changed since it was read: proposal %s is based on version %d, but version %d is installed. "+
+// longer the one the server serves (served).
+func staleProposal(p *proposal, served uint64) error {
+	return fmt.Errorf("the directory changed since it was read: proposal %s is based on version %d, but the server serves version %d. "+
 		"Discard %s and re-run the command that produced it (for example keyroster user approve NAME --fingerprint FP)",
-		p.dir, p.d.Version-1, installed, p.dir)
+		p.dir, p.d.Version-1, served, p.dir)
+}
+
+// reportServed is directory install's answer for a proposal the server
+// already serves: nothing to do. That the signer holds it is the server's
+// word, as everywhere (serverServesNote).
+func reportServed(stdout io.Writer, p *proposal) error {
+	_, err := fmt.Fprintf(stdout, "The server already serves proposal %s as directory version %d (SHA-256 %s); nothing to do.\n%s",
+		p.dir, p.d.Version, trust.SHA256Hex(p.doc), serverServesNote)
+	return err
+}
+
+// afterChainRefusal is directory install's answer to 409
+// directory_version_chain after its pre-check passed: another version
+// landed meanwhile. It reads the served directory again, so it names the
+// version served now (or says the proposal is that version), never the
+// one the pre-check read.
+func afterChainRefusal(ctx context.Context, s *adminSession, p *proposal, stdout io.Writer) error {
+	now, err := fetchVerifiedDirectory(ctx, s)
+	if err == nil {
+		err = checkProposalBase(p, now)
+	}
+	switch {
+	case errors.Is(err, errProposalServed):
+		return reportServed(stdout, p)
+	case err != nil && now != nil:
+		return err // staleProposal with the version served now
+	}
+	// The served directory could not be read, or the server's mirror has
+	// not caught up yet: no version can be named.
+	return fmt.Errorf("the directory changed since it was read: the signer installed another version after the check, so proposal %s no longer follows it. "+
+		"Discard %s and re-run the command that produced it (for example keyroster user approve NAME --fingerprint FP)", p.dir, p.dir)
 }
 
 // checkProposalSigs verifies every signature of a proposal: each must
@@ -243,7 +284,10 @@ func runDirectorySign(ctx context.Context, args []string, stdout, stderr io.Writ
 	if err != nil {
 		return err
 	}
-	if err := checkProposalBase(p, vd); err != nil {
+	if err := checkProposalBase(p, vd); errors.Is(err, errProposalServed) {
+		return fmt.Errorf("proposal %s is already the version the server serves (directory version %d, SHA-256 %s); there is nothing to sign",
+			p.dir, p.d.Version, vd.SHA256)
+	} else if err != nil {
 		return err
 	}
 	if err := directory.CheckPolicy(p.d, vd.Policy); err != nil {
@@ -303,7 +347,9 @@ func runDirectoryInstall(ctx context.Context, args []string, stdout, stderr io.W
 	if err != nil {
 		return err
 	}
-	if err := checkProposalBase(p, vd); err != nil {
+	if err := checkProposalBase(p, vd); errors.Is(err, errProposalServed) {
+		return reportServed(stdout, p)
+	} else if err != nil {
 		return err
 	}
 	var ans serverclient.InstallDirectoryAnswer
@@ -312,7 +358,7 @@ func runDirectoryInstall(ctx context.Context, args []string, stdout, stderr io.W
 		var he *serverclient.HTTPError
 		switch {
 		case errors.As(err, &he) && he.Code == http.StatusConflict && he.APIErrorIs(serverclient.AdminErrVersionChain):
-			return staleProposal(p, vd.Version)
+			return afterChainRefusal(ctx, s, p, stdout)
 		case errors.As(err, &he) && he.Code == http.StatusConflict && he.APIErrorIs(serverclient.AdminErrNotPendingCredential):
 			// 409 credential_not_pending: the server's check, the one place
 			// that stops every install through the server of a proposal

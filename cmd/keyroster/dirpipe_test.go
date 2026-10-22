@@ -676,7 +676,7 @@ func TestDirectoryPipeline(t *testing.T) {
 	}
 	requireStale := func(t *testing.T, what string, code int, stderr string) {
 		t.Helper()
-		if code != 1 || !strings.Contains(stderr, "based on version 1, but version 2 is installed") ||
+		if code != 1 || !strings.Contains(stderr, "based on version 1, but the server serves version 2") ||
 			!strings.Contains(stderr, "re-run the command that produced it") || strings.Contains(stderr, "re-run this command") {
 			t.Fatalf("%s: exit %d, stderr %q", what, code, stderr)
 		}
@@ -694,21 +694,77 @@ func TestDirectoryPipeline(t *testing.T) {
 		code, _, stderr := run(t, "directory", "install", dir)
 		requireStale(t, "install of a stale proposal", code, stderr)
 		requireNotSigned(t, e, 0)
-		// The pre-check passes, and the server answers 409
-		// directory_version_chain: the same advice.
+		// The pre-check passes, another admin's v2 lands, and the server
+		// answers 409 directory_version_chain: the same advice, with the
+		// version served now, not the one the pre-check read (pre-merge
+		// review, 02-09).
 		e2 := newDirEnv(t, 1, 1)
 		alice, _ := pendingEntry(t, webauthn.AlgES256)
 		v1 := buildDir(t, nil, addUser("alice", credOf(alice)))
 		e2.installDirect(t, v1)
 		bob, _ := pendingEntry(t, webauthn.AlgES256)
+		carol, _ := pendingEntry(t, webauthn.AlgES256)
 		proposal := buildDir(t, v1, addUser("bob", credOf(bob)))
+		other := buildDir(t, v1, addUser("carol", credOf(carol)))
+		otherSigs := e2.sign(t, other, 0)
 		e2.post = func(w http.ResponseWriter, _ serverclient.InstallDirectoryRequest) {
+			e2.doc, e2.sigs = other, otherSigs // e2.mu is held
 			w.WriteHeader(http.StatusConflict)
 			_, _ = io.WriteString(w, `{"error":"directory_version_chain"}`)
 		}
 		code, _, stderr = run(t, "directory", "install", writeProposalDir(t, proposal, e2.sign(t, proposal, 0)))
-		if code != 1 || !strings.Contains(stderr, "re-run the command that produced it") || strings.Contains(stderr, "re-run this command") {
-			t.Fatalf("install refused 409 directory_version_chain: exit %d, stderr %q", code, stderr)
+		requireStale(t, "install refused 409 directory_version_chain", code, stderr)
+	})
+
+	t.Run("proposal_already_served", func(t *testing.T) {
+		// The signer installs the proposal and the server loses its answer
+		// (503). A retry must not call the proposal stale: it is the
+		// version the server serves (pre-merge review, 02-09).
+		e := newDirEnv(t, 1, 1)
+		alice, _ := pendingEntry(t, webauthn.AlgES256)
+		v1 := buildDir(t, nil, addUser("alice", credOf(alice)))
+		e.installDirect(t, v1)
+		bob, _ := pendingEntry(t, webauthn.AlgES256)
+		proposal := buildDir(t, v1, addUser("bob", credOf(bob)))
+		dir := writeProposalDir(t, proposal, e.sign(t, proposal, 0))
+		e.post = func(w http.ResponseWriter, req serverclient.InstallDirectoryRequest) {
+			e.doc, e.sigs = req.Directory, req.Sigs // e.mu is held
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":"signer unavailable"}`)
+		}
+		if code, _, stderr := run(t, "directory", "install", dir); code != 1 || !strings.Contains(stderr, "cannot reach its signer") {
+			t.Fatalf("install whose answer is lost: exit %d, stderr %q", code, stderr)
+		}
+		e.mu.Lock()
+		e.post = nil
+		e.mu.Unlock()
+		served := "The server already serves proposal " + dir + " as directory version 2 (SHA-256 " + trust.SHA256Hex(proposal) + "); nothing to do."
+		code, stdout, stderr := run(t, "directory", "install", dir)
+		if code != 0 || !strings.Contains(stdout, served) || strings.Contains(stdout+stderr, "Discard") {
+			t.Fatalf("install retried after the lost answer: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+		code, _, stderr = run(t, "directory", "sign", dir, "--yes")
+		if code != 1 || !strings.Contains(stderr, "is already the version the server serves") || strings.Contains(stderr, "Discard") ||
+			strings.Contains(stderr, "re-run") {
+			t.Fatalf("sign of the served proposal: exit %d, stderr %q", code, stderr)
+		}
+		if _, posts := e.installed(); posts != 1 || e.agent.dirSigns() != 0 {
+			t.Fatalf("%d install posts and %d directory signatures, want 1 and 0", posts, e.agent.dirSigns())
+		}
+		// Another admin installs the same proposal between the pre-check
+		// and the post: the 409 is reported as nothing to do as well.
+		e2 := newDirEnv(t, 1, 1)
+		e2.installDirect(t, v1)
+		sigs := e2.sign(t, proposal, 0)
+		e2.post = func(w http.ResponseWriter, _ serverclient.InstallDirectoryRequest) {
+			e2.doc, e2.sigs = proposal, sigs // e2.mu is held
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":"directory_version_chain"}`)
+		}
+		dir2 := writeProposalDir(t, proposal, sigs)
+		code, stdout, stderr = run(t, "directory", "install", dir2)
+		if code != 0 || !strings.Contains(stdout, "The server already serves proposal "+dir2+" as directory version 2") {
+			t.Fatalf("install refused 409 after the same proposal landed: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 	})
 
