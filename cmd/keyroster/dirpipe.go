@@ -240,9 +240,9 @@ func editDirectory(ctx context.Context, s *adminSession, opts editOpts, stdout i
 func printChanges(stdout io.Writer, base *verifiedDirectory, version uint64, doc []byte, changes []string) {
 	var b strings.Builder
 	if base.Version == 0 {
-		fmt.Fprintf(&b, "Directory version %d (the first; none is installed). Changes:\n", version)
+		fmt.Fprintf(&b, "Directory version %d (the first; the server serves none). Changes:\n", version)
 	} else {
-		fmt.Fprintf(&b, "Directory version %d, based on the installed version %d (SHA-256 %s). Changes:\n", version, base.Version, base.SHA256)
+		fmt.Fprintf(&b, "Directory version %d, based on version %d (SHA-256 %s), the admin-signed version the server serves. Changes:\n", version, base.Version, base.SHA256)
 	}
 	for _, c := range changes {
 		b.WriteString("  " + c + "\n")
@@ -342,17 +342,24 @@ func installRefusal(err error) error {
 
 // errBadInstallAnswer refuses an install answer that does not describe the
 // version the CLI sent.
-var errBadInstallAnswer = errors.New("the server's install answer does not match the version sent; check what is installed with keyroster directory show")
+var errBadInstallAnswer = errors.New("the server's install answer does not match the version sent; " +
+	"only the signer's audit log shows what is installed (on the signer host: keyroster-signer export-log, then keyroster audit verify)")
 
-// reportInstalled prints an accepted install. The version and SHA-256
-// printed are the ones the CLI computed for what it sent; the server's
-// answer must agree with them.
+// reportInstalled prints an accepted install as what it is: the server's
+// report. The version and SHA-256 printed are the ones the CLI computed
+// for what it sent, and the server's answer must agree with them, but a
+// server can compute both from the request without forwarding it, and
+// nothing the signer signed comes back (residual until the CLI verifies
+// a signer-signed install receipt, Phase 4). The log leaf is printed so
+// it can be compared with the signer's exported log.
 func reportInstalled(stdout io.Writer, ans serverclient.InstallDirectoryAnswer, version uint64, doc []byte) error {
 	sum := trust.SHA256Hex(doc)
 	if ans.Version != version || ans.SHA256 != sum {
 		return errBadInstallAnswer
 	}
-	_, err := fmt.Fprintf(stdout, "Installed directory version %d (SHA-256 %s).\n", version, sum)
+	_, err := fmt.Fprintf(stdout, "The server reports directory version %d installed (SHA-256 %s, log leaf %d).\n"+
+		"That is the server's word: the signer's audit log is the proof (keyroster audit verify on a log exported on the signer host must print \"directory installs %d\").\n",
+		version, sum, ans.LeafIndex, version)
 	return err
 }
 

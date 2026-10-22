@@ -704,8 +704,10 @@ func runUserSetStatus(ctx context.Context, verb, status string, args []string, s
 var errBadUsersAnswer = errors.New("the server's user list does not check out, so nothing was printed")
 
 // runUserList is keyroster user list [--admin-key FP]: the users of the
-// installed directory, verified against the admins of the root-verified
-// policy (fetchVerifiedDirectory), with the fingerprints the CLI computes
+// admin-signed directory the server serves, its signatures verified
+// against the admins of the root-verified policy (fetchVerifiedDirectory;
+// that the signer installed it is the server's word, and the output says
+// so), with the fingerprints the CLI computes
 // from their keys, and the server's pending accounts from GET
 // /api/v1/admin/users. Every pending field printed is validated first
 // (names by the directory's grammar, times as RFC 3339, the used-invite
@@ -746,9 +748,10 @@ func runUserList(ctx context.Context, args []string, stdout, stderr io.Writer) e
 func usersText(vd *verifiedDirectory, ans serverclient.UsersAnswer) (string, error) {
 	var b strings.Builder
 	if vd.Version == 0 {
-		b.WriteString("No directory installed, so no user can sign in yet.\n")
+		b.WriteString("The server serves no directory; by its word, no user can sign in yet.\n")
 	} else {
-		fmt.Fprintf(&b, "Directory version %d, verified against the root-signed policy:\n", vd.Version)
+		fmt.Fprintf(&b, "The admin-signed directory the server serves: version %d, signatures verified against the root-signed policy.\n", vd.Version)
+		b.WriteString(serverServesNote)
 		for _, u := range vd.Dir.Users {
 			fmt.Fprintf(&b, "  %-24s %s\n", u.Name, u.Status)
 			for _, c := range u.Credentials {

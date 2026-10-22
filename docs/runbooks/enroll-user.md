@@ -84,9 +84,16 @@ nothing.
 
 Check the diff before you answer `y`: your signature is the authority.
 
+On success it prints `The server reports directory version N installed
+(SHA-256 ..., log leaf L)`. That is the server's report, not something the
+CLI can check: nothing the signer signed comes back to it (see
+[Confirm on the signer host](#confirm-on-the-signer-host)).
+
 `keyroster user list` then shows NAME as active, and
-`keyroster directory show` prints the verified directory with every
-passkey's fingerprint.
+`keyroster directory show` prints the admin-signed directory the server
+serves, with every passkey's fingerprint. Both verify the admins'
+signatures over what the server serves; neither can tell whether the
+signer has installed it.
 
 ## The first admin (D-04)
 
@@ -160,6 +167,10 @@ and `keyroster directory show` for the fingerprints:
 - If the fingerprint is not in the directory, nothing was installed, and
   you run the command again.
 
+Both views are what the server serves. If you suspect the server itself is
+compromised, they prove nothing about the signer: decide on the signer
+host instead ([Confirm on the signer host](#confirm-on-the-signer-host)).
+
 ## Disabling a user
 
 ```
@@ -171,6 +182,31 @@ Both go through the same pipeline (verify, diff, confirm, sign, install or
 propose). A disabled user keeps its passkeys in the directory and cannot
 sign in. Enabling needs at least one bound passkey.
 
+**After every revocation** (`user disable`), confirm it on the signer host
+as below. A compromised server can answer the install without forwarding
+it, and from then on serve the version you signed as if it were installed,
+while the signer keeps issuing certificates under the old one.
+
+## Confirm on the signer host
+
+On the signer host, export the signer's log and verify it against the root
+pins you hold on paper:
+
+```
+runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+  keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/log.jsonl
+keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 /tmp/log.jsonl
+```
+
+Its `OK:` line must say `directory installs N`, where N is the version
+the CLI reported. Every directory version is one install, so a smaller N
+means the signer never installed the version you signed: treat the server
+as compromised, and know that the user can still get certificates until
+that version is installed on the signer. The export and the `directory installs` count run in the
+end-to-end test `TestEnrollApproveEndToEnd`
+(`audit_verify_counts_installs`), without the `runuser` wrapper that
+[signer-install.md](signer-install.md) uses on a real host.
+
 ## Residual risk
 
 With attestation none, a **compromised server** can show both sides the
@@ -181,3 +217,14 @@ it is that the user's own first `keyroster login` fails. Every binding is
 an admin signature in the audit log (`keyroster audit verify` counts the
 directory installs), so such a binding cannot be hidden afterwards
 (RESEARCH Pitfall 13).
+
+A **compromised server** can also withhold or delay any install,
+including a `user disable`, and still answer it as installed: the CLI
+checks the answer only against the version and SHA-256 of what it sent,
+which the server knows too. It can then serve the version you signed, so
+`directory show` and `user list` show the change while the signer still
+holds the older version. It cannot make you sign anything you did not see,
+and every later edit builds on the version you signed, so none of them can
+be installed before it. Until the CLI verifies a receipt signed by the
+signer (Phase 4), the signer's own log is the only proof:
+[Confirm on the signer host](#confirm-on-the-signer-host).

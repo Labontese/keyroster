@@ -211,6 +211,7 @@ Recent decisions affecting current work:
 - [2026-10-17] [auth] Serve refuses to start without a witnessed checkpoint (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-17-serve-refuses-without-witnessed-checkpoint.md) — owner decision taken; options: witness cosignatures checked at start, or an operator-supplied minimum checkpoint as an interim measure.
 - [2026-10-19] [auth] Choose the software passphrase source at every start (minor, Phase 6) — [todo file](.planning/todos/pending/2026-10-19-choose-the-software-passphrase-source-at-every-start.md) — deferred by the owner; suggested option (c): store nothing at ca-init.
 - [2026-10-20] [server] Cap keyroster-server connections and memory (minor, Phase 6) — [todo file](.planning/todos/pending/2026-10-20-cap-server-connections-and-memory.md) — found in the 02-07 pre-merge review: no listener connection cap, idle HTTP/1.1 and h2 connections and h2 receive windows; options listed.
+- [2026-10-21] [auth] The CLI verifies signer-signed receipts for directory installs (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-21-cli-verifies-directory-install-receipts.md) — found in the 02-09 pre-merge review: a compromised server can answer an install (even a disable) as done without forwarding it; owner decision F1: honest wording and a signer-host check now, a signed checkpoint plus inclusion proof and high-water marks in Phase 4.
 
 ### Blockers/Concerns
 

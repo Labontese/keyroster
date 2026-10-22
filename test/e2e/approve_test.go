@@ -178,7 +178,7 @@ func TestEnrollApproveEndToEnd(t *testing.T) {
 	})
 
 	code, out, errOut := env.keyroster(t, admin, "", "user", "approve", "admin1", "--fingerprint", fp1, "--yes")
-	if code != 0 || !strings.Contains(out, "+ user admin1 (active)") || !strings.Contains(out, "Installed directory version 1") {
+	if code != 0 || !strings.Contains(out, "+ user admin1 (active)") || !strings.Contains(out, "The server reports directory version 1 installed") {
 		t.Fatalf("user approve admin1: exit %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
 	}
 	t.Logf("keyroster user approve admin1:\n%s", out)
@@ -205,7 +205,7 @@ func TestEnrollApproveEndToEnd(t *testing.T) {
 	// The second approval follows at once: no sleep, no polling.
 	auth2, fp2 := enroll(t, env, admin, "alice", webauthn.AlgRS256)
 	code, out, errOut = env.keyroster(t, admin, "", "user", "approve", "alice", "--fingerprint", fp2, "--yes")
-	if code != 0 || !strings.Contains(out, "+ user alice (active)") || !strings.Contains(out, "Installed directory version 2") {
+	if code != 0 || !strings.Contains(out, "+ user alice (active)") || !strings.Contains(out, "The server reports directory version 2 installed") {
 		t.Fatalf("user approve alice: exit %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
 	}
 	resp2, d2 := signerDirectory(t, env)
@@ -255,7 +255,7 @@ func TestApproveConflictNoLostUpdate(t *testing.T) {
 			t.Fatalf("user approve %s --out %s: exit %d:\nstdout:\n%s\nstderr:\n%s", a[0], a[2], code, out, errOut)
 		}
 	}
-	if code, out, errOut := env.keyroster(t, admin, work, "directory", "install", "A"); code != 0 || !strings.Contains(out, "Installed directory version 1") {
+	if code, out, errOut := env.keyroster(t, admin, work, "directory", "install", "A"); code != 0 || !strings.Contains(out, "The server reports directory version 1 installed") {
 		t.Fatalf("directory install A: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
 	}
 	code, out, errOut := env.keyroster(t, admin, work, "directory", "install", "B")
@@ -267,7 +267,7 @@ func TestApproveConflictNoLostUpdate(t *testing.T) {
 		t.Fatalf("signer directory version %d after the refused install, want 1", resp.Version)
 	}
 	if code, out, errOut := env.keyroster(t, admin, work, "user", "approve", "dave", "--fingerprint", fpDave, "--yes"); code != 0 ||
-		!strings.Contains(out, "Installed directory version 2") {
+		!strings.Contains(out, "The server reports directory version 2 installed") {
 		t.Fatalf("re-run of user approve dave: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
 	}
 	_, d := signerDirectory(t, env)
@@ -338,7 +338,7 @@ func TestApproveQuorumTwo(t *testing.T) {
 		t.Fatalf("directory sign by the second admin: exit %d:\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
 	}
 	code, out, errOut = env.keyroster(t, admin, work, "directory", "install", dir)
-	if code != 0 || !strings.Contains(out, "Installed directory version 1") {
+	if code != 0 || !strings.Contains(out, "The server reports directory version 1 installed") {
 		t.Fatalf("directory install with both signatures: exit %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
 	}
 	resp, d := signerDirectory(t, env)

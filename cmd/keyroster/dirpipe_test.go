@@ -461,7 +461,7 @@ func TestDirectoryPipeline(t *testing.T) {
 		if err != nil || vd == nil || vd.Version != 0 || vd.Dir != nil || vd.Doc != nil || vd.Sigs != nil || vd.SHA256 != "" || len(vd.Signers) != 0 || vd.Policy == nil {
 			t.Fatalf("fetchVerifiedDirectory with nothing installed = %+v, %v; want version 0, nil Dir, empty SHA256 and the policy", vd, err)
 		}
-		if code, stdout, stderr := run(t, "directory", "show"); code != 0 || stdout != "no directory installed\n" {
+		if code, stdout, stderr := run(t, "directory", "show"); code != 0 || stdout != "The server serves no directory.\n" {
 			t.Fatalf("directory show: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 		// Control: with version 1 installed.
@@ -472,7 +472,11 @@ func TestDirectoryPipeline(t *testing.T) {
 		if err != nil || vd.Version != 1 || vd.Dir == nil || vd.SHA256 != trust.SHA256Hex(v1) || len(vd.Signers) != 1 || vd.Signers[0] != e.fps[0] {
 			t.Fatalf("fetchVerifiedDirectory with version 1 = %+v, %v", vd, err)
 		}
-		if code, stdout, stderr := run(t, "directory", "show"); code != 0 || !strings.Contains(stdout, "Directory version 1") ||
+		// show prints what the server serves and says that installation is
+		// the server's word (pre-merge review, 02-09: owner decision F1).
+		if code, stdout, stderr := run(t, "directory", "show"); code != 0 ||
+			!strings.HasPrefix(stdout, "The admin-signed directory the server serves: version 1, signatures verified against the root-signed policy version 1\n"+serverServesNote) ||
+			strings.Contains(strings.ToLower(stdout), "installed directory") || strings.Contains(stdout, "verified installed") ||
 			!strings.Contains(stdout, "user alice (active)") || !strings.Contains(stdout, "admin0 "+e.fps[0]) {
 			t.Fatalf("directory show: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
@@ -589,8 +593,12 @@ func TestDirectoryPipeline(t *testing.T) {
 			t.Fatalf("approve: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
 		v1, _ := e.installed()
-		if !strings.Contains(stdout, "Installed directory version 1 (SHA-256 "+trust.SHA256Hex(v1)+")") {
-			t.Fatalf("approve output lacks the installed version's own SHA-256:\n%s", stdout)
+		// The install is reported as the server's word, never as a fact the
+		// CLI checked (pre-merge review, 02-09: owner decision F1).
+		if !strings.Contains(stdout, "The server reports directory version 1 installed (SHA-256 "+trust.SHA256Hex(v1)+", log leaf 1).\n"+
+			"That is the server's word: the signer's audit log is the proof (keyroster audit verify on a log exported on the signer host must print \"directory installs 1\").\n") ||
+			strings.Contains(stdout, "Installed directory") {
+			t.Fatalf("approve output does not report the install as the server's word, with the version's own SHA-256:\n%s", stdout)
 		}
 		if code, stdout, stderr := run(t, "user", "disable", "bob", "--yes"); code != 0 || !strings.Contains(stdout, "~ user bob active -> disabled") {
 			t.Fatalf("disable: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
@@ -605,7 +613,8 @@ func TestDirectoryPipeline(t *testing.T) {
 		if docVersion(doc) != 3 || posts != 3 || e.agent.dirSigns() != 3 {
 			t.Fatalf("after approve, disable, enable: version %d, %d posts, %d directory signatures; want 3 each", docVersion(doc), posts, e.agent.dirSigns())
 		}
-		if code, stdout, stderr := run(t, "user", "list"); code != 0 || !strings.Contains(stdout, "bob") || !strings.Contains(stdout, "passkey "+fp+" ES256") {
+		if code, stdout, stderr := run(t, "user", "list"); code != 0 || !strings.Contains(stdout, "bob") || !strings.Contains(stdout, "passkey "+fp+" ES256") ||
+			!strings.HasPrefix(stdout, "The admin-signed directory the server serves: version 3, signatures verified against the root-signed policy.\n"+serverServesNote) {
 			t.Fatalf("user list: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
 	})
@@ -755,7 +764,7 @@ func TestDirectoryPipeline(t *testing.T) {
 		if code, stdout, stderr = run(t, "directory", "sign", out, "--yes", "--admin-key", e.fps[1]); code != 0 || !strings.Contains(stdout, "2 of 2 admin signatures") {
 			t.Fatalf("co-sign: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
-		if code, stdout, stderr = run(t, "directory", "install", out); code != 0 || !strings.Contains(stdout, "Installed directory version 1") {
+		if code, stdout, stderr = run(t, "directory", "install", out); code != 0 || !strings.Contains(stdout, "The server reports directory version 1 installed") {
 			t.Fatalf("install: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
 	})

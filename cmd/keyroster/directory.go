@@ -26,7 +26,7 @@ import (
 func init() {
 	register(command{
 		Name:    "directory",
-		Summary: "the admin-signed directory (show: the verified installed version; sign: co-sign a proposal; install: install a fully signed proposal)",
+		Summary: "the admin-signed directory (show: the version the server serves, its signatures verified; sign: co-sign a proposal; install: install a fully signed proposal)",
 		Run:     runDirectory,
 	})
 }
@@ -50,9 +50,11 @@ func runDirectory(ctx context.Context, args []string, stdout, stderr io.Writer) 
 }
 
 // runDirectoryShow is keyroster directory show [--admin-key FP]: the
-// installed directory after the CLI verified it against the admins of the
-// root-verified policy, with its version, SHA-256 and signers, and every
-// user, credential fingerprint, group, role and host group.
+// directory the server serves, after the CLI verified its signatures
+// against the admins of the root-verified policy, with its version,
+// SHA-256 and signers, and every user, credential fingerprint, group, role
+// and host group. That the signer has installed it is the server's word;
+// the output says so, and only the signer's audit log proves it.
 func runDirectoryShow(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("directory show", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -70,11 +72,12 @@ func runDirectoryShow(ctx context.Context, args []string, stdout, stderr io.Writ
 		return err
 	}
 	if vd.Version == 0 {
-		_, err := io.WriteString(stdout, "no directory installed\n")
+		_, err := io.WriteString(stdout, "The server serves no directory.\n")
 		return err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Directory version %d, verified against the root-signed policy version %d\n", vd.Version, vd.Policy.Version)
+	fmt.Fprintf(&b, "The admin-signed directory the server serves: version %d, signatures verified against the root-signed policy version %d\n", vd.Version, vd.Policy.Version)
+	b.WriteString(serverServesNote)
 	fmt.Fprintf(&b, "SHA-256  %s\n", vd.SHA256)
 	fmt.Fprintf(&b, "Signed by %d of the policy's admins (quorum %d):\n", len(vd.Signers), vd.Policy.AdminQuorum)
 	for _, fp := range vd.Signers {
@@ -87,6 +90,13 @@ func runDirectoryShow(ctx context.Context, args []string, stdout, stderr io.Writ
 	_, err = io.WriteString(stdout, b.String())
 	return err
 }
+
+// serverServesNote is what directory show and user list say about the
+// directory they print: the admins signed it, but that the signer holds it
+// is the server's word (residual until the CLI verifies a signer-signed
+// install receipt, Phase 4).
+const serverServesNote = "That the signer has installed this version is the server's word; " +
+	"the signer's audit log is the proof (keyroster audit verify on an export from the signer host).\n"
 
 // adminNameOf is the policy's name for the admin key with fingerprint fp.
 func adminNameOf(pol *trust.Policy, fp string) string {
