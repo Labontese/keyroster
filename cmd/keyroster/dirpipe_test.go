@@ -885,6 +885,21 @@ func TestDirectoryPeerText(t *testing.T) {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
 	})
+	t.Run("show_escapes_extension_control_bytes", func(t *testing.T) {
+		// An admin-signed directory whose role extension carries escape
+		// sequences reaches the terminal escaped (pre-merge review, 02-09).
+		e := newDirEnv(t, 1, 1)
+		alice, _ := pendingEntry(t, webauthn.AlgES256)
+		e.installDirect(t, buildDir(t, nil, func(d *directory.Directory) {
+			addUser("alice", credOf(alice))(d)
+			d.Roles = append(d.Roles, directory.Role{Name: "ops", Principals: []string{"role:ops"}, MaxTTLSeconds: 3600,
+				Extensions: []string{"\x1b]0;owned\x07\x1b[2Kpermit-pty"}, Users: []string{"alice"}, Groups: []string{}})
+		}))
+		code, stdout, stderr := run(t, "directory", "show")
+		if code != 0 || strings.ContainsAny(stdout, "\x1b\x07") || !strings.Contains(stdout, `extensions=["\x1b]0;owned\a\x1b[2Kpermit-pty"]`) {
+			t.Fatalf("directory show of an extension with escape sequences: exit %d, stderr %q, stdout %q", code, stderr, stdout)
+		}
+	})
 	t.Run("install_answer_mismatch", func(t *testing.T) {
 		e := newDirEnv(t, 1, 1)
 		e.post = func(w http.ResponseWriter, _ serverclient.InstallDirectoryRequest) {

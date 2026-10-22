@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/Labontese/keyroster/internal/webauthn"
@@ -131,9 +132,27 @@ func groupText(g Group) string {
 }
 
 func roleText(r Role) string {
+	exts := make([]string, len(r.Extensions))
+	for i, e := range r.Extensions {
+		exts[i] = displayText(e)
+	}
 	return fmt.Sprintf("%s principals=[%s] max_ttl_seconds=%d extensions=[%s] users=[%s] groups=[%s]",
-		r.Name, strings.Join(r.Principals, " "), r.MaxTTLSeconds, strings.Join(r.Extensions, " "),
+		r.Name, strings.Join(r.Principals, " "), r.MaxTTLSeconds, strings.Join(exts, " "),
 		strings.Join(r.Users, " "), strings.Join(r.Groups, " "))
+}
+
+// displayText is s as Diff prints free text (a role's extensions, the one
+// field no name grammar covers): as it is when every byte is printable
+// ASCII other than space, '"' and '\', else Go-quoted in ASCII, so no
+// control byte or escape sequence reaches the admin's terminal and no
+// value can pass for two.
+func displayText(s string) string {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c <= ' ' || c >= 0x7f || c == '"' || c == '\\' {
+			return strconv.QuoteToASCII(s)
+		}
+	}
+	return s
 }
 
 func hostGroupText(h HostGroup) string {

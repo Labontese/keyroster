@@ -137,6 +137,30 @@ func TestDiff(t *testing.T) {
 			}
 		}
 	})
+	t.Run("extension_control_bytes_escaped", func(t *testing.T) {
+		// Role extensions are the one free-text field of a directory: a
+		// signed directory must not reach the admin's terminal with escape
+		// sequences, in directory show or in a co-signer's diff
+		// (pre-merge review, 02-09).
+		old := vectorV1(t)
+		next := vectorV1(t)
+		next.Roles[0].Extensions = []string{"\x1b[2K\x1b[1Apermit-pty", "permit-port-forwarding", "with space", `"quoted"`}
+		next.Sort()
+		var all strings.Builder
+		for _, line := range append(Diff(old, next), Diff(nil, next)...) {
+			all.WriteString(line + "\n")
+			for _, r := range line {
+				if r < 0x20 || r == 0x7f {
+					t.Fatalf("Diff line %q holds the control byte %#x", line, r)
+				}
+			}
+		}
+		for _, want := range []string{`"\x1b[2K\x1b[1Apermit-pty"`, " permit-port-forwarding ", `"with space"`, `"\"quoted\""`} {
+			if !strings.Contains(all.String(), want) {
+				t.Fatalf("Diff output lacks %s:\n%s", want, all.String())
+			}
+		}
+	})
 	t.Run("order_is_stable", func(t *testing.T) {
 		// The same change built in another order gives the same lines.
 		old := vectorV1(t)
