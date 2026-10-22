@@ -275,6 +275,33 @@ func testWebSignIn(t *testing.T, env *serverEnv, admin *cliEnv, alice *webauthnt
 	// gone, not only the browser's copy.
 	requireToLogin(t, "GET /account with the logged-out cookie",
 		w.do(t, http.MethodGet, "/account", nil, map[string]string{"Cookie": sessionCookieName + "=" + cookie}))
+	t.Run("disabled_user", func(t *testing.T) {
+		// Every edit goes through the server, whose install handler drops
+		// the status cache, so each takes effect on the next request: no
+		// sleep, no polling, and no retry of a refused edit.
+		if fin := w.signIn(t, "alice", alice); fin.code != http.StatusOK {
+			t.Fatalf("finish before the disable = %d %s", fin.code, fin.body)
+		}
+		if r := w.do(t, http.MethodGet, "/account", nil, nil); r.code != http.StatusOK {
+			t.Fatalf("GET /account before the disable = %d", r.code)
+		}
+		if code, out, errOut := env.keyroster(t, admin, "", "user", "disable", "alice", "--yes"); code != 0 {
+			t.Fatalf("user disable alice: exit %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
+		}
+		requireToLogin(t, "GET /account right after the disable", w.do(t, http.MethodGet, "/account", nil, nil))
+		if r := w.begin(t, "alice"); r.code != http.StatusNotFound || strings.TrimSpace(r.body) != `{"error":"no usable passkey for this user"}` {
+			t.Fatalf("begin for disabled alice = %d %s, want the uniform 404", r.code, r.body)
+		}
+		if code, out, errOut := env.keyroster(t, admin, "", "user", "enable", "alice", "--yes"); code != 0 {
+			t.Fatalf("user enable alice: exit %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
+		}
+		if fin := w.signIn(t, "alice", alice); fin.code != http.StatusOK {
+			t.Fatalf("finish after the re-enable = %d %s\nserver log:\n%s", fin.code, fin.body, env.Stderr.String())
+		}
+		if r := w.do(t, http.MethodGet, "/account", nil, nil); r.code != http.StatusOK || !strings.Contains(r.body, "role:ops") {
+			t.Fatalf("GET /account after the re-enable = %d:\n%s", r.code, r.body)
+		}
+	})
 	if !strings.Contains(env.Stderr.String(), `"event":"signin_ok"`) || !strings.Contains(env.Stderr.String(), `"event":"logout"`) {
 		t.Fatalf("the server log lacks the signin_ok and logout lines:\n%s", env.Stderr.String())
 	}
