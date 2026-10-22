@@ -222,7 +222,80 @@ end-to-end test `TestEnrollApproveEndToEnd`
 (`audit_verify_counts_installs`), without the `runuser` wrapper that
 [signer-install.md](signer-install.md) uses on a real host.
 
+## Logging in
+
+Once the user's passkey is bound and an admin has granted the user a role,
+the user gets a certificate with one command:
+
+```
+keyroster login
+keyroster login --role ops --ttl 30m
+```
+
+- `keyroster login` makes a new key in memory and prints
+  `Key fingerprint: SHA256:...`, the principals and the lifetime. It opens
+  the approval page in your browser (`--no-browser` only prints the URL).
+- **Approve only if the page shows exactly the fingerprint your terminal
+  printed.** If you did not just run `keyroster login`, close the page:
+  someone may have started a login and sent you the link, hoping you
+  approve it for them (consent phishing). Approving it would give them a
+  certificate for your principals.
+- After the passkey prompt the browser hands the result to
+  `keyroster login` on `127.0.0.1`. The CLI checks the certificate against
+  the user CA of your root-signed trust bundle (its own key, exactly the
+  principals it asked for, at least 60 s left) and adds it to the agent
+  with a lifetime equal to its remaining validity. It never writes the key
+  to a file. It prints the certificate's `Serial:` and `Key ID:`, which
+  match the signer's log.
+- `--role` picks some of your roles (default: all of them). `--ttl` may
+  only shorten the lifetime: the default and maximum is the smallest cap
+  of the selected roles, never above the user CA's. It must be at least
+  2 minutes.
+- Your computer's clock must be within 60 s of the server's; the CLI
+  refuses otherwise.
+- **Linux and macOS:** the certificate goes into the ssh-agent at
+  `SSH_AUTH_SOCK`; start one first with `eval $(ssh-agent)`. GNOME's
+  gcr-ssh-agent is **UNVERIFIED until 02-14**: use OpenSSH `ssh-agent`.
+- **Windows:** the certificate goes into keyroster's own agent, never the
+  Windows OpenSSH agent service. `keyroster login` starts it when needed
+  and prints a `Host <your keyroster hosts>` block with an `IdentityAgent`
+  line for `~/.ssh/config`. Keep that block host-scoped (see
+  `keyroster agent -h`).
+- **"login not completed ...; run keyroster login again":** do exactly
+  that. The CLI never retries. If the server's answer was lost after the
+  signer issued, the log holds one certificate for a key that only the
+  exited `keyroster login` process had, so nobody can use it.
+- **Remote machines:** there is no headless login yet (D-12). Log in on
+  your own computer and forward your agent (`ssh -A`) only to hosts you
+  trust.
+
+What is tested: `TestLoginEndToEnd` runs `keyroster login` on Linux
+against a real signer, server, OpenSSH `ssh-agent` and `sshd`, with a soft
+authenticator standing in for the browser and the passkey: the approval
+page shows the CLI's fingerprint, the certificate logs in through the
+agent, a `--ttl 2m` certificate leaves the agent at expiry, two concurrent
+logins stay apart, an unapproved login issues nothing, and a role revoked
+between approval and hand-off gets the signer's refusal. The CLI flow also
+runs against a fake server on Linux, macOS and Windows in CI. **UNVERIFIED
+until 02-13/02-14:** the approval page's script in a real browser, a real
+authenticator, the browser opener, the Windows path in which
+`keyroster login` itself starts keyroster agent, and gcr-ssh-agent.
+
 ## Residual risk
+
+**The fingerprint comparison does not hold against a compromised
+server.** The passkey signs only the WebAuthn challenge, never the
+fingerprint the page shows. A compromised server can show the fingerprint
+your terminal printed while the challenge covers a request for a key of
+its own; the signer then issues a certificate for that key, with your
+principals and at most your TTL cap. `keyroster login` refuses any
+certificate that is not for its own key, so you get none that time, but
+the server holds one. The issuance is in the signer's log, with the
+fingerprint of the server's key (`key_fingerprint` in the export), which
+no terminal printed. A compromised server can collect such an assertion
+from any passkey ceremony at its origin. The comparison protects you on
+an honest server against a login someone else started and sent you
+(T-02-56, T-02-60).
 
 With attestation none, a **compromised server** can show both sides the
 fingerprint of an attacker's credential: the user sees it on the page, and
