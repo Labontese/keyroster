@@ -1,7 +1,9 @@
 package directory
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"strings"
@@ -19,10 +21,11 @@ import (
 // new line added, each with all of its members, principals or accounts.
 //
 // Every value printed comes from a directory that passed Validate, so
-// names are from the directory's own name grammars, and a credential is
-// shown by the fingerprint of its key ("SHA256:" and the unpadded base64
-// of SHA-256 over the SPKI DER), the same text the registration page
-// showed the user, never by its ID.
+// names are from the directory's own name grammars. A credential is shown
+// by the fingerprint of its key ("SHA256:" and the unpadded base64 of
+// SHA-256 over the SPKI DER), the same text the registration page showed
+// the user, then by a digest of its ID and both backup flags, so a change
+// of its ID or of a flag alone never shows as two identical lines.
 func Diff(old, next *Directory) []string {
 	if old == nil {
 		old = &Directory{}
@@ -89,14 +92,24 @@ func diffNamed[T any](kind string, old, next []T, name func(T) string, text func
 	return out
 }
 
-// credentialText is a credential as Diff shows it: fingerprint, algorithm
-// and whether the passkey is synced (backed up).
+// credentialText is a credential as Diff shows it: fingerprint, algorithm,
+// the digest of its ID (credentialIDDigest), whether the passkey may be
+// backed up and whether it is synced (backed up).
 func credentialText(c Credential) string {
 	fp := "(spki not base64)"
 	if spki, err := base64.StdEncoding.Strict().DecodeString(c.SPKI); err == nil {
 		fp = webauthn.Fingerprint(spki)
 	}
-	return fmt.Sprintf("%s %s synced=%t", fp, AlgName(c.Alg), c.BackedUp)
+	return fmt.Sprintf("%s %s id-sha256=%s backup_eligible=%t synced=%t", fp, AlgName(c.Alg), credentialIDDigest(c.ID), c.BackupEligible, c.BackedUp)
+}
+
+// credentialIDDigest is the first 128 bits, in hex, of SHA-256 over a
+// credential's canonical ID text. An ID can be up to 1023 bytes, too long
+// for a diff line, and a prefix of it would not do: whoever writes a
+// version chooses the new ID, so it could share any prefix with the old.
+func credentialIDDigest(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:16])
 }
 
 // AlgName is the name of a credential's COSE algorithm: EdDSA, ES256 or

@@ -1,9 +1,12 @@
 package directory
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Labontese/keyroster/internal/trust"
@@ -33,13 +36,19 @@ func aliceFP(t *testing.T, d *Directory) string {
 	return webauthn.Fingerprint(spki)
 }
 
+// idDigest is the ID digest Diff prints, computed here independently.
+func idDigest(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:16])
+}
+
 func TestDiff(t *testing.T) {
 	t.Run("genesis", func(t *testing.T) {
 		d := vectorV1(t)
 		got := Diff(nil, d)
 		want := []string{
 			"+ user alice (active)",
-			"+ credential alice " + aliceFP(t, d) + " EdDSA synced=false",
+			"+ credential alice " + aliceFP(t, d) + " EdDSA id-sha256=" + idDigest(d.Users[0].Credentials[0].ID) + " backup_eligible=false synced=false",
 			"+ group ops-team members=[alice]",
 			"+ role ops principals=[role:ops] max_ttl_seconds=3600 extensions=[] users=[alice] groups=[]",
 			"+ host_group lab accounts=[zima:ops]",
@@ -58,7 +67,7 @@ func TestDiff(t *testing.T) {
 		got := Diff(old, next)
 		want := []string{
 			"+ user bob (active)",
-			"+ credential bob " + aliceFP(t, old) + " EdDSA synced=true",
+			"+ credential bob " + aliceFP(t, old) + " EdDSA id-sha256=" + idDigest("AAEC") + " backup_eligible=false synced=true",
 		}
 		if !slices.Equal(got, want) {
 			t.Fatalf("Diff =\n%q\nwant\n%q", got, want)
@@ -98,6 +107,34 @@ func TestDiff(t *testing.T) {
 		}
 		if got := Diff(old, vectorV1(t)); len(got) != 0 {
 			t.Fatalf("Diff of equal versions = %q, want nothing", got)
+		}
+	})
+	t.Run("credential_id_or_flag_change_visible", func(t *testing.T) {
+		// A version that changes only a credential's ID (locking the user
+		// out: the signer looks the credential up by ID) or only its
+		// backup_eligible flag must not render as identical - and + lines,
+		// which a co-signer reads as no change (pre-merge review, 02-09).
+		old := vectorV1(t)
+		realID := old.Users[0].Credentials[0].ID
+		last := "A" // the same ID but for its last character
+		if strings.HasSuffix(realID, last) {
+			last = "Q"
+		}
+		for name, mutate := range map[string]func(c *Credential){
+			"id":              func(c *Credential) { c.ID = "AAEC" },
+			"id_long_prefix":  func(c *Credential) { c.ID = realID[:len(realID)-1] + last },
+			"backup_eligible": func(c *Credential) { c.BackupEligible = !c.BackupEligible },
+		} {
+			next := vectorV1(t)
+			mutate(&next.Users[0].Credentials[0])
+			if next.Users[0].Credentials[0] == old.Users[0].Credentials[0] {
+				t.Fatalf("%s: the mutation changed nothing", name)
+			}
+			got := Diff(old, next)
+			if len(got) != 2 || !strings.HasPrefix(got[0], "- credential alice ") || !strings.HasPrefix(got[1], "+ credential alice ") ||
+				strings.TrimPrefix(got[0], "- ") == strings.TrimPrefix(got[1], "+ ") {
+				t.Fatalf("%s: Diff =\n%q\nwant a - and a + line for alice whose texts differ", name, got)
+			}
 		}
 	})
 	t.Run("order_is_stable", func(t *testing.T) {
