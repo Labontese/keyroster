@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-11 Tasks 1-3 done on p02/11-roles; PR awaiting owner merge gate (Task 4)
-last_updated: "2026-10-22T10:05:20.756Z"
+stopped_at: 02-12 Tasks 1-2 done on p02/12-cli-login; PR awaiting owner merge gate (Task 3)
+last_updated: "2026-10-22T13:40:00.000Z"
 last_activity: 2026-10-22
-last_activity_desc: 02-11 roles, groups and host groups executed; PR awaiting merge gate
-state_head: 960d89f0cd12e1239dfe61f217580a7a548e7304
+last_activity_desc: 02-12 keyroster login executed; PR awaiting merge gate
+state_head: e67ac2b
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 32
+  completed_plans: 33
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 11 of 14
-Status: 02-11 awaiting the owner merge gate (p02/11-roles); 02-01 to 02-10 are merged
-Last activity: 2026-10-22 — 02-11 roles executed (role, group and host-group commands through the directory pipeline, the shared AuthorizedPrincipalsFile renderer with header-only files for unmapped accounts, host principals and host ca-key, host setup runbook, e2e against real sshd)
+Plan: 12 of 14
+Status: 02-12 awaiting the owner merge gate (p02/12-cli-login); 02-01 to 02-11 are merged
+Last activity: 2026-10-22 — 02-12 keyroster login executed (browser-loopback login with PKCE and state, approval page with the server-computed fingerprint, mint at redemption, root-pinned certificate checks, agent add with a lifetime on Linux/macOS and keyroster agent on Windows, login export decode, e2e against real ssh-agent and sshd)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -88,6 +88,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P09 | about 40 min | 2 tasks | 21 files |
 | Phase 02 P10 | about 40 min | 2 tasks | 16 files |
 | Phase 02 P11 | 25 min | 3 tasks | 11 files |
+| Phase 02 P12 | about 65 min | 2 tasks | 28 files |
 
 ## Accumulated Context
 
@@ -215,6 +216,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-11: role add grants role:<name> by default (D-06 role-prefix, owner 2026-10-22); host principals renders a header-only file for an unmapped account or roles [], errors on an unknown host group, refuses with no directory installed
 - [Phase 02]: 02-11: renderer refuses host group and account names outside the directory grammars (header-line injection); host-group remove refused while the group maps an account (T-02-100); host ca-key needs no admin key
 - [Phase 02]: 02-11 pre-merge review, owner decision 2026-10-22: the executor's nine open choices approved; host-setup.md states that rendered files are the server's word (check `keyroster audit verify` on the signer host after revocations or CA changes) and puts the sshd settings where they take effect, verified with `sshd -T -C` including laddr and lport
+- [Phase 02]: 02-12: keyroster login is the D-12 browser-loopback flow: options (from directory.Authorize per role), begin with PKCE S256 and state, approval page with the fingerprint computed from the stored request bytes, assertion pre-verified, redeem the only signer call (mint at redemption); code single-use in one conditional UPDATE after the verifier-format and PKCE checks; begin ±120 s, session CreatedAt + 240 s, code min(+120 s, CreatedAt + 290 s)
+- [Phase 02]: 02-12: the CLI verifies the certificate (signature included) against the root-pinned user CA, its own key, exact principals, kr2 key ID, span <= TTL + 300 s, >= 60 s left; adds only the certificate identity with LifetimeSecs = remaining, never retries without the constraint or after a failed redeem; Windows uses keyroster agent via winagent.Ensure and prints only the host-scoped IdentityAgent block
+- [Phase 02]: 02-12: login limiters are their own class with the sign-in values and a bucket per route; per client once per request, per (user, client) via signInUserKey; the fingerprint claim corrected: a compromised server can harvest an assertion for its own key (T-02-60), the CLI's own-key check keeps it out of the agent and the log shows the other key_fingerprint
 
 ### Pending Todos
 
@@ -251,6 +255,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-22T10:05:20.524Z
-Stopped at: 02-11 Tasks 1-3 done on p02/11-roles; PR awaiting owner merge gate (Task 4)
+Last session: 2026-10-22T13:40:00.000Z
+Stopped at: 02-12 Tasks 1-2 done on p02/12-cli-login; PR awaiting owner merge gate (Task 3)
 Resume file: None
