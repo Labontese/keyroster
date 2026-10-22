@@ -7,11 +7,19 @@ as authority (D-01, D-03). The server only proposes: it keeps the pending
 account and the registered passkey, and forwards the signed version to the
 signer.
 
-> **What is tested and what is not.** The end-to-end tests run every
-> command below against a real signer and server with soft authenticators
-> standing in for the browser (`TestEnrollApproveEndToEnd`,
-> `TestApproveConflictNoLostUpdate`, `TestApproveQuorumTwo`,
-> `TestApproveProposalAfterReinvite`). The registration page in a real
+> **What is tested and what is not.** The end-to-end tests
+> (`TestEnrollApproveEndToEnd`, `TestApproveConflictNoLostUpdate`,
+> `TestApproveQuorumTwo`, `TestApproveProposalAfterReinvite`) run these
+> commands against a real signer and server, with soft authenticators
+> standing in for the browser: `user add` (also `--reinvite`),
+> `user pending`, `user approve` (without `--fingerprint`, and with
+> `--fingerprint ... --yes`, also with `--out`), `user list`,
+> `directory sign` (with `--yes`, and its refusal without a terminal),
+> `directory install`, and on the signer side `keyroster-signer export-log`
+> with `keyroster audit verify`. **UNVERIFIED end to end**, tested only
+> against a fake server in the CLI's unit tests: `user disable`,
+> `user enable`, `directory show`, and the interactive
+> `Sign directory version N? [y/N]` prompt. The registration page in a real
 > browser with a real authenticator is **UNVERIFIED** until plan 02-13.
 
 ## Before you start
