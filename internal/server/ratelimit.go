@@ -13,10 +13,12 @@ import (
 	"github.com/Labontese/keyroster/internal/serverclient"
 )
 
-// Limits are the per-client rate limits of the admin and invite routes.
-// A zero field takes its default. The invite routes also have one global
-// limiter at globalFactor times their per-client rate and burst. The
-// admin routes have none: a validly signed admin request is never refused
+// Limits are the rate limits of the admin, invite and web sign-in routes.
+// A zero field takes its default. The invite routes and the sign-in routes
+// each also have one global limiter at globalFactor times their
+// per-client rate and burst, and the sign-in routes a per-username limiter
+// next to the per-client one (02-10). The admin routes have no global
+// limiter: a validly signed admin request is never refused
 // because of traffic from other client keys (a client sharing the admin's
 // key, the same IPv4 address or IPv6 /64, still shares its bucket), and
 // an admin request that does not verify costs a header parse and at most
@@ -31,29 +33,41 @@ import (
 // todo.
 //
 // The limits are best-effort damping of floods only. Authenticity rests
-// on SSHSIG with single-use nonces (admin routes) and on 256-bit hashed
-// invite tokens (T-02-36).
+// on SSHSIG with single-use nonces (admin routes), on 256-bit hashed
+// invite tokens (T-02-36) and on passkey assertions over single-use
+// server challenges (sign-in).
 type Limits struct {
 	AdminPerMinute  int // default 60
 	AdminBurst      int // default 20
 	InvitePerMinute int // default 30
 	InviteBurst     int // default 10
+	// The sign-in begin and finish routes: per client, and per user name
+	// (one bucket per name, shared by begin and finish).
+	SignInPerMinute     int // default 20
+	SignInBurst         int // default 10
+	SignInUserPerMinute int // default 10
+	SignInUserBurst     int // default 10
 }
 
 // Default limits.
 const (
-	defaultAdminPerMinute  = 60
-	defaultAdminBurst      = 20
-	defaultInvitePerMinute = 30
-	defaultInviteBurst     = 10
+	defaultAdminPerMinute      = 60
+	defaultAdminBurst          = 20
+	defaultInvitePerMinute     = 30
+	defaultInviteBurst         = 10
+	defaultSignInPerMinute     = 20
+	defaultSignInBurst         = 10
+	defaultSignInUserPerMinute = 10
+	defaultSignInUserBurst     = 10
 )
 
 const (
-	// globalFactor is the invite routes' global limiter's rate and burst
-	// over their per-client ones.
+	// globalFactor is the invite and sign-in routes' global limiter's rate
+	// and burst over their per-client ones.
 	globalFactor = 10
-	// maxLimiterEntries bounds the per-client limiter map; the least
-	// recently used client is evicted first.
+	// maxLimiterEntries bounds each limiter's map of keys (clients, or
+	// user names for the sign-in per-username limiter); the least recently
+	// used key is evicted first.
 	maxLimiterEntries = 10000
 	// limiterIdle is how long a client's limiter is kept unused. It is
 	// far above the time a bucket needs to refill, so an evicted client
@@ -73,6 +87,18 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.InviteBurst <= 0 {
 		l.InviteBurst = defaultInviteBurst
+	}
+	if l.SignInPerMinute <= 0 {
+		l.SignInPerMinute = defaultSignInPerMinute
+	}
+	if l.SignInBurst <= 0 {
+		l.SignInBurst = defaultSignInBurst
+	}
+	if l.SignInUserPerMinute <= 0 {
+		l.SignInUserPerMinute = defaultSignInUserPerMinute
+	}
+	if l.SignInUserBurst <= 0 {
+		l.SignInUserBurst = defaultSignInUserBurst
 	}
 	return l
 }

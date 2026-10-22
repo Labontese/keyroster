@@ -1,0 +1,13 @@
+{{define "content"}}<h1>Sign in</h1>
+<p>Sign in to keyroster at <strong>{{.RPID}}</strong> with your passkey.</p>
+<section id="kr-login" data-begin="{{.BeginURL}}" data-finish="{{.FinishURL}}">
+<form id="kr-login-form">
+<p><label for="kr-user">User name</label>
+<input type="text" id="kr-user" name="user" autocomplete="username webauthn" autocapitalize="none" spellcheck="false" required></p>
+<p><button type="submit" id="kr-signin">Sign in with passkey</button></p>
+</form>
+<p id="kr-error" class="kr-error" role="alert"></p>
+</section>
+<p>Your browser asks you to unlock your passkey (a PIN, fingerprint or face), because keyroster requires user verification.</p>
+<script src="/static/app.js" defer></script>
+{{end}}
