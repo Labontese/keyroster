@@ -320,8 +320,9 @@ runs against a fake server on Linux, macOS and Windows in CI.
 approving with a synced Chrome passkey unlocked by Windows Hello. The page
 showed the fingerprint before any passkey prompt, and the prompt appeared
 only after Approve. The certificate logged in to a stock OpenSSH host
-through keyroster agent, and the 5 m certificate left the agent at expiry
-while the other stayed. The signer's log and the host's sshd journal
+through keyroster agent, and the 5 m certificate was gone from the agent
+at a later listing while the other stayed (the listing times were not
+recorded, so removal at expiry itself is not shown). The signer's log and the host's sshd journal
 confirm the logins.
 
 **Still UNVERIFIED:** Edge and every other browser, Linux, macOS,

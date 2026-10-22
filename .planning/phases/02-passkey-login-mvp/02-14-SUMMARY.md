@@ -69,6 +69,7 @@ evidence directory `P=$HOME/keyroster-ceremony/phase2`.
   root:root 0755.
 - Files with a `Match` block under `/etc/ssh/sshd_config` and
   `sshd_config.d/`: **0**.
+- `sshd_config`'s first setting is `Include /etc/ssh/sshd_config.d/*.conf`.
 - `sudo sshd -t` exits 0. `sudo sshd -T -C user=daniel,host=<a>,addr=<a>`
   shows both settings for Daniel-PC's address as the host sees it; in Task 3
   the same check also ran with `laddr` and `lport` from `$SSH_CONNECTION`,
@@ -151,9 +152,16 @@ export line for FP5M/SERIAL5M/KID5M spans 600 s. Informational: FP5M
 appears in listing A, so this OpenSSH prints the plain key's fingerprint on
 a certificate entry.
 
-Caveat: the wall-clock time of listing B was not recorded. The plan asks
-for it at least one minute after expiry; that margin is not evidenced. The
-key was gone at listing B, which the owner took after the printed expiry.
+Caveat: the wall-clock times of listings #2 and #3 (B) were not recorded.
+The plan asks for listing B at least one minute after expiry; that margin
+is not evidenced, and neither is removal *at* expiry. #2 still showed both
+certificates: if #2 was taken after the 5 m certificate's expiry (valid
+before 1792705294), the key outlived its certificate in the agent, which
+would be a defect. VERIFY3 only proves the key was gone by #3.
+
+**Open question for the owner:** when were listings #2 and #3 taken
+relative to the 5 m expiry? Until answered it stays open for Task 5 and the
+phase verifier; the laptop run (Task 4) should record listing times.
 
 ### 4. Authenticator data (A6)
 
@@ -202,6 +210,7 @@ keeps its 02-11 label.
 | T1: `KR_TARGET_SINCE` and `KR_VM_SINCE` in kr.env | exit 0 |
 | T1: key-based control login | exit 0 |
 | T1: laptop `keyroster version` | not run (laptop offline) |
+| T2: `systemctl is-active keyroster-server keyroster-signer` | active, active (run after the logins, not during them) |
 | T3-1: audit verify `ok`, `bundle_version` 3, `anchor_bundle_version` 2, login_issue ≥ baseline + 2 | exit 0 |
 | T3-2: a Windows serial appears as `(serial <n>) CA` in an owner certificate login in the host journal | exit 0 |
 | T3-3: expiry by key ID, listing B keeps a kr2 entry, export line ≤ 600 s | exit 0 |
