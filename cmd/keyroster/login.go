@@ -52,8 +52,8 @@ const (
 	// left when it arrives; the agent lifetime is what is left.
 	minLoginRemaining = 60
 	// minLoginTTL is the shortest TTL keyroster login requests, so that
-	// a certificate can still have minLoginRemaining seconds left after
-	// the approval.
+	// a certificate, minted at redeem, still has minLoginRemaining seconds
+	// left on the server's clock when it arrives, at any accepted skew.
 	minLoginTTL = 2 * time.Minute
 	// certBackdate is cert.Build's backdate of ValidAfter, in seconds.
 	certBackdate = 300
@@ -214,6 +214,7 @@ type loginPlan struct {
 func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, noBrowser bool) error {
 	user := l.cfg.User
 	var opts loginOptions
+	asked := loginNow() // before the request, so the measured skew errs toward the server's clock being ahead
 	if err := l.client.GetJSON(ctx, loginOptionsRoute+"?user="+url.QueryEscape(user), &opts); err != nil {
 		var he *serverclient.HTTPError
 		if errors.As(err, &he) && he.Code == http.StatusNotFound {
@@ -221,7 +222,7 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 		}
 		return err
 	}
-	plan, err := l.plan(&opts, roles, ttl)
+	plan, err := l.plan(&opts, roles, ttl, asked)
 	if err != nil {
 		return err
 	}
@@ -305,7 +306,7 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 		return redeemFailure(err)
 	}
 	now := loginNow()
-	c, remaining, err := checkLoginCert(redeemed.Certificate, l.ca, sshPub, req, plan.ttl, now)
+	c, remaining, err := checkLoginCert(redeemed.Certificate, l.ca, sshPub, req, plan, now)
 	if err != nil {
 		return fmt.Errorf("login not completed: the certificate does not check out (%w), so nothing was added to the agent; run keyroster login again", err)
 	}
@@ -324,8 +325,9 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 // plan checks the server's options and selects what to ask for: the
 // --role subset (each must be among the options) or every role, the
 // sorted union of their principals and extensions, and a TTL of at most
-// the smallest of their caps and the root-verified user CA cap.
-func (l *loginRun) plan(opts *loginOptions, roles []string, ttl time.Duration) (*loginPlan, error) {
+// the smallest of their caps and the root-verified user CA cap. asked is
+// the local clock read just before the options were requested.
+func (l *loginRun) plan(opts *loginOptions, roles []string, ttl time.Duration, asked time.Time) (*loginPlan, error) {
 	caCap := uint64(0)
 	for _, p := range l.policy.CAProfiles {
 		if p.Role == trust.RoleUser {
@@ -350,7 +352,7 @@ func (l *loginRun) plan(opts *loginOptions, roles []string, ttl time.Duration) (
 		}
 		byName[r.Name] = r
 	}
-	skew := time.Duration(opts.ServerTime-loginNow().Unix()) * time.Second // whole seconds on both sides
+	skew := time.Duration(opts.ServerTime-asked.Unix()) * time.Second // whole seconds on both sides
 	if skew > maxLoginSkew || skew < -maxLoginSkew {
 		return nil, fmt.Errorf("your clock differs from the server by %ds; fix it before logging in", int64(skew/time.Second))
 	}
@@ -474,14 +476,19 @@ func redeemFailure(err error) error {
 }
 
 // checkLoginCert parses and checks the certificate the server returned,
-// against the CLI's own request and one reading of the clock, now. It must
-// be a user certificate signed (signature verified) by ca, the root-pinned
-// user CA, valid at now, for key, with exactly the requested principals, a
-// kr2 key ID naming the user and the request ID, spanning at most the TTL
-// plus cert.Build's backdate, and with at least minLoginRemaining seconds
-// left. It returns the certificate and its remaining whole seconds,
-// counted from now rounded up.
-func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueRequest, ttl time.Duration, now time.Time) (*ssh.Certificate, uint32, error) {
+// against the CLI's own request and plan and one reading of the local
+// clock, now. The signer stamps the certificate with the server's clock,
+// so every time check runs on that clock: now plus the plan's measured
+// skew plus one second, which covers the skew's whole-second truncation
+// (02-12 pre-merge review). It must be a user certificate signed
+// (signature verified) by ca, the root-pinned user CA, valid then, for
+// key, with exactly the requested principals, a kr2 key ID naming the user
+// and the request ID, spanning at most the TTL plus cert.Build's backdate,
+// and with at least minLoginRemaining seconds left. It returns the
+// certificate and its remaining whole seconds, counted from that server
+// time rounded up, so the agent lifetime never outlasts the certificate.
+func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueRequest, plan *loginPlan, now time.Time) (*ssh.Certificate, uint32, error) {
+	serverNow := now.Add(plan.skew + time.Second)
 	pk, err := ssh.ParsePublicKey(raw)
 	if err != nil {
 		return nil, 0, errors.New("it does not parse")
@@ -495,7 +502,7 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 	}
 	checker := ssh.CertChecker{
 		IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), ca.Marshal()) },
-		Clock:           func() time.Time { return now },
+		Clock:           func() time.Time { return serverNow },
 	}
 	principal := ""
 	if len(c.ValidPrincipals) > 0 {
@@ -514,11 +521,11 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 	if err != nil || kid.Roles == nil || kid.CA != wire.CARoleUser.String() || kid.Subject != req.Subject || kid.Request != hex.EncodeToString(req.RequestID[:]) {
 		return nil, 0, errors.New("its key ID does not name this user and request")
 	}
-	if c.ValidBefore <= c.ValidAfter || c.ValidBefore-c.ValidAfter > uint64(ttl/time.Second)+certBackdate { //nolint:gosec // G115: a positive TTL
+	if c.ValidBefore <= c.ValidAfter || c.ValidBefore-c.ValidAfter > uint64(plan.ttl/time.Second)+certBackdate { //nolint:gosec // G115: a positive TTL
 		return nil, 0, errors.New("it is valid for longer than requested")
 	}
-	nowSecs := now.Unix()
-	if now.Nanosecond() > 0 {
+	nowSecs := serverNow.Unix()
+	if serverNow.Nanosecond() > 0 {
 		nowSecs++
 	}
 	if c.ValidBefore > uint64(1)<<62 || int64(c.ValidBefore)-nowSecs < minLoginRemaining { //nolint:gosec // G115: bounded above

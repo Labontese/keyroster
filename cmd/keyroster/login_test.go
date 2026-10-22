@@ -836,6 +836,37 @@ func TestLoginRefusals(t *testing.T) {
 			t.Fatalf("lifetime %d s, comment %q; want 60 <= lifetime <= %d and the key ID", adds[0].LifetimeSecs, adds[0].Comment, left)
 		}
 	})
+	t.Run("two_minute_login_at_accepted_skew", func(t *testing.T) {
+		// The signer stamps the certificate with the server's clock, here
+		// 2 s before the CLI checks it. At any accepted skew a 2-minute
+		// login succeeds and the agent lifetime never outlasts the
+		// certificate on the server's clock (02-12 pre-merge review).
+		for _, skew := range []time.Duration{-60 * time.Second, 0, 60 * time.Second} {
+			t.Run(fmt.Sprintf("skew_%ds", int(skew/time.Second)), func(t *testing.T) {
+				now := useLoginClock(t)
+				e := newLoginServer(t)
+				a := useRecordingAgent(t)
+				e.skew = skew
+				e.setCert(func(_ *testing.T, _ *fakeLogin, p *certParams) []byte {
+					p.now = p.now.Add(-2 * time.Second)
+					return nil
+				})
+				stderr, wait := e.start(t, "--role", "ops", "--ttl", "2m")
+				e.drive(t, stderr)
+				if r := wait(); r.code != 0 {
+					t.Fatalf("login exit %d:\n%s", r.code, r.stderr)
+				}
+				adds := a.added()
+				if len(adds) != 1 || adds[0].Certificate == nil {
+					t.Fatalf("adds = %v, want one certificate add", adds)
+				}
+				left := time.Unix(int64(adds[0].Certificate.ValidBefore), 0).Sub(now.Add(skew)) //nolint:gosec // G115: a test certificate
+				if got := time.Duration(adds[0].LifetimeSecs) * time.Second; got < 60*time.Second || got > left {
+					t.Fatalf("agent lifetime %v; want at least 60 s and at most %v, what the certificate has left on the server's clock", got, left)
+				}
+			})
+		}
+	})
 	t.Run("redeem_failure_tells_rerun", func(t *testing.T) {
 		for _, c := range []struct {
 			name, want string
