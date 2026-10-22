@@ -59,8 +59,8 @@ func pending(name string, b byte) PendingUser {
 func TestOpen(t *testing.T) {
 	t.Run("migration_applies_once", func(t *testing.T) {
 		d, path := openTemp(t)
-		if v := userVersion(t, d); v != 2 {
-			t.Fatalf("user_version = %d, want 2", v)
+		if v := userVersion(t, d); v != 3 {
+			t.Fatalf("user_version = %d, want 3", v)
 		}
 		if err := d.CreatePendingUser(context.Background(), pending("alice", 1)); err != nil {
 			t.Fatal(err)
@@ -73,8 +73,8 @@ func TestOpen(t *testing.T) {
 			t.Fatalf("reopen: %v", err)
 		}
 		defer func() { _ = d2.Close() }()
-		if v := userVersion(t, d2); v != 2 {
-			t.Fatalf("user_version after reopen = %d, want 2", v)
+		if v := userVersion(t, d2); v != 3 {
+			t.Fatalf("user_version after reopen = %d, want 3", v)
 		}
 		if n := count(t, d2, "pending_users"); n != 1 {
 			t.Fatalf("%d pending accounts after reopen, want the 1 written before", n)
@@ -490,6 +490,69 @@ func TestDeleteBound(t *testing.T) {
 		}
 		if _, err := d.PendingUser(ctx, "alice"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("alice's account after DeleteBound past the expiry: %v, want ErrNotFound", err)
+		}
+	})
+}
+
+// TestWebSignInRows: sign-in challenges and sessions are purged once
+// expired, so the tables hold only live rows; a challenge is taken once.
+func TestWebSignInRows(t *testing.T) {
+	ctx := context.Background()
+	t.Run("challenge_taken_once_and_purged", func(t *testing.T) {
+		d, _ := openTemp(t)
+		ch := bytes.Repeat([]byte{7}, 32)
+		if err := d.CreateChallenge(ctx, "old", "alice", ch, tNow.Add(time.Minute).UnixMicro(), tNow.UnixMicro()); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.CreateChallenge(ctx, "live", "bob", ch, tNow.Add(3*time.Minute).UnixMicro(), tNow.UnixMicro()); err != nil {
+			t.Fatal(err)
+		}
+		// A begin two minutes later purges the expired one.
+		if err := d.CreateChallenge(ctx, "new", "carol", ch, tNow.Add(4*time.Minute).UnixMicro(), tNow.Add(2*time.Minute).UnixMicro()); err != nil {
+			t.Fatal(err)
+		}
+		if n := count(t, d, "web_challenges"); n != 2 {
+			t.Fatalf("%d challenge rows, want 2 (live, new)", n)
+		}
+		user, got, err := d.TakeChallenge(ctx, "live", tNow.Add(2*time.Minute))
+		if err != nil || user != "bob" || !bytes.Equal(got, ch) {
+			t.Fatalf("TakeChallenge = %q %x %v", user, got, err)
+		}
+		if _, _, err := d.TakeChallenge(ctx, "live", tNow.Add(2*time.Minute)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("second TakeChallenge: %v, want ErrNotFound", err)
+		}
+		if _, _, err := d.TakeChallenge(ctx, "new", tNow.Add(4*time.Minute)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("TakeChallenge at the expiry: %v, want ErrNotFound", err)
+		}
+		if n := count(t, d, "web_challenges"); n != 0 {
+			t.Fatalf("%d challenge rows, want 0", n)
+		}
+	})
+	t.Run("expired_sessions_purged", func(t *testing.T) {
+		d, _ := openTemp(t)
+		cred := []byte{1}
+		if err := d.CreateSession(ctx, []byte("idle"), "alice", cred, tNow, time.Hour, 12*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.CreateSession(ctx, []byte("busy"), "alice", cred, tNow, time.Hour, 12*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		for h := time.Duration(1); h <= 12; h++ {
+			if _, _, err := d.TouchSession(ctx, []byte("busy"), tNow.Add(h*time.Hour-time.Minute), time.Hour, 12*time.Hour); err != nil {
+				t.Fatalf("touch at %v: %v", h*time.Hour-time.Minute, err)
+			}
+		}
+		if err := d.CreateSession(ctx, []byte("fresh"), "bob", cred, tNow.Add(12*time.Hour+time.Second), time.Hour, 12*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		if n := count(t, d, "sessions"); n != 1 {
+			t.Fatalf("%d session rows, want 1 (fresh): idle and absolute expiry purge", n)
+		}
+		if _, err := d.DeleteSession(ctx, []byte("fresh")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.DeleteSession(ctx, []byte("fresh")); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("second DeleteSession: %v, want ErrNotFound", err)
 		}
 	})
 }

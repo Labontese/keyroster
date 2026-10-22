@@ -105,6 +105,10 @@ type fakeSigner struct {
 	heldVersion uint64
 	leaf        uint64
 	loseAnswer  bool
+	// unauthorized: chain mode reports the held directory as not
+	// authorized (DirectoryAuthorized false), as the signer does when the
+	// directory no longer fits the policy in force.
+	unauthorized bool
 
 	heldMethod string
 	entered    chan struct{}
@@ -185,7 +189,7 @@ func (f *fakeSigner) Status(ctx context.Context) (*wire.StatusResponse, error) {
 		c := *st
 		c.DirectoryVersion, c.DirectorySHA256, c.DirectoryAuthorized = 0, [32]byte{}, false
 		if f.held != nil {
-			c.DirectoryVersion, c.DirectorySHA256, c.DirectoryAuthorized = f.heldVersion, sha256.Sum256(f.held), true
+			c.DirectoryVersion, c.DirectorySHA256, c.DirectoryAuthorized = f.heldVersion, sha256.Sum256(f.held), !f.unauthorized
 		}
 		st = &c
 	}
@@ -203,7 +207,7 @@ func (f *fakeSigner) GetDirectory(ctx context.Context) (*wire.GetDirectoryRespon
 	if f.chain && err == nil {
 		d = &wire.GetDirectoryResponse{}
 		if f.held != nil {
-			d = &wire.GetDirectoryResponse{Version: f.heldVersion, Directory: f.held, Sigs: f.heldSigs, Authorized: true}
+			d = &wire.GetDirectoryResponse{Version: f.heldVersion, Directory: f.held, Sigs: f.heldSigs, Authorized: !f.unauthorized}
 		}
 	}
 	f.mu.Unlock()

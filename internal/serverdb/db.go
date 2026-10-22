@@ -1,6 +1,7 @@
 // Package serverdb is keyroster-server's state database: pending accounts
-// with their invites, and the nonces of admin API requests already used.
-// It is one SQLite file that only the server writes.
+// with their invites, the nonces of admin API requests already used, and
+// web sign-in challenges and sessions. It is one SQLite file that only the
+// server writes.
 //
 // Nothing in it is authority. A pending account cannot sign in or obtain a
 // certificate; only the admin-signed directory the signer has installed
@@ -578,6 +579,120 @@ func (d *DB) ListPending(ctx context.Context) ([]PendingSummary, error) {
 		return nil, fmt.Errorf("serverdb: list pending accounts: %w", err)
 	}
 	return out, nil
+}
+
+// CreateChallenge stores a begun web sign-in ceremony: the challenge
+// bytes for user under id until expiresUS. In the same transaction it
+// first deletes every challenge that expired at or before nowUS, so the
+// table holds only live ceremonies (the sign-in rate limits bound how many
+// there are).
+func (d *DB) CreateChallenge(ctx context.Context, id, user string, challenge []byte, expiresUS, nowUS int64) error {
+	if id == "" || user == "" || len(challenge) == 0 {
+		return errors.New("serverdb: incomplete sign-in challenge")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM web_challenges WHERE expires_us <= ?`, nowUS); err != nil {
+		return fmt.Errorf("serverdb: purge sign-in challenges: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO web_challenges (id, user_name, challenge, expires_us) VALUES (?, ?, ?, ?)`,
+		id, user, challenge, expiresUS); err != nil {
+		return fmt.Errorf("serverdb: insert sign-in challenge: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return nil
+}
+
+// TakeChallenge deletes the challenge stored under id and returns its user
+// and bytes, in one statement (DELETE ... RETURNING), so a challenge is
+// used at most once even when two finishes race. An absent challenge and
+// one that expired at or before now are both ErrNotFound; either way the
+// row is gone afterwards.
+func (d *DB) TakeChallenge(ctx context.Context, id string, now time.Time) (user string, challenge []byte, err error) {
+	var expires int64
+	err = d.db.QueryRowContext(ctx, `DELETE FROM web_challenges WHERE id = ? RETURNING user_name, challenge, expires_us`, id).
+		Scan(&user, &challenge, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, ErrNotFound
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("serverdb: take sign-in challenge: %w", err)
+	}
+	if expires <= now.UnixMicro() {
+		return "", nil, ErrNotFound
+	}
+	return user, challenge, nil
+}
+
+// CreateSession stores a new web session: the SHA-256 of its ID (never
+// the ID), the user and the credential whose assertion opened it, created
+// and last seen at now. In the same transaction it first deletes every
+// session already past idle or absolute at now, the limits TouchSession
+// enforces, so expired rows do not accumulate.
+func (d *DB) CreateSession(ctx context.Context, idHash []byte, user string, credID []byte, now time.Time, idle, absolute time.Duration) error {
+	if len(idHash) == 0 || user == "" || len(credID) == 0 {
+		return errors.New("serverdb: incomplete session")
+	}
+	nowUS := now.UnixMicro()
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE :now - last_seen_us > :idle OR :now - created_us > :absolute`,
+		sql.Named("now", nowUS), sql.Named("idle", idle.Microseconds()), sql.Named("absolute", absolute.Microseconds())); err != nil {
+		return fmt.Errorf("serverdb: purge sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (id_hash, user_name, cred_id, created_us, last_seen_us) VALUES (?, ?, ?, ?, ?)`,
+		idHash, user, credID, nowUS, nowUS); err != nil {
+		return fmt.Errorf("serverdb: insert session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return nil
+}
+
+// TouchSession extends the session with ID hash idHash to now and returns
+// its user and the credential that opened it, in one conditional
+// statement: the row is updated only while it is within idle of its last
+// use and within absolute of its creation, both at now (02-10-F5). The
+// last-seen time never moves backwards. When no row matches, the row (if
+// any) is deleted and the answer is ErrNotFound, so an expired session is
+// never extended or revived, not even by a later call with an earlier now.
+func (d *DB) TouchSession(ctx context.Context, idHash []byte, now time.Time, idle, absolute time.Duration) (user string, credID []byte, err error) {
+	hash := sql.Named("hash", idHash)
+	err = d.db.QueryRowContext(ctx, `UPDATE sessions SET last_seen_us = max(last_seen_us, :now) WHERE id_hash = :hash AND :now - last_seen_us <= :idle AND :now - created_us <= :absolute RETURNING user_name, cred_id`,
+		hash, sql.Named("now", now.UnixMicro()), sql.Named("idle", idle.Microseconds()), sql.Named("absolute", absolute.Microseconds())).
+		Scan(&user, &credID)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := d.db.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash = :hash`, hash); err != nil {
+			return "", nil, fmt.Errorf("serverdb: delete expired session: %w", err)
+		}
+		return "", nil, ErrNotFound
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("serverdb: touch session: %w", err)
+	}
+	return user, credID, nil
+}
+
+// DeleteSession deletes the session with ID hash idHash and returns the
+// user it belonged to. No such session returns ErrNotFound.
+func (d *DB) DeleteSession(ctx context.Context, idHash []byte) (user string, err error) {
+	err = d.db.QueryRowContext(ctx, `DELETE FROM sessions WHERE id_hash = ? RETURNING user_name`, idHash).Scan(&user)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("serverdb: delete session: %w", err)
+	}
+	return user, nil
 }
 
 func boolInt(b bool) int {

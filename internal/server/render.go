@@ -16,7 +16,7 @@ import (
 
 // pageNames are the pages under templates/; each is parsed together with
 // base.html into its own template set.
-var pageNames = []string{"index", "error", "enroll"}
+var pageNames = []string{"index", "error", "enroll", "login", "account"}
 
 // parsePages parses every page once from the embedded templates.
 func parsePages() (map[string]*template.Template, error) {
@@ -48,6 +48,7 @@ type pageData struct {
 	PolicyVersion    uint64
 	DirectoryVersion uint64
 	Keys             []wire.KeyStatus
+	Account          *accountPage // the signed-in user's account (account.html)
 }
 
 // statusPage fills the banner from v: the owner-approved evaluation-only
@@ -107,6 +108,12 @@ func (s *Server) signerUnavailable(w http.ResponseWriter, html bool) {
 		return
 	}
 	s.writeJSON(w, nil, http.StatusServiceUnavailable, serverclient.APIError{Error: "signer unavailable"})
+}
+
+// internalErrorPage answers 500 with the error page and message, carrying
+// no status data.
+func (s *Server) internalErrorPage(w http.ResponseWriter, message string) {
+	s.renderPage(w, nil, http.StatusInternalServerError, "error", pageData{Title: "Internal error", Message: message})
 }
 
 // staticTypes gives the Content-Type of each embedded static file by

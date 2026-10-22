@@ -36,8 +36,8 @@ type Config struct {
 	// DB is the server state database (required): pending accounts,
 	// invites and used admin nonces. Nothing in it is authority.
 	DB *serverdb.DB
-	// Limits are the rate limits of the admin and invite routes (zero
-	// fields: the defaults).
+	// Limits are the rate limits of the admin, invite and sign-in routes
+	// (zero fields: the defaults).
 	Limits Limits
 }
 
@@ -52,9 +52,11 @@ type Server struct {
 	static  fs.FS
 	handler http.Handler
 
-	adminLimit  *limiter  // admin API routes
-	inviteLimit *limiter  // invite pages
-	mirror      dirMirror // the installed directory, as of the last Status that matched
+	adminLimit      *limiter  // admin API routes
+	inviteLimit     *limiter  // invite pages
+	signInLimit     *limiter  // sign-in begin and finish, per client, with a global backstop
+	signInUserLimit *limiter  // sign-in begin and finish, per user name
+	mirror          dirMirror // the installed directory, as of the last Status that matched
 
 	// pendingMu orders a directory install (its pending check, forward
 	// and cleanup) against a reinvite (its lookups and write), so neither
@@ -98,6 +100,10 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 		signer: sg, rpID: cfg.RPID, clock: cfg.Clock, log: cfg.Logger, db: cfg.DB, pages: pages, static: static,
 		adminLimit:  newLimiter(lim.AdminPerMinute, lim.AdminBurst, 0, 0), // per client only (Limits)
 		inviteLimit: newLimiter(lim.InvitePerMinute, lim.InviteBurst, globalFactor*lim.InvitePerMinute, globalFactor*lim.InviteBurst),
+		// Sign-in is its own route class (02-10): per client with the
+		// global backstop, and per user name and client with none.
+		signInLimit:     newLimiter(lim.SignInPerMinute, lim.SignInBurst, globalFactor*lim.SignInPerMinute, globalFactor*lim.SignInBurst),
+		signInUserLimit: newLimiter(lim.SignInUserPerMinute, lim.SignInUserBurst, 0, 0),
 	}
 	if s.clock == nil {
 		s.clock = time.Now
@@ -122,6 +128,15 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	// invite class, under the same limiter as the invite page.
 	mux.Handle("POST "+enrollBeginPath, s.rateLimited(s.inviteLimit, false, http.HandlerFunc(s.handleEnrollBegin)))
 	mux.Handle("POST "+enrollFinishPath, s.rateLimited(s.inviteLimit, false, http.HandlerFunc(s.handleEnrollFinish)))
+	// Web sign-in (02-10): the passkey ceremony, the read-only account
+	// page and logout. The two JSON routes apply the sign-in limiters
+	// themselves, so their 429 is logged as a sign-in event. A session
+	// authorizes nothing but GET /account.
+	mux.HandleFunc("GET /login", s.handleLogin)
+	mux.HandleFunc("POST "+signInBeginPath, s.handleSignInBegin)
+	mux.HandleFunc("POST "+signInFinishPath, s.handleSignInFinish)
+	mux.Handle("GET /account", s.withSession(s.handleAccount))
+	mux.HandleFunc("POST /logout", s.handleLogout)
 	s.handler = secure(mux)
 	return s, nil
 }
