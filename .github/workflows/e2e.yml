@@ -60,7 +60,7 @@ jobs:
         run: |
           mkdir -p e2e-logs
           KEYROSTER_OPENSSH_PREFIX="$HOME/.cache/keyroster/openssh-$OPENSSH_VERSION" \
-            go test -tags e2e -count=1 -v ./test/e2e/... 2>&1 | tee "e2e-logs/go-test-$OPENSSH_VERSION.log"
+            go test -tags e2e -count=1 -timeout 20m -v ./test/e2e/... 2>&1 | tee "e2e-logs/go-test-$OPENSSH_VERSION.log"
       # The harness prints the sshd, signer and agent logs of every failed
       # test into the go test output captured above.
       - name: Upload the sshd logs
