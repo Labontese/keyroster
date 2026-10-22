@@ -72,7 +72,10 @@ The last line maps the local account `deploy` of the hosts in host group
 
 ## Where the sshd settings go
 
-UNVERIFIED until 02-14 on a real host.
+Run on a homelab host in 02-14 for the drop-in case only (item 2): an
+Ubuntu host whose `sshd_config` includes `sshd_config.d/*.conf`, with no
+`Match` block in either. A host with `Match` blocks or without the
+include line (items 1 and 3) is UNVERIFIED.
 
 Steps 1 and 2 set `TrustedUserCAKeys` and `AuthorizedPrincipalsFile`. For
 both, sshd keeps the first value it reads, and a line after a `Match` line
@@ -102,8 +105,7 @@ Step 4 checks the effective values with `sshd -T` before the reload.
 
 ## 1. Trust the user CA
 
-UNVERIFIED until 02-14 on a real host (CI feeds the same line to a test
-sshd).
+Run on a homelab host in 02-14 (CI feeds the same line to a test sshd).
 
 On the admin workstation:
 
@@ -131,7 +133,7 @@ TrustedUserCAKeys /etc/ssh/keyroster_user_ca.pub
 
 ## 2. Point sshd at the principals files
 
-UNVERIFIED until 02-14 on a real host.
+Run on a homelab host in 02-14.
 
 Set, in the same place as step 1
 ([Where the sshd settings go](#where-the-sshd-settings-go)):
@@ -144,8 +146,8 @@ and create `/etc/ssh/principals`, owned by root, mode 0755.
 
 ## 3. Render and install each account's principals file
 
-UNVERIFIED until 02-14 on a real host (CI feeds the same output to a test
-sshd).
+Run on a homelab host in 02-14, for one account (CI feeds the same output
+to a test sshd).
 
 On the admin workstation, for each account of the host group:
 
@@ -171,7 +173,7 @@ mistyped name never produces a file.
 
 ## 4. Check and reload sshd
 
-UNVERIFIED until 02-14 on a real host.
+Run on a homelab host in 02-14.
 
 ```
 sudo sshd -t

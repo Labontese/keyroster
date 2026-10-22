@@ -313,11 +313,20 @@ page shows the CLI's fingerprint, the certificate logs in through the
 agent, a `--ttl 2m` certificate leaves the agent at expiry, two concurrent
 logins stay apart, an unapproved login issues nothing, and a role revoked
 between approval and hand-off gets the signer's refusal. The CLI flow also
-runs against a fake server on Linux, macOS and Windows in CI. **UNVERIFIED
-until 02-14** (02-13 ran registration only, no login): the approval page's
-script in a real browser, a real authenticator's assertion, the browser
-opener, the Windows path in which
-`keyroster login` itself starts keyroster agent, and gcr-ssh-agent.
+runs against a fake server on Linux, macOS and Windows in CI.
+
+**Run on the homelab in 02-14, on Windows only:** the owner ran
+`keyroster login` and `keyroster login --ttl 5m` on Windows 11 in Chrome,
+approving with a synced Chrome passkey unlocked by Windows Hello. The page
+showed the fingerprint before any passkey prompt, and the prompt appeared
+only after Approve. The certificate logged in to a stock OpenSSH host
+through keyroster agent, and the 5 m certificate left the agent at expiry
+while the other stayed. The signer's log and the host's sshd journal
+confirm the logins.
+
+**Still UNVERIFIED:** Edge and every other browser, Linux, macOS,
+gcr-ssh-agent, the browser opener, and the Windows path in which
+`keyroster login` itself starts keyroster agent.
 
 ## Residual risk
 
