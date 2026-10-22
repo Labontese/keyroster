@@ -384,6 +384,7 @@ These fix the verified findings of the pre-merge review of PR 52 (head `1753113`
   - Test `two_minute_login_at_accepted_skew`: a `--ttl 2m` login whose certificate is minted 2 s before the check, at skew -60, 0 and +60 s. It requires success and a lifetime of at least 60 s and at most what the certificate has left on the server's clock.
   - Before the fix, -60 s was refused with "less than 60 s left", and +60 s gave a lifetime of 2m58s against 1m58s left.
   - enroll-user.md now states the lifetime rule.
+  - Both parts are pinned by mutation (commit `5121c79`, test(02-12)): `two_minute_login_at_fractional_skew` (server clock 0.9 s past a whole local second) fails without the +1 s (lifetime 1m58s against 1m57.1s left), and `two_minute_login_with_options_latency` (5 s pass after the server stamps the options answer) fails when the clock is read after the request (-60 s refused as -65 s; lifetime 2m2s against 1m58s left at 0 and +60 s).
 - **Options validation untested** (CLI login.go:335/340). Commit `c12326c`, test(cli).
   - `options_checked` has 11 cases: other user, `server_time` 0, a CA cap other than the policy's, too many roles, a bad role name, a zero role TTL, no principals, a principal with ESC, a principal with CR, a bad extension, and a duplicate role.
   - Each case requires `errBadLoginOptions`, no begin, no agent add, and none of the text on stderr.
