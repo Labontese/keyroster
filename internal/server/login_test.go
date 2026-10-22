@@ -304,6 +304,37 @@ func TestLoginBegin(t *testing.T) {
 		req, p := ok(t)
 		requireBad(t, "method plain", post(beginBody(t, req, p, "plain", 50000)))
 	})
+	t.Run("bad_state_refused_nothing_stored", func(t *testing.T) {
+		// The state is concatenated into the loopback redirect unescaped,
+		// so its format check is the only thing keeping '&', '#', '=' or
+		// '+' out of that URL.
+		rows := func() int {
+			var n int
+			if err := e.openRaw(t).QueryRow(`SELECT count(*) FROM login_sessions`).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		for name, mutate := range map[string]func(string) string{
+			"state_42":        func(s string) string { return s[:42] },
+			"state_ampersand": func(s string) string { return s[:20] + "&" + s[21:] },
+			"state_plus":      func(s string) string { return s[:20] + "+" + s[21:] },
+			"state_hash":      func(s string) string { return s[:20] + "#" + s[21:] },
+			"state_padding":   func(s string) string { return s[:42] + "=" },
+		} {
+			req, p := ok(t)
+			p.state = mutate(p.state)
+			before := rows()
+			rec := post(beginBody(t, req, p, "S256", 50000))
+			requireBad(t, name, rec)
+			if strings.TrimSpace(rec.Body.String()) != `{"error":"malformed request"}` {
+				t.Fatalf("%s answered %s, want the malformed-request refusal", name, rec.Body)
+			}
+			if after := rows(); after != before {
+				t.Fatalf("%s stored a login (%d rows, was %d)", name, after, before)
+			}
+		}
+	})
 	t.Run("created_121s_old_refused", func(t *testing.T) {
 		req := loginRequest(t, "alice", t0.Add(-121*time.Second))
 		rec := post(beginBody(t, req, newLoginPKCE(t), "S256", 50000))
