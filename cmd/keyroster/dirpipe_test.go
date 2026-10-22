@@ -866,15 +866,99 @@ func TestDirectorySignConfirm(t *testing.T) {
 		if code != 1 || !strings.Contains(stderr, "not confirmed") || !strings.Contains(stdout, "Sign directory version 1? [y/N]") || e.agent.dirSigns() != 0 {
 			t.Fatalf("sign answered n: exit %d, %d sign requests, stdout %q, stderr %q", code, e.agent.dirSigns(), stdout, stderr)
 		}
+		requireDiffBeforePrompt(t, stdout, "+ user bob (active)", 1)
 		if got := readTestFile(t, filepath.Join(dir, proposalSigs)); !bytes.Equal(got, sig) {
 			t.Fatal("directory.json.sigs changed")
 		}
 		useTerminal(t, true, "Y\n")
-		if code, _, stderr := run(t, "directory", "sign", dir, "--admin-key", e.fps[1]); code != 0 || e.agent.dirSigns() != 1 {
+		code, stdout, stderr = run(t, "directory", "sign", dir, "--admin-key", e.fps[1])
+		if code != 0 || e.agent.dirSigns() != 1 {
 			t.Fatalf("sign answered y: exit %d, %d sign requests, stderr %q", code, e.agent.dirSigns(), stderr)
 		}
+		requireDiffBeforePrompt(t, stdout, "+ user bob (active)", 1)
 		if got := readTestFile(t, filepath.Join(dir, proposalSigs)); len(got) <= len(sig) {
 			t.Fatal("no signature was appended")
+		}
+	})
+}
+
+// requireDiffBeforePrompt fails unless stdout shows diffLine before the
+// confirmation prompt for version (T-02-43: nothing is signed unseen).
+func requireDiffBeforePrompt(t *testing.T, stdout, diffLine string, version int) {
+	t.Helper()
+	d := strings.Index(stdout, diffLine)
+	p := strings.Index(stdout, fmt.Sprintf("Sign directory version %d? [y/N]", version))
+	if d < 0 || p < 0 || d > p {
+		t.Fatalf("stdout does not show %q before the prompt (at %d and %d):\n%s", diffLine, d, p, stdout)
+	}
+}
+
+// TestEditConfirm: every directory edit (user approve, disable, enable)
+// asks before it signs, after the diff, on a terminal, and refuses
+// without one unless --yes is given; a refusal reaches no agent and posts
+// nothing (T-02-43; pre-merge review, 02-09).
+func TestEditConfirm(t *testing.T) {
+	setup := func(t *testing.T) (*dirEnv, string) {
+		t.Helper()
+		e := newDirEnv(t, 1, 1)
+		bob, fp := pendingEntry(t, webauthn.AlgES256)
+		e.setPending("bob", bob)
+		return e, fp
+	}
+	t.Run("approve_requires_yes_without_tty", func(t *testing.T) {
+		e, fp := setup(t)
+		code, stdout, stderr := run(t, "user", "approve", "bob", "--fingerprint", fp)
+		if code != 1 || !strings.Contains(stderr, "stdin is not a terminal") || !strings.Contains(stdout, "+ user bob (active)") {
+			t.Fatalf("approve without --yes and without a terminal: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+		requireNotSigned(t, e, 0)
+	})
+	t.Run("approve_prompt_answered_n", func(t *testing.T) {
+		e, fp := setup(t)
+		useTerminal(t, true, "n\n")
+		code, stdout, stderr := run(t, "user", "approve", "bob", "--fingerprint", fp)
+		if code != 1 || !strings.Contains(stderr, "not confirmed") {
+			t.Fatalf("approve answered n: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+		requireDiffBeforePrompt(t, stdout, "+ user bob (active)", 1)
+		requireNotSigned(t, e, 0)
+	})
+	t.Run("approve_prompt_answered_y", func(t *testing.T) {
+		e, fp := setup(t)
+		useTerminal(t, true, "y\n")
+		code, stdout, stderr := run(t, "user", "approve", "bob", "--fingerprint", fp)
+		if code != 0 {
+			t.Fatalf("approve answered y: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+		requireDiffBeforePrompt(t, stdout, "+ user bob (active)", 1)
+		if _, posts := e.installed(); posts != 1 || e.agent.dirSigns() != 1 {
+			t.Fatalf("approve answered y: %d install posts and %d directory signatures, want 1 each", posts, e.agent.dirSigns())
+		}
+	})
+	t.Run("disable_and_enable_ask", func(t *testing.T) {
+		e, fp := setup(t)
+		if code, _, stderr := run(t, "user", "approve", "bob", "--fingerprint", fp, "--yes"); code != 0 {
+			t.Fatalf("approve --yes: exit %d, stderr %q", code, stderr)
+		}
+		if code, _, stderr := run(t, "user", "disable", "bob"); code != 1 || !strings.Contains(stderr, "stdin is not a terminal") {
+			t.Fatalf("disable without --yes and without a terminal: exit %d, stderr %q", code, stderr)
+		}
+		useTerminal(t, true, "\n")
+		code, stdout, stderr := run(t, "user", "disable", "bob")
+		if code != 1 || !strings.Contains(stderr, "not confirmed") {
+			t.Fatalf("disable answered with an empty line: exit %d, stderr %q", code, stderr)
+		}
+		requireDiffBeforePrompt(t, stdout, "~ user bob active -> disabled", 2)
+		if _, posts := e.installed(); posts != 1 || e.agent.dirSigns() != 1 {
+			t.Fatalf("after the refused disable: %d install posts and %d directory signatures, want 1 each (the approve)", posts, e.agent.dirSigns())
+		}
+		useTerminal(t, true, "yes\n")
+		if code, stdout, stderr := run(t, "user", "disable", "bob"); code != 0 || e.agent.dirSigns() != 2 {
+			t.Fatalf("disable answered yes: exit %d, %d directory signatures, stdout %q, stderr %q", code, e.agent.dirSigns(), stdout, stderr)
+		}
+		useTerminal(t, false, "")
+		if code, _, stderr := run(t, "user", "enable", "bob"); code != 1 || !strings.Contains(stderr, "stdin is not a terminal") || e.agent.dirSigns() != 2 {
+			t.Fatalf("enable without --yes and without a terminal: exit %d, %d directory signatures, stderr %q", code, e.agent.dirSigns(), stderr)
 		}
 	})
 }
