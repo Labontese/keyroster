@@ -898,6 +898,54 @@ func TestLoginRefusals(t *testing.T) {
 		_, wait := e.start(t)
 		requireLoginRefused(t, wait(), "the server's login begin answer does not check out")
 	})
+	t.Run("begin_answer_fields_checked", func(t *testing.T) {
+		// A begin answer with an http URL, a query, a fragment, user info
+		// or another login's path, or an expiry not within 600 s after the
+		// server's time, opens no approval URL; an expiry of exactly 600 s
+		// is the control that does.
+		id := strings.Repeat("cd", 16)
+		for _, c := range []struct {
+			name   string
+			url    func(base string) string
+			expiry int64
+			ok     bool
+		}{
+			{"control_600s", func(b string) string { return b + "/login/" + id }, 600, true},
+			{"http_scheme", func(b string) string { return "http://" + strings.TrimPrefix(b, "https://") + "/login/" + id }, 240, false},
+			{"query", func(b string) string { return b + "/login/" + id + "?x=1" }, 240, false},
+			{"fragment", func(b string) string { return b + "/login/" + id + "#x" }, 240, false},
+			{"userinfo", func(b string) string { return "https://u@" + strings.TrimPrefix(b, "https://") + "/login/" + id }, 240, false},
+			{"other_login_path", func(b string) string { return b + "/login/" + strings.Repeat("ef", 16) }, 240, false},
+			{"expires_at_server_time", func(b string) string { return b + "/login/" + id }, 0, false},
+			{"expires_after_601s", func(b string) string { return b + "/login/" + id }, 601, false},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				now := useLoginClock(t)
+				e := newLoginServer(t)
+				useRecordingAgent(t)
+				prev := loginTimer
+				loginTimer = func(time.Duration) <-chan time.Time {
+					ch := make(chan time.Time, 1)
+					ch <- now
+					return ch
+				}
+				t.Cleanup(func() { loginTimer = prev })
+				e.override[loginBeginRoute] = func(w http.ResponseWriter) {
+					e.writeJSON(w, http.StatusOK, loginBeginAnswer{LoginID: id, ApprovalURL: c.url(e.url), ExpiresAt: e.now().Unix() + c.expiry})
+				}
+				_, wait := e.start(t)
+				r := wait()
+				if c.ok {
+					requireLoginRefused(t, r, "Approve this login in your browser: "+e.url+"/login/"+id)
+					return
+				}
+				requireLoginRefused(t, r, "the server's login begin answer does not check out")
+				if strings.Contains(r.stderr, "Approve this login in your browser") {
+					t.Fatalf("a refused begin answer was offered:\n%s", r.stderr)
+				}
+			})
+		}
+	})
 }
 
 // TestLoginFlowFakeServer runs keyroster login end to end against the fake
