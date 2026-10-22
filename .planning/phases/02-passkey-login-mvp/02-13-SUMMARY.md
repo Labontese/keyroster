@@ -99,8 +99,8 @@ Commit `99c2795`, go1.27.3, `CGO_ENABLED=0 -trimpath`, `vcs.modified=false`.
   - It holds `tpm/` (host, log, machine, ops and user `.auth`/`.tpmkey`, `-rw-------`).
 - `/usr/local/bin/keyroster-signer.pre-02-13`: `33f0125eceb5a680abfe60cf7731664ac4f345d275ec875af90d3e048486c891` (build d623927f7ffa)
 - `/usr/local/bin/keyroster.pre-02-13`: `529c52b47878ac054a39dfb91975d9db73f59ecc80f3fe2bbfbe734b5945d0d6`
-- `/etc/systemd/system/keyroster-signer.service.pre-02-13`: `24058153…e1ebe4`
-- `/etc/systemd/system/keyroster-signer.service.d/tpm.conf.pre-02-13`: `ff2b620a…95bf`
+- `/etc/systemd/system/keyroster-signer.service.pre-02-13`: `24058153fff8a3e935d67698b9ba41ff3292ef2bf04c9b123eeea7dfe02bd41b`
+- `/etc/systemd/system/keyroster-signer.service.d/tpm.conf.pre-02-13`: `ff2b620a235c20db8af656e7d6b02eeea6dec10899fbe3dfe0122b5a9ea295bf`
 - Extra, not in the plan: `/etc/sysusers.d/keyroster.conf.pre-02-13`. systemd-sysusers reads only `*.conf`, so the backup is inert.
 
 The rollback window closed when Task 3 registered a passkey. From then on the plan fixes forward (02-13-F1).
