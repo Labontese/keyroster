@@ -175,16 +175,21 @@ UNVERIFIED until 02-14 on a real host.
 
 ```
 sudo sshd -t
-sudo sshd -T -C user=<account>,host=<host>,addr=<address> | grep -iE '^(trustedusercakeys|authorizedprincipalsfile) '
+sudo sshd -T -C user=<account>,host=<host>,addr=<address>,laddr=<server address>,lport=22 | grep -iE '^(trustedusercakeys|authorizedprincipalsfile) '
 sudo systemctl reload ssh    # the unit is sshd on some distributions
 ```
 
 `sshd -t` must print nothing and exit 0. It checks the syntax only, not
 which value is in force. `sshd -T -C` prints the effective settings for a
 connection to `<account>` from `<address>` (a client address your users
-connect from; `<host>` is its name), with any matching `Match` block
-applied. Run it for each account the host group maps. It must print
-exactly:
+connect from; `<host>` is its name), arriving at `<server address>` on
+port 22 (use the port sshd listens on), with any matching `Match` block
+applied. Give every one of these criteria: in this test mode sshd treats a
+`Match` criterion it was not given (for example `LocalPort` or
+`LocalAddress`) as not matching, so leaving `laddr` or `lport` out can hide a
+`Match` block that does apply to real connections. If a `Match` block uses
+`RDomain`, add `rdomain=<domain>` as well. Run it for each account the host
+group maps. It must print exactly:
 
 ```
 trustedusercakeys /etc/ssh/keyroster_user_ca.pub
