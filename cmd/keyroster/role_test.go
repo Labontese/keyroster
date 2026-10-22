@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -334,6 +337,29 @@ func TestHostPrincipals(t *testing.T) {
 		}
 	})
 
+	t.Run("software_custody_banner_on_stderr", func(t *testing.T) {
+		// KEY-06: the evaluation-only banner goes to stderr once, so
+		// "keyroster host principals ... > file" and "host ca-key > file"
+		// capture only the file.
+		e := roleEnv(t, nil)
+		e.mu.Lock()
+		e.custody = "user=software, host=software, machine=software, ops=software, log=software"
+		e.mu.Unlock()
+		banner := custodytext.SoftwareCABanner([]string{"user", "host", "machine", "ops", "log"})
+		code, out, errOut := run(t, "host", "principals", "web", "root")
+		want, err := directory.RenderPrincipalsFile(installedDir(t, e), "web", "root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != 0 || out != string(want) || strings.Count(errOut, banner) != 1 {
+			t.Fatalf("host principals with software custody: exit %d, stdout %q, stderr:\n%s\nwant exactly the file on stdout and the banner once on stderr", code, out, errOut)
+		}
+		code, out, errOut = run(t, "host", "ca-key")
+		if code != 0 || strings.Count(out, "\n") != 1 || !strings.HasSuffix(out, " keyroster user CA (bundle v1)\n") || strings.Count(errOut, banner) != 1 {
+			t.Fatalf("host ca-key with software custody: exit %d, stdout %q, stderr:\n%s\nwant one key line on stdout and the banner once on stderr", code, out, errOut)
+		}
+	})
+
 	t.Run("invalid_account_refused", func(t *testing.T) {
 		roleEnv(t, nil)
 		code, out, errOut := run(t, "host", "principals", "web", "x\nrole:ops")
@@ -370,4 +396,44 @@ func TestHostCAKey(t *testing.T) {
 	if code != 0 || want == "" || out != want {
 		t.Fatalf("host ca-key: exit %d, stderr %q, stdout %q; want %q", code, errOut, out, want)
 	}
+}
+
+// TestRolePeerText (T-02-93): a hostile server's error text on the
+// directory routes reaches the new commands' stderr only contained, and
+// none of it reaches host principals' stdout.
+func TestRolePeerText(t *testing.T) {
+	padded := func(code int) func(w http.ResponseWriter) {
+		return func(w http.ResponseWriter) {
+			w.WriteHeader(code)
+			_, _ = io.WriteString(w, mustJSON(t, serverclient.APIError{Error: paddedAdvice}))
+		}
+	}
+	t.Run("host_principals_padded_get", func(t *testing.T) {
+		e := roleEnv(t, nil)
+		e.override["GET "+serverclient.AdminDirectoryPath] = padded(http.StatusInternalServerError)
+		code, stdout, stderr := run(t, "host", "principals", "web", "root")
+		if code != 1 || stdout != "" {
+			t.Fatalf("exit %d, stdout %q", code, stdout)
+		}
+		requirePeerTextContained(t, stderr, nil)
+	})
+	t.Run("role_add_padded_install", func(t *testing.T) {
+		e := roleEnv(t, nil)
+		e.override["POST "+serverclient.AdminDirectoryPath] = padded(http.StatusConflict)
+		code, _, stderr := run(t, "role", "add", "deploy", "--max-ttl", "1h", "--yes")
+		if code != 1 {
+			t.Fatalf("exit %d", code)
+		}
+		requirePeerTextContained(t, stderr, nil)
+	})
+	t.Run("host_group_map_padded_get", func(t *testing.T) {
+		e := roleEnv(t, nil)
+		e.override["GET "+serverclient.AdminDirectoryPath] = padded(http.StatusBadRequest)
+		code, _, stderr := run(t, "host-group", "map", "web", "deploy", "ops", "--yes")
+		if code != 1 {
+			t.Fatalf("exit %d", code)
+		}
+		requirePeerTextContained(t, stderr, nil)
+		requireNotSigned(t, e, 0)
+	})
 }
