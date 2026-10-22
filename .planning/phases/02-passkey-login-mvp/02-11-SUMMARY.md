@@ -18,11 +18,11 @@ provides:
 affects: [02-12, 02-13, 02-14, phase-3-agent, AUTHZ-01]
 
 actuals:
-  tokens: 20600
+  tokens: 21300
   tasks: 3
-  commits: 2
+  commits: 4
 plan_head_before: 4b7808bfb532f7f8d7c68bc5f93e4470df9ad65e
-plan_head_after: 960d89f0cd12e1239dfe61f217580a7a548e7304
+plan_head_after: ec927e8407ef3b80a998d5a7f3e0e0214bf9a812
 
 tech-stack:
   added: []
@@ -140,7 +140,7 @@ All the mutating subcommands take `--yes`, `--out DIR` and `--admin-key SHA256:.
 |---|---|---|---|
 | 1 | D-06 checkpoint | none (owner reply, recorded here) | none |
 | 2 | Tracer: renderer, role/group/host-group/host commands, e2e | 06a51e2 | render.go, directory.go, role.go, group.go, hostgroup.go, host.go, roles_test.go |
-| 3 | Refusals, renderer tests, runbook | 960d89f | render_test.go, role_test.go, dirpipe_test.go, host-setup.md |
+| 3 | Refusals, renderer tests, runbook | 960d89f, ec927e8 (stdout and peer-text tests); docs 4e39012 | render_test.go, role_test.go, dirpipe_test.go, host-setup.md |
 | 4 | Merge gate | not attempted (blocking-human) | none |
 
 ## Verification
@@ -158,6 +158,10 @@ All the mutating subcommands take `--yes`, `--out DIR` and `--admin-key SHA256:.
   - `capslock-check.sh`: 91 pairs, baseline 91, unchanged;
   - `dep-firewall.sh` and `testonly-firewall.sh` (clean).
 - **Windows:** `go test ./internal/directory/... ./cmd/keyroster/...` passes.
+- **After ec927e8:** the full gate was re-run in WSL with golangci-lint also at GOOS=windows and GOOS=darwin, as CI's lint job does: GATE rc=0, capslock 91/91. The Windows unit tests pass.
+- **Stdout and peer text:**
+  - `TestHostPrincipals/software_custody_banner_on_stderr` runs both `host` commands under software custody. stdout is exactly the rendered file or the key line, and the KEY-06 banner appears once on stderr. A mutant that sends `host ca-key`'s banner to stdout is killed.
+  - `TestRolePeerText` covers `host principals`, `role add` and `host-group map`: padded server errors on the directory routes reach stderr only contained, and stdout stays empty (T-02-93).
 - **Acceptance greps (Task 2):**
   - `func RenderPrincipalsFile` is in render.go and is used in host.go;
   - `ErrNoDirectory` is defined in render.go and used in host.go;
@@ -249,7 +253,7 @@ All the mutating subcommands take `--yes`, `--out DIR` and `--admin-key SHA256:.
 6. **`role update` with no flag** is a usage error (exit 2), not a pipeline "nothing changed" refusal.
 7. **The CLI does not enforce `u:` for personal roles, or `role:` for an explicit `--principal`.** Any principal that `cert.ValidatePrincipals` accepts is allowed, as the signer allows. The convention is a default and a documented form.
 8. **The e2e retry on the admin rate limit** (deviation 5). The alternative is a server flag for test limits, which would be a server change outside this plan.
-9. **`host principals` prints exactly the file on stdout.** The custody banner and errors go to stderr, so `> file` captures only the file.
+9. **`host principals` and `host ca-key` print exactly the file or line on stdout.** The custody banner and errors go to stderr, so `> file` captures only the file (`software_custody_banner_on_stderr`).
 
 ## Not exercised (UNVERIFIED)
 
@@ -261,6 +265,14 @@ All the mutating subcommands take `--yes`, `--out DIR` and `--admin-key SHA256:.
 - **`--out` and quorum-above-1 proposals for these commands.** They share `editDirectory`'s proposal path, tested in 02-09. No 02-11 test writes a role proposal.
 - **`host principals` and `host ca-key` against a real server outside the e2e** (02-14).
 - **CI-only:** govulncheck, the e2e 9.5p1 lane, the rest of the e2e suite, and the macOS and Windows lanes. They are reported in the checkpoint.
+
+## Relation to the phase-4 todos
+
+Not fixed here, and not made worse.
+
+- Every change goes through 02-09's `editDirectory`: same verified base, same directory format and namespace, same install wording ("The server reports directory version N installed"), no new route.
+- `host principals` reads through `fetchVerifiedDirectory`, so it renders what the admins signed and the server serves. That the signer installed it is still the server's word: install receipts are a Phase 4 todo.
+- The deployment-binding, recovery-after-admin-change, witnessed-checkpoint and connection-cap todos are untouched.
 
 ## Known Stubs
 
@@ -289,7 +301,7 @@ None for this plan. Host setup follows docs/runbooks/host-setup.md.
 ## Self-Check: PASSED
 
 - Every file in `key-files.created` exists.
-- Commits `06a51e2` and `960d89f` are ancestors of HEAD and SSH-signed.
+- Commits `06a51e2`, `960d89f`, `4e39012` and `ec927e8` are ancestors of HEAD and SSH-signed.
 - The Task 2 and Task 3 acceptance greps and named cases were re-run and pass. The runbook has the four required strings, steps 1-4 carry "UNVERIFIED until 02-14", and step 5 carries the CI-only label.
 - No private network detail in any file this plan changed (grep for 100.x, 10.x, 192.168.x, tailnet and host names: none).
 
