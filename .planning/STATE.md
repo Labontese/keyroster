@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-14 Task 1 done on p02/14-homelab-logins; Task 2 (owner logins on Daniel-PC) in progress
+stopped_at: 02-14 Task 1 done on p02/14-homelab-logins; Tasks 1-3 done for Windows (draft SUMMARY); Task 4 waits for the laptop
 last_updated: "2026-10-22T21:45:00.000Z"
 last_activity: 2026-10-22
-last_activity_desc: 02-13 merged (#53); 02-14 target host prepared, owner logins in progress
+last_activity_desc: 02-14 Windows logins run and corroborated; laptop part pending
 state_head: ff87054
 progress:
   total_phases: 6
@@ -262,5 +262,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-22T21:45:00.000Z
-Stopped at: 02-14 Task 1 done on p02/14-homelab-logins; Task 2 (owner logins on Daniel-PC) in progress
+Stopped at: 02-14 Task 1 done on p02/14-homelab-logins; Tasks 1-3 done for Windows (draft SUMMARY); Task 4 waits for the laptop
 Resume file: None

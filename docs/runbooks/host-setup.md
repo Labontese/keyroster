@@ -72,10 +72,11 @@ The last line maps the local account `deploy` of the hosts in host group
 
 ## Where the sshd settings go
 
-Run on a homelab host in 02-14 for the drop-in case only (item 2): an
-Ubuntu host whose `sshd_config` includes `sshd_config.d/*.conf`, with no
-`Match` block in either. A host with `Match` blocks or without the
-include line (items 1 and 3) is UNVERIFIED.
+Run on a homelab host in 02-14 for items 1 and 2: on an Ubuntu host the
+item 1 search found no `Match` block and no earlier value, and
+`sshd_config` includes `sshd_config.d/*.conf` first, so the settings went
+into a drop-in. Removing or commenting out an existing value (item 1) and
+item 3 are UNVERIFIED.
 
 Steps 1 and 2 set `TrustedUserCAKeys` and `AuthorizedPrincipalsFile`. For
 both, sshd keeps the first value it reads, and a line after a `Match` line

@@ -74,8 +74,12 @@ evidence directory `P=$HOME/keyroster-ceremony/phase2`.
   shows both settings for Daniel-PC's address as the host sees it; in Task 3
   the same check also ran with `laddr` and `lport` from `$SSH_CONNECTION`,
   same result. The laptop's address was not checked (laptop offline).
+- sshd was reloaded with `sudo systemctl reload ssh` right after `sshd -t`.
 - The key-based control login (`ssh.exe -n -o BatchMode=yes <target> true`)
   still exits 0.
+- The host-side output (CA file hash, `sshd -T -C` lines, Match count,
+  include line) is kept in `$P/host-prep-windows.txt`, with addresses
+  masked, copied from the orchestrator's session output.
 - kr.env holds `KR_TARGET_SINCE` (the target VM's clock, CEST) and
   `KR_VM_SINCE` (the signer VM's clock, UTC).
 
@@ -88,7 +92,9 @@ evidence directory `P=$HOME/keyroster-ceremony/phase2`.
 - `order=ok` for both approvals: the page showed the fingerprint first, and
   the Windows Hello prompt appeared only after Approve.
 - `ssh ... whoami` through keyroster agent printed `daniel`.
-- Listings: the owner ran `ssh-add -l` three times after the 5 m login.
+- Listings: the owner ran `ssh-add -l` three times after the 5 m login and
+  pasted all three verbatim in the chat; `$P/listing-windows-a.txt` (#1) and
+  `$P/listing-windows-b.txt` (#3) are copies of those pasted lines.
   #1 (listing A) and #2 showed both certificates, #3 (listing B) only the
   8 h one.
 

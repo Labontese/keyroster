@@ -317,13 +317,13 @@ runs against a fake server on Linux, macOS and Windows in CI.
 
 **Run on the homelab in 02-14, on Windows only:** the owner ran
 `keyroster login` and `keyroster login --ttl 5m` on Windows 11 in Chrome,
-approving with a synced Chrome passkey unlocked by Windows Hello. The page
-showed the fingerprint before any passkey prompt, and the prompt appeared
-only after Approve. The certificate logged in to a stock OpenSSH host
+approving with a synced Chrome passkey unlocked by Windows Hello. The owner
+saw the fingerprint on the page before any passkey prompt, and the prompt
+appeared only after Approve. The certificate logged in to a stock OpenSSH host
 through keyroster agent, and the 5 m certificate was gone from the agent
 at a later listing while the other stayed (the listing times were not
-recorded, so removal at expiry itself is not shown). The signer's log and the host's sshd journal
-confirm the logins.
+recorded, so removal at expiry itself is not shown). The signer's log records both logins, and the
+host's sshd journal records the SSH login with the 8 h certificate.
 
 **Still UNVERIFIED:** Edge and every other browser, Linux, macOS,
 gcr-ssh-agent, the browser opener, and the Windows path in which
