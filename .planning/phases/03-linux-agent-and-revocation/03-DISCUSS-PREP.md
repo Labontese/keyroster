@@ -10,14 +10,14 @@ These are the questions for `/gsd-discuss-phase 3`. Each has a short set of opti
    - Host certificate renewals and sshd config changes do need one.
    - Only the development version accepts several KRL files; the released versions take one.
 2. **A corrupt or unreadable KRL makes sshd refuse every public key on that host,** including plain `authorized_keys` keys. The agent must test each new KRL with the host's own `ssh-keygen` before installing it.
-   - **The CA file is just as fragile:** one unreadable line in it makes every certificate login fail, even with a valid CA key on another line. The agent checks every CA key line before installing, too.
+   - **The CA file is just as fragile:** one unreadable line in it makes sshd ignore every CA key on the lines after it, so certificate logins fail if the line comes before our CA key. The agent checks every CA key line before installing, too.
 3. **sshd can scope trust to one account** with a `Match User` block, and a `Match` inside our drop-in cannot spill into the main config. Break-glass can therefore be isolated.
 4. **A KRL entry by key ID revokes exactly one certificate,** because our key IDs contain the request ID. Revoking a person means revoking all their live serials.
 5. **RHEL 8 has no `sshd_config.d`.**
    - Alpine and Arch packaging read drop-ins first (verified in their package sources).
    - For RHEL 9 the only evidence is a changelog line saying the include was moved first; the change itself was not seen (medium confidence).
    - Debian, Ubuntu and Proxmox are documented to do the same, but this is not yet tested.
-6. **The probe account as first proposed would not work.** sshd never answers a probe for a locked account or one without a working shell (on hosts without PAM, such as Alpine), nor for an account shut out by `AllowUsers`/`AllowGroups`/`DenyUsers`/`DenyGroups`. The self-test would then fail and roll back every change. The account must look valid to sshd but be unable to log in (see question 8). The same lists can also shut out the break-glass account.
+6. **The probe account as first proposed would not work.** sshd never answers a probe for a locked account on hosts without PAM (such as Alpine), for an account without a working shell on any host, nor for an account shut out by `AllowUsers`/`AllowGroups`/`DenyUsers`/`DenyGroups`. The self-test would then fail and roll back every change. The account must look valid to sshd but be unable to log in (see question 8). The same lists can also shut out the break-glass account.
 7. **Hosts set up by hand in Phase 2 already have our sshd settings** (`50-keyroster.conf`). As planned, the agent would refuse them (see question 19).
 
 ## Questions
