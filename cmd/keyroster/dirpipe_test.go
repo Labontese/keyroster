@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -616,6 +617,32 @@ func TestDirectoryPipeline(t *testing.T) {
 		if code, stdout, stderr := run(t, "user", "list"); code != 0 || !strings.Contains(stdout, "bob") || !strings.Contains(stdout, "passkey "+fp+" ES256") ||
 			!strings.HasPrefix(stdout, "The admin-signed directory the server serves: version 3, signatures verified against the root-signed policy.\n"+serverServesNote) {
 			t.Fatalf("user list: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+	})
+
+	t.Run("approve_appends_passkey_to_directory_user", func(t *testing.T) {
+		// One more passkey for a user already in the directory (the
+		// reinvite flow) is added next to the bound one, never in its place
+		// (pre-merge review, 02-09).
+		e := newDirEnv(t, 1, 1)
+		c1, fp1 := pendingEntry(t, webauthn.AlgES256)
+		e.installDirect(t, buildDir(t, nil, addUser("bob", credOf(c1))))
+		c2, fp2 := pendingEntry(t, webauthn.AlgES256)
+		e.setPending("bob", c2)
+		code, stdout, stderr := run(t, "user", "approve", "bob", "--fingerprint", fp2, "--yes")
+		if code != 0 || !strings.Contains(stdout, "+ credential bob "+fp2+" ES256") || strings.Contains(stdout, "- credential") ||
+			strings.Contains(stdout, "+ user bob") || strings.Contains(stdout, fp1) {
+			t.Fatalf("approve of bob's second passkey: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		doc, _ := e.installed()
+		d, err := directory.Parse(doc)
+		if err != nil || d.Version != 2 || len(d.Users) != 1 || len(d.Users[0].Credentials) != 2 {
+			t.Fatalf("installed after the approve: %+v, %v; want version 2 with bob holding two passkeys", d, err)
+		}
+		for _, c := range []serverclient.PendingCredential{c1, c2} {
+			if !slices.Contains(d.Users[0].Credentials, credOf(c)) {
+				t.Fatalf("bob does not hold credential %s after the approve: %+v", c.ID, d.Users[0].Credentials)
+			}
 		}
 	})
 
