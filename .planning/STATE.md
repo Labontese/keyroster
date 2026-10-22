@@ -209,6 +209,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-10: web sign-in is username-first with allowCredentials from the installed directory; begin, finish and every session request read only through currentStatus/currentDirectory and check the user is active and the credential bound; assertions verified by internal/webauthn.VerifyAssertion
 - [Phase 02]: 02-10: __Host-keyroster-session is an opaque 32-byte ID stored as SHA-256 (sessions.id_hash) with the opening cred_id; 1 h idle and 12 h absolute in one conditional UPDATE ... RETURNING; a signer outage answers 503 and keeps the row; logout needs no signer state
 - [Phase 02]: 02-10: sign-in route class: per client 20/min burst 10 with a 200/min burst 100 global backstop, plus one per-username bucket 10/min burst 10 (bounded LRU, valid names only, finish keyed on the challenge's user); one 'web sign-in' log line per event with no secrets
+- [Phase 02]: 02-10 pre-merge review, owner decisions 2026-10-22: the per-username sign-in bucket is keyed on (user, client) so no client can lock another out (02-12's CLI login inherits this via deferred-items); the executor's 12 open choices approved; sign-in, sessions and /account fail closed when the signer reports the directory not authorized; CodeQL #13 dismissed as a false positive
+- [Phase 02]: 02-11 Task 1, owner decision D-06 2026-10-22: principal convention confirmed as role:<name> for roles and u:<username> for personal accounts ("role:<namn> och u:<användare> (Rekommenderas)")
 
 ### Pending Todos
 
