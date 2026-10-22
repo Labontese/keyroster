@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-09 Tasks 1-2 done on p02/09-approve; PR awaiting owner merge gate (Task 3)
-last_updated: "2026-10-21T18:17:18.126Z"
-last_activity: 2026-10-21
-last_activity_desc: 02-09 approve executed; PR awaiting merge gate
-state_head: d7a62182576bbac7540759dd690e87fd322ae264
+stopped_at: 02-10 Tasks 1-2 done on p02/10-web-signin; PR awaiting owner merge gate (Task 3)
+last_updated: "2026-10-22T06:00:58.100Z"
+last_activity: 2026-10-22
+last_activity_desc: 02-10 web sign-in executed; PR awaiting merge gate
+state_head: e811c5341458d137780284f298c94167558b1298
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 29
+  completed_plans: 31
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 9 of 14
-Status: 02-09 awaiting the owner merge gate (p02/09-approve); 02-01 to 02-08 are merged
-Last activity: 2026-10-21 — 02-09 approve executed (admin-signed directory pipeline, user approve/list/disable/enable, directory show/sign/install, server directory mirror and install forwarding under pendingMu, enrollment runbook)
+Plan: 10 of 14
+Status: 02-10 awaiting the owner merge gate (p02/10-web-signin); 02-01 to 02-09 are merged
+Last activity: 2026-10-22 — 02-10 web sign-in executed (passkey sign-in against the installed directory, __Host- sessions with idle/absolute expiry and per-request directory checks, read-only account page, sign-in rate limits and logging)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -86,6 +86,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P07 | 5h40m | 2 tasks | 34 files |
 | Phase 02 P08 | about 1h | 2 tasks | 31 files |
 | Phase 02 P09 | about 40 min | 2 tasks | 21 files |
+| Phase 02 P10 | about 40 min | 2 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -205,6 +206,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-09: currentDirectory is the one directory mirror (replaces 02-07's dirCache): reads only through currentStatus, version 0 without a signer read, fails closed on a failed or mismatched refresh; the install handler drops the status cache after every InstallDirectory
 - [Phase 02]: 02-09: POST /api/v1/admin/directory runs under pendingMu (also taken by a reinvite), refuses credential_not_pending, and cleans up with self-healing DeleteBound (ID and user matched); keyroster user list prints users from the verified directory, never the server's fingerprints
 - [Phase 02]: 02-09 pre-merge review, owner decisions 2026-10-21: (F1) the CLI says only that the server reports a version installed (no signer receipt yet; check with keyroster audit verify on the signer host; receipts are a Phase 4 blocker todo); (F2) the executor's five unsettled choices approved; (F3) recovery after an admin-set or quorum change is a Phase 4 blocker todo. The pending check at install matches ID, user, alg and SPKI; the diff shows credential IDs and BE; directory display escapes control bytes. CodeQL go/log-injection #12 (directory.go, a Validate-checked user name) dismissed as a false positive
+- [Phase 02]: 02-10: web sign-in is username-first with allowCredentials from the installed directory; begin, finish and every session request read only through currentStatus/currentDirectory and check the user is active and the credential bound; assertions verified by internal/webauthn.VerifyAssertion
+- [Phase 02]: 02-10: __Host-keyroster-session is an opaque 32-byte ID stored as SHA-256 (sessions.id_hash) with the opening cred_id; 1 h idle and 12 h absolute in one conditional UPDATE ... RETURNING; a signer outage answers 503 and keeps the row; logout needs no signer state
+- [Phase 02]: 02-10: sign-in route class: per client 20/min burst 10 with a 200/min burst 100 global backstop, plus one per-username bucket 10/min burst 10 (bounded LRU, valid names only, finish keyed on the challenge's user); one 'web sign-in' log line per event with no secrets
 
 ### Pending Todos
 
@@ -241,6 +245,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T18:17:17.897Z
-Stopped at: 02-09 Tasks 1-2 done on p02/09-approve; PR awaiting owner merge gate (Task 3)
+Last session: 2026-10-22T06:00:57.876Z
+Stopped at: 02-10 Tasks 1-2 done on p02/10-web-signin; PR awaiting owner merge gate (Task 3)
 Resume file: None
