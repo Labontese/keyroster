@@ -293,7 +293,12 @@ issues under the superseded policy.
 > agent backend. On the homelab vTPM signer, the stop, install and start
 > sequence above ran in plan 01-20 (a rehearsal rotation to bundle v2):
 > `install-bundle` printed the SHA-256 checked before the copy, and the
-> signer was serving again under the new bundle. Creating
+> signer was serving again under the new bundle. Plan 02-13 ran the same
+> sequence for bundle v3, the policy successor that adds the WebAuthn RP
+> (signed by a TEST root on a networked workstation). `install-bundle`
+> without `--pin` printed the SHA-256 that `trust verify --prev` had
+> accepted, and the signer then served with `policy_version=2`. Doctor
+> showed `trust bundle version 3` and no FAIL. Creating
 > `signer.lock` inside the systemd sandbox is covered by the CI `systemd`
 > smoke check (`test/systemd/smoke.sh`, which starts `serve` in the
 > sandbox). On the homelab signer, the sandboxed `serve` of the current

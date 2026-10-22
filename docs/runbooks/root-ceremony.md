@@ -626,9 +626,32 @@ the change.
 > directory is installed and a login certificate is issued under policy
 > v2 that sshd accepts, and the exported log verifies with
 > `login certificates 1, directory installs 1`. The successor-policy
-> refusals are unit-tested (`TestRootSuccessorPolicy`). Running this
-> procedure on the homelab signer, offline, from paper fingerprints, is
-> **UNVERIFIED**; plan 02-13 does it.
+> refusals are unit-tested (`TestRootSuccessorPolicy`).
+>
+> **Run on the homelab in 02-13, as a rehearsal.** Steps 1 to 5 ran
+> against the homelab vTPM signer, giving trust bundle v3 and policy v2.
+>
+> - Steps 2 to 4 ran in WSL on a networked workstation. Each `keyroster`
+>   command ran under `unshare -r -n`, with TEST root C (`--key`,
+>   `--passphrase-fd`) and directories instead of USB sticks.
+> - `--prev-sha256` was given the hash recorded when v2 was installed.
+> - The pins came from the fingerprints `root init` printed, not from
+>   paper.
+> - Before signing, a script decoded both policies and confirmed that only
+>   `version`, `prev` and `webauthn` differ.
+> - In the dry run (no `--confirm`, stdin `/dev/null`), `root sign` wrote
+>   the unsigned `bundle.json` and `policy.json` into `--out-dir` and then
+>   stopped at the confirmation. The `--confirm` run reused that bundle,
+>   so the hash prefix taken from the dry run matched.
+> - With the roots unchanged, root C's one signature counted toward both
+>   thresholds: `trust verify --prev` printed `previous roots 1 of 2` and
+>   `new roots 1 of 2`.
+> - Step 5 ran before `keyroster-server` was installed, so no restart was
+>   needed.
+>
+> Still **UNVERIFIED**: step 0 (live USB, offline machine, second-machine
+> build), paper fingerprints, and step 6 (audit) until 02-13 runs it after
+> the first enrollment.
 
 ## Hardware-root variant
 
