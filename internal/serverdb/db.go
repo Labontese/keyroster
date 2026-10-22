@@ -701,3 +701,131 @@ func boolInt(b bool) int {
 	}
 	return 0
 }
+
+// The states of a CLI login session (02-12).
+const (
+	LoginPending  = "pending"
+	LoginApproved = "approved"
+	LoginRedeemed = "redeemed"
+)
+
+// LoginSession is one keyroster login begun through the browser-loopback
+// flow (02-12). Request is the CLI's LoginIssueRequest without evidence;
+// Created is that request's CreatedAt, from which the handlers derive
+// every deadline. CodeHash, CodeExpires and Assertion are set only once
+// the passkey approved the session. Nothing in a row is authority.
+type LoginSession struct {
+	ID            string
+	User          string
+	Request       []byte
+	CodeChallenge string
+	State         string
+	RedirectPort  int
+	Status        string
+	Assertion     []byte
+	CodeHash      []byte
+	CodeExpires   time.Time // zero until approved
+	Created       time.Time
+	Expires       time.Time
+}
+
+// CreateLogin stores a new pending login session. In the same transaction
+// it first deletes every redeemed session (the signer's log is the record,
+// and a deleted row cannot be redeemed again) and every session past its
+// expiry whose code, if it has one, has expired too. An approved session
+// whose code is still valid survives its own expiry until the code
+// expires. With the login rate limits the table holds a few minutes of
+// begins at most (02-12-F12).
+func (d *DB) CreateLogin(ctx context.Context, l LoginSession, now time.Time) error {
+	if l.ID == "" || l.User == "" || len(l.Request) == 0 || l.CodeChallenge == "" || l.State == "" || l.Created.IsZero() || l.Expires.IsZero() {
+		return errors.New("serverdb: incomplete login session")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM login_sessions WHERE status = 'redeemed' OR (expires_us < :now AND (code_expires_us IS NULL OR code_expires_us < :now))`,
+		sql.Named("now", now.UnixMicro())); err != nil {
+		return fmt.Errorf("serverdb: purge login sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO login_sessions (id, user_name, request, code_challenge, state, redirect_port, status, created_us, expires_us) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+		l.ID, l.User, l.Request, l.CodeChallenge, l.State, l.RedirectPort, l.Created.UnixMicro(), l.Expires.UnixMicro()); err != nil {
+		return fmt.Errorf("serverdb: insert login session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return nil
+}
+
+// Login returns the login session id whatever its expiry fields say: each
+// handler applies its own deadline. No such row is ErrNotFound.
+func (d *DB) Login(ctx context.Context, id string) (*LoginSession, error) {
+	var (
+		l           LoginSession
+		codeExpires sql.NullInt64
+		created     int64
+		expires     int64
+	)
+	err := d.db.QueryRowContext(ctx, `SELECT id, user_name, request, code_challenge, state, redirect_port, status, assertion, code_hash, code_expires_us, created_us, expires_us FROM login_sessions WHERE id = ?`, id).
+		Scan(&l.ID, &l.User, &l.Request, &l.CodeChallenge, &l.State, &l.RedirectPort, &l.Status, &l.Assertion, &l.CodeHash, &codeExpires, &created, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("serverdb: read login session: %w", err)
+	}
+	if codeExpires.Valid {
+		l.CodeExpires = time.UnixMicro(codeExpires.Int64)
+	}
+	l.Created, l.Expires = time.UnixMicro(created), time.UnixMicro(expires)
+	return &l, nil
+}
+
+// ApproveLogin marks the login session id approved: it stores the
+// assertion blob, the SHA-256 of the new single-use code and the code's
+// expiry. Only a pending session whose expiry is not before now changes;
+// any other is ErrNotFound and nothing is written.
+func (d *DB) ApproveLogin(ctx context.Context, id string, assertion, codeHash []byte, codeExpires, now time.Time) error {
+	if len(assertion) == 0 || len(codeHash) == 0 || codeExpires.IsZero() {
+		return errors.New("serverdb: incomplete login approval")
+	}
+	res, err := d.db.ExecContext(ctx, `UPDATE login_sessions SET status = 'approved', assertion = ?, code_hash = ?, code_expires_us = ? WHERE id = ? AND status = 'pending' AND expires_us >= ?`,
+		assertion, codeHash, codeExpires.UnixMicro(), id, now.UnixMicro())
+	if err != nil {
+		return fmt.Errorf("serverdb: approve login session: %w", err)
+	}
+	return oneRow(res)
+}
+
+// RedeemLogin burns the code of the login session id: one conditional
+// UPDATE moves an approved session whose code hash is codeHash and whose
+// code has not expired at now to redeemed. It is the single atomic step
+// that makes a code single-use: of two concurrent redeems one changes the
+// row and the other gets ErrNotFound.
+func (d *DB) RedeemLogin(ctx context.Context, id string, codeHash []byte, now time.Time) error {
+	res, err := d.db.ExecContext(ctx, `UPDATE login_sessions SET status = 'redeemed' WHERE id = ? AND status = 'approved' AND code_hash = ? AND code_expires_us >= ?`,
+		id, codeHash, now.UnixMicro())
+	if err != nil {
+		return fmt.Errorf("serverdb: redeem login session: %w", err)
+	}
+	return oneRow(res)
+}
+
+// oneRow requires res to have changed exactly one row; none is
+// ErrNotFound.
+func oneRow(res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("serverdb: rows affected: %w", err)
+	}
+	switch n {
+	case 1:
+		return nil
+	case 0:
+		return ErrNotFound
+	default:
+		return fmt.Errorf("serverdb: %d rows changed, want 1", n)
+	}
+}

@@ -1,11 +1,14 @@
 // keyroster-server's one script: the passkey registration ceremony of the
-// invite page (02-08) and the passkey sign-in ceremony of the login page
-// (02-10). Plain ES2017, no modules, no third-party code. Each reads its
-// begin and finish URLs from the data- attributes of its section
-// (#kr-enroll, #kr-login): registration runs navigator.credentials.create
-// and shows the fingerprint the server computed, sign-in runs
-// navigator.credentials.get and goes to the account page. Every text it
-// shows is set with textContent, never as markup.
+// invite page (02-08), the passkey sign-in ceremony of the login page
+// (02-10) and the approval ceremony of a keyroster login (02-12). Plain
+// ES2017, no modules, no third-party code. Each reads its URLs from the
+// data- attributes of its section (#kr-enroll, #kr-login, #kr-approve):
+// registration runs navigator.credentials.create and shows the
+// fingerprint the server computed, sign-in runs navigator.credentials.get
+// and goes to the account page, approval runs navigator.credentials.get
+// over the login request's digest and hands the result to keyroster login
+// through the redirect the server answered. Every text it shows is set
+// with textContent, never as markup.
 (function () {
   "use strict";
 
@@ -215,9 +218,82 @@
     });
   }
 
+  // startApprove wires the approval page of a keyroster login
+  // (#kr-approve). The server rendered the key fingerprint into the page
+  // before this script runs, and navigator.credentials.get is called only
+  // from the Approve button's click handler: nothing on load, in the
+  // countdown or in the feature detection starts the ceremony (D-13). The
+  // loopback URL comes only from the server's answer: this script never
+  // builds or fetches it and leaves the page by top-level navigation.
+  function startApprove() {
+    var root = document.getElementById("kr-approve");
+    if (!root) {
+      return;
+    }
+    var button = document.getElementById("kr-approve-button");
+    var alertEl = document.getElementById("kr-error");
+    var countdown = document.getElementById("kr-countdown");
+    var approved = document.getElementById("kr-approved");
+    var assertionURL = root.getAttribute("data-assertion");
+    var expires = parseInt(root.getAttribute("data-expires"), 10);
+
+    // tick shows the time left by this computer's clock. It only informs:
+    // the server decides whether the approval is still in time.
+    function tick() {
+      var left = Math.floor(expires - Date.now() / 1000);
+      if (!(left > 0)) {
+        countdown.textContent = "expired";
+        return false;
+      }
+      countdown.textContent = Math.floor(left / 60) + " min " + (left % 60) + " s left";
+      return true;
+    }
+    if (tick()) {
+      var timer = setInterval(function () {
+        if (!tick()) {
+          clearInterval(timer);
+        }
+      }, 1000);
+    }
+
+    if (!window.PublicKeyCredential || !navigator.credentials || typeof navigator.credentials.get !== "function") {
+      alertEl.textContent = "This browser does not support passkeys";
+      button.disabled = true;
+      return;
+    }
+
+    button.addEventListener("click", async function () {
+      button.disabled = true;
+      alertEl.textContent = "";
+      try {
+        var options = requestOptions({ publicKey: JSON.parse(root.getAttribute("data-options")) });
+        var cred = await navigator.credentials.get({ publicKey: options });
+        if (!cred) {
+          throw new Error("no passkey was used");
+        }
+        var r = cred.response;
+        var done = await postJSON(assertionURL, {
+          credential_id: bytesToB64url(cred.rawId),
+          authenticator_data: bytesToB64url(r.authenticatorData),
+          client_data_json: bytesToB64url(r.clientDataJSON),
+          signature: bytesToB64url(r.signature)
+        });
+        if (!done || typeof done.redirect !== "string") {
+          throw new Error("the server answered no redirect");
+        }
+        approved.hidden = false;
+        window.location.assign(done.redirect);
+      } catch (e) {
+        showError(alertEl, e, "Approval failed");
+        button.disabled = false;
+      }
+    });
+  }
+
   function start() {
     startEnroll();
     startLogin();
+    startApprove();
   }
 
   if (document.readyState === "loading") {

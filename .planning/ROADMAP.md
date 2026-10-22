@@ -98,7 +98,7 @@ Plans:
   4. The signer refuses to sign, whatever the server sends, when the WebAuthn assertion is missing, replayed or bound to a different request digest, or when the policy version is not root/quorum-signed.
   5. Server and signer run on Linux and serve a server-rendered web UI embedded in the binary, with a strict CSP and no npm dependencies; when the CA runs on an encrypted software key, every CLI command and every UI page shows a loud evaluation-only warning.
 
-**Plans:** 10/14 plans executed in 11 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p02/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 11/14 plans executed in 11 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p02/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -126,7 +126,7 @@ Plans:
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [x] 02-10-PLAN.md — Passkey web sign-in, sessions, read-only account page
-- [ ] 02-11-PLAN.md — D-06 checkpoint, then roles, groups, host groups and the shared principals renderer (`keyroster host principals`)
+- [x] 02-11-PLAN.md — D-06 checkpoint, then roles, groups, host groups and the shared principals renderer (`keyroster host principals`)
 
 **Wave 9** *(blocked on Wave 8 completion)*
 - [ ] 02-12-PLAN.md — `keyroster login`: fingerprint on CLI and page, loopback with state and PKCE, mint at redemption, certificate checks, agent with lifetime (Linux, macOS, Windows)
@@ -216,7 +216,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
-| 2. Passkey Login MVP | 10/14 | In Progress | - |
+| 2. Passkey Login MVP | 11/14 | In Progress | - |
 | 3. Linux Agent and Revocation | 0/TBD | Not started | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |

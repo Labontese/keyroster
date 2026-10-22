@@ -18,7 +18,10 @@ import (
 // each also have one global limiter at globalFactor times their
 // per-client rate and burst, and the sign-in routes a per-username limiter
 // next to the per-client one (02-10), keyed on the user name and the
-// client key together (signInUserKey). The admin routes have no global
+// client key together (signInUserKey). The CLI login routes (02-12) use
+// the sign-in values in limiters of their own, with a bucket per route:
+// per route and client, and per route, user name and client. The admin
+// routes have no global
 // limiter: a validly signed admin request is never refused
 // because of traffic from other client keys (a client sharing the admin's
 // key, the same IPv4 address or IPv6 /64, still shares its bucket), and
