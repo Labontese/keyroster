@@ -37,6 +37,29 @@ const (
 	loginAPIPrefix   = "/api/v1/login/"
 )
 
+// The login routes as the rate limiters name them: each has its own
+// per-client buckets and its own global backstop (loginRoutes).
+const (
+	loginPageRoute      = loginPagePrefix + "{id}"
+	loginAssertionRoute = loginAPIPrefix + "{id}/assertion"
+	loginRedeemRoute    = loginAPIPrefix + "{id}/redeem"
+)
+
+// loginRoutes are the five login routes, each with its own login limiter.
+var loginRoutes = []string{loginOptionsPath, loginBeginPath, loginPageRoute, loginAssertionRoute, loginRedeemRoute}
+
+// newLoginLimits returns one limiter per login route with the sign-in
+// values: per client, and a global backstop sized for that one route, so
+// clients that drain one route's backstop leave the other routes open
+// (02-12 pre-merge review).
+func newLoginLimits(lim Limits) map[string]*limiter {
+	m := make(map[string]*limiter, len(loginRoutes))
+	for _, route := range loginRoutes {
+		m[route] = newLimiter(lim.SignInPerMinute, lim.SignInBurst, globalFactor*lim.SignInPerMinute, globalFactor*lim.SignInBurst)
+	}
+	return m
+}
+
 // The timing of a login, all relative to the request's CreatedAt except
 // the code's own lifetime (02-12-F15). The server and the signer share one
 // host clock, so a code capped at CreatedAt + loginCodeCap always reaches
@@ -118,19 +141,20 @@ func (s *Server) logLogin(level slog.Level, event, reason, user, id string, r *h
 	s.log.Log(context.Background(), level, "cli login", "event", event, "reason", reason, "user", user, "login_id", id, "client", remoteIP(r))
 }
 
-// loginClientAllow applies the login route class's per-client limiter
-// (with its global backstop) to a request for route, once per request at
-// the top of each handler. loginUserAllow applies the per-user limiter
+// loginClientAllow applies route's own login limiter (per client, with the
+// route's global backstop) to a request for route, once per request at the
+// top of each handler. loginUserAllow applies the per-user limiter
 // once the user name is known. Each route has its own buckets: the key is
 // the route and the client, or the route, the user name and the client
 // (02-10 pre-merge review, owner decision G1: one client never drains
 // another client's buckets). Both answer the 429 themselves and report
 // whether the request may go on.
 func (s *Server) loginClientAllow(w http.ResponseWriter, r *http.Request, route string, html bool) bool {
-	if s.loginLimit.allow(route+" "+clientKey(r), s.clock()) {
+	l := s.loginLimit[route]
+	if l.allow(route+" "+clientKey(r), s.clock()) {
 		return true
 	}
-	s.loginLimited(w, r, s.loginLimit, reasonPerClient, "", "", html)
+	s.loginLimited(w, r, l, reasonPerClient, "", "", html)
 	return false
 }
 
@@ -416,7 +440,7 @@ func (s *Server) loginGone(w http.ResponseWriter, r *http.Request, reason, user,
 // script starts the ceremony only from the Approve button.
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.loginClientAllow(w, r, "/login/{id}", true) {
+	if !s.loginClientAllow(w, r, loginPageRoute, true) {
 		return
 	}
 	if !loginIDRE.MatchString(id) {
@@ -519,7 +543,7 @@ type loginAssertionRequest struct {
 // verifier's sentinel goes to the log only.
 func (s *Server) handleLoginAssertion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.loginClientAllow(w, r, "/api/v1/login/{id}/assertion", false) {
+	if !s.loginClientAllow(w, r, loginAssertionRoute, false) {
 		return
 	}
 	refuse := func(reason, user, lid string) {
@@ -555,7 +579,7 @@ func (s *Server) handleLoginAssertion(w http.ResponseWriter, r *http.Request) {
 		s.loginInternal(w, r, eventLoginApprove, "", id, err)
 		return
 	}
-	if !s.loginUserAllow(w, r, "/api/v1/login/{id}/assertion", l.User, id) {
+	if !s.loginUserAllow(w, r, loginAssertionRoute, l.User, id) {
 		return
 	}
 	now := s.clock()
@@ -663,7 +687,7 @@ type loginRedeemResponse struct {
 // again (duplicate_request), so the user runs keyroster login again.
 func (s *Server) handleLoginRedeem(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.loginClientAllow(w, r, "/api/v1/login/{id}/redeem", false) {
+	if !s.loginClientAllow(w, r, loginRedeemRoute, false) {
 		return
 	}
 	refuse := func(reason, user, lid string) {
@@ -702,7 +726,7 @@ func (s *Server) handleLoginRedeem(w http.ResponseWriter, r *http.Request) {
 		s.loginRedeemInternal(w, r, "", id, err)
 		return
 	}
-	if !s.loginUserAllow(w, r, "/api/v1/login/{id}/redeem", l.User, id) {
+	if !s.loginUserAllow(w, r, loginRedeemRoute, l.User, id) {
 		return
 	}
 	now := s.clock()

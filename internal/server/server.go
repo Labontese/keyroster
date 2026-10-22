@@ -52,13 +52,13 @@ type Server struct {
 	static  fs.FS
 	handler http.Handler
 
-	adminLimit      *limiter  // admin API routes
-	inviteLimit     *limiter  // invite pages
-	signInLimit     *limiter  // sign-in begin and finish, per client, with a global backstop
-	signInUserLimit *limiter  // sign-in begin and finish, per user name
-	loginLimit      *limiter  // CLI login routes, per route and client, with a global backstop
-	loginUserLimit  *limiter  // CLI login API routes, per route, user name and client
-	mirror          dirMirror // the installed directory, as of the last Status that matched
+	adminLimit      *limiter            // admin API routes
+	inviteLimit     *limiter            // invite pages
+	signInLimit     *limiter            // sign-in begin and finish, per client, with a global backstop
+	signInUserLimit *limiter            // sign-in begin and finish, per user name
+	loginLimit      map[string]*limiter // CLI login routes: one per route, per client, with that route's global backstop
+	loginUserLimit  *limiter            // CLI login API routes, per route, user name and client
+	mirror          dirMirror           // the installed directory, as of the last Status that matched
 
 	// pendingMu orders a directory install (its pending check, forward
 	// and cleanup) against a reinvite (its lookups and write), so neither
@@ -107,9 +107,9 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 		signInLimit:     newLimiter(lim.SignInPerMinute, lim.SignInBurst, globalFactor*lim.SignInPerMinute, globalFactor*lim.SignInBurst),
 		signInUserLimit: newLimiter(lim.SignInUserPerMinute, lim.SignInUserBurst, 0, 0),
 		// The CLI login routes (02-12) are their own class with the
-		// sign-in values: per route and client with the global backstop,
-		// and per route, user name and client with none.
-		loginLimit:     newLimiter(lim.SignInPerMinute, lim.SignInBurst, globalFactor*lim.SignInPerMinute, globalFactor*lim.SignInBurst),
+		// sign-in values: per route and client with that route's own
+		// global backstop, and per route, user name and client with none.
+		loginLimit:     newLoginLimits(lim),
 		loginUserLimit: newLimiter(lim.SignInUserPerMinute, lim.SignInUserBurst, 0, 0),
 	}
 	if s.clock == nil {
@@ -150,9 +150,9 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	// the login limiters itself.
 	mux.HandleFunc("GET "+loginOptionsPath, s.handleLoginOptions)
 	mux.HandleFunc("POST "+loginBeginPath, s.handleLoginBegin)
-	mux.HandleFunc("GET "+loginPagePrefix+"{id}", s.handleLoginPage)
-	mux.HandleFunc("POST "+loginAPIPrefix+"{id}/assertion", s.handleLoginAssertion)
-	mux.HandleFunc("POST "+loginAPIPrefix+"{id}/redeem", s.handleLoginRedeem)
+	mux.HandleFunc("GET "+loginPageRoute, s.handleLoginPage)
+	mux.HandleFunc("POST "+loginAssertionRoute, s.handleLoginAssertion)
+	mux.HandleFunc("POST "+loginRedeemRoute, s.handleLoginRedeem)
 	s.handler = secure(mux)
 	return s, nil
 }

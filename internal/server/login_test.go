@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -773,6 +774,58 @@ func TestLoginLimits(t *testing.T) {
 		req := loginRequest(t, "alice", e.clock.Now())
 		if rec := e.request(http.MethodPost, loginBeginPath, beginBody(t, req, newLoginPKCE(t), "S256", 50000), "203.0.113.30:1234", "", nil); rec.Code != http.StatusOK {
 			t.Fatalf("begin after drained options = %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("junk_on_every_route_leaves_others_open", func(t *testing.T) {
+		// Two addresses spend their whole per-client burst on each of the
+		// five routes with junk; a third client's login still passes,
+		// because each route's global backstop is sized for that route
+		// alone (02-12 pre-merge review).
+		e := newLoginEnv(t, Limits{SignInUserPerMinute: 100000, SignInUserBurst: 100000})
+		zeros := strings.Repeat("0", 32)
+		junk := []struct{ method, path string }{
+			{http.MethodGet, loginOptionsPath + "?user=nobody"},
+			{http.MethodPost, loginBeginPath},
+			{http.MethodGet, loginPagePrefix + zeros},
+			{http.MethodPost, loginAPIPrefix + zeros + "/assertion"},
+			{http.MethodPost, loginAPIPrefix + zeros + "/redeem"},
+		}
+		for _, addr := range []string{"203.0.113.41:1234", "203.0.113.42:1234"} {
+			for _, j := range junk {
+				for i := range 10 {
+					if rec := e.request(j.method, j.path, "", addr, "", nil); rec.Code == http.StatusTooManyRequests {
+						t.Fatalf("%s %s #%d from %s = 429 within its burst", j.method, j.path, i+1, addr)
+					}
+				}
+			}
+		}
+		if rec := e.request(http.MethodGet, loginOptionsPath+"?user=alice", "", "198.51.100.43:1234", "", nil); rec.Code != http.StatusOK {
+			t.Fatalf("a third client's options = %d %s, want 200\nlog:\n%s", rec.Code, rec.Body, e.log)
+		}
+		req := loginRequest(t, "alice", e.clock.Now())
+		if rec := e.request(http.MethodPost, loginBeginPath, beginBody(t, req, newLoginPKCE(t), "S256", 50000), "198.51.100.43:1234", "", nil); rec.Code != http.StatusOK {
+			t.Fatalf("a third client's begin = %d %s, want 200", rec.Code, rec.Body)
+		}
+	})
+	t.Run("route_backstop_applies_per_route", func(t *testing.T) {
+		// Ten addresses drain the options route's global backstop (burst
+		// 100): an eleventh address's options is refused, while a begin
+		// from it passes on the begin route's own backstop.
+		e := newLoginEnv(t, Limits{SignInUserPerMinute: 100000, SignInUserBurst: 100000})
+		for a := range 10 {
+			addr := "203.0.113." + strconv.Itoa(50+a) + ":1234"
+			for i := range 10 {
+				if rec := e.request(http.MethodGet, loginOptionsPath+"?user=nobody", "", addr, "", nil); rec.Code == http.StatusTooManyRequests {
+					t.Fatalf("options #%d from %s = 429 within its burst", i+1, addr)
+				}
+			}
+		}
+		if rec := e.request(http.MethodGet, loginOptionsPath+"?user=alice", "", "198.51.100.60:1234", "", nil); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("options past the route's backstop = %d, want 429", rec.Code)
+		}
+		req := loginRequest(t, "alice", e.clock.Now())
+		if rec := e.request(http.MethodPost, loginBeginPath, beginBody(t, req, newLoginPKCE(t), "S256", 50000), "198.51.100.60:1234", "", nil); rec.Code != http.StatusOK {
+			t.Fatalf("begin while the options backstop is drained = %d %s, want 200", rec.Code, rec.Body)
 		}
 	})
 	t.Run("routes_have_own_buckets", func(t *testing.T) {
