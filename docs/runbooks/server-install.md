@@ -21,10 +21,18 @@ expired.
 > lines and a SIGHUP reload. **No CI job runs the systemd units below.**
 > `systemd-analyze verify` passed on them on the development workstation.
 >
-> **Run on the homelab in 02-13.** Steps 1 to 5 ran as written, with
-> Tailscale, on the homelab signer VM (Ubuntu 26.04, systemd 259, vTPM
-> signer, bundle v3 signed by a TEST root on a networked workstation), and
-> step 5 ran from the Windows `keyroster.exe`:
+> **Run on the homelab in 02-13.** Steps 1 to 5 ran, with Tailscale, on
+> the homelab signer VM (Ubuntu 26.04, systemd 259, vTPM signer, bundle v3
+> signed by a TEST root on a networked workstation), and step 5 ran from
+> the Windows `keyroster.exe`. Two things differed from the text:
+>
+> - The Tailscale prerequisites in [What you need](#what-you-need) were
+>   met out of band before step 1, not by a step of this runbook.
+> - In step 5.4 the `--root-pin` values came from the fingerprints
+>   `root init` printed for the TEST roots, not from a paper record. Init
+>   ran with `--force`, which replaces an existing config.
+>
+> What was checked:
 >
 > - `id keyroster-server` listed `keyroster-admin`;
 > - the certificate unit ended `Result=success` before the server's first
@@ -51,6 +59,13 @@ expired.
   reviewed commit as the signer, and this repository at that commit (for
   `deploy/`).
 - A TLS certificate and key for the RP ID (next sections).
+- For the **With Tailscale** path of step 3: `tailscaled` installed on the
+  host and joined to the tailnet, with **MagicDNS** and **HTTPS
+  Certificates** enabled in the tailnet's admin console. Without them the
+  machine has no MagicDNS name to use as the RP ID, and `tailscale cert`
+  fails. Enabling HTTPS Certificates publishes the name in Certificate
+  Transparency logs (see the warning below). This runbook does not install
+  Tailscale.
 
 > **Warning: the RP ID and hostname are a one-way choice (D-09).**
 >
