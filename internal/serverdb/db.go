@@ -455,26 +455,29 @@ func (d *DB) PendingState(ctx context.Context, name string) (*PendingState, erro
 	return &st, nil
 }
 
-// PendingCredentialUser returns the name of the pending account whose
-// pending credential has the canonical ID id, or ErrNotFound when no
-// pending credential has it.
-func (d *DB) PendingCredentialUser(ctx context.Context, id string) (string, error) {
-	var name string
-	err := d.db.QueryRowContext(ctx, `SELECT user_name FROM pending_credentials WHERE id = ?`, id).Scan(&name)
+// PendingCredentialByID returns the pending credential with the canonical
+// ID id (its ID, user name, algorithm and key; not its flags or time), or
+// ErrNotFound when no pending credential has it.
+func (d *DB) PendingCredentialByID(ctx context.Context, id string) (*PendingCredential, error) {
+	pc := PendingCredential{ID: id}
+	err := d.db.QueryRowContext(ctx, `SELECT user_name, alg, spki FROM pending_credentials WHERE id = ?`, id).Scan(&pc.UserName, &pc.Alg, &pc.SPKI)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
+		return nil, ErrNotFound
 	}
 	if err != nil {
-		return "", fmt.Errorf("serverdb: read pending credential: %w", err)
+		return nil, fmt.Errorf("serverdb: read pending credential: %w", err)
 	}
-	return name, nil
+	return &pc, nil
 }
 
 // Binding is one credential an installed directory version binds: its
-// canonical ID and the user that holds it in that version.
+// canonical ID, the user that holds it in that version, and its COSE
+// algorithm and key (SPKI DER).
 type Binding struct {
 	ID   string
 	User string
+	Alg  int64
+	SPKI []byte
 }
 
 // DeleteBound removes, in one transaction, the pending state that an
@@ -483,9 +486,10 @@ type Binding struct {
 // left behind by an earlier install (whose cleanup failed, or whose
 // signer answer was lost) goes with the next accepted install (02-09-R2-F4).
 //
-//  1. For each binding it deletes the pending credential whose ID and user
-//     name both equal the binding's. A pending credential of another user
-//     with the same ID is never touched.
+//  1. For each binding it deletes the pending credential whose ID, user
+//     name, algorithm and key all equal the binding's. A pending
+//     credential of another user, or with another key, under the same ID
+//     is never touched.
 //  2. For each user whose pending credential it deleted, it deletes the
 //     pending account, with its registration sessions, only when the
 //     account has no pending credential left and its invite is not open:
@@ -503,7 +507,7 @@ func (d *DB) DeleteBound(ctx context.Context, bound []Binding, nowUS int64) erro
 	defer func() { _ = tx.Rollback() }()
 	emptied := map[string]bool{}
 	for _, b := range bound {
-		res, err := tx.ExecContext(ctx, `DELETE FROM pending_credentials WHERE id = ? AND user_name = ?`, b.ID, b.User)
+		res, err := tx.ExecContext(ctx, `DELETE FROM pending_credentials WHERE id = ? AND user_name = ? AND alg = ? AND spki = ?`, b.ID, b.User, b.Alg, b.SPKI)
 		if err != nil {
 			return fmt.Errorf("serverdb: delete bound credential: %w", err)
 		}

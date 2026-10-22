@@ -405,6 +405,10 @@ func TestDeleteBound(t *testing.T) {
 	cred := func(id string) PendingCredential {
 		return PendingCredential{ID: id, Alg: -7, SPKI: []byte{0x30, 0x01}}
 	}
+	// bound is the binding of cred(id)'s key to user.
+	bound := func(id, user string) Binding {
+		return Binding{ID: id, User: user, Alg: -7, SPKI: []byte{0x30, 0x01}}
+	}
 	setup := func(t *testing.T, names ...string) *DB {
 		t.Helper()
 		d, _ := openTemp(t)
@@ -421,7 +425,7 @@ func TestDeleteBound(t *testing.T) {
 	}
 	t.Run("bound_credential_and_used_account_deleted", func(t *testing.T) {
 		d := setup(t, "dave", "carol")
-		if err := d.DeleteBound(ctx, []Binding{{ID: "dave-cred", User: "dave"}, {ID: "frank-cred", User: "frank"}}, tNow.UnixMicro()); err != nil {
+		if err := d.DeleteBound(ctx, []Binding{bound("dave-cred", "dave"), bound("frank-cred", "frank")}, tNow.UnixMicro()); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := d.PendingUser(ctx, "dave"); !errors.Is(err, ErrNotFound) {
@@ -433,11 +437,35 @@ func TestDeleteBound(t *testing.T) {
 	})
 	t.Run("same_id_other_user_untouched", func(t *testing.T) {
 		d := setup(t, "erin")
-		if err := d.DeleteBound(ctx, []Binding{{ID: "erin-cred", User: "frank"}}, tNow.UnixMicro()); err != nil {
+		if err := d.DeleteBound(ctx, []Binding{bound("erin-cred", "frank")}, tNow.UnixMicro()); err != nil {
 			t.Fatal(err)
 		}
 		if st, err := d.PendingState(ctx, "erin"); err != nil || len(st.Credentials) != 1 {
 			t.Fatalf("erin after a binding of her credential ID to frank: %+v, %v; want unchanged", st, err)
+		}
+	})
+	t.Run("same_id_other_key_untouched", func(t *testing.T) {
+		// A binding of the pending ID to another key (a proposal written
+		// before a reinvite whose new passkey reused the ID) deletes nothing
+		// (pre-merge review, 02-09).
+		d := setup(t, "dave")
+		for _, b := range []Binding{
+			{ID: "dave-cred", User: "dave", Alg: -7, SPKI: []byte{0x30, 0x02}},
+			{ID: "dave-cred", User: "dave", Alg: -8, SPKI: []byte{0x30, 0x01}},
+		} {
+			if err := d.DeleteBound(ctx, []Binding{b}, tNow.UnixMicro()); err != nil {
+				t.Fatal(err)
+			}
+			if st, err := d.PendingState(ctx, "dave"); err != nil || len(st.Credentials) != 1 {
+				t.Fatalf("dave after a binding of his credential ID to another key (%+v): %+v, %v; want unchanged", b, st, err)
+			}
+		}
+		pc, err := d.PendingCredentialByID(ctx, "dave-cred")
+		if err != nil || pc.UserName != "dave" || pc.Alg != -7 || !bytes.Equal(pc.SPKI, []byte{0x30, 0x01}) {
+			t.Fatalf("PendingCredentialByID(dave-cred) = %+v, %v; want dave's row", pc, err)
+		}
+		if _, err := d.PendingCredentialByID(ctx, "nobody-cred"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("PendingCredentialByID(nobody-cred) = %v, want ErrNotFound", err)
 		}
 	})
 	t.Run("open_invite_kept", func(t *testing.T) {
@@ -447,7 +475,7 @@ func TestDeleteBound(t *testing.T) {
 		if _, err := d.db.Exec(`UPDATE pending_users SET invite_used_us = NULL WHERE name = 'alice'`); err != nil {
 			t.Fatal(err)
 		}
-		if err := d.DeleteBound(ctx, []Binding{{ID: "alice-cred", User: "alice"}}, tNow.UnixMicro()); err != nil {
+		if err := d.DeleteBound(ctx, []Binding{bound("alice-cred", "alice")}, tNow.UnixMicro()); err != nil {
 			t.Fatal(err)
 		}
 		if st, err := d.PendingState(ctx, "alice"); err != nil || len(st.Credentials) != 0 || st.InviteUsed {
@@ -457,7 +485,7 @@ func TestDeleteBound(t *testing.T) {
 		if _, err := d.db.Exec(`INSERT INTO pending_credentials (id, user_name, alg, spki, backup_eligible, backed_up, registered_us) VALUES ('alice-2', 'alice', -7, x'3001', 0, 0, 0)`); err != nil {
 			t.Fatal(err)
 		}
-		if err := d.DeleteBound(ctx, []Binding{{ID: "alice-2", User: "alice"}}, tNow.Add(25*time.Hour).UnixMicro()); err != nil {
+		if err := d.DeleteBound(ctx, []Binding{bound("alice-2", "alice")}, tNow.Add(25*time.Hour).UnixMicro()); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := d.PendingUser(ctx, "alice"); !errors.Is(err, ErrNotFound) {

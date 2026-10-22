@@ -1396,6 +1396,36 @@ func TestDirectoryInstallCleanup(t *testing.T) {
 			t.Fatalf("dave still has pending %v after P2 was bound", ids)
 		}
 	})
+
+	t.Run("install_refuses_reused_id_with_other_key", func(t *testing.T) {
+		// The passkey registered after the reinvite reuses the discarded
+		// credential's ID with a new key: a proposal written before the
+		// reinvite still must not bind the discarded key (pre-merge review,
+		// 02-09).
+		e := chainEnv(t, nil)
+		p1, p2 := newCredential(t), newCredential(t)
+		p2.ID = p1.ID // only the key differs
+		first := e.mustAdd(t, "dave", false)
+		e.bindPending(t, urlInviteHash(t, first.InviteURL), "dave", p1)
+		withP1 := successor(t, nil, bind("dave", p1)) // built before the reinvite
+		second := e.mustAdd(t, "dave", true)          // ReplaceInvite discards P1
+		e.bindPending(t, urlInviteHash(t, second.InviteURL), "dave", p2)
+		requireAnswer(t, "install of the version binding the discarded key under the reused ID", e.postDirectory(t, withP1), http.StatusConflict, "credential_not_pending")
+		if n := e.fake.count("InstallDirectory"); n != 0 {
+			t.Fatalf("InstallDirectory called %d times, want 0", n)
+		}
+		creds, err := e.s.db.PendingCredentials(context.Background(), "dave")
+		if err != nil || len(creds) != 1 || creds[0].ID != p2.ID || base64.StdEncoding.EncodeToString(creds[0].SPKI) != p2.SPKI || e.pendingRows(t, "dave") != 1 {
+			t.Fatalf("dave after the refusals: %+v, %v; want P2 with its key, and the row", creds, err)
+		}
+		// Control: the version binding P2 itself installs and clears it.
+		if res := e.postDirectory(t, successor(t, nil, bind("dave", p2))); res.Code != http.StatusOK {
+			t.Fatalf("install binding P2 = %d %s", res.Code, res.Body)
+		}
+		if ids := e.pendingOf(t, "dave"); len(ids) != 0 {
+			t.Fatalf("dave still has pending %v after P2 was bound", ids)
+		}
+	})
 }
 
 // TestDirectoryInstallPending: pendingMu orders an install against a

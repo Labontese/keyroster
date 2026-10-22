@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -252,9 +253,11 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 //     forwarded, so the signer refuses it as directory_invalid and logs
 //     the refusal.
 //  3. Pending check: every newly bound credential must be a pending
-//     credential of the user it is bound to, or 409 credential_not_pending
-//     and nothing is forwarded. Once a reinvite has returned, no install
-//     through this server binds the credential it discarded. The check only
+//     credential of the user it is bound to, with the same algorithm and
+//     key, or 409 credential_not_pending and nothing is forwarded. Once a
+//     reinvite has returned, no install through this server binds the
+//     credential it discarded, even when the passkey registered after it
+//     reuses the discarded credential's ID. The check only
 //     ever refuses; a pending row grants nothing (D-03).
 //  4. Forward, then dropStatus as soon as InstallDirectory returns,
 //     whatever it returned, so the next request reads the signer's state.
@@ -296,8 +299,8 @@ func (s *Server) handleInstallDirectory(w http.ResponseWriter, r *http.Request) 
 	}
 	bound, newlyBound := directoryBindings(req.Directory, base)
 	for _, b := range newlyBound {
-		user, err := s.db.PendingCredentialUser(ctx, b.ID)
-		if errors.Is(err, serverdb.ErrNotFound) || (err == nil && user != b.User) {
+		pc, err := s.db.PendingCredentialByID(ctx, b.ID)
+		if errors.Is(err, serverdb.ErrNotFound) || (err == nil && (pc.UserName != b.User || pc.Alg != b.Alg || !bytes.Equal(pc.SPKI, b.SPKI))) {
 			// 409 credential_not_pending, forwarding nothing.
 			s.log.Warn("directory install refused", "admin", admin, "reason", serverclient.AdminErrNotPendingCredential, "user", b.User)
 			s.writeJSON(w, base.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrNotPendingCredential})
@@ -359,7 +362,8 @@ func installRefusalStatus(e *wire.ErrorResponse) int {
 
 // directoryBindings returns every binding of the posted document (bound)
 // and the ones whose credential ID the base does not hold (newlyBound),
-// each with the user that holds it in the posted version. newlyBound is a
+// each with the user that holds it in the posted version and its
+// algorithm and key (SPKI DER). newlyBound is a
 // subset of bound. A document that does not parse has neither.
 func directoryBindings(doc []byte, base *directoryView) (bound, newlyBound []serverdb.Binding) {
 	d, err := directory.Parse(doc)
@@ -368,7 +372,11 @@ func directoryBindings(doc []byte, base *directoryView) (bound, newlyBound []ser
 	}
 	for _, u := range d.Users {
 		for _, c := range u.Credentials {
-			b := serverdb.Binding{ID: c.ID, User: u.Name}
+			// Parse validated every SPKI as canonical standard base64; a
+			// key that did not decode would stay nil and match no pending
+			// credential.
+			spki, _ := base64.StdEncoding.Strict().DecodeString(c.SPKI)
+			b := serverdb.Binding{ID: c.ID, User: u.Name, Alg: c.Alg, SPKI: spki}
 			bound = append(bound, b)
 			// Parse validated every ID as canonical unpadded base64url.
 			id, err := base64.RawURLEncoding.Strict().DecodeString(c.ID)
