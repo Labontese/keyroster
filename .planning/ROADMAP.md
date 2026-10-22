@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A certificate issued through the signer is accepted by real `sshd` on OpenSSH 9.5p2 and on the latest release in CI. It carries a unique non-zero serial that is never reissued, even after the signer's state is restored from an older copy, plus a structured key ID and `permit-pty`-only extensions. The signer refuses empty, wildcard or malformed principals, certificate-type CA keys, and anything other than a client-supplied public key.
   5. Every issuance is in the Merkle audit log before the certificate is released; `sshcm audit verify` checks the log end to end, fails on any tampered or removed entry, and can export it.
 
-**Plans:** 21/21 plans executed; 01-17..01-21 work the KEY-07 gap, and KEY-07 stays open after them until the owner's real offline ceremony (a later v3 rotation; owner decision 2026-10-09) (11 waves plus 4 gap waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
+**Plans:** 21/21 plans executed; 01-17..01-21 work the KEY-07 gap, and KEY-07 stays open after them until the owner's real offline ceremony (a later v4 rotation (v3 became the Phase 2 RP successor, 02-13); owner decision 2026-10-09) (11 waves plus 4 gap waves; executed and merged one at a time, each PR through an owner merge gate — see 01-SKELETON.md "Delivery Protocol"; plan numbers are identifiers, waves decide order)
 
 Plans:
 **Wave 1**
@@ -98,7 +98,7 @@ Plans:
   4. The signer refuses to sign, whatever the server sends, when the WebAuthn assertion is missing, replayed or bound to a different request digest, or when the policy version is not root/quorum-signed.
   5. Server and signer run on Linux and serve a server-rendered web UI embedded in the binary, with a strict CSP and no npm dependencies; when the CA runs on an encrypted software key, every CLI command and every UI page shows a loud evaluation-only warning.
 
-**Plans:** 11/14 plans executed in 11 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p02/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 12/14 plans executed in 11 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p02/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -129,7 +129,7 @@ Plans:
 - [x] 02-11-PLAN.md — D-06 checkpoint, then roles, groups, host groups and the shared principals renderer (`keyroster host principals`)
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 02-12-PLAN.md — `keyroster login`: fingerprint on CLI and page, loopback with state and PKCE, mint at redemption, certificate checks, agent with lifetime (Linux, macOS, Windows)
+- [x] 02-12-PLAN.md — `keyroster login`: fingerprint on CLI and page, loopback with state and PKCE, mint at redemption, certificate checks, agent with lifetime (Linux, macOS, Windows)
 
 **Wave 10** *(blocked on Wave 9 completion)*
 - [ ] 02-13-PLAN.md — Homelab: D-09 hostname checkpoint, bundle v3 with the RP (KEY-07 offline ceremony becomes v4), keyroster-server with tailscale cert, owner enrolled (D-04)
@@ -216,7 +216,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
-| 2. Passkey Login MVP | 11/14 | In Progress | - |
+| 2. Passkey Login MVP | 12/14 | In Progress | - |
 | 3. Linux Agent and Revocation | 0/TBD | Not started | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |

@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-12 Tasks 1-2 done on p02/12-cli-login; PR awaiting owner merge gate (Task 3)
-last_updated: "2026-10-22T13:40:00.000Z"
+stopped_at: 02-13 Tasks 1-4 done on p02/13-homelab-enroll; PR awaiting owner merge gate (Task 5)
+last_updated: "2026-10-22T20:50:00.000Z"
 last_activity: 2026-10-22
-last_activity_desc: 02-12 keyroster login executed; PR awaiting merge gate
-state_head: e67ac2b
+last_activity_desc: 02-13 homelab server install and owner enrollment executed; PR awaiting merge gate
+state_head: 162478d
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 33
+  completed_plans: 34
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 12 of 14
-Status: 02-12 awaiting the owner merge gate (p02/12-cli-login); 02-01 to 02-11 are merged
-Last activity: 2026-10-22 — 02-12 keyroster login executed (browser-loopback login with PKCE and state, approval page with the server-computed fingerprint, mint at redemption, root-pinned certificate checks, agent add with a lifetime on Linux/macOS and keyroster agent on Windows, login export decode, e2e against real ssh-agent and sshd)
+Plan: 13 of 14
+Status: 02-13 awaiting the owner merge gate (p02/13-homelab-enroll); 02-01 to 02-12 are merged
+Last activity: 2026-10-22 — 02-13 homelab dogfood part 1 executed (bundle v3 with the RP hostname signed by TEST root C, keyroster-server with a tailscale cert and active timer, healthz over the tailnet, owner enrolled with a synced Chrome passkey and approved with his admin key, role homelab-admin and host group homelab, audit verify 12 entries with 5 directory installs)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -89,6 +89,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P10 | about 40 min | 2 tasks | 16 files |
 | Phase 02 P11 | 25 min | 3 tasks | 11 files |
 | Phase 02 P12 | about 65 min | 2 tasks | 28 files |
+| Phase 02 P13 | about 40 min plus owner checkpoints | 4 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -219,6 +220,10 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-12: keyroster login is the D-12 browser-loopback flow: options (from directory.Authorize per role), begin with PKCE S256 and state, approval page with the fingerprint computed from the stored request bytes, assertion pre-verified, redeem the only signer call (mint at redemption); code single-use in one conditional UPDATE after the verifier-format and PKCE checks; begin ±120 s, session CreatedAt + 240 s, code min(+120 s, CreatedAt + 290 s)
 - [Phase 02]: 02-12: the CLI verifies the certificate (signature included) against the root-pinned user CA, its own key, exact principals, kr2 key ID, span <= TTL + 300 s, >= 60 s left; adds only the certificate identity with LifetimeSecs = remaining, never retries without the constraint or after a failed redeem; Windows uses keyroster agent via winagent.Ensure and prints only the host-scoped IdentityAgent block
 - [Phase 02]: 02-12: login limiters are their own class with the sign-in values and a bucket per route; per client once per request, per (user, client) via signInUserKey; the fingerprint claim corrected: a compromised server can harvest an assertion for its own key (T-02-60), the CLI's own-key check keeps it out of the agent and the log shows the other key_fingerprint
+- [Phase 02]: 02-12 pre-merge review, owner decision 2026-10-22: the executor's 13 open choices approved; each login route has its own global backstop; the CLI refuses a certificate whose roles, extensions or critical options differ from the request; agent lifetime and remaining validity use the measured skew; CodeQL #14 and #15 dismissed as false positives
+- [Phase 02]: 02-13 Task 1, owner decision D-09 2026-10-22: the homelab RP ID is the signer VM's full MagicDNS FQDN (confirmed verbatim by the owner; the name and its hash are kept only outside the repository, in kr.env); the policy successor is bundle v3 signed by TEST root C, so the owed real offline ceremony becomes the v4 rotation and KEY-07 stays open. Tailscale was installed on the signer VM (official apt repository) and joined to the tailnet with the owner's approval
+- [Phase 02]: 02-13: homelab runs bundle v3 (policy v2 with the RP) and keyroster-server with a tailscale cert; the owner (user name `owner`) enrolled with a synced Chrome passkey (ES256) and approved it with his admin key; directory v5 grants role homelab-admin (8 h) and maps zima in host group homelab; the owner ran user add and the directory commands himself because the permission classifier refused them for agents
+- [Phase 02]: 02-13: audit verify anchors on the first bundle whose root set equals the pins, so C and D anchor on v2 while v3 is in force; 02-14's anchor_bundle_version==3 assertions must become bundle_version==3 and anchor_bundle_version==2 (phase 02 deferred-items.md)
 
 ### Pending Todos
 
@@ -255,6 +260,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-22T13:40:00.000Z
-Stopped at: 02-12 Tasks 1-2 done on p02/12-cli-login; PR awaiting owner merge gate (Task 3)
+Last session: 2026-10-22T20:50:00.000Z
+Stopped at: 02-13 Tasks 1-4 done on p02/13-homelab-enroll; PR awaiting owner merge gate (Task 5)
 Resume file: None

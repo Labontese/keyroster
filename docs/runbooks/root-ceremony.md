@@ -626,9 +626,42 @@ the change.
 > directory is installed and a login certificate is issued under policy
 > v2 that sshd accepts, and the exported log verifies with
 > `login certificates 1, directory installs 1`. The successor-policy
-> refusals are unit-tested (`TestRootSuccessorPolicy`). Running this
-> procedure on the homelab signer, offline, from paper fingerprints, is
-> **UNVERIFIED**; plan 02-13 does it.
+> refusals are unit-tested (`TestRootSuccessorPolicy`).
+>
+> **Run on the homelab in 02-13, as a rehearsal.** Steps 1 to 5 ran
+> against the homelab vTPM signer, giving trust bundle v3 and policy v2.
+>
+> - Steps 2 to 4 ran in WSL on a networked workstation. Each `keyroster`
+>   command ran under `unshare -r -n`, with TEST root C (`--key`,
+>   `--passphrase-fd`) and directories instead of USB sticks.
+> - `--prev-sha256` was given the hash recorded when v2 was installed.
+> - The pins came from the fingerprints `root init` printed, not from
+>   paper.
+> - Before signing, a script decoded both policies and confirmed that only
+>   `version`, `prev` and `webauthn` differ.
+> - In the dry run (no `--confirm`, stdin `/dev/null`), `root sign` wrote
+>   the unsigned `bundle.json` and `policy.json` into `--out-dir` and then
+>   stopped at the confirmation. The `--confirm` run reused that bundle,
+>   so the hash prefix taken from the dry run matched.
+> - With the roots unchanged, root C's one signature counted toward both
+>   thresholds: `trust verify --prev` printed `previous roots 1 of 2` and
+>   `new roots 1 of 2`.
+> - Step 5 ran before `keyroster-server` was installed, so no restart was
+>   needed.
+>
+> - Step 6 ran after the first enrollment, before any login. On the signer
+>   host, `export-log` ran with the `runuser` wrapper of
+>   [signer-install.md](signer-install.md) and wrote to standard output
+>   instead of `--out`. `keyroster audit verify` ran on the admin's Windows
+>   computer, on a copy of that export, pinned to TEST roots C and D (from
+>   `root init` output, not paper) at threshold 1. The `OK:` line named
+>   `trust bundle v3, policy v2` and counted `login certificates 0,
+>   directory installs 5`. The `anchored:` line named trust bundle v2, where
+>   C and D first became the root set, not v3: as this step predicts after
+>   one rotation.
+>
+> Still **UNVERIFIED**: step 0 (live USB, offline machine, second-machine
+> build) and paper fingerprints.
 
 ## Hardware-root variant
 

@@ -44,6 +44,32 @@ func TestRunbookGoToolchain(t *testing.T) {
 	}
 }
 
+// TestServerInstallTailscalePrerequisites: the "With Tailscale" path of
+// server-install.md step 3 runs `tailscale cert`, which fails on a host
+// without tailscaled joined to a tailnet with MagicDNS and HTTPS
+// Certificates enabled, and the RP ID is the MagicDNS name. No step of the
+// runbook sets these up, so "What you need" must list them.
+func TestServerInstallTailscalePrerequisites(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "runbooks", "server-install.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	need := ""
+	for _, sec := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n## ") {
+		if strings.HasPrefix(sec, "What you need") {
+			need = strings.Join(strings.Fields(sec), " ")
+		}
+	}
+	if need == "" {
+		t.Fatal(`server-install.md has no section "## What you need"`)
+	}
+	for _, want := range []string{"**With Tailscale**", "`tailscaled`", "joined to the tailnet", "MagicDNS", "HTTPS Certificates"} {
+		if !strings.Contains(need, want) {
+			t.Errorf("server-install.md \"What you need\" does not contain %q", want)
+		}
+	}
+}
+
 // hostSetupSection returns the text of the host-setup.md section whose
 // heading starts with "## "+prefix, up to the next "## " heading.
 func hostSetupSection(t *testing.T, prefix string) string {

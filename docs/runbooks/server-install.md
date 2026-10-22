@@ -19,10 +19,35 @@ expired.
 > name `keyroster.localhost`, and runs `keyroster init` against it. Those
 > tests cover the start-up refusals, the headers, the banner, the JSON log
 > lines and a SIGHUP reload. **No CI job runs the systemd units below.**
-> `systemd-analyze verify` passed on them on the development workstation,
-> nothing more. Every step in this runbook that installs or starts a unit,
-> or uses `tailscale cert`, is **UNVERIFIED until the homelab install
-> (02-13)**.
+> `systemd-analyze verify` passed on them on the development workstation.
+>
+> **Run on the homelab in 02-13.** Steps 1 to 5 ran, with Tailscale, on
+> the homelab signer VM (Ubuntu 26.04, systemd 259, vTPM signer, bundle v3
+> signed by a TEST root on a networked workstation), and step 5 ran from
+> the Windows `keyroster.exe`. Two things differed from the text:
+>
+> - The Tailscale prerequisites in [What you need](#what-you-need) were
+>   met out of band before step 1, not by a step of this runbook.
+> - In step 5.4 the `--root-pin` values came from the fingerprints
+>   `root init` printed for the TEST roots, not from a paper record. Init
+>   ran with `--force`, which replaces an existing config, and with
+>   `--user` and `--admin-key` as in step 5.4.
+>
+> What was checked:
+>
+> - `id keyroster-server` listed `keyroster-admin`;
+> - the certificate unit ended `Result=success` before the server's first
+>   start, with `key.pem` `root keyroster-server` mode `-rw-r-----`;
+> - the timer was active;
+> - the server logged `tls certificate loaded` (trigger `start`) and
+>   `serving` with `policy_version` 2 and `bundle_version` 3;
+> - `/healthz` answered `{"status":"ok"}` over the tailnet from a Windows
+>   client with the system trust store;
+> - `systemd-analyze security keyroster-server.service` printed 2.1 OK on
+>   the host.
+>
+> Only these units, on this one host, have run. Other distributions, and
+> any path without Tailscale, remain **UNVERIFIED**.
 
 ## What you need
 
@@ -35,6 +60,13 @@ expired.
   reviewed commit as the signer, and this repository at that commit (for
   `deploy/`).
 - A TLS certificate and key for the RP ID (next sections).
+- For the **With Tailscale** path of step 3: `tailscaled` installed on the
+  host and joined to the tailnet, with **MagicDNS** and **HTTPS
+  Certificates** enabled in the tailnet's admin console. Without them the
+  machine has no MagicDNS name to use as the RP ID, and `tailscale cert`
+  fails. Enabling HTTPS Certificates publishes the name in Certificate
+  Transparency logs (see the warning below). This runbook does not install
+  Tailscale.
 
 > **Warning: the RP ID and hostname are a one-way choice (D-09).**
 >
@@ -240,8 +272,15 @@ records. Lines to look for:
   `systemctl start keyroster-tailscale-cert.service` while the server runs.
   `journalctl -u keyroster-server` then shows `tls certificate loaded` with
   the trigger `sighup`, the leaf's fingerprint and its not_after.
-  **UNVERIFIED until the homelab install (02-13)**, as is the first run
-  before the server starts (step 3).
+  **Run on the homelab in 02-13**, together with the first run before
+  the server starts (step 3):
+  - both runs ended `Result=success`;
+  - the run against the running server logged `tls certificate loaded`
+    with trigger `sighup` within a second;
+  - that line's fingerprint equalled the `openssl` fingerprint of the
+    certificate on disk;
+  - `tailscale cert` printed `Public cert unchanged` and
+    `Private key unchanged`, so no new key was loaded.
 - **A stopped or failed server.** The unit does not start a server that is
   stopped or failed. Start it with
   `systemctl start keyroster-server.service`.
@@ -277,7 +316,9 @@ a bundle that the pinned roots did not sign.
 
    This prints the pin in the same `sha256/<base64>` form that
    `keyroster init` uses. The pipeline was checked against the client's own
-   pin function with OpenSSL 3.0.13.
+   pin function with OpenSSL 3.0.13. In 02-13, OpenSSL 3.5.5 on the
+   homelab host printed the same ISRG Root X1 pin that `keyroster init`
+   printed on Windows.
 
 2. **On the client, list the roots the server presents:**
 
@@ -347,8 +388,13 @@ grep -c 'BEGIN CERTIFICATE' /etc/keyroster/tls/fullchain.pem
 
 It must print 2 or more when the CA issues through an intermediate. If it
 prints 1 for such a CA, fix the certificate file and **do not re-pin**.
-**UNVERIFIED until the homelab install (02-13)**, which records the count
-for a `tailscale cert` file.
+**Run on the homelab in 02-13.** A `tailscale cert` file printed **4**:
+- the leaf;
+- the Let's Encrypt intermediate;
+- two cross-signed root certificates, the last one issued by ISRG Root X1.
+
+Both the Windows client and the host's trust store ended the chain at
+ISRG Root X1, and the pins matched.
 
 Otherwise the CA has moved to a new root:
 
