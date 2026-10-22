@@ -305,6 +305,27 @@ None for this plan. Host setup follows docs/runbooks/host-setup.md.
 - The Task 2 and Task 3 acceptance greps and named cases were re-run and pass. The runbook has the four required strings, steps 1-4 carry "UNVERIFIED until 02-14", and step 5 carries the CI-only label.
 - No private network detail in any file this plan changed (grep for 100.x, 10.x, 192.168.x, tailnet and host names: none).
 
+## Pre-merge review fixes
+
+**Owner decision, 2026-10-22 (Daniel, via the orchestrator):** the nine open choices under "Open choices for the owner's veto" are approved, verbatim reply "Godkänn (Rekommenderas)". They are owner-approved deviations.
+
+- **Fixed, `6a8ea39`:** `host principals` and `host ca-key` render whatever validly signed (possibly older) directory or trust bundle the server serves, and step 5's staleness check read the same server. host-setup.md steps 1, 3 and 5 now say the version is the server's word. Before a rendered file is installed after a revocation or a CA change, they send the admin to the signer's log (enroll-user.md "Confirm on the signer host"): `directory installs N` must equal the header's version, and `trust bundle vN` must equal the `(bundle vN)` comment. Test: `TestHostSetupSignerCheck`, which failed with 9 errors before the fix and passes after it. No code change: the CLI high-water mark (or a stderr note) stays the Phase 4 todo, as enroll-user.md's residual risk says.
+- **Fixed, `d29b387`:** the runbook said to append `TrustedUserCAKeys` and `AuthorizedPrincipalsFile` to sshd_config. A new section, "Where the sshd settings go", covers four things:
+  - sshd uses the first value it reads, and lines after a `Match` line apply only to that block;
+  - remove other values;
+  - use a drop-in that is read first, or put the lines above the first `Match`;
+  - step 4 checks the effective values with `sudo sshd -T -C user=<account>,host=<host>,addr=<address>`, and step 5 repeats that check.
+
+  Test: `TestHostSetupEffectiveSshdConfig`, which failed before the fix and passes after it. The new checks run only on a real host and are labelled UNVERIFIED until 02-14. 02-14 Task 1 already uses a drop-in and `sshd -T -C`. The runbook now matches it, and the plan was not edited.
+- **Skipped:** none.
+
+Checks:
+- `gofmt -l` is empty.
+- `go vet ./...` passes for windows, linux and darwin.
+- `go test -count=1 ./cmd/keyroster` passes.
+- `go test ./...` passes all 21 packages that have tests. test/e2e is behind the `e2e` build tag and did not run here.
+- `-race` was not run: there is no cgo on this Windows host.
+
 ---
 *Phase: 02-passkey-login-mvp*
 *Completed: 2026-10-22 (before the merge gate)*
