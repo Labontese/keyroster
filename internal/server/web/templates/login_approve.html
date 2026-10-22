@@ -1,0 +1,19 @@
+{{define "content"}}{{with .Login}}<h1>Approve keyroster login</h1>
+<section id="kr-approve" data-assertion="{{.AssertionURL}}" data-expires="{{.ExpiresUnix}}" data-options="{{.Options}}">
+<p>Key fingerprint:</p>
+<p class="kr-fingerprint"><code id="kr-login-fingerprint">{{.Fingerprint}}</code></p>
+<p><strong>Approve only if your terminal shows exactly this fingerprint. If you did not just run keyroster login, close this page.</strong></p>
+<dl class="kr-facts">
+<dt>User</dt><dd>{{.User}}</dd>
+<dt>Roles</dt><dd>{{.Roles}}</dd>
+<dt>Principals</dt><dd><ul>{{range .Principals}}<li><code>{{.}}</code></li>{{end}}</ul></dd>
+<dt>Valid for</dt><dd>{{.TTL}}</dd>
+<dt>Approve before</dt><dd>{{.ExpiresAt}} (<span id="kr-countdown">time left unknown</span>)</dd>
+</dl>
+<p><button type="button" id="kr-approve-button">Approve with passkey</button></p>
+<p id="kr-error" class="kr-error" role="alert"></p>
+<p id="kr-approved" hidden>Approved. Your browser now hands the result to keyroster login on this computer; return to your terminal.</p>
+</section>
+<p>Your browser asks you to unlock your passkey (a PIN, fingerprint or face), because keyroster requires user verification.</p>
+<script src="/static/app.js" defer></script>
+{{end}}{{end}}

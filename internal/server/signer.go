@@ -27,6 +27,10 @@ type signerAPI interface {
 	Status(ctx context.Context) (*wire.StatusResponse, error)
 	GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error)
 	InstallDirectory(ctx context.Context, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error)
+	// Login asks the signer to issue a login certificate (02-12). Only
+	// the redeem handler calls it, after the code and PKCE verifier have
+	// been redeemed; a refusal comes back as a *wire.ErrorResponse.
+	Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error)
 }
 
 // socketSigner reaches keyroster-signer over its Unix socket.
@@ -42,6 +46,10 @@ func (s socketSigner) GetDirectory(ctx context.Context) (*wire.GetDirectoryRespo
 
 func (s socketSigner) InstallDirectory(ctx context.Context, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
 	return signerclient.InstallDirectory(ctx, s.socket, req)
+}
+
+func (s socketSigner) Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error) {
+	return signerclient.Login(ctx, s.socket, req)
 }
 
 const (

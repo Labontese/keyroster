@@ -56,6 +56,8 @@ type Server struct {
 	inviteLimit     *limiter  // invite pages
 	signInLimit     *limiter  // sign-in begin and finish, per client, with a global backstop
 	signInUserLimit *limiter  // sign-in begin and finish, per user name
+	loginLimit      *limiter  // CLI login routes, per route and client, with a global backstop
+	loginUserLimit  *limiter  // CLI login API routes, per route, user name and client
 	mirror          dirMirror // the installed directory, as of the last Status that matched
 
 	// pendingMu orders a directory install (its pending check, forward
@@ -104,6 +106,11 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 		// global backstop, and per user name and client with none.
 		signInLimit:     newLimiter(lim.SignInPerMinute, lim.SignInBurst, globalFactor*lim.SignInPerMinute, globalFactor*lim.SignInBurst),
 		signInUserLimit: newLimiter(lim.SignInUserPerMinute, lim.SignInUserBurst, 0, 0),
+		// The CLI login routes (02-12) are their own class with the
+		// sign-in values: per route and client with the global backstop,
+		// and per route, user name and client with none.
+		loginLimit:     newLimiter(lim.SignInPerMinute, lim.SignInBurst, globalFactor*lim.SignInPerMinute, globalFactor*lim.SignInBurst),
+		loginUserLimit: newLimiter(lim.SignInUserPerMinute, lim.SignInUserBurst, 0, 0),
 	}
 	if s.clock == nil {
 		s.clock = time.Now
@@ -137,6 +144,15 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	mux.HandleFunc("POST "+signInFinishPath, s.handleSignInFinish)
 	mux.Handle("GET /account", s.withSession(s.handleAccount))
 	mux.HandleFunc("POST /logout", s.handleLogout)
+	// keyroster login (02-12): the options and begin the CLI calls, the
+	// approval page and its assertion route, and the redeem, the only
+	// route that asks the signer for a login certificate. Each applies
+	// the login limiters itself.
+	mux.HandleFunc("GET "+loginOptionsPath, s.handleLoginOptions)
+	mux.HandleFunc("POST "+loginBeginPath, s.handleLoginBegin)
+	mux.HandleFunc("GET "+loginPagePrefix+"{id}", s.handleLoginPage)
+	mux.HandleFunc("POST "+loginAPIPrefix+"{id}/assertion", s.handleLoginAssertion)
+	mux.HandleFunc("POST "+loginAPIPrefix+"{id}/redeem", s.handleLoginRedeem)
 	s.handler = secure(mux)
 	return s, nil
 }

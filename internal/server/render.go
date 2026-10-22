@@ -16,7 +16,7 @@ import (
 
 // pageNames are the pages under templates/; each is parsed together with
 // base.html into its own template set.
-var pageNames = []string{"index", "error", "enroll", "login", "account"}
+var pageNames = []string{"index", "error", "enroll", "login", "account", "login_approve"}
 
 // parsePages parses every page once from the embedded templates.
 func parsePages() (map[string]*template.Template, error) {
@@ -49,6 +49,7 @@ type pageData struct {
 	DirectoryVersion uint64
 	Keys             []wire.KeyStatus
 	Account          *accountPage // the signed-in user's account (account.html)
+	Login            *loginPage   // a CLI login to approve (login_approve.html)
 }
 
 // statusPage fills the banner from v: the owner-approved evaluation-only

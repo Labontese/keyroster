@@ -110,6 +110,11 @@ type fakeSigner struct {
 	// directory no longer fits the policy in force.
 	unauthorized bool
 
+	// Login's settable result (setLogin) and the last request it got.
+	login     *wire.IssueResponse
+	loginErr  error
+	lastLogin *wire.LoginIssueRequest
+
 	heldMethod string
 	entered    chan struct{}
 	gate       chan struct{}
@@ -312,6 +317,39 @@ func (f *fakeSigner) InstallDirectory(ctx context.Context, req *wire.InstallDire
 		return nil, errLostAnswer
 	}
 	return &wire.InstallDirectoryResponse{Version: next.Version, LeafIndex: f.leaf, SHA256: sha256.Sum256(req.Directory)}, nil
+}
+
+// setLogin sets Login's result.
+func (f *fakeSigner) setLogin(resp *wire.IssueResponse, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.login, f.loginErr = resp, err
+}
+
+// setLoginRefused makes Login refuse with detail, as the signer does: a
+// *wire.ErrorResponse with CodeRefused, the type signerclient returns
+// (02-12-F22).
+func (f *fakeSigner) setLoginRefused(detail string) {
+	f.setLogin(nil, &wire.ErrorResponse{Code: wire.CodeRefused, Message: detail})
+}
+
+// lastLoginRequest returns the last request Login was given.
+func (f *fakeSigner) lastLoginRequest() *wire.LoginIssueRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastLogin
+}
+
+func (f *fakeSigner) Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error) {
+	f.mu.Lock()
+	f.calls["Login"]++
+	f.lastLogin = req
+	resp, err := f.login, f.loginErr
+	f.mu.Unlock()
+	if err := f.enter(ctx, "Login"); err != nil {
+		return nil, err
+	}
+	return resp, err
 }
 
 // testClock is an injectable clock.

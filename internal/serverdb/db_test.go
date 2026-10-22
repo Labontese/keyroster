@@ -59,8 +59,8 @@ func pending(name string, b byte) PendingUser {
 func TestOpen(t *testing.T) {
 	t.Run("migration_applies_once", func(t *testing.T) {
 		d, path := openTemp(t)
-		if v := userVersion(t, d); v != 3 {
-			t.Fatalf("user_version = %d, want 3", v)
+		if v := userVersion(t, d); v != 4 {
+			t.Fatalf("user_version = %d, want 4", v)
 		}
 		if err := d.CreatePendingUser(context.Background(), pending("alice", 1)); err != nil {
 			t.Fatal(err)
@@ -73,8 +73,8 @@ func TestOpen(t *testing.T) {
 			t.Fatalf("reopen: %v", err)
 		}
 		defer func() { _ = d2.Close() }()
-		if v := userVersion(t, d2); v != 3 {
-			t.Fatalf("user_version after reopen = %d, want 3", v)
+		if v := userVersion(t, d2); v != 4 {
+			t.Fatalf("user_version after reopen = %d, want 4", v)
 		}
 		if n := count(t, d2, "pending_users"); n != 1 {
 			t.Fatalf("%d pending accounts after reopen, want the 1 written before", n)
