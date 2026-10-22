@@ -79,6 +79,7 @@ const (
 	reasonChallengeNotFound  = "challenge_not_found"
 	reasonUserNotActive      = "user_not_active"
 	reasonCredentialUnbound  = "credential_not_bound" //nolint:gosec // G101: a log reason code, not a credential
+	reasonDirNotAuthorized   = "directory_not_authorized"
 	reasonSignInUnavailable  = "signer_unavailable"
 	reasonSignInInternal     = "internal_error"
 	reasonNoSession          = "no_session"
@@ -194,10 +195,14 @@ func randomID(n int) ([]byte, string, error) {
 }
 
 // activeUser returns name's entry in the view when the installed directory
-// holds name as an active user. Nothing from the server's own tables is
-// consulted: a pending or unapproved account is not in the directory.
+// holds name as an active user and the signer reports that directory as
+// authorized. Nothing from the server's own tables is consulted: a pending
+// or unapproved account is not in the directory. A directory the signer
+// does not authorize (it no longer carries the admin quorum of the policy
+// in force, or no longer fits it) holds no active user here, as the
+// signer's Login refuses directory_not_authorized (02-10 pre-merge review).
 func (e *directoryView) activeUser(name string) (*directory.User, bool) {
-	if e.dir == nil {
+	if e.dir == nil || !e.authorized {
 		return nil, false
 	}
 	for i := range e.dir.Users {
@@ -212,9 +217,12 @@ func (e *directoryView) activeUser(name string) (*directory.User, bool) {
 }
 
 // boundCredential returns the credential with ID id when the installed
-// directory binds it to name and name is active there. The reason code
-// says which check refused.
+// directory is authorized, binds it to name and name is active there. The
+// reason code says which check refused.
 func (e *directoryView) boundCredential(name string, id []byte) (webauthn.Credential, string) {
+	if e.dir != nil && !e.authorized {
+		return webauthn.Credential{}, reasonDirNotAuthorized
+	}
 	if _, ok := e.activeUser(name); !ok {
 		return webauthn.Credential{}, reasonUserNotActive
 	}
@@ -261,10 +269,11 @@ type allowCredential struct {
 //     (signInUserKey);
 //  5. the installed directory through currentDirectory (503 when it
 //     cannot be read, nothing created);
-//  6. the name must be an active user of that directory with at least one
-//     bound credential, or the uniform 404: the same answer for an unknown
-//     name, a pending or unapproved account, a disabled user and one
-//     without a credential;
+//  6. the directory must be authorized by the signer and the name an
+//     active user of it with at least one bound credential, or the uniform
+//     404: the same answer for an unknown name, a pending or unapproved
+//     account, a disabled user, one without a credential and any name
+//     under a directory the signer does not authorize;
 //  7. a random 32-byte challenge under a random challenge ID, stored for
 //     signInChallengeTTL, and the request options with allowCredentials
 //     the user's bound credentials and user verification required.
@@ -307,7 +316,11 @@ func (s *Server) handleSignInBegin(w http.ResponseWriter, r *http.Request) {
 		ids = view.creds[name]
 	}
 	if len(ids) == 0 {
-		s.logSignIn(slog.LevelInfo, eventBeginRefused, reasonNoUsablePasskey, name, r)
+		reason := reasonNoUsablePasskey
+		if view.dir != nil && !view.authorized {
+			reason = reasonDirNotAuthorized
+		}
+		s.logSignIn(slog.LevelInfo, eventBeginRefused, reason, name, r)
 		s.writeJSON(w, nil, http.StatusNotFound, errSignInNoPasskey)
 		return
 	}
@@ -396,8 +409,8 @@ func validChallengeID(id string) bool {
 //     challenge, never on client input, and the client (signInUserKey);
 //  5. the installed directory through currentDirectory (503 when it
 //     cannot be read, nothing created);
-//  6. the user must still be active there and the credential must be
-//     bound to that user;
+//  6. the directory must be authorized by the signer, the user still
+//     active there and the credential bound to that user;
 //  7. internal/webauthn.VerifyAssertion, the signer's own verifier,
 //     against that credential, the policy's RP ID and origins and the
 //     stored challenge;

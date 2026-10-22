@@ -90,9 +90,10 @@ func sessionFrom(ctx context.Context) *webSession {
 //     reads signer state only through currentStatus. If it cannot be read,
 //     the answer is the 503 error page with nothing from stale data, and
 //     the session row is kept: an outage is not a logout;
-//  3. the user must still be active in that directory and the credential
-//     that opened the session must still be bound to the user (02-10-F2);
-//     otherwise the session row is deleted.
+//  3. the directory must be authorized by the signer, the user must still
+//     be active in it and the credential that opened the session must
+//     still be bound to the user (02-10-F2); otherwise the session row is
+//     deleted.
 //
 // A request without a usable session is redirected (303) to /login, and a
 // cookie it carried is cleared. A role or group change that keeps the

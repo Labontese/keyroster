@@ -104,6 +104,16 @@ func newSignInEnv(t *testing.T, lim Limits) *signInEnv {
 	return e
 }
 
+// deauthorize makes the fake report its directory as not authorized, as
+// the signer does after a policy change the directory no longer fits; the
+// clock then moves 6 s, past statusTTL, so the next request reads it.
+func (e *signInEnv) deauthorize() {
+	e.fake.mu.Lock()
+	e.fake.unauthorized = true
+	e.fake.mu.Unlock()
+	e.advance(6 * time.Second)
+}
+
 // install makes the fake hold the successor of the current directory
 // after mutate, as an install on the signer socket would, without the
 // server; the clock then moves 6 s, past statusTTL, so the next request
@@ -358,6 +368,17 @@ func TestSignInBegin(t *testing.T) {
 			t.Fatalf("logged %v", got)
 		}
 	})
+	t.Run("directory_not_authorized_uniform_404", func(t *testing.T) {
+		// 02-10 pre-merge review: a directory the signer no longer
+		// authorizes decides nobody's sign-in, as the signer's Login
+		// refuses directory_not_authorized.
+		e := newSignInEnv(t, highSignInLimits)
+		e.deauthorize()
+		requireNoPasskey(t, "begin under an unauthorized directory", e.beginFrom(t, "alice", ""))
+		if got := lastSignIn(t, e.log); got["event"] != eventBeginRefused || got["reason"] != reasonDirNotAuthorized || got["user"] != "alice" {
+			t.Fatalf("logged %v", got)
+		}
+	})
 	t.Run("nothing_installed_uniform_404", func(t *testing.T) {
 		e := newSignInEnv(t, highSignInLimits)
 		e.fake.setChain(nil, nil)
@@ -475,6 +496,12 @@ func TestSignInFinish(t *testing.T) {
 		b := e.mustBegin(t, "alice")
 		e.requireRefused(t, "bob's assertion", e.finish(finishBodyFor(t, b.ChallengeID, e.bob.Assert(testRPID, testOrigin, challengeOf(t, b))), ""), reasonCredentialUnbound)
 		e.requireRefused(t, "alice's assertion after it", e.finish(finishBodyFor(t, b.ChallengeID, e.alice.Assert(testRPID, testOrigin, challengeOf(t, b))), ""), reasonChallengeNotFound)
+	})
+	t.Run("directory_not_authorized_refused", func(t *testing.T) {
+		e := newSignInEnv(t, highSignInLimits)
+		b := e.mustBegin(t, "alice")
+		e.deauthorize()
+		e.requireRefused(t, "finish under an unauthorized directory", e.finish(finishBodyFor(t, b.ChallengeID, e.alice.Assert(testRPID, testOrigin, challengeOf(t, b))), ""), reasonDirNotAuthorized)
 	})
 	t.Run("disabled_between_begin_and_finish_refused", func(t *testing.T) {
 		e := newSignInEnv(t, highSignInLimits)

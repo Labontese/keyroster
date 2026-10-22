@@ -193,6 +193,35 @@ func TestSession(t *testing.T) {
 		e.install(t, setStatus("alice", directory.StatusActive))
 		requireLoginRedirect(t, "after the re-enable", e.account(cookie))
 	})
+	t.Run("directory_not_authorized_ends_session", func(t *testing.T) {
+		// 02-10 pre-merge review: a session does not outlive the signer's
+		// authorization of the directory it was checked against, and
+		// /account shows nothing from an unauthorized directory.
+		e := newSignInEnv(t, highSignInLimits)
+		cookie := e.signIn(t, "alice", e.alice)
+		e.deauthorize()
+		e.requireEnded(t, "under an unauthorized directory", cookie)
+		if got := lastSignIn(t, e.log); got["event"] != eventSessionEnded || got["reason"] != reasonDirNotAuthorized || got["user"] != "alice" {
+			t.Fatalf("logged %v", got)
+		}
+	})
+	t.Run("account_page_refuses_unauthorized_view", func(t *testing.T) {
+		e := newSignInEnv(t, highSignInLimits)
+		view, err := e.s.currentDirectory(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newAccountPage(view, "alice"); err != nil {
+			t.Fatalf("account page under the authorized view: %v", err)
+		}
+		e.deauthorize()
+		if view, err = e.s.currentDirectory(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if page, err := newAccountPage(view, "alice"); err == nil {
+			t.Fatalf("account page built from an unauthorized directory: %+v", page)
+		}
+	})
 	t.Run("credential_unbound_ends_session", func(t *testing.T) {
 		e := newSignInEnv(t, highSignInLimits)
 		first := e.signIn(t, "alice", e.alice)
