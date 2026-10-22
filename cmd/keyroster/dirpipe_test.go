@@ -159,6 +159,13 @@ const agentCustody = "user=agent, host=agent, machine=agent, ops=agent, log=agen
 
 func newDirEnv(t *testing.T, admins int, quorum int) *dirEnv {
 	t.Helper()
+	return newDirEnvPolicy(t, admins, quorum, nil)
+}
+
+// newDirEnvPolicy is newDirEnv with the genesis policy changed by edit
+// (nil: unchanged) before the root signs it.
+func newDirEnvPolicy(t *testing.T, admins int, quorum int, edit func(p *trust.Policy)) *dirEnv {
+	t.Helper()
 	e := &dirEnv{custody: agentCustody, pending: map[string]serverclient.PendingAnswer{}, pendingN: map[string]int{}, override: map[string]func(http.ResponseWriter){}}
 	g := newCeremony(t, 1)
 	g.policy = filepath.Join(g.dir, "dir-policy.json")
@@ -179,6 +186,18 @@ func newDirEnv(t *testing.T, admins int, quorum int) *dirEnv {
 	}
 	if code, _, stderr := run(t, args...); code != 0 {
 		t.Fatalf("genesis-policy exit %d: %s", code, stderr)
+	}
+	if edit != nil {
+		p, err := trust.ParsePolicy(readTestFile(t, g.policy))
+		if err != nil {
+			t.Fatal(err)
+		}
+		edit(p)
+		doc, err := p.Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, g.policy, doc)
 	}
 	useKeyring(t, g.rootKeys...)
 	typeHashPrefix(t, g.out)
