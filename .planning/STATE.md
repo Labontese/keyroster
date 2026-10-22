@@ -214,6 +214,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-11 Task 1, owner decision D-06 2026-10-22: principal convention confirmed as role:<name> for roles and u:<username> for personal accounts ("role:<namn> och u:<användare> (Rekommenderas)")
 - [Phase 02]: 02-11: role add grants role:<name> by default (D-06 role-prefix, owner 2026-10-22); host principals renders a header-only file for an unmapped account or roles [], errors on an unknown host group, refuses with no directory installed
 - [Phase 02]: 02-11: renderer refuses host group and account names outside the directory grammars (header-line injection); host-group remove refused while the group maps an account (T-02-100); host ca-key needs no admin key
+- [Phase 02]: 02-11 pre-merge review, owner decision 2026-10-22: the executor's nine open choices approved; host-setup.md states that rendered files are the server's word (check `keyroster audit verify` on the signer host after revocations or CA changes) and puts the sshd settings where they take effect, verified with `sshd -T -C` including laddr and lport
 
 ### Pending Todos
 
