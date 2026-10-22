@@ -18,9 +18,27 @@ signer.
 > `directory install`, and on the signer side `keyroster-signer export-log`
 > with `keyroster audit verify`. **UNVERIFIED end to end**, tested only
 > against a fake server in the CLI's unit tests: `user disable`,
-> `user enable`, `directory show`, and the interactive
-> `Sign directory version N? [y/N]` prompt. The registration page in a real
-> browser with a real authenticator is **UNVERIFIED** until plan 02-13.
+> `user enable`, and the interactive `Sign directory version N? [y/N]`
+> prompt.
+>
+> **Run on the homelab in 02-13**, for the first admin (D-04): the
+> Windows `keyroster.exe` against keyroster-server and the vTPM signer
+> under trust bundle v3.
+>
+> - The owner ran `user add`, `user approve`, `role add`, `role grant`,
+>   `host-group add` and `host-group map` in his own terminal. Their
+>   printed output (the invite URL, the diff) was not recorded. What they
+>   did was checked afterwards with `user pending`, `user list`,
+>   `directory show` and `host principals`.
+> - The registration page ran in Chrome on Windows, with a passkey in
+>   Chrome's own synced passkey store. `user pending` showed it as ES256
+>   and synced.
+> - `directory show` ran against the real server.
+> - The signer-host check below ran (see there).
+>
+> The interactive prompt's output was not seen. Another browser, a
+> hardware authenticator, and `user disable` and `user enable` on a real
+> server remain **UNVERIFIED**.
 
 ## Before you start
 
@@ -108,6 +126,11 @@ signer has installed it.
 There is no special first-user path. The first admin runs steps 1 to 3
 for themself: `user add`, register their own passkey, `user approve` with
 their own SSH admin key. That installs directory version 1.
+
+**Run on the homelab in 02-13.** The owner enrolled this way. The
+fingerprint he read from the page was the one `user pending` listed.
+After his `user approve`, `user list` showed him active with exactly that
+passkey.
 
 ## Quorum above 1
 
@@ -222,6 +245,17 @@ end-to-end test `TestEnrollApproveEndToEnd`
 (`audit_verify_counts_installs`), without the `runuser` wrapper that
 [signer-install.md](signer-install.md) uses on a real host.
 
+**Run on the homelab in 02-13.**
+
+- `export-log` ran on the signer host with the `runuser` wrapper above,
+  writing to standard output instead of `--out`.
+- `audit verify` ran on the admin's Windows computer, on a copy of that
+  export.
+- With the pins of TEST roots C and D, the root set of bundles v2 and v3,
+  the `OK:` line said `directory installs 5`.
+- `directory show` reported version 5. The five admin-signed versions
+  were approve, role add, role grant, host-group add and host-group map.
+
 ## Logging in
 
 Once the user's passkey is bound and an admin has granted the user a role,
@@ -280,8 +314,9 @@ agent, a `--ttl 2m` certificate leaves the agent at expiry, two concurrent
 logins stay apart, an unapproved login issues nothing, and a role revoked
 between approval and hand-off gets the signer's refusal. The CLI flow also
 runs against a fake server on Linux, macOS and Windows in CI. **UNVERIFIED
-until 02-13/02-14:** the approval page's script in a real browser, a real
-authenticator, the browser opener, the Windows path in which
+until 02-14** (02-13 ran registration only, no login): the approval page's
+script in a real browser, a real authenticator's assertion, the browser
+opener, the Windows path in which
 `keyroster login` itself starts keyroster agent, and gcr-ssh-agent.
 
 ## Residual risk
