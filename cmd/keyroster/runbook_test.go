@@ -88,3 +88,33 @@ func TestHostSetupSignerCheck(t *testing.T) {
 		}
 	}
 }
+
+// TestHostSetupEffectiveSshdConfig: sshd keeps the first value it reads
+// for TrustedUserCAKeys and AuthorizedPrincipalsFile, drop-ins are often
+// included first, and lines after a Match block apply only to it. sshd -t
+// checks syntax only, so the runbook must not say "add to sshd_config"
+// and must check the effective values with sshd -T.
+func TestHostSetupEffectiveSshdConfig(t *testing.T) {
+	appendTo := regexp.MustCompile("(?i)add\\s+to\\s+`/etc/ssh/sshd_config`")
+	for _, prefix := range []string{"1.", "2."} {
+		if appendTo.MatchString(hostSetupSection(t, prefix)) {
+			t.Errorf("host-setup.md step %s still says to add the setting to sshd_config", prefix)
+		}
+	}
+	for _, tc := range []struct{ section, want string }{
+		{"1.", "Where the sshd settings go"},
+		{"2.", "Where the sshd settings go"},
+		{"Where the sshd settings go", "sshd_config.d"},
+		{"Where the sshd settings go", "Include"},
+		{"Where the sshd settings go", "Match"},
+		{"Where the sshd settings go", "first value"},
+		{"4.", "sudo sshd -T -C user=<account>,host=<host>,addr=<address>"},
+		{"4.", "trustedusercakeys /etc/ssh/keyroster_user_ca.pub"},
+		{"4.", "authorizedprincipalsfile /etc/ssh/principals/%u"},
+		{"5.", "sshd -T"},
+	} {
+		if !strings.Contains(hostSetupSection(t, tc.section), tc.want) {
+			t.Errorf("host-setup.md section %q does not contain %q", tc.section, tc.want)
+		}
+	}
+}

@@ -70,6 +70,36 @@ keyroster host-group map web deploy ops
 The last line maps the local account `deploy` of the hosts in host group
 `web` to role `ops`. Account names are lowercase.
 
+## Where the sshd settings go
+
+UNVERIFIED until 02-14 on a real host.
+
+Steps 1 and 2 set `TrustedUserCAKeys` and `AuthorizedPrincipalsFile`. For
+both, sshd keeps the first value it reads, and a line after a `Match` line
+applies only to that `Match` block. A line appended to the end of
+`/etc/ssh/sshd_config` can therefore be ignored without any error, and
+`sshd -t` does not show it. On the host, before steps 1 and 2:
+
+1. Look for the include line, `Match` blocks and values already set:
+
+   ```
+   sudo grep -rniE '^\s*(include|match|trustedusercakeys|authorizedprincipalsfile)' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/
+   ```
+
+   Remove or comment out every other `TrustedUserCAKeys` and
+   `AuthorizedPrincipalsFile` value, including one inside a `Match` block
+   that matches a keyroster account: a matching `Match` block overrides
+   your value.
+2. If `/etc/ssh/sshd_config` has `Include /etc/ssh/sshd_config.d/*.conf`
+   above its other settings (Debian and Ubuntu, for example, ship it as
+   the first line), put the two settings in a drop-in such as
+   `/etc/ssh/sshd_config.d/50-keyroster.conf`, owned by root, mode 0644.
+   Drop-ins are read in name order, and a file read earlier would win.
+3. Otherwise put them in `/etc/ssh/sshd_config` above the first `Match`
+   line.
+
+Step 4 checks the effective values with `sshd -T` before the reload.
+
 ## 1. Trust the user CA
 
 UNVERIFIED until 02-14 on a real host (CI feeds the same line to a test
@@ -88,9 +118,12 @@ whose user CA key has since been replaced. Before the first host, and
 after every CA change, check that `keyroster audit verify` on the signer
 host prints `trust bundle vN` with the same N
 ([Confirm on the signer host](enroll-user.md#confirm-on-the-signer-host);
-step 5). Copy `keyroster_user_ca.pub`
-to the host as `/etc/ssh/keyroster_user_ca.pub`, owned by root, mode 0644,
-and add to `/etc/ssh/sshd_config`:
+step 5).
+
+Copy `keyroster_user_ca.pub` to the host as
+`/etc/ssh/keyroster_user_ca.pub`, owned by root, mode 0644, and set it
+where sshd reads it first
+([Where the sshd settings go](#where-the-sshd-settings-go)):
 
 ```
 TrustedUserCAKeys /etc/ssh/keyroster_user_ca.pub
@@ -100,7 +133,8 @@ TrustedUserCAKeys /etc/ssh/keyroster_user_ca.pub
 
 UNVERIFIED until 02-14 on a real host.
 
-Add to `/etc/ssh/sshd_config`:
+Set, in the same place as step 1
+([Where the sshd settings go](#where-the-sshd-settings-go)):
 
 ```
 AuthorizedPrincipalsFile /etc/ssh/principals/%u
@@ -141,10 +175,25 @@ UNVERIFIED until 02-14 on a real host.
 
 ```
 sudo sshd -t
+sudo sshd -T -C user=<account>,host=<host>,addr=<address> | grep -iE '^(trustedusercakeys|authorizedprincipalsfile) '
 sudo systemctl reload ssh    # the unit is sshd on some distributions
 ```
 
-`sshd -t` must print nothing and exit 0 before you reload.
+`sshd -t` must print nothing and exit 0. It checks the syntax only, not
+which value is in force. `sshd -T -C` prints the effective settings for a
+connection to `<account>` from `<address>` (a client address your users
+connect from; `<host>` is its name), with any matching `Match` block
+applied. Run it for each account the host group maps. It must print
+exactly:
+
+```
+trustedusercakeys /etc/ssh/keyroster_user_ca.pub
+authorizedprincipalsfile /etc/ssh/principals/%u
+```
+
+Another value, or `none`, means an earlier line or a `Match` block wins:
+fix it ([Where the sshd settings go](#where-the-sshd-settings-go)) before
+you reload.
 
 ## 5. Re-render after every change
 
@@ -156,6 +205,12 @@ does it for you, and a stale file keeps the old access. Comparing the
 second header line with `keyroster directory show` catches a file you
 forgot to re-render, but both read the same server: that is the
 server's word, not proof.
+
+A re-rendered file only takes effect while sshd still reads
+`/etc/ssh/principals/%u`. Re-run step 4's `sshd -T` check after any
+change to the sshd configuration, including an OS upgrade that adds a
+drop-in or a `Match` block, and when a re-rendered file seems to have no
+effect.
 
 **The rendered version is the server's word.** `keyroster host principals`
 and `keyroster host ca-key` check the admins' and the roots' signatures,
