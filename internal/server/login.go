@@ -118,24 +118,36 @@ func (s *Server) logLogin(level slog.Level, event, reason, user, id string, r *h
 	s.log.Log(context.Background(), level, "cli login", "event", event, "reason", reason, "user", user, "login_id", id, "client", remoteIP(r))
 }
 
-// loginAllow applies the login route class's limiters to a request for
-// route: per client (with the global backstop), and, when user is not
-// empty, per user name and client. Each route has its own buckets: the
-// key is the route and the client, or the route, the user name and the
-// client (02-10 pre-merge review, owner decision G1: one client never
-// drains another client's buckets). It answers the 429 itself and reports
+// loginClientAllow applies the login route class's per-client limiter
+// (with its global backstop) to a request for route, once per request at
+// the top of each handler. loginUserAllow applies the per-user limiter
+// once the user name is known. Each route has its own buckets: the key is
+// the route and the client, or the route, the user name and the client
+// (02-10 pre-merge review, owner decision G1: one client never drains
+// another client's buckets). Both answer the 429 themselves and report
 // whether the request may go on.
-func (s *Server) loginAllow(w http.ResponseWriter, r *http.Request, route, user, id string, html bool) bool {
-	now := s.clock()
-	l, reason := s.loginLimit, reasonPerClient
-	ok := l.allow(route+" "+clientKey(r), now)
-	if ok && user != "" {
-		l, reason = s.loginUserLimit, reasonPerUser
-		ok = l.allow(route+" "+signInUserKey(user, r), now)
-	}
-	if ok {
+func (s *Server) loginClientAllow(w http.ResponseWriter, r *http.Request, route string, html bool) bool {
+	if s.loginLimit.allow(route+" "+clientKey(r), s.clock()) {
 		return true
 	}
+	s.loginLimited(w, r, s.loginLimit, reasonPerClient, "", "", html)
+	return false
+}
+
+// loginUserAllow applies the per-user limiter to a request for route by
+// user, a name that passed the user-name rule or the user stored with a
+// login session; id is the login ID, if any, for the log line.
+func (s *Server) loginUserAllow(w http.ResponseWriter, r *http.Request, route, user, id string) bool {
+	if s.loginUserLimit.allow(route+" "+signInUserKey(user, r), s.clock()) {
+		return true
+	}
+	s.loginLimited(w, r, s.loginUserLimit, reasonPerUser, user, id, false)
+	return false
+}
+
+// loginLimited answers a login request that l refused: 429 with
+// Retry-After, and one login log line.
+func (s *Server) loginLimited(w http.ResponseWriter, r *http.Request, l *limiter, reason, user, id string, html bool) {
 	s.logLogin(slog.LevelWarn, eventLoginLimited, reason, user, id, r)
 	w.Header().Set("Retry-After", strconv.Itoa(l.retryAfter()))
 	if html {
@@ -143,10 +155,9 @@ func (s *Server) loginAllow(w http.ResponseWriter, r *http.Request, route, user,
 			Title:   "Too many requests",
 			Message: "Too many requests from your address. Wait a moment and try again.",
 		})
-		return false
+		return
 	}
 	s.writeJSON(w, nil, http.StatusTooManyRequests, errLoginLimited)
-	return false
 }
 
 // loginUser returns name's directory credentials when the installed
@@ -186,15 +197,16 @@ type loginRoleOption struct {
 // of the user's roles with its principals, max TTL and extensions. Every
 // other name gets the uniform 404.
 func (s *Server) handleLoginOptions(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("user")
-	if !directory.ValidUserName(name) {
-		if s.loginAllow(w, r, loginOptionsPath, "", "", false) {
-			s.logLogin(slog.LevelInfo, eventLoginOptions, reasonNoUsablePasskey, "", "", r)
-			s.writeJSON(w, nil, http.StatusNotFound, errLoginNotFound)
-		}
+	if !s.loginClientAllow(w, r, loginOptionsPath, false) {
 		return
 	}
-	if !s.loginAllow(w, r, loginOptionsPath, name, "", false) {
+	name := r.URL.Query().Get("user")
+	if !directory.ValidUserName(name) {
+		s.logLogin(slog.LevelInfo, eventLoginOptions, reasonNoUsablePasskey, "", "", r)
+		s.writeJSON(w, nil, http.StatusNotFound, errLoginNotFound)
+		return
+	}
+	if !s.loginUserAllow(w, r, loginOptionsPath, name, "") {
 		return
 	}
 	view, err := s.currentDirectory(r.Context())
@@ -282,7 +294,7 @@ func createdAt(req *wire.LoginIssueRequest) time.Time {
 // loginApprovalWindow. The approval URL's origin comes from
 // requestOrigin, the policy origin matching the request's Host.
 func (s *Server) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
-	if !s.loginAllow(w, r, loginBeginPath, "", "", false) {
+	if !s.loginClientAllow(w, r, loginBeginPath, false) {
 		return
 	}
 	refuse := func(code int, body serverclient.APIError, reason, user string) {
@@ -316,7 +328,7 @@ func (s *Server) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusNotFound, errLoginNotFound, reasonNoUsablePasskey, "")
 		return
 	}
-	if !s.loginAllow(w, r, loginBeginPath, name, "", false) {
+	if !s.loginUserAllow(w, r, loginBeginPath, name, "") {
 		return
 	}
 	view, err := s.currentDirectory(r.Context())
@@ -404,7 +416,7 @@ func (s *Server) loginGone(w http.ResponseWriter, r *http.Request, reason, user,
 // script starts the ceremony only from the Approve button.
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.loginAllow(w, r, "/login/{id}", "", "", true) {
+	if !s.loginClientAllow(w, r, "/login/{id}", true) {
 		return
 	}
 	if !loginIDRE.MatchString(id) {
@@ -507,7 +519,7 @@ type loginAssertionRequest struct {
 // verifier's sentinel goes to the log only.
 func (s *Server) handleLoginAssertion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.loginAllow(w, r, "/api/v1/login/{id}/assertion", "", "", false) {
+	if !s.loginClientAllow(w, r, "/api/v1/login/{id}/assertion", false) {
 		return
 	}
 	refuse := func(reason, user, lid string) {
@@ -543,7 +555,7 @@ func (s *Server) handleLoginAssertion(w http.ResponseWriter, r *http.Request) {
 		s.loginInternal(w, r, eventLoginApprove, "", id, err)
 		return
 	}
-	if !s.loginAllow(w, r, "/api/v1/login/{id}/assertion", l.User, id, false) {
+	if !s.loginUserAllow(w, r, "/api/v1/login/{id}/assertion", l.User, id) {
 		return
 	}
 	now := s.clock()
@@ -651,7 +663,7 @@ type loginRedeemResponse struct {
 // again (duplicate_request), so the user runs keyroster login again.
 func (s *Server) handleLoginRedeem(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.loginAllow(w, r, "/api/v1/login/{id}/redeem", "", "", false) {
+	if !s.loginClientAllow(w, r, "/api/v1/login/{id}/redeem", false) {
 		return
 	}
 	refuse := func(reason, user, lid string) {
@@ -690,7 +702,7 @@ func (s *Server) handleLoginRedeem(w http.ResponseWriter, r *http.Request) {
 		s.loginRedeemInternal(w, r, "", id, err)
 		return
 	}
-	if !s.loginAllow(w, r, "/api/v1/login/{id}/redeem", l.User, id, false) {
+	if !s.loginUserAllow(w, r, "/api/v1/login/{id}/redeem", l.User, id) {
 		return
 	}
 	now := s.clock()

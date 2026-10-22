@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/custodytext"
 	"github.com/Labontese/keyroster/internal/serverdb"
 	"github.com/Labontese/keyroster/internal/webauthn"
 	"github.com/Labontese/keyroster/internal/webauthn/webauthntest"
@@ -366,6 +367,20 @@ func TestLoginApproval(t *testing.T) {
 			t.Fatalf("page options %+v do not carry the request digest and alice's credentials", o)
 		}
 	})
+	t.Run("custody_banner_on_approval_page", func(t *testing.T) {
+		// KEY-06: the software-custody banner is on the approval page, and
+		// the custody header on the JSON answers the CLI reads.
+		e := newLoginEnv(t, highSignInLimits)
+		e.fake.setStatus(testStatus(t, "software", 0), nil)
+		banner := `<div class="kr-banner" role="alert">` + custodytext.SoftwareCABanner([]string{"user", "host", "machine", "ops", "log"}) + `</div>`
+		l := e.beginLogin(t, loginRequest(t, "alice", t0))
+		if rec := e.approvalPageOf(l); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), banner) {
+			t.Fatalf("approval page = %d without the banner:\n%s", rec.Code, rec.Body)
+		}
+		if rec := e.request(http.MethodGet, loginOptionsPath+"?user=alice", "", "", "", nil); !strings.Contains(rec.Header().Get("Keyroster-Custody"), "user=software") {
+			t.Fatalf("options custody header = %q", rec.Header().Get("Keyroster-Custody"))
+		}
+	})
 	t.Run("expired_or_redeemed_page_refused", func(t *testing.T) {
 		e := newLoginEnv(t, highSignInLimits)
 		l := e.beginLogin(t, loginRequest(t, "alice", t0))
@@ -692,6 +707,41 @@ func TestLoginLimits(t *testing.T) {
 		}
 		if !strings.Contains(e.log.String(), `"reason":"per_user"`) {
 			t.Fatalf("no per_user rate-limit line:\n%s", e.log)
+		}
+	})
+	t.Run("per_client_charged_once", func(t *testing.T) {
+		// The default per-client limit (burst 10) with a high per-user
+		// limit: ten begins from one client pass and the eleventh is
+		// refused, so a begin takes one per-client token, not two.
+		e := newLoginEnv(t, Limits{SignInUserPerMinute: 100000, SignInUserBurst: 100000})
+		for i := range 11 {
+			req := loginRequest(t, "alice", e.clock.Now())
+			rec := e.request(http.MethodPost, loginBeginPath, beginBody(t, req, newLoginPKCE(t), "S256", 50000), "203.0.113.20:1234", "", nil)
+			want := http.StatusOK
+			if i == 10 {
+				want = http.StatusTooManyRequests
+			}
+			if rec.Code != want {
+				t.Fatalf("begin #%d = %d %s, want %d", i+1, rec.Code, rec.Body, want)
+			}
+		}
+	})
+	t.Run("client_buckets_per_route", func(t *testing.T) {
+		// Ten options drain one client's options bucket (burst 10); its
+		// begin still passes, on the begin bucket.
+		e := newLoginEnv(t, Limits{SignInUserPerMinute: 100000, SignInUserBurst: 100000})
+		for i := range 11 {
+			want := http.StatusOK
+			if i == 10 {
+				want = http.StatusTooManyRequests
+			}
+			if rec := e.request(http.MethodGet, loginOptionsPath+"?user=alice", "", "203.0.113.30:1234", "", nil); rec.Code != want {
+				t.Fatalf("options #%d = %d, want %d", i+1, rec.Code, want)
+			}
+		}
+		req := loginRequest(t, "alice", e.clock.Now())
+		if rec := e.request(http.MethodPost, loginBeginPath, beginBody(t, req, newLoginPKCE(t), "S256", 50000), "203.0.113.30:1234", "", nil); rec.Code != http.StatusOK {
+			t.Fatalf("begin after drained options = %d %s", rec.Code, rec.Body)
 		}
 	})
 	t.Run("routes_have_own_buckets", func(t *testing.T) {
