@@ -40,7 +40,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Authorization & Insider Resistance (AUTHZ)
 
-- [ ] **AUTHZ-01**: Admin can define roles mapping users/groups to principals on host groups
+- [x] **AUTHZ-01**: Admin can define roles mapping users/groups to principals on host groups
 - [ ] **AUTHZ-02**: Hosts enforce role → principal mapping via `AuthorizedPrincipalsFile` generated from signed host policy
 - [ ] **AUTHZ-03**: Policy changes (roles, principals, credentials, quorum settings) require approval by a configured admin quorum, are versioned and signed
 - [ ] **AUTHZ-04**: User can request just-in-time access to a sensitive role; another person must approve it, bound to that exact request, single-use and time-boxed
@@ -187,7 +187,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUTH-04 | Phase 2 | Pending |
 | AUTH-05 | Phase 4 | Pending |
 | AUTH-06 | Phase 3 | Pending |
-| AUTHZ-01 | Phase 2 | Pending |
+| AUTHZ-01 | Phase 2 | Complete |
 | AUTHZ-02 | Phase 3 | Pending |
 | AUTHZ-03 | Phase 4 | Pending |
 | AUTHZ-04 | Phase 4 | Pending |

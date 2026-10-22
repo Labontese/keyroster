@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-10 Tasks 1-2 done on p02/10-web-signin; PR awaiting owner merge gate (Task 3)
-last_updated: "2026-10-22T06:00:58.100Z"
+stopped_at: 02-11 Tasks 1-3 done on p02/11-roles; PR awaiting owner merge gate (Task 4)
+last_updated: "2026-10-22T10:05:20.756Z"
 last_activity: 2026-10-22
-last_activity_desc: 02-10 web sign-in executed; PR awaiting merge gate
-state_head: e811c5341458d137780284f298c94167558b1298
+last_activity_desc: 02-11 roles, groups and host groups executed; PR awaiting merge gate
+state_head: 960d89f0cd12e1239dfe61f217580a7a548e7304
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 35
-  completed_plans: 31
+  completed_plans: 32
   percent: 0
 ---
 
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 10 of 14
-Status: 02-10 awaiting the owner merge gate (p02/10-web-signin); 02-01 to 02-09 are merged
-Last activity: 2026-10-22 — 02-10 web sign-in executed (passkey sign-in against the installed directory, __Host- sessions with idle/absolute expiry and per-request directory checks, read-only account page, sign-in rate limits and logging)
+Plan: 11 of 14
+Status: 02-11 awaiting the owner merge gate (p02/11-roles); 02-01 to 02-10 are merged
+Last activity: 2026-10-22 — 02-11 roles executed (role, group and host-group commands through the directory pipeline, the shared AuthorizedPrincipalsFile renderer with header-only files for unmapped accounts, host principals and host ca-key, host setup runbook, e2e against real sshd)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -87,6 +87,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P08 | about 1h | 2 tasks | 31 files |
 | Phase 02 P09 | about 40 min | 2 tasks | 21 files |
 | Phase 02 P10 | about 40 min | 2 tasks | 16 files |
+| Phase 02 P11 | 25 min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -209,6 +210,10 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-10: web sign-in is username-first with allowCredentials from the installed directory; begin, finish and every session request read only through currentStatus/currentDirectory and check the user is active and the credential bound; assertions verified by internal/webauthn.VerifyAssertion
 - [Phase 02]: 02-10: __Host-keyroster-session is an opaque 32-byte ID stored as SHA-256 (sessions.id_hash) with the opening cred_id; 1 h idle and 12 h absolute in one conditional UPDATE ... RETURNING; a signer outage answers 503 and keeps the row; logout needs no signer state
 - [Phase 02]: 02-10: sign-in route class: per client 20/min burst 10 with a 200/min burst 100 global backstop, plus one per-username bucket 10/min burst 10 (bounded LRU, valid names only, finish keyed on the challenge's user); one 'web sign-in' log line per event with no secrets
+- [Phase 02]: 02-10 pre-merge review, owner decisions 2026-10-22: the per-username sign-in bucket is keyed on (user, client) so no client can lock another out (02-12's CLI login inherits this via deferred-items); the executor's 12 open choices approved; sign-in, sessions and /account fail closed when the signer reports the directory not authorized; CodeQL #13 dismissed as a false positive
+- [Phase 02]: 02-11 Task 1, owner decision D-06 2026-10-22: principal convention confirmed as role:<name> for roles and u:<username> for personal accounts ("role:<namn> och u:<användare> (Rekommenderas)")
+- [Phase 02]: 02-11: role add grants role:<name> by default (D-06 role-prefix, owner 2026-10-22); host principals renders a header-only file for an unmapped account or roles [], errors on an unknown host group, refuses with no directory installed
+- [Phase 02]: 02-11: renderer refuses host group and account names outside the directory grammars (header-line injection); host-group remove refused while the group maps an account (T-02-100); host ca-key needs no admin key
 
 ### Pending Todos
 
@@ -245,6 +250,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-22T06:00:57.876Z
-Stopped at: 02-10 Tasks 1-2 done on p02/10-web-signin; PR awaiting owner merge gate (Task 3)
+Last session: 2026-10-22T10:05:20.524Z
+Stopped at: 02-11 Tasks 1-3 done on p02/11-roles; PR awaiting owner merge gate (Task 4)
 Resume file: None

@@ -128,6 +128,20 @@ var (
 // shell metacharacters.
 func ValidUserName(s string) bool { return nameRE.MatchString(s) }
 
+// ValidGroupName reports whether s is a valid group or host group name:
+// the user name grammar.
+func ValidGroupName(s string) bool { return nameRE.MatchString(s) }
+
+// ValidRoleName reports whether s is a valid role name: 1 to 32 characters
+// from a-z, 0-9, '.', '_' and '-', starting with a letter or a digit.
+func ValidRoleName(s string) bool { return roleRE.MatchString(s) }
+
+// ValidAccountName reports whether s is a valid host account name: 1 to 32
+// characters from a-z, 0-9, '_', '.' and '-', starting with a letter or
+// '_'. Lowercase only, so an account means the same on a Windows host,
+// whose account names are case-insensitive.
+func ValidAccountName(s string) bool { return accountRE.MatchString(s) }
+
 // Parse decodes a canonical directory and validates it.
 func Parse(data []byte) (*Directory, error) {
 	var d Directory
