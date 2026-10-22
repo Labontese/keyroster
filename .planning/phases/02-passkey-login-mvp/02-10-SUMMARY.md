@@ -161,7 +161,7 @@ status: complete
 |---|---|---|---|
 | `signInLimit` (begin and finish) | 20/min | 10 | `clientKey` (RemoteAddr, IPv6 by /64) |
 | its global backstop | 200/min | 100 | all clients |
-| `signInUserLimit` (begin and finish, one bucket) | 10/min | 10 | user name: at begin only a name that passes `^[a-z0-9][a-z0-9._-]{0,63}$`; at finish the name stored with the challenge |
+| `signInUserLimit` (begin and finish, one bucket) | 10/min | 10 | user name and `clientKey` together (`signInUserKey`, pre-merge review G1): at begin only a name that passes `^[a-z0-9][a-z0-9._-]{0,63}$`; at finish the name stored with the challenge |
 
 Both are configurable through `Limits` (`SignInPerMinute`, `SignInBurst`, `SignInUserPerMinute`, `SignInUserBurst`). The per-username map is a second instance of 02-07's bounded LRU map (10 000 entries, 10 min idle eviction).
 
@@ -172,11 +172,11 @@ One line per event, message `web sign-in`, with exactly `event`, `reason`, `user
 | event | reasons |
 |---|---|
 | `signin_ok` | `ok` |
-| `signin_refused` (finish) | `body_too_large`, `malformed`, `challenge_not_found`, `user_not_active`, `credential_not_bound`, `assertion_*` (one per internal/webauthn sentinel), `signer_unavailable`, `internal_error` |
-| `begin_refused` | `no_usable_passkey`, `malformed`, `body_too_large`, `signer_unavailable`, `internal_error` |
+| `signin_refused` (finish) | `body_too_large`, `malformed`, `challenge_not_found`, `directory_not_authorized`, `user_not_active`, `credential_not_bound`, `assertion_*` (one per internal/webauthn sentinel), `signer_unavailable`, `internal_error` |
+| `begin_refused` | `no_usable_passkey`, `directory_not_authorized`, `malformed`, `body_too_large`, `signer_unavailable`, `internal_error` |
 | `rate_limited` | `per_client`, `per_user` |
 | `logout` | `ok`, `no_session` |
-| `session_ended` | `user_not_active`, `credential_not_bound` |
+| `session_ended` | `directory_not_authorized`, `user_not_active`, `credential_not_bound` |
 
 No line holds the session ID, its hash, a challenge, a challenge ID or assertion bytes. Web sign-in stays out of the signer's Merkle log.
 
@@ -319,6 +319,29 @@ None.
 - Task 1 acceptance greps re-run and pass: `signerclient.InstallDirectory` in websignin_test.go (comments excluded) 0; `id_hash` in 0003_web.sql 2; `cred_id` 2; the one `RETURNING user_name, cred_id` TouchSession statement in db.go; the non-passkey route grep prints nothing; `kr-login` setup in app.js with feature detection before the submit handler; `innerHTML` (comments excluded) 0; `webauthn.VerifyAssertion` in weblogin.go.
 - Task 2 named cases present: the six weblogin cases under `TestSignInBegin`/`TestSignInFinish`, `username_limiter_bounded` and `signin_log_has_no_secrets` under `TestSignInLimits`/`TestSignInLog`, and the nine session cases under `TestSession`.
 - No private network detail in any file this plan changed (grep for 100.x, 10.x, 192.168.x, host and tailnet names: none).
+
+## Pre-merge review fixes
+
+Review of PR 50 at `ed27fba`. Eight confirmed findings, three distinct defects, three fix commits. Each fix's test was run before the fix and failed, then passed after it.
+
+**Owner decisions (2026-10-22, Daniel, via the orchestrator), verbatim:**
+
+- **G1**, per-username sign-in limit: "Per användare + klient (Rekommenderas)". The per-username bucket is keyed on the user name and the client key together; the per-client limiter and the global backstop are unchanged.
+- **G2**, the executor's other open choices: "Godkänn (Rekommenderas)". Choices 3, 4 and 6 to 12 under "Choices the plan left open" are recorded as owner-approved deviations. Two are superseded by these fixes rather than approved as they stood: choice 5 ("one bucket per name") is now one bucket per name and client, and choice 13 (the label "Longest certificate") is reworded below.
+
+**Fixed:**
+
+- `e915e48` fix(02-10): key the per-username sign-in limit on user and client. Covers "Unauthenticated per-username lockout: a single IP can keep any user from signing in indefinitely" (medium), "An unauthenticated client can lock any known user out of web sign-in by draining the per-username limiter" (low) and "Per-username sign-in bucket lets one client lock a named user out of web sign-in" (low, which named 02-12 L196 as the owner of the limiter decision; G1 decided it here). Begin keys `signInUserLimit` on `signInUserKey(name, r)` and finish on `signInUserKey(storedUser, r)`: the name, a space (which the user-name rule excludes) and `clientKey`. Test: `TestSignInLimits/other_client_not_locked_out` (an attacker at 203.0.113.9 drains alice's bucket within its per-client limit; alice still signs in from another address; the attacker's next begin is 429 `per_user`). Before the fix it failed with `begin alice = 429 ... "reason":"per_user"`. `eleventh_begin_for_one_user_429` and `finish_keyed_on_challenge_user` now drain from one client. deferred-items.md gains a row for 02-12, whose L196 and L517 inherit the limiter for the CLI login routes and must use the same (user, client) keying.
+- `f1d195b` fix(02-10): refuse web sign-in under a directory the signer does not authorize. Covers "Web sign-in and sessions ignore the signer's DirectoryAuthorized flag: an unauthorized directory still decides who can sign in" (low), "Web sign-in and /account ignore DirectoryAuthorized: they authenticate against, and show access from, a directory the signer has refused" (medium) and "Web sign-in and /account accept a directory the signer marks unauthorized (DirectoryAuthorized=false)" (medium). `activeUser` holds no user of a view whose `authorized` is false, and `boundCredential` refuses such a view first with the new closed reason `directory_not_authorized`. Begin answers the uniform 404, finish the uniform 401, and withSession deletes the session row, clears the cookie and redirects to /login, each logged with `directory_not_authorized`; /account can no longer be built from such a view. Nothing installed (version 0) still logs `no_usable_passkey`. Tests: `TestSignInBegin/directory_not_authorized_uniform_404`, `TestSignInFinish/directory_not_authorized_refused`, `TestSession/directory_not_authorized_ends_session`, `TestSession/account_page_refuses_unauthorized_view`; all four failed before the fix (begin 200 with options, finish 200 with the redirect, /account 200, the page built). `fakeSigner` gains an `unauthorized` switch for chain mode.
+- `af4941f` fix(02-10): state truthfully what the account page's certificate lengths mean. Covers "Account page 'Longest certificate' understates the real cap: it is the minimum over all roles, but a login may request a subset of roles" (low) and "/account 'Longest certificate' understates access when the user holds several roles (login can select a subset with --role)" (low). The summary row reads "Longest certificate with all your roles"; the roles table's column, now headed "Longest certificate", shows each role's max TTL capped by the user CA's, which is what a login for that role alone gets (signer `ttlCap`); a sentence under the table says a login for only some roles gets the shortest of their values. Doc comments on `accountPage.TTLCap` and `accountRole.MaxTTL` say the same. Test: `TestSession/ttl_cap_is_user_ca_cap` pins the label, the per-role values (dev 7200 s, long 43200 s under a 43200 s user CA cap) and the sentence, and that the uncapped 86400 s is not shown. It failed before the fix on the label; a temporary mutant that dropped the per-role cap failed it on the `long` row, then was restored.
+
+**Skipped:** none.
+
+**CodeQL #13 (go/log-injection, weblogin.go:125, the `logSignIn` call):** no code change; a false positive. Every `user` passed to `logSignIn` is empty, a name that passed `directory.ValidUserName` (`^[a-z0-9][a-z0-9._-]{0,63}$`, no control characters), or a database value written only from such a name: the challenge's user (CreateChallenge runs after the rule and the active-user check), the session's user (CreateSession takes the challenge's user) and DeleteSession's user. A name that fails the rule is logged as empty. `client` is `netip` output. keyroster-server logs through `slog.NewJSONHandler`, which escapes control characters in any case.
+
+**Threat model note (targeted lockout, an extension of T-02-90):** an unauthenticated client can now drain only its own (user, client) buckets, so it cannot lock another client out of a user's sign-in. Residual, accepted: an attacker with many source addresses gets more sign-in attempts per user, bounded by the per-client limit per address and the global backstop (200/min); each attempt still needs a passkey assertion over a single-use challenge. The per-username map is still the bounded LRU map (10 000 entries), now of (user, client) pairs, so a flood of pairs evicts older ones as before.
+
+**Verification (Windows, go1.27.3):** `gofmt -l .` empty; `go vet ./...`, `GOOS=linux go vet ./...`, `GOOS=darwin go vet ./...` and `go vet -tags e2e ./test/e2e/` clean; `go test -count=1 ./internal/server/` passed; `go test ./...` passed (all packages). `-race` was not run (no cgo on this host). The e2e (`TestWebSignInEndToEnd`, which checks /account for "3600 s") was not run locally: it needs `KEYROSTER_OPENSSH_PREFIX`; CI's e2e lanes run it. golangci-lint was not run locally. The PR's auto-merge was left off.
 
 ---
 *Phase: 02-passkey-login-mvp*
