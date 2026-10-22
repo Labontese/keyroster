@@ -30,7 +30,8 @@ expired.
 >   met out of band before step 1, not by a step of this runbook.
 > - In step 5.4 the `--root-pin` values came from the fingerprints
 >   `root init` printed for the TEST roots, not from a paper record. Init
->   ran with `--force`, which replaces an existing config.
+>   ran with `--force`, which replaces an existing config, and with
+>   `--user` and `--admin-key` as in step 5.4.
 >
 > What was checked:
 >
