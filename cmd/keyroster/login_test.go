@@ -677,6 +677,60 @@ func TestLoginRefusals(t *testing.T) {
 			t.Fatal("an unknown --role began a login")
 		}
 	})
+	t.Run("options_checked", func(t *testing.T) {
+		// Every options answer that fails the user, server time, user CA
+		// cap, role-count, role-name, TTL, principal or extension rules is
+		// refused before a key is made or a login begun, and its text never
+		// reaches stderr.
+		const badText = "\x1b[2Jevil"
+		for _, c := range []struct {
+			name   string
+			mutate func(o *loginOptions, caMax uint64)
+		}{
+			{"other_user", func(o *loginOptions, _ uint64) { o.User = "bob" }},
+			{"server_time_zero", func(o *loginOptions, _ uint64) { o.ServerTime = 0 }},
+			{"ca_max_not_policy_cap", func(o *loginOptions, caMax uint64) { o.CAMaxTTLSeconds = caMax - 1 }},
+			{"too_many_roles", func(o *loginOptions, _ uint64) {
+				o.Roles = nil
+				for i := range wire.MaxLoginRoles*4 + 1 {
+					o.Roles = append(o.Roles, loginOptionsRole{Name: fmt.Sprintf("r%02d", i), Principals: []string{"role:r"}, MaxTTLSeconds: 3600})
+				}
+			}},
+			{"bad_role_name", func(o *loginOptions, _ uint64) { o.Roles[0].Name = "dev" + badText }},
+			{"zero_role_ttl", func(o *loginOptions, _ uint64) { o.Roles[0].MaxTTLSeconds = 0 }},
+			{"no_principals", func(o *loginOptions, _ uint64) { o.Roles[0].Principals = nil }},
+			{"principal_escape", func(o *loginOptions, _ uint64) { o.Roles[0].Principals = []string{"role:dev" + badText} }},
+			{"principal_cr", func(o *loginOptions, _ uint64) { o.Roles[0].Principals = []string{"u:alice\revil"} }},
+			{"bad_extension", func(o *loginOptions, _ uint64) { o.Roles[0].Extensions = []string{"permit" + badText} }},
+			{"duplicate_role", func(o *loginOptions, _ uint64) { o.Roles = append(o.Roles, o.Roles[0]) }},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				e := newLoginServer(t)
+				a := useRecordingAgent(t)
+				e.override[loginOptionsRoute] = func(w http.ResponseWriter) {
+					e.mu.Lock()
+					roles := append([]loginOptionsRole(nil), e.roles...)
+					e.mu.Unlock()
+					for i := range roles {
+						roles[i].Principals = append([]string(nil), roles[i].Principals...)
+					}
+					o := loginOptions{ServerTime: e.now().Unix(), User: "alice", CAMaxTTLSeconds: e.caMax, Roles: roles}
+					c.mutate(&o, e.caMax)
+					e.writeJSON(w, http.StatusOK, o)
+				}
+				_, wait := e.start(t)
+				r := wait()
+				requireLoginRefused(t, r, errBadLoginOptions.Error())
+				requireNoRawControl(t, r.stderr)
+				if strings.Contains(r.stderr, "evil") || strings.Contains(r.stderr, "Key fingerprint") {
+					t.Fatalf("the refused options reached stderr or a key was made:\n%s", r.stderr)
+				}
+				if e.begins() != 0 || len(a.added()) != 0 {
+					t.Fatalf("refused options began a login (%d) or added to the agent (%d)", e.begins(), len(a.added()))
+				}
+			})
+		}
+	})
 	t.Run("constrained_add_refused_no_retry", func(t *testing.T) {
 		e := newLoginServer(t)
 		a := useRecordingAgent(t)
