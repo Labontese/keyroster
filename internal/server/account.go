@@ -20,8 +20,10 @@ type accountPage struct {
 	Status           string
 	DirectoryVersion uint64
 	Roles            []accountRole
-	// TTLCap is the longest certificate a login can get: the smallest of
-	// the roles' max TTLs and the user CA's (empty without roles).
+	// TTLCap is the longest certificate a login that requests all of the
+	// user's roles can get: the smallest of the roles' max TTLs and the
+	// user CA's (empty without roles). A login for only some of the roles
+	// may get longer, up to the smallest MaxTTL among those roles.
 	TTLCap      string
 	Credentials []accountCredential
 }
@@ -29,7 +31,10 @@ type accountPage struct {
 type accountRole struct {
 	Name       string
 	Principals []string
-	MaxTTL     string
+	// MaxTTL is the longest certificate a login for this role alone can
+	// get: the role's max TTL capped by the user CA's, as the signer caps
+	// it.
+	MaxTTL string
 }
 
 type accountCredential struct {
@@ -57,8 +62,8 @@ func userCAMaxTTL(p *trust.Policy) uint64 {
 // newAccountPage builds the account page of user from the directory view
 // withSession checked: Authorize(user, nil) for the roles and principals
 // (a user without roles shows none), each role's own principals and max
-// TTL, the TTL cap, and each bound credential's fingerprint, algorithm and
-// backup state.
+// TTL capped by the user CA's, the TTL cap of a login for all the roles,
+// and each bound credential's fingerprint, algorithm and backup state.
 func newAccountPage(view *directoryView, user string) (*accountPage, error) {
 	u, ok := view.activeUser(user)
 	if !ok {
@@ -71,19 +76,22 @@ func newAccountPage(view *directoryView, user string) (*accountPage, error) {
 	case err != nil:
 		return nil, err
 	default:
+		ca := userCAMaxTTL(view.status.policy)
+		capped := func(ttl uint64) uint64 {
+			if ca > 0 && ca < ttl {
+				return ca
+			}
+			return ttl
+		}
 		for _, rn := range g.Roles {
 			i := slices.IndexFunc(view.dir.Roles, func(r directory.Role) bool { return r.Name == rn })
 			if i < 0 {
 				return nil, errors.New("account: granted role not in the directory")
 			}
 			r := view.dir.Roles[i]
-			page.Roles = append(page.Roles, accountRole{Name: r.Name, Principals: r.Principals, MaxTTL: formatTTL(r.MaxTTLSeconds)})
+			page.Roles = append(page.Roles, accountRole{Name: r.Name, Principals: r.Principals, MaxTTL: formatTTL(capped(r.MaxTTLSeconds))})
 		}
-		ttl := g.MaxTTLSeconds
-		if ca := userCAMaxTTL(view.status.policy); ca > 0 && ca < ttl {
-			ttl = ca
-		}
-		page.TTLCap = formatTTL(ttl)
+		page.TTLCap = formatTTL(capped(g.MaxTTLSeconds))
 	}
 	for _, c := range u.Credentials {
 		// Parse validated the SPKI as canonical standard base64.
@@ -101,8 +109,8 @@ func newAccountPage(view *directoryView, user string) (*accountPage, error) {
 }
 
 // handleAccount serves GET /account behind withSession: the signed-in
-// user's own name, status, roles with their principals and max TTLs, the
-// TTL cap, the directory version and the bound credentials, from the
+// user's own name, status, roles with their principals and capped max
+// TTLs, the TTL cap of a login for all the roles, the directory version and the bound credentials, from the
 // directory view the session check used. It shows no other user's data
 // and offers no admin action; the only form is logout.
 func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {

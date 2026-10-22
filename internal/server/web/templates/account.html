@@ -4,15 +4,16 @@
 <dt>User name</dt><dd>{{.Name}}</dd>
 <dt>Status</dt><dd>{{.Status}}</dd>
 <dt>Directory version</dt><dd>{{.DirectoryVersion}}</dd>
-<dt>Longest certificate</dt><dd>{{if .TTLCap}}{{.TTLCap}}{{else}}none: no roles yet{{end}}</dd>
+<dt>Longest certificate with all your roles</dt><dd>{{if .TTLCap}}{{.TTLCap}}{{else}}none: no roles yet{{end}}</dd>
 </dl>
 <h2>Roles</h2>
 {{if .Roles}}<table class="kr-keys">
-<thead><tr><th>Role</th><th>Principals</th><th>Max TTL</th></tr></thead>
+<thead><tr><th>Role</th><th>Principals</th><th>Longest certificate</th></tr></thead>
 <tbody>
 {{range .Roles}}<tr><td>{{.Name}}</td><td>{{range $i, $p := .Principals}}{{if $i}}, {{end}}<code>{{$p}}</code>{{end}}</td><td>{{.MaxTTL}}</td></tr>
 {{end}}</tbody>
 </table>
+<p>A login for only some of your roles can get a longer certificate: the shortest of their values here.</p>
 {{else}}<p>No roles yet.</p>
 {{end}}<h2>Passkeys</h2>
 <table class="kr-keys">

@@ -84,19 +84,31 @@ func TestSession(t *testing.T) {
 		}
 		rec := e.account(cookie)
 		requireHeaders(t, "GET /account", rec)
-		if !strings.Contains(text, "Longest certificate</dt><dd>7200 s") {
+		if !strings.Contains(text, "Longest certificate with all your roles</dt><dd>7200 s") {
 			t.Fatalf("the TTL cap is not the role's 7200 s:\n%s", text)
 		}
 	})
 	t.Run("ttl_cap_is_user_ca_cap", func(t *testing.T) {
+		// 02-10 pre-merge review: the overall figure is what a login for
+		// all of alice's roles gets (the shortest role, 7200 s), and each
+		// role shows what a login for it alone gets: its own max TTL capped
+		// by the user CA's 43200 s. A login for "long" alone gets 43200 s,
+		// not 7200 s and not the role's 86400 s.
 		e := newSignInEnv(t, highSignInLimits)
 		e.install(t, grantRole("long", "alice", 86400)) // above the user CA's 43200
 		cookie := e.signIn(t, "alice", e.alice)
-		e.requireAccount(t, "alice", cookie, "Longest certificate</dt><dd>7200 s")
+		text := e.requireAccount(t, "alice", cookie, "Longest certificate with all your roles</dt><dd>7200 s (2h0m0s)",
+			"<td>dev</td><td><code>role:dev</code></td><td>7200 s (2h0m0s)</td>",
+			"<td>long</td><td><code>role:long</code></td><td>43200 s (12h0m0s)</td>",
+			"A login for only some of your roles can get a longer certificate: the shortest of their values here.")
+		if strings.Contains(text, "86400 s") {
+			t.Fatalf("the page shows the role's 86400 s, above the user CA's cap:\n%s", text)
+		}
 		e.install(t, func(d *directory.Directory) {
 			d.Roles = []directory.Role{{Name: "long", Principals: []string{"role:long"}, MaxTTLSeconds: 86400, Extensions: []string{}, Users: []string{"alice"}, Groups: []string{}}}
 		})
-		e.requireAccount(t, "alice with one long role", cookie, "Longest certificate</dt><dd>43200 s (12h0m0s)", "86400 s")
+		e.requireAccount(t, "alice with one long role", cookie, "Longest certificate with all your roles</dt><dd>43200 s (12h0m0s)",
+			"<td>long</td><td><code>role:long</code></td><td>43200 s (12h0m0s)</td>")
 	})
 	t.Run("no_roles_yet", func(t *testing.T) {
 		e := newSignInEnv(t, highSignInLimits)
@@ -267,7 +279,7 @@ func TestSession(t *testing.T) {
 			t.Fatal("v1 shows role:ops")
 		}
 		e.install(t, grantRole("ops", "alice", 3600))
-		e.requireAccount(t, "under v2", cookie, "role:ops", "role:dev", "Directory version</dt><dd>2<", "Longest certificate</dt><dd>3600 s")
+		e.requireAccount(t, "under v2", cookie, "role:ops", "role:dev", "Directory version</dt><dd>2<", "Longest certificate with all your roles</dt><dd>3600 s")
 		if n := e.sessionRows(t); n != 1 {
 			t.Fatalf("%d session rows, want 1", n)
 		}
