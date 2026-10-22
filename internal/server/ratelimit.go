@@ -17,7 +17,8 @@ import (
 // A zero field takes its default. The invite routes and the sign-in routes
 // each also have one global limiter at globalFactor times their
 // per-client rate and burst, and the sign-in routes a per-username limiter
-// next to the per-client one (02-10). The admin routes have no global
+// next to the per-client one (02-10), keyed on the user name and the
+// client key together (signInUserKey). The admin routes have no global
 // limiter: a validly signed admin request is never refused
 // because of traffic from other client keys (a client sharing the admin's
 // key, the same IPv4 address or IPv6 /64, still shares its bucket), and
@@ -42,7 +43,9 @@ type Limits struct {
 	InvitePerMinute int // default 30
 	InviteBurst     int // default 10
 	// The sign-in begin and finish routes: per client, and per user name
-	// (one bucket per name, shared by begin and finish).
+	// and client (one bucket per name and client key, shared by begin and
+	// finish, so one client cannot drain another's; 02-10 pre-merge
+	// review, owner decision G1).
 	SignInPerMinute     int // default 20
 	SignInBurst         int // default 10
 	SignInUserPerMinute int // default 10
@@ -66,7 +69,8 @@ const (
 	// and burst over their per-client ones.
 	globalFactor = 10
 	// maxLimiterEntries bounds each limiter's map of keys (clients, or
-	// user names for the sign-in per-username limiter); the least recently
+	// user name and client pairs for the sign-in per-username limiter);
+	// the least recently
 	// used key is evicted first.
 	maxLimiterEntries = 10000
 	// limiterIdle is how long a client's limiter is kept unused. It is

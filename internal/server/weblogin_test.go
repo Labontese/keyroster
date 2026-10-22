@@ -486,28 +486,55 @@ func TestSignInFinish(t *testing.T) {
 
 // TestSignInLimits: the sign-in route class (02-07's deferred row): a
 // per-username limiter beside the per-client one, bounded, keyed only on
-// valid names, and for finish on the challenge's stored user.
+// valid names (for finish on the challenge's stored user) together with
+// the client, so one client cannot lock another out (owner decision G1).
 func TestSignInLimits(t *testing.T) {
 	// distinct gives the i-th request its own client address, so only the
 	// per-username limiter can refuse it.
 	distinct := func(i int) string { return "198.51.100." + strconv.Itoa(i%250+1) + ":1234" }
 	t.Run("eleventh_begin_for_one_user_429", func(t *testing.T) {
-		e := newSignInEnv(t, Limits{})
+		// The per-client limit is lifted, so only the per-username bucket
+		// of (alice, this client) can refuse.
+		e := newSignInEnv(t, Limits{SignInPerMinute: 100000, SignInBurst: 100000})
+		const client = "203.0.113.9:1234"
 		for i := range 10 {
-			if rec := e.beginFrom(t, "alice", distinct(i)); rec.Code != http.StatusOK {
+			if rec := e.beginFrom(t, "alice", client); rec.Code != http.StatusOK {
 				t.Fatalf("begin %d = %d %s", i+1, rec.Code, rec.Body)
 			}
 		}
-		rec := e.beginFrom(t, "alice", distinct(10))
+		rec := e.beginFrom(t, "alice", client)
 		if rec.Code != http.StatusTooManyRequests || strings.TrimSpace(rec.Body.String()) != signInLimited || rec.Header().Get("Retry-After") == "" {
 			t.Fatalf("11th begin = %d %s, want 429", rec.Code, rec.Body)
 		}
 		if got := lastSignIn(t, e.log); got["event"] != eventRateLimited || got["reason"] != reasonPerUser || got["user"] != "alice" {
 			t.Fatalf("logged %v", got)
 		}
-		// Another user is not affected.
-		if rec := e.beginFrom(t, "bob", distinct(11)); rec.Code != http.StatusOK {
+		// Another user from the same client is not affected.
+		if rec := e.beginFrom(t, "bob", client); rec.Code != http.StatusOK {
 			t.Fatalf("begin bob = %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("other_client_not_locked_out", func(t *testing.T) {
+		// 02-10 pre-merge review, owner decision G1: an unauthenticated
+		// client that drains alice's bucket from its own address, within
+		// its per-client limit, does not keep alice from signing in from
+		// another address. The attacker itself stays limited.
+		e := newSignInEnv(t, Limits{})
+		const attacker = "203.0.113.9:1234"
+		for i := range 10 {
+			if rec := e.beginFrom(t, "alice", attacker); rec.Code != http.StatusOK {
+				t.Fatalf("attacker begin %d = %d %s", i+1, rec.Code, rec.Body)
+			}
+		}
+		e.signIn(t, "alice", e.alice)
+		// 3 s refill one per-client token (20/min) but only half a
+		// per-username one (10/min), so the per-username bucket refuses.
+		e.advance(3 * time.Second)
+		if rec := e.beginFrom(t, "alice", attacker); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("attacker's 11th begin = %d %s, want 429", rec.Code, rec.Body)
+		}
+		if got := lastSignIn(t, e.log); got["reason"] != reasonPerUser || got["user"] != "alice" {
+			t.Fatalf("logged %v", got)
 		}
 	})
 	t.Run("per_client_limit", func(t *testing.T) {
@@ -539,13 +566,13 @@ func TestSignInLimits(t *testing.T) {
 		e := newSignInEnv(t, Limits{SignInPerMinute: 100000, SignInBurst: 100000})
 		b := e.mustBegin(t, "alice")
 		for i := range 9 {
-			if rec := e.beginFrom(t, "alice", distinct(i)); rec.Code != http.StatusOK {
+			if rec := e.beginFrom(t, "alice", ""); rec.Code != http.StatusOK {
 				t.Fatalf("begin %d = %d", i+2, rec.Code)
 			}
 		}
-		// alice's bucket is empty; the finish names no user, its challenge
-		// does.
-		rec := e.finish(finishBodyFor(t, b.ChallengeID, e.alice.Assert(testRPID, testOrigin, challengeOf(t, b))), distinct(20))
+		// alice's bucket for this client is empty; the finish names no
+		// user, its challenge does.
+		rec := e.finish(finishBodyFor(t, b.ChallengeID, e.alice.Assert(testRPID, testOrigin, challengeOf(t, b))), "")
 		if rec.Code != http.StatusTooManyRequests {
 			t.Fatalf("finish with alice's bucket empty = %d %s, want 429", rec.Code, rec.Body)
 		}

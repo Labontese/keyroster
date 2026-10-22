@@ -135,6 +135,14 @@ func remoteIP(r *http.Request) string {
 	return ap.Addr().Unmap().WithZone("").String()
 }
 
+// signInUserKey is the per-username limiter's key of a sign-in for user
+// from r: the user name and the client key together (02-10 pre-merge
+// review, owner decision G1). A client can drain only its own buckets, so
+// unauthenticated begins for a name from one address never refuse that
+// user's sign-in from another. Names match the directory user-name rule,
+// which allows no space, so the key is unambiguous.
+func signInUserKey(user string, r *http.Request) string { return user + " " + clientKey(r) }
+
 // signInLimited answers a sign-in request one of the sign-in limiters
 // refused: 429 with Retry-After, and one sign-in log line.
 func (s *Server) signInLimited(w http.ResponseWriter, r *http.Request, l *limiter, reason, user string) {
@@ -249,7 +257,8 @@ type allowCredential struct {
 //  2. at most maxSignInBeginBody bytes, one strict JSON object;
 //  3. a name that fails the directory user-name rule gets the uniform 404
 //     at once, so it never creates a per-username limiter entry;
-//  4. the per-username limiter;
+//  4. the per-username limiter, keyed on the name and the client
+//     (signInUserKey);
 //  5. the installed directory through currentDirectory (503 when it
 //     cannot be read, nothing created);
 //  6. the name must be an active user of that directory with at least one
@@ -281,7 +290,7 @@ func (s *Server) handleSignInBegin(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, nil, http.StatusNotFound, errSignInNoPasskey)
 		return
 	}
-	if !s.signInUserLimit.allow(name, now) {
+	if !s.signInUserLimit.allow(signInUserKey(name, r), now) {
 		s.signInLimited(w, r, s.signInUserLimit, reasonPerUser, name)
 		return
 	}
@@ -384,7 +393,7 @@ func validChallengeID(id string) bool {
 //  3. TakeChallenge consumes the challenge, once (absent, used or expired:
 //     refused);
 //  4. the per-username limiter, keyed on the user stored with the
-//     challenge, never on client input;
+//     challenge, never on client input, and the client (signInUserKey);
 //  5. the installed directory through currentDirectory (503 when it
 //     cannot be read, nothing created);
 //  6. the user must still be active there and the credential must be
@@ -435,7 +444,7 @@ func (s *Server) handleSignInFinish(w http.ResponseWriter, r *http.Request) {
 		s.signInInternal(w, r, "", err)
 		return
 	}
-	if !s.signInUserLimit.allow(user, now) {
+	if !s.signInUserLimit.allow(signInUserKey(user, r), now) {
 		s.signInLimited(w, r, s.signInUserLimit, reasonPerUser, user)
 		return
 	}

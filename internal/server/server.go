@@ -101,7 +101,7 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 		adminLimit:  newLimiter(lim.AdminPerMinute, lim.AdminBurst, 0, 0), // per client only (Limits)
 		inviteLimit: newLimiter(lim.InvitePerMinute, lim.InviteBurst, globalFactor*lim.InvitePerMinute, globalFactor*lim.InviteBurst),
 		// Sign-in is its own route class (02-10): per client with the
-		// global backstop, and per user name with none.
+		// global backstop, and per user name and client with none.
 		signInLimit:     newLimiter(lim.SignInPerMinute, lim.SignInBurst, globalFactor*lim.SignInPerMinute, globalFactor*lim.SignInBurst),
 		signInUserLimit: newLimiter(lim.SignInUserPerMinute, lim.SignInUserBurst, 0, 0),
 	}
