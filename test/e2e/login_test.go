@@ -10,6 +10,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -390,16 +391,202 @@ func TestLoginEndToEnd(t *testing.T) {
 	}
 	t.Logf("sshd accepted the login through the agent")
 
+	// 8. The export verifies and holds exactly this one login certificate;
+	// its decoded line names the serial and key ID the CLI printed and the
+	// fingerprint of the key the CLI showed (02-14-F5/F13).
 	export := f.env.Signer.exportLog(t)
 	if code, vout := auditVerify(t, f.env.Signer, export); code != 0 {
 		t.Fatalf("audit verify exited %d:\n%s", code, vout)
 	}
-	_, issued := exportedLog(t, f.env.Signer)
-	total := 0
-	for _, n := range issued {
-		total += n
+	issues := loginIssueLines(t, export)
+	if len(issues) != 1 {
+		t.Fatalf("the exported log has %d login certificates, want 1", len(issues))
 	}
-	if total != 1 {
-		t.Fatalf("the exported log has %d login certificates, want 1", total)
+	d := issues[0]
+	serial := stdoutField(t, out, "Serial")
+	if fmtNumber(d["serial"]) != serial || d["key_id"] != keyID || d["key_fingerprint"] != s.fingerprint {
+		t.Fatalf("decoded login_issue %v does not match the CLI's Serial %s, Key ID %s and fingerprint %s", d, serial, keyID, s.fingerprint)
+	}
+	if !strings.HasSuffix(keyID, "/ser="+serial) {
+		t.Fatalf("Key ID %q does not end in the serial %s", keyID, serial)
+	}
+
+	t.Run("login_lifetime_expiry", func(t *testing.T) { testLoginLifetimeExpiry(t, f) })
+	t.Run("two_concurrent_logins", func(t *testing.T) { testTwoConcurrentLogins(t, f) })
+	t.Run("unapproved_login_mints_nothing", func(t *testing.T) { testUnapprovedLogin(t, f) })
+	// Last: it revokes role ops from alice.
+	t.Run("signer_refusal_after_approval", func(t *testing.T) { testSignerRefusalAfterApproval(t, f) })
+}
+
+// fmtNumber formats a JSON number decoded into an any as an integer.
+func fmtNumber(v any) string {
+	if n, ok := v.(json.Number); ok {
+		return n.String()
+	}
+	return ""
+}
+
+// loginIssueLines returns the decoded field of every login_issue line of
+// the export file, numbers kept exact.
+func loginIssueLines(t *testing.T, export string) []map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(export) //nolint:gosec // test file
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var line struct {
+			Decoded json.RawMessage `json:"decoded"`
+		}
+		if err := json.Unmarshal([]byte(l), &line); err != nil {
+			t.Fatal(err)
+		}
+		if len(line.Decoded) == 0 {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(string(line.Decoded)))
+		dec.UseNumber()
+		var m map[string]any
+		if err := dec.Decode(&m); err != nil {
+			t.Fatal(err)
+		}
+		if m["kind"] == "login_issue" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// testLoginLifetimeExpiry (success criterion 2; 02-14-F6): a default-TTL
+// login (1 h, the ops cap) and a --ttl 2m login go into one agent; both
+// are listed, each with the CLI's fingerprint and key ID on one line;
+// after the 2 m certificate's expiry plus 5 s the agent lists neither its
+// fingerprint nor its key ID, and still lists the default-TTL entry.
+func testLoginLifetimeExpiry(t *testing.T, f *loginFixture) {
+	sock := startAgent(t)
+	long, longOut := loginOK(t, f.env, f.alice, f.auth, sock)
+	short, shortOut := loginOK(t, f.env, f.alice, f.auth, sock, "--ttl", "2m")
+	longID, shortID := stdoutField(t, longOut, "Key ID"), stdoutField(t, shortOut, "Key ID")
+	listing := agentList(t, sock)
+	for _, e := range []struct{ fp, id string }{{long.fingerprint, longID}, {short.fingerprint, shortID}} {
+		if listingLine(listing, e.fp, e.id) == "" {
+			t.Fatalf("before expiry, ssh-add -l has no line with %s and %s:\n%s", e.fp, e.id, listing)
+		}
+	}
+	var validBefore int64
+	for _, d := range loginIssueLines(t, f.env.Signer.exportLog(t)) {
+		if d["key_id"] == shortID {
+			n, err := d["valid_before"].(json.Number).Int64()
+			if err != nil {
+				t.Fatal(err)
+			}
+			validBefore = n
+		}
+	}
+	if validBefore == 0 {
+		t.Fatalf("the export has no login_issue with key ID %s", shortID)
+	}
+	wait := time.Until(time.Unix(validBefore, 0)) + 5*time.Second
+	t.Logf("waiting %s for the 2 m certificate to expire", wait.Round(time.Second))
+	time.Sleep(wait)
+	listing = agentList(t, sock)
+	if strings.Contains(listing, short.fingerprint) || strings.Contains(listing, shortID) {
+		t.Fatalf("after expiry, ssh-add -l still lists the 2 m login:\n%s", listing)
+	}
+	if listingLine(listing, long.fingerprint, longID) == "" {
+		t.Fatalf("after the 2 m expiry, the default-TTL login is gone too:\n%s", listing)
+	}
+	t.Logf("the 2 m entry left the agent; the default-TTL entry remains: %s", listingLine(listing, long.fingerprint, longID))
+}
+
+// testTwoConcurrentLogins (AUTH-04 concurrency): two keyroster login runs
+// for alice get their own fingerprints, URLs and pages. Approving A gives
+// A a certificate for key A; A's code on B's redeem endpoint is refused;
+// approving B then gives B a certificate for key B.
+func testTwoConcurrentLogins(t *testing.T, f *loginFixture) {
+	sock := startAgent(t)
+	pA, pB := startLogin(t, f.alice, sock), startLogin(t, f.alice, sock)
+	sA, sB := pA.started(t), pB.started(t)
+	if sA.fingerprint == sB.fingerprint || sA.approvalURL == sB.approvalURL {
+		t.Fatalf("the two logins share a fingerprint or URL: %+v %+v", sA, sB)
+	}
+	approvalPage(t, f.env, sB.approvalURL, sB.fingerprint) // B's page shows B's fingerprint
+	redirectA := approve(t, f.env, f.auth, sA)
+
+	// A's code on B's login is refused (B is not approved, and the code
+	// belongs to A's login only).
+	u, err := url.Parse(redirectA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := strings.Repeat("A", 43)
+	body, err := json.Marshal(map[string]string{"code": u.Query().Get("code"), "code_verifier": verifier})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idB := strings.TrimPrefix(strings.TrimPrefix(sB.approvalURL, f.env.URL), "/login/")
+	if r := newWebClient(t, f.env).do(t, http.MethodPost, "/api/v1/login/"+idB+"/redeem", body, nil); r.code != http.StatusBadRequest {
+		t.Fatalf("A's code on B's redeem = %d %s, want 400", r.code, r.body)
+	}
+
+	followLoopback(t, redirectA)
+	if code := pA.wait(t); code != 0 {
+		t.Fatalf("login A exited %d:\n%s", code, pA.stderr.String())
+	}
+	idA := stdoutField(t, pA.stdout.String(), "Key ID")
+	if listingLine(agentList(t, sock), sA.fingerprint, idA) == "" {
+		t.Fatalf("the agent has no certificate for key A")
+	}
+	followLoopback(t, approve(t, f.env, f.auth, sB))
+	if code := pB.wait(t); code != 0 {
+		t.Fatalf("login B exited %d:\n%s", code, pB.stderr.String())
+	}
+	idB2 := stdoutField(t, pB.stdout.String(), "Key ID")
+	if listingLine(agentList(t, sock), sB.fingerprint, idB2) == "" || idA == idB2 {
+		t.Fatalf("the agent has no separate certificate for key B")
+	}
+}
+
+// testUnapprovedLogin: a login begun and viewed but never approved (the
+// CLI killed first) adds no login_issue to the log.
+func testUnapprovedLogin(t *testing.T, f *loginFixture) {
+	before := len(loginIssueLines(t, f.env.Signer.exportLog(t)))
+	p := startLogin(t, f.alice, startAgent(t))
+	s := p.started(t)
+	approvalPage(t, f.env, s.approvalURL, s.fingerprint)
+	_ = p.cmd.Process.Kill()
+	p.wait(t)
+	if after := len(loginIssueLines(t, f.env.Signer.exportLog(t))); after != before {
+		t.Fatalf("an unapproved login changed the login_issue count from %d to %d", before, after)
+	}
+}
+
+// testSignerRefusalAfterApproval (02-12-F22): alice approves, then an
+// admin revokes role ops before the loopback hand-off; the redeem reaches
+// the real signer, which refuses, so the CLI exits non-zero with the
+// signer's refusal and the rerun advice, the agent gains nothing and the
+// log gains no login_issue.
+func testSignerRefusalAfterApproval(t *testing.T, f *loginFixture) {
+	before := len(loginIssueLines(t, f.env.Signer.exportLog(t)))
+	sock := startAgent(t)
+	p := startLogin(t, f.alice, sock)
+	s := p.started(t)
+	redirect := approve(t, f.env, f.auth, s)
+	f.kr(t, "role", "revoke", "ops", "--user", "alice", "--yes")
+	followLoopback(t, redirect)
+	if code := p.wait(t); code == 0 {
+		t.Fatalf("login after the revoke exited 0:\n%s", p.stdout.String())
+	}
+	errOut := p.stderr.String()
+	if !strings.Contains(errOut, "refused by the signer:") || !strings.Contains(errOut, "run keyroster login again") {
+		t.Fatalf("stderr lacks the signer refusal and the rerun advice:\n%s", errOut)
+	}
+	t.Logf("CLI: %s", strings.TrimSpace(errOut[strings.LastIndex(strings.TrimSpace(errOut), "\n")+1:]))
+	if l := agentList(t, sock); l != "" {
+		t.Fatalf("the agent gained an entry:\n%s", l)
+	}
+	if after := len(loginIssueLines(t, f.env.Signer.exportLog(t))); after != before {
+		t.Fatalf("a refused login changed the login_issue count from %d to %d", before, after)
 	}
 }
