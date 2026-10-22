@@ -52,7 +52,7 @@ actuals:
 plan_head_before: 99c2795e7d05ddf6858c680588d8ee64297c6a88
 plan_head_after: 162478dd22e1f0acd4f125f52e20db109fbbf92d
 
-duration: Task 2 to Task 4 about 2026-10-22T20:06Z to 20:45Z, plus the owner's checkpoints in between
+duration: Task 2 to Task 4 under an hour on 2026-10-22, plus the owner's checkpoints in between
 completed: 2026-10-22
 status: complete
 ---
@@ -63,7 +63,7 @@ status: complete
 
 ## Performance
 
-- **Duration:** Task 2 started at 2026-10-22T20:06Z (build) and Task 4 ended at about 20:45Z. The owner's checkpoints lie in between: D-09, the user name, `user add`, registration, and the directory commands.
+- **Duration:** Task 2 (from the build) to the end of Task 4 took under an hour on 2026-10-22. The owner's checkpoints lie in between: D-09, the user name, `user add`, registration, and the directory commands.
 - **Tasks:** 4 of 5. Task 5 is the owner's merge gate.
 - **Files:** 4 runbooks and 4 planning files.
 
@@ -130,7 +130,7 @@ The rollback window closed when Task 3 registered a passkey. From then on the pl
 - The roots stay C and D at threshold 1.
 - The CA, ops and log keys are unchanged (vTPM).
 - The admin stays `owner` (`SHA256:BUJx6C2+…`), quorum 1 of 1.
-- Bundle v3 was issued at 2026-10-22T20:07:46Z.
+- Bundle v3 was issued on 2026-10-22.
 
 After install the signer logged `serving backend=tpm policy_version=2`, with NRestarts 0. Doctor reported `trust bundle version 3 installed (2 roots, threshold 1)` and no FAIL. It warned `software_root` twice (C, D) and `vtpm_custody`.
 
@@ -139,12 +139,12 @@ After install the signer logged `serving backend=tpm policy_version=2`, with NRe
 - systemd-sysusers created `keyroster-server` (uid/gid 980), with groups `keyroster-server` and `keyroster-admin`.
 - The state directory `/var/lib/keyroster-server` is 980:980 0700, created by StateDirectory under `ProtectSystem=strict`.
 - `ExecStartPost=/usr/bin/systemctl try-reload-or-restart` appears exactly once in the installed unit.
-- **First run** (server not started, 20:09:32Z): `Result=success`, ExecMainStatus 0. `tailscale cert` wrote the cert and the key. `key.pem` is `root:keyroster-server`, `-rw-r-----`.
+- **First run** (server not started): `Result=success`, ExecMainStatus 0. `tailscale cert` wrote the cert and the key. `key.pem` is `root:keyroster-server`, `-rw-r-----`.
 - **fullchain.pem** holds **4** certificates: the leaf, the Let's Encrypt intermediate, and two cross-signed roots, the last one issued by ISRG Root X1.
-- **Timer:** `is-active` printed `active`. Next run: Fri 2026-10-23 00:41:44 UTC.
-- **Server start:** `tls certificate loaded` with trigger `start`, then `serving` with policy_version 2 and bundle_version 3, at 20:10:30Z. NRestarts 0.
-- **Second run** (against the running server, VM time 2026-10-22 20:10:31 UTC): `Result=success`. `tailscale cert` printed `Public cert unchanged` and `Private key unchanged`.
-- The keyroster-server journal logged `tls certificate loaded` with trigger `sighup` at 20:10:32Z. Its fingerprint was equal to the certificate on disk.
+- **Timer:** `is-active` printed `active`. Next run: the next day, 2026-10-23.
+- **Server start:** `tls certificate loaded` with trigger `start`, then `serving` with policy_version 2 and bundle_version 3. NRestarts 0.
+- **Second run** (against the running server, after the server start): `Result=success`. `tailscale cert` printed `Public cert unchanged` and `Private key unchanged`.
+- The keyroster-server journal logged `tls certificate loaded` with trigger `sighup` within a second of the second run. Its fingerprint was equal to the certificate on disk.
 - **A renewal started by the timer itself is UNVERIFIED.** This plan started the unit by hand, and a renewal that writes a new certificate and key that the server then loads has not run.
 - **Exposure:** `systemd-analyze security keyroster-server.service` scored 2.1 OK on the host.
 - **healthz** from Daniel-PC over the tailnet answered `{"status":"ok"}` with rc 0, with no `-k` and verified against the system roots. Both Git Bash curl and Windows curl.exe (Schannel) were tried.
@@ -161,7 +161,7 @@ After install the signer logged `serving backend=tpm policy_version=2`, with NRe
 | Step | Who ran it | Checked by Claude |
 |---|---|---|
 | `user add owner` | Owner, in his own terminal. The classifier refused it for the agent, and the invite token never entered a transcript | `user pending owner` listed exactly the replied credential |
-| Registration | Owner: Chrome on Daniel-PC (Windows); authenticator reported as `chrome` | `user pending owner`: `SHA256:GKHjxrvAR/mDLNvY9SAb8vw0Xeiw7XlT5VwEizpxJE4`, ES256, backup eligible and synced, registered 2026-10-22T20:18:33Z |
+| Registration | Owner: Chrome on Daniel-PC (Windows); authenticator reported as `chrome` | `user pending owner`: `SHA256:GKHjxrvAR/mDLNvY9SAb8vw0Xeiw7XlT5VwEizpxJE4`, ES256, backup eligible and synced, registered 2026-10-22 |
 | `user approve owner --fingerprint SHA256:GKHj…` | Owner, interactively. The classifier refused it for the agent | `user list`: owner active with exactly that passkey |
 | `role add homelab-admin --max-ttl 8h`, `role grant homelab-admin --user owner`, `host-group add homelab`, `host-group map homelab zima homelab-admin` | Owner, interactively. The first round left the grant out (directory v4 had `users=[]`; the cause was not recorded). The owner ran the grant again | below |
 
