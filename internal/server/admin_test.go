@@ -1522,6 +1522,10 @@ func TestDirectoryInstallPending(t *testing.T) {
 		if !bytes.Equal(e.fake.heldDirectory(), v2) {
 			t.Fatal("the fake does not hold the version whose answer was lost")
 		}
+		// The lost answer dropped the status the install's base step
+		// cached: at the same instant the server serves v2, so an admin
+		// who looks before retrying sees it (pre-merge review, 02-09).
+		e.mustGetDirectory(t, 2, v2)
 		if ids := e.pendingOf(t, "dave"); len(ids) != 1 || e.pendingRows(t, "dave") != 1 {
 			t.Fatalf("dave after the lost answer: pending %v, %d rows; want the orphan", ids, e.pendingRows(t, "dave"))
 		}
