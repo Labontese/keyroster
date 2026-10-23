@@ -132,6 +132,19 @@ are kept only outside the repository, under the evidence directory
     has already reported success on this PR's head, so applying after the
     merge loses nothing. CONTRIBUTING.md "Changing the rulesets" now says
     this. The PLAN text is left as it is.
+12. **Laptop binary (pre-merge review).** Task 1 step 3.1 says to copy
+    "the linux `keyroster` binary from 02-13's build" and check its SHA-256,
+    and T-02-SC accepts on "binaries from 02-13's recorded build". The
+    laptop instead ran `c98749ba…`, a fresh build of main `ff87054` made on
+    2026-10-23 before the laptop part. Its build info records go1.27.3,
+    `CGO_ENABLED=0`, `-trimpath`, `vcs.revision=ff87054a8f6f`,
+    `vcs.modified=false` and no `-ldflags`. The file has no symbol table or
+    DWARF sections, though, so it was stripped in a way the build info does
+    not record, and who built it is not recorded either. Between 99c2795
+    and ff87054 the only Go file that changed is `cmd/keyroster/runbook_test.go`
+    (a test), and no file under an embed root changed, so the code that ran
+    is 02-13's. T-02-SC's "binaries from 02-13's recorded build" holds for
+    the Windows CLI and not for the laptop CLI.
 
 ## Hosts (Task 1)
 
@@ -173,13 +186,18 @@ are kept only outside the repository, under the evidence directory
 
 **Laptop (ub-daniel), 2026-10-23.**
 - `~/.local/bin/keyroster` SHA-256
-  `c98749bae5e589c6876f51cadfc0324be012beeff357387b87f376c29da57642`,
-  equal to 02-13's linux build. `keyroster version` reports
-  `ff87054a8f6f`, go1.27.3.
+  `c98749bae5e589c6876f51cadfc0324be012beeff357387b87f376c29da57642`
+  (`$P/bin-linux/keyroster`). This is **not** 02-13's linux build
+  (`d75b9caa…`, commit 99c2795) but a fresh build of main `ff87054`
+  (deviation 12). `keyroster version` reports `ff87054a8f6f`, go1.27.3.
 - `keyroster init` for user `owner`. The server, TLS pin, root pins and
   threshold equal Daniel-PC's config (compared by hash, field by field).
 - The GNOME session's `SSH_AUTH_SOCK` is `/run/user/1000/gcr/ssh`. The
   client is `OpenSSH_10.2p1 Ubuntu-2ubuntu3.8`.
+
+**Daniel-PC (Windows CLI).** The owner ran `$P/bin/keyroster.exe`, 02-13's
+recorded build: SHA-256 `da3bd5dd…` (02-13-SUMMARY "Build"), and its build
+info and `keyroster version` report commit `99c2795e7d05`, go1.27.3.
 
 **A3 (moved here from 02-02).** The 02-02 probe ran on the laptop over
 `ssh.exe -n ub-daniel`, base64-encoded (`$P/a3-probe.out`):
