@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 02
-current_phase_name: Passkey Login MVP
-status: executing
-stopped_at: 02-14 Tasks 1-5 done on p02/14-homelab-logins; PR awaiting owner merge gate (Task 6)
-last_updated: "2026-10-23T04:00:00.000Z"
+current_phase: 03
+current_phase_name: Linux Agent and Revocation
+status: planning
+stopped_at: Phase 2 complete (verification passed 2026-10-23 with owner overrides); next /gsd-discuss-phase 3
+last_updated: "2026-10-23T11:13:43.000Z"
 last_activity: 2026-10-23
-last_activity_desc: 02-14 Windows and Linux logins run and corroborated; PR awaiting merge gate
-state_head: 4333758
+last_activity_desc: Phase 2 verification passed after the owner's decisions; phase 2 complete; next /gsd-discuss-phase 3
+state_head: cbdb6e80c9a1aa991f20dc665a397f671dc35e50
 progress:
   total_phases: 6
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 35
-  completed_plans: 34
-  percent: 0
+  completed_plans: 35
+  percent: 17
 ---
 
 # Project State
@@ -27,17 +27,17 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 ## Current Position
 
-Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 14 of 14
-Status: 02-14 PR awaiting owner merge gate (Task 6); 02-01 to 02-13 are merged
-Last activity: 2026-10-23 — 02-14 Tasks 1-5: the owner's logins on Windows (Proxmox test VM target) and on the laptop (zima-srv target, gcr-ssh-agent) corroborated; platform record and the cli-macos ruleset change in the PR (cli-windows not required yet, owner decision D1)
+Phase: 03 (Linux Agent and Revocation) — not started
+Plan: Not started
+Status: Ready to discuss (next: /gsd-discuss-phase 3)
+Last activity: 2026-10-23 — Phase 2 complete: code review (0 critical, 0 warning, 8 info) and verification passed after the owner's decisions (macOS real-browser leg UNVERIFIED by override; timed Windows expiry done). Phase 1: its report says human_needed (real hardware, issue #13), and gsd-tools now routes it as stale
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██░░░░░░░░] 17%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
+- Total plans completed: 14
 - Average duration: -
 - Total execution time: 0.0 hours
 
@@ -45,7 +45,7 @@ Progress: [░░░░░░░░░░] 0%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 2 | 14 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -230,6 +230,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-14: requirements-completed AUTH-02 and AUTH-04 (order=ok on both OSes), and UI-01 after the pre-merge review (all six pages in a real browser: enroll in 02-13, login, account and login_approve in Tasks 2-4, index, the error page and sign-out by the owner in Chrome on 2026-10-23; strict CSP on every page by curl, no CSP violation in the console; a DevTools "1 issue" on the error page and /login not captured); AUTH-03 and PLAT-05 stay Pending (macOS UNVERIFIED); Windows removal at expiry not shown (listing times unrecorded)
 - [Phase 02]: 02-14 pre-merge review, owner decision D2 (2026-10-23): a ruleset change is applied by the owner after its PR merges, from an up-to-date main checkout (the reviewed script and JSON), never from a PR branch; this replaces the 01-04 pattern of applying from the PR branch before approval. A new required check must already have reported success on its PR (CONTRIBUTING.md "Changing the rulesets")
 
+- [Phase 02]: Phase 2 verification, owner decisions 2026-10-23: "Godkänn alla tre (Rekommenderas)" (overrides: 02-14 truth 9 cli-windows replaced by D1, 02-13 truth 8 anchor v2 by design, SC5 read through D-18); "Stäng med macOS UNVERIFIED (Rekommenderas)" (SC2 macOS clause by override; AUTH-03 and PLAT-05 stay Pending); "Kör testet nu (Rekommenderas)" (timed Windows expiry from a cold start: serial 1792752977539626 left the keyroster agent between 3.9 s before and 1.1 s after valid_before at 5 s resolution (Daniel-PC clock against server clock, skew unmeasured), audit verify ok with 18 entries); "Acceptera, lägg till tester senare (Rekommenderas)" (9 flagged prohibitions accepted, two negative tests as todos). The MVP goal format follows the Phase 1 precedent. Status passed, 5/5 and 145/145 with 4 overrides
+- [Phase 02]: KEY-02 stays Pending: its Phase 2 clauses are complete, the required-approvals clause arrives with Phase 4 SC2. Advisory 4 (machine names in committed files outside the alias allow-list) has no owner decision yet
+
 ### Pending Todos
 
 - [2026-10-16] [auth] Bind admin-signed directories to a deployment — [todo file](.planning/todos/pending/2026-10-16-bind-admin-signed-directories-to-a-deployment.md) — Needs Options:.
@@ -238,6 +241,18 @@ Recent decisions affecting current work:
 - [2026-10-20] [server] Cap keyroster-server connections and memory (minor, Phase 6) — [todo file](.planning/todos/pending/2026-10-20-cap-server-connections-and-memory.md) — found in the 02-07 pre-merge review: no listener connection cap, idle HTTP/1.1 and h2 connections and h2 receive windows; options listed.
 - [2026-10-21] [auth] The CLI verifies signer-signed receipts for directory installs (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-21-cli-verifies-directory-install-receipts.md) — found in the 02-09 pre-merge review: a compromised server can answer an install (even a disable) as done without forwarding it; owner decision F1: honest wording and a signer-host check now, a signed checkpoint plus inclusion proof and high-water marks in Phase 4.
 - [2026-10-21] [auth] Recover the directory after an admin-set or quorum change (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-21-recover-directory-after-admin-set-change.md) — found in the 02-09 pre-merge review: once a successor policy changes the admins or quorum, every CLI directory command refuses the old base, so no command can install the re-signed directory the signer waits for; owner decision F3; options: verify against the previous policy, the audit log's PolicyVersion, a re-sign command, a signer-local break-glass install.
+- [2026-10-23] [docs] The signer restore runbook replays lost directory versions with directory install (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-restore-runbook-replays-lost-directory-versions.md) — review A-IN-01.
+- [2026-10-23] [auth] The directory install pending check covers re-keyed and moved credentials (minor, Phase 4) — [todo file](.planning/todos/pending/2026-10-23-pending-check-covers-rekeyed-credentials.md) — review B-IN-01.
+- [2026-10-23] [server] Show the software-custody banner on error, 404 and 429 pages (minor, Phase 4) — [todo file](.planning/todos/pending/2026-10-23-custody-banner-on-error-pages.md) — review B-IN-02.
+- [2026-10-23] [server] A redeemed login code always reaches the signer inside its 300 s window (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-login-redeem-fits-the-signer-window.md) — review C-IN-01.
+- [2026-10-23] [cli] keyroster login checks the ssh-agent before the certificate is issued (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-cli-checks-the-agent-before-issuance.md) — review E-IN-01.
+- [2026-10-23] [cli] Recompute the agent lifetime immediately before the add (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-recompute-agent-lifetime-before-add.md) — review E-IN-02; not seen at 5 s resolution in the timed Windows run.
+- [2026-10-23] [docs] The runbooks say that disabling a user does not end certificates already issued (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-runbooks-say-disable-does-not-end-issued-certificates.md) — review F-IN-01.
+- [2026-10-23] [auth] The CLI takes software custody from the root-signed bundle, not only the server header (minor, Phase 4) — [todo file](.planning/todos/pending/2026-10-23-cli-custody-banner-from-the-root-signed-bundle.md) — review F-IN-02.
+- [2026-10-23] [test] A negative test proves there is no non-passkey sign-in route (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-negative-test-no-non-passkey-sign-in-route.md) — owner decision 2026-10-23 (02-10 prohibition).
+- [2026-10-23] [test] A negative test proves keyroster login never writes the ephemeral key to disk (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-negative-test-login-never-writes-the-key-to-disk.md) — owner decision 2026-10-23 (02-12 prohibition, disk half).
+- [2026-10-23] [planning] Correct the 02-13 and 02-14 plan text that drifted from what was executed (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-correct-02-13-and-02-14-plan-text-drift.md) — anchor 3 and cli-windows; editing the plans stales the phase 2 verification.
+- [2026-10-23] [docs] Record the timed Windows expiry run in needs-hardware.md (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-record-the-timed-windows-expiry-in-needs-hardware.md) — the doc still says the listing times were not recorded.
 
 ### Blockers/Concerns
 
@@ -265,6 +280,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-23T04:00:00.000Z
-Stopped at: 02-14 Tasks 1-5 done on p02/14-homelab-logins; PR awaiting owner merge gate (Task 6)
+Last session: 2026-10-23T11:13:43.000Z
+Stopped at: Phase 2 complete (verification passed 2026-10-23 with owner overrides); next /gsd-discuss-phase 3
 Resume file: None
