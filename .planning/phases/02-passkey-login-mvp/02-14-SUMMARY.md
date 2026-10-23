@@ -145,6 +145,12 @@ are kept only outside the repository, under the evidence directory
     (a test), and no file under an embed root changed, so the code that ran
     is 02-13's. T-02-SC's "binaries from 02-13's recorded build" holds for
     the Windows CLI and not for the laptop CLI.
+13. **Auto-merge is not enabled on the PR.** Task 5 step 4 says to enable
+    auto-merge, and its acceptance criterion and Task 6 rely on it. The
+    orchestrator's executor prompt asked for it, wrongly: under the
+    standing rule (since 02-07, auto-merge is enabled only after the
+    pre-merge review) the orchestrator disabled it before the review. It
+    enables auto-merge after the review, as in 02-13.
 
 ## Hosts (Task 1)
 
