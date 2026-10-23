@@ -52,12 +52,10 @@ jobs:
           KEYROSTER_REQUIRE_SSH_AGENT: "1"
         run: CGO_ENABLED=1 go test -race -count=1 ./...
 
-  # PLAT-05: the CLI on Windows and macOS. 02-14 makes cli-macos a required
-  # check (main-integrity). cli-windows is not required yet: go-winio
-  # v0.6.2's listener Close race intermittently hangs TestAgent (7 failures
-  # in the last 100 runs). It becomes required once Dependabot PR #41
-  # (go-winio v0.6.4, plus the SA1019 fix errors.Is(err, net.ErrClosed) in
-  # internal/winagent/winagent_windows.go) has merged and is green.
+  # PLAT-05: the CLI on Windows and macOS. Both jobs are required checks
+  # (main-integrity): cli-macos since 02-14, cli-windows after go-winio
+  # v0.6.4 (which fixed the listener Close race that hung TestAgent)
+  # replaced v0.6.2.
   # cli-windows runs keyroster agent against the inbox OpenSSH client and
   # requires it: KEYROSTER_REQUIRE_INBOX_SSH=1 turns a missing ssh.exe into a
   # failure of TestInboxSSHOffersAgentCert instead of a skip.
