@@ -150,7 +150,7 @@ func Serve(ctx context.Context, path string, opts Options) error {
 		for {
 			conn, err := l.Accept()
 			if err != nil {
-				if errors.Is(err, winio.ErrPipeListenerClosed) {
+				if errors.Is(err, net.ErrClosed) {
 					err = nil
 				}
 				acceptDone <- err
