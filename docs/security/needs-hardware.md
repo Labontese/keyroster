@@ -163,10 +163,12 @@ exercised and must not be presented as working.
 
 **End-to-end logins on the homelab (02-14).** The owner ran `keyroster
 login` in a real browser and approved with a passkey, then logged in with
-the certificate to a stock OpenSSH host. Each login is matched in two
+the certificate to a stock OpenSSH host. Only the 8 h certificate on each
+OS was used for SSH, and each of those two logins is matched in two
 records: a `login_issue` entry in the signer's audit-verified log, and a
 certificate login (`ED25519-CERT`, kr2 key ID, serial) in the host's sshd
-journal.
+journal. The `--ttl 5m` certificates were not used for SSH: they appear
+only in the signer's log and in the agent listings.
 
 | OS | Browser | Authenticator | Agent | SSH client → host | Result |
 |---|---|---|---|---|---|
