@@ -336,6 +336,11 @@ there was no STOP and no owner decision was needed:
 - since `KR_VM_SINCE` (Windows, `$P/journal-server-windows.txt`);
 - since 03:00 UTC on 2026-10-23 (Linux, `$P/journal-server-linux.txt`).
 
+The two stored reads leave a gap, from about 21:48 UTC on 2026-10-22 (when
+the Windows read was taken) to 03:00 UTC. In the pre-merge review the
+reviewers read the keyroster-server journal since `KR_VM_SINCE` in full,
+read-only, and it holds no `bad_authenticator_data` either.
+
 The Windows window holds one `web sign-in begin_refused
 reason=no_usable_passkey` for the user name `homelab-admin`: the role name
 was typed as the user name. It is followed by `signin_ok` for `owner`. Each
