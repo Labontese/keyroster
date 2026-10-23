@@ -31,7 +31,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Identity & Login (AUTH)
 
-- [ ] **AUTH-01**: Admin can create local user accounts; every account must register at least one WebAuthn/passkey credential
+- [x] **AUTH-01**: Admin can create local user accounts; every account must register at least one WebAuthn/passkey credential
 - [x] **AUTH-02**: User can log in to the web UI with a passkey/FIDO2 key
 - [ ] **AUTH-03**: User can run `sshcm login` and get a short-lived certificate (hours, capped per role) loaded into their ssh-agent with matching lifetime, on Linux, macOS and Windows
 - [x] **AUTH-04**: Login flow shows the public-key fingerprint on both CLI and browser so the user can confirm the request (phishing resistance)
@@ -181,7 +181,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | KEY-06 | Phase 2 | Complete |
 | KEY-07 | Phase 1 | Pending |
 | KEY-08 | Phase 3 | Pending |
-| AUTH-01 | Phase 2 | Pending |
+| AUTH-01 | Phase 2 | Complete |
 | AUTH-02 | Phase 2 | Complete |
 | AUTH-03 | Phase 2 | Pending (Linux and Windows verified end to end (02-14); macOS browser leg UNVERIFIED; Windows removal at expiry not timed) |
 | AUTH-04 | Phase 2 | Complete |
