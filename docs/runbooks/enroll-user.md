@@ -323,7 +323,7 @@ logins stay apart, an unapproved login issues nothing, and a role revoked
 between approval and hand-off gets the signer's refusal. The CLI flow also
 runs against a fake server on Linux, macOS and Windows in CI.
 
-**Run on the homelab in 02-14, on Windows only:** the owner ran
+**Run on the homelab in 02-14, on Windows:** the owner ran
 `keyroster login` and `keyroster login --ttl 5m` on Windows 11 in Chrome,
 approving with a synced Chrome passkey unlocked by Windows Hello. The owner
 saw the fingerprint on the page before any passkey prompt, and the prompt
