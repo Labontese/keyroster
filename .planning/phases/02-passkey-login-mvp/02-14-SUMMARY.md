@@ -413,8 +413,12 @@ inbox client, are UNVERIFIED.
   `$P/owner-ui-check.txt`; the screenshots were not kept, because they show
   the RP name.
 - **AUTH-03 and PLAT-05 stay Pending.** The macOS browser leg is
-  UNVERIFIED. REQUIREMENTS.md carries the note "Linux and Windows verified
-  end to end (02-14); macOS browser leg UNVERIFIED".
+  UNVERIFIED. On Windows, AUTH-03's "matching lifetime" is shown only in
+  part: the 5 m certificate was gone from keyroster agent at a later
+  listing, but the listing times were not recorded, so removal at expiry
+  is not shown (deviation 7, open item). REQUIREMENTS.md carries the note
+  "Linux and Windows verified end to end (02-14); macOS browser leg
+  UNVERIFIED; Windows removal at expiry not timed".
 
 ## Task Commits
 

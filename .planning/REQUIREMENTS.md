@@ -183,7 +183,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | KEY-08 | Phase 3 | Pending |
 | AUTH-01 | Phase 2 | Pending |
 | AUTH-02 | Phase 2 | Complete |
-| AUTH-03 | Phase 2 | Pending (Linux and Windows verified end to end (02-14); macOS browser leg UNVERIFIED) |
+| AUTH-03 | Phase 2 | Pending (Linux and Windows verified end to end (02-14); macOS browser leg UNVERIFIED; Windows removal at expiry not timed) |
 | AUTH-04 | Phase 2 | Complete |
 | AUTH-05 | Phase 4 | Pending |
 | AUTH-06 | Phase 3 | Pending |
@@ -225,7 +225,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-02 | Phase 5 | Pending |
 | PLAT-03 | Phase 5 | Pending |
 | PLAT-04 | Phase 5 | Pending |
-| PLAT-05 | Phase 2 | Pending (Linux and Windows verified end to end (02-14); macOS browser leg UNVERIFIED) |
+| PLAT-05 | Phase 2 | Pending (Linux and Windows verified end to end (02-14); macOS browser leg UNVERIFIED; Windows removal at expiry not timed) |
 | REPO-01 | Phase 1 | Complete |
 | REPO-02 | Phase 1 | Complete |
 | REPO-03 | Phase 1 | Complete |
