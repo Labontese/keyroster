@@ -12,7 +12,7 @@ provides:
   - "The first real end-to-end logins, on Windows 11 and on Ubuntu 26.04 GNOME, each corroborated by the signer's audit-verified log and the host's sshd journal"
   - "A3 (gcr-ssh-agent lifetime and certificate probe) run and passed on the laptop"
   - "The platform record in needs-hardware.md (verified vs UNVERIFIED per OS, browser, authenticator and agent)"
-  - "cli-windows and cli-macos in main-integrity.json and CONTRIBUTING.md, for the owner to apply at the merge gate"
+  - "cli-macos in main-integrity.json and CONTRIBUTING.md, for the owner to apply at the merge gate; cli-windows stays unrequired until its intermittent TestAgent hang is fixed (owner decision D1)"
 affects: [AUTH-02, AUTH-03, AUTH-04, PLAT-05, UI-01]
 
 tech-stack:
@@ -54,8 +54,8 @@ certificate login is matched by serial between the signer's audit-verified
 log and the host's sshd journal. A `--ttl 5m` certificate left the agent on
 both machines while the 8 h one stayed. On Linux this was shown 57 s after
 expiry. On Windows the listing times were not recorded. macOS stays
-UNVERIFIED. cli-windows and cli-macos become required checks once the owner
-applies the ruleset.**
+UNVERIFIED. cli-macos becomes a required check once the owner applies the
+ruleset; cli-windows does not yet (deviation 10).**
 
 Addresses, host names other than the SSH aliases, the RP name and its hash
 are kept only outside the repository, under the evidence directory
@@ -111,6 +111,17 @@ are kept only outside the repository, under the evidence directory
 9. **The plan's `ssh.exe -n zima` precondition and the Task 1 `sshd -T -C`
    check for zima-srv** were re-run in Task 5 (after the logins). Both exit
    0; see "Hosts".
+10. **Required checks: cli-macos only (owner decision D1, 2026-10-23,
+    pre-merge review).** The plan's must-have says cli-windows and cli-macos
+    "have run green on main since 02-02", and Task 5 step 3 checked only the
+    check runs of main's tip. That holds for cli-macos. It does not hold for
+    cli-windows: 7 of its last 100 runs failed, three of them on main, each
+    of those with a 10-minute hang in `TestAgent/ensure_retries_once_on_closing_agent`
+    (go-winio v0.6.2's listener `Close` race). Made required, it would fail
+    correct PR heads. The owner chose "macOS nu, Windows sen": the ruleset
+    and CONTRIBUTING.md require cli-macos only, and the ci.yml comment says
+    why cli-windows is not required yet. deferred-items.md records when it
+    becomes required (after Dependabot PR #41, go-winio v0.6.4).
 
 ## Hosts (Task 1)
 
@@ -337,10 +348,13 @@ inbox client, are UNVERIFIED.
 
 - `gh api repos/Labontese/keyroster/commits/main/check-runs` on main
   `ff87054` shows `cli-windows` and `cli-macos` completed with success, app
-  id 15368.
-- Both contexts (integration_id 15368) are added to
-  `.github/rulesets/main-integrity.json`. CONTRIBUTING.md's list grows from
-  17 to 19 checks.
+  id 15368. That is the tip only; cli-windows has failed on earlier main
+  runs (deviation 10).
+- `cli-macos` (integration_id 15368) is added to
+  `.github/rulesets/main-integrity.json`, and CONTRIBUTING.md's list grows
+  from 17 to 18 checks. `cli-windows` was added too and taken out again in
+  the pre-merge review (owner decision D1); CONTRIBUTING.md says it runs on
+  every PR but is not required yet.
 - The live ruleset is unchanged: the owner applies it from the PR branch in
   Task 6.
 
@@ -396,7 +410,7 @@ inbox client, are UNVERIFIED.
 | T5-1: Linux export extends the Windows one, ok, bundle 3, anchor 2, login_issue ≥ Windows + 2 | exit 0 |
 | T5-2: a Windows serial in the test VM's journal and a Linux serial in zima-srv's journal (adapted, deviation 2) | exit 0 |
 | T5-3: Linux expiry by key ID | exit 0 |
-| T5-4: ruleset JSON holds exactly cli-windows and cli-macos with integration_id 15368; needs-hardware.md has UNVERIFIED | exit 0 |
+| T5-4 (adapted, deviation 10): ruleset JSON holds cli-macos with integration_id 15368 and no cli-windows (the plan expects both); needs-hardware.md has UNVERIFIED | exit 0 |
 | T5-5: diff guard (pattern plus guard-literals.txt) | exit 0 before each commit |
 | T5-6: FETCH_HEAD equals HEAD with this SUMMARY | run after the push |
 | T5-7: exactly one `A3 (02-14): …` line | exit 0 |
@@ -412,10 +426,8 @@ inbox client, are UNVERIFIED.
 - **UI-01.** Exercise the index page, the error page and sign-out in a real
   browser, or decide that the pages exercised suffice.
 - **macOS** (AUTH-03, PLAT-05): no Mac in the homelab.
-- **ci.yml comment.** The comment above `cli-windows` says they are "Not
-  required checks yet". It is accurate until the owner applies the ruleset
-  and stale afterwards. It is left for a later edit of ci.yml (outside this
-  plan's files).
+- **cli-windows as a required check** (deviation 10): after Dependabot PR
+  #41 has merged and the job is green on main (deferred-items.md).
 
 ## Not exercised (UNVERIFIED)
 

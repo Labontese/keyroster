@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 Phase: 02 (Passkey Login MVP) — EXECUTING
 Plan: 14 of 14
 Status: 02-14 PR awaiting owner merge gate (Task 6); 02-01 to 02-13 are merged
-Last activity: 2026-10-23 — 02-14 Tasks 1-5: the owner's logins on Windows (Proxmox test VM target) and on the laptop (zima-srv target, gcr-ssh-agent) corroborated; platform record and the cli-windows/cli-macos ruleset change in the PR
+Last activity: 2026-10-23 — 02-14 Tasks 1-5: the owner's logins on Windows (Proxmox test VM target) and on the laptop (zima-srv target, gcr-ssh-agent) corroborated; platform record and the cli-macos ruleset change in the PR (cli-windows not required yet, owner decision D1)
 
 Progress: [░░░░░░░░░░] 0%
 

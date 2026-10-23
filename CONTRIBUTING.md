@@ -60,14 +60,13 @@ git config gpg.ssh.program C:/Windows/System32/OpenSSH/ssh-keygen.exe
 
 ## Required checks
 
-The `main-integrity` ruleset requires these 19 checks. Each name is a job
+The `main-integrity` ruleset requires these 18 checks. Each name is a job
 name (with its matrix value) in one of the workflows under
 `.github/workflows/`:
 
 | Check | Workflow | What it does |
 |---|---|---|
 | `build-test` | `ci.yml` | `go mod verify`, static build, cross-compile for windows/darwin/freebsd, `go vet`, `gofmt`, tests with the race detector |
-| `cli-windows` | `ci.yml` | the CLI packages' tests on Windows Server 2025, including keyroster agent against the inbox OpenSSH client (`KEYROSTER_REQUIRE_INBOX_SSH=1` makes a missing `ssh.exe` fail the job) |
 | `cli-macos` | `ci.yml` | the CLI packages' tests on macOS 15, including `TestAgentLifetime` against a real `ssh-agent` (`KEYROSTER_REQUIRE_SSH_AGENT=1`) |
 | `lint` | `ci.yml` | golangci-lint v2.14.0 with `.golangci.yml` |
 | `govulncheck` | `ci.yml` | reachable-vulnerability scan of the default build with the pinned govulncheck in `tools/go.mod` (the `-tags piv` build is scanned in `build-piv`) |
@@ -85,6 +84,18 @@ name (with its matrix value) in one of the workflows under
 | `pinned-actions` | `workflow-lint.yml` | `scripts/check-pinned-actions.sh`: every action is pinned to a commit SHA |
 | `Analyze (go)` | `codeql.yml` | CodeQL analysis of the Go code, built both static and with `-tags piv` (UNVERIFIED: that the extractor picks up the piv files from the second build has not been checked in a CI run) |
 | `Analyze (actions)` | `codeql.yml` | CodeQL analysis of the workflows |
+
+**`cli-windows` runs on every PR but is not required yet.** It runs in
+`ci.yml`: the CLI packages' tests on Windows Server 2025, including
+keyroster agent against the inbox OpenSSH client
+(`KEYROSTER_REQUIRE_INBOX_SSH=1` makes a missing `ssh.exe` fail the job).
+It is not in `main-integrity` because 7 of its last 100 runs failed, and
+the failures examined were a 10-minute hang in `TestAgent` on a correct
+head. The hang is a race in go-winio v0.6.2's listener `Close`. The job becomes required after
+Dependabot PR #41 (go-winio v0.6.4, plus the SA1019 fix
+`errors.Is(err, net.ErrClosed)` in `internal/winagent/winagent_windows.go`)
+has merged and the job is green on `main`. Until then, read a red
+`cli-windows` before you merge.
 
 **OpenSSH 9.5p2 is not covered by CI.** Windows ships Microsoft's own
 `OpenSSH_for_Windows_9.5p2`, which has no upstream release. Portable 9.5p1 is
