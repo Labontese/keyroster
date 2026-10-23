@@ -98,7 +98,7 @@ Plans:
   4. The signer refuses to sign, whatever the server sends, when the WebAuthn assertion is missing, replayed or bound to a different request digest, or when the policy version is not root/quorum-signed.
   5. Server and signer run on Linux and serve a server-rendered web UI embedded in the binary, with a strict CSP and no npm dependencies; when the CA runs on an encrypted software key, every CLI command and every UI page shows a loud evaluation-only warning.
 
-**Plans:** 12/14 plans executed in 11 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p02/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 13/14 plans executed in 11 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p02/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -132,10 +132,10 @@ Plans:
 - [x] 02-12-PLAN.md — `keyroster login`: fingerprint on CLI and page, loopback with state and PKCE, mint at redemption, certificate checks, agent with lifetime (Linux, macOS, Windows)
 
 **Wave 10** *(blocked on Wave 9 completion)*
-- [ ] 02-13-PLAN.md — Homelab: D-09 hostname checkpoint, bundle v3 with the RP (KEY-07 offline ceremony becomes v4), keyroster-server with tailscale cert, owner enrolled (D-04)
+- [x] 02-13-PLAN.md — Homelab: D-09 hostname checkpoint, bundle v3 with the RP (KEY-07 offline ceremony becomes v4), keyroster-server with tailscale cert, owner enrolled (D-04)
 
 **Wave 11** *(blocked on Wave 10 completion)*
-- [ ] 02-14-PLAN.md — Homelab: real logins from Daniel-PC (Windows) and the laptop (Linux) to a stock OpenSSH host, corroborated by audit log and sshd journal; platform record (macOS UNVERIFIED); cli-windows/cli-macos required
+- [ ] 02-14-PLAN.md — Homelab: real logins from Daniel-PC (Windows) and the laptop (Linux) to a stock OpenSSH host, corroborated by audit log and sshd journal; platform record (macOS UNVERIFIED); cli-macos required (cli-windows after the go-winio fix, owner decision D1)
 
 **UI hint**: yes
 **Research**: MEDIUM-HIGH. CLI WebAuthn transport (default: browser loopback with PKCE + state; libfido2 needs cgo), Windows webauthn.dll/CTAP for non-admin users, Windows ssh-agent named pipe, WebAuthn origin rules (hostname + TLS, IP-origin guard).
@@ -216,7 +216,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
-| 2. Passkey Login MVP | 12/14 | In Progress | - |
+| 2. Passkey Login MVP | 13/14 | In Progress | - |
 | 3. Linux Agent and Revocation | 0/TBD | Not started | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |

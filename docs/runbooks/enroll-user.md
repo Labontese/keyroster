@@ -273,7 +273,9 @@ keyroster login --role ops --ttl 30m
   printed.** If you did not just run `keyroster login`, close the page:
   someone may have started a login and sent you the link, hoping you
   approve it for them (consent phishing). Approving it would give them a
-  certificate for your principals.
+  certificate for your principals. A browser extension with access to the
+  keyroster site can defeat this comparison, so approve in a browser
+  profile without one (see [Residual risk](#residual-risk)).
 - After the passkey prompt the browser hands the result to
   `keyroster login` on `127.0.0.1`. The CLI checks the certificate against
   the user CA of your root-signed trust bundle (its own key, exactly the
@@ -291,8 +293,19 @@ keyroster login --role ops --ttl 30m
 - Your computer's clock must be within 60 s of the server's; the CLI
   refuses otherwise.
 - **Linux and macOS:** the certificate goes into the ssh-agent at
-  `SSH_AUTH_SOCK`; start one first with `eval $(ssh-agent)`. GNOME's
-  gcr-ssh-agent is **UNVERIFIED until 02-14**: use OpenSSH `ssh-agent`.
+  `SSH_AUTH_SOCK`. If none is running, start one first with
+  `eval $(ssh-agent)`. GNOME's gcr-ssh-agent, as shipped in Ubuntu 26.04,
+  passed the lifetime and certificate probe (A3) in 02-14 and works as that
+  agent. Other gcr versions are UNVERIFIED.
+- **ssh may log you in with another key.** If the host also has one of
+  your plain keys in `authorized_keys`, ssh may offer that key first, and
+  then the certificate is not what logged you in. To offer only
+  certificates, add `-o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com`.
+  The run on Linux in 02-14 used it together with
+  `-o PasswordAuthentication=no -o KbdInteractiveAuthentication=no`, so a
+  refused certificate ends the login instead of falling back to a password
+  prompt. The same settings in a `Host` block, and any of them with the
+  Windows inbox client, are UNVERIFIED.
 - **Windows:** the certificate goes into keyroster's own agent, never the
   Windows OpenSSH agent service. `keyroster login` starts it when needed
   and prints a `Host <your keyroster hosts>` block with an `IdentityAgent`
@@ -313,13 +326,50 @@ page shows the CLI's fingerprint, the certificate logs in through the
 agent, a `--ttl 2m` certificate leaves the agent at expiry, two concurrent
 logins stay apart, an unapproved login issues nothing, and a role revoked
 between approval and hand-off gets the signer's refusal. The CLI flow also
-runs against a fake server on Linux, macOS and Windows in CI. **UNVERIFIED
-until 02-14** (02-13 ran registration only, no login): the approval page's
-script in a real browser, a real authenticator's assertion, the browser
-opener, the Windows path in which
-`keyroster login` itself starts keyroster agent, and gcr-ssh-agent.
+runs against a fake server on Linux, macOS and Windows in CI.
+
+**Run on the homelab in 02-14, on Windows:** the owner ran
+`keyroster login` and `keyroster login --ttl 5m` on Windows 11 in Chrome,
+approving with a synced Chrome passkey unlocked by Windows Hello. The owner
+saw the fingerprint on the page before any passkey prompt, and the prompt
+appeared only after Approve. The certificate logged in to a stock OpenSSH host
+through keyroster agent, and the 5 m certificate was gone from the agent
+at a later listing while the other stayed (the listing times were not
+recorded, so removal at expiry itself is not shown). The signer's log records both logins, and the
+host's sshd journal records the SSH login with the 8 h certificate.
+
+**Run on the homelab in 02-14, on Linux:** on the laptop (Ubuntu 26.04,
+GNOME) the owner ran `keyroster login` and `keyroster login --ttl 5m`,
+approving in Chrome with the same synced passkey, unlocked through Google
+Password Manager. Both certificates went into gcr-ssh-agent. The owner saw
+the fingerprint on the page before any passkey prompt, and the prompt
+appeared only after Approve. The 8 h certificate logged in to a stock
+OpenSSH host. The first `ssh` used the laptop's own plain key instead (see
+"ssh may log you in with another key"), and a run that offered only
+certificates logged in with the certificate. The 5 m certificate was still
+in the agent before its expiry, and gone 57 s after it while the other
+stayed. The signer's log records both logins, and the host's sshd journal
+records the certificate login.
+
+**Still UNVERIFIED:** Edge and every browser other than Chrome, a
+hardware or device-bound authenticator (both runs used one synced
+passkey), web sign-in on Linux, macOS, OpenSSH `ssh-agent` outside CI, the
+browser opener, and the Windows path in which `keyroster login` itself
+starts keyroster agent.
 
 ## Residual risk
+
+**A browser extension can defeat the fingerprint comparison.** An
+extension that can read and change the keyroster site can swap the
+approval page's challenge and the address the assertion goes to while your
+own fingerprint stays on screen: `app.js` reads the challenge from
+`data-options` when you click Approve and posts the result to the URL in
+`data-assertion`. It can also read the loopback redirect to
+`keyroster login`. The page's Content-Security-Policy does not restrict
+extensions. Approve in a browser profile without extensions that have
+access to the keyroster host, or withhold their site access. This is
+outside the Phase 2 threat model (a compromised WebAuthn client); Phase 4
+revisits browser integrity.
 
 **The fingerprint comparison does not hold against a compromised
 server.** The passkey signs only the WebAuthn challenge, never the

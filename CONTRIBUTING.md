@@ -60,13 +60,14 @@ git config gpg.ssh.program C:/Windows/System32/OpenSSH/ssh-keygen.exe
 
 ## Required checks
 
-The `main-integrity` ruleset requires these 17 checks. Each name is a job
+The `main-integrity` ruleset requires these 18 checks. Each name is a job
 name (with its matrix value) in one of the workflows under
 `.github/workflows/`:
 
 | Check | Workflow | What it does |
 |---|---|---|
 | `build-test` | `ci.yml` | `go mod verify`, static build, cross-compile for windows/darwin/freebsd, `go vet`, `gofmt`, tests with the race detector |
+| `cli-macos` | `ci.yml` | on macOS 15, the tests of seven package trees: `cmd/keyroster`, `internal/winagent` (no package on macOS), `internal/webauthn`, `internal/wire`, `internal/trust`, `internal/sshsig` and `internal/directory`, including `TestAgentLifetime` against a real `ssh-agent` (`KEYROSTER_REQUIRE_SSH_AGENT=1`). The other packages `keyroster` links (`internal/audit`, `internal/tlog`, `internal/cert`, `internal/custodytext`, `internal/rootceremony`, `internal/adminauth`, `internal/serverclient`, `internal/signerclient`) are tested on Linux only; `internal/certprofile` has no tests |
 | `lint` | `ci.yml` | golangci-lint v2.14.0 with `.golangci.yml` |
 | `govulncheck` | `ci.yml` | reachable-vulnerability scan of the default build with the pinned govulncheck in `tools/go.mod` (the `-tags piv` build is scanned in `build-piv`) |
 | `dependency-firewall` | `ci.yml` | `scripts/dep-firewall.sh`: no banned package in keyroster-signer's dependency graph, with and without `-tags piv` |
@@ -83,6 +84,19 @@ name (with its matrix value) in one of the workflows under
 | `pinned-actions` | `workflow-lint.yml` | `scripts/check-pinned-actions.sh`: every action is pinned to a commit SHA |
 | `Analyze (go)` | `codeql.yml` | CodeQL analysis of the Go code, built both static and with `-tags piv` (UNVERIFIED: that the extractor picks up the piv files from the second build has not been checked in a CI run) |
 | `Analyze (actions)` | `codeql.yml` | CodeQL analysis of the workflows |
+
+**`cli-windows` runs on every PR but is not required yet.** It runs in
+`ci.yml`: on Windows Server 2025, the tests of the same seven package
+trees as `cli-macos` (the other packages `keyroster` links are tested on
+Linux only), including keyroster agent against the inbox OpenSSH client
+(`KEYROSTER_REQUIRE_INBOX_SSH=1` makes a missing `ssh.exe` fail the job).
+It is not in `main-integrity` because 7 of its last 100 runs failed, and
+the failures examined were a 10-minute hang in `TestAgent` on a correct
+head. The hang is a race in go-winio v0.6.2's listener `Close`. The job becomes required after
+Dependabot PR #41 (go-winio v0.6.4, plus the SA1019 fix
+`errors.Is(err, net.ErrClosed)` in `internal/winagent/winagent_windows.go`)
+has merged and the job is green on `main`. Until then, read a red
+`cli-windows` before you merge.
 
 **OpenSSH 9.5p2 is not covered by CI.** Windows ships Microsoft's own
 `OpenSSH_for_Windows_9.5p2`, which has no upstream release. Portable 9.5p1 is
@@ -189,16 +203,25 @@ second human reviewer. The rules for using it:
 ## Changing the rulesets
 
 The rulesets live in `.github/rulesets/` as JSON. A change goes through a
-normal PR; after it merges, the owner runs `bash scripts/apply-rulesets.sh`
-with the owner's gh login, which creates or updates each ruleset by name.
+normal PR. After it merges, the owner applies it from an up-to-date `main`
+checkout, with the owner's gh login:
 
-A new required check is the exception to "after it merges". A check becomes
-required only after it has reported success on the PR that introduces it,
-because a required check that never reports blocks every merge. The owner
-applies that ruleset from the PR branch once the new check is green on the
-PR, and before approving. The PR then shows that the new context resolves
-before anything merges. If that PR is later abandoned, the owner runs the
-script again from `main` to restore the previous list.
+```
+git switch main
+git pull --ff-only
+bash scripts/apply-rulesets.sh
+```
+
+The script creates or updates each ruleset by name. Running it from `main`
+means the script and the JSON it applies are the reviewed, merged copies,
+never a PR branch that can still change after review. Never run it from a
+PR branch.
+
+A new required check must report before it is required, because a
+required check that never reports blocks every merge. So add it to the
+ruleset only in a PR on which that check (same job name, same app) has
+already reported success, and before applying, confirm that it also passed
+on `main` after the merge.
 
 ## Security issues
 

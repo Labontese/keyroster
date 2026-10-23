@@ -3,11 +3,11 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-13 Tasks 1-4 done on p02/13-homelab-enroll; PR awaiting owner merge gate (Task 5)
-last_updated: "2026-10-22T20:50:00.000Z"
-last_activity: 2026-10-22
-last_activity_desc: 02-13 homelab server install and owner enrollment executed; PR awaiting merge gate
-state_head: 162478d
+stopped_at: 02-14 Tasks 1-5 done on p02/14-homelab-logins; PR awaiting owner merge gate (Task 6)
+last_updated: "2026-10-23T04:00:00.000Z"
+last_activity: 2026-10-23
+last_activity_desc: 02-14 Windows and Linux logins run and corroborated; PR awaiting merge gate
+state_head: 4333758
 progress:
   total_phases: 6
   completed_phases: 0
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
-Plan: 13 of 14
-Status: 02-13 awaiting the owner merge gate (p02/13-homelab-enroll); 02-01 to 02-12 are merged
-Last activity: 2026-10-22 — 02-13 homelab dogfood part 1 executed (bundle v3 with the RP hostname signed by TEST root C, keyroster-server with a tailscale cert and active timer, healthz over the tailnet, owner enrolled with a synced Chrome passkey and approved with his admin key, role homelab-admin and host group homelab, audit verify 12 entries with 5 directory installs)
+Plan: 14 of 14
+Status: 02-14 PR awaiting owner merge gate (Task 6); 02-01 to 02-13 are merged
+Last activity: 2026-10-23 — 02-14 Tasks 1-5: the owner's logins on Windows (Proxmox test VM target) and on the laptop (zima-srv target, gcr-ssh-agent) corroborated; platform record and the cli-macos ruleset change in the PR (cli-windows not required yet, owner decision D1)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -224,6 +224,11 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-13 Task 1, owner decision D-09 2026-10-22: the homelab RP ID is the signer VM's full MagicDNS FQDN (confirmed verbatim by the owner; the name and its hash are kept only outside the repository, in kr.env); the policy successor is bundle v3 signed by TEST root C, so the owed real offline ceremony becomes the v4 rotation and KEY-07 stays open. Tailscale was installed on the signer VM (official apt repository) and joined to the tailnet with the owner's approval
 - [Phase 02]: 02-13: homelab runs bundle v3 (policy v2 with the RP) and keyroster-server with a tailscale cert; the owner (user name `owner`) enrolled with a synced Chrome passkey (ES256) and approved it with his admin key; directory v5 grants role homelab-admin (8 h) and maps zima in host group homelab; the owner ran user add and the directory commands himself because the permission classifier refused them for agents
 - [Phase 02]: 02-13: audit verify anchors on the first bundle whose root set equals the pins, so C and D anchor on v2 while v3 is in force; 02-14's anchor_bundle_version==3 assertions must become bundle_version==3 and anchor_bundle_version==2 (phase 02 deferred-items.md)
+- [Phase 02]: 02-14 Task 1, owner decision 2026-10-22: zima-srv has been offline for 16 days, so the SSH target is a Proxmox test VM (Ubuntu 26.04, OpenSSH 10.2p1) chosen by comparing the owner's public keys with the running VMs' authorized_keys over the guest agent; production VMs were excluded. Its account `daniel` is mapped to homelab-admin in host group homelab by directory v6, which the owner signed himself (classifier). The laptop is offline, so Task 4 waits for it
+- [Phase 02]: 02-14: zima-srv came back online, so the laptop login (Task 4) went to zima-srv (account zima, KR_ZIMA_SINCE); the Windows serials are matched in the test VM's journal and the Linux serials in zima-srv's
+- [Phase 02]: 02-14: A3 (02-14) passed on the laptop (gcr-ssh-agent keeps the lifetime and the certificate); the laptop login used gcr-ssh-agent; the first plain `ssh` used the laptop's own key from authorized_keys, so the certificate login was shown with PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com
+- [Phase 02]: 02-14: requirements-completed AUTH-02 and AUTH-04 (order=ok on both OSes), and UI-01 after the pre-merge review (all six pages in a real browser: enroll in 02-13, login, account and login_approve in Tasks 2-4, index, the error page and sign-out by the owner in Chrome on 2026-10-23; strict CSP on every page by curl, no CSP violation in the console; a DevTools "1 issue" on the error page and /login not captured); AUTH-03 and PLAT-05 stay Pending (macOS UNVERIFIED); Windows removal at expiry not shown (listing times unrecorded)
+- [Phase 02]: 02-14 pre-merge review, owner decision D2 (2026-10-23): a ruleset change is applied by the owner after its PR merges, from an up-to-date main checkout (the reviewed script and JSON), never from a PR branch; this replaces the 01-04 pattern of applying from the PR branch before approval. A new required check must already have reported success on its PR (CONTRIBUTING.md "Changing the rulesets")
 
 ### Pending Todos
 
@@ -260,6 +265,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-22T20:50:00.000Z
-Stopped at: 02-13 Tasks 1-4 done on p02/13-homelab-enroll; PR awaiting owner merge gate (Task 5)
+Last session: 2026-10-23T04:00:00.000Z
+Stopped at: 02-14 Tasks 1-5 done on p02/14-homelab-logins; PR awaiting owner merge gate (Task 6)
 Resume file: None

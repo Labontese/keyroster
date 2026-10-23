@@ -72,7 +72,11 @@ The last line maps the local account `deploy` of the hosts in host group
 
 ## Where the sshd settings go
 
-UNVERIFIED until 02-14 on a real host.
+Run on a homelab host in 02-14 for items 1 and 2: on an Ubuntu host the
+item 1 search found no `Match` block and no earlier value, and
+`sshd_config` includes `sshd_config.d/*.conf` first, so the settings went
+into a drop-in. Removing or commenting out an existing value (item 1) and
+item 3 are UNVERIFIED.
 
 Steps 1 and 2 set `TrustedUserCAKeys` and `AuthorizedPrincipalsFile`. For
 both, sshd keeps the first value it reads, and a line after a `Match` line
@@ -102,8 +106,7 @@ Step 4 checks the effective values with `sshd -T` before the reload.
 
 ## 1. Trust the user CA
 
-UNVERIFIED until 02-14 on a real host (CI feeds the same line to a test
-sshd).
+Run on a homelab host in 02-14 (CI feeds the same line to a test sshd).
 
 On the admin workstation:
 
@@ -131,7 +134,7 @@ TrustedUserCAKeys /etc/ssh/keyroster_user_ca.pub
 
 ## 2. Point sshd at the principals files
 
-UNVERIFIED until 02-14 on a real host.
+Run on a homelab host in 02-14.
 
 Set, in the same place as step 1
 ([Where the sshd settings go](#where-the-sshd-settings-go)):
@@ -144,8 +147,8 @@ and create `/etc/ssh/principals`, owned by root, mode 0755.
 
 ## 3. Render and install each account's principals file
 
-UNVERIFIED until 02-14 on a real host (CI feeds the same output to a test
-sshd).
+Run on a homelab host in 02-14, for one account (CI feeds the same output
+to a test sshd).
 
 On the admin workstation, for each account of the host group:
 
@@ -171,7 +174,10 @@ mistyped name never produces a file.
 
 ## 4. Check and reload sshd
 
-UNVERIFIED until 02-14 on a real host.
+Run on two homelab hosts in 02-14: on a test VM with every criterion
+below, and on zima-srv without `laddr` and `lport`. Neither host had a
+`Match` block, so a `Match` block on the target, the case these criteria
+are for, is UNVERIFIED.
 
 ```
 sudo sshd -t
@@ -182,9 +188,13 @@ sudo systemctl reload ssh    # the unit is sshd on some distributions
 `sshd -t` must print nothing and exit 0. It checks the syntax only, not
 which value is in force. `sshd -T -C` prints the effective settings for a
 connection to `<account>` from `<address>` (a client address your users
-connect from; `<host>` is its name), arriving at `<server address>` on
-port 22 (use the port sshd listens on), with any matching `Match` block
-applied. Give every one of these criteria: in this test mode sshd treats a
+connect from), arriving at `<server address>` on port 22 (use the port
+sshd listens on), with any matching `Match` block applied. `<host>` must be
+what sshd sees for that client. With `UseDNS no`, the default (check with
+`sudo sshd -T | grep -i '^usedns'`), sshd matches `Match Host` against the
+client's address, not its name, so pass the address as both `host=` and
+`addr=`. Only with `UseDNS yes` is `<host>` the client's resolved name.
+Give every one of these criteria: in this test mode sshd treats a
 `Match` criterion it was not given (for example `LocalPort` or
 `LocalAddress`) as not matching, so leaving `laddr` or `lport` out can hide a
 `Match` block that does apply to real connections. If a `Match` block uses

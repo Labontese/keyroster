@@ -158,8 +158,48 @@ CI ([custody.md](custody.md)).
 ## Platform verification (D-16)
 
 What has and has not been run for the login agent on each client platform
-(Phase 2, plan 02-02). Anything marked UNVERIFIED has not been exercised and
-must not be presented as working.
+(Phase 2, plans 02-02 and 02-14). Anything marked UNVERIFIED has not been
+exercised and must not be presented as working.
+
+**End-to-end logins on the homelab (02-14).** The owner ran `keyroster
+login` in a real browser and approved with a passkey, then logged in with
+the certificate to a stock OpenSSH host. Only the 8 h certificate on each
+OS was used for SSH, and each of those two logins is matched in two
+records: a `login_issue` entry in the signer's audit-verified log, and a
+certificate login (`ED25519-CERT`, kr2 key ID, serial) in the host's sshd
+journal. The `--ttl 5m` certificates were not used for SSH: they appear
+only in the signer's log and in the agent listings.
+
+| OS | Browser | Authenticator | Agent | SSH client → host | Result |
+|---|---|---|---|---|---|
+| Windows 11 (Daniel-PC) | Chrome | synced Chrome passkey, unlocked with Windows Hello | `keyroster agent` | inbox `OpenSSH_for_Windows_9.5p2` → stock OpenSSH 10.2p1 (Ubuntu 26.04 test VM) | verified, 2026-10-22: web sign-in and `/account`, `keyroster login`, certificate login, `--ttl 5m` certificate gone from the agent while the 8 h one stayed |
+| Ubuntu 26.04, GNOME (laptop) | Chrome | the same synced passkey, unlocked through Google Password Manager | GNOME `gcr-ssh-agent` | OpenSSH 10.2p1 → stock OpenSSH 10.2p1 (zima-srv) | verified, 2026-10-23: `keyroster login`, certificate login, `--ttl 5m` certificate gone from the agent 57 s after its expiry while the 8 h one stayed |
+| macOS | any | any | OpenSSH `ssh-agent` | any | **UNVERIFIED**: no Mac in the homelab; the CLI flow runs in CI (`cli-macos`) |
+| Windows 11 | Edge, Firefox | any | `keyroster agent` | any | **UNVERIFIED**: not tried |
+
+What these rows do not cover:
+- **Approval order.** On both rows the owner saw the fingerprint on the
+  approval page before any passkey prompt, and the prompt came only after
+  Approve. That is the owner's observation in Chrome, not a measurement.
+- **Web sign-in on Linux.** Only the approval page was used on the laptop.
+- **Windows expiry timing.** The times of the Windows agent listings were
+  not recorded. Removal close to expiry (still listed 2 min 34 s before it,
+  gone 57 s after it) is shown only on Linux.
+- **The default key first.** On Linux, the first `ssh` after login
+  authenticated with the laptop's own plain key, because zima-srv also has
+  it in `authorized_keys`. The certificate login was shown by a run with
+  `-o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com
+  -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no`.
+
+**UNVERIFIED:**
+- macOS: browser and passkey login (no Mac; the CLI flow runs in CI in
+  `cli-macos`);
+- Safari; Firefox (any OS); Edge; every browser other than Chrome;
+- a hardware or device-bound authenticator (both rows used one synced
+  passkey);
+- OpenSSH `ssh-agent` in a real login (CI only, see below);
+- headless login (deferred, D-12);
+- Windows sshd as a certificate target (Phase 5).
 
 - **Windows: verified on Daniel-PC** (Windows 11, inbox
   `OpenSSH_for_Windows_9.5p2`). Login keys go to `keyroster agent`, keyroster's
@@ -225,9 +265,14 @@ must not be presented as working.
   refusal of a pipe whose DACL leaves the user out, are unit-tested, but the
   elevated case itself is **UNVERIFIED**: no agent was started from an
   elevated shell on Daniel-PC.
-- **GNOME gcr-ssh-agent (Ubuntu 26.04):** UNVERIFIED: A3 moved to 02-14. The
-  laptop was offline when 02-02 ran, so the lifetime and certificate probe has
-  not been run.
+- **GNOME gcr-ssh-agent (Ubuntu 26.04):** A3 passed in 02-14 (the Ubuntu
+  26.04 packages gcr 3.41.2 and gcr4 4.4; the exact package versions are in
+  the 02-14 evidence file). The probe from 02-02 added a key
+  and a certificate with a 20 s lifetime. Both were listed, both were gone
+  25 s later, and the owner's pre-existing key stayed. The 02-14 laptop
+  login used gcr-ssh-agent (`SSH_AUTH_SOCK=/run/user/1000/gcr/ssh`). Its
+  `--ttl 5m` certificate was still listed 2 min 34 s before its expiry and
+  gone 57 s after it (table above). Other gcr versions are UNVERIFIED.
 - **Linux, OpenSSH ssh-agent:** `TestAgentLifetime` adds a key and certificate
   with a 2 s lifetime to a real `ssh-agent` and checks that both are gone
   after 3 s. It runs in `build-test`, where `KEYROSTER_REQUIRE_SSH_AGENT=1`

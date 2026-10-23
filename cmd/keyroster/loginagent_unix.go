@@ -14,9 +14,10 @@ import (
 // connection, like dialAgent: tests replace it and restore it with
 // t.Cleanup; no environment variable, flag or build tag overrides it.
 //
-// 02-02-SUMMARY records "A3: moved to 02-14": no probe result for GNOME's
-// gcr-ssh-agent exists yet, so login ships no check for it, and its
-// handling of lifetimes and certificates is UNVERIFIED until 02-14.
+// A3 (moved from 02-02) passed in 02-14 on Ubuntu 26.04: GNOME's
+// gcr-ssh-agent honoured the lifetime constraint for a key and its
+// certificate, and a real login used it, so login needs no gcr check.
+// Other gcr versions are UNVERIFIED.
 var connectLoginAgent = func(_ context.Context) (net.Conn, error) {
 	if os.Getenv("SSH_AUTH_SOCK") == "" {
 		return nil, errors.New("SSH_AUTH_SOCK is not set: start ssh-agent (eval $(ssh-agent)) and retry; keyroster never writes the key to a file")

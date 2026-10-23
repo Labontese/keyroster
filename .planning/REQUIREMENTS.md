@@ -31,10 +31,10 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Identity & Login (AUTH)
 
-- [ ] **AUTH-01**: Admin can create local user accounts; every account must register at least one WebAuthn/passkey credential
-- [ ] **AUTH-02**: User can log in to the web UI with a passkey/FIDO2 key
+- [x] **AUTH-01**: Admin can create local user accounts; every account must register at least one WebAuthn/passkey credential
+- [x] **AUTH-02**: User can log in to the web UI with a passkey/FIDO2 key
 - [ ] **AUTH-03**: User can run `sshcm login` and get a short-lived certificate (hours, capped per role) loaded into their ssh-agent with matching lifetime, on Linux, macOS and Windows
-- [ ] **AUTH-04**: Login flow shows the public-key fingerprint on both CLI and browser so the user can confirm the request (phishing resistance)
+- [x] **AUTH-04**: Login flow shows the public-key fingerprint on both CLI and browser so the user can confirm the request (phishing resistance)
 - [ ] **AUTH-05**: Binding or resetting a user's credential requires admin quorum
 - [ ] **AUTH-06**: Machine/automation identities can obtain longer-lived (day-scale) certificates within role caps
 
@@ -88,7 +88,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Web UI (UI)
 
-- [ ] **UI-01**: Server-rendered web UI with strict CSP, embedded in the binary, no npm dependencies
+- [x] **UI-01**: Server-rendered web UI with strict CSP, embedded in the binary, no npm dependencies
 - [ ] **UI-02**: Admin can issue, revoke and manage roles/policy from the UI with CLI parity
 - [ ] **UI-03**: Approver can see pending approvals and approve with WebAuthn step-up
 - [ ] **UI-04**: Audit browser shows entries with inclusion proofs
@@ -181,10 +181,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | KEY-06 | Phase 2 | Complete |
 | KEY-07 | Phase 1 | Pending |
 | KEY-08 | Phase 3 | Pending |
-| AUTH-01 | Phase 2 | Pending |
-| AUTH-02 | Phase 2 | Pending |
-| AUTH-03 | Phase 2 | Pending |
-| AUTH-04 | Phase 2 | Pending |
+| AUTH-01 | Phase 2 | Complete |
+| AUTH-02 | Phase 2 | Complete |
+| AUTH-03 | Phase 2 | Pending (Linux and Windows verified end to end (02-14); macOS browser leg UNVERIFIED; Windows removal at expiry not timed) |
+| AUTH-04 | Phase 2 | Complete |
 | AUTH-05 | Phase 4 | Pending |
 | AUTH-06 | Phase 3 | Pending |
 | AUTHZ-01 | Phase 2 | Complete |
@@ -217,7 +217,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INV-02 | Phase 5 | Pending |
 | INV-03 | Phase 5 | Pending |
 | INV-04 | Phase 5 | Pending |
-| UI-01 | Phase 2 | Pending |
+| UI-01 | Phase 2 | Complete |
 | UI-02 | Phase 4 | Pending |
 | UI-03 | Phase 4 | Pending |
 | UI-04 | Phase 4 | Pending |
@@ -225,7 +225,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-02 | Phase 5 | Pending |
 | PLAT-03 | Phase 5 | Pending |
 | PLAT-04 | Phase 5 | Pending |
-| PLAT-05 | Phase 2 | Pending |
+| PLAT-05 | Phase 2 | Pending (Linux and Windows verified end to end (02-14); macOS browser leg UNVERIFIED; Windows removal at expiry not timed) |
 | REPO-01 | Phase 1 | Complete |
 | REPO-02 | Phase 1 | Complete |
 | REPO-03 | Phase 1 | Complete |
