@@ -174,7 +174,7 @@ Plans:
 - [ ] 03-04-PLAN.md — Installation-bound directory with hosts and machines, policy PoP switch, `host add`, `machine add`, `directory rebind`
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 03-05-PLAN.md — Apply engine offline: verify against pins, atomic generations, `sshd -t`, reload only when needed, self-test, rollback; sshd re-read matrix
+- [ ] 03-05-PLAN.md — D-05 network checkpoint (the owner decides how the no-network applier reaches sshd for the self-test), then the apply engine offline: verify against pins, atomic generations, `sshd -t`, reload only when needed, self-test, rollback; sshd re-read matrix
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 03-06-PLAN.md — Distro detection, D-07 refusals, D-08 Phase 2 takeover, drift checks, seven-image distro matrix (owner applies the ruleset)
@@ -186,7 +186,7 @@ Plans:
 - [ ] 03-08-PLAN.md — Heartbeats, `host status`, staleness and silence alerts, periodic drift, identity rotation, hardened systemd and OpenRC units
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 03-09-PLAN.md — Host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`
+- [ ] 03-09-PLAN.md — T-03-100 checkpoint (the owner decides who receives the signed directory for host trust), then host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`
 
 **Wave 9** *(blocked on Wave 8 completion)*
 - [ ] 03-10-PLAN.md — Probe certificates and the full self-test (D-06)
