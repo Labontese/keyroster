@@ -60,13 +60,15 @@ git config gpg.ssh.program C:/Windows/System32/OpenSSH/ssh-keygen.exe
 
 ## Required checks
 
-The `main-integrity` ruleset requires these 17 checks. Each name is a job
+The `main-integrity` ruleset requires these 19 checks. Each name is a job
 name (with its matrix value) in one of the workflows under
 `.github/workflows/`:
 
 | Check | Workflow | What it does |
 |---|---|---|
 | `build-test` | `ci.yml` | `go mod verify`, static build, cross-compile for windows/darwin/freebsd, `go vet`, `gofmt`, tests with the race detector |
+| `cli-windows` | `ci.yml` | the CLI packages' tests on Windows Server 2025, including keyroster agent against the inbox OpenSSH client (`KEYROSTER_REQUIRE_INBOX_SSH=1` makes a missing `ssh.exe` fail the job) |
+| `cli-macos` | `ci.yml` | the CLI packages' tests on macOS 15, including `TestAgentLifetime` against a real `ssh-agent` (`KEYROSTER_REQUIRE_SSH_AGENT=1`) |
 | `lint` | `ci.yml` | golangci-lint v2.14.0 with `.golangci.yml` |
 | `govulncheck` | `ci.yml` | reachable-vulnerability scan of the default build with the pinned govulncheck in `tools/go.mod` (the `-tags piv` build is scanned in `build-piv`) |
 | `dependency-firewall` | `ci.yml` | `scripts/dep-firewall.sh`: no banned package in keyroster-signer's dependency graph, with and without `-tags piv` |

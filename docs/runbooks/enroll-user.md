@@ -291,8 +291,15 @@ keyroster login --role ops --ttl 30m
 - Your computer's clock must be within 60 s of the server's; the CLI
   refuses otherwise.
 - **Linux and macOS:** the certificate goes into the ssh-agent at
-  `SSH_AUTH_SOCK`; start one first with `eval $(ssh-agent)`. GNOME's
-  gcr-ssh-agent is **UNVERIFIED until 02-14**: use OpenSSH `ssh-agent`.
+  `SSH_AUTH_SOCK`. If none is running, start one first with
+  `eval $(ssh-agent)`. GNOME's gcr-ssh-agent passed the lifetime and
+  certificate probe (A3) in 02-14 and works as that agent.
+- **ssh may log you in with another key.** If the host also has one of
+  your plain keys in `authorized_keys`, ssh may offer that key first, and
+  then the certificate is not what logged you in. To offer only
+  certificates, add `-o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com`
+  (or set it in a `Host` block). Run on Linux in 02-14; UNVERIFIED with the
+  Windows inbox client.
 - **Windows:** the certificate goes into keyroster's own agent, never the
   Windows OpenSSH agent service. `keyroster login` starts it when needed
   and prints a `Host <your keyroster hosts>` block with an `IdentityAgent`
@@ -325,9 +332,23 @@ at a later listing while the other stayed (the listing times were not
 recorded, so removal at expiry itself is not shown). The signer's log records both logins, and the
 host's sshd journal records the SSH login with the 8 h certificate.
 
-**Still UNVERIFIED:** Edge and every other browser, Linux, macOS,
-gcr-ssh-agent, the browser opener, and the Windows path in which
-`keyroster login` itself starts keyroster agent.
+**Run on the homelab in 02-14, on Linux:** on the laptop (Ubuntu 26.04,
+GNOME) the owner ran `keyroster login` and `keyroster login --ttl 5m`,
+approving in Chrome with the same synced passkey, unlocked through Google
+Password Manager. Both certificates went into gcr-ssh-agent. The owner saw
+the fingerprint on the page before any passkey prompt, and the prompt
+appeared only after Approve. The 8 h certificate logged in to a stock
+OpenSSH host. The first `ssh` used the laptop's own plain key instead (see
+"ssh may log you in with another key"), and a run that offered only
+certificates logged in with the certificate. The 5 m certificate was still
+in the agent before its expiry, and gone 57 s after it while the other
+stayed. The signer's log records both logins, and the host's sshd journal
+records the certificate login.
+
+**Still UNVERIFIED:** Edge and every browser other than Chrome, web
+sign-in on Linux, macOS, OpenSSH `ssh-agent` outside CI, the browser
+opener, and the Windows path in which `keyroster login` itself starts
+keyroster agent.
 
 ## Residual risk
 
