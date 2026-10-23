@@ -266,7 +266,8 @@ What these rows do not cover:
   elevated case itself is **UNVERIFIED**: no agent was started from an
   elevated shell on Daniel-PC.
 - **GNOME gcr-ssh-agent (Ubuntu 26.04):** A3 passed in 02-14 (the Ubuntu
-  26.04 packages gcr 3.41.2 and gcr4 4.4). The probe from 02-02 added a key
+  26.04 packages gcr 3.41.2 and gcr4 4.4; the exact package versions are in
+  the 02-14 evidence file). The probe from 02-02 added a key
   and a certificate with a 20 s lifetime. Both were listed, both were gone
   25 s later, and the owner's pre-existing key stayed. The 02-14 laptop
   login used gcr-ssh-agent (`SSH_AUTH_SOCK=/run/user/1000/gcr/ssh`). Its

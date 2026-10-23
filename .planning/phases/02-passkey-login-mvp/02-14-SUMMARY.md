@@ -212,8 +212,8 @@ info and `keyroster version` report commit `99c2795e7d05`, go1.27.3.
 
 A3 (02-14): passed
 
-The gcr socket is present (Ubuntu packages gcr 3.41.2-6 and gcr4, version
-4.4). `ssh-add -t 20` added a probe key and its certificate. Listing 1 showed
+The gcr socket is present (Ubuntu packages gcr 3.41.2-6 and gcr4 4.4; the
+exact package version is in `$P/a3-probe.out`). `ssh-add -t 20` added a probe key and its certificate. Listing 1 showed
 both plus the owner's own key. Listing 2, 25 s later, showed only the
 owner's key. gcr-ssh-agent therefore honours the lifetime constraint for a
 key and its certificate, and keeps the certificate. The laptop login
@@ -478,9 +478,9 @@ are UNVERIFIED.
 | T5-3: Linux expiry by key ID | exit 0 |
 | T5-4 (adapted, deviation 10): ruleset JSON holds cli-macos with integration_id 15368 and no cli-windows (the plan expects both); needs-hardware.md has UNVERIFIED | exit 0 |
 | T5-5: diff guard (pattern plus guard-literals.txt) | exit 0 before each commit |
-| T5-6: FETCH_HEAD equals HEAD with this SUMMARY | run after the push |
+| T5-6: FETCH_HEAD equals HEAD with this SUMMARY | pass: the PR head d8a7626 is on origin |
 | T5-7: exactly one `A3 (02-14): …` line | exit 0 |
-| T5-8: `pr checks --watch` | run after the push |
+| T5-8: `pr checks --watch` | pass: all 20 check runs on d8a7626 succeeded, cli-windows and cli-macos included |
 
 ## Open items
 
@@ -504,8 +504,9 @@ are UNVERIFIED.
 - macOS.
 - OpenSSH `ssh-agent` in a real login.
 - gcr-ssh-agent in any version other than Ubuntu 26.04's packages.
-- The browser opener: whether `keyroster login` opened the page itself was
-  not recorded.
+- The browser opener: the laptop's default browser is Chrome
+  (`xdg-settings`: `google-chrome.desktop`), but whether `keyroster login`
+  opened the page itself was not recorded.
 - `keyroster login` starting keyroster agent itself.
 - A `Match` block on the target.
 - host-setup.md step 5 on a real host.

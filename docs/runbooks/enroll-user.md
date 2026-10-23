@@ -351,10 +351,11 @@ in the agent before its expiry, and gone 57 s after it while the other
 stayed. The signer's log records both logins, and the host's sshd journal
 records the certificate login.
 
-**Still UNVERIFIED:** Edge and every browser other than Chrome, web
-sign-in on Linux, macOS, OpenSSH `ssh-agent` outside CI, the browser
-opener, and the Windows path in which `keyroster login` itself starts
-keyroster agent.
+**Still UNVERIFIED:** Edge and every browser other than Chrome, a
+hardware or device-bound authenticator (both runs used one synced
+passkey), web sign-in on Linux, macOS, OpenSSH `ssh-agent` outside CI, the
+browser opener, and the Windows path in which `keyroster login` itself
+starts keyroster agent.
 
 ## Residual risk
 
