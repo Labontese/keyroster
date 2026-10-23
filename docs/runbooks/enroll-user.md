@@ -273,7 +273,9 @@ keyroster login --role ops --ttl 30m
   printed.** If you did not just run `keyroster login`, close the page:
   someone may have started a login and sent you the link, hoping you
   approve it for them (consent phishing). Approving it would give them a
-  certificate for your principals.
+  certificate for your principals. A browser extension with access to the
+  keyroster site can defeat this comparison, so approve in a browser
+  profile without one (see [Residual risk](#residual-risk)).
 - After the passkey prompt the browser hands the result to
   `keyroster login` on `127.0.0.1`. The CLI checks the certificate against
   the user CA of your root-signed trust bundle (its own key, exactly the
@@ -355,6 +357,18 @@ opener, and the Windows path in which `keyroster login` itself starts
 keyroster agent.
 
 ## Residual risk
+
+**A browser extension can defeat the fingerprint comparison.** An
+extension that can read and change the keyroster site can swap the
+approval page's challenge and the address the assertion goes to while your
+own fingerprint stays on screen: `app.js` reads the challenge from
+`data-options` when you click Approve and posts the result to the URL in
+`data-assertion`. It can also read the loopback redirect to
+`keyroster login`. The page's Content-Security-Policy does not restrict
+extensions. Approve in a browser profile without extensions that have
+access to the keyroster host, or withhold their site access. This is
+outside the Phase 2 threat model (a compromised WebAuthn client); Phase 4
+revisits browser integrity.
 
 **The fingerprint comparison does not hold against a compromised
 server.** The passkey signs only the WebAuthn challenge, never the
