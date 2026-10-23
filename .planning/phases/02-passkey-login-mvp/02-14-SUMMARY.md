@@ -140,10 +140,11 @@ are kept only outside the repository, under the evidence directory
     and T-02-SC accepts on "binaries from 02-13's recorded build". The
     laptop instead ran `c98749ba…`, a fresh build of main `ff87054` made on
     2026-10-23 before the laptop part. Its build info records go1.27.3,
-    `CGO_ENABLED=0`, `-trimpath`, `vcs.revision=ff87054a8f6f`,
-    `vcs.modified=false` and no `-ldflags`. The file has no symbol table or
-    DWARF sections, though, so it was stripped in a way the build info does
-    not record, and who built it is not recorded either. Between 99c2795
+    `CGO_ENABLED=0`, `-trimpath`, `vcs.revision=ff87054a8f6f` and
+    `vcs.modified=false`. Go leaves `-ldflags` out of the build info under
+    `-trimpath` (checked with a test build), and the file has no symbol
+    table or DWARF sections, which fits `-ldflags="-s -w"`. Who built it,
+    and with which linker flags, is not recorded. Between 99c2795
     and ff87054 the only Go file that changed is `cmd/keyroster/runbook_test.go`
     (a test), and no file under an embed root changed, so the code that ran
     is 02-13's. T-02-SC's "binaries from 02-13's recorded build" holds for
