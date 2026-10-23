@@ -134,7 +134,15 @@ are kept only outside the repository, under the evidence directory
     up-to-date `main` checkout (the reviewed script and JSON). cli-macos
     has already reported success on this PR's head, so applying after the
     merge loses nothing. CONTRIBUTING.md "Changing the rulesets" now says
-    this. The PLAN text is left as it is.
+    this. The PLAN text is left as it is; Task 6 runs adapted:
+    1. the owner approves the PR, and `scripts/merge-gate.sh` waits for
+       the squash merge;
+    2. the owner then runs `scripts/apply-rulesets.sh` from an up-to-date
+       `main`;
+    3. the orchestrator's check of the live main-integrity ruleset expects
+       `cli-macos` (integration_id 15368) and no `cli-windows`, instead of
+       the PLAN's `cli-macos,cli-windows` (Task 6 verify, acceptance and
+       T-02-73 follow D1).
 12. **Laptop binary (pre-merge review).** Task 1 step 3.1 says to copy
     "the linux `keyroster` binary from 02-13's build" and check its SHA-256,
     and T-02-SC accepts on "binaries from 02-13's recorded build". The
@@ -363,6 +371,15 @@ prohibition on the approval script: the fingerprint is on the page before
 any passkey prompt, and the prompt comes only after Approve. It is the
 owner's observation of four approvals in Chrome, not a measurement. Every
 other browser stays UNVERIFIED on this point.
+
+The Windows approvals ran in a Chrome profile with a wallet-type browser
+extension whose content script was active on the keyroster pages (its
+console warnings show in the owner's UI check). That is the condition the
+new residual-risk text in enroll-user.md advises against. Nothing points
+to interference: each approved fingerprint matched the CLI's, and each
+`login_issue` entry carries the key the CLI generated. But the Windows
+evidence was not gathered under the runbook's recommended conditions.
+Whether the laptop's Chrome had such an extension is not known.
 
 ## Platform record
 

@@ -135,7 +135,7 @@ Plans:
 - [x] 02-13-PLAN.md — Homelab: D-09 hostname checkpoint, bundle v3 with the RP (KEY-07 offline ceremony becomes v4), keyroster-server with tailscale cert, owner enrolled (D-04)
 
 **Wave 11** *(blocked on Wave 10 completion)*
-- [ ] 02-14-PLAN.md — Homelab: real logins from Daniel-PC (Windows) and the laptop (Linux) to a stock OpenSSH host, corroborated by audit log and sshd journal; platform record (macOS UNVERIFIED); cli-windows/cli-macos required
+- [ ] 02-14-PLAN.md — Homelab: real logins from Daniel-PC (Windows) and the laptop (Linux) to a stock OpenSSH host, corroborated by audit log and sshd journal; platform record (macOS UNVERIFIED); cli-macos required (cli-windows after the go-winio fix, owner decision D1)
 
 **UI hint**: yes
 **Research**: MEDIUM-HIGH. CLI WebAuthn transport (default: browser loopback with PKCE + state; libfido2 needs cgo), Windows webauthn.dll/CTAP for non-admin users, Windows ssh-agent named pipe, WebAuthn origin rules (hostname + TLS, IP-origin guard).
