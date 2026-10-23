@@ -309,7 +309,8 @@ other browser stays UNVERIFIED on this point.
 ## Platform record
 
 `docs/security/needs-hardware.md` "Platform verification (D-16)" now has a
-table with two verified rows:
+table with an UNVERIFIED row for macOS, one for Edge and Firefox on
+Windows, and two verified rows:
 - Windows 11, Chrome, synced passkey via Windows Hello, keyroster agent,
   inbox OpenSSH 9.5p2;
 - Ubuntu 26.04 GNOME, Chrome, the same passkey via Google Password Manager,
@@ -328,8 +329,9 @@ UNVERIFIED:
 The gcr-ssh-agent line records A3 as passed and the laptop login as done
 through it. enroll-user.md "Logging in" labels the Linux login as run in
 02-14. It also adds the note that ssh may log in with a plain key first,
-and the option that offers only certificates. That option was run on Linux
-and is UNVERIFIED with the Windows inbox client.
+and the option that offers only certificates. Its `-o` form was run on
+Linux. The same setting in a `Host` block, and either form with the Windows
+inbox client, are UNVERIFIED.
 
 ## Required checks (Task 5 step 3)
 
@@ -374,8 +376,10 @@ and is UNVERIFIED with the Windows inbox client.
      checks
    - `e576a2c` docs(02-14): complete homelab-logins plan (the SUMMARY,
      REQUIREMENTS.md and STATE.md)
-   - the follow-up commit `docs(02-14): state the observed Linux expiry
-     window instead of removal at expiry`
+   - `f75bb64` docs(02-14): state the observed Linux expiry window instead
+     of removal at expiry
+   - the follow-up commit `docs(02-14): add the UNVERIFIED platform rows and
+     scope the Linux login notes`
 
 ## Verification run (adapted)
 
@@ -420,9 +424,11 @@ and is UNVERIFIED with the Windows inbox client.
 - Web sign-in on Linux.
 - macOS.
 - OpenSSH `ssh-agent` in a real login.
+- gcr-ssh-agent in any version other than Ubuntu 26.04's packages.
 - The browser opener: whether `keyroster login` opened the page itself was
   not recorded.
 - `keyroster login` starting keyroster agent itself.
 - A `Match` block on the target.
 - host-setup.md step 5 on a real host.
-- The certificate-only ssh option with the Windows inbox client.
+- The certificate-only ssh option in a `Host` block, or with the Windows
+  inbox client.

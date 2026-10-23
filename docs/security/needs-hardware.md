@@ -172,6 +172,8 @@ journal.
 |---|---|---|---|---|---|
 | Windows 11 (Daniel-PC) | Chrome | synced Chrome passkey, unlocked with Windows Hello | `keyroster agent` | inbox `OpenSSH_for_Windows_9.5p2` → stock OpenSSH 10.2p1 (Ubuntu 26.04 test VM) | verified, 2026-10-22: web sign-in and `/account`, `keyroster login`, certificate login, `--ttl 5m` certificate gone from the agent while the 8 h one stayed |
 | Ubuntu 26.04, GNOME (laptop) | Chrome | the same synced passkey, unlocked through Google Password Manager | GNOME `gcr-ssh-agent` | OpenSSH 10.2p1 → stock OpenSSH 10.2p1 (zima-srv) | verified, 2026-10-23: `keyroster login`, certificate login, `--ttl 5m` certificate gone from the agent 57 s after its expiry while the 8 h one stayed |
+| macOS | any | any | OpenSSH `ssh-agent` | any | **UNVERIFIED**: no Mac in the homelab; the CLI flow runs in CI (`cli-macos`) |
+| Windows 11 | Edge, Firefox | any | `keyroster agent` | any | **UNVERIFIED**: not tried |
 
 What these rows do not cover:
 - **Approval order.** On both rows the owner saw the fingerprint on the

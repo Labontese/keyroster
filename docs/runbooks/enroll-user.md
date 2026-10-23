@@ -292,14 +292,15 @@ keyroster login --role ops --ttl 30m
   refuses otherwise.
 - **Linux and macOS:** the certificate goes into the ssh-agent at
   `SSH_AUTH_SOCK`. If none is running, start one first with
-  `eval $(ssh-agent)`. GNOME's gcr-ssh-agent passed the lifetime and
-  certificate probe (A3) in 02-14 and works as that agent.
+  `eval $(ssh-agent)`. GNOME's gcr-ssh-agent, as shipped in Ubuntu 26.04,
+  passed the lifetime and certificate probe (A3) in 02-14 and works as that
+  agent. Other gcr versions are UNVERIFIED.
 - **ssh may log you in with another key.** If the host also has one of
   your plain keys in `authorized_keys`, ssh may offer that key first, and
   then the certificate is not what logged you in. To offer only
-  certificates, add `-o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com`
-  (or set it in a `Host` block). Run on Linux in 02-14; UNVERIFIED with the
-  Windows inbox client.
+  certificates, add `-o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com`.
+  This `-o` form was run on Linux in 02-14. The same setting in a `Host`
+  block, and either form with the Windows inbox client, are UNVERIFIED.
 - **Windows:** the certificate goes into keyroster's own agent, never the
   Windows OpenSSH agent service. `keyroster login` starts it when needed
   and prints a `Host <your keyroster hosts>` block with an `IdentityAgent`
