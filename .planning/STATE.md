@@ -3,11 +3,11 @@ gsd_state_version: "1.0"
 current_phase: 02
 current_phase_name: Passkey Login MVP
 status: executing
-stopped_at: 02-14 Task 1 done on p02/14-homelab-logins; Tasks 1-3 done for Windows (draft SUMMARY); Task 4 waits for the laptop
-last_updated: "2026-10-22T21:45:00.000Z"
-last_activity: 2026-10-22
-last_activity_desc: 02-14 Windows logins run and corroborated; laptop part pending
-state_head: ff87054
+stopped_at: 02-14 Tasks 1-5 done on p02/14-homelab-logins; PR awaiting owner merge gate (Task 6)
+last_updated: "2026-10-23T04:00:00.000Z"
+last_activity: 2026-10-23
+last_activity_desc: 02-14 Windows and Linux logins run and corroborated; PR awaiting merge gate
+state_head: 4333758
 progress:
   total_phases: 6
   completed_phases: 0
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 Phase: 02 (Passkey Login MVP) — EXECUTING
 Plan: 14 of 14
-Status: 02-14 executing on p02/14-homelab-logins; 02-01 to 02-13 are merged
-Last activity: 2026-10-22 — 02-13 merged (#53); 02-14 Task 1 prepared a Proxmox test VM as the SSH target (zima-srv offline) and the owner mapped its account in directory v6
+Status: 02-14 PR awaiting owner merge gate (Task 6); 02-01 to 02-13 are merged
+Last activity: 2026-10-23 — 02-14 Tasks 1-5: the owner's logins on Windows (Proxmox test VM target) and on the laptop (zima-srv target, gcr-ssh-agent) corroborated; platform record and the cli-windows/cli-macos ruleset change in the PR
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -225,6 +225,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-13: homelab runs bundle v3 (policy v2 with the RP) and keyroster-server with a tailscale cert; the owner (user name `owner`) enrolled with a synced Chrome passkey (ES256) and approved it with his admin key; directory v5 grants role homelab-admin (8 h) and maps zima in host group homelab; the owner ran user add and the directory commands himself because the permission classifier refused them for agents
 - [Phase 02]: 02-13: audit verify anchors on the first bundle whose root set equals the pins, so C and D anchor on v2 while v3 is in force; 02-14's anchor_bundle_version==3 assertions must become bundle_version==3 and anchor_bundle_version==2 (phase 02 deferred-items.md)
 - [Phase 02]: 02-14 Task 1, owner decision 2026-10-22: zima-srv has been offline for 16 days, so the SSH target is a Proxmox test VM (Ubuntu 26.04, OpenSSH 10.2p1) chosen by comparing the owner's public keys with the running VMs' authorized_keys over the guest agent; production VMs were excluded. Its account `daniel` is mapped to homelab-admin in host group homelab by directory v6, which the owner signed himself (classifier). The laptop is offline, so Task 4 waits for it
+- [Phase 02]: 02-14: zima-srv came back online, so the laptop login (Task 4) went to zima-srv (account zima, KR_ZIMA_SINCE); the Windows serials are matched in the test VM's journal and the Linux serials in zima-srv's
+- [Phase 02]: 02-14: A3 (02-14) passed on the laptop (gcr-ssh-agent keeps the lifetime and the certificate); the laptop login used gcr-ssh-agent; the first plain `ssh` used the laptop's own key from authorized_keys, so the certificate login was shown with PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com
+- [Phase 02]: 02-14: requirements-completed AUTH-02 and AUTH-04 (order=ok on both OSes); UI-01 not marked (index, error page and sign-out not exercised in a real browser); AUTH-03 and PLAT-05 stay Pending (macOS UNVERIFIED); Windows removal at expiry not shown (listing times unrecorded)
 
 ### Pending Todos
 
@@ -261,6 +264,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-22T21:45:00.000Z
-Stopped at: 02-14 Task 1 done on p02/14-homelab-logins; Tasks 1-3 done for Windows (draft SUMMARY); Task 4 waits for the laptop
+Last session: 2026-10-23T04:00:00.000Z
+Stopped at: 02-14 Tasks 1-5 done on p02/14-homelab-logins; PR awaiting owner merge gate (Task 6)
 Resume file: None
