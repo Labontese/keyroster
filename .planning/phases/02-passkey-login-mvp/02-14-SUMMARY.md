@@ -31,6 +31,9 @@ key-files:
     - CONTRIBUTING.md
     - .planning/REQUIREMENTS.md
     - .planning/STATE.md
+    - .planning/phases/02-passkey-login-mvp/deferred-items.md
+    - .github/workflows/ci.yml
+    - cmd/keyroster/loginagent_unix.go
 
 key-decisions:
   - "Owner, 2026-10-22: the Windows login's SSH target is a Proxmox test VM (zima-srv was offline then); the Linux login used zima-srv, which was back online"
@@ -512,3 +515,88 @@ are UNVERIFIED.
 - host-setup.md step 5 on a real host.
 - The certificate-only ssh option in a `Host` block, or with the Windows
   inbox client.
+
+## Pre-merge review fixes
+
+Review of PR #54 at d8a7626. Every fix is text: documentation, planning
+files, the ruleset JSON, CONTRIBUTING.md, a ci.yml comment and one Go
+comment. A failing-then-passing test does not apply to text. Each commit's
+diff shows the before and after lines, and each passed the diff guard
+(`guard-literals.txt` plus address and tailnet-domain patterns) before it was
+committed. The runbook tests (`go test ./cmd/keyroster -run
+'Runbook|HostSetup|ServerInstall'`, which pin host-setup.md step 4's
+`sshd -T -C` literal) pass after every runbook edit. No test reads
+CONTRIBUTING.md or the ruleset JSON; the JSON was checked with a parser:
+18 contexts, cli-macos in, cli-windows out.
+
+Fixed:
+- `29149fd` cli-windows hangs intermittently, so the plan's "green on main
+  since 02-02" must-have was false (owner decision D1: cli-macos only).
+  Ruleset, CONTRIBUTING.md (18 checks), ci.yml comment, deferred-items.md
+  row, deviation 10, T5-4. Check: JSON parse.
+- `6bc11bf` Task 6 had the owner run the PR branch's apply-rulesets.sh
+  before review (owner decision D2: apply after the merge, from main).
+  CONTRIBUTING.md "Changing the rulesets", deviation 11, STATE.md
+  decision. Check: diff only.
+- `743f2e5` CONTRIBUTING.md said the CLI OS jobs test "the CLI packages";
+  it now names the seven package trees and the linked packages tested on
+  Linux only. Check: `go list -deps ./cmd/keyroster` for windows and darwin.
+- `6a34abb` The laptop CLI was called 02-13's linux build; it is a fresh
+  build of ff87054 (deviation 12). The Windows CLI is named as 02-13's
+  keyroster.exe. Check: `sha256sum` and `go version -m` of both
+  binaries, `git diff --stat 99c2795 ff87054`.
+- `967d4a4` UI-01 marked complete. Every page has been exercised in a real
+  browser under the strict CSP. The uncaptured DevTools issue stays
+  open. Check: `owner-ui-check.txt`, `pageNames` in render.go.
+- `f1ad7b9` The AUTH-03 and PLAT-05 notes now add "Windows removal at
+  expiry not timed", and the SUMMARY's AUTH-03 bullet does too. Check: diff
+  only.
+- `7701cbd` needs-hardware.md: only the 8 h login on each OS reached a
+  host's sshd journal. Check: diff only.
+- `9bc9d2f` enroll-user.md: "on Windows only" becomes "on Windows". Check:
+  runbook tests.
+- `fe0a5b5` host-setup.md step 4: with UseDNS no (the default), pass the
+  client address as `host=`. Check: runbook tests
+  (`TestHostSetupEffectiveSshdConfig` literal kept).
+- `9d1cac2` host-setup.md step 4's label is scoped to what ran: every
+  criterion on the test VM, no laddr/lport on zima-srv, no `Match` block.
+  The SUMMARY records the test VM's full form. Check: runbook tests.
+- `cb1674e` loginagent_unix.go comment: A3 passed in 02-14 (comment
+  only). Check: gofmt, vet on windows, linux and darwin, and
+  `go test ./cmd/keyroster`.
+- `d6e1363` The certificate-only run's three ssh options are named in
+  enroll-user.md, needs-hardware.md and the SUMMARY (split finding, upheld
+  in part). Check: runbook tests.
+- `edb2a80` enroll-user.md: the browser-extension residual risk plus one
+  sentence under "Logging in" (owner decision D3). Check: runbook tests.
+- `0d97153` AUTH-01 marked complete, as 02-13-SUMMARY recorded.
+- `0b2bc26` deferred-items.md: 02-14 status on the anchor-version,
+  timestamp and classifier rows.
+- `e2c31be` Deviation 13: auto-merge is enabled only after the pre-merge
+  review (split finding, upheld in part).
+- `0e5cd7a` A6: the gap between the stored journal reads, closed by the
+  reviewers' full read.
+- `b5b08b9` Smaller wording fixes:
+  - a hardware authenticator added to enroll-user.md's UNVERIFIED list;
+  - the gcr4 version now points to the evidence file;
+  - T5-6 and T5-8 pass (20 check runs green on d8a7626);
+  - the laptop's default browser is Chrome.
+
+Skipped:
+- Making `TestValidateLinear` relative (part of the cli-windows finding).
+  It is test code, outside this docs-only PR. It is recorded in the D1
+  deferred-items.md row for the next plan that edits internal/directory.
+- The go-winio v0.6.4 bump (Dependabot #41) and its SA1019 fix. They need
+  the owner's acceptance of a dependency change against STACK.md's pin
+  (D1: cli-windows becomes required after #41).
+- An origin/main blob guard in `scripts/apply-rulesets.sh`, and a Task 6
+  live-ruleset verify of the full list. D2 settles the process (run from
+  main after the merge). A script guard would be new code outside this
+  plan's files.
+
+Verification of this pass:
+- `gofmt -l .` is empty.
+- `go vet ./...` passes on windows, linux and darwin.
+- `go test -count=1 ./cmd/keyroster` passes.
+- `go test -count=1 ./...` passes on Windows 11 (exit 0, `internal/winagent` included; the cli-windows hang did not occur in this run).
+- `-race` was not run: there is no cgo toolchain on Daniel-PC.
