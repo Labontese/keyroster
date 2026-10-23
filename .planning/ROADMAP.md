@@ -4,6 +4,11 @@
 
 Six coarse phases take ssh-cert-manager from an empty repository to a security-reviewed public release. The trust core comes first, because every later feature writes through it and none of it can be retrofitted cheaply: the network-less signer, hardware-backed CA keys, the offline trust root and the Merkle audit log, all verified against real `sshd`, in a repository run with GitHub best practice from the first commit. Phase 2 is the MVP checkpoint: a passkey login yields a short-lived certificate in ssh-agent and a real SSH session. Phase 3 hands the Linux fleet to the host agent (trusted CAs, principals, KRL revocation, host certificates, rotation and break-glass). Phase 4 makes the system insider-resistant (quorum-signed policy, two-person JIT approvals, a witnessed log) and operable from the web UI. Phase 5 completes the visibility promise with inventory of plain keys, login reconciliation and a single who-has-access overview, and brings the agent to Windows, macOS and the BSDs. Phase 6 hardens and ships: reproducible signed releases, signed agent updates, backup/restore, documentation and an external security review.
 
+**Documentation convention (owner decision 2026-10-23).** Documentation is written as the product is built and collected at the end:
+- Every plan that changes a step an operator or user performs updates its runbook in the same PR. Each step is labelled as run (where and when) or UNVERIFIED. This is part of the definition of done for every plan from Phase 3 on.
+- After Phase 3, a short README with a quickstart (install server, signer and agent, first certificate) is written, because that is the first time the whole chain can be installed.
+- In Phase 6, a documentation pass collects the runbooks into an install guide, a CLI reference, an architecture overview and a user-facing threat model, written with `gsd-doc-writer` and fact-checked against the code with `gsd-doc-verifier`.
+
 ## Phases
 
 **Phase Numbering:**
@@ -13,7 +18,7 @@ Six coarse phases take ssh-cert-manager from an empty repository to a security-r
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [ ] **Phase 1: Trust Core** - Network-less signer with hardware-backed CA keys, offline trust root and Merkle audit log, verified against real sshd, in a repo run with GitHub best practice from the first commit
-- [ ] **Phase 2: Passkey Login MVP** - Passkey sign-in and `sshcm login` put a short-lived certificate in ssh-agent and give the first real SSH login
+- [x] **Phase 2: Passkey Login MVP** - Passkey sign-in and `sshcm login` put a short-lived certificate in ssh-agent and give the first real SSH login (completed 2026-10-23)
 - [ ] **Phase 3: Linux Agent and Revocation** - Enrolled Linux hosts stay in sync automatically: trusted CAs, principals, KRL, host certificates, rotation and break-glass
 - [ ] **Phase 4: Insider Resistance and Web UI** - Quorum-signed policy, two-person JIT access and a witnessed audit log, all operable from the web UI
 - [ ] **Phase 5: Visibility and Cross-Platform Agents** - Key inventory, login reconciliation and one who-has-access overview, with agents on Windows, macOS and BSD
@@ -98,7 +103,9 @@ Plans:
   4. The signer refuses to sign, whatever the server sends, when the WebAuthn assertion is missing, replayed or bound to a different request digest, or when the policy version is not root/quorum-signed.
   5. Server and signer run on Linux and serve a server-rendered web UI embedded in the binary, with a strict CSP and no npm dependencies; when the CA runs on an encrypted software key, every CLI command and every UI page shows a loud evaluation-only warning.
 
-**Plans:** 13/14 plans executed in 11 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p02/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 14/14 plans complete in 11 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p02/NN-slug`). Plan numbers are identifiers; waves decide order.
+
+**Verification:** passed 2026-10-23 (02-VERIFICATION.md), with four owner overrides. SC2's macOS real-browser leg is closed UNVERIFIED (no Mac), so AUTH-03 and PLAT-05 stay Pending. Windows removal at expiry was timed from a cold start on 2026-10-23. Follow-ups are in `.planning/todos/pending/` (2026-10-23).
 
 Plans:
 **Wave 1**
@@ -135,7 +142,7 @@ Plans:
 - [x] 02-13-PLAN.md — Homelab: D-09 hostname checkpoint, bundle v3 with the RP (KEY-07 offline ceremony becomes v4), keyroster-server with tailscale cert, owner enrolled (D-04)
 
 **Wave 11** *(blocked on Wave 10 completion)*
-- [ ] 02-14-PLAN.md — Homelab: real logins from Daniel-PC (Windows) and the laptop (Linux) to a stock OpenSSH host, corroborated by audit log and sshd journal; platform record (macOS UNVERIFIED); cli-macos required (cli-windows after the go-winio fix, owner decision D1)
+- [x] 02-14-PLAN.md — Homelab: real logins from Daniel-PC (Windows) and the laptop (Linux) to a stock OpenSSH host, corroborated by audit log and sshd journal; platform record (macOS UNVERIFIED); cli-macos required (cli-windows after the go-winio fix, owner decision D1)
 
 **UI hint**: yes
 **Research**: MEDIUM-HIGH. CLI WebAuthn transport (default: browser loopback with PKCE + state; libfido2 needs cgo), Windows webauthn.dll/CTAP for non-admin users, Windows ssh-agent named pipe, WebAuthn origin rules (hostname + TLS, IP-origin guard).
@@ -155,6 +162,7 @@ Plans:
 
 **Plans**: TBD
 **UI hint**: no
+**Docs**: runbooks per plan as above; once the phase is verified, add the short README with a quickstart (documentation convention).
 **Research**: MEDIUM. KRL format and fuzzing for the in-house encoder (no maintained Go library), sshd `Include`/drop-in variance across distros, whether `RevokedKeys` is re-read without reload (settle with an integration test). Dogfood on the laptop, zima and Proxmox.
 
 ### Phase 4: Insider Resistance and Web UI
@@ -206,6 +214,7 @@ Plans:
 
 **Plans**: TBD
 **UI hint**: no
+**Docs**: the collected documentation pass (install guide, CLI reference, architecture overview, user-facing threat model) with `gsd-doc-writer` and `gsd-doc-verifier`, per the documentation convention.
 **Research**: Standard patterns (GoReleaser, cosign, SLSA provenance, cyclonedx-gomod). Also run the PITFALLS "looks done but isn't" checklist and per-platform rotation and break-glass drills.
 
 ## Progress
@@ -216,7 +225,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
-| 2. Passkey Login MVP | 13/14 | In Progress | - |
+| 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
 | 3. Linux Agent and Revocation | 0/TBD | Not started | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |

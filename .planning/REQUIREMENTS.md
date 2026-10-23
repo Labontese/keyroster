@@ -174,7 +174,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CA-07 | Phase 1 | Complete |
 | CA-08 | Phase 1 | Complete |
 | KEY-01 | Phase 1 | Complete |
-| KEY-02 | Phase 2 | Pending |
+| KEY-02 | Phase 2 | Pending: Phase 2 clauses complete (signer-verified WebAuthn assertion over the request digest, quorum-signed directory, root-signed policy; 02-01/03/04/09, SC4 verified 2026-10-23); the "required approvals" clause arrives with Phase 4 (SC2) |
 | KEY-03 | Phase 1 | Complete |
 | KEY-04 | Phase 1 | Complete |
 | KEY-05 | Phase 1 | Complete |
@@ -183,7 +183,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | KEY-08 | Phase 3 | Pending |
 | AUTH-01 | Phase 2 | Complete |
 | AUTH-02 | Phase 2 | Complete |
-| AUTH-03 | Phase 2 | Pending (Linux and Windows verified end to end (02-14); macOS browser leg UNVERIFIED; Windows removal at expiry not timed) |
+| AUTH-03 | Phase 2 | Pending: partially met. Linux and Windows verified end to end (02-14); Windows removal at expiry timed from a cold start on 2026-10-23 (key gone between 3.9 s before and 1.1 s after valid_before, 5 s resolution; Daniel-PC clock against server clock, skew unmeasured); macOS browser leg UNVERIFIED, phase 2 closed without it by owner decision 2026-10-23 (02-VERIFICATION.md override) |
 | AUTH-04 | Phase 2 | Complete |
 | AUTH-05 | Phase 4 | Pending |
 | AUTH-06 | Phase 3 | Pending |
@@ -225,7 +225,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAT-02 | Phase 5 | Pending |
 | PLAT-03 | Phase 5 | Pending |
 | PLAT-04 | Phase 5 | Pending |
-| PLAT-05 | Phase 2 | Pending (Linux and Windows verified end to end (02-14); macOS browser leg UNVERIFIED; Windows removal at expiry not timed) |
+| PLAT-05 | Phase 2 | Pending: partially met. Server and signer on Linux, CLI on Linux and Windows verified end to end (02-14; Windows removal at expiry timed 2026-10-23); macOS CLI CI-only, real-browser leg UNVERIFIED, phase 2 closed without it by owner decision 2026-10-23 (02-VERIFICATION.md override) |
 | REPO-01 | Phase 1 | Complete |
 | REPO-02 | Phase 1 | Complete |
 | REPO-03 | Phase 1 | Complete |
@@ -244,4 +244,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-04*
-*Last updated: 2026-10-04 after roadmap creation (traceability mapped)*
+*Last updated: 2026-10-23 after the phase 2 verification (AUTH-03, PLAT-05 and KEY-02 notes)*
