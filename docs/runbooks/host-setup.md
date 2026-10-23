@@ -185,9 +185,13 @@ sudo systemctl reload ssh    # the unit is sshd on some distributions
 `sshd -t` must print nothing and exit 0. It checks the syntax only, not
 which value is in force. `sshd -T -C` prints the effective settings for a
 connection to `<account>` from `<address>` (a client address your users
-connect from; `<host>` is its name), arriving at `<server address>` on
-port 22 (use the port sshd listens on), with any matching `Match` block
-applied. Give every one of these criteria: in this test mode sshd treats a
+connect from), arriving at `<server address>` on port 22 (use the port
+sshd listens on), with any matching `Match` block applied. `<host>` must be
+what sshd sees for that client. With `UseDNS no`, the default (check with
+`sudo sshd -T | grep -i '^usedns'`), sshd matches `Match Host` against the
+client's address, not its name, so pass the address as both `host=` and
+`addr=`. Only with `UseDNS yes` is `<host>` the client's resolved name.
+Give every one of these criteria: in this test mode sshd treats a
 `Match` criterion it was not given (for example `LocalPort` or
 `LocalAddress`) as not matching, so leaving `laddr` or `lport` out can hide a
 `Match` block that does apply to real connections. If a `Match` block uses
