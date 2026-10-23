@@ -174,7 +174,10 @@ mistyped name never produces a file.
 
 ## 4. Check and reload sshd
 
-Run on a homelab host in 02-14.
+Run on two homelab hosts in 02-14: on a test VM with every criterion
+below, and on zima-srv without `laddr` and `lport`. Neither host had a
+`Match` block, so a `Match` block on the target, the case these criteria
+are for, is UNVERIFIED.
 
 ```
 sudo sshd -t

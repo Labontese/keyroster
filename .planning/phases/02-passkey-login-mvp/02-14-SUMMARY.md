@@ -162,8 +162,9 @@ are kept only outside the repository, under the evidence directory
   /etc/ssh/principals/%u`, root:root 0644. `/etc/ssh/principals` is
   root:root 0755.
 - `sshd -t` exits 0, and sshd was reloaded. `sshd -T -C
-  user=daniel,host=<a>,addr=<a>` shows both settings for Daniel-PC's
-  address. The laptop does not log in to this VM, so its address was not
+  user=daniel,host=<a>,addr=<a>,laddr=<target>,lport=22` (step 4's full
+  form; `$P/host-prep-windows.txt`, baseline `usedns no`) shows both
+  settings for Daniel-PC's address. The laptop does not log in to this VM, so its address was not
   checked here.
 - `Match` files under `/etc/ssh/sshd_config` and `sshd_config.d/`: **0**.
 - The key-based control login exits 0 before and after.
@@ -177,8 +178,9 @@ are kept only outside the repository, under the evidence directory
   `role:homelab-admin`.
 - The same drop-in, root:root 0644. sshd is `OpenSSH_10.2p1
   Ubuntu-2ubuntu3.6`.
-- **`sshd -T -C user=zima,host=<a>,addr=<a>`** shows both settings for
-  Daniel-PC's address (`$SSH_CLIENT`) and for the laptop's Tailscale IPv4:
+- **`sshd -T -C user=zima,host=<a>,addr=<a>`** (no `laddr` or `lport`)
+  shows both settings for Daniel-PC's address (`$SSH_CLIENT`) and for the
+  laptop's Tailscale IPv4:
   the plan's Task 1 verify, exit 0 (re-run in Task 5).
 - `Match` files: **0**.
 - The key-based control login (`ssh.exe -n -o BatchMode=yes zima true`)
@@ -212,7 +214,9 @@ key and its certificate, and keeps the certificate. The laptop login
 (Task 4) used gcr-ssh-agent.
 
 **host-setup.md** (Task 1 step 5, commit a81ba29): steps 1-4 are labelled
-as run on a homelab host in 02-14. "Where the sshd settings go" is labelled
+as run on a homelab host in 02-14. The pre-merge review scoped step 4's
+label: every criterion on the test VM, no `laddr`/`lport` on zima-srv, and
+no `Match` block on either host. "Where the sshd settings go" is labelled
 for the drop-in case only (Ubuntu with the include line, no `Match`
 block). Step 5 keeps its 02-11 label. Both hosts match that case.
 
