@@ -34,10 +34,10 @@ key-files:
 
 key-decisions:
   - "Owner, 2026-10-22: the Windows login's SSH target is a Proxmox test VM (zima-srv was offline then); the Linux login used zima-srv, which was back online"
-  - "UI-01 is not marked complete: the index and error pages and sign-out were not exercised in a real browser"
+  - "UI-01 is marked complete (pre-merge review): every one of the six pages has been opened in a real browser under the strict CSP; the owner checked the index page, the error page and sign-out in Chrome after Task 5"
   - "AUTH-03 and PLAT-05 stay Pending: macOS browser leg UNVERIFIED"
 
-requirements-completed: [AUTH-02, AUTH-04]  # AUTH-02: web sign-in and /account in Chrome on Windows; AUTH-04: fingerprint on CLI and approval page, order=ok on both OSes. Not UI-01, AUTH-03, PLAT-05 (see "Requirements")
+requirements-completed: [AUTH-02, AUTH-04, UI-01]  # AUTH-02: web sign-in and /account in Chrome on Windows; AUTH-04: fingerprint on CLI and approval page, order=ok on both OSes; UI-01: all six pages in a real browser, strict CSP on each (pre-merge review). Not AUTH-03, PLAT-05 (see "Requirements")
 
 plan_head_before: ff87054
 completed: 2026-10-23
@@ -392,9 +392,26 @@ inbox client, are UNVERIFIED.
   (Chrome on Windows), and `/account` showed the role.
 - **AUTH-04 complete.** The fingerprint was compared on CLI and approval
   page on both OSes, with `order=ok` from Task 2 and Task 4.
-- **UI-01 not marked.** The enroll, sign-in, account and approval pages ran
-  in Chrome. The index page (`GET /`), the error page and sign-out were not
-  exercised in a real browser.
+- **UI-01 complete** (pre-merge review, 2026-10-23). Task 5 step 5's rule
+  is "every page exercised in a real browser". The UI has six pages
+  (`pageNames` in `internal/server/render.go`), and each has been:
+  - `enroll` in 02-13 (Chrome on Daniel-PC);
+  - `login`, `account` and `login_approve` in Tasks 2-4 (Chrome, both OSes
+    for the approval page);
+  - `index`, the `error` page (an unknown login ID, 404) and sign-out by
+    the owner on 2026-10-23, after Task 5, in Chrome on Daniel-PC with
+    DevTools open. The keyroster-server journal shows `signin_ok` for owner
+    and `logout` three seconds later, and the browser then showed `/login`.
+
+  curl from Daniel-PC at the same time shows the strict
+  `Content-Security-Policy` (`default-src 'none'; script-src 'self'; ...;
+  frame-ancestors 'none'; base-uri 'none'`) on `/`, `/login`, the 404 page
+  and `/account`, and the console showed no CSP violation on any of the
+  three pages. DevTools showed "1 issue" on the error page and on `/login`;
+  its text was not captured (open item). The pages and assets are embedded
+  in the binary and there is no npm dependency. Evidence:
+  `$P/owner-ui-check.txt`; the screenshots were not kept, because they show
+  the RP name.
 - **AUTH-03 and PLAT-05 stay Pending.** The macOS browser leg is
   UNVERIFIED. REQUIREMENTS.md carries the note "Linux and Windows verified
   end to end (02-14); macOS browser leg UNVERIFIED".
@@ -451,8 +468,9 @@ inbox client, are UNVERIFIED.
   (gcr-ssh-agent) only. For keyroster agent on Windows, a re-run with
   recorded listing times would close it. Until then it stays open for the
   phase verifier.
-- **UI-01.** Exercise the index page, the error page and sign-out in a real
-  browser, or decide that the pages exercised suffice.
+- **UI-01 DevTools issue.** DevTools showed "1 issue" on the error page
+  and on `/login`, and its text was not captured. The console showed no
+  CSP violation, so it is not a CSP refusal; what it is stays unknown.
 - **macOS** (AUTH-03, PLAT-05): no Mac in the homelab.
 - **cli-windows as a required check** (deviation 10): after Dependabot PR
   #41 has merged and the job is green on main (deferred-items.md).

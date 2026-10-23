@@ -88,7 +88,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Web UI (UI)
 
-- [ ] **UI-01**: Server-rendered web UI with strict CSP, embedded in the binary, no npm dependencies
+- [x] **UI-01**: Server-rendered web UI with strict CSP, embedded in the binary, no npm dependencies
 - [ ] **UI-02**: Admin can issue, revoke and manage roles/policy from the UI with CLI parity
 - [ ] **UI-03**: Approver can see pending approvals and approve with WebAuthn step-up
 - [ ] **UI-04**: Audit browser shows entries with inclusion proofs
@@ -217,7 +217,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INV-02 | Phase 5 | Pending |
 | INV-03 | Phase 5 | Pending |
 | INV-04 | Phase 5 | Pending |
-| UI-01 | Phase 2 | Pending |
+| UI-01 | Phase 2 | Complete |
 | UI-02 | Phase 4 | Pending |
 | UI-03 | Phase 4 | Pending |
 | UI-04 | Phase 4 | Pending |
