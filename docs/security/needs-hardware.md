@@ -179,7 +179,8 @@ What these rows do not cover:
   Approve. That is the owner's observation in Chrome, not a measurement.
 - **Web sign-in on Linux.** Only the approval page was used on the laptop.
 - **Windows expiry timing.** The times of the Windows agent listings were
-  not recorded, so removal *at* expiry is shown only on Linux.
+  not recorded. Removal close to expiry (still listed 2 min 34 s before it,
+  gone 57 s after it) is shown only on Linux.
 - **The default key first.** On Linux, the first `ssh` after login
   authenticated with the laptop's own plain key, because zima-srv also has
   it in `authorized_keys`. The certificate login was shown by a run with
@@ -262,10 +263,10 @@ What these rows do not cover:
 - **GNOME gcr-ssh-agent (Ubuntu 26.04):** A3 passed in 02-14 (the Ubuntu
   26.04 packages gcr 3.41.2 and gcr4 4.4). The probe from 02-02 added a key
   and a certificate with a 20 s lifetime. Both were listed, both were gone
-  25 s later, and the owner's pre-existing key stayed. The 02-14 laptop login used
-  gcr-ssh-agent (`SSH_AUTH_SOCK=/run/user/1000/gcr/ssh`), and its `--ttl 5m`
-  certificate left the agent at expiry (table above). Other gcr versions are
-  UNVERIFIED.
+  25 s later, and the owner's pre-existing key stayed. The 02-14 laptop
+  login used gcr-ssh-agent (`SSH_AUTH_SOCK=/run/user/1000/gcr/ssh`). Its
+  `--ttl 5m` certificate was still listed 2 min 34 s before its expiry and
+  gone 57 s after it (table above). Other gcr versions are UNVERIFIED.
 - **Linux, OpenSSH ssh-agent:** `TestAgentLifetime` adds a key and certificate
   with a 2 s lifetime to a real `ssh-agent` and checks that both are gone
   after 3 s. It runs in `build-test`, where `KEYROSTER_REQUIRE_SSH_AGENT=1`

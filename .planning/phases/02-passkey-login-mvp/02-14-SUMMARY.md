@@ -372,8 +372,10 @@ and is UNVERIFIED with the Windows inbox client.
 5. **Task 5:**
    - `4333758` docs(02-14): record the laptop login and require the CLI OS
      checks
-   - the SUMMARY commit `docs(02-14): complete homelab-logins plan`
-     (with REQUIREMENTS.md and STATE.md)
+   - `e576a2c` docs(02-14): complete homelab-logins plan (the SUMMARY,
+     REQUIREMENTS.md and STATE.md)
+   - the follow-up commit `docs(02-14): state the observed Linux expiry
+     window instead of removal at expiry`
 
 ## Verification run (adapted)
 
@@ -398,8 +400,9 @@ and is UNVERIFIED with the Windows inbox client.
 
 ## Open items
 
-- **Windows expiry timing (deviation 7).** Removal at expiry is shown on
-  Linux (gcr-ssh-agent) only. For keyroster agent on Windows, a re-run with
+- **Windows expiry timing (deviation 7).** Removal close to expiry (still
+  listed 2 min 34 s before it, gone 57 s after it) is shown on Linux
+  (gcr-ssh-agent) only. For keyroster agent on Windows, a re-run with
   recorded listing times would close it. Until then it stays open for the
   phase verifier.
 - **UI-01.** Exercise the index page, the error page and sign-out in a real
