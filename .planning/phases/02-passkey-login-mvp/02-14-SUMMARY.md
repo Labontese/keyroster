@@ -372,9 +372,11 @@ UNVERIFIED:
 The gcr-ssh-agent line records A3 as passed and the laptop login as done
 through it. enroll-user.md "Logging in" labels the Linux login as run in
 02-14. It also adds the note that ssh may log in with a plain key first,
-and the option that offers only certificates. Its `-o` form was run on
-Linux. The same setting in a `Host` block, and either form with the Windows
-inbox client, are UNVERIFIED.
+and the option that offers only certificates. The Linux run used that `-o`
+option together with `PasswordAuthentication=no` and
+`KbdInteractiveAuthentication=no`, and the runbook now says so. The same
+settings in a `Host` block, and any of them with the Windows inbox client,
+are UNVERIFIED.
 
 ## Required checks (Task 5 step 3)
 

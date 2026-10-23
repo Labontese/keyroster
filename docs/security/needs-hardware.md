@@ -188,7 +188,8 @@ What these rows do not cover:
 - **The default key first.** On Linux, the first `ssh` after login
   authenticated with the laptop's own plain key, because zima-srv also has
   it in `authorized_keys`. The certificate login was shown by a run with
-  `-o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com`.
+  `-o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com
+  -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no`.
 
 **UNVERIFIED:**
 - macOS: browser and passkey login (no Mac; the CLI flow runs in CI in

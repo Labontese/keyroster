@@ -299,8 +299,11 @@ keyroster login --role ops --ttl 30m
   your plain keys in `authorized_keys`, ssh may offer that key first, and
   then the certificate is not what logged you in. To offer only
   certificates, add `-o PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com`.
-  This `-o` form was run on Linux in 02-14. The same setting in a `Host`
-  block, and either form with the Windows inbox client, are UNVERIFIED.
+  The run on Linux in 02-14 used it together with
+  `-o PasswordAuthentication=no -o KbdInteractiveAuthentication=no`, so a
+  refused certificate ends the login instead of falling back to a password
+  prompt. The same settings in a `Host` block, and any of them with the
+  Windows inbox client, are UNVERIFIED.
 - **Windows:** the certificate goes into keyroster's own agent, never the
   Windows OpenSSH agent service. `keyroster login` starts it when needed
   and prints a `Host <your keyroster hosts>` block with an `IdentityAgent`
