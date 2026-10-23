@@ -165,9 +165,9 @@ Plans:
 Plans:
 **Wave 1**
 - [ ] 03-01-PLAN.md — Phase tracer: D-04 installation ID checkpoint, then `keyroster revoke serial` → signer revoke + krl_publish → own KRL encoder with an ops-signed, installation-bound manifest → real sshd refuses after a swap with no reload
-- [ ] 03-02-PLAN.md — Phase 2 follow-ups (agent check before issuance, lifetime at Add, redeem window), the two negative tests, three doc fixes, and the owner-approved rewording of AGENT-01, REVOKE-01 and PLAT-01
 
 **Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 03-02-PLAN.md — Phase 2 follow-ups (agent check before issuance, lifetime at Add, redeem window), the two negative tests, three doc fixes, and the owner-approved rewording of AGENT-01, REVOKE-01 and PLAT-01
 - [ ] 03-03-PLAN.md — KRL complete: strict parser, oracle both directions, fuzzing, revoke by key ID, key and user (D-09), hourly re-publish (D-10), safe pruning, audit verify rules
 
 **Wave 3** *(blocked on Wave 2 completion)*
