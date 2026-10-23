@@ -228,6 +228,7 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-14: zima-srv came back online, so the laptop login (Task 4) went to zima-srv (account zima, KR_ZIMA_SINCE); the Windows serials are matched in the test VM's journal and the Linux serials in zima-srv's
 - [Phase 02]: 02-14: A3 (02-14) passed on the laptop (gcr-ssh-agent keeps the lifetime and the certificate); the laptop login used gcr-ssh-agent; the first plain `ssh` used the laptop's own key from authorized_keys, so the certificate login was shown with PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com
 - [Phase 02]: 02-14: requirements-completed AUTH-02 and AUTH-04 (order=ok on both OSes); UI-01 not marked (index, error page and sign-out not exercised in a real browser); AUTH-03 and PLAT-05 stay Pending (macOS UNVERIFIED); Windows removal at expiry not shown (listing times unrecorded)
+- [Phase 02]: 02-14 pre-merge review, owner decision D2 (2026-10-23): a ruleset change is applied by the owner after its PR merges, from an up-to-date main checkout (the reviewed script and JSON), never from a PR branch; this replaces the 01-04 pattern of applying from the PR branch before approval. A new required check must already have reported success on its PR (CONTRIBUTING.md "Changing the rulesets")
 
 ### Pending Todos
 

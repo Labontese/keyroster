@@ -202,16 +202,25 @@ second human reviewer. The rules for using it:
 ## Changing the rulesets
 
 The rulesets live in `.github/rulesets/` as JSON. A change goes through a
-normal PR; after it merges, the owner runs `bash scripts/apply-rulesets.sh`
-with the owner's gh login, which creates or updates each ruleset by name.
+normal PR. After it merges, the owner applies it from an up-to-date `main`
+checkout, with the owner's gh login:
 
-A new required check is the exception to "after it merges". A check becomes
-required only after it has reported success on the PR that introduces it,
-because a required check that never reports blocks every merge. The owner
-applies that ruleset from the PR branch once the new check is green on the
-PR, and before approving. The PR then shows that the new context resolves
-before anything merges. If that PR is later abandoned, the owner runs the
-script again from `main` to restore the previous list.
+```
+git switch main
+git pull --ff-only
+bash scripts/apply-rulesets.sh
+```
+
+The script creates or updates each ruleset by name. Running it from `main`
+means the script and the JSON it applies are the reviewed, merged copies,
+never a PR branch that can still change after review. Never run it from a
+PR branch.
+
+A new required check must report before it is required, because a
+required check that never reports blocks every merge. So add it to the
+ruleset only in a PR on which that check (same job name, same app) has
+already reported success, and before applying, confirm that it also passed
+on `main` after the merge.
 
 ## Security issues
 

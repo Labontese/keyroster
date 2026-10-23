@@ -12,7 +12,7 @@ provides:
   - "The first real end-to-end logins, on Windows 11 and on Ubuntu 26.04 GNOME, each corroborated by the signer's audit-verified log and the host's sshd journal"
   - "A3 (gcr-ssh-agent lifetime and certificate probe) run and passed on the laptop"
   - "The platform record in needs-hardware.md (verified vs UNVERIFIED per OS, browser, authenticator and agent)"
-  - "cli-macos in main-integrity.json and CONTRIBUTING.md, for the owner to apply at the merge gate; cli-windows stays unrequired until its intermittent TestAgent hang is fixed (owner decision D1)"
+  - "cli-macos in main-integrity.json and CONTRIBUTING.md, for the owner to apply from main after the merge (deviation 11); cli-windows stays unrequired until its intermittent TestAgent hang is fixed (owner decision D1)"
 affects: [AUTH-02, AUTH-03, AUTH-04, PLAT-05, UI-01]
 
 tech-stack:
@@ -122,6 +122,16 @@ are kept only outside the repository, under the evidence directory
     and CONTRIBUTING.md require cli-macos only, and the ci.yml comment says
     why cli-windows is not required yet. deferred-items.md records when it
     becomes required (after Dependabot PR #41, go-winio v0.6.4).
+11. **The ruleset is applied after the merge, from main (owner decision
+    D2, "Efter merge, från main", pre-merge review).** Task 6 step 1 has
+    the owner check out the PR branch and run `scripts/apply-rulesets.sh`
+    from it, with admin rights, before approving. That runs a PR branch's
+    script and JSON, which can change after review, with the owner's
+    authority. Instead, after the merge the owner runs the script from an
+    up-to-date `main` checkout (the reviewed script and JSON). cli-macos
+    has already reported success on this PR's head, so applying after the
+    merge loses nothing. CONTRIBUTING.md "Changing the rulesets" now says
+    this. The PLAN text is left as it is.
 
 ## Hosts (Task 1)
 
@@ -355,8 +365,8 @@ inbox client, are UNVERIFIED.
   from 17 to 18 checks. `cli-windows` was added too and taken out again in
   the pre-merge review (owner decision D1); CONTRIBUTING.md says it runs on
   every PR but is not required yet.
-- The live ruleset is unchanged: the owner applies it from the PR branch in
-  Task 6.
+- The live ruleset is unchanged: the owner applies it after the merge,
+  from an up-to-date `main` (deviation 11).
 
 ## Requirements
 
