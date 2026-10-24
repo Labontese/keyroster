@@ -104,15 +104,11 @@ func (s *Signer) Revoke(ctx context.Context, peer Peer, req *wire.RevokeRequest)
 			return err
 		}
 		revokeLeaf = idx
-		var vbMicros uint64
-		if validBefore < uint64(1)<<62/uint64(time.Second/time.Microsecond) {
-			vbMicros = validBefore * uint64(time.Second/time.Microsecond)
-		}
 		if err := s.db.InsertRevocation(tx, signerdb.Revocation{
 			Kind:              signerdb.RevocationSerial,
 			CAKey:             caKey,
 			Serial:            req.Serial,
-			ValidBeforeMicros: vbMicros,
+			ValidBeforeMicros: validBeforeMicros(validBefore),
 			RequestID:         req.RequestID,
 			LeafIndex:         idx,
 			RevokedAt:         now,
@@ -147,6 +143,16 @@ func (s *Signer) Revoke(ctx context.Context, peer Peer, req *wire.RevokeRequest)
 		"uid", peer.UID,
 		"pid", peer.PID)
 	return &wire.RevokeResponse{KRLVersion: published.Version, RevokeLeaf: revokeLeaf, PublishLeaf: publishLeaf}, nil
+}
+
+// validBeforeMicros is the revocation row's valid_before_us for a
+// certificate valid_before in seconds: 0 (not known) when it does not fit,
+// as for ssh.CertTimeInfinity.
+func validBeforeMicros(seconds uint64) uint64 {
+	if seconds < uint64(1)<<62/uint64(time.Second/time.Microsecond) {
+		return seconds * uint64(time.Second/time.Microsecond)
+	}
+	return 0
 }
 
 // certCAKey returns the CA key (SSH wire format) and the valid_before of a

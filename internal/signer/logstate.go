@@ -199,7 +199,8 @@ func checkDirectoryLogged(stored *signerdb.StoredDirectory, install []byte) erro
 // CheckLog runs the start-up log check of serve without starting a signer:
 // the stored leaves must decode, match their stored hashes and reproduce the
 // latest checkpoint, which must verify with logKey (the recorded log key),
-// and agree with the tables that commit with them (checkLogCovers). It only
+// and agree with the tables that commit with them (checkLogCovers, and the
+// revocation rows with the revoke leaves: loggedRevocations.check). It only
 // reads db. keyroster-signer doctor uses it; an error wraps the
 // reason.
 func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error {
@@ -285,6 +286,7 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		hashes   [][]byte
 		installs loggedInstalls
 		issued   issuedSummary
+		revoked  = loggedRevocations{}
 	)
 	// ReadLogWithHashes yields idx = 0, 1, 2, ... without gaps.
 	snap, err := db.ReadLogWithHashes(ctx, func(idx uint64, leaf, hash []byte) error {
@@ -328,8 +330,12 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			issued.lastSerial = b.Serial
 		case tlog.KindRevoke:
 			// A revocation issues nothing: it must not change issued.
-			if _, err := tlog.DecodeRevokeBody(l.Body); err != nil {
+			b, err := tlog.DecodeRevokeBody(l.Body)
+			if err != nil {
 				return fmt.Errorf("%w: leaf %d: revoke body does not decode", errLogMismatch, idx)
+			}
+			if err := revoked.add(idx, b.Entries); err != nil {
+				return err
 			}
 		case tlog.KindKRLPublish:
 			if _, err := tlog.DecodeKRLPublishBody(l.Body); err != nil {
@@ -358,6 +364,9 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		if err := checkLogCovers(snap, 0, issued); err != nil {
 			return nil, 0, loggedInstalls{}, err
 		}
+		if err := revoked.check(snap.Revocations); err != nil {
+			return nil, 0, loggedInstalls{}, err
+		}
 		return tree, 0, installs, nil
 	}
 	root, err := tree.Root()
@@ -374,7 +383,72 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	if err := checkLogCovers(snap, tree.Size(), issued); err != nil {
 		return nil, 0, loggedInstalls{}, err
 	}
+	if err := revoked.check(snap.Revocations); err != nil {
+		return nil, 0, loggedInstalls{}, err
+	}
 	return tree, last, installs, nil
+}
+
+// errRevocationsNotLogged is the revocations_not_logged start-up refusal.
+var errRevocationsNotLogged = fmt.Errorf("%w: revocations_not_logged", errLogMismatch)
+
+// loggedRevocations counts the entries of the revoke leaves of a log by
+// revocationKey: what the revocation row written with each entry holds.
+type loggedRevocations map[string]int
+
+// revocationKey ties a revocation row to the entry of the revoke leaf it
+// was written with: the leaf index, kind, CA key, serial, key ID, key and
+// valid_before in microseconds (validBeforeMicros).
+func revocationKey(leaf uint64, kind string, caKey []byte, serial uint64, keyID string, key []byte, validBeforeMicros uint64) string {
+	return fmt.Sprintf("%d|%s|%x|%d|%q|%x|%d", leaf, kind, caKey, serial, keyID, key, validBeforeMicros)
+}
+
+// revocationKinds maps a revoked entry kind to the revocation row kind.
+var revocationKinds = map[uint8]string{
+	tlog.RevokedSerial: signerdb.RevocationSerial,
+	tlog.RevokedKeyID:  signerdb.RevocationKeyID,
+	tlog.RevokedKey:    signerdb.RevocationKey,
+}
+
+// add records the entries of the revoke leaf idx.
+func (lr loggedRevocations) add(idx uint64, entries []tlog.RevokedEntry) error {
+	for _, e := range entries {
+		kind, ok := revocationKinds[e.Kind]
+		if !ok {
+			return fmt.Errorf("%w: leaf %d: revoked entry kind %d", errLogMismatch, idx, e.Kind)
+		}
+		lr[revocationKey(idx, kind, e.CAKey, e.Serial, e.KeyID, e.Key, validBeforeMicros(e.ValidBeforeSeconds))]++
+	}
+	return nil
+}
+
+// check requires the revocation rows (read from the same snapshot as the
+// leaves) to be exactly the logged entries, one row per entry. The
+// revocation table is not anchored in the signed checkpoint, but every KRL
+// is rebuilt from it (publishKRLLocked): a row deleted outside the signer
+// would be left out of the next KRL the ops key signs, which un-revokes
+// that certificate on every host that installs it, and a row written
+// outside the signer would be published with no revoke leaf recording it.
+// Both are refused (revocations_not_logged). Like checkLogCovers, it
+// cannot catch the table rolled back together with the log to an earlier
+// signed prefix. It consumes lr.
+func (lr loggedRevocations) check(rows []signerdb.Revocation) error {
+	n := 0
+	for _, c := range lr {
+		n += c
+	}
+	if n != len(rows) {
+		return fmt.Errorf("%w: the log records %d revoked entries, the state database %d revocation rows (rows deleted or written outside the signer?)",
+			errRevocationsNotLogged, n, len(rows))
+	}
+	for _, r := range rows {
+		k := revocationKey(r.LeafIndex, r.Kind, r.CAKey, r.Serial, r.KeyID, r.Key, r.ValidBeforeMicros)
+		if lr[k] == 0 {
+			return fmt.Errorf("%w: revocation row %d is not an entry of revoke leaf %d", errRevocationsNotLogged, r.ID, r.LeafIndex)
+		}
+		lr[k]--
+	}
+	return nil
 }
 
 // issuedSummary is what the issue and login_issue leaves of a log record

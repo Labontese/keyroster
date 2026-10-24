@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/keystore"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -310,10 +311,22 @@ func TestRevokeKRLTooLarge(t *testing.T) {
 	}
 	e := newRevokeEnv(t, 1, 1, testInstallationID)
 	ca := e.fx.Roles["user"].PublicKey().Marshal()
+	// The 600 000 rows join the revocation table inside the revocation's
+	// own transaction (a trigger on revoke_request), so they are rolled
+	// back with it: rows written outside that transaction, with no revoke
+	// leaf recording them, would be refused as revocations_not_logged
+	// when the failed transaction reloads the log.
 	if err := e.db.WithTx(context.Background(), func(tx *sql.Tx) error {
-		_, err := tx.Exec(`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 600000)
+		if _, err := tx.Exec(`CREATE TABLE bulk (ca BLOB, serial INTEGER)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 600000)
+			INSERT INTO bulk (ca, serial) SELECT ?, 2 * x FROM c`, ca); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`CREATE TRIGGER bulk_revoke AFTER INSERT ON revoke_request BEGIN
 			INSERT INTO revocation (kind, ca_key, serial, request_id, leaf_index, revoked_at_us)
-			SELECT 'serial', ?, 2 * x, ?, 0, 1 FROM c`, ca, make([]byte, 16))
+			SELECT 'serial', ca, serial, NEW.request_id, NEW.leaf_index, 1 FROM bulk; END`)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -359,6 +372,48 @@ func TestRevokeRestart(t *testing.T) {
 	execSQL(t, e.dbPath, `DELETE FROM krl_state`)
 	if err := e.open(); err == nil || !strings.Contains(err.Error(), "krl_state_not_logged") {
 		t.Fatalf("start with the KRL state deleted: %v, want krl_state_not_logged", err)
+	}
+}
+
+// TestRevocationsNotLogged (pre-merge review): the revocation table, from
+// which every KRL is rebuilt, must be exactly the entries of the revoke
+// leaves. A row deleted, written or changed outside the signer stops
+// serve and doctor's log check alike (revocations_not_logged), so the
+// next revocation cannot publish a signed KRL that un-revokes a
+// certificate.
+func TestRevocationsNotLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name, query string
+		args        func(e *revokeEnv) []any
+	}{
+		{"row_deleted", `DELETE FROM revocation WHERE serial = ?`, func(e *revokeEnv) []any { return []any{int64(e.serial)} }}, //nolint:gosec // G115: a test serial
+		{"row_inserted", `INSERT INTO revocation (kind, ca_key, serial, request_id, leaf_index, revoked_at_us)
+			SELECT kind, ca_key, serial + 1, request_id, leaf_index, revoked_at_us FROM revocation`, func(*revokeEnv) []any { return nil }},
+		{"row_changed", `UPDATE revocation SET serial = serial + 1`, func(*revokeEnv) []any { return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newRevokeEnv(t, 1, 1, testInstallationID)
+			e.revoked(e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0]), 0)
+			e.close()
+			// Control: the untouched database starts and passes the check.
+			db := e.openDB()
+			err := CheckLog(context.Background(), db, e.fx.Roles[keystore.RoleLog].PublicKey())
+			_ = db.Close()
+			if err != nil {
+				t.Fatalf("CheckLog of a healthy database: %v", err)
+			}
+			execSQL(t, e.dbPath, tc.query, tc.args(e)...)
+			err = e.open()
+			if !errors.Is(err, errLogMismatch) || !strings.Contains(err.Error(), "revocations_not_logged") {
+				t.Fatalf("start: %v, want revocations_not_logged", err)
+			}
+			db = e.openDB()
+			err = CheckLog(context.Background(), db, e.fx.Roles[keystore.RoleLog].PublicKey())
+			_ = db.Close()
+			if !errors.Is(err, errLogMismatch) || !strings.Contains(err.Error(), "revocations_not_logged") {
+				t.Fatalf("CheckLog: %v, want revocations_not_logged", err)
+			}
+		})
 	}
 }
 

@@ -120,7 +120,9 @@ type Signer struct {
 // root of any bundle the log records as an admin, when the latest
 // stored directory is not the one the last directory_install entry
 // records, and when the stored KRL state is not the one the last
-// krl_publish entry records (krl_state_not_logged). The trust state is
+// krl_publish entry records (krl_state_not_logged), and when the
+// revocation rows are not exactly the entries of the revoke leaves
+// (revocations_not_logged). The trust state is
 // loaded only here: once another bundle is installed, the signer refuses
 // every request (trust_changed) until it is restarted and loads it.
 func New(cfg Config) (*Signer, error) {

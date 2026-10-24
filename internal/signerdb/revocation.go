@@ -107,7 +107,11 @@ func (d *DB) RevokeRequestUsed(ctx context.Context, id [16]byte) (bool, error) {
 
 // RevocationsTx returns every revocation row inside tx, in id order.
 func (d *DB) RevocationsTx(ctx context.Context, tx *sql.Tx) ([]Revocation, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id, kind, ca_key, serial, key_id, key, valid_before_us, request_id, leaf_index, revoked_at_us FROM revocation ORDER BY id`)
+	return revocations(ctx, tx)
+}
+
+func revocations(ctx context.Context, q queryer) ([]Revocation, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, kind, ca_key, serial, key_id, key, valid_before_us, request_id, leaf_index, revoked_at_us FROM revocation ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("signerdb: read revocations: %w", err)
 	}
