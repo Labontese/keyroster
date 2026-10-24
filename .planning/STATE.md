@@ -1,13 +1,13 @@
 ---
 gsd_state_version: "1.0"
 current_phase: 03
-current_phase_name: linux-agent-and-revocation
-status: planning
-stopped_at: Phase 3 context gathered
-last_updated: "2026-10-24T05:56:52.982Z"
-last_activity: 2026-10-23
-last_activity_desc: Phase 2 verification passed after the owner's decisions; phase 2 complete; next /gsd-discuss-phase 3
-state_head: 17b9de60f41798103898ee7b068568507ee619dd
+current_phase_name: Linux Agent and Revocation
+status: executing
+stopped_at: 03-01 executed; PR open at the Task 4 merge gate
+last_updated: "2026-10-24T19:53:58.337Z"
+last_activity: 2026-10-24
+last_activity_desc: Phase 03 execution started
+state_head: d263deea5a227f7a58ded895fb6a59a78175046c
 progress:
   total_phases: 6
   completed_phases: 1
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-04)
 
 **Core value:** Full visibility: at any moment you know exactly who has access to what, and can revoke it immediately.
-**Current focus:** Phase 02 — Passkey Login MVP
+**Current focus:** Phase 03 — Linux Agent and Revocation
 
 ## Current Position
 
-Phase: 03 (linux-agent-and-revocation) — READY TO EXECUTE
-Plan: Not started
-Status: Ready to discuss (next: /gsd-discuss-phase 3)
-Last activity: 2026-10-23 — Phase 2 complete: code review (0 critical, 0 warning, 8 info) and verification passed after the owner's decisions (macOS real-browser leg UNVERIFIED by override; timed Windows expiry done). Phase 1: its report says human_needed (real hardware, issue #13), and gsd-tools now routes it as stale
+Phase: 03 (Linux Agent and Revocation) — EXECUTING
+Plan: 2 of 16
+Status: Ready to execute
+Last activity: 2026-10-24 — Phase 03 execution started
 
 Progress: [██░░░░░░░░] 17%
 
@@ -90,6 +90,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P11 | 25 min | 3 tasks | 11 files |
 | Phase 02 P12 | about 65 min | 2 tasks | 28 files |
 | Phase 02 P13 | about 40 min plus owner checkpoints | 4 tasks | 8 files |
+| Phase 03 P01 | 62 min | 3 tasks | 52 files |
 
 ## Accumulated Context
 
@@ -232,6 +233,10 @@ Recent decisions affecting current work:
 
 - [Phase 02]: Phase 2 verification, owner decisions 2026-10-23: "Godkänn alla tre (Rekommenderas)" (overrides: 02-14 truth 9 cli-windows replaced by D1, 02-13 truth 8 anchor v2 by design, SC5 read through D-18); "Stäng med macOS UNVERIFIED (Rekommenderas)" (SC2 macOS clause by override; AUTH-03 and PLAT-05 stay Pending); "Kör testet nu (Rekommenderas)" (timed Windows expiry from a cold start: serial 1792752977539626 left the keyroster agent between 3.9 s before and 1.1 s after valid_before at 5 s resolution (Daniel-PC clock against server clock, skew unmeasured), audit verify ok with 18 entries); "Acceptera, lägg till tester senare (Rekommenderas)" (9 flagged prohibitions accepted, two negative tests as todos). The MVP goal format follows the Phase 1 precedent. Status passed, 5/5 and 145/145 with 4 overrides
 - [Phase 02]: KEY-02 stays Pending: its Phase 2 clauses are complete, the required-approvals clause arrives with Phase 4 SC2. Advisory 4 (machine names in committed files outside the alias allow-list) has no owner decision yet
+- [Phase 03]: 03-01 D-04: owner chose random-128 (2026-10-24): installation ID = 32 lowercase hex from crypto/rand, drawn by root sign at genesis or added once by --installation-id new; LENIENT transition (ID-less directories keep authorizing logins on the signer, agents never accept them; 03-04 implements the directory side)
+- [Phase 03]: 03-01: one policy admin's SSHSIG under keyroster/revoke-request/v1 authorizes a revocation whatever admin_quorum says (fail-safe direction); the signer refuses to publish a KRL while the bundle in force has no installation ID (krl_no_installation_id)
+- [Phase 03]: 03-01: keyroster-signer doctor (CheckTrust) now also refuses a KRL state the log does not record (krl_state_not_logged), matching serve
+- [Phase 03]: 03-01: STATE blocker 'unknown whether sshd re-reads RevokedKeys without a reload' resolved: it does; TestRevokeSerialEndToEnd swaps the KRL file with rename(2), no signal, same sshd PID, and sshd refuses the revoked certificate (run locally in WSL on 10.5p1 and 9.5p1; the CI e2e lanes run it on the 03-01 PR)
 
 ### Pending Todos
 
@@ -258,7 +263,6 @@ Recent decisions affecting current work:
 
 - [Phase 1]: Ed25519 via PKCS#11/ssh-agent and TPM algorithm support unverified; decide CA key algorithm and custody together in phase research
 - [Phase 2]: CLI WebAuthn transport undecided (browser loopback is the default); Windows CTAP access for non-admin users unverified
-- [Phase 3]: Unknown whether sshd re-reads `RevokedKeys` without a reload; settle with an integration test
 - [Phase 5]: Windows edge cases (principal case, domain/Entra accounts, `verify-required`, KRL on 9.5p2) at LOW-MEDIUM confidence
 - [General]: HSM signing throughput under login storms not measured
 
@@ -280,6 +284,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-23T19:09:42.183Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-linux-agent-and-revocation/03-CONTEXT.md
+Last session: 2026-10-24T19:53:46.724Z
+Stopped at: 03-01 executed; PR open at the Task 4 merge gate
+Resume file: None
