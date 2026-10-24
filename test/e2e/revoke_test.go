@@ -93,7 +93,8 @@ func TestRevokeSerialEndToEnd(t *testing.T) {
 		t.Fatalf("keyroster revoke serial exited %d:\n%s%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
 	}
 	t.Logf("keyroster revoke serial:\n%s", out)
-	if !strings.Contains(out, "revoked serial "+a.serial+" (user): KRL v1 published") ||
+	if !strings.Contains(out, "The server reports serial "+a.serial+" (user) revoked: KRL v1 published") ||
+		!strings.Contains(out, "Checked: the server serves KRL v1, signed by the ops key of your root-pinned trust bundle") ||
 		!strings.Contains(out, "Hosts enforce it once their keyroster agent applies this KRL.") {
 		t.Fatalf("keyroster revoke serial output:\n%s", out)
 	}

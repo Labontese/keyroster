@@ -11,8 +11,10 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
+	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -52,7 +54,10 @@ var revokeCARoles = map[string]wire.CARole{
 // its signing bytes with the admin key in ssh-agent under
 // keyroster/revoke-request/v1, and sends it through the admin API. The
 // server forwards it to the signer, which alone decides and publishes the
-// next KRL. Hosts enforce the revocation only once they have that KRL; the
+// next KRL. The server's answer is unsigned, so the command reports it as
+// the server's and confirms it against the signer-signed KRL manifest the
+// server then serves (confirmRevokeAnswer); it exits non-zero when that
+// fails. Hosts enforce the revocation only once they have that KRL; the
 // command never claims they already refuse the certificate.
 func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("revoke serial", flag.ContinueOnError)
@@ -100,7 +105,8 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 		return err
 	}
 	defer s.close()
-	if _, _, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold); err != nil {
+	bundle, _, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold)
+	if err != nil {
 		return err
 	}
 	sig, err := sshsig.Sign(rand.Reader, s.signer, wire.RevokeSSHSIGNamespace, req.SigningBytes())
@@ -116,10 +122,52 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 	if err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminRevokePath, serverclient.RevokeBody{Request: body}, &ans, s.signer); err != nil {
 		return revokeRefusal(err)
 	}
-	_, _ = fmt.Fprintf(stdout, "revoked serial %d (%s): KRL v%d published (log entries %d, %d)\n",
+	m, err := confirmRevokeAnswer(ctx, s.client, bundle, ans)
+	if err != nil {
+		// The CLI's own advice stays out of an error that may carry a
+		// PeerError excerpt.
+		_, _ = fmt.Fprintln(stderr, "On the signer host, journalctl -u keyroster-signer shows a \"revoked\" line with the serial if the signer revoked it.")
+		return fmt.Errorf("the server reports serial %d revoked, but that could not be confirmed: %w", serial, err)
+	}
+	_, _ = fmt.Fprintf(stdout, "The server reports serial %d (%s) revoked: KRL v%d published (log entries %d, %d).\n",
 		serial, role, ans.KRLVersion, ans.RevokeLeaf, ans.PublishLeaf)
+	_, _ = fmt.Fprintf(stdout, "Checked: the server serves KRL v%d, signed by the ops key of your root-pinned trust bundle (log entry %d).\n"+
+		"Not checked: that this KRL lists serial %d (this version cannot read a KRL); "+
+		"the signer's \"revoked\" line (journalctl -u keyroster-signer) is the proof.\n",
+		m.KRLVersion, m.LogIndex, serial)
 	_, _ = fmt.Fprintln(stdout, "Hosts enforce it once their keyroster agent applies this KRL.")
 	return nil
+}
+
+// confirmRevokeAnswer checks the server's answer to a revocation against
+// what the signer signed. The answer itself is unsigned: a server could
+// drop the request and invent it. The revoke and krl_publish leaves are
+// adjacent and a KRL version is at least 1; the KRL the server then serves
+// must verify against the root-pinned bundle and its installation ID
+// (krl.VerifyManifest) with a version of at least the answer's and a
+// krl_publish leaf of at least the answer's. A server that dropped the
+// request cannot show a manifest the signer never signed; it can still
+// show an earlier genuine one under an invented answer of that version,
+// which only reading the KRL for the serial would catch.
+func confirmRevokeAnswer(ctx context.Context, c *serverclient.Client, b *trust.Bundle, ans serverclient.RevokeAnswer) (*krl.Manifest, error) {
+	if ans.KRLVersion < 1 || ans.PublishLeaf != ans.RevokeLeaf+1 {
+		return nil, fmt.Errorf("its answer (KRL v%d, log entries %d, %d) is not one the signer gives", ans.KRLVersion, ans.RevokeLeaf, ans.PublishLeaf)
+	}
+	doc, err := c.GetKRL(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading the published KRL: %w", err)
+	}
+	if doc == nil {
+		return nil, errors.New("the server serves no KRL")
+	}
+	m, err := krl.VerifyManifest(doc.Manifest, doc.Sig, doc.KRL, b, b.InstallationID, ans.KRLVersion-1)
+	if err != nil {
+		return nil, fmt.Errorf("the KRL the server serves does not verify against your root-pinned trust bundle: %w", serverclient.PeerError(err))
+	}
+	if m.LogIndex < ans.PublishLeaf {
+		return nil, fmt.Errorf("the KRL the server serves (v%d) was published at log entry %d, before the reported entry %d", m.KRLVersion, m.LogIndex, ans.PublishLeaf)
+	}
+	return m, nil
 }
 
 // revokeRefusal states a refused revocation in the CLI's own words for the

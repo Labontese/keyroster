@@ -140,6 +140,10 @@ type dirEnv struct {
 	pol     *trust.Policy
 	agent   *countingAgent
 	cfg     *Config
+	// bundle is the root-signed genesis bundle served, and ops a signer
+	// for its ops key (signs KRL manifests).
+	bundle *trust.Bundle
+	ops    ssh.Signer
 
 	mu       sync.Mutex
 	custody  string // the Keyroster-Custody header of every answer
@@ -210,6 +214,12 @@ func newDirEnvPolicy(t *testing.T, admins int, quorum int, edit func(p *trust.Po
 		t.Fatal(err)
 	}
 	e.pol = pol
+	if e.bundle, err = trust.ParseBundle(read("bundle.json")); err != nil {
+		t.Fatal(err)
+	}
+	if e.ops, err = ssh.NewSignerFromKey(g.caKeys["ops"]); err != nil {
+		t.Fatal(err)
+	}
 	e.trustDoc, err = json.Marshal(serverclient.TrustResponse{
 		Bundle: read("bundle.json"), BundleSigs: read("bundle.json.sigs"),
 		Policy: read("policy.json"), PolicySigs: read("policy.json.sigs"), BundleVersion: 1,
@@ -262,6 +272,20 @@ func (e *dirEnv) handle(w http.ResponseWriter, r *http.Request) {
 		doc := e.trustDoc
 		e.mu.Unlock()
 		_, _ = w.Write(doc)
+		return
+	}
+	if r.URL.Path == serverclient.KRLPath {
+		// Public, like the trust document: override "GET "+KRLPath
+		// serves a KRL, otherwise none is published.
+		e.mu.Lock()
+		f := e.override[r.Method+" "+r.URL.Path]
+		e.mu.Unlock()
+		if f != nil {
+			f(w)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"`+serverclient.KRLErrNone+`"}`)
 		return
 	}
 	body, err := io.ReadAll(r.Body)

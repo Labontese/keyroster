@@ -63,13 +63,29 @@ pins first, then signs the request in ssh-agent under
 Expected output:
 
 ```
-revoked serial 1792869357962865 (user): KRL v1 published (log entries 4, 5)
+The server reports serial 1792869357962865 (user) revoked: KRL v1 published (log entries 4, 5).
+Checked: the server serves KRL v1, signed by the ops key of your root-pinned trust bundle (log entry 5).
+Not checked: that this KRL lists serial 1792869357962865 (this version cannot read a KRL); the signer's "revoked" line (journalctl -u keyroster-signer) is the proof.
 Hosts enforce it once their keyroster agent applies this KRL.
 ```
 
 The two log entries are the `revoke` entry and the `krl_publish` entry,
 written in one transaction with the revocation itself. Run in CI e2e
 (`TestRevokeSerialEndToEnd`, 03-01).
+
+The server's answer is not signed, and a compromised keyroster-server
+could drop the request and answer success. So the command reads the
+published KRL after the answer and requires its manifest to verify
+against your root-pinned trust bundle and its installation ID, with at
+least the reported KRL version and `krl_publish` entry. If that fails it
+prints `the server reports serial N revoked, but that could not be
+confirmed: ...` and exits non-zero; nothing tells you whether the signer
+revoked, so check the signer host. This catches an invented version, but
+not a server that drops the request and shows an earlier genuine KRL
+under an invented answer of that version: only reading the KRL for the
+serial would. The confirmation and each of its refusals ran in the CLI
+tests against a stub server (`TestRevokeSerialConfirm`); the confirmed
+path also runs in CI e2e.
 
 ## 2. Refusals
 
@@ -109,8 +125,9 @@ the manifest's signature is by the ops key of its root-pinned trust
 bundle, the manifest names the installation ID it pinned, its
 `krl_version` is above the version it holds, and its `krl_sha256` is the
 SHA-256 of the KRL bytes (`krl.VerifyManifest`). Run in CI e2e
-(`TestRevokeSerialEndToEnd`, 03-01) through the CLI's pinned TLS client;
-no command offers it to an operator yet.
+(`TestRevokeSerialEndToEnd`, 03-01) through the CLI's pinned TLS client.
+`keyroster revoke serial` runs this check after each revocation (step 1);
+no command fetches the KRL for a hand install yet.
 
 ## 4. The audit log after a revocation
 

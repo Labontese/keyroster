@@ -55,6 +55,7 @@ func useKeyring(t *testing.T, keys ...ed25519.PrivateKey) {
 type ceremony struct {
 	dir, caPubkeys, policy, roots, out string
 	rootKeys                           []ed25519.PrivateKey
+	caKeys                             map[string]*ecdsa.PrivateKey // by ca-pubkeys role
 }
 
 // newCeremony writes a genesis policy (via keyroster root genesis-policy),
@@ -91,6 +92,7 @@ func newCeremonyInputs(t *testing.T) *ceremony {
 		policy:    filepath.Join(dir, "genesis-policy.json"),
 		roots:     filepath.Join(dir, "roots.pub"),
 		out:       filepath.Join(dir, "out"),
+		caKeys:    map[string]*ecdsa.PrivateKey{},
 	}
 	_, adminPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -117,6 +119,7 @@ func newCeremonyInputs(t *testing.T) *ceremony {
 			t.Fatal(err)
 		}
 		cas.Keys = append(cas.Keys, trust.CAPubKey{Role: role, Key: trust.FormatKey(pub), Alg: pub.Type(), Custody: "tpm"})
+		c.caKeys[role] = priv
 	}
 	data, err := cas.Canonical()
 	if err != nil {
