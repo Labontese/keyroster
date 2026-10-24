@@ -397,6 +397,22 @@ None.
   - `k <= KindKRLPublish` in the fuzz test, and internal/krl in .golangci.yml.
   - UNVERIFIED appears 5 times in the runbook.
 
+## Pre-merge review fixes
+
+PR #58, findings the review upheld. Each code fix has a test that failed before the fix and passes after it.
+
+- **CLI reported the server's unsigned revoke answer as fact** (two findings, one defect): f6bc33d. Test: `TestRevokeSerialConfirm`; its seven refusal cases fail when the confirmation is bypassed. The CLI now labels the answer as the server's report and refuses answers the signer never gives. The served KRL manifest must verify against the root-pinned bundle and installation ID, with at least the reported version and krl_publish entry. Not done: checking that the KRL lists the serial needs `krl.Parse` (03-03), and no plan owns this check in the CLI.
+- **Revocation table not reconciled with the revoke leaves** (two findings, one defect): 1e5843e. Test: `TestRevocationsNotLogged` (row deleted, inserted, changed; serve and CheckLog). It fails with the check disabled. `TestRevokeKRLTooLarge` now adds its rows in the revocation's own transaction, through a trigger. Not done: a guard at publish time against rows changed while the signer runs.
+- **s.krl stale after a failed COMMIT that still reached disk**: e6b8bdc. Test: `TestRevokeFailedCommitReloadsKRL`. The directory cache has the same older pattern and is out of scope.
+- **Unauthenticated GET /api/v1/krl waited on s.mu and held signer slots**: eb18e2b. Test: `TestGetKRLDoesNotWaitForMu`. Not done: caching the KRL on the server or limiting concurrent signer calls.
+- **`--ca host` said hosts enforce the revocation**: 94728e6. Test: `TestRevokeSerialConfirm/enforcement_by_role`. The runbook describes the host case and labels it UNVERIFIED until 03-09.
+- **Runbook gave the wrong error for a non-admin key; refusal texts untested**: b7b1b57. Test: `TestRevokeRefusalText`; the 403 case fails on the old text. Each row is labelled as run against a stub server and UNVERIFIED end to end. 0782fcc is a lint-only follow-up.
+- **"Every refusal is in the audit log"** (split): 21856d2. Docs only, no test.
+- **Installation-ID upgrade path shown as working but never run end to end** (split): 9da2d70. Docs only, no test; the runbook labels it UNVERIFIED and names 03-15 and 03-16.
+- **DecodeRevokeBody accepted kind-inconsistent entries** (split): 01ee30a, for the serial kind only. Test: `TestRevokeBody`, with encode and raw-decode negative cases; the golden vector still passes. The rules for the key_id and key kinds are left to 03-03.
+- **Skipped:** none.
+- **Not run:** `-race` (no cgo on this host); e2e and golangci-lint (not available from this worktree, CI runs them).
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-24*
