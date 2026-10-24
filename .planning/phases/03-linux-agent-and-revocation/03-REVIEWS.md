@@ -1474,3 +1474,19 @@ Daniel chose the **two-step swap with no reload** over immutable `gen/N` paths w
 - **Self-test.** The self-test runs after the final step. A failure rolls back through the intermediate generation.
 - **Interleaving test.** A deterministic test of signed authentications interleaved with the swap: the read order is KRL, then CA, then principals, plus the A→M→B and B→M→A sequences. The tracer and AGENT-03 claims that revocation applies "at once with no reload" still hold, because revocation is live at step 1.
 - **Timing.** The roughly 2-minute delay for additions is documented in the runbook. The REVOKE-02 measurement in 03-16 records it.
+
+### Owner decisions on planner questions (2026-10-24, round 1 replanning)
+
+1. **Swap timing.** Daniel accepted planner B's generalised rule for 03-05:
+   - Narrowing swaps, which only remove or revoke, happen at once.
+   - Widening swaps (a new CA key or principal line) wait until `LoginGraceTime` + 5 s after the *previous* swap of `current`. That time is recorded in `<state>/last_swap.json` as boot_id plus CLOCK_BOOTTIME.
+
+   A→M→B is one case of the rule. Reason: under the literal rule, a revoke-only apply followed by an add-only apply one poll later would recreate the forbidden mix. Additions go live at most `LoginGraceTime` + 5 s after the last swap, and at once when there was no swap in that window.
+
+2. **The KRL in M stays KRL_B,** with a clock-skew alert. The agent raises a host-status alert `clock_skew` when |`clock_offset_s`| exceeds 300 (03-08). A host whose clock lags by more than that already accepts expired certificates in steady state, so the root cause is clock health. A union KRL was rejected: it would put the encoder in the root applier.
+
+3. **`pop.hosts` is mandatory for host agents.** Under locked D-06, revocations must never stall because probe certificates are unavailable. Therefore:
+   - Enrolment (join token, enrol and `host approve`) refuses `host_pop_not_enabled` while the installed root-signed policy lacks `pop.hosts`, and the agent's install and preflight check the pinned policy (03-07).
+   - A successor policy cannot turn `pop.hosts` from true to false (`pop_hosts_removed`). The signer, `trust verify` and audit all enforce this (03-04).
+   - The "one grace apply, then stuck on last-good" path for a policy without `pop.hosts` becomes unreachable (03-10).
+   - The v4 policy carries `pop.hosts` (03-15).
