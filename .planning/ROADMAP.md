@@ -160,7 +160,57 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans**: TBD
+**Plans:** 16 plans in 15 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+
+Plans:
+**Wave 1**
+- [ ] 03-01-PLAN.md — Phase tracer: D-04 installation ID checkpoint, then `keyroster revoke serial` → signer revoke + krl_publish → own KRL encoder with an ops-signed, installation-bound manifest → real sshd refuses after a swap with no reload
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 03-02-PLAN.md — Phase 2 follow-ups (agent check before issuance, lifetime at Add, redeem window), the two negative tests, three doc fixes, and the owner-approved rewording of AGENT-01, REVOKE-01 and PLAT-01
+- [ ] 03-03-PLAN.md — KRL complete: strict parser, oracle both directions, fuzzing, revoke by key ID, key and user (D-09), hourly re-publish (D-10), safe pruning, audit verify rules
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 03-04-PLAN.md — Installation-bound directory with hosts and machines, policy PoP switch, `host add`, `machine add`, `directory rebind`
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 03-05-PLAN.md — D-05 network checkpoint (the owner decides how the no-network applier reaches sshd for the self-test), then the apply engine offline: verify against pins, atomic generations, `sshd -t`, reload only when needed, self-test, rollback; sshd re-read matrix
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 03-06-PLAN.md — Distro detection, D-07 refusals, D-08 Phase 2 takeover, drift checks, seven-image distro matrix (owner applies the ruleset)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 03-07-PLAN.md — Join tokens, enrollment with host-key PoP, `host approve`, separate mTLS agent listener, fetcher/applier split, pull of signed state
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 03-08-PLAN.md — Heartbeats, `host status`, staleness and silence alerts, periodic drift, identity rotation, hardened systemd and OpenRC units
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 03-09-PLAN.md — T-03-100 checkpoint (the owner decides who receives the signed directory for host trust), then host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 03-10-PLAN.md — Probe certificates and the full self-test (D-06)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 03-11-PLAN.md — Machine identities by PoP (AUTH-06), `revoke machine`
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
+
+**Wave 12** *(blocked on Wave 11 completion)*
+- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
+
+**Wave 13** *(blocked on Wave 12 completion)*
+- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
+
+**Wave 14** *(blocked on Wave 13 completion)*
+- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+
+**Wave 15** *(blocked on Wave 14 completion)*
+- [ ] 03-16-PLAN.md — Homelab dogfood: enroll the owner's hosts, take over the 02-14 hosts, drills (revocation, no TOFU, corrupt file, break-glass, machine, rotation if chosen)
+
+**Phase close (after verification):** the README quickstart (install server, signer and agent, first certificate) on branch `p03/close`, per the documentation convention.
+
 **UI hint**: no
 **Docs**: runbooks per plan as above; once the phase is verified, add the short README with a quickstart (documentation convention).
 **Research**: MEDIUM. KRL format and fuzzing for the in-house encoder (no maintained Go library), sshd `Include`/drop-in variance across distros, whether `RevokedKeys` is re-read without reload (settle with an integration test). Dogfood on the laptop, zima and Proxmox.
