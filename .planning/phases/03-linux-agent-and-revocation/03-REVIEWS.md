@@ -1490,3 +1490,8 @@ Daniel chose the **two-step swap with no reload** over immutable `gen/N` paths w
    - A successor policy cannot turn `pop.hosts` from true to false (`pop_hosts_removed`). The signer, `trust verify` and audit all enforce this (03-04).
    - The "one grace apply, then stuck on last-good" path for a policy without `pop.hosts` becomes unreachable (03-10).
    - The v4 policy carries `pop.hosts` (03-15).
+
+### Owner decisions after plan-checker iteration 1 (2026-10-24)
+
+1. **LoginGraceTime residual (03-05): accepted.** The agent waits for the largest `LoginGraceTime` it has observed. It observes at start, on every apply and on every drift check, and keeps the value across its own reloads (`ObserveLoginGrace`, `<state>/login_grace.json`). What remains is a value that host root raises, reloads and reverts between two observations. Daniel accepted it as a residual, because host root is already trusted with its own sshd in the threat model. Pinning `LoginGraceTime` in the drop-in, and tracking pre-auth children through /proc, were both rejected.
+2. **Context budgets: all recorded Budget Exceptions are accepted** for the Phase 3 plans as revised in round 1, with no further splits. 03-03's optional split into a separate parser plan was declined.
