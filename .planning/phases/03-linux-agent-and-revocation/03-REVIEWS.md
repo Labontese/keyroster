@@ -1495,3 +1495,15 @@ Daniel chose the **two-step swap with no reload** over immutable `gen/N` paths w
 
 1. **LoginGraceTime residual (03-05): accepted.** The agent waits for the largest `LoginGraceTime` it has observed. It observes at start, on every apply and on every drift check, and keeps the value across its own reloads (`ObserveLoginGrace`, `<state>/login_grace.json`). What remains is a value that host root raises, reloads and reverts between two observations. Daniel accepted it as a residual, because host root is already trusted with its own sshd in the threat model. Pinning `LoginGraceTime` in the drop-in, and tracking pre-auth children through /proc, were both rejected.
 2. **Context budgets: all recorded Budget Exceptions are accepted** for the Phase 3 plans as revised in round 1, with no further splits. 03-03's optional split into a separate parser plan was declined.
+
+### Owner decision on the manual-recovery residual (2026-10-24)
+
+The 03-05 `--recover-to-last-good` path covers a host where something other than the agent has changed `/etc/ssh/keyroster`. A dangling or KRL-less `current` is swapped directly: sshd reads the KRL first, so every mixed read is refused. A readable foreign `current` X goes through Intermediate(X, last-good) and then last-good.
+
+**Accepted residual.** While a readable foreign X placed by host root is current, sshd enforces X. During recovery, a mixed read is accepted only when X or last-good would accept it. Recovery adds no permission of its own.
+
+Daniel accepted this residual for the same reason as T-03-232: host root is trusted with its own sshd.
+
+**Plan-checker loop.** It ended after iteration 3 with no open blockers or warnings. The two final targeted fixes are in 03-05 (manual-recovery swap safety) and 03-15 (dead fallback removed).
+
+**Pending.** The cross-plan consistency check by Codex was cut off by the Plus usage limit. It moves to the plan PR's docs-mode review.
