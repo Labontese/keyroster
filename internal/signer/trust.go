@@ -426,6 +426,7 @@ type trustState struct {
 	ca       map[wire.CARole]keystore.CAKey
 	profiles map[wire.CARole]cert.Profile
 	logKey   keystore.CAKey
+	opsKey   keystore.CAKey
 }
 
 // loadTrust reads the ca-init keys and the latest installed bundle,
@@ -464,6 +465,7 @@ func loadTrust(ctx context.Context, db *signerdb.DB, be keystore.Backend) (*trus
 		ts.ca[role] = keys[string(kr)]
 	}
 	ts.logKey = keys["log"]
+	ts.opsKey = keys["ops"]
 	ts.caKeys = caKeys
 	if ts.bundle.Log.Origin != tlog.Origin(ts.logKey.PublicKey()) {
 		return nil, fmt.Errorf("%w: log origin %q is not the log key's", ErrBundleKeys, ts.bundle.Log.Origin)

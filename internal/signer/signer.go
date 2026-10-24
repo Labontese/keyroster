@@ -66,6 +66,7 @@ type Signer struct {
 	profiles  map[wire.CARole]cert.Profile   // one profile per CA role, from the policy
 	policy    *trust.Policy
 	logKey    keystore.CAKey
+	opsKey    keystore.CAKey // the KRL authority: signs every KRL manifest (krl.Namespace)
 	db        *signerdb.DB
 	clock     serial.Clock
 	allowUIDs []uint32
@@ -76,6 +77,11 @@ type Signer struct {
 	// profiles and policy were loaded from. Issuance refuses once the
 	// database holds another version (trust_changed).
 	bundleVersion uint64
+	// installationID is the installed bundle's installation ID (D-04),
+	// "" when it has none; no KRL is published then.
+	installationID string
+	// krl is the published KRL in force, nil when none is. Guarded by mu.
+	krl *signerdb.KRLState
 
 	// caKeys are the ca-init keys as recorded, each opened in the
 	// backend at start with that custody (openRoleKey). Fixed for the
@@ -108,11 +114,12 @@ type Signer struct {
 // backend, when the stored leaves do not reproduce the latest signed
 // checkpoint, when the installed bundle record is not the one the last
 // bundle_install entry of that log records, when its policy names a
-// root of any bundle the log records as an admin, and when the latest
+// root of any bundle the log records as an admin, when the latest
 // stored directory is not the one the last directory_install entry
-// records. The trust state is loaded only here: once another bundle is
-// installed, the signer refuses every request (trust_changed) until it is
-// restarted and loads it.
+// records, and when the stored KRL state is not the one the last
+// krl_publish entry records (krl_state_not_logged). The trust state is
+// loaded only here: once another bundle is installed, the signer refuses
+// every request (trust_changed) until it is restarted and loads it.
 func New(cfg Config) (*Signer, error) {
 	if cfg.Backend == nil || cfg.DB == nil {
 		return nil, errors.New("signer: a keystore backend and a state database are required")
@@ -140,6 +147,7 @@ func New(cfg Config) (*Signer, error) {
 		profiles:  ts.profiles,
 		policy:    ts.policy,
 		logKey:    ts.logKey,
+		opsKey:    ts.opsKey,
 		caKeys:    ts.caKeys,
 		db:        cfg.DB,
 		clock:     cfg.Clock,
@@ -147,7 +155,8 @@ func New(cfg Config) (*Signer, error) {
 		allowGIDs: slices.Clone(cfg.AllowGIDs),
 		log:       cfg.Logger,
 
-		bundleVersion: ts.bundle.Version,
+		bundleVersion:  ts.bundle.Version,
+		installationID: ts.bundle.InstallationID,
 	}
 	if s.clock == nil {
 		s.clock = time.Now
@@ -173,6 +182,11 @@ func New(cfg Config) (*Signer, error) {
 	// A directory that is not authorized under the policy in force does not
 	// stop the signer (the admin path needs none); logins are refused.
 	if err := s.loadDirectory(context.Background()); err != nil {
+		return nil, err
+	}
+	// The published KRL must be the one the log's last krl_publish entry
+	// records (krl_state_not_logged).
+	if err := s.loadKRL(context.Background()); err != nil {
 		return nil, err
 	}
 	return s, nil

@@ -52,6 +52,9 @@ type serverOpts struct {
 	// AdminQuorum is the genesis policy's admin quorum (default 1); that
 	// many admin keys are generated, all in Signer.AdminAgent.
 	AdminQuorum int
+	// StoppableSigner starts the signer with serveStoppable and keeps its
+	// stop function in serverEnv.StopSigner, for a test that restarts it.
+	StoppableSigner bool
 }
 
 // serverEnv is a running signer with a keyroster-server in front of it.
@@ -65,6 +68,8 @@ type serverEnv struct {
 	Stderr *syncBuffer
 	Cmd    *exec.Cmd
 	Done   <-chan struct{}
+	// StopSigner stops the signer (serverOpts.StoppableSigner only).
+	StopSigner func()
 }
 
 // startServerEnv bootstraps a signer whose policy names RP serverRPID with
@@ -80,9 +85,18 @@ func startServerEnv(t *testing.T, opts serverOpts) *serverEnv {
 		bopts.Backend = "software"
 		bopts.BackendOpts = map[string]string{"passphrase-file": passphraseFile(t)}
 	}
-	sg := bootstrapSigner(t, bopts)
+	var (
+		sg   *signerEnv
+		stop func()
+	)
+	if opts.StoppableSigner {
+		sg = prepareSigner(t, bopts)
+		stop = serveStoppable(t, sg)
+	} else {
+		sg = bootstrapSigner(t, bopts)
+	}
 	ca := newTestCA(t, serverRPID)
-	e := &serverEnv{Signer: sg, CA: ca, Port: port, URL: "https://" + serverRPID + ":" + strconv.Itoa(port)}
+	e := &serverEnv{Signer: sg, CA: ca, Port: port, URL: "https://" + serverRPID + ":" + strconv.Itoa(port), StopSigner: stop}
 	e.Cmd, e.Stderr, e.Done = startDaemon(t, "keyroster-server", envWithout("SSH_AUTH_SOCK"), serverBin, "serve",
 		"--listen", "127.0.0.1:"+strconv.Itoa(port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", sg.Socket,
 		"--state-dir", filepath.Join(t.TempDir(), "state"))

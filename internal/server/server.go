@@ -58,6 +58,7 @@ type Server struct {
 	signInUserLimit *limiter            // sign-in begin and finish, per user name
 	loginLimit      map[string]*limiter // CLI login routes: one per route, per client, with that route's global backstop
 	loginUserLimit  *limiter            // CLI login API routes, per route, user name and client
+	krlLimit        *limiter            // GET /api/v1/krl, per client, with a global backstop
 	mirror          dirMirror           // the installed directory, as of the last Status that matched
 
 	// pendingMu orders a directory install (its pending check, forward
@@ -111,6 +112,9 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 		// global backstop, and per route, user name and client with none.
 		loginLimit:     newLoginLimits(lim),
 		loginUserLimit: newLimiter(lim.SignInUserPerMinute, lim.SignInUserBurst, 0, 0),
+		// The published KRL (03-01) is its own class: per client, with
+		// the global backstop.
+		krlLimit: newLimiter(krlPerMinute, krlBurst, globalFactor*krlPerMinute, globalFactor*krlBurst),
 	}
 	if s.clock == nil {
 		s.clock = time.Now
@@ -130,6 +134,12 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	mux.Handle("GET "+serverclient.AdminUsersPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleListUsers))))
 	mux.Handle("GET "+serverclient.AdminDirectoryPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleGetDirectory))))
 	mux.Handle("POST "+serverclient.AdminDirectoryPath, s.rateLimited(s.adminLimit, false, s.requireAdminLimit(maxDirectoryInstallBody, http.HandlerFunc(s.handleInstallDirectory))))
+	// Revocation (03-01): the admin route forwards the admin-signed
+	// request to the signer, which alone decides; the KRL route serves what
+	// the signer published, to any TLS client. No page offers revocation
+	// (CLI only, D-12).
+	mux.Handle("POST "+serverclient.AdminRevokePath, s.rateLimited(s.adminLimit, false, s.requireAdminLimit(maxRevokeBody, http.HandlerFunc(s.handleRevoke))))
+	mux.Handle("GET "+serverclient.KRLPath, s.rateLimited(s.krlLimit, false, http.HandlerFunc(s.handleKRL)))
 	mux.Handle("GET /enroll/{token}", s.rateLimited(s.inviteLimit, true, http.HandlerFunc(s.handleEnroll)))
 	// The registration ceremony of an invite (02-08): JSON routes in the
 	// invite class, under the same limiter as the invite page.

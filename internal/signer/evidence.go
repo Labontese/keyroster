@@ -24,6 +24,18 @@ func verifyAdminEvidence(req *wire.IssueRequest, pol *trust.Policy) ([]string, e
 	if pol == nil || pol.AdminQuorum < 1 {
 		return nil, refusalErr(wire.CodeRefused, "no_policy", nil)
 	}
+	return verifyAdminSignatures(req.Evidence, req.SigningBytes(), wire.AdminSSHSIGNamespace, int(pol.AdminQuorum), pol)
+}
+
+// verifyAdminSignatures checks evidence over msg under namespace against
+// the admins of pol and requires at least quorum distinct admins. Every
+// item must be admin-sshsig/v1 by an admin with a valid signature under
+// namespace; anything else refuses the whole request (default deny). It
+// returns the sorted names of the admins who signed.
+func verifyAdminSignatures(evidence []wire.Evidence, msg []byte, namespace string, quorum int, pol *trust.Policy) ([]string, error) {
+	if pol == nil || pol.AdminQuorum < 1 || quorum < 1 {
+		return nil, refusalErr(wire.CodeRefused, "no_policy", nil)
+	}
 	admins := map[string]trust.AdminKey{} // SHA256 fingerprint -> admin
 	for _, a := range pol.Admins {
 		pub, err := trust.ParseKey(a.Key)
@@ -32,12 +44,11 @@ func verifyAdminEvidence(req *wire.IssueRequest, pol *trust.Policy) ([]string, e
 		}
 		admins[ssh.FingerprintSHA256(pub)] = a
 	}
-	if len(req.Evidence) == 0 {
+	if len(evidence) == 0 {
 		return nil, refusalErr(wire.CodeRefused, "missing_evidence", nil)
 	}
-	msg := req.SigningBytes()
 	signed := map[string]string{} // fingerprint -> admin name
-	for _, ev := range req.Evidence {
+	for _, ev := range evidence {
 		if ev.Type != wire.EvidenceAdminSSHSIG {
 			return nil, refusalErr(wire.CodeRefused, "unknown_evidence_type", nil)
 		}
@@ -50,7 +61,7 @@ func verifyAdminEvidence(req *wire.IssueRequest, pol *trust.Policy) ([]string, e
 		if !ok || admin.Key != trust.FormatKey(sig.PublicKey()) {
 			return nil, refusalErr(wire.CodeRefused, "evidence_not_admin", nil)
 		}
-		if err := sig.Verify(wire.AdminSSHSIGNamespace, msg); err != nil {
+		if err := sig.Verify(namespace, msg); err != nil {
 			if errors.Is(err, sshsig.ErrNamespace) {
 				return nil, refusalErr(wire.CodeRefused, "evidence_wrong_namespace", err)
 			}
@@ -58,7 +69,7 @@ func verifyAdminEvidence(req *wire.IssueRequest, pol *trust.Policy) ([]string, e
 		}
 		signed[fp] = admin.Name
 	}
-	if len(signed) < int(pol.AdminQuorum) {
+	if len(signed) < quorum {
 		return nil, refusalErr(wire.CodeRefused, "admin_quorum_not_met", nil)
 	}
 	names := make([]string, 0, len(signed))

@@ -88,12 +88,16 @@ func (s *Signer) rebuildLog(ctx context.Context) (*tlog.Log, uint64, loggedInsta
 
 // loggedInstalls is what the install leaves of a log record: the body of
 // the last bundle_install leaf (nil when there is none), the root set of
-// every logged trust bundle, in log order, and the body of the last
-// directory_install leaf (nil when there is none).
+// every logged trust bundle, in log order, the body of the last
+// directory_install leaf and the body of the last krl_publish leaf (each
+// nil when there is none).
 type loggedInstalls struct {
 	last          []byte
 	roots         [][]trust.RootKey
 	lastDirectory []byte
+	// lastKRLPublish is the body of the last krl_publish leaf (nil when
+	// there is none); loadKRL compares the stored KRL state with it.
+	lastKRLPublish []byte
 }
 
 // add records the bundle_install leaf idx with body.
@@ -315,6 +319,16 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			}
 			issued.count++
 			issued.lastSerial = b.Serial
+		case tlog.KindRevoke:
+			// A revocation issues nothing: it must not change issued.
+			if _, err := tlog.DecodeRevokeBody(l.Body); err != nil {
+				return fmt.Errorf("%w: leaf %d: revoke body does not decode", errLogMismatch, idx)
+			}
+		case tlog.KindKRLPublish:
+			if _, err := tlog.DecodeKRLPublishBody(l.Body); err != nil {
+				return fmt.Errorf("%w: leaf %d: krl_publish body does not decode", errLogMismatch, idx)
+			}
+			installs.lastKRLPublish = l.Body
 		}
 		last = l.TimeMicros
 		hashes = append(hashes, hash)

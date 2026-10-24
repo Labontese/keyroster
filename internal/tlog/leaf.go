@@ -36,8 +36,11 @@ type Kind uint8
 // Leaf kinds of format v1. Kinds 1 to 6 are Phase 1's (plan 01-07 emits
 // CAInit and BundleInstall). Kinds 7 and 8 joined format v1 in Phase 2:
 // DirectoryInstall records an admin-signed directory the signer installed,
-// LoginIssue a certificate issued on a passkey login. A reader that has no
-// check for a kind must refuse it, never skip it (audit verify does).
+// LoginIssue a certificate issued on a passkey login. Kinds 9 and 10 joined
+// format v1 in Phase 3: Revoke records an admin-authorized revocation and
+// the entries it resolved to, KRLPublish a KRL version the signer published
+// with its ops-key-signed manifest. A reader that has no check for a kind
+// must refuse it, never skip it (audit verify does).
 const (
 	KindIssue            Kind = 1
 	KindRefusal          Kind = 2
@@ -47,6 +50,8 @@ const (
 	KindBundleInstall    Kind = 6
 	KindDirectoryInstall Kind = 7
 	KindLoginIssue       Kind = 8
+	KindRevoke           Kind = 9
+	KindKRLPublish       Kind = 10
 )
 
 // String returns the kind name used in exports and reports.
@@ -68,12 +73,16 @@ func (k Kind) String() string {
 		return "directory_install"
 	case KindLoginIssue:
 		return "login_issue"
+	case KindRevoke:
+		return "revoke"
+	case KindKRLPublish:
+		return "krl_publish"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(k))
 	}
 }
 
-func (k Kind) valid() bool { return k >= KindIssue && k <= KindLoginIssue }
+func (k Kind) valid() bool { return k >= KindIssue && k <= KindKRLPublish }
 
 // Size limits enforced by the encoders and the strict decoders.
 const (
@@ -87,6 +96,13 @@ const (
 	maxCounts      = 256
 	MaxSigs        = 64 << 10
 	MaxRequest     = 64 << 10
+	// MaxRevokedEntries bounds the entries one revoke leaf records.
+	MaxRevokedEntries = 4096
+	// MaxManifest and MaxManifestSig bound a krl_publish leaf's manifest
+	// and its armored signature (equal to krl.MaxManifest and
+	// krl.MaxManifestSig, which a test in internal/krl asserts).
+	MaxManifest    = 4 << 10
+	MaxManifestSig = 16 << 10
 )
 
 // Leaf is one log entry.
@@ -166,6 +182,10 @@ func checkBody(k Kind, body []byte) error {
 		_, err = DecodeDirectoryInstallBody(body)
 	case KindLoginIssue:
 		_, err = DecodeLoginIssueBody(body)
+	case KindRevoke:
+		_, err = DecodeRevokeBody(body)
+	case KindKRLPublish:
+		_, err = DecodeKRLPublishBody(body)
 	default:
 		err = fmt.Errorf("%w: unknown kind %d", ErrMalformedLeaf, k)
 	}
@@ -691,6 +711,212 @@ func DecodeLoginIssueBody(data []byte) (*LoginIssueBody, error) {
 	b.Request = append([]byte(nil), request...)
 	b.Cert = append([]byte(nil), certB...)
 	b.KeyID = string(keyID)
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// Revoked entry kinds of a RevokedEntry: a certificate serial under a CA
+// key, a key ID, or a public key. The 03-01 tracer writes serial entries
+// only; the other two arrive with 03-03.
+const (
+	RevokedSerial uint8 = 1
+	RevokedKeyID  uint8 = 2
+	RevokedKey    uint8 = 3
+)
+
+// RevokedEntry is one entry a revocation resolved to: for RevokedSerial
+// the CA key (SSH wire format) and the serial, for RevokedKeyID the key
+// ID, for RevokedKey the public key (SSH wire format). ValidBeforeSeconds
+// is the revoked certificate's valid_before, 0 when not known.
+type RevokedEntry struct {
+	Kind               uint8
+	CAKey              []byte
+	Serial             uint64
+	KeyID              string
+	Key                []byte
+	ValidBeforeSeconds uint64
+}
+
+func (e *RevokedEntry) check() error {
+	switch {
+	case e.Kind < RevokedSerial || e.Kind > RevokedKey:
+		return fmt.Errorf("%w: revoked entry kind", ErrMalformedLeaf)
+	case len(e.CAKey) > wire.MaxSubjectKeyLen || len(e.Key) > wire.MaxSubjectKeyLen || len(e.KeyID) > MaxKeyID:
+		return fmt.Errorf("%w: revoked entry size", ErrMalformedLeaf)
+	case e.Kind == RevokedSerial && (len(e.CAKey) == 0 || e.Serial == 0):
+		return fmt.Errorf("%w: a serial entry needs a CA key and a serial above 0", ErrMalformedLeaf)
+	}
+	return nil
+}
+
+// RevokeBody records one accepted revocation (kind 9): the policy version
+// its admin evidence was verified under, the time the signer resolved the
+// request (ResolvedAtSeconds, whole seconds; times 10^6 never above the
+// leaf's TimeMicros, which appendLocked may only raise), the request's
+// full signing bytes (at most MaxRequest), the evidence presented and the
+// entries the request resolved to (possibly none).
+type RevokeBody struct {
+	PolicyVersion     uint64
+	ResolvedAtSeconds uint64
+	Request           []byte
+	Evidence          []wire.Evidence
+	Entries           []RevokedEntry
+}
+
+func (b *RevokeBody) check() error {
+	if len(b.Request) == 0 || len(b.Request) > MaxRequest || len(b.Evidence) > wire.MaxEvidence ||
+		len(b.Entries) > MaxRevokedEntries {
+		return fmt.Errorf("%w: revoke body size", ErrMalformedLeaf)
+	}
+	for _, e := range b.Evidence {
+		if len(e.Type) == 0 || len(e.Type) > wire.MaxEvidenceType || len(e.Blob) > wire.MaxEvidenceBlob {
+			return fmt.Errorf("%w: evidence size", ErrMalformedLeaf)
+		}
+	}
+	for i := range b.Entries {
+		if err := b.Entries[i].check(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Encode encodes the body.
+func (b *RevokeBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	c.AddUint64(b.PolicyVersion)
+	c.AddUint64(b.ResolvedAtSeconds)
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Request) })
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+		for _, e := range b.Evidence {
+			add16(c, []byte(e.Type))
+			add16(c, e.Blob)
+		}
+	})
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+		for _, e := range b.Entries {
+			c.AddUint8(e.Kind)
+			add16(c, e.CAKey)
+			c.AddUint64(e.Serial)
+			add16(c, []byte(e.KeyID))
+			add16(c, e.Key)
+			c.AddUint64(e.ValidBeforeSeconds)
+		}
+	})
+	return c.Bytes()
+}
+
+// DecodeRevokeBody decodes a revoke body strictly. Every error wraps
+// ErrMalformedLeaf.
+func DecodeRevokeBody(data []byte) (*RevokeBody, error) {
+	s := cryptobyte.String(data)
+	var (
+		b                          RevokeBody
+		request, evidence, entries cryptobyte.String
+	)
+	if !s.ReadUint64(&b.PolicyVersion) || !s.ReadUint64(&b.ResolvedAtSeconds) ||
+		!s.ReadUint24LengthPrefixed(&request) || !s.ReadUint24LengthPrefixed(&evidence) ||
+		!s.ReadUint24LengthPrefixed(&entries) || !s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	for !evidence.Empty() {
+		if len(b.Evidence) == wire.MaxEvidence {
+			return nil, fmt.Errorf("%w: too many evidence items", ErrMalformedLeaf)
+		}
+		var typ, blob []byte
+		if !read16(&evidence, &typ, wire.MaxEvidenceType) || len(typ) == 0 ||
+			!read16(&evidence, &blob, wire.MaxEvidenceBlob) {
+			return nil, ErrMalformedLeaf
+		}
+		b.Evidence = append(b.Evidence, wire.Evidence{Type: string(typ), Blob: blob})
+	}
+	for !entries.Empty() {
+		if len(b.Entries) == MaxRevokedEntries {
+			return nil, fmt.Errorf("%w: too many revoked entries", ErrMalformedLeaf)
+		}
+		var (
+			e                 RevokedEntry
+			caKey, keyID, key []byte
+		)
+		if !entries.ReadUint8(&e.Kind) || !read16(&entries, &caKey, wire.MaxSubjectKeyLen) ||
+			!entries.ReadUint64(&e.Serial) || !read16(&entries, &keyID, MaxKeyID) ||
+			!read16(&entries, &key, wire.MaxSubjectKeyLen) || !entries.ReadUint64(&e.ValidBeforeSeconds) {
+			return nil, ErrMalformedLeaf
+		}
+		// Empty fields decode as nil, so decode-then-encode is exact and a
+		// decoded body compares equal to the one that was encoded.
+		if len(caKey) > 0 {
+			e.CAKey = caKey
+		}
+		if len(key) > 0 {
+			e.Key = key
+		}
+		e.KeyID = string(keyID)
+		b.Entries = append(b.Entries, e)
+	}
+	b.Request = append([]byte(nil), request...)
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// KRLPublishBody records one published KRL version (kind 10): its version,
+// the trust bundle version in force, the manifest's issued_at in whole
+// seconds, the SHA-256 of the KRL bytes, and the canonical manifest with
+// its detached SSHSIG by the ops key (namespace keyroster/krl/v1). The KRL
+// bytes themselves are not in the leaf; the manifest binds them.
+type KRLPublishBody struct {
+	KRLVersion      uint64
+	BundleVersion   uint64
+	IssuedAtSeconds uint64
+	SHA256          [32]byte
+	Manifest        []byte
+	Sig             []byte
+}
+
+func (b *KRLPublishBody) check() error {
+	if b.KRLVersion == 0 || len(b.Manifest) == 0 || len(b.Manifest) > MaxManifest ||
+		len(b.Sig) == 0 || len(b.Sig) > MaxManifestSig {
+		return fmt.Errorf("%w: krl_publish body", ErrMalformedLeaf)
+	}
+	return nil
+}
+
+// Encode encodes the body.
+func (b *KRLPublishBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	c.AddUint64(b.KRLVersion)
+	c.AddUint64(b.BundleVersion)
+	c.AddUint64(b.IssuedAtSeconds)
+	c.AddBytes(b.SHA256[:])
+	add16(&c, b.Manifest)
+	add16(&c, b.Sig)
+	return c.Bytes()
+}
+
+// DecodeKRLPublishBody decodes a krl_publish body strictly. Every error
+// wraps ErrMalformedLeaf.
+func DecodeKRLPublishBody(data []byte) (*KRLPublishBody, error) {
+	s := cryptobyte.String(data)
+	var (
+		b      KRLPublishBody
+		digest []byte
+	)
+	if !s.ReadUint64(&b.KRLVersion) || !s.ReadUint64(&b.BundleVersion) || !s.ReadUint64(&b.IssuedAtSeconds) ||
+		!s.ReadBytes(&digest, 32) || !read16(&s, &b.Manifest, MaxManifest) || !read16(&s, &b.Sig, MaxManifestSig) ||
+		!s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	copy(b.SHA256[:], digest)
 	if err := b.check(); err != nil {
 		return nil, err
 	}

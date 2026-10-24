@@ -190,7 +190,7 @@ func TestDecodeLeafStrict(t *testing.T) {
 		"trailing_byte":    append(append([]byte(nil), raw...), 0),
 		"truncated":        raw[:len(raw)-1],
 		"wrong_domain":     append([]byte{21}, append([]byte("keyroster/log-leaf/v2"), raw[22:]...)...),
-		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: 9, Body: refusal}),
+		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: KindKRLPublish + 1, Body: refusal}),
 		"body_of_another":  EncodeLeaf(Leaf{Kind: KindIssue, Body: refusal}),
 		"summary_no_count": EncodeLeaf(Leaf{Kind: KindRefusalSummary, Body: make([]byte, 18)}),
 	}

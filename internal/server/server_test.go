@@ -115,6 +115,14 @@ type fakeSigner struct {
 	loginErr  error
 	lastLogin *wire.LoginIssueRequest
 
+	// Revoke's and GetKRL's settable results and the last revoke request
+	// (03-01).
+	revoke     *wire.RevokeResponse
+	revokeErr  error
+	lastRevoke *wire.RevokeRequest
+	krl        *wire.GetKRLResponse
+	krlErr     error
+
 	heldMethod string
 	entered    chan struct{}
 	gate       chan struct{}
@@ -348,6 +356,32 @@ func (f *fakeSigner) Login(ctx context.Context, req *wire.LoginIssueRequest) (*w
 	f.mu.Unlock()
 	if err := f.enter(ctx, "Login"); err != nil {
 		return nil, err
+	}
+	return resp, err
+}
+
+func (f *fakeSigner) Revoke(ctx context.Context, req *wire.RevokeRequest) (*wire.RevokeResponse, error) {
+	f.mu.Lock()
+	f.calls["Revoke"]++
+	f.lastRevoke = req
+	resp, err := f.revoke, f.revokeErr
+	f.mu.Unlock()
+	if err := f.enter(ctx, "Revoke"); err != nil {
+		return nil, err
+	}
+	return resp, err
+}
+
+func (f *fakeSigner) GetKRL(ctx context.Context) (*wire.GetKRLResponse, error) {
+	f.mu.Lock()
+	f.calls["GetKRL"]++
+	resp, err := f.krl, f.krlErr
+	f.mu.Unlock()
+	if err := f.enter(ctx, "GetKRL"); err != nil {
+		return nil, err
+	}
+	if resp == nil && err == nil {
+		resp = &wire.GetKRLResponse{}
 	}
 	return resp, err
 }

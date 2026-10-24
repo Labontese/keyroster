@@ -70,7 +70,7 @@ func TestBuildSuccessor(t *testing.T) {
 	r := newRotation(t)
 
 	t.Run("round_trip_unchanged_policy", func(t *testing.T) {
-		next, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.c, r.d), 1, r.policy, rotationIssued)
+		next, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.c, r.d), 1, r.policy, rotationIssued, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +91,7 @@ func TestBuildSuccessor(t *testing.T) {
 
 	t.Run("round_trip_chained_policy", func(t *testing.T) {
 		policy := r.policyV2(t, func(*Policy) {})
-		next, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.c, r.d), 1, policy, rotationIssued)
+		next, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.c, r.d), 1, policy, rotationIssued, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -102,7 +102,7 @@ func TestBuildSuccessor(t *testing.T) {
 
 	t.Run("carries_online_keys", func(t *testing.T) {
 		r := newRotation(t) // its own fixture: the alias check edits it
-		next, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.c, r.d), 1, r.policy, rotationIssued)
+		next, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.c, r.d), 1, r.policy, rotationIssued, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -173,7 +173,7 @@ func TestBuildSuccessor(t *testing.T) {
 			if tc.roots != nil {
 				roots = tc.roots
 			}
-			b, err := BuildSuccessor(r.prev, prevCanonical, prevPolicy, roots, 1, policy, issuedAt)
+			b, err := BuildSuccessor(r.prev, prevCanonical, prevPolicy, roots, 1, policy, issuedAt, "")
 			if !errors.Is(err, tc.want) || b != nil {
 				t.Fatalf("BuildSuccessor: bundle %v, err = %v, want %v", b, err, tc.want)
 			}
@@ -198,7 +198,7 @@ func TestBuildSuccessor(t *testing.T) {
 		threshold uint32
 	}{{"threshold_zero", 0}, {"threshold_above_roots", 3}} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.c, r.d), tc.threshold, r.policy, rotationIssued)
+			b, err := BuildSuccessor(r.prev, r.prevBytes, r.policy, rootKeysOf(r.c, r.d), tc.threshold, r.policy, rotationIssued, "")
 			if !errors.Is(err, ErrInvalid) || b != nil {
 				t.Fatalf("bundle %v, err = %v, want %v", b, err, ErrInvalid)
 			}

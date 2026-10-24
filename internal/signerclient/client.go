@@ -85,6 +85,32 @@ func Status(ctx context.Context, socket string) (*wire.StatusResponse, error) {
 	return wire.ParseStatusResponse(respBody)
 }
 
+// Revoke sends an admin-signed revocation request to the signer and
+// returns the KRL version it published and the log entries that record
+// it. A refusal comes back as a *wire.ErrorResponse error.
+func Revoke(ctx context.Context, socket string, req *wire.RevokeRequest) (*wire.RevokeResponse, error) {
+	body, err := req.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := roundTrip(ctx, socket, wire.TypeRevokeRequest, body, wire.TypeRevokeResponse)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseRevokeResponse(respBody)
+}
+
+// GetKRL asks the signer for the published KRL with its manifest and the
+// ops key's signature (all empty when none is published). A refusal comes
+// back as a *wire.ErrorResponse error.
+func GetKRL(ctx context.Context, socket string) (*wire.GetKRLResponse, error) {
+	respBody, err := roundTrip(ctx, socket, wire.TypeGetKRL, nil, wire.TypeGetKRLResponse)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseGetKRLResponse(respBody)
+}
+
 // roundTrip sends one message of msgType and returns the body of the
 // response, which must be of type want; an error response comes back as a
 // *wire.ErrorResponse error.

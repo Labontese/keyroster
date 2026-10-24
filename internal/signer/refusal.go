@@ -200,6 +200,20 @@ func (s *Signer) installDirectoryOrRefuse(ctx context.Context, peer Peer, req *w
 	return nil, s.refuseErr(ctx, s.installLimiter, peer, digest, err)
 }
 
+// revokeOrRefuse runs Revoke and records a refusal through refuseErr, with
+// the digest of the exact revoke request that was refused.
+func (s *Signer) revokeOrRefuse(ctx context.Context, peer Peer, req *wire.RevokeRequest) (*wire.RevokeResponse, *wire.ErrorResponse) {
+	resp, err := s.Revoke(ctx, peer, req)
+	if err == nil {
+		return resp, nil
+	}
+	var digest [32]byte
+	if req != nil {
+		digest = req.Digest()
+	}
+	return nil, s.refuseErr(ctx, s.limiter, peer, digest, err)
+}
+
 // refuseErr records err (a *refusal, or any other error as internal_error)
 // through refuseLogging on bucket. For the signer's own failures (internal and unavailable
 // refusals: database, backend, encoding) the cause's Go type and text go
@@ -224,7 +238,9 @@ func classify(detail string) uint8 {
 	switch detail {
 	case "peer_not_allowed", "peer_credentials_unavailable":
 		return tlog.ReasonPeerNotAllowed
-	case "malformed_frame", "unknown_message_type", "malformed_request", "directory_invalid":
+	case "malformed_frame", "unknown_message_type", "malformed_request", "directory_invalid",
+		// Revocation details (Phase 3).
+		"unknown_serial", "ca_role_mismatch":
 		return tlog.ReasonMalformed
 	case "ca_not_configured":
 		return tlog.ReasonCANotConfigured
@@ -244,7 +260,8 @@ func classify(detail string) uint8 {
 		return tlog.ReasonBadSubject
 	case "extension_not_allowed", "duplicate_extension":
 		return tlog.ReasonExtensionNotAllowed
-	case "state_unavailable", "serial_unavailable", "trust_changed", "directory_changed":
+	case "state_unavailable", "serial_unavailable", "trust_changed", "directory_changed",
+		"krl_no_installation_id", "krl_too_large", "ops_key_unavailable":
 		return tlog.ReasonUnavailable
 	case "too_many_connections":
 		return tlog.ReasonOverloaded
