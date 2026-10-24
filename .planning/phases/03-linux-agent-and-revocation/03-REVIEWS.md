@@ -1457,3 +1457,20 @@ The new agent fetcher also lacks an explicit aggregate HTTP bound. Its state end
 **Minimal change:** **03-01 Task 2** should define a KRL HTTP response bound including encoding overhead; **03-07 Tasks 1–2** should define aggregate fetch limits or byte-budgeted pagination. Test maximum legitimate responses and limit-plus-one rejection.
 
 Counts: **CONFIRMED 1 · ALREADY-COVERED 3 · REFUTED 2 · PARTIAL 6**.
+### Owner decision on F1 (2026-10-24): two-step swap, no reload
+
+Daniel chose the **two-step swap with no reload** over immutable `gen/N` paths with a reload per apply, and over accepting the window.
+
+**The rule.** Applying generation B over A happens in two steps:
+1. Swap `current` to an intermediate generation **M = (KRL_B, CA_A ∩ CA_B, P_A ∩ P_B)**. The CA sets are compared per key; the principal sets are compared per account file and per line.
+2. Wait longer than sshd's `LoginGraceTime`, read from `sshd -T`, then swap to B.
+
+**Why it is safe.** sshd reads the KRL first, then the CA keys, then the principals. Any mix of A and M is therefore no more permissive than A, and any mix of M and B is no more permissive than B. A mix of A and B cannot happen, because no pre-authentication step outlives `LoginGraceTime`. Revocations and removals take effect at step 1; additions take effect at step 2.
+
+**Rules the planner must carry into 03-05, and wherever the swap is reused (03-09, 03-12, 03-14):**
+- **No mixed KRL.** `KRL_M = KRL_B` is valid only because a KRL loses entries solely through 03-03's pruning of certificates past ValidBefore + 300 s, and explicit-key entries are permanent. If any path can drop a live entry, M must use the union of both KRLs instead. State this assumption and test it.
+- **Unbounded `LoginGraceTime`.** A value of `0` means sshd has no bound, so the preflight refuses with a new code such as `login_grace_unbounded`. 03-06 is where the refusal set is documented.
+- **Rollback.** Rollback from B to last-good goes through the same kind of intermediate generation, built from B and last-good. A crash between the steps is recovered through the pending marker, which records the step. A rollback from M to A is safe directly.
+- **Self-test.** The self-test runs after the final step. A failure rolls back through the intermediate generation.
+- **Interleaving test.** A deterministic test of signed authentications interleaved with the swap: the read order is KRL, then CA, then principals, plus the A→M→B and B→M→A sequences. The tracer and AGENT-03 claims that revocation applies "at once with no reload" still hold, because revocation is live at step 1.
+- **Timing.** The roughly 2-minute delay for additions is documented in the runbook. The REVOKE-02 measurement in 03-16 records it.
