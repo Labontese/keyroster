@@ -1507,3 +1507,22 @@ Daniel accepted this residual for the same reason as T-03-232: host root is trus
 **Plan-checker loop.** It ended after iteration 3 with no open blockers or warnings. The two final targeted fixes are in 03-05 (manual-recovery swap safety) and 03-15 (dead fallback removed).
 
 **Pending.** The cross-plan consistency check by Codex was cut off by the Plus usage limit. It moves to the plan PR's docs-mode review.
+
+### PR #57 pre-merge review, docs mode (2026-10-24)
+
+1. **Cross-plan check.** Codex gpt-6-astra (high, read-only) checked the whole set of plans together and reported 6 findings:
+   - **#0 (03-05):** a revocation arriving during a widening wait was delayed.
+   - **#1 (03-10):** the negative probe key could not be renewed.
+   - **#2 (03-10/03-08):** probe outcomes fell outside the heartbeat enum.
+   - **#3 (03-06/03-16):** pre-enrolment preflight and Phase 2 adoption formed an ordering cycle.
+   - **#4 (03-05):** renderer headers prevented swaps from collapsing.
+   - **#5 (03-15):** the transfer whitelist left out the `.json.sigs` files.
+2. **Skeptics.** One Sonnet skeptic per finding upheld all six. #1 was rated high and the rest medium; #0 was lowered from high, because the delay is bounded at about 125 s plus one poll. Claude spot-checked the source claims (`cmd/keyroster/root.go:47,444-445`, `internal/directory/render.go:82-83`).
+3. **Fixes** went in as commit 0f9b213:
+   - spool re-read and supersede during a widening wait;
+   - collapse decided on classified content;
+   - `phase2_adoptable`, report-only;
+   - `last_apply.detail`;
+   - negative-probe renewal for the same host and key only;
+   - an exact transfer whitelist.
+4. **Fix check.** Codex gpt-6-astra (xhigh) checked commit 0f9b213: "All six fixes hold at the plan level. No concrete cross-plan defects or security weakening found."
