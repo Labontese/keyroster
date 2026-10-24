@@ -120,7 +120,14 @@ signer's own refusals ran in its unit tests (`TestRevoke`, among them
 `no_installation_id_refused`, and `TestRevokeKRLTooLarge`); on the
 homelab `krl_no_installation_id` is UNVERIFIED until 03-16.
 
-Every refusal is also an entry in the signer's audit log.
+A refusal by the signer is logged in its audit log: individually within
+the refusal rate (10 a minute), otherwise only as a count in the next
+`refusal_summary` entry, without the request. A request that
+keyroster-server refuses itself (malformed, admin authentication, body
+too large, rate limit, or 503 because it cannot reach the signer) never
+reaches the signer, so the audit log has no entry for it; look in the
+server's log instead (`journalctl -u keyroster-server`, which names
+every admin authentication failure).
 
 ### `krl_too_large`
 
