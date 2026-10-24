@@ -52,7 +52,13 @@ publishes a new KRL (OpenSSH Key Revocation List). Revocation is CLI only
   sign` gives every genesis bundle one and prints it as
   `installation id: ...`; `keyroster root sign --prev ... --installation-id new`
   adds one to a successor of a bundle without). Without it the signer
-  publishes no KRL.
+  publishes no KRL. **UNVERIFIED**: that upgrade end to end (install
+  such a successor with `install-bundle`, restart the signer, revoke). Only
+  its parts are tested: `root sign --installation-id new`
+  (`TestRootSignInstallationID`) and a successor that adds an ID passing
+  the successor checks (`TestInstallationIDSuccessor`). The v4 ceremony
+  rehearsal (03-15) installs and starts such a successor, and the homelab
+  revocation drill (03-16) revokes under it.
 - You know the certificate's serial and the CA that issued it. On a
   certificate file, `ssh-keygen -L -f id_ed25519-cert.pub` prints it as
   `Serial:`; keyroster key IDs end in `/ser=<serial>`, and sshd logs both
