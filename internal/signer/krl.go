@@ -136,17 +136,17 @@ func (s *Signer) nextLeafIndexLocked() uint64 {
 }
 
 // GetKRL returns the published KRL in force with its manifest and
-// signature, or an empty response when none is published.
+// signature, or an empty response when none is published. It does not
+// take s.mu (see Signer.krl).
 func (s *Signer) GetKRL() *wire.GetKRLResponse {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.krl == nil {
+	st := s.krl.Load()
+	if st == nil {
 		return &wire.GetKRLResponse{}
 	}
 	return &wire.GetKRLResponse{
-		KRL:      bytes.Clone(s.krl.KRL),
-		Manifest: bytes.Clone(s.krl.Manifest),
-		Sig:      bytes.Clone(s.krl.Sig),
+		KRL:      bytes.Clone(st.KRL),
+		Manifest: bytes.Clone(st.Manifest),
+		Sig:      bytes.Clone(st.Sig),
 	}
 }
 
@@ -162,7 +162,7 @@ func (s *Signer) loadKRL(ctx context.Context) error {
 	if err := checkKRLLogged(st, s.loaded.lastKRLPublish); err != nil {
 		return err
 	}
-	s.krl = st
+	s.krl.Store(st)
 	if st != nil {
 		s.log.Info("KRL loaded", "krl_version", st.Version, "sha256", krl.SHA256Hex(st.KRL))
 	}

@@ -80,8 +80,11 @@ type Signer struct {
 	// installationID is the installed bundle's installation ID (D-04),
 	// "" when it has none; no KRL is published then.
 	installationID string
-	// krl is the published KRL in force, nil when none is. Guarded by mu.
-	krl *signerdb.KRLState
+	// krl is the published KRL in force, nil when none is. It is written
+	// under mu (loadKRL, Revoke after COMMIT) but read without it: GetKRL
+	// serves unauthenticated GET /api/v1/krl and must not wait for an
+	// issuance or revocation in flight. A stored state is never modified.
+	krl atomic.Pointer[signerdb.KRLState]
 
 	// caKeys are the ca-init keys as recorded, each opened in the
 	// backend at start with that custody (openRoleKey). Fixed for the

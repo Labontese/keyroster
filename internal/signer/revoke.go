@@ -135,7 +135,7 @@ func (s *Signer) Revoke(ctx context.Context, peer Peer, req *wire.RevokeRequest)
 		}
 		return nil, refusalErr(wire.CodeUnavailable, "state_unavailable", err)
 	}
-	s.krl = published
+	s.krl.Store(published)
 	s.log.Info("revoked",
 		"target", "serial",
 		"serial", req.Serial,

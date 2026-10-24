@@ -402,7 +402,7 @@ func TestRevokeFailedCommitReloadsKRL(t *testing.T) {
 	}
 	injected := errors.New("injected failure after the append")
 	e.s.mu.Lock()
-	e.s.krl = nil
+	e.s.krl.Store(nil)
 	err = e.s.logTx(ctx, func(tx *sql.Tx) error {
 		if _, err := e.s.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(e.clock.Now()), Kind: tlog.KindRefusal, Body: body}); err != nil {
 			return err
@@ -417,5 +417,36 @@ func TestRevokeFailedCommitReloadsKRL(t *testing.T) {
 	got := e.s.GetKRL()
 	if !bytes.Equal(got.KRL, stored.KRL) || !bytes.Equal(got.Manifest, stored.Manifest) || !bytes.Equal(got.Sig, stored.Sig) {
 		t.Fatal("after the failed transaction GetKRL does not serve the stored KRL state")
+	}
+}
+
+// TestGetKRLDoesNotWaitForMu (pre-merge review): GET /api/v1/krl is
+// unauthenticated and makes one signer call per request, so GetKRL must
+// not wait for s.mu, which Issue, Login and Revoke hold across CA signing
+// and their transaction; otherwise a burst of KRL reads holds every
+// connection slot and the accept loop refuses the authenticated calls.
+func TestGetKRLDoesNotWaitForMu(t *testing.T) {
+	e := newRevokeEnv(t, 1, 1, testInstallationID)
+	e.revoked(e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0]), 0)
+	e.s.mu.Lock()
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			unlocked = true
+			e.s.mu.Unlock()
+		}
+	}
+	defer unlock()
+	done := make(chan *wire.GetKRLResponse, 1)
+	go func() { done <- e.s.GetKRL() }()
+	select {
+	case got := <-done:
+		if len(got.KRL) == 0 {
+			t.Fatal("GetKRL served no KRL")
+		}
+	case <-time.After(5 * time.Second):
+		unlock()
+		<-done
+		t.Fatal("GetKRL waited for s.mu")
 	}
 }
