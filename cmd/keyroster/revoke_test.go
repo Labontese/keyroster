@@ -111,7 +111,7 @@ func TestRevokeRefusalText(t *testing.T) {
 		}
 		reached := false
 		e.mu.Lock()
-		e.override["POST "+serverclient.AdminRevokePath] = func(w http.ResponseWriter) { reached = true }
+		e.override["POST "+serverclient.AdminRevokePath] = func(http.ResponseWriter) { reached = true }
 		e.mu.Unlock()
 		code, stdout, stderr := run(t, "revoke", "serial", "1729", "--admin-key", ssh.FingerprintSHA256(s.PublicKey()))
 		e.mu.Lock()
