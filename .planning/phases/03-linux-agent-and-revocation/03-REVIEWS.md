@@ -1342,3 +1342,118 @@ All other findings are unverified.
 - **nemotron-only HIGHs worth checking.** PIV slot exhaustion across many rotations (03-12). Disabling a host entry should remove its host certificate (03-09). PK_OK behavior on all distro sshd versions (03-10).
 
 **Recommended next step.** Verify adversarially before `/gsd-plan-phase 3 --reviews`, as in earlier rounds, when 70–90 % of reviewer findings were refuted or already covered. At minimum verify the 03-05 swap consistency, the 03-07 spool boundary, Agreed Concerns 1, 4, 5 and 6, and 03-13 continuity.
+
+---
+
+## Verification Round (Codex gpt-6-astra, xhigh, read-only) — 2026-10-24
+
+The twelve main findings above (F1–F12) were rechecked by Codex on **gpt-6-astra at xhigh effort**, read-only, against the plan text, the Go source and OpenSSH 9.5p1/10.5p1 source. The first review lane ran on gpt-6-luna. Afterwards Claude rechecked the one CONFIRMED finding and every HIGH that Codex dismissed (F4, F6, F7, F8, F10) against the plans and the source. All of Codex's verdicts held up:
+
+- **F1:** 03-05 sends all three paths through one `current` symlink and does not reload on content changes.
+- **F7:** `internal/audit/verify.go:795-818` rebuilds the root from every leaf, independent of the origin.
+- **F9:** the clamp is at `internal/signer/logstate.go:409`.
+- **F8:** agent and sshd share the host clock, so the refutation stands.
+
+Result: **CONFIRMED 1 · PARTIAL 6 · ALREADY-COVERED 3 · REFUTED 2.**
+
+| ID | Plan | Verdict | Severity | Required plan change |
+|---|---|---|---|---|
+| F1 | 03-05 | CONFIRMED | HIGH | A mixed generation can let through a certificate that neither generation allows. Each authentication must see one consistent generation, and an interleaving test is needed. **Owner design decision required** (see below). |
+| F2 | 03-05, 03-07 | PARTIAL | MEDIUM | The permissions are already specified: pins root 0600, spool `keyroster-agent:root 0750`, outbox `root:keyroster-agent 0750`. Missing: dirfd-relative opens with no symlink following, a regular-file check that does not block on a FIFO, verify-and-install from the same captured bytes, root ownership of the state parent, and adversarial spool tests. |
+| F3 | 03-16 | PARTIAL | MEDIUM | 03-06 already refuses apply on `no_loopback_listener`. However, 03-16 Task 1 checks `test $? -ne 2`, which lets refusal exit 3 through, so a host can be enrolled without ever passing a self-test. Fix: Task 2 runs only on hosts with a successful preflight, after the manual `ListenAddress 127.0.0.1` fix. |
+| F4 | 03-06 | ALREADY-COVERED | — | `account_excluded` is report-only by design, and per-account `sshd -T -C` is already required. |
+| F5 | 03-10 | PARTIAL | MEDIUM | The account checks and distro tests are already there. Missing: a negative-probe budget that persists under the apply lock (7 separate processes or restarts in the test), and explicit session restrictions on the probe certificate (`force-command`, no `permit-pty`/forwarding, optional `source-address`). `internal/cert/builder.go:113,152` keeps the profile defaults, and nologin does not stop forwarding. |
+| F6 | 03-14 | ALREADY-COVERED | — | Effective-path checks with rollback; login despite corrupt main files on 9.5p1, 10.5p1 and all seven images. PAM is a flagged assumption. |
+| F7 | 03-13 | REFUTED | — | The new origin does not reset the tree. Verification rebuilds the whole root and checks the previous checkpoint against its prefix. |
+| F8 | 03-12 | REFUTED | — | 300 s margin, and agent and sshd share the host clock. Certificates within the drain bound have already expired in sshd when `trusted_until` is reached. |
+| F9 | 03-03 | PARTIAL | MEDIUM | Parsing and pruning on `issued_at` are covered. Remaining: if the clock steps back, `appendLocked` raises the revoke leaf's time, so audit evaluates at a later time than the signer did and rejects an honest entry. Fix: one defined resolution timestamp (record it in the leaf), plus tests at equality, sub-second boundaries and clock rollback. |
+| F10 | 03-09 | ALREADY-COVERED | — | The privacy trade-off is documented, and the 1 MiB directory and 4 MiB HTTP caps already exist. Disabling a host entry keeps last-good (03-05). `revoke host` is the way to remove a host's access. |
+| F11 | 03-11 | PARTIAL | MEDIUM | Bounded key reads, immediate refusal when a passphrase is needed without a terminal (reuse `internal/rootceremony/passphrase.go:26`), clearing of buffers, and tests. Shared roles between machines and humans are intended. |
+| F12 | 03-01, 03-07 | PARTIAL | MEDIUM | The signer socket cap is covered (`ResponseCaps`, `internal/wire/frame.go:99`). Remaining: a 4 MiB KRL in base64 is about 5⅓ MiB, which exceeds the client's 4 MiB HTTP cap (`internal/serverclient/client.go:161`). The fetcher's catch-up of up to 16 versions has no total byte bound. Fix: an explicit KRL HTTP bound including encoding overhead, plus aggregate or paginated fetch limits with max and max+1 tests. |
+
+The other findings in the reviews above were not verified one by one in this round. Treat them as input to the planner, not as confirmed defects.
+
+### Codex verification report (verbatim, links made repo-relative)
+
+| ID | Verdict | Severity | Evidence (short) |
+|---|---|---|---|
+| F1 | **CONFIRMED** | **HIGH** | [03-05, Task 2 — `internal/agent/apply`](../../../.planning/phases/03-linux-agent-and-revocation/03-05-PLAN.md:214) puts all three paths through `current`. OpenSSH checks revocation, then CA trust, then principals through separate reads; a mixed generation can **accept**, not merely refuse. Details below. |
+| F2 | **PARTIAL** | **MEDIUM** | The shared-write premise is substantially wrong: [03-07, Task 1 — “Applier side”](../../../.planning/phases/03-linux-agent-and-revocation/03-07-PLAN.md:182) specifies pins `root 0600`, spool `keyroster-agent:root 0750`, and outbox `root:keyroster-agent 0750`. However, [03-05, Task 2 — “internal/agent/spool”](../../../.planning/phases/03-linux-agent-and-revocation/03-05-PLAN.md:205) specifies size caps without a regular-file/no-symlink opening contract; parent-state ownership is also insufficiently explicit. |
+| F3 | **PARTIAL** | **MEDIUM** | There is a blocking **apply** gate: [03-06, Task 1 — `preflight.go`](../../../.planning/phases/03-linux-agent-and-revocation/03-06-PLAN.md:127), “refuses on any refusal code,” including `no_loopback_listener`. There is no equivalent pre-enrollment gate: [03-16, Task 1 verification](../../../.planning/phases/03-linux-agent-and-revocation/03-16-PLAN.md:116) checks `test $? -ne 2`, which permits refusal exit **3**. |
+| F4 | **ALREADY-COVERED** | — | [03-06, must-haves](../../../.planning/phases/03-linux-agent-and-revocation/03-06-PLAN.md:41) explicitly requires per-account `sshd -T -C`; [Task 1 — `preflight.go`](../../../.planning/phases/03-linux-agent-and-revocation/03-06-PLAN.md:127) explicitly makes `account_excluded` “report only” and `user@host` “may exclude.” This is an intentional diagnostic limitation. `-T -C` dumps effective configuration; it does not prove login. SSH access restrictions remain enforced. [OpenSSH `sshd(8)`](https://man.openbsd.org/sshd.8#C), [`sshd_config(5)`](https://man.openbsd.org/sshd_config#AllowUsers). |
+| F5 | **PARTIAL** | **MEDIUM** | Account safety and platform testing are already substantial: [03-10, must-haves](../../../.planning/phases/03-linux-agent-and-revocation/03-10-PLAN.md:55) requires exclusive probe-principal mapping and checks before every probe; [Task 2](../../../.planning/phases/03-linux-agent-and-revocation/03-10-PLAN.md:184) tests real accounts under packaged PAM settings and `UsePAM no`. The six/hour limit lacks explicit persistence and restart coverage; its [named test](../../../.planning/phases/03-linux-agent-and-revocation/03-10-PLAN.md:179) only describes seven applies. |
+| F6 | **ALREADY-COVERED** | — | [03-14, Task 1 — “Agent” and “e2e”](../../../.planning/phases/03-linux-agent-and-revocation/03-14-PLAN.md:125) requires effective-path checks with rollback and login despite corrupt main files; [verification](../../../.planning/phases/03-linux-agent-and-revocation/03-14-PLAN.md:132) names **9.5p1 and 10.5p1**. [Task 2](../../../.planning/phases/03-linux-agent-and-revocation/03-14-PLAN.md:147) repeats this on all seven distro images. First matching value wins, but the effective-path check detects interference. PAM limitations are explicitly acknowledged under [“Flagged assumption, BREAK-01”](../../../.planning/phases/03-linux-agent-and-revocation/03-14-PLAN.md:225). [OpenSSH Match/UsePAM mechanisms](https://man.openbsd.org/sshd_config#Match). |
+| F7 | **REFUTED** | — | Changing origin does not reset the Merkle tree. [03-13, Task 1 — “Signer”/“Audit”](../../../.planning/phases/03-linux-agent-and-revocation/03-13-PLAN.md:116) switches the checkpoint signer and records `(fromSize, logKey, origin)` segments. Existing verification reconstructs the complete root and checks the previous checkpoint against the corresponding prefix: [internal/audit/verify.go:795](../../../internal/audit/verify.go:795), [verify.go:813](../../../internal/audit/verify.go:813). Tree hashing is independent of origin: [internal/tlog/log.go:18](../../../internal/tlog/log.go:18). |
+| F8 | **REFUTED** | — | A **300-second margin exists**: [03-12, Task 1 — “Bundle”](../../../.planning/phases/03-linux-agent-and-revocation/03-12-PLAN.md:151). No clock-health gate is specified. However, the agent and local sshd use the same host clock: for certificates within the stated drain bound, an ahead clock reaching `trusted_until` has already expired those certificates in sshd. It does not establish an additional CA-removal lockout. OpenSSH’s `sshkey_cert_check_authority_now()` uses `time(NULL)` and rejects `verify_time >= valid_before`. [Tagged OpenSSH source](https://github.com/openssh/openssh-portable/blob/V_9_5_P1/sshkey.c). |
+| F9 | **PARTIAL** | **MEDIUM** | Parsing and ordinary boundaries are explicitly covered: [03-03, Task 1 — “Signer”](../../../.planning/phases/03-linux-agent-and-revocation/03-03-PLAN.md:136) says “parses each … stored certificate,” uses `ValidBefore + 300 s > now`, and prunes against `issued_at`. The residual issue is that [“Audit verify”](../../../.planning/phases/03-linux-agent-and-revocation/03-03-PLAN.md:143) uses `leafMicros`, while existing append logic can advance that timestamp: [internal/signer/logstate.go:409](../../../internal/signer/logstate.go:409). |
+| F10 | **ALREADY-COVERED** | — | Privacy is explicit in [03-09, Task 1 — `redeem-directory` cons](../../../.planning/phases/03-linux-agent-and-revocation/03-09-PLAN.md:163). The numeric byte budget is not restated, but existing bounds suffice: directory **1 MiB**, signatures **64 KiB** ([internal/wire/directory.go:14](../../../internal/wire/directory.go:14)); HTTP response **4 MiB**, enforced before decoding ([internal/serverclient/client.go:452](../../../internal/serverclient/client.go:452)). **Disable does not remove an installed host certificate**: [03-05’s explicit last-good rule](../../../.planning/phases/03-linux-agent-and-revocation/03-05-PLAN.md:52) preserves state. [03-09, Task 3](../../../.planning/phases/03-linux-agent-and-revocation/03-09-PLAN.md:248) separately defines host revocation. |
+| F11 | **PARTIAL** | **MEDIUM** | [03-11, Task 1 — “CLI”](../../../.planning/phases/03-linux-agent-and-revocation/03-11-PLAN.md:143) says “prompting for a passphrase on a terminal,” but does not specify bounded key reads, buffer clearing, or the nonterminal error path. Shared roles are deliberate authorization, not an escalation: [03-04, Task 1 — `CheckPolicy`](../../../.planning/phases/03-linux-agent-and-revocation/03-04-PLAN.md:146) explicitly covers roles used under both CAs. |
+| F12 | **PARTIAL** | **MEDIUM** | The signer-client allegation is refuted: [03-01, Task 2 — “Wire”](../../../.planning/phases/03-linux-agent-and-revocation/03-01-PLAN.md:265) assigns the response type its cap; [internal/signerclient/client.go:119](../../../internal/signerclient/client.go:119) uses `ResponseCaps`, which derives the same per-type cap ([internal/wire/frame.go:99](../../../internal/wire/frame.go:99)). HTTP needs separate treatment: base64 of a maximum-size KRL already exceeds the existing 4 MiB response limit. |
+
+This was read-only verification. References to planned tests describe required coverage, not evidence that those future tests have run. Upstream OpenSSH references identify tagged files and functions; repository references use actual source line numbers.
+
+**F1 — Mixed generations can authorize a certificate that neither generation authorizes**
+
+OpenSSH calls `user_key_allowed()` for both unsigned public-key queries and signed authentication requests. That function checks revocation first; `user_cert_trusted_ca()` subsequently reads the CA file and principals file. These are repeated authorization-time reads, not one connection-wide snapshot. The mechanism appears in both [9.5p1](https://github.com/openssh/openssh-portable/blob/V_9_5_P1/auth2-pubkey.c) and [10.5p1](https://github.com/openssh/openssh-portable/blob/V_10_5_P1/auth2-pubkey.c). `sshkey_in_file()` opens the supplied pathname with `fopen()`. [OpenSSH authfile.c](https://github.com/openssh/openssh-portable/blob/V_9_5_P1/authfile.c).
+
+Concrete interleaving:
+
+- Generation A trusts CA C, does not revoke certificate X, but does not authorize X’s principal for account U.
+- Generation B still trusts C, revokes X, and adds that principal to U.
+- A **signed authentication request** checks A’s KRL; `current` changes; it then reads B’s CA/principals files. X can authenticate although both complete generations refuse it.
+
+The missing contract is in **03-05 Task 2, `swap.go`/`apply.go`**, with missing reader-interleaving coverage in **Task 3**. The apply flock only serializes writers. [Plan locations](../../../.planning/phases/03-linux-agent-and-revocation/03-05-PLAN.md:212), [existing concurrency test](../../../.planning/phases/03-linux-agent-and-revocation/03-05-PLAN.md:239).
+
+The broader “bad state during rollback” claim needs qualification: malformed CA/KRL candidates already have [pre-swap validation](../../../.planning/phases/03-linux-agent-and-revocation/03-05-PLAN.md:48). Nevertheless, post-swap rollback cannot retroactively undo an accepted authentication.
+
+**Minimal change:** require a generation consistent across each authentication—for example, immutable `gen/N` paths in the loaded configuration, reload per generation, and sufficient old-generation retention. Add a deterministic signed-authentication interleaving test and explicitly document candidate exposure before rollback.
+
+**F2 — Filesystem hardening remains underspecified; arbitrary overwrite is unproven**
+
+The specified outbox permissions do not let the fetcher replace `status.json`; signed spool data also cannot simply replace trusted pins or accepted documents. [03-05 Task 2 — “internal/agent/state”](../../../.planning/phases/03-linux-agent-and-revocation/03-05-PLAN.md:200) requires independent verification against stored pins. Heartbeat claims are separately acknowledged as untrusted host reports in [03-08, “Trust Boundaries”](../../../.planning/phases/03-linux-agent-and-revocation/03-08-PLAN.md:254).
+
+The remaining concrete failure is a recognized spool filename implemented as a FIFO, or a symlink to one: an ordinary blocking open/read could stall the root apply/check loop before byte limits help. This is a missing opening contract, not a demonstrated arbitrary-write exploit.
+
+**Minimal change:** in **03-07 Task 1**, specify and verify root ownership/non-writability of the state parent, accepted state, and pending-marker destinations. In **03-05 Tasks 2–3**, require descriptor-relative, no-follow opens, regular-file checks without blocking on special files, and verification/install from the same captured bytes; add adversarial spool tests.
+
+**F3 — Enrollment can proceed into an apply refusal**
+
+A tailnet-only host can pass 03-16’s procedural check because exit 3 is allowed, then receive a token and approval, but never satisfy Task 2’s generation/self-test requirement. Existing SSH configuration remains protected by the apply refusal; this is an enrollment workflow failure, not demonstrated lockout. [03-16 Task 2 action and verification](../../../.planning/phases/03-linux-agent-and-revocation/03-16-PLAN.md:131).
+
+**Minimal change:** **03-16 Task 1** must require successful preflight on every host proceeding to Task 2, after the documented manual loopback fix. Merely recording the refusal must not satisfy that gate.
+
+**F5 — Preserve the rate limit across processes**
+
+The account-check criticism largely fails: a real shell, missing nologin executable, wrong shadow password field, expiry, and account exclusion all have explicit refusal cases. [03-10 Task 2](../../../.planning/phases/03-linux-agent-and-revocation/03-10-PLAN.md:178). Packaged `*` behavior still needs execution of the required distro tests; the plan does not establish their results.
+
+A probe certificate is not intrinsically “PK_OK-only.” Full authentication additionally requires its private key. The plan scopes its principal and protects the keys, but its [Signer paragraph](../../../.planning/phases/03-linux-agent-and-revocation/03-10-PLAN.md:149) does not mandate `force-command`, removal of `permit-pty`, or `source-address`. The generic builder preserves profile defaults and adds only explicitly requested critical options. [internal/cert/builder.go:113](../../../internal/cert/builder.go:113), [builder.go:152](../../../internal/cert/builder.go:152). Nologin also does not independently disable forwarding; OpenSSH checks forwarding permissions separately. [OpenSSH serverloop.c, `server_request_direct_tcpip()`](https://github.com/openssh/openssh-portable/blob/V_10_5_P1/serverloop.c).
+
+The concrete uncovered limiter case is repeated `apply --once` executions or daemon restarts resetting an in-memory allowance. Whether this actually triggers packaged OpenSSH penalties remains the plan’s unresolved A9 test.
+
+**Minimal change:** **03-10 Task 1** must persist the negative-probe budget under the apply lock; **Task 2** must exercise seven separate process invocations/restarts. Also make the probe’s intended session/forwarding restrictions explicit instead of crediting protections that are not specified.
+
+**F9 — Resolve the timestamp before computing the live set**
+
+The missing `valid_before` database column is already handled: issuance stores the certificate blob ([internal/signerdb/issuance.go:19](../../../internal/signerdb/issuance.go:19)), and the plan explicitly parses it. Pruning against manifest `issued_at` is also covered.
+
+The residual scenario is a clock rollback across boundary `E = ValidBefore + 300s`: signer resolution uses wall time just before E and includes the serial, but `appendLocked()` raises the revoke leaf’s time to a previous timestamp after E. Audit resolves at that later `leafMicros` and rejects the honest entry set. The clamp is explicit at [internal/signer/logstate.go:405](../../../internal/signer/logstate.go:405).
+
+**Minimal change:** **03-03 Task 1** must define one resolution timestamp and its relationship to the log timestamp clamp—recording the resolution time explicitly is one option. **Task 2** should test equality, subsecond boundaries, and clock rollback. This is an audit false-rejection risk, not evidence of a successful audit forgery.
+
+**F11 — Complete the private-key input contract**
+
+The planned disk-write test checks that private material is not written; it does not cover input size, noninteractive prompting, or memory cleanup. [03-11 Task 2 — `TestMachineRenewNeverWritesKey`](../../../.planning/phases/03-linux-agent-and-revocation/03-11-PLAN.md:168).
+
+A scheduled renewal with an encrypted key needs a deterministic error when interactive input is unavailable. An unbounded key-file read can exhaust memory. Existing terminal-checking helpers exist, but the new path is not required to use them. [internal/rootceremony/passphrase.go:26](../../../internal/rootceremony/passphrase.go:26).
+
+**Minimal change:** **03-11 Tasks 1–2** should specify bounded key reads, immediate nonterminal refusal when a passphrase is required, clearing of owned sensitive buffers, and corresponding tests. Shared human/machine roles need no prohibition: the plan expressly makes those grants admin-controlled.
+
+**F12 — Separate binary-frame and HTTP limits**
+
+The binary socket cap is already shared by writer and reader. The remaining issue is HTTP representation: a 4 MiB KRL becomes approximately **5⅓ MiB** in base64 before manifest/signature/JSON overhead, exceeding [the existing response cap](../../../internal/serverclient/client.go:161).
+
+The new agent fetcher also lacks an explicit aggregate HTTP bound. Its state endpoint may return up to sixteen bundle and directory versions, so a spool-file cap alone does not define transport allocation limits. [03-07 Task 2 — “Chain catch-up”](../../../.planning/phases/03-linux-agent-and-revocation/03-07-PLAN.md:225).
+
+**Minimal change:** **03-01 Task 2** should define a KRL HTTP response bound including encoding overhead; **03-07 Tasks 1–2** should define aggregate fetch limits or byte-budgeted pagination. Test maximum legitimate responses and limit-plus-one rejection.
+
+Counts: **CONFIRMED 1 · ALREADY-COVERED 3 · REFUTED 2 · PARTIAL 6**.
