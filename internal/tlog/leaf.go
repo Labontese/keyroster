@@ -747,6 +747,11 @@ func (e *RevokedEntry) check() error {
 		return fmt.Errorf("%w: revoked entry size", ErrMalformedLeaf)
 	case e.Kind == RevokedSerial && (len(e.CAKey) == 0 || e.Serial == 0):
 		return fmt.Errorf("%w: a serial entry needs a CA key and a serial above 0", ErrMalformedLeaf)
+	case e.Kind == RevokedSerial && (e.KeyID != "" || len(e.Key) != 0):
+		// Exact, so no reader can take a serial entry for a key ID or key
+		// revocation. The rules for the key_id and key kinds come with
+		// 03-03, which first writes them.
+		return fmt.Errorf("%w: a serial entry carries no key ID and no key", ErrMalformedLeaf)
 	}
 	return nil
 }

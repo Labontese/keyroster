@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/cryptobyte"
+
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -494,9 +496,39 @@ func TestRevokeBody(t *testing.T) {
 		"serial_entry_no_ca": {Request: []byte("r"), Entries: []RevokedEntry{{Kind: RevokedSerial, Serial: 1}}},
 		"serial_entry_zero":  {Request: []byte("r"), Entries: []RevokedEntry{{Kind: RevokedSerial, CAKey: []byte("k")}}},
 		"unknown_entry_kind": {Request: []byte("r"), Entries: []RevokedEntry{{Kind: 4, CAKey: []byte("k"), Serial: 1}}},
+		// A serial entry is exact: a key ID or key beside it would let
+		// two readers take one leaf for different revocations.
+		"serial_entry_with_key_id": {Request: []byte("r"), Entries: []RevokedEntry{{Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, KeyID: "junk"}}},
+		"serial_entry_with_key":    {Request: []byte("r"), Entries: []RevokedEntry{{Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, Key: []byte("junk")}}},
 	} {
 		if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
 			t.Errorf("%s: Encode = %v, want ErrMalformedLeaf", name, err)
+		}
+	}
+	// The decoder refuses the same entries in bytes nobody encoded.
+	for name, e := range map[string]RevokedEntry{
+		"decode_serial_entry_with_key_id": {Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, KeyID: "junk"},
+		"decode_serial_entry_with_key":    {Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, Key: []byte("junk")},
+	} {
+		var c cryptobyte.Builder
+		c.AddUint64(1)
+		c.AddUint64(1)
+		c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes([]byte("r")) })
+		c.AddUint24LengthPrefixed(func(*cryptobyte.Builder) {})
+		c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+			c.AddUint8(e.Kind)
+			c.AddUint16LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(e.CAKey) })
+			c.AddUint64(e.Serial)
+			c.AddUint16LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes([]byte(e.KeyID)) })
+			c.AddUint16LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(e.Key) })
+			c.AddUint64(e.ValidBeforeSeconds)
+		})
+		raw, err := c.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeRevokeBody(raw); !errors.Is(err, ErrMalformedLeaf) {
+			t.Errorf("%s: DecodeRevokeBody = %v, want ErrMalformedLeaf", name, err)
 		}
 	}
 	empty := &RevokeBody{Request: []byte("r")}
