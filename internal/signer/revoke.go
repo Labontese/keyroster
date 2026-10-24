@@ -32,8 +32,9 @@ import (
 // then one transaction: the bundle still the one loaded at start, the
 // certificate with that serial issued by that CA role (unknown_serial,
 // ca_role_mismatch), the revocation row, the revoke leaf, the request ID,
-// the rebuilt KRL with its ops-signed manifest and the krl_publish leaf
-// (publishKRLLocked). The KRL leaves the signer only after COMMIT.
+// the KRL rebuilt from the whole revocation table (krl.Encode, in
+// publishKRLLocked) with its ops-signed manifest, and the krl_publish leaf.
+// The KRL leaves the signer only after COMMIT.
 func (s *Signer) Revoke(ctx context.Context, peer Peer, req *wire.RevokeRequest) (*wire.RevokeResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

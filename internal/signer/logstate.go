@@ -221,7 +221,9 @@ func CheckLog(ctx context.Context, db *signerdb.DB, logKey ssh.PublicKey) error 
 // byte-identical to the body of the last bundle_install entry of the log.
 // With no bundle installed, the log must record none. The latest stored
 // directory must likewise be the one the last directory_install entry
-// records (checkDirectoryLogged), as serve requires at start.
+// records (checkDirectoryLogged), and the published KRL state the one the
+// last krl_publish entry records (checkKRLLogged), as serve requires at
+// start.
 // keyroster-signer doctor uses it; an error wraps the reason.
 //
 // It cannot catch a database rewritten consistently with keys and roots of
@@ -242,6 +244,8 @@ func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 			return installs.add(idx, l.Body)
 		case tlog.KindDirectoryInstall:
 			return installs.addDirectory(idx, l.Body)
+		case tlog.KindKRLPublish:
+			installs.lastKRLPublish = l.Body
 		}
 		return nil
 	})
@@ -263,7 +267,10 @@ func CheckTrust(ctx context.Context, db *signerdb.DB) error {
 	if err := checkBundleLogged(snap.Bundle, installs.last); err != nil {
 		return err
 	}
-	return checkDirectoryLogged(snap.Directory, installs.lastDirectory)
+	if err := checkDirectoryLogged(snap.Directory, installs.lastDirectory); err != nil {
+		return err
+	}
+	return checkKRLLogged(snap.KRL, installs.lastKRLPublish)
 }
 
 // rebuildLogFrom is rebuildLog over db with the checkpoint verifier v. It

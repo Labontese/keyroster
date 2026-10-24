@@ -129,6 +129,8 @@ type LogSnapshot struct {
 	// Directory is the latest installed directory, nil when none is
 	// installed.
 	Directory *StoredDirectory
+	// KRL is the published KRL state, nil when none is published.
+	KRL *KRLState
 	// LastSerial is the serial high-water mark and Issuances the number
 	// of issuance rows; both commit with every issue leaf.
 	LastSerial uint64
@@ -139,8 +141,8 @@ type LogSnapshot struct {
 // one read transaction: it calls fn for every leaf with its stored hash, in
 // index order, and then returns the latest checkpoint (fn has then seen
 // every leaf) together with the ca-init keys, the latest trust bundle, the
-// latest directory, the serial high-water mark and the number of issuance
-// rows.
+// latest directory, the published KRL state, the serial high-water mark and
+// the number of issuance rows.
 // Appends committed meanwhile are not seen, so the leaves, hashes,
 // checkpoint and trust tables always belong together.
 func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, hash []byte) error) (*LogSnapshot, error) {
@@ -186,6 +188,9 @@ func (d *DB) ReadLogWithHashes(ctx context.Context, fn func(idx uint64, leaf, ha
 		return nil, err
 	}
 	if snap.Bundle, err = latestBundle(ctx, tx); err != nil && !errors.Is(err, ErrNoBundle) {
+		return nil, err
+	}
+	if snap.KRL, err = krlState(ctx, tx); err != nil {
 		return nil, err
 	}
 	if snap.Directory, err = latestDirectory(ctx, tx); err != nil {
