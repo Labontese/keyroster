@@ -135,8 +135,20 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 		"Not checked: that this KRL lists serial %d (this version cannot read a KRL); "+
 		"the signer's \"revoked\" line (journalctl -u keyroster-signer) is the proof.\n",
 		m.KRLVersion, m.LogIndex, serial)
-	_, _ = fmt.Fprintln(stdout, "Hosts enforce it once their keyroster agent applies this KRL.")
+	_, _ = fmt.Fprintln(stdout, revokeEnforcement(role))
 	return nil
+}
+
+// revokeEnforcement says who enforces a revocation under role. sshd's
+// RevokedKeys covers user authentication only, so it refuses user and
+// machine certificates (both are user certificates); a host certificate
+// is checked by SSH clients, through ssh_config's RevokedHostKeys.
+func revokeEnforcement(role wire.CARole) string {
+	if role == wire.CARoleHost {
+		return "A host certificate is checked by SSH clients, not by sshd: the revocation takes effect only on clients " +
+			"whose RevokedHostKeys file holds this KRL. Nothing installs it there yet, and no keyroster agent on a host enforces it."
+	}
+	return "Hosts enforce it once their keyroster agent applies this KRL."
 }
 
 // confirmRevokeAnswer checks the server's answer to a revocation against

@@ -95,6 +95,23 @@ func TestRevokeSerialConfirm(t *testing.T) {
 			t.Fatalf("stdout %q states the revocation as a fact", stdout)
 		}
 	})
+	t.Run("enforcement_by_role", func(t *testing.T) {
+		// sshd's RevokedKeys refuses user and machine certificates (both
+		// user certificates); a host certificate is refused only by SSH
+		// clients with RevokedHostKeys, never by a host's agent.
+		e := newDirEnv(t, 1, 1)
+		e.serveRevoke(ok, e.krlDoc(t, 3, 9, e.bundle.InstallationID, e.ops))
+		for ca, want := range map[string]string{
+			"user":    "Hosts enforce it once their keyroster agent applies this KRL.\n",
+			"machine": "Hosts enforce it once their keyroster agent applies this KRL.\n",
+			"host":    "A host certificate is checked by SSH clients, not by sshd: the revocation takes effect only on clients whose RevokedHostKeys file holds this KRL.",
+		} {
+			code, stdout, stderr := run(t, "revoke", "serial", "1729", "--ca", ca)
+			if code != 0 || !strings.Contains(stdout, want) || (ca == "host" && strings.Contains(stdout, "Hosts enforce")) {
+				t.Fatalf("--ca %s: exit %d, stdout %q, stderr %q; want %q", ca, code, stdout, stderr, want)
+			}
+		}
+	})
 	for _, tc := range []struct {
 		name string
 		ans  serverclient.RevokeAnswer

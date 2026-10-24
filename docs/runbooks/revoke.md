@@ -14,6 +14,16 @@ publishes a new KRL (OpenSSH Key Revocation List). Revocation is CLI only
 > with 03-05 to 03-07, and no keyroster command fetches and verifies the
 > KRL for a hand install yet. Until a host has the KRL, the certificate
 > keeps working there until it expires.
+>
+> This is for user and machine certificates (both are OpenSSH user
+> certificates). A **host** certificate (`--ca host`) is different: sshd's
+> `RevokedKeys` applies to user authentication only, so no host refuses
+> to present its own revoked host certificate. Only an SSH client refuses
+> it, once the KRL is in the file its `RevokedHostKeys` (ssh_config)
+> points to. Nothing installs it there yet (the known-hosts sync arrives
+> with 03-09). **UNVERIFIED**: no test revokes a host certificate and
+> checks a client refusing it; the CLI's wording for `--ca host` ran in
+> the CLI tests against a stub server (`TestRevokeSerialConfirm`).
 
 > **What is tested and what is not.**
 >
@@ -72,6 +82,10 @@ Hosts enforce it once their keyroster agent applies this KRL.
 The two log entries are the `revoke` entry and the `krl_publish` entry,
 written in one transaction with the revocation itself. Run in CI e2e
 (`TestRevokeSerialEndToEnd`, 03-01).
+
+With `--ca host` the last line instead says that a host certificate is
+checked by SSH clients, through `RevokedHostKeys`, and that nothing
+installs the KRL there yet (see the box at the top).
 
 The server's answer is not signed, and a compromised keyroster-server
 could drop the request and answer success. So the command reads the
