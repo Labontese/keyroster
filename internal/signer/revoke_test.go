@@ -380,3 +380,42 @@ func (e *revokeEnv) use(t *testing.T) func() {
 	e.t = t
 	return func() { e.t = prev }
 }
+
+// TestRevokeFailedCommitReloadsKRL (pre-merge review): when a transaction
+// that appended leaves fails, logTx reloads the log in case the COMMIT
+// reached the disk anyway, and the published KRL the signer serves is
+// reloaded with it. The cache is set back to "nothing published" to stand
+// in for the version before a revocation whose COMMIT reported an error
+// but was durable; after the failed transaction GetKRL must serve what
+// krl_state holds.
+func TestRevokeFailedCommitReloadsKRL(t *testing.T) {
+	e := newRevokeEnv(t, 1, 1, testInstallationID)
+	e.revoked(e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0]), 0)
+	ctx := context.Background()
+	stored, err := e.db.KRLState(ctx)
+	if err != nil || stored == nil {
+		t.Fatalf("KRL state: %+v, %v", stored, err)
+	}
+	body, err := (&tlog.RefusalBody{PeerUID: 1000, Reason: tlog.ReasonMalformed, Detail: "test"}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected failure after the append")
+	e.s.mu.Lock()
+	e.s.krl = nil
+	err = e.s.logTx(ctx, func(tx *sql.Tx) error {
+		if _, err := e.s.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(e.clock.Now()), Kind: tlog.KindRefusal, Body: body}); err != nil {
+			return err
+		}
+		return injected
+	})
+	broken := e.s.broken
+	e.s.mu.Unlock()
+	if !errors.Is(err, injected) || broken != nil {
+		t.Fatalf("logTx: %v (broken %v), want the injected error and a reloaded state", err, broken)
+	}
+	got := e.s.GetKRL()
+	if !bytes.Equal(got.KRL, stored.KRL) || !bytes.Equal(got.Manifest, stored.Manifest) || !bytes.Equal(got.Sig, stored.Sig) {
+		t.Fatal("after the failed transaction GetKRL does not serve the stored KRL state")
+	}
+}

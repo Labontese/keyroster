@@ -473,7 +473,14 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 		return nil
 	}
 	if next != nil {
-		if rerr := s.loadLog(context.WithoutCancel(ctx)); rerr != nil {
+		rerr := s.loadLog(context.WithoutCancel(ctx))
+		if rerr == nil {
+			// A COMMIT that reached the disk may have published a KRL:
+			// serve the state the reloaded log records, not the one
+			// cached before the transaction.
+			rerr = s.loadKRL(context.WithoutCancel(ctx))
+		}
+		if rerr != nil {
 			s.broken = fmt.Errorf("signer: audit log state unknown after a failed transaction: %w", rerr)
 			s.log.Error("audit log unavailable", "error", rerr.Error())
 		}
