@@ -862,3 +862,181 @@ func TestInstallDirectoryMessages(t *testing.T) {
 		t.Fatal("a Phase 2 message type number changed")
 	}
 }
+
+// revokeVector is the revoke request of
+// test/vectors/revoke_request_signing_v1.hex: target serial, the user CA,
+// serial 1700000000000001, request id 0x00..0x0f, created 1700000000,
+// reason "key lost".
+func revokeVector() *RevokeRequest {
+	r := &RevokeRequest{Target: TargetSerial, CARole: CARoleUser, Serial: 1_700_000_000_000_001, CreatedAt: 1700000000, Reason: "key lost"}
+	for i := range r.RequestID {
+		r.RequestID[i] = byte(i)
+	}
+	return r
+}
+
+// TestRevokeRequest: the revoke request round-trips with its evidence,
+// its signing bytes start with the raw domain tag and leave the evidence
+// out, and the parser refuses an unknown target, a CA role outside the
+// wire.CARole enum, serial 0, a reason with a control byte or above 256
+// bytes, and trailing bytes.
+func TestRevokeRequest(t *testing.T) {
+	r := revokeVector()
+	r.Evidence = []Evidence{{Type: EvidenceAdminSSHSIG, Blob: []byte("sig")}}
+	body, err := r.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("round_trip", func(t *testing.T) {
+		got, err := ParseRevokeRequest(body)
+		if err != nil || !reflect.DeepEqual(got, r) {
+			t.Fatalf("ParseRevokeRequest = %+v, %v; want %+v", got, err, r)
+		}
+	})
+	t.Run("signing_bytes", func(t *testing.T) {
+		sb := r.SigningBytes()
+		if !bytes.HasPrefix(sb, []byte("keyroster/revoke-request/v1")) || RevokeSSHSIGNamespace != RevokeRequestDomain {
+			t.Fatalf("signing bytes %q", sb[:min(len(sb), 32)])
+		}
+		noEv := *r
+		noEv.Evidence = nil
+		if !bytes.Equal(noEv.SigningBytes(), sb) || r.Digest() != sha256.Sum256(sb) {
+			t.Fatal("the evidence is part of the signing bytes, or Digest is not their SHA-256")
+		}
+		if TypeRevokeRequest != 0x06 || TypeGetKRL != 0x07 || TypeRevokeResponse != 0x86 || TypeGetKRLResponse != 0x87 {
+			t.Fatal("a revoke message type changed")
+		}
+	})
+	// mutate re-encodes r with edit applied to the encoded fields, bypassing
+	// Marshal's own checks.
+	mutate := func(edit func(r *RevokeRequest)) []byte {
+		c := *r
+		edit(&c)
+		var b cryptobyte.Builder
+		c.addFields(&b)
+		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+			for _, e := range c.Evidence {
+				addBytes16(b, []byte(e.Type))
+				addBytes16(b, e.Blob)
+			}
+		})
+		out, err := b.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for name, data := range map[string][]byte{
+		"target_2_refused":            mutate(func(r *RevokeRequest) { r.Target = 2 }),
+		"ca_role_out_of_range_0":      mutate(func(r *RevokeRequest) { r.CARole = 0 }),
+		"ca_role_out_of_range_4":      mutate(func(r *RevokeRequest) { r.CARole = 4 }),
+		"serial_zero_refused":         mutate(func(r *RevokeRequest) { r.Serial = 0 }),
+		"reason_control_byte_refused": mutate(func(r *RevokeRequest) { r.Reason = "key\nlost" }),
+		"reason_too_long_refused":     mutate(func(r *RevokeRequest) { r.Reason = strings.Repeat("x", MaxRevokeReason+1) }),
+		"trailing_byte_refused":       append(bytes.Clone(body), 0),
+		"truncated_refused":           body[:len(body)-1],
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseRevokeRequest(data); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseRevokeRequest: %v, want ErrMalformed", err)
+			}
+		})
+	}
+	t.Run("responses_round_trip", func(t *testing.T) {
+		rr := &RevokeResponse{KRLVersion: 3, RevokeLeaf: 7, PublishLeaf: 8}
+		b, err := rr.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := ParseRevokeResponse(b); err != nil || *got != *rr {
+			t.Fatalf("ParseRevokeResponse = %+v, %v", got, err)
+		}
+		if _, err := (&RevokeResponse{}).Marshal(); err == nil {
+			t.Fatal("a RevokeResponse with KRL version 0 marshals")
+		}
+		for _, g := range []*GetKRLResponse{{}, {KRL: []byte("krl"), Manifest: []byte("m"), Sig: []byte("s")}} {
+			b, err := g.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := ParseGetKRLResponse(b); err != nil || !reflect.DeepEqual(got, g) {
+				t.Fatalf("ParseGetKRLResponse = %+v, %v; want %+v", got, err, g)
+			}
+		}
+		if _, err := (&GetKRLResponse{KRL: []byte("krl")}).Marshal(); err == nil {
+			t.Fatal("a GetKRLResponse with a KRL but no manifest marshals")
+		}
+	})
+}
+
+// TestRevokeRequestSigningVector pins the revoke request's signing bytes:
+// they equal the golden file, start with the raw domain tag, and Digest
+// is their SHA-256.
+func TestRevokeRequestSigningVector(t *testing.T) {
+	r := revokeVector()
+	got := r.SigningBytes()
+	path := filepath.Join(vectorDir, "revoke_request_signing_v1.hex")
+	if *update {
+		if err := os.WriteFile(path, []byte(hex.EncodeToString(got)+"\n"), 0o644); err != nil { //nolint:gosec // G306: public test vector
+			t.Fatal(err)
+		}
+	}
+	file, err := os.ReadFile(path) //nolint:gosec // G304: fixed test vector path
+	if err != nil {
+		t.Fatalf("%v (create it with -update only for a deliberate format change)", err)
+	}
+	want, err := hex.DecodeString(strings.TrimSpace(string(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("revoke request signing bytes differ from %s\ngot:  %x\nwant: %x", path, got, want)
+	}
+	if !bytes.HasPrefix(want, []byte(RevokeRequestDomain)) || r.Digest() != sha256.Sum256(want) {
+		t.Fatal("the vector does not start with the domain tag, or Digest is not its SHA-256")
+	}
+}
+
+// TestKRLFrameBound (F12): a GetKRLResponse frame of exactly MaxKRLFrame
+// is read through ResponseCaps(TypeGetKRLResponse) and one of
+// MaxKRLFrame+1 is refused; a GetKRLResponse of the largest legal content
+// marshals within MaxKRLFrame; RevokeRequest stays capped at MaxFrame and
+// RequestCaps is unchanged.
+func TestKRLFrameBound(t *testing.T) {
+	frame := func(n int, typ byte) []byte {
+		buf := make([]byte, 4+n)
+		binary.BigEndian.PutUint32(buf, uint32(n)) //nolint:gosec // G115: test sizes
+		buf[4], buf[5] = Version, typ
+		return buf
+	}
+	if typ, body, err := ReadMessage(bytes.NewReader(frame(MaxKRLFrame, TypeGetKRLResponse)), ResponseCaps(TypeGetKRLResponse)); err != nil ||
+		typ != TypeGetKRLResponse || len(body) != MaxKRLFrame-headerLen {
+		t.Fatalf("a frame of MaxKRLFrame: %v", err)
+	}
+	if _, _, err := ReadMessage(bytes.NewReader(frame(MaxKRLFrame+1, TypeGetKRLResponse)), ResponseCaps(TypeGetKRLResponse)); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("a frame of MaxKRLFrame+1: %v, want ErrFrameTooLarge", err)
+	}
+	full := &GetKRLResponse{KRL: make([]byte, MaxKRLBytes), Manifest: make([]byte, maxKRLManifest), Sig: make([]byte, maxKRLManifestSig)}
+	body, err := full.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headerLen+len(body) > MaxKRLFrame {
+		t.Fatalf("the largest GetKRLResponse is a frame of %d bytes, above MaxKRLFrame %d", headerLen+len(body), MaxKRLFrame)
+	}
+	var w bytes.Buffer
+	if err := WriteMessage(&w, TypeGetKRLResponse, body); err != nil {
+		t.Fatalf("WriteMessage of the largest GetKRLResponse: %v", err)
+	}
+	if got, err := ParseGetKRLResponse(body); err != nil || len(got.KRL) != MaxKRLBytes {
+		t.Fatalf("ParseGetKRLResponse of the largest response: %v", err)
+	}
+	if err := WriteMessage(io.Discard, TypeRevokeRequest, make([]byte, MaxFrame-headerLen+1)); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("a RevokeRequest above MaxFrame: %v, want ErrFrameTooLarge", err)
+	}
+	for _, typ := range []byte{TypeRevokeRequest, TypeGetKRL, TypeGetKRLResponse} {
+		if n, ok := RequestCaps(typ); !ok || n != MaxFrame {
+			t.Fatalf("RequestCaps(%#x) = %d, %v; want MaxFrame", typ, n, ok)
+		}
+	}
+}

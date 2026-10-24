@@ -1450,6 +1450,33 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 			t.Logf("refused by its check: %v", err)
 		})
 	}
+	// Interim behaviour from 03-01 until 03-03 adds their checks (T-03-07):
+	// the default branch refuses a revoke or krl_publish entry, at that
+	// entry, before it is hashed or counted; it never skips one.
+	for _, tc := range []struct {
+		name string
+		kind tlog.Kind
+		body func(t *testing.T) []byte
+	}{
+		{"revoke_not_verifiable", tlog.KindRevoke, func(t *testing.T) []byte {
+			return encode(t, &tlog.RevokeBody{PolicyVersion: 1, ResolvedAtSeconds: 1, Request: []byte("request"),
+				Evidence: []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sig")}},
+				Entries:  []tlog.RevokedEntry{{Kind: tlog.RevokedSerial, CAKey: []byte("ca"), Serial: 1}}})
+		}},
+		{"krl_publish_not_verifiable", tlog.KindKRLPublish, func(t *testing.T) []byte {
+			return encode(t, &tlog.KRLPublishBody{KRLVersion: 1, BundleVersion: 1, Manifest: []byte("manifest"), Sig: []byte("sig")})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := standard(t, "ed25519")
+			idx := len(f.leaves)
+			f.add(tc.kind, tc.body(t))
+			rep, err := f.verify(join(f.lines()), nil)
+			if want := fmt.Sprintf("audit: entry %d (%s): not verifiable by this version", idx, tc.kind); err == nil || rep != nil || err.Error() != want {
+				t.Fatalf("Verify = %+v, %v; want exactly %q", rep, err, want)
+			}
+		})
+	}
 	t.Run("phase1_kinds_still_verify", func(t *testing.T) {
 		f := standard(t, "ed25519")
 		f.add(tlog.KindCAInit, encode(t, &tlog.CAInitBody{Keys: []tlog.CAInitKey{{Role: "log", PublicKey: []byte{1}, Alg: "ssh-ed25519", Custody: "agent"}}}))

@@ -15,9 +15,13 @@ func FuzzDecodeLeaf(f *testing.F) {
 	issue, _ := issueVector(f)
 	dirInstall, dirBody := directoryInstallVector(f)
 	login, loginBody := loginIssueVector(f)
+	revoke, revokeBody := revokeVector(f)
+	publish, publishBody := krlPublishVector(f)
 	f.Add(EncodeLeaf(issue))
 	f.Add(EncodeLeaf(dirInstall))
 	f.Add(EncodeLeaf(login))
+	f.Add(EncodeLeaf(revoke))
+	f.Add(EncodeLeaf(publish))
 	for _, b := range []interface{ Encode() ([]byte, error) }{
 		&RefusalBody{PeerUID: 1, Reason: ReasonMalformed, Detail: "malformed_frame"},
 		&RefusalSummaryBody{WindowEndMicros: 1, Counts: []ReasonCount{{ReasonPeerNotAllowed, 2}}},
@@ -26,12 +30,14 @@ func FuzzDecodeLeaf(f *testing.F) {
 		&BundleInstallBody{BundleVersion: 1, Bundle: []byte{1}, BundleSigs: []byte{2}, Policy: []byte{3}, PolicySigs: []byte{4}},
 		dirBody,
 		loginBody,
+		revokeBody,
+		publishBody,
 	} {
 		body, err := b.Encode()
 		if err != nil {
 			f.Fatal(err)
 		}
-		for k := KindIssue; k <= KindLoginIssue; k++ {
+		for k := KindIssue; k <= KindKRLPublish; k++ {
 			f.Add(EncodeLeaf(Leaf{Index: 1, TimeMicros: 2, Kind: k, Body: body}))
 		}
 	}
@@ -65,6 +71,10 @@ func FuzzDecodeLeaf(f *testing.F) {
 			body, err = DecodeDirectoryInstallBody(l.Body)
 		case KindLoginIssue:
 			body, err = DecodeLoginIssueBody(l.Body)
+		case KindRevoke:
+			body, err = DecodeRevokeBody(l.Body)
+		case KindKRLPublish:
+			body, err = DecodeKRLPublishBody(l.Body)
 		default:
 			t.Fatalf("DecodeLeaf accepted kind %d", l.Kind)
 		}
