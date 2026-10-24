@@ -107,13 +107,20 @@ path also runs in CI e2e.
 |---|---|---|
 | `the signer has issued no certificate with this serial` (`unknown_serial`) | The serial is not one this signer issued, or it is mistyped. | Check the serial. Revocation by key, for a certificate this signer did not issue, arrives with 03-03. |
 | `... was not issued by that CA` (`ca_role_mismatch`) | `--ca` names another CA than the one that issued it. | Pass the right `--ca`. |
-| `the signer refused the revocation (is --admin-key a policy admin?)` | The key is not a policy admin, or the signature does not verify. | Use an admin key from the root-signed policy. |
-| `signer unavailable ... The signer's log names the reason` | The signer could not decide. Its log names `krl_no_installation_id` (the bundle in force has no installation ID) or `krl_too_large` (see below). | Read the signer's log (`journalctl -u keyroster-signer`). |
+| `.../api/v1/admin/revoke: admin authentication failed` (HTTP 401) | keyroster-server refused the request's admin signature before the signer saw it: the key is not a policy admin, or your clock differs from the server's by more than 2 minutes (the CLI then adds `your clock differs from the server by Ns`). | Use an admin key from the root-signed policy (`--admin-key SHA256:...`), or fix the clock. |
+| `the signer refused the revocation; nothing was revoked: ... HTTP 403: [peer text: "REASON"]` | The signer refused it for REASON. The one an operator can hit is `request_time_skew`: the request was created more than 5 minutes before the signer saw it (ssh-agent took that long to sign, say while waiting for a touch, or the clocks differ). | Run the command again; for another REASON, read the signer's log (`journalctl -u keyroster-signer`). |
+| `the signer has already accepted a request with this ID` (`duplicate_request`) | The signer saw this request ID before; the CLI picks a fresh random one each run, so only a resent request gets this. | Run the command again. |
+| `the server cannot reach its signer (HTTP 503) ... The signer's log names the reason` | The signer could not decide. Its log names `krl_no_installation_id` (the bundle in force has no installation ID) or `krl_too_large` (see below). | Read the signer's log (`journalctl -u keyroster-signer`). |
 
-Every refusal is also an entry in the signer's audit log. The
-`krl_no_installation_id` refusal ran in the signer's unit tests
-(`TestRevoke/no_installation_id_refused`); on the homelab it is
-UNVERIFIED until 03-16.
+The CLI's text in every row ran in the CLI tests against a stub server
+(`TestRevokeRefusalText`), the 401 row with a key that is not a policy
+admin. Against the real server and signer, end to end, every row is
+**UNVERIFIED**: the e2e test runs only a successful revocation. The
+signer's own refusals ran in its unit tests (`TestRevoke`, among them
+`no_installation_id_refused`, and `TestRevokeKRLTooLarge`); on the
+homelab `krl_no_installation_id` is UNVERIFIED until 03-16.
+
+Every refusal is also an entry in the signer's audit log.
 
 ### `krl_too_large`
 

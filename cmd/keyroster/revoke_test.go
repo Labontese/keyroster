@@ -2,15 +2,18 @@ package main
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
@@ -57,6 +60,66 @@ func (e *dirEnv) serveRevoke(ans serverclient.RevokeAnswer, krlDoc []byte) {
 	if krlDoc != nil {
 		e.override["GET "+serverclient.KRLPath] = func(w http.ResponseWriter) { _, _ = w.Write(krlDoc) }
 	}
+}
+
+// TestRevokeRefusalText (pre-merge review): each refusal the runbook lists
+// reaches the operator in the CLI's words. A key that is not a policy
+// admin is refused by keyroster-server (401) before the signer sees the
+// request; a 403 without a reason the CLI knows is any other refusal by
+// the signer, such as request_time_skew when ssh-agent took over five
+// minutes to sign.
+func TestRevokeRefusalText(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, body, want string
+	}{
+		{"unknown_serial", "403", `{"error":"unknown_serial"}`, "the signer has issued no certificate with this serial; nothing was revoked"},
+		{"ca_role_mismatch", "403", `{"error":"ca_role_mismatch"}`, "was not issued by that CA; pass the right --ca; nothing was revoked"},
+		{"duplicate_request", "403", `{"error":"duplicate_request"}`, "the signer has already accepted a request with this ID"},
+		{"other_signer_refusal", "403", `{"error":"request_time_skew"}`, "the signer refused the revocation; nothing was revoked"},
+		{"signer_unavailable", "503", `{"error":"signer unavailable"}`, "The signer's log names the reason"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newDirEnv(t, 1, 1)
+			e.mu.Lock()
+			e.override["POST "+serverclient.AdminRevokePath] = func(w http.ResponseWriter) {
+				code := http.StatusForbidden
+				if tc.status == "503" {
+					code = http.StatusServiceUnavailable
+				}
+				w.WriteHeader(code)
+				_, _ = io.WriteString(w, tc.body)
+			}
+			e.mu.Unlock()
+			code, stdout, stderr := run(t, "revoke", "serial", "1729")
+			if code == 0 || stdout != "" || !strings.Contains(stderr, tc.want) || strings.Contains(stderr, "is --admin-key a policy admin") {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want %q", code, stdout, stderr, tc.want)
+			}
+		})
+	}
+	t.Run("not_a_policy_admin", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		_, k, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.agent.Add(agent.AddedKey{PrivateKey: k}); err != nil {
+			t.Fatal(err)
+		}
+		s, err := ssh.NewSignerFromKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reached := false
+		e.mu.Lock()
+		e.override["POST "+serverclient.AdminRevokePath] = func(w http.ResponseWriter) { reached = true }
+		e.mu.Unlock()
+		code, stdout, stderr := run(t, "revoke", "serial", "1729", "--admin-key", ssh.FingerprintSHA256(s.PublicKey()))
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if code == 0 || stdout != "" || reached || !strings.Contains(stderr, serverclient.AdminRevokePath+": admin authentication failed") {
+			t.Fatalf("exit %d, stdout %q, stderr %q, revoke handler reached %v; want admin authentication failed", code, stdout, stderr, reached)
+		}
+	})
 }
 
 // TestRevokeSerialConfirm (pre-merge review): the server's answer to a

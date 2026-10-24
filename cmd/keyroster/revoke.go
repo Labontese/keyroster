@@ -194,7 +194,11 @@ func revokeRefusal(err error) error {
 	case errors.As(err, &he) && he.APIErrorIs("duplicate_request"):
 		return errors.New("the signer has already accepted a request with this ID; run the command again; nothing new was revoked")
 	case errors.As(err, &he) && he.Code == http.StatusForbidden:
-		return fmt.Errorf("the signer refused the revocation (is --admin-key a policy admin?): %w", err)
+		// keyroster-server refuses a key that is not a policy admin itself
+		// (401, admin authentication failed); a 403 is the signer's, for
+		// example request_time_skew when ssh-agent took over five minutes
+		// to sign. Its reason is peer text, so no advice joins it.
+		return fmt.Errorf("the signer refused the revocation; nothing was revoked: %w", err)
 	case errors.Is(err, serverclient.ErrSignerUnavailable):
 		return fmt.Errorf("%w; the revocation may not have been recorded. The signer's log names the reason (krl_no_installation_id: the trust bundle in force has no installation ID; krl_too_large: see docs/runbooks/revoke.md)", err)
 	}
