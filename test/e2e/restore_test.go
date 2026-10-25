@@ -175,8 +175,14 @@ EOF`
 	// names the backup directory (<backup> in the runbook).
 	restoreFilesScript = `S=/var/lib/keyroster-signer
 test -e /etc/systemd/system/keyroster-signer.service.d/restore-hold.conf
-if systemctl is-active --quiet keyroster-signer.service; then
-  echo "keyroster-signer.service is running: hold it first" >&2
+st=$(systemctl show -p ActiveState --value keyroster-signer.service)
+if [ "$st" != inactive ] && [ "$st" != failed ]; then
+  echo "keyroster-signer.service is $st: hold it first" >&2
+  exit 1
+fi
+exec 9<"$S/signer.lock"
+if ! flock -n 9; then
+  echo "$S is in use by another keyroster-signer process" >&2
   exit 1
 fi
 test -s "$1/signer.db"

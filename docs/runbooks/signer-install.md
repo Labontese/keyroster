@@ -393,9 +393,12 @@ loudly, a start that keyroster-server's `Wants=` asks for included: each
 is the hold working. (A `Condition` would skip the start silently;
 `systemctl mask` does not work, because the units are files in
 `/etc/systemd/system`.) The block writes both drop-ins and reloads
-systemd before it stops the units, so neither can start again in
-between. Only the last line's `held:` means the hold is in force. Keep it
-until the end of step 2.
+systemd before it stops the units, so that no new start succeeds after
+the stop. A unit already waiting to restart after a crash (`activating`,
+`auto-restart`) is not held by the drop-in and can still start before
+the stop; the `systemctl stop` that follows stops it, and every start
+after that fails. Only the last line's `held:` means the hold is in
+force. Keep it until the end of step 2.
 
 **Keep users away until the replay is done.** From the moment the
 restored signer starts again until the last lost version is back (step
@@ -411,14 +414,24 @@ access.)
 `signer.db` and its `-wal` and `-shm` files together with those in the
 backup directory `<backup>` (an absolute path). Files the backup does not
 have are removed, or SQLite would replay the newer WAL onto the older
-file:
+file. The block refuses unless the signer is `inactive` or `failed` (not
+`activating`, which includes a pending restart), and it holds the state
+directory's lock (`signer.lock`, which `serve`, `ca-init` and
+`install-bundle` hold while they run) until it ends, so it refuses while
+any of them runs, also one started outside systemd:
 
 ```
 bash -eu -s <backup> <<'EOF'
 S=/var/lib/keyroster-signer
 test -e /etc/systemd/system/keyroster-signer.service.d/restore-hold.conf
-if systemctl is-active --quiet keyroster-signer.service; then
-  echo "keyroster-signer.service is running: hold it first" >&2
+st=$(systemctl show -p ActiveState --value keyroster-signer.service)
+if [ "$st" != inactive ] && [ "$st" != failed ]; then
+  echo "keyroster-signer.service is $st: hold it first" >&2
+  exit 1
+fi
+exec 9<"$S/signer.lock"
+if ! flock -n 9; then
+  echo "$S is in use by another keyroster-signer process" >&2
   exit 1
 fi
 test -s "$1/signer.db"
@@ -814,7 +827,8 @@ structurally (see the warning above).
 > the repository's units on an Ubuntu 24.04 runner: the hold block above
 > verbatim for keyroster-server and keyroster-signer, each start then
 > refused with `Assertion failed on job for ...`; the file restore block
-> verbatim, from a copy of the signer's database taken under the hold;
+> verbatim, from a copy of the signer's database taken under the hold,
+> refusing first while another process holds `signer.lock`;
 > the release block verbatim, with the signer crash-looped into its
 > start limit before the hold (a temporary drop-in), so that it starts
 > again only because the release resets it; and the signer starting again with
@@ -831,7 +845,9 @@ structurally (see the warning above).
 > signer VM) and the fresh signer VM when the current one cannot be
 > used, the hold and the file restore on a
 > real signer host (a running keyroster-server, or the TPM drop-in beside
-> the hold), the replay of a lost `bundle_install`, a lost version that
+> the hold), the file restore's refusal of a signer that is `activating`
+> (run once by hand against a throwaway unit in auto-restart, not in
+> CI), the replay of a lost `bundle_install`, a lost version that
 > binds a passkey and the re-invite after it, keeping users away from the server, the version counts of
 > step 2 against a real restored signer, the stop in step 2 for a
 > restored export that does not verify on its own (the refusals

@@ -375,11 +375,18 @@ for f in signer.db signer.db-wal signer.db-shm; do
 	[ ! -e "$STATE/$f" ] || cp -p "$STATE/$f" "$backup/$f"
 done
 ls -l "$backup"
-bash -eu -s "$backup" <<'EOF'
+file_restore() {
+	bash -eu -s "$1" <<'EOF'
 S=/var/lib/keyroster-signer
 test -e /etc/systemd/system/keyroster-signer.service.d/restore-hold.conf
-if systemctl is-active --quiet keyroster-signer.service; then
-  echo "keyroster-signer.service is running: hold it first" >&2
+st=$(systemctl show -p ActiveState --value keyroster-signer.service)
+if [ "$st" != inactive ] && [ "$st" != failed ]; then
+  echo "keyroster-signer.service is $st: hold it first" >&2
+  exit 1
+fi
+exec 9<"$S/signer.lock"
+if ! flock -n 9; then
+  echo "$S is in use by another keyroster-signer process" >&2
   exit 1
 fi
 test -s "$1/signer.db"
@@ -391,6 +398,28 @@ for f in signer.db signer.db-wal signer.db-shm; do
 done
 echo "restored signer.db from $1"
 EOF
+}
+# Another keyroster-signer process (here a stand-in that holds the lock, as
+# serve, ca-init and install-bundle do) makes the file restore refuse before
+# it removes anything.
+flock -o "$STATE/signer.lock" sleep 300 &
+locker=$!
+agent_pids+=("$locker")
+for _ in $(seq 1 50); do
+	flock -n "$STATE/signer.lock" true || break
+	sleep 0.1
+done
+db_before=$(sha256sum "$STATE/signer.db")
+if file_restore "$backup" >"$work/restore-locked.log" 2>&1; then
+	cat "$work/restore-locked.log"
+	fail "the file restore ran while the signer's lock was held"
+fi
+cat "$work/restore-locked.log"
+grep -q 'is in use by another keyroster-signer process' "$work/restore-locked.log" || fail "the file restore refused for another reason than the lock"
+[ "$(sha256sum "$STATE/signer.db")" = "$db_before" ] || fail "the refused file restore changed signer.db"
+pkill -P "$locker" sleep || true
+wait "$locker" || true
+file_restore "$backup"
 [ "$(stat -c '%a %U %G' "$STATE/signer.db")" = "600 keyroster-signer keyroster-signer" ] || fail "restored signer.db is $(stat -c '%a %U %G' "$STATE/signer.db")"
 bash -eu -s keyroster-server keyroster-signer <<'EOF'
 test "$#" -gt 0
