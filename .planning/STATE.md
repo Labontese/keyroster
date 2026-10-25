@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: 03-01 executed; PR open at the Task 4 merge gate
-last_updated: "2026-10-24T19:53:58.337Z"
+stopped_at: 03-02 executed; PR open at the Task 4 merge gate
+last_updated: "2026-10-25T06:35:22.176Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: d263deea5a227f7a58ded895fb6a59a78175046c
+state_head: b2cc53783c1055713be66bb1e048d1f89cbcde1d
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 51
-  completed_plans: 35
+  completed_plans: 37
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 2 of 16
+Plan: 3 of 16
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -91,6 +91,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P12 | about 65 min | 2 tasks | 28 files |
 | Phase 02 P13 | about 40 min plus owner checkpoints | 4 tasks | 8 files |
 | Phase 03 P01 | 62 min | 3 tasks | 52 files |
+| Phase 03 P02 | 47 min | 3 tasks | 26 files |
 
 ## Accumulated Context
 
@@ -237,6 +238,11 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-01: one policy admin's SSHSIG under keyroster/revoke-request/v1 authorizes a revocation whatever admin_quorum says (fail-safe direction); the signer refuses to publish a KRL while the bundle in force has no installation ID (krl_no_installation_id)
 - [Phase 03]: 03-01: keyroster-signer doctor (CheckTrust) now also refuses a KRL state the log does not record (krl_state_not_logged), matching serve
 - [Phase 03]: 03-01: STATE blocker 'unknown whether sshd re-reads RevokedKeys without a reload' resolved: it does; TestRevokeSerialEndToEnd swaps the KRL file with rename(2), no signal, same sshd PID, and sshd refuses the revoked certificate (run locally in WSL on 10.5p1 and 9.5p1; the CI e2e lanes run it on the 03-01 PR)
+- [Phase 03]: 03-02: keyroster login connects to and lists the ssh-agent right after planning, before the begin, on every OS; the one connection is held for the add, and the agent lifetime is computed immediately before the add (E-IN-01, E-IN-02)
+- [Phase 03]: 03-02: the login redeem re-reads the clock after currentStatus and refuses a code past its expiry or past CreatedAt + 295 s before RedeemLogin; the signer context's wall-clock deadline is the time left to that limit on the server clock (C-IN-01)
+- [Phase 03]: 03-02: every internal/server mux is built with newRouteMux, which records its patterns; a new sign-in or session keyword route needs a passkeyRoutes entry in TestNoNonPasskeySignInRoute (03-07's agent mux included)
+- [Phase 03]: 03-02: export lines of directory_install carry the directory and sigs in decoded (unverified); signer-install.md restore step 3 replays lost versions from them with keyroster directory install, and the post-replay export is the next --previous baseline
+- [Phase 03]: 03-02: plan-drift todo closed with the note option (Phase 2 plans unedited); the live main-integrity ruleset equals .github/rulesets/main-integrity.json, 19 checks with cli-windows, checked 2026-10-25
 
 ### Pending Todos
 
@@ -246,18 +252,10 @@ Recent decisions affecting current work:
 - [2026-10-20] [server] Cap keyroster-server connections and memory (minor, Phase 6) — [todo file](.planning/todos/pending/2026-10-20-cap-server-connections-and-memory.md) — found in the 02-07 pre-merge review: no listener connection cap, idle HTTP/1.1 and h2 connections and h2 receive windows; options listed.
 - [2026-10-21] [auth] The CLI verifies signer-signed receipts for directory installs (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-21-cli-verifies-directory-install-receipts.md) — found in the 02-09 pre-merge review: a compromised server can answer an install (even a disable) as done without forwarding it; owner decision F1: honest wording and a signer-host check now, a signed checkpoint plus inclusion proof and high-water marks in Phase 4.
 - [2026-10-21] [auth] Recover the directory after an admin-set or quorum change (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-21-recover-directory-after-admin-set-change.md) — found in the 02-09 pre-merge review: once a successor policy changes the admins or quorum, every CLI directory command refuses the old base, so no command can install the re-signed directory the signer waits for; owner decision F3; options: verify against the previous policy, the audit log's PolicyVersion, a re-sign command, a signer-local break-glass install.
-- [2026-10-23] [docs] The signer restore runbook replays lost directory versions with directory install (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-restore-runbook-replays-lost-directory-versions.md) — review A-IN-01.
 - [2026-10-23] [auth] The directory install pending check covers re-keyed and moved credentials (minor, Phase 4) — [todo file](.planning/todos/pending/2026-10-23-pending-check-covers-rekeyed-credentials.md) — review B-IN-01.
 - [2026-10-23] [server] Show the software-custody banner on error, 404 and 429 pages (minor, Phase 4) — [todo file](.planning/todos/pending/2026-10-23-custody-banner-on-error-pages.md) — review B-IN-02.
-- [2026-10-23] [server] A redeemed login code always reaches the signer inside its 300 s window (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-login-redeem-fits-the-signer-window.md) — review C-IN-01.
-- [2026-10-23] [cli] keyroster login checks the ssh-agent before the certificate is issued (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-cli-checks-the-agent-before-issuance.md) — review E-IN-01.
-- [2026-10-23] [cli] Recompute the agent lifetime immediately before the add (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-recompute-agent-lifetime-before-add.md) — review E-IN-02; not seen at 5 s resolution in the timed Windows run.
 - [2026-10-23] [docs] The runbooks say that disabling a user does not end certificates already issued (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-runbooks-say-disable-does-not-end-issued-certificates.md) — review F-IN-01.
 - [2026-10-23] [auth] The CLI takes software custody from the root-signed bundle, not only the server header (minor, Phase 4) — [todo file](.planning/todos/pending/2026-10-23-cli-custody-banner-from-the-root-signed-bundle.md) — review F-IN-02.
-- [2026-10-23] [test] A negative test proves there is no non-passkey sign-in route (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-negative-test-no-non-passkey-sign-in-route.md) — owner decision 2026-10-23 (02-10 prohibition).
-- [2026-10-23] [test] A negative test proves keyroster login never writes the ephemeral key to disk (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-negative-test-login-never-writes-the-key-to-disk.md) — owner decision 2026-10-23 (02-12 prohibition, disk half).
-- [2026-10-23] [planning] Correct the 02-13 and 02-14 plan text that drifted from what was executed (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-correct-02-13-and-02-14-plan-text-drift.md) — anchor 3 and cli-windows; editing the plans stales the phase 2 verification.
-- [2026-10-23] [docs] Record the timed Windows expiry run in needs-hardware.md (minor, Phase 3) — [todo file](.planning/todos/pending/2026-10-23-record-the-timed-windows-expiry-in-needs-hardware.md) — the doc still says the listing times were not recorded.
 
 ### Blockers/Concerns
 
@@ -284,6 +282,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-24T19:53:46.724Z
-Stopped at: 03-01 executed; PR open at the Task 4 merge gate
+Last session: 2026-10-25T06:35:03.090Z
+Stopped at: 03-02 executed; PR open at the Task 4 merge gate
 Resume file: None

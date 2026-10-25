@@ -160,14 +160,14 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 1/16 plans executed in 15 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 2/16 plans executed in 15 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
 - [x] 03-01-PLAN.md — Phase tracer: D-04 installation ID checkpoint, then `keyroster revoke serial` → signer revoke + krl_publish → own KRL encoder with an ops-signed, installation-bound manifest → real sshd refuses after a swap with no reload
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 03-02-PLAN.md — Phase 2 follow-ups (agent check before issuance, lifetime at Add, redeem window), the two negative tests, three doc fixes, and the owner-approved rewording of AGENT-01, REVOKE-01 and PLAT-01
+- [x] 03-02-PLAN.md — Phase 2 follow-ups (agent check before issuance, lifetime at Add, redeem window), the two negative tests, three doc fixes, and the owner-approved rewording of AGENT-01, REVOKE-01 and PLAT-01
 - [ ] 03-03-PLAN.md — KRL complete: strict parser, oracle both directions, fuzzing, revoke by key ID, key and user (D-09), hourly re-publish (D-10), safe pruning, audit verify rules
 
 **Wave 3** *(blocked on Wave 2 completion)*
@@ -277,7 +277,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 1/16 | In Progress | - |
+| 3. Linux Agent and Revocation | 2/16 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |
