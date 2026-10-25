@@ -384,9 +384,13 @@ Before starting the signer after a restore:
    later one. That is two exports of one live signer, not a restored
    database.
 
-   When it reports `log shrank`, verify the saved export itself, and that
-   the restored log is a prefix of it, before you read anything from the
-   saved export:
+   If it passes, the restored log extends the saved one: the restore took
+   back nothing that the saved export records, and there is nothing in it
+   to compare or replay.
+
+   If it fails, whatever it reports (`log shrank`, `log rewritten` or
+   another refusal), verify the saved export itself, and that the restored
+   log is a prefix of it, before you read anything from the saved export:
 
    ```
    keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
@@ -395,20 +399,26 @@ Before starting the signer after a restore:
      --previous /tmp/restored.jsonl /root/latest-saved.jsonl
    ```
 
-   Both must pass; if either fails, do not use the saved export to see or
-   replay what the restore lost. The command above does not do this: it
-   verifies the restored export and reads only the last checkpoint of the
-   saved one, and its `log shrank` looks the same for a log that was cut
-   back as for one that was cut back and rewritten. The first command
-   checks every entry of the saved export, including the decoded fields
-   that the `grep` commands below and in step 3 read (see "What makes the
-   replay safe" in step 3), so the counts, the list and the bytes they
-   give are the ones the signer logged. The second proves that the
-   restored log is a prefix of the saved one, so the lost entries are
-   exactly the saved export's entries after it.
+   Both must pass. If either fails, do not use the saved export at all:
+   not for the counts below, and not for step 3's list and proposals. Stop
+   there, keep the signer stopped, record both results in the operations
+   log, and escalate; this runbook does not cover that case. The second
+   command also fails when the restored signer logged entries after the
+   restore, for example because it auto-started before step 1 stopped it:
+   the restored log is then no prefix of the saved one, and its lost
+   entries cannot be told apart this way. The command above does not do
+   these checks: it verifies the restored export and reads only the last
+   checkpoint of the saved one, and what it reports looks the same for a
+   log that was cut back as for one that was cut back and rewritten. The
+   first command checks every entry of the saved export, including the
+   decoded fields that the `grep` commands below and in step 3 read (see
+   "What makes the replay safe" in step 3), so the counts, the list and
+   the bytes they give are the ones the signer logged. The second proves
+   that the restored log is a prefix of the saved one, so the lost entries
+   are exactly the saved export's entries after it.
 
-   Then compare the versions by hand, in both files, to see what the
-   restore took back:
+   Once both pass, compare the versions by hand, in both files, to see
+   what the restore took back:
 
    ```
    grep -o '"bundle_version":[0-9]*' /root/latest-saved.jsonl | tail -n 1

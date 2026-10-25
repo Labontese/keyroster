@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -57,10 +58,44 @@ var restoreRunbookChecks = []string{
 // restoreVerify is the first line of the runbook's audit verify commands.
 const restoreVerify = `keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \`
 
+// The order and the condition of step 2's verification of the saved
+// export (03-02 pre-merge review, round 3): it runs whenever step 2's
+// first command fails, whatever that reports, and before any grep reads
+// the saved export.
+const (
+	// restoreFirstCheck is the end of step 2's first command.
+	restoreFirstCheck = `--previous /root/latest-saved.jsonl /tmp/restored.jsonl`
+	// restoreSavedVerify is the two audit verify runs of the saved export.
+	restoreSavedVerify = restoreVerify + "\n/root/latest-saved.jsonl\n" +
+		restoreVerify + "\n--previous /tmp/restored.jsonl /root/latest-saved.jsonl"
+	// restoreSavedVerifyIf is the condition the runbook puts on them.
+	restoreSavedVerifyIf = "If it fails, whatever it reports (`log shrank`, `log rewritten` or another refusal), verify the saved export itself"
+	// restoreSavedStop is what to do when either fails.
+	restoreSavedStop = "Both must pass. If either fails, do not use the saved export at all"
+	// restoreShrankGate is the condition of 894a6c3, under which a saved
+	// export reported as rewritten was read unverified.
+	restoreShrankGate = "When it reports `log shrank`"
+)
+
+// restoreSavedGreps are the runbook's greps of the saved export: step 2's
+// bundle version and directory install count, step 3's list and step 3's
+// extraction. restoreSavedGrep finds any grep of it.
+var (
+	restoreSavedGreps = []string{
+		`grep -o '"bundle_version":[0-9]*' /root/latest-saved.jsonl | tail -n 1`,
+		`grep -c '"kind":"directory_install"' /root/latest-saved.jsonl`,
+		`grep -n -o '"kind":"\(bundle\|directory\)_install"' /root/latest-saved.jsonl`,
+		`grep '"kind":"directory_install"' "$SAVED"`,
+	}
+	restoreSavedGrep = regexp.MustCompile(`grep (?:-[a-zA-Z]+ )*'[^']*' (?:/root/latest-saved\.jsonl|"\$SAVED")`)
+)
+
 // TestRestoreRunbookChecks: signer-install.md still has every instruction
 // of restoreRunbookChecks. The runbook and each check are compared with
 // every line's leading and trailing space trimmed; a check of more than
-// one line must be whole lines of the runbook.
+// one line must be whole lines of the runbook. Step 2's verification of
+// the saved export must also be unconditional on what the first command
+// reports and come before every grep of the saved export (round 3).
 func TestRestoreRunbookChecks(t *testing.T) {
 	trim := func(s string) string {
 		l := strings.Split(s, "\n")
@@ -77,6 +112,47 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		}
 		if !strings.Contains(runbook, want) {
 			t.Errorf("signer-install.md no longer has %q, which TestRestoreReplaysLostDirectory carries out", c)
+		}
+	}
+
+	// The order, on the runbook's restore section with its white space
+	// collapsed, so that a sentence may wrap anywhere.
+	squash := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	section := runbook
+	if i := strings.Index(section, "### A restore brings back the older trust bundle"); i >= 0 {
+		section = section[i:]
+	} else {
+		t.Fatal("signer-install.md has no section \"A restore brings back the older trust bundle\"")
+	}
+	section = squash(section)
+	if strings.Contains(section, squash(restoreShrankGate)) {
+		t.Errorf("signer-install.md verifies the saved export only %q; a log reported as rewritten is then read unverified", restoreShrankGate)
+	}
+	pos := func(what, s string) int {
+		i := strings.Index(section, squash(s))
+		if i < 0 {
+			t.Fatalf("signer-install.md has no %s: %q", what, s)
+		}
+		return i
+	}
+	first := pos("step 2 first command", restoreFirstCheck)
+	cond := pos("unconditional verification of the saved export", restoreSavedVerifyIf)
+	block := pos("verification of the saved export", restoreSavedVerify)
+	stop := pos("rule for a saved export that does not verify", restoreSavedStop)
+	if first >= cond || cond >= block || block >= stop {
+		t.Errorf("signer-install.md step 2 is out of order: first command at %d, %q at %d, the saved export's audit verify runs at %d, %q at %d",
+			first, restoreSavedVerifyIf, cond, block, restoreSavedStop, stop)
+	}
+	for _, g := range restoreSavedGreps {
+		pos("grep of the saved export", g)
+	}
+	greps := restoreSavedGrep.FindAllStringIndex(section, -1)
+	if len(greps) < len(restoreSavedGreps) {
+		t.Errorf("found %d greps of the saved export, want at least %d", len(greps), len(restoreSavedGreps))
+	}
+	for _, g := range greps {
+		if g[0] < stop {
+			t.Errorf("signer-install.md greps the saved export (%q) before it is verified", section[g[0]:g[1]])
 		}
 	}
 }
