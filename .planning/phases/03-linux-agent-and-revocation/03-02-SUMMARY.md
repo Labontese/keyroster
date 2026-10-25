@@ -366,6 +366,62 @@ None.
   - needs-hardware.md has "3.9 s" and "1.1 s".
   - The diff against origin/main for `.planning/phases/02-passkey-login-mvp/` is empty.
 
+## Pre-merge review fixes
+
+PR #59 review, on head 0db3f9c. Each test marked **(fails before)** was run against the code before its fix and failed: either the fix was reverted, or the new check was temporarily disabled, and the code was restored afterwards. Adjusted fixtures and the e2e additions are listed apart from those tests; none of the e2e additions has been run.
+
+**Fixed**
+
+- **The login preflight passed a locked agent, or one that refuses the lifetime constraint** (medium). Fixed in `448abd6`.
+  - Before the begin, `probeLoginAgent` adds a throwaway Ed25519 key with a 30 s lifetime constraint, then removes it. If either step fails, the login stops with "(it is locked, or refuses such keys), so no login was started".
+  - The add error after the redeem no longer blames only the constraint.
+  - Tests:
+    - `locked_agent_no_begin` (new; `agent.NewKeyring` locked) **(fails before)**: with the probe disabled, the login goes on to the browser wait and times out after 60 s.
+    - `constrained_add_refused_no_retry`, which now requires `requireCalls(0,0)` and one constrained probe **(fails before)**, the same way.
+    - `probe_key_removed` (new) **(fails before)**: with the Remove skipped, it fails with "the preflight's test key is still in the agent".
+  - Adjusted fixture: `agent_lost_after_preflight`'s fake agent now answers the probe's add and remove too, and the expected error text follows the reworded message.
+  - The E-IN-01 residual above is now only the agent being lost, locked or stopped between the probe and the add.
+- **The redeem's signer deadline drifted by the time RedeemLogin took** (medium; this and the Codex finding "Anchor the redeem deadline before the database write" are one bug). Fixed in `d93e442`.
+  - The time left to CreatedAt + 295 s is turned into a wall-clock instant right after the second clock check.
+  - RedeemLogin and the signer call both run under that instant. A burn still waiting when it passes is abandoned unburnt and logged as `expired`.
+  - Tests use a second connection that holds `BEGIN IMMEDIATE`:
+    - `database_wait_counts_against_deadline` **(fails before)**: with a 2 s lock, the signer gets about 5 s, not 7 s. The old code gave "7s left".
+    - `database_wait_past_deadline_not_burnt` **(fails before)**: with a 3 s lock against 2 s left, the code stays approved and the signer is not called. The old code answered 200.
+  - On modernc, the cancelled UPDATE is abandoned once the lock is free, not at the deadline itself. The test comment says so.
+- **The restore replay installed bytes nobody verified, and the runbook said step 2 had verified them** (medium; this and the Codex finding "Extract restore proposals from authenticated leaf bytes" are one bug). Fixed in `c1767bd`, then narrowed in `649408d`.
+  - `c1767bd` compared the whole line with what Export writes. That froze `Decode`'s output: any field a later binary added would make every saved export since 03-02 fail. `649408d` replaced it with `checkReplayFields`.
+  - `checkReplayFields` refuses a line whose text carries a `"directory":` or `"sigs":` key unless all three hold: the line is a directory_install line, each key occurs exactly once, and each value is the standard base64 of the leaf's own document or signatures. The other decoded fields stay informational.
+  - Lines without these keys, as in exports from before 03-02, are not checked.
+  - This corrects the threat-flag row above: the runbook no longer calls the `directory` and `sigs` fields unverified.
+  - Runbook step 3, first item:
+    - Run `audit verify` on the saved export itself.
+    - Run `audit verify --previous /tmp/restored.jsonl /root/latest-saved.jsonl` to prove the restored log is a prefix of the saved one.
+    - The false "step 2 does this" sentence is gone.
+    - The extraction adds `test -s` for both files.
+    - The residual paragraph now names the remaining case: a saved export written by someone who holds the log key.
+  - Tests: `TestVerifyReplayFields` **(fails before)**. With the check disabled, five cases fail: swapped directory, swapped sigs, missing sigs, a nested decoy, and a decoy on another kind. `other_decoded_field_ok` and `pre_03_02_line_ok` pass with the check on.
+  - e2e addition, not run (no Linux e2e environment here; it compiles under `go vet -tags e2e` for windows and linux): `TestRestoreReplaysLostDirectory` now exports the restored log while the signer is stopped, requires `--previous restored saved` to pass, and runs the `test -s` lines.
+- **The post-replay baseline was not anchored to the restored export** (low, split verdict; real, since an available anchor went unused). Fixed in `0c8dd46`, docs. `b6068a4` adds the export command for the file those checks name, `/tmp/after-replay.jsonl`, which no step wrote before.
+  - Before the new export becomes the baseline, it must also pass `audit verify --previous /tmp/restored.jsonl /tmp/after-replay.jsonl`. Keep `/tmp/restored.jsonl` with the record of the restore.
+  - e2e addition, not run: `TestRestoreReplaysLostDirectory` asserts the same check.
+- **`TestNoNonPasskeySignInRoute` missed a sign-in route that matches no keyword** (low, split verdict; a cheap test-only fix). Fixed in `92a5665`.
+  - New subtest `every_route_reviewed`: every recorded pattern must be in `passkeyRoutes` or the new `otherRoutes`, each entry with its reason, and stale entries fail.
+  - **(fails before)**: the mutant `GET /auth/email/{token}` in server.go made it fail. The mutant was then removed.
+  - For later plans: every new server route must now be added to `otherRoutes` (or `passkeyRoutes`) with its reason, or this test fails. 03-10's `POST /api/v1/agent/probecert` is one such route, and so is any agent route of 03-07 that is recorded in the same list.
+
+**Skipped**
+
+- **The short signer deadline also limits reading the reply** (low, split verdict). No code change. The plan's must_have puts the deadline on the signer call. Giving the send and the read separate deadlines changes `signerclient`'s contract, so it is the owner's decision.
+  - What `d93e442` did instead: a comment at the signer call records this as the accepted lost-answer case (T-02-108, not retried).
+  - The 03-02 fixes make the case more likely. The signer's time can now drop below 5 s when the second check or the burn falls late in the window.
+  - Options for the owner:
+    - (a) Add a `signerclient` variant that applies the CreatedAt + 295 s deadline to the dial and the write, and `signerCallTimeout` to the read. This closes the gap; it costs one more client entry point.
+    - (b) Keep it as it is, as a documented residual.
+
+**Checks run:** `gofmt -l` (empty), `go vet ./...` (with `GOOS=linux` and `GOOS=darwin` too), `go vet -tags e2e ./test/e2e` (windows and linux), `go test -count=1` on every package touched, and `go test ./...` once. All passed on Windows.
+- The Unix-only tests (`login_unix_test.go`, the real ssh-agent `happy_path`) were only compiled, through the GOOS vets; they were not run.
+- `-race` was not run, because there is no cgo toolchain.
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-25*
