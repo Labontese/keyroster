@@ -313,10 +313,10 @@ serial (research Pitfall 9). A VM restored from a snapshot starts with the
 snapshot's clock until NTP corrects it, and its database holds the
 snapshot's high-water mark.
 
-**Before starting a restored signer, check the clock:**
+**Before starting a restored signer, check the clock.** The restore
+procedure below holds the signer stopped until then:
 
 ```
-systemctl stop keyroster-signer.service      # if it auto-started
 timedatectl                                  # "System clock synchronized: yes"
 runuser -u keyroster-signer -g keyroster-signer -G tss -- \
   keyroster-signer doctor --state-dir /var/lib/keyroster-signer
@@ -354,10 +354,121 @@ it: keep each export, and verify the next one with
 
 Before starting the signer after a restore:
 
-1. Keep the service stopped, and export the restored log:
+**Hold the signer and keyroster-server first.** A restored signer that
+logs anything before step 1 exports its log (a request that reaches it,
+or the refusal summary it writes when it stops after refusing one) forks
+the log, and step 2 then ends the procedure. So hold both units with a
+drop-in that makes every start fail: on a file restore before the
+restored `signer.db` is copied in, on a VM restore at the console right
+after the first boot (below). As root:
+
+```
+bash -eu -s keyroster-server keyroster-signer <<'EOF'
+test "$#" -gt 0
+for u in "$@"; do
+  install -d -m 0755 "/etc/systemd/system/$u.service.d"
+  printf '[Unit]\nAssertPathExists=/nonexistent-restore-hold\n' >"/etc/systemd/system/$u.service.d/restore-hold.conf"
+done
+systemctl daemon-reload
+for u in "$@"; do
+  systemctl stop "$u.service"
+done
+for u in "$@"; do
+  test "$(systemctl show -p LoadState --value "$u.service")" = loaded
+  systemctl show -p DropInPaths --value "$u.service" | grep -q "/$u.service.d/restore-hold.conf"
+  if systemctl start "$u.service"; then
+    systemctl stop "$u.service"
+    echo "$u.service started: the hold is NOT in force" >&2
+    exit 1
+  fi
+done
+echo "held: $*"
+EOF
+```
+
+Leave out `keyroster-server` where it is not installed. The drop-in
+asserts a path that never exists, so every start of the unit fails
+loudly, a start that keyroster-server's `Wants=` asks for included: each
+`systemctl start` above prints `Assertion failed on job for ...`, which
+is the hold working. (A `Condition` would skip the start silently;
+`systemctl mask` does not work, because the units are files in
+`/etc/systemd/system`.) The block writes both drop-ins and reloads
+systemd before it stops the units, so neither can start again in
+between. Only the last line's `held:` means the hold is in force. Keep it
+until the end of step 2.
+
+**Keep users away until the replay is done.** From the moment the
+restored signer starts again until the last lost version is back (step
+3), it serves the restored, older directory: a user disabled in a lost
+version can log in again, and a role removed in a lost version grants
+again. Keep keyroster-server unreachable to users for that time, for
+example with a firewall rule that admits only the admin workstation; set
+it before you release the hold, and on a VM restore before the network
+link comes up. The admin's `keyroster directory install` goes through the
+server, so stopping it is not an option. (UNVERIFIED: no test blocks user
+access.)
+
+**From a file backup of `signer.db`:** with the hold in force, replace
+`signer.db` and its `-wal` and `-shm` files together with those in the
+backup directory `<backup>` (an absolute path). Files the backup does not
+have are removed, or SQLite would replay the newer WAL onto the older
+file:
+
+```
+bash -eu -s <backup> <<'EOF'
+S=/var/lib/keyroster-signer
+test -e /etc/systemd/system/keyroster-signer.service.d/restore-hold.conf
+if systemctl is-active --quiet keyroster-signer.service; then
+  echo "keyroster-signer.service is running: hold it first" >&2
+  exit 1
+fi
+test -s "$1/signer.db"
+rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
+for f in signer.db signer.db-wal signer.db-shm; do
+  if [ -e "$1/$f" ]; then
+    install -o keyroster-signer -g keyroster-signer -m 0600 "$1/$f" "$S/$f"
+  fi
+done
+echo "restored signer.db from $1"
+EOF
+```
+
+**From a disk-only VM snapshot (Proxmox)** (UNVERIFIED: no step of this
+paragraph has run): the signer and keyroster-server start at the first
+boot after the rollback, before you can hold them. Keep every request
+away from them until they are held:
+
+- Tell every local admin (each `keyroster-admin` account on the signer
+  VM) to stand down until the restore is done: the signer socket is
+  local, so their requests reach it with the network cut.
+- Roll back the snapshot (`qm rollback <id> <snapshot>`; it also restores
+  the VM's configuration of that time). Before the first boot, cut every
+  network device at the hypervisor: list them with `qm config <id> | grep
+  '^net'` and set each again with `,link_down=1` added and its other
+  options kept, for example `qm set <id> --net0 '<net0 value>,link_down=1'`.
+- Boot (`qm start <id>`), log in at the console (the VM's Console in the
+  Proxmox web UI), run the hold block above, and set the firewall rule.
+- Run steps 1 and 2 under the hold. Then bring the link up again (`qm set
+  <id> --net0 '<net0 value>'`, without `link_down`): the clock check
+  needs NTP. If you need the network earlier, to copy the saved export in
+  or the restored export out, bring it up after the hold reports `held:`;
+  from then on the hold, not the cut link, keeps requests from the
+  signer.
+- Check the clock and release the hold at the end of step 2.
+
+**A VM snapshot with RAM is not supported for the signer VM.** The
+signer process resumes from the snapshot's memory and can log entries
+(for example a refusal summary it was holding) before you can hold it.
+Do not restore one; escalate. Take disk-only snapshots of the signer VM.
+
+If the signer logged entries after the restore anyway, step 2 shows the
+fork and you stop and escalate: that stays the rule whenever step 2
+detects a fork. Phase 4's witnessed checkpoint removes the problem
+structurally (see the warning above).
+
+1. With the hold in force, export the restored log:
 
    ```
-   systemctl stop keyroster-signer.service      # if it auto-started
    runuser -u keyroster-signer -g keyroster-signer -G tss -- \
      keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/restored.jsonl
    ```
@@ -372,7 +483,7 @@ Before starting the signer after a restore:
    It must pass. If it fails, do not compare it with anything and read
    nothing from it: stop there, keep the signer stopped, record the result
    in the operations log, and escalate; this runbook does not cover that
-   case. The comparisons and the `grep` commands below read the restored
+   case. Keep the hold in force. The comparisons and the `grep` commands below read the restored
    export's fields as well as the saved export's, and only this command
    checks every entry of the restored export.
 
@@ -428,9 +539,9 @@ Before starting the signer after a restore:
    there, keep the signer stopped, record both results in the operations
    log, and escalate; this runbook does not cover that case. The second
    command also fails when the restored signer logged entries after the
-   restore, for example because it auto-started before step 1 stopped it:
-   the restored log is then no prefix of the saved one, and its lost
-   entries cannot be told apart this way. The command above does not do
+   restore, which the hold is there to prevent: the restored log is then
+   no prefix of the saved one, and its lost entries cannot be told apart
+   this way. The command above does not do
    these checks: it verifies the restored export (which the standalone
    command above has already checked; `log shrank` and `log rewritten` are
    reported only after it did) and reads only the last checkpoint of the
@@ -459,20 +570,35 @@ Before starting the signer after a restore:
    numbers are lower, the restore reinstated an older bundle or directory.
    `doctor` also prints the restored bundle version (`OK bundle`).
 
+   **Release the hold** when step 2 passed: after the first comparison
+   passed, or after both checks of the saved export passed and you
+   compared the versions. Check the clock first (see [Snapshot restore:
+   check the clock first](#snapshot-restore-check-the-clock-first); on a
+   VM restore with the link up), make sure the firewall rule keeps users
+   away, and then, as root:
+
+   ```
+   bash -eu -s keyroster-server keyroster-signer <<'EOF'
+   test "$#" -gt 0
+   for u in "$@"; do
+     rm "/etc/systemd/system/$u.service.d/restore-hold.conf"
+   done
+   systemctl daemon-reload
+   echo "released: $*"
+   EOF
+   systemctl start keyroster-signer.service keyroster-server.service
+   ```
+
+   Name the same units as for the hold.
+
 3. Reinstall what the restore lost, with the same bytes as before and
    before anyone installs anything new. Install the exact versions that
    were lost: a different version 2 built on the restored version 1 is
    accepted too, and the disablements of the lost version are then gone
    for good.
 
-   **Keep users away until the replay is done.** From the moment the
-   restored signer starts until the last lost version is back, it serves
-   the restored, older directory: a user disabled in a lost version can log
-   in again, and a role removed in a lost version grants again. Keep
-   keyroster-server unreachable to users for that time, for example with a
-   firewall rule that admits only the admin workstation; the admin's
-   `keyroster directory install` goes through the server, so stopping it is
-   not an option. (UNVERIFIED: no test blocks user access.)
+   Keep users away until the last lost version is back (the firewall
+   rule set before step 1).
 
    **Replay the lost installs in log order**, not all bundles first. A
    directory version is checked against the policy in force when it is
@@ -625,15 +751,26 @@ Before starting the signer after a restore:
 > and with `--previous` set to the restored export, and `audit verify
 > --previous` refusing it against the pre-restore export.
 >
+> **Run in CI (`systemd-sandbox`, `test/systemd/smoke.sh`, 03-02)** with
+> the repository's units on an Ubuntu 24.04 runner: the hold block above
+> verbatim for keyroster-server and keyroster-signer, each start then
+> refused with `Assertion failed on job for ...`; the file restore block
+> verbatim, from a copy of the signer's database taken under the hold;
+> the release block verbatim; and the signer starting again with
+> `doctor` passing. No keyroster-server runs in that check: its unit is
+> held and its start refused, never started.
+>
 > **UNVERIFIED:** a VM snapshot restore, the replay of a lost
 > `bundle_install`, a lost version that binds a passkey and the re-invite
-> after it, the `install -o <admin>` copy of step 3 to a real admin
+> after it (the Proxmox steps, `link_down` and the console hold among
+> them), the `install -o <admin>` copy of step 3 to a real admin
 > account, keeping users away from the server, the version counts of
 > step 2 against a real restored signer, the stop in step 2 for a
 > restored export that does not verify on its own (the refusals
 > themselves are run in the audit unit tests), and step 2 when the saved
 > export's prefix check fails and the procedure stops, for example for a
-> restored signer that logged K entries after the restore and had lost L > 0:
+> restored signer that logged K entries after the restore despite the
+> hold and had lost L > 0:
 > step 2's first command then reports `log shrank` when K < L and `log
 > rewritten` otherwise, and the prefix check `log rewritten` when K <= L
 > and `log shrank` when K > L. The `grep` patterns of step 2 match

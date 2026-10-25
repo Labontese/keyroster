@@ -127,6 +127,70 @@ const (
 	restoreShrankGate = "When it reports `log shrank`"
 )
 
+// The restore hold (owner decision 2026-10-25, PR #59 review round 4): a
+// drop-in that makes every start of keyroster-signer and keyroster-server
+// fail, written before the restored signer.db is copied in and before
+// step 1, and removed at the end of step 2, before step 3 starts the
+// signer. The hold, file restore and release blocks are the runbook's and
+// test/systemd/smoke.sh's (the systemd-sandbox CI job runs them on the
+// repository's units); TestRestoreRunbookChecks requires each in both.
+const (
+	restoreHoldUnits = "bash -eu -s keyroster-server keyroster-signer <<'EOF'\n"
+	restoreHoldBlock = restoreHoldUnits +
+		`test "$#" -gt 0
+for u in "$@"; do
+  install -d -m 0755 "/etc/systemd/system/$u.service.d"
+  printf '[Unit]\nAssertPathExists=/nonexistent-restore-hold\n' >"/etc/systemd/system/$u.service.d/restore-hold.conf"
+done
+systemctl daemon-reload
+for u in "$@"; do
+  systemctl stop "$u.service"
+done
+for u in "$@"; do
+  test "$(systemctl show -p LoadState --value "$u.service")" = loaded
+  systemctl show -p DropInPaths --value "$u.service" | grep -q "/$u.service.d/restore-hold.conf"
+  if systemctl start "$u.service"; then
+    systemctl stop "$u.service"
+    echo "$u.service started: the hold is NOT in force" >&2
+    exit 1
+  fi
+done
+echo "held: $*"
+EOF`
+	// restoreFilesScript is the file restore after its heredoc line, which
+	// names the backup directory (<backup> in the runbook).
+	restoreFilesScript = `S=/var/lib/keyroster-signer
+test -e /etc/systemd/system/keyroster-signer.service.d/restore-hold.conf
+if systemctl is-active --quiet keyroster-signer.service; then
+  echo "keyroster-signer.service is running: hold it first" >&2
+  exit 1
+fi
+test -s "$1/signer.db"
+rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
+for f in signer.db signer.db-wal signer.db-shm; do
+  if [ -e "$1/$f" ]; then
+    install -o keyroster-signer -g keyroster-signer -m 0600 "$1/$f" "$S/$f"
+  fi
+done
+echo "restored signer.db from $1"
+EOF`
+	restoreReleaseBlock = restoreHoldUnits +
+		`test "$#" -gt 0
+for u in "$@"; do
+  rm "/etc/systemd/system/$u.service.d/restore-hold.conf"
+done
+systemctl daemon-reload
+echo "released: $*"
+EOF`
+	// restoreStep1 and restoreStep3 open the runbook's steps 1 and 3.
+	restoreStep1 = "1. With the hold in force, export the restored log:"
+	restoreStep3 = "3. Reinstall what the restore lost"
+	// restoreVMLinkDown and restoreVMRAM are the disk-only VM restore's
+	// network cut and the rule for a snapshot with RAM, both before step 1.
+	restoreVMLinkDown = "qm set <id> --net0 '<net0 value>,link_down=1'"
+	restoreVMRAM      = "A VM snapshot with RAM is not supported for the signer VM."
+)
+
 // restoreSavedGreps are the runbook's greps of the saved export: step 2's
 // bundle version and directory install count, step 3's list and step 3's
 // extraction. restoreSavedGrep finds any grep of it.
@@ -171,6 +235,23 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		}
 	}
 
+	// The hold, file restore and release blocks, whole lines, in the
+	// runbook and in the systemd-sandbox smoke test that runs them.
+	smoke := "\n" + trim(string(readFile(t, filepath.Join("..", "systemd", "smoke.sh")))) + "\n"
+	for _, b := range []struct{ name, text string }{
+		{"restore hold", restoreHoldBlock},
+		{"file restore", restoreFilesScript},
+		{"release of the restore hold", restoreReleaseBlock},
+	} {
+		want := "\n" + trim(b.text) + "\n"
+		if !strings.Contains(runbook, want) {
+			t.Errorf("signer-install.md no longer has the %s block:\n%s", b.name, b.text)
+		}
+		if !strings.Contains(smoke, want) {
+			t.Errorf("test/systemd/smoke.sh no longer runs the runbook's %s block:\n%s", b.name, b.text)
+		}
+	}
+
 	if strings.Contains(runbook, restoreRootInstall) {
 		t.Errorf("signer-install.md has an admin run %q, which no admin account can read", restoreRootInstall)
 	}
@@ -208,6 +289,23 @@ func TestRestoreRunbookChecks(t *testing.T) {
 	if first >= cond || cond >= block || block >= stop {
 		t.Errorf("signer-install.md step 2 is out of order: first command at %d, %q at %d, the saved export's audit verify runs at %d, %q at %d",
 			first, restoreSavedVerifyIf, cond, block, restoreSavedStop, stop)
+	}
+	// The hold comes before the file restore and before step 1, and is
+	// released after step 2's checks and before step 3.
+	hold := pos("restore hold", restoreHoldBlock)
+	files := pos("file restore", restoreFilesScript)
+	linkDown := pos("network cut of a VM restore", restoreVMLinkDown)
+	ram := pos("rule for a VM snapshot with RAM", restoreVMRAM)
+	step1 := pos("step 1", restoreStep1)
+	release := pos("release of the restore hold", restoreReleaseBlock)
+	step3 := pos("step 3", restoreStep3)
+	if hold >= files || files >= step1 || linkDown >= step1 || ram >= step1 {
+		t.Errorf("signer-install.md does not hold the units before the restore: hold at %d, file restore at %d, VM link_down at %d, RAM rule at %d, step 1 at %d",
+			hold, files, linkDown, ram, step1)
+	}
+	if release <= stop || release >= step3 {
+		t.Errorf("signer-install.md does not release the hold between step 2's checks and step 3: checks end at %d, release at %d, step 3 at %d",
+			stop, release, step3)
 	}
 	for _, g := range restoreSavedGreps {
 		pos("grep of the saved export", g)

@@ -29,7 +29,10 @@
 #     systemd reports its sandbox settings (MemoryDenyWriteExecute,
 #     localhost-only IP, address families);
 #   - systemd-analyze security rates the signer unit at or below THRESHOLD
-#     and the agent unit at or below AGENT_THRESHOLD (exposure x10; 20 = 2.0).
+#     and the agent unit at or below AGENT_THRESHOLD (exposure x10; 20 = 2.0);
+#   - signer-install.md's restore hold refuses every start of the signer and
+#     server units, its file restore puts signer.db back as keyroster-signer
+#     0600, and after its release the signer starts and doctor passes.
 #
 # The TPM drop-in is not installed here: the runner has no TPM, and its
 # SupplementaryGroups=tss needs the tss group. The TPM path under systemd is
@@ -308,5 +311,81 @@ systemd-analyze security --no-pager --threshold="$AGENT_THRESHOLD" keyroster-sig
 
 step "systemd-analyze security, signer unit (threshold $THRESHOLD = exposure $((THRESHOLD / 10)).$((THRESHOLD % 10)))"
 systemd-analyze security --no-pager --threshold="$THRESHOLD" keyroster-signer.service
+
+step "Restore hold, file restore and release (docs/runbooks/signer-install.md, verbatim)"
+# The three blocks below are the runbook's, as TestRestoreRunbookChecks
+# (test/e2e/restore_test.go) requires. keyroster-server's unit is installed
+# only to be held: no server runs here.
+install -m 0644 "$repo/deploy/systemd/keyroster-server.service" /etc/systemd/system/
+systemctl daemon-reload
+bash -eu -s keyroster-server keyroster-signer <<'EOF'
+test "$#" -gt 0
+for u in "$@"; do
+  install -d -m 0755 "/etc/systemd/system/$u.service.d"
+  printf '[Unit]\nAssertPathExists=/nonexistent-restore-hold\n' >"/etc/systemd/system/$u.service.d/restore-hold.conf"
+done
+systemctl daemon-reload
+for u in "$@"; do
+  systemctl stop "$u.service"
+done
+for u in "$@"; do
+  test "$(systemctl show -p LoadState --value "$u.service")" = loaded
+  systemctl show -p DropInPaths --value "$u.service" | grep -q "/$u.service.d/restore-hold.conf"
+  if systemctl start "$u.service"; then
+    systemctl stop "$u.service"
+    echo "$u.service started: the hold is NOT in force" >&2
+    exit 1
+  fi
+done
+echo "held: $*"
+EOF
+# The refusal is the assertion, not another failure.
+for u in keyroster-server keyroster-signer; do
+	if systemctl start "$u.service" 2>"$work/hold-$u.log"; then
+		fail "$u.service started under the hold"
+	fi
+	cat "$work/hold-$u.log"
+	grep -q "Assertion failed on job for $u.service" "$work/hold-$u.log" || fail "$u.service was refused for another reason than the hold"
+done
+systemctl is-active --quiet keyroster-signer.service && fail "keyroster-signer.service is active under the hold"
+backup=$work/signer-backup
+install -d -m 0700 "$backup"
+for f in signer.db signer.db-wal signer.db-shm; do
+	[ ! -e "$STATE/$f" ] || cp -p "$STATE/$f" "$backup/$f"
+done
+ls -l "$backup"
+bash -eu -s "$backup" <<'EOF'
+S=/var/lib/keyroster-signer
+test -e /etc/systemd/system/keyroster-signer.service.d/restore-hold.conf
+if systemctl is-active --quiet keyroster-signer.service; then
+  echo "keyroster-signer.service is running: hold it first" >&2
+  exit 1
+fi
+test -s "$1/signer.db"
+rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
+for f in signer.db signer.db-wal signer.db-shm; do
+  if [ -e "$1/$f" ]; then
+    install -o keyroster-signer -g keyroster-signer -m 0600 "$1/$f" "$S/$f"
+  fi
+done
+echo "restored signer.db from $1"
+EOF
+[ "$(stat -c '%a %U %G' "$STATE/signer.db")" = "600 keyroster-signer keyroster-signer" ] || fail "restored signer.db is $(stat -c '%a %U %G' "$STATE/signer.db")"
+bash -eu -s keyroster-server keyroster-signer <<'EOF'
+test "$#" -gt 0
+for u in "$@"; do
+  rm "/etc/systemd/system/$u.service.d/restore-hold.conf"
+done
+systemctl daemon-reload
+echo "released: $*"
+EOF
+systemctl start keyroster-signer.service
+wait_socket "$SIGNER_SOCK"
+systemctl is-active keyroster-signer.service
+as_signer keyroster-signer doctor --state-dir "$STATE" >"$work/doctor-restore.log" 2>&1 || {
+	cat "$work/doctor-restore.log"
+	fail "doctor failed after the restore"
+}
+cat "$work/doctor-restore.log"
 
 step "PASS"
