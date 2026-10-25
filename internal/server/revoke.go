@@ -24,8 +24,10 @@ const (
 
 	// krlTTL is how long a KRL read from the signer is served from the
 	// cache. A revocation through this server drops the entry before it
-	// answers (dropKRL); any other change, such as a signer restarted on
-	// another state database, is served at most krlTTL late.
+	// answers (dropKRL), unless the signer refused it as malformed or
+	// refused, which publishes nothing; any other change, such as a
+	// signer restarted on another state database, is served at most
+	// krlTTL late.
 	krlTTL = 5 * time.Second
 )
 
@@ -36,7 +38,8 @@ const (
 // the policy admin's SSHSIG and decides alone. A refusal is 400 for a
 // malformed request or a serial the signer does not know, 403 for every
 // other refusal, each with the signer's reason code, and 503 when the
-// signer could not decide.
+// signer could not decide. Every answer but those 400 and 403 refusals
+// drops the cached KRL, since the signer may have published.
 func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	var body serverclient.RevokeBody
 	dec := json.NewDecoder(r.Body)
@@ -70,6 +73,11 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 			case wire.CodeRefused:
 				s.writeJSON(w, v, http.StatusForbidden, serverclient.APIError{Error: refused.Message})
 			default:
+				// A malformed or refused request was decided before
+				// the transaction or rolled back inside it; any other
+				// answer (state_unavailable after a failed COMMIT
+				// that reached the disk, say) may follow a publish.
+				s.dropKRL()
 				s.signerUnavailable(w, false)
 			}
 			return

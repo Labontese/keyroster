@@ -213,6 +213,43 @@ func TestKRLCache(t *testing.T) {
 			t.Fatalf("GET krl after the revocation = %q after %d GetKRL calls, want v2 from a new call", got, e.fake.count("GetKRL"))
 		}
 	})
+	// A revocation the signer may have committed drops the entry too:
+	// an unavailable or internal refusal (state_unavailable after a failed
+	// COMMIT that reached the disk) and a call whose outcome is unknown.
+	// A malformed or refused request publishes nothing and keeps it.
+	t.Run("uncertain_outcome_drops_cache", func(t *testing.T) {
+		body, _ := revokeBody(t)
+		for _, tc := range []struct {
+			name string
+			err  error
+			code int
+			drop bool
+		}{
+			{"unavailable", &wire.ErrorResponse{Code: wire.CodeUnavailable, Message: "state_unavailable"}, http.StatusServiceUnavailable, true},
+			{"internal", &wire.ErrorResponse{Code: wire.CodeInternal, Message: "internal_error"}, http.StatusServiceUnavailable, true},
+			{"outcome_unknown", errors.New("connection reset"), http.StatusServiceUnavailable, true},
+			{"refused", &wire.ErrorResponse{Code: wire.CodeRefused, Message: "evidence_not_admin"}, http.StatusForbidden, false},
+			{"malformed", &wire.ErrorResponse{Code: wire.CodeMalformed, Message: "unknown_serial"}, http.StatusBadRequest, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				e := newAdminEnv(t, highLimits)
+				e.fake.setKRL(krlResp("v1"), nil)
+				getKRL(t, e)
+				e.fake.setRevoke(nil, tc.err)
+				e.fake.setKRL(krlResp("v2"), nil)
+				if res := serve(e.s.Handler(), signedReq(t, e.admin, http.MethodPost, serverclient.AdminRevokePath, serverclient.AdminRevokePath, body, e.clock.Now())); res.Code != tc.code {
+					t.Fatalf("POST revoke = %d %s, want %d", res.Code, res.Body, tc.code)
+				}
+				want, calls := "krl v1", 1
+				if tc.drop {
+					want, calls = "krl v2", 2
+				}
+				if got := getKRL(t, e); got != want || e.fake.count("GetKRL") != calls {
+					t.Fatalf("GET krl after the answer = %q after %d GetKRL calls, want %q after %d", got, e.fake.count("GetKRL"), want, calls)
+				}
+			})
+		}
+	})
 	t.Run("stale_after_ttl", func(t *testing.T) {
 		e := newAdminEnv(t, highLimits)
 		e.fake.setKRL(krlResp("v1"), nil)
