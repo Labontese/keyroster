@@ -122,7 +122,7 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 	if err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminRevokePath, serverclient.RevokeBody{Request: body}, &ans, s.signer); err != nil {
 		return revokeRefusal(err)
 	}
-	m, err := confirmRevokeAnswer(ctx, s.client, bundle, ans)
+	m, err := confirmRevokeAnswer(ctx, s.client, bundle, ans, req.CreatedAt)
 	if err != nil {
 		// The CLI's own advice stays out of an error that may carry a
 		// PeerError excerpt.
@@ -131,10 +131,12 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 	}
 	_, _ = fmt.Fprintf(stdout, "The server reports serial %d (%s) revoked: KRL v%d published (log entries %d, %d).\n",
 		serial, role, ans.KRLVersion, ans.RevokeLeaf, ans.PublishLeaf)
-	_, _ = fmt.Fprintf(stdout, "Checked: the server serves KRL v%d, signed by the ops key of your root-pinned trust bundle (log entry %d).\n"+
-		"Not checked: that this KRL lists serial %d (this version cannot read a KRL); "+
+	_, _ = fmt.Fprintf(stdout, "Checked: the server serves KRL v%d, signed by the ops key of your root-pinned trust bundle (log entry %d), "+
+		"issued at %s, at most %d s before this request.\n"+
+		"Not checked: that this KRL lists serial %d (this version cannot read a KRL). "+
+		"A KRL that another revocation published in those %d s passes the same checks; "+
 		"the signer's \"revoked\" line (journalctl -u keyroster-signer) is the proof.\n",
-		m.KRLVersion, m.LogIndex, serial)
+		m.KRLVersion, m.LogIndex, m.IssuedAt, wire.MaxRequestSkewSeconds, serial, wire.MaxRequestSkewSeconds)
 	_, _ = fmt.Fprintln(stdout, revokeEnforcement(role))
 	return nil
 }
@@ -157,11 +159,16 @@ func revokeEnforcement(role wire.CARole) string {
 // adjacent and a KRL version is at least 1; the KRL the server then serves
 // must verify against the root-pinned bundle and its installation ID
 // (krl.VerifyManifest) with a version of at least the answer's and a
-// krl_publish leaf of at least the answer's. A server that dropped the
-// request cannot show a manifest the signer never signed; it can still
-// show an earlier genuine one under an invented answer of that version,
-// which only reading the KRL for the serial would catch.
-func confirmRevokeAnswer(ctx context.Context, c *serverclient.Client, b *trust.Bundle, ans serverclient.RevokeAnswer) (*krl.Manifest, error) {
+// krl_publish leaf of at least the answer's, and an issued_at no earlier
+// than createdAt (the request's CreatedAt) minus
+// wire.MaxRequestSkewSeconds: the signer sets issued_at from the clock
+// reading it refused the request against unless it was within that
+// window, so the KRL this revocation published can never fail it. A
+// server that dropped the request cannot show a manifest the signer
+// never signed, nor replay one published before that window under an
+// invented answer; it can still show a genuine one published inside the
+// window, which only reading the KRL for the serial catches (03-03).
+func confirmRevokeAnswer(ctx context.Context, c *serverclient.Client, b *trust.Bundle, ans serverclient.RevokeAnswer, createdAt uint64) (*krl.Manifest, error) {
 	if ans.KRLVersion < 1 || ans.PublishLeaf != ans.RevokeLeaf+1 {
 		return nil, fmt.Errorf("its answer (KRL v%d, log entries %d, %d) is not one the signer gives", ans.KRLVersion, ans.RevokeLeaf, ans.PublishLeaf)
 	}
@@ -178,6 +185,14 @@ func confirmRevokeAnswer(ctx context.Context, c *serverclient.Client, b *trust.B
 	}
 	if m.LogIndex < ans.PublishLeaf {
 		return nil, fmt.Errorf("the KRL the server serves (v%d) was published at log entry %d, before the reported entry %d", m.KRLVersion, m.LogIndex, ans.PublishLeaf)
+	}
+	issued, err := time.Parse(trust.TimeFormat, m.IssuedAt)
+	if err != nil {
+		return nil, fmt.Errorf("the KRL the server serves has issued_at %q: %w", m.IssuedAt, err)
+	}
+	if floor := int64(min(createdAt, uint64(1)<<62)) - wire.MaxRequestSkewSeconds; issued.Unix() < floor { //nolint:gosec // G115: clamped below 2^63
+		return nil, fmt.Errorf("the KRL the server serves (v%d) was issued at %s, more than %d s before this request, so this revocation did not publish it",
+			m.KRLVersion, m.IssuedAt, wire.MaxRequestSkewSeconds)
 	}
 	return m, nil
 }

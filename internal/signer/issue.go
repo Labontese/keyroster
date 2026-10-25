@@ -20,7 +20,7 @@ import (
 )
 
 // maxClockSkew bounds |now - CreatedAt| for a request.
-const maxClockSkew = 300 * time.Second
+const maxClockSkew = wire.MaxRequestSkewSeconds * time.Second
 
 // refusal is a decision not to issue, with a reason code safe to log and to
 // send back (charset [a-z0-9_ .:-]).

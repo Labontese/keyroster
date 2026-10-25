@@ -80,8 +80,8 @@ Expected output:
 
 ```
 The server reports serial 1792869357962865 (user) revoked: KRL v1 published (log entries 4, 5).
-Checked: the server serves KRL v1, signed by the ops key of your root-pinned trust bundle (log entry 5).
-Not checked: that this KRL lists serial 1792869357962865 (this version cannot read a KRL); the signer's "revoked" line (journalctl -u keyroster-signer) is the proof.
+Checked: the server serves KRL v1, signed by the ops key of your root-pinned trust bundle (log entry 5), issued at 2026-10-25T09:14:07Z, at most 300 s before this request.
+Not checked: that this KRL lists serial 1792869357962865 (this version cannot read a KRL). A KRL that another revocation published in those 300 s passes the same checks; the signer's "revoked" line (journalctl -u keyroster-signer) is the proof.
 Hosts enforce it once their keyroster agent applies this KRL.
 ```
 
@@ -97,13 +97,17 @@ The server's answer is not signed, and a compromised keyroster-server
 could drop the request and answer success. So the command reads the
 published KRL after the answer and requires its manifest to verify
 against your root-pinned trust bundle and its installation ID, with at
-least the reported KRL version and `krl_publish` entry. If that fails it
-prints `the server reports serial N revoked, but that could not be
-confirmed: ...` and exits non-zero; nothing tells you whether the signer
-revoked, so check the signer host. This catches an invented version, but
-not a server that drops the request and shows an earlier genuine KRL
-under an invented answer of that version: only reading the KRL for the
-serial would. The confirmation and each of its refusals ran in the CLI
+least the reported KRL version and `krl_publish` entry, issued no more
+than 300 s before the request (the signer refuses a request further than
+that from its clock, and the manifest's `issued_at` is that clock
+reading). If that fails it prints `the server reports serial N revoked,
+but that could not be confirmed: ...` and exits non-zero; nothing tells
+you whether the signer revoked, so check the signer host. This catches an
+invented version, and an earlier genuine KRL replayed under an invented
+answer when it was published more than 300 s before the request. It does
+not catch a genuine KRL that another revocation published inside those
+300 s: only reading the KRL for the serial would, which 03-03 adds. The
+confirmation and each of its refusals ran in the CLI
 tests against a stub server (`TestRevokeSerialConfirm`); the confirmed
 path also runs in CI e2e.
 

@@ -25,12 +25,18 @@ import (
 // logIndex and installation, signed by signer under krl.Namespace.
 func (e *dirEnv) krlDoc(t *testing.T, v, logIndex uint64, installation string, signer ssh.Signer) []byte {
 	t.Helper()
+	return e.krlDocAt(t, v, logIndex, installation, signer, time.Now())
+}
+
+// krlDocAt is krlDoc with the manifest issued at issued (whole seconds).
+func (e *dirEnv) krlDocAt(t *testing.T, v, logIndex uint64, installation string, signer ssh.Signer, issued time.Time) []byte {
+	t.Helper()
 	data := []byte("SSHKRL\n\x00test krl")
 	m := krl.Manifest{
 		InstallationID: installation,
 		KRLVersion:     v,
 		KRLSHA256:      krl.SHA256Hex(data),
-		IssuedAt:       time.Now().UTC().Truncate(time.Second).Format(trust.TimeFormat),
+		IssuedAt:       issued.UTC().Truncate(time.Second).Format(trust.TimeFormat),
 		BundleVersion:  1,
 		LogIndex:       logIndex,
 	}
@@ -147,8 +153,10 @@ func TestRevokeSerialConfirm(t *testing.T) {
 		}
 		for _, want := range []string{
 			"The server reports serial 1729 (user) revoked: KRL v3 published (log entries 8, 9).\n",
-			"Checked: the server serves KRL v3, signed by the ops key of your root-pinned trust bundle (log entry 9).\n",
+			"Checked: the server serves KRL v3, signed by the ops key of your root-pinned trust bundle (log entry 9), issued at ",
+			", at most 300 s before this request.\n",
 			"Not checked: that this KRL lists serial 1729",
+			"A KRL that another revocation published in those 300 s passes the same checks",
 		} {
 			if !strings.Contains(stdout, want) {
 				t.Fatalf("stdout %q lacks %q", stdout, want)
@@ -156,6 +164,16 @@ func TestRevokeSerialConfirm(t *testing.T) {
 		}
 		if strings.HasPrefix(stdout, "revoked serial") {
 			t.Fatalf("stdout %q states the revocation as a fact", stdout)
+		}
+	})
+	t.Run("issued_inside_window", func(t *testing.T) {
+		// The signer sets issued_at from a clock reading within 300 s
+		// of the request's CreatedAt, so a KRL issued that long before
+		// the request may still be the one this revocation published.
+		e := newDirEnv(t, 1, 1)
+		e.serveRevoke(ok, e.krlDocAt(t, 3, 9, e.bundle.InstallationID, e.ops, time.Now().Add(-290*time.Second)))
+		if code, stdout, stderr := run(t, "revoke", "serial", "1729"); code != 0 {
+			t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 		}
 	})
 	t.Run("enforcement_by_role", func(t *testing.T) {
@@ -194,6 +212,15 @@ func TestRevokeSerialConfirm(t *testing.T) {
 		{"version_zero", serverclient.RevokeAnswer{KRLVersion: 0, RevokeLeaf: 8, PublishLeaf: 9}, func(e *dirEnv) []byte {
 			return e.krlDoc(t, 3, 9, e.bundle.InstallationID, e.ops)
 		}, "is not one the signer gives"},
+		// A server that dropped the request replays the genuine KRL in
+		// force (v3, published at entry 9 by an earlier revocation) under
+		// an invented answer whose numbers match it.
+		{"replayed_earlier_krl", ok, func(e *dirEnv) []byte {
+			return e.krlDocAt(t, 3, 9, e.bundle.InstallationID, e.ops, time.Now().Add(-time.Hour))
+		}, "more than 300 s before this request, so this revocation did not publish it"},
+		{"replayed_just_outside_window", ok, func(e *dirEnv) []byte {
+			return e.krlDocAt(t, 3, 9, e.bundle.InstallationID, e.ops, time.Now().Add(-301*time.Second))
+		}, "more than 300 s before this request"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newDirEnv(t, 1, 1)

@@ -25,6 +25,12 @@ const (
 // MaxRevokeReason bounds a RevokeRequest's Reason (printable ASCII).
 const MaxRevokeReason = 256
 
+// MaxRequestSkewSeconds is the signer's freshness window: it refuses an
+// issue, login or revoke request whose CreatedAt is further than this
+// from its clock (request_time_skew). A client may rely on it to bound
+// when the signer decided on its request.
+const MaxRequestSkewSeconds = 300
+
 // Size bounds of a published KRL on the wire, equal to krl.MaxKRL,
 // krl.MaxManifest and krl.MaxManifestSig (wire does not import krl; a test
 // in internal/krl asserts the equality).
