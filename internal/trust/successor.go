@@ -9,7 +9,9 @@ import (
 // force, whose canonical bytes are prevCanonical and whose policy document
 // is prevPolicy (KEY-07 root rotation). The successor is version prev+1,
 // carries prev's SHA-256 as prev, is issued at issuedAt, names roots at
-// threshold as its root set and carries the SHA-256 of policy. Its CA, ops
+// threshold as its root set, carries the SHA-256 of policy and carries
+// installationID (prev's ID when prev has one, which the chain rule
+// requires; a fresh one or none when prev has none). Its CA, ops
 // and log keys are prev's, unchanged: rotating a root never changes an
 // online key (CA rotation is KEY-08).
 //
@@ -19,19 +21,20 @@ import (
 // names the ceremony clock. It still needs prev.Root.Threshold signatures
 // by the previous roots AND threshold signatures by the new roots on both
 // documents.
-func BuildSuccessor(prev *Bundle, prevCanonical, prevPolicy []byte, roots []RootKey, threshold uint32, policy []byte, issuedAt string) (*Bundle, error) {
+func BuildSuccessor(prev *Bundle, prevCanonical, prevPolicy []byte, roots []RootKey, threshold uint32, policy []byte, issuedAt, installationID string) (*Bundle, error) {
 	if prev == nil {
 		return nil, fmt.Errorf("%w: no previous bundle", ErrVersionChain)
 	}
 	next := &Bundle{
-		Version:      prev.Version + 1,
-		Prev:         SHA256Hex(prevCanonical),
-		IssuedAt:     issuedAt,
-		Root:         RootSet{Keys: append([]RootKey(nil), roots...), Threshold: threshold},
-		CAs:          append([]CAEntry(nil), prev.CAs...),
-		OpsKey:       prev.OpsKey,
-		Log:          prev.Log,
-		PolicySHA256: SHA256Hex(policy),
+		Version:        prev.Version + 1,
+		Prev:           SHA256Hex(prevCanonical),
+		IssuedAt:       issuedAt,
+		Root:           RootSet{Keys: append([]RootKey(nil), roots...), Threshold: threshold},
+		CAs:            append([]CAEntry(nil), prev.CAs...),
+		OpsKey:         prev.OpsKey,
+		Log:            prev.Log,
+		PolicySHA256:   SHA256Hex(policy),
+		InstallationID: installationID,
 	}
 	// Structure first, as VerifySuccessor parses next before the chain
 	// check; then the chain rule the verifier enforces.

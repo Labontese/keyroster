@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/cryptobyte"
+
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -190,7 +192,7 @@ func TestDecodeLeafStrict(t *testing.T) {
 		"trailing_byte":    append(append([]byte(nil), raw...), 0),
 		"truncated":        raw[:len(raw)-1],
 		"wrong_domain":     append([]byte{21}, append([]byte("keyroster/log-leaf/v2"), raw[22:]...)...),
-		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: 9, Body: refusal}),
+		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: KindKRLPublish + 1, Body: refusal}),
 		"body_of_another":  EncodeLeaf(Leaf{Kind: KindIssue, Body: refusal}),
 		"summary_no_count": EncodeLeaf(Leaf{Kind: KindRefusalSummary, Body: make([]byte, 18)}),
 	}
@@ -414,5 +416,177 @@ func TestDirectoryLimitsMatchWire(t *testing.T) {
 	if wire.MaxDirectory != MaxDocument || wire.MaxDirectorySigs != MaxSigs {
 		t.Fatalf("wire.MaxDirectory %d, wire.MaxDirectorySigs %d; want tlog.MaxDocument %d and tlog.MaxSigs %d",
 			wire.MaxDirectory, wire.MaxDirectorySigs, MaxDocument, MaxSigs)
+	}
+}
+
+// revokeVector is the fixed revoke leaf of test/vectors/leaf_revoke_v1.hex.
+// Its request is the revoke request of
+// test/vectors/revoke_request_signing_v1.hex and its entry a serial under
+// a literal CA key blob.
+func revokeVector(t testing.TB) (Leaf, *RevokeBody) {
+	t.Helper()
+	request, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "revoke_request_signing_v1.hex"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &RevokeBody{
+		PolicyVersion:     3,
+		ResolvedAtSeconds: 1_700_000_000,
+		Request:           request,
+		Evidence:          []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sig")}},
+		Entries: []RevokedEntry{{
+			Kind:               RevokedSerial,
+			CAKey:              []byte("ca key (test vector)"),
+			Serial:             1_700_000_000_000_001,
+			ValidBeforeSeconds: 1_700_003_600,
+		}},
+	}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 10, TimeMicros: 1_700_000_000_000_006, Kind: KindRevoke, Body: enc}, body
+}
+
+// krlPublishVector is the fixed krl_publish leaf of
+// test/vectors/leaf_krl_publish_v1.hex.
+func krlPublishVector(t testing.TB) (Leaf, *KRLPublishBody) {
+	t.Helper()
+	var sum [32]byte
+	for i := range sum {
+		sum[i] = byte(0xc0 + i)
+	}
+	body := &KRLPublishBody{
+		KRLVersion:      1,
+		BundleVersion:   4,
+		IssuedAtSeconds: 1_700_000_000,
+		SHA256:          sum,
+		Manifest:        []byte("manifest (test vector)"),
+		Sig:             []byte("sig (test vector)"),
+	}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 11, TimeMicros: 1_700_000_000_000_006, Kind: KindKRLPublish, Body: enc}, body
+}
+
+// TestRevokeLeafVector pins the kind-9 leaf encoding, ResolvedAtSeconds
+// included (F9: 03-03's audit rule needs no format change).
+func TestRevokeLeafVector(t *testing.T) {
+	leaf, body := revokeVector(t)
+	checkLeafVector(t, "leaf_revoke_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeRevokeBody(b) })
+}
+
+// TestKRLPublishLeafVector pins the kind-10 leaf encoding.
+func TestKRLPublishLeafVector(t *testing.T) {
+	leaf, body := krlPublishVector(t)
+	checkLeafVector(t, "leaf_krl_publish_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeKRLPublishBody(b) })
+}
+
+// TestRevokeBody covers the kind-9 body decoder.
+func TestRevokeBody(t *testing.T) {
+	leaf, body := revokeVector(t)
+	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeRevokeBody(b) })
+	if KindRevoke != 9 || KindRevoke.String() != "revoke" {
+		t.Fatalf("KindRevoke = %d %q", KindRevoke, KindRevoke)
+	}
+	for name, b := range map[string]*RevokeBody{
+		"no_request":         {Entries: body.Entries},
+		"serial_entry_no_ca": {Request: []byte("r"), Entries: []RevokedEntry{{Kind: RevokedSerial, Serial: 1}}},
+		"serial_entry_zero":  {Request: []byte("r"), Entries: []RevokedEntry{{Kind: RevokedSerial, CAKey: []byte("k")}}},
+		"unknown_entry_kind": {Request: []byte("r"), Entries: []RevokedEntry{{Kind: 4, CAKey: []byte("k"), Serial: 1}}},
+		// A serial entry is exact: a key ID or key beside it would let
+		// two readers take one leaf for different revocations.
+		"serial_entry_with_key_id": {Request: []byte("r"), Entries: []RevokedEntry{{Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, KeyID: "junk"}}},
+		"serial_entry_with_key":    {Request: []byte("r"), Entries: []RevokedEntry{{Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, Key: []byte("junk")}}},
+	} {
+		if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+			t.Errorf("%s: Encode = %v, want ErrMalformedLeaf", name, err)
+		}
+	}
+	// Every kind carries exactly its own fields (pre-merge review, round
+	// 2): a key ID entry the CA key and key ID, a key entry the key alone.
+	strict := map[string]RevokedEntry{
+		"serial_entry_with_key_id":    {Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, KeyID: "junk"},
+		"serial_entry_with_key":       {Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, Key: []byte("junk")},
+		"key_id_entry_empty":          {Kind: RevokedKeyID, CAKey: []byte("k")},
+		"key_id_entry_no_ca":          {Kind: RevokedKeyID, KeyID: "id"},
+		"key_id_entry_with_serial":    {Kind: RevokedKeyID, CAKey: []byte("k"), KeyID: "id", Serial: 1},
+		"key_id_entry_with_key":       {Kind: RevokedKeyID, CAKey: []byte("k"), KeyID: "id", Key: []byte("junk")},
+		"key_entry_empty":             {Kind: RevokedKey},
+		"key_entry_with_ca":           {Kind: RevokedKey, Key: []byte("pk"), CAKey: []byte("k")},
+		"key_entry_with_serial":       {Kind: RevokedKey, Key: []byte("pk"), Serial: 1},
+		"key_entry_with_key_id":       {Kind: RevokedKey, Key: []byte("pk"), KeyID: "id"},
+		"key_entry_with_valid_before": {Kind: RevokedKey, Key: []byte("pk"), ValidBeforeSeconds: 1},
+	}
+	for name, e := range strict {
+		if _, err := (&RevokeBody{Request: []byte("r"), Entries: []RevokedEntry{e}}).Encode(); !errors.Is(err, ErrMalformedLeaf) {
+			t.Errorf("%s: Encode = %v, want ErrMalformedLeaf", name, err)
+		}
+	}
+	for name, e := range map[string]RevokedEntry{
+		"key_id_entry": {Kind: RevokedKeyID, CAKey: []byte("k"), KeyID: "id", ValidBeforeSeconds: 7},
+		"key_entry":    {Kind: RevokedKey, Key: []byte("pk")},
+	} {
+		in := &RevokeBody{Request: []byte("r"), Entries: []RevokedEntry{e}}
+		enc, err := in.Encode()
+		if err != nil {
+			t.Fatalf("%s: Encode = %v", name, err)
+		}
+		if got, err := DecodeRevokeBody(enc); err != nil || !reflect.DeepEqual(got, in) {
+			t.Fatalf("%s: DecodeRevokeBody = %+v, %v; want %+v", name, got, err, in)
+		}
+	}
+	// The decoder refuses the same entries in bytes nobody encoded.
+	for name, e := range strict {
+		name = "decode_" + name
+		var c cryptobyte.Builder
+		c.AddUint64(1)
+		c.AddUint64(1)
+		c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes([]byte("r")) })
+		c.AddUint24LengthPrefixed(func(*cryptobyte.Builder) {})
+		c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+			c.AddUint8(e.Kind)
+			c.AddUint16LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(e.CAKey) })
+			c.AddUint64(e.Serial)
+			c.AddUint16LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes([]byte(e.KeyID)) })
+			c.AddUint16LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(e.Key) })
+			c.AddUint64(e.ValidBeforeSeconds)
+		})
+		raw, err := c.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeRevokeBody(raw); !errors.Is(err, ErrMalformedLeaf) {
+			t.Errorf("%s: DecodeRevokeBody = %v, want ErrMalformedLeaf", name, err)
+		}
+	}
+	empty := &RevokeBody{Request: []byte("r")}
+	enc, err := empty.Encode()
+	if err != nil {
+		t.Fatalf("a revoke that resolved to no entry: %v", err)
+	}
+	if got, err := DecodeRevokeBody(enc); err != nil || len(got.Entries) != 0 {
+		t.Fatalf("DecodeRevokeBody(no entries) = %+v, %v", got, err)
+	}
+}
+
+// TestKRLPublishBody covers the kind-10 body decoder.
+func TestKRLPublishBody(t *testing.T) {
+	leaf, body := krlPublishVector(t)
+	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeKRLPublishBody(b) })
+	if KindKRLPublish != 10 || KindKRLPublish.String() != "krl_publish" {
+		t.Fatalf("KindKRLPublish = %d %q", KindKRLPublish, KindKRLPublish)
+	}
+	for name, b := range map[string]*KRLPublishBody{
+		"version_zero":       {Manifest: []byte("m"), Sig: []byte("s")},
+		"no_signature":       {KRLVersion: 1, Manifest: []byte("m")},
+		"manifest_too_large": {KRLVersion: 1, Manifest: make([]byte, MaxManifest+1), Sig: []byte("s")},
+		"sig_too_large":      {KRLVersion: 1, Manifest: []byte("m"), Sig: make([]byte, MaxManifestSig+1)},
+	} {
+		if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+			t.Errorf("%s: Encode = %v, want ErrMalformedLeaf", name, err)
+		}
 	}
 }

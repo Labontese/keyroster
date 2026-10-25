@@ -71,6 +71,10 @@ type signerEnv struct {
 	// or caller-supplied keys).
 	RoleAgent    string
 	RoleKeyFiles map[string]string
+
+	// InstallationID is the genesis bundle's installation ID, which root
+	// sign draws for every genesis bundle (D-04, 03-01).
+	InstallationID string
 }
 
 // roleNames is the fixed role order of ca-init.
@@ -228,9 +232,17 @@ func (e *signerEnv) signGenesis(t *testing.T, opts bootstrapOpts) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, out := keyrosterWithAgent(t, rootSock, append(sign, "--confirm", trust.SHA256Hex(bundle)[:8])...); code != 0 {
+	code, out := keyrosterWithAgent(t, rootSock, append(sign, "--confirm", trust.SHA256Hex(bundle)[:8])...)
+	if code != 0 {
 		t.Fatalf("root sign exited %d:\n%s", code, out)
 	}
+	// Every genesis bundle carries an installation ID, and the ceremony
+	// summary shows it to the root holder before the signature (D-04).
+	b, err := trust.ParseBundle(bundle)
+	if err != nil || b.InstallationID == "" || !strings.Contains(out, "installation id: "+b.InstallationID+" (new in this version)") {
+		t.Fatalf("root sign: the genesis bundle must carry an installation ID that the summary shows (%v):\n%s", err, out)
+	}
+	e.InstallationID = b.InstallationID
 }
 
 // installArgs returns the install-bundle arguments for env's genesis

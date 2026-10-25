@@ -110,6 +110,49 @@ type InstallDirectoryAnswer struct {
 	LeafIndex uint64 `json:"leaf_index"`
 }
 
+// AdminRevokePath is the admin route of a revocation (POST, keyroster
+// revoke): its body is a RevokeBody carrying the admin-signed
+// wire.RevokeRequest, which the server forwards to the signer unchanged.
+// The server holds no revocation authority (REVOKE-01, D-12).
+const AdminRevokePath = "/api/v1/admin/revoke"
+
+// KRLPath is the public route of the published KRL (GET): a KRLDocument,
+// or 404 KRLErrNone when nothing is published yet.
+const KRLPath = "/api/v1/krl"
+
+// KRLErrNone is the 404 answer of KRLPath before the first publish.
+const KRLErrNone = "no_krl"
+
+// KRLMaxStale is how long keyroster-server serves a KRL it read from the
+// signer before it reads it again: a KRL the signer changed other than
+// by a revocation through that server reaches KRLPath at most this late.
+const KRLMaxStale = 5 * time.Second
+
+// RevokeBody is the body of a POST to AdminRevokePath: the RevokeRequest's
+// wire bytes (wire.RevokeRequest.Marshal, evidence included), standard
+// base64 with padding in JSON.
+type RevokeBody struct {
+	Request []byte `json:"request"`
+}
+
+// RevokeAnswer is the 200 answer of a POST to AdminRevokePath: the KRL
+// version the signer published with the revocation and the indexes of its
+// revoke and krl_publish log entries.
+type RevokeAnswer struct {
+	KRLVersion  uint64 `json:"krl_version"`
+	RevokeLeaf  uint64 `json:"revoke_leaf"`
+	PublishLeaf uint64 `json:"publish_leaf"`
+}
+
+// KRLDocument is the 200 answer of KRLPath: the KRL bytes, the canonical
+// manifest and the ops key's armored SSHSIG over it, each standard base64
+// with padding in JSON. Its size is bounded by krl.MaxKRLResponse.
+type KRLDocument struct {
+	KRL      []byte `json:"krl"`
+	Manifest []byte `json:"manifest"`
+	Sig      []byte `json:"sig"`
+}
+
 // The refusals of a POST to AdminDirectoryPath that the CLI tells apart.
 // AdminErrNotPendingCredential (409) is the server's own: the version
 // binds a credential that is not a pending credential of the user it
@@ -242,7 +285,7 @@ func (c *Client) AdminJSON(ctx context.Context, method, path string, in, out any
 			req.Header[k] = vs
 		}
 		return nil
-	})
+	}, maxResponse)
 	var he *HTTPError
 	if !errors.As(err, &he) {
 		return err

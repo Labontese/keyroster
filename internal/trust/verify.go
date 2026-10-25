@@ -336,7 +336,8 @@ var errIssuedBeforePrev = fmt.Errorf("%w", ErrVersionChain)
 // order: prev validates and prevCanonical is its canonical encoding;
 // prevPolicy is prev's policy; policy parses; next is version prev+1,
 // carries prev's SHA-256 as prev and is not issued before prev; next
-// carries policy's SHA-256; policy is prevPolicy unchanged or chained to it
+// carries policy's SHA-256; next keeps prev's installation ID when prev has
+// one; policy is prevPolicy unchanged or chained to it
 // as the next version; a root in both prev and next keeps its custody
 // label; and no policy admin is a root of next or of prev. It returns the
 // parsed policy.
@@ -376,6 +377,11 @@ func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *B
 	if next.PolicySHA256 != SHA256Hex(policy) {
 		return nil, ErrPolicyHash
 	}
+	// The installation ID is carried unchanged once set; a successor of a
+	// bundle without one may add it (D-04).
+	if prev.InstallationID != "" && next.InstallationID != prev.InstallationID {
+		return nil, fmt.Errorf("%w: installation_id changed from %s to %s", ErrVersionChain, prev.InstallationID, displayID(next.InstallationID))
+	}
 	if !bytes.Equal(policy, prevPolicy) && (p.Version != pp.Version+1 || p.Prev != SHA256Hex(prevPolicy)) {
 		return nil, fmt.Errorf("%w: a changed policy must be version %d with the previous policy's SHA-256 as prev, got version %d",
 			ErrVersionChain, pp.Version+1, p.Version)
@@ -389,6 +395,14 @@ func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *B
 		return nil, err
 	}
 	return p, nil
+}
+
+// displayID names an installation ID in an error, an empty one as "none".
+func displayID(id string) string {
+	if id == "" {
+		return "none"
+	}
+	return id
 }
 
 // checkCarriedCustody refuses a root key that is in both prev's and next's

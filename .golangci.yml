@@ -49,6 +49,7 @@ linters:
             - "**/internal/doctor/**"
             - "**/internal/webauthn/**"
             - "**/internal/directory/**"
+            - "**/internal/krl/**"
             - "!$test"
           deny:
             - pkg: net/http

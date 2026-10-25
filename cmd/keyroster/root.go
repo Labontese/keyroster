@@ -324,10 +324,19 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	keyPath := fset.String("key", "", "age-encrypted software root FILE.age that signs (this or --agent-key)")
 	passFD := fset.Int("passphrase-fd", -1, "with --key: read the passphrase from this inherited file descriptor instead of the terminal")
 	confirm := fset.String("confirm", "", "first 8 hex digits of the bundle hash (default: prompt on stdin)")
+	installID := fset.String("installation-id", "", `with --prev: the literal "new" adds a fresh installation ID to a successor whose previous bundle has none (a genesis bundle always gets one)`)
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
 	successor := *prevDir != ""
+	if *installID != "" && *installID != "new" {
+		_, _ = fmt.Fprintln(stderr, `root sign: --installation-id accepts only the literal "new"`)
+		return errUsage
+	}
+	if *installID != "" && !successor {
+		_, _ = fmt.Fprintln(stderr, "root sign: --installation-id new needs --prev: a genesis bundle always gets a fresh installation ID")
+		return errUsage
+	}
 	if successor && *caPath != "" {
 		_, _ = fmt.Fprintln(stderr, "root sign: --ca-pubkeys is refused with --prev: a successor carries the CA, ops and log keys of the previous bundle unchanged (CA rotation is Phase 3)")
 		return errUsage
@@ -378,24 +387,30 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 	var (
 		prev       *trust.Bundle
 		prevBundle []byte
-		build      func(issuedAt string) (*trust.Bundle, error)
+		build      bundleBuilder
 		inputs     = "--ca-pubkeys, --roots, --threshold and --policy"
 		rootSets   = [][]trust.RootKey{roots}
+		idRule     = installationRule{fresh: true} // a genesis always gets one
 	)
 	if successor {
 		prev, prevBundle, build, err = successorBuilder(*prevDir, *prevSHA, *outDir, roots, thr, policy)
 		if err != nil {
 			return err
 		}
+		if *installID == "new" && prev.InstallationID != "" {
+			_, _ = fmt.Fprintf(stderr, "root sign: --installation-id new is refused: the bundle in force already has installation ID %s, which its successor carries unchanged\n", prev.InstallationID)
+			return errUsage
+		}
 		inputs = "--prev, --roots, --threshold and --policy"
 		rootSets = append(rootSets, prev.Root.Keys)
+		idRule = installationRule{fresh: *installID == "new", carry: prev.InstallationID}
 	} else {
 		cas, err := readParsed(*caPath, trust.ParseCAPubKeys)
 		if err != nil {
 			return err
 		}
-		build = func(issuedAt string) (*trust.Bundle, error) {
-			return buildBundle(cas, roots, thr, policy, issuedAt)
+		build = func(issuedAt, installationID string) (*trust.Bundle, error) {
+			return buildBundle(cas, roots, thr, policy, issuedAt, installationID)
 		}
 	}
 	// A root never authorizes issuance (KEY-07), and a root that a
@@ -405,7 +420,7 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		return fmt.Errorf("%s: %w; nothing was written or signed", *policyPath, err)
 	}
 
-	bundle, b, err := prepareBundle(*outDir, build, inputs, policy)
+	bundle, b, err := prepareBundle(*outDir, build, idRule, inputs, policy)
 	if err != nil {
 		return err
 	}
@@ -468,6 +483,7 @@ func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) err
 		}
 	}
 	_, _ = io.WriteString(stdout, rootceremony.Summary(b, pol))
+	_, _ = io.WriteString(stdout, installationLine(prev, b))
 	answer := *confirm
 	if answer == "" {
 		_, _ = fmt.Fprintf(stderr, "Type the first 8 hex digits of the bundle SHA-256 to sign with %s: ", fp)
@@ -551,12 +567,64 @@ func openSoftwareRoot(path string, passFD int) (*rootceremony.Root, error) {
 	return root, nil
 }
 
+// bundleBuilder builds the bundle for the ceremony inputs from the fields a
+// further root signing carries over from the stored bundle: issued_at and
+// installation_id.
+type bundleBuilder func(issuedAt, installationID string) (*trust.Bundle, error)
+
+// installationRule says which installation ID the inputs call for (D-04):
+// fresh for a genesis or --installation-id new, carry for a successor of a
+// bundle that has one, neither for a successor of a bundle without one.
+type installationRule struct {
+	fresh bool
+	carry string
+}
+
+// check reports whether a stored bundle's installation ID fits the rule.
+// The flag accepts only the literal "new", so presence and the previous
+// bundle's ID are the only things to compare.
+func (r installationRule) check(stored string) error {
+	switch {
+	case r.carry != "" && stored != r.carry:
+		return fmt.Errorf("it has installation ID %s, but the previous bundle's %s must be carried unchanged", displayInstallation(stored), r.carry)
+	case r.carry == "" && r.fresh && stored == "":
+		return errors.New("it has no installation ID, but the inputs call for one (a genesis bundle, or --installation-id new)")
+	case r.carry == "" && !r.fresh && stored != "":
+		return fmt.Errorf("it has installation ID %s, but neither the previous bundle nor --installation-id new gives one", stored)
+	}
+	return nil
+}
+
+func displayInstallation(id string) string {
+	if id == "" {
+		return "none"
+	}
+	return id
+}
+
+// installationLine is the ceremony summary's installation ID line, so root
+// holders confirm it before signing; an ID the previous bundle does not
+// have (a genesis, or one added by --installation-id new) is marked new.
+func installationLine(prev, b *trust.Bundle) string {
+	switch {
+	case b.InstallationID == "":
+		return "installation id: none (no KRL can be published under this bundle)\n"
+	case prev == nil || prev.InstallationID == "":
+		return "installation id: " + b.InstallationID + " (new in this version)\n"
+	default:
+		return "installation id: " + b.InstallationID + "\n"
+	}
+}
+
 // prepareBundle builds the bundle for the inputs with build and writes it
 // and a copy of the policy into dir, or, when dir already holds a bundle (a
-// further root signing), rebuilds it with the stored issued_at and requires
-// that bundle and policy to match exactly. inputs names the flags the
-// bundle is built from, for the mismatch error.
-func prepareBundle(dir string, build func(issuedAt string) (*trust.Bundle, error), inputs string, policy []byte) ([]byte, *trust.Bundle, error) {
+// further root signing, on this machine or after dir was copied elsewhere),
+// rebuilds it with the stored issued_at and installation ID and requires
+// that bundle and policy to match exactly. A fresh installation ID is drawn
+// only in the branch that writes a new bundle, so every further signing
+// rebuilds the same bytes and the signatures of several roots accumulate.
+// inputs names the flags the bundle is built from, for the mismatch error.
+func prepareBundle(dir string, build bundleBuilder, idRule installationRule, inputs string, policy []byte) ([]byte, *trust.Bundle, error) {
 	bundlePath := filepath.Join(dir, bundleFile)
 	policyPath := filepath.Join(dir, policyFile)
 	existing, err := os.ReadFile(bundlePath) //nolint:gosec // G304: inside the operator's out-dir
@@ -566,7 +634,10 @@ func prepareBundle(dir string, build func(issuedAt string) (*trust.Bundle, error
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", bundlePath, err)
 		}
-		want, err := build(b.IssuedAt)
+		if err := idRule.check(b.InstallationID); err != nil {
+			return nil, nil, fmt.Errorf("%s does not match %s and --installation-id: %w; refusing to sign a different bundle", bundlePath, inputs, err)
+		}
+		want, err := build(b.IssuedAt, b.InstallationID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -584,7 +655,13 @@ func prepareBundle(dir string, build func(issuedAt string) (*trust.Bundle, error
 		return existing, b, nil
 	case errors.Is(err, fs.ErrNotExist):
 		issued := ceremonyNow().UTC().Truncate(time.Second).Format(trust.TimeFormat)
-		b, err := build(issued)
+		id := idRule.carry
+		if idRule.fresh {
+			if id, err = trust.NewInstallationID(); err != nil {
+				return nil, nil, err
+			}
+		}
+		b, err := build(issued, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -613,15 +690,17 @@ func prepareBundle(dir string, build func(issuedAt string) (*trust.Bundle, error
 
 // buildBundle assembles a genesis bundle: version 1, all-zero prev, the
 // roots and threshold, the three CAs active at generation 1, the ops and
-// log keys and the policy hash. It validates the result.
-func buildBundle(cas *trust.CAPubKeys, roots []trust.RootKey, threshold uint32, policy []byte, issuedAt string) (*trust.Bundle, error) {
+// log keys, the policy hash and the installation ID. It validates the
+// result.
+func buildBundle(cas *trust.CAPubKeys, roots []trust.RootKey, threshold uint32, policy []byte, issuedAt, installationID string) (*trust.Bundle, error) {
 	b := &trust.Bundle{
-		Version:      1,
-		Prev:         trust.GenesisPrev,
-		IssuedAt:     issuedAt,
-		Root:         trust.RootSet{Keys: roots, Threshold: threshold},
-		CAs:          []trust.CAEntry{},
-		PolicySHA256: trust.SHA256Hex(policy),
+		Version:        1,
+		Prev:           trust.GenesisPrev,
+		IssuedAt:       issuedAt,
+		Root:           trust.RootSet{Keys: roots, Threshold: threshold},
+		CAs:            []trust.CAEntry{},
+		PolicySHA256:   trust.SHA256Hex(policy),
+		InstallationID: installationID,
 	}
 	for _, role := range []string{trust.RoleUser, trust.RoleHost, trust.RoleMachine} {
 		k, _ := cas.Key(role)
@@ -647,7 +726,7 @@ func buildBundle(cas *trust.CAPubKeys, roots []trust.RootKey, threshold uint32, 
 // its successor (trust.BuildSuccessor). outDir must not be prevDir: the
 // successor never overwrites the documents it chains to. Every refusal
 // comes before anything is written.
-func successorBuilder(prevDir, prevSHA, outDir string, roots []trust.RootKey, threshold uint32, policy []byte) (*trust.Bundle, []byte, func(string) (*trust.Bundle, error), error) {
+func successorBuilder(prevDir, prevSHA, outDir string, roots []trust.RootKey, threshold uint32, policy []byte) (*trust.Bundle, []byte, bundleBuilder, error) {
 	absPrev, err := filepath.Abs(prevDir)
 	if err != nil {
 		return nil, nil, nil, err
@@ -663,8 +742,8 @@ func successorBuilder(prevDir, prevSHA, outDir string, roots []trust.RootKey, th
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w; nothing was written or signed", err)
 	}
-	build := func(issuedAt string) (*trust.Bundle, error) {
-		return trust.BuildSuccessor(prev, prevBundle, prevPolicy, roots, threshold, policy, issuedAt)
+	build := func(issuedAt, installationID string) (*trust.Bundle, error) {
+		return trust.BuildSuccessor(prev, prevBundle, prevPolicy, roots, threshold, policy, issuedAt, installationID)
 	}
 	return prev, prevBundle, build, nil
 }

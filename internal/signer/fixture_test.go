@@ -34,6 +34,9 @@ type Fixture struct {
 	Quorum    uint32
 	// PolicyEdit, if set, changes the genesis policy Policy returns.
 	PolicyEdit func(*trust.Policy)
+	// InstallationID, if set, is the genesis bundle's installation ID
+	// (D-04); the signer publishes no KRL without one.
+	InstallationID string
 }
 
 // NewFixture generates the keys; quorum is the policy's admin quorum.
@@ -152,6 +155,7 @@ func (f *Fixture) GenesisBundle(t testing.TB, cas *trust.CAPubKeys, pol *trust.P
 		t.Fatal(err)
 	}
 	b.Log = trust.LogEntry{Key: lg.Key, Alg: lg.Alg, Custody: lg.Custody, Origin: tlog.Origin(logPub)}
+	b.InstallationID = f.InstallationID
 	return b
 }
 

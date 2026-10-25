@@ -207,6 +207,70 @@ func TestMigrations(t *testing.T) {
 			t.Fatalf("trust_bundle row after the upgrade: %+v, %v", b, err)
 		}
 	})
+	// upgrade_from_v4 builds a populated Phase 2 database (schema version
+	// 4, migrations 1-4 by direct SQL) and opens it: the 0005 revocation
+	// migration applies, its three tables are empty, and the Phase 2 rows
+	// read back unchanged (03-01; the homelab signer takes this path).
+	t.Run("upgrade_from_v4", func(t *testing.T) {
+		if len(ms) < 5 || ms[4].name != "0005_revocation.sql" {
+			t.Fatalf("want migration 5 to be 0005_revocation.sql, have %d migrations", len(ms))
+		}
+		path := filepath.Join(t.TempDir(), "signer.db")
+		raw, err := sql.Open("sqlite", path+"?"+dsnParams)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range ms[:4] {
+			if _, err := raw.Exec(m.sql); err != nil {
+				t.Fatalf("apply %s: %v", m.name, err)
+			}
+			if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		reqID := bytes.Repeat([]byte{0x43}, 16)
+		if _, err := raw.Exec(`INSERT INTO issuance (serial, request_id, ca_role, key_id, cert, issued_at_us) VALUES (?, ?, ?, ?, ?, ?)`,
+			1700000000000001, reqID, "user", "kr2/key", []byte("cert"), 1700000000000002); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := raw.Exec(`INSERT INTO directory (version, doc, sigs, policy_version, installed_at_us) VALUES (?, ?, ?, ?, ?)`,
+			1, []byte("doc"), []byte("sigs"), 1, 1700000000000004); err != nil {
+			t.Fatal(err)
+		}
+		if err := raw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		d, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open of a version 4 database: %v", err)
+		}
+		defer func() { _ = d.Close() }()
+		if got := userVersion(t, d); got != len(ms) {
+			t.Fatalf("user_version after the upgrade = %d, want %d", got, len(ms))
+		}
+		for _, table := range []string{"revocation", "krl_state", "revoke_request"} {
+			var n int
+			if err := d.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&n); err != nil || n != 0 { //nolint:gosec // G202: a constant table name
+				t.Fatalf("%s rows after the upgrade = %d, %v; want an empty table", table, n, err)
+			}
+		}
+		if st, err := d.KRLState(context.Background()); err != nil || st != nil {
+			t.Fatalf("KRLState after the upgrade = %+v, %v; want none", st, err)
+		}
+		var (
+			serial      int64
+			gotReq      []byte
+			role, keyID string
+		)
+		if err := d.db.QueryRow(`SELECT serial, request_id, ca_role, key_id FROM issuance`).Scan(&serial, &gotReq, &role, &keyID); err != nil ||
+			serial != 1700000000000001 || !bytes.Equal(gotReq, reqID) || role != "user" || keyID != "kr2/key" {
+			t.Fatalf("issuance row after the upgrade: %d %x %s %s, %v", serial, gotReq, role, keyID, err)
+		}
+		dir, err := d.LatestDirectory(context.Background())
+		if err != nil || dir == nil || dir.Version != 1 || string(dir.Doc) != "doc" || string(dir.Sigs) != "sigs" {
+			t.Fatalf("directory row after the upgrade: %+v, %v", dir, err)
+		}
+	})
 	t.Run("unusable_path", func(t *testing.T) {
 		for _, p := range []string{"", "a?mode=memory", "a#b"} {
 			if _, err := Open(p); err == nil || !strings.Contains(err.Error(), "unusable database path") {
@@ -529,4 +593,67 @@ func TestReadLogWithHashesSnapshot(t *testing.T) {
 			t.Fatalf("empty log: %d calls, %+v, %v; want 0 calls and no checkpoint", calls, snap, err)
 		}
 	})
+}
+
+// TestRevocationTables: a revoke request ID is recorded once (the PRIMARY
+// KEY returns ErrDuplicateRequest), revocations read back in id order,
+// and the KRL state only moves to a higher version.
+func TestRevocationTables(t *testing.T) {
+	d, _ := openTemp(t)
+	ctx := context.Background()
+	id := [16]byte{1, 2, 3}
+	now := time.UnixMicro(1700000000000000)
+	err := d.WithTx(ctx, func(tx *sql.Tx) error {
+		for i, serial := range []uint64{9, 5} {
+			if err := d.InsertRevocation(tx, Revocation{Kind: RevocationSerial, CAKey: []byte("ca"), Serial: serial,
+				ValidBeforeMicros: 1700000600000000, RequestID: id, LeafIndex: uint64(i), RevokedAt: now}); err != nil {
+				return err
+			}
+		}
+		if err := d.InsertRevokeRequestTx(tx, id, 1); err != nil {
+			return err
+		}
+		return d.PutKRLStateTx(tx, KRLState{Version: 1, KRL: []byte("k1"), Manifest: []byte("m1"), Sig: []byte("s1"), PublishedAt: now})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used, err := d.RevokeRequestUsed(ctx, id); err != nil || !used {
+		t.Fatalf("RevokeRequestUsed = %v, %v", used, err)
+	}
+	if used, err := d.RevokeRequestUsed(ctx, [16]byte{9}); err != nil || used {
+		t.Fatalf("RevokeRequestUsed(another id) = %v, %v", used, err)
+	}
+	err = d.WithTx(ctx, func(tx *sql.Tx) error {
+		if err := d.InsertRevokeRequestTx(tx, id, 2); !errors.Is(err, ErrDuplicateRequest) {
+			t.Errorf("a second InsertRevokeRequestTx: %v, want ErrDuplicateRequest", err)
+		}
+		return errors.New("roll back")
+	})
+	if err == nil {
+		t.Fatal("the rolled-back transaction committed")
+	}
+	err = d.WithTx(ctx, func(tx *sql.Tx) error {
+		revs, err := d.RevocationsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if len(revs) != 2 || revs[0].Serial != 9 || revs[1].Serial != 5 || revs[0].ValidBeforeMicros != 1700000600000000 || revs[0].RequestID != id {
+			t.Errorf("RevocationsTx = %+v", revs)
+		}
+		if err := d.PutKRLStateTx(tx, KRLState{Version: 1, KRL: []byte("k"), Manifest: []byte("m"), Sig: []byte("s"), PublishedAt: now}); err == nil {
+			t.Error("PutKRLStateTx accepted the same version again")
+		}
+		if err := d.InsertRevocation(tx, Revocation{Kind: RevocationKeyID, KeyID: "k", RequestID: id, RevokedAt: now}); err == nil {
+			t.Error("InsertRevocation accepted a key_id row, which this version does not write")
+		}
+		return d.PutKRLStateTx(tx, KRLState{Version: 2, KRL: []byte("k2"), Manifest: []byte("m2"), Sig: []byte("s2"), PublishedAt: now})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := d.KRLState(ctx)
+	if err != nil || st == nil || st.Version != 2 || string(st.KRL) != "k2" || string(st.Manifest) != "m2" || string(st.Sig) != "s2" {
+		t.Fatalf("KRLState = %+v, %v", st, err)
+	}
 }

@@ -30,6 +30,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/custodytext"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -1109,6 +1110,79 @@ func TestConnectErrorTransport(t *testing.T) {
 			if msg := err.Error(); !strings.Contains(msg, want) || strings.Contains(msg, "peer text") || strings.Contains(msg, "000") {
 				t.Errorf("body %.20q...: err = %.300q, want %q in the CLI's own words", body, msg, want)
 			}
+		}
+	})
+}
+
+// TestGetKRLResponseBound (F12, T-03-200): GET /api/v1/krl is read under
+// krl.MaxKRLResponse, the documented arithmetic and above the 4 MiB cap:
+// a document holding a maximum legal KRL, manifest and signature decodes,
+// a body of MaxKRLResponse+1 bytes is refused before decoding, and every
+// other route keeps maxResponse.
+func TestGetKRLResponseBound(t *testing.T) {
+	if want := 4*((krl.MaxKRL+2)/3) + 4*((krl.MaxManifest+2)/3) + 4*((krl.MaxManifestSig+2)/3) + 1<<10; krl.MaxKRLResponse != want ||
+		krl.MaxKRLResponse <= 4<<20 || maxResponse != 4<<20 {
+		t.Fatalf("MaxKRLResponse %d (want %d, above maxResponse %d)", krl.MaxKRLResponse, want, maxResponse)
+	}
+	r := newRoot(t, "root R")
+	var body atomic.Pointer[[]byte]
+	var code atomic.Int32
+	url := startTLS(t, r.validLeaf(t), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(CustodyHeader, agentCustody)
+		if c := code.Load(); c != 0 {
+			w.WriteHeader(int(c))
+		}
+		_, _ = w.Write(*body.Load())
+	}))
+	c := clientFor(t, url, r, nil)
+	full, err := json.Marshal(KRLDocument{KRL: bytes.Repeat([]byte{0xff}, krl.MaxKRL), Manifest: bytes.Repeat([]byte{0xfe}, krl.MaxManifest),
+		Sig: bytes.Repeat([]byte{0xfd}, krl.MaxManifestSig)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full = append(full, '\n')
+
+	t.Run("max_document_decodes", func(t *testing.T) {
+		if len(full) > krl.MaxKRLResponse {
+			t.Fatalf("the largest legal document is %d bytes, above MaxKRLResponse %d", len(full), krl.MaxKRLResponse)
+		}
+		body.Store(&full)
+		doc, err := c.GetKRL(context.Background())
+		if err != nil || doc == nil || len(doc.KRL) != krl.MaxKRL || len(doc.Manifest) != krl.MaxManifest || len(doc.Sig) != krl.MaxManifestSig {
+			t.Fatalf("GetKRL of the largest document: %v", err)
+		}
+	})
+	t.Run("over_max_refused", func(t *testing.T) {
+		// The same valid document padded with whitespace to exactly
+		// MaxKRLResponse+1 bytes, so only the size check can refuse it.
+		over := append(bytes.Clone(full), bytes.Repeat([]byte(" "), krl.MaxKRLResponse+1-len(full))...)
+		body.Store(&over)
+		doc, err := c.GetKRL(context.Background())
+		if doc != nil || err == nil || !strings.Contains(err.Error(), "response larger than") {
+			t.Fatalf("a %d-byte body: %v, %v; want \"response larger than\" and nothing decoded", len(over), doc, err)
+		}
+		// Control: exactly MaxKRLResponse bytes decode.
+		at := over[:krl.MaxKRLResponse]
+		body.Store(&at)
+		if doc, err := c.GetKRL(context.Background()); err != nil || doc == nil {
+			t.Fatalf("control: a %d-byte body: %v", len(at), err)
+		}
+	})
+	t.Run("general_cap_unchanged", func(t *testing.T) {
+		over := append(append([]byte(`"`), bytes.Repeat([]byte("a"), maxResponse-1)...), '"')
+		body.Store(&over)
+		var out string
+		if err := c.GetJSON(context.Background(), "/healthz", &out); err == nil || !strings.Contains(err.Error(), "larger than") {
+			t.Fatalf("a %d-byte body on another route: %v, want \"response larger than\"", len(over), err)
+		}
+	})
+	t.Run("no_krl_404", func(t *testing.T) {
+		none := []byte(`{"error":"` + KRLErrNone + `"}`)
+		body.Store(&none)
+		code.Store(http.StatusNotFound)
+		defer code.Store(0)
+		if doc, err := c.GetKRL(context.Background()); doc != nil || err != nil {
+			t.Fatalf("GetKRL before any publish = %v, %v; want nil, nil", doc, err)
 		}
 	})
 }

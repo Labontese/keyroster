@@ -36,6 +36,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/custodytext"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
 )
@@ -417,13 +418,34 @@ func (c *Client) PostJSON(ctx context.Context, path string, in, out any) error {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
-	return c.send(ctx, method, path, body, out, nil)
+	return c.send(ctx, method, path, body, out, nil, maxResponse)
+}
+
+// GetKRL GETs the published KRL (KRLPath) with its manifest and the ops
+// key's signature, reading the body under krl.MaxKRLResponse (the route
+// carries up to krl.MaxKRL bytes in base64, above the 4 MiB cap of every
+// other route) and refusing a larger one before decoding. It returns nil
+// and no error when the server answers 404 no_krl (nothing published
+// yet). Nothing in the document is trusted until krl.VerifyManifest has
+// checked it against the root-pinned bundle.
+func (c *Client) GetKRL(ctx context.Context) (*KRLDocument, error) {
+	var doc KRLDocument
+	err := c.send(ctx, http.MethodGet, KRLPath, nil, &doc, nil, krl.MaxKRLResponse)
+	var he *HTTPError
+	if errors.As(err, &he) && he.Code == http.StatusNotFound && he.APIErrorIs(KRLErrNone) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &doc, nil
 }
 
 // send is do with a prepare step, which runs on the finished request just
-// before it is sent (AdminJSON signs it there). A non-2xx answer other
-// than 503 is an *HTTPError.
-func (c *Client) send(ctx context.Context, method, path string, body []byte, out any, prepare func(*http.Request) error) error {
+// before it is sent (AdminJSON signs it there), and the response limit:
+// a body above limit bytes is refused before anything is decoded. A
+// non-2xx answer other than 503 is an *HTTPError.
+func (c *Client) send(ctx context.Context, method, path string, body []byte, out any, prepare func(*http.Request) error, limit int64) error {
 	if !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("serverclient: path %q must start with /", path)
 	}
@@ -449,13 +471,13 @@ func (c *Client) send(ctx context.Context, method, path string, body []byte, out
 		return c.mapError(path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		// A transport failure, as for the request itself.
 		return c.mapError(path, err)
 	}
-	if len(data) > maxResponse {
-		return fmt.Errorf("%s%s: response larger than %d bytes", c.base, path, maxResponse)
+	if int64(len(data)) > limit {
+		return fmt.Errorf("%s%s: response larger than %d bytes", c.base, path, limit)
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		// Custody is unknown on a 503; nothing is parsed from it.

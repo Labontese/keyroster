@@ -10,6 +10,7 @@
 package trust
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -64,6 +65,14 @@ type Bundle struct {
 	OpsKey       KeyEntry  `json:"ops_key"`
 	Log          LogEntry  `json:"log"`
 	PolicySHA256 string    `json:"policy_sha256"`
+	// InstallationID binds the bundle, and every directory and KRL manifest
+	// that repeats it, to one deployment (D-04, Phase 3): 32 lowercase hex
+	// digits (128 random bits) chosen by root sign at genesis, or added
+	// once by a successor of a bundle without one, and then carried
+	// unchanged by every successor. It is the last field with omitempty,
+	// so every Phase 1 and 2 bundle keeps its exact bytes and
+	// "installation_id":"" is refused as non-canonical.
+	InstallationID string `json:"installation_id,omitempty"`
 }
 
 // RootSet is the set of root keys and how many of them must sign.
@@ -232,7 +241,37 @@ func (b *Bundle) Validate() error {
 	if b.Log.Origin != LogOrigin(logKey) {
 		return fmt.Errorf("%w: %q, want %q", ErrLogOrigin, b.Log.Origin, LogOrigin(logKey))
 	}
+	if b.InstallationID != "" && !IsInstallationID(b.InstallationID) {
+		return fmt.Errorf("%w: installation_id must be 32 lowercase hex digits", ErrInvalid)
+	}
 	return nil
+}
+
+// installationIDLen is the length of an installation ID in hex digits.
+const installationIDLen = 32
+
+// IsInstallationID reports whether s has the form of an installation ID:
+// exactly 32 lowercase hex digits (^[0-9a-f]{32}$).
+func IsInstallationID(s string) bool {
+	if len(s) != installationIDLen {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// NewInstallationID returns a fresh installation ID: 16 bytes from
+// crypto/rand in lowercase hex.
+func NewInstallationID() (string, error) {
+	var b [installationIDLen / 2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("trust: installation id: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // validate checks the root set and returns the parsed root keys.
@@ -353,6 +392,11 @@ func checkTimestamp(s string) error {
 	}
 	return nil
 }
+
+// CheckTimestamp applies the issued_at rule of the trust documents (RFC
+// 3339 UTC with whole seconds, TimeFormat) to s, for other signed formats
+// that carry an issued_at (the KRL manifest). Errors wrap ErrInvalid.
+func CheckTimestamp(s string) error { return checkTimestamp(s) }
 
 // TimeFormat is the layout of issued_at.
 const TimeFormat = "2006-01-02T15:04:05Z"

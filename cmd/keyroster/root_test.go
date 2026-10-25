@@ -55,6 +55,7 @@ func useKeyring(t *testing.T, keys ...ed25519.PrivateKey) {
 type ceremony struct {
 	dir, caPubkeys, policy, roots, out string
 	rootKeys                           []ed25519.PrivateKey
+	caKeys                             map[string]*ecdsa.PrivateKey // by ca-pubkeys role
 }
 
 // newCeremony writes a genesis policy (via keyroster root genesis-policy),
@@ -91,6 +92,7 @@ func newCeremonyInputs(t *testing.T) *ceremony {
 		policy:    filepath.Join(dir, "genesis-policy.json"),
 		roots:     filepath.Join(dir, "roots.pub"),
 		out:       filepath.Join(dir, "out"),
+		caKeys:    map[string]*ecdsa.PrivateKey{},
 	}
 	_, adminPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -117,6 +119,7 @@ func newCeremonyInputs(t *testing.T) *ceremony {
 			t.Fatal(err)
 		}
 		cas.Keys = append(cas.Keys, trust.CAPubKey{Role: role, Key: trust.FormatKey(pub), Alg: pub.Type(), Custody: "tpm"})
+		c.caKeys[role] = priv
 	}
 	data, err := cas.Canonical()
 	if err != nil {
@@ -1591,6 +1594,231 @@ func TestRootSuccessorPolicy(t *testing.T) {
 			if code == 0 || !strings.Contains(stderr, "--prev, --out and --webauthn-rp-id are required") {
 				t.Fatalf("%v: exit %d, stderr %q; want the usage refusal", args, code, stderr)
 			}
+		}
+	})
+}
+
+// rootSignInto runs root sign with root i of c into out: a genesis from c's
+// inputs, or with prevDir a successor of the bundle there (same roots and
+// policy). extra is appended (for example --installation-id new).
+func (c *ceremony) rootSignInto(t *testing.T, out, prevDir string, i int, extra ...string) (int, string, string) {
+	t.Helper()
+	typeHashPrefix(t, out)
+	args := []string{"root", "sign", "--policy", c.policy, "--roots", c.roots, "--threshold", "1", "--out-dir", out, "--agent-key", c.fingerprint(t, i)}
+	if prevDir == "" {
+		args = append(args, "--ca-pubkeys", c.caPubkeys)
+	} else {
+		args = append(args, "--prev", prevDir, "--prev-sha256", fileSHA256(t, filepath.Join(prevDir, "bundle.json")))
+	}
+	return run(t, append(args, extra...)...)
+}
+
+// sigCount returns the number of SSHSIG blocks in path.
+func sigCount(t *testing.T, path string) int {
+	t.Helper()
+	return strings.Count(string(readTestFile(t, path)), "-----BEGIN SSH SIGNATURE-----")
+}
+
+// bundleIn parses dir's bundle.json and returns it with its bytes.
+func bundleIn(t *testing.T, dir string) (*trust.Bundle, []byte) {
+	t.Helper()
+	data := readTestFile(t, filepath.Join(dir, "bundle.json"))
+	b, err := trust.ParseBundle(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b, data
+}
+
+// idlessGenesis writes into a new directory a genesis bundle of c without
+// an installation ID (as every Phase 1 and 2 bundle is), signed by root 0,
+// with c's policy, and returns the directory.
+func (c *ceremony) idlessGenesis(t *testing.T) string {
+	t.Helper()
+	src := filepath.Join(c.dir, "genesis-with-id")
+	if code, _, stderr := c.rootSignInto(t, src, "", 0); code != 0 {
+		t.Fatalf("genesis root sign: exit %d: %s", code, stderr)
+	}
+	b, _ := bundleIn(t, src)
+	b.InstallationID = ""
+	doc, err := b.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := readTestFile(t, c.policy)
+	dir := filepath.Join(c.dir, "genesis-idless")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(c.rootKeys[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs, err := sshsig.Sign(rand.Reader, signer, trust.NamespaceBundle, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := sshsig.Sign(rand.Reader, signer, trust.NamespacePolicy, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(dir, "bundle.json"), doc)
+	writeTestFile(t, filepath.Join(dir, "bundle.json.sigs"), bs)
+	writeTestFile(t, filepath.Join(dir, "policy.json"), policy)
+	writeTestFile(t, filepath.Join(dir, "policy.json.sigs"), ps)
+	return dir
+}
+
+// copyDir copies the regular files of src into a new directory dst.
+func copyDir(t *testing.T, src, dst string) {
+	t.Helper()
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		writeTestFile(t, filepath.Join(dst, e.Name()), readTestFile(t, filepath.Join(src, e.Name())))
+	}
+}
+
+// TestRootSignInstallationID (D-04): every genesis bundle gets a fresh
+// installation ID that the ceremony summary shows, marked new;
+// --installation-id accepts only "new", needs --prev, and is refused when
+// the bundle in force already has an ID.
+func TestRootSignInstallationID(t *testing.T) {
+	c := newCeremony(t, 1)
+	useKeyring(t, c.rootKeys...)
+	t.Run("genesis_gets_an_id_shown_as_new", func(t *testing.T) {
+		code, stdout, stderr := c.rootSignInto(t, c.out, "", 0)
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, stderr)
+		}
+		b, _ := bundleIn(t, c.out)
+		if !trust.IsInstallationID(b.InstallationID) || !strings.Contains(stdout, "installation id: "+b.InstallationID+" (new in this version)\n") {
+			t.Fatalf("genesis bundle installation ID %q; summary:\n%s", b.InstallationID, stdout)
+		}
+	})
+	t.Run("successor_shows_the_carried_id", func(t *testing.T) {
+		out := filepath.Join(c.dir, "succ")
+		code, stdout, stderr := c.rootSignInto(t, out, c.out, 0)
+		prev, _ := bundleIn(t, c.out)
+		if code != 0 || !strings.Contains(stdout, "installation id: "+prev.InstallationID+"\n") {
+			t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		prev  string
+		extra []string
+		want  string
+	}{
+		{"flag_without_prev_usage_error", "", []string{"--installation-id", "new"}, "needs --prev"},
+		{"flag_not_new_usage_error", c.out, []string{"--installation-id", "0123456789abcdef0123456789abcdef"}, `only the literal "new"`},
+		{"flag_with_prev_id_usage_error", c.out, []string{"--installation-id", "new"}, "already has installation ID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := filepath.Join(c.dir, tc.name)
+			code, _, stderr := c.rootSignInto(t, out, tc.prev, 0, tc.extra...)
+			if code != 2 || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("exit %d, want 2 with %q: %s", code, tc.want, stderr)
+			}
+			if _, err := os.Stat(out); !os.IsNotExist(err) {
+				t.Fatalf("%s exists after a usage error", out)
+			}
+		})
+	}
+}
+
+// TestRootSignAccumulates (checker iteration 2, 03-15): the installation ID
+// is drawn only when the out-dir holds no bundle, so further root
+// signings, on this machine or after the out-dir was copied elsewhere,
+// rebuild the byte-identical bundle and their signatures accumulate; a
+// stored bundle whose ID does not fit the inputs is refused as a
+// different bundle, naming --installation-id.
+func TestRootSignAccumulates(t *testing.T) {
+	c := newCeremony(t, 3)
+	useKeyring(t, c.rootKeys...)
+	signOK := func(t *testing.T, out, prev string, i int, extra ...string) {
+		t.Helper()
+		if code, _, stderr := c.rootSignInto(t, out, prev, i, extra...); code != 0 {
+			t.Fatalf("root %d into %s: exit %d: %s", i, filepath.Base(out), code, stderr)
+		}
+	}
+	wantSame := func(t *testing.T, out string, before []byte, sigs int) *trust.Bundle {
+		t.Helper()
+		b, data := bundleIn(t, out)
+		if !bytes.Equal(data, before) {
+			t.Fatalf("%s/bundle.json changed after a further root signing", filepath.Base(out))
+		}
+		if n := sigCount(t, filepath.Join(out, "bundle.json.sigs")); n != sigs {
+			t.Fatalf("%s/bundle.json.sigs holds %d signatures, want %d", filepath.Base(out), n, sigs)
+		}
+		if n := sigCount(t, filepath.Join(out, "policy.json.sigs")); n != sigs {
+			t.Fatalf("%s/policy.json.sigs holds %d signatures, want %d", filepath.Base(out), n, sigs)
+		}
+		return b
+	}
+	idless := c.idlessGenesis(t)
+
+	t.Run("genesis_second_root_same_bundle", func(t *testing.T) {
+		out := filepath.Join(c.dir, "genesis")
+		signOK(t, out, "", 0)
+		first, data := bundleIn(t, out)
+		signOK(t, out, "", 1)
+		if b := wantSame(t, out, data, 2); b.InstallationID != first.InstallationID || b.InstallationID == "" {
+			t.Fatalf("installation ID %q after the second root, want %q", b.InstallationID, first.InstallationID)
+		}
+	})
+	newID := filepath.Join(c.dir, "succ-new-id")
+	t.Run("successor_new_id_second_root_same_bundle", func(t *testing.T) {
+		signOK(t, newID, idless, 0, "--installation-id", "new")
+		first, data := bundleIn(t, newID)
+		if !trust.IsInstallationID(first.InstallationID) {
+			t.Fatalf("--installation-id new gave %q", first.InstallationID)
+		}
+		signOK(t, newID, idless, 1, "--installation-id", "new")
+		if b := wantSame(t, newID, data, 2); b.InstallationID != first.InstallationID {
+			t.Fatal("the installation ID changed")
+		}
+	})
+	t.Run("successor_new_id_after_copy", func(t *testing.T) {
+		_, data := bundleIn(t, newID)
+		copied := filepath.Join(t.TempDir(), "elsewhere")
+		copyDir(t, newID, copied)
+		signOK(t, copied, idless, 2, "--installation-id", "new")
+		wantSame(t, copied, data, 3)
+	})
+	t.Run("existing_bundle_id_without_flag_refused", func(t *testing.T) {
+		copied := filepath.Join(t.TempDir(), "no-flag")
+		copyDir(t, newID, copied)
+		code, _, stderr := c.rootSignInto(t, copied, idless, 2)
+		if code != 1 || !strings.Contains(stderr, "refusing to sign a different bundle") || !strings.Contains(stderr, "--installation-id") {
+			t.Fatalf("exit %d, want the different-bundle refusal naming --installation-id: %s", code, stderr)
+		}
+	})
+	t.Run("flag_but_stored_has_no_id_refused", func(t *testing.T) {
+		out := filepath.Join(c.dir, "succ-no-id")
+		signOK(t, out, idless, 0)
+		if b, _ := bundleIn(t, out); b.InstallationID != "" {
+			t.Fatalf("a successor of an ID-less bundle without the flag carries ID %q", b.InstallationID)
+		}
+		code, _, stderr := c.rootSignInto(t, out, idless, 1, "--installation-id", "new")
+		if code != 1 || !strings.Contains(stderr, "refusing to sign a different bundle") || !strings.Contains(stderr, "--installation-id") {
+			t.Fatalf("exit %d, want the different-bundle refusal naming --installation-id: %s", code, stderr)
+		}
+	})
+	t.Run("successor_keeps_prev_id", func(t *testing.T) {
+		genesis := filepath.Join(c.dir, "genesis")
+		prev, _ := bundleIn(t, genesis)
+		out := filepath.Join(c.dir, "succ-keeps")
+		signOK(t, out, genesis, 0)
+		_, data := bundleIn(t, out)
+		signOK(t, out, genesis, 1)
+		if b := wantSame(t, out, data, 2); b.InstallationID != prev.InstallationID {
+			t.Fatalf("successor installation ID %q, want the previous bundle's %q", b.InstallationID, prev.InstallationID)
 		}
 	})
 }

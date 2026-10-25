@@ -21,8 +21,8 @@ import (
 // Growth rule: a later plan that needs another signer call adds that
 // method here, to socketSigner and to fakeSigner, in the commit that adds
 // its first caller (GetDirectory in 02-07, InstallDirectory in 02-09,
-// Login in 02-12). Nobody adds a second interface, and no method is added
-// before something calls it.
+// Login in 02-12, Revoke and GetKRL in 03-01). Nobody adds a second
+// interface, and no method is added before something calls it.
 type signerAPI interface {
 	Status(ctx context.Context) (*wire.StatusResponse, error)
 	GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error)
@@ -31,6 +31,12 @@ type signerAPI interface {
 	// the redeem handler calls it, after the code and PKCE verifier have
 	// been redeemed; a refusal comes back as a *wire.ErrorResponse.
 	Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error)
+	// Revoke forwards an admin-signed revocation request unchanged
+	// (03-01); the signer alone decides. A refusal comes back as a
+	// *wire.ErrorResponse.
+	Revoke(ctx context.Context, req *wire.RevokeRequest) (*wire.RevokeResponse, error)
+	// GetKRL reads the published KRL, its manifest and signature (03-01).
+	GetKRL(ctx context.Context) (*wire.GetKRLResponse, error)
 }
 
 // socketSigner reaches keyroster-signer over its Unix socket.
@@ -50,6 +56,14 @@ func (s socketSigner) InstallDirectory(ctx context.Context, req *wire.InstallDir
 
 func (s socketSigner) Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error) {
 	return signerclient.Login(ctx, s.socket, req)
+}
+
+func (s socketSigner) Revoke(ctx context.Context, req *wire.RevokeRequest) (*wire.RevokeResponse, error) {
+	return signerclient.Revoke(ctx, s.socket, req)
+}
+
+func (s socketSigner) GetKRL(ctx context.Context) (*wire.GetKRLResponse, error) {
+	return signerclient.GetKRL(ctx, s.socket)
 }
 
 const (

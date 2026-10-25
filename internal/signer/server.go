@@ -139,7 +139,9 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 // InstallDirectory request the admins' directory signatures. A
 // GetDirectory request (empty body) reads the installed directory, and a
 // Status request (empty body) the signer's own report of its keys'
-// custody and its trust state (D-18). Every
+// custody and its trust state (D-18). A RevokeRequest takes one policy
+// admin's evidence and publishes the next KRL; a GetKRL request (empty
+// body) reads the published KRL. Every
 // refusal goes through refuse (slog plus the rate-limited audit log,
 // D-14).
 func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
@@ -205,6 +207,24 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 			return
 		}
 		s.respond(ctx, conn, peer, [32]byte{}, wire.TypeGetDirectoryResponse, s.GetDirectory(), 0)
+	case wire.TypeRevokeRequest:
+		req, err := wire.ParseRevokeRequest(body)
+		if err != nil {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		resp, refused := s.revokeOrRefuse(ctx, peer, req)
+		if refused != nil {
+			s.reply(conn, refused)
+			return
+		}
+		s.respond(ctx, conn, peer, req.Digest(), wire.TypeRevokeResponse, resp, 0)
+	case wire.TypeGetKRL:
+		if len(body) != 0 {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		s.respond(ctx, conn, peer, [32]byte{}, wire.TypeGetKRLResponse, s.GetKRL(), 0)
 	case wire.TypeStatus:
 		if len(body) != 0 {
 			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
