@@ -16,7 +16,9 @@ import (
 // keyroster agent when it is not running and returns a connection only
 // after the pipe owner check, to an agent that already counts it as
 // active. Its errors, notably winagent.ErrOwnerUnverifiable, reach the
-// user with their own help text. It is the one test seam of the login's
+// user with their own help text. keyroster login calls it once, before it
+// begins the login (03-02), so these errors stop the login before the
+// signer issues anything. It is the one test seam of the login's
 // agent connection: tests replace it and restore it with t.Cleanup;
 // winagent itself exports no hook.
 var connectLoginAgent = func(ctx context.Context) (net.Conn, error) {
