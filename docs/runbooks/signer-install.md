@@ -741,7 +741,9 @@ structurally (see the warning above).
         ```
 
         Only the last line's `copied the proposal` means both files are
-        there. `mkdir` refuses a name that exists, a planted link
+        there. The block sets the modes itself (0700 and 0600), so that
+        neither a umask nor a default ACL inherited from the home
+        directory widens them. `mkdir` refuses a name that exists, a planted link
         included; root does not remove it. The admin removes it, or you
         ask them which name is free and use that one.
 

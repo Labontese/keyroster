@@ -476,8 +476,9 @@ canary_state() {
 	ls -A "$canary"
 }
 canary_before=$(canary_state)
-# The modes are set explicitly: on the runner, a directory made under umask
-# 077 alone came out 775 in kradmin's home (cause not established).
+# The modes are set explicitly: on the runner, /home/kradmin has a default
+# ACL (default:user:runner:rwx, default:mask::rwx), under which a directory
+# made with umask 077 alone came out 775 (run 40208370162).
 ls -ld /home/kradmin
 ! command -v getfacl >/dev/null || getfacl -p /home/kradmin
 copy_proposal() {
