@@ -69,9 +69,12 @@ type Server struct {
 	// process only.
 	pendingMu sync.Mutex
 
-	mu       sync.Mutex  // guards status and inflight; never held across a signer call
+	mu       sync.Mutex  // guards status, inflight, krl and krlInflight; never held across a signer call
 	status   *statusView // nil when there is no current entry
 	inflight *refresh    // the status refresh in flight, or nil
+
+	krl         *krlView    // the cached GET /api/v1/krl answer, nil when there is none
+	krlInflight *krlRefresh // the KRL refresh in flight, or nil
 }
 
 // New builds a Server that reaches the signer at cfg.SignerSocket.

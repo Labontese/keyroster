@@ -170,7 +170,13 @@ keyroster-server serves the published KRL to any TLS client at
 `GET /api/v1/krl`: a JSON document with the KRL bytes, a canonical
 manifest and the ops key's detached SSHSIG over it (namespace
 `keyroster/krl/v1`). Before the first revocation it answers 404
-`no_krl`. The answer is never cached (`Cache-Control: no-store`).
+`no_krl`. The route needs no login, so keyroster-server keeps the
+signer's last answer for up to 5 seconds and asks the signer at most
+once for any number of requests in that time; a revocation through it
+drops the copy before it answers, so the next read shows the new
+version. The bytes are the signer's, unchanged. HTTP clients are told
+not to cache it (`Cache-Control: no-store`). The cache ran in the
+server's unit tests against a stub signer (`TestKRLCache`).
 
 The server is not trusted for any of it. A reader accepts a KRL only when
 the manifest's signature is by the ops key of its root-pinned trust
