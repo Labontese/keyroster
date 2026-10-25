@@ -161,6 +161,13 @@ func decodeLeaf(data []byte) map[string]any {
 		}
 		m["version"] = b.Version
 		m["policy_version"] = b.PolicyVersion
+		// The installed document and its signatures, as standard base64,
+		// so a restore can write them back as a proposal (directory.json
+		// and directory.json.sigs) and replay them with keyroster directory
+		// install (03-02). Like all of "decoded", unverified: the signer
+		// checks them again at the replay.
+		m["directory"] = b.Directory
+		m["sigs"] = b.Sigs
 	case tlog.KindLoginIssue:
 		b, err := tlog.DecodeLoginIssueBody(l.Body)
 		if err != nil {

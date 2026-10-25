@@ -406,6 +406,15 @@ Before starting the signer after a restore:
    accepted too, and the disablements of the lost version are then gone
    for good.
 
+   **Keep users away until the replay is done.** From the moment the
+   restored signer starts until the last lost version is back, it serves
+   the restored, older directory: a user disabled in a lost version can log
+   in again, and a role removed in a lost version grants again. Keep
+   keyroster-server unreachable to users for that time, for example with a
+   firewall rule that admits only the admin workstation; the admin's
+   `keyroster directory install` goes through the server, so stopping it is
+   not an option. (UNVERIFIED: no test blocks user access.)
+
    **Replay the lost installs in log order**, not all bundles first. A
    directory version is checked against the policy in force when it is
    installed (its admin quorum and the user CA cap), so a directory version
@@ -422,23 +431,91 @@ Before starting the signer after a restore:
      with that bundle (see
      [Install a successor bundle](#install-a-successor-bundle-stop-install-start)),
      and start it again only if a lost directory version follows.
-   - **A lost `directory_install`: not possible yet at this point in
-     Phase 2.** A directory version goes in only through the running
-     signer's socket (its InstallDirectory request), and no keyroster
-     command sends that request until plan 02-09 adds
-     `keyroster directory install`. Nor can the signer run without login
-     peers: the shipped unit allows only `--allow-group keyroster-admin`,
-     which also owns the socket, so removing it removes every peer,
-     admins included.
+     (UNVERIFIED: no test replays a lost bundle.)
+   - **A lost `directory_install`:** write it back as a proposal from the
+     saved export and install it with `keyroster directory install`, one
+     version at a time, in log order:
 
-   So at this point in Phase 2, replay the lost bundles up to the first
-   lost directory version, and from there keep the restored signer
-   **stopped** until the lost directory versions can be reinstalled in
-   order. Starting it serves the restored, older directory: a user
-   disabled in a lost version can log in again.
+     1. Verify the saved export first, so that you replay from a log the
+        roots vouch for (step 2's `audit verify` does this).
+     2. Write the proposal of the lost version `V` (`directory.json` and
+        `directory.json.sigs`) from the export's decoded line:
 
-> **UNVERIFIED.** This procedure has not been run against a restored
-> database, and its directory half cannot be carried out yet (step 3).
-> The `grep` patterns match the export line format written by
-> `keyroster-signer export-log` (checked against its decoder, `audit.Decode`,
-> for `directory_install`), not a real export of a restored signer.
+        ```
+        V=2                                   # the lost directory version
+        SAVED=/root/latest-saved.jsonl
+        D=/root/replay/v$V
+        mkdir -p "$D"
+        grep '"kind":"directory_install"' "$SAVED" | grep -E ",\"version\":$V[,}]" > "$D/line"
+        test "$(wc -l < "$D/line")" -eq 1
+        grep -o '"directory":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.json"
+        grep -o '"sigs":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.json.sigs"
+        rm "$D/line"
+        ```
+
+        The decoded `directory` and `sigs` fields are in every export that
+        `keyroster-signer export-log` writes since plan 03-02. An older
+        export has only `version` and `policy_version` there (the bytes are
+        then only inside the leaf): export the saved log again with a
+        current binary, or keep the proposal directories of past installs.
+     3. With the restored signer running, wait at least 5 s after it
+        started, or restart keyroster-server: the server keeps the signer's
+        status for up to 5 s, and until then it can still report the
+        version it served before the restore. Then, as an admin:
+
+        ```
+        keyroster directory install /root/replay/v2
+        ```
+
+        It must print `The server reports directory version 2 installed`.
+        `The server already serves proposal ... nothing to do` means the
+        server still reported the pre-restore version: wait and run it
+        again. Check on the signer host that the signer holds the version
+        (`keyroster audit verify` of a new export counts the directory
+        installs).
+
+   **What makes the replay safe, and what it does not cover.** The
+   `decoded` part of an export line is informational: `audit verify` checks
+   only the leaf, so an edited `decoded` part still verifies. The replay is
+   checked again by the signer: the directory must carry the admin quorum's
+   signatures under the policy in force, and its `prev` must be the
+   SHA-256 of the restored version, so only an admin-signed successor of
+   that version installs. The residual: someone who can edit the saved
+   export can substitute another admin-signed successor of the same
+   version that was never installed (an unused proposal, say). Keep saved
+   exports where only operators can write them.
+
+   **A lost version that binds a passkey cannot be replayed.**
+   keyroster-server refuses it with 409 `credential_not_pending`, because
+   the passkey's pending entry was deleted at the original install, and
+   every later lost version chains to it, so none of them installs either.
+   Replay up to that version. Then re-invite that user
+   (`keyroster user add NAME --reinvite`, see
+   [enroll-user.md](enroll-user.md)), approve the new passkey, and make the
+   later lost changes again by hand, disablements first. (UNVERIFIED: this
+   case and its re-invite path have not been run.)
+
+   **After the replay, the new export is the baseline.** The replayed
+   installs are new log entries with new times, so the log no longer
+   extends the pre-restore export: `audit verify --previous
+   /root/latest-saved.jsonl` refuses the new export. Verify the new export
+   on its own pins, keep it as the next `--previous`, and keep the
+   pre-restore export with the operations log as the record of the
+   restore.
+
+> **Run in CI e2e (TestRestoreReplaysLostDirectory, 03-02)** on a test
+> signer, for a lost directory version that adds a role and binds no
+> passkey: a file-level restore of `signer.db` (its `-wal` and `-shm`
+> files replaced together, or SQLite replays the newer WAL onto the older
+> file), the signer then reporting the older version, step 3's
+> extraction commands above verbatim, the wait, `keyroster directory
+> install` of the written proposal with the signer then reporting the lost
+> version with the same bytes, the new export verifying on its own pins,
+> and `audit verify --previous` refusing it against the pre-restore export.
+>
+> **UNVERIFIED:** a VM snapshot restore, the replay of a lost
+> `bundle_install`, a lost version that binds a passkey and the re-invite
+> after it, keeping users away from the server, and the version counts of
+> step 2 against a real restored signer. The `grep` patterns of step 2 match
+> the export line format written by `keyroster-signer export-log`, not a
+> real export of a restored signer.
