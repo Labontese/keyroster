@@ -2317,7 +2317,8 @@ func TestVerifyGrepFields(t *testing.T) {
 	for range 3 {
 		lf.addDirectory(lf.directory(nil), nil)
 	}
-	all := lf.lines() // bundle_install, directory_install v1, v2, v3, checkpoint
+	lf.addLogin(nil, nil)
+	all := lf.lines() // bundle_install v1, directory_install v1, v2, v3, login_issue, checkpoint
 	edit := func(i int, f func(m map[string]any)) []string {
 		t.Helper()
 		return editDecodedLine(t, all, i, f)
@@ -2356,6 +2357,12 @@ func TestVerifyGrepFields(t *testing.T) {
 		{"bundle_version_edited_refused", edit(0, func(m map[string]any) { m["bundle_version"] = 2 }), bundleVersion},
 		{"bundle_version_missing_refused", edit(0, func(m map[string]any) { delete(m, "bundle_version") }), bundleVersion},
 		{"bundle_version_on_other_kind_refused", edit(3, func(m map[string]any) { m["bundle_version"] = 1 }), bundleVersion},
+		// The other kind's key with the value the check computes for this
+		// line (round 3): only the key compare refuses these.
+		{"bundle_version_colliding_on_directory_refused", edit(3, func(m map[string]any) { m["bundle_version"] = 3 }), bundleVersion},
+		{"version_colliding_on_bundle_refused", edit(0, func(m map[string]any) { m["version"] = 1 }), version},
+		{"version_zero_on_login_refused", edit(4, func(m map[string]any) { m["version"] = 0 }), version},
+		{"bundle_version_zero_on_login_refused", edit(4, func(m map[string]any) { m["bundle_version"] = 0 }), bundleVersion},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
