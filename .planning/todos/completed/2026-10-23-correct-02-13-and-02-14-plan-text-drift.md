@@ -31,3 +31,7 @@ Phase 2 verification, advisory 3. On 2026-10-23 the owner accepted both affected
   - Re-run the verifier, or refresh the digest, in the same change.
 - Otherwise close this todo with a note that the overrides in 02-VERIFICATION.md are the record.
 - When PR #41 has merged and cli-windows is green on main, add cli-windows to main-integrity (deferred-items.md, 02-14 D1 row).
+
+## Resolution
+
+Resolved in 03-02 (PR from branch `p03/02-phase2-followups`). Closed with the note option: the 02-13 and 02-14 plans and summaries stay as executed, because they are covered files of 02-VERIFICATION.md and editing them would stale a passed verification; the four overrides in 02-VERIFICATION.md are the record. The cli-windows step is done: the live main-integrity ruleset lists cli-windows (checked 2026-10-25, same 19 checks as .github/rulesets/main-integrity.json).

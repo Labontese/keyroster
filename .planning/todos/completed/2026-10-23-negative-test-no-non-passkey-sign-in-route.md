@@ -20,3 +20,7 @@ Today the evidence is the route table (internal/server/server.go, about L122-155
 - Add a test that enumerates the server's registered routes (or the mux patterns). It fails on any sign-in or session-creating route other than the passkey ceremony.
 - Probe the obvious paths (`/login/password`, `/totp`, `/recovery`, `/magic`, and form posts with a password field), expecting 404 or 405 and no session cookie.
 - Make sure the test fails when a dummy password route is added (mutant check).
+
+## Resolution
+
+Resolved in 03-02 (PR from branch `p03/02-phase2-followups`). `TestNoNonPasskeySignInRoute` (internal/server/routes_test.go) over the patterns `newRouteMux` records, with the `passkeyRoutes` allowlist, a single-mux source check and probes; mutant checks in 03-02-SUMMARY.md.

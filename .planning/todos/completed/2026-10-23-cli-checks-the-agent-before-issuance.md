@@ -28,3 +28,7 @@ Every retry adds another logged grant that nobody holds. The ephemeral key is ze
 - Hold the connection until the Add and the listing check, and pass it to `addLoginToAgent`.
 - Change the test to require the before-issuance order (no begin when no agent is usable).
 - Do this together with the E-IN-02 todo (`2026-10-23-recompute-agent-lifetime-before-add.md`), which changes the same code path.
+
+## Resolution
+
+Resolved in 03-02 (PR from branch `p03/02-phase2-followups`). keyroster login connects to the agent (winagent.Ensure on Windows) and lists it right after planning, before the begin; the connection is held for the add. Tests: `TestLoginFlowFakeServer/no_agent_no_begin` (no begin, no redeem) and `TestLoginAgentUnix` (before-issuance order). Residual, pinned by `agent_lost_after_preflight`: an agent that answers the preflight and is gone at the add still leaves one logged certificate whose key dies with the process.

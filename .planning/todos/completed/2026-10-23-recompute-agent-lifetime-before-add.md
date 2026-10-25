@@ -32,3 +32,7 @@ So the effect did not show at that resolution, but the run does not rule it out.
 - Connect to the agent first, as in the E-IN-01 todo (`2026-10-23-cli-checks-the-agent-before-issuance.md`).
 - Recompute the lifetime from a fresh `loginNow()` immediately before `ag.Add`, and refuse below `minLoginRemaining`.
 - A unit test with an injected clock and a slow Ensure should show the lifetime shrink by the delay.
+
+## Resolution
+
+Resolved in 03-02 (PR from branch `p03/02-phase2-followups`). The lifetime is computed from a fresh `loginNow()` immediately before `ag.Add` and refused below 60 s (`TestLoginFlowFakeServer/lifetime_recomputed_at_add`, `too_little_left_at_add_refused`). Connecting before the begin also moves a Windows cold start before the certificate exists. Not re-timed on Windows (UNVERIFIED there).

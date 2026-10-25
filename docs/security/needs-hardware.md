@@ -182,9 +182,26 @@ What these rows do not cover:
   approval page before any passkey prompt, and the prompt came only after
   Approve. That is the owner's observation in Chrome, not a measurement.
 - **Web sign-in on Linux.** Only the approval page was used on the laptop.
-- **Windows expiry timing.** The times of the Windows agent listings were
-  not recorded. Removal close to expiry (still listed 2 min 34 s before it,
-  gone 57 s after it) is shown only on Linux.
+- **Windows expiry timing.** Timed on 2026-10-23, after the 02-14 logins
+  (02-VERIFICATION.md, "Owner decisions and resolution"). The owner stopped
+  the keyroster agent (a cold start), ran `keyroster.exe login --ttl 5m`
+  with 02-13's Windows build, and listed the keyroster agent with the inbox
+  `ssh-add -l` every 5 s. The key left the keyroster agent between 3.9 s
+  before and 1.1 s after valid_before. The limits of that run:
+  - the listing resolution was 5 s;
+  - the skew between Daniel-PC's clock and the server's clock was not
+    measured;
+  - only one key was in the agent, because it was cold-started: no 8 h key
+    stayed alongside it in that run.
+
+  Review finding E-IN-02 (the agent lifetime was computed before the agent
+  started, so after a cold start the key could outlive the certificate by
+  the start delay) did not show at that resolution. Plan 03-02 fixes it:
+  keyroster login now connects to the agent before it begins the login, so
+  a cold start happens before the certificate exists, and it computes the
+  lifetime from a fresh clock reading immediately before the add. The fix is
+  unit-tested (`TestLoginFlowFakeServer/lifetime_recomputed_at_add`); it has
+  not been re-timed on Windows, so its effect there is **UNVERIFIED**.
 - **The default key first.** On Linux, the first `ssh` after login
   authenticated with the laptop's own plain key, because zima-srv also has
   it in `authorized_keys`. The certificate login was shown by a run with
@@ -215,7 +232,9 @@ What these rows do not cover:
   `\\.\pipe\keyroster-agent-<SID>`, with no other keyroster agent running.
   `ssh-add.exe -t 4` loaded the key and certificate, `ssh.exe` offered the
   certificate, both were gone after the lifetime, and the agent exited by
-  itself.
+  itself. A real `--ttl 5m` login key, added after a cold start, left the
+  agent between 3.9 s before and 1.1 s after its valid_before at 5 s
+  resolution (2026-10-23; see "Windows expiry timing" above for the limits).
 - **Pipe-squatting guard:** before keyroster sends a key, `VerifyServerOwner`
   checks that the pipe's server process runs as the caller's SID, with that
   SID not deny-only, at Medium integrity or above (which also excludes

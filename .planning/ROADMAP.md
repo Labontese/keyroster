@@ -154,7 +154,7 @@ Plans:
 **Depends on**: Phase 2
 **Requirements**: AGENT-01, AGENT-02, AGENT-03, AGENT-04, AGENT-05, AGENT-06, AGENT-07, AUTHZ-02, REVOKE-01, REVOKE-02, REVOKE-03, REVOKE-04, AUTH-06, KEY-08, BREAK-01, PLAT-01
 **Success Criteria** (what must be TRUE):
-  1. Admin enrolls a Linux host (Debian/Ubuntu, RHEL family, Alpine, Arch, Proxmox) with a one-time join token. The agent pins the server key and trust root, talks pull-only over mTLS with a closed set of typed operations (no inbound port, no remote exec), and applies only CA sets, host policy and KRLs signed by the pinned root or its delegated keys; unsigned or older versions are rejected.
+  1. Admin enrolls a Linux host (Debian 12+, Ubuntu 24.04+, RHEL family 9 and later not in FIPS mode, Alpine, Arch, Proxmox VE 8+) with a one-time join token. The agent pins the server's TLS root SPKI set and hostname, the trust root and the installation ID, talks pull-only over mTLS with a closed set of typed operations (no inbound port, no remote exec), and applies only CA sets, host policy and KRLs signed by the pinned root or its delegated keys; unsigned or older versions are rejected.
   2. The agent writes sshd config, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile` (generated from signed host policy) and the KRL atomically, validates with `sshd -t`, reloads, self-tests and rolls back on failure. It reports drift found by periodic `sshd -T -C` checks (e.g. missing `RevokedKeys`) and sends heartbeats with hashes of the applied config, CA set and KRL version.
   3. Admin revokes a certificate (by serial or key ID) or a key from the CLI, and every enrolled host refuses it after its next pull. The KRL (own encoder, cross-checked with `ssh-keygen -Q`) is SSHSIG-signed and installed atomically with a last-good copy, older versions are refused, and a corrupt or missing KRL never locks out the fleet.
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
@@ -221,6 +221,7 @@ Plans:
 **Mode:** mvp
 **Depends on**: Phase 3
 **Requirements**: AUTH-05, AUTHZ-03, AUTHZ-04, AUTHZ-05, AUTHZ-06, AUTHZ-07, VIS-02, VIS-06, UI-02, UI-03, UI-04
+**Also delivers:** REVOKE-01's UI part (revoke from the UI), moved from Phase 3 by owner decision D-12 (2026-10-23), under UI-02.
 **Success Criteria** (what must be TRUE):
   1. A change to roles, principals, credentials (including binding or resetting a user's passkey) or quorum settings takes effect only after the configured admin quorum approves it; every policy version is numbered and signed, and the signer refuses to act under a version that lacks quorum.
   2. A user requests just-in-time access to a sensitive role and another person approves it in the UI with WebAuthn step-up; the approval is bound to that exact request, works once, and the resulting certificate expires no later than the approval.
