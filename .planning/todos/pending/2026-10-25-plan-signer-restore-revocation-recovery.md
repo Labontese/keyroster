@@ -79,4 +79,6 @@ Either way the imported KRL is verified against the root-pinned bundle and the i
 
 Assert that no krl_publish between the restored log's end and the recovery lacks any of them. Assert also that `ssh-keygen -Q` and sshd refuse each one afterwards. Include a restart while the recovery is pending.
 
+**Closing this todo.** The plan that resolves it moves this file, under the same name, to `.planning/todos/completed/2026-10-25-plan-signer-restore-revocation-recovery.md` in its own PR, with "Resolved in <plan> (PR #N)" appended. 03-07's Task 1 precondition checks exactly that path on origin/main, so a renamed or differently closed todo blocks 03-07.
+
 Sources: 03-03-PLAN.md, Round 2 of the Review Dispositions Ledger (the Deferred table) and threat T-03-207; 03-03-PLAN.md at 4aaa62e, Task 3 (a)-(c), for the removed text.
