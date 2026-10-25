@@ -158,10 +158,10 @@ func TestRevokeSerialEndToEnd(t *testing.T) {
 	// 8. A restarted signer serves the same KRL.
 	env.StopSigner()
 	serveStoppable(t, env.Signer)
-	// keyroster-server serves its copy of the KRL for up to 5 s (krlTTL
-	// in internal/server); wait it out so this read reaches the restarted
-	// signer instead of the cache.
-	time.Sleep(6 * time.Second)
+	// keyroster-server serves its copy of the KRL for up to
+	// serverclient.KRLMaxStale; wait it out so this read reaches the
+	// restarted signer instead of the cache.
+	time.Sleep(serverclient.KRLMaxStale + time.Second)
 	doc2, err := client.GetKRL(context.Background())
 	if err != nil || doc2 == nil {
 		t.Fatalf("GetKRL after the signer restart = %v, %v\nserver log:\n%s", doc2, err, env.Stderr.String())

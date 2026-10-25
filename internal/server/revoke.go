@@ -27,8 +27,9 @@ const (
 	// answers (dropKRL), unless the signer refused it as malformed or
 	// refused, which publishes nothing; any other change, such as a
 	// signer restarted on another state database, is served at most
-	// krlTTL late.
-	krlTTL = 5 * time.Second
+	// krlTTL late. The value is serverclient's, which the e2e suite
+	// waits out.
+	krlTTL = serverclient.KRLMaxStale
 )
 
 // handleRevoke serves POST /api/v1/admin/revoke (03-01, REVOKE-01). The

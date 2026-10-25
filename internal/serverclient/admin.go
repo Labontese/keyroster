@@ -123,6 +123,11 @@ const KRLPath = "/api/v1/krl"
 // KRLErrNone is the 404 answer of KRLPath before the first publish.
 const KRLErrNone = "no_krl"
 
+// KRLMaxStale is how long keyroster-server serves a KRL it read from the
+// signer before it reads it again: a KRL the signer changed other than
+// by a revocation through that server reaches KRLPath at most this late.
+const KRLMaxStale = 5 * time.Second
+
 // RevokeBody is the body of a POST to AdminRevokePath: the RevokeRequest's
 // wire bytes (wire.RevokeRequest.Marshal, evidence included), standard
 // base64 with padding in JSON.
