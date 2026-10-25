@@ -530,15 +530,16 @@ Before starting the signer after a restore:
    **After the replay, the new export is the baseline.** The replayed
    installs are new log entries with new times, so the log no longer
    extends the pre-restore export: `audit verify --previous
-   /root/latest-saved.jsonl` refuses the new export. Verify the new export
-   on its own pins and against the export of the restored log from step 1;
-   both must pass:
+   /root/latest-saved.jsonl` refuses the new export. Export the log again
+   with step 1's command and `--out /tmp/after-replay.jsonl` (the service
+   may keep running), then verify it on its own pins and against the
+   export of the restored log from step 1; both must pass:
 
    ```
    keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
-     /root/after-replay.jsonl
+     /tmp/after-replay.jsonl
    keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
-     --previous /tmp/restored.jsonl /root/after-replay.jsonl
+     --previous /tmp/restored.jsonl /tmp/after-replay.jsonl
    ```
 
    The second command proves that the new log extends the restored one,
