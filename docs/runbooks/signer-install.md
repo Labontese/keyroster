@@ -555,21 +555,17 @@ structurally (see the warning above).
 
    A restored log that is older than the saved one is reported as shrunk
    (`log shrank`) or rewritten. Since plan 02-04, `audit verify` verifies
-   logs that contain `directory_install` and `login_issue` entries; an
-   older `audit verify` binary refuses them, so use a current one. A
-   binary built between plans 02-01 and 02-04 says "not verifiable by this
-   version". A Phase 1 binary usually stops earlier, at the bundle whose
-   policy added the WebAuthn RP (`json: unknown field "webauthn"`), which
-   is not a sign of tampering; see the compatibility note in
+   logs that contain `directory_install` and `login_issue` entries, and
+   `audit verify` checks revoke and krl_publish entries since 03-03 (the
+   signer writes them since plan 03-01); an older `audit verify` binary
+   refuses them, so use a current one. A binary built between plans 02-01
+   and 02-04, or before plan 03-03 for a log with a `revoke` or
+   `krl_publish` entry, says "not verifiable by this version", which is
+   not a sign of tampering. A Phase 1 binary usually stops earlier, at the
+   bundle whose policy added the WebAuthn RP (`json: unknown field
+   "webauthn"`), which is not a sign of tampering either; see the
+   compatibility note in
    [root-ceremony.md](root-ceremony.md#change-the-policy-successor-policy-for-example-add-the-webauthn-rp).
-   Until plan 03-03, every `audit verify` binary, the current one
-   included, refuses a log that contains a `revoke` or `krl_publish`
-   entry (the signer writes them since plan 03-01) with
-   `audit: entry N (revoke): not verifiable by this version` (or
-   `(krl_publish)`). That is not tampering either, but step 2 cannot be
-   completed for such a log until 03-03 adds their checks: the standalone
-   verify above already refuses it, so stop and escalate as it says; see
-   [revoke.md](revoke.md#4-the-audit-log-after-a-revocation).
    `TestAuditLoginAcrossPolicyChange` (e2e) runs this command on two
    exports of a signer with a directory and login certificates: the later
    export verifies with `--previous` set to the earlier one, and the
@@ -628,9 +624,38 @@ structurally (see the warning above).
    numbers are lower, the restore reinstated an older bundle or directory.
    `doctor` also prints the restored bundle version (`OK bundle`).
 
+   Then count the revocations in both verified exports:
+
+   ```
+   grep -c '"kind":"revoke"' /root/latest-saved.jsonl
+   grep -c '"kind":"revoke"' /tmp/restored.jsonl
+   ```
+
+   If the saved export has more revoke entries than the restored export,
+   the restore lost a revocation: do not release the hold. Keep the signer
+   stopped, record both counts in the operations log and escalate. Until
+   the restore-recovery plan merges, this runbook does not recover lost
+   revocations: once released, the restored signer would publish a KRL
+   without them, and every host would accept it. Hosts keep their last
+   KRL, which still lists the lost revocations, and never lock out because
+   of its age (D-10). Anyone who needs access in the meantime needs a
+   break-glass path, which no keyroster runbook describes yet
+   (**UNVERIFIED**). The restored log is a prefix of the saved one (the
+   second check above), so the difference is exactly the number of lost
+   revoke entries. The count reads only the `"kind":` key, which
+   `audit verify` binds once per line to the entry's own kind. It cannot
+   see a revocation made after the latest saved export: the restore loses
+   that one without a trace in either file (T-03-207). So take a saved
+   export after every revocation (see
+   [revoke.md](revoke.md#4-the-audit-log-after-a-revocation)). The stop
+   and both counts are checked against this text in CI
+   (`TestRestoreRunbookChecks`); a restore that loses a revocation has not
+   been run (**UNVERIFIED**).
+
    **Release the hold** when step 2 passed: after the first comparison
-   passed, or after both checks of the saved export passed and you
-   compared the versions. Check the clock first (see [Snapshot restore:
+   passed, or after both checks of the saved export passed, you compared
+   the versions and the saved export has no more revoke entries than the
+   restored one. Check the clock first (see [Snapshot restore:
    check the clock first](#snapshot-restore-check-the-clock-first)), make sure the firewall rule keeps users
    away, and then, as root:
 

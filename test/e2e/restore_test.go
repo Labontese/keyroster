@@ -219,17 +219,22 @@ EOF`
 	// restoreSavedSource is step 2's rule for where the saved export comes
 	// from, before the first comparison reads it.
 	restoreSavedSource = "That saved export must come from storage that no restore rolled back"
+	// restoreRevokeStop is step 2's stop for a restore that lost a
+	// revocation (owner decision 2026-10-25, 03-03 plan check, Q2): after
+	// the saved export is verified and before the release.
+	restoreRevokeStop = "If the saved export has more revoke entries than the restored export, the restore lost a revocation: do not release the hold."
 )
 
 var restoreVMBooted = []string{"link_down", "qm rollback <id>", "qm start <id>"}
 
 // restoreSavedGreps are the runbook's greps of the saved export: step 2's
-// bundle version and directory install count, step 3's list and step 3's
-// extraction. restoreSavedGrep finds any grep of it.
+// bundle version, directory install count and revoke count (03-03), step
+// 3's list and step 3's extraction. restoreSavedGrep finds any grep of it.
 var (
 	restoreSavedGreps = []string{
 		`grep -o '"bundle_version":[0-9]*' /root/latest-saved.jsonl | tail -n 1`,
 		`grep -c '"kind":"directory_install"' /root/latest-saved.jsonl`,
+		`grep -c '"kind":"revoke"' /root/latest-saved.jsonl`,
 		`grep -n -o '"kind":"\(bundle\|directory\)_install"' /root/latest-saved.jsonl`,
 		`grep '"kind":"directory_install"' "$SAVED"`,
 	}
@@ -351,6 +356,10 @@ func TestRestoreRunbookChecks(t *testing.T) {
 	if release <= stop || release >= step3 {
 		t.Errorf("signer-install.md does not release the hold between step 2's checks and step 3: checks end at %d, release at %d, step 3 at %d",
 			stop, release, step3)
+	}
+	if revokeStop := pos("stop for a restore that lost a revocation", restoreRevokeStop); revokeStop <= stop || revokeStop >= release {
+		t.Errorf("signer-install.md does not stop a restore that lost a revocation after the saved export is verified and before the release: %q at %d, checks end at %d, release at %d",
+			restoreRevokeStop, revokeStop, stop, release)
 	}
 	for _, g := range restoreSavedGreps {
 		pos("grep of the saved export", g)
