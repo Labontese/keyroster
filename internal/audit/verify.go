@@ -552,7 +552,14 @@ func certTypeName(t uint32) string {
 // the leaf bytes and the checkpoint, and only after checking them:
 //
 //   - strict JSONL: leaf indices exactly 0..n-1, exactly one checkpoint
-//     line and it is last; the informational "decoded" objects are ignored
+//     line and it is last; the "decoded" objects are informational, except
+//     for the fields the restore runbook reads with grep (03-02,
+//     checkGrepFields and checkReplayFields), which must be the leaf's own:
+//     "kind" once on every leaf line; "bundle_version" once on every
+//     bundle_install line; on a directory_install line, "version" once
+//     where present, and "directory" and "sigs" once each, both or
+//     neither, as the standard base64 of its document and signatures; and
+//     none of the last four on a line of another kind
 //   - every leaf decodes, records its own index, and leaf times never
 //     decrease
 //   - the first bundle_install entry holds a genesis bundle (version 1,
