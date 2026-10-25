@@ -157,9 +157,11 @@ log does not anchor. Before the ops key signs a new KRL, the signer
 requires the table to hold exactly the entries its revoke log entries
 record. A row deleted, added or changed outside the signer (another
 process writing the state database) is refused: nothing of the
-revocation is kept, the KRL in force stays, and the signer stops
-answering until it is restarted. It then refuses to start with the same
-reason, as `keyroster-signer doctor` reports. Find and stop whatever
+revocation is kept, and the KRL in force stays published and served.
+From then on the signer refuses every request that writes to the audit
+log (issuance, login, revocation) until it is restarted; the unit test
+checks issuance. On restart it refuses to start with the same reason, as
+`keyroster-signer doctor` reports. Find and stop whatever
 wrote the database. **UNVERIFIED**: no recovery procedure has been
 written or run. The refusal ran in the signer's unit tests
 (`TestRevocationsChangedWhileRunning`, `TestRevocationsNotLogged`).
