@@ -410,6 +410,19 @@ it before you release the hold. The admin's `keyroster directory install` goes t
 server, so stopping it is not an option. (UNVERIFIED: no test blocks user
 access.)
 
+**Taking a file backup of `signer.db`.** No other document describes
+it, and keyroster-signer has no backup command. Copy `signer.db` and its
+`-wal` and `-shm` files, those that exist, as one set, and only while
+the signer is stopped and cannot start: run the hold block above, copy
+the files into a directory of mode 0700 that only root can read, then
+run step 2's release block below and start the signer again. A copy of
+a running signer's files is not a backup, because SQLite may write to
+them during the copy. An online copy (SQLite's `.backup` command, or
+`VACUUM INTO` on a read-only connection, run as keyroster-signer) needs
+the `sqlite3` program, which this runbook does not install, and has not
+been tried (UNVERIFIED). Keep backups, like saved exports, off the
+signer VM's disk.
+
 **From a file backup of `signer.db`:** with the hold in force, replace
 `signer.db` and its `-wal` and `-shm` files together with those in the
 backup directory `<backup>` (an absolute path). Files the backup does not
