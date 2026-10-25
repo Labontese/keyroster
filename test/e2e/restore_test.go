@@ -65,14 +65,16 @@ func requireReplayBlock(t *testing.T, runbook string) {
 // restoreRunbookChecks are the instructions of the same runbook section
 // that TestRestoreReplaysLostDirectory carries out with its own pins and
 // paths (exportLog and auditVerifyPins) rather than as the runbook's text:
-// step 1's export of the restored log, step 2's two audit verify runs of
-// the saved export, and the export and the two audit verify runs of the
+// step 1's export of the restored log, step 2's audit verify of the
+// restored export on its own and its two audit verify runs of the saved
+// export, and the export and the two audit verify runs of the
 // post-replay log ("After the replay, the new export is the baseline").
 // TestRestoreRunbookChecks requires each in the runbook, so removing one
 // of these instructions fails the e2e suite as removing an extraction
 // line does.
 var restoreRunbookChecks = []string{
 	"--out /tmp/restored.jsonl",
+	restoreVerify + "\n/tmp/restored.jsonl",
 	restoreVerify + "\n/root/latest-saved.jsonl",
 	restoreVerify + "\n--previous /tmp/restored.jsonl /root/latest-saved.jsonl",
 	"`--out /tmp/after-replay.jsonl`",
@@ -88,7 +90,15 @@ const restoreVerify = `keyroster audit verify --pin SHA256:<A from paper> --pin 
 // first command fails, whatever that reports, and before any grep reads
 // the saved export.
 const (
-	// restoreFirstCheck is the end of step 2's first command.
+	// restoreRestoredVerify is step 2's audit verify of the restored
+	// export on its own (round 4), and restoreRestoredStop what to do when
+	// it fails. Both come before step 2's first comparison: Verify reports
+	// log shrank or log rewritten only after the restored export verified,
+	// but any other refusal of the comparison may come from the restored
+	// export itself.
+	restoreRestoredVerify = restoreVerify + "\n/tmp/restored.jsonl"
+	restoreRestoredStop   = "It must pass. If it fails, do not compare it with anything and read nothing from it: stop there"
+	// restoreFirstCheck is the end of step 2's first comparison.
 	restoreFirstCheck = `--previous /root/latest-saved.jsonl /tmp/restored.jsonl`
 	// restoreSavedVerify is the two audit verify runs of the saved export.
 	restoreSavedVerify = restoreVerify + "\n/root/latest-saved.jsonl\n" +
@@ -113,6 +123,8 @@ var (
 		`grep '"kind":"directory_install"' "$SAVED"`,
 	}
 	restoreSavedGrep = regexp.MustCompile(`grep (?:-[a-zA-Z]+ )*'[^']*' (?:/root/latest-saved\.jsonl|"\$SAVED")`)
+	// restoreRestoredGrep finds any grep of the restored export.
+	restoreRestoredGrep = regexp.MustCompile(`grep (?:-[a-zA-Z]+ )*'[^']*' /tmp/restored\.jsonl`)
 )
 
 // TestRestoreRunbookChecks: signer-install.md still has every instruction
@@ -120,7 +132,9 @@ var (
 // every line's leading and trailing space trimmed; a check of more than
 // one line must be whole lines of the runbook. Step 2's verification of
 // the saved export must also be unconditional on what the first command
-// reports and come before every grep of the saved export (round 3).
+// reports and come before every grep of the saved export (round 3), and
+// the restored export must verify on its own before the first comparison
+// and before every grep of it (round 4).
 func TestRestoreRunbookChecks(t *testing.T) {
 	trim := func(s string) string {
 		l := strings.Split(s, "\n")
@@ -162,7 +176,13 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		}
 		return i
 	}
+	restoredVerify := pos("audit verify of the restored export on its own", restoreRestoredVerify)
+	restoredStop := pos("rule for a restored export that does not verify", restoreRestoredStop)
 	first := pos("step 2 first command", restoreFirstCheck)
+	if restoredVerify >= restoredStop || restoredStop >= first {
+		t.Errorf("signer-install.md step 2 does not verify the restored export on its own first: its audit verify at %d, %q at %d, the first comparison at %d",
+			restoredVerify, restoreRestoredStop, restoredStop, first)
+	}
 	cond := pos("unconditional verification of the saved export", restoreSavedVerifyIf)
 	block := pos("verification of the saved export", restoreSavedVerify)
 	stop := pos("rule for a saved export that does not verify", restoreSavedStop)
@@ -180,6 +200,15 @@ func TestRestoreRunbookChecks(t *testing.T) {
 	for _, g := range greps {
 		if g[0] < stop {
 			t.Errorf("signer-install.md greps the saved export (%q) before it is verified", section[g[0]:g[1]])
+		}
+	}
+	rgreps := restoreRestoredGrep.FindAllStringIndex(section, -1)
+	if len(rgreps) < 2 {
+		t.Errorf("found %d greps of the restored export, want at least 2 (step 2's bundle version and directory install count)", len(rgreps))
+	}
+	for _, g := range rgreps {
+		if g[0] < restoredStop {
+			t.Errorf("signer-install.md greps the restored export (%q) before it is verified on its own", section[g[0]:g[1]])
 		}
 	}
 }
@@ -250,8 +279,12 @@ func TestRestoreReplaysLostDirectory(t *testing.T) {
 	if resp, _ := signerDirectory(t, env); resp.Version != 1 {
 		t.Fatalf("restored signer directory version %d, want 1", resp.Version)
 	}
-	// Step 2: the saved export verifies on its own pins (above), and the
-	// restored log is a prefix of it.
+	// Step 2: the restored export verifies on its own, the saved export
+	// verifies on its own pins (above), and the restored log is a prefix
+	// of it.
+	if code, out := auditVerifyPins(t, env.Signer.RootFingerprints, restored); code != 0 || !strings.Contains(out, "directory installs 1") {
+		t.Fatalf("audit verify of the restored export: exit %d:\n%s", code, out)
+	}
 	if code, out := auditVerifyPins(t, env.Signer.RootFingerprints, saved, "--previous", restored); code != 0 {
 		t.Fatalf("audit verify --previous <restored export> <saved export>: exit %d:\n%s", code, out)
 	}

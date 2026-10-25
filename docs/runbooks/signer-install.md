@@ -362,7 +362,22 @@ Before starting the signer after a restore:
      keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/restored.jsonl
    ```
 
-2. Compare it with the latest export you kept from before the restore:
+2. Verify the restored export on its own first:
+
+   ```
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     /tmp/restored.jsonl
+   ```
+
+   It must pass. If it fails, do not compare it with anything and read
+   nothing from it: stop there, keep the signer stopped, record the result
+   in the operations log, and escalate; this runbook does not cover that
+   case. The comparisons and the `grep` commands below read the restored
+   export's fields as well as the saved export's, and only this command
+   checks every entry of the restored export.
+
+   Then compare it with the latest export you kept from before the
+   restore:
 
    ```
    keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
@@ -407,8 +422,10 @@ Before starting the signer after a restore:
    restore, for example because it auto-started before step 1 stopped it:
    the restored log is then no prefix of the saved one, and its lost
    entries cannot be told apart this way. The command above does not do
-   these checks: it verifies the restored export and reads only the last
-   checkpoint of the saved one, and what it reports looks the same for a
+   these checks: it verifies the restored export (which the standalone
+   command above has already checked; `log shrank` and `log rewritten` are
+   reported only after it did) and reads only the last checkpoint of the
+   saved one, and what it reports looks the same for a
    log that was cut back as for one that was cut back and rewritten. The
    first command checks every entry of the saved export, including the
    decoded fields that the `grep` commands below and in step 3 read (see
@@ -574,8 +591,9 @@ Before starting the signer after a restore:
 > passkey: a file-level restore of `signer.db` (its `-wal` and `-shm`
 > files replaced together, or SQLite replays the newer WAL onto the older
 > file), the signer then reporting the older version, the export of the
-> restored log taken while the signer is stopped, step 2's two `audit
-> verify` runs of the saved export (on its own pins, and with `--previous`
+> restored log taken while the signer is stopped, step 2's `audit verify`
+> of the restored export on its own, step 2's two `audit verify` runs of
+> the saved export (on its own pins, and with `--previous`
 > set to the restored export), step 3's extraction commands above
 > verbatim, the wait, `keyroster directory
 > install` of the written proposal with the signer then reporting the lost
@@ -586,7 +604,9 @@ Before starting the signer after a restore:
 > **UNVERIFIED:** a VM snapshot restore, the replay of a lost
 > `bundle_install`, a lost version that binds a passkey and the re-invite
 > after it, keeping users away from the server, the version counts of
-> step 2 against a real restored signer, and step 2 for a restored log
+> step 2 against a real restored signer, the stop in step 2 for a
+> restored export that does not verify on its own (the refusals
+> themselves are run in the audit unit tests), and step 2 for a restored log
 > reported as `log rewritten` (for example a restored signer that logged
 > entries before step 1 stopped it), where the saved export's prefix check
 > fails and the procedure stops. The `grep` patterns of step 2 match
