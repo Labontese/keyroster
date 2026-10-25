@@ -392,7 +392,16 @@ Before starting the signer after a restore:
    version". A Phase 1 binary usually stops earlier, at the bundle whose
    policy added the WebAuthn RP (`json: unknown field "webauthn"`), which
    is not a sign of tampering; see the compatibility note in
-   [root-ceremony.md](root-ceremony.md#change-the-policy-successor-policy-for-example-add-the-webauthn-rp). `TestAuditLoginAcrossPolicyChange` (e2e) runs this command on two
+   [root-ceremony.md](root-ceremony.md#change-the-policy-successor-policy-for-example-add-the-webauthn-rp).
+   Until plan 03-03, every `audit verify` binary, the current one
+   included, refuses a log that contains a `revoke` or `krl_publish`
+   entry (the signer writes them since plan 03-01) with
+   `audit: entry N (revoke): not verifiable by this version` (or
+   `(krl_publish)`). That is not tampering either, but step 2 cannot be
+   completed for such a log until 03-03 adds their checks: the standalone
+   verify above already refuses it, so stop and escalate as it says; see
+   [revoke.md](revoke.md#4-the-audit-log-after-a-revocation).
+   `TestAuditLoginAcrossPolicyChange` (e2e) runs this command on two
    exports of a signer with a directory and login certificates: the later
    export verifies with `--previous` set to the earlier one, and the
    earlier export is refused as `log shrank` with `--previous` set to the
