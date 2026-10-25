@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +76,37 @@ type Server struct {
 
 	krl         *krlView    // the cached GET /api/v1/krl answer, nil when there is none
 	krlInflight *krlRefresh // the KRL refresh in flight, or nil
+
+	// patterns are the patterns registered on the Server's mux, in
+	// registration order, as its routeMux recorded them (03-02). Tests
+	// read them; nothing else does.
+	patterns []string
+}
+
+// routeMux is an http.ServeMux that records every pattern registered on
+// it, in its own list, before it registers it, so the list is exactly
+// what the mux serves (03-02, TestNoNonPasskeySignInRoute). Every mux of
+// this package is built with newRouteMux; the single_mux test refuses any
+// other http.NewServeMux.
+type routeMux struct {
+	*http.ServeMux
+	patterns []string
+}
+
+func newRouteMux() *routeMux {
+	return &routeMux{ServeMux: http.NewServeMux()}
+}
+
+// Handle records pattern, then registers h for it.
+func (m *routeMux) Handle(pattern string, h http.Handler) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.Handle(pattern, h)
+}
+
+// HandleFunc records pattern, then registers h for it.
+func (m *routeMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.HandleFunc(pattern, h)
 }
 
 // New builds a Server that reaches the signer at cfg.SignerSocket.
@@ -125,7 +157,7 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
 	}
-	mux := http.NewServeMux()
+	mux := newRouteMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /static/", s.handleStatic)
 	mux.HandleFunc("GET "+serverclient.TrustPath, s.handleTrust)
@@ -166,6 +198,7 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	mux.HandleFunc("GET "+loginPageRoute, s.handleLoginPage)
 	mux.HandleFunc("POST "+loginAssertionRoute, s.handleLoginAssertion)
 	mux.HandleFunc("POST "+loginRedeemRoute, s.handleLoginRedeem)
+	s.patterns = slices.Clone(mux.patterns)
 	s.handler = secure(mux)
 	return s, nil
 }

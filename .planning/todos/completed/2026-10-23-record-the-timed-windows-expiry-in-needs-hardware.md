@@ -29,3 +29,7 @@ needs-hardware.md is a covered file of the phase 2 verification and lives on mai
   - one key only: no 8 h key was in the agent alongside it in that run;
   - E-IN-02 still open.
 - Give dates and order only, no times of day next to any WebPKI certificate step (deferred-items.md, 02-13 rule). This run had none.
+
+## Resolution
+
+Resolved in 03-02 (PR from branch `p03/02-phase2-followups`). needs-hardware.md records the 2026-10-23 run with its limits and that E-IN-02 is fixed in 03-02 but not re-timed on Windows.

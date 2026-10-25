@@ -69,7 +69,9 @@ type loginServer struct {
 	roles   []loginOptionsRole
 	logins  map[string]*fakeLogin
 	redeems int
-	serial  uint64
+	// beginReqs counts every POST to the begin route, answered or not.
+	beginReqs int
+	serial    uint64
 	// certFor, when set, builds the certificate redeem returns instead of
 	// the honest one.
 	certFor func(t *testing.T, l *fakeLogin) []byte
@@ -185,6 +187,9 @@ func (e *loginServer) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(serverclient.CustodyHeader, e.custom)
 	e.mu.Lock()
 	over := e.override[r.URL.Path]
+	if r.Method == http.MethodPost && r.URL.Path == loginBeginRoute {
+		e.beginReqs++
+	}
 	e.mu.Unlock()
 	if over != nil {
 		over(w)
@@ -283,6 +288,22 @@ func (e *loginServer) begins() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.logins)
+}
+
+// calls returns how many begin and redeem requests reached the server.
+func (e *loginServer) calls() (begins, redeems int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.beginReqs, e.redeems
+}
+
+// requireCalls fails unless exactly begins begin requests and redeems
+// redeem requests reached the server.
+func (e *loginServer) requireCalls(t *testing.T, begins, redeems int) {
+	t.Helper()
+	if b, r := e.calls(); b != begins || r != redeems {
+		t.Fatalf("the server got %d begin and %d redeem requests, want %d and %d", b, r, begins, redeems)
+	}
 }
 
 func (e *loginServer) login(id string) *fakeLogin {
@@ -467,18 +488,24 @@ func (e *loginServer) get(t *testing.T, c *http.Client, u string) string {
 
 // recordingAgent is an in-memory agent served over a connection that
 // records every add and can refuse a constrained add or leave
-// certificates out of its listing.
+// certificates out of its listing. The preflight's throwaway key is
+// recorded apart from the login's adds, in probes.
 type recordingAgent struct {
 	agent.Agent
 	mu                sync.Mutex
 	adds              []agent.AddedKey
+	probes            []agent.AddedKey
 	refuseConstrained bool
 	hideCerts         bool
 }
 
 func (a *recordingAgent) Add(k agent.AddedKey) error {
 	a.mu.Lock()
-	a.adds = append(a.adds, k)
+	if k.Comment == loginProbeComment {
+		a.probes = append(a.probes, k)
+	} else {
+		a.adds = append(a.adds, k)
+	}
 	refuse := a.refuseConstrained && k.LifetimeSecs > 0
 	a.mu.Unlock()
 	if refuse {
@@ -512,6 +539,12 @@ func (a *recordingAgent) added() []agent.AddedKey {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]agent.AddedKey(nil), a.adds...)
+}
+
+func (a *recordingAgent) probed() []agent.AddedKey {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]agent.AddedKey(nil), a.probes...)
 }
 
 // useRecordingAgent replaces connectLoginAgent with a recordingAgent
@@ -784,21 +817,69 @@ func TestLoginRefusals(t *testing.T) {
 		}
 	})
 	t.Run("constrained_add_refused_no_retry", func(t *testing.T) {
+		// An agent that refuses the lifetime constraint refuses the
+		// preflight's throwaway key, so the login stops before the begin
+		// (03-02 pre-merge review): no certificate is issued, and nothing
+		// is retried without the constraint.
 		e := newLoginServer(t)
 		a := useRecordingAgent(t)
 		a.refuseConstrained = true
 		dirs := useEmptyHomes(t)
-		stderr, wait := e.start(t)
-		e.drive(t, stderr)
-		requireLoginRefused(t, wait(), "not retrying without it")
-		adds := a.added()
-		if len(adds) != 1 || adds[0].LifetimeSecs == 0 {
-			t.Fatalf("adds = %d (first lifetime %v), want exactly one constrained add and no unconstrained retry", len(adds), adds)
+		_, wait := e.start(t)
+		requireLoginRefused(t, wait(), "does not take a key with a lifetime constraint (it is locked, or refuses such keys), so no login was started")
+		e.requireCalls(t, 0, 0)
+		if probes := a.probed(); len(probes) != 1 || probes[0].LifetimeSecs != loginProbeLifetime {
+			t.Fatalf("probes = %v, want exactly one constrained test key and no unconstrained retry", probes)
+		}
+		if adds := a.added(); len(adds) != 0 {
+			t.Fatalf("login adds = %d, want none", len(adds))
 		}
 		if keys, _ := a.Agent.List(); len(keys) != 0 {
 			t.Fatalf("the agent holds %d keys", len(keys))
 		}
 		requireNoFiles(t, dirs)
+	})
+	t.Run("locked_agent_no_begin", func(t *testing.T) {
+		// A locked agent answers the preflight's List with an empty listing
+		// and refuses every add; the throwaway key finds it out before the
+		// begin, so the signer issues nothing (03-02 pre-merge review).
+		e := newLoginServer(t)
+		a := useRecordingAgent(t)
+		if err := a.Lock([]byte("pw")); err != nil {
+			t.Fatal(err)
+		}
+		_, wait := e.start(t)
+		requireLoginRefused(t, wait(), "(it is locked, or refuses such keys), so no login was started")
+		e.requireCalls(t, 0, 0)
+		if adds := a.added(); len(adds) != 0 {
+			t.Fatalf("login adds = %d, want none", len(adds))
+		}
+	})
+	t.Run("probe_key_removed", func(t *testing.T) {
+		// A login that succeeds leaves only its certificate key in the
+		// agent: the preflight's throwaway key is removed again.
+		e := newLoginServer(t)
+		a := useRecordingAgent(t)
+		stderr, wait := e.start(t)
+		e.drive(t, stderr)
+		if r := wait(); r.code != 0 {
+			t.Fatalf("login exit %d:\n%s", r.code, r.stderr)
+		}
+		if probes := a.probed(); len(probes) != 1 {
+			t.Fatalf("probes = %d, want 1", len(probes))
+		}
+		keys, err := a.Agent.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range keys {
+			if k.Comment == loginProbeComment {
+				t.Fatal("the preflight's test key is still in the agent")
+			}
+		}
+		if len(keys) != 1 {
+			t.Fatalf("the agent holds %d keys, want the login's certificate only", len(keys))
+		}
 	})
 	t.Run("listing_without_cert_refused", func(t *testing.T) {
 		e := newLoginServer(t)
@@ -1106,37 +1187,172 @@ func TestLoginRefusals(t *testing.T) {
 }
 
 // TestLoginFlowFakeServer runs keyroster login end to end against the fake
-// server, with the certificate landing in the platform agent: a real
+// server. happy_path lands the certificate in the platform agent: a real
 // ssh-agent on Linux and macOS, keyroster's own agent (winagent.Serve on a
-// test pipe) on Windows.
+// test pipe) on Windows. The other cases pin the order of the agent and
+// the issuance (03-02): no usable agent means no begin and no certificate
+// (E-IN-01), and the agent lifetime is computed at the add (E-IN-02).
 func TestLoginFlowFakeServer(t *testing.T) {
-	list := startLoginTestAgent(t)
-	e := newLoginServer(t)
-	stderr, wait := e.start(t)
-	l := e.drive(t, stderr)
-	r := wait()
-	if r.code != 0 {
-		t.Fatalf("keyroster login exit %d:\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
-	}
-	keys := list(t)
-	found := false
-	for _, k := range keys {
-		pk, err := ssh.ParsePublicKey(k.Blob)
-		if err != nil {
-			continue
+	t.Run("happy_path", func(t *testing.T) {
+		list := startLoginTestAgent(t)
+		e := newLoginServer(t)
+		stderr, wait := e.start(t)
+		l := e.drive(t, stderr)
+		r := wait()
+		if r.code != 0 {
+			t.Fatalf("keyroster login exit %d:\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
 		}
-		if c, ok := pk.(*ssh.Certificate); ok && bytes.Equal(c.Key.Marshal(), l.req.SubjectKey) && c.KeyId == k.Comment {
-			found = true
+		keys := list(t)
+		found := false
+		for _, k := range keys {
+			pk, err := ssh.ParsePublicKey(k.Blob)
+			if err != nil {
+				continue
+			}
+			if c, ok := pk.(*ssh.Certificate); ok && bytes.Equal(c.Key.Marshal(), l.req.SubjectKey) && c.KeyId == k.Comment {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the agent lists no certificate for the login key (%d keys)", len(keys))
+		}
+		for _, want := range []string{"Logged in as alice: principals role:dev, role:ops, u:alice", "Serial: ", "Key ID: kr2/ca=user/sub=alice/"} {
+			if !strings.Contains(r.stdout, want) {
+				t.Fatalf("stdout lacks %q:\n%s", want, r.stdout)
+			}
+		}
+		e.requireCalls(t, 1, 1)
+	})
+	t.Run("no_agent_no_begin", func(t *testing.T) {
+		// No usable agent (Unix: SSH_AUTH_SOCK unset, the default seam;
+		// Windows: Ensure's owner check fails): the login stops with the
+		// agent instructions before it begins, so no begin and no redeem
+		// reach the server and the signer issues nothing.
+		e := newLoginServer(t)
+		want := useUnusableLoginAgent(t)
+		_, wait := e.start(t)
+		r := wait()
+		requireLoginRefused(t, r, want)
+		e.requireCalls(t, 0, 0)
+		if strings.Contains(r.stderr, "Approve this login") || strings.Contains(r.stdout, "Serial:") {
+			t.Fatalf("a login without an agent went on:\nstdout:\n%s\nstderr:\n%s", r.stdout, r.stderr)
+		}
+	})
+	// steppedClock fixes loginNow at a whole second T and returns arm:
+	// after arm(d), the next reading of loginNow is still T and every
+	// later one is T+d. The fake server arms it once it has built the
+	// certificate, so checkLoginCert's reading is T and the reading for the
+	// agent add is T+d: d stands for whatever time passes between the
+	// check and the add.
+	steppedClock := func(t *testing.T) (start time.Time, arm func(d time.Duration)) {
+		t.Helper()
+		start = useLoginClock(t)
+		var mu sync.Mutex
+		cur, step := start, time.Duration(0)
+		armed := false
+		loginNow = func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			v := cur
+			if armed {
+				armed = false
+				cur = cur.Add(step)
+			}
+			return v
+		}
+		return start, func(d time.Duration) {
+			mu.Lock()
+			defer mu.Unlock()
+			armed, step = true, d
 		}
 	}
-	if !found {
-		t.Fatalf("the agent lists no certificate for the login key (%d keys)", len(keys))
-	}
-	for _, want := range []string{"Logged in as alice: principals role:dev, role:ops, u:alice", "Serial: ", "Key ID: kr2/ca=user/sub=alice/"} {
-		if !strings.Contains(r.stdout, want) {
-			t.Fatalf("stdout lacks %q:\n%s", want, r.stdout)
+	// armAfterCert makes redeem return the honest certificate and arm the
+	// clock after building it (the build reads the fake server's clock).
+	armAfterCert := func(e *loginServer, arm func(time.Duration), d time.Duration) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.certFor = func(t *testing.T, l *fakeLogin) []byte {
+			raw := e.honestCert(t, l)
+			arm(d)
+			return raw
 		}
 	}
+	t.Run("lifetime_recomputed_at_add", func(t *testing.T) {
+		start, arm := steppedClock(t)
+		e := newLoginServer(t)
+		a := useRecordingAgent(t)
+		armAfterCert(e, arm, 4*time.Second)
+		stderr, wait := e.start(t, "--role", "ops", "--ttl", "5m")
+		e.drive(t, stderr)
+		if r := wait(); r.code != 0 {
+			t.Fatalf("login exit %d:\n%s", r.code, r.stderr)
+		}
+		adds := a.added()
+		if len(adds) != 1 || adds[0].Certificate == nil {
+			t.Fatalf("adds = %v, want one certificate add", adds)
+		}
+		// At the check the certificate had ValidBefore - (T + 1 s) left on
+		// the server's clock (skew 0, plus checkLoginCert's extra second);
+		// 4 s later, at the add, 4 s less.
+		vb := int64(adds[0].Certificate.ValidBefore) //nolint:gosec // G115: a test certificate
+		atCheck := vb - (start.Unix() + 1)
+		if got, want := int64(adds[0].LifetimeSecs), atCheck-4; got != want {
+			t.Fatalf("agent lifetime %d s, want %d s: the %d s left at the check minus the 4 s before the add", got, want, atCheck)
+		}
+		e.requireCalls(t, 1, 1)
+	})
+	t.Run("too_little_left_at_add_refused", func(t *testing.T) {
+		// A 2-minute certificate has 119 s left at the check; 60 s later,
+		// at the add, 59 s, below minLoginRemaining: nothing is added.
+		_, arm := steppedClock(t)
+		e := newLoginServer(t)
+		a := useRecordingAgent(t)
+		armAfterCert(e, arm, 60*time.Second)
+		stderr, wait := e.start(t, "--role", "ops", "--ttl", "2m")
+		e.drive(t, stderr)
+		requireLoginRefused(t, wait(), fmt.Sprintf("the certificate does not check out (it has less than %d s left), so nothing was added to the agent", minLoginRemaining))
+		if n := len(a.added()); n != 0 {
+			t.Fatalf("agent adds = %d, want none", n)
+		}
+	})
+	t.Run("agent_lost_after_preflight", func(t *testing.T) {
+		// The agent answers the preflight (the List, and the add and the
+		// remove of the throwaway key) and then goes away. The login was
+		// begun and redeemed, so the signer issued and logged a
+		// certificate, but the add fails and the login exits non-zero:
+		// the residual of E-IN-01, an unusable grant whose key dies with
+		// this process.
+		e := newLoginServer(t)
+		prev := connectLoginAgent
+		connectLoginAgent = func(context.Context) (net.Conn, error) {
+			client, server := net.Pipe()
+			go func() {
+				defer func() { _ = server.Close() }()
+				for _, answer := range [][]byte{
+					{0, 0, 0, 5, 12, 0, 0, 0, 0}, // SSH_AGENT_IDENTITIES_ANSWER (12) with no keys
+					{0, 0, 0, 1, 6},              // SSH_AGENT_SUCCESS (6) to the test key's add
+					{0, 0, 0, 1, 6},              // and to its remove
+				} {
+					var n [4]byte
+					if _, err := io.ReadFull(server, n[:]); err != nil {
+						return
+					}
+					if _, err := io.CopyN(io.Discard, server, int64(n[0])<<24|int64(n[1])<<16|int64(n[2])<<8|int64(n[3])); err != nil {
+						return
+					}
+					if _, err := server.Write(answer); err != nil {
+						return
+					}
+				}
+			}()
+			return client, nil
+		}
+		t.Cleanup(func() { connectLoginAgent = prev })
+		stderr, wait := e.start(t)
+		e.drive(t, stderr)
+		requireLoginRefused(t, wait(), "the agent refused the key with its lifetime constraint, although it took the check's test key before the login (it may have been locked or stopped since); not retrying without it")
+		e.requireCalls(t, 1, 1)
+	})
 }
 
 // lastLine returns the last non-empty line of s.

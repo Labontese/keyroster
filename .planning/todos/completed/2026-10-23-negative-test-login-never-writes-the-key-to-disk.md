@@ -23,3 +23,7 @@ Today the evidence is that login.go, loginagent_*.go and loopback.go contain no 
 - Run the login flow test (TestLoginFlowFakeServer or a variant) with HOME, the config dir and TMPDIR pointed at empty temporary directories. Afterwards, assert that no file contains the private key bytes or an OpenSSH private-key header.
 - Optionally add a forbidigo/static rule that bans `os.WriteFile`, `os.Create` and `os.OpenFile` in the login files.
 - Make sure the test fails when a dummy key write is added (mutant check).
+
+## Resolution
+
+Resolved in 03-02 (PR from branch `p03/02-phase2-followups`). `TestLoginNeverWritesKey` (cmd/keyroster/login_disk_test.go), with a mutant check; no forbidigo rule was added.

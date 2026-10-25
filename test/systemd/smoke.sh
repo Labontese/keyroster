@@ -29,7 +29,16 @@
 #     systemd reports its sandbox settings (MemoryDenyWriteExecute,
 #     localhost-only IP, address families);
 #   - systemd-analyze security rates the signer unit at or below THRESHOLD
-#     and the agent unit at or below AGENT_THRESHOLD (exposure x10; 20 = 2.0).
+#     and the agent unit at or below AGENT_THRESHOLD (exposure x10; 20 = 2.0);
+#   - signer-install.md's restore hold refuses every start of the signer and
+#     server units, its file restore refuses while signer.lock is held, puts
+#     signer.db and the backup's -wal back as keyroster-signer 0600 and
+#     removes a stale -shm the backup does not have, and after its release
+#     the signer starts and doctor passes, also
+#     when it had crash-looped into its start limit before the hold;
+#   - signer-install.md's step 3 copy of the replay proposal to an admin
+#     refuses a link the admin planted, changes nothing it points at, and
+#     otherwise writes the files as the admin.
 #
 # The TPM drop-in is not installed here: the runner has no TPM, and its
 # SupplementaryGroups=tss needs the tss group. The TPM path under systemd is
@@ -308,5 +317,198 @@ systemd-analyze security --no-pager --threshold="$AGENT_THRESHOLD" keyroster-sig
 
 step "systemd-analyze security, signer unit (threshold $THRESHOLD = exposure $((THRESHOLD / 10)).$((THRESHOLD % 10)))"
 systemd-analyze security --no-pager --threshold="$THRESHOLD" keyroster-signer.service
+
+step "Restore hold, file restore and release (docs/runbooks/signer-install.md, verbatim)"
+# The three blocks below are the runbook's, as TestRestoreRunbookChecks
+# (test/e2e/restore_test.go) requires. keyroster-server's unit is installed
+# only to be held: no server runs here.
+install -m 0644 "$repo/deploy/systemd/keyroster-server.service" /etc/systemd/system/
+systemctl daemon-reload
+# The signer to be restored crash-looped (a damaged database, say) until its
+# start limit stopped it. A temporary drop-in makes it fail at once and
+# restart quickly; it is removed before the hold. The release must reset
+# the unit, or the start after it is refused.
+crash=/etc/systemd/system/keyroster-signer.service.d/smoke-crash.conf
+install -d -m 0755 /etc/systemd/system/keyroster-signer.service.d
+printf '[Service]\nExecStart=\nExecStart=/bin/false\nRestartSec=100ms\n' >"$crash"
+systemctl daemon-reload
+systemctl restart keyroster-signer.service || true
+for _ in $(seq 1 100); do
+	[ "$(systemctl show -p ActiveState --value keyroster-signer.service)" = failed ] && break
+	sleep 0.1
+done
+systemctl show -p ActiveState,Result,NRestarts keyroster-signer.service
+[ "$(systemctl show -p ActiveState --value keyroster-signer.service)" = failed ] || fail "the crash-looping signer did not stop at its start limit"
+rm "$crash"
+systemctl daemon-reload
+bash -eu -s keyroster-server keyroster-signer <<'EOF'
+test "$#" -gt 0
+for u in "$@"; do
+  install -d -m 0755 "/etc/systemd/system/$u.service.d"
+  printf '[Unit]\nAssertPathExists=/nonexistent-restore-hold\n' >"/etc/systemd/system/$u.service.d/restore-hold.conf"
+done
+systemctl daemon-reload
+for u in "$@"; do
+  systemctl stop "$u.service"
+done
+for u in "$@"; do
+  test "$(systemctl show -p LoadState --value "$u.service")" = loaded
+  systemctl show -p DropInPaths --value "$u.service" | grep -q "/$u.service.d/restore-hold.conf"
+  if systemctl start "$u.service"; then
+    systemctl stop "$u.service"
+    echo "$u.service started: the hold is NOT in force" >&2
+    exit 1
+  fi
+done
+echo "held: $*"
+EOF
+# The refusal is the assertion, not another failure.
+for u in keyroster-server keyroster-signer; do
+	if systemctl start "$u.service" 2>"$work/hold-$u.log"; then
+		fail "$u.service started under the hold"
+	fi
+	cat "$work/hold-$u.log"
+	grep -q "Assertion failed on job for $u.service" "$work/hold-$u.log" || fail "$u.service was refused for another reason than the hold"
+done
+systemctl is-active --quiet keyroster-signer.service && fail "keyroster-signer.service is active under the hold"
+backup=$work/signer-backup
+install -d -m 0700 "$backup"
+for f in signer.db signer.db-wal signer.db-shm; do
+	[ ! -e "$STATE/$f" ] || cp -p "$STATE/$f" "$backup/$f"
+done
+# The backup set has a -wal (empty: a WAL without frames) and no -shm, and
+# the live state directory has stale -wal and -shm files: the restore must
+# replace the -wal with the backup's and remove the -shm. A real WAL with
+# frames is not built here.
+[ -e "$backup/signer.db-wal" ] || : >"$backup/signer.db-wal"
+rm -f "$backup/signer.db-shm"
+for f in signer.db-wal signer.db-shm; do
+	printf 'stale %s\n' "$f" >"$STATE/$f"
+	chown keyroster-signer:keyroster-signer "$STATE/$f"
+	chmod 0600 "$STATE/$f"
+done
+ls -l "$backup" "$STATE"
+file_restore() {
+	bash -eu -s "$1" <<'EOF'
+S=/var/lib/keyroster-signer
+test -e /etc/systemd/system/keyroster-signer.service.d/restore-hold.conf
+st=$(systemctl show -p ActiveState --value keyroster-signer.service)
+if [ "$st" != inactive ] && [ "$st" != failed ]; then
+  echo "keyroster-signer.service is $st: hold it first" >&2
+  exit 1
+fi
+exec 9<"$S/signer.lock"
+if ! flock -n 9; then
+  echo "$S is in use by another keyroster-signer process" >&2
+  exit 1
+fi
+test -s "$1/signer.db"
+rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
+for f in signer.db signer.db-wal signer.db-shm; do
+  if [ -e "$1/$f" ]; then
+    install -o keyroster-signer -g keyroster-signer -m 0600 "$1/$f" "$S/$f"
+  fi
+done
+echo "restored signer.db from $1"
+EOF
+}
+# Another keyroster-signer process (here a stand-in that holds the lock, as
+# serve, ca-init and install-bundle do) makes the file restore refuse before
+# it removes anything.
+flock -o "$STATE/signer.lock" sleep 300 &
+locker=$!
+agent_pids+=("$locker")
+for _ in $(seq 1 50); do
+	flock -n "$STATE/signer.lock" true || break
+	sleep 0.1
+done
+db_before=$(sha256sum "$STATE/signer.db")
+if file_restore "$backup" >"$work/restore-locked.log" 2>&1; then
+	cat "$work/restore-locked.log"
+	fail "the file restore ran while the signer's lock was held"
+fi
+cat "$work/restore-locked.log"
+grep -q 'is in use by another keyroster-signer process' "$work/restore-locked.log" || fail "the file restore refused for another reason than the lock"
+[ "$(sha256sum "$STATE/signer.db")" = "$db_before" ] || fail "the refused file restore changed signer.db"
+grep -qx 'stale signer.db-shm' "$STATE/signer.db-shm" || fail "the refused file restore changed signer.db-shm"
+pkill -P "$locker" sleep || true
+wait "$locker" || true
+file_restore "$backup"
+ls -l "$STATE"
+for f in signer.db signer.db-wal; do
+	[ "$(stat -c '%a %U %G' "$STATE/$f")" = "600 keyroster-signer keyroster-signer" ] || fail "restored $f is $(stat -c '%a %U %G' "$STATE/$f")"
+	cmp "$backup/$f" "$STATE/$f" || fail "restored $f differs from the backup's"
+done
+[ ! -e "$STATE/signer.db-shm" ] || fail "the stale signer.db-shm, which the backup does not have, is still there"
+bash -eu -s keyroster-server keyroster-signer <<'EOF'
+test "$#" -gt 0
+for u in "$@"; do
+  rm "/etc/systemd/system/$u.service.d/restore-hold.conf"
+done
+systemctl daemon-reload
+for u in "$@"; do
+  if systemctl is-failed --quiet "$u.service"; then systemctl reset-failed "$u.service"; fi
+done
+echo "released: $*"
+EOF
+systemctl start keyroster-signer.service
+wait_socket "$SIGNER_SOCK"
+systemctl is-active keyroster-signer.service
+as_signer keyroster-signer doctor --state-dir "$STATE" >"$work/doctor-restore.log" 2>&1 || {
+	cat "$work/doctor-restore.log"
+	fail "doctor failed after the restore"
+}
+cat "$work/doctor-restore.log"
+
+step "Restore step 3: copy the replay proposal to an admin (docs/runbooks/signer-install.md, verbatim)"
+# The block writes as the admin (runuser), and root only reads /root/replay:
+# a link the admin planted at ~/replay-v2 is refused, and the directory of
+# root's that it points at keeps its owner, mode and contents.
+[ ! -e /root/replay ] || fail "/root/replay exists on this host"
+install -d -m 0700 /root/replay /root/replay/v2
+printf '{"version":2}\n' >/root/replay/v2/directory.json
+printf 'sigs\n' >/root/replay/v2/directory.json.sigs
+canary=$work/replay-canary
+install -d -m 0755 "$canary"
+echo keep >"$canary/keep"
+canary_state() {
+	stat -c '%U %G %a' "$canary"
+	ls -A "$canary"
+}
+canary_before=$(canary_state)
+# The modes are set explicitly: on the runner, /home/kradmin has a default
+# ACL (default:user:runner:rwx, default:mask::rwx), under which a directory
+# made with umask 077 alone came out 775 (run 40208370162).
+ls -ld /home/kradmin
+! command -v getfacl >/dev/null || getfacl -p /home/kradmin
+copy_proposal() {
+	bash -eu -s kradmin <<'EOF'
+V=2                                   # the lost directory version
+H=$(getent passwd "$1" | cut -d: -f6)
+test -n "$H"
+runuser -u "$1" -- sh -c 'umask 077 && mkdir -m 0700 "$1"' sh "$H/replay-v$V"
+for f in directory.json directory.json.sigs; do
+  runuser -u "$1" -- sh -c 'umask 077 && set -C && cat >"$1" && chmod 0600 "$1"' sh "$H/replay-v$V/$f" <"/root/replay/v$V/$f"
+done
+echo "copied the proposal of directory version $V to $H/replay-v$V for $1"
+EOF
+}
+as_user kradmin ln -s "$canary" /home/kradmin/replay-v2
+if copy_proposal >"$work/copy-link.log" 2>&1; then
+	cat "$work/copy-link.log"
+	fail "the copy block wrote through a link the admin planted"
+fi
+cat "$work/copy-link.log"
+[ "$(canary_state)" = "$canary_before" ] || fail "the copy block changed the directory a planted link points at: $(canary_state)"
+as_user kradmin rm /home/kradmin/replay-v2
+copy_proposal | tee "$work/copy.log"
+grep -qx 'copied the proposal of directory version 2 to /home/kradmin/replay-v2 for kradmin' "$work/copy.log" || fail "the copy block did not report the copy"
+[ "$(stat -c '%a %U %G' /home/kradmin/replay-v2)" = "700 kradmin kradmin" ] || fail "replay-v2 is $(stat -c '%a %U %G' /home/kradmin/replay-v2)"
+for f in directory.json directory.json.sigs; do
+	[ "$(stat -c '%a %U %G' "/home/kradmin/replay-v2/$f")" = "600 kradmin kradmin" ] || fail "replay-v2/$f is $(stat -c '%a %U %G' "/home/kradmin/replay-v2/$f")"
+	cmp "/root/replay/v2/$f" "/home/kradmin/replay-v2/$f" || fail "replay-v2/$f differs from root's copy"
+done
+[ "$(canary_state)" = "$canary_before" ] || fail "the copy block changed $canary"
+rm -r /root/replay
 
 step "PASS"

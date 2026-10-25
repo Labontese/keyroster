@@ -10,7 +10,9 @@ import (
 )
 
 // connectLoginAgent connects keyroster login to the ssh-agent at
-// SSH_AUTH_SOCK (D-15). It is the one test seam of the login's agent
+// SSH_AUTH_SOCK (D-15). keyroster login calls it once, before it begins
+// the login (03-02), and keeps the connection for the add. It is the one
+// test seam of the login's agent
 // connection, like dialAgent: tests replace it and restore it with
 // t.Cleanup; no environment variable, flag or build tag overrides it.
 //

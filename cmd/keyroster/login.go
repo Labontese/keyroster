@@ -134,7 +134,8 @@ var signerLoginRefusals = []string{
 }
 
 // runLogin is keyroster login [--role R]... [--ttl DURATION] [--no-browser]:
-// the D-12 browser-loopback login. It makes an ephemeral Ed25519 key in
+// the D-12 browser-loopback login. It connects to the ssh-agent before
+// anything is begun (03-02), makes an ephemeral Ed25519 key in
 // memory, builds the login request from the server's options for the
 // configured user (principals and TTL as the selected roles grant them),
 // prints the key's fingerprint, begins the login with PKCE S256 and a
@@ -234,6 +235,26 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 		return err
 	}
 
+	// The agent comes first (03-02, E-IN-01): a login with no usable agent
+	// stops here, before the begin, so the signer issues and logs no
+	// certificate that nobody holds. On Windows this runs winagent.Ensure,
+	// its owner check and its List. A List alone also passes a locked agent,
+	// so a throwaway key with a lifetime constraint is added and removed
+	// as well (probeLoginAgent). The one connection is held until the add
+	// and the listing check.
+	conn, err := connectLoginAgent(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	ag := agent.NewClient(conn)
+	if _, err := ag.List(); err != nil {
+		return fmt.Errorf("the ssh-agent does not answer, so no login was started: %w", err)
+	}
+	if err := probeLoginAgent(ag); err != nil {
+		return err
+	}
+
 	// The ephemeral key: memory only, zeroed on every return path (best
 	// effort; the agent holds its own copy for the certificate's lifetime).
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -312,12 +333,11 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 	if err := l.client.PostJSON(ctx, loginRoutePrefix+begin.LoginID+"/redeem", loginRedeemBody{Code: code, CodeVerifier: verifier}, &redeemed); err != nil {
 		return redeemFailure(err)
 	}
-	now := loginNow()
-	c, remaining, err := checkLoginCert(redeemed.Certificate, l.ca, sshPub, req, plan, now)
+	c, err := checkLoginCert(redeemed.Certificate, l.ca, sshPub, req, plan, loginNow())
 	if err != nil {
-		return fmt.Errorf("login not completed: the certificate does not check out (%w), so nothing was added to the agent; run keyroster login again", err)
+		return certRefused(err)
 	}
-	if err := addLoginToAgent(ctx, priv, c, remaining); err != nil {
+	if err := addLoginToAgent(ag, priv, c, plan.skew); err != nil {
 		return err
 	}
 	until := time.Unix(int64(c.ValidBefore), 0).Local() //nolint:gosec // G115: checked against now above
@@ -500,25 +520,25 @@ func redeemFailure(err error) error {
 // the request ID and exactly the plan's roles, exactly the plan's
 // extensions and no critical option (02-12 pre-merge review), spanning at
 // most the TTL plus cert.Build's backdate,
-// and with at least minLoginRemaining seconds left. It returns the
-// certificate and its remaining whole seconds, counted from that server
-// time rounded up, so the agent lifetime never outlasts the certificate.
-func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueRequest, plan *loginPlan, now time.Time) (*ssh.Certificate, uint32, error) {
+// and with at least minLoginRemaining seconds left (remainingOnServer). It
+// returns the certificate; addLoginToAgent computes the agent lifetime
+// again at the add.
+func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueRequest, plan *loginPlan, now time.Time) (*ssh.Certificate, error) {
 	serverNow := now.Add(plan.skew + time.Second)
 	pk, err := ssh.ParsePublicKey(raw)
 	if err != nil {
-		return nil, 0, errors.New("it does not parse")
+		return nil, errors.New("it does not parse")
 	}
 	c, ok := pk.(*ssh.Certificate)
 	if !ok || c.CertType != ssh.UserCert {
-		return nil, 0, errors.New("it is not a user certificate")
+		return nil, errors.New("it is not a user certificate")
 	}
 	if !bytes.Equal(c.SignatureKey.Marshal(), ca.Marshal()) {
-		return nil, 0, errors.New("it is not signed by the user CA of your root-signed trust bundle")
+		return nil, errors.New("it is not signed by the user CA of your root-signed trust bundle")
 	}
 	// Checked here, before CertChecker refuses them with a vaguer text.
 	if len(c.CriticalOptions) != 0 {
-		return nil, 0, errors.New("it carries critical options, which a login never requests")
+		return nil, errors.New("it carries critical options, which a login never requests")
 	}
 	checker := ssh.CertChecker{
 		IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), ca.Marshal()) },
@@ -529,20 +549,20 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 		principal = c.ValidPrincipals[0]
 	}
 	if err := checker.CheckCert(principal, c); err != nil {
-		return nil, 0, errors.New("its CA signature or validity does not verify")
+		return nil, errors.New("its CA signature or validity does not verify")
 	}
 	if !bytes.Equal(c.Key.Marshal(), key.Marshal()) {
-		return nil, 0, errors.New("it is for another key")
+		return nil, errors.New("it is for another key")
 	}
 	if !slices.Equal(c.ValidPrincipals, req.Principals) {
-		return nil, 0, errors.New("its principals are not the ones requested")
+		return nil, errors.New("its principals are not the ones requested")
 	}
 	kid, err := cert.ParseKeyID(c.KeyId)
 	if err != nil || kid.Roles == nil || kid.CA != wire.CARoleUser.String() || kid.Subject != req.Subject || kid.Request != hex.EncodeToString(req.RequestID[:]) {
-		return nil, 0, errors.New("its key ID does not name this user and request")
+		return nil, errors.New("its key ID does not name this user and request")
 	}
 	if !slices.Equal(kid.Roles, plan.granted) {
-		return nil, 0, errors.New("its key ID does not name the roles requested")
+		return nil, errors.New("its key ID does not name the roles requested")
 	}
 	exts := make([]string, 0, len(c.Extensions))
 	for e := range c.Extensions {
@@ -550,35 +570,89 @@ func checkLoginCert(raw []byte, ca, key ssh.PublicKey, req *wire.LoginIssueReque
 	}
 	slices.Sort(exts)
 	if !slices.Equal(exts, plan.certExtensions) {
-		return nil, 0, errors.New("its extensions are not the ones requested")
+		return nil, errors.New("its extensions are not the ones requested")
 	}
 	if c.ValidBefore <= c.ValidAfter || c.ValidBefore-c.ValidAfter > uint64(plan.ttl/time.Second)+certBackdate { //nolint:gosec // G115: a positive TTL
-		return nil, 0, errors.New("it is valid for longer than requested")
+		return nil, errors.New("it is valid for longer than requested")
 	}
+	if _, err := remainingOnServer(c, plan.skew, now); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// certRefused is the error of a login whose certificate does not check out,
+// at the check or at the add.
+func certRefused(err error) error {
+	return fmt.Errorf("login not completed: the certificate does not check out (%w), so nothing was added to the agent; run keyroster login again", err)
+}
+
+// remainingOnServer returns the whole seconds c has left at the local time
+// now, read on the server's clock, since the signer stamps the certificate
+// with that clock: now plus the measured skew plus one second, which covers
+// the skew's whole-second truncation (02-12 pre-merge review), rounded up,
+// so an agent lifetime of this many seconds never outlasts the certificate.
+// It refuses less than minLoginRemaining seconds.
+func remainingOnServer(c *ssh.Certificate, skew time.Duration, now time.Time) (uint32, error) {
+	serverNow := now.Add(skew + time.Second)
 	nowSecs := serverNow.Unix()
 	if serverNow.Nanosecond() > 0 {
 		nowSecs++
 	}
 	if c.ValidBefore > uint64(1)<<62 || int64(c.ValidBefore)-nowSecs < minLoginRemaining { //nolint:gosec // G115: bounded above
-		return nil, 0, fmt.Errorf("it has less than %d s left", minLoginRemaining)
+		return 0, fmt.Errorf("it has less than %d s left", minLoginRemaining)
 	}
-	return c, uint32(int64(c.ValidBefore) - nowSecs), nil //nolint:gosec // G115: at most the TTL plus the backdate
+	return uint32(int64(c.ValidBefore) - nowSecs), nil //nolint:gosec // G115: at most the TTL plus the backdate
 }
 
-// addLoginToAgent adds key and its certificate c to the agent that
-// connectLoginAgent reaches, with a lifetime of remaining seconds, then
-// requires the agent's listing to hold the certificate. An agent that
-// refuses the lifetime constraint fails the login: there is no retry
-// without it.
-func addLoginToAgent(ctx context.Context, key ed25519.PrivateKey, c *ssh.Certificate, remaining uint32) error {
-	conn, err := connectLoginAgent(ctx)
+// The preflight's throwaway key: its comment, and its lifetime constraint
+// in seconds, so it leaves the agent by itself if the Remove does not
+// reach it.
+const (
+	loginProbeComment  = "keyroster login agent check"
+	loginProbeLifetime = 30
+)
+
+// probeLoginAgent proves before the begin that ag takes what the login
+// will add after the redeem (03-02 pre-merge review, E-IN-01): a
+// throwaway Ed25519 key with a lifetime constraint, removed again at once.
+// A locked agent answers List with an empty listing, and some agents
+// refuse adds or the lifetime constraint; both stop here, so the signer
+// issues and logs no certificate that nobody holds.
+func probeLoginAgent(ag agent.ExtendedAgent) error {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	defer clear(priv)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close() }()
-	ag := agent.NewClient(conn)
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return err
+	}
+	if err := ag.Add(agent.AddedKey{PrivateKey: priv, LifetimeSecs: loginProbeLifetime, Comment: loginProbeComment}); err != nil {
+		return fmt.Errorf("the ssh-agent does not take a key with a lifetime constraint (it is locked, or refuses such keys), so no login was started: %w", err)
+	}
+	if err := ag.Remove(sshPub); err != nil {
+		return fmt.Errorf("the ssh-agent took a test key but did not remove it, so no login was started: %w", err)
+	}
+	return nil
+}
+
+// addLoginToAgent adds key and its certificate c to ag, the agent client
+// keyroster login connected before the begin, then requires the agent's
+// listing to hold the certificate. The lifetime is computed here, from a
+// fresh loginNow() immediately before the add (03-02, E-IN-02), because
+// the agent counts it from its own add: the certificate's remaining
+// validity on the server's clock (skew), refused below minLoginRemaining.
+// An agent that refuses the lifetime constraint fails the login: there is
+// no retry without it.
+func addLoginToAgent(ag agent.ExtendedAgent, key ed25519.PrivateKey, c *ssh.Certificate, skew time.Duration) error {
+	remaining, err := remainingOnServer(c, skew, loginNow())
+	if err != nil {
+		return certRefused(err)
+	}
 	if err := ag.Add(agent.AddedKey{PrivateKey: key, Certificate: c, LifetimeSecs: remaining, Comment: c.KeyId}); err != nil {
-		return fmt.Errorf("the agent refused the key with a lifetime constraint; not retrying without it: %w", err)
+		return fmt.Errorf("the agent refused the key with its lifetime constraint, although it took the check's test key before the login (it may have been locked or stopped since); not retrying without it: %w", err)
 	}
 	keys, err := ag.List()
 	if err != nil {

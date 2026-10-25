@@ -13,6 +13,8 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -550,7 +552,14 @@ func certTypeName(t uint32) string {
 // the leaf bytes and the checkpoint, and only after checking them:
 //
 //   - strict JSONL: leaf indices exactly 0..n-1, exactly one checkpoint
-//     line and it is last; the informational "decoded" objects are ignored
+//     line and it is last; the "decoded" objects are informational, except
+//     for the fields the restore runbook reads with grep (03-02,
+//     checkGrepFields and checkReplayFields), which must be the leaf's own:
+//     "kind" once on every leaf line; "bundle_version" once on every
+//     bundle_install line; on a directory_install line, "version" once
+//     where present, and "directory" and "sigs" once each, both or
+//     neither, as the standard base64 of its document and signatures; and
+//     none of the last four on a line of another kind
 //   - every leaf decodes, records its own index, and leaf times never
 //     decrease
 //   - the first bundle_install entry holds a genesis bundle (version 1,
@@ -690,6 +699,12 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			return nil, fmt.Errorf("audit: entry %d: leaf time goes back (%d after %d)", want, leaf.TimeMicros, lastTime)
 		}
 		lastTime = leaf.TimeMicros
+		if err := checkReplayFields(sc.Bytes(), leaf); err != nil {
+			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
+		}
+		if err := checkGrepFields(sc.Bytes(), leaf); err != nil {
+			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
+		}
 		switch leaf.Kind {
 		case tlog.KindBundleInstall:
 			body, err := tlog.DecodeBundleInstallBody(leaf.Body)
@@ -885,6 +900,87 @@ func signedBytes(c *ssh.Certificate) []byte {
 	c2.Signature = nil
 	out := c2.Marshal()
 	return out[:len(out)-4] // drop the empty signature's length prefix
+}
+
+// checkReplayFields checks the "directory" and "sigs" fields of an export
+// line's text, which a restore writes back as a proposal with grep
+// (03-02, signer-install.md step 3). A line whose text carries either key
+// must be a directory_install entry, and each key must occur exactly
+// once, followed by the standard base64 of the leaf's own document or
+// signatures; so the bytes the runbook extracts are the verified leaf's.
+// A line without them, as exports before 03-02 wrote, is not checked, and
+// the line's other decoded fields stay informational.
+func checkReplayFields(text []byte, leaf tlog.Leaf) error {
+	const keyDir, keySigs = `"directory":`, `"sigs":`
+	s := string(text)
+	if !strings.Contains(s, keyDir) && !strings.Contains(s, keySigs) {
+		return nil
+	}
+	refuse := errors.New("its directory or sigs field is not the document and signatures of its directory_install leaf")
+	if leaf.Kind != tlog.KindDirectoryInstall {
+		return refuse
+	}
+	body, err := tlog.DecodeDirectoryInstallBody(leaf.Body)
+	if err != nil {
+		return err
+	}
+	for _, f := range []struct {
+		key string
+		val []byte
+	}{{keyDir, body.Directory}, {keySigs, body.Sigs}} {
+		if strings.Count(s, f.key) != 1 || !strings.Contains(s, f.key+`"`+base64.StdEncoding.EncodeToString(f.val)+`"`) {
+			return refuse
+		}
+	}
+	return nil
+}
+
+// checkGrepFields checks the other decoded fields that the restore
+// runbook reads from an export line's text with grep, to count, list and
+// pick entries (03-02, signer-install.md steps 2 and 3): "kind" on every
+// leaf line, "bundle_version" on every bundle_install line, and "version"
+// on a directory_install line that carries it (exports written before
+// plan 02-12 do not). Each must occur exactly once on such a line,
+// followed by the leaf's own value, and a bundle_version or version key
+// on a line of another kind is refused; so a line that grep counts, lists
+// or picks is the verified leaf it says it is. Export has written each
+// key this way since it was added: kind and bundle_version since Phase 1.
+func checkGrepFields(text []byte, leaf tlog.Leaf) error {
+	s := string(text)
+	if strings.Count(s, `"kind":`) != 1 || !strings.Contains(s, `"kind":"`+leaf.Kind.String()+`"`) {
+		return fmt.Errorf("its decoded kind is not the kind of its leaf (%s)", leaf.Kind)
+	}
+	var (
+		key      string // the version key of this leaf's kind, if any
+		val      uint64
+		required bool
+	)
+	switch leaf.Kind {
+	case tlog.KindBundleInstall:
+		body, err := tlog.DecodeBundleInstallBody(leaf.Body)
+		if err != nil {
+			return err
+		}
+		key, val, required = "bundle_version", body.BundleVersion, true
+	case tlog.KindDirectoryInstall:
+		body, err := tlog.DecodeDirectoryInstallBody(leaf.Body)
+		if err != nil {
+			return err
+		}
+		key, val = "version", body.Version
+	}
+	for _, k := range []string{"bundle_version", "version"} {
+		quoted := `"` + k + `":`
+		n := strings.Count(s, quoted)
+		if n == 0 && (k != key || !required) {
+			continue
+		}
+		v := quoted + strconv.FormatUint(val, 10)
+		if k != key || n != 1 || !strings.Contains(s, v+",") && !strings.Contains(s, v+"}") {
+			return fmt.Errorf("its decoded %s field is not the one of its %s leaf", k, leaf.Kind)
+		}
+	}
+	return nil
 }
 
 // parseLine decodes one line strictly: unknown fields, trailing data and

@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
@@ -113,6 +114,15 @@ func TestDecodeLoginIssue(t *testing.T) {
 		m := decoded(t, leafOf(t, tlog.KindDirectoryInstall, body))
 		if m["kind"] != "directory_install" || m["version"] != float64(4) || m["policy_version"] != float64(2) {
 			t.Fatalf("decoded = %v", m)
+		}
+		// The document and its signatures, as standard base64, for a
+		// restore's replay (03-02).
+		for field, want := range map[string]string{"directory": `{"version":4}`, "sigs": "sigs"} {
+			s, _ := m[field].(string)
+			got, err := base64.StdEncoding.DecodeString(s)
+			if err != nil || string(got) != want {
+				t.Fatalf("decoded %s = %q (%v), want base64 of %q", field, s, err, want)
+			}
 		}
 	})
 	t.Run("truncated_body_is_error", func(t *testing.T) {

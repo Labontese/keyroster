@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -15,6 +16,20 @@ import (
 
 	"github.com/Labontese/keyroster/internal/winagent"
 )
+
+// useUnusableLoginAgent leaves keyroster login without a usable agent the
+// Windows way: connectLoginAgent fails as winagent.Ensure does when it
+// cannot verify who serves the pipe. It returns the text the login must
+// print.
+func useUnusableLoginAgent(t *testing.T) string {
+	t.Helper()
+	prev := connectLoginAgent
+	connectLoginAgent = func(context.Context) (net.Conn, error) {
+		return nil, fmt.Errorf("%w: test pipe", winagent.ErrOwnerUnverifiable)
+	}
+	t.Cleanup(func() { connectLoginAgent = prev })
+	return winagent.ErrOwnerUnverifiable.Error()
+}
 
 // startLoginTestAgent runs keyroster's own agent (winagent.Serve) in
 // process on a random test pipe and points connectLoginAgent at it: the

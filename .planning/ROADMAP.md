@@ -154,20 +154,20 @@ Plans:
 **Depends on**: Phase 2
 **Requirements**: AGENT-01, AGENT-02, AGENT-03, AGENT-04, AGENT-05, AGENT-06, AGENT-07, AUTHZ-02, REVOKE-01, REVOKE-02, REVOKE-03, REVOKE-04, AUTH-06, KEY-08, BREAK-01, PLAT-01
 **Success Criteria** (what must be TRUE):
-  1. Admin enrolls a Linux host (Debian/Ubuntu, RHEL family, Alpine, Arch, Proxmox) with a one-time join token. The agent pins the server key and trust root, talks pull-only over mTLS with a closed set of typed operations (no inbound port, no remote exec), and applies only CA sets, host policy and KRLs signed by the pinned root or its delegated keys; unsigned or older versions are rejected.
+  1. Admin enrolls a Linux host (Debian 12+, Ubuntu 24.04+, RHEL family 9 and later not in FIPS mode, Alpine, Arch, Proxmox VE 8+) with a one-time join token. The agent pins the server's TLS root SPKI set and hostname, the trust root and the installation ID, talks pull-only over mTLS with a closed set of typed operations (no inbound port, no remote exec), and applies only CA sets, host policy and KRLs signed by the pinned root or its delegated keys; unsigned or older versions are rejected.
   2. The agent writes sshd config, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile` (generated from signed host policy) and the KRL atomically, validates with `sshd -t`, reloads, self-tests and rolls back on failure. It reports drift found by periodic `sshd -T -C` checks (e.g. missing `RevokedKeys`) and sends heartbeats with hashes of the applied config, CA set and KRL version.
   3. Admin revokes a certificate (by serial or key ID) or a key from the CLI, and every enrolled host refuses it after its next pull. The KRL (own encoder, cross-checked with `ssh-keygen -Q`) is SSHSIG-signed and installed atomically with a last-good copy, older versions are refused, and a corrupt or missing KRL never locks out the fleet.
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 1/16 plans executed in 15 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 2/16 plans executed in 15 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
 - [x] 03-01-PLAN.md — Phase tracer: D-04 installation ID checkpoint, then `keyroster revoke serial` → signer revoke + krl_publish → own KRL encoder with an ops-signed, installation-bound manifest → real sshd refuses after a swap with no reload
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 03-02-PLAN.md — Phase 2 follow-ups (agent check before issuance, lifetime at Add, redeem window), the two negative tests, three doc fixes, and the owner-approved rewording of AGENT-01, REVOKE-01 and PLAT-01
+- [x] 03-02-PLAN.md — Phase 2 follow-ups (agent check before issuance, lifetime at Add, redeem window), the two negative tests, three doc fixes, and the owner-approved rewording of AGENT-01, REVOKE-01 and PLAT-01
 - [ ] 03-03-PLAN.md — KRL complete: strict parser, oracle both directions, fuzzing, revoke by key ID, key and user (D-09), hourly re-publish (D-10), safe pruning, audit verify rules
 
 **Wave 3** *(blocked on Wave 2 completion)*
@@ -221,6 +221,7 @@ Plans:
 **Mode:** mvp
 **Depends on**: Phase 3
 **Requirements**: AUTH-05, AUTHZ-03, AUTHZ-04, AUTHZ-05, AUTHZ-06, AUTHZ-07, VIS-02, VIS-06, UI-02, UI-03, UI-04
+**Also delivers:** REVOKE-01's UI part (revoke from the UI), moved from Phase 3 by owner decision D-12 (2026-10-23), under UI-02.
 **Success Criteria** (what must be TRUE):
   1. A change to roles, principals, credentials (including binding or resetting a user's passkey) or quorum settings takes effect only after the configured admin quorum approves it; every policy version is numbered and signed, and the signer refuses to act under a version that lacks quorum.
   2. A user requests just-in-time access to a sensitive role and another person approves it in the UI with WebAuthn step-up; the approval is bound to that exact request, works once, and the resulting certificate expires no later than the approval.
@@ -276,7 +277,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 1/16 | In Progress | - |
+| 3. Linux Agent and Revocation | 2/16 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |

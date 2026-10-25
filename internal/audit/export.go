@@ -10,7 +10,15 @@
 //
 //	{"checkpoint":"<signed note text>"}
 //
-// "decoded" is informational only: Verify never reads it.
+// "decoded" is informational: Verify does not interpret it, except for
+// the fields a restore reads from the line's text with grep to count, list
+// and replay lost installs (03-02, signer-install.md). "kind" on every
+// leaf line, "bundle_version" on every bundle_install line, and "version",
+// "directory" and "sigs" on a directory_install line that carries them
+// must each occur once, with the leaf's own value, and on no line of
+// another kind (checkGrepFields, checkReplayFields). Exports written
+// before 02-12 have no "version", and those before 03-02 no "directory"
+// or "sigs"; their lines still verify.
 package audit
 
 import (
@@ -161,6 +169,14 @@ func decodeLeaf(data []byte) map[string]any {
 		}
 		m["version"] = b.Version
 		m["policy_version"] = b.PolicyVersion
+		// The installed document and its signatures, as standard base64,
+		// so a restore can write them back as a proposal (directory.json
+		// and directory.json.sigs) and replay them with keyroster directory
+		// install (03-02). Verify requires them to be the leaf's own
+		// bytes (checkReplayFields), and the signer checks them again at
+		// the replay.
+		m["directory"] = b.Directory
+		m["sigs"] = b.Sigs
 	case tlog.KindLoginIssue:
 		b, err := tlog.DecodeLoginIssueBody(l.Body)
 		if err != nil {

@@ -70,19 +70,29 @@ func startLoginTestAgent(t *testing.T) func(t *testing.T) []*agent.Key {
 	}
 }
 
+// useUnusableLoginAgent leaves keyroster login without a usable agent the
+// Unix way, SSH_AUTH_SOCK unset with the default connectLoginAgent, and
+// returns the instruction text the login must print.
+func useUnusableLoginAgent(t *testing.T) string {
+	t.Helper()
+	t.Setenv("SSH_AUTH_SOCK", "")
+	return "start ssh-agent (eval $(ssh-agent)) and retry; keyroster never writes the key to a file"
+}
+
 // TestLoginAgentUnix: the Unix default of connectLoginAgent refuses to run
-// without SSH_AUTH_SOCK and says how to start an agent.
+// without SSH_AUTH_SOCK and says how to start an agent, before the login
+// is begun (03-02, E-IN-01): no begin and no redeem reach the server.
 func TestLoginAgentUnix(t *testing.T) {
 	t.Run("ssh_auth_sock_unset_refused", func(t *testing.T) {
 		e := newLoginServer(t)
 		dirs := useEmptyHomes(t)
-		t.Setenv("SSH_AUTH_SOCK", "")
-		stderr, wait := e.start(t)
-		e.drive(t, stderr)
+		want := useUnusableLoginAgent(t)
+		_, wait := e.start(t)
 		r := wait()
-		requireLoginRefused(t, r, "start ssh-agent (eval $(ssh-agent)) and retry; keyroster never writes the key to a file")
-		if strings.Contains(r.stdout, "Serial:") {
-			t.Fatalf("a refused login printed a serial:\n%s", r.stdout)
+		requireLoginRefused(t, r, want)
+		e.requireCalls(t, 0, 0)
+		if strings.Contains(r.stdout, "Serial:") || strings.Contains(r.stderr, "Approve this login") {
+			t.Fatalf("a refused login went on:\nstdout:\n%s\nstderr:\n%s", r.stdout, r.stderr)
 		}
 		requireNoFiles(t, dirs)
 	})

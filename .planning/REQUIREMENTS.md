@@ -50,7 +50,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Host Agent (AGENT)
 
-- [ ] **AGENT-01**: Admin can enroll a host with a one-time join token; the agent pins the server key and trust root at enrollment
+- [ ] **AGENT-01**: Admin can enroll a host with a one-time join token; the agent pins the server TLS root SPKI set and hostname, the trust-root fingerprints and threshold, and the installation ID at enrollment
 - [ ] **AGENT-02**: Agent communicates pull-only over mTLS with a closed set of typed operations — no remote exec, no inbound ports
 - [ ] **AGENT-03**: Agent only applies CA sets, policy and KRLs signed by the pinned trust root / delegated keys; unsigned or older versions are rejected
 - [ ] **AGENT-04**: Agent writes sshd config, trusted CA keys, principals files and KRL atomically, validates with `sshd -t`, reloads, self-tests and rolls back on failure
@@ -60,7 +60,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Revocation (REVOKE)
 
-- [ ] **REVOKE-01**: Admin can revoke a certificate (by serial/key ID) or a key, from CLI or UI
+- [ ] **REVOKE-01**: Admin can revoke a certificate (by serial/key ID) or a key, or a person, host or machine, from the CLI (UI moves to Phase 4)
 - [ ] **REVOKE-02**: Revocation is distributed as a KRL (own encoder, verified against `ssh-keygen -Q`) to all hosts automatically
 - [ ] **REVOKE-03**: KRLs are signed (detached SSHSIG), installed atomically, last-good copy kept, rollback to older versions refused — a broken KRL never locks out the fleet
 - [ ] **REVOKE-04**: Clients trust hosts via a CLI-managed `@cert-authority` known_hosts entry and revoked host keys list (no TOFU)
@@ -89,13 +89,13 @@ Requirements for the first public release. Each maps to roadmap phases.
 ### Web UI (UI)
 
 - [x] **UI-01**: Server-rendered web UI with strict CSP, embedded in the binary, no npm dependencies
-- [ ] **UI-02**: Admin can issue, revoke and manage roles/policy from the UI with CLI parity
+- [ ] **UI-02**: Admin can issue, revoke and manage roles/policy from the UI with CLI parity (includes REVOKE-01's UI part, moved from Phase 3 by owner decision D-12, 2026-10-23)
 - [ ] **UI-03**: Approver can see pending approvals and approve with WebAuthn step-up
 - [ ] **UI-04**: Audit browser shows entries with inclusion proofs
 
 ### Platforms (PLAT)
 
-- [ ] **PLAT-01**: Generic Unix agent works on any system with stock OpenSSH — major Linux distributions (Debian/Ubuntu, RHEL family, Alpine, Arch, Proxmox)
+- [ ] **PLAT-01**: Generic Unix agent works on any system with stock OpenSSH — Debian 12+, Ubuntu 24.04+, RHEL family 9 and later not in FIPS mode, Alpine, Arch, Proxmox VE 8+
 - [ ] **PLAT-02**: Agent works on FreeBSD, OpenBSD and NetBSD
 - [ ] **PLAT-03**: Agent works on macOS
 - [ ] **PLAT-04**: Agent works on Windows OpenSSH (9.5p2+): correct ACLs, config inserted before `Match Group administrators`, lowercase principals, admin key file
@@ -158,6 +158,7 @@ Deferred. Tracked but not in current roadmap.
 | Telemetry | Self-hosted, privacy |
 | SaaS offering | CA key must never leave customer environment |
 | TOTP for signing | Phishable; WebAuthn only |
+| RHEL 8 (no sshd_config.d) and RHEL in FIPS mode for the Phase 3 agent | D-18; a P-256 CA generation for FIPS is a deferred idea |
 
 ## Traceability
 
@@ -194,14 +195,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUTHZ-05 | Phase 4 | Pending |
 | AUTHZ-06 | Phase 4 | Pending |
 | AUTHZ-07 | Phase 4 | Pending |
-| AGENT-01 | Phase 3 | Pending |
+| AGENT-01 | Phase 3 | Pending (reworded 2026-10-23, Phase 3 D-02/D-04/D-12/D-17/D-18) |
 | AGENT-02 | Phase 3 | Pending |
 | AGENT-03 | Phase 3 | Pending |
 | AGENT-04 | Phase 3 | Pending |
 | AGENT-05 | Phase 3 | Pending |
 | AGENT-06 | Phase 3 | Pending |
 | AGENT-07 | Phase 3 | Pending |
-| REVOKE-01 | Phase 3 | Pending |
+| REVOKE-01 | Phase 3 | Pending (reworded 2026-10-23, Phase 3 D-02/D-04/D-12/D-17/D-18) |
 | REVOKE-02 | Phase 3 | Pending |
 | REVOKE-03 | Phase 3 | Pending |
 | REVOKE-04 | Phase 3 | Pending |
@@ -221,7 +222,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | UI-02 | Phase 4 | Pending |
 | UI-03 | Phase 4 | Pending |
 | UI-04 | Phase 4 | Pending |
-| PLAT-01 | Phase 3 | Pending |
+| PLAT-01 | Phase 3 | Pending (reworded 2026-10-23, Phase 3 D-02/D-04/D-12/D-17/D-18) |
 | PLAT-02 | Phase 5 | Pending |
 | PLAT-03 | Phase 5 | Pending |
 | PLAT-04 | Phase 5 | Pending |
@@ -244,4 +245,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-04*
-*Last updated: 2026-10-23 after the phase 2 verification (AUTH-03, PLAT-05 and KEY-02 notes)*
+*Last updated: 2026-10-25 in plan 03-02 (AGENT-01, REVOKE-01 and PLAT-01 reworded by owner decisions D-02, D-04, D-12, D-17 and D-18; UI-02 note; RHEL out-of-scope row)*

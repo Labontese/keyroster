@@ -44,6 +44,25 @@ func Login(ctx context.Context, socket string, req *wire.LoginIssueRequest) (*wi
 	return wire.ParseIssueResponse(respBody)
 }
 
+// LoginSend is Login with a deadline for sending only (03-02 pre-merge
+// review): ctx's deadline bounds the dial and the write of the request,
+// and the answer is read for up to readTimeout after the request was
+// written. A request not written by ctx's deadline is never sent; one the
+// signer has taken is read to its answer although ctx's deadline passes
+// meanwhile, so a certificate the signer issues and logs reaches the
+// caller. A refusal comes back as a *wire.ErrorResponse error.
+func LoginSend(ctx context.Context, socket string, req *wire.LoginIssueRequest, readTimeout time.Duration) (*wire.IssueResponse, error) {
+	body, err := req.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := roundTripRead(ctx, socket, wire.TypeLoginIssueRequest, body, wire.TypeIssueResponse, readTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseIssueResponse(respBody)
+}
+
 // InstallDirectory sends an admin-signed directory version to the signer
 // and returns what it installed. A refusal comes back as a
 // *wire.ErrorResponse error.
@@ -115,6 +134,14 @@ func GetKRL(ctx context.Context, socket string) (*wire.GetKRLResponse, error) {
 // response, which must be of type want; an error response comes back as a
 // *wire.ErrorResponse error.
 func roundTrip(ctx context.Context, socket string, msgType byte, body []byte, want byte) ([]byte, error) {
+	return roundTripRead(ctx, socket, msgType, body, want, 0)
+}
+
+// roundTripRead is roundTrip, except that a readTimeout above zero
+// replaces ctx's deadline for the read: ctx's deadline then bounds the
+// dial and the write only, and the response is read for up to readTimeout
+// after the write.
+func roundTripRead(ctx context.Context, socket string, msgType byte, body []byte, want byte, readTimeout time.Duration) ([]byte, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
@@ -133,6 +160,11 @@ func roundTrip(ctx context.Context, socket string, msgType byte, body []byte, wa
 	}
 	if err := wire.WriteMessage(conn, msgType, body); err != nil {
 		return nil, fmt.Errorf("signerclient: send: %w", err)
+	}
+	if readTimeout > 0 {
+		if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+			return nil, err
+		}
 	}
 	return readResponse(conn, want)
 }

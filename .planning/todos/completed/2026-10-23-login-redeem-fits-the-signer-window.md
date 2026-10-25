@@ -25,3 +25,7 @@ The impact is UX only: nothing is minted wrongly. But the comment at about L63-6
 - Bound the signer context deadline at CreatedAt+300 s minus a margin, or lower `loginCodeCap`.
 - Otherwise, correct the comment and T-02-107.
 - A test with an injected clock that stalls in `currentStatus` should show the fix.
+
+## Resolution
+
+Resolved in 03-02 (PR from branch `p03/02-phase2-followups`). The redeem reads the clock again after `currentStatus`, refuses a code past its expiry or past CreatedAt + 295 s before `RedeemLogin`, and gives the signer call a deadline at CreatedAt + 295 s (`TestLoginRedeem/redeem_status_stall`). The comment is corrected in internal/server/login.go; the T-02-107 row lives in the Phase 2 plan, which stays unedited.

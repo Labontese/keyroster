@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -531,12 +532,195 @@ func TestLoginApproval(t *testing.T) {
 
 // TestLoginRedeem: only the matching code and verifier of an approved,
 // unexpired login reach the signer, once; nothing else burns the code.
+// stallSigner wraps the test signer for redeem_status_stall: its Status
+// moves the test clock forward by stall before it answers, as a slow
+// currentStatus refresh would, and its Login records how much time its
+// context had left on the real clock when it was called.
+type stallSigner struct {
+	signerAPI
+	clock *testClock
+	stall time.Duration
+
+	mu          sync.Mutex
+	statusCalls int
+	loginLeft   time.Duration // time.Until(deadline) at the Login call
+	hasDeadline bool
+}
+
+func (s *stallSigner) Status(ctx context.Context) (*wire.StatusResponse, error) {
+	s.mu.Lock()
+	s.statusCalls++
+	s.mu.Unlock()
+	s.clock.set(s.clock.Now().Add(s.stall))
+	return s.signerAPI.Status(ctx)
+}
+
+func (s *stallSigner) Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error) {
+	dl, ok := ctx.Deadline()
+	s.mu.Lock()
+	s.loginLeft, s.hasDeadline = time.Until(dl), ok
+	s.mu.Unlock()
+	return s.signerAPI.Login(ctx, req)
+}
+
 func TestLoginRedeem(t *testing.T) {
 	approved := func(t *testing.T, e *signInEnv) (*loginRun, string) {
 		t.Helper()
 		l := e.beginLogin(t, loginRequest(t, "alice", e.clock.Now()))
 		return l, e.approve(t, l)
 	}
+	t.Run("redeem_status_stall", func(t *testing.T) {
+		// A login begun at t0 (its CreatedAt) and approved at t0+200 s has
+		// a code valid to t0+290 s. The redeem reads the signer status,
+		// which takes 3 s here; the clock is read again after it, and the
+		// signer call gets a deadline no later than CreatedAt + 295 s
+		// (03-02, C-IN-01). A code past its window after the stall is
+		// refused before RedeemLogin, so it is not burnt.
+		setup := func(t *testing.T, redeemAt time.Duration) (*signInEnv, *stallSigner, *loginRun, string) {
+			t.Helper()
+			e := newLoginEnv(t, highSignInLimits)
+			l := e.beginLogin(t, loginRequest(t, "alice", t0))
+			e.clock.set(t0.Add(200 * time.Second))
+			code := e.approve(t, l)
+			// Far past statusTTL, so the redeem's currentStatus refreshes.
+			e.clock.set(t0.Add(redeemAt))
+			sg := &stallSigner{signerAPI: e.fake, clock: e.clock, stall: 3 * time.Second}
+			e.s.signer = sg
+			return e, sg, l, code
+		}
+		requireStalled := func(t *testing.T, sg *stallSigner) {
+			t.Helper()
+			sg.mu.Lock()
+			defer sg.mu.Unlock()
+			if sg.statusCalls != 1 {
+				t.Fatalf("Status calls during the redeem = %d, want 1 (the stall did not happen)", sg.statusCalls)
+			}
+		}
+		t.Run("expired_after_stall_not_burnt", func(t *testing.T) {
+			// Redeemed at +288 s, inside the code's window; after the 3 s
+			// stall it is +291 s, past the code's +290 s.
+			e, sg, l, code := setup(t, 288*time.Second)
+			requireNotRedeemable(t, "redeem after the stall", e.redeem(l, code, l.pkce.verifier, ""))
+			requireStalled(t, sg)
+			requireLastLogin(t, e, eventLoginRedeem, reasonLoginExpired)
+			requireLoginCalls(t, e, 0)
+			if st := e.loginStatus(t, l.id); st != serverdb.LoginApproved {
+				t.Fatalf("status after the refused redeem = %s, want %s (not burnt)", st, serverdb.LoginApproved)
+			}
+		})
+		t.Run("inside_window_deadline", func(t *testing.T) {
+			// Redeemed at +285 s, +288 s after the stall: the signer gets
+			// a context with at most the 7 s left to CreatedAt + 295 s.
+			e, sg, l, code := setup(t, 285*time.Second)
+			requireRedeemed(t, "redeem inside the window", e.redeem(l, code, l.pkce.verifier, ""))
+			requireStalled(t, sg)
+			requireLoginCalls(t, e, 1)
+			sg.mu.Lock()
+			left, ok := sg.loginLeft, sg.hasDeadline
+			sg.mu.Unlock()
+			if !ok || left > 7*time.Second || left < 6*time.Second {
+				t.Fatalf("the signer call had %v left (deadline set: %v), want at most 7 s, the time to CreatedAt + 295 s", left, ok)
+			}
+		})
+		t.Run("database_wait_counts_against_deadline", func(t *testing.T) {
+			// As inside_window_deadline, but RedeemLogin waits 2 s of real
+			// time for a write lock another connection holds. The deadline
+			// is fixed as a wall-clock instant before the burn, so the
+			// wait is taken off the 7 s the signer call has left, instead
+			// of moving the deadline 2 s past CreatedAt + 295 s (03-02
+			// pre-merge review).
+			const hold = 2 * time.Second
+			e, sg, l, code := setup(t, 285*time.Second)
+			ctx := context.Background()
+			lock, err := e.openRaw(t).Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = lock.Close() }()
+			if _, err := lock.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+				t.Fatal(err)
+			}
+			released := make(chan error, 1)
+			time.AfterFunc(hold, func() {
+				_, err := lock.ExecContext(ctx, `ROLLBACK`)
+				released <- err
+			})
+			start := time.Now()
+			requireRedeemed(t, "redeem behind a held write lock", e.redeem(l, code, l.pkce.verifier, ""))
+			if err := <-released; err != nil {
+				t.Fatal(err)
+			}
+			if took := time.Since(start); took < hold {
+				t.Fatalf("the redeem took %v, want at least the %v the lock was held (the wait did not happen)", took, hold)
+			}
+			requireStalled(t, sg)
+			requireLoginCalls(t, e, 1)
+			sg.mu.Lock()
+			left, ok := sg.loginLeft, sg.hasDeadline
+			sg.mu.Unlock()
+			if !ok || left > 7*time.Second-hold+500*time.Millisecond || left < 3*time.Second {
+				t.Fatalf("the signer call had %v left (deadline set: %v), want about %v: the 7 s to CreatedAt + 295 s less the %v the burn waited", left, ok, 7*time.Second-hold, hold)
+			}
+		})
+		t.Run("database_wait_past_deadline_not_burnt", func(t *testing.T) {
+			// A code stored as valid to +299 s (as in deadline_passed_not_burnt)
+			// and redeemed at +290 s, +293 s after the stall: 2 s left to
+			// CreatedAt + 295 s. RedeemLogin then waits 3 s for a write
+			// lock; its context ends at the deadline during the wait, so the
+			// UPDATE is abandoned (on this driver once the lock is free, not
+			// at the deadline itself): the code is not burnt and the signer
+			// is not called.
+			const hold = 3 * time.Second
+			e, sg, l, code := setup(t, 290*time.Second)
+			raw := e.openRaw(t)
+			if _, err := raw.Exec(`UPDATE login_sessions SET code_expires_us = ? WHERE id = ?`, t0.Add(299*time.Second).UnixMicro(), l.id); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			lock, err := raw.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = lock.Close() }()
+			if _, err := lock.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+				t.Fatal(err)
+			}
+			released := make(chan error, 1)
+			time.AfterFunc(hold, func() {
+				_, err := lock.ExecContext(ctx, `ROLLBACK`)
+				released <- err
+			})
+			start := time.Now()
+			requireNotRedeemable(t, "redeem whose burn waits past the deadline", e.redeem(l, code, l.pkce.verifier, ""))
+			took := time.Since(start)
+			if err := <-released; err != nil {
+				t.Fatal(err)
+			}
+			requireStalled(t, sg)
+			requireLastLogin(t, e, eventLoginRedeem, reasonLoginExpired)
+			requireLoginCalls(t, e, 0)
+			if st := e.loginStatus(t, l.id); st != serverdb.LoginApproved {
+				t.Fatalf("status after the redeem = %s, want %s (not burnt; the redeem took %v)", st, serverdb.LoginApproved, took)
+			}
+		})
+		t.Run("deadline_passed_not_burnt", func(t *testing.T) {
+			// A code stored as valid to +299 s (no handler writes one past
+			// +290 s; this stands for any future change that would) and
+			// redeemed at +294 s, +297 s after the stall: past CreatedAt +
+			// 295 s, so it is refused unburnt although the code is valid.
+			e, sg, l, code := setup(t, 294*time.Second)
+			if _, err := e.openRaw(t).Exec(`UPDATE login_sessions SET code_expires_us = ? WHERE id = ?`, t0.Add(299*time.Second).UnixMicro(), l.id); err != nil {
+				t.Fatal(err)
+			}
+			requireNotRedeemable(t, "redeem past the signer window", e.redeem(l, code, l.pkce.verifier, ""))
+			requireStalled(t, sg)
+			requireLastLogin(t, e, eventLoginRedeem, reasonLoginExpired)
+			requireLoginCalls(t, e, 0)
+			if st := e.loginStatus(t, l.id); st != serverdb.LoginApproved {
+				t.Fatalf("status after the refused redeem = %s, want %s (not burnt)", st, serverdb.LoginApproved)
+			}
+		})
+	})
 	t.Run("redeems_with_stored_assertion", func(t *testing.T) {
 		e := newLoginEnv(t, highSignInLimits)
 		l, code := approved(t, e)

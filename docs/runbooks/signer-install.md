@@ -313,10 +313,10 @@ serial (research Pitfall 9). A VM restored from a snapshot starts with the
 snapshot's clock until NTP corrects it, and its database holds the
 snapshot's high-water mark.
 
-**Before starting a restored signer, check the clock:**
+**Before starting a restored signer, check the clock.** The restore
+procedure below holds the signer stopped until then:
 
 ```
-systemctl stop keyroster-signer.service      # if it auto-started
 timedatectl                                  # "System clock synchronized: yes"
 runuser -u keyroster-signer -g keyroster-signer -G tss -- \
   keyroster-signer doctor --state-dir /var/lib/keyroster-signer
@@ -354,15 +354,199 @@ it: keep each export, and verify the next one with
 
 Before starting the signer after a restore:
 
-1. Keep the service stopped, and export the restored log:
+**Hold the signer and keyroster-server first.** A restored signer that
+logs anything before step 1 exports its log (a request that reaches it,
+or the refusal summary it writes when it stops after refusing one) forks
+the log, and step 2 then ends the procedure. So hold both units with a
+drop-in that makes every start fail, on the signer host that is to serve
+the restored `signer.db`, before it is copied in (for a VM snapshot, the
+current signer VM: see below). As root:
+
+```
+bash -eu -s keyroster-server keyroster-signer <<'EOF'
+test "$#" -gt 0
+for u in "$@"; do
+  install -d -m 0755 "/etc/systemd/system/$u.service.d"
+  printf '[Unit]\nAssertPathExists=/nonexistent-restore-hold\n' >"/etc/systemd/system/$u.service.d/restore-hold.conf"
+done
+systemctl daemon-reload
+for u in "$@"; do
+  systemctl stop "$u.service"
+done
+for u in "$@"; do
+  test "$(systemctl show -p LoadState --value "$u.service")" = loaded
+  systemctl show -p DropInPaths --value "$u.service" | grep -q "/$u.service.d/restore-hold.conf"
+  if systemctl start "$u.service"; then
+    systemctl stop "$u.service"
+    echo "$u.service started: the hold is NOT in force" >&2
+    exit 1
+  fi
+done
+echo "held: $*"
+EOF
+```
+
+Leave out `keyroster-server` where it is not installed. The drop-in
+asserts a path that never exists, so every start of the unit fails
+loudly, a start that keyroster-server's `Wants=` asks for included: each
+`systemctl start` above prints `Assertion failed on job for ...`, which
+is the hold working. (A `Condition` would skip the start silently;
+`systemctl mask` does not work, because the units are files in
+`/etc/systemd/system`.) The block writes both drop-ins and reloads
+systemd before it stops the units, so that no new start succeeds after
+the stop. A unit already waiting to restart after a crash (`activating`,
+`auto-restart`) is not held by the drop-in and can still start before
+the stop; the `systemctl stop` that follows stops it, and every start
+after that fails. Only the last line's `held:` means the hold is in
+force. Keep it until the end of step 2.
+
+**Keep users away until the replay is done.** From the moment the
+restored signer starts again until the last lost version is back (step
+3), it serves the restored, older directory: a user disabled in a lost
+version can log in again, and a role removed in a lost version grants
+again. Keep keyroster-server unreachable to users for that time, for
+example with a firewall rule that admits only the admin workstation; set
+it before you release the hold. The admin's `keyroster directory install` goes through the
+server, so stopping it is not an option. (UNVERIFIED: no test blocks user
+access.)
+
+**Taking a file backup of `signer.db`.** No other document describes
+it, and keyroster-signer has no backup command. Copy `signer.db` and its
+`-wal` and `-shm` files, those that exist, as one set, and only while
+the signer is stopped and cannot start: run the hold block above, copy
+the files into a directory of mode 0700 that only root can read, then
+run step 2's release block below and start the signer again. A copy of
+a running signer's files is not a backup, because SQLite may write to
+them during the copy. An online copy (SQLite's `.backup` command, or
+`VACUUM INTO` on a read-only connection, run as keyroster-signer) needs
+the `sqlite3` program, which this runbook does not install, and has not
+been tried (UNVERIFIED). Keep backups, like saved exports, off the
+signer VM's disk.
+
+**From a file backup of `signer.db`:** with the hold in force, replace
+`signer.db` and its `-wal` and `-shm` files together with those in the
+backup directory `<backup>` (an absolute path). Files the backup does not
+have are removed, or SQLite would replay the newer WAL onto the older
+file. The block refuses unless the signer is `inactive` or `failed` (not
+`activating`, which includes a pending restart), and it holds the state
+directory's lock (`signer.lock`, which `serve`, `ca-init` and
+`install-bundle` hold while they run) until it ends, so it refuses while
+any of them runs, also one started outside systemd:
+
+```
+bash -eu -s <backup> <<'EOF'
+S=/var/lib/keyroster-signer
+test -e /etc/systemd/system/keyroster-signer.service.d/restore-hold.conf
+st=$(systemctl show -p ActiveState --value keyroster-signer.service)
+if [ "$st" != inactive ] && [ "$st" != failed ]; then
+  echo "keyroster-signer.service is $st: hold it first" >&2
+  exit 1
+fi
+exec 9<"$S/signer.lock"
+if ! flock -n 9; then
+  echo "$S is in use by another keyroster-signer process" >&2
+  exit 1
+fi
+test -s "$1/signer.db"
+rm -f "$S/signer.db" "$S/signer.db-wal" "$S/signer.db-shm"
+for f in signer.db signer.db-wal signer.db-shm; do
+  if [ -e "$1/$f" ]; then
+    install -o keyroster-signer -g keyroster-signer -m 0600 "$1/$f" "$S/$f"
+  fi
+done
+echo "restored signer.db from $1"
+EOF
+```
+
+**From a disk-only VM snapshot (Proxmox): never boot the snapshot.** A
+signer VM booted from a rolled-back disk starts the signer and
+keyroster-server before you can hold them. So do not roll back the
+signer VM (that would also discard the current VM's disk, its saved
+exports included), and never boot its snapshot or a copy of it. Take
+the three files out of the snapshot's disk instead, and restore them on
+the current signer VM as a file backup (UNVERIFIED: no step of this
+paragraph has run, and none can run in CI):
+
+- On the current signer VM, run the hold block above and set the
+  firewall rule (above).
+- On the Proxmox host, make a copy of only the signer VM's system disk
+  as it was at the snapshot, with the storage's own tools (for example a
+  ZFS clone of the disk's snapshot, or `qemu-img convert` of a qcow2
+  disk's internal snapshot), and attach the copy to a helper VM (any
+  Linux VM other than the signer VM, `<helper id>`) as an extra disk. Do
+  not clone the whole signer VM with `qm clone <id>`: that also copies its
+  vTPM state, which wraps the TPM backend's CA keys, into a second VM.
+- In the helper VM, mount the copy's root file system read-only
+  (`mount -o ro`) and copy `var/lib/keyroster-signer/signer.db` and its
+  `-wal` and `-shm` files, those that exist, as one set, with their
+  `sha256sum`. Mounting the copy on the Proxmox host itself also works
+  for some storage types, but it makes the host's kernel parse a file
+  system that the signer VM wrote; prefer the helper VM.
+- An encrypted disk (LUKS) opens in the helper VM only with a passphrase
+  or recovery key. If its only key is sealed to the signer VM's vTPM,
+  nothing outside that VM can open it, and this restore is not possible:
+  escalate.
+- Copy the set to the current signer VM, into a new directory
+  `<backup>` of mode 0700 owned by root, check the `sha256sum` values
+  there, and run the file restore block above with that `<backup>`. Then
+  delete the disk copy and the helper's copy of the files.
+- Continue with step 1. The saved export of step 2 is the one kept on
+  the current signer VM or off it, never one from the snapshot's disk.
+
+**If the current signer VM cannot be used,** install a fresh signer VM
+by this runbook, steps 1 to 3, and create the state directory of step 4,
+but run neither `ca-init` nor `install-bundle` (step 6): the restored
+`signer.db` brings the key records, the trust bundle and the policy of
+the same genesis. Create the lock file as the signer's user
+(`runuser -u keyroster-signer -- touch /var/lib/keyroster-signer/signer.lock`),
+then hold, take the three files out of the snapshot's disk as above,
+run the file restore and continue with step 1. This works only where
+the fresh signer reaches the same CA keys: `serve` opens every key by
+its recorded fingerprint, so it needs the same HSM or keys behind the
+agent backend, or for the software backend its `software` directory
+taken from the snapshot's disk with the three files. Keys in a TPM
+cannot leave the old VM's TPM, so for the TPM backend it is not
+possible. If it is not possible, or `serve` or
+step 2 refuses, escalate. (UNVERIFIED: no part of this has run.)
+
+**A VM snapshot with RAM is not supported for the signer VM.** Never
+resume one: the signer process would run on from the snapshot's memory
+and can log entries (for example a refusal summary it was holding)
+before any hold. This runbook does not cover taking the disk out of one
+either; escalate. Take disk-only snapshots of the signer VM.
+
+If the signer logged entries after the restore anyway, step 2 shows the
+fork and you stop and escalate: that stays the rule whenever step 2
+detects a fork. Phase 4's witnessed checkpoint removes the problem
+structurally (see the warning above).
+
+1. With the hold in force, export the restored log:
 
    ```
-   systemctl stop keyroster-signer.service      # if it auto-started
    runuser -u keyroster-signer -g keyroster-signer -G tss -- \
      keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/restored.jsonl
    ```
 
-2. Compare it with the latest export you kept from before the restore:
+2. Verify the restored export on its own first:
+
+   ```
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     /tmp/restored.jsonl
+   ```
+
+   It must pass. If it fails, do not compare it with anything and read
+   nothing from it: stop there, keep the signer stopped, record the result
+   in the operations log, and escalate; this runbook does not cover that
+   case. Keep the hold in force. The comparisons and the `grep` commands below read the restored
+   export's fields as well as the saved export's, and only this command
+   checks every entry of the restored export.
+
+   Then compare it with the latest export you kept from before the
+   restore. That saved export must come from storage that no restore
+   rolled back: the current signer VM's own disk, or a copy kept off the
+   signer VM. Never take it from a snapshot's disk or from the backup you
+   restored: an export from there is as old as the restored log, and the
+   comparison would show nothing lost.
 
    ```
    keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
@@ -377,15 +561,59 @@ Before starting the signer after a restore:
    version". A Phase 1 binary usually stops earlier, at the bundle whose
    policy added the WebAuthn RP (`json: unknown field "webauthn"`), which
    is not a sign of tampering; see the compatibility note in
-   [root-ceremony.md](root-ceremony.md#change-the-policy-successor-policy-for-example-add-the-webauthn-rp). `TestAuditLoginAcrossPolicyChange` (e2e) runs this command on two
+   [root-ceremony.md](root-ceremony.md#change-the-policy-successor-policy-for-example-add-the-webauthn-rp).
+   Until plan 03-03, every `audit verify` binary, the current one
+   included, refuses a log that contains a `revoke` or `krl_publish`
+   entry (the signer writes them since plan 03-01) with
+   `audit: entry N (revoke): not verifiable by this version` (or
+   `(krl_publish)`). That is not tampering either, but step 2 cannot be
+   completed for such a log until 03-03 adds their checks: the standalone
+   verify above already refuses it, so stop and escalate as it says; see
+   [revoke.md](revoke.md#4-the-audit-log-after-a-revocation).
+   `TestAuditLoginAcrossPolicyChange` (e2e) runs this command on two
    exports of a signer with a directory and login certificates: the later
    export verifies with `--previous` set to the earlier one, and the
    earlier export is refused as `log shrank` with `--previous` set to the
    later one. That is two exports of one live signer, not a restored
    database.
 
-   Also compare the versions by hand, in both files, to see what the
-   restore took back:
+   If it passes, the restored log extends the saved one: the restore took
+   back nothing that the saved export records, and there is nothing in it
+   to compare or replay.
+
+   If it fails, whatever it reports (`log shrank`, `log rewritten` or
+   another refusal), verify the saved export itself, and that the restored
+   log is a prefix of it, before you read anything from the saved export:
+
+   ```
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     /root/latest-saved.jsonl
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     --previous /tmp/restored.jsonl /root/latest-saved.jsonl
+   ```
+
+   Both must pass. If either fails, do not use the saved export at all:
+   not for the counts below, and not for step 3's list and proposals. Stop
+   there, keep the signer stopped, record both results in the operations
+   log, and escalate; this runbook does not cover that case. The second
+   command also fails when the restored signer logged entries after the
+   restore, which the hold is there to prevent: the restored log is then
+   no prefix of the saved one, and its lost entries cannot be told apart
+   this way. The command above does not do
+   these checks: it verifies the restored export (which the standalone
+   command above has already checked; `log shrank` and `log rewritten` are
+   reported only after it did) and reads only the last checkpoint of the
+   saved one, and what it reports looks the same for a
+   log that was cut back as for one that was cut back and rewritten. The
+   first command checks every entry of the saved export, including the
+   decoded fields that the `grep` commands below and in step 3 read (see
+   "What makes the replay safe" in step 3), so the counts, the list and
+   the bytes they give are the ones the signer logged. The second proves
+   that the restored log is a prefix of the saved one, so the lost entries
+   are exactly the saved export's entries after it.
+
+   Once both pass, compare the versions by hand, in both files, to see
+   what the restore took back:
 
    ```
    grep -o '"bundle_version":[0-9]*' /root/latest-saved.jsonl | tail -n 1
@@ -400,11 +628,41 @@ Before starting the signer after a restore:
    numbers are lower, the restore reinstated an older bundle or directory.
    `doctor` also prints the restored bundle version (`OK bundle`).
 
+   **Release the hold** when step 2 passed: after the first comparison
+   passed, or after both checks of the saved export passed and you
+   compared the versions. Check the clock first (see [Snapshot restore:
+   check the clock first](#snapshot-restore-check-the-clock-first)), make sure the firewall rule keeps users
+   away, and then, as root:
+
+   ```
+   bash -eu -s keyroster-server keyroster-signer <<'EOF'
+   test "$#" -gt 0
+   for u in "$@"; do
+     rm "/etc/systemd/system/$u.service.d/restore-hold.conf"
+   done
+   systemctl daemon-reload
+   for u in "$@"; do
+     if systemctl is-failed --quiet "$u.service"; then systemctl reset-failed "$u.service"; fi
+   done
+   echo "released: $*"
+   EOF
+   systemctl start keyroster-signer.service keyroster-server.service
+   ```
+
+   Name the same units as for the hold. The release resets a unit that
+   had failed before the hold, for example a signer that crash-looped on
+   a damaged database until systemd's start limit stopped it: without the
+   reset, systemd refuses its start until the limit's 10 minutes have
+   passed.
+
 3. Reinstall what the restore lost, with the same bytes as before and
    before anyone installs anything new. Install the exact versions that
    were lost: a different version 2 built on the restored version 1 is
    accepted too, and the disablements of the lost version are then gone
    for good.
+
+   Keep users away until the last lost version is back (the firewall
+   rule set before step 1).
 
    **Replay the lost installs in log order**, not all bundles first. A
    directory version is checked against the policy in force when it is
@@ -422,23 +680,203 @@ Before starting the signer after a restore:
      with that bundle (see
      [Install a successor bundle](#install-a-successor-bundle-stop-install-start)),
      and start it again only if a lost directory version follows.
-   - **A lost `directory_install`: not possible yet at this point in
-     Phase 2.** A directory version goes in only through the running
-     signer's socket (its InstallDirectory request), and no keyroster
-     command sends that request until plan 02-09 adds
-     `keyroster directory install`. Nor can the signer run without login
-     peers: the shipped unit allows only `--allow-group keyroster-admin`,
-     which also owns the socket, so removing it removes every peer,
-     admins included.
+     (UNVERIFIED: no test replays a lost bundle.)
+   - **A lost `directory_install`:** write it back as a proposal from the
+     saved export, which step 2 verified, and install it with `keyroster
+     directory install`, one version at a time, in log order:
 
-   So at this point in Phase 2, replay the lost bundles up to the first
-   lost directory version, and from there keep the restored signer
-   **stopped** until the lost directory versions can be reinstalled in
-   order. Starting it serves the restored, older directory: a user
-   disabled in a lost version can log in again.
+     1. Write the proposal of the lost version `V` (`directory.json` and
+        `directory.json.sigs`) from the export's decoded line:
 
-> **UNVERIFIED.** This procedure has not been run against a restored
-> database, and its directory half cannot be carried out yet (step 3).
-> The `grep` patterns match the export line format written by
-> `keyroster-signer export-log` (checked against its decoder, `audit.Decode`,
-> for `directory_install`), not a real export of a restored signer.
+        ```
+        bash -eu <<'EOF'
+        V=2                                   # the lost directory version
+        SAVED=/root/latest-saved.jsonl
+        D=/root/replay/v$V
+        mkdir -p "$D"
+        grep '"kind":"directory_install"' "$SAVED" | grep -E ",\"version\":$V[,}]" > "$D/line"
+        test "$(wc -l < "$D/line")" -eq 1
+        grep -o '"directory":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.json"
+        grep -o '"sigs":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.json.sigs"
+        test -s "$D/directory.json"
+        test -s "$D/directory.json.sigs"
+        rm "$D/line"
+        echo "wrote the proposal of directory version $V to $D"
+        EOF
+        ```
+
+        Paste it whole: it runs in its own `bash -eu`, which stops at the
+        first line that fails, so your shell stays open. Only the last
+        line's `wrote the proposal` means the proposal is complete; without
+        it, do not install anything from that directory.
+
+        The decoded `directory` and `sigs` fields are in every export that
+        `keyroster-signer export-log` writes since plan 03-02. An older
+        export has only `version` and `policy_version` there (the bytes are
+        then only inside the leaf, and the `test -s` lines stop): export the
+        saved log again with a current binary, or keep the proposal
+        directories of past installs.
+     2. Copy the proposal to the admin who installs it. `/root` is mode
+        0700, so an admin account (section 8, for example `alice`, with
+        her own ssh-agent and `keyroster` config) cannot read
+        `/root/replay`. Root must not create, change or write any path
+        the admin can write: the admin can plant a symbolic link in their
+        own home (for example `~/replay` pointing at
+        `/var/lib/keyroster-signer`), and root would follow it. So the
+        block below writes as the admin, with `runuser`, and root only
+        reads its own files and passes their bytes on standard input. As
+        root, with `<admin>` that account and `V` the lost version:
+
+        ```
+        bash -eu -s <admin> <<'EOF'
+        V=2                                   # the lost directory version
+        H=$(getent passwd "$1" | cut -d: -f6)
+        test -n "$H"
+        runuser -u "$1" -- sh -c 'umask 077 && mkdir -m 0700 "$1"' sh "$H/replay-v$V"
+        for f in directory.json directory.json.sigs; do
+          runuser -u "$1" -- sh -c 'umask 077 && set -C && cat >"$1" && chmod 0600 "$1"' sh "$H/replay-v$V/$f" <"/root/replay/v$V/$f"
+        done
+        echo "copied the proposal of directory version $V to $H/replay-v$V for $1"
+        EOF
+        ```
+
+        Only the last line's `copied the proposal` means both files are
+        there. The block sets the modes itself (0700 and 0600), so that
+        neither a umask nor a default ACL inherited from the home
+        directory widens them. `mkdir` refuses a name that exists, a planted link
+        included; root does not remove it. The admin removes it, or you
+        ask them which name is free and use that one.
+
+        If the admin runs `keyroster` on a workstation instead, copy the
+        two files there, into a directory only that admin can read, and
+        use that path below.
+     3. With the restored signer running, wait at least 5 s after it
+        started, or restart keyroster-server: the server keeps the signer's
+        status for up to 5 s, and until then it can still report the
+        version it served before the restore. Then, as that admin, with
+        the directory the copy printed:
+
+        ```
+        keyroster directory install /home/<admin>/replay-v2
+        ```
+
+        It must print `The server reports directory version 2 installed`.
+        `The server already serves proposal ... nothing to do` means the
+        server still reported the pre-restore version: wait and run it
+        again. Check on the signer host that the signer holds the version
+        (`keyroster audit verify` of a new export counts the directory
+        installs).
+
+   **What makes the replay safe, and what it does not cover.** `audit
+   verify` does not interpret the `decoded` part of an export line, except
+   for the fields these `grep` commands read. `kind` on every line,
+   `bundle_version` on every `bundle_install` line, and `version`,
+   `directory` and `sigs` on a `directory_install` line that carries them
+   must each occur once, with the value of the line's own leaf (for
+   `directory` and `sigs`, the standard base64 of its document and
+   signatures), and on no line of another kind. So after step 2's two
+   `audit verify` commands, the counts of step 2 and the list above come
+   from the verified leaves, and the proposal written from the saved export
+   is the document and signatures of the verified `directory_install` leaf
+   of version `V`: an edited or relabelled field, or a decoy one on another
+   line or nested in the same line, is refused, and an escaped or missing
+   field makes the `test` lines stop. The signer checks the replay again:
+   the directory must carry the admin quorum's signatures under the policy
+   in force, and its `prev` must be the SHA-256 of the restored version.
+   The residual: these checks bind the replay to the saved export's
+   checkpoint, which the log key signs. A saved export written by someone
+   who holds the log key (a compromised signer) verifies too, until Phase 4
+   witnesses the checkpoints. Keep saved exports where only operators can
+   write them.
+
+   **A lost version that binds a passkey cannot be replayed.**
+   keyroster-server refuses it with 409 `credential_not_pending`, because
+   the passkey's pending entry was deleted at the original install, and
+   every later lost version chains to it, so none of them installs either.
+   Replay up to that version. Then re-invite that user
+   (`keyroster user add NAME --reinvite`, see
+   [enroll-user.md](enroll-user.md)), approve the new passkey, and make the
+   later lost changes again by hand, disablements first. (UNVERIFIED: this
+   case and its re-invite path have not been run.)
+
+   **After the replay, the new export is the baseline.** The replayed
+   installs are new log entries with new times, so the log no longer
+   extends the pre-restore export: `audit verify --previous
+   /root/latest-saved.jsonl` refuses the new export. Export the log again
+   with step 1's command and `--out /tmp/after-replay.jsonl` (the service
+   may keep running), then verify it on its own pins and against the
+   export of the restored log from step 1; both must pass:
+
+   ```
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     /tmp/after-replay.jsonl
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     --previous /tmp/restored.jsonl /tmp/after-replay.jsonl
+   ```
+
+   The second command proves that the new log extends the restored one,
+   so nothing was cut back or rewritten between step 1 and the replay.
+   Then keep the new export as the next `--previous`, and keep the
+   pre-restore export and `/tmp/restored.jsonl` with the operations log as
+   the record of the restore.
+
+> **Run in CI e2e (TestRestoreReplaysLostDirectory, 03-02)** on a test
+> signer, for a lost directory version that adds a role and binds no
+> passkey: a file-level restore of `signer.db` (its `-wal` and `-shm`
+> files replaced together, or SQLite replays the newer WAL onto the older
+> file), the signer then reporting the older version, the export of the
+> restored log taken while the signer is stopped, step 2's `audit verify`
+> of the restored export on its own, step 2's two `audit verify` runs of
+> the saved export (on its own pins, and with `--previous`
+> set to the restored export), step 3's extraction commands above
+> verbatim, a copy of the proposal to another directory of mode 0700
+> with files of mode 0600 (as the test's own user, so not the runbook's
+> `runuser` copy block, which the `systemd-sandbox` check below runs),
+> the wait, `keyroster directory install` of
+> that copy with the signer then reporting the lost
+> version with the same bytes, the new export verifying on its own pins
+> and with `--previous` set to the restored export, and `audit verify
+> --previous` refusing it against the pre-restore export.
+>
+> **Run in CI (`systemd-sandbox`, `test/systemd/smoke.sh`, 03-02)** with
+> the repository's units on an Ubuntu 24.04 runner: the hold block above
+> verbatim for keyroster-server and keyroster-signer, each start then
+> refused with `Assertion failed on job for ...`; the file restore block
+> verbatim, from a copy of the signer's database taken under the hold,
+> refusing first while another process holds `signer.lock`, with stale
+> `-wal` and `-shm` files in the state directory and a backup set of
+> `signer.db` and an empty `-wal`: the restored `signer.db` and `-wal` are
+> the backup's bytes, keyroster-signer 0600, and the stale `-shm` is gone;
+> the release block verbatim, with the signer crash-looped into its
+> start limit before the hold (a temporary drop-in), so that it starts
+> again only because the release resets it; and the signer starting again with
+> `doctor` passing. No keyroster-server runs in that check: its unit is
+> held and its start refused, never started. It also runs step 3's copy
+> block verbatim for an admin account: it refuses with the account's
+> `~/replay-v2` planted as a link to a directory of root's, which keeps
+> its owner, mode and contents, and once the admin has removed the link
+> it writes both files as the admin, mode 0600 in a directory of mode
+> 0700, with root's bytes.
+>
+> **UNVERIFIED:** a VM snapshot restore (the disk copy, the helper VM,
+> the read-only mount and the transfer of the three files to the current
+> signer VM) and the fresh signer VM when the current one cannot be
+> used, the hold and the file restore on a
+> real signer host (a running keyroster-server, or the TPM drop-in beside
+> the hold), the file restore's refusal of a signer that is `activating`
+> (run once by hand against a throwaway unit in auto-restart, not in
+> CI), a backup whose `-wal` holds committed frames (CI's backup `-wal`
+> is empty, so only the file handling is run), the replay of a lost
+> `bundle_install`, a lost version that
+> binds a passkey and the re-invite after it, keeping users away from the server, the version counts of
+> step 2 against a real restored signer, the stop in step 2 for a
+> restored export that does not verify on its own (the refusals
+> themselves are run in the audit unit tests), and step 2 when the saved
+> export's prefix check fails and the procedure stops, for example for a
+> restored signer that logged K > 0 entries after the restore despite
+> the hold and had lost L > 0:
+> step 2's first command then reports `log shrank` when K < L and `log
+> rewritten` otherwise, and the prefix check `log rewritten` when K <= L
+> and `log shrank` when K > L. The `grep` patterns of step 2 match
+> the export line format written by `keyroster-signer export-log`, not a
+> real export of a restored signer.

@@ -25,3 +25,7 @@ A replayed version that newly binds a passkey would also be refused with 409 `cr
 - State the exposure window, and keep the server unreachable to users until the replay is done.
 - Document the 409 limit for versions that bind a passkey, or add an operator path that skips the pending check for a byte-identical replay of a logged version.
 - Run the procedure once on a test signer before labelling it verified.
+
+## Resolution
+
+Resolved in 03-02 (PR from branch `p03/02-phase2-followups`). signer-install.md restore step 3 replays lost directory versions from the saved export with `keyroster directory install` (export lines now carry the directory and its signatures), run in CI e2e by `TestRestoreReplaysLostDirectory`. The passkey-binding case (409 `credential_not_pending`) is documented and UNVERIFIED.
