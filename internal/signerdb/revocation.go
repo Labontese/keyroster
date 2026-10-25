@@ -1,14 +1,21 @@
 package signerdb
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
+
+	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/krl"
 )
 
 // Revocation kinds, as the revocation table stores them.
@@ -19,8 +26,10 @@ const (
 )
 
 // Revocation is one revoked entry. For RevocationSerial, CAKey (SSH wire
-// format) and Serial name the certificate; ValidBeforeMicros is its
-// valid_before in microseconds (0 when not known).
+// format) and Serial name the certificate; for RevocationKeyID, CAKey and
+// KeyID; for RevocationKey, Key (SSH wire format) names the key.
+// ValidBeforeMicros is the revoked certificate's valid_before in
+// microseconds (0 when not known, and for a key).
 type Revocation struct {
 	ID                int64
 	Kind              string
@@ -44,21 +53,37 @@ type KRLState struct {
 	PublishedAt time.Time
 }
 
-// InsertRevocation records r inside tx. This version writes serial rows
-// only (the key_id and key kinds arrive with 03-03).
+// InsertRevocation records r inside tx. Each kind carries exactly its own
+// fields: a serial row CAKey and Serial, a key_id row CAKey and KeyID, a
+// key row Key; ValidBeforeMicros 0 is stored as NULL (not known), and a
+// key row has none.
 func (d *DB) InsertRevocation(tx *sql.Tx, r Revocation) error {
-	if r.Kind != RevocationSerial || len(r.CAKey) == 0 || r.Serial == 0 || r.RevokedAt.IsZero() {
-		return errors.New("signerdb: incomplete revocation record")
+	ok := !r.RevokedAt.IsZero()
+	switch r.Kind {
+	case RevocationSerial:
+		ok = ok && len(r.CAKey) > 0 && r.Serial != 0 && r.KeyID == "" && len(r.Key) == 0
+	case RevocationKeyID:
+		ok = ok && len(r.CAKey) > 0 && r.Serial == 0 && r.KeyID != "" && len(r.Key) == 0
+	case RevocationKey:
+		ok = ok && len(r.CAKey) == 0 && r.Serial == 0 && r.KeyID == "" && len(r.Key) > 0 && r.ValidBeforeMicros == 0
+	default:
+		ok = false
 	}
-	serial, err := toInt64(r.Serial)
-	if err != nil {
-		return err
+	if !ok {
+		return errors.New("signerdb: incomplete revocation record")
 	}
 	leaf, err := toInt64(r.LeafIndex)
 	if err != nil {
 		return err
 	}
-	var validBefore any
+	var serial, validBefore, caKey, keyID, key any
+	if r.Serial != 0 {
+		s, err := toInt64(r.Serial)
+		if err != nil {
+			return err
+		}
+		serial = s
+	}
 	if r.ValidBeforeMicros != 0 {
 		vb, err := toInt64(r.ValidBeforeMicros)
 		if err != nil {
@@ -66,11 +91,126 @@ func (d *DB) InsertRevocation(tx *sql.Tx, r Revocation) error {
 		}
 		validBefore = vb
 	}
-	if _, err := tx.Exec(`INSERT INTO revocation (kind, ca_key, serial, valid_before_us, request_id, leaf_index, revoked_at_us) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		r.Kind, r.CAKey, serial, validBefore, r.RequestID[:], leaf, r.RevokedAt.UnixMicro()); err != nil {
+	if len(r.CAKey) > 0 {
+		caKey = r.CAKey
+	}
+	if r.KeyID != "" {
+		keyID = r.KeyID
+	}
+	if len(r.Key) > 0 {
+		key = r.Key
+	}
+	if _, err := tx.Exec(`INSERT INTO revocation (kind, ca_key, serial, key_id, key, valid_before_us, request_id, leaf_index, revoked_at_us) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.Kind, caKey, serial, keyID, key, validBefore, r.RequestID[:], leaf, r.RevokedAt.UnixMicro()); err != nil {
 		return fmt.Errorf("signerdb: insert revocation: %w", err)
 	}
 	return nil
+}
+
+// LiveCert is a certificate the signer issued that is live at a
+// subject revocation's resolution time.
+type LiveCert struct {
+	Serial      uint64
+	CAKey       []byte // the certificate's signature key, SSH wire format
+	ValidBefore uint64 // whole seconds
+	KeyID       string
+}
+
+// LiveIssuanceForSubjectTx returns, inside tx, every certificate issued
+// under CA role role (as the issuance table stores it) whose key ID names
+// subject (a kr1 or kr2 key ID with that sub field, confirmed with
+// cert.ParseKeyID) and that is live at at (whole seconds) by
+// krl.EntryLive, in ascending serial order. The prefix is compared
+// exactly (substr), never with LIKE, in which "_" would match any
+// character. There is no issue-time cutoff: the TTL cap comes from the
+// policy, and a successor policy with a shorter cap must not hide an
+// older, longer-lived certificate. It does not consult the revocation
+// table: a certificate an earlier revocation already lists is returned
+// again (re-listing).
+func (d *DB) LiveIssuanceForSubjectTx(ctx context.Context, tx *sql.Tx, role, subject string, at uint64) ([]LiveCert, error) {
+	var out []LiveCert
+	for _, prefix := range []string{"kr1/ca=" + role + "/sub=" + subject + "/", "kr2/ca=" + role + "/sub=" + subject + "/"} {
+		rows, err := tx.QueryContext(ctx, `SELECT serial, key_id, cert FROM issuance WHERE ca_role = ? AND substr(key_id, 1, length(?)) = ? ORDER BY serial`,
+			role, prefix, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("signerdb: read issuance by subject: %w", err)
+		}
+		for rows.Next() {
+			var (
+				serial int64
+				keyID  string
+				blob   []byte
+			)
+			if err := rows.Scan(&serial, &keyID, &blob); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("signerdb: read issuance by subject: %w", err)
+			}
+			kid, err := cert.ParseKeyID(keyID)
+			if err != nil || kid.CA != role || kid.Subject != subject || serial <= 0 || kid.Serial != uint64(serial) {
+				_ = rows.Close()
+				return nil, errors.New("signerdb: invalid issuance record")
+			}
+			c, err := parseIssuedCert(blob)
+			if err != nil || c.Serial != uint64(serial) || c.KeyId != keyID {
+				_ = rows.Close()
+				return nil, errors.New("signerdb: invalid issuance record")
+			}
+			if !krl.EntryLive(c.ValidBefore, at) {
+				continue
+			}
+			out = append(out, LiveCert{Serial: c.Serial, CAKey: c.SignatureKey.Marshal(), ValidBefore: c.ValidBefore, KeyID: keyID})
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("signerdb: read issuance by subject: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("signerdb: read issuance by subject: %w", err)
+		}
+	}
+	slices.SortFunc(out, func(a, b LiveCert) int { return cmp.Compare(a.Serial, b.Serial) })
+	return out, nil
+}
+
+// KeyIDValidBeforeTx returns, inside tx, the latest ValidBefore (whole
+// seconds) of the certificates with key ID keyID signed by caKey (SSH wire
+// format), or 0 when the signer issued none.
+func (d *DB) KeyIDValidBeforeTx(ctx context.Context, tx *sql.Tx, keyID string, caKey []byte) (uint64, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT cert FROM issuance WHERE key_id = ?`, keyID)
+	if err != nil {
+		return 0, fmt.Errorf("signerdb: read issuance by key ID: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var vb uint64
+	for rows.Next() {
+		var blob []byte
+		if err := rows.Scan(&blob); err != nil {
+			return 0, fmt.Errorf("signerdb: read issuance by key ID: %w", err)
+		}
+		c, err := parseIssuedCert(blob)
+		if err != nil {
+			return 0, errors.New("signerdb: invalid issuance record")
+		}
+		if bytes.Equal(c.SignatureKey.Marshal(), caKey) {
+			vb = max(vb, c.ValidBefore)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("signerdb: read issuance by key ID: %w", err)
+	}
+	return vb, nil
+}
+
+// parseIssuedCert parses a stored certificate.
+func parseIssuedCert(blob []byte) (*ssh.Certificate, error) {
+	pub, err := ssh.ParsePublicKey(blob)
+	if err != nil {
+		return nil, err
+	}
+	c, ok := pub.(*ssh.Certificate)
+	if !ok || c.SignatureKey == nil {
+		return nil, errors.New("signerdb: the stored key is not a certificate")
+	}
+	return c, nil
 }
 
 // InsertRevokeRequestTx records an accepted revoke request inside tx. A

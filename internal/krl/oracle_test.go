@@ -116,7 +116,7 @@ func TestOracleSSHKeygenKRL(t *testing.T) {
 	}
 	var set Set
 	for ca := range 2 {
-		cs := CertSerials{CAKey: caPubs[ca]}
+		cs := CertSection{CAKey: caPubs[ca]}
 		for s := range revoked[ca] {
 			cs.Serials = append(cs.Serials, s)
 		}

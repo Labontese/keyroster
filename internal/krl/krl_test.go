@@ -148,7 +148,7 @@ func TestEncode(t *testing.T) {
 		return out
 	}
 	one := func(ca ssh.PublicKey, serials ...uint64) Set {
-		return Set{Certs: []CertSerials{{CAKey: ca, Serials: serials}}}
+		return Set{Certs: []CertSection{{CAKey: ca, Serials: serials}}}
 	}
 
 	t.Run("adjacent_serials_one_range", func(t *testing.T) {
@@ -159,7 +159,7 @@ func TestEncode(t *testing.T) {
 		}
 	})
 	t.Run("duplicate_serial_once", func(t *testing.T) {
-		p := parseKRL(t, enc(t, Set{Certs: []CertSerials{{CAKey: caA, Serials: []uint64{5, 5}}, {CAKey: caA, Serials: []uint64{5}}}}))
+		p := parseKRL(t, enc(t, Set{Certs: []CertSection{{CAKey: caA, Serials: []uint64{5, 5}}, {CAKey: caA, Serials: []uint64{5}}}}))
 		if len(p.sections) != 1 || !slices.Equal(p.sections[0].list, []uint64{5}) || len(p.sections[0].ranges) != 0 {
 			t.Fatalf("{5, 5} (twice, one CA) encodes as %+v, want one serial 5", p.sections)
 		}
@@ -177,8 +177,8 @@ func TestEncode(t *testing.T) {
 			!slices.Equal(sec.ranges, [][2]uint64{{5, 6}}) {
 			t.Fatalf("{5, 6, 9, 12} encodes as %+v", sec)
 		}
-		c := enc(t, Set{Certs: []CertSerials{{CAKey: caB, Serials: []uint64{3}}, {CAKey: caA, Serials: []uint64{1}}}})
-		d := enc(t, Set{Certs: []CertSerials{{CAKey: caA, Serials: []uint64{1}}, {CAKey: caB, Serials: []uint64{3}}}})
+		c := enc(t, Set{Certs: []CertSection{{CAKey: caB, Serials: []uint64{3}}, {CAKey: caA, Serials: []uint64{1}}}})
+		d := enc(t, Set{Certs: []CertSection{{CAKey: caA, Serials: []uint64{1}}, {CAKey: caB, Serials: []uint64{3}}}})
 		if !bytes.Equal(c, d) {
 			t.Fatal("the CA order of the input changes the encoding")
 		}
@@ -198,12 +198,12 @@ func TestEncode(t *testing.T) {
 		}
 	})
 	t.Run("nil_ca_refused", func(t *testing.T) {
-		if _, err := Encode(Set{Certs: []CertSerials{{Serials: []uint64{1}}}}, 1, testTime); !errors.Is(err, ErrMalformed) {
+		if _, err := Encode(Set{Certs: []CertSection{{Serials: []uint64{1}}}}, 1, testTime); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("nil CA key: %v, want ErrMalformed", err)
 		}
 	})
 	t.Run("two_ca_sections_ordered", func(t *testing.T) {
-		p := parseKRL(t, enc(t, Set{Certs: []CertSerials{{CAKey: caB, Serials: []uint64{1}}, {CAKey: caA, Serials: []uint64{2}}}}))
+		p := parseKRL(t, enc(t, Set{Certs: []CertSection{{CAKey: caB, Serials: []uint64{1}}, {CAKey: caA, Serials: []uint64{2}}}}))
 		if len(p.sections) != 2 || bytes.Compare(p.sections[0].caKey, p.sections[1].caKey) >= 0 {
 			t.Fatalf("two CA keys: %d sections, want 2 ordered by wire bytes", len(p.sections))
 		}
@@ -240,7 +240,7 @@ func TestEncodeSizeBound(t *testing.T) {
 		serials[i] = 2 * uint64(i+1) // never adjacent: one list
 	}
 	t.Run("encode_at_max", func(t *testing.T) {
-		out, err := Encode(Set{Certs: []CertSerials{{CAKey: ca, Serials: serials[:n]}}}, 1, testTime)
+		out, err := Encode(Set{Certs: []CertSection{{CAKey: ca, Serials: serials[:n]}}}, 1, testTime)
 		if err != nil {
 			t.Fatalf("%d serials: %v", n, err)
 		}
@@ -249,7 +249,7 @@ func TestEncodeSizeBound(t *testing.T) {
 		}
 	})
 	t.Run("encode_over_max_refused", func(t *testing.T) {
-		if _, err := Encode(Set{Certs: []CertSerials{{CAKey: ca, Serials: serials}}}, 1, testTime); !errors.Is(err, ErrTooLarge) {
+		if _, err := Encode(Set{Certs: []CertSection{{CAKey: ca, Serials: serials}}}, 1, testTime); !errors.Is(err, ErrTooLarge) {
 			t.Fatalf("%d serials: %v, want ErrTooLarge", n+1, err)
 		}
 	})
@@ -309,7 +309,7 @@ func goldenVector(t *testing.T, name string, got []byte) []byte {
 func TestKRLGoldenVector(t *testing.T) {
 	_, caA := seedKey(t, 0x00)
 	_, caB := seedKey(t, 0x20)
-	data, err := Encode(Set{Certs: []CertSerials{{CAKey: caA, Serials: []uint64{5, 6, 9}}, {CAKey: caB, Serials: []uint64{9}}}}, 1, testTime)
+	data, err := Encode(Set{Certs: []CertSection{{CAKey: caA, Serials: []uint64{5, 6, 9}}, {CAKey: caB, Serials: []uint64{9}}}}, 1, testTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func FuzzEncodeKRL(f *testing.F) {
 	_, caB := seedKey(f, 0x20)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var set Set
-		set.Certs = []CertSerials{{CAKey: caA}, {CAKey: caB}}
+		set.Certs = []CertSection{{CAKey: caA}, {CAKey: caB}}
 		zero := false
 		for i := 0; i+1 < len(data) && i < 128; i += 2 {
 			ser := uint64(data[i])
@@ -401,7 +401,7 @@ func newManifestFixture(t *testing.T) *manifestFixture {
 	f := &manifestFixture{ops: signer(0x60), root: signer(0x80), ca: signer(0xa0)}
 	f.bundle = &trust.Bundle{OpsKey: trust.KeyEntry{Key: trust.FormatKey(f.ops.PublicKey())}, InstallationID: pinnedID}
 	var err error
-	if f.krl, err = Encode(Set{Certs: []CertSerials{{CAKey: f.ca.PublicKey(), Serials: []uint64{3}}}}, 2, testTime); err != nil {
+	if f.krl, err = Encode(Set{Certs: []CertSection{{CAKey: f.ca.PublicKey(), Serials: []uint64{3}}}}, 2, testTime); err != nil {
 		t.Fatal(err)
 	}
 	f.manifest = f.manifestFor(t, &Manifest{InstallationID: pinnedID, KRLVersion: 2, KRLSHA256: SHA256Hex(f.krl), IssuedAt: "2023-11-14T22:13:20Z", BundleVersion: 1, LogIndex: 7})

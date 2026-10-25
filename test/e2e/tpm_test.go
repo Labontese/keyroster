@@ -263,8 +263,9 @@ func TestTPMFullFlow(t *testing.T) {
 	assertTPMKeys(t, env)
 	tpmServe(t, env)
 	tpmIssueAndLogin(t, env)
-	// ca_init, bundle_install and the issuance.
-	tpmAuditVerify(t, env, 3, 1)
+	// ca_init, bundle_install, the start-up krl_publish (03-03) and the
+	// issuance.
+	tpmAuditVerify(t, env, 4, 1)
 }
 
 // TestTPMRestartPersistence: after the signer stops and starts again, it
@@ -292,8 +293,10 @@ func TestTPMRestartPersistence(t *testing.T) {
 	if after := assertTPMKeys(t, env); len(after) != len(before) {
 		t.Fatal("ca-pubkeys.json changed")
 	}
-	// ca_init, bundle_install and two issuances.
-	tpmAuditVerify(t, env, 4, 2)
+	// ca_init, bundle_install, the krl_publish of the first start (the
+	// restart, under an hour later, publishes nothing; 03-03) and two
+	// issuances.
+	tpmAuditVerify(t, env, 5, 2)
 }
 
 // TestTPMWrongAuthNotRestartable (D-WR-01, D-CR-01): with a corrupt auth

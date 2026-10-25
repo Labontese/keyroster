@@ -181,7 +181,7 @@ func TestHostCertificateNoTOFU(t *testing.T) {
 	}
 	if res.Entries != bootstrapLeaves+2 || res.Issued != 2 || res.ByCA["host"] != 1 || res.ByCA["user"] != 1 ||
 		res.Bundle != 1 || res.LogKey != fingerprint(t, env.LogPub) {
-		t.Fatalf("audit verify = %+v, want 4 entries with one host and one user issuance under bundle v1 and the bundle's log key", res)
+		t.Fatalf("audit verify = %+v, want %d entries with one host and one user issuance under bundle v1 and the bundle's log key", res, bootstrapLeaves+2)
 	}
 }
 

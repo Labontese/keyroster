@@ -6,6 +6,10 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +17,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/keystore"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/signerdb"
@@ -163,23 +168,26 @@ func TestRevoke(t *testing.T) {
 	t.Run("one_admin_of_quorum_two_revokes", func(t *testing.T) {
 		e := newRevokeEnv(t, 2, 2, testInstallationID)
 		resp, leaves := e.revoked(e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0]), 0)
-		if resp.KRLVersion != 1 {
-			t.Fatalf("KRL version %d, want 1", resp.KRLVersion)
+		// The first publish takes the clock's seconds (max(0 + 1,
+		// issued_at), owner decision 2026-10-25, Q1).
+		if want := uint64(e.clock.Now().Unix()); resp.KRLVersion != want { //nolint:gosec // G115: after 1970
+			t.Fatalf("first KRL version %d, want the publish time in seconds %d", resp.KRLVersion, want)
 		}
 		body, err := tlog.DecodeRevokeBody(leaves[0].Body)
 		if err != nil || len(body.Entries) != 1 || body.Entries[0].Serial != e.serial || body.Entries[0].Kind != tlog.RevokedSerial ||
 			!bytes.Equal(body.Entries[0].CAKey, e.fx.Roles["user"].PublicKey().Marshal()) || body.Entries[0].ValidBeforeSeconds == 0 {
 			t.Fatalf("revoke body %+v, %v", body, err)
 		}
-		// A second revocation publishes version 2 over both entries. The
-		// serial is time-based, so the frozen clock moves on first.
+		// A second revocation publishes the next version over both
+		// entries, strictly greater than the first. The serial is
+		// time-based, so the frozen clock moves on first.
 		e.clock.set(e.clock.Now().Add(time.Second))
 		other, err := e.issue()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if resp2, _ := e.revoked(e.revokeRequest(other.Serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[1]), 1); resp2.KRLVersion != 2 {
-			t.Fatalf("second KRL version %d, want 2", resp2.KRLVersion)
+		if resp2, _ := e.revoked(e.revokeRequest(other.Serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[1]), resp.KRLVersion); resp2.KRLVersion <= resp.KRLVersion {
+			t.Fatalf("second KRL version %d, want strictly greater than the previous %d", resp2.KRLVersion, resp.KRLVersion)
 		}
 	})
 	e := newRevokeEnv(t, 1, 1, testInstallationID)
@@ -438,7 +446,7 @@ func TestRevocationsChangedWhileRunning(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newRevokeEnv(t, 1, 1, testInstallationID)
-			e.revoked(e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0]), 0)
+			first, _ := e.revoked(e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0]), 0)
 			// The serial is time-based, so the frozen clock moves on first.
 			e.clock.set(e.clock.Now().Add(time.Second))
 			b, err := e.issue()
@@ -447,7 +455,7 @@ func TestRevocationsChangedWhileRunning(t *testing.T) {
 			}
 			reqB := e.revokeRequest(b.Serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0])
 			if tc.query == "" {
-				e.revoked(reqB, 1)
+				e.revoked(reqB, first.KRLVersion)
 				return
 			}
 			// Through its own handle, while e.s stays open.
@@ -469,8 +477,8 @@ func TestRevocationsChangedWhileRunning(t *testing.T) {
 				t.Fatal("the signer serves another KRL after the refusal")
 			}
 			stored, err := e.db.KRLState(context.Background())
-			if err != nil || stored == nil || stored.Version != 1 {
-				t.Fatalf("KRL state after the refusal: %+v, %v; want version 1", stored, err)
+			if err != nil || stored == nil || stored.Version != first.KRLVersion {
+				t.Fatalf("KRL state after the refusal: %+v, %v; want the first publish's version %d", stored, err, first.KRLVersion)
 			}
 			n := 0
 			for _, l := range e.leavesOf() {
@@ -610,4 +618,214 @@ func TestGetKRLDoesNotWaitForMu(t *testing.T) {
 		<-done
 		t.Fatal("GetKRL waited for s.mu")
 	}
+}
+
+// tickingClock is a settable signer clock that, while tick is set, moves one
+// microsecond per read, so serials (allocated from the clock) progress
+// while the time stays where a test put it.
+type tickingClock struct {
+	mu   sync.Mutex
+	now  time.Time
+	tick bool
+}
+
+func (c *tickingClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tick {
+		c.now = c.now.Add(time.Microsecond)
+	}
+	return c.now
+}
+
+func (c *tickingClock) set(t time.Time, tick bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now, c.tick = t, tick
+}
+
+// subjectEnv is a signer whose genesis bundle has an installation ID and
+// whose policy names the login RP, with a directory in which alice and bob
+// are active, on a tickingClock.
+type subjectEnv struct {
+	*logEnv
+	pk    *passkeys
+	clock *tickingClock
+}
+
+// subjectDirectory is directory version with prev: alice active, bob with
+// bobStatus, role ops granting loginPrincipals to both for up to 3600 s.
+func subjectDirectory(pk *passkeys, version uint64, prev, bobStatus string) *directory.Directory {
+	d := &directory.Directory{
+		Version: version,
+		Prev:    prev,
+		Users: []directory.User{
+			{Name: "alice", Status: directory.StatusActive, Credentials: []directory.Credential{boundCredential(pk.eddsa)}},
+			{Name: "bob", Status: bobStatus, Credentials: []directory.Credential{boundCredential(pk.bob)}},
+		},
+		Roles: []directory.Role{{Name: "ops", Principals: loginPrincipals, MaxTTLSeconds: 3600, Extensions: []string{"permit-pty"},
+			Users: []string{"alice", "bob"}}},
+	}
+	d.Sort()
+	return d
+}
+
+func newSubjectEnv(t *testing.T) *subjectEnv {
+	t.Helper()
+	fx := NewFixture(t, 1, 1)
+	fx.InstallationID = testInstallationID
+	fx.PolicyEdit = func(p *trust.Policy) {
+		p.WebAuthn = &trust.WebAuthnRP{RPID: loginRP, Origins: []string{loginOrigin}}
+	}
+	clock := &tickingClock{now: time.Unix(time.Now().Unix(), 0), tick: true}
+	e := &subjectEnv{logEnv: newLogEnvClock(t, fx, clock.Now), pk: newPasskeys(t), clock: clock}
+	doc, sigs := signDirectory(t, subjectDirectory(e.pk, 1, trust.GenesisPrev, directory.StatusActive), fx.Admins[0])
+	e.installDirectory(t, doc, sigs)
+	return e
+}
+
+// login issues a login certificate to user (alice or bob) through
+// LoginIssue.
+func (e *subjectEnv) login(t *testing.T, user string) *ssh.Certificate {
+	t.Helper()
+	auth := e.pk.eddsa
+	if user == "bob" {
+		auth = e.pk.bob
+	}
+	return e.mustLogin(t, approve(t, auth, e.loginReq(t, user), nil))
+}
+
+// subjectRequest is a subject revocation of the user subject, created now
+// on the signer's clock and signed by the fixture's admin.
+func (e *subjectEnv) subjectRequest(t *testing.T, subject string) *wire.RevokeRequest {
+	t.Helper()
+	req := &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: subject,
+		CreatedAt: uint64(e.clock.Now().Unix()), Reason: "test"} //nolint:gosec // G115: after 1970
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, e.fx.Admins[0], wire.RevokeSSHSIGNamespace, req.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+	return req
+}
+
+// revoke runs req through revokeOrRefuse and requires success.
+func (e *subjectEnv) revoke(t *testing.T, req *wire.RevokeRequest) *wire.RevokeResponse {
+	t.Helper()
+	resp, er := e.s.revokeOrRefuse(context.Background(), Peer{UID: 1000}, req)
+	if er != nil {
+		t.Fatalf("revoke refused: %s", er.Message)
+	}
+	return resp
+}
+
+// keygenOracle returns ssh-keygen, the KRL oracle, as internal/krl's
+// oracle tests find it: skipped when missing, unless
+// KEYROSTER_REQUIRE_ORACLE=1, where a missing oracle fails.
+func keygenOracle(t *testing.T) string {
+	t.Helper()
+	p, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		if os.Getenv("KEYROSTER_REQUIRE_ORACLE") == "1" {
+			t.Fatalf("ssh-keygen not found and KEYROSTER_REQUIRE_ORACLE=1: %v", err)
+		}
+		t.Skipf("ssh-keygen not found (set KEYROSTER_REQUIRE_ORACLE=1 to fail instead): %v", err)
+	}
+	return p
+}
+
+// keygenRevoked writes data as a KRL file and c as a certificate file and
+// reports whether ssh-keygen -Q -f refuses c (a non-zero exit that says
+// REVOKED).
+func keygenRevoked(t *testing.T, keygen string, data []byte, c *ssh.Certificate) bool {
+	t.Helper()
+	dir := t.TempDir()
+	krlFile, certFile := filepath.Join(dir, "revoked.krl"), filepath.Join(dir, "id-cert.pub")
+	if err := os.WriteFile(krlFile, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certFile, ssh.MarshalAuthorizedKey(c), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(keygen, "-Q", "-f", krlFile, certFile).CombinedOutput() //nolint:gosec // G204: test oracle
+	if err == nil {
+		t.Logf("ssh-keygen -Q, serial %d: %s", c.Serial, strings.TrimSpace(string(out)))
+		return false
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || !strings.Contains(string(out), "REVOKED") {
+		t.Fatalf("ssh-keygen -Q: %v\n%s", err, out)
+	}
+	t.Logf("ssh-keygen -Q, serial %d (exit %d): %s", c.Serial, ee.ExitCode(), strings.TrimSpace(string(out)))
+	return true
+}
+
+// TestRevokeSubjectTracer (03-03 Task 1, D-09): on a real signer with a
+// software CA, alice holds two login certificates and bob one. A subject
+// revocation of alice resolves both of hers in the signer and answers
+// their serials; the KRL it publishes makes ssh-keygen -Q refuse both of
+// alice's certificates and accept bob's; and audit verify, re-deriving the
+// revoke entry and the KRL from the exported log, passes and counts one
+// revocation with two entries.
+func TestRevokeSubjectTracer(t *testing.T) {
+	keygen := keygenOracle(t)
+	e := newSubjectEnv(t)
+	a1, a2 := e.login(t, "alice"), e.login(t, "alice")
+	b := e.login(t, "bob")
+	before := len(e.leavesOf())
+	resp := e.revoke(t, e.subjectRequest(t, "alice"))
+	if resp.SerialCount != 2 || !slices.Equal(resp.Serials, []uint64{a1.Serial, a2.Serial}) {
+		t.Fatalf("answer %+v, want SerialCount 2 and the serials of alice %d, %d", resp, a1.Serial, a2.Serial)
+	}
+	leaves := e.leavesOf()[before:]
+	if len(leaves) != 2 || leaves[0].Kind != tlog.KindRevoke || leaves[1].Kind != tlog.KindKRLPublish ||
+		resp.RevokeLeaf != leaves[0].Index || resp.PublishLeaf != leaves[1].Index {
+		t.Fatalf("leaves after the subject revoke: %+v (answer %+v), want one revoke then one krl_publish", leaves, resp)
+	}
+	rb, err := tlog.DecodeRevokeBody(leaves[0].Body)
+	if err != nil || len(rb.Entries) != 2 {
+		t.Fatalf("revoke body: %+v, %v", rb, err)
+	}
+	userCA := e.fx.Roles[keystore.RoleUser].PublicKey().Marshal()
+	for i, c := range []*ssh.Certificate{a1, a2} {
+		if en := rb.Entries[i]; en.Kind != tlog.RevokedSerial || en.Serial != c.Serial || !bytes.Equal(en.CAKey, userCA) || en.ValidBeforeSeconds != c.ValidBefore {
+			t.Fatalf("entry %d: %+v, want serial %d under the user CA, valid before %d", i, en, c.Serial, c.ValidBefore)
+		}
+	}
+	got := e.s.GetKRL()
+	if _, err := krl.VerifyManifest(got.Manifest, got.Sig, got.KRL, e.bundleOf(t), testInstallationID, 0); err != nil {
+		t.Fatalf("published KRL: %v", err)
+	}
+	for _, c := range []*ssh.Certificate{a1, a2} {
+		if !keygenRevoked(t, keygen, got.KRL, c) {
+			t.Errorf("ssh-keygen -Q accepts the certificate %d of alice", c.Serial)
+		}
+	}
+	if keygenRevoked(t, keygen, got.KRL, b) {
+		t.Errorf("ssh-keygen -Q refuses the certificate %d of bob", b.Serial)
+	}
+	rep := e.verifyExport()
+	if rep.Counts[tlog.KindRevoke] != 1 || rep.Revocations != 1 || rep.RevokedEntries != 2 ||
+		uint64(rep.KRLPublishes) != rep.Counts[tlog.KindKRLPublish] || rep.KRLPublishes < 1 { //nolint:gosec // G115: a count
+		t.Fatalf("audit report: %d revoke entries, %d revocations, %d revoked entries, %d KRL publishes (%d krl_publish entries); want 1, 1, 2 and at least 1",
+			rep.Counts[tlog.KindRevoke], rep.Revocations, rep.RevokedEntries, rep.KRLPublishes, rep.Counts[tlog.KindKRLPublish])
+	}
+	t.Logf("audit verify: %d entries, %d revocation with %d entries, %d KRL publishes, KRL v%d", rep.Size, rep.Revocations, rep.RevokedEntries, rep.KRLPublishes, rep.KRLVersion)
+}
+
+// bundleOf returns the installed trust bundle.
+func (e *logEnv) bundleOf(t *testing.T) *trust.Bundle {
+	t.Helper()
+	stored, err := e.db.LatestBundle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := trust.ParseBundle(stored.Bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

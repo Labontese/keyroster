@@ -927,7 +927,7 @@ func TestRevokeRequest(t *testing.T) {
 		return out
 	}
 	for name, data := range map[string][]byte{
-		"target_2_refused":            mutate(func(r *RevokeRequest) { r.Target = 2 }),
+		"target_5_refused":            mutate(func(r *RevokeRequest) { r.Target = 5 }),
 		"ca_role_out_of_range_0":      mutate(func(r *RevokeRequest) { r.CARole = 0 }),
 		"ca_role_out_of_range_4":      mutate(func(r *RevokeRequest) { r.CARole = 4 }),
 		"serial_zero_refused":         mutate(func(r *RevokeRequest) { r.Serial = 0 }),
@@ -948,7 +948,7 @@ func TestRevokeRequest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, err := ParseRevokeResponse(b); err != nil || *got != *rr {
+		if got, err := ParseRevokeResponse(b); err != nil || !reflect.DeepEqual(got, rr) {
 			t.Fatalf("ParseRevokeResponse = %+v, %v", got, err)
 		}
 		if _, err := (&RevokeResponse{}).Marshal(); err == nil {
@@ -1039,4 +1039,87 @@ func TestKRLFrameBound(t *testing.T) {
 			t.Fatalf("RequestCaps(%#x) = %d, %v; want MaxFrame", typ, n, ok)
 		}
 	}
+}
+
+// TestRevokeResponse (03-03): the answer of a subject revocation lists up
+// to MaxRevokeAnswerSerials serials, ascending and unique, and as many as
+// min(SerialCount, MaxRevokeAnswerSerials); every other shape is refused,
+// on Marshal and on ParseRevokeResponse alike.
+func TestRevokeResponse(t *testing.T) {
+	serials := func(n int) []uint64 {
+		out := make([]uint64, n)
+		for i := range out {
+			out[i] = uint64(1000 + 2*i) //nolint:gosec // G115: test serials
+		}
+		return out
+	}
+	// raw encodes r without Marshal's checks.
+	raw := func(r *RevokeResponse, n int) []byte {
+		var b cryptobyte.Builder
+		b.AddUint64(r.KRLVersion)
+		b.AddUint64(r.RevokeLeaf)
+		b.AddUint64(r.PublishLeaf)
+		b.AddUint32(r.SerialCount)
+		b.AddUint16(uint16(n)) //nolint:gosec // G115: test sizes
+		for _, s := range r.Serials {
+			b.AddUint64(s)
+		}
+		out, err := b.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		r    *RevokeResponse
+	}{
+		{"no_serials_round_trip", &RevokeResponse{KRLVersion: 1792869357, RevokeLeaf: 7, PublishLeaf: 8}},
+		{"two_serials_round_trip", &RevokeResponse{KRLVersion: 9, RevokeLeaf: 7, PublishLeaf: 8, SerialCount: 2, Serials: []uint64{5, 9}}},
+		{"4096_listed_round_trip", &RevokeResponse{KRLVersion: 9, RevokeLeaf: 7, PublishLeaf: 8, SerialCount: 4096, Serials: serials(4096)}},
+		{"count_above_list_round_trip", &RevokeResponse{KRLVersion: 9, RevokeLeaf: 8, PublishLeaf: 9, SerialCount: 4097, Serials: serials(4096)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := tc.r.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if 4+len(b) > MaxFrame-headerLen {
+				t.Fatalf("a %d-byte answer does not fit a frame", len(b))
+			}
+			got, err := ParseRevokeResponse(b)
+			if err != nil || !reflect.DeepEqual(got, tc.r) {
+				t.Fatalf("ParseRevokeResponse = %+v, %v", got, err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		r    *RevokeResponse
+	}{
+		{"4097_listed_refused", &RevokeResponse{KRLVersion: 9, SerialCount: 4097, Serials: serials(4097)}},
+		{"unsorted_refused", &RevokeResponse{KRLVersion: 9, SerialCount: 2, Serials: []uint64{9, 5}}},
+		{"duplicated_refused", &RevokeResponse{KRLVersion: 9, SerialCount: 2, Serials: []uint64{5, 5}}},
+		{"count_below_list_refused", &RevokeResponse{KRLVersion: 9, SerialCount: 1, Serials: []uint64{5, 9}}},
+		{"list_short_of_count_refused", &RevokeResponse{KRLVersion: 9, SerialCount: 3, Serials: []uint64{5, 9}}},
+		{"krl_version_0_refused", &RevokeResponse{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := tc.r.Marshal(); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("Marshal: %v, want ErrMalformed", err)
+			}
+			if _, err := ParseRevokeResponse(raw(tc.r, len(tc.r.Serials))); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseRevokeResponse: %v, want ErrMalformed", err)
+			}
+		})
+	}
+	t.Run("trailing_bytes_refused", func(t *testing.T) {
+		b, err := (&RevokeResponse{KRLVersion: 9, SerialCount: 1, Serials: []uint64{5}}).Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseRevokeResponse(append(b, 0)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("ParseRevokeResponse: %v, want ErrMalformed", err)
+		}
+	})
 }

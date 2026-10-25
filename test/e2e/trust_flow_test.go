@@ -19,7 +19,8 @@ import (
 // bundle, an admin-signed keyroster ca issue yields a certificate that real
 // sshd accepts, and the exported log verifies against the pinned root alone
 // (audit verify --pin takes the log key from the root-signed bundle_install
-// entry) and starts with the ca_init and bundle_install entries.
+// entry) and starts with the ca_init and bundle_install entries and the
+// krl_publish entry of serve's first start.
 func TestTrustFlowEndToEnd(t *testing.T) {
 	login := currentUser(t)
 	env := bootstrapSigner(t, bootstrapOpts{})
@@ -62,15 +63,17 @@ func TestTrustFlowEndToEnd(t *testing.T) {
 
 	export := env.exportLog(t)
 	code, out := auditVerify(t, env, export)
-	if code != 0 || !strings.HasPrefix(out, "OK: 3 entries,") || !strings.Contains(out, "issued 1") {
-		t.Fatalf("audit verify exited %d, want OK with 3 entries and 1 issued:\n%s", code, out)
+	if code != 0 || !strings.HasPrefix(out, "OK: "+strconv.Itoa(bootstrapLeaves+1)+" entries,") || !strings.Contains(out, "issued 1") {
+		t.Fatalf("audit verify exited %d, want OK with %d entries and 1 issued:\n%s", code, bootstrapLeaves+1, out)
 	}
 	raw, err := os.ReadFile(export) //nolint:gosec // test file
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(string(raw), "\n")
-	for i, want := range []string{"ca_init", "bundle_install", "issue"} {
+	// serve's first start publishes the empty first KRL before it accepts
+	// a request (D-10, 03-03).
+	for i, want := range []string{"ca_init", "bundle_install", "krl_publish", "issue"} {
 		var line struct {
 			Decoded struct {
 				Kind          string           `json:"kind"`

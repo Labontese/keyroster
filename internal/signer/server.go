@@ -84,21 +84,33 @@ func Listen(path string, gid int) (*net.UnixListener, error) {
 // Serve accepts connections on l until ctx is cancelled, then closes l,
 // waits for the open connections to finish and flushes the pending refusal
 // counts as a final refusal_summary leaf. While serving, the counts are
-// flushed every minute.
+// flushed every minute. Before it accepts the first connection it runs the
+// KRL check of D-10 once (republishIfDue): a fresh installation whose
+// bundle carries an installation ID publishes its first, empty KRL as the
+// first leaf the started signer writes, and a signer whose last publish is
+// at least an hour old publishes the next version; a restarted signer
+// with a fresher KRL publishes nothing. krlLoop repeats the check every
+// minute while serving.
 func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 	stop := context.AfterFunc(ctx, func() { _ = l.Close() })
 	defer stop()
+	s.republishIfDue(ctx)
 	loopCtx, cancelLoop := context.WithCancel(ctx)
-	flushDone := make(chan struct{})
+	flushDone, krlDone := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(flushDone)
 		s.flushLoop(loopCtx)
+	}()
+	go func() {
+		defer close(krlDone)
+		s.krlLoop(loopCtx)
 	}()
 	var wg sync.WaitGroup
 	defer func() {
 		wg.Wait()
 		cancelLoop()
 		<-flushDone
+		<-krlDone
 		s.flushSummaries(context.WithoutCancel(ctx))
 	}()
 	sem := make(chan struct{}, maxConns)

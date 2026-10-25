@@ -240,7 +240,7 @@ func classify(detail string) uint8 {
 		return tlog.ReasonPeerNotAllowed
 	case "malformed_frame", "unknown_message_type", "malformed_request", "directory_invalid",
 		// Revocation details (Phase 3).
-		"unknown_serial", "ca_role_mismatch":
+		"unknown_serial", "ca_role_mismatch", "subject_kind_unsupported", "key_is_ca_of_this_installation":
 		return tlog.ReasonMalformed
 	case "ca_not_configured":
 		return tlog.ReasonCANotConfigured

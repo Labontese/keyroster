@@ -71,6 +71,14 @@ type Report struct {
 	// AnchorVersion is the version of the first trust bundle in the log
 	// whose root set and threshold are exactly the pins (the anchor).
 	AnchorVersion uint64
+	// Revocations counts the revoke requests (a subject revocation split
+	// over several revoke entries counts once), RevokedEntries the entries
+	// their revoke entries list, and KRLPublishes the krl_publish entries;
+	// KRLVersion is the last published KRL version (0: none).
+	Revocations    int
+	RevokedEntries int
+	KRLPublishes   int
+	KRLVersion     uint64
 }
 
 // anchor is the trust state in force at a point of the log: the last
@@ -658,6 +666,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		lastTime   uint64
 	)
 	iss := issuance{issueIDs: map[string]uint64{}, loginIDs: map[string]uint64{}}
+	revs := newRevocations()
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), maxLine)
 	for sc.Scan() {
@@ -705,6 +714,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		if err := checkGrepFields(sc.Bytes(), leaf); err != nil {
 			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
+		if err := revs.before(want, leaf.Kind); err != nil {
+			return nil, err
+		}
 		switch leaf.Kind {
 		case tlog.KindBundleInstall:
 			body, err := tlog.DecodeBundleInstallBody(leaf.Body)
@@ -741,6 +753,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 				iss.issueIDs[kid.Request] = want
 			}
 			iss.next(body.Serial)
+			revs.addCert(c, kid)
 			rep.Serials++
 			rep.IssuedByCA[kid.CA]++
 		case tlog.KindDirectoryInstall:
@@ -759,6 +772,32 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err := verifyLoginIssue(want, body, leaf.TimeMicros, &trustState, &dirState, &iss); err != nil {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
+			// verifyLoginIssue checked the certificate and its kr2 key ID.
+			c, err := parseCert(body.Cert)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			kid, err := cert.ParseKeyID(c.KeyId)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			revs.addCert(c, kid)
+		case tlog.KindRevoke:
+			body, err := tlog.DecodeRevokeBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			if err := verifyRevoke(want, body, leaf.TimeMicros, &trustState, revs); err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+		case tlog.KindKRLPublish:
+			body, err := tlog.DecodeKRLPublishBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			if err := verifyKRLPublish(want, body, leaf.TimeMicros, &trustState, revs); err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
 		case tlog.KindRefusalSummary:
 			body, err := tlog.DecodeRefusalSummaryBody(leaf.Body)
 			if err != nil {
@@ -769,9 +808,11 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			// No check beyond the strict decode DecodeLeaf already did.
 		default:
 			// A kind this version has no check for is refused before it is
-			// hashed or counted, never skipped. Since plan 02-04 every kind
-			// tlog.DecodeLeaf accepts has a case above, so no leaf reaches
-			// this branch and no test exercises it: UNVERIFIED in this
+			// hashed or counted, never skipped. From 03-01 until 03-03 the
+			// revoke and krl_publish kinds reached this branch (and
+			// TestVerifyKindsWithoutChecks exercised it); since 03-03 every
+			// kind tlog.DecodeLeaf accepts has a case above, so no leaf
+			// reaches it and no test exercises it: UNVERIFIED in this
 			// version. It is kept as the guard that makes a kind added to
 			// tlog later fail closed until audit verify has a check for it.
 			return nil, fmt.Errorf("audit: entry %d (%s): not verifiable by this version", want, leaf.Kind)
@@ -785,6 +826,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("audit: read export: %w", err)
+	}
+	if err := revs.finish(); err != nil {
+		return nil, err
 	}
 	if checkpoint == nil {
 		return nil, errors.New("audit: empty log: the export has no checkpoint line")
@@ -840,6 +884,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	rep.Size, rep.Root = cp.Size, root
 	rep.BundleVersion, rep.PolicyVersion, rep.LogKey = trustState.bundle.Version, trustState.policy.Version, trustState.logKey
 	rep.AnchorVersion = trustState.anchorVersion
+	rep.Revocations, rep.RevokedEntries, rep.KRLPublishes, rep.KRLVersion = revs.revokes, revs.revokedEntries, revs.publishes, revs.krlVersion
 	return rep, nil
 }
 

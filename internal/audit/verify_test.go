@@ -1399,10 +1399,12 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 
 // TestVerifyKindsWithoutChecks: from plan 02-01 until 02-04, audit verify
 // refused every directory_install and login_issue leaf with "not
-// verifiable by this version" (T-02-115). Plan 02-04 gave both kinds real
-// checks; these cases keep 02-01's leaves, whose bodies only encode (the
-// directory bytes are no directory, the request bytes prove nothing), and
-// show that the interim refusal was replaced by a check, not by a pass:
+// verifiable by this version" (T-02-115), and from 03-01 until 03-03 every
+// revoke and krl_publish leaf (T-03-07). Plans 02-04 and 03-03 gave those
+// kinds real checks; these cases keep the interim leaves, whose bodies
+// only encode (the directory bytes are no directory, the request bytes
+// prove nothing), and show that the interim refusal was replaced by a
+// check, not by a pass:
 // Verify still returns an error and no report, the error names the entry
 // and its kind, and it is not the interim text. Each export carries a
 // checkpoint correctly signed over all its leaves. The control shows every
@@ -1429,6 +1431,16 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 			return encode(t, &tlog.LoginIssueBody{Serial: 1 << 60, PolicyVersion: 1, DirectoryVersion: 1, Request: []byte("request"),
 				Evidence: []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: []byte("assertion")}}, Cert: []byte("cert"), KeyID: "kr2"})
 		}, "logged request: "},
+		// From 03-01 until 03-03 the default branch refused these two kinds
+		// (T-03-07); 03-03 gave them real checks.
+		{"revoke_unproven_refused", tlog.KindRevoke, func(t *testing.T) []byte {
+			return encode(t, &tlog.RevokeBody{PolicyVersion: 1, ResolvedAtSeconds: 1, Request: []byte("request"),
+				Evidence: []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sig")}},
+				Entries:  []tlog.RevokedEntry{{Kind: tlog.RevokedSerial, CAKey: []byte("ca"), Serial: 1}}})
+		}, "logged request: "},
+		{"krl_publish_unproven_refused", tlog.KindKRLPublish, func(t *testing.T) []byte {
+			return encode(t, &tlog.KRLPublishBody{KRLVersion: 1, BundleVersion: 1, Manifest: []byte("manifest"), Sig: []byte("sig")})
+		}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := standard(t, "ed25519")
@@ -1448,33 +1460,6 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 				t.Fatalf("error %q, want the check %q", err, tc.want)
 			}
 			t.Logf("refused by its check: %v", err)
-		})
-	}
-	// Interim behaviour from 03-01 until 03-03 adds their checks (T-03-07):
-	// the default branch refuses a revoke or krl_publish entry, at that
-	// entry, before it is hashed or counted; it never skips one.
-	for _, tc := range []struct {
-		name string
-		kind tlog.Kind
-		body func(t *testing.T) []byte
-	}{
-		{"revoke_not_verifiable", tlog.KindRevoke, func(t *testing.T) []byte {
-			return encode(t, &tlog.RevokeBody{PolicyVersion: 1, ResolvedAtSeconds: 1, Request: []byte("request"),
-				Evidence: []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sig")}},
-				Entries:  []tlog.RevokedEntry{{Kind: tlog.RevokedSerial, CAKey: []byte("ca"), Serial: 1}}})
-		}},
-		{"krl_publish_not_verifiable", tlog.KindKRLPublish, func(t *testing.T) []byte {
-			return encode(t, &tlog.KRLPublishBody{KRLVersion: 1, BundleVersion: 1, Manifest: []byte("manifest"), Sig: []byte("sig")})
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := standard(t, "ed25519")
-			idx := len(f.leaves)
-			f.add(tc.kind, tc.body(t))
-			rep, err := f.verify(join(f.lines()), nil)
-			if want := fmt.Sprintf("audit: entry %d (%s): not verifiable by this version", idx, tc.kind); err == nil || rep != nil || err.Error() != want {
-				t.Fatalf("Verify = %+v, %v; want exactly %q", rep, err, want)
-			}
 		})
 	}
 	t.Run("phase1_kinds_still_verify", func(t *testing.T) {

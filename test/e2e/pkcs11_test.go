@@ -424,8 +424,9 @@ func runPKCS11FullFlow(t *testing.T, agentBin, keytype string) {
 
 	assertPKCS11Bundle(t, verifiedBundle(t, env), keytype)
 	issueOut := pkcs11IssueAndLogin(t, env, s.roleFPs["user"])
-	// ca_init, bundle_install and the issuance.
-	verifyOut := pkcs11AuditVerify(t, env, 3, 1)
+	// ca_init, bundle_install, the start-up krl_publish (03-03) and the
+	// issuance.
+	verifyOut := pkcs11AuditVerify(t, env, 4, 1)
 	t.Logf("keyroster audit verify:\n%s", verifyOut)
 	s.assertNoPINLeak(t, issueOut, verifyOut)
 
@@ -521,7 +522,9 @@ func TestPKCS11RootSignsBundle(t *testing.T) {
 	assertPKCS11Bundle(t, verifiedBundle(t, env), keytype)
 	env.serve(t)
 	pkcs11IssueAndLogin(t, env, s.roleFPs["user"])
-	pkcs11AuditVerify(t, env, 3, 1)
+	// ca_init, bundle_install, the start-up krl_publish (03-03) and the
+	// issuance.
+	pkcs11AuditVerify(t, env, 4, 1)
 }
 
 // TestPKCS11CAInitTwiceRefused: a second ca-init with the same PKCS#11 keys
@@ -671,5 +674,7 @@ func TestPKCS11ConcurrentIssue(t *testing.T) {
 		}
 	}
 	// ca_init, bundle_install and eight issuances.
-	pkcs11AuditVerify(t, env, 2+n, n)
+	// ca_init, bundle_install, the start-up krl_publish (03-03) and the n
+	// issuances.
+	pkcs11AuditVerify(t, env, 3+n, n)
 }
