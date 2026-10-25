@@ -488,18 +488,24 @@ func (e *loginServer) get(t *testing.T, c *http.Client, u string) string {
 
 // recordingAgent is an in-memory agent served over a connection that
 // records every add and can refuse a constrained add or leave
-// certificates out of its listing.
+// certificates out of its listing. The preflight's throwaway key is
+// recorded apart from the login's adds, in probes.
 type recordingAgent struct {
 	agent.Agent
 	mu                sync.Mutex
 	adds              []agent.AddedKey
+	probes            []agent.AddedKey
 	refuseConstrained bool
 	hideCerts         bool
 }
 
 func (a *recordingAgent) Add(k agent.AddedKey) error {
 	a.mu.Lock()
-	a.adds = append(a.adds, k)
+	if k.Comment == loginProbeComment {
+		a.probes = append(a.probes, k)
+	} else {
+		a.adds = append(a.adds, k)
+	}
 	refuse := a.refuseConstrained && k.LifetimeSecs > 0
 	a.mu.Unlock()
 	if refuse {
@@ -533,6 +539,12 @@ func (a *recordingAgent) added() []agent.AddedKey {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]agent.AddedKey(nil), a.adds...)
+}
+
+func (a *recordingAgent) probed() []agent.AddedKey {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]agent.AddedKey(nil), a.probes...)
 }
 
 // useRecordingAgent replaces connectLoginAgent with a recordingAgent
@@ -805,21 +817,69 @@ func TestLoginRefusals(t *testing.T) {
 		}
 	})
 	t.Run("constrained_add_refused_no_retry", func(t *testing.T) {
+		// An agent that refuses the lifetime constraint refuses the
+		// preflight's throwaway key, so the login stops before the begin
+		// (03-02 pre-merge review): no certificate is issued, and nothing
+		// is retried without the constraint.
 		e := newLoginServer(t)
 		a := useRecordingAgent(t)
 		a.refuseConstrained = true
 		dirs := useEmptyHomes(t)
-		stderr, wait := e.start(t)
-		e.drive(t, stderr)
-		requireLoginRefused(t, wait(), "not retrying without it")
-		adds := a.added()
-		if len(adds) != 1 || adds[0].LifetimeSecs == 0 {
-			t.Fatalf("adds = %d (first lifetime %v), want exactly one constrained add and no unconstrained retry", len(adds), adds)
+		_, wait := e.start(t)
+		requireLoginRefused(t, wait(), "does not take a key with a lifetime constraint (it is locked, or refuses such keys), so no login was started")
+		e.requireCalls(t, 0, 0)
+		if probes := a.probed(); len(probes) != 1 || probes[0].LifetimeSecs != loginProbeLifetime {
+			t.Fatalf("probes = %v, want exactly one constrained test key and no unconstrained retry", probes)
+		}
+		if adds := a.added(); len(adds) != 0 {
+			t.Fatalf("login adds = %d, want none", len(adds))
 		}
 		if keys, _ := a.Agent.List(); len(keys) != 0 {
 			t.Fatalf("the agent holds %d keys", len(keys))
 		}
 		requireNoFiles(t, dirs)
+	})
+	t.Run("locked_agent_no_begin", func(t *testing.T) {
+		// A locked agent answers the preflight's List with an empty listing
+		// and refuses every add; the throwaway key finds it out before the
+		// begin, so the signer issues nothing (03-02 pre-merge review).
+		e := newLoginServer(t)
+		a := useRecordingAgent(t)
+		if err := a.Agent.Lock([]byte("pw")); err != nil {
+			t.Fatal(err)
+		}
+		_, wait := e.start(t)
+		requireLoginRefused(t, wait(), "(it is locked, or refuses such keys), so no login was started")
+		e.requireCalls(t, 0, 0)
+		if adds := a.added(); len(adds) != 0 {
+			t.Fatalf("login adds = %d, want none", len(adds))
+		}
+	})
+	t.Run("probe_key_removed", func(t *testing.T) {
+		// A login that succeeds leaves only its certificate key in the
+		// agent: the preflight's throwaway key is removed again.
+		e := newLoginServer(t)
+		a := useRecordingAgent(t)
+		stderr, wait := e.start(t)
+		e.drive(t, stderr)
+		if r := wait(); r.code != 0 {
+			t.Fatalf("login exit %d:\n%s", r.code, r.stderr)
+		}
+		if probes := a.probed(); len(probes) != 1 {
+			t.Fatalf("probes = %d, want 1", len(probes))
+		}
+		keys, err := a.Agent.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range keys {
+			if k.Comment == loginProbeComment {
+				t.Fatal("the preflight's test key is still in the agent")
+			}
+		}
+		if len(keys) != 1 {
+			t.Fatalf("the agent holds %d keys, want the login's certificate only", len(keys))
+		}
 	})
 	t.Run("listing_without_cert_refused", func(t *testing.T) {
 		e := newLoginServer(t)
@@ -1256,8 +1316,9 @@ func TestLoginFlowFakeServer(t *testing.T) {
 		}
 	})
 	t.Run("agent_lost_after_preflight", func(t *testing.T) {
-		// The agent answers the preflight List and then goes away. The
-		// login was begun and redeemed, so the signer issued and logged a
+		// The agent answers the preflight (the List, and the add and the
+		// remove of the throwaway key) and then goes away. The login was
+		// begun and redeemed, so the signer issued and logged a
 		// certificate, but the add fails and the login exits non-zero:
 		// the residual of E-IN-01, an unusable grant whose key dies with
 		// this process.
@@ -1267,22 +1328,29 @@ func TestLoginFlowFakeServer(t *testing.T) {
 			client, server := net.Pipe()
 			go func() {
 				defer func() { _ = server.Close() }()
-				var n [4]byte
-				if _, err := io.ReadFull(server, n[:]); err != nil {
-					return
+				for _, answer := range [][]byte{
+					{0, 0, 0, 5, 12, 0, 0, 0, 0}, // SSH_AGENT_IDENTITIES_ANSWER (12) with no keys
+					{0, 0, 0, 1, 6},              // SSH_AGENT_SUCCESS (6) to the test key's add
+					{0, 0, 0, 1, 6},              // and to its remove
+				} {
+					var n [4]byte
+					if _, err := io.ReadFull(server, n[:]); err != nil {
+						return
+					}
+					if _, err := io.CopyN(io.Discard, server, int64(n[0])<<24|int64(n[1])<<16|int64(n[2])<<8|int64(n[3])); err != nil {
+						return
+					}
+					if _, err := server.Write(answer); err != nil {
+						return
+					}
 				}
-				if _, err := io.CopyN(io.Discard, server, int64(n[0])<<24|int64(n[1])<<16|int64(n[2])<<8|int64(n[3])); err != nil {
-					return
-				}
-				// SSH_AGENT_IDENTITIES_ANSWER (12) with no keys.
-				_, _ = server.Write([]byte{0, 0, 0, 5, 12, 0, 0, 0, 0})
 			}()
 			return client, nil
 		}
 		t.Cleanup(func() { connectLoginAgent = prev })
 		stderr, wait := e.start(t)
 		e.drive(t, stderr)
-		requireLoginRefused(t, wait(), "the agent refused the key with a lifetime constraint; not retrying without it")
+		requireLoginRefused(t, wait(), "the agent refused the key with its lifetime constraint, although it took the check's test key before the login (it may have been locked or stopped since); not retrying without it")
 		e.requireCalls(t, 1, 1)
 	})
 }

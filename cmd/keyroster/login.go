@@ -238,8 +238,10 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 	// The agent comes first (03-02, E-IN-01): a login with no usable agent
 	// stops here, before the begin, so the signer issues and logs no
 	// certificate that nobody holds. On Windows this runs winagent.Ensure,
-	// its owner check and its List. The one connection is held until the
-	// add and the listing check.
+	// its owner check and its List. A List alone also passes a locked agent,
+	// so a throwaway key with a lifetime constraint is added and removed
+	// as well (probeLoginAgent). The one connection is held until the add
+	// and the listing check.
 	conn, err := connectLoginAgent(ctx)
 	if err != nil {
 		return err
@@ -248,6 +250,9 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 	ag := agent.NewClient(conn)
 	if _, err := ag.List(); err != nil {
 		return fmt.Errorf("the ssh-agent does not answer, so no login was started: %w", err)
+	}
+	if err := probeLoginAgent(ag); err != nil {
+		return err
 	}
 
 	// The ephemeral key: memory only, zeroed on every return path (best
@@ -600,6 +605,39 @@ func remainingOnServer(c *ssh.Certificate, skew time.Duration, now time.Time) (u
 	return uint32(int64(c.ValidBefore) - nowSecs), nil //nolint:gosec // G115: at most the TTL plus the backdate
 }
 
+// The preflight's throwaway key: its comment, and its lifetime constraint
+// in seconds, so it leaves the agent by itself if the Remove does not
+// reach it.
+const (
+	loginProbeComment  = "keyroster login agent check"
+	loginProbeLifetime = 30
+)
+
+// probeLoginAgent proves before the begin that ag takes what the login
+// will add after the redeem (03-02 pre-merge review, E-IN-01): a
+// throwaway Ed25519 key with a lifetime constraint, removed again at once.
+// A locked agent answers List with an empty listing, and some agents
+// refuse adds or the lifetime constraint; both stop here, so the signer
+// issues and logs no certificate that nobody holds.
+func probeLoginAgent(ag agent.ExtendedAgent) error {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	defer clear(priv)
+	if err != nil {
+		return err
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return err
+	}
+	if err := ag.Add(agent.AddedKey{PrivateKey: priv, LifetimeSecs: loginProbeLifetime, Comment: loginProbeComment}); err != nil {
+		return fmt.Errorf("the ssh-agent does not take a key with a lifetime constraint (it is locked, or refuses such keys), so no login was started: %w", err)
+	}
+	if err := ag.Remove(sshPub); err != nil {
+		return fmt.Errorf("the ssh-agent took a test key but did not remove it, so no login was started: %w", err)
+	}
+	return nil
+}
+
 // addLoginToAgent adds key and its certificate c to ag, the agent client
 // keyroster login connected before the begin, then requires the agent's
 // listing to hold the certificate. The lifetime is computed here, from a
@@ -614,7 +652,7 @@ func addLoginToAgent(ag agent.ExtendedAgent, key ed25519.PrivateKey, c *ssh.Cert
 		return certRefused(err)
 	}
 	if err := ag.Add(agent.AddedKey{PrivateKey: key, Certificate: c, LifetimeSecs: remaining, Comment: c.KeyId}); err != nil {
-		return fmt.Errorf("the agent refused the key with a lifetime constraint; not retrying without it: %w", err)
+		return fmt.Errorf("the agent refused the key with its lifetime constraint, although it took the check's test key before the login (it may have been locked or stopped since); not retrying without it: %w", err)
 	}
 	keys, err := ag.List()
 	if err != nil {
