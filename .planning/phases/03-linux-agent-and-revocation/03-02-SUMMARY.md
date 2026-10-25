@@ -441,6 +441,26 @@ PR #59 review, on head 48e4a8f. Each test failed with its fix disabled or revert
 - In WSL: `go test -race -count=1 ./...` passed, and golangci-lint reported 0 issues for linux, windows and darwin.
 - The e2e suite ran in WSL under the uncommitted namespace hosts workaround with OpenSSH 10.5p1: 34 passed. `TestSSHDRejects/pty_allowed` failed, in a test no change here touches. The likely cause is PTY allocation in the user namespace, but that is unconfirmed; CI is the authoritative run.
 
+## Pre-merge review fixes, round 3
+
+PR #59 review, on head 894a6c3. Each test failed against its mutant or the pre-fix text and passed once the fix was restored.
+
+- **Item 1, saved export read unverified after `log rewritten` (medium), with item 2, the runbook check's order and condition (low):** `095294c`. Step 2 now runs both `audit verify` runs of the saved export whenever its first command fails, whatever it reports, before any grep of the saved export. If either fails, the operator stops, keeps the signer stopped and escalates. A restored signer that logged entries after the restore, for example one that auto-started, also ends there, because its log is no prefix of the saved one. `TestRestoreRunbookChecks` pins the condition, refuses the 894a6c3 gate sentence, and requires the verify block and the stop rule before every grep of the saved export. Proof: it failed on the 894a6c3 runbook (the gate) and on the 48e4a8f runbook. A copy of the fixed runbook with step 2's greps moved before the verify block failed it on the order alone.
+- **Item 3, the `k != key` branch of checkGrepFields (low):** `eb9e52a`. `TestVerifyGrepFields` adds a login_issue line and four colliding cases: `bundle_version` 3 on directory v3, `version` 1 on bundle v1, and `version` 0 and `bundle_version` 0 on the login line. Proof: with `k != key` dropped, exactly these four failed.
+- **Item 4, 03-03's revoke rendering (low):** `5b0bfe7`, docs only. 03-03-PLAN.md renders an entry's kind as `entry_kind`, keeps `bundle_version` and `version` keys off revoke and krl_publish lines, and adds an acceptance line: as-exported revoke (two or more entries) and krl_publish lines pass Verify.
+- **Item 5, Verify's doc comment (low):** `3742441`, comment only. It now names the decoded fields Verify checks instead of saying the decoded objects are ignored.
+- **Item 6, the extraction block without `set -e` (low):** `73b8399`. The runbook's block is a `bash -eu <<'EOF'` heredoc that ends with a `wrote the proposal` line, so a paste stops at the first failing line as CI's run does, and the operator's shell stays open. The e2e test runs the same script in `bash -eu`, and `requireReplayBlock` pins the whole block, wrapper included, in `TestRestoreRunbookChecks`. Proof: the test failed with the wrapper line removed from the runbook. A paste test in WSL bash against a small fake export wrote both files for version 2; for a missing version 3 it stopped with status 1, printed no success line, and the outer shell went on.
+- **Item 7, the login signer-call wording (low):** `0e5e44f`, comment and docs only. `signerCallTimeout`'s comment (internal/server/admin.go) and this file's `provides` line now say that the request is sent by CreatedAt + 295 s and the answer is read for up to signerCallTimeout after the send (C-IN-01, round 2).
+  - Round 2's item 2 supersedes the round-1 "Skipped" item (the reply read). It also supersedes the plan's must_have wording that puts the deadline on the whole signer call: since `0877449` that deadline bounds only the send.
+
+**Checks run:**
+- `gofmt -l` reported nothing.
+- `go vet ./...` passed for windows, linux and darwin, and `go vet -tags e2e ./test/e2e/` for windows and linux.
+- `go test -tags e2e -run TestRestoreRunbookChecks ./test/e2e/` passed on Windows.
+- In WSL: `go test -race -count=1 ./internal/audit/... ./internal/server/... ./internal/signerclient/...` passed, and golangci-lint reported 0 issues for linux, windows and darwin.
+- `TestRestoreRunbookChecks` and `TestRestoreReplaysLostDirectory` passed in WSL under the namespace hosts workaround, with OpenSSH 10.5p1.
+- The full e2e suite ran there too: 34 passed. `TestSSHDRejects/pty_allowed` failed, as in round 2, in a test no change here touches. CI is the authoritative run.
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-25*
