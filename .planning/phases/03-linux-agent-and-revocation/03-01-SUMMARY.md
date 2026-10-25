@@ -440,6 +440,18 @@ PR #58, the findings left open after round 1. The owner decided all four on 2026
   - golangci-lint v2.14.0 reports 0 issues.
 - **Not run locally (UNVERIFIED here):** the e2e lanes. WSL does not resolve `keyroster.localhost`, so they rely on CI. No end-to-end run exists yet for the server cache with a real signer or for `revocations_not_logged`.
 
+## Pre-merge review fixes, round 3
+
+- **Unavailable refusal kept a stale KRL cached** (Codex, MEDIUM): 7fd0862. `handleRevoke` now calls `dropKRL` for every signer answer except CodeMalformed (400) and CodeRefused (403). The signer decides those before the transaction or rolls them back inside it. A failed COMMIT that reached the disk is answered `state_unavailable` (CodeUnavailable), the same answer as the pre-transaction `RevokeRequestUsed` failure, so the server has to drop the cache for both. CodeInternal and unknown codes also drop it. Test: the `unavailable` and `internal` cases of `TestKRLCache/uncertain_outcome_drops_cache` fail with that `dropKRL` removed, as the ebc23d7 code does ("krl v1" after 1 GetKRL call). The `refused` and `malformed` cases confirm that a refusal keeps the cached entry.
+- **The `<-r.done` wait in `dropKRL` was untested**: 734a2c0. Test: `TestKRLCache/drop_waits_for_read_in_flight` holds a GetKRL that will answer v1, sends a revocation while it is in flight, switches the fake signer to v2 and releases it. The next GET must return v2. With the wait removed, it fails 10 of 10 runs: the v1 read is stored after the drop.
+- **The `dropKRL` on the outcome-unknown error path was untested**: 7fd0862. Test: the `outcome_unknown` case (a plain transport error) of `TestKRLCache/uncertain_outcome_drops_cache` fails with that `dropKRL` removed.
+- **The e2e wait was coupled by hand to the unexported `krlTTL`** (NIT): e011c7c. `krlTTL` is now `serverclient.KRLMaxStale` (5 s, documented as the staleness bound of KRLPath). Step 8 of `TestRevokeSerialEndToEnd` sleeps `KRLMaxStale + 1 s` instead of a 6 s literal, so the wait follows the TTL when it changes. The compile check is `go vet -tags e2e`; the test itself was not run locally.
+- **Gates:**
+  - `gofmt -l` is empty. `go vet ./...` passes for windows, linux and darwin, and `GOOS=linux go vet -tags e2e ./test/e2e/` passes.
+  - In WSL, `go test -race -count=1` passes for server, serverclient and cmd/keyroster, and `TestKRLCache -race -count=30` passes.
+  - golangci-lint reports 0 issues for linux, windows and darwin.
+  - The e2e lanes run only in CI.
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-24*
