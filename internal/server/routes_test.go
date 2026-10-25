@@ -30,6 +30,28 @@ var passkeyRoutes = map[string]string{
 	"POST /api/v1/web/login/finish":     "the only route that creates a session, after a passkey assertion",
 }
 
+// otherRoutes are every other registered pattern, each with the reason it
+// signs nobody in and creates no session, login code or certificate for a
+// user who has not passed a passkey ceremony.
+var otherRoutes = map[string]string{
+	"GET /{$}":                               "the index page",
+	"GET /static/":                           "the embedded static assets",
+	"GET /api/v1/trust":                      "the root-signed trust bundle, public",
+	"GET /healthz":                           "the health check",
+	"POST /api/v1/admin/users":               "creates an invite; an admin request signed by an admin key (requireAdmin)",
+	"GET /api/v1/admin/users/{name}/pending": "lists a user's pending passkeys; requireAdmin",
+	"GET /api/v1/admin/users":                "lists the users; requireAdmin",
+	"GET /api/v1/admin/directory":            "reads the installed directory; requireAdmin",
+	"POST /api/v1/admin/directory":           "installs an admin-signed directory; requireAdmin",
+	"POST /api/v1/admin/revoke":              "an admin-signed revocation; requireAdmin",
+	"GET /api/v1/krl":                        "the published KRL, public",
+	"GET /enroll/{token}":                    "the enrollment page of an invite; it registers a passkey and signs nobody in",
+	"POST /api/v1/enroll/{token}/begin":      "the passkey registration challenge of an invite; it signs nobody in",
+	"POST /api/v1/enroll/{token}/finish":     "stores a pending passkey for an admin to approve; it signs nobody in",
+	"GET /account":                           "the account page, behind an existing session (withSession)",
+	"POST /logout":                           "ends a session; it creates none",
+}
+
 // signInKeywords mark a pattern as a sign-in or session route.
 var signInKeywords = []string{"login", "signin", "sign-in", "session", "password", "totp", "otp", "recovery", "magic"}
 
@@ -60,6 +82,25 @@ func TestNoNonPasskeySignInRoute(t *testing.T) {
 		for p := range passkeyRoutes {
 			if !slices.Contains(patterns, p) {
 				t.Errorf("passkeyRoutes lists %q, which the server does not register; remove the stale entry", p)
+			}
+		}
+	})
+	t.Run("every_route_reviewed", func(t *testing.T) {
+		// A sign-in route whose pattern names none of signInKeywords (a
+		// GET /auth/email/{token}, say) passes the keyword check, so every
+		// recorded pattern must also be in passkeyRoutes or otherRoutes
+		// (03-02 pre-merge review): a new route fails until it is listed
+		// on purpose, with the reason it signs nobody in.
+		for _, p := range patterns {
+			_, passkey := passkeyRoutes[p]
+			_, other := otherRoutes[p]
+			if !passkey && !other {
+				t.Errorf("route %q is in neither passkeyRoutes nor otherRoutes; list it with the reason it signs nobody in", p)
+			}
+		}
+		for p := range otherRoutes {
+			if !slices.Contains(patterns, p) {
+				t.Errorf("otherRoutes lists %q, which the server does not register; remove the stale entry", p)
 			}
 		}
 	})
