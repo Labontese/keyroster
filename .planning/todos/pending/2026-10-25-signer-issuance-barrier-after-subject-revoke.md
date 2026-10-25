@@ -18,11 +18,11 @@ files:
 
 The 03-03 plan check (Codex + Claude, PR #59 follow-up) found a window in `keyroster revoke user`, and both skeptics upheld it (codex high). The subject revoke and the directory disable are two separate signer transactions. A login or issuance that completes after the revoke commits, and before the disable is installed, gets a certificate outside the revoked set. Signer.LoginIssue authorizes against the directory installed at that moment. The certificate stays valid until it expires.
 
-Owner decision 2026-10-25, question Q3: a second sweep now, the barrier in Phase 4. 03-03's `revoke user` revokes, disables, and once the install is reported revokes the subject a second time. That closes the window at admin quorum 1.
+Owner decision 2026-10-25, question Q3: a second sweep now, the barrier in Phase 4. 03-03b's `revoke user` (the CLI half of 03-03 since the split, owner decision 2026-10-25, PR #60) revokes, disables, and once the install is reported revokes the subject a second time. That closes the window at admin quorum 1.
 
 At quorum above 1, the disable is only a proposal, and the window stays open until the co-signers install it. The CLI exits 4 (`revoked, disable pending`), says that the user can still obtain certificates, and prints `run keyroster revoke user <name> again after the proposal is installed`. The fix then depends on the operator re-running the command. A server that reports an install that did not happen also moves the second sweep early: signer-signed install receipts are Phase 4 too, in the todo [The CLI verifies signer-signed receipts for directory installs](2026-10-21-cli-verifies-directory-install-receipts.md).
 
-This is 03-03 threat T-03-19's accepted residual.
+This is threat T-03-19's accepted residual (03-03b since the split; 03-03 before).
 
 ## Solution
 
@@ -40,4 +40,4 @@ Tests:
 - an install that keeps the user active lifts the barrier;
 - quorum 2 end to end.
 
-Sources: 03-03-PLAN.md, the Q3 rows of Round 2 in the Review Dispositions Ledger, and threat T-03-19.
+Sources: 03-03-PLAN.md, the Q3 rows of Round 2 in the Review Dispositions Ledger, and threat T-03-19; since the split, 03-03b-PLAN.md holds the CLI half, the moved Q3 rows and T-03-19.
