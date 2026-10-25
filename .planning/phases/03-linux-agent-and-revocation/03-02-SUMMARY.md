@@ -70,7 +70,6 @@ requirements-completed: []
 coverage:
   - id: D1
     description: "keyroster login with no usable agent stops before the begin: no begin, no redeem, no certificate (E-IN-01)"
-    requirement: "AUTH-03"
     verification:
       - kind: unit
         ref: "cmd/keyroster/login_test.go#TestLoginFlowFakeServer/no_agent_no_begin"
@@ -84,7 +83,6 @@ coverage:
     human_judgment: false
   - id: D2
     description: "The agent lifetime is computed from a fresh clock reading immediately before the add and refused below 60 s (E-IN-02)"
-    requirement: "AUTH-03"
     verification:
       - kind: unit
         ref: "cmd/keyroster/login_test.go#TestLoginFlowFakeServer/lifetime_recomputed_at_add"
@@ -121,7 +119,7 @@ coverage:
         ref: "test/e2e/restore_test.go#TestRestoreReplaysLostDirectory (local WSL, OpenSSH 10.5p1, namespace hosts entry)"
         status: pass
       - kind: unit
-        ref: "internal/audit/export_test.go#TestDecode/directory_install"
+        ref: "internal/audit/export_test.go#TestDecodeLoginIssue/directory_install"
         status: pass
     human_judgment: false
   - id: D7
