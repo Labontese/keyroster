@@ -2238,30 +2238,9 @@ func TestVerifyReplayFields(t *testing.T) {
 	lf := newLoginFixture(t, true)
 	lf.addDirectory(lf.directory(nil), nil)
 	all := lf.lines() // bundle_install, directory_install, checkpoint
-	// editDecoded re-encodes line i with its decoded object changed by edit.
 	editDecoded := func(i int, edit func(m map[string]any)) []string {
 		t.Helper()
-		l := append([]string(nil), all...)
-		var line ExportLine
-		if err := json.Unmarshal([]byte(l[i]), &line); err != nil {
-			t.Fatal(err)
-		}
-		var m map[string]any
-		if err := json.Unmarshal(line.Decoded, &m); err != nil {
-			t.Fatal(err)
-		}
-		edit(m)
-		dec, err := json.Marshal(m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		line.Decoded = dec
-		out, err := json.Marshal(line)
-		if err != nil {
-			t.Fatal(err)
-		}
-		l[i] = string(out)
-		return l
+		return editDecodedLine(t, all, i, edit)
 	}
 	other := base64.StdEncoding.EncodeToString([]byte(`{"version":1,"roles":[{"name":"evil"}]}`))
 	const refused = "its directory or sigs field is not the document and signatures of its directory_install leaf"
@@ -2272,7 +2251,7 @@ func TestVerifyReplayFields(t *testing.T) {
 	}{
 		{"as_exported_ok", all, ""},
 		{"reencoded_unchanged_ok", editDecoded(1, func(map[string]any) {}), ""},
-		{"other_decoded_field_ok", editDecoded(1, func(m map[string]any) { m["note"], m["version"] = "added by a later binary", 9 }), ""},
+		{"other_decoded_field_ok", editDecoded(1, func(m map[string]any) { m["note"] = "added by a later binary" }), ""},
 		{"directory_swapped_refused", editDecoded(1, func(m map[string]any) { m["directory"] = other }), refused},
 		{"sigs_swapped_refused", editDecoded(1, func(m map[string]any) { m["sigs"] = other }), refused},
 		{"sigs_missing_refused", editDecoded(1, func(m map[string]any) { delete(m, "sigs") }), refused},
@@ -2281,6 +2260,102 @@ func TestVerifyReplayFields(t *testing.T) {
 		{"decoy_on_other_kind_refused", editDecoded(0, func(m map[string]any) {
 			m["kind"], m["version"], m["directory"], m["sigs"] = "directory_install", 1, other, other
 		}), refused},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := lf.verify(join(tc.lines), nil)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Verify: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify = %+v, %v; want an error with %q", rep, err, tc.want)
+			}
+		})
+	}
+}
+
+// editDecodedLine returns a copy of lines with line i re-encoded, its
+// decoded object changed by edit.
+func editDecodedLine(t *testing.T, lines []string, i int, edit func(m map[string]any)) []string {
+	t.Helper()
+	l := append([]string(nil), lines...)
+	var line ExportLine
+	if err := json.Unmarshal([]byte(l[i]), &line); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(line.Decoded, &m); err != nil {
+		t.Fatal(err)
+	}
+	edit(m)
+	dec, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line.Decoded = dec
+	out, err := json.Marshal(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l[i] = string(out)
+	return l
+}
+
+// TestVerifyGrepFields: the decoded fields the restore runbook reads with
+// grep to count, list and pick entries (signer-install.md steps 2 and 3)
+// verify only as the leaf's own (03-02 pre-merge review, round 2): "kind"
+// once on every leaf line, "bundle_version" once on every bundle_install
+// line, and "version", where present, once on a directory_install line,
+// each with the leaf's value and on no other line. hidden_final_install
+// is the review's case: with v3 relabelled as a refusal, the runbook's
+// grep would list only v1 and v2, and a replay would stop at v2.
+func TestVerifyGrepFields(t *testing.T) {
+	lf := newLoginFixture(t, true)
+	for range 3 {
+		lf.addDirectory(lf.directory(nil), nil)
+	}
+	all := lf.lines() // bundle_install, directory_install v1, v2, v3, checkpoint
+	edit := func(i int, f func(m map[string]any)) []string {
+		t.Helper()
+		return editDecodedLine(t, all, i, f)
+	}
+	raw := func(i int, old, repl string) []string {
+		t.Helper()
+		if !strings.Contains(all[i], old) {
+			t.Fatalf("line %d has no %s", i, old)
+		}
+		l := append([]string(nil), all...)
+		l[i] = strings.Replace(l[i], old, repl, 1)
+		return l
+	}
+	const (
+		kind          = "its decoded kind is not the kind of its leaf"
+		version       = "its decoded version field is not the one of its"
+		bundleVersion = "its decoded bundle_version field is not the one of its"
+	)
+	cases := []struct {
+		name  string
+		lines []string
+		want  string // "" = must verify
+	}{
+		{"as_exported_ok", all, ""},
+		{"other_decoded_field_ok", edit(2, func(m map[string]any) { m["note"] = "added by a later binary" }), ""},
+		{"hidden_final_install_refused", edit(3, func(m map[string]any) { m["kind"] = "refusal" }), kind},
+		{"kind_missing_refused", edit(2, func(m map[string]any) { delete(m, "kind") }), kind},
+		{"kind_spaced_refused", raw(3, `"kind":"directory_install"`, `"kind" : "directory_install"`), kind},
+		{"kind_decoy_nested_refused", edit(0, func(m map[string]any) { m["x"] = map[string]any{"kind": "directory_install"} }), kind},
+		{"kind_decoy_escaped_key_refused", edit(0, func(m map[string]any) { m[`x"kind`] = "directory_install" }), kind},
+		{"version_edited_refused", edit(2, func(m map[string]any) { m["version"] = 3 }), version},
+		{"version_longer_number_refused", edit(2, func(m map[string]any) { m["version"] = 23 }), version},
+		{"version_twice_refused", edit(2, func(m map[string]any) { m["x"] = map[string]any{"version": 2} }), version},
+		{"version_missing_ok", edit(2, func(m map[string]any) { delete(m, "version") }), ""},
+		{"version_on_other_kind_refused", edit(0, func(m map[string]any) { m["version"] = 2 }), version},
+		{"bundle_version_edited_refused", edit(0, func(m map[string]any) { m["bundle_version"] = 2 }), bundleVersion},
+		{"bundle_version_missing_refused", edit(0, func(m map[string]any) { delete(m, "bundle_version") }), bundleVersion},
+		{"bundle_version_on_other_kind_refused", edit(3, func(m map[string]any) { m["bundle_version"] = 1 }), bundleVersion},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

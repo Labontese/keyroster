@@ -36,6 +36,51 @@ test -s "$D/directory.json.sigs"
 rm "$D/line"
 `
 
+// restoreRunbookChecks are the instructions of the same runbook section
+// that TestRestoreReplaysLostDirectory carries out with its own pins and
+// paths (exportLog and auditVerifyPins) rather than as the runbook's text:
+// step 1's export of the restored log, step 2's two audit verify runs of
+// the saved export, and the export and the two audit verify runs of the
+// post-replay log ("After the replay, the new export is the baseline").
+// TestRestoreRunbookChecks requires each in the runbook, so removing one
+// of these instructions fails the e2e suite as removing an extraction
+// line does.
+var restoreRunbookChecks = []string{
+	"--out /tmp/restored.jsonl",
+	restoreVerify + "\n/root/latest-saved.jsonl",
+	restoreVerify + "\n--previous /tmp/restored.jsonl /root/latest-saved.jsonl",
+	"`--out /tmp/after-replay.jsonl`",
+	restoreVerify + "\n/tmp/after-replay.jsonl",
+	restoreVerify + "\n--previous /tmp/restored.jsonl /tmp/after-replay.jsonl",
+}
+
+// restoreVerify is the first line of the runbook's audit verify commands.
+const restoreVerify = `keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \`
+
+// TestRestoreRunbookChecks: signer-install.md still has every instruction
+// of restoreRunbookChecks. The runbook and each check are compared with
+// every line's leading and trailing space trimmed; a check of more than
+// one line must be whole lines of the runbook.
+func TestRestoreRunbookChecks(t *testing.T) {
+	trim := func(s string) string {
+		l := strings.Split(s, "\n")
+		for i := range l {
+			l[i] = strings.TrimSpace(l[i])
+		}
+		return strings.Join(l, "\n")
+	}
+	runbook := "\n" + trim(string(readFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))) + "\n"
+	for _, c := range restoreRunbookChecks {
+		want := trim(c)
+		if strings.Contains(want, "\n") {
+			want = "\n" + want + "\n"
+		}
+		if !strings.Contains(runbook, want) {
+			t.Errorf("signer-install.md no longer has %q, which TestRestoreReplaysLostDirectory carries out", c)
+		}
+	}
+}
+
 // TestRestoreReplaysLostDirectory runs the signer restore procedure of
 // signer-install.md step 3 on a test signer (03-02, D-20, review A-IN-01).
 // Directory v1 (the first admin's approval) is installed; the signer is
@@ -102,8 +147,8 @@ func TestRestoreReplaysLostDirectory(t *testing.T) {
 	if resp, _ := signerDirectory(t, env); resp.Version != 1 {
 		t.Fatalf("restored signer directory version %d, want 1", resp.Version)
 	}
-	// Step 3's first item: the saved export verifies on its own pins
-	// (above), and the restored log is a prefix of it.
+	// Step 2: the saved export verifies on its own pins (above), and the
+	// restored log is a prefix of it.
 	if code, out := auditVerifyPins(t, env.Signer.RootFingerprints, saved, "--previous", restored); code != 0 {
 		t.Fatalf("audit verify --previous <restored export> <saved export>: exit %d:\n%s", code, out)
 	}

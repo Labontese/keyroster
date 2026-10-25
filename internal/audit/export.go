@@ -10,13 +10,15 @@
 //
 //	{"checkpoint":"<signed note text>"}
 //
-// "decoded" is informational: Verify does not interpret it, with one
-// exception. A restore replays a lost directory version from the
-// "directory" and "sigs" fields of a directory_install line (03-02), so
-// Verify refuses a line whose text carries either key unless it is a
-// directory_install line and each key occurs once, with the leaf's own
-// bytes as its value (checkReplayFields). Lines without them, such as
-// those of exports written before 03-02, are not checked.
+// "decoded" is informational: Verify does not interpret it, except for
+// the fields a restore reads from the line's text with grep to count, list
+// and replay lost installs (03-02, signer-install.md). "kind" on every
+// leaf line, "bundle_version" on every bundle_install line, and "version",
+// "directory" and "sigs" on a directory_install line that carries them
+// must each occur once, with the leaf's own value, and on no line of
+// another kind (checkGrepFields, checkReplayFields). Exports written
+// before 02-12 have no "version", and those before 03-02 no "directory"
+// or "sigs"; their lines still verify.
 package audit
 
 import (

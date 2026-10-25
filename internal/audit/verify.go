@@ -13,6 +13,7 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -694,6 +695,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		if err := checkReplayFields(sc.Bytes(), leaf); err != nil {
 			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
+		if err := checkGrepFields(sc.Bytes(), leaf); err != nil {
+			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
+		}
 		switch leaf.Kind {
 		case tlog.KindBundleInstall:
 			body, err := tlog.DecodeBundleInstallBody(leaf.Body)
@@ -919,6 +923,54 @@ func checkReplayFields(text []byte, leaf tlog.Leaf) error {
 	}{{keyDir, body.Directory}, {keySigs, body.Sigs}} {
 		if strings.Count(s, f.key) != 1 || !strings.Contains(s, f.key+`"`+base64.StdEncoding.EncodeToString(f.val)+`"`) {
 			return refuse
+		}
+	}
+	return nil
+}
+
+// checkGrepFields checks the other decoded fields that the restore
+// runbook reads from an export line's text with grep, to count, list and
+// pick entries (03-02, signer-install.md steps 2 and 3): "kind" on every
+// leaf line, "bundle_version" on every bundle_install line, and "version"
+// on a directory_install line that carries it (exports written before
+// plan 02-12 do not). Each must occur exactly once on such a line,
+// followed by the leaf's own value, and a bundle_version or version key
+// on a line of another kind is refused; so a line that grep counts, lists
+// or picks is the verified leaf it says it is. Export has written each
+// key this way since it was added: kind and bundle_version since Phase 1.
+func checkGrepFields(text []byte, leaf tlog.Leaf) error {
+	s := string(text)
+	if strings.Count(s, `"kind":`) != 1 || !strings.Contains(s, `"kind":"`+leaf.Kind.String()+`"`) {
+		return fmt.Errorf("its decoded kind is not the kind of its leaf (%s)", leaf.Kind)
+	}
+	var (
+		key      string // the version key of this leaf's kind, if any
+		val      uint64
+		required bool
+	)
+	switch leaf.Kind {
+	case tlog.KindBundleInstall:
+		body, err := tlog.DecodeBundleInstallBody(leaf.Body)
+		if err != nil {
+			return err
+		}
+		key, val, required = "bundle_version", body.BundleVersion, true
+	case tlog.KindDirectoryInstall:
+		body, err := tlog.DecodeDirectoryInstallBody(leaf.Body)
+		if err != nil {
+			return err
+		}
+		key, val = "version", body.Version
+	}
+	for _, k := range []string{"bundle_version", "version"} {
+		quoted := `"` + k + `":`
+		n := strings.Count(s, quoted)
+		if n == 0 && (k != key || !required) {
+			continue
+		}
+		v := quoted + strconv.FormatUint(val, 10)
+		if k != key || n != 1 || !strings.Contains(s, v+",") && !strings.Contains(s, v+"}") {
+			return fmt.Errorf("its decoded %s field is not the one of its %s leaf", k, leaf.Kind)
 		}
 	}
 	return nil
