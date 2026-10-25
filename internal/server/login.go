@@ -772,9 +772,21 @@ func (s *Server) handleLoginRedeem(w http.ResponseWriter, r *http.Request) {
 		refuse(reasonLoginExpired, l.User, id)
 		return
 	}
-	switch err := s.db.RedeemLogin(ctx, id, codeHash[:], now); {
+	// signerLimit is on s.clock; a context deadline runs on the wall
+	// clock. The time left to it is turned into a wall-clock instant here,
+	// right after the check, so time spent in RedeemLogin (a wait for the
+	// one database connection or a write lock) counts against it instead
+	// of moving it, and a burn still waiting at it is abandoned unburnt
+	// (03-02 pre-merge review).
+	limitCtx, cancelLimit := context.WithDeadline(ctx, time.Now().Add(signerLimit.Sub(now)))
+	defer cancelLimit()
+	switch err := s.db.RedeemLogin(limitCtx, id, codeHash[:], now); {
 	case errors.Is(err, serverdb.ErrNotFound):
 		refuse(reasonLoginState, l.User, id)
+		return
+	case err != nil && ctx.Err() == nil && limitCtx.Err() != nil:
+		// The burn waited past the deadline.
+		refuse(reasonLoginExpired, l.User, id)
 		return
 	case err != nil:
 		s.loginRedeemInternal(w, r, l.User, id, err)
@@ -787,13 +799,12 @@ func (s *Server) handleLoginRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Evidence = []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: l.Assertion}}
 	// The signer call ends at signerCallTimeout or at signerLimit,
-	// whichever comes first. signerLimit is on s.clock; a context deadline
-	// runs on the wall clock, so the time left to it is carried over (the
-	// same instant in production, where s.clock is time.Now).
-	tctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
+	// whichever comes first. The deadline bounds the read of the answer
+	// too: a request the signer takes before it and answers after it is
+	// issued and logged, but its answer is lost and not retried (T-02-108),
+	// as for any other lost answer.
+	sctx, cancel := context.WithTimeout(limitCtx, signerCallTimeout)
 	defer cancel()
-	sctx, cancelLimit := context.WithDeadline(tctx, time.Now().Add(signerLimit.Sub(now)))
-	defer cancelLimit()
 	resp, err := s.signer.Login(sctx, req)
 	if err != nil {
 		var refused *wire.ErrorResponse
