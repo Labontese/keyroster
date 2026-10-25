@@ -413,6 +413,33 @@ PR #58, findings the review upheld. Each code fix has a test that failed before 
 - **Skipped:** none.
 - **Not run:** `-race` (no cgo on this host); e2e and golangci-lint (not available from this worktree, CI runs them).
 
+## Pre-merge review fixes, round 2
+
+PR #58, the findings left open after round 1. The owner decided all four on 2026-10-25. Each code fix has a test that failed with the check disabled and passes with it.
+
+- **CLI exit 0 on a replayed KRL** (owner decision "IssuedAt now + 03-03"): 98538ed.
+  - Fix: the CLI refuses a manifest whose issued_at is more than `wire.MaxRequestSkewSeconds` (300) before the request's CreatedAt. That constant is now the source of the signer's `maxClockSkew`.
+  - Test: `TestRevokeSerialConfirm`. `replayed_earlier_krl` replays a genuine earlier v3 at entry 9 under the invented answer {3, 8, 9}; `replayed_just_outside_window` uses 301 s. Both fail with the check disabled. `issued_inside_window` (290 s) passes.
+  - Remains: a genuine KRL that another revocation published within those 300 s still passes, and the output says so. 03-03-PLAN.md Task 2 and must_haves now own the next step: the CLI parses the confirmed KRL with `krl.Parse` and refuses unless every revoked target is listed.
+- **No reconciliation at publish time** (owner decision "exact set in memory"): 2cb715d.
+  - Fix: the signer keeps the multiset of logged revoked entries in memory. It is built with the log and gains a revoke leaf's entries only when that transaction commits; a failed commit reloads it from the log. `publishKRLLocked` compares it with the rows read in the same transaction after `krl.Encode` and before the ops key signs (so `krl_too_large` still comes first). On a mismatch it refuses `revocations_not_logged`, the transaction rolls back and the signer is marked broken.
+  - Test: `TestRevocationsChangedWhileRunning` covers row_deleted, row_inserted and row_changed. In each case the row is changed through a separate handle while the signer stays open, revoke B is refused, no v2 is signed, the signer is broken and later issuance is refused. The three tampering cases fail with the check disabled. The `untouched` control fails when a commit does not update the set.
+  - Test: `TestRevokeFailedTxDiscardsPendingEntries` fails when a failed transaction's entries are merged after the reload. A mutant that merges them before the reload is masked: `loadLog` replaces the set, so that mutant passes.
+  - Runbook: `revocations_not_logged` is documented (4d86181 corrects what a stopped signer still does). The KRL in force stays served. Requests that write to the audit log are refused until restart, and only issuance is tested. Recovery is labelled UNVERIFIED.
+- **Unauthenticated KRL route made one signer call per request** (owner decision "server-side cache now"): b018723.
+  - Fix: keyroster-server caches the GetKRL answer for `krlTTL` (5 s), single-flighted like `currentStatus`. A failed read is not cached. The bytes are served unchanged. A revocation through this server drops the cache before it answers, both on success and when the outcome is unknown; it first waits for a refresh in flight, as `dropStatus` does.
+  - Test: `TestKRLCache`. `burst_one_signer_call` sends 12 concurrent GETs and gets 1 call; it fails without the cache (12 calls). `revoke_drops_cache` serves v2 after the revoke; it fails without `dropKRL`. `stale_after_ttl` and `failure_not_cached` also pass.
+  - e2e: 4d86181 makes `TestRevokeSerialEndToEnd` wait 6 s before its read after the signer restart, so the read reaches the signer and not the cache.
+  - Remains: no signal for the KRL version. A change that does not go through a revocation on this server is served up to 5 s late.
+- **Key ID and key entries not validated strictly** (Codex check): d3573ec.
+  - Fix: each kind carries only its own fields, in Encode and in decode, and every error wraps ErrMalformedLeaf. A serial entry is CA key + serial. A key_id entry is CA key + key ID: OpenSSH scopes key IDs to a CA, and the 03-03 plan says "under the CA key(s) of the role". A key entry is the key alone, with valid_before 0, since it is never pruned.
+  - Test: `TestRevokeBody` has 11 strict cases, each checked in Encode and in raw decode, plus round trips for a valid key_id entry and a valid key entry. All 18 new negative cases fail against the round-1 check. `leaf_revoke_v1.hex` still decodes unchanged.
+- **Gates:**
+  - `gofmt -l` is empty, and `go vet ./...` passes for windows, linux and darwin.
+  - In WSL, `go test -race -count=1` passes for signer, signerdb, tlog, server, serverclient and cmd/keyroster.
+  - golangci-lint v2.14.0 reports 0 issues.
+- **Not run locally (UNVERIFIED here):** the e2e lanes. WSL does not resolve `keyroster.localhost`, so they rely on CI. No end-to-end run exists yet for the server cache with a real signer or for `revocations_not_logged`.
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-24*
