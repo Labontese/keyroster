@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 2/17 plans executed in 16 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 3/17 plans executed in 16 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -168,7 +168,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 03-02-PLAN.md — Phase 2 follow-ups (agent check before issuance, lifetime at Add, redeem window), the two negative tests, three doc fixes, and the owner-approved rewording of AGENT-01, REVOKE-01 and PLAT-01
-- [ ] 03-03-PLAN.md — KRL core: strict parser, oracle both directions, fuzzing, revoke by key ID, key and user in the signer (D-09), hourly re-publish with a start-up publish (D-10), time-derived krl_version, safe pruning, audit verify rules, the restore stop for lost revocations
+- [x] 03-03-PLAN.md — KRL core: strict parser, oracle both directions, fuzzing, revoke by key ID, key and user in the signer (D-09), hourly re-publish with a start-up publish (D-10), time-derived krl_version, safe pruning, audit verify rules, the restore stop for lost revocations
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 03-03b-PLAN.md — Revocation from the CLI: `revoke key-id`, `revoke key`, `revoke user` with the second sweep and exits 3 and 4, the CLI's KRL listing check, the answer's serials through the server, subject and key e2e, disable-versus-revoke runbooks (split from 03-03, owner decision 2026-10-25, PR #60)
@@ -280,7 +280,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 2/17 | In Progress | - |
+| 3. Linux Agent and Revocation | 3/17 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |
