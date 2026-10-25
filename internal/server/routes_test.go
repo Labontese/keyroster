@@ -91,8 +91,10 @@ func TestNoNonPasskeySignInRoute(t *testing.T) {
 
 // requireOnlyRouteMux fails when a non-test Go file of this package builds
 // an http.ServeMux anywhere but in newRouteMux: a call or reference to
-// http.NewServeMux, an http.ServeMux literal or new(http.ServeMux). A mux
-// built that way would register routes no recorded list shows. It also
+// http.NewServeMux, an http.ServeMux literal or new(http.ServeMux), and
+// fails on a registration through a routeMux's embedded ServeMux
+// (mux.ServeMux.Handle) outside routeMux's own methods. A mux built or
+// used that way would serve routes no recorded list shows. It also
 // requires newRouteMux itself to call http.NewServeMux exactly once, so
 // the scan is known to see the call it allows.
 func requireOnlyRouteMux(t *testing.T) {
@@ -138,9 +140,19 @@ func requireOnlyRouteMux(t *testing.T) {
 			return ok && id.Name == httpName
 		}
 		for _, decl := range f.Decls {
-			owner := ""
-			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil {
+			owner, routeMuxMethod := "", false
+			if fd, ok := decl.(*ast.FuncDecl); ok {
 				owner = fd.Name.Name
+				if fd.Recv != nil {
+					owner = ""
+					if len(fd.Recv.List) == 1 {
+						if st, ok := fd.Recv.List[0].Type.(*ast.StarExpr); ok {
+							if id, ok := st.X.(*ast.Ident); ok && id.Name == "routeMux" {
+								routeMuxMethod = true
+							}
+						}
+					}
+				}
 			}
 			ast.Inspect(decl, func(n ast.Node) bool {
 				switch n := n.(type) {
@@ -151,6 +163,13 @@ func requireOnlyRouteMux(t *testing.T) {
 						} else {
 							t.Errorf("%s: http.NewServeMux outside newRouteMux; build every mux with newRouteMux", fset.Position(n.Pos()))
 						}
+					}
+					// x.ServeMux.Handle or HandleFunc registers on the
+					// embedded mux without recording the pattern; only
+					// routeMux's own methods may do that.
+					if inner, ok := n.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "ServeMux" &&
+						(n.Sel.Name == "Handle" || n.Sel.Name == "HandleFunc") && !routeMuxMethod {
+						t.Errorf("%s: a pattern registered on the embedded ServeMux, past routeMux's record", fset.Position(n.Pos()))
 					}
 				case *ast.CompositeLit:
 					if isHTTP(n.Type, "ServeMux") {
