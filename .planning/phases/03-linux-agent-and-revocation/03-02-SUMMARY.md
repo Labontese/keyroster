@@ -507,6 +507,50 @@ PR #59 review, on head dce3165, plus the owner decision of 2026-10-25 ("prevent 
 - CI on 033359c: all 19 required checks passed, systemd-sandbox, e2e (9.5p1, 10.5p1), e2e-tpm, e2e-pkcs11, fuzz, build-test and lint among them.
 - Follow-up `d82866f` (docs and plan only): `TestRestoreRunbookChecks` passed on Windows. CI runs again on the final head.
 
+## Pre-merge review fixes, round 5
+
+PR #59 review, on head 21d7618, plus the owner decision of 2026-10-25 ("do not boot the snapshot"). The WSL proofs ran as root (`wsl -u root`, Ubuntu 24.04, systemd 255.4, as on the CI runner) against throwaway users and units, which were removed afterwards; smoke.sh itself was not run there.
+
+- **Item 1, root followed links the admin plants (high):** `b5d02b5`. Step 3.2's copy is now a `bash -eu -s <admin>` block that runs `mkdir` and the writes as the admin with `runuser`. Root only reads `/root/replay` and passes the bytes on stdin, and `mkdir` refuses an existing name, a planted link included. Step 3.3 installs from `/home/<admin>/replay-v2`. `TestRestoreRunbookChecks` pins the block in the runbook and smoke.sh, and refuses any root `install`/`chown`/`chmod`/`cp`/`mv`/`mkdir`/`ln`/`tee`/`touch` line on `<admin>` or `/home/`. Proof: the test failed on the 21d7618 runbook, flagging both round-4 lines. In WSL, round 4's two lines with `~/replay` linked to a root-owned directory chowned it to the admin (`root root 755` became `krreplay krreplay 700`, with a `v2` inside). The new block refused (`mkdir: ... File exists`, exit 1) and left the directory unchanged. Once the link was gone it wrote both files as the admin (0700 directory, 0600 files, same bytes), and it refused a rerun. smoke.sh runs the same steps for kradmin, so CI is the evidence for the block under the runner's systemd.
+- **Item 2, owner decision: never boot a VM snapshot (medium):** `764aaa5`. A disk-only Proxmox restore no longer rolls back the VM or brings links up and down. Steps, all UNVERIFIED (none can run in CI):
+  1. Hold the current signer VM.
+  2. Attach a copy of only the snapshot's disk to a helper VM. `qm clone` is refused, because it copies the vTPM state.
+  3. Mount the copy read-only and take `signer.db`, `-wal` and `-shm` out as one set, with their sha256.
+  4. Transfer the set to the current VM and run the CI-tested file restore there.
+
+  Hypervisor mounting is possible but discouraged. A LUKS disk sealed to the vTPM is not possible: escalate. Step 2 now says the saved export must come from storage no restore rolled back. The fresh-VM fallback skips `ca-init` and `install-bundle`, creates `signer.lock` as the signer's user, and works only if the new host reaches the same CA keys (the HSM or agent keys, or the software backend's `software` directory). It is not possible for the TPM backend. RAM snapshots stay unsupported. 03-03-PLAN.md Task 3's round-4 boot-window question is void and was replaced. `TestRestoreRunbookChecks` pins the never-boot rule before step 1 and the saved-export rule between the standalone verify's stop and the first comparison. It refuses `link_down`, `qm rollback <id>` and `qm start <id>`. Proof: it failed on the b5d02b5 runbook, on a copy without the saved-export rule, and on a copy with `qm start <id>` added back.
+  - **Open for the owner:** the fallback depends on the CA keys being reachable from a new host. With the TPM backend, a signer VM that is lost for good means a CA rotation, which this runbook does not cover.
+- **Item 3, lost revocations and KRL version after a restore (medium):** `994a8bb` and `1a9d381`, plan only (03-03-PLAN.md Task 3, "PR #59 review, round 5").
+  - Step 3 lists lost `revoke` entries. The list grep gets `revoke`, and Task 3 updates the pinned grep in `restoreSavedGreps`.
+  - It replays each one by its recorded entries before users are let back in, never by `revoke user`. The restored signer has no record of post-snapshot certificates: `revoke serial` refuses them as `unknown_serial` (internal/signer/revoke.go), so those are replayed by recorded key ID or key, and step 3 lists the lost `issue` and `login_issue` entries.
+  - The krlLoop publishes nothing until the replays are done, and no KRL that hosts accept may lack a lost revocation. Each revoke publishes its own KRL, so the owner chooses between one combined request and held publishes.
+  - The first KRL after a restore has a krl_version above every krl_version in the saved export. Audit verify accepts that jump only where the log records why. The executor asks the owner before building it.
+  - Tests: an e2e drill and unit tests. Positive acceptance greps cover the replacement wording in signer-install.md and revoke.md (`checks revoke and krl_publish entries since 03-03`, which the action sentence now uses), the list grep, and "Replay every lost".
+- **Item 4, release after a start-limit failure (low):** `1ff4c8a`. After `daemon-reload`, the release runs `if systemctl is-failed --quiet "$u.service"; then systemctl reset-failed "$u.service"; fi` for each unit, in the runbook, smoke.sh and the test. smoke.sh drives the signer into its start limit before the hold with a temporary drop-in (`ExecStart=/bin/false`, `RestartSec=100ms`), then requires the start after the release. Proof:
+  - The test failed against the 994a8bb smoke.sh.
+  - In WSL, with a throwaway unit like keyroster-signer (Type=exec, 5 starts in 10 min), crash-looped to `failed` and then held: round 4's release left the start refused, and round 5's started it.
+  - Also seen in WSL: assertion failures do not count toward the start limit (7 held starts, then a normal start).
+  - Also seen in WSL: a crash-limited unit still prints `Assertion failed on job for ...` under the hold.
+- **Item 5, file-restore guard (low):** `fb13313`. The guard requires `ActiveState` to be `inactive` or `failed`. It opens `$S/signer.lock` read-only (`exec 9<`, so root never creates the lock file the signer must own; the lock path is `lockFileName` in cmd/keyroster-signer/lock.go) and holds `flock -n 9` until it ends. The hold's "neither can start again in between" now says that a unit already in auto-restart can still start before the stop, which then stops it. Proof:
+  - WSL showed it first: a unit in auto-restart restarted after the assert drop-in was loaded (`AssertResult=yes`, NRestarts 0 to 1).
+  - The test failed against the 1ff4c8a smoke.sh.
+  - In WSL (paths and unit substituted, block otherwise verbatim), with a unit in `activating`/`auto-restart`, round 4's block replaced signer.db and round 5's refused (`... is activating: hold it first`).
+  - With another process holding the lock, round 4 ran and round 5 refused. With the lock free, round 5 ran.
+  - smoke.sh exercises the lock refusal in CI: a holder via `flock -o`, then refused with signer.db unchanged.
+  - The `activating` refusal is CI-UNVERIFIED (WSL only), and the runbook says so.
+- **Item 6, the -wal and -shm branches (low):** `5adc75a`. smoke.sh plants stale `-wal` and `-shm` files in the live state directory. The backup set gets an empty `-wal` and no `-shm`. After the restore, signer.db and `-wal` must be the backup's bytes (keyroster-signer 0600), and the stale `-shm` must be gone. The locked run must leave `-shm` untouched. Proof: in WSL, smoke.sh's assertions on the round-5 block passed as written and failed with `-shm` dropped from the `rm` line (`stale signer.db-shm still there`). UNVERIFIED, and labelled so: a backup `-wal` with committed frames.
+- **Item 7, how to take a file backup (low, split):** `e1e206e`, docs only. No backup document existed in the repository to link to (grep of docs/ for backup, `.backup` and VACUUM). The runbook now says to copy the three files as one set under the hold, then release. It says a running signer's files are no backup, that an online `sqlite3 .backup` or `VACUUM INTO` copy as keyroster-signer is UNVERIFIED (no sqlite3 is installed), and that backups belong off the signer VM's disk.
+
+**Checks run:**
+- `gofmt -l .` reported nothing.
+- `go vet ./...` passed for windows, linux and darwin, and `go vet -tags e2e ./test/e2e/` for linux and windows.
+- `go test -tags e2e -run TestRestoreRunbookChecks ./test/e2e/` passed on Windows at every commit.
+- `bash -n test/systemd/smoke.sh` passed.
+- In WSL: `go test -race -count=1 ./internal/audit/...` passed, and golangci-lint reported 0 issues for linux, windows and darwin.
+- The full e2e suite was not run locally; CI is the run (only a comment changed in `TestRestoreReplaysLostDirectory`).
+- A grep of the diff found no 100.x, 10.x or 192.168.x addresses and no real host names or VM IDs (`<id>` and `<helper id>` only).
+- The systemd-sandbox CI job on the final head is the evidence for smoke.sh.
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-25*
