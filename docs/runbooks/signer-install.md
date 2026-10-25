@@ -585,7 +585,10 @@ Before starting the signer after a restore:
 >
 > **UNVERIFIED:** a VM snapshot restore, the replay of a lost
 > `bundle_install`, a lost version that binds a passkey and the re-invite
-> after it, keeping users away from the server, and the version counts of
-> step 2 against a real restored signer. The `grep` patterns of step 2 match
+> after it, keeping users away from the server, the version counts of
+> step 2 against a real restored signer, and step 2 for a restored log
+> reported as `log rewritten` (for example a restored signer that logged
+> entries before step 1 stopped it), where the saved export's prefix check
+> fails and the procedure stops. The `grep` patterns of step 2 match
 > the export line format written by `keyroster-signer export-log`, not a
 > real export of a restored signer.
