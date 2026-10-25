@@ -760,17 +760,18 @@ structurally (see the warning above).
 > `doctor` passing. No keyroster-server runs in that check: its unit is
 > held and its start refused, never started.
 >
-> **UNVERIFIED:** a VM snapshot restore, the replay of a lost
-> `bundle_install`, a lost version that binds a passkey and the re-invite
-> after it (the Proxmox steps, `link_down` and the console hold among
-> them), the `install -o <admin>` copy of step 3 to a real admin
-> account, keeping users away from the server, the version counts of
+> **UNVERIFIED:** a VM snapshot restore (the Proxmox steps, `link_down`
+> and the console hold among them), the hold and the file restore on a
+> real signer host (a running keyroster-server, or the TPM drop-in beside
+> the hold), the replay of a lost `bundle_install`, a lost version that
+> binds a passkey and the re-invite after it, the `install -o <admin>`
+> copy of step 3 to a real admin account, keeping users away from the server, the version counts of
 > step 2 against a real restored signer, the stop in step 2 for a
 > restored export that does not verify on its own (the refusals
 > themselves are run in the audit unit tests), and step 2 when the saved
 > export's prefix check fails and the procedure stops, for example for a
-> restored signer that logged K entries after the restore despite the
-> hold and had lost L > 0:
+> restored signer that logged K > 0 entries after the restore despite
+> the hold and had lost L > 0:
 > step 2's first command then reports `log shrank` when K < L and `log
 > rewritten` otherwise, and the prefix check `log rewritten` when K <= L
 > and `log shrank` when K > L. The `grep` patterns of step 2 match
