@@ -473,6 +473,7 @@ Before starting the signer after a restore:
         `directory.json.sigs`) from the export's decoded line:
 
         ```
+        bash -eu <<'EOF'
         V=2                                   # the lost directory version
         SAVED=/root/latest-saved.jsonl
         D=/root/replay/v$V
@@ -484,7 +485,14 @@ Before starting the signer after a restore:
         test -s "$D/directory.json"
         test -s "$D/directory.json.sigs"
         rm "$D/line"
+        echo "wrote the proposal of directory version $V to $D"
+        EOF
         ```
+
+        Paste it whole: it runs in its own `bash -eu`, which stops at the
+        first line that fails, so your shell stays open. Only the last
+        line's `wrote the proposal` means the proposal is complete; without
+        it, do not install anything from that directory.
 
         The decoded `directory` and `sigs` fields are in every export that
         `keyroster-signer export-log` writes since plan 03-02. An older

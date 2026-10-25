@@ -23,11 +23,13 @@ import (
 // replayExtractScript is the extraction step of docs/runbooks/signer-install.md
 // "A restore brings back the older trust bundle, policy and directory",
 // step 3, verbatim after the runbook's three variable assignments (V, SAVED
-// and D, which the test passes in the environment). Keep the two in sync:
-// TestRestoreReplaysLostDirectory runs this text, so it is the runbook's
-// command that is run in CI e2e, not a reimplementation of it.
-const replayExtractScript = `set -eu
-mkdir -p "$D"
+// and D, which the test passes in the environment). The runbook runs it in
+// bash -eu from a heredoc (replayExtractBlock), and so does the test, so
+// that a failing line stops it for an operator as it does here. Keep the
+// two in sync: TestRestoreReplaysLostDirectory runs this text, so it is
+// the runbook's command that is run in CI e2e, not a reimplementation of
+// it, and requireReplayBlock checks that the runbook still has it.
+const replayExtractScript = `mkdir -p "$D"
 grep '"kind":"directory_install"' "$SAVED" | grep -E ",\"version\":$V[,}]" > "$D/line"
 test "$(wc -l < "$D/line")" -eq 1
 grep -o '"directory":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.json"
@@ -35,7 +37,30 @@ grep -o '"sigs":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.j
 test -s "$D/directory.json"
 test -s "$D/directory.json.sigs"
 rm "$D/line"
+echo "wrote the proposal of directory version $V to $D"
 `
+
+// replayExtractBlock is the runbook's whole extraction block: the bash
+// -eu heredoc with the three variable assignments and replayExtractScript.
+const replayExtractBlock = "bash -eu <<'EOF'\n" +
+	"V=2                                   # the lost directory version\n" +
+	"SAVED=/root/latest-saved.jsonl\n" +
+	"D=/root/replay/v$V\n" +
+	replayExtractScript +
+	"EOF\n"
+
+// requireReplayBlock: the runbook has replayExtractBlock as whole,
+// consecutive lines, indented as the code block of step 3's first item.
+func requireReplayBlock(t *testing.T, runbook string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(replayExtractBlock, "\n"), "\n")
+	for i := range lines {
+		lines[i] = "        " + lines[i]
+	}
+	if !strings.Contains(runbook, "\n"+strings.Join(lines, "\n")+"\n") {
+		t.Fatalf("signer-install.md step 3 no longer has the extraction block that TestRestoreReplaysLostDirectory runs:\n%s", replayExtractBlock)
+	}
+}
 
 // restoreRunbookChecks are the instructions of the same runbook section
 // that TestRestoreReplaysLostDirectory carries out with its own pins and
@@ -104,7 +129,9 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		}
 		return strings.Join(l, "\n")
 	}
-	runbook := "\n" + trim(string(readFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))) + "\n"
+	raw := string(readFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
+	requireReplayBlock(t, raw)
+	runbook := "\n" + trim(raw) + "\n"
 	for _, c := range restoreRunbookChecks {
 		want := trim(c)
 		if strings.Contains(want, "\n") {
@@ -231,16 +258,12 @@ func TestRestoreReplaysLostDirectory(t *testing.T) {
 
 	// 4. The proposal from the saved export, with the runbook's commands
 	// (which must still be the runbook's).
-	runbook := string(readFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md")))
-	for _, l := range strings.Split(strings.TrimSpace(replayExtractScript), "\n")[1:] {
-		if !strings.Contains(runbook, "\n        "+l+"\n") {
-			t.Fatalf("signer-install.md step 3 no longer has the line %q that this test runs", l)
-		}
-	}
+	requireReplayBlock(t, string(readFile(t, filepath.Join("..", "..", "docs", "runbooks", "signer-install.md"))))
 	replay := filepath.Join(t.TempDir(), "replay", "v2")
-	cmd := exec.Command("bash", "-c", replayExtractScript)
+	cmd := exec.Command("bash", "-eu")
+	cmd.Stdin = strings.NewReader(replayExtractScript)
 	cmd.Env = append(os.Environ(), "V=2", "SAVED="+saved, "D="+replay)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "wrote the proposal of directory version 2") {
 		t.Fatalf("the runbook's extraction failed: %v\n%s", err, out)
 	}
 	doc := readFile(t, filepath.Join(replay, "directory.json"))
