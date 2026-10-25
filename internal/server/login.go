@@ -62,8 +62,12 @@ func newLoginLimits(lim Limits) map[string]*limiter {
 
 // The timing of a login, all relative to the request's CreatedAt except
 // the code's own lifetime (02-12-F15). The server and the signer share one
-// host clock, so a code capped at CreatedAt + loginCodeCap always reaches
-// the signer inside its ±300 s request window.
+// host clock. A code is capped at CreatedAt + loginCodeCap, and the redeem
+// reads the clock again after its status read and gives the signer call a
+// deadline at CreatedAt + loginSignerWindow, refusing a code past either
+// before it is burnt (03-02, C-IN-01). So a redeemed code reaches the
+// signer inside its ±300 s request window because that deadline is
+// enforced, not because the cap leaves room for every delay.
 const (
 	// loginBeginWindow is how far CreatedAt may lie from the server's
 	// clock at begin. The CLI itself refuses more than 60 s of skew.
@@ -75,6 +79,10 @@ const (
 	// loginCodeCap the latest it may be valid, after CreatedAt.
 	loginCodeTTL = 120 * time.Second
 	loginCodeCap = 290 * time.Second
+	// loginSignerWindow is the latest, after CreatedAt, that a redeem's
+	// signer call may run: the signer's 300 s request window less a 5 s
+	// margin.
+	loginSignerWindow = 300*time.Second - 5*time.Second
 	// loginBrowserTimeout is the WebAuthn timeout given to the browser,
 	// in milliseconds.
 	loginBrowserTimeout = 60000
@@ -676,9 +684,11 @@ type loginRedeemResponse struct {
 //  3. base64url(SHA-256(code_verifier)) equal to the stored code_challenge
 //     (constant time);
 //  4. the signer's status, so a signer outage answers 503 before the burn;
+//     then the clock again, and the code still unexpired and the time
+//     before CreatedAt + loginSignerWindow (03-02);
 //  5. RedeemLogin, the one conditional UPDATE that burns the code;
 //  6. the stored request with the stored assertion as its evidence, sent
-//     to the signer.
+//     to the signer with a deadline at CreatedAt + loginSignerWindow.
 //
 // A signer refusal answers 403 with the signer's detail; every other
 // failure the uniform 400. The code, the verifier and the state are never
@@ -752,6 +762,16 @@ func (s *Server) handleLoginRedeem(w http.ResponseWriter, r *http.Request) {
 		s.signerUnavailable(w, false)
 		return
 	}
+	// currentStatus may have waited for a signer refresh, so the clock is
+	// read again (03-02, C-IN-01). The code must still be valid, and the
+	// signer must get the request before CreatedAt + loginSignerWindow; a
+	// code past either is refused here, before RedeemLogin burns it.
+	now = s.clock()
+	signerLimit := l.Created.Add(loginSignerWindow)
+	if now.After(l.CodeExpires) || !now.Before(signerLimit) {
+		refuse(reasonLoginExpired, l.User, id)
+		return
+	}
 	switch err := s.db.RedeemLogin(ctx, id, codeHash[:], now); {
 	case errors.Is(err, serverdb.ErrNotFound):
 		refuse(reasonLoginState, l.User, id)
@@ -766,8 +786,14 @@ func (s *Server) handleLoginRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Evidence = []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: l.Assertion}}
-	sctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
+	// The signer call ends at signerCallTimeout or at signerLimit,
+	// whichever comes first. signerLimit is on s.clock; a context deadline
+	// runs on the wall clock, so the time left to it is carried over (the
+	// same instant in production, where s.clock is time.Now).
+	tctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
 	defer cancel()
+	sctx, cancelLimit := context.WithDeadline(tctx, time.Now().Add(signerLimit.Sub(now)))
+	defer cancelLimit()
 	resp, err := s.signer.Login(sctx, req)
 	if err != nil {
 		var refused *wire.ErrorResponse
