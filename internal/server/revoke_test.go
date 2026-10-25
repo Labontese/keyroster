@@ -213,6 +213,44 @@ func TestKRLCache(t *testing.T) {
 			t.Fatalf("GET krl after the revocation = %q after %d GetKRL calls, want v2 from a new call", got, e.fake.count("GetKRL"))
 		}
 	})
+	// A KRL read in flight when a revocation answers was asked for
+	// before it: dropKRL waits for that read, so its older answer is not
+	// stored after the drop and served to the CLI's read that follows.
+	t.Run("drop_waits_for_read_in_flight", func(t *testing.T) {
+		e := newAdminEnv(t, highLimits)
+		e.fake.setKRL(krlResp("v1"), nil)
+		e.fake.setRevoke(&wire.RevokeResponse{KRLVersion: 2, RevokeLeaf: 7, PublishLeaf: 8}, nil)
+		body, _ := revokeBody(t)
+		getReq := signedReq(t, nil, http.MethodGet, serverclient.KRLPath, serverclient.KRLPath, nil, e.clock.Now())
+		postReq := signedReq(t, e.admin, http.MethodPost, serverclient.AdminRevokePath, serverclient.AdminRevokePath, body, e.clock.Now())
+		entered, release := e.fake.hold("GetKRL")
+		defer release()
+		got, posted := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
+		go func() { got <- serve(e.s.Handler(), getReq) }()
+		<-entered // the read in flight returns v1
+		go func() { posted <- serve(e.s.Handler(), postReq) }()
+		for deadline := time.Now().Add(5 * time.Second); e.fake.count("Revoke") == 0; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("the revocation never reached the signer")
+			}
+		}
+		time.Sleep(100 * time.Millisecond) // let the revocation reach dropKRL
+		e.fake.setKRL(krlResp("v2"), nil)
+		release()
+		for _, ch := range []chan *httptest.ResponseRecorder{got, posted} {
+			select {
+			case res := <-ch:
+				if res.Code != http.StatusOK {
+					t.Fatalf("request = %d %s", res.Code, res.Body)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("a request is still waiting after the read ended")
+			}
+		}
+		if got := getKRL(t, e); got != "krl v2" || e.fake.count("GetKRL") != 2 {
+			t.Fatalf("GET krl after the revocation = %q after %d GetKRL calls, want v2 from a new call", got, e.fake.count("GetKRL"))
+		}
+	})
 	// A revocation the signer may have committed drops the entry too:
 	// an unavailable or internal refusal (state_unavailable after a failed
 	// COMMIT that reached the disk) and a call whose outcome is unknown.
