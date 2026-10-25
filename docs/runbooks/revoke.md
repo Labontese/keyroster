@@ -120,7 +120,7 @@ path also runs in CI e2e.
 | `.../api/v1/admin/revoke: admin authentication failed` (HTTP 401) | keyroster-server refused the request's admin signature before the signer saw it: the key is not a policy admin, or your clock differs from the server's by more than 2 minutes (the CLI then adds `your clock differs from the server by Ns`). | Use an admin key from the root-signed policy (`--admin-key SHA256:...`), or fix the clock. |
 | `the signer refused the revocation; nothing was revoked: ... HTTP 403: [peer text: "REASON"]` | The signer refused it for REASON. The one an operator can hit is `request_time_skew`: the request was created more than 5 minutes before the signer saw it (ssh-agent took that long to sign, say while waiting for a touch, or the clocks differ). | Run the command again; for another REASON, read the signer's log (`journalctl -u keyroster-signer`). |
 | `the signer has already accepted a request with this ID` (`duplicate_request`) | The signer saw this request ID before; the CLI picks a fresh random one each run, so only a resent request gets this. | Run the command again. |
-| `the server cannot reach its signer (HTTP 503) ... The signer's log names the reason` | The signer could not decide. Its log names `krl_no_installation_id` (the bundle in force has no installation ID) or `krl_too_large` (see below). | Read the signer's log (`journalctl -u keyroster-signer`). |
+| `the server cannot reach its signer (HTTP 503) ... The signer's log names the reason` | The signer could not decide. Its log names `krl_no_installation_id` (the bundle in force has no installation ID), `krl_too_large` or `revocations_not_logged` (both below). | Read the signer's log (`journalctl -u keyroster-signer`). |
 
 The CLI's text in every row ran in the CLI tests against a stub server
 (`TestRevokeRefusalText`), the 401 row with a key that is not a policy
@@ -149,6 +149,20 @@ which makes every certificate of the old CA useless at once.
 **UNVERIFIED**: the replacement procedure does not exist yet. The refusal
 and its rollback ran in the signer's unit tests
 (`TestRevokeKRLTooLarge`).
+
+### `revocations_not_logged`
+
+Every KRL is rebuilt from the signer's revocation table, which the signed
+log does not anchor. Before the ops key signs a new KRL, the signer
+requires the table to hold exactly the entries its revoke log entries
+record. A row deleted, added or changed outside the signer (another
+process writing the state database) is refused: nothing of the
+revocation is kept, the KRL in force stays, and the signer stops
+answering until it is restarted. It then refuses to start with the same
+reason, as `keyroster-signer doctor` reports. Find and stop whatever
+wrote the database. **UNVERIFIED**: no recovery procedure has been
+written or run. The refusal ran in the signer's unit tests
+(`TestRevocationsChangedWhileRunning`, `TestRevocationsNotLogged`).
 
 ## 3. Where the KRL is served
 

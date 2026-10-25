@@ -417,6 +417,112 @@ func TestRevocationsNotLogged(t *testing.T) {
 	}
 }
 
+// TestRevocationsChangedWhileRunning (pre-merge review, round 2): the
+// start-up check does not see a revocation row deleted, written or
+// changed through another database handle while the signer runs. The
+// next revocation must not publish a KRL built from such rows: it is
+// refused revocations_not_logged before the ops key signs, nothing of it
+// commits, and the signer stops (broken) as it would at start. The
+// control revokes B on an untouched table, which needs the in-memory set
+// to have taken A's entry when A committed.
+func TestRevocationsChangedWhileRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name, query string
+		args        func(e *revokeEnv) []any
+	}{
+		{"untouched", ``, nil},
+		{"row_deleted", `DELETE FROM revocation WHERE serial = ?`, func(e *revokeEnv) []any { return []any{int64(e.serial)} }}, //nolint:gosec // G115: a test serial
+		{"row_inserted", `INSERT INTO revocation (kind, ca_key, serial, request_id, leaf_index, revoked_at_us)
+			SELECT kind, ca_key, serial + 1000, request_id, leaf_index, revoked_at_us FROM revocation`, func(*revokeEnv) []any { return nil }},
+		{"row_changed", `UPDATE revocation SET serial = serial + 1000`, func(*revokeEnv) []any { return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newRevokeEnv(t, 1, 1, testInstallationID)
+			e.revoked(e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0]), 0)
+			// The serial is time-based, so the frozen clock moves on first.
+			e.clock.set(e.clock.Now().Add(time.Second))
+			b, err := e.issue()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reqB := e.revokeRequest(b.Serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0])
+			if tc.query == "" {
+				e.revoked(reqB, 1)
+				return
+			}
+			// Through its own handle, while e.s stays open.
+			execSQL(t, e.dbPath, tc.query, tc.args(e)...)
+			before := e.s.GetKRL()
+			rows := e.countRows("revocation")
+			publishes := 0
+			for _, l := range e.leavesOf() {
+				if l.Kind == tlog.KindKRLPublish {
+					publishes++
+				}
+			}
+			resp, er := e.s.revokeOrRefuse(context.Background(), Peer{UID: 1000}, reqB)
+			if resp != nil || er == nil || er.Message != "revocations_not_logged" || er.Code != wire.CodeUnavailable {
+				t.Fatalf("revoke B: %+v, %+v; want the refusal revocations_not_logged", resp, er)
+			}
+			after := e.s.GetKRL()
+			if !bytes.Equal(after.KRL, before.KRL) || !bytes.Equal(after.Manifest, before.Manifest) {
+				t.Fatal("the signer serves another KRL after the refusal")
+			}
+			stored, err := e.db.KRLState(context.Background())
+			if err != nil || stored == nil || stored.Version != 1 {
+				t.Fatalf("KRL state after the refusal: %+v, %v; want version 1", stored, err)
+			}
+			n := 0
+			for _, l := range e.leavesOf() {
+				if l.Kind == tlog.KindKRLPublish {
+					n++
+				}
+			}
+			if n != publishes || e.countRows("revocation") != rows {
+				t.Fatalf("%d krl_publish leaves and %d revocation rows after the refusal, want %d and %d", n, e.countRows("revocation"), publishes, rows)
+			}
+			e.s.mu.Lock()
+			broken := e.s.broken
+			e.s.mu.Unlock()
+			if !errors.Is(broken, errRevocationsNotLogged) {
+				t.Fatalf("broken = %v, want revocations_not_logged", broken)
+			}
+			if _, err := e.issue(); err == nil {
+				t.Fatal("the stopped signer still issues")
+			}
+		})
+	}
+}
+
+// TestRevokeFailedTxDiscardsPendingEntries (pre-merge review, round 2):
+// the entries of a revoke leaf join the in-memory set only when its
+// transaction commits. A failed transaction leaves the set as the reloaded
+// log records it, so the next legitimate revocation still publishes.
+func TestRevokeFailedTxDiscardsPendingEntries(t *testing.T) {
+	e := newRevokeEnv(t, 1, 1, testInstallationID)
+	ctx := context.Background()
+	body, err := (&tlog.RevokeBody{Request: []byte("r"), Entries: []tlog.RevokedEntry{
+		{Kind: tlog.RevokedSerial, CAKey: e.fx.Roles["user"].PublicKey().Marshal(), Serial: 999},
+	}}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected failure after the append")
+	e.s.mu.Lock()
+	err = e.s.logTx(ctx, func(tx *sql.Tx) error {
+		if _, err := e.s.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(e.clock.Now()), Kind: tlog.KindRevoke, Body: body}); err != nil {
+			return err
+		}
+		return injected
+	})
+	broken := e.s.broken
+	e.s.mu.Unlock()
+	if !errors.Is(err, injected) || broken != nil {
+		t.Fatalf("logTx: %v (broken %v), want the injected error and a reloaded state", err, broken)
+	}
+	e.revoked(e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0]), 0)
+}
+
 // openDB opens the env's state database through its own handle.
 func (e *revokeEnv) openDB() *signerdb.DB {
 	e.t.Helper()

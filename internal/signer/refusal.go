@@ -261,7 +261,7 @@ func classify(detail string) uint8 {
 	case "extension_not_allowed", "duplicate_extension":
 		return tlog.ReasonExtensionNotAllowed
 	case "state_unavailable", "serial_unavailable", "trust_changed", "directory_changed",
-		"krl_no_installation_id", "krl_too_large", "ops_key_unavailable":
+		"krl_no_installation_id", "krl_too_large", "ops_key_unavailable", "revocations_not_logged":
 		return tlog.ReasonUnavailable
 	case "too_many_connections":
 		return tlog.ReasonOverloaded

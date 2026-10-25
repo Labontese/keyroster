@@ -28,7 +28,9 @@ import (
 // krl.Namespace, the KRL state row, and the krl_publish leaf. A KRL above
 // krl.MaxKRL is refused krl_too_large, which rolls the whole transaction
 // back, so the revocation table never holds an entry no published KRL
-// carries. The caller holds s.mu and runs tx through logTx.
+// carries. Rows that are not exactly the logged revoke entries are refused
+// revocations_not_logged before the ops key signs, and the signer stops.
+// The caller holds s.mu and runs tx through logTx.
 func (s *Signer) publishKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time) (*signerdb.KRLState, uint64, error) {
 	if s.installationID == "" {
 		return nil, 0, refusalErr(wire.CodeUnavailable, "krl_no_installation_id", nil)
@@ -55,6 +57,21 @@ func (s *Signer) publishKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time
 			return nil, 0, refusalErr(wire.CodeUnavailable, "krl_too_large", err)
 		}
 		return nil, 0, refusalErr(wire.CodeInternal, "krl_encoding", err)
+	}
+	// The start-up check (loggedRevocations.check) does not cover a row
+	// deleted, written or changed through another database handle while
+	// the signer runs: the KRL built from such rows would un-revoke a
+	// certificate or publish an unlogged entry under the ops key. So the
+	// rows read in tx must be exactly the entries of the logged revoke
+	// leaves, this transaction's included, before the ops key signs. It
+	// runs after Encode so a KRL too large is still krl_too_large; Encode
+	// signs nothing. logTx stops the signer on a mismatch.
+	logged := s.pendingRevoked
+	if logged == nil {
+		logged = s.loaded.revoked
+	}
+	if err := logged.check(revs); err != nil {
+		return nil, 0, refusalErr(wire.CodeUnavailable, "revocations_not_logged", err)
 	}
 	issued := now.UTC().Truncate(time.Second)
 	m := krl.Manifest{

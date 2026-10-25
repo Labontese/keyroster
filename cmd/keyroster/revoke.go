@@ -215,7 +215,7 @@ func revokeRefusal(err error) error {
 		// to sign. Its reason is peer text, so no advice joins it.
 		return fmt.Errorf("the signer refused the revocation; nothing was revoked: %w", err)
 	case errors.Is(err, serverclient.ErrSignerUnavailable):
-		return fmt.Errorf("%w; the revocation may not have been recorded. The signer's log names the reason (krl_no_installation_id: the trust bundle in force has no installation ID; krl_too_large: see docs/runbooks/revoke.md)", err)
+		return fmt.Errorf("%w; the revocation may not have been recorded. The signer's log names the reason (krl_no_installation_id: the trust bundle in force has no installation ID; krl_too_large, revocations_not_logged: see docs/runbooks/revoke.md)", err)
 	}
 	return err
 }

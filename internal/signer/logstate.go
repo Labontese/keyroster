@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/mod/sumdb/note"
@@ -44,6 +45,10 @@ type logState struct {
 	// replaces tree only after COMMIT succeeded.
 	pending       *tlog.Log
 	pendingMicros uint64
+	// pendingRevoked is loaded.revoked plus the entries of the revoke
+	// leaves appended in the open transaction, nil while it appended
+	// none. It replaces loaded.revoked only after COMMIT succeeded.
+	pendingRevoked loggedRevocations
 
 	// broken is set when a failed commit left the in-memory state unknown
 	// and it could not be reloaded; every later append fails with it.
@@ -98,6 +103,12 @@ type loggedInstalls struct {
 	// lastKRLPublish is the body of the last krl_publish leaf (nil when
 	// there is none); loadKRL compares the stored KRL state with it.
 	lastKRLPublish []byte
+	// revoked is the exact multiset of the entries of the revoke leaves.
+	// Unlike the other fields it follows the committed log: logTx adds
+	// the entries of every revoke leaf that COMMITs (pendingRevoked), and
+	// publishKRLLocked compares the revocation rows with it before the
+	// ops key signs a KRL built from them.
+	revoked loggedRevocations
 }
 
 // add records the bundle_install leaf idx with body.
@@ -367,6 +378,7 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		if err := revoked.check(snap.Revocations); err != nil {
 			return nil, 0, loggedInstalls{}, err
 		}
+		installs.revoked = revoked
 		return tree, 0, installs, nil
 	}
 	root, err := tree.Root()
@@ -386,6 +398,7 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 	if err := revoked.check(snap.Revocations); err != nil {
 		return nil, 0, loggedInstalls{}, err
 	}
+	installs.revoked = revoked
 	return tree, last, installs, nil
 }
 
@@ -429,24 +442,27 @@ func (lr loggedRevocations) add(idx uint64, entries []tlog.RevokedEntry) error {
 // would be left out of the next KRL the ops key signs, which un-revokes
 // that certificate on every host that installs it, and a row written
 // outside the signer would be published with no revoke leaf recording it.
-// Both are refused (revocations_not_logged). Like checkLogCovers, it
-// cannot catch the table rolled back together with the log to an earlier
-// signed prefix. It consumes lr.
+// Both are refused (revocations_not_logged), at start, by doctor and,
+// against the entries the signer appended itself, at every publish
+// (publishKRLLocked). Like checkLogCovers, it cannot catch the table
+// rolled back together with the log to an earlier signed prefix. It
+// does not modify lr.
 func (lr loggedRevocations) check(rows []signerdb.Revocation) error {
 	n := 0
 	for _, c := range lr {
 		n += c
 	}
+	left := maps.Clone(lr)
 	if n != len(rows) {
 		return fmt.Errorf("%w: the log records %d revoked entries, the state database %d revocation rows (rows deleted or written outside the signer?)",
 			errRevocationsNotLogged, n, len(rows))
 	}
 	for _, r := range rows {
 		k := revocationKey(r.LeafIndex, r.Kind, r.CAKey, r.Serial, r.KeyID, r.Key, r.ValidBeforeMicros)
-		if lr[k] == 0 {
+		if left[k] == 0 {
 			return fmt.Errorf("%w: revocation row %d is not an entry of revoke leaf %d", errRevocationsNotLogged, r.ID, r.LeafIndex)
 		}
-		lr[k]--
+		left[k]--
 	}
 	return nil
 }
@@ -524,6 +540,21 @@ func (s *Signer) appendLocked(_ context.Context, tx *sql.Tx, leaf tlog.Leaf) (ui
 	if err := s.db.PutCheckpoint(tx, s.pending.Size(), signed); err != nil {
 		return 0, err
 	}
+	if leaf.Kind == tlog.KindRevoke {
+		b, err := tlog.DecodeRevokeBody(leaf.Body)
+		if err != nil {
+			return 0, err
+		}
+		if s.pendingRevoked == nil {
+			s.pendingRevoked = maps.Clone(s.loaded.revoked)
+			if s.pendingRevoked == nil {
+				s.pendingRevoked = loggedRevocations{}
+			}
+		}
+		if err := s.pendingRevoked.add(leaf.Index, b.Entries); err != nil {
+			return 0, err
+		}
+	}
 	s.pendingMicros = leaf.TimeMicros
 	return leaf.Index, nil
 }
@@ -536,13 +567,16 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.broken != nil {
 		return s.broken
 	}
-	s.pending = nil
+	s.pending, s.pendingRevoked = nil, nil
 	err := s.db.WithTx(ctx, fn)
-	next, nextMicros := s.pending, s.pendingMicros
-	s.pending = nil
+	next, nextMicros, nextRevoked := s.pending, s.pendingMicros, s.pendingRevoked
+	s.pending, s.pendingRevoked = nil, nil
 	if err == nil {
 		if next != nil {
 			s.tree, s.lastMicros = next, nextMicros
+		}
+		if nextRevoked != nil {
+			s.loaded.revoked = nextRevoked
 		}
 		return nil
 	}
@@ -558,6 +592,13 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 			s.broken = fmt.Errorf("signer: audit log state unknown after a failed transaction: %w", rerr)
 			s.log.Error("audit log unavailable", "error", rerr.Error())
 		}
+	}
+	if errors.Is(err, errRevocationsNotLogged) && s.broken == nil {
+		// publishKRLLocked found the revocation table changed while the
+		// signer runs. The rows are not anchored in the log, so no reload
+		// can tell which side is right: stop, as at start.
+		s.broken = fmt.Errorf("signer: revocation table changed outside the signer: %w", err)
+		s.log.Error("audit log unavailable", "error", err.Error())
 	}
 	return err
 }
