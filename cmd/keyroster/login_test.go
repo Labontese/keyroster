@@ -845,7 +845,7 @@ func TestLoginRefusals(t *testing.T) {
 		// begin, so the signer issues nothing (03-02 pre-merge review).
 		e := newLoginServer(t)
 		a := useRecordingAgent(t)
-		if err := a.Agent.Lock([]byte("pw")); err != nil {
+		if err := a.Lock([]byte("pw")); err != nil {
 			t.Fatal(err)
 		}
 		_, wait := e.start(t)
