@@ -29,7 +29,9 @@ type signerAPI interface {
 	InstallDirectory(ctx context.Context, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error)
 	// Login asks the signer to issue a login certificate (02-12). Only
 	// the redeem handler calls it, after the code and PKCE verifier have
-	// been redeemed; a refusal comes back as a *wire.ErrorResponse.
+	// been redeemed; a refusal comes back as a *wire.ErrorResponse. ctx's
+	// deadline bounds sending the request only: the answer is read for up
+	// to signerCallTimeout after the send (03-02 pre-merge review).
 	Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error)
 	// Revoke forwards an admin-signed revocation request unchanged
 	// (03-01); the signer alone decides. A refusal comes back as a
@@ -55,7 +57,7 @@ func (s socketSigner) InstallDirectory(ctx context.Context, req *wire.InstallDir
 }
 
 func (s socketSigner) Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error) {
-	return signerclient.Login(ctx, s.socket, req)
+	return signerclient.LoginSend(ctx, s.socket, req, signerCallTimeout)
 }
 
 func (s socketSigner) Revoke(ctx context.Context, req *wire.RevokeRequest) (*wire.RevokeResponse, error) {
