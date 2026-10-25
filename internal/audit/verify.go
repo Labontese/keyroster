@@ -690,6 +690,17 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			return nil, fmt.Errorf("audit: entry %d: leaf time goes back (%d after %d)", want, leaf.TimeMicros, lastTime)
 		}
 		lastTime = leaf.TimeMicros
+		// A restore writes a lost directory version back from the
+		// "directory" and "sigs" fields of its line (03-02), so a line
+		// whose text carries either, of any kind, must be exactly the line
+		// Export writes for its leaf: the replayed bytes are then the
+		// verified leaf's.
+		if text := sc.Bytes(); bytes.Contains(text, []byte(`"directory":`)) || bytes.Contains(text, []byte(`"sigs":`)) {
+			canon, err := exportLeafLine(want, raw)
+			if err != nil || !bytes.Equal(text, canon) {
+				return nil, fmt.Errorf("audit: line %d: it carries a directory or sigs field but is not the line export-log writes for its leaf", lineNo)
+			}
+		}
 		switch leaf.Kind {
 		case tlog.KindBundleInstall:
 			body, err := tlog.DecodeBundleInstallBody(leaf.Body)

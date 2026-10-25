@@ -31,6 +31,8 @@ grep '"kind":"directory_install"' "$SAVED" | grep -E ",\"version\":$V[,}]" > "$D
 test "$(wc -l < "$D/line")" -eq 1
 grep -o '"directory":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.json"
 grep -o '"sigs":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.json.sigs"
+test -s "$D/directory.json"
+test -s "$D/directory.json.sigs"
 rm "$D/line"
 `
 
@@ -40,8 +42,9 @@ rm "$D/line"
 // stopped and its signer.db copied; v2 (a role only, no passkey binding)
 // is installed with keyroster directory install and the log exported. The
 // signer is stopped, the copy restored and the signer started: it reports
-// v1. v2's directory.json and directory.json.sigs are written from the
-// saved export with the runbook's own commands and replayed with keyroster
+// v1. The saved export verifies on its own and with the restored export
+// as --previous; v2's directory.json and directory.json.sigs are written
+// from it with the runbook's own commands and replayed with keyroster
 // directory install: the signer reports v2 with the same bytes, and the
 // new export verifies on its own. It is no extension of the saved export
 // (the replayed leaf is new), so audit verify --previous refuses it: the
@@ -90,11 +93,18 @@ func TestRestoreReplaysLostDirectory(t *testing.T) {
 
 	// 3. The restore: the copy replaces signer.db, and the newer WAL files
 	// go, or SQLite would replay them onto the old database.
+	// The restored log is exported while the signer is stopped (step 1).
 	stop()
 	restoreDB(t, backup, env.Signer.StateDir)
+	restored := env.Signer.exportLog(t)
 	serveStoppable(t, env.Signer) // stopped at cleanup, as every daemon of the harness
 	if resp, _ := signerDirectory(t, env); resp.Version != 1 {
 		t.Fatalf("restored signer directory version %d, want 1", resp.Version)
+	}
+	// Step 3's first item: the saved export verifies on its own pins
+	// (above), and the restored log is a prefix of it.
+	if code, out := auditVerifyPins(t, env.Signer.RootFingerprints, saved, "--previous", restored); code != 0 {
+		t.Fatalf("audit verify --previous <restored export> <saved export>: exit %d:\n%s", code, out)
 	}
 
 	// 4. The proposal from the saved export, with the runbook's commands

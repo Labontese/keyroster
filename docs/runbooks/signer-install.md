@@ -436,8 +436,26 @@ Before starting the signer after a restore:
      saved export and install it with `keyroster directory install`, one
      version at a time, in log order:
 
-     1. Verify the saved export first, so that you replay from a log the
-        roots vouch for (step 2's `audit verify` does this).
+     1. Verify the saved export itself, and that the restored log is a
+        prefix of it, so that you replay entries the roots vouch for:
+
+        ```
+        keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+          /root/latest-saved.jsonl
+        keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+          --previous /tmp/restored.jsonl /root/latest-saved.jsonl
+        ```
+
+        Both must pass. Step 2 does not do this: it verifies the restored
+        export and reads only the last checkpoint of the saved one, and its
+        `log shrank` looks the same for a log that was cut back as for one
+        that was cut back and rewritten. The first command checks every
+        entry of the saved export, and refuses a line whose `directory` or
+        `sigs` field is not exactly what `export-log` writes for its
+        verified leaf, so the bytes the next step writes are the ones the
+        signer logged. The second proves that the restored log is a prefix
+        of the saved one, so the lost entries are exactly the saved
+        export's entries after it.
      2. Write the proposal of the lost version `V` (`directory.json` and
         `directory.json.sigs`) from the export's decoded line:
 
@@ -450,14 +468,17 @@ Before starting the signer after a restore:
         test "$(wc -l < "$D/line")" -eq 1
         grep -o '"directory":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.json"
         grep -o '"sigs":"[^"]*"' "$D/line" | cut -d'"' -f4 | base64 -d > "$D/directory.json.sigs"
+        test -s "$D/directory.json"
+        test -s "$D/directory.json.sigs"
         rm "$D/line"
         ```
 
         The decoded `directory` and `sigs` fields are in every export that
         `keyroster-signer export-log` writes since plan 03-02. An older
         export has only `version` and `policy_version` there (the bytes are
-        then only inside the leaf): export the saved log again with a
-        current binary, or keep the proposal directories of past installs.
+        then only inside the leaf, and the `test -s` lines stop): export the
+        saved log again with a current binary, or keep the proposal
+        directories of past installs.
      3. With the restored signer running, wait at least 5 s after it
         started, or restart keyroster-server: the server keeps the signer's
         status for up to 5 s, and until then it can still report the
@@ -474,16 +495,22 @@ Before starting the signer after a restore:
         (`keyroster audit verify` of a new export counts the directory
         installs).
 
-   **What makes the replay safe, and what it does not cover.** The
-   `decoded` part of an export line is informational: `audit verify` checks
-   only the leaf, so an edited `decoded` part still verifies. The replay is
-   checked again by the signer: the directory must carry the admin quorum's
-   signatures under the policy in force, and its `prev` must be the
-   SHA-256 of the restored version, so only an admin-signed successor of
-   that version installs. The residual: someone who can edit the saved
-   export can substitute another admin-signed successor of the same
-   version that was never installed (an unused proposal, say). Keep saved
-   exports where only operators can write them.
+   **What makes the replay safe, and what it does not cover.** `audit
+   verify` does not interpret the `decoded` part of an export line, but it
+   refuses a line that carries a `directory` or `sigs` field and is not
+   byte for byte the line `export-log` writes for its leaf. So after the
+   two `audit verify` commands of the first item above, the proposal written from the saved export is the
+   document and signatures of a verified `directory_install` leaf among the
+   lost entries: an edited `directory` or `sigs` field, or a decoy one on
+   another line, is refused, and an escaped or missing field leaves an empty
+   file that the `test -s` lines stop. The signer checks the replay again:
+   the directory must carry the admin quorum's signatures under the policy
+   in force, and its `prev` must be the SHA-256 of the restored version.
+   The residual: these checks bind the replay to the saved export's
+   checkpoint, which the log key signs. A saved export written by someone
+   who holds the log key (a compromised signer) verifies too, until Phase 4
+   witnesses the checkpoints. Keep saved exports where only operators can
+   write them.
 
    **A lost version that binds a passkey cannot be replayed.**
    keyroster-server refuses it with 409 `credential_not_pending`, because
@@ -507,8 +534,11 @@ Before starting the signer after a restore:
 > signer, for a lost directory version that adds a role and binds no
 > passkey: a file-level restore of `signer.db` (its `-wal` and `-shm`
 > files replaced together, or SQLite replays the newer WAL onto the older
-> file), the signer then reporting the older version, step 3's
-> extraction commands above verbatim, the wait, `keyroster directory
+> file), the signer then reporting the older version, the export of the
+> restored log taken while the signer is stopped, step 3's two `audit
+> verify` runs of the saved export (on its own pins, and with `--previous`
+> set to the restored export), step 3's extraction commands above
+> verbatim, the wait, `keyroster directory
 > install` of the written proposal with the signer then reporting the lost
 > version with the same bytes, the new export verifying on its own pins,
 > and `audit verify --previous` refusing it against the pre-restore export.

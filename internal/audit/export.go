@@ -10,11 +10,17 @@
 //
 //	{"checkpoint":"<signed note text>"}
 //
-// "decoded" is informational only: Verify never reads it.
+// "decoded" is informational: Verify does not interpret it. A restore
+// replays a lost directory version from the "directory" and "sigs" fields
+// of a directory_install line (03-02), so a line whose text carries either
+// field must be byte for byte the line Export writes for its leaf; Verify
+// refuses any other. Lines without them, such as those of exports written
+// before 03-02, are not compared.
 package audit
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -51,9 +57,13 @@ func Export(ctx context.Context, w io.Writer, src LogSource) (uint64, error) {
 	enc.SetEscapeHTML(false)
 	var n uint64
 	note, _, err := src.ReadLog(ctx, func(idx uint64, leaf []byte) error {
-		i := idx
 		n++
-		return enc.Encode(ExportLine{Index: &i, Leaf: base64.StdEncoding.EncodeToString(leaf), Decoded: Decode(leaf)})
+		line, err := exportLeafLine(idx, leaf)
+		if err != nil {
+			return err
+		}
+		_, err = bw.Write(append(line, '\n'))
+		return err
 	})
 	if err != nil {
 		return 0, err
@@ -62,6 +72,19 @@ func Export(ctx context.Context, w io.Writer, src LogSource) (uint64, error) {
 		return 0, err
 	}
 	return n, bw.Flush()
+}
+
+// exportLeafLine returns the line Export writes for the leaf at idx,
+// without its newline. Verify compares a line that carries replay fields
+// with it.
+func exportLeafLine(idx uint64, leaf []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(ExportLine{Index: &idx, Leaf: base64.StdEncoding.EncodeToString(leaf), Decoded: Decode(leaf)}); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // Decode renders leaf bytes as an informational JSON object. A leaf that
@@ -164,8 +187,9 @@ func decodeLeaf(data []byte) map[string]any {
 		// The installed document and its signatures, as standard base64,
 		// so a restore can write them back as a proposal (directory.json
 		// and directory.json.sigs) and replay them with keyroster directory
-		// install (03-02). Like all of "decoded", unverified: the signer
-		// checks them again at the replay.
+		// install (03-02). Verify requires a line with these fields to be
+		// exactly what Export writes for its leaf, and the signer checks
+		// them again at the replay.
 		m["directory"] = b.Directory
 		m["sigs"] = b.Sigs
 	case tlog.KindLoginIssue:

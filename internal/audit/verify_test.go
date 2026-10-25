@@ -2227,3 +2227,69 @@ func TestVerifyLoginTampering(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifyReplayFields: a line that carries the directory or sigs field
+// a restore replays from (03-02) verifies only as the exact line Export
+// writes for its leaf, so the replayed bytes are the verified leaf's
+// (03-02 pre-merge review). A line without them, as exports before 03-02
+// wrote, is not compared.
+func TestVerifyReplayFields(t *testing.T) {
+	lf := newLoginFixture(t, true)
+	lf.addDirectory(lf.directory(nil), nil)
+	all := lf.lines() // bundle_install, directory_install, checkpoint
+	// editDecoded re-encodes line i with its decoded object changed by edit.
+	editDecoded := func(i int, edit func(m map[string]any)) []string {
+		t.Helper()
+		l := append([]string(nil), all...)
+		var line ExportLine
+		if err := json.Unmarshal([]byte(l[i]), &line); err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(line.Decoded, &m); err != nil {
+			t.Fatal(err)
+		}
+		edit(m)
+		dec, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line.Decoded = dec
+		out, err := json.Marshal(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l[i] = string(out)
+		return l
+	}
+	other := base64.StdEncoding.EncodeToString([]byte(`{"version":1,"roles":[{"name":"evil"}]}`))
+	const refused = "carries a directory or sigs field but is not the line export-log writes for its leaf"
+	cases := []struct {
+		name  string
+		lines []string
+		want  string // "" = must verify
+	}{
+		{"as_exported_ok", all, ""},
+		{"reencoded_unchanged_ok", editDecoded(1, func(map[string]any) {}), ""},
+		{"directory_swapped_refused", editDecoded(1, func(m map[string]any) { m["directory"] = other }), refused},
+		{"sigs_swapped_refused", editDecoded(1, func(m map[string]any) { m["sigs"] = other }), refused},
+		{"pre_03_02_line_ok", editDecoded(1, func(m map[string]any) { delete(m, "directory"); delete(m, "sigs") }), ""},
+		{"decoy_on_other_kind_refused", editDecoded(0, func(m map[string]any) {
+			m["kind"], m["version"], m["directory"], m["sigs"] = "directory_install", 1, other, other
+		}), refused},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := lf.verify(join(tc.lines), nil)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Verify: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify = %+v, %v; want an error with %q", rep, err, tc.want)
+			}
+		})
+	}
+}
