@@ -32,7 +32,10 @@
 #     and the agent unit at or below AGENT_THRESHOLD (exposure x10; 20 = 2.0);
 #   - signer-install.md's restore hold refuses every start of the signer and
 #     server units, its file restore puts signer.db back as keyroster-signer
-#     0600, and after its release the signer starts and doctor passes.
+#     0600, and after its release the signer starts and doctor passes;
+#   - signer-install.md's step 3 copy of the replay proposal to an admin
+#     refuses a link the admin planted, changes nothing it points at, and
+#     otherwise writes the files as the admin.
 #
 # The TPM drop-in is not installed here: the runner has no TPM, and its
 # SupplementaryGroups=tss needs the tss group. The TPM path under systemd is
@@ -387,5 +390,51 @@ as_signer keyroster-signer doctor --state-dir "$STATE" >"$work/doctor-restore.lo
 	fail "doctor failed after the restore"
 }
 cat "$work/doctor-restore.log"
+
+step "Restore step 3: copy the replay proposal to an admin (docs/runbooks/signer-install.md, verbatim)"
+# The block writes as the admin (runuser), and root only reads /root/replay:
+# a link the admin planted at ~/replay-v2 is refused, and the directory of
+# root's that it points at keeps its owner, mode and contents.
+[ ! -e /root/replay ] || fail "/root/replay exists on this host"
+install -d -m 0700 /root/replay /root/replay/v2
+printf '{"version":2}\n' >/root/replay/v2/directory.json
+printf 'sigs\n' >/root/replay/v2/directory.json.sigs
+canary=$work/replay-canary
+install -d -m 0755 "$canary"
+echo keep >"$canary/keep"
+canary_state() {
+	stat -c '%U %G %a' "$canary"
+	ls -A "$canary"
+}
+canary_before=$(canary_state)
+copy_proposal() {
+	bash -eu -s kradmin <<'EOF'
+V=2                                   # the lost directory version
+H=$(getent passwd "$1" | cut -d: -f6)
+test -n "$H"
+runuser -u "$1" -- sh -c 'umask 077 && mkdir "$1"' sh "$H/replay-v$V"
+for f in directory.json directory.json.sigs; do
+  runuser -u "$1" -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$H/replay-v$V/$f" <"/root/replay/v$V/$f"
+done
+echo "copied the proposal of directory version $V to $H/replay-v$V for $1"
+EOF
+}
+as_user kradmin ln -s "$canary" /home/kradmin/replay-v2
+if copy_proposal >"$work/copy-link.log" 2>&1; then
+	cat "$work/copy-link.log"
+	fail "the copy block wrote through a link the admin planted"
+fi
+cat "$work/copy-link.log"
+[ "$(canary_state)" = "$canary_before" ] || fail "the copy block changed the directory a planted link points at: $(canary_state)"
+as_user kradmin rm /home/kradmin/replay-v2
+copy_proposal | tee "$work/copy.log"
+grep -qx 'copied the proposal of directory version 2 to /home/kradmin/replay-v2 for kradmin' "$work/copy.log" || fail "the copy block did not report the copy"
+[ "$(stat -c '%a %U %G' /home/kradmin/replay-v2)" = "700 kradmin kradmin" ] || fail "replay-v2 is $(stat -c '%a %U %G' /home/kradmin/replay-v2)"
+for f in directory.json directory.json.sigs; do
+	[ "$(stat -c '%a %U %G' "/home/kradmin/replay-v2/$f")" = "600 kradmin kradmin" ] || fail "replay-v2/$f is $(stat -c '%a %U %G' "/home/kradmin/replay-v2/$f")"
+	cmp "/root/replay/v2/$f" "/home/kradmin/replay-v2/$f" || fail "replay-v2/$f differs from root's copy"
+done
+[ "$(canary_state)" = "$canary_before" ] || fail "the copy block changed $canary"
+rm -r /root/replay
 
 step "PASS"

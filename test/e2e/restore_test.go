@@ -78,24 +78,38 @@ var restoreRunbookChecks = []string{
 	restoreVerify + "\n/tmp/restored.jsonl",
 	restoreVerify + "\n/root/latest-saved.jsonl",
 	restoreVerify + "\n--previous /tmp/restored.jsonl /root/latest-saved.jsonl",
-	restoreAdminCopy,
 	restoreAdminInstall,
 	"`--out /tmp/after-replay.jsonl`",
 	restoreVerify + "\n/tmp/after-replay.jsonl",
 	restoreVerify + "\n--previous /tmp/restored.jsonl /tmp/after-replay.jsonl",
 }
 
-// restoreAdminCopy is step 3's copy of the proposal from /root, which is
-// mode 0700, to the admin who installs it (round 4), and
-// restoreAdminInstall the install of that copy. restoreRootInstall, the
-// install straight from /root/replay that no admin account can read, must
-// not be in the runbook.
+// restoreAdminCopyScript is step 3's copy of the proposal from /root,
+// which is mode 0700, to the admin who installs it (round 4), after its
+// heredoc line, which names the admin (<admin> in the runbook, kradmin in
+// test/systemd/smoke.sh, which runs it). Since round 5 it writes as the
+// admin with runuser and root only reads its own files, because the admin
+// can plant a link where root would write. restoreAdminInstall is the
+// install of that copy. restoreRootInstall, the install straight from
+// /root/replay that no admin account can read, must not be in the
+// runbook, and neither may a command of root's that creates, changes or
+// writes an admin's path (restoreAdminPathWrite; round 4's install -d -o
+// <admin> and install -o <admin> followed a planted link).
 const (
-	restoreAdminCopy = "install -d -o <admin> -g <admin> -m 0700 /home/<admin>/replay /home/<admin>/replay/v2\n" +
-		"install -o <admin> -g <admin> -m 0600 /root/replay/v2/directory.json /root/replay/v2/directory.json.sigs /home/<admin>/replay/v2/"
-	restoreAdminInstall = "keyroster directory install /home/<admin>/replay/v2"
+	restoreAdminCopyScript = `V=2                                   # the lost directory version
+H=$(getent passwd "$1" | cut -d: -f6)
+test -n "$H"
+runuser -u "$1" -- sh -c 'umask 077 && mkdir "$1"' sh "$H/replay-v$V"
+for f in directory.json directory.json.sigs; do
+  runuser -u "$1" -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$H/replay-v$V/$f" <"/root/replay/v$V/$f"
+done
+echo "copied the proposal of directory version $V to $H/replay-v$V for $1"
+EOF`
+	restoreAdminInstall = "keyroster directory install /home/<admin>/replay-v2"
 	restoreRootInstall  = "keyroster directory install /root/replay"
 )
+
+var restoreAdminPathWrite = regexp.MustCompile(`(?m)^[ \t]*(?:install|chown|chmod|cp|mv|mkdir|ln|tee|touch)\b[^\n]*(?:<admin>|/home/)`)
 
 // restoreVerify is the first line of the runbook's audit verify commands.
 const restoreVerify = `keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \`
@@ -242,6 +256,7 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		{"restore hold", restoreHoldBlock},
 		{"file restore", restoreFilesScript},
 		{"release of the restore hold", restoreReleaseBlock},
+		{"copy of the replay proposal to the admin", restoreAdminCopyScript},
 	} {
 		want := "\n" + trim(b.text) + "\n"
 		if !strings.Contains(runbook, want) {
@@ -254,6 +269,9 @@ func TestRestoreRunbookChecks(t *testing.T) {
 
 	if strings.Contains(runbook, restoreRootInstall) {
 		t.Errorf("signer-install.md has an admin run %q, which no admin account can read", restoreRootInstall)
+	}
+	for _, m := range restoreAdminPathWrite.FindAllString(runbook, -1) {
+		t.Errorf("signer-install.md has root create, change or write an admin's path, following any link the admin planted: %q", strings.TrimSpace(m))
 	}
 
 	// The order, on the runbook's restore section with its white space
@@ -428,10 +446,11 @@ func TestRestoreReplaysLostDirectory(t *testing.T) {
 		t.Fatal("the extracted proposal differs from the directory_install leaf of v2")
 	}
 
-	// The copy to the admin (step 3): the runbook installs the two files
-	// into a 0700 directory of the admin's with mode 0600, because the
+	// The copy to the admin (step 3): the runbook writes the two files as
+	// the admin into a new 0700 directory with mode 0600, because the
 	// admin cannot read /root/replay. As the test's own user there is no
-	// install -o; the copy keeps the modes, and the replay reads only it.
+	// runuser (smoke.sh runs that block); the copy keeps the modes, and the
+	// replay reads only it.
 	adminCopy := filepath.Join(t.TempDir(), "replay", "v2")
 	if err := os.MkdirAll(adminCopy, 0o700); err != nil {
 		t.Fatal(err)

@@ -655,12 +655,31 @@ structurally (see the warning above).
      2. Copy the proposal to the admin who installs it. `/root` is mode
         0700, so an admin account (section 8, for example `alice`, with
         her own ssh-agent and `keyroster` config) cannot read
-        `/root/replay`. As root, with `<admin>` that account:
+        `/root/replay`. Root must not create, change or write any path
+        the admin can write: the admin can plant a symbolic link in their
+        own home (for example `~/replay` pointing at
+        `/var/lib/keyroster-signer`), and root would follow it. So the
+        block below writes as the admin, with `runuser`, and root only
+        reads its own files and passes their bytes on standard input. As
+        root, with `<admin>` that account and `V` the lost version:
 
         ```
-        install -d -o <admin> -g <admin> -m 0700 /home/<admin>/replay /home/<admin>/replay/v2
-        install -o <admin> -g <admin> -m 0600 /root/replay/v2/directory.json /root/replay/v2/directory.json.sigs /home/<admin>/replay/v2/
+        bash -eu -s <admin> <<'EOF'
+        V=2                                   # the lost directory version
+        H=$(getent passwd "$1" | cut -d: -f6)
+        test -n "$H"
+        runuser -u "$1" -- sh -c 'umask 077 && mkdir "$1"' sh "$H/replay-v$V"
+        for f in directory.json directory.json.sigs; do
+          runuser -u "$1" -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$H/replay-v$V/$f" <"/root/replay/v$V/$f"
+        done
+        echo "copied the proposal of directory version $V to $H/replay-v$V for $1"
+        EOF
         ```
+
+        Only the last line's `copied the proposal` means both files are
+        there. `mkdir` refuses a name that exists, a planted link
+        included; root does not remove it. The admin removes it, or you
+        ask them which name is free and use that one.
 
         If the admin runs `keyroster` on a workstation instead, copy the
         two files there, into a directory only that admin can read, and
@@ -668,10 +687,11 @@ structurally (see the warning above).
      3. With the restored signer running, wait at least 5 s after it
         started, or restart keyroster-server: the server keeps the signer's
         status for up to 5 s, and until then it can still report the
-        version it served before the restore. Then, as that admin:
+        version it served before the restore. Then, as that admin, with
+        the directory the copy printed:
 
         ```
-        keyroster directory install /home/<admin>/replay/v2
+        keyroster directory install /home/<admin>/replay-v2
         ```
 
         It must print `The server reports directory version 2 installed`.
@@ -745,7 +765,8 @@ structurally (see the warning above).
 > set to the restored export), step 3's extraction commands above
 > verbatim, a copy of the proposal to another directory of mode 0700
 > with files of mode 0600 (as the test's own user, so not the runbook's
-> `install -o` commands), the wait, `keyroster directory install` of
+> `runuser` copy block, which the `systemd-sandbox` check below runs),
+> the wait, `keyroster directory install` of
 > that copy with the signer then reporting the lost
 > version with the same bytes, the new export verifying on its own pins
 > and with `--previous` set to the restored export, and `audit verify
@@ -758,14 +779,18 @@ structurally (see the warning above).
 > verbatim, from a copy of the signer's database taken under the hold;
 > the release block verbatim; and the signer starting again with
 > `doctor` passing. No keyroster-server runs in that check: its unit is
-> held and its start refused, never started.
+> held and its start refused, never started. It also runs step 3's copy
+> block verbatim for an admin account: it refuses with the account's
+> `~/replay-v2` planted as a link to a directory of root's, which keeps
+> its owner, mode and contents, and once the admin has removed the link
+> it writes both files as the admin, mode 0600 in a directory of mode
+> 0700, with root's bytes.
 >
 > **UNVERIFIED:** a VM snapshot restore (the Proxmox steps, `link_down`
 > and the console hold among them), the hold and the file restore on a
 > real signer host (a running keyroster-server, or the TPM drop-in beside
 > the hold), the replay of a lost `bundle_install`, a lost version that
-> binds a passkey and the re-invite after it, the `install -o <admin>`
-> copy of step 3 to a real admin account, keeping users away from the server, the version counts of
+> binds a passkey and the re-invite after it, keeping users away from the server, the version counts of
 > step 2 against a real restored signer, the stop in step 2 for a
 > restored export that does not verify on its own (the refusals
 > themselves are run in the audit unit tests), and step 2 when the saved
