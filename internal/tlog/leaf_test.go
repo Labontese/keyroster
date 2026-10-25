@@ -505,11 +505,42 @@ func TestRevokeBody(t *testing.T) {
 			t.Errorf("%s: Encode = %v, want ErrMalformedLeaf", name, err)
 		}
 	}
-	// The decoder refuses the same entries in bytes nobody encoded.
+	// Every kind carries exactly its own fields (pre-merge review, round
+	// 2): a key ID entry the CA key and key ID, a key entry the key alone.
+	strict := map[string]RevokedEntry{
+		"serial_entry_with_key_id":    {Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, KeyID: "junk"},
+		"serial_entry_with_key":       {Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, Key: []byte("junk")},
+		"key_id_entry_empty":          {Kind: RevokedKeyID, CAKey: []byte("k")},
+		"key_id_entry_no_ca":          {Kind: RevokedKeyID, KeyID: "id"},
+		"key_id_entry_with_serial":    {Kind: RevokedKeyID, CAKey: []byte("k"), KeyID: "id", Serial: 1},
+		"key_id_entry_with_key":       {Kind: RevokedKeyID, CAKey: []byte("k"), KeyID: "id", Key: []byte("junk")},
+		"key_entry_empty":             {Kind: RevokedKey},
+		"key_entry_with_ca":           {Kind: RevokedKey, Key: []byte("pk"), CAKey: []byte("k")},
+		"key_entry_with_serial":       {Kind: RevokedKey, Key: []byte("pk"), Serial: 1},
+		"key_entry_with_key_id":       {Kind: RevokedKey, Key: []byte("pk"), KeyID: "id"},
+		"key_entry_with_valid_before": {Kind: RevokedKey, Key: []byte("pk"), ValidBeforeSeconds: 1},
+	}
+	for name, e := range strict {
+		if _, err := (&RevokeBody{Request: []byte("r"), Entries: []RevokedEntry{e}}).Encode(); !errors.Is(err, ErrMalformedLeaf) {
+			t.Errorf("%s: Encode = %v, want ErrMalformedLeaf", name, err)
+		}
+	}
 	for name, e := range map[string]RevokedEntry{
-		"decode_serial_entry_with_key_id": {Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, KeyID: "junk"},
-		"decode_serial_entry_with_key":    {Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, Key: []byte("junk")},
+		"key_id_entry": {Kind: RevokedKeyID, CAKey: []byte("k"), KeyID: "id", ValidBeforeSeconds: 7},
+		"key_entry":    {Kind: RevokedKey, Key: []byte("pk")},
 	} {
+		in := &RevokeBody{Request: []byte("r"), Entries: []RevokedEntry{e}}
+		enc, err := in.Encode()
+		if err != nil {
+			t.Fatalf("%s: Encode = %v", name, err)
+		}
+		if got, err := DecodeRevokeBody(enc); err != nil || !reflect.DeepEqual(got, in) {
+			t.Fatalf("%s: DecodeRevokeBody = %+v, %v; want %+v", name, got, err, in)
+		}
+	}
+	// The decoder refuses the same entries in bytes nobody encoded.
+	for name, e := range strict {
+		name = "decode_" + name
 		var c cryptobyte.Builder
 		c.AddUint64(1)
 		c.AddUint64(1)

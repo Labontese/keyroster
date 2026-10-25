@@ -727,9 +727,11 @@ const (
 )
 
 // RevokedEntry is one entry a revocation resolved to: for RevokedSerial
-// the CA key (SSH wire format) and the serial, for RevokedKeyID the key
-// ID, for RevokedKey the public key (SSH wire format). ValidBeforeSeconds
-// is the revoked certificate's valid_before, 0 when not known.
+// the CA key (SSH wire format) and the serial, for RevokedKeyID the CA key
+// and the key ID (OpenSSH scopes a key ID revocation to a CA), for
+// RevokedKey the public key (SSH wire format). ValidBeforeSeconds is the
+// revoked certificate's valid_before, 0 when not known; an explicit key
+// entry is no certificate and never expires, so it carries 0.
 type RevokedEntry struct {
 	Kind               uint8
 	CAKey              []byte
@@ -745,13 +747,31 @@ func (e *RevokedEntry) check() error {
 		return fmt.Errorf("%w: revoked entry kind", ErrMalformedLeaf)
 	case len(e.CAKey) > wire.MaxSubjectKeyLen || len(e.Key) > wire.MaxSubjectKeyLen || len(e.KeyID) > MaxKeyID:
 		return fmt.Errorf("%w: revoked entry size", ErrMalformedLeaf)
-	case e.Kind == RevokedSerial && (len(e.CAKey) == 0 || e.Serial == 0):
-		return fmt.Errorf("%w: a serial entry needs a CA key and a serial above 0", ErrMalformedLeaf)
-	case e.Kind == RevokedSerial && (e.KeyID != "" || len(e.Key) != 0):
-		// Exact, so no reader can take a serial entry for a key ID or key
-		// revocation. The rules for the key_id and key kinds come with
-		// 03-03, which first writes them.
-		return fmt.Errorf("%w: a serial entry carries no key ID and no key", ErrMalformedLeaf)
+	}
+	// Each kind carries exactly its own fields, so no reader can take an
+	// entry of one kind for a revocation of another.
+	switch e.Kind {
+	case RevokedSerial:
+		if len(e.CAKey) == 0 || e.Serial == 0 {
+			return fmt.Errorf("%w: a serial entry needs a CA key and a serial above 0", ErrMalformedLeaf)
+		}
+		if e.KeyID != "" || len(e.Key) != 0 {
+			return fmt.Errorf("%w: a serial entry carries no key ID and no key", ErrMalformedLeaf)
+		}
+	case RevokedKeyID:
+		if len(e.CAKey) == 0 || e.KeyID == "" {
+			return fmt.Errorf("%w: a key ID entry needs a CA key and a key ID", ErrMalformedLeaf)
+		}
+		if e.Serial != 0 || len(e.Key) != 0 {
+			return fmt.Errorf("%w: a key ID entry carries no serial and no key", ErrMalformedLeaf)
+		}
+	case RevokedKey:
+		if len(e.Key) == 0 {
+			return fmt.Errorf("%w: a key entry needs a key", ErrMalformedLeaf)
+		}
+		if len(e.CAKey) != 0 || e.Serial != 0 || e.KeyID != "" || e.ValidBeforeSeconds != 0 {
+			return fmt.Errorf("%w: a key entry carries no CA key, serial, key ID or valid_before", ErrMalformedLeaf)
+		}
 	}
 	return nil
 }
