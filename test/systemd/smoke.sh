@@ -31,8 +31,10 @@
 #   - systemd-analyze security rates the signer unit at or below THRESHOLD
 #     and the agent unit at or below AGENT_THRESHOLD (exposure x10; 20 = 2.0);
 #   - signer-install.md's restore hold refuses every start of the signer and
-#     server units, its file restore puts signer.db back as keyroster-signer
-#     0600, and after its release the signer starts and doctor passes, also
+#     server units, its file restore refuses while signer.lock is held, puts
+#     signer.db and the backup's -wal back as keyroster-signer 0600 and
+#     removes a stale -shm the backup does not have, and after its release
+#     the signer starts and doctor passes, also
 #     when it had crash-looped into its start limit before the hold;
 #   - signer-install.md's step 3 copy of the replay proposal to an admin
 #     refuses a link the admin planted, changes nothing it points at, and
@@ -374,7 +376,18 @@ install -d -m 0700 "$backup"
 for f in signer.db signer.db-wal signer.db-shm; do
 	[ ! -e "$STATE/$f" ] || cp -p "$STATE/$f" "$backup/$f"
 done
-ls -l "$backup"
+# The backup set has a -wal (empty: a WAL without frames) and no -shm, and
+# the live state directory has stale -wal and -shm files: the restore must
+# replace the -wal with the backup's and remove the -shm. A real WAL with
+# frames is not built here.
+[ -e "$backup/signer.db-wal" ] || : >"$backup/signer.db-wal"
+rm -f "$backup/signer.db-shm"
+for f in signer.db-wal signer.db-shm; do
+	printf 'stale %s\n' "$f" >"$STATE/$f"
+	chown keyroster-signer:keyroster-signer "$STATE/$f"
+	chmod 0600 "$STATE/$f"
+done
+ls -l "$backup" "$STATE"
 file_restore() {
 	bash -eu -s "$1" <<'EOF'
 S=/var/lib/keyroster-signer
@@ -417,10 +430,16 @@ fi
 cat "$work/restore-locked.log"
 grep -q 'is in use by another keyroster-signer process' "$work/restore-locked.log" || fail "the file restore refused for another reason than the lock"
 [ "$(sha256sum "$STATE/signer.db")" = "$db_before" ] || fail "the refused file restore changed signer.db"
+grep -qx 'stale signer.db-shm' "$STATE/signer.db-shm" || fail "the refused file restore changed signer.db-shm"
 pkill -P "$locker" sleep || true
 wait "$locker" || true
 file_restore "$backup"
-[ "$(stat -c '%a %U %G' "$STATE/signer.db")" = "600 keyroster-signer keyroster-signer" ] || fail "restored signer.db is $(stat -c '%a %U %G' "$STATE/signer.db")"
+ls -l "$STATE"
+for f in signer.db signer.db-wal; do
+	[ "$(stat -c '%a %U %G' "$STATE/$f")" = "600 keyroster-signer keyroster-signer" ] || fail "restored $f is $(stat -c '%a %U %G' "$STATE/$f")"
+	cmp "$backup/$f" "$STATE/$f" || fail "restored $f differs from the backup's"
+done
+[ ! -e "$STATE/signer.db-shm" ] || fail "the stale signer.db-shm, which the backup does not have, is still there"
 bash -eu -s keyroster-server keyroster-signer <<'EOF'
 test "$#" -gt 0
 for u in "$@"; do

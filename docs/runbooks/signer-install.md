@@ -828,7 +828,10 @@ structurally (see the warning above).
 > verbatim for keyroster-server and keyroster-signer, each start then
 > refused with `Assertion failed on job for ...`; the file restore block
 > verbatim, from a copy of the signer's database taken under the hold,
-> refusing first while another process holds `signer.lock`;
+> refusing first while another process holds `signer.lock`, with stale
+> `-wal` and `-shm` files in the state directory and a backup set of
+> `signer.db` and an empty `-wal`: the restored `signer.db` and `-wal` are
+> the backup's bytes, keyroster-signer 0600, and the stale `-shm` is gone;
 > the release block verbatim, with the signer crash-looped into its
 > start limit before the hold (a temporary drop-in), so that it starts
 > again only because the release resets it; and the signer starting again with
@@ -847,7 +850,9 @@ structurally (see the warning above).
 > real signer host (a running keyroster-server, or the TPM drop-in beside
 > the hold), the file restore's refusal of a signer that is `activating`
 > (run once by hand against a throwaway unit in auto-restart, not in
-> CI), the replay of a lost `bundle_install`, a lost version that
+> CI), a backup whose `-wal` holds committed frames (CI's backup `-wal`
+> is empty, so only the file handling is run), the replay of a lost
+> `bundle_install`, a lost version that
 > binds a passkey and the re-invite after it, keeping users away from the server, the version counts of
 > step 2 against a real restored signer, the stop in step 2 for a
 > restored export that does not verify on its own (the refusals
