@@ -526,13 +526,26 @@ Before starting the signer after a restore:
         then only inside the leaf, and the `test -s` lines stop): export the
         saved log again with a current binary, or keep the proposal
         directories of past installs.
-     2. With the restored signer running, wait at least 5 s after it
-        started, or restart keyroster-server: the server keeps the signer's
-        status for up to 5 s, and until then it can still report the
-        version it served before the restore. Then, as an admin:
+     2. Copy the proposal to the admin who installs it. `/root` is mode
+        0700, so an admin account (section 8, for example `alice`, with
+        her own ssh-agent and `keyroster` config) cannot read
+        `/root/replay`. As root, with `<admin>` that account:
 
         ```
-        keyroster directory install /root/replay/v2
+        install -d -o <admin> -g <admin> -m 0700 /home/<admin>/replay /home/<admin>/replay/v2
+        install -o <admin> -g <admin> -m 0600 /root/replay/v2/directory.json /root/replay/v2/directory.json.sigs /home/<admin>/replay/v2/
+        ```
+
+        If the admin runs `keyroster` on a workstation instead, copy the
+        two files there, into a directory only that admin can read, and
+        use that path below.
+     3. With the restored signer running, wait at least 5 s after it
+        started, or restart keyroster-server: the server keeps the signer's
+        status for up to 5 s, and until then it can still report the
+        version it served before the restore. Then, as that admin:
+
+        ```
+        keyroster directory install /home/<admin>/replay/v2
         ```
 
         It must print `The server reports directory version 2 installed`.
@@ -604,15 +617,18 @@ Before starting the signer after a restore:
 > of the restored export on its own, step 2's two `audit verify` runs of
 > the saved export (on its own pins, and with `--previous`
 > set to the restored export), step 3's extraction commands above
-> verbatim, the wait, `keyroster directory
-> install` of the written proposal with the signer then reporting the lost
+> verbatim, a copy of the proposal to another directory of mode 0700
+> with files of mode 0600 (as the test's own user, so not the runbook's
+> `install -o` commands), the wait, `keyroster directory install` of
+> that copy with the signer then reporting the lost
 > version with the same bytes, the new export verifying on its own pins
 > and with `--previous` set to the restored export, and `audit verify
 > --previous` refusing it against the pre-restore export.
 >
 > **UNVERIFIED:** a VM snapshot restore, the replay of a lost
 > `bundle_install`, a lost version that binds a passkey and the re-invite
-> after it, keeping users away from the server, the version counts of
+> after it, the `install -o <admin>` copy of step 3 to a real admin
+> account, keeping users away from the server, the version counts of
 > step 2 against a real restored signer, the stop in step 2 for a
 > restored export that does not verify on its own (the refusals
 > themselves are run in the audit unit tests), and step 2 when the saved

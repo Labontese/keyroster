@@ -67,7 +67,8 @@ func requireReplayBlock(t *testing.T, runbook string) {
 // paths (exportLog and auditVerifyPins) rather than as the runbook's text:
 // step 1's export of the restored log, step 2's audit verify of the
 // restored export on its own and its two audit verify runs of the saved
-// export, and the export and the two audit verify runs of the
+// export, step 3's copy of the proposal to the admin and the install of
+// that copy, and the export and the two audit verify runs of the
 // post-replay log ("After the replay, the new export is the baseline").
 // TestRestoreRunbookChecks requires each in the runbook, so removing one
 // of these instructions fails the e2e suite as removing an extraction
@@ -77,10 +78,24 @@ var restoreRunbookChecks = []string{
 	restoreVerify + "\n/tmp/restored.jsonl",
 	restoreVerify + "\n/root/latest-saved.jsonl",
 	restoreVerify + "\n--previous /tmp/restored.jsonl /root/latest-saved.jsonl",
+	restoreAdminCopy,
+	restoreAdminInstall,
 	"`--out /tmp/after-replay.jsonl`",
 	restoreVerify + "\n/tmp/after-replay.jsonl",
 	restoreVerify + "\n--previous /tmp/restored.jsonl /tmp/after-replay.jsonl",
 }
+
+// restoreAdminCopy is step 3's copy of the proposal from /root, which is
+// mode 0700, to the admin who installs it (round 4), and
+// restoreAdminInstall the install of that copy. restoreRootInstall, the
+// install straight from /root/replay that no admin account can read, must
+// not be in the runbook.
+const (
+	restoreAdminCopy = "install -d -o <admin> -g <admin> -m 0700 /home/<admin>/replay /home/<admin>/replay/v2\n" +
+		"install -o <admin> -g <admin> -m 0600 /root/replay/v2/directory.json /root/replay/v2/directory.json.sigs /home/<admin>/replay/v2/"
+	restoreAdminInstall = "keyroster directory install /home/<admin>/replay/v2"
+	restoreRootInstall  = "keyroster directory install /root/replay"
+)
 
 // restoreVerify is the first line of the runbook's audit verify commands.
 const restoreVerify = `keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \`
@@ -154,6 +169,10 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		if !strings.Contains(runbook, want) {
 			t.Errorf("signer-install.md no longer has %q, which TestRestoreReplaysLostDirectory carries out", c)
 		}
+	}
+
+	if strings.Contains(runbook, restoreRootInstall) {
+		t.Errorf("signer-install.md has an admin run %q, which no admin account can read", restoreRootInstall)
 	}
 
 	// The order, on the runbook's restore section with its white space
@@ -311,11 +330,25 @@ func TestRestoreReplaysLostDirectory(t *testing.T) {
 		t.Fatal("the extracted proposal differs from the directory_install leaf of v2")
 	}
 
+	// The copy to the admin (step 3): the runbook installs the two files
+	// into a 0700 directory of the admin's with mode 0600, because the
+	// admin cannot read /root/replay. As the test's own user there is no
+	// install -o; the copy keeps the modes, and the replay reads only it.
+	adminCopy := filepath.Join(t.TempDir(), "replay", "v2")
+	if err := os.MkdirAll(adminCopy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"directory.json", "directory.json.sigs"} {
+		if err := os.WriteFile(filepath.Join(adminCopy, name), readFile(t, filepath.Join(replay, name)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// 5. The replay. keyroster-server caches the signer's status for up
 	// to 5 s (statusTTL); wait it out, so the CLI's base check reads the
 	// restored v1 and not the v2 the server saw before the restore.
 	time.Sleep(6 * time.Second)
-	code, out, errOut := env.keyroster(t, admin, "", "directory", "install", replay)
+	code, out, errOut := env.keyroster(t, admin, "", "directory", "install", adminCopy)
 	if code != 0 || !strings.Contains(out, "The server reports directory version 2 installed") {
 		t.Fatalf("directory install of the replayed v2: exit %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
 	}
