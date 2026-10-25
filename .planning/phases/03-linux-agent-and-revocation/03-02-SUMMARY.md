@@ -461,6 +461,50 @@ PR #59 review, on head 894a6c3. Each test failed against its mutant or the pre-f
 - `TestRestoreRunbookChecks` and `TestRestoreReplaysLostDirectory` passed in WSL under the namespace hosts workaround, with OpenSSH 10.5p1.
 - The full e2e suite ran there too: 34 passed. `TestSSHDRejects/pty_allowed` failed, as in round 2, in a test no change here touches. CI is the authoritative run.
 
+## Pre-merge review fixes, round 4
+
+PR #59 review, on head dce3165, plus the owner decision of 2026-10-25 ("prevent it in the runbook"). Each test failed against the pre-fix runbook or a mutant copy, and passed once the fix was restored.
+
+- **Item 1, the restored export read unverified (medium):** `80d7225`. Step 2 now runs `audit verify` on `/tmp/restored.jsonl` by itself first: pins and threshold, no `--previous`. If that fails, the operator stops and escalates before any comparison or grep. The code shows why the order matters. `Verify` reports `log shrank` and `log rewritten` only after the export's entries, checkpoint and root have verified (internal/audit/verify.go: the entries, checkpoint and root at lines 663-819 come before the `--previous` check at 820-839). A `readPrevious` error (cmd/keyroster/audit.go) comes before `Verify` reads the restored export at all, so any refusal other than those two says nothing about whether the restored export verified. With the standalone verify first, any refusal of the comparison may go on to the saved-export checks. `TestRestoreRunbookChecks` pins the command, its stop rule, and their place before the first comparison and before every grep of the restored export (new regex). `TestRestoreReplaysLostDirectory` runs the standalone verify. Proof: the test failed on the dce3165 runbook, where the command is missing. It also failed on a copy with the block moved after step 2's greps, with an order error and two grep errors. The stop path itself is listed as UNVERIFIED.
+- **Item 2, the wrong report in the UNVERIFIED example (low):** `2d695a5`, docs only. The item now describes the path: step 2 when the saved export's prefix check fails. It also gives both reports for a signer that logged K entries after losing L > 0. The first command says `log shrank` if K < L, otherwise `log rewritten`. The prefix check says `log rewritten` if K <= L, `log shrank` if K > L.
+- **Item 3, revoke entries refused by every binary (low):** `6e2c7da`, docs only. Step 2 says that until 03-03, every `audit verify` binary refuses a log with a `revoke` or `krl_publish` entry (logged since 03-01) as `not verifiable by this version`. It says this is not tampering, that step 2 cannot be completed for such a log, and points to revoke.md section 4. 03-03-PLAN.md now lists signer-install.md in its files and in Task 3. Task 3 removes that sentence and revoke.md's interim paragraph. A new acceptance line requires `grep -c 'binary, the current one'` (signer-install.md) and `grep -c 'From the first revocation until 03-03 merges'` (revoke.md) to print 0.
+- **Item 4, the replay proposal under /root (low):** `64a8e94`. Step 3.2 now copies `directory.json` and `directory.json.sigs` as root into `/home/<admin>/replay/v2` (directory 0700, files 0600, owned by the admin), or to the admin's workstation. Step 3.3 installs from that path. The extraction block and `requireReplayBlock` are unchanged. `TestRestoreRunbookChecks` pins the copy and the install path, and refuses `keyroster directory install /root/replay`. `TestRestoreReplaysLostDirectory` installs from a separate 0700 copy. Proof: the test failed on the 6e2c7da runbook with three errors. UNVERIFIED: the `install -o <admin>` copy to a real admin account (CI copies as the test user).
+- **Item 5, owner decision: hold the signer and server during a restore:** `033359c`.
+  - **The hold.** A `restore-hold.conf` drop-in (`[Unit]` `AssertPathExists=/nonexistent-restore-hold`) goes into `keyroster-signer.service.d` and `keyroster-server.service.d` under /etc/systemd/system, the paths of the install section and deploy/systemd. The hold block writes both drop-ins and reloads systemd, then stops both units. For each unit it checks that it is loaded, that systemd lists the drop-in, and that `systemctl start` fails. It ends with `held:`.
+  - **Restores.** A new file restore block runs under the hold. It refuses to run without the hold or with the signer active, and replaces `signer.db`, `-wal` and `-shm` together as keyroster-signer 0600. The runbook had no such command before. For a disk-only Proxmox snapshot:
+    - After the rollback and before the first boot, cut every `netN` with `link_down=1`, keeping its options.
+    - At the console, run the hold and set the firewall rule.
+    - Local admins stand down.
+    - Run steps 1-2, then bring the link up for NTP.
+
+    A snapshot with RAM is unsupported for the signer VM: escalate, and take disk-only snapshots.
+  - **Wording moved or kept.** "Keep users away" moved ahead of step 1. Stop-and-escalate stays the rule for a detected fork, and one line names Phase 4's witnessed checkpoint. The release block (remove the drop-ins, daemon-reload) closes step 2, after the clock check and before step 3.
+  - **Tests.** `TestRestoreRunbookChecks` requires the hold, file restore and release blocks in both the runbook and test/systemd/smoke.sh. It also requires this order: hold before the file restore and step 1, `link_down` and the RAM rule before step 1, and the release after step 2's checks and before step 3. Proof, each failing:
+    - the 64a8e94 runbook;
+    - the hold moved after the file restore;
+    - the release moved into step 3;
+    - smoke.sh without the hold block;
+    - the 64a8e94 smoke.sh.
+  - **Exercised.** smoke.sh (the required `systemd-sandbox` check, an Ubuntu 24.04 runner) installs keyroster-server.service only to hold it, and runs the three blocks verbatim on the repository's units. It requires `Assertion failed on job for <unit>` for each unit, puts back a copy of the signer's database taken under the hold, checks 0600 keyroster-signer ownership, releases, starts the signer, and requires `doctor` to pass. This ran on 033359c (run 40200310902): `Assertion failed on job for keyroster-server.service.` and `... keyroster-signer.service.`, `held: keyroster-server keyroster-signer`, `restored signer.db from ...`, `released: ...`, the signer `active`, doctor with no FAIL. WSL was not used: sudo there needs a password, and smoke.sh changes the host it runs on. No keyroster-server runs in that check: its unit is held and refused, never started.
+  - **UNVERIFIED (labelled in the runbook):** every Proxmox step (`link_down`, the console hold, the RAM rule), the firewall rule, and the hold or restore on a real signer host. 03-16 has no signer-restore drill (its corrupt-file "restore" is an agent KRL drill), so no line was added there, and the homelab dogfood as planned does not exercise these steps.
+  - **Deviations from the decision as written:**
+    - The drop-ins are written and loaded before the units are stopped, not after. keyroster-server has `Wants=keyroster-signer.service` and `Restart=on-failure`, so a server start between stop and hold could start the signer again.
+    - The check uses LoadState, DropInPaths and a failing start rather than `AssertResult`, because a unit whose assertion was never tested also shows `AssertResult=no`.
+    - The release runs no `systemctl reset-failed`, because it fails on a unit systemd has unloaded. CI starts the signer after the release without it.
+    - On a VM, the link may come up as soon as the hold reports `held:` if files must be copied. The owner's order (after steps 1-2) is the default.
+    - From the code: a freshly started `serve` appends nothing until a request arrives, and stopping it writes a refusal summary only if it refused something. A disk-only boot with the link cut and local admins standing down therefore logs nothing.
+
+**Checks run:**
+- `gofmt -l .` reported nothing.
+- `go vet ./...` passed for windows, linux and darwin, and `go vet -tags e2e ./test/e2e/` for windows and linux.
+- `go test -tags e2e -run TestRestoreRunbookChecks ./test/e2e/` passed on Windows.
+- In WSL: `go test -race -count=1 ./internal/audit/...` passed, and golangci-lint reported 0 issues for linux, windows and darwin.
+- `golangci-lint --build-tags e2e ./test/e2e/` (not a required gate) reports 12 gosec findings, all in code this round did not change: harness_test.go, revoke_test.go, copyDB.
+- `TestRestoreRunbookChecks` and `TestRestoreReplaysLostDirectory` passed in WSL under the namespace hosts workaround, with OpenSSH 10.5p1.
+- The full e2e suite ran there too: 34 passed. `TestSSHDRejects/pty_allowed` failed, as in rounds 2 and 3.
+- `bash -n test/systemd/smoke.sh` passed. A grep of the diff found no 100.x, 10.x or 192.168.x addresses and no real host names or VM IDs (`<id>` placeholders only).
+- CI on 033359c: all 19 required checks passed, systemd-sandbox, e2e (9.5p1, 10.5p1), e2e-tpm, e2e-pkcs11, fuzz, build-test and lint among them.
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-25*
