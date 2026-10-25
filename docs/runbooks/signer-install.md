@@ -526,9 +526,21 @@ Before starting the signer after a restore:
    installs are new log entries with new times, so the log no longer
    extends the pre-restore export: `audit verify --previous
    /root/latest-saved.jsonl` refuses the new export. Verify the new export
-   on its own pins, keep it as the next `--previous`, and keep the
-   pre-restore export with the operations log as the record of the
-   restore.
+   on its own pins and against the export of the restored log from step 1;
+   both must pass:
+
+   ```
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     /root/after-replay.jsonl
+   keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+     --previous /tmp/restored.jsonl /root/after-replay.jsonl
+   ```
+
+   The second command proves that the new log extends the restored one,
+   so nothing was cut back or rewritten between step 1 and the replay.
+   Then keep the new export as the next `--previous`, and keep the
+   pre-restore export and `/tmp/restored.jsonl` with the operations log as
+   the record of the restore.
 
 > **Run in CI e2e (TestRestoreReplaysLostDirectory, 03-02)** on a test
 > signer, for a lost directory version that adds a role and binds no
@@ -540,8 +552,9 @@ Before starting the signer after a restore:
 > set to the restored export), step 3's extraction commands above
 > verbatim, the wait, `keyroster directory
 > install` of the written proposal with the signer then reporting the lost
-> version with the same bytes, the new export verifying on its own pins,
-> and `audit verify --previous` refusing it against the pre-restore export.
+> version with the same bytes, the new export verifying on its own pins
+> and with `--previous` set to the restored export, and `audit verify
+> --previous` refusing it against the pre-restore export.
 >
 > **UNVERIFIED:** a VM snapshot restore, the replay of a lost
 > `bundle_install`, a lost version that binds a passkey and the re-invite

@@ -46,9 +46,10 @@ rm "$D/line"
 // as --previous; v2's directory.json and directory.json.sigs are written
 // from it with the runbook's own commands and replayed with keyroster
 // directory install: the signer reports v2 with the same bytes, and the
-// new export verifies on its own. It is no extension of the saved export
-// (the replayed leaf is new), so audit verify --previous refuses it: the
-// runbook says the post-replay export is the next baseline.
+// new export verifies on its own and extends the restored export. It is
+// no extension of the saved export (the replayed leaf is new), so audit
+// verify --previous refuses it: the runbook says the post-replay export
+// is the next baseline.
 //
 // A lost version that binds a passkey is not run here: the server refuses
 // it with 409 credential_not_pending, and the runbook labels that case
@@ -151,6 +152,11 @@ func TestRestoreReplaysLostDirectory(t *testing.T) {
 	replayed := env.Signer.exportLog(t)
 	if code, out := auditVerifyPins(t, env.Signer.RootFingerprints, replayed); code != 0 || !strings.Contains(out, "directory installs 2") {
 		t.Fatalf("audit verify after the replay: exit %d:\n%s", code, out)
+	}
+	// It extends the restored log, so nothing was cut back or rewritten
+	// between the restore and the replay.
+	if code, out := auditVerifyPins(t, env.Signer.RootFingerprints, replayed, "--previous", restored); code != 0 {
+		t.Fatalf("audit verify --previous <restored export> <post-replay export>: exit %d:\n%s", code, out)
 	}
 	if code, out := auditVerifyPins(t, env.Signer.RootFingerprints, replayed, "--previous", saved); code == 0 {
 		t.Fatalf("audit verify --previous <pre-restore export> accepted the post-replay export:\n%s", out)
