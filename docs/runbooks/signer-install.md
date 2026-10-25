@@ -358,9 +358,9 @@ Before starting the signer after a restore:
 logs anything before step 1 exports its log (a request that reaches it,
 or the refusal summary it writes when it stops after refusing one) forks
 the log, and step 2 then ends the procedure. So hold both units with a
-drop-in that makes every start fail: on a file restore before the
-restored `signer.db` is copied in, on a VM restore at the console right
-after the first boot (below). As root:
+drop-in that makes every start fail, on the signer host that is to serve
+the restored `signer.db`, before it is copied in (for a VM snapshot, the
+current signer VM: see below). As root:
 
 ```
 bash -eu -s keyroster-server keyroster-signer <<'EOF'
@@ -403,8 +403,7 @@ restored signer starts again until the last lost version is back (step
 version can log in again, and a role removed in a lost version grants
 again. Keep keyroster-server unreachable to users for that time, for
 example with a firewall rule that admits only the admin workstation; set
-it before you release the hold, and on a VM restore before the network
-link comes up. The admin's `keyroster directory install` goes through the
+it before you release the hold. The admin's `keyroster directory install` goes through the
 server, so stopping it is not an option. (UNVERIFIED: no test blocks user
 access.)
 
@@ -433,33 +432,62 @@ echo "restored signer.db from $1"
 EOF
 ```
 
-**From a disk-only VM snapshot (Proxmox)** (UNVERIFIED: no step of this
-paragraph has run): the signer and keyroster-server start at the first
-boot after the rollback, before you can hold them. Keep every request
-away from them until they are held:
+**From a disk-only VM snapshot (Proxmox): never boot the snapshot.** A
+signer VM booted from a rolled-back disk starts the signer and
+keyroster-server before you can hold them. So do not roll back the
+signer VM (that would also discard the current VM's disk, its saved
+exports included), and never boot its snapshot or a copy of it. Take
+the three files out of the snapshot's disk instead, and restore them on
+the current signer VM as a file backup (UNVERIFIED: no step of this
+paragraph has run, and none can run in CI):
 
-- Tell every local admin (each `keyroster-admin` account on the signer
-  VM) to stand down until the restore is done: the signer socket is
-  local, so their requests reach it with the network cut.
-- Roll back the snapshot (`qm rollback <id> <snapshot>`; it also restores
-  the VM's configuration of that time). Before the first boot, cut every
-  network device at the hypervisor: list them with `qm config <id> | grep
-  '^net'` and set each again with `,link_down=1` added and its other
-  options kept, for example `qm set <id> --net0 '<net0 value>,link_down=1'`.
-- Boot (`qm start <id>`), log in at the console (the VM's Console in the
-  Proxmox web UI), run the hold block above, and set the firewall rule.
-- Run steps 1 and 2 under the hold. Then bring the link up again (`qm set
-  <id> --net0 '<net0 value>'`, without `link_down`): the clock check
-  needs NTP. If you need the network earlier, to copy the saved export in
-  or the restored export out, bring it up after the hold reports `held:`;
-  from then on the hold, not the cut link, keeps requests from the
-  signer.
-- Check the clock and release the hold at the end of step 2.
+- On the current signer VM, run the hold block above and set the
+  firewall rule (above).
+- On the Proxmox host, make a copy of only the signer VM's system disk
+  as it was at the snapshot, with the storage's own tools (for example a
+  ZFS clone of the disk's snapshot, or `qemu-img convert` of a qcow2
+  disk's internal snapshot), and attach the copy to a helper VM (any
+  Linux VM other than the signer VM, `<helper id>`) as an extra disk. Do
+  not clone the whole signer VM with `qm clone <id>`: that also copies its
+  vTPM state, which wraps the TPM backend's CA keys, into a second VM.
+- In the helper VM, mount the copy's root file system read-only
+  (`mount -o ro`) and copy `var/lib/keyroster-signer/signer.db` and its
+  `-wal` and `-shm` files, those that exist, as one set, with their
+  `sha256sum`. Mounting the copy on the Proxmox host itself also works
+  for some storage types, but it makes the host's kernel parse a file
+  system that the signer VM wrote; prefer the helper VM.
+- An encrypted disk (LUKS) opens in the helper VM only with a passphrase
+  or recovery key. If its only key is sealed to the signer VM's vTPM,
+  nothing outside that VM can open it, and this restore is not possible:
+  escalate.
+- Copy the set to the current signer VM, into a new directory
+  `<backup>` of mode 0700 owned by root, check the `sha256sum` values
+  there, and run the file restore block above with that `<backup>`. Then
+  delete the disk copy and the helper's copy of the files.
+- Continue with step 1. The saved export of step 2 is the one kept on
+  the current signer VM or off it, never one from the snapshot's disk.
 
-**A VM snapshot with RAM is not supported for the signer VM.** The
-signer process resumes from the snapshot's memory and can log entries
-(for example a refusal summary it was holding) before you can hold it.
-Do not restore one; escalate. Take disk-only snapshots of the signer VM.
+**If the current signer VM cannot be used,** install a fresh signer VM
+by this runbook, steps 1 to 3, and create the state directory of step 4,
+but run neither `ca-init` nor `install-bundle` (step 6): the restored
+`signer.db` brings the key records, the trust bundle and the policy of
+the same genesis. Create the lock file as the signer's user
+(`runuser -u keyroster-signer -- touch /var/lib/keyroster-signer/signer.lock`),
+then hold, take the three files out of the snapshot's disk as above,
+run the file restore and continue with step 1. This works only where
+the fresh signer reaches the same CA keys: `serve` opens every key by
+its recorded fingerprint, so it needs the same HSM or keys behind the
+agent backend, or for the software backend its `software` directory
+taken from the snapshot's disk with the three files. Keys in a TPM
+cannot leave the old VM's TPM, so for the TPM backend it is not
+possible. If it is not possible, or `serve` or
+step 2 refuses, escalate. (UNVERIFIED: no part of this has run.)
+
+**A VM snapshot with RAM is not supported for the signer VM.** Never
+resume one: the signer process would run on from the snapshot's memory
+and can log entries (for example a refusal summary it was holding)
+before any hold. This runbook does not cover taking the disk out of one
+either; escalate. Take disk-only snapshots of the signer VM.
 
 If the signer logged entries after the restore anyway, step 2 shows the
 fork and you stop and escalate: that stays the rule whenever step 2
@@ -488,7 +516,11 @@ structurally (see the warning above).
    checks every entry of the restored export.
 
    Then compare it with the latest export you kept from before the
-   restore:
+   restore. That saved export must come from storage that no restore
+   rolled back: the current signer VM's own disk, or a copy kept off the
+   signer VM. Never take it from a snapshot's disk or from the backup you
+   restored: an export from there is as old as the restored log, and the
+   comparison would show nothing lost.
 
    ```
    keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
@@ -573,8 +605,7 @@ structurally (see the warning above).
    **Release the hold** when step 2 passed: after the first comparison
    passed, or after both checks of the saved export passed and you
    compared the versions. Check the clock first (see [Snapshot restore:
-   check the clock first](#snapshot-restore-check-the-clock-first); on a
-   VM restore with the link up), make sure the firewall rule keeps users
+   check the clock first](#snapshot-restore-check-the-clock-first)), make sure the firewall rule keeps users
    away, and then, as root:
 
    ```
@@ -786,8 +817,10 @@ structurally (see the warning above).
 > it writes both files as the admin, mode 0600 in a directory of mode
 > 0700, with root's bytes.
 >
-> **UNVERIFIED:** a VM snapshot restore (the Proxmox steps, `link_down`
-> and the console hold among them), the hold and the file restore on a
+> **UNVERIFIED:** a VM snapshot restore (the disk copy, the helper VM,
+> the read-only mount and the transfer of the three files to the current
+> signer VM) and the fresh signer VM when the current one cannot be
+> used, the hold and the file restore on a
 > real signer host (a running keyroster-server, or the TPM drop-in beside
 > the hold), the replay of a lost `bundle_install`, a lost version that
 > binds a passkey and the re-invite after it, keeping users away from the server, the version counts of

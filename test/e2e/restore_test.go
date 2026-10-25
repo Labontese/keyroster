@@ -199,11 +199,20 @@ EOF`
 	// restoreStep1 and restoreStep3 open the runbook's steps 1 and 3.
 	restoreStep1 = "1. With the hold in force, export the restored log:"
 	restoreStep3 = "3. Reinstall what the restore lost"
-	// restoreVMLinkDown and restoreVMRAM are the disk-only VM restore's
-	// network cut and the rule for a snapshot with RAM, both before step 1.
-	restoreVMLinkDown = "qm set <id> --net0 '<net0 value>,link_down=1'"
-	restoreVMRAM      = "A VM snapshot with RAM is not supported for the signer VM."
+	// restoreVMNoBoot and restoreVMRAM are the disk-only VM restore's rule
+	// (owner decision 2026-10-25, PR #59 review round 5: the snapshot is
+	// never booted; its files are restored on the current signer VM) and
+	// the rule for a snapshot with RAM, both before step 1.
+	// restoreVMBooted are round 4's commands that roll back and boot the
+	// signer VM, which the runbook must no longer have.
+	restoreVMNoBoot = "From a disk-only VM snapshot (Proxmox): never boot the snapshot."
+	restoreVMRAM    = "A VM snapshot with RAM is not supported for the signer VM."
+	// restoreSavedSource is step 2's rule for where the saved export comes
+	// from, before the first comparison reads it.
+	restoreSavedSource = "That saved export must come from storage that no restore rolled back"
 )
+
+var restoreVMBooted = []string{"link_down", "qm rollback <id>", "qm start <id>"}
 
 // restoreSavedGreps are the runbook's greps of the saved export: step 2's
 // bundle version and directory install count, step 3's list and step 3's
@@ -301,6 +310,10 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		t.Errorf("signer-install.md step 2 does not verify the restored export on its own first: its audit verify at %d, %q at %d, the first comparison at %d",
 			restoredVerify, restoreRestoredStop, restoredStop, first)
 	}
+	if src := pos("rule for where the saved export comes from", restoreSavedSource); src <= restoredStop || src >= first {
+		t.Errorf("signer-install.md step 2 does not say where the saved export comes from before the first comparison: %q at %d, the first comparison at %d",
+			restoreSavedSource, src, first)
+	}
 	cond := pos("unconditional verification of the saved export", restoreSavedVerifyIf)
 	block := pos("verification of the saved export", restoreSavedVerify)
 	stop := pos("rule for a saved export that does not verify", restoreSavedStop)
@@ -312,14 +325,19 @@ func TestRestoreRunbookChecks(t *testing.T) {
 	// released after step 2's checks and before step 3.
 	hold := pos("restore hold", restoreHoldBlock)
 	files := pos("file restore", restoreFilesScript)
-	linkDown := pos("network cut of a VM restore", restoreVMLinkDown)
+	noBoot := pos("rule never to boot a VM snapshot", restoreVMNoBoot)
 	ram := pos("rule for a VM snapshot with RAM", restoreVMRAM)
 	step1 := pos("step 1", restoreStep1)
 	release := pos("release of the restore hold", restoreReleaseBlock)
 	step3 := pos("step 3", restoreStep3)
-	if hold >= files || files >= step1 || linkDown >= step1 || ram >= step1 {
-		t.Errorf("signer-install.md does not hold the units before the restore: hold at %d, file restore at %d, VM link_down at %d, RAM rule at %d, step 1 at %d",
-			hold, files, linkDown, ram, step1)
+	if hold >= files || files >= step1 || files >= noBoot || noBoot >= step1 || ram >= step1 {
+		t.Errorf("signer-install.md does not hold the units before the restore: hold at %d, file restore at %d, VM snapshot rule at %d, RAM rule at %d, step 1 at %d",
+			hold, files, noBoot, ram, step1)
+	}
+	for _, c := range restoreVMBooted {
+		if strings.Contains(section, c) {
+			t.Errorf("signer-install.md still has %q: a VM snapshot is never booted (owner decision 2026-10-25, round 5)", c)
+		}
 	}
 	if release <= stop || release >= step3 {
 		t.Errorf("signer-install.md does not release the hold between step 2's checks and step 3: checks end at %d, release at %d, step 3 at %d",
