@@ -11,7 +11,7 @@ requires:
     provides: 03-01's revoke and KRL routes in New's mux
 provides:
   - keyroster login connects to the ssh-agent before the begin and computes the agent lifetime at the add (E-IN-01, E-IN-02)
-  - the login redeem reads the clock again after currentStatus and bounds the signer call at CreatedAt + 295 s (C-IN-01)
+  - the login redeem reads the clock again after currentStatus and sends the signer request by CreatedAt + 295 s; the answer is read for up to signerCallTimeout after the send (C-IN-01, round 2)
   - newRouteMux, a ServeMux that records its patterns, and Server.patterns
   - TestNoNonPasskeySignInRoute and TestLoginNeverWritesKey (the two Phase 2 prohibitions)
   - directory_install export lines carry the directory and its signatures; restore step 3 replays lost versions (A-IN-01)

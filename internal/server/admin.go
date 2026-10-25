@@ -43,7 +43,11 @@ const (
 	// inviteTokenBytes is the random length of an invite token and of a
 	// WebAuthn user handle.
 	inviteTokenBytes = 32
-	// signerCallTimeout bounds one signer call made by a handler.
+	// signerCallTimeout bounds one signer call made by a handler. The
+	// login redeem's call is the exception: its request is sent by
+	// CreatedAt + loginSignerWindow and within signerCallTimeout, and the
+	// answer is then read for up to signerCallTimeout after the send
+	// (03-02, C-IN-01, pre-merge review round 2).
 	signerCallTimeout = 10 * time.Second
 	// pendingCleanupTimeout bounds the pending cleanup after an accepted
 	// install, which runs detached from the request (handleInstallDirectory).
