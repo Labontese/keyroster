@@ -476,14 +476,18 @@ canary_state() {
 	ls -A "$canary"
 }
 canary_before=$(canary_state)
+# The modes are set explicitly: on the runner, a directory made under umask
+# 077 alone came out 775 in kradmin's home (cause not established).
+ls -ld /home/kradmin
+! command -v getfacl >/dev/null || getfacl -p /home/kradmin
 copy_proposal() {
 	bash -eu -s kradmin <<'EOF'
 V=2                                   # the lost directory version
 H=$(getent passwd "$1" | cut -d: -f6)
 test -n "$H"
-runuser -u "$1" -- sh -c 'umask 077 && mkdir "$1"' sh "$H/replay-v$V"
+runuser -u "$1" -- sh -c 'umask 077 && mkdir -m 0700 "$1"' sh "$H/replay-v$V"
 for f in directory.json directory.json.sigs; do
-  runuser -u "$1" -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$H/replay-v$V/$f" <"/root/replay/v$V/$f"
+  runuser -u "$1" -- sh -c 'umask 077 && set -C && cat >"$1" && chmod 0600 "$1"' sh "$H/replay-v$V/$f" <"/root/replay/v$V/$f"
 done
 echo "copied the proposal of directory version $V to $H/replay-v$V for $1"
 EOF

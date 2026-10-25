@@ -732,9 +732,9 @@ structurally (see the warning above).
         V=2                                   # the lost directory version
         H=$(getent passwd "$1" | cut -d: -f6)
         test -n "$H"
-        runuser -u "$1" -- sh -c 'umask 077 && mkdir "$1"' sh "$H/replay-v$V"
+        runuser -u "$1" -- sh -c 'umask 077 && mkdir -m 0700 "$1"' sh "$H/replay-v$V"
         for f in directory.json directory.json.sigs; do
-          runuser -u "$1" -- sh -c 'umask 077 && set -C && cat >"$1"' sh "$H/replay-v$V/$f" <"/root/replay/v$V/$f"
+          runuser -u "$1" -- sh -c 'umask 077 && set -C && cat >"$1" && chmod 0600 "$1"' sh "$H/replay-v$V/$f" <"/root/replay/v$V/$f"
         done
         echo "copied the proposal of directory version $V to $H/replay-v$V for $1"
         EOF
