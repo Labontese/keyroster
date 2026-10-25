@@ -18,6 +18,9 @@
 // same set always encodes to the same bytes, whatever the insertion order
 // and however often an entry is listed.
 //
+// Parse (parse.go) reads every section and subsection type ssh-keygen may
+// write, strictly and with memory bounded by its input.
+//
 // EntryLive, Prunable and PublishSet are the one liveness rule, the one
 // pruning rule and the one set builder that the signer (publishing) and
 // keyroster audit verify (re-deriving every published KRL from the log)

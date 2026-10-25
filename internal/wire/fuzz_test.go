@@ -275,3 +275,60 @@ func FuzzParseGetDirectoryResponse(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseRevokeRequest (03-03): ParseRevokeRequest never panics, every
+// error wraps ErrMalformed, and a parsed request marshals back to exactly
+// the input. Seeded with one request per target.
+func FuzzParseRevokeRequest(f *testing.F) {
+	for _, r := range revokeTargets(f) {
+		r.Evidence = []Evidence{{Type: EvidenceAdminSSHSIG, Blob: []byte("sig")}}
+		body, err := r.Marshal()
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(body)
+		f.Add(append(bytes.Clone(body), 0))
+	}
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, body []byte) {
+		r, err := ParseRevokeRequest(body)
+		if err != nil {
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseRevokeRequest error = %v, want ErrMalformed", err)
+			}
+			return
+		}
+		out, err := r.Marshal()
+		if err != nil || !bytes.Equal(out, body) {
+			t.Fatalf("Marshal does not reproduce the input: %v\n in  %x\n out %x", err, body, out)
+		}
+	})
+}
+
+// FuzzParseRevokeSigningBytes (03-03): ParseRevokeSigningBytes, which
+// keyroster audit verify applies to every logged revoke request, never
+// panics, every error wraps ErrMalformed, and whatever parses re-encodes
+// (SigningBytes) to exactly the input. Seeded with one request per target.
+func FuzzParseRevokeSigningBytes(f *testing.F) {
+	for _, r := range revokeTargets(f) {
+		sb := r.SigningBytes()
+		f.Add(sb)
+		f.Add(sb[:len(sb)-1])
+	}
+	f.Add([]byte(RevokeRequestDomain))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		r, err := ParseRevokeSigningBytes(b)
+		if err != nil {
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseRevokeSigningBytes error = %v, want ErrMalformed", err)
+			}
+			return
+		}
+		if len(r.Evidence) != 0 || !bytes.Equal(r.SigningBytes(), b) {
+			t.Fatalf("SigningBytes does not reproduce the input:\n in  %x\n out %x", b, r.SigningBytes())
+		}
+		if r.Validate() != nil {
+			t.Fatal("a parsed request does not validate")
+		}
+	})
+}

@@ -653,14 +653,15 @@ type subjectEnv struct {
 	clock *tickingClock
 }
 
-// subjectDirectory is directory version with prev: alice active, bob with
-// bobStatus, role ops granting loginPrincipals to both for up to 3600 s.
-func subjectDirectory(pk *passkeys, version uint64, prev, bobStatus string) *directory.Directory {
+// subjectDirectory is directory version with prev: alice and bob with the
+// given statuses, role ops granting loginPrincipals to both for up to
+// 3600 s.
+func subjectDirectory(pk *passkeys, version uint64, prev, aliceStatus, bobStatus string) *directory.Directory {
 	d := &directory.Directory{
 		Version: version,
 		Prev:    prev,
 		Users: []directory.User{
-			{Name: "alice", Status: directory.StatusActive, Credentials: []directory.Credential{boundCredential(pk.eddsa)}},
+			{Name: "alice", Status: aliceStatus, Credentials: []directory.Credential{boundCredential(pk.eddsa)}},
 			{Name: "bob", Status: bobStatus, Credentials: []directory.Credential{boundCredential(pk.bob)}},
 		},
 		Roles: []directory.Role{{Name: "ops", Principals: loginPrincipals, MaxTTLSeconds: 3600, Extensions: []string{"permit-pty"},
@@ -679,7 +680,7 @@ func newSubjectEnv(t *testing.T) *subjectEnv {
 	}
 	clock := &tickingClock{now: time.Unix(time.Now().Unix(), 0), tick: true}
 	e := &subjectEnv{logEnv: newLogEnvClock(t, fx, clock.Now), pk: newPasskeys(t), clock: clock}
-	doc, sigs := signDirectory(t, subjectDirectory(e.pk, 1, trust.GenesisPrev, directory.StatusActive), fx.Admins[0])
+	doc, sigs := signDirectory(t, subjectDirectory(e.pk, 1, trust.GenesisPrev, directory.StatusActive, directory.StatusActive), fx.Admins[0])
 	e.installDirectory(t, doc, sigs)
 	return e
 }
@@ -807,6 +808,16 @@ func TestRevokeSubjectTracer(t *testing.T) {
 	if keygenRevoked(t, keygen, got.KRL, b) {
 		t.Errorf("ssh-keygen -Q refuses the certificate %d of bob", b.Serial)
 	}
+	// Read back with krl.Parse (Task 2): both of alice's serials under the
+	// user CA key, none of bob's.
+	p, err := krl.Parse(got.KRL)
+	if err != nil {
+		t.Fatalf("krl.Parse of the published KRL: %v", err)
+	}
+	if !p.RevokesSerial(userCA, a1.Serial) || !p.RevokesSerial(userCA, a2.Serial) || p.RevokesSerial(userCA, b.Serial) ||
+		len(p.Certs) != 1 || !bytes.Equal(p.Certs[0].CAKey, userCA) {
+		t.Fatalf("krl.Parse of the published KRL: %+v; want the two serials of alice under the user CA key and none of bob", p.Certs)
+	}
 	rep := e.verifyExport()
 	if rep.Counts[tlog.KindRevoke] != 1 || rep.Revocations != 1 || rep.RevokedEntries != 2 ||
 		uint64(rep.KRLPublishes) != rep.Counts[tlog.KindKRLPublish] || rep.KRLPublishes < 1 { //nolint:gosec // G115: a count
@@ -828,4 +839,522 @@ func (e *logEnv) bundleOf(t *testing.T) *trust.Bundle {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// signedRevoke completes req (CreatedAt now on the signer's clock, a fresh
+// request ID) and signs it with the fixture's admin.
+func (e *subjectEnv) signedRevoke(t *testing.T, req *wire.RevokeRequest) *wire.RevokeRequest {
+	t.Helper()
+	req.CreatedAt = uint64(e.clock.Now().Unix()) //nolint:gosec // G115: after 1970
+	if req.Reason == "" {
+		req.Reason = "test"
+	}
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, e.fx.Admins[0], wire.RevokeSSHSIGNamespace, req.SigningBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+	return req
+}
+
+// refused runs req through revokeOrRefuse and requires the refusal
+// detail, with one refusal leaf and no revocation row added.
+func (e *subjectEnv) refused(t *testing.T, req *wire.RevokeRequest, detail string) {
+	t.Helper()
+	re := &revokeEnv{logEnv: e.logEnv}
+	defer re.use(t)()
+	re.refusedRevoke(req, detail)
+}
+
+// parsedKRL parses the KRL the signer serves.
+func (e *logEnv) parsedKRL(t *testing.T) *krl.Parsed {
+	t.Helper()
+	p, err := krl.Parse(e.s.GetKRL().KRL)
+	if err != nil {
+		t.Fatalf("krl.Parse of the served KRL: %v", err)
+	}
+	return p
+}
+
+// revokeEntries returns the entries of the revoke leaf at index idx.
+func (e *logEnv) revokeEntries(t *testing.T, idx uint64) []tlog.RevokedEntry {
+	t.Helper()
+	l := e.leavesOf()[idx]
+	if l.Kind != tlog.KindRevoke {
+		t.Fatalf("leaf %d is %s, want a revoke leaf", idx, l.Kind)
+	}
+	b, err := tlog.DecodeRevokeBody(l.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.Entries
+}
+
+func serialsOf(entries []tlog.RevokedEntry) []uint64 {
+	out := make([]uint64, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Serial)
+	}
+	return out
+}
+
+// TestSubjectResolutionTime (F9, T-03-202, T-03-203): a subject revocation
+// resolves at T = the clock reading in whole seconds, and a certificate is
+// live while ValidBefore + 300 > T, in whole seconds, on both sides of a
+// sub-second boundary; after a clock step back the revoke leaf's time is
+// clamped, T is not, and audit verify accepts it; and a certificate issued
+// under an older policy with a longer TTL cap is found.
+func TestSubjectResolutionTime(t *testing.T) {
+	boundary := func(t *testing.T, offset time.Duration, wantRevoked bool) {
+		e := newSubjectEnv(t)
+		c := e.login(t, "alice")
+		end := time.Unix(int64(c.ValidBefore)+krl.PruneMargin, 0) //nolint:gosec // G115: a test time
+		e.clock.set(end.Add(offset), false)
+		resp := e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "alice"}))
+		entries := e.revokeEntries(t, resp.RevokeLeaf)
+		rb, err := tlog.DecodeRevokeBody(e.leavesOf()[resp.RevokeLeaf].Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := uint64(end.Add(offset).Unix()); rb.ResolvedAtSeconds != want { //nolint:gosec // G115: a test time
+			t.Fatalf("ResolvedAtSeconds %d, want the reading's whole seconds %d", rb.ResolvedAtSeconds, want)
+		}
+		if got := len(entries) == 1 && entries[0].Serial == c.Serial; got != wantRevoked || len(entries) > 1 {
+			t.Fatalf("at E%+v the subject revocation lists %v; want the certificate revoked=%v", offset, serialsOf(entries), wantRevoked)
+		}
+		e.verifyExport()
+	}
+	t.Run("subsecond_before_boundary_live", func(t *testing.T) { boundary(t, -time.Microsecond, true) })
+	t.Run("at_boundary_excluded", func(t *testing.T) { boundary(t, 0, false) })
+	t.Run("subsecond_after_boundary_excluded", func(t *testing.T) { boundary(t, 999_999*time.Microsecond, false) })
+	t.Run("clock_rollback", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		c := e.login(t, "alice")
+		// A leaf at L, after the certificate's E = ValidBefore + 300.
+		l := time.Unix(int64(c.ValidBefore)+krl.PruneMargin+100, 0) //nolint:gosec // G115: a test time
+		e.clock.set(l, true)
+		e.login(t, "bob")
+		all := e.leavesOf()
+		last := all[len(all)-1].TimeMicros
+		// The clock steps back an hour: E lies inside (L - 3600 s, L].
+		back := time.UnixMicro(int64(last)).Add(-time.Hour).Truncate(time.Second) //nolint:gosec // G115: a test time
+		e.clock.set(back, false)
+		resp := e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "alice"}))
+		leaf := e.leavesOf()[resp.RevokeLeaf]
+		rb, err := tlog.DecodeRevokeBody(leaf.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if leaf.TimeMicros != last || rb.ResolvedAtSeconds != uint64(back.Unix()) || !slices.Equal(serialsOf(rb.Entries), []uint64{c.Serial}) { //nolint:gosec // G115: a test time
+			t.Fatalf("leaf time %d (want clamped to %d), ResolvedAtSeconds %d (want %d), entries %v (want %d)",
+				leaf.TimeMicros, last, rb.ResolvedAtSeconds, back.Unix(), serialsOf(rb.Entries), c.Serial)
+		}
+		if krl.EntryLive(c.ValidBefore, leaf.TimeMicros/1_000_000) {
+			t.Fatal("the certificate is live at the clamped leaf time too, so the case would not catch an audit that reads it")
+		}
+		rep := e.verifyExport()
+		t.Logf("audit verify accepts the revocation resolved at %d s under a leaf clamped to %d µs: %d revocation, %d entries", rb.ResolvedAtSeconds, leaf.TimeMicros, rep.Revocations, rep.RevokedEntries)
+	})
+	t.Run("older_longer_cap_found", func(t *testing.T) {
+		fx := NewFixture(t, 1, 1)
+		fx.InstallationID = testInstallationID
+		fx.PolicyEdit = func(p *trust.Policy) { p.CAProfiles[0].MaxTTLSeconds = 24 * 3600 }
+		clock := &tickingClock{now: time.Unix(time.Now().Unix(), 0), tick: true}
+		e := &subjectEnv{logEnv: newLogEnvClock(t, fx, clock.Now), clock: clock}
+		req := &wire.IssueRequest{CARole: wire.CARoleUser, SubjectKey: newEd25519(t).PublicKey().Marshal(), Subject: "alice",
+			Principals: []string{"alice"}, ValidForSeconds: 24 * 3600, CreatedAt: uint64(clock.Now().Unix())} //nolint:gosec // G115: after 1970
+		if _, err := rand.Read(req.RequestID[:]); err != nil {
+			t.Fatal(err)
+		}
+		req.Evidence = SignRequest(t, req, fx.Admins...)
+		issued, err := e.s.Issue(context.Background(), Peer{UID: 1000}, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A successor policy cuts the user cap to 8 h.
+		e.restartUnderPolicy(t, func(*trust.Policy) {})
+		if e.s.profiles[wire.CARoleUser].MaxTTL != 8*time.Hour {
+			t.Fatalf("user cap under the successor policy %v, want 8h", e.s.profiles[wire.CARoleUser].MaxTTL)
+		}
+		clock.set(clock.Now().Add(20*time.Hour), false)
+		resp := e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "alice"}))
+		if !slices.Equal(resp.Serials, []uint64{issued.Serial}) {
+			t.Fatalf("20 h later the subject revocation lists %v, want the 24 h certificate %d", resp.Serials, issued.Serial)
+		}
+		e.verifyExport()
+	})
+}
+
+// TestRevokeSubject (D-09, REVOKE-01): the subject, key-ID and key targets
+// on a real signer, their refusals, the entry cap split, re-listing, and
+// the second sweep after a login between the revoke and the disable.
+func TestRevokeSubject(t *testing.T) {
+	subject := func(name string) *wire.RevokeRequest {
+		return &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: name}
+	}
+	t.Run("revoke_user_login_between_revoke_and_disable", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		a1 := e.login(t, "alice")
+		first := e.revoke(t, e.signedRevoke(t, subject("alice")))
+		if !slices.Equal(first.Serials, []uint64{a1.Serial}) {
+			t.Fatalf("first sweep %v, want %d", first.Serials, a1.Serial)
+		}
+		// The directory still has alice active: a login between the
+		// revoke and the disable is issued.
+		a2 := e.login(t, "alice")
+		doc1, err := subjectDirectory(e.pk, 1, trust.GenesisPrev, directory.StatusActive, directory.StatusActive).Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc, sigs := signDirectory(t, subjectDirectory(e.pk, 2, trust.SHA256Hex(doc1), directory.StatusDisabled, directory.StatusActive), e.fx.Admins[0])
+		e.installDirectory(t, doc, sigs)
+		e.refuseLogin(t, approve(t, e.pk.eddsa, e.loginReq(t, "alice"), nil), "user_disabled")
+		second := e.revoke(t, e.signedRevoke(t, subject("alice")))
+		if !slices.Equal(second.Serials, []uint64{a1.Serial, a2.Serial}) || second.SerialCount != 2 {
+			t.Fatalf("second sweep %+v, want the first sweep's %d and the interleaved %d", second, a1.Serial, a2.Serial)
+		}
+		p := e.parsedKRL(t)
+		userCA := e.fx.Roles[keystore.RoleUser].PublicKey().Marshal()
+		if len(p.Certs) != 1 || !slices.Equal(p.Certs[0].Serials, []krl.SerialRange{{Lo: a1.Serial, Hi: a1.Serial}, {Lo: a2.Serial, Hi: a2.Serial}}) || !bytes.Equal(p.Certs[0].CAKey, userCA) {
+			t.Fatalf("KRL after the second sweep: %+v, want each serial once under the user CA", p.Certs)
+		}
+		rep := e.verifyExport()
+		if rep.Revocations != 2 || rep.RevokedEntries != 3 {
+			t.Fatalf("audit: %d revocations, %d entries; want 2 and 3", rep.Revocations, rep.RevokedEntries)
+		}
+	})
+	t.Run("revoke_user_second_sweep_relists", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		a1, a2 := e.login(t, "alice"), e.login(t, "alice")
+		r1 := e.revoke(t, e.signedRevoke(t, subject("alice")))
+		r2 := e.revoke(t, e.signedRevoke(t, subject("alice")))
+		want := []uint64{a1.Serial, a2.Serial}
+		if !slices.Equal(serialsOf(e.revokeEntries(t, r1.RevokeLeaf)), want) || !slices.Equal(serialsOf(e.revokeEntries(t, r2.RevokeLeaf)), want) {
+			t.Fatal("the two sweeps do not both list both certificates")
+		}
+		if n := e.countRevocations(t); n != 4 {
+			t.Fatalf("%d revocation rows, want 4 (one per entry of each sweep)", n)
+		}
+		p := e.parsedKRL(t)
+		if len(p.Certs) != 1 || !slices.Equal(p.Certs[0].Serials, []krl.SerialRange{{Lo: a1.Serial, Hi: a1.Serial}, {Lo: a2.Serial, Hi: a2.Serial}}) {
+			t.Fatalf("KRL: %+v, want each serial once", p.Certs)
+		}
+		e.verifyExport()
+	})
+	t.Run("subject_kind_unsupported", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		for _, kind := range []wire.SubjectKind{wire.SubjectHost, wire.SubjectMachine} {
+			e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: kind, Subject: "web1"}), "subject_kind_unsupported")
+		}
+	})
+	t.Run("key_is_ca_of_this_installation", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		for _, role := range []keystore.Role{keystore.RoleUser, keystore.RoleHost, keystore.RoleMachine, keystore.RoleOps, keystore.RoleLog} {
+			e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: e.fx.Roles[role].PublicKey().Marshal()}), "key_is_ca_of_this_installation")
+		}
+		e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: e.fx.Root.PublicKey().Marshal()}), "key_is_ca_of_this_installation")
+	})
+	t.Run("malformed_targets_refused", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		c := e.login(t, "alice")
+		for name, req := range map[string]*wire.RevokeRequest{
+			"empty_key_id":       {Target: wire.TargetKeyID, CARole: wire.CARoleUser},
+			"certificate_as_key": {Target: wire.TargetKey, Key: c.Marshal()},
+			"unknown_target":     {Target: 9},
+			"subject_with_slash": {Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "alice/x"},
+		} {
+			t.Run(name, func(t *testing.T) { e.refused(t, e.signedRevoke(t, req), "malformed_request") })
+		}
+	})
+	t.Run("empty_live_set_recorded", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		req := e.signedRevoke(t, subject("carol"))
+		resp := e.revoke(t, req)
+		if resp.SerialCount != 0 || len(resp.Serials) != 0 || len(e.revokeEntries(t, resp.RevokeLeaf)) != 0 {
+			t.Fatalf("answer %+v, want a revoke leaf with no entries", resp)
+		}
+		if used, err := e.db.RevokeRequestUsed(context.Background(), req.RequestID); err != nil || !used {
+			t.Fatalf("the request ID is not recorded: %v, %v", used, err)
+		}
+		e.refused(t, req, "duplicate_request")
+		e.verifyExport()
+	})
+	t.Run("revoke_by_key_id", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		c := e.login(t, "alice")
+		resp := e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: c.KeyId}))
+		entries := e.revokeEntries(t, resp.RevokeLeaf)
+		userCA := e.fx.Roles[keystore.RoleUser].PublicKey().Marshal()
+		if len(entries) != 1 || entries[0].Kind != tlog.RevokedKeyID || entries[0].KeyID != c.KeyId || !bytes.Equal(entries[0].CAKey, userCA) ||
+			entries[0].ValidBeforeSeconds != c.ValidBefore || resp.SerialCount != 0 {
+			t.Fatalf("key-ID revoke entries %+v (answer %+v), want the key ID under the user CA with the certificate's ValidBefore", entries, resp)
+		}
+		if p := e.parsedKRL(t); !p.RevokesKeyID(userCA, c.KeyId) {
+			t.Fatalf("the KRL does not revoke the key ID: %+v", p)
+		}
+		e.verifyExport()
+	})
+	t.Run("revoke_by_key", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		key := newEd25519(t).PublicKey().Marshal()
+		resp := e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: key}))
+		if entries := e.revokeEntries(t, resp.RevokeLeaf); len(entries) != 1 || entries[0].Kind != tlog.RevokedKey || !bytes.Equal(entries[0].Key, key) {
+			t.Fatalf("key revoke entries %+v", entries)
+		}
+		if p := e.parsedKRL(t); !p.RevokesKey(key) {
+			t.Fatal("the KRL does not revoke the key")
+		}
+		e.verifyExport()
+	})
+	t.Run("key_id_unknown_valid_before_kept", func(t *testing.T) {
+		e := newSubjectEnv(t)
+		id := "kr1/ca=user/sub=nobody/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=1"
+		resp := e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: id}))
+		if entries := e.revokeEntries(t, resp.RevokeLeaf); len(entries) != 1 || entries[0].ValidBeforeSeconds != 0 {
+			t.Fatalf("entries %+v, want one with ValidBefore 0 (no issuance row)", entries)
+		}
+		// Long past every certificate's lifetime the re-published KRL still
+		// lists it.
+		e.clock.set(e.clock.Now().Add(30*24*time.Hour), false)
+		if !e.s.republishIfDue(context.Background()) {
+			t.Fatal("no re-publish 30 days later")
+		}
+		if p := e.parsedKRL(t); !p.RevokesKeyID(e.fx.Roles[keystore.RoleUser].PublicKey().Marshal(), id) {
+			t.Fatal("the key ID with an unknown ValidBefore left the KRL")
+		}
+		e.verifyExport()
+	})
+	t.Run("valid_before_beyond_row_range_kept", func(t *testing.T) {
+		// No signer issues a certificate valid until ssh.CertTimeInfinity,
+		// so this logs one serial entry with that ValidBefore directly, as
+		// a revocation would, and its row with valid_before NULL
+		// (validBeforeMicros), then publishes.
+		e := newSubjectEnv(t)
+		ctx := context.Background()
+		caKey := e.fx.Roles[keystore.RoleUser].PublicKey().Marshal()
+		entry := tlog.RevokedEntry{Kind: tlog.RevokedSerial, CAKey: caKey, Serial: 77, ValidBeforeSeconds: ssh.CertTimeInfinity}
+		body, err := (&tlog.RevokeBody{Request: []byte("r"), Entries: []tlog.RevokedEntry{entry}}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := e.clock.Now()
+		e.s.mu.Lock()
+		err = e.s.logTx(ctx, func(tx *sql.Tx) error {
+			idx, err := e.s.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(now), Kind: tlog.KindRevoke, Body: body})
+			if err != nil {
+				return err
+			}
+			if err := e.db.InsertRevocation(tx, revocationRow(entry, [16]byte{1}, idx, now)); err != nil {
+				return err
+			}
+			st, _, err := e.s.publishKRLLocked(ctx, tx, now)
+			if err == nil {
+				e.s.krl.Store(st)
+			}
+			return err
+		})
+		e.s.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		revs := e.revocationRows(t)
+		if len(revs) != 1 || revs[0].ValidBeforeMicros != 0 {
+			t.Fatalf("revocation rows %+v, want one with valid_before NULL", revs)
+		}
+		for _, at := range []time.Time{now, now.Add(100 * 365 * 24 * time.Hour)} {
+			e.clock.set(at, false)
+			if !at.Equal(now) && !e.s.republishIfDue(ctx) {
+				t.Fatal("no re-publish")
+			}
+			if p := e.parsedKRL(t); !p.RevokesSerial(caKey, 77) {
+				t.Fatalf("the serial left the KRL at %v", at)
+			}
+			// Audit builds its set from the leaf's ValidBefore, the signer
+			// from the row's NULL: the same KRL at any realistic time.
+			issued := uint64(at.Unix()) //nolint:gosec // G115: a test time
+			fromLeaf, err := krl.PublishSet([]krl.Entry{{Kind: krl.EntrySerial, CAKey: caKey, Serial: 77, ValidBefore: ssh.CertTimeInfinity}}, issued)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fromRow, err := krl.PublishSet(revocationEntries(revs), issued)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, _ := krl.Encode(fromLeaf, 1, at)
+			b, _ := krl.Encode(fromRow, 1, at)
+			if !bytes.Equal(a, b) {
+				t.Fatalf("the leaf (audit) and the row (signer) give different KRLs at %v", at)
+			}
+		}
+	})
+	t.Run("revoke_user_over_entry_cap", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("issues 4097 login certificates")
+		}
+		e := newSubjectEnv(t)
+		var serials []uint64
+		for range tlog.MaxRevokedEntries + 1 {
+			serials = append(serials, e.login(t, "alice").Serial)
+		}
+		req := e.signedRevoke(t, subject("alice"))
+		before := len(e.leavesOf())
+		resp := e.revoke(t, req)
+		leaves := e.leavesOf()[before:]
+		if len(leaves) != 3 || leaves[0].Kind != tlog.KindRevoke || leaves[1].Kind != tlog.KindRevoke || leaves[2].Kind != tlog.KindKRLPublish ||
+			resp.RevokeLeaf != leaves[1].Index || resp.PublishLeaf != leaves[2].Index {
+			t.Fatalf("leaves %v (answer %+v), want two revoke leaves then one krl_publish", leaves, resp)
+		}
+		got := append(serialsOf(e.revokeEntries(t, leaves[0].Index)), serialsOf(e.revokeEntries(t, leaves[1].Index))...)
+		if n := len(e.revokeEntries(t, leaves[0].Index)); n != tlog.MaxRevokedEntries || !slices.Equal(got, serials) {
+			t.Fatalf("the first leaf lists %d entries and both %d, want %d and every serial ascending", n, len(got), tlog.MaxRevokedEntries)
+		}
+		if resp.SerialCount != tlog.MaxRevokedEntries+1 || !slices.Equal(resp.Serials, serials[:wire.MaxRevokeAnswerSerials]) {
+			t.Fatalf("answer: SerialCount %d, %d serials; want 4097 and the first 4096", resp.SerialCount, len(resp.Serials))
+		}
+		e.refused(t, req, "duplicate_request")
+		rep := e.verifyExport()
+		if rep.Revocations != 1 || rep.RevokedEntries != tlog.MaxRevokedEntries+1 {
+			t.Fatalf("audit: %d revocations, %d entries", rep.Revocations, rep.RevokedEntries)
+		}
+	})
+}
+
+func (e *logEnv) countRevocations(t *testing.T) int {
+	t.Helper()
+	return len(e.revocationRows(t))
+}
+
+func (e *logEnv) revocationRows(t *testing.T) []signerdb.Revocation {
+	t.Helper()
+	var revs []signerdb.Revocation
+	if err := e.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		var err error
+		revs, err = e.db.RevocationsTx(context.Background(), tx)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return revs
+}
+
+// TestPublishNeverDropsLiveEntry (T-03-14, the shared contract with 03-05's
+// KRL_M = KRL_B): over serial, key-ID (with and without an issuance row),
+// key and subject revocations, forced re-publishes and clock steps forward
+// and back, every entry missing from a published KRL version is prunable
+// at that version's issued_at (krl.Prunable over every row of it), and no
+// explicit key and no key-ID entry whose ValidBefore is unknown ever
+// leaves.
+func TestPublishNeverDropsLiveEntry(t *testing.T) {
+	e := newSubjectEnv(t)
+	ctx := context.Background()
+	var versions []*krl.Parsed
+	record := func() {
+		t.Helper()
+		p := e.parsedKRL(t)
+		if n := len(versions); n == 0 || versions[n-1].Version != p.Version {
+			versions = append(versions, p)
+		}
+	}
+	unknownID := "kr1/ca=user/sub=nobody/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=1"
+	keyA, keyB := newEd25519(t).PublicKey().Marshal(), newEd25519(t).PublicKey().Marshal()
+	a1, a2, b := e.login(t, "alice"), e.login(t, "alice"), e.login(t, "bob")
+	steps := []func(){
+		func() {
+			e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: a1.Serial}))
+		},
+		func() {
+			e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: a2.KeyId}))
+		},
+		func() {
+			e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: unknownID}))
+		},
+		func() { e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: keyA})) },
+		func() {
+			e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "bob"}))
+		},
+		func() { e.clock.set(e.clock.Now().Add(30*time.Minute), false); e.s.republishIfDue(ctx) }, // under an hour: nothing
+		func() { e.clock.set(e.clock.Now().Add(2*time.Hour), false); e.s.republishIfDue(ctx) },    // prunes the expired certificates
+		func() {
+			// The clock steps back three hours; a revocation then publishes
+			// at the earlier issued_at.
+			e.clock.set(e.clock.Now().Add(-3*time.Hour), false)
+			e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: keyB}))
+		},
+		func() { e.clock.set(e.clock.Now().Add(5*time.Hour), false); e.s.republishIfDue(ctx) },
+	}
+	for _, step := range steps {
+		step()
+		record()
+	}
+	if len(versions) < 7 {
+		t.Fatalf("%d KRL versions published, want at least 7", len(versions))
+	}
+	revs := e.revocationRows(t)
+	userCA := e.fx.Roles[keystore.RoleUser].PublicKey().Marshal()
+	prunable := func(match func(r signerdb.Revocation) bool, at uint64) bool {
+		n := 0
+		for _, r := range revs {
+			if match(r) {
+				n++
+				if !krl.Prunable(r.ValidBeforeMicros/1_000_000, at) {
+					return false
+				}
+			}
+		}
+		return n > 0
+	}
+	for i := 1; i < len(versions); i++ {
+		prev, next := versions[i-1], versions[i]
+		at := next.GeneratedDate // issued_at in whole seconds
+		for _, sec := range prev.Certs {
+			for _, r := range sec.Serials {
+				for s := r.Lo; s <= r.Hi; s++ {
+					if next.RevokesSerial(sec.CAKey, s) {
+						continue
+					}
+					if !prunable(func(row signerdb.Revocation) bool {
+						return row.Kind == signerdb.RevocationSerial && row.Serial == s && bytes.Equal(row.CAKey, sec.CAKey)
+					}, at) {
+						t.Fatalf("version %d drops serial %d, which is not prunable at its issued_at %d", next.Version, s, at)
+					}
+				}
+			}
+			for _, id := range sec.KeyIDs {
+				if next.RevokesKeyID(sec.CAKey, id) {
+					continue
+				}
+				if id == unknownID || !prunable(func(row signerdb.Revocation) bool {
+					return row.Kind == signerdb.RevocationKeyID && row.KeyID == id && bytes.Equal(row.CAKey, sec.CAKey)
+				}, at) {
+					t.Fatalf("version %d drops key ID %q, which is not prunable at its issued_at %d", next.Version, id, at)
+				}
+			}
+		}
+		for _, k := range prev.Keys {
+			if !next.RevokesKey(k) {
+				t.Fatalf("version %d drops an explicit key", next.Version)
+			}
+		}
+		if next.Version <= prev.Version {
+			t.Fatalf("version %d after %d", next.Version, prev.Version)
+		}
+	}
+	last := versions[len(versions)-1]
+	if !last.RevokesKeyID(userCA, unknownID) || !last.RevokesKey(keyA) || !last.RevokesKey(keyB) || last.RevokesSerial(userCA, b.Serial) {
+		t.Fatalf("the last version: %+v; want the unknown key ID and both keys, and the expired subject entry pruned", last)
+	}
+	pruned := false
+	for i := 1; i < len(versions); i++ {
+		if versions[i-1].RevokesSerial(userCA, a1.Serial) && !versions[i].RevokesSerial(userCA, a1.Serial) {
+			pruned = true
+		}
+	}
+	if !pruned {
+		t.Fatal("no version pruned an expired entry, so the property was not exercised")
+	}
+	t.Logf("%d KRL versions checked pairwise", len(versions))
+	e.verifyExport()
 }

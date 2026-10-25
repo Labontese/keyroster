@@ -3,21 +3,27 @@ package wire
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"flag"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/Labontese/keyroster/internal/cert"
 )
 
 // validRequest returns a request within every limit.
@@ -1122,4 +1128,160 @@ func TestRevokeResponse(t *testing.T) {
 			t.Fatalf("ParseRevokeResponse: %v, want ErrMalformed", err)
 		}
 	})
+}
+
+// revokeTargets is one valid request per revocation target, created at
+// 1700000000 with request ID 0x00..0x0f.
+func revokeTargets(t testing.TB) map[string]*RevokeRequest {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]*RevokeRequest{
+		"serial":  {Target: TargetSerial, CARole: CARoleUser, Serial: 1_700_000_000_000_001},
+		"key_id":  {Target: TargetKeyID, CARole: CARoleHost, KeyID: "kr1/ca=host/sub=web1/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=7"},
+		"key":     {Target: TargetKey, Key: key.Marshal()},
+		"subject": {Target: TargetSubject, SubjectKind: SubjectUser, Subject: "alice"},
+	}
+	for _, r := range out {
+		r.CreatedAt, r.Reason = 1700000000, "key lost"
+		for i := range r.RequestID {
+			r.RequestID[i] = byte(i)
+		}
+	}
+	return out
+}
+
+// TestParseRevokeSigningBytes (03-03): the logged request bytes of every
+// target round-trip with SigningBytes; a wrong domain tag, an unknown
+// target, an unknown CA role or subject kind, a field the target does not
+// carry, a certificate or non-canonical key, a subject outside the key ID
+// grammar and trailing bytes are refused.
+func TestParseRevokeSigningBytes(t *testing.T) {
+	for name, r := range revokeTargets(t) {
+		t.Run(name+"_round_trip", func(t *testing.T) {
+			sb := r.SigningBytes()
+			got, err := ParseRevokeSigningBytes(sb)
+			if err != nil || !reflect.DeepEqual(got, r) || !bytes.Equal(got.SigningBytes(), sb) {
+				t.Fatalf("ParseRevokeSigningBytes = %+v, %v; want %+v", got, err, r)
+			}
+			body, err := r.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p, err := ParseRevokeRequest(body); err != nil || !reflect.DeepEqual(p, r) {
+				t.Fatalf("ParseRevokeRequest = %+v, %v", p, err)
+			}
+		})
+	}
+	targets := revokeTargets(t)
+	// raw is the signing bytes of r with edit applied, bypassing Validate.
+	raw := func(name string, edit func(*RevokeRequest)) []byte {
+		c := *targets[name]
+		edit(&c)
+		var b cryptobyte.Builder
+		b.AddBytes([]byte(RevokeRequestDomain))
+		c.addFields(&b)
+		return b.BytesOrPanic()
+	}
+	signer, err := ssh.NewSignerFromKey(mustPriv(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := cert.Build(cert.Request{Profile: cert.DefaultUserProfile(), Subject: mustKey(t), Principals: []string{"alice"},
+		Now: time.Unix(1700000000, 0), ValidFor: time.Hour, Serial: 7,
+		KeyID: cert.KeyID{CA: "user", Subject: "alice", Request: "000102030405060708090a0b0c0d0e0f", Policy: 1, Serial: 7}}, signer, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padded := append([]byte{0, 0, 0, 0x0c}, []byte("ssh-ed25519x")...) // not a key
+	for name, data := range map[string][]byte{
+		"wrong_domain_tag_refused":     append([]byte("keyroster/issue-request/v1"), targets["serial"].SigningBytes()[len(RevokeRequestDomain):]...),
+		"no_domain_tag_refused":        targets["serial"].SigningBytes()[len(RevokeRequestDomain):],
+		"unknown_target_refused":       raw("serial", func(r *RevokeRequest) { r.Target = 5 }),
+		"target_0_refused":             raw("serial", func(r *RevokeRequest) { r.Target = 0 }),
+		"unknown_ca_role_refused":      raw("key_id", func(r *RevokeRequest) { r.CARole = 4 }),
+		"ca_role_0_refused":            raw("serial", func(r *RevokeRequest) { r.CARole = 0 }),
+		"unknown_subject_kind_refused": raw("subject", func(r *RevokeRequest) { r.SubjectKind = 4 }),
+		"subject_with_slash_refused":   raw("subject", func(r *RevokeRequest) { r.Subject = "alice/x" }),
+		"subject_upper_case_refused":   raw("subject", func(r *RevokeRequest) { r.Subject = "Alice" }),
+		"empty_key_id_refused":         raw("key_id", func(r *RevokeRequest) { r.KeyID = "" }),
+		"key_id_control_byte_refused":  raw("key_id", func(r *RevokeRequest) { r.KeyID = "a\nb" }),
+		"key_id_too_long_refused":      raw("key_id", func(r *RevokeRequest) { r.KeyID = strings.Repeat("k", MaxRevokeKeyID+1) }),
+		"certificate_as_key_refused":   raw("key", func(r *RevokeRequest) { r.Key = certificate.Marshal() }),
+		"unparsable_key_refused":       raw("key", func(r *RevokeRequest) { r.Key = padded }),
+		"empty_key_refused":            raw("key", func(r *RevokeRequest) { r.Key = nil }),
+		"serial_zero_refused":          raw("serial", func(r *RevokeRequest) { r.Serial = 0 }),
+		"trailing_byte_refused":        append(targets["subject"].SigningBytes(), 0),
+		"truncated_refused":            targets["key"].SigningBytes()[:len(targets["key"].SigningBytes())-1],
+		"reason_control_byte_refused":  raw("key", func(r *RevokeRequest) { r.Reason = "a\tb" }),
+		"key_id_trailing_byte_refused": append(raw("key_id", func(*RevokeRequest) {}), 0),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if r, err := ParseRevokeSigningBytes(data); r != nil || !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseRevokeSigningBytes = %+v, %v; want ErrMalformed", r, err)
+			}
+		})
+	}
+	t.Run("non_canonical_key_refused", func(t *testing.T) {
+		// An RSA key whose exponent carries a superfluous leading zero:
+		// ssh.ParsePublicKey accepts it, Marshal is one byte shorter.
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blob := ssh.Marshal(struct {
+			Name string
+			E    []byte
+			N    *big.Int
+		}{ssh.KeyAlgoRSA, []byte{0, 1, 0, 1}, k.N})
+		if pub, err := ssh.ParsePublicKey(blob); err != nil || bytes.Equal(pub.Marshal(), blob) {
+			t.Fatalf("the padded RSA key: %v, or it is canonical", err)
+		}
+		data := raw("key", func(r *RevokeRequest) { r.Key = blob })
+		if r, err := ParseRevokeSigningBytes(data); r != nil || !errors.Is(err, ErrMalformed) {
+			t.Fatalf("ParseRevokeSigningBytes = %+v, %v; want ErrMalformed", r, err)
+		}
+	})
+	t.Run("field_of_another_target_refused", func(t *testing.T) {
+		for name, edit := range map[string]func(*RevokeRequest){
+			"key_with_ca_role":    func(r *RevokeRequest) { r.CARole = CARoleUser },
+			"subject_with_serial": func(r *RevokeRequest) { r.Serial = 3 },
+			"serial_with_key_id":  func(r *RevokeRequest) { r.KeyID = "x" },
+			"key_id_with_subject": func(r *RevokeRequest) { r.Subject = "alice" },
+		} {
+			target := map[string]string{"key_with_ca_role": "key", "subject_with_serial": "subject", "serial_with_key_id": "serial", "key_id_with_subject": "key_id"}[name]
+			c := *targets[target]
+			edit(&c)
+			if err := c.Validate(); !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s: Validate = %v, want ErrMalformed", name, err)
+			}
+			if _, err := c.Marshal(); !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s: Marshal = %v, want ErrMalformed", name, err)
+			}
+		}
+	})
+}
+
+func mustPriv(t testing.TB) ed25519.PrivateKey {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return priv
+}
+
+func mustKey(t testing.TB) ssh.PublicKey {
+	t.Helper()
+	k, err := ssh.NewPublicKey(mustPriv(t).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }
