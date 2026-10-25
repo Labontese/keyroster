@@ -606,9 +606,11 @@ Before starting the signer after a restore:
 > after it, keeping users away from the server, the version counts of
 > step 2 against a real restored signer, the stop in step 2 for a
 > restored export that does not verify on its own (the refusals
-> themselves are run in the audit unit tests), and step 2 for a restored log
-> reported as `log rewritten` (for example a restored signer that logged
-> entries before step 1 stopped it), where the saved export's prefix check
-> fails and the procedure stops. The `grep` patterns of step 2 match
+> themselves are run in the audit unit tests), and step 2 when the saved
+> export's prefix check fails and the procedure stops, for example for a
+> restored signer that logged K entries after the restore and had lost L > 0:
+> step 2's first command then reports `log shrank` when K < L and `log
+> rewritten` otherwise, and the prefix check `log rewritten` when K <= L
+> and `log shrank` when K > L. The `grep` patterns of step 2 match
 > the export line format written by `keyroster-signer export-log`, not a
 > real export of a restored signer.
