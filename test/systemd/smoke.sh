@@ -32,7 +32,8 @@
 #     and the agent unit at or below AGENT_THRESHOLD (exposure x10; 20 = 2.0);
 #   - signer-install.md's restore hold refuses every start of the signer and
 #     server units, its file restore puts signer.db back as keyroster-signer
-#     0600, and after its release the signer starts and doctor passes;
+#     0600, and after its release the signer starts and doctor passes, also
+#     when it had crash-looped into its start limit before the hold;
 #   - signer-install.md's step 3 copy of the replay proposal to an admin
 #     refuses a link the admin planted, changes nothing it points at, and
 #     otherwise writes the files as the admin.
@@ -321,6 +322,23 @@ step "Restore hold, file restore and release (docs/runbooks/signer-install.md, v
 # only to be held: no server runs here.
 install -m 0644 "$repo/deploy/systemd/keyroster-server.service" /etc/systemd/system/
 systemctl daemon-reload
+# The signer to be restored crash-looped (a damaged database, say) until its
+# start limit stopped it. A temporary drop-in makes it fail at once and
+# restart quickly; it is removed before the hold. The release must reset
+# the unit, or the start after it is refused.
+crash=/etc/systemd/system/keyroster-signer.service.d/smoke-crash.conf
+install -d -m 0755 /etc/systemd/system/keyroster-signer.service.d
+printf '[Service]\nExecStart=\nExecStart=/bin/false\nRestartSec=100ms\n' >"$crash"
+systemctl daemon-reload
+systemctl restart keyroster-signer.service || true
+for _ in $(seq 1 100); do
+	[ "$(systemctl show -p ActiveState --value keyroster-signer.service)" = failed ] && break
+	sleep 0.1
+done
+systemctl show -p ActiveState,Result,NRestarts keyroster-signer.service
+[ "$(systemctl show -p ActiveState --value keyroster-signer.service)" = failed ] || fail "the crash-looping signer did not stop at its start limit"
+rm "$crash"
+systemctl daemon-reload
 bash -eu -s keyroster-server keyroster-signer <<'EOF'
 test "$#" -gt 0
 for u in "$@"; do
@@ -380,6 +398,9 @@ for u in "$@"; do
   rm "/etc/systemd/system/$u.service.d/restore-hold.conf"
 done
 systemctl daemon-reload
+for u in "$@"; do
+  if systemctl is-failed --quiet "$u.service"; then systemctl reset-failed "$u.service"; fi
+done
 echo "released: $*"
 EOF
 systemctl start keyroster-signer.service

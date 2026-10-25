@@ -615,12 +615,19 @@ structurally (see the warning above).
      rm "/etc/systemd/system/$u.service.d/restore-hold.conf"
    done
    systemctl daemon-reload
+   for u in "$@"; do
+     if systemctl is-failed --quiet "$u.service"; then systemctl reset-failed "$u.service"; fi
+   done
    echo "released: $*"
    EOF
    systemctl start keyroster-signer.service keyroster-server.service
    ```
 
-   Name the same units as for the hold.
+   Name the same units as for the hold. The release resets a unit that
+   had failed before the hold, for example a signer that crash-looped on
+   a damaged database until systemd's start limit stopped it: without the
+   reset, systemd refuses its start until the limit's 10 minutes have
+   passed.
 
 3. Reinstall what the restore lost, with the same bytes as before and
    before anyone installs anything new. Install the exact versions that
@@ -808,7 +815,9 @@ structurally (see the warning above).
 > verbatim for keyroster-server and keyroster-signer, each start then
 > refused with `Assertion failed on job for ...`; the file restore block
 > verbatim, from a copy of the signer's database taken under the hold;
-> the release block verbatim; and the signer starting again with
+> the release block verbatim, with the signer crash-looped into its
+> start limit before the hold (a temporary drop-in), so that it starts
+> again only because the release resets it; and the signer starting again with
 > `doctor` passing. No keyroster-server runs in that check: its unit is
 > held and its start refused, never started. It also runs step 3's copy
 > block verbatim for an admin account: it refuses with the account's

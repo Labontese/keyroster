@@ -194,6 +194,9 @@ for u in "$@"; do
   rm "/etc/systemd/system/$u.service.d/restore-hold.conf"
 done
 systemctl daemon-reload
+for u in "$@"; do
+  if systemctl is-failed --quiet "$u.service"; then systemctl reset-failed "$u.service"; fi
+done
 echo "released: $*"
 EOF`
 	// restoreStep1 and restoreStep3 open the runbook's steps 1 and 3.
