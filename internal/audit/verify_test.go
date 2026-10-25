@@ -2228,11 +2228,12 @@ func TestVerifyLoginTampering(t *testing.T) {
 	}
 }
 
-// TestVerifyReplayFields: a line that carries the directory or sigs field
-// a restore replays from (03-02) verifies only as the exact line Export
-// writes for its leaf, so the replayed bytes are the verified leaf's
-// (03-02 pre-merge review). A line without them, as exports before 03-02
-// wrote, is not compared.
+// TestVerifyReplayFields: a line that carries the directory or sigs key a
+// restore replays from (03-02) verifies only as a directory_install line
+// with each key once and the leaf's own bytes as its value, so the
+// replayed bytes are the verified leaf's (03-02 pre-merge review). A line
+// without them, as exports before 03-02 wrote, is not checked, and other
+// decoded fields stay informational.
 func TestVerifyReplayFields(t *testing.T) {
 	lf := newLoginFixture(t, true)
 	lf.addDirectory(lf.directory(nil), nil)
@@ -2263,7 +2264,7 @@ func TestVerifyReplayFields(t *testing.T) {
 		return l
 	}
 	other := base64.StdEncoding.EncodeToString([]byte(`{"version":1,"roles":[{"name":"evil"}]}`))
-	const refused = "carries a directory or sigs field but is not the line export-log writes for its leaf"
+	const refused = "its directory or sigs field is not the document and signatures of its directory_install leaf"
 	cases := []struct {
 		name  string
 		lines []string
@@ -2271,8 +2272,11 @@ func TestVerifyReplayFields(t *testing.T) {
 	}{
 		{"as_exported_ok", all, ""},
 		{"reencoded_unchanged_ok", editDecoded(1, func(map[string]any) {}), ""},
+		{"other_decoded_field_ok", editDecoded(1, func(m map[string]any) { m["note"], m["version"] = "added by a later binary", 9 }), ""},
 		{"directory_swapped_refused", editDecoded(1, func(m map[string]any) { m["directory"] = other }), refused},
 		{"sigs_swapped_refused", editDecoded(1, func(m map[string]any) { m["sigs"] = other }), refused},
+		{"sigs_missing_refused", editDecoded(1, func(m map[string]any) { delete(m, "sigs") }), refused},
+		{"nested_decoy_refused", editDecoded(1, func(m map[string]any) { m["x"] = map[string]any{"directory": other} }), refused},
 		{"pre_03_02_line_ok", editDecoded(1, func(m map[string]any) { delete(m, "directory"); delete(m, "sigs") }), ""},
 		{"decoy_on_other_kind_refused", editDecoded(0, func(m map[string]any) {
 			m["kind"], m["version"], m["directory"], m["sigs"] = "directory_install", 1, other, other

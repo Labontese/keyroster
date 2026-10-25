@@ -13,6 +13,7 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -690,16 +691,8 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			return nil, fmt.Errorf("audit: entry %d: leaf time goes back (%d after %d)", want, leaf.TimeMicros, lastTime)
 		}
 		lastTime = leaf.TimeMicros
-		// A restore writes a lost directory version back from the
-		// "directory" and "sigs" fields of its line (03-02), so a line
-		// whose text carries either, of any kind, must be exactly the line
-		// Export writes for its leaf: the replayed bytes are then the
-		// verified leaf's.
-		if text := sc.Bytes(); bytes.Contains(text, []byte(`"directory":`)) || bytes.Contains(text, []byte(`"sigs":`)) {
-			canon, err := exportLeafLine(want, raw)
-			if err != nil || !bytes.Equal(text, canon) {
-				return nil, fmt.Errorf("audit: line %d: it carries a directory or sigs field but is not the line export-log writes for its leaf", lineNo)
-			}
+		if err := checkReplayFields(sc.Bytes(), leaf); err != nil {
+			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
 		switch leaf.Kind {
 		case tlog.KindBundleInstall:
@@ -896,6 +889,39 @@ func signedBytes(c *ssh.Certificate) []byte {
 	c2.Signature = nil
 	out := c2.Marshal()
 	return out[:len(out)-4] // drop the empty signature's length prefix
+}
+
+// checkReplayFields checks the "directory" and "sigs" fields of an export
+// line's text, which a restore writes back as a proposal with grep
+// (03-02, signer-install.md step 3). A line whose text carries either key
+// must be a directory_install entry, and each key must occur exactly
+// once, followed by the standard base64 of the leaf's own document or
+// signatures; so the bytes the runbook extracts are the verified leaf's.
+// A line without them, as exports before 03-02 wrote, is not checked, and
+// the line's other decoded fields stay informational.
+func checkReplayFields(text []byte, leaf tlog.Leaf) error {
+	const keyDir, keySigs = `"directory":`, `"sigs":`
+	s := string(text)
+	if !strings.Contains(s, keyDir) && !strings.Contains(s, keySigs) {
+		return nil
+	}
+	refuse := errors.New("its directory or sigs field is not the document and signatures of its directory_install leaf")
+	if leaf.Kind != tlog.KindDirectoryInstall {
+		return refuse
+	}
+	body, err := tlog.DecodeDirectoryInstallBody(leaf.Body)
+	if err != nil {
+		return err
+	}
+	for _, f := range []struct {
+		key string
+		val []byte
+	}{{keyDir, body.Directory}, {keySigs, body.Sigs}} {
+		if strings.Count(s, f.key) != 1 || !strings.Contains(s, f.key+`"`+base64.StdEncoding.EncodeToString(f.val)+`"`) {
+			return refuse
+		}
+	}
+	return nil
 }
 
 // parseLine decodes one line strictly: unknown fields, trailing data and

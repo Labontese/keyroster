@@ -451,9 +451,9 @@ Before starting the signer after a restore:
         `log shrank` looks the same for a log that was cut back as for one
         that was cut back and rewritten. The first command checks every
         entry of the saved export, and refuses a line whose `directory` or
-        `sigs` field is not exactly what `export-log` writes for its
-        verified leaf, so the bytes the next step writes are the ones the
-        signer logged. The second proves that the restored log is a prefix
+        `sigs` field is not the document or signatures of its own verified
+        `directory_install` leaf, so the bytes the next step writes are the
+        ones the signer logged. The second proves that the restored log is a prefix
         of the saved one, so the lost entries are exactly the saved
         export's entries after it.
      2. Write the proposal of the lost version `V` (`directory.json` and
@@ -496,16 +496,21 @@ Before starting the signer after a restore:
         installs).
 
    **What makes the replay safe, and what it does not cover.** `audit
-   verify` does not interpret the `decoded` part of an export line, but it
-   refuses a line that carries a `directory` or `sigs` field and is not
-   byte for byte the line `export-log` writes for its leaf. So after the
-   two `audit verify` commands of the first item above, the proposal written from the saved export is the
-   document and signatures of a verified `directory_install` leaf among the
-   lost entries: an edited `directory` or `sigs` field, or a decoy one on
-   another line, is refused, and an escaped or missing field leaves an empty
-   file that the `test -s` lines stop. The signer checks the replay again:
-   the directory must carry the admin quorum's signatures under the policy
-   in force, and its `prev` must be the SHA-256 of the restored version.
+   verify` does not interpret the `decoded` part of an export line, with
+   one exception: a line that carries a `directory` or `sigs` key must be a
+   `directory_install` line, with each key once and the standard base64 of
+   its leaf's own document and signatures as the value. So after the two
+   `audit verify` commands of the first item above, the proposal written
+   from the saved export is the document and signatures of a verified
+   `directory_install` leaf among the lost entries: an edited `directory`
+   or `sigs` field, or a decoy one on another line or nested in the same
+   line, is refused, and an escaped or missing field leaves an empty file
+   that the `test -s` lines stop. An edited `version` in the decoded part
+   can only pick the bytes of another logged version, and the signer
+   refuses those, because their `prev` is not the SHA-256 of the version it
+   serves. The signer checks the replay again: the directory must carry the
+   admin quorum's signatures under the policy in force, and its `prev` must
+   be the SHA-256 of the restored version.
    The residual: these checks bind the replay to the saved export's
    checkpoint, which the log key signs. A saved export written by someone
    who holds the log key (a compromised signer) verifies too, until Phase 4
