@@ -422,6 +422,25 @@ PR #59 review, on head 0db3f9c. Each test marked **(fails before)** was run agai
 - The Unix-only tests (`login_unix_test.go`, the real ssh-agent `happy_path`) were only compiled, through the GOOS vets; they were not run.
 - `-race` was not run, because there is no cgo toolchain.
 
+## Pre-merge review fixes, round 2
+
+PR #59 review, on head 48e4a8f. Each test failed with its fix disabled or reverted and passed once the fix was restored.
+
+- **Item 1, decoded `kind` (Codex medium) and the e2e baseline check (Codex low):** `62f9002`. Owner decision (2026-10-25): `audit verify` requires on every line that the decoded `kind` is the leaf's own. `checkGrepFields` also covers the runbook's other grepped fields: `bundle_version` on every bundle_install line, and `version` where a directory_install line carries it (written only since 02-12). The runbook now verifies the saved export in step 2, before its counts are read. Tests:
+  - `TestVerifyGrepFields`, with `hidden_final_install_refused`: all 12 refusal cases failed with the check disabled.
+  - `TestRestoreRunbookChecks`: the 0db3f9c "After the replay" paragraph failed it 3 times, and dropping the step-2 block 2 times.
+- **Item 2, redeem read deadline (low):** `0877449`. Owner decision (2026-10-25): a separate read deadline. `signerclient.LoginSend` bounds the dial and the write by ctx, and reads for `signerCallTimeout` after the write. Tests:
+  - `TestLoginSendReadDeadline`: `answer_after_send_deadline_received` and `read_bounded_by_read_timeout` failed with the read on ctx's deadline. `past_send_deadline_never_sent` failed when ctx bounded no part of the send.
+  - `TestSocketSignerLoginReadsPastSendDeadline` failed with `signerclient.Login`.
+  - Not exercised: removing only the dial bound or only the write bound, because each still blocks the send alone.
+- **Item 3, QF1008 lint:** `6063e7a`. `a.Agent.Lock` became `a.Lock`, since `recordingAgent` does not override `Lock`. golangci-lint reported QF1008 on the old line and 0 issues after the fix.
+
+**Checks run:**
+- `gofmt -l` reported nothing.
+- `go vet ./...` passed for windows, linux and darwin, and `go vet -tags e2e ./test/e2e/` for linux and windows.
+- In WSL: `go test -race -count=1 ./...` passed, and golangci-lint reported 0 issues for linux, windows and darwin.
+- The e2e suite ran in WSL under the uncommitted namespace hosts workaround with OpenSSH 10.5p1: 34 passed. `TestSSHDRejects/pty_allowed` failed, in a test no change here touches. The likely cause is PTY allocation in the user namespace, but that is unconfirmed; CI is the authoritative run.
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-25*
