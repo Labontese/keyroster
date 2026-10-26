@@ -166,7 +166,8 @@ already serves the proposal as directory version N ("nothing to do"), the
 proposal itself was installed, for example by an earlier attempt whose
 answer was lost, or by another admin at the same moment. Do not rebuild
 it; `directory sign` of it refuses with "there is nothing to sign". After a
-revocation, confirm on the signer host as below.
+change that removes access (a disable, a role revoke, an unmap), confirm
+on the signer host as below.
 
 ## After a reinvite, discard any proposal for that user
 
@@ -189,7 +190,9 @@ approval reached the server first, it wins: the passkey is bound, and your
 reinvite produced an invite for one additional passkey. Check with
 `keyroster user list` after a reinvite: a user shown as active was
 approved before it, and that passkey stays bound to the account.
-`keyroster user disable NAME` stops the account if it must not be used.
+`keyroster user disable NAME` stops the account from obtaining new
+certificates if it must not be used; `keyroster revoke user NAME` also
+ends the ones already issued ([Disabling a user](#disabling-a-user)).
 
 ## After "the server cannot reach its signer": look before you retry
 
@@ -220,7 +223,26 @@ Both go through the same pipeline (verify, diff, confirm, sign, install or
 propose). A disabled user keeps its passkeys in the directory and cannot
 sign in. Enabling needs at least one bound passkey.
 
-**After every revocation** (`user disable`), confirm it on the signer host
+**Disabling stops only new certificates.** The signer issues a disabled
+user nothing new, but every certificate already issued stays valid until
+its ValidBefore (up to the user CA's 12 h cap): a stolen laptop with a
+fresh certificate keeps logging in to every host that lists its
+principal. The same holds for revoking a role from the user or a group,
+removing the user from a group and unmapping an account. To end the
+issued certificates too, run `keyroster revoke user NAME` instead of
+`user disable`: it revokes every live certificate of NAME in the signer's
+records, disables NAME and revokes again
+([revoke.md](revoke.md#4-revoke-a-user-keyroster-revoke-user)). A host
+refuses those certificates only once its sshd's `RevokedKeys` file holds
+the new KRL, and the drop-in in [host-setup.md](host-setup.md) sets no
+`RevokedKeys`. So in this version a host set up by hand enforces no
+revocation. Until the keyroster agent (03-05 to 03-07) sets `RevokedKeys`
+and applies the KRL, such a host refuses a revoked certificate only if
+the operator adds a `RevokedKeys` line and installs the KRL by hand,
+which is UNVERIFIED (revoke.md). Otherwise `revoke user` stops only new
+certificates there.
+
+**After every disable**, confirm it on the signer host
 as below. A compromised server can answer the install without forwarding
 it, and from then on serve the version you signed as if it were installed,
 while the signer keeps issuing certificates under the old one.

@@ -1209,6 +1209,51 @@ func TestRevokeSubject(t *testing.T) {
 			})
 		}
 	})
+	t.Run("explicit_key_cap_relist_accepted", func(t *testing.T) {
+		// A key already revoked adds nothing to the cap, so revoking it
+		// again at the cap is accepted and it stays listed (03-03b
+		// carry-over from the PR #61 fix check). The keys at the cap are
+		// logged in one revoke leaf with their rows and published, as
+		// MaxRevokedKeys revocations would leave them: the publish check
+		// refuses rows the log does not hold (revocations_not_logged).
+		e := newSubjectEnv(t)
+		ctx := context.Background()
+		entries := make([]tlog.RevokedEntry, krl.MaxRevokedKeys)
+		for i := range entries {
+			entries[i] = tlog.RevokedEntry{Kind: tlog.RevokedKey, Key: newEd25519(t).PublicKey().Marshal()}
+		}
+		body, err := (&tlog.RevokeBody{Request: []byte("r"), Entries: entries}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := e.clock.Now()
+		e.s.mu.Lock()
+		err = e.s.logTx(ctx, func(tx *sql.Tx) error {
+			idx, err := e.s.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(now), Kind: tlog.KindRevoke, Body: body})
+			if err != nil {
+				return err
+			}
+			for _, en := range entries {
+				if err := e.db.InsertRevocation(tx, revocationRow(en, [16]byte{2}, idx, now)); err != nil {
+					return err
+				}
+			}
+			st, _, err := e.s.publishKRLLocked(ctx, tx, now)
+			if err == nil {
+				e.s.krl.Store(st)
+			}
+			return err
+		})
+		e.s.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: newEd25519(t).PublicKey().Marshal()}), "explicit_key_cap_reached")
+		e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: entries[0].Key}))
+		if p := e.parsedKRL(t); !p.RevokesKey(entries[0].Key) || len(p.Keys) != krl.MaxRevokedKeys {
+			t.Fatalf("the KRL after revoking a revoked key again at the cap lists %d keys, want the %d with it", len(p.Keys), krl.MaxRevokedKeys)
+		}
+	})
 	t.Run("valid_before_beyond_row_range_kept", func(t *testing.T) {
 		// No signer issues a certificate valid until ssh.CertTimeInfinity,
 		// so this logs one serial entry with that ValidBefore directly, as

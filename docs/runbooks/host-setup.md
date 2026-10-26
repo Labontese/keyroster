@@ -234,8 +234,9 @@ high-water mark until Phase 4 (as for `directory show`, see the residual
 risk in [enroll-user.md](enroll-user.md#residual-risk)). A compromised
 server can therefore serve an older signed directory, for example the one
 from before an unmap, or an older trust bundle whose user CA key has since
-been replaced, and the rendered file looks valid. After every revocation
-(unmap, role revoke, group member removal) and every CA change, and before
+been replaced, and the rendered file looks valid. After every change that
+removes access (unmap, role revoke, group member removal) and every CA
+change, and before
 you install a rendered file on a new host,
 [confirm on the signer host](enroll-user.md#confirm-on-the-signer-host):
 
@@ -257,6 +258,25 @@ header-only file. Install it as-is: never keep the old file, and never
 delete it by hand. `keyroster host-group remove` refuses while the host
 group still maps an account, so the header-only file can always be
 rendered first.
+
+**These changes stop only new certificates.** Disabling a user, revoking
+a role from a user or a group and removing a group member change no
+principals file: a certificate already issued keeps the principals it
+carries and logs in on every host that lists one of them until its
+ValidBefore. An unmap does change the file, but only for that account and
+only on the hosts that install the re-rendered file. To end a person's
+issued certificates on every host, run `keyroster revoke user NAME`
+([revoke.md](revoke.md#4-revoke-a-user-keyroster-revoke-user)): it revokes
+every live certificate of NAME in the signer's records, disables NAME and
+revokes again. A host refuses those certificates only once its sshd's
+`RevokedKeys` file holds the new KRL, and the drop-in in this runbook sets
+no `RevokedKeys`. So in this version a host set up with this runbook
+enforces no revocation. Until the keyroster agent (03-05 to 03-07) sets
+`RevokedKeys` and applies the KRL, such a host refuses a revoked
+certificate only if the operator adds a `RevokedKeys` line and installs
+the KRL by hand, which is UNVERIFIED ([revoke.md](revoke.md)). Otherwise
+`keyroster revoke user` stops only new certificates there, and an issued
+one logs in until its ValidBefore.
 
 ## Windows hosts
 

@@ -967,8 +967,12 @@ func TestRevokeRequest(t *testing.T) {
 		"trailing_byte_refused":       append(bytes.Clone(body), 0),
 		"truncated_refused":           body[:len(body)-1],
 		"v1_body_refused":             mutate(func(r *RevokeRequest) { r.InstallationID = "" }),
-		"installation_id_upper_case":  mutate(func(r *RevokeRequest) { r.InstallationID = strings.ToUpper(testRevokeInstallationID) }),
-		"installation_id_short":       mutate(func(r *RevokeRequest) { r.InstallationID = testRevokeInstallationID[1:] }),
+		// The v2 layout with a zero-length installation ID: the fields
+		// after it are a valid serial request, so without the refusal of an
+		// empty ID it would parse as a v1 request (03-03b carry-over).
+		"v2_layout_empty_installation_id": append([]byte{0, 0}, mutate(func(r *RevokeRequest) { r.InstallationID = "" })...),
+		"installation_id_upper_case":      mutate(func(r *RevokeRequest) { r.InstallationID = strings.ToUpper(testRevokeInstallationID) }),
+		"installation_id_short":           mutate(func(r *RevokeRequest) { r.InstallationID = testRevokeInstallationID[1:] }),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ParseRevokeRequest(data); !errors.Is(err, ErrMalformed) {
