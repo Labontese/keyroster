@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1401,5 +1403,80 @@ func TestHostKeys(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "ssh_host_ecdsa_key"), []byte("private key placeholder\n"))
 	if _, err := hostKeys(dump("ssh_host_ecdsa_key", "ssh_host_ed25519_key")); err == nil {
 		t.Fatal("a present private key without its .pub: no error")
+	}
+}
+
+// TestSelfTestLoopbackFamilies (PR #67 review): with the default
+// AddressFamily any, sshd -T lists [::]:port beside 0.0.0.0:port even
+// when IPv6 is disabled, so ::1 can be unreachable (EADDRNOTAVAIL with
+// disable_ipv6 on lo, EAFNOSUPPORT without IPv6 in the kernel). An
+// unreachable ::1 is skipped; every reachable target must pass, at least
+// one must, and 127.0.0.1 is never skipped.
+func TestSelfTestLoopbackFamilies(t *testing.T) {
+	h := newTestHost(t, newFixture(t))
+	port := strconv.Itoa(h.sshd.port)
+	unavailable := func(errno syscall.Errno) func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if strings.HasPrefix(addr, "[::1]") || strings.HasPrefix(addr, "127.0.0.9") {
+				return nil, &net.OpError{Op: "dial", Net: network, Err: os.NewSyscallError("connect", errno)}
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		}
+	}
+	run := func(listen []string, dial func(context.Context, string, string) (net.Conn, error), v6off bool) error {
+		e := h.engine()
+		e.cfg.SelfTestTimeout = 500 * time.Millisecond
+		e.dial, e.ipv6Off = dial, func() bool { return v6off }
+		var b strings.Builder
+		for _, l := range listen {
+			b.WriteString("listenaddress " + l + "\n")
+		}
+		return e.selfTest(context.Background(), ParseDump([]byte(b.String())), []ssh.PublicKey{h.sshd.pub})
+	}
+	both := []string{"[::]:" + port, "0.0.0.0:" + port}
+	for _, errno := range []syscall.Errno{syscall.EADDRNOTAVAIL, syscall.EAFNOSUPPORT} {
+		if err := run(both, unavailable(errno), false); err != nil {
+			t.Errorf("[::] and 0.0.0.0 with ::1 failing %v: %v, want a pass on 127.0.0.1", errno, err)
+		}
+	}
+	hang := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if strings.HasPrefix(addr, "[::1]") {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	if err := run(both, hang, true); err != nil {
+		t.Errorf("IPv6 disabled on lo: %v, want ::1 not dialed and a pass", err)
+	}
+	if err := run([]string{"[::]:" + port}, unavailable(syscall.EADDRNOTAVAIL), false); !errors.Is(err, ErrSelfTest) {
+		t.Errorf("only ::1, unreachable: %v, want self_test_failed (never a pass with no target)", err)
+	}
+	if err := run([]string{"[::]:" + port, "127.0.0.9:" + port}, unavailable(syscall.EADDRNOTAVAIL), false); !errors.Is(err, ErrSelfTest) {
+		t.Errorf("EADDRNOTAVAIL on an IPv4 loopback target: %v, want self_test_failed", err)
+	}
+	h.sshd.stop()
+	if err := run(both, unavailable(syscall.EADDRNOTAVAIL), false); !errors.Is(err, ErrSelfTest) {
+		t.Errorf("::1 unreachable and nothing on 127.0.0.1: %v, want self_test_failed", err)
+	}
+}
+
+// TestSelfTestIPv6DisabledHost runs the real dialer where IPv6 is
+// disabled on lo; it is skipped elsewhere. Run it as root in a network
+// namespace: unshare -n sh -c 'ip link set lo up; echo 1 >
+// /proc/sys/net/ipv6/conf/lo/disable_ipv6; ./apply.test -test.run
+// TestSelfTestIPv6DisabledHost -test.v'.
+func TestSelfTestIPv6DisabledHost(t *testing.T) {
+	if b, err := os.ReadFile("/proc/sys/net/ipv6/conf/lo/disable_ipv6"); err != nil || strings.TrimSpace(string(b)) != "1" {
+		t.Skip("IPv6 is enabled on lo")
+	}
+	h := newTestHost(t, newFixture(t))
+	port := strconv.Itoa(h.sshd.port)
+	e := h.engine()
+	e.ipv6Off = func() bool { return false } // dial ::1 for real: the kernel answers EADDRNOTAVAIL
+	if err := e.selfTest(context.Background(), ParseDump([]byte("listenaddress [::]:"+port+"\nlistenaddress 0.0.0.0:"+port+"\n")), []ssh.PublicKey{h.sshd.pub}); err != nil {
+		t.Fatalf("real dial with IPv6 disabled on lo: %v", err)
 	}
 }

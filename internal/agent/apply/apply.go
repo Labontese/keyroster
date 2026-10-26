@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -163,6 +164,11 @@ type engine struct {
 	pending       *marker
 	dropinChanged bool
 	poll          func(ctx context.Context) (*Generation, *state.Verified, error)
+
+	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
+	// net.Dialer and /proc (tests substitute both).
+	dial    func(ctx context.Context, network, addr string) (net.Conn, error)
+	ipv6Off func() bool
 }
 
 func (e *engine) fault(point string) error {

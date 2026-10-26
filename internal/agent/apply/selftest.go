@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -118,6 +119,12 @@ func hostKeys(d Dump) ([]ssh.PublicKey, error) {
 // of hanging the apply. A refused dial is retried until the deadline (a
 // reloading sshd re-opens its listeners). The handshake stops once the
 // host key is proved, before any authentication.
+//
+// With the default AddressFamily any, sshd -T lists [::]:port beside
+// 0.0.0.0:port even where IPv6 is disabled (PR #67 review), so an IPv6
+// target is skipped when IPv6 is disabled on lo, or when its dial fails
+// EADDRNOTAVAIL or EAFNOSUPPORT. Every target not skipped must pass, at
+// least one must, and an IPv4 target is never skipped.
 func (e *engine) selfTest(ctx context.Context, dump Dump, keys []ssh.PublicKey) error {
 	targets, err := loopbackTargets(dump)
 	if err != nil {
@@ -126,13 +133,34 @@ func (e *engine) selfTest(ctx context.Context, dump Dump, keys []ssh.PublicKey) 
 	deadline := time.Now().Add(e.cfg.SelfTestTimeout)
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	dial := e.dial
+	if dial == nil {
+		d := net.Dialer{Deadline: deadline}
+		dial = d.DialContext
+	}
+	ipv6Off := e.ipv6Off
+	if ipv6Off == nil {
+		ipv6Off = ipv6Disabled
+	}
+	passed := 0
+	var skipped []string
 	for _, addr := range targets {
-		var last error
+		v6 := strings.HasPrefix(addr, "[")
+		if v6 && ipv6Off() {
+			skipped = append(skipped, addr+": IPv6 is disabled on lo")
+			continue
+		}
+	retry:
 		for {
-			if last = probe(ctx, addr, deadline, keys); last == nil {
-				break
-			}
-			if time.Now().Add(100 * time.Millisecond).After(deadline) {
+			last := probe(ctx, dial, addr, deadline, keys)
+			switch {
+			case last == nil:
+				passed++
+				break retry
+			case v6 && (errors.Is(last, syscall.EADDRNOTAVAIL) || errors.Is(last, syscall.EAFNOSUPPORT)):
+				skipped = append(skipped, addr+": "+last.Error())
+				break retry
+			case time.Now().Add(100 * time.Millisecond).After(deadline):
 				return fmt.Errorf("%w: %s: %w", ErrSelfTest, addr, last)
 			}
 			select {
@@ -142,11 +170,28 @@ func (e *engine) selfTest(ctx context.Context, dump Dump, keys []ssh.PublicKey) 
 			}
 		}
 	}
+	if passed == 0 {
+		return fmt.Errorf("%w: no loopback address sshd listens on could be reached (%s)", ErrSelfTest, strings.Join(skipped, "; "))
+	}
+	if len(skipped) > 0 {
+		e.logf("self-test skipped %s", strings.Join(skipped, "; "))
+	}
 	return nil
 }
 
+// ipv6Disabled reports whether IPv6 is disabled on lo: disable_ipv6 is 1,
+// or the kernel has no IPv6 (no /proc/sys/net/ipv6).
+func ipv6Disabled() bool {
+	b, err := os.ReadFile("/proc/sys/net/ipv6/conf/lo/disable_ipv6")
+	if errors.Is(err, os.ErrNotExist) {
+		_, err := os.Stat("/proc/sys/net/ipv6")
+		return errors.Is(err, os.ErrNotExist)
+	}
+	return err == nil && strings.TrimSpace(string(b)) == "1"
+}
+
 // probe is one self-test connection to addr, a loopback address.
-func probe(ctx context.Context, addr string, deadline time.Time, keys []ssh.PublicKey) error {
+func probe(ctx context.Context, dial func(ctx context.Context, network, addr string) (net.Conn, error), addr string, deadline time.Time, keys []ssh.PublicKey) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return err
@@ -154,8 +199,7 @@ func probe(ctx context.Context, addr string, deadline time.Time, keys []ssh.Publ
 	if ip, err := netip.ParseAddr(host); err != nil || !ip.IsLoopback() {
 		return fmt.Errorf("%w: refusing to dial %s, which is not a loopback address", ErrNoLoopbackListener, addr)
 	}
-	d := net.Dialer{Deadline: deadline}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	conn, err := dial(ctx, "tcp", addr)
 	if err != nil {
 		return err
 	}
