@@ -308,10 +308,51 @@ func (e *engine) replaceLink(path, target string) error {
 	return fsyncDir(filepath.Dir(filepath.Dir(path)))
 }
 
-// setLastGood points last-good at generation n.
+// ErrKRLRollback is a move of current or last-good to a generation whose
+// revocation list is older, by KRL version, than the one the agent's
+// generation there holds (owner decision 2026-10-26, PR #67: the KRL
+// never rolls back). It is refused before any rename; every path renders
+// or rolls back to a generation that keeps the newer KRL, so this is
+// defence in depth (PR #67 fix round 2).
+var ErrKRLRollback = errors.New("krl_rollback_refused")
+
+// checkKRLFloor refuses moving the link name, which holds generation from
+// (resolved as l), to generation to when from is the agent's and holds a
+// newer KRL. A foreign generation's KRL was never verified and sets no
+// floor.
+func checkKRLFloor(name string, from *Generation, l link, to *Generation) error {
+	if from == nil || l.kind != linkAgent || !lowersKRL(from, to) {
+		return nil
+	}
+	return fmt.Errorf("%w: generation %d holds KRL version %d, below version %d that %s (generation %d) holds", ErrKRLRollback, to.N, krlVersion(to), krlVersion(from), name, l.n)
+}
+
+// setLastGood points last-good at generation n, never to a generation
+// with an older KRL than current or last-good hold (checkKRLFloor).
 func (e *engine) setLastGood(n uint64) error {
 	if err := e.fault("last-good"); err != nil {
 		return err
+	}
+	to, err := readGeneration(e.l.Gen(n))
+	if err != nil {
+		return err
+	}
+	to.N = n
+	for _, p := range []struct{ name, path string }{{"current", e.l.Current()}, {"last-good", e.l.LastGood()}} {
+		l, err := e.resolveLink(p.path)
+		if err != nil {
+			return err
+		}
+		if l.kind != linkAgent {
+			continue
+		}
+		from, err := readGeneration(l.dir)
+		if err != nil {
+			return err
+		}
+		if err := checkKRLFloor(p.name, from, l, to); err != nil {
+			return err
+		}
 	}
 	return e.replaceLink(e.l.LastGood(), paths.GenLink(n))
 }
@@ -396,11 +437,16 @@ func (e *engine) readCurrent() (*Generation, link, error) {
 // classification (the operator's --recover-to-last-good from a missing
 // current or revocation list, where every mixed read is refused).
 func (e *engine) swapCurrent(ctx context.Context, target *Generation, mode swapMode) error {
-	if mode != swapDirect {
-		cur, _, err := e.readCurrent()
-		if err != nil {
+	cur, curLink, err := e.readCurrent()
+	if err != nil && mode != swapDirect {
+		return err
+	}
+	if err == nil {
+		if err := checkKRLFloor("current", cur, curLink, target); err != nil {
 			return err
 		}
+	}
+	if mode != swapDirect {
 		if cur != nil && !isNarrowing(cur, target) {
 			if !isWidening(cur, target) {
 				return fmt.Errorf("%w: generation %d both adds and removes, or adds while changing the KRL, relative to current", ErrSwapNotMonotone, target.N)

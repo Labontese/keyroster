@@ -219,7 +219,8 @@ func (e *engine) logf(format string, args ...any) {
 //     operator runs --recover-to-last-good.
 //  3. One spool capture is verified (state.Verify); equal versions are a
 //     no-op that writes nothing and repairs no drift.
-//  4. The newest verified state is rendered once (Render), written as a
+//  4. The newest verified state is rendered once (Render), keeping a newer
+//     KRL current holds (keepKRL: the KRL never rolls back), written as a
 //     new generation and checked (validate).
 //  5. First install: current points at it directly and the drop-in is
 //     written. Otherwise Transition moves current to it, through the
@@ -478,7 +479,7 @@ func (e *engine) forward(ctx context.Context) error {
 	e.report.BundleHeld = v.BundleHeld
 	if !v.Changed() {
 		e.report.NoOp = true
-		e.setVersions(v)
+		e.setVersions(v, nil)
 		return nil
 	}
 	g, err := e.render(v)
@@ -489,14 +490,15 @@ func (e *engine) forward(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.keepKRL(g, cur, curLink)
 	if e.cfg.DryRun {
-		e.setVersions(v)
+		e.setVersions(v, g)
 		e.report.Diff = diff(cur, g)
 		return nil
 	}
 	if cur != nil && sameBytes(cur, g) {
 		// The new versions change nothing on disk: store them.
-		e.setVersions(v)
+		e.setVersions(v, g)
 		e.report.Generation = curLink.n
 		return e.commit(curLink.n, v)
 	}
@@ -513,7 +515,7 @@ func (e *engine) forward(ctx context.Context) error {
 		return err
 	}
 	if lg.kind == linkNone {
-		e.setVersions(v)
+		e.setVersions(v, g)
 		return e.firstInstall(ctx, g, v)
 	}
 	target, tv := g, v
@@ -539,7 +541,7 @@ func (e *engine) forward(ctx context.Context) error {
 		}
 		break
 	}
-	e.setVersions(tv)
+	e.setVersions(tv, target)
 	e.report.Generation = target.N
 	changed, err := e.writeDropIn()
 	if err != nil {
@@ -561,8 +563,25 @@ func (e *engine) forward(ctx context.Context) error {
 	return e.commit(target.N, tv)
 }
 
-func (e *engine) setVersions(v *state.Verified) {
+// setVersions reports v's versions; the KRL version is g's when g (the
+// generation moved to) keeps a newer KRL in force than v accepts
+// (keepKRL), so the report names the KRL actually in force.
+func (e *engine) setVersions(v *state.Verified, g *Generation) {
 	e.report.BundleVersion, e.report.DirectoryVersion, e.report.KRLVersion = v.Next.BundleVersion, v.Next.DirectoryVersion, v.Next.KRLVersion
+	if g != nil {
+		e.report.KRLVersion = max(e.report.KRLVersion, krlVersion(g))
+	}
+}
+
+// keepKRL is keepKRLInForce against the generation current names, when it
+// is the agent's (owner decision 2026-10-26, PR #67: the KRL never rolls
+// back; PR #67 fix round 2). A rollback or crash recovery can leave a
+// newer KRL in current than accepted/ holds, and a capture that no longer
+// offers it must not render the older one.
+func (e *engine) keepKRL(g, cur *Generation, curLink link) {
+	if cur != nil && curLink.kind == linkAgent && keepKRLInForce(g, cur) {
+		e.logf("keeping KRL version %d, in force in generation %d, over the older one this capture renders", krlVersion(cur), curLink.n)
+	}
 }
 
 // render is Render for this host. When Render refuses because of the
@@ -625,12 +644,13 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 	if err != nil {
 		return nil, nil, err
 	}
-	if sameBytes(g, target) {
-		return nil, nil, nil
-	}
-	cur, _, err := e.readCurrent()
+	cur, curLink, err := e.readCurrent()
 	if err != nil {
 		return nil, nil, err
+	}
+	e.keepKRL(g, cur, curLink)
+	if sameBytes(g, target) {
+		return nil, nil, nil
 	}
 	g.N = e.allocGeneration()
 	if err := e.installGeneration(g); err != nil {
@@ -684,20 +704,9 @@ func (e *engine) backToLastGood(ctx context.Context, lg link) error {
 	if rec, err := e.readRecord(lg.n); err == nil {
 		lgGen.Host = rec.Host
 	}
-	to := RollbackTarget(from, lgGen)
-	if to.N == 0 {
-		if from != nil && cur.kind == linkAgent && sameBytes(from, to) {
-			to.N = cur.n // current holds it already: a revocation-only change
-		} else {
-			to.N = e.allocGeneration()
-			if err := e.installGeneration(to); err != nil {
-				return err
-			}
-			if err := e.validate(ctx, to, e.l.Gen(to.N), from); err != nil {
-				e.discard(to.N)
-				return err
-			}
-		}
+	to, err := e.rollbackTarget(ctx, from, cur, lgGen)
+	if err != nil {
+		return err
 	}
 	if from != nil && (cur.kind != linkAgent || cur.n != to.N) {
 		if _, err := e.Transition(ctx, from, to, swapChecked); err != nil {
@@ -718,6 +727,30 @@ func (e *engine) backToLastGood(ctx context.Context, lg link) error {
 		return err
 	}
 	return e.remove(e.l.State(dropinPrevFile))
+}
+
+// rollbackTarget is RollbackTarget(from, lgGen) on disk: last-good itself
+// when that is its content, current (cur, which names from) when it holds
+// it already (a revocation-only change), else a new generation, installed
+// and validated.
+func (e *engine) rollbackTarget(ctx context.Context, from *Generation, cur link, lgGen *Generation) (*Generation, error) {
+	to := RollbackTarget(from, lgGen)
+	if to.N != 0 {
+		return to, nil
+	}
+	if from != nil && cur.kind == linkAgent && sameBytes(from, to) {
+		to.N = cur.n
+		return to, nil
+	}
+	to.N = e.allocGeneration()
+	if err := e.installGeneration(to); err != nil {
+		return nil, err
+	}
+	if err := e.validate(ctx, to, e.l.Gen(to.N), from); err != nil {
+		e.discard(to.N)
+		return nil, err
+	}
+	return to, nil
 }
 
 // recover finishes a move a previous run left (pending marker): a commit
@@ -824,6 +857,8 @@ func (e *engine) undoFirstInstall(ctx context.Context, cur link) error {
 // read through ReadFileAt with its caps and left through
 // Transition(X, last-good): a narrowing swap at once to the intermediate
 // built from X's bytes, then last-good after the LoginGraceTime bound.
+// When X is a generation of the agent's, the target is RollbackTarget(X,
+// last-good): a newer KRL in X stays in force.
 func (e *engine) recoverToLastGood(ctx context.Context, m *marker, cur, lg link) error {
 	e.report.Recovered = true
 	if lg.kind != linkAgent {
@@ -863,8 +898,22 @@ func (e *engine) recoverToLastGood(ctx context.Context, m *marker, cur, lg link)
 		}
 	default:
 		x.N = cur.n
-		if _, err := e.Transition(ctx, x, to, swapChecked); err != nil {
-			return err
+		if cur.kind == linkAgent {
+			// The KRL never rolls back (owner decision 2026-10-26, PR #67):
+			// from a generation of the agent's, recovery moves to
+			// RollbackTarget, as a rollback does. A foreign current's KRL
+			// was never verified, so it sets no floor.
+			if rec, err := e.readRecord(lg.n); err == nil {
+				to.Host = rec.Host
+			}
+			if to, err = e.rollbackTarget(ctx, x, cur, to); err != nil {
+				return err
+			}
+		}
+		if cur.kind != linkAgent || cur.n != to.N {
+			if _, err := e.Transition(ctx, x, to, swapChecked); err != nil {
+				return err
+			}
 		}
 	}
 	if e.dropinChanged {

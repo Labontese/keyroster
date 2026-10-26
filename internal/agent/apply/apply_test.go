@@ -718,6 +718,113 @@ func TestApply(t *testing.T) {
 			t.Fatal("last-good's own KRL changed")
 		}
 	})
+	// PR #67 fix round 2: a KRL a rollback or crash recovery keeps in
+	// current is not in accepted/ (accepted/ moves only with last-good).
+	// The next capture no longer offers it (a withholding fetcher, a
+	// rebuilt spool) but changes the directory: the KRL in force stays,
+	// whether that apply commits or rolls back again.
+	keptKRL := func(t *testing.T, crashAtSelfTest bool) (*testHost, uint64) {
+		t.Helper()
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		lg := h.current()
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		if crashAtSelfTest {
+			h.cfg.Fault = func(p string) error {
+				if p == "self-test" {
+					return &crash{point: p}
+				}
+				return nil
+			}
+		} else {
+			h.sshd.setStall(true)
+		}
+		h.publishKRL(7)
+		krl7 := h.f.krlVersion
+		if _, err := h.apply(); err == nil || !h.krlRevokes(h.l.Current(), 7) || h.lastGood() != lg {
+			t.Fatalf("the failed apply of KRL 7: %v, current %d, last-good %d", err, h.current(), h.lastGood())
+		}
+		h.cfg.Fault = nil
+		h.sshd.setStall(false)
+		h.resetSpool()
+		h.state.KRLs = map[uint64]spool.KRLFiles{}
+		h.publishDir(h.spec("role:ops", "role:q"))
+		return h, krl7
+	}
+	for _, crashed := range []bool{false, true} {
+		name := map[bool]string{false: "rollback", true: "crash"}[crashed]
+		t.Run("krl_kept_by_"+name+"_survives_withheld_capture_commit", func(t *testing.T) {
+			t.Parallel()
+			h, krl7 := keptKRL(t, crashed)
+			r, err := h.apply()
+			if err != nil || r.SelfTest != "pass" || r.Rollback != crashed || h.lastGood() != h.current() {
+				t.Fatalf("the apply after the kept KRL: %+v, %v", r, err)
+			}
+			if !h.krlRevokes(h.l.Current(), 7) || !h.krlRevokes(h.l.LastGood(), 7) || r.KRLVersion != krl7 {
+				t.Fatalf("the KRL went back: current revokes 7 %t, last-good revokes 7 %t, reported KRL %d", h.krlRevokes(h.l.Current(), 7), h.krlRevokes(h.l.LastGood(), 7), r.KRLVersion)
+			}
+			if !slices.Equal(h.principals("deploy"), []string{"role:ops", "role:q"}) {
+				t.Fatalf("principals = %v", h.principals("deploy"))
+			}
+		})
+		t.Run("krl_kept_by_"+name+"_survives_withheld_capture_rollback", func(t *testing.T) {
+			t.Parallel()
+			h, _ := keptKRL(t, crashed)
+			h.sshd.stop()
+			r, err := h.apply()
+			if !errors.Is(err, ErrSelfTest) || !r.Rollback || readMarker(t, h) != nil {
+				t.Fatalf("the failing apply after the kept KRL: %+v, %v", r, err)
+			}
+			if !h.krlRevokes(h.l.Current(), 7) {
+				t.Fatal("the second rollback took KRL 7 back")
+			}
+		})
+	}
+	t.Run("recover_to_last_good_keeps_newer_krl", func(t *testing.T) {
+		t.Parallel()
+		// --recover-to-last-good from the generation a rollback left
+		// (last-good's CA keys and principals, a newer KRL): the KRL stays.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:old", "role:ops")
+		lg := h.current()
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.setStall(true)
+		h.publishKRL(7)
+		h.publishDir(h.spec("role:ops", "role:q"))
+		if _, err := h.apply(); !errors.Is(err, ErrSelfTest) || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("the failed apply: %v", err)
+		}
+		h.sshd.setStall(false)
+		h.cfg.RecoverToLastGood = true
+		r, err := h.apply()
+		if err != nil || r.Stuck != "" || h.lastGood() != lg || !h.atRollback(lg) || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("recover to last-good: %+v, %v, current %d, revokes 7 %t", r, err, h.current(), h.krlRevokes(h.l.Current(), 7))
+		}
+		if !slices.Equal(h.principals("deploy"), []string{"role:old", "role:ops"}) {
+			t.Fatalf("principals = %v", h.principals("deploy"))
+		}
+	})
+	t.Run("krl_floor_refuses_older_swap_and_last_good", func(t *testing.T) {
+		t.Parallel()
+		// Defence in depth: swapCurrent (every mode) and setLastGood refuse
+		// a generation whose KRL is older than the agent's generation in
+		// force, before any rename.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.publishKRL(7)
+		h.mustApply()
+		cur := h.current()
+		e := h.engine()
+		older := h.gen(e, []byte{}, "role:ops")
+		for _, mode := range []swapMode{swapChecked, swapPolled, swapDirect} {
+			if err := e.swapCurrent(context.Background(), older, mode); !errors.Is(err, ErrKRLRollback) || h.current() != cur {
+				t.Fatalf("swap mode %d to an empty KRL: %v, current %d", mode, err, h.current())
+			}
+		}
+		if err := e.setLastGood(older.N); !errors.Is(err, ErrKRLRollback) || h.lastGood() != cur {
+			t.Fatalf("last-good to an empty KRL: %v, last-good %d", err, h.lastGood())
+		}
+	})
 	t.Run("first_install_selftest_failure_removes_dropin", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))

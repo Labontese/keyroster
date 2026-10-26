@@ -378,7 +378,8 @@ func Intermediate(from, to *Generation) (*Generation, bool) {
 // last-good therefore names the last generation that passed a self-test;
 // current may name a generation with last-good's CA keys and principals
 // and a newer KRL. RollbackTarget(that, lg) is that same content, so a
-// later rollback or recovery never moves the KRL back either.
+// later rollback or recovery never moves the KRL back either, and every
+// forward render keeps it (keepKRLInForce).
 func RollbackTarget(cur, lg *Generation) *Generation {
 	t := &Generation{N: lg.N, Files: map[string][]byte{}, Host: lg.Host}
 	for name, b := range lg.Files {
@@ -393,6 +394,46 @@ func RollbackTarget(cur, lg *Generation) *Generation {
 		}
 	}
 	return t
+}
+
+// keepKRLInForce makes the KRL in force the floor of generation g (owner
+// decision 2026-10-26, PR #67: the KRL never rolls back, PR #67 fix
+// round 2): each revocation-list file of g that is older by KRL version
+// than inForce's, the generation current names, takes inForce's bytes. A
+// rollback leaves a newer KRL in current than accepted/ holds (accepted/
+// moves only with last-good), so a later capture that no longer offers it
+// would otherwise render the older accepted one. It reports whether it
+// kept one.
+func keepKRLInForce(g, inForce *Generation) bool {
+	kept := false
+	for _, name := range fileNames(inForce, g) {
+		if class, ok := ClassOf(name); ok && class == FileKRL && newerKRL(inForce.Files[name], g.Files[name]) {
+			g.Files[name], kept = inForce.Files[name], true
+		}
+	}
+	return kept
+}
+
+// lowersKRL reports whether moving from from to to would put an older
+// revocation list in force: some revocation-list file of from is newer by
+// KRL version than to's.
+func lowersKRL(from, to *Generation) bool {
+	for _, name := range fileNames(from, to) {
+		if class, ok := ClassOf(name); ok && class == FileKRL && newerKRL(from.Files[name], to.Files[name]) {
+			return true
+		}
+	}
+	return false
+}
+
+// krlVersion is the KRL version of g's revocation list, 0 when it has
+// none or it does not parse.
+func krlVersion(g *Generation) uint64 {
+	p, err := krl.Parse(g.Files[KRLFile])
+	if len(g.Files[KRLFile]) == 0 || err != nil {
+		return 0
+	}
+	return p.Version
 }
 
 // newerKRL reports whether a is a revocation list of a higher KRL version
