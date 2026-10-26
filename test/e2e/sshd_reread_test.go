@@ -199,7 +199,8 @@ func caPub(t *testing.T, ca string) ssh.PublicKey {
 // replaced HostCertificate is served at once by 9.5p1 and only after
 // SIGHUP by 10.5p1 (recorded for 03-09). sshd closes a connection that
 // sends its banner and nothing more after LoginGraceTime and within
-// LoginGraceTime + 5 s, the agent's widening wait (F1's premise). Every refusal comes from its
+// LoginGraceTime + 5 s, well inside the agent's widening wait of
+// LoginGraceTime + 30 s (F1's premise). Every refusal comes from its
 // own sshd and loopback source, so OpenSSH 10.x's PerSourcePenalties
 // never penalise an accepted login.
 func TestSshdRereadsTrustFiles(t *testing.T) {
@@ -380,8 +381,9 @@ func TestSshdRereadsTrustFiles(t *testing.T) {
 		// processing an authentication (and so reading the trust files)?
 		// One offered LoginGraceTime + 1 s after connect is recorded, not
 		// asserted: 10.5p1 was seen to accept it in 2 of 3 runs, 9.5p1
-		// refused it. One offered after LoginGraceTime + 5 s, the agent's
-		// widening wait, must be refused.
+		// refused it. One offered after LoginGraceTime + 5 s must be
+		// refused: sshd's own bound, well inside the agent's widening wait
+		// of LoginGraceTime + 30 s (owner decision 2026-10-26, PR #67).
 		r := newRereadEnv(t)
 		c := r.userCert(t, r.ca1, "p", 12)
 		for _, d := range []struct {
@@ -412,9 +414,10 @@ func TestSshdRereadsTrustFiles(t *testing.T) {
 			t.Fatalf("sshd did not close the connection: %v after %v", err, time.Since(start))
 		}
 		t.Logf("sshd closed the connection %v after the banner", time.Since(start))
-		// The agent's widening wait is LoginGraceTime + 5 s, so that is
-		// the bound the premise needs. With LoginGraceTime 3, 9.5p1 closed
-		// about 3.1 s after the banner and 10.5p1 from 3.2 s to 5.6 s.
+		// The agent's widening wait is LoginGraceTime + 30 s; this bounds
+		// sshd far tighter, at LoginGraceTime + 5 s. With LoginGraceTime 3,
+		// 9.5p1 closed about 3.1 s after the banner and 10.5p1 from 3.2 s to
+		// 6.6 s.
 		if took := time.Since(start); took < 3*time.Second || took > (3+5)*time.Second {
 			t.Fatalf("sshd closed the pre-authentication connection after %v, want after LoginGraceTime 3 and within LoginGraceTime + 5 s", took)
 		}

@@ -31,6 +31,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // Apply refusals not tied to one helper.
@@ -43,12 +44,20 @@ var (
 	ErrNoDropInDir         = errors.New("no_dropin_dir")
 )
 
-// Clock is the time the engine runs on: CLOCK_BOOTTIME and the boot ID
+// Clock is the time the engine runs on: CLOCK_MONOTONIC and the boot ID
 // for the swap timing rule (they survive a restart of the agent and
 // ignore wall-clock steps), wall time for the marker's deadline, and a
 // sleep. Tests inject a fake.
+//
+// The swap timing rule measures on CLOCK_MONOTONIC (owner decision
+// 2026-10-26, PR #67), the clock sshd's LoginGraceTime timer runs on:
+// setitimer(ITIMER_REAL) is a CLOCK_MONOTONIC timer on Linux, and
+// neither advances while the host is suspended, so a suspend cannot make
+// the agent's wait end before sshd's timer does. CLOCK_BOOTTIME, used
+// before, counts suspended time and could. Go's own timers (Sleep) run
+// on CLOCK_MONOTONIC too (runtime nanotime).
 type Clock interface {
-	Boottime() time.Duration
+	Monotonic() time.Duration
 	BootID() string
 	Now() time.Time
 	Sleep(ctx context.Context, d time.Duration) error
@@ -57,10 +66,10 @@ type Clock interface {
 // SystemClock is the real clock.
 type SystemClock struct{}
 
-// Boottime is CLOCK_BOOTTIME.
-func (SystemClock) Boottime() time.Duration {
+// Monotonic is CLOCK_MONOTONIC.
+func (SystemClock) Monotonic() time.Duration {
 	var ts unix.Timespec
-	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
 		return 0
 	}
 	return time.Duration(ts.Nano())
@@ -129,7 +138,7 @@ type Report struct {
 	LoginGraceS      int    `json:"login_grace_s"`
 	// WaitedMS is, for every widening swap that had to wait, the interval
 	// the timing rule enforced: from the previous swap of current to the
-	// widening swap (at least LoginGraceTime + 5 s).
+	// widening swap (at least LoginGraceTime + 30 s).
 	WaitedMS         int64  `json:"waited_ms"`
 	Reloaded         bool   `json:"reloaded"`
 	SelfTest         string `json:"self_test"`
@@ -387,10 +396,12 @@ func stuck(m *marker, cur, lg link) error {
 func (e *engine) loadLastSwap(pending, haveCurrent bool) {
 	b, _ := e.readState(lastSwapFile, 4<<10)
 	var r swapRecord
-	ok := b != nil && json.Unmarshal(b, &r) == nil
+	// Strict: a record of another shape (an older boottime_ns record)
+	// counts as unreadable, so the last swap is taken as just made.
+	ok := b != nil && trust.DecodeStrict(b, &r) == nil
 	switch {
 	case pending || (haveCurrent && !ok):
-		e.last = swapRecord{BootID: e.clock.BootID(), BoottimeNS: int64(e.clock.Boottime()), LoginGrace: e.grace}
+		e.last = swapRecord{BootID: e.clock.BootID(), MonotonicNS: int64(e.clock.Monotonic()), LoginGrace: e.grace}
 		e.lastKnown = true
 	case ok:
 		e.last, e.lastKnown = r, true

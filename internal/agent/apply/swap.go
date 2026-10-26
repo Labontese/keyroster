@@ -325,14 +325,21 @@ func (e *engine) removeCurrent() error {
 }
 
 // swapRecord is <state>/last_swap.json: when current last changed, on
-// which boot (boot_id) and at which CLOCK_BOOTTIME, to which generation,
+// which boot (boot_id) and at which CLOCK_MONOTONIC, to which generation,
 // and the LoginGraceTime bound in force then.
 type swapRecord struct {
-	BootID     string `json:"boot_id"`
-	BoottimeNS int64  `json:"boottime_ns"`
-	Generation uint64 `json:"generation"`
-	LoginGrace int    `json:"login_grace_s"`
+	BootID      string `json:"boot_id"`
+	MonotonicNS int64  `json:"monotonic_ns"`
+	Generation  uint64 `json:"generation"`
+	LoginGrace  int    `json:"login_grace_s"`
 }
+
+// graceMargin is what the swap timing rule adds to the LoginGraceTime
+// bound (owner decision 2026-10-26, PR #67: LoginGraceTime + 30 s). sshd
+// arms its grace timer with up to 4 s of jitter from 9.9p1 on, and
+// 10.5p1 was seen to process an authentication up to about 3.6 s past
+// LoginGraceTime (03-05 SUMMARY); the earlier 5 s left about 1 s.
+const graceMargin = 30 * time.Second
 
 // swapMode is how swapCurrent may move current.
 type swapMode int
@@ -378,8 +385,8 @@ func (e *engine) readCurrent() (*Generation, link, error) {
 // swapCurrent is the one function that moves current (F1). It classifies
 // the move against the generation current names, read from disk: a
 // narrowing swap happens at once; a widening swap first waits until the
-// LoginGraceTime bound + 5 s have passed since the previous swap of
-// current (last_swap.json, by boot ID and CLOCK_BOOTTIME), checking the
+// LoginGraceTime bound + 30 s have passed since the previous swap of
+// current (last_swap.json, by boot ID and CLOCK_MONOTONIC), checking the
 // spool every 5 s when mode is swapPolled; anything else is
 // swap_not_monotone, refused before any rename. swapDirect skips the
 // classification (the operator's --recover-to-last-good from a missing
@@ -410,7 +417,7 @@ func (e *engine) swapCurrent(ctx context.Context, target *Generation, mode swapM
 
 // recordSwap writes last_swap.json for a swap just made.
 func (e *engine) recordSwap(n uint64) error {
-	e.last = swapRecord{BootID: e.clock.BootID(), BoottimeNS: int64(e.clock.Boottime()), Generation: n, LoginGrace: e.grace}
+	e.last = swapRecord{BootID: e.clock.BootID(), MonotonicNS: int64(e.clock.Monotonic()), Generation: n, LoginGrace: e.grace}
 	e.lastKnown = true
 	b, err := trust.CanonicalJSON(e.last)
 	if err != nil {
@@ -419,16 +426,16 @@ func (e *engine) recordSwap(n uint64) error {
 	return e.writeState(lastSwapFile, b)
 }
 
-// widenDue is the CLOCK_BOOTTIME from which a widening swap may happen:
+// widenDue is the CLOCK_MONOTONIC from which a widening swap may happen:
 // the previous swap plus the larger of the bound recorded with it and the
-// bound in force now, plus 5 s. Another boot owes nothing (sshd started
-// again with it).
+// bound in force now, plus graceMargin. Another boot owes nothing (sshd
+// started again with it).
 func (e *engine) widenDue() time.Duration {
 	if !e.lastKnown || e.last.BootID != e.clock.BootID() {
 		return 0
 	}
 	g := max(e.last.LoginGrace, e.grace)
-	return time.Duration(e.last.BoottimeNS) + time.Duration(g+5)*time.Second
+	return time.Duration(e.last.MonotonicNS) + time.Duration(g)*time.Second + graceMargin
 }
 
 // spoolPoll is how often a widening wait checks the spool.
@@ -443,10 +450,10 @@ func (e *engine) waitWidening(ctx context.Context, poll bool) error {
 	due := e.widenDue()
 	waited := false
 	for {
-		now := e.clock.Boottime()
+		now := e.clock.Monotonic()
 		if now >= due {
 			if waited {
-				e.report.WaitedMS += (now - time.Duration(e.last.BoottimeNS)).Milliseconds()
+				e.report.WaitedMS += (now - time.Duration(e.last.MonotonicNS)).Milliseconds()
 			}
 			return nil
 		}
@@ -493,7 +500,7 @@ func (e *engine) writeMarker(from, to, mid uint64, step string) error {
 		return err
 	}
 	m := marker{From: from, To: to, Intermediate: mid, Step: step, DropInChanged: e.dropinChanged,
-		Deadline: e.clock.Now().Add(time.Duration(e.grace+5)*time.Second + 2*e.cfg.SelfTestTimeout).UTC().Format(trust.TimeFormat)}
+		Deadline: e.clock.Now().Add(time.Duration(e.grace)*time.Second + graceMargin + 2*e.cfg.SelfTestTimeout).UTC().Format(trust.TimeFormat)}
 	if step == stepCommit {
 		m.Accepted = e.staged
 	}
@@ -621,17 +628,17 @@ func (e *engine) cleanup() {
 
 // loginGraceState is <state>/login_grace.json.
 type loginGraceState struct {
-	BootID            string `json:"boot_id"`
-	MaxS              int    `json:"max_s"`
-	PrevMaxS          int    `json:"prev_max_s"`
-	OwnReloadBoottime int64  `json:"own_reload_boottime_ns"`
+	BootID             string `json:"boot_id"`
+	MaxS               int    `json:"max_s"`
+	PrevMaxS           int    `json:"prev_max_s"`
+	OwnReloadMonotonic int64  `json:"own_reload_monotonic_ns"`
 }
 
 // ObserveLoginGrace records one sshd -T observation of LoginGraceTime
 // (cur seconds) in <state>/login_grace.json and returns the bound the
 // swap timing uses: the largest of cur, every value observed since the
 // agent's own last reload of sshd (max_s), and, until that reload plus
-// prev_max_s + 5 s has passed, the maximum observed before it
+// prev_max_s + graceMargin has passed (CLOCK_MONOTONIC), the maximum observed before it
 // (prev_max_s). A value lowered on disk without a reload, and children
 // forked before a reload, so keep their longer window. Another boot
 // starts afresh. It is called at start, at every apply and by 03-06's
@@ -648,17 +655,17 @@ func (e *engine) observeLoginGrace(cur int, ownReload bool) (int, error) {
 			st = loginGraceState{}
 		}
 	}
-	now := e.clock.Boottime()
+	now := e.clock.Monotonic()
 	if st.BootID != e.clock.BootID() {
 		st = loginGraceState{BootID: e.clock.BootID()}
 	}
-	prevInForce := st.PrevMaxS > 0 && now < time.Duration(st.OwnReloadBoottime)+time.Duration(st.PrevMaxS+5)*time.Second
+	prevInForce := st.PrevMaxS > 0 && now < time.Duration(st.OwnReloadMonotonic)+time.Duration(st.PrevMaxS)*time.Second+graceMargin
 	if !prevInForce {
-		st.PrevMaxS, st.OwnReloadBoottime = 0, 0
+		st.PrevMaxS, st.OwnReloadMonotonic = 0, 0
 	}
 	if ownReload {
 		st.PrevMaxS = max(st.PrevMaxS, st.MaxS, cur)
-		st.OwnReloadBoottime = int64(now)
+		st.OwnReloadMonotonic = int64(now)
 		st.MaxS = cur
 	}
 	st.MaxS = max(st.MaxS, cur)

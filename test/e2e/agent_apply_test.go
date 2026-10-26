@@ -383,7 +383,7 @@ func (h *agentHost) wantRefused(t *testing.T, what string, c agentCert, user, sr
 // one swap. A change that revokes certificate Y and adds principal q in
 // one apply goes through the intermediate generation: while current names
 // it, Y and a q-only certificate are both refused; after the final swap,
-// LoginGraceTime 3 + 5 s later, Y is still refused and q is accepted. The
+// LoginGraceTime 3 + 30 s later, Y is still refused and q is accepted. The
 // sshd PID never changes after the first install. Finally, with sshd
 // stopped, a new KRL fails its self-test and is rolled back to last-good.
 func TestAgentApplyEndToEnd(t *testing.T) {
@@ -467,7 +467,7 @@ func TestAgentApplyEndToEnd(t *testing.T) {
 	if h.current(t) != mid {
 		t.Fatalf("current moved from the intermediate %s to %s before the wait ended", mid, h.current(t))
 	}
-	if code, r, stderr = run.finish(t); code != 0 || r.Intermediate == 0 || r.WaitedMS < int64(agentLoginGrace+5)*1000 || r.Reloaded || r.SelfTest != "pass" {
+	if code, r, stderr = run.finish(t); code != 0 || r.Intermediate == 0 || r.WaitedMS < int64(agentLoginGrace+30)*1000 || r.Reloaded || r.SelfTest != "pass" {
 		t.Fatalf("mixed change: exit %d, report %+v\nstderr:\n%s", code, r, stderr)
 	}
 	if got := h.current(t); got == mid || got == before {

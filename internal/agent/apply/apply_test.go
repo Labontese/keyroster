@@ -32,7 +32,7 @@ import (
 // TestApplyTracer drives the whole sequence against the fake sshd: a
 // first install (drop-in, one reload, self-test), a revocation (one
 // narrowing swap, no reload), and a change that revokes and adds at once
-// (intermediate, then the final swap LoginGraceTime + 5 s later).
+// (intermediate, then the final swap LoginGraceTime + 30 s later).
 func TestApplyTracer(t *testing.T) {
 	f := newFixture(t)
 	h := newTestHost(t, f)
@@ -51,15 +51,15 @@ func TestApplyTracer(t *testing.T) {
 		t.Fatalf("revocation: %+v, %d reloads, current %d", r, h.run.reloads, h.current())
 	}
 
-	start := h.clock.Boottime()
+	start := h.clock.Monotonic()
 	h.publishKRL(7, 8)
 	h.publishDir(h.spec("role:ops", "role:q"))
 	r = h.mustApply()
-	if r.Intermediate == 0 || r.Reloaded || r.WaitedMS < int64(120+5)*1000 {
+	if r.Intermediate == 0 || r.Reloaded || r.WaitedMS < int64(120+30)*1000 {
 		t.Fatalf("mixed change: %+v", r)
 	}
-	if waited := h.clock.Boottime() - start; waited < 125*time.Second {
-		t.Fatalf("the clock moved %v, want at least LoginGraceTime + 5 s", waited)
+	if waited := h.clock.Monotonic() - start; waited < 150*time.Second {
+		t.Fatalf("the clock moved %v, want at least LoginGraceTime + 30 s", waited)
 	}
 	if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops", "role:q"}) {
 		t.Fatalf("principals after the mixed change = %v", got)
@@ -602,7 +602,7 @@ func TestApply(t *testing.T) {
 		cur := h.current()
 		h.cfg.SelfTestTimeout = 300 * time.Millisecond
 		h.sshd.stop()
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		h.publishKRL(7)
 		h.publishDir(h.spec("role:ops", "role:q"))
 		r, err := h.apply()
@@ -611,8 +611,8 @@ func TestApply(t *testing.T) {
 		}
 		// B removes role:old and adds role:q: forward and back both pass an
 		// intermediate, each with a full wait.
-		if waited := h.clock.Boottime() - start; waited < 2*125*time.Second {
-			t.Fatalf("forward and rollback waited %v together, want two LoginGraceTime + 5 s waits", waited)
+		if waited := h.clock.Monotonic() - start; waited < 2*150*time.Second {
+			t.Fatalf("forward and rollback waited %v together, want two LoginGraceTime + 30 s waits", waited)
 		}
 		if !slices.Equal(h.principals("deploy"), []string{"role:old", "role:ops"}) {
 			t.Fatalf("principals after the rollback = %v", h.principals("deploy"))
@@ -677,7 +677,7 @@ func TestApply(t *testing.T) {
 			if p == "swap" {
 				m := readMarker(t, h)
 				h.sshd.mu.Lock()
-				swaps = append(swaps, swapAt{h.clock.Boottime(), m.Step, h.sshd.accepted})
+				swaps = append(swaps, swapAt{h.clock.Monotonic(), m.Step, h.sshd.accepted})
 				h.sshd.mu.Unlock()
 			}
 		}}
@@ -689,8 +689,8 @@ func TestApply(t *testing.T) {
 		if len(swaps) != 2 || swaps[0].step != "intermediate" || swaps[1].step != "final" {
 			t.Fatalf("swaps %+v, want the intermediate step then the final one", swaps)
 		}
-		if gap := swaps[1].at - swaps[0].at; gap < 125*time.Second {
-			t.Fatalf("%v between the swaps, want at least LoginGraceTime + 5 s", gap)
+		if gap := swaps[1].at - swaps[0].at; gap < 150*time.Second {
+			t.Fatalf("%v between the swaps, want at least LoginGraceTime + 30 s", gap)
 		}
 		if swaps[1].accepted != before || h.sshd.accepted == before {
 			t.Fatalf("self-test connections: %d before, %d at the final swap, %d after; want the self-test only after the final swap", before, swaps[1].accepted, h.sshd.accepted)
@@ -702,8 +702,8 @@ func TestApply(t *testing.T) {
 		h.installed("role:ops")
 		h.publishKRL(7)
 		h.publishDir(h.spec("role:ops", "role:q"))
-		if r := h.mustApply(); r.LoginGraceS != 7 || r.WaitedMS != 12000 {
-			t.Fatalf("logingracetime 7: %+v, want a 12 s wait", r)
+		if r := h.mustApply(); r.LoginGraceS != 7 || r.WaitedMS != 37000 {
+			t.Fatalf("logingracetime 7: %+v, want a 37 s wait", r)
 		}
 	})
 	t.Run("login_grace_unbounded_refused", func(t *testing.T) {
@@ -734,9 +734,9 @@ func TestApply(t *testing.T) {
 		h := newTestHost(t, newFixture(t))
 		h.installed("role:ops")
 		h.clock.advance(10 * time.Second)
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		h.publishKRL(7)
-		if r := h.mustApply(); r.WaitedMS != 0 || h.clock.Boottime() != start {
+		if r := h.mustApply(); r.WaitedMS != 0 || h.clock.Monotonic() != start {
 			t.Fatalf("a revocation 10 s after a swap waited: %+v", r)
 		}
 	})
@@ -747,12 +747,12 @@ func TestApply(t *testing.T) {
 		h.clock.advance(time.Hour)
 		h.publishKRL(7)
 		h.mustApply()
-		t0 := h.clock.Boottime()
+		t0 := h.clock.Monotonic()
 		h.clock.advance(60 * time.Second)
 		h.publishDir(h.spec("role:ops", "role:q"))
 		r := h.mustApply()
-		if got := h.clock.Boottime() - t0; got != 125*time.Second || r.Intermediate != 0 || r.WaitedMS != 125000 {
-			t.Fatalf("an add-only apply 60 s after a revocation swapped %v after it (%+v), want 125 s", got, r)
+		if got := h.clock.Monotonic() - t0; got != 150*time.Second || r.Intermediate != 0 || r.WaitedMS != 150000 {
+			t.Fatalf("an add-only apply 60 s after a revocation swapped %v after it (%+v), want 150 s", got, r)
 		}
 	})
 	t.Run("last_swap_survives_restart", func(t *testing.T) {
@@ -762,18 +762,38 @@ func TestApply(t *testing.T) {
 		h.clock.advance(time.Hour)
 		h.publishKRL(7)
 		h.mustApply()
-		t0 := h.clock.Boottime()
+		t0 := h.clock.Monotonic()
 		var rec swapRecord
 		b, err := os.ReadFile(h.l.State(lastSwapFile)) //nolint:gosec // test fixture
-		if err != nil || json.Unmarshal(b, &rec) != nil || rec.BootID != "boot-1" || time.Duration(rec.BoottimeNS) != t0 || rec.Generation != uint64(h.current()) {
+		if err != nil || json.Unmarshal(b, &rec) != nil || rec.BootID != "boot-1" || time.Duration(rec.MonotonicNS) != t0 || rec.Generation != uint64(h.current()) {
 			t.Fatalf("last_swap.json = %s (%v)", b, err)
 		}
 		// Each Apply is a fresh engine: the record alone carries the time.
 		h.clock.advance(100 * time.Second)
 		h.publishDir(h.spec("role:ops", "role:q"))
 		h.mustApply()
-		if got := h.clock.Boottime() - t0; got != 125*time.Second {
-			t.Fatalf("after a restart the widening swap came %v after the last one, want 125 s", got)
+		if got := h.clock.Monotonic() - t0; got != 150*time.Second {
+			t.Fatalf("after a restart the widening swap came %v after the last one, want 150 s", got)
+		}
+	})
+	t.Run("last_swap_old_format_means_full_wait", func(t *testing.T) {
+		t.Parallel()
+		// Owner decision 2026-10-26 (PR #67): the record moved from
+		// CLOCK_BOOTTIME (boottime_ns) to CLOCK_MONOTONIC (monotonic_ns).
+		// A record of the old shape is unreadable, so the last swap counts
+		// as just made: the full LoginGraceTime + 30 s, never no wait.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.clock.advance(time.Hour)
+		old := mustCanonical(t, map[string]any{"boot_id": "boot-1", "boottime_ns": 1, "generation": h.current(), "login_grace_s": 120})
+		if err := os.WriteFile(h.l.State(lastSwapFile), old, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		start := h.clock.Monotonic()
+		h.publishDir(h.spec("role:ops", "role:q"))
+		h.mustApply()
+		if got := h.clock.Monotonic() - start; got != 150*time.Second {
+			t.Fatalf("with a boottime_ns record the widening swap waited %v, want the full 150 s", got)
 		}
 	})
 	t.Run("other_boot_no_wait", func(t *testing.T) {
@@ -785,9 +805,9 @@ func TestApply(t *testing.T) {
 		h.clock.mu.Lock()
 		h.clock.boot = "boot-2"
 		h.clock.mu.Unlock()
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		h.publishDir(h.spec("role:ops", "role:q"))
-		if r := h.mustApply(); r.WaitedMS != 0 || h.clock.Boottime() != start {
+		if r := h.mustApply(); r.WaitedMS != 0 || h.clock.Monotonic() != start {
 			t.Fatalf("another boot waited: %+v", r)
 		}
 	})
@@ -801,11 +821,11 @@ func TestApply(t *testing.T) {
 		if err := os.WriteFile(h.l.State(pendingFile), b, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		h.publishDir(h.spec("role:ops", "role:q"))
 		r := h.mustApply()
-		if got := h.clock.Boottime() - start; !r.Recovered || got != 125*time.Second {
-			t.Fatalf("a run that starts with a pending marker waited %v (%+v), want the full 125 s", got, r)
+		if got := h.clock.Monotonic() - start; !r.Recovered || got != 150*time.Second {
+			t.Fatalf("a run that starts with a pending marker waited %v (%+v), want the full 150 s", got, r)
 		}
 	})
 
@@ -840,8 +860,8 @@ func TestApply(t *testing.T) {
 		e := h.engine()
 		_, files := h.f.krl([]uint64{9}, nil, "")
 		g := h.gen(e, files.KRL, "role:ops")
-		start := h.clock.Boottime()
-		if err := e.swapCurrent(context.Background(), g, swapChecked); err != nil || uint64(h.current()) != g.N || h.clock.Boottime() != start {
+		start := h.clock.Monotonic()
+		if err := e.swapCurrent(context.Background(), g, swapChecked); err != nil || uint64(h.current()) != g.N || h.clock.Monotonic() != start {
 			t.Fatalf("a narrowing swap with a new KRL: %v, current %d", err, h.current())
 		}
 	})
@@ -856,11 +876,11 @@ func TestApply(t *testing.T) {
 		h.publishKRL(7)
 		h.mustApply()
 		h.run.grace = "120" // lowered on disk, no reload by the agent
-		t0 := h.clock.Boottime()
+		t0 := h.clock.Monotonic()
 		h.publishDir(h.spec("role:ops", "role:q"))
 		r := h.mustApply()
-		if got := h.clock.Boottime() - t0; r.LoginGraceS != 600 || got != 605*time.Second {
-			t.Fatalf("after lowering to 120 without a reload: bound %d, waited %v; want 600 and 605 s", r.LoginGraceS, got)
+		if got := h.clock.Monotonic() - t0; r.LoginGraceS != 600 || got != 630*time.Second {
+			t.Fatalf("after lowering to 120 without a reload: bound %d, waited %v; want 600 and 630 s", r.LoginGraceS, got)
 		}
 	})
 	t.Run("login_grace_prev_max_until_own_reload_window_ends", func(t *testing.T) {
@@ -873,13 +893,13 @@ func TestApply(t *testing.T) {
 		if b, _ := e.observeLoginGrace(120, true); b != 600 {
 			t.Fatalf("right after the agent's own reload at 120: bound %d, want 600", b)
 		}
-		h.clock.advance(604 * time.Second)
+		h.clock.advance(629 * time.Second)
 		if b, _ := e.observeLoginGrace(120, false); b != 600 {
-			t.Fatalf("604 s after the reload: bound %d, want 600", b)
+			t.Fatalf("629 s after the reload: bound %d, want 600", b)
 		}
 		h.clock.advance(2 * time.Second)
 		if b, _ := e.observeLoginGrace(120, false); b != 120 {
-			t.Fatalf("606 s after the reload: bound %d, want 120", b)
+			t.Fatalf("631 s after the reload: bound %d, want 120", b)
 		}
 	})
 	t.Run("login_grace_raised_used_at_once", func(t *testing.T) {
@@ -935,12 +955,12 @@ func TestApply(t *testing.T) {
 		}
 		h.resetSpool()
 		h.state = old
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		r := h.mustApply()
 		if !r.Recovered || h.current() != lg || readMarker(t, h) != nil {
 			t.Fatalf("recovery: %+v, current %d", r, h.current())
 		}
-		if got := h.clock.Boottime() - start; got < 125*time.Second {
+		if got := h.clock.Monotonic() - start; got < 150*time.Second {
 			t.Fatalf("recovery's widening step came %v after start, want the full interval", got)
 		}
 	})
@@ -1129,9 +1149,9 @@ func TestApply(t *testing.T) {
 			t.Fatalf("a dangling current: %v", err)
 		}
 		h.cfg.RecoverToLastGood = true
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		r, err := h.apply()
-		if err != nil || h.current() != lg || r.Stuck != "" || h.clock.Boottime() != start {
+		if err != nil || h.current() != lg || r.Stuck != "" || h.clock.Monotonic() != start {
 			t.Fatalf("recover: %+v, %v", r, err)
 		}
 		h.cfg.RecoverToLastGood = false
@@ -1150,8 +1170,8 @@ func TestApply(t *testing.T) {
 		}
 		repoint(t, h.l.Current(), foreign)
 		h.cfg.RecoverToLastGood = true
-		start := h.clock.Boottime()
-		if _, err := h.apply(); err != nil || h.current() != lg || h.clock.Boottime() != start {
+		start := h.clock.Monotonic()
+		if _, err := h.apply(); err != nil || h.current() != lg || h.clock.Monotonic() != start {
 			t.Fatalf("recover from a current without revoked.krl: %v, current %d", err, h.current())
 		}
 	})
@@ -1169,12 +1189,12 @@ func TestApply(t *testing.T) {
 		})
 		repoint(t, h.l.Current(), foreign)
 		h.cfg.RecoverToLastGood = true
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		r, err := h.apply()
 		if err != nil || h.current() != lg || r.Stuck != "" {
 			t.Fatalf("recover from a readable foreign current: %+v, %v", r, err)
 		}
-		if got := h.clock.Boottime() - start; got < 125*time.Second {
+		if got := h.clock.Monotonic() - start; got < 150*time.Second {
 			t.Fatalf("recovery reached last-good %v after start, want the widening step after the bound", got)
 		}
 	})
@@ -1208,11 +1228,11 @@ func TestApply(t *testing.T) {
 		}
 		h.resetSpool()
 		h.state = old
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		if r := h.mustApply(); !r.Rollback || h.current() != lg {
 			t.Fatalf("recovery from B: %+v", r)
 		}
-		if got := h.clock.Boottime() - start; got < 125*time.Second {
+		if got := h.clock.Monotonic() - start; got < 150*time.Second {
 			t.Fatalf("B -> L took %v, want a two-step move with a full wait", got)
 		}
 	})
@@ -1251,11 +1271,11 @@ func TestApply(t *testing.T) {
 		}
 		h.resetSpool()
 		h.state = old
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		if r, _ := h.apply(); h.current() != lg || !r.Recovered {
 			t.Fatalf("recovery from the rollback's intermediate: %+v, current %d", r, h.current())
 		}
-		if got := h.clock.Boottime() - start; got < 125*time.Second {
+		if got := h.clock.Monotonic() - start; got < 150*time.Second {
 			t.Fatalf("M' -> L took %v, want the full interval", got)
 		}
 	})
@@ -1361,7 +1381,7 @@ func TestApply(t *testing.T) {
 		var revokedAt time.Duration = -1
 		h.clock.onSleep = func(time.Duration) {
 			if wrote == 0 {
-				wrote = h.clock.Boottime()
+				wrote = h.clock.Monotonic()
 				h.publishKRL(7, 99)
 				h.write()
 			}
@@ -1371,11 +1391,11 @@ func TestApply(t *testing.T) {
 				return
 			}
 			if m := readMarker(t, h); m != nil && m.Intermediate != 0 && m.Step == "intermediate" && h.krlRevokes(h.l.Gen(m.Intermediate), 99) {
-				revokedAt = h.clock.Boottime()
+				revokedAt = h.clock.Monotonic()
 			}
 		}}
 		h.cfg.Fault = fl.hook
-		t0 := h.clock.Boottime()
+		t0 := h.clock.Monotonic()
 		h.mustApply()
 		if revokedAt < 0 || revokedAt-wrote > 5*time.Second {
 			t.Fatalf("the revocation arrived at %v and was swapped in at %v; want within one poll", wrote-t0, revokedAt-t0)
@@ -1383,8 +1403,8 @@ func TestApply(t *testing.T) {
 		if !h.krlRevokes(h.l.Current(), 99) || !slices.Equal(h.principals("deploy"), []string{"role:ops", "role:q"}) {
 			t.Fatal("B2 (the revocation and role:q) is not current")
 		}
-		if h.clock.Boottime()-revokedAt < 125*time.Second {
-			t.Fatalf("B2's widening swap came %v after its narrowing step", h.clock.Boottime()-revokedAt)
+		if h.clock.Monotonic()-revokedAt < 150*time.Second {
+			t.Fatalf("B2's widening swap came %v after its narrowing step", h.clock.Monotonic()-revokedAt)
 		}
 	})
 	t.Run("collapse_with_real_render_headers", func(t *testing.T) {
@@ -1392,9 +1412,9 @@ func TestApply(t *testing.T) {
 		h := newTestHost(t, newFixture(t))
 		h.installed("role:ops")
 		h.clock.advance(time.Hour)
-		start := h.clock.Boottime()
+		start := h.clock.Monotonic()
 		h.publishDir(h.spec("role:ops", "role:q"))
-		if r := h.mustApply(); r.Intermediate != 0 || h.clock.Boottime() != start {
+		if r := h.mustApply(); r.Intermediate != 0 || h.clock.Monotonic() != start {
 			t.Fatalf("a pure addition after a quiet period: %+v, want one immediate swap", r)
 		}
 		h.publishKRL(7)
@@ -1785,4 +1805,26 @@ func TestReloadSignal(t *testing.T) {
 	if err := reloadSignal(sshd, dump); !errors.Is(err, ErrReload) {
 		t.Errorf("a PidFile naming a process that has exited: %v, want reload_failed", err)
 	}
+}
+
+// TestSystemClockMonotonic (owner decision 2026-10-26, PR #67): the swap
+// timing rule reads CLOCK_MONOTONIC, the clock sshd's LoginGraceTime
+// timer runs on, not CLOCK_BOOTTIME, which also counts suspended time.
+// On a host that has been suspended the two differ and the check tells
+// them apart; where they are equal it only bounds the reading.
+func TestSystemClockMonotonic(t *testing.T) {
+	read := func(id int32) time.Duration {
+		var ts unix.Timespec
+		if err := unix.ClockGettime(id, &ts); err != nil {
+			t.Fatal(err)
+		}
+		return time.Duration(ts.Nano())
+	}
+	before := read(unix.CLOCK_MONOTONIC)
+	got := SystemClock{}.Monotonic()
+	after := read(unix.CLOCK_MONOTONIC)
+	if got < before || got > after {
+		t.Fatalf("SystemClock.Monotonic() = %v, outside CLOCK_MONOTONIC %v..%v", got, before, after)
+	}
+	t.Logf("CLOCK_BOOTTIME - CLOCK_MONOTONIC = %v (time this host spent suspended)", read(unix.CLOCK_BOOTTIME)-after)
 }

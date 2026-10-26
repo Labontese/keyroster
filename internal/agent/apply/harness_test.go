@@ -234,7 +234,7 @@ func (f *fixture) genesis() spool.State {
 	}
 }
 
-// fakeClock is CLOCK_BOOTTIME and wall time that only Sleep advances.
+// fakeClock is CLOCK_MONOTONIC and wall time that only Sleep advances.
 type fakeClock struct {
 	mu      sync.Mutex
 	boot    string
@@ -247,7 +247,7 @@ func newFakeClock() *fakeClock {
 	return &fakeClock{boot: "boot-1", elapsed: time.Hour, wall: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)}
 }
 
-func (c *fakeClock) Boottime() time.Duration {
+func (c *fakeClock) Monotonic() time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.elapsed

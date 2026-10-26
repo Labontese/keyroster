@@ -404,7 +404,7 @@ func (m *modelHost) record(n uint64) {
 	}
 	g.N = n
 	m.sched.gens = append(m.sched.gens, loadModel(m.t, g))
-	m.sched.at = append(m.sched.at, m.h.clock.Boottime())
+	m.sched.at = append(m.sched.at, m.h.clock.Monotonic())
 }
 
 // render writes the generation for s.
