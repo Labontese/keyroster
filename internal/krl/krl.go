@@ -76,6 +76,22 @@ const (
 	maxBitmapMpintLength      = 16384 + 1 // OpenSSH's SSHBUF_MAX_BIGNUM plus its sign byte
 )
 
+// MaxRevokedKeys and MaxRevokedKeyBytes cap the explicit-key entries,
+// which never leave a KRL (a key has no ValidBefore): at most 1000
+// distinct keys, taking at most 1 MiB of the explicit-key section (4 +
+// the wire length per key). The count binds for Ed25519, ECDSA,
+// security-key and RSA keys up to 4096 bits; only larger RSA keys reach
+// the byte cap first. So one admin cannot fill MaxKRL for good with
+// explicit keys: 3 MiB stay for serial and key-ID entries, which leave the
+// KRL once their certificates expire (pre-merge review of PR #61, owner
+// decision 2026-10-26, T-03-211). The signer refuses a key revocation
+// beyond either cap (explicit_key_cap_reached) and audit verify a log
+// whose explicit keys exceed them; both call CheckExplicitKeys.
+const (
+	MaxRevokedKeys     = 1000
+	MaxRevokedKeyBytes = 1 << 20
+)
+
 // Errors.
 var (
 	// ErrMalformed reports a set the encoder refuses (a nil CA key, a
@@ -85,7 +101,30 @@ var (
 	// ErrTooLarge reports an encoding above MaxKRL, and an input above
 	// MaxKRL or above MaxParsedEntries entries for Parse.
 	ErrTooLarge = errors.New("krl: the KRL would exceed MaxKRL")
+	// ErrKeyCap reports explicit keys beyond MaxRevokedKeys or
+	// MaxRevokedKeyBytes (CheckExplicitKeys).
+	ErrKeyCap = errors.New("krl: the explicit-key cap is reached")
 )
+
+// CheckExplicitKeys requires the distinct keys among keys (SSH wire
+// format; a key listed twice counts once, as Encode lists it once) to be
+// at most MaxRevokedKeys and to take at most MaxRevokedKeyBytes in the
+// explicit-key section. A key already among them adds nothing, so
+// revoking it again passes at the cap.
+func CheckExplicitKeys(keys [][]byte) error {
+	seen := make(map[string]bool, len(keys))
+	size := 0
+	for _, k := range keys {
+		if !seen[string(k)] {
+			seen[string(k)] = true
+			size += 4 + len(k)
+		}
+	}
+	if len(seen) > MaxRevokedKeys || size > MaxRevokedKeyBytes {
+		return fmt.Errorf("%w: %d distinct keys in %d bytes, at most %d keys in %d bytes", ErrKeyCap, len(seen), size, MaxRevokedKeys, MaxRevokedKeyBytes)
+	}
+	return nil
+}
 
 // Set is what a KRL revokes: certificates by serial or key ID under a CA
 // key, and explicit keys (a plain key and every certificate for it).

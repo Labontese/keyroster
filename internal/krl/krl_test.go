@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"flag"
+	"fmt"
 	"math"
 	"math/big"
 	"os"
@@ -972,4 +973,75 @@ func TestKRLFullGoldenVector(t *testing.T) {
 	if err != nil || !p.SameContent(s.Normalize()) {
 		t.Fatalf("Parse of the golden vector: %+v, %v", p, err)
 	}
+}
+
+// skKey returns a fresh canonical sk-ssh-ed25519@openssh.com public key of
+// exactly size bytes (at least 74), padded by its application string: a
+// revocable key up to wire.MaxSubjectKeyLen.
+func skKey(t testing.TB, size int) []byte {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := ssh.Marshal(struct {
+		Name        string
+		KeyBytes    []byte
+		Application string
+	}{ssh.KeyAlgoSKED25519, pub, "ssh:" + strings.Repeat("x", size-74)})
+	if p, err := ssh.ParsePublicKey(k); err != nil || len(k) != size || !bytes.Equal(p.Marshal(), k) {
+		t.Fatalf("security-key key of %d bytes: %v", len(k), err)
+	}
+	return k
+}
+
+// TestCheckExplicitKeys (T-03-211, pre-merge review of PR #61): at most
+// MaxRevokedKeys distinct explicit keys in MaxRevokedKeyBytes, a key
+// listed twice counted once; and the explicit-key section at the byte cap
+// leaves room in MaxKRL for 2.5 MiB of key IDs, so the cap stops one admin
+// from filling the KRL for good.
+func TestCheckExplicitKeys(t *testing.T) {
+	small := make([][]byte, MaxRevokedKeys)
+	for i := range small {
+		small[i] = skKey(t, 74)
+	}
+	big := make([][]byte, MaxRevokedKeyBytes/(wire.MaxSubjectKeyLen+4))
+	for i := range big {
+		big[i] = skKey(t, wire.MaxSubjectKeyLen)
+	}
+	for _, tc := range []struct {
+		name string
+		keys [][]byte
+		ok   bool
+	}{
+		{"count_at_cap", small, true},
+		{"count_above_cap", append(slices.Clone(small), skKey(t, 74)), false},
+		{"count_at_cap_relisted", append(slices.Clone(small), small[0]), true},
+		{"bytes_at_cap", big, true},
+		{"bytes_above_cap", append(slices.Clone(big), skKey(t, wire.MaxSubjectKeyLen)), false},
+		{"bytes_at_cap_relisted", append(slices.Clone(big), big[3]), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := CheckExplicitKeys(tc.keys); (err == nil) != tc.ok || (err != nil && !errors.Is(err, ErrKeyCap)) {
+				t.Fatalf("CheckExplicitKeys of %d keys: %v, want ok %v", len(tc.keys), err, tc.ok)
+			}
+		})
+	}
+	t.Run("worst_case_fits", func(t *testing.T) {
+		_, ca := seedKey(t, 0xca)
+		s := Set{Certs: []CertSection{{CAKey: ca}}}
+		for _, k := range big {
+			pub, err := ssh.ParsePublicKey(k)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Keys = append(s.Keys, pub)
+		}
+		for len(s.Certs[0].KeyIDs)*(wire.MaxRevokeKeyID+4) < 5<<19 { // 2.5 MiB of key IDs
+			s.Certs[0].KeyIDs = append(s.Certs[0].KeyIDs, fmt.Sprintf("%0*d", wire.MaxRevokeKeyID, len(s.Certs[0].KeyIDs)))
+		}
+		if _, err := Encode(s, 1, time.Unix(1700000000, 0)); err != nil {
+			t.Fatalf("Encode of the explicit keys at the byte cap and 2.5 MiB of key IDs: %v", err)
+		}
+	})
 }

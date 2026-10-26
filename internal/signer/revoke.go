@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -44,13 +45,15 @@ import (
 // The targets resolve to:
 //   - serial: the certificate with that serial, issued by that CA role
 //     (unknown_serial, ca_role_mismatch), with its CA key and ValidBefore;
-//   - key_id: one entry per CA key of the role in the bundle in force, in
-//     their wire-byte order, each with the latest ValidBefore of this
-//     signer's certificates with that key ID under that CA key, or 0 (not
-//     known, never pruned) when it issued none;
+//   - key_id: one entry per CA key of the role in the bundle in force
+//     under which this signer issued a certificate with that key ID, in
+//     their wire-byte order, each with the latest ValidBefore of those
+//     certificates; refused key_id_not_issued when there is none, so every
+//     key-ID entry expires (pre-merge review of PR #61, T-03-211);
 //   - key: the key itself, refused key_is_ca_of_this_installation when the
 //     bundle in force names it (CA-key revocation is 03-13's emergency
-//     path);
+//     path), and explicit_key_cap_reached when the revoked keys with it
+//     would exceed krl.MaxRevokedKeys or krl.MaxRevokedKeyBytes;
 //   - subject user: every certificate this signer issued under the user
 //     CA whose key ID names the subject and that is live at T
 //     (signerdb.LiveIssuanceForSubjectTx, krl.EntryLive), in ascending
@@ -204,21 +207,47 @@ func (s *Signer) resolveRevokeLocked(ctx context.Context, tx *sql.Tx, req *wire.
 		}
 		return []tlog.RevokedEntry{{Kind: tlog.RevokedSerial, CAKey: caKey, Serial: req.Serial, ValidBeforeSeconds: validBefore}}, nil
 	case wire.TargetKeyID:
+		keys := s.roleCAKeys[req.CARole]
+		if len(keys) == 0 {
+			return nil, refusalErr(wire.CodeRefused, "ca_not_configured", nil)
+		}
 		var out []tlog.RevokedEntry
-		for _, caKey := range s.roleCAKeys[req.CARole] {
+		for _, caKey := range keys {
 			vb, err := s.db.KeyIDValidBeforeTx(ctx, tx, req.KeyID, caKey)
 			if err != nil {
 				return nil, err
 			}
+			if vb == 0 {
+				// Not issued under this CA key: no entry, so every key-ID
+				// entry has its certificate's ValidBefore and leaves the
+				// KRL once it expires (T-03-211).
+				continue
+			}
 			out = append(out, tlog.RevokedEntry{Kind: tlog.RevokedKeyID, CAKey: caKey, KeyID: req.KeyID, ValidBeforeSeconds: vb})
 		}
 		if len(out) == 0 {
-			return nil, refusalErr(wire.CodeRefused, "ca_not_configured", nil)
+			// A key ID this signer did not issue under the role's CA keys
+			// would be an entry that never expires; a certificate it did
+			// not issue is revoked by key (TargetKey).
+			return nil, refusalErr(wire.CodeMalformed, "key_id_not_issued", nil)
 		}
 		return out, nil
 	case wire.TargetKey:
 		if s.installationKeys[string(req.Key)] {
 			return nil, refusalErr(wire.CodeRefused, "key_is_ca_of_this_installation", nil)
+		}
+		revs, err := s.db.RevocationsTx(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		keys := [][]byte{req.Key}
+		for _, r := range revs {
+			if r.Kind == signerdb.RevocationKey {
+				keys = append(keys, r.Key)
+			}
+		}
+		if err := krl.CheckExplicitKeys(keys); err != nil {
+			return nil, refusalErr(wire.CodeRefused, "explicit_key_cap_reached", err)
 		}
 		return []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: req.Key}}, nil
 	case wire.TargetSubject:

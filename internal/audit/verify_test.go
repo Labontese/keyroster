@@ -2506,6 +2506,42 @@ func subjectAlice() *wire.RevokeRequest {
 	return &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "u:alice"}
 }
 
+// bigSKKey returns a fresh canonical sk-ssh-ed25519@openssh.com public key
+// of exactly size bytes (at least 74), padded by its application string.
+func bigSKKey(t testing.TB, size int) []byte {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := ssh.Marshal(struct {
+		Name        string
+		KeyBytes    []byte
+		Application string
+	}{ssh.KeyAlgoSKED25519, pub, "ssh:" + strings.Repeat("x", size-74)})
+	if p, err := ssh.ParsePublicKey(k); err != nil || len(k) != size || !bytes.Equal(p.Marshal(), k) {
+		t.Fatalf("security-key key of %d bytes: %v", len(k), err)
+	}
+	return k
+}
+
+// fillKeyCap logs explicit-key revocations of 8000-byte keys, each
+// followed by its KRL publish, up to krl.MaxRevokedKeyBytes, and returns
+// the first key.
+func (rf *revokeFixture) fillKeyCap() []byte {
+	rf.t.Helper()
+	var first []byte
+	for range krl.MaxRevokedKeyBytes / 8004 {
+		k := bigSKKey(rf.t, 8000)
+		if first == nil {
+			first = k
+		}
+		rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: k}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: k}}, nil)
+		rf.publish(nil)
+	}
+	return first
+}
+
 // asV1 returns an edit that logs req as a 03-01 v1 request (no
 // installation ID, keyroster/revoke-request/v1), signed by the admin under
 // namespace.
@@ -2621,21 +2657,37 @@ func TestVerifyRevocations(t *testing.T) {
 				[]tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: rf.ca.PublicKey().Marshal(), KeyID: c.KeyId, ValidBeforeSeconds: c.ValidBefore}}, nil)
 			rf.publish(nil)
 		}, ""},
-		{"key_id_unknown_valid_before_kept", func(rf *revokeFixture) {
+		// Pre-merge review of PR #61 (owner decision 2026-10-26, T-03-211):
+		// a key-ID entry the log's issuance does not support would never
+		// leave the KRL, and the signer refuses it (key_id_not_issued).
+		{"key_id_not_issued_refused", func(rf *revokeFixture) {
 			id := "kr1/ca=user/sub=nobody/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=1"
 			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: id},
 				[]tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: rf.ca.PublicKey().Marshal(), KeyID: id}}, nil)
-			rf.publish(nil)
-			rf.micros += 30 * 24 * 3600 * 1_000_000 // 30 days later
+		}, "key_id_not_issued"},
+		{"key_id_not_issued_empty_refused", func(rf *revokeFixture) {
+			id := "kr1/ca=user/sub=nobody/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=1"
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: id}, nil, nil)
+		}, "key_id_not_issued"},
+		{"key_id_of_other_role_refused", func(rf *revokeFixture) {
+			c := rf.issue() // a user certificate
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleHost, KeyID: c.KeyId},
+				[]tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: rf.hostCA.PublicKey().Marshal(), KeyID: c.KeyId}}, nil)
+		}, "key_id_not_issued"},
+		// The explicit-key cap (krl.CheckExplicitKeys): the byte cap is
+		// reached with krl.MaxRevokedKeyBytes / 8004 keys of 8000 bytes; a
+		// key already revoked is accepted again at the cap, a new one is
+		// refused.
+		{"explicit_key_cap_relist_accepted", func(rf *revokeFixture) {
+			first := rf.fillKeyCap()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: first}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: first}}, nil)
 			rf.publish(nil)
 		}, ""},
-		{"key_id_unknown_valid_before_dropped_refused", func(rf *revokeFixture) {
-			id := "kr1/ca=user/sub=nobody/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=1"
-			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: id},
-				[]tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: rf.ca.PublicKey().Marshal(), KeyID: id}}, nil)
-			rf.micros += 30 * 24 * 3600 * 1_000_000
-			rf.publish(func(o *publishOpts) { o.entries = nil }) // a KRL that read 0 as expired
-		}, "re-derived from the log's revocations"},
+		{"explicit_key_cap_refused", func(rf *revokeFixture) {
+			rf.fillKeyCap()
+			k := bigSKKey(rf.t, 8000)
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: k}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: k}}, nil)
+		}, "explicit_key_cap_reached"},
 		{"revoke_key_accepted", func(rf *revokeFixture) {
 			k := newSigner(rf.t, "ed25519").PublicKey().Marshal()
 			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: k}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: k}}, nil)

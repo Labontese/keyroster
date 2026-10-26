@@ -3,6 +3,7 @@ package signer
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
 	"errors"
@@ -28,6 +29,26 @@ import (
 )
 
 const testInstallationID = "0123456789abcdef0123456789abcdef"
+
+// bigSKKey returns a fresh canonical sk-ssh-ed25519@openssh.com public key
+// of exactly size bytes (at least 74), padded by its application string:
+// a revocable key near wire.MaxSubjectKeyLen for the explicit-key byte cap.
+func bigSKKey(t testing.TB, size int) []byte {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := ssh.Marshal(struct {
+		Name        string
+		KeyBytes    []byte
+		Application string
+	}{ssh.KeyAlgoSKED25519, pub, "ssh:" + strings.Repeat("x", size-74)})
+	if p, err := ssh.ParsePublicKey(k); err != nil || len(k) != size || !bytes.Equal(p.Marshal(), k) {
+		t.Fatalf("security-key key of %d bytes: %v", len(k), err)
+	}
+	return k
+}
 
 // revokeClock is a settable clock for the signer and the bootstrap.
 type revokeClock struct {
@@ -1131,23 +1152,62 @@ func TestRevokeSubject(t *testing.T) {
 		}
 		e.verifyExport()
 	})
-	t.Run("key_id_unknown_valid_before_kept", func(t *testing.T) {
+	t.Run("key_id_not_issued_refused", func(t *testing.T) {
+		// Pre-merge review of PR #61 (owner decision 2026-10-26): a key ID
+		// this signer did not issue under the role's CA keys would be an
+		// entry that never leaves the KRL, so it is refused; one it issued
+		// under another role is refused too.
 		e := newSubjectEnv(t)
-		id := "kr1/ca=user/sub=nobody/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=1"
-		resp := e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: id}))
-		if entries := e.revokeEntries(t, resp.RevokeLeaf); len(entries) != 1 || entries[0].ValidBeforeSeconds != 0 {
-			t.Fatalf("entries %+v, want one with ValidBefore 0 (no issuance row)", entries)
-		}
-		// Long past every certificate's lifetime the re-published KRL still
-		// lists it.
-		e.clock.set(e.clock.Now().Add(30*24*time.Hour), false)
-		if !e.s.republishIfDue(context.Background()) {
-			t.Fatal("no re-publish 30 days later")
-		}
-		if p := e.parsedKRL(t); !p.RevokesKeyID(e.fx.Roles[keystore.RoleUser].PublicKey().Marshal(), id) {
-			t.Fatal("the key ID with an unknown ValidBefore left the KRL")
-		}
+		c := e.login(t, "alice")
+		e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser,
+			KeyID: "kr1/ca=user/sub=nobody/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=1"}), "key_id_not_issued")
+		e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleHost, KeyID: c.KeyId}), "key_id_not_issued")
 		e.verifyExport()
+	})
+	t.Run("explicit_key_cap_reached", func(t *testing.T) {
+		// T-03-211: explicit keys never leave the KRL, so at most
+		// krl.MaxRevokedKeys distinct keys in krl.MaxRevokedKeyBytes. The
+		// keys at the cap are written as rows directly: the cap is checked
+		// against the rows before anything is logged or published.
+		for name, keys := range map[string]func(t *testing.T) [][]byte{
+			"count": func(t *testing.T) [][]byte {
+				out := make([][]byte, krl.MaxRevokedKeys)
+				for i := range out {
+					out[i] = newEd25519(t).PublicKey().Marshal()
+				}
+				return out
+			},
+			"bytes": func(t *testing.T) [][]byte {
+				out := make([][]byte, krl.MaxRevokedKeyBytes/8004)
+				for i := range out {
+					out[i] = bigSKKey(t, 8000)
+				}
+				return out
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				e := newSubjectEnv(t)
+				full := keys(t)
+				if err := krl.CheckExplicitKeys(full); err != nil {
+					t.Fatalf("the keys at the cap: %v", err)
+				}
+				if err := e.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+					for _, k := range full {
+						if err := e.db.InsertRevocation(tx, signerdb.Revocation{Kind: signerdb.RevocationKey, Key: k, RevokedAt: time.Now()}); err != nil {
+							return err
+						}
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				next := bigSKKey(t, 8000)
+				if name == "count" {
+					next = newEd25519(t).PublicKey().Marshal()
+				}
+				e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: next}), "explicit_key_cap_reached")
+			})
+		}
 	})
 	t.Run("valid_before_beyond_row_range_kept", func(t *testing.T) {
 		// No signer issues a certificate valid until ssh.CertTimeInfinity,
@@ -1263,12 +1323,11 @@ func (e *logEnv) revocationRows(t *testing.T) []signerdb.Revocation {
 }
 
 // TestPublishNeverDropsLiveEntry (T-03-14, the shared contract with 03-05's
-// KRL_M = KRL_B): over serial, key-ID (with and without an issuance row),
-// key and subject revocations, forced re-publishes and clock steps forward
-// and back, every entry missing from a published KRL version is prunable
-// at that version's issued_at (krl.Prunable over every row of it), and no
-// explicit key and no key-ID entry whose ValidBefore is unknown ever
-// leaves.
+// KRL_M = KRL_B): over serial, key-ID (a key ID without an issuance row
+// is refused, key_id_not_issued), key and subject revocations, forced
+// re-publishes and clock steps forward and back, every entry missing from
+// a published KRL version is prunable at that version's issued_at
+// (krl.Prunable over every row of it), and no explicit key ever leaves.
 func TestPublishNeverDropsLiveEntry(t *testing.T) {
 	e := newSubjectEnv(t)
 	ctx := context.Background()
@@ -1291,7 +1350,8 @@ func TestPublishNeverDropsLiveEntry(t *testing.T) {
 			e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: a2.KeyId}))
 		},
 		func() {
-			e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: unknownID}))
+			// Refused since the pre-merge review of PR #61: it would never leave.
+			e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: unknownID}), "key_id_not_issued")
 		},
 		func() { e.revoke(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: keyA})) },
 		func() {
@@ -1348,7 +1408,7 @@ func TestPublishNeverDropsLiveEntry(t *testing.T) {
 				if next.RevokesKeyID(sec.CAKey, id) {
 					continue
 				}
-				if id == unknownID || !prunable(func(row signerdb.Revocation) bool {
+				if !prunable(func(row signerdb.Revocation) bool {
 					return row.Kind == signerdb.RevocationKeyID && row.KeyID == id && bytes.Equal(row.CAKey, sec.CAKey)
 				}, at) {
 					t.Fatalf("version %d drops key ID %q, which is not prunable at its issued_at %d", next.Version, id, at)
@@ -1365,8 +1425,8 @@ func TestPublishNeverDropsLiveEntry(t *testing.T) {
 		}
 	}
 	last := versions[len(versions)-1]
-	if !last.RevokesKeyID(userCA, unknownID) || !last.RevokesKey(keyA) || !last.RevokesKey(keyB) || last.RevokesSerial(userCA, b.Serial) {
-		t.Fatalf("the last version: %+v; want the unknown key ID and both keys, and the expired subject entry pruned", last)
+	if last.RevokesKeyID(userCA, unknownID) || !last.RevokesKey(keyA) || !last.RevokesKey(keyB) || last.RevokesSerial(userCA, b.Serial) {
+		t.Fatalf("the last version: %+v; want both keys, no refused key ID, and the expired subject entry pruned", last)
 	}
 	pruned := false
 	for i := 1; i < len(versions); i++ {

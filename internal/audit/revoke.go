@@ -123,10 +123,12 @@ func (rs *revocations) groupCut(g *subjectGroup) error {
 //     the request's serial with the CA key and ValidBefore of its logged
 //     certificate, of the request's CA role; key_id, the request's key ID
 //     under every CA key of the role in the bundle in force
-//     (krl.RoleCAKeys), each with the latest ValidBefore of the logged
-//     certificates with that key ID under that CA key, or 0; key, the
-//     request's key, which must not be a key of the bundle in force
-//     (krl.InstallationKeys); subject user, the (CA key, serial,
+//     (krl.RoleCAKeys) under which the log issued a certificate with that
+//     key ID, each with the latest ValidBefore of those certificates, and
+//     at least one (key_id_not_issued); key, the request's key, which must
+//     not be a key of the bundle in force (krl.InstallationKeys) and must
+//     keep the log's explicit keys within krl.CheckExplicitKeys
+//     (explicit_key_cap_reached); subject user, the (CA key, serial,
 //     ValidBefore) of every certificate the issue and login_issue entries
 //     before it logged under the user CA with a key ID naming the subject
 //     and live at T (krl.EntryLive), ascending, whether or not an earlier
@@ -218,7 +220,14 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 					vb = max(vb, c.validBefore)
 				}
 			}
+			if vb == 0 {
+				continue // the log issued no certificate with that key ID under caKey
+			}
 			want = append(want, tlog.RevokedEntry{Kind: tlog.RevokedKeyID, CAKey: caKey, KeyID: req.KeyID, ValidBeforeSeconds: vb})
+		}
+		if len(want) == 0 {
+			return fmt.Errorf("revokes key ID %q, which no earlier issue or login_issue entry logged under a %s CA key of trust bundle v%d; the signer refuses it (key_id_not_issued)",
+				req.KeyID, req.CARole, a.bundle.Version)
 		}
 	case wire.TargetKey:
 		own, err := krl.InstallationKeys(a.bundle)
@@ -228,6 +237,16 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 		if own[string(req.Key)] {
 			return fmt.Errorf("revokes key %s, a key of trust bundle v%d, which the signer refuses (key_is_ca_of_this_installation)",
 				keyFingerprint(req.Key), a.bundle.Version)
+		}
+		revoked := [][]byte{req.Key}
+		for _, e := range rs.entries {
+			if e.Kind == krl.EntryKey {
+				revoked = append(revoked, e.Key)
+			}
+		}
+		if err := krl.CheckExplicitKeys(revoked); err != nil {
+			return fmt.Errorf("revokes key %s beyond the explicit-key cap, which the signer refuses (explicit_key_cap_reached): %w",
+				keyFingerprint(req.Key), err)
 		}
 		want = []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: req.Key}}
 	case wire.TargetSubject:

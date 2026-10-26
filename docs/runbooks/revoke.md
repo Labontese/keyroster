@@ -159,6 +159,25 @@ which makes every certificate of the old CA useless at once.
 and its rollback ran in the signer's unit tests
 (`TestRevokeKRLTooLarge`).
 
+### `explicit_key_cap_reached`
+
+An explicit key never leaves the KRL, so the signer revokes at most 1000
+distinct keys by key, taking at most 1 MiB of the KRL (an RSA key above
+4096 bits or a security-key key with a long application string reaches
+the 1 MiB first). Revoking a key that is already revoked always works.
+Beyond the cap a key revocation is refused and nothing is recorded, so
+the other 3 MiB of the KRL stay for serial and key-ID entries, which
+leave it as their certificates expire: one admin cannot fill the KRL for
+good. What one admin can still do is use up the cap, after which no
+further key can be revoked by key; revocation by serial, key ID and
+subject still works, and audit verify shows every key revocation and who
+signed it. **There is no remedy in this version**, because revocation
+rows are never deleted: remove such a key from every `authorized_keys`
+file by hand, and revoke its certificates by serial. The refusal and the
+cap ran in the signer's, audit's and krl's unit tests
+(`explicit_key_cap_reached`, `explicit_key_cap_refused`,
+`TestCheckExplicitKeys`, pre-merge review of PR #61).
+
 ### `revocations_not_logged`
 
 Every KRL is rebuilt from the signer's revocation table, which the signed
@@ -189,8 +208,11 @@ every minute). From then on the signer publishes the next version by
 itself whenever the last one is an hour old, with a fresh `issued_at` and
 the same entries, so a reader can tell a KRL that stopped being updated
 (D-10). An entry stays in the KRL until its certificate's ValidBefore +
-300 s at the KRL's `issued_at`; an explicit key, and a key ID whose
-certificate the signer has no record of, stay for good. The KRL keeps the
+300 s at the KRL's `issued_at`; an explicit key stays for good. The
+signer revokes a key ID only when it issued a certificate with that key
+ID under a CA key of the role (otherwise `key_id_not_issued`; revoke a
+certificate it did not issue by its key), so every key-ID entry leaves
+once its certificate expires. The KRL keeps the
 sections of CA keys the trust bundle no longer trusts until their entries
 expire. Run in CI (internal/krl and internal/signer tests, 03-03). The
 route needs no login, so keyroster-server keeps the

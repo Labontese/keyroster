@@ -47,6 +47,7 @@ The plan check found these facts about replay material (both skeptics upheld eac
 8. **03-13's start-up publish.** After an ops-key rotation, 03-13 publishes a KRL with the new ops key when the signer starts. That publish must respect a pending recovery. This was a split item: it cannot happen before 03-13, because successors copy the ops key until then.
 9. **Leaf kind numbers.** If the plan needs a new leaf kind, 11 to 14 are taken by 03-09 to 03-12. Reserve the next free number and note it in those plans.
 10. **The floor that round 5 proposed is moot.** It was set above the saved export's highest krl_version, which is too low after any later publish, and the export's krl_version is not bound either. Under Q1 the versions are time-derived, so no floor and no new leaf kind are needed for numbering.
+11. **Lost key IDs (pre-merge review of PR #61, owner decision 2026-10-26).** The signer revokes a key ID only when its issuance table holds a certificate with it (`key_id_not_issued` otherwise, T-03-211), so a key ID whose issuance a restore lost cannot be revoked by key ID on the restored signer; recovering such key IDs belongs to this plan.
 
 ## Solution
 
