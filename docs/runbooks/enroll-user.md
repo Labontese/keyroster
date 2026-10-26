@@ -145,8 +145,10 @@ keyroster directory install DIR
 ```
 
 `directory sign` re-checks the proposal: it must follow the installed
-verified version, and every signature already in it must verify and be by
-a policy admin. It shows the diff and asks before it signs; in a script
+verified version, name the installation of the root-verified trust bundle
+(a proposal for another installation, or for none while the bundle has
+one, is refused: the signer would never install it), and every signature
+already in it must verify and be by a policy admin. It shows the diff and asks before it signs; in a script
 with no terminal it refuses unless it is given `--yes`. A co-signer whose
 key is not the `admin_key` in their config names it with `--admin-key`.
 An admin who already signed is refused: a second signature by one admin

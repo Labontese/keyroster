@@ -474,6 +474,15 @@ func buildDir(t *testing.T, prev []byte, mutate func(d *directory.Directory)) []
 	return doc
 }
 
+// boundTo returns mutate followed by binding the directory to installation
+// id, as every edit binds a new version to the root-verified bundle's.
+func boundTo(id string, mutate func(d *directory.Directory)) func(d *directory.Directory) {
+	return func(d *directory.Directory) {
+		mutate(d)
+		d.InstallationID = id
+	}
+}
+
 // credOf is the directory credential of a pending entry.
 func credOf(c serverclient.PendingCredential) directory.Credential {
 	return directory.Credential{ID: c.ID, Alg: c.Alg, SPKI: c.SPKI, BackupEligible: c.BackupEligible, BackedUp: c.BackedUp}
@@ -706,7 +715,7 @@ func TestDirectoryPipeline(t *testing.T) {
 	t.Run("directory_sign_refuses_non_admin_sig", func(t *testing.T) {
 		e := newDirEnv(t, 2, 2)
 		bob, _ := pendingEntry(t, webauthn.AlgES256)
-		doc := buildDir(t, nil, addUser("bob", credOf(bob)))
+		doc := buildDir(t, nil, boundTo(e.bundle.InstallationID, addUser("bob", credOf(bob))))
 		_, other, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatal(err)
@@ -733,7 +742,7 @@ func TestDirectoryPipeline(t *testing.T) {
 	t.Run("directory_sign_refuses_tampered_doc", func(t *testing.T) {
 		e := newDirEnv(t, 2, 2)
 		bob, _ := pendingEntry(t, webauthn.AlgES256)
-		doc := buildDir(t, nil, addUser("bob", credOf(bob)))
+		doc := buildDir(t, nil, boundTo(e.bundle.InstallationID, addUser("bob", credOf(bob))))
 		sig := e.sign(t, doc, 0)
 		tampered := bytes.Replace(doc, []byte(`"name":"bob"`), []byte(`"name":"bod"`), 1)
 		if bytes.Equal(tampered, doc) {
@@ -918,7 +927,7 @@ func TestDirectorySignConfirm(t *testing.T) {
 		t.Helper()
 		e := newDirEnv(t, 2, 2)
 		bob, _ := pendingEntry(t, webauthn.AlgES256)
-		doc := buildDir(t, nil, addUser("bob", credOf(bob)))
+		doc := buildDir(t, nil, boundTo(e.bundle.InstallationID, addUser("bob", credOf(bob))))
 		sig := e.sign(t, doc, 0)
 		return e, writeProposalDir(t, doc, sig), sig
 	}
@@ -1161,4 +1170,44 @@ func TestDirectoryPeerText(t *testing.T) {
 			t.Fatalf("approve with software custody: exit %d, stderr:\n%s\nwant the banner once", code, stderr)
 		}
 	})
+}
+
+// TestDirectorySignInstallation (pre-merge review, 03-04): directory sign
+// co-signs only a proposal bound to the root-verified bundle's
+// installation, the signer's install rule (directory.CheckInstallation,
+// D-04). A proposal for another installation, or for none while the bundle
+// has an ID, is refused before the agent is asked, with directory.json.sigs
+// unchanged.
+func TestDirectorySignInstallation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   func(e *dirEnv) string
+		want string
+	}{
+		{"other_installation", func(*dirEnv) string { return "ffffffffffffffffffffffffffffffff" }, "is bound to installation ffffffffffffffffffffffffffffffff, but the root-verified trust bundle names "},
+		{"no_installation", func(*dirEnv) string { return "" }, "is bound to installation none, but the root-verified trust bundle names "},
+		{"this_installation", func(e *dirEnv) string { return e.bundle.InstallationID }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newDirEnv(t, 2, 2)
+			bob, _ := pendingEntry(t, webauthn.AlgES256)
+			doc := buildDir(t, nil, boundTo(tc.id(e), addUser("bob", credOf(bob))))
+			sig := e.sign(t, doc, 0)
+			dir := writeProposalDir(t, doc, sig)
+			code, stdout, stderr := run(t, "directory", "sign", dir, "--yes", "--admin-key", e.fps[1])
+			if tc.want == "" {
+				if code != 0 || e.agent.dirSigns() != 1 || !strings.Contains(stdout, "2 of 2 admin signatures") {
+					t.Fatalf("sign of a proposal for this installation: exit %d, %d sign requests, stdout %q, stderr %q", code, e.agent.dirSigns(), stdout, stderr)
+				}
+				return
+			}
+			if code != 1 || !strings.Contains(stderr, tc.want+e.bundle.InstallationID) || !strings.Contains(stderr, "Nothing was signed") {
+				t.Fatalf("sign of a proposal for installation %q: exit %d, stdout %q, stderr %q", tc.id(e), code, stdout, stderr)
+			}
+			requireNotSigned(t, e, 0)
+			if got := readTestFile(t, filepath.Join(dir, proposalSigs)); !bytes.Equal(got, sig) {
+				t.Fatal("directory.json.sigs changed")
+			}
+		})
+	}
 }

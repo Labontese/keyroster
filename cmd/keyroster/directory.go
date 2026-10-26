@@ -316,8 +316,9 @@ func checkProposalSigs(doc, sigs []byte, pol *trust.Policy) ([]string, error) {
 
 // runDirectorySign is keyroster directory sign DIR [--yes] [--admin-key FP]:
 // a co-signer adds their signature to a proposal. Before the agent is
-// asked, the proposal must parse, fit the policy, follow the installed
-// verified directory, and carry only valid signatures by policy admins
+// asked, the proposal must parse, follow the installed verified directory,
+// name the root-verified bundle's installation (directory.CheckInstallation,
+// D-04), fit the policy, and carry only valid signatures by policy admins
 // (checkProposalSigs); then the diff against the installed base is shown
 // and confirmSign asks (02-09-R2-F10). An admin who already signed is
 // refused: a second signature by one admin counts once.
@@ -349,6 +350,14 @@ func runDirectorySign(ctx context.Context, args []string, stdout, stderr io.Writ
 			p.dir, p.d.Version, vd.SHA256)
 	} else if err != nil {
 		return err
+	}
+	// D-04, the signer's install rule (CheckInstallation): a proposal for
+	// another installation, or for none while the bundle has an ID, never
+	// installs here, so no admin co-signs it (every edit writes the ID).
+	if err := directory.CheckInstallation(p.d, vd.Bundle.InstallationID); err != nil {
+		return &cliError{text: fmt.Sprintf("proposal %s is bound to installation %s, but the root-verified trust bundle names %s; "+
+			"the signer installs no directory for another installation. Nothing was signed",
+			p.dir, installationText(p.d.InstallationID), installationText(vd.Bundle.InstallationID)), err: err}
 	}
 	if err := directory.CheckPolicy(p.d, vd.Policy); err != nil {
 		return fmt.Errorf("proposal %s exceeds the root-signed policy: %w", p.dir, err)
