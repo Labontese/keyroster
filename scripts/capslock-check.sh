@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# capslock capability baseline for keyroster-signer (REPO-02, T-01-61).
+# capslock capability baselines per binary (REPO-02, T-01-61): keyroster-signer,
+# and keyroster-agent since 03-05.
 #
 #   bash scripts/capslock-check.sh            # compare with the baseline
 #   bash scripts/capslock-check.sh --update   # rewrite the baseline
 #
-# Runs capslock (pinned in tools/go.mod) on ./cmd/keyroster-signer for
-# GOOS=linux GOARCH=amd64 with CGO_ENABLED=0, in package mode: for every
-# package in the signer's dependency graph, the capabilities (FILES,
-# NETWORK, EXEC, ...) that capslock finds reachable from it. The check fails
-# when any (package, capability) pair is not in the committed baseline
-# test/capslock/keyroster-signer.json, so a dependency bump or a code change
+# Runs capslock (pinned in tools/go.mod) on each target (./cmd/keyroster-signer,
+# ./cmd/keyroster-agent) for GOOS=linux GOARCH=amd64 with CGO_ENABLED=0, in
+# package mode: for every package in the binary's dependency graph, the
+# capabilities (FILES, NETWORK, EXEC, ...) that capslock finds reachable
+# from it. The check fails when any (package, capability) pair is not in
+# the target's committed baseline (test/capslock/keyroster-signer.json,
+# test/capslock/keyroster-agent.json), so a dependency bump or a code change
 # that gives any package a new capability fails CI until a reviewed PR
 # updates the baseline. This is finer than comparing capability names only:
 # the signer as a whole already reaches nearly every capability (through
@@ -48,15 +50,15 @@ pairs() {
 	' "$1" | LC_ALL=C sort -u
 }
 
-# check_target NAME TAGS CGO BASELINE
+# check_target NAME PACKAGE TAGS CGO BASELINE
 check_target() {
-	local name=$1 tags=$2 cgo=$3 baseline=$4 out cur base new gone
+	local name=$1 pkg=$2 tags=$3 cgo=$4 baseline=$5 out cur base new gone
 	out=$(mktemp)
 	trap 'rm -f "$out"' RETURN
 	# stderr carries "go: downloading ..." on a cold module cache.
 	echo "== $(go tool -modfile=tools/go.mod capslock -version 2>/dev/null | head -n 1): $name (GOOS=linux GOARCH=amd64 CGO_ENABLED=$cgo tags=${tags:-none})"
 	if ! CGO_ENABLED=$cgo go tool -modfile=tools/go.mod capslock \
-		-packages ./cmd/keyroster-signer -goos linux -goarch amd64 \
+		-packages "$pkg" -goos linux -goarch amd64 \
 		-buildtags "$tags" -force_local_module -output package >"$out"; then
 		echo "capslock-check: capslock failed" >&2
 		exit 2
@@ -93,8 +95,9 @@ check_target() {
 }
 
 status=0
-check_target "keyroster-signer" "" 0 test/capslock/keyroster-signer.json
+check_target "keyroster-signer" ./cmd/keyroster-signer "" 0 test/capslock/keyroster-signer.json
+check_target "keyroster-agent" ./cmd/keyroster-agent "" 0 test/capslock/keyroster-agent.json
 if [ "$status" != 0 ]; then
-	echo "capslock-check: keyroster-signer gained capabilities; review them, then update the baseline in a reviewed PR (bash scripts/capslock-check.sh --update)" >&2
+	echo "capslock-check: a binary gained capabilities; review them, then update the baseline in a reviewed PR (bash scripts/capslock-check.sh --update)" >&2
 fi
 exit "$status"

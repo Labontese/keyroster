@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
-# Dependency firewall for keyroster-signer (KEY-01, REPO-02): the signer's
-# transitive dependency graph must not contain network, template, exec or
-# plugin packages, nor a TPM simulator. depguard (lint) catches direct
-# imports in signer packages; this catches what dependencies pull in.
+# Dependency firewall per binary (KEY-01, REPO-02, D-05). Each target has
+# its own banned list:
+#
+#   keyroster-signer: no network, template, exec or plugin packages, no
+#   TPM simulator, no WebAuthn attestation stack (BANNED, EXCEPTIONS).
+#   keyroster-agent (the root applier, 03-05): no HTTP, RPC, TLS, SMTP,
+#   templates, plugins or WebAuthn stack (AGENT_BANNED). os/exec is allowed
+#   for this target only; internal/agent/paths' TestPaths pins every exec
+#   site to sshd.go. Its only network use is the loopback self-test (the
+#   owner's D-05 answer, loopback-only), through net and x/crypto/ssh.
+#
+# depguard (lint) catches direct imports; this catches what dependencies
+# pull in.
 #
 #   bash scripts/dep-firewall.sh
 #
-# It runs `go list -deps` for GOOS=linux twice: with no build tags
-# (CGO_ENABLED=0, the default binary) and with -tags piv (CGO_ENABLED=1, the
-# PIV build). For every banned package it prints the packages that import it.
-# A banned package passes only when every importer is listed for it in
-# EXCEPTIONS below; each exception names the locked dependency that imports
-# it and why that is acceptable, and is reviewed in the PR that adds it.
+# It runs `go list -deps` for GOOS=linux: for the signer twice, with no
+# build tags (CGO_ENABLED=0, the default binary) and with -tags piv
+# (CGO_ENABLED=1, the PIV build); for the agent once, with no tags. For
+# every banned package it prints the packages that import it. A banned
+# package passes only when every importer is listed for it in the target's
+# exceptions; each exception names the locked dependency that imports it
+# and why that is acceptable, and is reviewed in the PR that adds it.
 #
 # Exit 0 when clean, 1 when a banned package is found without a matching
 # exception, 2 on usage or tool errors.
@@ -52,10 +62,28 @@ EXCEPTIONS=(
 	"os/exec modernc.org/libc"
 )
 
+# AGENT_BANNED is keyroster-agent's banned list (03-05 Task 4). 03-07 adds
+# the fetcher as its own target.
+AGENT_BANNED=(
+	net/http
+	net/rpc
+	crypto/tls
+	html/template
+	text/template
+	net/smtp
+	plugin
+	github.com/go-webauthn
+	github.com/fxamacker/cbor
+	github.com/golang-jwt
+)
+AGENT_EXCEPTIONS=()
+
 # A package matches a banned entry when it is the entry or below it.
+# $1 names the banned array.
 banned_match() {
-	local pkg=$1 b
-	for b in "${BANNED[@]}"; do
+	local -n list=$1
+	local pkg=$2 b
+	for b in "${list[@]}"; do
 		if [ "$pkg" = "$b" ] || [[ $pkg == "$b"/* ]]; then
 			return 0
 		fi
@@ -63,46 +91,56 @@ banned_match() {
 	return 1
 }
 
+# $1 names the exceptions array.
 excepted() {
-	local pkg=$1 importer=$2 e
-	for e in "${EXCEPTIONS[@]}"; do
+	local -n list=$1
+	local pkg=$2 importer=$3 e
+	for e in "${list[@]}"; do
 		[ "$e" = "$pkg $importer" ] && return 0
 	done
 	return 1
 }
 
 status=0
-for tags in "" piv; do
-	cgo=0
+
+# check_target NAME PKG TAGS BANNED_ARRAY EXCEPTIONS_ARRAY
+check_target() {
+	local name=$1 pkg=$2 tags=$3 banned=$4 exceptions=$5 cgo=0 label deps graph found p importers importer
 	[ -n "$tags" ] && cgo=1
 	label=${tags:-default}
-	if ! deps=$(CGO_ENABLED=$cgo GOOS=linux go list -deps -tags "$tags" ./cmd/keyroster-signer); then
-		echo "dep-firewall: go list failed for tags '$label'" >&2
+	if ! deps=$(CGO_ENABLED=$cgo GOOS=linux go list -deps -tags "$tags" "$pkg"); then
+		echo "dep-firewall: go list failed for $name, tags '$label'" >&2
 		exit 2
 	fi
-	if ! graph=$(CGO_ENABLED=$cgo GOOS=linux go list -deps -tags "$tags" -f '{{.ImportPath}}: {{join .Imports " "}}' ./cmd/keyroster-signer); then
-		echo "dep-firewall: go list failed for tags '$label'" >&2
+	if ! graph=$(CGO_ENABLED=$cgo GOOS=linux go list -deps -tags "$tags" -f '{{.ImportPath}}: {{join .Imports " "}}' "$pkg"); then
+		echo "dep-firewall: go list failed for $name, tags '$label'" >&2
 		exit 2
 	fi
-	echo "== keyroster-signer, GOOS=linux, tags=$label, CGO_ENABLED=$cgo: $(wc -l <<<"$deps") packages"
+	echo "== $name, GOOS=linux, tags=$label, CGO_ENABLED=$cgo: $(wc -l <<<"$deps") packages"
 	found=0
-	while IFS= read -r pkg; do
-		banned_match "$pkg" || continue
+	while IFS= read -r p; do
+		banned_match "$banned" "$p" || continue
 		found=1
-		importers=$(awk -v p="$pkg" '{for (i = 2; i <= NF; i++) if ($i == p) {sub(/:$/, "", $1); print $1}}' <<<"$graph")
+		importers=$(awk -v p="$p" '{for (i = 2; i <= NF; i++) if ($i == p) {sub(/:$/, "", $1); print $1}}' <<<"$graph")
 		for importer in $importers; do
-			if excepted "$pkg" "$importer"; then
-				echo "   allowed: $pkg <- $importer (documented exception)"
+			if excepted "$exceptions" "$p" "$importer"; then
+				echo "   allowed: $p <- $importer (documented exception)"
 			else
-				echo "   BANNED:  $pkg <- $importer"
+				echo "   BANNED:  $p <- $importer"
 				status=1
 			fi
 		done
 	done <<<"$deps"
 	[ "$found" = 0 ] && echo "   no banned packages"
+	return 0
+}
+
+for tags in "" piv; do
+	check_target keyroster-signer ./cmd/keyroster-signer "$tags" BANNED EXCEPTIONS
 done
+check_target keyroster-agent ./cmd/keyroster-agent "" AGENT_BANNED AGENT_EXCEPTIONS
 
 if [ "$status" != 0 ]; then
-	echo "dep-firewall: banned packages in the keyroster-signer dependency graph (see above)" >&2
+	echo "dep-firewall: banned packages in a binary's dependency graph (see above)" >&2
 fi
 exit "$status"

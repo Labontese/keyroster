@@ -1,0 +1,29 @@
+{
+  "github.com/Labontese/keyroster/cmd/keyroster-agent": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_EXEC",
+    "CAPABILITY_FILES",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_READ_SYSTEM_STATE",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_SYSTEM_CALLS",
+    "CAPABILITY_UNANALYZED",
+    "CAPABILITY_UNSAFE_POINTER"
+  ],
+  "github.com/Labontese/keyroster/internal/agent/apply": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_EXEC",
+    "CAPABILITY_FILES",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_READ_SYSTEM_STATE",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_SYSTEM_CALLS",
+    "CAPABILITY_UNANALYZED"
+  ],
+  "golang.org/x/crypto/ssh": [
+    "CAPABILITY_REFLECT"
+  ],
+  "golang.org/x/sys/unix": [
+    "CAPABILITY_SYSTEM_CALLS"
+  ]
+}
