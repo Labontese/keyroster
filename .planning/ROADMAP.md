@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 5/18 plans executed in 17 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 5/19 plans executed in 18 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -183,36 +183,39 @@ Plans:
 - [ ] 03-06-PLAN.md — Distro detection, D-07 refusals, D-08 Phase 2 takeover, drift checks, seven-image distro matrix (owner applies the ruleset)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 03-06b-PLAN.md — Recovery of the revocations a signer restore lost (owner decision 2026-10-25, Q2: merged before 03-07): lost-certificates checkpoint, keyroster-server keeps the KRL it served, `keyroster revoke recover` and `keyroster-signer recover-revocations` import it with the saved export's last KRL in one admin-signed `revocation_recovery` transaction under the restore hold, audit rule, the restore runbook and drill
+- [ ] 03-06b-PLAN.md — Recovery of the revocations a signer restore lost, the code (owner decision 2026-10-25, Q2: merged before 03-07): the owner's lost-certificates answer (pre-answered 2026-10-26), keyroster-server keeps the KRL it served, `keyroster revoke recover` and `keyroster-signer recover-revocations` import it with the saved export's last KRL in one admin-signed `revocation_recovery` transaction, audit rule, unit tests, vectors and fuzzing, the tracer
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 03-07-PLAN.md — Join tokens, enrollment with host-key PoP, `host approve`, separate mTLS agent listener, fetcher/applier split, pull of signed state
+- [ ] 03-06c-PLAN.md — Recovery of the revocations a signer restore lost, the procedure: the restore runbook keeps the server's KRL copy under the hold and runs the recovery before the release in place of 03-03's stop, the e2e drill, the runbook pins and systemd-sandbox blocks, the todo closed (split from 03-06b, owner decision 2026-10-26, PR #66)
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 03-08-PLAN.md — Heartbeats, `host status`, staleness and silence alerts, periodic drift, identity rotation, hardened systemd and OpenRC units
+- [ ] 03-07-PLAN.md — Join tokens, enrollment with host-key PoP, `host approve`, separate mTLS agent listener, fetcher/applier split, pull of signed state
 
 **Wave 10** *(blocked on Wave 9 completion)*
-- [ ] 03-09-PLAN.md — T-03-100 checkpoint (the owner decides who receives the signed directory for host trust), then host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`
+- [ ] 03-08-PLAN.md — Heartbeats, `host status`, staleness and silence alerts, periodic drift, identity rotation, hardened systemd and OpenRC units
 
 **Wave 11** *(blocked on Wave 10 completion)*
-- [ ] 03-10-PLAN.md — Probe certificates and the full self-test (D-06)
+- [ ] 03-09-PLAN.md — T-03-100 checkpoint (the owner decides who receives the signed directory for host trust), then host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`
 
 **Wave 12** *(blocked on Wave 11 completion)*
-- [ ] 03-11-PLAN.md — Machine identities by PoP (AUTH-06), `revoke machine`
+- [ ] 03-10-PLAN.md — Probe certificates and the full self-test (D-06)
 
 **Wave 13** *(blocked on Wave 12 completion)*
-- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
+- [ ] 03-11-PLAN.md — Machine identities by PoP (AUTH-06), `revoke machine`
 
 **Wave 14** *(blocked on Wave 13 completion)*
-- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
+- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
 
 **Wave 15** *(blocked on Wave 14 completion)*
-- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
+- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
 
 **Wave 16** *(blocked on Wave 15 completion)*
-- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
 
 **Wave 17** *(blocked on Wave 16 completion)*
+- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+
+**Wave 18** *(blocked on Wave 17 completion)*
 - [ ] 03-16-PLAN.md — Homelab dogfood: enroll the owner's hosts, take over the 02-14 hosts, drills (revocation, no TOFU, corrupt file, break-glass, machine, rotation if chosen)
 
 **Phase close (after verification):** the README quickstart (install server, signer and agent, first certificate) on branch `p03/close`, per the documentation convention.
@@ -283,7 +286,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 5/18 | In Progress | - |
+| 3. Linux Agent and Revocation | 5/19 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |
