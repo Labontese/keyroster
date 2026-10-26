@@ -337,6 +337,25 @@ func TestApply(t *testing.T) {
 			t.Fatalf("a disabled host: %v", err)
 		}
 	})
+	t.Run("oversize_generation_refused_before_install", func(t *testing.T) {
+		t.Parallel()
+		// PR #67 review: a valid directory can map enough roles to one
+		// account to render a principals file above the cap readGeneration
+		// reads with; installed, it would fail every later apply.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		cur, gens := h.current(), h.genCount()
+		s := h.spec("role:ops")
+		s.bulkRoles = 17
+		h.publishDir(s)
+		if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) || h.current() != cur || h.genCount() != gens {
+			t.Fatalf("an oversize principals file: %v, current %d (was %d), %d gens (was %d)", err, h.current(), cur, h.genCount(), gens)
+		}
+		h.publishDir(h.spec("role:ops", "role:q"))
+		if r, err := h.apply(); err != nil || r.DirectoryVersion != 3 {
+			t.Fatalf("the next apply after the refusal: %+v, %v", r, err)
+		}
+	})
 	t.Run("empty_krl_installed", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))

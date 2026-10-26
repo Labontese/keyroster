@@ -124,6 +124,10 @@ type dirSpec struct {
 	status     string
 	install    string // installation ID; "" means testInstallation
 	extraHost  *directory.Host
+	// bulkRoles adds that many roles of 32 principals of 128 characters
+	// each, mapped to every account (a valid directory whose principals
+	// files exceed the generation read cap).
+	bulkRoles int
 }
 
 // directory signs one version after prev (nil: version 1).
@@ -139,12 +143,23 @@ func (f *fixture) directory(prev []byte, s dirSpec) spool.Doc {
 	for _, k := range s.hostKeys {
 		keys = append(keys, trust.FormatKey(k))
 	}
+	roles := []directory.Role{{Name: "ops", Principals: s.principals, MaxTTLSeconds: 3600, Extensions: []string{}, Users: []string{}, Groups: []string{}}}
+	names := []string{"ops"}
+	for i := range s.bulkRoles {
+		r := directory.Role{Name: fmt.Sprintf("bulk%02d", i), MaxTTLSeconds: 3600, Extensions: []string{}, Users: []string{}, Groups: []string{}}
+		for j := range directory.MaxRolePrincipals {
+			p := fmt.Sprintf("bulk%02d-%02d-", i, j)
+			r.Principals = append(r.Principals, p+strings.Repeat("x", 128-len(p)))
+		}
+		roles = append(roles, r)
+		names = append(names, r.Name)
+	}
 	var accounts []directory.AccountMap
 	for _, a := range s.accounts {
-		accounts = append(accounts, directory.AccountMap{Account: a, Roles: []string{"ops"}})
+		accounts = append(accounts, directory.AccountMap{Account: a, Roles: names})
 	}
 	d := &directory.Directory{Version: 1, Prev: trust.GenesisPrev, Users: []directory.User{}, Groups: []directory.Group{},
-		Roles:          []directory.Role{{Name: "ops", Principals: s.principals, MaxTTLSeconds: 3600, Extensions: []string{}, Users: []string{}, Groups: []string{}}},
+		Roles:          roles,
 		HostGroups:     []directory.HostGroup{{Name: "lab", Accounts: accounts}},
 		Hosts:          []directory.Host{{Name: "web1", HostGroup: "lab", Keys: keys, Principals: []string{"web1"}, Status: s.status}},
 		InstallationID: s.install,

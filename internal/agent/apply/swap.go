@@ -42,6 +42,38 @@ const (
 	maxAccounts       = 4096
 )
 
+// ErrGenerationTooLarge is a generation with a file, or a number of
+// principals files, above the cap readGeneration reads it back with:
+// installed, it would fail every later apply (PR #67 review). It is
+// refused before anything is written.
+var ErrGenerationTooLarge = errors.New("generation_too_large")
+
+// checkLimits refuses g when readGeneration could not read it back: each
+// file within its class's cap, at most maxAccounts principals files.
+func checkLimits(g *Generation) error {
+	accounts := 0
+	for _, name := range fileNames(g) {
+		class, _ := ClassOf(name)
+		var limit int64
+		switch class {
+		case FileKRL:
+			limit = krl.MaxKRL
+		case FileCAList:
+			limit = maxCAFile
+		default:
+			limit = maxPrincipalsFile
+			accounts++
+		}
+		if n := int64(len(g.Files[name])); n > limit {
+			return fmt.Errorf("%w: %s would be %d bytes, above %d", ErrGenerationTooLarge, name, n, limit)
+		}
+	}
+	if accounts > maxAccounts {
+		return fmt.Errorf("%w: %d principals files, above %d", ErrGenerationTooLarge, accounts, maxAccounts)
+	}
+	return nil
+}
+
 // genRecord is <state>/generations/<N>.json: the SHA-256 of each file of
 // generation N, written before the directory is renamed into place. Only
 // a generation with a record is the agent's (03-06's drift check and
@@ -56,8 +88,12 @@ func recordName(n uint64) string { return strconv.FormatUint(n, 10) + ".json" }
 // installGeneration writes g as generation g.N: a temporary directory in
 // gen/ (0755, files 0644), the record, then rename to gen/<N> and an
 // fsync of gen/. The keyroster tree and gen/ are set to 0755 whatever the
-// umask (mkdirMode).
+// umask (mkdirMode). A generation readGeneration could not read back is
+// refused first (generation_too_large).
 func (e *engine) installGeneration(g *Generation) error {
+	if err := checkLimits(g); err != nil {
+		return err
+	}
 	for _, d := range []string{e.l.KeyrosterDir(), e.l.GenDir()} {
 		if err := e.mkdirMode(d, 0o755); err != nil {
 			return err
