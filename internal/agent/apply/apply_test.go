@@ -1937,6 +1937,24 @@ func TestHostKeys(t *testing.T) {
 	if _, err := hostKeys(dump("ssh_host_ecdsa_key", "ssh_host_ed25519_key")); err == nil {
 		t.Fatal("a present private key without its .pub: no error")
 	}
+	// 03-06: Arch's OpenSSH 10.6p1 generates an ML-DSA-44+Ed25519 host key
+	// x/crypto/ssh cannot parse. It is skipped, beside a readable key; alone
+	// it is an error, and so is a readable type that does not parse.
+	mldsa := filepath.Join(dir, "ssh_host_mldsa44_ed25519_key")
+	writeFile(t, mldsa, []byte("private key placeholder\n"))
+	writeFile(t, mldsa+".pub", []byte("ssh-mldsa44-ed25519 AAAAE3NzaC1tbGRzYTQ0LWVkMjU1MTkAAAAg root@arch\n"))
+	if keys, err := hostKeys(dump("ssh_host_ed25519_key", "ssh_host_mldsa44_ed25519_key")); err != nil || len(keys) != 1 {
+		t.Fatalf("Ed25519 and ML-DSA-44+Ed25519 keys: %v, %v", keys, err)
+	}
+	if _, err := hostKeys(dump("ssh_host_mldsa44_ed25519_key")); err == nil || !strings.Contains(err.Error(), "ssh-mldsa44-ed25519") {
+		t.Fatalf("only an unreadable key type: %v", err)
+	}
+	bad := filepath.Join(dir, "ssh_host_bad_key")
+	writeFile(t, bad, []byte("private key placeholder\n"))
+	writeFile(t, bad+".pub", []byte("ssh-ed25519 !!!notbase64 root@x\n"))
+	if _, err := hostKeys(dump("ssh_host_ed25519_key", "ssh_host_bad_key")); err == nil {
+		t.Fatal("a corrupt Ed25519 .pub: no error")
+	}
 }
 
 // TestSelfTestLoopbackFamilies (PR #67 review): with the default
