@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: 03-03b executed; PR open at the Task 4 merge gate
-last_updated: "2026-10-26T05:32:21.584Z"
+stopped_at: 03-04 executed; PR open at the Task 4 merge gate
+last_updated: "2026-10-26T08:43:28.415Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 89b237881c1eb68808a87ac4efca3d2033ad321d
+state_head: 1d78c41036bf7591093761e8e4b422e251face58
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 52
-  completed_plans: 39
+  completed_plans: 40
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 5 of 17
+Plan: 6 of 17
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -94,6 +94,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P02 | 47 min | 3 tasks | 26 files |
 | Phase 03 P03 | 78 min | 3 tasks | 32 files |
 | Phase 03 P03b | 67 min | 3 tasks | 19 files |
+| Phase 03 P04 | 62 min | 3 tasks | 38 files |
 
 ## Accumulated Context
 
@@ -250,10 +251,13 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-03: subject_kind_unsupported and key_is_ca_of_this_installation are classified malformed
 - [Phase 03]: 03-03b: keyroster revoke user refuses before revoking when stdin is not a terminal and --yes is not given
 - [Phase 03]: 03-03b: every revoke command parses the verified KRL and exits non-zero unless it lists each revoked target
+- [Phase 03]: 03-04: directories carry installation_id (last omitempty field; namespace keyroster/directory/v1 unchanged); the signer refuses directory_installation_missing, _mismatch and _unknown (unauthorized) and audit verify applies the same rule; a stored ID-less directory stays authorized (lenient D-04 answer, start-up warning)
+- [Phase 03]: 03-04: every CLI directory edit copies the installation ID from the root-verified bundle; keyroster directory rebind binds an ID-less directory and refuses without a bundle ID, when already bound, and when bound to another installation
+- [Phase 03]: 03-04: a role is user-facing when its own users or groups list is non-empty; machine-only roles take the machine CA cap; mixed roles pass both caps and both profiles
+- [Phase 03]: 03-04: pop.hosts is one-way (trust.CheckPoPSuccessor in checkSuccessorChain, pop_hosts_removed); pop.machines stays freely changeable
 
 ### Pending Todos
 
-- [2026-10-16] [auth] Bind admin-signed directories to a deployment — [todo file](.planning/todos/pending/2026-10-16-bind-admin-signed-directories-to-a-deployment.md) — Needs Options:.
 - [2026-10-17] [auth] Serve refuses to start without a witnessed checkpoint (blocker, Phase 4) — [todo file](.planning/todos/pending/2026-10-17-serve-refuses-without-witnessed-checkpoint.md) — owner decision taken; options: witness cosignatures checked at start, or an operator-supplied minimum checkpoint as an interim measure.
 - [2026-10-19] [auth] Choose the software passphrase source at every start (minor, Phase 6) — [todo file](.planning/todos/pending/2026-10-19-choose-the-software-passphrase-source-at-every-start.md) — deferred by the owner; suggested option (c): store nothing at ca-init.
 - [2026-10-20] [server] Cap keyroster-server connections and memory (minor, Phase 6) — [todo file](.planning/todos/pending/2026-10-20-cap-server-connections-and-memory.md) — found in the 02-07 pre-merge review: no listener connection cap, idle HTTP/1.1 and h2 connections and h2 receive windows; options listed.
@@ -289,6 +293,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-26T05:32:21.136Z
-Stopped at: 03-03b executed; PR open at the Task 4 merge gate
+Last session: 2026-10-26T08:43:27.937Z
+Stopped at: 03-04 executed; PR open at the Task 4 merge gate
 Resume file: None
