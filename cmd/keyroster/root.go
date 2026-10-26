@@ -222,25 +222,43 @@ func runRootGenesisPolicy(_ context.Context, args []string, stdout, stderr io.Wr
 // WebAuthn RP (D-09).
 const rpOneWayWarning = "WARNING: rp_id is a one-way setting. Every passkey enrolled under it works only for that exact hostname; renaming the host or changing rp_id makes every enrolled passkey unusable.\n"
 
+// popOneWayNote is printed whenever the successor's pop.hosts is true
+// (owner decision 2026-10-24).
+const popOneWayNote = "note: pop.hosts cannot be removed once set (pop_hosts_removed)\n"
+
 // successorPolicyUsage is the flag set's usage header.
-const successorPolicyUsage = `usage: keyroster root successor-policy --prev POLICY --out FILE --webauthn-rp-id HOST [--webauthn-origin URL]...
+const successorPolicyUsage = `usage: keyroster root successor-policy --prev POLICY --out FILE [--webauthn-rp-id HOST [--webauthn-origin URL]...] [--pop-hosts] [--pop-machines]
 
 Writes the successor of the policy in force (policy.json of the bundle in
 force): version + 1, prev = SHA-256 of that policy, every other field
-unchanged, and the WebAuthn relying party set or changed. The output is
-unsigned: sign it into a successor bundle with "keyroster root sign --prev",
-check it with "keyroster trust verify --prev", then install it.
+unchanged, and the WebAuthn relying party set or changed, or proof of
+possession enabled for host agents (--pop-hosts) or machine renewals
+(--pop-machines). The output is unsigned: sign it into a successor bundle
+with "keyroster root sign --prev", check it with "keyroster trust verify
+--prev", then install it.
 
-Only the WebAuthn RP can be changed here. Admins, admin quorum, CA profiles
-and every other policy field are carried over unchanged; a quorum-gated
-policy change is Phase 4 (AUTHZ-03).
+Only the WebAuthn RP and the PoP switches can be changed here. A PoP flag
+that is not given keeps the previous policy's value, and pop.hosts cannot
+be turned off again once a policy sets it (pop_hosts_removed). Admins,
+admin quorum, CA profiles and every other policy field are carried over
+unchanged; a quorum-gated policy change is Phase 4 (AUTHZ-03).
 
 `
 
+// popText is a policy's PoP switches as successor-policy prints them.
+func popText(p *trust.PoPPolicy) string {
+	if p == nil {
+		return "(none)"
+	}
+	return fmt.Sprintf("hosts=%t machines=%t", p.Hosts, p.Machines)
+}
+
 // runRootSuccessorPolicy writes the successor of the policy in force that
-// sets or changes its WebAuthn RP (D-09). It refuses an existing --out, a
-// --prev that is not a canonical policy, an RP equal to the one in force
-// and an RP the policy rules refuse, and writes nothing then.
+// sets or changes its WebAuthn RP (D-09), or enables proof-of-possession
+// issuance (pop.hosts, pop.machines). It refuses an existing --out, a
+// --prev that is not a canonical policy, a successor that changes nothing,
+// one that turns pop.hosts off (trust.CheckPoPSuccessor) and an RP the
+// policy rules refuse, and writes nothing then.
 func runRootSuccessorPolicy(_ context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("root successor-policy", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -250,14 +268,20 @@ func runRootSuccessorPolicy(_ context.Context, args []string, stdout, stderr io.
 	}
 	prevPath := fset.String("prev", "", "the canonical policy in force: policy.json of the bundle in force (required)")
 	out := fset.String("out", "", "successor policy output file; must not exist (required)")
-	rpID := fset.String("webauthn-rp-id", "", "WebAuthn relying party ID: the DNS hostname every passkey is bound to, forever (required)")
+	rpID := fset.String("webauthn-rp-id", "", "WebAuthn relying party ID: the DNS hostname every passkey is bound to, forever")
 	var origins stringList
 	fset.Var(&origins, "webauthn-origin", "allowed WebAuthn origin https://HOST[:PORT] (repeatable; default https://<rp-id>)")
+	popHosts := fset.Bool("pop-hosts", false, "enable host certificates for enrolled host agents on proof of possession (one-way: cannot be turned off again)")
+	popMachines := fset.Bool("pop-machines", false, "enable machine certificate renewals on proof of possession")
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
-	if fset.NArg() != 0 || *prevPath == "" || *out == "" || *rpID == "" {
-		_, _ = fmt.Fprintln(stderr, "root successor-policy: --prev, --out and --webauthn-rp-id are required")
+	if fset.NArg() != 0 || *prevPath == "" || *out == "" || (*rpID == "" && !*popHosts && !*popMachines) {
+		_, _ = fmt.Fprintln(stderr, "root successor-policy: --prev and --out are required, with --webauthn-rp-id, --pop-hosts or --pop-machines")
+		return errUsage
+	}
+	if *rpID == "" && len(origins) > 0 {
+		_, _ = fmt.Fprintln(stderr, "root successor-policy: --webauthn-origin needs --webauthn-rp-id")
 		return errUsage
 	}
 	if _, err := os.Lstat(*out); err == nil {
@@ -273,23 +297,48 @@ func runRootSuccessorPolicy(_ context.Context, args []string, stdout, stderr io.
 	if err != nil {
 		return fmt.Errorf("%s: %w; nothing was written", *prevPath, err)
 	}
-	rp := &trust.WebAuthnRP{RPID: *rpID, Origins: slices.Clone([]string(origins))}
-	if len(rp.Origins) == 0 {
-		rp.Origins = []string{"https://" + *rpID}
+	next := *prev
+	rpChanged := false
+	if *rpID != "" {
+		rp := &trust.WebAuthnRP{RPID: *rpID, Origins: slices.Clone([]string(origins))}
+		if len(rp.Origins) == 0 {
+			rp.Origins = []string{"https://" + *rpID}
+		}
+		slices.Sort(rp.Origins)
+		rpChanged = prev.WebAuthn == nil || prev.WebAuthn.RPID != rp.RPID || !slices.Equal(prev.WebAuthn.Origins, rp.Origins)
+		if !rpChanged && !*popHosts && !*popMachines {
+			return fmt.Errorf("the policy in force (v%d) already has rp_id %s with origins %s: nothing to change; nothing was written",
+				prev.Version, rp.RPID, strings.Join(rp.Origins, " "))
+		}
+		next.WebAuthn = rp
 	}
-	slices.Sort(rp.Origins)
-	if prev.WebAuthn != nil && prev.WebAuthn.RPID == rp.RPID && slices.Equal(prev.WebAuthn.Origins, rp.Origins) {
-		return fmt.Errorf("the policy in force (v%d) already has rp_id %s with origins %s: nothing to change; nothing was written",
-			prev.Version, rp.RPID, strings.Join(rp.Origins, " "))
+	// The successor starts from the previous switches: a flag not given
+	// keeps its value, and no flag clears one.
+	var pop trust.PoPPolicy
+	if prev.PoP != nil {
+		pop = *prev.PoP
+	}
+	pop.Hosts = pop.Hosts || *popHosts
+	pop.Machines = pop.Machines || *popMachines
+	next.PoP = nil
+	if pop.Hosts || pop.Machines {
+		next.PoP = &pop
+	}
+	popChanged := popText(prev.PoP) != popText(next.PoP)
+	if !rpChanged && !popChanged {
+		return fmt.Errorf("the policy in force (v%d) already has %s: nothing to change; nothing was written", prev.Version, successorWhat(prev, *rpID != ""))
 	}
 	if prev.Version == math.MaxUint64 {
 		return fmt.Errorf("the policy in force has the last possible version; nothing was written")
 	}
-	next := *prev
 	next.Version = prev.Version + 1
 	next.Prev = trust.SHA256Hex(prevData)
-	next.WebAuthn = rp
 	if err := next.Validate(); err != nil {
+		return fmt.Errorf("successor policy: %w; nothing was written", err)
+	}
+	// Refuse before any root holder signs; root sign --prev, trust verify
+	// --prev, install-bundle and audit verify refuse it again.
+	if err := trust.CheckPoPSuccessor(prev, &next); err != nil {
 		return fmt.Errorf("successor policy: %w; nothing was written", err)
 	}
 	data, err := next.Canonical()
@@ -299,15 +348,34 @@ func runRootSuccessorPolicy(_ context.Context, args []string, stdout, stderr io.
 	if err := writeNew(*out, data); err != nil {
 		return err
 	}
-	oldRP, oldOrigins := "(none)", "(none)"
-	if prev.WebAuthn != nil {
-		oldRP, oldOrigins = prev.WebAuthn.RPID, strings.Join(prev.WebAuthn.Origins, " ")
-	}
 	_, _ = fmt.Fprintf(stdout, "successor of policy v%d, sha256 %s\n", prev.Version, next.Prev)
-	_, _ = fmt.Fprintf(stdout, "rp_id:   %s -> %s\norigins: %s -> %s\n", oldRP, rp.RPID, oldOrigins, strings.Join(rp.Origins, " "))
+	if rpChanged {
+		oldRP, oldOrigins := "(none)", "(none)"
+		if prev.WebAuthn != nil {
+			oldRP, oldOrigins = prev.WebAuthn.RPID, strings.Join(prev.WebAuthn.Origins, " ")
+		}
+		_, _ = fmt.Fprintf(stdout, "rp_id:   %s -> %s\norigins: %s -> %s\n", oldRP, next.WebAuthn.RPID, oldOrigins, strings.Join(next.WebAuthn.Origins, " "))
+	}
+	if popChanged {
+		_, _ = fmt.Fprintf(stdout, "pop: %s -> %s\n", popText(prev.PoP), popText(next.PoP))
+	}
 	_, _ = fmt.Fprintf(stdout, "policy: %s (version %d)\nsha256: %s\n", *out, next.Version, trust.SHA256Hex(data))
-	_, _ = io.WriteString(stderr, rpOneWayWarning)
+	if rpChanged {
+		_, _ = io.WriteString(stderr, rpOneWayWarning)
+	}
+	if next.PoP != nil && next.PoP.Hosts {
+		_, _ = io.WriteString(stderr, popOneWayNote)
+	}
 	return nil
+}
+
+// successorWhat names what a no-op successor-policy request asked for.
+func successorWhat(prev *trust.Policy, rp bool) string {
+	what := "pop " + popText(prev.PoP)
+	if rp && prev.WebAuthn != nil {
+		what = "rp_id " + prev.WebAuthn.RPID + " with origins " + strings.Join(prev.WebAuthn.Origins, " ") + " and " + what
+	}
+	return what
 }
 
 func runRootSign(_ context.Context, args []string, stdout, stderr io.Writer) error {

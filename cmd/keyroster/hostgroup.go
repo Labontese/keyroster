@@ -89,7 +89,9 @@ func runHostGroupAdd(ctx context.Context, args []string, stdout, stderr io.Write
 }
 
 // runHostGroupRemove is keyroster host-group remove NAME. It refuses while
-// the host group maps an account: once the host group is gone, keyroster
+// a host names the host group (D-11; Validate refuses that directory too,
+// this is the friendlier message), and while the host group maps an
+// account: once the host group is gone, keyroster
 // host principals can no longer render the header-only file that replaces
 // an account's old grant (T-02-100). Unmap the accounts and install their
 // re-rendered files first.
@@ -112,6 +114,17 @@ func runHostGroupRemove(ctx context.Context, args []string, stdout, stderr io.Wr
 		i, err := findHostGroup(d, name)
 		if err != nil {
 			return err
+		}
+		// D-11: every host names exactly one existing host group.
+		var hosts []string
+		for _, h := range d.Hosts {
+			if h.HostGroup == name {
+				hosts = append(hosts, h.Name)
+			}
+		}
+		if len(hosts) > 0 {
+			return fmt.Errorf("host group %s is the host group of host(s) %s; remove each (keyroster host remove HOST) or register it again in another host group first. Nothing was signed",
+				name, strings.Join(hosts, ", "))
 		}
 		if accounts := d.HostGroups[i].Accounts; len(accounts) > 0 {
 			names := make([]string, len(accounts))

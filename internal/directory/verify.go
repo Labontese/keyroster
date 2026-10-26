@@ -82,26 +82,82 @@ func CheckSuccessorBytes(installed, doc []byte) error {
 	return CheckSuccessor(installed, &Directory{Version: next.Version, Prev: next.Prev})
 }
 
-// CheckPolicy checks d against the policy in force: every role's max TTL
-// is at most the user CA profile's max_ttl_seconds, and every role
-// extension is one of that profile's default or allowed extensions.
+// CheckPolicy checks d against the policy in force (D-15). Each role is
+// checked against the CA profile of every CA it is used under: its max TTL
+// at most that profile's max_ttl_seconds, and each of its extensions one
+// of that profile's default or allowed extensions.
+//
+//   - A role is user-facing when its own users or groups list is non-empty,
+//     whether or not those groups have members: membership can change
+//     without touching the role, so the cap that applies never changes
+//     behind the admins' backs. A user-facing role is checked against the
+//     user CA profile, also when machines name it.
+//   - A role that no user or group grants and that at least one machine
+//     names is machine-only: it is checked against the machine CA profile
+//     instead.
+//   - A role named by machines and granted to users or groups (mixed) must
+//     pass both profiles.
+//   - A role that nobody grants and no machine names keeps the user CA
+//     check.
+//
+// Each machine's own max_ttl_seconds must be at most the machine CA cap.
 func CheckPolicy(d *Directory, pol *trust.Policy) error {
 	if pol == nil {
 		return fmt.Errorf("%w: no policy", ErrPolicy)
 	}
-	idx := slices.IndexFunc(pol.CAProfiles, func(p trust.CAProfile) bool { return p.Role == trust.RoleUser })
-	if idx < 0 {
-		return fmt.Errorf("%w: the policy has no user CA profile", ErrPolicy)
-	}
-	prof := pol.CAProfiles[idx]
-	for _, r := range d.Roles {
-		if r.MaxTTLSeconds > prof.MaxTTLSeconds {
-			return fmt.Errorf("%w: role %s: max_ttl_seconds %d is above the user CA cap %d", ErrPolicy, r.Name, r.MaxTTLSeconds, prof.MaxTTLSeconds)
+	profile := func(role string) (*trust.CAProfile, error) {
+		idx := slices.IndexFunc(pol.CAProfiles, func(p trust.CAProfile) bool { return p.Role == role })
+		if idx < 0 {
+			return nil, fmt.Errorf("%w: the policy has no %s CA profile", ErrPolicy, role)
 		}
-		for _, e := range r.Extensions {
-			if !slices.Contains(prof.DefaultExtensions, e) && !slices.Contains(prof.AllowedExtensions, e) {
-				return fmt.Errorf("%w: role %s: extension %q is not allowed by the user CA profile", ErrPolicy, r.Name, e)
+		return &pol.CAProfiles[idx], nil
+	}
+	userProf, err := profile(trust.RoleUser)
+	if err != nil {
+		return err
+	}
+	machineNamed := map[string]bool{}
+	for _, m := range d.Machines {
+		for _, r := range m.Roles {
+			machineNamed[r] = true
+		}
+	}
+	var machineProf *trust.CAProfile
+	if len(d.Machines) > 0 {
+		if machineProf, err = profile(trust.RoleMachine); err != nil {
+			return err
+		}
+	}
+	for _, r := range d.Roles {
+		userFacing := len(r.Users) > 0 || len(r.Groups) > 0
+		if userFacing || !machineNamed[r.Name] {
+			if err := checkRoleProfile(r, userProf, "user"); err != nil {
+				return err
 			}
+		}
+		if machineNamed[r.Name] {
+			if err := checkRoleProfile(r, machineProf, "machine"); err != nil {
+				return err
+			}
+		}
+	}
+	for _, m := range d.Machines {
+		if m.MaxTTLSeconds > machineProf.MaxTTLSeconds {
+			return fmt.Errorf("%w: machine %s: max_ttl_seconds %d is above the machine CA cap %d", ErrPolicy, m.Name, m.MaxTTLSeconds, machineProf.MaxTTLSeconds)
+		}
+	}
+	return nil
+}
+
+// checkRoleProfile checks one role against the CA profile prof of the CA
+// named what.
+func checkRoleProfile(r Role, prof *trust.CAProfile, what string) error {
+	if r.MaxTTLSeconds > prof.MaxTTLSeconds {
+		return fmt.Errorf("%w: role %s: max_ttl_seconds %d is above the %s CA cap %d", ErrPolicy, r.Name, r.MaxTTLSeconds, what, prof.MaxTTLSeconds)
+	}
+	for _, e := range r.Extensions {
+		if !slices.Contains(prof.DefaultExtensions, e) && !slices.Contains(prof.AllowedExtensions, e) {
+			return fmt.Errorf("%w: role %s: extension %q is not allowed by the %s CA profile", ErrPolicy, r.Name, e, what)
 		}
 	}
 	return nil

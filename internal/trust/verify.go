@@ -337,8 +337,9 @@ var errIssuedBeforePrev = fmt.Errorf("%w", ErrVersionChain)
 // prevPolicy is prev's policy; policy parses; next is version prev+1,
 // carries prev's SHA-256 as prev and is not issued before prev; next
 // carries policy's SHA-256; next keeps prev's installation ID when prev has
-// one; policy is prevPolicy unchanged or chained to it
-// as the next version; a root in both prev and next keeps its custody
+// one; policy is prevPolicy unchanged or chained to it as the next
+// version, and a changed policy keeps pop.hosts once set
+// (CheckPoPSuccessor); a root in both prev and next keeps its custody
 // label; and no policy admin is a root of next or of prev. It returns the
 // parsed policy.
 func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *Bundle, policy []byte) (*Policy, error) {
@@ -382,9 +383,15 @@ func checkSuccessorChain(prev *Bundle, prevCanonical, prevPolicy []byte, next *B
 	if prev.InstallationID != "" && next.InstallationID != prev.InstallationID {
 		return nil, fmt.Errorf("%w: installation_id changed from %s to %s", ErrVersionChain, prev.InstallationID, displayID(next.InstallationID))
 	}
-	if !bytes.Equal(policy, prevPolicy) && (p.Version != pp.Version+1 || p.Prev != SHA256Hex(prevPolicy)) {
-		return nil, fmt.Errorf("%w: a changed policy must be version %d with the previous policy's SHA-256 as prev, got version %d",
-			ErrVersionChain, pp.Version+1, p.Version)
+	if !bytes.Equal(policy, prevPolicy) {
+		if p.Version != pp.Version+1 || p.Prev != SHA256Hex(prevPolicy) {
+			return nil, fmt.Errorf("%w: a changed policy must be version %d with the previous policy's SHA-256 as prev, got version %d",
+				ErrVersionChain, pp.Version+1, p.Version)
+		}
+		// pop.hosts is one-way (owner decision 2026-10-24).
+		if err := CheckPoPSuccessor(pp, p); err != nil {
+			return nil, err
+		}
 	}
 	if err := checkCarriedCustody(prev, next); err != nil {
 		return nil, err

@@ -1,5 +1,7 @@
 // Package directory is the admin-signed directory document (D-01): the
-// users, their bound WebAuthn credentials, groups, roles and host groups.
+// users, their bound WebAuthn credentials, groups, roles and host groups,
+// and (Phase 3) the installation it is bound to (D-04), its hosts (D-11,
+// D-16) and its machine identities (D-15).
 // A directory version is canonical JSON, chained to its predecessor by
 // SHA-256, and authoritative only when at least the root-signed policy's
 // admin quorum signed it with SSHSIG under Namespace. The signer installs
@@ -65,6 +67,17 @@ type Directory struct {
 	Groups     []Group     `json:"groups"`
 	Roles      []Role      `json:"roles"`
 	HostGroups []HostGroup `json:"host_groups"`
+	// InstallationID binds the directory to one installation (D-04): the
+	// installation_id of the trust bundle in force. The signer installs a
+	// directory only when it names that installation (CheckInstallation).
+	// It and the two lists below are the last fields and omitempty, so a
+	// Phase 2 directory keeps its exact bytes, and "installation_id":"",
+	// "hosts":[] and "machines":[] are refused as non-canonical.
+	InstallationID string `json:"installation_id,omitempty"`
+	// Hosts are the hosts of the fleet, each in one host group.
+	Hosts []Host `json:"hosts,omitempty"`
+	// Machines are the automation identities.
+	Machines []Machine `json:"machines,omitempty"`
 }
 
 // User is a directory user and the WebAuthn credentials bound to it.
@@ -159,7 +172,9 @@ func (d *Directory) Canonical() ([]byte, error) { return trust.CanonicalJSON(d) 
 
 // Sort puts every list of d in canonical order and replaces nil lists by
 // empty ones, so a builder produces the same bytes whatever order it added
-// entries in. It does not remove duplicates; Validate refuses them.
+// entries in. The host and machine lists are the exception: an empty one
+// becomes nil, since both are omitted from the canonical encoding when
+// empty. It does not remove duplicates; Validate refuses them.
 func (d *Directory) Sort() {
 	d.Users = nonNil(d.Users)
 	d.Groups = nonNil(d.Groups)
@@ -192,6 +207,7 @@ func (d *Directory) Sort() {
 			h.Accounts[j].Roles = sortedStrings(h.Accounts[j].Roles)
 		}
 	}
+	d.sortHostsAndMachines()
 }
 
 func nonNil[T any](s []T) []T {
@@ -212,8 +228,9 @@ func sortedStrings(s []string) []string {
 // grammars, credentials (strict encodings, supported algorithm, a key that
 // parses for it, IDs unique across the document), role principals and
 // TTLs, sorted duplicate-free non-null lists, references that resolve, a
-// credential for every active user, and per-user role and principal
-// bounds.
+// credential for every active user, per-user role and principal bounds,
+// the installation ID's form, and the host and machine entries
+// (validateHosts, validateMachines).
 func (d *Directory) Validate() error {
 	if d.Version < 1 {
 		return fmt.Errorf("%w: version must be >= 1", ErrInvalid)
@@ -226,6 +243,9 @@ func (d *Directory) Validate() error {
 	}
 	if d.Users == nil || d.Groups == nil || d.Roles == nil || d.HostGroups == nil {
 		return fmt.Errorf("%w: users, groups, roles and host_groups must be arrays, not null", ErrInvalid)
+	}
+	if err := d.validateInstallation(); err != nil {
+		return err
 	}
 
 	users := map[string]*User{}
@@ -331,6 +351,14 @@ func (d *Directory) Validate() error {
 				return err
 			}
 		}
+	}
+
+	hostKeys, err := d.validateHosts()
+	if err != nil {
+		return err
+	}
+	if err := d.validateMachines(hostKeys, roles); err != nil {
+		return err
 	}
 
 	effective, err := d.roleGrants()

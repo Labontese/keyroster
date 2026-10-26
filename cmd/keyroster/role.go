@@ -225,7 +225,7 @@ func runRoleAdd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 func runRoleUpdate(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("role update", flag.ContinueOnError)
 	fset.SetOutput(stderr)
-	ttl := fset.Duration("max-ttl", 0, "the new max TTL, as a Go duration, at least 1m and at most the user CA cap")
+	ttl := fset.Duration("max-ttl", 0, "the new max TTL, as a Go duration, at least 1m and at most the cap of each CA the role is used under (the user CA; the machine CA for a role only machines use)")
 	var principals, extensions stringList
 	fset.Var(&principals, "principal", "a principal the role grants (repeatable; replaces the role's principals)")
 	fset.Var(&extensions, "extension", "an extension the role allows (repeatable; replaces the role's extensions)")

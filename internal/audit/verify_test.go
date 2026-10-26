@@ -3008,3 +3008,110 @@ func mustLeafBody(t testing.TB, raw []byte) []byte {
 	}
 	return l.Body
 }
+
+// installSuccessor logs a successor bundle (version + 1, the same roots,
+// CAs and log key, signed by the fixture root) changed by editBundle, with
+// the policy in force unchanged.
+func (lf *loginFixture) installSuccessor(editBundle func(*trust.Bundle)) {
+	lf.t.Helper()
+	prev, err := trust.ParseBundle(lf.docs.bundle)
+	if err != nil {
+		lf.t.Fatal(err)
+	}
+	next := *prev
+	next.Version, next.Prev = prev.Version+1, trust.SHA256Hex(lf.docs.bundle)
+	editBundle(&next)
+	lf.docs = lf.signDocs(&next, lf.pol, lf.root)
+	lf.addBundle(lf.docs)
+}
+
+// TestVerifyDirectoryInstallation (D-04, T-03-20, T-03-25): audit verify
+// applies the signer's installation rules. A directory_install entry must
+// name the installation of the bundle in force (none while it has none);
+// an ID-less directory installed before the bundle gained an ID stays in
+// force for logins (the lenient 03-01 answer), and the rebind's
+// directory_install entry verifies.
+func TestVerifyDirectoryInstallation(t *testing.T) {
+	const other = "ffffffffffffffffffffffffffffffff"
+	withID := func(id string) func(*directory.Directory) {
+		return func(d *directory.Directory) { d.InstallationID = id }
+	}
+	refusedAt := func(t *testing.T, lf *loginFixture, want string) {
+		t.Helper()
+		entry := fmt.Sprintf("entry %d (directory_install)", len(lf.leaves)-1)
+		_, err := lf.verify(join(lf.lines()), nil)
+		if err == nil || !strings.Contains(err.Error(), entry) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("Verify = %v, want a refusal at %s naming %q", err, entry, want)
+		}
+	}
+	bound := func(t *testing.T) *loginFixture {
+		lf := newLoginFixture(t, true)
+		lf.installSuccessor(func(b *trust.Bundle) { b.InstallationID = auditInstallationID })
+		return lf
+	}
+	t.Run("other_installation_refused", func(t *testing.T) {
+		lf := bound(t)
+		lf.addDirectory(lf.directory(withID(other)), nil)
+		refusedAt(t, lf, "names another installation")
+	})
+	t.Run("missing_installation_refused", func(t *testing.T) {
+		lf := bound(t)
+		lf.addDirectory(lf.directory(nil), nil)
+		refusedAt(t, lf, "names no installation")
+	})
+	t.Run("unknown_installation_refused", func(t *testing.T) {
+		lf := newLoginFixture(t, true)
+		lf.addDirectory(lf.directory(withID(auditInstallationID)), nil)
+		refusedAt(t, lf, "the trust bundle in force has none")
+	})
+	t.Run("matching_installation_accepted", func(t *testing.T) {
+		lf := bound(t)
+		lf.addDirectory(lf.directory(withID(auditInstallationID)), nil)
+		lf.addLogin(nil, nil)
+		if _, err := lf.verify(join(lf.lines()), nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("rebind_leaf_accepted", func(t *testing.T) {
+		lf := newLoginFixture(t, true)
+		lf.addDirectory(lf.directory(nil), nil)
+		lf.addLogin(nil, nil)
+		lf.installSuccessor(func(b *trust.Bundle) { b.InstallationID = auditInstallationID })
+		// Lenient: the ID-less directory stays in force for logins.
+		lf.addLogin(nil, nil)
+		// The rebind: the next version, identical but for the ID.
+		lf.addDirectory(lf.directory(withID(auditInstallationID)), nil)
+		lf.addLogin(nil, nil)
+		rep, err := lf.verify(join(lf.lines()), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep.Counts[tlog.KindDirectoryInstall] != 2 || rep.Counts[tlog.KindLoginIssue] != 3 {
+			t.Fatalf("report: %d directory installs, %d logins; want 2 and 3", rep.Counts[tlog.KindDirectoryInstall], rep.Counts[tlog.KindLoginIssue])
+		}
+	})
+}
+
+// TestVerifyBundlePoP (owner decision 2026-10-24, T-03-206): a
+// bundle_install entry whose policy turns pop.hosts off fails at that
+// entry; a successor that keeps it verifies.
+func TestVerifyBundlePoP(t *testing.T) {
+	t.Run("pop_hosts_removed_refused", func(t *testing.T) {
+		lf := newLoginFixture(t, true)
+		lf.installPolicy(func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true} })
+		lf.installPolicy(func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Machines: true} })
+		entry := fmt.Sprintf("entry %d: bundle_install", len(lf.leaves)-1)
+		_, err := lf.verify(join(lf.lines()), nil)
+		if err == nil || !strings.Contains(err.Error(), entry) || !strings.Contains(err.Error(), "pop_hosts_removed") {
+			t.Fatalf("Verify = %v, want pop_hosts_removed at %s", err, entry)
+		}
+	})
+	t.Run("pop_hosts_kept_accepted", func(t *testing.T) {
+		lf := newLoginFixture(t, true)
+		lf.installPolicy(func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true} })
+		lf.installPolicy(func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true, Machines: true} })
+		if _, err := lf.verify(join(lf.lines()), nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+}

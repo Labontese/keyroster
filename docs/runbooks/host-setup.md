@@ -278,6 +278,143 @@ the KRL by hand, which is UNVERIFIED ([revoke.md](revoke.md)). Otherwise
 `keyroster revoke user` stops only new certificates there, and an issued
 one logs in until its ValidBefore.
 
+## Registering a host in the directory
+
+Run in CI e2e (`TestDirectoryHostsEndToEnd`, 03-04); UNVERIFIED on the
+homelab until 03-16.
+
+A host entry is the signed host policy of AUTHZ-02: the host's one host
+group (D-11), its host public keys and the names its host certificate will
+carry (D-16). Only an admin-signed directory version creates one; nothing
+about a host comes from the host, the server or an enrollment request. In
+this version the entry is read by `keyroster host principals --host`; the
+host agent (03-07) and host certificates (03-09) use the same entry later.
+
+1. On the host, print its host public key and its fingerprint, and read the
+   fingerprint over a channel you already trust (the console, or an SSH
+   session whose host key you verified):
+
+   ```
+   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+   ```
+
+   Copy the `.pub` file (never the private key file) to the admin
+   workstation. Ed25519 and ECDSA host keys are accepted, up to 8 per host;
+   RSA is refused.
+2. On the admin workstation, register the host in an existing host group:
+
+   ```
+   keyroster host add web1 --group web --key ssh_host_ed25519_key.pub \
+     --principal web1 --principal web1.lab.example --principal web1.example-tailnet.ts.net
+   ```
+
+   The principals are the names clients type: the short name, the FQDN and
+   the tailnet name, 1 to 8 of them. Do not add an address the host gets
+   from DHCP: the next lease can give it to another host. Each name must be
+   in its one canonical spelling, lowercase and without a trailing dot, an
+   IPv6 address compressed (`2001:db8::1`, not `2001:DB8:0:0::1`), an IPv4
+   address as four decimal octets without leading zeros. keyroster refuses
+   any other spelling and prints the canonical one where there is one; it
+   never rewrites a name. A name whose labels are all numbers, such as the
+   hex `0x7f000001` or `127.0.0.0x1`, is refused too: a resolver reads it
+   as an IPv4 address. No principal and no host key may be on two hosts.
+
+   The diff shows `+ host web1 host_group=web ...` with each key's
+   fingerprint: compare it with step 1 before you sign. The first version
+   signed after the trust bundle gained an installation ID also shows
+   `+ installation_id <id>`; see the next section.
+3. Check what the directory holds, and render the file that host's agent
+   will write for an account:
+
+   ```
+   keyroster host list
+   keyroster host principals --host web1 deploy
+   ```
+
+   `--host` renders exactly what `keyroster host principals web deploy`
+   renders for the host's one host group. An unknown or disabled host is an
+   error naming it.
+
+`keyroster host remove web1` removes the entry. `keyroster host-group remove`
+refuses while a host names the host group.
+
+**Host agents need `pop.hosts` in the root-signed policy.** Run in CI
+(`TestPoPSuccessor`, `TestRootSuccessorPolicyPoP`, `TestInstallBundlePoP`,
+`TestVerifyBundlePoP`, 03-04; `trust verify --prev` runs the same
+`VerifySuccessor` check, but no test runs that command with such a policy);
+UNVERIFIED on the homelab until 03-15. A host
+agent gets its certificates on proof of possession of a host key the
+directory names, which the signer allows only when the policy in force has
+`pop.hosts` true (03-07, 03-09). It is set in a root ceremony
+([root-ceremony.md](root-ceremony.md)):
+
+```
+keyroster root successor-policy --prev policy.json --out policy-next.json --pop-hosts
+```
+
+then `keyroster root sign --prev` with the new policy. Once set, `pop.hosts`
+cannot be turned off again (owner decision 2026-10-24): `root
+successor-policy` prints `note: pop.hosts cannot be removed once set
+(pop_hosts_removed)`, and `root sign --prev`, `trust verify --prev`,
+`keyroster-signer install-bundle` and `keyroster audit verify` refuse a
+successor that clears it with `pop_hosts_removed`. A host agent that could
+not get its probe certificates could not confirm a new KRL, so revocations
+would stall.
+
+## Binding an existing directory to the installation
+
+Run in CI (signer and CLI rebind tests: `TestDirectoryInstallationRebind`,
+`TestDirectoryRebind`, `TestVerifyDirectoryInstallation`, 03-04);
+UNVERIFIED on the homelab until 03-15.
+
+Every directory version names the installation of the trust bundle it was
+signed for (D-04), and the signer installs a version only when that
+installation is the one of the bundle in force: otherwise it refuses
+`directory_installation_missing` (the version names none),
+`directory_installation_mismatch` (it names another installation, so it was
+signed for another deployment) or `directory_installation_unknown` (it names
+one, but the bundle has none). `keyroster audit verify` applies the same
+rule to every directory install in the log. Admins never type the ID: every
+directory command copies it from the root-verified bundle and the diff shows
+it.
+
+A directory installed before the bundle had an installation ID names none.
+When the bundle first gains one (the 03-15 ceremony, `root sign --prev ...
+--installation-id new`), bind the installed directory once:
+
+```
+keyroster directory rebind
+```
+
+It writes the next version with every user, group, role, host group, host
+and machine unchanged and only `installation_id` set, shows the diff
+(`+ installation_id <id>`), asks and signs, and installs it (or writes a
+proposal when the policy's admin quorum is above 1). It refuses, signing
+nothing:
+
+- when the root-verified bundle has no installation ID: there is nothing to
+  bind to;
+- when the installed directory already names that installation;
+- when the installed directory names another installation; the message names
+  both IDs. The signer never installs such a directory, so the server serves
+  one from another deployment.
+
+Any other directory edit binds the directory too, because it copies the ID.
+
+The CLI applies the signer's rule to the directory it reads: `directory
+show`, `directory sign`, `directory install`, `user list`, `host list`,
+`machine list`, `host principals` and every edit refuse a served directory
+that names another installation than the root-verified bundle, or names
+one while the bundle has none, and print nothing from it. An unbound
+directory is still read (`TestReadCommandsCheckInstallation`).
+
+Until the bound version installs, logins under the unbound directory keep
+working on the signer: the owner's lenient answer to D-04 (03-01). The
+signer logs a warning at start (`installed directory names no installation,
+but the trust bundle in force does`). Host agents (03-07) never accept a
+directory without the installation ID, so bind it before the first agent
+enrolls.
+
 ## Windows hosts
 
 Account names are lowercase in the directory, and `keyroster host-group map`

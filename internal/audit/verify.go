@@ -303,8 +303,9 @@ func authorizeDirectory(raw, sigs []byte, d *directory.Directory, pol *trust.Pol
 // state in force and makes its directory the one in force: the document
 // parses, is the successor of the directory in force (version + 1, prev =
 // SHA-256 of its bytes; version 1 with the all-zero prev first), is
+// bound to the installation of the bundle in force (CheckInstallation),
 // signed by the admin quorum of the policy in force and fits that policy's
-// user CA profile, and the entry records that policy's version and the
+// CA profiles, and the entry records that policy's version and the
 // document's own version.
 func (ds *directoryInForce) install(body *tlog.DirectoryInstallBody, a *anchor) error {
 	if a.policy == nil {
@@ -323,6 +324,11 @@ func (ds *directoryInForce) install(body *tlog.DirectoryInstallBody, a *anchor) 
 	if err := directory.CheckSuccessor(ds.raw, d); err != nil {
 		return fmt.Errorf("directory v%d is not the successor of the directory in force (v%d): %w", d.Version, ds.version, err)
 	}
+	// D-04: the signer installs a directory only for the installation of
+	// the bundle in force (InstallDirectory).
+	if err := directory.CheckInstallation(d, a.bundle.InstallationID); err != nil {
+		return fmt.Errorf("directory v%d is not bound to the installation of trust bundle v%d: %w", d.Version, a.bundle.Version, err)
+	}
 	if err := authorizeDirectory(body.Directory, body.Sigs, d, a.policy); err != nil {
 		return fmt.Errorf("directory v%d is %w", d.Version, err)
 	}
@@ -331,9 +337,16 @@ func (ds *directoryInForce) install(body *tlog.DirectoryInstallBody, a *anchor) 
 }
 
 // recheck recomputes the cached authorization of the directory in force
-// under pol, after a bundle_install entry made pol the policy in force.
-func (ds *directoryInForce) recheck(pol *trust.Policy) {
+// under b's policy pol, after a bundle_install entry made b the bundle in
+// force: the signer's start-up check (loadDirectory), including its
+// installation rule, under which a directory without an installation ID
+// stays authorized (CheckStoredInstallation, the lenient D-04 answer).
+func (ds *directoryInForce) recheck(b *trust.Bundle, pol *trust.Policy) {
 	if ds.dir == nil {
+		return
+	}
+	if err := directory.CheckStoredInstallation(ds.dir, b.InstallationID); err != nil {
+		ds.authErr = fmt.Errorf("not bound to the installation of trust bundle v%d: %w", b.Version, err)
 		return
 	}
 	ds.authErr = authorizeDirectory(ds.raw, ds.sigs, ds.dir, pol)
@@ -728,7 +741,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			}
 			// The policy in force may have changed: re-check the directory
 			// in force under it, once, for every later login_issue entry.
-			dirState.recheck(trustState.policy)
+			dirState.recheck(trustState.bundle, trustState.policy)
 		case tlog.KindIssue:
 			body, err := tlog.DecodeIssueBody(leaf.Body)
 			if err != nil {

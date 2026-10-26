@@ -47,7 +47,7 @@ func TestLoginRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := aliceDirectory(t, auth)
+	doc := aliceDirectory(t, auth, env.InstallationID)
 	if _, err := signerclient.InstallDirectory(ctx, env.Socket, &wire.InstallDirectoryRequest{
 		Directory: doc, Sigs: adminSign(t, env, directory.Namespace, doc),
 	}); err != nil {
@@ -111,6 +111,7 @@ func TestLoginRefusals(t *testing.T) {
 
 	t.Run("directory_not_quorum_signed", func(t *testing.T) {
 		fresh := bootstrapSigner(t, rpPolicy)
+		doc := aliceDirectory(t, auth, fresh.InstallationID) // bound to fresh's installation (D-04)
 		_, outsider, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatal(err)
@@ -156,6 +157,7 @@ func TestLoginRefusals(t *testing.T) {
 
 	t.Run("policy_without_rp", func(t *testing.T) {
 		noRP := bootstrapSigner(t, bootstrapOpts{})
+		doc := aliceDirectory(t, auth, noRP.InstallationID) // bound to noRP's installation (D-04)
 		if _, err := signerclient.InstallDirectory(ctx, noRP.Socket, &wire.InstallDirectoryRequest{
 			Directory: doc, Sigs: adminSign(t, noRP, directory.Namespace, doc),
 		}); err != nil {
@@ -201,13 +203,15 @@ func TestLoginRefusals(t *testing.T) {
 
 // aliceDirectory returns the canonical bytes of directory version 1:
 // alice, active, with auth's credential, and role ops granting her
-// role:ops for up to 3600 s.
-func aliceDirectory(t *testing.T, auth *webauthntest.Authenticator) []byte {
+// role:ops for up to 3600 s, bound to the installation installationID
+// (D-04).
+func aliceDirectory(t *testing.T, auth *webauthntest.Authenticator, installationID string) []byte {
 	t.Helper()
 	cred := auth.Credential()
 	dir := &directory.Directory{
-		Version: 1,
-		Prev:    trust.GenesisPrev,
+		Version:        1,
+		Prev:           trust.GenesisPrev,
+		InstallationID: installationID,
 		Users: []directory.User{{Name: "alice", Status: directory.StatusActive, Credentials: []directory.Credential{{
 			ID:   base64.RawURLEncoding.EncodeToString(cred.ID),
 			Alg:  cred.Alg,

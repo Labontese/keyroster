@@ -906,3 +906,41 @@ func TestProfiles(t *testing.T) {
 		}
 	})
 }
+
+// TestInstallBundlePoP (owner decision 2026-10-24, T-03-206): install-bundle
+// refuses a successor whose policy turns pop.hosts off, and the installed
+// bundle stays as it was; a successor that keeps it installs.
+func TestInstallBundlePoP(t *testing.T) {
+	newEnv := func(t *testing.T) *installEnv {
+		fx := NewFixture(t, 1, 1)
+		fx.PolicyEdit = func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true} }
+		e := newInstallEnv(t, fx)
+		e.installGenesis(t)
+		return e
+	}
+	t.Run("pop_hosts_removed_refused", func(t *testing.T) {
+		e := newEnv(t)
+		for _, pop := range []*trust.PoPPolicy{nil, {Machines: true}} {
+			pol := policyV2(t, e.fx)
+			pol.PoP = pop
+			_, err := e.install(nil, 0, docs4(t, successor(t, e.genesis(t), pol), pol, e.fx.Root))
+			if !errors.Is(err, trust.ErrPoPHostsRemoved) {
+				t.Fatalf("install-bundle with pop %+v: %v, want ErrPoPHostsRemoved", pop, err)
+			}
+			if v, err := e.db.LatestBundleVersion(context.Background()); err != nil || v != 1 {
+				t.Fatalf("installed bundle version %d (%v) after the refusal, want 1", v, err)
+			}
+		}
+	})
+	t.Run("pop_hosts_kept_installs", func(t *testing.T) {
+		e := newEnv(t)
+		pol := policyV2(t, e.fx)
+		pol.PoP = &trust.PoPPolicy{Hosts: true, Machines: true}
+		if _, err := e.install(nil, 0, docs4(t, successor(t, e.genesis(t), pol), pol, e.fx.Root)); err != nil {
+			t.Fatalf("install-bundle keeping pop.hosts: %v", err)
+		}
+		if v, err := e.db.LatestBundleVersion(context.Background()); err != nil || v != 2 {
+			t.Fatalf("installed bundle version %d (%v), want 2", v, err)
+		}
+	})
+}

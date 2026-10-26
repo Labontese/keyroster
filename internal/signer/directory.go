@@ -36,8 +36,11 @@ type directoryState struct {
 // must be exactly the one the verified log's last directory_install entry
 // records (checkDirectoryLogged), or the signer refuses to start (T-02-14).
 // Then it checks the directory against the policy in force (s.policy): it
-// must parse, carry the admin quorum's signatures and fit the user CA
-// profile. On any of those failures the signer still starts, because the
+// must parse, name this installation or none (CheckStoredInstallation:
+// the owner's lenient D-04 answer, 03-01, keeps an ID-less directory
+// authorized under a bundle with an ID, with a warning), carry the admin
+// quorum's signatures and fit the policy's CA profiles. On any of those
+// failures the signer still starts, because the
 // admin path needs no directory, but refuses every login
 // (directory_not_authorized) until a directory signed under the policy in
 // force is installed (T-02-15).
@@ -60,6 +63,17 @@ func (s *Signer) loadDirectory(ctx context.Context) error {
 		return nil
 	}
 	s.directory = d
+	if err := directory.CheckStoredInstallation(d, s.installationID); err != nil {
+		s.log.Error("installed directory is bound to another installation than the trust bundle in force: logins are refused until a directory for this installation is installed",
+			"directory_version", stored.Version, "error", err.Error())
+		return nil
+	}
+	if d.InstallationID == "" && s.installationID != "" {
+		// The owner's lenient D-04 answer (03-01): an ID-less directory
+		// keeps authorizing logins on the signer; agents never accept it.
+		s.log.Warn("installed directory names no installation, but the trust bundle in force does: logins stay authorized (lenient transition); bind it with keyroster directory rebind",
+			"directory_version", stored.Version, "installation_id", s.installationID)
+	}
 	if _, err := directory.VerifySignatures(stored.Doc, stored.Sigs, s.policy); err != nil {
 		s.log.Error("installed directory is not signed by the admin quorum of the policy in force: logins are refused until a re-signed directory is installed",
 			"directory_version", stored.Version, "policy_version", s.policy.Version, "error", err.Error())
@@ -81,9 +95,11 @@ func (s *Signer) loadDirectory(ctx context.Context) error {
 // version and prev follow the installed version (directory_version_chain)
 // before it parses the document, so neither an unsigned document nor a
 // replayed older version is parsed (T-02-12). Then it parses the
-// document strictly (directory_invalid), checks the chain again on the
-// parsed document, and checks that it fits the user CA profile
-// (directory_exceeds_policy). Then one transaction stores it and
+// document strictly (directory_invalid), checks that it names the
+// installation of the bundle in force (directory_installation_missing,
+// directory_installation_mismatch, directory_installation_unknown; D-04),
+// checks the chain again on the parsed document, and checks that it fits
+// the policy's CA profiles (directory_exceeds_policy). Then one transaction stores it and
 // appends a directory_install leaf with the document and its signatures,
 // and only after COMMIT does the signer switch to it.
 func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
@@ -103,6 +119,17 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 	d, err := directory.Parse(req.Directory)
 	if err != nil {
 		return nil, refusalErr(wire.CodeMalformed, "directory_invalid", err)
+	}
+	// D-04, the T-03-20 rule: a directory signed by these admins for
+	// another installation, or for none while this one has an ID, never
+	// installs here.
+	switch err := directory.CheckInstallation(d, s.installationID); {
+	case errors.Is(err, directory.ErrInstallationMissing):
+		return nil, refusalErr(wire.CodeRefused, "directory_installation_missing", err)
+	case errors.Is(err, directory.ErrInstallationMismatch):
+		return nil, refusalErr(wire.CodeRefused, "directory_installation_mismatch", err)
+	case err != nil:
+		return nil, refusalErr(wire.CodeRefused, "directory_installation_unknown", err)
 	}
 	// Not reachable today: Parse accepts only canonical bytes, whose
 	// version and prev CheckSuccessorBytes read the same way. Kept so the

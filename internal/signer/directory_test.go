@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -544,6 +546,131 @@ func TestDirectoryConcurrent(t *testing.T) {
 		}
 		if installs != 2 {
 			t.Fatalf("%d directory_install leaves, want 2 (version 1 and the one successor)", installs)
+		}
+	})
+}
+
+// boundDirectory is loginDirectory bound to installation id.
+func boundDirectory(pk *passkeys, version uint64, prev, id string) *directory.Directory {
+	d := loginDirectory(pk, version, prev)
+	d.InstallationID = id
+	return d
+}
+
+// restartWithInstallation closes the signer, installs the successor of
+// the installed bundle that carries installation id (the policy
+// unchanged), and opens the signer again: the bundle gaining an ID, as the
+// 03-15 ceremony does.
+func (e *logEnv) restartWithInstallation(t *testing.T, id string) {
+	t.Helper()
+	e.close()
+	db, err := signerdb.Open(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ie := &installEnv{fx: e.fx, db: db, be: e.backend}
+	pol := e.fx.Policy()
+	next := successor(t, ie.genesis(t), pol)
+	next.InstallationID = id
+	if _, err := ie.install(nil, 0, docs4(t, next, pol, e.fx.Root)); err != nil {
+		t.Fatalf("install the successor bundle with installation %s: %v", id, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.open(); err != nil {
+		t.Fatalf("restart under the bundle with an installation ID: %v", err)
+	}
+}
+
+// TestDirectoryInstallation (D-04, T-03-20): while the bundle in force
+// carries an installation ID, the signer installs only a directory that
+// carries the same; while it has none, only a directory without one. Each
+// refusal is logged as unauthorized and changes nothing.
+func TestDirectoryInstallation(t *testing.T) {
+	pk := newPasskeys(t)
+	const other = "ffffffffffffffffffffffffffffffff"
+	bound := func(t *testing.T) *logEnv {
+		fx := NewFixture(t, 1, 1)
+		fx.InstallationID = testInstallationID
+		return newLoginEnv(t, pk, fx, true, false)
+	}
+	t.Run("directory_installation_missing", func(t *testing.T) {
+		e := bound(t)
+		doc, sigs := signDirectory(t, loginDirectory(pk, 1, trust.GenesisPrev), e.fx.Admins[0])
+		e.refuseInstall(t, &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}, "directory_installation_missing")
+	})
+	t.Run("directory_installation_mismatch", func(t *testing.T) {
+		e := bound(t)
+		doc, sigs := signDirectory(t, boundDirectory(pk, 1, trust.GenesisPrev, other), e.fx.Admins[0])
+		e.refuseInstall(t, &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}, "directory_installation_mismatch")
+	})
+	t.Run("directory_installation_unknown", func(t *testing.T) {
+		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, false)
+		doc, sigs := signDirectory(t, boundDirectory(pk, 1, trust.GenesisPrev, testInstallationID), e.fx.Admins[0])
+		e.refuseInstall(t, &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}, "directory_installation_unknown")
+	})
+	t.Run("classified_unauthorized", func(t *testing.T) {
+		for _, d := range []string{"directory_installation_missing", "directory_installation_mismatch", "directory_installation_unknown"} {
+			if c := classify(d); c != classify("revoke_installation_mismatch") || codeFor(c) != wire.CodeRefused {
+				t.Fatalf("classify(%s) = %d, want the unauthorized class of the revoke binding", d, c)
+			}
+		}
+	})
+	t.Run("matching_installation_installs", func(t *testing.T) {
+		e := bound(t)
+		doc, sigs := signDirectory(t, boundDirectory(pk, 1, trust.GenesisPrev, testInstallationID), e.fx.Admins[0])
+		e.installDirectory(t, doc, sigs)
+		e.wantDirectory(t, 1, doc, sigs, true)
+		e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil))
+	})
+}
+
+// TestDirectoryInstallationRebind (D-04, the owner's lenient answer in
+// 03-01, T-03-25): a directory without an installation ID, installed
+// before the bundle gained one, keeps authorizing logins after the signer
+// restarts under the bundle with the ID (with a warning in the operator
+// log); version n+1 that differs only by the bundle's installation ID
+// then installs by the ordinary rules, and logins are authorized under
+// it. A new version without the ID is refused.
+func TestDirectoryInstallationRebind(t *testing.T) {
+	pk := newPasskeys(t)
+	t.Run("rebind_from_idless_accepted", func(t *testing.T) {
+		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, false)
+		var log bytes.Buffer
+		e.logOut = &log
+		doc1, sigs1 := signDirectory(t, loginDirectory(pk, 1, trust.GenesisPrev), e.fx.Admins[0])
+		e.installDirectory(t, doc1, sigs1)
+		e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil))
+
+		e.restartWithInstallation(t, testInstallationID)
+		// Lenient: the ID-less directory stays authorized, and says so.
+		if !slices.ContainsFunc(strings.Split(log.String(), "\n"), func(l string) bool {
+			return strings.Contains(l, "level=WARN") && strings.Contains(l, "installed directory names no installation, but the trust bundle in force does") &&
+				strings.Contains(l, "installation_id="+testInstallationID)
+		}) {
+			t.Fatalf("no warning about the ID-less directory in the start-up log:\n%s", log.String())
+		}
+		e.wantDirectory(t, 1, doc1, sigs1, true)
+		if c := e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil)); !strings.Contains(c.KeyId, "/dir=1/") {
+			t.Fatalf("key ID %q, want dir=1", c.KeyId)
+		}
+
+		// A new version without the ID is refused.
+		plain, plainSigs := signDirectory(t, loginDirectory(pk, 2, trust.SHA256Hex(doc1)), e.fx.Admins[0])
+		e.refuseInstall(t, &wire.InstallDirectoryRequest{Directory: plain, Sigs: plainSigs}, "directory_installation_missing")
+
+		// The rebind: version 2, identical but for the installation ID.
+		d2 := loginDirectory(pk, 2, trust.SHA256Hex(doc1))
+		if got := directory.Diff(loginDirectory(pk, 1, trust.GenesisPrev), boundDirectory(pk, 2, trust.SHA256Hex(doc1), testInstallationID)); len(got) != 1 {
+			t.Fatalf("the rebind changes more than the installation ID: %q", got)
+		}
+		d2.InstallationID = testInstallationID
+		doc2, sigs2 := signDirectory(t, d2, e.fx.Admins[0])
+		e.installDirectory(t, doc2, sigs2)
+		e.wantDirectory(t, 2, doc2, sigs2, true)
+		if c := e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil)); !strings.Contains(c.KeyId, "/dir=2/") {
+			t.Fatalf("key ID %q, want dir=2", c.KeyId)
 		}
 	})
 }
