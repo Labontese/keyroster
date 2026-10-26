@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -23,6 +22,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 
+	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/directory"
@@ -364,22 +364,22 @@ type fakeRunner struct {
 	queryCode   int
 }
 
-func (r *fakeRunner) Run(cmd *exec.Cmd) (Result, error) {
+func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	args := cmd.Args[1:]
-	call := filepath.Base(cmd.Path) + " " + strings.Join(args, " ")
+	args := cmd.Args()[1:]
+	call := filepath.Base(cmd.Path()) + " " + strings.Join(args, " ")
 	r.calls = append(r.calls, call)
 	switch {
-	case cmd.Path == r.h.cfg.SSHD && len(args) >= 1 && args[0] == "-t":
+	case cmd.Path() == r.h.cfg.SSHD && len(args) >= 1 && args[0] == "-t":
 		// The configuration fails only with the agent's drop-in in it.
 		if _, err := os.Stat(r.h.l.DropIn()); r.sshdTestErr != "" && err == nil {
 			return Result{Code: 1, Stderr: []byte(r.sshdTestErr)}, nil
 		}
 		return Result{}, nil
-	case cmd.Path == r.h.cfg.SSHD && len(args) >= 1 && args[0] == "-T":
+	case cmd.Path() == r.h.cfg.SSHD && len(args) >= 1 && args[0] == "-T":
 		return Result{Stdout: []byte(r.dump())}, nil
-	case cmd.Path == r.h.cfg.SSHKeygen && len(args) == 3 && args[0] == "-l":
+	case cmd.Path() == r.h.cfg.SSHKeygen && len(args) == 3 && args[0] == "-l":
 		b, err := os.ReadFile(args[2])
 		if err != nil {
 			return Result{Code: 255}, nil
@@ -392,7 +392,7 @@ func (r *fakeRunner) Run(cmd *exec.Cmd) (Result, error) {
 			return Result{Code: 255, Stderr: []byte("not a public key file")}, nil
 		}
 		return Result{Stdout: []byte("256 SHA256:x (ED25519)\n")}, nil
-	case cmd.Path == r.h.cfg.SSHKeygen && len(args) == 4 && args[0] == "-Q":
+	case cmd.Path() == r.h.cfg.SSHKeygen && len(args) == 4 && args[0] == "-Q":
 		if r.onQuery != nil {
 			r.onQuery()
 		}
@@ -407,7 +407,7 @@ func (r *fakeRunner) Run(cmd *exec.Cmd) (Result, error) {
 			return Result{Code: 255, Stderr: []byte("invalid KRL")}, nil
 		}
 		return Result{Stdout: []byte(args[3] + ": ok\n")}, nil
-	case filepath.Base(cmd.Path) == "rc-service":
+	case filepath.Base(cmd.Path()) == "rc-service":
 		r.reloads++
 		return Result{}, nil
 	}

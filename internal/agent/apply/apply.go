@@ -27,6 +27,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 
+	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
@@ -217,7 +218,7 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 		cfg.Clock = SystemClock{}
 	}
 	if cfg.Exec == nil {
-		cfg.Exec = ExecRunner{}
+		cfg.Exec = execsite.ExecRunner{}
 	}
 	r := &Report{Errors: []string{}}
 	e := &engine{cfg: cfg, l: l, clock: cfg.Clock, report: r, stateFd: -1}

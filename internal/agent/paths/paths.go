@@ -105,28 +105,34 @@ func Allowed(l Layout, path string) error {
 	return fmt.Errorf("%w: %s is outside the agent's paths (%s, %s and %s)", ErrNotAllowed, path, l.KeyrosterDir(), l.DropIn(), l.StateDir)
 }
 
-// ExecSite is one program the applier runs: the function in
-// internal/agent/apply/sshd.go that runs it, its binary (a Config field
-// or a fixed absolute path) and its argument shape, where an upper-case
-// word stands for a value the applier fills in and everything else is a
-// literal flag.
+// ExecSite is one program the applier runs (PR #67 review: every exec
+// site goes through internal/agent/execsite, the only package that
+// imports os/exec). Func is the function in internal/agent/apply/sshd.go
+// that runs it; Ctor the execsite constructor it calls; Call the
+// arguments it passes, as written there; Args the constructor's argv
+// after the binary, where an upper-case word is a parameter of the
+// constructor and everything else a literal flag.
 type ExecSite struct {
 	Func string
-	Bin  string
+	Ctor string
+	Call string
 	Args string
 }
 
 // ExecSites are every exec site of the applier. TestPaths fails for a
-// call of os/exec's Command or CommandContext that is not in this list,
-// not in sshd.go, or whose binary or flags differ from it.
+// call of an execsite constructor that is not in this list, from another
+// function or with other arguments; for a constructor whose argv differs
+// from Args or that is not listed; and for any use of os/exec, or of
+// os.StartProcess, syscall.Exec, ForkExec or StartProcess or unix.Exec,
+// outside execsite's ExecRunner.Run.
 var ExecSites = []ExecSite{
-	{Func: "sshdTest", Bin: "e.cfg.SSHD", Args: "-t -f e.cfg.SSHDConfig"},
-	{Func: "sshdDump", Bin: "e.cfg.SSHD", Args: "-T -f e.cfg.SSHDConfig"},
-	{Func: "sshdDump", Bin: "e.cfg.SSHD", Args: "-T -f e.cfg.SSHDConfig -C SPEC"},
-	{Func: "keygenFingerprint", Bin: "e.cfg.SSHKeygen", Args: "-l -f FILE"},
-	{Func: "keygenQuery", Bin: "e.cfg.SSHKeygen", Args: "-Q -f KRL PUB"},
-	{Func: "reloadSystemd", Bin: "systemctl", Args: "reload UNIT"},
-	{Func: "reloadOpenRC", Bin: "rcService", Args: "sshd reload"},
+	{Func: "sshdTest", Ctor: "SSHDTest", Call: "e.cfg.SSHD e.cfg.SSHDConfig", Args: "-t -f CONFIG"},
+	{Func: "sshdDump", Ctor: "SSHDDump", Call: "e.cfg.SSHD e.cfg.SSHDConfig", Args: "-T -f CONFIG"},
+	{Func: "sshdDump", Ctor: "SSHDDumpFor", Call: "e.cfg.SSHD e.cfg.SSHDConfig spec", Args: "-T -f CONFIG -C SPEC"},
+	{Func: "keygenFingerprint", Ctor: "KeygenFingerprint", Call: "e.cfg.SSHKeygen file", Args: "-l -f FILE"},
+	{Func: "keygenQuery", Ctor: "KeygenQuery", Call: "e.cfg.SSHKeygen krlFile pub", Args: "-Q -f KRL PUB"},
+	{Func: "reloadSystemd", Ctor: "SystemctlReload", Call: "systemctl unit", Args: "reload UNIT"},
+	{Func: "reloadOpenRC", Ctor: "RCServiceReload", Call: "paths.RCService", Args: "sshd reload"},
 }
 
 // Systemctl are the absolute paths reloadSystemd may run, in the order

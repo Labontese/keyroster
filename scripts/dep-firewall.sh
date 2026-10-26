@@ -6,8 +6,9 @@
 #   TPM simulator, no WebAuthn attestation stack (BANNED, EXCEPTIONS).
 #   keyroster-agent (the root applier, 03-05): no HTTP, RPC, TLS, SMTP,
 #   templates, plugins or WebAuthn stack (AGENT_BANNED). os/exec is allowed
-#   for this target only; internal/agent/paths' TestPaths pins every exec
-#   site to sshd.go. Its only network use is the loopback self-test (the
+#   for this target only, imported only by internal/agent/execsite, whose
+#   constructors internal/agent/paths' TestPaths pins and to which
+#   capslock-check confines EXEC. Its only network use is the loopback self-test (the
 #   owner's D-05 answer, loopback-only), through net and x/crypto/ssh.
 #
 # depguard (lint) catches direct imports; this catches what dependencies

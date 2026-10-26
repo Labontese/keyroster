@@ -83,6 +83,19 @@ linters:
               desc: the root applier has no TLS code (D-05, loopback-only)
             - pkg: net/rpc
               desc: the root applier has no RPC code (D-05, loopback-only)
+        # PR #67 review: os/exec is imported only by internal/agent/execsite,
+        # under any name; TestPaths pins its constructors and their callers,
+        # and capslock-check confines EXEC to it.
+        agent-exec-only-in-execsite:
+          list-mode: lax
+          files:
+            - "**/internal/agent/**"
+            - "**/cmd/keyroster-agent/**"
+            - "!**/internal/agent/execsite/**"
+            - "!$test"
+          deny:
+            - pkg: os/exec
+              desc: the agent runs programs only through internal/agent/execsite (paths.ExecSites)
     forbidigo:
       forbid:
         - pattern: ^print(ln)?$
@@ -90,7 +103,9 @@ linters:
         - pattern: '\.SignCert\b'
           msg: certificates are signed only by internal/cert.Build (CA-06, CA-07)
         - pattern: 'exec\.Command(Context)?\b'
-          msg: programs are run only at the applier's exec sites in internal/agent/apply/sshd.go (paths.ExecSites) and the reviewed exceptions below
+          msg: programs are run only through internal/agent/execsite (paths.ExecSites) and the reviewed exceptions below
+        - pattern: '^(os\.StartProcess|syscall\.(Exec|ForkExec|StartProcess)|unix\.Exec)$'
+          msg: programs are run only through internal/agent/execsite (paths.ExecSites)
   exclusions:
     rules:
       # internal/cert.Build is the single SignCert call site.
@@ -98,10 +113,10 @@ linters:
         linters:
           - forbidigo
         text: SignCert
-      # The exec sites: the applier's (pinned by internal/agent/paths
-      # TestPaths), the CLI opening a browser for passkey login, the
+      # The exec sites: the agent's (internal/agent/execsite, pinned by
+      # internal/agent/paths TestPaths), the CLI opening a browser for passkey login, the
       # Windows agent check, and tests, which run go and OpenSSH tools.
-      - path: ^internal/agent/apply/sshd\.go$
+      - path: ^internal/agent/execsite/
         linters:
           - forbidigo
         text: exec\.Command

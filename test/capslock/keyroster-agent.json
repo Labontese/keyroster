@@ -20,6 +20,9 @@
     "CAPABILITY_SYSTEM_CALLS",
     "CAPABILITY_UNANALYZED"
   ],
+  "github.com/Labontese/keyroster/internal/agent/execsite": [
+    "CAPABILITY_EXEC"
+  ],
   "golang.org/x/crypto/ssh": [
     "CAPABILITY_REFLECT"
   ],

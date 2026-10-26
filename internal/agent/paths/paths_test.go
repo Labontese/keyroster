@@ -3,6 +3,7 @@ package paths
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/printer"
@@ -17,7 +18,13 @@ import (
 )
 
 // agentDirs are the applier's packages, relative to the module root.
-var agentDirs = []string{"internal/agent/apply", "internal/agent/state", "internal/agent/spool", "cmd/keyroster-agent"}
+var agentDirs = []string{"internal/agent/apply", "internal/agent/state", "internal/agent/spool", "internal/agent/execsite", "cmd/keyroster-agent"}
+
+// execsiteDir is the one package that may import os/exec.
+const execsiteDir = "internal/agent/execsite"
+
+// execsitePath is its import path.
+const execsitePath = "github.com/Labontese/keyroster/internal/agent/execsite"
 
 func moduleRoot(t *testing.T) string {
 	t.Helper()
@@ -122,8 +129,10 @@ func callsAllowed(fset *token.FileSet, decl *ast.FuncDecl) bool {
 
 // TestPaths confines the root applier (D-05, D-07, T-03-30, T-03-31):
 // (1) its dependency graph holds no HTTP, TLS or RPC; (2) it runs
-// programs only at the exec sites ExecSites lists, all in sshd.go, each
-// with its fixed binary and flags; (3) every write is preceded by
+// programs only at the exec sites ExecSites lists, each an
+// internal/agent/execsite constructor with its fixed binary and flags
+// called from its one function in sshd.go, and nothing outside execsite
+// names os/exec or a program-starting call; (3) every write is preceded by
 // Allowed in the same function; (4) no function that writes names
 // sshd_config, authorized_keys, PasswordAuthentication,
 // AuthorizedKeysFile, Port or ListenAddress; (5) only swapCurrent in
@@ -149,67 +158,131 @@ func TestPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("exec_sites_pinned", func(t *testing.T) {
-		found := map[ExecSite]bool{}
-		eachCall(files, func(p parsed, decl *ast.FuncDecl, c *ast.CallExpr) {
-			name := callName(fset, c)
-			if name != "exec.Command" && name != "exec.CommandContext" {
-				return
-			}
-			where := p.path + ":" + strconv.Itoa(fset.Position(c.Pos()).Line)
-			if p.path != "internal/agent/apply/sshd.go" {
-				t.Errorf("%s: %s outside internal/agent/apply/sshd.go", where, name)
-				return
-			}
-			args := c.Args
-			if name == "exec.CommandContext" {
-				args = args[1:]
-			}
-			if len(args) == 0 {
-				t.Errorf("%s: no binary", where)
-				return
-			}
-			var shape []string
-			for _, a := range args[1:] {
-				if lit, ok := a.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					s, _ := strconv.Unquote(lit.Value)
-					shape = append(shape, s)
-					continue
+	t.Run("exec_only_in_execsite", func(t *testing.T) {
+		// PR #67 review: os/exec under any name (an alias, a dot or blank
+		// import) and the program-starting calls of os, syscall and
+		// x/sys/unix are refused outside execsite's ExecRunner.Run,
+		// whatever the spelling; so are cgo and plugin.
+		forbidden := map[string][]string{
+			"os":                    {"StartProcess"},
+			"syscall":               {"Exec", "ForkExec", "StartProcess"},
+			"golang.org/x/sys/unix": {"Exec"},
+		}
+		for _, p := range files {
+			names := importNames(p.file)
+			inExecsite := strings.HasPrefix(p.path, execsiteDir+"/")
+			for path, name := range names {
+				where := p.path + ": import " + strconv.Quote(path)
+				switch {
+				case path == "C" || path == "plugin":
+					t.Errorf("%s: not allowed in the agent", where)
+				case path == "os/exec" && !inExecsite:
+					t.Errorf("%s outside %s", where, execsiteDir)
+				case path == "os/exec" && (name == "." || name == "_"):
+					t.Errorf("%s as %q", where, name)
 				}
-				shape = append(shape, render(fset, a))
 			}
-			site := ExecSite{Func: decl.Name.Name, Bin: render(fset, args[0])}
-			ok := false
-			for _, s := range ExecSites {
-				if s.Func != site.Func || s.Bin != site.Bin {
-					continue
+			ast.Inspect(p.file, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
 				}
-				want := strings.Fields(s.Args)
-				if len(want) != len(shape) {
-					continue
+				x, ok := sel.X.(*ast.Ident)
+				if !ok {
+					return true
 				}
-				match := true
-				for i, w := range want {
-					// An upper-case word stands for a value the applier
-					// fills in; it must not be a string literal.
-					if strings.Trim(w, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") == "" {
-						if lit, isLit := args[i+1].(*ast.BasicLit); isLit && lit.Kind == token.STRING {
-							match = false
-						}
+				for path, name := range names {
+					if x.Name != name {
 						continue
 					}
-					if w != shape[i] {
-						match = false
+					line := fset.Position(sel.Pos()).Line
+					if path == "os/exec" && !inMethod(p.file, sel.Pos(), "ExecRunner", "Run") {
+						t.Errorf("%s:%d: %s.%s outside execsite's ExecRunner.Run", p.path, line, name, sel.Sel.Name)
+					}
+					if slices.Contains(forbidden[path], sel.Sel.Name) {
+						t.Errorf("%s:%d: %s.%s starts a program outside execsite's ExecRunner.Run", p.path, line, path, sel.Sel.Name)
 					}
 				}
-				if match {
-					ok, found[s] = true, true
+				return true
+			})
+		}
+	})
+
+	t.Run("exec_sites_pinned", func(t *testing.T) {
+		sites := map[string]ExecSite{}
+		for _, s := range ExecSites {
+			sites[s.Ctor] = s
+		}
+		// The constructors: every function of execsite that makes a Cmd
+		// is listed, and returns exactly Cmd{path: bin, args: []string{bin,
+		// <Args>}}.
+		ctors := map[string]bool{}
+		for _, p := range files {
+			if !strings.HasPrefix(p.path, execsiteDir+"/") {
+				continue
+			}
+			for _, d := range p.file.Decls {
+				decl, ok := d.(*ast.FuncDecl)
+				if !ok || decl.Body == nil {
+					continue
+				}
+				makesCmd := false
+				ast.Inspect(decl.Body, func(n ast.Node) bool {
+					if cl, ok := n.(*ast.CompositeLit); ok && render(fset, cl.Type) == "Cmd" {
+						makesCmd = true
+					}
+					return true
+				})
+				if !makesCmd {
+					continue
+				}
+				site, listed := sites[decl.Name.Name]
+				if !listed || decl.Recv != nil {
+					t.Errorf("%s: %s makes an execsite.Cmd and is not a constructor in paths.ExecSites", p.path, decl.Name.Name)
+					continue
+				}
+				ctors[decl.Name.Name] = true
+				if err := checkCtor(fset, decl, site.Args); err != nil {
+					t.Errorf("%s: %s: %v", p.path, decl.Name.Name, err)
 				}
 			}
-			if !ok {
-				t.Errorf("%s: %s(%s %s) in %s is not in paths.ExecSites", where, name, site.Bin, strings.Join(shape, " "), site.Func)
+		}
+		for c := range sites {
+			if !ctors[c] {
+				t.Errorf("paths.ExecSites names constructor %s, which execsite does not define", c)
 			}
-		})
+		}
+		// The callers: every call of a constructor is a listed site, from
+		// its function, with its arguments as written.
+		found := map[ExecSite]bool{}
+		for _, p := range files {
+			if strings.HasPrefix(p.path, execsiteDir+"/") {
+				continue
+			}
+			pkg, ok := importNames(p.file)[execsitePath]
+			if !ok {
+				continue
+			}
+			eachCall([]parsed{p}, func(p parsed, decl *ast.FuncDecl, c *ast.CallExpr) {
+				sel, ok := c.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return
+				}
+				if x, ok := sel.X.(*ast.Ident); !ok || x.Name != pkg || !ctors[sel.Sel.Name] {
+					return
+				}
+				var args []string
+				for _, a := range c.Args {
+					args = append(args, render(fset, a))
+				}
+				got := ExecSite{Func: decl.Name.Name, Ctor: sel.Sel.Name, Call: strings.Join(args, " "), Args: sites[sel.Sel.Name].Args}
+				if got != sites[got.Ctor] {
+					t.Errorf("%s:%d: execsite.%s(%s) in %s is not in paths.ExecSites", p.path, fset.Position(c.Pos()).Line, got.Ctor, got.Call, got.Func)
+					return
+				}
+				found[got] = true
+			})
+		}
 		for _, s := range ExecSites {
 			if !found[s] {
 				t.Errorf("paths.ExecSites lists %+v, which no code runs", s)
@@ -311,4 +384,101 @@ func TestAllowed(t *testing.T) {
 			t.Errorf("Allowed(%s) = %v, want path_not_allowed", p, err)
 		}
 	}
+}
+
+// importNames maps each import path of f to the name it is used by.
+func importNames(f *ast.File) map[string]string {
+	out := map[string]string{}
+	for _, im := range f.Imports {
+		path, _ := strconv.Unquote(im.Path.Value)
+		name := path[strings.LastIndex(path, "/")+1:]
+		if im.Name != nil {
+			name = im.Name.Name
+		}
+		out[path] = name
+	}
+	return out
+}
+
+// inMethod reports whether pos lies in the method recv.name of f.
+func inMethod(f *ast.File, pos token.Pos, recv, name string) bool {
+	for _, d := range f.Decls {
+		decl, ok := d.(*ast.FuncDecl)
+		if !ok || decl.Recv == nil || len(decl.Recv.List) != 1 || decl.Name.Name != name {
+			continue
+		}
+		if id, ok := decl.Recv.List[0].Type.(*ast.Ident); ok && id.Name == recv && decl.Pos() <= pos && pos < decl.End() {
+			return true
+		}
+	}
+	return false
+}
+
+// isParamWord reports whether w, a word of ExecSite.Args, stands for a
+// constructor parameter (upper case) rather than a literal flag.
+func isParamWord(w string) bool { return strings.Trim(w, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") == "" }
+
+// checkCtor checks that an execsite constructor's body is exactly
+// return Cmd{path: p0, args: []string{p0, <args>}}: p0 its first
+// parameter, each literal flag of args a string literal, each upper-case
+// word one of its parameters, and every parameter used.
+func checkCtor(fset *token.FileSet, decl *ast.FuncDecl, args string) error {
+	var params []string
+	for _, f := range decl.Type.Params.List {
+		for _, n := range f.Names {
+			params = append(params, n.Name)
+		}
+	}
+	if len(params) == 0 || len(decl.Body.List) != 1 {
+		return errors.New("not a single return of a Cmd literal over its parameters")
+	}
+	ret, ok := decl.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return errors.New("not a single return statement")
+	}
+	cl, ok := ret.Results[0].(*ast.CompositeLit)
+	if !ok || render(fset, cl.Type) != "Cmd" || len(cl.Elts) != 2 {
+		return errors.New("does not return Cmd{path: ..., args: ...}")
+	}
+	fields := map[string]ast.Expr{}
+	for _, e := range cl.Elts {
+		kv, ok := e.(*ast.KeyValueExpr)
+		if !ok {
+			return errors.New("an unkeyed Cmd literal")
+		}
+		fields[render(fset, kv.Key)] = kv.Value
+	}
+	if fields["path"] == nil || render(fset, fields["path"]) != params[0] {
+		return fmt.Errorf("path is not its first parameter %s", params[0])
+	}
+	argv, ok := fields["args"].(*ast.CompositeLit)
+	if !ok || render(fset, argv.Type) != "[]string" {
+		return errors.New("args is not a []string literal")
+	}
+	want := append([]string{"BIN"}, strings.Fields(args)...)
+	if len(argv.Elts) != len(want) {
+		return fmt.Errorf("argv has %d words, paths.ExecSites says %d", len(argv.Elts), len(want))
+	}
+	used := map[string]bool{}
+	for i, e := range argv.Elts {
+		w := want[i]
+		if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			v, _ := strconv.Unquote(lit.Value)
+			if isParamWord(w) || v != w {
+				return fmt.Errorf("argv word %d is the literal %q, want %s", i, v, w)
+			}
+			continue
+		}
+		id, ok := e.(*ast.Ident)
+		if !ok || !isParamWord(w) || !slices.Contains(params, id.Name) || i == 0 && id.Name != params[0] {
+			return fmt.Errorf("argv word %d is %s, want %s", i, render(fset, e), w)
+		}
+		used[id.Name] = true
+	}
+	for _, p := range params {
+		if !used[p] {
+			return fmt.Errorf("parameter %s is not in argv", p)
+		}
+	}
+	return nil
 }

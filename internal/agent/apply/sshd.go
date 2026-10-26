@@ -3,13 +3,11 @@
 package apply
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -17,71 +15,25 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/paths"
 )
 
-// This file holds every exec site of the applier (paths.ExecSites; the
-// AST walk in internal/agent/paths pins them): each runs a binary from
-// the Config or a fixed absolute path, with literal flags, through
-// Config.Exec. Nothing else in internal/agent runs a program.
+// This file holds every exec site of the applier: each builds its
+// command with a constructor of internal/agent/execsite, the only package
+// that imports os/exec, from a binary in the Config or a fixed absolute
+// path, and runs it through Config.Exec. paths.ExecSites pins each site,
+// its constructor and its binary (TestPaths).
 
-// Result is what one run of a program gave: its output, capped, and its
-// exit status.
-type Result struct {
-	Stdout, Stderr []byte
-	Code           int
-}
+// Result is execsite's: a run's capped output and exit status.
+type Result = execsite.Result
 
-// Runner runs a prepared command. ExecRunner runs it; tests substitute a
-// fake that answers by cmd.Path and cmd.Args without running anything.
-type Runner interface {
-	Run(cmd *exec.Cmd) (Result, error)
-}
+// Runner is execsite's: what runs a command (tests substitute a fake).
+type Runner = execsite.Runner
 
-// Output caps of one program run.
-const (
-	maxStdout = 1 << 20
-	maxStderr = 64 << 10
-)
-
-// cappedBuffer keeps at most max bytes and drops the rest.
-type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := c.max - c.buf.Len(); room > 0 {
-		c.buf.Write(p[:min(len(p), room)])
-	}
-	return len(p), nil
-}
-
-// ExecRunner runs commands with a minimal environment and capped output.
-type ExecRunner struct{}
-
-// Run runs cmd. A non-zero exit is a Result, not an error; an error is a
-// program that could not be started or was killed by its context.
-func (ExecRunner) Run(cmd *exec.Cmd) (Result, error) {
-	out, errOut := &cappedBuffer{max: maxStdout}, &cappedBuffer{max: maxStderr}
-	cmd.Stdout, cmd.Stderr, cmd.Stdin = out, errOut, nil
-	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
-	err := cmd.Run()
-	res := Result{Stdout: out.buf.Bytes(), Stderr: errOut.buf.Bytes()}
-	var ee *exec.ExitError
-	switch {
-	case err == nil:
-	case errors.As(err, &ee) && ee.ExitCode() >= 0:
-		res.Code = ee.ExitCode()
-	default:
-		return res, err
-	}
-	return res, nil
-}
-
-// run runs cmd through the configured runner.
-func (e *engine) run(cmd *exec.Cmd) (Result, error) {
-	return e.cfg.Exec.Run(cmd)
+// run runs c through the configured runner.
+func (e *engine) run(ctx context.Context, c execsite.Cmd) (Result, error) {
+	return e.cfg.Exec.Run(ctx, c)
 }
 
 // firstLine is the first line of a program's error output, for messages.
@@ -93,7 +45,7 @@ func firstLine(b []byte) string {
 // sshdTest runs sshd -t -f <config>: the service's own binary checks the
 // configuration it will load at the next reload.
 func (e *engine) sshdTest(ctx context.Context) error {
-	res, err := e.run(exec.CommandContext(ctx, e.cfg.SSHD, "-t", "-f", e.cfg.SSHDConfig)) //nolint:gosec // G204: an exec site of paths.ExecSites, absolute paths from the operator's configuration
+	res, err := e.run(ctx, execsite.SSHDTest(e.cfg.SSHD, e.cfg.SSHDConfig))
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSSHDTest, err)
 	}
@@ -106,13 +58,11 @@ func (e *engine) sshdTest(ctx context.Context) error {
 // sshdDump runs sshd -T -f <config>, with -C spec when spec is not empty,
 // and parses its output.
 func (e *engine) sshdDump(ctx context.Context, spec string) (Dump, error) {
-	var cmd *exec.Cmd
-	if spec == "" {
-		cmd = exec.CommandContext(ctx, e.cfg.SSHD, "-T", "-f", e.cfg.SSHDConfig) //nolint:gosec // G204: an exec site of paths.ExecSites
-	} else {
-		cmd = exec.CommandContext(ctx, e.cfg.SSHD, "-T", "-f", e.cfg.SSHDConfig, "-C", spec) //nolint:gosec // G204: an exec site of paths.ExecSites
+	c := execsite.SSHDDump(e.cfg.SSHD, e.cfg.SSHDConfig)
+	if spec != "" {
+		c = execsite.SSHDDumpFor(e.cfg.SSHD, e.cfg.SSHDConfig, spec)
 	}
-	res, err := e.run(cmd)
+	res, err := e.run(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSSHDDump, err)
 	}
@@ -125,13 +75,13 @@ func (e *engine) sshdDump(ctx context.Context, spec string) (Dump, error) {
 // keygenFingerprint runs ssh-keygen -l -f file: the host's own tools must
 // read a CA key line.
 func (e *engine) keygenFingerprint(ctx context.Context, file string) (Result, error) {
-	return e.run(exec.CommandContext(ctx, e.cfg.SSHKeygen, "-l", "-f", file)) //nolint:gosec // G204: an exec site of paths.ExecSites; file is the agent's own check file
+	return e.run(ctx, execsite.KeygenFingerprint(e.cfg.SSHKeygen, file))
 }
 
 // keygenQuery runs ssh-keygen -Q -f krl pub: exit 0 means the host's own
 // tools read the KRL and it does not revoke pub.
 func (e *engine) keygenQuery(ctx context.Context, krlFile, pub string) (Result, error) {
-	return e.run(exec.CommandContext(ctx, e.cfg.SSHKeygen, "-Q", "-f", krlFile, pub)) //nolint:gosec // G204: an exec site of paths.ExecSites; both files are the agent's own
+	return e.run(ctx, execsite.KeygenQuery(e.cfg.SSHKeygen, krlFile, pub))
 }
 
 // reloadSystemd runs systemctl reload <unit> with the first of
@@ -147,7 +97,7 @@ func (e *engine) reloadSystemd(ctx context.Context, unit string) error {
 	if systemctl == "" {
 		return fmt.Errorf("%w: no systemctl at %s", ErrReload, strings.Join(paths.Systemctl, " or "))
 	}
-	res, err := e.run(exec.CommandContext(ctx, systemctl, "reload", unit)) //nolint:gosec // G204: a fixed systemctl path and a unit name checked against unitRE
+	res, err := e.run(ctx, execsite.SystemctlReload(systemctl, unit))
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrReload, err)
 	}
@@ -159,8 +109,7 @@ func (e *engine) reloadSystemd(ctx context.Context, unit string) error {
 
 // reloadOpenRC runs rc-service sshd reload.
 func (e *engine) reloadOpenRC(ctx context.Context) error {
-	rcService := paths.RCService
-	res, err := e.run(exec.CommandContext(ctx, rcService, "sshd", "reload")) //nolint:gosec // G204: a fixed path
+	res, err := e.run(ctx, execsite.RCServiceReload(paths.RCService))
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrReload, err)
 	}
