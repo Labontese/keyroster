@@ -856,10 +856,11 @@ func (e *engine) readDropIn() ([]byte, error) {
 	return b, err
 }
 
-// writeDropIn writes the drop-in when it is missing or differs: the
-// previous one is kept as dropin.prev (none when there was none), the
-// marker records dropin_changed, then the file is written. It reports
-// whether it wrote.
+// writeDropIn writes the drop-in when it is missing or differs, and sshd
+// listens on a loopback address the self-test can reach (else
+// no_loopback_listener, before anything is written): the previous one is
+// kept as dropin.prev (none when there was none), the marker records
+// dropin_changed, then the file is written. It reports whether it wrote.
 func (e *engine) writeDropIn() (bool, error) {
 	want := DropIn(e.l)
 	old, err := e.readDropIn()
@@ -868,6 +869,12 @@ func (e *engine) writeDropIn() (bool, error) {
 	}
 	if bytes.Equal(old, want) {
 		return false, nil
+	}
+	// A drop-in sshd would load but the self-test cannot reach is never
+	// written: no reload for a host with no loopback listener (PR #67
+	// review; 03-06's preflight reports the same code before enrollment).
+	if _, err := loopbackTargets(e.dump); err != nil {
+		return false, err
 	}
 	if old != nil {
 		if err := e.writeState(dropinPrevFile, old); err != nil {
