@@ -2049,6 +2049,37 @@ func TestReloadSignal(t *testing.T) {
 		t.Error("sshd running a replaced binary did not get SIGHUP")
 	}
 
+	// PR #67 fix round 2: the configured path goes through a symlinked
+	// directory (/usr/sbin -> bin, merged-/usr /sbin); after an upgrade
+	// /proc/<pid>/exe names the canonical directory, "(deleted)".
+	realDir := filepath.Join(dir, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(dir, "link", "sshd")
+	b, err := os.ReadFile(sleep) //nolint:gosec // test fixture
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBin := func() {
+		_ = os.Remove(filepath.Join(realDir, "sshd"))
+		if err := os.WriteFile(filepath.Join(realDir, "sshd"), b, 0o755); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+	}
+	writeBin()
+	_, done = start(linked)
+	writeBin()
+	if err := reloadSignal(linked, dump); err != nil {
+		t.Errorf("sshd configured through a symlinked directory, binary replaced: %v", err)
+	}
+	if !hungUp(done) {
+		t.Error("sshd configured through a symlinked directory did not get SIGHUP")
+	}
+
 	c, done := start(sshd)
 	_ = c.Process.Kill()
 	<-done

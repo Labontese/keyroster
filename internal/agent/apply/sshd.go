@@ -198,7 +198,10 @@ func reloadSignal(sshd string, dump Dump) error {
 
 // runsBinary checks that process pid runs the binary at path: its
 // /proc/<pid>/exe is that file, or, after an upgrade replaced the file
-// under the running process, names path marked " (deleted)".
+// under the running process, names path marked " (deleted)". The kernel
+// names the file by its canonical directory, so path is compared as
+// written and with its directory's symlinks resolved (PR #67 fix round 2:
+// /usr/sbin a symlink to bin, or /sbin on merged-/usr).
 func runsBinary(pid int, path string) error {
 	exe := "/proc/" + strconv.Itoa(pid) + "/exe"
 	if want, err := os.Stat(path); err == nil {
@@ -210,10 +213,20 @@ func runsBinary(pid int, path string) error {
 	if err != nil {
 		return fmt.Errorf("process %d: %w", pid, err)
 	}
-	if strings.TrimSuffix(target, " (deleted)") == filepath.Clean(path) {
+	if got := strings.TrimSuffix(target, " (deleted)"); got == filepath.Clean(path) || got == resolvedDir(path) {
 		return nil
 	}
 	return fmt.Errorf("process %d runs %s, not %s", pid, target, path)
+}
+
+// resolvedDir is path with the symlinks of its directory resolved, or
+// path cleaned when they cannot be.
+func resolvedDir(path string) string {
+	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Join(dir, filepath.Base(path))
 }
 
 // Dump is sshd -T output: lowercase keyword to its values, one per line
