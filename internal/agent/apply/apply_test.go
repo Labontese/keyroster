@@ -474,7 +474,7 @@ func TestApply(t *testing.T) {
 		if _, err := h.apply(); !errors.Is(err, ErrNoLoopbackListener) {
 			t.Fatalf("sshd only on non-loopback addresses: %v, want no_loopback_listener", err)
 		}
-		if got, err := loopbackTargets(ParseDump([]byte("listenaddress 0.0.0.0:2222\nlistenaddress [::]:2222\nlistenaddress 10.0.0.1:22\n"))); err != nil || !slices.Equal(got, []string{"127.0.0.1:2222", "[::1]:2222"}) {
+		if got, err := loopbackTargets(ParseDump([]byte("listenaddress 0.0.0.0:2222\nlistenaddress [::]:2222\nlistenaddress 192.0.2.20:22\n"))); err != nil || !slices.Equal(got, []string{"127.0.0.1:2222", "[::1]:2222"}) {
 			t.Fatalf("wildcards: %v, %v", got, err)
 		}
 	})
