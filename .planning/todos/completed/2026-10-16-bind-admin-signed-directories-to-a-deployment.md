@@ -30,3 +30,7 @@ Trade-offs to settle in phase 4 planning:
 - The identifier must be pinned and shown to co-signing admins.
 - It adds friction for restore, re-bootstrap and promoting staging to prod.
 - A format change needs a directory schema version bump and a migration story for already-signed directories.
+
+## Resolution
+
+Resolved in 03-04 (PR from branch `p03/04-directory-hosts`): installation_id in bundle (03-01), directory and KRL manifest; signer install check and audit rule here; agent pin in 03-07. Trade-offs settled by the D-04 checkpoint in 03-01. The directory carries `installation_id` (omitempty, after `host_groups`), the signer refuses `directory_installation_missing`, `directory_installation_mismatch` and `directory_installation_unknown`, audit verify applies the same rule to every directory_install entry, a stored ID-less directory stays authorized under the lenient answer, and `keyroster directory rebind` binds it (TestDirectoryInstallation, TestDirectoryInstallationRebind, TestVerifyDirectoryInstallation, TestDirectoryHostsEndToEnd).
