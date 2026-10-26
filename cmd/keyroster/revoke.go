@@ -643,17 +643,40 @@ func confirmRevokeAnswer(ctx context.Context, c *serverclient.Client, b *trust.B
 	return m, p, nil
 }
 
+// revokeRefusals are the signer's refusal details an admin can act on, in
+// the CLI's own words. They are matched by detail, whatever the HTTP
+// status (keyroster-server answers 400 for a malformed request and 403
+// for every other refusal).
+var revokeRefusals = map[string]string{
+	"unknown_serial": "the signer has issued no certificate with this serial; nothing was revoked. " +
+		"Revoke the certificate by its key ID (keyroster revoke key-id) or, for a certificate this signer did not issue, by its key (keyroster revoke key FILE)",
+	"ca_role_mismatch":  "the certificate with this serial was not issued by that CA; pass the right --ca; nothing was revoked",
+	"duplicate_request": "the signer has already accepted a request with this ID; run the command again; nothing new was revoked",
+	"key_id_not_issued": "the signer has issued no certificate with this key ID under that CA; nothing was revoked. " +
+		"Check the key ID and --ca; a certificate this signer did not issue is revoked by its key (keyroster revoke key FILE)",
+	"explicit_key_cap_reached": "the KRL holds as many explicit keys as it may (explicit_key_cap_reached: 1000 keys or 1 MiB, and they never leave it); nothing was revoked. " +
+		"Revoke the key's certificates by serial or key ID instead and remove the key from authorized_keys by hand; see docs/runbooks/revoke.md",
+	"key_is_ca_of_this_installation": "the key is a key of this installation's trust bundle (a CA, ops, log or root key), which is never revoked as a key; nothing was revoked. " +
+		"A compromised CA key is replaced by the emergency CA rotation (03-13)",
+	"subject_kind_unsupported": "this signer revokes user subjects only (subject_kind_unsupported); nothing was revoked",
+	"revoke_installation_missing": "the signer received the request without an installation ID (revoke_installation_missing), but this CLI always names one, " +
+		"so the request did not reach the signer unchanged; nothing was revoked",
+	"revoke_installation_mismatch": "the signer belongs to another installation than the trust bundle your root pins verify (revoke_installation_mismatch); nothing was revoked. " +
+		"Check the server URL and root pins that keyroster init saved",
+}
+
 // revokeRefusal states a refused revocation in the CLI's own words for the
 // refusals an admin can act on, and otherwise returns err.
 func revokeRefusal(err error) error {
 	var he *serverclient.HTTPError
+	if errors.As(err, &he) {
+		for detail, text := range revokeRefusals {
+			if he.APIErrorIs(detail) {
+				return errors.New(text)
+			}
+		}
+	}
 	switch {
-	case errors.As(err, &he) && he.APIErrorIs("unknown_serial"):
-		return errors.New("the signer has issued no certificate with this serial; nothing was revoked (revocation by key, for a certificate this signer did not issue, arrives in a later version)")
-	case errors.As(err, &he) && he.APIErrorIs("ca_role_mismatch"):
-		return errors.New("the certificate with this serial was not issued by that CA; pass the right --ca; nothing was revoked")
-	case errors.As(err, &he) && he.APIErrorIs("duplicate_request"):
-		return errors.New("the signer has already accepted a request with this ID; run the command again; nothing new was revoked")
 	case errors.As(err, &he) && he.Code == http.StatusForbidden:
 		// keyroster-server refuses a key that is not a policy admin itself
 		// (401, admin authentication failed); a 403 is the signer's, for
