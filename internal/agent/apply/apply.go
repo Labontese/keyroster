@@ -156,11 +156,26 @@ type Report struct {
 	// and host_removed install no principals, host_keys_rotated and
 	// host_keys_disagree keep last-good's; the CA keys and the KRL apply
 	// in every case.
-	HostStatus        string   `json:"host_status,omitempty"`
+	HostStatus string `json:"host_status,omitempty"`
+	// KRLKept is set when the verified state's KRL is older than the one
+	// in force in current, which a rollback or crash recovery kept there
+	// (the KRL never rolls back): the generation keeps the KRL in force,
+	// and this names both versions instead of substituting silently (PR #67
+	// round-2 carry-over).
+	KRLKept           *KRLKept `json:"krl_kept,omitempty"`
 	UnmatchedHostKeys []string `json:"unmatched_host_keys,omitempty"`
 	SpoolIgnored      []string `json:"spool_ignored,omitempty"`
 	Diff              []string `json:"diff,omitempty"`
 	Errors            []string `json:"errors"`
+}
+
+// KRLKept is Report.KRLKept: the KRL version in force in current (and the
+// generation that holds it), kept over the older version the verified
+// state renders.
+type KRLKept struct {
+	InForce    uint64 `json:"in_force"`
+	Verified   uint64 `json:"verified"`
+	Generation uint64 `json:"generation"`
 }
 
 // engine is one run's working state.
@@ -579,9 +594,16 @@ func (e *engine) setVersions(v *state.Verified, g *Generation) {
 // newer KRL in current than accepted/ holds, and a capture that no longer
 // offers it must not render the older one.
 func (e *engine) keepKRL(g, cur *Generation, curLink link) {
-	if cur != nil && curLink.kind == linkAgent && keepKRLInForce(g, cur) {
-		e.logf("keeping KRL version %d, in force in generation %d, over the older one this capture renders", krlVersion(cur), curLink.n)
+	if cur == nil || curLink.kind != linkAgent {
+		return
 	}
+	verified := krlVersion(g)
+	if !keepKRLInForce(g, cur) {
+		e.report.KRLKept = nil // a superseding capture may bring a newer KRL
+		return
+	}
+	e.report.KRLKept = &KRLKept{InForce: krlVersion(cur), Verified: verified, Generation: curLink.n}
+	e.logf("WARNING krl_kept: the verified state's KRL version %d is older than version %d in force in generation %d; keeping version %d", verified, krlVersion(cur), curLink.n, krlVersion(cur))
 }
 
 // render is Render for this host. When Render refuses because of the

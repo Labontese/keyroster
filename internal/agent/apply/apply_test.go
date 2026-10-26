@@ -48,7 +48,7 @@ func TestApplyTracer(t *testing.T) {
 
 	h.publishKRL(7)
 	r = h.mustApply()
-	if r.Reloaded || r.Intermediate != 0 || h.run.reloads != 1 || h.current() == first {
+	if r.Reloaded || r.Intermediate != 0 || h.run.reloads != 1 || h.current() == first || r.KRLKept != nil {
 		t.Fatalf("revocation: %+v, %d reloads, current %d", r, h.run.reloads, h.current())
 	}
 
@@ -780,6 +780,14 @@ func TestApply(t *testing.T) {
 			}
 			if !h.krlRevokes(h.l.Current(), 7) || !h.krlRevokes(h.l.LastGood(), 7) || r.KRLVersion != krl7 {
 				t.Fatalf("the KRL went back: current revokes 7 %t, last-good revokes 7 %t, reported KRL %d", h.krlRevokes(h.l.Current(), 7), h.krlRevokes(h.l.LastGood(), 7), r.KRLVersion)
+			}
+			// PR #67 round-2 carry-over (b): the substitution is named in
+			// the report and in status.json, not only in the log.
+			if r.KRLKept == nil || r.KRLKept.InForce != krl7 || r.KRLKept.Verified >= krl7 {
+				t.Fatalf("report krl_kept = %+v, want in_force %d over an older verified version", r.KRLKept, krl7)
+			}
+			if b, _ := os.ReadFile(h.l.State(statusFile)); !strings.Contains(string(b), `"krl_kept":{"in_force":`+strconv.FormatUint(krl7, 10)) { //nolint:gosec // test fixture
+				t.Fatalf("status.json does not name the kept KRL: %s", b)
 			}
 			if !slices.Equal(h.principals("deploy"), []string{"role:ops", "role:q"}) {
 				t.Fatalf("principals = %v", h.principals("deploy"))
