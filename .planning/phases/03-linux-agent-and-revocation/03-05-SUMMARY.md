@@ -75,9 +75,13 @@ key-decisions:
   - "03-05: KRLs have no chain (krl_version is time-derived since 03-03): the newest complete KRL is verified against the stored version, an equal version is a no-op before VerifyManifest, an older one is krl_older"
   - "03-05: waited_ms reports, for each widening swap that had to wait, the interval from the previous swap of current to that swap"
   - "03-05: spool.Read takes the accepted versions as a Floor and reads the lowest 64 versions above it, so a host far behind converges over several applies"
+  - "03-05 PR #67, owner decision 2026-10-26: the KRL never rolls back; a rollback or crash recovery moves current to RollbackTarget(current, last-good), last-good's CA keys, principals and drop-in with the newer KRL"
+  - "03-05 PR #67, owner decision 2026-10-26: once the host has trust files, the KRL and CA keys always apply; a disabled or removed host gets no principals, rotated host keys keep last-good's principals, host_status in the report"
+  - "03-05 PR #67, owner decision 2026-10-26: the widening wait is the LoginGraceTime bound + 30 s on CLOCK_MONOTONIC"
 
 patterns-established:
-  - "Root applier exec sites live in internal/agent/apply/sshd.go only, each listed in paths.ExecSites with its binary and flags"
+  - "Root applier exec sites are internal/agent/execsite constructors (the only importer of os/exec), each listed in paths.ExecSites with its argv and its one caller in sshd.go (PR #67 review; first written as sshd.go only)"
+  - "accepted/ is one atomic unit: snapshot directories and a current.json pointer with SHA-256s (PR #67 review)"
   - "A generation file's behaviour in Intermediate and in the swap classification comes from its FileClass in GenerationFiles"
 
 requirements-completed: []
@@ -197,6 +201,8 @@ So on 10.5p1, sshd still reads the trust files for an authentication more than L
 
 This plan did not change the owner's timing rule. **The owner decides** whether the + 5 s margin stands, needs to grow, or needs 10.x's slack explained first. UNVERIFIED: the slack on a loaded production host.
 
+**Superseded (owner decision 2026-10-26, PR #67):** the owner set the margin to LoginGraceTime + 30 s, measured on CLOCK_MONOTONIC. See "Pre-merge review fixes" at the end.
+
 ## D-05 network answer (Task 1)
 
 D-05 network answer: loopback-only
@@ -269,7 +275,12 @@ The record is `$HOME/keyroster-ceremony/phase3/d05-answer.txt`; its first line i
 - The bound is the largest LoginGraceTime the agent has observed since its own last reload of sshd.
 - The operator runbook gets this rule in 03-07, and 03-16 measures it.
 
-## Capslock pairs (test/capslock/keyroster-agent.json, 19 pairs)
+**Superseded (owner decision 2026-10-26, PR #67):** additions are live at most LoginGraceTime + 30 s after the previous swap of `current` (150 s with the default), measured on CLOCK_MONOTONIC. A failed self-test no longer takes a revocation back, and a host the directory disables or removes still gets every KRL.
+
+## Capslock pairs (test/capslock/keyroster-agent.json, 19 pairs; 20 since PR #67)
+
+PR #67 review: the baseline gained `internal/agent/execsite CAPABILITY_EXEC`, because the exec sites moved there. capslock-check also requires every EXEC edge that leaves the module to start in execsite.
+
 
 | Package | Capabilities |
 |---|---|
@@ -332,7 +343,7 @@ Each mutant was applied in WSL, run, and restored byte for byte (cmp with a kept
 - **Real root, real systemd or OpenRC reloads, and real host paths.** Every run was non-root, with `--reload signal` against the test sshd, `openrc` against a fake runner, and `--root` in a temporary directory. `reloadSystemd` and `reloadOpenRC` never ran a real binary.
 - **The stuck alert "once a minute".** Each `apply --once` run writes one stderr line and status.json. Repeating it every minute is 03-08's timer (journald). UNVERIFIED.
 - **A `current` that is a real directory rather than a link.** `--recover-to-last-good` refuses with an instruction to move it by hand; this is not tested.
-- **IPv6 loopback (`::1`) self-test dials.** Only the address mapping is unit-tested; no sshd ran on ::1.
+- **IPv6 loopback (`::1`) self-test dials.** Only the address mapping is unit-tested; no sshd ran on ::1. **PR #67 review:** an unreachable ::1 is now skipped. The real EADDRNOTAVAIL path ran as root in a network namespace with `disable_ipv6=1` on lo. A dial to a real sshd on a reachable ::1 is still not run.
 - **Every homelab step.** UNVERIFIED until 03-16. The agent is not installable until 03-07.
 
 ## Decisions Made
@@ -340,7 +351,7 @@ Each mutant was applied in WSL, run, and restored byte for byte (cmp with a kept
 See `key-decisions` in the frontmatter. Also:
 
 - **No operator step changes in this plan (D-20).** The agent is not installable until 03-07, so no runbook gains an agent step. The only runbook change is the carry-over in machine-identities.md.
-- **Rollback can undo a revocation.** A revocation whose self-test fails is rolled back to last-good's KRL. That is the plan's rule (rollback to last-good on a failed self-test); the report shows `rollback: true` with the error. 03-08's status surfaces it.
+- **Rollback can undo a revocation.** A revocation whose self-test fails is rolled back to last-good's KRL. That is the plan's rule (rollback to last-good on a failed self-test); the report shows `rollback: true` with the error. 03-08's status surfaces it. **Superseded (owner decision 2026-10-26, PR #67):** the KRL never rolls back (decision 1 below).
 
 ## Deviations from Plan
 
@@ -469,10 +480,10 @@ None.
   - should know that a drop-in other files override is caught only when the drop-in changes (`dropin_not_effective`).
 - **03-07:** writes the spool with `spool.Write`. The applier reads at most 64 versions per kind above its accepted ones per run, so a fetcher may keep older files but catch-up takes several runs. Enrollment writes `pins.json` with `state.WritePins`. The operator runbook gets the timing rule above.
 - **03-08:** units, a journald repeat of the stuck alert, `status.json` (`stuck`, `last_apply`), and `IPAddressDeny=any` with `IPAddressAllow=localhost`.
-- **03-08 and 03-10:** each self-test adds a 1 s "noauth" penalty for 127.0.0.1 on OpenSSH 10.x, and 03-10's probes will add more. Frequent applies could reach the 15 s minimum that makes a penalty bite. A self-test failed that way rolls back to last-good, and so to last-good's KRL, until the next run. That is plan-conformant, but the interaction belongs on 03-08's and 03-10's radar.
+- **03-08 and 03-10:** each self-test adds a 1 s "noauth" penalty for 127.0.0.1 on OpenSSH 10.x, and 03-10's probes will add more. Frequent applies could reach the 15 s minimum that makes a penalty bite. A self-test failed that way rolls back to last-good, and so to last-good's KRL, until the next run. That is plan-conformant, but the interaction belongs on 03-08's and 03-10's radar. **Superseded (owner decision 2026-10-26, PR #67):** such a rollback now keeps the newest KRL.
 - **03-09:** HostCertificate needs SIGHUP on 10.x and not on 9.x (see findings).
 - **03-10 and 03-14:** register their files in `GenerationFiles` and leave swap.go alone.
-- **Owner:** the LoginGraceTime slack on 10.5p1 (up to 3.6 s over LoginGraceTime 3) against the + 5 s margin.
+- **Owner:** the LoginGraceTime slack on 10.5p1 (up to 3.6 s over LoginGraceTime 3) against the + 5 s margin. **Superseded (owner decision 2026-10-26, PR #67):** + 30 s on CLOCK_MONOTONIC.
 
 ## Self-Check: PASSED
 
@@ -486,6 +497,88 @@ None.
   - the only rename of `current` is replaceLink's `os.Rename`, reached only from swapCurrent (TestPaths 5). layout.go's `renameDir` renames generation directories only.
 - **Task 3.** Every named case in the behaviour lists exists and passes, including every name in the plan's verify list (checked from `go test -v` output).
 - **Task 4.** `git ls-files test/capslock/keyroster-agent.json` prints the baseline (after the commit), and `grep -n agent-apply-no-http .golangci.yml` prints the rule.
+
+## Pre-merge review fixes
+
+PR #67's pre-merge review (Claude lenses plus Codex) confirmed 14 findings, with duplicates merged here, and split 2. Each fix is on the branch from head `d2e9fb5`. Every item has a test that failed before the fix, or a mutant that the test kills. Mutants were applied, run and restored byte for byte. All 13 commits are SSH-signed by keyroster-bot.
+
+### Owner decisions (2026-10-26, PR #67)
+
+Recorded as T-03-270, T-03-271 and T-03-272 and in the review ledger of 03-05-PLAN.md, with the must_haves edited in place. Each later plan they reach gets one line per affected rule in a closing section, "Inherited from 03-05's pre-merge review": 03-06, 03-07, 03-08, 03-09, 03-10, 03-12, 03-14 and 03-16.
+
+1. **The KRL never rolls back.** `99632f0`. A rollback or crash recovery now moves `current` to `RollbackTarget(current, last-good)`. That is last-good's files, except that each revocation list (FileKRL class) is the newer of the two by KRL version. CA keys, principals and the drop-in go back to last-good. The generation is last-good itself when the content is equal, otherwise a new validated generation, or current itself for a revocation-only change.
+   - **Bookkeeping, defined precisely.** last-good names the last generation that passed a self-test, so its KRL may be older than current's. At rest current may hold last-good's CA keys and principals with a newer KRL. A start that finds current there recovers nothing. A later commit sets last-good as before.
+   - **Tests.** `selftest_failure_after_krl_only_change_keeps_krl` covers a KRL-only change with a forced self-test failure: the KRL stays and last-good keeps its own KRL. `selftest_failure_rolls_back` covers a mixed change: principals and CA keys back to last-good, KRL 7 still in force, and the next run recovers nothing. Both failed against a stub with the old target.
+   - **Also changed.** `TestSwapInterleaving/rollback_keeps_newest_krl` models the move. TestAgentApplyEndToEnd step 5 now expects last-good unchanged and current with last-good's CA keys and principals and the new KRL. The crash-recovery tests accept current at the rollback target.
+2. **The KRL and CA keys always apply; principals are emptied for a disabled or removed host.** `e971d2e`. Once the host has a last-good, a Render refusal for this host goes on through `RenderFallback`:
+   - the KRL and CA keys apply as Render renders them;
+   - `host_disabled` or `host_removed` installs no principals files;
+   - `host_keys_rotated` (keys match no entry while the entry last-good was rendered for is still active) and `host_keys_disagree` (keys match two entries) keep last-good's principals files.
+
+   The report carries `host_status` and a warning goes to the log. Generation records now carry `host`, which tells a removed host from rotated keys.
+   - **Tests.** `host_disabled_empties_principals_krl_applies`, `host_removed_...`, `host_keys_rotated_keeps_last_good_principals` (also with a record that has no host name), `host_keys_disagree_...` and `host_not_active_on_first_install_refused`.
+   - **Mutants.** Without the fallback, all four host cases fail. Never keeping principals fails the rotated and disagree cases. Counting a removed host as rotated fails the removed case.
+3. **The widening wait is LoginGraceTime + 30 s on CLOCK_MONOTONIC.** `da8df2e`. `graceMargin` is 30 s, used in widenDue, the marker deadline and the window of the earlier LoginGraceTime maximum. The timing rule reads CLOCK_MONOTONIC (`Clock.Monotonic`), and the records became `monotonic_ns` and `own_reload_monotonic_ns`. `last_swap.json` is now decoded strictly, so an old `boottime_ns` record counts as just made, which means a full wait.
+   - **Go's clock.** Go 1.27.3's runtime `nanotime1` uses CLOCK_MONOTONIC (`runtime/sys_linux_amd64.s`), and Sleep runs on it.
+   - **Safety argument, independent of the kernel detail.** The wait never counts suspended time. If sshd's timer also pauses during a suspend, the two match. If sshd's timer counts the suspend, it fires sooner and the agent waits longer. Either way the wait is never shorter than sshd's, so no extra period after a detected suspend is needed. The review checked that sshd arms its timer with `setitimer(ITIMER_REAL)`, in 9.9p1's sshd-session.c. On Linux that timer runs on CLOCK_MONOTONIC; this was not re-read in kernel source this session.
+   - **Tests.** The TestApply timing cases now expect 150 s, 37 s and 630 s. `last_swap_old_format_means_full_wait` and TestSystemClockMonotonic are new. The e2e mixed change waits at least 33 s and measured 33.0 s. The `login_grace_*` subtests still bound sshd at LoginGraceTime + 5 s, as the owner asked.
+   - **Mutants.** `graceMargin` set to 5 s fails four TestApply cases. Lenient decoding of `last_swap.json` fails the old-format case.
+
+### Fixes without an owner decision
+
+| Item (severity) | Commit | Test | Proof it bites |
+|---|---|---|---|
+| Crash in commit's first-install window left the drop-in and removed `current` (HIGH; Claude and Codex duplicates) | `79d1b36` | TestApply `crash_anywhere_first_install`: a crash at every fault point of a first install, then at every fault point of the recovery run; the drop-in must exist exactly when current and last-good name a generation with a KRL, with no marker left | Failed before the fix at k=7 (drop-in true, current false). The marker's new step `commit` keeps dropin_changed and dropin.prev until last-good is durable, and recovery finishes such a commit |
+| Self-test failed every host with IPv6 disabled (HIGH) | `4857710` | TestSelfTestLoopbackFamilies (injected EADDRNOTAVAIL and EAFNOSUPPORT, IPv6 off, only ::1, an IPv4 EADDRNOTAVAIL, nothing on 127.0.0.1); TestSelfTestIPv6DisabledHost (real dialer) | The first three cases failed before the fix. The real-kernel test passed as root in an `unshare -n` namespace with `disable_ipv6=1` on lo, which gave a real EADDRNOTAVAIL |
+| keyroster/ and gen/ modes depended on the umask (HIGH) | `f5a83fc` | TestGenerationModesUnderUmask (umask 077) | Before: keyroster/ and gen/ 0700 |
+| accepted/ saved one file at a time (HIGH/MEDIUM; Claude and Codex duplicates) | `5f03c95` | TestApply `torn_accepted_save_never_mixes` (a crash between bundle.json and policy.json during a policy rotation that renders the same files); `crash_anywhere_recovers` now also requires accepted/ to move with last-good; TestStored (partial state never activated, files without a pointer, a staged snapshot not in force, a tampered file) | Before: accepted/ held bundle 2 with policy 1. Now `accepted/<N>/` plus `current.json` with SHA-256s, one rename; LoadStored refuses a hash mismatch and a bundle that does not name its policy; the commit marker names the staged snapshot and recovery activates it |
+| hostKeys refused a missing default HostKey .pub (MEDIUM) | `aa5e76b` | TestHostKeys (default paths with only ed25519 present, none present, a private key without .pub) | Failed before: an open of ssh_host_rsa_key.pub |
+| Exec pin, forbidigo and capslock missed trivial rewrites (MEDIUM) | `0ae678d` | TestPaths `exec_only_in_execsite` and `exec_sites_pinned`; depguard `agent-exec-only-in-execsite`; forbidigo process-start pattern; capslock-check EXEC call-graph gate | Mutant A (aliased os/exec plus an exec.Cmd literal in apply) and mutant B (os.StartProcess) each failed TestPaths, golangci-lint and capslock-check. Mutant C (an unlisted execsite constructor) and mutant D (a listed constructor called with another binary) failed TestPaths |
+| Generation read limits not validated before install (MEDIUM) | `e94b9c0` | TestApply `oversize_generation_refused_before_install` (17 bulk roles, 32 principals of 128 characters) | Before: installed (generation 2), which would fail every later readCurrent |
+| Capped catch-up refused every capture across a policy rotation (MEDIUM) | `56638ea` | TestApply `catch_up_across_policy_rotation` (67 directories under the old policy, then a rotation, once also with a new ops key and a KRL signed by it) | Before: `directory_not_verified` on every run. A mutant without the KRL wait fails the ops-key case |
+| Signal reload signalled a stale PidFile's PID (LOW) | `d9d8633` | TestReloadSignal (another process, the configured binary, a binary replaced under it, an exited process) | Before: the unrelated process got SIGHUP |
+| no_loopback_listener only detected by the post-swap self-test (SPLIT LOW) | `b141e95` | TestApply `non_loopback_listener_refused` now also requires no reload, no drop-in, no current and no marker | Before: 2 reloads. Decision: 03-06's preflight covers the first apply and drop-in changes (its key_link "the first apply, and every drop-in change, runs Preflight before any reload"), but 03-06 is not merged and the check is a pure function of the `sshd -T` dump, so writeDropIn now runs it before writing. A steady-state host that loses its listener with the drop-in unchanged is still caught by the self-test, whose rollback now keeps the KRL |
+| Widening wait's + 5 s margin and CLOCK_BOOTTIME (SPLIT LOW) | `da8df2e` | as decision 3 | as decision 3 |
+
+### Choices made inside the decisions, for the owner to confirm
+
+- **First install.** It still refuses a disabled or absent host and installs nothing, as before. There is no access to narrow yet, and installing the drop-in would change sshd's configuration for a host the directory does not admit.
+- **Identity uncertain.** `host_keys_disagree`, and a last-good record without a host name (only records from before this change), are treated like rotated keys: last-good's principals are kept.
+- **Residual of decision 2.** While a host's keys stay rotated, principal changes in the directory do not reach it.
+- **`generation_too_large`.** It refuses the whole apply, so a KRL in the same capture does not land either. Option: route it through the fallback, with the KRL and CA keys applied and last-good's principals kept.
+- **`--recover-to-last-good`.** The operator's recovery from a foreign `current` still goes to last-good's own files, so it can install an older KRL than the one in force. Not changed here; this is a residual of decision 1. Option: apply RollbackTarget to an agent-made `current` there too.
+- **03-10 interaction.** A host with `host_status` host_disabled or host_removed has no principals files, so 03-10's positive probe cannot pass there. 03-10-PLAN.md now carries a line saying the probe must skip such a host, or keep its principals file, instead of rolling back every apply.
+- **Contract changes later plans read.**
+  - `pending.json` has the step `commit` and an `accepted` field.
+  - accepted/ is snapshot directories plus `current.json`.
+  - Generation records gain `host`.
+  - The report gains `host_status` and `bundle_held`.
+  - New exec sites must be execsite constructors with a `paths.ExecSites` entry.
+
+### Gates on the final code head (`e971d2e`), WSL Ubuntu, Go 1.27.3
+
+- `gofmt -l .` is empty.
+- `go vet ./...` passes for linux, windows and darwin, and so does `GOOS=linux go vet -tags e2e ./test/e2e/`.
+- `CGO_ENABLED=1 go test -race -count=1 ./...` passes. internal/agent/apply took 130 s under -race, against the 10-minute default timeout.
+- golangci-lint reports 0 issues for linux, windows and darwin.
+- `scripts/capslock-check.sh`: signer 91/91, agent 20/20, and EXEC leaves the module only through execsite (2 edges).
+- `scripts/dep-firewall.sh` and `scripts/testonly-firewall.sh` are clean.
+- TestAgentApplyEndToEnd and TestSshdRereadsTrustFiles pass locally on OpenSSH 10.5p1 and 9.5p1, with the `signal` reload against the real test sshd, so the PidFile check matched the real sshd process.
+- The required checks on the pushed head are in the handback.
+
+### UNVERIFIED
+
+- A real suspend during a widening wait. WSL and CI cannot suspend, so TestSystemClockMonotonic only bounds the reading (BOOTTIME - MONOTONIC was 0 here).
+- EAFNOSUPPORT from a kernel booted with `ipv6.disable=1`. It is covered only by the injected dialer.
+- A self-test dial to a real sshd on a reachable ::1.
+- The pidfd path on kernels older than 5.3. pidfd_open is required, and RHEL 8 is already unsupported (03-06).
+- Real root, systemd and OpenRC reloads, and every homelab step, as before.
+
+### Self-Check (pre-merge review fixes): PASSED
+
+- The commits `f5a83fc`, `aa5e76b`, `4857710`, `d9d8633`, `b141e95`, `e94b9c0`, `0ae678d`, `79d1b36`, `5f03c95`, `56638ea`, `da8df2e`, `99632f0` and `e971d2e` are ancestors of HEAD, and each has a good SSH signature from keyroster-bot's signing key.
+- `git rev-list --count d2e9fb5..e971d2e` is 13.
+- internal/agent/execsite/execsite.go exists.
 
 ---
 *Phase: 03-linux-agent-and-revocation*
