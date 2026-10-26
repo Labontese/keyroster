@@ -239,6 +239,16 @@ var (
 		`grep '"kind":"directory_install"' "$SAVED"`,
 	}
 	restoreSavedGrep = regexp.MustCompile(`grep (?:-[a-zA-Z]+ )*'[^']*' (?:/root/latest-saved\.jsonl|"\$SAVED")`)
+	// restoreRestoredGreps are the runbook's greps of the restored export:
+	// step 2's bundle version, directory install count and revoke count
+	// (03-03). The revoke count was matched only by restoreRestoredGrep
+	// until the pre-merge review of PR #61, so deleting it passed.
+	restoreRestoredGreps = []string{
+		`grep -o '"bundle_version":[0-9]*' /tmp/restored.jsonl | tail -n 1`,
+		`grep -c '"kind":"directory_install"' /tmp/restored.jsonl`,
+		restoreRestoredRevokeGrep,
+	}
+	restoreRestoredRevokeGrep = `grep -c '"kind":"revoke"' /tmp/restored.jsonl`
 	// restoreRestoredGrep finds any grep of the restored export.
 	restoreRestoredGrep = regexp.MustCompile(`grep (?:-[a-zA-Z]+ )*'[^']*' /tmp/restored\.jsonl`)
 )
@@ -357,12 +367,20 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		t.Errorf("signer-install.md does not release the hold between step 2's checks and step 3: checks end at %d, release at %d, step 3 at %d",
 			stop, release, step3)
 	}
-	if revokeStop := pos("stop for a restore that lost a revocation", restoreRevokeStop); revokeStop <= stop || revokeStop >= release {
+	revokeStop := pos("stop for a restore that lost a revocation", restoreRevokeStop)
+	if revokeStop <= stop || revokeStop >= release {
 		t.Errorf("signer-install.md does not stop a restore that lost a revocation after the saved export is verified and before the release: %q at %d, checks end at %d, release at %d",
 			restoreRevokeStop, revokeStop, stop, release)
 	}
 	for _, g := range restoreSavedGreps {
 		pos("grep of the saved export", g)
+	}
+	for _, g := range restoreRestoredGreps {
+		pos("grep of the restored export", g)
+	}
+	if rg := pos("revoke count of the restored export", restoreRestoredRevokeGrep); rg <= stop || rg >= revokeStop {
+		t.Errorf("signer-install.md does not count the restored export's revoke entries after the saved export is verified and before the stop for a lost revocation: %q at %d, checks end at %d, the stop at %d",
+			restoreRestoredRevokeGrep, rg, stop, revokeStop)
 	}
 	greps := restoreSavedGrep.FindAllStringIndex(section, -1)
 	if len(greps) < len(restoreSavedGreps) {
@@ -374,8 +392,8 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		}
 	}
 	rgreps := restoreRestoredGrep.FindAllStringIndex(section, -1)
-	if len(rgreps) < 2 {
-		t.Errorf("found %d greps of the restored export, want at least 2 (step 2's bundle version and directory install count)", len(rgreps))
+	if len(rgreps) < len(restoreRestoredGreps) {
+		t.Errorf("found %d greps of the restored export, want at least %d (step 2's bundle version, directory install count and revoke count)", len(rgreps), len(restoreRestoredGreps))
 	}
 	for _, g := range rgreps {
 		if g[0] < restoredStop {
