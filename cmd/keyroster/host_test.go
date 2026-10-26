@@ -293,3 +293,60 @@ func installedDirOf(t *testing.T, doc []byte) *directory.Directory {
 	}
 	return d
 }
+
+// TestReadCommandsCheckInstallation (pre-merge review, 03-04): every
+// command that reads the served directory applies the signer's
+// installation rule for an installed directory (fetchVerifiedDirectory,
+// directory.CheckStoredInstallation). A directory bound to another
+// installation, or to one under a bundle without an ID, is refused with
+// nothing printed; an ID-less directory under a bundle with an ID is read.
+func TestReadCommandsCheckInstallation(t *testing.T) {
+	const other = "ffffffffffffffffffffffffffffffff"
+	reads := [][]string{
+		{"directory", "show"},
+		{"user", "list"},
+		{"host", "list"},
+		{"machine", "list"},
+		{"host", "principals", "web", "root"},
+	}
+	bound := func(t *testing.T, e *dirEnv, id string) {
+		t.Helper()
+		e.installDirect(t, buildDir(t, nil, func(d *directory.Directory) {
+			roleBase(t, nil)(d)
+			d.InstallationID = id
+		}))
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T)
+		want  string
+	}{
+		{"other_installation", func(t *testing.T) {
+			e := newDirEnv(t, 1, 1)
+			bound(t, e, other)
+		}, "bound to installation " + other + ", but the root-verified trust bundle names "},
+		{"bundle_without_id", func(t *testing.T) {
+			e := newDirEnv(t, 1, 1)
+			bound(t, e, e.bundle.InstallationID)
+			e.resignBundle(t, func(b *trust.Bundle) { b.InstallationID = "" })
+		}, "but the root-verified trust bundle names none"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+			for _, args := range reads {
+				code, stdout, stderr := run(t, args...)
+				if code == 0 || stdout != "" || !strings.Contains(stderr, tc.want) || !strings.Contains(stderr, "Refusing to use it") {
+					t.Errorf("%s: exit %d, stdout %q, stderr %q; want a refusal naming the installations and nothing printed", strings.Join(args, " "), code, stdout, stderr)
+				}
+			}
+		})
+	}
+	t.Run("id_less_directory_read", func(t *testing.T) {
+		roleEnv(t, nil) // no installation ID, under a bundle with one
+		for _, args := range reads {
+			if code, stdout, stderr := run(t, args...); code != 0 || stdout == "" {
+				t.Fatalf("%s: exit %d, stdout %q, stderr %q; want the lenient D-04 answer (read)", strings.Join(args, " "), code, stdout, stderr)
+			}
+		}
+	})
+}

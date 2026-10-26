@@ -91,7 +91,9 @@ func runDirectoryRebind(ctx context.Context, args []string, stdout, stderr io.Wr
 
 // rebindCheck is the refusal rule of directory rebind for the installed
 // directory version installed, whose installation ID is dirID, under the
-// root-verified bundle's bundleID.
+// root-verified bundle's bundleID. fetchVerifiedDirectory already refuses
+// a base bound to another installation (or to one under a bundle without
+// an ID) before this runs; the rule still states those cases itself.
 func rebindCheck(installed uint64, dirID, bundleID string) error {
 	switch {
 	case bundleID == "":

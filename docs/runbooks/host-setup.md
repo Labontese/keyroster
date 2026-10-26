@@ -399,6 +399,13 @@ nothing:
 
 Any other directory edit binds the directory too, because it copies the ID.
 
+The CLI applies the signer's rule to the directory it reads: `directory
+show`, `directory sign`, `directory install`, `user list`, `host list`,
+`machine list`, `host principals` and every edit refuse a served directory
+that names another installation than the root-verified bundle, or names
+one while the bundle has none, and print nothing from it. An unbound
+directory is still read (`TestReadCommandsCheckInstallation`).
+
 Until the bound version installs, logins under the unbound directory keep
 working on the signer: the owner's lenient answer to D-04 (03-01). The
 signer logs a warning at start (`installed directory names no installation,
