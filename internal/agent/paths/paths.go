@@ -122,7 +122,9 @@ type ExecSite struct {
 // ExecSites are every exec site of the applier. TestPaths fails for a
 // call of an execsite constructor that is not in this list, from another
 // function or with other arguments; for a constructor whose argv differs
-// from Args or that is not listed; and for any use of os/exec, or of
+// from Args or that is not listed; for a constructor used other than as
+// the callee of such a call, or execsite imported by any package of the
+// module but internal/agent/apply; and for any use of os/exec, or of
 // os.StartProcess, syscall.Exec, ForkExec or StartProcess or unix.Exec,
 // outside execsite's ExecRunner.Run.
 var ExecSites = []ExecSite{

@@ -131,7 +131,9 @@ func callsAllowed(fset *token.FileSet, decl *ast.FuncDecl) bool {
 // (1) its dependency graph holds no HTTP, TLS or RPC; (2) it runs
 // programs only at the exec sites ExecSites lists, each an
 // internal/agent/execsite constructor with its fixed binary and flags
-// called from its one function in sshd.go, and nothing outside execsite
+// called from its one function in sshd.go (a constructor used as a value
+// or outside a function is refused, and no package of the module but
+// internal/agent/apply imports execsite), and nothing outside execsite
 // names os/exec or a program-starting call; (3) every write is preceded by
 // Allowed in the same function; (4) no function that writes names
 // sshd_config, authorized_keys, PasswordAuthentication,
@@ -263,6 +265,16 @@ func TestPaths(t *testing.T) {
 			if !ok {
 				continue
 			}
+			if pkg == "." {
+				t.Errorf("%s: dot import of %s: its constructors would escape this check", p.path, execsitePath)
+				continue
+			}
+			// PR #67 fix round 2: a constructor taken as a value (f :=
+			// execsite.KeygenFingerprint), or called outside a function
+			// declaration (a package-level var), is never a pinned call.
+			// Every selector of a constructor must be the callee of a call
+			// matched below.
+			pinned := map[token.Pos]bool{}
 			eachCall([]parsed{p}, func(p parsed, decl *ast.FuncDecl, c *ast.CallExpr) {
 				sel, ok := c.Fun.(*ast.SelectorExpr)
 				if !ok {
@@ -271,6 +283,7 @@ func TestPaths(t *testing.T) {
 				if x, ok := sel.X.(*ast.Ident); !ok || x.Name != pkg || !ctors[sel.Sel.Name] {
 					return
 				}
+				pinned[sel.Pos()] = true // matched below, or reported
 				var args []string
 				for _, a := range c.Args {
 					args = append(args, render(fset, a))
@@ -282,11 +295,51 @@ func TestPaths(t *testing.T) {
 				}
 				found[got] = true
 			})
+			ast.Inspect(p.file, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == pkg && ctors[sel.Sel.Name] && !pinned[sel.Pos()] {
+					t.Errorf("%s:%d: execsite.%s is used other than as the callee of a call in paths.ExecSites", p.path, fset.Position(sel.Pos()).Line, sel.Sel.Name)
+				}
+				return true
+			})
 		}
 		for _, s := range ExecSites {
 			if !found[s] {
 				t.Errorf("paths.ExecSites lists %+v, which no code runs", s)
 			}
+		}
+	})
+
+	t.Run("execsite_imported_only_by_apply", func(t *testing.T) {
+		// PR #67 fix round 2: a package outside agentDirs is never parsed
+		// above, so a helper there could call a constructor with another
+		// binary. No package of the module but internal/agent/apply, the
+		// pinned callers', imports execsite outside its tests.
+		cmd := exec.Command("go", "list", "-e", "-f", "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", "./...")
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "GOOS=linux", "CGO_ENABLED=0")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("go list: %v", err)
+		}
+		module := strings.TrimSuffix(execsitePath, "/"+execsiteDir)
+		allowed := []string{module + "/internal/agent/apply", execsitePath}
+		seen := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			f := strings.Fields(line)
+			if len(f) == 0 {
+				continue
+			}
+			seen++
+			if slices.Contains(f[1:], execsitePath) && !slices.Contains(allowed, f[0]) {
+				t.Errorf("%s imports %s; only internal/agent/apply may", f[0], execsitePath)
+			}
+		}
+		if seen < 10 {
+			t.Fatalf("go list listed %d packages", seen)
 		}
 	})
 
