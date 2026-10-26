@@ -81,6 +81,10 @@ func checkLimits(g *Generation) error {
 type genRecord struct {
 	Generation uint64            `json:"generation"`
 	Files      map[string]string `json:"files"`
+	// Host is Generation.Host: the directory host entry the principals
+	// files were rendered for (owner decision 2026-10-26, PR #67: tells a
+	// removed host from one whose keys were rotated).
+	Host string `json:"host,omitempty"`
 }
 
 func recordName(n uint64) string { return strconv.FormatUint(n, 10) + ".json" }
@@ -107,7 +111,7 @@ func (e *engine) installGeneration(g *Generation) error {
 	if err := e.mkdir(tmp, 0o755); err != nil {
 		return err
 	}
-	rec := genRecord{Generation: g.N, Files: map[string]string{}}
+	rec := genRecord{Generation: g.N, Files: map[string]string{}, Host: g.Host}
 	for _, name := range fileNames(g) {
 		dir, base := filepath.Split(name)
 		target := filepath.Join(tmp, dir)

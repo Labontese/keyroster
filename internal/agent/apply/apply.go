@@ -149,8 +149,14 @@ type Report struct {
 	// BundleHeld: a newer bundle in the spool waits for the next run,
 	// because the newest directory verifies only under an earlier policy
 	// (state.Verified.BundleHeld).
-	BundleHeld        bool     `json:"bundle_held,omitempty"`
-	Stuck             string   `json:"stuck,omitempty"`
+	BundleHeld bool   `json:"bundle_held,omitempty"`
+	Stuck      string `json:"stuck,omitempty"`
+	// HostStatus is set when the directory does not give this host its
+	// own principals (owner decision 2026-10-26, PR #67): host_disabled
+	// and host_removed install no principals, host_keys_rotated and
+	// host_keys_disagree keep last-good's; the CA keys and the KRL apply
+	// in every case.
+	HostStatus        string   `json:"host_status,omitempty"`
 	UnmatchedHostKeys []string `json:"unmatched_host_keys,omitempty"`
 	SpoolIgnored      []string `json:"spool_ignored,omitempty"`
 	Diff              []string `json:"diff,omitempty"`
@@ -475,12 +481,8 @@ func (e *engine) forward(ctx context.Context) error {
 		e.setVersions(v)
 		return nil
 	}
-	g, err := Render(v, e.keys)
+	g, err := e.render(v)
 	if err != nil {
-		var he *HostError
-		if errors.As(err, &he) {
-			e.report.UnmatchedHostKeys = he.Unmatched
-		}
 		return err
 	}
 	cur, curLink, err := e.readCurrent()
@@ -563,6 +565,42 @@ func (e *engine) setVersions(v *state.Verified) {
 	e.report.BundleVersion, e.report.DirectoryVersion, e.report.KRLVersion = v.Next.BundleVersion, v.Next.DirectoryVersion, v.Next.KRLVersion
 }
 
+// render is Render for this host. When Render refuses because of the
+// host's entry and the host already has trust files (a last-good of the
+// agent's), the apply goes on with RenderFallback (owner decision
+// 2026-10-26, PR #67): the KRL and CA keys apply, principals are emptied
+// or kept as last-good's, and the report names the host status. Before
+// the first install the refusal stands and nothing is installed.
+func (e *engine) render(v *state.Verified) (*Generation, error) {
+	g, err := Render(v, e.keys)
+	if err == nil {
+		return g, nil
+	}
+	var he *HostError
+	if errors.As(err, &he) {
+		e.report.UnmatchedHostKeys = he.Unmatched
+	}
+	lg, lerr := e.resolveLink(e.l.LastGood())
+	if lerr != nil || lg.kind != linkAgent {
+		return nil, err
+	}
+	lgGen, rerr := readGeneration(lg.dir)
+	if rerr != nil {
+		return nil, errors.Join(err, rerr)
+	}
+	lastHost := ""
+	if rec, rerr := e.readRecord(lg.n); rerr == nil {
+		lastHost = rec.Host
+	}
+	g, status, ferr := RenderFallback(v, e.keys, lastHost, lgGen, err)
+	if ferr != nil {
+		return nil, ferr
+	}
+	e.report.HostStatus = status
+	e.logf("WARNING %s: %v; the KRL and CA keys apply, principals are %s", status, err, map[bool]string{true: "kept as last-good's", false: "emptied"}[status == HostKeysRotated || status == HostKeysDisagree])
+	return g, nil
+}
+
 // discard removes a generation that never became current.
 func (e *engine) discard(n uint64) {
 	if err := e.removeAll(e.l.Gen(n)); err == nil {
@@ -583,7 +621,7 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 	if err != nil || !v.Changed() {
 		return nil, nil, err
 	}
-	g, err := Render(v, e.keys)
+	g, err := e.render(v)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -642,6 +680,9 @@ func (e *engine) backToLastGood(ctx context.Context, lg link) error {
 	from, cur, err := e.readCurrent()
 	if err != nil {
 		return err
+	}
+	if rec, err := e.readRecord(lg.n); err == nil {
+		lgGen.Host = rec.Host
 	}
 	to := RollbackTarget(from, lgGen)
 	if to.N == 0 {

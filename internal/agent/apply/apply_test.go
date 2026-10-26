@@ -25,6 +25,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
+	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/trust"
 )
@@ -353,23 +354,86 @@ func TestApply(t *testing.T) {
 			t.Fatalf("a KRL for another installation: %v, want krl_not_verified (installation)", err)
 		}
 	})
-	t.Run("host_not_in_directory_keeps_last_good", func(t *testing.T) {
-		t.Parallel()
+	// Owner decision 2026-10-26 (PR #67): a refusal for this host's entry
+	// no longer stops the apply once the host has trust files. The KRL and
+	// the CA keys always apply; a disabled or removed host gets no
+	// principals; a host whose keys no longer match keeps last-good's.
+	hostCase := func(t *testing.T, edit func(h *testHost, s *dirSpec), status string, wantPrincipals []string) *testHost {
+		t.Helper()
 		h := newTestHost(t, newFixture(t))
 		h.installed("role:ops")
-		cur := h.current()
+		caBefore := h.file(CAFile)
 		s := h.spec("role:ops", "role:x")
+		edit(h, &s)
+		h.publishDir(s)
+		h.publishKRL(7)
+		r, err := h.apply()
+		if err != nil || r.HostStatus != status || r.KRLVersion != h.f.krlVersion || h.lastGood() != h.current() {
+			t.Fatalf("%s: %+v, %v", status, r, err)
+		}
+		if !h.krlRevokes(h.l.Current(), 7) || h.file(CAFile) != caBefore {
+			t.Fatalf("%s: the KRL or the CA keys did not apply", status)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, wantPrincipals) {
+			t.Fatalf("%s: principals %v, want %v", status, got, wantPrincipals)
+		}
+		return h
+	}
+	t.Run("host_disabled_empties_principals_krl_applies", func(t *testing.T) {
+		t.Parallel()
+		h := hostCase(t, func(_ *testHost, s *dirSpec) { s.status = "disabled" }, HostDisabled, nil)
+		if entries, err := os.ReadDir(filepath.Join(h.l.Current(), PrincipalsDir)); err == nil && len(entries) != 0 {
+			t.Fatalf("a disabled host keeps principals files: %v", entries)
+		}
+	})
+	t.Run("host_removed_empties_principals_krl_applies", func(t *testing.T) {
+		t.Parallel()
+		hostCase(t, func(_ *testHost, s *dirSpec) { s.noHost = true }, HostRemoved, nil)
+	})
+	t.Run("host_keys_rotated_keeps_last_good_principals", func(t *testing.T) {
+		t.Parallel()
+		// web1 is still listed, active, with another key: role:x is not
+		// granted, role:ops stays, and the report names the rotation.
+		h := hostCase(t, func(h *testHost, s *dirSpec) { s.hostKeys = []ssh.PublicKey{h.f.mach.PublicKey()} }, HostKeysRotated, []string{"role:ops"})
+		// Without the host name in last-good's record (an older record)
+		// the identity is uncertain too: principals are kept.
+		rec, err := h.engine().readRecord(h.lastGood())
+		if err != nil || rec.Host != "web1" {
+			t.Fatalf("last-good's record: %+v, %v", rec, err)
+		}
+		rec.Host = ""
+		writeFile(t, h.l.State(generationsDir, recordName(rec.Generation)), mustCanonical(t, rec))
+		s := h.spec("role:ops", "role:y")
 		s.hostKeys = []ssh.PublicKey{h.f.mach.PublicKey()}
 		h.publishDir(s)
-		r, err := h.apply()
-		if !errors.Is(err, ErrHostNotInDirectory) || h.current() != cur || h.lastGood() != cur || len(r.UnmatchedHostKeys) != 1 {
-			t.Fatalf("a directory without this host: %+v, %v", r, err)
+		h.publishKRL(7, 8)
+		if r, err := h.apply(); err != nil || r.HostStatus != HostKeysRotated || !slices.Equal(h.principals("deploy"), []string{"role:ops"}) || !h.krlRevokes(h.l.Current(), 8) {
+			t.Fatalf("a record without the host name: %+v, %v, principals %v", r, err, h.principals("deploy"))
 		}
-		s = h.spec("role:ops", "role:x")
+	})
+	t.Run("host_keys_disagree_keeps_last_good_principals", func(t *testing.T) {
+		t.Parallel()
+		// Two of this host's keys name two entries.
+		var second ssh.PublicKey
+		hostCase(t, func(h *testHost, s *dirSpec) {
+			key := filepath.Join(t.TempDir(), "ssh_host_ecdsa_key")
+			writeFile(t, key, []byte("private key placeholder\n"))
+			second = seedKey(t, 15).PublicKey()
+			writeFile(t, key+".pub", ssh.MarshalAuthorizedKey(second))
+			h.run.extraHostKeys = []string{key}
+			s.extraHost = &directory.Host{Name: "web2", HostGroup: "lab", Keys: []string{trust.FormatKey(second)}, Principals: []string{"web2"}, Status: directory.StatusActive}
+		}, HostKeysDisagree, []string{"role:ops"})
+	})
+	t.Run("host_not_active_on_first_install_refused", func(t *testing.T) {
+		t.Parallel()
+		// Before the first install there is nothing to narrow: a disabled
+		// host still installs nothing.
+		h := newTestHost(t, newFixture(t))
+		s := h.spec("role:ops")
 		s.status = "disabled"
 		h.publishDir(s)
-		if _, err := h.apply(); !errors.Is(err, ErrHostNotInDirectory) || h.current() != cur {
-			t.Fatalf("a disabled host: %v", err)
+		if _, err := h.apply(); !errors.Is(err, ErrHostNotInDirectory) || h.exists(h.l.Current()) || h.exists(h.l.DropIn()) {
+			t.Fatalf("a first install for a disabled host: %v", err)
 		}
 	})
 	t.Run("oversize_generation_refused_before_install", func(t *testing.T) {

@@ -38,6 +38,9 @@ const intermediateHeader = "# keyroster: intermediate generation; do not edit\n"
 type Generation struct {
 	N     uint64
 	Files map[string][]byte
+	// Host is the directory host entry the principals files were
+	// rendered for ("" when not known), kept in the generation's record.
+	Host string
 }
 
 // FileClass decides how Intermediate combines a generation file and how a
@@ -98,6 +101,15 @@ var (
 	ErrHostKeysDisagree   = errors.New("host_keys_disagree")
 )
 
+// Host statuses: why a generation holds no principals of its own for
+// this host (owner decision 2026-10-26, PR #67; Report.HostStatus).
+const (
+	HostDisabled     = "host_disabled"
+	HostRemoved      = "host_removed"
+	HostKeysRotated  = "host_keys_rotated"
+	HostKeysDisagree = "host_keys_disagree"
+)
+
 // HostError is a Render refusal about this host's entry, with the host
 // keys that matched nothing, for the report.
 type HostError struct {
@@ -122,23 +134,98 @@ func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
 	if v.Directory == nil {
 		return nil, &HostError{Err: fmt.Errorf("%w: no directory is accepted yet", ErrHostNotInDirectory), Unmatched: fingerprints(hostKeys)}
 	}
-	var host *directory.Host
-	for _, k := range hostKeys {
-		h, ok := v.Directory.HostForKey(k)
-		if !ok {
-			continue
-		}
-		if host != nil && host.Name != h.Name {
-			return nil, fmt.Errorf("%w: the host keys name hosts %s and %s", ErrHostKeysDisagree, host.Name, h.Name)
-		}
-		host = h
+	hosts := hostsForKeys(v.Directory, hostKeys)
+	if len(hosts) > 1 {
+		return nil, fmt.Errorf("%w: the host keys name hosts %s and %s", ErrHostKeysDisagree, hosts[0].Name, hosts[1].Name)
 	}
-	if host == nil {
+	if len(hosts) == 0 {
 		return nil, &HostError{Err: fmt.Errorf("%w: directory version %d names none of this host's keys", ErrHostNotInDirectory, v.Directory.Version), Unmatched: fingerprints(hostKeys)}
 	}
+	host := hosts[0]
 	if host.Status != directory.StatusActive {
 		return nil, &HostError{Err: fmt.Errorf("%w: host %s is %s in directory version %d", ErrHostNotInDirectory, host.Name, host.Status, v.Directory.Version)}
 	}
+	g, err := renderTrust(v)
+	if err != nil {
+		return nil, err
+	}
+	g.Host = host.Name
+	i := slices.IndexFunc(v.Directory.HostGroups, func(h directory.HostGroup) bool { return h.Name == host.HostGroup })
+	if i < 0 {
+		return nil, fmt.Errorf("%w: host %s names host group %s, which the directory does not define", ErrHostNotInDirectory, host.Name, host.HostGroup)
+	}
+	for _, a := range v.Directory.HostGroups[i].Accounts {
+		file, err := directory.RenderPrincipalsFile(v.Directory, host.HostGroup, a.Account)
+		if err != nil {
+			return nil, err
+		}
+		g.Files[PrincipalsDir+"/"+a.Account] = file
+	}
+	return g, nil
+}
+
+// hostsForKeys is the directory hosts that list any of hostKeys, each
+// once, in the order of hostKeys.
+func hostsForKeys(d *directory.Directory, hostKeys []ssh.PublicKey) []*directory.Host {
+	var out []*directory.Host
+	for _, k := range hostKeys {
+		h, ok := d.HostForKey(k)
+		if ok && !slices.ContainsFunc(out, func(x *directory.Host) bool { return x.Name == h.Name }) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// RenderFallback builds the generation for a host that Render refuses
+// while it already has trust files (lastGood, rendered for the directory
+// host lastHost; owner decision 2026-10-26, PR #67): the KRL and the CA
+// keys always apply, as Render renders them. No principals files when the
+// directory disables the host, or no longer lists it, so certificate
+// logins are refused (authorized_keys and the console are unaffected);
+// last-good's principals files, unchanged, when the host's identity is
+// uncertain: its sshd host keys match no entry while lastHost is still an
+// active entry (its keys were rotated on either side, or lastHost is not
+// known), or they match two entries. It returns the generation and the
+// host status; a refusal of any other kind is returned as is.
+func RenderFallback(v *state.Verified, hostKeys []ssh.PublicKey, lastHost string, lastGood *Generation, refusal error) (*Generation, string, error) {
+	if v.Directory == nil || !errors.Is(refusal, ErrHostNotInDirectory) && !errors.Is(refusal, ErrHostKeysDisagree) {
+		return nil, "", refusal
+	}
+	hosts := hostsForKeys(v.Directory, hostKeys)
+	status, name := HostKeysRotated, lastHost
+	switch {
+	case len(hosts) > 1:
+		status = HostKeysDisagree
+	case len(hosts) == 1 && hosts[0].Status != directory.StatusActive:
+		status, name = HostDisabled, hosts[0].Name
+	case len(hosts) == 1:
+		return nil, "", refusal // an active entry Render still refused
+	case lastHost != "":
+		if h, ok := v.Directory.HostByName(lastHost); !ok {
+			status = HostRemoved
+		} else if h.Status != directory.StatusActive {
+			status = HostDisabled
+		}
+	}
+	g, err := renderTrust(v)
+	if err != nil {
+		return nil, "", err
+	}
+	g.Host = name
+	if status == HostKeysRotated || status == HostKeysDisagree {
+		for n, b := range lastGood.Files {
+			if class, ok := ClassOf(n); ok && class == FilePrincipals {
+				g.Files[n] = b
+			}
+		}
+	}
+	return g, status, nil
+}
+
+// renderTrust is the part of a generation that does not depend on the
+// host entry: user_ca_keys and revoked.krl.
+func renderTrust(v *state.Verified) (*Generation, error) {
 	g := &Generation{Files: map[string][]byte{}}
 	var ca bytes.Buffer
 	for _, role := range []string{trust.RoleUser, trust.RoleMachine} {
@@ -158,17 +245,6 @@ func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
 		}
 	}
 	g.Files[CAFile] = ca.Bytes()
-	i := slices.IndexFunc(v.Directory.HostGroups, func(h directory.HostGroup) bool { return h.Name == host.HostGroup })
-	if i < 0 {
-		return nil, fmt.Errorf("%w: host %s names host group %s, which the directory does not define", ErrHostNotInDirectory, host.Name, host.HostGroup)
-	}
-	for _, a := range v.Directory.HostGroups[i].Accounts {
-		file, err := directory.RenderPrincipalsFile(v.Directory, host.HostGroup, a.Account)
-		if err != nil {
-			return nil, err
-		}
-		g.Files[PrincipalsDir+"/"+a.Account] = file
-	}
 	g.Files[KRLFile] = append([]byte{}, v.Next.KRL...)
 	return g, nil
 }
@@ -285,6 +361,7 @@ func Intermediate(from, to *Generation) (*Generation, bool) {
 	if sameContent(m, to) || sameContent(m, from) {
 		return to, true
 	}
+	m.Host = to.Host
 	return m, false
 }
 
@@ -303,7 +380,7 @@ func Intermediate(from, to *Generation) (*Generation, bool) {
 // and a newer KRL. RollbackTarget(that, lg) is that same content, so a
 // later rollback or recovery never moves the KRL back either.
 func RollbackTarget(cur, lg *Generation) *Generation {
-	t := &Generation{N: lg.N, Files: map[string][]byte{}}
+	t := &Generation{N: lg.N, Files: map[string][]byte{}, Host: lg.Host}
 	for name, b := range lg.Files {
 		t.Files[name] = b
 	}

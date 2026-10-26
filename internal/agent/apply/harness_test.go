@@ -130,6 +130,8 @@ type dirSpec struct {
 	bulkRoles int
 	// signer signs the directory; nil is the fixture's admin.
 	signer ssh.Signer
+	// noHost leaves host web1 out of the directory.
+	noHost bool
 }
 
 // directory signs one version after prev (nil: version 1).
@@ -165,6 +167,9 @@ func (f *fixture) directory(prev []byte, s dirSpec) spool.Doc {
 		HostGroups:     []directory.HostGroup{{Name: "lab", Accounts: accounts}},
 		Hosts:          []directory.Host{{Name: "web1", HostGroup: "lab", Keys: keys, Principals: []string{"web1"}, Status: s.status}},
 		InstallationID: s.install,
+	}
+	if s.noHost {
+		d.Hosts = nil
 	}
 	if s.extraHost != nil {
 		d.Hosts = append(d.Hosts, *s.extraHost)
@@ -368,6 +373,8 @@ type fakeRunner struct {
 	rejectCA    func(line string) bool
 	onQuery     func()
 	queryCode   int
+	// extraHostKeys are more HostKey paths sshd -T lists.
+	extraHostKeys []string
 }
 
 func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
@@ -431,6 +438,9 @@ func (r *fakeRunner) dump() string {
 		fmt.Fprintf(&b, "listenaddress %s\n", l)
 	}
 	fmt.Fprintf(&b, "hostkey %s\npidfile /nonexistent/sshd.pid\nlogingracetime %s\n", r.h.sshd.keyPath, r.grace)
+	for _, k := range r.extraHostKeys {
+		fmt.Fprintf(&b, "hostkey %s\n", k)
+	}
 	if _, err := os.Stat(r.h.l.DropIn()); err == nil {
 		cur := r.h.l.Current()
 		fmt.Fprintf(&b, "trustedusercakeys %s\nrevokedkeys %s\nauthorizedprincipalsfile %s\n", filepath.Join(cur, CAFile), filepath.Join(cur, KRLFile), filepath.Join(cur, PrincipalsDir, "%u"))
