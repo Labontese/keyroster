@@ -53,7 +53,7 @@ key-files:
 
 key-decisions:
   - "keyroster revoke user refuses before revoking anything when stdin is not a terminal and --yes is not given: the disable signs a directory version, and a scripted run would otherwise revoke and stop at exit 3"
-  - "A user not in the installed directory is treated like one already disabled (one revocation, no directory change, exit 0): no passkey login can issue that name a certificate"
+  - "A user not in the installed directory is treated like one already disabled (no directory change, exit 0): no passkey login can issue that name a certificate. Since pre-merge fix 1 both revocations still run"
   - "RevokeAnswer decoding applies wire.RevokeResponse's exact rule (exactly min(serial_count, 4096) serials, ascending, unique), stricter than the plan's count-below-the-list rule"
   - "Refusal details are matched by name whatever the HTTP status; unknown_serial names keyroster revoke key-id and keyroster revoke key, with key-id only for key IDs this signer issued (key_id_not_issued since PR #61)"
   - "revoke.md is renumbered so the commands come first (1 serial, 2 key-id, 3 key, 4 user; 5 refusals, 6 KRL, 7 audit, 8 homelab); signer-install.md's anchor follows"
@@ -156,7 +156,7 @@ status: complete
   - 3 when revoked but NAME is NOT disabled, or when the second sweep failed;
   - 4 when the disable is only a proposal;
   - 1 when the first revocation failed: the disable still runs, and nothing is reported revoked;
-  - 0 when NAME was already disabled or is not in the directory. Only one sweep runs then.
+  - 0 when NAME was already disabled or is not in the directory. Only one sweep ran then; since pre-merge fix 1 both run.
   - Each partial outcome names `keyroster revoke user NAME` as the way to finish.
 - **KRL listing check.** It replaces 03-01's `Not checked:` line. An absent entry is refused with both causes named (not effective, or pruned). A KRL that is signed but does not parse is also refused.
 - **Server and client.**
@@ -244,7 +244,7 @@ Each mutant was applied, run and reverted, and `git diff` of the file was empty 
 See `key-decisions` in the frontmatter. The two that go beyond the plan:
 
 - **The early refusal when stdin is not a terminal.** Without `--yes`, a scripted `revoke user` would revoke and then stop at exit 3.
-- **A user not in the directory counts as already disabled.** The signer issues no login certificate to a name that is not in the directory, so this run needs no disable and no second sweep.
+- **A user not in the directory counts as already disabled.** The signer issues no login certificate to a name that is not in the directory, so this run needs no disable. It skipped the second sweep too, until pre-merge fix 1 (a disable another admin installs after the first sweep leaves a certificate from a login in between).
 
 ## Deviations from Plan
 
@@ -350,7 +350,7 @@ None.
 
 ## Pre-merge review fixes
 
-PR #64 review (Claude lenses plus Codex; each finding upheld by two skeptics):
+PR #64 review (Claude lenses plus Codex). Two skeptics upheld findings 1, 3 and 4 (2/2); finding 2 was split (1/2).
 
 1. **`7dec8fb`** (low): `revoke user` now runs the second sweep, with the KRL check, when the served directory already shows the user disabled or absent; a failure there exits 3. Test: `TestRevokeUser/revoke_user_already_disabled` (a login between the first sweep and another admin's installed disable gets serial 7, and the second sweep revokes and checks it), plus `revoke_user_not_in_directory` and `revoke_user_not_in_directory_second_sweep_not_listed`. Proof: with revoke.go reverted, all three fail (one revoke request, no serial 7, exit 0 instead of 3); restored, they pass. A failed first sweep still exits 1 without a second sweep, by design: the re-run it names sweeps again, and a sweep there would make "nothing is reported revoked" false.
 2. **`ee3422c`** (split, low): the already-disabled or absent output and the revoke.md exit-0 row say it is the server's word: the version the server serves, admin-signed but possibly older than the signer's, or none at all. The closing and exit-3 lines say "(the server's word)" too. Proof: the same subtests assert the caveat; with revoke.go reverted they fail, and restored they pass.
