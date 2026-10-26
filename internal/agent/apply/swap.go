@@ -470,7 +470,8 @@ func (e *engine) waitWidening(ctx context.Context, poll bool) error {
 
 // marker is <state>/pending.json, canonical JSON: the move in progress
 // (from, to, the intermediate, 0 when it collapsed), the step the next
-// swap makes ("intermediate" or "final"), whether the drop-in was changed
+// swap makes ("intermediate" or "final"; "commit" once to passed its
+// self-test and is becoming last-good), whether the drop-in was changed
 // (so reaching last-good restores dropin.prev) and the wall-clock time by
 // which the move should be done. Transition rewrites it before every
 // swap, so at every crash point current names from, the intermediate or

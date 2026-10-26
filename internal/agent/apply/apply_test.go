@@ -1132,6 +1132,57 @@ func TestApply(t *testing.T) {
 			t.Fatalf("start after a killed run: %+v", r)
 		}
 	})
+	t.Run("crash_anywhere_first_install", func(t *testing.T) {
+		t.Parallel()
+		// PR #67 review: a crash at every fault point of a first install,
+		// commit included, and again at every fault point of the recovery
+		// run after it, ends with sshd able to accept keys: the drop-in is
+		// present exactly when current names a generation with a KRL that
+		// last-good names too, and no marker is left.
+		runs := 0
+		for k := 1; ; k++ {
+			done := false
+			for j := 0; j <= 8; j++ {
+				h := newTestHost(t, newFixture(t))
+				h.publishDir(h.spec("role:ops"))
+				if _, err := crashRun(h, k); !isCrash(err) {
+					done = true
+					break
+				}
+				h.resetSpool()
+				h.state = h.f.genesis()
+				nested := false
+				if j > 0 {
+					// The spool offers no directory: after recovery the run
+					// refuses host_not_in_directory and installs nothing.
+					_, err := crashRun(h, j)
+					if err != nil && !isCrash(err) && !errors.Is(err, ErrHostNotInDirectory) {
+						t.Fatalf("k=%d j=%d: second run: %v", k, j, err)
+					}
+					nested = isCrash(err)
+				}
+				_, err := h.apply()
+				runs++
+				if errors.Is(err, ErrHostNotInDirectory) {
+					err = nil
+				}
+				dropIn, cur := h.exists(h.l.DropIn()), h.exists(h.l.Current())
+				if errors.Is(err, ErrPendingStateUnknown) || readMarker(t, h) != nil || dropIn != cur {
+					t.Fatalf("k=%d j=%d: drop-in %t, current %t, marker %+v, err %v", k, j, dropIn, cur, readMarker(t, h), err)
+				}
+				if cur && (h.lastGood() != h.current() || !h.exists(filepath.Join(h.l.Current(), KRLFile))) {
+					t.Fatalf("k=%d j=%d: current %d, last-good %d", k, j, h.current(), h.lastGood())
+				}
+				if j > 0 && !nested {
+					break
+				}
+			}
+			if done {
+				break
+			}
+		}
+		t.Logf("%d crash-and-recover runs", runs)
+	})
 	t.Run("crash_during_first_install_recovered", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))

@@ -627,13 +627,19 @@ func (e *engine) backToLastGood(ctx context.Context, lg link) error {
 	return e.remove(e.l.State(dropinPrevFile))
 }
 
-// recover finishes a move a previous run left (pending marker): back to
-// last-good, or the first-install failure path when there is none.
+// recover finishes a move a previous run left (pending marker): a commit
+// whose generation is current is finished; otherwise back to last-good,
+// or the first-install failure path when there is none.
 func (e *engine) recover(ctx context.Context, m *marker, cur, lg link) error {
 	e.report.Recovered = true
 	if m != nil {
 		e.dropinChanged = m.DropInChanged
 		e.pending = m
+	}
+	if m != nil && m.Step == stepCommit && cur.kind == linkAgent && cur.n == m.To {
+		// The generation passed its self-test: finish its commit; the
+		// drop-in it was tested with stays.
+		return e.finishCommit(m.To)
 	}
 	if lg.kind == linkNone {
 		return e.undoFirstInstall(ctx, cur)
@@ -785,23 +791,23 @@ func (e *engine) recoverToLastGood(ctx context.Context, m *marker, cur, lg link)
 	return e.remove(e.l.State(dropinPrevFile))
 }
 
-// commit makes generation n last-good and stores the verified state:
-// the drop-in change is committed first (marker rewritten, dropin.prev
-// removed), then last-good, accepted/, the marker cleared, and old
-// generations removed.
+// stepCommit is the marker step of a commit: generation to passed its
+// self-test (or changes nothing on disk) and is becoming last-good.
+const stepCommit = "commit"
+
+// commit makes generation n last-good and stores the verified state, in
+// an order a crash at any point can finish (PR #67 review): the marker is
+// rewritten with step "commit", keeping dropin_changed and dropin.prev,
+// then accepted/ is saved and last-good set, and only then is the marker
+// cleared and dropin.prev removed. A start that finds a commit marker
+// whose to is current finishes the commit (finishCommit); the drop-in is
+// never restored once its generation passed the self-test.
 func (e *engine) commit(n uint64, v *state.Verified) error {
-	if e.dropinChanged {
-		e.dropinChanged = false
-		if e.pending != nil {
-			if err := e.writeMarker(e.pending.From, e.pending.To, e.pending.Intermediate, e.pending.Step); err != nil {
-				return err
-			}
-		}
-		if err := e.remove(e.l.State(dropinPrevFile)); err != nil {
-			return err
-		}
+	from := n
+	if e.pending != nil {
+		from = e.pending.From
 	}
-	if err := e.setLastGood(n); err != nil {
+	if err := e.writeMarker(from, n, 0, stepCommit); err != nil {
 		return err
 	}
 	if err := e.fault("save-state"); err != nil {
@@ -815,18 +821,25 @@ func (e *engine) commit(n uint64, v *state.Verified) error {
 	if err := v.Next.Save(e.l, fd); err != nil {
 		return err
 	}
-	if e.pending != nil || e.markerExists() {
-		if err := e.clearMarker(); err != nil {
-			return err
-		}
+	return e.finishCommit(n)
+}
+
+// finishCommit is the end of a commit, and what recovery runs for a
+// commit marker: last-good to n, the marker cleared, dropin.prev removed,
+// old generations removed.
+func (e *engine) finishCommit(n uint64) error {
+	if err := e.setLastGood(n); err != nil {
+		return err
+	}
+	if err := e.clearMarker(); err != nil {
+		return err
+	}
+	e.dropinChanged = false
+	if err := e.remove(e.l.State(dropinPrevFile)); err != nil {
+		return err
 	}
 	e.cleanup()
 	return nil
-}
-
-func (e *engine) markerExists() bool {
-	b, _ := e.readState(pendingFile, 4<<10)
-	return b != nil
 }
 
 // DropIn is the agent's sshd drop-in for layout l: a header comment and
