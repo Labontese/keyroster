@@ -159,6 +159,8 @@ type dirEnv struct {
 	leaf     uint64
 	// revokeBody is the body of the last POST AdminRevokePath.
 	revokeBody []byte
+	// calls is every admin POST, in order, as "POST <path>".
+	calls []string
 }
 
 const agentCustody = "user=agent, host=agent, machine=agent, ops=agent, log=agent"
@@ -308,6 +310,9 @@ func (e *dirEnv) handle(w http.ResponseWriter, r *http.Request) {
 	defer e.mu.Unlock()
 	if r.Method == http.MethodPost && r.URL.Path == serverclient.AdminRevokePath {
 		e.revokeBody = body
+	}
+	if r.Method == http.MethodPost {
+		e.calls = append(e.calls, r.Method+" "+r.URL.Path)
 	}
 	if f := e.override[r.Method+" "+r.URL.Path]; f != nil {
 		f(w)
