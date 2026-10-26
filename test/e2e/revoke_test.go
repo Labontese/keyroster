@@ -346,8 +346,14 @@ func TestRevokeUserEndToEnd(t *testing.T) {
 		t.Fatalf("the served KRL lists %d serials in %d sections, want exactly alice's %v under the user CA key", listed, len(p.Certs), want)
 	}
 
-	// 6. The swap; both of alice's certificates are refused, bob's works.
+	// 6. The swap; bob's certificate works and both of alice's are refused.
+	// bob goes first: from OpenSSH 9.8, sshd's PerSourcePenalties (authfail
+	// 5 s, applied from 15 s) would refuse 127.0.0.1 after enough failures.
 	swapKRL(t, d, doc.KRL)
+	if code, out := sshLogin(t, loginOptions{Port: sshd.port, Key: bobKey, Cert: bobCert, User: login, Command: "true"}); code != 0 {
+		t.Fatalf("bob's login after the revocation exited %d:\n%s", code, out)
+	}
+	t.Log("sshd accepted bob's certificate after the swap")
 	for i, h := range alices {
 		before := sshd.log.String()
 		if code, out := sshLogin(t, loginOptions{Port: sshd.port, Key: h.key, Cert: h.cert, User: login, Command: "true"}); code == 0 {
@@ -356,10 +362,6 @@ func TestRevokeUserEndToEnd(t *testing.T) {
 		waitForLog(t, sshd, before, "revoked")
 		t.Logf("sshd refused alice's certificate %d (serial %d): %s", i, h.serial, strings.TrimSpace(strings.TrimPrefix(sshd.log.String(), before)))
 	}
-	if code, out := sshLogin(t, loginOptions{Port: sshd.port, Key: bobKey, Cert: bobCert, User: login, Command: "true"}); code != 0 {
-		t.Fatalf("bob's login after the revocation exited %d:\n%s", code, out)
-	}
-	t.Log("sshd accepted bob's certificate after the swap")
 
 	// 7. The signer refuses a new login for alice.
 	if _, _, _, err := revokeLogin(t, env, alice, "alice"); !refusedWith(err, "user_disabled") {
@@ -503,8 +505,14 @@ func TestRevokeKeyEndToEnd(t *testing.T) {
 	}
 	swapKRL(t, d, doc.KRL)
 
-	// 5. The plain key, its certificate and the key ID's certificate are
-	// refused; the control still logs in.
+	// 5. The control still logs in under the new KRL, and the plain key,
+	// its certificate and the key ID's certificate are refused. The control
+	// goes first: from OpenSSH 9.8, sshd's PerSourcePenalties (authfail 5 s,
+	// applied from 15 s) refuses every connection from 127.0.0.1 after the
+	// third failed authentication.
+	if code, out := sshLogin(t, loginOptions{Port: sshd.port, Key: subjects["d"].key, Cert: subjects["d"].cert, User: login, Command: "true"}); code != 0 {
+		t.Fatalf("login with the control certificate after the swap exited %d:\n%s", code, out)
+	}
 	before := sshd.log.String()
 	if code, out := plainLogin(); code == 0 {
 		t.Fatalf("plain key login after the revocation succeeded:\n%s", out)
@@ -519,9 +527,6 @@ func TestRevokeKeyEndToEnd(t *testing.T) {
 		}
 		waitForLog(t, sshd, before, "revoked")
 		t.Logf("sshd refused %s's certificate: %s", name, strings.TrimSpace(strings.TrimPrefix(sshd.log.String(), before)))
-	}
-	if code, out := sshLogin(t, loginOptions{Port: sshd.port, Key: subjects["d"].key, Cert: subjects["d"].cert, User: login, Command: "true"}); code != 0 {
-		t.Fatalf("login with the control certificate after the revocation exited %d:\n%s", code, out)
 	}
 }
 
