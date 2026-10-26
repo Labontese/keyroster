@@ -531,7 +531,9 @@ func TestRevokeUser(t *testing.T) {
 			"alice is already disabled, so no passkey login issues alice a certificate: no directory change.\n",
 			"Second revocation (after reading the directory) of alice: the server reports 3 certificate(s) revoked: KRL v4 published (log entries 11, 12).\nSerials: 5 6 7\n",
 			"Checked: KRL v4 lists each of the 3 serial(s) the server's answer reports",
-			"alice is already disabled, and the KRL lists every certificate of alice the server reported.",
+			"That is the server's word: the admins signed directory version 1, the one the server serves, but the server may serve an older version than the signer holds. " +
+				"The signer's audit log is the proof",
+			"alice is already disabled (the server's word), and the KRL lists every certificate of alice the server reported.",
 		} {
 			if !strings.Contains(stdout, want) {
 				t.Fatalf("stdout lacks %q:\n%s", want, stdout)
@@ -548,6 +550,8 @@ func TestRevokeUser(t *testing.T) {
 		e.serveRevokes(e.userKRLDoc(t, 4, 12, []uint64{5, 6, 7}, nil), revokeOK(first), revokeOK(answer(4, 11, 5, 6, 7)))
 		code, stdout, stderr := run(t, "revoke", "user", "alice", "--yes")
 		if code != 0 || !strings.Contains(stdout, "alice is not in the installed directory, so no passkey login issues alice a certificate: no directory change.\n") ||
+			!strings.Contains(stdout, "That is the server's word: it serves no directory, so nothing admin-signed shows what the signer holds. The signer's audit log is the proof") ||
+			!strings.Contains(stdout, "alice is not in the installed directory (the server's word), and the KRL lists") ||
 			!strings.Contains(stdout, "Serials: 5 6 7\n") || strings.Contains(stdout, "alice is disabled") {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
@@ -562,7 +566,7 @@ func TestRevokeUser(t *testing.T) {
 		e := newDirEnv(t, 1, 1)
 		e.serveRevokes(e.userKRLDoc(t, 4, 12, []uint64{5, 6}, nil), revokeOK(first), revokeOK(answer(4, 11, 5, 6, 7)))
 		code, stdout, stderr := run(t, "revoke", "user", "alice", "--yes")
-		if code != 3 || !strings.Contains(stderr, "alice is not in the installed directory, but the second revocation failed") ||
+		if code != 3 || !strings.Contains(stderr, "alice is not in the installed directory (the server's word), but the second revocation failed") ||
 			!strings.Contains(stderr, "does not list serial 7") || !strings.Contains(stderr, "run keyroster revoke user alice again") ||
 			strings.Contains(stdout, "the KRL lists every certificate") {
 			t.Fatalf("exit %d, stdout %q, stderr %q; want exit 3 naming serial 7 and the re-run", code, stdout, stderr)

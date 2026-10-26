@@ -483,8 +483,11 @@ func runRevokeUser(ctx context.Context, args []string, stdout, stderr io.Writer)
 	_, firstErr := r.sweepUser(ctx, first, name, "First revocation", stdout, stderr)
 
 	// 2. The directory step, also after a failed first sweep: disabling
-	// stops new certificates.
+	// stops new certificates. served is the version the server serves
+	// (0: none); d is the version after it.
+	var served uint64
 	outcome, dirErr := editDirectoryOutcome(ctx, r.s, editOpts{Yes: *yes, Out: *out, User: name}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
+		served = d.Version - 1
 		for i := range d.Users {
 			if d.Users[i].Name != name {
 				continue
@@ -501,6 +504,14 @@ func runRevokeUser(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if nothingNew {
 		_, _ = fmt.Fprintf(stdout, "%s is %s, so no passkey login issues %s a certificate: no directory change.\n",
 			name, dirErr, name)
+		// Unverified: the served version may be stale, or none at all.
+		if served == 0 {
+			_, _ = io.WriteString(stdout, "That is the server's word: it serves no directory, so nothing admin-signed shows what the signer holds. ")
+		} else {
+			_, _ = fmt.Fprintf(stdout, "That is the server's word: the admins signed directory version %d, the one the server serves, "+
+				"but the server may serve an older version than the signer holds. ", served)
+		}
+		_, _ = io.WriteString(stdout, "The signer's audit log is the proof (keyroster audit verify on an export from the signer host).\n")
 	}
 	if firstErr != nil {
 		switch {
@@ -520,7 +531,7 @@ func runRevokeUser(ctx context.Context, args []string, stdout, stderr io.Writer)
 	case nothingNew:
 		// Still sweep: a login between step 1 and a disable another
 		// admin installed has a live certificate the first missed.
-		state, label = dirErr.Error(), "Second revocation (after reading the directory)"
+		state, label = dirErr.Error()+" (the server's word)", "Second revocation (after reading the directory)"
 	case dirErr != nil:
 		return &exitError{code: 3, err: fmt.Errorf("revoked as reported above, but the user is NOT disabled: %w. "+
 			"%s can still obtain certificates; run keyroster revoke user %s again (it revokes every live certificate again, those issued since included, "+
