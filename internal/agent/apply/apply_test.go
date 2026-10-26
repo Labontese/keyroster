@@ -591,7 +591,9 @@ func TestApply(t *testing.T) {
 		h.run.sshdTestErr = "/etc/ssh/sshd_config line 1: Bad configuration option"
 		h.publishKRL(7)
 		r, err := h.apply()
-		if !errors.Is(err, ErrSSHDTest) || !r.Rollback || h.current() != cur || h.exists(h.l.DropIn()) || readMarker(t, h) != nil {
+		// A revocation only: the rollback restores the drop-in and keeps
+		// the new KRL (owner decision 2026-10-26, PR #67).
+		if !errors.Is(err, ErrSSHDTest) || !r.Rollback || !h.atRollback(cur) || !h.krlRevokes(h.l.Current(), 7) || h.exists(h.l.DropIn()) || readMarker(t, h) != nil {
 			t.Fatalf("sshd -t failure: %+v, %v, current %d, drop-in %t", r, err, h.current(), h.exists(h.l.DropIn()))
 		}
 	})
@@ -606,7 +608,7 @@ func TestApply(t *testing.T) {
 		h.publishKRL(7)
 		h.publishDir(h.spec("role:ops", "role:q"))
 		r, err := h.apply()
-		if !errors.Is(err, ErrSelfTest) || !r.Rollback || h.current() != cur || h.lastGood() != cur || readMarker(t, h) != nil {
+		if !errors.Is(err, ErrSelfTest) || !r.Rollback || h.lastGood() != cur || readMarker(t, h) != nil {
 			t.Fatalf("self-test failure: %+v, %v", r, err)
 		}
 		// B removes role:old and adds role:q: forward and back both pass an
@@ -614,8 +616,42 @@ func TestApply(t *testing.T) {
 		if waited := h.clock.Monotonic() - start; waited < 2*150*time.Second {
 			t.Fatalf("forward and rollback waited %v together, want two LoginGraceTime + 30 s waits", waited)
 		}
-		if !slices.Equal(h.principals("deploy"), []string{"role:old", "role:ops"}) {
+		// Owner decision 2026-10-26 (PR #67): CA keys and principals go
+		// back to last-good, the new KRL stays in force.
+		if !slices.Equal(h.principals("deploy"), []string{"role:old", "role:ops"}) || h.file(CAFile) != readFile(t, filepath.Join(h.l.LastGood(), CAFile)) {
 			t.Fatalf("principals after the rollback = %v", h.principals("deploy"))
+		}
+		if !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatal("the rollback took the new KRL back")
+		}
+		// A later start finds current at the rollback target: nothing to
+		// recover, and the KRL still stays.
+		r, _ = h.apply()
+		if r.Recovered || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("the run after the rollback: %+v, KRL revokes 7: %t", r, h.krlRevokes(h.l.Current(), 7))
+		}
+	})
+	t.Run("selftest_failure_after_krl_only_change_keeps_krl", func(t *testing.T) {
+		t.Parallel()
+		// Owner decision 2026-10-26 (PR #67): the KRL never rolls back. A
+		// revocation-only apply whose self-test fails (sshd stopped here)
+		// keeps the new KRL in force; last-good keeps its older one.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		lg := h.current()
+		lgKRL := readFile(t, filepath.Join(h.l.Gen(lg), KRLFile))
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.stop()
+		h.publishKRL(7)
+		r, err := h.apply()
+		if !errors.Is(err, ErrSelfTest) || !r.Rollback || h.lastGood() != lg || readMarker(t, h) != nil {
+			t.Fatalf("self-test failure after a KRL-only change: %+v, %v", r, err)
+		}
+		if !h.krlRevokes(h.l.Current(), 7) || !slices.Equal(h.principals("deploy"), []string{"role:ops"}) {
+			t.Fatal("the rollback took the revocation back")
+		}
+		if readFile(t, filepath.Join(h.l.LastGood(), KRLFile)) != lgKRL {
+			t.Fatal("last-good's own KRL changed")
 		}
 	})
 	t.Run("first_install_selftest_failure_removes_dropin", func(t *testing.T) {
@@ -957,7 +993,7 @@ func TestApply(t *testing.T) {
 		h.state = old
 		start := h.clock.Monotonic()
 		r := h.mustApply()
-		if !r.Recovered || h.current() != lg || readMarker(t, h) != nil {
+		if !r.Recovered || !h.atRollback(lg) || readMarker(t, h) != nil {
 			t.Fatalf("recovery: %+v, current %d", r, h.current())
 		}
 		if got := h.clock.Monotonic() - start; got < 150*time.Second {
@@ -973,13 +1009,15 @@ func TestApply(t *testing.T) {
 		h.state = cloneState(old)
 		h.publishKRL(7)
 		h.publishDir(h.spec("role:ops", "role:q"))
-		if _, err := crashRun(h, 4); !isCrash(err) {
+		// Forward: marker, swap (to M), marker, swap (to B), self-test <-
+		// crash: current names B, whose KRL is in force.
+		if _, err := crashRun(h, 5); !isCrash(err) {
 			t.Fatal(err)
 		}
 		h.resetSpool()
 		h.state = old
-		// Recovery: Transition(M, L) = marker, swap (to M_r), marker, swap.
-		// Crash at its final swap: current names M_r.
+		// Recovery: Transition(B, RollbackTarget(B, L)) = marker, swap (to
+		// M_r), marker, swap. Crash at its final swap: current names M_r.
 		if _, err := crashRun(h, 4); !isCrash(err) {
 			t.Fatalf("crash in recovery: %v", err)
 		}
@@ -987,7 +1025,7 @@ func TestApply(t *testing.T) {
 			t.Fatal("recovery did not stop at its intermediate")
 		}
 		r, err := h.apply()
-		if err != nil || errors.Is(err, ErrPendingStateUnknown) || h.current() != lg || readMarker(t, h) != nil || !r.Recovered {
+		if err != nil || errors.Is(err, ErrPendingStateUnknown) || !h.atRollback(lg) || readMarker(t, h) != nil || !r.Recovered {
 			t.Fatalf("second recovery: %+v, %v, current %d", r, err, h.current())
 		}
 	})
@@ -1012,7 +1050,7 @@ func TestApply(t *testing.T) {
 		h.state = h.f.genesis()
 		h.state.Directories[1] = h.dirs[0]
 		r, err := h.apply()
-		if err != nil || h.current() != lg || readMarker(t, h) != nil || !r.Recovered {
+		if err != nil || !h.atRollback(lg) || readMarker(t, h) != nil || !r.Recovered {
 			t.Fatalf("recovery of a crashed rollback: %+v, %v", r, err)
 		}
 	})
@@ -1079,14 +1117,19 @@ func TestApply(t *testing.T) {
 						if errors.Is(err, ErrPendingStateUnknown) {
 							t.Fatalf("%s k=%d j=%d: pending_state_unknown", seq.name, k, j)
 						}
-						if readMarker(t, h) != nil || h.current() != h.lastGood() || (h.current() != lg && h.current() != target) {
+						// Recovery ends at last-good, or at the target once the
+						// crash came after the commit; or, once the new KRL was
+						// in force, at last-good's CA keys and principals with
+						// that KRL (the KRL never rolls back, owner decision
+						// 2026-10-26, PR #67).
+						if readMarker(t, h) != nil || !h.atRollback(h.lastGood()) || (h.lastGood() != lg && h.lastGood() != target) {
 							t.Fatalf("%s k=%d j=%d: current %d, last-good %d (was %d, crash target %d), marker %+v, err %v", seq.name, k, j, h.current(), h.lastGood(), lg, target, readMarker(t, h), err)
 						}
 						// accepted/ moves with last-good (PR #67 review): the
 						// new KRL is accepted exactly when the target became
 						// last-good.
 						want := uint64(0)
-						if h.current() == target && target != lg {
+						if h.lastGood() == target && target != lg {
 							want = newKRL
 						}
 						if st, err := h.accepted(); err != nil || st.KRLVersion != want {
@@ -1229,7 +1272,7 @@ func TestApply(t *testing.T) {
 		h.resetSpool()
 		h.state = old
 		start := h.clock.Monotonic()
-		if r := h.mustApply(); !r.Rollback || h.current() != lg {
+		if r := h.mustApply(); !r.Rollback || !h.atRollback(lg) {
 			t.Fatalf("recovery from B: %+v", r)
 		}
 		if got := h.clock.Monotonic() - start; got < 150*time.Second {
@@ -1252,7 +1295,7 @@ func TestApply(t *testing.T) {
 		}
 		h.resetSpool()
 		h.state = old
-		if r := h.mustApply(); !r.Recovered || h.current() != lg {
+		if r := h.mustApply(); !r.Recovered || !h.atRollback(lg) {
 			t.Fatalf("recovery from M: %+v", r)
 		}
 	})
@@ -1272,7 +1315,7 @@ func TestApply(t *testing.T) {
 		h.resetSpool()
 		h.state = old
 		start := h.clock.Monotonic()
-		if r, _ := h.apply(); h.current() != lg || !r.Recovered {
+		if r, _ := h.apply(); !h.atRollback(lg) || !r.Recovered {
 			t.Fatalf("recovery from the rollback's intermediate: %+v, current %d", r, h.current())
 		}
 		if got := h.clock.Monotonic() - start; got < 150*time.Second {
@@ -1293,7 +1336,7 @@ func TestApply(t *testing.T) {
 		}
 		h.resetSpool()
 		h.state = old
-		if r := h.mustApply(); !r.Recovered || h.current() != lg || readMarker(t, h) != nil {
+		if r := h.mustApply(); !r.Recovered || !h.atRollback(lg) || readMarker(t, h) != nil {
 			t.Fatalf("start after a killed run: %+v", r)
 		}
 	})
@@ -1549,6 +1592,36 @@ func cloneState(s spool.State) spool.State {
 		c.KRLs[k] = v
 	}
 	return c
+}
+
+// atRollback reports whether last-good names generation lg and current
+// names it too, or RollbackTarget(current, last-good): last-good's CA keys
+// and principals with a newer KRL (owner decision 2026-10-26, PR #67: the
+// KRL never rolls back).
+func (h *testHost) atRollback(lg uint64) bool {
+	h.t.Helper()
+	if h.lastGood() != lg {
+		return false
+	}
+	if h.current() == lg {
+		return true
+	}
+	c, err := readGeneration(h.l.Gen(h.current()))
+	if err != nil {
+		return false
+	}
+	l, err := readGeneration(h.l.Gen(lg))
+	return err == nil && sameBytes(c, RollbackTarget(c, l))
+}
+
+// readFile is the content of path.
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path) //nolint:gosec // test fixture
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 // repoint replaces the link at path with one to target.

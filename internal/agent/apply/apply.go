@@ -333,12 +333,28 @@ func (e *engine) apply(ctx context.Context) error {
 		e.report.Stuck = ErrPendingStateUnknown.Error()
 		return err
 	}
-	if (m != nil || (cur.kind == linkAgent && lg.kind == linkAgent && cur.n != lg.n)) && !e.cfg.DryRun {
+	if (m != nil || (cur.kind == linkAgent && lg.kind == linkAgent && cur.n != lg.n && !atRollbackTarget(cur, lg))) && !e.cfg.DryRun {
 		if err := e.recover(ctx, m, cur, lg); err != nil {
 			return err
 		}
 	}
 	return e.forward(ctx)
+}
+
+// atRollbackTarget reports whether current already holds
+// RollbackTarget(current, last-good): last-good's CA keys and principals
+// with a newer KRL, where a rollback left it. Then there is nothing to
+// recover.
+func atRollbackTarget(cur, lg link) bool {
+	c, err := readGeneration(cur.dir)
+	if err != nil {
+		return false
+	}
+	l, err := readGeneration(lg.dir)
+	if err != nil {
+		return false
+	}
+	return sameBytes(c, RollbackTarget(c, l))
 }
 
 // lock takes the exclusive flock on <state>/apply.lock, waiting for a
@@ -596,10 +612,12 @@ func isCrash(err error) bool {
 	return errors.As(err, &c) && c.InjectedCrash()
 }
 
-// rollback moves current back to last-good after cause failed the apply:
-// Transition(current, last-good) through the intermediate, the previous
-// drop-in restored and sshd reloaded when the drop-in had changed, the
-// self-test run again, the marker cleared. It returns cause.
+// rollback moves current back after cause failed the apply:
+// Transition(current, RollbackTarget(current, last-good)) through the
+// intermediate (last-good's CA keys and principals, the newest KRL; owner
+// decision 2026-10-26, PR #67), the previous drop-in restored and sshd
+// reloaded when the drop-in had changed, the self-test run again, the
+// marker cleared. It returns cause.
 func (e *engine) rollback(ctx context.Context, cause error, lg link) error {
 	if isCrash(cause) {
 		return cause
@@ -612,18 +630,35 @@ func (e *engine) rollback(ctx context.Context, cause error, lg link) error {
 	return cause
 }
 
-// backToLastGood is the common end of rollback and crash recovery.
+// backToLastGood is the common end of rollback and crash recovery: it
+// moves current to RollbackTarget(current, last-good), installing that
+// generation when it is neither last-good nor what current names already.
 func (e *engine) backToLastGood(ctx context.Context, lg link) error {
-	to, err := readGeneration(lg.dir)
+	lgGen, err := readGeneration(lg.dir)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrLastGoodInvalid, err)
 	}
-	to.N = lg.n
+	lgGen.N = lg.n
 	from, cur, err := e.readCurrent()
 	if err != nil {
 		return err
 	}
-	if from != nil && (cur.kind != linkAgent || cur.n != lg.n) {
+	to := RollbackTarget(from, lgGen)
+	if to.N == 0 {
+		if from != nil && cur.kind == linkAgent && sameBytes(from, to) {
+			to.N = cur.n // current holds it already: a revocation-only change
+		} else {
+			to.N = e.allocGeneration()
+			if err := e.installGeneration(to); err != nil {
+				return err
+			}
+			if err := e.validate(ctx, to, e.l.Gen(to.N), from); err != nil {
+				e.discard(to.N)
+				return err
+			}
+		}
+	}
+	if from != nil && (cur.kind != linkAgent || cur.n != to.N) {
 		if _, err := e.Transition(ctx, from, to, swapChecked); err != nil {
 			return err
 		}

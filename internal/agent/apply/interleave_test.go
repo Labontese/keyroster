@@ -590,6 +590,27 @@ func TestSwapInterleaving(t *testing.T) {
 			m.mustTo(a)
 		})
 	})
+	t.Run("rollback_keeps_newest_krl", func(t *testing.T) {
+		t.Parallel()
+		// Owner decision 2026-10-26 (PR #67): the rollback goes to
+		// RollbackTarget(B, A), A's CA keys and principals with the newer
+		// KRL; every mix of the move from B is accepted by a generation
+		// current during it.
+		runPairs(t, pairs(11, 300, nil), func(m *modelHost, a, b *Generation) {
+			m.mustTo(b)
+			r := RollbackTarget(b, a)
+			if r.N == 0 {
+				r.N = m.e.allocGeneration()
+				if err := m.e.installGeneration(r); err != nil {
+					m.t.Fatal(err)
+				}
+			}
+			if newerKRL(b.Files[KRLFile], a.Files[KRLFile]) && string(r.Files[KRLFile]) != string(b.Files[KRLFile]) {
+				m.t.Fatal("the rollback target does not carry the newer KRL")
+			}
+			m.mustTo(r)
+		})
+	})
 	t.Run("collapsed_single_swap", func(t *testing.T) {
 		t.Parallel()
 		collapses := func(a, b spec) bool {

@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -480,7 +481,10 @@ func TestAgentApplyEndToEnd(t *testing.T) {
 	}
 	last := h.current(t)
 
-	// 5. sshd stopped: a new KRL fails its self-test and is rolled back.
+	// 5. sshd stopped: a new KRL fails its self-test and the apply rolls
+	// back. The KRL never rolls back (owner decision 2026-10-26, PR #67):
+	// last-good stays, and current keeps last-good's CA keys and
+	// principals with the new KRL.
 	h.sshd.stop(t)
 	revokeSerial(t, env, z.serial)
 	h.refreshSpool(t)
@@ -488,8 +492,25 @@ func TestAgentApplyEndToEnd(t *testing.T) {
 	if code == 0 || !r.Rollback || !strings.HasPrefix(r.SelfTest, "fail") {
 		t.Fatalf("self-test failure: exit %d, report %+v\nstderr:\n%s", code, r, stderr)
 	}
-	if got := h.current(t); got != last {
-		t.Fatalf("current names %s after the rollback, want last-good %s", got, last)
+	kr := filepath.Join(h.root, "etc", "ssh", "keyroster")
+	if lg, err := os.Readlink(filepath.Join(kr, "last-good")); err != nil || lg != last {
+		t.Fatalf("last-good names %q (%v) after the rollback, want %s", lg, err, last)
+	}
+	read := func(rel string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(kr, rel)) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	for _, f := range []string{"user_ca_keys", "principals/" + login} {
+		if !bytes.Equal(read(filepath.Join("current", f)), read(filepath.Join(last, f))) {
+			t.Fatalf("current's %s after the rollback differs from last-good's", f)
+		}
+	}
+	if bytes.Equal(read("current/revoked.krl"), read(filepath.Join(last, "revoked.krl"))) {
+		t.Fatal("the rollback took the new KRL back")
 	}
 	if _, err := os.Stat(filepath.Join(h.state, "pending.json")); !os.IsNotExist(err) {
 		t.Fatalf("pending.json after the rollback: %v", err)

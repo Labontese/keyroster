@@ -15,6 +15,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/directory"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -285,6 +286,50 @@ func Intermediate(from, to *Generation) (*Generation, bool) {
 		return to, true
 	}
 	return m, false
+}
+
+// RollbackTarget is the generation a rollback or crash recovery moves
+// current to from cur, with lg the last-good generation (owner decision
+// 2026-10-26, PR #67: the KRL never rolls back). It holds lg's files,
+// except that each revocation-list file is the newer of cur's and lg's by
+// KRL version: the self-test checks sshd's listener and host key and
+// cannot be failed by a revocation list, and revoking is the fail-safe
+// direction, so the newest verified KRL stays in force while CA keys,
+// principals and the drop-in go back to last-good. Its N is lg's when it
+// equals lg, else 0 (not installed yet).
+//
+// last-good therefore names the last generation that passed a self-test;
+// current may name a generation with last-good's CA keys and principals
+// and a newer KRL. RollbackTarget(that, lg) is that same content, so a
+// later rollback or recovery never moves the KRL back either.
+func RollbackTarget(cur, lg *Generation) *Generation {
+	t := &Generation{N: lg.N, Files: map[string][]byte{}}
+	for name, b := range lg.Files {
+		t.Files[name] = b
+	}
+	if cur == nil {
+		return t
+	}
+	for _, name := range fileNames(cur, lg) {
+		if class, ok := ClassOf(name); ok && class == FileKRL && newerKRL(cur.Files[name], lg.Files[name]) {
+			t.Files[name], t.N = cur.Files[name], 0
+		}
+	}
+	return t
+}
+
+// newerKRL reports whether a is a revocation list of a higher KRL version
+// than b; an empty or unparsable b is older than any parsable a.
+func newerKRL(a, b []byte) bool {
+	pa, err := krl.Parse(a)
+	if len(a) == 0 || err != nil {
+		return false
+	}
+	pb, err := krl.Parse(b)
+	if len(b) == 0 || err != nil {
+		return true
+	}
+	return pa.Version > pb.Version
 }
 
 // covers reports whether every CA key and principal line of a is also in
