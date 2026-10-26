@@ -375,6 +375,26 @@ func TestSshdRereadsTrustFiles(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	})
+	t.Run("login_grace_bounds_auth_reads", func(t *testing.T) {
+		// F1's premise is about reads, not closes: when does sshd stop
+		// processing an authentication (and so reading the trust files)?
+		// One offered LoginGraceTime + 1 s after connect is recorded, not
+		// asserted: 10.5p1 was seen to accept it in 2 of 3 runs, 9.5p1
+		// refused it. One offered after LoginGraceTime + 5 s, the agent's
+		// widening wait, must be refused.
+		r := newRereadEnv(t)
+		c := r.userCert(t, r.ca1, "p", 12)
+		for _, d := range []struct {
+			delay time.Duration
+			must  bool
+		}{{4 * time.Second, false}, {8500 * time.Millisecond, true}} {
+			err := delayedCertAuth(t, r, c, d.delay)
+			t.Logf("OpenSSH %d: a certificate offered %v after connect (LoginGraceTime 3): accepted=%t (%v)", opensshMajor(t), d.delay, err == nil, err)
+			if d.must && err == nil {
+				t.Fatalf("sshd accepted an authentication %v after connect, beyond LoginGraceTime + 5 s", d.delay)
+			}
+		}
+	})
 	t.Run("login_grace_closes_preauth", func(t *testing.T) {
 		r := newRereadEnv(t)
 		conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(r.sshd.port)))
@@ -417,4 +437,47 @@ func opensshMajor(t *testing.T) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// delayedCertAuth connects to r's sshd and offers certificate c only
+// delay after the TCP connection opened; nil means sshd accepted it.
+func delayedCertAuth(t *testing.T, r *rereadEnv, c agentCert, delay time.Duration) error {
+	t.Helper()
+	keyBytes, err := os.ReadFile(c.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.ParsePrivateKey(keyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certBytes, err := os.ReadFile(c.cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(certBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, ok := pub.(*ssh.Certificate)
+	if !ok {
+		t.Fatalf("%s is not a certificate", c.cert)
+	}
+	cs, err := ssh.NewCertSigner(cert, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(r.sshd.port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(start.Add(delay + 10*time.Second))
+	cfg := &ssh.ClientConfig{User: r.user, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Auth: []ssh.AuthMethod{ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+		time.Sleep(time.Until(start.Add(delay)))
+		return []ssh.Signer{cs}, nil
+	})}}
+	_, _, _, err = ssh.NewClientConn(conn, "127.0.0.1", cfg)
+	return err
 }
