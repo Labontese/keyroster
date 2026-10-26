@@ -184,55 +184,75 @@ type editOpts struct {
 // The CLI never signs a version built on a base it did not verify, and
 // never signs one it did not show (T-02-42, T-02-43).
 func editDirectory(ctx context.Context, s *adminSession, opts editOpts, stdout io.Writer, mutate func(d *directory.Directory, pol *trust.Policy) error) error {
+	_, err := editDirectoryOutcome(ctx, s, opts, stdout, mutate)
+	return err
+}
+
+// editOutcome is what a successful editDirectoryOutcome did with the
+// signed version.
+type editOutcome int
+
+const (
+	// editInstalled: the server reports the version installed.
+	editInstalled editOutcome = iota + 1
+	// editProposed: a proposal directory was written for co-signing.
+	editProposed
+)
+
+// editDirectoryOutcome is editDirectory, also returning whether the
+// version was installed or written as a proposal (keyroster revoke user
+// sends its second revocation only after an install). An error from
+// mutate is returned unchanged, before anything is signed.
+func editDirectoryOutcome(ctx context.Context, s *adminSession, opts editOpts, stdout io.Writer, mutate func(d *directory.Directory, pol *trust.Policy) error) (editOutcome, error) {
 	base, err := fetchVerifiedDirectory(ctx, s)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	next := &directory.Directory{Version: 1, Prev: trust.GenesisPrev}
 	if base.Version > 0 {
 		next = &directory.Directory{}
 		// A deep copy: the base's verified canonical bytes decoded again.
 		if err := json.Unmarshal(base.Doc, next); err != nil {
-			return fmt.Errorf("copy the installed directory: %w", err)
+			return 0, fmt.Errorf("copy the installed directory: %w", err)
 		}
 		next.Version, next.Prev = base.Version+1, base.SHA256
 	}
 	if err := mutate(next, base.Policy); err != nil {
-		return err
+		return 0, err
 	}
 	next.Sort()
 	if err := next.Validate(); err != nil {
-		return fmt.Errorf("the new directory version would not be valid, so nothing was signed: %w", err)
+		return 0, fmt.Errorf("the new directory version would not be valid, so nothing was signed: %w", err)
 	}
 	if err := directory.CheckPolicy(next, base.Policy); err != nil {
-		return fmt.Errorf("the new directory version exceeds the root-signed policy, so nothing was signed: %w", err)
+		return 0, fmt.Errorf("the new directory version exceeds the root-signed policy, so nothing was signed: %w", err)
 	}
 	doc, err := next.Canonical()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	changes := directory.Diff(base.Dir, next)
 	if len(changes) == 0 {
-		return errors.New("the change leaves the directory as it is; nothing was signed")
+		return 0, errors.New("the change leaves the directory as it is; nothing was signed")
 	}
 	proposal := ""
 	if base.Policy.AdminQuorum > 1 || opts.Out != "" {
 		if proposal, err = proposalTarget(opts.Out, next.Version); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	printChanges(stdout, base, next.Version, doc, changes)
 	if err := confirmSign(opts.Yes, next.Version, stdout); err != nil {
-		return err
+		return 0, err
 	}
 	sig, err := sshsig.Sign(rand.Reader, s.signer, directory.Namespace, doc)
 	if err != nil {
-		return fmt.Errorf("sign directory version %d with %s: %w", next.Version, s.adminFP, err)
+		return 0, fmt.Errorf("sign directory version %d with %s: %w", next.Version, s.adminFP, err)
 	}
 	if proposal != "" {
-		return writeProposal(stdout, proposal, base, next.Version, doc, sig)
+		return editProposed, writeProposal(stdout, proposal, base, next.Version, doc, sig)
 	}
-	return installVersion(ctx, s, base, opts, stdout, next.Version, doc, sig)
+	return editInstalled, installVersion(ctx, s, base, opts, stdout, next.Version, doc, sig)
 }
 
 // printChanges prints what an admin is asked to sign: the base, the diff

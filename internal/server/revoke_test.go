@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,8 +39,16 @@ func (f *fakeSigner) setKRL(resp *wire.GetKRLResponse, err error) {
 // revokeBody is a POST AdminRevokePath body carrying a revoke request.
 func revokeBody(t *testing.T) ([]byte, *wire.RevokeRequest) {
 	t.Helper()
-	req := &wire.RevokeRequest{InstallationID: "0123456789abcdef0123456789abcdef", Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: 42, CreatedAt: 1700000000,
-		Evidence: []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sig")}}}
+	req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: 42}
+	return revokeBodyFor(t, req), req
+}
+
+// revokeBodyFor is a POST AdminRevokePath body carrying req, completed
+// with an installation ID, a creation time and one evidence item.
+func revokeBodyFor(t *testing.T, req *wire.RevokeRequest) []byte {
+	t.Helper()
+	req.InstallationID, req.CreatedAt = "0123456789abcdef0123456789abcdef", 1700000000
+	req.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sig")}}
 	raw, err := req.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +57,7 @@ func revokeBody(t *testing.T) ([]byte, *wire.RevokeRequest) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return body, req
+	return body
 }
 
 // TestRevokeRoute (03-01): POST /api/v1/admin/revoke forwards the
@@ -70,7 +80,8 @@ func TestRevokeRoute(t *testing.T) {
 		e.fake.setRevoke(&wire.RevokeResponse{KRLVersion: 3, RevokeLeaf: 7, PublishLeaf: 8}, nil)
 		res := serve(e.s.Handler(), signedReq(t, e.admin, http.MethodPost, serverclient.AdminRevokePath, serverclient.AdminRevokePath, body, e.clock.Now()))
 		var ans serverclient.RevokeAnswer
-		if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &ans) != nil || ans != (serverclient.RevokeAnswer{KRLVersion: 3, RevokeLeaf: 7, PublishLeaf: 8}) {
+		if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &ans) != nil || ans.KRLVersion != 3 || ans.RevokeLeaf != 7 || ans.PublishLeaf != 8 ||
+			ans.SerialCount != 0 || len(ans.Serials) != 0 {
 			t.Fatalf("POST revoke = %d %s", res.Code, res.Body)
 		}
 		got := e.fake.lastRevokeRequest()
@@ -129,6 +140,85 @@ func TestRevokeRoute(t *testing.T) {
 		if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &doc) != nil || string(doc.KRL) != "krl" ||
 			string(doc.Manifest) != "manifest" || string(doc.Sig) != "sig" || res.Header().Get("Cache-Control") != "no-store" {
 			t.Fatalf("GET krl = %d %s %v", res.Code, res.Body, res.Header())
+		}
+	})
+}
+
+// TestRevokeAnswerSerials (03-03b): the signer's SerialCount and Serials
+// reach the JSON answer unchanged (here a truncated answer: 4096 serials
+// listed of 5000), and the "revoked" log line names the target kind and
+// carries the serial only for the serial target, where it is not 0.
+func TestRevokeAnswerSerials(t *testing.T) {
+	serials := make([]uint64, wire.MaxRevokeAnswerSerials)
+	for i := range serials {
+		serials[i] = uint64(2*i + 1) //nolint:gosec // G115: a small test index
+	}
+	revokedLine := func(t *testing.T, log *logBuffer) map[string]any {
+		t.Helper()
+		var found map[string]any
+		for _, l := range log.Lines() {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(l), &m); err != nil {
+				t.Fatalf("log line is not JSON: %q", l)
+			}
+			if m["msg"] == "revoked" {
+				found = m
+			}
+		}
+		if found == nil {
+			t.Fatalf("no revoked line:\n%s", log)
+		}
+		return found
+	}
+	t.Run("subject_serials_pass_through", func(t *testing.T) {
+		e := newAdminEnv(t, highLimits)
+		e.fake.setRevoke(&wire.RevokeResponse{KRLVersion: 9, RevokeLeaf: 20, PublishLeaf: 21, SerialCount: 5000, Serials: serials}, nil)
+		body := revokeBodyFor(t, &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "alice"})
+		res := serve(e.s.Handler(), signedReq(t, e.admin, http.MethodPost, serverclient.AdminRevokePath, serverclient.AdminRevokePath, body, e.clock.Now()))
+		var ans serverclient.RevokeAnswer
+		if res.Code != http.StatusOK {
+			t.Fatalf("POST revoke = %d %s", res.Code, res.Body)
+		}
+		if err := json.Unmarshal(res.Body.Bytes(), &ans); err != nil {
+			t.Fatal(err)
+		}
+		if ans.KRLVersion != 9 || ans.RevokeLeaf != 20 || ans.PublishLeaf != 21 || ans.SerialCount != 5000 || !slices.Equal(ans.Serials, serials) {
+			t.Fatalf("answer %d/%d/%d, %d serials of %d; want the signer's 9/20/21 and its 4096 of 5000", ans.KRLVersion, ans.RevokeLeaf, ans.PublishLeaf, len(ans.Serials), ans.SerialCount)
+		}
+		m := revokedLine(t, e.log)
+		if m["target"] != "subject" || m["subject"] != "alice" || m["serial"] != nil || m["serial_count"] != float64(5000) {
+			t.Fatalf("revoked line %v, want target subject, subject alice, serial_count 5000 and no serial", m)
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		req    *wire.RevokeRequest
+		target string
+		serial any
+	}{
+		{"serial_logs_serial", &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: 42}, "serial", float64(42)},
+		{"key_id_logs_no_serial", &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: "kr1/x"}, "key_id", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newAdminEnv(t, highLimits)
+			e.fake.setRevoke(&wire.RevokeResponse{KRLVersion: 3, RevokeLeaf: 7, PublishLeaf: 8}, nil)
+			res := serve(e.s.Handler(), signedReq(t, e.admin, http.MethodPost, serverclient.AdminRevokePath, serverclient.AdminRevokePath, revokeBodyFor(t, tc.req), e.clock.Now()))
+			if res.Code != http.StatusOK {
+				t.Fatalf("POST revoke = %d %s", res.Code, res.Body)
+			}
+			if m := revokedLine(t, e.log); m["target"] != tc.target || m["serial"] != tc.serial {
+				t.Fatalf("revoked line %v, want target %s and serial %v", m, tc.target, tc.serial)
+			}
+		})
+	}
+	t.Run("refusal_names_target", func(t *testing.T) {
+		e := newAdminEnv(t, highLimits)
+		e.fake.setRevoke(nil, &wire.ErrorResponse{Code: wire.CodeMalformed, Message: "key_id_not_issued"})
+		res := serve(e.s.Handler(), signedReq(t, e.admin, http.MethodPost, serverclient.AdminRevokePath, serverclient.AdminRevokePath,
+			revokeBodyFor(t, &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: "kr1/x"}), e.clock.Now()))
+		requireAnswer(t, "key_id_not_issued", res, http.StatusBadRequest, "key_id_not_issued")
+		if !strings.Contains(e.log.String(), `"target":"key_id"`) || strings.Contains(e.log.String(), `"serial":0`) {
+			t.Fatalf("log %s, want the refusal with target key_id and no serial 0", e.log)
 		}
 	})
 }

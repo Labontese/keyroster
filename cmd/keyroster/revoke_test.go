@@ -23,7 +23,8 @@ import (
 )
 
 // krlDoc returns a served KRL document of version v whose manifest names
-// logIndex and installation, signed by signer under krl.Namespace.
+// logIndex and installation, signed by signer under krl.Namespace, over a
+// KRL that lists serial 1729 under every CA key of the bundle.
 func (e *dirEnv) krlDoc(t *testing.T, v, logIndex uint64, installation string, signer ssh.Signer) []byte {
 	t.Helper()
 	return e.krlDocAt(t, v, logIndex, installation, signer, time.Now())
@@ -32,7 +33,28 @@ func (e *dirEnv) krlDoc(t *testing.T, v, logIndex uint64, installation string, s
 // krlDocAt is krlDoc with the manifest issued at issued (whole seconds).
 func (e *dirEnv) krlDocAt(t *testing.T, v, logIndex uint64, installation string, signer ssh.Signer, issued time.Time) []byte {
 	t.Helper()
-	data := []byte("SSHKRL\n\x00test krl")
+	var set krl.Set
+	for _, role := range []string{trust.RoleUser, trust.RoleHost, trust.RoleMachine} {
+		set.Certs = append(set.Certs, krl.CertSection{CAKey: e.caKey(t, role), Serials: []uint64{1729}})
+	}
+	return e.krlDocData(t, v, logIndex, installation, signer, issued, e.encodeKRL(t, v, set))
+}
+
+// encodeKRL is krl.Encode of set as version v.
+func (e *dirEnv) encodeKRL(t *testing.T, v uint64, set krl.Set) []byte {
+	t.Helper()
+	data, err := krl.Encode(set, v, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// krlDocData is the served KRL document over data, of version v, whose
+// manifest names logIndex and installation, issued at issued and signed
+// by signer under krl.Namespace.
+func (e *dirEnv) krlDocData(t *testing.T, v, logIndex uint64, installation string, signer ssh.Signer, issued time.Time, data []byte) []byte {
+	t.Helper()
 	m := krl.Manifest{
 		InstallationID: installation,
 		KRLVersion:     v,
@@ -54,6 +76,22 @@ func (e *dirEnv) krlDocAt(t *testing.T, v, logIndex uint64, installation string,
 		t.Fatal(err)
 	}
 	return doc
+}
+
+// caKey is the bundle's CA key of role.
+func (e *dirEnv) caKey(t *testing.T, role string) ssh.PublicKey {
+	t.Helper()
+	for _, ca := range e.bundle.CAs {
+		if ca.Role == role {
+			pub, err := trust.ParseKey(ca.Key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return pub
+		}
+	}
+	t.Fatalf("the bundle has no %s CA", role)
+	return nil
 }
 
 // serveRevoke makes the stub server answer every revocation with ans
@@ -156,9 +194,7 @@ func TestRevokeSerialConfirm(t *testing.T) {
 			"The server reports serial 1729 (user) revoked: KRL v3 published (log entries 8, 9).\n",
 			"Checked: the server serves KRL v3, signed by the ops key of your root-pinned trust bundle (log entry 9), issued at ",
 			", at most 300 s before this request.\n",
-			"Not checked: that this KRL lists serial 1729",
-			"Any genuine KRL issued after that passes the same checks, including the one the signer re-publishes by itself every hour, " +
-				"so a compromised keyroster-server can show one without having forwarded this revocation",
+			"Checked: KRL v3 lists serial 1729 under a user CA key of your trust bundle, so it revokes that certificate.\n",
 		} {
 			if !strings.Contains(stdout, want) {
 				t.Fatalf("stdout %q lacks %q", stdout, want)

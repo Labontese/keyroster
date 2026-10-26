@@ -67,7 +67,7 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var refused *wire.ErrorResponse
 		if errors.As(err, &refused) {
-			s.log.Warn("revocation refused", "admin", admin, "serial", req.Serial, "reason", refused.Message)
+			s.log.Warn("revocation refused", append(append([]any{"admin", admin}, revokeTarget(req)...), "reason", refused.Message)...)
 			switch refused.Code {
 			case wire.CodeMalformed:
 				s.writeJSON(w, v, http.StatusBadRequest, serverclient.APIError{Error: refused.Message})
@@ -84,7 +84,7 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The outcome is unknown: the signer may have revoked.
-		s.log.Error("revocation: signer call failed, outcome unknown", "admin", admin, "serial", req.Serial, "err", err)
+		s.log.Error("revocation: signer call failed, outcome unknown", append(append([]any{"admin", admin}, revokeTarget(req)...), "err", err)...)
 		s.dropKRL()
 		s.signerUnavailable(w, false)
 		return
@@ -92,11 +92,33 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	// The signer published a new KRL version: the CLI reads it right
 	// after this answer, so the cached older one must not be served.
 	s.dropKRL()
-	s.log.Info("revoked", "admin", admin, "serial", req.Serial, "ca", req.CARole.String(),
-		"krl_version", resp.KRLVersion, "revoke_leaf", resp.RevokeLeaf, "publish_leaf", resp.PublishLeaf)
+	s.log.Info("revoked", append(append([]any{"admin", admin}, revokeTarget(req)...),
+		"krl_version", resp.KRLVersion, "revoke_leaf", resp.RevokeLeaf, "publish_leaf", resp.PublishLeaf, "serial_count", resp.SerialCount)...)
+	// SerialCount and Serials pass through unchanged: the CLI prints them
+	// and checks that the KRL it verified lists each serial (03-03b).
 	s.writeJSON(w, v, http.StatusOK, serverclient.RevokeAnswer{
 		KRLVersion: resp.KRLVersion, RevokeLeaf: resp.RevokeLeaf, PublishLeaf: resp.PublishLeaf,
+		SerialCount: resp.SerialCount, Serials: resp.Serials,
 	})
+}
+
+// revokeTarget is the log attributes naming a revocation's target: its
+// kind, then the CA role and serial of a serial target, the CA role and
+// key ID of a key ID target and the subject kind and subject of a subject
+// target (a key target logs only its kind). Serial is 0 for every target
+// but serial, so it is logged only there.
+func revokeTarget(req *wire.RevokeRequest) []any {
+	switch req.Target {
+	case wire.TargetSerial:
+		return []any{"target", "serial", "ca", req.CARole.String(), "serial", req.Serial}
+	case wire.TargetKeyID:
+		return []any{"target", "key_id", "ca", req.CARole.String(), "key_id", req.KeyID}
+	case wire.TargetKey:
+		return []any{"target", "key"}
+	case wire.TargetSubject:
+		return []any{"target", "subject", "subject_kind", req.SubjectKind.String(), "subject", req.Subject}
+	}
+	return []any{"target", "unknown"}
 }
 
 // handleKRL serves GET /api/v1/krl: the KRL the signer published, its

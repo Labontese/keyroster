@@ -115,6 +115,66 @@ func TestAdminJSONClockSkewHint(t *testing.T) {
 	})
 }
 
+// TestRevokeAnswerDecode (03-03b): a revoke answer's serials decode
+// through AdminJSON (and its response limit) only as the signer sends
+// them: at most wire.MaxRevokeAnswerSerials, ascending and unique, and
+// exactly min(serial_count, 4096) of them. A refusal is in the CLI's own
+// words.
+func TestRevokeAnswerDecode(t *testing.T) {
+	admin := edSigner(t)
+	ascending := func(n int) []uint64 {
+		out := make([]uint64, n)
+		for i := range out {
+			out[i] = uint64(i + 1) //nolint:gosec // G115: a small test index
+		}
+		return out
+	}
+	decode := func(t *testing.T, count uint32, serials []uint64) (RevokeAnswer, error) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"krl_version": 3, "revoke_leaf": 7, "publish_leaf": 8, "serial_count": count, "serials": serials})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ans RevokeAnswer
+		err = adminServer(t, statusAnswer(http.StatusOK, string(body), nil)).AdminJSON(context.Background(), http.MethodPost, AdminRevokePath, RevokeBody{Request: []byte{1}}, &ans, admin)
+		return ans, err
+	}
+	for _, tc := range []struct {
+		name    string
+		count   uint32
+		serials []uint64
+	}{
+		{"none", 0, nil},
+		{"max_listed", 4096, ascending(4096)},
+		{"truncated", 5000, ascending(4096)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ans, err := decode(t, tc.count, tc.serials)
+			if err != nil || ans.KRLVersion != 3 || ans.SerialCount != tc.count || len(ans.Serials) != len(tc.serials) {
+				t.Fatalf("decoded %d serials of %d, %v; want %d of %d", len(ans.Serials), ans.SerialCount, err, len(tc.serials), tc.count)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name    string
+		count   uint32
+		serials []uint64
+	}{
+		{"4097_listed", 4097, ascending(4097)},
+		{"unsorted", 3, []uint64{1, 3, 2}},
+		{"duplicated", 3, []uint64{1, 2, 2}},
+		{"count_below_list", 2, ascending(3)},
+		{"count_above_short_list", 3, ascending(2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := decode(t, tc.count, tc.serials)
+			if err == nil || !strings.Contains(err.Error(), "the revoke answer's serials are not a list the signer sends") || strings.Contains(err.Error(), "peer text") {
+				t.Fatalf("error %v, want the CLI's refusal of the serials", err)
+			}
+		})
+	}
+}
+
 // TestAdminJSONRefusals: 401, 413 and 429 are stated in the CLI's own
 // words, never with the server's text; any other refusal is an HTTPError
 // whose server text appears only as a PeerError excerpt and is compared

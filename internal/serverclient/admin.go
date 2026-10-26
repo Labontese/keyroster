@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/adminauth"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // AdminUsersPath is the admin route that creates a pending account and
@@ -137,11 +138,45 @@ type RevokeBody struct {
 
 // RevokeAnswer is the 200 answer of a POST to AdminRevokePath: the KRL
 // version the signer published with the revocation and the indexes of its
-// revoke and krl_publish log entries.
+// revoke and krl_publish log entries. For a subject revocation SerialCount
+// is the number of certificates it resolved to and Serials the first
+// wire.MaxRevokeAnswerSerials of their serials, ascending; both are empty
+// for the other targets. The server copies them from the signer's
+// wire.RevokeResponse; nothing in the answer is signed.
 type RevokeAnswer struct {
-	KRLVersion  uint64 `json:"krl_version"`
-	RevokeLeaf  uint64 `json:"revoke_leaf"`
-	PublishLeaf uint64 `json:"publish_leaf"`
+	KRLVersion  uint64   `json:"krl_version"`
+	RevokeLeaf  uint64   `json:"revoke_leaf"`
+	PublishLeaf uint64   `json:"publish_leaf"`
+	SerialCount uint32   `json:"serial_count"`
+	Serials     []uint64 `json:"serials"`
+}
+
+// errBadRevokeAnswer refuses a revoke answer whose serials the signer
+// would never send. It never repeats the server's text.
+var errBadRevokeAnswer = errors.New("the revoke answer's serials are not a list the signer sends " +
+	"(at most 4096, ascending and unique, exactly min(serial_count, 4096) of them)")
+
+// UnmarshalJSON decodes a RevokeAnswer and applies wire.RevokeResponse's
+// rule to its serials: at most wire.MaxRevokeAnswerSerials, ascending and
+// unique, and exactly min(SerialCount, wire.MaxRevokeAnswerSerials) of
+// them (so a count below the list is refused).
+func (a *RevokeAnswer) UnmarshalJSON(b []byte) error {
+	type plain RevokeAnswer
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	n := len(p.Serials)
+	if n > wire.MaxRevokeAnswerSerials || uint64(n) != min(uint64(p.SerialCount), wire.MaxRevokeAnswerSerials) {
+		return errBadRevokeAnswer
+	}
+	for i := 1; i < n; i++ {
+		if p.Serials[i] <= p.Serials[i-1] {
+			return errBadRevokeAnswer
+		}
+	}
+	*a = RevokeAnswer(p)
+	return nil
 }
 
 // KRLDocument is the 200 answer of KRLPath: the KRL bytes, the canonical

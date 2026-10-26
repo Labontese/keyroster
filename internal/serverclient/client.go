@@ -520,6 +520,9 @@ func decodeError(err error) error {
 		msg       string
 	)
 	switch {
+	case errors.Is(err, errBadRevokeAnswer):
+		// The CLI's own words, about a value it checked.
+		return err
 	case errors.As(err, &syntaxErr):
 		msg = fmt.Sprintf("the response is not valid JSON (at byte %d)", syntaxErr.Offset)
 	case errors.As(err, &typeErr):
