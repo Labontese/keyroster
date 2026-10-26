@@ -348,6 +348,23 @@ None.
   - both runbooks grep `keyroster revoke user`;
   - the todo is in completed/.
 
+## Pre-merge review fixes
+
+PR #64 review (Claude lenses plus Codex; each finding upheld by two skeptics):
+
+1. **`7dec8fb`** (low): `revoke user` now runs the second sweep, with the KRL check, when the served directory already shows the user disabled or absent; a failure there exits 3. Test: `TestRevokeUser/revoke_user_already_disabled` (a login between the first sweep and another admin's installed disable gets serial 7, and the second sweep revokes and checks it), plus `revoke_user_not_in_directory` and `revoke_user_not_in_directory_second_sweep_not_listed`. Proof: with revoke.go reverted, all three fail (one revoke request, no serial 7, exit 0 instead of 3); restored, they pass. A failed first sweep still exits 1 without a second sweep, by design: the re-run it names sweeps again, and a sweep there would make "nothing is reported revoked" false.
+2. **`ee3422c`** (split, low): the already-disabled or absent output and the revoke.md exit-0 row say it is the server's word: the version the server serves, admin-signed but possibly older than the signer's, or none at all. The closing and exit-3 lines say "(the server's word)" too. Proof: the same subtests assert the caveat; with revoke.go reverted they fail, and restored they pass.
+3. **`7866363`** (low/medium, docs-only): host-setup.md and enroll-user.md now say the host-setup drop-in sets no `RevokedKeys`. So in this version a hand-set host enforces no revocation unless the operator adds `RevokedKeys` and installs the KRL by hand (UNVERIFIED); otherwise `revoke user` stops only new certificates there.
+4. **`659f58f`** (low, docs-only): the revoke.md exit-1 row lists each directory outcome the CLI names: disabled, already disabled or absent (re-run); a proposal at admin quorum above 1 or with `--out DIR` (sign, install, then re-run); the directory step failed (`user disable`, then `revoke user`). The exit-4 row also names `--out DIR`.
+
+Gates:
+
+- `gofmt -l` is empty.
+- `go vet ./...` passes for windows, linux and darwin, and `GOOS=linux go vet -tags e2e ./test/e2e/` passes.
+- `go test ./cmd/keyroster/...` passes on Windows.
+- In WSL, `go test -race` passes on cmd/keyroster, internal/server and internal/serverclient, and golangci-lint for linux, windows and darwin reports 0 issues.
+- e2e is CI's.
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-26*
