@@ -79,11 +79,11 @@ func setup() error {
 		return err
 	}
 	if out, err := exec.Command(keygen, "-A").CombinedOutput(); err != nil {
-		return fmt.Errorf("ssh-keygen -A: %v: %s", err, out)
+		return fmt.Errorf("ssh-keygen -A: %w: %s", err, out)
 	}
 	if _, err := os.Stat(pristine); errors.Is(err, os.ErrNotExist) {
 		if out, err := exec.Command("cp", "-a", "/etc/ssh", pristine).CombinedOutput(); err != nil {
-			return fmt.Errorf("cp -a /etc/ssh: %v: %s", err, out)
+			return fmt.Errorf("cp -a /etc/ssh: %w: %s", err, out)
 		}
 	}
 	if err := exec.Command("id", account).Run(); err != nil {
@@ -92,7 +92,7 @@ func setup() error {
 			cmd = exec.Command("adduser", "-D", "-s", "/bin/sh", account) // busybox (Alpine)
 		}
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("create %s: %v: %s", account, err, out)
+			return fmt.Errorf("create %s: %w: %s", account, err, out)
 		}
 	}
 	// A locked password ("!") makes an sshd without PAM (Alpine) refuse
@@ -200,7 +200,7 @@ func sshdT(t *testing.T, spec string) apply.Dump {
 func startSSHD() error {
 	_ = os.Remove(sshdLog)
 	if out, err := exec.Command(sshdBin, "-f", sshdConfig, "-E", sshdLog).CombinedOutput(); err != nil {
-		return fmt.Errorf("start sshd: %v: %s", err, out)
+		return fmt.Errorf("start sshd: %w: %s", err, out)
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -217,7 +217,7 @@ func startSSHD() error {
 // stopSSHD stops the sshd the PidFile names, if any, and waits for it.
 func stopSSHD() error {
 	for _, pf := range []string{"/run/sshd.pid", "/var/run/sshd.pid"} {
-		b, err := os.ReadFile(pf)
+		b, err := os.ReadFile(pf) //nolint:gosec // G304: sshd's own PidFile paths
 		if err != nil {
 			continue
 		}
@@ -412,7 +412,7 @@ func TestDistroDrift(t *testing.T) {
 		t.Fatalf("check after removing the override: exit %d: %s", code, out)
 	}
 	file := fmt.Sprintf("/etc/ssh/keyroster/gen/%d/principals/%s", r.Generation, account)
-	b, err := os.ReadFile(file)
+	b, err := os.ReadFile(file) //nolint:gosec // G304: a file of the generation under test
 	if err != nil {
 		t.Fatal(err)
 	}

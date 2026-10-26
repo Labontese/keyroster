@@ -36,8 +36,9 @@ phase2_adoptable are report only), 3 when one does, 2 for a usage or tool
 error (an sshd that cannot run, an apply holding the lock).
 
 Without --sshd and --sshd-config the service that runs sshd is detected
-(systemd or OpenRC). Without --state-dir the policy and account checks do
-not run, as before enrollment.
+(systemd or OpenRC). While the state directory (default
+/var/lib/keyroster-agent) does not exist, as before enrollment, the policy
+and account checks do not run.
 `
 
 // defaultStateDir is the applier's state directory in production.
@@ -114,13 +115,13 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	fset.SetOutput(stderr)
 	fset.Usage = func() { _, _ = io.WriteString(stderr, preflightUsage) }
 	svc := addServiceFlags(fset, false)
-	stateDir := fset.String("state-dir", "", "the applier's state directory (optional before enrollment)")
+	stateDir := fset.String("state-dir", defaultStateDir, "the applier's state directory (absent before enrollment)")
 	spoolDir := fset.String("spool", "", "the spool directory (optional)")
 	if err := fset.Parse(args); err != nil || fset.NArg() != 0 {
 		return errUsage
 	}
 	for name, v := range map[string]string{"--state-dir": *stateDir, "--spool": *spoolDir} {
-		if v != "" && !filepath.IsAbs(v) {
+		if (v != "" || name == "--state-dir") && !filepath.IsAbs(v) {
 			_, _ = fmt.Fprintf(stderr, "preflight: %s must be an absolute path\n", name)
 			return errUsage
 		}
@@ -132,10 +133,7 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return &exitError{code: 2, err: err}
 	}
-	l := apply.Layout{Root: filepath.Clean(*svc.root)}
-	if *stateDir != "" {
-		l.StateDir = filepath.Clean(*stateDir)
-	}
+	l := apply.Layout{Root: filepath.Clean(*svc.root), StateDir: filepath.Clean(*stateDir)}
 	cfg := apply.Config{SSHD: sshd, SSHDConfig: config, SSHKeygen: keygen, Log: stderr}
 	if *spoolDir != "" {
 		cfg.Spool = filepath.Clean(*spoolDir)

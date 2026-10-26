@@ -64,11 +64,13 @@ var codeErrors = map[string]error{
 	CodeHostPoPNotEnabled:   ErrHostPoPNotEnabled,
 	CodeLoginGraceUnbounded: ErrLoginGraceUnbounded,
 	CodeLoginGraceUnknown:   ErrLoginGraceUnknown,
+	CodePhase2Pending:       ErrPhase2Pending,
+	CodePhase2Differs:       ErrPhase2Differs,
 }
 
 // ReportOnly are the codes that never refuse: keyroster-agent preflight
 // exits 0 with only these (03-16's enrollment gate relies on it).
-var ReportOnly = []string{CodeAccountExcluded}
+var ReportOnly = []string{CodeAccountExcluded, CodePhase2Adoptable}
 
 // Finding is one preflight result: a stable code, what was found and how
 // to fix it, and where (a file and line, or an account) when known.
@@ -140,11 +142,23 @@ const (
 	trialHeader  = "# keyroster: preflight trial by keyroster-agent; removed when the preflight ends\n"
 )
 
-// trialDropIn is the trial drop-in: DropIn's three lines under
-// trialHeader.
+// trialDropIn is the trial drop-in: DropIn's TrustedUserCAKeys and
+// AuthorizedPrincipalsFile lines under trialHeader. It sets no
+// RevokedKeys: sshd treats every public key as revoked while its
+// RevokedKeys file is missing, so an sshd reloaded by something else in
+// the moment the trial exists would refuse every key until its next
+// reload; without that line such a reload refuses only certificate logins
+// (Threat Flags, 03-06 SUMMARY). The two keywords show the drop-in's
+// precedence as well as three would: sshd keeps the first value of each.
 func trialDropIn(l Layout) []byte {
-	return append([]byte(trialHeader), bytes.TrimPrefix(DropIn(l), []byte(dropInHeader))...)
+	cur := l.Current()
+	return []byte(trialHeader +
+		"TrustedUserCAKeys " + filepath.Join(cur, CAFile) + "\n" +
+		"AuthorizedPrincipalsFile " + filepath.Join(cur, PrincipalsDir, "%u") + "\n")
 }
+
+// trialKeywords are the keywords the trial drop-in sets.
+var trialKeywords = []string{"trustedusercakeys", "authorizedprincipalsfile"}
 
 // isDefault reports whether an sshd -T value of a trust keyword is unset:
 // "none", or no line at all (OpenSSH 10.3 and later print no revokedkeys
@@ -293,13 +307,15 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 			_ = unix.Close(e.stateFd)
 		}
 	}()
-	for _, p := range []string{cfg.SSHD, cfg.SSHDConfig, cfg.SSHKeygen, l.Root} {
+	for _, p := range []string{cfg.SSHD, cfg.SSHDConfig, cfg.SSHKeygen, l.Root, l.StateDir} {
 		if !filepath.IsAbs(p) {
 			return nil, fmt.Errorf("%w: %q is not an absolute path", ErrConfig, p)
 		}
 	}
-	if st, err := os.Stat(cfg.SSHD); err != nil || !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: sshd %s: not a regular file (%v)", ErrConfig, cfg.SSHD, err)
+	if st, err := os.Stat(cfg.SSHD); err != nil {
+		return nil, fmt.Errorf("%w: sshd %s: %w", ErrConfig, cfg.SSHD, err)
+	} else if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: sshd %s is not a regular file", ErrConfig, cfg.SSHD)
 	}
 	if st, err := os.Stat(cfg.SSHKeygen); err != nil || !st.Mode().IsRegular() {
 		r.add(Finding{Code: CodeSSHKeygenMissing, File: cfg.SSHKeygen, Message: "there is no ssh-keygen at " + cfg.SSHKeygen + "; the agent checks every CA line and KRL with the host's own ssh-keygen before installing it",
@@ -328,6 +344,9 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 		}
 		existing = nil
 		r.Notes = append(r.Notes, "removed a trial drop-in an earlier preflight left behind")
+		if base, err = e.sshdDump(ctx, ""); err != nil {
+			return nil, err
+		}
 	}
 	hits := trustSettingHits(l, cfg.SSHDConfig)
 	switch {
@@ -335,10 +354,25 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 		r.add(Finding{Code: CodeForeignTrust, File: l.DropIn(), Message: l.DropIn() + " exists and is not the agent's drop-in",
 			Fix: "move it away; the agent owns that file name"})
 	case existing != nil:
-		// The agent's own drop-in: its values must be in force.
-		foreignFindings(l, base, hits, r)
+		// The agent's own drop-in: its values must be in force. The Phase 2
+		// runbook's own two lines in 50-keyroster.conf, left by a takeover
+		// whose removal is unfinished, are shadowed by it (00- is read
+		// first, and sshd -T shows the agent's values).
+		var rest []settingHit
+		for _, h := range hits {
+			if h.File == l.Phase2DropIn() && (h.Text == phase2CALine || h.Text == phase2PrincipalsLine) {
+				continue
+			}
+			rest = append(rest, h)
+		}
+		if len(rest) < len(hits) {
+			r.Notes = append(r.Notes, "the Phase 2 layout is still present beside the agent's drop-in; "+adoptCommand+" removes it")
+		}
+		foreignFindings(l, base, rest, r)
 	default:
-		foreignFindings(l, base, hits, r)
+		if !phase2Findings(l, base, hits, r) {
+			foreignFindings(l, base, hits, r)
+		}
 		if err := e.trialFindings(ctx, base, r); err != nil {
 			return nil, err
 		}
@@ -368,7 +402,13 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 // drop-in would change, removes a trial drop-in a crashed preflight left,
 // and refuses with a PreflightError on any refusal code. 03-05's own
 // login_grace_unbounded check at the start of every apply stays.
-func (e *engine) preflightApply(v *state.Verified) error {
+//
+// On a first install it also decides a Phase 2 takeover (D-08,
+// adoptDecision): the exact layout, matching the signed state g was
+// rendered from, sets e.adopt when Config.AllowAdoption is set and is
+// phase2_adoption_pending otherwise; any other Phase 2 style layout is
+// phase2_layout_differs.
+func (e *engine) preflightApply(ctx context.Context, v *state.Verified, g *Generation) error {
 	lg, err := e.resolveLink(e.l.LastGood())
 	if err != nil {
 		return err
@@ -385,6 +425,10 @@ func (e *engine) preflightApply(v *state.Verified) error {
 			if err := e.removeTrial(); err != nil {
 				return err
 			}
+			// The start-of-run sshd -T saw the trial: read it again.
+			if e.dump, err = e.sshdDump(ctx, ""); err != nil {
+				return err
+			}
 		}
 		old = nil
 	}
@@ -394,9 +438,21 @@ func (e *engine) preflightApply(v *state.Verified) error {
 	}
 	platformFindings(e.l, r)
 	dumpFindings(e.dump, r)
-	if old == nil || bytes.Equal(old, DropIn(e.l)) {
-		foreignFindings(e.l, e.dump, trustSettingHits(e.l, e.cfg.SSHDConfig), r)
-	} else {
+	hits := trustSettingHits(e.l, e.cfg.SSHDConfig)
+	switch {
+	case old == nil && lg.kind == linkNone:
+		plan, f := e.adoptDecision(v, g, hits)
+		switch {
+		case f != nil:
+			r.add(*f)
+		case plan != nil:
+			e.adopt = plan
+		default:
+			foreignFindings(e.l, e.dump, hits, r)
+		}
+	case old == nil || bytes.Equal(old, DropIn(e.l)):
+		foreignFindings(e.l, e.dump, hits, r)
+	default:
 		r.add(Finding{Code: CodeForeignTrust, File: e.l.DropIn(), Message: e.l.DropIn() + " exists and is not the agent's drop-in", Fix: "move it away; the agent owns that file name"})
 	}
 	policyFindings(v.Policy, r)
@@ -416,9 +472,6 @@ func (e *engine) preflightApply(v *state.Verified) error {
 // directory exists, so the trial drop-in never races an apply's real one.
 // No state directory means no applier can run yet.
 func (e *engine) preflightLock(l Layout) (func(), error) {
-	if l.StateDir == "" {
-		return func() {}, nil
-	}
 	if _, err := os.Lstat(l.StateDir); errors.Is(err, os.ErrNotExist) {
 		return func() {}, nil
 	}
@@ -517,7 +570,7 @@ func (e *engine) trialFindings(ctx context.Context, base Dump, r *PreflightRepor
 	}
 	want := ourValues(e.l)
 	var unread []string
-	for _, k := range trustKeywords {
+	for _, k := range trialKeywords {
 		if trial.One(k) != want[k] && isDefault(base.One(k)) {
 			unread = append(unread, k)
 		}

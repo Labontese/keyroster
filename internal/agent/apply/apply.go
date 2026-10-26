@@ -117,6 +117,12 @@ type Config struct {
 	// RecoverToLastGood is the operator's way out of
 	// stuck: pending_state_unknown.
 	RecoverToLastGood bool
+	// AllowAdoption lets this run take over a host set up with the Phase 2
+	// runbook's exact layout (D-08), removing that layout's files in
+	// /etc/ssh. keyroster-agent apply --once sets it; the applier unit's
+	// run loop (03-07) does not, because its sandbox cannot remove files
+	// there: it reports phase2_adoption_pending and writes nothing.
+	AllowAdoption bool
 	// SelfTestTimeout bounds the whole self-test (default 10 s).
 	SelfTestTimeout time.Duration
 	// Clock, Exec and Log default to SystemClock, ExecRunner and nowhere.
@@ -162,7 +168,10 @@ type Report struct {
 	// (the KRL never rolls back): the generation keeps the KRL in force,
 	// and this names both versions instead of substituting silently (PR #67
 	// round-2 carry-over).
-	KRLKept           *KRLKept `json:"krl_kept,omitempty"`
+	KRLKept *KRLKept `json:"krl_kept,omitempty"`
+	// Phase2Removed are the Phase 2 layout's paths this run removed after
+	// taking the host over (D-08).
+	Phase2Removed     []string `json:"phase2_removed,omitempty"`
 	UnmatchedHostKeys []string `json:"unmatched_host_keys,omitempty"`
 	SpoolIgnored      []string `json:"spool_ignored,omitempty"`
 	Diff              []string `json:"diff,omitempty"`
@@ -198,7 +207,8 @@ type engine struct {
 	maxGen        uint64
 	pending       *marker
 	dropinChanged bool
-	staged        uint64 // the accepted/ snapshot a commit marker names
+	staged        uint64     // the accepted/ snapshot a commit marker names
+	adopt         *AdoptPlan // a Phase 2 takeover this first install makes (D-08)
 	poll          func(ctx context.Context) (*Generation, *state.Verified, error)
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
@@ -360,6 +370,19 @@ func (e *engine) apply(ctx context.Context) error {
 			return err
 		}
 	}
+	if !e.cfg.DryRun {
+		// A Phase 2 takeover whose removal a crash or a failure cut short
+		// resumes once the agent's generation is last-good (D-08).
+		if lg, err := e.resolveLink(e.l.LastGood()); err != nil {
+			return err
+		} else if lg.kind == linkAgent && e.cfg.AllowAdoption {
+			if err := e.finishAdoption(ctx); err != nil {
+				return err
+			}
+		} else if p, _ := e.readAdopt(); lg.kind == linkAgent && p != nil {
+			e.logf("WARNING %s: the agent's files are in force, and the Phase 2 layout's removal is unfinished; run %s", CodePhase2Pending, adoptCommand)
+		}
+	}
 	return e.forward(ctx)
 }
 
@@ -512,7 +535,7 @@ func (e *engine) forward(ctx context.Context) error {
 		return err
 	}
 	e.keepKRL(g, cur, curLink)
-	if err := e.preflightApply(v); err != nil {
+	if err := e.preflightApply(ctx, v, g); err != nil {
 		return err
 	}
 	if e.cfg.DryRun {
@@ -815,6 +838,15 @@ func (e *engine) recover(ctx context.Context, m *marker, cur, lg link) error {
 // the self-test run. A failure undoes all of it (undoFirstInstall).
 func (e *engine) firstInstall(ctx context.Context, g *Generation, v *state.Verified) error {
 	e.report.Generation = g.N
+	if e.adopt != nil {
+		// A Phase 2 takeover (D-08): its plan is durable before current or
+		// the drop-in change. A crash resumes the removal once last-good is
+		// set (resumeAdoption), or is undone with the first install
+		// (undoFirstInstall).
+		if err := e.writeAdopt(e.adopt); err != nil {
+			return err
+		}
+	}
 	if err := e.writeMarker(0, g.N, 0, "final"); err != nil {
 		return err
 	}
@@ -835,7 +867,12 @@ func (e *engine) firstInstall(ctx context.Context, g *Generation, v *state.Verif
 		return e.failFirstInstall(ctx, err)
 	}
 	e.report.SelfTest = "pass"
-	return e.commit(g.N, v)
+	if err := e.commit(g.N, v); err != nil {
+		return err
+	}
+	// Only now, with the agent's generation last-good, do the Phase 2
+	// paths go (D-08).
+	return e.finishAdoption(ctx)
 }
 
 func (e *engine) failFirstInstall(ctx context.Context, cause error) error {
@@ -872,6 +909,11 @@ func (e *engine) undoFirstInstall(ctx context.Context, cur link) error {
 		if err := e.removeCurrent(); err != nil {
 			return err
 		}
+	}
+	// A Phase 2 takeover this first install began is undone with it: its
+	// paths were never touched (they go only after the commit).
+	if err := e.remove(e.l.State(adoptFile)); err != nil {
+		return err
 	}
 	if err := e.clearMarker(); err != nil {
 		return err

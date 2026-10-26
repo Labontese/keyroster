@@ -115,10 +115,18 @@ func isWrite(fset *token.FileSet, c *ast.CallExpr) bool {
 }
 
 func callsAllowed(fset *token.FileSet, decl *ast.FuncDecl) bool {
+	return callsFunc(fset, decl, "paths.Allowed")
+}
+
+// removeCalls are the writes that only remove; AllowedRemoval may guard
+// them (03-06, D-08: the Phase 2 layout is removed, never written).
+var removeCalls = []string{"os.Remove", "os.RemoveAll", "unix.Unlinkat"}
+
+func callsFunc(fset *token.FileSet, decl *ast.FuncDecl, fn string) bool {
 	found := false
 	ast.Inspect(decl.Body, func(n ast.Node) bool {
 		if c, ok := n.(*ast.CallExpr); ok {
-			if name := callName(fset, c); name == "paths.Allowed" {
+			if name := callName(fset, c); name == fn {
 				found = true
 			}
 		}
@@ -361,6 +369,9 @@ func TestPaths(t *testing.T) {
 			if name == "spool.Write" {
 				t.Errorf("%s: the applier calls spool.Write, the fetcher's writer", where)
 			}
+			if slices.Contains(removeCalls, name) && callsFunc(fset, decl, "paths.AllowedRemoval") {
+				return // a removal, guarded by the removal-only allowlist
+			}
 			if !callsAllowed(fset, decl) {
 				t.Errorf("%s: %s in %s without paths.Allowed in the same function", where, name, decl.Name.Name)
 			}
@@ -435,6 +446,28 @@ func TestAllowed(t *testing.T) {
 		"/r/root/.ssh/authorized_keys", "/r/etc/ssh/keyroster-evil", "/var/lib/keyroster-agent-x/a", "/r/etc/ssh/keyroster/../sshd_config", "relative/path"} {
 		if err := Allowed(l, p); !errors.Is(err, ErrNotAllowed) {
 			t.Errorf("Allowed(%s) = %v, want path_not_allowed", p, err)
+		}
+	}
+	// 03-06 (D-08): the Phase 2 layout's three paths are removable once,
+	// never writable.
+	phase2 := []string{"/r/etc/ssh/sshd_config.d/50-keyroster.conf", "/r/etc/ssh/keyroster_user_ca.pub", "/r/etc/ssh/principals", "/r/etc/ssh/principals/deploy"}
+	for _, p := range phase2 {
+		if err := Allowed(l, p); !errors.Is(err, ErrNotAllowed) {
+			t.Errorf("Allowed(%s) = %v, want path_not_allowed: the Phase 2 layout is never written", p, err)
+		}
+		if err := AllowedRemoval(l, p); err != nil {
+			t.Errorf("AllowedRemoval(%s) = %v", p, err)
+		}
+	}
+	for _, p := range []string{"/r/etc/ssh/keyroster/gen/3", "/var/lib/keyroster-agent/pins.json"} {
+		if err := AllowedRemoval(l, p); err != nil {
+			t.Errorf("AllowedRemoval(%s) = %v (everything Allowed may be removed)", p, err)
+		}
+	}
+	for _, p := range []string{"/r/etc/ssh/sshd_config", "/r/etc/ssh/sshd_config.d/50-other.conf", "/r/etc/ssh/principals/a/b",
+		"/r/etc/ssh/principals/../sshd_config", "/r/etc/ssh/keyroster_user_ca.pub.bak", "/r/etc/ssh", "relative/principals"} {
+		if err := AllowedRemoval(l, p); !errors.Is(err, ErrNotAllowed) {
+			t.Errorf("AllowedRemoval(%s) = %v, want path_not_allowed", p, err)
 		}
 	}
 }

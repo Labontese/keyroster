@@ -40,6 +40,12 @@ socket-activated sshd whose service is not running). Without --sshd,
 --sshd-config and --reload the service that runs sshd is detected (systemd
 or OpenRC); a flag that is given overrides the detected value.
 
+A host set up by hand with the Phase 2 runbook's exact layout is taken over
+by this command (and only by it): the agent installs its own files, proves
+they win, reloads and self-tests, and only then removes the three Phase 2
+paths. Run it from a root shell after approving the host and re-rendering
+its principals files (host-setup.md "Moving a Phase 2 host to the agent").
+
 --dry-run verifies and renders and prints the difference against current
 without installing anything. --recover-to-last-good is the operator's way
 out of "stuck: pending_state_unknown" (a layout the agent did not make),
@@ -84,6 +90,9 @@ func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	cfg := apply.Config{
 		Spool: filepath.Clean(*spoolDir), SSHD: sshd, SSHDConfig: config, SSHKeygen: keygen,
 		Reload: reload, DryRun: *dryRun, RecoverToLastGood: *recoverFlag, Log: stderr,
+		// D-08: only this hand run takes a Phase 2 host over; the applier
+		// unit's run loop (03-07) never sets it.
+		AllowAdoption: true,
 	}
 	report, err := apply.Apply(ctx, cfg, apply.Layout{Root: filepath.Clean(*svc.root), StateDir: filepath.Clean(*stateDir)})
 	out, merr := json.MarshalIndent(report, "", "  ")

@@ -13,7 +13,6 @@
   "github.com/Labontese/keyroster/internal/agent/apply": [
     "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_EXEC",
-    "CAPABILITY_FILES",
     "CAPABILITY_NETWORK",
     "CAPABILITY_READ_SYSTEM_STATE",
     "CAPABILITY_REFLECT",
@@ -23,7 +22,17 @@
   "github.com/Labontese/keyroster/internal/agent/execsite": [
     "CAPABILITY_EXEC"
   ],
+  "github.com/Labontese/keyroster/internal/agent/state": [
+    "CAPABILITY_ARBITRARY_EXECUTION"
+  ],
+  "github.com/Labontese/keyroster/internal/krl": [
+    "CAPABILITY_ARBITRARY_EXECUTION"
+  ],
+  "github.com/Labontese/keyroster/internal/sshsig": [
+    "CAPABILITY_ARBITRARY_EXECUTION"
+  ],
   "golang.org/x/crypto/ssh": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_REFLECT"
   ],
   "golang.org/x/sys/unix": [

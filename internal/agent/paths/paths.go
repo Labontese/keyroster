@@ -105,6 +105,49 @@ func Allowed(l Layout, path string) error {
 	return fmt.Errorf("%w: %s is outside the agent's paths (%s, %s and %s)", ErrNotAllowed, path, l.KeyrosterDir(), l.DropIn(), l.StateDir)
 }
 
+// Phase2DropIn is the Phase 2 runbook's drop-in,
+// <root>/etc/ssh/sshd_config.d/50-keyroster.conf. With Phase2CAFile
+// (<root>/etc/ssh/keyroster_user_ca.pub) and Phase2PrincipalsDir
+// (<root>/etc/ssh/principals) it is the hand-set layout of host-setup.md.
+// The agent takes such a host over once (D-08) and then removes them; it
+// never writes them (AllowedRemoval).
+func (l Layout) Phase2DropIn() string {
+	return filepath.Join(l.DropInDir(), "50-keyroster.conf")
+}
+
+// Phase2CAFile is the Phase 2 runbook's TrustedUserCAKeys file.
+func (l Layout) Phase2CAFile() string {
+	return filepath.Join(l.Root, "etc", "ssh", "keyroster_user_ca.pub")
+}
+
+// Phase2PrincipalsDir is the Phase 2 runbook's AuthorizedPrincipalsFile
+// directory.
+func (l Layout) Phase2PrincipalsDir() string {
+	return filepath.Join(l.Root, "etc", "ssh", "principals")
+}
+
+// AllowedRemoval returns nil when the applier may remove path: anything
+// Allowed, and the three one-time entries of the Phase 2 layout (D-08):
+// Phase2DropIn and Phase2CAFile exactly, Phase2PrincipalsDir itself and
+// the files directly in it. Only removals may use it; every write goes
+// through Allowed, which these paths never pass (TestPaths, TestAllowed).
+func AllowedRemoval(l Layout, path string) error {
+	if err := Allowed(l, path); err == nil {
+		return nil
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || !filepath.IsAbs(l.Root) {
+		return fmt.Errorf("%w: %q is not a clean absolute path", ErrNotAllowed, path)
+	}
+	pdir := filepath.Clean(l.Phase2PrincipalsDir())
+	switch {
+	case path == filepath.Clean(l.Phase2DropIn()), path == filepath.Clean(l.Phase2CAFile()), path == pdir:
+		return nil
+	case filepath.Dir(path) == pdir && filepath.Base(path) != "." && filepath.Base(path) != "..":
+		return nil
+	}
+	return fmt.Errorf("%w: %s is neither the agent's nor one of the Phase 2 layout's paths (%s, %s, %s)", ErrNotAllowed, path, l.Phase2DropIn(), l.Phase2CAFile(), l.Phase2PrincipalsDir())
+}
+
 // ExecSite is one program the applier runs (PR #67 review: every exec
 // site goes through internal/agent/execsite, the only package that
 // imports os/exec). Func is the function in internal/agent/apply/sshd.go

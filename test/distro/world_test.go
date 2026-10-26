@@ -184,7 +184,7 @@ func (w *world) userCert(serial uint64, principals ...string) ssh.Signer {
 	if err != nil {
 		w.t.Fatal(err)
 	}
-	kid := cert.KeyID{CA: "user", Subject: "alice", Request: strings.Repeat(fmt.Sprintf("%02x", byte(serial)), 16), Policy: 1, Serial: serial}
+	kid := cert.KeyID{CA: "user", Subject: "alice", Request: strings.Repeat(fmt.Sprintf("%02x", serial%256), 16), Policy: 1, Serial: serial}
 	c, err := cert.Build(cert.Request{Profile: cert.DefaultUserProfile(), Subject: subject, Principals: principals,
 		Now: time.Now().Add(-time.Minute), ValidFor: time.Hour, KeyID: kid, Serial: serial}, w.user, rand.Reader)
 	if err != nil {
