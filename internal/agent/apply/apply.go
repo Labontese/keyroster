@@ -512,6 +512,9 @@ func (e *engine) forward(ctx context.Context) error {
 		return err
 	}
 	e.keepKRL(g, cur, curLink)
+	if err := e.preflightApply(v); err != nil {
+		return err
+	}
 	if e.cfg.DryRun {
 		e.setVersions(v, g)
 		e.report.Diff = diff(cur, g)
@@ -1033,7 +1036,7 @@ func (e *engine) finishCommit(n, snap uint64) error {
 // /etc/ssh/sshd_config (D-07).
 func DropIn(l Layout) []byte {
 	cur := l.Current()
-	return []byte("# keyroster: managed by keyroster-agent; do not edit\n" +
+	return []byte(dropInHeader +
 		"TrustedUserCAKeys " + filepath.Join(cur, CAFile) + "\n" +
 		"RevokedKeys " + filepath.Join(cur, KRLFile) + "\n" +
 		"AuthorizedPrincipalsFile " + filepath.Join(cur, PrincipalsDir, "%u") + "\n")
@@ -1067,6 +1070,9 @@ func (e *engine) writeDropIn() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if bytes.Equal(old, trialDropIn(e.l)) {
+		old = nil // a preflight's trial, never in force: not a previous drop-in
+	}
 	if bytes.Equal(old, want) {
 		return false, nil
 	}
@@ -1098,9 +1104,96 @@ func (e *engine) writeDropIn() (bool, error) {
 	return true, e.writeFile(e.l.DropInDir(), paths.DropInName, want, 0o644)
 }
 
+// trustKeywords are the sshd settings the drop-in sets, in sshd -T's
+// lowercase spelling.
+var trustKeywords = []string{"trustedusercakeys", "revokedkeys", "authorizedprincipalsfile"}
+
+// ourValues are the values sshd -T must report for trustKeywords once the
+// agent's drop-in is in force: its three current/ paths.
+func ourValues(l Layout) map[string]string {
+	cur := l.Current()
+	return map[string]string{
+		"trustedusercakeys":        filepath.Join(cur, CAFile),
+		"revokedkeys":              filepath.Join(cur, KRLFile),
+		"authorizedprincipalsfile": filepath.Join(cur, PrincipalsDir, "%u"),
+	}
+}
+
+// accountSpec is the sshd -T -C connection specification for account on
+// a loopback connection to laddr port lport (03-06: Match blocks are
+// evaluated per managed account; a Match Address for remote client ranges
+// is not, see host-setup.md "Drift").
+func accountSpec(account, laddr, lport string) string {
+	return "user=" + account + ",host=127.0.0.1,addr=127.0.0.1,laddr=" + laddr + ",lport=" + lport
+}
+
+// firstLoopback is the address and port of the first loopback target
+// sshd -T names, for the -C specifications.
+func firstLoopback(d Dump) (string, string, error) {
+	targets, err := loopbackTargets(d)
+	if err != nil {
+		return "", "", err
+	}
+	host, port, err := net.SplitHostPort(targets[0])
+	return host, port, err
+}
+
+// principalAccounts is the accounts g holds a principals file for.
+func principalAccounts(g *Generation) []string {
+	var out []string
+	if g == nil {
+		return nil
+	}
+	for _, name := range fileNames(g) {
+		if a, ok := strings.CutPrefix(name, PrincipalsDir+"/"); ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// checkDropInEffective checks that sshd -T reports the drop-in's three
+// paths, and so does sshd -T -C for every account current holds a
+// principals file for (03-06, T-03-34: a Match block that overrides a
+// trust setting for a managed account makes the drop-in not effective
+// for that account).
+func (e *engine) checkDropInEffective(ctx context.Context, dump Dump) error {
+	want := ourValues(e.l)
+	for _, k := range trustKeywords {
+		if got := dump.One(k); got != want[k] {
+			return fmt.Errorf("%w: sshd -T reports %s %q, want %q; another configuration file sets it first", ErrDropInNotEffective, k, got, want[k])
+		}
+	}
+	cur, _, err := e.readCurrent()
+	if err != nil {
+		return err
+	}
+	accounts := principalAccounts(cur)
+	if len(accounts) == 0 {
+		return nil
+	}
+	laddr, lport, err := firstLoopback(dump)
+	if err != nil {
+		return err
+	}
+	for _, a := range accounts {
+		d, err := e.sshdDump(ctx, accountSpec(a, laddr, lport))
+		if err != nil {
+			return err
+		}
+		for _, k := range trustKeywords {
+			if got := d.One(k); got != want[k] {
+				return fmt.Errorf("%w: sshd -T -C user=%s reports %s %q, want %q; a Match block overrides it for that account", ErrDropInNotEffective, a, k, got, want[k])
+			}
+		}
+	}
+	return nil
+}
+
 // activateDropIn checks a changed drop-in with sshd -t, checks that
-// sshd -T now reports its three paths (a drop-in read after another file
-// that sets them is not effective), and reloads sshd.
+// sshd -T now reports its three paths, globally and for every managed
+// account (a drop-in read after another file that sets them, or a Match
+// block that overrides them, is not effective), and reloads sshd.
 func (e *engine) activateDropIn(ctx context.Context) error {
 	if err := e.sshdTest(ctx); err != nil {
 		return err
@@ -1109,23 +1202,17 @@ func (e *engine) activateDropIn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cur := e.l.Current()
-	for k, want := range map[string]string{
-		"trustedusercakeys":        filepath.Join(cur, CAFile),
-		"revokedkeys":              filepath.Join(cur, KRLFile),
-		"authorizedprincipalsfile": filepath.Join(cur, PrincipalsDir, "%u"),
-	} {
-		if got := dump.One(k); got != want {
-			return fmt.Errorf("%w: sshd -T reports %s %q, want %q; another configuration file sets it first", ErrDropInNotEffective, k, got, want)
-		}
+	if err := e.checkDropInEffective(ctx, dump); err != nil {
+		return err
 	}
 	if err := e.fault("reload"); err != nil {
 		return err
 	}
-	if err := e.reload(ctx, e.dump); err != nil {
+	reloaded, err := e.reload(ctx, e.dump)
+	if err != nil {
 		return err
 	}
-	e.report.Reloaded = true
+	e.report.Reloaded = e.report.Reloaded || reloaded
 	g, err := dump.LoginGrace()
 	if err != nil {
 		return err
@@ -1153,10 +1240,11 @@ func (e *engine) restoreDropIn(ctx context.Context) error {
 	if err := e.sshdTest(ctx); err != nil {
 		return err
 	}
-	if err := e.reload(ctx, e.dump); err != nil {
+	reloaded, err := e.reload(ctx, e.dump)
+	if err != nil {
 		return err
 	}
-	e.report.Reloaded = true
+	e.report.Reloaded = e.report.Reloaded || reloaded
 	e.grace, err = e.observeLoginGrace(e.rawGrace, true)
 	return err
 }

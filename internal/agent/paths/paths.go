@@ -135,6 +135,7 @@ var ExecSites = []ExecSite{
 	{Func: "keygenQuery", Ctor: "KeygenQuery", Call: "e.cfg.SSHKeygen krlFile pub", Args: "-Q -f KRL PUB"},
 	{Func: "reloadSystemd", Ctor: "SystemctlReload", Call: "systemctl unit", Args: "reload UNIT"},
 	{Func: "reloadOpenRC", Ctor: "RCServiceReload", Call: "paths.RCService", Args: "sshd reload"},
+	{Func: "systemctlShow", Ctor: "SystemctlShow", Call: "systemctl", Args: "show -p Id -p LoadState -p ActiveState -p ExecStart ssh.socket ssh.service sshd.service"},
 }
 
 // Systemctl are the absolute paths reloadSystemd may run, in the order

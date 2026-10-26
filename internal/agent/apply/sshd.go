@@ -119,6 +119,13 @@ func (e *engine) reloadOpenRC(ctx context.Context) error {
 	return nil
 }
 
+// systemctlShow runs systemctl show for ssh.socket, ssh.service and
+// sshd.service (Detect): the service manager says which binary and
+// configuration the running sshd uses.
+func systemctlShow(ctx context.Context, r Runner, systemctl string) (Result, error) {
+	return r.Run(ctx, execsite.SystemctlShow(systemctl))
+}
+
 // Errors of the sshd helpers.
 var (
 	ErrSSHDTest = errors.New("sshd_t_failed")
@@ -129,33 +136,42 @@ var (
 // unitRE is a systemd service name the systemd reload strategy accepts.
 var unitRE = regexp.MustCompile(`^[a-z0-9@._-]+\.service$`)
 
-// CheckReload checks a --reload strategy: signal, systemd:<unit> or
-// openrc.
+// ReloadNone is the reload strategy of a socket-activated sshd whose
+// service is not running (Ubuntu's ssh.socket with ssh.service inactive):
+// the next connection starts sshd, which reads the configuration fresh,
+// so nothing is reloaded. sshd -t still checks every changed drop-in.
+const ReloadNone = "none"
+
+// CheckReload checks a --reload strategy: signal, systemd:<unit>, openrc
+// or none.
 func CheckReload(s string) error {
 	switch {
-	case s == "signal" || s == "openrc":
+	case s == "signal" || s == "openrc" || s == ReloadNone:
 		return nil
 	case strings.HasPrefix(s, "systemd:") && unitRE.MatchString(strings.TrimPrefix(s, "systemd:")):
 		return nil
 	}
-	return fmt.Errorf("%w: reload strategy %q: want signal, systemd:<unit>.service or openrc", ErrReload, s)
+	return fmt.Errorf("%w: reload strategy %q: want signal, systemd:<unit>.service, openrc or none", ErrReload, s)
 }
 
 // reload makes sshd re-read its configuration by the configured strategy
 // (a closed set): signal sends SIGHUP to the pid in the PidFile sshd -T
 // names, when that process runs the configured sshd, and runs nothing; systemd:<unit> runs systemctl reload <unit>;
-// openrc runs rc-service sshd reload.
-func (e *engine) reload(ctx context.Context, dump Dump) error {
+// openrc runs rc-service sshd reload; none does nothing (ReloadNone). It
+// reports whether it reloaded.
+func (e *engine) reload(ctx context.Context, dump Dump) (bool, error) {
 	if err := CheckReload(e.cfg.Reload); err != nil {
-		return err
+		return false, err
 	}
 	switch e.cfg.Reload {
+	case ReloadNone:
+		return false, nil
 	case "signal":
-		return reloadSignal(e.cfg.SSHD, dump)
+		return true, reloadSignal(e.cfg.SSHD, dump)
 	case "openrc":
-		return e.reloadOpenRC(ctx)
+		return true, e.reloadOpenRC(ctx)
 	default:
-		return e.reloadSystemd(ctx, strings.TrimPrefix(e.cfg.Reload, "systemd:"))
+		return true, e.reloadSystemd(ctx, strings.TrimPrefix(e.cfg.Reload, "systemd:"))
 	}
 }
 
