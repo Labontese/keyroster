@@ -430,10 +430,13 @@ var (
 //  2. NAME set disabled in a signed directory version, installed at admin
 //     quorum 1 and written as a proposal otherwise, so nothing new is
 //     issued;
-//  3. once the install is reported, a second subject revocation (the
-//     second sweep), which revokes every certificate issued between steps
-//     1 and 2. Its answer re-lists those of step 1, because no subject
-//     resolution excludes certificates already revoked.
+//  3. once the install is reported, or when the served directory already
+//     shows NAME disabled or absent (a disable another admin installed
+//     after step 1 leaves the certificates of a login in between), a
+//     second subject revocation (the second sweep), which revokes every
+//     certificate issued between steps 1 and 2. Its answer re-lists those
+//     of step 1, because no subject resolution excludes certificates
+//     already revoked.
 //
 // Each answer's serials are printed and checked against the verified KRL
 // (the answer is unsigned, so exactly the reported serials). Exit 3 is a
@@ -441,7 +444,7 @@ var (
 // failed), exit 4 a disable that is only a proposal; both name the
 // command to finish with, keyroster revoke user NAME again. A first
 // revocation that fails still runs step 2, the fail-safe direction, and
-// exits 1.
+// exits 1 without a second sweep (the re-run it names sweeps again).
 func runRevokeUser(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("revoke user", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -496,7 +499,7 @@ func runRevokeUser(ctx context.Context, args []string, stdout, stderr io.Writer)
 	})
 	nothingNew := errors.Is(dirErr, errUserAlreadyDisabled) || errors.Is(dirErr, errUserNotInDirectory)
 	if nothingNew {
-		_, _ = fmt.Fprintf(stdout, "%s is %s, so no passkey login issues %s a certificate: no directory change and no second revocation.\n",
+		_, _ = fmt.Fprintf(stdout, "%s is %s, so no passkey login issues %s a certificate: no directory change.\n",
 			name, dirErr, name)
 	}
 	if firstErr != nil {
@@ -511,9 +514,13 @@ func runRevokeUser(ctx context.Context, args []string, stdout, stderr io.Writer)
 		}
 		return fmt.Errorf("nothing is reported revoked: %w. %s is disabled now, so nothing new is issued; run keyroster revoke user %s again", firstErr, name, name)
 	}
+	// state is what the second sweep's output says of NAME.
+	state, label := "disabled", "Second revocation (after the disable)"
 	switch {
 	case nothingNew:
-		return nil
+		// Still sweep: a login between step 1 and a disable another
+		// admin installed has a live certificate the first missed.
+		state, label = dirErr.Error(), "Second revocation (after reading the directory)"
 	case dirErr != nil:
 		return &exitError{code: 3, err: fmt.Errorf("revoked as reported above, but the user is NOT disabled: %w. "+
 			"%s can still obtain certificates; run keyroster revoke user %s again (it revokes every live certificate again, those issued since included, "+
@@ -523,17 +530,18 @@ func runRevokeUser(ctx context.Context, args []string, stdout, stderr io.Writer)
 			"run keyroster revoke user %s again after the proposal is installed", name, name)}
 	}
 
-	// 3. The second sweep, after the install the server reported.
+	// 3. The second sweep, after the install the server reported or the
+	// directory read that showed NAME disabled or absent.
 	second := &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: name}
 	if err := checkRevokeRequest(second, *f.reason); err != nil {
 		return err
 	}
-	if _, err := r.sweepUser(ctx, second, name, "Second revocation (after the disable)", stdout, stderr); err != nil {
-		return &exitError{code: 3, err: fmt.Errorf("%s is disabled, but the second revocation failed: %w; "+
-			"certificates issued before the disable may still be live; run keyroster revoke user %s again", name, err, name)}
+	if _, err := r.sweepUser(ctx, second, name, label, stdout, stderr); err != nil {
+		return &exitError{code: 3, err: fmt.Errorf("%s is %s, but the second revocation failed: %w; "+
+			"certificates issued since the first revocation may still be live; run keyroster revoke user %s again", name, state, err, name)}
 	}
-	_, _ = fmt.Fprintf(stdout, "%s is disabled, and the KRL lists every certificate of %s the server reported. %s\n",
-		name, name, revokeEnforcement(wire.CARoleUser))
+	_, _ = fmt.Fprintf(stdout, "%s is %s, and the KRL lists every certificate of %s the server reported. %s\n",
+		name, state, name, revokeEnforcement(wire.CARoleUser))
 	return nil
 }
 

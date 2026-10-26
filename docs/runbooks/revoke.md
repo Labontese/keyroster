@@ -232,7 +232,10 @@ authority, so the command runs them in a fixed order:
    written as a proposal (`--out DIR` names it).
 3. **Second revocation.** Once the server reports the install, the
    command revokes the user again. That catches a certificate issued by
-   a login that completed between steps 1 and 2. Its answer re-lists the
+   a login that completed between steps 1 and 2. It also runs when the
+   directory already shows the user disabled or absent (no directory
+   change then): another admin's disable installed after step 1 leaves
+   such a certificate too. Its answer re-lists the
    certificates of step 1 next to any new one, because no revocation
    leaves out certificates already revoked; the KRL lists each serial
    once.
@@ -270,9 +273,9 @@ between), each followed by its krl_publish entry.
 
 | Status | Meaning | What to do |
 |---|---|---|
-| exit 0 | Revoked, the user disabled and swept again. Also when the user was already disabled or is not in the installed directory: then no login issues the user a certificate, so there is one revocation and no directory change, and the output says so. | Nothing. Confirm the install on the signer host ([enroll-user.md](enroll-user.md#confirm-on-the-signer-host)). |
+| exit 0 | Revoked, the user disabled and swept again. Also when the user was already disabled or is not in the installed directory: then there is no directory change, but both revocations run (the second catches a certificate issued before another admin's disable was installed), and the output says so. | Nothing. Confirm the install on the signer host ([enroll-user.md](enroll-user.md#confirm-on-the-signer-host)). |
 | exit 1 | The first revocation failed or could not be confirmed: nothing is reported revoked. The disable still ran, because it stops new certificates. | Run `keyroster revoke user NAME` again. If the disable failed too, the output names `keyroster user disable NAME` first. |
-| exit 3 | Partial. Revoked, but the user is NOT disabled (the directory step failed), or disabled but the second revocation failed. The user may still obtain certificates, or hold one issued in between. | Run `keyroster revoke user NAME` again: it revokes every live certificate again, those issued since included, then disables and sweeps. A bare `keyroster user disable NAME` would leave the certificates issued in between. |
+| exit 3 | Partial. Revoked, but the user is NOT disabled (the directory step failed), or disabled (or already disabled or not in the directory) but the second revocation failed. The user may still obtain certificates, or hold one issued in between. | Run `keyroster revoke user NAME` again: it revokes every live certificate again, those issued since included, then disables and sweeps. A bare `keyroster user disable NAME` would leave the certificates issued in between. |
 | exit 4 | Admin quorum above 1: revoked, disable pending. The disable is a proposal, and the user can still obtain certificates until the co-signers install it. | Have it co-signed and installed (`keyroster directory sign`, `keyroster directory install`), then run `keyroster revoke user NAME` again. |
 
 The exits ran in CI (cmd/keyroster revoke tests, 03-03b): `TestRevokeUser`

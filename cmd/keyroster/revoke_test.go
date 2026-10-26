@@ -516,17 +516,60 @@ func TestRevokeUser(t *testing.T) {
 		}
 	})
 	t.Run("revoke_user_already_disabled", func(t *testing.T) {
+		// Pre-merge review of PR #64: another admin installed the disable
+		// after the first revocation, and a login in between got serial
+		// 7. The command makes no directory change but still sweeps, so
+		// serial 7 is revoked and checked in the KRL.
 		e := newDirEnv(t, 1, 1)
 		e.installAlice(t, directory.StatusDisabled)
-		e.serveRevokes(e.userKRLDoc(t, 4, 12, []uint64{5, 6}, nil), revokeOK(first))
+		e.serveRevokes(e.userKRLDoc(t, 4, 12, []uint64{5, 6, 7}, nil), revokeOK(first), revokeOK(answer(4, 11, 5, 6, 7)))
 		code, stdout, stderr := run(t, "revoke", "user", "alice", "--yes")
-		if code != 0 || !strings.Contains(stdout, "alice is already disabled, so no passkey login issues alice a certificate: no directory change and no second revocation.") {
+		if code != 0 {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
-		if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
-			t.Fatalf("requests %v, want one revoke and no directory install", got)
+		for _, want := range []string{
+			"alice is already disabled, so no passkey login issues alice a certificate: no directory change.\n",
+			"Second revocation (after reading the directory) of alice: the server reports 3 certificate(s) revoked: KRL v4 published (log entries 11, 12).\nSerials: 5 6 7\n",
+			"Checked: KRL v4 lists each of the 3 serial(s) the server's answer reports",
+			"alice is already disabled, and the KRL lists every certificate of alice the server reported.",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("stdout lacks %q:\n%s", want, stdout)
+			}
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "revoke"}) {
+			t.Fatalf("requests %v, want two revokes and no directory install", got)
 		}
 		requireNotSigned(t, e, 0)
+	})
+	t.Run("revoke_user_not_in_directory", func(t *testing.T) {
+		// No directory installed (version 0): no change, still two sweeps.
+		e := newDirEnv(t, 1, 1)
+		e.serveRevokes(e.userKRLDoc(t, 4, 12, []uint64{5, 6, 7}, nil), revokeOK(first), revokeOK(answer(4, 11, 5, 6, 7)))
+		code, stdout, stderr := run(t, "revoke", "user", "alice", "--yes")
+		if code != 0 || !strings.Contains(stdout, "alice is not in the installed directory, so no passkey login issues alice a certificate: no directory change.\n") ||
+			!strings.Contains(stdout, "Serials: 5 6 7\n") || strings.Contains(stdout, "alice is disabled") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "revoke"}) {
+			t.Fatalf("requests %v, want two revokes and no directory install", got)
+		}
+		requireNotSigned(t, e, 0)
+	})
+	t.Run("revoke_user_not_in_directory_second_sweep_not_listed", func(t *testing.T) {
+		// The second answer reports serial 7, which the KRL lacks: a
+		// partial result, exit 3, and no "is disabled" for a missing user.
+		e := newDirEnv(t, 1, 1)
+		e.serveRevokes(e.userKRLDoc(t, 4, 12, []uint64{5, 6}, nil), revokeOK(first), revokeOK(answer(4, 11, 5, 6, 7)))
+		code, stdout, stderr := run(t, "revoke", "user", "alice", "--yes")
+		if code != 3 || !strings.Contains(stderr, "alice is not in the installed directory, but the second revocation failed") ||
+			!strings.Contains(stderr, "does not list serial 7") || !strings.Contains(stderr, "run keyroster revoke user alice again") ||
+			strings.Contains(stdout, "the KRL lists every certificate") {
+			t.Fatalf("exit %d, stdout %q, stderr %q; want exit 3 naming serial 7 and the re-run", code, stdout, stderr)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "revoke"}) {
+			t.Fatalf("requests %v, want two revokes", got)
+		}
 	})
 	t.Run("revoke_user_none_found", func(t *testing.T) {
 		e := newDirEnv(t, 1, 1)
