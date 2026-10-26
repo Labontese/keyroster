@@ -233,10 +233,14 @@ issued certificates too, run `keyroster revoke user NAME` instead of
 `user disable`: it revokes every live certificate of NAME in the signer's
 records, disables NAME and revokes again
 ([revoke.md](revoke.md#4-revoke-a-user-keyroster-revoke-user)). A host
-refuses those certificates once its sshd's `RevokedKeys` file holds the
-new KRL: a host whose keyroster agent applies the KRL (03-07) does so by
-itself; on a host set up by hand the KRL must be installed by hand,
-which is UNVERIFIED (revoke.md).
+refuses those certificates only once its sshd's `RevokedKeys` file holds
+the new KRL, and the drop-in in [host-setup.md](host-setup.md) sets no
+`RevokedKeys`. So in this version a host set up by hand enforces no
+revocation. Until the keyroster agent (03-05 to 03-07) sets `RevokedKeys`
+and applies the KRL, such a host refuses a revoked certificate only if
+the operator adds a `RevokedKeys` line and installs the KRL by hand,
+which is UNVERIFIED (revoke.md). Otherwise `revoke user` stops only new
+certificates there.
 
 **After every disable**, confirm it on the signer host
 as below. A compromised server can answer the install without forwarding

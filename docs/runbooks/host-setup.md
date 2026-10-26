@@ -268,10 +268,15 @@ only on the hosts that install the re-rendered file. To end a person's
 issued certificates on every host, run `keyroster revoke user NAME`
 ([revoke.md](revoke.md#4-revoke-a-user-keyroster-revoke-user)): it revokes
 every live certificate of NAME in the signer's records, disables NAME and
-revokes again. A host refuses those certificates once its sshd's
-`RevokedKeys` file holds the new KRL: a host whose keyroster agent applies
-the KRL (03-07) does so by itself; on a host set up with this runbook the
-KRL must be installed by hand, which is UNVERIFIED (revoke.md).
+revokes again. A host refuses those certificates only once its sshd's
+`RevokedKeys` file holds the new KRL, and the drop-in in this runbook sets
+no `RevokedKeys`. So in this version a host set up with this runbook
+enforces no revocation. Until the keyroster agent (03-05 to 03-07) sets
+`RevokedKeys` and applies the KRL, such a host refuses a revoked
+certificate only if the operator adds a `RevokedKeys` line and installs
+the KRL by hand, which is UNVERIFIED ([revoke.md](revoke.md)). Otherwise
+`keyroster revoke user` stops only new certificates there, and an issued
+one logs in until its ValidBefore.
 
 ## Windows hosts
 
