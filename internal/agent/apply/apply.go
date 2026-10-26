@@ -494,7 +494,13 @@ func (e *engine) forward(ctx context.Context) error {
 	e.report.BundleHeld = v.BundleHeld
 	if !v.Changed() {
 		e.report.NoOp = true
-		e.setVersions(v, nil)
+		// The KRL in force is current's, which a rollback or crash recovery
+		// may have kept above accepted/'s (PR #67 round-2 carry-over).
+		cur, curLink, err := e.readCurrent()
+		if err != nil || curLink.kind != linkAgent {
+			cur = nil
+		}
+		e.setVersions(v, cur)
 		return nil
 	}
 	g, err := e.render(v)

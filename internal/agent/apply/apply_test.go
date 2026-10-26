@@ -806,6 +806,28 @@ func TestApply(t *testing.T) {
 			}
 		})
 	}
+	t.Run("noop_reports_krl_in_force", func(t *testing.T) {
+		t.Parallel()
+		// PR #67 round-2 carry-over (c): after a rollback kept KRL 7 in
+		// current, a capture equal to accepted/ is a no-op; it reports the
+		// KRL version in force (current's), not accepted/'s.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.setStall(true)
+		h.publishKRL(7)
+		krl7 := h.f.krlVersion
+		if _, err := h.apply(); !errors.Is(err, ErrSelfTest) || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("the failed apply of KRL 7: %v", err)
+		}
+		h.sshd.setStall(false)
+		h.resetSpool()
+		h.state.KRLs = map[uint64]spool.KRLFiles{}
+		r, err := h.apply()
+		if err != nil || !r.NoOp || r.KRLVersion != krl7 {
+			t.Fatalf("no-op after the kept KRL: %+v, %v, want krl_version %d", r, err, krl7)
+		}
+	})
 	t.Run("recover_to_last_good_keeps_newer_krl", func(t *testing.T) {
 		t.Parallel()
 		// --recover-to-last-good from the generation a rollback left
