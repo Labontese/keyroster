@@ -1942,6 +1942,12 @@ func TestSelfTestLoopbackFamilies(t *testing.T) {
 	if err := run([]string{"[::]:" + port, "127.0.0.9:" + port}, unavailable(syscall.EADDRNOTAVAIL), false); !errors.Is(err, ErrSelfTest) {
 		t.Errorf("EADDRNOTAVAIL on an IPv4 loopback target: %v, want self_test_failed", err)
 	}
+	// PR #67 fix round 2: with 127.0.0.1 reachable, only the IPv4 rule
+	// fails this; code that skipped 127.0.0.9 as well would pass on
+	// 127.0.0.1.
+	if err := run([]string{"[::]:" + port, "0.0.0.0:" + port, "127.0.0.9:" + port}, unavailable(syscall.EADDRNOTAVAIL), false); !errors.Is(err, ErrSelfTest) || !strings.Contains(err.Error(), "127.0.0.9") {
+		t.Errorf("EADDRNOTAVAIL on 127.0.0.9 beside a reachable 127.0.0.1: %v, want self_test_failed on 127.0.0.9", err)
+	}
 	h.sshd.stop()
 	if err := run(both, unavailable(syscall.EADDRNOTAVAIL), false); !errors.Is(err, ErrSelfTest) {
 		t.Errorf("::1 unreachable and nothing on 127.0.0.1: %v, want self_test_failed", err)
