@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -123,7 +124,11 @@ func runMachineAdd(ctx context.Context, args []string, stdout, stderr io.Writer)
 }
 
 // runMachineRemove is keyroster machine remove NAME: removes the machine
-// entry, so the signer no longer renews its certificates (03-11).
+// entry, so the signer no longer renews its certificates (03-11). A role
+// that only this machine names and nobody grants falls back to the user
+// CA profile (directory.CheckPolicy); when it exceeds that, the refusal
+// names the role and the two ways out: add the replacement machine first
+// (key rotation), or bring the role within the user CA profile first.
 func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("machine remove", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -139,14 +144,36 @@ func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writ
 	if !directory.ValidUserName(name) {
 		return errHostName("machine", name)
 	}
-	return ef.edit(ctx, stdout, stderr, func(d *directory.Directory) error {
+	var orphans []string // roles that no user, group or other machine uses after the removal
+	err = ef.edit(ctx, stdout, stderr, func(d *directory.Directory) error {
 		i := slices.IndexFunc(d.Machines, func(m directory.Machine) bool { return m.Name == name })
 		if i < 0 {
 			return fmt.Errorf("there is no machine %s in the directory; nothing was signed", name)
 		}
+		roles := d.Machines[i].Roles
 		d.Machines = slices.Delete(d.Machines, i, i+1)
+		for _, r := range roles {
+			named := slices.ContainsFunc(d.Machines, func(m directory.Machine) bool { return slices.Contains(m.Roles, r) })
+			j := slices.IndexFunc(d.Roles, func(x directory.Role) bool { return x.Name == r })
+			if !named && j >= 0 && len(d.Roles[j].Users) == 0 && len(d.Roles[j].Groups) == 0 {
+				orphans = append(orphans, r)
+			}
+		}
 		return nil
 	})
+	if !errors.Is(err, directory.ErrPolicy) {
+		return err
+	}
+	// CheckPolicy stops at the first role it refuses and names it.
+	for _, r := range orphans {
+		if strings.Contains(err.Error(), "role "+r+": ") {
+			return fmt.Errorf("%w. Removing machine %s leaves role %s granted to no user, group or machine, so the user CA profile applies to it. "+
+				"To rotate the machine's key, add the new machine with that role first (keyroster machine add NEW --key FILE --role %s), then remove %s. "+
+				"To remove the machine for good, first bring the role within the user CA profile (keyroster role update %s --max-ttl D), then remove %s",
+				err, name, r, r, name, r, name)
+		}
+	}
+	return err
 }
 
 // runMachineList is keyroster machine list [--admin-key FP]: the machines

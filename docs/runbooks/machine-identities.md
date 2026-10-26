@@ -38,7 +38,8 @@ directory version, it carries the installation ID of the root-verified
 trust bundle (see [host-setup.md](host-setup.md#binding-an-existing-directory-to-the-installation)).
 
 `keyroster machine list` shows the machines of the installed directory, and
-`keyroster machine remove ci` removes one.
+`keyroster machine remove ci` removes one (see [below](#remove-a-machine-or-rotate-its-key)
+for a machine-only role above the user cap).
 
 ## The TTL rule
 
@@ -62,6 +63,35 @@ user cap (`keyroster role add deploy --max-ttl 1h`), add the machine that
 names it, then raise the role (`keyroster role update deploy --max-ttl 20h`).
 Granting that role to a user or a group afterwards is refused while it is
 above the user cap.
+
+## Remove a machine or rotate its key
+
+Removing the last machine that names a machine-only role leaves the role
+granted to nobody, so it falls back to the user CA cap. While the role is
+above that cap, `keyroster machine remove` is refused, signing nothing; the
+message names the role and both ways out:
+
+- **Rotate the key.** A machine's key cannot be changed in place
+  (`machine add` refuses a name that exists), so add the replacement under
+  a new name with the same roles first, then remove the old entry:
+
+  ```
+  keyroster machine add ci2 --key id_ci_new.pub --role deploy --max-ttl 20h
+  keyroster machine remove ci
+  ```
+
+- **Remove the machine for good.** Bring the role within the user cap
+  first (12h here stands for the user CA cap of your root-signed policy),
+  then remove the machine:
+
+  ```
+  keyroster role update deploy --max-ttl 12h
+  keyroster machine remove ci
+  ```
+
+Both sequences and the refusal run in CI
+(`TestMachineCommands/machine_remove_machine_only_role_above_user_cap`,
+03-04); UNVERIFIED on the homelab until 03-16.
 
 ## Renewal needs pop.machines
 

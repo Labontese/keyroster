@@ -84,6 +84,55 @@ func TestMachineCommands(t *testing.T) {
 			t.Fatalf("role grant deploy to alice at 20 h: exit %d, stderr %q", code, stderr)
 		}
 	})
+	t.Run("machine_remove_machine_only_role_above_user_cap", func(t *testing.T) {
+		// deploy is machine-only at 20 h. Removing the last machine that
+		// names it would put it under the 12 h user cap: refused, with the
+		// role named and the two ways out, both run here (pre-merge
+		// review, 03-04).
+		e := roleEnv(t, nil)
+		ciKey, _ := writeEntryKey(t, "ci")
+		for _, args := range [][]string{
+			{"role", "add", "deploy", "--max-ttl", "1h", "--yes"},
+			{"machine", "add", "ci", "--key", ciKey, "--role", "deploy", "--yes"},
+			{"role", "update", "deploy", "--max-ttl", "20h", "--yes"},
+		} {
+			if code, _, stderr := run(t, args...); code != 0 {
+				t.Fatalf("%v: %s", args, stderr)
+			}
+		}
+		// Key rotation: the new machine first, then the old one goes.
+		ci2Key, _ := writeEntryKey(t, "ci2")
+		if code, _, stderr := run(t, "machine", "add", "ci2", "--key", ci2Key, "--role", "deploy", "--yes"); code != 0 {
+			t.Fatalf("machine add ci2: %s", stderr)
+		}
+		if code, _, stderr := run(t, "machine", "remove", "ci", "--yes"); code != 0 {
+			t.Fatalf("machine remove ci after ci2 names deploy: exit %d, stderr %q", code, stderr)
+		}
+		// The last machine: refused, actionably.
+		check := unchanged(t, e)
+		code, _, stderr := run(t, "machine", "remove", "ci2", "--yes")
+		for _, want := range []string{
+			"role deploy: max_ttl_seconds 72000 is above the user CA cap 43200",
+			"Removing machine ci2 leaves role deploy granted to no user, group or machine",
+			"keyroster machine add NEW --key FILE --role deploy), then remove ci2",
+			"keyroster role update deploy --max-ttl D), then remove ci2",
+		} {
+			if code == 0 || !strings.Contains(stderr, want) {
+				t.Fatalf("machine remove ci2: exit %d, stderr %q; want %q", code, stderr, want)
+			}
+		}
+		check()
+		// Within the user cap first, then the removal goes through.
+		if code, _, stderr := run(t, "role", "update", "deploy", "--max-ttl", "12h", "--yes"); code != 0 {
+			t.Fatalf("role update deploy to 12 h: %s", stderr)
+		}
+		if code, _, stderr := run(t, "machine", "remove", "ci2", "--yes"); code != 0 {
+			t.Fatalf("machine remove ci2 with deploy within the user cap: exit %d, stderr %q", code, stderr)
+		}
+		if d := installedDir(t, e); len(d.Machines) != 0 || roleOf(t, d, "deploy").MaxTTLSeconds != 12*3600 {
+			t.Fatalf("installed machines %+v, deploy %+v", d.Machines, roleOf(t, d, "deploy"))
+		}
+	})
 	t.Run("machine_list_and_remove", func(t *testing.T) {
 		e := roleEnv(t, nil)
 		keyFile, _ := writeEntryKey(t, "ci")
