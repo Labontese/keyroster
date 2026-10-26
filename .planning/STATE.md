@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: 03-04 executed; PR open at the Task 4 merge gate
-last_updated: "2026-10-26T08:43:28.415Z"
+stopped_at: 03-05 executed; PR open at the Task 5 merge gate
+last_updated: "2026-10-26T13:56:04.327Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 1d78c41036bf7591093761e8e4b422e251face58
+state_head: 5046eb36253f14e089a3a0a9885ad5ec57b422f1
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 54
-  completed_plans: 40
+  completed_plans: 41
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 6 of 19
+Plan: 7 of 19
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -95,6 +95,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P03 | 78 min | 3 tasks | 32 files |
 | Phase 03 P03b | 67 min | 3 tasks | 19 files |
 | Phase 03 P04 | 62 min | 3 tasks | 38 files |
+| Phase 03 P05 | about 150 min | 3 tasks | 32 files |
 
 ## Accumulated Context
 
@@ -255,6 +256,8 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-04: every CLI directory edit copies the installation ID from the root-verified bundle; keyroster directory rebind binds an ID-less directory and refuses without a bundle ID, when already bound, and when bound to another installation
 - [Phase 03]: 03-04: a role is user-facing when its own users or groups list is non-empty; machine-only roles take the machine CA cap; mixed roles pass both caps and both profiles
 - [Phase 03]: 03-04: pop.hosts is one-way (trust.CheckPoPSuccessor in checkSuccessorChain, pop_hosts_removed); pop.machines stays freely changeable
+- [Phase 03]: 03-05: D-05 network answer loopback-only; the self-test dials only loopback addresses from sshd -T and stops once sshd proves a host key sshd -T names
+- [Phase 03]: 03-05: every move of current goes through Transition/swapCurrent (intermediate, LoginGraceTime + 5 s widening rule, swap_not_monotone); the agent never creates sshd_config.d (no_dropin_dir)
 
 ### Pending Todos
 
@@ -293,6 +296,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-26T08:43:27.937Z
-Stopped at: 03-04 executed; PR open at the Task 4 merge gate
+Last session: 2026-10-26T13:56:03.881Z
+Stopped at: 03-05 executed; PR open at the Task 5 merge gate
 Resume file: None

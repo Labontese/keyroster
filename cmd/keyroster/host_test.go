@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -300,6 +301,10 @@ func installedDirOf(t *testing.T, doc []byte) *directory.Directory {
 // directory.CheckStoredInstallation). A directory bound to another
 // installation, or to one under a bundle without an ID, is refused with
 // nothing printed; an ID-less directory under a bundle with an ID is read.
+// directory sign and directory install read it too, as the base of a
+// proposal (PR #65 fix check): each gets a proposal bound to the bundle's
+// own installation, so the only refusal left is the served directory's,
+// and neither asks the agent nor posts anything.
 func TestReadCommandsCheckInstallation(t *testing.T) {
 	const other = "ffffffffffffffffffffffffffffffff"
 	reads := [][]string{
@@ -308,6 +313,17 @@ func TestReadCommandsCheckInstallation(t *testing.T) {
 		{"host", "list"},
 		{"machine", "list"},
 		{"host", "principals", "web", "root"},
+	}
+	// proposalReads are directory sign and directory install of a proposal
+	// that follows the served directory and names the bundle's ID.
+	proposalReads := func(t *testing.T, e *dirEnv) [][]string {
+		t.Helper()
+		served, _ := e.installed()
+		doc := buildDir(t, served, boundTo(e.bundle.InstallationID, func(d *directory.Directory) {
+			d.Groups = append(d.Groups, directory.Group{Name: "zed", Members: []string{}})
+		}))
+		dir := writeProposalDir(t, doc, e.sign(t, doc, 0))
+		return [][]string{{"directory", "sign", dir, "--yes"}, {"directory", "install", dir}}
 	}
 	bound := func(t *testing.T, e *dirEnv, id string) {
 		t.Helper()
@@ -318,34 +334,44 @@ func TestReadCommandsCheckInstallation(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name  string
-		setup func(t *testing.T)
+		setup func(t *testing.T) *dirEnv
 		want  string
 	}{
-		{"other_installation", func(t *testing.T) {
+		{"other_installation", func(t *testing.T) *dirEnv {
 			e := newDirEnv(t, 1, 1)
 			bound(t, e, other)
+			return e
 		}, "bound to installation " + other + ", but the root-verified trust bundle names "},
-		{"bundle_without_id", func(t *testing.T) {
+		{"bundle_without_id", func(t *testing.T) *dirEnv {
 			e := newDirEnv(t, 1, 1)
 			bound(t, e, e.bundle.InstallationID)
 			e.resignBundle(t, func(b *trust.Bundle) { b.InstallationID = "" })
+			return e
 		}, "but the root-verified trust bundle names none"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.setup(t)
-			for _, args := range reads {
+			e := tc.setup(t)
+			for _, args := range append(slices.Clone(reads), proposalReads(t, e)...) {
 				code, stdout, stderr := run(t, args...)
 				if code == 0 || stdout != "" || !strings.Contains(stderr, tc.want) || !strings.Contains(stderr, "Refusing to use it") {
 					t.Errorf("%s: exit %d, stdout %q, stderr %q; want a refusal naming the installations and nothing printed", strings.Join(args, " "), code, stdout, stderr)
 				}
 			}
+			requireNotSigned(t, e, 0)
 		})
 	}
 	t.Run("id_less_directory_read", func(t *testing.T) {
-		roleEnv(t, nil) // no installation ID, under a bundle with one
+		e := roleEnv(t, nil) // no installation ID, under a bundle with one
 		for _, args := range reads {
 			if code, stdout, stderr := run(t, args...); code != 0 || stdout == "" {
 				t.Fatalf("%s: exit %d, stdout %q, stderr %q; want the lenient D-04 answer (read)", strings.Join(args, " "), code, stdout, stderr)
+			}
+		}
+		// The proposal commands get past the base check; whatever they
+		// answer afterwards is not this test's concern.
+		for _, args := range proposalReads(t, e) {
+			if _, _, stderr := run(t, args...); strings.Contains(stderr, "Refusing to use it") {
+				t.Fatalf("%s: stderr %q; want the lenient D-04 answer (the served base is read)", strings.Join(args, " "), stderr)
 			}
 		}
 	})

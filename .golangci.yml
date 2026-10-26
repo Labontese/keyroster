@@ -68,12 +68,44 @@ linters:
               desc: no templates in the signer (KEY-01)
             - pkg: github.com/go-webauthn
               desc: "D-17: the signer verifies assertions with internal/webauthn only"
+        # D-05 (owner's answer: loopback-only): the root applier has no HTTP,
+        # TLS or RPC code; its only network use is the loopback self-test.
+        # scripts/dep-firewall.sh checks the transitive graph.
+        agent-apply-no-http:
+          list-mode: lax
+          files:
+            - "**/internal/agent/**"
+            - "**/cmd/keyroster-agent/**"
+          deny:
+            - pkg: net/http
+              desc: the root applier has no HTTP code (D-05, loopback-only)
+            - pkg: crypto/tls
+              desc: the root applier has no TLS code (D-05, loopback-only)
+            - pkg: net/rpc
+              desc: the root applier has no RPC code (D-05, loopback-only)
+        # PR #67 review: os/exec is imported only by internal/agent/execsite,
+        # under any name; TestPaths pins its constructors and their callers,
+        # and capslock-check confines EXEC to it.
+        agent-exec-only-in-execsite:
+          list-mode: lax
+          files:
+            - "**/internal/agent/**"
+            - "**/cmd/keyroster-agent/**"
+            - "!**/internal/agent/execsite/**"
+            - "!$test"
+          deny:
+            - pkg: os/exec
+              desc: the agent runs programs only through internal/agent/execsite (paths.ExecSites)
     forbidigo:
       forbid:
         - pattern: ^print(ln)?$
           msg: write to an io.Writer instead of the print builtins
         - pattern: '\.SignCert\b'
           msg: certificates are signed only by internal/cert.Build (CA-06, CA-07)
+        - pattern: 'exec\.Command(Context)?\b'
+          msg: programs are run only through internal/agent/execsite (paths.ExecSites) and the reviewed exceptions below
+        - pattern: '^(os\.StartProcess|syscall\.(Exec|ForkExec|StartProcess)|unix\.Exec)$'
+          msg: programs are run only through internal/agent/execsite (paths.ExecSites)
   exclusions:
     rules:
       # internal/cert.Build is the single SignCert call site.
@@ -81,3 +113,22 @@ linters:
         linters:
           - forbidigo
         text: SignCert
+      # The exec sites: the agent's (internal/agent/execsite, pinned by
+      # internal/agent/paths TestPaths), the CLI opening a browser for passkey login, the
+      # Windows agent check, and tests, which run go and OpenSSH tools.
+      - path: ^internal/agent/execsite/
+        linters:
+          - forbidigo
+        text: exec\.Command
+      - path: ^cmd/keyroster/browser_(darwin|linux|windows)\.go$
+        linters:
+          - forbidigo
+        text: exec\.Command
+      - path: ^internal/winagent/ensure_windows\.go$
+        linters:
+          - forbidigo
+        text: exec\.Command
+      - path: _test\.go$
+        linters:
+          - forbidigo
+        text: exec\.Command

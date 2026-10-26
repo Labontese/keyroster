@@ -48,6 +48,10 @@ type bootstrapOpts struct {
 	// --webauthn-origin); empty means a policy without one.
 	WebAuthnRPID    string
 	WebAuthnOrigins []string
+	// PoPHosts sets pop.hosts in the genesis policy before the root signs
+	// it (the policy a host agent needs, 03-05/03-06); genesis-policy
+	// itself has no such flag.
+	PoPHosts bool
 }
 
 // signerEnv is a running keyroster-signer under a root-signed genesis
@@ -204,6 +208,24 @@ func (e *signerEnv) signGenesis(t *testing.T, opts bootstrapOpts) {
 	}
 	if code, out := keyrosterWithAgent(t, "", args...); code != 0 {
 		t.Fatalf("root genesis-policy exited %d:\n%s", code, out)
+	}
+	if opts.PoPHosts {
+		data, err := os.ReadFile(policy) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := trust.ParsePolicy(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.PoP = &trust.PoPPolicy{Hosts: true}
+		doc, err := p.Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(policy, doc, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	rootSock, rootFP, custody := opts.RootAgentSocket, opts.RootFingerprint, opts.RootCustody

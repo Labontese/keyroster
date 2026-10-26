@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // TestMachineCommands covers keyroster machine add, remove and list
@@ -131,6 +133,69 @@ func TestMachineCommands(t *testing.T) {
 		}
 		if d := installedDir(t, e); len(d.Machines) != 0 || roleOf(t, d, "deploy").MaxTTLSeconds != 12*3600 {
 			t.Fatalf("installed machines %+v, deploy %+v", d.Machines, roleOf(t, d, "deploy"))
+		}
+	})
+	t.Run("machine_remove_hint_names_the_actual_remedy", func(t *testing.T) {
+		// A machine-only role may carry an extension the machine CA
+		// profile allows and the user CA profile does not. Removing its
+		// last machine is refused on that extension, and --max-ttl alone
+		// would loop: the hint names the extension fix, and both fixes
+		// when the role also exceeds the user cap (PR #65 fix check).
+		for _, tc := range []struct {
+			name, ttl string
+			exts      []string
+			want      []string
+			fix       []string
+		}{
+			{"extension_only", "1h", []string{"permit-port-forwarding"},
+				[]string{`role deploy: extension "permit-port-forwarding" is not allowed by the user CA profile`, "keyroster role update deploy --no-extensions), then remove ci"},
+				[]string{"role", "update", "deploy", "--no-extensions", "--yes"}},
+			{"extension_kept_by_user_profile", "1h", []string{"permit-port-forwarding", "permit-pty"},
+				[]string{"keyroster role update deploy --extension permit-pty), then remove ci"},
+				[]string{"role", "update", "deploy", "--extension", "permit-pty", "--yes"}},
+			{"ttl_and_extension", "20h", []string{"permit-port-forwarding"},
+				[]string{"role deploy: max_ttl_seconds 72000 is above the user CA cap 43200", "keyroster role update deploy --max-ttl D --no-extensions), then remove ci"},
+				[]string{"role", "update", "deploy", "--max-ttl", "12h", "--no-extensions", "--yes"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				e := newDirEnvPolicy(t, 1, 1, func(p *trust.Policy) {
+					for i := range p.CAProfiles {
+						if p.CAProfiles[i].Role == trust.RoleMachine {
+							p.CAProfiles[i].AllowedExtensions = []string{"permit-port-forwarding"}
+						}
+					}
+				})
+				e.installDirect(t, buildDir(t, nil, roleBase(t, nil)))
+				ciKey, _ := writeEntryKey(t, "ci")
+				update := []string{"role", "update", "deploy", "--max-ttl", tc.ttl, "--yes"}
+				for _, x := range tc.exts {
+					update = append(update, "--extension", x)
+				}
+				for _, args := range [][]string{
+					{"role", "add", "deploy", "--max-ttl", "1h", "--yes"},
+					{"machine", "add", "ci", "--key", ciKey, "--role", "deploy", "--yes"},
+					update,
+				} {
+					if code, _, stderr := run(t, args...); code != 0 {
+						t.Fatalf("%v: %s", args, stderr)
+					}
+				}
+				check := unchanged(t, e)
+				code, _, stderr := run(t, "machine", "remove", "ci", "--yes")
+				for _, want := range tc.want {
+					if code == 0 || !strings.Contains(stderr, want) {
+						t.Fatalf("machine remove ci: exit %d, stderr %q; want %q", code, stderr, want)
+					}
+				}
+				check()
+				// Following the hint once is enough.
+				if code, _, stderr := run(t, tc.fix...); code != 0 {
+					t.Fatalf("%v: %s", tc.fix, stderr)
+				}
+				if code, _, stderr := run(t, "machine", "remove", "ci", "--yes"); code != 0 {
+					t.Fatalf("machine remove ci after %v: exit %d, stderr %q", tc.fix, code, stderr)
+				}
+			})
 		}
 	})
 	t.Run("machine_list_and_remove", func(t *testing.T) {
