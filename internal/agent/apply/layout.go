@@ -68,6 +68,20 @@ func (e *engine) mkdir(path string, mode os.FileMode) error {
 	return nil
 }
 
+// mkdirMode is mkdir followed by a chmod to mode, for a directory that
+// must have exactly mode whatever the umask, and whether it was created
+// now or before (PR #67 review: sshd opens AuthorizedPrincipalsFile as the
+// target user, so the keyroster tree must be traversable by everyone).
+func (e *engine) mkdirMode(path string, mode os.FileMode) error {
+	if err := paths.Allowed(e.l, path); err != nil {
+		return err
+	}
+	if err := os.Mkdir(path, mode); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return os.Chmod(path, mode) //nolint:gosec // G302: the keyroster tree is world-traversable by design; only root writes it
+}
+
 // writeFile writes data to dir/name atomically (spool.WriteFileAt), after
 // paths.Allowed: dir is opened with O_DIRECTORY|O_NOFOLLOW and the file
 // created relative to it.

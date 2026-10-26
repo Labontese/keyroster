@@ -55,10 +55,11 @@ func recordName(n uint64) string { return strconv.FormatUint(n, 10) + ".json" }
 
 // installGeneration writes g as generation g.N: a temporary directory in
 // gen/ (0755, files 0644), the record, then rename to gen/<N> and an
-// fsync of gen/.
+// fsync of gen/. The keyroster tree and gen/ are set to 0755 whatever the
+// umask (mkdirMode).
 func (e *engine) installGeneration(g *Generation) error {
 	for _, d := range []string{e.l.KeyrosterDir(), e.l.GenDir()} {
-		if err := e.mkdir(d, 0o755); err != nil {
+		if err := e.mkdirMode(d, 0o755); err != nil {
 			return err
 		}
 	}
@@ -104,7 +105,9 @@ func (e *engine) installGeneration(g *Generation) error {
 }
 
 // chmodDirs sets 0755 on a new generation's directories, whatever the
-// umask made of them: sshd reads them as root, users never write them.
+// umask made of them: sshd reads the CA file and the KRL as root but opens
+// AuthorizedPrincipalsFile as the target user, so every user must be able
+// to traverse them; only root writes them.
 func (e *engine) chmodDirs(root string) error {
 	for _, d := range []string{root, filepath.Join(root, PrincipalsDir)} {
 		if err := paths.Allowed(e.l, d); err != nil {

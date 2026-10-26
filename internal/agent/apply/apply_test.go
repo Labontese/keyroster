@@ -1342,3 +1342,34 @@ func copyGen(t *testing.T, from string, edit func(dir string)) string {
 	edit(dir)
 	return dir
 }
+
+// TestGenerationModesUnderUmask (PR #67 review): sshd opens the
+// AuthorizedPrincipalsFile as the target user, so the keyroster tree must
+// be traversable and its files readable by everyone whatever the umask of
+// the process that runs the applier. Not parallel: the umask is
+// process-wide.
+func TestGenerationModesUnderUmask(t *testing.T) {
+	h := newTestHost(t, newFixture(t))
+	old := unix.Umask(0o077)
+	defer unix.Umask(old)
+	h.installed("role:ops")
+	gen := h.l.Gen(h.current())
+	for path, want := range map[string]os.FileMode{
+		h.l.KeyrosterDir():                0o755,
+		h.l.GenDir():                      0o755,
+		gen:                               0o755,
+		filepath.Join(gen, PrincipalsDir): 0o755,
+		filepath.Join(gen, PrincipalsDir, "deploy"): 0o644,
+		filepath.Join(gen, CAFile):                  0o644,
+		filepath.Join(gen, KRLFile):                 0o644,
+		h.l.DropIn():                                0o644,
+	} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != want {
+			t.Errorf("%s has mode %04o under umask 077, want %04o", path, got, want)
+		}
+	}
+}
