@@ -343,6 +343,24 @@ func TestApply(t *testing.T) {
 			t.Fatalf("a directory for another installation: %v, want directory_installation and nothing installed", err)
 		}
 	})
+	t.Run("krl_header_version_differs_from_manifest_refused", func(t *testing.T) {
+		t.Parallel()
+		// PR #67 round-2 carry-over (a): the manifest signs the KRL's bytes
+		// and names version N, but the KRL's own header says another
+		// version. Above N it would set a floor no later KRL passes; below
+		// N an older list could replace a newer one. Refused either way.
+		for _, delta := range []int64{+1000, -1} {
+			h := newTestHost(t, newFixture(t))
+			h.installed("role:ops")
+			cur := h.current()
+			header := uint64(int64(h.f.krlVersion+1) + delta) //nolint:gosec // G115: a test version
+			v, files := h.f.krlWithHeader([]uint64{7}, nil, "", header)
+			h.state.KRLs = map[uint64]spool.KRLFiles{v: files}
+			if _, err := h.apply(); !errors.Is(err, state.ErrKRLHeader) || h.current() != cur || h.krlRevokes(h.l.Current(), 7) {
+				t.Fatalf("header %d, manifest %d: %v, want krl_header_version_mismatch and nothing installed", header, v, err)
+			}
+		}
+	})
 	t.Run("krl_other_installation_refused", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))

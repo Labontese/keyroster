@@ -57,6 +57,11 @@ var (
 	ErrDirInstall     = errors.New("directory_installation")
 	ErrKRLOlder       = errors.New("krl_older")
 	ErrKRL            = errors.New("krl_not_verified")
+	// ErrKRLHeader is a KRL whose header krl_version differs from the
+	// KRLVersion its signed manifest names (PR #67 round-2 carry-over): the
+	// agent orders KRLs by the header version (the KRL floor, RollbackTarget),
+	// the manifest by its own, so the two must be one number.
+	ErrKRLHeader = errors.New("krl_header_version_mismatch")
 )
 
 // Pins are the applier's trust anchors (pins.json, root 0600): the

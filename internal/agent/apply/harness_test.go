@@ -205,15 +205,25 @@ func (f *fixture) directory(prev []byte, s dirSpec) spool.Doc {
 // testInstallation).
 func (f *fixture) krl(serials []uint64, keys []ssh.PublicKey, id string) (uint64, spool.KRLFiles) {
 	f.t.Helper()
+	return f.krlWithHeader(serials, keys, id, 0)
+}
+
+// krlWithHeader is krl with the KRL's own header krl_version set to header
+// instead of the manifest's version (0: the same).
+func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id string, header uint64) (uint64, spool.KRLFiles) {
+	f.t.Helper()
 	if id == "" {
 		id = testInstallation
 	}
 	f.krlVersion++
+	if header == 0 {
+		header = f.krlVersion
+	}
 	set := krl.Set{Keys: keys}
 	if len(serials) > 0 {
 		set.Certs = []krl.CertSection{{CAKey: f.user.PublicKey(), Serials: serials}}
 	}
-	b, err := krl.Encode(set, f.krlVersion, time.Unix(int64(f.krlVersion), 0)) //nolint:gosec // G115: a test version
+	b, err := krl.Encode(set, header, time.Unix(int64(f.krlVersion), 0)) //nolint:gosec // G115: a test version
 	if err != nil {
 		f.t.Fatal(err)
 	}
