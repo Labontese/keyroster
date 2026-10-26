@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -193,7 +194,7 @@ func CheckReload(s string) error {
 
 // reload makes sshd re-read its configuration by the configured strategy
 // (a closed set): signal sends SIGHUP to the pid in the PidFile sshd -T
-// names and runs nothing; systemd:<unit> runs systemctl reload <unit>;
+// names, when that process runs the configured sshd, and runs nothing; systemd:<unit> runs systemctl reload <unit>;
 // openrc runs rc-service sshd reload.
 func (e *engine) reload(ctx context.Context, dump Dump) error {
 	if err := CheckReload(e.cfg.Reload); err != nil {
@@ -201,7 +202,7 @@ func (e *engine) reload(ctx context.Context, dump Dump) error {
 	}
 	switch e.cfg.Reload {
 	case "signal":
-		return reloadSignal(dump)
+		return reloadSignal(e.cfg.SSHD, dump)
 	case "openrc":
 		return e.reloadOpenRC(ctx)
 	default:
@@ -209,8 +210,12 @@ func (e *engine) reload(ctx context.Context, dump Dump) error {
 	}
 }
 
-// reloadSignal sends SIGHUP to sshd's listener, read from its PidFile.
-func reloadSignal(dump Dump) error {
+// reloadSignal sends SIGHUP to sshd's listener, read from its PidFile,
+// and only when that process runs the configured sshd binary (PR #67
+// review: a stale PidFile can name a reused PID). The process is held by
+// a pidfd from before the check to the signal, so a PID reused in
+// between is never signalled.
+func reloadSignal(sshd string, dump Dump) error {
 	pidFile := dump.One("pidfile")
 	if pidFile == "" || pidFile == "none" {
 		return fmt.Errorf("%w: sshd -T names no pidfile", ErrReload)
@@ -228,10 +233,38 @@ func reloadSignal(dump Dump) error {
 	if err != nil || pid <= 1 {
 		return fmt.Errorf("%w: %s does not hold a process ID", ErrReload, pidFile)
 	}
-	if err := unix.Kill(pid, unix.SIGHUP); err != nil {
+	pidfd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return fmt.Errorf("%w: process %d named by %s: %w", ErrReload, pid, pidFile, err)
+	}
+	defer func() { _ = unix.Close(pidfd) }()
+	if err := runsBinary(pid, sshd); err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrReload, pidFile, err)
+	}
+	if err := unix.PidfdSendSignal(pidfd, unix.SIGHUP, nil, 0); err != nil {
 		return fmt.Errorf("%w: SIGHUP to %d: %w", ErrReload, pid, err)
 	}
 	return nil
+}
+
+// runsBinary checks that process pid runs the binary at path: its
+// /proc/<pid>/exe is that file, or, after an upgrade replaced the file
+// under the running process, names path marked " (deleted)".
+func runsBinary(pid int, path string) error {
+	exe := "/proc/" + strconv.Itoa(pid) + "/exe"
+	if want, err := os.Stat(path); err == nil {
+		if got, err := os.Stat(exe); err == nil && os.SameFile(want, got) {
+			return nil
+		}
+	}
+	target, err := os.Readlink(exe)
+	if err != nil {
+		return fmt.Errorf("process %d: %w", pid, err)
+	}
+	if strings.TrimSuffix(target, " (deleted)") == filepath.Clean(path) {
+		return nil
+	}
+	return fmt.Errorf("process %d runs %s, not %s", pid, target, path)
 }
 
 // Dump is sshd -T output: lowercase keyword to its values, one per line

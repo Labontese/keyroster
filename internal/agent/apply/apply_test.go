@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -1478,5 +1479,90 @@ func TestSelfTestIPv6DisabledHost(t *testing.T) {
 	e.ipv6Off = func() bool { return false } // dial ::1 for real: the kernel answers EADDRNOTAVAIL
 	if err := e.selfTest(context.Background(), ParseDump([]byte("listenaddress [::]:"+port+"\nlistenaddress 0.0.0.0:"+port+"\n")), []ssh.PublicKey{h.sshd.pub}); err != nil {
 		t.Fatalf("real dial with IPv6 disabled on lo: %v", err)
+	}
+}
+
+// TestReloadSignal (PR #67 review): the signal strategy sends SIGHUP only
+// to a process that runs the configured sshd binary; a PidFile naming
+// another process (stale after sshd died and its PID was reused) is
+// refused and that process is left alone.
+func TestReloadSignal(t *testing.T) {
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep binary")
+	}
+	dir := t.TempDir()
+	sshd := filepath.Join(dir, "sshd")
+	copyBin := func() {
+		b, err := os.ReadFile(sleep) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Remove(sshd)
+		if err := os.WriteFile(sshd, b, 0o755); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+	}
+	copyBin()
+	pidFile := filepath.Join(dir, "sshd.pid")
+	dump := ParseDump([]byte("pidfile " + pidFile + "\n"))
+	start := func(bin string) (*exec.Cmd, chan error) {
+		c := exec.Command(bin, "30") //nolint:gosec // test fixture
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- c.Wait() }()
+		t.Cleanup(func() { _ = c.Process.Kill() })
+		writeFile(t, pidFile, []byte(strconv.Itoa(c.Process.Pid)+"\n"))
+		return c, done
+	}
+	hungUp := func(done chan error) bool {
+		select {
+		case err := <-done:
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGHUP {
+					return true
+				}
+			}
+			t.Fatalf("the process ended otherwise: %v", err)
+		case <-time.After(500 * time.Millisecond):
+		}
+		return false
+	}
+
+	_, done := start(sleep)
+	if err := reloadSignal(sshd, dump); !errors.Is(err, ErrReload) {
+		t.Errorf("a PidFile naming a process that is not %s: %v, want reload_failed", sshd, err)
+	}
+	if hungUp(done) {
+		t.Error("the process that is not sshd got SIGHUP")
+	}
+
+	_, done = start(sshd)
+	if err := reloadSignal(sshd, dump); err != nil {
+		t.Errorf("the configured sshd: %v", err)
+	}
+	if !hungUp(done) {
+		t.Error("sshd did not get SIGHUP")
+	}
+
+	// An upgrade replaced the binary under a running sshd: /proc/<pid>/exe
+	// names the old file, "(deleted)", at the configured path.
+	_, done = start(sshd)
+	copyBin()
+	if err := reloadSignal(sshd, dump); err != nil {
+		t.Errorf("sshd running a replaced binary: %v", err)
+	}
+	if !hungUp(done) {
+		t.Error("sshd running a replaced binary did not get SIGHUP")
+	}
+
+	c, done := start(sshd)
+	_ = c.Process.Kill()
+	<-done
+	if err := reloadSignal(sshd, dump); !errors.Is(err, ErrReload) {
+		t.Errorf("a PidFile naming a process that has exited: %v, want reload_failed", err)
 	}
 }
