@@ -402,6 +402,15 @@ None.
   - `keyroster directory rebind` is in host-setup.md, and `keyroster machine add` in machine-identities.md.
   - The todo is in completed/ and absent from pending/.
 
+## Pre-merge review fixes
+
+Findings of the PR #65 pre-merge review (Claude lenses plus Codex, verified). Each test was shown to fail with the fix disabled and to pass with it restored.
+
+- **MEDIUM, read paths accept another installation's directory** (810be33): `fetchVerifiedDirectory` applies `directory.CheckStoredInstallation`, the signer's rule for an installed directory, so every verified read and edit refuses it; `checkBaseInstallation` is folded in. Test `TestReadCommandsCheckInstallation`. Proof: with the check disabled, all 10 command x case runs fail (`directory show`, `user list`, `host list`, `machine list`, `host principals`, each with a foreign ID and with an ID under a bundle that has none). The ID-less control passes either way.
+- **MEDIUM, `directory sign` co-signs a foreign or ID-less proposal** (d8bb572): the strict `directory.CheckInstallation` runs before the agent is asked. Test `TestDirectorySignInstallation`. Proof: with the check disabled, the `other_installation` and `no_installation` subtests fail with exit 0 and a signature. The sign fixtures are now bound to the bundle's ID (`boundTo`).
+- **LOW, inet_aton spellings pass as DNS names** (41cf445): `CheckHostPrincipal` refuses a name whose labels are all numbers (decimal, octal, 0x hex). Test `TestHostPrincipalSpelling`, which adds 7 refused cases and 1 accepted case (`0xdead.example`). Proof: with the check disabled, 8 cases fail. The hex spellings are accepted, and the rest are refused without the inet_aton reason.
+- **LOW, `machine remove` refused for a machine-only role above the user cap** (7c7ef8c): the refusal stays (no cap loosened). It now names the role and both ways out, and the runbook gains a section on removal and rotation. Test `TestMachineCommands/machine_remove_machine_only_role_above_user_cap`. Proof: with the hint disabled, the test fails on the message. The rotation leg (add the new machine, then remove the old) passed before the fix too.
+
 ---
 *Phase: 03-linux-agent-and-revocation*
 *Completed: 2026-10-26*
