@@ -1822,3 +1822,103 @@ func TestRootSignAccumulates(t *testing.T) {
 		}
 	})
 }
+
+// TestRootSuccessorPolicyPoP (owner decision 2026-10-24): successor-policy
+// --pop-hosts and --pop-machines start from the previous policy's pop, set
+// only the switches given, print the change and, whenever the successor's
+// pop.hosts is true, the one-way note; a request that changes nothing is
+// refused.
+func TestRootSuccessorPolicyPoP(t *testing.T) {
+	dir := t.TempDir()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(priv.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := filepath.Join(dir, "alice.pub")
+	writeTestFile(t, admin, ssh.MarshalAuthorizedKey(pub))
+	plain := filepath.Join(dir, "plain.json")
+	if code, _, stderr := run(t, "root", "genesis-policy", "--admin", "alice="+admin, "--webauthn-rp-id", "keyroster.example.org", "--out", plain); code != 0 {
+		t.Fatalf("genesis-policy exited %d: %s", code, stderr)
+	}
+	successor := func(t *testing.T, name string, extra ...string) (int, string, string, *trust.Policy) {
+		t.Helper()
+		out := filepath.Join(dir, name)
+		code, stdout, stderr := run(t, append([]string{"root", "successor-policy", "--out", out}, extra...)...)
+		if code != 0 {
+			return code, stdout, stderr, nil
+		}
+		p, err := trust.ParsePolicy(readTestFile(t, out))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return code, stdout, stderr, p
+	}
+	const note = "note: pop.hosts cannot be removed once set (pop_hosts_removed)"
+
+	t.Run("successor_policy_pop_hosts_note", func(t *testing.T) {
+		code, stdout, stderr, p := successor(t, "hosts.json", "--prev", plain, "--pop-hosts")
+		if code != 0 || p.PoP == nil || !p.PoP.Hosts || p.PoP.Machines || p.Version != 2 {
+			t.Fatalf("exit %d, stderr %q, pop %+v", code, stderr, p)
+		}
+		if !strings.Contains(stdout, "pop: (none) -> hosts=true machines=false") || !strings.Contains(stderr, note) {
+			t.Fatalf("change or note missing:\nstdout %s\nstderr %s", stdout, stderr)
+		}
+		if strings.Contains(stdout, "rp_id:") || strings.Contains(stderr, "rp_id is a one-way setting") {
+			t.Fatalf("an RP change is reported though the RP was not changed:\nstdout %s\nstderr %s", stdout, stderr)
+		}
+		if p.WebAuthn == nil || p.WebAuthn.RPID != "keyroster.example.org" {
+			t.Fatalf("the RP was not carried over: %+v", p.WebAuthn)
+		}
+	})
+	t.Run("successor_policy_keeps_pop_hosts", func(t *testing.T) {
+		code, stdout, stderr, p := successor(t, "both.json", "--prev", filepath.Join(dir, "hosts.json"), "--pop-machines")
+		if code != 0 || p.PoP == nil || !p.PoP.Hosts || !p.PoP.Machines || p.Version != 3 {
+			t.Fatalf("exit %d, stderr %q, pop %+v", code, stderr, p)
+		}
+		if !strings.Contains(stdout, "pop: hosts=true machines=false -> hosts=true machines=true") || !strings.Contains(stderr, note) {
+			t.Fatalf("change or note missing:\nstdout %s\nstderr %s", stdout, stderr)
+		}
+	})
+	t.Run("successor_policy_machines_only_no_note", func(t *testing.T) {
+		code, _, stderr, p := successor(t, "machines.json", "--prev", plain, "--pop-machines")
+		if code != 0 || p.PoP == nil || p.PoP.Hosts || !p.PoP.Machines {
+			t.Fatalf("exit %d, stderr %q, pop %+v", code, stderr, p)
+		}
+		if strings.Contains(stderr, note) {
+			t.Fatalf("the pop.hosts note is printed although pop.hosts is false:\n%s", stderr)
+		}
+	})
+	t.Run("successor_policy_pop_noop_refused", func(t *testing.T) {
+		code, _, stderr, _ := successor(t, "noop.json", "--prev", filepath.Join(dir, "hosts.json"), "--pop-hosts")
+		if code == 0 || !strings.Contains(stderr, "nothing to change") {
+			t.Fatalf("a successor that changes nothing: exit %d, stderr %q", code, stderr)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "noop.json")); !os.IsNotExist(err) {
+			t.Fatal("noop.json was written")
+		}
+		code, _, stderr, _ = successor(t, "noop-rp.json", "--prev", plain, "--webauthn-rp-id", "keyroster.example.org")
+		if code == 0 || !strings.Contains(stderr, "nothing to change") {
+			t.Fatalf("an unchanged RP: exit %d, stderr %q", code, stderr)
+		}
+	})
+	t.Run("successor_policy_rp_and_pop", func(t *testing.T) {
+		code, stdout, stderr, p := successor(t, "rp-pop.json", "--prev", plain, "--webauthn-rp-id", "login.example.org", "--pop-hosts")
+		if code != 0 || p.WebAuthn.RPID != "login.example.org" || p.PoP == nil || !p.PoP.Hosts {
+			t.Fatalf("exit %d, stderr %q, policy %+v", code, stderr, p)
+		}
+		if !strings.Contains(stdout, "rp_id:   keyroster.example.org -> login.example.org") || !strings.Contains(stdout, "pop: (none) -> hosts=true") ||
+			!strings.Contains(stderr, "rp_id is a one-way setting") || !strings.Contains(stderr, note) {
+			t.Fatalf("output:\nstdout %s\nstderr %s", stdout, stderr)
+		}
+	})
+	t.Run("successor_policy_origin_without_rp_refused", func(t *testing.T) {
+		code, _, stderr, _ := successor(t, "origin.json", "--prev", plain, "--pop-hosts", "--webauthn-origin", "https://x.example.org")
+		if code == 0 || !strings.Contains(stderr, "--webauthn-origin needs --webauthn-rp-id") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+}

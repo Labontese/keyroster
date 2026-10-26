@@ -144,6 +144,9 @@ type dirEnv struct {
 	// for its ops key (signs KRL manifests).
 	bundle *trust.Bundle
 	ops    ssh.Signer
+	// root is the genesis root's private key, for re-signing the bundle
+	// (resignBundle).
+	root ed25519.PrivateKey
 
 	mu       sync.Mutex
 	custody  string // the Keyroster-Custody header of every answer
@@ -207,6 +210,7 @@ func newDirEnvPolicy(t *testing.T, admins int, quorum int, edit func(p *trust.Po
 		}
 		writeTestFile(t, g.policy, doc)
 	}
+	e.root = g.rootKeys[0]
 	useKeyring(t, g.rootKeys...)
 	typeHashPrefix(t, g.out)
 	if code, _, stderr := g.sign(t, "1", 0); code != 0 {

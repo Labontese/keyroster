@@ -14,9 +14,16 @@ import (
 func FuzzParseDirectory(f *testing.F) {
 	valid := mustCanonical(f, fixture(f))
 	f.Add(valid)
-	if golden, err := os.ReadFile(filepath.Join(vectorDir, "directory_v1.json")); err == nil { //nolint:gosec // G304: fixed test vector path
-		f.Add(golden)
+	for _, name := range []string{"directory_v1.json", "directory_hosts_v1.json"} {
+		if golden, err := os.ReadFile(filepath.Join(vectorDir, name)); err == nil { //nolint:gosec // G304: fixed test vector path
+			f.Add(golden)
+		}
 	}
+	hosts := mustCanonical(f, hostsFixture(f))
+	f.Add(hosts)
+	f.Add(bytes.Replace(hosts, []byte(`"web1.lab.example"`), []byte(`"WEB1.lab.example"`), 1))
+	f.Add(bytes.Replace(hosts, []byte(`"principals":["web1",`), []byte(`"principals":["2001:db8::1",`), 1))
+	f.Add(bytes.Replace(hosts, []byte(`,"machines":`), []byte(`,"machines":[],"x":`), 1))
 	f.Add(append([]byte("{ "), valid[1:]...))
 	f.Add(append([]byte(`{"comment":"x",`), valid[1:]...))
 	f.Add(bytes.Replace(valid, []byte(`"version":1`), []byte(`"version":0`), 1))
