@@ -128,8 +128,9 @@ func TestAuditLoginAcrossPolicyChange(t *testing.T) {
 	// sshd accepts for role:ops.
 	cred := auth.Credential()
 	dir := &directory.Directory{
-		Version: 1,
-		Prev:    trust.GenesisPrev,
+		Version:        1,
+		Prev:           trust.GenesisPrev,
+		InstallationID: env.InstallationID, // the bundle's (D-04)
 		Users: []directory.User{{Name: "alice", Status: directory.StatusActive, Credentials: []directory.Credential{{
 			ID:   base64.RawURLEncoding.EncodeToString(cred.ID),
 			Alg:  cred.Alg,

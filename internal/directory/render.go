@@ -17,6 +17,9 @@ var (
 	// ErrNoDirectory is a nil directory: none is installed yet, so there is
 	// no host group to render for.
 	ErrNoDirectory = errors.New("directory: no directory is installed")
+	// ErrUnknownHost is a host the directory does not name, or names as
+	// disabled.
+	ErrUnknownHost = errors.New("directory: unknown or disabled host")
 )
 
 // AccountPrincipals returns the sorted, de-duplicated union of the
@@ -85,4 +88,23 @@ func RenderPrincipalsFile(d *Directory, hostGroup, account string) ([]byte, erro
 		b.WriteString(p + "\n")
 	}
 	return []byte(b.String()), nil
+}
+
+// HostPrincipals returns the AuthorizedPrincipalsFile of account on the
+// host hostName: RenderPrincipalsFile for the host's one host group
+// (D-11). It is the file that host's agent writes. A host the directory
+// does not name, or names as disabled, is ErrUnknownHost; a host name
+// outside the user name grammar ErrInvalid. There is no second renderer.
+func HostPrincipals(d *Directory, hostName, account string) ([]byte, error) {
+	if d == nil {
+		return nil, ErrNoDirectory
+	}
+	if !ValidUserName(hostName) {
+		return nil, fmt.Errorf("%w: host name %q", ErrInvalid, hostName)
+	}
+	h, ok := d.HostByName(hostName)
+	if !ok || h.Status != StatusActive {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownHost, hostName)
+	}
+	return RenderPrincipalsFile(d, h.HostGroup, account)
 }

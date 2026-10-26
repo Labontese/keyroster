@@ -1,6 +1,7 @@
 package trust
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -29,6 +30,43 @@ type Policy struct {
 	// and "webauthn":null is refused as non-canonical. The signer refuses
 	// every login issuance while it is absent.
 	WebAuthn *WebAuthnRP `json:"webauthn,omitempty"`
+	// PoP enables certificate issuance on proof of possession of a key the
+	// admin-signed directory names: host certificates for host agents and
+	// renewals for machine identities (Phase 3). A pointer with omitempty
+	// and the last field, like WebAuthn, so every earlier policy keeps its
+	// exact bytes and "pop":null is refused as non-canonical. Once a policy
+	// sets hosts, no successor may clear it (CheckPoPSuccessor).
+	PoP *PoPPolicy `json:"pop,omitempty"`
+}
+
+// PoPPolicy says which proof-of-possession issuance the root allows: host
+// certificates to enrolled host agents (Hosts) and machine certificate
+// renewals (Machines). At least one is true when the policy carries it.
+type PoPPolicy struct {
+	Hosts    bool `json:"hosts"`
+	Machines bool `json:"machines"`
+}
+
+// ErrPoPHostsRemoved refuses a successor policy that turns host proof of
+// possession off once a policy turned it on (owner decision 2026-10-24):
+// host agents get their probe certificates through it, and without them
+// they could not confirm a new KRL, so revocations would stall (D-06).
+var ErrPoPHostsRemoved = errors.New("trust: pop_hosts_removed: a successor policy may not turn pop.hosts off once a policy set it")
+
+// CheckPoPSuccessor checks the PoP change from prev to next: when prev's
+// pop.hosts is true, next must carry pop with hosts true, else
+// ErrPoPHostsRemoved. Every other change passes: pop absent or hosts
+// false to hosts true, hosts true to true, and any change of machines,
+// whose off direction only stops machine renewals (the fail-safe
+// direction) and holds up no revocation.
+func CheckPoPSuccessor(prev, next *Policy) error {
+	if prev == nil || next == nil {
+		return fmt.Errorf("%w: no policy to compare", ErrInvalid)
+	}
+	if prev.PoP != nil && prev.PoP.Hosts && (next.PoP == nil || !next.PoP.Hosts) {
+		return fmt.Errorf("%w (policy v%d sets it; v%d clears it)", ErrPoPHostsRemoved, prev.Version, next.Version)
+	}
+	return nil
 }
 
 // WebAuthnRP is the WebAuthn relying party of a policy: the RP ID (one DNS
@@ -144,6 +182,9 @@ func (p *Policy) Validate() error {
 		if err := p.WebAuthn.validate(); err != nil {
 			return fmt.Errorf("webauthn: %w", err)
 		}
+	}
+	if p.PoP != nil && !p.PoP.Hosts && !p.PoP.Machines {
+		return fmt.Errorf("%w: pop: at least one of hosts and machines must be true; omit pop to enable neither", ErrInvalid)
 	}
 	return nil
 }

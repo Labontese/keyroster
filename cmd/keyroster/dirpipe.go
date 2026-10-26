@@ -94,9 +94,12 @@ type verifiedDirectory struct {
 	Version   uint64
 	Doc, Sigs []byte
 	Dir       *directory.Directory
-	Policy    *trust.Policy
-	Signers   []string
-	SHA256    string
+	// Bundle is the root-verified trust bundle Policy belongs to; its
+	// installation ID is the one every new directory version names (D-04).
+	Bundle  *trust.Bundle
+	Policy  *trust.Policy
+	Signers []string
+	SHA256  string
 }
 
 // errUnsignedBase refuses a served directory that the policy admins did
@@ -114,7 +117,7 @@ var errBadDirectoryAnswer = errors.New("the server's directory answer does not c
 // policy before it parses them (directory.VerifySignatures, at least the
 // policy's quorum). Each caller decides what version 0 means for it.
 func fetchVerifiedDirectory(ctx context.Context, s *adminSession) (*verifiedDirectory, error) {
-	_, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold)
+	bundle, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +125,7 @@ func fetchVerifiedDirectory(ctx context.Context, s *adminSession) (*verifiedDire
 	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminDirectoryPath, nil, &ans, s.signer); err != nil {
 		return nil, adminError(err, s, pol)
 	}
-	out := &verifiedDirectory{Policy: pol}
+	out := &verifiedDirectory{Bundle: bundle, Policy: pol}
 	if ans.Version == 0 {
 		if len(ans.Directory) != 0 || len(ans.Sigs) != 0 {
 			return nil, errBadDirectoryAnswer
@@ -163,6 +166,10 @@ type editOpts struct {
 	// User names the user the edit is about, for the refusal messages
 	// ("" when there is none).
 	User string
+	// CheckBase, when set, checks the verified base before anything is
+	// built on it (directory rebind's refusals); an error is returned
+	// unchanged and nothing is signed.
+	CheckBase func(base *verifiedDirectory) error
 }
 
 // editDirectory is the one pipeline of every directory edit (user approve,
@@ -172,7 +179,9 @@ type editOpts struct {
 //     the installed directory against that policy's admins;
 //  2. next is a copy of that base (or a new genesis, version 1 with the
 //     all-zero prev) with version + 1 and prev = SHA-256 of the base bytes;
-//     mutate changes it; then Sort, Validate and CheckPolicy;
+//     mutate changes it; its installation ID is set to the root-verified
+//     bundle's (D-04: admins never type it, and the diff shows it when it
+//     changes); then Sort, Validate and CheckPolicy;
 //  3. the diff and next's SHA-256 are printed, and confirmSign asks (or
 //     --yes); a refusal reaches no agent;
 //  4. next's canonical bytes are signed with SSHSIG under
@@ -217,9 +226,18 @@ func editDirectoryOutcome(ctx context.Context, s *adminSession, opts editOpts, s
 		}
 		next.Version, next.Prev = base.Version+1, base.SHA256
 	}
+	if opts.CheckBase != nil {
+		if err := opts.CheckBase(base); err != nil {
+			return 0, err
+		}
+	}
+	if err := checkBaseInstallation(base); err != nil {
+		return 0, err
+	}
 	if err := mutate(next, base.Policy); err != nil {
 		return 0, err
 	}
+	next.InstallationID = base.Bundle.InstallationID
 	next.Sort()
 	if err := next.Validate(); err != nil {
 		return 0, fmt.Errorf("the new directory version would not be valid, so nothing was signed: %w", err)
@@ -253,6 +271,29 @@ func editDirectoryOutcome(ctx context.Context, s *adminSession, opts editOpts, s
 		return editProposed, writeProposal(stdout, proposal, base, next.Version, doc, sig)
 	}
 	return editInstalled, installVersion(ctx, s, base, opts, stdout, next.Version, doc, sig)
+}
+
+// checkBaseInstallation refuses to build on an installed directory that is
+// bound to another installation than the root-verified bundle, or to one
+// while the bundle names none: the signer installs neither (D-04), so a
+// version built on it could never install. A base without an installation
+// ID is fine: the edit binds it.
+func checkBaseInstallation(base *verifiedDirectory) error {
+	if base.Dir == nil || base.Dir.InstallationID == "" || base.Dir.InstallationID == base.Bundle.InstallationID {
+		return nil
+	}
+	return fmt.Errorf("the installed directory version %d is bound to installation %s, but the root-verified trust bundle names %s; "+
+		"the signer installs no directory for another installation. Nothing was signed",
+		base.Version, base.Dir.InstallationID, installationText(base.Bundle.InstallationID))
+}
+
+// installationText names an installation ID in a message, an empty one as
+// "none".
+func installationText(id string) string {
+	if id == "" {
+		return "none"
+	}
+	return id
 }
 
 // printChanges prints what an admin is asked to sign: the base, the diff
@@ -356,6 +397,13 @@ func installRefusal(err error) error {
 		return errors.New("the signer refused the directory version: it exceeds the root-signed policy in force")
 	case he.APIErrorIs(serverclient.AdminErrInvalid):
 		return errors.New("the signer refused the directory version as not valid")
+	case he.APIErrorIs(serverclient.AdminErrInstallationMissing):
+		return errors.New("the signer refused the directory version: it names no installation, but the trust bundle in force does; " +
+			"build it with this version of keyroster, which copies the installation ID from the root-verified bundle (keyroster directory rebind binds the installed directory)")
+	case he.APIErrorIs(serverclient.AdminErrInstallationMismatch):
+		return errors.New("the signer refused the directory version: it names another installation than the trust bundle in force, so it was signed for another deployment")
+	case he.APIErrorIs(serverclient.AdminErrInstallationUnknown):
+		return errors.New("the signer refused the directory version: it names an installation, but the trust bundle in force has none")
 	}
 	return nil
 }

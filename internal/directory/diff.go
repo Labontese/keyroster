@@ -9,17 +9,22 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/crypto/ssh"
+
+	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/webauthn"
 )
 
 // Diff returns the changes from old to next as human-readable lines, the
 // text an admin reads before signing next (T-02-43). A nil old means
-// genesis: everything in next is added. The order is fixed: users, then
-// credentials, groups, roles and host groups; within each kind by name,
-// with a removal before an addition of the same name. Lines start with
-// "+" (added), "-" (removed) or "~" (a user's status changed); a group,
-// role or host group that changed shows as its old line removed and its
-// new line added, each with all of its members, principals or accounts.
+// genesis: everything in next is added. The order is fixed: the
+// installation ID, users, then credentials, groups, roles, host groups,
+// hosts and machines; within each kind by name, with a removal before an
+// addition of the same name. Lines start with "+" (added), "-" (removed)
+// or "~" (the installation ID or a user's status changed); a group, role,
+// host group, host or machine that changed shows as its old line removed
+// and its new line added, each with all of its fields. Host and machine
+// keys are shown by their type and SHA256 fingerprint.
 //
 // Every value printed comes from a directory that passed Validate, so
 // names are from the directory's own name grammars. A credential is shown
@@ -32,6 +37,15 @@ func Diff(old, next *Directory) []string {
 		old = &Directory{}
 	}
 	var out []string
+	switch {
+	case old.InstallationID == next.InstallationID:
+	case old.InstallationID == "":
+		out = append(out, "+ installation_id "+next.InstallationID)
+	case next.InstallationID == "":
+		out = append(out, "- installation_id "+old.InstallationID)
+	default:
+		out = append(out, fmt.Sprintf("~ installation_id %s -> %s", old.InstallationID, next.InstallationID))
+	}
 	oldUsers, newUsers := byName(old.Users, func(u User) string { return u.Name }), byName(next.Users, func(u User) string { return u.Name })
 	for _, n := range unionNames(oldUsers, newUsers) {
 		o, inOld := oldUsers[n]
@@ -69,6 +83,8 @@ func Diff(old, next *Directory) []string {
 	out = append(out, diffNamed("group", old.Groups, next.Groups, func(g Group) string { return g.Name }, groupText)...)
 	out = append(out, diffNamed("role", old.Roles, next.Roles, func(r Role) string { return r.Name }, roleText)...)
 	out = append(out, diffNamed("host_group", old.HostGroups, next.HostGroups, func(h HostGroup) string { return h.Name }, hostGroupText)...)
+	out = append(out, diffNamed("host", old.Hosts, next.Hosts, func(h Host) string { return h.Name }, hostText)...)
+	out = append(out, diffNamed("machine", old.Machines, next.Machines, func(m Machine) string { return m.Name }, machineText)...)
 	return out
 }
 
@@ -161,6 +177,30 @@ func hostGroupText(h HostGroup) string {
 		accounts[i] = a.Account + ":" + strings.Join(a.Roles, ",")
 	}
 	return fmt.Sprintf("%s accounts=[%s]", h.Name, strings.Join(accounts, " "))
+}
+
+// keyText is a host or machine key as Diff shows it: its type and SHA256
+// fingerprint, or the key itself Go-quoted when it does not parse.
+func keyText(k string) string {
+	pub, err := trust.ParseKey(k)
+	if err != nil {
+		return strconv.QuoteToASCII(k)
+	}
+	return pub.Type() + " " + ssh.FingerprintSHA256(pub)
+}
+
+func hostText(h Host) string {
+	keys := make([]string, len(h.Keys))
+	for i, k := range h.Keys {
+		keys[i] = keyText(k)
+	}
+	return fmt.Sprintf("%s host_group=%s status=%s principals=[%s] keys=[%s]",
+		h.Name, h.HostGroup, h.Status, strings.Join(h.Principals, " "), strings.Join(keys, ", "))
+}
+
+func machineText(m Machine) string {
+	return fmt.Sprintf("%s status=%s key=%s roles=[%s] max_ttl_seconds=%d",
+		m.Name, m.Status, keyText(m.Key), strings.Join(m.Roles, " "), m.MaxTTLSeconds)
 }
 
 func byName[T any](list []T, name func(T) string) map[string]T {

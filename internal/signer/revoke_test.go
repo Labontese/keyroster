@@ -695,11 +695,12 @@ type subjectEnv struct {
 
 // subjectDirectory is directory version with prev: alice and bob with the
 // given statuses, role ops granting loginPrincipals to both for up to
-// 3600 s.
+// 3600 s, bound to testInstallationID (the bundle's, D-04).
 func subjectDirectory(pk *passkeys, version uint64, prev, aliceStatus, bobStatus string) *directory.Directory {
 	d := &directory.Directory{
-		Version: version,
-		Prev:    prev,
+		Version:        version,
+		Prev:           prev,
+		InstallationID: testInstallationID,
 		Users: []directory.User{
 			{Name: "alice", Status: aliceStatus, Credentials: []directory.Credential{boundCredential(pk.eddsa)}},
 			{Name: "bob", Status: bobStatus, Credentials: []directory.Credential{boundCredential(pk.bob)}},

@@ -1591,7 +1591,7 @@ func TestRootSuccessorPolicy(t *testing.T) {
 			{"--out", filepath.Join(dir, "y.json"), "--webauthn-rp-id", "keyroster.example.org"},
 		} {
 			code, _, stderr := run(t, append([]string{"root", "successor-policy"}, args...)...)
-			if code == 0 || !strings.Contains(stderr, "--prev, --out and --webauthn-rp-id are required") {
+			if code == 0 || !strings.Contains(stderr, "--prev and --out are required, with --webauthn-rp-id, --pop-hosts or --pop-machines") {
 				t.Fatalf("%v: exit %d, stderr %q; want the usage refusal", args, code, stderr)
 			}
 		}

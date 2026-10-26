@@ -26,14 +26,14 @@ import (
 func init() {
 	register(command{
 		Name:    "directory",
-		Summary: "the admin-signed directory (show: the version the server serves, its signatures verified; sign: co-sign a proposal; install: install a fully signed proposal)",
+		Summary: "the admin-signed directory (show: the version the server serves, its signatures verified; sign: co-sign a proposal; install: install a fully signed proposal; rebind: bind the installed directory to the installation)",
 		Run:     runDirectory,
 	})
 }
 
 func runDirectory(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "directory: want a subcommand: show, sign or install")
+		_, _ = fmt.Fprintln(stderr, "directory: want a subcommand: show, sign, install or rebind")
 		return errUsage
 	}
 	switch args[0] {
@@ -43,10 +43,68 @@ func runDirectory(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return runDirectorySign(ctx, args[1:], stdout, stderr)
 	case "install":
 		return runDirectoryInstall(ctx, args[1:], stdout, stderr)
+	case "rebind":
+		return runDirectoryRebind(ctx, args[1:], stdout, stderr)
 	default:
-		_, _ = fmt.Fprintf(stderr, "directory: unknown subcommand %q; want show, sign or install\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "directory: unknown subcommand %q; want show, sign, install or rebind\n", args[0])
 		return errUsage
 	}
+}
+
+// runDirectoryRebind is keyroster directory rebind [--yes] [--out DIR]
+// [--admin-key FP]: the one re-sign a deployment needs after its trust
+// bundle first gains an installation ID (D-04, 03-15). It writes the next
+// directory version with every list unchanged and only installation_id
+// set, copied from the root-verified bundle, through the ordinary
+// pipeline (diff, confirmation, SSHSIG, install or proposal). The signer
+// needs no rule of its own for it: the version and prev follow the
+// installed version, and the ID equals the bundle's. It refuses when the
+// verified bundle has no installation ID (nothing to bind to), when the
+// installed directory already carries it (nothing to change), and when it
+// carries another (a state the signer's install check never allows; the
+// message names both). Until it installs, logins under the ID-less
+// directory follow the owner's lenient answer from 03-01: they stay
+// authorized.
+func runDirectoryRebind(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("directory rebind", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	ef := addEditFlags(fset)
+	if pos, err := parseInterspersed(fset, args); err != nil || len(pos) != 0 {
+		return errUsage
+	}
+	s, err := openAdminSession(*ef.adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	check := func(base *verifiedDirectory) error {
+		id := ""
+		if base.Dir != nil {
+			id = base.Dir.InstallationID
+		}
+		return rebindCheck(base.Version, id, base.Bundle.InstallationID)
+	}
+	return editDirectory(ctx, s, editOpts{Yes: *ef.yes, Out: *ef.out, CheckBase: check}, stdout, func(*directory.Directory, *trust.Policy) error {
+		return nil // the pipeline sets the installation ID
+	})
+}
+
+// rebindCheck is the refusal rule of directory rebind for the installed
+// directory version installed, whose installation ID is dirID, under the
+// root-verified bundle's bundleID.
+func rebindCheck(installed uint64, dirID, bundleID string) error {
+	switch {
+	case bundleID == "":
+		return errors.New("the root-verified trust bundle has no installation ID, so there is nothing to bind the directory to; nothing was signed")
+	case installed == 0:
+		return errors.New("the server serves no directory; the first directory version an edit writes is bound to the installation already. Nothing was signed")
+	case dirID == bundleID:
+		return fmt.Errorf("the installed directory version %d is already bound to installation %s; nothing to change. Nothing was signed", installed, bundleID)
+	case dirID != "":
+		return fmt.Errorf("the installed directory version %d is bound to installation %s, but the root-verified trust bundle names %s; "+
+			"the signer never installs that, so this server serves a directory of another deployment. Nothing was signed", installed, dirID, bundleID)
+	}
+	return nil
 }
 
 // runDirectoryShow is keyroster directory show [--admin-key FP]: the

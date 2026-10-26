@@ -200,6 +200,10 @@ const (
 	AdminErrQuorum               = "directory_quorum_not_met"
 	AdminErrExceedsPolicy        = "directory_exceeds_policy"
 	AdminErrInvalid              = "directory_invalid"
+	// The installation binding refusals (D-04, 03-04), 403.
+	AdminErrInstallationMissing  = "directory_installation_missing"
+	AdminErrInstallationMismatch = "directory_installation_mismatch"
+	AdminErrInstallationUnknown  = "directory_installation_unknown"
 )
 
 // UsersAnswer is the answer of a GET to AdminUsersPath: the users of the
