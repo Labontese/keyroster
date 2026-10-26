@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: 03-03 executed; PR open at the Task 4 merge gate
-last_updated: "2026-10-25T22:38:31.913Z"
+stopped_at: 03-03b executed; PR open at the Task 4 merge gate
+last_updated: "2026-10-26T05:32:21.584Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: f8b1448cd1cc0cc564a176df10db4e805c729217
+state_head: 89b237881c1eb68808a87ac4efca3d2033ad321d
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 52
-  completed_plans: 38
+  completed_plans: 39
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 4 of 17
+Plan: 5 of 17
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -93,6 +93,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P01 | 62 min | 3 tasks | 52 files |
 | Phase 03 P02 | 47 min | 3 tasks | 26 files |
 | Phase 03 P03 | 78 min | 3 tasks | 32 files |
+| Phase 03 P03b | 67 min | 3 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -247,6 +248,8 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-03: key-ID and key revocations cover every key the bundle in force names (CA keys in any state, ops, log, roots), through krl.RoleCAKeys and krl.InstallationKeys shared by signer and audit
 - [Phase 03]: 03-03: krl_version = max(prev + 1, issued_at); the signer publishes at its first Serve start and re-publishes hourly (D-10)
 - [Phase 03]: 03-03: subject_kind_unsupported and key_is_ca_of_this_installation are classified malformed
+- [Phase 03]: 03-03b: keyroster revoke user refuses before revoking when stdin is not a terminal and --yes is not given
+- [Phase 03]: 03-03b: every revoke command parses the verified KRL and exits non-zero unless it lists each revoked target
 
 ### Pending Todos
 
@@ -286,6 +289,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-25T22:38:31.472Z
-Stopped at: 03-03 executed; PR open at the Task 4 merge gate
+Last session: 2026-10-26T05:32:21.136Z
+Stopped at: 03-03b executed; PR open at the Task 4 merge gate
 Resume file: None
