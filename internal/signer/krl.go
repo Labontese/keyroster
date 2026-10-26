@@ -181,7 +181,8 @@ func (s *Signer) krlLoop(ctx context.Context) {
 // republishIfDue publishes the next KRL version, by the rules of every
 // publish and with the set otherwise unchanged, when the bundle in force
 // has an installation ID and either no KRL is published or the last
-// publish is at least krlRepublishAfter old on the signer's clock (D-10).
+// publish is at least krlRepublishAfter old on the signer's clock, or
+// dated after it (D-10; pre-merge review of PR #61).
 // It runs under s.mu in one logTx, with the trust check every request
 // makes, so a signer still running after another bundle was installed
 // publishes nothing. A failure is logged at error level and retried at the
@@ -195,8 +196,13 @@ func (s *Signer) republishIfDue(ctx context.Context) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock()
-	if st := s.krl.Load(); st != nil && now.Sub(st.PublishedAt) < krlRepublishAfter {
-		return false
+	// A negative age (the last publish is dated after the clock: it ran
+	// ahead and was corrected) is due too: waiting until the clock passed
+	// it would keep serving a KRL whose future issued_at looks fresh.
+	if st := s.krl.Load(); st != nil {
+		if age := now.Sub(st.PublishedAt); age >= 0 && age < krlRepublishAfter {
+			return false
+		}
 	}
 	var (
 		published *signerdb.KRLState

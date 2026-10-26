@@ -140,3 +140,48 @@ func TestKRLStartupAndRepublish(t *testing.T) {
 		t.Fatalf("%d krl_publish leaves after a restart with a fresh KRL, want 2", n)
 	}
 }
+
+// TestKRLRepublishAfterClockStepBack (pre-merge review of PR #61): a last
+// publish dated after the signer's clock (the clock ran ahead, then was
+// corrected, here across a restart, which reads PublishedAt back without
+// a monotonic reading) does not hold off the hourly re-publish until the
+// clock catches up: a negative age counts as due, so the next check
+// publishes with the corrected issued_at, which shows the KRL's real age
+// to readers (krl_stale, 03-08) instead of a fresh-looking future one;
+// after it the age check works as before, and audit verify accepts the
+// log.
+func TestKRLRepublishAfterClockStepBack(t *testing.T) {
+	fx := NewFixture(t, 1, 1)
+	fx.InstallationID = testInstallationID
+	clock := &tickingClock{now: time.Unix(time.Now().Unix(), 0)}
+	e := newLogEnvClock(t, fx, clock.Now)
+	ctx := context.Background()
+	correct := clock.Now()
+	clock.set(correct.Add(6*time.Hour), false) // ahead
+	if !e.s.republishIfDue(ctx) {
+		t.Fatal("no first publish")
+	}
+	e.close()
+	if err := e.open(); err != nil {
+		t.Fatal(err)
+	}
+	clock.set(correct.Add(time.Minute), false)
+	if !e.s.republishIfDue(ctx) {
+		t.Fatal("a last publish dated after the clock held off the re-publish")
+	}
+	all := publishes(e)
+	b, err := tlog.DecodeKRLPublishBody(all[len(all)-1].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := uint64(correct.Add(time.Minute).Unix()); b.IssuedAtSeconds != want { //nolint:gosec // G115: after 1970
+		t.Fatalf("re-published issued_at %d, want the corrected clock %d", b.IssuedAtSeconds, want)
+	}
+	clock.set(correct.Add(2*time.Minute), false)
+	if e.s.republishIfDue(ctx) {
+		t.Fatal("a check a minute after the re-publish published again")
+	}
+	if rep := e.verifyExport(); rep.KRLPublishes != 2 {
+		t.Fatalf("audit report: %d KRL publishes, want 2", rep.KRLPublishes)
+	}
+}
