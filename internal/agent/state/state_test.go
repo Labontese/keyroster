@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -86,24 +87,78 @@ func TestPins(t *testing.T) {
 	})
 }
 
-// TestStored covers accepted/: nothing stored reads as nil, and a store
-// without its bundle and policy is refused.
+// TestStored covers accepted/: nothing stored reads as nil, a state
+// without its bundle and policy is never activated, and the snapshot
+// pointer guards the set (PR #67 review).
 func TestStored(t *testing.T) {
+	accepted := func(t *testing.T) (paths.Layout, int) {
+		t.Helper()
+		l, _ := stateDir(t)
+		if err := os.Mkdir(l.State(AcceptedDir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		fd, err := spool.OpenDir(l.State(AcceptedDir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = unix.Close(fd) })
+		return l, fd
+	}
 	t.Run("empty_is_nil", func(t *testing.T) {
-		_, fd := stateDir(t)
+		_, fd := accepted(t)
 		s, err := LoadStored(fd)
 		if err != nil || s != nil {
 			t.Fatalf("LoadStored of an empty directory = %v, %v", s, err)
 		}
 	})
 	t.Run("partial_refused", func(t *testing.T) {
-		l, fd := stateDir(t)
+		l, fd := accepted(t)
 		s := &Stored{Directory: []byte(`{"version":1}`), DirectorySigs: []byte("x")}
-		if err := s.Save(l, fd); err != nil {
+		if err := s.Save(l, fd, nil); !errors.Is(err, ErrSnapshot) {
+			t.Fatalf("saving a directory without a bundle: %v, want accepted_snapshot_invalid", err)
+		}
+		if s, err := LoadStored(fd); err != nil || s != nil {
+			t.Fatalf("after the refused save: %v, %v, want nothing accepted", s, err)
+		}
+	})
+	t.Run("files_without_pointer_refused", func(t *testing.T) {
+		_, fd := accepted(t)
+		if err := spool.WriteFileAt(fd, bundleFile, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := LoadStored(fd); !errors.Is(err, ErrStored) {
-			t.Fatalf("a directory without a bundle: %v, want stored_state_invalid", err)
+			t.Fatalf("accepted/ files without current.json: %v, want stored_state_invalid", err)
+		}
+	})
+	t.Run("staged_snapshot_not_in_force", func(t *testing.T) {
+		l, fd := accepted(t)
+		s := &Stored{Directory: []byte(`{"version":1}`), DirectorySigs: []byte("x")}
+		if _, err := s.Stage(l, fd, nil); err != nil {
+			t.Fatal(err)
+		}
+		if s, err := LoadStored(fd); err != nil || s != nil {
+			t.Fatalf("a staged snapshot without Activate: %v, %v, want nothing accepted", s, err)
+		}
+	})
+	t.Run("tampered_file_refused", func(t *testing.T) {
+		_, fd := accepted(t)
+		if err := unix.Mkdirat(fd, "1", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		dfd, err := openSnapshot(fd, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = unix.Close(dfd) }()
+		if err := spool.WriteFileAt(dfd, bundleFile, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ptr := []byte(`{"files":{"bundle.json":"` + strings.Repeat("0", 64) + `"},"snapshot":1}`)
+		if err := spool.WriteFileAt(fd, pointerFile, ptr, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadStored(fd); !errors.Is(err, ErrStored) {
+			t.Fatalf("a file that does not match its SHA-256: %v, want stored_state_invalid", err)
 		}
 	})
 }

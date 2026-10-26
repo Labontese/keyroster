@@ -483,6 +483,9 @@ type marker struct {
 	Step          string `json:"step"`
 	DropInChanged bool   `json:"dropin_changed"`
 	Deadline      string `json:"deadline"`
+	// Accepted is, for step "commit", the accepted/ snapshot staged for
+	// to (state.Stage), which recovery activates.
+	Accepted uint64 `json:"accepted,omitempty"`
 }
 
 func (e *engine) writeMarker(from, to, mid uint64, step string) error {
@@ -491,6 +494,9 @@ func (e *engine) writeMarker(from, to, mid uint64, step string) error {
 	}
 	m := marker{From: from, To: to, Intermediate: mid, Step: step, DropInChanged: e.dropinChanged,
 		Deadline: e.clock.Now().Add(time.Duration(e.grace+5)*time.Second + 2*e.cfg.SelfTestTimeout).UTC().Format(trust.TimeFormat)}
+	if step == stepCommit {
+		m.Accepted = e.staged
+	}
 	b, err := trust.CanonicalJSON(m)
 	if err != nil {
 		return err

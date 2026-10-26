@@ -164,6 +164,7 @@ type engine struct {
 	maxGen        uint64
 	pending       *marker
 	dropinChanged bool
+	staged        uint64 // the accepted/ snapshot a commit marker names
 	poll          func(ctx context.Context) (*Generation, *state.Verified, error)
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
@@ -639,7 +640,7 @@ func (e *engine) recover(ctx context.Context, m *marker, cur, lg link) error {
 	if m != nil && m.Step == stepCommit && cur.kind == linkAgent && cur.n == m.To {
 		// The generation passed its self-test: finish its commit; the
 		// drop-in it was tested with stays.
-		return e.finishCommit(m.To)
+		return e.finishCommit(m.To, m.Accepted)
 	}
 	if lg.kind == linkNone {
 		return e.undoFirstInstall(ctx, cur)
@@ -796,38 +797,54 @@ func (e *engine) recoverToLastGood(ctx context.Context, m *marker, cur, lg link)
 const stepCommit = "commit"
 
 // commit makes generation n last-good and stores the verified state, in
-// an order a crash at any point can finish (PR #67 review): the marker is
-// rewritten with step "commit", keeping dropin_changed and dropin.prev,
-// then accepted/ is saved and last-good set, and only then is the marker
-// cleared and dropin.prev removed. A start that finds a commit marker
-// whose to is current finishes the commit (finishCommit); the drop-in is
-// never restored once its generation passed the self-test.
+// an order a crash at any point can finish (PR #67 review): the verified
+// state is staged as a new accepted/ snapshot, the marker is rewritten
+// with step "commit" naming that snapshot (keeping dropin_changed and
+// dropin.prev), the snapshot is activated and last-good set, and only
+// then is the marker cleared and dropin.prev removed. A start that finds
+// a commit marker whose to is current finishes the commit
+// (finishCommit): accepted/ and last-good move together, and the drop-in
+// is never restored once its generation passed the self-test.
 func (e *engine) commit(n uint64, v *state.Verified) error {
 	from := n
 	if e.pending != nil {
 		from = e.pending.From
 	}
-	if err := e.writeMarker(from, n, 0, stepCommit); err != nil {
-		return err
-	}
-	if err := e.fault("save-state"); err != nil {
-		return err
-	}
 	fd, err := e.acceptedFd()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = unix.Close(fd) }()
-	if err := v.Next.Save(e.l, fd); err != nil {
+	snap, err := v.Next.Stage(e.l, fd, e.cfg.Fault)
+	_ = unix.Close(fd)
+	if err != nil {
 		return err
 	}
-	return e.finishCommit(n)
+	e.staged = snap
+	if err := e.writeMarker(from, n, 0, stepCommit); err != nil {
+		return err
+	}
+	return e.finishCommit(n, snap)
 }
 
 // finishCommit is the end of a commit, and what recovery runs for a
-// commit marker: last-good to n, the marker cleared, dropin.prev removed,
-// old generations removed.
-func (e *engine) finishCommit(n uint64) error {
+// commit marker: accepted/ snapshot snap activated (0: none staged),
+// last-good to n, the marker cleared, dropin.prev removed, old
+// generations removed.
+func (e *engine) finishCommit(n, snap uint64) error {
+	if snap != 0 {
+		if err := e.fault("save-state"); err != nil {
+			return err
+		}
+		fd, err := e.acceptedFd()
+		if err != nil {
+			return err
+		}
+		err = state.Activate(e.l, fd, snap)
+		_ = unix.Close(fd)
+		if err != nil {
+			return err
+		}
+	}
 	if err := e.setLastGood(n); err != nil {
 		return err
 	}

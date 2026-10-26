@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -159,26 +161,88 @@ func (s *Stored) Floor() spool.Floor {
 	return f
 }
 
-// LoadStored reads accepted/ through its descriptor acceptedFd with
-// spool.ReadFileAt. No bundle.json means nothing was accepted yet (nil,
-// nil). The stored documents were verified when they were accepted; they
-// are parsed again only for their versions and for the bundle and policy
-// a successor is checked against.
+// accepted/ layout (PR #67 review: the accepted documents are one
+// atomic unit). Each save writes a new snapshot directory accepted/<N>/
+// holding the documents, then replaces accepted/current.json, which names
+// N and the SHA-256 of every file in it; that rename is the one step that
+// moves the accepted state. A crash before it leaves the previous
+// snapshot in force, and LoadStored refuses a snapshot whose files do not
+// match their hashes, or whose bundle does not name its policy.
+const (
+	pointerFile    = "current.json"
+	maxPointerFile = 4 << 10
+)
+
+// pointer is accepted/current.json.
+type pointer struct {
+	Snapshot uint64            `json:"snapshot"`
+	Files    map[string]string `json:"files"`
+}
+
+// ErrSnapshot is a snapshot Activate is asked for that is missing or
+// does not load.
+var ErrSnapshot = errors.New("accepted_snapshot_invalid")
+
+// LoadStored reads the accepted state through accepted/'s descriptor
+// acceptedFd: current.json, then each file it names from that snapshot
+// with spool.ReadFileAt, checked against its SHA-256. No current.json
+// means nothing was accepted yet (nil, nil), unless accepted/ holds
+// anything else, which is refused. The stored documents were verified
+// when they were accepted; they are parsed again only for their versions
+// and for the bundle and policy a successor is checked against, and the
+// bundle must name the policy stored with it.
 func LoadStored(acceptedFd int) (*Stored, error) {
-	s := &Stored{}
-	found := false
-	for _, f := range s.files() {
-		b, err := spool.ReadFileAt(acceptedFd, f.name, f.max)
-		if errors.Is(err, unix.ENOENT) {
-			continue
-		}
+	b, err := spool.ReadFileAt(acceptedFd, pointerFile, maxPointerFile)
+	if errors.Is(err, unix.ENOENT) {
+		names, err := spool.ListDir(acceptedFd)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrStored, err)
 		}
-		*f.dst, found = b, true
-	}
-	if !found {
+		for _, n := range names {
+			if !strings.HasPrefix(n, ".") {
+				if _, err := strconv.ParseUint(n, 10, 64); err != nil {
+					return nil, fmt.Errorf("%w: accepted/ holds %s but no %s", ErrStored, n, pointerFile)
+				}
+			}
+		}
 		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrStored, err)
+	}
+	var p pointer
+	if err := trust.DecodeStrict(b, &p); err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrStored, pointerFile, err)
+	}
+	return loadSnapshot(acceptedFd, &p)
+}
+
+// loadSnapshot reads the snapshot p names and checks it.
+func loadSnapshot(acceptedFd int, p *pointer) (*Stored, error) {
+	dfd, err := openSnapshot(acceptedFd, p.Snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrStored, err)
+	}
+	defer func() { _ = unix.Close(dfd) }()
+	s := &Stored{}
+	known := 0
+	for _, f := range s.files() {
+		sum, ok := p.Files[f.name]
+		if !ok {
+			continue
+		}
+		known++
+		b, err := spool.ReadFileAt(dfd, f.name, f.max)
+		if err != nil {
+			return nil, fmt.Errorf("%w: snapshot %d: %w", ErrStored, p.Snapshot, err)
+		}
+		if trust.SHA256Hex(b) != sum {
+			return nil, fmt.Errorf("%w: snapshot %d: %s does not match its SHA-256 in %s", ErrStored, p.Snapshot, f.name, pointerFile)
+		}
+		*f.dst = b
+	}
+	if known != len(p.Files) {
+		return nil, fmt.Errorf("%w: %s names a file that is not an accepted document", ErrStored, pointerFile)
 	}
 	if s.Bundle == nil || s.Policy == nil {
 		return nil, fmt.Errorf("%w: accepted/ holds no bundle and policy", ErrStored)
@@ -187,11 +251,14 @@ func LoadStored(acceptedFd int) (*Stored, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: bundle: %w", ErrStored, err)
 	}
-	p, err := trust.ParsePolicy(s.Policy)
+	pol, err := trust.ParsePolicy(s.Policy)
 	if err != nil {
 		return nil, fmt.Errorf("%w: policy: %w", ErrStored, err)
 	}
-	s.bundle, s.policy, s.BundleVersion = b, p, b.Version
+	if b.PolicySHA256 != trust.SHA256Hex(s.Policy) {
+		return nil, fmt.Errorf("%w: the accepted bundle %d does not name the accepted policy", ErrStored, b.Version)
+	}
+	s.bundle, s.policy, s.BundleVersion = b, pol, b.Version
 	if s.Directory != nil {
 		d, err := directory.Parse(s.Directory)
 		if err != nil {
@@ -209,21 +276,157 @@ func LoadStored(acceptedFd int) (*Stored, error) {
 	return s, nil
 }
 
-// Save writes s to accepted/ (descriptor acceptedFd, path
-// l.State(AcceptedDir)) through spool.WriteFileAt, mode 0600, after
-// paths.Allowed. A file whose field is empty is left as it is: a kind is
-// never un-accepted.
-func (s *Stored) Save(l paths.Layout, acceptedFd int) error {
+// openSnapshot opens accepted/<n> with O_DIRECTORY|O_NOFOLLOW.
+func openSnapshot(acceptedFd int, n uint64) (int, error) {
+	name := strconv.FormatUint(n, 10)
+	fd, err := unix.Openat(acceptedFd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("snapshot %s: %w", name, err)
+	}
+	return fd, nil
+}
+
+// snapshots lists the snapshot numbers in accepted/.
+func snapshots(acceptedFd int) ([]uint64, error) {
+	names, err := spool.ListDir(acceptedFd)
+	if err != nil {
+		return nil, err
+	}
+	var out []uint64
+	for _, n := range names {
+		if v, err := strconv.ParseUint(n, 10, 64); err == nil && v > 0 {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
+// Stage writes s, the whole accepted state (Verify's Next is), as a new
+// snapshot accepted/<N>/ through spool.WriteFileAt, mode 0600, after
+// paths.Allowed, and returns N. It is not in force until Activate. fault,
+// when set, is called before each file (the apply engine's crash hook).
+func (s *Stored) Stage(l paths.Layout, acceptedFd int, fault func(point string) error) (uint64, error) {
+	existing, err := snapshots(acceptedFd)
+	if err != nil {
+		return 0, err
+	}
+	n := uint64(1)
+	for _, v := range existing {
+		n = max(n, v+1)
+	}
+	name := strconv.FormatUint(n, 10)
+	if err := paths.Allowed(l, l.State(AcceptedDir, name)); err != nil {
+		return 0, err
+	}
+	if err := unix.Mkdirat(acceptedFd, name, 0o700); err != nil {
+		return 0, fmt.Errorf("snapshot %s: %w", name, err)
+	}
+	if err := unix.Fsync(acceptedFd); err != nil {
+		return 0, err
+	}
+	dfd, err := openSnapshot(acceptedFd, n)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = unix.Close(dfd) }()
 	for _, f := range s.files() {
 		if *f.dst == nil {
 			continue
 		}
-		if err := paths.Allowed(l, l.State(AcceptedDir, f.name)); err != nil {
-			return err
+		if fault != nil {
+			if err := fault("accepted:" + f.name); err != nil {
+				return 0, err
+			}
 		}
-		if err := spool.WriteFileAt(acceptedFd, f.name, *f.dst, 0o600); err != nil {
-			return err
+		if err := paths.Allowed(l, l.State(AcceptedDir, name, f.name)); err != nil {
+			return 0, err
+		}
+		if err := spool.WriteFileAt(dfd, f.name, *f.dst, 0o600); err != nil {
+			return 0, err
 		}
 	}
-	return nil
+	return n, nil
+}
+
+// Activate makes snapshot n the accepted state: it reads the snapshot's
+// files, checks that they load as one consistent set, writes
+// accepted/current.json naming them by SHA-256 (spool.WriteFileAt, an
+// atomic rename), and removes every other snapshot. It is idempotent, so
+// crash recovery runs it again for a commit that stopped after Stage.
+func Activate(l paths.Layout, acceptedFd int, n uint64) error {
+	dfd, err := openSnapshot(acceptedFd, n)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrSnapshot, err)
+	}
+	p := pointer{Snapshot: n, Files: map[string]string{}}
+	for _, f := range (&Stored{}).files() {
+		b, err := spool.ReadFileAt(dfd, f.name, f.max)
+		if errors.Is(err, unix.ENOENT) {
+			continue
+		}
+		if err != nil {
+			_ = unix.Close(dfd)
+			return fmt.Errorf("%w: snapshot %d: %w", ErrSnapshot, n, err)
+		}
+		p.Files[f.name] = trust.SHA256Hex(b)
+	}
+	_ = unix.Close(dfd)
+	if _, err := loadSnapshot(acceptedFd, &p); err != nil {
+		return fmt.Errorf("%w: %w", ErrSnapshot, err)
+	}
+	b, err := trust.CanonicalJSON(p)
+	if err != nil {
+		return err
+	}
+	if err := paths.Allowed(l, l.State(AcceptedDir, pointerFile)); err != nil {
+		return err
+	}
+	if err := spool.WriteFileAt(acceptedFd, pointerFile, b, 0o600); err != nil {
+		return err
+	}
+	return prune(l, acceptedFd, n)
+}
+
+// prune removes every snapshot of accepted/ but keep.
+func prune(l paths.Layout, acceptedFd int, keep uint64) error {
+	existing, err := snapshots(acceptedFd)
+	if err != nil {
+		return err
+	}
+	for _, v := range existing {
+		if v == keep {
+			continue
+		}
+		name := strconv.FormatUint(v, 10)
+		if err := paths.Allowed(l, l.State(AcceptedDir, name)); err != nil {
+			return err
+		}
+		dfd, err := openSnapshot(acceptedFd, v)
+		if err != nil {
+			return err
+		}
+		files, err := spool.ListDir(dfd)
+		for _, f := range files {
+			if err == nil {
+				err = unix.Unlinkat(dfd, f, 0)
+			}
+		}
+		_ = unix.Close(dfd)
+		if err != nil {
+			return fmt.Errorf("remove snapshot %s: %w", name, err)
+		}
+		if err := unix.Unlinkat(acceptedFd, name, unix.AT_REMOVEDIR); err != nil {
+			return fmt.Errorf("remove snapshot %s: %w", name, err)
+		}
+	}
+	return unix.Fsync(acceptedFd)
+}
+
+// Save stages s and activates it: the accepted state moves in one step.
+func (s *Stored) Save(l paths.Layout, acceptedFd int, fault func(point string) error) error {
+	n, err := s.Stage(l, acceptedFd, fault)
+	if err != nil {
+		return err
+	}
+	return Activate(l, acceptedFd, n)
 }

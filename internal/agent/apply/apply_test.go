@@ -222,6 +222,32 @@ func (f *fixture) successor(prev *trust.Bundle, prevDoc []byte, issuedAt string)
 	return b, spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}
 }
 
+// rotation builds bundle version prev.Version+1 whose policy is the next
+// policy version with admins (a policy rotation), both root-signed.
+func (f *fixture) rotation(prev *trust.Bundle, prevDoc, prevPolicyDoc []byte, prevPolicy *trust.Policy, admins []trust.AdminKey, issuedAt string) (*trust.Bundle, spool.Doc, spool.Doc) {
+	f.t.Helper()
+	p := *prevPolicy
+	p.Version, p.Prev, p.Admins = prevPolicy.Version+1, trust.SHA256Hex(prevPolicyDoc), admins
+	polDoc := mustCanonical(f.t, &p)
+	b, err := trust.BuildSuccessor(prev, prevDoc, prevPolicyDoc, prev.Root.Keys, 1, polDoc, issuedAt, testInstallation)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	doc := mustCanonical(f.t, b)
+	return b, spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}, spool.Doc{Body: polDoc, Sigs: f.rootSign(trust.NamespacePolicy, polDoc)}
+}
+
+// accepted loads accepted/ as the applier would.
+func (h *testHost) accepted() (*state.Stored, error) {
+	h.t.Helper()
+	fd, err := spool.OpenDir(h.l.State(state.AcceptedDir))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	return state.LoadStored(fd)
+}
+
 // TestApply covers the apply sequence's edges (Task 3 of 03-05): versions
 // and documents, candidate checks, self-test and rollback, the two-step
 // swap and its timing rule, the monotone-swap check, the LoginGraceTime
@@ -354,6 +380,47 @@ func TestApply(t *testing.T) {
 		h.publishDir(h.spec("role:ops", "role:q"))
 		if r, err := h.apply(); err != nil || r.DirectoryVersion != 3 {
 			t.Fatalf("the next apply after the refusal: %+v, %v", r, err)
+		}
+	})
+	t.Run("torn_accepted_save_never_mixes", func(t *testing.T) {
+		t.Parallel()
+		// PR #67 review: a policy rotation whose CA set is unchanged renders
+		// the same bytes and is committed without a swap; a crash between
+		// the accepted/ files must never leave bundle 2 beside policy 1.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops")
+		bob := seedKey(t, 11)
+		_, b2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, "2026-10-02T00:00:00Z")
+		h.state.Bundles[2], h.state.Policies[2] = b2, p2
+		h.cfg.Fault = func(point string) error {
+			if point == "accepted:policy.json" {
+				return &crash{point: point}
+			}
+			return nil
+		}
+		if _, err := h.apply(); !isCrash(err) {
+			t.Fatalf("the crash between bundle.json and policy.json did not happen: %v", err)
+		}
+		h.cfg.Fault = nil
+		consistent := func(when string) {
+			t.Helper()
+			s, err := h.accepted()
+			if err != nil {
+				t.Fatalf("%s: LoadStored: %v", when, err)
+			}
+			b, err := trust.ParseBundle(s.Bundle)
+			if err != nil || b.PolicySHA256 != trust.SHA256Hex(s.Policy) {
+				t.Fatalf("%s: accepted/ holds bundle %d with a policy that is not its own (%v)", when, s.BundleVersion, err)
+			}
+		}
+		consistent("after the crash")
+		if _, err := h.apply(); err != nil {
+			t.Fatalf("the run after the crash: %v", err)
+		}
+		consistent("after the next run")
+		if s, _ := h.accepted(); s.BundleVersion != 2 {
+			t.Fatalf("the next run accepted bundle %d, want 2", s.BundleVersion)
 		}
 	})
 	t.Run("empty_krl_installed", func(t *testing.T) {
@@ -901,6 +968,7 @@ func TestApply(t *testing.T) {
 							h.sshd.stop()
 						}
 						seq.change(h)
+						newKRL := h.f.krlVersion
 						_, err := crashRun(h, k)
 						if !isCrash(err) {
 							done = true // k is past the sequence's last fault point
@@ -926,6 +994,16 @@ func TestApply(t *testing.T) {
 						}
 						if readMarker(t, h) != nil || h.current() != h.lastGood() || (h.current() != lg && h.current() != target) {
 							t.Fatalf("%s k=%d j=%d: current %d, last-good %d (was %d, crash target %d), marker %+v, err %v", seq.name, k, j, h.current(), h.lastGood(), lg, target, readMarker(t, h), err)
+						}
+						// accepted/ moves with last-good (PR #67 review): the
+						// new KRL is accepted exactly when the target became
+						// last-good.
+						want := uint64(0)
+						if h.current() == target && target != lg {
+							want = newKRL
+						}
+						if st, err := h.accepted(); err != nil || st.KRLVersion != want {
+							t.Fatalf("%s k=%d j=%d: accepted/ %+v, %v; want KRL version %d with last-good %d", seq.name, k, j, st, err, want, h.lastGood())
 						}
 						if j > 0 && !nested {
 							break // the recovery run has no j-th fault point
