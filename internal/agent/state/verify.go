@@ -30,6 +30,25 @@ type Verified struct {
 	Next      Stored
 
 	BundleChanged, DirectoryChanged, KRLChanged bool
+
+	// BundleHeld is set when the capture offered a newer bundle than the
+	// one in force after it: the newest offered directory verifies only
+	// under an earlier policy of the bundle chain, so the bundle (and a
+	// KRL only its ops key verifies) waits for the next capture (PR #67
+	// review).
+	BundleHeld bool
+
+	// steps is the bundle chain of this capture: the stored bundle (when
+	// there is one), then each successor verified.
+	steps []bundleStep
+}
+
+// bundleStep is one bundle of the chain Verify walked, with its policy
+// and their documents.
+type bundleStep struct {
+	bundle      *trust.Bundle
+	policy      *trust.Policy
+	doc, polDoc spool.Doc
 }
 
 // Changed reports whether the capture moved any kind forward.
@@ -58,18 +77,26 @@ func (v *Verified) AsStored() *Stored {
 //     equal is a no-op. Every accepted bundle must name the pinned
 //     installation ID.
 //   - Directory. The newest offered directory above the stored one must
-//     carry the policy's admin quorum, parse, name the pinned installation
+//     carry the admin quorum of the policy in force, parse, name the pinned installation
 //     (directory.CheckInstallation, strict: agents never accept a
 //     directory without an ID) and fit the policy (directory.CheckPolicy).
 //     With a stored directory, every version from it to the newest must be
 //     offered and chain by version and prev hash (directory.CheckSuccessor):
 //     the newest one's signatures then authenticate the versions between,
 //     which are never rendered. With none stored the newest is checked
-//     standalone. Offering only older versions is directory_older.
+//     standalone. Offering only older versions is directory_older. When it
+//     carries the quorum only of an earlier policy of this capture's
+//     bundle chain (a host catching up, MaxVersionsPerKind directory
+//     versions at a time, across a policy rotation; PR #67 review), the
+//     bundle is taken only up to that policy (BundleHeld) and the rest
+//     waits for the next capture: what a fetcher withholding the newer
+//     bundles would have shown, so nothing is accepted that could not be
+//     accepted already.
 //   - KRL. The newest complete KRL: equal to the stored one is a no-op,
 //     an older version krl_older; otherwise krl.VerifyManifest against the
 //     bundle in force, the pinned installation ID and the stored version,
-//     then krl.Parse.
+//     then krl.Parse. With BundleHeld, a KRL whose manifest the bundle in
+//     force does not verify waits with the bundle.
 //
 // Verify reads only in; the bytes it checks are the bytes it returns in
 // Next.
@@ -134,9 +161,11 @@ func (v *Verified) verifyBundle(p *Pins, prev *Stored, in spool.State) error {
 		}
 		v.Bundle, v.Policy, v.BundleChanged = b, pol, true
 		v.Next.Bundle, v.Next.BundleSigs, v.Next.Policy, v.Next.PolicySigs, v.Next.BundleVersion = doc.Body, doc.Sigs, polDoc.Body, polDoc.Sigs, b.Version
+		v.steps = []bundleStep{{bundle: b, policy: pol, doc: doc, polDoc: polDoc}}
 		return nil
 	}
 	v.Bundle, v.Policy = prev.bundle, prev.policy
+	v.steps = []bundleStep{{bundle: prev.bundle, policy: prev.policy, doc: spool.Doc{Body: prev.Bundle, Sigs: prev.BundleSigs}, polDoc: spool.Doc{Body: prev.Policy, Sigs: prev.PolicySigs}}}
 	if len(vs) == 0 || vs[len(vs)-1] == prev.BundleVersion {
 		return nil
 	}
@@ -167,8 +196,19 @@ func (v *Verified) verifyBundle(p *Pins, prev *Stored, in spool.State) error {
 		cur, curBytes, curPolicy = nb, doc.Body, pol.Body
 		v.Bundle, v.Policy, v.BundleChanged = nb, np, true
 		v.Next.Bundle, v.Next.BundleSigs, v.Next.Policy, v.Next.PolicySigs, v.Next.BundleVersion = doc.Body, doc.Sigs, pol.Body, pol.Sigs, nb.Version
+		v.steps = append(v.steps, bundleStep{bundle: nb, policy: np, doc: doc, polDoc: pol})
 	}
 	return nil
+}
+
+// holdBundle takes the bundle chain only up to step k: the bundle,
+// policy and their documents in force after this capture are step k's.
+// Only a capture with a stored bundle holds one, so step 0 is the stored
+// bundle and the bundle changed exactly when k > 0.
+func (v *Verified) holdBundle(k int) {
+	st := v.steps[k]
+	v.Bundle, v.Policy, v.BundleHeld, v.BundleChanged = st.bundle, st.policy, true, k > 0
+	v.Next.Bundle, v.Next.BundleSigs, v.Next.Policy, v.Next.PolicySigs, v.Next.BundleVersion = st.doc.Body, st.doc.Sigs, st.polDoc.Body, st.polDoc.Sigs, st.bundle.Version
 }
 
 // verifyPinned is the first acceptance of a bundle, serverclient.Trust's
@@ -261,7 +301,18 @@ func (v *Verified) verifyDirectory(p *Pins, prev *Stored, in spool.State) error 
 	}
 	doc := in.Directories[newest]
 	if _, err := directory.VerifySignatures(doc.Body, doc.Sigs, v.Policy); err != nil {
-		return fmt.Errorf("%w: version %d: %w", ErrDir, newest, err)
+		// The newest policy refuses it; an earlier one of the chain may
+		// carry its quorum (holdBundle).
+		held := false
+		for k := len(v.steps) - 2; k >= 0 && !held; k-- {
+			if _, e := directory.VerifySignatures(doc.Body, doc.Sigs, v.steps[k].policy); e == nil {
+				v.holdBundle(k)
+				held = true
+			}
+		}
+		if !held {
+			return fmt.Errorf("%w: version %d: %w", ErrDir, newest, err)
+		}
 	}
 	d, err := directory.Parse(doc.Body)
 	if err != nil {
@@ -333,6 +384,11 @@ func (v *Verified) verifyKRL(p *Pins, prev *Stored, in spool.State) error {
 		return fmt.Errorf("%w: the spool offers KRL version %d, below the accepted version %d", ErrKRLOlder, m.KRLVersion, storedVersion)
 	}
 	if _, err := krl.VerifyManifest(files.Manifest, files.Sig, files.KRL, v.Bundle, p.InstallationID, storedVersion); err != nil {
+		if v.BundleHeld {
+			// Signed by an ops key of a bundle this capture holds back:
+			// it waits for that bundle.
+			return nil
+		}
 		return fmt.Errorf("%w: KRL version %d: %w", ErrKRL, ver, err)
 	}
 	parsed, err := krl.Parse(files.KRL)

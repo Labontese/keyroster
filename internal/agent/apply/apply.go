@@ -130,13 +130,17 @@ type Report struct {
 	// WaitedMS is, for every widening swap that had to wait, the interval
 	// the timing rule enforced: from the previous swap of current to the
 	// widening swap (at least LoginGraceTime + 5 s).
-	WaitedMS          int64    `json:"waited_ms"`
-	Reloaded          bool     `json:"reloaded"`
-	SelfTest          string   `json:"self_test"`
-	Rollback          bool     `json:"rollback"`
-	RollbackSelfTest  string   `json:"rollback_self_test,omitempty"`
-	Recovered         bool     `json:"recovered"`
-	NoOp              bool     `json:"no_op"`
+	WaitedMS         int64  `json:"waited_ms"`
+	Reloaded         bool   `json:"reloaded"`
+	SelfTest         string `json:"self_test"`
+	Rollback         bool   `json:"rollback"`
+	RollbackSelfTest string `json:"rollback_self_test,omitempty"`
+	Recovered        bool   `json:"recovered"`
+	NoOp             bool   `json:"no_op"`
+	// BundleHeld: a newer bundle in the spool waits for the next run,
+	// because the newest directory verifies only under an earlier policy
+	// (state.Verified.BundleHeld).
+	BundleHeld        bool     `json:"bundle_held,omitempty"`
 	Stuck             string   `json:"stuck,omitempty"`
 	UnmatchedHostKeys []string `json:"unmatched_host_keys,omitempty"`
 	SpoolIgnored      []string `json:"spool_ignored,omitempty"`
@@ -438,6 +442,7 @@ func (e *engine) forward(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.report.BundleHeld = v.BundleHeld
 	if !v.Changed() {
 		e.report.NoOp = true
 		e.setVersions(v)

@@ -128,6 +128,8 @@ type dirSpec struct {
 	// each, mapped to every account (a valid directory whose principals
 	// files exceed the generation read cap).
 	bulkRoles int
+	// signer signs the directory; nil is the fixture's admin.
+	signer ssh.Signer
 }
 
 // directory signs one version after prev (nil: version 1).
@@ -182,7 +184,11 @@ func (f *fixture) directory(prev []byte, s dirSpec) spool.Doc {
 	if _, err := directory.Parse(doc); err != nil {
 		f.t.Fatalf("test directory: %v", err)
 	}
-	sig, err := sshsig.Sign(rand.Reader, f.admin, directory.Namespace, doc)
+	signer := f.admin
+	if s.signer != nil {
+		signer = s.signer
+	}
+	sig, err := sshsig.Sign(rand.Reader, signer, directory.Namespace, doc)
 	if err != nil {
 		f.t.Fatal(err)
 	}

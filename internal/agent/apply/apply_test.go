@@ -225,6 +225,12 @@ func (f *fixture) successor(prev *trust.Bundle, prevDoc []byte, issuedAt string)
 // rotation builds bundle version prev.Version+1 whose policy is the next
 // policy version with admins (a policy rotation), both root-signed.
 func (f *fixture) rotation(prev *trust.Bundle, prevDoc, prevPolicyDoc []byte, prevPolicy *trust.Policy, admins []trust.AdminKey, issuedAt string) (*trust.Bundle, spool.Doc, spool.Doc) {
+	return f.rotationOps(prev, prevDoc, prevPolicyDoc, prevPolicy, admins, issuedAt, nil)
+}
+
+// rotationOps is rotation that also replaces the ops key with ops (nil:
+// kept).
+func (f *fixture) rotationOps(prev *trust.Bundle, prevDoc, prevPolicyDoc []byte, prevPolicy *trust.Policy, admins []trust.AdminKey, issuedAt string, ops ssh.Signer) (*trust.Bundle, spool.Doc, spool.Doc) {
 	f.t.Helper()
 	p := *prevPolicy
 	p.Version, p.Prev, p.Admins = prevPolicy.Version+1, trust.SHA256Hex(prevPolicyDoc), admins
@@ -232,6 +238,9 @@ func (f *fixture) rotation(prev *trust.Bundle, prevDoc, prevPolicyDoc []byte, pr
 	b, err := trust.BuildSuccessor(prev, prevDoc, prevPolicyDoc, prev.Root.Keys, 1, polDoc, issuedAt, testInstallation)
 	if err != nil {
 		f.t.Fatal(err)
+	}
+	if ops != nil {
+		b.OpsKey = trust.KeyEntry{Key: trust.FormatKey(ops.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software"}
 	}
 	doc := mustCanonical(f.t, b)
 	return b, spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}, spool.Doc{Body: polDoc, Sigs: f.rootSign(trust.NamespacePolicy, polDoc)}
@@ -454,6 +463,64 @@ func TestApply(t *testing.T) {
 		}
 		if r = h.mustApply(); !r.NoOp {
 			t.Fatalf("third apply: %+v, want a no-op", r)
+		}
+	})
+	t.Run("catch_up_across_policy_rotation", func(t *testing.T) {
+		t.Parallel()
+		// PR #67 review: a host more than spool.MaxVersionsPerKind
+		// directory versions behind while a bundle rotates the policy.
+		// The capture holds the lowest 64 directories above the accepted
+		// one, all signed under the old policy, and the new bundle; the
+		// newest captured directory verifies only under the old policy,
+		// so the bundle waits for the next capture instead of the host
+		// refusing every capture. With newOps the rotation also replaces
+		// the ops key and the newest KRL is signed by the new one: the KRL
+		// waits with the bundle.
+		for _, newOps := range []bool{false, true} {
+			f := newFixture(t)
+			h := newTestHost(t, f)
+			h.installed("role:ops")
+			for range spool.MaxVersionsPerKind + 3 {
+				h.publishDir(h.spec("role:ops"))
+			}
+			bob := seedKey(t, 12)
+			var ops ssh.Signer
+			if newOps {
+				ops = seedKey(t, 13)
+			}
+			_, b2, p2 := f.rotationOps(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, "2026-10-02T00:00:00Z", ops)
+			h.state.Bundles[2], h.state.Policies[2] = b2, p2
+			for range 2 {
+				s := h.spec("role:ops", "role:q")
+				s.signer = bob
+				h.publishDir(s)
+			}
+			if newOps {
+				f.ops = ops
+			}
+			h.publishKRL(7)
+			total := uint64(len(h.dirs))
+			r, err := h.apply()
+			if err != nil || r.DirectoryVersion != 1+spool.MaxVersionsPerKind || r.BundleVersion != 1 || !r.BundleHeld {
+				t.Fatalf("newOps %t: first capture: %+v, %v; want directory %d under bundle 1", newOps, r, err, 1+spool.MaxVersionsPerKind)
+			}
+			if newOps && r.KRLVersion == f.krlVersion {
+				t.Fatalf("the KRL signed by the rotated ops key was taken under bundle 1: %+v", r)
+			}
+			r, err = h.apply()
+			if err != nil || r.DirectoryVersion != total || r.BundleVersion != 2 || r.KRLVersion != f.krlVersion {
+				t.Fatalf("newOps %t: second capture: %+v, %v; want directory %d, bundle 2, KRL %d", newOps, r, err, total, f.krlVersion)
+			}
+			if !slices.Equal(h.principals("deploy"), []string{"role:ops", "role:q"}) || !h.krlRevokes(h.l.Current(), 7) {
+				t.Fatalf("newOps %t: the newest state is not current", newOps)
+			}
+			// A directory no policy of the chain signed is still refused.
+			s := h.spec("role:ops")
+			s.signer = seedKey(t, 14)
+			h.publishDir(s)
+			if _, err := h.apply(); !errors.Is(err, state.ErrDir) {
+				t.Fatalf("newOps %t: a directory signed by no admin: %v, want directory_not_verified", newOps, err)
+			}
 		}
 	})
 	t.Run("render_once_from_newest", func(t *testing.T) {
