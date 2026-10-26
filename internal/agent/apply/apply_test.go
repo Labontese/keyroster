@@ -1373,3 +1373,33 @@ func TestGenerationModesUnderUmask(t *testing.T) {
 		}
 	}
 }
+
+// TestHostKeys (PR #67 review): sshd -T lists its default HostKey paths
+// whether or not the keys exist, and sshd skips the missing ones; so does
+// hostKeys. A key whose private half exists needs its .pub, and at least
+// one key must be found.
+func TestHostKeys(t *testing.T) {
+	dir := t.TempDir()
+	signer := seedKey(t, 9)
+	ed := filepath.Join(dir, "ssh_host_ed25519_key")
+	writeFile(t, ed, []byte("private key placeholder\n"))
+	writeFile(t, ed+".pub", ssh.MarshalAuthorizedKey(signer.PublicKey()))
+	dump := func(names ...string) Dump {
+		var b strings.Builder
+		for _, n := range names {
+			b.WriteString("hostkey " + filepath.Join(dir, n) + "\n")
+		}
+		return ParseDump([]byte(b.String()))
+	}
+	keys, err := hostKeys(dump("ssh_host_rsa_key", "ssh_host_ecdsa_key", "ssh_host_ed25519_key"))
+	if err != nil || len(keys) != 1 || !slices.Equal(keys[0].Marshal(), signer.PublicKey().Marshal()) {
+		t.Fatalf("default paths with only the Ed25519 key present: %v, %v", keys, err)
+	}
+	if _, err := hostKeys(dump("ssh_host_rsa_key", "ssh_host_ecdsa_key")); err == nil {
+		t.Fatal("no host key present: no error")
+	}
+	writeFile(t, filepath.Join(dir, "ssh_host_ecdsa_key"), []byte("private key placeholder\n"))
+	if _, err := hostKeys(dump("ssh_host_ecdsa_key", "ssh_host_ed25519_key")); err == nil {
+		t.Fatal("a present private key without its .pub: no error")
+	}
+}

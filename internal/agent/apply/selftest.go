@@ -80,10 +80,16 @@ func loopbackTargets(d Dump) ([]string, error) {
 }
 
 // hostKeys reads the public halves of the host keys sshd -T names
-// (hostkey PATH, with PATH.pub beside it).
+// (hostkey PATH, with PATH.pub beside it). sshd -T lists its default
+// HostKey paths whether or not those keys exist, and sshd skips the
+// missing ones; so a HostKey whose private key does not exist is skipped
+// here too (PR #67 review). At least one key must remain.
 func hostKeys(d Dump) ([]ssh.PublicKey, error) {
 	var out []ssh.PublicKey
 	for _, p := range d["hostkey"] {
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		f, err := os.Open(p + ".pub") //nolint:gosec // G304: a host key path from sshd's own configuration
 		if err != nil {
 			return nil, fmt.Errorf("host key %s.pub: %w", p, err)
@@ -100,7 +106,7 @@ func hostKeys(d Dump) ([]ssh.PublicKey, error) {
 		out = append(out, pub)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("sshd -T names no host key")
+		return nil, errors.New("sshd -T names no host key that exists")
 	}
 	return out, nil
 }
