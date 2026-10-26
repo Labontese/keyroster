@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
+	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
@@ -691,8 +692,16 @@ func TestRevokeKRLCheck(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c := &ssh.Certificate{Key: key, CertType: ssh.UserCert, KeyId: "x", ValidBefore: ssh.CertTimeInfinity}
-		if err := c.SignCert(rand.Reader, caSigner); err != nil {
+		c, err := cert.Build(cert.Request{
+			Profile:    cert.DefaultUserProfile(),
+			Subject:    key,
+			Principals: []string{"alice"},
+			Now:        time.Now(),
+			ValidFor:   10 * time.Minute,
+			KeyID:      cert.KeyID{CA: "user", Subject: "u:alice", Request: "0123456789abcdef0123456789abcdef", Serial: 1},
+			Serial:     1,
+		}, caSigner, rand.Reader)
+		if err != nil {
 			t.Fatal(err)
 		}
 		certFile := filepath.Join(t.TempDir(), "id-cert.pub")
