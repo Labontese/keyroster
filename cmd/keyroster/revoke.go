@@ -142,9 +142,10 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 	_, _ = fmt.Fprintf(stdout, "Checked: the server serves KRL v%d, signed by the ops key of your root-pinned trust bundle (log entry %d), "+
 		"issued at %s, at most %d s before this request.\n"+
 		"Not checked: that this KRL lists serial %d (this version cannot read a KRL). "+
-		"A KRL that another revocation published in those %d s passes the same checks; "+
+		"Any genuine KRL issued after that passes the same checks, including the one the signer re-publishes by itself every hour, "+
+		"so a compromised keyroster-server can show one without having forwarded this revocation; "+
 		"the signer's \"revoked\" line (journalctl -u keyroster-signer) is the proof.\n",
-		m.KRLVersion, m.LogIndex, m.IssuedAt, wire.MaxRequestSkewSeconds, serial, wire.MaxRequestSkewSeconds)
+		m.KRLVersion, m.LogIndex, m.IssuedAt, wire.MaxRequestSkewSeconds, serial)
 	_, _ = fmt.Fprintln(stdout, revokeEnforcement(role))
 	return nil
 }
@@ -174,8 +175,10 @@ func revokeEnforcement(role wire.CARole) string {
 // window, so the KRL this revocation published can never fail it. A
 // server that dropped the request cannot show a manifest the signer
 // never signed, nor replay one published before that window under an
-// invented answer; it can still show a genuine one published inside the
-// window, which only reading the KRL for the serial catches (03-03).
+// invented answer. It can still show any genuine one issued later: there
+// is no upper bound, and the signer re-publishes by itself every hour
+// (D-10), so it needs no other revocation. Only reading the KRL for the
+// serial catches that (03-03b, krl.Parse).
 func confirmRevokeAnswer(ctx context.Context, c *serverclient.Client, b *trust.Bundle, ans serverclient.RevokeAnswer, createdAt uint64) (*krl.Manifest, error) {
 	if ans.KRLVersion < 1 || ans.PublishLeaf != ans.RevokeLeaf+1 {
 		return nil, fmt.Errorf("its answer (KRL v%d, log entries %d, %d) is not one the signer gives", ans.KRLVersion, ans.RevokeLeaf, ans.PublishLeaf)

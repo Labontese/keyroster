@@ -157,7 +157,8 @@ func TestRevokeSerialConfirm(t *testing.T) {
 			"Checked: the server serves KRL v3, signed by the ops key of your root-pinned trust bundle (log entry 9), issued at ",
 			", at most 300 s before this request.\n",
 			"Not checked: that this KRL lists serial 1729",
-			"A KRL that another revocation published in those 300 s passes the same checks",
+			"Any genuine KRL issued after that passes the same checks, including the one the signer re-publishes by itself every hour, " +
+				"so a compromised keyroster-server can show one without having forwarded this revocation",
 		} {
 			if !strings.Contains(stdout, want) {
 				t.Fatalf("stdout %q lacks %q", stdout, want)

@@ -87,7 +87,7 @@ Expected output:
 ```
 The server reports serial 1792869357962865 (user) revoked: KRL v1792919647 published (log entries 5, 6).
 Checked: the server serves KRL v1792919647, signed by the ops key of your root-pinned trust bundle (log entry 6), issued at 2026-10-25T09:14:07Z, at most 300 s before this request.
-Not checked: that this KRL lists serial 1792869357962865 (this version cannot read a KRL). A KRL that another revocation published in those 300 s passes the same checks; the signer's "revoked" line (journalctl -u keyroster-signer) is the proof.
+Not checked: that this KRL lists serial 1792869357962865 (this version cannot read a KRL). Any genuine KRL issued after that passes the same checks, including the one the signer re-publishes by itself every hour, so a compromised keyroster-server can show one without having forwarded this revocation; the signer's "revoked" line (journalctl -u keyroster-signer) is the proof.
 Hosts enforce it once their keyroster agent applies this KRL.
 ```
 
@@ -114,8 +114,12 @@ but that could not be confirmed: ...` and exits non-zero; nothing tells
 you whether the signer revoked, so check the signer host. This catches an
 invented version, and an earlier genuine KRL replayed under an invented
 answer when it was published more than 300 s before the request. It does
-not catch a genuine KRL that another revocation published inside those
-300 s: only reading the KRL for the serial would, which 03-03 adds. The
+not catch any genuine KRL issued after that point: the check has no upper
+bound, and the signer re-publishes the KRL by itself every hour (section
+3), so a compromised keyroster-server can show a fresh, genuine KRL
+without forwarding the request and without any other revocation. Only
+reading the KRL for the serial catches that, which 03-03b adds
+(`krl.Parse`). The
 confirmation and each of its refusals ran in the CLI
 tests against a stub server (`TestRevokeSerialConfirm`); the confirmed
 path also runs in CI e2e.
