@@ -32,6 +32,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/wire"
 )
@@ -183,8 +184,102 @@ func decodeLeaf(data []byte) map[string]any {
 			return map[string]any{"error": err.Error()}
 		}
 		decodeLoginIssue(m, b)
+	case tlog.KindRevoke:
+		b, err := tlog.DecodeRevokeBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		decodeRevoke(m, b)
+	case tlog.KindKRLPublish:
+		b, err := tlog.DecodeKRLPublishBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		// No "bundle_version" or "version" key: Verify binds those names
+		// to bundle_install and directory_install lines (checkGrepFields).
+		m["krl_version"] = b.KRLVersion
+		m["krl_sha256"] = hex.EncodeToString(b.SHA256[:])
+		m["issued_at"] = b.IssuedAtSeconds
+		m["krl_bundle_version"] = b.BundleVersion
 	}
 	return m
+}
+
+// decodeRevoke renders a revoke body into m (03-03): the target its
+// logged request names, the resolution time, the fingerprints of the keys
+// that signed its evidence and its entries. An entry's kind is rendered
+// as "entry_kind", never "kind", and no field is named "version",
+// "bundle_version", "directory" or "sigs": Verify binds each of those
+// names, at any depth of the line, to the leaf kind the restore runbook
+// greps for (checkGrepFields, checkReplayFields).
+func decodeRevoke(m map[string]any, b *tlog.RevokeBody) {
+	m["policy_version"] = b.PolicyVersion
+	m["resolved_at"] = b.ResolvedAtSeconds
+	if req, err := wire.ParseRevokeSigningBytes(b.Request); err != nil {
+		m["request_error"] = err.Error()
+	} else {
+		m["request_id"] = hex.EncodeToString(req.RequestID[:])
+		m["created_at"] = req.CreatedAt
+		m["reason"] = req.Reason
+		switch req.Target {
+		case wire.TargetSerial:
+			m["target"] = "serial"
+			m["ca_role"] = req.CARole.String()
+			m["serial"] = req.Serial
+		case wire.TargetKeyID:
+			m["target"] = "key_id"
+			m["ca_role"] = req.CARole.String()
+			m["key_id"] = req.KeyID
+		case wire.TargetKey:
+			m["target"] = "key"
+			m["key_fingerprint"] = fingerprint(req.Key)
+		case wire.TargetSubject:
+			m["target"] = "subject"
+			m["subject_kind"] = req.SubjectKind.String()
+			m["subject"] = req.Subject
+		}
+	}
+	admins := make([]string, 0, len(b.Evidence))
+	for _, e := range b.Evidence {
+		if e.Type != wire.EvidenceAdminSSHSIG {
+			continue
+		}
+		if sig, err := sshsig.Parse(e.Blob); err == nil {
+			admins = append(admins, ssh.FingerprintSHA256(sig.PublicKey()))
+		}
+	}
+	m["admins"] = admins
+	entries := make([]map[string]any, 0, len(b.Entries))
+	for _, e := range b.Entries {
+		r := map[string]any{}
+		switch e.Kind {
+		case tlog.RevokedSerial:
+			r["entry_kind"] = "serial"
+			r["serial"] = e.Serial
+			r["ca_fingerprint"] = fingerprint(e.CAKey)
+			r["valid_before"] = e.ValidBeforeSeconds
+		case tlog.RevokedKeyID:
+			r["entry_kind"] = "key_id"
+			r["key_id"] = e.KeyID
+			r["ca_fingerprint"] = fingerprint(e.CAKey)
+			r["valid_before"] = e.ValidBeforeSeconds
+		case tlog.RevokedKey:
+			r["entry_kind"] = "key"
+			r["key_fingerprint"] = fingerprint(e.Key)
+		}
+		entries = append(entries, r)
+	}
+	m["entries"] = entries
+}
+
+// fingerprint is the SHA256 fingerprint of an SSH wire-format key, or ""
+// when it does not parse.
+func fingerprint(blob []byte) string {
+	pub, err := ssh.ParsePublicKey(blob)
+	if err != nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(pub)
 }
 
 // decodeLoginIssue renders a login_issue body into m (02-12). Each part

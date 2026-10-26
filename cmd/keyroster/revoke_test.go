@@ -19,6 +19,7 @@ import (
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // krlDoc returns a served KRL document of version v whose manifest names
@@ -156,7 +157,8 @@ func TestRevokeSerialConfirm(t *testing.T) {
 			"Checked: the server serves KRL v3, signed by the ops key of your root-pinned trust bundle (log entry 9), issued at ",
 			", at most 300 s before this request.\n",
 			"Not checked: that this KRL lists serial 1729",
-			"A KRL that another revocation published in those 300 s passes the same checks",
+			"Any genuine KRL issued after that passes the same checks, including the one the signer re-publishes by itself every hour, " +
+				"so a compromised keyroster-server can show one without having forwarded this revocation",
 		} {
 			if !strings.Contains(stdout, want) {
 				t.Fatalf("stdout %q lacks %q", stdout, want)
@@ -164,6 +166,31 @@ func TestRevokeSerialConfirm(t *testing.T) {
 		}
 		if strings.HasPrefix(stdout, "revoked serial") {
 			t.Fatalf("stdout %q states the revocation as a fact", stdout)
+		}
+	})
+	t.Run("request_names_installation", func(t *testing.T) {
+		// Pre-merge review of PR #61 (owner decision 2026-10-26): the
+		// request is v2, names the installation of the root-pinned bundle
+		// and is signed under keyroster/revoke-request/v2.
+		e := newDirEnv(t, 1, 1)
+		e.serveRevoke(ok, e.krlDoc(t, 3, 9, e.bundle.InstallationID, e.ops))
+		if code, _, stderr := run(t, "revoke", "serial", "1729"); code != 0 {
+			t.Fatalf("exit %d: %s", code, stderr)
+		}
+		e.mu.Lock()
+		raw := e.revokeBody
+		e.mu.Unlock()
+		var body serverclient.RevokeBody
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+		req, err := wire.ParseRevokeRequest(body.Request)
+		if err != nil || e.bundle.InstallationID == "" || req.InstallationID != e.bundle.InstallationID || len(req.Evidence) != 1 {
+			t.Fatalf("request %+v, %v; want one for installation %q", req, err, e.bundle.InstallationID)
+		}
+		sig, err := sshsig.Parse(req.Evidence[0].Blob)
+		if err != nil || sig.Verify("keyroster/revoke-request/v2", req.SigningBytes()) != nil {
+			t.Fatalf("the evidence is not an SSHSIG under keyroster/revoke-request/v2 over the request: %v", err)
 		}
 	})
 	t.Run("issued_inside_window", func(t *testing.T) {

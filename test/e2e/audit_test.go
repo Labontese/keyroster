@@ -16,8 +16,10 @@ import (
 )
 
 // bootstrapLeaves is the number of log entries a bootstrapped signer
-// starts with: ca_init and bundle_install.
-const bootstrapLeaves = 2
+// holds once it has served: ca_init, bundle_install and the krl_publish of
+// the empty first KRL, which serve writes at its first start because every
+// genesis bundle carries an installation ID (D-10, 03-03).
+const bootstrapLeaves = 3
 
 // auditVerify runs keyroster audit verify pinned to env's roots at
 // threshold 1 and returns its exit code and output.
@@ -67,9 +69,9 @@ func TestAuditVerifiesIssuance(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("keyroster audit verify exited %d:\n%s", code, out)
 	}
-	if !strings.HasPrefix(out, "OK: 5 entries,") || !strings.Contains(out, "issued 3") ||
+	if !strings.HasPrefix(out, "OK: "+strconv.Itoa(bootstrapLeaves+3)+" entries,") || !strings.Contains(out, "issued 3") ||
 		!strings.Contains(out, "not checked: that each issuance was authorized") {
-		t.Fatalf("audit verify output = %q, want OK with 5 entries (ca_init, bundle_install, 3 issuances) and 3 issued", out)
+		t.Fatalf("audit verify output = %q, want OK with %d entries (ca_init, bundle_install, the start-up krl_publish, 3 issuances) and 3 issued", out, bootstrapLeaves+3)
 	}
 	t.Logf("audit verify: %s", strings.TrimSpace(out))
 
@@ -196,8 +198,8 @@ func TestRefusalsAreAudited(t *testing.T) {
 		t.Fatalf("audit verify --json: %v\n%s", err, out)
 	}
 	if res.Entries != bootstrapLeaves+4 || res.Issued != 1 || res.Kinds["refusal"] != 3 ||
-		res.Kinds["ca_init"] != 1 || res.Kinds["bundle_install"] != 1 {
-		t.Fatalf("audit verify = %+v, want 6 entries: ca_init, bundle_install, 3 refusals and 1 issuance", res)
+		res.Kinds["ca_init"] != 1 || res.Kinds["bundle_install"] != 1 || res.Kinds["krl_publish"] != 1 {
+		t.Fatalf("audit verify = %+v, want %d entries: ca_init, bundle_install, the start-up krl_publish, 3 refusals and 1 issuance", res, bootstrapLeaves+4)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

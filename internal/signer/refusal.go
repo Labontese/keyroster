@@ -240,7 +240,8 @@ func classify(detail string) uint8 {
 		return tlog.ReasonPeerNotAllowed
 	case "malformed_frame", "unknown_message_type", "malformed_request", "directory_invalid",
 		// Revocation details (Phase 3).
-		"unknown_serial", "ca_role_mismatch":
+		"unknown_serial", "ca_role_mismatch", "subject_kind_unsupported", "key_is_ca_of_this_installation",
+		"key_id_not_issued", "explicit_key_cap_reached":
 		return tlog.ReasonMalformed
 	case "ca_not_configured":
 		return tlog.ReasonCANotConfigured
@@ -273,7 +274,9 @@ func classify(detail string) uint8 {
 		"credential_mismatch", "bad_authenticator_data", "rp_mismatch", "user_presence_missing",
 		"user_verification_missing", "bad_client_data", "type_mismatch", "challenge_mismatch",
 		"origin_mismatch", "cross_origin_refused", "assertion_signature_invalid", "unsupported_algorithm",
-		"directory_version_chain", "directory_quorum_not_met", "directory_exceeds_policy":
+		"directory_version_chain", "directory_quorum_not_met", "directory_exceeds_policy",
+		// Revocation installation binding (03-03, the T-03-20 rule).
+		"revoke_installation_missing", "revoke_installation_mismatch":
 		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal

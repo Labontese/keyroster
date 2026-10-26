@@ -5,12 +5,14 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,13 +27,17 @@ import (
 // certificates A and B log in to real sshd whose RevokedKeys points at
 // <dir>/current/revoked.krl (a zero-byte file, which revokes nothing);
 // keyroster revoke serial A goes through keyroster-server to the signer,
-// which publishes KRL v1 written by our own encoder with an ops-signed,
+// which publishes the next KRL version (above the empty KRL its first
+// start published, 03-03) written by our own encoder with an ops-signed,
 // installation-bound manifest; the test fetches it through
 // serverclient.Client.GetKRL, verifies it with krl.VerifyManifest against
 // the root-pinned bundle, checks the candidate file with ssh-keygen -Q
 // (A revoked, B not) and swaps current with rename(2). With no signal sent
 // and the same sshd PID, A is refused with sshd's revoked-key log line and
-// B still logs in. A restarted signer serves the same KRL.
+// B still logs in. A restarted signer serves the same KRL, and keyroster
+// audit verify accepts the exported log with its revoke and krl_publish
+// entries (03-03). Versions are compared, never pinned: krl_version is
+// max(previous + 1, issued_at) (owner decision 2026-10-25, Q1).
 //
 // The direct rename is test harness, not the agent: only the KRL changes
 // between gen/1 and gen/2, so 03-05's intermediate generation would equal
@@ -83,6 +89,20 @@ func TestRevokeSerialEndToEnd(t *testing.T) {
 		}
 	}
 
+	// The empty KRL serve published at its first start (03-03).
+	client, bundle := revokeClient(t, env)
+	doc0, err := client.GetKRL(context.Background())
+	if err != nil || doc0 == nil {
+		t.Fatalf("GetKRL before the revocation = %v, %v", doc0, err)
+	}
+	m0, err := krl.VerifyManifest(doc0.Manifest, doc0.Sig, doc0.KRL, bundle, env.Signer.InstallationID, 0)
+	if err != nil {
+		t.Fatalf("VerifyManifest of the start-up KRL: %v", err)
+	}
+	if code, out := keygenQuery(t, writeKRL(t, doc0.KRL), a.cert); code != 0 {
+		t.Fatalf("the start-up KRL revokes A (ssh-keygen -Q exited %d):\n%s", code, out)
+	}
+
 	// 4. keyroster revoke serial A through keyroster-server.
 	admin := newCLIEnv(t)
 	if code, out, errOut := runCLIIn(t, admin, "", "", keyrosterBin, append(env.initArgs(), "--admin-key", env.Signer.AdminFingerprint)...); code != 0 {
@@ -93,25 +113,29 @@ func TestRevokeSerialEndToEnd(t *testing.T) {
 		t.Fatalf("keyroster revoke serial exited %d:\n%s%s\nserver log:\n%s", code, out, errOut, env.Stderr.String())
 	}
 	t.Logf("keyroster revoke serial:\n%s", out)
-	if !strings.Contains(out, "The server reports serial "+a.serial+" (user) revoked: KRL v1 published") ||
-		!strings.Contains(out, "Checked: the server serves KRL v1, signed by the ops key of your root-pinned trust bundle") ||
+	match := regexp.MustCompile(`The server reports serial ` + a.serial + ` \(user\) revoked: KRL v([0-9]+) published`).FindStringSubmatch(out)
+	if match == nil ||
+		!strings.Contains(out, "Checked: the server serves KRL v"+match[1]+", signed by the ops key of your root-pinned trust bundle") ||
 		!strings.Contains(out, "Hosts enforce it once their keyroster agent applies this KRL.") {
 		t.Fatalf("keyroster revoke serial output:\n%s", out)
+	}
+	reported, err := strconv.ParseUint(match[1], 10, 64)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	// 5. GET /api/v1/krl through the pinned client; verify against the
 	// root-pinned bundle and the installation ID.
-	client, bundle := revokeClient(t, env)
 	doc, err := client.GetKRL(context.Background())
 	if err != nil || doc == nil {
 		t.Fatalf("GetKRL = %v, %v", doc, err)
 	}
-	m, err := krl.VerifyManifest(doc.Manifest, doc.Sig, doc.KRL, bundle, env.Signer.InstallationID, 0)
+	m, err := krl.VerifyManifest(doc.Manifest, doc.Sig, doc.KRL, bundle, env.Signer.InstallationID, m0.KRLVersion)
 	if err != nil {
-		t.Fatalf("VerifyManifest: %v", err)
+		t.Fatalf("VerifyManifest (strictly above the start-up KRL v%d): %v", m0.KRLVersion, err)
 	}
-	if m.KRLVersion != 1 || m.InstallationID != env.Signer.InstallationID || m.BundleVersion != 1 {
-		t.Fatalf("manifest = %+v", m)
+	if m.KRLVersion != reported || m.InstallationID != env.Signer.InstallationID || m.BundleVersion != 1 {
+		t.Fatalf("manifest = %+v, want the version the CLI reported (%d)", m, reported)
 	}
 	t.Logf("manifest: %s", doc.Manifest)
 
@@ -169,9 +193,37 @@ func TestRevokeSerialEndToEnd(t *testing.T) {
 	if !bytes.Equal(doc2.KRL, doc.KRL) || !bytes.Equal(doc2.Manifest, doc.Manifest) || !bytes.Equal(doc2.Sig, doc.Sig) {
 		t.Fatal("the restarted signer serves another KRL")
 	}
-	if m2, err := krl.ParseManifest(doc2.Manifest); err != nil || m2.KRLVersion != 1 {
-		t.Fatalf("manifest after the restart = %+v, %v", m2, err)
+	if m2, err := krl.ParseManifest(doc2.Manifest); err != nil || m2.KRLVersion != m.KRLVersion {
+		t.Fatalf("manifest after the restart = %+v, %v; want version %d again", m2, err, m.KRLVersion)
 	}
+
+	// 9. keyroster audit verify checks the revoke entry and both
+	// krl_publish entries (the start-up publish and the revocation's) of
+	// the exported log; the restart published nothing.
+	code, out = auditVerify(t, env.Signer, env.Signer.exportLog(t), "--json")
+	if code != 0 {
+		t.Fatalf("keyroster audit verify exited %d:\n%s", code, out)
+	}
+	var res struct {
+		Kinds map[string]uint64 `json:"kinds"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("audit verify --json: %v\n%s", err, out)
+	}
+	if res.Kinds["revoke"] != 1 || res.Kinds["krl_publish"] != 2 {
+		t.Fatalf("audit verify kinds = %v, want 1 revoke and 2 krl_publish entries", res.Kinds)
+	}
+	t.Logf("keyroster audit verify: %s", strings.TrimSpace(out))
+}
+
+// writeKRL writes data to a fresh file and returns its path.
+func writeKRL(t *testing.T, data []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "revoked.krl")
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // revokeClient builds the pinned TLS client for env's server and returns

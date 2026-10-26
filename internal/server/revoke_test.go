@@ -37,7 +37,7 @@ func (f *fakeSigner) setKRL(resp *wire.GetKRLResponse, err error) {
 // revokeBody is a POST AdminRevokePath body carrying a revoke request.
 func revokeBody(t *testing.T) ([]byte, *wire.RevokeRequest) {
 	t.Helper()
-	req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: 42, CreatedAt: 1700000000,
+	req := &wire.RevokeRequest{InstallationID: "0123456789abcdef0123456789abcdef", Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: 42, CreatedAt: 1700000000,
 		Evidence: []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sig")}}}
 	raw, err := req.Marshal()
 	if err != nil {

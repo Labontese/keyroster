@@ -74,20 +74,29 @@ keyroster revoke serial SERIAL --ca user --reason "laptop lost"
 printable ASCII, at most 256 bytes, and goes into the audit log with the
 request. The command verifies the served trust bundle against your root
 pins first, then signs the request in ssh-agent under
-`keyroster/revoke-request/v1`.
+`keyroster/revoke-request/v2`. The request names the installation ID of
+that bundle, so your signature revokes in no other installation: the
+signer refuses a request for another installation
+(`revoke_installation_mismatch`) and a 03-01 request under
+`keyroster/revoke-request/v1`, which names none
+(`revoke_installation_missing`). Run in CI (signer, audit and CLI tests,
+03-03 pre-merge review).
 
 Expected output:
 
 ```
-The server reports serial 1792869357962865 (user) revoked: KRL v1 published (log entries 4, 5).
-Checked: the server serves KRL v1, signed by the ops key of your root-pinned trust bundle (log entry 5), issued at 2026-10-25T09:14:07Z, at most 300 s before this request.
-Not checked: that this KRL lists serial 1792869357962865 (this version cannot read a KRL). A KRL that another revocation published in those 300 s passes the same checks; the signer's "revoked" line (journalctl -u keyroster-signer) is the proof.
+The server reports serial 1792869357962865 (user) revoked: KRL v1792919647 published (log entries 5, 6).
+Checked: the server serves KRL v1792919647, signed by the ops key of your root-pinned trust bundle (log entry 6), issued at 2026-10-25T09:14:07Z, at most 300 s before this request.
+Not checked: that this KRL lists serial 1792869357962865 (this version cannot read a KRL). Any genuine KRL issued after that passes the same checks, including the one the signer re-publishes by itself every hour, so a compromised keyroster-server can show one without having forwarded this revocation; the signer's "revoked" line (journalctl -u keyroster-signer) is the proof.
 Hosts enforce it once their keyroster agent applies this KRL.
 ```
 
 The two log entries are the `revoke` entry and the `krl_publish` entry,
-written in one transaction with the revocation itself. Run in CI e2e
-(`TestRevokeSerialEndToEnd`, 03-01).
+written in one transaction with the revocation itself. The KRL version is
+the publish time in seconds or the previous version plus 1, whichever is
+larger, so it always grows and a restored signer with a correct clock
+publishes above every version it lost (03-03). Run in CI e2e
+(`TestRevokeSerialEndToEnd`, 03-01, versions since 03-03).
 
 With `--ca host` the last line instead says that a host certificate is
 checked by SSH clients, through `RevokedHostKeys`, and that nothing
@@ -105,8 +114,12 @@ but that could not be confirmed: ...` and exits non-zero; nothing tells
 you whether the signer revoked, so check the signer host. This catches an
 invented version, and an earlier genuine KRL replayed under an invented
 answer when it was published more than 300 s before the request. It does
-not catch a genuine KRL that another revocation published inside those
-300 s: only reading the KRL for the serial would, which 03-03 adds. The
+not catch any genuine KRL issued after that point: the check has no upper
+bound, and the signer re-publishes the KRL by itself every hour (section
+3), so a compromised keyroster-server can show a fresh, genuine KRL
+without forwarding the request and without any other revocation. Only
+reading the KRL for the serial catches that, which 03-03b adds
+(`krl.Parse`). The
 confirmation and each of its refusals ran in the CLI
 tests against a stub server (`TestRevokeSerialConfirm`); the confirmed
 path also runs in CI e2e.
@@ -150,6 +163,25 @@ which makes every certificate of the old CA useless at once.
 and its rollback ran in the signer's unit tests
 (`TestRevokeKRLTooLarge`).
 
+### `explicit_key_cap_reached`
+
+An explicit key never leaves the KRL, so the signer revokes at most 1000
+distinct keys by key, taking at most 1 MiB of the KRL (an RSA key above
+4096 bits or a security-key key with a long application string reaches
+the 1 MiB first). Revoking a key that is already revoked always works.
+Beyond the cap a key revocation is refused and nothing is recorded, so
+the other 3 MiB of the KRL stay for serial and key-ID entries, which
+leave it as their certificates expire: one admin cannot fill the KRL for
+good. What one admin can still do is use up the cap, after which no
+further key can be revoked by key; revocation by serial, key ID and
+subject still works, and audit verify shows every key revocation and who
+signed it. **There is no remedy in this version**, because revocation
+rows are never deleted: remove such a key from every `authorized_keys`
+file by hand, and revoke its certificates by serial. The refusal and the
+cap ran in the signer's, audit's and krl's unit tests
+(`explicit_key_cap_reached`, `explicit_key_cap_refused`,
+`TestCheckExplicitKeys`, pre-merge review of PR #61).
+
 ### `revocations_not_logged`
 
 Every KRL is rebuilt from the signer's revocation table, which the signed
@@ -171,8 +203,23 @@ written or run. The refusal ran in the signer's unit tests
 keyroster-server serves the published KRL to any TLS client at
 `GET /api/v1/krl`: a JSON document with the KRL bytes, a canonical
 manifest and the ops key's detached SSHSIG over it (namespace
-`keyroster/krl/v1`). Before the first revocation it answers 404
-`no_krl`. The route needs no login, so keyroster-server keeps the
+`keyroster/krl/v1`). The signer publishes its first KRL, which revokes
+nothing, the first time `serve` starts with a trust bundle that carries
+an installation ID, before it accepts a request, so a 404 `no_krl` now
+means the signer has not published yet: its bundle has no installation
+ID, or that first publish failed (its log says why, and it tries again
+every minute). From then on the signer publishes the next version by
+itself whenever the last one is an hour old, with a fresh `issued_at` and
+the same entries, so a reader can tell a KRL that stopped being updated
+(D-10). An entry stays in the KRL until its certificate's ValidBefore +
+300 s at the KRL's `issued_at`; an explicit key stays for good. The
+signer revokes a key ID only when it issued a certificate with that key
+ID under a CA key of the role (otherwise `key_id_not_issued`; revoke a
+certificate it did not issue by its key), so every key-ID entry leaves
+once its certificate expires. The KRL keeps the
+sections of CA keys the trust bundle no longer trusts until their entries
+expire. Run in CI (internal/krl and internal/signer tests, 03-03). The
+route needs no login, so keyroster-server keeps the
 signer's last answer for up to 5 seconds and asks the signer at most
 once for any number of requests in that time; a revocation through it
 drops the copy before it answers, so the next read shows the new
@@ -191,12 +238,21 @@ no command fetches the KRL for a hand install yet.
 
 ## 4. The audit log after a revocation
 
-From the first revocation until 03-03 merges, `keyroster audit verify`
-refuses the log at the first `revoke` or `krl_publish` entry with
-`audit: entry N (revoke): not verifiable by this version`. That is by
-design: a check this version does not have is never skipped. A log
-without such entries verifies as before. Run in the audit unit tests
-(`TestVerifyKindsWithoutChecks`); on the homelab UNVERIFIED until 03-16.
+`keyroster audit verify` checks revoke and krl_publish entries since
+03-03: each revoke entry against the admin-signed request it logs and the
+certificates the log issued, and each published KRL against the one it
+re-derives from the logged revocations. An older binary says "not
+verifiable by this version" at the first such entry; that is not
+tampering, use a current binary. Run in the audit and signer unit tests
+(`TestVerifyRevocations`, `TestRevokeSubjectTracer`) and in CI e2e
+(`TestRevokeSerialEndToEnd`); on the homelab UNVERIFIED until 03-16.
+
+Always take a saved export after every revocation
+(`keyroster-signer export-log`, kept off the signer VM): a signer restore
+loses every revocation made after the latest saved export without a
+trace, and the restore's check in
+[signer-install.md](signer-install.md#a-restore-brings-back-the-older-trust-bundle-policy-and-directory)
+cannot see it (T-03-207).
 
 ## 5. On the homelab
 

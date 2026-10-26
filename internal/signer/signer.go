@@ -36,6 +36,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/keystore"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serial"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -80,6 +81,17 @@ type Signer struct {
 	// installationID is the installed bundle's installation ID (D-04),
 	// "" when it has none; no KRL is published then.
 	installationID string
+	// roleCAKeys are the wire encodings of every CA key of each role in
+	// the installed bundle, in any state, sorted (krl.RoleCAKeys): a
+	// key-ID revocation is recorded under each of them.
+	roleCAKeys map[wire.CARole][][]byte
+	// installationKeys are the wire encodings of every key the installed
+	// bundle names (krl.InstallationKeys), which a key revocation refuses
+	// (key_is_ca_of_this_installation).
+	installationKeys map[string]bool
+	// newKRLTicker makes the ticker of krlLoop; tests replace it. nil
+	// means a time.Ticker of krlCheckInterval.
+	newKRLTicker func() (<-chan time.Time, func())
 	// krl is the published KRL in force, nil when none is. It is written
 	// under mu (loadKRL, Revoke after COMMIT) but read without it: GetKRL
 	// serves unauthenticated GET /api/v1/krl and must not wait for an
@@ -162,6 +174,17 @@ func New(cfg Config) (*Signer, error) {
 
 		bundleVersion:  ts.bundle.Version,
 		installationID: ts.bundle.InstallationID,
+		roleCAKeys:     map[wire.CARole][][]byte{},
+	}
+	for _, role := range []wire.CARole{wire.CARoleUser, wire.CARoleHost, wire.CARoleMachine} {
+		keys, err := krl.RoleCAKeys(ts.bundle, role.String())
+		if err != nil {
+			return nil, fmt.Errorf("signer: installed trust bundle: %w", err)
+		}
+		s.roleCAKeys[role] = keys
+	}
+	if s.installationKeys, err = krl.InstallationKeys(ts.bundle); err != nil {
+		return nil, fmt.Errorf("signer: installed trust bundle: %w", err)
 	}
 	if s.clock == nil {
 		s.clock = time.Now

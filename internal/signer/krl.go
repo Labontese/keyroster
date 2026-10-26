@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -21,16 +19,23 @@ import (
 )
 
 // publishKRLLocked rebuilds the KRL from the whole revocation table inside
-// tx and publishes it as the next version: krl.Encode with now as its
-// generated_date, a manifest {installation ID of the bundle in force,
-// version, SHA-256, issued_at = now in whole seconds, bundle version, the
-// index the krl_publish leaf takes} signed by the ops key under
-// krl.Namespace, the KRL state row, and the krl_publish leaf. A KRL above
-// krl.MaxKRL is refused krl_too_large, which rolls the whole transaction
-// back, so the revocation table never holds an entry no published KRL
-// carries. Rows that are not exactly the logged revoke entries are refused
-// revocations_not_logged before the ops key signs, and the signer stops.
-// The caller holds s.mu and runs tx through logTx.
+// tx and publishes it as the next version. One clock reading, now, gives
+// issued_at (now in whole seconds) and the KRL's generated_date. The set
+// is built by krl.PublishSet from every revocation row, whichever CA keys
+// the bundle in force trusts, so only entries no longer live at issued_at
+// leave it, and a row whose valid_before is unknown never does. The
+// version is max(prev + 1, issued_at), prev being the published version
+// (0 before the first): a restored signer with a correct clock publishes
+// above every version it lost (owner decision 2026-10-25, Q1). Then
+// krl.Encode, a manifest {installation ID of the bundle in force, version,
+// SHA-256, issued_at, bundle version, the index the krl_publish leaf
+// takes} signed by the ops key under krl.Namespace, the KRL state row, and
+// the krl_publish leaf. A KRL above krl.MaxKRL is refused krl_too_large,
+// which rolls the whole transaction back, so the revocation table never
+// holds an entry no published KRL carries. Rows that are not exactly the
+// logged revoke entries are refused revocations_not_logged before the ops
+// key signs, and the signer stops. The caller holds s.mu and runs tx
+// through logTx.
 func (s *Signer) publishKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time) (*signerdb.KRLState, uint64, error) {
 	if s.installationID == "" {
 		return nil, 0, refusalErr(wire.CodeUnavailable, "krl_no_installation_id", nil)
@@ -39,18 +44,21 @@ func (s *Signer) publishKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time
 	if err != nil {
 		return nil, 0, err
 	}
-	set, err := revocationSet(revs)
+	issued := now.UTC().Truncate(time.Second)
+	issuedAt := uint64(max(issued.Unix(), 0)) //nolint:gosec // G115: >= 0
+	set, err := krl.PublishSet(revocationEntries(revs), issuedAt)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, refusalErr(wire.CodeInternal, "krl_encoding", err)
 	}
 	prev, err := s.db.KRLStateTx(ctx, tx)
 	if err != nil {
 		return nil, 0, err
 	}
-	version := uint64(1)
+	var prevVersion uint64
 	if prev != nil {
-		version = prev.Version + 1
+		prevVersion = prev.Version
 	}
+	version := max(prevVersion+1, issuedAt)
 	data, err := krl.Encode(set, version, now)
 	if err != nil {
 		if errors.Is(err, krl.ErrTooLarge) {
@@ -73,7 +81,6 @@ func (s *Signer) publishKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time
 	if err := logged.check(revs); err != nil {
 		return nil, 0, refusalErr(wire.CodeUnavailable, "revocations_not_logged", err)
 	}
-	issued := now.UTC().Truncate(time.Second)
 	m := krl.Manifest{
 		InstallationID: s.installationID,
 		KRLVersion:     version,
@@ -97,7 +104,7 @@ func (s *Signer) publishKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time
 	body, err := (&tlog.KRLPublishBody{
 		KRLVersion:      version,
 		BundleVersion:   s.bundleVersion,
-		IssuedAtSeconds: uint64(max(issued.Unix(), 0)), //nolint:gosec // G115: >= 0
+		IssuedAtSeconds: issuedAt,
 		SHA256:          sha256.Sum256(data),
 		Manifest:        manifest,
 		Sig:             sig,
@@ -115,31 +122,107 @@ func (s *Signer) publishKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time
 	return &st, idx, nil
 }
 
-// revocationSet groups the serial revocations by CA key.
-func revocationSet(revs []signerdb.Revocation) (krl.Set, error) {
-	var (
-		set   krl.Set
-		index = map[string]int{} // CA key wire bytes -> position in set.Certs
-	)
-	for _, r := range revs {
-		if r.Kind != signerdb.RevocationSerial {
-			// The key_id and key kinds arrive with 03-03; a row this
-			// version cannot put into the KRL must not be dropped silently.
-			return krl.Set{}, fmt.Errorf("signer: revocation %d has kind %q, which this version cannot publish", r.ID, r.Kind)
-		}
-		i, ok := index[string(r.CAKey)]
-		if !ok {
-			pub, err := ssh.ParsePublicKey(r.CAKey)
-			if err != nil {
-				return krl.Set{}, fmt.Errorf("signer: revocation %d: CA key: %w", r.ID, err)
-			}
-			i = len(set.Certs)
-			index[string(r.CAKey)] = i
-			set.Certs = append(set.Certs, krl.CertSerials{CAKey: pub})
-		}
-		set.Certs[i].Serials = append(set.Certs[i].Serials, r.Serial)
+// revocationEntries maps the revocation rows to the entries krl.PublishSet
+// builds a KRL from. A row's valid_before is in microseconds (0, from
+// NULL, when not known); the entry takes it in whole seconds.
+func revocationEntries(revs []signerdb.Revocation) []krl.Entry {
+	kinds := map[string]uint8{
+		signerdb.RevocationSerial: krl.EntrySerial,
+		signerdb.RevocationKeyID:  krl.EntryKeyID,
+		signerdb.RevocationKey:    krl.EntryKey,
 	}
-	return set, nil
+	out := make([]krl.Entry, 0, len(revs))
+	for _, r := range revs {
+		out = append(out, krl.Entry{
+			Kind:        kinds[r.Kind], // an unknown kind maps to 0, which PublishSet refuses
+			CAKey:       r.CAKey,
+			Serial:      r.Serial,
+			KeyID:       r.KeyID,
+			Key:         r.Key,
+			ValidBefore: r.ValidBeforeMicros / uint64(time.Second/time.Microsecond),
+		})
+	}
+	return out
+}
+
+// D-10: the signer re-publishes the KRL by itself, so a frozen server
+// shows through the KRL's signed issued_at.
+const (
+	// krlRepublishAfter is the age of the last publish at which the
+	// signer publishes the next version with an unchanged set.
+	krlRepublishAfter = time.Hour
+	// krlCheckInterval is how often krlLoop checks that age.
+	krlCheckInterval = time.Minute
+)
+
+// krlLoop runs republishIfDue on every tick of the KRL ticker (every
+// krlCheckInterval unless a test set newKRLTicker) until ctx is done.
+// Serve runs the first check itself, before it accepts any connection.
+func (s *Signer) krlLoop(ctx context.Context) {
+	newTicker := s.newKRLTicker
+	if newTicker == nil {
+		newTicker = func() (<-chan time.Time, func()) {
+			t := time.NewTicker(krlCheckInterval)
+			return t.C, t.Stop
+		}
+	}
+	tick, stop := newTicker()
+	defer stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+			s.republishIfDue(ctx)
+		}
+	}
+}
+
+// republishIfDue publishes the next KRL version, by the rules of every
+// publish and with the set otherwise unchanged, when the bundle in force
+// has an installation ID and either no KRL is published or the last
+// publish is at least krlRepublishAfter old on the signer's clock, or
+// dated after it (D-10; pre-merge review of PR #61).
+// It runs under s.mu in one logTx, with the trust check every request
+// makes, so a signer still running after another bundle was installed
+// publishes nothing. A failure is logged at error level and retried at the
+// next check; it never stops the signer. It reports whether it published.
+func (s *Signer) republishIfDue(ctx context.Context) bool {
+	// installationID is fixed for the life of the process, so a signer
+	// that publishes nothing never waits for s.mu here.
+	if s.installationID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.clock()
+	// A negative age (the last publish is dated after the clock: it ran
+	// ahead and was corrected) is due too: waiting until the clock passed
+	// it would keep serving a KRL whose future issued_at looks fresh.
+	if st := s.krl.Load(); st != nil {
+		if age := now.Sub(st.PublishedAt); age >= 0 && age < krlRepublishAfter {
+			return false
+		}
+	}
+	var (
+		published *signerdb.KRLState
+		leaf      uint64
+	)
+	err := s.logTx(ctx, func(tx *sql.Tx) error {
+		if err := s.checkTrustCurrent(s.db.LatestBundleVersionTx(ctx, tx)); err != nil {
+			return err
+		}
+		var err error
+		published, leaf, err = s.publishKRLLocked(ctx, tx, now)
+		return err
+	})
+	if err != nil {
+		s.log.Error("KRL publish failed; retrying at the next check", "error", err.Error())
+		return false
+	}
+	s.krl.Store(published)
+	s.log.Info("KRL published", "krl_version", published.Version, "publish_leaf", leaf)
+	return true
 }
 
 // nextLeafIndexLocked returns the index the next appended leaf takes in

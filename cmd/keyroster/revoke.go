@@ -50,9 +50,10 @@ var revokeCARoles = map[string]wire.CARole{
 // runRevokeSerial is keyroster revoke serial SERIAL [--ca user|host|machine]
 // [--reason TEXT] [--admin-key FP] (REVOKE-01, CLI only per D-12). It
 // verifies the served trust bundle against the saved root pins, builds a
-// RevokeRequest with a fresh random request ID and the current time, signs
-// its signing bytes with the admin key in ssh-agent under
-// keyroster/revoke-request/v1, and sends it through the admin API. The
+// RevokeRequest with a fresh random request ID, the current time and the
+// bundle's installation ID, signs its signing bytes with the admin key in
+// ssh-agent under keyroster/revoke-request/v2, and sends it through the
+// admin API. The
 // server forwards it to the signer, which alone decides and publishes the
 // next KRL. The server's answer is unsigned, so the command reports it as
 // the server's and confirms it against the signer-signed KRL manifest the
@@ -93,9 +94,9 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		return err
 	}
-	// Marshal checks every field limit (the reason's charset and length)
+	// Validate checks every field limit (the reason's charset and length)
 	// before the admin key signs anything.
-	if _, err := req.Marshal(); err != nil {
+	if err := req.Validate(); err != nil {
 		_, _ = fmt.Fprintf(stderr, "revoke serial: %v\n", err)
 		return errUsage
 	}
@@ -109,6 +110,13 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 	if err != nil {
 		return err
 	}
+	// The request names the installation of the root-pinned bundle
+	// (keyroster/revoke-request/v2), so this admin signature revokes in no
+	// other installation (the T-03-20 rule of directories).
+	if bundle.InstallationID == "" {
+		return fmt.Errorf("trust bundle v%d in force has no installation ID, so the signer revokes nothing (krl_no_installation_id); see docs/runbooks/revoke.md", bundle.Version)
+	}
+	req.InstallationID = bundle.InstallationID
 	sig, err := sshsig.Sign(rand.Reader, s.signer, wire.RevokeSSHSIGNamespace, req.SigningBytes())
 	if err != nil {
 		return fmt.Errorf("sign the revocation with %s: %w", s.adminFP, err)
@@ -134,9 +142,10 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 	_, _ = fmt.Fprintf(stdout, "Checked: the server serves KRL v%d, signed by the ops key of your root-pinned trust bundle (log entry %d), "+
 		"issued at %s, at most %d s before this request.\n"+
 		"Not checked: that this KRL lists serial %d (this version cannot read a KRL). "+
-		"A KRL that another revocation published in those %d s passes the same checks; "+
+		"Any genuine KRL issued after that passes the same checks, including the one the signer re-publishes by itself every hour, "+
+		"so a compromised keyroster-server can show one without having forwarded this revocation; "+
 		"the signer's \"revoked\" line (journalctl -u keyroster-signer) is the proof.\n",
-		m.KRLVersion, m.LogIndex, m.IssuedAt, wire.MaxRequestSkewSeconds, serial, wire.MaxRequestSkewSeconds)
+		m.KRLVersion, m.LogIndex, m.IssuedAt, wire.MaxRequestSkewSeconds, serial)
 	_, _ = fmt.Fprintln(stdout, revokeEnforcement(role))
 	return nil
 }
@@ -166,8 +175,10 @@ func revokeEnforcement(role wire.CARole) string {
 // window, so the KRL this revocation published can never fail it. A
 // server that dropped the request cannot show a manifest the signer
 // never signed, nor replay one published before that window under an
-// invented answer; it can still show a genuine one published inside the
-// window, which only reading the KRL for the serial catches (03-03).
+// invented answer. It can still show any genuine one issued later: there
+// is no upper bound, and the signer re-publishes by itself every hour
+// (D-10), so it needs no other revocation. Only reading the KRL for the
+// serial catches that (03-03b, krl.Parse).
 func confirmRevokeAnswer(ctx context.Context, c *serverclient.Client, b *trust.Bundle, ans serverclient.RevokeAnswer, createdAt uint64) (*krl.Manifest, error) {
 	if ans.KRLVersion < 1 || ans.PublishLeaf != ans.RevokeLeaf+1 {
 		return nil, fmt.Errorf("its answer (KRL v%d, log entries %d, %d) is not one the signer gives", ans.KRLVersion, ans.RevokeLeaf, ans.PublishLeaf)

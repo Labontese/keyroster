@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/directory"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -1399,10 +1401,12 @@ func TestVerifyAnchorsOnLaterBundle(t *testing.T) {
 
 // TestVerifyKindsWithoutChecks: from plan 02-01 until 02-04, audit verify
 // refused every directory_install and login_issue leaf with "not
-// verifiable by this version" (T-02-115). Plan 02-04 gave both kinds real
-// checks; these cases keep 02-01's leaves, whose bodies only encode (the
-// directory bytes are no directory, the request bytes prove nothing), and
-// show that the interim refusal was replaced by a check, not by a pass:
+// verifiable by this version" (T-02-115), and from 03-01 until 03-03 every
+// revoke and krl_publish leaf (T-03-07). Plans 02-04 and 03-03 gave those
+// kinds real checks; these cases keep the interim leaves, whose bodies
+// only encode (the directory bytes are no directory, the request bytes
+// prove nothing), and show that the interim refusal was replaced by a
+// check, not by a pass:
 // Verify still returns an error and no report, the error names the entry
 // and its kind, and it is not the interim text. Each export carries a
 // checkpoint correctly signed over all its leaves. The control shows every
@@ -1429,6 +1433,16 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 			return encode(t, &tlog.LoginIssueBody{Serial: 1 << 60, PolicyVersion: 1, DirectoryVersion: 1, Request: []byte("request"),
 				Evidence: []wire.Evidence{{Type: wire.EvidenceWebAuthnAssertion, Blob: []byte("assertion")}}, Cert: []byte("cert"), KeyID: "kr2"})
 		}, "logged request: "},
+		// From 03-01 until 03-03 the default branch refused these two kinds
+		// (T-03-07); 03-03 gave them real checks.
+		{"revoke_unproven_refused", tlog.KindRevoke, func(t *testing.T) []byte {
+			return encode(t, &tlog.RevokeBody{PolicyVersion: 1, ResolvedAtSeconds: 1, Request: []byte("request"),
+				Evidence: []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sig")}},
+				Entries:  []tlog.RevokedEntry{{Kind: tlog.RevokedSerial, CAKey: []byte("ca"), Serial: 1}}})
+		}, "logged request: "},
+		{"krl_publish_unproven_refused", tlog.KindKRLPublish, func(t *testing.T) []byte {
+			return encode(t, &tlog.KRLPublishBody{KRLVersion: 1, BundleVersion: 1, Manifest: []byte("manifest"), Sig: []byte("sig")})
+		}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := standard(t, "ed25519")
@@ -1448,33 +1462,6 @@ func TestVerifyKindsWithoutChecks(t *testing.T) {
 				t.Fatalf("error %q, want the check %q", err, tc.want)
 			}
 			t.Logf("refused by its check: %v", err)
-		})
-	}
-	// Interim behaviour from 03-01 until 03-03 adds their checks (T-03-07):
-	// the default branch refuses a revoke or krl_publish entry, at that
-	// entry, before it is hashed or counted; it never skips one.
-	for _, tc := range []struct {
-		name string
-		kind tlog.Kind
-		body func(t *testing.T) []byte
-	}{
-		{"revoke_not_verifiable", tlog.KindRevoke, func(t *testing.T) []byte {
-			return encode(t, &tlog.RevokeBody{PolicyVersion: 1, ResolvedAtSeconds: 1, Request: []byte("request"),
-				Evidence: []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: []byte("sig")}},
-				Entries:  []tlog.RevokedEntry{{Kind: tlog.RevokedSerial, CAKey: []byte("ca"), Serial: 1}}})
-		}},
-		{"krl_publish_not_verifiable", tlog.KindKRLPublish, func(t *testing.T) []byte {
-			return encode(t, &tlog.KRLPublishBody{KRLVersion: 1, BundleVersion: 1, Manifest: []byte("manifest"), Sig: []byte("sig")})
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := standard(t, "ed25519")
-			idx := len(f.leaves)
-			f.add(tc.kind, tc.body(t))
-			rep, err := f.verify(join(f.lines()), nil)
-			if want := fmt.Sprintf("audit: entry %d (%s): not verifiable by this version", idx, tc.kind); err == nil || rep != nil || err.Error() != want {
-				t.Fatalf("Verify = %+v, %v; want exactly %q", rep, err, want)
-			}
 		})
 	}
 	t.Run("phase1_kinds_still_verify", func(t *testing.T) {
@@ -2378,4 +2365,646 @@ func TestVerifyGrepFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+// auditInstallationID is the installation ID of the revocation fixtures'
+// genesis bundle.
+const auditInstallationID = "00112233445566778899aabbccddeeff"
+
+// revokeFixture is a fixture whose genesis bundle has an installation ID
+// and whose log can hold revoke and krl_publish entries written the way the
+// signer writes them: admin-signed requests, entries resolved from the
+// logged certificates, and KRLs built with krl.PublishSet from every
+// logged entry, signed by the bundle's ops key.
+type revokeFixture struct {
+	*fixture
+	entries    []krl.Entry // every revoke entry logged so far
+	krlVersion uint64
+}
+
+func newRevokeFixture(t testing.TB) *revokeFixture {
+	t.Helper()
+	f := newBareFixtureAt(t, "ed25519", time.Now())
+	g := f.genesis()
+	g.InstallationID = auditInstallationID
+	f.addBundle(f.signDocs(g, f.policy(), f.root))
+	return &revokeFixture{fixture: f}
+}
+
+// issue logs one certificate (kr1, subject u:alice, an hour) and returns
+// it.
+func (rf *revokeFixture) issue() *ssh.Certificate {
+	rf.t.Helper()
+	rf.serial++
+	c := rf.newCert(rf.serial, issuedAt(rf.serial))
+	rf.add(tlog.KindIssue, issueBody(rf.t, c, rf.serial))
+	return c
+}
+
+// secs is the next leaf's time in whole seconds (add raises the leaf time
+// by one microsecond first).
+func (rf *revokeFixture) secs() uint64 { return (rf.micros + 1) / 1_000_000 }
+
+// serialEntry is the serial entry of c as the signer writes it.
+func serialEntry(c *ssh.Certificate) tlog.RevokedEntry {
+	return tlog.RevokedEntry{Kind: tlog.RevokedSerial, CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, ValidBeforeSeconds: c.ValidBefore}
+}
+
+// revoke logs a revoke entry for req, resolved now (CreatedAt and
+// ResolvedAtSeconds the next leaf's whole seconds), signed by the policy
+// admin, listing entries; edit (optional) changes the body after signing.
+func (rf *revokeFixture) revoke(req *wire.RevokeRequest, entries []tlog.RevokedEntry, edit func(*tlog.RevokeBody)) {
+	rf.t.Helper()
+	at := rf.secs()
+	if req.CreatedAt == 0 {
+		req.CreatedAt = at
+	}
+	if req.Reason == "" {
+		req.Reason = "test"
+	}
+	if req.InstallationID == "" {
+		req.InstallationID = auditInstallationID
+	}
+	if req.RequestID == ([16]byte{}) {
+		if _, err := rand.Read(req.RequestID[:]); err != nil {
+			rf.t.Fatal(err)
+		}
+	}
+	sig, err := sshsig.Sign(rand.Reader, rf.admin, wire.RevokeSSHSIGNamespace, req.SigningBytes())
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	b := &tlog.RevokeBody{PolicyVersion: 1, ResolvedAtSeconds: at, Request: req.SigningBytes(),
+		Evidence: []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}, Entries: entries}
+	if edit != nil {
+		edit(b)
+	}
+	body, err := b.Encode()
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	rf.add(tlog.KindRevoke, body)
+	kinds := map[uint8]uint8{tlog.RevokedSerial: krl.EntrySerial, tlog.RevokedKeyID: krl.EntryKeyID, tlog.RevokedKey: krl.EntryKey}
+	for _, e := range b.Entries {
+		rf.entries = append(rf.entries, krl.Entry{Kind: kinds[e.Kind], CAKey: e.CAKey, Serial: e.Serial, KeyID: e.KeyID, Key: e.Key, ValidBefore: e.ValidBeforeSeconds})
+	}
+}
+
+// publishOpts changes a krl_publish entry before it is signed: its
+// version, issued_at (whole seconds), the entries the KRL is built from.
+type publishOpts struct {
+	version  uint64
+	issuedAt uint64
+	entries  []krl.Entry
+	data     []byte // the KRL bytes, instead of the ones built
+}
+
+// publish logs a krl_publish entry as the signer writes one: issued at the
+// next leaf's whole seconds, version max(prev + 1, issued_at), the KRL
+// krl.PublishSet builds from every logged entry, its manifest signed by
+// the ops key. edit (optional) changes the options first.
+func (rf *revokeFixture) publish(edit func(*publishOpts)) {
+	rf.t.Helper()
+	o := &publishOpts{issuedAt: rf.secs(), entries: rf.entries}
+	o.version = max(rf.krlVersion+1, o.issuedAt)
+	if edit != nil {
+		edit(o)
+	}
+	if o.data == nil {
+		set, err := krl.PublishSet(o.entries, o.issuedAt)
+		if err != nil {
+			rf.t.Fatal(err)
+		}
+		if o.data, err = krl.Encode(set, o.version, time.Unix(int64(o.issuedAt), 0)); err != nil { //nolint:gosec // G115: a test time
+			rf.t.Fatal(err)
+		}
+	}
+	m := krl.Manifest{InstallationID: auditInstallationID, KRLVersion: o.version, KRLSHA256: krl.SHA256Hex(o.data),
+		IssuedAt: time.Unix(int64(o.issuedAt), 0).UTC().Format(trust.TimeFormat), BundleVersion: 1, LogIndex: uint64(len(rf.leaves))} //nolint:gosec // G115: test values
+	manifest, err := m.Canonical()
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, rf.ops, krl.Namespace, manifest)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	body, err := (&tlog.KRLPublishBody{KRLVersion: o.version, BundleVersion: 1, IssuedAtSeconds: o.issuedAt,
+		SHA256: sha256.Sum256(o.data), Manifest: manifest, Sig: sig}).Encode()
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	rf.add(tlog.KindKRLPublish, body)
+	rf.krlVersion = o.version
+}
+
+func (rf *revokeFixture) verifyAll() (*Report, error) {
+	return rf.verify(join(rf.lines()), nil)
+}
+
+func subjectAlice() *wire.RevokeRequest {
+	return &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "u:alice"}
+}
+
+// bigSKKey returns a fresh canonical sk-ssh-ed25519@openssh.com public key
+// of exactly size bytes (at least 74), padded by its application string.
+func bigSKKey(t testing.TB, size int) []byte {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := ssh.Marshal(struct {
+		Name        string
+		KeyBytes    []byte
+		Application string
+	}{ssh.KeyAlgoSKED25519, pub, "ssh:" + strings.Repeat("x", size-74)})
+	if p, err := ssh.ParsePublicKey(k); err != nil || len(k) != size || !bytes.Equal(p.Marshal(), k) {
+		t.Fatalf("security-key key of %d bytes: %v", len(k), err)
+	}
+	return k
+}
+
+// fillKeyCap logs explicit-key revocations of 8000-byte keys, each
+// followed by its KRL publish, up to krl.MaxRevokedKeyBytes, and returns
+// the first key.
+func (rf *revokeFixture) fillKeyCap() []byte {
+	rf.t.Helper()
+	var first []byte
+	for range krl.MaxRevokedKeyBytes / 8004 {
+		k := bigSKKey(rf.t, 8000)
+		if first == nil {
+			first = k
+		}
+		rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: k}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: k}}, nil)
+		rf.publish(nil)
+	}
+	return first
+}
+
+// asV1 returns an edit that logs req as a 03-01 v1 request (no
+// installation ID, keyroster/revoke-request/v1), signed by the admin under
+// namespace.
+func (rf *revokeFixture) asV1(req *wire.RevokeRequest, namespace string) func(*tlog.RevokeBody) {
+	return func(b *tlog.RevokeBody) {
+		v1 := *req
+		v1.InstallationID = ""
+		b.Request = v1.SigningBytes()
+		sig, err := sshsig.Sign(rand.Reader, rf.admin, namespace, b.Request)
+		if err != nil {
+			rf.t.Fatal(err)
+		}
+		b.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+	}
+}
+
+// TestVerifyRevocations (REVOKE-01..03, T-03-13, T-03-14, T-03-16, T-03-202):
+// audit verify re-derives every revoke entry from the admin-signed request
+// and the logged certificates, and every krl_publish entry from the logged
+// revocations, and refuses every entry a signer could not have written.
+func TestVerifyRevocations(t *testing.T) {
+	type tc struct {
+		name  string
+		build func(rf *revokeFixture)
+		want  string // "" accepted, otherwise a substring of the refusal
+	}
+	cases := []tc{
+		{"revoke_subject_accepted", func(rf *revokeFixture) {
+			c1, c2 := rf.issue(), rf.issue()
+			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c1), serialEntry(c2)}, nil)
+			rf.publish(nil)
+		}, ""},
+		// Installation binding (pre-merge review of PR #61, owner decision
+		// 2026-10-26): a v2 request names its installation; a 03-01 v1
+		// request names none, revokes only by serial and is signed under
+		// keyroster/revoke-request/v1.
+		{"revoke_other_installation_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{InstallationID: "ffffffffffffffffffffffffffffffff", Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial},
+				[]tlog.RevokedEntry{serialEntry(c)}, nil)
+		}, "revoke_installation_mismatch"},
+		{"revoke_v1_serial_accepted", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, rf.asV1(req, wire.RevokeSSHSIGNamespaceV1))
+			rf.publish(nil)
+		}, ""},
+		{"revoke_v1_under_v2_namespace_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, rf.asV1(req, wire.RevokeSSHSIGNamespace))
+		}, "does not approve the logged request under keyroster/revoke-request/v1"},
+		{"revoke_v2_under_v1_namespace_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, func(b *tlog.RevokeBody) {
+				sig, err := sshsig.Sign(rand.Reader, rf.admin, wire.RevokeSSHSIGNamespaceV1, b.Request)
+				if err != nil {
+					rf.t.Fatal(err)
+				}
+				b.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+			})
+		}, "does not approve the logged request under keyroster/revoke-request/v2"},
+		{"revoke_v1_key_id_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: c.KeyId}
+			rf.revoke(req, []tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: rf.ca.PublicKey().Marshal(), KeyID: c.KeyId, ValidBeforeSeconds: c.ValidBefore}},
+				rf.asV1(req, wire.RevokeSSHSIGNamespaceV1))
+		}, "revokes only by serial"},
+		{"revoke_entries_tampered", func(rf *revokeFixture) {
+			c1, _ := rf.issue(), rf.issue()
+			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c1)}, nil) // omits the live c2
+		}, "lists 1 entries, but the log shows 2"},
+		{"revoke_entry_valid_before_tampered", func(rf *revokeFixture) {
+			c := rf.issue()
+			e := serialEntry(c)
+			e.ValidBeforeSeconds -= 3600 // so it would be pruned early
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{e}, nil)
+		}, "but the log shows serial"},
+		{"revoke_entry_ca_key_tampered", func(rf *revokeFixture) {
+			c := rf.issue()
+			e := serialEntry(c)
+			e.CAKey = rf.hostCA.PublicKey().Marshal()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{e}, nil)
+		}, "but the log shows serial"},
+		{"revoke_entry_other_target_refused_serial", func(rf *revokeFixture) {
+			c1, c2 := rf.issue(), rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c1.Serial}, []tlog.RevokedEntry{serialEntry(c2)}, nil)
+		}, "but the log shows serial"},
+		{"revoke_entry_other_target_refused_key_id", func(rf *revokeFixture) {
+			c1, c2 := rf.issue(), rf.issue()
+			ca := rf.ca.PublicKey().Marshal()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: c1.KeyId},
+				[]tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: ca, KeyID: c2.KeyId, ValidBeforeSeconds: c2.ValidBefore}}, nil)
+		}, "but the log shows key ID"},
+		{"revoke_entry_other_target_refused_key", func(rf *revokeFixture) {
+			k1, k2 := newSigner(rf.t, "ed25519").PublicKey().Marshal(), newSigner(rf.t, "ed25519").PublicKey().Marshal()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: k1}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: k2}}, nil)
+		}, "but the log shows key"},
+		{"revoke_key_id_ca_set_mismatch_refused_missing", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: c.KeyId}, nil, nil)
+		}, "lists 0 entries, but the log shows 1"},
+		{"revoke_key_id_ca_set_mismatch_refused_foreign", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: c.KeyId}, []tlog.RevokedEntry{
+				{Kind: tlog.RevokedKeyID, CAKey: rf.ca.PublicKey().Marshal(), KeyID: c.KeyId, ValidBeforeSeconds: c.ValidBefore},
+				{Kind: tlog.RevokedKeyID, CAKey: rf.hostCA.PublicKey().Marshal(), KeyID: c.KeyId}}, nil)
+		}, "lists 2 entries, but the log shows 1"},
+		{"revoke_key_id_accepted", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: c.KeyId},
+				[]tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: rf.ca.PublicKey().Marshal(), KeyID: c.KeyId, ValidBeforeSeconds: c.ValidBefore}}, nil)
+			rf.publish(nil)
+		}, ""},
+		// Pre-merge review of PR #61 (owner decision 2026-10-26, T-03-211):
+		// a key-ID entry the log's issuance does not support would never
+		// leave the KRL, and the signer refuses it (key_id_not_issued).
+		{"key_id_not_issued_refused", func(rf *revokeFixture) {
+			id := "kr1/ca=user/sub=nobody/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=1"
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: id},
+				[]tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: rf.ca.PublicKey().Marshal(), KeyID: id}}, nil)
+		}, "key_id_not_issued"},
+		{"key_id_not_issued_empty_refused", func(rf *revokeFixture) {
+			id := "kr1/ca=user/sub=nobody/req=000102030405060708090a0b0c0d0e0f/pol=1/ser=1"
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: id}, nil, nil)
+		}, "key_id_not_issued"},
+		{"key_id_of_other_role_refused", func(rf *revokeFixture) {
+			c := rf.issue() // a user certificate
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleHost, KeyID: c.KeyId},
+				[]tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: rf.hostCA.PublicKey().Marshal(), KeyID: c.KeyId}}, nil)
+		}, "key_id_not_issued"},
+		// The explicit-key cap (krl.CheckExplicitKeys): the byte cap is
+		// reached with krl.MaxRevokedKeyBytes / 8004 keys of 8000 bytes; a
+		// key already revoked is accepted again at the cap, a new one is
+		// refused.
+		{"explicit_key_cap_relist_accepted", func(rf *revokeFixture) {
+			first := rf.fillKeyCap()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: first}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: first}}, nil)
+			rf.publish(nil)
+		}, ""},
+		{"explicit_key_cap_refused", func(rf *revokeFixture) {
+			rf.fillKeyCap()
+			k := bigSKKey(rf.t, 8000)
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: k}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: k}}, nil)
+		}, "explicit_key_cap_reached"},
+		{"revoke_key_accepted", func(rf *revokeFixture) {
+			k := newSigner(rf.t, "ed25519").PublicKey().Marshal()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: k}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: k}}, nil)
+			rf.publish(nil)
+		}, ""},
+		{"revoke_key_of_installation_refused", func(rf *revokeFixture) {
+			k := rf.ca.PublicKey().Marshal()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: k}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: k}}, nil)
+		}, "key_is_ca_of_this_installation"},
+		{"revoke_subject_kind_host_refused", func(rf *revokeFixture) {
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectHost, Subject: "web1"}, nil, nil)
+		}, "does not resolve"},
+		{"revoke_not_admin_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, func(b *tlog.RevokeBody) {
+				sig, err := sshsig.Sign(rand.Reader, newSigner(rf.t, "ed25519"), wire.RevokeSSHSIGNamespace, b.Request)
+				if err != nil {
+					rf.t.Fatal(err)
+				}
+				b.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+			})
+		}, "not an admin"},
+		{"revoke_wrong_namespace_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, func(b *tlog.RevokeBody) {
+				sig, err := sshsig.Sign(rand.Reader, rf.admin, wire.AdminSSHSIGNamespace, b.Request)
+				if err != nil {
+					rf.t.Fatal(err)
+				}
+				b.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+			})
+		}, "does not approve the logged request"},
+		{"revoke_resolved_after_leaf_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)},
+				func(b *tlog.RevokeBody) { b.ResolvedAtSeconds++ })
+		}, "is after the leaf time"},
+		{"revoke_resolved_far_from_created_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial, CreatedAt: rf.secs() - 301},
+				[]tlog.RevokedEntry{serialEntry(c)}, nil)
+		}, "from the request's CreatedAt"},
+		{"revoke_clock_rollback_accepted", func(rf *revokeFixture) {
+			c := rf.issue()
+			// Two hours on, the clock steps back one: the leaf time stays
+			// (appendLocked raises it), the resolution time does not. c is
+			// live at T and not at the leaf time.
+			rf.micros += 2 * 3600 * 1_000_000
+			back := rf.secs() - 3600
+			if !krl.EntryLive(c.ValidBefore, back) || krl.EntryLive(c.ValidBefore, rf.secs()) {
+				rf.t.Fatal("the case does not separate T from the leaf time")
+			}
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "u:alice", CreatedAt: back},
+				[]tlog.RevokedEntry{serialEntry(c)}, func(b *tlog.RevokeBody) { b.ResolvedAtSeconds = back })
+			rf.publish(nil)
+		}, ""},
+		// Pre-merge review of PR #61: the signer writes the krl_publish
+		// entry right after every revocation, in the same transaction, so
+		// a revocation followed by another entry, or by none, is refused.
+		{"revoke_unpublished_at_end_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+		}, "is not followed by the krl_publish entry"},
+		{"revoke_published_after_another_entry_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+			rf.issue()
+			rf.publish(nil)
+		}, "is not followed by the krl_publish entry"},
+		{"revoke_followed_by_revoke_refused", func(rf *revokeFixture) {
+			c1, c2 := rf.issue(), rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c1.Serial}, []tlog.RevokedEntry{serialEntry(c1)}, nil)
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c2.Serial}, []tlog.RevokedEntry{serialEntry(c2)}, nil)
+			rf.publish(nil)
+		}, "is not followed by the krl_publish entry"},
+		{"revoke_subject_relist_accepted", func(rf *revokeFixture) {
+			c1, c2 := rf.issue(), rf.issue()
+			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c1), serialEntry(c2)}, nil)
+			rf.publish(nil)
+			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c1), serialEntry(c2)}, nil)
+			rf.publish(nil)
+		}, ""},
+		{"revoke_subject_excluding_revoked_refused", func(rf *revokeFixture) {
+			c1, c2 := rf.issue(), rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c1.Serial}, []tlog.RevokedEntry{serialEntry(c1)}, nil)
+			rf.publish(nil)
+			// c1 is already revoked; a sweep that leaves it out is refused.
+			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c2)}, nil)
+		}, "lists 1 entries, but the log shows 2"},
+		{"revoke_request_replayed_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, nil)
+			rf.publish(nil)
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, nil)
+		}, "replayed"},
+		{"krl_publish_digest_tampered", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+			rf.publish(func(o *publishOpts) { o.entries = nil }) // a KRL that omits the revocation, ops-signed
+		}, "re-derived from the log's revocations"},
+		{"krl_publish_early_prune_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+			// Published while c is live, but pruned as if issued after E.
+			rf.publish(func(o *publishOpts) {
+				set, err := krl.PublishSet(rf.entries, c.ValidBefore+krl.PruneMargin)
+				if err != nil {
+					rf.t.Fatal(err)
+				}
+				if o.data, err = krl.Encode(set, o.version, time.Unix(int64(o.issuedAt), 0)); err != nil { //nolint:gosec // G115: a test time
+					rf.t.Fatal(err)
+				}
+			})
+		}, "re-derived from the log's revocations"},
+		{"krl_publish_time_derived_accepted", func(rf *revokeFixture) {
+			rf.publish(nil) // version = issued_at
+			if rf.krlVersion != rf.secs() {
+				rf.t.Fatalf("version %d, want issued_at %d", rf.krlVersion, rf.secs())
+			}
+		}, ""},
+		{"krl_publish_same_second_plus_one_accepted", func(rf *revokeFixture) {
+			rf.publish(nil)
+			rf.publish(nil) // the same second: prev + 1, above issued_at
+		}, ""},
+		{"krl_publish_03_01_plus_one_accepted", func(rf *revokeFixture) {
+			rf.publish(func(o *publishOpts) { o.version = 1 })
+			rf.publish(func(o *publishOpts) { o.version = 2 })
+		}, ""},
+		{"krl_publish_version_not_above_prev_refused_equal", func(rf *revokeFixture) {
+			rf.publish(nil)
+			v := rf.krlVersion
+			rf.publish(func(o *publishOpts) { o.version = v })
+		}, "is not above the previous version"},
+		{"krl_publish_version_not_above_prev_refused_below", func(rf *revokeFixture) {
+			rf.publish(nil)
+			v := rf.krlVersion
+			rf.publish(func(o *publishOpts) { o.version = v - 1 })
+		}, "is not above the previous version"},
+		{"krl_publish_version_above_max_refused", func(rf *revokeFixture) {
+			rf.publish(func(o *publishOpts) { o.version = max(1, o.issuedAt) + 1 })
+		}, "is above max(previous + 1, issued_at)"},
+		{"krl_publish_version_between_refused", func(rf *revokeFixture) {
+			rf.publish(func(o *publishOpts) { o.version = 1 })
+			rf.publish(func(o *publishOpts) { o.version = 5 }) // between 2 and issued_at
+		}, "is neither the previous version + 1"},
+		{"krl_publish_issued_after_leaf_refused", func(rf *revokeFixture) {
+			rf.publish(func(o *publishOpts) { o.issuedAt++; o.version = o.issuedAt })
+		}, "is after the leaf time"},
+		{"krl_publish_log_index_refused", func(rf *revokeFixture) {
+			// The manifest names the index the entry was built for; a refusal
+			// inserted before it moves it one entry later.
+			n := len(rf.leaves)
+			rf.publish(nil)
+			raw := rf.leaves[n]
+			rf.leaves = rf.leaves[:n]
+			rf.addRefusal()
+			rf.add(tlog.KindKRLPublish, mustLeafBody(rf.t, raw))
+		}, "manifest names log index"},
+		{"republish_unchanged_set", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+			rf.publish(nil)
+			rf.micros += 10 * 60 * 1_000_000
+			rf.publish(nil)
+			rf.micros += 3 * 3600 * 1_000_000 // past E: the next one prunes c
+			rf.publish(nil)
+		}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rf := newRevokeFixture(t)
+			c.build(rf)
+			rep, err := rf.verifyAll()
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("Verify: %v", err)
+				}
+				t.Logf("accepted: %d revocations, %d entries, %d KRL publishes", rep.Revocations, rep.RevokedEntries, rep.KRLPublishes)
+				return
+			}
+			if err == nil || rep != nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Verify = %+v, %v; want a refusal containing %q", rep, err, c.want)
+			}
+			t.Logf("refused: %v", err)
+		})
+	}
+}
+
+// TestVerifyRevokeSplit (T-03-16): a subject revocation of more than
+// tlog.MaxRevokedEntries certificates is accepted over adjacent revoke
+// entries of one request (every one but the last full, ascending) and
+// refused when its parts are not adjacent.
+func TestVerifyRevokeSplit(t *testing.T) {
+	build := func(t *testing.T, between func(rf *revokeFixture)) (*Report, error) {
+		rf := newRevokeFixture(t)
+		var entries []tlog.RevokedEntry
+		for range tlog.MaxRevokedEntries + 1 {
+			entries = append(entries, serialEntry(rf.issue()))
+		}
+		req := subjectAlice()
+		rf.revoke(req, entries[:tlog.MaxRevokedEntries], nil)
+		between(rf)
+		rf.revoke(req, entries[tlog.MaxRevokedEntries:], nil)
+		rf.publish(nil)
+		return rf.verifyAll()
+	}
+	t.Run("revoke_subject_split_joined_accepted", func(t *testing.T) {
+		rep, err := build(t, func(*revokeFixture) {})
+		if err != nil || rep.Revocations != 1 || rep.RevokedEntries != tlog.MaxRevokedEntries+1 {
+			t.Fatalf("Verify = %+v, %v; want one revocation of 4097 entries", rep, err)
+		}
+	})
+	t.Run("revoke_subject_split_unpublished_refused", func(t *testing.T) {
+		// The krl_publish entry follows the last part, not the first.
+		rf := newRevokeFixture(t)
+		var entries []tlog.RevokedEntry
+		for range tlog.MaxRevokedEntries + 1 {
+			entries = append(entries, serialEntry(rf.issue()))
+		}
+		req := subjectAlice()
+		rf.revoke(req, entries[:tlog.MaxRevokedEntries], nil)
+		rf.revoke(req, entries[tlog.MaxRevokedEntries:], nil)
+		rf.issue()
+		rf.publish(nil)
+		if rep, err := rf.verifyAll(); err == nil || rep != nil || !strings.Contains(err.Error(), "is not followed by the krl_publish entry") {
+			t.Fatalf("Verify = %+v, %v; want the unpublished split refused", rep, err)
+		}
+	})
+	t.Run("revoke_subject_split_nonadjacent_refused", func(t *testing.T) {
+		rep, err := build(t, func(rf *revokeFixture) { rf.addRefusal() })
+		if err == nil || rep != nil || !strings.Contains(err.Error(), "does not continue it") {
+			t.Fatalf("Verify = %+v, %v; want the split refused", rep, err)
+		}
+		t.Logf("refused: %v", err)
+	})
+}
+
+// TestVerifyRevokeExportLines (PR #59 review, round 3): the as-exported
+// lines of a revoke entry with two entries and of a krl_publish entry pass
+// Verify: each entry's kind is rendered as entry_kind, and neither line
+// carries a bundle_version or version key.
+func TestVerifyRevokeExportLines(t *testing.T) {
+	rf := newRevokeFixture(t)
+	c1, c2 := rf.issue(), rf.issue()
+	rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c1), serialEntry(c2)}, nil)
+	rf.publish(nil)
+	lines := rf.lines()
+	if _, err := rf.verify(join(lines), nil); err != nil {
+		t.Fatalf("Verify of the as-exported lines: %v", err)
+	}
+	rev, pub := lines[len(lines)-3], lines[len(lines)-2]
+	for _, want := range []string{`"kind":"revoke"`, `"target":"subject"`, `"subject":"u:alice"`, `"entry_kind":"serial"`, `"admins":["SHA256:`} {
+		if !strings.Contains(rev, want) {
+			t.Errorf("revoke line lacks %s:\n%s", want, rev)
+		}
+	}
+	if strings.Count(rev, `"entry_kind":`) != 2 || strings.Count(rev, `"kind":`) != 1 {
+		t.Errorf("revoke line: %d entry_kind and %d kind keys, want 2 and 1:\n%s", strings.Count(rev, `"entry_kind":`), strings.Count(rev, `"kind":`), rev)
+	}
+	for _, want := range []string{`"kind":"krl_publish"`, `"krl_version":`, `"krl_sha256":`, `"issued_at":`} {
+		if !strings.Contains(pub, want) {
+			t.Errorf("krl_publish line lacks %s:\n%s", want, pub)
+		}
+	}
+	for _, l := range []string{rev, pub} {
+		if strings.Contains(l, `"bundle_version":`) || strings.Contains(l, `"version":`) {
+			t.Errorf("a revoke or krl_publish line carries a bundle_version or version key:\n%s", l)
+		}
+	}
+}
+
+// TestVerifyKRLPublishBeyondRowRange (valid_before_beyond_row_range_kept,
+// audit side): a revoke entry whose certificate is valid until
+// ssh.CertTimeInfinity is stored in the signer's row as NULL (unknown);
+// the KRL the signer builds from that row is the one audit verify
+// re-derives from the leaf's ValidBefore, at any realistic time.
+func TestVerifyKRLPublishBeyondRowRange(t *testing.T) {
+	rf := newRevokeFixture(t)
+	body, err := tlog.DecodeBundleInstallBody(mustLeafBody(t, rf.leaves[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a anchor
+	if err := a.install(body, Options{Pins: rf.pins(), Threshold: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ca := rf.ca.PublicKey().Marshal()
+	for _, years := range []int64{0, 100} {
+		rs := newRevocations()
+		rs.add([]tlog.RevokedEntry{{Kind: tlog.RevokedSerial, CAKey: ca, Serial: 77, ValidBeforeSeconds: ssh.CertTimeInfinity}})
+		rf.micros += uint64(years) * 365 * 24 * 3600 * 1_000_000 //nolint:gosec // G115: test values
+		// The signer's view: the row's valid_before NULL, so 0.
+		rf.entries = []krl.Entry{{Kind: krl.EntrySerial, CAKey: ca, Serial: 77}}
+		rf.krlVersion = 0
+		rf.publish(nil)
+		l, err := tlog.DecodeLeaf(rf.leaves[len(rf.leaves)-1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		pb, err := tlog.DecodeKRLPublishBody(l.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyKRLPublish(l.Index, pb, l.TimeMicros, &a, rs); err != nil {
+			t.Fatalf("%d years on: verifyKRLPublish of the signer's KRL: %v", years, err)
+		}
+	}
+}
+
+func mustLeafBody(t testing.TB, raw []byte) []byte {
+	t.Helper()
+	l, err := tlog.DecodeLeaf(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l.Body
 }

@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: 03-02 executed; PR open at the Task 4 merge gate
-last_updated: "2026-10-25T06:35:22.176Z"
+stopped_at: 03-03 executed; PR open at the Task 4 merge gate
+last_updated: "2026-10-25T22:38:31.913Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: b2cc53783c1055713be66bb1e048d1f89cbcde1d
+state_head: f8b1448cd1cc0cc564a176df10db4e805c729217
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 52
-  completed_plans: 37
+  completed_plans: 38
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 3 of 17
+Plan: 4 of 17
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -92,6 +92,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P13 | about 40 min plus owner checkpoints | 4 tasks | 8 files |
 | Phase 03 P01 | 62 min | 3 tasks | 52 files |
 | Phase 03 P02 | 47 min | 3 tasks | 26 files |
+| Phase 03 P03 | 78 min | 3 tasks | 32 files |
 
 ## Accumulated Context
 
@@ -243,6 +244,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-02: every internal/server mux is built with newRouteMux, which records its patterns; a new sign-in or session keyword route needs a passkeyRoutes entry in TestNoNonPasskeySignInRoute (03-07's agent mux included)
 - [Phase 03]: 03-02: export lines of directory_install carry the directory and sigs in decoded (unverified); signer-install.md restore step 3 replays lost versions from them with keyroster directory install, and the post-replay export is the next --previous baseline
 - [Phase 03]: 03-02: plan-drift todo closed with the note option (Phase 2 plans unedited); the live main-integrity ruleset equals .github/rulesets/main-integrity.json, 19 checks with cli-windows, checked 2026-10-25
+- [Phase 03]: 03-03: key-ID and key revocations cover every key the bundle in force names (CA keys in any state, ops, log, roots), through krl.RoleCAKeys and krl.InstallationKeys shared by signer and audit
+- [Phase 03]: 03-03: krl_version = max(prev + 1, issued_at); the signer publishes at its first Serve start and re-publishes hourly (D-10)
+- [Phase 03]: 03-03: subject_kind_unsupported and key_is_ca_of_this_installation are classified malformed
 
 ### Pending Todos
 
@@ -282,6 +286,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-25T06:35:03.090Z
-Stopped at: 03-02 executed; PR open at the Task 4 merge gate
+Last session: 2026-10-25T22:38:31.472Z
+Stopped at: 03-03 executed; PR open at the Task 4 merge gate
 Resume file: None
