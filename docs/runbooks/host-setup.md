@@ -313,9 +313,11 @@ host agent (03-07) and host certificates (03-09) use the same entry later.
    from DHCP: the next lease can give it to another host. Each name must be
    in its one canonical spelling, lowercase and without a trailing dot, an
    IPv6 address compressed (`2001:db8::1`, not `2001:DB8:0:0::1`), an IPv4
-   address without leading zeros. keyroster refuses any other spelling and
-   prints the canonical one; it never rewrites a name. No principal and no
-   host key may be on two hosts.
+   address as four decimal octets without leading zeros. keyroster refuses
+   any other spelling and prints the canonical one where there is one; it
+   never rewrites a name. A name whose labels are all numbers, such as the
+   hex `0x7f000001` or `127.0.0.0x1`, is refused too: a resolver reads it
+   as an IPv4 address. No principal and no host key may be on two hosts.
 
    The diff shows `+ host web1 host_group=web ...` with each key's
    fingerprint: compare it with step 1 before you sign. The first version

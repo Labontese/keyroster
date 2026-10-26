@@ -318,6 +318,14 @@ func TestHostPrincipalSpelling(t *testing.T) {
 		{"host_principal_numeric_last_label_refused", "192.0.2.256", ""},
 		{"host_principal_label_hyphen_refused", "-web1", ""},
 		{"host_principal_long_label_refused", strings.Repeat("a", 64) + ".example", ""},
+		// inet_aton spellings of an IPv4 address (pre-merge review, 03-04).
+		{"host_principal_hex_address_refused", "0x7f000001", ""},
+		{"host_principal_hex_address_uppercase_refused", "0X7F000001", ""},
+		{"host_principal_hex_last_part_refused", "127.0.0.0x1", ""},
+		{"host_principal_hex_parts_refused", "0xc0.0x0.0x2.0x1", ""},
+		{"host_principal_hex_two_parts_refused", "0x7f.0x1", ""},
+		{"host_principal_empty_hex_refused", "0x", ""},
+		{"host_principal_two_part_decimal_refused", "127.1", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckHostPrincipal(tc.principal)
@@ -326,6 +334,9 @@ func TestHostPrincipalSpelling(t *testing.T) {
 			}
 			if tc.canonical != "" && !strings.HasSuffix(err.Error(), " "+tc.canonical) {
 				t.Fatalf("CheckHostPrincipal(%q) = %v, want the message to name %s", tc.principal, err, tc.canonical)
+			}
+			if tc.canonical == "" && inetNumeral(strings.ToLower(tc.principal)) && !strings.Contains(err.Error(), "a resolver reads it as an IPv4 address") {
+				t.Fatalf("CheckHostPrincipal(%q) = %v, want the inet_aton refusal", tc.principal, err)
 			}
 			d := hostsFixture(t)
 			d.Hosts[0].Principals = []string{tc.principal}
@@ -343,6 +354,7 @@ func TestHostPrincipalSpelling(t *testing.T) {
 		{"host_principal_short_name_accepted", "web1"},
 		{"host_principal_fqdn_accepted", "web1.lab.example"},
 		{"host_principal_digit_label_accepted", "1web.example"},
+		{"host_principal_hex_like_label_accepted", "0xdead.example"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := CheckHostPrincipal(tc.principal); err != nil {

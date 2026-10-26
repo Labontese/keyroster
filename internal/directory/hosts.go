@@ -319,7 +319,10 @@ func dnsLabelOK(l string) bool {
 //     compressed form);
 //   - anything else is a DNS name of lowercase RFC 1123 labels, at most
 //     253 bytes, without a trailing dot, whose last label is not all
-//     digits;
+//     digits, and whose labels are not all numbers in inet_aton notation
+//     (decimal, octal with a leading 0, or hex with 0x, such as
+//     0x7f000001 or 127.0.0.0x1): a resolver reads such a name as an IPv4
+//     address, a second spelling of it;
 //   - never '*', '?', ',', whitespace or a control byte.
 //
 // A refusal names the canonical form when one exists. Nothing is ever
@@ -345,9 +348,14 @@ func CheckHostPrincipal(p string) error {
 		return nil
 	}
 	if canon, ok := dottedQuad(p); ok {
-		return fmt.Errorf("host principal %q: an IPv4 address with leading zeros; write %s", p, canon)
+		return fmt.Errorf("host principal %q: an IPv4 address with leading zeros, which a resolver may read as octal; for the decimal address write %s", p, canon)
 	}
-	if lower := strings.TrimSuffix(strings.ToLower(p), "."); lower != p {
+	lower := strings.TrimSuffix(strings.ToLower(p), ".")
+	if inetNumeral(lower) {
+		return fmt.Errorf("host principal %q: every label is a number (decimal, octal or 0x hex), so a resolver reads it as an IPv4 address; "+
+			"write an IP address as four decimal octets (0-255) without leading zeros, or a host name", p)
+	}
+	if lower != p {
 		if dnsNameOK(lower) {
 			return fmt.Errorf("host principal %q: write host names in lowercase without a trailing dot, as %s", p, lower)
 		}
@@ -373,6 +381,24 @@ func dnsNameOK(s string) bool {
 		}
 	}
 	return strings.Trim(labels[len(labels)-1], "0123456789") != ""
+}
+
+// inetNumeral reports whether every dot-separated label of s is a number
+// as inet_aton reads one: decimal digits (octal with a leading 0), or 0x
+// followed by hex digits. s is lowercase.
+func inetNumeral(s string) bool {
+	for _, l := range strings.Split(s, ".") {
+		digits := "0123456789"
+		if strings.HasPrefix(l, "0x") {
+			l, digits = l[2:], "0123456789abcdef"
+		} else if l == "" {
+			return false
+		}
+		if strings.Trim(l, digits) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // dottedQuad reports whether s is four dot-separated decimal octets of at
