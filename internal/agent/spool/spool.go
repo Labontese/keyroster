@@ -100,6 +100,11 @@ func OpenDir(path string) (int, error) {
 		case errors.Is(err, unix.ELOOP):
 			return -1, fmt.Errorf("%w: %s is a symlink", ErrSymlink, path)
 		case errors.Is(err, unix.ENOTDIR):
+			// O_DIRECTORY|O_NOFOLLOW on a symlink fails ENOTDIR on Linux.
+			var st unix.Stat_t
+			if unix.Lstat(path, &st) == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
+				return -1, fmt.Errorf("%w: %s is a symlink", ErrSymlink, path)
+			}
 			return -1, fmt.Errorf("%w: %s is not a directory", ErrNotDir, path)
 		}
 		return -1, fmt.Errorf("open directory %s: %w", path, err)

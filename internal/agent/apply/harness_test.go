@@ -352,7 +352,8 @@ func (r *fakeRunner) Run(cmd *exec.Cmd) (Result, error) {
 	r.calls = append(r.calls, call)
 	switch {
 	case cmd.Path == r.h.cfg.SSHD && len(args) >= 1 && args[0] == "-t":
-		if r.sshdTestErr != "" {
+		// The configuration fails only with the agent's drop-in in it.
+		if _, err := os.Stat(r.h.l.DropIn()); r.sshdTestErr != "" && err == nil {
 			return Result{Code: 1, Stderr: []byte(r.sshdTestErr)}, nil
 		}
 		return Result{}, nil
@@ -413,18 +414,6 @@ func (r *fakeRunner) dump() string {
 	return b.String()
 }
 
-func (r *fakeRunner) count(prefix string) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	n := 0
-	for _, c := range r.calls {
-		if strings.HasPrefix(c, prefix) {
-			n++
-		}
-	}
-	return n
-}
-
 // testHost is one host under test: its layout, spool, fake sshd, fake
 // runner and fake clock, and the fixture whose state it applies.
 type testHost struct {
@@ -442,7 +431,12 @@ type testHost struct {
 
 func newTestHost(t *testing.T, f *fixture) *testHost {
 	t.Helper()
-	base := t.TempDir()
+	return newTestHostIn(t, f, t.TempDir())
+}
+
+// newTestHostIn is newTestHost with its layout under base.
+func newTestHostIn(t *testing.T, f *fixture, base string) *testHost {
+	t.Helper()
 	h := &testHost{t: t, f: f, l: Layout{Root: filepath.Join(base, "root"), StateDir: filepath.Join(base, "state")}, spool: filepath.Join(base, "spool"), clock: newFakeClock()}
 	for _, d := range []string{h.l.Root, h.l.StateDir, h.spool} {
 		if err := os.Mkdir(d, 0o700); err != nil {

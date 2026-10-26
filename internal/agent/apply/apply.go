@@ -149,6 +149,7 @@ type engine struct {
 	clock   Clock
 	report  *Report
 	stateFd int
+	locked  bool // past the apply lock: status.json may be written
 
 	pins *state.Pins
 	dump Dump
@@ -222,7 +223,7 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 		}
 	}
 	if e.stateFd >= 0 {
-		if !cfg.DryRun && !r.NoOp {
+		if e.locked && !cfg.DryRun && !r.NoOp {
 			if serr := e.writeStatus(); serr != nil && err == nil {
 				err = serr
 			}
@@ -249,21 +250,8 @@ func (e *engine) apply(ctx context.Context) error {
 		return fmt.Errorf("%w: %w", ErrStateDirUnsafe, err)
 	}
 	e.stateFd = fd
-	unlock, err := e.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	for _, d := range []string{state.AcceptedDir, generationsDir} {
-		if !e.cfg.DryRun {
-			if err := e.mkdir(e.l.State(d), 0o700); err != nil {
-				return err
-			}
-		}
-		if err := checkOwnDir(e.l.State(d)); err != nil && (!e.cfg.DryRun || !errors.Is(err, unix.ENOENT)) {
-			return err
-		}
-	}
+	// Everything up to the lock only reads: a refusal here (bad pins, an
+	// unbounded LoginGraceTime) leaves the host exactly as it was.
 	if e.pins, err = state.LoadPins(e.stateFd); err != nil {
 		return err
 	}
@@ -276,6 +264,22 @@ func (e *engine) apply(ctx context.Context) error {
 	}
 	if e.keys, err = hostKeys(e.dump); err != nil {
 		return err
+	}
+	unlock, err := e.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	e.locked = true
+	for _, d := range []string{state.AcceptedDir, generationsDir} {
+		if !e.cfg.DryRun {
+			if err := e.mkdir(e.l.State(d), 0o700); err != nil {
+				return err
+			}
+		}
+		if err := checkOwnDir(e.l.State(d)); err != nil && (!e.cfg.DryRun || !errors.Is(err, unix.ENOENT)) {
+			return err
+		}
 	}
 	e.grace, e.rawGrace = grace, grace
 	if !e.cfg.DryRun {
@@ -502,6 +506,9 @@ func (e *engine) forward(ctx context.Context) error {
 		if err := e.activateDropIn(ctx); err != nil {
 			return e.rollback(ctx, err, lg)
 		}
+	}
+	if err := e.fault("self-test"); err != nil {
+		return err
 	}
 	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
 		e.report.SelfTest = "fail: " + err.Error()
