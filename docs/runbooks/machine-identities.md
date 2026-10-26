@@ -67,9 +67,11 @@ above the user cap.
 ## Remove a machine or rotate its key
 
 Removing the last machine that names a machine-only role leaves the role
-granted to nobody, so it falls back to the user CA cap. While the role is
-above that cap, `keyroster machine remove` is refused, signing nothing; the
-message names the role and both ways out:
+granted to nobody, so it falls back to the user CA profile. While the role
+does not fit that profile, `keyroster machine remove` is refused, signing
+nothing. That is the case when its max TTL is above the user cap, or when it
+allows an extension that the machine CA profile allows and the user CA
+profile does not. The message names the role and both ways out:
 
 - **Rotate the key.** A machine's key cannot be changed in place
   (`machine add` refuses a name that exists), so add the replacement under
@@ -80,18 +82,29 @@ message names the role and both ways out:
   keyroster machine remove ci
   ```
 
-- **Remove the machine for good.** Bring the role within the user cap
-  first (12h here stands for the user CA cap of your root-signed policy),
-  then remove the machine:
+- **Remove the machine for good.** Bring the role within the user CA
+  profile first, then remove the machine. The message prints the one
+  `keyroster role update` command that does it, with every change the
+  role needs:
+  - `--max-ttl D` when the max TTL is above the user cap (D at most that
+    cap; 12h below stands for the user CA cap of your root-signed policy);
+  - `--no-extensions` when none of the role's extensions is allowed by the
+    user CA profile, or `--extension E` for each one it allows, because a
+    given list replaces the role's extensions.
+
+  For a role above the user cap that also allows `permit-port-forwarding`,
+  which only the machine profile allows here:
 
   ```
-  keyroster role update deploy --max-ttl 12h
+  keyroster role update deploy --max-ttl 12h --no-extensions
   keyroster machine remove ci
   ```
 
-Both sequences and the refusal run in CI
-(`TestMachineCommands/machine_remove_machine_only_role_above_user_cap`,
-03-04); UNVERIFIED on the homelab until 03-16.
+Both sequences and the refusal run in CI. They are covered by
+`TestMachineCommands/machine_remove_machine_only_role_above_user_cap`
+(03-04) and, for the extension cases,
+`TestMachineCommands/machine_remove_hint_names_the_actual_remedy` (03-05).
+Every step is UNVERIFIED on the homelab until 03-16.
 
 ## Renewal needs pop.machines
 

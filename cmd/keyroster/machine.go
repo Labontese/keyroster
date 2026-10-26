@@ -128,7 +128,10 @@ func runMachineAdd(ctx context.Context, args []string, stdout, stderr io.Writer)
 // that only this machine names and nobody grants falls back to the user
 // CA profile (directory.CheckPolicy); when it exceeds that, the refusal
 // names the role and the two ways out: add the replacement machine first
-// (key rotation), or bring the role within the user CA profile first.
+// (key rotation), or bring the role within the user CA profile first. The
+// second names every change the role needs at once (userProfileFix): a
+// max TTL above the user cap, extensions the user profile does not allow,
+// or both, because CheckPolicy reports only the first of them.
 func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("machine remove", flag.ContinueOnError)
 	fset.SetOutput(stderr)
@@ -144,8 +147,20 @@ func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writ
 	if !directory.ValidUserName(name) {
 		return errHostName("machine", name)
 	}
-	var orphans []string // roles that no user, group or other machine uses after the removal
-	err = ef.edit(ctx, stdout, stderr, func(d *directory.Directory) error {
+	s, err := openAdminSession(*ef.adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	var (
+		orphans  []directory.Role // roles that no user, group or other machine uses after the removal
+		userProf *trust.CAProfile
+	)
+	err = editDirectory(ctx, s, editOpts{Yes: *ef.yes, Out: *ef.out}, stdout, func(d *directory.Directory, pol *trust.Policy) error {
+		orphans, userProf = nil, nil
+		if i := slices.IndexFunc(pol.CAProfiles, func(p trust.CAProfile) bool { return p.Role == trust.RoleUser }); i >= 0 {
+			userProf = &pol.CAProfiles[i]
+		}
 		i := slices.IndexFunc(d.Machines, func(m directory.Machine) bool { return m.Name == name })
 		if i < 0 {
 			return fmt.Errorf("there is no machine %s in the directory; nothing was signed", name)
@@ -156,7 +171,7 @@ func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writ
 			named := slices.ContainsFunc(d.Machines, func(m directory.Machine) bool { return slices.Contains(m.Roles, r) })
 			j := slices.IndexFunc(d.Roles, func(x directory.Role) bool { return x.Name == r })
 			if !named && j >= 0 && len(d.Roles[j].Users) == 0 && len(d.Roles[j].Groups) == 0 {
-				orphans = append(orphans, r)
+				orphans = append(orphans, d.Roles[j])
 			}
 		}
 		return nil
@@ -166,14 +181,50 @@ func runMachineRemove(ctx context.Context, args []string, stdout, stderr io.Writ
 	}
 	// CheckPolicy stops at the first role it refuses and names it.
 	for _, r := range orphans {
-		if strings.Contains(err.Error(), "role "+r+": ") {
+		if strings.Contains(err.Error(), "role "+r.Name+": ") {
 			return fmt.Errorf("%w. Removing machine %s leaves role %s granted to no user, group or machine, so the user CA profile applies to it. "+
 				"To rotate the machine's key, add the new machine with that role first (keyroster machine add NEW --key FILE --role %s), then remove %s. "+
-				"To remove the machine for good, first bring the role within the user CA profile (keyroster role update %s --max-ttl D), then remove %s",
-				err, name, r, r, name, r, name)
+				"To remove the machine for good, first bring the role within the user CA profile (%s), then remove %s",
+				err, name, r.Name, r.Name, name, userProfileFix(r, userProf), name)
 		}
 	}
 	return err
+}
+
+// userProfileFix is the keyroster role update command that brings role r
+// within the user CA profile prof: --max-ttl D when r's max TTL is above
+// the user cap, and, when r allows an extension that prof neither sets by
+// default nor allows, --no-extensions or the --extension list of r's
+// extensions that prof does allow (a given list replaces the role's). A
+// role that violates both gets both in one command, so following the
+// advice once is enough.
+func userProfileFix(r directory.Role, prof *trust.CAProfile) string {
+	cmd := "keyroster role update " + r.Name
+	if prof == nil {
+		return cmd + " --max-ttl D"
+	}
+	ttl := r.MaxTTLSeconds > prof.MaxTTLSeconds
+	var keep []string
+	drop := false
+	for _, e := range r.Extensions {
+		if slices.Contains(prof.DefaultExtensions, e) || slices.Contains(prof.AllowedExtensions, e) {
+			keep = append(keep, e)
+		} else {
+			drop = true
+		}
+	}
+	if ttl || !drop {
+		cmd += " --max-ttl D"
+	}
+	if drop {
+		if len(keep) == 0 {
+			cmd += " --no-extensions"
+		}
+		for _, e := range keep {
+			cmd += " --extension " + e
+		}
+	}
+	return cmd
 }
 
 // runMachineList is keyroster machine list [--admin-key FP]: the machines
