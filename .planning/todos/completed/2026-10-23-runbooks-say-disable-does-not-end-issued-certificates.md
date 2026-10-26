@@ -25,3 +25,7 @@ Example: a laptop is stolen with a fresh certificate (up to the 12 h user CA cap
 - In "Disabling a user" and in host-setup.md, state that these actions only stop new certificates, and that issued ones stay valid until ValidBefore.
 - Give the immediate cut-off available today: revoke the role or unmap the account, then re-render and install the principals files on every host.
 - Point to the Phase 3 KRL work (REVOKE-01..04), which removes the gap.
+
+## Resolution
+
+Resolved in 03-03b (PR from branch `p03/03b-revoke-cli`). enroll-user.md ("Disabling a user") and host-setup.md now say that disabling a user, revoking a role, removing a group member and unmapping an account stop only new certificates, and that issued ones stay valid until ValidBefore. Both name `keyroster revoke user NAME`, which revokes every live certificate of the user, disables the user and revokes again (revoke.md section 4, run in CI e2e by `TestRevokeUserEndToEnd`). A host enforces it once its sshd's `RevokedKeys` holds the KRL: by itself with the agent (03-07), by hand otherwise, which is UNVERIFIED. The calls of these changes a "revocation" are reworded.

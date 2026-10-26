@@ -647,7 +647,7 @@ structurally (see the warning above).
    see a revocation made after the latest saved export: the restore loses
    that one without a trace in either file (T-03-207). So take a saved
    export after every revocation (see
-   [revoke.md](revoke.md#4-the-audit-log-after-a-revocation)). The stop
+   [revoke.md](revoke.md#7-the-audit-log-after-a-revocation)). The stop
    and both counts are checked against this text in CI
    (`TestRestoreRunbookChecks`); a restore that loses a revocation has not
    been run (**UNVERIFIED**).
