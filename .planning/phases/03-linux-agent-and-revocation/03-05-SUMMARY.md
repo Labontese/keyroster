@@ -546,7 +546,7 @@ Recorded as T-03-270, T-03-271 and T-03-272 and in the review ledger of 03-05-PL
 - **Identity uncertain.** `host_keys_disagree`, and a last-good record without a host name (only records from before this change), are treated like rotated keys: last-good's principals are kept.
 - **Residual of decision 2.** While a host's keys stay rotated, principal changes in the directory do not reach it.
 - **`generation_too_large`.** It refuses the whole apply, so a KRL in the same capture does not land either. Option: route it through the fallback, with the KRL and CA keys applied and last-good's principals kept.
-- **`--recover-to-last-good`.** The operator's recovery from a foreign `current` still goes to last-good's own files, so it can install an older KRL than the one in force. Not changed here; this is a residual of decision 1. Option: apply RollbackTarget to an agent-made `current` there too.
+- **`--recover-to-last-good`.** The operator's recovery from a foreign `current` still goes to last-good's own files, so it can install an older KRL than the one in force. Not changed here; this is a residual of decision 1. Option: apply RollbackTarget to an agent-made `current` there too. *(Superseded in round 2, `04b7d8e`: an agent-made `current` now goes to RollbackTarget; a foreign one still goes to last-good's KRL.)*
 - **03-10 interaction.** A host with `host_status` host_disabled or host_removed has no principals files, so 03-10's positive probe cannot pass there. 03-10-PLAN.md now carries a line saying the probe must skip such a host, or keep its principals file, instead of rolling back every apply.
 - **Contract changes later plans read.**
   - `pending.json` has the step `commit` and an `accepted` field.
@@ -579,6 +579,29 @@ Recorded as T-03-270, T-03-271 and T-03-272 and in the review ledger of 03-05-PL
 - The commits `f5a83fc`, `aa5e76b`, `4857710`, `d9d8633`, `b141e95`, `e94b9c0`, `0ae678d`, `79d1b36`, `5f03c95`, `56638ea`, `da8df2e`, `99632f0` and `e971d2e` are ancestors of HEAD, and each has a good SSH signature from keyroster-bot's signing key.
 - `git rev-list --count d2e9fb5..e971d2e` is 13.
 - internal/agent/execsite/execsite.go exists.
+
+## Pre-merge review fixes, round 2
+
+The fix-round check on head `8760bc3` confirmed four findings and split one. Each item has one SSH-signed keyroster-bot commit and a test that fails with the fix reverted or mutated (mutants applied, run and restored byte for byte).
+
+1. **The KRL in force could still go back (HIGH, both skeptics upheld).** `04b7d8e`. A KRL that a rollback or crash recovery kept in `current` was not in accepted/, so a later capture that no longer offered it rendered the older accepted KRL, swapped to it and committed it. Fix: forward and pollSpool render with the KRL of the agent's `current` as the floor (`keepKRLInForce`). As a hard guard, swapCurrent (every mode) and setLastGood refuse a generation whose KRL is older than the agent's generation in current or last-good (`krl_rollback_refused`). `--recover-to-last-good` from an agent-made `current` moves to RollbackTarget, and the report names the KRL version in force. The floor is the KRL in force, not a KRL staged into accepted/ at rollback, the reviewer's alternative. accepted/ still moves only with last-good (5f03c95, asserted by `crash_anywhere_recovers`), and crash recovery holds no verified manifest it could stage, so staging would stall a recovered host. 03-08 already reads the KRL in force from `current`. Tests: TestApply `krl_kept_by_{rollback,crash}_survives_withheld_capture_{commit,rollback}` (the reviewer's probe), `krl_floor_refuses_older_swap_and_last_good`, `recover_to_last_good_keeps_newer_krl`. Proof: with the floor and the guard both removed, current and last-good no longer revoke serial 7 (the bug reproduced). With only the floor removed the guard refuses the swap, and the commit cases fail. With only the guard removed the guard test fails. With the recovery routed to last-good as before the recover test fails. The crash matrix stays green. Remaining exception: the operator's recovery from a *foreign* `current` (whose KRL was never verified) goes to last-good's KRL.
+2. **Exec-site pin bypass (MEDIUM, split).** `03f7d3a`. `exec_sites_pinned` now requires every `execsite.<Ctor>` selector outside execsite to be the callee of a pinned call, and it refuses a dot import of execsite. The new `execsite_imported_only_by_apply` subtest (`go list ./...`, GOOS=linux, non-test imports) refuses any package of the module but internal/agent/apply importing execsite. Proof: mutants E7 (func value in sshd.go), E8 (helper in a new internal/hx), E9 (package-level var) and E10 (dot import in apply) each passed TestPaths at `8760bc3` and fail it now.
+3. **No test bit on LoadStored's SHA-256 check (LOW).** `8c48a59`. TestStored `tampered_byte_of_valid_snapshot_refused` saves a complete snapshot (the golden genesis bundle and policy), flips one byte of `bundle.json.sigs` and requires `stored_state_invalid` with "does not match its SHA-256". Proof: with the check disabled only the new subtest fails.
+4. **IPv4 never-skipped case did not bite (LOW).** `100c99e`. TestSelfTestLoopbackFamilies adds `[::]:port`, `0.0.0.0:port` and `127.0.0.9:port` with 127.0.0.9 failing EADDRNOTAVAIL. Proof: with `v6 &&` dropped from the skip case, the self-test passes on 127.0.0.1 and the new case fails.
+5. **Signal reload refused after an upgrade through a symlinked directory (LOW).** `d7384d8`. runsBinary also accepts the configured path with its directory's symlinks resolved (`resolvedDir`), in the " (deleted)" form too. TestReloadSignal adds sshd started as `link/sshd` with `link -> real` and the binary replaced. Proof: with the comparison back to `filepath.Clean` only, it fails with "runs .../real/sshd (deleted), not .../link/sshd".
+
+**Gates on the round-2 code head (`d7384d8`), WSL Ubuntu, Go 1.27.3:**
+- gofmt is clean.
+- go vet passes for linux, windows and darwin, and with `-tags e2e`.
+- golangci-lint reports 0 issues for linux, windows and darwin.
+- dep-firewall and testonly-firewall are clean.
+- capslock-check: signer 91/91, agent 20/20, EXEC only through execsite (2 edges).
+- `go test -race -count=1 ./...` passes; internal/agent/apply took 128 s.
+- TestAgentApplyEndToEnd and TestSshdRereadsTrustFiles pass on OpenSSH 10.5p1 and 9.5p1.
+
+**UNVERIFIED (round 2):**
+- A real distribution with `/usr/sbin` or `/sbin` symlinked (Arch, merged-/usr Debian). Only the temp-directory symlink of TestReloadSignal was run.
+- A real withholding fetcher. Only the spool emptied by the test was run.
 
 ---
 *Phase: 03-linux-agent-and-revocation*
