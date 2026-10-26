@@ -3,9 +3,11 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -159,6 +161,44 @@ func TestStored(t *testing.T) {
 		}
 		if _, err := LoadStored(fd); !errors.Is(err, ErrStored) {
 			t.Fatalf("a file that does not match its SHA-256: %v, want stored_state_invalid", err)
+		}
+	})
+	t.Run("tampered_byte_of_valid_snapshot_refused", func(t *testing.T) {
+		// PR #67 fix round 2: a complete, valid snapshot (the golden
+		// genesis bundle and its policy) loads; one byte changed in
+		// bundle.json.sigs, which LoadStored never parses, is refused only
+		// by the SHA-256 check.
+		l, fd := accepted(t)
+		read := func(name string) []byte {
+			b, err := os.ReadFile(filepath.Join("..", "..", "..", "test", "vectors", name)) //nolint:gosec // test fixture: the golden vectors
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b
+		}
+		s := &Stored{Bundle: read("bundle_genesis_v1.json"), BundleSigs: []byte("signatures"), Policy: read("policy_genesis_v1.json"), PolicySigs: []byte("signatures")}
+		if err := s.Save(l, fd, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := LoadStored(fd); err != nil || got == nil || got.BundleVersion != 1 {
+			t.Fatalf("the valid snapshot: %+v, %v", got, err)
+		}
+		var p pointer
+		b, err := spool.ReadFileAt(fd, pointerFile, maxPointerFile)
+		if err != nil || json.Unmarshal(b, &p) != nil {
+			t.Fatalf("%s: %v", pointerFile, err)
+		}
+		sigs := filepath.Join(l.State(AcceptedDir), strconv.FormatUint(p.Snapshot, 10), bundleSigsFile)
+		b, err = os.ReadFile(sigs) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		b[0] ^= 1
+		if err := os.WriteFile(sigs, b, 0o600); err != nil { //nolint:gosec // test fixture: the tampering under test
+			t.Fatal(err)
+		}
+		if _, err := LoadStored(fd); !errors.Is(err, ErrStored) || !strings.Contains(err.Error(), "does not match its SHA-256") {
+			t.Fatalf("one byte changed in %s: %v, want stored_state_invalid (does not match its SHA-256)", bundleSigsFile, err)
 		}
 	})
 }
