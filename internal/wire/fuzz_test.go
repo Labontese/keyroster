@@ -315,7 +315,9 @@ func FuzzParseRevokeSigningBytes(f *testing.F) {
 		f.Add(sb)
 		f.Add(sb[:len(sb)-1])
 	}
+	f.Add(revokeVector().SigningBytes()) // a 03-01 v1 serial request
 	f.Add([]byte(RevokeRequestDomain))
+	f.Add([]byte(RevokeRequestDomainV1))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		r, err := ParseRevokeSigningBytes(b)
 		if err != nil {

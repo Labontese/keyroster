@@ -8,16 +8,38 @@ import (
 
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // RevokeRequestDomain separates the signing bytes of a RevokeRequest from
-// every other signed format (REVOKE-01).
-const RevokeRequestDomain = "keyroster/revoke-request/v1"
+// every other signed format (REVOKE-01). Since 03-03 a request is v2: its
+// signing bytes name the installation it is for (InstallationID), so an
+// admin signature for one installation never revokes in another (the
+// T-03-20 rule of directories, 03-04).
+const RevokeRequestDomain = "keyroster/revoke-request/v2"
 
 // RevokeSSHSIGNamespace is the SSHSIG namespace of the admin-sshsig/v1
 // evidence on a RevokeRequest. It equals RevokeRequestDomain, so an
 // issuance approval can never authorize a revocation and the reverse.
 const RevokeSSHSIGNamespace = RevokeRequestDomain
+
+// RevokeRequestDomainV1 and RevokeSSHSIGNamespaceV1 are those of the
+// 03-01 requests, which name no installation and revoke only by serial.
+// The signer refuses them since 03-03; audit verify still reads the ones
+// a log holds (ParseRevokeSigningBytes, Namespace).
+const (
+	RevokeRequestDomainV1   = "keyroster/revoke-request/v1"
+	RevokeSSHSIGNamespaceV1 = RevokeRequestDomainV1
+)
+
+// maxRevokeInstallationID bounds the installation ID field as read;
+// Validate then requires the trust bundle form.
+const maxRevokeInstallationID = 64
+
+// errRevokeV1 refuses a request without an installation ID where only v2
+// is accepted.
+var errRevokeV1 = fmt.Errorf("%w: a revoke request names the installation it is for (%s)", ErrMalformed, RevokeRequestDomain)
 
 // Revocation targets. A request names exactly one; the parsers refuse
 // every other value.
@@ -104,28 +126,40 @@ const MaxKRLFrame = MaxKRLBytes + 64<<10
 // CARole and KeyID (1 to 1024 bytes of printable ASCII), TargetKey Key (a
 // plain public key in canonical SSH wire encoding, never a certificate),
 // TargetSubject SubjectKind and Subject (the key ID subject grammar).
-// CreatedAt is the client's clock in Unix seconds. Evidence
-// (admin-sshsig/v1 by one policy admin, over SigningBytes under
-// RevokeSSHSIGNamespace) is not part of the signing bytes.
+// CreatedAt is the client's clock in Unix seconds. InstallationID is the
+// installation ID of the trust bundle the request is for (32 lowercase
+// hex digits); it is empty only in a v1 request read back from a log
+// (ParseRevokeSigningBytes), which Marshal and ParseRevokeRequest refuse.
+// Evidence (admin-sshsig/v1 by one policy admin, over SigningBytes under
+// Namespace) is not part of the signing bytes.
 type RevokeRequest struct {
-	Target      uint8
-	CARole      CARole
-	Serial      uint64
-	KeyID       string
-	Key         []byte
-	SubjectKind SubjectKind
-	Subject     string
-	RequestID   [16]byte
-	CreatedAt   uint64
-	Reason      string
-	Evidence    []Evidence
+	InstallationID string
+	Target         uint8
+	CARole         CARole
+	Serial         uint64
+	KeyID          string
+	Key            []byte
+	SubjectKind    SubjectKind
+	Subject        string
+	RequestID      [16]byte
+	CreatedAt      uint64
+	Reason         string
+	Evidence       []Evidence
 }
 
-// Validate checks the request: a known target carrying exactly its own
-// fields, each within its limits, and the reason and evidence limits.
-// Marshal and both parsers apply it, and the signer applies it to every
-// request it decides on.
+// Validate checks the request: an installation ID of the trust bundle
+// form or, for a v1 request, none and the serial target; a known target
+// carrying exactly its own fields, each within its limits; and the reason
+// and evidence limits. Marshal and both parsers apply it, and the signer
+// applies it to every request it decides on (and refuses a v1 request,
+// revoke_installation_missing).
 func (r *RevokeRequest) Validate() error {
+	switch {
+	case r.InstallationID == "" && r.Target != TargetSerial:
+		return fmt.Errorf("%w: a %s request revokes only by serial", ErrMalformed, RevokeRequestDomainV1)
+	case r.InstallationID != "" && !trust.IsInstallationID(r.InstallationID):
+		return fmt.Errorf("%w: the installation ID is not 32 lowercase hex digits", ErrMalformed)
+	}
 	if err := r.checkTarget(); err != nil {
 		return err
 	}
@@ -216,11 +250,15 @@ func printable(s string) bool {
 	return true
 }
 
-// addFields appends every field except Evidence: Target, then the
-// target's own fields (serial: CARole and Serial, the 03-01 layout;
-// key_id: CARole and KeyID; key: Key; subject: SubjectKind and Subject),
-// then RequestID, CreatedAt and Reason.
+// addFields appends every field except Evidence: InstallationID (v2
+// only), Target, then the target's own fields (serial: CARole and Serial,
+// the 03-01 layout; key_id: CARole and KeyID; key: Key; subject:
+// SubjectKind and Subject), then RequestID, CreatedAt and Reason. A v1
+// request (no installation ID) is the 03-01 layout byte for byte.
 func (r *RevokeRequest) addFields(b *cryptobyte.Builder) {
+	if r.InstallationID != "" {
+		addBytes16(b, []byte(r.InstallationID))
+	}
 	b.AddUint8(r.Target)
 	switch r.Target {
 	case TargetSerial:
@@ -240,8 +278,16 @@ func (r *RevokeRequest) addFields(b *cryptobyte.Builder) {
 	addBytes16(b, []byte(r.Reason))
 }
 
-// readFields reads what addFields writes into r, without validating it.
-func (r *RevokeRequest) readFields(s *cryptobyte.String) bool {
+// readFields reads what addFields writes into r, without validating it:
+// the v2 layout, or the v1 layout (no installation ID) when v1.
+func (r *RevokeRequest) readFields(s *cryptobyte.String, v1 bool) bool {
+	if !v1 {
+		var id []byte
+		if !readBytes16(s, &id, maxRevokeInstallationID) {
+			return false
+		}
+		r.InstallationID = string(id)
+	}
 	if !s.ReadUint8(&r.Target) {
 		return false
 	}
@@ -282,11 +328,14 @@ func (r *RevokeRequest) readFields(s *cryptobyte.String) bool {
 	return true
 }
 
-// Marshal encodes the request body. It refuses a request that Validate
-// refuses.
+// Marshal encodes the request body, always v2. It refuses a request that
+// Validate refuses and one without an installation ID (a v1 request).
 func (r *RevokeRequest) Marshal() ([]byte, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
+	}
+	if r.InstallationID == "" {
+		return nil, errRevokeV1
 	}
 	var b cryptobyte.Builder
 	r.addFields(&b)
@@ -299,12 +348,13 @@ func (r *RevokeRequest) Marshal() ([]byte, error) {
 	return b.Bytes()
 }
 
-// SigningBytes returns the domain tag RevokeRequestDomain, as raw bytes,
-// followed by every field except Evidence. A revoke leaf logs exactly
-// these bytes, and ParseRevokeSigningBytes reads them back.
+// SigningBytes returns the domain tag (RevokeRequestDomain, or
+// RevokeRequestDomainV1 for a v1 request), as raw bytes, followed by every
+// field except Evidence. A revoke leaf logs exactly these bytes, and
+// ParseRevokeSigningBytes reads them back.
 func (r *RevokeRequest) SigningBytes() []byte {
 	var b cryptobyte.Builder
-	b.AddBytes([]byte(RevokeRequestDomain))
+	b.AddBytes([]byte(r.domain()))
 	r.addFields(&b)
 	// Fails only for a field above 65535 bytes, which Validate refuses.
 	out, err := b.Bytes()
@@ -314,22 +364,38 @@ func (r *RevokeRequest) SigningBytes() []byte {
 	return out
 }
 
+// domain is the request's domain tag: v1 without an installation ID.
+func (r *RevokeRequest) domain() string {
+	if r.InstallationID == "" {
+		return RevokeRequestDomainV1
+	}
+	return RevokeRequestDomain
+}
+
+// Namespace is the SSHSIG namespace of the request's evidence:
+// RevokeSSHSIGNamespace, or RevokeSSHSIGNamespaceV1 for a v1 request.
+func (r *RevokeRequest) Namespace() string { return r.domain() }
+
 // Digest returns the SHA-256 of SigningBytes.
 func (r *RevokeRequest) Digest() [32]byte {
 	return sha256.Sum256(r.SigningBytes())
 }
 
-// ParseRevokeRequest decodes a request body strictly: every limit is
-// enforced, an unknown target or CA role is refused, and trailing bytes
-// are refused.
+// ParseRevokeRequest decodes a v2 request body strictly: every limit is
+// enforced, an unknown target or CA role is refused, a request without an
+// installation ID is refused, and trailing bytes are refused. A 03-01
+// (v1) body, which has none, does not parse.
 func ParseRevokeRequest(body []byte) (*RevokeRequest, error) {
 	s := cryptobyte.String(body)
 	var (
 		r        RevokeRequest
 		evidence cryptobyte.String
 	)
-	if !r.readFields(&s) || !s.ReadUint16LengthPrefixed(&evidence) || !s.Empty() {
+	if !r.readFields(&s, false) || !s.ReadUint16LengthPrefixed(&evidence) || !s.Empty() {
 		return nil, ErrMalformed
+	}
+	if r.InstallationID == "" {
+		return nil, errRevokeV1
 	}
 	for !evidence.Empty() {
 		if len(r.Evidence) == MaxEvidence {
@@ -351,17 +417,24 @@ func ParseRevokeRequest(body []byte) (*RevokeRequest, error) {
 // revoke leaf logs as its request (tlog.RevokeBody.Request), strictly: the
 // raw domain tag first, then the layout of the request's target, the
 // limits of ParseRevokeRequest, an unknown target or CA role refused and
-// trailing bytes refused. The result carries no evidence, and its
-// SigningBytes equal b.
+// trailing bytes refused. It reads v2 requests, and the v1 requests of
+// 03-01 logs (no installation ID, serial target only). The result carries
+// no evidence, and its SigningBytes equal b.
 func ParseRevokeSigningBytes(b []byte) (*RevokeRequest, error) {
 	rest, ok := bytes.CutPrefix(b, []byte(RevokeRequestDomain))
+	v1 := false
 	if !ok {
-		return nil, fmt.Errorf("%w: not the signing bytes of a revoke request", ErrMalformed)
+		if rest, v1 = bytes.CutPrefix(b, []byte(RevokeRequestDomainV1)); !v1 {
+			return nil, fmt.Errorf("%w: not the signing bytes of a revoke request", ErrMalformed)
+		}
 	}
 	s := cryptobyte.String(rest)
 	var r RevokeRequest
-	if !r.readFields(&s) || !s.Empty() {
+	if !r.readFields(&s, v1) || !s.Empty() {
 		return nil, ErrMalformed
+	}
+	if !v1 && r.InstallationID == "" {
+		return nil, errRevokeV1
 	}
 	if err := r.Validate(); err != nil {
 		return nil, err

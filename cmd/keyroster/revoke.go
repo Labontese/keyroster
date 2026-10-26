@@ -50,9 +50,10 @@ var revokeCARoles = map[string]wire.CARole{
 // runRevokeSerial is keyroster revoke serial SERIAL [--ca user|host|machine]
 // [--reason TEXT] [--admin-key FP] (REVOKE-01, CLI only per D-12). It
 // verifies the served trust bundle against the saved root pins, builds a
-// RevokeRequest with a fresh random request ID and the current time, signs
-// its signing bytes with the admin key in ssh-agent under
-// keyroster/revoke-request/v1, and sends it through the admin API. The
+// RevokeRequest with a fresh random request ID, the current time and the
+// bundle's installation ID, signs its signing bytes with the admin key in
+// ssh-agent under keyroster/revoke-request/v2, and sends it through the
+// admin API. The
 // server forwards it to the signer, which alone decides and publishes the
 // next KRL. The server's answer is unsigned, so the command reports it as
 // the server's and confirms it against the signer-signed KRL manifest the
@@ -93,9 +94,9 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		return err
 	}
-	// Marshal checks every field limit (the reason's charset and length)
+	// Validate checks every field limit (the reason's charset and length)
 	// before the admin key signs anything.
-	if _, err := req.Marshal(); err != nil {
+	if err := req.Validate(); err != nil {
 		_, _ = fmt.Fprintf(stderr, "revoke serial: %v\n", err)
 		return errUsage
 	}
@@ -109,6 +110,13 @@ func runRevokeSerial(ctx context.Context, args []string, stdout, stderr io.Write
 	if err != nil {
 		return err
 	}
+	// The request names the installation of the root-pinned bundle
+	// (keyroster/revoke-request/v2), so this admin signature revokes in no
+	// other installation (the T-03-20 rule of directories).
+	if bundle.InstallationID == "" {
+		return fmt.Errorf("trust bundle v%d in force has no installation ID, so the signer revokes nothing (krl_no_installation_id); see docs/runbooks/revoke.md", bundle.Version)
+	}
+	req.InstallationID = bundle.InstallationID
 	sig, err := sshsig.Sign(rand.Reader, s.signer, wire.RevokeSSHSIGNamespace, req.SigningBytes())
 	if err != nil {
 		return fmt.Errorf("sign the revocation with %s: %w", s.adminFP, err)

@@ -273,7 +273,9 @@ func classify(detail string) uint8 {
 		"credential_mismatch", "bad_authenticator_data", "rp_mismatch", "user_presence_missing",
 		"user_verification_missing", "bad_client_data", "type_mismatch", "challenge_mismatch",
 		"origin_mismatch", "cross_origin_refused", "assertion_signature_invalid", "unsupported_algorithm",
-		"directory_version_chain", "directory_quorum_not_met", "directory_exceeds_policy":
+		"directory_version_chain", "directory_quorum_not_met", "directory_exceeds_policy",
+		// Revocation installation binding (03-03, the T-03-20 rule).
+		"revoke_installation_missing", "revoke_installation_mismatch":
 		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal

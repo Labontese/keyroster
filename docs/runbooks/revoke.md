@@ -74,7 +74,13 @@ keyroster revoke serial SERIAL --ca user --reason "laptop lost"
 printable ASCII, at most 256 bytes, and goes into the audit log with the
 request. The command verifies the served trust bundle against your root
 pins first, then signs the request in ssh-agent under
-`keyroster/revoke-request/v1`.
+`keyroster/revoke-request/v2`. The request names the installation ID of
+that bundle, so your signature revokes in no other installation: the
+signer refuses a request for another installation
+(`revoke_installation_mismatch`) and a 03-01 request under
+`keyroster/revoke-request/v1`, which names none
+(`revoke_installation_missing`). Run in CI (signer, audit and CLI tests,
+03-03 pre-merge review).
 
 Expected output:
 

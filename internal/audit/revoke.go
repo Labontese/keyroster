@@ -108,11 +108,12 @@ func (rs *revocations) groupCut(g *subjectGroup) error {
 // leafMicros, against the trust state in force and the log before it:
 //
 //   - its logged request bytes parse strictly (wire.ParseRevokeSigningBytes)
-//     and its evidence is admin-sshsig/v1 under keyroster/revoke-request/v1
-//     over exactly those bytes, every item by an admin of the policy in
-//     force and at least one admin (the signer's rule: one admin revokes);
-//     the entry records that policy's version, and the bundle in force has
-//     an installation ID;
+//     and its evidence is admin-sshsig/v1 under the request's namespace
+//     (keyroster/revoke-request/v2, or v1 for a 03-01 serial request) over
+//     exactly those bytes, every item by an admin of the policy in force
+//     and at least one admin (the signer's rule: one admin revokes); the
+//     entry records that policy's version, the bundle in force has an
+//     installation ID, and a v2 request names that installation;
 //   - its resolution time T = ResolvedAtSeconds (F9): T × 10^6 is not
 //     after the leaf time, which appendLocked may only raise, and T is
 //     within 300 s of the request's CreatedAt, the signer's freshness
@@ -152,7 +153,14 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 	if body.PolicyVersion != a.policy.Version {
 		return fmt.Errorf("entry records policy version %d, but the policy in force is version %d", body.PolicyVersion, a.policy.Version)
 	}
-	if err := verifyRevokeAdmins(body.Evidence, body.Request, a.policy); err != nil {
+	// A v2 request names the installation it is for, and the signer revokes
+	// only for its own (the T-03-20 rule of directories). A v1 request of
+	// 03-01 names none and revokes only by serial (wire.ParseRevokeSigningBytes).
+	if req.InstallationID != "" && req.InstallationID != a.bundle.InstallationID {
+		return fmt.Errorf("the request is for installation %s, but trust bundle v%d in force is for %s, and the signer refuses it (revoke_installation_mismatch)",
+			req.InstallationID, a.bundle.Version, a.bundle.InstallationID)
+	}
+	if err := verifyRevokeAdmins(body.Evidence, body.Request, req.Namespace(), a.policy); err != nil {
 		return err
 	}
 	if body.ResolvedAtSeconds > math.MaxUint64/1_000_000 || body.ResolvedAtSeconds*1_000_000 > leafMicros {
@@ -298,9 +306,9 @@ func keyFingerprint(blob []byte) string {
 
 // verifyRevokeAdmins checks a revoke entry's evidence the way the signer
 // authorizes a revocation: every item admin-sshsig/v1, an SSHSIG under
-// keyroster/revoke-request/v1 over msg by an admin of pol, and at least
-// one admin.
-func verifyRevokeAdmins(evidence []wire.Evidence, msg []byte, pol *trust.Policy) error {
+// namespace (the logged request's: keyroster/revoke-request/v2, or v1 for
+// a 03-01 request) over msg by an admin of pol, and at least one admin.
+func verifyRevokeAdmins(evidence []wire.Evidence, msg []byte, namespace string, pol *trust.Policy) error {
 	admins := map[string]bool{}
 	for _, ad := range pol.Admins {
 		admins[ad.Key] = true
@@ -319,8 +327,8 @@ func verifyRevokeAdmins(evidence []wire.Evidence, msg []byte, pol *trust.Policy)
 		if !admins[trust.FormatKey(sig.PublicKey())] {
 			return fmt.Errorf("evidence %d is signed by %s, not an admin of policy v%d", i, ssh.FingerprintSHA256(sig.PublicKey()), pol.Version)
 		}
-		if err := sig.Verify(wire.RevokeSSHSIGNamespace, msg); err != nil {
-			return fmt.Errorf("evidence %d does not approve the logged request under %s: %w", i, wire.RevokeSSHSIGNamespace, err)
+		if err := sig.Verify(namespace, msg); err != nil {
+			return fmt.Errorf("evidence %d does not approve the logged request under %s: %w", i, namespace, err)
 		}
 	}
 	return nil

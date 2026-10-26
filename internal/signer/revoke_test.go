@@ -73,7 +73,7 @@ func newRevokeEnv(t *testing.T, admins int, quorum uint32, installationID string
 // now by the env's clock, signed under ns by signers.
 func (e *revokeEnv) revokeRequest(serial uint64, role wire.CARole, ns string, signers ...ssh.Signer) *wire.RevokeRequest {
 	e.t.Helper()
-	req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: role, Serial: serial, CreatedAt: uint64(e.clock.Now().Unix()), Reason: "test"} //nolint:gosec // G115: after 1970
+	req := &wire.RevokeRequest{InstallationID: e.fx.InstallationID, Target: wire.TargetSerial, CARole: role, Serial: serial, CreatedAt: uint64(e.clock.Now().Unix()), Reason: "test"} //nolint:gosec // G115: after 1970
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		e.t.Fatal(err)
 	}
@@ -244,6 +244,25 @@ func TestRevoke(t *testing.T) {
 		if st, err := e.db.KRLState(context.Background()); err != nil || st != nil {
 			t.Fatalf("KRL state after the refusal: %+v, %v", st, err)
 		}
+	})
+	t.Run("installation_binding", func(t *testing.T) {
+		// Pre-merge review of PR #61 (owner decision 2026-10-26): an
+		// admin-signed request for another installation, and a 03-01 v1
+		// request, which names none, are refused before the evidence is
+		// checked; the request for this installation revokes.
+		e := newRevokeEnv(t, 1, 1, testInstallationID)
+		other := e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace)
+		other.InstallationID = "ffffffffffffffffffffffffffffffff"
+		e.refusedRevoke(e.signed(other, e.fx.Admins[0]), "revoke_installation_mismatch")
+		v1 := e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace)
+		v1.InstallationID = ""
+		sig, err := sshsig.Sign(rand.Reader, e.fx.Admins[0], wire.RevokeSSHSIGNamespaceV1, v1.SigningBytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		v1.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+		e.refusedRevoke(v1, "revoke_installation_missing")
+		e.revoked(e.revokeRequest(e.serial, wire.CARoleUser, wire.RevokeSSHSIGNamespace, e.fx.Admins[0]), 0)
 	})
 }
 
@@ -700,7 +719,7 @@ func (e *subjectEnv) login(t *testing.T, user string) *ssh.Certificate {
 // on the signer's clock and signed by the fixture's admin.
 func (e *subjectEnv) subjectRequest(t *testing.T, subject string) *wire.RevokeRequest {
 	t.Helper()
-	req := &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: subject,
+	req := &wire.RevokeRequest{InstallationID: e.fx.InstallationID, Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: subject,
 		CreatedAt: uint64(e.clock.Now().Unix()), Reason: "test"} //nolint:gosec // G115: after 1970
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		t.Fatal(err)
@@ -846,6 +865,9 @@ func (e *logEnv) bundleOf(t *testing.T) *trust.Bundle {
 func (e *subjectEnv) signedRevoke(t *testing.T, req *wire.RevokeRequest) *wire.RevokeRequest {
 	t.Helper()
 	req.CreatedAt = uint64(e.clock.Now().Unix()) //nolint:gosec // G115: after 1970
+	if req.InstallationID == "" {
+		req.InstallationID = e.fx.InstallationID
+	}
 	if req.Reason == "" {
 		req.Reason = "test"
 	}

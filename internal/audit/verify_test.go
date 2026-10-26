@@ -2422,6 +2422,9 @@ func (rf *revokeFixture) revoke(req *wire.RevokeRequest, entries []tlog.RevokedE
 	if req.Reason == "" {
 		req.Reason = "test"
 	}
+	if req.InstallationID == "" {
+		req.InstallationID = auditInstallationID
+	}
 	if req.RequestID == ([16]byte{}) {
 		if _, err := rand.Read(req.RequestID[:]); err != nil {
 			rf.t.Fatal(err)
@@ -2503,6 +2506,22 @@ func subjectAlice() *wire.RevokeRequest {
 	return &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "u:alice"}
 }
 
+// asV1 returns an edit that logs req as a 03-01 v1 request (no
+// installation ID, keyroster/revoke-request/v1), signed by the admin under
+// namespace.
+func (rf *revokeFixture) asV1(req *wire.RevokeRequest, namespace string) func(*tlog.RevokeBody) {
+	return func(b *tlog.RevokeBody) {
+		v1 := *req
+		v1.InstallationID = ""
+		b.Request = v1.SigningBytes()
+		sig, err := sshsig.Sign(rand.Reader, rf.admin, namespace, b.Request)
+		if err != nil {
+			rf.t.Fatal(err)
+		}
+		b.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+	}
+}
+
 // TestVerifyRevocations (REVOKE-01..03, T-03-13, T-03-14, T-03-16, T-03-202):
 // audit verify re-derives every revoke entry from the admin-signed request
 // and the logged certificates, and every krl_publish entry from the logged
@@ -2519,6 +2538,43 @@ func TestVerifyRevocations(t *testing.T) {
 			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c1), serialEntry(c2)}, nil)
 			rf.publish(nil)
 		}, ""},
+		// Installation binding (pre-merge review of PR #61, owner decision
+		// 2026-10-26): a v2 request names its installation; a 03-01 v1
+		// request names none, revokes only by serial and is signed under
+		// keyroster/revoke-request/v1.
+		{"revoke_other_installation_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{InstallationID: "ffffffffffffffffffffffffffffffff", Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial},
+				[]tlog.RevokedEntry{serialEntry(c)}, nil)
+		}, "revoke_installation_mismatch"},
+		{"revoke_v1_serial_accepted", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, rf.asV1(req, wire.RevokeSSHSIGNamespaceV1))
+			rf.publish(nil)
+		}, ""},
+		{"revoke_v1_under_v2_namespace_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, rf.asV1(req, wire.RevokeSSHSIGNamespace))
+		}, "does not approve the logged request under keyroster/revoke-request/v1"},
+		{"revoke_v2_under_v1_namespace_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
+			rf.revoke(req, []tlog.RevokedEntry{serialEntry(c)}, func(b *tlog.RevokeBody) {
+				sig, err := sshsig.Sign(rand.Reader, rf.admin, wire.RevokeSSHSIGNamespaceV1, b.Request)
+				if err != nil {
+					rf.t.Fatal(err)
+				}
+				b.Evidence = []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}
+			})
+		}, "does not approve the logged request under keyroster/revoke-request/v2"},
+		{"revoke_v1_key_id_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			req := &wire.RevokeRequest{Target: wire.TargetKeyID, CARole: wire.CARoleUser, KeyID: c.KeyId}
+			rf.revoke(req, []tlog.RevokedEntry{{Kind: tlog.RevokedKeyID, CAKey: rf.ca.PublicKey().Marshal(), KeyID: c.KeyId, ValidBeforeSeconds: c.ValidBefore}},
+				rf.asV1(req, wire.RevokeSSHSIGNamespaceV1))
+		}, "revokes only by serial"},
 		{"revoke_entries_tampered", func(rf *revokeFixture) {
 			c1, _ := rf.issue(), rf.issue()
 			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c1)}, nil) // omits the live c2

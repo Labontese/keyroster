@@ -27,10 +27,12 @@ import (
 //
 // In order: a valid request (malformed_request), freshness (CreatedAt
 // within ±300 s), a request ID not accepted before (duplicate_request),
+// an installation ID in the bundle in force (krl_no_installation_id), a
+// v2 request (revoke_installation_missing) for that installation
+// (revoke_installation_mismatch: the T-03-20 rule of directories),
 // admin-sshsig/v1 evidence by at least one policy admin over the request's
-// exact signing bytes under keyroster/revoke-request/v1 (one admin
-// suffices whatever admin_quorum says), an installation ID in the bundle
-// in force (krl_no_installation_id), a subject kind this version resolves
+// exact signing bytes under keyroster/revoke-request/v2 (one admin
+// suffices whatever admin_quorum says), a subject kind this version resolves
 // (subject_kind_unsupported), then one transaction: the bundle still the
 // one loaded at start, the target resolved to its entries, one revocation
 // row per entry, the revoke leaf (several for a subject above
@@ -74,12 +76,19 @@ func (s *Signer) Revoke(ctx context.Context, peer Peer, req *wire.RevokeRequest)
 	case used:
 		return nil, refusalErr(wire.CodeRefused, "duplicate_request", signerdb.ErrDuplicateRequest)
 	}
+	switch {
+	case s.installationID == "":
+		return nil, refusalErr(wire.CodeUnavailable, "krl_no_installation_id", nil)
+	case req.InstallationID == "":
+		// A keyroster/revoke-request/v1 request (03-01) names no
+		// installation, so its admin signature is valid in every one.
+		return nil, refusalErr(wire.CodeRefused, "revoke_installation_missing", nil)
+	case req.InstallationID != s.installationID:
+		return nil, refusalErr(wire.CodeRefused, "revoke_installation_mismatch", nil)
+	}
 	admins, err := verifyRevokeEvidence(req, s.policy)
 	if err != nil {
 		return nil, err
-	}
-	if s.installationID == "" {
-		return nil, refusalErr(wire.CodeUnavailable, "krl_no_installation_id", nil)
 	}
 	if req.Target == wire.TargetSubject && req.SubjectKind != wire.SubjectUser {
 		// Host subjects arrive with 03-09, machine subjects with 03-11.
@@ -284,7 +293,7 @@ func certCAKey(certBytes []byte) ([]byte, uint64, error) {
 
 // verifyRevokeEvidence authorizes a revocation under the installed policy
 // (REVOKE-01): every evidence item must be admin-sshsig/v1, an armored
-// SSHSIG under keyroster/revoke-request/v1 over req.SigningBytes() by a
+// SSHSIG under keyroster/revoke-request/v2 over req.SigningBytes() by a
 // policy admin, and at least one distinct admin must have signed. One
 // admin suffices whatever admin_quorum says: revocation only ever removes
 // access (the fail-safe direction). It returns the sorted names of the
