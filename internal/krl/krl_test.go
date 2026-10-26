@@ -626,6 +626,14 @@ func TestParse(t *testing.T) {
 		{"wildcard_ca", rawKRL(0, rawSection{sectionCertificates, certBody(nil, rawSection{subKeyID, strings32([]byte("id"))})}), ErrMalformed},
 		{"ca_key_unparsable", rawKRL(0, rawSection{sectionCertificates, certBody([]byte("not a key"), rawSection{subSerialList, u64s(5)})}), ErrMalformed},
 		{"empty_key_id", rawKRL(0, rawSection{sectionCertificates, certBody(caKey, rawSection{subKeyID, strings32(nil)})}), ErrMalformed},
+		// OpenSSH's C-string and bignum rules (pre-merge review of PR #61;
+		// TestOracleCStringBignum runs them against ssh-keygen). A key ID
+		// that is only a NUL is empty, which Parse refuses.
+		{"key_id_inner_nul", rawKRL(0, rawSection{sectionCertificates, certBody(caKey, rawSection{subKeyID, strings32([]byte("a\x00b"))})}), ErrMalformed},
+		{"key_id_only_nul", rawKRL(0, rawSection{sectionCertificates, certBody(caKey, rawSection{subKeyID, strings32([]byte{0})})}), ErrMalformed},
+		{"comment_inner_nul", rawKRLComment([]byte("a\x00b")), ErrMalformed},
+		{"bitmap_2049_bytes_nonzero_first", rawKRL(0, rawSection{sectionCertificates, certBody(caKey, rawSection{subSerialBitmap, bitmapBody(1, append([]byte{0x01}, alternatingBitmap(2048)...))})}), ErrMalformed},
+		{"bitmap_2050_bytes", rawKRL(0, rawSection{sectionCertificates, certBody(caKey, rawSection{subSerialBitmap, bitmapBody(1, make([]byte, 2050))})}), ErrMalformed},
 		{"explicit_key_unparsable", rawKRL(0, rawSection{sectionExplicitKey, strings32([]byte("not a key"))}), ErrMalformed},
 		{"truncated_header", valid[:20], ErrMalformed},
 	} {
@@ -638,12 +646,12 @@ func TestParse(t *testing.T) {
 		})
 	}
 	t.Run("entry_cap", func(t *testing.T) {
-		// 16 bitmaps of 16384 bytes of alternating bits are 16 × 65536 =
-		// MaxParsedEntries runs, at disjoint offsets: accepted. One more
-		// serial is refused, before it is appended.
+		// 128 bitmaps of 2048 bytes (OpenSSH's largest) of alternating
+		// bits are 128 × 8192 = MaxParsedEntries runs, at disjoint offsets:
+		// accepted. One more serial is refused, before it is appended.
 		var subs []rawSection
-		for i := range 16 {
-			subs = append(subs, rawSection{subSerialBitmap, bitmapBody(uint64(1+i)<<20, alternatingBitmap(16384))}) //nolint:gosec // G115: small test offsets
+		for i := range 128 {
+			subs = append(subs, rawSection{subSerialBitmap, bitmapBody(uint64(1+i)<<20, alternatingBitmap(2048))}) //nolint:gosec // G115: small test offsets
 		}
 		full := rawKRL(0, rawSection{sectionCertificates, certBody(caKey, subs...)})
 		if len(full) > MaxKRL {
@@ -682,10 +690,10 @@ func TestParse(t *testing.T) {
 		if err != nil || !slices.Equal(p.Certs[0].Serials, want) {
 			t.Fatalf("Parse = %+v, %v; want %v", p, err, want)
 		}
-		// A dense bitmap counts each run toward MaxParsedEntries: 4 × 16384
-		// runs from one 16 KiB subsection.
-		p, err = Parse(rawKRL(0, rawSection{sectionCertificates, certBody(caKey, rawSection{subSerialBitmap, bitmapBody(1, alternatingBitmap(16384))})}))
-		if err != nil || len(p.Certs[0].Serials) != 4*16384 {
+		// A dense bitmap counts each run toward MaxParsedEntries: 4 × 2048
+		// runs from one 2 KiB subsection.
+		p, err = Parse(rawKRL(0, rawSection{sectionCertificates, certBody(caKey, rawSection{subSerialBitmap, bitmapBody(1, alternatingBitmap(2048))})}))
+		if err != nil || len(p.Certs[0].Serials) != 4*2048 {
 			t.Fatalf("dense bitmap: %v, %d intervals", err, len(p.Certs[0].Serials))
 		}
 	})
@@ -821,6 +829,13 @@ func TestEncodeOrdering(t *testing.T) {
 	}
 	if _, err := Encode(Set{Certs: []CertSection{{CAKey: caA, KeyIDs: []string{""}}}}, 1, testTime); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("an empty key ID: %v, want ErrMalformed", err)
+	}
+	// OpenSSH refuses a KRL with a NUL inside a key ID and cuts a key ID at
+	// a final NUL (pre-merge review of PR #61).
+	for _, id := range []string{"a\x00b", "a\x00"} {
+		if _, err := Encode(Set{Certs: []CertSection{{CAKey: caA, KeyIDs: []string{id}}}}, 1, testTime); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("key ID %q: %v, want ErrMalformed", id, err)
+		}
 	}
 }
 

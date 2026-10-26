@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -544,6 +545,94 @@ func TestOracleReverse(t *testing.T) {
 			}
 			if sp, err := Parse(seed); err != nil || !sp.SameContent(tc.want()) {
 				t.Fatalf("the seed %s parses to %+v, %v", bitmapSeed, sp, err)
+			}
+		})
+	}
+}
+
+// rawKRLComment is rawKRL with flags 0 and the header comment comment.
+func rawKRLComment(comment []byte, sections ...rawSection) []byte {
+	var b cryptobyte.Builder
+	b.AddBytes([]byte(Magic))
+	b.AddUint32(FormatVersion)
+	b.AddUint64(1)
+	b.AddUint64(0)
+	b.AddUint64(0)
+	b.AddUint32LengthPrefixed(func(*cryptobyte.Builder) {})
+	b.AddUint32LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(comment) })
+	for _, s := range sections {
+		b.AddUint8(s.typ)
+		b.AddUint32LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(s.body) })
+	}
+	return b.BytesOrPanic()
+}
+
+// cstringBignumKRLs are KRLs on OpenSSH's C-string and bignum rules
+// (pre-merge review of PR #61), each with whether OpenSSH reads it:
+// sshbuf_get_cstring allows a NUL only as the last byte of a key ID or
+// the header comment, and sshbuf_get_bignum2_bytes_direct takes a bitmap
+// of at most SSHBUF_MAX_BIGNUM (2048) bytes plus one leading zero byte.
+// They are also FuzzParseKRL seeds.
+func cstringBignumKRLs(ca []byte) []struct {
+	name string
+	data []byte
+	ok   bool
+} {
+	keyIDs := func(ids ...[]byte) []byte {
+		return rawKRL(0, rawSection{sectionCertificates, certBody(ca, rawSection{subKeyID, strings32(ids...)})})
+	}
+	bitmap := func(mpint []byte) []byte {
+		return rawKRL(0, rawSection{sectionCertificates, certBody(ca, rawSection{subSerialBitmap, bitmapBody(1, mpint)})})
+	}
+	return []struct {
+		name string
+		data []byte
+		ok   bool
+	}{
+		{"key_id_trailing_nul", keyIDs([]byte("oracle-id\x00")), true},
+		{"key_id_inner_nul", keyIDs([]byte("oracle\x00id")), false},
+		{"comment_trailing_nul", rawKRLComment([]byte("note\x00")), true},
+		{"comment_inner_nul", rawKRLComment([]byte("no\x00te")), false},
+		{"bitmap_2048_bytes", bitmap(append([]byte{0x7f}, alternatingBitmap(2047)...)), true},
+		{"bitmap_2049_bytes_zero_first", bitmap(append([]byte{0x00, 0xff}, alternatingBitmap(2047)...)), true},
+		{"bitmap_2049_bytes_nonzero_first", bitmap(append([]byte{0x01}, alternatingBitmap(2048)...)), false},
+		{"bitmap_2050_bytes", bitmap(append([]byte{0x00, 0x00}, alternatingBitmap(2048)...)), false},
+	}
+}
+
+// TestOracleCStringBignum (pre-merge review of PR #61): Parse accepts
+// exactly the KRLs of cstringBignumKRLs that ssh-keygen accepts, and a key
+// ID with a final NUL is the key ID before it, as ssh-keygen -Q revokes a
+// certificate with that key ID.
+func TestOracleCStringBignum(t *testing.T) {
+	keygen := oracleKeygen(t)
+	dir := t.TempDir()
+	caFile, caPub := oracleCA(t, dir, 0x30)
+	for _, tc := range cstringBignumKRLs(caPub.Marshal()) {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, tc.name+".krl")
+			if err := os.WriteFile(path, tc.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command(keygen, "-Q", "-l", "-f", path).CombinedOutput() //nolint:gosec // G204: test oracle
+			if (err == nil) != tc.ok {
+				t.Fatalf("ssh-keygen -Q -l: %v (want accepted %v)\n%s", err, tc.ok, out)
+			}
+			p, perr := Parse(tc.data)
+			if (perr == nil) != tc.ok {
+				t.Fatalf("Parse: %v; ssh-keygen accepted it: %v", perr, tc.ok)
+			}
+			if tc.name != "key_id_trailing_nul" {
+				return
+			}
+			if !p.RevokesKeyID(caPub.Marshal(), "oracle-id") || !slices.Equal(p.Certs[0].KeyIDs, []string{"oracle-id"}) {
+				t.Fatalf("Parse reads the key ID as %q, want %q", p.Certs[0].KeyIDs, "oracle-id")
+			}
+			key := filepath.Join(dir, "nul-user")
+			run(t, keygen, "-q", "-t", "ed25519", "-N", "", "-f", key)
+			run(t, keygen, "-q", "-s", caFile, "-I", "oracle-id", "-n", "u", "-z", "9", "-V", "-5m:+1h", key+".pub")
+			if !queryRevoked(t, keygen, path, key+"-cert.pub") {
+				t.Fatal("ssh-keygen -Q does not revoke the certificate with key ID oracle-id")
 			}
 		})
 	}

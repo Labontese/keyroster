@@ -79,8 +79,10 @@ func (p *parser) count() error {
 // (0x39), an unknown section or subsection type, a length beyond the
 // remaining input, trailing bytes inside a section or subsection, an
 // empty, unparsable, non-canonical or certificate CA key or explicit key,
-// serial 0, a range with lo > hi, a bitmap that wraps past 2^64 - 1 or is
-// negative, an empty key ID, a fingerprint of the wrong length, and
+// serial 0, a range with lo > hi, a bitmap that wraps past 2^64 - 1, is
+// negative or is above OpenSSH's bignum bound, an empty key ID, a NUL
+// inside a key ID or the header comment (a final NUL ends a key ID, as in
+// OpenSSH), a fingerprint of the wrong length, and
 // fingerprints that are not strictly ascending. It reads the serial list
 // (0x20), range (0x21), bitmap (0x22) and key-ID (0x23) subsections and
 // the explicit-key (2), SHA-1 (3) and SHA-256 (5) sections, which
@@ -111,6 +113,9 @@ func Parse(data []byte) (*Parsed, error) {
 	}
 	if flags != 0 {
 		return nil, parseErr("flags %#x (none are defined)", flags)
+	}
+	if _, err := cString(comment, "the header comment"); err != nil {
+		return nil, err
 	}
 	p := &parser{certs: map[string]*ParsedSection{}}
 	for !s.Empty() {
@@ -252,11 +257,14 @@ func (p *parser) serialBitmap(sub cryptobyte.String, sec *ParsedSection) error {
 	if !sub.ReadUint64(&offset) || !readString32(&sub, &mpint) || !sub.Empty() {
 		return parseErr("serial bitmap: truncated or trailing bytes")
 	}
-	if len(mpint) > maxBitmapMpintLength {
-		return parseErr("serial bitmap of %d bytes, above %d", len(mpint), maxBitmapMpintLength)
-	}
 	if len(mpint) > 0 && mpint[0]&0x80 != 0 {
 		return parseErr("serial bitmap is a negative mpint")
+	}
+	// OpenSSH's bignum rule (sshbuf_get_bignum2_bytes_direct): at most
+	// SSHBUF_MAX_BIGNUM bytes, plus one leading zero byte that keeps the
+	// sign bit clear.
+	if len(mpint) > maxBitmapMpintLength || (len(mpint) == maxBitmapMpintLength && mpint[0] != 0) {
+		return parseErr("serial bitmap of %d bytes, above OpenSSH's %d (plus a zero sign byte)", len(mpint), maxBitmapMpintLength-1)
 	}
 	bits := []byte(mpint)
 	for len(bits) > 0 && bits[0] == 0 {
@@ -289,19 +297,38 @@ func (p *parser) serialBitmap(sub cryptobyte.String, sec *ParsedSection) error {
 	return nil
 }
 
+// cString reads b as OpenSSH's sshbuf_get_cstring does for the header
+// comment and every key ID: a NUL is allowed only as the last byte, and
+// the value ends before it, so "X\x00" is the key ID "X", which sshd and
+// ssh-keygen -Q revoke as "X" (they compare key IDs with strcmp). A NUL
+// anywhere else is refused, as OpenSSH refuses the whole KRL.
+func cString(b []byte, what string) (string, error) {
+	if i := bytes.IndexByte(b, 0); i >= 0 {
+		if i != len(b)-1 {
+			return "", parseErr("%s with a NUL byte inside it (OpenSSH refuses the KRL)", what)
+		}
+		b = b[:i]
+	}
+	return string(b), nil
+}
+
 func (p *parser) keyIDs(sub cryptobyte.String, sec *ParsedSection) error {
 	for !sub.Empty() {
 		var id cryptobyte.String
 		if !readString32(&sub, &id) {
 			return parseErr("key ID subsection: truncated")
 		}
-		if len(id) == 0 {
+		kid, err := cString(id, "a key ID")
+		if err != nil {
+			return err
+		}
+		if kid == "" {
 			return parseErr("an empty key ID")
 		}
 		if err := p.count(); err != nil {
 			return err
 		}
-		sec.KeyIDs = append(sec.KeyIDs, string(id))
+		sec.KeyIDs = append(sec.KeyIDs, kid)
 	}
 	return nil
 }

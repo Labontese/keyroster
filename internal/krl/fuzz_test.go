@@ -36,6 +36,10 @@ func FuzzParseKRL(f *testing.F) {
 	}
 	f.Add([]byte(Magic))
 	f.Add([]byte{})
+	_, ca := seedKey(f, 0x30)
+	for _, tc := range cstringBignumKRLs(ca.Marshal()) {
+		f.Add(tc.data)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p, err := Parse(data)
 		if err != nil {

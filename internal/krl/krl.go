@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/cryptobyte"
@@ -73,7 +74,7 @@ const (
 	subExtension         byte = 0x39
 	sha1Len                   = 20
 	sha256Len                 = 32
-	maxBitmapMpintLength      = 16384 + 1 // OpenSSH's SSHBUF_MAX_BIGNUM plus its sign byte
+	maxBitmapMpintLength      = 16384/8 + 1 // OpenSSH's SSHBUF_MAX_BIGNUM (2048 bytes) plus a zero sign byte
 )
 
 // MaxRevokedKeys and MaxRevokedKeyBytes cap the explicit-key entries,
@@ -144,7 +145,8 @@ type CertSection struct {
 
 // Encode returns the KRL for s with the given krl_version and
 // generated_date (generated, in whole seconds since the epoch; 0 before
-// it). It refuses a nil CA key, a serial 0, an empty key ID and a nil or
+// it). It refuses a nil CA key, a serial 0, an empty key ID or one with a
+// NUL byte, and a nil or
 // certificate explicit key (ErrMalformed), and an encoding above MaxKRL
 // (ErrTooLarge). An empty set encodes to the header alone, which revokes
 // nothing.
@@ -166,6 +168,11 @@ func Encode(s Set, version uint64, generated time.Time) ([]byte, error) {
 		for _, id := range c.KeyIDs {
 			if id == "" {
 				return nil, fmt.Errorf("%w: an empty key ID cannot be revoked", ErrMalformed)
+			}
+			if strings.IndexByte(id, 0) >= 0 {
+				// OpenSSH reads a key ID as a C string: it refuses the KRL
+				// for a NUL inside one and ends the key ID at a final one.
+				return nil, fmt.Errorf("%w: a key ID with a NUL byte cannot be revoked", ErrMalformed)
 			}
 		}
 		k := string(c.CAKey.Marshal())
