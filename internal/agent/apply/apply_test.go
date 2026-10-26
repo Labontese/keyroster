@@ -345,6 +345,28 @@ func TestApply(t *testing.T) {
 			t.Fatalf("an empty KRL: %+v", r)
 		}
 	})
+	t.Run("catch_up_beyond_one_capture", func(t *testing.T) {
+		t.Parallel()
+		// A host more than spool.MaxVersionsPerKind directory versions
+		// behind converges over several applies: each capture reads the
+		// versions just above what it accepted, so the chain is never cut.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		for range spool.MaxVersionsPerKind + 6 {
+			h.publishDir(h.spec("role:ops"))
+		}
+		total := uint64(len(h.dirs))
+		r := h.mustApply()
+		if r.DirectoryVersion != 1+spool.MaxVersionsPerKind {
+			t.Fatalf("first apply reached directory version %d, want %d", r.DirectoryVersion, 1+spool.MaxVersionsPerKind)
+		}
+		if r = h.mustApply(); r.DirectoryVersion != total {
+			t.Fatalf("second apply reached directory version %d, want %d", r.DirectoryVersion, total)
+		}
+		if r = h.mustApply(); !r.NoOp {
+			t.Fatalf("third apply: %+v, want a no-op", r)
+		}
+	})
 	t.Run("render_once_from_newest", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))

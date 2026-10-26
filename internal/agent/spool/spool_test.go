@@ -67,7 +67,7 @@ func TestSpool(t *testing.T) {
 		writeTestFile(t, filepath.Join(dir, "bundle-1.json.sigs"), []byte("x"))
 		done := make(chan error, 1)
 		go func() {
-			_, _, err := Read(dir)
+			_, _, err := Read(dir, Floor{})
 			done <- err
 		}()
 		select {
@@ -88,11 +88,11 @@ func TestSpool(t *testing.T) {
 		if err := os.Symlink(realDir, filepath.Join(base, "spool")); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := Read(filepath.Join(base, "spool")); !errors.Is(err, ErrSymlink) {
+		if _, _, err := Read(filepath.Join(base, "spool"), Floor{}); !errors.Is(err, ErrSymlink) {
 			t.Fatalf("symlinked spool: %v, want spool_symlink", err)
 		}
 		writeTestFile(t, filepath.Join(base, "file"), nil)
-		if _, _, err := Read(filepath.Join(base, "file")); !errors.Is(err, ErrNotDir) {
+		if _, _, err := Read(filepath.Join(base, "file"), Floor{}); !errors.Is(err, ErrNotDir) {
 			t.Fatalf("a file as spool: %v, want spool_not_directory", err)
 		}
 	})
@@ -107,7 +107,7 @@ func TestSpool(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeTestFile(t, filepath.Join(dir, "bundle-5.json.sigs"), []byte("x"))
-		st, _, err := Read(dir)
+		st, _, err := Read(dir, Floor{})
 		if !errors.Is(err, ErrSymlink) || len(st.Bundles) != 0 {
 			t.Fatalf("bundle-5.json -> ../pins.json: %v, %d bundles; want spool_symlink and nothing read", err, len(st.Bundles))
 		}
@@ -119,7 +119,7 @@ func TestSpool(t *testing.T) {
 		}
 		writeTestFile(t, filepath.Join(dir, "bundle-1.json"), []byte("b"))
 		writeTestFile(t, filepath.Join(dir, "bundle-1.json.sigs"), []byte("s"))
-		st, ignored, err := Read(dir)
+		st, ignored, err := Read(dir, Floor{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,7 +139,7 @@ func TestSpool(t *testing.T) {
 		writeTestFile(t, filepath.Join(dir, ".bundle-2.json.tmp-0011223344556677"), []byte("torn"))
 		writeTestFile(t, filepath.Join(dir, "bundle-1.json"), []byte("b"))
 		writeTestFile(t, filepath.Join(dir, "bundle-1.json.sigs"), []byte("s"))
-		st, ignored, err := Read(dir)
+		st, ignored, err := Read(dir, Floor{})
 		if err != nil || len(st.Bundles) != 1 || !slices.Contains(ignored, ".bundle-2.json.tmp-0011223344556677") {
 			t.Fatalf("Read = %v, %v, %v", st.Bundles, ignored, err)
 		}
@@ -189,9 +189,41 @@ func TestSpool(t *testing.T) {
 		if err := Write(dir, in); err != nil {
 			t.Fatal(err)
 		}
-		st, ignored, err := Read(dir)
+		st, ignored, err := Read(dir, Floor{})
 		if err != nil || len(st.Bundles) != 2 || len(st.Directories) != 1 || len(st.KRLs) != 1 || string(st.KRLs[1793000002].KRL) != "k2" {
 			t.Fatalf("Read = %+v, %v, %v", st, ignored, err)
+		}
+	})
+	t.Run("floor_selects_versions", func(t *testing.T) {
+		dir := t.TempDir()
+		in := State{Directories: map[uint64]Doc{}}
+		for v := uint64(1); v <= 100; v++ {
+			in.Directories[v] = Doc{Body: []byte("d"), Sigs: []byte("s")}
+		}
+		if err := Write(dir, in); err != nil {
+			t.Fatal(err)
+		}
+		// With a floor: the lowest MaxVersionsPerKind above it, and the
+		// newest at or below it.
+		st, _, err := Read(dir, Floor{Directory: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(st.Directories) != MaxVersionsPerKind+1 {
+			t.Fatalf("%d directories read, want %d", len(st.Directories), MaxVersionsPerKind+1)
+		}
+		for _, v := range []uint64{10, 11, 10 + MaxVersionsPerKind} {
+			if _, ok := st.Directories[v]; !ok {
+				t.Fatalf("version %d not read", v)
+			}
+		}
+		if _, ok := st.Directories[11+MaxVersionsPerKind]; ok {
+			t.Fatal("a version beyond the window was read")
+		}
+		// Without one: the newest MaxVersionsPerKind.
+		st, _, _ = Read(dir, Floor{})
+		if _, ok := st.Directories[100]; !ok || len(st.Directories) != MaxVersionsPerKind {
+			t.Fatalf("without a floor: %d read, newest read %t", len(st.Directories), ok)
 		}
 	})
 	t.Run("bad_names_refused", func(t *testing.T) {

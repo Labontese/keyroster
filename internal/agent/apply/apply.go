@@ -387,9 +387,10 @@ func (e *engine) loadLastSwap(pending, haveCurrent bool) {
 
 // capture is the one spool capture helper: the transition and every
 // superseding check during a widening wait read the spool only here, and
-// the bytes it returns are the bytes verified and installed (F2).
-func (e *engine) capture() (spool.State, error) {
-	st, ignored, err := spool.Read(e.cfg.Spool)
+// the bytes it returns are the bytes verified and installed (F2). floor is
+// the accepted state the capture is verified against (spool.Floor).
+func (e *engine) capture(floor spool.Floor) (spool.State, error) {
+	st, ignored, err := spool.Read(e.cfg.Spool, floor)
 	for _, n := range ignored {
 		if len(e.report.SpoolIgnored) < 64 && !slices.Contains(e.report.SpoolIgnored, n) {
 			e.report.SpoolIgnored = append(e.report.SpoolIgnored, n)
@@ -417,11 +418,11 @@ func (e *engine) loadStored() (*state.Stored, error) {
 // forward verifies one capture and moves current to the generation it
 // renders.
 func (e *engine) forward(ctx context.Context) error {
-	st, err := e.capture()
+	stored, err := e.loadStored()
 	if err != nil {
 		return err
 	}
-	stored, err := e.loadStored()
+	st, err := e.capture(stored.Floor())
 	if err != nil {
 		return err
 	}
@@ -533,11 +534,12 @@ func (e *engine) discard(n uint64) {
 // the pending target pending, verified against it, rendered, written and
 // checked, is returned as the superseding generation.
 func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target *Generation) (*Generation, *state.Verified, error) {
-	st, err := e.capture()
+	prev := pending.AsStored()
+	st, err := e.capture(prev.Floor())
 	if err != nil {
 		return nil, nil, err
 	}
-	v, err := state.Verify(e.pins, pending.AsStored(), st)
+	v, err := state.Verify(e.pins, prev, st)
 	if err != nil || !v.Changed() {
 		return nil, nil, err
 	}

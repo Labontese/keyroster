@@ -46,10 +46,21 @@ const (
 	// each.
 	MaxBundle = 1 << 20
 	// MaxVersionsPerKind bounds how many versions of the bundle, policy
-	// and directory the applier reads from one spool: the newest ones. A
-	// host further behind than that catches up in more than one apply.
+	// and directory the applier reads from one spool capture (see Floor).
+	// A host further behind than that catches up over several applies,
+	// MaxVersionsPerKind versions at a time.
 	MaxVersionsPerKind = 64
 )
+
+// Floor is what the applier has accepted already, by kind (0: nothing).
+// Read takes, for a kind with a floor, the lowest MaxVersionsPerKind
+// versions above it, so that the chain from the floor is never cut, plus
+// the newest version at or below it, so that an equal version reads as a
+// no-op and an older one is refused; for a kind without a floor, the
+// newest MaxVersionsPerKind versions.
+type Floor struct {
+	Bundle, Policy, Directory uint64
+}
 
 // Doc is one signed document and its detached signatures.
 type Doc struct {
@@ -251,11 +262,11 @@ func ListDir(dirfd int) ([]string, error) {
 // wire.MaxDirectory with wire.MaxDirectorySigs for its signatures, the
 // KRL krl.MaxKRL, its manifest krl.MaxManifest and the manifest's
 // signature krl.MaxManifestSig. Names outside the fixed patterns, sets
-// that are not complete, versions beyond the newest MaxVersionsPerKind
-// and every KRL but the newest complete one are not read; they are
-// returned as ignored, for the report. A recognised file that fails the
-// open contract refuses the whole capture.
-func Read(dir string) (State, []string, error) {
+// that are not complete, versions Floor leaves out and every KRL but the
+// newest complete one are not read; they are returned as ignored, for the
+// report. A recognised file that fails the open contract refuses the
+// whole capture.
+func Read(dir string, floor Floor) (State, []string, error) {
 	st := State{Bundles: map[uint64]Doc{}, Policies: map[uint64]Doc{}, Directories: map[uint64]Doc{}, KRLs: map[uint64]KRLFiles{}}
 	fd, err := OpenDir(dir)
 	if err != nil {
@@ -302,18 +313,22 @@ func Read(dir string) (State, []string, error) {
 		"directory": {wire.MaxDirectory, wire.MaxDirectorySigs},
 	}
 	targets := map[string]map[uint64]Doc{"bundle": st.Bundles, "policy": st.Policies, "directory": st.Directories}
+	floors := map[string]uint64{"bundle": floor.Bundle, "policy": floor.Policy, "directory": floor.Directory}
 	for _, kind := range []string{"bundle", "policy", "directory"} {
-		vs := docs[kind]
-		slices.Sort(vs)
-		slices.Reverse(vs)
-		for i, v := range vs {
+		var complete []uint64
+		for _, v := range docs[kind] {
 			base := kind + "-" + strconv.FormatUint(v, 10) + ".json"
-			if !present[base+".sigs"] {
+			if present[base+".sigs"] {
+				complete = append(complete, v)
+			} else {
 				ignored = append(ignored, base+" (no "+base+".sigs)")
-				continue
 			}
-			if i >= MaxVersionsPerKind {
-				ignored = append(ignored, base+" (older than the newest versions read)")
+		}
+		take := pick(complete, floors[kind])
+		for _, v := range complete {
+			base := kind + "-" + strconv.FormatUint(v, 10) + ".json"
+			if !take[v] {
+				ignored = append(ignored, base+" (outside the versions read this time)")
 				continue
 			}
 			body, err := ReadFileAt(fd, base, caps[kind][0])
@@ -352,6 +367,33 @@ func Read(dir string) (State, []string, error) {
 		read = true
 	}
 	return st, ignored, nil
+}
+
+// pick is Floor's rule over the complete versions vs of one kind.
+func pick(vs []uint64, floor uint64) map[uint64]bool {
+	slices.Sort(vs)
+	take := map[uint64]bool{}
+	if floor == 0 {
+		for i := len(vs) - 1; i >= 0 && len(take) < MaxVersionsPerKind; i-- {
+			take[vs[i]] = true
+		}
+		return take
+	}
+	var below uint64
+	n := 0
+	for _, v := range vs {
+		switch {
+		case v <= floor:
+			below = v
+		case n < MaxVersionsPerKind:
+			take[v] = true
+			n++
+		}
+	}
+	if below != 0 {
+		take[below] = true
+	}
+	return take
 }
 
 // Write stores s in the spool at dir through WriteFileAt (mode 0644),

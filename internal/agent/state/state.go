@@ -147,6 +147,18 @@ func (s *Stored) files() []struct {
 	}
 }
 
+// Floor is what s accepted, for spool.Read (nil s: nothing).
+func (s *Stored) Floor() spool.Floor {
+	if s == nil {
+		return spool.Floor{}
+	}
+	f := spool.Floor{Bundle: s.BundleVersion, Directory: s.DirectoryVersion}
+	if s.policy != nil {
+		f.Policy = s.policy.Version
+	}
+	return f
+}
+
 // LoadStored reads accepted/ through its descriptor acceptedFd with
 // spool.ReadFileAt. No bundle.json means nothing was accepted yet (nil,
 // nil). The stored documents were verified when they were accepted; they
