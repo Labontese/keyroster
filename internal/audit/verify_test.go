@@ -2744,7 +2744,27 @@ func TestVerifyRevocations(t *testing.T) {
 			}
 			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectUser, Subject: "u:alice", CreatedAt: back},
 				[]tlog.RevokedEntry{serialEntry(c)}, func(b *tlog.RevokeBody) { b.ResolvedAtSeconds = back })
+			rf.publish(nil)
 		}, ""},
+		// Pre-merge review of PR #61: the signer writes the krl_publish
+		// entry right after every revocation, in the same transaction, so
+		// a revocation followed by another entry, or by none, is refused.
+		{"revoke_unpublished_at_end_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+		}, "is not followed by the krl_publish entry"},
+		{"revoke_published_after_another_entry_refused", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+			rf.issue()
+			rf.publish(nil)
+		}, "is not followed by the krl_publish entry"},
+		{"revoke_followed_by_revoke_refused", func(rf *revokeFixture) {
+			c1, c2 := rf.issue(), rf.issue()
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c1.Serial}, []tlog.RevokedEntry{serialEntry(c1)}, nil)
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c2.Serial}, []tlog.RevokedEntry{serialEntry(c2)}, nil)
+			rf.publish(nil)
+		}, "is not followed by the krl_publish entry"},
 		{"revoke_subject_relist_accepted", func(rf *revokeFixture) {
 			c1, c2 := rf.issue(), rf.issue()
 			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c1), serialEntry(c2)}, nil)
@@ -2881,6 +2901,22 @@ func TestVerifyRevokeSplit(t *testing.T) {
 		rep, err := build(t, func(*revokeFixture) {})
 		if err != nil || rep.Revocations != 1 || rep.RevokedEntries != tlog.MaxRevokedEntries+1 {
 			t.Fatalf("Verify = %+v, %v; want one revocation of 4097 entries", rep, err)
+		}
+	})
+	t.Run("revoke_subject_split_unpublished_refused", func(t *testing.T) {
+		// The krl_publish entry follows the last part, not the first.
+		rf := newRevokeFixture(t)
+		var entries []tlog.RevokedEntry
+		for range tlog.MaxRevokedEntries + 1 {
+			entries = append(entries, serialEntry(rf.issue()))
+		}
+		req := subjectAlice()
+		rf.revoke(req, entries[:tlog.MaxRevokedEntries], nil)
+		rf.revoke(req, entries[tlog.MaxRevokedEntries:], nil)
+		rf.issue()
+		rf.publish(nil)
+		if rep, err := rf.verifyAll(); err == nil || rep != nil || !strings.Contains(err.Error(), "is not followed by the krl_publish entry") {
+			t.Fatalf("Verify = %+v, %v; want the unpublished split refused", rep, err)
 		}
 	})
 	t.Run("revoke_subject_split_nonadjacent_refused", func(t *testing.T) {

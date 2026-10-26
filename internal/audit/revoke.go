@@ -48,7 +48,12 @@ type revocations struct {
 	// group is the subject revocation whose entries continue in the next
 	// revoke entry: it resolved to more than tlog.MaxRevokedEntries
 	// certificates and has not listed all of them yet.
-	group      *subjectGroup
+	group *subjectGroup
+	// due is the revocation whose krl_publish entry must come next: the
+	// signer publishes in the transaction of every revocation, right
+	// after its last revoke entry, so a log in which another entry, or
+	// none, follows it hides the revocation from every KRL.
+	due        *publishDue
 	krlVersion uint64 // the last published KRL version, 0 before the first
 
 	revokes, revokedEntries, publishes int
@@ -64,6 +69,12 @@ type subjectGroup struct {
 	want       []tlog.RevokedEntry // every entry the request resolves to
 	listed     int                 // entries listed so far
 	next       uint64              // the index its next revoke entry must take
+}
+
+// publishDue is a revocation whose krl_publish entry has not come yet.
+type publishDue struct {
+	requestID [16]byte
+	last      uint64 // index of its last revoke entry
 }
 
 func newRevocations() *revocations {
@@ -83,10 +94,17 @@ func (rs *revocations) addCert(c *ssh.Certificate, kid cert.KeyID) {
 }
 
 // before is called for every entry, at index, before its own check: a
-// split subject revocation must continue in exactly the next entry.
+// split subject revocation must continue in exactly the next entry, and a
+// completed revocation must be followed by exactly its krl_publish entry.
 func (rs *revocations) before(index uint64, kind tlog.Kind) error {
 	if g := rs.group; g != nil && (kind != tlog.KindRevoke || index != g.next) {
 		return rs.groupCut(g)
+	}
+	if d := rs.due; d != nil {
+		if kind != tlog.KindKRLPublish || index != d.last+1 {
+			return rs.publishMissing(d)
+		}
+		rs.due = nil
 	}
 	return nil
 }
@@ -96,7 +114,15 @@ func (rs *revocations) finish() error {
 	if g := rs.group; g != nil {
 		return rs.groupCut(g)
 	}
+	if d := rs.due; d != nil {
+		return rs.publishMissing(d)
+	}
 	return nil
+}
+
+func (rs *revocations) publishMissing(d *publishDue) error {
+	return fmt.Errorf("audit: entry %d (revoke): the revocation of request %s is not followed by the krl_publish entry the signer writes in the same transaction (entry %d)",
+		d.last, hex.EncodeToString(d.requestID[:]), d.last+1)
 }
 
 func (rs *revocations) groupCut(g *subjectGroup) error {
@@ -136,7 +162,10 @@ func (rs *revocations) groupCut(g *subjectGroup) error {
 //     of that request (every one but the last listing
 //     tlog.MaxRevokedEntries);
 //   - its request ID was used by no earlier revoke entry, except the one
-//     right before it in the same split subject revocation.
+//     right before it in the same split subject revocation;
+//   - the entry right after the revocation's last revoke entry is a
+//     krl_publish entry (before, finish), as the signer writes it in the
+//     same transaction, so no revocation stays out of the KRLs.
 //
 // The leaf time is used only for the bound on T, never for liveness: the
 // signer evaluates liveness at T, and the leaf time may have been raised
@@ -188,6 +217,7 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 		g.next++
 		if g.listed == len(g.want) {
 			rs.group = nil
+			rs.due = &publishDue{requestID: req.RequestID, last: index}
 		}
 		rs.add(body.Entries)
 		return nil
@@ -270,6 +300,9 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 	}
 	if err := sameEntries(body.Entries, want); err != nil {
 		return err
+	}
+	if rs.group == nil {
+		rs.due = &publishDue{requestID: req.RequestID, last: index}
 	}
 	rs.revokes++
 	rs.add(body.Entries)
