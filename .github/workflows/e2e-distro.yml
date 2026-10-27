@@ -39,7 +39,12 @@ jobs:
         # with `docker buildx imagetools inspect <tag>` (the multi-arch
         # index digest of the tag in the comment). The packages each image
         # installs come from its distribution's repositories at run time and
-        # are not pinned.
+        # are not pinned, except on archlinux: Arch rolls, so installing
+        # from its live repositories into this frozen image would be a
+        # partial upgrade. run-in.sh points pacman at the Arch Linux
+        # Archive snapshot of the image's build day and upgrades the whole
+        # system to it (signature checks on), so bumping the archlinux
+        # digest moves the snapshot with it.
         include:
           - name: "debian:12"
             image: debian@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 # debian:12
