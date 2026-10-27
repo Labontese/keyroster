@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: 03-05 executed; PR open at the Task 5 merge gate
-last_updated: "2026-10-26T13:56:04.327Z"
+stopped_at: 03-06 executed; PR open at the Task 4 merge gate
+last_updated: "2026-10-27T00:21:20.073Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 5046eb36253f14e089a3a0a9885ad5ec57b422f1
+state_head: 9d3d2aab1df36b8a67fd27afed8c78c74f56457c
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 54
-  completed_plans: 41
+  completed_plans: 42
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 7 of 19
+Plan: 8 of 19
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -96,6 +96,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P03b | 67 min | 3 tasks | 19 files |
 | Phase 03 P04 | 62 min | 3 tasks | 38 files |
 | Phase 03 P05 | about 150 min | 3 tasks | 32 files |
+| Phase 03 P06 | 116 min | 3 tasks | 32 files |
 
 ## Accumulated Context
 
@@ -258,6 +259,10 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-04: pop.hosts is one-way (trust.CheckPoPSuccessor in checkSuccessorChain, pop_hosts_removed); pop.machines stays freely changeable
 - [Phase 03]: 03-05: D-05 network answer loopback-only; the self-test dials only loopback addresses from sshd -T and stops once sshd proves a host key sshd -T names
 - [Phase 03]: 03-05: every move of current goes through Transition/swapCurrent (intermediate, LoginGraceTime + 5 s widening rule, swap_not_monotone); the agent never creates sshd_config.d (no_dropin_dir)
+- [Phase 03]: 03-06: the trial drop-in sets only TrustedUserCAKeys and AuthorizedPrincipalsFile, never RevokedKeys (a reload in its window would make sshd refuse every key)
+- [Phase 03]: 03-06: Phase 2 paths are removed only after the agent's generation is last-good, through paths.AllowedRemoval; only apply --once (Config.AllowAdoption) takes a host over
+- [Phase 03]: 03-06: hostKeys skips host key types it does not read (Arch OpenSSH 10.6p1 ssh-mldsa44-ed25519, DSA)
+- [Phase 03]: 03-06: a kept KRL is named in the report (krl_kept), not refused; Verify refuses krl_header_version_mismatch
 
 ### Pending Todos
 
@@ -296,6 +301,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-26T13:56:03.881Z
-Stopped at: 03-05 executed; PR open at the Task 5 merge gate
+Last session: 2026-10-27T00:21:19.547Z
+Stopped at: 03-06 executed; PR open at the Task 4 merge gate
 Resume file: None
