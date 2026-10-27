@@ -45,6 +45,10 @@ const (
 	// from what the agent writes (PR #68 review, F1, F5 and D-R2). Only
 	// keyroster-agent preflight reports it: the apply repairs the file.
 	CodeDropInDrift = "dropin_drift"
+	// CodeConfigUnsafe is a file sshd reads that the agent cannot read
+	// safely, or an Include graph it cannot follow (configGraph, PR #68
+	// review D-R3): a trust setting in it cannot be ruled out.
+	CodeConfigUnsafe = "sshd_config_unsafe"
 	// CodeSSHDCommand is Detect's refusal (ErrSSHDCommand, PR #68 review
 	// D-R4): the service starts sshd with arguments the agent does not
 	// account for.
@@ -76,7 +80,11 @@ var codeErrors = map[string]error{
 	CodePhase2Pending:       ErrPhase2Pending,
 	CodePhase2Differs:       ErrPhase2Differs,
 	CodeSSHDCommand:         ErrSSHDCommand,
+	CodeConfigUnsafe:        ErrConfigUnsafe,
 }
+
+// ErrConfigUnsafe is CodeConfigUnsafe's error.
+var ErrConfigUnsafe = errors.New(CodeConfigUnsafe)
 
 // ReportOnly are the codes that never refuse: keyroster-agent preflight
 // exits 0 with only these (03-16's enrollment gate relies on it).
@@ -192,29 +200,47 @@ type settingHit struct {
 	Text    string
 }
 
-// trustSettingHits greps the sshd configuration files for lines that set
-// TrustedUserCAKeys, RevokedKeys or AuthorizedPrincipalsFile, in any case
-// and inside Match blocks too: config (the service's sshd_config) and
-// every <root>/etc/ssh/sshd_config.d/*.conf but the agent's own drop-in.
-// It only reads. A file it cannot read is skipped (sshd -T still shows
-// its effect).
-func trustSettingHits(l Layout, config string) []settingHit {
-	files := []string{config}
+// principalsCommand and principalsCommandUser are sshd -T's spelling of
+// AuthorizedPrincipalsCommand and its user. sshd checks a certificate's
+// principals against AuthorizedPrincipalsFile and, when that matches
+// none, against the command's output (auth2-pubkey.c), so a command the
+// agent does not own widens which keyroster certificates an account
+// accepts: it must be unset (PR #68 review, F16 and D-R3).
+const (
+	principalsCommand     = "authorizedprincipalscommand"
+	principalsCommandUser = "authorizedprincipalscommanduser"
+)
+
+// trustSettingHits finds the configuration lines that set a trust
+// setting (TrustedUserCAKeys, RevokedKeys, AuthorizedPrincipalsFile, an
+// AuthorizedPrincipalsCommand other than none, and then every
+// AuthorizedPrincipalsCommandUser), in any case and inside Match blocks
+// too, in every file sshd reads from config (configGraph: the whole
+// Include graph, PR #68 review D-R3) but the agent's own drop-in. A
+// <root>/etc/ssh/sshd_config.d/*.conf the graph does not reach (no
+// Include of it) is still read, as before. It only reads; files it cannot
+// follow safely are the sshd_config_unsafe findings it returns.
+func trustSettingHits(l Layout, config string) ([]settingHit, []Finding) {
+	files, problems := configGraph(l, config)
+	read := map[string]bool{}
+	for _, f := range files {
+		read[f.path] = true
+	}
 	if m, err := filepath.Glob(filepath.Join(l.DropInDir(), "*.conf")); err == nil {
 		sort.Strings(m)
 		for _, f := range m {
-			if f != l.DropIn() {
-				files = append(files, f)
+			if b, err := readSmall(f, 1<<20); err == nil && !read[f] {
+				files = append(files, configFile{path: f, data: b})
 			}
 		}
 	}
-	var hits []settingHit
+	var hits, users []settingHit
+	command := false
 	for _, f := range files {
-		b, err := readSmall(f, 1<<20)
-		if err != nil {
+		if f.path == l.DropIn() {
 			continue
 		}
-		for i, line := range strings.Split(string(b), "\n") {
+		for i, line := range strings.Split(string(f.data), "\n") {
 			t := strings.TrimSpace(line)
 			if t == "" || strings.HasPrefix(t, "#") {
 				continue
@@ -223,12 +249,21 @@ func trustSettingHits(l Layout, config string) []settingHit {
 			if len(words) == 0 {
 				continue
 			}
-			if k := strings.ToLower(words[0]); slices.Contains(trustKeywords, k) {
-				hits = append(hits, settingHit{File: f, Line: i + 1, Keyword: k, Text: t})
+			h := settingHit{File: f.path, Line: i + 1, Keyword: strings.ToLower(words[0]), Text: t}
+			switch {
+			case slices.Contains(trustKeywords, h.Keyword):
+				hits = append(hits, h)
+			case h.Keyword == principalsCommand && (len(words) < 2 || !strings.EqualFold(words[1], "none")):
+				hits, command = append(hits, h), true
+			case h.Keyword == principalsCommandUser:
+				users = append(users, h)
 			}
 		}
 	}
-	return hits
+	if command {
+		hits = append(hits, users...)
+	}
+	return hits, problems
 }
 
 // readSmall reads at most limit bytes of a file, following symlinks (a
@@ -289,7 +324,7 @@ func foreignFindings(l Layout, base Dump, hits []settingHit, dropIn []byte, r *P
 	for _, h := range hits {
 		named[h.Keyword] = true
 		r.add(Finding{Code: CodeForeignTrust, File: h.File, Line: h.Line,
-			Message: fmt.Sprintf("%s:%d sets %q; the agent never merges with or overrides another trust setting", h.File, h.Line, h.Text),
+			Message: fmt.Sprintf("%s:%d sets %q; the agent never merges with or overrides another trust setting (an AuthorizedPrincipalsCommand would widen which certificates sshd accepts)", h.File, h.Line, h.Text),
 			Fix:     "remove or comment out that line (the agent never edits sshd configuration files it does not own); a host set up with the Phase 2 runbook's exact layout is taken over instead, see host-setup.md"})
 	}
 	want := ourValues(l)
@@ -297,9 +332,14 @@ func foreignFindings(l Layout, base Dump, hits []settingHit, dropIn []byte, r *P
 	for _, k := range trustKeywords {
 		if v := base.One(k); !isDefault(v) && v != want[k] && !named[k] && !ownLine[k] {
 			r.add(Finding{Code: CodeForeignTrust,
-				Message: fmt.Sprintf("sshd -T reports %s %q, set outside sshd_config and sshd_config.d (an Include elsewhere)", k, v),
+				Message: fmt.Sprintf("sshd -T reports %s %q, set in no file the agent read (an Include elsewhere, or a command-line option)", k, v),
 				Fix:     "find and remove that setting: sudo grep -rniE '^\\s*" + k + "' /etc/ssh"})
 		}
+	}
+	if v := base.One(principalsCommand); !isDefault(v) && !named[principalsCommand] {
+		r.add(Finding{Code: CodeForeignTrust,
+			Message: fmt.Sprintf("sshd -T reports %s %q, set in no file the agent read; a principals command widens which certificates sshd accepts", principalsCommand, v),
+			Fix:     "find and remove that setting: sudo grep -rniE '^\\s*" + principalsCommand + "' /etc/ssh"})
 	}
 }
 
@@ -401,7 +441,10 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 			return nil, err
 		}
 	}
-	hits := trustSettingHits(l, cfg.SSHDConfig)
+	hits, problems := trustSettingHits(l, cfg.SSHDConfig)
+	for _, f := range problems {
+		r.add(f)
+	}
 	switch {
 	case installed:
 		switch {
@@ -512,7 +555,10 @@ func (e *engine) preflightApply(v *state.Verified, g *Generation) error {
 	}
 	platformFindings(e.l, r)
 	dumpFindings(e.dump, r)
-	hits := trustSettingHits(e.l, e.cfg.SSHDConfig)
+	hits, problems := trustSettingHits(e.l, e.cfg.SSHDConfig)
+	for _, f := range problems {
+		r.add(f)
+	}
 	switch {
 	case old == nil && lg.kind == linkNone:
 		plan, f := e.adoptDecision(v, g, hits)
@@ -742,7 +788,9 @@ func accountsForHost(d *directory.Directory, keys []ssh.PublicKey) []string {
 // accountFindings evaluates AllowUsers, AllowGroups, DenyUsers and
 // DenyGroups for each managed account with sshd -T -C (so a Match block
 // that sets them applies) and sshd's pattern rules (exclusion.go):
-// account_excluded, report only. The agent never edits them.
+// account_excluded, report only. The agent never edits them. An
+// AuthorizedPrincipalsCommand in force for an account is
+// foreign_trust_setting (D-R3).
 func (e *engine) accountFindings(ctx context.Context, base Dump, accounts []string, r *PreflightReport) error {
 	if len(accounts) == 0 {
 		return nil
@@ -755,6 +803,11 @@ func (e *engine) accountFindings(ctx context.Context, base Dump, accounts []stri
 		d, err := e.sshdDump(ctx, accountSpec(a, laddr, lport))
 		if err != nil {
 			return err
+		}
+		if v := d.One(principalsCommand); !isDefault(v) {
+			r.add(Finding{Code: CodeForeignTrust, Account: a,
+				Message: fmt.Sprintf("sshd -T -C user=%s reports %s %q: a principals command widens which certificates sshd accepts for %s", a, principalsCommand, v, a),
+				Fix:     "remove the AuthorizedPrincipalsCommand (and its user) that applies to " + a + "; the agent never merges with another trust setting"})
 		}
 		if why := Excluded(d, a, e.l.Root); why != "" {
 			r.add(Finding{Code: CodeAccountExcluded, Account: a, Message: "account " + a + ": " + why,

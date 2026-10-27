@@ -31,6 +31,14 @@ import (
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
+// TestMain fixes the umask: readTrusted refuses a configuration file or
+// directory writable by group or others (PR #68 review D-R3), so the
+// fixtures' modes must not depend on the caller's umask.
+func TestMain(m *testing.M) {
+	unix.Umask(0o022)
+	os.Exit(m.Run())
+}
+
 // Test fixture keys: deterministic Ed25519 keys from a seed byte.
 func seedKey(t testing.TB, n byte) ssh.Signer {
 	t.Helper()
@@ -510,7 +518,7 @@ func (r *fakeRunner) dumpFor(spec string) string {
 	for _, k := range r.extraHostKeys {
 		fmt.Fprintf(&b, "hostkey %s\n", k)
 	}
-	for _, k := range trustKeywords {
+	for _, k := range append(slices.Clone(trustKeywords), principalsCommand, principalsCommandUser) {
 		fmt.Fprintf(&b, "%s %s\n", k, value(k))
 	}
 	b.WriteString(r.extra)

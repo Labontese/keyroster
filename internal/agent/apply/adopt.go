@@ -69,7 +69,8 @@ const adoptCommand = "sudo keyroster-agent apply --once"
 //   - /etc/ssh/principals is a directory owned by the applier's uid
 //     (root) and writable by no one else;
 //   - no other configuration line sets a trust keyword (hits are
-//     trustSettingHits), sshd_config itself included;
+//     trustSettingHits, the whole Include graph), sshd_config itself
+//     included;
 //   - sshd -T (base, before the agent's drop-in exists) reports exactly
 //     those two values and no revokedkeys.
 func StructuralPhase2(l Layout, base Dump, hits []settingHit) (present bool, diffs []string) {

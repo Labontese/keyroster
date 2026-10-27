@@ -82,6 +82,23 @@ func TestDistroRefusals(t *testing.T) {
 			return []string{"preflight", "--root", "/", "--sshd", "/nonexistent/sshd", "--sshd-config", sshdConfig, "--ssh-keygen", keygen, "--state-dir", stateDir, "--spool", spoolDir}
 		}, code: 2},
 		{name: "login_grace_unbounded", edit: hostEdit{config: prepend("LoginGraceTime 0\n")}, code: 3, want: apply.CodeLoginGraceUnbounded},
+		// PR #68 review D-R3: the whole Include graph, relative to /etc/ssh,
+		// Match blocks and AuthorizedPrincipalsCommand included.
+		{name: "foreign_principals_file_in_included_match_block", edit: hostEdit{config: prepend("Include keyroster-test/ops.conf\n"),
+			files: map[string]string{"/etc/ssh/keyroster-test/ops.conf": "Match User root\n    AuthorizedPrincipalsFile /etc/ssh/ops_principals/%u\n"}},
+			code: 3, want: apply.CodeForeignTrust, file: "/etc/ssh/keyroster-test/ops.conf", line: 2},
+		{name: "foreign_ca_in_nested_glob_include", edit: hostEdit{config: prepend("Include keyroster-test/*.conf\n"),
+			files: map[string]string{"/etc/ssh/keyroster-test/10-a.conf": "Include keyroster-test/deeper/b.conf\n", "/etc/ssh/keyroster-test/deeper/b.conf": "TrustedUserCAKeys /etc/ssh/other_ca.pub\n"}},
+			code: 3, want: apply.CodeForeignTrust, file: "/etc/ssh/keyroster-test/deeper/b.conf", line: 1},
+		{name: "principals_command_in_sshd_config", edit: hostEdit{config: prepend("AuthorizedPrincipalsCommand /bin/false\nAuthorizedPrincipalsCommandUser nobody\n")},
+			code: 3, want: apply.CodeForeignTrust, file: sshdConfig, line: 1},
+		{name: "principals_command_in_included_match_block", edit: hostEdit{config: prepend("Include keyroster-test/cmd.conf\n"),
+			files: map[string]string{"/etc/ssh/keyroster-test/cmd.conf": "Match User " + account + "\n    AuthorizedPrincipalsCommand /bin/false\n    AuthorizedPrincipalsCommandUser nobody\n"}},
+			code: 3, want: apply.CodeForeignTrust, file: "/etc/ssh/keyroster-test/cmd.conf", line: 2},
+		// A real sshd refuses an Include cycle itself: sshd -T fails, a
+		// tool error (the agent's own sshd_config_unsafe is unit-tested).
+		{name: "include_cycle_sshd_fails", edit: hostEdit{config: prepend("Include keyroster-test/loop.conf\n"), noStart: true,
+			files: map[string]string{"/etc/ssh/keyroster-test/loop.conf": "Include keyroster-test/loop.conf\n"}}, code: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHost(t, true, tc.edit)

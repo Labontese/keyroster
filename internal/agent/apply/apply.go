@@ -1272,16 +1272,19 @@ func principalAccounts(g *Generation) []string {
 }
 
 // checkDropInEffective checks that sshd -T reports the drop-in's three
-// paths, and so does sshd -T -C for every account current holds a
-// principals file for (03-06, T-03-34: a Match block that overrides a
-// trust setting for a managed account makes the drop-in not effective
-// for that account).
+// paths and no AuthorizedPrincipalsCommand (D-R3), and so does sshd -T -C
+// for every account current holds a principals file for (03-06,
+// T-03-34: a Match block that overrides a trust setting for a managed
+// account makes the drop-in not effective for that account).
 func (e *engine) checkDropInEffective(ctx context.Context, dump Dump) error {
 	want := ourValues(e.l)
 	for _, k := range trustKeywords {
 		if got := dump.One(k); got != want[k] {
 			return fmt.Errorf("%w: sshd -T reports %s %q, want %q; another configuration file sets it first", ErrDropInNotEffective, k, got, want[k])
 		}
+	}
+	if got := dump.One(principalsCommand); !isDefault(got) {
+		return fmt.Errorf("%w: sshd -T reports %s %q, want none; a principals command widens which certificates sshd accepts", ErrDropInNotEffective, principalsCommand, got)
 	}
 	cur, _, err := e.readCurrent()
 	if err != nil {
@@ -1304,6 +1307,9 @@ func (e *engine) checkDropInEffective(ctx context.Context, dump Dump) error {
 			if got := d.One(k); got != want[k] {
 				return fmt.Errorf("%w: sshd -T -C user=%s reports %s %q, want %q; a Match block overrides it for that account", ErrDropInNotEffective, a, k, got, want[k])
 			}
+		}
+		if got := d.One(principalsCommand); !isDefault(got) {
+			return fmt.Errorf("%w: sshd -T -C user=%s reports %s %q, want none; a Match block sets a principals command for that account", ErrDropInNotEffective, a, principalsCommand, got)
 		}
 	}
 	return nil

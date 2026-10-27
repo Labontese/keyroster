@@ -119,10 +119,13 @@ type host struct {
 }
 
 // hostEdit changes the pristine /etc/ssh before sshd starts: config edits
-// sshd_config, files are extra files by path.
+// sshd_config, files are extra files by path; noStart leaves sshd
+// stopped (a configuration it cannot load or bind; preflight needs only
+// sshd -T).
 type hostEdit struct {
-	config func(string) string
-	files  map[string]string
+	config  func(string) string
+	files   map[string]string
+	noStart bool
 }
 
 // newHost restores the pristine /etc/ssh, applies edit, empties the
@@ -170,8 +173,10 @@ func newHost(t *testing.T, popHosts bool, edit hostEdit) *host {
 	if h.hostKey, _, _, _, err = ssh.ParseAuthorizedKey(b); err != nil {
 		t.Fatal(err)
 	}
-	if err := startSSHD(); err != nil {
-		t.Fatal(err)
+	if !edit.noStart {
+		if err := startSSHD(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -404,6 +409,24 @@ func TestDistroDrift(t *testing.T) {
 	}
 	if code != 3 || !found {
 		t.Fatalf("check with a Match override: exit %d, %+v; want exit 3 naming authorizedprincipalsfile for %s", code, r, account)
+	}
+	// PR #68 review D-R3 (F16): an AuthorizedPrincipalsCommand in a Match
+	// block for the managed account is drift, by its file and line and by
+	// sshd -T -C.
+	if err := os.WriteFile(override, []byte("Match User "+account+"\n    AuthorizedPrincipalsCommand /bin/false\n    AuthorizedPrincipalsCommandUser nobody\n"), 0o644); err != nil { //nolint:gosec // test drop-in
+		t.Fatal(err)
+	}
+	code, out, _ = agent(t, checkArgs()...)
+	r = decode[apply.DriftReport](t, out)
+	foreign, command := false, false
+	for _, f := range r.Foreign {
+		foreign = foreign || f.File == override && f.Line == 2
+	}
+	for _, s := range r.Settings {
+		command = command || s.Keyword == "authorizedprincipalscommand" && s.Account == account && s.Got == "/bin/false"
+	}
+	if code != 3 || !foreign || !command {
+		t.Fatalf("check with a principals command for %s: exit %d, %+v", account, code, r)
 	}
 	if err := os.Remove(override); err != nil {
 		t.Fatal(err)

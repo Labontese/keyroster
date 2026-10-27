@@ -50,13 +50,19 @@ type DriftReport struct {
 	Settings   []SettingDrift `json:"settings"`
 	Files      []FileDrift    `json:"files"`
 	Excluded   []Finding      `json:"excluded,omitempty"`
+	// Foreign are the trust settings in files sshd reads other than the
+	// agent's drop-in, and the files of that configuration the agent
+	// cannot read safely (configGraph, PR #68 review D-R3): drift.
+	Foreign []Finding `json:"foreign,omitempty"`
 	// LoginGraceObserved is false when an apply held the lock, so the
 	// check left login_grace.json to that apply.
 	LoginGraceObserved bool `json:"login_grace_observed"`
 }
 
 // Drift reports whether anything drifted.
-func (r *DriftReport) Drift() bool { return len(r.Settings) > 0 || len(r.Files) > 0 }
+func (r *DriftReport) Drift() bool {
+	return len(r.Settings) > 0 || len(r.Files) > 0 || len(r.Foreign) > 0
+}
 
 // Check compares what sshd and the file system hold with what the agent
 // installed (AGENT-05, T-03-34, T-03-38), and fixes nothing:
@@ -67,6 +73,9 @@ func (r *DriftReport) Drift() bool { return len(r.Settings) > 0 || len(r.Files) 
 //     the check, even into an intermediate generation, cannot make it mix
 //     two generations; a file missing, added or changed is a FileDrift,
 //     and so is a drop-in whose bytes are not DropIn's;
+//   - every file sshd reads (the whole Include graph, D-R3) is searched
+//     for trust settings outside the agent's drop-in (Foreign), and
+//     sshd -T must report no AuthorizedPrincipalsCommand;
 //   - sshd -T must report the drop-in's three paths, and so must
 //     sshd -T -C user=<account>,host=127.0.0.1,addr=127.0.0.1,laddr=<l>,lport=<p>
 //     for every account that generation holds a principals file for (l
@@ -156,6 +165,22 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 			r.Settings = append(r.Settings, SettingDrift{Keyword: k, Want: want[k], Got: got})
 		}
 	}
+	if got := dump.One(principalsCommand); !isDefault(got) {
+		r.Settings = append(r.Settings, SettingDrift{Keyword: principalsCommand, Want: "none", Got: got})
+	}
+	// Every trust setting in what sshd reads but the agent's drop-in
+	// (D-R3); the Phase 2 runbook's own two lines, left by a takeover whose
+	// removal is unfinished, are the takeover's (the agent's drop-in
+	// shadows them).
+	hits, problems := trustSettingHits(l, cfg.SSHDConfig)
+	r.Foreign = append(r.Foreign, problems...)
+	for _, h := range hits {
+		if h.File == l.Phase2DropIn() && (h.Text == phase2CALine || h.Text == phase2PrincipalsLine) {
+			continue
+		}
+		r.Foreign = append(r.Foreign, Finding{Code: CodeForeignTrust, Refusal: true, File: h.File, Line: h.Line,
+			Message: fmt.Sprintf("%s:%d sets %q; the agent never merges with or overrides another trust setting", h.File, h.Line, h.Text)})
+	}
 	grace, gerr := dump.LoginGrace()
 	if gerr != nil {
 		r.Settings = append(r.Settings, SettingDrift{Keyword: "logingracetime", Want: "a bounded value", Got: dump.One("logingracetime")})
@@ -197,6 +222,9 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 			if got := d.One(k); got != want[k] {
 				r.Settings = append(r.Settings, SettingDrift{Keyword: k, Account: a, Want: want[k], Got: got})
 			}
+		}
+		if got := d.One(principalsCommand); !isDefault(got) {
+			r.Settings = append(r.Settings, SettingDrift{Keyword: principalsCommand, Account: a, Want: "none", Got: got})
 		}
 		if why := Excluded(d, a, l.Root); why != "" {
 			r.Excluded = append(r.Excluded, Finding{Code: CodeAccountExcluded, Account: a, Message: "account " + a + ": " + why})
