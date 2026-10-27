@@ -146,7 +146,15 @@ func TestRestoreRecoveryTracer(t *testing.T) {
 	}
 	t.Logf("keyroster revoke recover:\n%s", out)
 
-	// 4. keyroster-signer recover-revocations, the signer stopped.
+	// 4. keyroster-signer recover-revocations, the signer stopped. Its
+	// publish must be above every imported version, and versions are
+	// time-derived in whole seconds (max(prev + 1, issued_at)): this test
+	// runs within a second or two of the revocation, so it waits for the
+	// clock to pass the imported version, as the refusal
+	// recovery_version_not_above_import would ask.
+	for time.Now().Unix() <= int64(revoked) { //nolint:gosec // G115: a time-derived version fits int64
+		time.Sleep(100 * time.Millisecond)
+	}
 	in, err := os.Open(reqFile) //nolint:gosec // G304: the test's file
 	if err != nil {
 		t.Fatal(err)
