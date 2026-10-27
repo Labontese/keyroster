@@ -378,6 +378,9 @@ func (e *engine) finishAdoption(ctx context.Context) error {
 		}
 		e.report.Phase2Removed = append(e.report.Phase2Removed, path)
 	}
+	if err := e.fault("phase2-removed"); err != nil {
+		return err
+	}
 	if err := e.sshdTest(ctx); err != nil {
 		return fmt.Errorf("%w (after removing the Phase 2 layout; copies are in %s)", err, e.l.State(adoptBak))
 	}
@@ -416,7 +419,12 @@ func (e *engine) backupPhase2(path string) error {
 }
 
 // removePhase2 removes one path of the Phase 2 layout, a file or the empty
-// principals directory, through the removal-only allowlist.
+// principals directory, through the removal-only allowlist, and fsyncs the
+// directory that held it. A resumed removal finds paths an earlier run
+// removed already, and their directory too when that run got as far as
+// the principals directory (PR #68 review, F14): the fsync then goes to
+// the nearest directory that still exists, up to <root>/etc/ssh, so the
+// earlier run's removals are durable before the plan goes.
 func (e *engine) removePhase2(path string) error {
 	if err := paths.AllowedRemoval(e.l, path); err != nil {
 		return err
@@ -424,5 +432,11 @@ func (e *engine) removePhase2(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return fsyncDir(filepath.Dir(path))
+	stop := filepath.Join(e.l.Root, "etc", "ssh")
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		err := fsyncDir(dir)
+		if !errors.Is(err, unix.ENOENT) || dir == stop || dir == filepath.Dir(dir) {
+			return err
+		}
+	}
 }

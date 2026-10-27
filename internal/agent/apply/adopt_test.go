@@ -263,6 +263,28 @@ func TestAdopt(t *testing.T) {
 			t.Fatalf("the next run did not finish the removal: %+v", r)
 		}
 	})
+	t.Run("crash_after_final_removal_resumes", func(t *testing.T) {
+		t.Parallel()
+		// PR #68 review, F14: a crash after the principals directory went,
+		// before the plan did; the resume finds every path and the
+		// principals files' directory gone.
+		h := adoptHost(t)
+		h.installPhase2(phase2Layout{})
+		h.cfg.Fault = func(p string) error {
+			if p == "phase2-removed" {
+				return &crash{point: p}
+			}
+			return nil
+		}
+		if _, err := h.apply(); !isCrash(err) || h.lastGood() == 0 || !h.exists(h.l.State(adoptFile)) || h.exists(h.l.Phase2PrincipalsDir()) {
+			t.Fatalf("crash after the removal: %v, last-good %d, plan %t, principals dir %t", err, h.lastGood(), h.exists(h.l.State(adoptFile)), h.exists(h.l.Phase2PrincipalsDir()))
+		}
+		h.cfg.Fault = nil
+		r, err := h.apply()
+		if err != nil || h.exists(h.l.State(adoptFile)) || h.exists(h.l.State(adoptBak)) || len(r.Phase2Removed) != 4 {
+			t.Fatalf("the resume after the final removal: %v, %+v, plan %t", err, r, h.exists(h.l.State(adoptFile)))
+		}
+	})
 	t.Run("removal_only_through_allowed_removal", func(t *testing.T) {
 		t.Parallel()
 		h := adoptHost(t)
