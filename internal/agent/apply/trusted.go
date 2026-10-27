@@ -116,10 +116,10 @@ func resolveTrusted(root, p string) (string, *unix.Stat_t, error) {
 	}
 }
 
-// readTrusted reads at most limit bytes of the regular file at p (inside
-// root) when resolveTrusted accepts it: the file is opened by its
-// resolved path with O_NOFOLLOW and must still be the entry that was
-// checked.
+// readTrusted reads the regular file at p (inside root) when
+// resolveTrusted accepts it: the file is opened by its resolved path with
+// O_NOFOLLOW and must still be the entry that was checked. A file larger
+// than limit bytes is ErrUnsafeFile, never read in part.
 func readTrusted(root, p string, limit int64) ([]byte, error) {
 	resolved, st, err := resolveTrusted(root, p)
 	if err != nil {
@@ -141,5 +141,14 @@ func readTrusted(root, p string, limit int64) ([]byte, error) {
 	if fst.Dev != st.Dev || fst.Ino != st.Ino {
 		return nil, fmt.Errorf("%w: %s changed while it was read", ErrUnsafeFile, resolved)
 	}
-	return io.ReadAll(io.LimitReader(f, limit))
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", resolved, err)
+	}
+	if int64(len(b)) > limit {
+		// sshd and systemd read the whole file: a setting past the limit
+		// would be in force but unseen (PR #68 review fix round 2, P5).
+		return nil, fmt.Errorf("%w: %s is larger than %d bytes, more than the agent reads", ErrUnsafeFile, resolved, limit)
+	}
+	return b, nil
 }

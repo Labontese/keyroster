@@ -21,32 +21,55 @@ const maxIncludeDepth = 16
 // maxConfigVisits bounds the files one walk reads, repeats included.
 const maxConfigVisits = 512
 
-// configFile is one sshd configuration file the walk read.
+// configFile is one sshd configuration file the walk read, tokenised.
 type configFile struct {
-	path string
-	data []byte
+	path  string
+	lines []configLine
+}
+
+// configLine is one line of an sshd configuration file as sshd reads it
+// (sshdTokens): its number, lowercase keyword ("" for a blank line or a
+// comment), the rest of the line after the keyword and its separator
+// (what sshd takes verbatim as an AuthorizedPrincipalsCommand), its
+// arguments and its trimmed text.
+type configLine struct {
+	n       int
+	keyword string
+	rest    string
+	args    []string
+	text    string
 }
 
 // configGraph reads the sshd configuration the way sshd reads it (PR #68
 // review D-R3, the owner's "whole Include graph + command"): config, and
 // every file an Include line names, recursively, wherever the line is
-// (inside a Match block too), with glob expansion and sshd's rule that a
-// relative path is relative to /etc/ssh (below the layout's root). A path
-// that matches nothing is skipped, as sshd does. Every file is read with
-// readTrusted, and the directory of each Include pattern must be one no
-// other user can write (a file added there later would be read); one that
-// is not, a ~ path, a cycle, nesting past maxIncludeDepth or more than
-// maxConfigVisits files is a sshd_config_unsafe finding. Go's glob also
-// matches dot files that sshd's glob(3) skips: more is read, never less.
-// Each file is returned once, in the order first read.
-func configGraph(l Layout, config string) ([]configFile, []Finding) {
-	g := &graph{l: l, seen: map[string]bool{}}
+// (inside a Match block too), with sshd's rule that a relative path is
+// relative to /etc/ssh (below the layout's root). Every line is tokenised
+// as sshd tokenises it (sshdTokens), so a quoted keyword or argument is
+// seen. An Include path may hold only the wildcard *, and only in its
+// last component (includePattern); a path that matches nothing is
+// skipped, as sshd does. Every file is read with readTrusted, and the
+// directory of each Include pattern must be one no other user can write
+// (a file added there later would be read); one that is not, a line the
+// tokeniser cannot read, a ~ path, a cycle, nesting past maxIncludeDepth
+// or more than maxConfigVisits files is a sshd_config_unsafe finding.
+// Go's glob also matches dot files that sshd's glob(3) skips: more is
+// read, never less. Each file is returned once, in the order first read.
+//
+// own, when not nil, stands in for the agent's drop-in (l.DropIn()) on an
+// installed host: the walk evaluates the file the apply is about to write
+// (DropIn, mode 0644), not an edited one the apply replaces (owner
+// decision D-R2; PR #68 review fix round 2, P1). check passes nil: it
+// reports what sshd reads now.
+func configGraph(l Layout, config string, own []byte) ([]configFile, []Finding) {
+	g := &graph{l: l, own: own, seen: map[string]bool{}}
 	g.visit(config, 0, nil, "", 0)
 	return g.files, g.problems
 }
 
 type graph struct {
 	l        Layout
+	own      []byte
 	files    []configFile
 	problems []Finding
 	seen     map[string]bool
@@ -54,9 +77,14 @@ type graph struct {
 }
 
 func (g *graph) problem(file string, line int, format string, args ...any) {
-	g.problems = append(g.problems, Finding{Code: CodeConfigUnsafe, File: file, Line: line,
+	g.problems = append(g.problems, configProblem(file, line, format, args...))
+}
+
+// configProblem is one sshd_config_unsafe finding.
+func configProblem(file string, line int, format string, args ...any) Finding {
+	return Finding{Code: CodeConfigUnsafe, File: file, Line: line,
 		Message: fmt.Sprintf(format, args...) + "; the agent cannot rule out a trust setting in what sshd reads",
-		Fix:     "make every file sshd reads, and every directory an Include names, owned by root and writable by no one else, with no symlink another user controls, and keep the Include nesting within sshd's 16 levels; see host-setup.md \"Before the agent: preflight\""})
+		Fix:     "make every file sshd reads, and every directory an Include names, owned by root and writable by no one else, with no symlink another user controls; keep the Include nesting within sshd's 16 levels, every Include path a plain path with at most a * in its last component, and every line free of unbalanced quotes; see host-setup.md \"Before the agent: preflight\""}
 }
 
 // visit reads path (named by from:line; "" for the main configuration)
@@ -76,7 +104,13 @@ func (g *graph) visit(path string, depth int, stack []string, from string, line 
 		}
 		return
 	}
-	b, err := readTrusted(g.l.Root, path, 1<<20)
+	var b []byte
+	var err error
+	if g.own != nil && path == g.l.DropIn() {
+		b = g.own
+	} else {
+		b, err = readTrusted(g.l.Root, path, 1<<20)
+	}
 	if errors.Is(err, unix.ENOENT) && from != "" {
 		return // gone since it matched: sshd would not read it either
 	}
@@ -88,47 +122,37 @@ func (g *graph) visit(path string, depth int, stack []string, from string, line 
 		g.problem(where, wl, "%s: %v", path, err)
 		return
 	}
+	lines, bad := parseConfig(path, b)
+	g.problems = append(g.problems, bad...)
 	if !g.seen[path] {
 		g.seen[path] = true
-		g.files = append(g.files, configFile{path: path, data: b})
+		g.files = append(g.files, configFile{path: path, lines: lines})
 	}
 	stack = append(stack, path)
-	for i, text := range strings.Split(string(b), "\n") {
-		k, rest := configKeyword(text)
-		if k != "include" {
+	for _, l := range lines {
+		if l.keyword != "include" {
 			continue
 		}
-		args, ok := configArgs(rest)
-		if !ok {
-			g.problem(path, i+1, "%s:%d: an Include line the agent does not parse (%q)", path, i+1, strings.TrimSpace(text))
-			continue
-		}
-		for _, a := range args {
-			g.include(path, i+1, a, depth+1, stack)
+		for _, a := range l.args {
+			g.include(path, l.n, a, depth+1, stack)
 		}
 	}
 }
 
 // include walks one Include argument of from:line.
 func (g *graph) include(from string, line int, arg string, depth int, stack []string) {
-	if strings.HasPrefix(arg, "~") {
-		g.problem(from, line, "%s:%d: Include %q starts with ~, which the agent does not resolve", from, line, arg)
+	p, why := includePattern(g.l.Root, arg)
+	if why != "" {
+		g.problem(from, line, "%s:%d: Include %q %s", from, line, arg, why)
 		return
 	}
-	p := arg
-	if !filepath.IsAbs(p) {
-		p = filepath.Join(g.l.Root, "etc", "ssh", p)
+	err := trustedDir(g.l.Root, filepath.Dir(p))
+	if errors.Is(err, unix.ENOENT) {
+		return // nothing can match
 	}
-	p = filepath.Clean(p)
-	if dir := filepath.Dir(p); !hasGlobMeta(dir) {
-		err := trustedDir(g.l.Root, dir)
-		if errors.Is(err, unix.ENOENT) {
-			return // nothing can match
-		}
-		if err != nil {
-			g.problem(from, line, "%s:%d: Include %q: %v", from, line, arg, err)
-			return
-		}
+	if err != nil {
+		g.problem(from, line, "%s:%d: Include %q: %v", from, line, arg, err)
+		return
 	}
 	matches, err := filepath.Glob(p)
 	if err != nil {
@@ -140,59 +164,157 @@ func (g *graph) include(from string, line int, arg string, depth int, stack []st
 	}
 }
 
-// hasGlobMeta reports whether p holds a glob metacharacter.
-func hasGlobMeta(p string) bool { return strings.ContainsAny(p, `*?[\`) }
-
-// configKeyword splits an sshd configuration line into its lowercase
-// keyword and the rest, after the separating whitespace or "=" (sshd's
-// strdelim); a blank line or a # comment has no keyword.
-func configKeyword(line string) (string, string) {
-	t := strings.TrimSpace(line)
-	if t == "" || strings.HasPrefix(t, "#") {
-		return "", ""
+// includePattern is the clean absolute path below root that an Include
+// argument names, or why the agent does not read it. sshd prefixes an
+// argument that starts with neither / nor ~ with /etc/ssh/ and passes it
+// to glob(3) with no flags (servconf.c, checked in portable 9.2p1 and
+// 10.2p1). glob(3) is not one implementation (portable OpenSSH builds its
+// openbsd-compat glob or uses the libc one), and none of them is Go's
+// filepath.Match: [!...] is a negation in glob(3) and a literal ! in Go,
+// [^...] and [:class:] differ between them, ? matches a byte in one and a
+// rune in the other, and \ escapes differ at the edges (PR #68 review fix
+// round 2, P4). So the one wildcard read is *, which all of them and Go
+// match alike, and only in the last component: a * in a directory
+// component would make every directory it expands through one the agent
+// must check (P9). Any other glob character, a * in a directory
+// component and a ~ path (the agent does not resolve it) are refused.
+func includePattern(root, arg string) (string, string) {
+	switch {
+	case arg == "":
+		return "", "is empty (sshd refuses it)"
+	case strings.HasPrefix(arg, "~"):
+		return "", "starts with ~, which the agent does not resolve"
+	case strings.ContainsAny(arg, `?[\`):
+		return "", `holds ?, [ or \, which the agent does not expand as sshd's glob(3) does (only * is read)`
 	}
-	i := strings.IndexAny(t, " \t=")
-	if i < 0 {
-		return strings.ToLower(t), ""
+	p := filepath.Clean(arg)
+	if !strings.HasPrefix(arg, "/") {
+		p = filepath.Join(root, "etc", "ssh", arg)
 	}
-	rest := strings.TrimLeft(t[i:], " \t")
-	if strings.HasPrefix(rest, "=") {
-		rest = strings.TrimLeft(rest[1:], " \t")
+	if strings.Contains(filepath.Dir(p), "*") {
+		return "", "has a * in a directory component; the agent reads a * in the last component only"
 	}
-	return strings.ToLower(t[:i]), rest
+	return p, ""
 }
 
-// configArgs splits the arguments of a configuration line on whitespace,
-// joining a double-quoted argument (sshd's argv_split); a backslash or an
-// unbalanced quote is not parsed.
-func configArgs(s string) ([]string, bool) {
-	var out []string
-	var cur strings.Builder
-	quoted, have := false, false
-	for _, r := range s {
-		switch {
-		case r == '\\':
-			return nil, false
-		case r == '"':
-			quoted, have = !quoted, true
-		case (r == ' ' || r == '\t') && !quoted:
-			if have {
-				out = append(out, cur.String())
-				cur.Reset()
-				have = false
-			}
-		default:
-			cur.WriteRune(r)
-			have = true
+// parseConfig tokenises every line of an sshd configuration file
+// (sshdTokens); a line it cannot read is a sshd_config_unsafe finding.
+func parseConfig(path string, b []byte) ([]configLine, []Finding) {
+	var lines []configLine
+	var bad []Finding
+	for i, text := range strings.Split(string(b), "\n") {
+		l, err := sshdTokens(text)
+		if err != nil {
+			bad = append(bad, configProblem(path, i+1, "%s:%d: %v (%q)", path, i+1, err, strings.TrimSpace(text)))
+			continue
 		}
+		l.n = i + 1
+		lines = append(lines, l)
 	}
-	if quoted {
-		return nil, false
+	return lines, bad
+}
+
+// sshdWhitespace is sshd's WHITESPACE (misc.h).
+const sshdWhitespace = " \t\r\n"
+
+// sshdTokens splits one configuration line as sshd does
+// (process_server_config_line_depth in servconf.c, strdelim and
+// argv_split in misc.c, checked in portable 9.2p1 and 10.2p1; PR #68
+// review fix round 2, P3). Trailing whitespace is stripped. The keyword
+// is the first token of strdelim, which removes one pair of double quotes
+// and splits on whitespace or one "=" (a second strdelim when the line
+// starts with whitespace); a keyword that is empty or starts with # makes
+// the line a comment. The rest is split by argv_split: single or double
+// quotes, the escapes \' \" \\ and (outside quotes) "\ ", and a # at the
+// start of an argument ends the line. Where sshd would ignore the line
+// or refuse it (a keyword's opening quote with no closing one, unbalanced
+// quotes in the arguments), or the keyword still holds a quote, the agent
+// cannot be sure what sshd does: an error, never a skipped line.
+func sshdTokens(line string) (configLine, error) {
+	l := configLine{text: strings.TrimSpace(line)}
+	kw, rest, ok := strdelim(strings.TrimRight(line, sshdWhitespace+"\f"))
+	if ok && kw == "" {
+		kw, rest, ok = strdelim(rest)
 	}
-	if have {
-		out = append(out, cur.String())
+	switch {
+	case !ok:
+		return l, errors.New("a keyword with an opening quote and no closing one")
+	case kw == "" || kw[0] == '#':
+		return l, nil
+	case strings.ContainsAny(kw, `"'`):
+		return l, fmt.Errorf("the keyword %q holds a quote", kw)
 	}
-	return out, true
+	args, err := argvSplit(rest)
+	if err != nil {
+		return l, err
+	}
+	l.keyword, l.rest, l.args = strings.ToLower(kw), rest, args
+	return l, nil
+}
+
+// strdelim is sshd's strdelim (misc.c strdelim_internal with
+// split_equals): the token at the start of s and the rest after its
+// separator. ok is false where sshd's returns NULL: an opening double
+// quote with no closing one.
+func strdelim(s string) (tok, rest string, ok bool) {
+	i := strings.IndexAny(s, sshdWhitespace+`"=`)
+	if i < 0 {
+		return s, "", true
+	}
+	if s[i] == '"' {
+		s = s[:i] + s[i+1:]
+		j := strings.IndexByte(s[i:], '"')
+		if j < 0 {
+			return "", "", false
+		}
+		return s[:i+j], strings.TrimLeft(s[i+j+1:], sshdWhitespace), true
+	}
+	equals := s[i] == '='
+	tok, rest = s[:i], strings.TrimLeft(s[i+1:], sshdWhitespace)
+	if !equals && strings.HasPrefix(rest, "=") {
+		rest = strings.TrimLeft(rest[1:], sshdWhitespace)
+	}
+	return tok, rest, true
+}
+
+// argvSplit is sshd's argv_split with terminate_on_comment (misc.c):
+// unbalanced quotes are an error, as they are for sshd.
+func argvSplit(s string) ([]string, error) {
+	var out []string
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' || s[i] == '\t' {
+			continue
+		}
+		if s[i] == '#' {
+			break
+		}
+		var arg strings.Builder
+		var quote byte
+	token:
+		for ; i < len(s); i++ {
+			c := s[i]
+			switch {
+			case c == '\\':
+				if i+1 < len(s) && (s[i+1] == '\'' || s[i+1] == '"' || s[i+1] == '\\' || (quote == 0 && s[i+1] == ' ')) {
+					i++
+				}
+				arg.WriteByte(s[i])
+			case quote == 0 && (c == ' ' || c == '\t'):
+				break token
+			case quote == 0 && (c == '"' || c == '\''):
+				quote = c
+			case quote != 0 && c == quote:
+				quote = 0
+			default:
+				arg.WriteByte(c)
+			}
+		}
+		if quote != 0 {
+			return nil, errors.New("an argument with unbalanced quotes (sshd refuses the line)")
+		}
+		out = append(out, arg.String())
+	}
+	return out, nil
 }
 
 // trustedDir checks that the directory dir (inside root) resolves only

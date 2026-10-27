@@ -214,14 +214,16 @@ const (
 // trustSettingHits finds the configuration lines that set a trust
 // setting (TrustedUserCAKeys, RevokedKeys, AuthorizedPrincipalsFile, an
 // AuthorizedPrincipalsCommand other than none, and then every
-// AuthorizedPrincipalsCommandUser), in any case and inside Match blocks
-// too, in every file sshd reads from config (configGraph: the whole
-// Include graph, PR #68 review D-R3) but the agent's own drop-in. A
-// <root>/etc/ssh/sshd_config.d/*.conf the graph does not reach (no
-// Include of it) is still read, as before. It only reads; files it cannot
-// follow safely are the sshd_config_unsafe findings it returns.
-func trustSettingHits(l Layout, config string) ([]settingHit, []Finding) {
-	files, problems := configGraph(l, config)
+// AuthorizedPrincipalsCommandUser), in any case, quoted or not and inside
+// Match blocks too, in every file sshd reads from config (configGraph:
+// the whole Include graph, PR #68 review D-R3) but the agent's own
+// drop-in. own is configGraph's: DropIn on an installed host, where the
+// apply writes it, else nil. A <root>/etc/ssh/sshd_config.d/*.conf the
+// graph does not reach (no Include of it) is still read, as before. It
+// only reads; files it cannot follow safely are the sshd_config_unsafe
+// findings it returns.
+func trustSettingHits(l Layout, config string, own []byte) ([]settingHit, []Finding) {
+	files, problems := configGraph(l, config, own)
 	read := map[string]bool{}
 	for _, f := range files {
 		read[f.path] = true
@@ -229,9 +231,20 @@ func trustSettingHits(l Layout, config string) ([]settingHit, []Finding) {
 	if m, err := filepath.Glob(filepath.Join(l.DropInDir(), "*.conf")); err == nil {
 		sort.Strings(m)
 		for _, f := range m {
-			if b, err := readSmall(f, 1<<20); err == nil && !read[f] {
-				files = append(files, configFile{path: f, data: b})
+			if read[f] || f == l.DropIn() {
+				continue
 			}
+			b, err := readSmall(f, 1<<20+1)
+			if err != nil {
+				continue
+			}
+			if len(b) > 1<<20 {
+				problems = append(problems, configProblem(f, 0, "%s is larger than %d bytes, more than the agent reads", f, 1<<20))
+				continue
+			}
+			lines, bad := parseConfig(f, b)
+			problems = append(problems, bad...)
+			files = append(files, configFile{path: f, lines: lines})
 		}
 	}
 	var hits, users []settingHit
@@ -240,20 +253,14 @@ func trustSettingHits(l Layout, config string) ([]settingHit, []Finding) {
 		if f.path == l.DropIn() {
 			continue
 		}
-		for i, line := range strings.Split(string(f.data), "\n") {
-			t := strings.TrimSpace(line)
-			if t == "" || strings.HasPrefix(t, "#") {
-				continue
-			}
-			words := strings.FieldsFunc(t, func(r rune) bool { return r == ' ' || r == '\t' || r == '=' })
-			if len(words) == 0 {
-				continue
-			}
-			h := settingHit{File: f.path, Line: i + 1, Keyword: strings.ToLower(words[0]), Text: t}
+		for _, line := range f.lines {
+			h := settingHit{File: f.path, Line: line.n, Keyword: line.keyword, Text: line.text}
 			switch {
 			case slices.Contains(trustKeywords, h.Keyword):
 				hits = append(hits, h)
-			case h.Keyword == principalsCommand && (len(words) < 2 || !strings.EqualFold(words[1], "none")):
+			case h.Keyword == principalsCommand && !strings.EqualFold(line.rest, "none"):
+				// sshd takes the command verbatim from the rest of the line
+				// (servconf.c parse_command): only a bare none is none.
 				hits, command = append(hits, h), true
 			case h.Keyword == principalsCommandUser:
 				users = append(users, h)
@@ -343,16 +350,14 @@ func foreignFindings(l Layout, base Dump, hits []settingHit, dropIn []byte, r *P
 	}
 }
 
-// dropInKeywords are the lowercase keywords the lines of a drop-in set.
+// dropInKeywords are the lowercase keywords the lines of a drop-in set,
+// tokenised as sshd does (sshdTokens); a line it cannot read sets none.
 func dropInKeywords(b []byte) map[string]bool {
 	out := map[string]bool{}
-	for _, line := range strings.Split(string(b), "\n") {
-		t := strings.TrimSpace(line)
-		if t == "" || strings.HasPrefix(t, "#") {
-			continue
-		}
-		if words := strings.FieldsFunc(t, func(r rune) bool { return r == ' ' || r == '\t' || r == '=' }); len(words) > 0 {
-			out[strings.ToLower(words[0])] = true
+	lines, _ := parseConfig("", b)
+	for _, l := range lines {
+		if l.keyword != "" {
+			out[l.keyword] = true
 		}
 	}
 	return out
@@ -441,7 +446,13 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 			return nil, err
 		}
 	}
-	hits, problems := trustSettingHits(l, cfg.SSHDConfig)
+	var own []byte
+	if installed {
+		// The drop-in the next apply writes, not an edited one it replaces
+		// (D-R2; PR #68 review fix round 2, P1).
+		own = DropIn(l)
+	}
+	hits, problems := trustSettingHits(l, cfg.SSHDConfig, own)
 	for _, f := range problems {
 		r.add(f)
 	}
@@ -555,7 +566,15 @@ func (e *engine) preflightApply(v *state.Verified, g *Generation) error {
 	}
 	platformFindings(e.l, r)
 	dumpFindings(e.dump, r)
-	hits, problems := trustSettingHits(e.l, e.cfg.SSHDConfig)
+	var own []byte
+	if lg.kind == linkAgent {
+		// writeDropIn replaces an edited drop-in with DropIn at mode 0644,
+		// and activateDropIn checks the result: the graph evaluates that
+		// file, so the edit is repaired, never refused (D-R2; PR #68 review
+		// fix round 2, P1).
+		own = DropIn(e.l)
+	}
+	hits, problems := trustSettingHits(e.l, e.cfg.SSHDConfig, own)
 	for _, f := range problems {
 		r.add(f)
 	}

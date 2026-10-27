@@ -216,4 +216,141 @@ func TestIncludeGraph(t *testing.T) {
 			t.Fatalf("settings %+v", r.Settings)
 		}
 	})
+	// PR #68 review fix round 2, P10: a foreign setting alone, in a Match
+	// block for an account the agent does not manage, is drift (check
+	// exits 3) although every effective value is the agent's.
+	t.Run("check_reports_foreign_setting_alone", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		appendFile(t, h.cfg.SSHDConfig, "Include extra/ops.conf\n")
+		writeRootFile(t, h, "etc/ssh/extra/ops.conf", matchBlock)
+		r, err := h.check()
+		if err != nil || len(r.Settings) != 0 || len(r.Files) != 0 || len(r.Foreign) != 1 || !r.Drift() {
+			t.Fatalf("check with a foreign Match block only: %+v, %v", r, err)
+		}
+	})
+	// PR #68 review fix round 2, P3: lines are tokenised as sshd's
+	// strdelim and argv_split do (real sshd 9.2p1 applies every one of
+	// these); a line the agent cannot tokenise is refused, never skipped.
+	refusedAtInstall := func(t *testing.T, h *testHost, want error) {
+		t.Helper()
+		if _, err := h.apply(); !errors.Is(err, want) || h.exists(h.l.Current()) {
+			t.Fatalf("the first install: %v (want %v), current %t", err, want, h.exists(h.l.Current()))
+		}
+	}
+	evil := map[string]string{"etc/ssh/extra/evil.conf": matchBlock}
+	for _, tc := range []struct{ name, line string }{
+		{"quoted_include_keyword_followed", `"Include" extra/evil.conf`},
+		{"partly_quoted_include_keyword_followed", `In"clude" extra/evil.conf`},
+		{"single_quoted_include_path_followed", `Include 'extra/evil.conf'`},
+		{"double_quoted_include_path_after_equals_followed", `include="extra/evil.conf"`},
+		{"include_with_trailing_comment_followed", `Include extra/evil.conf # ops`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := host(t, tc.line+"\n", evil)
+			foreignAt(t, h.mustPreflight(), filepath.Join(h.l.Root, "etc/ssh/extra/evil.conf"), 2)
+			refusedAtInstall(t, h, ErrForeignTrust)
+		})
+	}
+	t.Run("quoted_trust_keyword_in_match_block", func(t *testing.T) {
+		t.Parallel()
+		h := host(t, "Match User root\n    \"AuthorizedPrincipalsFile\" /etc/ssh/q\n", nil)
+		foreignAt(t, h.mustPreflight(), h.cfg.SSHDConfig, 3)
+		refusedAtInstall(t, h, ErrForeignTrust)
+	})
+	t.Run("quoted_principals_command_none_is_not_none", func(t *testing.T) {
+		t.Parallel()
+		// sshd takes the command verbatim: "none" in quotes is a command.
+		h := host(t, "AuthorizedPrincipalsCommand \"none\"\n", nil)
+		foreignAt(t, h.mustPreflight(), h.cfg.SSHDConfig, 2)
+	})
+	for _, tc := range []struct{ name, line string }{
+		{"unbalanced_quote_in_include_unsafe", `Include "extra/evil.conf`},
+		{"unclosed_quote_in_keyword_unsafe", `"Include extra/evil.conf`},
+		{"single_quoted_keyword_unsafe", `'Include' extra/evil.conf`},
+		{"unbalanced_quote_in_other_line_unsafe", `Banner "/etc/issue`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := host(t, tc.line+"\n", evil)
+			unsafe(t, h.mustPreflight())
+			refusedAtInstall(t, h, ErrConfigUnsafe)
+		})
+	}
+	// P4 and P9: * in the last component is the one wildcard read.
+	for _, tc := range []struct{ name, line string }{
+		{"bang_bracket_glob_unsafe", "Include extra/[!x]*.conf"},
+		{"caret_bracket_glob_unsafe", "Include extra/[^x]*.conf"},
+		{"question_mark_glob_unsafe", "Include extra/????.conf"},
+		{"glob_in_directory_unsafe", "Include ex*/evil.conf"},
+		{"escaped_include_path_unsafe", `Include extra/ev\il.conf`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := host(t, tc.line+"\n", evil)
+			unsafe(t, h.mustPreflight())
+			refusedAtInstall(t, h, ErrConfigUnsafe)
+		})
+	}
+	t.Run("glob_in_directory_of_open_dir_unsafe", func(t *testing.T) {
+		t.Parallel()
+		// P9: nothing matches yet, but anyone can create krX/x.conf.
+		h := host(t, "", nil)
+		open := filepath.Join(h.l.Root, "srv/open")
+		if err := os.MkdirAll(open, 0o755); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		chmod(t, open, 0o777) //nolint:gosec // the directory under test is world-writable
+		appendFile(t, h.cfg.SSHDConfig, "Include "+open+"/kr*/x.conf\n")
+		unsafe(t, h.mustPreflight())
+	})
+	t.Run("oversized_include_unsafe", func(t *testing.T) {
+		t.Parallel()
+		// P5: a setting past the agent's 1 MiB read is refused, not unseen.
+		h := host(t, "Include extra/big.conf\n", map[string]string{"etc/ssh/extra/big.conf": strings.Repeat("# padding\n", 110<<10) + matchBlock})
+		unsafe(t, h.mustPreflight())
+		refusedAtInstall(t, h, ErrConfigUnsafe)
+	})
+}
+
+// TestSSHDTokens is sshd's tokeniser (servconf.c with misc.c's strdelim
+// and argv_split, portable 9.2p1 and 10.2p1) on the lines the review's
+// probes ran against a real sshd 9.2p1.
+func TestSSHDTokens(t *testing.T) {
+	for _, tc := range []struct {
+		line, keyword, rest string
+		args                []string
+		bad                 bool
+	}{
+		{line: "", keyword: ""},
+		{line: "   # a comment", keyword: ""},
+		{line: "#Include x", keyword: ""},
+		{line: "Include x y", keyword: "include", rest: "x y", args: []string{"x", "y"}},
+		{line: "  Include\tx  \r", keyword: "include", rest: "x", args: []string{"x"}},
+		{line: "Include=x", keyword: "include", rest: "x", args: []string{"x"}},
+		{line: "Include = x", keyword: "include", rest: "x", args: []string{"x"}},
+		{line: `"Include" x`, keyword: "include", rest: "x", args: []string{"x"}},
+		{line: `In"clude" x`, keyword: "include", rest: "x", args: []string{"x"}},
+		{line: `Include "a b" 'c d' e#f # g`, keyword: "include", rest: `"a b" 'c d' e#f # g`, args: []string{"a b", "c d", "e#f"}},
+		{line: `Include a\ b \"c\" \\d \x`, keyword: "include", rest: `a\ b \"c\" \\d \x`, args: []string{"a b", `"c"`, `\d`, `\x`}},
+		{line: `Include "a\ b"`, keyword: "include", rest: `"a\ b"`, args: []string{`a\ b`}},
+		{line: "AuthorizedPrincipalsCommand none", keyword: "authorizedprincipalscommand", rest: "none", args: []string{"none"}},
+		{line: `Include "x`, bad: true},
+		{line: `"Include x`, bad: true},
+		{line: `'Include' x`, bad: true},
+	} {
+		l, err := sshdTokens(tc.line)
+		if (err != nil) != tc.bad {
+			t.Errorf("%q: error %v, want an error %t", tc.line, err, tc.bad)
+			continue
+		}
+		if tc.bad {
+			continue
+		}
+		if l.keyword != tc.keyword || l.rest != tc.rest || !slices.Equal(l.args, tc.args) {
+			t.Errorf("%q: keyword %q rest %q args %q, want %q %q %q", tc.line, l.keyword, l.rest, l.args, tc.keyword, tc.rest, tc.args)
+		}
+	}
 }

@@ -172,7 +172,7 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 	// (D-R3); the Phase 2 runbook's own two lines, left by a takeover whose
 	// removal is unfinished, are the takeover's (the agent's drop-in
 	// shadows them).
-	hits, problems := trustSettingHits(l, cfg.SSHDConfig)
+	hits, problems := trustSettingHits(l, cfg.SSHDConfig, nil)
 	r.Foreign = append(r.Foreign, problems...)
 	for _, h := range hits {
 		if h.File == l.Phase2DropIn() && (h.Text == phase2CALine || h.Text == phase2PrincipalsLine) {

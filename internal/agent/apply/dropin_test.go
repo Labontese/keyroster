@@ -72,6 +72,51 @@ func TestDropInRepair(t *testing.T) {
 			t.Fatalf("an edited TrustedUserCAKeys line: %+v, drop-in %q", r, readFile(t, h.l.DropIn()))
 		}
 	})
+	// PR #68 review fix round 2, P1: the config-graph checks evaluate the
+	// drop-in the apply writes, so an edit they would refuse elsewhere (a
+	// group-writable mode, a line the tokeniser cannot read, an Include
+	// of an open directory) is repaired, never a refusal that holds back
+	// a KRL.
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, h *testHost)
+	}{
+		{"edited_group_writable_dropin_repaired", func(t *testing.T, h *testHost) {
+			appendFile(t, h.l.DropIn(), "# managed by ansible\n")
+			chmod(t, h.l.DropIn(), 0o664)
+		}},
+		{"edited_dropin_with_unbalanced_include_repaired", func(t *testing.T, h *testHost) {
+			appendFile(t, h.l.DropIn(), "Include \"/etc/ssh/local.d/*.conf\n")
+		}},
+		{"edited_dropin_including_open_dir_repaired", func(t *testing.T, h *testHost) {
+			open := filepath.Join(h.l.Root, "srv/open")
+			if err := os.MkdirAll(open, 0o755); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+			chmod(t, open, 0o777) //nolint:gosec // the directory under test is world-writable
+			appendFile(t, h.l.DropIn(), "Include "+open+"/*.conf\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newTestHost(t, newFixture(t))
+			h.installed("role:ops")
+			first := h.current()
+			tc.edit(t, h)
+			if r, err := h.preflight(); err != nil || finding(r, CodeConfigUnsafe) != nil || finding(r, CodeDropInDrift) == nil {
+				t.Fatalf("preflight with the edited drop-in: %+v, %v", r, err)
+			}
+			h.publishKRL(7)
+			r := h.mustApply()
+			if h.current() == first || r.SelfTest != "pass" || !h.krlRevokes(h.l.Current(), 7) {
+				t.Fatalf("the KRL apply over the edited drop-in: current %d (first %d), %+v", h.current(), first, r)
+			}
+			st, err := os.Stat(h.l.DropIn())
+			if err != nil || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || st.Mode().Perm() != 0o644 {
+				t.Fatalf("the drop-in was not repaired: %q, %v, %v", readFile(t, h.l.DropIn()), st.Mode(), err)
+			}
+		})
+	}
 	t.Run("foreign_file_refused_at_first_install", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))
