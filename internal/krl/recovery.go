@@ -12,8 +12,34 @@ import (
 )
 
 // MaxRecoveryEntries bounds the entries one recovery derives (equal to
-// tlog.MaxRecoveryEntries, which a test in internal/tlog asserts).
-const MaxRecoveryEntries = 1 << 16
+// tlog.MaxRecoveryEntries, which a test in internal/tlog asserts). It is
+// tlog.MaxRecoveryBody (11 MiB) divided by 24, the size of the smallest
+// entry a revocation_recovery body can hold, so the count never refuses a
+// recovery that the body cap admits: the body cap binds first (PR #69
+// review, D-R1). The count is still taken before anything is expanded.
+const MaxRecoveryEntries = (11 << 20) / 24
+
+// RecoveryCarrySkew is the skew bound of CarriesLost, in seconds: the
+// signer's request freshness window (wire.MaxRequestSkewSeconds, which a
+// test asserts), so a workstation clock ahead of the signer's never leaves
+// out a certificate the signer still sees as live.
+const RecoveryCarrySkew = 300
+
+// CarriesLost is the one rule for which lost certificates a recovery
+// carries (PR #69 review, D-R2): one it revokes, and one still live
+// (EntryLive) at createdAt, the request's CreatedAt (the preparing
+// client's clock in whole seconds), minus RecoveryCarrySkew. keyroster
+// revoke recover selects the certificates with it, and the signer and
+// keyroster audit verify refuse a request that carries any other
+// (recovery_certificate_expired). It reads only the signed request, never
+// the time the recovery is applied, so a request prepared offline and
+// applied hours later is judged as it was prepared. A lost certificate it
+// leaves out is expired and needs no revocation; the imported entries of
+// its serial or key ID then get ValidBefore 0 and are never pruned
+// (RecoveryEntries), the fail-safe outcome.
+func CarriesLost(validBefore, createdAt uint64, revoke bool) bool {
+	return revoke || EntryLive(validBefore, createdAt-min(createdAt, RecoveryCarrySkew))
+}
 
 // ErrRecoveryTooLarge reports a recovery that would derive more than
 // MaxRecoveryEntries entries. It is returned before the entries are

@@ -116,12 +116,18 @@ const (
 	// krl.MaxManifestSig, which a test in internal/krl asserts).
 	MaxManifest    = 4 << 10
 	MaxManifestSig = 16 << 10
-	// MaxRecoveryEntries bounds the entries one revocation_recovery leaf
-	// records (equal to krl.MaxRecoveryEntries, which a test here
-	// asserts), and MaxRecoveryBody its whole body, so that the export
-	// line of the largest one stays below audit's 16 MiB line limit.
-	MaxRecoveryEntries = 1 << 16
+	// MaxRecoveryBody bounds a revocation_recovery leaf's whole body, so
+	// that the export line of the largest one stays below audit's 16 MiB
+	// line limit, and MaxRecoveryEntries the entries it records (equal
+	// to krl.MaxRecoveryEntries, which a test here asserts): the most
+	// entries of minRecoveredEntry bytes that fit in MaxRecoveryBody, so
+	// the body cap binds first (PR #69 review, D-R1).
 	MaxRecoveryBody    = 11 << 20
+	MaxRecoveryEntries = MaxRecoveryBody / minRecoveredEntry
+	// minRecoveredEntry is the size of the smallest entry a body holds: a
+	// kind byte, three uint16 length prefixes with one byte of CA key or
+	// key (every kind needs one), a serial and a valid_before.
+	minRecoveredEntry = 1 + 2 + 1 + 8 + 2 + 2 + 8
 )
 
 // Leaf is one log entry.

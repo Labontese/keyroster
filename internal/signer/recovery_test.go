@@ -544,15 +544,43 @@ func TestRecoverRevocations(t *testing.T) {
 			})
 		}
 	})
+	// A recovery carries only the lost certificates krl.CarriesLost admits
+	// at its CreatedAt (PR #69 review, D-R2): an expired one it does not
+	// revoke is refused; revoked, it is carried.
+	t.Run("recovery_certificate_expired", func(t *testing.T) {
+		var host *ssh.Certificate
+		_, r := lostSetup(t, func(e *revokeEnv) { host = e.issueRole(t, wire.CARoleHost) })
+		late := func(rq *wire.RecoveryRequest) { rq.CreatedAt = host.ValidBefore + 600 }
+		r.refusedRecovery(t, marshal(t, r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: host.Marshal()}}, late)), "recovery_certificate_expired")
+		res := r.recover(t, r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: host.Marshal(), Revoke: true}}, late))
+		if res.Revoked != 1 || !r.parsedKRL(t).RevokesSerial(host.SignatureKey.Marshal(), host.Serial) {
+			t.Fatalf("result %+v; want the expired host certificate named for revocation carried and revoked", res)
+		}
+		r.verifyExport()
+	})
+	// Prepared while the certificate was live, applied after it expired:
+	// accepted, since the rule reads only the request's CreatedAt.
+	t.Run("carried_certificate_applied_late", func(t *testing.T) {
+		var host *ssh.Certificate
+		_, r := lostSetup(t, func(e *revokeEnv) { host = e.issueRole(t, wire.CARoleHost) })
+		req := r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: host.Marshal()}}, nil)
+		r.clock.set(time.Unix(int64(host.ValidBefore)+2*3600, 0)) //nolint:gosec // G115: a test time
+		if res := r.recover(t, req); res.Kept != 1 {
+			t.Fatalf("result %+v; want the host certificate kept", res)
+		}
+		r.verifyExport()
+	})
 	t.Run("recovery_user_certificate_kept", func(t *testing.T) {
 		var lost *ssh.Certificate
 		_, r := lostSetup(t, func(e *revokeEnv) { lost = e.issueRole(t, wire.CARoleUser) })
 		req := r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: false}}, nil)
 		r.refusedRecovery(t, marshal(t, req), "recovery_user_certificate_kept")
 	})
+	// Above the entry cap: one range of adjacent serials, a tiny KRL,
+	// refused before it is expanded.
 	t.Run("recovery_too_large", func(t *testing.T) {
 		_, r := lostSetup(t, nil)
-		serials := make([]uint64, 70000)
+		serials := make([]uint64, krl.MaxRecoveryEntries+1)
 		for i := range serials {
 			serials[i] = uint64(i) + 1 //nolint:gosec // G115: a test index
 		}
@@ -560,6 +588,47 @@ func TestRecoverRevocations(t *testing.T) {
 		im := importKRL(t, krl.Set{Certs: []krl.CertSection{{CAKey: r.fx.Roles[keystore.RoleUser].PublicKey(), Serials: serials}}},
 			uint64(now.Unix())-10, now, testInstallationID, r.fx.Roles[keystore.RoleOps]) //nolint:gosec // G115: after 1970
 		r.refusedRecovery(t, marshal(t, r.recoveryRequest(t, []wire.RecoveryImport{im}, nil, nil)), "recovery_too_large")
+	})
+	// Under the entry cap but above the body cap (PR #69 review, D-R1:
+	// the body cap binds first): two imports of about 3.9 MB, each with
+	// 3,800 distinct key IDs of 1,000 bytes, give 7,600 entries of about
+	// 1 KB beside the 7.8 MB of imports.
+	t.Run("recovery_too_large_body", func(t *testing.T) {
+		_, r := lostSetup(t, nil)
+		now := r.clock.Now()
+		ca := r.fx.Roles[keystore.RoleUser].PublicKey()
+		var imports []wire.RecoveryImport
+		for n := range 2 {
+			ids := make([]string, 3800)
+			for i := range ids {
+				ids[i] = fmt.Sprintf("%d-%06d-%s", n, i, strings.Repeat("k", 990))
+			}
+			imports = append(imports, importKRL(t, krl.Set{Certs: []krl.CertSection{{CAKey: ca, KeyIDs: ids}}},
+				uint64(now.Unix())-10+uint64(n), now, testInstallationID, r.fx.Roles[keystore.RoleOps])) //nolint:gosec // G115: after 1970
+		}
+		err := r.refusedRecoveryErr(t, marshal(t, r.recoveryRequest(t, imports, nil, nil)), "recovery_too_large")
+		if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), "above") {
+			t.Fatalf("the refusal %v (%v) does not name the body cap", err, cause)
+		}
+	})
+	// A KRL near what the signer publishes, 70,000 serials that are not
+	// adjacent, is recovered (PR #69 review, D-R1).
+	t.Run("recovers_near_publishable_maximum", func(t *testing.T) {
+		_, r := lostSetup(t, nil)
+		serials := make([]uint64, 70000)
+		for i := range serials {
+			serials[i] = 2*uint64(i) + 1 //nolint:gosec // G115: a test index
+		}
+		now := r.clock.Now()
+		ca := r.fx.Roles[keystore.RoleUser].PublicKey()
+		im := importKRL(t, krl.Set{Certs: []krl.CertSection{{CAKey: ca, Serials: serials}}},
+			uint64(now.Unix())-10, now, testInstallationID, r.fx.Roles[keystore.RoleOps]) //nolint:gosec // G115: after 1970
+		res := r.recover(t, r.recoveryRequest(t, []wire.RecoveryImport{im}, nil, nil))
+		p := r.parsedKRL(t)
+		if res.Entries != len(serials) || !p.RevokesSerial(ca.Marshal(), 1) || !p.RevokesSerial(ca.Marshal(), 139999) || p.RevokesSerial(ca.Marshal(), 2) {
+			t.Fatalf("result %+v; want %d entries, all in the published KRL", res, len(serials))
+		}
+		r.verifyExport()
 	})
 	t.Run("recovery_version_not_above_import", func(t *testing.T) {
 		_, r := lostSetup(t, nil)

@@ -34,8 +34,12 @@ const (
 	// MaxRecoveryKRL bounds one imported KRL: krl.MaxKRL (a test in
 	// internal/tlog, which imports both, asserts the equality).
 	MaxRecoveryKRL = MaxKRLBytes
-	// MaxRecoveryCertificates bounds the carried certificates.
-	MaxRecoveryCertificates = 4096
+	// MaxRecoveryCertificates bounds the carried certificates: the
+	// largest count the uint16 count field holds. MaxRecoveryRequest binds
+	// first, since even the smallest certificate takes more than
+	// MaxRecoveryRequest / MaxRecoveryCertificates bytes (PR #69 review,
+	// D-R2; a test asserts it).
+	MaxRecoveryCertificates = 1<<16 - 1
 	// MaxRecoveryCert bounds one carried certificate: tlog.MaxCert (the
 	// same test asserts it).
 	MaxRecoveryCert = 64 << 10

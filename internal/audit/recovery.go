@@ -36,6 +36,9 @@ import (
 //     is a CA key of the role its key ID names in the bundle in force, its
 //     key ID names its serial, and it is new to the log's issuance: no
 //     issue or login_issue entry logged it and its serial is above theirs;
+//   - every carried certificate is one krl.CarriesLost admits at the
+//     request's CreatedAt, revoked or still live then, as the signer
+//     requires (recovery_certificate_expired);
 //   - every carried user certificate live at the resolution time is
 //     revoked (the owner's answer revoke-users-list-others);
 //   - the entries are exactly krl.RecoveryEntries over the imports and the
@@ -123,6 +126,10 @@ func verifyRecovery(index uint64, body *tlog.RecoveryBody, leafMicros uint64, ro
 		}
 		if _, logged := rs.certs[c.Serial]; logged || (iss.seen && c.Serial <= iss.lastSerial) {
 			return nil, fmt.Errorf("carried certificate %d (serial %d) is not lost: the log issued it, or a later serial (recovery_certificate_not_lost)", i, c.Serial)
+		}
+		if !krl.CarriesLost(c.ValidBefore, req.CreatedAt, rc.Revoke) {
+			return nil, fmt.Errorf("carried certificate serial %d expired before the request was created (valid before %d, created at %d) and is not revoked (recovery_certificate_expired)",
+				c.Serial, c.ValidBefore, req.CreatedAt)
 		}
 		if kid.CA == wire.CARoleUser.String() && !rc.Revoke && krl.EntryLive(c.ValidBefore, body.ResolvedAtSeconds) {
 			return nil, fmt.Errorf("carried user certificate serial %d is live at %d s and not revoked; every lost user certificate still live is revoked (recovery_user_certificate_kept)",

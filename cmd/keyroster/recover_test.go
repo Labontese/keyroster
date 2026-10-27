@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -85,10 +86,16 @@ func bundleDocs(t *testing.T, e *dirEnv) *tlog.BundleInstallBody {
 // genesis bundle), so its hour-long certificates are live.
 func newLogBuilder(t *testing.T, e *dirEnv, install *tlog.BundleInstallBody) *logBuilder {
 	t.Helper()
+	return newLogBuilderAt(t, e, install, time.Now().Add(-30*time.Minute))
+}
+
+// newLogBuilderAt is newLogBuilder with a log that starts at start.
+func newLogBuilderAt(t *testing.T, e *dirEnv, install *tlog.BundleInstallBody, start time.Time) *logBuilder {
+	t.Helper()
 	if install == nil {
 		install = bundleDocs(t, e)
 	}
-	b := &logBuilder{t: t, e: e, micros: uint64(time.Now().Add(-30 * time.Minute).UnixMicro()), //nolint:gosec // G115: after 1970
+	b := &logBuilder{t: t, e: e, micros: uint64(start.UnixMicro()), //nolint:gosec // G115: after 1970
 		logKey: signerOf(t, e, "log"), ops: e.ops, ca: map[string]ssh.Signer{}, issued: map[uint64]*ssh.Certificate{}}
 	for _, role := range []string{trust.RoleUser, trust.RoleHost, trust.RoleMachine} {
 		b.ca[role] = signerOf(t, e, role)
@@ -741,6 +748,58 @@ func TestRevokeRecover(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("U's entry does not take U's ValidBefore: %+v", entries)
+		}
+	})
+	// D-R2 (PR #69 review): a lost certificate that expired before the
+	// request is not carried (and counted in the summary), unless
+	// --revoke-lost names it; a live one is carried as before.
+	t.Run("expired_lost_not_carried", func(t *testing.T) {
+		for _, name := range []bool{false, true} {
+			e := newDirEnv(t, 1, 1)
+			b := newLogBuilderAt(t, e, nil, time.Now().Add(-3*time.Hour))
+			b.issue(trust.RoleUser)
+			b.publish()
+			restoredN := len(b.leaves)
+			uOld, hOld := b.issue(trust.RoleUser), b.issue(trust.RoleHost)   // valid until about two hours ago
+			b.micros = uint64(time.Now().Add(-10 * time.Minute).UnixMicro()) //nolint:gosec // G115: after 1970
+			uNew, hNew := b.issue(trust.RoleUser), b.issue(trust.RoleHost)
+			b.publish()
+			s := &recoverScenario{e: e, b: b, restored: b.export(restoredN), saved: b.export(-1), restoredN: restoredN,
+				out: filepath.Join(t.TempDir(), "recovery.req")}
+			var extra []string
+			want := map[uint64]bool{uNew.Serial: true, hNew.Serial: false}
+			wantLine := "lost certificates expired before this request, not carried: 2\n"
+			if name {
+				extra = []string{"--revoke-lost", strconv.FormatUint(hOld.Serial, 10)}
+				want[hOld.Serial] = true
+				wantLine = "lost certificates expired before this request, not carried: 1\n"
+			}
+			code, out, errOut := s.run(t, extra...)
+			if code != 0 || !strings.Contains(out, wantLine) {
+				t.Fatalf("--revoke-lost named %v: exit %d:\n%s%s", name, code, out, errOut)
+			}
+			if got := carried(t, s.request(t)); !maps.Equal(got, want) {
+				t.Fatalf("--revoke-lost named %v: carried %v, want %v (expired user %d, host %d)", name, got, want, uOld.Serial, hOld.Serial)
+			}
+		}
+	})
+	// D-R1 (PR #69 review): a server copy near what the signer publishes,
+	// 70,000 serials that are not adjacent, passes every limit of the CLI
+	// and the request.
+	t.Run("recovers_near_publishable_maximum", func(t *testing.T) {
+		s := newRecoverScenario(t)
+		caKey := s.b.ca[trust.RoleUser].PublicKey().Marshal()
+		extra := make([]krl.Entry, 0, 70000)
+		for i := range 70000 {
+			extra = append(extra, krl.Entry{Kind: krl.EntrySerial, CAKey: caKey, Serial: 2*uint64(i) + 1}) //nolint:gosec // G115: a test index
+		}
+		doc := s.b.serverCopy(extra, s.b.krlVersion+1, s.e.bundle.InstallationID, nil)
+		code, out, errOut := s.run(t, "--krl", doc)
+		if code != 0 || !strings.Contains(out, "entries: 70002;") {
+			t.Fatalf("a server copy of 70,000 serials: exit %d:\n%s%s", code, out, errOut)
+		}
+		if r := s.request(t); len(r.Imports) != 2 {
+			t.Fatalf("the request imports %d KRL versions, want 2", len(r.Imports))
 		}
 	})
 	t.Run("carried_serial_once", func(t *testing.T) {

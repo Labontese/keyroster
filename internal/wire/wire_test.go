@@ -1404,6 +1404,51 @@ func recoveryVector(t testing.TB) *RecoveryRequest {
 	return r
 }
 
+// TestRecoveryCertificateCap (PR #69 review, D-R2): a request carries more
+// certificates than the old cap of 4096, and MaxRecoveryCertificates, the
+// most the uint16 count holds, never binds before MaxRecoveryRequest: even
+// the smallest certificate that parses takes more than
+// MaxRecoveryRequest / MaxRecoveryCertificates bytes in a request.
+func TestRecoveryCertificateCap(t *testing.T) {
+	if MaxRecoveryCertificates != 1<<16-1 {
+		t.Fatalf("MaxRecoveryCertificates = %d, want the uint16 count's maximum", MaxRecoveryCertificates)
+	}
+	r := recoveryVector(t)
+	r.Certificates = nil
+	for i := range 5000 {
+		r.Certificates = append(r.Certificates, RecoveredCertificate{Cert: recoveryCert(t, 1_790_000_000_000_001+uint64(i))}) //nolint:gosec // G115: a test index
+	}
+	data, err := r.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal with 5000 certificates: %v", err)
+	}
+	got, err := ParseRecoveryRequest(data)
+	if err != nil || len(got.Certificates) != 5000 {
+		t.Fatalf("ParseRecoveryRequest with 5000 certificates: %v", err)
+	}
+
+	ca, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xca}, ed25519.SeedSize)).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x5b}, ed25519.SeedSize)).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	smallest := (&ssh.Certificate{Key: sub, CertType: ssh.UserCert, SignatureKey: ca,
+		Signature: &ssh.Signature{Format: ssh.KeyAlgoED25519, Blob: make([]byte, ed25519.SignatureSize)}}).Marshal()
+	if pub, err := ssh.ParsePublicKey(smallest); err != nil {
+		t.Fatalf("the smallest certificate does not parse: %v", err)
+	} else if _, ok := pub.(*ssh.Certificate); !ok {
+		t.Fatal("the smallest certificate is not a certificate")
+	}
+	per := len(smallest) + 3 + 1 // the uint24 length and the revoke byte
+	if per*MaxRecoveryCertificates <= MaxRecoveryRequest {
+		t.Fatalf("%d certificates of %d bytes fit in %d bytes: the count cap would bind first", MaxRecoveryCertificates, per, MaxRecoveryRequest)
+	}
+	t.Logf("the smallest certificate takes %d bytes, so at most %d fit in a request", per, MaxRecoveryRequest/per)
+}
+
 // TestRecoveryRequest (03-06b): a recovery request round-trips in its
 // file form (Marshal, ParseRecoveryRequest) and its logged form
 // (SigningBytes, ParseRecoverySigningBytes); the parsers and the encoders

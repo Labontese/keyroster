@@ -1224,4 +1224,58 @@ func TestRecoveryEntries(t *testing.T) {
 			t.Fatalf("a kept certificate gave %+v", got)
 		}
 	})
+	// A KRL near what the signer publishes, 70,000 serials that are not
+	// adjacent (about 560 KB, far below MaxKRL), is recoverable (PR #69
+	// review, D-R1): the entry count no longer refuses it.
+	t.Run("near_publishable_maximum", func(t *testing.T) {
+		_, ca := seedKey(t, 0x61)
+		serials := make([]uint64, 70000)
+		for i := range serials {
+			serials[i] = 2*uint64(i) + 1 //nolint:gosec // G115: a test index
+		}
+		data, err := Encode(Set{Certs: []CertSection{{CAKey: ca, Serials: serials}}}, 9, time.Unix(1_700_000_000, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := Parse(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := RecoveryEntries([]*Parsed{p}, nil, nil)
+		if err != nil || len(got) != len(serials) {
+			t.Fatalf("RecoveryEntries of a %d-byte KRL with %d serials = %d entries, %v", len(data), len(serials), len(got), err)
+		}
+		t.Logf("a KRL of %d non-adjacent serials takes %d bytes and recovers as %d entries", len(serials), len(data), len(got))
+	})
+}
+
+// TestCarriesLost (PR #69 review, D-R2): a recovery carries a lost
+// certificate it revokes, or one still live at the request's CreatedAt
+// minus RecoveryCarrySkew (EntryLive: valid_before + PruneMargin above
+// that); the time the recovery is applied plays no part.
+func TestCarriesLost(t *testing.T) {
+	if RecoveryCarrySkew != wire.MaxRequestSkewSeconds {
+		t.Fatalf("RecoveryCarrySkew = %d, wire.MaxRequestSkewSeconds = %d", RecoveryCarrySkew, wire.MaxRequestSkewSeconds)
+	}
+	const created = 1_800_000_000
+	for _, c := range []struct {
+		name        string
+		validBefore uint64
+		createdAt   uint64
+		revoke      bool
+		want        bool
+	}{
+		{"live", created + 3600, created, false, true},
+		{"expired_inside_margins", created - 599, created, false, true},
+		{"expired_at_margins", created - 600, created, false, false},
+		{"expired_long_ago", created - 86400, created, false, false},
+		{"expired_but_revoked", created - 86400, created, true, true},
+		{"infinite", math.MaxUint64, created, false, true},
+		{"created_before_skew_saturates", 1, 10, false, true},
+		{"zero_valid_before", 0, created, false, false},
+	} {
+		if got := CarriesLost(c.validBefore, c.createdAt, c.revoke); got != c.want {
+			t.Errorf("%s: CarriesLost(%d, %d, %v) = %v, want %v", c.name, c.validBefore, c.createdAt, c.revoke, got, c.want)
+		}
+	}
 }

@@ -89,7 +89,11 @@ type lostCert struct {
 // Then it applies the owner's answer on lost certificates
 // (revoke-users-list-others): every lost user certificate live at its
 // clock minus the signer's 300 s skew bound is revoked, a lost host or
-// machine certificate only when --revoke-lost names its serial. It prints
+// machine certificate only when --revoke-lost names its serial. It
+// carries only the lost certificates krl.CarriesLost admits at that one
+// clock reading, which is the request's CreatedAt: those it revokes and
+// those still live; an expired one it only counts (PR #69 review, D-R2).
+// It prints
 // a summary, asks for confirmation unless --yes, signs the request with
 // the admin key in ssh-agent under keyroster/revoke-recovery/v1 and writes
 // it to --out (mode 0600, never over an existing file).
@@ -246,24 +250,35 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 		maxImport = max(maxImport, im.m.KRLVersion)
 	}
 
-	// The lost certificates, one per serial, and the owner's answer.
-	at := uint64(max(time.Now().Unix()-wire.MaxRequestSkewSeconds, 0)) //nolint:gosec // G115: >= 0
-	var certs []lostCert
+	// The lost certificates, one per serial, and the owner's answer, at
+	// one clock reading: the request's CreatedAt.
+	createdAt := uint64(max(time.Now().Unix(), 0)) //nolint:gosec // G115: >= 0
+	at := createdAt - min(createdAt, wire.MaxRequestSkewSeconds)
+	var (
+		certs   []lostCert
+		expired int
+	)
+	seen := map[uint64]bool{}
 	for _, lc := range lost {
 		c, err := parseLostCert(lc.Cert)
 		if err != nil {
 			return fmt.Errorf("the saved export's entry %d: %w", lc.Index, err)
 		}
-		if slices.ContainsFunc(certs, func(o lostCert) bool { return o.c.Serial == c.Serial }) {
+		if seen[c.Serial] {
 			continue // the first in log order
 		}
+		seen[c.Serial] = true
 		kid, err := cert.ParseKeyID(c.KeyId)
 		if err != nil {
 			return fmt.Errorf("the saved export's entry %d: key ID: %w", lc.Index, err)
 		}
 		live := krl.EntryLive(c.ValidBefore, at)
-		certs = append(certs, lostCert{c: c, raw: lc.Cert, kid: kid, live: live,
-			revoke: (kid.CA == trust.RoleUser && live) || (kid.CA != trust.RoleUser && named[c.Serial])})
+		revoke := (kid.CA == trust.RoleUser && live) || (kid.CA != trust.RoleUser && named[c.Serial])
+		if !krl.CarriesLost(c.ValidBefore, createdAt, revoke) {
+			expired++
+			continue
+		}
+		certs = append(certs, lostCert{c: c, raw: lc.Cert, kid: kid, live: live, revoke: revoke})
 	}
 	for serial := range named {
 		if !slices.ContainsFunc(certs, func(o lostCert) bool { return o.c.Serial == serial && o.kid.CA != trust.RoleUser }) {
@@ -313,7 +328,7 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 
 	req := &wire.RecoveryRequest{
 		InstallationID: installation,
-		CreatedAt:      uint64(max(time.Now().Unix(), 0)), //nolint:gosec // G115: >= 0
+		CreatedAt:      createdAt,
 		RestoredSize:   restored.Size,
 	}
 	copy(req.RestoredRoot[:], restored.Root)
@@ -330,7 +345,7 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 	if err != nil {
 		return recoverRefusal("recovery_too_large", "%v", err)
 	}
-	printRecoverySummary(stdout, restored, saved, imports, certs, len(entries), maxImport)
+	printRecoverySummary(stdout, restored, saved, imports, certs, expired, len(entries), maxImport)
 
 	if err := confirmRecovery(*yes, stdout); err != nil {
 		return err
@@ -367,9 +382,10 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 	return err
 }
 
-// printRecoverySummary prints what the recovery imports and carries, for
-// the admin to check before signing.
-func printRecoverySummary(w io.Writer, restored, saved *audit.Report, imports []recoverImport, certs []lostCert, entries int, maxImport uint64) {
+// printRecoverySummary prints what the recovery imports and carries, and
+// how many lost certificates it leaves out as expired, for the admin to
+// check before signing.
+func printRecoverySummary(w io.Writer, restored, saved *audit.Report, imports []recoverImport, certs []lostCert, expired, entries int, maxImport uint64) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "installation: %s\n", restored.Bundle.InstallationID)
 	fmt.Fprintf(&b, "restored log: %d entries, root %s; saved log: %d entries\n",
@@ -385,8 +401,11 @@ func printRecoverySummary(w io.Writer, restored, saved *audit.Report, imports []
 		fmt.Fprintf(&b, "import: %s: KRL v%d, issued at %s: %d serials, %d key IDs, %d keys\n",
 			im.source, im.m.KRLVersion, im.m.IssuedAt, serials, keyIDs, len(im.p.Keys))
 	}
-	if len(certs) == 0 {
+	if len(certs) == 0 && expired == 0 {
 		b.WriteString("lost certificates: none\n")
+	}
+	if expired > 0 {
+		fmt.Fprintf(&b, "lost certificates expired before this request, not carried: %d\n", expired)
 	}
 	for _, lc := range certs {
 		state := "expired"

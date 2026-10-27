@@ -71,7 +71,9 @@ var recoveryRoles = map[string]wire.CARole{
 // manifest's version in its header (recovery_import_invalid); every
 // certificate verifies under its signature key, which is a CA key of the
 // role its key ID names in the bundle in force, and its key ID names its
-// serial (recovery_certificate_invalid); every user certificate live at
+// serial (recovery_certificate_invalid); every certificate is one
+// krl.CarriesLost admits at the request's CreatedAt, revoked or still live
+// then (recovery_certificate_expired); every user certificate live at
 // the resolution time T (this call's one clock reading, in whole seconds)
 // is revoked (recovery_user_certificate_kept: the owner's answer
 // revoke-users-list-others). Then, inside the transaction: the bundle is
@@ -133,6 +135,10 @@ func (s *Signer) RecoverRevocations(ctx context.Context, data []byte) (*Recovery
 	resolvedAt := uint64(max(now.Unix(), 0)) //nolint:gosec // G115: >= 0
 	revoked := 0
 	for _, c := range certs {
+		if !krl.CarriesLost(c.ValidBefore, req.CreatedAt, c.Revoke) {
+			return nil, recoveryRefusal("recovery_certificate_expired",
+				fmt.Errorf("lost certificate serial %d expired before the request was created (valid before %d, created at %d) and is not revoked; a recovery carries only the lost certificates it revokes or that are still live then", c.Serial, c.ValidBefore, req.CreatedAt))
+		}
 		if c.Revoke {
 			revoked++
 			continue
