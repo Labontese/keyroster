@@ -468,12 +468,54 @@ CLOCK_MONOTONIC, before an addition takes effect after a removal: 150 s with
 the packaged 120 s.
 
 **What is not tested.** The containers run no service manager, so systemd
-and OpenRC reloads, Ubuntu's socket activation on a booted host, SELinux on
-an enforcing EL9 host and Proxmox VE are UNVERIFIED until the dogfood hosts
-(03-16). Older EL9 minor releases are covered only by the current AlmaLinux
-9 image. The agent finds the service with `systemctl show` (systemd) or
-`/etc/conf.d/sshd` (OpenRC); that detection is unit-tested on constructed
-`systemctl show` output only, UNVERIFIED on a real systemd until 03-16.
+and OpenRC reloads, `systemctl try-reload-or-restart` on Ubuntu's socket
+activation on a booted host, SELinux on an enforcing EL9 host and Proxmox VE
+are UNVERIFIED until the dogfood hosts (03-16). Older EL9 minor releases are
+covered only by the current AlmaLinux 9 image. Detection (below) is
+unit-tested on constructed `systemctl show` output, and
+`TestDistroDetectStock` runs it on each image's real file system with
+`systemctl show` output built from the image's own unit file (Alpine: its
+own `/etc/conf.d/sshd`); the output of a real `systemctl show` is UNVERIFIED
+until 03-16.
+
+### How the agent finds and reloads sshd
+
+Without `--sshd`, `--sshd-config` and `--reload`, the agent reads the service
+that runs sshd (03-06; PR #68 review, owner decisions D-R1 and D-R4):
+
+- **systemd:** `systemctl show` of `ssh.socket`, `ssh.service` and
+  `sshd.service` gives the binary and the command line (`ExecStart`). The
+  agent runs `sshd -t` and `sshd -T` with `-f <config>` only, so it accepts
+  only the arguments every stock unit uses: `-D`, `-e` and one `-f <file>`
+  (Debian and Ubuntu `-D $SSHD_OPTS`, EL9 `-D $OPTIONS`, Arch `-D`). A
+  `$NAME` or `${NAME}` is resolved from the unit's `Environment` and
+  `EnvironmentFile`s (`/etc/default/ssh`, `/etc/sysconfig/sshd`; empty on
+  every stock image), so `SSHD_OPTS="-f /etc/ssh/sshd_config.prod"` makes the
+  agent check that file. Anything else, such as `-o RevokedKeys=none`,
+  `-p 2222` or a value it cannot unquote, is refused as
+  `sshd_command_unknown`, and so is an `EnvironmentFile` it cannot read
+  safely (owned by root, writable by no one else, no symlink another user
+  controls). A missing optional file (`EnvironmentFile=-...`) is empty.
+- **OpenRC:** `/etc/conf.d/sshd`, read the same way and as Alpine's init
+  script uses it: `cfgfile`, else `SSHD_CONFIG`, else
+  `$SSHD_CONFDIR/sshd_config`; `SSHD_BINARY`; `command_args`, else
+  `SSHD_OPTS`, which may hold only `-D` and `-e` (set the file with
+  `cfgfile`). The agent does not read the init script's own command line:
+  Alpine's stock script adds only `-o PidFile=` and `-f <cfgfile>` when
+  they differ from the defaults, and a modified init script is UNVERIFIED.
+- **Socket activation (Ubuntu's `ssh.socket`):** whenever `ssh.socket` is
+  active, the reload strategy is `systemd-socket:<unit>`, whatever the
+  service's own state. Every reload, the apply's and every rollback's, runs
+  `systemctl try-reload-or-restart <unit>`: a running sshd, also one a
+  connection started since the agent looked, re-reads its configuration,
+  and a stopped one reads the files on disk when the next connection starts
+  it. The report's `reload_actions` names each command that ran. A unit
+  caught in a transitional state (`activating`, `reloading`,
+  `deactivating`) is refused: run again. The strategy `none`, which reloaded
+  nothing, no longer exists.
+
+`--sshd`, `--sshd-config` and `--reload` override detection; a host started
+with other arguments is then the operator's to vouch for.
 
 ## Not supported
 
@@ -501,13 +543,19 @@ sudo keyroster-agent preflight
 
 It prints its findings as JSON and changes nothing on the host, except a
 trial copy of the agent's drop-in. It writes that copy only while no
-drop-in exists, removes it before it exits, and never reloads sshd. With
-the trial in place, `sshd -T` shows whether `sshd_config.d` is read before
-every other trust setting. Without `--sshd` and `--sshd-config` it detects
-the service that runs sshd (systemd or OpenRC). Its exit status is:
+drop-in exists on a host where the agent has installed nothing (no
+`/etc/ssh/keyroster/current` or `last-good`), removes it before it exits,
+and never reloads sshd. With the trial in place, `sshd -T` shows whether
+`sshd_config.d` is read before every other trust setting. On an installed
+host it writes no trial: the trial names `current`'s CA keys without a
+`RevokedKeys` line, so an sshd that loaded it would accept revoked
+certificates. There a missing, trial or edited drop-in is `dropin_drift`
+instead. Without `--sshd` and `--sshd-config` it detects the service that
+runs sshd ([How the agent finds and reloads
+sshd](#how-the-agent-finds-and-reloads-sshd)). Its exit status is:
 
 - 0 when no finding refuses the host;
-- 3 when one does;
+- 3 when one does (`sshd_command_unknown` included);
 - 2 for a usage or tool error, such as an sshd that cannot run, or an apply
   that holds the agent's lock.
 
@@ -516,13 +564,20 @@ status at 0.
 
 The first apply, and every change of the drop-in, runs the same checks
 before anything is written (without the trial) and refuses on any refusal.
-Every apply also refuses `login_grace_unbounded` at its start (03-05).
+Every apply also refuses `login_grace_unbounded` at its start (03-05). On a
+first install a file the agent did not write at `00-keyroster.conf` is
+`foreign_trust_setting`; once a generation is installed the file is the
+agent's own, and an edited one is repaired, never refused, so a KRL still
+installs.
 
 | Code | What it means | Fix |
 |---|---|---|
 | `ssh_keygen_missing` | No `ssh-keygen` at the path given (default `/usr/bin/ssh-keygen` or `/bin/ssh-keygen`); the agent checks every CA line and KRL with the host's own tools | Install it (`openssh-client`, `openssh-clients`, or `openssh-keygen` on Alpine), or pass `--ssh-keygen` |
 | `no_dropin_dir` | `/etc/ssh/sshd_config.d` is missing, or `sshd -T` with the trial drop-in still shows the setting unset: sshd does not read `sshd_config.d/*.conf` before its other settings | Add `Include /etc/ssh/sshd_config.d/*.conf` as the first line of `sshd_config` (every image above ships it near the top) |
-| `foreign_trust_setting` | Another line sets `TrustedUserCAKeys`, `RevokedKeys` or `AuthorizedPrincipalsFile` (the finding names the file and line), or `sshd -T` reports one set elsewhere | Remove or comment out that line. The agent never merges with or overrides another trust setting. The Phase 2 runbook's exact layout is taken over instead (below) |
+| `foreign_trust_setting` | A line sets `TrustedUserCAKeys`, `RevokedKeys`, `AuthorizedPrincipalsFile`, or an `AuthorizedPrincipalsCommand` other than `none` (then every `AuthorizedPrincipalsCommandUser` line too) in any file sshd reads but the agent's drop-in, inside `Match` blocks too; the finding names the file and line. The agent follows every `Include` from `sshd_config` (or the service's `-f` file), recursively, with globs, relative paths under `/etc/ssh` and `Include` lines inside `Match` blocks (owner decision D-R3, extending D-07). Also raised when `sshd -T`, or `sshd -T -C` for a managed account, reports one of these set where the agent did not read it. A principals command matters because sshd consults its output when the principals file matches none, which widens which certificates an account accepts | Remove or comment out that line. The agent never merges with or overrides another trust setting. The Phase 2 runbook's exact layout is taken over instead (below) |
+| `sshd_config_unsafe` | A file sshd reads, or the directory an `Include` names, could be changed by another user (not owned by root, writable by group or others, or behind a symlink another user owns), or the `Include` graph cannot be followed: a cycle, more than sshd's 16 levels, a `~` path, or more than 512 files. A trust setting there cannot be ruled out | Make those files and directories root-owned and writable only by root, and simplify the `Include` lines |
+| `sshd_command_unknown` | The detected service starts sshd with an argument other than `-D`, `-e` and `-f <file>` (after resolving `$SSHD_OPTS`, `$OPTIONS`, OpenRC's `command_args`), or its settings file cannot be read safely ([How the agent finds and reloads sshd](#how-the-agent-finds-and-reloads-sshd)) | Move the option into `sshd_config`, where the agent checks it, and leave the variable empty |
+| `dropin_drift` | Only on an installed host: `00-keyroster.conf` is missing, holds a preflight trial, or differs from what the agent writes (owner decision D-R2, "repair and report"). The apply never refuses on it | A trial: `sudo keyroster-agent apply --once` replaces it with the agent's drop-in and reloads sshd, even with nothing new to install. Missing or edited: the next apply that installs a new signed state rewrites it (the old file is kept as `dropin.prev` until that apply commits). Keep other sshd settings in another file |
 | `no_loopback_listener` | sshd listens on no loopback address. The agent self-tests sshd over loopback only (the owner's D-05 answer, loopback-only) | Add `ListenAddress 127.0.0.1` to `sshd_config` beside the existing `ListenAddress` lines; the agent never edits `sshd_config` |
 | `login_grace_unbounded` | `sshd -T` reports `logingracetime 0`. The agent's two-step swap waits LoginGraceTime plus 30 s before an addition takes effect, so it needs a bound | Set a bounded `LoginGraceTime` in `sshd_config`, for example the default 120 |
 | `login_grace_unknown` | `sshd -T` reports a LoginGraceTime that is not a number of seconds | As above |
@@ -617,11 +672,19 @@ sudo keyroster-agent check
 It reports, as JSON, every way sshd or the installed files differ from
 what the agent installed, and fixes nothing (AGENT-05):
 
-- `sshd -T` must show the drop-in's three paths, and so must
+- `sshd -T` must show the drop-in's three paths and no
+  `AuthorizedPrincipalsCommand`, and so must
   `sshd -T -C user=<account>,host=127.0.0.1,addr=127.0.0.1,laddr=<l>,lport=<p>`
   for every account the generation has a principals file for. A later
   `Match` block or an earlier file is reported with the keyword, and the
   account when it applies only to that account;
+- every file sshd reads, the whole `Include` graph as preflight follows it,
+  is searched for a trust setting outside the agent's drop-in; each is
+  listed under `foreign` by file and line, and so is a file the agent
+  cannot read safely (`sshd_config_unsafe`);
+- `00-keyroster.conf` must hold exactly what the agent writes; a missing,
+  trial or edited drop-in is listed under `files`. The next apply that
+  installs a new signed state repairs it (a trial, any apply);
 - the generation `current` names is re-hashed against its record in
   `/var/lib/keyroster-agent/generations/<N>.json`. It resolves `current`
   once, so an apply that swaps it during the check cannot mix two

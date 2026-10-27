@@ -8,7 +8,7 @@ requires:
   - phase: 03-linux-agent-and-revocation
     provides: "03-05: the apply engine (Apply, Transition, swapCurrent, RollbackTarget, keepKRLInForce, Dump.LoginGrace, ObserveLoginGrace, generations/<N>.json, execsite constructors pinned by paths.ExecSites); 03-04: RenderPrincipalsFile, pop.hosts"
 provides:
-  - "apply.Detect (systemd systemctl show, OpenRC conf.d/sshd) and the reload strategy none"
+  - "apply.Detect (systemd systemctl show, OpenRC conf.d/sshd); review fix round 1 replaced the reload strategy none with systemd-socket:<unit> (systemctl try-reload-or-restart)"
   - "apply.Preflight and PreflightReport: ssh_keygen_missing, no_dropin_dir, foreign_trust_setting, no_loopback_listener, account_excluded (report only), rhel8_unsupported, fips_unsupported, host_pop_not_enabled, login_grace_unbounded, login_grace_unknown, phase2_adoptable (report only); apply-only phase2_adoption_pending and phase2_layout_differs"
   - "apply.StructuralPhase2, apply.Adopt, AdoptPlan, Config.AllowAdoption (set only by apply --once), paths.AllowedRemoval"
   - "apply.Check and DriftReport (AGENT-05), resolving current once"
@@ -219,7 +219,7 @@ Local Docker in WSL. Each image's `RepoDigest` equals the digest pinned in `e2e-
 - **Preflight (`preflight.go`, `exclusion.go`).** The full D-07 table, each code with a fix.
   - **Foreign trust settings:** found by grepping `sshd_config` and `sshd_config.d/*.conf` (file and line, `Keyword=value` and Match blocks included) and by the `sshd -T` values. An unset value is `none` or no line at all: OpenSSH 10.3 and later print no `revokedkeys` line.
   - **Trial drop-in:** written only while no drop-in exists, with its own header, and removed before return, with no reload. It runs under the apply lock taken without waiting.
-  - **Leftovers:** a leftover trial is removed by the preflight and by every apply, and `writeDropIn` never counts one as a previous drop-in.
+  - **Leftovers:** a leftover trial is removed by the preflight and by every apply, and `writeDropIn` never counts one as a previous drop-in. *(Corrected in review fix round 1, F1: as first written, a no-op apply never removed a leftover; see below.)*
   - **Account exclusion:** sshd's `match_pattern` and `match_pattern_list`, with `user@host` entries counted as "may exclude". Groups come from `/etc/passwd` and `/etc/group`.
   - **Policy and accounts:** with pins present, the state is verified as an apply would verify it, for `host_pop_not_enabled` and the managed accounts. Before enrollment this is a note, not a finding.
   - **In apply:** the first apply and every drop-in change run these checks before any write, and refuse with a `PreflightError` that `errors.Is` matches per code.
@@ -402,7 +402,7 @@ None. `hostcertificate` is not compared by `check` yet; 03-09 adds it when it in
 
 | Flag | File | Description |
 |------|------|-------------|
-| threat_flag: config-write window | internal/agent/apply/preflight.go | The trial drop-in exists for one `sshd -T` run. A reload of sshd by something else in that moment loads it, and certificate logins are refused until the next reload. Plain keys and passwords are unaffected, since the trial sets no RevokedKeys. The trial is never left behind: a crash leftover is removed by the next preflight or apply |
+| threat_flag: config-write window | internal/agent/apply/preflight.go | The trial drop-in exists for one `sshd -T` run, and only on a host where neither `current` nor `last-good` exists (review fix round 1, F1/F5). An sshd that loads it in that moment (a reload by something else, or a socket-activated sshd a connection starts) trusts no CA, because the trial's paths name files that do not exist: certificate logins are refused until the next reload. Plain keys and passwords are unaffected, since the trial sets no RevokedKeys. On an installed host the same lines would trust `current`'s CA keys without its KRL, so no trial is written there. A crash leftover is removed by the next preflight or apply on a host without a generation, and replaced by the agent's drop-in with a reload by any apply on an installed host |
 | threat_flag: removal surface | internal/agent/paths/paths.go | `AllowedRemoval` lets the applier unlink three Phase 2 paths outside its tree (only `os.Remove`, one directory level, pinned by TestAllowed and TestPaths) |
 | threat_flag: supply chain | .github/workflows/e2e-distro.yml | The images are pinned by digest (T-03-39), but each job installs OpenSSH from its distribution's repositories at run time, unpinned. The jobs get no secrets and contents: read |
 | threat_flag: capability baseline | test/capslock/keyroster-agent.json | 20 → 23 pairs (ARBITRARY_EXECUTION through ssh.PublicKey.Verify; see Owner attention, item 3) |
@@ -441,6 +441,68 @@ None.
   - the runbook has UNVERIFIED, FIPS, `keyroster-agent preflight`, `login_grace_unbounded`, `keyroster-agent apply --once`, and `keyroster host principals` in "Moving a Phase 2 host to the agent";
   - every image in e2e-distro.yml is `name@sha256:`.
 - **Named cases.** Every case named in Task 2's behaviour list exists and passes (`go test -v` output).
+
+## Review fix round 1 (PR #68)
+
+The pre-merge security review confirmed 16 findings (F1 to F16). The owner made four decisions, quoted here verbatim:
+
+- **D-R1 "try-reload-or-restart"** (F3, F4, F13).
+- **D-R2 "Reparera + rapportera"** (F15).
+- **D-R3 "Hela Include-grafen + kommando"** (F12, F16; extends D-07).
+- **D-R4 "Vägra okända argument"** (F6, F11).
+
+Base `6b17aa4`. Every commit is SSH-signed by keyroster-bot.
+
+### Per finding
+
+| Finding | Commit | What changed | Test (and the mutant that fails it) |
+|---|---|---|---|
+| F1, F5 (trial on an installed host) | `c41bb92` | Preflight writes no trial while `current` or `last-good` exists, and reports a missing, trial or edited drop-in as the new refusal code `dropin_drift`. Every apply handles a byte-exact trial before forward (`replaceTrial`), so before a no-op return too. Without a last-good it removes the trial. On an installed host it writes the agent's drop-in, then runs `activateDropIn` (with the D-R1 reload action) and the self-test, and the run is not a no-op. The trial comment and the threat flag are corrected. | `TestDropInRepair/noop_apply_replaces_trial_on_installed_host` (mutant: `replaceTrial` always removes). `TestPreflight/installed_host_*` (mutant: Preflight's installed check off fails all four). |
+| F2 (stale `phase2-adopt.json`) | `c0fd163` | The marker is written first, then the plan; a failed plan write undoes the first install. A new fault point `adopt-plan` sits between. `finishAdoption` runs from firstInstall only for its own plan. A plan with no marker, no current and no last-good is removed at the start of the run. | `TestAdopt/marker_write_failure_leaves_no_plan` (mutant: the old write order). `plan_write_failure_or_crash_undone`. `stale_plan_never_executed` (the finding's probe; mutant: the start-of-run discard and the `e.adopt` guard both off). |
+| F3, F4, F13 (D-R1) | `8f17c81` | New strategy `systemd-socket:<unit>`, chosen whenever `ssh.socket` is active, whatever the service's state. Every reload (activation, `restoreDropIn` in every rollback and undo path) runs `systemctl try-reload-or-restart <unit>` through the new pinned `execsite.SystemctlTryReloadOrRestart`. `none` is gone. Detect refuses a transitional ActiveState. `Report.ReloadActions` names each command that ran. `reloadSystemd` looks for systemctl below the layout's root, as Detect does. | `TestSocketActivatedReload`. The self-test fails after the fake sshd accepted the connection, and the rollback's try-reload-or-restart runs with the drop-in gone and `current` still present. Adoption runs the command before the first Phase 2 removal. Mutant: the socket strategy reloading nothing fails all three. `TestDetect` socket and transitional cases; mutant: the old inactive-only rule fails four. |
+| F6, F11 (D-R4) | `d2c378c` | ExecStart accepts only `-D`, `-e` and one `-f <file>`. `$NAME` (word-split) and `${NAME}` are resolved from `Environment` and `EnvironmentFiles` in systemd's precedence. Each EnvironmentFile is read through the new `readTrusted`: root-owned, not group- or world-writable, owned symlinks only, inside the root. OpenRC's `/etc/conf.d/sshd` is read as Alpine's init script reads it (`cfgfile`, `SSHD_CONFIG`, `SSHD_CONFDIR`, `command_args`, `SSHD_OPTS`). Anything else is the new refusal code `sshd_command_unknown`: preflight exit 3 through `apply.DetectRefusal`. The SystemctlShow argv gains `-p EnvironmentFiles -p Environment`. | `TestDetect`, 30 new cases, including the captured stock unit, env-file and conf.d contents. Three mutants: accepting unknown arguments, no variable lookup, and no ownership check. `TestDistroDetectStock` and `TestDistroDetectRefusesSSHDArgs`. |
+| F7 (runbook overclaim) | `6dd875b` | `TestDistroRefusals` gains `ssh_keygen_missing`, `host_pop_not_enabled`, `no_loopback_listener` (sshd left stopped, new `hostEdit.noStart`) and a held apply lock (exit 2). The runbook names exactly the codes the matrix provokes, and lists the rest as unit-tested only. | Mutant: the pop.hosts check off fails `host_pop_not_enabled` on debian:12. |
+| F8 (Arch partial upgrade) | `00bc086` | `run-in.sh` points pacman at the Arch Linux Archive snapshot of the image's build day and runs `pacman -Syyu --needed openssh`. The day is the mtime of the mirrorlist the image build wrote. SigLevel and the image's keyring are unchanged. | No unit test (CI script). Checked on the pinned image: snapshot 2026/10/18, openssh 10.6p1-2, archlinux-keyring 20260909-1. archlinux passed 25 of 25 with it. |
+| F9 (CONTRIBUTING) | `e34a0de` | Lists 26 checks, names exactly as in `main-integrity.json` (sorted diff of both lists). | Docs. |
+| F10 (run.sh comment) | `6f27dee` | The comment now says the container keeps Docker's default bridge network for the whole run. | Docs. |
+| F12, F16 (D-R3) | `be5d99d` | `configGraph` follows every Include from the main configuration recursively: globs, paths relative to `/etc/ssh`, Include inside Match blocks, nothing-matched skipped. A cycle, nesting past sshd's 16 levels (`SERVCONF_MAX_DEPTH`, servconf.c, portable 10.2p1), `~`, more than 512 reads, an unsafe file, or an Include directory others can write is the new refusal code `sshd_config_unsafe`. A trust setting anywhere but the agent's drop-in is `foreign_trust_setting`, Match blocks included. That covers `AuthorizedPrincipalsCommand` other than `none`, and then every `AuthorizedPrincipalsCommandUser`. `authorizedprincipalscommand` must be unset in `foreignFindings`, preflight's per-account `-C` check, `checkDropInEffective` (global and per account) and check. Check walks the graph too (`DriftReport.Foreign`). | `TestIncludeGraph`, 20 cases; six mutants each fail it: no Include following, no command grep, no directory check, no depth limit, no per-account command check at activation, no Foreign in check. Distro: an included Match block, a nested glob include, the command in sshd_config and in an included Match block (exit 3, by file and line); an Include cycle, which the real `sshd -T` refuses itself (exit 2); `TestDistroDrift` reports a Match-block principals command. |
+| F14 (resume after the directory is gone) | `955ced7` | `removePhase2` fsyncs the nearest existing directory, up to `<root>/etc/ssh`. A new fault point `phase2-removed` sits after the removal loop. | `TestAdopt/crash_after_final_removal_resumes` (mutant: fsync only the parent). |
+| F15 (D-R2) | `c41bb92` | Once last-good is the agent's, a differing `00-keyroster.conf` is drift. `writeDropIn` repairs it (`dropin.prev`, `sshd -t`, the `sshd -T` checks, reload, self-test) and it is never refused. A foreign file there is refused only at the first install. `foreignFindings` skips the `sshd -T` comparison for a keyword the on-disk drop-in sets. Check reports drop-in bytes that differ from `DropIn` as a FileDrift. | `TestDropInRepair/edited_dropin_repaired_and_krl_installed` (the finding's probe), `edited_trust_line_repaired` and `foreign_file_refused_at_first_install`. `TestDrift/dropin_edited_or_missing_is_drift`. Mutants: the installed carve-out off, the own-keyword skip off, and check's drop-in compare off. |
+
+### What ran (2026-10-27)
+
+- **Distro matrix:** WSL, Docker, `test/distro/run.sh` on the final code. All seven pinned images passed **25 of 25** each, against 14 before the fix round. `TestDistroDetectStock` found the stock service on every image (systemd units on six, OpenRC conf.d on Alpine).
+- **Race suite:** `CGO_ENABLED=1 go test -race -count=1 ./...` in WSL passed.
+- **Windows:** `go test -count=1 ./...` passed in every package except `internal/agent/paths` `TestAllowed`. That test fails identically at `6b17aa4`: POSIX paths on Windows, and the package is not in the Windows CI lane (Follow-ups).
+- **go vet:** clean for linux, windows and darwin, and with `-tags e2e` and `-tags e2edistro`.
+- **gofmt:** clean.
+- **golangci-lint:** 0 issues in all four runs (linux, windows, darwin, and `--build-tags e2edistro` on test/distro).
+- **capslock-check:** the agent still has 23 of 23 pairs (no change), and EXEC leaves the module only through execsite (2 edges). The signer has 91 of 91.
+- **Other gates:** dep-firewall clean; testonly-firewall clean in 6 combinations; check-pinned-actions 47 of 47.
+- **Mutants:** every mutant listed above was applied in the WSL copy, run, and restored (a fresh copy for each). All were killed.
+
+### New codes
+
+- `dropin_drift`: a refusal, raised by preflight only.
+- `sshd_config_unsafe`: a refusal.
+- `sshd_command_unknown`: a refusal, preflight exit 3.
+
+### UNVERIFIED (updated)
+
+- **Real systemd.** `systemctl show` output was only constructed, by hand or from each image's unit file. `systemctl try-reload-or-restart` on Ubuntu's socket activation was never run against a real systemd. The harness answers systemctl without running it (03-16).
+- **OpenRC init script.** The script's own command line is not read; a modified script is not detected.
+- **Unit-tested only on a distribution sshd:** `login_grace_unknown`, `rhel8_unsupported`, `fips_unsupported`, `dropin_drift`, `sshd_config_unsafe`, `sshd_command_unknown` from a systemd unit, and `phase2_adoption_pending`.
+- **Ownership checks as root.** `readTrusted` compares owners with the applier's euid. Unit tests ran as a non-root user against their own uid; root ran only in the containers.
+- **Carried over from the original SUMMARY:** real reloads, the homelab (SELinux, Proxmox), the resume warning, and `Match Address` for remote ranges.
+
+### Follow-ups (not done here)
+
+- Make run.sh's no-network claim true: install the packages into a committed image, then run the tests with `--network none` (F10).
+- A no-op apply could reinstate a missing (not trial) drop-in on an installed host. Today only an apply with new state rewrites it, by 03-05's "no-op repairs no drift" design.
+- The agent's drop-in could set `AuthorizedPrincipalsCommand none` to shadow a later global command. Not done: it changes `DropIn` on every installed host.
+- `detectOpenRC` defaults the binary to `/usr/sbin/sshd`, while Alpine's init script picks `sshd.pam` or `sshd.krb5` from the configuration.
+- `internal/agent/paths` `TestAllowed` fails on Windows at the PR head (POSIX paths). It needs a build tag or OS-neutral paths.
+- The archlinux snapshot day is taken from the mirrorlist's mtime. An image build that stops writing the mirrorlist would move it, so a digest bump should be checked against the run's "snapshot" line.
 
 ---
 *Phase: 03-linux-agent-and-revocation*
