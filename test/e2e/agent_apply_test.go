@@ -104,8 +104,14 @@ LoginGraceTime %d
 	for _, l := range extra {
 		cfg += l + "\n"
 	}
-	cfgPath := filepath.Join(dir, "sshd_config")
+	// The host's own sshd_config, below the layout's root: the agent reads
+	// every file sshd reads through readTrusted, inside the root, owned by
+	// its uid and writable by no one else (PR #68 review D-R3).
+	cfgPath := filepath.Join(root, "etc", "ssh", "sshd_config")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfgPath, 0o644); err != nil { //nolint:gosec // sshd_config's packaged mode, whatever the umask
 		t.Fatal(err)
 	}
 	sshd := filepath.Join(prefix, "sbin", "sshd") // absolute: sshd re-execs itself
@@ -158,6 +164,13 @@ func newAgentHost(t *testing.T, env *signerEnv, sshdExtra ...string) *agentHost 
 	// there and creates no sshd configuration directory itself.
 	if err := os.MkdirAll(filepath.Join(h.root, "etc", "ssh", "sshd_config.d"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	// Exact modes whatever the umask: the agent refuses a configuration
+	// directory writable by group or others (PR #68 review D-R3).
+	for _, d := range []string{"etc", "etc/ssh", "etc/ssh/sshd_config.d"} {
+		if err := os.Chmod(filepath.Join(h.root, d), 0o755); err != nil { //nolint:gosec // sshd's configuration directories
+			t.Fatal(err)
+		}
 	}
 	h.sshd = startIncludeSSHD(t, h.root, sshdExtra...)
 	fd, err := spool.OpenDir(h.state)
