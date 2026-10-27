@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -61,6 +62,65 @@ func servedCopyVersion(t *testing.T, state string) uint64 {
 	return m.KRLVersion
 }
 
+// keygenVerdict reads the exit code and output of ssh-keygen -Q -f KRL
+// CERT for one certificate (PR #69 review, F5): revoked for exit 1 with a
+// line ending in ": REVOKED" and none ending in ": ok", not revoked for
+// exit 0 with a line ending in ": ok" and none ending in ": REVOKED", and
+// an error for anything else, such as exit 255 for a KRL OpenSSH cannot
+// parse ("Couldn't parse KRL"), which is never a refusal.
+func keygenVerdict(code int, out string) (revoked bool, err error) {
+	var ok, rev bool
+	for line := range strings.Lines(out) {
+		line = strings.TrimRight(line, "\r\n")
+		ok = ok || strings.HasSuffix(line, ": ok")
+		rev = rev || strings.HasSuffix(line, ": REVOKED")
+	}
+	switch {
+	case code == 1 && rev && !ok:
+		return true, nil
+	case code == 0 && ok && !rev:
+		return false, nil
+	}
+	return false, fmt.Errorf("ssh-keygen -Q exited %d without exactly one verdict line", code)
+}
+
+// requireKeygen runs ssh-keygen -Q -f krlFile cert and fails unless its
+// verdict (keygenVerdict) is wantRevoked.
+func requireKeygen(t *testing.T, what, krlFile, cert string, wantRevoked bool) {
+	t.Helper()
+	code, out := keygenQuery(t, krlFile, cert)
+	revoked, err := keygenVerdict(code, out)
+	if err != nil || revoked != wantRevoked {
+		t.Fatalf("%s: ssh-keygen -Q gave revoked=%v (%v), want revoked=%v:\n%s", what, revoked, err, wantRevoked, out)
+	}
+	t.Logf("%s: ssh-keygen -Q exit %d: %s", what, code, strings.TrimSpace(out))
+}
+
+// TestKeygenVerdict pins keygenVerdict on the outputs ssh-keygen -Q
+// gives: a refusal and an acceptance count, a parse failure or an exit
+// code without its verdict line does not.
+func TestKeygenVerdict(t *testing.T) {
+	for _, c := range []struct {
+		code    int
+		out     string
+		revoked bool
+		ok      bool
+	}{
+		{1, "/tmp/a-cert.pub (a): REVOKED\n", true, true},
+		{0, "/tmp/b-cert.pub (b): ok\n", false, true},
+		{255, "Couldn't parse KRL /tmp/r.krl: invalid format\n", false, false},
+		{1, "something else\n", false, false},
+		{0, "", false, false},
+		{1, "/tmp/a-cert.pub (a): ok\n", false, false},
+		{0, "/tmp/a-cert.pub (a): REVOKED\n", false, false},
+	} {
+		revoked, err := keygenVerdict(c.code, c.out)
+		if (err == nil) != c.ok || revoked != c.revoked {
+			t.Errorf("keygenVerdict(%d, %q) = %v, %v; want revoked=%v, ok=%v", c.code, c.out, revoked, err, c.revoked, c.ok)
+		}
+	}
+}
+
 // TestRestoreRecoveryTracer (03-06b Task 2) runs the recovery through the
 // real binaries:
 //
@@ -74,8 +134,9 @@ func servedCopyVersion(t *testing.T, state string) uint64 {
 //  4. keyroster-signer recover-revocations applies it under the state
 //     lock, before the restored signer ever starts;
 //  5. with both started again, the KRL the server serves makes ssh-keygen
-//     -Q refuse the certificate, and krl-served.json holds the new, higher
-//     version;
+//     -Q refuse the certificate (exit 1, ": REVOKED") and accept a control
+//     certificate B that was never revoked (exit 0, ": ok"), and
+//     krl-served.json holds the new, higher version;
 //  6. keyroster audit verify passes on the final export, with --previous
 //     set to the restored export.
 func TestRestoreRecoveryTracer(t *testing.T) {
@@ -92,6 +153,12 @@ func TestRestoreRecoveryTracer(t *testing.T) {
 	sg.issue(t, "--pubkey", key+".pub", "--principal", "role:t", "--subject", "u:a", "--ttl", "10m")
 	cert := key + "-cert.pub"
 	serial := parseCertInfo(t, sshKeygen(t, "-L", "-f", cert)).serial
+	// The control certificate B, issued before the backup too, never
+	// revoked: every KRL here must accept it.
+	keyB := filepath.Join(t.TempDir(), "id_b")
+	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "b", "-f", keyB)
+	sg.issue(t, "--pubkey", keyB+".pub", "--principal", "role:t", "--subject", "u:b", "--ttl", "10m")
+	certB := keyB + "-cert.pub"
 
 	// The backup and the saved export, taken from the stopped signer, both
 	// before the revocation.
@@ -121,9 +188,9 @@ func TestRestoreRecoveryTracer(t *testing.T) {
 	if v := servedCopyVersion(t, state); v != revoked {
 		t.Fatalf("krl-served.json holds KRL v%d after the revocation, want v%d", v, revoked)
 	}
-	if code, out := keygenQuery(t, writeKRL(t, mustServedKRL(t, env, revoked-1)), cert); code == 0 {
-		t.Fatalf("the KRL of the revocation does not refuse A:\n%s", out)
-	}
+	revKRL := writeKRL(t, mustServedKRL(t, env, revoked-1))
+	requireKeygen(t, "the KRL of the revocation on A", revKRL, cert, true)
+	requireKeygen(t, "the KRL of the revocation on B", revKRL, certB, false)
 
 	// 2. The restore, with the server stopped: the copy replaces signer.db.
 	stopServer()
@@ -179,12 +246,9 @@ func TestRestoreRecoveryTracer(t *testing.T) {
 	// it.
 	serveStoppable(t, sg)
 	startStoppableServer(t, env, state)
-	krlData := mustServedKRL(t, env, revoked)
-	if code, out := keygenQuery(t, writeKRL(t, krlData), cert); code == 0 {
-		t.Fatalf("after the recovery, ssh-keygen -Q accepts A, want a refusal:\n%s", out)
-	} else {
-		t.Logf("ssh-keygen -Q on A after the recovery (exit %d): %s", code, strings.TrimSpace(out))
-	}
+	recKRL := writeKRL(t, mustServedKRL(t, env, revoked))
+	requireKeygen(t, "the recovered KRL on A", recKRL, cert, true)
+	requireKeygen(t, "the recovered KRL on B", recKRL, certB, false)
 	if v := servedCopyVersion(t, state); v != recovered {
 		t.Fatalf("krl-served.json holds KRL v%d after the recovery, want v%d", v, recovered)
 	}
