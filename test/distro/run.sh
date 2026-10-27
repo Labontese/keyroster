@@ -8,8 +8,11 @@
 # static, CGO_ENABLED=0, so they run on glibc and musl alike), then runs
 # them as root in a fresh container of the image: run-in.sh installs the
 # distribution's own OpenSSH server with its package manager and runs the
-# tests. The container gets no secrets and no network beyond the package
-# install. Needs Docker and Go.
+# tests. The container gets no secrets and no token. It runs on Docker's
+# default bridge network for the whole run, the package install and the
+# tests alike, so the image, the packages it installs and the test binary
+# keep outbound network access; the tests themselves connect only to
+# loopback addresses. Needs Docker and Go.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
