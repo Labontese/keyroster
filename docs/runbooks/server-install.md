@@ -237,10 +237,18 @@ restore source for revocations that a signer restore lost (the restore
 procedure lands with 03-06c). Never delete it, and back it up with the
 directory. The server's KRL route answers 503, and logs why, rather than serve
 a KRL it could not keep (`KRL not kept: ...`), one that does not verify (`KRL
-not served: it does not verify ...`), or one below the version it served
-(`KRL not served: version X is below version Y this server served ...`).
-Hosts then keep their last KRL. This behaviour is run in CI (internal/server
-tests, 03-06b).
+not served: it does not verify ...`), one below the version it served
+(`KRL not served: version X is below version Y this server served ...`), or no
+KRL at all after it served one (`KRL not served: the signer has no KRL, but
+this server served version V ...`). The copy read at start counts as the
+version it served only once it verifies against the signer's trust bundle and
+installation ID. If it does not, the route answers 503 with `KRL not served:
+the copy ... this server kept (version V) does not verify against the signer's
+trust bundle ...`: this server did not write that copy for this installation.
+Keep it as evidence and escalate; do not delete it. Moving it out of the state
+directory and restarting the server ends the 503, but that remedy is
+UNVERIFIED. Hosts then keep their last KRL. These answers are run in CI
+(internal/server tests, 03-06b).
 
 Network access is limited to IPv4,
 IPv6 and Unix sockets. At start the server asks the signer for its Status,

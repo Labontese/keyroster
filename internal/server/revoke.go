@@ -222,8 +222,13 @@ func (s *Server) refreshKRL(ctx context.Context, r *krlRefresh, now time.Time) {
 	if err != nil {
 		s.log.Warn("KRL read failed", "err", err)
 		resp = nil
-	} else if len(resp.KRL) > 0 && s.krlFile != "" {
-		if err = s.keepKRL(rctx, resp); err != nil {
+	} else if s.krlFile != "" {
+		if len(resp.KRL) > 0 {
+			err = s.keepKRL(rctx, resp)
+		} else {
+			err = s.checkNoKRL(rctx)
+		}
+		if err != nil {
 			s.log.Error(err.Error())
 			resp = nil
 		}
@@ -254,16 +259,25 @@ func (s *Server) dropKRL() {
 }
 
 // servedKRL is the KRL document the server last kept and served: its
-// version and the exact JSON handleKRL writes for it (without the final
-// newline).
+// version, the exact JSON handleKRL writes for it (without the final
+// newline) and its KRL, manifest and signature. verified is false for the
+// copy loadServedKRL read at start until servedFloor has verified it
+// against the signer's trust bundle; a document keepKRL kept was verified
+// before it was kept.
 type servedKRL struct {
-	version uint64
-	doc     []byte
+	version  uint64
+	doc      []byte
+	krl      []byte
+	manifest []byte
+	sig      []byte
+	verified bool
 }
 
 // loadServedKRL reads the durable copy at path at start: nil when there is
 // none yet, an error when it does not parse (strict KRLDocument JSON, then
-// krl.ParseManifest of its manifest), which stops keyroster-server.
+// krl.ParseManifest of its manifest), which stops keyroster-server. The
+// copy it returns is not verified yet: its version becomes the floor only
+// once servedFloor has verified it (PR #69 review, F3).
 func loadServedKRL(path string) (*servedKRL, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: the operator's state directory
 	if errors.Is(err, fs.ErrNotExist) {
@@ -288,7 +302,74 @@ func loadServedKRL(path string) (*servedKRL, error) {
 	if err != nil {
 		return nil, refuse(err)
 	}
-	return &servedKRL{version: m.KRLVersion, doc: enc}, nil
+	return &servedKRL{version: m.KRLVersion, doc: enc, krl: doc.KRL, manifest: doc.Manifest, sig: doc.Sig}, nil
+}
+
+// servedFloor returns the KRL this server served, the floor of every KRL
+// it serves next, verified against b, the trust bundle of the signer's
+// status, and b's installation ID (krl.VerifyManifest), or nil when it
+// served none. The copy read at start is verified here, once, before its
+// version is ever used (PR #69 review, F3): one that does not verify is
+// never the floor, the KRL is not served (503) and the log says why, on
+// every refresh until the operator resolves it; it is never silently
+// trusted or discarded.
+func (s *Server) servedFloor(b *trust.Bundle) (*servedKRL, error) {
+	s.mu.Lock()
+	prev := s.served
+	s.mu.Unlock()
+	if prev == nil || prev.verified {
+		return prev, nil
+	}
+	if _, err := krl.VerifyManifest(prev.manifest, prev.sig, prev.krl, b, b.InstallationID, 0); err != nil {
+		return nil, fmt.Errorf("KRL not served: the copy %s this server kept (version %d) does not verify against the signer's trust bundle v%d, "+
+			"so it is not used as the version floor: %w. It was not written by this server for this installation, or the trust bundle changed: "+
+			"keep it as evidence and see docs/runbooks/server-install.md", s.krlFile, prev.version, b.Version, err)
+	}
+	ok := *prev
+	ok.verified = true
+	s.mu.Lock()
+	if s.served == prev {
+		s.served = &ok
+	}
+	s.mu.Unlock()
+	return &ok, nil
+}
+
+// signerBundle returns the trust bundle of the signer's status, for
+// verifying a KRL; what prefixes its errors.
+func (s *Server) signerBundle(ctx context.Context, what string) (*trust.Bundle, error) {
+	v, err := s.currentStatus(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: the signer status is unavailable: %w", what, err)
+	}
+	b, err := trust.ParseBundle(v.raw.Bundle)
+	if err != nil {
+		return nil, fmt.Errorf("%s: the signer's trust bundle does not parse: %w", what, err)
+	}
+	return b, nil
+}
+
+// checkNoKRL handles an answer without a KRL (PR #69 review, F6): before
+// this server served one it is 404 no_krl; after it served version V it
+// is the rollback the floor exists to report (a signer restored from
+// before its first publish, or re-initialised), refused like a lower
+// version, so the route answers 503 and the log says why.
+func (s *Server) checkNoKRL(ctx context.Context) error {
+	s.mu.Lock()
+	served := s.served
+	s.mu.Unlock()
+	if served == nil {
+		return nil
+	}
+	b, err := s.signerBundle(ctx, "KRL not served: the served copy cannot be checked")
+	if err != nil {
+		return err
+	}
+	prev, err := s.servedFloor(b)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("KRL not served: the signer has no KRL, but this server served version %d (a signer restored without the recovery? signer-install.md)", prev.version)
 }
 
 // keepKRL keeps resp, a published KRL the signer answered, before any
@@ -301,13 +382,9 @@ func loadServedKRL(path string) (*servedKRL, error) {
 // refused: hosts keep their last KRL instead (D-10), and the log says why.
 // The copy is never replaced by a lower or equal version.
 func (s *Server) keepKRL(ctx context.Context, resp *wire.GetKRLResponse) error {
-	v, err := s.currentStatus(ctx)
+	b, err := s.signerBundle(ctx, "KRL not served: it does not verify")
 	if err != nil {
-		return fmt.Errorf("KRL not served: it does not verify: the signer status is unavailable: %w", err)
-	}
-	b, err := trust.ParseBundle(v.raw.Bundle)
-	if err != nil {
-		return fmt.Errorf("KRL not served: it does not verify: the signer's trust bundle does not parse: %w", err)
+		return err
 	}
 	m, err := krl.VerifyManifest(resp.Manifest, resp.Sig, resp.KRL, b, b.InstallationID, 0)
 	if err != nil {
@@ -317,9 +394,10 @@ func (s *Server) keepKRL(ctx context.Context, resp *wire.GetKRLResponse) error {
 	if err != nil {
 		return fmt.Errorf("KRL not kept: %w", err)
 	}
-	s.mu.Lock()
-	prev := s.served
-	s.mu.Unlock()
+	prev, err := s.servedFloor(b)
+	if err != nil {
+		return err
+	}
 	if prev != nil {
 		switch {
 		case m.KRLVersion == prev.version && bytes.Equal(doc, prev.doc):
@@ -331,25 +409,31 @@ func (s *Server) keepKRL(ctx context.Context, resp *wire.GetKRLResponse) error {
 			return fmt.Errorf("KRL not served: version %d has other bytes than the version %d this server served", m.KRLVersion, prev.version)
 		}
 	}
-	if err := keepKRLFile(s.krlFile, append(doc, '\n')); err != nil {
+	renamed, err := keepKRLFile(s.krlFile, append(doc, '\n'))
+	if renamed {
+		// The copy on disk is this version from the rename on, even when
+		// the directory sync after it failed: the floor follows the disk,
+		// so a lower version can never replace it (PR #69 review, F4).
+		s.mu.Lock()
+		s.served = &servedKRL{version: m.KRLVersion, doc: doc, krl: resp.KRL, manifest: resp.Manifest, sig: resp.Sig, verified: true}
+		s.mu.Unlock()
+	}
+	if err != nil {
 		return fmt.Errorf("KRL not kept: %w", err)
 	}
-	s.mu.Lock()
-	s.served = &servedKRL{version: m.KRLVersion, doc: doc}
-	s.mu.Unlock()
 	return nil
 }
 
 // keepKRLFile replaces path with data durably: a temporary file in the
 // same directory (created with O_EXCL and mode 0600), written and synced,
-// renamed over path, then the directory synced. Windows cannot sync a
-// directory handle, so that step is skipped there: keyroster-server runs
-// only on Linux, and this package's tests also run on Windows.
-func keepKRLFile(path string, data []byte) error {
+// renamed over path, then the directory synced (syncDir). renamed reports
+// whether the rename happened, so that path holds data, also when the
+// directory sync after it failed.
+func keepKRLFile(path string, data []byte) (renamed bool, err error) {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".krl-served-*.tmp")
 	if err != nil {
-		return err
+		return false, err
 	}
 	tmp := f.Name()
 	done := false
@@ -360,18 +444,26 @@ func keepKRLFile(path string, data []byte) error {
 		}
 	}()
 	if _, err := f.Write(data); err != nil {
-		return err
+		return false, err
 	}
 	if err := f.Sync(); err != nil {
-		return err
+		return false, err
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return err
+		return false, err
 	}
 	done = true
+	return true, syncDir(dir)
+}
+
+// syncDir syncs the directory dir, so that a rename in it is durable.
+// Windows cannot sync a directory handle, so it does nothing there:
+// keyroster-server runs only on Linux, and this package's tests also run
+// on Windows. It is a variable so that a test can make it fail.
+var syncDir = func(dir string) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -488,6 +490,32 @@ func krlDoc(t *testing.T, signer ssh.Signer, installation string, v uint64, data
 	return &wire.GetKRLResponse{KRL: []byte(data), Manifest: manifest, Sig: sig}
 }
 
+// restart replaces e.s by a new server on the same signer, clock, log and
+// copy file, as a restart of keyroster-server reads the copy again.
+func (e *copyEnv) restart(t *testing.T) {
+	t.Helper()
+	logger := slog.New(slog.NewJSONHandler(e.log, nil))
+	s, err := newServer(Config{RPID: testRPID, Clock: e.clock.Now, Logger: logger, DB: openTestDB(t), KRLFile: e.file}, e.fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.s = s
+}
+
+// writeCopy writes doc to the copy file as keepKRL writes it.
+func (e *copyEnv) writeCopy(t *testing.T, doc *wire.GetKRLResponse) []byte {
+	t.Helper()
+	data, err := json.Marshal(serverclient.KRLDocument{KRL: doc.KRL, Manifest: doc.Manifest, Sig: doc.Sig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(e.file, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 // get serves GET KRLPath once the cache entry has aged out.
 func (e *copyEnv) get(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
@@ -604,6 +632,110 @@ func TestKRLServedCopy(t *testing.T) {
 		}
 		if res := e.get(t); res.Code != http.StatusOK || !bytes.Equal(e.copyBytes(t), res.Body.Bytes()) {
 			t.Fatalf("GET once the directory exists = %d", res.Code)
+		}
+	})
+	// The copy read at start is the floor only once it verifies against
+	// the signer's trust bundle (PR #69 review, F3): a planted copy with
+	// the highest version, signed by another ops key, blocks nothing
+	// silently; the route answers 503, the log names the copy, and the copy
+	// is neither replaced nor removed.
+	t.Run("copy_unverified_not_floor", func(t *testing.T) {
+		for name, planted := range map[string]func(e *copyEnv) *wire.GetKRLResponse{
+			"wrong_ops_key": func(*copyEnv) *wire.GetKRLResponse {
+				return krlDoc(t, newSigner(t), copyInstallation, math.MaxUint64, "planted")
+			},
+			"wrong_installation_id": func(e *copyEnv) *wire.GetKRLResponse {
+				return krlDoc(t, e.ops, "ffffffffffffffffffffffffffffffff", math.MaxUint64, "planted")
+			},
+			"digest_mismatch": func(e *copyEnv) *wire.GetKRLResponse {
+				d := krlDoc(t, e.ops, copyInstallation, math.MaxUint64, "planted")
+				d.KRL = []byte("other bytes")
+				return d
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
+				kept := e.writeCopy(t, planted(e))
+				e.restart(t)
+				e.fake.setKRL(krlDoc(t, e.ops, copyInstallation, 1, "krl v1"), nil)
+				res := e.get(t)
+				if res.Code != http.StatusServiceUnavailable || !bytes.Equal(e.copyBytes(t), kept) ||
+					!strings.Contains(e.log.String(), "this server kept (version 18446744073709551615) does not verify against the signer's trust bundle v1, so it is not used as the version floor") {
+					t.Fatalf("GET with a planted copy = %d, copy changed %v:\n%s", res.Code, !bytes.Equal(e.copyBytes(t), kept), e.log.String())
+				}
+				// Not cached: every refresh checks it again.
+				if res := e.get(t); res.Code != http.StatusServiceUnavailable || e.fake.count("GetKRL") != 2 {
+					t.Fatalf("second GET = %d after %d signer calls, want 503 after 2", res.Code, e.fake.count("GetKRL"))
+				}
+			})
+		}
+	})
+	// The control: a copy that verifies is the floor after a restart.
+	t.Run("copy_verified_is_floor", func(t *testing.T) {
+		e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
+		kept := e.writeCopy(t, krlDoc(t, e.ops, copyInstallation, 5, "krl v5"))
+		e.restart(t)
+		e.fake.setKRL(krlDoc(t, e.ops, copyInstallation, 3, "krl v3"), nil)
+		if res := e.get(t); res.Code != http.StatusServiceUnavailable || !bytes.Equal(e.copyBytes(t), kept) ||
+			!strings.Contains(e.log.String(), "KRL not served: version 3 is below version 5 this server served") {
+			t.Fatalf("GET below a verified copy = %d:\n%s", res.Code, e.log.String())
+		}
+		e.fake.setKRL(krlDoc(t, e.ops, copyInstallation, 5, "krl v5"), nil)
+		if res := e.get(t); res.Code != http.StatusOK || !bytes.Equal(e.copyBytes(t), kept) {
+			t.Fatalf("GET of the copy's own version = %d", res.Code)
+		}
+	})
+	// A failed directory sync after the rename still moves the floor to
+	// what the disk holds (PR #69 review, F4): the answer is not served,
+	// and a version between the old floor and the disk copy cannot replace
+	// it.
+	t.Run("dir_sync_failure_advances_floor", func(t *testing.T) {
+		e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
+		e.fake.setKRL(krlDoc(t, e.ops, copyInstallation, 100, "krl v100"), nil)
+		if res := e.get(t); res.Code != http.StatusOK {
+			t.Fatalf("GET v100 = %d", res.Code)
+		}
+		orig := syncDir
+		syncDir = func(string) error { return errors.New("injected EIO") }
+		t.Cleanup(func() { syncDir = orig })
+		e.fake.setKRL(krlDoc(t, e.ops, copyInstallation, 200, "krl v200"), nil)
+		if res := e.get(t); res.Code != http.StatusServiceUnavailable || !strings.Contains(e.log.String(), "KRL not kept: injected EIO") {
+			t.Fatalf("GET v200 with a failing directory sync = %d:\n%s", res.Code, e.log.String())
+		}
+		kept := e.copyBytes(t)
+		if !strings.Contains(string(kept), base64.StdEncoding.EncodeToString([]byte("krl v200"))) {
+			t.Fatalf("the copy does not hold v200 after the rename: %q", kept)
+		}
+		syncDir = orig
+		e.fake.setKRL(krlDoc(t, e.ops, copyInstallation, 150, "krl v150"), nil)
+		if res := e.get(t); res.Code != http.StatusServiceUnavailable || !bytes.Equal(e.copyBytes(t), kept) ||
+			!strings.Contains(e.log.String(), "KRL not served: version 150 is below version 200 this server served") {
+			t.Fatalf("GET v150 after the disk copy became v200 = %d, copy replaced %v:\n%s", res.Code, !bytes.Equal(e.copyBytes(t), kept), e.log.String())
+		}
+	})
+	// An answer without a KRL after this server served one is the
+	// rollback the floor reports (PR #69 review, F6): 503, logged, never
+	// cached; before it served one, 404 no_krl.
+	t.Run("empty_after_served_not_served", func(t *testing.T) {
+		e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
+		if res := e.get(t); res.Code != http.StatusNotFound {
+			t.Fatalf("GET before any KRL = %d, want 404 no_krl", res.Code)
+		}
+		e.fake.setKRL(krlDoc(t, e.ops, copyInstallation, 2, "krl v2"), nil)
+		e.get(t)
+		kept := e.copyBytes(t)
+		e.fake.setKRL(&wire.GetKRLResponse{}, nil)
+		if res := e.get(t); res.Code != http.StatusServiceUnavailable || !bytes.Equal(e.copyBytes(t), kept) ||
+			!strings.Contains(e.log.String(), "KRL not served: the signer has no KRL, but this server served version 2 (a signer restored without the recovery? signer-install.md)") {
+			t.Fatalf("GET of an empty answer after v2 = %d:\n%s", res.Code, e.log.String())
+		}
+		if res := e.get(t); res.Code != http.StatusServiceUnavailable || e.fake.count("GetKRL") != 4 {
+			t.Fatalf("second GET = %d after %d signer calls, want 503 after 4 (never cached)", res.Code, e.fake.count("GetKRL"))
+		}
+		// After a restart the same holds from the verified copy.
+		e.restart(t)
+		if res := e.get(t); res.Code != http.StatusServiceUnavailable {
+			t.Fatalf("GET of an empty answer after a restart = %d", res.Code)
 		}
 	})
 	t.Run("corrupt_copy_refuses_start", func(t *testing.T) {
