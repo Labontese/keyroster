@@ -50,6 +50,29 @@ type Options struct {
 	// The export must extend it: at least as many entries, and its first
 	// entries must reproduce the earlier root.
 	Previous []byte
+	// CertificatesFrom, when set, makes Verify list in Report.Certificates
+	// every certificate the log holds at or after that index (03-06b).
+	CertificatesFrom *uint64
+}
+
+// LoggedCertificate is a certificate a verified log holds: the index and
+// kind of its entry and the certificate (SSH wire format) from the
+// verified leaf bytes. An issue or login_issue entry holds one; a
+// revocation_recovery entry holds every certificate it carries.
+type LoggedCertificate struct {
+	Index uint64
+	Kind  tlog.Kind
+	Cert  []byte
+}
+
+// PublishedKRL is one published KRL version as the log proves it: the KRL
+// re-derived from the log's revocations (verifyKRLPublish), its manifest
+// and the ops key's signature, which together are what keyroster-server
+// served (serverclient.KRLDocument).
+type PublishedKRL struct {
+	KRL      []byte
+	Manifest []byte
+	Sig      []byte
 }
 
 // Report summarizes a verified export.
@@ -79,6 +102,18 @@ type Report struct {
 	RevokedEntries int
 	KRLPublishes   int
 	KRLVersion     uint64
+	// Recoveries counts the revocation_recovery entries (03-06b).
+	Recoveries int
+	// Certificates lists, with Options.CertificatesFrom, every
+	// certificate at or after that index, in log order: those of the
+	// issue and login_issue entries and every certificate a
+	// revocation_recovery entry carries.
+	Certificates []LoggedCertificate
+	// LastKRL is the last krl_publish entry's KRL version, nil when the
+	// log has none.
+	LastKRL *PublishedKRL
+	// Bundle is the trust bundle in force at the end of the log.
+	Bundle *trust.Bundle
 }
 
 // anchor is the trust state in force at a point of the log: the last
@@ -767,6 +802,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			}
 			iss.next(body.Serial)
 			revs.addCert(c, kid)
+			rep.collect(opts, want, leaf.Kind, body.Cert)
 			rep.Serials++
 			rep.IssuedByCA[kid.CA]++
 		case tlog.KindDirectoryInstall:
@@ -795,6 +831,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
 			revs.addCert(c, kid)
+			rep.collect(opts, want, leaf.Kind, body.Cert)
 		case tlog.KindRevoke:
 			body, err := tlog.DecodeRevokeBody(leaf.Body)
 			if err != nil {
@@ -810,6 +847,24 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			}
 			if err := verifyKRLPublish(want, body, leaf.TimeMicros, &trustState, revs); err != nil {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+		case tlog.KindRevocationRecovery:
+			body, err := tlog.DecodeRecoveryBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			// The root of the entries before it, which the recovery
+			// request names as the restored log's.
+			rootBefore, err := tree.Root()
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			carried, err := verifyRecovery(want, body, leaf.TimeMicros, rootBefore, &trustState, revs, &iss)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			for _, c := range carried {
+				rep.collect(opts, want, leaf.Kind, c)
 			}
 		case tlog.KindRefusalSummary:
 			body, err := tlog.DecodeRefusalSummaryBody(leaf.Body)
@@ -898,7 +953,16 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	rep.BundleVersion, rep.PolicyVersion, rep.LogKey = trustState.bundle.Version, trustState.policy.Version, trustState.logKey
 	rep.AnchorVersion = trustState.anchorVersion
 	rep.Revocations, rep.RevokedEntries, rep.KRLPublishes, rep.KRLVersion = revs.revokes, revs.revokedEntries, revs.publishes, revs.krlVersion
+	rep.Recoveries, rep.LastKRL, rep.Bundle = revs.recoveries, revs.lastKRL, trustState.bundle
 	return rep, nil
+}
+
+// collect lists cert, of the entry at index of kind, in Certificates when
+// opts asks for the certificates from an index at or before it.
+func (rep *Report) collect(opts Options, index uint64, kind tlog.Kind, cert []byte) {
+	if opts.CertificatesFrom != nil && index >= *opts.CertificatesFrom {
+		rep.Certificates = append(rep.Certificates, LoggedCertificate{Index: index, Kind: kind, Cert: cert})
+	}
 }
 
 // checkIssue re-verifies the certificate of one issue leaf and returns it

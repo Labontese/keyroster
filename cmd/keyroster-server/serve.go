@@ -96,7 +96,11 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
-	srv, err := server.New(server.Config{SignerSocket: *socket, RPID: rpID, Logger: logger, DB: db})
+	// krl-served.json is the last KRL document this server served, kept
+	// before it is served: the restore source for lost revocations (03-06b,
+	// docs/runbooks/server-install.md).
+	srv, err := server.New(server.Config{SignerSocket: *socket, RPID: rpID, Logger: logger, DB: db,
+		KRLFile: filepath.Join(*stateDir, "krl-served.json")})
 	if err != nil {
 		return err
 	}

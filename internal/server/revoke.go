@@ -1,13 +1,21 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -200,9 +208,10 @@ func (s *Server) currentKRL(ctx context.Context) (*wire.GetKRLResponse, error) {
 }
 
 // refreshKRL asks the signer for the published KRL, bounded by
-// signerCallTimeout; ctx must carry no cancellation. It stores a good
-// answer as the cache entry and hands the result to every caller waiting
-// on r.
+// signerCallTimeout; ctx must carry no cancellation. A published KRL is
+// kept (keepKRL) before it is served. It stores a good answer as the cache
+// entry and hands the result to every caller waiting on r; an answer it
+// could not keep is never cached, and the route answers 503.
 func (s *Server) refreshKRL(ctx context.Context, r *krlRefresh, now time.Time) {
 	rctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
 	defer cancel()
@@ -213,6 +222,11 @@ func (s *Server) refreshKRL(ctx context.Context, r *krlRefresh, now time.Time) {
 	if err != nil {
 		s.log.Warn("KRL read failed", "err", err)
 		resp = nil
+	} else if len(resp.KRL) > 0 && s.krlFile != "" {
+		if err = s.keepKRL(rctx, resp); err != nil {
+			s.log.Error(err.Error())
+			resp = nil
+		}
 	}
 	s.mu.Lock()
 	if err == nil {
@@ -237,4 +251,134 @@ func (s *Server) dropKRL() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.krl = nil
+}
+
+// servedKRL is the KRL document the server last kept and served: its
+// version and the exact JSON handleKRL writes for it (without the final
+// newline).
+type servedKRL struct {
+	version uint64
+	doc     []byte
+}
+
+// loadServedKRL reads the durable copy at path at start: nil when there is
+// none yet, an error when it does not parse (strict KRLDocument JSON, then
+// krl.ParseManifest of its manifest), which stops keyroster-server.
+func loadServedKRL(path string) (*servedKRL, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the operator's state directory
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("server: read %s: %w", path, err)
+	}
+	refuse := func(err error) error {
+		return fmt.Errorf("server: %s does not parse: %w. It is the last KRL this server served and the restore source for lost revocations: "+
+			"keep it, do not delete it, and see docs/runbooks/server-install.md", path, err)
+	}
+	doc, err := serverclient.DecodeKRLDocument(data)
+	if err != nil {
+		return nil, refuse(err)
+	}
+	m, err := krl.ParseManifest(doc.Manifest)
+	if err != nil {
+		return nil, refuse(err)
+	}
+	enc, err := json.Marshal(doc)
+	if err != nil {
+		return nil, refuse(err)
+	}
+	return &servedKRL{version: m.KRLVersion, doc: enc}, nil
+}
+
+// keepKRL keeps resp, a published KRL the signer answered, before any
+// route serves it (03-06b): it must verify (krl.VerifyManifest) against
+// the trust bundle of the signer's status and that bundle's installation
+// ID; then a version above the one this server served (or the first) is
+// written to the durable copy, exactly the KRLDocument JSON handleKRL
+// serves (keepKRLFile), and the same version with the same bytes writes
+// nothing. A lower version, or the same version with other bytes, is
+// refused: hosts keep their last KRL instead (D-10), and the log says why.
+// The copy is never replaced by a lower or equal version.
+func (s *Server) keepKRL(ctx context.Context, resp *wire.GetKRLResponse) error {
+	v, err := s.currentStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("KRL not served: it does not verify: the signer status is unavailable: %w", err)
+	}
+	b, err := trust.ParseBundle(v.raw.Bundle)
+	if err != nil {
+		return fmt.Errorf("KRL not served: it does not verify: the signer's trust bundle does not parse: %w", err)
+	}
+	m, err := krl.VerifyManifest(resp.Manifest, resp.Sig, resp.KRL, b, b.InstallationID, 0)
+	if err != nil {
+		return fmt.Errorf("KRL not served: it does not verify against the signer's trust bundle v%d: %w", b.Version, err)
+	}
+	doc, err := json.Marshal(serverclient.KRLDocument{KRL: resp.KRL, Manifest: resp.Manifest, Sig: resp.Sig})
+	if err != nil {
+		return fmt.Errorf("KRL not kept: %w", err)
+	}
+	s.mu.Lock()
+	prev := s.served
+	s.mu.Unlock()
+	if prev != nil {
+		switch {
+		case m.KRLVersion == prev.version && bytes.Equal(doc, prev.doc):
+			return nil
+		case m.KRLVersion < prev.version:
+			return fmt.Errorf("KRL not served: version %d is below version %d this server served (a signer restored without the recovery? signer-install.md)",
+				m.KRLVersion, prev.version)
+		case m.KRLVersion == prev.version:
+			return fmt.Errorf("KRL not served: version %d has other bytes than the version %d this server served", m.KRLVersion, prev.version)
+		}
+	}
+	if err := keepKRLFile(s.krlFile, append(doc, '\n')); err != nil {
+		return fmt.Errorf("KRL not kept: %w", err)
+	}
+	s.mu.Lock()
+	s.served = &servedKRL{version: m.KRLVersion, doc: doc}
+	s.mu.Unlock()
+	return nil
+}
+
+// keepKRLFile replaces path with data durably: a temporary file in the
+// same directory (created with O_EXCL and mode 0600), written and synced,
+// renamed over path, then the directory synced. Windows cannot sync a
+// directory handle, so that step is skipped there: keyroster-server runs
+// only on Linux, and this package's tests also run on Windows.
+func keepKRLFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".krl-served-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	done := false
+	defer func() {
+		if !done {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	done = true
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir) //nolint:gosec // G304: the state directory
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
 }

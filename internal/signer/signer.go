@@ -81,6 +81,10 @@ type Signer struct {
 	// installationID is the installed bundle's installation ID (D-04),
 	// "" when it has none; no KRL is published then.
 	installationID string
+	// bundle is the installed trust bundle the signer loaded at start. A
+	// revocation recovery verifies imported KRLs against its ops key
+	// (krl.VerifyManifest, 03-06b).
+	bundle *trust.Bundle
 	// roleCAKeys are the wire encodings of every CA key of each role in
 	// the installed bundle, in any state, sorted (krl.RoleCAKeys): a
 	// key-ID revocation is recorded under each of them.
@@ -174,6 +178,7 @@ func New(cfg Config) (*Signer, error) {
 
 		bundleVersion:  ts.bundle.Version,
 		installationID: ts.bundle.InstallationID,
+		bundle:         ts.bundle,
 		roleCAKeys:     map[wire.CARole][][]byte{},
 	}
 	for _, role := range []wire.CARole{wire.CARoleUser, wire.CARoleHost, wire.CARoleMachine} {

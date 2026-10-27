@@ -32,6 +32,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -190,6 +191,12 @@ func decodeLeaf(data []byte) map[string]any {
 			return map[string]any{"error": err.Error()}
 		}
 		decodeRevoke(m, b)
+	case tlog.KindRevocationRecovery:
+		b, err := tlog.DecodeRecoveryBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		decodeRecovery(m, b)
 	case tlog.KindKRLPublish:
 		b, err := tlog.DecodeKRLPublishBody(l.Body)
 		if err != nil {
@@ -270,6 +277,52 @@ func decodeRevoke(m map[string]any, b *tlog.RevokeBody) {
 		entries = append(entries, r)
 	}
 	m["entries"] = entries
+}
+
+// decodeRecovery renders a revocation_recovery body into m (03-06b) as
+// counts only: the restored log size its request names, the number of
+// imported KRL versions and their versions, the number of carried
+// certificates and of those revoked, the number of entries, and the
+// fingerprints of the keys that signed its evidence. It renders no KRL or
+// certificate bytes, and no key named "kind" (beyond the line's own),
+// "bundle_version", "version", "directory" or "sigs" (checkGrepFields,
+// checkReplayFields).
+func decodeRecovery(m map[string]any, b *tlog.RecoveryBody) {
+	m["policy_version"] = b.PolicyVersion
+	m["resolved_at"] = b.ResolvedAtSeconds
+	if req, err := wire.ParseRecoverySigningBytes(b.Request); err != nil {
+		m["request_error"] = err.Error()
+	} else {
+		m["request_id"] = hex.EncodeToString(req.RequestID[:])
+		m["restored_size"] = req.RestoredSize
+		m["imports"] = len(req.Imports)
+		versions := make([]uint64, 0, len(req.Imports))
+		for _, im := range req.Imports {
+			if man, err := krl.ParseManifest(im.Manifest); err == nil {
+				versions = append(versions, man.KRLVersion)
+			}
+		}
+		m["import_krl_versions"] = versions
+		revoked := 0
+		for _, c := range req.Certificates {
+			if c.Revoke {
+				revoked++
+			}
+		}
+		m["certificates"] = len(req.Certificates)
+		m["certificates_revoked"] = revoked
+	}
+	m["entries"] = len(b.Entries)
+	admins := make([]string, 0, len(b.Evidence))
+	for _, e := range b.Evidence {
+		if e.Type != wire.EvidenceAdminSSHSIG {
+			continue
+		}
+		if sig, err := sshsig.Parse(e.Blob); err == nil {
+			admins = append(admins, ssh.FingerprintSHA256(sig.PublicKey()))
+		}
+	}
+	m["admins"] = admins
 }
 
 // fingerprint is the SHA256 fingerprint of an SSH wire-format key, or ""
