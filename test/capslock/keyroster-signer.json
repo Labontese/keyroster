@@ -55,6 +55,9 @@
     "CAPABILITY_REFLECT",
     "CAPABILITY_SYSTEM_CALLS"
   ],
+  "github.com/Labontese/keyroster/internal/krl": [
+    "CAPABILITY_REFLECT"
+  ],
   "github.com/Labontese/keyroster/internal/signer": [
     "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_FILES",
