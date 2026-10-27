@@ -109,7 +109,8 @@ type Config struct {
 	// SSHD, SSHDConfig and SSHKeygen are absolute paths: the service's
 	// sshd binary and configuration, and ssh-keygen.
 	SSHD, SSHDConfig, SSHKeygen string
-	// Reload is the reload strategy: signal, systemd:<unit> or openrc.
+	// Reload is the reload strategy: signal, systemd:<unit>,
+	// systemd-socket:<unit> or openrc (CheckReload).
 	Reload string
 	// DryRun verifies and renders and reports the difference against
 	// current, writing nothing.
@@ -145,13 +146,18 @@ type Report struct {
 	// WaitedMS is, for every widening swap that had to wait, the interval
 	// the timing rule enforced: from the previous swap of current to the
 	// widening swap (at least LoginGraceTime + 30 s).
-	WaitedMS         int64  `json:"waited_ms"`
-	Reloaded         bool   `json:"reloaded"`
-	SelfTest         string `json:"self_test"`
-	Rollback         bool   `json:"rollback"`
-	RollbackSelfTest string `json:"rollback_self_test,omitempty"`
-	Recovered        bool   `json:"recovered"`
-	NoOp             bool   `json:"no_op"`
+	WaitedMS int64 `json:"waited_ms"`
+	Reloaded bool  `json:"reloaded"`
+	// ReloadActions are the reload commands this run ran, in order (PR #68
+	// review D-R1): "systemctl try-reload-or-restart ssh.service" on a
+	// socket-activated host, where systemd decides whether a running sshd
+	// re-reads.
+	ReloadActions    []string `json:"reload_actions,omitempty"`
+	SelfTest         string   `json:"self_test"`
+	Rollback         bool     `json:"rollback"`
+	RollbackSelfTest string   `json:"rollback_self_test,omitempty"`
+	Recovered        bool     `json:"recovered"`
+	NoOp             bool     `json:"no_op"`
 	// BundleHeld: a newer bundle in the spool waits for the next run,
 	// because the newest directory verifies only under an earlier policy
 	// (state.Verified.BundleHeld).

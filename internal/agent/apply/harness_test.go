@@ -398,6 +398,9 @@ type fakeRunner struct {
 	extraFor      map[string]string
 	// dumps counts sshd -T runs, by -C spec ("" for none).
 	dumps map[string]int
+	// onReload runs at every reload command (rc-service, systemctl), with
+	// the runner's lock held.
+	onReload func(call string)
 }
 
 func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
@@ -451,8 +454,11 @@ func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
 			return Result{Code: 255, Stderr: []byte("invalid KRL")}, nil
 		}
 		return Result{Stdout: []byte(args[3] + ": ok\n")}, nil
-	case filepath.Base(cmd.Path()) == "rc-service":
+	case filepath.Base(cmd.Path()) == "rc-service" || filepath.Base(cmd.Path()) == "systemctl":
 		r.reloads++
+		if r.onReload != nil {
+			r.onReload(call)
+		}
 		return Result{}, nil
 	}
 	return Result{Code: 127}, fmt.Errorf("fake runner: unexpected command %s", call)

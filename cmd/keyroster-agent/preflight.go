@@ -62,7 +62,7 @@ func addServiceFlags(fset *flag.FlagSet, withReload bool) serviceFlags {
 		keygen:     fset.String("ssh-keygen", "", "absolute path of ssh-keygen (default: "+keygenPaths[0]+" or "+keygenPaths[1]+")"),
 	}
 	if withReload {
-		s.reload = fset.String("reload", "", "reload strategy: signal, systemd:<unit>.service, openrc or none (default: detected)")
+		s.reload = fset.String("reload", "", "reload strategy: signal, systemd:<unit>.service, systemd-socket:<unit>.service or openrc (default: detected)")
 	}
 	return s
 }

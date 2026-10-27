@@ -35,8 +35,10 @@ as JSON. The first apply, and every drop-in change, runs the preflight's
 checks first and refuses on any refusal (keyroster-agent preflight).
 
 STRATEGY is how sshd is reloaded when the drop-in changes: signal (SIGHUP
-to the PidFile sshd -T names), systemd:<unit>.service, openrc, or none (a
-socket-activated sshd whose service is not running). Without --sshd,
+to the PidFile sshd -T names), systemd:<unit>.service (systemctl reload),
+systemd-socket:<unit>.service (systemctl try-reload-or-restart, for a
+socket-activated sshd: a running one re-reads, a stopped one reads the
+files when it next starts), or openrc. Without --sshd,
 --sshd-config and --reload the service that runs sshd is detected (systemd
 or OpenRC); a flag that is given overrides the detected value.
 

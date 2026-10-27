@@ -38,11 +38,10 @@ type Service struct {
 	SSHD   string `json:"sshd"`
 	Config string `json:"sshd_config"`
 	// Reload is the reload strategy (CheckReload): systemd:<unit>,
-	// openrc, or none for a socket-activated sshd whose service is not
-	// running.
+	// systemd-socket:<unit> for a socket-activated sshd, or openrc.
 	Reload string `json:"reload"`
-	// Socket is set when ssh.socket is active and the service is not: the
-	// next connection starts sshd, which reads its configuration fresh.
+	// Socket is set when ssh.socket is active: a connection may start sshd
+	// at any moment, so every reload is systemctl try-reload-or-restart.
 	Socket bool `json:"socket_activated,omitempty"`
 }
 
@@ -63,8 +62,12 @@ const (
 //     resolved from the unit's Environment and EnvironmentFiles, else
 //     /etc/ssh/sshd_config); any other argument is ErrSSHDCommand
 //     (parseExecStart). The strategy is systemd:<its Id>. When
-//     ssh.socket is active and the service is not, Socket is set and the
-//     strategy is none (Ubuntu's socket activation).
+//     ssh.socket is active (Ubuntu's socket activation), whatever the
+//     service's own state, Socket is set and the strategy is
+//     systemd-socket:<its Id> (ReloadSocket, PR #68 review D-R1). A
+//     transitional ActiveState of the socket or the service (activating,
+//     deactivating, reloading, refreshing, maintenance) is refused:
+//     run again once it settles.
 //   - OpenRC (root/etc/init.d/sshd exists): the binary, configuration and
 //     arguments from root/etc/conf.d/sshd (detectOpenRC), else the
 //     defaults; the strategy is openrc.
@@ -145,6 +148,9 @@ func detectSystemd(ctx context.Context, r Runner, root string) (Service, error) 
 	for _, u := range parseShow(res.Stdout) {
 		switch {
 		case u["Id"] == "ssh.socket":
+			if transitional(u["ActiveState"]) {
+				return Service{}, fmt.Errorf("%w: ssh.socket is %s; run again once it settles", ErrNotDetected, u["ActiveState"])
+			}
 			socketActive = u["ActiveState"] == "active"
 		case u["LoadState"] != "loaded" || !strings.HasSuffix(u["Id"], ".service"):
 		case service == nil, service["ActiveState"] != "active" && u["ActiveState"] == "active":
@@ -155,6 +161,9 @@ func detectSystemd(ctx context.Context, r Runner, root string) (Service, error) 
 		return Service{}, fmt.Errorf("%w: systemd has no loaded ssh.service or sshd.service", ErrNotDetected)
 	}
 	unit := service["Id"]
+	if transitional(service["ActiveState"]) {
+		return Service{}, fmt.Errorf("%w: %s is %s; run again once it settles", ErrNotDetected, unit, service["ActiveState"])
+	}
 	if !unitRE.MatchString(unit) {
 		return Service{}, fmt.Errorf("%w: systemd unit %q is not a service name the agent accepts", ErrNotDetected, unit)
 	}
@@ -166,10 +175,20 @@ func detectSystemd(ctx context.Context, r Runner, root string) (Service, error) 
 		return Service{}, fmt.Errorf("%w: %s: %w", ErrNotDetected, unit, err)
 	}
 	s := Service{Manager: "systemd", Unit: unit, SSHD: sshd, Config: config, Reload: "systemd:" + unit}
-	if socketActive && service["ActiveState"] != "active" {
-		s.Socket, s.Reload = true, ReloadNone
+	if socketActive {
+		s.Socket, s.Reload = true, ReloadSocket+unit
 	}
 	return s, nil
+}
+
+// transitional reports a systemd ActiveState on its way between two
+// others.
+func transitional(state string) bool {
+	switch state {
+	case "activating", "deactivating", "reloading", "refreshing", "maintenance":
+		return true
+	}
+	return false
 }
 
 // parseExecStart reads the binary and the configuration of a systemd

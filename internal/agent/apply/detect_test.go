@@ -95,15 +95,28 @@ func TestDetect(t *testing.T) {
 			unitBlock("ssh.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")),
 			unitBlock("ssh.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")), // sshd.service is an alias
 		}, "\n"), want: Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd:ssh.service"}},
-		{name: "ubuntu_socket_activated_reload_none", show: strings.Join([]string{
+		// PR #68 review D-R1: an active ssh.socket gives
+		// systemd-socket:<unit> (try-reload-or-restart at every reload)
+		// whatever the service's own state; nothing maps to "none".
+		{name: "ubuntu_socket_activated_service_inactive", show: strings.Join([]string{
 			unitBlock("ssh.socket", "loaded", "active", ""),
 			unitBlock("ssh.service", "loaded", "inactive", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")),
 			unitBlock("ssh.service", "loaded", "inactive", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")),
-		}, "\n"), want: Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: ReloadNone, Socket: true}},
-		{name: "ubuntu_socket_started_service_reloads", show: strings.Join([]string{
+		}, "\n"), want: Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd-socket:ssh.service", Socket: true}},
+		{name: "ubuntu_socket_started_service_active", show: strings.Join([]string{
 			unitBlock("ssh.socket", "loaded", "active", ""),
 			unitBlock("ssh.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")),
-		}, "\n"), want: Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd:ssh.service"}},
+		}, "\n"), want: Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd-socket:ssh.service", Socket: true}},
+		{name: "socket_service_activating_refused", show: strings.Join([]string{
+			unitBlock("ssh.socket", "loaded", "active", ""),
+			unitBlock("ssh.service", "loaded", "activating", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")),
+		}, "\n"), errIs: ErrNotDetected},
+		{name: "service_reloading_refused", show: unitBlock("sshd.service", "loaded", "reloading", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D")), errIs: ErrNotDetected},
+		{name: "service_deactivating_refused", show: unitBlock("sshd.service", "loaded", "deactivating", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D")), errIs: ErrNotDetected},
+		{name: "socket_activating_refused", show: strings.Join([]string{
+			unitBlock("ssh.socket", "loaded", "activating", ""),
+			unitBlock("ssh.service", "loaded", "inactive", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")),
+		}, "\n"), errIs: ErrNotDetected},
 		{name: "rhel_sshd_service", show: strings.Join([]string{
 			unitBlock("ssh.socket", "not-found", "inactive", ""),
 			unitBlock("ssh.service", "not-found", "inactive", ""),

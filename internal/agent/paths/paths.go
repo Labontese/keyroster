@@ -177,12 +177,14 @@ var ExecSites = []ExecSite{
 	{Func: "keygenFingerprint", Ctor: "KeygenFingerprint", Call: "e.cfg.SSHKeygen file", Args: "-l -f FILE"},
 	{Func: "keygenQuery", Ctor: "KeygenQuery", Call: "e.cfg.SSHKeygen krlFile pub", Args: "-Q -f KRL PUB"},
 	{Func: "reloadSystemd", Ctor: "SystemctlReload", Call: "systemctl unit", Args: "reload UNIT"},
+	{Func: "reloadSystemd", Ctor: "SystemctlTryReloadOrRestart", Call: "systemctl unit", Args: "try-reload-or-restart UNIT"},
 	{Func: "reloadOpenRC", Ctor: "RCServiceReload", Call: "paths.RCService", Args: "sshd reload"},
 	{Func: "systemctlShow", Ctor: "SystemctlShow", Call: "systemctl", Args: "show -p Id -p LoadState -p ActiveState -p ExecStart -p EnvironmentFiles -p Environment ssh.socket ssh.service sshd.service"},
 }
 
 // Systemctl are the absolute paths reloadSystemd may run, in the order
-// it tries them; RCService is reloadOpenRC's.
+// it tries them (the first that exists below the layout's root, as Detect
+// looks for it); RCService is reloadOpenRC's.
 var (
 	Systemctl = []string{"/usr/bin/systemctl", "/bin/systemctl"}
 	RCService = "/sbin/rc-service"

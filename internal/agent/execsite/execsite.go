@@ -64,6 +64,14 @@ func SystemctlReload(systemctl, unit string) Cmd {
 	return Cmd{path: systemctl, args: []string{systemctl, "reload", unit}}
 }
 
+// SystemctlTryReloadOrRestart is systemctl try-reload-or-restart unit:
+// a running unit re-reads its configuration, a stopped one stays stopped
+// and reads the files on disk when it next starts (the socket-activated
+// sshd's strategy, PR #68 review D-R1).
+func SystemctlTryReloadOrRestart(systemctl, unit string) Cmd {
+	return Cmd{path: systemctl, args: []string{systemctl, "try-reload-or-restart", unit}}
+}
+
 // SystemctlShow is systemctl show for the units sshd may run as: each
 // unit's Id, LoadState, ActiveState, ExecStart, EnvironmentFiles and
 // Environment, as KEY=VALUE blocks separated by blank lines (03-06
