@@ -495,14 +495,31 @@ that runs sshd (03-06; PR #68 review, owner decisions D-R1 and D-R4):
   `-p 2222` or a value it cannot unquote, is refused as
   `sshd_command_unknown`, and so is an `EnvironmentFile` it cannot read
   safely (owned by root, writable by no one else, no symlink another user
-  controls). A missing optional file (`EnvironmentFile=-...`) is empty.
-- **OpenRC:** `/etc/conf.d/sshd`, read the same way and as Alpine's init
-  script uses it: `cfgfile`, else `SSHD_CONFIG`, else
-  `$SSHD_CONFDIR/sshd_config`; `SSHD_BINARY`; `command_args`, else
-  `SSHD_OPTS`, which may hold only `-D` and `-e` (set the file with
-  `cfgfile`). The agent does not read the init script's own command line:
-  Alpine's stock script adds only `-o PidFile=` and `-f <cfgfile>` when
-  they differ from the defaults, and a modified init script is UNVERIFIED.
+  controls, at most 64 KiB) or cannot be sure how systemd splits into
+  lines: a backslash anywhere (also a comment that ends in one, which
+  systemd continues on the next line), a quoted value that is not exactly
+  one quoted string (systemd's quoted values span lines), or a line that is
+  not `NAME=VALUE` (such as `export NAME=...`). A missing optional file
+  (`EnvironmentFile=-...`) is empty. The agent does not read systemd's
+  manager environment (`DefaultEnvironment=` in `system.conf`,
+  `systemctl set-environment`), which a unit's `$NAME` also sees: a variable
+  set only there is read as empty. UNVERIFIED: an `OPTIONS` or `SSHD_OPTS`
+  set that way is not detected (PR #68 review fix round 2, P8, deferred).
+- **OpenRC:** `/etc/conf.d/sshd` (at most 64 KiB, owned by root, writable
+  by no one else). The agent reads the variables Alpine's stock init script
+  uses: `cfgfile`, else `SSHD_CONFIG`, else `$SSHD_CONFDIR/sshd_config`;
+  `SSHD_BINARY`; `command_args`, else `SSHD_OPTS`, which may hold only `-D`
+  and `-e` (set the file with `cfgfile`). `openrc-run` sources the file with
+  `sh`, so every line must be a comment, a blank line or one plain
+  `NAME=VALUE` assignment (an unquoted value without shell characters, or
+  one single- or double-quoted string without `$`, a backtick or a
+  backslash); anything else (`export`, a command, `;`, a trailing comment)
+  refuses the file as `sshd_command_unknown`. The agent does not read the
+  init script's own command line (Alpine's stock script adds only
+  `-o PidFile=` and `-f <cfgfile>` when they differ from the defaults),
+  `/etc/rc.conf`, or the environment `openrc-run` inherits. UNVERIFIED: a
+  modified init script, or `command_args`/`SSHD_OPTS` set in `/etc/rc.conf`
+  or the inherited environment, is not detected.
 - **Socket activation (Ubuntu's `ssh.socket`):** whenever `ssh.socket` is
   active, the reload strategy is `systemd-socket:<unit>`, whatever the
   service's own state. Every reload, the apply's and every rollback's, runs
@@ -574,8 +591,8 @@ installs.
 |---|---|---|
 | `ssh_keygen_missing` | No `ssh-keygen` at the path given (default `/usr/bin/ssh-keygen` or `/bin/ssh-keygen`); the agent checks every CA line and KRL with the host's own tools | Install it (`openssh-client`, `openssh-clients`, or `openssh-keygen` on Alpine), or pass `--ssh-keygen` |
 | `no_dropin_dir` | `/etc/ssh/sshd_config.d` is missing, or `sshd -T` with the trial drop-in still shows the setting unset: sshd does not read `sshd_config.d/*.conf` before its other settings | Add `Include /etc/ssh/sshd_config.d/*.conf` as the first line of `sshd_config` (every image above ships it near the top) |
-| `foreign_trust_setting` | A line sets `TrustedUserCAKeys`, `RevokedKeys`, `AuthorizedPrincipalsFile`, or an `AuthorizedPrincipalsCommand` other than `none` (then every `AuthorizedPrincipalsCommandUser` line too) in any file sshd reads but the agent's drop-in, inside `Match` blocks too; the finding names the file and line. The agent follows every `Include` from `sshd_config` (or the service's `-f` file), recursively, with globs, relative paths under `/etc/ssh` and `Include` lines inside `Match` blocks (owner decision D-R3, extending D-07). Also raised when `sshd -T`, or `sshd -T -C` for a managed account, reports one of these set where the agent did not read it. A principals command matters because sshd consults its output when the principals file matches none, which widens which certificates an account accepts | Remove or comment out that line. The agent never merges with or overrides another trust setting. The Phase 2 runbook's exact layout is taken over instead (below) |
-| `sshd_config_unsafe` | A file sshd reads, or the directory an `Include` names, could be changed by another user (not owned by root, writable by group or others, or behind a symlink another user owns), or the `Include` graph cannot be followed: a cycle, more than sshd's 16 levels, a `~` path, or more than 512 files. A trust setting there cannot be ruled out | Make those files and directories root-owned and writable only by root, and simplify the `Include` lines |
+| `foreign_trust_setting` | A line sets `TrustedUserCAKeys`, `RevokedKeys`, `AuthorizedPrincipalsFile`, or an `AuthorizedPrincipalsCommand` other than `none` (then every `AuthorizedPrincipalsCommandUser` line too) in any file sshd reads but the agent's drop-in, inside `Match` blocks too; the finding names the file and line. The agent follows every `Include` from `sshd_config` (or the service's `-f` file), recursively, with relative paths under `/etc/ssh`, `Include` lines inside `Match` blocks, and a `*` in the last path component (owner decision D-R3, extending D-07). Every line is split as sshd splits it (a port of OpenSSH 9.2p1's and 10.2p1's tokeniser: quoted keywords and arguments, `keyword=value`, backslash escapes, a trailing `#` comment), so a quoted `"Include"` or `"AuthorizedPrincipalsFile"` is seen; quoted and partly quoted keywords, single- and double-quoted paths, `include=` and a trailing comment were checked against a real sshd 9.2p1, the other escapes only against its source. Also raised when `sshd -T`, or `sshd -T -C` for a managed account, reports one of these set where the agent did not read it. A principals command matters because sshd consults its output when the principals file matches none, which widens which certificates an account accepts | Remove or comment out that line. The agent never merges with or overrides another trust setting. The Phase 2 runbook's exact layout is taken over instead (below) |
+| `sshd_config_unsafe` | A file sshd reads, or the directory an `Include` names, could be changed by another user (not owned by root, writable by group or others, or behind a symlink another user owns), or the `Include` graph cannot be followed: a cycle, more than sshd's 16 levels, a `~` path, more than 512 files, a file larger than 1 MiB, a line with an unbalanced quote (or a keyword in single quotes), or an `Include` path with another glob character than `*` (`?`, `[...]`, a backslash) or a `*` in a directory component. The agent matches only `*` because sshd's glob(3) and Go's differ on the others: `[!x]` is a negation in glob(3), and `[^x]` is a literal `^` in sshd 9.2p1's. A trust setting there cannot be ruled out. On an installed host the agent's own drop-in is evaluated as the apply writes it, so an edited `00-keyroster.conf` is repaired, not refused; an unsafe `sshd_config.d` directory is still refused, because rewriting the file cannot fix it | Make those files and directories root-owned and writable only by root, and simplify the `Include` lines (a plain path, or one `*` in the file name) |
 | `sshd_command_unknown` | The detected service starts sshd with an argument other than `-D`, `-e` and `-f <file>` (after resolving `$SSHD_OPTS`, `$OPTIONS`, OpenRC's `command_args`), or its settings file cannot be read safely ([How the agent finds and reloads sshd](#how-the-agent-finds-and-reloads-sshd)) | Move the option into `sshd_config`, where the agent checks it, and leave the variable empty |
 | `dropin_drift` | Only on an installed host: `00-keyroster.conf` is missing, holds a preflight trial, or differs from what the agent writes (owner decision D-R2, "repair and report"). The apply never refuses on it | A trial: `sudo keyroster-agent apply --once` replaces it with the agent's drop-in and reloads sshd, even with nothing new to install. Missing or edited: the next apply that installs a new signed state rewrites it (the old file is kept as `dropin.prev` until that apply commits). Keep other sshd settings in another file |
 | `no_loopback_listener` | sshd listens on no loopback address. The agent self-tests sshd over loopback only (the owner's D-05 answer, loopback-only) | Add `ListenAddress 127.0.0.1` to `sshd_config` beside the existing `ListenAddress` lines; the agent never edits `sshd_config` |
@@ -640,7 +657,10 @@ the three Phase 2 paths: `50-keyroster.conf`, `keyroster_user_ca.pub`, each
 principals file it compared, and then the empty principals directory. They
 are copied to `/var/lib/keyroster-agent/phase2/` first and kept there until
 the removal and an `sshd -t` have succeeded. A crash during the removal is
-resumed by the next `apply --once`. If the self-test fails, the agent's
+resumed by the next `apply --once`. A resume that finds `00-keyroster.conf`
+edited, or missing, first writes the agent's drop-in again, checks it with
+`sshd -t` and `sshd -T`, reloads sshd and self-tests, and only then removes
+anything. If the self-test fails, the agent's
 files are removed again and the Phase 2 layout was never touched.
 
 When it refuses with `phase2_layout_differs`, the report lists every
