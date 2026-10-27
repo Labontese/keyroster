@@ -147,6 +147,9 @@ type dirEnv struct {
 	// root is the genesis root's private key, for re-signing the bundle
 	// (resignBundle).
 	root ed25519.PrivateKey
+	// caKeys are the online keys the bundle names (user, host, machine,
+	// ops, log), for building signed logs (revoke recover, 03-06b).
+	caKeys map[string]*ecdsa.PrivateKey
 
 	mu       sync.Mutex
 	custody  string // the Keyroster-Custody header of every answer
@@ -210,7 +213,7 @@ func newDirEnvPolicy(t *testing.T, admins int, quorum int, edit func(p *trust.Po
 		}
 		writeTestFile(t, g.policy, doc)
 	}
-	e.root = g.rootKeys[0]
+	e.root, e.caKeys = g.rootKeys[0], g.caKeys
 	useKeyring(t, g.rootKeys...)
 	typeHashPrefix(t, g.out)
 	if code, _, stderr := g.sign(t, "1", 0); code != 0 {
