@@ -81,8 +81,10 @@ func loopbackTargets(d Dump) ([]string, error) {
 	return out, nil
 }
 
-// readableKeyTypes are the host key types x/crypto/ssh parses.
-var readableKeyTypes = []string{ssh.KeyAlgoRSA, ssh.KeyAlgoDSA, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
+// readableKeyTypes are the host key types the agent reads: those
+// x/crypto/ssh parses, but DSA (insecure, removed from OpenSSH 10.0),
+// which is skipped like an unreadable type.
+var readableKeyTypes = []string{ssh.KeyAlgoRSA, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
 	ssh.KeyAlgoSKECDSA256, ssh.KeyAlgoED25519, ssh.KeyAlgoSKED25519}
 
 // hostKeys reads the public halves of the host keys sshd -T names
