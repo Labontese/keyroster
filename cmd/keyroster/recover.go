@@ -36,6 +36,10 @@ const nothingToRecover = "nothing to recover: neither export's trust bundle has 
 // maxRecoverExport bounds one export file keyroster revoke recover reads.
 const maxRecoverExport = 1 << 30
 
+// recoverNow is keyroster revoke recover's clock (the request's
+// CreatedAt); tests replace it.
+var recoverNow = time.Now
+
 // recoverRefusal is a refusal of keyroster revoke recover: the name the
 // runbook quotes, then the reason.
 func recoverRefusal(name, format string, args ...any) error {
@@ -87,13 +91,14 @@ type lostCert struct {
 //     (recovery_import_invalid).
 //
 // Then it applies the owner's answer on lost certificates
-// (revoke-users-list-others): every lost user certificate live at its
-// clock minus the signer's 300 s skew bound is revoked, a lost host or
-// machine certificate only when --revoke-lost names its serial. It
-// carries only the lost certificates krl.CarriesLost admits at that one
-// clock reading, which is the request's CreatedAt: those it revokes and
-// those still live; an expired one it only counts (PR #69 review, D-R2).
-// It prints
+// (revoke-users-list-others): every lost user certificate is revoked,
+// whatever its clock says (PR #69 review round 2), a lost host or machine
+// certificate only when --revoke-lost names its serial. It carries
+// exactly the lost certificates krl.CheckCarriedLost admits at its one
+// clock reading, which is the request's CreatedAt: every one it revokes,
+// and each other host or machine certificate still live then minus the
+// signer's 300 s skew bound; an expired one it only counts (PR #69
+// review, D-R2). It prints
 // a summary, asks for confirmation unless --yes, signs the request with
 // the admin key in ssh-agent under keyroster/revoke-recovery/v1 and writes
 // it to --out (mode 0600, never over an existing file).
@@ -252,7 +257,7 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 
 	// The lost certificates, one per serial, and the owner's answer, at
 	// one clock reading: the request's CreatedAt.
-	createdAt := uint64(max(time.Now().Unix(), 0)) //nolint:gosec // G115: >= 0
+	createdAt := uint64(max(recoverNow().Unix(), 0)) //nolint:gosec // G115: >= 0
 	at := createdAt - min(createdAt, wire.MaxRequestSkewSeconds)
 	var (
 		certs   []lostCert
@@ -272,13 +277,13 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 		if err != nil {
 			return fmt.Errorf("the saved export's entry %d: key ID: %w", lc.Index, err)
 		}
-		live := krl.EntryLive(c.ValidBefore, at)
-		revoke := (kid.CA == trust.RoleUser && live) || (kid.CA != trust.RoleUser && named[c.Serial])
-		if !krl.CarriesLost(c.ValidBefore, createdAt, revoke) {
+		user := kid.CA == trust.RoleUser
+		revoke := user || named[c.Serial]
+		if krl.CheckCarriedLost(c.ValidBefore, createdAt, user, revoke) != nil {
 			expired++
 			continue
 		}
-		certs = append(certs, lostCert{c: c, raw: lc.Cert, kid: kid, live: live, revoke: revoke})
+		certs = append(certs, lostCert{c: c, raw: lc.Cert, kid: kid, live: krl.EntryLive(c.ValidBefore, at), revoke: revoke})
 	}
 	for serial := range named {
 		if !slices.ContainsFunc(certs, func(o lostCert) bool { return o.c.Serial == serial && o.kid.CA != trust.RoleUser }) {

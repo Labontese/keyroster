@@ -544,7 +544,7 @@ func TestRecoverRevocations(t *testing.T) {
 			})
 		}
 	})
-	// A recovery carries only the lost certificates krl.CarriesLost admits
+	// A recovery carries only the lost certificates krl.CheckCarriedLost admits
 	// at its CreatedAt (PR #69 review, D-R2): an expired one it does not
 	// revoke is refused; revoked, it is carried.
 	t.Run("recovery_certificate_expired", func(t *testing.T) {
@@ -575,6 +575,32 @@ func TestRecoverRevocations(t *testing.T) {
 		_, r := lostSetup(t, func(e *revokeEnv) { lost = e.issueRole(t, wire.CARoleUser) })
 		req := r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: false}}, nil)
 		r.refusedRecovery(t, marshal(t, req), "recovery_user_certificate_kept")
+	})
+	// Round 2 (PR #69 review): a carried user certificate is revoked
+	// whatever any clock says. Kept, it is refused even when the recovery
+	// is applied after it expired.
+	t.Run("recovery_user_certificate_kept_applied_late", func(t *testing.T) {
+		var lost *ssh.Certificate
+		_, r := lostSetup(t, func(e *revokeEnv) { lost = e.issueRole(t, wire.CARoleUser) })
+		req := r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: false}}, nil)
+		r.clock.set(time.Unix(int64(lost.ValidBefore)+2*3600, 0)) //nolint:gosec // G115: a test time
+		r.refusedRecovery(t, marshal(t, req), "recovery_user_certificate_kept")
+	})
+	// A request prepared on a clock far ahead (CreatedAt two hours past the
+	// lost user certificate's expiry, while it is still live at the
+	// signer) revokes it: the recovery applies and the KRL revokes it.
+	t.Run("clock_ahead_user_revoked", func(t *testing.T) {
+		var lost *ssh.Certificate
+		_, r := lostSetup(t, func(e *revokeEnv) { lost = e.issueRole(t, wire.CARoleUser) })
+		if now := uint64(r.clock.Now().Unix()); now >= lost.ValidBefore { //nolint:gosec // G115: after 1970
+			t.Fatalf("the lost user certificate is not live at the signer: now %d, valid before %d", now, lost.ValidBefore)
+		}
+		ahead := func(rq *wire.RecoveryRequest) { rq.CreatedAt = lost.ValidBefore + 2*3600 }
+		res := r.recover(t, r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: true}}, ahead))
+		if res.Revoked != 1 || !r.parsedKRL(t).RevokesSerial(lost.SignatureKey.Marshal(), lost.Serial) {
+			t.Fatalf("result %+v; want the lost user certificate revoked", res)
+		}
+		r.verifyExport()
 	})
 	// Above the entry cap: one range of adjacent serials, a tiny KRL,
 	// refused before it is expanded.

@@ -1249,11 +1249,12 @@ func TestRecoveryEntries(t *testing.T) {
 	})
 }
 
-// TestCarriesLost (PR #69 review, D-R2): a recovery carries a lost
-// certificate it revokes, or one still live at the request's CreatedAt
-// minus RecoveryCarrySkew (EntryLive: valid_before + PruneMargin above
-// that); the time the recovery is applied plays no part.
-func TestCarriesLost(t *testing.T) {
+// TestCheckCarriedLost (PR #69 review, D-R2 and round 2): a recovery
+// carries a lost certificate it revokes; one it does not revoke must be
+// live at the request's CreatedAt minus RecoveryCarrySkew (EntryLive:
+// valid_before + PruneMargin above that) and must not be a user
+// certificate; the time the recovery is applied plays no part.
+func TestCheckCarriedLost(t *testing.T) {
 	if RecoveryCarrySkew != wire.MaxRequestSkewSeconds {
 		t.Fatalf("RecoveryCarrySkew = %d, wire.MaxRequestSkewSeconds = %d", RecoveryCarrySkew, wire.MaxRequestSkewSeconds)
 	}
@@ -1262,20 +1263,25 @@ func TestCarriesLost(t *testing.T) {
 		name        string
 		validBefore uint64
 		createdAt   uint64
+		user        bool
 		revoke      bool
-		want        bool
+		want        error
 	}{
-		{"live", created + 3600, created, false, true},
-		{"expired_inside_margins", created - 599, created, false, true},
-		{"expired_at_margins", created - 600, created, false, false},
-		{"expired_long_ago", created - 86400, created, false, false},
-		{"expired_but_revoked", created - 86400, created, true, true},
-		{"infinite", math.MaxUint64, created, false, true},
-		{"created_before_skew_saturates", 1, 10, false, true},
-		{"zero_valid_before", 0, created, false, false},
+		{"live", created + 3600, created, false, false, nil},
+		{"expired_inside_margins", created - 599, created, false, false, nil},
+		{"expired_at_margins", created - 600, created, false, false, ErrLostExpired},
+		{"expired_long_ago", created - 86400, created, false, false, ErrLostExpired},
+		{"expired_but_revoked", created - 86400, created, false, true, nil},
+		{"infinite", math.MaxUint64, created, false, false, nil},
+		{"created_before_skew_saturates", 1, 10, false, false, nil},
+		{"zero_valid_before", 0, created, false, false, ErrLostExpired},
+		{"user_live_revoked", created + 3600, created, true, true, nil},
+		{"user_expired_revoked", created - 86400, created, true, true, nil},
+		{"user_live_kept", created + 3600, created, true, false, ErrLostUserKept},
+		{"user_expired_kept", created - 86400, created, true, false, ErrLostExpired},
 	} {
-		if got := CarriesLost(c.validBefore, c.createdAt, c.revoke); got != c.want {
-			t.Errorf("%s: CarriesLost(%d, %d, %v) = %v, want %v", c.name, c.validBefore, c.createdAt, c.revoke, got, c.want)
+		if got := CheckCarriedLost(c.validBefore, c.createdAt, c.user, c.revoke); !errors.Is(got, c.want) {
+			t.Errorf("%s: CheckCarriedLost(%d, %d, %v, %v) = %v, want %v", c.name, c.validBefore, c.createdAt, c.user, c.revoke, got, c.want)
 		}
 	}
 }

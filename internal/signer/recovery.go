@@ -72,11 +72,11 @@ var recoveryRoles = map[string]wire.CARole{
 // certificate verifies under its signature key, which is a CA key of the
 // role its key ID names in the bundle in force, and its key ID names its
 // serial (recovery_certificate_invalid); every certificate is one
-// krl.CarriesLost admits at the request's CreatedAt, revoked or still live
-// then (recovery_certificate_expired); every user certificate live at
-// the resolution time T (this call's one clock reading, in whole seconds)
-// is revoked (recovery_user_certificate_kept: the owner's answer
-// revoke-users-list-others). Then, inside the transaction: the bundle is
+// krl.CheckCarriedLost admits at the request's CreatedAt: revoked, or
+// still live then (recovery_certificate_expired) and not a user
+// certificate (recovery_user_certificate_kept: the owner's answer
+// revoke-users-list-others revokes every lost user certificate, whatever
+// any clock says). Then, inside the transaction: the bundle is
 // still the one loaded at start; every certificate is above the restored
 // serial high-water mark and not in the issuance table
 // (recovery_certificate_not_lost); the entries (krl.RecoveryEntries, with
@@ -135,17 +135,16 @@ func (s *Signer) RecoverRevocations(ctx context.Context, data []byte) (*Recovery
 	resolvedAt := uint64(max(now.Unix(), 0)) //nolint:gosec // G115: >= 0
 	revoked := 0
 	for _, c := range certs {
-		if !krl.CarriesLost(c.ValidBefore, req.CreatedAt, c.Revoke) {
+		switch err := krl.CheckCarriedLost(c.ValidBefore, req.CreatedAt, c.role == wire.CARoleUser, c.Revoke); {
+		case errors.Is(err, krl.ErrLostExpired):
 			return nil, recoveryRefusal("recovery_certificate_expired",
 				fmt.Errorf("lost certificate serial %d expired before the request was created (valid before %d, created at %d) and is not revoked; a recovery carries only the lost certificates it revokes or that are still live then", c.Serial, c.ValidBefore, req.CreatedAt))
+		case errors.Is(err, krl.ErrLostUserKept):
+			return nil, recoveryRefusal("recovery_user_certificate_kept",
+				fmt.Errorf("lost user certificate serial %d is not revoked; a recovery revokes every lost user certificate (revoke-users-list-others)", c.Serial))
 		}
 		if c.Revoke {
 			revoked++
-			continue
-		}
-		if c.role == wire.CARoleUser && krl.EntryLive(c.ValidBefore, resolvedAt) {
-			return nil, recoveryRefusal("recovery_user_certificate_kept",
-				fmt.Errorf("lost user certificate serial %d is live at %d and not revoked; every lost user certificate still live is revoked (revoke-users-list-others)", c.Serial, resolvedAt))
 		}
 	}
 	highWater, err := s.db.LastSerial(ctx)

@@ -3201,6 +3201,22 @@ func (rf *revokeFixture) lostCert(serial uint64) *ssh.Certificate {
 	return rf.newCert(serial, time.UnixMicro(int64(rf.micros))) //nolint:gosec // G115: a test time
 }
 
+// lostHostCert is a host certificate (s:e2e, valid for an hour from now)
+// with serial, which the log never logs: a lost host certificate.
+func (rf *revokeFixture) lostHostCert(serial uint64, now time.Time) *ssh.Certificate {
+	rf.t.Helper()
+	rf.request++
+	keyID := cert.KeyID{CA: wire.CARoleHost.String(), Subject: "s:e2e", Request: strings.Repeat(hex.EncodeToString([]byte{rf.request}), 16), Policy: 1, Serial: serial}
+	c, err := cert.Build(cert.Request{
+		Profile: roleProfile(ssh.HostCert), Subject: newSigner(rf.t, "ed25519").PublicKey(), Principals: []string{"alice"},
+		Now: now, ValidFor: time.Hour, KeyID: keyID, Serial: serial,
+	}, rf.hostCA, rand.Reader)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	return c
+}
+
 // treeRoot is the root of the fixture's leaves.
 func (rf *revokeFixture) treeRoot() [32]byte {
 	rf.t.Helper()
@@ -3417,7 +3433,7 @@ func TestVerifyRecovery(t *testing.T) {
 			rf.recover(nil, []wire.RecoveredCertificate{{Cert: rf.lostCert(rf.serial + 1000).Marshal(), Revoke: false}}, nil)
 			rf.publish(nil)
 		}, "recovery_user_certificate_kept"},
-		// A recovery carries only the lost certificates krl.CarriesLost
+		// A recovery carries only the lost certificates krl.CheckCarriedLost
 		// admits at its CreatedAt, as the signer requires (PR #69 review,
 		// D-R2); the resolution time plays no part.
 		{"recovery_certificate_expired", func(rf *revokeFixture) {
@@ -3438,14 +3454,26 @@ func TestVerifyRecovery(t *testing.T) {
 		}, ""},
 		{"recovery_prepared_live_applied_late_accepted", func(rf *revokeFixture) {
 			rf.issue()
-			// Valid until two hours ago; the request was prepared while it
-			// was live and is resolved now, after it expired.
-			lost := rf.newCert(rf.serial+1000, time.UnixMicro(int64(rf.micros)).Add(-3*time.Hour)) //nolint:gosec // G115: a test time
+			// A host certificate valid until two hours ago; the request was
+			// prepared while it was live and is resolved now, after it
+			// expired.
+			lost := rf.lostHostCert(rf.serial+1000, time.UnixMicro(int64(rf.micros)).Add(-3*time.Hour)) //nolint:gosec // G115: a test time
 			rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: false}}, func(o *recoveryOpts) {
 				o.req = func(r *wire.RecoveryRequest) { r.CreatedAt = lost.ValidBefore - 1000 }
 			})
 			rf.publish(nil)
 		}, ""},
+		// Round 2 (PR #69 review): a carried user certificate is revoked
+		// whatever any clock says; kept, it is refused even when it
+		// expired before the resolution time.
+		{"recovery_user_kept_applied_late", func(rf *revokeFixture) {
+			rf.issue()
+			lost := rf.newCert(rf.serial+1000, time.UnixMicro(int64(rf.micros)).Add(-3*time.Hour)) //nolint:gosec // G115: a test time
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: false}}, func(o *recoveryOpts) {
+				o.req = func(r *wire.RecoveryRequest) { r.CreatedAt = lost.ValidBefore - 1000 }
+			})
+			rf.publish(nil)
+		}, "(recovery_user_certificate_kept)"},
 		{"recovery_unpublished_at_end", func(rf *revokeFixture) { base(rf, nil) }, "not followed by the krl_publish entry"},
 		{"recovery_publish_not_above_import", func(rf *revokeFixture) {
 			c := rf.issue()

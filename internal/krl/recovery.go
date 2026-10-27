@@ -19,26 +19,56 @@ import (
 // review, D-R1). The count is still taken before anything is expanded.
 const MaxRecoveryEntries = (11 << 20) / 24
 
-// RecoveryCarrySkew is the skew bound of CarriesLost, in seconds: the
-// signer's request freshness window (wire.MaxRequestSkewSeconds, which a
-// test asserts), so a workstation clock ahead of the signer's never leaves
-// out a certificate the signer still sees as live.
+// RecoveryCarrySkew is the skew bound of CheckCarriedLost, in seconds:
+// the signer's request freshness window (wire.MaxRequestSkewSeconds, which
+// a test asserts). It bounds only the lost certificates a recovery does
+// not revoke, which are host and machine certificates: a recovery revokes
+// every lost user certificate whatever any clock says (PR #69 review round
+// 2). With the workstation clock at most 300 s ahead of the signer's, no
+// such certificate the signer still sees as live is left out; with it
+// further ahead, one can be left out of the recovered log and the summary
+// (only counted), but it is not revoked under either outcome, grants no
+// login, and the saved export still holds it.
 const RecoveryCarrySkew = 300
 
-// CarriesLost is the one rule for which lost certificates a recovery
-// carries (PR #69 review, D-R2): one it revokes, and one still live
-// (EntryLive) at createdAt, the request's CreatedAt (the preparing
-// client's clock in whole seconds), minus RecoveryCarrySkew. keyroster
-// revoke recover selects the certificates with it, and the signer and
-// keyroster audit verify refuse a request that carries any other
-// (recovery_certificate_expired). It reads only the signed request, never
-// the time the recovery is applied, so a request prepared offline and
-// applied hours later is judged as it was prepared. A lost certificate it
-// leaves out is expired and needs no revocation; the imported entries of
+// ErrLostExpired and ErrLostUserKept are the two ways a carried lost
+// certificate breaks CheckCarriedLost; the signer refuses them as
+// recovery_certificate_expired and recovery_user_certificate_kept.
+var (
+	ErrLostExpired  = errors.New("krl: a carried lost certificate the recovery does not revoke expired before the request was created")
+	ErrLostUserKept = errors.New("krl: a carried lost user certificate is not revoked")
+)
+
+// CheckCarriedLost is the one rule for which lost certificates a recovery
+// carries and which it revokes (PR #69 review, D-R2 and round 2); user
+// says whether the certificate is a user certificate, revoke whether the
+// recovery revokes it, and createdAt is the request's CreatedAt (the
+// preparing client's clock in whole seconds). A revoked certificate is
+// always carried. Otherwise the certificate must still be live
+// (EntryLive) at createdAt minus RecoveryCarrySkew (ErrLostExpired), and
+// it must not be a user certificate (ErrLostUserKept): every lost user
+// certificate is revoked (the owner's answer revoke-users-list-others),
+// expired or not, since revoking an expired one is harmless and its entry
+// prunes by its ValidBefore. keyroster revoke recover sets revoke for
+// every lost user certificate and each --revoke-lost serial and carries
+// exactly the certificates this rule admits; the signer and keyroster
+// audit verify refuse a request that carries any other. It reads only the
+// signed request, never the time the recovery is applied, so a request
+// prepared offline and applied hours later is judged as it was prepared.
+// A lost host or machine certificate it leaves out is not revoked and is
+// expired at createdAt minus RecoveryCarrySkew; the imported entries of
 // its serial or key ID then get ValidBefore 0 and are never pruned
 // (RecoveryEntries), the fail-safe outcome.
-func CarriesLost(validBefore, createdAt uint64, revoke bool) bool {
-	return revoke || EntryLive(validBefore, createdAt-min(createdAt, RecoveryCarrySkew))
+func CheckCarriedLost(validBefore, createdAt uint64, user, revoke bool) error {
+	switch {
+	case revoke:
+		return nil
+	case !EntryLive(validBefore, createdAt-min(createdAt, RecoveryCarrySkew)):
+		return ErrLostExpired
+	case user:
+		return ErrLostUserKept
+	}
+	return nil
 }
 
 // ErrRecoveryTooLarge reports a recovery that would derive more than

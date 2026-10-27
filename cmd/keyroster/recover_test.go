@@ -750,9 +750,11 @@ func TestRevokeRecover(t *testing.T) {
 			t.Fatalf("U's entry does not take U's ValidBefore: %+v", entries)
 		}
 	})
-	// D-R2 (PR #69 review): a lost certificate that expired before the
-	// request is not carried (and counted in the summary), unless
-	// --revoke-lost names it; a live one is carried as before.
+	// D-R2 (PR #69 review): a lost host or machine certificate that
+	// expired before the request is not carried (and counted in the
+	// summary), unless --revoke-lost names it; a live one is carried as
+	// before. A lost user certificate is carried and revoked, expired or
+	// not (round 2).
 	t.Run("expired_lost_not_carried", func(t *testing.T) {
 		for _, name := range []bool{false, true} {
 			e := newDirEnv(t, 1, 1)
@@ -767,20 +769,45 @@ func TestRevokeRecover(t *testing.T) {
 			s := &recoverScenario{e: e, b: b, restored: b.export(restoredN), saved: b.export(-1), restoredN: restoredN,
 				out: filepath.Join(t.TempDir(), "recovery.req")}
 			var extra []string
-			want := map[uint64]bool{uNew.Serial: true, hNew.Serial: false}
-			wantLine := "lost certificates expired before this request, not carried: 2\n"
+			want := map[uint64]bool{uOld.Serial: true, uNew.Serial: true, hNew.Serial: false}
+			const countLine = "lost certificates expired before this request, not carried:"
+			wantLine := countLine + " 1\n"
 			if name {
 				extra = []string{"--revoke-lost", strconv.FormatUint(hOld.Serial, 10)}
 				want[hOld.Serial] = true
-				wantLine = "lost certificates expired before this request, not carried: 1\n"
+				wantLine = ""
 			}
 			code, out, errOut := s.run(t, extra...)
-			if code != 0 || !strings.Contains(out, wantLine) {
+			if code != 0 || (wantLine != "" && !strings.Contains(out, wantLine)) || (wantLine == "" && strings.Contains(out, countLine)) {
 				t.Fatalf("--revoke-lost named %v: exit %d:\n%s%s", name, code, out, errOut)
 			}
 			if got := carried(t, s.request(t)); !maps.Equal(got, want) {
 				t.Fatalf("--revoke-lost named %v: carried %v, want %v (expired user %d, host %d)", name, got, want, uOld.Serial, hOld.Serial)
 			}
+		}
+	})
+	// Round 2 (PR #69 review): with the workstation clock far ahead, a
+	// lost user certificate still valid at real time but expired at the
+	// CLI's clock minus the margins is carried and revoked all the same
+	// (revoke-users-list-others); the request's CreatedAt is that clock.
+	t.Run("clock_ahead_user_still_revoked", func(t *testing.T) {
+		s := newRecoverScenario(t)
+		ahead := time.Unix(int64(s.u.ValidBefore)+2*3600, 0) //nolint:gosec // G115: a test time
+		prev := recoverNow
+		recoverNow = func() time.Time { return ahead }
+		t.Cleanup(func() { recoverNow = prev })
+		realNow, cliNow := uint64(time.Now().Unix()), uint64(ahead.Unix()) //nolint:gosec // G115: after 1970
+		if realNow >= s.u.ValidBefore || s.u.ValidBefore+krl.PruneMargin+krl.RecoveryCarrySkew > cliNow {
+			t.Fatalf("the case needs real time %d < valid before %d <= the CLI's clock %d minus %d s",
+				realNow, s.u.ValidBefore, cliNow, krl.PruneMargin+krl.RecoveryCarrySkew)
+		}
+		if code, out, errOut := s.run(t); code != 0 {
+			t.Fatalf("exit %d:\n%s%s", code, out, errOut)
+		}
+		r := s.request(t)
+		if got := carried(t, r); !maps.Equal(got, map[uint64]bool{s.u.Serial: true}) || r.CreatedAt != cliNow {
+			t.Fatalf("carried %v at CreatedAt %d; want only U (serial %d) revoked, at %d (H %d expired at that clock)",
+				got, r.CreatedAt, s.u.Serial, cliNow, s.h.Serial)
 		}
 	})
 	// D-R1 (PR #69 review): a server copy near what the signer publishes,
