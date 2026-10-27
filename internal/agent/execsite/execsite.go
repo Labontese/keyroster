@@ -65,10 +65,11 @@ func SystemctlReload(systemctl, unit string) Cmd {
 }
 
 // SystemctlShow is systemctl show for the units sshd may run as: each
-// unit's Id, LoadState, ActiveState and ExecStart, as KEY=VALUE blocks
-// separated by blank lines (03-06 Detect).
+// unit's Id, LoadState, ActiveState, ExecStart, EnvironmentFiles and
+// Environment, as KEY=VALUE blocks separated by blank lines (03-06
+// Detect; the last two resolve a $VAR in ExecStart, PR #68 review D-R4).
 func SystemctlShow(systemctl string) Cmd {
-	return Cmd{path: systemctl, args: []string{systemctl, "show", "-p", "Id", "-p", "LoadState", "-p", "ActiveState", "-p", "ExecStart", "ssh.socket", "ssh.service", "sshd.service"}}
+	return Cmd{path: systemctl, args: []string{systemctl, "show", "-p", "Id", "-p", "LoadState", "-p", "ActiveState", "-p", "ExecStart", "-p", "EnvironmentFiles", "-p", "Environment", "ssh.socket", "ssh.service", "sshd.service"}}
 }
 
 // RCServiceReload is rc-service sshd reload.

@@ -40,6 +40,10 @@ const (
 	CodeHostPoPNotEnabled   = "host_pop_not_enabled"
 	CodeLoginGraceUnbounded = "login_grace_unbounded"
 	CodeLoginGraceUnknown   = "login_grace_unknown"
+	// CodeSSHDCommand is Detect's refusal (ErrSSHDCommand, PR #68 review
+	// D-R4): the service starts sshd with arguments the agent does not
+	// account for.
+	CodeSSHDCommand = "sshd_command_unknown"
 )
 
 // Preflight refusals as errors, for errors.Is on an apply refused by its
@@ -66,6 +70,7 @@ var codeErrors = map[string]error{
 	CodeLoginGraceUnknown:   ErrLoginGraceUnknown,
 	CodePhase2Pending:       ErrPhase2Pending,
 	CodePhase2Differs:       ErrPhase2Differs,
+	CodeSSHDCommand:         ErrSSHDCommand,
 }
 
 // ReportOnly are the codes that never refuse: keyroster-agent preflight
@@ -392,6 +397,16 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 		}
 	}
 	return r, nil
+}
+
+// DetectRefusal is keyroster-agent preflight's report for a host whose
+// service Detect refused with ErrSSHDCommand: one sshd_command_unknown
+// refusal, so the preflight exits 3 as for every other refusal.
+func DetectRefusal(err error) *PreflightReport {
+	r := &PreflightReport{Findings: []Finding{}}
+	r.add(Finding{Code: CodeSSHDCommand, Message: err.Error(),
+		Fix: "start sshd with only -D, -e and -f <file> (set every other option in sshd_config, which the agent checks), or empty the variable in the unit's EnvironmentFile (/etc/default/ssh, /etc/sysconfig/sshd) or /etc/conf.d/sshd; see host-setup.md \"Before the agent: preflight\""})
+	return r
 }
 
 // preflightApply is the preflight of an apply (03-06 key link: the first

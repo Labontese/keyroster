@@ -12,7 +12,9 @@ if command -v apt-get >/dev/null 2>&1; then
 elif command -v dnf >/dev/null 2>&1; then
 	dnf install -y -q openssh-server >/dev/null
 elif command -v apk >/dev/null 2>&1; then
-	apk add -q openssh openssh-keygen
+	# openssh-server-common-openrc is Alpine's /etc/init.d/sshd and
+	# /etc/conf.d/sshd: TestDistroDetectStock reads the stock conf.d.
+	apk add -q openssh openssh-keygen openssh-server-common-openrc
 	keygen_package=openssh-keygen
 elif command -v pacman >/dev/null 2>&1; then
 	# Arch rolls, and the image is frozen by its digest: pacman -Sy of the

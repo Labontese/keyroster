@@ -37,6 +37,30 @@ func unitBlock(id, load, active, execStart string) string {
 	return b
 }
 
+// withProps adds more KEY=VALUE lines to a unit block (EnvironmentFiles,
+// Environment), in systemctl show's format: one EnvironmentFiles= line per
+// file, "path (ignore_errors=yes|no)".
+func withProps(block string, props ...string) string {
+	for _, p := range props {
+		block += p + "\n"
+	}
+	return block
+}
+
+// The stock environment files of the CI images, as captured from them
+// (03-06 review fix round; blank lines dropped by the capture).
+const (
+	debianDefaultSSH  = "# Default settings for openssh-server. This file is sourced by /bin/sh from\n# /etc/init.d/ssh.\n\n# Options to pass to sshd\nSSHD_OPTS=\n"
+	almaSysconfigSSHD = "# Configuration file for the sshd service.\n# The server keys are automatically generated if they are missing.\n# To change the automatic creation, adjust sshd.service options for\n# example using  systemctl enable sshd-keygen@dsa.service  to allow creation\n# of DSA key or  systemctl mask sshd-keygen@rsa.service  to disable RSA key\n# creation.\n#SSH_RSA_BITS=3072\n#SSH_ECDSA_BITS=256\n"
+	alpineConfDSSHD   = "# Configuration for /etc/init.d/sshd\n\n# Path of sshd_config file.\n#cfgfile=\"/etc/ssh/sshd_config\"\n\n# Any random options you want to pass to sshd.\n# See the sshd(8) manpage for more info.\n#command_args=\"\"\n\n#key_types_to_generate=\"\"\n#ecdsa_bit_size=\"256\"\n#rsa_bit_size=\"3072\"\n"
+)
+
+// debianUnit is Debian's and Ubuntu's ssh.service as systemctl show prints
+// it, active, with its EnvironmentFile=-/etc/default/ssh and argv.
+func debianUnit(argv, envFile string, env string) string {
+	return withProps(unitBlock("ssh.service", "loaded", "active", execStart("/usr/sbin/sshd", argv)), "EnvironmentFiles="+envFile, "Environment="+env)
+}
+
 func execStart(path, argv string) string {
 	return "{ path=" + path + " ; argv[]=" + argv + " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
 }
@@ -62,6 +86,9 @@ func TestDetect(t *testing.T) {
 		want   Service
 		errIs  error
 		openrc string // /etc/conf.d/sshd; "-" means an OpenRC host without it
+		// files are written below the root, mode 0644; setup runs after.
+		files map[string]string
+		setup func(t *testing.T, root string)
 	}{
 		{name: "debian_ssh_service", show: strings.Join([]string{
 			unitBlock("ssh.socket", "loaded", "inactive", ""),
@@ -95,6 +122,81 @@ func TestDetect(t *testing.T) {
 			want: Service{Manager: "openrc", SSHD: "/usr/sbin/sshd.pam", Config: "/etc/ssh/sshd_config", Reload: "openrc"}},
 		{name: "openrc_defaults", openrc: "-", want: Service{Manager: "openrc", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "openrc"}},
 		{name: "openrc_variable_refused", openrc: "SSHD_CONFIG=\"${SSHD_CONFDIR}/sshd_config\"\n", errIs: ErrNotDetected},
+		// PR #68 review D-R4 (F6, F11): the stock units and files of the CI
+		// images pass; any other sshd argument is refused.
+		{name: "debian_stock_unit_and_default_file", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": debianDefaultSSH},
+			want:  Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd:ssh.service"}},
+		{name: "el9_stock_unit_and_sysconfig", show: withProps(unitBlock("sshd.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $OPTIONS")), "EnvironmentFiles=/etc/sysconfig/sshd (ignore_errors=yes)", "Environment="),
+			files: map[string]string{"etc/sysconfig/sshd": almaSysconfigSSHD},
+			want:  Service{Manager: "systemd", Unit: "sshd.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd:sshd.service"}},
+		{name: "optional_env_file_missing", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			want: Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd:ssh.service"}},
+		{name: "required_env_file_missing_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=no)", ""), errIs: ErrSSHDCommand},
+		{name: "sshd_opts_dash_f_sets_config", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=\"-f /etc/ssh/sshd_config.prod\"\n"},
+			want:  Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config.prod", Reload: "systemd:ssh.service"}},
+		{name: "sshd_opts_dash_o_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=-o RevokedKeys=none\n"}, errIs: ErrSSHDCommand},
+		{name: "el9_options_dash_o_refused", show: withProps(unitBlock("sshd.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $OPTIONS")), "EnvironmentFiles=/etc/sysconfig/sshd (ignore_errors=yes)"),
+			files: map[string]string{"etc/sysconfig/sshd": almaSysconfigSSHD + "OPTIONS=\"-oLoginGraceTime=0\"\n"}, errIs: ErrSSHDCommand},
+		{name: "exec_start_dash_o_refused", show: unitBlock("sshd.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D -o RevokedKeys=none")), errIs: ErrSSHDCommand},
+		{name: "exec_start_unknown_flag_refused", show: unitBlock("sshd.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D -p 2222")), errIs: ErrSSHDCommand},
+		{name: "exec_start_combined_flags_refused", show: unitBlock("sshd.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -De")), errIs: ErrSSHDCommand},
+		{name: "exec_start_dash_f_twice_refused", show: unitBlock("sshd.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D -f /etc/ssh/a -f/etc/ssh/b")), errIs: ErrSSHDCommand},
+		{name: "exec_start_embedded_variable_refused", show: unitBlock("sshd.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D -f$CONF")), errIs: ErrSSHDCommand},
+		{name: "environment_property_resolved", show: withProps(unitBlock("ssh.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")), "Environment=SSHD_OPTS=-e LANG=C"),
+			want: Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd:ssh.service"}},
+		{name: "env_file_overrides_environment", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", "SSHD_OPTS=-e"),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS='-o PermitRootLogin=yes'\n"}, errIs: ErrSSHDCommand},
+		{name: "later_env_file_overrides_earlier", show: withProps(unitBlock("ssh.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")),
+			"EnvironmentFiles=/etc/default/ssh (ignore_errors=yes)", "EnvironmentFiles=/etc/default/ssh-local (ignore_errors=yes)", "Environment="),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=\n", "etc/default/ssh-local": "SSHD_OPTS=-oX=y\n"}, errIs: ErrSSHDCommand},
+		{name: "braced_variable_one_word", show: unitBlock("ssh.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D ${SSHD_OPTS}")) + "Environment=SSHD_OPTS=-e\n",
+			want: Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd:ssh.service"}},
+		{name: "braced_variable_with_whitespace_refused", show: debianUnit("/usr/sbin/sshd -D ${SSHD_OPTS}", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=\"-f /etc/ssh/x\"\n"}, errIs: ErrSSHDCommand},
+		{name: "env_file_writable_by_others_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": debianDefaultSSH},
+			setup: func(t *testing.T, root string) { chmod(t, filepath.Join(root, "etc/default/ssh"), 0o666) }, errIs: ErrUnsafeFile},
+		{name: "env_file_behind_symlink_into_open_dir_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"open/ssh": debianDefaultSSH},
+			setup: func(t *testing.T, root string) {
+				chmod(t, filepath.Join(root, "open"), 0o777)                                   //nolint:gosec // the directory under test is world-writable
+				if err := os.MkdirAll(filepath.Join(root, "etc/default"), 0o755); err != nil { //nolint:gosec // test fixture
+					t.Fatal(err)
+				}
+				if err := os.Symlink("../../open/ssh", filepath.Join(root, "etc/default/ssh")); err != nil {
+					t.Fatal(err)
+				}
+			}, errIs: ErrUnsafeFile},
+		{name: "env_file_root_symlink_followed", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"usr/share/ssh/default": "SSHD_OPTS=-e\n"},
+			setup: func(t *testing.T, root string) {
+				if err := os.MkdirAll(filepath.Join(root, "etc/default"), 0o755); err != nil { //nolint:gosec // test fixture
+					t.Fatal(err)
+				}
+				if err := os.Symlink("../../usr/share/ssh/default", filepath.Join(root, "etc/default/ssh")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd:ssh.service"}},
+		{name: "env_file_unexpanded_value_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=\"$EXTRA\"\n"}, errIs: ErrSSHDCommand},
+		{name: "env_file_unrelated_unexpanded_value_ignored", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "OTHER=\"$HOME/x\"\nSSHD_OPTS=\n"},
+			want:  Service{Manager: "systemd", Unit: "ssh.service", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "systemd:ssh.service"}},
+		{name: "env_file_continuation_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=-e \\\n-o RevokedKeys=none\n"}, errIs: ErrSSHDCommand},
+		{name: "two_exec_start_refused", show: unitBlock("sshd.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D")) + "ExecStart=" + execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D -o X=y") + "\n", errIs: ErrSSHDCommand},
+		{name: "alpine_stock_conf_d", openrc: alpineConfDSSHD, want: Service{Manager: "openrc", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "openrc"}},
+		{name: "openrc_cfgfile_sets_config", openrc: "cfgfile=\"/etc/ssh/sshd_config.alt\"\nSSHD_CONFIG=/etc/ssh/ignored\n", want: Service{Manager: "openrc", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config.alt", Reload: "openrc"}},
+		{name: "openrc_confdir_sets_config", openrc: "SSHD_CONFDIR=/opt/ssh\n", want: Service{Manager: "openrc", SSHD: "/usr/sbin/sshd", Config: "/opt/ssh/sshd_config", Reload: "openrc"}},
+		{name: "openrc_command_args_dash_o_refused", openrc: "command_args=\"-o RevokedKeys=none\"\n", errIs: ErrSSHDCommand},
+		{name: "openrc_sshd_opts_dash_f_refused", openrc: "SSHD_OPTS=\"-f /etc/ssh/other\"\n", errIs: ErrSSHDCommand},
+		{name: "openrc_sshd_opts_dash_e", openrc: "SSHD_OPTS=\"-e\"\n", want: Service{Manager: "openrc", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "openrc"}},
+		{name: "openrc_conf_d_writable_by_others_refused", openrc: alpineConfDSSHD,
+			setup: func(t *testing.T, root string) { chmod(t, filepath.Join(root, "etc/conf.d/sshd"), 0o666) }, errIs: ErrSSHDCommand},
 		{name: "neither_refused", errIs: ErrNotDetected},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,6 +224,18 @@ func TestDetect(t *testing.T) {
 					}
 				}
 			}
+			for f, content := range tc.files {
+				p := filepath.Join(root, f)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { //nolint:gosec // test fixture
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(content), 0o644); err != nil { //nolint:gosec // test fixture
+					t.Fatal(err)
+				}
+			}
+			if tc.setup != nil {
+				tc.setup(t, root)
+			}
 			r := &showRunner{out: tc.show}
 			got, err := Detect(context.Background(), r, root)
 			if tc.errIs != nil {
@@ -133,9 +247,17 @@ func TestDetect(t *testing.T) {
 			if err != nil || got != tc.want {
 				t.Fatalf("Detect = %+v, %v; want %+v", got, err, tc.want)
 			}
-			if tc.show != "" && strings.Join(r.got, " ") != "/usr/bin/systemctl show -p Id -p LoadState -p ActiveState -p ExecStart ssh.socket ssh.service sshd.service" {
+			if tc.show != "" && strings.Join(r.got, " ") != "/usr/bin/systemctl show -p Id -p LoadState -p ActiveState -p ExecStart -p EnvironmentFiles -p Environment ssh.socket ssh.service sshd.service" {
 				t.Fatalf("ran %q", r.got)
 			}
 		})
+	}
+}
+
+// chmod sets mode exactly, whatever the umask.
+func chmod(t *testing.T, p string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(p, mode); err != nil {
+		t.Fatal(err)
 	}
 }

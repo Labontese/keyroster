@@ -32,8 +32,10 @@ a trial copy of the agent's drop-in, written only while none exists and
 removed before it exits, with no reload.
 
 Exit status: 0 when no finding refuses the host (account_excluded and
-phase2_adoptable are report only), 3 when one does, 2 for a usage or tool
-error (an sshd that cannot run, an apply holding the lock).
+phase2_adoptable are report only), 3 when one does (sshd_command_unknown
+included: the detected service starts sshd with arguments the agent does
+not account for), 2 for a usage or tool error (an sshd that cannot run,
+an apply holding the lock).
 
 Without --sshd and --sshd-config the service that runs sshd is detected
 (systemd or OpenRC). While the state directory (default
@@ -129,6 +131,14 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	sshd, config, keygen, _, err := svc.resolve(ctx, stderr)
 	if errors.Is(err, errUsage) {
 		return err
+	}
+	if errors.Is(err, apply.ErrSSHDCommand) {
+		// The service starts sshd in a way the agent cannot account for:
+		// a refusal with its code, not a tool error (PR #68 review D-R4).
+		if out, merr := json.MarshalIndent(apply.DetectRefusal(err), "", "  "); merr == nil {
+			_, _ = fmt.Fprintf(stdout, "%s\n", out)
+		}
+		return &exitError{code: 3, err: err}
 	}
 	if err != nil {
 		return &exitError{code: 2, err: err}
