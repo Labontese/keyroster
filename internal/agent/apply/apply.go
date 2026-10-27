@@ -215,6 +215,7 @@ type engine struct {
 	dropinChanged bool
 	staged        uint64     // the accepted/ snapshot a commit marker names
 	adopt         *AdoptPlan // a Phase 2 takeover this first install makes (D-08)
+	trialReplaced bool       // replaceTrial wrote the agent's drop-in over a trial
 	poll          func(ctx context.Context) (*Generation, *state.Verified, error)
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
@@ -249,7 +250,8 @@ func (e *engine) logf(format string, args ...any) {
 //     did not make is stuck: pending_state_unknown, no swap, until the
 //     operator runs --recover-to-last-good.
 //  3. One spool capture is verified (state.Verify); equal versions are a
-//     no-op that writes nothing and repairs no drift.
+//     no-op that writes nothing and repairs no drift, except that a trial
+//     drop-in a crashed preflight left is replaced first (replaceTrial).
 //  4. The newest verified state is rendered once (Render), keeping a newer
 //     KRL current holds (keepKRL: the KRL never rolls back), written as a
 //     new generation and checked (validate).
@@ -399,8 +401,58 @@ func (e *engine) apply(ctx context.Context) error {
 		} else if p, _ := e.readAdopt(); lg.kind == linkAgent && p != nil {
 			e.logf("WARNING %s: the agent's files are in force, and the Phase 2 layout's removal is unfinished; run %s", CodePhase2Pending, adoptCommand)
 		}
+		if err := e.replaceTrial(ctx); err != nil {
+			return err
+		}
 	}
 	return e.forward(ctx)
+}
+
+// replaceTrial handles a trial drop-in a crashed preflight left, before
+// anything else of the run and before a no-op returns (PR #68 review, F1
+// and F5). Without a generation of the agent's as last-good it is
+// removed. On an installed host the agent's own drop-in replaces it, with
+// activateDropIn's sshd -t, sshd -T checks and reload, and the self-test,
+// so an sshd that loaded the trial (current's CA keys without its KRL)
+// re-reads; the run is then not a no-op. The start-of-run sshd -T saw the
+// trial, so it is read again.
+func (e *engine) replaceTrial(ctx context.Context) error {
+	old, err := e.readDropIn()
+	if err != nil || !bytes.Equal(old, trialDropIn(e.l)) {
+		return err
+	}
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil {
+		return err
+	}
+	if lg.kind != linkAgent {
+		if err := e.removeTrial(); err != nil {
+			return err
+		}
+	} else {
+		changed, err := e.writeDropIn()
+		if err != nil {
+			return err
+		}
+		if changed {
+			if err := e.activateDropIn(ctx); err != nil {
+				return err
+			}
+		}
+		e.trialReplaced = true
+		if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
+			e.report.SelfTest = "fail: " + err.Error()
+			return err
+		}
+		e.report.SelfTest = "pass"
+		e.dropinChanged = false
+		if err := e.remove(e.l.State(dropinPrevFile)); err != nil {
+			return err
+		}
+		e.logf("replaced a preflight's trial drop-in with the agent's own and reloaded sshd")
+	}
+	e.dump, err = e.sshdDump(ctx, "")
+	return err
 }
 
 // atRollbackTarget reports whether current already holds
@@ -533,7 +585,8 @@ func (e *engine) forward(ctx context.Context) error {
 	}
 	e.report.BundleHeld = v.BundleHeld
 	if !v.Changed() {
-		e.report.NoOp = true
+		// A run that replaced a trial drop-in wrote it: not a no-op.
+		e.report.NoOp = !e.trialReplaced
 		// The KRL in force is current's, which a rollback or crash recovery
 		// may have kept above accepted/'s (PR #67 round-2 carry-over).
 		cur, curLink, err := e.readCurrent()
@@ -552,7 +605,7 @@ func (e *engine) forward(ctx context.Context) error {
 		return err
 	}
 	e.keepKRL(g, cur, curLink)
-	if err := e.preflightApply(ctx, v, g); err != nil {
+	if err := e.preflightApply(v, g); err != nil {
 		return err
 	}
 	if e.cfg.DryRun {

@@ -40,6 +40,11 @@ const (
 	CodeHostPoPNotEnabled   = "host_pop_not_enabled"
 	CodeLoginGraceUnbounded = "login_grace_unbounded"
 	CodeLoginGraceUnknown   = "login_grace_unknown"
+	// CodeDropInDrift is an installed host (current or last-good exists)
+	// whose 00-keyroster.conf is missing, a preflight trial, or differs
+	// from what the agent writes (PR #68 review, F1, F5 and D-R2). Only
+	// keyroster-agent preflight reports it: the apply repairs the file.
+	CodeDropInDrift = "dropin_drift"
 	// CodeSSHDCommand is Detect's refusal (ErrSSHDCommand, PR #68 review
 	// D-R4): the service starts sshd with arguments the agent does not
 	// account for.
@@ -140,21 +145,29 @@ func (p *PreflightError) Unwrap() []error {
 
 // dropInHeader heads the agent's drop-in; trialHeader heads the trial
 // copy the preflight writes and removes, so a trial left by a crash never
-// passes for the agent's drop-in (writeDropIn then writes and activates
-// the real one; Preflight and every apply remove a leftover trial).
+// passes for the agent's drop-in. On a host with no generation of the
+// agent's, Preflight and every apply remove a leftover trial; on an
+// installed host every apply, a no-op included, replaces it with the
+// agent's own drop-in and reloads (replaceTrial), and the preflight
+// reports it (dropin_drift).
 const (
 	dropInHeader = "# keyroster: managed by keyroster-agent; do not edit\n"
 	trialHeader  = "# keyroster: preflight trial by keyroster-agent; removed when the preflight ends\n"
 )
 
 // trialDropIn is the trial drop-in: DropIn's TrustedUserCAKeys and
-// AuthorizedPrincipalsFile lines under trialHeader. It sets no
-// RevokedKeys: sshd treats every public key as revoked while its
-// RevokedKeys file is missing, so an sshd reloaded by something else in
-// the moment the trial exists would refuse every key until its next
-// reload; without that line such a reload refuses only certificate logins
-// (Threat Flags, 03-06 SUMMARY). The two keywords show the drop-in's
-// precedence as well as three would: sshd keeps the first value of each.
+// AuthorizedPrincipalsFile lines under trialHeader. The preflight writes
+// it only on a host where neither current nor last-good exists (PR #68
+// review, F1 and F5): there the two paths name files that do not exist,
+// so an sshd that loads the trial (reloaded by something else, or started
+// by a connection, in the moment it exists) refuses certificate logins and
+// trusts no CA. It sets no RevokedKeys: sshd treats every public key as
+// revoked while its RevokedKeys file is missing, so with that line such
+// an sshd would refuse every key, plain keys too (Threat Flags, 03-06
+// SUMMARY). On an installed host the same lines would trust current's CA
+// keys without its KRL, which is why no trial is written there. The two
+// keywords show the drop-in's precedence as well as three would: sshd
+// keeps the first value of each.
 func trialDropIn(l Layout) []byte {
 	cur := l.Current()
 	return []byte(trialHeader +
@@ -267,8 +280,11 @@ func dumpFindings(d Dump, r *PreflightReport) {
 // foreignFindings reports trust settings the agent does not own: every
 // configuration line that sets one of its keywords outside its drop-in,
 // and, with base the sshd -T dump, every keyword whose effective value is
-// neither unset nor the agent's. hits are trustSettingHits.
-func foreignFindings(l Layout, base Dump, hits []settingHit, r *PreflightReport) {
+// neither unset nor the agent's. hits are trustSettingHits. dropIn is the
+// 00-keyroster.conf on disk on an installed host: a keyword it sets is
+// not compared with base, because an edited agent drop-in is drift the
+// apply repairs (D-R2), and activateDropIn checks the repaired value.
+func foreignFindings(l Layout, base Dump, hits []settingHit, dropIn []byte, r *PreflightReport) {
 	named := map[string]bool{}
 	for _, h := range hits {
 		named[h.Keyword] = true
@@ -277,8 +293,9 @@ func foreignFindings(l Layout, base Dump, hits []settingHit, r *PreflightReport)
 			Fix:     "remove or comment out that line (the agent never edits sshd configuration files it does not own); a host set up with the Phase 2 runbook's exact layout is taken over instead, see host-setup.md"})
 	}
 	want := ourValues(l)
+	ownLine := dropInKeywords(dropIn)
 	for _, k := range trustKeywords {
-		if v := base.One(k); !isDefault(v) && v != want[k] && !named[k] {
+		if v := base.One(k); !isDefault(v) && v != want[k] && !named[k] && !ownLine[k] {
 			r.add(Finding{Code: CodeForeignTrust,
 				Message: fmt.Sprintf("sshd -T reports %s %q, set outside sshd_config and sshd_config.d (an Include elsewhere)", k, v),
 				Fix:     "find and remove that setting: sudo grep -rniE '^\\s*" + k + "' /etc/ssh"})
@@ -286,12 +303,29 @@ func foreignFindings(l Layout, base Dump, hits []settingHit, r *PreflightReport)
 	}
 }
 
+// dropInKeywords are the lowercase keywords the lines of a drop-in set.
+func dropInKeywords(b []byte) map[string]bool {
+	out := map[string]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if words := strings.FieldsFunc(t, func(r rune) bool { return r == ' ' || r == '\t' || r == '=' }); len(words) > 0 {
+			out[strings.ToLower(words[0])] = true
+		}
+	}
+	return out
+}
+
 // Preflight checks whether this host can be managed safely (03-06,
 // D-07), before enrollment and on every run of keyroster-agent
 // preflight. It changes nothing on the host but a trial copy of the
-// drop-in, written only while no drop-in exists and removed before it
-// returns, with no reload: sshd -T with the trial shows whether
-// sshd_config.d is read before every other trust setting. With a state
+// drop-in, written only while no drop-in, no current and no last-good
+// exist (PR #68 review, F1) and removed before it returns, with no
+// reload: sshd -T with the trial shows whether sshd_config.d is read
+// before every other trust setting. On an installed host a drop-in that
+// is missing, a trial or edited is dropin_drift. With a state
 // directory it takes the apply lock without waiting (an apply in progress
 // is a tool error: run again), and the verified policy and directory, when
 // there are any, add host_pop_not_enabled and account_excluded.
@@ -341,7 +375,21 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil && bytes.Equal(existing, trialDropIn(l)) {
+	cur, err := e.resolveLink(l.Current())
+	if err != nil {
+		return nil, err
+	}
+	lg, err := e.resolveLink(l.LastGood())
+	if err != nil {
+		return nil, err
+	}
+	// An installed host (current or last-good exists; PR #68 review, F1,
+	// F5, D-R2) gets no trial, which would trust current's CA keys
+	// without its KRL, and its drop-in is the agent's own: a missing,
+	// trial or edited one is drift the apply repairs, never a foreign
+	// file.
+	installed := cur.kind != linkNone || lg.kind != linkNone
+	if !installed && bytes.Equal(existing, trialDropIn(l)) {
 		// A trial a crashed preflight left: never in force (no reload), and
 		// pointing at files that may not exist, so it goes now.
 		if err := e.removeTrial(); err != nil {
@@ -355,14 +403,25 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 	}
 	hits := trustSettingHits(l, cfg.SSHDConfig)
 	switch {
-	case existing != nil && !bytes.Equal(existing, DropIn(l)):
-		r.add(Finding{Code: CodeForeignTrust, File: l.DropIn(), Message: l.DropIn() + " exists and is not the agent's drop-in",
-			Fix: "move it away; the agent owns that file name"})
-	case existing != nil:
-		// The agent's own drop-in: its values must be in force. The Phase 2
-		// runbook's own two lines in 50-keyroster.conf, left by a takeover
-		// whose removal is unfinished, are shadowed by it (00- is read
-		// first, and sshd -T shows the agent's values).
+	case installed:
+		switch {
+		case existing == nil:
+			r.add(Finding{Code: CodeDropInDrift, File: l.DropIn(),
+				Message: l.DropIn() + " is missing although the agent's generations are installed (" + l.Current() + "): sshd trusts no keyroster certificate until it is back. The preflight writes no trial drop-in here: it would make sshd trust current's CA keys without its KRL",
+				Fix:     "the next keyroster-agent apply that installs a new signed state writes it again (an apply with nothing new writes nothing); keyroster-agent check reports it until then"})
+		case bytes.Equal(existing, trialDropIn(l)):
+			r.add(Finding{Code: CodeDropInDrift, File: l.DropIn(),
+				Message: l.DropIn() + " holds a preflight trial drop-in, not the agent's own, on a host where the agent's generations are installed: an sshd that re-reads it trusts current's CA keys without the KRL",
+				Fix:     "run sudo keyroster-agent apply --once: it replaces the trial with the agent's drop-in and reloads sshd, even when the signed state has not changed"})
+		case !bytes.Equal(existing, DropIn(l)):
+			r.add(Finding{Code: CodeDropInDrift, File: l.DropIn(),
+				Message: l.DropIn() + " differs from the drop-in the agent writes (edited by hand or by configuration management?)",
+				Fix:     "the next keyroster-agent apply that installs a new signed state rewrites it (the old file is kept as dropin.prev until that apply commits); keyroster-agent check reports it until then. Manage sshd settings in another file: the agent owns this one"})
+		}
+		// The Phase 2 runbook's own two lines in 50-keyroster.conf, left by
+		// a takeover whose removal is unfinished, are shadowed by the
+		// agent's drop-in (00- is read first, and sshd -T shows the
+		// agent's values).
 		var rest []settingHit
 		for _, h := range hits {
 			if h.File == l.Phase2DropIn() && (h.Text == phase2CALine || h.Text == phase2PrincipalsLine) {
@@ -373,10 +432,17 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 		if len(rest) < len(hits) {
 			r.Notes = append(r.Notes, "the Phase 2 layout is still present beside the agent's drop-in; "+adoptCommand+" removes it")
 		}
-		foreignFindings(l, base, rest, r)
+		foreignFindings(l, base, rest, existing, r)
+	case existing != nil && !bytes.Equal(existing, DropIn(l)):
+		r.add(Finding{Code: CodeForeignTrust, File: l.DropIn(), Message: l.DropIn() + " exists and is not the agent's drop-in",
+			Fix: "move it away; the agent owns that file name"})
+	case existing != nil:
+		// The agent's own drop-in without a generation of the agent's:
+		// its values must be in force.
+		foreignFindings(l, base, hits, nil, r)
 	default:
 		if !phase2Findings(l, base, hits, r) {
-			foreignFindings(l, base, hits, r)
+			foreignFindings(l, base, hits, nil, r)
 		}
 		if err := e.trialFindings(ctx, base, r); err != nil {
 			return nil, err
@@ -414,16 +480,16 @@ func DetectRefusal(err error) *PreflightReport {
 // the same checks as Preflight but the trial write, because the apply's
 // own drop-in write is followed by sshd -t and the sshd -T checks of
 // activateDropIn. It runs only when there is no last-good yet or the
-// drop-in would change, removes a trial drop-in a crashed preflight left,
-// and refuses with a PreflightError on any refusal code. 03-05's own
-// login_grace_unbounded check at the start of every apply stays.
+// drop-in would change, and refuses with a PreflightError on any refusal
+// code. 03-05's own login_grace_unbounded check at the start of every
+// apply stays.
 //
 // On a first install it also decides a Phase 2 takeover (D-08,
 // adoptDecision): the exact layout, matching the signed state g was
 // rendered from, sets e.adopt when Config.AllowAdoption is set and is
 // phase2_adoption_pending otherwise; any other Phase 2 style layout is
 // phase2_layout_differs.
-func (e *engine) preflightApply(ctx context.Context, v *state.Verified, g *Generation) error {
+func (e *engine) preflightApply(v *state.Verified, g *Generation) error {
 	lg, err := e.resolveLink(e.l.LastGood())
 	if err != nil {
 		return err
@@ -435,16 +501,9 @@ func (e *engine) preflightApply(ctx context.Context, v *state.Verified, g *Gener
 	if lg.kind != linkNone && bytes.Equal(old, DropIn(e.l)) {
 		return nil
 	}
-	if old != nil && bytes.Equal(old, trialDropIn(e.l)) {
-		if !e.cfg.DryRun {
-			if err := e.removeTrial(); err != nil {
-				return err
-			}
-			// The start-of-run sshd -T saw the trial: read it again.
-			if e.dump, err = e.sshdDump(ctx, ""); err != nil {
-				return err
-			}
-		}
+	if bytes.Equal(old, trialDropIn(e.l)) {
+		// Only a dry run still finds a trial here: every other run removed
+		// or replaced it before forward (replaceTrial).
 		old = nil
 	}
 	r := &PreflightReport{}
@@ -463,11 +522,17 @@ func (e *engine) preflightApply(ctx context.Context, v *state.Verified, g *Gener
 		case plan != nil:
 			e.adopt = plan
 		default:
-			foreignFindings(e.l, e.dump, hits, r)
+			foreignFindings(e.l, e.dump, hits, nil, r)
 		}
-	case old == nil || bytes.Equal(old, DropIn(e.l)):
-		foreignFindings(e.l, e.dump, hits, r)
+	case old == nil || bytes.Equal(old, DropIn(e.l)) || lg.kind != linkNone:
+		// Once a generation of the agent's is last-good, 00-keyroster.conf
+		// is the agent's own file: bytes that differ from DropIn are drift
+		// writeDropIn repairs (kept as dropin.prev, sshd -t, the sshd -T
+		// checks, reload, self-test), never a refusal that would hold back a
+		// KRL (owner decision D-R2, PR #68 review F15: "Repair + report").
+		foreignFindings(e.l, e.dump, hits, old, r)
 	default:
+		// A first install: a file the agent did not write holds its name.
 		r.add(Finding{Code: CodeForeignTrust, File: e.l.DropIn(), Message: e.l.DropIn() + " exists and is not the agent's drop-in", Fix: "move it away; the agent owns that file name"})
 	}
 	policyFindings(v.Policy, r)

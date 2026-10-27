@@ -3,6 +3,7 @@
 package apply
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -32,7 +33,8 @@ type SettingDrift struct {
 }
 
 // FileDrift is one file of the generation current names whose SHA-256 is
-// not its record's ("" for a file missing on that side).
+// not its record's, or the drop-in when it is not the one the agent
+// writes ("" for a file missing on that side).
 type FileDrift struct {
 	File       string `json:"file"`
 	WantSHA256 string `json:"want_sha256"`
@@ -63,7 +65,8 @@ func (r *DriftReport) Drift() bool { return len(r.Settings) > 0 || len(r.Files) 
 //     names is re-hashed by that resolved path against
 //     <state>/generations/<N>.json, so an apply that swaps current during
 //     the check, even into an intermediate generation, cannot make it mix
-//     two generations; a file missing, added or changed is a FileDrift;
+//     two generations; a file missing, added or changed is a FileDrift,
+//     and so is a drop-in whose bytes are not DropIn's;
 //   - sshd -T must report the drop-in's three paths, and so must
 //     sshd -T -C user=<account>,host=127.0.0.1,addr=127.0.0.1,laddr=<l>,lport=<p>
 //     for every account that generation holds a principals file for (l
@@ -131,6 +134,18 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 		}
 	}
 
+	// The drop-in is the agent's own file once a generation is installed
+	// (D-R2, PR #68 review F15): bytes that differ from DropIn are drift,
+	// even when sshd -T still reports the agent's three paths.
+	if b, err := e.readDropIn(); err != nil {
+		return nil, err
+	} else if want := DropIn(l); !bytes.Equal(b, want) {
+		got := ""
+		if b != nil {
+			got = trust.SHA256Hex(b)
+		}
+		r.Files = append(r.Files, FileDrift{File: l.DropIn(), WantSHA256: trust.SHA256Hex(want), GotSHA256: got})
+	}
 	dump, err := e.sshdDump(ctx, "")
 	if err != nil {
 		return nil, err

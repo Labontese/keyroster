@@ -28,8 +28,10 @@ const preflightUsage = `usage: keyroster-agent preflight [--root DIR] [--state-d
 
 Checks whether the agent can manage this host's sshd without editing
 sshd_config (D-07), and prints the findings as JSON. It changes nothing but
-a trial copy of the agent's drop-in, written only while none exists and
-removed before it exits, with no reload.
+a trial copy of the agent's drop-in, written only while none exists on a
+host with no generation of the agent's installed, and removed before it
+exits, with no reload. On an installed host a missing, trial or edited
+drop-in is reported as dropin_drift.
 
 Exit status: 0 when no finding refuses the host (account_excluded and
 phase2_adoptable are report only), 3 when one does (sshd_command_unknown

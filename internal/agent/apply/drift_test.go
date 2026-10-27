@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/Labontese/keyroster/internal/agent/paths"
@@ -27,6 +28,24 @@ func TestDrift(t *testing.T) {
 		r, err := h.check()
 		if err != nil || r.Drift() || r.Generation != h.current() || !r.LoginGraceObserved {
 			t.Fatalf("check after install: %+v, %v", r, err)
+		}
+	})
+	t.Run("dropin_edited_or_missing_is_drift", func(t *testing.T) {
+		t.Parallel()
+		// PR #68 review D-R2: sshd -T still reports the agent's three paths,
+		// but the file is not the one the agent wrote.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		appendFile(t, h.l.DropIn(), "# managed by ansible\n")
+		r, err := h.check()
+		if err != nil || len(r.Files) != 1 || r.Files[0].File != h.l.DropIn() || r.Files[0].GotSHA256 == "" || len(r.Settings) != 0 {
+			t.Fatalf("an edited drop-in: %+v, %v", r, err)
+		}
+		if err := os.Remove(h.l.DropIn()); err != nil {
+			t.Fatal(err)
+		}
+		if r, err := h.check(); err != nil || !r.Drift() || !slices.ContainsFunc(r.Files, func(f FileDrift) bool { return f.File == h.l.DropIn() && f.GotSHA256 == "" }) {
+			t.Fatalf("a missing drop-in: %+v, %v", r, err)
 		}
 	})
 	t.Run("match_block_override_is_drift", func(t *testing.T) {

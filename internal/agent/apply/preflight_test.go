@@ -324,6 +324,62 @@ func TestPreflight(t *testing.T) {
 			t.Fatalf("sshd -T runs %v", h.run.dumps)
 		}
 	})
+	// PR #68 review, F1, F5 and D-R2: on an installed host the preflight
+	// writes no trial, and a missing, trial or edited drop-in is
+	// dropin_drift, never foreign_trust_setting.
+	installedDrift := func(t *testing.T, edit func(h *testHost)) (*testHost, *PreflightReport) {
+		t.Helper()
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		edit(h)
+		before := h.run.dumps[""]
+		r, err := h.preflight()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f := refused(t, r, CodeDropInDrift); f.File != h.l.DropIn() || finding(r, CodeForeignTrust) != nil {
+			t.Fatalf("findings %+v", r.Findings)
+		}
+		if h.run.dumps[""] != before+1 || h.run.reloads != 1 { // one sshd -T, no trial; only the install's reload
+			t.Fatalf("sshd -T runs %v, %d reloads", h.run.dumps, h.run.reloads)
+		}
+		return h, r
+	}
+	t.Run("installed_host_missing_dropin_no_trial", func(t *testing.T) {
+		t.Parallel()
+		h, _ := installedDrift(t, func(h *testHost) {
+			if err := os.Remove(h.l.DropIn()); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if h.exists(h.l.DropIn()) {
+			t.Fatal("the preflight wrote a drop-in on an installed host")
+		}
+	})
+	t.Run("installed_host_trial_reported_and_left", func(t *testing.T) {
+		t.Parallel()
+		h, _ := installedDrift(t, func(h *testHost) {
+			if err := os.WriteFile(h.l.DropIn(), trialDropIn(h.l), 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+		})
+		if readFile(t, h.l.DropIn()) != string(trialDropIn(h.l)) {
+			t.Fatal("the preflight changed the trial on an installed host (the apply replaces it and reloads)")
+		}
+	})
+	t.Run("installed_host_edited_dropin_is_drift", func(t *testing.T) {
+		t.Parallel()
+		installedDrift(t, func(h *testHost) { appendFile(t, h.l.DropIn(), "# managed by ansible\n") })
+	})
+	t.Run("installed_host_edited_trust_line_is_drift", func(t *testing.T) {
+		t.Parallel()
+		installedDrift(t, func(h *testHost) {
+			b := strings.Replace(string(DropIn(h.l)), filepath.Join(h.l.Current(), CAFile), "/etc/ssh/other_ca.pub", 1)
+			if err := os.WriteFile(h.l.DropIn(), []byte(b), 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+		})
+	})
 	t.Run("foreign_file_with_the_agents_name", func(t *testing.T) {
 		t.Parallel()
 		h := host(t)
