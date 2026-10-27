@@ -9,9 +9,10 @@ requires:
     provides: "03-03b: every revocation target, v2 installation-bound revoke requests, krl.Parse, the restore stop that 03-06c replaces; 03-03: krl.PublishSet, Prunable, EntryLive, the KRL manifest, publishKRLLocked and loggedRevocations; 03-06: ordering only"
 provides:
   - "keyroster-server's durable copy <state-dir>/krl-served.json: verified against the signer's trust bundle and written before any route serves a KRL; a lower version, or the same version with other bytes, is never served (503); a damaged copy stops the server at start"
-  - "Leaf kind 15 revocation_recovery (tlog.RecoveryBody, DecodeRecoveryBody, MaxRecoveryEntries 1<<16, MaxRecoveryBody 11 MiB); tlog Kind validity is the explicit set 1-10 and 15"
+  - "Leaf kind 15 revocation_recovery (tlog.RecoveryBody, DecodeRecoveryBody, MaxRecoveryEntries = MaxRecoveryBody / 24 since PR #69 review round 1, MaxRecoveryBody 11 MiB); tlog Kind validity is the explicit set 1-10 and 15"
   - "wire.RecoveryRequest under keyroster/revoke-recovery/v1 (file form Marshal / ParseRecoveryRequest, logged form SigningBytes / ParseRecoverySigningBytes), RecoveryImport, RecoveredCertificate and their caps"
   - "krl.RecoveryEntries, RecoveredCert, CertLookup, ErrRecoveryTooLarge, MaxRecoveryEntries: the one derivation rule the signer, audit verify and the CLI share"
+  - "krl.CarriesLost and RecoveryCarrySkew (PR #69 review round 1): the one rule for which lost certificates a recovery carries, shared by the CLI, the signer and audit verify (recovery_certificate_expired)"
   - "Signer.RecoverRevocations and RecoveryResult; kind 15 in the start-up rebuild (rebuildLogFrom) and in appendLocked"
   - "keyroster-signer recover-revocations --state-dir DIR (stdin, state lock, signer.New, never Serve)"
   - "keyroster revoke recover --restored --saved [--krl ...] [--revoke-lost ...] [--yes] [--admin-key] --out (offline, root-pinned, admin-signed)"
@@ -77,6 +78,9 @@ key-decisions:
   - "03-06b: keyroster revoke recover decides the installation-ID rule in one branch: no installation ID in the restored bundle refuses recovery_installation_lost when the saved bundle has one or any --krl document was given, and prints nothing to recover otherwise"
   - "03-06b: with no KRLFile (the tests' newServer only; New refuses it) keyroster-server skips the whole keep step: verification, the version rule and the write"
   - "03-06b: the signer keeps the parsed trust bundle it loaded at start (Signer.bundle), so krl.VerifyManifest checks an import against the ops key of the bundle in force"
+  - "03-06b (PR #69 review, owner decision D-R1): MaxRecoveryEntries is MaxRecoveryBody / 24, so the entry count never binds before the 11 MiB body cap; partially met, the body cap still binds below MaxKRL"
+  - "03-06b (PR #69 review, owner decision D-R2): a recovery carries only the lost certificates it revokes or that are live at the request's CreatedAt minus 300 s (krl.CarriesLost, enforced by CLI, signer and audit); MaxRecoveryCertificates is 65535"
+  - "03-06b (PR #69 review): keyroster-server uses the copy read at start as the version floor only after it verifies, moves the floor once the rename succeeded, and refuses an empty KRL answer after it served one"
 
 patterns-established:
   - "Mutants are applied by a script, run against the named test and restored byte for byte; a mutant that does not compile is rewritten until it compiles, so no kill is a build failure"
@@ -164,6 +168,7 @@ restored log: <n> entries, root <std base64>; saved log: <n> entries
 import: saved export, log entry <i>: KRL v<v>, issued at <RFC 3339>: <n> serials, <n> key IDs, <n> keys
 import: <--krl path>: KRL v<v>, issued at <RFC 3339>: <n> serials, <n> key IDs, <n> keys
 lost certificates: none
+lost certificates expired before this request, not carried: <n>
 lost certificate: serial <s>, <user|host|machine>, subject <sub>, key SHA256:<fp>, valid before <unix s> (<live|expired>): revoke
 lost certificate: serial <s>, <host|machine>, subject <sub>, key SHA256:<fp>, valid before <unix s> (<live|expired>): keep; public key <authorized_keys line>; revoke later with: keyroster revoke key <file with this public key>
 entries: <n>; the KRL the recovery publishes must be above v<highest imported version>
@@ -183,7 +188,9 @@ Its refusals exit 1 as `keyroster revoke: refused (<name>): <reason>`:
 - `recovery_import_invalid`: a `--krl` document that does not decode, or an import that does not verify under the restored bundle and its installation ID, does not parse, or has a header version other than its manifest's;
 - `recovery_fork`: neither export extends the other;
 - `recovery_revoke_lost_unknown`: `--revoke-lost` names a serial that is not a lost host or machine certificate;
-- `recovery_too_large`: more than 65536 entries, or a request above 9 MiB.
+- `recovery_too_large`: more than 480597 entries, or a request above 9 MiB (PR #69 review round 1; before it, 65536 entries).
+
+`lost certificates: none` is printed only when no lost certificate is carried and none was left out as expired. The `expired before this request` line is printed only when at least one was left out (PR #69 review round 1).
 
 An export that does not verify on the saved pins exits 1 with `... does not verify on your trust pins: ...; escalate, do not release the hold`. An existing `--out` exits 1 with `--out <file> exists; ...`.
 
@@ -204,6 +211,7 @@ A refusal exits 1 as `keyroster-signer recover-revocations: refused: <name>: <re
 - `recovery_import_invalid`
 - `recovery_certificate_invalid`
 - `recovery_certificate_not_lost`
+- `recovery_certificate_expired` (PR #69 review round 1)
 - `recovery_user_certificate_kept`
 - `recovery_too_large`
 - `recovery_version_not_above_import`: the reason ends `wait <n> s (until the clock passes it) and run it again`
@@ -215,6 +223,8 @@ keyroster-server logs these lines and answers 503:
 - `KRL not served: version X is below version Y this server served (a signer restored without the recovery? signer-install.md)`
 - `KRL not served: version X has other bytes than the version X this server served`
 - `KRL not served: it does not verify ...`
+- `KRL not served: the copy <path> this server kept (version V) does not verify against the signer's trust bundle vB, so it is not used as the version floor: ...` (PR #69 review round 1)
+- `KRL not served: the signer has no KRL, but this server served version V (a signer restored without the recovery? signer-install.md)` (PR #69 review round 1)
 - `KRL not kept: ...`
 
 A damaged copy stops the start with `server: <path> does not parse: ... keep it, do not delete it, and see docs/runbooks/server-install.md`.
@@ -422,3 +432,109 @@ capslock: one new (package, capability) pair, `internal/krl CAPABILITY_REFLECT` 
   - no existing vector changed;
   - `krl-served.json` in server-install.md, with `run in CI (internal/server tests, 03-06b)`;
   - 03-03's stop still in signer-install.md.
+
+## Review fix round 1 (PR #69)
+
+The pre-merge security review of PR #69 upheld six findings. It ran three Claude lenses, Codex and a critic, and two skeptics checked every finding. The fixes are on top of `af18fd7`, on 2026-10-27.
+
+### Owner decisions (2026-10-27, AskUserQuestion)
+
+- **D-R1 (F1, the recovery entry cap).** Raise the cap to what a KRL can hold, so that every state the signer can publish can also be recovered. Expansion is still counted before allocation.
+- **D-R2 (F2, the carried certificate cap).** A recovery skips expired lost certificates and does not revoke them. It always carries certificates named with `--revoke-lost`. The signer and audit enforce one shared rule. Imported entries of a skipped certificate get ValidBefore 0. The certificate cap is raised so that the body cap binds first.
+
+### Per finding
+
+| F | Fix | Commit | Tests | Mutants (all RED) |
+|---|---|---|---|---|
+| F1 | `krl.MaxRecoveryEntries` and `tlog.MaxRecoveryEntries` are both `MaxRecoveryBody / 24` = 480597. 24 bytes is the smallest entry a body holds, so the entry count never refuses a recovery that the 11 MiB body cap admits. The count is still taken on merged intervals before expansion. | `0176c4e` | krl `TestRecoveryEntries/near_publishable_maximum`; `TestRevokeRecover/recovers_near_publishable_maximum` (CLI, a 70,000-serial `--krl` copy); audit `TestRecoveryNearPublishableMaximum` (Ed25519 and P-256 CA, two imports, 64 carried certificates, through `SigningBytes`, the body encoder, the export line and Verify); signer `recovers_near_publishable_maximum`, plus `recovery_too_large` (one range above the cap) and `recovery_too_large_body` (under the count, above the body cap) | the cap set back to `1 << 16`: in krl (krl, CLI and signer tests RED) and in tlog (audit test RED) |
+| F2 | `krl.CarriesLost(validBefore, createdAt, revoke)` = revoke, or `EntryLive(validBefore, createdAt - 300)`. The CLI selects with it and counts the rest in the summary. The signer and audit refuse a request that carries any other (`recovery_certificate_expired`). `wire.MaxRecoveryCertificates` = 65535, the uint16 count's maximum. | `0176c4e` | `TestCarriesLost`; `TestRecoveryCertificateCap` (5000 certificates; the smallest certificate takes 270 bytes, so at most 34952 fit in 9 MiB); `TestRevokeRecover/expired_lost_not_carried`; audit `recovery_certificate_expired`, `recovery_expired_revoked_accepted`, `recovery_prepared_live_applied_late_accepted`; signer `recovery_certificate_expired`, `carried_certificate_applied_late` | CLI carries every certificate; signer check removed; signer check reads the resolution time; audit check removed; audit check reads the resolution time; the helper without the skew; the cap back to 4096 |
+| F3 | `servedFloor` verifies the copy read at start against the signer status's bundle and installation ID before its version is ever used, whether keepKRL or the empty-answer check uses it. A copy that does not verify is never the floor. The route answers 503 and logs the copy and the reason on every refresh, and the copy is neither replaced nor removed. A copy that does not parse still refuses start. | `73cbcc5` | `TestKRLServedCopy/copy_unverified_not_floor` (wrong ops key, wrong installation, digest mismatch, version 2^64 − 1); `copy_verified_is_floor` | the copy trusted unverified |
+| F4 | `keepKRLFile` returns whether the rename happened. `keepKRL` moves the floor to the new version once it has, even when the directory sync fails, and still answers 503. `syncDir` is a seam. | `73cbcc5` | `TestKRLServedCopy/dir_sync_failure_advances_floor` (v100 served, v200 renamed with a failing sync, then v150 refused and the copy stays v200) | the floor moved only on success |
+| F5 | `keygenVerdict`: exit 1 with a `: REVOKED` line is a refusal and exit 0 with `: ok` is an acceptance. Anything else fails the test, for example exit 255 for a KRL that OpenSSH cannot parse. The tracer issues a control certificate B before the backup. B must be accepted by the revocation's KRL and by the recovered KRL. | `a7c87ce` | `TestKeygenVerdict` (run in WSL); `TestRestoreRecoveryTracer` (CI e2e) | any non-zero exit taken as a refusal (TestKeygenVerdict RED in WSL) |
+| F6 | `checkNoKRL`: when the server has served version V and the signer answers no KRL, the server logs `KRL not served: the signer has no KRL, but this server served version V (...)`. It does not cache the answer and answers 503. Before anything was served, the answer is 404 `no_krl` as before. | `73cbcc5` | `TestKRLServedCopy/empty_after_served_not_served` (also after a restart, from the verified copy) | the empty answer ignored |
+
+server-install.md names the two new 503 log lines. Moving an unverifiable copy aside is UNVERIFIED as a remedy.
+
+### D-R1 is only partially met
+
+The entry count no longer binds, but the body cap does, and it binds below what MaxKRL can publish. These sizes were measured by `TestRecoveryNearPublishableMaximum`, with 71,064 entries (70,000 serials, 1,000 serials moved between the two imports, and 64 carried certificates):
+
+| CA | KRLs | request | body (cap 11,534,336) | export line (cap 16,777,216) |
+|---|---|---|---|---|
+| Ed25519 | 560,113 B each | 1,148,055 B | 6,407,161 B | 8,543,319 B |
+| P-256 | 560,166 B each | 1,152,634 B | 10,178,132 B | 13,571,279 B |
+
+An entry takes 74 B under Ed25519 and 127 B under P-256, and the two imports add 16 B per serial. So with two imports, one recovery holds about 128,000 serials under Ed25519 and about 80,000 under P-256. MaxKRL holds about 500,000 non-adjacent serials. Adjacent serials are encoded as ranges, so MaxKRL holds even more of those. A larger live set is refused `recovery_too_large`.
+
+The body cap cannot rise without a format change. The leaf body has a uint24 length, so at most 16 MiB, and audit's 16 MiB export line carries the leaf in base64, which keeps the body under about 12 MiB. Two ways out exist, and both need an owner decision:
+
+- split one recovery over several `revocation_recovery` leaves with one publish, as 03-03 splits a subject revoke;
+- have the normal publish refuse to grow the live set past what one recovery carries.
+
+T-03-269 in the plan records this residual.
+
+### D-R2: checks before coding, and the reference time
+
+- **No floor depends on carried certificates.** `RecoverRevocations` never calls `SetLastSerial`. In audit, a carried certificate never joins the issuance state (`lastSerial`, `issueIDs`, `loginIDs`) or `rs.certs`. New serials come from the clock. So skipping an expired certificate weakens neither the "above the restored high-water mark" check, nor the serial floor, nor key-ID uniqueness (D-09). No request field and no golden vector changed.
+- **Successive recoveries.** An expired certificate is not carried again later. It can never become live again, so a later recovery would skip it too, and Report.Certificates loses nothing a later recovery needs.
+- **ValidBefore 0 confirmed.** `RecoveryEntries` takes ValidBefore from a carried certificate with the same CA key, then from the lookup, which is the issuance only, where a lost certificate never is. Otherwise it is 0, which `Prunable` never prunes. The existing `recovers_serial_without_certificate` asserts 0. The cost: the imported entries of an expired lost certificate stay in the KRL for good. That counts against the D-R1 ceiling (T-03-269).
+- **Reference time: the request's CreatedAt, not ResolvedAtSeconds.** The decision text names ResolvedAtSeconds, but the CLI cannot know it. The request is signed offline and applied later, possibly hours later. A strict rule at the resolution time would refuse a correct request whenever a certificate it carries expired in between. `CreatedAt` is signed, and the signer and audit both read it from the request, so they agree by construction. The CLI uses one clock reading for both `CreatedAt` and the user-live rule. The skew bound is the existing 300 s (`RecoveryCarrySkew`, equal to `wire.MaxRequestSkewSeconds`, which a test asserts). Expired means not live by `krl.EntryLive` at `CreatedAt − 300`, that is, `ValidBefore + 600 <= CreatedAt`.
+- **T-03-272 residual.** An expired lost certificate is no longer in the recovered log, and the summary only counts it. It grants no access, and the saved export still holds it.
+
+### What ran (2026-10-27)
+
+- **Windows 11, Go 1.27.1:**
+  - `go test ./...` passed in every package except `internal/agent/paths` (TestAllowed). That test fails identically at `af18fd7`, from Windows path semantics in a Linux-only package. CI's Windows lane does not run it. Not in scope.
+  - `go vet ./...` passed for linux, windows and darwin, and with `-tags e2e`. gofmt is clean.
+  - FuzzParseRecoveryRequest, FuzzParseRecoverySigningBytes and FuzzDecodeLeaf ran 20 s each with no failure.
+  - 12 mutants were run on throwaway copies.
+- **WSL Ubuntu, Go 1.27.3, from a `git archive` of the commit:**
+  - `go test -race -count=1 ./...`: 29 packages ok, no DATA RACE.
+  - The signer package alone under `-race` took 297.6 s, including `recovers_near_publishable_maximum` at 78 s. Without `-race` that subtest takes 2.7 s. CI ran the signer package in 115.6 s at `af18fd7`.
+  - golangci-lint reported 0 issues for linux, windows and darwin.
+  - dep-firewall, testonly-firewall and check-pinned-actions are clean.
+  - capslock passed unchanged: signer 92/92, agent 23/23, EXEC only through execsite.
+  - `TestKeygenVerdict` passed.
+  - 4 mutants were run: two signer D-R2 mutants, the signer cap and F5.
+  - `golangci-lint --build-tags e2e ./test/e2e/` reports 14 gosec findings. They are in agent_apply_test.go, bootstrap_test.go, harness_test.go, restore_test.go, revoke_test.go and sshd_reread_test.go, none in a file this round touched. CI does not lint with the e2e tag. Not in scope.
+- **CI E2E** (`workflow_dispatch`) on the pushed head: see the PR.
+
+The WSL copies were deleted.
+
+### UNVERIFIED (updated)
+
+- The tracer's real `ssh-keygen -Q` verdicts, with control certificate B, run only in CI e2e. The F5 mutant was killed through `TestKeygenVerdict`, not through the tracer.
+- F4's failure is injected through the `syncDir` seam. A real EIO from a directory fsync was not produced.
+- Moving an unverifiable `krl-served.json` aside and restarting (server-install.md).
+- D-R1 beyond the measured sizes: no recovery between 80,000 and 128,000 serials was run, and those ceilings are computed from the measured per-entry sizes.
+- Everything in "What ran and what did not" above still holds.
+
+### Follow-ups (not in scope)
+
+- **Close D-R1** (owner decision): a multi-leaf recovery, or a publish-path refusal at the recoverable size.
+- **If the KRL grows from skipped certificates:** carry an expired lost certificate only when an import names its serial or key ID, so that its entries keep a ValidBefore and are pruned. The signer and audit would then need the imports to judge a carried certificate.
+- **The signer's ValidBefore lookup is one SQL query per serial.** 70,000 serials take 2.7 s, which is fine at this size. Batch the queries if recoveries grow.
+- **Once 03-13 rotates the ops key,** `servedFloor` should verify the copy under the bundle that its manifest's BundleVersion names, not only under the bundle in force.
+- **Pre-existing:** TestAllowed fails on Windows, and test/e2e has gosec findings under the e2e tag.
+
+### Mutants of this round
+
+All of them were applied to throwaway copies of the working tree, and the copies were discarded. None survived.
+
+| Mutant | Change | Killed by |
+|---|---|---|
+| F1-krl-cap | krl cap back to `1 << 16` | `TestRecoveryEntries/near_publishable_maximum`; CLI `recovers_near_publishable_maximum`; signer `recovers_near_publishable_maximum` (WSL) |
+| F1-tlog-cap | tlog cap back to `1 << 16` | `TestRecoveryNearPublishableMaximum` (ed25519, p256) |
+| F2-cli-carries-all | the CLI's CarriesLost skip removed | `TestRevokeRecover/expired_lost_not_carried` |
+| F2-signer-no-check | the signer's check removed | `recovery_certificate_expired` (WSL) |
+| F2-signer-resolvedat | the signer's check reads the resolution time | `recovery_certificate_expired`, `carried_certificate_applied_late` (WSL) |
+| F2-audit-no-check | audit's check removed | `TestVerifyRecovery/recovery_certificate_expired` |
+| F2-audit-resolvedat | audit's check reads the resolution time | `recovery_certificate_expired`, `recovery_prepared_live_applied_late_accepted` |
+| F2-helper-no-skew | CarriesLost without the 300 s | `TestCarriesLost` |
+| F2-cert-cap-4096 | MaxRecoveryCertificates back to 4096 | `TestRecoveryCertificateCap` |
+| F3-trust-copy | the copy read at start is trusted unverified | `TestKRLServedCopy/copy_unverified_not_floor` (3 cases) |
+| F4-floor-only-on-success | the floor moves only when keepKRLFile returns nil | `TestKRLServedCopy/dir_sync_failure_advances_floor` |
+| F5-any-nonzero | any non-zero exit is a refusal | `TestKeygenVerdict` (WSL) |
+| F6-empty-ignored | an empty answer is not checked | `TestKRLServedCopy/empty_after_served_not_served` |
+
+The signer mutants ran on the commit before its amend. In that run, the first version of `recovery_too_large_body` also failed on its own: it read the refusal's text rather than its cause. It was replaced, still within that commit, by the faster key-ID version that passes. The tests that killed the mutants did not change.
