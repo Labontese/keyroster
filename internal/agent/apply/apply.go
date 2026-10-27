@@ -355,6 +355,17 @@ func (e *engine) apply(ctx context.Context) error {
 		return err
 	}
 	e.loadLastSwap(m != nil, cur.kind != linkNone)
+	if m == nil && cur.kind == linkNone && lg.kind == linkNone && !e.cfg.DryRun {
+		// A takeover plan with no first install it belongs to (no marker,
+		// no current, no last-good) was never validated against the files
+		// on disk now: it goes, and is never executed (PR #68 review, F2).
+		if p, _ := e.readAdopt(); p != nil {
+			e.logf("WARNING removing %s: no first install it belongs to is in progress", e.l.State(adoptFile))
+		}
+		if err := e.remove(e.l.State(adoptFile)); err != nil {
+			return err
+		}
+	}
 	if e.cfg.RecoverToLastGood {
 		if e.cfg.DryRun {
 			return fmt.Errorf("%w: --recover-to-last-good does not combine with --dry-run", ErrConfig)
@@ -838,17 +849,21 @@ func (e *engine) recover(ctx context.Context, m *marker, cur, lg link) error {
 // the self-test run. A failure undoes all of it (undoFirstInstall).
 func (e *engine) firstInstall(ctx context.Context, g *Generation, v *state.Verified) error {
 	e.report.Generation = g.N
-	if e.adopt != nil {
-		// A Phase 2 takeover (D-08): its plan is durable before current or
-		// the drop-in change. A crash resumes the removal once last-good is
-		// set (resumeAdoption), or is undone with the first install
-		// (undoFirstInstall).
-		if err := e.writeAdopt(e.adopt); err != nil {
-			return err
-		}
-	}
 	if err := e.writeMarker(0, g.N, 0, "final"); err != nil {
 		return err
+	}
+	if e.adopt != nil {
+		// A Phase 2 takeover (D-08): its plan is durable before current or
+		// the drop-in change, and after the marker (PR #68 review, F2), so
+		// recovery's undoFirstInstall always covers it. A crash resumes the
+		// removal once last-good is set (the start of Apply), or is undone
+		// with the first install.
+		if err := e.fault("adopt-plan"); err != nil {
+			return e.failFirstInstall(ctx, err)
+		}
+		if err := e.writeAdopt(e.adopt); err != nil {
+			return e.failFirstInstall(ctx, err)
+		}
 	}
 	if err := e.swapCurrent(ctx, g, swapChecked); err != nil {
 		return e.failFirstInstall(ctx, err)
@@ -871,7 +886,10 @@ func (e *engine) firstInstall(ctx context.Context, g *Generation, v *state.Verif
 		return err
 	}
 	// Only now, with the agent's generation last-good, do the Phase 2
-	// paths go (D-08).
+	// paths go (D-08), and only those of this run's own plan.
+	if e.adopt == nil {
+		return nil
+	}
 	return e.finishAdoption(ctx)
 }
 

@@ -285,6 +285,73 @@ func TestAdopt(t *testing.T) {
 			t.Fatalf("the resume after the final removal: %v, %+v, plan %t", err, r, h.exists(h.l.State(adoptFile)))
 		}
 	})
+	t.Run("marker_write_failure_leaves_no_plan", func(t *testing.T) {
+		t.Parallel()
+		// PR #68 review, F2: the marker write fails (ENOSPC, EIO) at the
+		// start of the takeover's first install; no plan may outlive it.
+		h := adoptHost(t)
+		h.installPhase2(phase2Layout{})
+		h.cfg.Fault = func(p string) error {
+			if p == "marker" {
+				return errors.New("no space left on device")
+			}
+			return nil
+		}
+		if _, err := h.apply(); err == nil {
+			t.Fatal("the apply passed with a failing marker write")
+		}
+		h.nothingWritten("after the failed marker write")
+		h.cfg.Fault = nil
+		if r := h.mustApply(); len(r.Phase2Removed) != 4 {
+			t.Fatalf("the takeover after the failure: %+v", r)
+		}
+	})
+	t.Run("plan_write_failure_or_crash_undone", func(t *testing.T) {
+		t.Parallel()
+		for _, inject := range []error{errors.New("no space left on device"), &crash{point: "adopt-plan"}} {
+			h := adoptHost(t)
+			h.installPhase2(phase2Layout{})
+			h.cfg.Fault = func(p string) error {
+				if p == "adopt-plan" {
+					return inject
+				}
+				return nil
+			}
+			if _, err := h.apply(); err == nil {
+				t.Fatalf("%v: the apply passed", inject)
+			}
+			if h.exists(h.l.State(adoptFile)) || h.exists(h.l.Current()) || h.exists(h.l.DropIn()) || !h.phase2Intact() {
+				t.Fatalf("%v: plan %t, current %t, drop-in %t, Phase 2 intact %t", inject, h.exists(h.l.State(adoptFile)), h.exists(h.l.Current()), h.exists(h.l.DropIn()), h.phase2Intact())
+			}
+			h.cfg.Fault = nil
+			if r := h.mustApply(); len(r.Phase2Removed) != 4 || h.exists(h.l.State(pendingFile)) {
+				t.Fatalf("%v: the takeover afterwards: %+v", inject, r)
+			}
+		}
+	})
+	t.Run("stale_plan_never_executed", func(t *testing.T) {
+		t.Parallel()
+		// PR #68 review, F2: a plan left with no marker and no generation
+		// (the state a failure or crash between the plan and the marker
+		// writes left before this fix). The operator removed the Phase 2
+		// drop-in by hand and kept the other files with new content; the
+		// first install adopts nothing and must not remove them.
+		h := newTestHost(t, newFixture(t))
+		h.publishDir(h.spec("role:ops"))
+		writeRootFile(t, h, "etc/ssh/keyroster_user_ca.pub", "ssh-ed25519 AAAA kept by the operator\n")
+		kept := writeRootFile(t, h, "etc/ssh/principals/deploy", "role:other\n")
+		e := h.engine()
+		if err := e.writeAdopt(&AdoptPlan{Remove: []string{h.l.Phase2DropIn(), h.l.Phase2CAFile(), kept, h.l.Phase2PrincipalsDir()}}); err != nil {
+			t.Fatal(err)
+		}
+		r := h.mustApply()
+		if len(r.Phase2Removed) != 0 || !h.exists(h.l.Phase2CAFile()) || readFile(t, kept) != "role:other\n" || h.exists(h.l.State(adoptFile)) || h.exists(h.l.State(adoptBak)) {
+			t.Fatalf("a stale plan: removed %v, CA file %t, plan %t", r.Phase2Removed, h.exists(h.l.Phase2CAFile()), h.exists(h.l.State(adoptFile)))
+		}
+		if h.lastGood() == 0 {
+			t.Fatal("the first install did not commit")
+		}
+	})
 	t.Run("removal_only_through_allowed_removal", func(t *testing.T) {
 		t.Parallel()
 		h := adoptHost(t)
