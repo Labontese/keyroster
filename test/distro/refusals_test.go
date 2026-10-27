@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/Labontese/keyroster/internal/agent/apply"
 	"github.com/Labontese/keyroster/internal/directory"
 )
@@ -53,7 +55,11 @@ func prepend(lines string) func(string) string {
 // TestDistroRefusals: the D-07 refusals on the distribution's own sshd,
 // with keyroster-agent preflight's exit codes (0 clean or report only, 3
 // refused, 2 tool error), and LoginGraceTime 0 refused by preflight and
-// apply --once alike with nothing written.
+// apply --once alike with nothing written. It runs the codes a container
+// can provoke; login_grace_unknown (a real sshd -T always prints seconds),
+// rhel8_unsupported, fips_unsupported, dropin_drift, sshd_config_unsafe
+// and the systemd path of sshd_command_unknown are unit-tested only
+// (TestPreflight, TestIncludeGraph, TestDetect; host-setup.md).
 func TestDistroRefusals(t *testing.T) {
 	other := filepath.Join(dropInDir, "10-other.conf")
 	for _, tc := range []struct {
@@ -64,6 +70,9 @@ func TestDistroRefusals(t *testing.T) {
 		want string // a finding code; "" none
 		file string // the finding's file
 		line int
+		// noPoP signs a policy without pop.hosts; lock holds the apply lock
+		// while the preflight runs.
+		noPoP, lock bool
 	}{
 		{name: "clean", code: 0},
 		{name: "foreign_ca_in_other_dropin", edit: hostEdit{files: map[string]string{other: "TrustedUserCAKeys /etc/ssh/other_ca.pub\n"}}, code: 3, want: apply.CodeForeignTrust, file: other, line: 1},
@@ -82,6 +91,16 @@ func TestDistroRefusals(t *testing.T) {
 			return []string{"preflight", "--root", "/", "--sshd", "/nonexistent/sshd", "--sshd-config", sshdConfig, "--ssh-keygen", keygen, "--state-dir", stateDir, "--spool", spoolDir}
 		}, code: 2},
 		{name: "login_grace_unbounded", edit: hostEdit{config: prepend("LoginGraceTime 0\n")}, code: 3, want: apply.CodeLoginGraceUnbounded},
+		// PR #68 review F7: the cheap remaining cases of the preflight table
+		// on the distribution's own sshd.
+		{name: "ssh_keygen_missing", args: func() []string {
+			return []string{"preflight", "--root", "/", "--sshd", sshdBin, "--sshd-config", sshdConfig, "--ssh-keygen", "/nonexistent/ssh-keygen", "--state-dir", stateDir, "--spool", spoolDir}
+		}, code: 3, want: apply.CodeSSHKeygenMissing, file: "/nonexistent/ssh-keygen"},
+		{name: "host_pop_not_enabled", noPoP: true, code: 3, want: apply.CodeHostPoPNotEnabled},
+		// sshd -T needs no listener, so sshd stays stopped (it cannot bind
+		// a TEST-NET address).
+		{name: "no_loopback_listener", edit: hostEdit{config: prepend("ListenAddress 192.0.2.10\n"), noStart: true}, code: 3, want: apply.CodeNoLoopbackListener},
+		{name: "apply_lock_held_tool_error", lock: true, code: 2},
 		// PR #68 review D-R3: the whole Include graph, relative to /etc/ssh,
 		// Match blocks and AuthorizedPrincipalsCommand included.
 		{name: "foreign_principals_file_in_included_match_block", edit: hostEdit{config: prepend("Include keyroster-test/ops.conf\n"),
@@ -101,9 +120,19 @@ func TestDistroRefusals(t *testing.T) {
 			files: map[string]string{"/etc/ssh/keyroster-test/loop.conf": "Include keyroster-test/loop.conf\n"}}, code: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newHost(t, true, tc.edit)
+			h := newHost(t, !tc.noPoP, tc.edit)
 			h.w.publish(account, h.hostKey, "role:ops")
 			h.enroll()
+			if tc.lock {
+				fd, err := unix.Open(filepath.Join(stateDir, "apply.lock"), unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC, 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = unix.Close(fd) }()
+				if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+					t.Fatal(err)
+				}
+			}
 			args := preflightArgs(true)
 			if tc.args != nil {
 				args = tc.args()
@@ -124,7 +153,7 @@ func TestDistroRefusals(t *testing.T) {
 				return
 			}
 			f := findingOf(r, tc.want)
-			if f == nil || tc.file != "" && (f.File != tc.file || f.Line != tc.line) {
+			if f == nil || !f.Refusal && tc.code == 3 || tc.file != "" && (f.File != tc.file || f.Line != tc.line) {
 				t.Fatalf("findings %+v, want %s at %s:%d", r.Findings, tc.want, tc.file, tc.line)
 			}
 			if tc.want == apply.CodeLoginGraceUnbounded {

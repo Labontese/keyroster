@@ -435,9 +435,23 @@ The keyroster agent (`keyroster-agent`, Phase 3) manages stock OpenSSH on
 root in a container, installs its own `openssh-server` and runs its
 packaged `sshd_config` with StrictModes yes. The agent passes its preflight,
 applies with the `signal` reload, accepts a certificate login through the
-`current` symlink, reports a later `Match` block as drift, refuses each
-case in the preflight table below, and takes over the Phase 2 layout. The
-facts each image ships:
+`current` symlink, reports a later `Match` block as drift, and takes over the
+Phase 2 layout. `TestDistroRefusals` provokes these preflight cases on each
+image's own sshd, with their exit status: `foreign_trust_setting` (another
+drop-in, `sshd_config`, a file included from outside `sshd_config.d` with a
+`Match` block, a nested glob include, `AuthorizedPrincipalsCommand` in
+`sshd_config` and in an included `Match` block), `no_dropin_dir`,
+`account_excluded` (report only), `login_grace_unbounded` (preflight and
+apply), `ssh_keygen_missing`, `host_pop_not_enabled`,
+`no_loopback_listener`, and exit 2 for an sshd that cannot run, an apply
+that holds the lock and an `Include` cycle (the distribution's `sshd -T`
+refuses it). `TestDistroDetectRefusesSSHDArgs` provokes
+`sshd_command_unknown` through `/etc/conf.d/sshd`. The other codes are
+unit-tested only, UNVERIFIED on a distribution's sshd:
+`login_grace_unknown` (a real `sshd -T` always prints seconds),
+`rhel8_unsupported`, `fips_unsupported`, `dropin_drift`,
+`sshd_config_unsafe`, `sshd_command_unknown` from a systemd unit, and the
+apply-only `phase2_adoption_pending`. The facts each image ships:
 
 | Image | OpenSSH | `Include sshd_config.d/*.conf` at line | Ed25519 CAs accepted (`casignaturealgorithms`) | LoginGraceTime | `ssh-keygen` | Notes |
 |---|---|---|---|---|---|---|
@@ -477,8 +491,9 @@ Run in CI as unit tests (`TestPreflight`); no RHEL 8 or FIPS host ran.
 
 ## Before the agent: preflight
 
-Run in CI (`e2e-distro`, 03-06) on every image above; UNVERIFIED on a real
-host until 03-16.
+Run in CI (`e2e-distro`, 03-06) on every image above for the codes
+[What is tested](#supported-platforms) lists; the others are unit-tested
+only. UNVERIFIED on a real host until 03-16.
 
 ```
 sudo keyroster-agent preflight
