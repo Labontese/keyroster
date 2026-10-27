@@ -12,7 +12,7 @@ provides:
   - "Leaf kind 15 revocation_recovery (tlog.RecoveryBody, DecodeRecoveryBody, MaxRecoveryEntries = MaxRecoveryBody / 24 since PR #69 review round 1, MaxRecoveryBody 11 MiB); tlog Kind validity is the explicit set 1-10 and 15"
   - "wire.RecoveryRequest under keyroster/revoke-recovery/v1 (file form Marshal / ParseRecoveryRequest, logged form SigningBytes / ParseRecoverySigningBytes), RecoveryImport, RecoveredCertificate and their caps"
   - "krl.RecoveryEntries, RecoveredCert, CertLookup, ErrRecoveryTooLarge, MaxRecoveryEntries: the one derivation rule the signer, audit verify and the CLI share"
-  - "krl.CarriesLost and RecoveryCarrySkew (PR #69 review round 1): the one rule for which lost certificates a recovery carries, shared by the CLI, the signer and audit verify (recovery_certificate_expired)"
+  - "krl.CheckCarriedLost (CarriesLost until PR #69 review round 2), ErrLostExpired, ErrLostUserKept and RecoveryCarrySkew: the one rule for which lost certificates a recovery carries and revokes, shared by the CLI, the signer and audit verify (recovery_certificate_expired, recovery_user_certificate_kept)"
   - "Signer.RecoverRevocations and RecoveryResult; kind 15 in the start-up rebuild (rebuildLogFrom) and in appendLocked"
   - "keyroster-signer recover-revocations --state-dir DIR (stdin, state lock, signer.New, never Serve)"
   - "keyroster revoke recover --restored --saved [--krl ...] [--revoke-lost ...] [--yes] [--admin-key] --out (offline, root-pinned, admin-signed)"
@@ -73,13 +73,14 @@ key-files:
     - test/capslock/keyroster-signer.json
 
 key-decisions:
-  - "03-06b: lost certificates still valid follow the owner's answer revoke-users-list-others (2026-10-26, PR #66): every lost user certificate live at the CLI's clock minus 300 s is revoked; host and machine certificates are carried and listed, and revoked only when --revoke-lost names them"
+  - "03-06b: lost certificates still valid follow the owner's answer revoke-users-list-others (2026-10-26, PR #66): every lost user certificate is revoked, whatever any clock says (PR #69 review round 2; before it, those live at the CLI's clock minus 300 s); host and machine certificates are carried and listed, and revoked only when --revoke-lost names them"
   - "03-06b: a key-ID entry's ValidBefore also requires the certificate's CA key to equal the entry's, besides the serial its key ID names and the equal key ID; otherwise 0 (fail-safe, the same rule in signer, audit and CLI)"
   - "03-06b: keyroster revoke recover decides the installation-ID rule in one branch: no installation ID in the restored bundle refuses recovery_installation_lost when the saved bundle has one or any --krl document was given, and prints nothing to recover otherwise"
   - "03-06b: with no KRLFile (the tests' newServer only; New refuses it) keyroster-server skips the whole keep step: verification, the version rule and the write"
   - "03-06b: the signer keeps the parsed trust bundle it loaded at start (Signer.bundle), so krl.VerifyManifest checks an import against the ops key of the bundle in force"
   - "03-06b (PR #69 review, owner decision D-R1): MaxRecoveryEntries is MaxRecoveryBody / 24, so the entry count never binds before the 11 MiB body cap; partially met, the body cap still binds below MaxKRL"
-  - "03-06b (PR #69 review, owner decision D-R2): a recovery carries only the lost certificates it revokes or that are live at the request's CreatedAt minus 300 s (krl.CarriesLost, enforced by CLI, signer and audit); MaxRecoveryCertificates is 65535"
+  - "03-06b (PR #69 review, owner decision D-R2): a recovery carries only the lost certificates it revokes or that are live at the request's CreatedAt minus 300 s (krl.CheckCarriedLost, enforced by CLI, signer and audit); MaxRecoveryCertificates is 65535"
+  - "03-06b (PR #69 review round 2): every lost user certificate is carried and revoked whatever the workstation clock says; a carried user certificate that is not revoked is refused at any resolution time (recovery_user_certificate_kept); the D-R2 expiry filter applies only to host and machine certificates"
   - "03-06b (PR #69 review): keyroster-server uses the copy read at start as the version floor only after it verifies, moves the floor once the rename succeeded, and refuses an empty KRL answer after it served one"
 
 patterns-established:
@@ -153,7 +154,7 @@ Lost-certificates answer: revoke-users-list-others
 
 ## Owner attention first
 
-- **Lost certificates follow your Task 1 answer.** Every lost user certificate that is still live is revoked. Lost host and machine certificates are carried and listed with their public keys, and are revoked only when `--revoke-lost SERIAL` names them. The signer enforces the user rule (`recovery_user_certificate_kept`), and so does audit verify.
+- **Lost certificates follow your Task 1 answer.** Every lost user certificate is revoked, expired or not, whatever the workstation clock says (PR #69 review round 2; before it, only those still live at the CLI's clock minus 300 s). Lost host and machine certificates are carried and listed with their public keys, and are revoked only when `--revoke-lost SERIAL` names them. The signer enforces the user rule (`recovery_user_certificate_kept`), and so does audit verify.
 - **`recover-revocations` never starts Serve.** It calls `signer.New` (every start-up check) and `RecoverRevocations`, and nothing else. The only KRL it publishes is the recovery's, inside its one transaction.
 - **`nothing to recover` never skips a supplied server copy.** It is printed only when neither bundle has an installation ID and no `--krl` document was given. A `--krl` document is read and decoded before anything is decided. The carry-over mutant (the `--krl` clause dropped) is killed by `TestRevokeRecover/krl_given_without_installation_id_refused`.
 - **Look closely at:** the server skips its whole keep step when `KRLFile` is empty. Only the tests' `newServer` can do that; `New` refuses it. Also check the key-ID ValidBefore rule, which is stricter than the plan text (deviation 6).
@@ -538,3 +539,70 @@ All of them were applied to throwaway copies of the working tree, and the copies
 | F6-empty-ignored | an empty answer is not checked | `TestKRLServedCopy/empty_after_served_not_served` |
 
 The signer mutants ran on the commit before its amend. In that run, the first version of `recovery_too_large_body` also failed on its own: it read the refusal's text rather than its cause. It was replaced, still within that commit, by the faster key-ID version that passes. The tests that killed the mutants did not change.
+
+## Review fix round 2 (PR #69)
+
+A narrow check of round 1 upheld one problem in `0176c4e` (P1, medium, 2 of 2 skeptics). The fix is on top of `0ad0723`, on 2026-10-27.
+
+### P1: a fast workstation clock left lost user certificates unrevoked
+
+- **Problem.** In round 1 the CLI set `revoke = live` for a lost user certificate, where live meant `EntryLive(vb, CLI clock − 300)`, and then dropped anything `CarriesLost` rejected. With the workstation clock D > 600 s ahead, a lost user certificate with real now < vb ≤ CLI clock − 600 was neither carried nor revoked. The signer's `recovery_user_certificate_kept` and audit's copy of it only look at carried certificates, so the request passed both. At `af18fd7` that input was refused, so round 1 turned a fail-closed case into a fail-open one and broke revoke-users-list-others. The `RecoveryCarrySkew` comment claimed that a fast clock never leaves a live certificate out. That only held for D ≤ 300.
+- **Fix (orchestrator decision).** Every lost user certificate is carried and revoked, whatever the local clock says: `revoke := user || named[serial]`. The D-R2 expiry filter now applies only to host and machine certificates, which grant no login. Revoking an expired user certificate is harmless, and its entry prunes by its known ValidBefore.
+- **One shared rule.** `krl.CarriesLost` is renamed `krl.CheckCarriedLost(validBefore, createdAt, user, revoke)`. A revoked certificate is always carried. An unrevoked one must be live at `CreatedAt − 300` (`ErrLostExpired`, refused as `recovery_certificate_expired`), and it must not be a user certificate (`ErrLostUserKept`, refused as `recovery_user_certificate_kept`). The CLI selects with it, and the signer and audit verify refuse with it. The signer and audit therefore no longer read the resolution time for the user rule: a carried user certificate that is not revoked is refused at any time. Refusal texts changed: the signer now says `lost user certificate serial <s> is not revoked; a recovery revokes every lost user certificate (revoke-users-list-others)`, and audit says `carried user certificate serial <s> is not revoked; a recovery revokes every lost user certificate (recovery_user_certificate_kept)`. The refusal names are unchanged.
+- **Why the stricter signer and audit rule rejects nothing it accepted before for a CLI request.** Every CLI on this branch set revoke for each carried user certificate that was live at `CreatedAt − 300` (`at` is that time). A carried unrevoked user certificate was therefore always expired at `CreatedAt − 300`. Round 1 already refused that as `recovery_certificate_expired`, and that case still gets the same refusal, because the expiry check comes first. Before `0176c4e` the CLI carried every lost certificate. Its expired, unrevoked user certificates passed the signer then, and round 1 already refused them. Nothing is deployed: the branch is unmerged.
+- **Commit:** `ffede39`.
+- **The comments now state exactly what holds.** `RecoveryCarrySkew` bounds only unrevoked certificates, which are host and machine certificates. With D ≤ 300 s, no host or machine certificate that the signer still sees as live is left out. With D > 300 s one can be left out of the recovered log and the summary, and only counted. It is not revoked under either outcome, grants no login, and the saved export still holds it. The plan's T-03-272 row records this as an accepted residual, and the plan's Certificates paragraph now states the user rule.
+
+### Round 1 text this round supersedes
+
+- **D-R2 (line "A recovery skips expired lost certificates") and the T-03-272 residual bullet.** They now hold only for host and machine certificates. The summary line `lost certificates expired before this request, not carried: <n>` counts only host and machine certificates.
+- **"The CLI uses one clock reading for both CreatedAt and the user-live rule".** No user-live rule exists any more. The CLI's one clock reading is CreatedAt. The summary's `(live|expired)` label still uses `CreatedAt − 300`.
+- **Side benefit.** An expired lost user certificate is now carried, so the imported entries of its serial or key ID take its ValidBefore and prune. The follow-up "If the KRL grows from skipped certificates" now concerns host and machine certificates only.
+
+### Tests
+
+- **CLI** `TestRevokeRecover/clock_ahead_user_still_revoked`, through the new `recoverNow` seam: the clock is set two hours past U's ValidBefore. The test asserts its own precondition, real now < vb ≤ CLI clock − 600. It then requires U, and only U, carried with revoke=true, at that CreatedAt. H has expired at that clock and is not carried.
+- **CLI** `expired_lost_not_carried` is updated. The expired user certificate is carried and revoked. Without `--revoke-lost`, the count line says 1 (the expired host certificate). With it, the line is absent.
+- **Signer** `clock_ahead_user_revoked`: CreatedAt is two hours past the expiry of a lost user certificate that is still live at the signer, and it is carried with revoke=true. The recovery applies, `Revoked` is 1, the published KRL revokes the certificate, and the export verifies.
+- **Signer** `recovery_user_certificate_kept_applied_late`: a kept user certificate is still refused when it is applied after it expired.
+- **Audit** `recovery_user_kept_applied_late`: the same case in a log. `recovery_prepared_live_applied_late_accepted` now uses a host certificate (new helper `lostHostCert`), because a kept user certificate is no longer accepted.
+- **krl** `TestCheckCarriedLost` adds four user cases.
+- **Gap.** No single test feeds the file the CLI writes to a signer. The CLI test shows the request's shape, and the signer test shows that a request of that shape applies and revokes.
+
+### Mutants of round 2
+
+Each mutant was applied by a script and then restored: with `git checkout -- <file>` on Windows, and from a byte copy in the WSL copy. None survived.
+
+| Mutant | Change | Killed by |
+|---|---|---|
+| R2-cli-old-user-rule | the CLI's `revoke = live` for user certificates restored | `TestRevokeRecover/clock_ahead_user_still_revoked`, `TestRevokeRecover/expired_lost_not_carried` |
+| R2-signer-resolvedat | the signer refuses a kept user certificate only when it is live at the resolution time | `recovery_user_certificate_kept_applied_late` (WSL) |
+| R2-signer-no-user-check | the signer's user check removed | `recovery_user_certificate_kept`, `recovery_user_certificate_kept_applied_late` (WSL) |
+| R2-audit-resolvedat | audit refuses a kept user certificate only when it is live at the resolution time | `TestVerifyRecovery/recovery_user_kept_applied_late` |
+| R2-helper-no-user | `CheckCarriedLost` without the user case | `TestCheckCarriedLost`; audit `recovery_user_certificate_kept`, `recovery_user_kept_applied_late` |
+
+### What ran (2026-10-27)
+
+- **Windows 11, Go 1.27.1, at `ffede39`:**
+  - `go test ./...` passed in every package except `internal/agent/paths` (TestAllowed). That failure is pre-existing and unchanged.
+  - gofmt is clean. `go vet ./...` passed for linux, windows and darwin.
+  - The Windows mutants were R2-cli-old-user-rule, R2-audit-resolvedat and R2-helper-no-user.
+- **WSL Ubuntu, Go 1.27.3, from a `git archive` of `ffede39`, through the copy's `scripts/linux.sh` with a script file:**
+  - The signer subtests above passed: `recovery_certificate_expired`, `carried_certificate_applied_late`, `recovery_user_certificate_kept`, `recovery_user_certificate_kept_applied_late` and `clock_ahead_user_revoked`.
+  - The signer mutants R2-signer-resolvedat and R2-signer-no-user-check were run, then the file was restored.
+  - `go test -race -count=1` passed for internal/krl, internal/audit, cmd/keyroster and internal/signer (292 s), with no DATA RACE.
+  - golangci-lint reported 0 issues for linux, windows and darwin.
+  - `go vet -tags e2e ./test/e2e/` passed. It ran on linux only: on windows and darwin the e2e package does not build, because it imports the linux-only `internal/agent/apply`, which predates this round.
+  - The WSL copy was deleted.
+- **Not run this round:** dep-firewall, testonly-firewall, capslock and fuzzing. No dependency changed, no new exec site was added, and no parser changed.
+- **CI E2E** (`workflow_dispatch`) on the pushed head: see the PR.
+
+### UNVERIFIED (round 2 update)
+
+- **The tracer's real `ssh-keygen -Q` verdicts, with control certificate B, are now verified.** Round-1 e2e run 40499241345 on `0ad0723` passed `TestRestoreRecoveryTracer` and `TestKeygenVerdict` on both lanes (OpenSSH 10.5p1 and 9.5p1). This resolves the first UNVERIFIED line of round 1, as the round-1 executor noted. One thing still holds: the F5 mutant was killed through `TestKeygenVerdict`, not through the tracer.
+- The other round-1 UNVERIFIED lines still hold.
+
+### Follow-ups (round 2, not in scope)
+
+- **Availability, fails closed.** Every lost user certificate is now carried, including long-expired ones. After a long gap between the backup and the latest saved export, many short-lived user certificates count against `MaxRecoveryCertificates` (65535) and the 11 MiB body cap, and the recovery can be refused with `recovery_too_large`. This partly undoes what D-R2 gained for the caps, for user certificates only.
+- **Host and machine certificates under a clock more than 300 s ahead.** One the signer still sees as live can be left out of the log and only counted (T-03-272 residual). Closing this needs a CreatedAt freshness bound, which the owner declined.
