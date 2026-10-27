@@ -95,7 +95,8 @@ func (v *Verified) AsStored() *Stored {
 //   - KRL. The newest complete KRL: equal to the stored one is a no-op,
 //     an older version krl_older; otherwise krl.VerifyManifest against the
 //     bundle in force, the pinned installation ID and the stored version,
-//     then krl.Parse. With BundleHeld, a KRL whose manifest the bundle in
+//     then krl.Parse, and the KRL's header krl_version must be the
+//     manifest's (krl_header_version_mismatch). With BundleHeld, a KRL whose manifest the bundle in
 //     force does not verify waits with the bundle.
 //
 // Verify reads only in; the bytes it checks are the bytes it returns in
@@ -394,6 +395,14 @@ func (v *Verified) verifyKRL(p *Pins, prev *Stored, in spool.State) error {
 	parsed, err := krl.Parse(files.KRL)
 	if err != nil {
 		return fmt.Errorf("%w: KRL version %d: %w", ErrKRL, ver, err)
+	}
+	if parsed.Version != m.KRLVersion {
+		// The manifest's SHA-256 covers these bytes, but the agent orders
+		// installed KRLs by their header (keepKRLInForce, RollbackTarget,
+		// krl_rollback_refused), so a header above the manifest would set a
+		// floor no later KRL could pass, and one below it would let an
+		// older list replace a newer one.
+		return fmt.Errorf("%w: KRL version %d: the KRL's header says krl_version %d, its signed manifest %d", ErrKRLHeader, ver, parsed.Version, m.KRLVersion)
 	}
 	v.KRL, v.KRLChanged = parsed, true
 	v.Next.KRL, v.Next.KRLManifest, v.Next.KRLSig, v.Next.KRLVersion = files.KRL, files.Manifest, files.Sig, m.KRLVersion

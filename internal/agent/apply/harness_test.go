@@ -31,6 +31,14 @@ import (
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
+// TestMain fixes the umask: readTrusted refuses a configuration file or
+// directory writable by group or others (PR #68 review D-R3), so the
+// fixtures' modes must not depend on the caller's umask.
+func TestMain(m *testing.M) {
+	unix.Umask(0o022)
+	os.Exit(m.Run())
+}
+
 // Test fixture keys: deterministic Ed25519 keys from a seed byte.
 func seedKey(t testing.TB, n byte) ssh.Signer {
 	t.Helper()
@@ -205,15 +213,25 @@ func (f *fixture) directory(prev []byte, s dirSpec) spool.Doc {
 // testInstallation).
 func (f *fixture) krl(serials []uint64, keys []ssh.PublicKey, id string) (uint64, spool.KRLFiles) {
 	f.t.Helper()
+	return f.krlWithHeader(serials, keys, id, 0)
+}
+
+// krlWithHeader is krl with the KRL's own header krl_version set to header
+// instead of the manifest's version (0: the same).
+func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id string, header uint64) (uint64, spool.KRLFiles) {
+	f.t.Helper()
 	if id == "" {
 		id = testInstallation
 	}
 	f.krlVersion++
+	if header == 0 {
+		header = f.krlVersion
+	}
 	set := krl.Set{Keys: keys}
 	if len(serials) > 0 {
 		set.Certs = []krl.CertSection{{CAKey: f.user.PublicKey(), Serials: serials}}
 	}
-	b, err := krl.Encode(set, f.krlVersion, time.Unix(int64(f.krlVersion), 0)) //nolint:gosec // G115: a test version
+	b, err := krl.Encode(set, header, time.Unix(int64(f.krlVersion), 0)) //nolint:gosec // G115: a test version
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -375,6 +393,22 @@ type fakeRunner struct {
 	queryCode   int
 	// extraHostKeys are more HostKey paths sshd -T lists.
 	extraHostKeys []string
+	// before are trust settings read before the Include (they win over
+	// any drop-in), after those read after it (a drop-in wins over them).
+	// noInclude makes sshd read no drop-in at all. match overrides
+	// settings for sshd -T -C user=<account> (a Match block). extra is
+	// more sshd -T lines (allowusers, denygroups, ...), and extraFor the
+	// same for sshd -T -C user=<account>.
+	before, after map[string]string
+	noInclude     bool
+	match         map[string]map[string]string
+	extra         string
+	extraFor      map[string]string
+	// dumps counts sshd -T runs, by -C spec ("" for none).
+	dumps map[string]int
+	// onReload runs at every reload command (rc-service, systemctl), with
+	// the runner's lock held.
+	onReload func(call string)
 }
 
 func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
@@ -391,7 +425,15 @@ func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
 		}
 		return Result{}, nil
 	case cmd.Path() == r.h.cfg.SSHD && len(args) >= 1 && args[0] == "-T":
-		return Result{Stdout: []byte(r.dump())}, nil
+		spec := ""
+		if len(args) == 5 && args[3] == "-C" {
+			spec = args[4]
+		}
+		if r.dumps == nil {
+			r.dumps = map[string]int{}
+		}
+		r.dumps[spec]++
+		return Result{Stdout: []byte(r.dumpFor(spec))}, nil
 	case cmd.Path() == r.h.cfg.SSHKeygen && len(args) == 3 && args[0] == "-l":
 		b, err := os.ReadFile(args[2])
 		if err != nil {
@@ -420,14 +462,49 @@ func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
 			return Result{Code: 255, Stderr: []byte("invalid KRL")}, nil
 		}
 		return Result{Stdout: []byte(args[3] + ": ok\n")}, nil
-	case filepath.Base(cmd.Path()) == "rc-service":
+	case filepath.Base(cmd.Path()) == "rc-service" || filepath.Base(cmd.Path()) == "systemctl":
 		r.reloads++
+		if r.onReload != nil {
+			r.onReload(call)
+		}
 		return Result{}, nil
 	}
 	return Result{Code: 127}, fmt.Errorf("fake runner: unexpected command %s", call)
 }
 
-func (r *fakeRunner) dump() string {
+func (r *fakeRunner) dump() string { return r.dumpFor("") }
+
+// dumpFor is sshd -T, with -C spec when spec is not empty: the trust
+// settings come from before, then the drop-in on disk (any file there
+// that names them, the agent's or a trial), then after, then "none"; a
+// Match override for the spec's user wins.
+func (r *fakeRunner) dumpFor(spec string) string {
+	user := ""
+	for _, kv := range strings.Split(spec, ",") {
+		if v, ok := strings.CutPrefix(kv, "user="); ok {
+			user = v
+		}
+	}
+	dropIn, derr := os.ReadFile(r.h.l.DropIn())
+	value := func(k string) string {
+		if v, ok := r.match[user][k]; ok && user != "" {
+			return v
+		}
+		if v, ok := r.before[k]; ok {
+			return v
+		}
+		if derr == nil && !r.noInclude {
+			for _, l := range strings.Split(string(dropIn), "\n") {
+				if f := strings.Fields(l); len(f) == 2 && strings.ToLower(f[0]) == k {
+					return f[1]
+				}
+			}
+		}
+		if v, ok := r.after[k]; ok {
+			return v
+		}
+		return "none"
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "port %d\n", r.h.sshd.port)
 	listen := r.listen
@@ -441,11 +518,12 @@ func (r *fakeRunner) dump() string {
 	for _, k := range r.extraHostKeys {
 		fmt.Fprintf(&b, "hostkey %s\n", k)
 	}
-	if _, err := os.Stat(r.h.l.DropIn()); err == nil {
-		cur := r.h.l.Current()
-		fmt.Fprintf(&b, "trustedusercakeys %s\nrevokedkeys %s\nauthorizedprincipalsfile %s\n", filepath.Join(cur, CAFile), filepath.Join(cur, KRLFile), filepath.Join(cur, PrincipalsDir, "%u"))
-	} else {
-		b.WriteString("trustedusercakeys none\nrevokedkeys none\nauthorizedprincipalsfile none\n")
+	for _, k := range append(slices.Clone(trustKeywords), principalsCommand, principalsCommandUser) {
+		fmt.Fprintf(&b, "%s %s\n", k, value(k))
+	}
+	b.WriteString(r.extra)
+	if user != "" {
+		b.WriteString(r.extraFor[user])
 	}
 	return b.String()
 }
@@ -492,7 +570,22 @@ func newTestHostIn(t *testing.T, f *fixture, base string) *testHost {
 	_ = unix.Close(fd)
 	h.sshd = startFakeSSHD(t)
 	h.run = &fakeRunner{h: h, grace: "120"}
-	h.cfg = Config{Spool: h.spool, SSHD: "/fake/sbin/sshd", SSHDConfig: "/fake/etc/ssh/sshd_config", SSHKeygen: "/fake/bin/ssh-keygen",
+	// The binaries exist (the preflight checks them) but never run: the
+	// fake runner answers by path. sshd_config is the host's own file.
+	bin := filepath.Join(base, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	for _, b := range []string{"sshd", "ssh-keygen"} {
+		if err := os.WriteFile(filepath.Join(bin, b), []byte("#!/bin/false\n"), 0o755); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+	}
+	sshdConfig := filepath.Join(h.l.Root, "etc", "ssh", "sshd_config")
+	if err := os.WriteFile(sshdConfig, []byte("Include "+filepath.Join(h.l.DropInDir(), "*.conf")+"\n"), 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	h.cfg = Config{Spool: h.spool, SSHD: filepath.Join(bin, "sshd"), SSHDConfig: sshdConfig, SSHKeygen: filepath.Join(bin, "ssh-keygen"),
 		Reload: "openrc", SelfTestTimeout: 2 * time.Second, Clock: h.clock, Exec: h.run}
 	h.state = f.genesis()
 	return h

@@ -109,7 +109,8 @@ type Config struct {
 	// SSHD, SSHDConfig and SSHKeygen are absolute paths: the service's
 	// sshd binary and configuration, and ssh-keygen.
 	SSHD, SSHDConfig, SSHKeygen string
-	// Reload is the reload strategy: signal, systemd:<unit> or openrc.
+	// Reload is the reload strategy: signal, systemd:<unit>,
+	// systemd-socket:<unit> or openrc (CheckReload).
 	Reload string
 	// DryRun verifies and renders and reports the difference against
 	// current, writing nothing.
@@ -117,6 +118,12 @@ type Config struct {
 	// RecoverToLastGood is the operator's way out of
 	// stuck: pending_state_unknown.
 	RecoverToLastGood bool
+	// AllowAdoption lets this run take over a host set up with the Phase 2
+	// runbook's exact layout (D-08), removing that layout's files in
+	// /etc/ssh. keyroster-agent apply --once sets it; the applier unit's
+	// run loop (03-07) does not, because its sandbox cannot remove files
+	// there: it reports phase2_adoption_pending and writes nothing.
+	AllowAdoption bool
 	// SelfTestTimeout bounds the whole self-test (default 10 s).
 	SelfTestTimeout time.Duration
 	// Clock, Exec and Log default to SystemClock, ExecRunner and nowhere.
@@ -139,13 +146,18 @@ type Report struct {
 	// WaitedMS is, for every widening swap that had to wait, the interval
 	// the timing rule enforced: from the previous swap of current to the
 	// widening swap (at least LoginGraceTime + 30 s).
-	WaitedMS         int64  `json:"waited_ms"`
-	Reloaded         bool   `json:"reloaded"`
-	SelfTest         string `json:"self_test"`
-	Rollback         bool   `json:"rollback"`
-	RollbackSelfTest string `json:"rollback_self_test,omitempty"`
-	Recovered        bool   `json:"recovered"`
-	NoOp             bool   `json:"no_op"`
+	WaitedMS int64 `json:"waited_ms"`
+	Reloaded bool  `json:"reloaded"`
+	// ReloadActions are the reload commands this run ran, in order (PR #68
+	// review D-R1): "systemctl try-reload-or-restart ssh.service" on a
+	// socket-activated host, where systemd decides whether a running sshd
+	// re-reads.
+	ReloadActions    []string `json:"reload_actions,omitempty"`
+	SelfTest         string   `json:"self_test"`
+	Rollback         bool     `json:"rollback"`
+	RollbackSelfTest string   `json:"rollback_self_test,omitempty"`
+	Recovered        bool     `json:"recovered"`
+	NoOp             bool     `json:"no_op"`
 	// BundleHeld: a newer bundle in the spool waits for the next run,
 	// because the newest directory verifies only under an earlier policy
 	// (state.Verified.BundleHeld).
@@ -156,11 +168,29 @@ type Report struct {
 	// and host_removed install no principals, host_keys_rotated and
 	// host_keys_disagree keep last-good's; the CA keys and the KRL apply
 	// in every case.
-	HostStatus        string   `json:"host_status,omitempty"`
+	HostStatus string `json:"host_status,omitempty"`
+	// KRLKept is set when the verified state's KRL is older than the one
+	// in force in current, which a rollback or crash recovery kept there
+	// (the KRL never rolls back): the generation keeps the KRL in force,
+	// and this names both versions instead of substituting silently (PR #67
+	// round-2 carry-over).
+	KRLKept *KRLKept `json:"krl_kept,omitempty"`
+	// Phase2Removed are the Phase 2 layout's paths this run removed after
+	// taking the host over (D-08).
+	Phase2Removed     []string `json:"phase2_removed,omitempty"`
 	UnmatchedHostKeys []string `json:"unmatched_host_keys,omitempty"`
 	SpoolIgnored      []string `json:"spool_ignored,omitempty"`
 	Diff              []string `json:"diff,omitempty"`
 	Errors            []string `json:"errors"`
+}
+
+// KRLKept is Report.KRLKept: the KRL version in force in current (and the
+// generation that holds it), kept over the older version the verified
+// state renders.
+type KRLKept struct {
+	InForce    uint64 `json:"in_force"`
+	Verified   uint64 `json:"verified"`
+	Generation uint64 `json:"generation"`
 }
 
 // engine is one run's working state.
@@ -176,15 +206,17 @@ type engine struct {
 	dump Dump
 	keys []ssh.PublicKey
 
-	grace         int // the LoginGraceTime bound in force (ObserveLoginGrace)
-	rawGrace      int // sshd -T's logingracetime at start
-	last          swapRecord
-	lastKnown     bool
-	maxGen        uint64
-	pending       *marker
-	dropinChanged bool
-	staged        uint64 // the accepted/ snapshot a commit marker names
-	poll          func(ctx context.Context) (*Generation, *state.Verified, error)
+	grace          int // the LoginGraceTime bound in force (ObserveLoginGrace)
+	rawGrace       int // sshd -T's logingracetime at start
+	last           swapRecord
+	lastKnown      bool
+	maxGen         uint64
+	pending        *marker
+	dropinChanged  bool
+	staged         uint64     // the accepted/ snapshot a commit marker names
+	adopt          *AdoptPlan // a Phase 2 takeover this first install makes (D-08)
+	dropInRepaired bool       // repairDropIn wrote the agent's drop-in (over a trial, or an edit on an adoption resume)
+	poll           func(ctx context.Context) (*Generation, *state.Verified, error)
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
 	// net.Dialer and /proc (tests substitute both).
@@ -218,7 +250,8 @@ func (e *engine) logf(format string, args ...any) {
 //     did not make is stuck: pending_state_unknown, no swap, until the
 //     operator runs --recover-to-last-good.
 //  3. One spool capture is verified (state.Verify); equal versions are a
-//     no-op that writes nothing and repairs no drift.
+//     no-op that writes nothing and repairs no drift, except that a trial
+//     drop-in a crashed preflight left is replaced first (replaceTrial).
 //  4. The newest verified state is rendered once (Render), keeping a newer
 //     KRL current holds (keepKRL: the KRL never rolls back), written as a
 //     new generation and checked (validate).
@@ -330,6 +363,17 @@ func (e *engine) apply(ctx context.Context) error {
 		return err
 	}
 	e.loadLastSwap(m != nil, cur.kind != linkNone)
+	if m == nil && cur.kind == linkNone && lg.kind == linkNone && !e.cfg.DryRun {
+		// A takeover plan with no first install it belongs to (no marker,
+		// no current, no last-good) was never validated against the files
+		// on disk now: it goes, and is never executed (PR #68 review, F2).
+		if p, _ := e.readAdopt(); p != nil {
+			e.logf("WARNING removing %s: no first install it belongs to is in progress", e.l.State(adoptFile))
+		}
+		if err := e.remove(e.l.State(adoptFile)); err != nil {
+			return err
+		}
+	}
 	if e.cfg.RecoverToLastGood {
 		if e.cfg.DryRun {
 			return fmt.Errorf("%w: --recover-to-last-good does not combine with --dry-run", ErrConfig)
@@ -345,7 +389,83 @@ func (e *engine) apply(ctx context.Context) error {
 			return err
 		}
 	}
+	if !e.cfg.DryRun {
+		// A Phase 2 takeover whose removal a crash or a failure cut short
+		// resumes once the agent's generation is last-good (D-08).
+		if lg, err := e.resolveLink(e.l.LastGood()); err != nil {
+			return err
+		} else if lg.kind == linkAgent && e.cfg.AllowAdoption {
+			if err := e.finishAdoption(ctx); err != nil {
+				return err
+			}
+		} else if p, _ := e.readAdopt(); lg.kind == linkAgent && p != nil {
+			e.logf("WARNING %s: the agent's files are in force, and the Phase 2 layout's removal is unfinished; run %s", CodePhase2Pending, adoptCommand)
+		}
+		if err := e.replaceTrial(ctx); err != nil {
+			return err
+		}
+	}
 	return e.forward(ctx)
+}
+
+// replaceTrial handles a trial drop-in a crashed preflight left, before
+// anything else of the run and before a no-op returns (PR #68 review, F1
+// and F5). Without a generation of the agent's as last-good it is
+// removed. On an installed host the agent's own drop-in replaces it, with
+// activateDropIn's sshd -t, sshd -T checks and reload, and the self-test,
+// so an sshd that loaded the trial (current's CA keys without its KRL)
+// re-reads; the run is then not a no-op. The start-of-run sshd -T saw the
+// trial, so it is read again.
+func (e *engine) replaceTrial(ctx context.Context) error {
+	old, err := e.readDropIn()
+	if err != nil || !bytes.Equal(old, trialDropIn(e.l)) {
+		return err
+	}
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil {
+		return err
+	}
+	if lg.kind == linkAgent {
+		if err := e.repairDropIn(ctx); err != nil {
+			return err
+		}
+		e.logf("replaced a preflight's trial drop-in with the agent's own and reloaded sshd")
+		return nil
+	}
+	if err := e.removeTrial(); err != nil {
+		return err
+	}
+	e.dump, err = e.sshdDump(ctx, "")
+	return err
+}
+
+// repairDropIn writes the agent's drop-in over whatever 00-keyroster.conf
+// holds on an installed host (a trial, an edit, nothing), with
+// activateDropIn's sshd -t, sshd -T checks and reload, then the
+// self-test; dropin.prev goes once it passes, and sshd -T is read again.
+// The run is then not a no-op.
+func (e *engine) repairDropIn(ctx context.Context) error {
+	changed, err := e.writeDropIn()
+	if err != nil {
+		return err
+	}
+	if changed {
+		if err := e.activateDropIn(ctx); err != nil {
+			return err
+		}
+	}
+	e.dropInRepaired = true
+	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
+		e.report.SelfTest = "fail: " + err.Error()
+		return err
+	}
+	e.report.SelfTest = "pass"
+	e.dropinChanged = false
+	if err := e.remove(e.l.State(dropinPrevFile)); err != nil {
+		return err
+	}
+	e.dump, err = e.sshdDump(ctx, "")
+	return err
 }
 
 // atRollbackTarget reports whether current already holds
@@ -478,8 +598,15 @@ func (e *engine) forward(ctx context.Context) error {
 	}
 	e.report.BundleHeld = v.BundleHeld
 	if !v.Changed() {
-		e.report.NoOp = true
-		e.setVersions(v, nil)
+		// A run that replaced a trial drop-in wrote it: not a no-op.
+		e.report.NoOp = !e.dropInRepaired
+		// The KRL in force is current's, which a rollback or crash recovery
+		// may have kept above accepted/'s (PR #67 round-2 carry-over).
+		cur, curLink, err := e.readCurrent()
+		if err != nil || curLink.kind != linkAgent {
+			cur = nil
+		}
+		e.setVersions(v, cur)
 		return nil
 	}
 	g, err := e.render(v)
@@ -491,6 +618,9 @@ func (e *engine) forward(ctx context.Context) error {
 		return err
 	}
 	e.keepKRL(g, cur, curLink)
+	if err := e.preflightApply(v, g); err != nil {
+		return err
+	}
 	if e.cfg.DryRun {
 		e.setVersions(v, g)
 		e.report.Diff = diff(cur, g)
@@ -579,9 +709,16 @@ func (e *engine) setVersions(v *state.Verified, g *Generation) {
 // newer KRL in current than accepted/ holds, and a capture that no longer
 // offers it must not render the older one.
 func (e *engine) keepKRL(g, cur *Generation, curLink link) {
-	if cur != nil && curLink.kind == linkAgent && keepKRLInForce(g, cur) {
-		e.logf("keeping KRL version %d, in force in generation %d, over the older one this capture renders", krlVersion(cur), curLink.n)
+	if cur == nil || curLink.kind != linkAgent {
+		return
 	}
+	verified := krlVersion(g)
+	if !keepKRLInForce(g, cur) {
+		e.report.KRLKept = nil // a superseding capture may bring a newer KRL
+		return
+	}
+	e.report.KRLKept = &KRLKept{InForce: krlVersion(cur), Verified: verified, Generation: curLink.n}
+	e.logf("WARNING krl_kept: the verified state's KRL version %d is older than version %d in force in generation %d; keeping version %d", verified, krlVersion(cur), curLink.n, krlVersion(cur))
 }
 
 // render is Render for this host. When Render refuses because of the
@@ -787,6 +924,19 @@ func (e *engine) firstInstall(ctx context.Context, g *Generation, v *state.Verif
 	if err := e.writeMarker(0, g.N, 0, "final"); err != nil {
 		return err
 	}
+	if e.adopt != nil {
+		// A Phase 2 takeover (D-08): its plan is durable before current or
+		// the drop-in change, and after the marker (PR #68 review, F2), so
+		// recovery's undoFirstInstall always covers it. A crash resumes the
+		// removal once last-good is set (the start of Apply), or is undone
+		// with the first install.
+		if err := e.fault("adopt-plan"); err != nil {
+			return e.failFirstInstall(ctx, err)
+		}
+		if err := e.writeAdopt(e.adopt); err != nil {
+			return e.failFirstInstall(ctx, err)
+		}
+	}
 	if err := e.swapCurrent(ctx, g, swapChecked); err != nil {
 		return e.failFirstInstall(ctx, err)
 	}
@@ -804,7 +954,15 @@ func (e *engine) firstInstall(ctx context.Context, g *Generation, v *state.Verif
 		return e.failFirstInstall(ctx, err)
 	}
 	e.report.SelfTest = "pass"
-	return e.commit(g.N, v)
+	if err := e.commit(g.N, v); err != nil {
+		return err
+	}
+	// Only now, with the agent's generation last-good, do the Phase 2
+	// paths go (D-08), and only those of this run's own plan.
+	if e.adopt == nil {
+		return nil
+	}
+	return e.finishAdoption(ctx)
 }
 
 func (e *engine) failFirstInstall(ctx context.Context, cause error) error {
@@ -841,6 +999,11 @@ func (e *engine) undoFirstInstall(ctx context.Context, cur link) error {
 		if err := e.removeCurrent(); err != nil {
 			return err
 		}
+	}
+	// A Phase 2 takeover this first install began is undone with it: its
+	// paths were never touched (they go only after the commit).
+	if err := e.remove(e.l.State(adoptFile)); err != nil {
+		return err
 	}
 	if err := e.clearMarker(); err != nil {
 		return err
@@ -1005,7 +1168,7 @@ func (e *engine) finishCommit(n, snap uint64) error {
 // /etc/ssh/sshd_config (D-07).
 func DropIn(l Layout) []byte {
 	cur := l.Current()
-	return []byte("# keyroster: managed by keyroster-agent; do not edit\n" +
+	return []byte(dropInHeader +
 		"TrustedUserCAKeys " + filepath.Join(cur, CAFile) + "\n" +
 		"RevokedKeys " + filepath.Join(cur, KRLFile) + "\n" +
 		"AuthorizedPrincipalsFile " + filepath.Join(cur, PrincipalsDir, "%u") + "\n")
@@ -1039,6 +1202,9 @@ func (e *engine) writeDropIn() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if bytes.Equal(old, trialDropIn(e.l)) {
+		old = nil // a preflight's trial, never in force: not a previous drop-in
+	}
 	if bytes.Equal(old, want) {
 		return false, nil
 	}
@@ -1070,9 +1236,102 @@ func (e *engine) writeDropIn() (bool, error) {
 	return true, e.writeFile(e.l.DropInDir(), paths.DropInName, want, 0o644)
 }
 
+// trustKeywords are the sshd settings the drop-in sets, in sshd -T's
+// lowercase spelling.
+var trustKeywords = []string{"trustedusercakeys", "revokedkeys", "authorizedprincipalsfile"}
+
+// ourValues are the values sshd -T must report for trustKeywords once the
+// agent's drop-in is in force: its three current/ paths.
+func ourValues(l Layout) map[string]string {
+	cur := l.Current()
+	return map[string]string{
+		"trustedusercakeys":        filepath.Join(cur, CAFile),
+		"revokedkeys":              filepath.Join(cur, KRLFile),
+		"authorizedprincipalsfile": filepath.Join(cur, PrincipalsDir, "%u"),
+	}
+}
+
+// accountSpec is the sshd -T -C connection specification for account on
+// a loopback connection to laddr port lport (03-06: Match blocks are
+// evaluated per managed account; a Match Address for remote client ranges
+// is not, see host-setup.md "Drift").
+func accountSpec(account, laddr, lport string) string {
+	return "user=" + account + ",host=127.0.0.1,addr=127.0.0.1,laddr=" + laddr + ",lport=" + lport
+}
+
+// firstLoopback is the address and port of the first loopback target
+// sshd -T names, for the -C specifications.
+func firstLoopback(d Dump) (string, string, error) {
+	targets, err := loopbackTargets(d)
+	if err != nil {
+		return "", "", err
+	}
+	host, port, err := net.SplitHostPort(targets[0])
+	return host, port, err
+}
+
+// principalAccounts is the accounts g holds a principals file for.
+func principalAccounts(g *Generation) []string {
+	var out []string
+	if g == nil {
+		return nil
+	}
+	for _, name := range fileNames(g) {
+		if a, ok := strings.CutPrefix(name, PrincipalsDir+"/"); ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// checkDropInEffective checks that sshd -T reports the drop-in's three
+// paths and no AuthorizedPrincipalsCommand (D-R3), and so does sshd -T -C
+// for every account current holds a principals file for (03-06,
+// T-03-34: a Match block that overrides a trust setting for a managed
+// account makes the drop-in not effective for that account).
+func (e *engine) checkDropInEffective(ctx context.Context, dump Dump) error {
+	want := ourValues(e.l)
+	for _, k := range trustKeywords {
+		if got := dump.One(k); got != want[k] {
+			return fmt.Errorf("%w: sshd -T reports %s %q, want %q; another configuration file sets it first", ErrDropInNotEffective, k, got, want[k])
+		}
+	}
+	if got := dump.One(principalsCommand); !isDefault(got) {
+		return fmt.Errorf("%w: sshd -T reports %s %q, want none; a principals command widens which certificates sshd accepts", ErrDropInNotEffective, principalsCommand, got)
+	}
+	cur, _, err := e.readCurrent()
+	if err != nil {
+		return err
+	}
+	accounts := principalAccounts(cur)
+	if len(accounts) == 0 {
+		return nil
+	}
+	laddr, lport, err := firstLoopback(dump)
+	if err != nil {
+		return err
+	}
+	for _, a := range accounts {
+		d, err := e.sshdDump(ctx, accountSpec(a, laddr, lport))
+		if err != nil {
+			return err
+		}
+		for _, k := range trustKeywords {
+			if got := d.One(k); got != want[k] {
+				return fmt.Errorf("%w: sshd -T -C user=%s reports %s %q, want %q; a Match block overrides it for that account", ErrDropInNotEffective, a, k, got, want[k])
+			}
+		}
+		if got := d.One(principalsCommand); !isDefault(got) {
+			return fmt.Errorf("%w: sshd -T -C user=%s reports %s %q, want none; a Match block sets a principals command for that account", ErrDropInNotEffective, a, principalsCommand, got)
+		}
+	}
+	return nil
+}
+
 // activateDropIn checks a changed drop-in with sshd -t, checks that
-// sshd -T now reports its three paths (a drop-in read after another file
-// that sets them is not effective), and reloads sshd.
+// sshd -T now reports its three paths, globally and for every managed
+// account (a drop-in read after another file that sets them, or a Match
+// block that overrides them, is not effective), and reloads sshd.
 func (e *engine) activateDropIn(ctx context.Context) error {
 	if err := e.sshdTest(ctx); err != nil {
 		return err
@@ -1081,23 +1340,17 @@ func (e *engine) activateDropIn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cur := e.l.Current()
-	for k, want := range map[string]string{
-		"trustedusercakeys":        filepath.Join(cur, CAFile),
-		"revokedkeys":              filepath.Join(cur, KRLFile),
-		"authorizedprincipalsfile": filepath.Join(cur, PrincipalsDir, "%u"),
-	} {
-		if got := dump.One(k); got != want {
-			return fmt.Errorf("%w: sshd -T reports %s %q, want %q; another configuration file sets it first", ErrDropInNotEffective, k, got, want)
-		}
+	if err := e.checkDropInEffective(ctx, dump); err != nil {
+		return err
 	}
 	if err := e.fault("reload"); err != nil {
 		return err
 	}
-	if err := e.reload(ctx, e.dump); err != nil {
+	reloaded, err := e.reload(ctx, e.dump)
+	if err != nil {
 		return err
 	}
-	e.report.Reloaded = true
+	e.report.Reloaded = e.report.Reloaded || reloaded
 	g, err := dump.LoginGrace()
 	if err != nil {
 		return err
@@ -1125,10 +1378,11 @@ func (e *engine) restoreDropIn(ctx context.Context) error {
 	if err := e.sshdTest(ctx); err != nil {
 		return err
 	}
-	if err := e.reload(ctx, e.dump); err != nil {
+	reloaded, err := e.reload(ctx, e.dump)
+	if err != nil {
 		return err
 	}
-	e.report.Reloaded = true
+	e.report.Reloaded = e.report.Reloaded || reloaded
 	e.grace, err = e.observeLoginGrace(e.rawGrace, true)
 	return err
 }

@@ -60,7 +60,7 @@ git config gpg.ssh.program C:/Windows/System32/OpenSSH/ssh-keygen.exe
 
 ## Required checks
 
-The `main-integrity` ruleset requires these 19 checks. Each name is a job
+The `main-integrity` ruleset requires these 26 checks. Each name is a job
 name (with its matrix value) in one of the workflows under
 `.github/workflows/`:
 
@@ -77,6 +77,13 @@ name (with its matrix value) in one of the workflows under
 | `pr-title` | `pr-title.yml` | Conventional Commits check of the PR title (runs on pull requests only, also when the title is edited) |
 | `e2e (9.5p1)` | `e2e.yml` | the `test/e2e` suite against a non-root sshd built from portable OpenSSH 9.5p1 (`scripts/build-openssh.sh`: SHA-256-pinned, GPG-verified) |
 | `e2e (10.5p1)` | `e2e.yml` | the same suite against portable OpenSSH 10.5p1 |
+| `e2e-distro (debian:12)` | `e2e-distro.yml` | `test/distro/run.sh` in the Debian 12 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
+| `e2e-distro (debian:13)` | `e2e-distro.yml` | `test/distro/run.sh` in the Debian 13 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
+| `e2e-distro (ubuntu:24.04)` | `e2e-distro.yml` | `test/distro/run.sh` in the Ubuntu 24.04 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
+| `e2e-distro (ubuntu:26.04)` | `e2e-distro.yml` | `test/distro/run.sh` in the Ubuntu 26.04 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
+| `e2e-distro (almalinux:9)` | `e2e-distro.yml` | `test/distro/run.sh` in the AlmaLinux 9 image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
+| `e2e-distro (alpine)` | `e2e-distro.yml` | `test/distro/run.sh` in the Alpine (latest) image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
+| `e2e-distro (archlinux)` | `e2e-distro.yml` | `test/distro/run.sh` in the Arch Linux (latest) image (pinned by digest): keyroster-agent against the distribution's own OpenSSH server, run as root in the container |
 | `e2e-pkcs11 (distro-p256)` | `e2e-pkcs11.yml` | the PKCS#11 path with P-256 keys in SoftHSM2, reached through Ubuntu's own ssh-agent |
 | `e2e-pkcs11 (10.5p1-ed25519)` | `e2e-pkcs11.yml` | the PKCS#11 path with Ed25519 keys in SoftHSM2, reached through the OpenSSH 10.5p1 ssh-agent |
 | `e2e-tpm` | `e2e-tpm.yml` | `ca-init --backend tpm` and the TPM keystore tests against swtpm |

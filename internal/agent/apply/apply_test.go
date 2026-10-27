@@ -48,7 +48,7 @@ func TestApplyTracer(t *testing.T) {
 
 	h.publishKRL(7)
 	r = h.mustApply()
-	if r.Reloaded || r.Intermediate != 0 || h.run.reloads != 1 || h.current() == first {
+	if r.Reloaded || r.Intermediate != 0 || h.run.reloads != 1 || h.current() == first || r.KRLKept != nil {
 		t.Fatalf("revocation: %+v, %d reloads, current %d", r, h.run.reloads, h.current())
 	}
 
@@ -341,6 +341,24 @@ func TestApply(t *testing.T) {
 		h.publishDir(s)
 		if _, err := h.apply(); !errors.Is(err, state.ErrDirInstall) || h.exists(h.l.Current()) {
 			t.Fatalf("a directory for another installation: %v, want directory_installation and nothing installed", err)
+		}
+	})
+	t.Run("krl_header_version_differs_from_manifest_refused", func(t *testing.T) {
+		t.Parallel()
+		// PR #67 round-2 carry-over (a): the manifest signs the KRL's bytes
+		// and names version N, but the KRL's own header says another
+		// version. Above N it would set a floor no later KRL passes; below
+		// N an older list could replace a newer one. Refused either way.
+		for _, delta := range []int64{+1000, -1} {
+			h := newTestHost(t, newFixture(t))
+			h.installed("role:ops")
+			cur := h.current()
+			header := uint64(int64(h.f.krlVersion+1) + delta) //nolint:gosec // G115: a test version
+			v, files := h.f.krlWithHeader([]uint64{7}, nil, "", header)
+			h.state.KRLs = map[uint64]spool.KRLFiles{v: files}
+			if _, err := h.apply(); !errors.Is(err, state.ErrKRLHeader) || h.current() != cur || h.krlRevokes(h.l.Current(), 7) {
+				t.Fatalf("header %d, manifest %d: %v, want krl_header_version_mismatch and nothing installed", header, v, err)
+			}
 		}
 	})
 	t.Run("krl_other_installation_refused", func(t *testing.T) {
@@ -763,6 +781,14 @@ func TestApply(t *testing.T) {
 			if !h.krlRevokes(h.l.Current(), 7) || !h.krlRevokes(h.l.LastGood(), 7) || r.KRLVersion != krl7 {
 				t.Fatalf("the KRL went back: current revokes 7 %t, last-good revokes 7 %t, reported KRL %d", h.krlRevokes(h.l.Current(), 7), h.krlRevokes(h.l.LastGood(), 7), r.KRLVersion)
 			}
+			// PR #67 round-2 carry-over (b): the substitution is named in
+			// the report and in status.json, not only in the log.
+			if r.KRLKept == nil || r.KRLKept.InForce != krl7 || r.KRLKept.Verified >= krl7 {
+				t.Fatalf("report krl_kept = %+v, want in_force %d over an older verified version", r.KRLKept, krl7)
+			}
+			if b, _ := os.ReadFile(h.l.State(statusFile)); !strings.Contains(string(b), `"krl_kept":{"in_force":`+strconv.FormatUint(krl7, 10)) { //nolint:gosec // test fixture
+				t.Fatalf("status.json does not name the kept KRL: %s", b)
+			}
 			if !slices.Equal(h.principals("deploy"), []string{"role:ops", "role:q"}) {
 				t.Fatalf("principals = %v", h.principals("deploy"))
 			}
@@ -780,6 +806,28 @@ func TestApply(t *testing.T) {
 			}
 		})
 	}
+	t.Run("noop_reports_krl_in_force", func(t *testing.T) {
+		t.Parallel()
+		// PR #67 round-2 carry-over (c): after a rollback kept KRL 7 in
+		// current, a capture equal to accepted/ is a no-op; it reports the
+		// KRL version in force (current's), not accepted/'s.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.setStall(true)
+		h.publishKRL(7)
+		krl7 := h.f.krlVersion
+		if _, err := h.apply(); !errors.Is(err, ErrSelfTest) || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("the failed apply of KRL 7: %v", err)
+		}
+		h.sshd.setStall(false)
+		h.resetSpool()
+		h.state.KRLs = map[uint64]spool.KRLFiles{}
+		r, err := h.apply()
+		if err != nil || !r.NoOp || r.KRLVersion != krl7 {
+			t.Fatalf("no-op after the kept KRL: %+v, %v, want krl_version %d", r, err, krl7)
+		}
+	})
 	t.Run("recover_to_last_good_keeps_newer_krl", func(t *testing.T) {
 		t.Parallel()
 		// --recover-to-last-good from the generation a rollback left
@@ -1888,6 +1936,24 @@ func TestHostKeys(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "ssh_host_ecdsa_key"), []byte("private key placeholder\n"))
 	if _, err := hostKeys(dump("ssh_host_ecdsa_key", "ssh_host_ed25519_key")); err == nil {
 		t.Fatal("a present private key without its .pub: no error")
+	}
+	// 03-06: Arch's OpenSSH 10.6p1 generates an ML-DSA-44+Ed25519 host key
+	// x/crypto/ssh cannot parse. It is skipped, beside a readable key; alone
+	// it is an error, and so is a readable type that does not parse.
+	mldsa := filepath.Join(dir, "ssh_host_mldsa44_ed25519_key")
+	writeFile(t, mldsa, []byte("private key placeholder\n"))
+	writeFile(t, mldsa+".pub", []byte("ssh-mldsa44-ed25519 AAAAE3NzaC1tbGRzYTQ0LWVkMjU1MTkAAAAg root@arch\n"))
+	if keys, err := hostKeys(dump("ssh_host_ed25519_key", "ssh_host_mldsa44_ed25519_key")); err != nil || len(keys) != 1 {
+		t.Fatalf("Ed25519 and ML-DSA-44+Ed25519 keys: %v, %v", keys, err)
+	}
+	if _, err := hostKeys(dump("ssh_host_mldsa44_ed25519_key")); err == nil || !strings.Contains(err.Error(), "ssh-mldsa44-ed25519") {
+		t.Fatalf("only an unreadable key type: %v", err)
+	}
+	bad := filepath.Join(dir, "ssh_host_bad_key")
+	writeFile(t, bad, []byte("private key placeholder\n"))
+	writeFile(t, bad+".pub", []byte("ssh-ed25519 !!!notbase64 root@x\n"))
+	if _, err := hostKeys(dump("ssh_host_ed25519_key", "ssh_host_bad_key")); err == nil {
+		t.Fatal("a corrupt Ed25519 .pub: no error")
 	}
 }
 

@@ -1,0 +1,76 @@
+name: E2E distro
+
+# The distro container matrix (03-06, D-17): keyroster-agent against each
+# supported distribution's own OpenSSH server, run as root inside a
+# container of that distribution. test/distro/run.sh builds the agent and
+# the e2edistro test binary here (static, CGO_ENABLED=0) and runs them in
+# the image, which installs its own openssh-server with its package manager.
+# It covers drop-in precedence, apply --once with the signal reload and a
+# certificate login with StrictModes yes, the D-07 refusals, the D-08
+# Phase 2 takeover and drift. It does NOT cover the service managers:
+# systemd and OpenRC reloads, socket activation, SELinux and Proxmox stay
+# UNVERIFIED until the dogfood hosts (03-16).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing by default, read-only contents per job. The
+# containers get no secrets and no token.
+permissions: {}
+
+# The seven check names "e2e-distro (<name>)" are required status checks in
+# the main-integrity ruleset. Renaming the job or a matrix name blocks every
+# merge until the ruleset is updated (see CONTRIBUTING.md). The image digest
+# is not part of the name, so a digest bump keeps the check names.
+jobs:
+  e2e-distro:
+    name: e2e-distro (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Official images pinned by digest (T-03-39). Resolved 2026-10-26
+        # with `docker buildx imagetools inspect <tag>` (the multi-arch
+        # index digest of the tag in the comment). The packages each image
+        # installs come from its distribution's repositories at run time and
+        # are not pinned, except on archlinux: Arch rolls, so installing
+        # from its live repositories into this frozen image would be a
+        # partial upgrade. run-in.sh points pacman at the Arch Linux
+        # Archive snapshot of the image's build day and upgrades the whole
+        # system to it (signature checks on), so bumping the archlinux
+        # digest moves the snapshot with it.
+        include:
+          - name: "debian:12"
+            image: debian@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 # debian:12
+          - name: "debian:13"
+            image: debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 # debian:13
+          - name: "ubuntu:24.04"
+            image: ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac # ubuntu:24.04
+          - name: "ubuntu:26.04"
+            image: ubuntu@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 # ubuntu:26.04
+          - name: "almalinux:9"
+            image: almalinux@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16 # almalinux:9
+          - name: "alpine"
+            image: alpine@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a # alpine:latest
+          - name: "archlinux"
+            image: archlinux@sha256:52dfbd5afb23a220d5ee92dafcb4c788d96c026ed04179890c23adef4c897fa0 # archlinux:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Run the distro tests in the image
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: bash test/distro/run.sh "$IMAGE"

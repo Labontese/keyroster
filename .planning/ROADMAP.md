@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 6/19 plans executed in 18 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 7/19 plans executed in 18 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -180,7 +180,7 @@ Plans:
 - [x] 03-05-PLAN.md — D-05 network checkpoint (the owner decides how the no-network applier reaches sshd for the self-test), then the apply engine offline: verify against pins, atomic generations, `sshd -t`, reload only when needed, self-test, rollback; sshd re-read matrix
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 03-06-PLAN.md — Distro detection, D-07 refusals, D-08 Phase 2 takeover, drift checks, seven-image distro matrix (owner applies the ruleset)
+- [x] 03-06-PLAN.md — Distro detection, D-07 refusals, D-08 Phase 2 takeover, drift checks, seven-image distro matrix (owner applies the ruleset)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 03-06b-PLAN.md — Recovery of the revocations a signer restore lost, the code (owner decision 2026-10-25, Q2: merged before 03-07): the owner's lost-certificates answer (pre-answered 2026-10-26), keyroster-server keeps the KRL it served, `keyroster revoke recover` and `keyroster-signer recover-revocations` import it with the saved export's last KRL in one admin-signed `revocation_recovery` transaction, audit rule, unit tests, vectors and fuzzing, the tracer
@@ -286,7 +286,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 6/19 | In Progress | - |
+| 3. Linux Agent and Revocation | 7/19 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |

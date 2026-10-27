@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -80,13 +81,25 @@ func loopbackTargets(d Dump) ([]string, error) {
 	return out, nil
 }
 
+// readableKeyTypes are the host key types the agent reads: those
+// x/crypto/ssh parses, but DSA (insecure, removed from OpenSSH 10.0),
+// which is skipped like an unreadable type.
+var readableKeyTypes = []string{ssh.KeyAlgoRSA, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
+	ssh.KeyAlgoSKECDSA256, ssh.KeyAlgoED25519, ssh.KeyAlgoSKED25519}
+
 // hostKeys reads the public halves of the host keys sshd -T names
 // (hostkey PATH, with PATH.pub beside it). sshd -T lists its default
 // HostKey paths whether or not those keys exist, and sshd skips the
 // missing ones; so a HostKey whose private key does not exist is skipped
-// here too (PR #67 review). At least one key must remain.
+// here too (PR #67 review). A key of a type x/crypto/ssh does not
+// implement is skipped as well (03-06: Arch's OpenSSH 10.6p1 generates
+// ssh-mldsa44-ed25519 beside its Ed25519 key); sshd offers its other keys,
+// and the host match and the self-test use those. A key of a readable
+// type that does not parse is still an error. At least one key must
+// remain.
 func hostKeys(d Dump) ([]ssh.PublicKey, error) {
 	var out []ssh.PublicKey
+	var skipped []string
 	for _, p := range d["hostkey"] {
 		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
 			continue
@@ -100,6 +113,10 @@ func hostKeys(d Dump) ([]ssh.PublicKey, error) {
 		if err != nil {
 			return nil, fmt.Errorf("host key %s.pub: %w", p, err)
 		}
+		if f := strings.Fields(string(b)); len(f) > 0 && !slices.Contains(readableKeyTypes, f[0]) {
+			skipped = append(skipped, f[0])
+			continue
+		}
 		pub, _, _, _, err := ssh.ParseAuthorizedKey(b)
 		if err != nil {
 			return nil, fmt.Errorf("host key %s.pub: %w", p, err)
@@ -107,6 +124,9 @@ func hostKeys(d Dump) ([]ssh.PublicKey, error) {
 		out = append(out, pub)
 	}
 	if len(out) == 0 {
+		if len(skipped) > 0 {
+			return nil, fmt.Errorf("sshd -T names no host key of a type the agent reads (it skipped %s)", strings.Join(skipped, ", "))
+		}
 		return nil, errors.New("sshd -T names no host key that exists")
 	}
 	return out, nil

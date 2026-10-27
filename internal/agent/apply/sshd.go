@@ -84,12 +84,14 @@ func (e *engine) keygenQuery(ctx context.Context, krlFile, pub string) (Result, 
 	return e.run(ctx, execsite.KeygenQuery(e.cfg.SSHKeygen, krlFile, pub))
 }
 
-// reloadSystemd runs systemctl reload <unit> with the first of
-// paths.Systemctl that exists.
-func (e *engine) reloadSystemd(ctx context.Context, unit string) error {
+// reloadSystemd runs systemctl reload <unit>, or, for a socket-activated
+// sshd (socket), systemctl try-reload-or-restart <unit>, with the first of
+// paths.Systemctl that exists below the layout's root (as Detect finds
+// it). It records the command in the report.
+func (e *engine) reloadSystemd(ctx context.Context, unit string, socket bool) error {
 	systemctl := ""
 	for _, p := range paths.Systemctl {
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(filepath.Join(e.l.Root, p)); err == nil {
 			systemctl = p
 			break
 		}
@@ -97,18 +99,24 @@ func (e *engine) reloadSystemd(ctx context.Context, unit string) error {
 	if systemctl == "" {
 		return fmt.Errorf("%w: no systemctl at %s", ErrReload, strings.Join(paths.Systemctl, " or "))
 	}
-	res, err := e.run(ctx, execsite.SystemctlReload(systemctl, unit))
+	c := execsite.SystemctlReload(systemctl, unit)
+	if socket {
+		c = execsite.SystemctlTryReloadOrRestart(systemctl, unit)
+	}
+	e.report.ReloadActions = append(e.report.ReloadActions, strings.Join(c.Args(), " "))
+	res, err := e.run(ctx, c)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrReload, err)
 	}
 	if res.Code != 0 {
-		return fmt.Errorf("%w: systemctl reload %s exited %d: %s", ErrReload, unit, res.Code, firstLine(res.Stderr))
+		return fmt.Errorf("%w: %s exited %d: %s", ErrReload, strings.Join(c.Args()[1:], " "), res.Code, firstLine(res.Stderr))
 	}
 	return nil
 }
 
 // reloadOpenRC runs rc-service sshd reload.
 func (e *engine) reloadOpenRC(ctx context.Context) error {
+	e.report.ReloadActions = append(e.report.ReloadActions, paths.RCService+" sshd reload")
 	res, err := e.run(ctx, execsite.RCServiceReload(paths.RCService))
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrReload, err)
@@ -117,6 +125,13 @@ func (e *engine) reloadOpenRC(ctx context.Context) error {
 		return fmt.Errorf("%w: rc-service sshd reload exited %d: %s", ErrReload, res.Code, firstLine(res.Stderr))
 	}
 	return nil
+}
+
+// systemctlShow runs systemctl show for ssh.socket, ssh.service and
+// sshd.service (Detect): the service manager says which binary and
+// configuration the running sshd uses.
+func systemctlShow(ctx context.Context, r Runner, systemctl string) (Result, error) {
+	return r.Run(ctx, execsite.SystemctlShow(systemctl))
 }
 
 // Errors of the sshd helpers.
@@ -129,33 +144,51 @@ var (
 // unitRE is a systemd service name the systemd reload strategy accepts.
 var unitRE = regexp.MustCompile(`^[a-z0-9@._-]+\.service$`)
 
-// CheckReload checks a --reload strategy: signal, systemd:<unit> or
-// openrc.
+// ReloadSocket prefixes the reload strategy of a socket-activated sshd
+// (Ubuntu's ssh.socket): systemd-socket:<unit> runs systemctl
+// try-reload-or-restart <unit> at every reload (owner decision D-R1, PR
+// #68 review: "try-reload-or-restart"). Whether a connection started sshd
+// since Detect ran is decided by systemd when the drop-in is on disk, not
+// by the agent beforehand: a running sshd re-reads it, a stopped one reads
+// it when the next connection starts it. The "none" strategy, which
+// decided that once at Detect and then reloaded nothing, is gone.
+const ReloadSocket = "systemd-socket:"
+
+// CheckReload checks a --reload strategy: signal, systemd:<unit>,
+// systemd-socket:<unit> or openrc.
 func CheckReload(s string) error {
 	switch {
 	case s == "signal" || s == "openrc":
 		return nil
 	case strings.HasPrefix(s, "systemd:") && unitRE.MatchString(strings.TrimPrefix(s, "systemd:")):
 		return nil
+	case strings.HasPrefix(s, ReloadSocket) && unitRE.MatchString(strings.TrimPrefix(s, ReloadSocket)):
+		return nil
 	}
-	return fmt.Errorf("%w: reload strategy %q: want signal, systemd:<unit>.service or openrc", ErrReload, s)
+	return fmt.Errorf("%w: reload strategy %q: want signal, systemd:<unit>.service, systemd-socket:<unit>.service or openrc", ErrReload, s)
 }
 
 // reload makes sshd re-read its configuration by the configured strategy
 // (a closed set): signal sends SIGHUP to the pid in the PidFile sshd -T
-// names, when that process runs the configured sshd, and runs nothing; systemd:<unit> runs systemctl reload <unit>;
-// openrc runs rc-service sshd reload.
-func (e *engine) reload(ctx context.Context, dump Dump) error {
+// names, when that process runs the configured sshd, and runs nothing;
+// systemd:<unit> runs systemctl reload <unit>; systemd-socket:<unit> runs
+// systemctl try-reload-or-restart <unit>; openrc runs rc-service sshd
+// reload. Report.ReloadActions names each action that ran. It reports
+// whether it reloaded (an action ran).
+func (e *engine) reload(ctx context.Context, dump Dump) (bool, error) {
 	if err := CheckReload(e.cfg.Reload); err != nil {
-		return err
+		return false, err
 	}
-	switch e.cfg.Reload {
-	case "signal":
-		return reloadSignal(e.cfg.SSHD, dump)
-	case "openrc":
-		return e.reloadOpenRC(ctx)
+	switch s := e.cfg.Reload; {
+	case s == "signal":
+		e.report.ReloadActions = append(e.report.ReloadActions, "SIGHUP to the PidFile's sshd")
+		return true, reloadSignal(e.cfg.SSHD, dump)
+	case s == "openrc":
+		return true, e.reloadOpenRC(ctx)
+	case strings.HasPrefix(s, ReloadSocket):
+		return true, e.reloadSystemd(ctx, strings.TrimPrefix(s, ReloadSocket), true)
 	default:
-		return e.reloadSystemd(ctx, strings.TrimPrefix(e.cfg.Reload, "systemd:"))
+		return true, e.reloadSystemd(ctx, strings.TrimPrefix(s, "systemd:"), false)
 	}
 }
 
