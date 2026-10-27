@@ -251,7 +251,7 @@ A damaged copy stops the start with `server: <path> does not parse: ... keep it,
   - `go test -race -count=1 ./...` passed;
   - `go vet ./...` and `go vet -tags e2e ./test/e2e/` passed;
   - gofmt is clean;
-  - golangci-lint reports 0 issues;
+  - golangci-lint reports 0 issues, and `go vet` and golangci-lint also pass with `GOOS=windows` and `GOOS=darwin`;
   - dep-firewall and testonly-firewall are clean;
   - capslock reported one new pair (deviation 16). The baseline was updated in `c39d09c`, and the check then passed: signer 92/92, agent 23/23, EXEC only through execsite.
 - **Task 3's verify commands:**
@@ -335,7 +335,7 @@ See `key-decisions` in the frontmatter.
 
 ## TDD Gate Compliance (mutants)
 
-A script applied each mutant to the committed source, ran the named test and restored the file byte for byte. After the run, `git diff` showed no change to any source file. Four mutants first failed to compile (S7, A8, K2, K3: an unused import or variable). They were rewritten until they compiled, so no kill below is a build failure.
+A script applied each mutant to the committed source, ran the named test and restored the file byte for byte. After the run, `git diff` showed no change to any source file. Five mutants first failed to compile (S7, S9b, A8, K2, K3: an unused import or variable). They were rewritten until they compiled, so no kill below is a build failure.
 
 | Mutant | Removed or changed | Killed by |
 |---|---|---|
