@@ -207,6 +207,42 @@ func TestDetect(t *testing.T) {
 		{name: "openrc_confdir_sets_config", openrc: "SSHD_CONFDIR=/opt/ssh\n", want: Service{Manager: "openrc", SSHD: "/usr/sbin/sshd", Config: "/opt/ssh/sshd_config", Reload: "openrc"}},
 		{name: "openrc_command_args_dash_o_refused", openrc: "command_args=\"-o RevokedKeys=none\"\n", errIs: ErrSSHDCommand},
 		{name: "openrc_sshd_opts_dash_f_refused", openrc: "SSHD_OPTS=\"-f /etc/ssh/other\"\n", errIs: ErrSSHDCommand},
+		// PR #68 review fix round 2, P7: sh sources /etc/conf.d/sshd, so any
+		// line but a comment, a blank line or one plain assignment refuses
+		// the whole file.
+		{name: "openrc_export_refused", openrc: "export SSHD_OPTS=\"-o RevokedKeys=none\"\n", errIs: ErrSSHDCommand},
+		{name: "openrc_compound_line_refused", openrc: "true; command_args=-oRevokedKeys=none\n", errIs: ErrSSHDCommand},
+		{name: "openrc_default_assignment_in_other_variable_refused", openrc: "FOO=\"${command_args:=-oRevokedKeys=none}\"\n", errIs: ErrSSHDCommand},
+		{name: "openrc_unquoted_space_refused", openrc: "rc_need=net command_args=-oRevokedKeys=none\n", errIs: ErrSSHDCommand},
+		{name: "openrc_open_quote_refused", openrc: "rc_need=\"net\nSSHD_OPTS=\"-o RevokedKeys=none\"\n", errIs: ErrSSHDCommand},
+		{name: "openrc_plain_assignments_pass", openrc: alpineConfDSSHD + "rc_need=\"net\"\nSSHD_DISABLE_KEYGEN='yes'\nkey_types_to_generate=ed25519\n",
+			want: Service{Manager: "openrc", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "openrc"}},
+		// P5: a file past the agent's read limit is refused, not truncated.
+		{name: "openrc_conf_d_over_limit_refused", openrc: alpineConfDSSHD + strings.Repeat("#\n", 33<<10) + "command_args=-oRevokedKeys=none\n", errIs: ErrUnsafeFile},
+		{name: "env_file_over_limit_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=\n" + strings.Repeat("#\n", 33<<10) + "SSHD_OPTS=-oRevokedKeys=none\n"}, errIs: ErrUnsafeFile},
+		// P6: a line whose extent the agent cannot be sure of (systemd's
+		// quoted values span lines; a comment ending in a backslash
+		// continues) refuses the whole file.
+		{name: "env_file_multiline_single_quote_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=-oRevokedKeys=none\nDUMMY='\nSSHD_OPTS=\nEND='\n"}, errIs: ErrSSHDCommand},
+		{name: "env_file_multiline_after_closed_quote_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=-oRevokedKeys=none\nDUMMY=\"a\"'b\nSSHD_OPTS=\nEND='\n"}, errIs: ErrSSHDCommand},
+		{name: "env_file_comment_continuation_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=-oRevokedKeys=none\n# reset below \\\nSSHD_OPTS=\n"}, errIs: ErrSSHDCommand},
+		{name: "env_file_escaped_quote_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=-oRevokedKeys=none\nDUMMY=\"a\\\"\nSSHD_OPTS=\nEND=\"x\"\n"}, errIs: ErrSSHDCommand},
+		{name: "env_file_two_quoted_strings_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "DUMMY=\"a\"'b'\nSSHD_OPTS=\n"}, errIs: ErrSSHDCommand},
+		{name: "env_file_export_refused", show: debianUnit("/usr/sbin/sshd -D $SSHD_OPTS", "/etc/default/ssh (ignore_errors=yes)", ""),
+			files: map[string]string{"etc/default/ssh": "export SSHD_OPTS=\n"}, errIs: ErrSSHDCommand},
+		// P10: each EnvironmentFiles line is read (parseShow keeps every
+		// value of a repeated key), and so is Environment=.
+		{name: "first_of_two_env_files_sets_option_refused", show: withProps(unitBlock("ssh.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")),
+			"EnvironmentFiles=/etc/default/ssh (ignore_errors=yes)", "EnvironmentFiles=/etc/default/ssh-local (ignore_errors=yes)", "Environment="),
+			files: map[string]string{"etc/default/ssh": "SSHD_OPTS=-oX=y\n", "etc/default/ssh-local": "OTHER=1\n"}, errIs: ErrSSHDCommand},
+		{name: "two_exec_start_bad_first_refused", show: unitBlock("sshd.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D -o X=y")) + "ExecStart=" + execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D") + "\n", errIs: ErrSSHDCommand},
+		{name: "environment_property_dash_o_refused", show: withProps(unitBlock("ssh.service", "loaded", "active", execStart("/usr/sbin/sshd", "/usr/sbin/sshd -D $SSHD_OPTS")), "Environment=SSHD_OPTS=-oRevokedKeys=none"), errIs: ErrSSHDCommand},
 		{name: "openrc_sshd_opts_dash_e", openrc: "SSHD_OPTS=\"-e\"\n", want: Service{Manager: "openrc", SSHD: "/usr/sbin/sshd", Config: "/etc/ssh/sshd_config", Reload: "openrc"}},
 		{name: "openrc_conf_d_writable_by_others_refused", openrc: alpineConfDSSHD,
 			setup: func(t *testing.T, root string) { chmod(t, filepath.Join(root, "etc/conf.d/sshd"), 0o666) }, errIs: ErrSSHDCommand},

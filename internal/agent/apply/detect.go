@@ -386,24 +386,45 @@ func splitProp(v string) []string {
 }
 
 // parseEnvFile reads the NAME=VALUE lines of a systemd EnvironmentFile
-// into vars, conservatively: blank lines and # or ; comments are
-// skipped, one pair of matching quotes around a value is removed, and a
-// value with another quote, a backslash, a backtick, a % or a $ is
-// recorded as unreadable (refused only if ExecStart uses it). A line that
-// is not NAME=VALUE, or continues on the next line, is an error: it may
-// hide any assignment.
+// into vars, conservatively. Blank lines and # or ; comments are skipped,
+// one pair of matching quotes around a value is removed, and a value
+// with a backtick, a % or a $ is recorded as unreadable (refused only if
+// ExecStart uses it). A line whose extent the agent cannot be sure of is
+// an error for the whole file, because systemd may read it as part of a
+// later assignment, or a later one as part of it (PR #68 review fix round
+// 2, P6; checked against systemd 255's parser with systemd-run): a line
+// that is not NAME=VALUE (systemd skips export NAME=...), a backslash
+// anywhere (an escape or a continuation; a comment that ends in one
+// continues on the next line), and a value that starts with a quote but
+// is not exactly one quoted string (a quoted value spans lines until its
+// quote closes, and a second quote may open after it). A quote inside an
+// unquoted value is literal to systemd: that value is only unreadable.
 func parseEnvFile(path string, b []byte, vars envVars) error {
 	for i, line := range strings.Split(string(b), "\n") {
 		t := strings.TrimSpace(line)
-		if t == "" || t[0] == '#' || t[0] == ';' {
+		refuse := func(why string) error {
+			return fmt.Errorf("%s:%d %s; the agent cannot tell which variables the file sets", path, i+1, why)
+		}
+		switch {
+		case t == "":
 			continue
+		case t[0] == '#' || t[0] == ';':
+			if strings.HasSuffix(t, `\`) {
+				return refuse("is a comment that ends in a backslash, which continues it on the next line")
+			}
+			continue
+		case strings.Contains(t, `\`):
+			return refuse("holds a backslash (an escape or a line continuation)")
 		}
 		k, val, ok := strings.Cut(t, "=")
 		k, val = strings.TrimSpace(k), strings.TrimSpace(val)
-		if !ok || !envNameRE.MatchString(k) || strings.HasSuffix(t, "\\") {
-			return fmt.Errorf("%s:%d is not a NAME=VALUE line the agent reads", path, i+1)
+		if !ok || !envNameRE.MatchString(k) {
+			return refuse("is not a NAME=VALUE line the agent reads")
 		}
-		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+		if val != "" && (val[0] == '"' || val[0] == '\'') {
+			if len(val) < 2 || val[len(val)-1] != val[0] || strings.ContainsAny(val[1:len(val)-1], `"'`) {
+				return refuse("has a quoted value that is not exactly one quoted string")
+			}
 			val = val[1 : len(val)-1]
 		}
 		bad := ""
@@ -415,14 +436,22 @@ func parseEnvFile(path string, b []byte, vars envVars) error {
 	return nil
 }
 
+// openRCValueRE is a /etc/conf.d/sshd value the agent reads as sh reads
+// it: unquoted with no character sh treats specially, one single-quoted
+// string, or one double-quoted string without ", \, $ or a backtick.
+var openRCValueRE = regexp.MustCompile("^(?:[A-Za-z0-9_./:,+=@-]*|'[^']*'|\"[^\"\\\\$`]*\")$")
+
 // detectOpenRC reads <root>/etc/conf.d/sshd (through readTrusted) the
 // way Alpine's /etc/init.d/sshd uses it: cfgfile, else SSHD_CONFIG, else
 // $SSHD_CONFDIR/sshd_config (default /etc/ssh) is the configuration;
 // SSHD_BINARY the binary; command_args, else SSHD_OPTS, the arguments,
 // which sshdArgs checks without -f (the init script adds its own -f
-// <cfgfile>) (PR #68 review D-R4). A value with a $, a backtick, a % or
-// quotes inside is refused. The init script's own command line is not
-// read (UNVERIFIED for a modified script, host-setup.md).
+// <cfgfile>) (PR #68 review D-R4). Every other line must be a comment, a
+// blank line or one plain NAME=VALUE assignment (openRCValueRE), else the
+// whole file is refused; a value with a $, a backtick, a % or quotes
+// inside is refused. The init script's own command line, /etc/rc.conf
+// and the environment openrc-run inherits are not read (UNVERIFIED,
+// host-setup.md).
 func detectOpenRC(root string) (Service, error) {
 	s := Service{Manager: "openrc", SSHD: defaultSSHD, Config: defaultSSHDConfig, Reload: "openrc"}
 	b, err := readTrusted(root, filepath.Join(root, "etc", "conf.d", "sshd"), 64<<10)
@@ -433,13 +462,21 @@ func detectOpenRC(root string) (Service, error) {
 		return Service{}, fmt.Errorf("%w: %w: %w", ErrNotDetected, ErrSSHDCommand, err)
 	}
 	set := map[string]string{}
-	for _, line := range strings.Split(string(b), "\n") {
-		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok || strings.HasPrefix(k, "#") {
+	for i, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || t[0] == '#' {
 			continue
 		}
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		// openrc-run sources the file with sh: a line that is not one plain
+		// assignment (export NAME=..., a command, a ; or && list, a
+		// continuation, an expansion, a quote left open, a trailing
+		// comment) may set or change any variable the init script uses, so
+		// the whole file is refused (PR #68 review fix round 2, P7).
+		k, v, ok := strings.Cut(t, "=")
+		if !ok || !envNameRE.MatchString(k) || !openRCValueRE.MatchString(v) {
+			return Service{}, fmt.Errorf("%w: %w: /etc/conf.d/sshd:%d (%q) is not a plain NAME=VALUE line the agent reads; sh sources the file, so it could set any variable the init script uses", ErrNotDetected, ErrSSHDCommand, i+1, t)
+		}
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') {
 			v = v[1 : len(v)-1]
 		}
 		switch k {
