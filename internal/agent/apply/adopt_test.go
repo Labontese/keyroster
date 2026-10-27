@@ -285,6 +285,51 @@ func TestAdopt(t *testing.T) {
 			t.Fatalf("the resume after the final removal: %v, %+v, plan %t", err, r, h.exists(h.l.State(adoptFile)))
 		}
 	})
+	// PR #68 review fix round 2, P2 (D-R2): a takeover cut short during its
+	// removal, then the agent's drop-in edited (a trust line) or removed,
+	// and a new KRL published. The resume repairs the drop-in before it
+	// removes anything, and the KRL installs in the same run.
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, h *testHost)
+	}{
+		{"resume_repairs_edited_dropin", func(t *testing.T, h *testHost) {
+			edited := strings.Replace(string(DropIn(h.l)), filepath.Join(h.l.Current(), CAFile), "/etc/ssh/other_ca.pub", 1)
+			if err := os.WriteFile(h.l.DropIn(), []byte(edited), 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+		}},
+		{"resume_repairs_missing_dropin", func(t *testing.T, h *testHost) {
+			if err := os.Remove(h.l.DropIn()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := adoptHost(t)
+			h.installPhase2(phase2Layout{})
+			h.cfg.Fault = func(p string) error {
+				if p == "phase2-remove" {
+					return &crash{point: p}
+				}
+				return nil
+			}
+			if _, err := h.apply(); !isCrash(err) || h.lastGood() == 0 || !h.exists(h.l.State(adoptFile)) {
+				t.Fatalf("crash during the removal: %v, last-good %d", err, h.lastGood())
+			}
+			h.cfg.Fault = nil
+			tc.edit(t, h)
+			h.publishKRL(9)
+			r, err := h.apply()
+			if err != nil || !h.krlRevokes(h.l.Current(), 9) || h.exists(h.l.State(adoptFile)) || len(r.Phase2Removed) != 4 || !r.Reloaded {
+				t.Fatalf("the resume: %v, %+v, plan %t", err, r, h.exists(h.l.State(adoptFile)))
+			}
+			if readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || h.exists(h.l.State(dropinPrevFile)) {
+				t.Fatalf("the drop-in was not repaired: %q", readFile(t, h.l.DropIn()))
+			}
+		})
+	}
 	t.Run("marker_write_failure_leaves_no_plan", func(t *testing.T) {
 		t.Parallel()
 		// PR #68 review, F2: the marker write fails (ENOSPC, EIO) at the

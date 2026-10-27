@@ -206,17 +206,17 @@ type engine struct {
 	dump Dump
 	keys []ssh.PublicKey
 
-	grace         int // the LoginGraceTime bound in force (ObserveLoginGrace)
-	rawGrace      int // sshd -T's logingracetime at start
-	last          swapRecord
-	lastKnown     bool
-	maxGen        uint64
-	pending       *marker
-	dropinChanged bool
-	staged        uint64     // the accepted/ snapshot a commit marker names
-	adopt         *AdoptPlan // a Phase 2 takeover this first install makes (D-08)
-	trialReplaced bool       // replaceTrial wrote the agent's drop-in over a trial
-	poll          func(ctx context.Context) (*Generation, *state.Verified, error)
+	grace          int // the LoginGraceTime bound in force (ObserveLoginGrace)
+	rawGrace       int // sshd -T's logingracetime at start
+	last           swapRecord
+	lastKnown      bool
+	maxGen         uint64
+	pending        *marker
+	dropinChanged  bool
+	staged         uint64     // the accepted/ snapshot a commit marker names
+	adopt          *AdoptPlan // a Phase 2 takeover this first install makes (D-08)
+	dropInRepaired bool       // repairDropIn wrote the agent's drop-in (over a trial, or an edit on an adoption resume)
+	poll           func(ctx context.Context) (*Generation, *state.Verified, error)
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
 	// net.Dialer and /proc (tests substitute both).
@@ -425,31 +425,44 @@ func (e *engine) replaceTrial(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if lg.kind != linkAgent {
-		if err := e.removeTrial(); err != nil {
-			return err
-		}
-	} else {
-		changed, err := e.writeDropIn()
-		if err != nil {
-			return err
-		}
-		if changed {
-			if err := e.activateDropIn(ctx); err != nil {
-				return err
-			}
-		}
-		e.trialReplaced = true
-		if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
-			e.report.SelfTest = "fail: " + err.Error()
-			return err
-		}
-		e.report.SelfTest = "pass"
-		e.dropinChanged = false
-		if err := e.remove(e.l.State(dropinPrevFile)); err != nil {
+	if lg.kind == linkAgent {
+		if err := e.repairDropIn(ctx); err != nil {
 			return err
 		}
 		e.logf("replaced a preflight's trial drop-in with the agent's own and reloaded sshd")
+		return nil
+	}
+	if err := e.removeTrial(); err != nil {
+		return err
+	}
+	e.dump, err = e.sshdDump(ctx, "")
+	return err
+}
+
+// repairDropIn writes the agent's drop-in over whatever 00-keyroster.conf
+// holds on an installed host (a trial, an edit, nothing), with
+// activateDropIn's sshd -t, sshd -T checks and reload, then the
+// self-test; dropin.prev goes once it passes, and sshd -T is read again.
+// The run is then not a no-op.
+func (e *engine) repairDropIn(ctx context.Context) error {
+	changed, err := e.writeDropIn()
+	if err != nil {
+		return err
+	}
+	if changed {
+		if err := e.activateDropIn(ctx); err != nil {
+			return err
+		}
+	}
+	e.dropInRepaired = true
+	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
+		e.report.SelfTest = "fail: " + err.Error()
+		return err
+	}
+	e.report.SelfTest = "pass"
+	e.dropinChanged = false
+	if err := e.remove(e.l.State(dropinPrevFile)); err != nil {
+		return err
 	}
 	e.dump, err = e.sshdDump(ctx, "")
 	return err
@@ -586,7 +599,7 @@ func (e *engine) forward(ctx context.Context) error {
 	e.report.BundleHeld = v.BundleHeld
 	if !v.Changed() {
 		// A run that replaced a trial drop-in wrote it: not a no-op.
-		e.report.NoOp = !e.trialReplaced
+		e.report.NoOp = !e.dropInRepaired
 		// The KRL in force is current's, which a rollback or crash recovery
 		// may have kept above accepted/'s (PR #67 round-2 carry-over).
 		cur, curLink, err := e.readCurrent()

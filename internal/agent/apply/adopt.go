@@ -362,6 +362,19 @@ func (e *engine) finishAdoption(ctx context.Context) error {
 	if err != nil || p == nil {
 		return err
 	}
+	// The agent's drop-in must be its own, and in force, before the Phase
+	// 2 files go: one edited (or replaced by a trial) since the takeover's
+	// first install is repaired here, never left to fail the effectiveness
+	// check below on every run (owner decision D-R2; PR #68 review fix
+	// round 2, P2).
+	if old, err := e.readDropIn(); err != nil {
+		return err
+	} else if !bytes.Equal(old, DropIn(e.l)) {
+		if err := e.repairDropIn(ctx); err != nil {
+			return fmt.Errorf("repairing %s before removing the Phase 2 layout: %w", e.l.DropIn(), err)
+		}
+		e.logf("repaired %s, which differed from the agent's drop-in, before removing the Phase 2 layout", e.l.DropIn())
+	}
 	if err := e.mkdir(e.l.State(adoptBak), 0o700); err != nil {
 		return err
 	}
