@@ -41,7 +41,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 ### Authorization & Insider Resistance (AUTHZ)
 
 - [x] **AUTHZ-01**: Admin can define roles mapping users/groups to principals on host groups
-- [ ] **AUTHZ-02**: Hosts enforce role → principal mapping via `AuthorizedPrincipalsFile` generated from signed host policy
+- [x] **AUTHZ-02**: Hosts enforce role → principal mapping via `AuthorizedPrincipalsFile` generated from signed host policy
 - [ ] **AUTHZ-03**: Policy changes (roles, principals, credentials, quorum settings) require approval by a configured admin quorum, are versioned and signed
 - [ ] **AUTHZ-04**: User can request just-in-time access to a sensitive role; another person must approve it, bound to that exact request, single-use and time-boxed
 - [ ] **AUTHZ-05**: A JIT certificate never outlives its approval
@@ -50,9 +50,9 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Host Agent (AGENT)
 
-- [ ] **AGENT-01**: Admin can enroll a host with a one-time join token; the agent pins the server TLS root SPKI set and hostname, the trust-root fingerprints and threshold, and the installation ID at enrollment
-- [ ] **AGENT-02**: Agent communicates pull-only over mTLS with a closed set of typed operations — no remote exec, no inbound ports
-- [ ] **AGENT-03**: Agent only applies CA sets, policy and KRLs signed by the pinned trust root / delegated keys; unsigned or older versions are rejected
+- [x] **AGENT-01**: Admin can enroll a host with a one-time join token; the agent pins the server TLS root SPKI set and hostname, the trust-root fingerprints and threshold, and the installation ID at enrollment
+- [x] **AGENT-02**: Agent communicates pull-only over mTLS with a closed set of typed operations — no remote exec, no inbound ports
+- [x] **AGENT-03**: Agent only applies CA sets, policy and KRLs signed by the pinned trust root / delegated keys; unsigned or older versions are rejected
 - [ ] **AGENT-04**: Agent writes sshd config, trusted CA keys, principals files and KRL atomically, validates with `sshd -t`, reloads, self-tests and rolls back on failure
 - [ ] **AGENT-05**: Agent verifies effective sshd config (`sshd -T -C`) periodically and reports drift (e.g. missing `RevokedKeys`)
 - [ ] **AGENT-06**: Agent obtains and renews host certificates by proof of possession of the host key
@@ -61,8 +61,8 @@ Requirements for the first public release. Each maps to roadmap phases.
 ### Revocation (REVOKE)
 
 - [ ] **REVOKE-01**: Admin can revoke a certificate (by serial/key ID) or a key, or a person, host or machine, from the CLI (UI moves to Phase 4)
-- [ ] **REVOKE-02**: Revocation is distributed as a KRL (own encoder, verified against `ssh-keygen -Q`) to all hosts automatically
-- [ ] **REVOKE-03**: KRLs are signed (detached SSHSIG), installed atomically, last-good copy kept, rollback to older versions refused — a broken KRL never locks out the fleet
+- [x] **REVOKE-02**: Revocation is distributed as a KRL (own encoder, verified against `ssh-keygen -Q`) to all hosts automatically
+- [x] **REVOKE-03**: KRLs are signed (detached SSHSIG), installed atomically, last-good copy kept, rollback to older versions refused — a broken KRL never locks out the fleet
 - [ ] **REVOKE-04**: Clients trust hosts via a CLI-managed `@cert-authority` known_hosts entry and revoked host keys list (no TOFU)
 
 ### Emergency Access (BREAK)
@@ -189,22 +189,22 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUTH-05 | Phase 4 | Pending |
 | AUTH-06 | Phase 3 | Pending |
 | AUTHZ-01 | Phase 2 | Complete |
-| AUTHZ-02 | Phase 3 | Pending |
+| AUTHZ-02 | Phase 3 | Complete |
 | AUTHZ-03 | Phase 4 | Pending |
 | AUTHZ-04 | Phase 4 | Pending |
 | AUTHZ-05 | Phase 4 | Pending |
 | AUTHZ-06 | Phase 4 | Pending |
 | AUTHZ-07 | Phase 4 | Pending |
-| AGENT-01 | Phase 3 | Pending (reworded 2026-10-23, Phase 3 D-02/D-04/D-12/D-17/D-18) |
-| AGENT-02 | Phase 3 | Pending |
-| AGENT-03 | Phase 3 | Pending |
+| AGENT-01 | Phase 3 | Complete (reworded 2026-10-23, Phase 3 D-02/D-04/D-12/D-17/D-18) |
+| AGENT-02 | Phase 3 | Complete |
+| AGENT-03 | Phase 3 | Complete |
 | AGENT-04 | Phase 3 | Pending |
 | AGENT-05 | Phase 3 | Pending |
 | AGENT-06 | Phase 3 | Pending |
 | AGENT-07 | Phase 3 | Pending |
 | REVOKE-01 | Phase 3 | Pending (reworded 2026-10-23, Phase 3 D-02/D-04/D-12/D-17/D-18) |
-| REVOKE-02 | Phase 3 | Pending |
-| REVOKE-03 | Phase 3 | Pending |
+| REVOKE-02 | Phase 3 | Complete |
+| REVOKE-03 | Phase 3 | Complete |
 | REVOKE-04 | Phase 3 | Pending |
 | BREAK-01 | Phase 3 | Pending |
 | BREAK-02 | Phase 5 | Pending |

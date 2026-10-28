@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: Completed 03-06c-PLAN.md (PR open, awaiting the owner's merge gate)
-last_updated: "2026-10-28T06:03:44.602Z"
+stopped_at: "Completed 03-07-PLAN.md (PR #71 open, merge gate pending)"
+last_updated: "2026-10-28T14:29:42.654Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 5be604d2028f5ea3fc1ac21b56e3ce6cff5474cc
+state_head: 622f8943606ac444893b0874c83cca6fa59c455f
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 54
-  completed_plans: 44
+  completed_plans: 45
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 10 of 19
+Plan: 11 of 19
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -99,6 +99,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P06 | 116 min | 3 tasks | 32 files |
 | Phase 03 P06b | 100min | 4 tasks | 32 files |
 | Phase 03 P06c | 29min | 3 tasks | 8 files |
+| Phase 03 P07 | 110min | 3 tasks | 67 files |
 
 ## Accumulated Context
 
@@ -267,6 +268,10 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-06: a kept KRL is named in the report (krl_kept), not refused; Verify refuses krl_header_version_mismatch
 - [Phase 03]: 03-06b: lost certificates follow revoke-users-list-others; a key-ID entry's ValidBefore also needs the CA key to match; nothing to recover only when neither bundle has an installation ID and no --krl document was given
 - [Phase 03]: 03-06c: every signer restore runs step 2b under the hold; the hold is released only after the recovery's verifies passed, or after nothing to recover with no server KRL copy kept; the capture block claims no outcome when the server's state directory is unreachable
+- [Phase 03]: 03-07: agents are served on a separate --agent-listen listener that requires exactly one self-signed Ed25519 client certificate; the browser listener keeps NoClientCert and serves no agent route
+- [Phase 03]: 03-07: the join string names the agent listener port the server's mint answer reports, on the host of the admin's keyroster init config (owner to confirm)
+- [Phase 03]: 03-07: approval is the installed directory's active host entry whose keys equal the agent's enrolled host keys
+- [Phase 03]: 03-07: T-03-277 mitigated by the restore cross-check of the kept server KRL copy against keyroster-agent krl-version on the enrolled hosts
 
 ### Pending Todos
 
@@ -305,6 +310,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T06:03:44.191Z
-Stopped at: Completed 03-06c-PLAN.md (PR open, awaiting the owner's merge gate)
+Last session: 2026-10-28T14:29:42.247Z
+Stopped at: Completed 03-07-PLAN.md (PR #71 open, merge gate pending)
 Resume file: None
