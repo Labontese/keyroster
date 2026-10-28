@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -274,4 +275,190 @@ func mustServedKRL(t *testing.T, env *serverEnv, above uint64) []byte {
 		t.Fatalf("VerifyManifest of the served KRL (above v%d): %v", above, err)
 	}
 	return doc.KRL
+}
+
+// drillCert is one certificate of the restore drill.
+type drillCert struct {
+	name, key, cert, serial string
+}
+
+// drillIssue issues a certificate through the admin path with subject and
+// args (the principals and, for a host certificate, --ca host) and
+// returns it.
+func drillIssue(t *testing.T, sg *signerEnv, name, subject string, args ...string) drillCert {
+	t.Helper()
+	key := filepath.Join(t.TempDir(), "id_"+name)
+	sshKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", name, "-f", key)
+	sg.issue(t, append([]string{"--pubkey", key + ".pub", "--subject", subject, "--ttl", "10m"}, args...)...)
+	c := drillCert{name: name, key: key, cert: key + "-cert.pub"}
+	c.serial = parseCertInfo(t, sshKeygen(t, "-L", "-f", c.cert)).serial
+	return c
+}
+
+// runRecoverRevocations runs keyroster-signer recover-revocations on sg's
+// state directory with reqFile on standard input, as the runbook's
+// recovery line does, and returns its exit code and combined output.
+func runRecoverRevocations(t *testing.T, sg *signerEnv, reqFile string) (int, string) {
+	t.Helper()
+	in, err := os.Open(reqFile) //nolint:gosec // G304: the test's file
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = in.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, signerBin, "recover-revocations", "--state-dir", sg.StateDir) //nolint:gosec // G204: the binary under test
+	cmd.Env, cmd.Stdin = envWithout("SSH_AUTH_SOCK"), in
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("keyroster-signer recover-revocations: %v\n%s", err, out)
+		}
+		return ee.ExitCode(), string(out)
+	}
+	return 0, string(out)
+}
+
+// TestRestoreRecoversLostRevocations is the restore drill of
+// docs/runbooks/signer-install.md step 2b (03-06c), through the runbook's
+// commands (as the test's own user; test/systemd/smoke.sh runs the
+// runbook's runuser blocks):
+//
+//  1. B (user) and the control E (user, never revoked) are issued, the
+//     backup is taken from the stopped signer, and the saved export is
+//     taken;
+//  2. B is revoked through keyroster-server after the saved export, so
+//     only the server's krl-served.json holds the revocation;
+//  3. the server and the signer are stopped (the hold), the server's copy
+//     is kept as the capture block keeps it, the backup is restored, and
+//     the restored export is taken before the signer ever starts;
+//  4. keyroster revoke recover with the restored and saved exports and
+//     --krl set to the kept copy, whose summary lists the copy among the
+//     imports; keyroster-signer recover-revocations reads its file under
+//     the hold;
+//  5. both started again, the served KRL makes ssh-keygen -Q refuse B and
+//     accept E, and sshd refuses B's login and accepts E's.
+func TestRestoreRecoversLostRevocations(t *testing.T) {
+	port := freePort(t)
+	sg := prepareSigner(t, bootstrapOpts{WebAuthnRPID: serverRPID, WebAuthnOrigins: []string{"https://" + serverRPID + ":" + strconv.Itoa(port)}})
+	stopSigner := serveStoppable(t, sg)
+	env := &serverEnv{Signer: sg, CA: newTestCA(t, serverRPID), Port: port, URL: "https://" + serverRPID + ":" + strconv.Itoa(port)}
+	state := filepath.Join(t.TempDir(), "server-state")
+	stopServer := startStoppableServer(t, env, state)
+	admin := newCLIEnv(t)
+	if code, out, errOut := runCLIIn(t, admin, "", "", keyrosterBin, append(env.initArgs(), "--admin-key", sg.AdminFingerprint)...); code != 0 {
+		t.Fatalf("keyroster init exited %d:\n%s%s", code, out, errOut)
+	}
+	kr := func(args ...string) string {
+		t.Helper()
+		code, out, errOut := revokeCLIRetry(t, env, admin, args...)
+		if code != 0 {
+			t.Fatalf("keyroster %s: exit %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", strings.Join(args, " "), code, out, errOut, env.Stderr.String())
+		}
+		return out
+	}
+
+	// 1. Before the backup: B and the control E.
+	b := drillIssue(t, sg, "b", "bert", "--principal", "role:t")
+	e := drillIssue(t, sg, "e", "erik", "--principal", "role:t")
+	stopSigner()
+	backup := t.TempDir()
+	copyDB(t, sg.StateDir, backup)
+	saved := sg.exportLog(t)
+	stopSigner = serveStoppable(t, sg)
+
+	// 2. B revoked after the saved export, through keyroster-server.
+	out := kr("revoke", "serial", b.serial, "--reason", "e2e restore drill")
+	match := regexp.MustCompile(`The server reports serial ` + b.serial + ` \(user\) revoked: KRL v([0-9]+) published`).FindStringSubmatch(out)
+	if match == nil {
+		t.Fatalf("keyroster revoke serial output:\n%s", out)
+	}
+	lastServed, err := strconv.ParseUint(match[1], 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := servedCopyVersion(t, state); v != lastServed {
+		t.Fatalf("krl-served.json holds KRL v%d after the revocation of B, want v%d", v, lastServed)
+	}
+
+	// 3. The hold: the server and the signer stopped. The capture block
+	// keeps the server's copy before the file restore; the restored export
+	// is taken before the restored signer ever starts.
+	stopServer()
+	stopSigner()
+	recovery := t.TempDir()
+	serverCopy := filepath.Join(recovery, "server-krl.json")
+	copyFile(t, filepath.Join(state, "krl-served.json"), serverCopy, 0o600)
+	restoreDB(t, backup, sg.StateDir)
+	restored := sg.exportLog(t)
+	if code, out := auditVerifyPins(t, sg.RootFingerprints, restored); code != 0 {
+		t.Fatalf("audit verify of the restored export: exit %d:\n%s", code, out)
+	}
+
+	// 4. Step 2b: the admin's keyroster revoke recover with --krl, then
+	// the recovery line under the hold, past the newest imported version
+	// (versions are time-derived in whole seconds; the runbook's refusal
+	// recovery_version_not_above_import says to wait).
+	reqFile := filepath.Join(recovery, "recovery.bin")
+	out = kr("revoke", "recover", "--restored", restored, "--saved", saved, "--krl", serverCopy, "--out", reqFile, "--yes")
+	if !strings.Contains(out, "import: "+serverCopy+": KRL v"+match[1]+",") || !strings.Contains(out, "lost certificates: none\n") {
+		t.Fatalf("keyroster revoke recover summary:\n%s", out)
+	}
+	t.Logf("keyroster revoke recover:\n%s", out)
+	for time.Now().Unix() <= int64(lastServed) { //nolint:gosec // G115: a time-derived version fits int64
+		time.Sleep(100 * time.Millisecond)
+	}
+	code, recOut := runRecoverRevocations(t, sg, reqFile)
+	rm := regexp.MustCompile(`(?m)^recovered: [0-9]+ entries from 2 imported KRLs, 0 lost certificates revoked, 0 kept; KRL v([0-9]+) \(log entries [0-9]+, [0-9]+\)$`).FindStringSubmatch(recOut)
+	if code != 0 || rm == nil {
+		t.Fatalf("keyroster-signer recover-revocations exited %d:\n%s", code, recOut)
+	}
+	t.Logf("keyroster-signer recover-revocations: %s", strings.TrimSpace(recOut))
+	recovered, err := strconv.ParseUint(rm[1], 10, 64)
+	if err != nil || recovered <= lastServed {
+		t.Fatalf("the recovery published KRL v%s, want above v%d", rm[1], lastServed)
+	}
+	final := sg.exportLog(t)
+	if code, out := auditVerifyPins(t, sg.RootFingerprints, final); code != 0 {
+		t.Fatalf("audit verify of the recovered export: exit %d:\n%s", code, out)
+	}
+	if code, out := auditVerifyPins(t, sg.RootFingerprints, final, "--previous", restored); code != 0 {
+		t.Fatalf("audit verify --previous <restored export> <recovered export>: exit %d:\n%s", code, out)
+	}
+
+	// 5. The release: both started again. The served KRL refuses B and
+	// accepts E, with ssh-keygen and with sshd.
+	serveStoppable(t, sg)
+	startStoppableServer(t, env, state)
+	served := mustServedKRL(t, env, lastServed)
+	recKRL := writeKRL(t, served)
+	requireKeygen(t, "the recovered KRL on B", recKRL, b.cert, true)
+	requireKeygen(t, "the recovered KRL on the control E", recKRL, e.cert, false)
+
+	login := currentUser(t)
+	d := krlLayout(t)
+	sshd := startSSHDWithLog(t, sshdOptions{
+		UserCAPub:  sg.UserCAPub,
+		Principals: map[string][]string{login: {"role:t"}},
+		Extra:      []string{"RevokedKeys " + filepath.Join(d, "current", "revoked.krl")},
+	})
+	from := func(c drillCert, src string) (int, string) {
+		return sshLogin(t, loginOptions{Port: sshd.port, Key: c.key, Cert: c.cert, User: login, Command: "true", Extra: []string{"-o", "BindAddress=" + src}})
+	}
+	for _, c := range []drillCert{e, b} {
+		if code, out := from(c, "127.0.0.1"); code != 0 {
+			t.Fatalf("login with %s before the swap exited %d:\n%s", c.name, code, out)
+		}
+	}
+	swapKRL(t, d, served)
+	if code, out := from(e, "127.0.0.1"); code != 0 {
+		t.Fatalf("login with the control E under the recovered KRL exited %d:\n%s", code, out)
+	}
+	before := sshd.log.String()
+	if code, out := from(b, "127.0.0.2"); code == 0 {
+		t.Fatalf("login with B under the recovered KRL succeeded:\n%s", out)
+	}
+	waitForLog(t, sshd, before, "revoked")
+	t.Logf("sshd refused B: %s", strings.TrimSpace(strings.TrimPrefix(sshd.log.String(), before)))
 }

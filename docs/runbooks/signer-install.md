@@ -398,7 +398,74 @@ the stop. A unit already waiting to restart after a crash (`activating`,
 `auto-restart`) is not held by the drop-in and can still start before
 the stop; the `systemctl stop` that follows stops it, and every start
 after that fails. Only the last line's `held:` means the hold is in
-force. Keep it until the end of step 2.
+force. Keep it until the release after step 2b.
+
+**Keep keyroster-server's KRL copy, right after `held:`.** keyroster-server
+keeps the last KRL it served in `/var/lib/keyroster-server/krl-served.json`
+(see [server-install.md](server-install.md)). The hold stopped the server, so
+the file now holds the newest KRL any host could have fetched, including
+revocations made after your latest saved export. Step 2b imports it. Keep a
+copy before anything else changes. As root, on the host where
+keyroster-server runs:
+
+```
+bash -eu <<'EOF'
+runuser -u keyroster-server -- test -d /var/lib/keyroster-server -a -x /var/lib/keyroster-server
+test ! -e /root/recovery
+install -d -m 0700 /root/recovery
+if runuser -u keyroster-server -- test -e /var/lib/keyroster-server/krl-served.json -o -L /var/lib/keyroster-server/krl-served.json; then
+  runuser -u keyroster-server -- cat /var/lib/keyroster-server/krl-served.json > /root/recovery/server-krl.json
+  test -s /root/recovery/server-krl.json
+  echo "kept: /root/recovery/server-krl.json"
+else
+  echo "no server KRL copy: /var/lib/keyroster-server/krl-served.json does not exist"
+fi
+EOF
+```
+
+The block prints exactly one of two lines, and that line decides which form
+of step 2b applies. Write it into the operations log.
+
+- `kept: /root/recovery/server-krl.json`: the copy is kept, and step 2b
+  passes it as `--krl`.
+- `no server KRL copy: ...`: keyroster-server has served no KRL since it
+  keeps copies (03-06b). Only after this line does step 2b leave `--krl`
+  out.
+
+The block's rules:
+
+- Root reads the server's file only as keyroster-server, so a link in the
+  server's state directory reaches only what that account can read. Root
+  writes only its own directory, `/root/recovery`.
+- The block stops when it ends without one of the two lines, and then it
+  claims neither:
+  - the server account cannot reach its state directory (keyroster-server
+    is not installed on this host, or the directory is missing);
+  - `/root/recovery` exists from an earlier run (move it into the
+    operations record first, then run the block again);
+  - the file exists but cannot be read, or is a link that leads nowhere.
+
+  Keep the hold and find out why, and escalate if you cannot.
+- Where keyroster-server runs on another host, hold it there with the hold
+  block (naming only `keyroster-server`), because the hold block holds only
+  the units on the host where it runs. Then run this block there, and copy
+  `/root/recovery/server-krl.json` to `/root/recovery/` on the signer host,
+  into a directory of mode 0700 that only root can read. (UNVERIFIED: no
+  test copies the file from another host.)
+- Where no keyroster-server runs anywhere, the block stops at its first
+  line. Keep the hold and escalate: this runbook covers only a signer
+  behind keyroster-server.
+
+Run in CI (`systemd-sandbox`, `test/systemd/smoke.sh`, 03-06c), with the
+block verbatim:
+
+- without the state directory: it stops and prints neither line;
+- with the directory and no file: `no server KRL copy`;
+- over an existing `/root/recovery`: it stops;
+- with a fixture file written as keyroster-server: `kept:`, with a copy
+  equal to the fixture byte for byte.
+
+UNVERIFIED on a real host.
 
 **Keep users away until the replay is done.** From the moment the
 restored signer starts again until the last lost version is back (step
@@ -467,8 +534,8 @@ the three files out of the snapshot's disk instead, and restore them on
 the current signer VM as a file backup (UNVERIFIED: no step of this
 paragraph has run, and none can run in CI):
 
-- On the current signer VM, run the hold block above and set the
-  firewall rule (above).
+- On the current signer VM, run the hold block and the capture block
+  above, and set the firewall rule (above).
 - On the Proxmox host, make a copy of only the signer VM's system disk
   as it was at the snapshot, with the storage's own tools (for example a
   ZFS clone of the disk's snapshot, or `qemu-img convert` of a qcow2
@@ -499,8 +566,13 @@ but run neither `ca-init` nor `install-bundle` (step 6): the restored
 `signer.db` brings the key records, the trust bundle and the policy of
 the same genesis. Create the lock file as the signer's user
 (`runuser -u keyroster-signer -- touch /var/lib/keyroster-signer/signer.lock`),
-then hold, take the three files out of the snapshot's disk as above,
-run the file restore and continue with step 1. This works only where
+then hold, run the capture block on the host where keyroster-server runs,
+take the three files out of the snapshot's disk as above, run the file
+restore and continue with step 1. If keyroster-server ran on the old VM
+and its state directory is lost with it, the capture block cannot keep
+its copy, and step 2b then imports only the saved export: revocations
+made after the latest saved export stay lost (T-03-207's remaining
+residual). This works only where
 the fresh signer reaches the same CA keys: `serve` opens every key by
 its recorded fingerprint, so it needs the same HSM or keys behind the
 agent backend, or for the software backend its `software` directory
@@ -575,7 +647,8 @@ structurally (see the warning above).
 
    If it passes, the restored log extends the saved one: the restore took
    back nothing that the saved export records, and there is nothing in it
-   to compare or replay.
+   to compare or replay. Run step 2b all the same: a revocation made after
+   the saved export is in neither file.
 
    If it fails, whatever it reports (`log shrank`, `log rewritten` or
    another refusal), verify the saved export itself, and that the restored
@@ -631,33 +704,242 @@ structurally (see the warning above).
    grep -c '"kind":"revoke"' /tmp/restored.jsonl
    ```
 
-   If the saved export has more revoke entries than the restored export,
-   the restore lost a revocation: do not release the hold. Keep the signer
-   stopped, record both counts in the operations log and escalate. Until
-   the restore-recovery plan merges, this runbook does not recover lost
-   revocations: once released, the restored signer would publish a KRL
-   without them, and every host would accept it. Hosts keep their last
-   KRL, which still lists the lost revocations, and never lock out because
-   of its age (D-10). Anyone who needs access in the meantime needs a
-   break-glass path, which no keyroster runbook describes yet
-   (**UNVERIFIED**). The restored log is a prefix of the saved one (the
-   second check above), so the difference is exactly the number of lost
-   revoke entries. The count reads only the `"kind":` key, which
-   `audit verify` binds once per line to the entry's own kind. It cannot
-   see a revocation made after the latest saved export: the restore loses
-   that one without a trace in either file (T-03-207). So take a saved
-   export after every revocation (see
-   [revoke.md](revoke.md#7-the-audit-log-after-a-revocation)). The stop
-   and both counts are checked against this text in CI
-   (`TestRestoreRunbookChecks`); a restore that loses a revocation has not
-   been run (**UNVERIFIED**).
+   Record both counts in the operations log. Whatever they show, recover
+   in step 2b before you release the hold. The restored log is a prefix of
+   the saved one (the second check above), so the difference is exactly
+   the number of lost revoke entries. The count reads only the `"kind":`
+   key, which `audit verify` binds once per line to the entry's own kind.
+   It cannot see a revocation made after the latest saved export (T-03-207),
+   which only keyroster-server's copy holds.
 
-   **Release the hold** when step 2 passed: after the first comparison
-   passed, or after both checks of the saved export passed, you compared
-   the versions and the saved export has no more revoke entries than the
-   restored one. Check the clock first (see [Snapshot restore:
-   check the clock first](#snapshot-restore-check-the-clock-first)), make sure the firewall rule keeps users
-   away, and then, as root:
+   So take a saved export after every revocation (see
+   [revoke.md](revoke.md#7-the-audit-log-after-a-revocation)). The recovery
+   also imports keyroster-server's copy, kept by the capture block, which
+   covers the revocations after the latest saved export while that
+   server's state directory survives the restore. When the server's state
+   directory is lost with the restore, only the saved export is imported,
+   and revocations after it stay lost.
+
+   **2b. Recover the revocations the restore lost (every restore, before
+   the release).** Run it after every restore, whatever the counts above
+   show, and with the hold in force. The restored signer's first KRL after
+   the restore must be the recovery's, and it lists every revocation that
+   either import holds. Every lost user certificate is revoked too. Lost
+   host and machine certificates are listed, and are revoked only when the
+   admin names them (the owner's answer `revoke-users-list-others`,
+   03-06b). Run the five parts in this order:
+
+   1. **Check the clock, under the hold, before the recovery.** The
+      recovery publishes a KRL whose version comes from the signer's
+      clock, and that version must be above every KRL version it imports.
+      As root:
+
+      ```
+      timedatectl                                  # "System clock synchronized: yes"
+      runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+        keyroster-signer doctor --state-dir /var/lib/keyroster-signer
+      ```
+
+      Go on only when `timedatectl` reports a synchronized clock and
+      `doctor` shows `OK clock`, as in [Snapshot restore: check the clock
+      first](#snapshot-restore-check-the-clock-first).
+
+   2. **Copy the inputs to the admin.** An admin account (section 8, for
+      example `alice`, with her own ssh-agent and `keyroster` config) signs
+      the recovery. It must be an admin of the **restored** policy: a
+      policy restored older can lack admins added since. Root must not
+      create, change or write a path the admin can write (step 3 below
+      explains why). So the block writes as the admin with `runuser`, and
+      root reads only its own files and passes their bytes on standard
+      input. As root, with `<admin>` that account:
+
+      ```
+      bash -eu -s <admin> <<'EOF'
+      A=$1
+      H=$(getent passwd "$A" | cut -d: -f6)
+      test -n "$H"
+      test -d /root/recovery
+      runuser -u "$A" -- sh -c 'umask 077 && mkdir -m 0700 "$1"' sh "$H/recovery-in"
+      copy_in() {
+        runuser -u "$A" -- sh -c 'umask 077 && set -C && cat >"$1" && chmod 0600 "$1"' sh "$H/recovery-in/$1" <"$2"
+      }
+      copy_in restored.jsonl /tmp/restored.jsonl
+      copy_in latest-saved.jsonl /root/latest-saved.jsonl
+      files="restored.jsonl latest-saved.jsonl"
+      if [ -e /root/recovery/server-krl.json ]; then
+        copy_in server-krl.json /root/recovery/server-krl.json
+        files="$files server-krl.json"
+      fi
+      echo "copied $files to $H/recovery-in for $A"
+      EOF
+      ```
+
+      Only the last line's `copied` means the files are there. It names
+      `server-krl.json` exactly when the capture block printed `kept:`.
+      `mkdir` refuses a name that exists, a planted link included, and
+      root does not remove it. The admin removes it, or you ask them which
+      name is free and use that one.
+
+   3. **The admin signs the recovery.** In their own session, with their
+      ssh-agent and `keyroster` config, and with the directory the copy
+      printed:
+
+      ```
+      keyroster revoke recover --restored /home/<admin>/recovery-in/restored.jsonl \
+        --saved /home/<admin>/recovery-in/latest-saved.jsonl \
+        --krl /home/<admin>/recovery-in/server-krl.json \
+        --out /home/<admin>/recovery-in/recovery.bin
+      ```
+
+      Leave out `--krl ...` only when the capture block printed `no server
+      KRL copy`. When it printed `kept:`, the summary must list the server
+      copy among the imports (`import: /home/<admin>/recovery-in/server-krl.json:
+      KRL v...`). If it does not, answer `n` and run the command again
+      with `--krl`.
+
+      Read the summary before you answer `y` at `Sign this recovery?
+      [y/N]`:
+
+      - `installation:` names the installation.
+      - `restored log:` gives both logs' sizes.
+      - Each `import:` line names a KRL and its version.
+      - `lost certificate: ... : revoke` lines name the lost user
+        certificates, which are always revoked.
+      - `lost certificate: ... : keep; public key ...` lines name lost host
+        and machine certificates. Each of these lines prints the
+        certificate's public key. Revoke one now by adding `--revoke-lost
+        SERIAL` (repeatable) and running the command again, or later with
+        `keyroster revoke key` and that public key (see
+        [revoke.md](revoke.md#7-the-audit-log-after-a-revocation)).
+      - `lost certificates expired before this request, not carried: <n>`
+        counts the lost host and machine certificates that had expired.
+
+      The command ends `wrote the signed recovery request to
+      /home/<admin>/recovery-in/recovery.bin`.
+
+   4. **Read the request back.** As root:
+
+      ```
+      bash -eu -s <admin> <<'EOF'
+      H=$(getent passwd "$1" | cut -d: -f6)
+      test -n "$H"
+      test ! -e /root/recovery/recovery.bin
+      runuser -u "$1" -- cat "$H/recovery-in/recovery.bin" > /root/recovery/recovery.bin
+      test -s /root/recovery/recovery.bin
+      echo "read the recovery request back to /root/recovery/recovery.bin"
+      EOF
+      ```
+
+      Root reads the admin's file only as the admin and writes only its
+      own directory.
+
+   5. **Apply it under the hold.** As root:
+
+      ```
+      runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+        keyroster-signer recover-revocations --state-dir /var/lib/keyroster-signer < /root/recovery/recovery.bin
+      ```
+
+      It takes the state directory's lock, runs every start-up check of
+      the signer and applies the request in one transaction. It writes
+      one `revocation_recovery` entry and publishes one KRL, and it never
+      serves. It prints `recovered: <n> entries from <n> imported KRLs, <n>
+      lost certificates revoked, <n> kept; KRL v<v> (log entries <i>,
+      <j>)`: write that line into the operations log. Then export the log
+      again and verify it, on its own pins and as an extension of the
+      restored log:
+
+      ```
+      runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+        keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/recovered.jsonl
+      ```
+
+      ```
+      keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+        /tmp/recovered.jsonl
+      keyroster audit verify --pin SHA256:<A from paper> --pin SHA256:<B from paper> --threshold 1 \
+        --previous /tmp/restored.jsonl /tmp/recovered.jsonl
+      grep -c '"kind":"revocation_recovery"' /tmp/recovered.jsonl
+      ```
+
+      Both verifies must pass, and the count must print `1`: the report
+      counts one recovery. `audit verify` binds the `"kind":` key of every
+      line, so after it passed, the count is the log's own. If either
+      verify fails, keep the hold and escalate.
+
+   **The refusals and outcomes of step 2b, and what to do.** Both commands
+   exit 1 on a refusal and write nothing. `keyroster revoke recover`
+   prints `keyroster revoke: refused (<name>): <reason>`, and
+   `recover-revocations` prints `refused: <name>: <reason>`. Keep the hold
+   for every one of them:
+
+   - `nothing to recover` (from `keyroster revoke recover`, exit 0, no
+     file written): neither export's trust bundle has an installation ID
+     and no `--krl` was given, so no KRL was ever published, and there is
+     no recovery to apply. Release the hold only when the capture block
+     printed `no server KRL copy`. After `kept:`, a `nothing to recover`
+     keeps the hold: the server copy was left out. Run the command again
+     with `--krl`, which then refuses `recovery_installation_lost`, and
+     escalate.
+   - `recovery_installation_lost`: the restored trust bundle has no
+     installation ID, but the saved export's bundle has one, or a server
+     copy was given. A lost bundle added the installation ID, or the
+     server copy proves that a KRL was published under one. Escalate.
+     (UNVERIFIED: no restore of such a bundle has run.)
+   - `recovery_fork`: neither export extends the other. Escalate, as for
+     a fork in step 2.
+   - `... does not verify on your trust pins: ...`: an export does not
+     verify on the admin's pins. Escalate, as in step 2.
+   - `--out ... exists`: an earlier attempt left `recovery.bin`. Ask the
+     admin to move it aside, then run the command again.
+   - `recovery_import_invalid`: a `--krl` file that is not a KRL
+     document, or an import that does not verify under the restored bundle
+     and its installation ID. Check that `server-krl.json` is the file
+     the capture block kept. If it is, escalate. An import signed under
+     another ops key is possible only after 03-13 rotates the ops key, and
+     a certificate that only a lost bundle's CA generation names
+     (`recovery_certificate_invalid`) is possible only after 03-12. 03-12
+     and 03-13 own making those cases recoverable (UNVERIFIED).
+   - `recovery_revoke_lost_unknown`: `--revoke-lost` named a serial that
+     is not a lost host or machine certificate. Correct the serial from
+     the summary.
+   - `recovery_too_large`: the live revocations do not fit in one recovery
+     (about 80 000 serials under a P-256 CA and 128 000 under Ed25519,
+     T-03-269). Escalate.
+   - `the state directory is in use by another keyroster-signer process
+     ...` (from `recover-revocations`): something else holds the state
+     directory's lock. Find it (the hold must keep the unit stopped), then
+     run the same line again.
+   - `recovery_version_not_above_import`: the signer's clock is not yet
+     past the newest imported version (T-03-208). Wait the seconds the
+     reason names, then run the same line again with the same file.
+   - `recovery_evidence_invalid`: the admin who signed is not an admin of
+     the restored policy. Have one who is sign it again, from part 3 on.
+     Escalate when there is none (T-03-276).
+   - `recovery_log_mismatch`: the request was made for another log state.
+     Either the restored signer logged something after the export of step
+     1, or the recovery already ran. If an earlier run of this file
+     printed `recovered:`, the recovery is done: go on with its export.
+     Otherwise stop and escalate, as for a fork.
+   - `recovery_malformed`, `recovery_installation_mismatch`,
+     `duplicate_request`, `recovery_certificate_not_lost`,
+     `recovery_certificate_expired` or `recovery_user_certificate_kept`:
+     the file is not the request this runbook's `keyroster revoke recover`
+     wrote for this restore. Make it again from part 3 on with a current
+     binary, and escalate if the refusal repeats.
+   - `unavailable: ...` (`krl_no_installation_id`, `ops_key_unavailable`,
+     `trust_changed`): the signer cannot sign now. Escalate.
+
+   **Release the hold** only after step 2b, in one of two cases:
+
+   - the recovery's two `audit verify` runs passed and the count printed
+     `1`;
+   - `keyroster revoke recover` printed `nothing to recover` after the
+     capture block printed `no server KRL copy`.
+
+   No restored signer starts before that, so none publishes a KRL that
+   lacks a lost revocation. The clock was checked in step 2b. Make sure
+   the firewall rule keeps users away, and then, as root:
 
    ```
    bash -eu -s keyroster-server keyroster-signer <<'EOF'
@@ -882,6 +1164,37 @@ structurally (see the warning above).
 > its owner, mode and contents, and once the admin has removed the link
 > it writes both files as the admin, mode 0600 in a directory of mode
 > 0700, with root's bytes.
+>
+> **Run in CI e2e (TestRestoreRecoversLostRevocations, 03-06c)** on a
+> test signer behind a test keyroster-server, with the harness's agent
+> backend: a user certificate issued before the backup and revoked with
+> `keyroster revoke serial` after the saved export, so that only the
+> server's `krl-served.json` holds the revocation; the server and signer
+> stopped, the server's copy kept, and the backup restored; the restored
+> export taken while the signer is stopped; `keyroster revoke recover`
+> with the restored and saved exports and the kept copy as `--krl`, its
+> summary listing the copy among the imports; `keyroster-signer
+> recover-revocations` reading its file before the restored signer ever
+> starts; with both started again, the served KRL makes `ssh-keygen -Q`
+> refuse the certificate and sshd refuse its login, and accept a control
+> certificate. The test runs the commands as its own user, not the
+> runbook's `runuser` blocks, which the `systemd-sandbox` check below
+> runs.
+>
+> **Run in CI (`systemd-sandbox`, `test/systemd/smoke.sh`, 03-06c)** with
+> the blocks of step 2b verbatim, under the hold, for the admin account:
+> the copy block refusing a planted `~/recovery-in` link and then copying
+> with the server copy kept and without it; the read-back block; and the
+> recovery line with a request that does not parse, refused
+> `recovery_malformed` with `signer.db` unchanged. The capture block's
+> runs are listed with that block above.
+>
+> **UNVERIFIED (step 2b):** a real signer host, and the TPM and PKCS#11
+> backends for `recover-revocations` (CI e2e runs the harness's agent
+> backend); the copy of the server's file from another host; and a fresh
+> signer VM whose server copy died with the old VM, after which only the
+> saved export's KRL is imported and revocations after the latest saved
+> export stay lost (T-03-207's remaining residual).
 >
 > **UNVERIFIED:** a VM snapshot restore (the disk copy, the helper VM,
 > the read-only mount and the transfer of the three files to the current

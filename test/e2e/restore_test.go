@@ -219,11 +219,106 @@ EOF`
 	// restoreSavedSource is step 2's rule for where the saved export comes
 	// from, before the first comparison reads it.
 	restoreSavedSource = "That saved export must come from storage that no restore rolled back"
-	// restoreRevokeStop is step 2's stop for a restore that lost a
-	// revocation (owner decision 2026-10-25, 03-03 plan check, Q2): after
-	// the saved export is verified and before the release.
-	restoreRevokeStop = "If the saved export has more revoke entries than the restored export, the restore lost a revocation: do not release the hold."
+	// restoreRevokeStop is 03-03's stop for a restore that lost a
+	// revocation, and restoreRevokeInterim its text saying that the runbook
+	// did not recover lost revocations yet. 03-06c replaced both with step
+	// 2b, which recovers after every restore; neither may come back.
+	restoreRevokeStop    = "the restore lost a revocation: do not release the hold"
+	restoreRevokeInterim = "Until the restore-recovery plan merges"
+	// restoreSavedExportRule is the operating rule that stays (T-03-207):
+	// a revocation after the latest saved export is in neither export.
+	restoreSavedExportRule = "take a saved export after every revocation"
 )
+
+// The recovery of the revocations a restore lost (03-06c, after 03-06b's
+// commands): the capture block right after the hold's held: line, step
+// 2b's clock check, copy block, the admin's keyroster revoke recover, the
+// read-back block and the recovery line under the hold, then the release.
+// The capture, copy, read-back and recovery blocks are the runbook's and
+// test/systemd/smoke.sh's (the systemd-sandbox job runs them);
+// TestRestoreRunbookChecks requires each in both, and their order.
+// TestRestoreRecoversLostRevocations carries out the same steps with the
+// test's own user and paths.
+const (
+	// restoreCaptureBlock keeps keyroster-server's krl-served.json, read
+	// as keyroster-server. It prints exactly one of restoreCaptureKept and
+	// restoreCaptureNone, and the second only once the server account
+	// reached its state directory (PR #66 plan check).
+	restoreCaptureBlock = "bash -eu <<'EOF'\n" +
+		`runuser -u keyroster-server -- test -d /var/lib/keyroster-server -a -x /var/lib/keyroster-server
+test ! -e /root/recovery
+install -d -m 0700 /root/recovery
+if runuser -u keyroster-server -- test -e /var/lib/keyroster-server/krl-served.json -o -L /var/lib/keyroster-server/krl-served.json; then
+  runuser -u keyroster-server -- cat /var/lib/keyroster-server/krl-served.json > /root/recovery/server-krl.json
+  test -s /root/recovery/server-krl.json
+  echo "kept: /root/recovery/server-krl.json"
+else
+  echo "no server KRL copy: /var/lib/keyroster-server/krl-served.json does not exist"
+fi
+EOF`
+	restoreCaptureKept = "kept: /root/recovery/server-krl.json"
+	restoreCaptureNone = "no server KRL copy: /var/lib/keyroster-server/krl-served.json does not exist"
+	// restoreClockCheck heads step 2b's clock check, which comes before
+	// the recovery because the recovery publishes (T-03-273).
+	restoreClockCheck = "Check the clock, under the hold, before the recovery."
+	// restoreCopyInScript is step 2b's copy of the two exports and, when
+	// the capture block kept it, the server copy to the admin, after its
+	// heredoc line, which names the admin (<admin> in the runbook, kradmin
+	// in smoke.sh). It writes as the admin, as restoreAdminCopyScript does.
+	restoreCopyInScript = `A=$1
+H=$(getent passwd "$A" | cut -d: -f6)
+test -n "$H"
+test -d /root/recovery
+runuser -u "$A" -- sh -c 'umask 077 && mkdir -m 0700 "$1"' sh "$H/recovery-in"
+copy_in() {
+  runuser -u "$A" -- sh -c 'umask 077 && set -C && cat >"$1" && chmod 0600 "$1"' sh "$H/recovery-in/$1" <"$2"
+}
+copy_in restored.jsonl /tmp/restored.jsonl
+copy_in latest-saved.jsonl /root/latest-saved.jsonl
+files="restored.jsonl latest-saved.jsonl"
+if [ -e /root/recovery/server-krl.json ]; then
+  copy_in server-krl.json /root/recovery/server-krl.json
+  files="$files server-krl.json"
+fi
+echo "copied $files to $H/recovery-in for $A"
+EOF`
+	// restoreAdminRecover is the admin's command, with --krl; restoreKRLRule
+	// the rule that --krl is left out only after restoreCaptureNone, and
+	// restoreReleaseRule the rule that a nothing to recover after
+	// restoreCaptureKept keeps the hold (PR #66 plan check).
+	restoreAdminRecover = `keyroster revoke recover --restored /home/<admin>/recovery-in/restored.jsonl \
+--saved /home/<admin>/recovery-in/latest-saved.jsonl \
+--krl /home/<admin>/recovery-in/server-krl.json \
+--out /home/<admin>/recovery-in/recovery.bin`
+	restoreKRLRule     = "Leave out `--krl ...` only when the capture block printed `no server KRL copy`."
+	restoreReleaseRule = "Release the hold only when the capture block printed `no server KRL copy`. After `kept:`, a `nothing to recover` keeps the hold"
+	// restoreReadBackScript is step 2b's read-back of the admin's request,
+	// after its heredoc line: root reads it as the admin and writes only
+	// /root/recovery.
+	restoreReadBackScript = `H=$(getent passwd "$1" | cut -d: -f6)
+test -n "$H"
+test ! -e /root/recovery/recovery.bin
+runuser -u "$1" -- cat "$H/recovery-in/recovery.bin" > /root/recovery/recovery.bin
+test -s /root/recovery/recovery.bin
+echo "read the recovery request back to /root/recovery/recovery.bin"
+EOF`
+	// restoreRecoverLine applies the request under the hold.
+	restoreRecoverLine = `runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+keyroster-signer recover-revocations --state-dir /var/lib/keyroster-signer < /root/recovery/recovery.bin`
+	// restoreReleaseAfter2b is the release paragraph's condition.
+	restoreReleaseAfter2b = "**Release the hold** only after step 2b, in one of two cases:"
+)
+
+// restoreRecoveryChecks are step 2b's export of the recovered log, its two
+// audit verify runs and the count of recovery entries, which
+// TestRestoreRecoversLostRevocations carries out with its own pins and
+// paths, in this order.
+var restoreRecoveryChecks = []string{
+	"keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/recovered.jsonl",
+	restoreVerify + "\n/tmp/recovered.jsonl",
+	restoreVerify + "\n--previous /tmp/restored.jsonl /tmp/recovered.jsonl",
+	`grep -c '"kind":"revocation_recovery"' /tmp/recovered.jsonl`,
+}
 
 var restoreVMBooted = []string{"link_down", "qm rollback <id>", "qm start <id>"}
 
@@ -281,6 +376,15 @@ func TestRestoreRunbookChecks(t *testing.T) {
 			t.Errorf("signer-install.md no longer has %q, which TestRestoreReplaysLostDirectory carries out", c)
 		}
 	}
+	for _, c := range restoreRecoveryChecks {
+		want := trim(c)
+		if strings.Contains(want, "\n") {
+			want = "\n" + want + "\n"
+		}
+		if !strings.Contains(runbook, want) {
+			t.Errorf("signer-install.md no longer has %q, which TestRestoreRecoversLostRevocations carries out", c)
+		}
+	}
 
 	// The hold, file restore and release blocks, whole lines, in the
 	// runbook and in the systemd-sandbox smoke test that runs them.
@@ -290,6 +394,10 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		{"file restore", restoreFilesScript},
 		{"release of the restore hold", restoreReleaseBlock},
 		{"copy of the replay proposal to the admin", restoreAdminCopyScript},
+		{"capture of keyroster-server's KRL copy", restoreCaptureBlock},
+		{"copy of the recovery inputs to the admin", restoreCopyInScript},
+		{"read-back of the recovery request", restoreReadBackScript},
+		{"recovery line", restoreRecoverLine},
 	} {
 		want := "\n" + trim(b.text) + "\n"
 		if !strings.Contains(runbook, want) {
@@ -367,20 +475,59 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		t.Errorf("signer-install.md does not release the hold between step 2's checks and step 3: checks end at %d, release at %d, step 3 at %d",
 			stop, release, step3)
 	}
-	revokeStop := pos("stop for a restore that lost a revocation", restoreRevokeStop)
-	if revokeStop <= stop || revokeStop >= release {
-		t.Errorf("signer-install.md does not stop a restore that lost a revocation after the saved export is verified and before the release: %q at %d, checks end at %d, release at %d",
-			restoreRevokeStop, revokeStop, stop, release)
+	// 03-06c: 03-03's stop and its interim text are gone, the saved-export
+	// rule stays, and the recovery runs in this order: the capture after
+	// the hold and before the file restore; the revoke counts after the
+	// saved export is verified; then step 2b (the clock check, the copy,
+	// the admin's command, the read-back, the recovery line, the recovered
+	// export and its verifies), all before the release, which comes before
+	// step 3.
+	for _, gone := range []string{restoreRevokeStop, restoreRevokeInterim} {
+		if strings.Contains(section, squash(gone)) {
+			t.Errorf("signer-install.md still has 03-03's stop for a lost revocation (%q); step 2b recovers instead", gone)
+		}
+	}
+	pos("operating rule for saved exports", restoreSavedExportRule)
+	capture := pos("capture of keyroster-server's KRL copy", restoreCaptureBlock)
+	if capture <= hold || capture >= files {
+		t.Errorf("signer-install.md does not keep the server's KRL copy right after the hold and before the file restore: hold at %d, capture at %d, file restore at %d",
+			hold, capture, files)
+	}
+	pos("capture line for a kept copy", restoreCaptureKept)
+	pos("capture line for no copy", restoreCaptureNone)
+	krlRule := pos("rule that --krl is left out only after no server KRL copy", restoreKRLRule)
+	releaseRule := pos("rule that nothing to recover after kept: keeps the hold", restoreReleaseRule)
+	steps := []struct {
+		what string
+		at   int
+	}{
+		{"saved export's verify stop", stop},
+		{"revoke count of the restored export", pos("revoke count of the restored export", restoreRestoredRevokeGrep)},
+		{"clock check of step 2b", pos("clock check of step 2b", restoreClockCheck)},
+		{"copy of the recovery inputs", pos("copy of the recovery inputs to the admin", restoreCopyInScript)},
+		{"admin's keyroster revoke recover", pos("admin's keyroster revoke recover", restoreAdminRecover)},
+		{"rule for --krl", krlRule},
+		{"read-back of the request", pos("read-back of the recovery request", restoreReadBackScript)},
+		{"recovery line", pos("recovery line", restoreRecoverLine)},
+		{"export of the recovered log", pos("export of the recovered log", restoreRecoveryChecks[0])},
+		{"verify of the recovered export", pos("verify of the recovered export", restoreRecoveryChecks[1]+"\n"+restoreRecoveryChecks[2])},
+		{"count of recovery entries", pos("count of recovery entries", restoreRecoveryChecks[3])},
+		{"rule that nothing to recover after kept: keeps the hold", releaseRule},
+		{"release condition after step 2b", pos("release condition after step 2b", restoreReleaseAfter2b)},
+		{"release of the restore hold", release},
+		{"step 3", step3},
+	}
+	for i := 1; i < len(steps); i++ {
+		if steps[i-1].at >= steps[i].at {
+			t.Errorf("signer-install.md has the %s (at %d) before the %s (at %d); want step 2's checks, then step 2b in order, then the release and step 3",
+				steps[i].what, steps[i].at, steps[i-1].what, steps[i-1].at)
+		}
 	}
 	for _, g := range restoreSavedGreps {
 		pos("grep of the saved export", g)
 	}
 	for _, g := range restoreRestoredGreps {
 		pos("grep of the restored export", g)
-	}
-	if rg := pos("revoke count of the restored export", restoreRestoredRevokeGrep); rg <= stop || rg >= revokeStop {
-		t.Errorf("signer-install.md does not count the restored export's revoke entries after the saved export is verified and before the stop for a lost revocation: %q at %d, checks end at %d, the stop at %d",
-			restoreRestoredRevokeGrep, rg, stop, revokeStop)
 	}
 	greps := restoreSavedGrep.FindAllStringIndex(section, -1)
 	if len(greps) < len(restoreSavedGreps) {

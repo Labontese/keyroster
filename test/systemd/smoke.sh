@@ -38,7 +38,16 @@
 #     when it had crash-looped into its start limit before the hold;
 #   - signer-install.md's step 3 copy of the replay proposal to an admin
 #     refuses a link the admin planted, changes nothing it points at, and
-#     otherwise writes the files as the admin.
+#     otherwise writes the files as the admin;
+#   - signer-install.md's capture of keyroster-server's KRL copy, under the
+#     hold, stops without the server's state directory, prints "no server
+#     KRL copy" without the file, refuses an existing /root/recovery, and
+#     keeps a copy equal to the server's file byte for byte; step 2b's copy
+#     block refuses a link the admin planted at ~/recovery-in and otherwise
+#     writes the inputs as the admin, with the server copy and without it;
+#     its read-back block reads the admin's request as the admin; and its
+#     recovery line refuses a request that does not parse
+#     (recovery_malformed) and leaves signer.db as it was (03-06c).
 #
 # The TPM drop-in is not installed here: the runner has no TPM, and its
 # SupplementaryGroups=tss needs the tss group. The TPM path under systemd is
@@ -371,6 +380,58 @@ for u in keyroster-server keyroster-signer; do
 	grep -q "Assertion failed on job for $u.service" "$work/hold-$u.log" || fail "$u.service was refused for another reason than the hold"
 done
 systemctl is-active --quiet keyroster-signer.service && fail "keyroster-signer.service is active under the hold"
+
+step "Restore: keep keyroster-server's KRL copy, right after the hold (docs/runbooks/signer-install.md, verbatim)"
+# The capture block reads the server's file as keyroster-server and prints
+# exactly one of its two lines; without the server's state directory it
+# claims neither.
+capture() {
+	bash -eu <<'EOF'
+runuser -u keyroster-server -- test -d /var/lib/keyroster-server -a -x /var/lib/keyroster-server
+test ! -e /root/recovery
+install -d -m 0700 /root/recovery
+if runuser -u keyroster-server -- test -e /var/lib/keyroster-server/krl-served.json -o -L /var/lib/keyroster-server/krl-served.json; then
+  runuser -u keyroster-server -- cat /var/lib/keyroster-server/krl-served.json > /root/recovery/server-krl.json
+  test -s /root/recovery/server-krl.json
+  echo "kept: /root/recovery/server-krl.json"
+else
+  echo "no server KRL copy: /var/lib/keyroster-server/krl-served.json does not exist"
+fi
+EOF
+}
+srv_state=/var/lib/keyroster-server
+[ ! -e "$srv_state" ] || fail "$srv_state exists on this host"
+[ ! -e /root/recovery ] || fail "/root/recovery exists on this host"
+if capture >"$work/capture-nodir.log" 2>&1; then
+	cat "$work/capture-nodir.log"
+	fail "the capture block passed without keyroster-server's state directory"
+fi
+cat "$work/capture-nodir.log"
+if grep -q 'kept:\|no server KRL copy' "$work/capture-nodir.log"; then
+	fail "the capture block claimed an outcome without keyroster-server's state directory"
+fi
+[ ! -e /root/recovery ] || fail "the capture block created /root/recovery without keyroster-server's state directory"
+# The state directory with the owner and mode the unit's StateDirectory=
+# keyroster-server and StateDirectoryMode=0700 give it; no copy yet.
+install -d -o keyroster-server -g keyroster-server -m 0700 "$srv_state"
+capture | tee "$work/capture-none.log"
+grep -qx 'no server KRL copy: /var/lib/keyroster-server/krl-served.json does not exist' "$work/capture-none.log" || fail "the capture block did not report the missing copy"
+[ "$(stat -c '%a %U' /root/recovery)" = "700 root" ] || fail "/root/recovery is $(stat -c '%a %U' /root/recovery)"
+[ -z "$(ls -A /root/recovery)" ] || fail "the capture block left a copy of a file that does not exist: $(ls -A /root/recovery)"
+if capture >"$work/capture-again.log" 2>&1; then
+	cat "$work/capture-again.log"
+	fail "the capture block ran over an existing /root/recovery"
+fi
+cat "$work/capture-again.log"
+rm -r /root/recovery
+# A copy written as keyroster-server (a fixture: no server runs here).
+krl_fixture=$work/krl-served.fixture
+printf '{"krl":"Zml4dHVyZQ==","manifest":"Zml4dHVyZQ==","sig":"Zml4dHVyZQ=="}\n' >"$krl_fixture"
+runuser -u keyroster-server -- sh -c 'umask 077 && cat >"$1"' sh "$srv_state/krl-served.json" <"$krl_fixture"
+capture | tee "$work/capture-kept.log"
+grep -qx 'kept: /root/recovery/server-krl.json' "$work/capture-kept.log" || fail "the capture block did not keep the server's copy"
+cmp "$krl_fixture" /root/recovery/server-krl.json || fail "the kept copy differs from the server's file"
+cmp "$krl_fixture" "$srv_state/krl-served.json" || fail "the capture block changed the server's file"
 backup=$work/signer-backup
 install -d -m 0700 "$backup"
 for f in signer.db signer.db-wal signer.db-shm; do
@@ -440,6 +501,105 @@ for f in signer.db signer.db-wal; do
 	cmp "$backup/$f" "$STATE/$f" || fail "restored $f differs from the backup's"
 done
 [ ! -e "$STATE/signer.db-shm" ] || fail "the stale signer.db-shm, which the backup does not have, is still there"
+
+step "Restore step 2b: copy, read-back and recovery line, under the hold (docs/runbooks/signer-install.md, verbatim)"
+# The runbook's runuser -G tss needs the group, which the TPM packages
+# create on a signer host and this runner may lack.
+getent group tss >/dev/null || groupadd --system tss
+# Stand-ins for the two exports of step 2 (the copy block reads them as
+# root and does not parse them).
+[ ! -e /tmp/restored.jsonl ] || fail "/tmp/restored.jsonl exists on this host"
+[ ! -e /root/latest-saved.jsonl ] || fail "/root/latest-saved.jsonl exists on this host"
+printf '{"fixture":"restored"}\n' >/tmp/restored.jsonl
+printf '{"fixture":"saved"}\n' >/root/latest-saved.jsonl
+copy_in_block() {
+	bash -eu -s kradmin <<'EOF'
+A=$1
+H=$(getent passwd "$A" | cut -d: -f6)
+test -n "$H"
+test -d /root/recovery
+runuser -u "$A" -- sh -c 'umask 077 && mkdir -m 0700 "$1"' sh "$H/recovery-in"
+copy_in() {
+  runuser -u "$A" -- sh -c 'umask 077 && set -C && cat >"$1" && chmod 0600 "$1"' sh "$H/recovery-in/$1" <"$2"
+}
+copy_in restored.jsonl /tmp/restored.jsonl
+copy_in latest-saved.jsonl /root/latest-saved.jsonl
+files="restored.jsonl latest-saved.jsonl"
+if [ -e /root/recovery/server-krl.json ]; then
+  copy_in server-krl.json /root/recovery/server-krl.json
+  files="$files server-krl.json"
+fi
+echo "copied $files to $H/recovery-in for $A"
+EOF
+}
+# A link the admin planted at ~/recovery-in: refused, and the directory it
+# points at keeps its owner, mode and contents.
+rec_canary=$work/recovery-canary
+install -d -m 0755 "$rec_canary"
+echo keep >"$rec_canary/keep"
+rec_canary_state() {
+	stat -c '%U %G %a' "$rec_canary"
+	ls -A "$rec_canary"
+}
+rec_canary_before=$(rec_canary_state)
+as_user kradmin ln -s "$rec_canary" /home/kradmin/recovery-in
+if copy_in_block >"$work/copy-in-link.log" 2>&1; then
+	cat "$work/copy-in-link.log"
+	fail "the recovery copy block wrote through a link the admin planted"
+fi
+cat "$work/copy-in-link.log"
+[ "$(rec_canary_state)" = "$rec_canary_before" ] || fail "the recovery copy block changed the directory a planted link points at: $(rec_canary_state)"
+as_user kradmin rm /home/kradmin/recovery-in
+check_copied() {
+	[ "$(stat -c '%a %U %G' /home/kradmin/recovery-in)" = "700 kradmin kradmin" ] || fail "recovery-in is $(stat -c '%a %U %G' /home/kradmin/recovery-in)"
+	for f in "$@"; do
+		[ "$(stat -c '%a %U %G' "/home/kradmin/recovery-in/$f")" = "600 kradmin kradmin" ] || fail "recovery-in/$f is $(stat -c '%a %U %G' "/home/kradmin/recovery-in/$f")"
+	done
+	cmp /tmp/restored.jsonl /home/kradmin/recovery-in/restored.jsonl || fail "recovery-in/restored.jsonl differs from root's"
+	cmp /root/latest-saved.jsonl /home/kradmin/recovery-in/latest-saved.jsonl || fail "recovery-in/latest-saved.jsonl differs from root's"
+}
+# With the server copy the capture block kept.
+copy_in_block | tee "$work/copy-in-kept.log"
+grep -qx 'copied restored.jsonl latest-saved.jsonl server-krl.json to /home/kradmin/recovery-in for kradmin' "$work/copy-in-kept.log" || fail "the recovery copy block did not report the three files"
+check_copied restored.jsonl latest-saved.jsonl server-krl.json
+cmp /root/recovery/server-krl.json /home/kradmin/recovery-in/server-krl.json || fail "recovery-in/server-krl.json differs from root's"
+# Without it (the capture block printed no server KRL copy).
+as_user kradmin rm -r /home/kradmin/recovery-in
+mv /root/recovery/server-krl.json "$work/server-krl.kept"
+copy_in_block | tee "$work/copy-in-none.log"
+grep -qx 'copied restored.jsonl latest-saved.jsonl to /home/kradmin/recovery-in for kradmin' "$work/copy-in-none.log" || fail "the recovery copy block did not report the two files"
+check_copied restored.jsonl latest-saved.jsonl
+[ ! -e /home/kradmin/recovery-in/server-krl.json ] || fail "the recovery copy block copied a server copy that was not kept"
+[ "$(rec_canary_state)" = "$rec_canary_before" ] || fail "the recovery copy block changed $rec_canary"
+# The admin's request: here bytes that do not parse, written as the admin.
+as_user kradmin sh -c 'umask 077 && printf "not a recovery request\n" >/home/kradmin/recovery-in/recovery.bin'
+read_back() {
+	bash -eu -s kradmin <<'EOF'
+H=$(getent passwd "$1" | cut -d: -f6)
+test -n "$H"
+test ! -e /root/recovery/recovery.bin
+runuser -u "$1" -- cat "$H/recovery-in/recovery.bin" > /root/recovery/recovery.bin
+test -s /root/recovery/recovery.bin
+echo "read the recovery request back to /root/recovery/recovery.bin"
+EOF
+}
+read_back | tee "$work/read-back.log"
+grep -qx 'read the recovery request back to /root/recovery/recovery.bin' "$work/read-back.log" || fail "the read-back block did not report the copy"
+cmp /home/kradmin/recovery-in/recovery.bin /root/recovery/recovery.bin || fail "the read-back copy differs from the admin's file"
+recover_line() {
+	runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+	  keyroster-signer recover-revocations --state-dir /var/lib/keyroster-signer < /root/recovery/recovery.bin
+}
+db_before=$(sha256sum "$STATE/signer.db")
+if recover_line >"$work/recover.log" 2>&1; then
+	cat "$work/recover.log"
+	fail "recover-revocations accepted a request that does not parse"
+fi
+cat "$work/recover.log"
+grep -q 'recovery_malformed' "$work/recover.log" || fail "recover-revocations refused for another reason than recovery_malformed"
+[ "$(sha256sum "$STATE/signer.db")" = "$db_before" ] || fail "the refused recovery changed signer.db"
+systemctl is-active --quiet keyroster-signer.service && fail "keyroster-signer.service is active under the hold"
+rm -r /root/recovery /home/kradmin/recovery-in /tmp/restored.jsonl /root/latest-saved.jsonl
 bash -eu -s keyroster-server keyroster-signer <<'EOF'
 test "$#" -gt 0
 for u in "$@"; do
