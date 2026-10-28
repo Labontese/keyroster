@@ -610,12 +610,198 @@ Only `keyroster-agent apply` reports these two:
 | `phase2_adoption_pending` | The exact Phase 2 layout, matching the signed state, found by a run that may not take it over (the applier unit's run loop; its sandbox cannot remove files in `/etc/ssh`). Nothing is written or removed | Run `sudo keyroster-agent apply --once` once from a root shell |
 | `phase2_layout_differs` | A Phase 2 style layout that is not exactly the runbook's, or does not match the signed state. Every difference is listed | Fix each difference (below) |
 
+## Enrolling a host
+
+Run in CI e2e (`TestAgentEnrollEndToEnd`, 03-07): a join token minted with
+`keyroster host join-token`, `keyroster-agent install`, the fetcher's
+enrollment over the agent listener, `keyroster host pending` compared with
+`keyroster-agent identity`, `keyroster host approve`, the first apply, a
+certificate login, and a revocation refused a few seconds later, against a
+real sshd on OpenSSH 9.5p1 and 10.5p1. Every step on the homelab is
+UNVERIFIED until 03-16. Join-token minting and `host approve` are
+owner-run on the homelab: they are admin-signed acts, which the permission
+classifier refuses for agents.
+
+**Before you start.**
+
+- The root-signed policy must set `pop.hosts`. Without it, minting a join
+  token, the enrollment and the pending list are refused
+  `host_pop_not_enabled`, by the server and, for `host join-token` and
+  `host approve`, by the CLI itself on the policy it verified. The fix is a
+  root ceremony with `keyroster root successor-policy --pop-hosts`
+  ([Registering a host in the directory](#registering-a-host-in-the-directory)),
+  which can never be turned off again.
+- keyroster-server must run an agent listener (`--agent-listen`, see
+  [server-install.md](server-install.md#the-agent-listener-host-agents-03-07)).
+- The host passes `sudo keyroster-agent preflight` ([Before the agent:
+  preflight](#before-the-agent-preflight)).
+- Root on an enrolled host can read the whole signed directory the agent
+  receives: every user name, role, host group and credential ID (D-03, a
+  single-tenant deployment). Enroll only hosts whose root you would show
+  that to.
+
+**1. Mint a join token (admin workstation).**
+
+```
+keyroster host join-token <name> --ttl 30m --out <name>.join
+```
+
+`<name>` is the host name the directory will give the host. The token is
+32 random bytes, valid for one enrollment and at most 1 h (30 min by
+default); the server keeps only its SHA-256. The command writes the join
+string (`kr-join-v1:...`) to the file with mode 0600 and never prints it:
+the file is a secret until the token is used or expires. It carries the
+agent listener's URL, the TLS roots and pins and the trust-root pins and
+threshold of your `keyroster init` config, and the installation ID of the
+trust bundle it verified.
+
+**2. Install the agent (on the host, as root).**
+
+Create the fetcher's system user first, with a group of its own:
+
+```
+useradd --system --user-group --no-create-home --shell /usr/sbin/nologin keyroster-agent
+```
+
+On Alpine:
+
+```
+addgroup -S keyroster-agent && adduser -S -D -H -G keyroster-agent -s /sbin/nologin keyroster-agent
+```
+
+(UNVERIFIED: neither command has run on a real host; the e2e run uses the
+test user through `--fetch-user`.) Copy the join file to the host with mode
+0600 (for example `install -m 0600 <name>.join /root/<name>.join` after
+`scp`), then:
+
+```
+keyroster-agent install --join-file /root/<name>.join
+rm /root/<name>.join
+```
+
+Install refuses before it writes anything when the join string does not
+parse, the user `keyroster-agent` does not exist, a path below already
+exists as a symlink, as the wrong type, with another owner or a wider mode
+(`install_path_unsafe`), or `pins.json` pins another installation
+(`install_pins_differ`). It lays out these paths, each created relative to
+its parent opened without following links:
+
+| Path | Owner | Mode | Holds |
+|---|---|---|---|
+| `/var/lib/keyroster-agent` | root:root | 0755 | the applier's state |
+| `/var/lib/keyroster-agent/accepted` | root:root | 0700 | the signed documents the applier accepted |
+| `/var/lib/keyroster-agent/pins.json` | root | 0600 | trust-root pins, threshold, installation ID |
+| `/var/lib/keyroster-agent/spool` | keyroster-agent:root | 0750 | the signed documents the fetcher received |
+| `/var/lib/keyroster-agent/outbox` | root:keyroster-agent | 2750 | the applier's answers to the fetcher (`enroll-pop.json`) |
+| `/etc/keyroster-agent` | root:root | 0755 | |
+| `/etc/keyroster-agent/fetch.json` | root:keyroster-agent | 0640 | the agent server's URL, TLS roots and pins |
+| `/var/lib/keyroster-agent-fetch` | keyroster-agent | 0700 | the fetcher's identity key |
+| `/var/lib/keyroster-agent-fetch/join-token` | keyroster-agent | 0600 | the token, until the server accepts the enrollment |
+
+The fetcher can write only its own directory and the spool. Everything it
+writes there is data the root applier verifies against its own pins; it
+reads nothing from the fetcher but through a no-follow, non-blocking,
+size-capped open. The ownership of these paths as root is checked in
+03-08 (`agent-smoke.sh`); the e2e run creates them as the test user.
+
+**3. Start the fetcher and the applier.** The systemd and OpenRC units are
+03-08's. Until then, run both by hand, each in its own terminal (or under
+`tmux`):
+
+```
+runuser -u keyroster-agent -- keyroster-agent-fetch
+keyroster-agent run
+```
+
+The fetcher generates its identity (a self-signed Ed25519 TLS client
+certificate) on its first start and writes `identity.pub` into the spool.
+It asks the applier for the proof of possession (`enroll-request.json` in
+the spool); `keyroster-agent run` signs it with every Ed25519 and ECDSA host
+key `sshd -T` names and answers in the outbox; the fetcher posts it. Both
+then wait quietly for the approval. (UNVERIFIED: the hand-run commands on
+a real host; the e2e run uses the same binaries with `--poll 1s` and
+`--interval 1s`.)
+
+**4. Approve the host (admin workstation, then the host).**
+
+```
+keyroster host pending
+```
+
+lists each host waiting for approval with its agent identity and host key
+fingerprints and the facts it reported (its own word only). On the host,
+as root:
+
+```
+keyroster-agent identity
+```
+
+prints the same `agent identity:` and `host key:` lines. Compare every one
+of them out of band; then:
+
+```
+keyroster host approve <name> --group <host group> --principal <name> [--principal <fqdn> ...]
+```
+
+`host approve` shows the fingerprints again and signs a directory version
+with a host entry `<name>`, the enrolled host keys, the host group and the
+principals you typed: nothing in it comes from the host but its keys,
+which it proved it holds. The server treats the agent as approved only
+while the installed directory holds an active entry with exactly those
+keys. The next poll pulls the signed state and `keyroster-agent run`
+applies it ([How fast changes arrive](#how-fast-changes-arrive)).
+
+**Refusals.**
+
+| Code | Where | What it means | Fix |
+|---|---|---|---|
+| `host_pop_not_enabled` | CLI, server | The policy in force lacks `pop.hosts` | A root ceremony with `--pop-hosts` (above) |
+| `no_agent_listener` | `host join-token` | The server runs no agent listener | `--agent-listen` (server-install.md) |
+| `token_used`, `token_expired`, `token_unknown` | fetcher log | The token enrolled another agent, expired (enforced to the second), or was never minted | A new join token, then `keyroster-agent install` again |
+| `host_keys_in_use` | fetcher log | A host key is already on a directory host entry or another enrolled agent (a reinstalled host) | `keyroster host remove <old name>` first, or approve the host already pending |
+| `identity_in_use` | fetcher log | This fetcher identity is enrolled already | None needed: the host is enrolled |
+| `enroll_pop_invalid` | fetcher log | A host key's signature does not verify | Re-run the applier (`keyroster-agent run`); escalate if it repeats |
+| `host_key_unreadable` | applier log | A host key is held by an agent (`HostKeyAgent`), encrypted, or does not match its `.pub` | Use unencrypted host key files |
+| `enroll_request_invalid`, `enroll_pop_mismatch` | applier, fetcher log | The hand-over files do not check out | Let the fetcher write a fresh request (restart it) |
+| `not_approved` | fetcher log | Enrolled, not approved yet | Step 4 |
+| `install_path_unsafe`, `install_pins_differ` | install | See step 2 | Fix the path; for other pins, remove the agent's state first |
+
+## How fast changes arrive
+
+Run in CI e2e (`TestAgentApplyEndToEnd`, 03-05, and
+`TestAgentEnrollEndToEnd`, 03-07); the homelab measurement is 03-16
+(UNVERIFIED until then).
+
+- **Revocations and removals** (a revoked certificate, a removed principal,
+  a removed CA key) are live within one poll of the fetcher (60 s, with a
+  random 10 s either way), plus at most 5 s for keyroster-server's KRL cache
+  and 5 s for the applier's round. They never wait: they only narrow what
+  sshd accepts, so they are swapped in at once.
+- **Additions** (a new principal, a new CA key) are live at most
+  LoginGraceTime + 30 s after the applier's previous swap of the trust
+  files: 150 s with the default LoginGraceTime of 120. That previous swap
+  may be the first step of the same apply, which installs an intermediate
+  generation that allows only what both versions allow, or an earlier
+  apply. With no swap in that interval, additions are live at once. The
+  wait is measured on CLOCK_MONOTONIC (owner decision 2026-10-26, PR #67;
+  the plan's earlier + 5 s, 125 s, is superseded).
+- **A failed self-test** rolls the CA keys, principals and drop-in back to
+  the last generation that passed one; the newer KRL stays in force (the
+  KRL never rolls back), so `current` can differ from `last-good` at rest.
+- **A host the directory disables or removes** gets no principals files
+  (its certificate logins are refused; `authorized_keys` and the console
+  are unaffected); it keeps receiving every KRL and CA key. A host whose
+  keys match no entry while its last entry is still active, or match two
+  entries, keeps its last principals. The applier's report names the case
+  (`host_status`: `host_disabled`, `host_removed`, `host_keys_rotated`,
+  `host_keys_disagree`).
+
 ## Moving a Phase 2 host to the agent
 
 Run in CI (`e2e-distro`, `TestDistroAdoptPhase2`, 03-06, on every image
-above, and `TestAdopt`). Steps 1 and 2 need the agent's units and enrollment
-(03-07, 03-08), which this version does not ship, so the order below is
-UNVERIFIED until 03-16.
+above, and `TestAdopt`). Step 1 needs the agent's units (03-08), which this
+version does not ship, and the enrollment of [Enrolling a host](#enrolling-a-host),
+so the order below is UNVERIFIED until 03-16.
 
 The agent takes over a host set up with this runbook only when its layout
 is exactly the runbook's (D-08):
