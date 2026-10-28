@@ -367,3 +367,73 @@ Mutants: 2 for the CLI, 3 for audit, and 28 for the runbook and smoke pins, all 
 - The release check trusts the kept copy's own manifest for its version, which T-03-277 covers. 03-07's cross-check against a host's installed KRL closes that.
 - The capture and read-back blocks could put `timeout` around the copy, which would turn the FIFO race into a stop rather than a wait.
 - `keyroster audit verify --json` could report the recovery's import versions, so that root does not need grep and base64.
+
+## Review fix round 2 (PR #70)
+
+### The finding (MEDIUM, introduced by `7c28c25`)
+
+The capture block's listing was `find /var/lib/keyroster-server -maxdepth 1 -name krl-served.json -print`. GNU find's default `-P` mode does not descend through a start point that is a symlink. Suppose the state directory is a link to a real directory, for example state kept on another disk. find then printed nothing and exited 0, and the block printed `no server KRL copy` although the file exists. Root then leaves out `--krl` in step 2b, the release check takes its "no server KRL copy kept" branch, and every revocation after the latest saved export is lost without notice. That fails open. The `test -e ... -o -L` of round 0 had followed the link.
+
+Probing in WSL (GNU findutils 4.9.0) showed a second path to the same outcome. An **unreadable** directory behind the link also gave exit 0 with no output. The block's first line tests only `-d` and `-x`, so that case also printed `no server KRL copy`.
+
+### The fix (`db86d1e`)
+
+- **`find -H` in all three copies:** the runbook, `test/systemd/smoke.sh` and `restoreCaptureBlock`. `TestRestoreRunbookChecks` requires all three to match.
+- **Why `-H` and not a trailing slash.** Both work; the WSL probe ran both forms on a linked directory and on an unreadable directory behind a link. `-H` is a documented POSIX option that means exactly "follow symlinks named on the command line". A trailing slash relies on how pathnames resolve, which a reader may not see and a later edit could tidy away. `-H` follows no link inside the directory, so a `krl-served.json` that is itself a link is still listed, and `test -f` still decides about it. The dangling-link and `/dev/zero` cases are unchanged.
+- **F5 is intact.** The listing fails, and so stops the block under `bash -eu`, for two cases (WSL probe and CI):
+  - a non-linked directory of mode 0300;
+  - a mode-0300 directory behind a link.
+- **Runbook:** the listing rule now says that it follows the state directory when that directory is itself a link, and no link inside it. The CI list names the two new cases.
+- **smoke.sh, before the existing fixture case:**
+  - It moves the state directory to `/var/lib/keyroster-server-data` (keyroster-server, 0700) and links `/var/lib/keyroster-server` to it.
+  - With the fixture behind the link, it requires `kept:` and a byte-equal copy.
+  - With the target at mode 0300, it requires `capture_stops linked-unreadable-dir`.
+  - It then puts the real directory back. The later steps still use the original `kept:` case's `/root/recovery/server-krl.json`.
+
+### Mutant
+
+- **Setup.** Two WSL copies were made from a tar of `git ls-files -co --exclude-standard`. In the mutant copy only the `find -H` line in smoke.sh was reverted. `diff -r` showed that one line as the only difference.
+- **Harness.** It ran as WSL root and cut `capture()`, `capture_stops()` and the new linked-directory cases out of each copy's smoke.sh with sed, so the cases ran verbatim. It created a temporary `keyroster-server` system user and removed it, the state directories and `/root/recovery` afterwards.
+- **Fixed copy, GREEN, 0 failures:**
+  - the non-linked unreadable directory stops (`find: ... Permission denied`);
+  - a directory without the file gives `no server KRL copy`;
+  - the linked directory gives `kept:` and the copy compares equal;
+  - the linked unreadable directory stops.
+- **Mutant, RED, 4 failures:**
+  - the linked case printed `no server KRL copy` (no `kept:`, no copy to compare);
+  - the linked unreadable case passed and claimed `no server KRL copy`.
+
+  The non-linked unreadable case still stopped in the mutant, as expected: F5's original case does not depend on `-H`.
+
+### Sweep for the same pattern
+
+- The capture block's listing was the only `find` in the runbook, smoke.sh and `restore_test.go`. There is also no `find` in the e2e drill, and nothing builds the capture block with `ReplaceAll`.
+- The other blocks of this round do not list directories, and every test they use follows links:
+  - copy-in: `test -d /root/recovery`, `test -e /root/recovery/server-krl.json`, `mkdir` and `cat` as the admin;
+  - read-back: `test -e`, `test -f` and `head` as the admin;
+  - release check: `test -s` and `[ -e "$KEPT" ]`;
+  - the move block, and the file restore: `test -s`, `[ -e ]` and `install`.
+
+  Nothing else changed.
+
+### What ran where
+
+- **WSL (Go 1.27.3 from the WSL profile):**
+  - gofmt clean on `test/e2e`; `go vet -tags e2e ./test/e2e` clean; `bash -n test/systemd/smoke.sh` clean;
+  - `go test -tags e2e -run 'TestRestoreRunbookChecks|TestRestoreCopyCaps' ./test/e2e` PASS.
+  - shellcheck is not installed there, and CI does not run it.
+  - Both WSL copies, the temporary user and the scratch directories were removed afterwards.
+- **CI, dispatched on `db86d1e`:**
+  - E2E run 40676797915: success. `TestRestoreRunbookChecks`, `TestRestoreCopyCaps`, `TestRestoreRecoversLostRevocations` and `TestRestoreRecoveryAfterRecovery` show `--- PASS` on both lanes, 10.5p1 and 9.5p1, and the log has no `--- FAIL`.
+  - Systemd run 40676801688: success. The log shows, in order:
+    1. the unreadable directory's `Permission denied`;
+    2. the mode-000 file's `head` refusal;
+    3. `kept:` behind the linked directory;
+    4. the linked unreadable directory's `Permission denied`;
+    5. the fixture's `kept:`.
+- **PR checks on `db86d1e`:** all 27 green, `fuzz` included. They include CI run 40676775785, Systemd run 40676775725 and E2E run 40676775712.
+- **This docs commit changes only `.planning`.** The PR's own checks run on it.
+
+### UNVERIFIED after this round
+
+Unchanged from round 1. A real host whose state directory is a link to another disk has not been tried; CI runs the link on one file system.
