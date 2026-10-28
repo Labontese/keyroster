@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/join"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
@@ -73,8 +75,13 @@ func (s *Server) handleMintJoinToken(w http.ResponseWriter, r *http.Request) {
 
 // handlePendingHosts serves GET AdminPendingHostsPath (keyroster host
 // pending and host approve, admin-signed): every enrolled agent that no
-// active directory host entry with exactly its host keys approves. The
-// policy must set pop.hosts (409 host_pop_not_enabled).
+// active directory host entry with exactly its host keys approves. An
+// agent the directory approved once is never pending again: it is listed
+// under Served with its directory state (removed, disabled or
+// keys_changed) and keeps getting signed state until keyroster host
+// forget, so host approve can never pick its identity (03-08 carry-over
+// a, owner decision 2026-10-28). The policy must set pop.hosts (409
+// host_pop_not_enabled).
 func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	v, err := s.currentStatus(ctx)
@@ -98,7 +105,7 @@ func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, v, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 		return
 	}
-	out := serverclient.PendingHostsAnswer{Hosts: []serverclient.PendingHost{}}
+	out := serverclient.PendingHostsAnswer{Hosts: []serverclient.PendingHost{}, Served: []serverclient.ServedHost{}}
 	for _, a := range agents {
 		if approved(dv, a.HostKeys) {
 			continue
@@ -108,25 +115,41 @@ func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("agent facts", "agent", a.ID, "err", err)
 			continue
 		}
-		out.Hosts = append(out.Hosts, serverclient.PendingHost{
+		p := serverclient.PendingHost{
 			ExpectedName: a.ExpectedName, IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256), HostKeys: a.HostKeys,
 			Facts: f, EnrolledAt: time.UnixMicro(a.EnrolledAtUS).UTC().Format(time.RFC3339),
-		})
+		}
+		if a.ApprovedAtUS != 0 {
+			_, st := hostState(dv, a.HostKeys)
+			out.Served = append(out.Served, serverclient.ServedHost{PendingHost: p, State: st})
+			continue
+		}
+		out.Hosts = append(out.Hosts, p)
 	}
-	s.log.Info("pending hosts listed", "admin", adminName(ctx), "count", len(out.Hosts))
+	s.log.Info("pending hosts listed", "admin", adminName(ctx), "count", len(out.Hosts), "served", len(out.Served))
 	s.writeJSON(w, dv.status, http.StatusOK, out)
 }
 
 // handleForgetHost serves POST AdminForgetHostPath (keyroster host forget,
 // admin-signed; PR #71 review D-R1): it deletes every agent enrolled under
 // the host name, so its identity gets 403 unknown_agent from then on and
-// its host keys can enroll again with a new join token. It is refused 409
-// host_in_directory while any directory host entry, active or disabled,
-// holds a host key of one of them: forgetting an agent whose host is
-// still in the directory would stop the signed state, revocations
-// included, that host still needs. The runbook order is: remove the host
-// from the directory, let the host apply that version, then forget. 404
-// host_not_enrolled when no agent has the name.
+// its host keys can enroll again with a new join token. It is refused,
+// deleting nothing:
+//   - 409 host_in_directory while any directory host entry, active or
+//     disabled, holds a host key of one of them: forgetting an agent whose
+//     host is still in the directory would stop the signed state,
+//     revocations included, that host still needs;
+//   - 409 host_removal_not_applied (03-08, owner decision 2026-10-28) for
+//     an agent approved once until its newest heartbeat shows a committed
+//     directory version at or above removed_dir_version, the first
+//     version it was served under that no longer approved it: the host
+//     has then applied its own removal. The request's host_gone overrides
+//     this for a host that will never report again; the server logs it at
+//     warning level. An agent never approved has no removal to wait for.
+//
+// 404 host_not_enrolled when no agent has the name. Forget is one admin's
+// action and leaves a server log line only; the admin quorum and an audit
+// leaf for forget and for host_gone are 03-08b's (owner decision D-1).
 func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req serverclient.ForgetHostRequest
@@ -148,21 +171,33 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 		return
 	}
+	hbs, err := s.db.Heartbeats(ctx)
+	if err != nil {
+		s.log.Error("heartbeats", "err", err)
+		s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
+	}
 	var forget []serverdb.Agent
 	for _, a := range agents {
 		if a.ExpectedName != req.ExpectedName {
 			continue
 		}
-		if dv.dir != nil {
-			for _, k := range a.HostKeys {
-				pub, err := trust.ParseKey(k)
-				if err != nil {
-					continue
+		if hostHolds(dv, a.HostKeys) {
+			s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrHostInDirectory})
+			return
+		}
+		if a.ApprovedAtUS != 0 && !req.HostGone {
+			reported := uint64(0)
+			if hb, ok := hbs[a.ID]; ok {
+				if h, err := heartbeat.ParseHeartbeat(hb.Body); err == nil {
+					reported = h.Status.Directory.Version
 				}
-				if _, ok := dv.dir.HostForKey(pub); ok {
-					s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrHostInDirectory})
-					return
-				}
+			}
+			if a.RemovedDirVersion == 0 || reported < a.RemovedDirVersion {
+				s.log.Warn("forget refused", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "admin", adminName(ctx),
+					"reason", serverclient.AdminErrRemovalNotApplied, "removal_version", a.RemovedDirVersion, "reported_directory_version", reported)
+				s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrRemovalNotApplied})
+				return
 			}
 		}
 		forget = append(forget, a)
@@ -180,11 +215,127 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 		}
 		var f enroll.Facts
 		_ = json.Unmarshal([]byte(a.Facts), &f) // stored by enrollment, which checked them
-		s.log.Info("agent forgotten", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "admin", adminName(ctx))
+		if req.HostGone && a.ApprovedAtUS != 0 {
+			s.log.Warn("agent forgotten with --host-gone: the host never confirmed that it applied its removal", "expected_name", a.ExpectedName,
+				"agent", agentFingerprint(a.IdentitySPKISHA256), "admin", adminName(ctx), "removal_version", a.RemovedDirVersion)
+		} else {
+			s.log.Info("agent forgotten", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "admin", adminName(ctx))
+		}
 		out.Forgotten = append(out.Forgotten, serverclient.PendingHost{
 			ExpectedName: a.ExpectedName, IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256), HostKeys: a.HostKeys,
 			Facts: f, EnrolledAt: time.UnixMicro(a.EnrolledAtUS).UTC().Format(time.RFC3339),
 		})
+	}
+	s.writeJSON(w, dv.status, http.StatusOK, out)
+}
+
+// hostState is the directory state of an agent with host keys keys: the
+// name of the entry holding one of them, and HostStateActive when that
+// entry is active with exactly keys, HostStateDisabled when it is
+// disabled, HostStateKeysChanged when it is active with other keys; ""
+// and HostStateRemoved when no entry holds any of them.
+func hostState(dv *directoryView, keys []string) (string, string) {
+	if dv.dir == nil {
+		return "", serverclient.HostStateRemoved
+	}
+	for _, k := range keys {
+		pub, err := trust.ParseKey(k)
+		if err != nil {
+			continue
+		}
+		h, ok := dv.dir.HostForKey(pub)
+		if !ok {
+			continue
+		}
+		switch {
+		case h.Status != directory.StatusActive:
+			return h.Name, serverclient.HostStateDisabled
+		case slices.Equal(h.Keys, keys):
+			return h.Name, serverclient.HostStateActive
+		default:
+			return h.Name, serverclient.HostStateKeysChanged
+		}
+	}
+	return "", serverclient.HostStateRemoved
+}
+
+// silentAfter is serverclient.SilentAfterS as a duration.
+const silentAfter = serverclient.SilentAfterS * time.Second
+
+// handleHostsStatus serves GET AdminHostsStatusPath (keyroster host
+// status, admin-signed; 03-08, AGENT-07): the server's current bundle,
+// directory and KRL versions, and per agent the directory approved once
+// (a pending one is keyroster host pending's): its directory name and
+// state, when it was last seen and whether that is more than 180 s ago
+// on the server's clock (silent, D-10), and its newest heartbeat with
+// clock_skew (|clock_offset_s| > 300) and never_applied. A removed,
+// disabled or re-keyed agent that is still served shows its state, never
+// as waiting for approval (03-08 carry-over a). Convergence is the
+// server's report, the host's own word through its heartbeat; the CLI
+// says so and points to keyroster-agent check on the host.
+func (s *Server) handleHostsStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	v, err := s.currentStatus(ctx)
+	if err != nil {
+		s.signerUnavailable(w, false)
+		return
+	}
+	dv, err := s.currentDirectory(ctx)
+	if err != nil {
+		s.log.Warn("directory read failed", "err", err)
+		s.signerUnavailable(w, false)
+		return
+	}
+	k, err := s.krlItem(ctx, 0)
+	if err != nil {
+		s.log.Warn("hosts status: KRL", "err", err)
+		s.signerUnavailable(w, false)
+		return
+	}
+	agents, err := s.db.ListAgents(ctx)
+	if err != nil {
+		s.log.Error("list agents", "err", err)
+		s.writeJSON(w, v, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
+	}
+	hbs, err := s.db.Heartbeats(ctx)
+	if err != nil {
+		s.log.Error("heartbeats", "err", err)
+		s.writeJSON(w, v, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
+	}
+	out := serverclient.HostsStatusAnswer{Current: serverclient.HostVersions{Bundle: v.raw.BundleVersion, Directory: dv.version}, Hosts: []serverclient.HostStatusRow{}}
+	if k != nil {
+		out.Current.KRL = k.Version
+	}
+	now := s.clock()
+	for _, a := range agents {
+		if a.ApprovedAtUS == 0 {
+			continue
+		}
+		name, st := hostState(dv, a.HostKeys)
+		if name == "" {
+			name = a.ExpectedName
+		}
+		row := serverclient.HostStatusRow{Name: name, ExpectedName: a.ExpectedName, IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256),
+			State: st, Silent: true, NeverApplied: true}
+		if a.LastSeenUS != 0 {
+			seen := time.UnixMicro(a.LastSeenUS)
+			row.LastSeen = seen.UTC().Format(time.RFC3339)
+			row.Silent = now.Sub(seen) > silentAfter
+		}
+		if hb, ok := hbs[a.ID]; ok {
+			h, err := heartbeat.ParseHeartbeat(hb.Body)
+			if err != nil {
+				s.log.Error("stored heartbeat does not parse", "agent", agentFingerprint(a.IdentitySPKISHA256), "field", heartbeat.Field(err))
+			} else {
+				row.Heartbeat = h
+				row.ReceivedAt = time.UnixMicro(hb.ReceivedAtUS).UTC().Format(time.RFC3339)
+				row.ClockSkew = heartbeat.ClockSkew(h.ClockOffsetS)
+				row.NeverApplied = h.Status.Generation == 0
+			}
+		}
+		out.Hosts = append(out.Hosts, row)
 	}
 	s.writeJSON(w, dv.status, http.StatusOK, out)
 }

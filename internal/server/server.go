@@ -225,6 +225,7 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	mux.Handle("POST "+serverclient.AdminJoinTokensPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleMintJoinToken))))
 	mux.Handle("GET "+serverclient.AdminPendingHostsPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handlePendingHosts))))
 	mux.Handle("POST "+serverclient.AdminForgetHostPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleForgetHost))))
+	mux.Handle("GET "+serverclient.AdminHostsStatusPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleHostsStatus))))
 	mux.Handle("GET /enroll/{token}", s.rateLimited(s.inviteLimit, true, http.HandlerFunc(s.handleEnroll)))
 	// The registration ceremony of an invite (02-08): JSON routes in the
 	// invite class, under the same limiter as the invite page.

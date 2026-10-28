@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -53,18 +54,20 @@ type enrolledHost struct {
 	*agentHost
 	run, fetch       *syncBuffer
 	runDone, fetchDn <-chan struct{}
+	fetchCmd         *exec.Cmd
 }
 
 // newEnrolledHostLayout makes a host root with the directories install
 // expects to exist (<root>/etc, <root>/var/lib, the sshd configuration
-// directory) and starts its sshd; the state directory is created by
-// install.
+// directory, and a systemd host's /run/systemd/system and
+// /etc/systemd/system, where install writes the units, 03-08) and starts
+// its sshd; the state directory is created by install.
 func newEnrolledHostLayout(t *testing.T, env *signerEnv) *agentHost {
 	t.Helper()
 	base := t.TempDir()
 	h := &agentHost{signer: env, root: filepath.Join(base, "root"), state: filepath.Join(base, "state")}
 	h.spoolDr = filepath.Join(h.state, "spool")
-	for _, d := range []string{"etc/ssh/sshd_config.d", "var/lib"} {
+	for _, d := range []string{"etc/ssh/sshd_config.d", "var/lib", "run/systemd/system", "etc/systemd/system"} {
 		if err := os.MkdirAll(filepath.Join(h.root, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -91,11 +94,29 @@ func startEnrolled(t *testing.T, h *agentHost) *enrolledHost {
 		"--sshd", filepath.Join(prefix, "sbin", "sshd"), "--sshd-config", h.sshd.cfg,
 		"--ssh-keygen", filepath.Join(prefix, "bin", "ssh-keygen"), "--reload", "signal", "--interval", "1s"}
 	_, e.run, e.runDone = startDaemon(t, "keyroster-agent run", envWithout("SSH_AUTH_SOCK"), agentBin(t), runArgs...)
-	_, e.fetch, e.fetchDn = startDaemon(t, "keyroster-agent-fetch", envWithout("SSH_AUTH_SOCK"), fetchBin(t),
+	e.startFetch(t)
+	return e
+}
+
+// startFetch starts e's keyroster-agent-fetch (--poll 1s).
+func (e *enrolledHost) startFetch(t *testing.T) {
+	t.Helper()
+	h := e.agentHost
+	e.fetchCmd, e.fetch, e.fetchDn = startDaemon(t, "keyroster-agent-fetch", envWithout("SSH_AUTH_SOCK"), fetchBin(t),
 		"--config", filepath.Join(h.root, "etc", "keyroster-agent", "fetch.json"),
 		"--dir", filepath.Join(h.root, "var", "lib", "keyroster-agent-fetch"),
 		"--spool", filepath.Join(h.state, "spool"), "--outbox", filepath.Join(h.state, "outbox"), "--poll", "1s")
-	return e
+}
+
+// stopFetch stops e's fetcher and waits for it to exit.
+func (e *enrolledHost) stopFetch(t *testing.T) {
+	t.Helper()
+	_ = e.fetchCmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-e.fetchDn:
+	case <-time.After(10 * time.Second):
+		t.Fatal("keyroster-agent-fetch did not stop")
+	}
 }
 
 // agentLastApply is what the e2e tests read of the applier's report.
@@ -324,7 +345,19 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	kr("revoke", "serial", c3.serial, "--reason", "e2e after the removal")
 	waitForApply("a revocation after the removal", func(r *agentLastApply) bool { return r.KRLVersion > krlBefore && r.SelfTest == "pass" })
 	t.Logf("a revocation after the removal reached the removed host: KRL v%d", h.lastApply(t).KRLVersion)
-	forgot := kr("host", "forget", "web1")
+	// 03-08 (owner decision 2026-10-28): forget waits until the host's
+	// heartbeat shows the removal applied (host_removal_not_applied).
+	var forgot string
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(time.Second) {
+		code, out, errOut := env.keyroster(t, admin, "", "host", "forget", "web1")
+		if code == 0 {
+			forgot = out
+			break
+		}
+		if !strings.Contains(errOut, "host_removal_not_applied") || time.Now().After(deadline) {
+			t.Fatalf("keyroster host forget web1: exit %d:\n%s\n%s\nfetch log:\n%s", code, out, errOut, eh.fetch.String())
+		}
+	}
 	if !strings.Contains(forgot, "Forgot the agent enrolled as web1") {
 		t.Fatalf("keyroster host forget web1:\n%s", forgot)
 	}

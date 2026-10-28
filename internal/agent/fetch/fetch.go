@@ -12,7 +12,7 @@
 // generated (D-02; no agent CA) and verifies the server like the CLI: a
 // pool of the pinned TLS roots plus the host name, and a chain that must
 // end in a pinned root (serverclient.New). The closed operation set is
-// enrollment and state (AGENT-02).
+// enrollment, state, heartbeat and identity rotation (AGENT-02, 03-08).
 package fetch
 
 import (
@@ -31,6 +31,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -73,6 +74,8 @@ var (
 	// token than this fetcher's: it is not posted (F2).
 	ErrPoPMismatch = errors.New("enroll_pop_mismatch")
 	ErrConfig      = errors.New("fetch_config_invalid")
+	// ErrDirNotOwned is a fetcher directory another user owns.
+	ErrDirNotOwned = errors.New("fetch_dir_not_owned")
 )
 
 // Config is one fetcher.
@@ -84,15 +87,80 @@ type Config struct {
 	Poll time.Duration
 	// Log receives one line per event (nil: nowhere).
 	Log io.Writer
+	// Fault is a test hook called at named points; an error from it
+	// stops there, as a crash would.
+	Fault func(point string) error
 }
 
 // Fetcher is a configured fetcher with its identity loaded.
 type Fetcher struct {
 	cfg     Config
+	fc      *join.FetchConfig
 	client  *serverclient.Client
+	key     ed25519.PrivateKey
 	spkiHex string
 	lastLog string
+	// offset is the last state answer's Date minus this host's clock at
+	// its receipt, in whole seconds (haveOffset: there was one).
+	offset     int64
+	haveOffset bool
 }
+
+func (f *Fetcher) fault(point string) error {
+	if f.cfg.Fault != nil {
+		return f.cfg.Fault(point)
+	}
+	return nil
+}
+
+// useKeyOnly makes key the identity: its self-signed certificate and the
+// pinned mTLS client.
+func (f *Fetcher) useKeyOnly(key ed25519.PrivateKey) error {
+	cert, err := selfSigned(key)
+	if err != nil {
+		return err
+	}
+	spki, err := x509.MarshalPKIXPublicKey(key.Public())
+	if err != nil {
+		return err
+	}
+	client, err := serverclient.New(serverclient.Config{Server: f.fc.Server, RootsPEM: f.fc.TLSRoots, Pins: f.fc.TLSPins, Certificates: []tls.Certificate{cert}})
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(spki)
+	f.client, f.key, f.spkiHex = client, key, hex.EncodeToString(sum[:])
+	return nil
+}
+
+// useKey is useKeyOnly, and writes the identity's SPKI to the spool's
+// identity.pub for keyroster-agent identity.
+func (f *Fetcher) useKey(key ed25519.PrivateKey) error {
+	if err := f.useKeyOnly(key); err != nil {
+		return err
+	}
+	spki, err := x509.MarshalPKIXPublicKey(key.Public())
+	if err != nil {
+		return err
+	}
+	return writeIdentityPub(f.cfg.Spool, spki)
+}
+
+// reloadIdentity switches to identity.key when another process (a
+// rotation) replaced it. The caller holds the identity flock.
+func (f *Fetcher) reloadIdentity() error {
+	key, err := loadIdentity(f.cfg.Dir)
+	if err != nil {
+		return err
+	}
+	if f.key != nil && key.Equal(f.key) {
+		return nil
+	}
+	return f.useKey(key)
+}
+
+// Fingerprint is the identity as keyroster-agent identity prints it.
+func (f *Fetcher) Fingerprint() string { return enroll.IdentityFingerprint(mustHex(f.spkiHex)) }
 
 // New reads fetch.json, loads or creates the identity key in Dir (0600),
 // makes its self-signed certificate (CN keyroster-agent, a random serial,
@@ -110,27 +178,26 @@ func New(cfg Config) (*Fetcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	key, err := loadIdentity(cfg.Dir)
+	// The identity files must stay the service user's: a fetcher run as
+	// another user (root running --rotate-identity) would leave keys the
+	// service cannot read (03-08).
+	var st unix.Stat_t
+	if err := unix.Stat(cfg.Dir, &st); err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrConfig, cfg.Dir, err)
+	}
+	if int(st.Uid) != os.Geteuid() {
+		return nil, fmt.Errorf("%w: %s is owned by uid %d, not this process's %d: run the fetcher as its owner (sudo -u keyroster-agent keyroster-agent-fetch ...)", ErrDirNotOwned, cfg.Dir, st.Uid, os.Geteuid())
+	}
+	unlock, err := lockIdentity(cfg.Dir)
 	if err != nil {
 		return nil, err
 	}
-	cert, err := selfSigned(key)
-	if err != nil {
+	defer unlock()
+	f := &Fetcher{cfg: cfg, fc: fc}
+	if err := f.reloadIdentity(); err != nil {
 		return nil, err
 	}
-	spki, err := x509.MarshalPKIXPublicKey(key.Public())
-	if err != nil {
-		return nil, err
-	}
-	if err := writeIdentityPub(cfg.Spool, spki); err != nil {
-		return nil, err
-	}
-	client, err := serverclient.New(serverclient.Config{Server: fc.Server, RootsPEM: fc.TLSRoots, Pins: fc.TLSPins, Certificates: []tls.Certificate{cert}})
-	if err != nil {
-		return nil, err
-	}
-	sum := sha256.Sum256(spki)
-	return &Fetcher{cfg: cfg, client: client, spkiHex: hex.EncodeToString(sum[:])}, nil
+	return f, nil
 }
 
 // IdentitySPKISHA256 is the lowercase hex SHA-256 of the identity's SPKI.
@@ -179,10 +246,20 @@ func NextPoll(base time.Duration) time.Duration {
 	return base + time.Duration(n-span)
 }
 
-// Once is one poll: while the join token is there, the enrollment step;
-// otherwise the state, asked again at once while the server answers
-// more: true, at most MaxRounds times.
+// Once is one poll, under the identity flock (a rotation never runs in
+// the middle of it) and with the identity on disk (a rotation by another
+// process is picked up): while the join token is there, the enrollment
+// step; otherwise the state, asked again at once while the server answers
+// more: true, at most MaxRounds times, and then the heartbeat.
 func (f *Fetcher) Once(ctx context.Context) error {
+	unlock, err := lockIdentity(f.cfg.Dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := f.reloadIdentity(); err != nil {
+		return err
+	}
 	tok, err := f.readToken()
 	if err != nil {
 		return err
@@ -190,7 +267,11 @@ func (f *Fetcher) Once(ctx context.Context) error {
 	if tok != nil {
 		return f.enroll(ctx, tok)
 	}
-	return f.pollState(ctx)
+	approved, err := f.pollState(ctx)
+	if err != nil || !approved {
+		return err
+	}
+	return f.sendHeartbeat(ctx)
 }
 
 // readToken reads the join token install left, or nil when it is gone.
@@ -310,17 +391,34 @@ func (f *Fetcher) readAnswer() (*enroll.Answer, error) {
 // most MaxRounds times, each round from the versions the last one wrote.
 // A poll that ends with more: false has had everything up to the server's
 // current versions, so spool files above them are none of the server's:
-// they go (dropAbove). not_approved waits for the next poll.
-func (f *Fetcher) pollState(ctx context.Context) error {
+// they go (dropAbove). not_approved waits for the next poll. It reports
+// whether the server answered the state (the agent is approved), after
+// which Once sends the heartbeat. unknown_agent with an identity.next
+// left by a rotation whose answer was lost finishes that rotation
+// (recoverRotation) and asks again.
+func (f *Fetcher) pollState(ctx context.Context) (bool, error) {
 	v, err := f.cursor()
 	if err != nil {
-		return err
+		return false, err
 	}
+	recovered := false
 	for range MaxRounds {
-		resp, err := f.client.AgentState(ctx, v)
+		resp, date, err := f.client.AgentStateAt(ctx, v)
+		received := time.Now()
+		if isAPIError(err, serverclient.AgentErrUnknown) && !recovered {
+			recovered = true
+			switched, rerr := f.recoverRotation(ctx, v)
+			if rerr != nil {
+				return false, rerr
+			}
+			if switched {
+				resp, date, err = f.client.AgentStateAt(ctx, v)
+				received = time.Now()
+			}
+		}
 		if isAPIError(err, serverclient.AgentErrNotApproved) {
 			f.logf("enrolled, waiting for an admin's approval (keyroster host approve)")
-			return nil
+			return false, nil
 		}
 		var he *serverclient.HTTPError
 		if errors.As(err, &he) {
@@ -328,14 +426,21 @@ func (f *Fetcher) pollState(ctx context.Context) error {
 				// What was spooled stays for the applier (PR #71 review
 				// F4); the next poll asks again from what it accepted.
 				f.logf("the server is rate limiting this agent (retry after %d s); continuing at the next poll", secs)
-				return nil
+				return false, nil
 			}
 		}
 		if err != nil {
-			return fmt.Errorf("state: %w", err)
+			return false, fmt.Errorf("state: %w", err)
+		}
+		if !recovered {
+			f.dropStaleNext()
+			recovered = true
+		}
+		if !date.IsZero() {
+			f.offset, f.haveOffset = clockOffset(date, received), true
 		}
 		if err := writeState(f.cfg.Spool, resp); err != nil {
-			return err
+			return true, err
 		}
 		if n := len(resp.Bundles) + len(resp.Directories); n > 0 || resp.KRL != nil {
 			f.logf("spooled %d bundle and %d directory versions and %d KRL", len(resp.Bundles), len(resp.Directories), boolInt(resp.KRL != nil))
@@ -355,10 +460,10 @@ func (f *Fetcher) pollState(ctx context.Context) error {
 				f.logf("removed spool files above the server's current versions (bundle %d, directory %d, KRL %d): %s",
 					v.Bundle, v.Directory, v.KRL, strings.Join(dropped, " "))
 			}
-			return err
+			return true, err
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // cursor is where a poll's state requests start: for each kind the
@@ -533,41 +638,23 @@ func readFetchConfig(path string) (*join.FetchConfig, error) {
 }
 
 // loadIdentity reads the identity key from dir, or makes one and writes
-// it there (mode 0600, through spool.WriteFileAt).
+// it there (mode 0600, through spool.WriteFileAt). The caller holds the
+// identity flock.
 func loadIdentity(dir string) (ed25519.PrivateKey, error) {
 	fd, err := spool.OpenDir(dir)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = unix.Close(fd) }()
-	b, err := spool.ReadFileAt(fd, IdentityKeyFile, maxSmallFile)
-	if err == nil {
-		block, rest := pem.Decode(b)
-		if block == nil || block.Type != "PRIVATE KEY" || len(rest) != 0 {
-			return nil, fmt.Errorf("%s: not one PEM PRIVATE KEY block", IdentityKeyFile)
-		}
-		k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", IdentityKeyFile, err)
-		}
-		ek, ok := k.(ed25519.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("%s: not an Ed25519 key", IdentityKeyFile)
-		}
-		return ek, nil
-	}
+	k, err := readKey(fd, IdentityKeyFile)
 	if !errors.Is(err, unix.ENOENT) {
-		return nil, err
+		return k, err
 	}
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		return nil, err
-	}
-	if err := spool.WriteFileAt(fd, IdentityKeyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+	if err := writeKey(fd, IdentityKeyFile, key); err != nil {
 		return nil, err
 	}
 	return key, nil

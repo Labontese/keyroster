@@ -331,6 +331,12 @@ func (c *Client) GetKRL(ctx context.Context) (*KRLDocument, error) {
 // a body above limit bytes is refused before anything is decoded. A
 // non-2xx answer other than 503 is an *HTTPError.
 func (c *Client) send(ctx context.Context, method, path string, body []byte, out any, prepare func(*http.Request) error, limit int64) error {
+	return c.sendHeader(ctx, method, path, body, out, prepare, limit, nil)
+}
+
+// sendHeader is send, and passes the response's headers to header (when
+// not nil) once a response arrived, whatever its status.
+func (c *Client) sendHeader(ctx context.Context, method, path string, body []byte, out any, prepare func(*http.Request) error, limit int64, header func(http.Header)) error {
 	if !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("serverclient: path %q must start with /", path)
 	}
@@ -356,6 +362,9 @@ func (c *Client) send(ctx context.Context, method, path string, body []byte, out
 		return c.mapError(path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if header != nil {
+		header(resp.Header)
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		// A transport failure, as for the request itself.

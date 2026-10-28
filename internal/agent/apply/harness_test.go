@@ -432,6 +432,8 @@ func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
 		return Result{Code: 255, Stderr: []byte(r.h.l.DropIn() + " line 9: invalid quotes")}, nil
 	}
 	switch {
+	case cmd.Path() == r.h.cfg.SSHD && len(args) == 1 && args[0] == "-V":
+		return Result{Stderr: []byte("OpenSSH_10.5p1, OpenSSL 3.5.0 8 Apr 2025\n")}, nil
 	case cmd.Path() == r.h.cfg.SSHD && len(args) >= 1 && args[0] == "-t":
 		// The configuration fails only with the agent's drop-in in it.
 		if _, err := os.Stat(r.h.l.DropIn()); r.sshdTestErr != "" && err == nil {

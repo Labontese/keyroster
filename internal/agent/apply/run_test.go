@@ -5,8 +5,12 @@ package apply
 import (
 	"context"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 )
 
 // TestRunCatchUp (PR #71 review F9): with more directory versions queued
@@ -38,4 +42,113 @@ func TestRunCatchUp(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// TestRunChecks (AGENT-05, 03-08): keyroster-agent run writes the status
+// at start (never applied), after an apply, and after the drift check that
+// follows every apply; then the check runs again only once CheckEvery has
+// passed on the clock, each time writing a status with the new last_check.
+func TestRunChecks(t *testing.T) {
+	h := newTestHost(t, newFixture(t))
+	withOutbox(t, h)
+	statuses := make(chan *heartbeat.Status, 64)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	var log syncLog
+	h.cfg.Log = &log
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("run log:\n%s", log.String())
+		}
+	})
+	go func() {
+		done <- Run(ctx, RunConfig{Config: h.cfg, Interval: 20 * time.Millisecond, Retry: time.Hour,
+			Status: func(s *heartbeat.Status) { statuses <- s }}, h.l)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	next := func(what string, cond func(s *heartbeat.Status) bool) *heartbeat.Status {
+		t.Helper()
+		deadline := time.After(10 * time.Second)
+		for {
+			select {
+			case s := <-statuses:
+				if cond(s) {
+					return s
+				}
+			case <-deadline:
+				t.Fatalf("no status %s within 10 s", what)
+			}
+		}
+	}
+	if s := next("at start", func(*heartbeat.Status) bool { return true }); s.Generation != 0 || s.LastApply != nil {
+		t.Fatalf("the first status: %+v", s)
+	}
+	h.publishDir(h.spec("role:ops"))
+	h.write()
+	applied := next("after the check that follows the apply", func(s *heartbeat.Status) bool { return s.LastApply != nil && s.LastCheck != nil })
+	if applied.Generation == 0 || applied.LastCheck.Drift {
+		t.Fatalf("after the apply and its check: %+v %+v", applied, applied.LastCheck)
+	}
+	// The spool was written file by file, so the loop may have applied
+	// (and checked) more than once; once it is quiet, no further check
+	// comes before CheckEvery has passed on the clock.
+	for quiet := false; !quiet; {
+		select {
+		case s := <-statuses:
+			if s.LastCheck == nil || s.LastCheck.At != applied.LastCheck.At {
+				t.Fatalf("a check before CheckEvery passed: %+v", s.LastCheck)
+			}
+			applied = s
+		case <-time.After(500 * time.Millisecond):
+			quiet = true
+		}
+	}
+	// 15 min +- 60 s: nothing at 13 min, a check by 16 min.
+	h.clock.advance(13 * time.Minute)
+	select {
+	case s := <-statuses:
+		t.Fatalf("a check 13 min after the last one: %+v", s.LastCheck)
+	case <-time.After(500 * time.Millisecond):
+	}
+	h.clock.advance(3 * time.Minute)
+	later := next("from the periodic check", func(s *heartbeat.Status) bool { return s.LastCheck != nil && s.LastCheck.At != applied.LastCheck.At })
+	if later.Seq <= applied.Seq {
+		t.Fatalf("seq %d after %d", later.Seq, applied.Seq)
+	}
+}
+
+// TestCheckJitter: the drift check's period is 15 min +- 60 s, uniformly.
+func TestCheckJitter(t *testing.T) {
+	lo, hi := DefaultCheckEvery, DefaultCheckEvery
+	for range 2000 {
+		d := jitter(DefaultCheckEvery, DefaultCheckJitter)
+		if d < DefaultCheckEvery-DefaultCheckJitter || d > DefaultCheckEvery+DefaultCheckJitter {
+			t.Fatalf("jitter %s outside 15 min +- 60 s", d)
+		}
+		lo, hi = min(lo, d), max(hi, d)
+	}
+	if hi-lo < 100*time.Second {
+		t.Fatalf("2000 draws span only %s", hi-lo)
+	}
+}
+
+// syncLog is a goroutine-safe log buffer.
+type syncLog struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *syncLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *syncLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }

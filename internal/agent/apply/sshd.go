@@ -72,6 +72,22 @@ func (e *engine) sshdDump(ctx context.Context, spec string) (Dump, error) {
 	return ParseDump(res.Stdout), nil
 }
 
+// sshdVersion runs sshd -V and returns the first line of its output that
+// starts with "OpenSSH" (an sshd without -V prints it in its usage text),
+// or "" when there is none: the heartbeat's sshd_version, the host's word.
+func (e *engine) sshdVersion(ctx context.Context) string {
+	res, err := e.run(ctx, execsite.SSHDVersion(e.cfg.SSHD))
+	if err != nil {
+		return ""
+	}
+	for _, l := range strings.Split(string(res.Stderr)+"\n"+string(res.Stdout), "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "OpenSSH") {
+			return l
+		}
+	}
+	return ""
+}
+
 // keygenFingerprint runs ssh-keygen -l -f file: the host's own tools must
 // read a CA key line.
 func (e *engine) keygenFingerprint(ctx context.Context, file string) (Result, error) {

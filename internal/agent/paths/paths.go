@@ -207,6 +207,7 @@ var ExecSites = []ExecSite{
 	{Func: "sshdTest", Ctor: "SSHDTest", Call: "e.cfg.SSHD e.cfg.SSHDConfig", Args: "-t -f CONFIG"},
 	{Func: "sshdDump", Ctor: "SSHDDump", Call: "e.cfg.SSHD e.cfg.SSHDConfig", Args: "-T -f CONFIG"},
 	{Func: "sshdDump", Ctor: "SSHDDumpFor", Call: "e.cfg.SSHD e.cfg.SSHDConfig spec", Args: "-T -f CONFIG -C SPEC"},
+	{Func: "sshdVersion", Ctor: "SSHDVersion", Call: "e.cfg.SSHD", Args: "-V"},
 	{Func: "keygenFingerprint", Ctor: "KeygenFingerprint", Call: "e.cfg.SSHKeygen file", Args: "-l -f FILE"},
 	{Func: "keygenQuery", Ctor: "KeygenQuery", Call: "e.cfg.SSHKeygen krlFile pub", Args: "-Q -f KRL PUB"},
 	{Func: "reloadSystemd", Ctor: "SystemctlReload", Call: "systemctl unit", Args: "reload UNIT"},

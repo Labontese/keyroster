@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	"modernc.org/sqlite"
@@ -86,6 +87,10 @@ type Agent struct {
 	// directory approved it (0: never). An agent approved once keeps
 	// getting state after its host entry goes (PR #71 review D-R1).
 	ApprovedAtUS int64
+	// RemovedDirVersion is, for an agent approved once, the first
+	// directory version it requested state under that no longer approves
+	// it (0: none since it was last approved; 03-08).
+	RemovedDirVersion uint64
 }
 
 // EnrollAgent uses the join token tokenHash and records a as an enrolled
@@ -233,32 +238,142 @@ func (d *DB) MarkAgentApproved(ctx context.Context, id, nowUS int64) error {
 	return nil
 }
 
-// DeleteAgent removes the agent row id, which frees its identity and host
-// keys for a new enrollment (keyroster host forget; PR #71 review D-R1).
-// It is ErrNotFound when no such row exists.
+// DeleteAgent removes the agent row id and its heartbeat, which frees its
+// identity and host keys for a new enrollment (keyroster host forget; PR
+// #71 review D-R1). It is ErrNotFound when no such row exists.
 func (d *DB) DeleteAgent(ctx context.Context, id int64) error {
-	res, err := d.db.ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, id)
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM heartbeats WHERE agent_id = ?`, id); err != nil {
+		return fmt.Errorf("serverdb: delete heartbeat: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("serverdb: delete agent: %w", err)
+	}
+	if err := oneRow(res); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return nil
+}
+
+// SetAgentRemovedVersion records version as the first directory version
+// that no longer approves the agent, unless one is recorded already. A
+// version of 0 clears it (a directory approves the agent again).
+func (d *DB) SetAgentRemovedVersion(ctx context.Context, id int64, version uint64) error {
+	if version > math.MaxInt64 {
+		return errors.New("serverdb: directory version above int64")
+	}
+	var err error
+	if version == 0 {
+		_, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = NULL WHERE id = ?`, id)
+	} else {
+		_, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = ? WHERE id = ? AND removed_dir_version IS NULL`, int64(version), id) //nolint:gosec // G115: checked above
+	}
+	if err != nil {
+		return fmt.Errorf("serverdb: agent removal version: %w", err)
+	}
+	return nil
+}
+
+// RotateAgentIdentity replaces agent id's identity SPKI hash oldSPKI by
+// newSPKI (03-08, AGENT-02). It is ErrNotFound when the row no longer
+// holds oldSPKI (a concurrent rotation), ErrIdentityInUse when another
+// agent holds newSPKI.
+func (d *DB) RotateAgentIdentity(ctx context.Context, id int64, oldSPKI, newSPKI []byte) error {
+	if len(newSPKI) != 32 {
+		return errors.New("serverdb: incomplete identity")
+	}
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET identity_spki_sha256 = ? WHERE id = ? AND identity_spki_sha256 = ?`, newSPKI, id, oldSPKI)
+	if err != nil {
+		var se *sqlite.Error
+		if errors.As(err, &se) && se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+			return ErrIdentityInUse
+		}
+		return fmt.Errorf("serverdb: rotate agent identity: %w", err)
 	}
 	return oneRow(res)
 }
 
+// ErrStaleHeartbeat is a heartbeat whose seq is not above the stored one.
+var ErrStaleHeartbeat = errors.New("stale_heartbeat")
+
+// Heartbeat is one stored heartbeat.
+type Heartbeat struct {
+	AgentID      int64
+	Seq          int64
+	Body         []byte
+	ReceivedAtUS int64
+}
+
+// StoreHeartbeat stores body as agent id's heartbeat when seq is above
+// the stored one, or none is stored, in one statement. A lower or equal
+// seq changes nothing and is ErrStaleHeartbeat.
+func (d *DB) StoreHeartbeat(ctx context.Context, id, seq int64, body []byte, nowUS int64) error {
+	if seq < 1 || len(body) == 0 {
+		return errors.New("serverdb: incomplete heartbeat")
+	}
+	res, err := d.db.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) VALUES (?, ?, ?, ?)
+ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, received_at_us = excluded.received_at_us
+WHERE excluded.seq > heartbeats.seq`, id, seq, body, nowUS)
+	if err != nil {
+		return fmt.Errorf("serverdb: store heartbeat: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("serverdb: rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrStaleHeartbeat
+	}
+	return nil
+}
+
+// Heartbeats returns every stored heartbeat, by agent ID.
+func (d *DB) Heartbeats(ctx context.Context) (map[int64]Heartbeat, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT agent_id, seq, body, received_at_us FROM heartbeats`)
+	if err != nil {
+		return nil, fmt.Errorf("serverdb: heartbeats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[int64]Heartbeat{}
+	for rows.Next() {
+		var h Heartbeat
+		if err := rows.Scan(&h.AgentID, &h.Seq, &h.Body, &h.ReceivedAtUS); err != nil {
+			return nil, fmt.Errorf("serverdb: heartbeat: %w", err)
+		}
+		out[h.AgentID] = h
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("serverdb: heartbeats: %w", err)
+	}
+	return out, nil
+}
+
 // agentColumns are the columns scanAgent reads, in its order.
-const agentColumns = `id, identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us, last_seen_us, approved_at_us`
+const agentColumns = `id, identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us, last_seen_us, approved_at_us, removed_dir_version`
 
 func scanAgent(rows *sql.Rows) (*Agent, error) {
 	var (
-		a              Agent
-		keys           string
-		seen, approved sql.NullInt64
+		a                       Agent
+		keys                    string
+		seen, approved, removed sql.NullInt64
 	)
-	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.TokenSHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen, &approved); err != nil {
+	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.TokenSHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen, &approved, &removed); err != nil {
 		return nil, fmt.Errorf("serverdb: agent: %w", err)
 	}
 	if err := json.Unmarshal([]byte(keys), &a.HostKeys); err != nil {
 		return nil, fmt.Errorf("serverdb: agent %d host keys: %w", a.ID, err)
 	}
 	a.LastSeenUS, a.ApprovedAtUS = seen.Int64, approved.Int64
+	if removed.Valid && removed.Int64 > 0 {
+		a.RemovedDirVersion = uint64(removed.Int64)
+	}
 	return &a, nil
 }
