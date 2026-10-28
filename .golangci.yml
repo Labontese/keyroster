@@ -71,11 +71,15 @@ linters:
         # D-05 (owner's answer: loopback-only): the root applier has no HTTP,
         # TLS or RPC code; its only network use is the loopback self-test.
         # scripts/dep-firewall.sh checks the transitive graph.
+        # 03-07: the fetcher (internal/agent/fetch, cmd/keyroster-agent-fetch)
+        # is the agent's network half and is excluded; scripts/dep-firewall.sh
+        # keeps os/exec out of its graph instead.
         agent-apply-no-http:
           list-mode: lax
           files:
             - "**/internal/agent/**"
             - "**/cmd/keyroster-agent/**"
+            - "!**/internal/agent/fetch/**"
           deny:
             - pkg: net/http
               desc: the root applier has no HTTP code (D-05, loopback-only)

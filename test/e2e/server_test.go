@@ -55,6 +55,12 @@ type serverOpts struct {
 	// StoppableSigner starts the signer with serveStoppable and keeps its
 	// stop function in serverEnv.StopSigner, for a test that restarts it.
 	StoppableSigner bool
+	// PoPHosts sets pop.hosts in the genesis policy (bootstrapOpts), which
+	// host enrollment needs (03-07).
+	PoPHosts bool
+	// AgentListen starts keyroster-server with --agent-listen on
+	// 127.0.0.1:serverEnv.AgentPort (03-07).
+	AgentListen bool
 }
 
 // serverEnv is a running signer with a keyroster-server in front of it.
@@ -70,6 +76,11 @@ type serverEnv struct {
 	Done   <-chan struct{}
 	// StopSigner stops the signer (serverOpts.StoppableSigner only).
 	StopSigner func()
+	// StateDir is the server's --state-dir (krl-served.json is in it),
+	// and AgentPort its agent listener's port (serverOpts.AgentListen
+	// only, else 0).
+	StateDir  string
+	AgentPort int
 }
 
 // startServerEnv bootstraps a signer whose policy names RP serverRPID with
@@ -80,7 +91,8 @@ type serverEnv struct {
 func startServerEnv(t *testing.T, opts serverOpts) *serverEnv {
 	t.Helper()
 	port := freePort(t)
-	bopts := bootstrapOpts{WebAuthnRPID: serverRPID, WebAuthnOrigins: []string{"https://" + serverRPID + ":" + strconv.Itoa(port)}, AdminQuorum: opts.AdminQuorum}
+	bopts := bootstrapOpts{WebAuthnRPID: serverRPID, WebAuthnOrigins: []string{"https://" + serverRPID + ":" + strconv.Itoa(port)}, AdminQuorum: opts.AdminQuorum,
+		PoPHosts: opts.PoPHosts}
 	if opts.Software {
 		bopts.Backend = "software"
 		bopts.BackendOpts = map[string]string{"passphrase-file": passphraseFile(t)}
@@ -96,10 +108,15 @@ func startServerEnv(t *testing.T, opts serverOpts) *serverEnv {
 		sg = bootstrapSigner(t, bopts)
 	}
 	ca := newTestCA(t, serverRPID)
-	e := &serverEnv{Signer: sg, CA: ca, Port: port, URL: "https://" + serverRPID + ":" + strconv.Itoa(port), StopSigner: stop}
-	e.Cmd, e.Stderr, e.Done = startDaemon(t, "keyroster-server", envWithout("SSH_AUTH_SOCK"), serverBin, "serve",
-		"--listen", "127.0.0.1:"+strconv.Itoa(port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", sg.Socket,
-		"--state-dir", filepath.Join(t.TempDir(), "state"))
+	e := &serverEnv{Signer: sg, CA: ca, Port: port, URL: "https://" + serverRPID + ":" + strconv.Itoa(port), StopSigner: stop,
+		StateDir: filepath.Join(t.TempDir(), "state")}
+	args := []string{"serve", "--listen", "127.0.0.1:" + strconv.Itoa(port), "--tls-cert", ca.CertPath, "--tls-key", ca.KeyPath, "--signer-socket", sg.Socket,
+		"--state-dir", e.StateDir}
+	if opts.AgentListen {
+		e.AgentPort = freePort(t)
+		args = append(args, "--agent-listen", "127.0.0.1:"+strconv.Itoa(e.AgentPort))
+	}
+	e.Cmd, e.Stderr, e.Done = startDaemon(t, "keyroster-server", envWithout("SSH_AUTH_SOCK"), serverBin, args...)
 	waitFor(t, "keyroster-server /healthz", e.Done, e.Stderr, func() bool {
 		r, err := e.get("/healthz")
 		return err == nil && r.code == http.StatusOK

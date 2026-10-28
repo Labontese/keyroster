@@ -59,6 +59,7 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 	keyFile := fs.String("tls-key", "", "TLS private key file (required)")
 	socket := fs.String("signer-socket", "/run/keyroster-signer/signer.sock", "keyroster-signer Unix socket")
 	stateDir := fs.String("state-dir", "/var/lib/keyroster-server", "directory of the server's state database (created 0700); nothing in it is authority")
+	agentListen := fs.String("agent-listen", "", "TCP address of the agent listener (03-07): the agent routes only, a client certificate required; empty: no agent listener")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -96,23 +97,77 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
-	// krl-served.json is the last KRL document this server served, kept
-	// before it is served: the restore source for lost revocations (03-06b,
-	// docs/runbooks/server-install.md).
-	srv, err := server.New(server.Config{SignerSocket: *socket, RPID: rpID, Logger: logger, DB: db,
-		KRLFile: filepath.Join(*stateDir, "krl-served.json")})
-	if err != nil {
-		return err
-	}
-	// 4. TLS 1.3 only, certificate from the holder.
+	// 4. The listeners: the main one for browsers and the CLI, and, with
+	// --agent-listen, the agent listener (03-07), whose port minted join
+	// tokens name. Both serve TLS 1.3 with the holder's certificate.
 	l, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return err
 	}
-	// 5. Bounded reads, writes and headers.
-	hs := &http.Server{
-		Handler:           srv.Handler(),
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: holder.GetCertificate},
+	var al net.Listener
+	agentPort := 0
+	if *agentListen != "" {
+		if al, err = net.Listen("tcp", *agentListen); err != nil {
+			_ = l.Close()
+			return err
+		}
+		agentPort = al.Addr().(*net.TCPAddr).Port
+	}
+	// krl-served.json is the last KRL document this server served, kept
+	// before it is served: the restore source for lost revocations (03-06b,
+	// docs/runbooks/server-install.md).
+	srv, err := server.New(server.Config{SignerSocket: *socket, RPID: rpID, Logger: logger, DB: db,
+		KRLFile: filepath.Join(*stateDir, "krl-served.json"), AgentPort: agentPort})
+	if err != nil {
+		return err
+	}
+	// 5. Bounded reads, writes and headers. The main listener's TLS
+	// configuration asks for no client certificate (BrowserTLSConfig); the
+	// agent listener's requires one and serves only the agent routes.
+	servers := []*http.Server{newHTTPServer(srv.Handler(), server.BrowserTLSConfig(holder.GetCertificate), logger)}
+	listeners := []net.Listener{l}
+	if al != nil {
+		servers = append(servers, newHTTPServer(srv.AgentHandler(), server.AgentTLSConfig(holder.GetCertificate), logger))
+		listeners = append(listeners, al)
+	}
+	// Reload on a file change (checked every certWatch) and on SIGHUP.
+	go holder.Watch(ctx, certWatch, hup)
+	served := make(chan error, len(servers))
+	for i, hs := range servers {
+		go func() { served <- hs.ServeTLS(listeners[i], "", "") }()
+	}
+	agentAddr := ""
+	if al != nil {
+		agentAddr = al.Addr().String()
+	}
+	logger.Info("serving", "listen", l.Addr().String(), "agent_listen", agentAddr, "rp_id", rpID, "origins", policy.WebAuthn.Origins,
+		"policy_version", policy.Version, "bundle_version", st.BundleVersion)
+
+	var serveErr error
+	select {
+	case serveErr = <-served:
+	case <-ctx.Done():
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+	for _, hs := range servers {
+		if err := hs.Shutdown(sctx); err != nil && serveErr == nil {
+			serveErr = err
+		}
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
+	}
+	logger.Info("stopped")
+	return nil
+}
+
+// newHTTPServer is one listener's http.Server: bounded reads, writes and
+// headers, errors to the JSON log.
+func newHTTPServer(h http.Handler, tlsCfg *tls.Config, logger *slog.Logger) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -120,25 +175,6 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 		MaxHeaderBytes:    16 << 10,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
-	// Reload on a file change (checked every certWatch) and on SIGHUP.
-	go holder.Watch(ctx, certWatch, hup)
-	served := make(chan error, 1)
-	go func() { served <- hs.ServeTLS(l, "", "") }()
-	logger.Info("serving", "listen", l.Addr().String(), "rp_id", rpID, "origins", policy.WebAuthn.Origins,
-		"policy_version", policy.Version, "bundle_version", st.BundleVersion)
-
-	select {
-	case err := <-served:
-		return err
-	case <-ctx.Done():
-	}
-	sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-	defer cancel()
-	if err := hs.Shutdown(sctx); err != nil {
-		return err
-	}
-	logger.Info("stopped")
-	return nil
 }
 
 // openStateDB creates dir (0700) if needed and opens server.db in it.

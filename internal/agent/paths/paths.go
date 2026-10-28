@@ -75,6 +75,34 @@ func (l Layout) State(name ...string) string {
 	return filepath.Join(append([]string{l.StateDir}, name...)...)
 }
 
+// Spool is <state>/spool, the one directory the fetcher writes signed
+// documents into (keyroster-agent:root 0750, 03-07).
+func (l Layout) Spool() string { return l.State("spool") }
+
+// Outbox is <state>/outbox, where the applier writes what the fetcher
+// may read (root:keyroster-agent 2750, 03-07): the enrollment proof, and
+// 03-08's status.
+func (l Layout) Outbox() string { return l.State("outbox") }
+
+// FetchConfigDir is <root>/etc/keyroster-agent (root:root 0755), and
+// FetchConfig its fetch.json (root:keyroster-agent 0640): the agent
+// server's URL and its TLS roots and pins, which install writes and the
+// fetcher reads (03-07).
+func (l Layout) FetchConfigDir() string { return filepath.Join(l.Root, "etc", "keyroster-agent") }
+
+// FetchConfig is <root>/etc/keyroster-agent/fetch.json.
+func (l Layout) FetchConfig() string { return filepath.Join(l.FetchConfigDir(), "fetch.json") }
+
+// FetchDir is <root>/var/lib/keyroster-agent-fetch, the fetcher's own
+// directory (keyroster-agent 0700): its identity key, and the join token
+// install writes there (JoinTokenFile, 0600) until enrollment uses it.
+func (l Layout) FetchDir() string {
+	return filepath.Join(l.Root, "var", "lib", "keyroster-agent-fetch")
+}
+
+// JoinTokenFile is <root>/var/lib/keyroster-agent-fetch/join-token.
+func (l Layout) JoinTokenFile() string { return filepath.Join(l.FetchDir(), "join-token") }
+
 // within reports whether p is dir or below it; both are clean absolute
 // paths.
 func within(p, dir string) bool {
@@ -82,8 +110,10 @@ func within(p, dir string) bool {
 }
 
 // Allowed returns nil when the applier may write path: the keyroster tree
-// itself or anything below it, the drop-in file exactly, or the state
-// directory or anything below it. The path must be absolute and clean
+// itself or anything below it, the drop-in file exactly, the state
+// directory or anything below it, or exactly one of the four paths
+// install writes outside them (03-07): FetchConfigDir, FetchConfig,
+// FetchDir and JoinTokenFile. The path must be absolute and clean
 // (no "..", no doubled separators); anything else is ErrNotAllowed. It
 // never touches the file system: the applier opens every path it checked
 // with O_NOFOLLOW relative to a directory it opened the same way.
@@ -101,8 +131,11 @@ func Allowed(l Layout, path string) error {
 		return nil
 	case within(path, filepath.Clean(l.StateDir)):
 		return nil
+	case path == filepath.Clean(l.FetchConfigDir()), path == filepath.Clean(l.FetchConfig()),
+		path == filepath.Clean(l.FetchDir()), path == filepath.Clean(l.JoinTokenFile()):
+		return nil
 	}
-	return fmt.Errorf("%w: %s is outside the agent's paths (%s, %s and %s)", ErrNotAllowed, path, l.KeyrosterDir(), l.DropIn(), l.StateDir)
+	return fmt.Errorf("%w: %s is outside the agent's paths (%s, %s, %s and install's %s, %s)", ErrNotAllowed, path, l.KeyrosterDir(), l.DropIn(), l.StateDir, l.FetchConfig(), l.JoinTokenFile())
 }
 
 // Phase2DropIn is the Phase 2 runbook's drop-in,

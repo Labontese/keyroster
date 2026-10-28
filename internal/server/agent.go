@@ -1,0 +1,473 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"regexp"
+	"slices"
+	"strconv"
+	"time"
+
+	"github.com/Labontese/keyroster/internal/agent/enroll"
+	"github.com/Labontese/keyroster/internal/agent/join"
+	"github.com/Labontese/keyroster/internal/directory"
+	"github.com/Labontese/keyroster/internal/krl"
+	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/serverdb"
+	"github.com/Labontese/keyroster/internal/trust"
+)
+
+const (
+	// maxAgentEnrollBody bounds an enrollment request: eight host keys,
+	// their signatures and the facts fit in a few KiB.
+	maxAgentEnrollBody = 16 << 10
+	// agentPerMinute and agentBurst are the per-identity rate of the agent
+	// routes; the global backstop is agentGlobalFactor times them.
+	agentPerMinute    = 30
+	agentBurst        = 10
+	agentGlobalFactor = 100
+)
+
+// buildAgentMux registers the closed set of agent routes (AGENT-02) on
+// their own mux, served only by the agent listener (AgentHandler): the
+// enrollment and the state. Each takes the client certificate's identity
+// from the TLS connection (AgentTLSConfig required one at the handshake)
+// and goes through the per-identity limiter.
+func (s *Server) buildAgentMux() *routeMux {
+	mux := newRouteMux()
+	mux.Handle("POST "+serverclient.AgentEnrollPath, s.agentLimited(http.HandlerFunc(s.handleAgentEnroll)))
+	mux.Handle("GET "+serverclient.AgentStatePath, s.agentLimited(s.requireAgent(s.handleAgentState)))
+	return mux
+}
+
+// AgentHandler is the handler of the agent listener: the agent routes
+// only, with the security headers. It serves nothing without the TLS
+// configuration of AgentTLSConfig in front of it.
+func (s *Server) AgentHandler() http.Handler { return s.agentHandler }
+
+// agentLimited applies the agent limiter, keyed by the client
+// certificate's SPKI hash; a request without one is refused 403.
+func (s *Server) agentLimited(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		spki, ok := agentSPKI(r)
+		if !ok {
+			s.writeJSON(w, nil, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
+			return
+		}
+		if s.agentLimit.allow(hex.EncodeToString(spki), s.clock()) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.log.Warn("rate limited", "route", r.Pattern, "agent", agentFingerprint(spki))
+		w.Header().Set("Retry-After", strconv.Itoa(s.agentLimit.retryAfter()))
+		s.writeJSON(w, nil, http.StatusTooManyRequests, serverclient.APIError{Error: "rate limited"})
+	})
+}
+
+// agentFingerprint is the identity as keyroster-agent identity and
+// keyroster host approve print it (enroll.IdentityFingerprint).
+func agentFingerprint(spki []byte) string { return enroll.IdentityFingerprint(spki) }
+
+// popHostsEnabled reports whether the installed root-signed policy sets
+// pop.hosts. Minting, enrollment and the pending list refuse
+// host_pop_not_enabled without it (owner decision 2026-10-24).
+func popHostsEnabled(v *statusView) bool { return v.policy.PoP != nil && v.policy.PoP.Hosts }
+
+// agentRequest is one request requireAgent admitted: the enrolled agent,
+// and the status and directory it was approved under.
+type agentRequest struct {
+	agent  *serverdb.Agent
+	status *statusView
+	dir    *directoryView
+}
+
+// requireAgent admits a request only from an enrolled, approved agent:
+// the client certificate's SPKI hash must name an agents row (else 403
+// unknown_agent), and the installed directory must hold an active host
+// entry whose keys equal that agent's enrolled host keys (else 403
+// not_approved). The approval is the admin-signed directory itself: the
+// server records nothing else. It updates the agent's last_seen_us.
+func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *agentRequest)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		spki, _ := agentSPKI(r) // agentLimited checked it
+		a, err := s.db.AgentBySPKI(ctx, spki)
+		if errors.Is(err, serverdb.ErrNotFound) {
+			v, _ := s.currentStatus(ctx)
+			s.writeJSON(w, v, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
+			return
+		}
+		if err != nil {
+			s.log.Error("agent lookup", "err", err)
+			s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+			return
+		}
+		dv, err := s.currentDirectory(ctx)
+		if err != nil {
+			s.log.Warn("directory read failed", "err", err)
+			s.signerUnavailable(w, false)
+			return
+		}
+		if !approved(dv, a.HostKeys) {
+			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrNotApproved})
+			return
+		}
+		if err := s.db.TouchAgent(ctx, a.ID, s.clock().UnixMicro()); err != nil {
+			s.log.Warn("agent last seen", "err", err)
+		}
+		next(w, r, &agentRequest{agent: a, status: dv.status, dir: dv})
+	})
+}
+
+// approved reports whether the directory dv holds an active host entry
+// whose keys are exactly keys (both sorted trust.FormatKey lists). The
+// entry is found by its first key (HostForKey: a key is on at most one
+// host).
+func approved(dv *directoryView, keys []string) bool {
+	if dv.dir == nil || len(keys) == 0 {
+		return false
+	}
+	pub, err := trust.ParseKey(keys[0])
+	if err != nil {
+		return false
+	}
+	h, ok := dv.dir.HostForKey(pub)
+	return ok && h.Status == directory.StatusActive && slices.Equal(h.Keys, keys)
+}
+
+// handleAgentEnroll serves POST AgentEnrollPath: one agent records itself
+// as pending with a one-time join token (AGENT-01). In order:
+//  1. the installed policy must set pop.hosts (409 host_pop_not_enabled),
+//     before the token is looked at;
+//  2. the body, at most maxAgentEnrollBody, decoded strictly;
+//  3. the proof of possession (enroll.Verify) the server rebuilds from the
+//     token's hash, the TLS identity, the signer's installation ID, the
+//     host keys and the facts' hash: every host key must have signed it
+//     (403 enroll_pop_invalid);
+//  4. no host key on a directory host entry (409 host_keys_in_use);
+//  5. in one transaction (serverdb.EnrollAgent): the token known, unused
+//     and unexpired (403 token_unknown, token_used, token_expired), the
+//     identity not enrolled (409 identity_in_use), no host key on another
+//     agent (409 host_keys_in_use), the token used and the agent recorded.
+//
+// Nothing the agent sends becomes a name, host group or principal: the
+// row keeps the host name the admin gave the token.
+func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	v, err := s.currentStatus(ctx)
+	if err != nil {
+		s.signerUnavailable(w, false)
+		return
+	}
+	if !popHostsEnabled(v) {
+		s.writeJSON(w, v, http.StatusConflict, serverclient.APIError{Error: serverclient.AgentErrHostPoPNotEnable})
+		return
+	}
+	var req serverclient.AgentEnrollRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAgentEnrollBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || dec.More() {
+		s.writeJSON(w, v, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	spki, _ := agentSPKI(r)
+	raw, err := join.DecodeToken(req.Token)
+	if err != nil {
+		s.writeJSON(w, v, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	if err := enroll.CheckFacts(req.Facts); err != nil {
+		s.writeJSON(w, v, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	factsSum, err := enroll.FactsSHA256(req.Facts)
+	if err != nil {
+		s.writeJSON(w, v, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	bundle, err := trust.ParseBundle(v.raw.Bundle)
+	if err != nil {
+		s.log.Error("the signer's trust bundle does not parse", "err", err)
+		s.signerUnavailable(w, false)
+		return
+	}
+	pop := enroll.PoP{
+		Domain: enroll.Domain, InstallationID: bundle.InstallationID, TokenSHA256: join.TokenSHA256(raw),
+		IdentitySPKISHA256: hex.EncodeToString(spki), HostKeys: req.HostKeys, FactsSHA256: factsSum,
+	}
+	if err := enroll.Verify(pop, nil, req.Sigs); err != nil {
+		s.log.Warn("agent enrollment refused", "agent", agentFingerprint(spki), "reason", err.Error())
+		s.writeJSON(w, v, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrPoPInvalid})
+		return
+	}
+	dv, err := s.currentDirectory(ctx)
+	if err != nil {
+		s.log.Warn("directory read failed", "err", err)
+		s.signerUnavailable(w, false)
+		return
+	}
+	if dv.dir != nil {
+		for _, k := range req.HostKeys {
+			pub, _ := trust.ParseKey(k) // enroll.Verify parsed it
+			if _, ok := dv.dir.HostForKey(pub); ok {
+				s.writeJSON(w, v, http.StatusConflict, serverclient.APIError{Error: serverclient.AgentErrHostKeysInUse})
+				return
+			}
+		}
+	}
+	facts, err := json.Marshal(req.Facts)
+	if err != nil {
+		s.writeJSON(w, v, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	hash := sha256.Sum256(raw)
+	a, err := s.db.EnrollAgent(ctx, hash[:], serverdb.Agent{IdentitySPKISHA256: spki, HostKeys: req.HostKeys, Facts: string(facts)},
+		s.clock().Truncate(time.Second).UnixMicro())
+	if err != nil {
+		code, msg := http.StatusInternalServerError, "internal error"
+		switch {
+		case errors.Is(err, serverdb.ErrTokenUnknown):
+			code, msg = http.StatusForbidden, serverclient.AgentErrTokenUnknown
+		case errors.Is(err, serverdb.ErrTokenUsed):
+			code, msg = http.StatusForbidden, serverclient.AgentErrTokenUsed
+		case errors.Is(err, serverdb.ErrTokenExpired):
+			code, msg = http.StatusForbidden, serverclient.AgentErrTokenExpired
+		case errors.Is(err, serverdb.ErrIdentityInUse):
+			code, msg = http.StatusConflict, serverclient.AgentErrIdentityInUse
+		case errors.Is(err, serverdb.ErrHostKeysInUse):
+			code, msg = http.StatusConflict, serverclient.AgentErrHostKeysInUse
+		default:
+			s.log.Error("agent enrollment", "err", err)
+		}
+		if code != http.StatusInternalServerError {
+			s.log.Warn("agent enrollment refused", "agent", agentFingerprint(spki), "reason", msg)
+		}
+		s.writeJSON(w, v, code, serverclient.APIError{Error: msg})
+		return
+	}
+	s.log.Info("agent enrolled, pending approval", "expected_name", a.ExpectedName, "agent", agentFingerprint(spki), "host_keys", len(a.HostKeys))
+	s.writeJSON(w, v, http.StatusAccepted, serverclient.AgentEnrollAnswer{ExpectedName: a.ExpectedName, Status: "pending"})
+}
+
+// versionRE is one version in a state query: decimal from 1, no leading
+// zero, at most 20 digits (ParseUint then bounds it to uint64).
+var versionRE = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
+
+// parseVersions reads a state query: only bundle, directory and krl, each
+// at most once and a version from 1; an empty, repeated, malformed or
+// unknown parameter is an error (400).
+func parseVersions(r *http.Request) (serverclient.AgentVersions, bool) {
+	var v serverclient.AgentVersions
+	q := r.URL.Query()
+	for name, vals := range q {
+		var dst *uint64
+		switch name {
+		case "bundle":
+			dst = &v.Bundle
+		case "directory":
+			dst = &v.Directory
+		case "krl":
+			dst = &v.KRL
+		default:
+			return v, false
+		}
+		if len(vals) != 1 || !versionRE.MatchString(vals[0]) {
+			return v, false
+		}
+		n, err := strconv.ParseUint(vals[0], 10, 64)
+		if err != nil {
+			return v, false
+		}
+		*dst = n
+	}
+	return v, true
+}
+
+// handleAgentState serves GET AgentStatePath to an approved agent: every
+// bundle and directory above the versions it sent, ascending (bundleItems,
+// directoryItems), and the KRL when newer, from what the server holds
+// (currentStatus, currentDirectory and currentKRL, which keeps every KRL
+// in krl-served.json before any route serves it, 03-06b). With no
+// versions it is the current state only. The answer is filled within
+// s.agentStateBudget (fillAgentState).
+func (s *Server) handleAgentState(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
+	ctx := r.Context()
+	since, ok := parseVersions(r)
+	if !ok {
+		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	bundles, bundlesCut, err := s.bundleItems(ctx, ar.status, since.Bundle)
+	if err != nil {
+		s.log.Warn("agent state: bundles", "err", err)
+		s.signerUnavailable(w, false)
+		return
+	}
+	dirs, dirsCut, err := s.directoryItems(ctx, ar.dir, since.Directory)
+	if err != nil {
+		s.log.Warn("agent state: directories", "err", err)
+		s.signerUnavailable(w, false)
+		return
+	}
+	k, err := s.krlItem(ctx, since.KRL)
+	if err != nil {
+		s.log.Warn("agent state: KRL", "err", err)
+		s.signerUnavailable(w, false)
+		return
+	}
+	body, err := fillAgentState(bundles, dirs, k, bundlesCut || dirsCut, s.agentStateBudget)
+	if err != nil {
+		s.log.Error("agent state", "err", err)
+		s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
+	}
+	w.Header().Set(serverclient.CustodyHeader, ar.status.custody)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// bundleItems returns the bundles above since. The tracer serves the
+// current bundle and policy (currentStatus) only, when newer; cut reports
+// versions left out.
+func (s *Server) bundleItems(_ context.Context, v *statusView, since uint64) ([]serverclient.AgentBundle, bool, error) {
+	if v.raw.BundleVersion <= since {
+		return nil, false, nil
+	}
+	cur := serverclient.AgentBundle{
+		Version: v.raw.BundleVersion, Bundle: v.raw.Bundle, BundleSigs: v.raw.BundleSigs,
+		PolicyVersion: v.policy.Version, Policy: v.raw.Policy, PolicySigs: v.raw.PolicySigs,
+	}
+	return []serverclient.AgentBundle{cur}, false, nil
+}
+
+// directoryItems returns the directories above since: the current one
+// (currentDirectory) only in the tracer.
+func (s *Server) directoryItems(_ context.Context, dv *directoryView, since uint64) ([]serverclient.AgentDirectory, bool, error) {
+	if dv.version == 0 || dv.version <= since {
+		return nil, false, nil
+	}
+	return []serverclient.AgentDirectory{{Version: dv.version, Directory: dv.doc, Sigs: dv.sigs}}, false, nil
+}
+
+// krlItem returns the published KRL when its version is above since, or
+// nil. It comes only through currentKRL, which keeps it in krl-served.json
+// first: a KRL reaches no host that no signer restore could recover.
+func (s *Server) krlItem(ctx context.Context, since uint64) (*serverclient.AgentKRL, error) {
+	resp, err := s.currentKRL(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.KRL) == 0 {
+		return nil, nil
+	}
+	m, err := krl.ParseManifest(resp.Manifest)
+	if err != nil {
+		return nil, err
+	}
+	if m.KRLVersion <= since {
+		return nil, nil
+	}
+	return &serverclient.AgentKRL{Version: m.KRLVersion, KRL: resp.KRL, Manifest: resp.Manifest, Sig: resp.Sig}, nil
+}
+
+// agentStateEnvelope is the encoded answer with no item and more false,
+// as encodeAgentState writes it.
+var agentStateEnvelope = len(`{"bundles":[],"directories":[],"krl":null,"more":false}` + "\n")
+
+// fillAgentState encodes the state answer within budget bytes (F12):
+// bundles, then directories, then the KRL, in that fixed order, each kept
+// only while the encoded answer stays within budget; the first item is
+// kept whatever its size, and filling stops at the first item that does
+// not fit. more is set when an item was left out here or by the caller
+// (cut). The answer is encoded by encodeAgentState, so its size is exactly
+// what the budget counted.
+func fillAgentState(bundles []serverclient.AgentBundle, dirs []serverclient.AgentDirectory, k *serverclient.AgentKRL, cut bool, budget int) ([]byte, error) {
+	var encB, encD [][]byte
+	var encK []byte
+	size := agentStateEnvelope
+	more := cut
+	n := 0
+	add := func(item any, list *[][]byte, single *[]byte) (bool, error) {
+		b, err := json.Marshal(item)
+		if err != nil {
+			return false, err
+		}
+		grow := len(b)
+		switch {
+		case single != nil:
+			grow -= len("null")
+		case len(*list) > 0:
+			grow++ // the comma
+		}
+		if n > 0 && size+grow > budget {
+			return false, nil
+		}
+		size += grow
+		n++
+		if single != nil {
+			*single = b
+		} else {
+			*list = append(*list, b)
+		}
+		return true, nil
+	}
+	stopped := false
+	for _, b := range bundles {
+		ok, err := add(b, &encB, nil)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			stopped = true
+			break
+		}
+	}
+	for _, d := range dirs {
+		if stopped {
+			break
+		}
+		ok, err := add(d, &encD, nil)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			stopped = true
+		}
+	}
+	if k != nil && !stopped {
+		ok, err := add(k, nil, &encK)
+		if err != nil {
+			return nil, err
+		}
+		stopped = !ok
+	}
+	if stopped {
+		more = true
+	}
+	return encodeAgentState(encB, encD, encK, more), nil
+}
+
+// encodeAgentState writes the state answer from its encoded items, as
+// json.Marshal of serverclient.AgentStateResponse would (empty lists as
+// [], no KRL as null), with the final newline writeJSON adds.
+func encodeAgentState(bundles, dirs [][]byte, k []byte, more bool) []byte {
+	var b bytes.Buffer
+	b.WriteString(`{"bundles":[`)
+	b.Write(bytes.Join(bundles, []byte(",")))
+	b.WriteString(`],"directories":[`)
+	b.Write(bytes.Join(dirs, []byte(",")))
+	b.WriteString(`],"krl":`)
+	if k == nil {
+		b.WriteString("null")
+	} else {
+		b.Write(k)
+	}
+	b.WriteString(`,"more":` + strconv.FormatBool(more) + "}\n")
+	return b.Bytes()
+}

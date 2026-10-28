@@ -303,7 +303,7 @@ func (e *engine) apply(ctx context.Context) error {
 	if err := CheckReload(e.cfg.Reload); err != nil {
 		return err
 	}
-	if err := checkOwnDir(e.l.StateDir); err != nil {
+	if err := CheckStateDirs(e.l); err != nil {
 		return err
 	}
 	fd, err := spool.OpenDir(e.l.StateDir)
