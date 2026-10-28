@@ -27,6 +27,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 
+	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
@@ -288,6 +289,14 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 		if e.locked && !cfg.DryRun && !r.NoOp {
 			if serr := e.writeStatus(); serr != nil && err == nil {
 				err = serr
+			}
+		}
+		if e.locked && !cfg.DryRun {
+			// The fetcher's state requests start from these (PR #71
+			// review F3/F7); a write that fails only makes it ask again
+			// from older versions.
+			if aerr := WriteAccepted(l); aerr != nil {
+				e.logf("WARNING writing %s: %v", filepath.Join(l.Outbox(), enroll.AcceptedFile), aerr)
 			}
 		}
 		_ = unix.Close(e.stateFd)

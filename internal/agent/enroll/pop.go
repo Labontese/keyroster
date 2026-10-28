@@ -263,6 +263,25 @@ const (
 	MaxAnswerFile  = 64 << 10
 )
 
+// AcceptedFile is the applier's accepted versions, canonical JSON of
+// Accepted, in the outbox (0640), and MaxAcceptedFile its cap as the
+// fetcher reads it. The fetcher starts every poll's state requests from
+// these, never from the spool's newest file names alone, so a version a
+// server spooled that the applier never accepted is asked for again
+// (PR #71 review F3/F7).
+const (
+	AcceptedFile    = "accepted.json"
+	MaxAcceptedFile = 4 << 10
+)
+
+// Accepted is AcceptedFile: per kind, the version the applier has
+// accepted (0: none); KRL is the KRL version the host enforces.
+type Accepted struct {
+	Bundle    uint64 `json:"bundle"`
+	Directory uint64 `json:"directory"`
+	KRL       uint64 `json:"krl"`
+}
+
 // Request is RequestFile, the fetcher's request for a proof of
 // possession, canonical JSON: the SHA-256 of its TLS identity's SPKI and
 // of the raw join token (64 lowercase hex digits each), the host name the

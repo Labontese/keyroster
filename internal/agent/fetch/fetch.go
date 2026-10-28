@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -303,15 +304,19 @@ func (f *Fetcher) readAnswer() (*enroll.Answer, error) {
 	return &a, nil
 }
 
-// pollState asks for the state newer than the spool's newest versions and
-// spools it, again at once while the server answers more: true, at most
-// MaxRounds times. not_approved waits for the next poll.
+// pollState asks for the state newer than the cursor (PR #71 review
+// F3/F7: what the applier accepted, never more than the spool's newest)
+// and spools it, again at once while the server answers more: true, at
+// most MaxRounds times, each round from the versions the last one wrote.
+// A poll that ends with more: false has had everything up to the server's
+// current versions, so spool files above them are none of the server's:
+// they go (dropAbove). not_approved waits for the next poll.
 func (f *Fetcher) pollState(ctx context.Context) error {
+	v, err := f.cursor()
+	if err != nil {
+		return err
+	}
 	for range MaxRounds {
-		v, err := spooledVersions(f.cfg.Spool)
-		if err != nil {
-			return err
-		}
 		resp, err := f.client.AgentState(ctx, v)
 		if isAPIError(err, serverclient.AgentErrNotApproved) {
 			f.logf("enrolled, waiting for an admin's approval (keyroster host approve)")
@@ -320,8 +325,8 @@ func (f *Fetcher) pollState(ctx context.Context) error {
 		var he *serverclient.HTTPError
 		if errors.As(err, &he) {
 			if secs, ok := he.RateLimited(); ok {
-				// What was spooled stays; the next poll goes on from it
-				// (PR #71 review F4).
+				// What was spooled stays for the applier (PR #71 review
+				// F4); the next poll asks again from what it accepted.
 				f.logf("the server is rate limiting this agent (retry after %d s); continuing at the next poll", secs)
 				return nil
 			}
@@ -335,11 +340,100 @@ func (f *Fetcher) pollState(ctx context.Context) error {
 		if n := len(resp.Bundles) + len(resp.Directories); n > 0 || resp.KRL != nil {
 			f.logf("spooled %d bundle and %d directory versions and %d KRL", len(resp.Bundles), len(resp.Directories), boolInt(resp.KRL != nil))
 		}
+		if n := len(resp.Bundles); n > 0 {
+			v.Bundle = resp.Bundles[n-1].Version
+		}
+		if n := len(resp.Directories); n > 0 {
+			v.Directory = resp.Directories[n-1].Version
+		}
+		if resp.KRL != nil {
+			v.KRL = resp.KRL.Version
+		}
 		if !resp.More {
-			return nil
+			dropped, err := dropAbove(f.cfg.Spool, v)
+			if len(dropped) > 0 {
+				f.logf("removed spool files above the server's current versions (bundle %d, directory %d, KRL %d): %s",
+					v.Bundle, v.Directory, v.KRL, strings.Join(dropped, " "))
+			}
+			return err
 		}
 	}
 	return nil
+}
+
+// cursor is where a poll's state requests start: for each kind the
+// version the applier accepted (enroll.AcceptedFile in the outbox), but
+// never above the spool's newest complete version (a spool that lost files
+// gets them again). Without an AcceptedFile yet, the spool's newest. A
+// version the applier never accepted is so never a reason not to ask:
+// one bad answer cannot pin the fetcher above every honest later version
+// (PR #71 review F3/F7). A lying outbox only withholds from this host.
+func (f *Fetcher) cursor() (serverclient.AgentVersions, error) {
+	sv, err := spooledVersions(f.cfg.Spool)
+	if err != nil {
+		return sv, err
+	}
+	fd, err := spool.OpenDir(f.cfg.Outbox)
+	if err != nil {
+		return sv, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	b, err := spool.ReadFileAt(fd, enroll.AcceptedFile, enroll.MaxAcceptedFile)
+	if errors.Is(err, unix.ENOENT) {
+		return sv, nil
+	}
+	if err != nil {
+		return sv, err
+	}
+	var a enroll.Accepted
+	if err := trust.DecodeStrict(b, &a); err != nil {
+		return sv, fmt.Errorf("%s: %w", enroll.AcceptedFile, err)
+	}
+	return serverclient.AgentVersions{Bundle: min(a.Bundle, sv.Bundle), Directory: min(a.Directory, sv.Directory), KRL: min(a.KRL, sv.KRL)}, nil
+}
+
+// dropAbove removes the bundle, directory and KRL files of the spool at
+// dir whose version is above v's for their kind, and returns their names.
+// Policies are left: they are found by their hash, never by a version
+// cursor. Only pollState calls it, after an answer with more: false.
+func dropAbove(dir string, v serverclient.AgentVersions) ([]string, error) {
+	fd, err := spool.OpenDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	names, err := spool.ListDir(fd)
+	if err != nil {
+		return nil, err
+	}
+	var dropped []string
+	for _, n := range names {
+		limit, x, ok := uint64(0), uint64(0), false
+		if m := spoolFileRE.FindStringSubmatch(n); m != nil {
+			if p, err := strconv.ParseUint(m[2], 10, 64); err == nil {
+				x, ok = p, true
+				switch m[1] {
+				case "bundle":
+					limit = v.Bundle
+				case "directory":
+					limit = v.Directory
+				case "krl":
+					limit = v.KRL
+				}
+			}
+		}
+		if !ok || x <= limit {
+			continue
+		}
+		if err := unix.Unlinkat(fd, n, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			return dropped, fmt.Errorf("remove %s: %w", n, err)
+		}
+		dropped = append(dropped, n)
+	}
+	if len(dropped) > 0 {
+		return dropped, unix.Fsync(fd)
+	}
+	return nil, nil
 }
 
 // writeState spools every item of r, one at a time and in the response's
@@ -371,6 +465,9 @@ func writeState(dir string, r *serverclient.AgentStateResponse) error {
 var (
 	spoolDocRE = regexp.MustCompile(`^(bundle|directory)-([1-9][0-9]{0,19})\.json$`)
 	spoolKRLRE = regexp.MustCompile(`^krl-([1-9][0-9]{0,19})\.krl$`)
+	// spoolFileRE is every file of a versioned bundle, directory or KRL
+	// (dropAbove).
+	spoolFileRE = regexp.MustCompile(`^(bundle|directory|krl)-([1-9][0-9]{0,19})\.(json|json\.sigs|krl|manifest\.json|manifest\.sig)$`)
 )
 
 // spooledVersions are the newest complete bundle, directory and KRL

@@ -2,6 +2,7 @@ package serverclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -258,6 +259,63 @@ func (r *AgentStateResponse) Check() error {
 	return nil
 }
 
+// CheckSince is Check, and refuses an answer that does not follow on from
+// since, the versions the request named (PR #71 review F3/F7):
+//   - with since 0 for a kind, at most one item of it (the current one);
+//     otherwise its items must be since+1, since+2, ... with no gap;
+//   - a KRL at or below since.KRL, or whose manifest's krl_version is not
+//     the item's version.
+//
+// The fetcher cannot verify any signature, so this only keeps a server's
+// answer from naming spool files that no later honest answer replaces.
+func (r *AgentStateResponse) CheckSince(since AgentVersions) error {
+	if err := r.Check(); err != nil {
+		return err
+	}
+	bad := func(format string, args ...any) error {
+		return fmt.Errorf("%w: "+format, append([]any{ErrChainOutOfOrder}, args...)...)
+	}
+	follows := func(kind string, vs []uint64, from uint64) error {
+		if from == 0 {
+			if len(vs) > 1 {
+				return bad("%d %s versions for a request that named none", len(vs), kind)
+			}
+			return nil
+		}
+		for i, v := range vs {
+			if v != from+uint64(i)+1 { //nolint:gosec // G115: i is a slice index
+				return bad("%s version %d does not follow version %d", kind, v, from+uint64(i)) //nolint:gosec // G115: i is a slice index
+			}
+		}
+		return nil
+	}
+	var bs, ds []uint64
+	for _, b := range r.Bundles {
+		bs = append(bs, b.Version)
+	}
+	for _, d := range r.Directories {
+		ds = append(ds, d.Version)
+	}
+	if err := follows("bundle", bs, since.Bundle); err != nil {
+		return err
+	}
+	if err := follows("directory", ds, since.Directory); err != nil {
+		return err
+	}
+	if k := r.KRL; k != nil {
+		if k.Version <= since.KRL {
+			return bad("KRL version %d, at or below the requested %d", k.Version, since.KRL)
+		}
+		var m struct {
+			KRLVersion uint64 `json:"krl_version"`
+		}
+		if err := json.Unmarshal(k.Manifest, &m); err != nil || m.KRLVersion != k.Version {
+			return bad("the KRL item's version %d is not its manifest's krl_version", k.Version)
+		}
+	}
+	return nil
+}
+
 // AgentEnroll POSTs the enrollment. A refusal is an *HTTPError whose
 // APIErrorIs names the code (AgentErr...).
 func (c *Client) AgentEnroll(ctx context.Context, req *AgentEnrollRequest) (*AgentEnrollAnswer, error) {
@@ -271,7 +329,7 @@ func (c *Client) AgentEnroll(ctx context.Context, req *AgentEnrollRequest) (*Age
 // AgentState GETs the state newer than v. The body is read under
 // MaxAgentStateResponse, not the 4 MiB of every other route, and a larger
 // one is ErrStateResponseTooLarge before anything is decoded (F12). The
-// decoded response must pass Check. A refusal is an *HTTPError
+// decoded response must pass CheckSince against v. A refusal is an *HTTPError
 // (AgentErrNotApproved while the host waits for its approval).
 func (c *Client) AgentState(ctx context.Context, v AgentVersions) (*AgentStateResponse, error) {
 	var r AgentStateResponse
@@ -282,7 +340,7 @@ func (c *Client) AgentState(ctx context.Context, v AgentVersions) (*AgentStateRe
 	if err != nil {
 		return nil, err
 	}
-	if err := r.Check(); err != nil {
+	if err := r.CheckSince(v); err != nil {
 		return nil, err
 	}
 	return &r, nil

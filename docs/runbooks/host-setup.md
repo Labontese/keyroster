@@ -693,7 +693,7 @@ its parent opened without following links:
 | `/var/lib/keyroster-agent/accepted` | root:root | 0700 | the signed documents the applier accepted |
 | `/var/lib/keyroster-agent/pins.json` | root | 0600 | trust-root pins, threshold, installation ID |
 | `/var/lib/keyroster-agent/spool` | keyroster-agent:root | 0750 | the signed documents the fetcher received |
-| `/var/lib/keyroster-agent/outbox` | root:keyroster-agent | 2750 | the applier's answers to the fetcher (`enroll-pop.json`) |
+| `/var/lib/keyroster-agent/outbox` | root:keyroster-agent | 2750 | the applier's answers to the fetcher (`enroll-pop.json`; `accepted.json`, the versions it accepted, which the fetcher's state requests start from) |
 | `/etc/keyroster-agent` | root:root | 0755 | |
 | `/etc/keyroster-agent/fetch.json` | root:keyroster-agent | 0640 | the agent server's URL, TLS roots and pins |
 | `/var/lib/keyroster-agent-fetch` | keyroster-agent | 0700 | the fetcher's identity key |

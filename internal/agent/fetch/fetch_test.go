@@ -8,11 +8,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -29,6 +31,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/join"
+	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/trust"
 )
@@ -150,6 +153,9 @@ func (s *testServer) spooled(t *testing.T) []string {
 
 const emptyState = `{"bundles":[],"directories":[],"krl":null,"more":false}`
 
+// b64 is s in standard base64, as a []byte is in JSON.
+func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
 // TestFetch pins the fetcher's limits and its side of the enrollment
 // hand-over (F2, F12).
 func TestFetch(t *testing.T) {
@@ -253,6 +259,85 @@ func TestFetch(t *testing.T) {
 		}
 		if got := ts.spooled(t); !slices.Contains(got, "directory-1.json") {
 			t.Fatalf("spooled %v, want the first round's directory kept", got)
+		}
+	})
+	t.Run("poisoned_answer_then_honest_delivers_newer_krl", func(t *testing.T) {
+		// PR #71 review F3/F7: a compromised server's one answer spools a
+		// KRL at the largest version and a junk directory 4. Once the
+		// server is honest again, the fetcher asks from what the applier
+		// accepted (accepted.json: directory 3, KRL 100), not from the
+		// spool's newest names, so the honest directory 4 and KRL 101
+		// arrive, and the junk KRL above the server's current version goes.
+		const maxV = "18446744073709551615"
+		var n atomic.Int32
+		ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			if n.Add(1) == 1 {
+				_, _ = w.Write([]byte(`{"bundles":[],"directories":[{"version":4,"directory":"anVuaw==","sigs":"anVuaw=="}],` +
+					`"krl":{"version":` + maxV + `,"krl":"anVuaw==","manifest":"` + b64(`{"krl_version":`+maxV+`}`) + `","sig":"anVuaw=="},"more":false}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"bundles":[],"directories":[{"version":4,"directory":"aG9uZXN0","sigs":"c2lncw=="}],` +
+				`"krl":{"version":101,"krl":"a3JsMTAx","manifest":"` + b64(`{"krl_version":101}`) + `","sig":"c2ln"},"more":false}`))
+		})
+		for name, body := range map[string]string{
+			"bundle-1.json": "b", "bundle-1.json.sigs": "s", "policy-1.json": "p", "policy-1.json.sigs": "s",
+			"directory-3.json": "d", "directory-3.json.sigs": "s",
+			"krl-100.krl": "k", "krl-100.manifest.json": `{"krl_version":100}`, "krl-100.manifest.sig": "s",
+		} {
+			if err := os.WriteFile(filepath.Join(ts.spool, name), []byte(body), 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+		}
+		acc, err := trust.CanonicalJSON(enroll.Accepted{Bundle: 1, Directory: 3, KRL: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(ts.outbox, enroll.AcceptedFile), acc, 0o640); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		for range 2 {
+			if err := ts.f.Once(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		reqs := ts.requests()
+		want := "GET " + serverclient.AgentStatePath + "?bundle=1&directory=3&krl=100"
+		if len(reqs) != 2 || reqs[0] != want || reqs[1] != want {
+			t.Fatalf("requests %q, want both from the accepted versions (%s)", reqs, want)
+		}
+		got := ts.spooled(t)
+		for _, name := range []string{"krl-" + maxV + ".krl", "krl-" + maxV + ".manifest.json", "krl-" + maxV + ".manifest.sig"} {
+			if slices.Contains(got, name) {
+				t.Errorf("the poisoned %s is still spooled: %v", name, got)
+			}
+		}
+		if b, err := os.ReadFile(filepath.Join(ts.spool, "directory-4.json")); err != nil || string(b) != "honest" {
+			t.Fatalf("directory-4.json %q (%v), want the honest version", b, err)
+		}
+		st, _, err := spool.Read(ts.spool, spool.Floor{Bundle: 1, Directory: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := st.KRLs[101]; !ok || len(st.KRLs) != 1 {
+			t.Fatalf("the applier's capture reads KRLs %v, want the honest 101", slices.Collect(maps.Keys(st.KRLs)))
+		}
+	})
+	t.Run("answer_not_following_the_request_refused", func(t *testing.T) {
+		// PR #71 review F3/F7: a directory far above the requested version
+		// (no chain from it) is refused before anything is spooled.
+		ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"bundles":[],"directories":[{"version":18446744073709551615,"directory":"YQ==","sigs":"YQ=="}],"krl":null,"more":false}`))
+		})
+		for _, name := range []string{"directory-3.json", "directory-3.json.sigs"} {
+			if err := os.WriteFile(filepath.Join(ts.spool, name), []byte("d"), 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+		}
+		if err := ts.f.Once(t.Context()); !errors.Is(err, serverclient.ErrChainOutOfOrder) {
+			t.Fatalf("a directory not following version 3: %v, want chain_out_of_order", err)
+		}
+		if got := ts.spooled(t); len(got) != 2 {
+			t.Fatalf("spooled %v", got)
 		}
 	})
 	t.Run("policy_write_failure_spools_no_bundle", func(t *testing.T) {
