@@ -173,11 +173,11 @@ func TestAgentSystemdSmoke(t *testing.T) {
 		t.Logf("--rotate-identity as root refused: %s", strings.TrimSpace(string(out)))
 	}
 	oldID := a.Hosts[0].IdentitySPKISHA256
-	out, err := exec.Command("runuser", "-u", "keyroster-agent", "--", "/usr/local/bin/keyroster-agent-fetch", "--rotate-identity").CombinedOutput()
+	rot, err := exec.Command("runuser", "-u", "keyroster-agent", "--", "/usr/local/bin/keyroster-agent-fetch", "--rotate-identity").CombinedOutput()
 	if err != nil {
-		t.Fatalf("--rotate-identity as keyroster-agent: %v\n%s", err, out)
+		t.Fatalf("--rotate-identity as keyroster-agent: %v\n%s", err, rot)
 	}
-	t.Logf("--rotate-identity as keyroster-agent: %s", strings.TrimSpace(string(out)))
+	t.Logf("--rotate-identity as keyroster-agent: %s", strings.TrimSpace(string(rot)))
 	rotatedAt := time.Now()
 	for deadline := time.Now().Add(150 * time.Second); ; time.Sleep(5 * time.Second) {
 		if err := json.Unmarshal([]byte(kr("host", "status", "--json")), &a); err != nil {
