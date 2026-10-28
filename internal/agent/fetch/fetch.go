@@ -62,8 +62,8 @@ const (
 	DefaultPoll = 60 * time.Second
 	MinPoll     = time.Second
 	// MaxRounds bounds the state requests of one poll while the server
-	// answers more: true.
-	MaxRounds = 64
+	// answers more: true; the server's per-identity burst matches it.
+	MaxRounds = serverclient.MaxAgentStateRounds
 )
 
 // Refusals.
@@ -316,6 +316,15 @@ func (f *Fetcher) pollState(ctx context.Context) error {
 		if isAPIError(err, serverclient.AgentErrNotApproved) {
 			f.logf("enrolled, waiting for an admin's approval (keyroster host approve)")
 			return nil
+		}
+		var he *serverclient.HTTPError
+		if errors.As(err, &he) {
+			if secs, ok := he.RateLimited(); ok {
+				// What was spooled stays; the next poll goes on from it
+				// (PR #71 review F4).
+				f.logf("the server is rate limiting this agent (retry after %d s); continuing at the next poll", secs)
+				return nil
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("state: %w", err)

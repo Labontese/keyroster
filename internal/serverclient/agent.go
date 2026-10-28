@@ -48,6 +48,12 @@ const MaxAgentStateResponse = 8 << 20
 // one state response carries.
 const MaxAgentStatePerKind = 16
 
+// MaxAgentStateRounds bounds the state requests of one fetcher poll while
+// the server answers more: true. The server's per-identity burst for
+// enrolled agents is at least this, so a host catching up is never
+// refused inside one poll (PR #71 review F4).
+const MaxAgentStateRounds = 64
+
 // MaxJoinTokenTTLSeconds is the longest join token lifetime the server
 // mints (1 h), and DefaultJoinTokenTTLSeconds the one it uses when the
 // request names none (30 min).

@@ -70,7 +70,8 @@ type Server struct {
 	loginLimit      map[string]*limiter // CLI login routes: one per route, per client, with that route's global backstop
 	loginUserLimit  *limiter            // CLI login API routes, per route, user name and client
 	krlLimit        *limiter            // GET /api/v1/krl, per client, with a global backstop
-	agentLimit      *limiter            // the agent routes, per agent identity, with a global backstop
+	agentLimit      *limiter            // the state route of enrolled agents, per agent identity, with a global backstop
+	agentAnonLimit  *limiter            // enrollment and unknown identities, per client address, with a global backstop
 	mirror          dirMirror           // the installed directory, as of the last Status that matched
 
 	// pendingMu orders a directory install (its pending check, forward
@@ -181,12 +182,12 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 		// The published KRL (03-01) is its own class: per client, with
 		// the global backstop.
 		krlLimit: newLimiter(krlPerMinute, krlBurst, globalFactor*krlPerMinute, globalFactor*krlBurst),
-		// The agent routes (03-07) are their own class: per agent identity
-		// (the client certificate's SPKI), with a global backstop.
-		agentLimit:       newLimiter(agentPerMinute, agentBurst, agentGlobalFactor*agentPerMinute, agentGlobalFactor*agentBurst),
+		// The agent routes (03-07) are two classes of their own (PR #71
+		// review F1/F2, newAgentLimiters).
 		agentPort:        cfg.AgentPort,
 		agentStateBudget: serverclient.MaxAgentStateResponse,
 	}
+	s.agentLimit, s.agentAnonLimit = newAgentLimiters()
 	if s.clock == nil {
 		s.clock = time.Now
 	}

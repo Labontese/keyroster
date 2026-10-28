@@ -841,3 +841,86 @@ func TestAgentState(t *testing.T) {
 		t.Logf("the three largest items encode to %d bytes (KRL %d, directory %d, bundle %d); MaxAgentStateResponse %d", len(body), len(kj), len(dj), len(bj), serverclient.MaxAgentStateResponse)
 	})
 }
+
+// agentDoFrom is agentDo from the client address addr.
+func (e *agentEnv) agentDoFrom(t *testing.T, id agentID, addr, method, target string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, "https://"+testRPID+":8443"+target, bytes.NewReader(body))
+	req.RemoteAddr = addr
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{id.cert}}
+	return serve(e.s.AgentHandler(), req)
+}
+
+// TestAgentLimits runs the production agent limiters (newAgentLimiters):
+// identities anyone can make spend only the anonymous class, so an
+// approved agent's state requests are never refused because of them (PR
+// #71 review F1/F2), and a host far behind catches up through `more`
+// inside one poll (F4).
+func TestAgentLimits(t *testing.T) {
+	t.Run("unknown_identities_never_starve_approved_agents", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		e.s.agentLimit, e.s.agentAnonLimit = newAgentLimiters()
+		id, _ := e.approvedAgent(t)
+		const shared = "198.51.100.7:40000" // the approved agent's address too
+		limited := 0
+		// Fresh self-signed identities, each sending a full per-identity
+		// burst of state requests and enrollments, from the agent's own
+		// address and from many others (the anonymous global backstop).
+		for i := range 400 {
+			addr := shared
+			if i%2 == 1 {
+				addr = "203.0.113." + strconv.Itoa(i%250+1) + ":40000"
+			}
+			x := newAgentID(t)
+			for range agentAnonBurst {
+				for _, rec := range []*httptest.ResponseRecorder{
+					e.agentDoFrom(t, x, addr, http.MethodGet, serverclient.AgentStatePath, nil),
+					e.agentDoFrom(t, x, addr, http.MethodPost, serverclient.AgentEnrollPath, []byte(`{}`)),
+				} {
+					if rec.Code == http.StatusTooManyRequests {
+						limited++
+					}
+				}
+			}
+		}
+		if limited == 0 {
+			t.Fatal("no request of the unknown identities was rate limited; the test exhausted nothing")
+		}
+		for range 10 {
+			if rec := e.agentDoFrom(t, id, shared, http.MethodGet, serverclient.AgentStatePath, nil); rec.Code != http.StatusOK {
+				t.Fatalf("the approved agent after %d refusals of unknown identities: %d %s", limited, rec.Code, rec.Body.String())
+			}
+		}
+	})
+	t.Run("burst_covers_the_fetchers_rounds", func(t *testing.T) {
+		if agentBurst < serverclient.MaxAgentStateRounds {
+			t.Fatalf("the per-identity burst %d is below the fetcher's %d rounds per poll", agentBurst, serverclient.MaxAgentStateRounds)
+		}
+	})
+	t.Run("far_behind_host_catches_up_through_the_real_limiter", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		e.s.agentLimit, e.s.agentAnonLimit = newAgentLimiters()
+		id, hosts := e.approvedAgent(t)
+		for range 300 {
+			e.installDir(t, hostEntry("web1", hosts))
+		}
+		since, rounds := uint64(1), 0
+		for more := true; more; rounds++ {
+			if rounds == serverclient.MaxAgentStateRounds {
+				t.Fatalf("not caught up after %d rounds (at directory %d)", rounds, since)
+			}
+			rec := e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath+"?bundle=1&krl=100&directory="+strconv.FormatUint(since, 10), nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("round %d (directory %d): %d %s", rounds+1, since, rec.Code, rec.Body.String())
+			}
+			r := decodeState(t, rec)
+			if vs := dirVersions(r); len(vs) > 0 {
+				since = vs[len(vs)-1]
+			}
+			more = r.More
+		}
+		if since != 301 {
+			t.Fatalf("caught up to directory %d in %d rounds, want 301", since, rounds)
+		}
+	})
+}

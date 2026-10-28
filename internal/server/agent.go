@@ -27,22 +27,46 @@ const (
 	// maxAgentEnrollBody bounds an enrollment request: eight host keys,
 	// their signatures and the facts fit in a few KiB.
 	maxAgentEnrollBody = 16 << 10
-	// agentPerMinute and agentBurst are the per-identity rate of the agent
-	// routes; the global backstop is agentGlobalFactor times them.
+	// agentPerMinute and agentBurst are the per-identity rate of the state
+	// route for enrolled agents; the global backstop is agentGlobalFactor
+	// times them. The burst is the fetcher's rounds per poll, so a host
+	// catching up through `more` is never refused inside one poll (PR #71
+	// review F4).
 	agentPerMinute    = 30
-	agentBurst        = 10
+	agentBurst        = serverclient.MaxAgentStateRounds
 	agentGlobalFactor = 100
+	// agentAnonPerMinute and agentAnonBurst are the per-address rate of
+	// enrollment and of state requests from identities the server does
+	// not know; their global backstop is globalFactor times them (PR #71
+	// review F1/F2).
+	agentAnonPerMinute = 30
+	agentAnonBurst     = 10
 )
+
+// newAgentLimiters returns the two limiter classes of the agent routes
+// (PR #71 review F1/F2). A self-signed identity costs nothing to make, so
+// it buys no budget: only an enrolled agent's state requests are charged
+// to agent, per identity (the client certificate's SPKI hash) with its
+// global backstop; enrollment and state requests from an identity no
+// agents row names are charged to anon, per client address (clientKey)
+// with a global backstop of its own. No amount of unknown traffic can
+// then spend the budget enrolled agents poll with.
+func newAgentLimiters() (agent, anon *limiter) {
+	return newLimiter(agentPerMinute, agentBurst, agentGlobalFactor*agentPerMinute, agentGlobalFactor*agentBurst),
+		newLimiter(agentAnonPerMinute, agentAnonBurst, globalFactor*agentAnonPerMinute, globalFactor*agentAnonBurst)
+}
 
 // buildAgentMux registers the closed set of agent routes (AGENT-02) on
 // their own mux, served only by the agent listener (AgentHandler): the
 // enrollment and the state. Each takes the client certificate's identity
-// from the TLS connection (AgentTLSConfig required one at the handshake)
-// and goes through the per-identity limiter.
+// from the TLS connection (AgentTLSConfig required one at the handshake).
+// Enrollment goes through the anonymous limiter; the state route through
+// requireAgent, which picks the class by whether the identity is
+// enrolled.
 func (s *Server) buildAgentMux() *routeMux {
 	mux := newRouteMux()
-	mux.Handle("POST "+serverclient.AgentEnrollPath, s.agentLimited(http.HandlerFunc(s.handleAgentEnroll)))
-	mux.Handle("GET "+serverclient.AgentStatePath, s.agentLimited(s.requireAgent(s.handleAgentState)))
+	mux.Handle("POST "+serverclient.AgentEnrollPath, s.agentAnonLimited(http.HandlerFunc(s.handleAgentEnroll)))
+	mux.Handle("GET "+serverclient.AgentStatePath, s.requireAgent(s.handleAgentState))
 	return mux
 }
 
@@ -51,23 +75,30 @@ func (s *Server) buildAgentMux() *routeMux {
 // configuration of AgentTLSConfig in front of it.
 func (s *Server) AgentHandler() http.Handler { return s.agentHandler }
 
-// agentLimited applies the agent limiter, keyed by the client
-// certificate's SPKI hash; a request without one is refused 403.
-func (s *Server) agentLimited(next http.Handler) http.Handler {
+// agentAnonLimited applies the anonymous agent limiter, keyed by the
+// client address; a request without a client certificate is refused 403.
+func (s *Server) agentAnonLimited(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		spki, ok := agentSPKI(r)
-		if !ok {
+		if _, ok := agentSPKI(r); !ok {
 			s.writeJSON(w, nil, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
 			return
 		}
-		if s.agentLimit.allow(hex.EncodeToString(spki), s.clock()) {
+		if s.agentAllow(w, r, s.agentAnonLimit, clientKey(r), "client", clientKey(r)) {
 			next.ServeHTTP(w, r)
-			return
 		}
-		s.log.Warn("rate limited", "route", r.Pattern, "agent", agentFingerprint(spki))
-		w.Header().Set("Retry-After", strconv.Itoa(s.agentLimit.retryAfter()))
-		s.writeJSON(w, nil, http.StatusTooManyRequests, serverclient.APIError{Error: "rate limited"})
 	})
+}
+
+// agentAllow charges one request to l under key. A refused request gets
+// 429 with Retry-After and a log line naming who (what, value).
+func (s *Server) agentAllow(w http.ResponseWriter, r *http.Request, l *limiter, key, what, value string) bool {
+	if l.allow(key, s.clock()) {
+		return true
+	}
+	s.log.Warn("rate limited", "route", r.Pattern, what, value)
+	w.Header().Set("Retry-After", strconv.Itoa(l.retryAfter()))
+	s.writeJSON(w, nil, http.StatusTooManyRequests, serverclient.APIError{Error: "rate limited"})
+	return false
 }
 
 // agentFingerprint is the identity as keyroster-agent identity and
@@ -93,12 +124,24 @@ type agentRequest struct {
 // entry whose keys equal that agent's enrolled host keys (else 403
 // not_approved). The approval is the admin-signed directory itself: the
 // server records nothing else. It updates the agent's last_seen_us.
+//
+// The agent is looked up before any rate limit is charged (PR #71 review
+// F1/F2): an identity no agents row names is charged to the anonymous
+// class by its client address, and only an enrolled one to the agent
+// class by its identity.
 func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *agentRequest)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		spki, _ := agentSPKI(r) // agentLimited checked it
+		spki, ok := agentSPKI(r)
+		if !ok {
+			s.writeJSON(w, nil, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
+			return
+		}
 		a, err := s.db.AgentBySPKI(ctx, spki)
 		if errors.Is(err, serverdb.ErrNotFound) {
+			if !s.agentAllow(w, r, s.agentAnonLimit, clientKey(r), "client", clientKey(r)) {
+				return
+			}
 			v, _ := s.currentStatus(ctx)
 			s.writeJSON(w, v, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
 			return
@@ -106,6 +149,9 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		if err != nil {
 			s.log.Error("agent lookup", "err", err)
 			s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+			return
+		}
+		if !s.agentAllow(w, r, s.agentLimit, hex.EncodeToString(spki), "agent", agentFingerprint(spki)) {
 			return
 		}
 		dv, err := s.currentDirectory(ctx)

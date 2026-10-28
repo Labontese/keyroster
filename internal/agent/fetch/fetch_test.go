@@ -229,6 +229,32 @@ func TestFetch(t *testing.T) {
 			t.Fatalf("spooled %v", got)
 		}
 	})
+	t.Run("rate_limited_continues_next_poll", func(t *testing.T) {
+		// PR #71 review F4: a 429 with Retry-After inside a poll's more
+		// rounds keeps what was spooled and is no error; the next poll goes
+		// on from it.
+		var n atomic.Int32
+		ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			if n.Add(1) == 1 {
+				_, _ = w.Write([]byte(`{"bundles":[],"directories":[{"version":1,"directory":"YQ==","sigs":"YQ=="}],"krl":null,"more":true}`))
+				return
+			}
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+		})
+		var log strings.Builder
+		ts.f.cfg.Log = &log
+		if err := ts.f.Once(t.Context()); err != nil {
+			t.Fatalf("a 429 with Retry-After: %v, want no error", err)
+		}
+		if strings.Contains(log.String(), "ERROR") || !strings.Contains(log.String(), "continuing at the next poll") {
+			t.Fatalf("log %q", log.String())
+		}
+		if got := ts.spooled(t); !slices.Contains(got, "directory-1.json") {
+			t.Fatalf("spooled %v, want the first round's directory kept", got)
+		}
+	})
 	t.Run("policy_write_failure_spools_no_bundle", func(t *testing.T) {
 		// PR #71 review F10/F12: the policy a bundle names is written before
 		// the bundle, so a bundle in the spool implies its policy is there. A
