@@ -47,8 +47,12 @@ func recoverRefusal(name, format string, args ...any) error {
 }
 
 // recoverImport is one KRL version to import, with where it came from.
+// same is set on a --krl document whose manifest is that of an earlier
+// import: it is the earlier import's source, and the request carries the
+// version once (PR #70 review, F1).
 type recoverImport struct {
 	source string
+	same   string
 	im     wire.RecoveryImport
 	m      *krl.Manifest
 	p      *krl.Parsed
@@ -215,30 +219,28 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 		return err
 	}
 
-	// 5. Every import, under the restored bundle.
-	var imports []recoverImport
+	// 5. Every import, under the restored bundle. Each input is verified
+	// on its own, a --krl document identical to an earlier input too, and
+	// the summary lists every one; the request carries each manifest once
+	// (PR #70 review, F1: a server copy equal to the saved export's last
+	// KRL is listed as such, not dropped).
+	var all []recoverImport
 	if saved.LastKRL != nil {
 		m, err := krl.ParseManifest(saved.LastKRL.Manifest)
 		if err != nil {
 			return recoverRefusal("recovery_import_invalid", "the saved export's last KRL: %v", err)
 		}
-		imports = append(imports, recoverImport{source: fmt.Sprintf("saved export, log entry %d", m.LogIndex),
+		all = append(all, recoverImport{source: fmt.Sprintf("saved export, log entry %d", m.LogIndex),
 			im: wire.RecoveryImport{KRL: saved.LastKRL.KRL, Manifest: saved.LastKRL.Manifest, Sig: saved.LastKRL.Sig}, m: m})
 	}
-	for _, d := range docs {
-		if !slices.ContainsFunc(imports, func(o recoverImport) bool { return bytes.Equal(o.im.Manifest, d.im.Manifest) }) {
-			imports = append(imports, d)
-		}
-	}
-	if len(imports) > wire.MaxRecoveryImports {
-		return recoverRefusal("recovery_import_invalid", "%d distinct KRL versions to import, at most %d", len(imports), wire.MaxRecoveryImports)
-	}
+	all = append(all, docs...)
 	var (
+		imports   []recoverImport
 		parsed    []*krl.Parsed
 		maxImport uint64
 	)
-	for i := range imports {
-		im := &imports[i]
+	for i := range all {
+		im := &all[i]
 		if _, err := krl.VerifyManifest(im.im.Manifest, im.im.Sig, im.im.KRL, restored.Bundle, installation, 0); err != nil {
 			return recoverRefusal("recovery_import_invalid", "%s: it is not a KRL version of the restored trust bundle v%d and installation %s: %v",
 				im.source, restored.Bundle.Version, installation, err)
@@ -251,6 +253,14 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 			return recoverRefusal("recovery_import_invalid", "%s: the KRL header says version %d, its manifest %d", im.source, p.Version, im.m.KRLVersion)
 		}
 		im.p = p
+		if j := slices.IndexFunc(all[:i], func(o recoverImport) bool { return bytes.Equal(o.im.Manifest, im.im.Manifest) }); j >= 0 {
+			im.same = all[j].source
+			continue
+		}
+		if len(imports) == wire.MaxRecoveryImports {
+			return recoverRefusal("recovery_import_invalid", "more than %d distinct KRL versions to import", wire.MaxRecoveryImports)
+		}
+		imports = append(imports, *im)
 		parsed = append(parsed, p)
 		maxImport = max(maxImport, im.m.KRLVersion)
 	}
@@ -350,7 +360,7 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 	if err != nil {
 		return recoverRefusal("recovery_too_large", "%v", err)
 	}
-	printRecoverySummary(stdout, restored, saved, imports, certs, expired, len(entries), maxImport)
+	printRecoverySummary(stdout, restored, saved, all, certs, expired, len(entries), maxImport)
 
 	if err := confirmRecovery(*yes, stdout); err != nil {
 		return err
@@ -389,13 +399,20 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 
 // printRecoverySummary prints what the recovery imports and carries, and
 // how many lost certificates it leaves out as expired, for the admin to
-// check before signing.
-func printRecoverySummary(w io.Writer, restored, saved *audit.Report, imports []recoverImport, certs []lostCert, expired, entries int, maxImport uint64) {
+// check before signing. It lists every input, the saved export's last KRL
+// and each --krl document, in that order: one identical to an earlier
+// input names that input ("same as ...") and is imported once.
+func printRecoverySummary(w io.Writer, restored, saved *audit.Report, inputs []recoverImport, certs []lostCert, expired, entries int, maxImport uint64) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "installation: %s\n", restored.Bundle.InstallationID)
 	fmt.Fprintf(&b, "restored log: %d entries, root %s; saved log: %d entries\n",
 		restored.Size, base64.StdEncoding.EncodeToString(restored.Root), saved.Size)
-	for _, im := range imports {
+	for _, im := range inputs {
+		if im.same != "" {
+			fmt.Fprintf(&b, "import: %s: KRL v%d, issued at %s: same as %s, imported once\n",
+				im.source, im.m.KRLVersion, im.m.IssuedAt, im.same)
+			continue
+		}
 		var serials, keyIDs uint64
 		for _, sec := range im.p.Certs {
 			for _, r := range sec.Serials {

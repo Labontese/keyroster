@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -824,6 +825,61 @@ func TestRevokeRecover(t *testing.T) {
 		code, out, errOut := s.run(t, "--krl", doc)
 		if code != 0 || !strings.Contains(out, "entries: 70002;") {
 			t.Fatalf("a server copy of 70,000 serials: exit %d:\n%s%s", code, out, errOut)
+		}
+		if r := s.request(t); len(r.Imports) != 2 {
+			t.Fatalf("the request imports %d KRL versions, want 2", len(r.Imports))
+		}
+	})
+	// PR #70 review, F1: a server copy equal to the saved export's last
+	// KRL (a saved export taken after the last revocation, the signer
+	// failing before its hourly republish) is listed with its path and as
+	// the same as the saved export, so the runbook's check finds it; the
+	// request imports that version once. Two identical --krl documents
+	// are listed both. A document with the saved export's manifest but
+	// other KRL bytes is verified on its own and refused.
+	t.Run("server_copy_same_as_saved_listed", func(t *testing.T) {
+		s := newRecoverScenario(t)
+		rep, err := audit.Verify(bytes.NewReader(readTestFile(t, s.saved)), audit.Options{Pins: s.e.cfg.TrustPins, Threshold: s.e.cfg.TrustThreshold})
+		if err != nil || rep.LastKRL == nil {
+			t.Fatalf("the saved export: %v, last KRL %v", err, rep)
+		}
+		writeDoc := func(d serverclient.KRLDocument) string {
+			t.Helper()
+			data, err := json.Marshal(d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(t.TempDir(), "krl-served.json")
+			writeTestFile(t, p, append(data, '\n'))
+			return p
+		}
+		doc := writeDoc(serverclient.KRLDocument{KRL: rep.LastKRL.KRL, Manifest: rep.LastKRL.Manifest, Sig: rep.LastKRL.Sig})
+		code, out, errOut := s.run(t, "--krl", doc)
+		v := strconv.FormatUint(s.b.krlVersion, 10)
+		saved := "saved export, log entry " + strconv.Itoa(len(s.b.leaves)-1)
+		if code != 0 || !strings.Contains(out, "import: "+saved+": KRL v"+v+", issued at ") ||
+			!regexp.MustCompile(`(?m)^import: `+regexp.QuoteMeta(doc)+`: KRL v`+v+`, issued at \S+: same as `+saved+`, imported once$`).MatchString(out) {
+			t.Fatalf("a server copy equal to the saved export's last KRL: exit %d:\n%s%s", code, out, errOut)
+		}
+		if r := s.request(t); len(r.Imports) != 1 {
+			t.Fatalf("the request imports %d KRL versions, want the saved export's once", len(r.Imports))
+		}
+		// The same scenario, so the manifest is the saved export's.
+		s.out = filepath.Join(t.TempDir(), "recovery.req")
+		other := writeDoc(serverclient.KRLDocument{KRL: append([]byte(nil), rep.LastKRL.KRL[:len(rep.LastKRL.KRL)-1]...), Manifest: rep.LastKRL.Manifest, Sig: rep.LastKRL.Sig})
+		if code, out, errOut := s.run(t, "--krl", other); code == 0 || !strings.Contains(errOut, "recovery_import_invalid") || !strings.Contains(errOut, other) || fileExists(s.out) {
+			t.Fatalf("the saved export's manifest over other KRL bytes: exit %d:\n%s%s", code, out, errOut)
+		}
+
+		s = newRecoverScenario(t)
+		first := s.b.serverCopy(nil, s.b.krlVersion+1, s.e.bundle.InstallationID, nil)
+		second := filepath.Join(t.TempDir(), "krl-served.json")
+		writeTestFile(t, second, readTestFile(t, first))
+		code, out, errOut = s.run(t, "--krl", first, "--krl", second)
+		v = strconv.FormatUint(s.b.krlVersion+1, 10)
+		if code != 0 || !strings.Contains(out, "import: "+first+": KRL v"+v+", issued at ") ||
+			!regexp.MustCompile(`(?m)^import: `+regexp.QuoteMeta(second)+`: KRL v`+v+`, issued at \S+: same as `+regexp.QuoteMeta(first)+`, imported once$`).MatchString(out) {
+			t.Fatalf("two identical --krl documents: exit %d:\n%s%s", code, out, errOut)
 		}
 		if r := s.request(t); len(r.Imports) != 2 {
 			t.Fatalf("the request imports %d KRL versions, want 2", len(r.Imports))

@@ -83,3 +83,11 @@ Assert that no krl_publish between the restored log's end and the recovery lacks
 **Closing this todo.** The plan that resolves it moves this file, under the same name, to `.planning/todos/completed/2026-10-25-plan-signer-restore-revocation-recovery.md` in its own PR, with "Resolved in <plan> (PR #N)" appended. 03-07's Task 1 precondition checks exactly that path on origin/main, so a renamed or differently closed todo blocks 03-07.
 
 Sources: 03-03-PLAN.md, Round 2 of the Review Dispositions Ledger (the Deferred table) and threat T-03-207; 03-03-PLAN.md at 4aaa62e, Task 3 (a)-(c), for the removed text.
+
+## Resolution
+
+Resolved in 03-06b (the code) and 03-06c (the restore procedure, PR from branch p03/06c-restore-procedure).
+
+- 03-06b (PR #69): keyroster-server's durable `krl-served.json`, leaf kind 15 `revocation_recovery`, `krl.RecoveryEntries`, the audit rule, `keyroster revoke recover` and `keyroster-signer recover-revocations`.
+- 03-06c: signer-install.md keeps the server's copy right after the hold, runs step 2b (clock check, copy to the admin, `keyroster revoke recover`, read-back, `recover-revocations` under the hold, export and verifies) after every restore in place of 03-03's stop, and releases the hold only after it. `TestRestoreRecoversLostRevocations` (CI e2e) is the drill: serial before and after the snapshot, key ID, explicit key, subject, a revocation after the saved export, a lost live user certificate and a kept host certificate, the publish assertion, `ssh-keygen -Q` and sshd, the pending-recovery cases and a restart. `test/systemd/smoke.sh` runs the runbook's blocks.
+- Not covered: point 7 (03-10's negative-probe revocations) is 03-10's, named as the drill's extension point; point 8 (03-13's start-up publish) is 03-13's. A recovery larger than one leaf is the todo `2026-10-28-split-one-recovery-over-several-leaves.md`.

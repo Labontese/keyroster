@@ -3576,6 +3576,57 @@ func TestVerifyRecoveryExportLines(t *testing.T) {
 	}
 }
 
+// TestVerifyRecoveryImportVersions (PR #70 review, D-R1): the
+// "import_krl_versions" field the restore runbook's release check reads
+// with grep is the leaf's own: once on a revocation_recovery line, with
+// the versions of its imports in order, and on no line of another kind.
+func TestVerifyRecoveryImportVersions(t *testing.T) {
+	rf := newRevokeFixture(t)
+	c := rf.issue()
+	im7 := rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, ValidBefore: c.ValidBefore}}, 7, nil, auditInstallationID)
+	im19 := rf.importKRL(nil, 19, nil, auditInstallationID)
+	rf.recover([]wire.RecoveryImport{im7, im19}, nil, nil)
+	rf.publish(nil)
+	all := rf.lines()
+	rec, pub, issue := len(all)-3, len(all)-2, len(all)-4
+	if !strings.Contains(all[rec], `"import_krl_versions":[7,19]`) {
+		t.Fatalf("the revocation_recovery line lacks the import versions:\n%s", all[rec])
+	}
+	edit := func(i int, f func(m map[string]any)) []string {
+		t.Helper()
+		return editDecodedLine(t, all, i, f)
+	}
+	const refused = "its decoded import_krl_versions field is not the one of its"
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string // "" = must verify
+	}{
+		{"as_exported_ok", all, ""},
+		{"edited_refused", edit(rec, func(m map[string]any) { m["import_krl_versions"] = []int{7, 20} }), refused},
+		{"one_left_out_refused", edit(rec, func(m map[string]any) { m["import_krl_versions"] = []int{7} }), refused},
+		{"one_added_refused", edit(rec, func(m map[string]any) { m["import_krl_versions"] = []int{7, 19, 20} }), refused},
+		{"reordered_refused", edit(rec, func(m map[string]any) { m["import_krl_versions"] = []int{19, 7} }), refused},
+		{"missing_refused", edit(rec, func(m map[string]any) { delete(m, "import_krl_versions") }), refused},
+		{"twice_refused", edit(rec, func(m map[string]any) { m["x"] = map[string]any{"import_krl_versions": []int{7, 19}} }), refused},
+		{"on_krl_publish_refused", edit(pub, func(m map[string]any) { m["import_krl_versions"] = []int{7, 19} }), refused},
+		{"on_issue_refused", edit(issue, func(m map[string]any) { m["import_krl_versions"] = []int{} }), refused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := rf.verify(join(tc.lines), nil)
+			if tc.want == "" {
+				if err != nil || rep.Recoveries != 1 {
+					t.Fatalf("Verify: %+v, %v", rep, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify = %+v, %v; want an error with %q", rep, err, tc.want)
+			}
+		})
+	}
+}
+
 // TestRecoveryLeafFitsExportLine: a revocation_recovery leaf with a body
 // of exactly tlog.MaxRecoveryBody, written with Export's line encoder, is
 // read back by Verify's line reader (maxLine) without "token too long".
