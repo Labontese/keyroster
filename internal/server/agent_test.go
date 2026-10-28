@@ -386,6 +386,28 @@ func TestAgentEnroll(t *testing.T) {
 		if rec := e.enroll(t, newAgentID(t), other.Token, pendingKeys); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AgentErrHostKeysInUse || e.tokenUsed(t, other.Token) {
 			t.Fatalf("a key of another pending agent: %d %s", rec.Code, rec.Body.String())
 		}
+		// The runbook's remedy for a key on a directory entry only: once
+		// the entry is removed, the same keys enroll.
+		e.installDir(t)
+		if rec := e.enroll(t, newAgentID(t), other.Token, inDir); rec.Code != http.StatusAccepted {
+			t.Fatalf("the keys of a removed directory host: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("removed_host_agent_keeps_its_keys", func(t *testing.T) {
+		// No deregistration exists (an owner decision, 03-08): an agent
+		// whose host entry is removed keeps its keys, is pending again, and
+		// a reinstalled agent with the same host keys is refused.
+		e := newAgentEnv(t, true)
+		_, hosts := e.approvedAgent(t)
+		e.installDir(t)
+		rec := e.adminDo(t, http.MethodGet, serverclient.AdminPendingHostsPath, nil)
+		var p serverclient.PendingHostsAnswer
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &p) != nil || len(p.Hosts) != 1 || p.Hosts[0].ExpectedName != "web1" {
+			t.Fatalf("pending after the host's removal: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := e.enroll(t, newAgentID(t), e.mustMint(t, "web1", 0).Token, hosts); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AgentErrHostKeysInUse {
+			t.Fatalf("a reinstalled agent with the same host keys: %d %s", rec.Code, rec.Body.String())
+		}
 	})
 	t.Run("identity_in_use", func(t *testing.T) {
 		e := newAgentEnv(t, true)
