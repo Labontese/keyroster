@@ -5,6 +5,7 @@ package state
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -37,6 +38,14 @@ type Verified struct {
 	// KRL only its ops key verifies) waits for the next capture (PR #67
 	// review).
 	BundleHeld bool
+
+	// Refused is set when the capture's bundle or directory step was
+	// refused (owner decision D-R2, PR #71 review F5): the capture then
+	// takes only its KRL, verified against the bundle in force (the
+	// accepted one), and the bundle, policy and directory stay as
+	// accepted. Revocations only narrow what sshd accepts, so they never
+	// wait for a chain that does not verify. The caller reports Refused.
+	Refused error
 
 	// steps is the bundle chain of this capture: the stored bundle (when
 	// there is one), then each successor verified.
@@ -99,6 +108,13 @@ func (v *Verified) AsStored() *Stored {
 //     manifest's (krl_header_version_mismatch). With BundleHeld, a KRL whose manifest the bundle in
 //     force does not verify waits with the bundle.
 //
+// A refused bundle or directory step does not stop the KRL (owner decision
+// D-R2, PR #71 review F5): with an accepted bundle, the KRL is verified
+// against it and taken alone, everything else stays as accepted, and the
+// refusal is returned in Refused with a nil error. Before any bundle was
+// accepted the refusal stands, and a refused KRL is an error with the
+// earlier refusal joined to it.
+//
 // Verify reads only in; the bytes it checks are the bytes it returns in
 // Next.
 func Verify(p *Pins, prev *Stored, in spool.State) (*Verified, error) {
@@ -109,16 +125,43 @@ func Verify(p *Pins, prev *Stored, in spool.State) (*Verified, error) {
 	if prev != nil {
 		v.Next = *prev
 	}
-	if err := v.verifyBundle(p, prev, in); err != nil {
-		return nil, err
+	refused := v.verifyBundle(p, prev, in)
+	if refused == nil {
+		refused = v.verifyDirectory(p, prev, in)
 	}
-	if err := v.verifyDirectory(p, prev, in); err != nil {
-		return nil, err
+	if refused != nil {
+		if prev == nil || prev.Bundle == nil {
+			return nil, refused
+		}
+		w, err := storedOnly(prev)
+		if err != nil {
+			return nil, errors.Join(refused, err)
+		}
+		if err := w.verifyKRL(p, prev, in); err != nil {
+			return nil, errors.Join(refused, err)
+		}
+		w.Refused = refused
+		return w, nil
 	}
 	if err := v.verifyKRL(p, prev, in); err != nil {
 		return nil, err
 	}
 	return v, nil
+}
+
+// storedOnly is the Verified of a capture that takes nothing but, later,
+// its KRL: the accepted bundle, policy and directory in force, unchanged.
+func storedOnly(prev *Stored) (*Verified, error) {
+	w := &Verified{Next: *prev, Bundle: prev.bundle, Policy: prev.policy}
+	w.steps = []bundleStep{{bundle: prev.bundle, policy: prev.policy, doc: spool.Doc{Body: prev.Bundle, Sigs: prev.BundleSigs}, polDoc: spool.Doc{Body: prev.Policy, Sigs: prev.PolicySigs}}}
+	if prev.Directory != nil {
+		d, err := directory.Parse(prev.Directory)
+		if err != nil {
+			return nil, fmt.Errorf("%w: the accepted directory: %w", ErrStored, err)
+		}
+		w.Directory = d
+	}
+	return w, nil
 }
 
 func sortedVersions[T any](m map[uint64]T) []uint64 {

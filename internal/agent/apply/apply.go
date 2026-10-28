@@ -681,6 +681,11 @@ func (e *engine) forward(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if v.Refused != nil {
+		// Owner decision D-R2 (PR #71 review F5): the refused bundle or
+		// directory step is reported, and only the capture's KRL moves on.
+		e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", v.Refused)
+	}
 	e.report.BundleHeld = v.BundleHeld
 	if !v.Changed() {
 		// A run that replaced a trial drop-in wrote it: not a no-op.
@@ -692,7 +697,7 @@ func (e *engine) forward(ctx context.Context) error {
 			cur = nil
 		}
 		e.setVersions(v, cur)
-		return nil
+		return v.Refused
 	}
 	g, err := e.render(v)
 	if err != nil {
@@ -709,13 +714,16 @@ func (e *engine) forward(ctx context.Context) error {
 	if e.cfg.DryRun {
 		e.setVersions(v, g)
 		e.report.Diff = diff(cur, g)
-		return nil
+		return v.Refused
 	}
 	if cur != nil && sameBytes(cur, g) {
 		// The new versions change nothing on disk: store them.
 		e.setVersions(v, g)
 		e.report.Generation = curLink.n
-		return e.commit(curLink.n, v)
+		if err := e.commit(curLink.n, v); err != nil {
+			return err
+		}
+		return v.Refused
 	}
 	g.N = e.allocGeneration()
 	if err := e.installGeneration(g); err != nil {
@@ -731,7 +739,10 @@ func (e *engine) forward(ctx context.Context) error {
 	}
 	if lg.kind == linkNone {
 		e.setVersions(v, g)
-		return e.firstInstall(ctx, g, v)
+		if err := e.firstInstall(ctx, g, v); err != nil {
+			return err
+		}
+		return v.Refused
 	}
 	target, tv := g, v
 	e.poll = func(ctx context.Context) (*Generation, *state.Verified, error) {
@@ -775,7 +786,10 @@ func (e *engine) forward(ctx context.Context) error {
 		return e.rollback(ctx, err, lg)
 	}
 	e.report.SelfTest = "pass"
-	return e.commit(target.N, tv)
+	if err := e.commit(target.N, tv); err != nil {
+		return err
+	}
+	return tv.Refused
 }
 
 // setVersions reports v's versions; the KRL version is g's when g (the
