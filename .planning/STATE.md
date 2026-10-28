@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: Completed 03-06b-PLAN.md (PR open, awaiting the owner's merge gate)
-last_updated: "2026-10-27T09:49:57.095Z"
+stopped_at: Completed 03-06c-PLAN.md (PR open, awaiting the owner's merge gate)
+last_updated: "2026-10-28T06:03:44.602Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: c39d09c360539fb987a135c43bd643db57a155f1
+state_head: 5be604d2028f5ea3fc1ac21b56e3ce6cff5474cc
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 54
-  completed_plans: 43
+  completed_plans: 44
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 9 of 19
+Plan: 10 of 19
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -98,6 +98,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P05 | about 150 min | 3 tasks | 32 files |
 | Phase 03 P06 | 116 min | 3 tasks | 32 files |
 | Phase 03 P06b | 100min | 4 tasks | 32 files |
+| Phase 03 P06c | 29min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -265,6 +266,7 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-06: hostKeys skips host key types it does not read (Arch OpenSSH 10.6p1 ssh-mldsa44-ed25519, DSA)
 - [Phase 03]: 03-06: a kept KRL is named in the report (krl_kept), not refused; Verify refuses krl_header_version_mismatch
 - [Phase 03]: 03-06b: lost certificates follow revoke-users-list-others; a key-ID entry's ValidBefore also needs the CA key to match; nothing to recover only when neither bundle has an installation ID and no --krl document was given
+- [Phase 03]: 03-06c: every signer restore runs step 2b under the hold; the hold is released only after the recovery's verifies passed, or after nothing to recover with no server KRL copy kept; the capture block claims no outcome when the server's state directory is unreachable
 
 ### Pending Todos
 
@@ -303,6 +305,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-27T09:49:56.682Z
-Stopped at: Completed 03-06b-PLAN.md (PR open, awaiting the owner's merge gate)
+Last session: 2026-10-28T06:03:44.191Z
+Stopped at: Completed 03-06c-PLAN.md (PR open, awaiting the owner's merge gate)
 Resume file: None
