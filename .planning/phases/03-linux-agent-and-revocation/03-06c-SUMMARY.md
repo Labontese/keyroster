@@ -292,3 +292,65 @@ capslock: no new pair. T-03-SC: no module added.
 - Task 1's acceptance greps, with white space squashed:
   - 03-03's stop and `Until the restore-recovery plan merges` print 0;
   - `no server KRL copy`, `recovery_installation_lost` and `take a saved export after every revocation` each print at least 1.
+
+## Review fix round 1 (PR #70)
+
+A pre-merge security review of PR #70 upheld fifteen findings: two Claude lenses, Codex and a critic, each finding checked by two skeptics. F12 duplicates F1, F13 duplicates F2, and F14 overlaps F6, so each was fixed once. The fixes are on top of `d611ecf`, on 2026-10-28.
+
+### Owner decisions (2026-10-28)
+
+- **D-R1 (F3).** Root's release gate checks that the kept server copy was imported. Root reads the KRL version from the manifest of `/root/recovery/server-krl.json` and requires it among `import_krl_versions` on the recovered export's `revocation_recovery` line. `audit verify` now binds that field. A copy equal to the saved export's last KRL passes by version.
+- **D-R2 (F4).** Accepted as a residual for now, with a check in 03-07. The new threat row T-03-277 says the server copy is only as trustworthy as the keyroster-server account; its disposition is accept-until-03-07. The runbook says the same next to the capture block, and says that a cross-check against a host's installed KRL arrives with 03-07. This round does not touch 03-07-PLAN.md; the orchestrator carries the check over.
+
+### Per finding
+
+| F | Fix | Commit | Tests and pins | Mutants (all RED) |
+|---|---|---|---|---|
+| F1, F12 | `keyroster revoke recover` verifies every input on its own and lists each one. A `--krl` document identical to an earlier input prints `import: <path>: KRL vN, issued at ...: same as <source>, imported once`, and the request still carries that manifest once. Part 3 of step 2b accepts this form (`same as saved export, log entry <n>, imported once`). | `ecf068d` (CLI), `7c28c25` (runbook) | CLI `TestRevokeRecover/server_copy_same_as_saved_listed`: a copy equal to the saved export's last KRL, two identical `--krl` files, and the saved manifest over other KRL bytes (refused). e2e `TestRestoreRecoveryAfterRecovery`. Pin `restoreImportRule`. | the duplicate line not printed; duplicates folded before verification; the import rule deleted from the runbook |
+| F2, F13 | The `grep -c` count is replaced by root's **release check** (part 5). The recovered log must hold exactly two entries after the restored one: a `revocation_recovery` at the restored size and a `krl_publish` after it. Its two entries must be the `log entries <i>, <j>` of the `recovered:` line. Release case 1 now reads "the release check printed `release check passed:`". | `7c28c25` | e2e `TestRestoreRecoversLostRevocations` runs the script on the real exports: it passes on the recovered export and stops on the restored export given as the recovered one. e2e `TestRestoreRecoveryAfterRecovery`: a restored log that already holds a recovery, which leaves two in the recovered log, passes. smoke.sh, on fixtures: passes on a restored log with an earlier recovery, and stops when nothing was added. Pins `restoreReleaseCheckBlock` (runbook and smoke), `restoreReleaseCheckRule` and `restoreReleaseCheckStop`. | `-eq` changed to `-ge` (runbook, smoke); `grep -c` restored instead of the check; the rule for its line deleted; the stop rule deleted |
+| F3 (D-R1) | `checkImportVersions` in `internal/audit/verify.go`. On a `revocation_recovery` line, `"import_krl_versions":` must occur exactly once, followed by the leaf's own import versions in order. On any other kind the key is refused. A leaf whose request or manifest does not decode is left to `verifyRecovery`. The release check reads the kept copy only in the form keyroster-server writes it (one line, the three fields in order). It base64-decodes the canonical manifest and requires its single `krl_version` among the versions, as an exact match. | `d037d24` (audit), `7c28c25` (runbook) | `TestVerifyRecoveryImportVersions`: edited, one left out, one added, reordered, missing, nested twice, on `krl_publish`, on `issue`. e2e: a server copy whose version the recovery did not import stops the check. smoke: v9 and v1 against `[7,19]` both stop. T-03-275 updated. | binding not called; key not required; no refusal on other kinds; the kept-copy line deleted from the runbook's check |
+| F4 (D-R2) | The runbook paragraph "The copy is only as trustworthy as the keyroster-server account", next to the capture block; a sentence in revoke.md; threat row T-03-277 (accept until 03-07). The capture paragraph no longer claims the copy "holds the newest KRL any host could have fetched". | `7c28c25`; PLAN row in the docs commit | Pins `restoreServerCopyTrust` (positioned between the capture line and the file restore) and `restoreServerCopyCheck` | the paragraph deleted; the 03-07 sentence deleted |
+| F5 | The capture block decides absence only from `listed=$(runuser -u keyroster-server -- find ... -name krl-served.json -print)`, outside any `if`, so a failing listing stops it under `-e`. | `7c28c25` | smoke: a state directory the server account can search but not read stops the block, which prints neither line. The capture block is pinned in the runbook and smoke. | back to `test -e ... -o -L` (runbook, smoke) |
+| F6, F14 | Part 4 prints `/root/recovery/recovery.bin exists: move the refused request aside first (step 2b)`. A new **move block** moves a refused request to `/root/recovery/refused-<UTC time>/recovery.bin` and never deletes it or `/root/recovery`. `recovery_evidence_invalid` now starts again from part 2 with the other admin; the request-shape refusals start from part 3 after the move. | `7c28c25` | smoke: refusal, then the read-back stops with its reason, the move (bytes and mode checked), the admin's own move, and a new request read back and refused again. Pins `restoreArchiveBlock` (runbook, smoke), `restoreArchiveRule` and `restoreOtherAdminRule`. | the move block deleted; the never-delete rule deleted; "from part 3 on" for another admin; part 4 without its reason |
+| F7 | Release of a keyroster-server held on another host. The signer host names and starts only keyroster-signer; then the server's host runs the release block naming only keyroster-server, and starts it. UNVERIFIED. | `7c28c25` | Pin `restoreRemoteRelease` | the paragraph deleted |
+| F8 | Now tested, no longer UNVERIFIED. smoke.sh runs the capture block on a dangling link, a link to `/dev/zero`, a FIFO, a mode-000 file and a file one byte too large. Each case runs under `timeout 60`, and each must stop, print neither line and write at most 5 620 745 bytes. The runbook's CI list names these cases. | `7c28c25` | systemd-sandbox | covered by the F5 and F15 pins |
+| F9 | Both release cases are pinned and placed between the release condition and the release block. | `7c28c25` | `restoreReleaseCase1`, `restoreReleaseCase2` | case 2 cut to plain `nothing to recover`; case 1 without the release check |
+| F10 | The drill issues carol's certificate C before the backup and revokes it with `revoke user carol` after it. The post-snapshot host certificate H2 is revoked with `revoke serial --ca host` before the saved export. The summary lists D (revoke) and H and H2 (keep), and not C. The `recovered:` line reads `1 lost certificates revoked, 2 kept` at the restored size's indices. ssh-keygen -Q refuses H2 after the recovery and after the restart. | `3590a2c` | e2e, both lanes | not run (e2e runs only in CI). By construction: C is not lost and H2 is kept, so only the imported serial rows revoke them, and dropping those rows turns `requireKeygen(..., true)` RED. |
+| F11 | Pinned: the clock check's two commands and its rule, found after step 2b's heading (the same lines stand in "Snapshot restore: check the clock first"); the openers `bash -eu -s <admin> <<'EOF'` (runbook) and `bash -eu -s kradmin <<'EOF'` (smoke) of copy-in and read-back; the release check's rules (F2 replaced "the count must print `1`"). | `7c28c25` | `restoreClockCommands`, `restoreClockRule`, `restoreAdminOpener`, `restoreSmokeAdminOpener` | commands deleted; rule deleted; four openers without `-e` |
+| F15 | The capture block copies only when `runuser -u keyroster-server -- test -f` passes, then runs `head -c 5620745` and checks `stat -c %s` ≤ 5620744 = `krl.MaxKRLResponse`. The read-back works the same way as the admin, with the cap `wire.MaxRecoveryFile` = 9470226. The rule that "a link reaches only what that account can read" now says that a link still reaches any regular file that account can read. A FIFO swapped in between the check and the copy only makes the block wait; the runbook says to stop it and escalate. | `7c28c25` | `TestRestoreCopyCaps` ties both caps to the code constants. smoke: the read-back stops on a request planted as a FIFO, a link to `/dev/zero` or a dangling link. | capture without `test -f` (runbook); read-back without `test -f` (smoke); either cap moved off its limit in runbook, smoke and test together (TestRestoreCopyCaps) |
+
+Mutants: 2 for the CLI, 3 for audit, and 28 for the runbook and smoke pins, all RED.
+- The CLI and audit mutants ran on Windows copies.
+- The pin mutants ran on a WSL copy with the e2e test binary (`TestRestoreRunbookChecks`, `TestRestoreCopyCaps`).
+- Each copy was discarded afterwards.
+- The release check's script was also run by hand in WSL on synthetic exports (7 cases) before the CI runs.
+
+### Round 0 text this round supersedes
+
+- **The key decision "the runbook counts the recovery with `grep -c`"** is replaced. The count could not tell a restored log that already held a recovery from a recovery that never ran. Root's release check now decides.
+- **The UNVERIFIED item "the capture block's refusal of a krl-served.json that cannot be read, or of a dangling link"** is run in systemd-sandbox now (F8).
+- **Deviation 4 (the recovery count)** and the PR body's item 4 are superseded the same way.
+
+### What ran where (head `3590a2c`)
+
+- **Windows:** gofmt clean; go vet linux/windows/darwin clean, and `-tags e2e` for linux; `go test ./...` passes apart from the known `internal/agent/paths` TestAllowed failure.
+- **WSL:** `golangci-lint run ./...` 0 issues, and `GOOS=windows` 0 issues. `-tags e2e` lint reports only findings older than this round. In `restore_test.go` those are `copyDB`'s G304 and G703, and CI does not lint with that tag.
+- **WSL:** `go test -race` passes for `./cmd/keyroster/` and `./internal/audit/`.
+- **CI, dispatched on `3590a2c`:**
+  - E2E run 40668513933: success. `TestRestoreRecoversLostRevocations`, `TestRestoreRecoveryAfterRecovery`, `TestRestoreRunbookChecks` and `TestRestoreCopyCaps` show `--- PASS` on both lanes, 10.5p1 and 9.5p1.
+  - Systemd run 40668518276: success. The log shows the refusal and replacement, the move, and the release check's five fixture outcomes.
+
+### UNVERIFIED after this round
+
+- The release of a keyroster-server held on another host (F7). The copy from another host stays UNVERIFIED too.
+- A request or server copy turned into a FIFO between a block's check and its copy. The block waits, and the runbook says to stop it with Ctrl-C and escalate.
+- A listing that fails on a disk error. CI runs only an unreadable directory.
+- The release check on a real signer host. CI e2e runs it on real exports as the test's user; smoke runs the verbatim block on fixtures.
+- The other items of the list above are unchanged.
+
+### Follow-ups (not in this round)
+
+- The summary lists a lost host or machine certificate as `keep; ... revoke later` even when an import already revokes it (H2 in the drill). The certificate stays revoked, but the advice is misleading. The CLI could mark such lines `already revoked by an import`.
+- The release check trusts the kept copy's own manifest for its version, which T-03-277 covers. 03-07's cross-check against a host's installed KRL closes that.
+- The capture and read-back blocks could put `timeout` around the copy, which would turn the FIFO race into a stop rather than a wait.
+- `keyroster audit verify --json` could report the recovery's import versions, so that root does not need grep and base64.
