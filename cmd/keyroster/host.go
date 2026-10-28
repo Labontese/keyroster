@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -463,10 +464,26 @@ func runHostJoinToken(ctx context.Context, args []string, stdout, stderr io.Writ
 	if err := writeExclusive(*out, []byte(str+"\n"), 0o600); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "Wrote the join string for host %s to %s (mode 0600). It expires at %s and enrolls one agent.\n"+
+	protection, warning := joinFileProtection(runtime.GOOS)
+	if warning != "" {
+		_, _ = fmt.Fprintln(stderr, warning)
+	}
+	_, err = fmt.Fprintf(stdout, "Wrote the join string for host %s to %s (%s). It expires at %s and enrolls one agent.\n"+
 		"It is a secret: copy it to the host with mode 0600 and run, as root there, keyroster-agent install --join-file <file> "+
-		"(docs/runbooks/host-setup.md \"Enrolling a host\"). The agent server is %s.\n", name, *out, ans.ExpiresAt, agentURL)
+		"(docs/runbooks/host-setup.md \"Enrolling a host\"). The agent server is %s.\n", name, *out, protection, ans.ExpiresAt, agentURL)
 	return err
+}
+
+// joinFileProtection is how host join-token describes the join file's
+// protection on goos, and a warning to print first (PR #71 review F14):
+// mode 0600 where the OS has file modes; on Windows the mode only sets
+// the read-only attribute, and the file inherits its directory's ACL.
+func joinFileProtection(goos string) (protection, warning string) {
+	if goos == "windows" {
+		return "with the ACL it inherits from its directory",
+			"WARNING: on Windows the join file is not mode 0600: it inherits the ACL of the directory it is in, so any account that can read that directory can read the token. Write it to a directory only you can read (for example under your user profile), and delete it once it is on the host."
+	}
+	return "mode 0600", ""
 }
 
 // fetchPendingHosts GETs the pending hosts through the admin API, after

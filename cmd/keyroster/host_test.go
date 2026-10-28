@@ -631,3 +631,26 @@ func TestHostApproveHostKeys(t *testing.T) {
 		}
 	})
 }
+
+// TestJoinFileProtection (PR #71 review F14): host join-token claims mode
+// 0600 only where the OS has file modes; on Windows it names the
+// inherited ACL instead and warns first.
+func TestJoinFileProtection(t *testing.T) {
+	if p, w := joinFileProtection("linux"); p != "mode 0600" || w != "" {
+		t.Fatalf("linux: %q, %q", p, w)
+	}
+	p, w := joinFileProtection("windows")
+	if strings.Contains(p, "0600") || !strings.Contains(p, "ACL") || !strings.Contains(w, "inherits the ACL") {
+		t.Fatalf("windows: %q, %q", p, w)
+	}
+	// The command's own output on this OS.
+	e := popHostsEnv(t)
+	var called bool
+	e.recordCall(http.MethodPost, serverclient.AdminJoinTokensPath, &called,
+		`{"expected_name":"web1","token":"`+strings.Repeat("A", 43)+`","expires_at":"2026-10-28T12:30:00Z","agent_port":8443}`, http.StatusCreated)
+	code, stdout, stderr := run(t, "host", "join-token", "web1", "--out", filepath.Join(t.TempDir(), "join.txt"))
+	want, warn := joinFileProtection(runtime.GOOS)
+	if code != 0 || !strings.Contains(stdout, "("+want+")") || (warn != "" && !strings.Contains(stderr, warn)) || (warn == "" && strings.Contains(stderr, "WARNING")) {
+		t.Fatalf("host join-token on %s: exit %d\n%s\n%s", runtime.GOOS, code, stdout, stderr)
+	}
+}

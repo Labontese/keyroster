@@ -651,7 +651,11 @@ keyroster host join-token <name> --ttl 30m --out <name>.join
 32 random bytes, valid for one enrollment and at most 1 h (30 min by
 default); the server keeps only its SHA-256. The command writes the join
 string (`kr-join-v1:...`) to the file with mode 0600 and never prints it:
-the file is a secret until the token is used or expires. It carries the
+the file is a secret until the token is used or expires. On a Windows
+workstation the file gets no mode 0600: it inherits the ACL of its
+directory, and the command says so and warns. Write it to a directory only
+you can read, for example under your user profile, and delete it once it
+is on the host (an owner-only ACL is a pending todo). It carries the
 agent listener's URL, the TLS roots and pins and the trust-root pins and
 threshold of your `keyroster init` config, and the installation ID of the
 trust bundle it verified.
