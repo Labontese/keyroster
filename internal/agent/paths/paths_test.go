@@ -439,9 +439,21 @@ func TestAllowed(t *testing.T) {
 	for _, p := range []string{"/r/etc/ssh/keyroster", "/r/etc/ssh/keyroster/gen/3/user_ca_keys", "/r/etc/ssh/keyroster/current",
 		"/r/etc/ssh/sshd_config.d/00-keyroster.conf", "/var/lib/keyroster-agent", "/var/lib/keyroster-agent/pins.json",
 		// 03-07: install's four paths outside the state directory, exactly.
-		"/r/etc/keyroster-agent", "/r/etc/keyroster-agent/fetch.json", "/r/var/lib/keyroster-agent-fetch", "/r/var/lib/keyroster-agent-fetch/join-token"} {
+		"/r/etc/keyroster-agent", "/r/etc/keyroster-agent/fetch.json", "/r/var/lib/keyroster-agent-fetch", "/r/var/lib/keyroster-agent-fetch/join-token",
+		// 03-08: the two systemd units and the two OpenRC scripts, exactly.
+		"/r/etc/systemd/system/keyroster-agent.service", "/r/etc/systemd/system/keyroster-agent-fetch.service",
+		"/r/etc/init.d/keyroster-agent", "/r/etc/init.d/keyroster-agent-fetch"} {
 		if err := Allowed(l, p); err != nil {
 			t.Errorf("Allowed(%s) = %v", p, err)
+		}
+	}
+	if got := l.ServiceFiles(); len(got) != 4 {
+		t.Errorf("ServiceFiles = %q, want exactly four paths", got)
+	}
+	for _, p := range []string{"/r/etc/systemd/system", "/r/etc/systemd/system/ssh.service", "/r/etc/systemd/system/keyroster-agent.service.d/x.conf",
+		"/r/etc/init.d", "/r/etc/init.d/sshd", "/r/etc/init.d/keyroster-agent.bak", "/r/etc/systemd/system/keyroster-signer.service"} {
+		if err := Allowed(l, p); !errors.Is(err, ErrNotAllowed) {
+			t.Errorf("Allowed(%s) = %v, want path_not_allowed", p, err)
 		}
 	}
 	for _, p := range []string{"/r/etc/ssh/sshd_config", "/r/etc/ssh/sshd_config.d/50-other.conf", "/r/etc/ssh/sshd_config.d",

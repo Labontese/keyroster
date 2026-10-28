@@ -61,13 +61,21 @@ func joinFile(t *testing.T) (string, *join.JoinToken) {
 	return p, &j
 }
 
-// installRoot is a host root with /etc and /var/lib, and a state
-// directory path whose parent exists.
+// installRoot is a systemd host's root with /etc/ssh/sshd_config.d, /etc/systemd/system,
+// /run/systemd/system and /var/lib, and a state directory path whose
+// parent exists.
 func installRoot(t *testing.T) (root, state string) {
+	t.Helper()
+	return installRootWith(t, "etc/systemd/system", "run/systemd/system")
+}
+
+// installRootWith is a host root with /etc/ssh/sshd_config.d, /var/lib
+// and the extra directories.
+func installRootWith(t *testing.T, extra ...string) (root, state string) {
 	t.Helper()
 	base := t.TempDir()
 	root = filepath.Join(base, "root")
-	for _, d := range []string{"etc", "var/lib"} {
+	for _, d := range append([]string{"etc/ssh/sshd_config.d", "var/lib"}, extra...) {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil { //nolint:gosec // G301: a host's /etc and /var/lib
 			t.Fatal(err)
 		}
