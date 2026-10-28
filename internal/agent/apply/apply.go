@@ -216,6 +216,7 @@ type engine struct {
 	staged         uint64     // the accepted/ snapshot a commit marker names
 	adopt          *AdoptPlan // a Phase 2 takeover this first install makes (D-08)
 	dropInRepaired bool       // repairDropIn wrote the agent's drop-in (over a trial, or an edit on an adoption resume)
+	preRepaired    bool       // preRepairDropIn wrote the agent's drop-in before the start-of-run sshd -T (it holds the lock)
 	poll           func(ctx context.Context) (*Generation, *state.Verified, error)
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
@@ -312,13 +313,28 @@ func (e *engine) apply(ctx context.Context) error {
 	}
 	e.stateFd = fd
 	// Everything up to the lock only reads: a refusal here (bad pins, an
-	// unbounded LoginGraceTime) leaves the host exactly as it was.
+	// unbounded LoginGraceTime) leaves the host exactly as it was. The one
+	// exception is preRepairDropIn, on an installed host whose sshd -T
+	// fails while 00-keyroster.conf is not the agent's own.
 	if e.pins, err = state.LoadPins(e.stateFd); err != nil {
 		return err
 	}
+	unlock := func() {}
 	if e.dump, err = e.sshdDump(ctx, ""); err != nil {
-		return err
+		early, rerr := e.preRepairDropIn()
+		if rerr != nil {
+			return errors.Join(err, rerr)
+		}
+		if early == nil {
+			return err
+		}
+		unlock = early
+		if e.dump, err = e.sshdDump(ctx, ""); err != nil {
+			unlock()
+			return err
+		}
 	}
+	defer func() { unlock() }()
 	grace, err := e.dump.LoginGrace()
 	if err != nil {
 		return err
@@ -326,11 +342,12 @@ func (e *engine) apply(ctx context.Context) error {
 	if e.keys, err = hostKeys(e.dump); err != nil {
 		return err
 	}
-	unlock, err := e.lock()
-	if err != nil {
-		return err
+	if !e.preRepaired {
+		if unlock, err = e.lock(); err != nil {
+			unlock = func() {}
+			return err
+		}
 	}
-	defer unlock()
 	e.locked = true
 	for _, d := range []string{state.AcceptedDir, generationsDir} {
 		if !e.cfg.DryRun {
@@ -401,11 +418,73 @@ func (e *engine) apply(ctx context.Context) error {
 		} else if p, _ := e.readAdopt(); lg.kind == linkAgent && p != nil {
 			e.logf("WARNING %s: the agent's files are in force, and the Phase 2 layout's removal is unfinished; run %s", CodePhase2Pending, adoptCommand)
 		}
+		if e.preRepaired {
+			if err := e.activatePreRepair(ctx); err != nil {
+				return err
+			}
+		}
 		if err := e.replaceTrial(ctx); err != nil {
 			return err
 		}
 	}
 	return e.forward(ctx)
+}
+
+// preRepairDropIn handles a start-of-run sshd -T that failed (PR #68
+// carry-over): on an installed host (last-good is the agent's), whose
+// 00-keyroster.conf is not the agent's drop-in, it takes the apply lock
+// and writes DropIn there, so that an edit sshd itself refuses (an
+// unbalanced quote, say) cannot stop every apply, and every revocation,
+// before any repair. The edit is not kept as dropin.prev: nobody vetted
+// it, and a rollback restores DropIn on an installed host anyway. It
+// returns the lock's release, or nil when it repaired nothing (not
+// installed, the drop-in already the agent's, a dry run). The run then
+// reads sshd -T again, and activatePreRepair reloads sshd and self-tests.
+func (e *engine) preRepairDropIn() (func(), error) {
+	if e.cfg.DryRun {
+		return nil, nil
+	}
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil || lg.kind != linkAgent {
+		return nil, err
+	}
+	old, err := e.readDropIn()
+	if err != nil || bytes.Equal(old, DropIn(e.l)) {
+		return nil, err
+	}
+	unlock, err := e.lock()
+	if err != nil {
+		return nil, err
+	}
+	if err := e.fault("pre-repair"); err != nil {
+		unlock()
+		return nil, err
+	}
+	if err := e.writeFile(e.l.DropInDir(), paths.DropInName, DropIn(e.l), 0o644); err != nil {
+		unlock()
+		return nil, err
+	}
+	e.preRepaired = true
+	e.logf("WARNING sshd -T failed while %s was not the agent's drop-in; wrote the agent's drop-in back before reading sshd -T again", e.l.DropIn())
+	return unlock, nil
+}
+
+// activatePreRepair finishes preRepairDropIn under the lock: sshd -t, the
+// sshd -T checks and the reload (activateDropIn), then the self-test. The
+// run is then not a no-op.
+func (e *engine) activatePreRepair(ctx context.Context) error {
+	if err := e.activateDropIn(ctx); err != nil {
+		return err
+	}
+	e.dropInRepaired = true
+	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
+		e.report.SelfTest = "fail: " + err.Error()
+		return err
+	}
+	e.report.SelfTest = "pass"
+	var err error
+	e.dump, err = e.sshdDump(ctx, "")
+	return err
 }
 
 // replaceTrial handles a trial drop-in a crashed preflight left, before
@@ -1360,11 +1439,22 @@ func (e *engine) activateDropIn(ctx context.Context) error {
 }
 
 // restoreDropIn puts the previous drop-in back (or removes the drop-in
-// when there was none), checks the result with sshd -t and reloads.
+// when there was none), checks the result with sshd -t and reloads. On an
+// installed host (last-good is the agent's) a previous file goes back as
+// the agent's own drop-in (DropIn), never as dropin.prev's bytes: there
+// dropin.prev holds what a repair replaced, an edit nobody vetted (PR #68
+// carry-over). A drop-in that was missing is removed again, as before.
 func (e *engine) restoreDropIn(ctx context.Context) error {
 	prev, err := e.readState(dropinPrevFile, 64<<10)
 	if err != nil {
 		return err
+	}
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil {
+		return err
+	}
+	if lg.kind == linkAgent && prev != nil {
+		prev = DropIn(e.l)
 	}
 	if prev != nil {
 		err = e.writeFile(e.l.DropInDir(), paths.DropInName, prev, 0o644)
