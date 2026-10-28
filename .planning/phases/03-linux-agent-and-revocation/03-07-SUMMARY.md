@@ -19,11 +19,11 @@ provides:
 affects: [03-08, 03-09, 03-10, 03-12, 03-13, 03-14, 03-16]
 
 actuals:
-  tokens: 82279
+  tokens: 82683
   tasks: 3
-  commits: 9
+  commits: 12
 plan_head_before: ef382931e0b84354e963ac66c333b639e78b3252
-plan_head_after: 622f8943606ac444893b0874c83cca6fa59c455f
+plan_head_after: 36c9044
 
 tech-stack:
   added: []
@@ -166,8 +166,11 @@ PR: **#71** (`p03/07-agent-transport`), opened without auto-merge. Requirements 
 7. **Task 3 gates:** `3c3f332` chore(agent): gate the fetcher's dependency graph and capabilities per binary
 8. **Task 3 docs:** `7a9efb0` docs(agent): document host enrollment, the agent listener and how fast changes arrive
 9. **Task 2 follow-up:** `622f894` test(agent): log the accepted certificate login in TestAgentEnrollEndToEnd
+10. **Plan metadata:** `405475c` docs(03-07): complete agent-transport plan (this file, STATE.md, ROADMAP.md, REQUIREMENTS.md)
+11. **Pre-handback review, test:** `04c2078` test(server): pin re-enrollment after a host entry's removal and its limit
+12. **Pre-handback review, docs:** `36c9044` docs(agent): state the re-enrollment limit and that enrolled hosts receive every KRL
 
-Every commit is SSH-signed by keyroster-bot (`%G?` = G against the configured signing key). **Plan metadata:** the `docs(03-07): complete agent-transport plan` commit with this file, STATE.md and ROADMAP.md.
+Every commit is SSH-signed by keyroster-bot (`%G?` = G against the configured signing key). `git rev-list --count ef38293..36c9044` is 12; it counts the plan metadata commit, which landed before the review fixes. A last `docs(03-07)` commit updates this file.
 
 ## Carry-overs and how each was closed
 
@@ -299,9 +302,14 @@ See `key-decisions` in the frontmatter.
 **15. [Plan detail] `run` retries**
 - A failed apply runs again 60 s later on an unchanged spool, so a transient failure (sshd stopped) does not wait for the next new version.
 
+**16. [Rule 1 - Bug, found in review] A false remedy for `host_keys_in_use`**
+- **Issue:** the first host-setup.md table said `keyroster host remove <old name>` fixes `host_keys_in_use`. It does only for a key on a directory entry: the server never deletes an `agents` row, so a host whose agent state was reinstalled with the same host keys can never enroll again in this version, and after `host remove` the old agent shows up in `host pending` again (a later `host approve <name>` would approve that old identity).
+- **Fix:** the table states the one remedy that works and the limit; `TestAgentEnroll/host_keys_in_use` now also enrolls the keys of a removed directory entry, and `removed_host_agent_keeps_its_keys` pins the limit. Deregistration is an open question for the owner. The same review found revoke.md, enroll-user.md and host-setup.md still saying that no host receives a KRL automatically; they now say an enrolled host does.
+- **Commits:** `04c2078`, `36c9044`
+
 ---
 
-**Total deviations:** 15: 1 Rule 3, 3 Rule 2, 1 Rule 1, 1 plan gap, 9 plan details.
+**Total deviations:** 16: 1 Rule 3, 3 Rule 2, 2 Rule 1, 1 plan gap, 9 plan details.
 **Impact on plan:** No new Go module. No production exec site was added; the fetcher has none in its graph.
 
 ## TDD Gate Compliance
@@ -328,6 +336,7 @@ None. `sshd_version` is reported empty on purpose (deviation 4).
 | threat_flag: unauthenticated enrollment cost | internal/server/agent.go | `POST /api/v1/agent/enroll` verifies up to eight SSHSIG signatures per request before the token is checked; the per-identity limiter is per self-generated identity, so the global backstop (3 000 a minute) bounds it |
 | threat_flag: spool growth | internal/agent/fetch/fetch.go | The fetcher never removes old spool files, so every bundle, directory and KRL version stays in the spool; the applier reads at most 64 per kind. Pruning is a follow-up (03-08?) |
 | threat_flag: install as root | cmd/keyroster-agent/install.go | A root command that chowns paths to the fetcher's user; every path is checked first and owners are set on descriptors |
+| threat_flag: no deregistration | internal/serverdb/agents.go | An `agents` row is never deleted. After its host entry is removed, the old agent is pending again, and an admin who approves that name re-approves the old identity, whose key may belong to a decommissioned host; it would then read the signed directory (D-03's exposure, read-only). A reinstalled host with the same host keys cannot enroll again |
 
 ## Open questions for the owner
 
@@ -336,6 +345,7 @@ None. `sshd_version` is reported empty on purpose (deviation 4).
 3. Spool pruning: who removes old versions, the fetcher (it knows nothing of what the applier accepted) or the applier through the outbox (03-08's status)?
 4. `install_pins_differ` makes moving a host to another deployment a manual removal of `/var/lib/keyroster-agent`: acceptable, or should install offer a `--replace`?
 5. The agent limiter (30/min, burst 10, backstop 3 000/min): right for your fleet?
+6. **Deregistration and re-enrollment.** An enrolled agent can never be removed and its host keys never enroll again (deviation 16, threat flag "no deregistration"). Options: an admin-signed `keyroster host forget <name>` that deletes the agent row, letting `host remove` also drop the row whose keys it removes, or leaving it to 03-08's identity rotation. Until then a reinstalled host needs the server's database edited by hand, which no runbook describes.
 
 ## User Setup Required
 
@@ -350,7 +360,7 @@ None in this plan. On the homelab (03-16), the owner mints join tokens and appro
 ## Self-Check: PASSED
 
 - **Files.** Every created key file exists, `test/capslock/keyroster-agent-fetch.json` is tracked and holds no EXEC pair.
-- **Commits.** `cef59c0`, `2c474d3`, `80ac377`, `6557d7d`, `03cb4d7`, `f4fb528`, `3c3f332`, `7a9efb0` and `622f894` are ancestors of HEAD; `git rev-list --count ef38293..622f894` is 9.
+- **Commits.** `cef59c0`, `2c474d3`, `80ac377`, `6557d7d`, `03cb4d7`, `f4fb528`, `3c3f332`, `7a9efb0`, `622f894`, `405475c`, `04c2078` and `36c9044` are ancestors of HEAD; `git rev-list --count ef38293..36c9044` is 12.
 - **Task 1 acceptance.** `grep -n RequireAnyClientCert internal/server/agenttls.go` prints the config line; `grep -c ClientAuth cmd/keyroster-server/serve.go` prints 0; `grep -rn /api/v1/agent/ internal/server/server.go` prints nothing; TestAgentEnrollEndToEnd's CI log shows the pending host, the approval, the first apply, the accepted login and the refusal.
 - **Task 2 acceptance.** Every named case of the behaviour list exists and passes (`go test -v` output), including TestParse/expiry_boundary, TestFetch/response_max_plus_one_refused and enroll_pop_mismatch_not_posted, TestEnroll/enroll_request_fifo_refused and state_dir_unsafe_refused, TestInstallLayout, TestHostPoPRequired/join_token_refused and enroll_refused, TestAgentListenerRequiresClientCert, TestBrowserListenerUnchanged, TestAgentState/budget_exact_fits, budget_one_byte_short_defers_last, more_than_16_continues, largest_items_fit_budget and catch_up_ascending, TestChain/absent_version_not_found, TestIdentityCommand and TestHostApprovePoPRequired/approve_refused_locally and join_token_refused_locally.
 - **Task 3 acceptance.** `bash scripts/dep-firewall.sh` prints the `== keyroster-agent-fetch,`, `== keyroster-agent,` and `== keyroster-signer,` headers and passes; host-setup.md has "How fast changes arrive" and LoginGraceTime; every new runbook step carries a CI or UNVERIFIED label.
