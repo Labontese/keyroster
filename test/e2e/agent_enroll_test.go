@@ -230,6 +230,7 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	c := issueAgentCert(t, env.Signer, "c1", "role:ops")
 	other := issueAgentCert(t, env.Signer, "c2", "role:ops")
 	h.wantAccepted(t, "c1 after the first apply", c, login)
+	t.Logf("certificate c1 (serial %s, role:ops) logs in as %s after the first apply", c.serial, login)
 	pid := h.sshd.pid(t)
 
 	// The server's kept copy of the KRL it served before the revocation:
