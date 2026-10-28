@@ -22,6 +22,7 @@ import (
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/directory"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/webauthn"
@@ -614,8 +615,10 @@ func certTypeName(t uint32) string {
 //     "kind" once on every leaf line; "bundle_version" once on every
 //     bundle_install line; on a directory_install line, "version" once
 //     where present, and "directory" and "sigs" once each, both or
-//     neither, as the standard base64 of its document and signatures; and
-//     none of the last four on a line of another kind
+//     neither, as the standard base64 of its document and signatures; on a
+//     revocation_recovery line, "import_krl_versions" once, as the KRL
+//     versions of its imports (checkImportVersions); and none of the last
+//     five on a line of another kind
 //   - every leaf decodes, records its own index, and leaf times never
 //     decrease
 //   - the first bundle_install entry holds a genesis bundle (version 1,
@@ -1101,6 +1104,45 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 		if k != key || n != 1 || !strings.Contains(s, v+",") && !strings.Contains(s, v+"}") {
 			return fmt.Errorf("its decoded %s field is not the one of its %s leaf", k, leaf.Kind)
 		}
+	}
+	return checkImportVersions(s, leaf)
+}
+
+// checkImportVersions checks the "import_krl_versions" field, which the
+// restore runbook's release check reads with grep (PR #70 review, D-R1):
+// on a revocation_recovery line it must occur exactly once, followed by
+// the KRL versions of the leaf's own imports in order, as Export writes
+// them; on a line of any other kind it must not occur. A recovery leaf
+// whose request or an import's manifest does not decode is left to
+// verifyRecovery, which refuses it.
+func checkImportVersions(s string, leaf tlog.Leaf) error {
+	const key = `"import_krl_versions":`
+	n := strings.Count(s, key)
+	refuse := fmt.Errorf("its decoded import_krl_versions field is not the one of its %s leaf", leaf.Kind)
+	if leaf.Kind != tlog.KindRevocationRecovery {
+		if n != 0 {
+			return refuse
+		}
+		return nil
+	}
+	body, err := tlog.DecodeRecoveryBody(leaf.Body)
+	if err != nil {
+		return nil // verifyRecovery refuses the leaf
+	}
+	req, err := wire.ParseRecoverySigningBytes(body.Request)
+	if err != nil {
+		return nil // verifyRecovery refuses the leaf
+	}
+	versions := make([]string, 0, len(req.Imports))
+	for _, im := range req.Imports {
+		m, err := krl.ParseManifest(im.Manifest)
+		if err != nil {
+			return nil // verifyRecovery refuses the leaf
+		}
+		versions = append(versions, strconv.FormatUint(m.KRLVersion, 10))
+	}
+	if n != 1 || !strings.Contains(s, key+"["+strings.Join(versions, ",")+"]") {
+		return refuse
 	}
 	return nil
 }
