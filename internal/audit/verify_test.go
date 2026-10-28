@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/cert"
@@ -3114,4 +3115,568 @@ func TestVerifyBundlePoP(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// recoveryOpts changes a revocation_recovery entry the fixture logs: the
+// request before it is signed (req), the signer of its evidence, the
+// entries (nil: derived as the signer derives them), the resolution time,
+// and the body after signing (body).
+type recoveryOpts struct {
+	req        func(*wire.RecoveryRequest)
+	signer     ssh.Signer
+	entries    func([]tlog.RevokedEntry) []tlog.RevokedEntry
+	resolvedAt uint64
+	body       func(*tlog.RecoveryBody)
+}
+
+// importKRL is a KRL version listing entries (nothing pruned), of version,
+// for installation, its manifest signed by signer (the ops key when nil).
+func (rf *revokeFixture) importKRL(entries []krl.Entry, version uint64, signer ssh.Signer, installation string) wire.RecoveryImport {
+	rf.t.Helper()
+	set, err := krl.PublishSet(entries, 0)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	data, err := krl.Encode(set, version, time.Unix(1_700_000_000, 0))
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	return rf.signImport(data, version, signer, installation)
+}
+
+// signImport is importKRL over KRL bytes data.
+func (rf *revokeFixture) signImport(data []byte, version uint64, signer ssh.Signer, installation string) wire.RecoveryImport {
+	rf.t.Helper()
+	if signer == nil {
+		signer = rf.ops
+	}
+	m := krl.Manifest{InstallationID: installation, KRLVersion: version, KRLSHA256: krl.SHA256Hex(data),
+		IssuedAt: time.Unix(1_700_000_000, 0).UTC().Format(trust.TimeFormat), BundleVersion: 1, LogIndex: 1}
+	manifest, err := m.Canonical()
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, signer, krl.Namespace, manifest)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	return wire.RecoveryImport{KRL: data, Manifest: manifest, Sig: sig}
+}
+
+// issuedCerts are the certificates the fixture's issue and login_issue
+// leaves logged, by serial.
+func (rf *revokeFixture) issuedCerts() map[uint64]*ssh.Certificate {
+	rf.t.Helper()
+	out := map[uint64]*ssh.Certificate{}
+	for _, raw := range rf.leaves {
+		l, err := tlog.DecodeLeaf(raw)
+		if err != nil {
+			rf.t.Fatal(err)
+		}
+		var blob []byte
+		switch l.Kind {
+		case tlog.KindIssue:
+			b, _ := tlog.DecodeIssueBody(l.Body)
+			blob = b.Cert
+		case tlog.KindLoginIssue:
+			b, _ := tlog.DecodeLoginIssueBody(l.Body)
+			blob = b.Cert
+		default:
+			continue
+		}
+		c, err := parseCert(blob)
+		if err != nil {
+			rf.t.Fatal(err)
+		}
+		out[c.Serial] = c
+	}
+	return out
+}
+
+// lostCert is a user certificate (u:alice, an hour from now) with a serial
+// above every logged one, which the log never logs: a certificate a
+// restore lost.
+func (rf *revokeFixture) lostCert(serial uint64) *ssh.Certificate {
+	rf.t.Helper()
+	return rf.newCert(serial, time.UnixMicro(int64(rf.micros))) //nolint:gosec // G115: a test time
+}
+
+// lostHostCert is a host certificate (s:e2e, valid for an hour from now)
+// with serial, which the log never logs: a lost host certificate.
+func (rf *revokeFixture) lostHostCert(serial uint64, now time.Time) *ssh.Certificate {
+	rf.t.Helper()
+	rf.request++
+	keyID := cert.KeyID{CA: wire.CARoleHost.String(), Subject: "s:e2e", Request: strings.Repeat(hex.EncodeToString([]byte{rf.request}), 16), Policy: 1, Serial: serial}
+	c, err := cert.Build(cert.Request{
+		Profile: roleProfile(ssh.HostCert), Subject: newSigner(rf.t, "ed25519").PublicKey(), Principals: []string{"alice"},
+		Now: now, ValidFor: time.Hour, KeyID: keyID, Serial: serial,
+	}, rf.hostCA, rand.Reader)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	return c
+}
+
+// treeRoot is the root of the fixture's leaves.
+func (rf *revokeFixture) treeRoot() [32]byte {
+	rf.t.Helper()
+	var hashes [][]byte
+	for _, l := range rf.leaves {
+		hashes = append(hashes, tlog.HashLeaf(l))
+	}
+	tree, err := tlog.FromHashes(hashes)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	root, err := tree.Root()
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	var out [32]byte
+	copy(out[:], root)
+	return out
+}
+
+// recover logs a revocation_recovery entry as the signer writes one: the
+// request names this log's size and root and the installation, is signed
+// by the policy admin, and its entries are krl.RecoveryEntries over the
+// imports and certs with the logged certificates as the lookup. edit
+// (optional) changes it.
+func (rf *revokeFixture) recover(imports []wire.RecoveryImport, certs []wire.RecoveredCertificate, edit func(*recoveryOpts)) {
+	rf.t.Helper()
+	req := &wire.RecoveryRequest{InstallationID: auditInstallationID, CreatedAt: rf.secs(), RestoredSize: uint64(len(rf.leaves)), //nolint:gosec // G115: test size
+		RestoredRoot: rf.treeRoot(), Imports: imports, Certificates: certs}
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		rf.t.Fatal(err)
+	}
+	o := &recoveryOpts{signer: rf.admin, resolvedAt: rf.secs()}
+	if edit != nil {
+		edit(o)
+	}
+	if o.req != nil {
+		o.req(req)
+	}
+	sb, err := req.SigningBytes()
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	sig, err := sshsig.Sign(rand.Reader, o.signer, wire.RecoverySSHSIGNamespace, sb)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	var parsed []*krl.Parsed
+	for _, im := range imports {
+		p, err := krl.Parse(im.KRL)
+		if err != nil {
+			rf.t.Fatal(err)
+		}
+		parsed = append(parsed, p)
+	}
+	var rcs []krl.RecoveredCert
+	for _, rc := range certs {
+		c, err := parseCert(rc.Cert)
+		if err != nil {
+			rf.t.Fatal(err)
+		}
+		rcs = append(rcs, krl.RecoveredCert{CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, KeyID: c.KeyId, ValidBefore: c.ValidBefore, Revoke: rc.Revoke})
+	}
+	issued := rf.issuedCerts()
+	derived, err := krl.RecoveryEntries(parsed, rcs, func(serial uint64) ([]byte, string, uint64, bool) {
+		c, ok := issued[serial]
+		if !ok {
+			return nil, "", 0, false
+		}
+		return c.SignatureKey.Marshal(), c.KeyId, c.ValidBefore, true
+	})
+	if err != nil && o.entries == nil {
+		rf.t.Fatal(err)
+	}
+	entries := revokedEntries(derived)
+	if o.entries != nil {
+		entries = o.entries(entries)
+	}
+	b := &tlog.RecoveryBody{PolicyVersion: 1, ResolvedAtSeconds: o.resolvedAt, Request: sb,
+		Evidence: []wire.Evidence{{Type: wire.EvidenceAdminSSHSIG, Blob: sig}}, Entries: entries}
+	if o.body != nil {
+		o.body(b)
+	}
+	body, err := b.Encode()
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	rf.add(tlog.KindRevocationRecovery, body)
+	kinds := map[uint8]uint8{tlog.RevokedSerial: krl.EntrySerial, tlog.RevokedKeyID: krl.EntryKeyID, tlog.RevokedKey: krl.EntryKey}
+	for _, e := range b.Entries {
+		rf.entries = append(rf.entries, krl.Entry{Kind: kinds[e.Kind], CAKey: e.CAKey, Serial: e.Serial, KeyID: e.KeyID, Key: e.Key, ValidBefore: e.ValidBeforeSeconds})
+	}
+}
+
+// sha256SectionKRL is a KRL of version whose only section is a SHA-256
+// fingerprint section (type 5), which ssh-keygen may write and this
+// installation never publishes.
+func sha256SectionKRL(t testing.TB, version uint64) []byte {
+	t.Helper()
+	var b cryptobyte.Builder
+	b.AddBytes([]byte(krl.Magic))
+	b.AddUint32(krl.FormatVersion)
+	b.AddUint64(version)
+	b.AddUint64(0)
+	b.AddUint64(0)
+	b.AddUint32LengthPrefixed(func(*cryptobyte.Builder) {})
+	b.AddUint32LengthPrefixed(func(*cryptobyte.Builder) {})
+	b.AddUint8(5)
+	b.AddUint32LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddUint32LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(make([]byte, 32)) })
+	})
+	out, err := b.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestVerifyRecovery (03-06b): audit verify re-derives every
+// revocation_recovery entry from its signed request, the trust state in
+// force and the log before it, and refuses every entry a signer could not
+// have written.
+func TestVerifyRecovery(t *testing.T) {
+	// base logs one certificate and a recovery that imports a KRL listing
+	// it and a key, and carries a lost user certificate it revokes.
+	base := func(rf *revokeFixture, edit func(*recoveryOpts)) (c *ssh.Certificate, im wire.RecoveryImport, lost *ssh.Certificate) {
+		c = rf.issue()
+		key := newSigner(rf.t, "ed25519").PublicKey().Marshal()
+		im = rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, ValidBefore: c.ValidBefore},
+			{Kind: krl.EntryKey, Key: key}}, 7, nil, auditInstallationID)
+		lost = rf.lostCert(rf.serial + 1000)
+		rf.recover([]wire.RecoveryImport{im}, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: true}}, edit)
+		return c, im, lost
+	}
+	type tc struct {
+		name  string
+		build func(rf *revokeFixture)
+		want  string // "" accepted, otherwise a substring of the refusal
+	}
+	cases := []tc{
+		{"recovery_accepted", func(rf *revokeFixture) { base(rf, nil); rf.publish(nil) }, ""},
+		{"recovery_entries_tampered", func(rf *revokeFixture) {
+			base(rf, func(o *recoveryOpts) { o.entries = func(es []tlog.RevokedEntry) []tlog.RevokedEntry { return es[1:] } })
+			rf.publish(nil)
+		}, "its entries are not those"},
+		{"recovery_entry_vb_tampered", func(rf *revokeFixture) {
+			base(rf, func(o *recoveryOpts) {
+				o.entries = func(es []tlog.RevokedEntry) []tlog.RevokedEntry {
+					for i := range es {
+						if es[i].Kind == tlog.RevokedSerial && es[i].ValidBeforeSeconds > 0 {
+							es[i].ValidBeforeSeconds--
+							break
+						}
+					}
+					return es
+				}
+			})
+			rf.publish(nil)
+		}, "its entries are not those"},
+		{"recovery_entry_added_unbound", func(rf *revokeFixture) {
+			base(rf, func(o *recoveryOpts) {
+				o.entries = func(es []tlog.RevokedEntry) []tlog.RevokedEntry {
+					return append(es, tlog.RevokedEntry{Kind: tlog.RevokedSerial, CAKey: rf.ca.PublicKey().Marshal(), Serial: 424242})
+				}
+			})
+			rf.publish(nil)
+		}, "its entries are not those"},
+		{"recovery_restored_root_mismatch", func(rf *revokeFixture) {
+			base(rf, func(o *recoveryOpts) { o.req = func(r *wire.RecoveryRequest) { r.RestoredRoot[0] ^= 1 } })
+			rf.publish(nil)
+		}, "restored root that is not the root"},
+		{"recovery_restored_size_mismatch", func(rf *revokeFixture) {
+			base(rf, func(o *recoveryOpts) { o.req = func(r *wire.RecoveryRequest) { r.RestoredSize-- } })
+			rf.publish(nil)
+		}, "names a restored log of"},
+		{"recovery_not_admin", func(rf *revokeFixture) {
+			base(rf, func(o *recoveryOpts) { o.signer = newSigner(rf.t, "ed25519") })
+			rf.publish(nil)
+		}, "not an admin of policy"},
+		{"recovery_other_installation", func(rf *revokeFixture) {
+			base(rf, func(o *recoveryOpts) {
+				o.req = func(r *wire.RecoveryRequest) { r.InstallationID = "ffffffffffffffffffffffffffffffff" }
+			})
+			rf.publish(nil)
+		}, "recovery_installation_mismatch"},
+		{"recovery_import_unsigned", func(rf *revokeFixture) {
+			c := rf.issue()
+			im := rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: c.SignatureKey.Marshal(), Serial: c.Serial}}, 7, newSigner(rf.t, "ed25519"), auditInstallationID)
+			rf.recover([]wire.RecoveryImport{im}, nil, nil)
+			rf.publish(nil)
+		}, "recovery_import_invalid"},
+		{"recovery_import_hash_section", func(rf *revokeFixture) {
+			rf.issue()
+			rf.recover([]wire.RecoveryImport{rf.signImport(sha256SectionKRL(rf.t, 7), 7, nil, auditInstallationID)}, nil, func(o *recoveryOpts) {
+				o.entries = func([]tlog.RevokedEntry) []tlog.RevokedEntry { return nil }
+			})
+			rf.publish(nil)
+		}, "fingerprint section"},
+		{"recovery_certificate_forged", func(rf *revokeFixture) {
+			rf.issue()
+			lost := rf.lostCert(rf.serial + 1000)
+			other := newSigner(rf.t, "ed25519")
+			forged := forgeCert(rf.t.(*testing.T), lost, other, other.PublicKey())
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: forged.Marshal(), Revoke: true}}, nil)
+			rf.publish(nil)
+		}, "recovery_certificate_invalid"},
+		{"recovery_certificate_already_logged", func(rf *revokeFixture) {
+			c := rf.issue()
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: c.Marshal(), Revoke: true}}, nil)
+			rf.publish(nil)
+		}, "recovery_certificate_not_lost"},
+		{"recovery_user_certificate_kept", func(rf *revokeFixture) {
+			rf.issue()
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: rf.lostCert(rf.serial + 1000).Marshal(), Revoke: false}}, nil)
+			rf.publish(nil)
+		}, "recovery_user_certificate_kept"},
+		// A recovery carries only the lost certificates krl.CheckCarriedLost
+		// admits at its CreatedAt, as the signer requires (PR #69 review,
+		// D-R2); the resolution time plays no part.
+		{"recovery_certificate_expired", func(rf *revokeFixture) {
+			rf.issue()
+			lost := rf.lostCert(rf.serial + 1000)
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: false}}, func(o *recoveryOpts) {
+				o.req = func(r *wire.RecoveryRequest) { r.CreatedAt = lost.ValidBefore + 600 }
+			})
+			rf.publish(nil)
+		}, "(recovery_certificate_expired)"},
+		{"recovery_expired_revoked_accepted", func(rf *revokeFixture) {
+			rf.issue()
+			lost := rf.lostCert(rf.serial + 1000)
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: true}}, func(o *recoveryOpts) {
+				o.req = func(r *wire.RecoveryRequest) { r.CreatedAt = lost.ValidBefore + 600 }
+			})
+			rf.publish(nil)
+		}, ""},
+		{"recovery_prepared_live_applied_late_accepted", func(rf *revokeFixture) {
+			rf.issue()
+			// A host certificate valid until two hours ago; the request was
+			// prepared while it was live and is resolved now, after it
+			// expired.
+			lost := rf.lostHostCert(rf.serial+1000, time.UnixMicro(int64(rf.micros)).Add(-3*time.Hour)) //nolint:gosec // G115: a test time
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: false}}, func(o *recoveryOpts) {
+				o.req = func(r *wire.RecoveryRequest) { r.CreatedAt = lost.ValidBefore - 1000 }
+			})
+			rf.publish(nil)
+		}, ""},
+		// Round 2 (PR #69 review): a carried user certificate is revoked
+		// whatever any clock says; kept, it is refused even when it
+		// expired before the resolution time.
+		{"recovery_user_kept_applied_late", func(rf *revokeFixture) {
+			rf.issue()
+			lost := rf.newCert(rf.serial+1000, time.UnixMicro(int64(rf.micros)).Add(-3*time.Hour)) //nolint:gosec // G115: a test time
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: false}}, func(o *recoveryOpts) {
+				o.req = func(r *wire.RecoveryRequest) { r.CreatedAt = lost.ValidBefore - 1000 }
+			})
+			rf.publish(nil)
+		}, "(recovery_user_certificate_kept)"},
+		{"recovery_unpublished_at_end", func(rf *revokeFixture) { base(rf, nil) }, "not followed by the krl_publish entry"},
+		{"recovery_publish_not_above_import", func(rf *revokeFixture) {
+			c := rf.issue()
+			ahead := rf.secs() + 1000
+			im := rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, ValidBefore: c.ValidBefore}}, ahead, nil, auditInstallationID)
+			rf.recover([]wire.RecoveryImport{im}, nil, nil)
+			rf.publish(nil)
+		}, "is not above the imported version"},
+		{"recovery_resolved_after_leaf", func(rf *revokeFixture) {
+			base(rf, func(o *recoveryOpts) { o.resolvedAt = rf.secs() + 10 })
+			rf.publish(nil)
+		}, "is after the leaf time"},
+
+		// Successive recoveries (PR #66 review): a certificate that only a
+		// recovery carried never joins the log's issuance, so a later
+		// recovery's entry for it has ValidBefore 0, as on the signer.
+		{"recovery_after_recovery_vb_zero_accepted", func(rf *revokeFixture) {
+			_, _, lost := base(rf, nil)
+			rf.publish(nil)
+			im := rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: lost.SignatureKey.Marshal(), Serial: lost.Serial}}, rf.krlVersion, nil, auditInstallationID)
+			rf.recover([]wire.RecoveryImport{im}, nil, nil)
+			if e := rf.entries[len(rf.entries)-1]; e.Serial != lost.Serial || e.ValidBefore != 0 {
+				rf.t.Fatalf("the second recovery's entry %+v, want serial %d with ValidBefore 0", e, lost.Serial)
+			}
+			rf.publish(nil)
+		}, ""},
+		{"recovery_after_recovery_vb_from_leaf_refused", func(rf *revokeFixture) {
+			_, _, lost := base(rf, nil)
+			rf.publish(nil)
+			im := rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: lost.SignatureKey.Marshal(), Serial: lost.Serial}}, rf.krlVersion, nil, auditInstallationID)
+			rf.recover([]wire.RecoveryImport{im}, nil, func(o *recoveryOpts) {
+				o.entries = func(es []tlog.RevokedEntry) []tlog.RevokedEntry {
+					es[0].ValidBeforeSeconds = lost.ValidBefore // from the first recovery's carried certificate
+					return es
+				}
+			})
+			rf.publish(nil)
+		}, "its entries are not those"},
+		{"recovery_carried_not_in_subject_revoke", func(rf *revokeFixture) {
+			c, _, _ := base(rf, nil)
+			rf.publish(nil)
+			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c)}, nil)
+			rf.publish(nil)
+		}, ""},
+		{"recovery_carried_in_subject_revoke_refused", func(rf *revokeFixture) {
+			c, _, lost := base(rf, nil)
+			rf.publish(nil)
+			rf.revoke(subjectAlice(), []tlog.RevokedEntry{serialEntry(c), serialEntry(lost)}, nil)
+			rf.publish(nil)
+		}, "lists 2 entries, but the log shows 1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rf := newRevokeFixture(t)
+			c.build(rf)
+			rep, err := rf.verifyAll()
+			switch {
+			case c.want == "" && err != nil:
+				t.Fatalf("Verify: %v", err)
+			case c.want == "" && rep.Recoveries == 0:
+				t.Fatal("Verify counted no recovery")
+			case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+				t.Fatalf("Verify = %v, want a refusal containing %q", err, c.want)
+			}
+		})
+	}
+}
+
+// TestVerifyRecoveryExportLines: the as-exported lines of a recovery
+// verify, and its line carries counts only and none of the keys Verify
+// binds to other kinds.
+func TestVerifyRecoveryExportLines(t *testing.T) {
+	rf := newRevokeFixture(t)
+	c := rf.issue()
+	im := rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, ValidBefore: c.ValidBefore}}, 7, nil, auditInstallationID)
+	rf.recover([]wire.RecoveryImport{im}, []wire.RecoveredCertificate{{Cert: rf.lostCert(rf.serial + 1000).Marshal(), Revoke: true}}, nil)
+	rf.publish(nil)
+	lines := rf.lines()
+	rep, err := rf.verify(join(lines), nil)
+	if err != nil || rep.Recoveries != 1 {
+		t.Fatalf("Verify of the as-exported lines: %+v, %v", rep, err)
+	}
+	line := lines[len(lines)-3]
+	for _, want := range []string{`"kind":"revocation_recovery"`, `"restored_size":2`, `"imports":1`, `"import_krl_versions":[7]`,
+		`"certificates":1`, `"certificates_revoked":1`, `"entries":2`, `"admins":["SHA256:`} {
+		if !strings.Contains(line, want) {
+			t.Errorf("revocation_recovery line lacks %s:\n%s", want, line)
+		}
+	}
+	for _, key := range []string{`"bundle_version":`, `"version":`, `"directory":`, `"sigs":`} {
+		if strings.Contains(line, key) {
+			t.Errorf("revocation_recovery line carries %s:\n%s", key, line)
+		}
+	}
+	if strings.Count(line, `"kind":`) != 1 {
+		t.Errorf("revocation_recovery line has %d kind keys, want 1", strings.Count(line, `"kind":`))
+	}
+	if strings.Contains(line, base64.StdEncoding.EncodeToString(im.KRL)) {
+		t.Error("the revocation_recovery line renders the KRL bytes")
+	}
+}
+
+// TestRecoveryLeafFitsExportLine: a revocation_recovery leaf with a body
+// of exactly tlog.MaxRecoveryBody, written with Export's line encoder, is
+// read back by Verify's line reader (maxLine) without "token too long".
+func TestRecoveryLeafFitsExportLine(t *testing.T) {
+	b := &tlog.RecoveryBody{PolicyVersion: 1, ResolvedAtSeconds: 1, Request: make([]byte, wire.MaxRecoveryRequest)}
+	// 8+8+3+3+3 bytes of fixed fields; key entries take 23 bytes plus
+	// their key.
+	rest := tlog.MaxRecoveryBody - 25 - wire.MaxRecoveryRequest
+	for rest > 0 {
+		k := min(rest-23, wire.MaxSubjectKeyLen)
+		b.Entries = append(b.Entries, tlog.RevokedEntry{Kind: tlog.RevokedKey, Key: bytes.Repeat([]byte{'k'}, k)})
+		rest -= 23 + k
+	}
+	body, err := b.Encode()
+	if err != nil || len(body) != tlog.MaxRecoveryBody {
+		t.Fatalf("a body of %d bytes (%v), want exactly %d", len(body), err, tlog.MaxRecoveryBody)
+	}
+	leaf, err := tlog.MarshalLeaf(tlog.Leaf{Kind: tlog.KindRevocationRecovery, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if _, err := Export(context.Background(), &buf, &memLog{leaves: [][]byte{leaf}, note: []byte("note")}); err != nil {
+		t.Fatal(err)
+	}
+	if first := bytes.IndexByte(buf.Bytes(), '\n'); first < 14<<20 {
+		t.Fatalf("the export line is %d bytes, want the largest body's (above 14 MiB)", first)
+	}
+	_, err = Verify(&buf, Options{Pins: []string{"SHA256:" + strings.Repeat("A", 43)}, Threshold: 1})
+	if err == nil || strings.Contains(err.Error(), "too long") || !strings.Contains(err.Error(), "entry 0 (revocation_recovery)") {
+		t.Fatalf("Verify = %v; want the line read and the entry checked (and refused: its request is zeros)", err)
+	}
+}
+
+// TestVerifyCertificatesFrom: with Options.CertificatesFrom, the report
+// lists exactly the certificates at or after that index, from the leaf
+// bytes: those of issue and login_issue entries, and every certificate a
+// revocation_recovery entry carries, each with its entry's index and kind.
+func TestVerifyCertificatesFrom(t *testing.T) {
+	t.Run("recovery_carried_listed", func(t *testing.T) {
+		rf := newRevokeFixture(t)
+		rf.issue()
+		from := uint64(len(rf.leaves))
+		c2 := rf.issue()
+		lost := rf.lostCert(rf.serial + 1000)
+		rf.recover(nil, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: true}}, nil)
+		rf.publish(nil)
+		rep, err := Verify(strings.NewReader(join(rf.lines())), Options{Pins: rf.pins(), Threshold: 1, CertificatesFrom: &from})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []LoggedCertificate{{Index: from, Kind: tlog.KindIssue, Cert: c2.Marshal()}, {Index: from + 1, Kind: tlog.KindRevocationRecovery, Cert: lost.Marshal()}}
+		if !slices.EqualFunc(rep.Certificates, want, func(a, b LoggedCertificate) bool {
+			return a.Index == b.Index && a.Kind == b.Kind && bytes.Equal(a.Cert, b.Cert)
+		}) {
+			t.Fatalf("Certificates = %+v, want %+v", rep.Certificates, want)
+		}
+		if rep, err := rf.verifyAll(); err != nil || rep.Certificates != nil {
+			t.Fatalf("without CertificatesFrom: %+v, %v; want no list", rep.Certificates, err)
+		}
+	})
+	t.Run("login_issue_listed", func(t *testing.T) {
+		lf := newLoginFixture(t, true)
+		lf.addDirectory(lf.directory(nil), nil)
+		lf.addLogin(nil, nil)
+		body, err := tlog.DecodeLoginIssueBody(mustLeafBody(t, lf.leaves[len(lf.leaves)-1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		zero := uint64(0)
+		rep, err := Verify(strings.NewReader(join(lf.lines())), Options{Pins: lf.pins(), Threshold: 1, CertificatesFrom: &zero})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rep.Certificates) != 1 || rep.Certificates[0].Kind != tlog.KindLoginIssue || !bytes.Equal(rep.Certificates[0].Cert, body.Cert) {
+			t.Fatalf("Certificates = %+v, want the login certificate", rep.Certificates)
+		}
+	})
+}
+
+// TestVerifyLastKRL: Report.LastKRL is the last published KRL, re-derived
+// from the log: its SHA-256 is the manifest's, with the logged manifest
+// and signature.
+func TestVerifyLastKRL(t *testing.T) {
+	rf := newRevokeFixture(t)
+	c := rf.issue()
+	rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+	rf.publish(nil)
+	rep, err := rf.verifyAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.LastKRL == nil {
+		t.Fatal("no LastKRL")
+	}
+	m, err := krl.VerifyManifest(rep.LastKRL.Manifest, rep.LastKRL.Sig, rep.LastKRL.KRL, rep.Bundle, auditInstallationID, 0)
+	if err != nil || m.KRLVersion != rep.KRLVersion || m.KRLSHA256 != krl.SHA256Hex(rep.LastKRL.KRL) {
+		t.Fatalf("LastKRL: %+v, %v", m, err)
+	}
+	p, err := krl.Parse(rep.LastKRL.KRL)
+	if err != nil || !p.RevokesSerial(c.SignatureKey.Marshal(), c.Serial) {
+		t.Fatalf("LastKRL does not list the revoked serial: %v", err)
+	}
 }

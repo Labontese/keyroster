@@ -40,6 +40,12 @@ type Config struct {
 	// Limits are the rate limits of the admin, invite and sign-in routes
 	// (zero fields: the defaults).
 	Limits Limits
+	// KRLFile is the server's durable copy of the last KRL document it
+	// served, <state-dir>/krl-served.json (03-06b; required by New): it is
+	// written, verified, before any route serves a KRL, and is the restore
+	// source for revocations a signer restore lost. Only the tests'
+	// constructor (newServer) may leave it empty, which disables the copy.
+	KRLFile string
 }
 
 // Server serves keyroster's pages and API.
@@ -77,6 +83,13 @@ type Server struct {
 	krl         *krlView    // the cached GET /api/v1/krl answer, nil when there is none
 	krlInflight *krlRefresh // the KRL refresh in flight, or nil
 
+	// krlFile is Config.KRLFile ("" disables the copy), and served the
+	// KRL document last written to it (nil before the first). served is
+	// guarded by mu; only refreshKRL, which runs one at a time, writes
+	// the file.
+	krlFile string
+	served  *servedKRL
+
 	// patterns are the patterns registered on the Server's mux, in
 	// registration order, as its routeMux recorded them (03-02). Tests
 	// read them; nothing else does.
@@ -113,6 +126,9 @@ func (m *routeMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.
 func New(cfg Config) (*Server, error) {
 	if cfg.SignerSocket == "" {
 		return nil, errors.New("server: no signer socket")
+	}
+	if cfg.KRLFile == "" {
+		return nil, errors.New("server: no KRL file (the durable copy of the served KRL, <state-dir>/krl-served.json)")
 	}
 	return newServer(cfg, socketSigner{socket: cfg.SignerSocket})
 }
@@ -156,6 +172,13 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
+	}
+	if cfg.KRLFile != "" {
+		served, err := loadServedKRL(cfg.KRLFile)
+		if err != nil {
+			return nil, err
+		}
+		s.krlFile, s.served = cfg.KRLFile, served
 	}
 	mux := newRouteMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)

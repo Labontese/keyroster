@@ -1351,3 +1351,249 @@ func mustKey(t testing.TB) ssh.PublicKey {
 	}
 	return k
 }
+
+// recoveryCert returns a fixed user certificate with serial, deterministic
+// for the golden vector: Ed25519 keys from fixed seeds, a zero nonce and a
+// kr1 key ID naming the serial.
+func recoveryCert(t testing.TB, serial uint64) []byte {
+	t.Helper()
+	ca, err := ssh.NewSignerFromKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xca}, ed25519.SeedSize)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x5b}, ed25519.SeedSize)).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &ssh.Certificate{
+		Key: sub, Serial: serial, CertType: ssh.UserCert, ValidPrincipals: []string{"alice"},
+		KeyId:      cert.KeyID{CA: "user", Subject: "u:alice", Request: strings.Repeat("ab", 16), Policy: 1, Serial: serial}.String(),
+		ValidAfter: 1_790_000_000, ValidBefore: 1_790_003_600, Nonce: make([]byte, 32), SignatureKey: ca.PublicKey(),
+	}
+	// Signed by hand (only cert.Build may call SignCert, CA-06); Ed25519
+	// signatures are deterministic, so the vector is stable.
+	out := c.Marshal()
+	sig, err := ca.Sign(nil, out[:len(out)-4]) // without the empty signature's length prefix
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Signature = sig
+	return c.Marshal()
+}
+
+const testRecoveryInstallationID = "0123456789abcdef0123456789abcdef"
+
+// recoveryVector is the recovery request of
+// test/vectors/recovery_request_signing_v1.hex: one import, one carried
+// certificate to revoke.
+func recoveryVector(t testing.TB) *RecoveryRequest {
+	t.Helper()
+	r := &RecoveryRequest{
+		InstallationID: testRecoveryInstallationID,
+		CreatedAt:      1_790_000_100,
+		RestoredSize:   12,
+		Imports:        []RecoveryImport{{KRL: []byte("krl (test vector)"), Manifest: []byte("manifest (test vector)"), Sig: []byte("sig (test vector)")}},
+		Certificates:   []RecoveredCertificate{{Cert: recoveryCert(t, 1_790_000_000_000_001), Revoke: true}},
+	}
+	for i := range r.RequestID {
+		r.RequestID[i] = byte(0x40 + i)
+	}
+	for i := range r.RestoredRoot {
+		r.RestoredRoot[i] = byte(0x80 + i)
+	}
+	return r
+}
+
+// TestRecoveryCertificateCap (PR #69 review, D-R2): a request carries more
+// certificates than the old cap of 4096, and MaxRecoveryCertificates, the
+// most the uint16 count holds, never binds before MaxRecoveryRequest: even
+// the smallest certificate that parses takes more than
+// MaxRecoveryRequest / MaxRecoveryCertificates bytes in a request.
+func TestRecoveryCertificateCap(t *testing.T) {
+	if MaxRecoveryCertificates != 1<<16-1 {
+		t.Fatalf("MaxRecoveryCertificates = %d, want the uint16 count's maximum", MaxRecoveryCertificates)
+	}
+	r := recoveryVector(t)
+	r.Certificates = nil
+	for i := range 5000 {
+		r.Certificates = append(r.Certificates, RecoveredCertificate{Cert: recoveryCert(t, 1_790_000_000_000_001+uint64(i))}) //nolint:gosec // G115: a test index
+	}
+	data, err := r.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal with 5000 certificates: %v", err)
+	}
+	got, err := ParseRecoveryRequest(data)
+	if err != nil || len(got.Certificates) != 5000 {
+		t.Fatalf("ParseRecoveryRequest with 5000 certificates: %v", err)
+	}
+
+	ca, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xca}, ed25519.SeedSize)).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x5b}, ed25519.SeedSize)).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	smallest := (&ssh.Certificate{Key: sub, CertType: ssh.UserCert, SignatureKey: ca,
+		Signature: &ssh.Signature{Format: ssh.KeyAlgoED25519, Blob: make([]byte, ed25519.SignatureSize)}}).Marshal()
+	if pub, err := ssh.ParsePublicKey(smallest); err != nil {
+		t.Fatalf("the smallest certificate does not parse: %v", err)
+	} else if _, ok := pub.(*ssh.Certificate); !ok {
+		t.Fatal("the smallest certificate is not a certificate")
+	}
+	per := len(smallest) + 3 + 1 // the uint24 length and the revoke byte
+	if per*MaxRecoveryCertificates <= MaxRecoveryRequest {
+		t.Fatalf("%d certificates of %d bytes fit in %d bytes: the count cap would bind first", MaxRecoveryCertificates, per, MaxRecoveryRequest)
+	}
+	t.Logf("the smallest certificate takes %d bytes, so at most %d fit in a request", per, MaxRecoveryRequest/per)
+}
+
+// TestRecoveryRequest (03-06b): a recovery request round-trips in its
+// file form (Marshal, ParseRecoveryRequest) and its logged form
+// (SigningBytes, ParseRecoverySigningBytes); the parsers and the encoders
+// refuse an empty installation ID, more than MaxRecoveryImports imports, a
+// KRL above MaxRecoveryKRL, two imports with the same manifest, unsorted
+// or repeated certificate serials, more than MaxRecoveryCertificates
+// certificates, trailing bytes and a wrong domain tag.
+func TestRecoveryRequest(t *testing.T) {
+	r := recoveryVector(t)
+	r.Evidence = []Evidence{{Type: EvidenceAdminSSHSIG, Blob: []byte("sig")}}
+	file, err := r.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseRecoveryRequest(file)
+	if err != nil || !reflect.DeepEqual(got, r) {
+		t.Fatalf("ParseRecoveryRequest = %+v, %v", got, err)
+	}
+	sb, err := r.SigningBytes()
+	if err != nil || !bytes.HasPrefix(sb, []byte(RecoveryRequestDomain)) || !bytes.HasPrefix(file, sb) || RecoverySSHSIGNamespace != RecoveryRequestDomain {
+		t.Fatalf("SigningBytes = %x, %v; want the raw domain tag first and a prefix of the file form", sb, err)
+	}
+	logged, err := ParseRecoverySigningBytes(sb)
+	if err != nil || logged.Evidence != nil || !reflect.DeepEqual(logged.Imports, r.Imports) || !reflect.DeepEqual(logged.Certificates, r.Certificates) {
+		t.Fatalf("ParseRecoverySigningBytes = %+v, %v", logged, err)
+	}
+	if again, err := logged.SigningBytes(); err != nil || !bytes.Equal(again, sb) {
+		t.Fatalf("the logged form does not re-encode: %v", err)
+	}
+	certA, certB := recoveryCert(t, 5), recoveryCert(t, 9)
+	for name, edit := range map[string]func(*RecoveryRequest){
+		"empty_installation_id": func(r *RecoveryRequest) { r.InstallationID = "" },
+		"too_many_imports": func(r *RecoveryRequest) {
+			r.Imports = nil
+			for i := range MaxRecoveryImports + 1 {
+				r.Imports = append(r.Imports, RecoveryImport{KRL: []byte("k"), Manifest: []byte{byte(i)}, Sig: []byte("s")})
+			}
+		},
+		"krl_above_cap":  func(r *RecoveryRequest) { r.Imports[0].KRL = make([]byte, MaxRecoveryKRL+1) },
+		"same_manifest":  func(r *RecoveryRequest) { r.Imports = append(r.Imports, r.Imports[0]) },
+		"empty_manifest": func(r *RecoveryRequest) { r.Imports[0].Manifest = nil },
+		"unsorted_serials": func(r *RecoveryRequest) {
+			r.Certificates = []RecoveredCertificate{{Cert: certB}, {Cert: certA}}
+		},
+		"repeated_serial": func(r *RecoveryRequest) {
+			r.Certificates = []RecoveredCertificate{{Cert: certA}, {Cert: certA, Revoke: true}}
+		},
+		"too_many_certificates": func(r *RecoveryRequest) {
+			r.Certificates = make([]RecoveredCertificate, MaxRecoveryCertificates+1)
+			for i := range r.Certificates {
+				r.Certificates[i].Cert = certA
+			}
+		},
+		"plain_key_as_certificate": func(r *RecoveryRequest) {
+			pub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)).Public())
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Certificates = []RecoveredCertificate{{Cert: pub.Marshal()}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := recoveryVector(t)
+			edit(bad)
+			if _, err := bad.SigningBytes(); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("SigningBytes = %v, want ErrMalformed", err)
+			}
+			if _, err := bad.Marshal(); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("Marshal = %v, want ErrMalformed", err)
+			}
+		})
+	}
+	t.Run("sorted_certificates_accepted", func(t *testing.T) {
+		ok := recoveryVector(t)
+		ok.Certificates = []RecoveredCertificate{{Cert: certA}, {Cert: certB, Revoke: true}}
+		if _, err := ok.Marshal(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("trailing_bytes", func(t *testing.T) {
+		if _, err := ParseRecoveryRequest(append(bytes.Clone(file), 0)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("ParseRecoveryRequest with a trailing byte = %v", err)
+		}
+		if _, err := ParseRecoverySigningBytes(append(bytes.Clone(sb), 0)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("ParseRecoverySigningBytes with a trailing byte = %v", err)
+		}
+	})
+	t.Run("wrong_domain_tag", func(t *testing.T) {
+		other := append([]byte(RevokeRequestDomain), sb[len(RecoveryRequestDomain):]...)
+		if _, err := ParseRecoverySigningBytes(other); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("ParseRecoverySigningBytes under %s = %v", RevokeRequestDomain, err)
+		}
+		if _, err := ParseRecoveryRequest(append([]byte("keyroster/revoke-recovery/v2"), file[len(RecoveryRequestDomain):]...)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("ParseRecoveryRequest under another tag = %v", err)
+		}
+	})
+	t.Run("revoke_byte_not_0_or_1", func(t *testing.T) {
+		bad := bytes.Clone(sb)
+		bad[len(bad)-1] = 2 // the revoke byte of the last certificate
+		if _, err := ParseRecoverySigningBytes(bad); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("ParseRecoverySigningBytes with revoke byte 2 = %v", err)
+		}
+	})
+	t.Run("signing_bytes_above_cap", func(t *testing.T) {
+		big := recoveryVector(t)
+		big.Imports = nil
+		for i := range 3 {
+			big.Imports = append(big.Imports, RecoveryImport{KRL: make([]byte, MaxRecoveryKRL), Manifest: []byte{byte(i)}, Sig: []byte("s")})
+		}
+		if _, err := big.SigningBytes(); !errors.Is(err, ErrMalformed) || !strings.Contains(err.Error(), "above") {
+			t.Fatalf("SigningBytes of a request above MaxRecoveryRequest = %v", err)
+		}
+	})
+}
+
+// TestRecoveryRequestSigningVector pins the keyroster/revoke-recovery/v1
+// signing bytes (test/vectors/recovery_request_signing_v1.hex), which
+// every revocation_recovery leaf logs.
+func TestRecoveryRequestSigningVector(t *testing.T) {
+	got, err := recoveryVector(t).SigningBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(vectorDir, "recovery_request_signing_v1.hex")
+	if *update {
+		if err := os.WriteFile(path, []byte(hex.EncodeToString(got)+"\n"), 0o644); err != nil { //nolint:gosec // G306: public test vector
+			t.Fatal(err)
+		}
+	}
+	file, err := os.ReadFile(path) //nolint:gosec // G304: fixed test vector path
+	if err != nil {
+		t.Fatalf("%v (create it with -update only for a deliberate format change)", err)
+	}
+	want, err := hex.DecodeString(strings.TrimSpace(string(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("recovery request signing bytes differ from %s\ngot:  %x\nwant: %x", path, got, want)
+	}
+	if !bytes.HasPrefix(want, []byte(RecoveryRequestDomain)) {
+		t.Fatalf("%s does not start with the domain tag %s", path, RecoveryRequestDomain)
+	}
+	r, err := ParseRecoverySigningBytes(want)
+	if err != nil || len(r.Imports) != 1 || len(r.Certificates) != 1 || !r.Certificates[0].Revoke {
+		t.Fatalf("ParseRecoverySigningBytes(%s) = %+v, %v", path, r, err)
+	}
+}

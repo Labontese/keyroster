@@ -26,14 +26,14 @@ import (
 func init() {
 	register(command{
 		Name:    "revoke",
-		Summary: "revoke certificates (serial, key-id), a key (key) or every certificate of a user (user); the signer publishes a new KRL",
+		Summary: "revoke certificates (serial, key-id), a key (key) or every certificate of a user (user); the signer publishes a new KRL. recover: recover the revocations a signer restore lost (offline)",
 		Run:     runRevoke,
 	})
 }
 
 func runRevoke(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "revoke: want a subcommand: serial, key-id, key or user")
+		_, _ = fmt.Fprintln(stderr, "revoke: want a subcommand: serial, key-id, key, user or recover")
 		return errUsage
 	}
 	switch args[0] {
@@ -45,8 +45,11 @@ func runRevoke(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return runRevokeKey(ctx, args[1:], stdout, stderr)
 	case "user":
 		return runRevokeUser(ctx, args[1:], stdout, stderr)
+	case "recover":
+		// Offline (03-06b): no server call; see recover.go.
+		return runRevokeRecover(ctx, args[1:], stdout, stderr)
 	default:
-		_, _ = fmt.Fprintf(stderr, "revoke: unknown subcommand %q; want serial, key-id, key or user\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "revoke: unknown subcommand %q; want serial, key-id, key, user or recover\n", args[0])
 		return errUsage
 	}
 }

@@ -1060,3 +1060,228 @@ func TestCheckExplicitKeys(t *testing.T) {
 		}
 	})
 }
+
+// TestRecoveryEntries (03-06b): krl.RecoveryEntries, the one rule the
+// signer and audit verify derive a recovery's entries with. A serial
+// entry's ValidBefore comes only from a certificate with the same serial
+// and CA key, a key-ID entry's only from the certificate whose serial the
+// key ID names and whose key ID and CA key equal the entry's; otherwise it
+// is 0, never pruned. Ranges are expanded after the count is checked.
+func TestRecoveryEntries(t *testing.T) {
+	caA, caB := []byte("ca key A"), []byte("ca key B")
+	keyID := "kr1/ca=user/sub=u:alice/req=abababababababababababababababab/pol=1/ser=42"
+	lookup := func(serial uint64) ([]byte, string, uint64, bool) {
+		switch serial {
+		case 7:
+			return caA, "kr1/ca=user/sub=u:bob/req=abababababababababababababababab/pol=1/ser=7", 700, true
+		case 42:
+			return caA, keyID, 4200, true
+		}
+		return nil, "", 0, false
+	}
+	imp := func(secs ...ParsedSection) *Parsed { return &Parsed{Certs: secs} }
+	one := func(t *testing.T, imports []*Parsed, certs []RecoveredCert) []Entry {
+		t.Helper()
+		got, err := RecoveryEntries(imports, certs, lookup)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	t.Run("serial_vb_from_lookup", func(t *testing.T) {
+		got := one(t, []*Parsed{imp(ParsedSection{CAKey: caA, Serials: []SerialRange{{7, 7}}})}, nil)
+		if len(got) != 1 || got[0].Kind != EntrySerial || got[0].Serial != 7 || got[0].ValidBefore != 700 || !bytes.Equal(got[0].CAKey, caA) {
+			t.Fatalf("got %+v", got)
+		}
+	})
+	t.Run("serial_vb_from_carried_certificate", func(t *testing.T) {
+		got := one(t, []*Parsed{imp(ParsedSection{CAKey: caA, Serials: []SerialRange{{9, 9}}})},
+			[]RecoveredCert{{CAKey: caA, Serial: 9, KeyID: "x", ValidBefore: 900}})
+		if len(got) != 1 || got[0].ValidBefore != 900 {
+			t.Fatalf("got %+v", got)
+		}
+	})
+	t.Run("serial_ca_mismatch_vb_zero", func(t *testing.T) {
+		got := one(t, []*Parsed{imp(ParsedSection{CAKey: caB, Serials: []SerialRange{{7, 7}}})},
+			[]RecoveredCert{{CAKey: caA, Serial: 7, ValidBefore: 999}})
+		if len(got) != 1 || got[0].ValidBefore != 0 || !bytes.Equal(got[0].CAKey, caB) {
+			t.Fatalf("got %+v; a certificate under another CA key gives no ValidBefore", got)
+		}
+	})
+	t.Run("key_id_vb_from_named_serial", func(t *testing.T) {
+		got := one(t, []*Parsed{imp(ParsedSection{CAKey: caA, KeyIDs: []string{keyID}})}, nil)
+		if len(got) != 1 || got[0].Kind != EntryKeyID || got[0].KeyID != keyID || got[0].ValidBefore != 4200 {
+			t.Fatalf("got %+v", got)
+		}
+	})
+	t.Run("key_id_other_text_vb_zero", func(t *testing.T) {
+		// ser=7 names a known certificate, but its key ID is another text;
+		// "not a key ID" names no serial; under caB nothing matches.
+		other := "kr1/ca=user/sub=u:eve/req=abababababababababababababababab/pol=1/ser=7"
+		got := one(t, []*Parsed{imp(ParsedSection{CAKey: caA, KeyIDs: []string{other, "not a key ID"}}, ParsedSection{CAKey: caB, KeyIDs: []string{keyID}})}, nil)
+		if len(got) != 3 {
+			t.Fatalf("got %+v", got)
+		}
+		for _, e := range got {
+			if e.ValidBefore != 0 {
+				t.Fatalf("entry %+v has ValidBefore %d, want 0", e, e.ValidBefore)
+			}
+		}
+	})
+	t.Run("explicit_keys_kept", func(t *testing.T) {
+		got := one(t, []*Parsed{{Keys: [][]byte{[]byte("key 2"), []byte("key 1")}}}, nil)
+		if len(got) != 2 || got[0].Kind != EntryKey || string(got[0].Key) != "key 1" || string(got[1].Key) != "key 2" || got[0].ValidBefore != 0 {
+			t.Fatalf("got %+v", got)
+		}
+	})
+	t.Run("range_expanded", func(t *testing.T) {
+		got := one(t, []*Parsed{imp(ParsedSection{CAKey: caA, Serials: []SerialRange{{5, 9}}})}, nil)
+		if len(got) != 5 {
+			t.Fatalf("got %d entries, want 5", len(got))
+		}
+		for i, e := range got {
+			if e.Serial != uint64(5+i) || e.Kind != EntrySerial { //nolint:gosec // G115: a test index
+				t.Fatalf("entry %d is %+v", i, e)
+			}
+		}
+	})
+	t.Run("range_cap_refused_before_allocation", func(t *testing.T) {
+		huge := []*Parsed{imp(ParsedSection{CAKey: caA, Serials: []SerialRange{{1, math.MaxUint64}}})}
+		if _, err := RecoveryEntries(huge, nil, lookup); !errors.Is(err, ErrRecoveryTooLarge) {
+			t.Fatalf("RecoveryEntries of [1, 2^64 - 1] = %v, want ErrRecoveryTooLarge", err)
+		}
+		over := []*Parsed{imp(ParsedSection{CAKey: caA, Serials: []SerialRange{{1, MaxRecoveryEntries + 1}}})}
+		if _, err := RecoveryEntries(over, nil, lookup); !errors.Is(err, ErrRecoveryTooLarge) {
+			t.Fatalf("RecoveryEntries of %d serials = %v, want ErrRecoveryTooLarge", MaxRecoveryEntries+1, err)
+		}
+		if n := testing.AllocsPerRun(10, func() { _, _ = RecoveryEntries(huge, nil, lookup) }); n > 20 {
+			t.Fatalf("RecoveryEntries of [1, 2^64 - 1] made %.0f allocations, want a small bound", n)
+		}
+		at := []*Parsed{imp(ParsedSection{CAKey: caA, Serials: []SerialRange{{1, MaxRecoveryEntries}}})}
+		if got, err := RecoveryEntries(at, nil, lookup); err != nil || len(got) != MaxRecoveryEntries {
+			t.Fatalf("RecoveryEntries of exactly %d serials = %d entries, %v", MaxRecoveryEntries, len(got), err)
+		}
+	})
+	t.Run("hash_section_refused", func(t *testing.T) {
+		for name, p := range map[string]*Parsed{"sha1": {SHA1: [][]byte{make([]byte, 20)}}, "sha256": {SHA256: [][]byte{make([]byte, 32)}}} {
+			if _, err := RecoveryEntries([]*Parsed{p}, nil, lookup); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("%s section: %v, want ErrMalformed", name, err)
+			}
+		}
+	})
+	t.Run("duplicates_across_imports_once", func(t *testing.T) {
+		a := imp(ParsedSection{CAKey: caA, Serials: []SerialRange{{5, 8}}, KeyIDs: []string{keyID}})
+		b := imp(ParsedSection{CAKey: caA, Serials: []SerialRange{{7, 10}}, KeyIDs: []string{keyID}})
+		a.Keys, b.Keys = [][]byte{[]byte("k")}, [][]byte{[]byte("k")}
+		got := one(t, []*Parsed{a, b}, []RecoveredCert{{CAKey: caA, Serial: 6, Revoke: true}})
+		if len(got) != 6+1+1 {
+			t.Fatalf("got %d entries %+v, want serials 5 to 10, one key ID and one key", len(got), got)
+		}
+	})
+	t.Run("canonical_order", func(t *testing.T) {
+		x := imp(ParsedSection{CAKey: caB, Serials: []SerialRange{{3, 3}}, KeyIDs: []string{"b"}}, ParsedSection{CAKey: caA, Serials: []SerialRange{{9, 9}}})
+		y := imp(ParsedSection{CAKey: caA, Serials: []SerialRange{{1, 2}}, KeyIDs: []string{"a"}})
+		z := &Parsed{Keys: [][]byte{[]byte("key")}}
+		certs := []RecoveredCert{{CAKey: caB, Serial: 4, Revoke: true}}
+		want := one(t, []*Parsed{x, y, z}, certs)
+		for _, order := range [][]*Parsed{{z, y, x}, {y, z, x}} {
+			if got := one(t, order, certs); !slices.EqualFunc(got, want, func(a, b Entry) bool {
+				return a.Kind == b.Kind && bytes.Equal(a.CAKey, b.CAKey) && a.Serial == b.Serial && a.KeyID == b.KeyID && bytes.Equal(a.Key, b.Key) && a.ValidBefore == b.ValidBefore
+			}) {
+				t.Fatalf("another input order gives %+v, want %+v", got, want)
+			}
+		}
+		sorted := slices.IsSortedFunc(want, func(a, b Entry) int {
+			if a.Kind != b.Kind {
+				return int(a.Kind) - int(b.Kind)
+			}
+			if c := bytes.Compare(a.CAKey, b.CAKey); c != 0 {
+				return c
+			}
+			if a.Serial != b.Serial {
+				if a.Serial < b.Serial {
+					return -1
+				}
+				return 1
+			}
+			if c := strings.Compare(a.KeyID, b.KeyID); c != 0 {
+				return c
+			}
+			return bytes.Compare(a.Key, b.Key)
+		})
+		if !sorted || len(want) != 8 {
+			t.Fatalf("not in canonical order (or not 8 entries): %+v", want)
+		}
+	})
+	t.Run("revoked_certificate_entry", func(t *testing.T) {
+		got := one(t, nil, []RecoveredCert{{CAKey: caB, Serial: 77, ValidBefore: 7700, Revoke: true}})
+		if len(got) != 1 || got[0].Kind != EntrySerial || got[0].Serial != 77 || got[0].ValidBefore != 7700 || !bytes.Equal(got[0].CAKey, caB) {
+			t.Fatalf("got %+v", got)
+		}
+	})
+	t.Run("kept_certificate_no_entry", func(t *testing.T) {
+		if got := one(t, nil, []RecoveredCert{{CAKey: caB, Serial: 77, ValidBefore: 7700}}); len(got) != 0 {
+			t.Fatalf("a kept certificate gave %+v", got)
+		}
+	})
+	// A KRL near what the signer publishes, 70,000 serials that are not
+	// adjacent (about 560 KB, far below MaxKRL), is recoverable (PR #69
+	// review, D-R1): the entry count no longer refuses it.
+	t.Run("near_publishable_maximum", func(t *testing.T) {
+		_, ca := seedKey(t, 0x61)
+		serials := make([]uint64, 70000)
+		for i := range serials {
+			serials[i] = 2*uint64(i) + 1 //nolint:gosec // G115: a test index
+		}
+		data, err := Encode(Set{Certs: []CertSection{{CAKey: ca, Serials: serials}}}, 9, time.Unix(1_700_000_000, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := Parse(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := RecoveryEntries([]*Parsed{p}, nil, nil)
+		if err != nil || len(got) != len(serials) {
+			t.Fatalf("RecoveryEntries of a %d-byte KRL with %d serials = %d entries, %v", len(data), len(serials), len(got), err)
+		}
+		t.Logf("a KRL of %d non-adjacent serials takes %d bytes and recovers as %d entries", len(serials), len(data), len(got))
+	})
+}
+
+// TestCheckCarriedLost (PR #69 review, D-R2 and round 2): a recovery
+// carries a lost certificate it revokes; one it does not revoke must be
+// live at the request's CreatedAt minus RecoveryCarrySkew (EntryLive:
+// valid_before + PruneMargin above that) and must not be a user
+// certificate; the time the recovery is applied plays no part.
+func TestCheckCarriedLost(t *testing.T) {
+	if RecoveryCarrySkew != wire.MaxRequestSkewSeconds {
+		t.Fatalf("RecoveryCarrySkew = %d, wire.MaxRequestSkewSeconds = %d", RecoveryCarrySkew, wire.MaxRequestSkewSeconds)
+	}
+	const created = 1_800_000_000
+	for _, c := range []struct {
+		name        string
+		validBefore uint64
+		createdAt   uint64
+		user        bool
+		revoke      bool
+		want        error
+	}{
+		{"live", created + 3600, created, false, false, nil},
+		{"expired_inside_margins", created - 599, created, false, false, nil},
+		{"expired_at_margins", created - 600, created, false, false, ErrLostExpired},
+		{"expired_long_ago", created - 86400, created, false, false, ErrLostExpired},
+		{"expired_but_revoked", created - 86400, created, false, true, nil},
+		{"infinite", math.MaxUint64, created, false, false, nil},
+		{"created_before_skew_saturates", 1, 10, false, false, nil},
+		{"zero_valid_before", 0, created, false, false, ErrLostExpired},
+		{"user_live_revoked", created + 3600, created, true, true, nil},
+		{"user_expired_revoked", created - 86400, created, true, true, nil},
+		{"user_live_kept", created + 3600, created, true, false, ErrLostUserKept},
+		{"user_expired_kept", created - 86400, created, true, false, ErrLostExpired},
+	} {
+		if got := CheckCarriedLost(c.validBefore, c.createdAt, c.user, c.revoke); !errors.Is(got, c.want) {
+			t.Errorf("%s: CheckCarriedLost(%d, %d, %v, %v) = %v, want %v", c.name, c.validBefore, c.createdAt, c.user, c.revoke, got, c.want)
+		}
+	}
+}

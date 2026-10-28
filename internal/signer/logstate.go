@@ -46,8 +46,8 @@ type logState struct {
 	pending       *tlog.Log
 	pendingMicros uint64
 	// pendingRevoked is loaded.revoked plus the entries of the revoke
-	// leaves appended in the open transaction, nil while it appended
-	// none. It replaces loaded.revoked only after COMMIT succeeded.
+	// and revocation_recovery leaves appended in the open transaction,
+	// nil while it appended none. It replaces loaded.revoked only after COMMIT succeeded.
 	pendingRevoked loggedRevocations
 
 	// broken is set when a failed commit left the in-memory state unknown
@@ -103,7 +103,8 @@ type loggedInstalls struct {
 	// lastKRLPublish is the body of the last krl_publish leaf (nil when
 	// there is none); loadKRL compares the stored KRL state with it.
 	lastKRLPublish []byte
-	// revoked is the exact multiset of the entries of the revoke leaves.
+	// revoked is the exact multiset of the entries of the revoke and
+	// revocation_recovery leaves.
 	// Unlike the other fields it follows the committed log: logTx adds
 	// the entries of every revoke leaf that COMMITs (pendingRevoked), and
 	// publishKRLLocked compares the revocation rows with it before the
@@ -348,6 +349,16 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			if err := revoked.add(idx, b.Entries); err != nil {
 				return err
 			}
+		case tlog.KindRevocationRecovery:
+			// A recovery (03-06b) writes one revocation row per listed
+			// entry and issues nothing, like a revocation.
+			b, err := tlog.DecodeRecoveryBody(l.Body)
+			if err != nil {
+				return fmt.Errorf("%w: leaf %d: revocation_recovery body does not decode", errLogMismatch, idx)
+			}
+			if err := revoked.add(idx, b.Entries); err != nil {
+				return err
+			}
 		case tlog.KindKRLPublish:
 			if _, err := tlog.DecodeKRLPublishBody(l.Body); err != nil {
 				return fmt.Errorf("%w: leaf %d: krl_publish body does not decode", errLogMismatch, idx)
@@ -540,23 +551,43 @@ func (s *Signer) appendLocked(_ context.Context, tx *sql.Tx, leaf tlog.Leaf) (ui
 	if err := s.db.PutCheckpoint(tx, s.pending.Size(), signed); err != nil {
 		return 0, err
 	}
-	if leaf.Kind == tlog.KindRevoke {
-		b, err := tlog.DecodeRevokeBody(leaf.Body)
-		if err != nil {
-			return 0, err
-		}
+	entries, revokes, err := revokedEntriesOf(leaf)
+	if err != nil {
+		return 0, err
+	}
+	if revokes {
 		if s.pendingRevoked == nil {
 			s.pendingRevoked = maps.Clone(s.loaded.revoked)
 			if s.pendingRevoked == nil {
 				s.pendingRevoked = loggedRevocations{}
 			}
 		}
-		if err := s.pendingRevoked.add(leaf.Index, b.Entries); err != nil {
+		if err := s.pendingRevoked.add(leaf.Index, entries); err != nil {
 			return 0, err
 		}
 	}
 	s.pendingMicros = leaf.TimeMicros
 	return leaf.Index, nil
+}
+
+// revokedEntriesOf returns the revoked entries of a revoke or
+// revocation_recovery leaf, and ok false for a leaf of any other kind.
+func revokedEntriesOf(leaf tlog.Leaf) ([]tlog.RevokedEntry, bool, error) {
+	switch leaf.Kind {
+	case tlog.KindRevoke:
+		b, err := tlog.DecodeRevokeBody(leaf.Body)
+		if err != nil {
+			return nil, false, err
+		}
+		return b.Entries, true, nil
+	case tlog.KindRevocationRecovery:
+		b, err := tlog.DecodeRecoveryBody(leaf.Body)
+		if err != nil {
+			return nil, false, err
+		}
+		return b.Entries, true, nil
+	}
+	return nil, false, nil
 }
 
 // logTx runs fn in one transaction (the caller holds s.mu). Leaves that fn

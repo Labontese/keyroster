@@ -1,10 +1,12 @@
 package serverclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/adminauth"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -186,6 +189,31 @@ type KRLDocument struct {
 	KRL      []byte `json:"krl"`
 	Manifest []byte `json:"manifest"`
 	Sig      []byte `json:"sig"`
+}
+
+// DecodeKRLDocument decodes one KRLDocument strictly (03-06b): at most
+// krl.MaxKRLResponse bytes, one JSON object with exactly the three fields,
+// each non-empty, and nothing after it but white space. keyroster-server
+// reads its durable copy (krl-served.json) with it, and keyroster revoke
+// recover every --krl document. Nothing in the result is trusted until
+// krl.VerifyManifest has checked it.
+func DecodeKRLDocument(data []byte) (*KRLDocument, error) {
+	if len(data) > krl.MaxKRLResponse {
+		return nil, fmt.Errorf("a KRL document of %d bytes, above %d", len(data), krl.MaxKRLResponse)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var doc KRLDocument
+	if err := dec.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("not a KRL document: %w", decodeError(err))
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("not a KRL document: data after the JSON object")
+	}
+	if len(doc.KRL) == 0 || len(doc.Manifest) == 0 || len(doc.Sig) == 0 {
+		return nil, errors.New("not a KRL document: krl, manifest and sig are each required")
+	}
+	return &doc, nil
 }
 
 // The refusals of a POST to AdminDirectoryPath that the CLI tells apart.

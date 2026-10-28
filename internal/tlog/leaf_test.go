@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/crypto/cryptobyte"
 
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/wire"
 )
 
@@ -588,5 +589,158 @@ func TestKRLPublishBody(t *testing.T) {
 		if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
 			t.Errorf("%s: Encode = %v, want ErrMalformedLeaf", name, err)
 		}
+	}
+}
+
+// recoveryVector is the fixed revocation_recovery leaf of
+// test/vectors/leaf_revocation_recovery_v1.hex: the request is the signing
+// bytes of test/vectors/recovery_request_signing_v1.hex (one import, one
+// carried certificate), with one evidence item and three entries, one of
+// each kind.
+func recoveryVector(t testing.TB) (Leaf, *RecoveryBody) {
+	t.Helper()
+	req, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "recovery_request_signing_v1.hex"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &RecoveryBody{
+		PolicyVersion:     3,
+		ResolvedAtSeconds: 1_790_000_200,
+		Request:           req,
+		Evidence:          []wire.Evidence{{Type: "admin-sshsig/v1", Blob: []byte("sig (test vector)")}},
+		Entries: []RevokedEntry{
+			{Kind: RevokedSerial, CAKey: []byte("ca key (test vector)"), Serial: 1_790_000_000_000_001, ValidBeforeSeconds: 1_790_003_600},
+			{Kind: RevokedKeyID, CAKey: []byte("ca key (test vector)"), KeyID: "kr1/ca=user/sub=u:bob/req=abababababababababababababababab/pol=1/ser=7"},
+			{Kind: RevokedKey, Key: []byte("public key (test vector)")},
+		},
+	}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 12, TimeMicros: 1_790_000_200_000_001, Kind: KindRevocationRecovery, Body: enc}, body
+}
+
+// TestRecoveryLeafGoldenVector pins the kind-15 leaf encoding (03-06b).
+func TestRecoveryLeafGoldenVector(t *testing.T) {
+	leaf, body := recoveryVector(t)
+	checkLeafVector(t, "leaf_revocation_recovery_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeRecoveryBody(b) })
+	file := strings.TrimSpace(string(readGolden(t, "leaf_revocation_recovery_v1.hex")))
+	if tag := hex.EncodeToString(append([]byte{byte(len(LeafDomain))}, LeafDomain...)); !strings.HasPrefix(file, tag) {
+		t.Fatalf("the vector does not start with the leaf domain tag %s", LeafDomain)
+	}
+}
+
+// TestRecoveryBody (03-06b) covers the kind-15 body: it round-trips, and
+// the encoder and decoder refuse a request above wire.MaxRecoveryRequest,
+// more than MaxRecoveryEntries entries, a body above MaxRecoveryBody, an
+// entry carrying fields of another kind and trailing bytes. Kinds 11 to 14
+// are not of format v1 yet; 15 is.
+func TestRecoveryBody(t *testing.T) {
+	leaf, body := recoveryVector(t)
+	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeRecoveryBody(b) })
+	if KindRevocationRecovery != 15 || KindRevocationRecovery.String() != "revocation_recovery" {
+		t.Fatalf("KindRevocationRecovery = %d %q", KindRevocationRecovery, KindRevocationRecovery)
+	}
+	serial := RevokedEntry{Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1}
+	for name, b := range map[string]*RecoveryBody{
+		"request_too_large": {Request: make([]byte, wire.MaxRecoveryRequest+1)},
+		"no_request":        {},
+		"entries_over_cap":  {Request: []byte("r"), Entries: make([]RevokedEntry, MaxRecoveryEntries+1)},
+		"body_over_cap": {Request: make([]byte, wire.MaxRecoveryRequest), Entries: func() []RevokedEntry {
+			// 4096 key entries of 600 bytes take about 2.4 MiB: with the
+			// 9 MiB request the body passes 11 MiB.
+			es := make([]RevokedEntry, 4096)
+			for i := range es {
+				es[i] = RevokedEntry{Kind: RevokedKey, Key: bytes.Repeat([]byte{byte(i), byte(i >> 8)}, 300)}
+			}
+			return es
+		}()},
+		"entry_kind_fields": {Request: []byte("r"), Entries: []RevokedEntry{{Kind: RevokedSerial, CAKey: []byte("k"), Serial: 1, KeyID: "junk"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if name == "entries_over_cap" {
+				for i := range b.Entries {
+					b.Entries[i] = serial
+				}
+			}
+			if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("Encode = %v, want ErrMalformedLeaf", err)
+			}
+		})
+	}
+	t.Run("decode_refuses_over_caps", func(t *testing.T) {
+		// Bytes nobody encoded: entries over the cap, and a body over it.
+		raw := func(request []byte, entries []RevokedEntry) []byte {
+			var c cryptobyte.Builder
+			c.AddUint64(1)
+			c.AddUint64(1)
+			c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(request) })
+			c.AddUint24LengthPrefixed(func(*cryptobyte.Builder) {})
+			c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { addEntries(c, entries) })
+			out, err := c.Bytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}
+		many := make([]RevokedEntry, MaxRecoveryEntries+1)
+		for i := range many {
+			many[i] = serial
+		}
+		if _, err := DecodeRecoveryBody(raw([]byte("r"), many)); !errors.Is(err, ErrMalformedLeaf) {
+			t.Fatalf("DecodeRecoveryBody of %d entries = %v", len(many), err)
+		}
+		if _, err := DecodeRecoveryBody(raw(make([]byte, MaxRecoveryBody), nil)); !errors.Is(err, ErrMalformedLeaf) {
+			t.Fatalf("DecodeRecoveryBody of a body above MaxRecoveryBody = %v", err)
+		}
+	})
+	t.Run("trailing_bytes", func(t *testing.T) {
+		if _, err := DecodeRecoveryBody(append(bytes.Clone(leaf.Body), 0)); !errors.Is(err, ErrMalformedLeaf) {
+			t.Fatalf("DecodeRecoveryBody with a trailing byte = %v", err)
+		}
+	})
+	t.Run("kinds_are_a_set", func(t *testing.T) {
+		refusal, err := (&RefusalBody{Reason: ReasonMalformed, Detail: "x"}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k := Kind(11); k <= 14; k++ {
+			if _, err := MarshalLeaf(Leaf{Kind: k, Body: refusal}); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("MarshalLeaf accepted kind %d", k)
+			}
+			if _, err := DecodeLeaf(rawKindLeaf(t, Leaf{Kind: k, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("DecodeLeaf accepted kind %d", k)
+			}
+		}
+		for _, k := range []Kind{0, 16, 255} {
+			if _, err := MarshalLeaf(Leaf{Kind: k, Body: refusal}); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("MarshalLeaf accepted kind %d", k)
+			}
+		}
+		enc, err := MarshalLeaf(leaf)
+		if err != nil {
+			t.Fatalf("MarshalLeaf refused kind 15: %v", err)
+		}
+		if l, err := DecodeLeaf(enc); err != nil || l.Kind != KindRevocationRecovery {
+			t.Fatalf("DecodeLeaf of kind 15 = %+v, %v", l, err)
+		}
+	})
+}
+
+// TestRecoveryCaps: the recovery caps that wire and krl state on their own
+// equal tlog's (wire cannot import tlog, so the check is here).
+func TestRecoveryCaps(t *testing.T) {
+	if wire.MaxRecoveryKRL != krl.MaxKRL {
+		t.Fatalf("wire.MaxRecoveryKRL = %d, krl.MaxKRL = %d", wire.MaxRecoveryKRL, krl.MaxKRL)
+	}
+	if wire.MaxRecoveryCert != MaxCert {
+		t.Fatalf("wire.MaxRecoveryCert = %d, tlog.MaxCert = %d", wire.MaxRecoveryCert, MaxCert)
+	}
+	if krl.MaxRecoveryEntries != MaxRecoveryEntries {
+		t.Fatalf("krl.MaxRecoveryEntries = %d, tlog.MaxRecoveryEntries = %d", krl.MaxRecoveryEntries, MaxRecoveryEntries)
+	}
+	if wire.MaxRecoveryRequest >= MaxRecoveryBody || MaxRecoveryBody > maxBody {
+		t.Fatalf("wire.MaxRecoveryRequest %d, MaxRecoveryBody %d, the leaf body cap %d", wire.MaxRecoveryRequest, MaxRecoveryBody, maxBody)
 	}
 }

@@ -334,3 +334,67 @@ func FuzzParseRevokeSigningBytes(f *testing.F) {
 		}
 	})
 }
+
+// recoverySeeds are one recovery request per shape: the vector, no import
+// and no certificate, two imports, a kept certificate.
+func recoverySeeds(f *testing.F) []*RecoveryRequest {
+	f.Helper()
+	empty := recoveryVector(f)
+	empty.Imports, empty.Certificates = nil, nil
+	two := recoveryVector(f)
+	two.Imports = append(two.Imports, RecoveryImport{KRL: []byte("k2"), Manifest: []byte("m2"), Sig: []byte("s2")})
+	kept := recoveryVector(f)
+	kept.Certificates[0].Revoke = false
+	return []*RecoveryRequest{recoveryVector(f), empty, two, kept}
+}
+
+func FuzzParseRecoveryRequest(f *testing.F) {
+	for _, r := range recoverySeeds(f) {
+		r.Evidence = []Evidence{{Type: EvidenceAdminSSHSIG, Blob: []byte("sig")}}
+		data, err := r.Marshal()
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(data)
+		f.Add(data[:len(data)-1])
+	}
+	f.Add([]byte(RecoveryRequestDomain))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		r, err := ParseRecoveryRequest(data)
+		if err != nil {
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseRecoveryRequest error = %v, want ErrMalformed", err)
+			}
+			return
+		}
+		again, err := r.Marshal()
+		if err != nil || !bytes.Equal(again, data) {
+			t.Fatalf("Marshal does not reproduce the input (%v):\n in  %x\n out %x", err, data, again)
+		}
+	})
+}
+
+func FuzzParseRecoverySigningBytes(f *testing.F) {
+	for _, r := range recoverySeeds(f) {
+		sb, err := r.SigningBytes()
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(sb)
+		f.Add(sb[:len(sb)-1])
+	}
+	f.Add([]byte(RecoveryRequestDomain))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		r, err := ParseRecoverySigningBytes(b)
+		if err != nil {
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseRecoverySigningBytes error = %v, want ErrMalformed", err)
+			}
+			return
+		}
+		again, err := r.SigningBytes()
+		if err != nil || len(r.Evidence) != 0 || !bytes.Equal(again, b) {
+			t.Fatalf("SigningBytes does not reproduce the input (%v):\n in  %x\n out %x", err, b, again)
+		}
+	})
+}

@@ -31,6 +31,7 @@ type loggedCert struct {
 	role        string // the CA role of its key ID
 	caKey       []byte // its signature key, SSH wire format
 	validBefore uint64
+	keyID       string
 }
 
 // revocations is the walk's revocation state: the certificates the log
@@ -55,8 +56,14 @@ type revocations struct {
 	// none, follows it hides the revocation from every KRL.
 	due        *publishDue
 	krlVersion uint64 // the last published KRL version, 0 before the first
+	// floor is the version the krl_publish entry being checked must be
+	// above: the highest version a revocation_recovery entry right before
+	// it imported (03-06b), 0 otherwise. before sets it as it clears due.
+	floor uint64
+	// lastKRL is the last published KRL version, re-derived.
+	lastKRL *PublishedKRL
 
-	revokes, revokedEntries, publishes int
+	revokes, revokedEntries, publishes, recoveries int
 }
 
 // subjectGroup is a subject revocation split over consecutive revoke
@@ -71,10 +78,13 @@ type subjectGroup struct {
 	next       uint64              // the index its next revoke entry must take
 }
 
-// publishDue is a revocation whose krl_publish entry has not come yet.
+// publishDue is a revocation (or recovery) whose krl_publish entry has
+// not come yet.
 type publishDue struct {
 	requestID [16]byte
-	last      uint64 // index of its last revoke entry
+	last      uint64    // index of its last revoke (or revocation_recovery) entry
+	kind      tlog.Kind // the kind of that entry
+	floor     uint64    // the version its krl_publish entry must be above (a recovery's highest import), else 0
 }
 
 func newRevocations() *revocations {
@@ -87,7 +97,7 @@ func newRevocations() *revocations {
 // addCert records the certificate c with key ID kid that a verified issue
 // or login_issue entry logged.
 func (rs *revocations) addCert(c *ssh.Certificate, kid cert.KeyID) {
-	rs.certs[c.Serial] = loggedCert{role: kid.CA, caKey: c.SignatureKey.Marshal(), validBefore: c.ValidBefore}
+	rs.certs[c.Serial] = loggedCert{role: kid.CA, caKey: c.SignatureKey.Marshal(), validBefore: c.ValidBefore, keyID: c.KeyId}
 	k := kid.CA + "/" + kid.Subject
 	rs.bySubject[k] = append(rs.bySubject[k], c.Serial)
 	rs.byKeyID[c.KeyId] = append(rs.byKeyID[c.KeyId], c.Serial)
@@ -100,11 +110,12 @@ func (rs *revocations) before(index uint64, kind tlog.Kind) error {
 	if g := rs.group; g != nil && (kind != tlog.KindRevoke || index != g.next) {
 		return rs.groupCut(g)
 	}
+	rs.floor = 0
 	if d := rs.due; d != nil {
 		if kind != tlog.KindKRLPublish || index != d.last+1 {
 			return rs.publishMissing(d)
 		}
-		rs.due = nil
+		rs.due, rs.floor = nil, d.floor
 	}
 	return nil
 }
@@ -121,8 +132,12 @@ func (rs *revocations) finish() error {
 }
 
 func (rs *revocations) publishMissing(d *publishDue) error {
-	return fmt.Errorf("audit: entry %d (revoke): the revocation of request %s is not followed by the krl_publish entry the signer writes in the same transaction (entry %d)",
-		d.last, hex.EncodeToString(d.requestID[:]), d.last+1)
+	kind := d.kind
+	if kind == 0 {
+		kind = tlog.KindRevoke
+	}
+	return fmt.Errorf("audit: entry %d (%s): the revocation of request %s is not followed by the krl_publish entry the signer writes in the same transaction (entry %d)",
+		d.last, kind, hex.EncodeToString(d.requestID[:]), d.last+1)
 }
 
 func (rs *revocations) groupCut(g *subjectGroup) error {
@@ -424,6 +439,11 @@ func verifyKRLPublish(index uint64, body *tlog.KRLPublishBody, leafMicros uint64
 	default:
 		return fmt.Errorf("KRL version %d is neither the previous version + 1 (%d) nor issued_at (%d)", v, prev+1, issuedAt)
 	}
+	// The publish right after a revocation_recovery entry must be above
+	// every version it imported, so every host that saw one accepts it.
+	if rs.floor != 0 && v <= rs.floor {
+		return fmt.Errorf("KRL version %d right after a revocation recovery is not above the imported version %d, so a host that saw it would refuse this KRL", v, rs.floor)
+	}
 	set, err := krl.PublishSet(rs.entries, issuedAt)
 	if err != nil {
 		return fmt.Errorf("the log's revocations: %w", err)
@@ -451,5 +471,6 @@ func verifyKRLPublish(index uint64, body *tlog.KRLPublishBody, leafMicros uint64
 	}
 	rs.krlVersion = v
 	rs.publishes++
+	rs.lastKRL = &PublishedKRL{KRL: data, Manifest: body.Manifest, Sig: body.Sig}
 	return nil
 }

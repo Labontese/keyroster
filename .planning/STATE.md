@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: 03-06 executed; PR open at the Task 4 merge gate
-last_updated: "2026-10-27T00:21:20.073Z"
+stopped_at: Completed 03-06b-PLAN.md (PR open, awaiting the owner's merge gate)
+last_updated: "2026-10-27T09:49:57.095Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 9d3d2aab1df36b8a67fd27afed8c78c74f56457c
+state_head: c39d09c360539fb987a135c43bd643db57a155f1
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 54
-  completed_plans: 42
+  completed_plans: 43
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 8 of 19
+Plan: 9 of 19
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -97,6 +97,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P04 | 62 min | 3 tasks | 38 files |
 | Phase 03 P05 | about 150 min | 3 tasks | 32 files |
 | Phase 03 P06 | 116 min | 3 tasks | 32 files |
+| Phase 03 P06b | 100min | 4 tasks | 32 files |
 
 ## Accumulated Context
 
@@ -263,6 +264,7 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-06: Phase 2 paths are removed only after the agent's generation is last-good, through paths.AllowedRemoval; only apply --once (Config.AllowAdoption) takes a host over
 - [Phase 03]: 03-06: hostKeys skips host key types it does not read (Arch OpenSSH 10.6p1 ssh-mldsa44-ed25519, DSA)
 - [Phase 03]: 03-06: a kept KRL is named in the report (krl_kept), not refused; Verify refuses krl_header_version_mismatch
+- [Phase 03]: 03-06b: lost certificates follow revoke-users-list-others; a key-ID entry's ValidBefore also needs the CA key to match; nothing to recover only when neither bundle has an installation ID and no --krl document was given
 
 ### Pending Todos
 
@@ -301,6 +303,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-27T00:21:19.547Z
-Stopped at: 03-06 executed; PR open at the Task 4 merge gate
+Last session: 2026-10-27T09:49:56.682Z
+Stopped at: Completed 03-06b-PLAN.md (PR open, awaiting the owner's merge gate)
 Resume file: None

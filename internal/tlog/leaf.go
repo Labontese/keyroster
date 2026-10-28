@@ -39,8 +39,12 @@ type Kind uint8
 // LoginIssue a certificate issued on a passkey login. Kinds 9 and 10 joined
 // format v1 in Phase 3: Revoke records an admin-authorized revocation and
 // the entries it resolved to, KRLPublish a KRL version the signer published
-// with its ops-key-signed manifest. A reader that has no check for a kind
-// must refuse it, never skip it (audit verify does).
+// with its ops-key-signed manifest. Kind 15 joined format v1 in Phase 3
+// too (03-06b), before kinds 11 to 14 exist: RevocationRecovery records
+// the revocations a signer restore lost, imported in one admin-signed
+// recovery. Kinds 11 to 14 are reserved for 03-09 to 03-12, which add them
+// to the valid set (valid). A reader that has no check for a kind must
+// refuse it, never skip it (audit verify does).
 const (
 	KindIssue            Kind = 1
 	KindRefusal          Kind = 2
@@ -52,6 +56,9 @@ const (
 	KindLoginIssue       Kind = 8
 	KindRevoke           Kind = 9
 	KindKRLPublish       Kind = 10
+	// 15 (03-06b) is the first free number: 11 to 14 belong to 03-09 to
+	// 03-12.
+	KindRevocationRecovery Kind = 15
 )
 
 // String returns the kind name used in exports and reports.
@@ -77,12 +84,18 @@ func (k Kind) String() string {
 		return "revoke"
 	case KindKRLPublish:
 		return "krl_publish"
+	case KindRevocationRecovery:
+		return "revocation_recovery"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(k))
 	}
 }
 
-func (k Kind) valid() bool { return k >= KindIssue && k <= KindKRLPublish }
+// valid reports whether k is a kind of format v1. It is an explicit set:
+// 1 to 10 and 15. Kinds 11 to 14 are added by 03-09 to 03-12.
+func (k Kind) valid() bool {
+	return (k >= KindIssue && k <= KindKRLPublish) || k == KindRevocationRecovery
+}
 
 // Size limits enforced by the encoders and the strict decoders.
 const (
@@ -103,6 +116,18 @@ const (
 	// krl.MaxManifestSig, which a test in internal/krl asserts).
 	MaxManifest    = 4 << 10
 	MaxManifestSig = 16 << 10
+	// MaxRecoveryBody bounds a revocation_recovery leaf's whole body, so
+	// that the export line of the largest one stays below audit's 16 MiB
+	// line limit, and MaxRecoveryEntries the entries it records (equal
+	// to krl.MaxRecoveryEntries, which a test here asserts): the most
+	// entries of minRecoveredEntry bytes that fit in MaxRecoveryBody, so
+	// the body cap binds first (PR #69 review, D-R1).
+	MaxRecoveryBody    = 11 << 20
+	MaxRecoveryEntries = MaxRecoveryBody / minRecoveredEntry
+	// minRecoveredEntry is the size of the smallest entry a body holds: a
+	// kind byte, three uint16 length prefixes with one byte of CA key or
+	// key (every kind needs one), a serial and a valid_before.
+	minRecoveredEntry = 1 + 2 + 1 + 8 + 2 + 2 + 8
 )
 
 // Leaf is one log entry.
@@ -186,6 +211,8 @@ func checkBody(k Kind, body []byte) error {
 		_, err = DecodeRevokeBody(body)
 	case KindKRLPublish:
 		_, err = DecodeKRLPublishBody(body)
+	case KindRevocationRecovery:
+		_, err = DecodeRecoveryBody(body)
 	default:
 		err = fmt.Errorf("%w: unknown kind %d", ErrMalformedLeaf, k)
 	}
@@ -823,16 +850,7 @@ func (b *RevokeBody) Encode() ([]byte, error) {
 			add16(c, e.Blob)
 		}
 	})
-	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
-		for _, e := range b.Entries {
-			c.AddUint8(e.Kind)
-			add16(c, e.CAKey)
-			c.AddUint64(e.Serial)
-			add16(c, []byte(e.KeyID))
-			add16(c, e.Key)
-			c.AddUint64(e.ValidBeforeSeconds)
-		}
-	})
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { addEntries(c, b.Entries) })
 	return c.Bytes()
 }
 
@@ -849,32 +867,162 @@ func DecodeRevokeBody(data []byte) (*RevokeBody, error) {
 		!s.ReadUint24LengthPrefixed(&entries) || !s.Empty() {
 		return nil, ErrMalformedLeaf
 	}
+	var err error
+	if b.Evidence, err = readEvidence(&evidence); err != nil {
+		return nil, err
+	}
+	if b.Entries, err = readEntries(&entries, MaxRevokedEntries); err != nil {
+		return nil, err
+	}
+	b.Request = append([]byte(nil), request...)
+	if err = b.check(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// RecoveryBody records one revocation recovery (kind 15, 03-06b): the
+// policy version its admin evidence was verified under, the time the
+// signer resolved it (ResolvedAtSeconds, whole seconds; times 10^6 never
+// above the leaf's TimeMicros), the recovery request's full signing bytes
+// (wire.ParseRecoverySigningBytes reads them; at most
+// wire.MaxRecoveryRequest), the evidence presented and the entries the
+// recovery derived (krl.RecoveryEntries; at most MaxRecoveryEntries, each
+// checked like a revoke entry's). The whole body is at most
+// MaxRecoveryBody.
+type RecoveryBody struct {
+	PolicyVersion     uint64
+	ResolvedAtSeconds uint64
+	Request           []byte
+	Evidence          []wire.Evidence
+	Entries           []RevokedEntry
+}
+
+func (b *RecoveryBody) check() error {
+	switch {
+	case len(b.Request) == 0 || len(b.Request) > wire.MaxRecoveryRequest:
+		return fmt.Errorf("%w: revocation_recovery request size", ErrMalformedLeaf)
+	case len(b.Evidence) > wire.MaxEvidence:
+		return fmt.Errorf("%w: revocation_recovery evidence count", ErrMalformedLeaf)
+	case len(b.Entries) > MaxRecoveryEntries:
+		return fmt.Errorf("%w: revocation_recovery lists more than %d entries", ErrMalformedLeaf, MaxRecoveryEntries)
+	}
+	for _, e := range b.Evidence {
+		if len(e.Type) == 0 || len(e.Type) > wire.MaxEvidenceType || len(e.Blob) > wire.MaxEvidenceBlob {
+			return fmt.Errorf("%w: evidence size", ErrMalformedLeaf)
+		}
+	}
+	for i := range b.Entries {
+		if err := b.Entries[i].check(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Encode encodes the body. It refuses a body above MaxRecoveryBody.
+func (b *RecoveryBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	c.AddUint64(b.PolicyVersion)
+	c.AddUint64(b.ResolvedAtSeconds)
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Request) })
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+		for _, e := range b.Evidence {
+			add16(c, []byte(e.Type))
+			add16(c, e.Blob)
+		}
+	})
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { addEntries(c, b.Entries) })
+	out, err := c.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("%w: revocation_recovery body: %w", ErrMalformedLeaf, err)
+	}
+	if len(out) > MaxRecoveryBody {
+		return nil, fmt.Errorf("%w: revocation_recovery body of %d bytes, above %d", ErrMalformedLeaf, len(out), MaxRecoveryBody)
+	}
+	return out, nil
+}
+
+// DecodeRecoveryBody decodes a revocation_recovery body strictly. Every
+// error wraps ErrMalformedLeaf.
+func DecodeRecoveryBody(data []byte) (*RecoveryBody, error) {
+	if len(data) > MaxRecoveryBody {
+		return nil, fmt.Errorf("%w: revocation_recovery body of %d bytes, above %d", ErrMalformedLeaf, len(data), MaxRecoveryBody)
+	}
+	s := cryptobyte.String(data)
+	var (
+		b                          RecoveryBody
+		request, evidence, entries cryptobyte.String
+	)
+	if !s.ReadUint64(&b.PolicyVersion) || !s.ReadUint64(&b.ResolvedAtSeconds) ||
+		!s.ReadUint24LengthPrefixed(&request) || !s.ReadUint24LengthPrefixed(&evidence) ||
+		!s.ReadUint24LengthPrefixed(&entries) || !s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	var err error
+	if b.Evidence, err = readEvidence(&evidence); err != nil {
+		return nil, err
+	}
+	if b.Entries, err = readEntries(&entries, MaxRecoveryEntries); err != nil {
+		return nil, err
+	}
+	b.Request = append([]byte(nil), request...)
+	if err = b.check(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// addEntries appends the revoked entries in the layout of a revoke body.
+func addEntries(c *cryptobyte.Builder, entries []RevokedEntry) {
+	for _, e := range entries {
+		c.AddUint8(e.Kind)
+		add16(c, e.CAKey)
+		c.AddUint64(e.Serial)
+		add16(c, []byte(e.KeyID))
+		add16(c, e.Key)
+		c.AddUint64(e.ValidBeforeSeconds)
+	}
+}
+
+// readEvidence reads the evidence items of a revoke or recovery body.
+func readEvidence(evidence *cryptobyte.String) ([]wire.Evidence, error) {
+	var out []wire.Evidence
 	for !evidence.Empty() {
-		if len(b.Evidence) == wire.MaxEvidence {
+		if len(out) == wire.MaxEvidence {
 			return nil, fmt.Errorf("%w: too many evidence items", ErrMalformedLeaf)
 		}
 		var typ, blob []byte
-		if !read16(&evidence, &typ, wire.MaxEvidenceType) || len(typ) == 0 ||
-			!read16(&evidence, &blob, wire.MaxEvidenceBlob) {
+		if !read16(evidence, &typ, wire.MaxEvidenceType) || len(typ) == 0 ||
+			!read16(evidence, &blob, wire.MaxEvidenceBlob) {
 			return nil, ErrMalformedLeaf
 		}
-		b.Evidence = append(b.Evidence, wire.Evidence{Type: string(typ), Blob: blob})
+		out = append(out, wire.Evidence{Type: string(typ), Blob: blob})
 	}
+	return out, nil
+}
+
+// readEntries reads at most limit revoked entries in the layout of a
+// revoke body. Empty fields decode as nil, so decode-then-encode is exact
+// and a decoded body compares equal to the one that was encoded.
+func readEntries(entries *cryptobyte.String, limit int) ([]RevokedEntry, error) {
+	var out []RevokedEntry
 	for !entries.Empty() {
-		if len(b.Entries) == MaxRevokedEntries {
+		if len(out) == limit {
 			return nil, fmt.Errorf("%w: too many revoked entries", ErrMalformedLeaf)
 		}
 		var (
 			e                 RevokedEntry
 			caKey, keyID, key []byte
 		)
-		if !entries.ReadUint8(&e.Kind) || !read16(&entries, &caKey, wire.MaxSubjectKeyLen) ||
-			!entries.ReadUint64(&e.Serial) || !read16(&entries, &keyID, MaxKeyID) ||
-			!read16(&entries, &key, wire.MaxSubjectKeyLen) || !entries.ReadUint64(&e.ValidBeforeSeconds) {
+		if !entries.ReadUint8(&e.Kind) || !read16(entries, &caKey, wire.MaxSubjectKeyLen) ||
+			!entries.ReadUint64(&e.Serial) || !read16(entries, &keyID, MaxKeyID) ||
+			!read16(entries, &key, wire.MaxSubjectKeyLen) || !entries.ReadUint64(&e.ValidBeforeSeconds) {
 			return nil, ErrMalformedLeaf
 		}
-		// Empty fields decode as nil, so decode-then-encode is exact and a
-		// decoded body compares equal to the one that was encoded.
 		if len(caKey) > 0 {
 			e.CAKey = caKey
 		}
@@ -882,13 +1030,9 @@ func DecodeRevokeBody(data []byte) (*RevokeBody, error) {
 			e.Key = key
 		}
 		e.KeyID = string(keyID)
-		b.Entries = append(b.Entries, e)
+		out = append(out, e)
 	}
-	b.Request = append([]byte(nil), request...)
-	if err := b.check(); err != nil {
-		return nil, err
-	}
-	return &b, nil
+	return out, nil
 }
 
 // KRLPublishBody records one published KRL version (kind 10): its version,

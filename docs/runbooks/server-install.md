@@ -227,7 +227,30 @@ The unit runs the server as `keyroster-server` with only
 `/var/lib/keyroster-server` (`StateDirectory=`, mode 0700, `--state-dir`). That
 directory holds `server.db`: pending accounts, invites (as SHA-256 only) and
 used admin nonces. Nothing in it is authority; only the admin-signed directory
-the signer installs binds a passkey to a user. Network access is limited to IPv4,
+the signer installs binds a passkey to a user.
+
+The directory also holds `krl-served.json`: the last KRL document the server
+served, which it writes, verified against the signer's trust bundle, before it
+serves it. Like the rest of the directory it is no authority, because every
+reader verifies the KRL against its own root-pinned bundle. It is, however, the
+restore source for revocations that a signer restore lost (the restore
+procedure lands with 03-06c). Never delete it, and back it up with the
+directory. The server's KRL route answers 503, and logs why, rather than serve
+a KRL it could not keep (`KRL not kept: ...`), one that does not verify (`KRL
+not served: it does not verify ...`), one below the version it served
+(`KRL not served: version X is below version Y this server served ...`), or no
+KRL at all after it served one (`KRL not served: the signer has no KRL, but
+this server served version V ...`). The copy read at start counts as the
+version it served only once it verifies against the signer's trust bundle and
+installation ID. If it does not, the route answers 503 with `KRL not served:
+the copy ... this server kept (version V) does not verify against the signer's
+trust bundle ...`: this server did not write that copy for this installation.
+Keep it as evidence and escalate; do not delete it. Moving it out of the state
+directory and restarting the server ends the 503, but that remedy is
+UNVERIFIED. Hosts then keep their last KRL. These answers are run in CI
+(internal/server tests, 03-06b).
+
+Network access is limited to IPv4,
 IPv6 and Unix sockets. At start the server asks the signer for its Status,
 retrying for up to 30 s. It then exits non-zero if:
 
@@ -236,7 +259,13 @@ retrying for up to 30 s. It then exits non-zero if:
 - the certificate does not cover the RP ID: `the certificate does not cover
   the RP ID ...`;
 - the certificate is not valid now: `the certificate is valid from ... to
-  ..., not now`.
+  ..., not now`;
+- `krl-served.json` exists but does not parse: `server:
+  /var/lib/keyroster-server/krl-served.json does not parse: ... keep it, do not
+  delete it, and see docs/runbooks/server-install.md`. Do not delete the file,
+  because it is the restore source for lost revocations. Put back the copy from
+  the backup of the state directory. That remedy is UNVERIFIED; the refusal
+  itself is run in CI (internal/server tests, 03-06b).
 
 If the unit is not running, read `journalctl -u keyroster-server` for one
 of these lines.
