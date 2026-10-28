@@ -276,9 +276,10 @@ issued certificates on every host, run `keyroster revoke user NAME`
 every live certificate of NAME in the signer's records, disables NAME and
 revokes again. A host refuses those certificates only once its sshd's
 `RevokedKeys` file holds the new KRL, and the drop-in in this runbook sets
-no `RevokedKeys`. So in this version a host set up with this runbook
-enforces no revocation. Until the keyroster agent (03-05 to 03-07) sets
-`RevokedKeys` and applies the KRL, such a host refuses a revoked
+no `RevokedKeys`. So a host set up with this runbook enforces no
+revocation. Until it is enrolled with the keyroster agent ([Enrolling a
+host](#enrolling-a-host), 03-07), which sets `RevokedKeys` and applies
+every KRL, such a host refuses a revoked
 certificate only if the operator adds a `RevokedKeys` line and installs
 the KRL by hand, which is UNVERIFIED ([revoke.md](revoke.md)). Otherwise
 `keyroster revoke user` stops only new certificates there, and an issued
@@ -758,7 +759,7 @@ applies it ([How fast changes arrive](#how-fast-changes-arrive)).
 | `host_pop_not_enabled` | CLI, server | The policy in force lacks `pop.hosts` | A root ceremony with `--pop-hosts` (above) |
 | `no_agent_listener` | `host join-token` | The server runs no agent listener | `--agent-listen` (server-install.md) |
 | `token_used`, `token_expired`, `token_unknown` | fetcher log | The token enrolled another agent, expired (enforced to the second), or was never minted | A new join token, then `keyroster-agent install` again |
-| `host_keys_in_use` | fetcher log | A host key is already on a directory host entry or another enrolled agent (a reinstalled host) | `keyroster host remove <old name>` first, or approve the host already pending |
+| `host_keys_in_use` | fetcher log | A host key is already on a directory host entry, or on an agent this server enrolled before | A directory entry only (a host registered with `keyroster host add`): `keyroster host remove <name>`. The refusal left the token unused, so the fetcher's next attempt enrolls while the token is valid (after it expired, a new join token and `install`); then approve under the same name. An agent enrolled before, for example a host whose agent state was reinstalled with the same host keys: this version has **no way** to enroll those keys again, or to deregister an enrolled agent (an owner decision; 03-08 owns identity rotation). `keyroster host remove` does not help there: it leaves the old agent, which `host pending` then lists again. Escalate |
 | `identity_in_use` | fetcher log | This fetcher identity is enrolled already | None needed: the host is enrolled |
 | `enroll_pop_invalid` | fetcher log | A host key's signature does not verify | Re-run the applier (`keyroster-agent run`); escalate if it repeats |
 | `host_key_unreadable` | applier log | A host key is held by an agent (`HostKeyAgent`), encrypted, or does not match its `.pub` | Use unencrypted host key files |

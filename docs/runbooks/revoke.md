@@ -16,12 +16,15 @@ ends the issued ones too, on every host that applies the KRL.
 > **What a revocation does, and what it does not do yet.** The signer
 > records it and publishes the next KRL version at once. A host refuses
 > the certificate only once that KRL is in the file its sshd's
-> `RevokedKeys` points to. In this version nothing puts it there: the
-> keyroster agent that fetches, verifies and installs the KRL arrives
-> with 03-05 to 03-07, and no keyroster command fetches and verifies the
-> KRL for a hand install yet. Until a host has the KRL, the certificate
-> keeps working there until it expires. **UNVERIFIED**: installing a KRL
-> on a host by hand; no runbook step or command does it, and only the e2e
+> `RevokedKeys` points to. On a host enrolled with the keyroster agent
+> ([host-setup.md, "Enrolling a host"](host-setup.md#enrolling-a-host),
+> 03-07), the agent fetches, verifies and installs it within one poll
+> ([How fast changes arrive](host-setup.md#how-fast-changes-arrive); run
+> in CI e2e, `TestAgentEnrollEndToEnd`; UNVERIFIED on a real host until
+> 03-16). A host set up by hand gets no KRL: no keyroster command fetches
+> and verifies the KRL for a hand install yet, and there the certificate
+> keeps working until it expires. **UNVERIFIED**: installing a KRL on a
+> host by hand; no runbook step or command does it, and only the e2e
 > harness swaps a KRL file under a running sshd.
 >
 > This is for user and machine certificates (both are OpenSSH user
@@ -511,5 +514,5 @@ summary.
 **UNVERIFIED until 03-16.** The homelab signer runs under trust bundle v3,
 which has no installation ID, so every revocation there is refused with
 `krl_no_installation_id` until the v4 ceremony (03-15). No homelab host
-has `RevokedKeys` configured by keyroster before the agent (03-05 to
-03-07).
+has `RevokedKeys` configured by keyroster until it is enrolled with the
+agent (03-07; the homelab enrollment is 03-16).

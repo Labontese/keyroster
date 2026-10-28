@@ -237,9 +237,10 @@ records, disables NAME and revokes again
 ([revoke.md](revoke.md#4-revoke-a-user-keyroster-revoke-user)). A host
 refuses those certificates only once its sshd's `RevokedKeys` file holds
 the new KRL, and the drop-in in [host-setup.md](host-setup.md) sets no
-`RevokedKeys`. So in this version a host set up by hand enforces no
-revocation. Until the keyroster agent (03-05 to 03-07) sets `RevokedKeys`
-and applies the KRL, such a host refuses a revoked certificate only if
+`RevokedKeys`. So a host set up by hand enforces no revocation. Until it
+is enrolled with the keyroster agent ([host-setup.md, "Enrolling a
+host"](host-setup.md#enrolling-a-host), 03-07), which sets `RevokedKeys`
+and applies every KRL, such a host refuses a revoked certificate only if
 the operator adds a `RevokedKeys` line and installs the KRL by hand,
 which is UNVERIFIED (revoke.md). Otherwise `revoke user` stops only new
 certificates there.
