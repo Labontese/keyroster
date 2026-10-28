@@ -98,25 +98,25 @@ func startEnrolled(t *testing.T, h *agentHost) *enrolledHost {
 	return e
 }
 
+// agentLastApply is what the e2e tests read of the applier's report.
+type agentLastApply struct {
+	Generation       uint64   `json:"generation"`
+	DirectoryVersion uint64   `json:"directory_version"`
+	KRLVersion       uint64   `json:"krl_version"`
+	SelfTest         string   `json:"self_test"`
+	HostStatus       string   `json:"host_status"`
+	Errors           []string `json:"errors"`
+}
+
 // lastApply is the last_apply of the applier's status.json, or nil.
-func (h *agentHost) lastApply(t *testing.T) *struct {
-	Generation uint64   `json:"generation"`
-	KRLVersion uint64   `json:"krl_version"`
-	SelfTest   string   `json:"self_test"`
-	Errors     []string `json:"errors"`
-} {
+func (h *agentHost) lastApply(t *testing.T) *agentLastApply {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(h.state, "status.json")) //nolint:gosec // test fixture
 	if err != nil {
 		return nil
 	}
 	var s struct {
-		LastApply *struct {
-			Generation uint64   `json:"generation"`
-			KRLVersion uint64   `json:"krl_version"`
-			SelfTest   string   `json:"self_test"`
-			Errors     []string `json:"errors"`
-		} `json:"last_apply"`
+		LastApply *agentLastApply `json:"last_apply"`
 	}
 	if json.Unmarshal(b, &s) != nil {
 		return nil
@@ -294,4 +294,39 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	} else {
 		t.Logf("the cross-check stops on the older copy: %s", strings.TrimSpace(out))
 	}
+
+	// 9. Removal (owner decision D-R1, PR #71 review F8): the agent was
+	// approved once, so after keyroster host remove it keeps getting signed
+	// state. The removal version reaches the host, which then has no
+	// principals files (c2 is refused), and a later revocation still
+	// arrives. Then keyroster host forget deletes the agent.
+	waitForApply := func(what string, cond func(r *agentLastApply) bool) {
+		t.Helper()
+		for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+			if r := h.lastApply(t); r != nil && cond(r) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: no such apply within 30 s (last %+v)\nrun log:\n%s\nfetch log:\n%s", what, h.lastApply(t), eh.run.String(), eh.fetch.String())
+			}
+		}
+	}
+	before9 := h.lastApply(t)
+	rm := kr("host", "remove", "web1", "--yes")
+	t.Logf("keyroster host remove web1:\n%s", rm)
+	waitForApply("the removal", func(r *agentLastApply) bool {
+		return r.DirectoryVersion > before9.DirectoryVersion && r.HostStatus == "host_removed" && r.SelfTest == "pass"
+	})
+	h.wantRefused(t, "c2 after web1's removal", other, login, "127.0.0.3", logNoPrincipal)
+	t.Logf("the removal applied: directory v%d, host_status host_removed", h.lastApply(t).DirectoryVersion)
+	krlBefore := h.lastApply(t).KRLVersion
+	c3 := issueAgentCert(t, env.Signer, "c3", "role:ops")
+	kr("revoke", "serial", c3.serial, "--reason", "e2e after the removal")
+	waitForApply("a revocation after the removal", func(r *agentLastApply) bool { return r.KRLVersion > krlBefore && r.SelfTest == "pass" })
+	t.Logf("a revocation after the removal reached the removed host: KRL v%d", h.lastApply(t).KRLVersion)
+	forgot := kr("host", "forget", "web1")
+	if !strings.Contains(forgot, "Forgot the agent enrolled as web1") {
+		t.Fatalf("keyroster host forget web1:\n%s", forgot)
+	}
+	t.Logf("keyroster host forget web1:\n%s", forgot)
 }
