@@ -46,6 +46,10 @@ type Config struct {
 	// source for revocations a signer restore lost. Only the tests'
 	// constructor (newServer) may leave it empty, which disables the copy.
 	KRLFile string
+	// AgentPort is the TCP port of the agent listener (--agent-listen),
+	// which minted join tokens name; 0 means there is none, and minting a
+	// join token is refused (03-07).
+	AgentPort int
 }
 
 // Server serves keyroster's pages and API.
@@ -66,6 +70,8 @@ type Server struct {
 	loginLimit      map[string]*limiter // CLI login routes: one per route, per client, with that route's global backstop
 	loginUserLimit  *limiter            // CLI login API routes, per route, user name and client
 	krlLimit        *limiter            // GET /api/v1/krl, per client, with a global backstop
+	agentLimit      *limiter            // the state route of enrolled agents, per agent identity, with a global backstop
+	agentAnonLimit  *limiter            // enrollment and unknown identities, per client address, with a global backstop
 	mirror          dirMirror           // the installed directory, as of the last Status that matched
 
 	// pendingMu orders a directory install (its pending check, forward
@@ -94,6 +100,16 @@ type Server struct {
 	// registration order, as its routeMux recorded them (03-02). Tests
 	// read them; nothing else does.
 	patterns []string
+
+	// agentHandler serves the agent listener (03-07): its own mux, whose
+	// recorded patterns are agentPatterns, disjoint from patterns.
+	// agentPort is Config.AgentPort, and agentStateBudget the byte budget
+	// of one state answer (serverclient.MaxAgentStateResponse; tests set
+	// less).
+	agentHandler     http.Handler
+	agentPatterns    []string
+	agentPort        int
+	agentStateBudget int
 }
 
 // routeMux is an http.ServeMux that records every pattern registered on
@@ -166,7 +182,12 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 		// The published KRL (03-01) is its own class: per client, with
 		// the global backstop.
 		krlLimit: newLimiter(krlPerMinute, krlBurst, globalFactor*krlPerMinute, globalFactor*krlBurst),
+		// The agent routes (03-07) are two classes of their own (PR #71
+		// review F1/F2, newAgentLimiters).
+		agentPort:        cfg.AgentPort,
+		agentStateBudget: serverclient.MaxAgentStateResponse,
 	}
+	s.agentLimit, s.agentAnonLimit = newAgentLimiters()
 	if s.clock == nil {
 		s.clock = time.Now
 	}
@@ -198,6 +219,12 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	// (CLI only, D-12).
 	mux.Handle("POST "+serverclient.AdminRevokePath, s.rateLimited(s.adminLimit, false, s.requireAdminLimit(maxRevokeBody, http.HandlerFunc(s.handleRevoke))))
 	mux.Handle("GET "+serverclient.KRLPath, s.rateLimited(s.krlLimit, false, http.HandlerFunc(s.handleKRL)))
+	// Host enrollment (03-07): the admin mints a join token and lists the
+	// pending hosts. The agents' own routes are on the agent listener
+	// only (AgentHandler), never on this mux.
+	mux.Handle("POST "+serverclient.AdminJoinTokensPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleMintJoinToken))))
+	mux.Handle("GET "+serverclient.AdminPendingHostsPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handlePendingHosts))))
+	mux.Handle("POST "+serverclient.AdminForgetHostPath, s.rateLimited(s.adminLimit, false, s.requireAdmin(http.HandlerFunc(s.handleForgetHost))))
 	mux.Handle("GET /enroll/{token}", s.rateLimited(s.inviteLimit, true, http.HandlerFunc(s.handleEnroll)))
 	// The registration ceremony of an invite (02-08): JSON routes in the
 	// invite class, under the same limiter as the invite page.
@@ -223,6 +250,9 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	mux.HandleFunc("POST "+loginRedeemRoute, s.handleLoginRedeem)
 	s.patterns = slices.Clone(mux.patterns)
 	s.handler = secure(mux)
+	agentMux := s.buildAgentMux()
+	s.agentPatterns = slices.Clone(agentMux.patterns)
+	s.agentHandler = secure(agentMux)
 	return s, nil
 }
 

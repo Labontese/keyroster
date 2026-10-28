@@ -33,7 +33,7 @@ var passkeyRoutes = map[string]string{
 // otherRoutes are every other registered pattern, each with the reason it
 // signs nobody in and creates no session, login code or certificate for a
 // user who has not passed a passkey ceremony.
-var otherRoutes = map[string]string{
+var otherRoutes = map[string]string{ //nolint:gosec // G101: route patterns and reasons, not credentials
 	"GET /{$}":                               "the index page",
 	"GET /static/":                           "the embedded static assets",
 	"GET /api/v1/trust":                      "the root-signed trust bundle, public",
@@ -50,6 +50,9 @@ var otherRoutes = map[string]string{
 	"POST /api/v1/enroll/{token}/finish":     "stores a pending passkey for an admin to approve; it signs nobody in",
 	"GET /account":                           "the account page, behind an existing session (withSession)",
 	"POST /logout":                           "ends a session; it creates none",
+	"POST /api/v1/admin/join-tokens":         "mints a host join token; requireAdmin (03-07)",
+	"GET /api/v1/admin/hosts/pending":        "lists the enrolled hosts waiting for approval; requireAdmin (03-07)",
+	"POST /api/v1/admin/hosts/forget":        "deletes the agents enrolled under a host name; requireAdmin (PR #71 review D-R1)",
 }
 
 // signInKeywords mark a pattern as a sign-in or session route.

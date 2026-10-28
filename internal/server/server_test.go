@@ -123,6 +123,12 @@ type fakeSigner struct {
 	krl        *wire.GetKRLResponse
 	krlErr     error
 
+	// The chain (03-07): every bundle version GetBundle serves, and every
+	// directory version GetDirectoryVersion serves (chain mode's installs
+	// add theirs).
+	bundles     map[uint64]*wire.GetBundleResponse
+	dirVersions map[uint64]*wire.GetDirectoryVersionResponse
+
 	heldMethod string
 	entered    chan struct{}
 	gate       chan struct{}
@@ -253,6 +259,10 @@ func (f *fakeSigner) setChain(doc, sigs []byte) {
 	f.chain, f.held, f.heldSigs, f.heldVersion = true, doc, sigs, 0
 	if doc != nil {
 		f.heldVersion = chainVersion(doc)
+		if f.dirVersions == nil {
+			f.dirVersions = map[uint64]*wire.GetDirectoryVersionResponse{}
+		}
+		f.dirVersions[f.heldVersion] = &wire.GetDirectoryVersionResponse{Version: f.heldVersion, Directory: doc, Sigs: sigs}
 	}
 }
 
@@ -320,6 +330,10 @@ func (f *fakeSigner) InstallDirectory(ctx context.Context, req *wire.InstallDire
 		return nil, &wire.ErrorResponse{Code: wire.CodeRefused, Message: "directory_version_chain"}
 	}
 	f.held, f.heldSigs, f.heldVersion = append([]byte(nil), req.Directory...), append([]byte(nil), req.Sigs...), next.Version
+	if f.dirVersions == nil {
+		f.dirVersions = map[uint64]*wire.GetDirectoryVersionResponse{}
+	}
+	f.dirVersions[next.Version] = &wire.GetDirectoryVersionResponse{Version: next.Version, Directory: f.held, Sigs: f.heldSigs}
 	f.leaf++
 	if f.loseAnswer {
 		return nil, errLostAnswer
@@ -384,6 +398,38 @@ func (f *fakeSigner) GetKRL(ctx context.Context) (*wire.GetKRLResponse, error) {
 		resp = &wire.GetKRLResponse{}
 	}
 	return resp, err
+}
+
+// errNotFound is the signer's refusal of a chain read for a version never
+// installed.
+var errNotFound = &wire.ErrorResponse{Code: wire.CodeMalformed, Message: "not_found"}
+
+func (f *fakeSigner) GetBundle(ctx context.Context, v uint64) (*wire.GetBundleResponse, error) {
+	f.mu.Lock()
+	f.calls["GetBundle"]++
+	b := f.bundles[v]
+	f.mu.Unlock()
+	if err := f.enter(ctx, "GetBundle"); err != nil {
+		return nil, err
+	}
+	if b == nil {
+		return nil, errNotFound
+	}
+	return b, nil
+}
+
+func (f *fakeSigner) GetDirectoryVersion(ctx context.Context, v uint64) (*wire.GetDirectoryVersionResponse, error) {
+	f.mu.Lock()
+	f.calls["GetDirectoryVersion"]++
+	d := f.dirVersions[v]
+	f.mu.Unlock()
+	if err := f.enter(ctx, "GetDirectoryVersion"); err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, errNotFound
+	}
+	return d, nil
 }
 
 // testClock is an injectable clock.

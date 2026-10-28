@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // appendFile appends text to the file at p.
@@ -117,6 +118,69 @@ func TestDropInRepair(t *testing.T) {
 			}
 		})
 	}
+	// PR #68 carry-over: an edit sshd itself refuses (an unbalanced quote)
+	// makes the start-of-run sshd -T fail. On an installed host the agent
+	// writes its own drop-in back first, reads sshd -T again, reloads and
+	// self-tests, so the KRL still lands; with no new state the run is a
+	// repair, not a no-op.
+	for _, tc := range []struct {
+		name string
+		krl  bool
+	}{{"dropin_sshd_refuses_repaired_before_dump", true}, {"dropin_sshd_refuses_repaired_by_noop_run", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newTestHost(t, newFixture(t))
+			h.installed("role:ops")
+			gen, reloads := h.current(), h.run.reloads
+			appendFile(t, h.l.DropIn(), "Banner \"/etc/issue\n")
+			h.run.rejectDropIn = func(b []byte) bool { return strings.Contains(string(b), "Banner \"") }
+			if tc.krl {
+				h.publishKRL(7)
+			}
+			r, err := h.apply()
+			if err != nil || r.NoOp || r.SelfTest != "pass" || h.run.reloads != reloads+1 {
+				t.Fatalf("an apply over a drop-in sshd refuses: %v, %+v, %d reloads (before %d)", err, r, h.run.reloads, reloads)
+			}
+			if readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || h.exists(h.l.State(dropinPrevFile)) {
+				t.Fatalf("the drop-in was not repaired: %q", readFile(t, h.l.DropIn()))
+			}
+			if tc.krl != (h.current() != gen) || (tc.krl && !h.krlRevokes(h.l.Current(), 7)) {
+				t.Fatalf("current %d (before %d), KRL applied: %t", h.current(), gen, tc.krl)
+			}
+		})
+	}
+	t.Run("sshd_dump_failure_with_own_dropin_not_repaired", func(t *testing.T) {
+		t.Parallel()
+		// sshd -T fails for another reason: nothing is written.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.run.rejectDropIn = func([]byte) bool { return true }
+		if _, err := h.apply(); !errors.Is(err, ErrSSHDDump) || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) {
+			t.Fatalf("sshd -T failing with the agent's own drop-in: %v", err)
+		}
+	})
+	t.Run("rollback_restores_agents_dropin_not_the_edit", func(t *testing.T) {
+		t.Parallel()
+		// PR #68 carry-over: an edited drop-in is repaired by an apply
+		// whose self-test then fails (sshd stopped). The rollback puts the
+		// agent's own drop-in back, never the edit dropin.prev held.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		appendFile(t, h.l.DropIn(), "# managed by ansible\n")
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.stop()
+		h.publishKRL(7)
+		r, err := h.apply()
+		if !errors.Is(err, ErrSelfTest) || !r.Rollback {
+			t.Fatalf("self-test failure after the repair: %+v, %v", r, err)
+		}
+		if got := readFile(t, h.l.DropIn()); got != string(DropIn(h.l)) {
+			t.Fatalf("the rollback restored %q, want the agent's drop-in", got)
+		}
+		if h.exists(h.l.State(dropinPrevFile)) {
+			t.Fatal("dropin.prev left after the rollback")
+		}
+	})
 	t.Run("foreign_file_refused_at_first_install", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))

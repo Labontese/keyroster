@@ -3,6 +3,7 @@
     "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_EXEC",
     "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
     "CAPABILITY_NETWORK",
     "CAPABILITY_READ_SYSTEM_STATE",
     "CAPABILITY_REFLECT",
@@ -13,22 +14,47 @@
   "github.com/Labontese/keyroster/internal/agent/apply": [
     "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_EXEC",
+    "CAPABILITY_FILES",
     "CAPABILITY_NETWORK",
     "CAPABILITY_READ_SYSTEM_STATE",
     "CAPABILITY_REFLECT",
     "CAPABILITY_SYSTEM_CALLS",
     "CAPABILITY_UNANALYZED"
   ],
+  "github.com/Labontese/keyroster/internal/agent/enroll": [
+    "CAPABILITY_ARBITRARY_EXECUTION"
+  ],
   "github.com/Labontese/keyroster/internal/agent/execsite": [
     "CAPABILITY_EXEC"
   ],
+  "github.com/Labontese/keyroster/internal/agent/join": [
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_UNSAFE_POINTER"
+  ],
+  "github.com/Labontese/keyroster/internal/agent/spool": [
+    "CAPABILITY_FILES",
+    "CAPABILITY_UNANALYZED"
+  ],
   "github.com/Labontese/keyroster/internal/agent/state": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_FILES",
+    "CAPABILITY_READ_SYSTEM_STATE",
+    "CAPABILITY_REFLECT"
+  ],
+  "github.com/Labontese/keyroster/internal/directory": [
     "CAPABILITY_ARBITRARY_EXECUTION"
   ],
   "github.com/Labontese/keyroster/internal/krl": [
     "CAPABILITY_ARBITRARY_EXECUTION"
   ],
   "github.com/Labontese/keyroster/internal/sshsig": [
+    "CAPABILITY_ARBITRARY_EXECUTION"
+  ],
+  "github.com/Labontese/keyroster/internal/trust": [
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_UNSAFE_POINTER"
+  ],
+  "github.com/Labontese/keyroster/internal/webauthn": [
     "CAPABILITY_ARBITRARY_EXECUTION"
   ],
   "golang.org/x/crypto/ssh": [

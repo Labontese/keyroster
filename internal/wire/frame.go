@@ -39,20 +39,29 @@ const Version = 1
 // Message types. A LoginIssueRequest is answered with an IssueResponse
 // (0x81). GetDirectory, Status and GetKRL requests have an empty body.
 const (
-	TypeIssueRequest             byte = 0x01
-	TypeInstallDirectory         byte = 0x02
-	TypeGetDirectory             byte = 0x03
-	TypeStatus                   byte = 0x04
-	TypeLoginIssueRequest        byte = 0x05
-	TypeRevokeRequest            byte = 0x06
-	TypeGetKRL                   byte = 0x07
+	TypeIssueRequest      byte = 0x01
+	TypeInstallDirectory  byte = 0x02
+	TypeGetDirectory      byte = 0x03
+	TypeStatus            byte = 0x04
+	TypeLoginIssueRequest byte = 0x05
+	TypeRevokeRequest     byte = 0x06
+	TypeGetKRL            byte = 0x07
+	// The chain messages (03-07, chain.go): one installed trust bundle
+	// or directory by version.
+	TypeGetBundle                byte = 0x08
+	TypeGetDirectoryVersion      byte = 0x09
 	TypeIssueResponse            byte = 0x81
 	TypeInstallDirectoryResponse byte = 0x82
 	TypeGetDirectoryResponse     byte = 0x83
 	TypeStatusResponse           byte = 0x84
 	TypeRevokeResponse           byte = 0x86
 	TypeGetKRLResponse           byte = 0x87
-	TypeError                    byte = 0xFF
+	// TypeGetBundleResponse is capped like a StatusResponse
+	// (MaxStatusFrame), TypeGetDirectoryVersionResponse like a
+	// GetDirectoryResponse (MaxDirectoryFrame).
+	TypeGetBundleResponse           byte = 0x88
+	TypeGetDirectoryVersionResponse byte = 0x89
+	TypeError                       byte = 0xFF
 )
 
 // Framing errors.
@@ -69,9 +78,9 @@ var (
 // unknown types included, gets MaxFrame.
 func maxBodyFor(msgType byte) int {
 	switch msgType {
-	case TypeInstallDirectory, TypeGetDirectoryResponse:
+	case TypeInstallDirectory, TypeGetDirectoryResponse, TypeGetDirectoryVersionResponse:
 		return MaxDirectoryFrame - headerLen
-	case TypeStatusResponse:
+	case TypeStatusResponse, TypeGetBundleResponse:
 		return MaxStatusFrame - headerLen
 	case TypeGetKRLResponse:
 		return MaxKRLFrame - headerLen

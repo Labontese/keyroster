@@ -27,6 +27,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 
+	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
@@ -180,8 +181,13 @@ type Report struct {
 	Phase2Removed     []string `json:"phase2_removed,omitempty"`
 	UnmatchedHostKeys []string `json:"unmatched_host_keys,omitempty"`
 	SpoolIgnored      []string `json:"spool_ignored,omitempty"`
-	Diff              []string `json:"diff,omitempty"`
-	Errors            []string `json:"errors"`
+	// SpoolMore is set when the spool holds newer bundle, policy or
+	// directory versions than this run's capture read (more than
+	// spool.MaxVersionsPerKind behind): keyroster-agent run applies again
+	// at once (PR #71 review F9).
+	SpoolMore bool     `json:"spool_more,omitempty"`
+	Diff      []string `json:"diff,omitempty"`
+	Errors    []string `json:"errors"`
 }
 
 // KRLKept is Report.KRLKept: the KRL version in force in current (and the
@@ -216,6 +222,7 @@ type engine struct {
 	staged         uint64     // the accepted/ snapshot a commit marker names
 	adopt          *AdoptPlan // a Phase 2 takeover this first install makes (D-08)
 	dropInRepaired bool       // repairDropIn wrote the agent's drop-in (over a trial, or an edit on an adoption resume)
+	preRepaired    bool       // preRepairDropIn wrote the agent's drop-in before the start-of-run sshd -T (it holds the lock)
 	poll           func(ctx context.Context) (*Generation, *state.Verified, error)
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
@@ -289,6 +296,14 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 				err = serr
 			}
 		}
+		if e.locked && !cfg.DryRun {
+			// The fetcher's state requests start from these (PR #71
+			// review F3/F7); a write that fails only makes it ask again
+			// from older versions.
+			if aerr := WriteAccepted(l); aerr != nil {
+				e.logf("WARNING writing %s: %v", filepath.Join(l.Outbox(), enroll.AcceptedFile), aerr)
+			}
+		}
 		_ = unix.Close(e.stateFd)
 	}
 	return r, err
@@ -303,7 +318,7 @@ func (e *engine) apply(ctx context.Context) error {
 	if err := CheckReload(e.cfg.Reload); err != nil {
 		return err
 	}
-	if err := checkOwnDir(e.l.StateDir); err != nil {
+	if err := CheckStateDirs(e.l); err != nil {
 		return err
 	}
 	fd, err := spool.OpenDir(e.l.StateDir)
@@ -312,13 +327,28 @@ func (e *engine) apply(ctx context.Context) error {
 	}
 	e.stateFd = fd
 	// Everything up to the lock only reads: a refusal here (bad pins, an
-	// unbounded LoginGraceTime) leaves the host exactly as it was.
+	// unbounded LoginGraceTime) leaves the host exactly as it was. The one
+	// exception is preRepairDropIn, on an installed host whose sshd -T
+	// fails while 00-keyroster.conf is not the agent's own.
 	if e.pins, err = state.LoadPins(e.stateFd); err != nil {
 		return err
 	}
+	unlock := func() {}
 	if e.dump, err = e.sshdDump(ctx, ""); err != nil {
-		return err
+		early, rerr := e.preRepairDropIn()
+		if rerr != nil {
+			return errors.Join(err, rerr)
+		}
+		if early == nil {
+			return err
+		}
+		unlock = early
+		if e.dump, err = e.sshdDump(ctx, ""); err != nil {
+			unlock()
+			return err
+		}
 	}
+	defer func() { unlock() }()
 	grace, err := e.dump.LoginGrace()
 	if err != nil {
 		return err
@@ -326,11 +356,12 @@ func (e *engine) apply(ctx context.Context) error {
 	if e.keys, err = hostKeys(e.dump); err != nil {
 		return err
 	}
-	unlock, err := e.lock()
-	if err != nil {
-		return err
+	if !e.preRepaired {
+		if unlock, err = e.lock(); err != nil {
+			unlock = func() {}
+			return err
+		}
 	}
-	defer unlock()
 	e.locked = true
 	for _, d := range []string{state.AcceptedDir, generationsDir} {
 		if !e.cfg.DryRun {
@@ -390,6 +421,17 @@ func (e *engine) apply(ctx context.Context) error {
 		}
 	}
 	if !e.cfg.DryRun {
+		// A drop-in preRepairDropIn wrote is reloaded and self-tested first,
+		// before a resumed takeover removes anything: finishAdoption then
+		// finds the agent's drop-in on disk and repairs nothing, so a repair
+		// that fails its self-test must stop the run while the Phase 2
+		// layout, its copies and the plan are still there (D-08; PR #71
+		// review F15).
+		if e.preRepaired {
+			if err := e.activatePreRepair(ctx); err != nil {
+				return err
+			}
+		}
 		// A Phase 2 takeover whose removal a crash or a failure cut short
 		// resumes once the agent's generation is last-good (D-08).
 		if lg, err := e.resolveLink(e.l.LastGood()); err != nil {
@@ -406,6 +448,63 @@ func (e *engine) apply(ctx context.Context) error {
 		}
 	}
 	return e.forward(ctx)
+}
+
+// preRepairDropIn handles a start-of-run sshd -T that failed (PR #68
+// carry-over): on an installed host (last-good is the agent's), whose
+// 00-keyroster.conf is not the agent's drop-in, it takes the apply lock
+// and writes DropIn there, so that an edit sshd itself refuses (an
+// unbalanced quote, say) cannot stop every apply, and every revocation,
+// before any repair. The edit is not kept as dropin.prev: nobody vetted
+// it, and a rollback restores DropIn on an installed host anyway. It
+// returns the lock's release, or nil when it repaired nothing (not
+// installed, the drop-in already the agent's, a dry run). The run then
+// reads sshd -T again, and activatePreRepair reloads sshd and self-tests.
+func (e *engine) preRepairDropIn() (func(), error) {
+	if e.cfg.DryRun {
+		return nil, nil
+	}
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil || lg.kind != linkAgent {
+		return nil, err
+	}
+	old, err := e.readDropIn()
+	if err != nil || bytes.Equal(old, DropIn(e.l)) {
+		return nil, err
+	}
+	unlock, err := e.lock()
+	if err != nil {
+		return nil, err
+	}
+	if err := e.fault("pre-repair"); err != nil {
+		unlock()
+		return nil, err
+	}
+	if err := e.writeFile(e.l.DropInDir(), paths.DropInName, DropIn(e.l), 0o644); err != nil {
+		unlock()
+		return nil, err
+	}
+	e.preRepaired = true
+	e.logf("WARNING sshd -T failed while %s was not the agent's drop-in; wrote the agent's drop-in back before reading sshd -T again", e.l.DropIn())
+	return unlock, nil
+}
+
+// activatePreRepair finishes preRepairDropIn under the lock: sshd -t, the
+// sshd -T checks and the reload (activateDropIn), then the self-test. The
+// run is then not a no-op.
+func (e *engine) activatePreRepair(ctx context.Context) error {
+	if err := e.activateDropIn(ctx); err != nil {
+		return err
+	}
+	e.dropInRepaired = true
+	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
+		e.report.SelfTest = "fail: " + err.Error()
+		return err
+	}
+	e.report.SelfTest = "pass"
+	var err error
+	e.dump, err = e.sshdDump(ctx, "")
+	return err
 }
 
 // replaceTrial handles a trial drop-in a crashed preflight left, before
@@ -557,6 +656,7 @@ func (e *engine) loadLastSwap(pending, haveCurrent bool) {
 // the accepted state the capture is verified against (spool.Floor).
 func (e *engine) capture(floor spool.Floor) (spool.State, error) {
 	st, ignored, err := spool.Read(e.cfg.Spool, floor)
+	e.report.SpoolMore = st.More
 	for _, n := range ignored {
 		if len(e.report.SpoolIgnored) < 64 && !slices.Contains(e.report.SpoolIgnored, n) {
 			e.report.SpoolIgnored = append(e.report.SpoolIgnored, n)
@@ -596,6 +696,11 @@ func (e *engine) forward(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if v.Refused != nil {
+		// Owner decision D-R2 (PR #71 review F5): the refused bundle or
+		// directory step is reported, and only the capture's KRL moves on.
+		e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", v.Refused)
+	}
 	e.report.BundleHeld = v.BundleHeld
 	if !v.Changed() {
 		// A run that replaced a trial drop-in wrote it: not a no-op.
@@ -607,7 +712,7 @@ func (e *engine) forward(ctx context.Context) error {
 			cur = nil
 		}
 		e.setVersions(v, cur)
-		return nil
+		return v.Refused
 	}
 	g, err := e.render(v)
 	if err != nil {
@@ -624,13 +729,16 @@ func (e *engine) forward(ctx context.Context) error {
 	if e.cfg.DryRun {
 		e.setVersions(v, g)
 		e.report.Diff = diff(cur, g)
-		return nil
+		return v.Refused
 	}
 	if cur != nil && sameBytes(cur, g) {
 		// The new versions change nothing on disk: store them.
 		e.setVersions(v, g)
 		e.report.Generation = curLink.n
-		return e.commit(curLink.n, v)
+		if err := e.commit(curLink.n, v); err != nil {
+			return err
+		}
+		return v.Refused
 	}
 	g.N = e.allocGeneration()
 	if err := e.installGeneration(g); err != nil {
@@ -646,7 +754,10 @@ func (e *engine) forward(ctx context.Context) error {
 	}
 	if lg.kind == linkNone {
 		e.setVersions(v, g)
-		return e.firstInstall(ctx, g, v)
+		if err := e.firstInstall(ctx, g, v); err != nil {
+			return err
+		}
+		return v.Refused
 	}
 	target, tv := g, v
 	e.poll = func(ctx context.Context) (*Generation, *state.Verified, error) {
@@ -690,7 +801,10 @@ func (e *engine) forward(ctx context.Context) error {
 		return e.rollback(ctx, err, lg)
 	}
 	e.report.SelfTest = "pass"
-	return e.commit(target.N, tv)
+	if err := e.commit(target.N, tv); err != nil {
+		return err
+	}
+	return tv.Refused
 }
 
 // setVersions reports v's versions; the KRL version is g's when g (the
@@ -1360,11 +1474,22 @@ func (e *engine) activateDropIn(ctx context.Context) error {
 }
 
 // restoreDropIn puts the previous drop-in back (or removes the drop-in
-// when there was none), checks the result with sshd -t and reloads.
+// when there was none), checks the result with sshd -t and reloads. On an
+// installed host (last-good is the agent's) a previous file goes back as
+// the agent's own drop-in (DropIn), never as dropin.prev's bytes: there
+// dropin.prev holds what a repair replaced, an edit nobody vetted (PR #68
+// carry-over). A drop-in that was missing is removed again, as before.
 func (e *engine) restoreDropIn(ctx context.Context) error {
 	prev, err := e.readState(dropinPrevFile, 64<<10)
 	if err != nil {
 		return err
+	}
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil {
+		return err
+	}
+	if lg.kind == linkAgent && prev != nil {
+		prev = DropIn(e.l)
 	}
 	if prev != nil {
 		err = e.writeFile(e.l.DropInDir(), paths.DropInName, prev, 0o644)

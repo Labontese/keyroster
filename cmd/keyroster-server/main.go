@@ -17,7 +17,7 @@ import (
 // errUsage reports a command-line usage error (exit status 2).
 var errUsage = errors.New("usage error")
 
-const usage = "usage: keyroster-server serve --tls-cert FILE --tls-key FILE [--listen ADDR] [--signer-socket PATH]\n"
+const usage = "usage: keyroster-server serve --tls-cert FILE --tls-key FILE [--listen ADDR] [--agent-listen ADDR] [--signer-socket PATH] [--state-dir DIR]\n"
 
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stderr))

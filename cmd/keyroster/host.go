@@ -2,15 +2,25 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
+	"net"
+	"net/http"
+	"os"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/agent/enroll"
+	"github.com/Labontese/keyroster/internal/agent/join"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -19,12 +29,12 @@ import (
 func init() {
 	register(command{
 		Name:    "host",
-		Summary: "hosts in the directory (add, remove, list) and manual host setup (principals: render an account's AuthorizedPrincipalsFile; ca-key: the TrustedUserCAKeys line)",
+		Summary: "hosts in the directory (add, remove, list), agent enrollment (join-token, pending, approve, forget) and manual host setup (principals: render an account's AuthorizedPrincipalsFile; ca-key: the TrustedUserCAKeys line)",
 		Run:     runHost,
 	})
 }
 
-const hostSubcommands = "add, remove, list, principals or ca-key"
+const hostSubcommands = "add, remove, list, join-token, pending, approve, forget, principals or ca-key"
 
 func runHost(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -38,6 +48,14 @@ func runHost(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return runHostRemove(ctx, args[1:], stdout, stderr)
 	case "list":
 		return runHostList(ctx, args[1:], stdout, stderr)
+	case "join-token":
+		return runHostJoinToken(ctx, args[1:], stdout, stderr)
+	case "pending":
+		return runHostPending(ctx, args[1:], stdout, stderr)
+	case "approve":
+		return runHostApprove(ctx, args[1:], stdout, stderr)
+	case "forget":
+		return runHostForget(ctx, args[1:], stdout, stderr)
 	case "principals":
 		return runHostPrincipals(ctx, args[1:], stdout, stderr)
 	case "ca-key":
@@ -117,18 +135,25 @@ func runHostAdd(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		}
 		keys = append(keys, k)
 	}
-	return ef.edit(ctx, stdout, stderr, func(d *directory.Directory) error {
+	return ef.edit(ctx, stdout, stderr, addHostEntry(name, *group, keys, principals))
+}
+
+// addHostEntry is the one mutation of host add and host approve: a new
+// active entry NAME in host group GROUP with keys and the principals the
+// admin typed.
+func addHostEntry(name, group string, keys, principals []string) func(d *directory.Directory) error {
+	return func(d *directory.Directory) error {
 		if _, ok := d.HostByName(name); ok {
 			return fmt.Errorf("host %s is already in the directory; remove it first to change it. Nothing was signed", name)
 		}
-		if _, err := findHostGroup(d, *group); err != nil {
+		if _, err := findHostGroup(d, group); err != nil {
 			return err
 		}
 		d.Hosts = append(d.Hosts, directory.Host{
-			Name: name, HostGroup: *group, Keys: keys, Principals: slices.Clone([]string(principals)), Status: directory.StatusActive,
+			Name: name, HostGroup: group, Keys: slices.Clone(keys), Principals: slices.Clone(principals), Status: directory.StatusActive,
 		})
 		return nil
-	})
+	}
 }
 
 // runHostRemove is keyroster host remove NAME: removes the host entry, so
@@ -314,4 +339,429 @@ func runHostCAKey(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	}
 	// Bundle validation requires exactly one active key per role.
 	return errors.New("the verified trust bundle has no active user CA key")
+}
+
+// errHostPoPNotEnabled refuses host enrollment while the root-signed
+// policy lacks pop.hosts (owner decision 2026-10-24): checked here on the
+// policy the CLI verified against its own pins, before any request that
+// changes state; the server refuses the same independently.
+var errHostPoPNotEnabled = errors.New("host_pop_not_enabled: the root-signed policy in force does not set pop.hosts, which host agents need " +
+	"(their revocation self-test relies on host proof of possession); run a root ceremony with keyroster root successor-policy --pop-hosts " +
+	"(docs/runbooks/root-ceremony.md), which can never be turned off again, then enroll the host")
+
+// requireHostPoP verifies the served trust bundle and policy against the
+// saved pins (Trust) and refuses errHostPoPNotEnabled when the verified
+// policy does not set pop.hosts.
+func requireHostPoP(ctx context.Context, s *adminSession) (*trust.Bundle, *trust.Policy, error) {
+	b, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold)
+	if err != nil {
+		return nil, nil, err
+	}
+	if pol.PoP == nil || !pol.PoP.Hosts {
+		return nil, nil, errHostPoPNotEnabled
+	}
+	return b, pol, nil
+}
+
+// hostAdminRefusal states the server's refusals of the host enrollment
+// routes in the CLI's own words; nil for any other error.
+func hostAdminRefusal(err error) error {
+	var he *serverclient.HTTPError
+	if !errors.As(err, &he) {
+		return nil
+	}
+	switch {
+	case he.APIErrorIs(serverclient.AgentErrHostPoPNotEnable):
+		return errHostPoPNotEnabled
+	case he.APIErrorIs(serverclient.AdminErrNoAgentListener):
+		return errors.New("the server has no agent listener: start keyroster-server with --agent-listen (docs/runbooks/server-install.md); no join token was minted")
+	case he.APIErrorIs(serverclient.AdminErrTTL):
+		return errors.New("the server refused the join token's lifetime: at most 1h")
+	case he.APIErrorIs(serverclient.AdminErrHostInDirectory):
+		return errors.New("the directory still has a host entry with this agent's host keys; remove the host first (keyroster host remove), " +
+			"wait until the host has applied that version, then forget it (docs/runbooks/host-setup.md \"Removing a host\"). Nothing was forgotten")
+	case he.APIErrorIs(serverclient.AdminErrHostNotEnrolled):
+		return errors.New("no agent is enrolled under this name; nothing was forgotten")
+	}
+	return nil
+}
+
+// runHostJoinToken is keyroster host join-token NAME [--ttl D] --out FILE
+// [--admin-key FP] (AGENT-01): mints a one-time join token for host NAME
+// through the admin API and writes the join string (internal/agent/join)
+// to FILE, mode 0600, never to stdout or a log. The string carries the
+// agent listener's URL (this config's server host with the port the
+// server names), the saved TLS roots and pins, the saved trust pins and
+// threshold and the installation ID of the verified trust bundle. FILE
+// must not exist.
+func runHostJoinToken(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("host join-token", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	ttl := fset.Duration("ttl", 30*time.Minute, "how long the token stays valid (whole seconds, at most 1h)")
+	out := fset.String("out", "", "the file to write the join string to, mode 0600 (required; must not exist)")
+	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	pos, err := parseInterspersed(fset, args)
+	if err != nil {
+		return errUsage
+	}
+	name, err := oneName(stderr, "host join-token", pos)
+	if err != nil {
+		return err
+	}
+	if !directory.ValidUserName(name) {
+		return errHostName("host", name)
+	}
+	if *out == "" {
+		_, _ = fmt.Fprintln(stderr, "host join-token: --out FILE is required; the join string is a secret and is never printed")
+		return errUsage
+	}
+	secs := int64(ttl.Round(time.Second) / time.Second)
+	if secs < 1 || secs > serverclient.MaxJoinTokenTTLSeconds {
+		return fmt.Errorf("--ttl %s: want 1s to 1h; no join token was minted", *ttl)
+	}
+	if _, err := os.Lstat(*out); !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%s exists; name a new file. No join token was minted", *out)
+	}
+	s, err := openAdminSession(*adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	bundle, pol, err := requireHostPoP(ctx, s)
+	if err != nil {
+		return err
+	}
+	if bundle.InstallationID == "" {
+		return errors.New("the verified trust bundle names no installation ID, which every enrolled agent pins (D-04); bind the installation first (docs/runbooks/root-ceremony.md). No join token was minted")
+	}
+	var ans serverclient.JoinTokenAnswer
+	if err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminJoinTokensPath, serverclient.JoinTokenRequest{ExpectedName: name, TTLSeconds: secs}, &ans, s.signer); err != nil {
+		if refusal := hostAdminRefusal(err); refusal != nil {
+			return refusal
+		}
+		return adminError(err, s, pol)
+	}
+	if ans.ExpectedName != name || ans.AgentPort < 1 || ans.AgentPort > 65535 {
+		return errors.New("the server's join token answer does not match the request; nothing was written")
+	}
+	base, err := serverclient.ParseServerURL(s.cfg.Server)
+	if err != nil {
+		return err
+	}
+	agentURL, err := serverclient.ParseServerURL("https://" + net.JoinHostPort(base.Hostname(), strconv.Itoa(ans.AgentPort)))
+	if err != nil {
+		return err
+	}
+	str, err := join.Format(join.JoinToken{
+		Version: join.Version, Server: agentURL.String(), TLSRoots: s.cfg.TLSRootsPEM, TLSPins: s.cfg.TLSPins,
+		TrustPins: s.cfg.TrustPins, Threshold: s.cfg.TrustThreshold, InstallationID: bundle.InstallationID,
+		Token: ans.Token, ExpectedName: name, ExpiresAt: ans.ExpiresAt,
+	})
+	if err != nil {
+		// join's errors never repeat the token.
+		return fmt.Errorf("the join string would not be valid, so nothing was written: %w", err)
+	}
+	if err := writeExclusive(*out, []byte(str+"\n"), 0o600); err != nil {
+		return err
+	}
+	protection, warning := joinFileProtection(runtime.GOOS)
+	if warning != "" {
+		_, _ = fmt.Fprintln(stderr, warning)
+	}
+	_, err = fmt.Fprintf(stdout, "Wrote the join string for host %s to %s (%s). It expires at %s and enrolls one agent.\n"+
+		"It is a secret: copy it to the host with mode 0600 and run, as root there, keyroster-agent install --join-file <file> "+
+		"(docs/runbooks/host-setup.md \"Enrolling a host\"). The agent server is %s.\n", name, *out, protection, ans.ExpiresAt, agentURL)
+	return err
+}
+
+// joinFileProtection is how host join-token describes the join file's
+// protection on goos, and a warning to print first (PR #71 review F14):
+// mode 0600 where the OS has file modes; on Windows the mode only sets
+// the read-only attribute, and the file inherits its directory's ACL.
+func joinFileProtection(goos string) (protection, warning string) {
+	if goos == "windows" {
+		return "with the ACL it inherits from its directory",
+			"WARNING: on Windows the join file is not mode 0600: it inherits the ACL of the directory it is in, so any account that can read that directory can read the token. Write it to a directory only you can read (for example under your user profile), and delete it once it is on the host."
+	}
+	return "mode 0600", ""
+}
+
+// fetchPendingHosts GETs the pending hosts through the admin API, after
+// requireHostPoP.
+func fetchPendingHosts(ctx context.Context, s *adminSession) ([]serverclient.PendingHost, error) {
+	_, pol, err := requireHostPoP(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+	var ans serverclient.PendingHostsAnswer
+	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminPendingHostsPath, nil, &ans, s.signer); err != nil {
+		if refusal := hostAdminRefusal(err); refusal != nil {
+			return nil, refusal
+		}
+		return nil, adminError(err, s, pol)
+	}
+	return ans.Hosts, nil
+}
+
+// pendingHostView is a pending host as the CLI shows it: every value
+// re-derived and checked from the server's answer.
+type pendingHostView struct {
+	Name        string
+	Identity    string // enroll.IdentityFingerprint
+	Keys        []string
+	Fingerprint []string // ssh.FingerprintSHA256 of each key, in Keys order
+	Facts       enroll.Facts
+	EnrolledAt  string
+}
+
+// errBadPendingHosts refuses a pending host list that does not check
+// out; it never repeats the server's text.
+var errBadPendingHosts = errors.New("the server's pending host list does not check out; refusing to use it")
+
+// checkPendingHost re-derives what host approve and host pending print:
+// the name in the host name grammar, the identity hash as 64 lowercase hex
+// digits, 1 to directory.MaxHostKeys sorted distinct host keys of a host
+// key type, printable facts and an RFC 3339 time.
+func checkPendingHost(p serverclient.PendingHost) (*pendingHostView, error) {
+	if !directory.ValidUserName(p.ExpectedName) || !enroll.IsSHA256Hex(p.IdentitySPKISHA256) || enroll.CheckFacts(p.Facts) != nil {
+		return nil, errBadPendingHosts
+	}
+	if _, err := time.Parse(time.RFC3339, p.EnrolledAt); err != nil {
+		return nil, errBadPendingHosts
+	}
+	if len(p.HostKeys) == 0 || len(p.HostKeys) > directory.MaxHostKeys {
+		return nil, errBadPendingHosts
+	}
+	v := &pendingHostView{Name: p.ExpectedName, Facts: p.Facts, EnrolledAt: p.EnrolledAt}
+	spki, err := hex.DecodeString(p.IdentitySPKISHA256)
+	if err != nil {
+		return nil, errBadPendingHosts
+	}
+	v.Identity = enroll.IdentityFingerprint(spki)
+	for i, k := range p.HostKeys {
+		pub, err := trust.ParseKey(k)
+		if err != nil || trust.FormatKey(pub) != k || !directory.IsHostKeyType(pub.Type()) || (i > 0 && p.HostKeys[i-1] >= k) {
+			return nil, errBadPendingHosts
+		}
+		v.Keys = append(v.Keys, k)
+		v.Fingerprint = append(v.Fingerprint, ssh.FingerprintSHA256(pub))
+	}
+	return v, nil
+}
+
+// describePendingHost writes the block host pending and host approve print
+// for one pending host: the lines keyroster-agent identity prints on the
+// host, for the comparison.
+func describePendingHost(b *strings.Builder, v *pendingHostView) {
+	fact := func(s string) string {
+		if s == "" {
+			return "unknown"
+		}
+		return s
+	}
+	fmt.Fprintf(b, "Pending host %s (enrolled %s)\n", v.Name, v.EnrolledAt)
+	fmt.Fprintf(b, "  agent identity: %s\n", v.Identity)
+	for i, k := range v.Keys {
+		fmt.Fprintf(b, "  host key: %s %s\n", v.Fingerprint[i], strings.Fields(k)[0])
+	}
+	fmt.Fprintf(b, "  facts (the host's word): hostname %s, os %s %s, sshd %s\n",
+		fact(v.Facts.Hostname), fact(v.Facts.OSID), fact(v.Facts.OSVersionID), fact(v.Facts.SSHDVersion))
+}
+
+// runHostPending is keyroster host pending [--admin-key FP]: the enrolled
+// agents waiting for approval, with the fingerprints to compare.
+func runHostPending(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("host pending", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	if pos, err := parseInterspersed(fset, args); err != nil || len(pos) != 0 {
+		return errUsage
+	}
+	s, err := openAdminSession(*adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	hosts, err := fetchPendingHosts(ctx, s)
+	if err != nil {
+		return err
+	}
+	var b strings.Builder
+	if len(hosts) == 0 {
+		b.WriteString("No host is waiting for approval.\n")
+	}
+	for _, h := range hosts {
+		v, err := checkPendingHost(h)
+		if err != nil {
+			return err
+		}
+		describePendingHost(&b, v)
+	}
+	if len(hosts) > 0 {
+		b.WriteString("Compare each fingerprint with `keyroster-agent identity` on the host, then run keyroster host approve NAME --group G --principal P.\n")
+	}
+	_, err = io.WriteString(stdout, b.String())
+	return err
+}
+
+// runHostApprove is keyroster host approve NAME --group G --principal P...
+// [--yes] [--out DIR] [--admin-key FP] (AGENT-01): shows the pending
+// host's key and identity fingerprints and facts for the out-of-band
+// comparison with keyroster-agent identity on the host, then signs a
+// directory version with a new host entry NAME, the enrolled host keys,
+// the host group and the principals the admin typed (the host add path).
+// The server then treats the agent as approved while that entry is active
+// with exactly those keys. Nothing about the entry comes from the host but
+// its keys, which the agent proved it holds.
+func runHostApprove(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("host approve", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	ef := addEditFlags(fset)
+	group := fset.String("group", "", "the host group the host belongs to (required; exactly one)")
+	var principals, hostKeys stringList
+	fset.Var(&principals, "principal", "a name clients use for the host, in its host certificate (repeatable, 1 to 8): short name, FQDN or address, lowercase, no trailing dot")
+	fset.Var(&hostKeys, "host-key", "the SHA256 fingerprint of a host key, as keyroster-agent identity prints it on the host (repeatable: every host key; required with --yes)")
+	pos, err := parseInterspersed(fset, args)
+	if err != nil {
+		return errUsage
+	}
+	name, err := oneName(stderr, "host approve", pos)
+	if err != nil {
+		return err
+	}
+	if !directory.ValidUserName(name) {
+		return errHostName("host", name)
+	}
+	if *group == "" || len(principals) == 0 {
+		_, _ = fmt.Fprintln(stderr, "host approve: --group and at least one --principal are required")
+		return errUsage
+	}
+	if !directory.ValidGroupName(*group) {
+		return errGroupName(*group)
+	}
+	for _, p := range principals {
+		if err := directory.CheckHostPrincipal(p); err != nil {
+			return fmt.Errorf("%w; nothing was signed", err)
+		}
+	}
+	// PR #71 review D-R4: with --yes nobody compares the fingerprints this
+	// run prints, so the admin names the ones they compared on the host.
+	if *ef.yes && len(hostKeys) == 0 {
+		_, _ = fmt.Fprintln(stderr, "host approve: --yes needs --host-key SHA256:... for every host key the host has (keyroster-agent identity on the host prints them); nothing was signed")
+		return errUsage
+	}
+	if len(hostKeys) > 0 {
+		if err := trust.CheckPins(hostKeys, 1); err != nil {
+			return fmt.Errorf("--host-key: %w; nothing was signed", err)
+		}
+	}
+	s, err := openAdminSession(*ef.adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	hosts, err := fetchPendingHosts(ctx, s)
+	if err != nil {
+		return err
+	}
+	var match []*pendingHostView
+	for _, h := range hosts {
+		v, err := checkPendingHost(h)
+		if err != nil {
+			return err
+		}
+		if v.Name == name {
+			match = append(match, v)
+		}
+	}
+	switch len(match) {
+	case 0:
+		return fmt.Errorf("no enrolled host named %s is waiting for approval (keyroster host pending lists them); nothing was signed", name)
+	case 1:
+	default:
+		return fmt.Errorf("%d enrolled agents wait under the name %s (two join tokens for one name were used); approving by this name is refused: "+
+			"compare them with keyroster host pending and keyroster-agent identity on each host. Nothing was signed", len(match), name)
+	}
+	var b strings.Builder
+	describePendingHost(&b, match[0])
+	b.WriteString("Compare the agent identity and every host key fingerprint with `keyroster-agent identity` on the host, out of band, before you sign.\n")
+	if _, err := io.WriteString(stdout, b.String()); err != nil {
+		return err
+	}
+	if len(hostKeys) > 0 && !sameFingerprints(hostKeys, match[0].Fingerprint) {
+		return fmt.Errorf("the pending host %s has the host keys %s, not exactly the --host-key fingerprints you gave (%s); "+
+			"compare again with keyroster-agent identity on the host. Nothing was signed",
+			name, strings.Join(match[0].Fingerprint, ", "), strings.Join(hostKeys, ", "))
+	}
+	return editDirectory(ctx, s, editOpts{Yes: *ef.yes, Out: *ef.out}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
+		return addHostEntry(name, *group, match[0].Keys, principals)(d)
+	})
+}
+
+// sameFingerprints reports whether a and b, each without repeats
+// (trust.CheckPins and checkPendingHost refuse them), hold the same
+// fingerprints: nothing missing and nothing extra.
+func sameFingerprints(a, b []string) bool {
+	x, y := slices.Clone(a), slices.Clone(b)
+	slices.Sort(x)
+	slices.Sort(y)
+	return slices.Equal(x, y)
+}
+
+// runHostForget is keyroster host forget NAME [--admin-key FP] (PR #71
+// review D-R1): the server deletes every agent enrolled under NAME, so its
+// identity gets 403 unknown_agent from then on and its host keys can
+// enroll again with a new join token. An agent approved once keeps
+// getting signed state after its host entry is removed, so the removal
+// and later revocations reach the host; forget ends that. The server
+// refuses while a directory host entry still holds the agent's host keys.
+func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("host forget", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	pos, err := parseInterspersed(fset, args)
+	if err != nil {
+		return errUsage
+	}
+	name, err := oneName(stderr, "host forget", pos)
+	if err != nil {
+		return err
+	}
+	if !directory.ValidUserName(name) {
+		return errHostName("host", name)
+	}
+	s, err := openAdminSession(*adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	_, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold)
+	if err != nil {
+		return err
+	}
+	var ans serverclient.ForgetHostAnswer
+	if err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminForgetHostPath, serverclient.ForgetHostRequest{ExpectedName: name}, &ans, s.signer); err != nil {
+		if refusal := hostAdminRefusal(err); refusal != nil {
+			return refusal
+		}
+		return adminError(err, s, pol)
+	}
+	if len(ans.Forgotten) == 0 {
+		return errors.New("the server's answer names no forgotten agent; check keyroster host pending")
+	}
+	var b strings.Builder
+	for _, h := range ans.Forgotten {
+		v, err := checkPendingHost(h)
+		if err != nil || v.Name != name {
+			return errors.New("the server's forget answer does not check out; the server may have forgotten agents: check keyroster host pending")
+		}
+		fmt.Fprintf(&b, "Forgot the agent enrolled as %s (enrolled %s)\n", v.Name, v.EnrolledAt)
+		fmt.Fprintf(&b, "  agent identity: %s\n", v.Identity)
+		for i, k := range v.Keys {
+			fmt.Fprintf(&b, "  host key: %s %s\n", v.Fingerprint[i], strings.Fields(k)[0])
+		}
+	}
+	b.WriteString("Its identity gets unknown_agent from now on and receives no more signed state; its host keys can enroll again with a new join token.\n")
+	_, err = io.WriteString(stdout, b.String())
+	return err
 }

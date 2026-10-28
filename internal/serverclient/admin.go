@@ -320,6 +320,19 @@ func (e *HTTPError) Unwrap() error { return e.err }
 // APIErrorIs reports whether the server's error text is exactly s.
 func (e *HTTPError) APIErrorIs(s string) bool { return e.api != "" && e.api == s }
 
+// RateLimited reports whether e is a 429 whose Retry-After is a whole
+// number of seconds from 1 to an hour, and that number.
+func (e *HTTPError) RateLimited() (int, bool) {
+	if e.Code != http.StatusTooManyRequests {
+		return 0, false
+	}
+	n, err := strconv.Atoi(e.retryAfter)
+	if err != nil || n < 1 || n > maxRetryAfter {
+		return 0, false
+	}
+	return n, true
+}
+
 // AdminJSON sends an admin API request: in as the JSON body of method to
 // path (a nil in sends no body, and the signature covers the SHA-256 of the
 // empty body, as for a GET), signed with signer (in the CLI, agentSigner over the per-OS

@@ -1,0 +1,39 @@
+{
+  "github.com/Labontese/keyroster/cmd/keyroster-agent-fetch": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_FILES",
+    "CAPABILITY_MODIFY_SYSTEM_STATE",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_SYSTEM_CALLS",
+    "CAPABILITY_UNANALYZED",
+    "CAPABILITY_UNSAFE_POINTER"
+  ],
+  "github.com/Labontese/keyroster/internal/agent/enroll": [
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_REFLECT"
+  ],
+  "github.com/Labontese/keyroster/internal/agent/fetch": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
+    "CAPABILITY_FILES",
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_REFLECT",
+    "CAPABILITY_SYSTEM_CALLS"
+  ],
+  "github.com/Labontese/keyroster/internal/agent/spool": [
+    "CAPABILITY_FILES"
+  ],
+  "github.com/Labontese/keyroster/internal/serverclient": [
+    "CAPABILITY_NETWORK"
+  ],
+  "github.com/Labontese/keyroster/internal/trust": [
+    "CAPABILITY_REFLECT"
+  ],
+  "golang.org/x/crypto/ssh": [
+    "CAPABILITY_NETWORK",
+    "CAPABILITY_REFLECT"
+  ],
+  "golang.org/x/sys/unix": [
+    "CAPABILITY_SYSTEM_CALLS"
+  ]
+}

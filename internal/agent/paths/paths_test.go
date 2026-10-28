@@ -437,13 +437,17 @@ func TestPaths(t *testing.T) {
 func TestAllowed(t *testing.T) {
 	l := Layout{Root: "/r", StateDir: "/var/lib/keyroster-agent"}
 	for _, p := range []string{"/r/etc/ssh/keyroster", "/r/etc/ssh/keyroster/gen/3/user_ca_keys", "/r/etc/ssh/keyroster/current",
-		"/r/etc/ssh/sshd_config.d/00-keyroster.conf", "/var/lib/keyroster-agent", "/var/lib/keyroster-agent/pins.json"} {
+		"/r/etc/ssh/sshd_config.d/00-keyroster.conf", "/var/lib/keyroster-agent", "/var/lib/keyroster-agent/pins.json",
+		// 03-07: install's four paths outside the state directory, exactly.
+		"/r/etc/keyroster-agent", "/r/etc/keyroster-agent/fetch.json", "/r/var/lib/keyroster-agent-fetch", "/r/var/lib/keyroster-agent-fetch/join-token"} {
 		if err := Allowed(l, p); err != nil {
 			t.Errorf("Allowed(%s) = %v", p, err)
 		}
 	}
 	for _, p := range []string{"/r/etc/ssh/sshd_config", "/r/etc/ssh/sshd_config.d/50-other.conf", "/r/etc/ssh/sshd_config.d",
-		"/r/root/.ssh/authorized_keys", "/r/etc/ssh/keyroster-evil", "/var/lib/keyroster-agent-x/a", "/r/etc/ssh/keyroster/../sshd_config", "relative/path"} {
+		"/r/root/.ssh/authorized_keys", "/r/etc/ssh/keyroster-evil", "/var/lib/keyroster-agent-x/a", "/r/etc/ssh/keyroster/../sshd_config", "relative/path",
+		"/r/etc/keyroster-agent/other.json", "/r/etc/keyroster-agent/fetch.json/x", "/r/var/lib/keyroster-agent-fetch/identity", "/r/var/lib/keyroster-agent-fetch/join-token.tmp",
+		"/r/var/lib", "/r/etc"} {
 		if err := Allowed(l, p); !errors.Is(err, ErrNotAllowed) {
 			t.Errorf("Allowed(%s) = %v, want path_not_allowed", p, err)
 		}

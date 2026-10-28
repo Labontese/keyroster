@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -336,8 +337,13 @@ func startFakeSSHD(t *testing.T) *fakeSSHD {
 	dir := t.TempDir()
 	s := &fakeSSHD{ln: ln, port: ln.Addr().(*net.TCPAddr).Port, keyPath: filepath.Join(dir, "ssh_host_ed25519_key"), pub: signer.PublicKey()}
 	// sshd skips a HostKey whose private key is missing, and so does
-	// hostKeys: the fixture writes both halves.
-	if err := os.WriteFile(s.keyPath, []byte("private key placeholder\n"), 0o600); err != nil {
+	// hostKeys: the fixture writes both halves, the private key in
+	// OpenSSH format (enrollment signs with it, 03-07).
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.keyPath, pem.EncodeToMemory(block), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(s.keyPath+".pub", ssh.MarshalAuthorizedKey(signer.PublicKey()), 0o644); err != nil { //nolint:gosec // test fixture
@@ -388,9 +394,13 @@ type fakeRunner struct {
 	grace       string // logingracetime sshd -T reports
 	listen      []string
 	sshdTestErr string
-	rejectCA    func(line string) bool
-	onQuery     func()
-	queryCode   int
+	// rejectDropIn makes sshd -t and sshd -T fail, as a real sshd does
+	// for a configuration line it refuses, while the drop-in on disk
+	// makes it true (PR #68 carry-over).
+	rejectDropIn func(dropIn []byte) bool
+	rejectCA     func(line string) bool
+	onQuery      func()
+	queryCode    int
 	// extraHostKeys are more HostKey paths sshd -T lists.
 	extraHostKeys []string
 	// before are trust settings read before the Include (they win over
@@ -417,6 +427,10 @@ func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
 	args := cmd.Args()[1:]
 	call := filepath.Base(cmd.Path()) + " " + strings.Join(args, " ")
 	r.calls = append(r.calls, call)
+	if b, err := os.ReadFile(r.h.l.DropIn()); err == nil && r.rejectDropIn != nil && r.rejectDropIn(b) &&
+		cmd.Path() == r.h.cfg.SSHD && len(args) >= 1 && (args[0] == "-t" || args[0] == "-T") {
+		return Result{Code: 255, Stderr: []byte(r.h.l.DropIn() + " line 9: invalid quotes")}, nil
+	}
 	switch {
 	case cmd.Path() == r.h.cfg.SSHD && len(args) >= 1 && args[0] == "-t":
 		// The configuration fails only with the agent's drop-in in it.

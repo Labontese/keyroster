@@ -272,6 +272,55 @@ retrying for up to 30 s. It then exits non-zero if:
 If the unit is not running, read `journalctl -u keyroster-server` for one
 of these lines.
 
+### The agent listener (host agents, 03-07)
+
+Host agents (`keyroster-agent-fetch`) talk to the server on a listener of
+their own, which only `--agent-listen ADDR` starts. Without it the server
+serves no agent, and `keyroster host join-token` is refused
+(`the server has no agent listener`). Add it with a drop-in, for example on
+port 8443, keeping the unit's other arguments as they are:
+
+```
+systemctl edit keyroster-server.service
+```
+
+```
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/keyroster-server serve --listen :443 --agent-listen :8443 --tls-cert /etc/keyroster/tls/fullchain.pem --tls-key /etc/keyroster/tls/key.pem --signer-socket /run/keyroster-signer/signer.sock --state-dir /var/lib/keyroster-server
+```
+
+```
+systemctl restart keyroster-server.service
+journalctl -u keyroster-server -n 5
+```
+
+The `serving` line then names `agent_listen`. The agent listener:
+
+- uses the same certificate, and requires a client certificate at the TLS
+  handshake: exactly one self-signed Ed25519 certificate, the agent's
+  identity. There is no agent CA. A connection without one is refused
+  before any request;
+- serves only the two agent routes, enrollment and state, and no page or
+  admin route. The main listener asks for no client certificate and serves
+  no agent route, so browsers never see a certificate prompt and never use
+  the agent port;
+- names its port in every join token the server mints, on the server's host
+  name from the admin's `keyroster init` config.
+
+**Firewall.** Open the agent port only to the hosts that run the agent: in
+the homelab, to the tailnet only, never to the internet, and never to the
+browsers' networks. For example with nftables, accept TCP port 8443 only
+from the tailnet range on the tailnet interface. The rule depends on your
+firewall, and this runbook does not install one. (UNVERIFIED: no test
+applies a firewall rule.)
+
+Run in CI e2e (`TestAgentEnrollEndToEnd`, 03-07), with a server started with
+`--agent-listen` on loopback, and in the server's tests
+(`TestAgentListenerRequiresClientCert`, `TestBrowserListenerUnchanged`). The
+drop-in, the restart and the firewall rule on a real host are UNVERIFIED
+until 03-16.
+
 ## Logs
 
 The server writes one JSON object per line on stderr, which journald

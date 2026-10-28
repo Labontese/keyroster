@@ -205,3 +205,27 @@ func latestBundle(ctx context.Context, q queryer) (*StoredBundle, error) {
 	b.InstalledAt = time.UnixMicro(at)
 	return &b, nil
 }
+
+// BundleByVersion returns the installed bundle of version v, or
+// ErrNoBundle when none was installed at v (03-07: the chain an agent
+// catches up through).
+func (d *DB) BundleByVersion(ctx context.Context, v uint64) (*StoredBundle, error) {
+	iv, err := toInt64(v)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		b  StoredBundle
+		at int64
+	)
+	err = d.db.QueryRowContext(ctx, `SELECT bundle, bundle_sigs, policy, policy_sigs, installed_at_us FROM trust_bundle WHERE version = ?`, iv).
+		Scan(&b.Bundle, &b.BundleSigs, &b.Policy, &b.PolicySigs, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNoBundle
+	}
+	if err != nil {
+		return nil, fmt.Errorf("signerdb: read trust bundle %d: %w", v, err)
+	}
+	b.Version, b.InstalledAt = v, time.UnixMicro(at)
+	return &b, nil
+}

@@ -86,6 +86,11 @@ var (
 	}
 )
 
+// IsHostKeyType reports whether a host entry may name a key of type t
+// (ssh-ed25519 and ECDSA; no RSA, no security keys). An agent enrolls
+// only such keys (03-07), so the entry an admin approves validates.
+func IsHostKeyType(t string) bool { return hostKeyTypes[t] }
+
 // CheckInstallation is the installation rule of a directory install
 // (D-04), applied by the signer to every directory it installs and by
 // audit verify to every directory_install entry, against bundleID, the

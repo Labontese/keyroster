@@ -93,3 +93,30 @@ func latestDirectoryVersion(ctx context.Context, q queryer) (uint64, error) {
 	}
 	return uint64(v), nil //nolint:gosec // G115: v >= 0, checked above
 }
+
+// DirectoryByVersion returns the installed directory of version v, or nil
+// and no error when none was installed at v (03-07: the chain an agent
+// catches up through).
+func (d *DB) DirectoryByVersion(ctx context.Context, v uint64) (*StoredDirectory, error) {
+	iv, err := toInt64(v)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		dir     StoredDirectory
+		pol, at int64
+	)
+	err = d.db.QueryRowContext(ctx, `SELECT doc, sigs, policy_version, installed_at_us FROM directory WHERE version = ?`, iv).
+		Scan(&dir.Doc, &dir.Sigs, &pol, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("signerdb: read directory %d: %w", v, err)
+	}
+	if pol < 0 {
+		return nil, errors.New("signerdb: invalid directory record")
+	}
+	dir.Version, dir.PolicyVersion, dir.InstalledAt = v, uint64(pol), time.UnixMicro(at) //nolint:gosec // G115: pol >= 0, checked above
+	return &dir, nil
+}

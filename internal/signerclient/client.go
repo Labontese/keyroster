@@ -130,6 +130,36 @@ func GetKRL(ctx context.Context, socket string) (*wire.GetKRLResponse, error) {
 	return wire.ParseGetKRLResponse(respBody)
 }
 
+// GetBundle asks the signer for the installed trust bundle of version v,
+// with its policy and both signature files (03-07). A version never
+// installed is refused not_found, as a *wire.ErrorResponse error.
+func GetBundle(ctx context.Context, socket string, v uint64) (*wire.GetBundleResponse, error) {
+	body, err := (&wire.GetBundleRequest{Version: v}).Marshal()
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := roundTrip(ctx, socket, wire.TypeGetBundle, body, wire.TypeGetBundleResponse)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseGetBundleResponse(respBody)
+}
+
+// GetDirectoryVersion asks the signer for the installed directory of
+// version v with its signatures (03-07). A version never installed is
+// refused not_found, as a *wire.ErrorResponse error.
+func GetDirectoryVersion(ctx context.Context, socket string, v uint64) (*wire.GetDirectoryVersionResponse, error) {
+	body, err := (&wire.GetDirectoryVersionRequest{Version: v}).Marshal()
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := roundTrip(ctx, socket, wire.TypeGetDirectoryVersion, body, wire.TypeGetDirectoryVersionResponse)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseGetDirectoryVersionResponse(respBody)
+}
+
 // roundTrip sends one message of msgType and returns the body of the
 // response, which must be of type want; an error response comes back as a
 // *wire.ErrorResponse error.

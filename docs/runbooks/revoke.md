@@ -16,12 +16,15 @@ ends the issued ones too, on every host that applies the KRL.
 > **What a revocation does, and what it does not do yet.** The signer
 > records it and publishes the next KRL version at once. A host refuses
 > the certificate only once that KRL is in the file its sshd's
-> `RevokedKeys` points to. In this version nothing puts it there: the
-> keyroster agent that fetches, verifies and installs the KRL arrives
-> with 03-05 to 03-07, and no keyroster command fetches and verifies the
-> KRL for a hand install yet. Until a host has the KRL, the certificate
-> keeps working there until it expires. **UNVERIFIED**: installing a KRL
-> on a host by hand; no runbook step or command does it, and only the e2e
+> `RevokedKeys` points to. On a host enrolled with the keyroster agent
+> ([host-setup.md, "Enrolling a host"](host-setup.md#enrolling-a-host),
+> 03-07), the agent fetches, verifies and installs it within one poll
+> ([How fast changes arrive](host-setup.md#how-fast-changes-arrive); run
+> in CI e2e, `TestAgentEnrollEndToEnd`; UNVERIFIED on a real host until
+> 03-16). A host set up by hand gets no KRL: no keyroster command fetches
+> and verifies the KRL for a hand install yet, and there the certificate
+> keeps working until it expires. **UNVERIFIED**: installing a KRL on a
+> host by hand; no runbook step or command does it, and only the e2e
 > harness swaps a KRL file under a running sshd.
 >
 > This is for user and machine certificates (both are OpenSSH user
@@ -440,8 +443,12 @@ source for revocations made after the latest saved export
 ([signer-install.md](signer-install.md#a-restore-brings-back-the-older-trust-bundle-policy-and-directory),
 step 2b). That source is only as trustworthy as the keyroster-server
 account: whoever controls it can put an older genuine KRL there before
-the restore, and nothing checks the copy against a host until 03-07
-(T-03-277, the note at the capture block). The copy and each of the 503 answers are run in CI
+the restore. The restore compares the copy with the KRL the enrolled
+hosts enforce before it imports it (`keyroster-agent krl-version`, the
+cross-check after the capture block, T-03-277). That catches a copy rolled
+back below a host's KRL, not a server account that withheld KRLs from the
+hosts before it rolled the copy back, so a restore after a suspected
+compromise of the server host is always escalated. The copy and each of the 503 answers are run in CI
 (internal/server tests, 03-06b). Remedies for a copy that does not
 verify are in server-install.md, labelled UNVERIFIED there.
 
@@ -510,5 +517,5 @@ summary.
 **UNVERIFIED until 03-16.** The homelab signer runs under trust bundle v3,
 which has no installation ID, so every revocation there is refused with
 `krl_no_installation_id` until the v4 ceremony (03-15). No homelab host
-has `RevokedKeys` configured by keyroster before the agent (03-05 to
-03-07).
+has `RevokedKeys` configured by keyroster until it is enrolled with the
+agent (03-07; the homelab enrollment is 03-16).

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Labontese/keyroster/internal/krl"
+	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/webauthn"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -281,9 +282,53 @@ EOF`
 	restoreCaptureNone = "no server KRL copy: /var/lib/keyroster-server/krl-served.json does not exist"
 	// restoreServerCopyTrust is D-R2's residual next to the capture block:
 	// the copy is only as trustworthy as the server account, and the
-	// cross-check with a host's KRL arrives with 03-07 (T-03-277).
+	// cross-check against the hosts (03-07, T-03-277) runs before step 2b.
 	restoreServerCopyTrust = "**The copy is only as trustworthy as the keyroster-server account.**"
-	restoreServerCopyCheck = "A cross-check of the copy's version against a host's installed KRL arrives with 03-07 (T-03-277)."
+	restoreServerCopyCheck = "The cross-check below compares the copy with the KRL the enrolled hosts enforce (T-03-277). Run it before step 2b."
+	// restoreCrossCheckHead heads the cross-check (03-07, T-03-277, owner
+	// decision D-R2): restoreCrossCheckCommand prints each host's KRL
+	// version, restoreCrossCheckBlock compares them with the kept copy's,
+	// restoreCrossCheckRule makes its line step 2b's gate, and
+	// restoreCrossCheckResidual names what it cannot see.
+	restoreCrossCheckHead     = "**Cross-check the copy against the hosts (T-03-277).**"
+	restoreCrossCheckCommand  = "keyroster-agent krl-version"
+	restoreCrossCheckLine     = "It prints one line, `installed KRL version: <N>`, and changes nothing"
+	restoreCrossCheckOpener   = "bash -eu -s <host KRL version> [<host KRL version> ...] <<'EOF'\n"
+	restoreCrossCheckRule     = "Only the last line's `cross-check passed:` lets step 2b run;"
+	restoreCrossCheckGate     = "and only after the cross-check of the server copy against the hosts printed `cross-check passed:` (T-03-277)."
+	restoreCrossCheckNoCopy   = "After the capture block printed `no server KRL copy`, the copy counts as version 0, so any host that enforces a KRL stops the block"
+	restoreCrossCheckResidual = "The cross-check cannot help where no host is enrolled, or where every host you reach is under the same control as the keyroster-server account"
+	// restoreCrossCheckWithheld and restoreCrossCheckEscalate are the
+	// residual's withholding case and its unconditional escalation (PR #71
+	// review F6): a server that froze KRL delivery before it rolled back
+	// its copy passes the check.
+	restoreCrossCheckWithheld = "Nor can it catch a keyroster-server account that withheld KRLs from the hosts before it rolled back its copy"
+	restoreCrossCheckEscalate = "A passing cross-check therefore never clears a suspected compromise of the server host: escalate every restore after a suspected compromise of the server host, whatever the cross-check prints."
+	restoreCrossCheckProves   = "That is all a passing cross-check proves: the copy is at least as new as the KRL every host you checked enforces."
+	// restoreCrossCheckScript is the block after its heredoc line and its
+	// assignment (restoreCrossCheckBlock), which TestRestoreCrossCheck and
+	// TestAgentEnrollEndToEnd run with KEPT in the environment.
+	restoreCrossCheckScript = `set -o pipefail
+stop() { echo "cross-check: $*" >&2; exit 1; }
+[ "$#" -gt 0 ] || stop "no host's installed KRL version given; run keyroster-agent krl-version on at least one enrolled host"
+v=0
+if [ -e "$KEPT" ]; then
+  [ "$(wc -l <"$KEPT")" -eq 1 ] || stop "$KEPT is not one line"
+  grep -Eqx '\{"krl":"[A-Za-z0-9+/=]+","manifest":"[A-Za-z0-9+/=]+","sig":"[A-Za-z0-9+/=]+"\}' "$KEPT" || stop "$KEPT is not a KRL document as keyroster-server writes it"
+  v=$(cut -d'"' -f8 "$KEPT" | base64 -d | grep -o '"krl_version":[0-9]*' | cut -d: -f2) || stop "$KEPT has no KRL version"
+fi
+for n in "$v" "$@"; do
+  case "$n" in '' | *[!0-9]* | 0?* | ???????????????????*) stop "'$n' is not a KRL version" ;; esac
+done
+for h in "$@"; do
+  [ "$h" -le "$v" ] || stop "a host enforces KRL v$h, above v$v of the kept server copy: the copy was rolled back or removed. Keep the hold and escalate"
+done
+echo "cross-check passed: the kept server copy's KRL v$v is at least every host's installed KRL version ($*)"
+`
+	restoreCrossCheckBlock = restoreCrossCheckOpener +
+		"KEPT=/root/recovery/server-krl.json\n" +
+		restoreCrossCheckScript +
+		"EOF"
 	// restoreClockCheck heads step 2b's clock check, which comes before
 	// the recovery because the recovery publishes (T-03-273), and
 	// restoreClockCommands and restoreClockRule are its commands and its
@@ -447,6 +492,94 @@ func runReleaseCheck(t *testing.T, restored, recovered, kept string) (int, strin
 	return 0, string(out)
 }
 
+// runCrossCheck runs the runbook's cross-check (restoreCrossCheckScript)
+// with bash -eu on kept and the host versions, as the runbook's block does
+// with /root/recovery/server-krl.json, and returns its exit code and
+// combined output.
+func runCrossCheck(t *testing.T, kept string, hosts ...string) (int, string) {
+	t.Helper()
+	requireRunbookBlock(t, restoreCrossCheckBlock)
+	cmd := exec.Command("bash", append([]string{"-eu", "-s"}, hosts...)...)
+	cmd.Stdin = strings.NewReader(restoreCrossCheckScript)
+	cmd.Env = append(os.Environ(), "KEPT="+kept)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("the runbook's cross-check: %v\n%s", err, out)
+		}
+		return ee.ExitCode(), string(out)
+	}
+	return 0, string(out)
+}
+
+// keptCopy writes a KRL document of version v as keyroster-server writes
+// krl-served.json (one line, the three fields) and returns its path.
+func keptCopy(t *testing.T, v uint64) string {
+	t.Helper()
+	m := krl.Manifest{InstallationID: strings.Repeat("ab", 16), KRLVersion: v, KRLSHA256: krl.SHA256Hex([]byte("krl")),
+		IssuedAt: "2026-10-28T12:00:00Z", BundleVersion: 1, LogIndex: 2}
+	manifest, err := m.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := json.Marshal(serverclient.KRLDocument{KRL: []byte("krl"), Manifest: manifest, Sig: []byte("sig")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "server-krl.json")
+	if err := os.WriteFile(p, append(doc, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestRestoreCrossCheck (03-07, T-03-277, owner decision D-R2): the
+// runbook's cross-check passes only when the kept server copy's KRL
+// version is at least every host's installed version, refuses a host
+// above it (a rolled-back copy), counts a missing copy as version 0 (a
+// removed copy), and refuses no host and anything that is not a version.
+func TestRestoreCrossCheck(t *testing.T) {
+	kept := keptCopy(t, 1793000123)
+	none := filepath.Join(t.TempDir(), "server-krl.json")
+	for _, c := range []struct {
+		name  string
+		kept  string
+		hosts []string
+		pass  bool
+		want  string
+	}{
+		{"equal", kept, []string{"1793000123"}, true, "cross-check passed: the kept server copy's KRL v1793000123 is at least every host's installed KRL version (1793000123)"},
+		{"below_and_equal", kept, []string{"1793000001", "1793000123", "0"}, true, "cross-check passed:"},
+		{"one_host_above", kept, []string{"1793000001", "1793000124"}, false, "a host enforces KRL v1793000124, above v1793000123 of the kept server copy"},
+		{"no_copy_no_krl", none, []string{"0"}, true, "cross-check passed: the kept server copy's KRL v0"},
+		{"no_copy_host_has_krl", none, []string{"1793000001"}, false, "a host enforces KRL v1793000001, above v0"},
+		{"no_host", kept, nil, false, "no host's installed KRL version given"},
+		{"not_a_number", kept, []string{"17930001x"}, false, "is not a KRL version"},
+		{"leading_zero", kept, []string{"01793000999"}, false, "is not a KRL version"},
+		{"too_long", kept, []string{"9999999999999999999999"}, false, "is not a KRL version"},
+		{"empty", kept, []string{""}, false, "is not a KRL version"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, out := runCrossCheck(t, c.kept, c.hosts...)
+			if (code == 0) != c.pass || !strings.Contains(out, c.want) {
+				t.Fatalf("exit %d, want pass %t:\n%s", code, c.pass, out)
+			}
+			if !c.pass && strings.Contains(out, "cross-check passed") {
+				t.Fatalf("a refused cross-check printed its pass line:\n%s", out)
+			}
+		})
+	}
+	// A copy that is not the server's one-line document stops the block.
+	bad := filepath.Join(t.TempDir(), "server-krl.json")
+	if err := os.WriteFile(bad, []byte("{\"krl\":\"a\"}\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := runCrossCheck(t, bad, "1"); code == 0 || !strings.Contains(out, "is not one line") {
+		t.Fatalf("a two-line copy: exit %d:\n%s", code, out)
+	}
+}
+
 // requireRunbookBlock: signer-install.md has block as whole lines, with
 // every line's leading and trailing space trimmed.
 func requireRunbookBlock(t *testing.T, block string) {
@@ -581,6 +714,12 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		}
 	}
 
+	// The cross-check block, whole lines; it runs in e2e only
+	// (TestRestoreCrossCheck, TestAgentEnrollEndToEnd), not in smoke.sh.
+	if want := "\n" + trim(restoreCrossCheckBlock) + "\n"; !strings.Contains(runbook, want) {
+		t.Errorf("signer-install.md no longer has the cross-check block:\n%s", restoreCrossCheckBlock)
+	}
+
 	if strings.Contains(runbook, restoreRootInstall) {
 		t.Errorf("signer-install.md has an admin run %q, which no admin account can read", restoreRootInstall)
 	}
@@ -672,7 +811,29 @@ func TestRestoreRunbookChecks(t *testing.T) {
 		t.Errorf("signer-install.md does not say next to the capture block that the copy is only as trustworthy as the server account: capture line at %d, rule at %d, file restore at %d",
 			captureKept, trust, files)
 	}
-	pos("cross-check of the server copy with 03-07", restoreServerCopyCheck)
+	// 03-07 (T-03-277): the cross-check against the hosts comes after the
+	// capture and before the file restore, and gates step 2b.
+	crossNote := pos("pointer to the cross-check of the server copy", restoreServerCopyCheck)
+	crossHead := pos("cross-check of the server copy against the hosts", restoreCrossCheckHead)
+	crossCommand := strings.Index(section[crossHead:], squash(restoreCrossCheckCommand)) + crossHead
+	crossLine := pos("pinned line of keyroster-agent krl-version", restoreCrossCheckLine)
+	crossBlock := pos("cross-check block", restoreCrossCheckBlock)
+	crossRule := pos("rule that only cross-check passed: lets step 2b run", restoreCrossCheckRule)
+	pos("rule for a missing server copy in the cross-check", restoreCrossCheckNoCopy)
+	residual := pos("residual of the cross-check", restoreCrossCheckResidual)
+	withheld := pos("the withholding case of the cross-check's residual", restoreCrossCheckWithheld)
+	escalate := pos("the unconditional escalation after a suspected server compromise", restoreCrossCheckEscalate)
+	proves := pos("what a passing cross-check proves", restoreCrossCheckProves)
+	if proves > crossBlock || residual > withheld || withheld > escalate {
+		t.Error("signer-install.md: the cross-check's claim, its residual, the withholding case and the escalation are out of order")
+	}
+	crossGate := pos("step 2b's gate on the cross-check", restoreCrossCheckGate)
+	adminRecover := pos("admin's keyroster revoke recover", restoreAdminRecover)
+	if !(captureKept < crossNote && crossNote < crossHead && crossHead < crossCommand && crossCommand < crossLine && crossLine < crossBlock &&
+		crossBlock < crossRule && crossRule < files && crossGate < adminRecover && crossRule < crossGate) {
+		t.Errorf("signer-install.md's cross-check is out of order: capture line %d, pointer %d, head %d, command %d, line %d, block %d, rule %d, file restore %d, step 2b's gate %d, admin's recover %d",
+			captureKept, crossNote, crossHead, crossCommand, crossLine, crossBlock, crossRule, files, crossGate, adminRecover)
+	}
 	krlRule := pos("rule that --krl is left out only after no server KRL copy", restoreKRLRule)
 	releaseRule := pos("rule that nothing to recover after kept: keeps the hold", restoreReleaseRule)
 	// posAfter finds s after from: the clock check's commands and rule also
