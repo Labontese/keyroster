@@ -41,13 +41,23 @@
 #     otherwise writes the files as the admin;
 #   - signer-install.md's capture of keyroster-server's KRL copy, under the
 #     hold, stops without the server's state directory, prints "no server
-#     KRL copy" without the file, refuses an existing /root/recovery, and
-#     keeps a copy equal to the server's file byte for byte; step 2b's copy
-#     block refuses a link the admin planted at ~/recovery-in and otherwise
+#     KRL copy" without the file, refuses an existing /root/recovery, stops
+#     on a state directory it cannot list and on a krl-served.json that is
+#     a dangling link, a link to /dev/zero, a FIFO, a mode-000 file or one
+#     byte too large (writing at most that many bytes), and keeps a copy
+#     equal to the server's file byte for byte; step 2b's copy block
+#     refuses a link the admin planted at ~/recovery-in and otherwise
 #     writes the inputs as the admin, with the server copy and without it;
-#     its read-back block reads the admin's request as the admin; and its
-#     recovery line refuses a request that does not parse
-#     (recovery_malformed) and leaves signer.db as it was (03-06c).
+#     its read-back block stops on a request planted as a FIFO, a link to
+#     /dev/zero or a dangling link, and reads the admin's request as the
+#     admin; its recovery line refuses a request that does not parse
+#     (recovery_malformed) and leaves signer.db as it was; after that
+#     refusal the read-back stops with its reason, the move block moves the
+#     refused request aside inside /root/recovery, and a new request is read
+#     back and refused the same way; and the release check passes on
+#     fixture exports whose restored log already holds a recovery, and
+#     stops on a kept copy whose version was not imported and on a
+#     recovered log that adds nothing (03-06c, PR #70 review).
 #
 # The TPM drop-in is not installed here: the runner has no TPM, and its
 # SupplementaryGroups=tss needs the tss group. The TPM path under systemd is
@@ -390,14 +400,36 @@ capture() {
 runuser -u keyroster-server -- test -d /var/lib/keyroster-server -a -x /var/lib/keyroster-server
 test ! -e /root/recovery
 install -d -m 0700 /root/recovery
-if runuser -u keyroster-server -- test -e /var/lib/keyroster-server/krl-served.json -o -L /var/lib/keyroster-server/krl-served.json; then
-  runuser -u keyroster-server -- cat /var/lib/keyroster-server/krl-served.json > /root/recovery/server-krl.json
+listed=$(runuser -u keyroster-server -- find /var/lib/keyroster-server -maxdepth 1 -name krl-served.json -print)
+if [ -n "$listed" ]; then
+  runuser -u keyroster-server -- test -f /var/lib/keyroster-server/krl-served.json
+  runuser -u keyroster-server -- head -c 5620745 /var/lib/keyroster-server/krl-served.json > /root/recovery/server-krl.json
   test -s /root/recovery/server-krl.json
+  test "$(stat -c %s /root/recovery/server-krl.json)" -le 5620744
   echo "kept: /root/recovery/server-krl.json"
 else
   echo "no server KRL copy: /var/lib/keyroster-server/krl-served.json does not exist"
 fi
 EOF
+}
+# capture_stops NAME: the capture block, under a timeout so that a block
+# that waits fails the test, must stop without claiming either outcome and
+# write at most 5 620 745 bytes; /root/recovery is cleared for the next case.
+export -f capture
+capture_stops() {
+	local log=$work/capture-$1.log
+	if timeout 60 bash -c capture >"$log" 2>&1; then
+		cat "$log"
+		fail "the capture block passed: $1"
+	fi
+	cat "$log"
+	if grep -q 'kept:\|no server KRL copy' "$log"; then
+		fail "the capture block claimed an outcome: $1"
+	fi
+	if [ -e /root/recovery/server-krl.json ] && [ "$(stat -c %s /root/recovery/server-krl.json)" -gt 5620745 ]; then
+		fail "the capture block copied more than 5 620 745 bytes: $1"
+	fi
+	rm -rf /root/recovery
 }
 srv_state=/var/lib/keyroster-server
 [ ! -e "$srv_state" ] || fail "$srv_state exists on this host"
@@ -424,10 +456,34 @@ if capture >"$work/capture-again.log" 2>&1; then
 fi
 cat "$work/capture-again.log"
 rm -r /root/recovery
+# A listing that fails (here a state directory the server account can
+# search but not read) is not "no server KRL copy" (PR #70 review, F5).
+chmod 0300 "$srv_state"
+capture_stops unreadable-dir
+chmod 0700 "$srv_state"
+# A krl-served.json the server account cannot copy as a regular file of at
+# most 5 620 744 bytes (PR #70 review, F8 and F15): a link that leads
+# nowhere, a link to /dev/zero, a FIFO, a file of mode 000 and a file one
+# byte too large.
+srv_file=$srv_state/krl-served.json
+as_user keyroster-server ln -s "$srv_state/nowhere" "$srv_file"
+capture_stops dangling-link
+as_user keyroster-server ln -sf /dev/zero "$srv_file"
+capture_stops dev-zero-link
+rm "$srv_file"
+as_user keyroster-server mkfifo -m 0600 "$srv_file"
+capture_stops fifo
+rm "$srv_file"
+as_user keyroster-server sh -c ': >"$1" && chmod 000 "$1"' sh "$srv_file"
+capture_stops mode-000
+rm "$srv_file"
+as_user keyroster-server sh -c 'umask 077 && head -c 5620745 /dev/zero >"$1"' sh "$srv_file"
+capture_stops too-large
+rm "$srv_file"
 # A copy written as keyroster-server (a fixture: no server runs here).
 krl_fixture=$work/krl-served.fixture
 printf '{"krl":"Zml4dHVyZQ==","manifest":"Zml4dHVyZQ==","sig":"Zml4dHVyZQ=="}\n' >"$krl_fixture"
-runuser -u keyroster-server -- sh -c 'umask 077 && cat >"$1"' sh "$srv_state/krl-served.json" <"$krl_fixture"
+runuser -u keyroster-server -- sh -c 'umask 077 && cat >"$1"' sh "$srv_file" <"$krl_fixture"
 capture | tee "$work/capture-kept.log"
 grep -qx 'kept: /root/recovery/server-krl.json' "$work/capture-kept.log" || fail "the capture block did not keep the server's copy"
 cmp "$krl_fixture" /root/recovery/server-krl.json || fail "the kept copy differs from the server's file"
@@ -571,18 +627,43 @@ grep -qx 'copied restored.jsonl latest-saved.jsonl to /home/kradmin/recovery-in 
 check_copied restored.jsonl latest-saved.jsonl
 [ ! -e /home/kradmin/recovery-in/server-krl.json ] || fail "the recovery copy block copied a server copy that was not kept"
 [ "$(rec_canary_state)" = "$rec_canary_before" ] || fail "the recovery copy block changed $rec_canary"
-# The admin's request: here bytes that do not parse, written as the admin.
-as_user kradmin sh -c 'umask 077 && printf "not a recovery request\n" >/home/kradmin/recovery-in/recovery.bin'
 read_back() {
 	bash -eu -s kradmin <<'EOF'
 H=$(getent passwd "$1" | cut -d: -f6)
 test -n "$H"
-test ! -e /root/recovery/recovery.bin
-runuser -u "$1" -- cat "$H/recovery-in/recovery.bin" > /root/recovery/recovery.bin
+if [ -e /root/recovery/recovery.bin ]; then
+  echo "/root/recovery/recovery.bin exists: move the refused request aside first (step 2b)" >&2
+  exit 1
+fi
+runuser -u "$1" -- test -f "$H/recovery-in/recovery.bin"
+runuser -u "$1" -- head -c 9470227 "$H/recovery-in/recovery.bin" > /root/recovery/recovery.bin
 test -s /root/recovery/recovery.bin
+test "$(stat -c %s /root/recovery/recovery.bin)" -le 9470226
 echo "read the recovery request back to /root/recovery/recovery.bin"
 EOF
 }
+export -f read_back
+# A request the admin planted as a FIFO, a link to /dev/zero or a link
+# that leads nowhere: the read-back, under a timeout so that a block that
+# waits fails the test, stops without its line and copies nothing (PR #70
+# review, F15).
+for planted in fifo dev-zero dangling; do
+	case $planted in
+	fifo) as_user kradmin mkfifo -m 0600 /home/kradmin/recovery-in/recovery.bin ;;
+	dev-zero) as_user kradmin ln -s /dev/zero /home/kradmin/recovery-in/recovery.bin ;;
+	dangling) as_user kradmin ln -s /home/kradmin/nowhere /home/kradmin/recovery-in/recovery.bin ;;
+	esac
+	if timeout 60 bash -c read_back >"$work/read-back-$planted.log" 2>&1; then
+		cat "$work/read-back-$planted.log"
+		fail "the read-back block copied a request planted as $planted"
+	fi
+	cat "$work/read-back-$planted.log"
+	! grep -q 'read the recovery request back' "$work/read-back-$planted.log" || fail "the read-back block claimed a copy of $planted"
+	[ ! -e /root/recovery/recovery.bin ] || fail "the read-back block wrote /root/recovery/recovery.bin from $planted"
+	as_user kradmin rm /home/kradmin/recovery-in/recovery.bin
+done
+# The admin's request: here bytes that do not parse, written as the admin.
+as_user kradmin sh -c 'umask 077 && printf "not a recovery request\n" >/home/kradmin/recovery-in/recovery.bin'
 read_back | tee "$work/read-back.log"
 grep -qx 'read the recovery request back to /root/recovery/recovery.bin' "$work/read-back.log" || fail "the read-back block did not report the copy"
 cmp /home/kradmin/recovery-in/recovery.bin /root/recovery/recovery.bin || fail "the read-back copy differs from the admin's file"
@@ -590,16 +671,128 @@ recover_line() {
 	runuser -u keyroster-signer -g keyroster-signer -G tss -- \
 	  keyroster-signer recover-revocations --state-dir /var/lib/keyroster-signer < /root/recovery/recovery.bin
 }
-db_before=$(sha256sum "$STATE/signer.db")
-if recover_line >"$work/recover.log" 2>&1; then
-	cat "$work/recover.log"
-	fail "recover-revocations accepted a request that does not parse"
-fi
-cat "$work/recover.log"
-grep -q 'recovery_malformed' "$work/recover.log" || fail "recover-revocations refused for another reason than recovery_malformed"
-[ "$(sha256sum "$STATE/signer.db")" = "$db_before" ] || fail "the refused recovery changed signer.db"
+# recover_refused LOG: the recovery line refuses recovery_malformed and
+# leaves signer.db as it was.
+recover_refused() {
+	local before
+	before=$(sha256sum "$STATE/signer.db")
+	if recover_line >"$1" 2>&1; then
+		cat "$1"
+		fail "recover-revocations accepted a request that does not parse"
+	fi
+	cat "$1"
+	grep -q 'recovery_malformed' "$1" || fail "recover-revocations refused for another reason than recovery_malformed"
+	[ "$(sha256sum "$STATE/signer.db")" = "$before" ] || fail "the refused recovery changed signer.db"
+}
+recover_refused "$work/recover.log"
 systemctl is-active --quiet keyroster-signer.service && fail "keyroster-signer.service is active under the hold"
-rm -r /root/recovery /home/kradmin/recovery-in /tmp/restored.jsonl /root/latest-saved.jsonl
+# After the refusal, a new request (PR #70 review, F6): the read-back
+# stops over the refused one and says why; the refused request is moved
+# aside inside /root/recovery, the admin moves theirs aside and writes a
+# new one, and the read-back and the recovery line run again.
+if read_back >"$work/read-back-again.log" 2>&1; then
+	cat "$work/read-back-again.log"
+	fail "the read-back block ran over an earlier request"
+fi
+cat "$work/read-back-again.log"
+grep -qx '/root/recovery/recovery.bin exists: move the refused request aside first (step 2b)' "$work/read-back-again.log" || fail "the read-back block did not say why it stopped"
+refused_before=$(sha256sum </root/recovery/recovery.bin)
+move_refused() {
+	bash -eu <<'EOF'
+test -f /root/recovery/recovery.bin
+d=/root/recovery/refused-$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -m 0700 "$d"
+mv /root/recovery/recovery.bin "$d/recovery.bin"
+echo "moved the refused request to $d/recovery.bin"
+EOF
+}
+move_refused | tee "$work/move-refused.log"
+moved=$(sed -n 's|^moved the refused request to \(/root/recovery/refused-[0-9TZ]*/recovery\.bin\)$|\1|p' "$work/move-refused.log")
+[ -n "$moved" ] || fail "the move block did not report where it moved the request"
+[ "$(sha256sum <"$moved")" = "$refused_before" ] || fail "the moved request differs from the refused one"
+[ "$(stat -c '%a %U' "$(dirname "$moved")")" = "700 root" ] || fail "$(dirname "$moved") is $(stat -c '%a %U' "$(dirname "$moved")")"
+[ ! -e /root/recovery/recovery.bin ] || fail "the move block left /root/recovery/recovery.bin"
+as_user kradmin mv /home/kradmin/recovery-in/recovery.bin /home/kradmin/recovery-in/recovery.bin.refused
+as_user kradmin sh -c 'umask 077 && printf "another request that does not parse\n" >/home/kradmin/recovery-in/recovery.bin'
+read_back | tee "$work/read-back-new.log"
+grep -qx 'read the recovery request back to /root/recovery/recovery.bin' "$work/read-back-new.log" || fail "the read-back block did not read the new request back"
+cmp /home/kradmin/recovery-in/recovery.bin /root/recovery/recovery.bin || fail "the read-back copy differs from the admin's new file"
+recover_refused "$work/recover-new.log"
+
+step "Restore step 2b: the release check, on fixture exports (docs/runbooks/signer-install.md, verbatim)"
+# The block reads only lines and keys that audit verify binds, so it runs
+# here on fixture lines (no recovery is applied in this job; CI e2e runs it
+# on real exports). The restored fixture already holds a recovery, as a
+# backup taken after an earlier restore does (PR #70 review, F2).
+release_check() {
+	bash -eu <<'EOF'
+RESTORED=/tmp/restored.jsonl
+RECOVERED=/tmp/recovered.jsonl
+KEPT=/root/recovery/server-krl.json
+set -o pipefail
+stop() { echo "release check: $*" >&2; exit 1; }
+test -s "$RESTORED"
+test -s "$RECOVERED"
+n=$(($(wc -l <"$RESTORED") - 1))
+[ "$(wc -l <"$RECOVERED")" -eq $((n + 3)) ] || stop "$RECOVERED does not hold exactly two entries after the $n of $RESTORED"
+[ "$(sed -n "$((n + 1))p" "$RECOVERED" | grep -c "^{\"index\":$n,.*\"kind\":\"revocation_recovery\"")" = 1 ] || stop "entry $n is not a revocation_recovery"
+[ "$(sed -n "$((n + 2))p" "$RECOVERED" | grep -c "^{\"index\":$((n + 1)),.*\"kind\":\"krl_publish\"")" = 1 ] || stop "entry $((n + 1)) is not a krl_publish"
+imported=$(sed -n "$((n + 1))p" "$RECOVERED" | grep -o '"import_krl_versions":\[[0-9,]*\]' | tr -dc '0-9,') || stop "entry $n names no imported KRL versions"
+if [ -e "$KEPT" ]; then
+  [ "$(wc -l <"$KEPT")" -eq 1 ] || stop "$KEPT is not one line"
+  grep -Eqx '\{"krl":"[A-Za-z0-9+/=]+","manifest":"[A-Za-z0-9+/=]+","sig":"[A-Za-z0-9+/=]+"\}' "$KEPT" || stop "$KEPT is not a KRL document as keyroster-server writes it"
+  v=$(cut -d'"' -f8 "$KEPT" | base64 -d | grep -o '"krl_version":[0-9]*' | cut -d: -f2) || stop "$KEPT has no KRL version"
+  case "$v" in '' | *[!0-9]*) stop "$KEPT has no single KRL version" ;; esac
+  printf '%s\n' "$imported" | tr , '\n' | grep -x "$v" >/dev/null || stop "the recovery did not import the kept server copy, KRL v$v (it imported KRL versions [$imported])"
+  echo "release check passed: entries $n (revocation_recovery) and $((n + 1)) (krl_publish), imported KRL versions [$imported], the kept server copy's v$v among them"
+else
+  echo "release check passed: entries $n (revocation_recovery) and $((n + 1)) (krl_publish), imported KRL versions [$imported], no server KRL copy kept"
+fi
+EOF
+}
+[ ! -e /tmp/recovered.jsonl ] || fail "/tmp/recovered.jsonl exists on this host"
+fixture_line() { printf '{"index":%d,"leaf":"Zml4dHVyZQ==","decoded":{%s}}\n' "$1" "$2"; }
+fixture_kept() {
+	printf '{"krl":"Zml4dHVyZQ==","manifest":"%s","sig":"Zml4dHVyZQ=="}\n' "$(printf '{"krl_version":%d}' "$1" | base64 -w0)" >/root/recovery/server-krl.json
+}
+{
+	fixture_line 0 '"kind":"bundle_install"'
+	fixture_line 1 '"import_krl_versions":[5],"kind":"revocation_recovery"'
+	fixture_line 2 '"kind":"krl_publish"'
+	echo '{"checkpoint":"fixture"}'
+} >/tmp/restored.jsonl
+{
+	head -n 3 /tmp/restored.jsonl
+	fixture_line 3 '"import_krl_versions":[7,19],"kind":"revocation_recovery"'
+	fixture_line 4 '"kind":"krl_publish"'
+	echo '{"checkpoint":"fixture"}'
+} >/tmp/recovered.jsonl
+# release_check_stops NAME WANT: the check stops with the reason WANT and
+# never prints its passed line.
+release_check_stops() {
+	if release_check >"$work/release-check-$1.log" 2>&1; then
+		cat "$work/release-check-$1.log"
+		fail "the release check passed: $1"
+	fi
+	cat "$work/release-check-$1.log"
+	grep -q "$2" "$work/release-check-$1.log" || fail "the release check stopped for another reason: $1"
+	! grep -q 'release check passed' "$work/release-check-$1.log" || fail "the release check printed its passed line: $1"
+}
+fixture_kept 19
+release_check | tee "$work/release-check-kept.log"
+grep -qx "release check passed: entries 3 (revocation_recovery) and 4 (krl_publish), imported KRL versions \[7,19\], the kept server copy's v19 among them" "$work/release-check-kept.log" ||
+	fail "the release check did not pass with the kept copy's version imported"
+fixture_kept 9
+release_check_stops not-imported 'the recovery did not import the kept server copy, KRL v9'
+fixture_kept 1
+release_check_stops not-imported-prefix 'the recovery did not import the kept server copy, KRL v1 '
+rm /root/recovery/server-krl.json
+release_check | tee "$work/release-check-none.log"
+grep -qx 'release check passed: entries 3 (revocation_recovery) and 4 (krl_publish), imported KRL versions \[7,19\], no server KRL copy kept' "$work/release-check-none.log" ||
+	fail "the release check did not pass without a kept copy"
+cp /tmp/restored.jsonl /tmp/recovered.jsonl
+release_check_stops not-applied 'does not hold exactly two entries after the 3 of /tmp/restored.jsonl'
+rm -r /root/recovery /home/kradmin/recovery-in /tmp/restored.jsonl /tmp/recovered.jsonl /root/latest-saved.jsonl
 bash -eu -s keyroster-server keyroster-signer <<'EOF'
 test "$#" -gt 0
 for u in "$@"; do

@@ -438,7 +438,10 @@ answers 503, and logs why, rather than serve a KRL in any of these cases:
 A signer restore does not roll this file back, so it is the restore's
 source for revocations made after the latest saved export
 ([signer-install.md](signer-install.md#a-restore-brings-back-the-older-trust-bundle-policy-and-directory),
-step 2b). The copy and each of the 503 answers are run in CI
+step 2b). That source is only as trustworthy as the keyroster-server
+account: whoever controls it can put an older genuine KRL there before
+the restore, and nothing checks the copy against a host until 03-07
+(T-03-277, the note at the capture block). The copy and each of the 503 answers are run in CI
 (internal/server tests, 03-06b). Remedies for a copy that does not
 verify are in server-install.md, labelled UNVERIFIED there.
 
