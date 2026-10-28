@@ -38,6 +38,7 @@
   "github.com/Labontese/keyroster/internal/agent/state": [
     "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_FILES",
+    "CAPABILITY_READ_SYSTEM_STATE",
     "CAPABILITY_REFLECT"
   ],
   "github.com/Labontese/keyroster/internal/directory": [

@@ -5,10 +5,12 @@ package apply
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -40,11 +42,11 @@ var spoolDirectoryRE = regexp.MustCompile(`^directory-[1-9][0-9]{0,19}\.json(\.s
 //     directory as a first install does: the newest one the spool offers,
 //     verified against the admin quorum of the accepted policy and the
 //     pinned installation, standalone;
-//  2. removes every directory file from the spool at spoolDir, by its
-//     fixed-pattern name relative to a descriptor opened without
-//     following links (the spool is the fetcher's data directory the
-//     operator named, as for apply --spool; it holds no configuration), so
-//     a lost version the fetcher spooled earlier is not taken again;
+//  2. removes every directory file from the spool at spoolDir, which must
+//     be inside the agent's paths (paths.Allowed: the state directory's
+//     spool by default), by its fixed-pattern name relative to a
+//     descriptor opened without following links, so a lost version the
+//     fetcher spooled earlier is not taken again;
 //  3. rewrites the outbox's accepted versions (WriteAccepted), so the
 //     fetcher asks for the server's current directory.
 //
@@ -54,6 +56,11 @@ var spoolDirectoryRE = regexp.MustCompile(`^directory-[1-9][0-9]{0,19}\.json(\.s
 // nothing, and the current generation stays in force either way.
 func ResetDirectory(l Layout, spoolDir string) (*ResetReport, error) {
 	if err := CheckStateDirs(l); err != nil {
+		return nil, err
+	}
+	// Before anything changes: the spool must be one the applier may
+	// remove files from.
+	if err := paths.Allowed(l, spoolDir); err != nil {
 		return nil, err
 	}
 	fd, err := spool.OpenDir(l.StateDir)
@@ -107,6 +114,9 @@ func ResetDirectory(l Layout, spoolDir string) (*ResetReport, error) {
 	for _, n := range names {
 		if !spoolDirectoryRE.MatchString(n) {
 			continue
+		}
+		if err := paths.Allowed(l, filepath.Join(spoolDir, n)); err != nil {
+			return r, err
 		}
 		if err := unix.Unlinkat(sfd, n, 0); err != nil && !errors.Is(err, unix.ENOENT) {
 			return r, fmt.Errorf("remove %s from the spool: %w", n, err)

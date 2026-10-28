@@ -88,6 +88,19 @@ func TestKRLAlone(t *testing.T) {
 	})
 }
 
+// spoolInState moves h's spool to the production place, <state>/spool,
+// where paths.Allowed lets the applier remove files (ResetDirectory).
+func spoolInState(t *testing.T, h *testHost) {
+	t.Helper()
+	if err := os.Mkdir(h.l.Spool(), 0o750); err != nil { //nolint:gosec // the spool's mode
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(h.l.Outbox(), 0o750); err != nil { //nolint:gosec // the outbox's mode
+		t.Fatal(err)
+	}
+	h.spool, h.cfg.Spool = h.l.Spool(), h.l.Spool()
+}
+
 // TestResetDirectory is the root-run re-bootstrap of owner decision D-R2
 // (PR #71 review F5): on a host whose accepted directory a signer restore
 // lost, keyroster-agent reset-directory drops it and the spool's directory
@@ -99,9 +112,7 @@ func TestResetDirectory(t *testing.T) {
 	diverged := func(t *testing.T) (*testHost, spool.Doc) {
 		t.Helper()
 		h := newTestHost(t, newFixture(t))
-		if err := os.Mkdir(h.l.Outbox(), 0o750); err != nil { //nolint:gosec // the outbox's mode
-			t.Fatal(err)
-		}
+		spoolInState(t, h)
 		h.installed("role:ops")
 		h.publishDir(h.spec("role:ops", "role:lost"))
 		h.mustApply()
@@ -157,12 +168,27 @@ func TestResetDirectory(t *testing.T) {
 			t.Fatalf("principals %v, want the last good ones kept", got)
 		}
 	})
+	t.Run("spool_outside_the_agents_paths_refused", func(t *testing.T) {
+		t.Parallel()
+		h, _ := diverged(t)
+		other := t.TempDir()
+		if err := os.WriteFile(filepath.Join(other, "directory-1.json"), []byte("d"), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		if _, err := ResetDirectory(h.l, other); err == nil {
+			t.Fatal("reset-directory accepted a spool outside the agent's paths")
+		}
+		if _, err := os.Stat(filepath.Join(other, "directory-1.json")); err != nil {
+			t.Fatalf("the file outside the agent's paths is gone: %v", err)
+		}
+		if a, err := AcceptedVersions(h.l); err != nil || a.Directory != 2 {
+			t.Fatalf("the refused reset changed the accepted directory: %+v, %v", a, err)
+		}
+	})
 	t.Run("refused_while_an_apply_is_unfinished", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))
-		if err := os.Mkdir(h.l.Outbox(), 0o750); err != nil { //nolint:gosec // the outbox's mode
-			t.Fatal(err)
-		}
+		spoolInState(t, h)
 		h.installed("role:ops")
 		h.publishDir(h.spec("role:ops", "role:web"))
 		h.cfg.Fault = func(p string) error {
