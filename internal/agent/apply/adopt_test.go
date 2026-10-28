@@ -346,6 +346,65 @@ func TestAdopt(t *testing.T) {
 			}
 		})
 	}
+	// PR #71 review F15: a takeover cut short during its removal, then the
+	// drop-in edited into a line sshd itself refuses, so the start-of-run
+	// sshd -T fails and the pre-repair writes the agent's drop-in back. That
+	// repair is reloaded and self-tested before any Phase 2 path goes: with
+	// sshd stopped the self-test fails and the Phase 2 layout, its copies in
+	// phase2/ and the plan are all still there; with sshd up the first
+	// removal comes after the repair's reload.
+	for _, tc := range []struct {
+		name    string
+		stopped bool
+	}{{"resume_after_refused_edit_sshd_stopped_keeps_phase2", true}, {"resume_after_refused_edit_reloads_before_removal", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := adoptHost(t)
+			h.installPhase2(phase2Layout{})
+			h.cfg.Fault = func(p string) error {
+				if p == "phase2-remove" {
+					return &crash{point: p}
+				}
+				return nil
+			}
+			if _, err := h.apply(); !isCrash(err) || h.lastGood() == 0 || !h.exists(h.l.State(adoptFile)) {
+				t.Fatalf("crash during the removal: %v, last-good %d", err, h.lastGood())
+			}
+			appendFile(t, h.l.DropIn(), "Banner \"/etc/issue\n")
+			h.run.rejectDropIn = func(b []byte) bool { return strings.Contains(string(b), "Banner \"") }
+			h.publishKRL(9)
+			reloads := h.run.reloads
+			removals, reloadedFirst := 0, false
+			h.cfg.Fault = func(p string) error {
+				if p == "phase2-remove" {
+					if removals == 0 {
+						reloadedFirst = h.run.reloads > reloads
+					}
+					removals++
+				}
+				return nil
+			}
+			if tc.stopped {
+				h.cfg.SelfTestTimeout = 300 * time.Millisecond
+				h.sshd.stop()
+			}
+			r, err := h.apply()
+			h.cfg.Fault = nil
+			if tc.stopped {
+				if !errors.Is(err, ErrSelfTest) || removals != 0 || len(r.Phase2Removed) != 0 {
+					t.Fatalf("the resume with sshd stopped: %v, %d removals, %+v", err, removals, r)
+				}
+				if !h.phase2Intact() || !h.exists(h.l.State(adoptFile)) || !h.exists(h.l.State(adoptBak)) {
+					t.Fatalf("a failed self-test of the repair lost the Phase 2 fallback: Phase 2 intact %t, plan %t, phase2/ %t",
+						h.phase2Intact(), h.exists(h.l.State(adoptFile)), h.exists(h.l.State(adoptBak)))
+				}
+				return
+			}
+			if err != nil || removals == 0 || !reloadedFirst || len(r.Phase2Removed) != 4 || h.exists(h.l.State(adoptFile)) {
+				t.Fatalf("the resume: %v, %d removals, reloaded before the first %t, %+v", err, removals, reloadedFirst, r)
+			}
+		})
+	}
 	t.Run("marker_write_failure_leaves_no_plan", func(t *testing.T) {
 		t.Parallel()
 		// PR #68 review, F2: the marker write fails (ENOSPC, EIO) at the

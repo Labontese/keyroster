@@ -407,6 +407,17 @@ func (e *engine) apply(ctx context.Context) error {
 		}
 	}
 	if !e.cfg.DryRun {
+		// A drop-in preRepairDropIn wrote is reloaded and self-tested first,
+		// before a resumed takeover removes anything: finishAdoption then
+		// finds the agent's drop-in on disk and repairs nothing, so a repair
+		// that fails its self-test must stop the run while the Phase 2
+		// layout, its copies and the plan are still there (D-08; PR #71
+		// review F15).
+		if e.preRepaired {
+			if err := e.activatePreRepair(ctx); err != nil {
+				return err
+			}
+		}
 		// A Phase 2 takeover whose removal a crash or a failure cut short
 		// resumes once the agent's generation is last-good (D-08).
 		if lg, err := e.resolveLink(e.l.LastGood()); err != nil {
@@ -417,11 +428,6 @@ func (e *engine) apply(ctx context.Context) error {
 			}
 		} else if p, _ := e.readAdopt(); lg.kind == linkAgent && p != nil {
 			e.logf("WARNING %s: the agent's files are in force, and the Phase 2 layout's removal is unfinished; run %s", CodePhase2Pending, adoptCommand)
-		}
-		if e.preRepaired {
-			if err := e.activatePreRepair(ctx); err != nil {
-				return err
-			}
 		}
 		if err := e.replaceTrial(ctx); err != nil {
 			return err
