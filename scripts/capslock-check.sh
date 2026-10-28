@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # capslock capability baselines per binary (REPO-02, T-01-61): keyroster-signer,
-# and keyroster-agent since 03-05.
+# keyroster-agent since 03-05, and keyroster-agent-fetch since 03-07.
 #
 #   bash scripts/capslock-check.sh            # compare with the baseline
 #   bash scripts/capslock-check.sh --update   # rewrite the baseline
@@ -137,10 +137,26 @@ check_exec_confined() {
 	fi
 }
 
+# check_no_exec NAME BASELINE: the fetcher runs no program (03-07, T-03-43),
+# so its baseline holds no EXEC pair at all. (ARBITRARY_EXECUTION is
+# capslock's over-approximation of interface calls such as
+# ssh.PublicKey.Verify, reviewed per pair like every other capability.)
+check_no_exec() {
+	local name=$1 baseline=$2 found
+	found=$(pairs "$baseline" | awk '$2 == "CAPABILITY_EXEC"')
+	if [ -n "$found" ]; then
+		echo "   $name: EXEC capability in $baseline:"
+		sed 's/^/     + /' <<<"$found"
+		status=1
+	fi
+}
+
 status=0
 check_target "keyroster-signer" ./cmd/keyroster-signer "" 0 test/capslock/keyroster-signer.json
 check_target "keyroster-agent" ./cmd/keyroster-agent "" 0 test/capslock/keyroster-agent.json
+check_target "keyroster-agent-fetch" ./cmd/keyroster-agent-fetch "" 0 test/capslock/keyroster-agent-fetch.json
 if [ "$update" = 0 ]; then
+	check_no_exec "keyroster-agent-fetch" test/capslock/keyroster-agent-fetch.json
 	check_exec_confined "keyroster-agent" ./cmd/keyroster-agent github.com/Labontese/keyroster/internal/agent/execsite
 fi
 if [ "$status" != 0 ]; then

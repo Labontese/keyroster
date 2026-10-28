@@ -10,6 +10,10 @@
 #   constructors internal/agent/paths' TestPaths pins and to which
 #   capslock-check confines EXEC. Its only network use is the loopback self-test (the
 #   owner's D-05 answer, loopback-only), through net and x/crypto/ssh.
+#   keyroster-agent-fetch (the unprivileged fetcher, 03-07): all of the
+#   agent's network I/O, so HTTP and TLS are allowed, but no exec, plugin,
+#   template, SMTP or WebAuthn stack (FETCH_BANNED). The os/exec <-
+#   modernc.org/libc exception does not apply: the fetcher links no SQLite.
 #
 # depguard (lint) catches direct imports; this catches what dependencies
 # pull in.
@@ -18,7 +22,7 @@
 #
 # It runs `go list -deps` for GOOS=linux: for the signer twice, with no
 # build tags (CGO_ENABLED=0, the default binary) and with -tags piv
-# (CGO_ENABLED=1, the PIV build); for the agent once, with no tags. For
+# (CGO_ENABLED=1, the PIV build); for the agent and the fetcher once each, with no tags. For
 # every banned package it prints the packages that import it. A banned
 # package passes only when every importer is listed for it in the target's
 # exceptions; each exception names the locked dependency that imports it
@@ -78,6 +82,20 @@ AGENT_BANNED=(
 	github.com/golang-jwt
 )
 AGENT_EXCEPTIONS=()
+
+# FETCH_BANNED is keyroster-agent-fetch's banned list (03-07 Task 3, D-05):
+# the fetcher runs no program (T-03-43), so os/exec has no exception here.
+FETCH_BANNED=(
+	os/exec
+	plugin
+	html/template
+	text/template
+	net/smtp
+	github.com/go-webauthn
+	github.com/fxamacker/cbor
+	github.com/golang-jwt
+)
+FETCH_EXCEPTIONS=()
 
 # A package matches a banned entry when it is the entry or below it.
 # $1 names the banned array.
@@ -140,6 +158,7 @@ for tags in "" piv; do
 	check_target keyroster-signer ./cmd/keyroster-signer "$tags" BANNED EXCEPTIONS
 done
 check_target keyroster-agent ./cmd/keyroster-agent "" AGENT_BANNED AGENT_EXCEPTIONS
+check_target keyroster-agent-fetch ./cmd/keyroster-agent-fetch "" FETCH_BANNED FETCH_EXCEPTIONS
 
 if [ "$status" != 0 ]; then
 	echo "dep-firewall: banned packages in a binary's dependency graph (see above)" >&2
