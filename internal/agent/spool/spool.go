@@ -398,8 +398,11 @@ func pick(vs []uint64, floor uint64) map[uint64]bool {
 
 // Write stores s in the spool at dir through WriteFileAt (mode 0644),
 // signatures and manifests before the file that completes a set, so a
-// reader never sees a set without the bytes that complete it. It is the
-// fetcher's writer (03-07); the applier never calls it.
+// reader never sees a set without the bytes that complete it. Policies
+// are written before bundles, so a bundle in the spool implies the policy
+// it names is there too: a write cut short between them leaves the bundle
+// out, and the fetcher asks for it again (PR #71 review F10/F12). It is
+// the fetcher's writer (03-07); the applier never calls it.
 func Write(dir string, s State) error {
 	fd, err := OpenDir(dir)
 	if err != nil {
@@ -409,7 +412,7 @@ func Write(dir string, s State) error {
 	for _, k := range []struct {
 		kind string
 		docs map[uint64]Doc
-	}{{"bundle", s.Bundles}, {"policy", s.Policies}, {"directory", s.Directories}} {
+	}{{"policy", s.Policies}, {"bundle", s.Bundles}, {"directory", s.Directories}} {
 		for v, d := range k.docs {
 			base := k.kind + "-" + strconv.FormatUint(v, 10) + ".json"
 			if err := WriteFileAt(fd, base+".sigs", d.Sigs, 0o644); err != nil {

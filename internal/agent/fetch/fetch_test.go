@@ -229,6 +229,35 @@ func TestFetch(t *testing.T) {
 			t.Fatalf("spooled %v", got)
 		}
 	})
+	t.Run("policy_write_failure_spools_no_bundle", func(t *testing.T) {
+		// PR #71 review F10/F12: the policy a bundle names is written before
+		// the bundle, so a bundle in the spool implies its policy is there. A
+		// policy write that fails (a directory in its place stands in for
+		// ENOSPC or a crash) leaves bundle 2 out, and the spool's newest
+		// bundle stays 1.
+		spoolDir := t.TempDir()
+		item := func(v uint64) *serverclient.AgentStateResponse {
+			return &serverclient.AgentStateResponse{Bundles: []serverclient.AgentBundle{{Version: v, Bundle: []byte("b"), BundleSigs: []byte("s"),
+				PolicyVersion: v, Policy: []byte("p"), PolicySigs: []byte("s")}}}
+		}
+		if err := writeState(spoolDir, item(1)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(spoolDir, "policy-2.json"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeState(spoolDir, item(2)); err == nil {
+			t.Fatal("the policy write did not fail")
+		}
+		for _, n := range []string{"bundle-2.json", "bundle-2.json.sigs"} {
+			if _, err := os.Lstat(filepath.Join(spoolDir, n)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("%s spooled while its policy is missing: %v", n, err)
+			}
+		}
+		if v, err := spooledVersions(spoolDir); err != nil || v.Bundle != 1 {
+			t.Fatalf("the spool's newest bundle %d (%v), want 1", v.Bundle, err)
+		}
+	})
 	t.Run("not_approved_waits", func(t *testing.T) {
 		ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusForbidden)
