@@ -66,12 +66,15 @@ jobs:
       # apply through systemctl, a certificate login, the heartbeat, the
       # cross-user writes as the real keyroster-agent user and
       # `systemd-analyze security` for both units. The thresholds are
-      # exposure x10, set from the measured exposure x10 rounded up to the
-      # next 5 (plan caps: fetcher 20, applier 50); see the step's log.
+      # exposure x10, the measured exposure x10 rounded up to the next 5
+      # (plan caps: fetcher 20, applier 50). Measured on PR #72 (run
+      # 40786881636, systemd 255 on ubuntu-24.04): keyroster-agent-fetch.service
+      # 1.2 (OK), so 15; keyroster-agent.service 2.0 (OK), so 20. Lower either
+      # freely; raise one only in a reviewed PR that records the report.
       - name: Smoke test the agent units
         env:
-          KEYROSTER_AGENT_FETCH_SECURITY_THRESHOLD: "20"
-          KEYROSTER_AGENT_APPLY_SECURITY_THRESHOLD: "50"
+          KEYROSTER_AGENT_FETCH_SECURITY_THRESHOLD: "15"
+          KEYROSTER_AGENT_APPLY_SECURITY_THRESHOLD: "20"
         run: >-
           sudo env "PATH=$PATH"
           "KEYROSTER_AGENT_FETCH_SECURITY_THRESHOLD=$KEYROSTER_AGENT_FETCH_SECURITY_THRESHOLD"
