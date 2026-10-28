@@ -319,6 +319,13 @@ A pre-merge security review of PR #70 upheld fifteen findings: two Claude lenses
 | F11 | Pinned: the clock check's two commands and its rule, found after step 2b's heading (the same lines stand in "Snapshot restore: check the clock first"); the openers `bash -eu -s <admin> <<'EOF'` (runbook) and `bash -eu -s kradmin <<'EOF'` (smoke) of copy-in and read-back; the release check's rules (F2 replaced "the count must print `1`"). | `7c28c25` | `restoreClockCommands`, `restoreClockRule`, `restoreAdminOpener`, `restoreSmokeAdminOpener` | commands deleted; rule deleted; four openers without `-e` |
 | F15 | The capture block copies only when `runuser -u keyroster-server -- test -f` passes, then runs `head -c 5620745` and checks `stat -c %s` ≤ 5620744 = `krl.MaxKRLResponse`. The read-back works the same way as the admin, with the cap `wire.MaxRecoveryFile` = 9470226. The rule that "a link reaches only what that account can read" now says that a link still reaches any regular file that account can read. A FIFO swapped in between the check and the copy only makes the block wait; the runbook says to stop it and escalate. | `7c28c25` | `TestRestoreCopyCaps` ties both caps to the code constants. smoke: the read-back stops on a request planted as a FIFO, a link to `/dev/zero` or a dangling link. | capture without `test -f` (runbook); read-back without `test -f` (smoke); either cap moved off its limit in runbook, smoke and test together (TestRestoreCopyCaps) |
 
+**F2, "exactly two" (`2c66315`).** The check must also stop when more was logged after the recovery's two entries:
+- smoke.sh runs a fixture with one extra entry after the `krl_publish`;
+- the drill's final export holds the revocation of H after the recovery;
+- both must stop the release check.
+
+Before this commit, only the text pins protected `-eq $((n + 3))`: every behavioural negative had fewer lines than the check expects, not more. In WSL, the script with `-ge` passed an extra-entry log that the original stops. Those smoke and drill assertions turn RED under `-ge` by construction. They were not run as mutants, because systemd-sandbox and e2e run only in CI.
+
 Mutants: 2 for the CLI, 3 for audit, and 28 for the runbook and smoke pins, all RED.
 - The CLI and audit mutants ran on Windows copies.
 - The pin mutants ran on a WSL copy with the e2e test binary (`TestRestoreRunbookChecks`, `TestRestoreCopyCaps`).
@@ -331,14 +338,20 @@ Mutants: 2 for the CLI, 3 for audit, and 28 for the runbook and smoke pins, all 
 - **The UNVERIFIED item "the capture block's refusal of a krl-served.json that cannot be read, or of a dangling link"** is run in systemd-sandbox now (F8).
 - **Deviation 4 (the recovery count)** and the PR body's item 4 are superseded the same way.
 
-### What ran where (head `3590a2c`)
+### What ran where
 
 - **Windows:** gofmt clean; go vet linux/windows/darwin clean, and `-tags e2e` for linux; `go test ./...` passes apart from the known `internal/agent/paths` TestAllowed failure.
 - **WSL:** `golangci-lint run ./...` 0 issues, and `GOOS=windows` 0 issues. `-tags e2e` lint reports only findings older than this round. In `restore_test.go` those are `copyDB`'s G304 and G703, and CI does not lint with that tag.
 - **WSL:** `go test -race` passes for `./cmd/keyroster/` and `./internal/audit/`.
+- **WSL copies were tars of the working tree, not `git archive`:** `git ls-files -co --exclude-standard`, without `.planning`. They were deleted afterwards.
 - **CI, dispatched on `3590a2c`:**
   - E2E run 40668513933: success. `TestRestoreRecoversLostRevocations`, `TestRestoreRecoveryAfterRecovery`, `TestRestoreRunbookChecks` and `TestRestoreCopyCaps` show `--- PASS` on both lanes, 10.5p1 and 9.5p1.
   - Systemd run 40668518276: success. The log shows the refusal and replacement, the move, and the release check's five fixture outcomes.
+- **CI, dispatched again on `2c66315`, after the extra-entry cases:**
+  - E2E run 40670429954: success, with the same four tests `--- PASS` on both lanes.
+  - Systemd run 40670434605: success, with six release-check outcomes, the extra-entry stop among them.
+- **This docs commit changes only `.planning`.** The PR's own checks run on it.
+- **No exec site, no module.** The new `exec.Command("bash")` is in `test/e2e` only.
 
 ### UNVERIFIED after this round
 
