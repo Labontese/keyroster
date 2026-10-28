@@ -54,9 +54,9 @@ Requirements for the first public release. Each maps to roadmap phases.
 - [x] **AGENT-02**: Agent communicates pull-only over mTLS with a closed set of typed operations — no remote exec, no inbound ports
 - [x] **AGENT-03**: Agent only applies CA sets, policy and KRLs signed by the pinned trust root / delegated keys; unsigned or older versions are rejected
 - [ ] **AGENT-04**: Agent writes sshd config, trusted CA keys, principals files and KRL atomically, validates with `sshd -t`, reloads, self-tests and rolls back on failure
-- [ ] **AGENT-05**: Agent verifies effective sshd config (`sshd -T -C`) periodically and reports drift (e.g. missing `RevokedKeys`)
+- [x] **AGENT-05**: Agent verifies effective sshd config (`sshd -T -C`) periodically and reports drift (e.g. missing `RevokedKeys`)
 - [ ] **AGENT-06**: Agent obtains and renews host certificates by proof of possession of the host key
-- [ ] **AGENT-07**: Agent sends heartbeats with hashes of applied config, CA set and KRL version
+- [x] **AGENT-07**: Agent sends heartbeats with hashes of applied config, CA set and KRL version
 
 ### Revocation (REVOKE)
 
@@ -199,9 +199,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AGENT-02 | Phase 3 | Complete |
 | AGENT-03 | Phase 3 | Complete |
 | AGENT-04 | Phase 3 | Pending |
-| AGENT-05 | Phase 3 | Pending |
+| AGENT-05 | Phase 3 | Complete |
 | AGENT-06 | Phase 3 | Pending |
-| AGENT-07 | Phase 3 | Pending |
+| AGENT-07 | Phase 3 | Complete |
 | REVOKE-01 | Phase 3 | Pending (reworded 2026-10-23, Phase 3 D-02/D-04/D-12/D-17/D-18) |
 | REVOKE-02 | Phase 3 | Complete |
 | REVOKE-03 | Phase 3 | Complete |
