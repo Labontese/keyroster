@@ -413,7 +413,7 @@ bash -eu <<'EOF'
 runuser -u keyroster-server -- test -d /var/lib/keyroster-server -a -x /var/lib/keyroster-server
 test ! -e /root/recovery
 install -d -m 0700 /root/recovery
-listed=$(runuser -u keyroster-server -- find /var/lib/keyroster-server -maxdepth 1 -name krl-served.json -print)
+listed=$(runuser -u keyroster-server -- find -H /var/lib/keyroster-server -maxdepth 1 -name krl-served.json -print)
 if [ -n "$listed" ]; then
   runuser -u keyroster-server -- test -f /var/lib/keyroster-server/krl-served.json
   runuser -u keyroster-server -- head -c 5620745 /var/lib/keyroster-server/krl-served.json > /root/recovery/server-krl.json
@@ -454,7 +454,9 @@ The block's rules:
   writes only its own directory, `/root/recovery`.
 - Only a listing of the state directory that succeeded and does not name
   the file prints `no server KRL copy`. A listing that fails stops the
-  block.
+  block. The listing (`find -H`) follows the state directory when it is
+  itself a link, for example to state kept on another disk, and follows
+  no link inside it.
 - The block stops when it ends without one of the two lines, and then it
   claims neither:
   - the server account cannot reach or list its state directory
@@ -491,6 +493,10 @@ block verbatim:
 - with the file a link that leads nowhere, a link to `/dev/zero`, a FIFO,
   a file of mode 000, or a file of 5 620 745 bytes: it stops, prints
   neither line and writes at most 5 620 745 bytes;
+- with the state directory a link to a directory elsewhere: `kept:` when
+  that directory holds a fixture file, with a copy equal to the fixture
+  byte for byte; and, when that directory is unreadable to the server
+  account, it stops and prints neither line;
 - with a fixture file written as keyroster-server: `kept:`, with a copy
   equal to the fixture byte for byte.
 

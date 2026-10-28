@@ -255,11 +255,18 @@ const (
 	// as the server account sees it) of at most krl.MaxKRLResponse bytes,
 	// the most keyroster revoke recover reads from a --krl file
 	// (TestRestoreCopyCaps), so a link to /dev/zero or a FIFO stops it.
+	//
+	// PR #70 review round 2: find -H lists the state directory also when
+	// it is itself a link (state kept on another disk, say). Without -H,
+	// find does not descend through a linked start point, prints nothing
+	// and exits 0, and the block claims that a kept file does not exist.
+	// -H follows only that start point, so a krl-served.json that is a
+	// link is still listed, and test -f decides about it.
 	restoreCaptureBlock = "bash -eu <<'EOF'\n" +
 		`runuser -u keyroster-server -- test -d /var/lib/keyroster-server -a -x /var/lib/keyroster-server
 test ! -e /root/recovery
 install -d -m 0700 /root/recovery
-listed=$(runuser -u keyroster-server -- find /var/lib/keyroster-server -maxdepth 1 -name krl-served.json -print)
+listed=$(runuser -u keyroster-server -- find -H /var/lib/keyroster-server -maxdepth 1 -name krl-served.json -print)
 if [ -n "$listed" ]; then
   runuser -u keyroster-server -- test -f /var/lib/keyroster-server/krl-served.json
   runuser -u keyroster-server -- head -c 5620745 /var/lib/keyroster-server/krl-served.json > /root/recovery/server-krl.json

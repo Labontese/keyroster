@@ -400,7 +400,7 @@ capture() {
 runuser -u keyroster-server -- test -d /var/lib/keyroster-server -a -x /var/lib/keyroster-server
 test ! -e /root/recovery
 install -d -m 0700 /root/recovery
-listed=$(runuser -u keyroster-server -- find /var/lib/keyroster-server -maxdepth 1 -name krl-served.json -print)
+listed=$(runuser -u keyroster-server -- find -H /var/lib/keyroster-server -maxdepth 1 -name krl-served.json -print)
 if [ -n "$listed" ]; then
   runuser -u keyroster-server -- test -f /var/lib/keyroster-server/krl-served.json
   runuser -u keyroster-server -- head -c 5620745 /var/lib/keyroster-server/krl-served.json > /root/recovery/server-krl.json
@@ -480,9 +480,31 @@ rm "$srv_file"
 as_user keyroster-server sh -c 'umask 077 && head -c 5620745 /dev/zero >"$1"' sh "$srv_file"
 capture_stops too-large
 rm "$srv_file"
-# A copy written as keyroster-server (a fixture: no server runs here).
 krl_fixture=$work/krl-served.fixture
 printf '{"krl":"Zml4dHVyZQ==","manifest":"Zml4dHVyZQ==","sig":"Zml4dHVyZQ=="}\n' >"$krl_fixture"
+# A state directory that is a link to a directory elsewhere (state kept on
+# another disk, say): the listing follows the link, so the copy behind it
+# is kept, and a listing of an unreadable directory behind it fails (PR #70
+# review round 2). find without -H lists nothing behind a linked start
+# point and exits 0, which claimed "no server KRL copy" for both.
+srv_real=/var/lib/keyroster-server-data
+[ ! -e "$srv_real" ] || fail "$srv_real exists on this host"
+mv "$srv_state" "$srv_real"
+ln -s "$srv_real" "$srv_state"
+runuser -u keyroster-server -- sh -c 'umask 077 && cat >"$1"' sh "$srv_file" <"$krl_fixture"
+capture | tee "$work/capture-linked.log"
+grep -qx 'kept: /root/recovery/server-krl.json' "$work/capture-linked.log" || fail "the capture block did not keep the copy behind a linked state directory"
+cmp "$krl_fixture" /root/recovery/server-krl.json || fail "the copy kept behind a linked state directory differs from the server's file"
+rm -r /root/recovery
+chmod 0300 "$srv_real"
+capture_stops linked-unreadable-dir
+chmod 0700 "$srv_real"
+rm "$srv_file" "$srv_state"
+mv "$srv_real" "$srv_state"
+if [ -L "$srv_state" ] || [ ! -d "$srv_state" ]; then
+	fail "$srv_state is not a directory again"
+fi
+# A copy written as keyroster-server (a fixture: no server runs here).
 runuser -u keyroster-server -- sh -c 'umask 077 && cat >"$1"' sh "$srv_file" <"$krl_fixture"
 capture | tee "$work/capture-kept.log"
 grep -qx 'kept: /root/recovery/server-krl.json' "$work/capture-kept.log" || fail "the capture block did not keep the server's copy"
