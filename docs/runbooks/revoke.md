@@ -420,6 +420,28 @@ version. The bytes are the signer's, unchanged. HTTP clients are told
 not to cache it (`Cache-Control: no-store`). The cache ran in the
 server's unit tests against a stub signer (`TestKRLCache`).
 
+keyroster-server also keeps the last KRL document it served, in
+`krl-served.json` in its state directory (`/var/lib/keyroster-server`,
+see [server-install.md](server-install.md)). It verifies each KRL against
+the signer's trust bundle and installation ID and writes it there before
+it serves it. It never replaces the copy with a lower version. The route
+answers 503, and logs why, rather than serve a KRL in any of these cases:
+
+- it could not keep the KRL (`KRL not kept: ...`);
+- the KRL does not verify;
+- the KRL's version is below the one it served;
+- the KRL has the same version as the one it served, but other bytes;
+- the copy it read at start does not verify, so it cannot be the
+  version floor;
+- the signer has no KRL after the server served one.
+
+A signer restore does not roll this file back, so it is the restore's
+source for revocations made after the latest saved export
+([signer-install.md](signer-install.md#a-restore-brings-back-the-older-trust-bundle-policy-and-directory),
+step 2b). The copy and each of the 503 answers are run in CI
+(internal/server tests, 03-06b). Remedies for a copy that does not
+verify are in server-install.md, labelled UNVERIFIED there.
+
 The server is not trusted for any of it. A reader accepts a KRL only when
 the manifest's signature is by the ops key of its root-pinned trust
 bundle, the manifest names the installation ID it pinned, its
@@ -455,11 +477,30 @@ of each (section 4). Run in the audit and signer unit tests
 UNVERIFIED until 03-16.
 
 Always take a saved export after every revocation
-(`keyroster-signer export-log`, kept off the signer VM): a signer restore
-loses every revocation made after the latest saved export without a
-trace, and the restore's check in
+(`keyroster-signer export-log`, kept off the signer VM). A signer
+restore loses every revocation made after the latest saved export, and
+the revoke counts of the restore's step 2 cannot see such a revocation
+(T-03-207). The restore's step 2b in
 [signer-install.md](signer-install.md#a-restore-brings-back-the-older-trust-bundle-policy-and-directory)
-cannot see it (T-03-207).
+recovers lost revocations under the hold, before the restored signer
+serves. It imports the saved export's last KRL and keyroster-server's
+copy (section 6). The server's copy covers revocations made after the
+latest saved export, but only while the server's state directory
+survives the restore. When it does not, only the saved export is
+imported, and revocations made after it stay lost.
+
+**A lost host or machine certificate that the recovery kept.** The
+recovery revokes every lost user certificate. It keeps lost host and
+machine certificates unless the admin names them with `--revoke-lost
+SERIAL`, and its summary prints each kept certificate's public key:
+`lost certificate: serial <s>, host, ...: keep; public key <key>; revoke
+later with: keyroster revoke key <file with this public key>`. To revoke
+one later, write that public key (the text after `public key`, up to the
+`;`) into a file, and run `keyroster revoke key FILE` (section 3). That
+revokes the key plain and in every certificate for it. This path is
+run in CI e2e (03-06c): `TestRestoreRecoversLostRevocations` revokes a
+kept host certificate this way, with the public key read from the
+summary.
 
 ## 8. On the homelab
 

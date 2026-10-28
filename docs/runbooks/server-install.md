@@ -233,8 +233,10 @@ The directory also holds `krl-served.json`: the last KRL document the server
 served, which it writes, verified against the signer's trust bundle, before it
 serves it. Like the rest of the directory it is no authority, because every
 reader verifies the KRL against its own root-pinned bundle. It is, however, the
-restore source for revocations that a signer restore lost (the restore
-procedure lands with 03-06c). Never delete it, and back it up with the
+restore source for revocations that a signer restore lost: the restore
+procedure keeps a copy of it under the hold and imports it in step 2b (see
+[signer-install.md](signer-install.md#a-restore-brings-back-the-older-trust-bundle-policy-and-directory)).
+Never delete it, and back it up with the
 directory. The server's KRL route answers 503, and logs why, rather than serve
 a KRL it could not keep (`KRL not kept: ...`), one that does not verify (`KRL
 not served: it does not verify ...`), one below the version it served

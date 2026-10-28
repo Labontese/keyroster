@@ -482,7 +482,8 @@ it, and keyroster-signer has no backup command. Copy `signer.db` and its
 `-wal` and `-shm` files, those that exist, as one set, and only while
 the signer is stopped and cannot start: run the hold block above, copy
 the files into a directory of mode 0700 that only root can read, then
-run step 2's release block below and start the signer again. A copy of
+run step 2's release block below and start the signer again. A backup
+restores nothing, so it needs neither the capture block nor step 2b. A copy of
 a running signer's files is not a backup, because SQLite may write to
 them during the copy. An online copy (SQLite's `.backup` command, or
 `VACUUM INTO` on a read-only connection, run as keyroster-signer) needs
@@ -1167,19 +1168,38 @@ structurally (see the warning above).
 >
 > **Run in CI e2e (TestRestoreRecoversLostRevocations, 03-06c)** on a
 > test signer behind a test keyroster-server, with the harness's agent
-> backend: a user certificate issued before the backup and revoked with
-> `keyroster revoke serial` after the saved export, so that only the
-> server's `krl-served.json` holds the revocation; the server and signer
-> stopped, the server's copy kept, and the backup restored; the restored
-> export taken while the signer is stopped; `keyroster revoke recover`
-> with the restored and saved exports and the kept copy as `--krl`, its
-> summary listing the copy among the imports; `keyroster-signer
-> recover-revocations` reading its file before the restored signer ever
-> starts; with both started again, the served KRL makes `ssh-keygen -Q`
-> refuse the certificate and sshd refuse its login, and accept a control
-> certificate. The test runs the commands as its own user, not the
-> runbook's `runuser` blocks, which the `systemd-sandbox` check below
-> runs.
+> backend. The setup:
+>
+> - user certificates A and B, and a control certificate E that is never
+>   revoked, are issued before the backup;
+> - after the backup, user certificates C and D (two subjects) and a host
+>   certificate H are issued, A is revoked by key ID, C with `keyroster
+>   revoke user` and a plain key K with `keyroster revoke key`;
+> - the saved export is taken, and then B is revoked with `keyroster
+>   revoke serial`, so only the server's `krl-served.json` holds that
+>   revocation;
+> - the server and the signer are stopped, the server's copy is kept, and
+>   the backup is restored.
+>
+> Then the restored export (taken while the signer is stopped) and step
+> 2's three verifies; `keyroster revoke recover` with the kept copy as
+> `--krl`, whose summary lists the copy among the imports, revokes the
+> lost user certificates C and D and keeps H with its public key; and
+> `keyroster-signer recover-revocations` before the restored signer ever
+> starts. It is refused while another process holds `signer.lock` and
+> with the evidence of a key that is no admin (`recovery_evidence_invalid`),
+> each time with the log unchanged, then applies the file once, and a
+> second run is refused `recovery_log_mismatch`. The recovered log adds
+> exactly one `revocation_recovery` entry and one `krl_publish` to the
+> restored log, so no KRL was published between them, and it verifies on
+> its own and with `--previous` set to the restored export. With both
+> started again, the served KRL makes `ssh-keygen -Q` refuse A, B, C, D
+> and K and accept E and H, and sshd refuses A, B, C and D and accepts E.
+> `keyroster revoke key` with the public key the summary printed then
+> revokes H. A restarted signer serves the same KRL version, which still
+> refuses all of them, and the final export verifies. The test runs the
+> commands as its own user, not the runbook's `runuser` blocks, which the
+> `systemd-sandbox` check below runs.
 >
 > **Run in CI (`systemd-sandbox`, `test/systemd/smoke.sh`, 03-06c)** with
 > the blocks of step 2b verbatim, under the hold, for the admin account:
