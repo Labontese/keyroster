@@ -436,14 +436,13 @@ of step 2b applies. Write it into the operations log.
   out.
 
 **The copy is only as trustworthy as the keyroster-server account.**
-Nothing in this procedure checks it against a host. Whoever controls that
-account can put an older genuine KRL into `krl-served.json` before the
-capture (a direct write bypasses the server's never-lower rule). That copy
-passes every check of step 2b, and the revocations made after its version
-and after your latest saved export are then silently left out of the
-recovery. A cross-check of the copy's version against a host's installed
-KRL arrives with 03-07 (T-03-277). Until then, escalate a restore after a
-suspected compromise of the server host.
+Whoever controls that account can put an older genuine KRL into
+`krl-served.json` before the capture (a direct write bypasses the server's
+never-lower rule), or remove the file. Such a copy passes every check of
+step 2b, and the revocations made after its version and after your latest
+saved export would then be silently left out of the recovery. The
+cross-check below compares the copy with the KRL the enrolled hosts
+enforce (T-03-277). Run it before step 2b.
 
 The block's rules:
 
@@ -502,6 +501,67 @@ block verbatim:
 
 UNVERIFIED on a real host, and a listing that fails on a disk error (CI
 runs only an unreadable directory).
+
+**Cross-check the copy against the hosts (T-03-277).** Hosts get a KRL
+only through keyroster-server, which writes `krl-served.json` before it
+serves a KRL (03-06b). So a genuine copy is never older than the KRL any
+host enforces, and a host that enforces a newer KRL than the copy proves
+that the copy was rolled back or removed. The hold keeps every host where
+it is: no new KRL reaches a host until the release.
+
+1. On at least one enrolled host, and preferably on every enrolled host
+   you can reach, run as root:
+
+   ```
+   keyroster-agent krl-version
+   ```
+
+   It prints one line, `installed KRL version: <N>`, and changes nothing
+   (it reads the agent's state and takes no lock). Write each host's name
+   and number into the operations log.
+
+2. As root, on the host that holds `/root/recovery`, run this block with
+   every number from part 1 as its arguments:
+
+   ```
+   bash -eu -s <host KRL version> [<host KRL version> ...] <<'EOF'
+   KEPT=/root/recovery/server-krl.json
+   set -o pipefail
+   stop() { echo "cross-check: $*" >&2; exit 1; }
+   [ "$#" -gt 0 ] || stop "no host's installed KRL version given; run keyroster-agent krl-version on at least one enrolled host"
+   v=0
+   if [ -e "$KEPT" ]; then
+     [ "$(wc -l <"$KEPT")" -eq 1 ] || stop "$KEPT is not one line"
+     grep -Eqx '\{"krl":"[A-Za-z0-9+/=]+","manifest":"[A-Za-z0-9+/=]+","sig":"[A-Za-z0-9+/=]+"\}' "$KEPT" || stop "$KEPT is not a KRL document as keyroster-server writes it"
+     v=$(cut -d'"' -f8 "$KEPT" | base64 -d | grep -o '"krl_version":[0-9]*' | cut -d: -f2) || stop "$KEPT has no KRL version"
+   fi
+   for n in "$v" "$@"; do
+     case "$n" in '' | *[!0-9]* | 0?* | ???????????????????*) stop "'$n' is not a KRL version" ;; esac
+   done
+   for h in "$@"; do
+     [ "$h" -le "$v" ] || stop "a host enforces KRL v$h, above v$v of the kept server copy: the copy was rolled back or removed. Keep the hold and escalate"
+   done
+   echo "cross-check passed: the kept server copy's KRL v$v is at least every host's installed KRL version ($*)"
+   EOF
+   ```
+
+Only the last line's `cross-check passed:` lets step 2b run; write it into
+the operations log. If the block stops, keep the hold and escalate. After
+the capture block printed `no server KRL copy`, the copy counts as version
+0, so any host that enforces a KRL stops the block: either the copy was
+removed, or the server's state directory was lost with it, and either way
+revocations after your latest saved export may be lost.
+
+The cross-check cannot help where no host is enrolled, or where every host
+you reach is under the same control as the keyroster-server account (it
+could then set what `keyroster-agent krl-version` prints). In those cases,
+escalate a restore after a suspected compromise of the server host.
+
+Run in CI e2e: the block on fixture copies, with hosts above, equal to and
+below the copy and with no copy (`TestRestoreCrossCheck`), and
+`keyroster-agent krl-version` on an enrolled host against the server's own
+`krl-served.json`, then against an older genuine copy, which stops the block
+(`TestAgentEnrollEndToEnd`, 03-07). UNVERIFIED on a real host until 03-16.
 
 **Keep users away until the replay is done.** From the moment the
 restored signer starts again until the last lost version is back (step
@@ -759,9 +819,10 @@ structurally (see the warning above).
 
    **2b. Recover the revocations the restore lost (every restore, before
    the release).** Run it after every restore, whatever the counts above
-   show, and with the hold in force. The restored signer's first KRL after
-   the restore must be the recovery's, and it lists every revocation that
-   either import holds. Every lost user certificate is revoked too. Lost
+   show, and with the hold in force, and only after the cross-check of the
+   server copy against the hosts printed `cross-check passed:` (T-03-277).
+   The restored signer's first KRL after the restore must be the
+   recovery's, and it lists every revocation that either import holds. Every lost user certificate is revoked too. Lost
    host and machine certificates are listed, and are revoked only when the
    admin names them (the owner's answer `revoke-users-list-others`,
    03-06b). Run the five parts in this order:

@@ -440,8 +440,9 @@ source for revocations made after the latest saved export
 ([signer-install.md](signer-install.md#a-restore-brings-back-the-older-trust-bundle-policy-and-directory),
 step 2b). That source is only as trustworthy as the keyroster-server
 account: whoever controls it can put an older genuine KRL there before
-the restore, and nothing checks the copy against a host until 03-07
-(T-03-277, the note at the capture block). The copy and each of the 503 answers are run in CI
+the restore. The restore compares the copy with the KRL the enrolled
+hosts enforce before it imports it (`keyroster-agent krl-version`, the
+cross-check after the capture block, T-03-277). The copy and each of the 503 answers are run in CI
 (internal/server tests, 03-06b). Remedies for a copy that does not
 verify are in server-install.md, labelled UNVERIFIED there.
 

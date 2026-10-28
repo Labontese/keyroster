@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -231,6 +232,18 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	h.wantAccepted(t, "c1 after the first apply", c, login)
 	pid := h.sshd.pid(t)
 
+	// The server's kept copy of the KRL it served before the revocation:
+	// an older genuine copy, for the cross-check below.
+	served := filepath.Join(env.StateDir, "krl-served.json")
+	servedBefore, err := os.ReadFile(served) //nolint:gosec // test fixture
+	if err != nil {
+		t.Fatalf("the server kept no KRL copy after serving the host: %v", err)
+	}
+	olderCopy := filepath.Join(t.TempDir(), "server-krl.json")
+	if err := os.WriteFile(olderCopy, servedBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	// 7. keyroster revoke serial through the server: refused a few polls
 	// later (the server's KRL cache, one fetcher poll, one applier round).
 	revokedAt := time.Now()
@@ -254,4 +267,21 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 		t.Fatalf("sshd PID %d, was %d: sshd was restarted", got, pid)
 	}
 	t.Logf("sshd PID %d unchanged since the first apply", pid)
+
+	// 8. The restore cross-check (T-03-277): the host's installed KRL
+	// version against the server's own copy passes, and against the older
+	// genuine copy it stops the runbook's block.
+	code, kv := runBin(t, agentBin(t), "", "krl-version", "--root", h.root, "--state-dir", h.state)
+	m := regexp.MustCompile(`^installed KRL version: ([0-9]+)\n$`).FindStringSubmatch(kv)
+	if code != 0 || m == nil || m[1] != strconv.FormatUint(h.lastApply(t).KRLVersion, 10) {
+		t.Fatalf("keyroster-agent krl-version exited %d: %q (the last apply reports KRL v%d)", code, kv, h.lastApply(t).KRLVersion)
+	}
+	if code, out := runCrossCheck(t, served, m[1]); code != 0 || !strings.Contains(out, "cross-check passed: the kept server copy's KRL v"+m[1]+" ") {
+		t.Fatalf("the cross-check against the server's own copy: exit %d:\n%s", code, out)
+	}
+	if code, out := runCrossCheck(t, olderCopy, m[1]); code == 0 || !strings.Contains(out, "a host enforces KRL v"+m[1]+", above v") {
+		t.Fatalf("the cross-check against an older genuine copy: exit %d:\n%s", code, out)
+	} else {
+		t.Logf("the cross-check stops on the older copy: %s", strings.TrimSpace(out))
+	}
 }
