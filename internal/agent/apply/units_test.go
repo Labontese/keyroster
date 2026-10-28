@@ -31,7 +31,10 @@ func TestUnits(t *testing.T) {
 		}
 		for _, l := range []string{"IPAddressDeny=any", "IPAddressAllow=localhost", "NoNewPrivileges=yes", "ProtectSystem=strict",
 			"ReadWritePaths=/etc/ssh/keyroster /etc/ssh/sshd_config.d /var/lib/keyroster-agent", "CapabilityBoundingSet=",
-			"ExecStart=/usr/local/bin/keyroster-agent run --state-dir /var/lib/keyroster-agent"} {
+			"ExecStart=/usr/local/bin/keyroster-agent run --state-dir /var/lib/keyroster-agent",
+			// A socket-activated sshd's privilege separation directory
+			// (systemd smoke test, PR #72): without it sshd -T fails.
+			"ExecStartPre=+/usr/bin/install -d -m 0755 -o root -g root /run/sshd"} {
 			if !unitHasLine(u, l) {
 				t.Errorf("keyroster-agent.service lacks the line %q:\n%s", l, u)
 			}

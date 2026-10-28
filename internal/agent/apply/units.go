@@ -79,6 +79,13 @@ After=network.target ssh.service sshd.service
 
 [Service]
 Type=exec
+# sshd -t and -T refuse to run without sshd's privilege separation
+# directory, which a socket-activated ssh.service (Ubuntu 24.04's default)
+# creates only once a connection started it: until then, after every boot,
+# the applier could neither apply nor check, and sshd would start on the
+# first connection with the trust files of before the boot. systemd creates
+# it here, outside this sandbox ("+"), root:root 0755 as sshd requires.
+ExecStartPre=+/usr/bin/install -d -m 0755 -o root -g root /run/sshd
 ExecStart=` + filepath.Join(c.BinDir, "keyroster-agent") + ` run --state-dir ` + c.StateDir + `
 Restart=on-failure
 RestartSec=5s

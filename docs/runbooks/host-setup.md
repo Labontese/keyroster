@@ -825,6 +825,17 @@ through drop-ins (`systemctl edit`): a later `install` writes them again.
 over a Phase 2 host is a hand-run step (below), and why the unit's applier
 reports `phase2_adoption_pending` instead of doing it.
 
+`sshd -t` and `sshd -T` refuse to run without sshd's privilege separation
+directory (`Missing privilege separation directory: /run/sshd`). A
+socket-activated `ssh.service`, Ubuntu 24.04's default, creates it only
+once a connection started sshd, so after a boot the applier could neither
+apply nor check, and the first connection would start sshd with the trust
+files from before the boot. The applier's unit therefore creates
+`/run/sshd` (root:root 0755) before it starts (`ExecStartPre=+`, outside its
+sandbox). A hand-run `keyroster-agent apply --once` on such a host before
+the unit ever ran needs `sudo install -d -m 0755 /run/sshd` first. (Found
+and run in CI by `agent-smoke.sh` on the runner's socket-activated sshd.)
+
 **Start them** (as root):
 
 ```
