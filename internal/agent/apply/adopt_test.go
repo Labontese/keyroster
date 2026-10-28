@@ -318,10 +318,26 @@ func TestAdopt(t *testing.T) {
 			if _, err := h.apply(); !isCrash(err) || h.lastGood() == 0 || !h.exists(h.l.State(adoptFile)) {
 				t.Fatalf("crash during the removal: %v, last-good %d", err, h.lastGood())
 			}
-			h.cfg.Fault = nil
 			tc.edit(t, h)
 			h.publishKRL(9)
+			// PR #68 carry-over (mutant M8): the repair runs before any Phase
+			// 2 path goes, so at every removal the drop-in on disk is already
+			// the agent's.
+			removals := 0
+			h.cfg.Fault = func(p string) error {
+				if p == "phase2-remove" {
+					removals++
+					if got := readFile(t, h.l.DropIn()); got != string(DropIn(h.l)) {
+						t.Errorf("removal %d of the Phase 2 layout ran before the drop-in was repaired: it holds %q", removals, got)
+					}
+				}
+				return nil
+			}
 			r, err := h.apply()
+			h.cfg.Fault = nil
+			if removals == 0 {
+				t.Fatal("the resume removed no Phase 2 path; the order check did not run")
+			}
 			if err != nil || !h.krlRevokes(h.l.Current(), 9) || h.exists(h.l.State(adoptFile)) || len(r.Phase2Removed) != 4 || !r.Reloaded {
 				t.Fatalf("the resume: %v, %+v, plan %t", err, r, h.exists(h.l.State(adoptFile)))
 			}
