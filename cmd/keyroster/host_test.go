@@ -419,7 +419,7 @@ func TestHostApprovePoPRequired(t *testing.T) {
 		e := roleEnv(t, nil)
 		var called bool
 		e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called, `{"hosts":[]}`, http.StatusOK)
-		code, _, stderr := run(t, "host", "approve", "web1", "--group", "web", "--principal", "web1", "--yes")
+		code, _, stderr := run(t, "host", "approve", "web1", "--group", "web", "--principal", "web1", "--host-key", "SHA256:"+strings.Repeat("A", 43), "--yes")
 		if code == 0 || !strings.Contains(stderr, "host_pop_not_enabled") {
 			t.Fatalf("host approve without pop.hosts: exit %d: %s", code, stderr)
 		}
@@ -457,7 +457,7 @@ func TestHostApprovePoPRequired(t *testing.T) {
 		}
 		var called bool
 		e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called, string(ans), http.StatusOK)
-		code, stdout, stderr := run(t, "host", "approve", "web1", "--group", "web", "--principal", "web1", "--yes")
+		code, stdout, stderr := run(t, "host", "approve", "web1", "--group", "web", "--principal", "web1", "--host-key", ssh.FingerprintSHA256(pub), "--yes")
 		if code != 0 {
 			t.Fatalf("host approve: exit %d: %s", code, stderr)
 		}
@@ -474,7 +474,7 @@ func TestHostApprovePoPRequired(t *testing.T) {
 		var called bool
 		e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called,
 			`{"hosts":[{"expected_name":"web1","identity_spki_sha256":"00","host_keys":["ssh-rsa AAAA"],"facts":{"sshd_version":"","os_id":"","os_version_id":"","hostname":"\u001b[31m"},"enrolled_at":"x"}]}`, http.StatusOK)
-		if code, _, stderr := run(t, "host", "approve", "web1", "--group", "web", "--principal", "web1", "--yes"); code == 0 || !strings.Contains(stderr, "does not check out") {
+		if code, _, stderr := run(t, "host", "approve", "web1", "--group", "web", "--principal", "web1", "--host-key", "SHA256:"+strings.Repeat("A", 43), "--yes"); code == 0 || !strings.Contains(stderr, "does not check out") {
 			t.Fatalf("a pending answer that does not check out: exit %d: %s", code, stderr)
 		}
 		if e.agent.dirSigns() != 0 {
@@ -562,6 +562,72 @@ func TestHostForget(t *testing.T) {
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, strings.Replace(string(forgotten), `"web1"`, `"web2"`, 1), http.StatusOK)
 		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "does not check out") {
 			t.Fatalf("an answer for another name: exit %d: %s", code, stderr)
+		}
+	})
+}
+
+// TestHostApproveHostKeys is owner decision D-R4 (PR #71 review F13):
+// host approve with --yes needs --host-key for every host key the admin
+// compared on the host, and signs only when the pending host the CLI
+// fetched again has exactly that set: a swapped key, a missing one or an
+// extra one is refused and nothing is signed.
+func TestHostApproveHostKeys(t *testing.T) {
+	keyOf := func(t *testing.T, name string) (string, string) {
+		t.Helper()
+		_, key := writeEntryKey(t, name)
+		pub, err := trust.ParseKey(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key, ssh.FingerprintSHA256(pub)
+	}
+	k1, fp1 := keyOf(t, "a")
+	k2, fp2 := keyOf(t, "b")
+	_, fpOther := keyOf(t, "c")
+	pendingWith := func(t *testing.T, keys ...string) *dirEnv {
+		t.Helper()
+		e := popHostsEnv(t)
+		slices.Sort(keys)
+		ans, err := json.Marshal(serverclient.PendingHostsAnswer{Hosts: []serverclient.PendingHost{{ExpectedName: "web1", IdentitySPKISHA256: strings.Repeat("00", 32),
+			HostKeys: keys, Facts: enroll.Facts{OSID: "debian", Hostname: "web1"}, EnrolledAt: "2026-10-28T12:00:00Z"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var called bool
+		e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called, string(ans), http.StatusOK)
+		return e
+	}
+	approve := func(fps ...string) []string {
+		args := []string{"host", "approve", "web1", "--group", "web", "--principal", "web1", "--yes"}
+		for _, fp := range fps {
+			args = append(args, "--host-key", fp)
+		}
+		return args
+	}
+	for _, tc := range []struct {
+		name    string
+		pending []string
+		given   []string
+	}{
+		{"yes_without_host_key_refused", []string{k1}, nil},
+		{"swapped_key_refused", []string{k1, k2}, []string{fp1, fpOther}},
+		{"missing_key_refused", []string{k1, k2}, []string{fp1}},
+		{"extra_key_refused", []string{k1}, []string{fp1, fp2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := pendingWith(t, tc.pending...)
+			if code, _, stderr := run(t, approve(tc.given...)...); code == 0 || !strings.Contains(stderr, "host-key") {
+				t.Fatalf("exit %d: %s", code, stderr)
+			}
+			if e.agent.dirSigns() != 0 {
+				t.Fatal("a directory version was signed")
+			}
+		})
+	}
+	t.Run("exact_set_in_any_order_signs", func(t *testing.T) {
+		e := pendingWith(t, k1, k2)
+		if code, _, stderr := run(t, approve(fp2, fp1)...); code != 0 || e.agent.dirSigns() != 1 {
+			t.Fatalf("exit %d, %d signatures: %s", code, e.agent.dirSigns(), stderr)
 		}
 	})
 }

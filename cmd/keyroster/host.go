@@ -601,8 +601,9 @@ func runHostApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 	fset.SetOutput(stderr)
 	ef := addEditFlags(fset)
 	group := fset.String("group", "", "the host group the host belongs to (required; exactly one)")
-	var principals stringList
+	var principals, hostKeys stringList
 	fset.Var(&principals, "principal", "a name clients use for the host, in its host certificate (repeatable, 1 to 8): short name, FQDN or address, lowercase, no trailing dot")
+	fset.Var(&hostKeys, "host-key", "the SHA256 fingerprint of a host key, as keyroster-agent identity prints it on the host (repeatable: every host key; required with --yes)")
 	pos, err := parseInterspersed(fset, args)
 	if err != nil {
 		return errUsage
@@ -624,6 +625,17 @@ func runHostApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 	for _, p := range principals {
 		if err := directory.CheckHostPrincipal(p); err != nil {
 			return fmt.Errorf("%w; nothing was signed", err)
+		}
+	}
+	// PR #71 review D-R4: with --yes nobody compares the fingerprints this
+	// run prints, so the admin names the ones they compared on the host.
+	if *ef.yes && len(hostKeys) == 0 {
+		_, _ = fmt.Fprintln(stderr, "host approve: --yes needs --host-key SHA256:... for every host key the host has (keyroster-agent identity on the host prints them); nothing was signed")
+		return errUsage
+	}
+	if len(hostKeys) > 0 {
+		if err := trust.CheckPins(hostKeys, 1); err != nil {
+			return fmt.Errorf("--host-key: %w; nothing was signed", err)
 		}
 	}
 	s, err := openAdminSession(*ef.adminKey, stderr)
@@ -659,9 +671,24 @@ func runHostApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 	if _, err := io.WriteString(stdout, b.String()); err != nil {
 		return err
 	}
+	if len(hostKeys) > 0 && !sameFingerprints(hostKeys, match[0].Fingerprint) {
+		return fmt.Errorf("the pending host %s has the host keys %s, not exactly the --host-key fingerprints you gave (%s); "+
+			"compare again with keyroster-agent identity on the host. Nothing was signed",
+			name, strings.Join(match[0].Fingerprint, ", "), strings.Join(hostKeys, ", "))
+	}
 	return editDirectory(ctx, s, editOpts{Yes: *ef.yes, Out: *ef.out}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
 		return addHostEntry(name, *group, match[0].Keys, principals)(d)
 	})
+}
+
+// sameFingerprints reports whether a and b, each without repeats
+// (trust.CheckPins and checkPendingHost refuse them), hold the same
+// fingerprints: nothing missing and nothing extra.
+func sameFingerprints(a, b []string) bool {
+	x, y := slices.Clone(a), slices.Clone(b)
+	slices.Sort(x)
+	slices.Sort(y)
+	return slices.Equal(x, y)
 }
 
 // runHostForget is keyroster host forget NAME [--admin-key FP] (PR #71

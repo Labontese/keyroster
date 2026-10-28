@@ -210,7 +210,16 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	before := time.Now()
 
 	// 5. Approval: a directory version with host web1 and the enrolled key.
-	approve := kr("host", "approve", "web1", "--group", "lab", "--principal", "web1", "--yes")
+	// With --yes, host approve signs only the host keys the admin compared
+	// (--host-key, every one; PR #71 review D-R4): here the ones
+	// keyroster-agent identity printed.
+	approveArgs := []string{"host", "approve", "web1", "--group", "lab", "--principal", "web1", "--yes"}
+	for _, l := range lines {
+		if fp, ok := strings.CutPrefix(l, "host key: "); ok {
+			approveArgs = append(approveArgs, "--host-key", strings.Fields(fp)[0])
+		}
+	}
+	approve := kr(approveArgs...)
 	if !strings.Contains(approve, "+ host web1 host_group=lab status=active principals=[web1]") {
 		t.Fatalf("host approve web1:\n%s", approve)
 	}

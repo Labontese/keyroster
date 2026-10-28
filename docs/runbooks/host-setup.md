@@ -741,8 +741,19 @@ prints the same `agent identity:` and `host key:` lines. Compare every one
 of them out of band; then:
 
 ```
-keyroster host approve <name> --group <host group> --principal <name> [--principal <fqdn> ...]
+keyroster host approve <name> --group <host group> --principal <name> [--principal <fqdn> ...] \
+  --host-key SHA256:<host key 1> [--host-key SHA256:<host key 2> ...]
 ```
+
+Give `--host-key` once for every `host key:` line `keyroster-agent
+identity` printed on the host. `host approve` fetches the pending host again
+and refuses, signing nothing, unless its host keys are exactly the ones you
+gave: none missing, none extra (owner decision D-R4, PR #71). That binds the
+signature to the keys you compared, not to whatever the server answers at
+approve time. `--host-key` is required with `--yes`; without `--yes`, `host
+approve` prints the fingerprints and asks before it signs, and then compare
+them in that output, not in an earlier `host pending`. (Run in CI:
+`TestHostApproveHostKeys` and `TestAgentEnrollEndToEnd`.)
 
 `host approve` shows the fingerprints again and signs a directory version
 with a host entry `<name>`, the enrolled host keys, the host group and the
