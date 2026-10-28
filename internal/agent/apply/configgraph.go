@@ -3,6 +3,7 @@
 package apply
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -122,6 +123,15 @@ func (g *graph) visit(path string, depth int, stack []string, from string, line 
 		g.problem(where, wl, "%s: %v", path, err)
 		return
 	}
+	// sshd copies each line it reads up to its first NUL byte only, so the
+	// rest of that line and its newline are dropped and the next line is
+	// joined to it (PR #68 carry-over; observed with 9.5p1 and 10.5p1:
+	// "AuthorizedPrincipalsComma<NUL>" then "nd /x" is one line to sshd).
+	// The agent cannot read such a file line by line as sshd does.
+	if i := bytes.IndexByte(b, 0); i >= 0 {
+		g.problem(path, 1+bytes.Count(b[:i], []byte{'\n'}), "%s holds a NUL byte, at which sshd joins lines", path)
+		return
+	}
 	lines, bad := parseConfig(path, b)
 	g.problems = append(g.problems, bad...)
 	if !g.seen[path] {
@@ -186,6 +196,11 @@ func includePattern(root, arg string) (string, string) {
 		return "", "starts with ~, which the agent does not resolve"
 	case strings.ContainsAny(arg, `?[\`):
 		return "", `holds ?, [ or \, which the agent does not expand as sshd's glob(3) does (only * is read)`
+	case slices.Contains(strings.Split(arg, "/"), ".."):
+		// The kernel resolves ".." after a symlink, Clean before it: a
+		// root-owned link under /etc/ssh plus link/../x would make the
+		// agent read another file than sshd (PR #68 carry-over).
+		return "", "holds a .. component, which the agent does not resolve as the kernel does"
 	}
 	p := filepath.Clean(arg)
 	if !strings.HasPrefix(arg, "/") {

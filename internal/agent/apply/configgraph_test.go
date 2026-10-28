@@ -107,6 +107,27 @@ func TestIncludeGraph(t *testing.T) {
 			t.Fatalf("%d levels of Include: %+v", maxIncludeDepth, r.Findings)
 		}
 	})
+	// PR #68 carry-over: sshd keeps a line only up to its first NUL byte
+	// and joins the next line to it (observed with 9.5p1 and 10.5p1), so a
+	// NUL anywhere in a file the walk reads makes a line-by-line reader see
+	// other lines than sshd: sshd_config_unsafe.
+	t.Run("nul_byte_in_included_file_unsafe", func(t *testing.T) {
+		t.Parallel()
+		h := host(t, "Include extra/ops.conf\n", map[string]string{"etc/ssh/extra/ops.conf": "PermitRootLogin no\x00\nBanner none\n"})
+		r := h.mustPreflight()
+		unsafe(t, r)
+		if f := finding(r, CodeConfigUnsafe); f.File != filepath.Join(h.l.Root, "etc/ssh/extra/ops.conf") || f.Line != 1 {
+			t.Fatalf("the NUL finding names %s:%d, want the included file, line 1", f.File, f.Line)
+		}
+		if _, err := h.apply(); !errors.Is(err, ErrConfigUnsafe) || h.exists(h.l.Current()) {
+			t.Fatalf("the first install: %v, current %t", err, h.exists(h.l.Current()))
+		}
+	})
+	t.Run("nul_byte_in_sshd_config_unsafe", func(t *testing.T) {
+		t.Parallel()
+		h := host(t, "# a comment\x00TrustedUserCAKeys /etc/ssh/other_ca.pub\n", nil)
+		unsafe(t, h.mustPreflight())
+	})
 	t.Run("included_file_writable_by_others_unsafe", func(t *testing.T) {
 		t.Parallel()
 		h := host(t, "Include extra/ops.conf\n", map[string]string{"etc/ssh/extra/ops.conf": "PermitRootLogin no\n"})
@@ -286,6 +307,9 @@ func TestIncludeGraph(t *testing.T) {
 		{"question_mark_glob_unsafe", "Include extra/????.conf"},
 		{"glob_in_directory_unsafe", "Include ex*/evil.conf"},
 		{"escaped_include_path_unsafe", `Include extra/ev\il.conf`},
+		// PR #68 carry-over: a .. component (the kernel resolves it after a
+		// symlink, filepath.Clean before it).
+		{"dot_dot_include_unsafe", "Include extra/../extra/evil.conf"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
