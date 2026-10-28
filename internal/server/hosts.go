@@ -12,6 +12,8 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/join"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/serverdb"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // handleMintJoinToken serves POST AdminJoinTokensPath (keyroster host
@@ -112,5 +114,77 @@ func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.log.Info("pending hosts listed", "admin", adminName(ctx), "count", len(out.Hosts))
+	s.writeJSON(w, dv.status, http.StatusOK, out)
+}
+
+// handleForgetHost serves POST AdminForgetHostPath (keyroster host forget,
+// admin-signed; PR #71 review D-R1): it deletes every agent enrolled under
+// the host name, so its identity gets 403 unknown_agent from then on and
+// its host keys can enroll again with a new join token. It is refused 409
+// host_in_directory while any directory host entry, active or disabled,
+// holds a host key of one of them: forgetting an agent whose host is
+// still in the directory would stop the signed state, revocations
+// included, that host still needs. The runbook order is: remove the host
+// from the directory, let the host apply that version, then forget. 404
+// host_not_enrolled when no agent has the name.
+func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var req serverclient.ForgetHostRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || dec.More() || !directory.ValidUserName(req.ExpectedName) {
+		s.writeJSON(w, nil, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	dv, err := s.currentDirectory(ctx)
+	if err != nil {
+		s.log.Warn("directory read failed", "err", err)
+		s.signerUnavailable(w, false)
+		return
+	}
+	agents, err := s.db.ListAgents(ctx)
+	if err != nil {
+		s.log.Error("list agents", "err", err)
+		s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
+	}
+	var forget []serverdb.Agent
+	for _, a := range agents {
+		if a.ExpectedName != req.ExpectedName {
+			continue
+		}
+		if dv.dir != nil {
+			for _, k := range a.HostKeys {
+				pub, err := trust.ParseKey(k)
+				if err != nil {
+					continue
+				}
+				if _, ok := dv.dir.HostForKey(pub); ok {
+					s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrHostInDirectory})
+					return
+				}
+			}
+		}
+		forget = append(forget, a)
+	}
+	if len(forget) == 0 {
+		s.writeJSON(w, dv.status, http.StatusNotFound, serverclient.APIError{Error: serverclient.AdminErrHostNotEnrolled})
+		return
+	}
+	out := serverclient.ForgetHostAnswer{Forgotten: []serverclient.PendingHost{}}
+	for _, a := range forget {
+		if err := s.db.DeleteAgent(ctx, a.ID); err != nil {
+			s.log.Error("forget agent", "agent", a.ID, "err", err)
+			s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+			return
+		}
+		var f enroll.Facts
+		_ = json.Unmarshal([]byte(a.Facts), &f) // stored by enrollment, which checked them
+		s.log.Info("agent forgotten", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "admin", adminName(ctx))
+		out.Forgotten = append(out.Forgotten, serverclient.PendingHost{
+			ExpectedName: a.ExpectedName, IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256), HostKeys: a.HostKeys,
+			Facts: f, EnrolledAt: time.UnixMicro(a.EnrolledAtUS).UTC().Format(time.RFC3339),
+		})
+	}
 	s.writeJSON(w, dv.status, http.StatusOK, out)
 }

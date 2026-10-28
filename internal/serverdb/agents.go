@@ -71,15 +71,21 @@ func (d *DB) CountJoinTokens(ctx context.Context) (int, error) {
 }
 
 // Agent is one enrolled agent. HostKeys are sorted trust.FormatKey
-// strings, Facts the facts' JSON as the agent sent them.
+// strings, Facts the facts' JSON as the agent sent them, TokenSHA256 the
+// SHA-256 of the join token that enrolled it.
 type Agent struct {
 	ID                 int64
 	IdentitySPKISHA256 []byte
+	TokenSHA256        []byte
 	ExpectedName       string
 	HostKeys           []string
 	Facts              string
 	EnrolledAtUS       int64
 	LastSeenUS         int64 // 0: never seen after enrollment
+	// ApprovedAtUS is when the agent first got signed state while the
+	// directory approved it (0: never). An agent approved once keeps
+	// getting state after its host entry goes (PR #71 review D-R1).
+	ApprovedAtUS int64
 }
 
 // EnrollAgent uses the join token tokenHash and records a as an enrolled
@@ -148,8 +154,8 @@ func (d *DB) EnrollAgent(ctx context.Context, tokenHash []byte, a Agent, nowUS i
 		}
 		return nil, fmt.Errorf("serverdb: use join token: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO agents (identity_spki_sha256, expected_name, host_keys, facts, enrolled_at_us) VALUES (?, ?, ?, ?, ?)`,
-		a.IdentitySPKISHA256, name, string(keys), a.Facts, nowUS)
+	res, err := tx.ExecContext(ctx, `INSERT INTO agents (identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us) VALUES (?, ?, ?, ?, ?, ?)`,
+		a.IdentitySPKISHA256, tokenHash, name, string(keys), a.Facts, nowUS)
 	if err != nil {
 		var se *sqlite.Error
 		if errors.As(err, &se) && se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
@@ -165,7 +171,7 @@ func (d *DB) EnrollAgent(ctx context.Context, tokenHash []byte, a Agent, nowUS i
 		return nil, fmt.Errorf("serverdb: commit: %w", err)
 	}
 	out := a
-	out.ID, out.ExpectedName, out.EnrolledAtUS = id, name, nowUS
+	out.ID, out.ExpectedName, out.EnrolledAtUS, out.TokenSHA256 = id, name, nowUS, slices.Clone(tokenHash)
 	return &out, nil
 }
 
@@ -173,7 +179,7 @@ func (d *DB) EnrollAgent(ctx context.Context, tokenHash []byte, a Agent, nowUS i
 func (d *DB) ListAgents(ctx context.Context) ([]Agent, error) { return listAgents(ctx, d.db) }
 
 func listAgents(ctx context.Context, q queryer) ([]Agent, error) {
-	rows, err := q.QueryContext(ctx, `SELECT id, identity_spki_sha256, expected_name, host_keys, facts, enrolled_at_us, last_seen_us FROM agents ORDER BY id`)
+	rows, err := q.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("serverdb: list agents: %w", err)
 	}
@@ -195,7 +201,7 @@ func listAgents(ctx context.Context, q queryer) ([]Agent, error) {
 // AgentBySPKI returns the agent whose identity SPKI hash is spki, or
 // ErrNotFound.
 func (d *DB) AgentBySPKI(ctx context.Context, spki []byte) (*Agent, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT id, identity_spki_sha256, expected_name, host_keys, facts, enrolled_at_us, last_seen_us FROM agents WHERE identity_spki_sha256 = ?`, spki)
+	rows, err := d.db.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents WHERE identity_spki_sha256 = ?`, spki)
 	if err != nil {
 		return nil, fmt.Errorf("serverdb: agent: %w", err)
 	}
@@ -218,18 +224,41 @@ func (d *DB) TouchAgent(ctx context.Context, id, nowUS int64) error {
 	return oneRow(res)
 }
 
+// MarkAgentApproved records nowUS as the agent's first approved state
+// answer; a later call keeps the first time (PR #71 review D-R1).
+func (d *DB) MarkAgentApproved(ctx context.Context, id, nowUS int64) error {
+	if _, err := d.db.ExecContext(ctx, `UPDATE agents SET approved_at_us = ? WHERE id = ? AND approved_at_us IS NULL`, nowUS, id); err != nil {
+		return fmt.Errorf("serverdb: mark agent approved: %w", err)
+	}
+	return nil
+}
+
+// DeleteAgent removes the agent row id, which frees its identity and host
+// keys for a new enrollment (keyroster host forget; PR #71 review D-R1).
+// It is ErrNotFound when no such row exists.
+func (d *DB) DeleteAgent(ctx context.Context, id int64) error {
+	res, err := d.db.ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("serverdb: delete agent: %w", err)
+	}
+	return oneRow(res)
+}
+
+// agentColumns are the columns scanAgent reads, in its order.
+const agentColumns = `id, identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us, last_seen_us, approved_at_us`
+
 func scanAgent(rows *sql.Rows) (*Agent, error) {
 	var (
-		a    Agent
-		keys string
-		seen sql.NullInt64
+		a              Agent
+		keys           string
+		seen, approved sql.NullInt64
 	)
-	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen); err != nil {
+	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.TokenSHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen, &approved); err != nil {
 		return nil, fmt.Errorf("serverdb: agent: %w", err)
 	}
 	if err := json.Unmarshal([]byte(keys), &a.HostKeys); err != nil {
 		return nil, fmt.Errorf("serverdb: agent %d host keys: %w", a.ID, err)
 	}
-	a.LastSeenUS = seen.Int64
+	a.LastSeenUS, a.ApprovedAtUS = seen.Int64, approved.Int64
 	return &a, nil
 }

@@ -118,12 +118,14 @@ type agentRequest struct {
 	dir    *directoryView
 }
 
-// requireAgent admits a request only from an enrolled, approved agent:
-// the client certificate's SPKI hash must name an agents row (else 403
-// unknown_agent), and the installed directory must hold an active host
-// entry whose keys equal that agent's enrolled host keys (else 403
-// not_approved). The approval is the admin-signed directory itself: the
-// server records nothing else. It updates the agent's last_seen_us.
+// requireAgent admits a request only from an enrolled agent that was
+// approved: the client certificate's SPKI hash must name an agents row
+// (else 403 unknown_agent), and the installed directory must hold an
+// active host entry whose keys equal that agent's enrolled host keys, or
+// have held one when the agent last got state (else 403 not_approved).
+// The approval is the admin-signed directory itself; the server records
+// only when the agent first got state under it (approved_at_us). It
+// updates the agent's last_seen_us.
 //
 // The agent is looked up before any rate limit is charged (PR #71 review
 // F1/F2): an identity no agents row names is charged to the anonymous
@@ -160,7 +162,22 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 			s.signerUnavailable(w, false)
 			return
 		}
-		if !approved(dv, a.HostKeys) {
+		// An agent the directory approved once keeps getting signed state
+		// after its host entry is disabled or removed, so the removal
+		// itself and every later revocation reach the host; only an agent
+		// never approved is refused (PR #71 review D-R1). keyroster host
+		// forget deletes the row and ends it.
+		switch {
+		case approved(dv, a.HostKeys):
+			if a.ApprovedAtUS == 0 {
+				if err := s.db.MarkAgentApproved(ctx, a.ID, s.clock().UnixMicro()); err != nil {
+					s.log.Error("agent approval", "err", err)
+					s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+					return
+				}
+				s.log.Info("agent approved: first signed state", "expected_name", a.ExpectedName, "agent", agentFingerprint(spki))
+			}
+		case a.ApprovedAtUS == 0:
 			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrNotApproved})
 			return
 		}
@@ -196,8 +213,13 @@ func approved(dv *directoryView, keys []string) bool {
 //     token's hash, the TLS identity, the signer's installation ID, the
 //     host keys and the facts' hash: every host key must have signed it
 //     (403 enroll_pop_invalid);
-//  4. no host key on a directory host entry (409 host_keys_in_use);
-//  5. in one transaction (serverdb.EnrollAgent): the token known, unused
+//  4. a retry of an enrollment this server already recorded, with the
+//     same token, identity and host keys (its 202 was lost), is answered
+//     202 again, before the checks below, which the recorded enrollment
+//     itself (its host approved since, its token used) would fail (PR #71
+//     review F11);
+//  5. no host key on a directory host entry (409 host_keys_in_use);
+//  6. in one transaction (serverdb.EnrollAgent): the token known, unused
 //     and unexpired (403 token_unknown, token_used, token_expired), the
 //     identity not enrolled (409 identity_in_use), no host key on another
 //     agent (409 host_keys_in_use), the token used and the agent recorded.
@@ -252,6 +274,17 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, v, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrPoPInvalid})
 		return
 	}
+	hash := sha256.Sum256(raw)
+	switch prior, err := s.db.AgentBySPKI(ctx, spki); {
+	case err == nil && bytes.Equal(prior.TokenSHA256, hash[:]) && slices.Equal(prior.HostKeys, req.HostKeys):
+		s.log.Info("agent enrollment retried, already recorded", "expected_name", prior.ExpectedName, "agent", agentFingerprint(spki))
+		s.writeJSON(w, v, http.StatusAccepted, serverclient.AgentEnrollAnswer{ExpectedName: prior.ExpectedName, Status: "pending"})
+		return
+	case err != nil && !errors.Is(err, serverdb.ErrNotFound):
+		s.log.Error("agent lookup", "err", err)
+		s.writeJSON(w, v, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
+	}
 	dv, err := s.currentDirectory(ctx)
 	if err != nil {
 		s.log.Warn("directory read failed", "err", err)
@@ -272,7 +305,6 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, v, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
 		return
 	}
-	hash := sha256.Sum256(raw)
 	a, err := s.db.EnrollAgent(ctx, hash[:], serverdb.Agent{IdentitySPKISHA256: spki, HostKeys: req.HostKeys, Facts: string(facts)},
 		s.clock().Truncate(time.Second).UnixMicro())
 	if err != nil {

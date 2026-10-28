@@ -34,6 +34,10 @@ const (
 	// AdminPendingHostsPath (GET): the enrolled agents no directory host
 	// entry approves yet; 200 PendingHostsAnswer.
 	AdminPendingHostsPath = "/api/v1/admin/hosts/pending"
+	// AdminForgetHostPath (POST): delete the agents enrolled under a host
+	// name, so their identities and host keys are free again
+	// (ForgetHostRequest); 200 ForgetHostAnswer (PR #71 review D-R1).
+	AdminForgetHostPath = "/api/v1/admin/hosts/forget"
 )
 
 // MaxAgentStateResponse bounds one encoded state response (F12): the
@@ -77,6 +81,8 @@ const (
 	AgentErrMalformed        = "malformed request"
 	AdminErrNoAgentListener  = "no_agent_listener"
 	AdminErrTTL              = "ttl_above_hour"
+	AdminErrHostNotEnrolled  = "host_not_enrolled"
+	AdminErrHostInDirectory  = "host_in_directory"
 )
 
 // ErrStateResponseTooLarge is a state response above
@@ -123,6 +129,18 @@ type PendingHost struct {
 	HostKeys           []string     `json:"host_keys"`
 	Facts              enroll.Facts `json:"facts"`
 	EnrolledAt         string       `json:"enrolled_at"`
+}
+
+// ForgetHostRequest is the body of a POST to AdminForgetHostPath: the host
+// name the agents were enrolled under.
+type ForgetHostRequest struct {
+	ExpectedName string `json:"expected_name"`
+}
+
+// ForgetHostAnswer is its 200 answer: every agent the server deleted, as
+// PendingHost (the CLI re-derives every fingerprint it prints).
+type ForgetHostAnswer struct {
+	Forgotten []PendingHost `json:"forgotten"`
 }
 
 // AgentEnrollRequest is the body of a POST to AgentEnrollPath: the join

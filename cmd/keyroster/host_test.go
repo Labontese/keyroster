@@ -521,3 +521,47 @@ func TestHostApprovePoPRequired(t *testing.T) {
 		}
 	})
 }
+
+// TestHostForget (PR #71 review D-R1): host forget prints every agent the
+// server forgot, with its re-derived fingerprints, and turns the server's
+// host_in_directory refusal into the runbook order.
+func TestHostForget(t *testing.T) {
+	_, key := writeEntryKey(t, "web1")
+	pub, err := trust.ParseKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgotten, err := json.Marshal(serverclient.ForgetHostAnswer{Forgotten: []serverclient.PendingHost{{ExpectedName: "web1", IdentitySPKISHA256: strings.Repeat("00", 32),
+		HostKeys: []string{key}, Facts: enroll.Facts{OSID: "debian", Hostname: "web1"}, EnrolledAt: "2026-10-28T12:00:00Z"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("prints_the_forgotten_agent", func(t *testing.T) {
+		e := popHostsEnv(t)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, string(forgotten), http.StatusOK)
+		code, stdout, stderr := run(t, "host", "forget", "web1")
+		if code != 0 || !e.wasCalled(&called) {
+			t.Fatalf("host forget: exit %d: %s", code, stderr)
+		}
+		if !strings.Contains(stdout, "agent identity: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n") || !strings.Contains(stdout, "host key: "+ssh.FingerprintSHA256(pub)+" ssh-ed25519\n") {
+			t.Fatalf("host forget output:\n%s", stdout)
+		}
+	})
+	t.Run("in_directory_refused_with_the_runbook_order", func(t *testing.T) {
+		e := popHostsEnv(t)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"host_in_directory"}`, http.StatusConflict)
+		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "keyroster host remove") {
+			t.Fatalf("host forget of a host still in the directory: exit %d: %s", code, stderr)
+		}
+	})
+	t.Run("answer_for_another_name_refused", func(t *testing.T) {
+		e := popHostsEnv(t)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, strings.Replace(string(forgotten), `"web1"`, `"web2"`, 1), http.StatusOK)
+		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "does not check out") {
+			t.Fatalf("an answer for another name: exit %d: %s", code, stderr)
+		}
+	})
+}

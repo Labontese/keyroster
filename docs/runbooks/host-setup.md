@@ -747,10 +747,14 @@ keyroster host approve <name> --group <host group> --principal <name> [--princip
 `host approve` shows the fingerprints again and signs a directory version
 with a host entry `<name>`, the enrolled host keys, the host group and the
 principals you typed: nothing in it comes from the host but its keys,
-which it proved it holds. The server treats the agent as approved only
-while the installed directory holds an active entry with exactly those
-keys. The next poll pulls the signed state and `keyroster-agent run`
-applies it ([How fast changes arrive](#how-fast-changes-arrive)).
+which it proved it holds. The server serves the agent signed state once
+the installed directory holds an active entry with exactly those keys, and
+from its first state answer on it records the agent as approved: after
+that the agent keeps receiving signed state even when its entry is
+disabled or removed, so the removal itself and every later revocation
+reach the host ([Removing a host](#removing-a-host)). The next poll pulls
+the signed state and `keyroster-agent run` applies it ([How fast changes
+arrive](#how-fast-changes-arrive)).
 
 **Refusals.**
 
@@ -759,13 +763,60 @@ applies it ([How fast changes arrive](#how-fast-changes-arrive)).
 | `host_pop_not_enabled` | CLI, server | The policy in force lacks `pop.hosts` | A root ceremony with `--pop-hosts` (above) |
 | `no_agent_listener` | `host join-token` | The server runs no agent listener | `--agent-listen` (server-install.md) |
 | `token_used`, `token_expired`, `token_unknown` | fetcher log | The token enrolled another agent, expired (enforced to the second), or was never minted | A new join token, then `keyroster-agent install` again |
-| `host_keys_in_use` | fetcher log | A host key is already on a directory host entry, or on an agent this server enrolled before | A directory entry only (a host registered with `keyroster host add`): `keyroster host remove <name>`. The refusal left the token unused, so the fetcher's next attempt enrolls while the token is valid (after it expired, a new join token and `install`); then approve under the same name. An agent enrolled before, for example a host whose agent state was reinstalled with the same host keys: this version has **no way** to enroll those keys again, or to deregister an enrolled agent (an owner decision; 03-08 owns identity rotation). `keyroster host remove` does not help there: it leaves the old agent, which `host pending` then lists again. Escalate |
+| `host_keys_in_use` | fetcher log | A host key is already on a directory host entry, or on an agent this server enrolled before | A directory entry only (a host registered with `keyroster host add`): `keyroster host remove <name>`. The refusal left the token unused, so the fetcher's next attempt enrolls while the token is valid (after it expired, a new join token and `install`); then approve under the same name. An agent enrolled before, for example a host whose agent state was reinstalled with the same host keys: remove its entry if it has one, then `keyroster host forget <old name>` ([Removing a host](#removing-a-host)), then a new join token and `install` |
 | `identity_in_use` | fetcher log | This fetcher identity is enrolled already | None needed: the host is enrolled |
 | `enroll_pop_invalid` | fetcher log | A host key's signature does not verify | Re-run the applier (`keyroster-agent run`); escalate if it repeats |
 | `host_key_unreadable` | applier log | A host key is held by an agent (`HostKeyAgent`), encrypted, or does not match its `.pub` | Use unencrypted host key files |
 | `enroll_request_invalid`, `enroll_pop_mismatch` | applier, fetcher log | The hand-over files do not check out | Let the fetcher write a fresh request (restart it) |
 | `not_approved` | fetcher log | Enrolled, not approved yet | Step 4 |
+| `unknown_agent` | fetcher log | The server has no agent with this identity: never enrolled, or forgotten (`keyroster host forget`) | A new join token, then `keyroster-agent install` again |
+| `rate limited` (429) | fetcher log | The server's limiter refused a state request; the fetcher keeps what it spooled and goes on at the next poll | None; escalate if every poll says it |
+| `host_in_directory`, `host_not_enrolled` | `host forget` | A directory entry still holds the agent's host keys; no agent has the name | Remove the host first and wait for the host to apply it; check the name with `keyroster host pending` |
 | `install_path_unsafe`, `install_pins_differ` | install | See step 2 | Fix the path; for other pins, remove the agent's state first |
+
+## Removing a host
+
+Run in CI: `TestAgentRemoval` (server unit tests: the removed host gets the
+removal version and later KRLs, a never-approved agent is still refused,
+forget is refused while the directory holds the host's keys, and the host
+keys enroll again after it) and `TestAgentEnrollEndToEnd` (e2e: the
+removal reaches the enrolled host and its certificate logins are refused,
+then a later revocation still reaches it). Every step on the homelab is
+UNVERIFIED until 03-16.
+
+An enrolled agent that the directory approved once keeps receiving signed
+state (directory, bundle and policy, KRL) after its host entry is disabled
+or removed (owner decision D-R1, PR #71). That is what makes the removal
+reach the host: the applier installs the version that removes the entry,
+and the host then has no principals files (its certificate logins are
+refused; `authorized_keys` and the console are unaffected), while later
+revocations keep arriving. Until the agent is forgotten, root on a removed
+host can still read every later directory version, as root on any
+enrolled host can (D-03); that is the leak this order accepts.
+
+1. **Remove the entry (admin workstation).** `keyroster host remove <name>`.
+2. **Wait until the host has applied that version.** On the host, as root,
+   the applier's last report in `/var/lib/keyroster-agent/status.json`
+   names the directory version it applied (`last_apply.directory_version`)
+   and `host_status: host_removed` (or `host_disabled`); `keyroster-agent
+   run` prints the same report as a JSON line, and `keyroster-agent
+   krl-version` the KRL in force. (UNVERIFIED on a real host; 03-08's
+   `keyroster host status` will show the applied version from the
+   workstation.) A host you cannot reach any more never applies it; go on
+   only if it is decommissioned.
+3. **Forget the agent (admin workstation).**
+
+   ```
+   keyroster host forget <name>
+   ```
+
+   The server deletes every agent enrolled under `<name>` and prints each
+   identity and host key it forgot. From then on that identity gets
+   `unknown_agent` and receives nothing, and its host keys can enroll again
+   with a new join token (a reinstalled host). The server refuses
+   `host_in_directory` while any directory entry, active or disabled, still
+   holds one of the agent's host keys: forgetting an agent whose host is
+   still in the directory would stop the revocations that host needs.
 
 ## How fast changes arrive
 

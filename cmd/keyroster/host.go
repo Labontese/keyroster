@@ -28,12 +28,12 @@ import (
 func init() {
 	register(command{
 		Name:    "host",
-		Summary: "hosts in the directory (add, remove, list), agent enrollment (join-token, pending, approve) and manual host setup (principals: render an account's AuthorizedPrincipalsFile; ca-key: the TrustedUserCAKeys line)",
+		Summary: "hosts in the directory (add, remove, list), agent enrollment (join-token, pending, approve, forget) and manual host setup (principals: render an account's AuthorizedPrincipalsFile; ca-key: the TrustedUserCAKeys line)",
 		Run:     runHost,
 	})
 }
 
-const hostSubcommands = "add, remove, list, join-token, pending, approve, principals or ca-key"
+const hostSubcommands = "add, remove, list, join-token, pending, approve, forget, principals or ca-key"
 
 func runHost(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -53,6 +53,8 @@ func runHost(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return runHostPending(ctx, args[1:], stdout, stderr)
 	case "approve":
 		return runHostApprove(ctx, args[1:], stdout, stderr)
+	case "forget":
+		return runHostForget(ctx, args[1:], stdout, stderr)
 	case "principals":
 		return runHostPrincipals(ctx, args[1:], stdout, stderr)
 	case "ca-key":
@@ -374,6 +376,11 @@ func hostAdminRefusal(err error) error {
 		return errors.New("the server has no agent listener: start keyroster-server with --agent-listen (docs/runbooks/server-install.md); no join token was minted")
 	case he.APIErrorIs(serverclient.AdminErrTTL):
 		return errors.New("the server refused the join token's lifetime: at most 1h")
+	case he.APIErrorIs(serverclient.AdminErrHostInDirectory):
+		return errors.New("the directory still has a host entry with this agent's host keys; remove the host first (keyroster host remove), " +
+			"wait until the host has applied that version, then forget it (docs/runbooks/host-setup.md \"Removing a host\"). Nothing was forgotten")
+	case he.APIErrorIs(serverclient.AdminErrHostNotEnrolled):
+		return errors.New("no agent is enrolled under this name; nothing was forgotten")
 	}
 	return nil
 }
@@ -655,4 +662,62 @@ func runHostApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 	return editDirectory(ctx, s, editOpts{Yes: *ef.yes, Out: *ef.out}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
 		return addHostEntry(name, *group, match[0].Keys, principals)(d)
 	})
+}
+
+// runHostForget is keyroster host forget NAME [--admin-key FP] (PR #71
+// review D-R1): the server deletes every agent enrolled under NAME, so its
+// identity gets 403 unknown_agent from then on and its host keys can
+// enroll again with a new join token. An agent approved once keeps
+// getting signed state after its host entry is removed, so the removal
+// and later revocations reach the host; forget ends that. The server
+// refuses while a directory host entry still holds the agent's host keys.
+func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("host forget", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	pos, err := parseInterspersed(fset, args)
+	if err != nil {
+		return errUsage
+	}
+	name, err := oneName(stderr, "host forget", pos)
+	if err != nil {
+		return err
+	}
+	if !directory.ValidUserName(name) {
+		return errHostName("host", name)
+	}
+	s, err := openAdminSession(*adminKey, stderr)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	_, pol, err := s.client.Trust(ctx, s.cfg.TrustPins, s.cfg.TrustThreshold)
+	if err != nil {
+		return err
+	}
+	var ans serverclient.ForgetHostAnswer
+	if err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminForgetHostPath, serverclient.ForgetHostRequest{ExpectedName: name}, &ans, s.signer); err != nil {
+		if refusal := hostAdminRefusal(err); refusal != nil {
+			return refusal
+		}
+		return adminError(err, s, pol)
+	}
+	if len(ans.Forgotten) == 0 {
+		return errors.New("the server's answer names no forgotten agent; check keyroster host pending")
+	}
+	var b strings.Builder
+	for _, h := range ans.Forgotten {
+		v, err := checkPendingHost(h)
+		if err != nil || v.Name != name {
+			return errors.New("the server's forget answer does not check out; the server may have forgotten agents: check keyroster host pending")
+		}
+		fmt.Fprintf(&b, "Forgot the agent enrolled as %s (enrolled %s)\n", v.Name, v.EnrolledAt)
+		fmt.Fprintf(&b, "  agent identity: %s\n", v.Identity)
+		for i, k := range v.Keys {
+			fmt.Fprintf(&b, "  host key: %s %s\n", v.Fingerprint[i], strings.Fields(k)[0])
+		}
+	}
+	b.WriteString("Its identity gets unknown_agent from now on and receives no more signed state; its host keys can enroll again with a new join token.\n")
+	_, err = io.WriteString(stdout, b.String())
+	return err
 }

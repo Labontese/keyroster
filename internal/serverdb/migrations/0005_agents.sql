@@ -19,13 +19,21 @@ CREATE TABLE join_tokens (
 -- identity's SubjectPublicKeyInfo. host_keys is the JSON array of its
 -- sorted host keys (trust.FormatKey form) and facts the JSON object of
 -- its facts, both as the agent sent them and the proof of possession
--- covered.
+-- covered. token_hash is the join token that enrolled it, so a retry of
+-- that same enrollment is recognised (PR #71 review F11).
+-- approved_at_us is set on the first state answer the agent got while the
+-- directory approved it; from then on it keeps getting signed state after
+-- its host entry is disabled or removed, so the removal and later
+-- revocations reach the host, until an admin forgets the row (keyroster
+-- host forget; PR #71 review D-R1).
 CREATE TABLE agents (
     id INTEGER PRIMARY KEY,
     identity_spki_sha256 BLOB NOT NULL UNIQUE CHECK (length(identity_spki_sha256) = 32),
+    token_hash BLOB NOT NULL CHECK (length(token_hash) = 32),
     expected_name TEXT NOT NULL,
     host_keys TEXT NOT NULL,
     facts TEXT NOT NULL,
     enrolled_at_us INTEGER NOT NULL,
-    last_seen_us INTEGER
+    last_seen_us INTEGER,
+    approved_at_us INTEGER
 );

@@ -394,9 +394,9 @@ func TestAgentEnroll(t *testing.T) {
 		}
 	})
 	t.Run("removed_host_agent_keeps_its_keys", func(t *testing.T) {
-		// No deregistration exists (an owner decision, 03-08): an agent
-		// whose host entry is removed keeps its keys, is pending again, and
-		// a reinstalled agent with the same host keys is refused.
+		// Until an admin forgets it (keyroster host forget, TestAgentRemoval),
+		// an agent whose host entry is removed keeps its keys, is pending
+		// again, and a reinstalled agent with the same host keys is refused.
 		e := newAgentEnv(t, true)
 		_, hosts := e.approvedAgent(t)
 		e.installDir(t)
@@ -407,6 +407,34 @@ func TestAgentEnroll(t *testing.T) {
 		}
 		if rec := e.enroll(t, newAgentID(t), e.mustMint(t, "web1", 0).Token, hosts); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AgentErrHostKeysInUse {
 			t.Fatalf("a reinstalled agent with the same host keys: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("lost_response_retry_after_approval", func(t *testing.T) {
+		// PR #71 review F11: the server recorded the enrollment but its 202
+		// never arrived; an admin approved the host before the fetcher
+		// retried. The retry, with the same token, identity and host keys,
+		// is the recorded enrollment and is answered 202 again, even after
+		// the token's expiry; another identity with that token is not.
+		e := newAgentEnv(t, true)
+		ans := e.mustMint(t, "web1", 60)
+		id, hosts := newAgentID(t), hostSigners(t, 1)
+		if rec := e.enroll(t, id, ans.Token, hosts); rec.Code != http.StatusAccepted {
+			t.Fatalf("enroll: %d %s", rec.Code, rec.Body.String())
+		}
+		e.installDir(t, hostEntry("web1", hosts))
+		e.clock.set(t0.Add(2 * time.Minute))
+		if rec := e.enroll(t, id, ans.Token, hosts); rec.Code != http.StatusAccepted {
+			t.Fatalf("the retry of a recorded enrollment after its approval: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := e.enroll(t, newAgentID(t), ans.Token, hosts); rec.Code == http.StatusAccepted {
+			t.Fatalf("another identity with the used token: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := e.enroll(t, id, ans.Token, append(hosts, hostSigners(t, 1)...)); rec.Code == http.StatusAccepted {
+			t.Fatalf("the same identity and token with other host keys: %d %s", rec.Code, rec.Body.String())
+		}
+		agents, err := e.s.db.ListAgents(t.Context())
+		if err != nil || len(agents) != 1 {
+			t.Fatalf("%d agents (%v), want the one recorded", len(agents), err)
 		}
 	})
 	t.Run("identity_in_use", func(t *testing.T) {
@@ -534,10 +562,6 @@ func TestAgentListenerRequiresClientCert(t *testing.T) {
 	if code, body, err := tlsGet(url, pool, id.tlsCert()); err != nil || code != http.StatusForbidden || !strings.Contains(body, serverclient.AgentErrNotApproved) {
 		t.Fatalf("an enrolled, unapproved identity: %d %s %v", code, body, err)
 	}
-	e.installDir(t, hostEntry("web1", hosts))
-	if code, body, err := tlsGet(url, pool, id.tlsCert()); err != nil || code != http.StatusOK {
-		t.Fatalf("an approved identity: %d %s %v", code, body, err)
-	}
 	// A disabled host entry, or one with other keys, approves nothing.
 	h := hostEntry("web1", hosts)
 	h.Status = directory.StatusDisabled
@@ -548,6 +572,16 @@ func TestAgentListenerRequiresClientCert(t *testing.T) {
 	e.installDir(t, hostEntry("web1", append(hostSigners(t, 1), hosts...)))
 	if code, _, err := tlsGet(url, pool, id.tlsCert()); err != nil || code != http.StatusForbidden {
 		t.Fatalf("a host entry with one more key: %d %v", code, err)
+	}
+	e.installDir(t, hostEntry("web1", hosts))
+	if code, body, err := tlsGet(url, pool, id.tlsCert()); err != nil || code != http.StatusOK {
+		t.Fatalf("an approved identity: %d %s %v", code, body, err)
+	}
+	// Approved once, it keeps getting state after its entry is disabled
+	// (PR #71 review D-R1, TestAgentRemoval).
+	e.installDir(t, h)
+	if code, _, err := tlsGet(url, pool, id.tlsCert()); err != nil || code != http.StatusOK {
+		t.Fatalf("a disabled host approved before: %d %v", code, err)
 	}
 }
 
@@ -921,6 +955,130 @@ func TestAgentLimits(t *testing.T) {
 		}
 		if since != 301 {
 			t.Fatalf("caught up to directory %d in %d rounds, want 301", since, rounds)
+		}
+	})
+}
+
+// publishKRL makes the signer publish KRL version v and drops the
+// server's cached KRL.
+func (e *agentEnv) publishKRL(t *testing.T, v uint64) {
+	t.Helper()
+	k := krlDoc(t, e.ops, copyInstallation, v, "krl version "+strconv.FormatUint(v, 10))
+	e.fake.mu.Lock()
+	e.fake.krl = k
+	e.fake.mu.Unlock()
+	e.s.mu.Lock()
+	e.s.krl = nil
+	e.s.mu.Unlock()
+}
+
+// forget posts keyroster host forget name.
+func (e *agentEnv) forget(t *testing.T, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(serverclient.ForgetHostRequest{ExpectedName: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e.adminDo(t, http.MethodPost, serverclient.AdminForgetHostPath, body)
+}
+
+// TestAgentRemoval is owner decision D-R1 (PR #71 review F8): an agent the
+// directory approved once keeps getting signed state after its host entry
+// is removed or disabled, so the removal and every later revocation reach
+// the host; an agent never approved is refused as before; keyroster host
+// forget deletes the row, after which the identity is unknown and the
+// host keys enroll again.
+func TestAgentRemoval(t *testing.T) {
+	state := func(t *testing.T, e *agentEnv, id agentID, q string) *httptest.ResponseRecorder {
+		t.Helper()
+		return e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath+q, nil)
+	}
+	// polled is an approved agent that got its first state.
+	polled := func(t *testing.T) (*agentEnv, agentID, []ssh.Signer) {
+		t.Helper()
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		if rec := state(t, e, id, ""); rec.Code != http.StatusOK {
+			t.Fatalf("the first state: %d %s", rec.Code, rec.Body.String())
+		}
+		return e, id, hosts
+	}
+	t.Run("removed_host_gets_the_removal_and_later_revocations", func(t *testing.T) {
+		e, id, _ := polled(t)
+		removal := e.installDir(t)
+		r := decodeState(t, state(t, e, id, "?bundle=1&directory=1&krl=100"))
+		if !slices.Equal(dirVersions(r), []uint64{removal}) {
+			t.Fatalf("the removed host got directories %v, want the removal %d", dirVersions(r), removal)
+		}
+		d, err := directory.Parse(r.Directories[0].Directory)
+		if err != nil || len(d.Hosts) != 0 {
+			t.Fatalf("the removal version: %v, hosts %v", err, d.Hosts)
+		}
+		e.publishKRL(t, 101)
+		if r := decodeState(t, state(t, e, id, "?bundle=1&directory=2&krl=100")); r.KRL == nil || r.KRL.Version != 101 {
+			t.Fatalf("a revocation after the removal: KRL %+v", r.KRL)
+		}
+	})
+	t.Run("disabled_host_keeps_getting_state", func(t *testing.T) {
+		e, id, hosts := polled(t)
+		h := hostEntry("web1", hosts)
+		h.Status = directory.StatusDisabled
+		e.installDir(t, h)
+		if r := decodeState(t, state(t, e, id, "?bundle=1&directory=1&krl=100")); !slices.Equal(dirVersions(r), []uint64{2}) {
+			t.Fatalf("the disabled host got directories %v", dirVersions(r))
+		}
+	})
+	t.Run("never_approved_agent_not_approved", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := newAgentID(t), hostSigners(t, 1)
+		if rec := e.enroll(t, id, e.mustMint(t, "web1", 0).Token, hosts); rec.Code != http.StatusAccepted {
+			t.Fatalf("enroll: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := state(t, e, id, ""); rec.Code != http.StatusForbidden || apiError(rec) != serverclient.AgentErrNotApproved {
+			t.Fatalf("a pending agent: %d %s", rec.Code, rec.Body.String())
+		}
+		// Approved and removed again before it ever polled: never approved.
+		e.installDir(t, hostEntry("web1", hosts))
+		e.installDir(t)
+		if rec := state(t, e, id, ""); rec.Code != http.StatusForbidden || apiError(rec) != serverclient.AgentErrNotApproved {
+			t.Fatalf("an agent removed before its first state: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("forget_refused_while_in_directory", func(t *testing.T) {
+		e, _, hosts := polled(t)
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrHostInDirectory {
+			t.Fatalf("forget an active host: %d %s", rec.Code, rec.Body.String())
+		}
+		h := hostEntry("web1", hosts)
+		h.Status = directory.StatusDisabled
+		e.installDir(t, h)
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrHostInDirectory {
+			t.Fatalf("forget a disabled host: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := e.forget(t, "nosuch"); rec.Code != http.StatusNotFound || apiError(rec) != serverclient.AdminErrHostNotEnrolled {
+			t.Fatalf("forget an unknown name: %d %s", rec.Code, rec.Body.String())
+		}
+		if agents, err := e.s.db.ListAgents(t.Context()); err != nil || len(agents) != 1 {
+			t.Fatalf("%d agents (%v) after the refusals, want 1", len(agents), err)
+		}
+	})
+	t.Run("forget_then_reenroll_with_the_same_host_keys", func(t *testing.T) {
+		e, id, hosts := polled(t)
+		e.installDir(t)
+		rec := e.forget(t, "web1")
+		var ans serverclient.ForgetHostAnswer
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &ans) != nil || len(ans.Forgotten) != 1 ||
+			ans.Forgotten[0].IdentitySPKISHA256 != hex.EncodeToString(id.spki) {
+			t.Fatalf("forget: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := state(t, e, id, ""); rec.Code != http.StatusForbidden || apiError(rec) != serverclient.AgentErrUnknown {
+			t.Fatalf("a forgotten agent's state: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := e.enroll(t, id, e.mustMint(t, "web1", 0).Token, hosts); rec.Code != http.StatusAccepted {
+			t.Fatalf("re-enrollment with the same identity and host keys: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := state(t, e, id, ""); rec.Code != http.StatusForbidden || apiError(rec) != serverclient.AgentErrNotApproved {
+			t.Fatalf("the re-enrolled agent before its approval: %d %s", rec.Code, rec.Body.String())
 		}
 	})
 }
