@@ -790,6 +790,14 @@ rm /root/recovery/server-krl.json
 release_check | tee "$work/release-check-none.log"
 grep -qx 'release check passed: entries 3 (revocation_recovery) and 4 (krl_publish), imported KRL versions \[7,19\], no server KRL copy kept' "$work/release-check-none.log" ||
 	fail "the release check did not pass without a kept copy"
+# One entry more after the recovery's two: something else was logged.
+{
+	head -n 5 /tmp/recovered.jsonl
+	fixture_line 5 '"kind":"revoke"'
+	echo '{"checkpoint":"fixture"}'
+} >"$work/recovered-extra.jsonl"
+mv "$work/recovered-extra.jsonl" /tmp/recovered.jsonl
+release_check_stops extra-entry 'does not hold exactly two entries after the 3 of /tmp/restored.jsonl'
 cp /tmp/restored.jsonl /tmp/recovered.jsonl
 release_check_stops not-applied 'does not hold exactly two entries after the 3 of /tmp/restored.jsonl'
 rm -r /root/recovery /home/kradmin/recovery-in /tmp/restored.jsonl /tmp/recovered.jsonl /root/latest-saved.jsonl

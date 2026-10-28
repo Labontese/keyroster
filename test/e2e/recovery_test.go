@@ -737,6 +737,12 @@ func TestRestoreRecoversLostRevocations(t *testing.T) {
 	if code, out := auditVerifyPins(t, sg.RootFingerprints, final, "--previous", restored); code != 0 {
 		t.Fatalf("keyroster audit verify --previous <restored export> <final export>: exit %d:\n%s", code, out)
 	}
+	// It holds more than the recovery's two entries after the restored
+	// log (the revocation of H and its publish), so the release check
+	// stops on it: the check requires exactly two.
+	if code, out := runReleaseCheck(t, restored, final, serverCopy); code == 0 || !strings.Contains(out, "does not hold exactly two entries after the") || strings.Contains(out, "release check passed") {
+		t.Fatalf("the runbook's release check on an export with more than the recovery's two entries exited %d:\n%s", code, out)
+	}
 }
 
 // importVersions returns the KRL versions a written recovery request
