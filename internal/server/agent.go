@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
@@ -332,27 +333,81 @@ func (s *Server) handleAgentState(w http.ResponseWriter, r *http.Request, ar *ag
 	_, _ = w.Write(body)
 }
 
-// bundleItems returns the bundles above since. The tracer serves the
-// current bundle and policy (currentStatus) only, when newer; cut reports
-// versions left out.
-func (s *Server) bundleItems(_ context.Context, v *statusView, since uint64) ([]serverclient.AgentBundle, bool, error) {
-	if v.raw.BundleVersion <= since {
+// bundleItems returns the bundles above since, ascending: with no version
+// (since 0) the current one only (currentStatus); otherwise every version
+// from since+1, at most serverclient.MaxAgentStatePerKind of them, each
+// but the current read from the signer (GetBundle). cut reports versions
+// left out by that cap. An agent ahead of the server gets none.
+func (s *Server) bundleItems(ctx context.Context, v *statusView, since uint64) ([]serverclient.AgentBundle, bool, error) {
+	cur := v.raw.BundleVersion
+	if cur <= since {
 		return nil, false, nil
 	}
-	cur := serverclient.AgentBundle{
-		Version: v.raw.BundleVersion, Bundle: v.raw.Bundle, BundleSigs: v.raw.BundleSigs,
+	current := serverclient.AgentBundle{
+		Version: cur, Bundle: v.raw.Bundle, BundleSigs: v.raw.BundleSigs,
 		PolicyVersion: v.policy.Version, Policy: v.raw.Policy, PolicySigs: v.raw.PolicySigs,
 	}
-	return []serverclient.AgentBundle{cur}, false, nil
+	if since == 0 {
+		return []serverclient.AgentBundle{current}, false, nil
+	}
+	var out []serverclient.AgentBundle
+	ver := since + 1
+	for ; ver <= cur && len(out) < serverclient.MaxAgentStatePerKind; ver++ {
+		if ver == cur {
+			out = append(out, current)
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
+		b, err := s.signer.GetBundle(cctx, ver)
+		cancel()
+		if err != nil {
+			return nil, false, fmt.Errorf("bundle version %d: %w", ver, err)
+		}
+		if b.Version != ver {
+			return nil, false, fmt.Errorf("the signer answered bundle version %d for version %d", b.Version, ver)
+		}
+		pol, err := trust.ParsePolicy(b.Policy)
+		if err != nil {
+			return nil, false, fmt.Errorf("bundle version %d: policy: %w", ver, err)
+		}
+		out = append(out, serverclient.AgentBundle{Version: ver, Bundle: b.Bundle, BundleSigs: b.BundleSigs,
+			PolicyVersion: pol.Version, Policy: b.Policy, PolicySigs: b.PolicySigs})
+	}
+	return out, ver <= cur, nil
 }
 
-// directoryItems returns the directories above since: the current one
-// (currentDirectory) only in the tracer.
-func (s *Server) directoryItems(_ context.Context, dv *directoryView, since uint64) ([]serverclient.AgentDirectory, bool, error) {
-	if dv.version == 0 || dv.version <= since {
+// directoryItems returns the directories above since, as bundleItems does
+// for bundles: the current one (currentDirectory) only with no version,
+// otherwise every version from since+1, at most MaxAgentStatePerKind, each
+// but the current read from the signer (GetDirectoryVersion).
+func (s *Server) directoryItems(ctx context.Context, dv *directoryView, since uint64) ([]serverclient.AgentDirectory, bool, error) {
+	cur := dv.version
+	if cur == 0 || cur <= since {
 		return nil, false, nil
 	}
-	return []serverclient.AgentDirectory{{Version: dv.version, Directory: dv.doc, Sigs: dv.sigs}}, false, nil
+	current := serverclient.AgentDirectory{Version: cur, Directory: dv.doc, Sigs: dv.sigs}
+	if since == 0 {
+		return []serverclient.AgentDirectory{current}, false, nil
+	}
+	var out []serverclient.AgentDirectory
+	ver := since + 1
+	for ; ver <= cur && len(out) < serverclient.MaxAgentStatePerKind; ver++ {
+		if ver == cur {
+			out = append(out, current)
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
+		d, err := s.signer.GetDirectoryVersion(cctx, ver)
+		cancel()
+		if err != nil {
+			return nil, false, fmt.Errorf("directory version %d: %w", ver, err)
+		}
+		if d.Version != ver {
+			return nil, false, fmt.Errorf("the signer answered directory version %d for version %d", d.Version, ver)
+		}
+		out = append(out, serverclient.AgentDirectory{Version: ver, Directory: d.Directory, Sigs: d.Sigs})
+	}
+	return out, ver <= cur, nil
 }
 
 // krlItem returns the published KRL when its version is above since, or

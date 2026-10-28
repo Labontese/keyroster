@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -336,8 +337,13 @@ func startFakeSSHD(t *testing.T) *fakeSSHD {
 	dir := t.TempDir()
 	s := &fakeSSHD{ln: ln, port: ln.Addr().(*net.TCPAddr).Port, keyPath: filepath.Join(dir, "ssh_host_ed25519_key"), pub: signer.PublicKey()}
 	// sshd skips a HostKey whose private key is missing, and so does
-	// hostKeys: the fixture writes both halves.
-	if err := os.WriteFile(s.keyPath, []byte("private key placeholder\n"), 0o600); err != nil {
+	// hostKeys: the fixture writes both halves, the private key in
+	// OpenSSH format (enrollment signs with it, 03-07).
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.keyPath, pem.EncodeToMemory(block), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(s.keyPath+".pub", ssh.MarshalAuthorizedKey(signer.PublicKey()), 0o644); err != nil { //nolint:gosec // test fixture

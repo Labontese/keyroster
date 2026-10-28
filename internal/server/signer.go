@@ -21,7 +21,8 @@ import (
 // Growth rule: a later plan that needs another signer call adds that
 // method here, to socketSigner and to fakeSigner, in the commit that adds
 // its first caller (GetDirectory in 02-07, InstallDirectory in 02-09,
-// Login in 02-12, Revoke and GetKRL in 03-01). Nobody adds a second
+// Login in 02-12, Revoke and GetKRL in 03-01, GetBundle and
+// GetDirectoryVersion in 03-07). Nobody adds a second
 // interface, and no method is added before something calls it.
 type signerAPI interface {
 	Status(ctx context.Context) (*wire.StatusResponse, error)
@@ -39,6 +40,11 @@ type signerAPI interface {
 	Revoke(ctx context.Context, req *wire.RevokeRequest) (*wire.RevokeResponse, error)
 	// GetKRL reads the published KRL, its manifest and signature (03-01).
 	GetKRL(ctx context.Context) (*wire.GetKRLResponse, error)
+	// GetBundle and GetDirectoryVersion read one installed trust bundle
+	// or directory by version (03-07), for an agent's state answer; an
+	// absent version is refused not_found.
+	GetBundle(ctx context.Context, v uint64) (*wire.GetBundleResponse, error)
+	GetDirectoryVersion(ctx context.Context, v uint64) (*wire.GetDirectoryVersionResponse, error)
 }
 
 // socketSigner reaches keyroster-signer over its Unix socket.
@@ -66,6 +72,14 @@ func (s socketSigner) Revoke(ctx context.Context, req *wire.RevokeRequest) (*wir
 
 func (s socketSigner) GetKRL(ctx context.Context) (*wire.GetKRLResponse, error) {
 	return signerclient.GetKRL(ctx, s.socket)
+}
+
+func (s socketSigner) GetBundle(ctx context.Context, v uint64) (*wire.GetBundleResponse, error) {
+	return signerclient.GetBundle(ctx, s.socket, v)
+}
+
+func (s socketSigner) GetDirectoryVersion(ctx context.Context, v uint64) (*wire.GetDirectoryVersionResponse, error) {
+	return signerclient.GetDirectoryVersion(ctx, s.socket, v)
 }
 
 const (

@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -279,4 +281,69 @@ func CheckStateDirs(l Layout) error {
 		}
 	}
 	return nil
+}
+
+// Identity is what keyroster-agent identity prints for the approval
+// comparison (03-07): the fetcher's TLS identity, as
+// enroll.IdentityFingerprint of the SPKI in the spool's identity.pub, and
+// the host keys an enrollment signs with (those of a type a directory host
+// entry may name, sorted as the proof of possession lists them), each with
+// its ssh.FingerprintSHA256. keyroster host approve prints the same
+// strings for the pending host.
+type Identity struct {
+	Agent        string
+	HostKeys     []string
+	Fingerprints []string
+}
+
+// ReadIdentity reads Identity: identity.pub through spool.ReadFileAt
+// (empty Agent when the fetcher has not written it yet) and the host keys
+// sshd -T names.
+func ReadIdentity(ctx context.Context, cfg Config, l Layout) (*Identity, error) {
+	if cfg.Exec == nil {
+		cfg.Exec = execsite.ExecRunner{}
+	}
+	e := &engine{cfg: cfg, l: l, report: &Report{}, stateFd: -1}
+	id := &Identity{}
+	fd, err := spool.OpenDir(cfg.Spool)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	b, err := spool.ReadFileAt(fd, IdentityFile, enroll.MaxRequestFile)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+	case err != nil:
+		return nil, err
+	default:
+		block, rest := pem.Decode(b)
+		if block == nil || block.Type != "PUBLIC KEY" || len(bytes.TrimSpace(rest)) != 0 {
+			return nil, fmt.Errorf("%s: not one PEM PUBLIC KEY block", IdentityFile)
+		}
+		sum := sha256.Sum256(block.Bytes)
+		id.Agent = enroll.IdentityFingerprint(sum[:])
+	}
+	dump, err := e.sshdDump(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	pubs, err := hostKeys(dump)
+	if err != nil {
+		return nil, err
+	}
+	var kept []ssh.PublicKey
+	for _, p := range pubs {
+		if directory.IsHostKeyType(p.Type()) {
+			kept = append(kept, p)
+		}
+	}
+	id.HostKeys = enroll.SortHostKeys(kept)
+	for _, k := range id.HostKeys {
+		pub, err := trust.ParseKey(k)
+		if err != nil {
+			return nil, err
+		}
+		id.Fingerprints = append(id.Fingerprints, ssh.FingerprintSHA256(pub))
+	}
+	return id, nil
 }

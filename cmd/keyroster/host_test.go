@@ -4,13 +4,20 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/agent/enroll"
+	"github.com/Labontese/keyroster/internal/agent/join"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -373,6 +380,144 @@ func TestReadCommandsCheckInstallation(t *testing.T) {
 			if _, _, stderr := run(t, args...); strings.Contains(stderr, "Refusing to use it") {
 				t.Fatalf("%s: stderr %q; want the lenient D-04 answer (the served base is read)", strings.Join(args, " "), stderr)
 			}
+		}
+	})
+}
+
+// popHostsEnv is roleEnv on a genesis policy that sets pop.hosts.
+func popHostsEnv(t *testing.T) *dirEnv {
+	t.Helper()
+	e := newDirEnvPolicy(t, 1, 1, func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true} })
+	e.installDirect(t, buildDir(t, nil, roleBase(t, nil)))
+	return e
+}
+
+// recordCall marks path's override as called, under e.mu.
+func (e *dirEnv) recordCall(method, path string, called *bool, answer string, code int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.override[method+" "+path] = func(w http.ResponseWriter) {
+		*called = true
+		w.WriteHeader(code)
+		_, _ = io.WriteString(w, answer)
+	}
+}
+
+func (e *dirEnv) wasCalled(called *bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return *called
+}
+
+// TestHostApprovePoPRequired (owner decision 2026-10-24, REVIEWS L1488):
+// host approve and host join-token refuse host_pop_not_enabled on the
+// policy the CLI verified itself, before any admin request; with
+// pop.hosts, approve signs the enrolled keys and join-token writes the
+// join string to a 0600 file only.
+func TestHostApprovePoPRequired(t *testing.T) {
+	t.Run("approve_refused_locally", func(t *testing.T) {
+		e := roleEnv(t, nil)
+		var called bool
+		e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called, `{"hosts":[]}`, http.StatusOK)
+		code, _, stderr := run(t, "host", "approve", "web1", "--group", "web", "--principal", "web1", "--yes")
+		if code == 0 || !strings.Contains(stderr, "host_pop_not_enabled") {
+			t.Fatalf("host approve without pop.hosts: exit %d: %s", code, stderr)
+		}
+		if e.wasCalled(&called) || len(e.calls) != 0 || e.agent.dirSigns() != 0 {
+			t.Fatalf("host approve made a call (pending %t, posts %q, directory signatures %d)", e.wasCalled(&called), e.calls, e.agent.dirSigns())
+		}
+	})
+	t.Run("join_token_refused_locally", func(t *testing.T) {
+		e := roleEnv(t, nil)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminJoinTokensPath, &called, `{}`, http.StatusCreated)
+		out := filepath.Join(t.TempDir(), "join.txt")
+		code, _, stderr := run(t, "host", "join-token", "web1", "--out", out)
+		if code == 0 || !strings.Contains(stderr, "host_pop_not_enabled") {
+			t.Fatalf("host join-token without pop.hosts: exit %d: %s", code, stderr)
+		}
+		if e.wasCalled(&called) || len(e.calls) != 0 {
+			t.Fatalf("host join-token made a call (mint %t, posts %q)", e.wasCalled(&called), e.calls)
+		}
+		if _, err := os.Lstat(out); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("host join-token wrote the file")
+		}
+	})
+	t.Run("approve_signs_enrolled_keys", func(t *testing.T) {
+		e := popHostsEnv(t)
+		_, key := writeEntryKey(t, "web1")
+		pub, err := trust.ParseKey(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ans, err := json.Marshal(serverclient.PendingHostsAnswer{Hosts: []serverclient.PendingHost{{ExpectedName: "web1", IdentitySPKISHA256: strings.Repeat("00", 32),
+			HostKeys: []string{key}, Facts: enroll.Facts{OSID: "debian", Hostname: "web1"}, EnrolledAt: "2026-10-28T12:00:00Z"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var called bool
+		e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called, string(ans), http.StatusOK)
+		code, stdout, stderr := run(t, "host", "approve", "web1", "--group", "web", "--principal", "web1", "--yes")
+		if code != 0 {
+			t.Fatalf("host approve: exit %d: %s", code, stderr)
+		}
+		if !strings.Contains(stdout, "agent identity: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n") || !strings.Contains(stdout, "host key: "+ssh.FingerprintSHA256(pub)+" ssh-ed25519\n") {
+			t.Fatalf("host approve does not show the fingerprints:\n%s", stdout)
+		}
+		h, ok := installedDir(t, e).HostByName("web1")
+		if !ok || !slices.Equal(h.Keys, []string{key}) || h.HostGroup != "web" || !slices.Equal(h.Principals, []string{"web1"}) {
+			t.Fatalf("installed host %+v, %v", h, ok)
+		}
+	})
+	t.Run("approve_refuses_bad_pending_answer", func(t *testing.T) {
+		e := popHostsEnv(t)
+		var called bool
+		e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called,
+			`{"hosts":[{"expected_name":"web1","identity_spki_sha256":"00","host_keys":["ssh-rsa AAAA"],"facts":{"sshd_version":"","os_id":"","os_version_id":"","hostname":"\u001b[31m"},"enrolled_at":"x"}]}`, http.StatusOK)
+		if code, _, stderr := run(t, "host", "approve", "web1", "--group", "web", "--principal", "web1", "--yes"); code == 0 || !strings.Contains(stderr, "does not check out") {
+			t.Fatalf("a pending answer that does not check out: exit %d: %s", code, stderr)
+		}
+		if e.agent.dirSigns() != 0 {
+			t.Fatal("a directory version was signed")
+		}
+	})
+	t.Run("join_token_writes_file", func(t *testing.T) {
+		e := popHostsEnv(t)
+		token := strings.Repeat("A", 43)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminJoinTokensPath, &called,
+			`{"expected_name":"web1","token":"`+token+`","expires_at":"2026-10-28T12:30:00Z","agent_port":8443}`, http.StatusCreated)
+		out := filepath.Join(t.TempDir(), "join.txt")
+		code, stdout, stderr := run(t, "host", "join-token", "web1", "--out", out)
+		if code != 0 {
+			t.Fatalf("host join-token: exit %d: %s", code, stderr)
+		}
+		if strings.Contains(stdout+stderr, token) {
+			t.Fatal("host join-token printed the token")
+		}
+		b, err := os.ReadFile(out) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		j, err := join.Parse(string(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, _ := serverclient.ParseServerURL(e.cfg.Server)
+		if j.Token != token || j.ExpectedName != "web1" || j.Server != "https://"+u.Hostname()+":8443" || j.InstallationID != e.bundle.InstallationID ||
+			!slices.Equal(j.TLSPins, e.cfg.TLSPins) || j.Threshold != 1 {
+			t.Fatalf("join string %v", j)
+		}
+		if runtime.GOOS != "windows" {
+			if st, err := os.Stat(out); err != nil || st.Mode().Perm() != 0o600 {
+				t.Fatalf("join file mode %v (%v), want 0600", st.Mode(), err)
+			}
+		}
+		if code, _, stderr := run(t, "host", "join-token", "web1", "--out", out); code == 0 || !strings.Contains(stderr, "exists") {
+			t.Fatalf("an existing --out: exit %d: %s", code, stderr)
+		}
+		if code, _, _ := run(t, "host", "join-token", "web1", "--out", out+".2", "--ttl", "61m"); code == 0 {
+			t.Fatal("--ttl 61m was accepted")
 		}
 	})
 }

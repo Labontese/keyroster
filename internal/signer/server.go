@@ -153,7 +153,8 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 // Status request (empty body) the signer's own report of its keys'
 // custody and its trust state (D-18). A RevokeRequest takes one policy
 // admin's evidence and publishes the next KRL; a GetKRL request (empty
-// body) reads the published KRL. Every
+// body) reads the published KRL. A GetBundle or GetDirectoryVersion
+// request (one version) reads one installed version (03-07). Every
 // refusal goes through refuse (slog plus the rate-limited audit log,
 // D-14).
 func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
@@ -237,6 +238,30 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
 			return
 		}
 		s.respond(ctx, conn, peer, [32]byte{}, wire.TypeGetKRLResponse, s.GetKRL(), 0)
+	case wire.TypeGetBundle:
+		req, err := wire.ParseGetBundleRequest(body)
+		if err != nil {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		resp, err := s.GetBundle(ctx, req.Version)
+		if err != nil {
+			s.reply(conn, s.chainRefusal(ctx, peer, err))
+			return
+		}
+		s.respond(ctx, conn, peer, [32]byte{}, wire.TypeGetBundleResponse, resp, 0)
+	case wire.TypeGetDirectoryVersion:
+		req, err := wire.ParseGetDirectoryVersionRequest(body)
+		if err != nil {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		resp, err := s.GetDirectoryVersion(ctx, req.Version)
+		if err != nil {
+			s.reply(conn, s.chainRefusal(ctx, peer, err))
+			return
+		}
+		s.respond(ctx, conn, peer, [32]byte{}, wire.TypeGetDirectoryVersionResponse, resp, 0)
 	case wire.TypeStatus:
 		if len(body) != 0 {
 			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))

@@ -192,6 +192,20 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	if !regexp.MustCompile(`agent identity: SHA256:[A-Za-z0-9+/]{43}\n`).MatchString(pending) || !strings.Contains(pending, "host key: "+fingerprint(t, h.sshd.hostKey)) {
 		t.Fatalf("host pending does not show the identity and the host key %s:\n%s", fingerprint(t, h.sshd.hostKey), pending)
 	}
+	// keyroster-agent identity on the host prints exactly those lines.
+	prefix := opensshPrefix(t)
+	code, ident := runBin(t, agentBin(t), "", "identity", "--state-dir", h.state, "--root", h.root,
+		"--sshd", filepath.Join(prefix, "sbin", "sshd"), "--sshd-config", h.sshd.cfg)
+	lines := strings.Split(strings.TrimSpace(ident), "\n")
+	if code != 0 || len(lines) != 2 {
+		t.Fatalf("keyroster-agent identity exited %d:\n%s", code, ident)
+	}
+	for _, l := range lines {
+		if !strings.Contains(pending, "  "+l+"\n") {
+			t.Fatalf("keyroster-agent identity prints %q, which host pending does not:\n%s", l, pending)
+		}
+	}
+	t.Logf("keyroster-agent identity:\n%s", ident)
 	before := time.Now()
 
 	// 5. Approval: a directory version with host web1 and the enrolled key.
