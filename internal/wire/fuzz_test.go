@@ -398,3 +398,126 @@ func FuzzParseRecoverySigningBytes(f *testing.F) {
 		}
 	})
 }
+
+// fuzzChainRoundTrip is the property of every chain parser (03-07, PR #71
+// review): parse never panics, refuses only with ErrMalformed or
+// ErrStatusTooLarge, and what it accepts marshals back to exactly the
+// input, so the format has one encoding per message.
+func fuzzChainRoundTrip[T interface{ Marshal() ([]byte, error) }](t *testing.T, body []byte, parse func([]byte) (T, error)) {
+	t.Helper()
+	r, err := parse(body)
+	if err != nil {
+		if !errors.Is(err, ErrMalformed) && !errors.Is(err, ErrStatusTooLarge) {
+			t.Fatalf("parse error = %v, want ErrMalformed or ErrStatusTooLarge", err)
+		}
+		return
+	}
+	out, err := r.Marshal()
+	if err != nil {
+		t.Fatalf("a parsed message does not marshal: %v", err)
+	}
+	if !bytes.Equal(out, body) {
+		t.Fatalf("Marshal does not reproduce the input:\n in  %x\n out %x", body, out)
+	}
+}
+
+// chainVersionSeeds are the request seeds: versions 1, 2^64-1, 0, and
+// bodies one byte short and one byte long.
+func chainVersionSeeds(f *testing.F) {
+	for _, v := range []uint64{1, 1<<64 - 1} {
+		b, err := (&GetBundleRequest{Version: v}).Marshal()
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(b)
+		f.Add(b[:7])
+		f.Add(append(append([]byte(nil), b...), 0))
+	}
+	f.Add(make([]byte, 8))
+	f.Add([]byte{})
+}
+
+func FuzzParseGetBundleRequest(f *testing.F) {
+	chainVersionSeeds(f)
+	f.Fuzz(func(t *testing.T, body []byte) { fuzzChainRoundTrip(t, body, ParseGetBundleRequest) })
+}
+
+func FuzzParseGetDirectoryVersionRequest(f *testing.F) {
+	chainVersionSeeds(f)
+	f.Fuzz(func(t *testing.T, body []byte) { fuzzChainRoundTrip(t, body, ParseGetDirectoryVersionRequest) })
+}
+
+func FuzzParseGetBundleResponse(f *testing.F) {
+	valid, err := (&GetBundleResponse{Version: 3, Bundle: []byte(`{"version":3}`), BundleSigs: []byte("sigs"), Policy: []byte(`{"version":1}`), PolicySigs: []byte("psigs")}).Marshal()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(valid)
+	f.Add(valid[:len(valid)-1])
+	f.Add(append(append([]byte(nil), valid...), 0))
+	f.Add(valid[:8])
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, body []byte) { fuzzChainRoundTrip(t, body, ParseGetBundleResponse) })
+}
+
+func FuzzParseGetDirectoryVersionResponse(f *testing.F) {
+	valid, err := (&GetDirectoryVersionResponse{Version: 7, Directory: []byte(`{"version":7}`), Sigs: []byte("sigs")}).Marshal()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(valid)
+	f.Add(valid[:len(valid)-1])
+	f.Add(append(append([]byte(nil), valid...), 0))
+	f.Add(valid[:8])
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, body []byte) { fuzzChainRoundTrip(t, body, ParseGetDirectoryVersionResponse) })
+}
+
+// TestChainParserCaps pins the chain parsers' caps (PR #71 review): a
+// bundle response of exactly the largest body a Status frame carries
+// parses and one byte more is ErrStatusTooLarge; a directory version
+// response at wire.MaxDirectory and MaxDirectorySigs parses and one byte
+// more of either is ErrMalformed.
+func TestChainParserCaps(t *testing.T) {
+	// The four uint24-prefixed documents and the version take 8 + 4*3 bytes.
+	fill := maxStatusBody - 8 - 4*3 - 3
+	r := &GetBundleResponse{Version: 1, Bundle: bytes.Repeat([]byte("b"), fill), BundleSigs: []byte("s"), Policy: []byte("p"), PolicySigs: []byte("q")}
+	body, err := r.Marshal()
+	if err != nil || len(body) != maxStatusBody {
+		t.Fatalf("a bundle response of the largest body: %d bytes, %v", len(body), err)
+	}
+	if _, err := ParseGetBundleResponse(body); err != nil {
+		t.Fatalf("the largest bundle response: %v", err)
+	}
+	r.Bundle = append(r.Bundle, 'b')
+	if _, err := r.Marshal(); !errors.Is(err, ErrStatusTooLarge) {
+		t.Fatalf("Marshal one byte above the cap: %v", err)
+	}
+	if _, err := ParseGetBundleResponse(append(body, 0)); !errors.Is(err, ErrStatusTooLarge) {
+		t.Fatalf("a body one byte above the cap: %v, want ErrStatusTooLarge", err)
+	}
+	d := &GetDirectoryVersionResponse{Version: 1, Directory: bytes.Repeat([]byte("d"), MaxDirectory), Sigs: bytes.Repeat([]byte("s"), MaxDirectorySigs)}
+	dbody, err := d.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseGetDirectoryVersionResponse(dbody); err != nil {
+		t.Fatalf("a directory version response at the caps: %v", err)
+	}
+	for name, over := range map[string]*GetDirectoryVersionResponse{
+		"directory": {Version: 1, Directory: bytes.Repeat([]byte("d"), MaxDirectory+1), Sigs: []byte("s")},
+		"sigs":      {Version: 1, Directory: []byte("d"), Sigs: bytes.Repeat([]byte("s"), MaxDirectorySigs+1)},
+	} {
+		var b cryptobyte.Builder
+		b.AddUint64(over.Version)
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(over.Directory) })
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(over.Sigs) })
+		raw, err := b.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseGetDirectoryVersionResponse(raw); !errors.Is(err, ErrMalformed) {
+			t.Errorf("a %s one byte above its cap: %v, want ErrMalformed", name, err)
+		}
+	}
+}
