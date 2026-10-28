@@ -4,11 +4,15 @@ package apply
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
+	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // TestKRLAlone is owner decision D-R2 (PR #71 review F5): a capture whose
@@ -82,4 +86,110 @@ func TestKRLAlone(t *testing.T) {
 			t.Fatal("a refused KRL was installed")
 		}
 	})
+}
+
+// TestResetDirectory is the root-run re-bootstrap of owner decision D-R2
+// (PR #71 review F5): on a host whose accepted directory a signer restore
+// lost, keyroster-agent reset-directory drops it and the spool's directory
+// files, so the next apply takes the re-made chain's newest version as a
+// first install does, and nothing unsigned.
+func TestResetDirectory(t *testing.T) {
+	// diverged is a host that accepted directory version 2, which the
+	// signer then lost and re-made; version 3 builds on the re-made 2.
+	diverged := func(t *testing.T) (*testHost, spool.Doc) {
+		t.Helper()
+		h := newTestHost(t, newFixture(t))
+		if err := os.Mkdir(h.l.Outbox(), 0o750); err != nil { //nolint:gosec // the outbox's mode
+			t.Fatal(err)
+		}
+		h.installed("role:ops")
+		h.publishDir(h.spec("role:ops", "role:lost"))
+		h.mustApply()
+		remade := h.f.directory(h.dirs[0].Body, h.spec("role:ops", "role:remade"))
+		next := h.f.directory(remade.Body, h.spec("role:ops", "role:next"))
+		h.state.Directories[3] = next
+		if _, err := h.apply(); !errors.Is(err, state.ErrDir) {
+			t.Fatalf("the re-made chain: %v, want directory_not_verified", err)
+		}
+		return h, next
+	}
+	t.Run("drops_the_lost_version_and_takes_the_remade_chain", func(t *testing.T) {
+		t.Parallel()
+		h, next := diverged(t)
+		r, err := ResetDirectory(h.l, h.spool)
+		if err != nil || r.Version != 2 || r.SHA256 != trust.SHA256Hex(h.dirs[1].Body) {
+			t.Fatalf("reset-directory: %v, %+v", err, r)
+		}
+		for _, n := range []string{"directory-1.json", "directory-2.json", "directory-3.json", "directory-3.json.sigs"} {
+			if !slices.Contains(r.SpoolRemoved, n) {
+				t.Errorf("reset-directory left %s in the spool (removed %v)", n, r.SpoolRemoved)
+			}
+		}
+		if a := readAccepted(t, h); a.Directory != 0 || a.Bundle != 1 {
+			t.Fatalf("accepted.json after the reset: %+v, want directory 0", a)
+		}
+		// The fetcher then spools the server's current directory only.
+		h.state.Directories = map[uint64]spool.Doc{3: next}
+		r2, err := h.apply()
+		if err != nil || r2.DirectoryVersion != 3 {
+			t.Fatalf("the apply after the reset: %v, %+v", err, r2)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:next", "role:ops"}) {
+			t.Fatalf("principals %v after the re-made chain", got)
+		}
+		if a := readAccepted(t, h); a.Directory != 3 {
+			t.Fatalf("accepted.json after the apply: %+v", a)
+		}
+	})
+	t.Run("an_unsigned_directory_is_still_refused", func(t *testing.T) {
+		t.Parallel()
+		h, next := diverged(t)
+		if _, err := ResetDirectory(h.l, h.spool); err != nil {
+			t.Fatal(err)
+		}
+		forged := next
+		forged.Sigs = []byte("not a signature")
+		h.state.Directories = map[uint64]spool.Doc{3: forged}
+		if _, err := h.apply(); !errors.Is(err, state.ErrDir) {
+			t.Fatalf("an unsigned directory after the reset: %v, want directory_not_verified", err)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:lost", "role:ops"}) {
+			t.Fatalf("principals %v, want the last good ones kept", got)
+		}
+	})
+	t.Run("refused_while_an_apply_is_unfinished", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHost(t, newFixture(t))
+		if err := os.Mkdir(h.l.Outbox(), 0o750); err != nil { //nolint:gosec // the outbox's mode
+			t.Fatal(err)
+		}
+		h.installed("role:ops")
+		h.publishDir(h.spec("role:ops", "role:web"))
+		h.cfg.Fault = func(p string) error {
+			if p == "self-test" {
+				return &crash{point: p}
+			}
+			return nil
+		}
+		if _, err := h.apply(); !isCrash(err) {
+			t.Fatalf("the crash: %v", err)
+		}
+		if _, err := ResetDirectory(h.l, h.spool); !errors.Is(err, ErrResetPending) {
+			t.Fatalf("reset-directory over an unfinished apply: %v, want reset_apply_unfinished", err)
+		}
+	})
+}
+
+// readAccepted reads the outbox's accepted.json.
+func readAccepted(t *testing.T, h *testHost) enroll.Accepted {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(h.l.Outbox(), enroll.AcceptedFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a enroll.Accepted
+	if err := trust.DecodeStrict(b, &a); err != nil {
+		t.Fatal(err)
+	}
+	return a
 }

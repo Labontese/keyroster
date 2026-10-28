@@ -146,6 +146,22 @@ func TestInstallLayout(t *testing.T) {
 		if code, out, errOut := runCmd(t, "krl-version", "--root", root, "--state-dir", state); code != 0 || out != "installed KRL version: 0\n" {
 			t.Fatalf("krl-version exited %d: %q %s", code, out, errOut)
 		}
+		// reset-directory (PR #71 review D-R2) on a host with no accepted
+		// directory drops nothing from accepted/, clears the spool's
+		// directory files and writes the outbox's accepted versions.
+		if err := os.WriteFile(filepath.Join(state, "spool", "directory-1.json"), []byte("d"), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		code, out, errOut := runCmd(t, "reset-directory", "--root", root, "--state-dir", state)
+		if code != 0 || !strings.Contains(out, "no accepted directory") || !strings.Contains(out, "removed from the spool: directory-1.json\n") {
+			t.Fatalf("reset-directory exited %d: %q %s", code, out, errOut)
+		}
+		if _, err := os.Stat(filepath.Join(state, "outbox", "accepted.json")); err != nil {
+			t.Fatalf("reset-directory wrote no accepted.json: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(state, "spool", "directory-1.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("directory-1.json is still in the spool: %v", err)
+		}
 		// Running install again with the same join string is a no-op.
 		if code, out, errOut := runCmd(t, "install", "--root", root, "--state-dir", state, "--join-file", jf, "--fetch-user", who); code != 0 {
 			t.Fatalf("install again exited %d:\n%s%s", code, out, errOut)

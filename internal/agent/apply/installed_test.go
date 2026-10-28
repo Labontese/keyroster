@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
-	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // TestInstalledKRLVersion (T-03-277, the restore cross-check): the KRL
@@ -68,18 +67,7 @@ func TestWriteAccepted(t *testing.T) {
 	if err := os.Mkdir(h.l.Outbox(), 0o750); err != nil { //nolint:gosec // the outbox's mode
 		t.Fatal(err)
 	}
-	read := func() enroll.Accepted {
-		t.Helper()
-		b, err := os.ReadFile(filepath.Join(h.l.Outbox(), enroll.AcceptedFile))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var a enroll.Accepted
-		if err := trust.DecodeStrict(b, &a); err != nil {
-			t.Fatal(err)
-		}
-		return a
-	}
+	read := func() enroll.Accepted { return readAccepted(t, h) }
 	h.publishKRL(3)
 	h.installed("role:ops")
 	if a := read(); a.Bundle != 1 || a.Directory != 1 || a.KRL != h.f.krlVersion {

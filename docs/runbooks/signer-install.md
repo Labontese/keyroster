@@ -1153,6 +1153,48 @@ structurally (see the warning above).
    Keep users away until the last lost version is back (the firewall
    rule set before step 1).
 
+   **Enrolled hosts and a re-made version (owner decision D-R2, PR #71).**
+   An enrolled host whose agent already accepted a lost version refuses a
+   *different* version with that number, and every version built on it:
+   its applier reports `directory_not_verified` ("does not chain") on
+   every run. Its KRLs keep applying (the applier verifies them against
+   the bundle it accepted and installs them alone), but its principals
+   stay at the lost version until it is re-bootstrapped.
+
+   - **Escalate before you install a lost version differently, or a
+     different version with a lost number, while any host is enrolled.**
+     Replaying the exact bytes from the saved export (below) needs none of
+     this: a host that saw the lost version accepts the same bytes as a
+     no-op.
+   - **Which hosts saw a lost version.** On each enrolled host, as root,
+     `/var/lib/keyroster-agent/outbox/accepted.json` names the directory
+     version the agent accepted. A host whose `directory` is above the
+     restored signer's version saw a lost one. A host you cannot reach
+     must be assumed to have seen it.
+   - **Re-bootstrap each such host** once the re-made chain is installed,
+     as root on the host:
+
+     ```
+     keyroster-agent reset-directory
+     ```
+
+     It drops the accepted directory and the spool's directory files,
+     prints the version and SHA-256 it dropped, and writes the outbox's
+     `accepted.json`. It accepts nothing itself. At the fetcher's next poll
+     the agent receives the server's current directory and accepts it the
+     way a first install does: signed by the admin quorum of the policy it
+     accepted, for its pinned installation, with no chain to anything it
+     held before. So check, after the next poll, that `last_apply` in
+     `/var/lib/keyroster-agent/status.json` names the directory version
+     that `keyroster directory show` reports on your workstation, and that
+     its `errors` are empty; a different version means the server served
+     another admin-signed version than the one you installed: escalate.
+     Until the new directory arrives the host keeps the principals it had.
+   - Run in CI: `TestResetDirectory` and `TestKRLAlone` (the agent's
+     apply tests), and `TestInstallLayout` (the command after an install).
+     UNVERIFIED: no restore with a re-made version has been run against an
+     enrolled host, and `reset-directory` has not run on a real host.
+
    **Replay the lost installs in log order**, not all bundles first. A
    directory version is checked against the policy in force when it is
    installed (its admin quorum and the user CA cap), so a directory version
@@ -1286,7 +1328,10 @@ structurally (see the warning above).
    (`keyroster user add NAME --reinvite`, see
    [enroll-user.md](enroll-user.md)), approve the new passkey, and make the
    later lost changes again by hand, disablements first. (UNVERIFIED: this
-   case and its re-invite path have not been run.)
+   case and its re-invite path have not been run.) Those are different
+   versions with the lost numbers: escalate first while any host is
+   enrolled, and re-bootstrap every enrolled host that saw a lost version
+   (**Enrolled hosts and a re-made version**, at the start of this step).
 
    **After the replay, the new export is the baseline.** The replayed
    installs are new log entries with new times, so the log no longer
