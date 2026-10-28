@@ -445,7 +445,10 @@ step 2b). That source is only as trustworthy as the keyroster-server
 account: whoever controls it can put an older genuine KRL there before
 the restore. The restore compares the copy with the KRL the enrolled
 hosts enforce before it imports it (`keyroster-agent krl-version`, the
-cross-check after the capture block, T-03-277). The copy and each of the 503 answers are run in CI
+cross-check after the capture block, T-03-277). That catches a copy rolled
+back below a host's KRL, not a server account that withheld KRLs from the
+hosts before it rolled the copy back, so a restore after a suspected
+compromise of the server host is always escalated. The copy and each of the 503 answers are run in CI
 (internal/server tests, 03-06b). Remedies for a copy that does not
 verify are in server-install.md, labelled UNVERIFIED there.
 

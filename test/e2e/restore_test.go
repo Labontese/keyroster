@@ -298,6 +298,13 @@ EOF`
 	restoreCrossCheckGate     = "and only after the cross-check of the server copy against the hosts printed `cross-check passed:` (T-03-277)."
 	restoreCrossCheckNoCopy   = "After the capture block printed `no server KRL copy`, the copy counts as version 0, so any host that enforces a KRL stops the block"
 	restoreCrossCheckResidual = "The cross-check cannot help where no host is enrolled, or where every host you reach is under the same control as the keyroster-server account"
+	// restoreCrossCheckWithheld and restoreCrossCheckEscalate are the
+	// residual's withholding case and its unconditional escalation (PR #71
+	// review F6): a server that froze KRL delivery before it rolled back
+	// its copy passes the check.
+	restoreCrossCheckWithheld = "Nor can it catch a keyroster-server account that withheld KRLs from the hosts before it rolled back its copy"
+	restoreCrossCheckEscalate = "A passing cross-check therefore never clears a suspected compromise of the server host: escalate every restore after a suspected compromise of the server host, whatever the cross-check prints."
+	restoreCrossCheckProves   = "That is all a passing cross-check proves: the copy is at least as new as the KRL every host you checked enforces."
 	// restoreCrossCheckScript is the block after its heredoc line and its
 	// assignment (restoreCrossCheckBlock), which TestRestoreCrossCheck and
 	// TestAgentEnrollEndToEnd run with KEPT in the environment.
@@ -813,7 +820,13 @@ func TestRestoreRunbookChecks(t *testing.T) {
 	crossBlock := pos("cross-check block", restoreCrossCheckBlock)
 	crossRule := pos("rule that only cross-check passed: lets step 2b run", restoreCrossCheckRule)
 	pos("rule for a missing server copy in the cross-check", restoreCrossCheckNoCopy)
-	pos("residual of the cross-check", restoreCrossCheckResidual)
+	residual := pos("residual of the cross-check", restoreCrossCheckResidual)
+	withheld := pos("the withholding case of the cross-check's residual", restoreCrossCheckWithheld)
+	escalate := pos("the unconditional escalation after a suspected server compromise", restoreCrossCheckEscalate)
+	proves := pos("what a passing cross-check proves", restoreCrossCheckProves)
+	if proves > crossBlock || residual > withheld || withheld > escalate {
+		t.Error("signer-install.md: the cross-check's claim, its residual, the withholding case and the escalation are out of order")
+	}
 	crossGate := pos("step 2b's gate on the cross-check", restoreCrossCheckGate)
 	adminRecover := pos("admin's keyroster revoke recover", restoreAdminRecover)
 	if !(captureKept < crossNote && crossNote < crossHead && crossHead < crossCommand && crossCommand < crossLine && crossLine < crossBlock &&

@@ -504,10 +504,12 @@ runs only an unreadable directory).
 
 **Cross-check the copy against the hosts (T-03-277).** Hosts get a KRL
 only through keyroster-server, which writes `krl-served.json` before it
-serves a KRL (03-06b). So a genuine copy is never older than the KRL any
-host enforces, and a host that enforces a newer KRL than the copy proves
-that the copy was rolled back or removed. The hold keeps every host where
-it is: no new KRL reaches a host until the release.
+serves a KRL (03-06b). So a host that enforces a newer KRL than the copy
+proves that the copy was rolled back or removed. That is all a passing
+cross-check proves: the copy is at least as new as the KRL every host you
+checked enforces. It does not prove that the copy is the newest KRL the
+signer published (see what it cannot catch, below). The hold keeps every
+host where it is: no new KRL reaches a host until the release.
 
 1. On at least one enrolled host, and preferably on every enrolled host
    you can reach, run as root:
@@ -554,8 +556,14 @@ revocations after your latest saved export may be lost.
 
 The cross-check cannot help where no host is enrolled, or where every host
 you reach is under the same control as the keyroster-server account (it
-could then set what `keyroster-agent krl-version` prints). In those cases,
-escalate a restore after a suspected compromise of the server host.
+could then set what `keyroster-agent krl-version` prints). Nor can it catch
+a keyroster-server account that withheld KRLs from the hosts before it
+rolled back its copy (PR #71 review F6): it served the hosts an older KRL,
+or none, while the signer published newer ones, so every host enforces at
+most that older version, and a copy rolled back to it passes. A passing
+cross-check therefore never clears a suspected compromise of the server
+host: escalate every restore after a suspected compromise of the server
+host, whatever the cross-check prints.
 
 Run in CI e2e: the block on fixture copies, with hosts above, equal to and
 below the copy and with no copy (`TestRestoreCrossCheck`), and
