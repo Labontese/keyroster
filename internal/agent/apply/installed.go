@@ -3,15 +3,11 @@
 package apply
 
 import (
-	"bytes"
 	"errors"
-	"fmt"
-	"path/filepath"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
-	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -68,8 +64,10 @@ func AcceptedVersions(l Layout) (enroll.Accepted, error) {
 
 // WriteAccepted writes the applier's accepted versions to the outbox's
 // enroll.AcceptedFile (spool.WriteFileAt, mode 0640, so the fetcher can
-// read it through the outbox's group), unless it holds them already. The
-// fetcher bases its state requests on it (PR #71 review F3/F7).
+// read it through the outbox's group), after every apply. It never reads
+// the outbox (03-08, F2): nothing the fetcher could plant there decides
+// whether it writes. The fetcher bases its state requests on it (PR #71
+// review F3/F7).
 func WriteAccepted(l Layout) error {
 	a, err := AcceptedVersions(l)
 	if err != nil {
@@ -79,16 +77,5 @@ func WriteAccepted(l Layout) error {
 	if err != nil {
 		return err
 	}
-	fd, err := spool.OpenDir(l.Outbox())
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrStateDirUnsafe, err)
-	}
-	defer func() { _ = unix.Close(fd) }()
-	if old, err := spool.ReadFileAt(fd, enroll.AcceptedFile, enroll.MaxAcceptedFile); err == nil && bytes.Equal(old, b) {
-		return nil
-	}
-	if err := paths.Allowed(l, filepath.Join(l.Outbox(), enroll.AcceptedFile)); err != nil {
-		return err
-	}
-	return spool.WriteFileAt(fd, enroll.AcceptedFile, b, 0o640)
+	return writeOutbox(l, enroll.AcceptedFile, b)
 }
