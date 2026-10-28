@@ -181,8 +181,13 @@ type Report struct {
 	Phase2Removed     []string `json:"phase2_removed,omitempty"`
 	UnmatchedHostKeys []string `json:"unmatched_host_keys,omitempty"`
 	SpoolIgnored      []string `json:"spool_ignored,omitempty"`
-	Diff              []string `json:"diff,omitempty"`
-	Errors            []string `json:"errors"`
+	// SpoolMore is set when the spool holds newer bundle, policy or
+	// directory versions than this run's capture read (more than
+	// spool.MaxVersionsPerKind behind): keyroster-agent run applies again
+	// at once (PR #71 review F9).
+	SpoolMore bool     `json:"spool_more,omitempty"`
+	Diff      []string `json:"diff,omitempty"`
+	Errors    []string `json:"errors"`
 }
 
 // KRLKept is Report.KRLKept: the KRL version in force in current (and the
@@ -651,6 +656,7 @@ func (e *engine) loadLastSwap(pending, haveCurrent bool) {
 // the accepted state the capture is verified against (spool.Floor).
 func (e *engine) capture(floor spool.Floor) (spool.State, error) {
 	st, ignored, err := spool.Read(e.cfg.Spool, floor)
+	e.report.SpoolMore = st.More
 	for _, n := range ignored {
 		if len(e.report.SpoolIgnored) < 64 && !slices.Contains(e.report.SpoolIgnored, n) {
 			e.report.SpoolIgnored = append(e.report.SpoolIgnored, n)

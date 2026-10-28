@@ -40,7 +40,10 @@ type RunConfig struct {
 //  2. an enrollment request in the spool is answered (Enroll);
 //  3. Apply runs when the spool holds documents and their names changed
 //     since the last apply (a new version arrived), on the first round
-//     (crash recovery), and again Retry after an apply that failed.
+//     (crash recovery), and again Retry after an apply that failed. While
+//     an apply leaves newer versions in the spool than its capture read
+//     (Report.SpoolMore) and moved forward, it runs again at once, at most
+//     maxCatchUpApplies times a round (PR #71 review F9).
 //
 // Before approval the spool holds no document, so a round reads only its
 // listing: it writes nothing and logs nothing. Errors are logged to
@@ -61,6 +64,7 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 	var (
 		lastNames  string
 		haveNames  bool
+		catchUp    bool
 		failedAt   time.Time
 		lastErrMsg string
 	)
@@ -81,17 +85,35 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			switch {
 			case err != nil:
 				logf("ERROR spool: %v", err)
-			case names != "" && (!haveNames || names != lastNames || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry)):
-				r, err := Apply(ctx, rc.Config, l)
-				if rc.Out != nil && (err != nil || !r.NoOp) {
-					rc.Out(r, err)
+			case names != "" && (!haveNames || names != lastNames || catchUp || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry)):
+				catchUp = false
+				var prev *Report
+				for i := 0; ; i++ {
+					r, err := Apply(ctx, rc.Config, l)
+					if rc.Out != nil && (err != nil || !r.NoOp) {
+						rc.Out(r, err)
+					}
+					failedAt = time.Time{}
+					if err != nil {
+						logf("ERROR apply: %v", err)
+						failedAt = time.Now()
+					}
+					lastNames, haveNames = names, true
+					// PR #71 review F9: a capture reads at most
+					// spool.MaxVersionsPerKind versions above what was
+					// accepted. While the spool holds more and the last
+					// apply moved forward, apply again: up to
+					// maxCatchUpApplies times now, the rest next round.
+					if err != nil || !r.SpoolMore || !advanced(prev, r) {
+						break
+					}
+					if i+1 == maxCatchUpApplies {
+						catchUp = true
+						break
+					}
+					logf("applied up to bundle %d and directory %d; the spool holds newer versions, applying again", r.BundleVersion, r.DirectoryVersion)
+					prev = r
 				}
-				failedAt = time.Time{}
-				if err != nil {
-					logf("ERROR apply: %v", err)
-					failedAt = time.Now()
-				}
-				lastNames, haveNames = names, true
 			}
 		}
 		t := time.NewTimer(rc.Interval)
@@ -102,6 +124,16 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		case <-t.C:
 		}
 	}
+}
+
+// maxCatchUpApplies bounds the applies of one round while the spool holds
+// more versions than one capture reads (Report.SpoolMore).
+const maxCatchUpApplies = 16
+
+// advanced reports whether the apply that wrote r moved the accepted
+// bundle or directory version past prev's (any apply does, with no prev).
+func advanced(prev, r *Report) bool {
+	return prev == nil || r.BundleVersion > prev.BundleVersion || r.DirectoryVersion > prev.DirectoryVersion
 }
 
 // spoolDocuments is the sorted list of document names in the spool (every

@@ -82,6 +82,11 @@ type State struct {
 	Policies    map[uint64]Doc
 	Directories map[uint64]Doc
 	KRLs        map[uint64]KRLFiles
+	// More is set by Read when Floor's rule left out complete versions
+	// above the ones it read (a host more than MaxVersionsPerKind versions
+	// behind): another capture after this one is accepted reads them (PR
+	// #71 review F9).
+	More bool
 }
 
 var (
@@ -324,7 +329,8 @@ func Read(dir string, floor Floor) (State, []string, error) {
 				ignored = append(ignored, base+" (no "+base+".sigs)")
 			}
 		}
-		take := pick(complete, floors[kind])
+		take, more := pick(complete, floors[kind])
+		st.More = st.More || more
 		for _, v := range complete {
 			base := kind + "-" + strconv.FormatUint(v, 10) + ".json"
 			if !take[v] {
@@ -369,18 +375,20 @@ func Read(dir string, floor Floor) (State, []string, error) {
 	return st, ignored, nil
 }
 
-// pick is Floor's rule over the complete versions vs of one kind.
-func pick(vs []uint64, floor uint64) map[uint64]bool {
+// pick is Floor's rule over the complete versions vs of one kind. more
+// reports versions above floor it left out (with a floor only: without
+// one it takes the newest, and what it leaves out is older).
+func pick(vs []uint64, floor uint64) (map[uint64]bool, bool) {
 	slices.Sort(vs)
 	take := map[uint64]bool{}
 	if floor == 0 {
 		for i := len(vs) - 1; i >= 0 && len(take) < MaxVersionsPerKind; i-- {
 			take[vs[i]] = true
 		}
-		return take
+		return take, false
 	}
 	var below uint64
-	n := 0
+	n, more := 0, false
 	for _, v := range vs {
 		switch {
 		case v <= floor:
@@ -388,12 +396,14 @@ func pick(vs []uint64, floor uint64) map[uint64]bool {
 		case n < MaxVersionsPerKind:
 			take[v] = true
 			n++
+		default:
+			more = true
 		}
 	}
 	if below != 0 {
 		take[below] = true
 	}
-	return take
+	return take, more
 }
 
 // Write stores s in the spool at dir through WriteFileAt (mode 0644),
