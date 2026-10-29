@@ -697,6 +697,30 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts()) }},
 		})
 	})
+	t.Run("seq_regressed", func(t *testing.T) {
+		// StoreHeartbeat's seq_regressed write (03-08c): B's stored
+		// heartbeat has seq 3, and A's request carries 2.
+		d, k, b := reused(t, true, false)
+		storeTestHB(t, d, b.Key(), 3)
+		before, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hbsBefore, err := d.Heartbeats(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.StoreHeartbeat(ctx, k, 2, []byte("{}"), 7, nowUS+9); !errors.Is(err, ErrNotFound) {
+			t.Errorf("StoreHeartbeat below B's seq with A's key: %v, want ErrNotFound", err)
+		}
+		after, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+		if err != nil || !reflect.DeepEqual(after, before) {
+			t.Errorf("StoreHeartbeat below B's seq with A's key changed B's row:\n%+v\nwas\n%+v (%v)", after, before, err)
+		}
+		if hbs, err := d.Heartbeats(ctx); err != nil || !reflect.DeepEqual(hbs, hbsBefore) {
+			t.Errorf("StoreHeartbeat below B's seq with A's key changed B's heartbeat: %v, was %v (%v)", hbs, hbsBefore, err)
+		}
+	})
 }
 
 // TestAgentWritesKeyedByIdentity is PR #72 fix-round carry-over (a)

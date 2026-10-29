@@ -543,8 +543,11 @@ type Heartbeat struct {
 // first checks that the row k still exists (AgentKey): a
 // request the row was forgotten (or rotated) under while its body arrived
 // never writes a heartbeat that a later agent reusing the ID would inherit
-// (ErrNotFound; PR #72 review C1). foreign_keys is off, so 0006's ON
-// DELETE CASCADE does nothing; DeleteAgentIf deletes the row itself.
+// (ErrNotFound; PR #72 review C1). Every write names k itself as well
+// (03-08c), the heartbeat through its agents row, so none of them relies
+// on that first check to miss a row that reused the ID. foreign_keys is
+// off, so 0006's ON DELETE CASCADE does nothing; DeleteAgentIf deletes the
+// row itself.
 //
 // The clock offset is recorded whatever the seq (owner decision D-R2). An
 // equal seq changes nothing else and is ErrStaleHeartbeat; a lower one is
@@ -565,8 +568,12 @@ func (d *DB) StoreHeartbeat(ctx context.Context, k AgentKey, seq int64, body []b
 	if err := agentExists(ctx, tx, k); err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE id = ?`, offsetS, id); err != nil {
+	res, err := tx.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE `+agentKeyWhere, keyArgs(k, offsetS)...)
+	if err != nil {
 		return false, fmt.Errorf("serverdb: clock offset: %w", err)
+	}
+	if err := oneRow(res); err != nil {
+		return false, err
 	}
 	var stored, receivedUS int64
 	err = tx.QueryRowContext(ctx, `SELECT seq, received_at_us FROM heartbeats WHERE agent_id = ?`, id).Scan(&stored, &receivedUS)
@@ -580,8 +587,8 @@ func (d *DB) StoreHeartbeat(ctx context.Context, k AgentKey, seq int64, body []b
 		}
 		return false, ErrStaleHeartbeat
 	case seq < stored:
-		res, err := tx.ExecContext(ctx, `UPDATE agents SET seq_regressed_at_us = ? WHERE id = ?
-AND (seq_regressed_at_us IS NULL OR seq_regressed_at_us <= ? OR seq_regressed_at_us <= ?)`, nowUS, id, receivedUS, nowUS-seqRegressedLogEvery)
+		res, err := tx.ExecContext(ctx, `UPDATE agents SET seq_regressed_at_us = ? WHERE `+agentKeyWhere+`
+AND (seq_regressed_at_us IS NULL OR seq_regressed_at_us <= ? OR seq_regressed_at_us <= ?)`, append(keyArgs(k, nowUS), receivedUS, nowUS-seqRegressedLogEvery)...)
 		if err != nil {
 			return false, fmt.Errorf("serverdb: seq regressed: %w", err)
 		}
@@ -594,9 +601,16 @@ AND (seq_regressed_at_us IS NULL OR seq_regressed_at_us <= ? OR seq_regressed_at
 		}
 		return n == 1, ErrSeqRegressed
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) VALUES (?, ?, ?, ?)
-ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, received_at_us = excluded.received_at_us`, id, seq, body, nowUS); err != nil {
+	// The row's ID comes from the agents row k, so the heartbeat is stored
+	// only for that row (the WHERE also keeps SQLite's upsert parse
+	// unambiguous).
+	res, err = tx.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) SELECT id, ?, ?, ? FROM agents WHERE `+agentKeyWhere+`
+ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, received_at_us = excluded.received_at_us`, keyArgs(k, seq, body, nowUS)...)
+	if err != nil {
 		return false, fmt.Errorf("serverdb: store heartbeat: %w", err)
+	}
+	if err := oneRow(res); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("serverdb: commit: %w", err)
