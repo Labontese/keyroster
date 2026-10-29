@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -178,54 +179,79 @@ func TestServedHostNotPending(t *testing.T) {
 	})
 }
 
-// TestHostForgetHostGone is carry-over b on the CLI: the refusal names
-// --host-gone, and --host-gone is sent, printed before the request and
+// TestHostForgetHostGone is carry-over b on the CLI (03-08, 03-08b): an
+// agent approved once without a recorded removal confirmation is refused
+// before anything is sent, the refusal naming --host-gone with its
+// identity; --host-gone is then sent, printed before the request and
 // after it.
 func TestHostForgetHostGone(t *testing.T) {
 	_, key := writeEntryKey(t, "web1")
-	forgotten, err := json.Marshal(serverclient.ForgetHostAnswer{Forgotten: []serverclient.PendingHost{{ExpectedName: "web1", IdentitySPKISHA256: strings.Repeat("00", 32),
-		HostKeys: []string{key}, Facts: enroll.Facts{OSID: "debian", Hostname: "web1"}, EnrolledAt: "2026-10-28T12:00:00Z"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	web1 := servedRow("web1", "00", key, false)
 	t.Run("removal_not_applied_refused", func(t *testing.T) {
-		e := popHostsEnv(t)
+		e := forgetEnv(t, nil, web1)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || !strings.Contains(stderr, "host_removal_not_applied") || !strings.Contains(stderr, "keyroster host forget --identity SHA256:"+strings.Repeat("A", 43)+" --host-gone") {
+			t.Fatalf("exit %d: %s", code, stderr)
+		}
+		if e.wasCalled(&called) {
+			t.Fatal("the refused forget was sent")
+		}
+	})
+	t.Run("server_refusal_explained", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
 		var called bool
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"host_removal_not_applied"}`, http.StatusConflict)
-		code, _, stderr := run(t, "host", "forget", "web1")
+		code, _, stderr := run(t, "host", "forget", "web1", "--host-gone")
 		if code == 0 || !strings.Contains(stderr, "host_removal_not_applied") || !strings.Contains(stderr, "--host-gone") {
 			t.Fatalf("exit %d: %s", code, stderr)
 		}
-		var req serverclient.ForgetHostRequest
-		if json.Unmarshal(e.lastPost, &req) != nil || req.HostGone {
-			t.Fatalf("the request %s", e.lastPost)
-		}
 	})
 	t.Run("host_gone_sent_and_printed", func(t *testing.T) {
-		e := popHostsEnv(t)
+		e := forgetEnv(t, nil, web1)
 		var called bool
-		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, string(forgotten), http.StatusOK)
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
 		code, out, stderr := run(t, "host", "forget", "web1", "--host-gone")
-		if code != 0 || !strings.Contains(stderr, "host forget --host-gone: forgetting web1 without its confirmation") || !strings.Contains(out, "Forgotten with --host-gone") {
+		if code != 0 || !strings.Contains(stderr, "host forget --host-gone: forgetting web1 without its confirmation") || !strings.Contains(out, "Forgotten with --host-gone") ||
+			!strings.Contains(out, "override: --host-gone") {
 			t.Fatalf("exit %d:\n%s%s", code, out, stderr)
 		}
 		var req serverclient.ForgetHostRequest
-		if json.Unmarshal(e.lastPost, &req) != nil || !req.HostGone || req.ExpectedName != "web1" {
+		if json.Unmarshal(e.lastPost, &req) != nil || !req.HostGone || req.IdentitySPKISHA256 != strings.Repeat("00", 32) || req.RemovalConfirmed != nil || req.RemovalVersion != 3 {
 			t.Fatalf("the request %s", e.lastPost)
 		}
 	})
 }
 
-// TestServedLine (PR #72 review C14): a re-keyed host is shown as one to
-// re-enroll, in host pending and host status alike.
+// TestServedLine (PR #72 review C14, 03-08b): a re-keyed host is shown as
+// host_keys_changed and served until forget, in host pending and host
+// status alike; host pending prints each served row's confirmation and
+// the command that forgets it by identity.
 func TestServedLine(t *testing.T) {
 	for state, want := range map[string]string{
-		serverclient.HostStateKeysChanged: "host_keys_changed (re-enroll), served until forget",
+		serverclient.HostStateKeysChanged: "host_keys_changed, served until forget",
 		serverclient.HostStateRemoved:     "removed, served until forget",
 		serverclient.HostStateDisabled:    "disabled, served until forget",
 	} {
 		if got := servedLine(state); got != want {
 			t.Errorf("servedLine(%s) = %q, want %q", state, got, want)
+		}
+	}
+	_, key := writeEntryKey(t, "web1")
+	confirmed, open := servedRow("web1", "00", key, true), servedRow("web1", "11", key, false)
+	open.State = serverclient.HostStateKeysChanged
+	forgetEnv(t, nil, confirmed, open)
+	code, out, stderr := run(t, "host", "pending")
+	idOpen := enroll.IdentityFingerprint(bytes.Repeat([]byte{0x11}, 32))
+	for _, want := range []string{
+		"Host web1: removed, served until forget (agent identity SHA256:" + strings.Repeat("A", 43) + ")\n  removal confirmed at directory v4; enrolled 2026-10-28T12:00:00Z\n" +
+			"  forget it with: keyroster host forget --identity SHA256:" + strings.Repeat("A", 43) + "\n",
+		"Host web1: host_keys_changed, served until forget (agent identity " + idOpen + ")\n  removal at directory v3 not confirmed; enrolled 2026-10-28T12:00:00Z\n" +
+			"  forget it with: keyroster host forget --identity " + idOpen + "\n",
+	} {
+		if code != 0 || !strings.Contains(out, want) {
+			t.Fatalf("host pending: exit %d, want %q in:\n%s%s", code, want, out, stderr)
 		}
 	}
 }

@@ -103,6 +103,12 @@ type Agent struct {
 	// IdentityRotations how often it has (owner decision D-R1).
 	IdentityRotatedAtUS int64
 	IdentityRotations   int64
+	// RemovalConfirmedVersion and RemovalConfirmedSHA256 are the directory
+	// version and the raw SHA-256 of its document whose application, in
+	// the host's own heartbeat, confirmed the removal at RemovedDirVersion
+	// (0 and nil: none recorded; 03-08b, RecordRemovalConfirmed).
+	RemovalConfirmedVersion uint64
+	RemovalConfirmedSHA256  []byte
 }
 
 // EnrollAgent uses the join token tokenHash and records a as an enrolled
@@ -250,10 +256,65 @@ func (d *DB) MarkAgentApproved(ctx context.Context, id, nowUS int64) error {
 	return nil
 }
 
-// DeleteAgent removes the agent row id and its heartbeat, which frees its
-// identity and host keys for a new enrollment (keyroster host forget; PR
-// #71 review D-R1). It is ErrNotFound when no such row exists.
-func (d *DB) DeleteAgent(ctx context.Context, id int64) error {
+// ForgetFacts are what the admin saw of an agent in keyroster host
+// pending, which a forget names and DeleteAgentIf re-checks (03-08b):
+// whether the directory approved it once, its removal version (0: none)
+// and its recorded removal confirmation (ConfirmedVersion 0 and
+// ConfirmedSHA256 nil: none; the SHA-256 is raw, 32 bytes).
+type ForgetFacts struct {
+	ApprovedOnce     bool
+	RemovalVersion   uint64
+	ConfirmedVersion uint64
+	ConfirmedSHA256  []byte
+}
+
+// ForgetFacts are a's ForgetFacts as the row holds them.
+func (a *Agent) ForgetFacts() ForgetFacts {
+	return ForgetFacts{ApprovedOnce: a.ApprovedAtUS != 0, RemovalVersion: a.RemovedDirVersion,
+		ConfirmedVersion: a.RemovalConfirmedVersion, ConfirmedSHA256: a.RemovalConfirmedSHA256}
+}
+
+// nullVersion binds a version, NULL for 0 (IS ? then matches a NULL
+// column; a bound 0 never would).
+func nullVersion(v uint64) (any, error) {
+	switch {
+	case v == 0:
+		return nil, nil
+	case v > math.MaxInt64:
+		return nil, errors.New("serverdb: directory version above int64")
+	}
+	return int64(v), nil //nolint:gosec // G115: checked above
+}
+
+// nullBlob binds b, NULL for an empty b (an empty blob is not NULL).
+func nullBlob(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
+}
+
+// DeleteAgentIf removes the agents row id with the identity spki, and its
+// heartbeat, which frees its identity and host keys for a new enrollment
+// (keyroster host forget; PR #71 review D-R1), but only while the row's
+// approval, removal version and recorded confirmation still equal facts
+// (03-08b, plan check item 1). The heartbeat and the row are deleted in
+// one transaction, the row by one statement that re-checks every fact;
+// when it deletes no row (the row is gone, its identity rotated, or a fact
+// changed after the caller checked it) nothing is deleted and the answer
+// is ErrNotFound. foreign_keys is off, so the heartbeat is deleted here.
+func (d *DB) DeleteAgentIf(ctx context.Context, id int64, spki []byte, facts ForgetFacts) error {
+	removal, err := nullVersion(facts.RemovalVersion)
+	if err != nil {
+		return err
+	}
+	confirmed, err := nullVersion(facts.ConfirmedVersion)
+	if err != nil {
+		return err
+	}
+	if (confirmed == nil) != (len(facts.ConfirmedSHA256) == 0) {
+		return errors.New("serverdb: a confirmation needs both its version and its SHA-256")
+	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("serverdb: begin: %w", err)
@@ -262,7 +323,9 @@ func (d *DB) DeleteAgent(ctx context.Context, id int64) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM heartbeats WHERE agent_id = ?`, id); err != nil {
 		return fmt.Errorf("serverdb: delete heartbeat: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, id)
+	res, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE id = ? AND identity_spki_sha256 = ? AND removed_dir_version IS ?
+AND removal_confirmed_version IS ? AND removal_confirmed_sha256 IS ? AND (approved_at_us IS NULL) = ?`,
+		id, spki, removal, confirmed, nullBlob(facts.ConfirmedSHA256), !facts.ApprovedOnce)
 	if err != nil {
 		return fmt.Errorf("serverdb: delete agent: %w", err)
 	}
@@ -275,16 +338,62 @@ func (d *DB) DeleteAgent(ctx context.Context, id int64) error {
 	return nil
 }
 
+// RecordRemovalConfirmed records {version, sha256} (sha256 raw, 32 bytes)
+// as the confirmation of the removal at removedVersion of the agents row
+// id with the identity spki (03-08b), only while that removal version is
+// still the recorded one and no confirmation is: a removal cleared or
+// re-recorded since the caller read the row records nothing, and the next
+// heartbeat or host pending runs the rule again. It reports whether it
+// recorded; ErrNotFound when no row has both id and spki.
+func (d *DB) RecordRemovalConfirmed(ctx context.Context, id int64, spki []byte, removedVersion, version uint64, sha256 []byte) (bool, error) {
+	if removedVersion == 0 || version < removedVersion || version > math.MaxInt64 || len(sha256) != 32 {
+		return false, errors.New("serverdb: incomplete removal confirmation")
+	}
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET removal_confirmed_version = ?, removal_confirmed_sha256 = ?
+WHERE id = ? AND identity_spki_sha256 = ? AND removed_dir_version = ? AND removal_confirmed_version IS NULL`,
+		int64(version), sha256, id, spki, int64(removedVersion)) //nolint:gosec // G115: removedVersion <= version <= MaxInt64, checked above
+	if err != nil {
+		return false, fmt.Errorf("serverdb: record removal confirmation: %w", err)
+	}
+	if err := oneRow(res); !errors.Is(err, ErrNotFound) {
+		return err == nil, err
+	}
+	if err := agentExists(ctx, d.db, id, spki); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// rowQueryer is a *sql.DB or a *sql.Tx.
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// agentExists is ErrNotFound unless the agents row id exists with the
+// identity spki.
+func agentExists(ctx context.Context, q rowQueryer, id int64, spki []byte) error {
+	var one int
+	err := q.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ? AND identity_spki_sha256 = ?`, id, spki).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("serverdb: agent: %w", err)
+	}
+	return nil
+}
+
 // SetAgentRemovedVersion records version as the first directory version
 // that no longer approves the agent, unless one is recorded already. A
-// version of 0 clears it (a directory approves the agent again).
+// version of 0 clears it and its recorded confirmation (a directory entry
+// holds the agent's keys again).
 func (d *DB) SetAgentRemovedVersion(ctx context.Context, id int64, version uint64) error {
 	if version > math.MaxInt64 {
 		return errors.New("serverdb: directory version above int64")
 	}
 	var err error
 	if version == 0 {
-		_, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = NULL WHERE id = ?`, id)
+		_, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = NULL, removal_confirmed_version = NULL, removal_confirmed_sha256 = NULL WHERE id = ?`, id)
 	} else {
 		_, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = ? WHERE id = ? AND removed_dir_version IS NULL`, int64(version), id) //nolint:gosec // G115: checked above
 	}
@@ -363,7 +472,7 @@ type Heartbeat struct {
 // request the row was forgotten (or rotated) under while its body arrived
 // never writes a heartbeat that a later agent reusing the ID would inherit
 // (ErrNotFound; PR #72 review C1). foreign_keys is off, so 0006's ON
-// DELETE CASCADE does nothing; DeleteAgent deletes the row itself.
+// DELETE CASCADE does nothing; DeleteAgentIf deletes the row itself.
 //
 // The clock offset is recorded whatever the seq (owner decision D-R2). An
 // equal seq changes nothing else and is ErrStaleHeartbeat; a lower one is
@@ -380,7 +489,7 @@ func (d *DB) StoreHeartbeat(ctx context.Context, id int64, spki []byte, seq int6
 		return false, fmt.Errorf("serverdb: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := agentLive(ctx, tx, id, spki); err != nil {
+	if err := agentExists(ctx, tx, id, spki); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE id = ?`, offsetS, id); err != nil {
@@ -434,20 +543,6 @@ func (d *DB) RecordClockOffset(ctx context.Context, id int64, spki []byte, offse
 	return oneRow(res)
 }
 
-// agentLive is ErrNotFound unless the agents row id exists with the
-// identity spki.
-func agentLive(ctx context.Context, tx *sql.Tx, id int64, spki []byte) error {
-	var one int
-	err := tx.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ? AND identity_spki_sha256 = ?`, id, spki).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("serverdb: agent: %w", err)
-	}
-	return nil
-}
-
 // Heartbeats returns every stored heartbeat, by agent ID.
 func (d *DB) Heartbeats(ctx context.Context) (map[int64]Heartbeat, error) {
 	rows, err := d.db.QueryContext(ctx, `SELECT agent_id, seq, body, received_at_us FROM heartbeats`)
@@ -471,7 +566,7 @@ func (d *DB) Heartbeats(ctx context.Context) (map[int64]Heartbeat, error) {
 
 // agentColumns are the columns scanAgent reads, in its order.
 const agentColumns = `id, identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us, last_seen_us, approved_at_us, removed_dir_version,
-clock_offset_s, seq_regressed_at_us, identity_rotated_at_us, identity_rotations`
+clock_offset_s, seq_regressed_at_us, identity_rotated_at_us, identity_rotations, removal_confirmed_version, removal_confirmed_sha256`
 
 func scanAgent(rows *sql.Rows) (*Agent, error) {
 	var (
@@ -479,10 +574,10 @@ func scanAgent(rows *sql.Rows) (*Agent, error) {
 		keys                    string
 		seen, approved, removed sql.NullInt64
 		offset, regressed       sql.NullInt64
-		rotated                 sql.NullInt64
+		rotated, confirmed      sql.NullInt64
 	)
 	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.TokenSHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen, &approved, &removed,
-		&offset, &regressed, &rotated, &a.IdentityRotations); err != nil {
+		&offset, &regressed, &rotated, &a.IdentityRotations, &confirmed, &a.RemovalConfirmedSHA256); err != nil {
 		return nil, fmt.Errorf("serverdb: agent: %w", err)
 	}
 	if err := json.Unmarshal([]byte(keys), &a.HostKeys); err != nil {
@@ -493,6 +588,11 @@ func scanAgent(rows *sql.Rows) (*Agent, error) {
 	a.IdentityRotatedAtUS = rotated.Int64
 	if removed.Valid && removed.Int64 > 0 {
 		a.RemovedDirVersion = uint64(removed.Int64)
+	}
+	if confirmed.Valid && confirmed.Int64 > 0 {
+		a.RemovalConfirmedVersion = uint64(confirmed.Int64)
+	} else {
+		a.RemovalConfirmedSHA256 = nil
 	}
 	return &a, nil
 }

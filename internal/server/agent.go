@@ -203,7 +203,7 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 				if err := s.db.SetAgentRemovedVersion(ctx, a.ID, 0); err != nil {
 					s.log.Warn("agent removal version", "err", err)
 				}
-				a.RemovedDirVersion = 0
+				a.RemovedDirVersion, a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, 0, nil
 			}
 		case a.ApprovedAtUS == 0:
 			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrNotApproved})
@@ -213,7 +213,7 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 				if err := s.db.SetAgentRemovedVersion(ctx, a.ID, 0); err != nil {
 					s.log.Warn("agent removal version", "err", err)
 				}
-				a.RemovedDirVersion = 0
+				a.RemovedDirVersion, a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, 0, nil
 			}
 		case a.RemovedDirVersion == 0 && dv.version != 0:
 			if err := s.db.SetAgentRemovedVersion(ctx, a.ID, dv.version); err != nil {
@@ -712,7 +712,9 @@ func encodeAgentState(bundles, dirs [][]byte, k []byte, more bool) []byte {
 // The clock offset of every heartbeat that parsed is recorded, a refused
 // one's too, so clock_skew never lags behind the fetcher (D-R2).
 //
-// A stored heartbeat logs nothing (one row per agent, gemma REVIEWS L1123).
+// A stored heartbeat logs nothing (one row per agent, gemma REVIEWS L1123),
+// unless it confirms the agent's removal (confirmRemoval, 03-08b), which
+// is recorded on the agents row and logged once.
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, heartbeat.MaxBody))
 	if err != nil {
@@ -754,6 +756,12 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 		s.log.Error("store heartbeat", "err", err)
 		s.writeJSON(w, ar.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 	default:
+		// 03-08b: a stored heartbeat may confirm the agent's removal. A
+		// signer error is logged and skipped, and the answer never depends
+		// on it; keyroster host pending runs the rule again.
+		if _, err := s.confirmRemoval(ctx, ar.dir, ar.agent, h.Status.Directory); err != nil {
+			s.log.Warn("removal confirmation skipped", "expected_name", ar.agent.ExpectedName, "agent", fp, "err", err)
+		}
 		s.writeJSON(w, ar.status, http.StatusOK, serverclient.HeartbeatAnswer{Seq: h.Status.Seq})
 	}
 }

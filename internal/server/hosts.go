@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -76,13 +78,19 @@ func (s *Server) handleMintJoinToken(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePendingHosts serves GET AdminPendingHostsPath (keyroster host
-// pending and host approve, admin-signed): every enrolled agent that no
-// active directory host entry with exactly its host keys approves. An
-// agent the directory approved once is never pending again: it is listed
-// under Served with its directory state (removed, disabled or
-// keys_changed) and keeps getting signed state until keyroster host
+// pending, host approve and host forget, admin-signed): every enrolled
+// agent that no active directory host entry with exactly its host keys
+// approves. An agent the directory approved once is never pending again:
+// it is listed under Served with its directory state (removed, disabled
+// or keys_changed), its removal version and its recorded removal
+// confirmation, and keeps getting signed state until keyroster host
 // forget, so host approve can never pick its identity (03-08 carry-over
-// a, owner decision 2026-10-28). The policy must set pop.hosts (409
+// a, owner decision 2026-10-28). Before it answers, it records the
+// confirmation of each served agent with a removal version and none
+// recorded, from its stored heartbeat (confirmRemoval, 03-08b): that
+// catches the rows from before migration 0007 and the recordings a
+// heartbeat skipped while the signer was unreachable. A signer error
+// there is logged and skipped. The policy must set pop.hosts (409
 // host_pop_not_enabled).
 func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -107,6 +115,12 @@ func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, v, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 		return
 	}
+	hbs, err := s.db.Heartbeats(ctx)
+	if err != nil {
+		s.log.Error("heartbeats", "err", err)
+		s.writeJSON(w, v, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
+	}
 	out := serverclient.PendingHostsAnswer{Hosts: []serverclient.PendingHost{}, Served: []serverclient.ServedHost{}}
 	for _, a := range agents {
 		if approved(dv, a.HostKeys) {
@@ -121,46 +135,107 @@ func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 			ExpectedName: a.ExpectedName, IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256), HostKeys: a.HostKeys,
 			Facts: f, EnrolledAt: time.UnixMicro(a.EnrolledAtUS).UTC().Format(time.RFC3339),
 		}
-		if a.ApprovedAtUS != 0 {
-			_, st := hostState(dv, a.HostKeys, a.ExpectedName)
-			out.Served = append(out.Served, serverclient.ServedHost{PendingHost: p, State: st})
+		if a.ApprovedAtUS == 0 {
+			out.Hosts = append(out.Hosts, p)
 			continue
 		}
-		out.Hosts = append(out.Hosts, p)
+		if hb, ok := hbs[a.ID]; ok && a.RemovedDirVersion != 0 && a.RemovalConfirmedVersion == 0 {
+			if h, err := heartbeat.ParseHeartbeat(hb.Body); err == nil {
+				if _, err := s.confirmRemoval(ctx, dv, &a, h.Status.Directory); err != nil {
+					s.log.Warn("removal confirmation skipped", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "err", err)
+				}
+			}
+		}
+		_, st := hostState(dv, a.HostKeys, a.ExpectedName)
+		out.Served = append(out.Served, servedHost(p, st, &a))
 	}
 	s.log.Info("pending hosts listed", "admin", adminName(ctx), "count", len(out.Hosts), "served", len(out.Served))
 	s.writeJSON(w, dv.status, http.StatusOK, out)
 }
 
+// servedHost is the served row of p, an agent approved once in directory
+// state st, with a's removal version and recorded confirmation.
+func servedHost(p serverclient.PendingHost, st string, a *serverdb.Agent) serverclient.ServedHost {
+	h := serverclient.ServedHost{PendingHost: p, State: st, RemovalVersion: a.RemovedDirVersion}
+	if a.RemovalConfirmedVersion != 0 {
+		h.RemovalConfirmed = &serverclient.RemovalConfirmation{Version: a.RemovalConfirmedVersion, SHA256: hex.EncodeToString(a.RemovalConfirmedSHA256)}
+	}
+	return h
+}
+
+// forgetRequest checks a decoded forget request and returns the identity
+// and the facts it names: the identity as 64 lowercase hex digits; a
+// confirmation with a removal version, a version at or above it and a
+// 64-hex SHA-256; and none of the combinations no admin saw in host
+// pending (host_gone with a confirmation; approved_once false with a
+// removal fact or host_gone).
+func forgetRequest(req serverclient.ForgetHostRequest) ([]byte, serverdb.ForgetFacts, bool) {
+	var f serverdb.ForgetFacts
+	if !enroll.IsSHA256Hex(req.IdentitySPKISHA256) {
+		return nil, f, false
+	}
+	spki, _ := hex.DecodeString(req.IdentitySPKISHA256) // IsSHA256Hex checked it
+	f.ApprovedOnce, f.RemovalVersion = req.ApprovedOnce, req.RemovalVersion
+	if c := req.RemovalConfirmed; c != nil {
+		if req.RemovalVersion == 0 || c.Version < req.RemovalVersion || !enroll.IsSHA256Hex(c.SHA256) || req.HostGone {
+			return nil, f, false
+		}
+		f.ConfirmedVersion = c.Version
+		f.ConfirmedSHA256, _ = hex.DecodeString(c.SHA256)
+	}
+	if !req.ApprovedOnce && (req.RemovalVersion != 0 || req.RemovalConfirmed != nil || req.HostGone) {
+		return nil, f, false
+	}
+	return spki, f, true
+}
+
+// sameFacts reports whether a's row still holds the facts f.
+func sameFacts(a *serverdb.Agent, f serverdb.ForgetFacts) bool {
+	g := a.ForgetFacts()
+	return g.ApprovedOnce == f.ApprovedOnce && g.RemovalVersion == f.RemovalVersion && g.ConfirmedVersion == f.ConfirmedVersion &&
+		bytes.Equal(g.ConfirmedSHA256, f.ConfirmedSHA256)
+}
+
 // handleForgetHost serves POST AdminForgetHostPath (keyroster host forget,
-// admin-signed; PR #71 review D-R1): it deletes every agent enrolled under
-// the host name, so its identity gets 403 unknown_agent from then on and
-// its host keys can enroll again with a new join token. It is refused,
+// admin-signed; PR #71 review D-R1, 03-08b): it deletes the one agent the
+// request names by identity, so that identity gets 403 unknown_agent from
+// then on and its host keys can enroll again with a new join token. The
+// request carries the facts the admin saw in keyroster host pending (400
+// malformed request when they do not check out, forgetRequest), and the
+// agent is forgotten only while they still hold. In order, each refusal
 // deleting nothing:
-//   - 409 host_in_directory while any directory host entry, active or
-//     disabled, holds a host key of one of them: forgetting an agent whose
-//     host is still in the directory would stop the signed state,
-//     revocations included, that host still needs;
-//   - 409 host_removal_not_applied (03-08, owner decision 2026-10-28) for
-//     an agent approved once until its newest heartbeat shows a committed
-//     directory version at or above removed_dir_version, the first
-//     version it was served under that no longer approved it, and that
-//     directory is one the server served: not above the current version,
-//     with the SHA-256 of the server's directory at that number
-//     (removalApplied, PR #72 review C4). The host has then applied its
-//     own removal. The request's host_gone overrides
-//     this for a host that will never report again; the server logs it at
-//     warning level. An agent never approved has no removal to wait for.
+//  1. the directory in force (503 when it cannot be read);
+//  2. the agent with that identity (404 host_not_enrolled);
+//  3. its approval, removal version and recorded confirmation equal the
+//     request's (409 forget_state_changed: run host pending again);
+//  4. no directory host entry, active or disabled, holds one of its host
+//     keys (409 host_in_directory): forgetting an agent whose host is
+//     still in the directory would stop the signed state, revocations
+//     included, that host still needs;
+//  5. an agent approved once has a recorded removal confirmation (its
+//     host's own heartbeat showed it applied a directory that removed it,
+//     confirmRemoval), or the request sets host_gone for a host that will
+//     never report again, which is logged at warning level (409
+//     host_removal_not_applied, 03-08 owner decision D-1). An agent never
+//     approved has no removal to wait for;
+//  6. serverdb.DeleteAgentIf deletes the row and its heartbeat in one
+//     transaction, by one statement that re-checks the identity and every
+//     fact (409 forget_state_changed when the row changed after step 3).
 //
-// 404 host_not_enrolled when no agent has the name. Forget is one admin's
-// action and leaves a server log line only; the admin quorum and an audit
-// leaf for forget and for host_gone are 03-08b's (owner decision D-1).
+// Forget stays one admin's request, recorded in the server's log only,
+// until plan 03-08c adds the signer's admin quorum and its host_forget
+// audit entry (owner decisions 03-08 D-1 and 03-08b Q1).
 func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req serverclient.ForgetHostRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil || dec.More() || !directory.ValidUserName(req.ExpectedName) {
+	if err := dec.Decode(&req); err != nil || dec.More() {
+		s.writeJSON(w, nil, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	spki, facts, ok := forgetRequest(req)
+	if !ok {
 		s.writeJSON(w, nil, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
 		return
 	}
@@ -170,111 +245,113 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 		s.signerUnavailable(w, false)
 		return
 	}
-	agents, err := s.db.ListAgents(ctx)
-	if err != nil {
-		s.log.Error("list agents", "err", err)
-		s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
-		return
-	}
-	hbs, err := s.db.Heartbeats(ctx)
-	if err != nil {
-		s.log.Error("heartbeats", "err", err)
-		s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
-		return
-	}
-	var forget []serverdb.Agent
-	for _, a := range agents {
-		if a.ExpectedName != req.ExpectedName {
-			continue
-		}
-		if hostHolds(dv, a.HostKeys) {
-			s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrHostInDirectory})
-			return
-		}
-		if a.ApprovedAtUS != 0 && !req.HostGone {
-			var reported heartbeat.Doc
-			if hb, ok := hbs[a.ID]; ok {
-				if h, err := heartbeat.ParseHeartbeat(hb.Body); err == nil {
-					reported = h.Status.Directory
-				}
-			}
-			why, err := s.removalApplied(ctx, dv, a.RemovedDirVersion, reported)
-			if err != nil {
-				s.log.Warn("forget: directory read failed", "err", err)
-				s.signerUnavailable(w, false)
-				return
-			}
-			if why != "" {
-				s.log.Warn("forget refused", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "admin", adminName(ctx),
-					"reason", serverclient.AdminErrRemovalNotApplied, "detail", why, "removal_version", a.RemovedDirVersion,
-					"reported_directory_version", reported.Version, "reported_directory_sha256", reported.SHA256)
-				s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrRemovalNotApplied})
-				return
-			}
-		}
-		forget = append(forget, a)
-	}
-	if len(forget) == 0 {
+	a, err := s.db.AgentBySPKI(ctx, spki)
+	switch {
+	case errors.Is(err, serverdb.ErrNotFound):
 		s.writeJSON(w, dv.status, http.StatusNotFound, serverclient.APIError{Error: serverclient.AdminErrHostNotEnrolled})
 		return
+	case err != nil:
+		s.log.Error("agent lookup", "err", err)
+		s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
 	}
-	out := serverclient.ForgetHostAnswer{Forgotten: []serverclient.PendingHost{}}
-	for _, a := range forget {
-		if err := s.db.DeleteAgent(ctx, a.ID); err != nil {
-			s.log.Error("forget agent", "agent", a.ID, "err", err)
-			s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
-			return
-		}
-		var f enroll.Facts
-		_ = json.Unmarshal([]byte(a.Facts), &f) // stored by enrollment, which checked them
-		if req.HostGone && a.ApprovedAtUS != 0 {
-			s.log.Warn("agent forgotten with --host-gone: the host never confirmed that it applied its removal", "expected_name", a.ExpectedName,
-				"agent", agentFingerprint(a.IdentitySPKISHA256), "admin", adminName(ctx), "removal_version", a.RemovedDirVersion)
-		} else {
-			s.log.Info("agent forgotten", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "admin", adminName(ctx))
-		}
-		out.Forgotten = append(out.Forgotten, serverclient.PendingHost{
-			ExpectedName: a.ExpectedName, IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256), HostKeys: a.HostKeys,
-			Facts: f, EnrolledAt: time.UnixMicro(a.EnrolledAtUS).UTC().Format(time.RFC3339),
-		})
+	fp := agentFingerprint(a.IdentitySPKISHA256)
+	refuse := func(reason string) {
+		s.log.Warn("forget refused", "expected_name", a.ExpectedName, "agent", fp, "admin", adminName(ctx), "reason", reason,
+			"removal_version", a.RemovedDirVersion, "removal_confirmed_version", a.RemovalConfirmedVersion)
+		s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: reason})
 	}
-	s.writeJSON(w, dv.status, http.StatusOK, out)
+	switch {
+	case !sameFacts(a, facts):
+		refuse(serverclient.AdminErrForgetStateChanged)
+		return
+	case hostHolds(dv, a.HostKeys):
+		refuse(serverclient.AdminErrHostInDirectory)
+		return
+	case facts.ApprovedOnce && facts.ConfirmedVersion == 0 && !req.HostGone:
+		refuse(serverclient.AdminErrRemovalNotApplied)
+		return
+	}
+	switch err := s.db.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, facts); {
+	case errors.Is(err, serverdb.ErrNotFound):
+		refuse(serverclient.AdminErrForgetStateChanged)
+		return
+	case err != nil:
+		s.log.Error("forget agent", "agent", a.ID, "err", err)
+		s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
+	}
+	if req.HostGone {
+		s.log.Warn("agent forgotten with --host-gone: the host never confirmed that it applied its removal", "expected_name", a.ExpectedName,
+			"agent", fp, "admin", adminName(ctx), "removal_version", a.RemovedDirVersion)
+	} else {
+		s.log.Info("agent forgotten", "expected_name", a.ExpectedName, "agent", fp, "admin", adminName(ctx),
+			"approved_once", facts.ApprovedOnce, "removal_version", a.RemovedDirVersion, "removal_confirmed_version", a.RemovalConfirmedVersion)
+	}
+	var f enroll.Facts
+	_ = json.Unmarshal([]byte(a.Facts), &f) // stored by enrollment, which checked them
+	s.writeJSON(w, dv.status, http.StatusOK, serverclient.ForgetHostAnswer{Forgotten: []serverclient.PendingHost{{
+		ExpectedName: a.ExpectedName, IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256), HostKeys: a.HostKeys,
+		Facts: f, EnrolledAt: time.UnixMicro(a.EnrolledAtUS).UTC().Format(time.RFC3339),
+	}}})
 }
 
-// removalApplied is forget's removal wait for one agent (PR #72 review
-// C4): "" when the directory the host reported is at or above removal,
-// not above the current version, and has the SHA-256 of the server's
-// directory at that number (the current one, or the signer's
-// GetDirectoryVersion for an older one); otherwise why not. A signer
-// that cannot answer is an error: forget then refuses, it never guesses.
-func (s *Server) removalApplied(ctx context.Context, dv *directoryView, removal uint64, reported heartbeat.Doc) (string, error) {
-	switch {
-	case removal == 0:
-		return "no removal recorded", nil
-	case reported.Version < removal:
-		return "reported directory below the removal version", nil
-	case reported.Version > dv.version:
-		return "reported directory above the current version", nil
+// confirmRemoval records the confirmation of agent a's removal (03-08b,
+// PR #72 fix-round carry-over b) from reported, the directory its host's
+// stored heartbeat says it committed. It records only when a was
+// approved once, has a removal version R and no confirmation yet, and all
+// of these hold:
+//   - R <= reported.Version <= the current version;
+//   - reported.SHA256 is the SHA-256 of the server's directory document
+//     at that version, without its signatures (the current one, or the
+//     signer's GetDirectoryVersion for an older one): the bytes the agent
+//     hashes (apply/status.go) and a directory_install leaf records;
+//   - in that directory, not the current one, no entry holds any of a's
+//     host keys and no active entry carries its expected name (hostState
+//     is removed). A host that reached a re-add of its name without
+//     applying its removal (host_keys_rotated, last-good principals kept)
+//     therefore never confirms it.
+//
+// It reports whether it recorded, and updates a when it did. A signer
+// that cannot answer is an error, which the caller logs and skips; the
+// next heartbeat or keyroster host pending runs the rule again.
+func (s *Server) confirmRemoval(ctx context.Context, dv *directoryView, a *serverdb.Agent, reported heartbeat.Doc) (bool, error) {
+	removal := a.RemovedDirVersion
+	if a.ApprovedAtUS == 0 || removal == 0 || a.RemovalConfirmedVersion != 0 || reported.Version < removal || reported.Version > dv.version {
+		return false, nil
 	}
-	want := ""
-	if reported.Version == dv.version {
-		want = trust.SHA256Hex(dv.doc)
-	} else {
+	view, doc := dv, dv.doc
+	if reported.Version != dv.version {
 		cctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
 		d, err := s.signer.GetDirectoryVersion(cctx, reported.Version)
 		cancel()
 		if err != nil {
-			return "", fmt.Errorf("directory version %d: %w", reported.Version, err)
+			return false, fmt.Errorf("directory version %d: %w", reported.Version, err)
 		}
 		if d.Version != reported.Version {
-			return "", fmt.Errorf("the signer answered directory version %d for version %d", d.Version, reported.Version)
+			return false, fmt.Errorf("the signer answered directory version %d for version %d", d.Version, reported.Version)
 		}
-		want = trust.SHA256Hex(d.Directory)
+		parsed, err := directory.Parse(d.Directory)
+		if err != nil {
+			return false, fmt.Errorf("directory version %d: %w", reported.Version, err)
+		}
+		view, doc = &directoryView{version: d.Version, dir: parsed}, d.Directory
 	}
-	if reported.SHA256 != want {
-		return "reported directory differs from the server's under that version", nil
+	if reported.SHA256 != trust.SHA256Hex(doc) {
+		return false, nil
 	}
-	return "", nil
+	if _, st := hostState(view, a.HostKeys, a.ExpectedName); st != serverclient.HostStateRemoved {
+		return false, nil
+	}
+	sum := sha256.Sum256(doc)
+	recorded, err := s.db.RecordRemovalConfirmed(ctx, a.ID, a.IdentitySPKISHA256, removal, reported.Version, sum[:])
+	if err != nil || !recorded {
+		return false, err
+	}
+	a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = reported.Version, sum[:]
+	s.log.Info("agent removal confirmed", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256),
+		"removal_version", removal, "directory_version", reported.Version, "directory_sha256", reported.SHA256)
+	return true, nil
 }
 
 // hostState is the directory state of an agent with host keys keys and

@@ -310,14 +310,10 @@ func TestHeartbeat(t *testing.T) {
 	})
 }
 
-// forgetReq posts keyroster host forget with host_gone.
+// forgetGone posts keyroster host forget name --host-gone.
 func (e *agentEnv) forgetGone(t *testing.T, name string) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(serverclient.ForgetHostRequest{ExpectedName: name, HostGone: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return e.adminDo(t, http.MethodPost, serverclient.AdminForgetHostPath, body)
+	return e.forgetName(t, name, true)
 }
 
 // TestHostForgetWaitsForRemoval is owner decision 2026-10-28 (carry-over

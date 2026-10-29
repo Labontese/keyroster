@@ -345,21 +345,45 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	kr("revoke", "serial", c3.serial, "--reason", "e2e after the removal")
 	waitForApply("a revocation after the removal", func(r *agentLastApply) bool { return r.KRLVersion > krlBefore && r.SelfTest == "pass" })
 	t.Logf("a revocation after the removal reached the removed host: KRL v%d", h.lastApply(t).KRLVersion)
-	// 03-08 (owner decision 2026-10-28): forget waits until the host's
-	// heartbeat shows the removal applied (host_removal_not_applied).
+	// 03-08 (owner decision 2026-10-28) and 03-08b: forget waits until the
+	// server recorded, from the host's own heartbeat, that it applied a
+	// directory that removed it (host_removal_not_applied until then).
+	// The wait is twice the fetcher's poll interval plus 30 s (plan check
+	// item 7), and fails with the last answer.
 	var forgot string
-	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(time.Second) {
+	for deadline := time.Now().Add(2*time.Second + 30*time.Second); ; time.Sleep(time.Second) {
 		code, out, errOut := env.keyroster(t, admin, "", "host", "forget", "web1")
 		if code == 0 {
 			forgot = out
 			break
 		}
 		if !strings.Contains(errOut, "host_removal_not_applied") || time.Now().After(deadline) {
-			t.Fatalf("keyroster host forget web1: exit %d:\n%s\n%s\nfetch log:\n%s", code, out, errOut, eh.fetch.String())
+			t.Fatalf("keyroster host forget web1: exit %d:\n%s\n%s\nfetch log:\n%s\nserver log:\n%s", code, out, errOut, eh.fetch.String(), env.Stderr.String())
 		}
 	}
-	if !strings.Contains(forgot, "Forgot the agent enrolled as web1") {
+	if !strings.Contains(forgot, "Forgot the agent enrolled as web1") || !strings.Contains(forgot, "removal confirmed at directory v") {
 		t.Fatalf("keyroster host forget web1:\n%s", forgot)
 	}
 	t.Logf("keyroster host forget web1:\n%s", forgot)
+	// The confirmation the server recorded from the real agent's
+	// heartbeat: the SHA-256 the agent reported is the server's directory
+	// document without signatures (plan check item 8).
+	for _, l := range strings.Split(env.Stderr.String(), "\n") {
+		if strings.Contains(l, "agent removal confirmed") {
+			t.Logf("server: %s", l)
+		}
+	}
+	// The forgotten agent's next poll gets unknown_agent (D-10): its
+	// fetcher logs it.
+	for deadline := time.Now().Add(2*time.Second + 30*time.Second); !strings.Contains(eh.fetch.String(), "unknown_agent"); time.Sleep(200 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the forgotten agent's fetcher never logged unknown_agent\nfetch log:\n%s", eh.fetch.String())
+		}
+	}
+	for _, l := range strings.Split(eh.fetch.String(), "\n") {
+		if strings.Contains(l, "unknown_agent") {
+			t.Logf("fetcher: %s", l)
+			break
+		}
+	}
 }

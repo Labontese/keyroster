@@ -522,34 +522,78 @@ func TestHostApprovePoPRequired(t *testing.T) {
 	})
 }
 
-// TestHostForget (PR #71 review D-R1): host forget prints every agent the
-// server forgot, with its re-derived fingerprints, and turns the server's
-// host_in_directory refusal into the runbook order.
+// servedRow is a served agent named name with identity hex spkiHex (two
+// hex digits repeated) and host key key, removed at directory v3, and
+// confirmed at v4 when confirmed.
+func servedRow(name, spkiHex, key string, confirmed bool) serverclient.ServedHost {
+	h := serverclient.ServedHost{PendingHost: serverclient.PendingHost{ExpectedName: name, IdentitySPKISHA256: strings.Repeat(spkiHex, 32),
+		HostKeys: []string{key}, Facts: enroll.Facts{OSID: "debian", Hostname: name}, EnrolledAt: "2026-10-28T12:00:00Z"},
+		State: serverclient.HostStateRemoved, RemovalVersion: 3}
+	if confirmed {
+		h.RemovalConfirmed = &serverclient.RemovalConfirmation{Version: 4, SHA256: strings.Repeat("cd", 32)}
+	}
+	return h
+}
+
+// forgetEnv is popHostsEnv whose host pending answer lists hosts and
+// served.
+func forgetEnv(t *testing.T, hosts []serverclient.PendingHost, served ...serverclient.ServedHost) *dirEnv {
+	t.Helper()
+	e := popHostsEnv(t)
+	if hosts == nil {
+		hosts = []serverclient.PendingHost{}
+	}
+	ans, err := json.Marshal(serverclient.PendingHostsAnswer{Hosts: hosts, Served: append([]serverclient.ServedHost{}, served...)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var called bool
+	e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called, string(ans), http.StatusOK)
+	return e
+}
+
+// forgetAnswer is the server's answer for forgetting h.
+func forgetAnswer(t *testing.T, h serverclient.PendingHost) string {
+	t.Helper()
+	b, err := json.Marshal(serverclient.ForgetHostAnswer{Forgotten: []serverclient.PendingHost{h}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestHostForget (PR #71 review D-R1, 03-08b): host forget names one
+// agent from host pending, sends its identity and the facts it read,
+// prints the agent the server forgot with its re-derived fingerprints,
+// and turns the server's host_in_directory refusal into the runbook
+// order.
 func TestHostForget(t *testing.T) {
 	_, key := writeEntryKey(t, "web1")
 	pub, err := trust.ParseKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	forgotten, err := json.Marshal(serverclient.ForgetHostAnswer{Forgotten: []serverclient.PendingHost{{ExpectedName: "web1", IdentitySPKISHA256: strings.Repeat("00", 32),
-		HostKeys: []string{key}, Facts: enroll.Facts{OSID: "debian", Hostname: "web1"}, EnrolledAt: "2026-10-28T12:00:00Z"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	web1 := servedRow("web1", "00", key, true)
 	t.Run("prints_the_forgotten_agent", func(t *testing.T) {
-		e := popHostsEnv(t)
+		e := forgetEnv(t, nil, web1)
 		var called bool
-		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, string(forgotten), http.StatusOK)
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
 		code, stdout, stderr := run(t, "host", "forget", "web1")
 		if code != 0 || !e.wasCalled(&called) {
 			t.Fatalf("host forget: exit %d: %s", code, stderr)
 		}
-		if !strings.Contains(stdout, "agent identity: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n") || !strings.Contains(stdout, "host key: "+ssh.FingerprintSHA256(pub)+" ssh-ed25519\n") {
+		if !strings.Contains(stdout, "agent identity: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n") || !strings.Contains(stdout, "host key: "+ssh.FingerprintSHA256(pub)+" ssh-ed25519\n") ||
+			!strings.Contains(stdout, "removal confirmed at directory v4") {
 			t.Fatalf("host forget output:\n%s", stdout)
+		}
+		var req serverclient.ForgetHostRequest
+		if json.Unmarshal(e.lastPost, &req) != nil || req.IdentitySPKISHA256 != strings.Repeat("00", 32) || !req.ApprovedOnce || req.RemovalVersion != 3 ||
+			req.RemovalConfirmed == nil || *req.RemovalConfirmed != *web1.RemovalConfirmed || req.HostGone {
+			t.Fatalf("the request %s", e.lastPost)
 		}
 	})
 	t.Run("in_directory_refused_with_the_runbook_order", func(t *testing.T) {
-		e := popHostsEnv(t)
+		e := forgetEnv(t, nil, web1)
 		var called bool
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"host_in_directory"}`, http.StatusConflict)
 		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "keyroster host remove") {
@@ -557,9 +601,9 @@ func TestHostForget(t *testing.T) {
 		}
 	})
 	t.Run("answer_for_another_name_refused", func(t *testing.T) {
-		e := popHostsEnv(t)
+		e := forgetEnv(t, nil, web1)
 		var called bool
-		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, strings.Replace(string(forgotten), `"web1"`, `"web2"`, 1), http.StatusOK)
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, strings.Replace(forgetAnswer(t, web1.PendingHost), `"web1"`, `"web2"`, 1), http.StatusOK)
 		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "does not check out") {
 			t.Fatalf("an answer for another name: exit %d: %s", code, stderr)
 		}

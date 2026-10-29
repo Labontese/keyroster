@@ -1,0 +1,21 @@
+-- Forget by identity (03-08b, PR #72 fix-round carry-overs b and c).
+--
+-- removal_confirmed_version and removal_confirmed_sha256: the directory
+-- version {V, SHA-256} whose application, reported in the host's own
+-- heartbeat, confirmed the removal recorded in removed_dir_version. They
+-- are recorded once, when an approved-once agent with removal version R
+-- has a stored heartbeat whose committed directory meets all of:
+--   - R <= V <= the current version;
+--   - its SHA-256 is that of the server's directory document at V (the
+--     document without its signatures);
+--   - in directory V no entry holds any of the agent's host keys and no
+--     active entry carries its expected name.
+-- An active entry under the agent's name with other keys (a re-keyed host
+-- or a re-enrolled agent) clears neither the removal nor the
+-- confirmation; an entry holding the agent's keys again clears both.
+-- keyroster host forget needs the confirmation (or --host-gone) for an
+-- agent approved once, and deletes only while it, the removal version and
+-- the approval still equal what the admin saw. NULL: none recorded.
+-- removal_confirmed_sha256 is the raw 32-byte SHA-256.
+ALTER TABLE agents ADD COLUMN removal_confirmed_version INTEGER;
+ALTER TABLE agents ADD COLUMN removal_confirmed_sha256 BLOB CHECK (removal_confirmed_sha256 IS NULL OR length(removal_confirmed_sha256) = 32);
