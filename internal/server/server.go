@@ -114,6 +114,10 @@ type Server struct {
 	// afterAgentLookup, when a test sets it, runs in requireAgent right
 	// after the agents row was read. It is nil outside tests.
 	afterAgentLookup func()
+	// beforeForgetDelete, when a test sets it, runs in handleForgetHost
+	// after the facts were checked and before DeleteAgentIf (03-08b). It
+	// is nil outside tests.
+	beforeForgetDelete func()
 }
 
 // routeMux is an http.ServeMux that records every pattern registered on

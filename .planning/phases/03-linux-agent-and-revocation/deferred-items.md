@@ -9,3 +9,6 @@
 - WSL on Daniel-PC no longer resolves `keyroster.localhost` (the WSL DNS proxy answers no such host). Phase 2 recorded that it resolved natively. The server e2e tests therefore fail locally unless run in a user and mount namespace with a hosts entry (`unshare --user --map-current-user --mount`, then a bind-mounted /etc/hosts). Inside that namespace `TestSSHDRejects/pty_allowed` fails (pty allocation), and it passes outside. CI resolves the name natively.
   status: open
   **What:** a local test-environment issue, not a product defect. Either restore the resolution in WSL or add the namespace runner to scripts/ as a reviewed helper.
+- `internal/signer` `TestSignerConcurrency/sixteen_clients` failed once under `-race` in WSL during the 03-08b fix-round-2 local gate (`client 1: signer unavailable: clock_regression`). It passed on a five-run rerun and on the gate's second full run, and the fix round changed nothing under internal/signer. It is the same class as Phase 2's `TestCheckLogAgainstLiveSigner` flake (deferred-items.md of phase 02): issuances faster than the microsecond wall clock advances.
+  status: open
+  **What:** pre-existing and outside the fix round; belongs with the Phase 2 entry, to the next plan that edits issuance or these tests.

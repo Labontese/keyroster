@@ -54,7 +54,7 @@ type enrolledHost struct {
 	*agentHost
 	run, fetch       *syncBuffer
 	runDone, fetchDn <-chan struct{}
-	fetchCmd         *exec.Cmd
+	runCmd, fetchCmd *exec.Cmd
 }
 
 // newEnrolledHostLayout makes a host root with the directories install
@@ -88,14 +88,35 @@ func newEnrolledHostLayout(t *testing.T, env *signerEnv) *agentHost {
 // keyroster-agent-fetch (--poll 1s) for h.
 func startEnrolled(t *testing.T, h *agentHost) *enrolledHost {
 	t.Helper()
-	prefix := opensshPrefix(t)
 	e := &enrolledHost{agentHost: h}
+	e.startRun(t)
+	e.startFetch(t)
+	return e
+}
+
+// startRun starts e's keyroster-agent run (--interval 1s).
+func (e *enrolledHost) startRun(t *testing.T) {
+	t.Helper()
+	h := e.agentHost
+	prefix := opensshPrefix(t)
 	runArgs := []string{"run", "--state-dir", h.state, "--root", h.root,
 		"--sshd", filepath.Join(prefix, "sbin", "sshd"), "--sshd-config", h.sshd.cfg,
 		"--ssh-keygen", filepath.Join(prefix, "bin", "ssh-keygen"), "--reload", "signal", "--interval", "1s"}
-	_, e.run, e.runDone = startDaemon(t, "keyroster-agent run", envWithout("SSH_AUTH_SOCK"), agentBin(t), runArgs...)
-	e.startFetch(t)
-	return e
+	e.runCmd, e.run, e.runDone = startDaemon(t, "keyroster-agent run", envWithout("SSH_AUTH_SOCK"), agentBin(t), runArgs...)
+}
+
+// restartRun stops e's keyroster-agent run, waits for it to exit and
+// starts it again, as a reboot, a restart or an upgrade does: its first
+// round applies, a no-op when nothing new is in the spool.
+func (e *enrolledHost) restartRun(t *testing.T) {
+	t.Helper()
+	_ = e.runCmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-e.runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("keyroster-agent run did not stop")
+	}
+	e.startRun(t)
 }
 
 // startFetch starts e's keyroster-agent-fetch (--poll 1s).
@@ -345,21 +366,49 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	kr("revoke", "serial", c3.serial, "--reason", "e2e after the removal")
 	waitForApply("a revocation after the removal", func(r *agentLastApply) bool { return r.KRLVersion > krlBefore && r.SelfTest == "pass" })
 	t.Logf("a revocation after the removal reached the removed host: KRL v%d", h.lastApply(t).KRLVersion)
-	// 03-08 (owner decision 2026-10-28): forget waits until the host's
-	// heartbeat shows the removal applied (host_removal_not_applied).
+	// 03-08 (owner decision 2026-10-28) and 03-08b: forget waits until the
+	// server recorded, from the host's own heartbeat, that it applied a
+	// directory that removed it (host_removal_not_applied until then).
+	// The wait is twice the fetcher's poll interval plus 30 s (plan check
+	// item 7), and fails with the last answer.
 	var forgot string
-	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(time.Second) {
+	// Each attempt spends three admin requests (host pending, host status,
+	// the forget), so it waits 2 s; a refusal of the admin limiter is
+	// retried like host_removal_not_applied.
+	for deadline := time.Now().Add(2*time.Second + 30*time.Second); ; time.Sleep(2 * time.Second) {
 		code, out, errOut := env.keyroster(t, admin, "", "host", "forget", "web1")
 		if code == 0 {
 			forgot = out
 			break
 		}
-		if !strings.Contains(errOut, "host_removal_not_applied") || time.Now().After(deadline) {
-			t.Fatalf("keyroster host forget web1: exit %d:\n%s\n%s\nfetch log:\n%s", code, out, errOut, eh.fetch.String())
+		retry := strings.Contains(errOut, "host_removal_not_applied") || strings.Contains(errOut, "the server is rate-limiting requests from this address")
+		if !retry || time.Now().After(deadline) {
+			t.Fatalf("keyroster host forget web1: exit %d:\n%s\n%s\nfetch log:\n%s\nserver log:\n%s", code, out, errOut, eh.fetch.String(), env.Stderr.String())
 		}
 	}
-	if !strings.Contains(forgot, "Forgot the agent enrolled as web1") {
+	if !strings.Contains(forgot, "Forgot the agent enrolled as web1") || !strings.Contains(forgot, "removal confirmed at directory v") {
 		t.Fatalf("keyroster host forget web1:\n%s", forgot)
 	}
 	t.Logf("keyroster host forget web1:\n%s", forgot)
+	// The confirmation the server recorded from the real agent's
+	// heartbeat: the SHA-256 the agent reported is the server's directory
+	// document without signatures (plan check item 8).
+	for _, l := range strings.Split(env.Stderr.String(), "\n") {
+		if strings.Contains(l, "agent removal confirmed") {
+			t.Logf("server: %s", l)
+		}
+	}
+	// The forgotten agent's next poll gets unknown_agent (D-10): its
+	// fetcher logs it.
+	for deadline := time.Now().Add(2*time.Second + 30*time.Second); !strings.Contains(eh.fetch.String(), "unknown_agent"); time.Sleep(200 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the forgotten agent's fetcher never logged unknown_agent\nfetch log:\n%s", eh.fetch.String())
+		}
+	}
+	for _, l := range strings.Split(eh.fetch.String(), "\n") {
+		if strings.Contains(l, "unknown_agent") {
+			t.Logf("fetcher: %s", l)
+			break
+		}
+	}
 }

@@ -68,9 +68,9 @@ const (
 	// AdminPendingHostsPath (GET): the enrolled agents no directory host
 	// entry approves yet; 200 PendingHostsAnswer.
 	AdminPendingHostsPath = "/api/v1/admin/hosts/pending"
-	// AdminForgetHostPath (POST): delete the agents enrolled under a host
-	// name, so their identities and host keys are free again
-	// (ForgetHostRequest); 200 ForgetHostAnswer (PR #71 review D-R1).
+	// AdminForgetHostPath (POST): delete one agent, named by its identity,
+	// so its identity and host keys are free again (ForgetHostRequest);
+	// 200 ForgetHostAnswer (PR #71 review D-R1, 03-08b).
 	AdminForgetHostPath = "/api/v1/admin/hosts/forget"
 	// AdminHostsStatusPath (GET): every agent the directory approved
 	// once, with its newest heartbeat and the current versions; 200
@@ -126,6 +126,11 @@ const (
 	// at or above the one that removed its entry (03-08, owner decision
 	// 2026-10-28); --host-gone overrides it.
 	AdminErrRemovalNotApplied = "host_removal_not_applied"
+	// AdminErrForgetStateChanged refuses keyroster host forget when the
+	// agent's facts the request carries no longer equal its row (its
+	// approval, removal version or recorded confirmation changed since
+	// keyroster host pending was read; 03-08b): nothing was deleted.
+	AdminErrForgetStateChanged = "forget_state_changed"
 	// AgentErrStaleHeartbeat is a heartbeat whose seq is not above the
 	// stored one (409); the fetcher treats it as quiet.
 	AgentErrStaleHeartbeat = "stale_heartbeat"
@@ -208,10 +213,25 @@ const (
 
 // ServedHost is an agent approved once that the directory no longer
 // approves, with why (HostStateRemoved, HostStateDisabled or
-// HostStateKeysChanged).
+// HostStateKeysChanged). RemovalVersion is the first directory version
+// it was served under in which no entry held any of its keys (omitted:
+// none recorded), and RemovalConfirmed the directory the host's own
+// heartbeat confirmed that removal with (omitted: none recorded; 03-08b).
+// keyroster host forget sends both back as the facts the admin saw.
 type ServedHost struct {
 	PendingHost
-	State string `json:"state"`
+	State            string               `json:"state"`
+	RemovalVersion   uint64               `json:"removal_version,omitempty"`
+	RemovalConfirmed *RemovalConfirmation `json:"removal_confirmed,omitempty"`
+}
+
+// RemovalConfirmation is a recorded removal confirmation: the directory
+// version the host reported applying and the lowercase hex SHA-256 of
+// the server's directory document at that version, without signatures
+// (trust.SHA256Hex, the bytes the agent hashes too; 03-08b).
+type RemovalConfirmation struct {
+	Version uint64 `json:"version"`
+	SHA256  string `json:"sha256"`
 }
 
 // PendingHost is one enrolled agent that no active directory host entry
@@ -227,17 +247,27 @@ type PendingHost struct {
 	EnrolledAt         string       `json:"enrolled_at"`
 }
 
-// ForgetHostRequest is the body of a POST to AdminForgetHostPath: the host
-// name the agents were enrolled under. HostGone overrides
-// host_removal_not_applied for a host that will never report again; the
-// server logs it and the CLI prints it.
+// ForgetHostRequest is the body of a POST to AdminForgetHostPath
+// (03-08b): the one agent to forget, by the lowercase hex SHA-256 of its
+// identity's SPKI, and the facts the admin saw of it in keyroster host
+// pending: whether it was approved once, its removal version (0: none)
+// and its recorded removal confirmation (nil: none). The server deletes
+// it only while every fact still equals its row (forget_state_changed
+// otherwise). HostGone overrides host_removal_not_applied for an agent
+// approved once whose host never confirmed its removal and will never
+// report again; the server logs it and the CLI prints it. A request with
+// HostGone and a confirmation, or ApprovedOnce false with a removal fact
+// or HostGone, is malformed.
 type ForgetHostRequest struct {
-	ExpectedName string `json:"expected_name"`
-	HostGone     bool   `json:"host_gone,omitempty"`
+	IdentitySPKISHA256 string               `json:"identity_spki_sha256"`
+	ApprovedOnce       bool                 `json:"approved_once"`
+	RemovalVersion     uint64               `json:"removal_version"`
+	RemovalConfirmed   *RemovalConfirmation `json:"removal_confirmed,omitempty"`
+	HostGone           bool                 `json:"host_gone"`
 }
 
-// ForgetHostAnswer is its 200 answer: every agent the server deleted, as
-// PendingHost (the CLI re-derives every fingerprint it prints).
+// ForgetHostAnswer is its 200 answer: the one agent the server deleted,
+// as PendingHost (the CLI re-derives every fingerprint it prints).
 type ForgetHostAnswer struct {
 	Forgotten []PendingHost `json:"forgotten"`
 }
@@ -499,7 +529,12 @@ func (v HostVersions) Docs() (bundle, directory, krl heartbeat.Doc) {
 //     decision D-R1): host status shows a rotation of the last 7 days;
 //   - SeqRegressed is set while the host is not silent and its heartbeats
 //     since the stored one carry a lower seq (heartbeat_seq_regressed,
-//     D-R2): its status is frozen at the stored one.
+//     D-R2): its status is frozen at the stored one;
+//   - NotYetPolled is set for an agent the current directory approves (an
+//     active entry holds exactly its host keys) that has not got signed
+//     state since (approved, not yet polled; 03-08b owner decision D-R2).
+//     Its State is HostStateActive, and it has no heartbeat yet. Omitted
+//     otherwise, so the other rows read as before.
 type HostStatusRow struct {
 	Name               string               `json:"name"`
 	ExpectedName       string               `json:"expected_name"`
@@ -515,6 +550,7 @@ type HostStatusRow struct {
 	IdentityRotatedAt  string               `json:"identity_rotated_at"`
 	IdentityRotations  int64                `json:"identity_rotations"`
 	NeverApplied       bool                 `json:"never_applied"`
+	NotYetPolled       bool                 `json:"not_yet_polled,omitempty"`
 	Heartbeat          *heartbeat.Heartbeat `json:"heartbeat"`
 }
 

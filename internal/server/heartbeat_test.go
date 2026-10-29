@@ -310,14 +310,10 @@ func TestHeartbeat(t *testing.T) {
 	})
 }
 
-// forgetReq posts keyroster host forget with host_gone.
+// forgetGone posts keyroster host forget name --host-gone.
 func (e *agentEnv) forgetGone(t *testing.T, name string) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(serverclient.ForgetHostRequest{ExpectedName: name, HostGone: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return e.adminDo(t, http.MethodPost, serverclient.AdminForgetHostPath, body)
+	return e.forgetName(t, name, true)
 }
 
 // TestHostForgetWaitsForRemoval is owner decision 2026-10-28 (carry-over
@@ -339,7 +335,7 @@ func TestHostForgetWaitsForRemoval(t *testing.T) {
 	})
 	t.Run("refused_while_the_heartbeat_shows_an_older_directory", func(t *testing.T) {
 		e, id, _ := removed(t)
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(2, 1)}); rec.Code != http.StatusOK {
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, 1)}); rec.Code != http.StatusOK {
 			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
 		}
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
@@ -351,7 +347,7 @@ func TestHostForgetWaitsForRemoval(t *testing.T) {
 	})
 	t.Run("accepted_once_the_removal_is_applied", func(t *testing.T) {
 		e, id, removal := removed(t)
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, removal)}); rec.Code != http.StatusOK {
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, removal)}); rec.Code != http.StatusOK {
 			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
 		}
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
@@ -367,7 +363,7 @@ func TestHostForgetWaitsForRemoval(t *testing.T) {
 		// host's heartbeat at the removal version is enough.
 		e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil)
 		e.installDir(t)
-		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, removal)})
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, removal)})
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
 			t.Fatalf("forget: %d %s", rec.Code, rec.Body.String())
 		}
@@ -393,13 +389,13 @@ func TestHostForgetWaitsForRemoval(t *testing.T) {
 		h.Status = directory.StatusDisabled
 		disabled := e.installDir(t, h)
 		e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil)
-		e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(2, disabled)})
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: asEmptied(e.hbAt(t, 2, disabled), "host_disabled")})
 		removal := e.installDir(t)
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
 			t.Fatalf("forget with the disable applied but not the removal: %d %s", rec.Code, rec.Body.String())
 		}
 		e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil)
-		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 3, removal)})
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 3, removal)})
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
 			t.Fatalf("forget after the removal applied: %d %s", rec.Code, rec.Body.String())
 		}
@@ -478,6 +474,31 @@ func TestServedHostsNeverPending(t *testing.T) {
 			}
 		})
 	}
+	t.Run("approved_not_yet_polled_in_status", func(t *testing.T) {
+		// Owner decision D-R2 (PR #74 review findings 1 and 3): an agent
+		// the directory approves now that has not polled since is in
+		// neither host pending (it is approved) nor, before, host status;
+		// host status lists it, marked not yet polled, so a forget by
+		// name sees it.
+		e := newAgentEnv(t, true)
+		id, hosts := newAgentID(t), hostSigners(t, 1)
+		e.enroll(t, id, e.mustMint(t, "web1", 0).Token, hosts)
+		e.installDir(t, hostEntry("web1", hosts))
+		if ans := pending(t, e); len(ans.Hosts) != 0 || len(ans.Served) != 0 {
+			t.Fatalf("host pending lists an approved agent: %+v", ans)
+		}
+		st := e.hostsStatus(t)
+		if len(st.Hosts) != 1 || !st.Hosts[0].NotYetPolled || st.Hosts[0].State != serverclient.HostStateActive || st.Hosts[0].Name != "web1" ||
+			st.Hosts[0].ExpectedName != "web1" || st.Hosts[0].IdentitySPKISHA256 != hex.EncodeToString(id.spki) || st.Hosts[0].Heartbeat != nil {
+			t.Fatalf("hosts/status of an approved agent that has not polled: %+v", st.Hosts)
+		}
+		if c := e.state(t, id); c != http.StatusOK {
+			t.Fatalf("the first state: %d", c)
+		}
+		if st := e.hostsStatus(t); len(st.Hosts) != 1 || st.Hosts[0].NotYetPolled {
+			t.Fatalf("hosts/status after the first state: %+v", st.Hosts)
+		}
+	})
 	t.Run("never_polled_is_still_pending", func(t *testing.T) {
 		e := newAgentEnv(t, true)
 		id, hosts := newAgentID(t), hostSigners(t, 1)

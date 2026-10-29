@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -59,8 +60,8 @@ func pending(name string, b byte) PendingUser {
 func TestOpen(t *testing.T) {
 	t.Run("migration_applies_once", func(t *testing.T) {
 		d, path := openTemp(t)
-		if v := userVersion(t, d); v != 6 {
-			t.Fatalf("user_version = %d, want 6", v)
+		if v := userVersion(t, d); v != 7 {
+			t.Fatalf("user_version = %d, want 7", v)
 		}
 		if err := d.CreatePendingUser(context.Background(), pending("alice", 1)); err != nil {
 			t.Fatal(err)
@@ -73,8 +74,8 @@ func TestOpen(t *testing.T) {
 			t.Fatalf("reopen: %v", err)
 		}
 		defer func() { _ = d2.Close() }()
-		if v := userVersion(t, d2); v != 6 {
-			t.Fatalf("user_version after reopen = %d, want 6", v)
+		if v := userVersion(t, d2); v != 7 {
+			t.Fatalf("user_version after reopen = %d, want 7", v)
 		}
 		if n := count(t, d2, "pending_users"); n != 1 {
 			t.Fatalf("%d pending accounts after reopen, want the 1 written before", n)
@@ -555,4 +556,471 @@ func TestWebSignInRows(t *testing.T) {
 			t.Fatalf("second DeleteSession: %v, want ErrNotFound", err)
 		}
 	})
+}
+
+// enrollTestAgent mints a join token for name and enrolls an agent with
+// the identity SPKI hash spki (32 bytes of b) and the host key key, at
+// nowUS.
+func enrollTestAgent(t *testing.T, d *DB, b byte, name, key string, nowUS int64) *Agent {
+	t.Helper()
+	return enrollTestAgentToken(t, d, b, b, name, key, nowUS)
+}
+
+// storeTestHB stores a heartbeat with seq seq for the agents row k.
+func storeTestHB(t *testing.T, d *DB, k AgentKey, seq int64) {
+	t.Helper()
+	if _, err := d.StoreHeartbeat(context.Background(), k, seq, []byte("{}"), 0, tNow.UnixMicro()); err != nil {
+		t.Fatalf("store heartbeat %d: %v", seq, err)
+	}
+}
+
+// enrollTestAgentToken is enrollTestAgent with the identity of b and the
+// join token of tok (32 bytes of each).
+func enrollTestAgentToken(t *testing.T, d *DB, b, tok byte, name, key string, nowUS int64) *Agent {
+	t.Helper()
+	ctx := context.Background()
+	token := bytes.Repeat([]byte{tok}, 32)
+	if err := d.CreateJoinToken(ctx, token, name, "admin", nowUS+3600_000_000); err != nil {
+		t.Fatal(err)
+	}
+	a, err := d.EnrollAgent(ctx, token, Agent{IdentitySPKISHA256: bytes.Repeat([]byte{b}, 32), HostKeys: []string{key}, Facts: "{}"}, nowUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// TestAgentWritesKeyedByToken is the PR #74 pre-merge review's finding 8
+// (03-08b fix round 1): agent A is deleted and the same identity
+// re-enrolls with a new join token into A's reused row ID (the runbook's
+// same-machine order), so B has A's ID and A's identity. Every agents-row
+// writer called with A's key (its token) is ErrNotFound and leaves B's
+// row, and its heartbeat, as they were. B is fresh (never approved, no
+// removal) for the writers that only change such a row, and approved and
+// removed, unconfirmed, for the others.
+func TestAgentWritesKeyedByToken(t *testing.T) {
+	ctx := context.Background()
+	nowUS := tNow.UnixMicro()
+	sum := bytes.Repeat([]byte{0xcd}, 32)
+	reused := func(t *testing.T, approvedRemoved, confirmed bool) (*DB, AgentKey, *Agent) {
+		t.Helper()
+		d, _ := openTemp(t)
+		enrollTestAgent(t, d, 0x01, "web0", "key-0", nowUS)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{}); err != nil {
+			t.Fatalf("delete A: %v", err)
+		}
+		b := enrollTestAgentToken(t, d, 0x0a, 0x1a, "web1", "key-a", nowUS)
+		if b.ID != a.ID || !bytes.Equal(b.IdentitySPKISHA256, a.IdentitySPKISHA256) || bytes.Equal(b.TokenSHA256, a.TokenSHA256) {
+			t.Fatalf("B %d %x %x; the test needs A's row ID %d and identity with another token", b.ID, b.IdentitySPKISHA256, b.TokenSHA256, a.ID)
+		}
+		if approvedRemoved {
+			if err := d.MarkAgentApproved(ctx, b.Key(), nowUS+1); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.SetAgentRemovedVersion(ctx, b.Key(), 5); err != nil {
+				t.Fatal(err)
+			}
+			storeTestHB(t, d, b.Key(), 1)
+		}
+		if confirmed {
+			if ok, err := d.RecordRemovalConfirmed(ctx, b.Key(), 1, 5, 6, sum); err != nil || !ok {
+				t.Fatalf("record B's confirmation: %t %v", ok, err)
+			}
+		}
+		before, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d, a.Key(), before
+	}
+	type write struct {
+		name  string
+		write func(d *DB, k AgentKey, before *Agent) error
+	}
+	check := func(t *testing.T, approvedRemoved, confirmed bool, writes []write) {
+		t.Helper()
+		for _, w := range writes {
+			d, k, before := reused(t, approvedRemoved, confirmed)
+			hbsBefore, err := d.Heartbeats(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := w.write(d, k, before); !errors.Is(err, ErrNotFound) {
+				t.Errorf("%s with A's key: %v, want ErrNotFound", w.name, err)
+			}
+			after, err := d.AgentBySPKI(ctx, before.IdentitySPKISHA256)
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Errorf("%s with A's key changed B's row:\n%+v\nwas\n%+v (%v)", w.name, after, before, err)
+			}
+			if hbs, err := d.Heartbeats(ctx); err != nil || !reflect.DeepEqual(hbs, hbsBefore) {
+				t.Errorf("%s with A's key changed B's heartbeat: %v, was %v (%v)", w.name, hbs, hbsBefore, err)
+			}
+		}
+	}
+	t.Run("fresh", func(t *testing.T) {
+		check(t, false, false, []write{
+			{"TouchAgent", func(d *DB, k AgentKey, _ *Agent) error { return d.TouchAgent(ctx, k, nowUS+9) }},
+			{"MarkAgentApproved", func(d *DB, k AgentKey, _ *Agent) error { return d.MarkAgentApproved(ctx, k, nowUS+9) }},
+			{"SetAgentRemovedVersion_record", func(d *DB, k AgentKey, _ *Agent) error { return d.SetAgentRemovedVersion(ctx, k, 9) }},
+			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts()) }},
+			{"StoreHeartbeat", func(d *DB, k AgentKey, _ *Agent) error {
+				_, err := d.StoreHeartbeat(ctx, k, 1, []byte("{}"), 7, nowUS+9)
+				return err
+			}},
+			{"RecordClockOffset", func(d *DB, k AgentKey, _ *Agent) error { return d.RecordClockOffset(ctx, k, 7) }},
+			{"RotateAgentIdentity", func(d *DB, k AgentKey, _ *Agent) error {
+				return d.RotateAgentIdentity(ctx, k, bytes.Repeat([]byte{0x2a}, 32), nowUS+9)
+			}},
+		})
+	})
+	t.Run("approved_removed", func(t *testing.T) {
+		check(t, true, false, []write{
+			{"SetAgentRemovedVersion_clear", func(d *DB, k AgentKey, _ *Agent) error { return d.SetAgentRemovedVersion(ctx, k, 0) }},
+			{"RecordRemovalConfirmed", func(d *DB, k AgentKey, _ *Agent) error {
+				_, err := d.RecordRemovalConfirmed(ctx, k, 1, 5, 6, sum)
+				return err
+			}},
+			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts()) }},
+			{"StoreHeartbeat", func(d *DB, k AgentKey, _ *Agent) error {
+				_, err := d.StoreHeartbeat(ctx, k, 2, []byte("{}"), 7, nowUS+9)
+				return err
+			}},
+		})
+	})
+	t.Run("confirmed", func(t *testing.T) {
+		check(t, true, true, []write{
+			{"ClearRemovalConfirmed", func(d *DB, k AgentKey, _ *Agent) error {
+				_, err := d.ClearRemovalConfirmed(ctx, k, 1)
+				return err
+			}},
+			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts()) }},
+		})
+	})
+}
+
+// TestAgentWritesKeyedByIdentity is PR #72 fix-round carry-over (a)
+// (03-08b): agent A is deleted and B enrolls into A's reused row ID; every
+// agents-row writer called with A's ID and A's identity is ErrNotFound
+// and leaves B's row as it was, column for column.
+func TestAgentWritesKeyedByIdentity(t *testing.T) {
+	ctx := context.Background()
+	d, _ := openTemp(t)
+	nowUS := tNow.UnixMicro()
+	enrollTestAgent(t, d, 0x01, "web0", "key-0", nowUS)
+	a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+	if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{}); err != nil {
+		t.Fatalf("delete A: %v", err)
+	}
+	b := enrollTestAgent(t, d, 0x0b, "web1", "key-b", nowUS)
+	if b.ID != a.ID {
+		t.Fatalf("B got row ID %d; the test needs A's %d (SQLite reuses the highest row ID)", b.ID, a.ID)
+	}
+	// B approved, removed at v5 and confirmed at v6, seen.
+	sum := bytes.Repeat([]byte{0xcd}, 32)
+	if err := d.MarkAgentApproved(ctx, b.Key(), nowUS+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetAgentRemovedVersion(ctx, b.Key(), 5); err != nil {
+		t.Fatal(err)
+	}
+	storeTestHB(t, d, b.Key(), 1)
+	if ok, err := d.RecordRemovalConfirmed(ctx, b.Key(), 1, 5, 6, sum); err != nil || !ok {
+		t.Fatalf("record B's confirmation: %t %v", ok, err)
+	}
+	if err := d.TouchAgent(ctx, b.Key(), nowUS+2); err != nil {
+		t.Fatal(err)
+	}
+	before, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ApprovedAtUS != nowUS+1 || before.RemovedDirVersion != 5 || before.RemovalConfirmedVersion != 6 || !bytes.Equal(before.RemovalConfirmedSHA256, sum) || before.LastSeenUS != nowUS+2 {
+		t.Fatalf("B before the writes: %+v", before)
+	}
+	for _, w := range []struct {
+		name  string
+		write func() error
+	}{
+		{"TouchAgent", func() error { return d.TouchAgent(ctx, a.Key(), nowUS+9) }},
+		{"MarkAgentApproved", func() error { return d.MarkAgentApproved(ctx, a.Key(), nowUS+9) }},
+		{"SetAgentRemovedVersion_clear", func() error { return d.SetAgentRemovedVersion(ctx, a.Key(), 0) }},
+		{"SetAgentRemovedVersion_record", func() error { return d.SetAgentRemovedVersion(ctx, a.Key(), 9) }},
+		{"RecordRemovalConfirmed", func() error {
+			_, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 5, 9, sum)
+			return err
+		}},
+		{"ClearRemovalConfirmed", func() error {
+			_, err := d.ClearRemovalConfirmed(ctx, a.Key(), 1)
+			return err
+		}},
+		{"DeleteAgentIf", func() error { return d.DeleteAgentIf(ctx, a.Key(), before.ForgetFacts()) }},
+	} {
+		if err := w.write(); !errors.Is(err, ErrNotFound) {
+			t.Errorf("%s with A's ID and identity: %v, want ErrNotFound", w.name, err)
+		}
+		after, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+		if err != nil || !reflect.DeepEqual(after, before) {
+			t.Fatalf("%s with A's ID and identity changed B's row:\n%+v\nwas\n%+v (%v)", w.name, after, before, err)
+		}
+	}
+	t.Run("fresh_row", func(t *testing.T) {
+		// B never approved and with no removal: the conditional writers
+		// would change its row if they matched by ID alone.
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{}); err != nil {
+			t.Fatal(err)
+		}
+		b := enrollTestAgent(t, d, 0x0b, "web1", "key-b", nowUS)
+		if b.ID != a.ID {
+			t.Fatalf("B got row ID %d; the test needs A's %d", b.ID, a.ID)
+		}
+		before, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range []struct {
+			name  string
+			write func() error
+		}{
+			{"TouchAgent", func() error { return d.TouchAgent(ctx, a.Key(), nowUS+9) }},
+			{"MarkAgentApproved", func() error { return d.MarkAgentApproved(ctx, a.Key(), nowUS+9) }},
+			{"SetAgentRemovedVersion_record", func() error { return d.SetAgentRemovedVersion(ctx, a.Key(), 9) }},
+			{"SetAgentRemovedVersion_clear", func() error { return d.SetAgentRemovedVersion(ctx, a.Key(), 0) }},
+			{"DeleteAgentIf", func() error { return d.DeleteAgentIf(ctx, a.Key(), before.ForgetFacts()) }},
+		} {
+			if err := w.write(); !errors.Is(err, ErrNotFound) {
+				t.Errorf("%s with A's ID and identity: %v, want ErrNotFound", w.name, err)
+			}
+			after, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("%s with A's ID and identity changed B's fresh row:\n%+v\nwas\n%+v (%v)", w.name, after, before, err)
+			}
+		}
+	})
+	t.Run("approved_again_keeps_the_first_time", func(t *testing.T) {
+		if err := d.MarkAgentApproved(ctx, b.Key(), nowUS+50); err != nil {
+			t.Fatalf("MarkAgentApproved on an approved row: %v", err)
+		}
+		if got, _ := d.AgentBySPKI(ctx, b.IdentitySPKISHA256); got.ApprovedAtUS != nowUS+1 {
+			t.Fatalf("approved_at_us %d, want the first time %d", got.ApprovedAtUS, nowUS+1)
+		}
+		if err := d.SetAgentRemovedVersion(ctx, b.Key(), 7); err != nil {
+			t.Fatalf("SetAgentRemovedVersion with one recorded: %v", err)
+		}
+		if got, _ := d.AgentBySPKI(ctx, b.IdentitySPKISHA256); got.RemovedDirVersion != 5 {
+			t.Fatalf("removed_dir_version %d, want the first 5", got.RemovedDirVersion)
+		}
+	})
+}
+
+// TestDeleteAgentIf (03-08b, plan check item 1): the delete matches only
+// while every fact equals the row, NULLs included: a never-approved row,
+// a row without a confirmation and a confirmed one.
+func TestDeleteAgentIf(t *testing.T) {
+	ctx := context.Background()
+	sum := bytes.Repeat([]byte{0xcd}, 32)
+	nowUS := tNow.UnixMicro()
+	t.Run("never_approved", func(t *testing.T) {
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("approved_once true for a never-approved row: %v", err)
+		}
+		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{}); err != nil {
+			t.Fatalf("the row's own facts: %v", err)
+		}
+	})
+	t.Run("removed_unconfirmed_then_confirmed", func(t *testing.T) {
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.MarkAgentApproved(ctx, a.Key(), nowUS); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.SetAgentRemovedVersion(ctx, a.Key(), 3); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []ForgetFacts{
+			{ApprovedOnce: true},
+			{ApprovedOnce: false, RemovalVersion: 3},
+			{ApprovedOnce: true, RemovalVersion: 4},
+			{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 3, ConfirmedSHA256: sum},
+		} {
+			if err := d.DeleteAgentIf(ctx, a.Key(), f); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("facts %+v the row does not hold: %v", f, err)
+			}
+		}
+		storeTestHB(t, d, a.Key(), 1)
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 4, sum); err != nil || !ok {
+			t.Fatalf("record: %t %v", ok, err)
+		}
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 5, sum); err != nil || ok {
+			t.Fatalf("a second record: %t %v, want nothing recorded", ok, err)
+		}
+		other := bytes.Repeat([]byte{0xab}, 32)
+		for _, f := range []ForgetFacts{
+			{ApprovedOnce: true, RemovalVersion: 3},
+			{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: other},
+			{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 5, ConfirmedSHA256: sum},
+		} {
+			if err := d.DeleteAgentIf(ctx, a.Key(), f); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("facts %+v the row does not hold: %v", f, err)
+			}
+		}
+		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: sum}); err != nil {
+			t.Fatalf("the row's own facts: %v", err)
+		}
+		if _, err := d.AgentBySPKI(ctx, a.IdentitySPKISHA256); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("the row after the delete: %v", err)
+		}
+	})
+}
+
+// TestRemovalConfirmation is serverdb's half of carry-over (b) (03-08b):
+// RecordRemovalConfirmed records only for the removal version the caller
+// read.
+func TestRemovalConfirmation(t *testing.T) {
+	ctx := context.Background()
+	sum := bytes.Repeat([]byte{0xcd}, 32)
+	nowUS := tNow.UnixMicro()
+	t.Run("removal_changed_before_record", func(t *testing.T) {
+		// The caller read removal version 3; the removal was cleared and
+		// recorded again at 5 before its write. Nothing is recorded.
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.MarkAgentApproved(ctx, a.Key(), nowUS); err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range []uint64{3, 0, 5} {
+			if err := d.SetAgentRemovedVersion(ctx, a.Key(), v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		storeTestHB(t, d, a.Key(), 1)
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 4, sum); err != nil || ok {
+			t.Fatalf("a confirmation of the old removal: %t %v, want nothing recorded", ok, err)
+		}
+		if got, _ := d.AgentBySPKI(ctx, a.IdentitySPKISHA256); got.RemovedDirVersion != 5 || got.RemovalConfirmedVersion != 0 {
+			t.Fatalf("removed_dir_version %d, confirmed %d; want 5, none", got.RemovedDirVersion, got.RemovalConfirmedVersion)
+		}
+	})
+	// Owner decision D-R1 (PR #74 review fix round 1): a confirmation is
+	// recorded or cleared only from the heartbeat that is still stored.
+	removed := func(t *testing.T) (*DB, *Agent) {
+		t.Helper()
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.MarkAgentApproved(ctx, a.Key(), nowUS); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.SetAgentRemovedVersion(ctx, a.Key(), 3); err != nil {
+			t.Fatal(err)
+		}
+		storeTestHB(t, d, a.Key(), 1)
+		return d, a
+	}
+	confirmedAt := func(t *testing.T, d *DB, a *Agent) uint64 {
+		t.Helper()
+		got, err := d.AgentBySPKI(ctx, a.IdentitySPKISHA256)
+		if err != nil || got.RemovedDirVersion != 3 {
+			t.Fatalf("the row: %+v %v", got, err)
+		}
+		return got.RemovalConfirmedVersion
+	}
+	t.Run("heartbeat_changed_before_record", func(t *testing.T) {
+		// The caller decided from heartbeat 1; heartbeat 2 (which may show
+		// principals again) was stored before its write.
+		d, a := removed(t)
+		storeTestHB(t, d, a.Key(), 2)
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 4, sum); err != nil || ok {
+			t.Fatalf("a confirmation from a replaced heartbeat: %t %v, want nothing recorded", ok, err)
+		}
+		if v := confirmedAt(t, d, a); v != 0 {
+			t.Fatalf("confirmed v%d, want none", v)
+		}
+	})
+	t.Run("cleared_only_from_the_stored_heartbeat", func(t *testing.T) {
+		d, a := removed(t)
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 4, sum); err != nil || !ok {
+			t.Fatalf("record: %t %v", ok, err)
+		}
+		storeTestHB(t, d, a.Key(), 2)
+		if ok, err := d.ClearRemovalConfirmed(ctx, a.Key(), 1); err != nil || ok {
+			t.Fatalf("a clear from a replaced heartbeat: %t %v, want nothing cleared", ok, err)
+		}
+		if v := confirmedAt(t, d, a); v != 4 {
+			t.Fatalf("confirmed v%d, want 4", v)
+		}
+		if ok, err := d.ClearRemovalConfirmed(ctx, a.Key(), 2); err != nil || !ok {
+			t.Fatalf("a clear from the stored heartbeat: %t %v", ok, err)
+		}
+		if v := confirmedAt(t, d, a); v != 0 {
+			t.Fatalf("confirmed v%d after the clear, want none (the removal version stays)", v)
+		}
+		if ok, err := d.ClearRemovalConfirmed(ctx, a.Key(), 2); err != nil || ok {
+			t.Fatalf("a second clear: %t %v, want nothing cleared", ok, err)
+		}
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 2, 3, 5, sum); err != nil || !ok {
+			t.Fatalf("a new confirmation after the clear: %t %v", ok, err)
+		}
+	})
+}
+
+// TestAgentsAndHeartbeatsOneRead is PR #74 pre-merge review fix round 2,
+// fix 2: host status reads the agents and their heartbeats as one
+// snapshot. A request that marks the agent approved and stores its first
+// heartbeat while the read runs (between the two reads, the hook) is seen
+// whole or not at all: never a row with approved_at_us unset next to a
+// stored heartbeat, which keyroster host status refuses.
+func TestAgentsAndHeartbeatsOneRead(t *testing.T) {
+	ctx := context.Background()
+	d, _ := openTemp(t)
+	a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", tNow.UnixMicro())
+	written := make(chan error, 1)
+	ran := false
+	d.afterListAgents = func() {
+		ran = true
+		waits := d.db.Stats().WaitCount
+		go func() {
+			if err := d.MarkAgentApproved(ctx, a.Key(), tNow.UnixMicro()); err != nil {
+				written <- err
+				return
+			}
+			_, err := d.StoreHeartbeat(ctx, a.Key(), 1, []byte("{}"), 0, tNow.UnixMicro())
+			written <- err
+		}()
+		deadline := time.Now().Add(10 * time.Second)
+		for len(written) == 0 && d.db.Stats().WaitCount == waits {
+			if time.Now().After(deadline) {
+				t.Error("the write neither committed nor waited for the connection")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	agents, hbs, err := d.AgentsAndHeartbeats(ctx)
+	d.afterListAgents = nil
+	if err != nil || !ran {
+		t.Fatalf("AgentsAndHeartbeats = %v (hook ran: %v)", err, ran)
+	}
+	if err := <-written; err != nil {
+		t.Fatalf("the request during the read = %v", err)
+	}
+	check := func(what string, agents []Agent, hbs map[int64]Heartbeat, approved bool) {
+		t.Helper()
+		if len(agents) != 1 {
+			t.Fatalf("%s: %d agents, want 1", what, len(agents))
+		}
+		_, hasHB := hbs[a.ID]
+		if (agents[0].ApprovedAtUS != 0) != approved || hasHB != approved {
+			t.Fatalf("%s: approved_at_us %d, heartbeat stored %v; want approved and a heartbeat both %v", what, agents[0].ApprovedAtUS, hasHB, approved)
+		}
+	}
+	check("read during the request", agents, hbs, false)
+	agents, hbs, err = d.AgentsAndHeartbeats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("read after the request", agents, hbs, true)
 }

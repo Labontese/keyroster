@@ -181,52 +181,81 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		// forget deletes the row and ends it.
 		//
 		// 03-08: the first directory version an approved-once agent is
-		// served under in which no entry holds any of its keys (its entry
-		// removed, not just disabled or re-keyed) is recorded
-		// (removed_dir_version), so keyroster host forget can wait for the
-		// host's heartbeat to show it applied; a directory in which an
-		// entry holds them again clears it. An active entry under the
-		// agent's name with entirely new keys is a re-keyed host, not a
-		// removal: the applier keeps last-good's principals for it
-		// (host_keys_rotated), so nothing is recorded (PR #72 review C14).
+		// served under in which no entry holds any of its keys and no
+		// active entry carries its name (its entry removed, not disabled
+		// or re-keyed) is recorded (removed_dir_version), so keyroster host
+		// forget can wait for the host's heartbeat to confirm it applied.
+		// 03-08b: a directory in which an entry holds the agent's keys
+		// again clears the removal and its recorded confirmation. An active
+		// entry under the agent's name with entirely new keys (a re-keyed
+		// host, or another agent enrolled under the name) neither records a
+		// removal nor clears one: the applier keeps last-good's principals
+		// for it (host_keys_rotated, PR #72 review C14), and a removal the
+		// host confirmed before stays confirmed (PR #72 fix-round
+		// carry-over b) until the host's own heartbeat shows principals
+		// again (reconcileRemoval, owner decision D-R1). A removal recorded
+		// here is confirmed only by the host's report that it emptied its
+		// principals, so a renamed entry re-keyed under its new name
+		// (PR #74 review finding 7) never confirms one.
+		//
+		// Every write names the agent's row ID, identity and join token
+		// (serverdb.AgentKey): when the row went after the lookup
+		// (keyroster host forget) and another enrollment took the reused
+		// ID, the same identity's included, the write finds no row, and
+		// the request is refused 403 unknown_agent (PR #72 review C1,
+		// fix-round carry-over a; PR #74 review finding 8).
+		gone := func(err error, what string, fatal bool) bool {
+			switch {
+			case err == nil:
+				return false
+			case errors.Is(err, serverdb.ErrNotFound):
+				s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
+				return true
+			case fatal:
+				s.log.Error(what, "err", err)
+				s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+				return true
+			}
+			s.log.Warn(what, "err", err)
+			return false
+		}
+		clearRemoval := func() bool {
+			if a.RemovedDirVersion == 0 && a.RemovalConfirmedVersion == 0 {
+				return false
+			}
+			if gone(s.db.SetAgentRemovedVersion(ctx, a.Key(), 0), "agent removal version", false) {
+				return true
+			}
+			a.RemovedDirVersion, a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, 0, nil
+			return false
+		}
 		switch {
 		case approved(dv, a.HostKeys):
 			if a.ApprovedAtUS == 0 {
-				if err := s.db.MarkAgentApproved(ctx, a.ID, s.clock().UnixMicro()); err != nil {
-					s.log.Error("agent approval", "err", err)
-					s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+				if gone(s.db.MarkAgentApproved(ctx, a.Key(), s.clock().UnixMicro()), "agent approval", true) {
 					return
 				}
 				s.log.Info("agent approved: first signed state", "expected_name", a.ExpectedName, "agent", agentFingerprint(spki))
 			}
-			if a.RemovedDirVersion != 0 {
-				if err := s.db.SetAgentRemovedVersion(ctx, a.ID, 0); err != nil {
-					s.log.Warn("agent removal version", "err", err)
-				}
-				a.RemovedDirVersion = 0
+			if clearRemoval() {
+				return
 			}
 		case a.ApprovedAtUS == 0:
 			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrNotApproved})
 			return
-		case hostHolds(dv, a.HostKeys) || rekeyed(dv, a.ExpectedName):
-			if a.RemovedDirVersion != 0 {
-				if err := s.db.SetAgentRemovedVersion(ctx, a.ID, 0); err != nil {
-					s.log.Warn("agent removal version", "err", err)
-				}
-				a.RemovedDirVersion = 0
+		case hostHolds(dv, a.HostKeys):
+			if clearRemoval() {
+				return
 			}
+		case rekeyed(dv, a.ExpectedName):
+			// Neither a removal nor a re-approval (03-08b).
 		case a.RemovedDirVersion == 0 && dv.version != 0:
-			if err := s.db.SetAgentRemovedVersion(ctx, a.ID, dv.version); err != nil {
-				s.log.Error("agent removal version", "err", err)
-				s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+			if gone(s.db.SetAgentRemovedVersion(ctx, a.Key(), dv.version), "agent removal version", true) {
 				return
 			}
 			a.RemovedDirVersion = dv.version
 		}
-		// The row can go between the lookup and here (keyroster host
-		// forget): the request is then refused, never served for a row
-		// that no longer exists (PR #72 review C1).
-		switch err := s.db.TouchAgent(ctx, a.ID, s.clock().UnixMicro()); {
+		switch err := s.db.TouchAgent(ctx, a.Key(), s.clock().UnixMicro()); {
 		case errors.Is(err, serverdb.ErrNotFound):
 			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
 			return
@@ -712,7 +741,9 @@ func encodeAgentState(bundles, dirs [][]byte, k []byte, more bool) []byte {
 // The clock offset of every heartbeat that parsed is recorded, a refused
 // one's too, so clock_skew never lags behind the fetcher (D-R2).
 //
-// A stored heartbeat logs nothing (one row per agent, gemma REVIEWS L1123).
+// A stored heartbeat logs nothing (one row per agent, gemma REVIEWS L1123),
+// unless it confirms the agent's removal (confirmRemoval, 03-08b), which
+// is recorded on the agents row and logged once.
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, heartbeat.MaxBody))
 	if err != nil {
@@ -730,7 +761,7 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 	nowUS := s.clock().UnixMicro()
 	if limit := nowUS + heartbeat.MaxSeqAhead.Microseconds(); limit < 0 || h.Status.Seq > uint64(limit) {
 		// The offset is the host's clock, which is what is wrong (D-R2).
-		if err := s.db.RecordClockOffset(ctx, ar.agent.ID, ar.agent.IdentitySPKISHA256, h.ClockOffsetS); err != nil && !errors.Is(err, serverdb.ErrNotFound) {
+		if err := s.db.RecordClockOffset(ctx, ar.agent.Key(), h.ClockOffsetS); err != nil && !errors.Is(err, serverdb.ErrNotFound) {
 			s.log.Error("record clock offset", "err", err)
 		}
 		s.log.Warn("heartbeat refused", "agent", fp, "expected_name", ar.agent.ExpectedName, "reason", serverclient.AgentErrHeartbeatSeqFuture,
@@ -738,7 +769,7 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrHeartbeatSeqFuture})
 		return
 	}
-	logIt, err := s.db.StoreHeartbeat(ctx, ar.agent.ID, ar.agent.IdentitySPKISHA256, int64(h.Status.Seq), body, h.ClockOffsetS, nowUS) //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
+	logIt, err := s.db.StoreHeartbeat(ctx, ar.agent.Key(), int64(h.Status.Seq), body, h.ClockOffsetS, nowUS) //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
 	if logIt {
 		s.log.Warn("heartbeat refused", "agent", fp, "expected_name", ar.agent.ExpectedName, "reason", "heartbeat_seq_regressed",
 			"seq", h.Status.Seq, "detail", "the seq is below the stored one: the host's state was reset after its clock ran ahead; its status stays the stored one until its seq passes it")
@@ -754,6 +785,14 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 		s.log.Error("store heartbeat", "err", err)
 		s.writeJSON(w, ar.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 	default:
+		// 03-08b: a stored heartbeat may confirm the agent's removal, or
+		// clear a recorded confirmation when it shows principals again
+		// (owner decision D-R1). A signer error is logged and skipped, and
+		// the answer never depends on it; keyroster host pending runs the
+		// rule again.
+		if err := s.reconcileRemoval(ctx, ar.dir, ar.agent, int64(h.Status.Seq), &h.Status); err != nil { //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
+			s.log.Warn("removal confirmation skipped", "expected_name", ar.agent.ExpectedName, "agent", fp, "err", err)
+		}
 		s.writeJSON(w, ar.status, http.StatusOK, serverclient.HeartbeatAnswer{Seq: h.Status.Seq})
 	}
 }
@@ -788,7 +827,7 @@ func (s *Server) handleAgentIdentity(w http.ResponseWriter, r *http.Request, ar 
 	}
 	newSum := sha256.Sum256(req.NewSPKI)
 	now := s.clock()
-	err = s.db.RotateAgentIdentity(r.Context(), ar.agent.ID, ar.agent.IdentitySPKISHA256, newSum[:], now.UnixMicro())
+	err = s.db.RotateAgentIdentity(r.Context(), ar.agent.Key(), newSum[:], now.UnixMicro())
 	switch {
 	case errors.Is(err, serverdb.ErrRotationTooSoon):
 		wait := time.UnixMicro(ar.agent.IdentityRotatedAtUS).Add(serverdb.RotationEvery).Sub(now)

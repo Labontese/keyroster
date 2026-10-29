@@ -29,6 +29,7 @@ import (
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/serverdb"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
 )
@@ -973,10 +974,56 @@ func (e *agentEnv) publishKRL(t *testing.T, v uint64) {
 	e.s.mu.Unlock()
 }
 
-// forget posts keyroster host forget name.
+// forget posts keyroster host forget name as the CLI sends it: after a
+// host pending read (which records a removal confirmation), the one
+// agent enrolled as name with the facts its row holds (03-08b). A name
+// no agent has is sent as an unknown identity.
 func (e *agentEnv) forget(t *testing.T, name string) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(serverclient.ForgetHostRequest{ExpectedName: name})
+	return e.forgetName(t, name, false)
+}
+
+// forgetName is forget, with host_gone when gone and the agent was
+// approved once without a confirmation (the CLI drops it otherwise).
+func (e *agentEnv) forgetName(t *testing.T, name string, gone bool) *httptest.ResponseRecorder {
+	t.Helper()
+	e.adminDo(t, http.MethodGet, serverclient.AdminPendingHostsPath, nil)
+	agents, err := e.s.db.ListAgents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var match []serverdb.Agent
+	for _, a := range agents {
+		if a.ExpectedName == name {
+			match = append(match, a)
+		}
+	}
+	switch len(match) {
+	case 0:
+		return e.forgetFacts(t, serverclient.ForgetHostRequest{IdentitySPKISHA256: strings.Repeat("ee", 32)})
+	case 1:
+	default:
+		t.Fatalf("%d agents named %s; forget them by identity", len(match), name)
+	}
+	return e.forgetFacts(t, forgetReqOf(&match[0], gone))
+}
+
+// forgetReqOf is the forget request of agent a with the facts its row
+// holds, and host_gone when gone and a was approved once without a
+// confirmation.
+func forgetReqOf(a *serverdb.Agent, gone bool) serverclient.ForgetHostRequest {
+	req := serverclient.ForgetHostRequest{IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256), ApprovedOnce: a.ApprovedAtUS != 0,
+		RemovalVersion: a.RemovedDirVersion, HostGone: gone && a.ApprovedAtUS != 0 && a.RemovalConfirmedVersion == 0}
+	if a.RemovalConfirmedVersion != 0 {
+		req.RemovalConfirmed = &serverclient.RemovalConfirmation{Version: a.RemovalConfirmedVersion, SHA256: hex.EncodeToString(a.RemovalConfirmedSHA256)}
+	}
+	return req
+}
+
+// forgetFacts posts the forget request req.
+func (e *agentEnv) forgetFacts(t *testing.T, req serverclient.ForgetHostRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1067,7 +1114,7 @@ func TestAgentRemoval(t *testing.T) {
 		e, id, hosts := polled(t)
 		removal := e.installDir(t)
 		// 03-08: forget waits for the host to report the removal applied.
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 1, removal)}); rec.Code != http.StatusOK {
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 1, removal)}); rec.Code != http.StatusOK {
 			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
 		}
 		rec := e.forget(t, "web1")

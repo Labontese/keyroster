@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -308,6 +310,184 @@ func TestStatus(t *testing.T) {
 			if got := applyResult(c.r, c.err); got != c.want {
 				t.Errorf("applyResult(%+v, %v) = %s, want %s", c.r, c.err, got, c.want)
 			}
+		}
+	})
+}
+
+// TestStatusHostStatus (PR #74 pre-merge review fix round 2):
+// last_apply.host_status is the host status of the committed generation,
+// so every apply names what is in force, not only the one that rendered
+// it. A no-op apply (the first round after a restart, a reboot or an
+// upgrade) used to report "", which the server reads as an active entry
+// rendered again and so cleared a recorded removal confirmation.
+func TestStatusHostStatus(t *testing.T) {
+	hostStatus := func(t *testing.T, h *testHost) string {
+		t.Helper()
+		s := outboxStatus(t, h)
+		if s.LastApply == nil {
+			t.Fatal("no last_apply")
+		}
+		return s.LastApply.HostStatus
+	}
+	for _, c := range []struct {
+		status string
+		edit   func(h *testHost, s *dirSpec)
+	}{
+		{HostRemoved, func(_ *testHost, s *dirSpec) { s.noHost = true }},
+		{HostDisabled, func(_ *testHost, s *dirSpec) { s.status = "disabled" }},
+		{HostKeysRotated, func(h *testHost, s *dirSpec) { s.hostKeys = []ssh.PublicKey{h.f.mach.PublicKey()} }},
+	} {
+		t.Run(c.status+"_kept_by_a_noop_apply", func(t *testing.T) {
+			h := newTestHost(t, newFixture(t))
+			withOutbox(t, h)
+			h.installed("role:ops")
+			s := h.spec("role:ops")
+			c.edit(h, &s)
+			h.publishDir(s)
+			h.publishKRL(7)
+			if r := h.mustApply(); r.HostStatus != c.status {
+				t.Fatalf("the apply that rendered it: host_status %q, want %q", r.HostStatus, c.status)
+			}
+			if got := hostStatus(t, h); got != c.status {
+				t.Fatalf("after the apply that rendered it: host_status %q, want %q", got, c.status)
+			}
+			gen := h.current()
+			if r := h.mustApply(); !r.NoOp || h.current() != gen {
+				t.Fatalf("the second apply is not a no-op: %+v", r)
+			}
+			if got := hostStatus(t, h); got != c.status {
+				t.Fatalf("after a no-op apply: host_status %q, want %q (the committed generation's)", got, c.status)
+			}
+			// The entry is back under the host's keys: a real render
+			// overwrites the status, and a no-op after it keeps "".
+			h.publishDir(h.spec("role:ops"))
+			if r := h.mustApply(); r.HostStatus != "" || !slices.Equal(h.principals("deploy"), []string{"role:ops"}) {
+				t.Fatalf("the re-added entry: %+v, principals %v", r, h.principals("deploy"))
+			}
+			if got := hostStatus(t, h); got != "" {
+				t.Fatalf("after the re-added entry rendered: host_status %q, want \"\"", got)
+			}
+			if r := h.mustApply(); !r.NoOp {
+				t.Fatalf("the apply after the re-add is not a no-op: %+v", r)
+			}
+			if got := hostStatus(t, h); got != "" {
+				t.Fatalf("after a no-op apply of the re-added entry: host_status %q, want \"\"", got)
+			}
+		})
+	}
+	t.Run("same_files_rendered_under_another_status", func(t *testing.T) {
+		// Removed, then listed again with other host keys: the host keeps
+		// last-good's principals, which are none, so the new render holds
+		// exactly the files of the generation in force and no new
+		// generation is made. Its status is the new render's, also after a
+		// no-op.
+		h := newTestHost(t, newFixture(t))
+		withOutbox(t, h)
+		h.installed("role:ops")
+		s := h.spec("role:ops")
+		s.noHost = true
+		h.publishDir(s)
+		h.mustApply()
+		gen := h.current()
+		s = h.spec("role:ops")
+		s.hostKeys = []ssh.PublicKey{h.f.mach.PublicKey()}
+		h.publishDir(s)
+		if r := h.mustApply(); r.HostStatus != HostKeysRotated || h.current() != gen || r.NoOp {
+			t.Fatalf("the re-keyed entry: %+v, current %d (was %d)", r, h.current(), gen)
+		}
+		if got := hostStatus(t, h); got != HostKeysRotated {
+			t.Fatalf("after the re-keyed entry rendered the same files: host_status %q, want %q", got, HostKeysRotated)
+		}
+		if r := h.mustApply(); !r.NoOp {
+			t.Fatalf("not a no-op: %+v", r)
+		}
+		if got := hostStatus(t, h); got != HostKeysRotated {
+			t.Fatalf("after a no-op apply: host_status %q, want %q", got, HostKeysRotated)
+		}
+	})
+	t.Run("rollback_reports_last_good_status", func(t *testing.T) {
+		// After a rollback current holds last-good's principals: the
+		// status names last-good's host status, not the failed render's.
+		h := newTestHost(t, newFixture(t))
+		withOutbox(t, h)
+		h.installed("role:ops")
+		s := h.spec("role:ops")
+		s.noHost = true
+		h.publishDir(s)
+		h.publishKRL(7)
+		h.mustApply()
+		lg := h.current()
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.stop()
+		h.publishDir(h.spec("role:ops"))
+		h.publishKRL(7, 8)
+		r, err := h.apply()
+		if !errors.Is(err, ErrSelfTest) || !r.Rollback || h.lastGood() != lg || h.current() == lg {
+			t.Fatalf("the failed re-add: %+v, %v, current %d, last-good %d", r, err, h.current(), lg)
+		}
+		st := outboxStatus(t, h)
+		if st.LastApply.Result != heartbeat.ResultRolledBack || st.LastApply.HostStatus != HostRemoved || len(h.principals("deploy")) != 0 {
+			t.Fatalf("after the rollback: last_apply %+v, principals %v; want rolled_back with %q", st.LastApply, h.principals("deploy"), HostRemoved)
+		}
+		if rec := readFile(t, h.l.State(generationsDir, recordName(h.current()))); !strings.Contains(rec, `"host_status":"host_removed"`) {
+			t.Fatalf("the rollback target's record does not keep last-good's host status: %s", rec)
+		}
+	})
+	t.Run("rollback_in_place_reports_last_good_status", func(t *testing.T) {
+		// The failed render kept last-good's principals (host_keys_rotated)
+		// with a newer KRL: current already is the rollback target and
+		// stays, and its status becomes last-good's.
+		h := newTestHost(t, newFixture(t))
+		withOutbox(t, h)
+		h.installed("role:ops")
+		lg := h.current()
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.stop()
+		s := h.spec("role:ops")
+		s.hostKeys = []ssh.PublicKey{h.f.mach.PublicKey()}
+		h.publishDir(s)
+		h.publishKRL(7)
+		r, err := h.apply()
+		if !errors.Is(err, ErrSelfTest) || !r.Rollback || r.HostStatus != HostKeysRotated || h.lastGood() != lg || h.current() == lg {
+			t.Fatalf("the failed re-key: %+v, %v, current %d, last-good %d", r, err, h.current(), lg)
+		}
+		if st := outboxStatus(t, h); st.LastApply.Result != heartbeat.ResultRolledBack || st.LastApply.HostStatus != "" {
+			t.Fatalf("after the rollback: last_apply %+v; want rolled_back with last-good's \"\"", st.LastApply)
+		}
+	})
+	t.Run("recover_to_last_good_reports_last_good_status", func(t *testing.T) {
+		// A re-add stopped before its self-test (current at the re-added
+		// generation, the marker left); --recover-to-last-good moves to
+		// last-good's principals with the newer KRL, and the status names
+		// last-good's host status.
+		h := newTestHost(t, newFixture(t))
+		withOutbox(t, h)
+		h.installed("role:ops")
+		s := h.spec("role:ops")
+		s.noHost = true
+		h.publishDir(s)
+		h.mustApply()
+		lg := h.current()
+		h.publishDir(h.spec("role:ops"))
+		h.publishKRL(7)
+		stop := &crash{point: "self-test"}
+		h.cfg.Fault = func(p string) error {
+			if p == "self-test" {
+				return stop
+			}
+			return nil
+		}
+		if _, err := h.apply(); !errors.Is(err, error(stop)) || h.current() == lg || readMarker(t, h) == nil {
+			t.Fatalf("the stopped re-add: %v, current %d (last-good %d)", err, h.current(), lg)
+		}
+		h.cfg.Fault = nil
+		h.cfg.RecoverToLastGood = true
+		r, err := h.apply()
+		if err != nil || h.lastGood() != lg || h.current() == lg || len(h.principals("deploy")) != 0 || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("recover to last-good: %+v, %v, current %d, last-good %d, principals %v", r, err, h.current(), h.lastGood(), h.principals("deploy"))
+		}
+		if st := outboxStatus(t, h); st.LastApply.HostStatus != HostRemoved {
+			t.Fatalf("after --recover-to-last-good: last_apply %+v; want last-good's %q", st.LastApply, HostRemoved)
 		}
 	})
 }

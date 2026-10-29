@@ -169,7 +169,8 @@ type Report struct {
 	// own principals (owner decision 2026-10-26, PR #67): host_disabled
 	// and host_removed install no principals, host_keys_rotated and
 	// host_keys_disagree keep last-good's; the CA keys and the KRL apply
-	// in every case.
+	// in every case. It is this run's render; the heartbeat status
+	// reports the committed generation's (Generation.HostStatus).
 	HostStatus string `json:"host_status,omitempty"`
 	// KRLKept is set when the verified state's KRL is older than the one
 	// in force in current, which a rollback or crash recovery kept there
@@ -741,9 +742,14 @@ func (e *engine) forward(ctx context.Context) error {
 		return v.Refused
 	}
 	if cur != nil && sameBytes(cur, g) {
-		// The new versions change nothing on disk: store them.
+		// The new versions change nothing on disk: store them. The
+		// render's host status is the one in force now (a removed entry
+		// listed again under other keys keeps the same, empty, principals).
 		e.setVersions(v, g)
 		e.report.Generation = curLink.n
+		if err := e.setHostStatus(curLink.n, g.HostStatus); err != nil {
+			return err
+		}
 		if err := e.commit(curLink.n, v); err != nil {
 			return err
 		}
@@ -875,7 +881,7 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 	if ferr != nil {
 		return nil, ferr
 	}
-	e.report.HostStatus = status
+	g.HostStatus, e.report.HostStatus = status, status
 	e.logf("WARNING %s: %v; the KRL and CA keys apply, principals are %s", status, err, map[bool]string{true: "kept as last-good's", false: "emptied"}[status == HostKeysRotated || status == HostKeysDisagree])
 	return g, nil
 }
@@ -962,7 +968,7 @@ func (e *engine) backToLastGood(ctx context.Context, lg link) error {
 		return err
 	}
 	if rec, err := e.readRecord(lg.n); err == nil {
-		lgGen.Host = rec.Host
+		lgGen.Host, lgGen.HostStatus = rec.Host, rec.HostStatus
 	}
 	to, err := e.rollbackTarget(ctx, from, cur, lgGen)
 	if err != nil {
@@ -999,7 +1005,12 @@ func (e *engine) rollbackTarget(ctx context.Context, from *Generation, cur link,
 		return to, nil
 	}
 	if from != nil && cur.kind == linkAgent && sameBytes(from, to) {
+		// Current holds last-good's principals already: its status is
+		// last-good's, whatever the render that made it reported.
 		to.N = cur.n
+		if err := e.setHostStatus(cur.n, to.HostStatus); err != nil {
+			return nil, err
+		}
 		return to, nil
 	}
 	to.N = e.allocGeneration()
@@ -1190,7 +1201,7 @@ func (e *engine) recoverToLastGood(ctx context.Context, m *marker, cur, lg link)
 			// RollbackTarget, as a rollback does. A foreign current's KRL
 			// was never verified, so it sets no floor.
 			if rec, err := e.readRecord(lg.n); err == nil {
-				to.Host = rec.Host
+				to.Host, to.HostStatus = rec.Host, rec.HostStatus
 			}
 			if to, err = e.rollbackTarget(ctx, x, cur, to); err != nil {
 				return err

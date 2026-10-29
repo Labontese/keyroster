@@ -16,11 +16,16 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // statusFooter ends every keyroster host status table: convergence is the
 // server's report of what each host said (T-03-51).
 const statusFooter = "Reported by keyroster-server; run `keyroster-agent check` on a host to verify it there.\n"
+
+// notYetPolled is how the CLI shows an agent the directory approves that
+// has not polled since (03-08b owner decision D-R2).
+const notYetPolled = "approved, not yet polled"
 
 // recoveryCommand is what an operator runs on a host whose status says
 // stuck: pending_state_unknown (03-05).
@@ -58,6 +63,11 @@ func checkHostsStatus(a *serverclient.HostsStatusAnswer) error {
 			return errBadHostsStatus
 		}
 		if r.IdentityRotations < 0 || (r.IdentityRotations == 0) != (r.IdentityRotatedAt == "") {
+			return errBadHostsStatus
+		}
+		// Approved, not yet polled (03-08b owner decision D-R2): active in
+		// the directory, and no heartbeat yet.
+		if r.NotYetPolled && (r.State != serverclient.HostStateActive || r.Heartbeat != nil) {
 			return errBadHostsStatus
 		}
 		for _, ts := range []string{r.LastSeen, r.ReceivedAt, r.IdentityRotatedAt} {
@@ -112,14 +122,8 @@ func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if err != nil {
 		return err
 	}
-	var ans serverclient.HostsStatusAnswer
-	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminHostsStatusPath, nil, &ans, s.signer); err != nil {
-		if refusal := hostAdminRefusal(err); refusal != nil {
-			return refusal
-		}
-		return adminError(err, s, pol)
-	}
-	if err := checkHostsStatus(&ans); err != nil {
+	ans, err := fetchHostsStatus(ctx, s, pol)
+	if err != nil {
 		return err
 	}
 	if *asJSON {
@@ -130,8 +134,24 @@ func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer)
 		_, err = fmt.Fprintf(stdout, "%s\n", b)
 		return err
 	}
-	_, err = io.WriteString(stdout, renderHostsStatus(&ans, time.Now()))
+	_, err = io.WriteString(stdout, renderHostsStatus(ans, time.Now()))
 	return err
+}
+
+// fetchHostsStatus GETs hosts/status through the admin API and checks it
+// (checkHostsStatus); pol is the verified policy for adminError.
+func fetchHostsStatus(ctx context.Context, s *adminSession, pol *trust.Policy) (*serverclient.HostsStatusAnswer, error) {
+	var ans serverclient.HostsStatusAnswer
+	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminHostsStatusPath, nil, &ans, s.signer); err != nil {
+		if refusal := hostAdminRefusal(err); refusal != nil {
+			return nil, refusal
+		}
+		return nil, adminError(err, s, pol)
+	}
+	if err := checkHostsStatus(&ans); err != nil {
+		return nil, err
+	}
+	return &ans, nil
 }
 
 // renderHostsStatus is host status's text output at now.
@@ -169,7 +189,10 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 	var notes []string
 	for _, r := range a.Hosts {
 		entry := "active"
-		if r.State != serverclient.HostStateActive {
+		switch {
+		case r.NotYetPolled:
+			entry = notYetPolled
+		case r.State != serverclient.HostStateActive:
 			entry = servedLine(r.State)
 		}
 		seen, status := "never", "none"

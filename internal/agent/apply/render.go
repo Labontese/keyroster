@@ -41,6 +41,12 @@ type Generation struct {
 	// Host is the directory host entry the principals files were
 	// rendered for ("" when not known), kept in the generation's record.
 	Host string
+	// HostStatus is the host status the generation was rendered with
+	// (RenderFallback's; "" for an active entry under the host's keys),
+	// kept in its record: the status reports the committed generation's,
+	// so a no-op apply names what is in force (PR #74 pre-merge review
+	// fix round 2).
+	HostStatus string
 }
 
 // FileClass decides how Intermediate combines a generation file and how a
@@ -381,7 +387,7 @@ func Intermediate(from, to *Generation) (*Generation, bool) {
 // later rollback or recovery never moves the KRL back either, and every
 // forward render keeps it (keepKRLInForce).
 func RollbackTarget(cur, lg *Generation) *Generation {
-	t := &Generation{N: lg.N, Files: map[string][]byte{}, Host: lg.Host}
+	t := &Generation{N: lg.N, Files: map[string][]byte{}, Host: lg.Host, HostStatus: lg.HostStatus}
 	for name, b := range lg.Files {
 		t.Files[name] = b
 	}

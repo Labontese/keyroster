@@ -53,6 +53,10 @@ type DB struct {
 	// between the read of the invite and the read of the credentials. It
 	// is nil outside tests.
 	afterPendingInvite func()
+	// afterListAgents, when a test sets it, runs inside
+	// AgentsAndHeartbeats between the read of the agents and the read of
+	// the heartbeats. It is nil outside tests.
+	afterListAgents func()
 }
 
 // dsnParams: WAL with synchronous=FULL, a 5 s busy timeout, and BEGIN
