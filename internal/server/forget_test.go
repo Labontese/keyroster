@@ -456,6 +456,64 @@ func TestRemovalConfirmation(t *testing.T) {
 			t.Fatalf("forget after the no-op apply: %d %s", rec.Code, rec.Body.String())
 		}
 	})
+	// PR #74 pre-merge review fix round 2, fix 3: while a swap is pending
+	// the status lists the generation the swap started from, and the
+	// target's principals may already be live, so a pending swap clears a
+	// recorded confirmation, as a truncated file list does. Once the swap
+	// commits, a status that shows the removal again confirms it again.
+	t.Run("pending_swap_clears_then_commit_confirms_again", func(t *testing.T) {
+		e, id, r := confirmedAgent(t)
+		s := e.hbRemovedAt(t, 3, r)
+		s.Pending = &heartbeat.Pending{Step: heartbeat.StepFinal, From: s.Generation, To: s.Generation + 1}
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		wantConfirmed(t, e, id, r, 0)
+		if !strings.Contains(e.log.String(), "agent removal confirmation cleared") {
+			t.Errorf("the clear was not logged:\n%s", e.log.String())
+		}
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
+			t.Fatalf("forget during a swap: %d %s", rec.Code, rec.Body.String())
+		}
+		s = e.hbRemovedAt(t, 4, r)
+		s.Generation++
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		wantConfirmed(t, e, id, r, r)
+	})
+	t.Run("pending_swap_clears_keys_rotated_for_good", func(t *testing.T) {
+		// The re-enroll flow's old agent, confirmed and then reporting
+		// host_keys_rotated, goes through a swap (a KRL update): the
+		// pending status clears its confirmation, and host_keys_rotated
+		// never confirms again (owner decision D-R1), so its forget then
+		// needs --host-gone.
+		e, id, r := confirmedAgent(t)
+		v := e.installDir(t, rekeyedWeb1(t))
+		e.state(t, id)
+		rotated := func(seq uint64) heartbeat.Status {
+			s := e.hbRemovedAt(t, seq, v)
+			s.LastApply.HostStatus = "host_keys_rotated"
+			return s
+		}
+		send := func(s heartbeat.Status) {
+			t.Helper()
+			if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+				t.Fatalf("heartbeat %d: %d %s", s.Seq, rec.Code, rec.Body.String())
+			}
+		}
+		send(rotated(3))
+		wantConfirmed(t, e, id, r, r)
+		s := rotated(4)
+		s.Pending = &heartbeat.Pending{Step: heartbeat.StepFinal, From: s.Generation, To: s.Generation + 1}
+		send(s)
+		wantConfirmed(t, e, id, r, 0)
+		s = rotated(5)
+		s.Generation++
+		send(s)
+		e.pendingAnswer(t)
+		wantConfirmed(t, e, id, r, 0)
+	})
 	t.Run("confirmed_then_readded_kept", func(t *testing.T) {
 		e, id, r := confirmedAgent(t)
 		e.installDir(t, rekeyedWeb1(t))

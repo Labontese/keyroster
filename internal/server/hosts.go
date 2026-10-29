@@ -312,13 +312,15 @@ const (
 // principalsShown reports whether st, a host's status, shows that the
 // host has certificate principals in force (owner decision D-R1, PR #74
 // review fix round 1): its committed generation lists a principals/ file,
-// or its file list is cut short so that it cannot be told, or its last
-// apply succeeded and rendered an active entry under its current host
-// keys (host_status empty). host_keys_rotated and host_keys_disagree keep
+// or it cannot be told: the file list is cut short, or a swap is pending
+// (the list is the generation the swap started from, while the target's
+// principals may already be live; fix round 2), or its last apply
+// succeeded and rendered an active entry under its current host keys
+// (host_status empty). host_keys_rotated and host_keys_disagree keep
 // last-good's principals files, which the file list shows; a refused or
 // failed apply changed no file.
 func principalsShown(st *heartbeat.Status) bool {
-	if st.FilesTruncated || slices.ContainsFunc(st.Files, func(f heartbeat.File) bool { return strings.HasPrefix(f.Path, "principals/") }) {
+	if st.FilesTruncated || st.Pending != nil || slices.ContainsFunc(st.Files, func(f heartbeat.File) bool { return strings.HasPrefix(f.Path, "principals/") }) {
 		return true
 	}
 	la := st.LastApply
@@ -328,19 +330,21 @@ func principalsShown(st *heartbeat.Status) bool {
 // principalsEmptied reports whether st shows that the apply which
 // committed its directory emptied the host's principals (owner decision
 // D-R1): the last apply succeeded without a rollback, reported
-// host_removed or host_disabled, no swap is pending (the committed
-// generation is then that apply's), and no principals are shown.
+// host_removed or host_disabled, and no principals are shown, which also
+// means no swap is pending (the committed generation is then that
+// apply's).
 func principalsEmptied(st *heartbeat.Status) bool {
 	la := st.LastApply
-	return la != nil && la.Result == heartbeat.ResultOK && !la.Rollback && st.Pending == nil &&
+	return la != nil && la.Result == heartbeat.ResultOK && !la.Rollback &&
 		(la.HostStatus == hostStatusRemoved || la.HostStatus == hostStatusDisabled) && !principalsShown(st)
 }
 
 // reconcileRemoval brings agent a's recorded removal confirmation in step
 // with st, its host's stored status with seq seq (03-08b; owner decision
-// D-R1): when st shows principals again (principalsShown) a recorded
-// confirmation is cleared, so the host's forget needs --host-gone again
-// (the host resumed service, PR #74 review finding 0); otherwise
+// D-R1): when st shows principals again, or cannot tell (principalsShown),
+// a recorded confirmation is cleared, so the host's forget needs
+// --host-gone again (the host resumed service, PR #74 review finding 0);
+// otherwise
 // confirmRemoval may record one. Both writes hold only while the stored
 // heartbeat is still the one with seq. It updates a, and an error is the
 // caller's to log and skip.
@@ -356,7 +360,7 @@ func (s *Server) reconcileRemoval(ctx context.Context, dv *directoryView, a *ser
 	if err != nil || !cleared {
 		return err
 	}
-	s.log.Warn("agent removal confirmation cleared: its host reports principals again", "expected_name", a.ExpectedName,
+	s.log.Warn("agent removal confirmation cleared: its host reports principals again, or a swap whose outcome it cannot tell yet", "expected_name", a.ExpectedName,
 		"agent", agentFingerprint(a.IdentitySPKISHA256), "removal_version", a.RemovedDirVersion, "removal_confirmed_version", a.RemovalConfirmedVersion,
 		"directory_version", st.Directory.Version)
 	a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, nil

@@ -1002,8 +1002,10 @@ confirmed its removal before the name was used again, and does need it
 when the old agent never applied the removal (a host that reached the
 re-added name without the removal keeps its last good principals and
 never confirms it; `TestRemovalConfirmation`). A confirmed old agent whose
-host shows principals again loses its confirmation, and its forget then
-needs `--host-gone` (owner decision D-R1).
+host shows principals again, or reports a swap in progress, loses its
+confirmation, and its forget then needs `--host-gone` unless it reports
+the removal again (owner decision D-R1; [Removing a host](#removing-a-host),
+step 2).
 
 **What host status rests on** (owner decision D-R4, PR #72 review). Each
 row is the host's own report, and the unprivileged fetcher posts it: it
@@ -1219,8 +1221,17 @@ enrolled host can (D-03); that is the leak this order accepts.
    when a later heartbeat of the same agent shows principals again: a
    `principals/` file, or an apply that rendered an active entry
    (`host_status` empty), for example after the host was re-keyed and
-   re-added under an entry with its new keys. The server logs `agent
-   removal confirmation cleared` at warning level. An entry that holds
+   re-added under an entry with its new keys. It is also cleared by a
+   heartbeat that cannot tell: a truncated file list, or a swap in
+   progress (`pending`), whose file list is the generation the swap
+   started from while the target's principals may already be live (PR
+   #74 pre-merge review fix round 2). A later heartbeat that reports the
+   removal again (`host_removed` or `host_disabled`) confirms it again;
+   one that reports `host_keys_rotated` does not, so an old agent of the
+   re-enroll flow that goes through a swap (a KRL update) while it waits
+   to be forgotten then needs `--host-gone` (run in CI:
+   `TestRemovalConfirmation`). The server logs `agent removal
+   confirmation cleared` at warning level. An entry that holds
    the agent's keys again clears both the confirmation and the removal.
 
    The confirmation is the host's word: the unprivileged fetcher composes
