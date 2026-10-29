@@ -21,3 +21,15 @@ CREATE TABLE heartbeats (
 -- committed directory version at or above it (host_removal_not_applied,
 -- owner decision 2026-10-28), unless the admin passes --host-gone.
 ALTER TABLE agents ADD COLUMN removed_dir_version INTEGER;
+
+-- clock_offset_s: the clock offset of the agent's newest heartbeat that
+-- authenticated and parsed, stored or refused (a stale or a future seq
+-- included), so clock_skew in keyroster host status never lags behind
+-- the fetcher (owner decision D-R2, PR #72 review). NULL: none yet.
+ALTER TABLE agents ADD COLUMN clock_offset_s INTEGER;
+
+-- seq_regressed_at_us: when a heartbeat with a seq below the stored one
+-- was last refused and logged (at most once an hour per agent). It is
+-- later than heartbeats.received_at_us while the host still sends lower
+-- seqs, which keyroster host status flags seq_regressed (D-R2).
+ALTER TABLE agents ADD COLUMN seq_regressed_at_us INTEGER;

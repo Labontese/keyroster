@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"time"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -91,6 +92,13 @@ type Agent struct {
 	// directory version it requested state under that no longer approves
 	// it (0: none since it was last approved; 03-08).
 	RemovedDirVersion uint64
+	// ClockOffsetS is the clock offset of the newest heartbeat that
+	// authenticated and parsed, stored or refused (ClockOffsetKnown false:
+	// none yet), and SeqRegressedAtUS when a seq below the stored one was
+	// last refused and logged (0: never; owner decision D-R2).
+	ClockOffsetS     int64
+	ClockOffsetKnown bool
+	SeqRegressedAtUS int64
 }
 
 // EnrollAgent uses the join token tokenHash and records a as an enrolled
@@ -301,8 +309,17 @@ func (d *DB) RotateAgentIdentity(ctx context.Context, id int64, oldSPKI, newSPKI
 	return oneRow(res)
 }
 
-// ErrStaleHeartbeat is a heartbeat whose seq is not above the stored one.
-var ErrStaleHeartbeat = errors.New("stale_heartbeat")
+// ErrStaleHeartbeat is a heartbeat whose seq is not above the stored one,
+// and ErrSeqRegressed (which is ErrStaleHeartbeat too) one whose seq is
+// below it.
+var (
+	ErrStaleHeartbeat = errors.New("stale_heartbeat")
+	ErrSeqRegressed   = fmt.Errorf("%w: seq below the stored one", ErrStaleHeartbeat)
+)
+
+// seqRegressedLogEvery is how often a host that keeps sending a seq below
+// the stored one is logged (D-R2).
+const seqRegressedLogEvery = int64(time.Hour / time.Microsecond)
 
 // Heartbeat is one stored heartbeat.
 type Heartbeat struct {
@@ -318,37 +335,75 @@ type Heartbeat struct {
 // request the row was forgotten (or rotated) under while its body arrived
 // never writes a heartbeat that a later agent reusing the ID would inherit
 // (ErrNotFound; PR #72 review C1). foreign_keys is off, so 0006's ON
-// DELETE CASCADE does nothing; DeleteAgent deletes the row itself. A
-// lower or equal seq changes nothing and is ErrStaleHeartbeat.
-func (d *DB) StoreHeartbeat(ctx context.Context, id int64, spki []byte, seq int64, body []byte, nowUS int64) error {
+// DELETE CASCADE does nothing; DeleteAgent deletes the row itself.
+//
+// The clock offset is recorded whatever the seq (owner decision D-R2). An
+// equal seq changes nothing else and is ErrStaleHeartbeat; a lower one is
+// ErrSeqRegressed and records seq_regressed_at_us when it is a new episode
+// (nothing recorded since the stored heartbeat arrived) or an hour has
+// passed since the last record: logIt then tells the caller to log it, so
+// a host that keeps sending lower seqs is logged once an hour.
+func (d *DB) StoreHeartbeat(ctx context.Context, id int64, spki []byte, seq int64, body []byte, offsetS, nowUS int64) (logIt bool, err error) {
 	if seq < 1 || len(body) == 0 || len(spki) != 32 {
-		return errors.New("serverdb: incomplete heartbeat")
+		return false, errors.New("serverdb: incomplete heartbeat")
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("serverdb: begin: %w", err)
+		return false, fmt.Errorf("serverdb: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := agentLive(ctx, tx, id, spki); err != nil {
-		return err
+		return false, err
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) VALUES (?, ?, ?, ?)
-ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, received_at_us = excluded.received_at_us
-WHERE excluded.seq > heartbeats.seq`, id, seq, body, nowUS)
-	if err != nil {
-		return fmt.Errorf("serverdb: store heartbeat: %w", err)
+	if _, err := tx.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE id = ?`, offsetS, id); err != nil {
+		return false, fmt.Errorf("serverdb: clock offset: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("serverdb: rows affected: %w", err)
+	var stored, receivedUS int64
+	err = tx.QueryRowContext(ctx, `SELECT seq, received_at_us FROM heartbeats WHERE agent_id = ?`, id).Scan(&stored, &receivedUS)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return false, fmt.Errorf("serverdb: heartbeat: %w", err)
+	case seq == stored:
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("serverdb: commit: %w", err)
+		}
+		return false, ErrStaleHeartbeat
+	case seq < stored:
+		res, err := tx.ExecContext(ctx, `UPDATE agents SET seq_regressed_at_us = ? WHERE id = ?
+AND (seq_regressed_at_us IS NULL OR seq_regressed_at_us <= ? OR seq_regressed_at_us <= ?)`, nowUS, id, receivedUS, nowUS-seqRegressedLogEvery)
+		if err != nil {
+			return false, fmt.Errorf("serverdb: seq regressed: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("serverdb: rows affected: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("serverdb: commit: %w", err)
+		}
+		return n == 1, ErrSeqRegressed
 	}
-	if n == 0 {
-		return ErrStaleHeartbeat
+	if _, err := tx.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) VALUES (?, ?, ?, ?)
+ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, received_at_us = excluded.received_at_us`, id, seq, body, nowUS); err != nil {
+		return false, fmt.Errorf("serverdb: store heartbeat: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("serverdb: commit: %w", err)
+		return false, fmt.Errorf("serverdb: commit: %w", err)
 	}
-	return nil
+	return false, nil
+}
+
+// RecordClockOffset records offsetS as agent id's clock offset, when the
+// row still has the identity spki (else ErrNotFound): a heartbeat refused
+// before StoreHeartbeat (heartbeat_seq_future) still shows its host's
+// clock (D-R2).
+func (d *DB) RecordClockOffset(ctx context.Context, id int64, spki []byte, offsetS int64) error {
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE id = ? AND identity_spki_sha256 = ?`, offsetS, id, spki)
+	if err != nil {
+		return fmt.Errorf("serverdb: clock offset: %w", err)
+	}
+	return oneRow(res)
 }
 
 // agentLive is ErrNotFound unless the agents row id exists with the
@@ -387,21 +442,25 @@ func (d *DB) Heartbeats(ctx context.Context) (map[int64]Heartbeat, error) {
 }
 
 // agentColumns are the columns scanAgent reads, in its order.
-const agentColumns = `id, identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us, last_seen_us, approved_at_us, removed_dir_version`
+const agentColumns = `id, identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us, last_seen_us, approved_at_us, removed_dir_version,
+clock_offset_s, seq_regressed_at_us`
 
 func scanAgent(rows *sql.Rows) (*Agent, error) {
 	var (
 		a                       Agent
 		keys                    string
 		seen, approved, removed sql.NullInt64
+		offset, regressed       sql.NullInt64
 	)
-	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.TokenSHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen, &approved, &removed); err != nil {
+	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.TokenSHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen, &approved, &removed,
+		&offset, &regressed); err != nil {
 		return nil, fmt.Errorf("serverdb: agent: %w", err)
 	}
 	if err := json.Unmarshal([]byte(keys), &a.HostKeys); err != nil {
 		return nil, fmt.Errorf("serverdb: agent %d host keys: %w", a.ID, err)
 	}
 	a.LastSeenUS, a.ApprovedAtUS = seen.Int64, approved.Int64
+	a.ClockOffsetS, a.ClockOffsetKnown, a.SeqRegressedAtUS = offset.Int64, offset.Valid, regressed.Int64
 	if removed.Valid && removed.Int64 > 0 {
 		a.RemovedDirVersion = uint64(removed.Int64)
 	}

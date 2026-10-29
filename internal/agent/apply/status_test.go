@@ -109,6 +109,26 @@ func TestStatus(t *testing.T) {
 			t.Fatalf("seq %d after a reset, not above %d", c.Seq, b.Seq)
 		}
 	})
+	t.Run("seq_restarts_from_the_clock_after_running_ahead", func(t *testing.T) {
+		// D-R2 (PR #72 review): the server refuses a seq more than
+		// heartbeat.MaxSeqAhead beyond its clock. A host whose clock ran
+		// two hours ahead, then was corrected, restarts from its clock
+		// instead of counting on from the far-future seq for two hours.
+		h := newTestHost(t, newFixture(t))
+		withOutbox(t, h)
+		a := writeStatus(t, h, StatusUpdate{})
+		h.clock.advance(-2 * time.Hour)
+		b := writeStatus(t, h, StatusUpdate{})
+		if want := uint64(h.clock.Now().UnixMicro()); b.Seq != want {
+			t.Fatalf("seq %d after the clock went back two hours (from %d), want the clock's %d", b.Seq, a.Seq, want)
+		}
+		// Within the bound it still only grows.
+		h.clock.advance(-30 * time.Minute)
+		c := writeStatus(t, h, StatusUpdate{})
+		if c.Seq != b.Seq+1 {
+			t.Fatalf("seq %d after the clock went back 30 min, want %d", c.Seq, b.Seq+1)
+		}
+	})
 	t.Run("applier_never_reads_the_outbox", func(t *testing.T) {
 		h := newTestHost(t, newFixture(t))
 		withOutbox(t, h)

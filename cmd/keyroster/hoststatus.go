@@ -53,6 +53,9 @@ func checkHostsStatus(a *serverclient.HostsStatusAnswer) error {
 				return errBadHostsStatus
 			}
 		}
+		if r.ClockOffsetS > heartbeat.MaxClockOffset || r.ClockOffsetS < -heartbeat.MaxClockOffset {
+			return errBadHostsStatus
+		}
 		if r.Heartbeat != nil {
 			if err := heartbeat.ValidateHeartbeat(r.Heartbeat); err != nil {
 				return fmt.Errorf("%w: host %s: %w", errBadHostsStatus, r.Name, err)
@@ -197,12 +200,16 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 			if st.KRLStale {
 				alerts = append(alerts, "krl_stale")
 			}
-			if r.ClockSkew {
-				alerts = append(alerts, fmt.Sprintf("clock_skew (%+d s)", h.ClockOffsetS))
+			if r.SeqRegressed {
+				alerts = append(alerts, "seq_regressed")
+				notes = append(notes, fmt.Sprintf("%s: seq_regressed: its heartbeats carry a seq below the stored one (its state was reset after its clock ran ahead); the status shown is the stored one until its seq passes it", r.Name))
 			}
 			if st.FilesTruncated {
 				alerts = append(alerts, "files_truncated")
 			}
+		}
+		if r.ClockSkew {
+			alerts = append(alerts, fmt.Sprintf("clock_skew (%+d s)", r.ClockOffsetS))
 		}
 		if len(alerts) == 0 {
 			alerts = []string{"-"}

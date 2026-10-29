@@ -267,8 +267,13 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 	if u.Checked && u.Drift != nil {
 		s.LastCheck = &heartbeat.LastCheck{At: stamp(now), Drift: u.Drift.Drift()}
 	}
+	// seq = max(previous + 1, now in microseconds), except that a previous
+	// seq more than heartbeat.MaxSeqAhead beyond this clock (it ran ahead
+	// and was corrected) restarts from the clock: the server refuses a seq
+	// that far beyond its own clock (heartbeat_seq_future, owner decision
+	// D-R2), so counting on from it would freeze the host's status.
 	s.Seq = uint64(max(now.UnixMicro(), 1)) //nolint:gosec // G115: positive
-	if prev != nil && prev.Seq >= s.Seq {
+	if prev != nil && prev.Seq >= s.Seq && prev.Seq-s.Seq <= uint64(heartbeat.MaxSeqAhead.Microseconds()) {
 		s.Seq = prev.Seq + 1
 	}
 	return s, nil

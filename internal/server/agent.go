@@ -683,7 +683,15 @@ func encodeAgentState(bundles, dirs [][]byte, k []byte, more bool) []byte {
 //     fetcher posts at every poll and the seq changes only when the
 //     applier writes a new status, so stale_heartbeat is the usual answer
 //     between writes (owner decision D-2, 2026-10-28): a host's silence is
-//     judged from its last request (last_seen_us), not from this.
+//     judged from its last request (last_seen_us), not from this. A lower
+//     seq is logged as heartbeat_seq_regressed at most once an hour and
+//     flagged seq_regressed in hosts/status (owner decision D-R2);
+//  4. a seq more than heartbeat.MaxSeqAhead beyond the server's clock is
+//     400 heartbeat_seq_future, logged, and stores nothing, so no seq can
+//     freeze the host's status (D-R2, PR #72 review C11).
+//
+// The clock offset of every heartbeat that parsed is recorded, a refused
+// one's too, so clock_skew never lags behind the fetcher (D-R2).
 //
 // A stored heartbeat logs nothing (one row per agent, gemma REVIEWS L1123).
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
@@ -699,7 +707,23 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.HeartbeatRefusal{Error: serverclient.AgentErrHeartbeatField, Field: field})
 		return
 	}
-	err = s.db.StoreHeartbeat(r.Context(), ar.agent.ID, ar.agent.IdentitySPKISHA256, int64(h.Status.Seq), body, s.clock().UnixMicro()) //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
+	ctx, fp := r.Context(), agentFingerprint(ar.agent.IdentitySPKISHA256)
+	nowUS := s.clock().UnixMicro()
+	if limit := nowUS + heartbeat.MaxSeqAhead.Microseconds(); limit < 0 || h.Status.Seq > uint64(limit) {
+		// The offset is the host's clock, which is what is wrong (D-R2).
+		if err := s.db.RecordClockOffset(ctx, ar.agent.ID, ar.agent.IdentitySPKISHA256, h.ClockOffsetS); err != nil && !errors.Is(err, serverdb.ErrNotFound) {
+			s.log.Error("record clock offset", "err", err)
+		}
+		s.log.Warn("heartbeat refused", "agent", fp, "expected_name", ar.agent.ExpectedName, "reason", serverclient.AgentErrHeartbeatSeqFuture,
+			"seq", h.Status.Seq, "server_now_us", nowUS, "clock_offset_s", h.ClockOffsetS)
+		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrHeartbeatSeqFuture})
+		return
+	}
+	logIt, err := s.db.StoreHeartbeat(ctx, ar.agent.ID, ar.agent.IdentitySPKISHA256, int64(h.Status.Seq), body, h.ClockOffsetS, nowUS) //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
+	if logIt {
+		s.log.Warn("heartbeat refused", "agent", fp, "expected_name", ar.agent.ExpectedName, "reason", "heartbeat_seq_regressed",
+			"seq", h.Status.Seq, "detail", "the seq is below the stored one: the host's state was reset after its clock ran ahead; its status stays the stored one until its seq passes it")
+	}
 	switch {
 	case errors.Is(err, serverdb.ErrNotFound):
 		// Forgotten (or rotated away) while the body arrived (PR #72

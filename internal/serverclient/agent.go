@@ -132,6 +132,10 @@ const (
 	// AgentErrHeartbeatField is a heartbeat field outside its rule (400);
 	// the answer's field names it.
 	AgentErrHeartbeatField = "heartbeat_field_invalid"
+	// AgentErrHeartbeatSeqFuture is a heartbeat whose seq is more than
+	// heartbeat.MaxSeqAhead beyond the server's clock (400): it stores
+	// nothing but the clock offset (owner decision D-R2, PR #72 review).
+	AgentErrHeartbeatSeqFuture = "heartbeat_seq_future"
 	// AgentErrIdentitySig is a rotation whose signature does not verify
 	// under the current identity, or whose new SPKI is not an Ed25519
 	// key other than the current one (403).
@@ -460,8 +464,13 @@ type HostVersions struct {
 //   - ReceivedAt is when the stored heartbeat arrived ("" for none), and
 //     Heartbeat the newest heartbeat by seq (nil for none), every field
 //     validated before it was stored;
-//   - ClockSkew is |clock_offset_s| > heartbeat.ClockSkewS, NeverApplied
-//     no heartbeat or generation 0.
+//   - ClockOffsetS is the clock offset of the agent's newest heartbeat
+//     that parsed, stored or refused (owner decision D-R2), and ClockSkew
+//     |ClockOffsetS| > heartbeat.ClockSkewS; NeverApplied is no heartbeat
+//     or generation 0;
+//   - SeqRegressed is set while the host is not silent and its heartbeats
+//     since the stored one carry a lower seq (heartbeat_seq_regressed,
+//     D-R2): its status is frozen at the stored one.
 type HostStatusRow struct {
 	Name               string               `json:"name"`
 	ExpectedName       string               `json:"expected_name"`
@@ -470,7 +479,9 @@ type HostStatusRow struct {
 	LastSeen           string               `json:"last_seen"`
 	Silent             bool                 `json:"silent"`
 	ReceivedAt         string               `json:"received_at"`
+	ClockOffsetS       int64                `json:"clock_offset_s"`
 	ClockSkew          bool                 `json:"clock_skew"`
+	SeqRegressed       bool                 `json:"seq_regressed"`
 	NeverApplied       bool                 `json:"never_applied"`
 	Heartbeat          *heartbeat.Heartbeat `json:"heartbeat"`
 }

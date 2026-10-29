@@ -24,6 +24,7 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Labontese/keyroster/internal/trust"
 )
@@ -175,6 +176,13 @@ type Heartbeat struct {
 	Status       Status `json:"status"`
 	ClockOffsetS int64  `json:"clock_offset_s"`
 }
+
+// MaxSeqAhead is how far beyond keyroster-server's clock a heartbeat's
+// seq (microseconds) may be: a higher one is refused heartbeat_seq_future
+// and stores nothing but its clock offset, so no seq can freeze a host's
+// status (owner decision D-R2, PR #72 review C11). The applier restarts
+// its seq from its clock when the previous one is this far beyond it.
+const MaxSeqAhead = time.Hour
 
 // ClockSkewS is the clock_skew threshold: an offset whose magnitude is
 // above it (in whole seconds, so 300 is not flagged and 301 is) raises

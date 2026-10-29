@@ -69,7 +69,8 @@ func TestHostStatus(t *testing.T) {
 		silent,
 	}}
 	ans.Hosts[4].NeverApplied = true
-	ans.Hosts[3].ClockSkew = true
+	ans.Hosts[3].ClockSkew, ans.Hosts[3].ClockOffsetS = true, -301
+	ans.Hosts[0].SeqRegressed = true
 	t.Run("table", func(t *testing.T) {
 		statusEnv(t, ans)
 		code, out, stderr := run(t, "host", "status")
@@ -80,7 +81,7 @@ func TestHostStatus(t *testing.T) {
 		for _, want := range []string{
 			"bundle v1 on 3/5 hosts\n", "directory v5 on 3/5 hosts\n", "KRL v100 on 2/5 hosts\n",
 			"ok (probe:negative_refused)", "stuck: pending_state_unknown", "sudo keyroster-agent apply --once --recover-to-last-good",
-			"pending: intermediate", "removed, served until forget", "krl_stale", "clock_skew (-301 s)", "silent", "never applied", "v99*",
+			"pending: intermediate", "removed, served until forget", "krl_stale", "clock_skew (-301 s)", "silent", "seq_regressed", "web1: seq_regressed: its heartbeats carry a seq below the stored one", "never applied", "v99*",
 			"Reported by keyroster-server; run `keyroster-agent check` on a host to verify it there.\n",
 		} {
 			if !strings.Contains(out, want) {

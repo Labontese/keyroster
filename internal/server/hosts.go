@@ -268,7 +268,8 @@ const silentAfter = serverclient.SilentAfterS * time.Second
 // (a pending one is keyroster host pending's): its directory name and
 // state, when it was last seen and whether that is more than 180 s ago
 // on the server's clock (silent, D-10), and its newest heartbeat with
-// clock_skew (|clock_offset_s| > 300) and never_applied. A removed,
+// never_applied, the newest clock offset with clock_skew (|clock_offset_s|
+// > 300) and seq_regressed (owner decision D-R2). A removed,
 // disabled or re-keyed agent that is still served shows its state, never
 // as waiting for approval (03-08 carry-over a). Convergence is the
 // server's report, the host's own word through its heartbeat; the CLI
@@ -331,10 +332,16 @@ func (s *Server) handleHostsStatus(w http.ResponseWriter, r *http.Request) {
 			} else {
 				row.Heartbeat = h
 				row.ReceivedAt = time.UnixMicro(hb.ReceivedAtUS).UTC().Format(time.RFC3339)
-				row.ClockSkew = heartbeat.ClockSkew(h.ClockOffsetS)
+				row.ClockOffsetS = h.ClockOffsetS
 				row.NeverApplied = h.Status.Generation == 0
+				row.SeqRegressed = !row.Silent && a.SeqRegressedAtUS > hb.ReceivedAtUS
 			}
 		}
+		// The newest offset any heartbeat carried, refused ones too (D-R2).
+		if a.ClockOffsetKnown {
+			row.ClockOffsetS = a.ClockOffsetS
+		}
+		row.ClockSkew = heartbeat.ClockSkew(row.ClockOffsetS)
 		out.Hosts = append(out.Hosts, row)
 	}
 	s.writeJSON(w, dv.status, http.StatusOK, out)
