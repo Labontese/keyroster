@@ -4,6 +4,8 @@ package apply
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -117,6 +119,59 @@ func TestRunChecks(t *testing.T) {
 	later := next("from the periodic check", func(s *heartbeat.Status) bool { return s.LastCheck != nil && s.LastCheck.At != applied.LastCheck.At })
 	if later.Seq <= applied.Seq {
 		t.Fatalf("seq %d after %d", later.Seq, applied.Seq)
+	}
+}
+
+// TestRunPublishesFailedCheck (PR #72 review C16): a drift check that
+// fails, for example because sshd -T refuses an sshd_config with a syntax
+// error, writes a status that says so, instead of leaving the last
+// healthy one in the outbox.
+func TestRunPublishesFailedCheck(t *testing.T) {
+	h := newTestHost(t, newFixture(t))
+	withOutbox(t, h)
+	h.installed("role:ops")
+	statuses := make(chan *heartbeat.Status, 64)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	var log syncLog
+	h.cfg.Log = &log
+	go func() {
+		done <- Run(ctx, RunConfig{Config: h.cfg, Interval: 20 * time.Millisecond, Retry: time.Hour,
+			Status: func(s *heartbeat.Status) { statuses <- s }}, h.l)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	next := func(what string, cond func(s *heartbeat.Status) bool) *heartbeat.Status {
+		t.Helper()
+		deadline := time.After(10 * time.Second)
+		for {
+			select {
+			case s := <-statuses:
+				if cond(s) {
+					return s
+				}
+			case <-deadline:
+				t.Fatalf("no status %s within 10 s; run log:\n%s", what, log.String())
+			}
+		}
+	}
+	first := next("from the first check", func(s *heartbeat.Status) bool { return s.LastCheck != nil })
+	h.run.mu.Lock()
+	h.run.rejectDropIn = func([]byte) bool { return true }
+	h.run.mu.Unlock()
+	h.clock.advance(17 * time.Minute)
+	next("from the failed check", func(s *heartbeat.Status) bool { return s.LastCheck != nil && s.LastCheck.At != first.LastCheck.At })
+	b, err := os.ReadFile(filepath.Join(h.l.Outbox(), heartbeat.StatusFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"error":"sshd_T_failed: `) {
+		t.Fatalf("the outbox after a failed check names no sshd_T_failed:\n%s", b)
+	}
+	if _, err := heartbeat.ParseStatus(b); err != nil {
+		t.Fatalf("the failed check's status does not pass the server's checks: %v", err)
 	}
 }
 

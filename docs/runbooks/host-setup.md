@@ -947,6 +947,13 @@ ASCII. (Run in CI: `TestHostStatus`, `TestHeartbeat`,
   fetcher keeps polling: nothing checks drift or applies revocations
   there. (Run in CI: `TestStatusStale`, `TestHostStatusAge`; PR #72
   review.)
+- `check_failed`: the last drift check could not run, for example because
+  `sshd -T` refuses an `sshd_config` with a syntax error; `DRIFT` shows
+  `failed`, and the error follows the table. The applier writes that
+  status instead of keeping the last healthy one. Fix the configuration
+  on the host; until then neither checks nor applies succeed there. (Run
+  in CI: `TestRunPublishesFailedCheck`, `TestHostStatusCheckFailed`; PR
+  #72 review.)
 - `krl_stale`: the KRL in force was issued 24 h ago or more (its manifest's
   `issued_at`). The applier logs an error line on every check (journald
   priority 3), and nothing else changes: the KRL stays installed and no

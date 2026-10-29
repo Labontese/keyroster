@@ -64,7 +64,8 @@ type RunConfig struct {
 //  4. the drift check (Check, AGENT-05) runs after every round that
 //     applied, and every CheckEvery +- CheckJitter, in this goroutine, so
 //     a check and an apply never overlap within run. Each check writes
-//     the status (WriteStatus) with its result, and logs D-10's error
+//     the status (WriteStatus) with its result, a failed one with its
+//     error (last_check.error, PR #72 review C16), and logs D-10's error
 //     line when the KRL in force is 24 h old or older (LogKRLAge). An
 //     apply writes the status itself (Apply). The first round writes the
 //     status too, so an enrolled host that never applied reports
@@ -132,7 +133,12 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		case errors.Is(err, ErrNotInstalled):
 			return
 		case err != nil:
+			// The status says the check failed (for example sshd -T
+			// refuses a broken sshd_config), instead of keeping the last
+			// healthy one; the KRL's age is still logged (PR #72 review
+			// C16).
 			logf("ERROR drift check: %v", err)
+			status(StatusUpdate{Checked: true, CheckErr: err})
 			return
 		case d.Drift():
 			logf("ERROR drift: generation %d: %d setting, %d file and %d foreign findings (keyroster-agent check prints them)", d.Generation, len(d.Settings), len(d.Files), len(d.Foreign))

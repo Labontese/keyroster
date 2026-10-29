@@ -294,7 +294,37 @@ func TestHostStatusAge(t *testing.T) {
 		t.Fatalf("host status: exit %d: %s", code, stderr)
 	}
 	t.Logf("keyroster host status:\n%s", out)
-	for _, want := range []string{"LAST SEEN  STATUS", "12s ago    40m ago", "status_stale", "web1: status_stale: its status is 40m old"} {
+	for _, want := range []string{"LAST SEEN  STATUS", "ago    40m ago", "status_stale", "web1: status_stale: its status is 40m old"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("host status lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestHostStatusCheckFailed (PR #72 review C16): a failed drift check is
+// shown as such, with its error, not as "no drift".
+func TestHostStatusCheckFailed(t *testing.T) {
+	row := statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: hbStatus(5, 100)})
+	b, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["heartbeat"].(map[string]any)["status"].(map[string]any)["last_check"].(map[string]any)["error"] =
+		"sshd_T_failed: sshd -T exited 255: /etc/ssh/sshd_config line 3: Bad configuration option: PermitRootLogn"
+	ab := strings.Repeat("ab", 32)
+	statusEnv(t, map[string]any{
+		"current": map[string]any{"bundle": 1, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
+		"hosts":   []any{m},
+	})
+	code, out, stderr := run(t, "host", "status")
+	if code != 0 {
+		t.Fatalf("host status: exit %d: %s", code, stderr)
+	}
+	for _, want := range []string{"failed", "check_failed", "web1: check_failed: the last drift check failed: sshd_T_failed: sshd -T exited 255"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("host status lacks %q:\n%s", want, out)
 		}

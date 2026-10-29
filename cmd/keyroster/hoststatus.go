@@ -202,7 +202,12 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 			gen = fmt.Sprint(st.Generation)
 			if c := st.LastCheck; c != nil {
 				drift = "no"
-				if c.Drift {
+				switch {
+				case c.Error != "":
+					drift = "failed"
+					alerts = append(alerts, "check_failed")
+					notes = append(notes, fmt.Sprintf("%s: check_failed: the last drift check failed: %s", r.Name, c.Error))
+				case c.Drift:
 					drift = "yes"
 				}
 			}

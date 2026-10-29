@@ -128,10 +128,14 @@ type LastApply struct {
 	HostStatus string `json:"host_status,omitempty"`
 }
 
-// LastCheck is the last drift check (AGENT-05).
+// LastCheck is the last drift check (AGENT-05): when, whether it found
+// drift, and the error of a check that failed (printable, at most MaxText
+// bytes; drift is then false, as it is unknown). A failed check is
+// reported, never left behind the last healthy one (PR #72 review C16).
 type LastCheck struct {
 	At    string `json:"at"`
 	Drift bool   `json:"drift"`
+	Error string `json:"error,omitempty"`
 }
 
 // Pending is 03-05's pending marker while a two-step swap is in progress.
@@ -326,6 +330,9 @@ func Validate(s *Status) error {
 	if c := s.LastCheck; c != nil {
 		if err := checkTime("last_check.at", c.At); err != nil {
 			return err
+		}
+		if !Printable(c.Error, MaxText) || c.Error != "" && c.Drift {
+			return bad("last_check.error")
 		}
 	}
 	if p := s.Pending; p != nil {

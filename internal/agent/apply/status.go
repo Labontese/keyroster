@@ -45,6 +45,9 @@ type StatusUpdate struct {
 	ApplyErr error
 	Checked  bool
 	Drift    *DriftReport
+	// CheckErr is the error of a check that failed (Checked set, Drift
+	// nil): the status says so in last_check.error (PR #72 review C16).
+	CheckErr error
 }
 
 // WriteStatus builds the host's status and writes it, under the apply
@@ -264,7 +267,10 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 			s.Stuck = u.Report.Stuck
 		}
 	}
-	if u.Checked && u.Drift != nil {
+	switch {
+	case u.Checked && u.CheckErr != nil:
+		s.LastCheck = &heartbeat.LastCheck{At: stamp(now), Error: heartbeat.Sanitize(u.CheckErr.Error(), heartbeat.MaxText)}
+	case u.Checked && u.Drift != nil:
 		s.LastCheck = &heartbeat.LastCheck{At: stamp(now), Drift: u.Drift.Drift()}
 	}
 	// seq = max(previous + 1, now in microseconds), except that a previous
