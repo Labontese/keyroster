@@ -635,6 +635,41 @@ func TestAgentWritesKeyedByIdentity(t *testing.T) {
 			t.Fatalf("%s with A's ID and identity changed B's row:\n%+v\nwas\n%+v (%v)", w.name, after, before, err)
 		}
 	}
+	t.Run("fresh_row", func(t *testing.T) {
+		// B never approved and with no removal: the conditional writers
+		// would change its row if they matched by ID alone.
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, ForgetFacts{}); err != nil {
+			t.Fatal(err)
+		}
+		b := enrollTestAgent(t, d, 0x0b, "web1", "key-b", nowUS)
+		if b.ID != a.ID {
+			t.Fatalf("B got row ID %d; the test needs A's %d", b.ID, a.ID)
+		}
+		before, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range []struct {
+			name  string
+			write func() error
+		}{
+			{"TouchAgent", func() error { return d.TouchAgent(ctx, a.ID, a.IdentitySPKISHA256, nowUS+9) }},
+			{"MarkAgentApproved", func() error { return d.MarkAgentApproved(ctx, a.ID, a.IdentitySPKISHA256, nowUS+9) }},
+			{"SetAgentRemovedVersion_record", func() error { return d.SetAgentRemovedVersion(ctx, a.ID, a.IdentitySPKISHA256, 9) }},
+			{"SetAgentRemovedVersion_clear", func() error { return d.SetAgentRemovedVersion(ctx, a.ID, a.IdentitySPKISHA256, 0) }},
+			{"DeleteAgentIf", func() error { return d.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, before.ForgetFacts()) }},
+		} {
+			if err := w.write(); !errors.Is(err, ErrNotFound) {
+				t.Errorf("%s with A's ID and identity: %v, want ErrNotFound", w.name, err)
+			}
+			after, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("%s with A's ID and identity changed B's fresh row:\n%+v\nwas\n%+v (%v)", w.name, after, before, err)
+			}
+		}
+	})
 	t.Run("approved_again_keeps_the_first_time", func(t *testing.T) {
 		if err := d.MarkAgentApproved(ctx, b.ID, b.IdentitySPKISHA256, nowUS+50); err != nil {
 			t.Fatalf("MarkAgentApproved on an approved row: %v", err)
