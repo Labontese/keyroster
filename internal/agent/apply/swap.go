@@ -85,6 +85,9 @@ type genRecord struct {
 	// files were rendered for (owner decision 2026-10-26, PR #67: tells a
 	// removed host from one whose keys were rotated).
 	Host string `json:"host,omitempty"`
+	// HostStatus is Generation.HostStatus: what last_apply.host_status
+	// reports while this generation is the committed one.
+	HostStatus string `json:"host_status,omitempty"`
 }
 
 func recordName(n uint64) string { return strconv.FormatUint(n, 10) + ".json" }
@@ -111,7 +114,7 @@ func (e *engine) installGeneration(g *Generation) error {
 	if err := e.mkdir(tmp, 0o755); err != nil {
 		return err
 	}
-	rec := genRecord{Generation: g.N, Files: map[string]string{}, Host: g.Host}
+	rec := genRecord{Generation: g.N, Files: map[string]string{}, Host: g.Host, HostStatus: g.HostStatus}
 	for _, name := range fileNames(g) {
 		dir, base := filepath.Split(name)
 		target := filepath.Join(tmp, dir)
@@ -277,6 +280,27 @@ func (e *engine) readRecord(n uint64) (*genRecord, error) {
 		return nil, fmt.Errorf("record %d does not decode", n)
 	}
 	return &r, nil
+}
+
+// setHostStatus rewrites generation n's record with host status status
+// when it holds another one (spool.WriteFileAt: a whole record or the
+// old one, never a torn one): a render whose files are those of the
+// generation in force commits that generation, and its status is then the
+// new render's (PR #74 pre-merge review fix round 2).
+func (e *engine) setHostStatus(n uint64, status string) error {
+	rec, err := e.readRecord(n)
+	if err != nil {
+		return err
+	}
+	if rec.HostStatus == status {
+		return nil
+	}
+	rec.HostStatus = status
+	b, err := trust.CanonicalJSON(rec)
+	if err != nil {
+		return err
+	}
+	return e.writeFile(e.l.State(generationsDir), recordName(n), b, 0o600)
 }
 
 // replaceLink points the link at path to target atomically: a temporary

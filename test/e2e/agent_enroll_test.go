@@ -54,7 +54,7 @@ type enrolledHost struct {
 	*agentHost
 	run, fetch       *syncBuffer
 	runDone, fetchDn <-chan struct{}
-	fetchCmd         *exec.Cmd
+	runCmd, fetchCmd *exec.Cmd
 }
 
 // newEnrolledHostLayout makes a host root with the directories install
@@ -88,14 +88,35 @@ func newEnrolledHostLayout(t *testing.T, env *signerEnv) *agentHost {
 // keyroster-agent-fetch (--poll 1s) for h.
 func startEnrolled(t *testing.T, h *agentHost) *enrolledHost {
 	t.Helper()
-	prefix := opensshPrefix(t)
 	e := &enrolledHost{agentHost: h}
+	e.startRun(t)
+	e.startFetch(t)
+	return e
+}
+
+// startRun starts e's keyroster-agent run (--interval 1s).
+func (e *enrolledHost) startRun(t *testing.T) {
+	t.Helper()
+	h := e.agentHost
+	prefix := opensshPrefix(t)
 	runArgs := []string{"run", "--state-dir", h.state, "--root", h.root,
 		"--sshd", filepath.Join(prefix, "sbin", "sshd"), "--sshd-config", h.sshd.cfg,
 		"--ssh-keygen", filepath.Join(prefix, "bin", "ssh-keygen"), "--reload", "signal", "--interval", "1s"}
-	_, e.run, e.runDone = startDaemon(t, "keyroster-agent run", envWithout("SSH_AUTH_SOCK"), agentBin(t), runArgs...)
-	e.startFetch(t)
-	return e
+	e.runCmd, e.run, e.runDone = startDaemon(t, "keyroster-agent run", envWithout("SSH_AUTH_SOCK"), agentBin(t), runArgs...)
+}
+
+// restartRun stops e's keyroster-agent run, waits for it to exit and
+// starts it again, as a reboot, a restart or an upgrade does: its first
+// round applies, a no-op when nothing new is in the spool.
+func (e *enrolledHost) restartRun(t *testing.T) {
+	t.Helper()
+	_ = e.runCmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-e.runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("keyroster-agent run did not stop")
+	}
+	e.startRun(t)
 }
 
 // startFetch starts e's keyroster-agent-fetch (--poll 1s).

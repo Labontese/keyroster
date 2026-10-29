@@ -1201,7 +1201,11 @@ enrolled host can (D-03); that is the leak this order accepts.
    - the host reports that the apply which committed its directory
      emptied its principals: `last_apply` is `ok` with `host_status`
      `host_removed` or `host_disabled`, no swap is pending, and its
-     generation lists no `principals/` file;
+     generation lists no `principals/` file. `host_status` is that of
+     the generation the host has in force, not only of the apply that
+     rendered it, so a no-op apply (the first one after the agent
+     restarts) reports it again (PR #74 pre-merge review fix round 2;
+     run in CI: `TestStatusHostStatus`, `TestAgentReenrollEndToEnd`);
    - the directory it reports committing is one the server served and
      that removes the host: at or above the removal version, not above
      the current version, with the SHA-256 of the server's directory

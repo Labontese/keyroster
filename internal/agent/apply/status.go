@@ -166,8 +166,8 @@ func agentVersion() string {
 // stampFormat is the status's time format (trust's timestamp format).
 func stamp(t time.Time) string { return t.UTC().Format(trust.TimeFormat) }
 
-// buildStatus assembles the status. The generation and its files are the
-// committed generation's: current at rest, or the generation a pending
+// buildStatus assembles the status. The generation, its files and
+// last_apply's host status are the committed generation's: current at rest, or the generation a pending
 // swap started from (its marker's from), never the intermediate; bundle,
 // policy and directory come from accepted/, which changes only at a
 // commit. The KRL is the one in force, in the generation current names.
@@ -183,7 +183,10 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 	if err != nil {
 		return nil, err
 	}
-	var gen uint64
+	var (
+		gen        uint64
+		hostStatus string // the committed generation's (genRecord.HostStatus)
+	)
 	if m != nil {
 		s.Pending = &heartbeat.Pending{Step: m.Step, From: m.From, To: m.To, Intermediate: m.Intermediate}
 		gen = m.From
@@ -195,7 +198,7 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 		if err != nil {
 			return nil, fmt.Errorf("generation %d: %w", gen, err)
 		}
-		s.Generation = gen
+		s.Generation, hostStatus = gen, rec.HostStatus
 		names := make([]string, 0, len(rec.Files))
 		for n := range rec.Files {
 			names = append(names, n)
@@ -295,9 +298,13 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 		if len(u.Report.Errors) > 0 {
 			a.Error = heartbeat.Sanitize(u.Report.Errors[0], heartbeat.MaxText)
 		}
-		switch u.Report.HostStatus {
-		case "", "host_disabled", "host_removed", "host_keys_rotated", "host_keys_disagree":
-			a.HostStatus = u.Report.HostStatus
+		// The host status is the committed generation's, not this run's
+		// render's: a no-op apply (the first round after a restart) or a
+		// rollback names what is in force (PR #74 pre-merge review fix
+		// round 2), which the server's removal confirmation reads.
+		switch hostStatus {
+		case "", HostDisabled, HostRemoved, HostKeysRotated, HostKeysDisagree:
+			a.HostStatus = hostStatus
 		}
 		s.LastApply = a
 		s.Stuck = ""

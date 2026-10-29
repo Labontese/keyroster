@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/serverclient"
 )
 
@@ -72,6 +73,38 @@ func TestAgentReenrollEndToEnd(t *testing.T) {
 		}
 	}
 	t.Logf("keyroster host pending after the removal:\n%s", pending)
+
+	// 2b. A restarts (PR #74 pre-merge review fix round 2): its first
+	// round is a no-op apply, whose status must still name the committed
+	// generation's host_removed, so the confirmation stays.
+	time.Sleep(1100 * time.Millisecond) // A's last apply so far is in an earlier second than restarted
+	restarted := time.Now().UTC().Truncate(time.Second)
+	a.restartRun(t)
+	var noop serverclient.HostStatusRow
+	for deadline := time.Now().Add(forgetWait); ; time.Sleep(time.Second) {
+		found := false
+		for _, r := range hostsStatusJSON(t, kr).Hosts {
+			if r.ExpectedName == "web1" && r.Heartbeat != nil && r.Heartbeat.Status.LastApply != nil {
+				if at, err := time.Parse(time.RFC3339, r.Heartbeat.Status.LastApply.At); err == nil && !at.Before(restarted) {
+					noop, found = r, true
+				}
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A's apply after its restart never reached the server within %s\nA's run log:\n%s\nA's fetch log:\n%s", forgetWait, a.run.String(), a.fetch.String())
+		}
+	}
+	if la := noop.Heartbeat.Status.LastApply; la.Result != heartbeat.ResultOK || la.HostStatus != "host_removed" {
+		t.Fatalf("A's no-op apply after its restart: last_apply %+v, want ok with host_status host_removed", la)
+	}
+	pending = kr("host", "pending")
+	if m := servedAgentRE.FindStringSubmatch(pending); m == nil || m[1] != idA || !strings.HasPrefix(m[2], "removal confirmed at directory v") {
+		t.Fatalf("after A's restart its removal is no longer confirmed:\n%s\nserver log:\n%s", pending, env.Stderr.String())
+	}
+	t.Logf("keyroster host pending after A's restart:\n%s", pending)
 
 	// 3. Agent B: a new host layout, with new host keys and a new
 	// identity, enrolls under web1 and is approved.

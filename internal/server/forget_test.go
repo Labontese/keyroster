@@ -403,6 +403,59 @@ func TestRemovalConfirmation(t *testing.T) {
 		}
 		wantConfirmed(t, e, id, r, 0)
 	})
+	// PR #74 pre-merge review fix round 2: the first apply after an agent
+	// restart is a no-op, and its status now names the committed
+	// generation's host status. These guard the server's half: such a
+	// status keeps a confirmation, and confirms one the server has not
+	// recorded yet. The status a no-op apply sent before the agent fix
+	// (host_status "") still clears, so the agent fix is what keeps it.
+	t.Run("noop_apply_after_restart_kept", func(t *testing.T) {
+		e, id, r := confirmedAgent(t)
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 3, r)}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		e.pendingAnswer(t)
+		wantConfirmed(t, e, id, r, r)
+		s := e.hbRemovedAt(t, 4, r)
+		s.LastApply.HostStatus = ""
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		wantConfirmed(t, e, id, r, 0)
+	})
+	t.Run("restart_before_the_removal_heartbeat_confirms", func(t *testing.T) {
+		// Variant (a): the agent restarted before the server stored the
+		// heartbeat of the apply that emptied its principals; the next one
+		// it stores is the no-op apply's, which names host_removed.
+		e, id, r := removedAgent(t)
+		s := e.hbRemovedAt(t, 2, r)
+		s.LastApply.At = "2026-10-28T13:00:00Z"
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		wantConfirmed(t, e, id, r, r)
+	})
+	t.Run("keys_rotated_noop_apply_kept", func(t *testing.T) {
+		// Variant (b): the re-enroll flow's old agent, confirmed, applied
+		// the directory approving the new one (host_keys_rotated, no
+		// principals), then restarted: its no-op apply names
+		// host_keys_rotated again and it stays confirmed.
+		e, id, r := confirmedAgent(t)
+		v := e.installDir(t, rekeyedWeb1(t))
+		e.state(t, id)
+		for seq := uint64(3); seq <= 4; seq++ {
+			s := e.hbRemovedAt(t, seq, v)
+			s.LastApply.HostStatus = "host_keys_rotated"
+			if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+				t.Fatalf("heartbeat %d: %d %s", seq, rec.Code, rec.Body.String())
+			}
+		}
+		e.pendingAnswer(t)
+		wantConfirmed(t, e, id, r, r)
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
+			t.Fatalf("forget after the no-op apply: %d %s", rec.Code, rec.Body.String())
+		}
+	})
 	t.Run("confirmed_then_readded_kept", func(t *testing.T) {
 		e, id, r := confirmedAgent(t)
 		e.installDir(t, rekeyedWeb1(t))
