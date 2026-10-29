@@ -526,6 +526,114 @@ Review run wf_cd240bdc-2a4 on `4ff905e`. Owner decisions D-R1, D-R2 and D-R3 (Da
 - **Staged paths.** No commit stages `.planning/config.json`, `.planning/milestone.lock`, `.planning/state.json` or any `.review-diagnostics/`.
 - **Original metrics.** The `actuals` above are the original plan's and are left as they were.
 
+## Pre-merge review fix round 2
+
+Review run wf_9baec2a4-cb1 (Claude only) at `bf746b5` against base `4ff905e`. Owner decisions (Daniel, 2026-10-29): fix round 2 now, and D-R1's clearing rule as round 1 implemented it is approved. Each fix was written test-first and is one commit, SSH-signed by keyroster-bot, without attribution lines; each staged diff was grepped for tailnet and LAN addresses and the real host names (none). Evidence (RED output, mutants, gate log) is kept outside the repo.
+
+| Commit | Item | Tests |
+|---|---|---|
+| `0fe5b8e` fix(agent): report the committed generation's host status in every apply | Fix 1 (medium, regression from `6fbc083`) | `TestStatusHostStatus/*` (agent, Linux); `TestRemovalConfirmation/{noop_apply_after_restart_kept, restart_before_the_removal_heartbeat_confirms, keys_rotated_noop_apply_kept}` (server guards); the restart step 2b in `TestAgentReenrollEndToEnd` |
+| `8f57e4e` fix(server): read agents and heartbeats in one transaction for host status | Fix 2 (low, from `08da89a`) | serverdb `TestAgentsAndHeartbeatsOneRead` |
+| `b1eefc0` fix(server): clear a removal confirmation while a swap is pending | Fix 3 (hardening) | `TestRemovalConfirmation/{pending_swap_clears_then_commit_confirms_again, pending_swap_clears_keys_rotated_for_good}` |
+
+### D-R1 refinement, owner-approved
+
+A recorded confirmation is cleared only on a `principals/` file, `files_truncated`, or an `ok` apply with an empty `host_status`. With Fix 3, a pending swap now counts as a fourth case, because it "cannot tell". The confirmation is **not** cleared on `host_keys_rotated` or `host_keys_disagree` without a `principals/` file. This is the owner-approved refinement of D-R1 (2026-10-29). The plan's truth 3 and threat row T-03-288 stay as round 1 wrote them.
+
+### Fix 1: a no-op apply cleared the confirmation
+
+- **The bug.** `Report.HostStatus` was set only in `render()`'s `RenderFallback` branch, and `buildStatus` copied it into `last_apply.host_status`. A no-op apply returns from `forward()` before `render()`, but it still writes `StatusUpdate{Applied: true}`. A no-op is the first round after a restart, a reboot or an upgrade. It therefore reported `{ok, ""}` for a host whose committed generation was rendered `host_removed`. `principalsShown` reads ok with an empty status as an active entry rendered again, so it cleared the confirmation. `principalsEmptied` needs `host_removed`/`host_disabled`, so the confirmation was never made again, and forget answered `host_removal_not_applied`. The same held for variant (a), a restart before the server stored the `host_removed` heartbeat, which never confirmed. It also held for variant (b): the re-enroll flow's old agent, confirmed and reporting `host_keys_rotated`, lost its confirmation.
+- **Approach chosen: persist the status with the generation.** `Generation.HostStatus` and `genRecord.HostStatus` (`host_status`, `omitempty`) hold the status a generation was rendered with. `render()` sets it from `RenderFallback`, and a normal `Render` leaves it `""`. `installGeneration` writes it into the record. `buildStatus` reports the committed generation's status: current, or the marker's `from` during a swap, read from the record it already reads for the file list. The run's report is not used. The alternative, carrying the previous `last_apply.host_status` forward, was rejected for four reasons:
+  - it is lost when `heartbeat.json` is reset;
+  - after a rollback it names the failed render, not what is in force;
+  - "the committed generation is unchanged" does not line up across rollback and recovery, which change the generation number;
+  - it needs a separate "rendered" flag, so that a real render to `""` still overwrites.
+- **A real render always overwrites.**
+  - When a render's files equal the generation in force (the `sameBytes` commit in `forward()`, for example a removed entry listed again under other keys: `host_keys_rotated` with last-good's principals, which are none), `setHostStatus` rewrites that generation's record before the commit. `spool.WriteFileAt` writes the whole record or leaves the old one, never a torn one.
+  - The status difference does **not** force a new generation, because that would run `Transition` and publish a pending status, which Fix 3 clears on.
+  - A re-added entry's render writes `""` (tested).
+- **Rollback and recovery carry last-good's status.**
+  - `RollbackTarget` copies `lg.HostStatus`.
+  - `backToLastGood` and `recoverToLastGood` load it from last-good's record next to `Host`.
+  - `rollbackTarget`'s in-place branch (current already holds the rollback content) rewrites current's record to last-good's status.
+  - `Intermediate` is unchanged: its status is never reported (`buildStatus` uses `m.From`), and the mutant that would carry it survived, so the change was removed (no unexercised paths).
+- **RED on `bf746b5`** (`TestStatusHostStatus`, Linux, WSL):
+  - `host_removed_kept_by_a_noop_apply`: `after a no-op apply: host_status "", want "host_removed" (the committed generation's)`;
+  - the same for `host_disabled` and `host_keys_rotated`;
+  - `same_files_rendered_under_another_status`: `after a no-op apply: host_status "", want "host_keys_rotated"`;
+  - `rollback_reports_last_good_status`: `last_apply … Result:rolled_back … HostStatus:}; want rolled_back with "host_removed"`.
+
+  `rollback_in_place_reports_last_good_status` and `recover_to_last_good_reports_last_good_status` were added after the fix, to pin those two branches. Their mutants are below.
+- **Mutants (WSL, a copy of the tree per mutant): 9 run. 7 were killed by a test; m1 was a build failure, whose behaviour the RED above shows; m9 survived, and its change was removed.**
+
+  | # | Mutant | Killed by |
+  |---|---|---|
+  | m2 | `render()` does not keep the fallback status in the generation | every `*_kept_by_a_noop_apply`, `same_files…`, `rollback_reports…` |
+  | m3 | the `sameBytes` commit keeps the old record status | `same_files_rendered_under_another_status` (`"host_removed", want "host_keys_rotated"`) |
+  | m4 | `RollbackTarget` drops last-good's status | `rollback_reports_last_good_status` |
+  | m5 | `backToLastGood` does not load last-good's status | `rollback_reports_last_good_status` |
+  | m6 | the in-place rollback keeps the failed render's status | `rollback_in_place_reports_last_good_status` (`HostStatus:host_keys_rotated`) |
+  | m7 | `installGeneration` does not persist the status | every `*_kept_by_a_noop_apply`, `rollback_reports…` |
+  | m8 | `recoverToLastGood` does not load last-good's status | `recover_to_last_good_reports_last_good_status` |
+  | m1 | `buildStatus` reports the run's status (the pre-fix code) | a build failure (an unused variable); the RED above is that behaviour |
+  | m9 | `Intermediate` does not carry the target's status | **survived**; the change was removed |
+- **Server.** `principalsShown` and `principalsEmptied` keep their semantics. The three new server tests are **regression guards, not RED**, because the server code did not change:
+  - a confirmed host followed by a no-op heartbeat that names `host_removed` stays confirmed, while the pre-fix shape (`host_status ""`) still clears, so the agent fix is what keeps it;
+  - variant (a) confirms on the no-op heartbeat;
+  - variant (b) stays confirmed through `host_keys_rotated` no-ops, and forget succeeds.
+- **e2e.** `TestAgentReenrollEndToEnd` step 2b restarts agent A's `keyroster-agent run` once its removal is confirmed (new `enrolledHost.startRun`/`restartRun`; the run's cmd is kept). It waits until host status shows a `last_apply.at` from after the restart, then requires `ok` with `host_status host_removed`. `host pending` must still show `removal confirmed at directory v<N>`. Step 5's forget without `--host-gone` then covers the rest. It runs only in CI (see What ran).
+- **Downgrade note.** `readRecord` decodes strictly (`DisallowUnknownFields`). An older agent binary that reads a record with `host_status` treats the link as foreign, and is then `pending_state_unknown` until `--recover-to-last-good`. `Host` set the same precedent in PR #67. Nothing is released. Records written before this fix carry no `host_status`, though. On a host whose removal an older build committed, the first no-op apply after the upgrade still reports `""`, which clears the confirmation for good. Such a host needs `--host-gone`, or a new render (any directory version that renders it again). This matters only for a development build already running, for example on the homelab before 03-16.
+- **Not changed.** The `sameBytes` path keeps the record's `Host` as before, and only the status is rewritten. `pollSpool`'s `sameBytes(g, target)` keeps the target, and so its status, for a superseding capture with the same files. The commit then stores the older verified state, and the next apply renders the newer one and rewrites the status through `forward()`.
+
+### Fix 2: not_yet_polled with a heartbeat
+
+- **Coverage.** `approved_at_us` is only ever set where it is NULL (`MarkAgentApproved`) and never reset while a heartbeat row survives, so the race was the only way to get a `not_yet_polled` row with a heartbeat. The `!hasHB` rule is not needed in addition.
+- **Change.** `serverdb.AgentsAndHeartbeats` reads `listAgents` and `heartbeats` (now queryer helpers, with `Heartbeats` a wrapper) in one transaction, and `handleHostsStatus` uses it. With `SetMaxOpenConns(1)` and `_txlock=immediate`, a request that marks the agent approved and stores its heartbeat waits until the read ends. It is therefore seen whole or not at all. A heartbeat is also never paired with another agent's row under a reused ID.
+- **Why one transaction rather than the `!hasHB` rule.** serverdb supports it cleanly, and `PendingState` with its `afterPendingInvite` hook is the precedent for both the code and the test. The transaction holds the only connection, so nothing inside it may use `d.db`; the method is self-contained in serverdb. `host pending` keeps its two reads, because its writes are guarded by the stored seq and the spec names host status only.
+- **RED (mutant reproducing the pre-fix two auto-commit reads, with the hook between them):** `read during the request: approved_at_us 0, heartbeat stored true; want approved and a heartbeat both false`, which is exactly the row the CLI refused. After the fix the request waits for the connection (`WaitCount` rises), the read sees the agent before it, and a second read sees both.
+
+### Fix 3: a pending swap counts as "cannot tell"
+
+- **Change.** `principalsShown` returns true when `st.Pending != nil`, as for `files_truncated`. It therefore never confirms, and it clears a recorded confirmation. `principalsEmptied`'s own `Pending == nil` check is now implied, and was dropped. The clear's log line reads `… its host reports principals again, or a swap whose outcome it cannot tell yet`. host-setup.md (Removing a host, step 2, and the re-enroll paragraph) states it.
+- **RED on `8f57e4e`:** `pending_swap_clears_then_commit_confirms_again` and `pending_swap_clears_keys_rotated_for_good` both failed with `confirmed v2 <sha>; want 2, v0`.
+- **The normal flow.** Every `Transition` publishes a pending status (`publishPending`), but the server only sees it if the fetcher posts during the window. For a removed or disabled host, the commit's status names `host_removed` again (Fix 1), and the next heartbeat confirms again (tested). `TestAgentEnrollEndToEnd`'s forget already retries on `host_removal_not_applied`. In `TestAgentReenrollEndToEnd`, A's apply of B's directory is a `sameBytes` commit without a `Transition`, so it publishes no pending status.
+
+### Carried to 03-08c (not fixed here)
+
+- **The CLI GET/POST race.** Between the CLI's GET and its POST, a pending agent A can be forgotten and the same identity re-enrolled, pending, with identical facts. The forget then deletes the new pending row, which costs one re-enrollment. To close it, carry `enrolled_at` or a row nonce in `ForgetHostRequest`, which 03-08c's relay may want anyway.
+- **StoreHeartbeat's by-ID writes.** The `clock_offset_s`, `seq_regressed_at_us` and heartbeats upsert writes are safe only because they share the transaction with `agentExists(k)`. Keying them on `AgentKey` would make that safety local.
+
+### Owner attention (fix round 2)
+
+1. **Fix 3 and variant (b).** A confirmed old agent of the re-enroll flow reports `host_keys_rotated`. If it goes through a swap, for example any KRL update between the new agent's approval and the forget, and the server happens to receive the pending status, its confirmation is cleared. `host_keys_rotated` never confirms again (the approved rule), so its forget then needs `--host-gone`. This fails safe and follows the spec as written. It is now stated in the runbook and pinned by `pending_swap_clears_keys_rotated_for_good`. A narrower alternative, if this is unwanted: refuse forget while the stored heartbeat shows a swap pending, instead of clearing the confirmation.
+
+### What ran (fix round 2)
+
+- **WSL (Ubuntu, Go 1.27.3), on a copy of `b1eefc0`'s tree:** the full gate, exit 0 (`GATE PASSED`).
+  - gofmt by absolute path with the positive control (the misformatted control file was listed), then `gofmt -l .` empty;
+  - `CGO_ENABLED=1 go test -race -count=1 ./...`: every package ok;
+  - `go vet ./...`, with `-tags e2e` and with `-tags "e2e systemdsmoke"`;
+  - golangci-lint: 0 issues for linux, windows and darwin;
+  - capslock-check (92/37/23, equal to the baseline), dep-firewall, testonly-firewall (6 combinations), check-pinned-actions (47).
+
+  The gate's first run failed once in `internal/signer` `TestSignerConcurrency/sixteen_clients` (`clock_regression` under `-race`). Nothing under internal/signer changed. It passed on a five-run rerun and on the second full run, and is recorded in deferred-items.md next to Phase 2's flake of the same class.
+- **WSL:** the RED runs and the Fix 1 mutants (`TestStatusHostStatus` is Linux-tagged), each on a fresh copy of the tree.
+- **Windows (Go 1.27.3):** the server, serverdb and CLI package tests after each change, the Fix 2 and Fix 3 RED runs, and `GOOS=linux go vet -tags e2e` of the e2e package.
+- **CI on `b1eefc0`:** every required check of PR #74 green (`gh pr checks 74 --required`), among them CI 40957298555 (build-test, lint, fuzz, cli-windows, cli-macos, capslock, govulncheck, dependency-firewall) and E2E 40957298730, both lanes. In E2E, `TestAgentReenrollEndToEnd` passed on 10.5p1 (25.07 s) and 9.5p1 (22.27 s), and step 2b logged `keyroster host pending after A's restart:` with `removal confirmed at directory v5` on both. The other runs were E2E distro 40957298608, E2E TPM 40957298749, E2E PKCS#11 40957298625, Systemd 40957298697, PIV 40957298643, CodeQL 40957298719, PR title 40957298678 and pinned actions 40957298582.
+- This file's docs commit reruns them; the handback names the final head.
+
+**Not run, and UNVERIFIED:**
+- the e2e tests locally (WSL cannot resolve `keyroster.localhost`);
+- step 2b's restart check against the pre-fix agent: it was not run in CI on a pre-fix tree, so its RED is inferred from the unit RED, not observed;
+- every homelab step, until 03-16.
+
+### Self-check (fix round 2): PASSED
+
+- **Commits.** `0fe5b8e`, `8f57e4e` and `b1eefc0` are ancestors of HEAD. Each carries an SSH signature by keyroster-bot and has no attribution lines. `git rev-list --count bf746b5..b1eefc0` is 3, and this file's commit makes 4.
+- **Staged paths.** No commit stages `.planning/config.json`, `.planning/milestone.lock`, `.planning/state.json` or any `.review-diagnostics/`. The staged diffs hold no tailnet or LAN address and no real host name.
+- **Carried items.** The two items under "Carried to 03-08c" are listed and not fixed.
+- **Original metrics.** The `actuals` above are the original plan's and are left as they were.
+
 ## Self-Check: PASSED
 
 - **Files.** `internal/serverdb/migrations/0007_forget.sql`, `internal/server/forget_test.go` and `test/e2e/agent_forget_test.go` exist.
