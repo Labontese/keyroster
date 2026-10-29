@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 11/19 plans executed in 18 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 11/21 plans executed in 20 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -195,28 +195,34 @@ Plans:
 - [x] 03-08-PLAN.md — Heartbeats, `host status`, staleness and silence alerts, periodic drift, identity rotation, hardened systemd and OpenRC units
 
 **Wave 11** *(blocked on Wave 10 completion)*
-- [ ] 03-09-PLAN.md — T-03-100 checkpoint (the owner decides who receives the signed directory for host trust), then host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`
+- [ ] 03-08b-PLAN.md — Forget, the server half (owner decision Q1, 2026-10-29: split, server first; forget stays single-admin): agent-row writes keyed by identity, the removal confirmation recorded once (serverdb 0007) and kept when the name is re-used, forget by agent identity with `forget_name_ambiguous`, a delete that re-checks the facts in one transaction, the re-enroll e2e (PR #72 fix-round carry-overs)
 
 **Wave 12** *(blocked on Wave 11 completion)*
-- [ ] 03-10-PLAN.md — Probe certificates and the full self-test (D-06)
+- [ ] 03-08c-PLAN.md — Forget through the signer (owner decision 03-08 D-1, 2026-10-28): `keyroster host forget` and `--host-gone` carry admin signatures the signer checks (one for a never-approved agent, the policy's admin quorum otherwise, owner decision Q3), a `host_forget` audit entry (leaf kind 16) in the signer's transaction, audit verify and export, vectors and fuzzing; the server deletes only after the signer accepted, fail-closed
 
 **Wave 13** *(blocked on Wave 12 completion)*
-- [ ] 03-11-PLAN.md — Machine identities by PoP (AUTH-06), `revoke machine`
+- [ ] 03-09-PLAN.md — T-03-100 checkpoint (the owner decides who receives the signed directory for host trust), then host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`
 
 **Wave 14** *(blocked on Wave 13 completion)*
-- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
+- [ ] 03-10-PLAN.md — Probe certificates and the full self-test (D-06)
 
 **Wave 15** *(blocked on Wave 14 completion)*
-- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
+- [ ] 03-11-PLAN.md — Machine identities by PoP (AUTH-06), `revoke machine`
 
 **Wave 16** *(blocked on Wave 15 completion)*
-- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
+- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
 
 **Wave 17** *(blocked on Wave 16 completion)*
-- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
 
 **Wave 18** *(blocked on Wave 17 completion)*
-- [ ] 03-16-PLAN.md — Homelab dogfood: enroll the owner's hosts, take over the 02-14 hosts, drills (revocation, no TOFU, corrupt file, break-glass, machine, rotation if chosen)
+- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
+
+**Wave 19** *(blocked on Wave 18 completion)*
+- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+
+**Wave 20** *(blocked on Wave 19 completion)*
+- [ ] 03-16-PLAN.md — Homelab dogfood: enroll the owner's hosts, take over the 02-14 hosts, drills (revocation, no TOFU, corrupt file, break-glass, machine, rotation if chosen, forget and re-enrollment)
 
 **Phase close (after verification):** the README quickstart (install server, signer and agent, first certificate) on branch `p03/close`, per the documentation convention.
 
@@ -286,7 +292,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 11/19 | In Progress | - |
+| 3. Linux Agent and Revocation | 11/21 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |
