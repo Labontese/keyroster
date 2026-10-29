@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 11/21 plans executed in 20 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 12/21 plans executed in 20 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -195,7 +195,7 @@ Plans:
 - [x] 03-08-PLAN.md — Heartbeats, `host status`, staleness and silence alerts, periodic drift, identity rotation, hardened systemd and OpenRC units
 
 **Wave 11** *(blocked on Wave 10 completion)*
-- [ ] 03-08b-PLAN.md — Forget, the server half (owner decision Q1, 2026-10-29: split, server first; forget stays single-admin): agent-row writes keyed by identity, the removal confirmation recorded once (serverdb 0007) and kept when the name is re-used, forget by agent identity with `forget_name_ambiguous`, a delete that re-checks the facts in one transaction, the re-enroll e2e (PR #72 fix-round carry-overs)
+- [x] 03-08b-PLAN.md — Forget, the server half (owner decision Q1, 2026-10-29: split, server first; forget stays single-admin): agent-row writes keyed by identity, the removal confirmation recorded once (serverdb 0007) and kept when the name is re-used, forget by agent identity with `forget_name_ambiguous`, a delete that re-checks the facts in one transaction, the re-enroll e2e (PR #72 fix-round carry-overs)
 
 **Wave 12** *(blocked on Wave 11 completion)*
 - [ ] 03-08c-PLAN.md — Forget through the signer (owner decision 03-08 D-1, 2026-10-28): `keyroster host forget` and `--host-gone` carry admin signatures the signer checks (one for a never-approved agent, the policy's admin quorum otherwise, owner decision Q3), a `host_forget` audit entry (leaf kind 16) in the signer's transaction, audit verify and export, vectors and fuzzing; the server deletes only after the signer accepted, fail-closed
@@ -292,7 +292,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 11/21 | In Progress | - |
+| 3. Linux Agent and Revocation | 12/21 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |

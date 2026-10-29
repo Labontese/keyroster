@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08-PLAN.md (PR #72 open, awaiting the merge gate)"
-last_updated: "2026-10-28T23:33:33.322Z"
+stopped_at: Completed 03-08b-PLAN.md (PR open, awaiting the merge gate)
+last_updated: "2026-10-29T10:45:58.985Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 188149839ddd153720e20ef3a7cac71139c2d443
+state_head: 046646f5006159af95394a69fb5b562b1ad6814b
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 56
-  completed_plans: 46
+  completed_plans: 47
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 12 of 21
+Plan: 13 of 21
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -101,6 +101,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P06c | 29min | 3 tasks | 8 files |
 | Phase 03 P07 | 110min | 3 tasks | 67 files |
 | Phase 03 P08 | 330min | 3 tasks | 47 files |
+| Phase 03 P08b | 58min | 3 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -275,6 +276,8 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-07: T-03-277 mitigated by the restore cross-check of the kept server KRL copy against keyroster-agent krl-version on the enrolled hosts
 - [Phase 03]: 03-08 D-1: host forget waits for the heartbeat that shows the removal applied (host_removal_not_applied, --host-gone printed and logged); quorum and the forget audit leaf are 03-08b's
 - [Phase 03]: 03-08 D-2: silent is judged from last_seen_us; the server stores a status only on a higher seq; the fetcher treats stale_heartbeat as quiet
+- [Phase 03]: 03-08b: host forget also reads keyroster host status, because host pending never lists an agent the directory approves now; such an agent only makes a name ambiguous (forget_name_ambiguous) and is refused as a target
+- [Phase 03]: 03-08b: the removal confirmation's SHA-256 is trust.SHA256Hex of the directory document without signatures, stored raw (32 bytes)
 
 ### Pending Todos
 
@@ -313,6 +316,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T23:33:32.905Z
-Stopped at: Completed 03-08-PLAN.md (PR #72 open, awaiting the merge gate)
+Last session: 2026-10-29T10:45:58.563Z
+Stopped at: Completed 03-08b-PLAN.md (PR open, awaiting the merge gate)
 Resume file: None
