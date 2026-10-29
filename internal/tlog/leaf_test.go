@@ -713,7 +713,7 @@ func TestRecoveryBody(t *testing.T) {
 				t.Fatalf("DecodeLeaf accepted kind %d", k)
 			}
 		}
-		for _, k := range []Kind{0, 16, 255} {
+		for _, k := range []Kind{0, 17, 255} {
 			if _, err := MarshalLeaf(Leaf{Kind: k, Body: refusal}); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("MarshalLeaf accepted kind %d", k)
 			}

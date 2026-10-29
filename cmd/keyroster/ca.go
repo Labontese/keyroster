@@ -104,7 +104,7 @@ func runCAIssue(ctx context.Context, args []string, _, stderr io.Writer) error {
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		return fmt.Errorf("request id: %w", err)
 	}
-	evidence, err := adminEvidence(req, adminKeys)
+	evidence, err := adminEvidence(req.SigningBytes(), wire.AdminSSHSIGNamespace, adminKeys)
 	if err != nil {
 		return err
 	}
@@ -173,11 +173,12 @@ func warnCustody(ctx context.Context, socket string, stderr io.Writer) error {
 	return nil
 }
 
-// adminEvidence signs req.SigningBytes() with each named admin key from
-// the ssh-agent at SSH_AUTH_SOCK, as admin-sshsig/v1 evidence under the
-// namespace keyroster/issue-request/v1 (D-13). The signer checks the
-// signatures against the admins in its root-signed policy.
-func adminEvidence(req *wire.IssueRequest, fingerprints []string) ([]wire.Evidence, error) {
+// adminEvidence signs msg, a request's signing bytes, with each named admin
+// key from the ssh-agent at SSH_AUTH_SOCK, as admin-sshsig/v1 evidence
+// under namespace: keyroster/issue-request/v1 for ca issue (D-13),
+// keyroster/host-forget-request/v1 for host forget (03-08c). The signer
+// checks the signatures against the admins in its root-signed policy.
+func adminEvidence(msg []byte, namespace string, fingerprints []string) ([]wire.Evidence, error) {
 	if len(fingerprints) > wire.MaxEvidence {
 		return nil, fmt.Errorf("at most %d --admin-key values", wire.MaxEvidence)
 	}
@@ -190,7 +191,6 @@ func adminEvidence(req *wire.IssueRequest, fingerprints []string) ([]wire.Eviden
 	if err != nil {
 		return nil, fmt.Errorf("list ssh-agent keys: %w", err)
 	}
-	msg := req.SigningBytes()
 	out := make([]wire.Evidence, 0, len(fingerprints))
 	for _, fp := range fingerprints {
 		if !strings.HasPrefix(fp, "SHA256:") {
@@ -206,7 +206,7 @@ func adminEvidence(req *wire.IssueRequest, fingerprints []string) ([]wire.Eviden
 		if s == nil {
 			return nil, fmt.Errorf("ssh-agent does not hold the admin key %s", fp)
 		}
-		sig, err := sshsig.Sign(rand.Reader, s, wire.AdminSSHSIGNamespace, msg)
+		sig, err := sshsig.Sign(rand.Reader, s, namespace, msg)
 		if err != nil {
 			return nil, fmt.Errorf("sign the request with %s: %w", fp, err)
 		}

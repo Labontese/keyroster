@@ -119,6 +119,22 @@ func Revoke(ctx context.Context, socket string, req *wire.RevokeRequest) (*wire.
 	return wire.ParseRevokeResponse(respBody)
 }
 
+// ForgetAgent sends an admin-signed forget request, with the server's own
+// statement of its row (ServerApprovedOnce), to the signer and returns the
+// index of the host_forget entry that records it (03-08c). A refusal comes
+// back as a *wire.ErrorResponse error.
+func ForgetAgent(ctx context.Context, socket string, req *wire.ForgetRequest) (*wire.ForgetResponse, error) {
+	body, err := req.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := roundTrip(ctx, socket, wire.TypeForgetAgentRequest, body, wire.TypeForgetAgentResponse)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseForgetResponse(respBody)
+}
+
 // GetKRL asks the signer for the published KRL with its manifest and the
 // ops key's signature (all empty when none is published). A refusal comes
 // back as a *wire.ErrorResponse error.

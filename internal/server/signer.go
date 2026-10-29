@@ -22,7 +22,7 @@ import (
 // method here, to socketSigner and to fakeSigner, in the commit that adds
 // its first caller (GetDirectory in 02-07, InstallDirectory in 02-09,
 // Login in 02-12, Revoke and GetKRL in 03-01, GetBundle and
-// GetDirectoryVersion in 03-07). Nobody adds a second
+// GetDirectoryVersion in 03-07, ForgetAgent in 03-08c). Nobody adds a second
 // interface, and no method is added before something calls it.
 type signerAPI interface {
 	Status(ctx context.Context) (*wire.StatusResponse, error)
@@ -45,6 +45,11 @@ type signerAPI interface {
 	// absent version is refused not_found.
 	GetBundle(ctx context.Context, v uint64) (*wire.GetBundleResponse, error)
 	GetDirectoryVersion(ctx context.Context, v uint64) (*wire.GetDirectoryVersionResponse, error)
+	// ForgetAgent relays an admin-signed forget request with the server's
+	// own statement of its row (ServerApprovedOnce, 03-08c); the signer
+	// alone decides and logs it. A refusal comes back as a
+	// *wire.ErrorResponse.
+	ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (*wire.ForgetResponse, error)
 }
 
 // socketSigner reaches keyroster-signer over its Unix socket.
@@ -80,6 +85,10 @@ func (s socketSigner) GetBundle(ctx context.Context, v uint64) (*wire.GetBundleR
 
 func (s socketSigner) GetDirectoryVersion(ctx context.Context, v uint64) (*wire.GetDirectoryVersionResponse, error) {
 	return signerclient.GetDirectoryVersion(ctx, s.socket, v)
+}
+
+func (s socketSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (*wire.ForgetResponse, error) {
+	return signerclient.ForgetAgent(ctx, s.socket, req)
 }
 
 const (

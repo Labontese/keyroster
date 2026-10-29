@@ -214,6 +214,20 @@ func (s *Signer) revokeOrRefuse(ctx context.Context, peer Peer, req *wire.Revoke
 	return nil, s.refuseErr(ctx, s.limiter, peer, digest, err)
 }
 
+// forgetOrRefuse runs ForgetAgent and records a refusal through refuseErr,
+// with the digest of the exact forget request that was refused (03-08c).
+func (s *Signer) forgetOrRefuse(ctx context.Context, peer Peer, req *wire.ForgetRequest) (*wire.ForgetResponse, *wire.ErrorResponse) {
+	resp, err := s.ForgetAgent(ctx, peer, req)
+	if err == nil {
+		return resp, nil
+	}
+	var digest [32]byte
+	if req != nil {
+		digest = req.Digest()
+	}
+	return nil, s.refuseErr(ctx, s.limiter, peer, digest, err)
+}
+
 // refuseErr records err (a *refusal, or any other error as internal_error)
 // through refuseLogging on bucket. For the signer's own failures (internal and unavailable
 // refusals: database, backend, encoding) the cause's Go type and text go
@@ -262,7 +276,9 @@ func classify(detail string) uint8 {
 	case "extension_not_allowed", "duplicate_extension":
 		return tlog.ReasonExtensionNotAllowed
 	case "state_unavailable", "serial_unavailable", "trust_changed", "directory_changed",
-		"krl_no_installation_id", "krl_too_large", "ops_key_unavailable", "revocations_not_logged":
+		"krl_no_installation_id", "krl_too_large", "ops_key_unavailable", "revocations_not_logged",
+		// Forget (03-08c): a stored directory that does not parse.
+		"forget_directory_unreadable":
 		return tlog.ReasonUnavailable
 	case "too_many_connections":
 		return tlog.ReasonOverloaded
@@ -278,7 +294,11 @@ func classify(detail string) uint8 {
 		// Revocation installation binding (03-03, the T-03-20 rule).
 		"revoke_installation_missing", "revoke_installation_mismatch",
 		// Directory installation binding (03-04, D-04, the same rule).
-		"directory_installation_missing", "directory_installation_mismatch", "directory_installation_unknown":
+		"directory_installation_missing", "directory_installation_mismatch", "directory_installation_unknown",
+		// Forget (03-08c): the installation binding, the server's statement
+		// and the directory facts.
+		"forget_no_installation_id", "forget_installation_mismatch", "forget_facts_mismatch",
+		"forget_host_in_directory", "forget_confirmation_invalid":
 		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal

@@ -607,7 +607,7 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 		d, _ := openTemp(t)
 		enrollTestAgent(t, d, 0x01, "web0", "key-0", nowUS)
 		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
-		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{}); err != nil {
+		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts()); err != nil {
 			t.Fatalf("delete A: %v", err)
 		}
 		b := enrollTestAgentToken(t, d, 0x0a, 0x1a, "web1", "key-a", nowUS)
@@ -733,7 +733,7 @@ func TestAgentWritesKeyedByIdentity(t *testing.T) {
 	nowUS := tNow.UnixMicro()
 	enrollTestAgent(t, d, 0x01, "web0", "key-0", nowUS)
 	a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
-	if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{}); err != nil {
+	if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts()); err != nil {
 		t.Fatalf("delete A: %v", err)
 	}
 	b := enrollTestAgent(t, d, 0x0b, "web1", "key-b", nowUS)
@@ -793,7 +793,7 @@ func TestAgentWritesKeyedByIdentity(t *testing.T) {
 		// would change its row if they matched by ID alone.
 		d, _ := openTemp(t)
 		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
-		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{}); err != nil {
+		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts()); err != nil {
 			t.Fatal(err)
 		}
 		b := enrollTestAgent(t, d, 0x0b, "web1", "key-b", nowUS)
@@ -852,7 +852,7 @@ func TestDeleteAgentIf(t *testing.T) {
 		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true}); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("approved_once true for a never-approved row: %v", err)
 		}
-		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{}); err != nil {
+		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts()); err != nil {
 			t.Fatalf("the row's own facts: %v", err)
 		}
 	})
@@ -892,7 +892,11 @@ func TestDeleteAgentIf(t *testing.T) {
 				t.Fatalf("facts %+v the row does not hold: %v", f, err)
 			}
 		}
-		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: sum}); err != nil {
+		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: sum,
+			EnrolledAtUS: nowUS + int64(time.Second/time.Microsecond)}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("the row's facts with another enrollment time (03-08c): %v", err)
+		}
+		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: sum, EnrolledAtUS: nowUS}); err != nil {
 			t.Fatalf("the row's own facts: %v", err)
 		}
 		if _, err := d.AgentBySPKI(ctx, a.IdentitySPKISHA256); !errors.Is(err, ErrNotFound) {

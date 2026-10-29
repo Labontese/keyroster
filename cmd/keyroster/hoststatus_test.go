@@ -221,15 +221,6 @@ func TestHostForgetHostGone(t *testing.T) {
 			t.Fatal("the refused forget was sent")
 		}
 	})
-	t.Run("server_refusal_explained", func(t *testing.T) {
-		e := forgetEnv(t, nil, web1)
-		var called bool
-		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"host_removal_not_applied"}`, http.StatusConflict)
-		code, _, stderr := run(t, "host", "forget", "web1", "--host-gone")
-		if code == 0 || !strings.Contains(stderr, "host_removal_not_applied") || !strings.Contains(stderr, "--host-gone") {
-			t.Fatalf("exit %d: %s", code, stderr)
-		}
-	})
 	t.Run("host_gone_dropped_when_confirmed", func(t *testing.T) {
 		confirmed := servedRow("web1", "00", key, true)
 		e := forgetEnv(t, nil, confirmed)
@@ -239,8 +230,7 @@ func TestHostForgetHostGone(t *testing.T) {
 		if code != 0 || !strings.Contains(stderr, "--host-gone dropped") || strings.Contains(out, "Forgotten with --host-gone") {
 			t.Fatalf("exit %d:\n%s%s", code, out, stderr)
 		}
-		var req serverclient.ForgetHostRequest
-		if json.Unmarshal(e.lastPost, &req) != nil || req.HostGone || req.RemovalConfirmed == nil {
+		if req := e.postedForget(t); req == nil || req.HostGone || req.ConfirmedVersion == 0 {
 			t.Fatalf("the request %s", e.lastPost)
 		}
 	})
@@ -253,8 +243,7 @@ func TestHostForgetHostGone(t *testing.T) {
 			!strings.Contains(out, "override: --host-gone") {
 			t.Fatalf("exit %d:\n%s%s", code, out, stderr)
 		}
-		var req serverclient.ForgetHostRequest
-		if json.Unmarshal(e.lastPost, &req) != nil || !req.HostGone || req.IdentitySPKISHA256 != strings.Repeat("00", 32) || req.RemovalConfirmed != nil || req.RemovalVersion != 3 {
+		if req := e.postedForget(t); !identityIs(req, "00") || !req.HostGone || req.ConfirmedVersion != 0 || req.RemovalVersion != 3 {
 			t.Fatalf("the request %s", e.lastPost)
 		}
 	})

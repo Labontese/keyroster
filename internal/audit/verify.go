@@ -309,6 +309,11 @@ type directoryInForce struct {
 	sigs    []byte // the admins' signatures it was installed with
 	dir     *directory.Directory
 	version uint64
+	// shas maps the version of every directory a directory_install entry
+	// installed to the SHA-256 of its document, without signatures
+	// (DirectoryInstallBody.Directory): the basis a heartbeat reports and a
+	// forget's confirmation names (03-08c).
+	shas map[uint64][32]byte
 	// authErr is why the directory is not authorized under the policy in
 	// force (nil: it is). It is the one cached result for the current
 	// (directory, policy) pair: authorizeDirectory runs only when one side
@@ -369,6 +374,10 @@ func (ds *directoryInForce) install(body *tlog.DirectoryInstallBody, a *anchor) 
 		return fmt.Errorf("directory v%d is %w", d.Version, err)
 	}
 	ds.raw, ds.sigs, ds.dir, ds.version, ds.authErr = body.Directory, body.Sigs, d, d.Version, nil
+	if ds.shas == nil {
+		ds.shas = map[uint64][32]byte{}
+	}
+	ds.shas[d.Version] = sha256.Sum256(body.Directory)
 	return nil
 }
 
@@ -869,6 +878,14 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			for _, c := range carried {
 				rep.collect(opts, want, leaf.Kind, c)
 			}
+		case tlog.KindHostForget:
+			body, err := tlog.DecodeHostForgetBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			if err := verifyForget(want, body, leaf.TimeMicros, &trustState, &dirState, revs); err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
 		case tlog.KindRefusalSummary:
 			body, err := tlog.DecodeRefusalSummaryBody(leaf.Body)
 			if err != nil {
@@ -1105,7 +1122,45 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 			return fmt.Errorf("its decoded %s field is not the one of its %s leaf", k, leaf.Kind)
 		}
 	}
+	if err := checkForgetFields(s, leaf); err != nil {
+		return err
+	}
 	return checkImportVersions(s, leaf)
+}
+
+// checkForgetFields checks the "approved_once" and "host_gone" fields of a
+// host_forget line (03-08c), which say whether the forget needed the admin
+// quorum and whether it overrode the host's confirmation: on such a line
+// each must occur exactly once, followed by the leaf's own value, as
+// Export writes them; on a line of any other kind neither may occur. A
+// host_forget leaf whose request does not decode is left to verifyForget,
+// which refuses it.
+func checkForgetFields(s string, leaf tlog.Leaf) error {
+	const keyApproved, keyGone = `"approved_once":`, `"host_gone":`
+	if leaf.Kind != tlog.KindHostForget {
+		if strings.Contains(s, keyApproved) || strings.Contains(s, keyGone) {
+			return fmt.Errorf("its decoded approved_once or host_gone field is not one of a host_forget leaf (%s)", leaf.Kind)
+		}
+		return nil
+	}
+	body, err := tlog.DecodeHostForgetBody(leaf.Body)
+	if err != nil {
+		return nil // verifyForget refuses the leaf
+	}
+	req, err := wire.ParseForgetSigningBytes(body.Request)
+	if err != nil {
+		return nil // verifyForget refuses the leaf
+	}
+	for _, f := range []struct {
+		key string
+		val bool
+	}{{keyApproved, req.ApprovedOnce}, {keyGone, req.HostGone}} {
+		v := f.key + strconv.FormatBool(f.val)
+		if strings.Count(s, f.key) != 1 || !strings.Contains(s, v+",") && !strings.Contains(s, v+"}") {
+			return fmt.Errorf("its decoded %s field is not the one of its host_forget leaf", strings.Trim(f.key, `":`))
+		}
+	}
+	return nil
 }
 
 // checkImportVersions checks the "import_krl_versions" field, which the

@@ -23,6 +23,7 @@ import (
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // resignBundle serves e's genesis bundle changed by edit, re-signed by
@@ -578,6 +579,29 @@ func activeRow(name, spkiHex string) serverclient.HostStatusRow {
 		Silent: true, NeverApplied: true}
 }
 
+// postedForget is the wire.ForgetRequest of the last forget e received
+// (03-08c), nil when the body does not parse.
+func (e *dirEnv) postedForget(t *testing.T) *wire.ForgetRequest {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var body serverclient.ForgetHostBody
+	if json.Unmarshal(e.lastPost, &body) != nil {
+		return nil
+	}
+	req, err := wire.ParseForgetRequest(body.Request)
+	if err != nil {
+		return nil
+	}
+	return req
+}
+
+// identityIs reports whether req names the identity spkiHex (two hex
+// digits repeated).
+func identityIs(req *wire.ForgetRequest, spkiHex string) bool {
+	return req != nil && hex.EncodeToString(req.AgentIdentity[:]) == strings.Repeat(spkiHex, 32)
+}
+
 // forgetAnswer is the server's answer for forgetting h.
 func forgetAnswer(t *testing.T, h serverclient.PendingHost) string {
 	t.Helper()
@@ -615,9 +639,10 @@ func TestHostForget(t *testing.T) {
 			!strings.Contains(stdout, "removal confirmed at directory v4") {
 			t.Fatalf("host forget output:\n%s", stdout)
 		}
-		var req serverclient.ForgetHostRequest
-		if json.Unmarshal(e.lastPost, &req) != nil || req.IdentitySPKISHA256 != strings.Repeat("00", 32) || !req.ApprovedOnce || req.RemovalVersion != 3 ||
-			req.RemovalConfirmed == nil || *req.RemovalConfirmed != *web1.RemovalConfirmed || req.HostGone {
+		req := e.postedForget(t)
+		if !identityIs(req, "00") || !req.ApprovedOnce || req.RemovalVersion != 3 || req.ConfirmedVersion != 4 ||
+			hex.EncodeToString(req.ConfirmedSHA256[:]) != web1.RemovalConfirmed.SHA256 || req.HostGone || req.ExpectedName != "web1" ||
+			len(req.HostKeyFingerprints) != 1 || req.HostKeyFingerprints[0] != wire.HostKeyDigest(pub) || req.InstallationID != e.bundle.InstallationID {
 			t.Fatalf("the request %s", e.lastPost)
 		}
 	})
@@ -671,8 +696,7 @@ func TestHostForget(t *testing.T) {
 		var called bool
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, other.PendingHost), http.StatusOK)
 		code, stdout, stderr := run(t, "host", "forget", "--identity", identityOf("11"))
-		var req serverclient.ForgetHostRequest
-		if code != 0 || json.Unmarshal(e.lastPost, &req) != nil || req.IdentitySPKISHA256 != strings.Repeat("11", 32) {
+		if req := e.postedForget(t); code != 0 || !identityIs(req, "11") {
 			t.Fatalf("host forget --identity: exit %d, request %s: %s%s", code, e.lastPost, stdout, stderr)
 		}
 	})
@@ -744,6 +768,16 @@ func TestHostForget(t *testing.T) {
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"forget_state_changed"}`, http.StatusConflict)
 		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "forget_state_changed") || !strings.Contains(stderr, "run the command again") {
 			t.Fatalf("a forget whose agent changed: exit %d: %s", code, stderr)
+		}
+	})
+	t.Run("logged_not_deleted_printed", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"forget_logged_not_deleted","leaf":17}`, http.StatusConflict)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || !strings.Contains(stderr, "forget_logged_not_deleted: audit entry 17 records an authorization the server did not carry out") ||
+			!strings.Contains(stderr, "keyroster host pending still lists it") {
+			t.Fatalf("a forget logged but not carried out: exit %d: %s", code, stderr)
 		}
 	})
 	t.Run("answer_for_another_name_refused", func(t *testing.T) {

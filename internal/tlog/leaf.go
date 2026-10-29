@@ -42,9 +42,12 @@ type Kind uint8
 // with its ops-key-signed manifest. Kind 15 joined format v1 in Phase 3
 // too (03-06b), before kinds 11 to 14 exist: RevocationRecovery records
 // the revocations a signer restore lost, imported in one admin-signed
-// recovery. Kinds 11 to 14 are reserved for 03-09 to 03-12, which add them
-// to the valid set (valid). A reader that has no check for a kind must
-// refuse it, never skip it (audit verify does).
+// recovery. Kind 16 joined format v1 in Phase 3 (03-08c), next after 15:
+// HostForget records an admin-signed forget of one enrolled agent, which
+// the signer authorized before keyroster-server deleted it. Kinds 11 to 14
+// stay reserved for 03-09 to 03-12, which add them to the valid set
+// (valid). A reader that has no check for a kind must refuse it, never
+// skip it (audit verify does).
 const (
 	KindIssue            Kind = 1
 	KindRefusal          Kind = 2
@@ -59,6 +62,8 @@ const (
 	// 15 (03-06b) is the first free number: 11 to 14 belong to 03-09 to
 	// 03-12.
 	KindRevocationRecovery Kind = 15
+	// 16 (03-08c) comes after 15; 11 to 14 stay 03-09 to 03-12's.
+	KindHostForget Kind = 16
 )
 
 // String returns the kind name used in exports and reports.
@@ -86,15 +91,17 @@ func (k Kind) String() string {
 		return "krl_publish"
 	case KindRevocationRecovery:
 		return "revocation_recovery"
+	case KindHostForget:
+		return "host_forget"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(k))
 	}
 }
 
 // valid reports whether k is a kind of format v1. It is an explicit set:
-// 1 to 10 and 15. Kinds 11 to 14 are added by 03-09 to 03-12.
+// 1 to 10, 15 and 16. Kinds 11 to 14 are added by 03-09 to 03-12.
 func (k Kind) valid() bool {
-	return (k >= KindIssue && k <= KindKRLPublish) || k == KindRevocationRecovery
+	return (k >= KindIssue && k <= KindKRLPublish) || k == KindRevocationRecovery || k == KindHostForget
 }
 
 // Size limits enforced by the encoders and the strict decoders.
@@ -213,6 +220,8 @@ func checkBody(k Kind, body []byte) error {
 		_, err = DecodeKRLPublishBody(body)
 	case KindRevocationRecovery:
 		_, err = DecodeRecoveryBody(body)
+	case KindHostForget:
+		_, err = DecodeHostForgetBody(body)
 	default:
 		err = fmt.Errorf("%w: unknown kind %d", ErrMalformedLeaf, k)
 	}
@@ -976,6 +985,75 @@ func DecodeRecoveryBody(data []byte) (*RecoveryBody, error) {
 	return &b, nil
 }
 
+// HostForgetBody records one forget the signer authorized (kind 16,
+// 03-08c): the policy version its admin evidence was verified under, the
+// version of the directory in force then, the time the signer decided it
+// (ResolvedAtSeconds, whole seconds; times 10^6 never above the leaf's
+// TimeMicros, which appendLocked may only raise), the forget request's
+// full signing bytes (wire.ParseForgetSigningBytes reads them; at most
+// MaxRequest) and the evidence presented.
+type HostForgetBody struct {
+	PolicyVersion     uint64
+	DirectoryVersion  uint64
+	ResolvedAtSeconds uint64
+	Request           []byte
+	Evidence          []wire.Evidence
+}
+
+func (b *HostForgetBody) check() error {
+	if len(b.Request) == 0 || len(b.Request) > MaxRequest || len(b.Evidence) > wire.MaxEvidence {
+		return fmt.Errorf("%w: host_forget body size", ErrMalformedLeaf)
+	}
+	for _, e := range b.Evidence {
+		if len(e.Type) == 0 || len(e.Type) > wire.MaxEvidenceType || len(e.Blob) > wire.MaxEvidenceBlob {
+			return fmt.Errorf("%w: evidence size", ErrMalformedLeaf)
+		}
+	}
+	return nil
+}
+
+// Encode encodes the body.
+func (b *HostForgetBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	c.AddUint64(b.PolicyVersion)
+	c.AddUint64(b.DirectoryVersion)
+	c.AddUint64(b.ResolvedAtSeconds)
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Request) })
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+		for _, e := range b.Evidence {
+			add16(c, []byte(e.Type))
+			add16(c, e.Blob)
+		}
+	})
+	return c.Bytes()
+}
+
+// DecodeHostForgetBody decodes a host_forget body strictly. Every error
+// wraps ErrMalformedLeaf.
+func DecodeHostForgetBody(data []byte) (*HostForgetBody, error) {
+	s := cryptobyte.String(data)
+	var (
+		b                 HostForgetBody
+		request, evidence cryptobyte.String
+	)
+	if !s.ReadUint64(&b.PolicyVersion) || !s.ReadUint64(&b.DirectoryVersion) || !s.ReadUint64(&b.ResolvedAtSeconds) ||
+		!s.ReadUint24LengthPrefixed(&request) || !s.ReadUint24LengthPrefixed(&evidence) || !s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	var err error
+	if b.Evidence, err = readEvidence(&evidence); err != nil {
+		return nil, err
+	}
+	b.Request = append([]byte(nil), request...)
+	if err = b.check(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
 // addEntries appends the revoked entries in the layout of a revoke body.
 func addEntries(c *cryptobyte.Builder, entries []RevokedEntry) {
 	for _, e := range entries {
@@ -988,7 +1066,8 @@ func addEntries(c *cryptobyte.Builder, entries []RevokedEntry) {
 	}
 }
 
-// readEvidence reads the evidence items of a revoke or recovery body.
+// readEvidence reads the evidence items of a revoke, recovery or
+// host_forget body.
 func readEvidence(evidence *cryptobyte.String) ([]wire.Evidence, error) {
 	var out []wire.Evidence
 	for !evidence.Empty() {

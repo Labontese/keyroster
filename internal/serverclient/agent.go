@@ -69,8 +69,9 @@ const (
 	// entry approves yet; 200 PendingHostsAnswer.
 	AdminPendingHostsPath = "/api/v1/admin/hosts/pending"
 	// AdminForgetHostPath (POST): delete one agent, named by its identity,
-	// so its identity and host keys are free again (ForgetHostRequest);
-	// 200 ForgetHostAnswer (PR #71 review D-R1, 03-08b).
+	// so its identity and host keys are free again, after keyroster-signer
+	// authorized and logged the admins' signed forget (ForgetHostBody);
+	// 200 ForgetHostAnswer (PR #71 review D-R1, 03-08b, 03-08c).
 	AdminForgetHostPath = "/api/v1/admin/hosts/forget"
 	// AdminHostsStatusPath (GET): every agent the directory approved
 	// once, with its newest heartbeat and the current versions; 200
@@ -121,16 +122,25 @@ const (
 	AdminErrTTL              = "ttl_above_hour"
 	AdminErrHostNotEnrolled  = "host_not_enrolled"
 	AdminErrHostInDirectory  = "host_in_directory"
-	// AdminErrRemovalNotApplied refuses keyroster host forget while the
-	// host's newest heartbeat does not show a committed directory version
-	// at or above the one that removed its entry (03-08, owner decision
-	// 2026-10-28); --host-gone overrides it.
+	// AdminErrRemovalNotApplied is keyroster host forget's refusal of an
+	// agent approved once that has no recorded removal confirmation (its
+	// host's heartbeat never showed it applied a directory that removed
+	// it; 03-08, owner decision 2026-10-28); --host-gone overrides it.
+	// Since 03-08c the CLI refuses it before it signs, because a signed
+	// forget request cannot name such an agent without host_gone
+	// (wire.ForgetRequest.Validate).
 	AdminErrRemovalNotApplied = "host_removal_not_applied"
 	// AdminErrForgetStateChanged refuses keyroster host forget when the
 	// agent's facts the request carries no longer equal its row (its
 	// approval, removal version or recorded confirmation changed since
 	// keyroster host pending was read; 03-08b): nothing was deleted.
 	AdminErrForgetStateChanged = "forget_state_changed"
+	// AdminErrForgetLoggedNotDeleted is a forget the signer authorized and
+	// logged that the server did not carry out, because the agent's row no
+	// longer matched it when the server came to delete it (its facts
+	// changed or its identity rotated after the signer's answer; 03-08c).
+	// The agent keeps being served; the answer's leaf names the entry.
+	AdminErrForgetLoggedNotDeleted = "forget_logged_not_deleted"
 	// AgentErrStaleHeartbeat is a heartbeat whose seq is not above the
 	// stored one (409); the fetcher treats it as quiet.
 	AgentErrStaleHeartbeat = "stale_heartbeat"
@@ -247,29 +257,26 @@ type PendingHost struct {
 	EnrolledAt         string       `json:"enrolled_at"`
 }
 
-// ForgetHostRequest is the body of a POST to AdminForgetHostPath
-// (03-08b): the one agent to forget, by the lowercase hex SHA-256 of its
-// identity's SPKI, and the facts the admin saw of it in keyroster host
-// pending: whether it was approved once, its removal version (0: none)
-// and its recorded removal confirmation (nil: none). The server deletes
-// it only while every fact still equals its row (forget_state_changed
-// otherwise). HostGone overrides host_removal_not_applied for an agent
-// approved once whose host never confirmed its removal and will never
-// report again; the server logs it and the CLI prints it. A request with
-// HostGone and a confirmation, or ApprovedOnce false with a removal fact
-// or HostGone, is malformed.
-type ForgetHostRequest struct {
-	IdentitySPKISHA256 string               `json:"identity_spki_sha256"`
-	ApprovedOnce       bool                 `json:"approved_once"`
-	RemovalVersion     uint64               `json:"removal_version"`
-	RemovalConfirmed   *RemovalConfirmation `json:"removal_confirmed,omitempty"`
-	HostGone           bool                 `json:"host_gone"`
+// ForgetHostBody is the body of a POST to AdminForgetHostPath (03-08c):
+// the admin-signed wire.ForgetRequest's bytes (wire.ForgetRequest.Marshal,
+// evidence included), standard base64 with padding in JSON. The request
+// names the one agent to forget and the facts the admins saw of it in
+// keyroster host pending (its identity, expected name, enrollment time and
+// host keys; whether it was approved once, its removal version, its
+// recorded removal confirmation and host_gone). The server deletes it only
+// while every fact still equals its row (forget_state_changed otherwise)
+// and only after keyroster-signer authorized and logged the request.
+type ForgetHostBody struct {
+	Request []byte `json:"request"`
 }
 
 // ForgetHostAnswer is its 200 answer: the one agent the server deleted,
-// as PendingHost (the CLI re-derives every fingerprint it prints).
+// as PendingHost (the CLI re-derives every fingerprint it prints), and
+// Leaf, the index of the signer's host_forget entry that records it. A 409
+// forget_logged_not_deleted refusal carries that index as APIError.Leaf.
 type ForgetHostAnswer struct {
 	Forgotten []PendingHost `json:"forgotten"`
+	Leaf      uint64        `json:"leaf"`
 }
 
 // AgentEnrollRequest is the body of a POST to AgentEnrollPath: the join

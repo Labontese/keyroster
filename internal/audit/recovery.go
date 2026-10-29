@@ -73,7 +73,7 @@ func verifyRecovery(index uint64, body *tlog.RecoveryBody, leafMicros uint64, ro
 	if !bytes.Equal(req.RestoredRoot[:], rootBefore) {
 		return nil, fmt.Errorf("the recovery names a restored root that is not the root of the %d entries before it (recovery_log_mismatch)", index)
 	}
-	if err := verifyRevokeAdmins(body.Evidence, body.Request, wire.RecoverySSHSIGNamespace, a.policy); err != nil {
+	if err := verifyRevokeAdmins(body.Evidence, body.Request, wire.RecoverySSHSIGNamespace, 1, a.policy); err != nil {
 		return nil, err
 	}
 	if body.ResolvedAtSeconds > math.MaxUint64/1_000_000 || body.ResolvedAtSeconds*1_000_000 > leafMicros {

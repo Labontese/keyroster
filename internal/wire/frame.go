@@ -48,8 +48,12 @@ const (
 	TypeGetKRL            byte = 0x07
 	// The chain messages (03-07, chain.go): one installed trust bundle
 	// or directory by version.
-	TypeGetBundle                byte = 0x08
-	TypeGetDirectoryVersion      byte = 0x09
+	TypeGetBundle           byte = 0x08
+	TypeGetDirectoryVersion byte = 0x09
+	// TypeForgetAgentRequest carries an admin-signed ForgetRequest
+	// (03-08c), answered with a ForgetResponse (0x8D); both are capped at
+	// MaxFrame. 0x0A to 0x0C are 03-09 to 03-11's.
+	TypeForgetAgentRequest       byte = 0x0D
 	TypeIssueResponse            byte = 0x81
 	TypeInstallDirectoryResponse byte = 0x82
 	TypeGetDirectoryResponse     byte = 0x83
@@ -61,6 +65,7 @@ const (
 	// GetDirectoryResponse (MaxDirectoryFrame).
 	TypeGetBundleResponse           byte = 0x88
 	TypeGetDirectoryVersionResponse byte = 0x89
+	TypeForgetAgentResponse         byte = 0x8D
 	TypeError                       byte = 0xFF
 )
 

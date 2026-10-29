@@ -295,18 +295,22 @@ func (d *DB) MarkAgentApproved(ctx context.Context, k AgentKey, nowUS int64) err
 // pending, which a forget names and DeleteAgentIf re-checks (03-08b):
 // whether the directory approved it once, its removal version (0: none)
 // and its recorded removal confirmation (ConfirmedVersion 0 and
-// ConfirmedSHA256 nil: none; the SHA-256 is raw, 32 bytes).
+// ConfirmedSHA256 nil: none; the SHA-256 is raw, 32 bytes), and when it
+// enrolled (EnrolledAtUS, 03-08c): a forget is bound to the one enrollment
+// the admin saw, so it never deletes a later enrollment of the same
+// identity with the same facts.
 type ForgetFacts struct {
 	ApprovedOnce     bool
 	RemovalVersion   uint64
 	ConfirmedVersion uint64
 	ConfirmedSHA256  []byte
+	EnrolledAtUS     int64
 }
 
 // ForgetFacts are a's ForgetFacts as the row holds them.
 func (a *Agent) ForgetFacts() ForgetFacts {
 	return ForgetFacts{ApprovedOnce: a.ApprovedAtUS != 0, RemovalVersion: a.RemovedDirVersion,
-		ConfirmedVersion: a.RemovalConfirmedVersion, ConfirmedSHA256: a.RemovalConfirmedSHA256}
+		ConfirmedVersion: a.RemovalConfirmedVersion, ConfirmedSHA256: a.RemovalConfirmedSHA256, EnrolledAtUS: a.EnrolledAtUS}
 }
 
 // nullVersion binds a version, NULL for 0 (IS ? then matches a NULL
@@ -333,8 +337,8 @@ func nullBlob(b []byte) any {
 // the same identity into the reused row ID is another row), and its
 // heartbeat, which frees its identity and host keys for a new enrollment
 // (keyroster host forget; PR #71 review D-R1), but only while the row's
-// approval, removal version and recorded confirmation still equal facts
-// (03-08b, plan check item 1). The heartbeat and the row are deleted in
+// approval, removal version, recorded confirmation and enrollment time
+// still equal facts (03-08b, plan check item 1; 03-08c). The heartbeat and the row are deleted in
 // one transaction, the row by one statement that re-checks every fact;
 // when it deletes no row (the row is gone, its identity rotated, or a fact
 // changed after the caller checked it) nothing is deleted and the answer
@@ -360,8 +364,8 @@ func (d *DB) DeleteAgentIf(ctx context.Context, k AgentKey, facts ForgetFacts) e
 		return fmt.Errorf("serverdb: delete heartbeat: %w", err)
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE `+agentKeyWhere+` AND removed_dir_version IS ?
-AND removal_confirmed_version IS ? AND removal_confirmed_sha256 IS ? AND (approved_at_us IS NULL) = ?`,
-		append(k.args(), removal, confirmed, nullBlob(facts.ConfirmedSHA256), !facts.ApprovedOnce)...)
+AND removal_confirmed_version IS ? AND removal_confirmed_sha256 IS ? AND (approved_at_us IS NULL) = ? AND enrolled_at_us = ?`,
+		append(k.args(), removal, confirmed, nullBlob(facts.ConfirmedSHA256), !facts.ApprovedOnce, facts.EnrolledAtUS)...)
 	if err != nil {
 		return fmt.Errorf("serverdb: delete agent: %w", err)
 	}

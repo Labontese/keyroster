@@ -115,8 +115,8 @@ type Server struct {
 	// after the agents row was read. It is nil outside tests.
 	afterAgentLookup func()
 	// beforeForgetDelete, when a test sets it, runs in handleForgetHost
-	// after the facts were checked and before DeleteAgentIf (03-08b). It
-	// is nil outside tests.
+	// after the signer's answer and before DeleteAgentIf (03-08b; moved
+	// after the signer call in 03-08c). It is nil outside tests.
 	beforeForgetDelete func()
 }
 

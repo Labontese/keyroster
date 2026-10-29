@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 
 	"golang.org/x/crypto/ssh"
 
@@ -197,6 +198,12 @@ func decodeLeaf(data []byte) map[string]any {
 			return map[string]any{"error": err.Error()}
 		}
 		decodeRecovery(m, b)
+	case tlog.KindHostForget:
+		b, err := tlog.DecodeHostForgetBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		decodeHostForget(m, b)
 	case tlog.KindKRLPublish:
 		b, err := tlog.DecodeKRLPublishBody(l.Body)
 		if err != nil {
@@ -323,6 +330,59 @@ func decodeRecovery(m map[string]any, b *tlog.RecoveryBody) {
 		}
 	}
 	m["admins"] = admins
+}
+
+// decodeHostForget renders a host_forget body into m (03-08c): the agent
+// its logged request names (its identity fingerprint, expected name,
+// enrollment time and the SHA256 fingerprints of its host keys), the facts
+// the admins signed (approved_once, host_gone, removal_version, and
+// confirmed_version with confirmed_sha256 for a confirmation, neither
+// without one), the request ID and times, the policy and directory
+// versions in force, the evidence types and the sorted SHA256
+// fingerprints of the keys that signed (admin_fingerprints), so the entry
+// names who forgot. It renders no key named "kind" (beyond the line's
+// own), "bundle_version", "version", "directory" or "sigs"
+// (checkGrepFields, checkReplayFields), and Verify binds the rendered
+// approved_once and host_gone to the leaf (checkForgetFields).
+func decodeHostForget(m map[string]any, b *tlog.HostForgetBody) {
+	m["policy_version"] = b.PolicyVersion
+	m["directory_version"] = b.DirectoryVersion
+	m["resolved_at"] = b.ResolvedAtSeconds
+	if req, err := wire.ParseForgetSigningBytes(b.Request); err != nil {
+		m["request_error"] = err.Error()
+	} else {
+		m["identity"] = "SHA256:" + base64.RawStdEncoding.EncodeToString(req.AgentIdentity[:])
+		m["expected_name"] = req.ExpectedName
+		m["enrolled_at_us"] = req.EnrolledAtMicros
+		fps := make([]string, 0, len(req.HostKeyFingerprints))
+		for _, d := range req.HostKeyFingerprints {
+			fps = append(fps, "SHA256:"+base64.RawStdEncoding.EncodeToString(d[:]))
+		}
+		m["host_key_fingerprints"] = fps
+		m["approved_once"] = req.ApprovedOnce
+		m["host_gone"] = req.HostGone
+		m["removal_version"] = req.RemovalVersion
+		if req.ConfirmedVersion != 0 {
+			m["confirmed_version"] = req.ConfirmedVersion
+			m["confirmed_sha256"] = hex.EncodeToString(req.ConfirmedSHA256[:])
+		}
+		m["request_id"] = hex.EncodeToString(req.RequestID[:])
+		m["created_at"] = req.CreatedAt
+	}
+	types := make([]string, 0, len(b.Evidence))
+	admins := make([]string, 0, len(b.Evidence))
+	for _, e := range b.Evidence {
+		types = append(types, e.Type)
+		if e.Type != wire.EvidenceAdminSSHSIG {
+			continue
+		}
+		if sig, err := sshsig.Parse(e.Blob); err == nil {
+			admins = append(admins, ssh.FingerprintSHA256(sig.PublicKey()))
+		}
+	}
+	slices.Sort(admins)
+	m["evidence_types"] = types
+	m["admin_fingerprints"] = admins
 }
 
 // fingerprint is the SHA256 fingerprint of an SSH wire-format key, or ""
