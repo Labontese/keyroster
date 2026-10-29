@@ -259,6 +259,28 @@ func TestStatus(t *testing.T) {
 			t.Fatalf("after the apply: pending %+v, generation %d", s.Pending, s.Generation)
 		}
 	})
+	t.Run("swap_status_runs_nothing", func(t *testing.T) {
+		// PR #72 review C17: the status a swap writes under the apply lock
+		// runs no program; sshd's version and settings are the last
+		// status's.
+		h := newTestHost(t, newFixture(t))
+		withOutbox(t, h)
+		h.installed("role:ops")
+		prev := writeStatus(t, h, StatusUpdate{})
+		h.run.mu.Lock()
+		before := len(h.run.calls)
+		h.run.mu.Unlock()
+		s := writeStatus(t, h, StatusUpdate{Swapping: true})
+		h.run.mu.Lock()
+		ran := h.run.calls[before:]
+		h.run.mu.Unlock()
+		if len(ran) != 0 {
+			t.Fatalf("the swap's status ran %q", ran)
+		}
+		if s.SSHDVersion != prev.SSHDVersion || s.Effective != prev.Effective || s.SSHDVersion == "" {
+			t.Fatalf("the swap's status did not carry sshd's version and settings: %q %+v, want %q %+v", s.SSHDVersion, s.Effective, prev.SSHDVersion, prev.Effective)
+		}
+	})
 	t.Run("stuck_is_reported_and_kept", func(t *testing.T) {
 		h := newTestHost(t, newFixture(t))
 		withOutbox(t, h)

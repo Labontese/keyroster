@@ -270,20 +270,20 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 	if b, err := e.readDropIn(); err == nil && b != nil {
 		s.DropInSHA256 = trust.SHA256Hex(b)
 	}
-	switch {
-	case u.Swapping:
+	if u.Swapping {
+		// A swap's status runs nothing (publishPending).
 		if prev != nil {
 			s.SSHDVersion, s.Effective = prev.SSHDVersion, prev.Effective
 		}
-	default:
+	} else {
 		s.SSHDVersion = heartbeat.Sanitize(e.sshdVersion(ctx), heartbeat.MaxText)
-	}
-	if d, err := e.sshdDump(ctx, ""); err == nil && !u.Swapping {
-		s.Effective = heartbeat.Effective{
-			TrustedUserCAKeys:        heartbeat.Sanitize(d.One("trustedusercakeys"), heartbeat.MaxText),
-			RevokedKeys:              heartbeat.Sanitize(d.One("revokedkeys"), heartbeat.MaxText),
-			AuthorizedPrincipalsFile: heartbeat.Sanitize(d.One("authorizedprincipalsfile"), heartbeat.MaxText),
-			HostCertificate:          heartbeat.Sanitize(d.One("hostcertificate"), heartbeat.MaxText),
+		if d, err := e.sshdDump(ctx, ""); err == nil {
+			s.Effective = heartbeat.Effective{
+				TrustedUserCAKeys:        heartbeat.Sanitize(d.One("trustedusercakeys"), heartbeat.MaxText),
+				RevokedKeys:              heartbeat.Sanitize(d.One("revokedkeys"), heartbeat.MaxText),
+				AuthorizedPrincipalsFile: heartbeat.Sanitize(d.One("authorizedprincipalsfile"), heartbeat.MaxText),
+				HostCertificate:          heartbeat.Sanitize(d.One("hostcertificate"), heartbeat.MaxText),
+			}
 		}
 	}
 
