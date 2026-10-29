@@ -796,8 +796,13 @@ arrive](#how-fast-changes-arrive)).
 | `install_no_service_manager`, `install_no_sshd_config_d` | install | Neither systemd nor OpenRC found; no `/etc/ssh/sshd_config.d` on a systemd host | [Running the agent](#running-the-agent) |
 | `install_path_unsafe`, `install_pins_differ` | install | See step 2 | Fix the path; for other pins, remove the agent's state first |
 
-The `host forget` refusals above run in CI (`TestForgetHost`, `TestHostForget`,
-`TestHostForgetHostGone`, 03-08b); on the homelab they are UNVERIFIED until 03-16.
+The `host forget` refusals above run in CI (03-08b). The server's: `host_in_directory`
+and `host_not_enrolled` in `TestAgentRemoval`, `host_removal_not_applied` in
+`TestHostForgetWaitsForRemoval` and `TestRemovalConfirmation`, `forget_state_changed`
+in `TestForgetHost`. The CLI's: `forget_name_ambiguous`, `forget_state_changed`,
+`host_in_directory` and `host_not_enrolled` in `TestHostForget`, and
+`host_removal_not_applied` in `TestHostForget` and `TestHostForgetHostGone`. On the
+homelab they are UNVERIFIED until 03-16.
 
 ## Running the agent
 

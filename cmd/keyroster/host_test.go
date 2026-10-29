@@ -726,6 +726,18 @@ func TestHostForget(t *testing.T) {
 			t.Fatalf("host forget of a host still in the directory: exit %d: %s", code, stderr)
 		}
 	})
+	t.Run("not_enrolled_explained", func(t *testing.T) {
+		// PR #74 review finding 6 (03-08b fix round 1): the server's 404
+		// host_not_enrolled, for an identity no agent has any more.
+		e := forgetEnv(t, nil, web1)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"host_not_enrolled"}`, http.StatusNotFound)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || !e.wasCalled(&called) || !strings.Contains(stderr, "no agent with this identity is enrolled (it was forgotten, or its identity rotated)") ||
+			!strings.Contains(stderr, "Nothing was forgotten") {
+			t.Fatalf("a forget of an identity no agent has: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+	})
 	t.Run("state_changed_explained", func(t *testing.T) {
 		e := forgetEnv(t, nil, web1)
 		var called bool
