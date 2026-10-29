@@ -313,13 +313,26 @@ type Heartbeat struct {
 }
 
 // StoreHeartbeat stores body as agent id's heartbeat when seq is above
-// the stored one, or none is stored, in one statement. A lower or equal
-// seq changes nothing and is ErrStaleHeartbeat.
-func (d *DB) StoreHeartbeat(ctx context.Context, id, seq int64, body []byte, nowUS int64) error {
-	if seq < 1 || len(body) == 0 {
+// the stored one, or none is stored, in one transaction that first checks
+// that the agents row id still exists and still has the identity spki: a
+// request the row was forgotten (or rotated) under while its body arrived
+// never writes a heartbeat that a later agent reusing the ID would inherit
+// (ErrNotFound; PR #72 review C1). foreign_keys is off, so 0006's ON
+// DELETE CASCADE does nothing; DeleteAgent deletes the row itself. A
+// lower or equal seq changes nothing and is ErrStaleHeartbeat.
+func (d *DB) StoreHeartbeat(ctx context.Context, id int64, spki []byte, seq int64, body []byte, nowUS int64) error {
+	if seq < 1 || len(body) == 0 || len(spki) != 32 {
 		return errors.New("serverdb: incomplete heartbeat")
 	}
-	res, err := d.db.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) VALUES (?, ?, ?, ?)
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := agentLive(ctx, tx, id, spki); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) VALUES (?, ?, ?, ?)
 ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, received_at_us = excluded.received_at_us
 WHERE excluded.seq > heartbeats.seq`, id, seq, body, nowUS)
 	if err != nil {
@@ -331,6 +344,23 @@ WHERE excluded.seq > heartbeats.seq`, id, seq, body, nowUS)
 	}
 	if n == 0 {
 		return ErrStaleHeartbeat
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return nil
+}
+
+// agentLive is ErrNotFound unless the agents row id exists with the
+// identity spki.
+func agentLive(ctx context.Context, tx *sql.Tx, id int64, spki []byte) error {
+	var one int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ? AND identity_spki_sha256 = ?`, id, spki).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("serverdb: agent: %w", err)
 	}
 	return nil
 }

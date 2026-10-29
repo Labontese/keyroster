@@ -110,6 +110,10 @@ type Server struct {
 	agentPatterns    []string
 	agentPort        int
 	agentStateBudget int
+
+	// afterAgentLookup, when a test sets it, runs in requireAgent right
+	// after the agents row was read. It is nil outside tests.
+	afterAgentLookup func()
 }
 
 // routeMux is an http.ServeMux that records every pattern registered on

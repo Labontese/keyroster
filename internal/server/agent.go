@@ -146,6 +146,9 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 			return
 		}
 		a, err := s.db.AgentBySPKI(ctx, spki)
+		if s.afterAgentLookup != nil {
+			s.afterAgentLookup()
+		}
 		if errors.Is(err, serverdb.ErrNotFound) {
 			if !s.agentAllow(w, r, s.agentAnonLimit, clientKey(r), "client", clientKey(r)) {
 				return
@@ -214,7 +217,14 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 			}
 			a.RemovedDirVersion = dv.version
 		}
-		if err := s.db.TouchAgent(ctx, a.ID, s.clock().UnixMicro()); err != nil {
+		// The row can go between the lookup and here (keyroster host
+		// forget): the request is then refused, never served for a row
+		// that no longer exists (PR #72 review C1).
+		switch err := s.db.TouchAgent(ctx, a.ID, s.clock().UnixMicro()); {
+		case errors.Is(err, serverdb.ErrNotFound):
+			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
+			return
+		case err != nil:
 			s.log.Warn("agent last seen", "err", err)
 		}
 		next(w, r, &agentRequest{agent: a, status: dv.status, dir: dv})
@@ -689,8 +699,12 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.HeartbeatRefusal{Error: serverclient.AgentErrHeartbeatField, Field: field})
 		return
 	}
-	err = s.db.StoreHeartbeat(r.Context(), ar.agent.ID, int64(h.Status.Seq), body, s.clock().UnixMicro()) //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
+	err = s.db.StoreHeartbeat(r.Context(), ar.agent.ID, ar.agent.IdentitySPKISHA256, int64(h.Status.Seq), body, s.clock().UnixMicro()) //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
 	switch {
+	case errors.Is(err, serverdb.ErrNotFound):
+		// Forgotten (or rotated away) while the body arrived (PR #72
+		// review C1).
+		s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
 	case errors.Is(err, serverdb.ErrStaleHeartbeat):
 		s.writeJSON(w, ar.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AgentErrStaleHeartbeat})
 	case err != nil:
