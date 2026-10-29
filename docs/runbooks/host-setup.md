@@ -819,7 +819,7 @@ through drop-ins (`systemctl edit`): a later `install` writes them again.
 
 | Unit | Runs as | May write (`ReadWritePaths`, everything else read-only) | Network |
 |---|---|---|---|
-| `keyroster-agent-fetch.service` | `keyroster-agent`, no capabilities, `NoNewPrivileges` | `/var/lib/keyroster-agent-fetch /var/lib/keyroster-agent/spool`; it reads `/etc/keyroster-agent/fetch.json` and the outbox | TCP to the agent server only (`AF_INET`, `AF_INET6`) |
+| `keyroster-agent-fetch.service` | `keyroster-agent`, no capabilities, `NoNewPrivileges` | `/var/lib/keyroster-agent-fetch /var/lib/keyroster-agent/spool`; it reads `/etc/keyroster-agent/fetch.json` and the outbox | IPv4 and IPv6 sockets only (`RestrictAddressFamilies=AF_INET AF_INET6`: no Unix, netlink or packet sockets). The unit does not restrict destinations: the server's address is not known when `install` writes it; a host firewall can restrict them |
 | `keyroster-agent.service` | root, no capabilities, `NoNewPrivileges` | `/etc/ssh/keyroster /etc/ssh/sshd_config.d /var/lib/keyroster-agent` (the spool and the outbox are inside the state directory) | loopback only: `IPAddressDeny=any`, `IPAddressAllow=localhost` (its self-test; the owner's D-05 answer `loopback-only`) |
 
 `/etc/ssh` itself stays read-only to the applier's unit. That is why taking
@@ -853,7 +853,11 @@ rc-service keyroster-agent start && rc-service keyroster-agent-fetch start
 
 The OpenRC scripts have no sandbox: the applier runs as root and the
 fetcher as `keyroster-agent` (`command_user`), and that user is the only
-separation.
+separation. The fetcher's script creates its log,
+`/var/log/keyroster-agent-fetch.log`, as `keyroster-agent` 0640 before
+the start (`checkpath` in `start_pre`), because `start-stop-daemon` opens
+the log only after it dropped to that user (PR #72 review; UNVERIFIED
+until 03-16 like the rest of OpenRC).
 
 **On a Phase 2 host** ([Moving a Phase 2 host to the agent](#moving-a-phase-2-host-to-the-agent)):
 the units run as usual and the applier reports `phase2_adoption_pending`

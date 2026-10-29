@@ -60,6 +60,12 @@ func TestUnits(t *testing.T) {
 		if strings.Contains(u, "AF_UNIX") || strings.Contains(u, "IPAddressAllow=") {
 			t.Error("the fetcher unit allows Unix sockets or an IP allowlist it does not need")
 		}
+		// PR #72 review C8: the unit restricts address families only; its
+		// comments must not claim a destination limit it does not set.
+		if strings.Contains(u, "server only") || strings.Contains(u, "to one server") ||
+			!unitHasLine(u, "# Network: IPv4 and IPv6 sockets only; destinations are not restricted (the server's address is not known when install writes this unit).") {
+			t.Errorf("the fetcher unit's network comment claims more than RestrictAddressFamilies enforces:\n%s", u)
+		}
 	})
 	t.Run("openrc_scripts", func(t *testing.T) {
 		a, err := ApplierOpenRCScript(c)
@@ -72,6 +78,12 @@ func TestUnits(t *testing.T) {
 		}
 		if !unitHasLine(f, `command_user="keyroster-agent"`) {
 			t.Errorf("the fetcher's OpenRC script does not run as keyroster-agent:\n%s", f)
+		}
+		// PR #72 review C7: start-stop-daemon opens output_log after it
+		// dropped to command_user, so the log must exist and be the
+		// user's before the start.
+		if !unitHasLine(f, "start_pre() {") || !unitHasLine(f, "\tcheckpath -f -o keyroster-agent:keyroster-agent -m 0640 \"/var/log/${RC_SVCNAME}.log\"") {
+			t.Errorf("the fetcher's OpenRC script does not create its log for keyroster-agent before the start:\n%s", f)
 		}
 		if strings.Contains(a, "command_user") {
 			t.Errorf("the applier's OpenRC script names a user: it runs as root:\n%s", a)

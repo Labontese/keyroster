@@ -139,8 +139,9 @@ func FetcherSystemdUnit(c UnitConfig) (string, error) {
 	}
 	return `# keyroster-agent-fetch: the agent's unprivileged fetcher (03-08, D-05).
 # Written by keyroster-agent install; see docs/runbooks/host-setup.md
-# "Running the agent". It does all of the agent's network I/O, to one
-# server, writes only its own directory and the spool, and runs no program.
+# "Running the agent". It does all of the agent's network I/O (to the
+# server fetch.json names), writes only its own directory and the spool,
+# and runs no program.
 [Unit]
 Description=keyroster agent fetcher (pulls signed state over pinned mTLS)
 Documentation=https://github.com/Labontese/keyroster/blob/main/docs/runbooks/host-setup.md
@@ -164,7 +165,7 @@ PrivateTmp=yes
 PrivateDevices=yes
 DevicePolicy=closed
 
-# Network: the agent server only (TCP); no Unix sockets.
+# Network: IPv4 and IPv6 sockets only; destinations are not restricted (the server's address is not known when install writes this unit).
 RestrictAddressFamilies=AF_INET AF_INET6
 
 # Privileges: none.
@@ -225,7 +226,9 @@ depend() {
 }
 
 // FetcherOpenRCScript is /etc/init.d/keyroster-agent-fetch, run as
-// keyroster-agent (command_user). UNVERIFIED until 03-16.
+// keyroster-agent (command_user). start-stop-daemon opens output_log only
+// after it dropped to that user, so start_pre creates the log as the
+// user's first (checkpath; PR #72 review C7). UNVERIFIED until 03-16.
 func FetcherOpenRCScript(c UnitConfig) (string, error) {
 	if err := c.check(); err != nil {
 		return "", err
@@ -242,6 +245,10 @@ command_background=true
 pidfile="/run/${RC_SVCNAME}.pid"
 output_log="/var/log/${RC_SVCNAME}.log"
 error_log="/var/log/${RC_SVCNAME}.log"
+
+start_pre() {
+	checkpath -f -o ` + FetchUser + `:` + FetchUser + ` -m 0640 "/var/log/${RC_SVCNAME}.log"
+}
 
 depend() {
 	need net
