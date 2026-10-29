@@ -56,6 +56,10 @@ key-decisions:
   - "03-08b owner decision Q1 (2026-10-29): forget's server half ships alone; forget stays one admin's request until 03-08c"
   - "03-08b: forget's name resolution also reads keyroster host status, because host pending never lists an agent the directory approves now; such an agent only makes a name ambiguous and is refused as a target"
   - "03-08b: the confirmation's SHA-256 is trust.SHA256Hex of the directory document without signatures, stored raw (32 bytes) and compared hex-decoded"
+  - "03-08b fix round 1, owner decision D-R1 (2026-10-29): a removal is confirmed only when the host's own heartbeat shows the apply that committed V emptied its principals, and a later heartbeat that shows principals again clears the confirmation"
+  - "03-08b fix round 1, owner decision D-R2 (2026-10-29): host status lists approved agents that have not polled yet (not_yet_polled), so forget's name resolution sees them"
+  - "03-08b fix round 1, owner decision D-R3 (2026-10-29): 03-16's forget drill runs the same-machine re-enroll order"
+  - "03-08b fix round 1: every agents-row write is keyed on (id, identity, join token hash) through serverdb.AgentKey"
 
 patterns-established:
   - "A host-reported fact becomes server state only through a rule over server-held documents (confirmRemoval checks the reported directory against the server's own copy at that version)"
@@ -345,12 +349,182 @@ None.
 - **03-08c:** builds on these unchanged:
   - `RecordRemovalConfirmed`;
   - the columns `removal_confirmed_version` and `removal_confirmed_sha256` (raw);
-  - `ForgetFacts`, `Agent.ForgetFacts` and `DeleteAgentIf(ctx, id, spki, facts)`;
+  - `ForgetFacts`, `Agent.ForgetFacts` and `DeleteAgentIf` (since fix round 1 `DeleteAgentIf(ctx, k serverdb.AgentKey, facts)`; see "Pre-merge review fix round 1", "For 03-08c");
   - forget's identity addressing;
   - the served rows' `removal_version` and `removal_confirmed {version, sha256}` (hex);
   - the CLI's target resolution, which now includes host status (deviation 1);
   - the hook `beforeForgetDelete` (between the facts check and the delete). 03-08c adds its own hook between the signer's answer and the delete.
 - **03-16:** every UNVERIFIED item above (owner decision Q4's forget drill).
+
+## Pre-merge review fix round 1
+
+Review run wf_cd240bdc-2a4 on `4ff905e`. Owner decisions D-R1, D-R2 and D-R3 (Daniel, 2026-10-29) and the no-decision fixes [8], [4] and [6]. Each fix was written test-first and is one commit, SSH-signed by keyroster-bot, without attribution lines; each staged diff was grepped for tailnet and LAN addresses and the real host names (none).
+
+| Commit | Item | Tests |
+|---|---|---|
+| `da76092` fix(agent): key every agents-row write on the enrolling join token too | [8] (and split [2]) | `TestReenrolledIdentityKeepsItsRow` (server), `TestAgentWritesKeyedByToken` (serverdb) |
+| `6fbc083` fix(agent): confirm a host removal only from the host's own emptied apply | D-R1 ([0], [7], [10]) | `TestRemovalConfirmation/{removed_host_reporting_removed_confirmed, report_not_emptied_not_confirmed/*, renamed_then_rekeyed_not_confirmed, principals_again_clears, rendered_entry_without_principals_files_clears, pending_clears_from_the_stored_heartbeat, keys_rotated_without_principals_kept}`; serverdb `TestRemovalConfirmation/{heartbeat_changed_before_record, cleared_only_from_the_stored_heartbeat}` |
+| `08da89a` fix(agent): list approved agents that have not polled yet in host status | D-R2 ([3], split [1]) | `TestServedHostsNeverPending/approved_not_yet_polled_in_status`, `TestHostStatus/approved_not_yet_polled`, `TestHostForget/name_ambiguous_with_an_approved_not_polled_agent`, the e2e window in `TestAgentReenrollEndToEnd` |
+| `d755686` fix(cli): name the directory entry, not the enrollment name, in host forget | [4] | `TestHostForget/approved_agent_under_another_entry_named` |
+| `1d99c61` test(cli): run host forget's host_not_enrolled text, and name the real tests | [6] | `TestHostForget/not_enrolled_explained` |
+| `c296d33` docs(03-16): run the same-machine re-enroll order in the forget drill | D-R3 | none (plan text) |
+
+### [8] Writers keyed on the join token
+
+- **Change.** `serverdb.AgentKey {ID, SPKI, TokenSHA256}` and `Agent.Key()`. Every agents-row writer matches `id = ? AND identity_spki_sha256 = ? AND token_hash = ?` (the one constant `agentKeyWhere`):
+  - `TouchAgent`, `MarkAgentApproved`, both `SetAgentRemovedVersion` statements, `RecordRemovalConfirmed`;
+  - the new `ClearRemovalConfirmed` (D-R1);
+  - `agentExists`, which `StoreHeartbeat` checks;
+  - `RotateAgentIdentity`, its follow-up existence check included;
+  - `RecordClockOffset` and `DeleteAgentIf`.
+
+  `requireAgent`, the heartbeat route, the identity route and forget pass the looked-up row's `Key()`.
+- **Why token_hash holds.** A join token enrolls at most one row (`EnrollAgent` uses it in the transaction that records the row). The identity rotation keeps it: the UPDATE in `RotateAgentIdentity` sets only `identity_spki_sha256`, `identity_rotated_at_us` and `identity_rotations`. The agents table was not rebuilt and `foreign_keys` stays off.
+- **RED on `4ff905e`** (`TestReenrolledIdentityKeepsItsRow`, written against the old API):
+  - `state_request_in_flight`: `A's in-flight request: 200 {"bundles":[...]}, want 403 unknown_agent`; `A's request wrote the new row: approved_at_us 0, removed_dir_version 2, last_seen_us 1792411200000000`; `forget of the new pending row: 400 {"error":"malformed request"}` (the stuck row of the finding);
+  - `forget_in_flight`: `the forget checked against A: 200 {"forgotten":[...]}, want 409 forget_state_changed`; `the new row <nil>`.
+- **serverdb leg.** `TestAgentWritesKeyedByToken` (same identity, reused row ID, new token; a fresh B, an approved and removed B, a confirmed B). Its RED is a compile error, as in Task 2, so one mutant per writer drops the token term while keeping the bound argument. **9 run, 9 killed:** TouchAgent, MarkAgentApproved, DeleteAgentIf, RecordRemovalConfirmed, agentExists, SetAgentRemovedVersion (clear), SetAgentRemovedVersion (record), RotateAgentIdentity, RecordClockOffset.
+- **Plan claims.** must_haves truth 2 and T-03-287 now hold through the token. Their wording in 03-08b-PLAN.md names it. The literal `identity_spki_sha256 = ?` now occurs once in agents.go, in `agentKeyWhere`, which every writer uses.
+
+### D-R1 A removal is confirmed only from the host's own report
+
+- **The rule (`confirmRemoval`, `principalsEmptied`).** The existing checks stay: R <= V <= current, the SHA-256 of directory V, and `hostState(V)` removed. In addition, the stored heartbeat must show all of these:
+  - `last_apply` present, result `ok`, no rollback;
+  - `host_status` `host_removed` or `host_disabled`;
+  - no pending swap;
+  - no `principals/` file in `Status.Files`;
+  - `files_truncated` false.
+- **"The apply that committed V".** The heartbeat carries no version in `last_apply`. The observable used is: an `ok` apply without a rollback, with no swap pending. The applier commits and accepts the generation and its directory only on such an apply, and a later refused or failed apply carries another result (apply/status.go `applyResult`).
+- **Invalidation (`reconcileRemoval`, `principalsShown`).** A recorded confirmation (not R) is cleared when a later heartbeat of the same agent shows principals:
+  - any `principals/` file;
+  - `files_truncated`;
+  - an `ok` apply without a rollback whose `host_status` is empty, meaning it rendered an active entry under the host's current keys.
+
+  This runs after a stored heartbeat and, from the stored heartbeat, in `host pending`. The write is `ClearRemovalConfirmed`, keyed by `AgentKey`. It is logged `agent removal confirmation cleared` at warning level.
+- **Interpretation for the owner (see Owner attention below).** `host_keys_rotated`/`host_keys_disagree` without a principals file, and refused or failed applies, do **not** clear.
+- **[Rule 2] The stored heartbeat's seq guards both writes.** `RecordRemovalConfirmed(ctx, k, hbSeq, R, V, sha)` and `ClearRemovalConfirmed(ctx, k, hbSeq)` hold only while the stored heartbeat still has the seq the decision was made from (`storedSeqIs`).
+  - Without the guard, this race is possible: `host pending` reads an emptied heartbeat S, heartbeat S+1 with principals is stored and finds nothing to clear, and then `host pending` records the confirmation from S.
+  - Those facts would reach the admin and pass `sameFacts` and `DeleteAgentIf`.
+- **RED on `da76092`** (the new tests, against the old rule):
+  - all ten `report_not_emptied_not_confirmed/*` cases (`principals_rendered` = finding 10, `host_status_empty`, `keys_rotated`, `keys_disagree`, `principals_file`, `files_truncated`, `apply_refused`, `apply_rolled_back`, `no_last_apply`, `swap_pending`): `removed_dir_version 2, confirmed v2 <sha>; want 2, v0`;
+  - `renamed_then_rekeyed_not_confirmed` (finding 7): `removed_dir_version 3, confirmed v3 947b48…1a25; want 3, v0`;
+  - `principals_again_clears` (finding 0): `removed_dir_version 2, confirmed v2 b57729…8c59; want 2, v0`;
+  - `keys_rotated_without_principals_kept`: its first half passed (kept), and its second half failed (`confirmed v2 …; want 2, v0`), because nothing cleared.
+- **Fixtures.** `testHBStatus` lists `principals/deploy` with an empty `host_status`. Left unchanged, every "not confirmed because X" test would pass without testing X. A helper `hbRemovedAt` (with `asEmptied`) builds the emptied report, and these tests use it:
+  - every test that expects a confirmation;
+  - `other_sha`, `version_above_current`, `same_number_other_sha` and the older-version tests;
+  - `pre_0007_*`, `unconfirmed_then_readded` and `late_heartbeat`;
+  - the disabled-first case (`host_disabled`).
+
+  `unconfirmed_then_readded_not_confirmed` deliberately sends an emptied report at the re-adding version. It pins the server's own `hostState(V)` check, which the host's report does not replace.
+- **Mutants (Windows, Go 1.27.3; each applied, its tests run, the file restored and compared): 16 run, 16 killed.**
+
+  | # | Mutant | Killed by |
+  |---|---|---|
+  | D1 | `principalsEmptied` ignores the host status | `report_not_emptied_not_confirmed/keys_rotated`, `/keys_disagree`, … |
+  | D2 | `confirmRemoval` skips `principalsEmptied` | `report_not_emptied_not_confirmed/*` |
+  | D3 | `principalsShown` ignores the file list | `report_not_emptied_not_confirmed/principals_file`, `keys_rotated_without_principals_kept` |
+  | D4 | `principalsShown` ignores an active render | `rendered_entry_without_principals_files_clears` |
+  | D5 | `principalsShown` ignores `files_truncated` | `report_not_emptied_not_confirmed/files_truncated` |
+  | D6 | the pending-swap condition dropped | `report_not_emptied_not_confirmed/swap_pending` |
+  | D7 | a rollback counts as ok | `report_not_emptied_not_confirmed/apply_rolled_back` |
+  | D8 | reconcile never clears | `principals_again_clears`, `pending_clears_from_the_stored_heartbeat`, … |
+  | D9 | host pending only records (the old condition) | `pending_clears_from_the_stored_heartbeat` |
+  | D10 | the heartbeat route does not reconcile | `confirmed_then_readded_kept`, `late_heartbeat_…`, … |
+  | D11 | `RecordRemovalConfirmed` without the stored-seq term | serverdb `heartbeat_changed_before_record` |
+  | D12 | `ClearRemovalConfirmed` without the stored-seq term | serverdb `cleared_only_from_the_stored_heartbeat` |
+  | M5 | (again, new fixtures) the current directory instead of V | `late_heartbeat_reporting_the_removal_confirms` |
+  | M7 | (again) without `removed_dir_version = ?` | serverdb `removal_changed_before_record` |
+  | M8 | (again) no SHA-256 check | `other_sha_not_confirmed`, `TestForgetGateChecksTheDirectory/same_number_other_sha_refused` |
+
+  D3 first broke the build (an unused import) and was rewritten to `false && …`. M11 (forget lets an unconfirmed approved-once agent go) was not re-run: its gate code is unchanged.
+- **CI evidence of the reading.** E2E run **40938179992** on `6fbc083`, both lanes green. On both lanes, after B's approval A reports `directory v6, last apply ok, host_status "host_keys_rotated", 2 files` (the test now waits for this before it checks) and stays `removal confirmed at directory v5`. `forget --identity A` succeeds without `--host-gone`. The literal reading of D-R1 would have cleared A there. The normal path is confirmed from the real agent's heartbeat in `TestAgentEnrollEndToEnd` (`agent removal confirmed`, v5, both lanes).
+- **Docs.**
+  - host-setup.md: the "keeps the last good principals" claim is corrected. A host whose current keys are on an active entry renders it normally, and `host_keys_rotated` keeps last-good's files.
+  - host-setup.md: step 2 of "Removing a host" now states the rule, the clear and the T-03-284 residual (a lying fetcher gets a confirmation recorded).
+  - 03-08b-PLAN.md: truth 3 and the T-03-288 row describe the new rule, and the row names the residual.
+  - The comments in migration 0007, requireAgent and confirmRemoval are updated; no migration checksum exists.
+
+### D-R2 Approved but not yet polled agents in host status
+
+- **Server.** `hosts/status` also lists an agent the current directory approves (`approved(dv, keys)`) whose `approved_at_us` is unset. Such a row carries `not_yet_polled: true` (`omitempty`, so the other rows encode as before), state `active`, and no heartbeat. `host pending` is unchanged.
+- **CLI.**
+  - `checkHostsStatus` refuses a `not_yet_polled` row that is not active or that carries a heartbeat.
+  - `host status` shows it as `approved, not yet polled`.
+  - `host forget`'s candidates include it, so its name is refused `forget_name_ambiguous`, with the listing line `approved, not yet polled (enrolled as …, directory entry …)`.
+- **RED on `6fbc083`** (the JSON field added first, so the RED is behavioural):
+  - `hosts/status of an approved agent that has not polled: []`;
+  - CLI `host status`: no `approved, not yet polled` (exit 0, the row shown as active);
+  - CLI forget: refused ambiguous, but without the `approved, not yet polled` state.
+- **e2e window.** `joinApprovedHeld` stops B's fetcher before `host approve` and starts it again after the check. In that window, `keyroster host forget web1` must be refused `forget_name_ambiguous`, naming A's `--identity` and `approved, not yet polled`. E2E run **40941045281** on `c296d33` shows it on both lanes, for example on 10.5p1: `keyroster host forget web1 before B polled (refused):` with `agent SHA256:ocgA…I3Q: approved, not yet polled (enrolled as web1, directory entry web1)`. After B's first poll, the existing ambiguity step and the forget by identity pass as before (`--- PASS: TestAgentReenrollEndToEnd`, 19.01 s on 10.5p1 and 17.16 s on 9.5p1).
+- **Compatibility.** The CLI decodes admin answers strictly (`DisallowUnknownFields`). A CLI older than this server refuses a hosts/status answer that holds such a row. Server and CLI ship together (unreleased); 03-08c inherits the field.
+
+### [4] The directory entry name in host forget
+
+- **Change.** Candidates from host status keep `HostStatusRow.Name` (the entry holding the agent's keys) as `EntryName`, next to the enrollment name.
+- **Output.** The listing reads `(enrolled as web1, directory entry db1)`, and the refusal names `keyroster host remove db1`.
+- **RED on `08da89a`:** `the directory approves agent SHA256:IiIi… now (host entry web1): remove the host first (keyroster host remove)…`.
+
+### [6] host_not_enrolled and the runbook's test claim
+
+- **Test.** `TestHostForget/not_enrolled_explained` answers 404 `host_not_enrolled` and checks the CLI's text.
+- **Coverage only.** The mapping already existed, so there is no behavioural RED. The mutant that drops the mapping case was killed by the new test.
+- **Runbook.** host-setup.md now names, per refusal, the server test and the CLI test that run it. `host_in_directory` and `host_not_enrolled` run in `TestAgentRemoval` on the server, and the CLI mappings run in `TestHostForget`/`TestHostForgetHostGone`.
+
+### D-R3 The 03-16 forget drill runs the same-machine order
+
+03-16-PLAN.md:
+- **The drill.** The forget drill's re-enrollment runs host-setup.md's same-machine order, keeping both `identity.key` and the sshd host keys. It records that the agent came back with the same identity and host keys and stayed pending (fetcher `not_approved`) until `host approve`. The `forget` line gains `same_identity=`, `same_host_keys=` and `pending_until_approved=`, and its acceptance requires all three to be yes.
+- **Labels.** The runbook keeps that order UNVERIFIED until the drill runs.
+
+### Refuted, no action
+
+- The forget checks `host_in_directory` against a directory read before the delete: 03-08c moves the decision into the signer.
+- The forget request carries neither the name nor the enrolment time: the token in `DeleteAgentIf` binds the enrollment.
+
+### Owner attention
+
+1. **D-R1's invalidation is implemented on what is in force, not on the literal host_status rule.**
+   - **The literal text.** "A host_status other than removed/disabled" would clear a confirmation on `host_keys_rotated`. That is exactly what the confirmed old agent of the re-enroll flow reports once the new agent is approved under its name (last-good principals kept, and none after the applied removal; CI shows `host_keys_rotated, 2 files`). The literal rule would make step 5 of `TestAgentReenrollEndToEnd` need `--host-gone` and break must_haves truth 3.
+   - **What was implemented.** A clear happens on a `principals/` file, a truncated file list, or an `ok` apply that rendered an active entry (empty `host_status`). That covers finding 0. It does not clear on `host_keys_rotated`/`host_keys_disagree` without a principals file, nor on a refused or failed apply, which changes no file.
+   - **For the owner.** Please confirm this reading, or decide that the literal rule applies and the re-enroll flow then needs `--host-gone`.
+2. **[Rule 2] The seq guard on the confirmation writes** (above) is an addition that D-R1's invalidation needs to be race-free. It changes `RecordRemovalConfirmed`'s signature.
+
+### For 03-08c (reconcile in its plan)
+
+- **serverdb signatures.** Every writer now takes a `serverdb.AgentKey` (`a.Key()`) instead of `(id, spki)`:
+  - `DeleteAgentIf(ctx, k, facts)`;
+  - `RecordRemovalConfirmed(ctx, k, hbSeq, removedVersion, version, sha)`;
+  - the new `ClearRemovalConfirmed(ctx, k, hbSeq)`.
+
+  The function names are unchanged, so 03-08c's precondition grep `func (d *DB) DeleteAgentIf(` still matches. Its relay must delete with the key of the row it read.
+- **A confirmation is no longer monotonic.** It can be cleared between the admins' signatures and the delete, when the host shows principals again. `DeleteAgentIf` then refuses, and 03-08c's `forget_logged_not_deleted` (fail-safe) becomes more reachable than its plan assumes.
+- **The forget request's JSON and `ForgetFacts` are unchanged**, as are the served rows' `removal_version` and `removal_confirmed`.
+- **Host status rows can carry `not_yet_polled`**, and forget's target resolution includes them. Candidates from host status carry the entry name separately from the enrollment name. 03-08c-PLAN.md:269 "keeps 03-08b's target resolution" inherits both.
+
+### What ran
+
+- **WSL (Ubuntu, Go 1.27.3), on `c296d33`'s tree:** the full gate, exit 0.
+  - gofmt was called by absolute path (`$(go env GOROOT)/bin/gofmt`) inside a script, with a positive control: a misformatted file in a temporary directory had to be listed, and was. `gofmt -l .` was then empty. This fixes deviation 11's vacuous step.
+  - `CGO_ENABLED=1 go test -race -count=1 ./...`: every package ok.
+  - `go vet ./...`, with `-tags e2e` and with `-tags "e2e systemdsmoke"`.
+  - golangci-lint: 0 issues for linux, windows and darwin.
+  - capslock-check (92/37/23, equal to the baseline), dep-firewall, testonly-firewall (6 combinations) and check-pinned-actions (47).
+- **Windows (Go 1.27.3):** the package tests after each change, the mutants, and `GOOS=linux go vet -tags e2e` of the e2e package.
+- **CI:**
+  - E2E run 40938179992 (dispatched) on `6fbc083`: both lanes green, no `--- FAIL`.
+  - Every workflow of the PR on `c296d33` is green: CI 40941045279, E2E 40941045281 (both lanes; `TestAgentEnrollEndToEnd`, `TestAgentReenrollEndToEnd` and `TestAgentStatusEndToEnd` pass, no `--- FAIL`), E2E distro 40941045296, E2E TPM 40941045287, E2E PKCS#11 40941045292, Systemd 40941045288, PIV 40941045290, CodeQL 40941045300, PR title 40941045294, Workflow lint 40941045280.
+  - This file's docs commit reruns them; the handback names the final head.
+
+**Not run, and UNVERIFIED:**
+- the e2e tests locally (WSL cannot resolve `keyroster.localhost`);
+- every homelab step, until 03-16, the same-machine re-enroll order included (D-R3).
+
+### Self-check (fix round 1): PASSED
+
+- **Commits.** `da76092`, `6fbc083`, `08da89a`, `d755686`, `1d99c61` and `c296d33` are ancestors of HEAD. Each is SSH-signed by keyroster-bot and has no attribution lines.
+- **Staged paths.** No commit stages `.planning/config.json`, `.planning/milestone.lock`, `.planning/state.json` or any `.review-diagnostics/`.
+- **Original metrics.** The `actuals` above are the original plan's and are left as they were.
 
 ## Self-Check: PASSED
 
