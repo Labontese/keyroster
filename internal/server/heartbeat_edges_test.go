@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
+	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
 )
 
@@ -252,4 +253,75 @@ func TestIdentityRotationRecorded(t *testing.T) {
 	if row["identity_rotations"] != float64(1) || row["identity_rotated_at"] != t0.UTC().Format(time.RFC3339) {
 		t.Fatalf("after a rotation: identity_rotations %v, identity_rotated_at %v", row["identity_rotations"], row["identity_rotated_at"])
 	}
+}
+
+// TestAgentLimitAcrossRotation (PR #72 review C10, C15): the enrolled
+// agent's rate limit is its row's, so an identity rotation buys it no new
+// budget, and a row rotates at most once an hour, so no single agent can
+// drain the shared agent budget.
+func TestAgentLimitAcrossRotation(t *testing.T) {
+	e := newAgentEnv(t, true)
+	e.s.agentLimit, e.s.agentAnonLimit = newAgentLimiters()
+	id, _ := e.approvedAgent(t)
+	for i := range agentBurst - 1 {
+		if rec := e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil); rec.Code != http.StatusOK {
+			t.Fatalf("state request %d: %d %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	nid, spki := newIdentityKey(t)
+	if rec := e.rotateIdentity(t, id, spki); rec.Code != http.StatusOK {
+		t.Fatalf("the rotation (the burst's last token): %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := e.agentDo(t, nid, http.MethodGet, serverclient.AgentStatePath, nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("the rotated identity's first state request with the row's burst spent: %d, want 429", rec.Code)
+	}
+	// A minute refills 30 tokens; the row still may not rotate again.
+	e.clock.set(e.clock.Now().Add(time.Minute))
+	_, spki2 := newIdentityKey(t)
+	rec := e.rotateIdentity(t, nid, spki2)
+	if rec.Code != http.StatusTooManyRequests || apiError(rec) != serverclient.AgentErrRotationTooSoon || rec.Header().Get("Retry-After") != "3540" {
+		t.Fatalf("a second rotation a minute later: %d %s (Retry-After %q)", rec.Code, rec.Body.String(), rec.Header().Get("Retry-After"))
+	}
+	// Churning the row cannot spend the global budget for others.
+	for range 200 {
+		x, s := newIdentityKey(t)
+		e.rotateIdentity(t, nid, s)
+		e.agentDo(t, x, http.MethodGet, serverclient.AgentStatePath, nil)
+		e.agentDo(t, nid, http.MethodGet, serverclient.AgentStatePath, nil)
+	}
+	other, hosts := newAgentID(t), hostSigners(t, 1)
+	// From another address: the unknown identities above spent the
+	// anonymous class of this one.
+	const addr = "198.51.100.9:40000"
+	if rec := e.agentDoFrom(t, other, addr, http.MethodPost, serverclient.AgentEnrollPath, enrollBody(t, other, e.mustMint(t, "web2", 0).Token, hosts)); rec.Code != http.StatusAccepted {
+		t.Fatalf("enroll web2: %d %s", rec.Code, rec.Body.String())
+	}
+	e.installDir(t, e.webEntry2(t, "web1"), hostEntry("web2", hosts))
+	for i := range agentBurst {
+		if rec := e.agentDoFrom(t, other, addr, http.MethodGet, serverclient.AgentStatePath, nil); rec.Code != http.StatusOK {
+			t.Fatalf("another agent's state request %d: %d %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	// An hour after the rotation the row may rotate again.
+	e.clock.set(e.clock.Now().Add(time.Hour))
+	if rec := e.rotateIdentity(t, nid, spki2); rec.Code != http.StatusOK {
+		t.Fatalf("a rotation an hour later: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// webEntry2 is the directory entry named name of the enrolled agent
+// whose expected name it is.
+func (e *agentEnv) webEntry2(t *testing.T, name string) directory.Host {
+	t.Helper()
+	agents, err := e.s.db.ListAgents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range agents {
+		if a.ExpectedName == name {
+			return directory.Host{Name: name, HostGroup: "lab", Keys: a.HostKeys, Principals: []string{name}, Status: directory.StatusActive}
+		}
+	}
+	t.Fatalf("no agent named %s", name)
+	return directory.Host{}
 }

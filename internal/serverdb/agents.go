@@ -294,17 +294,28 @@ func (d *DB) SetAgentRemovedVersion(ctx context.Context, id int64, version uint6
 	return nil
 }
 
+// RotationEvery is how often one agents row may rotate its identity (PR
+// #72 review C10, C15): a row cannot churn identities.
+const RotationEvery = time.Hour
+
+// ErrRotationTooSoon is a rotation less than RotationEvery after the
+// row's last one.
+var ErrRotationTooSoon = errors.New("identity_rotation_too_soon")
+
 // RotateAgentIdentity replaces agent id's identity SPKI hash oldSPKI by
 // newSPKI (03-08, AGENT-02) and records the rotation at nowUS
-// (identity_rotated_at_us, identity_rotations; owner decision D-R1). It
-// is ErrNotFound when the row no longer holds oldSPKI (a concurrent
-// rotation), ErrIdentityInUse when another agent holds newSPKI.
+// (identity_rotated_at_us, identity_rotations; owner decision D-R1), in
+// one conditional UPDATE. It is ErrRotationTooSoon within RotationEvery
+// of the row's last rotation, ErrNotFound when the row no longer holds
+// oldSPKI (a concurrent rotation), ErrIdentityInUse when another agent
+// holds newSPKI.
 func (d *DB) RotateAgentIdentity(ctx context.Context, id int64, oldSPKI, newSPKI []byte, nowUS int64) error {
 	if len(newSPKI) != 32 {
 		return errors.New("serverdb: incomplete identity")
 	}
 	res, err := d.db.ExecContext(ctx, `UPDATE agents SET identity_spki_sha256 = ?, identity_rotated_at_us = ?, identity_rotations = identity_rotations + 1
-WHERE id = ? AND identity_spki_sha256 = ?`, newSPKI, nowUS, id, oldSPKI)
+WHERE id = ? AND identity_spki_sha256 = ? AND (identity_rotated_at_us IS NULL OR identity_rotated_at_us <= ?)`,
+		newSPKI, nowUS, id, oldSPKI, nowUS-RotationEvery.Microseconds())
 	if err != nil {
 		var se *sqlite.Error
 		if errors.As(err, &se) && se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
@@ -312,7 +323,18 @@ WHERE id = ? AND identity_spki_sha256 = ?`, newSPKI, nowUS, id, oldSPKI)
 		}
 		return fmt.Errorf("serverdb: rotate agent identity: %w", err)
 	}
-	return oneRow(res)
+	if err := oneRow(res); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	var one int
+	err = d.db.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ? AND identity_spki_sha256 = ?`, id, oldSPKI).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrNotFound
+	case err != nil:
+		return fmt.Errorf("serverdb: agent: %w", err)
+	}
+	return ErrRotationTooSoon
 }
 
 // ErrStaleHeartbeat is a heartbeat whose seq is not above the stored one,

@@ -136,6 +136,9 @@ const (
 	// heartbeat.MaxSeqAhead beyond the server's clock (400): it stores
 	// nothing but the clock offset (owner decision D-R2, PR #72 review).
 	AgentErrHeartbeatSeqFuture = "heartbeat_seq_future"
+	// AgentErrRotationTooSoon is a rotation within an hour of the row's
+	// last one (429 with Retry-After; PR #72 review C10, C15).
+	AgentErrRotationTooSoon = "identity_rotation_too_soon"
 	// AgentErrIdentitySig is a rotation whose signature does not verify
 	// under the current identity, or whose new SPKI is not an Ed25519
 	// key other than the current one (403).

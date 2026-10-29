@@ -789,6 +789,7 @@ arrive](#how-fast-changes-arrive)).
 | `stale_heartbeat` | server | The heartbeat's seq is not above the stored one: the usual answer between the applier's status writes | None: the fetcher logs nothing for it |
 | `heartbeat_field_invalid` | fetcher log, server log | A status field broke its rule; the answer names the field | Escalate: the agent wrote, or something changed, a status the server refuses |
 | `fetch_dir_not_owned` | fetcher | The fetcher runs as another user than its directory's owner (root running `--rotate-identity`) | `sudo -u keyroster-agent keyroster-agent-fetch ...` |
+| `identity_rotation_too_soon` (429) | `--rotate-identity` | The agent rotated its identity less than an hour ago; one agent rotates at most once an hour, and its rate limit is the agent's, whatever its identity (PR #72 review) | Wait for `Retry-After`; an unplanned earlier rotation is [An unexpected identity rotation](#running-the-agent) |
 | `install_no_service_manager`, `install_no_sshd_config_d` | install | Neither systemd nor OpenRC found; no `/etc/ssh/sshd_config.d` on a systemd host | [Running the agent](#running-the-agent) |
 | `install_path_unsafe`, `install_pins_differ` | install | See step 2 | Fix the path; for other pins, remove the agent's state first |
 

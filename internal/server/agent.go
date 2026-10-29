@@ -32,9 +32,9 @@ const (
 	// maxAgentEnrollBody bounds an enrollment request: eight host keys,
 	// their signatures and the facts fit in a few KiB.
 	maxAgentEnrollBody = 16 << 10
-	// agentPerMinute and agentBurst are the per-identity rate of the state
-	// route for enrolled agents; the global backstop is agentGlobalFactor
-	// times them. The burst is the fetcher's rounds per poll, so a host
+	// agentPerMinute and agentBurst are the per-agent rate (per agents row,
+	// whatever its identity) of the routes of enrolled agents; the global
+	// backstop is agentGlobalFactor times them. The burst is the fetcher's rounds per poll, so a host
 	// catching up through `more` is never refused inside one poll (PR #71
 	// review F4).
 	agentPerMinute    = 30
@@ -50,9 +50,9 @@ const (
 
 // newAgentLimiters returns the two limiter classes of the agent routes
 // (PR #71 review F1/F2). A self-signed identity costs nothing to make, so
-// it buys no budget: only an enrolled agent's state requests are charged
-// to agent, per identity (the client certificate's SPKI hash) with its
-// global backstop; enrollment and state requests from an identity no
+// it buys no budget: only an enrolled agent's requests are charged to
+// agent, per agents row (which an identity rotation keeps, PR #72 review
+// C10) with its global backstop; enrollment and state requests from an identity no
 // agents row names are charged to anon, per client address (clientKey)
 // with a global backstop of its own. No amount of unknown traffic can
 // then spend the budget enrolled agents poll with.
@@ -137,7 +137,7 @@ type agentRequest struct {
 // The agent is looked up before any rate limit is charged (PR #71 review
 // F1/F2): an identity no agents row names is charged to the anonymous
 // class by its client address, and only an enrolled one to the agent
-// class by its identity.
+// class by its agents row.
 func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *agentRequest)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -163,7 +163,9 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 			s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 			return
 		}
-		if !s.agentAllow(w, r, s.agentLimit, hex.EncodeToString(spki), "agent", agentFingerprint(spki)) {
+		// Charged to the row, which an identity rotation keeps, so a
+		// rotation buys no new budget (PR #72 review C10, C15).
+		if !s.agentAllow(w, r, s.agentLimit, strconv.FormatInt(a.ID, 10), "agent", agentFingerprint(spki)) {
 			return
 		}
 		dv, err := s.currentDirectory(ctx)
@@ -749,7 +751,9 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 // the new identity, so the old certificate gets 403 unknown_agent from
 // the next request on; another agent's identity is 409 identity_in_use.
 // Every rotation is logged at warning level and recorded on the row
-// (owner decision D-R1).
+// (owner decision D-R1); a row rotates at most once per
+// serverdb.RotationEvery (429 identity_rotation_too_soon with Retry-After,
+// PR #72 review C10, C15).
 func (s *Server) handleAgentIdentity(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
 	var req serverclient.AgentIdentityRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, serverclient.MaxAgentIdentityBody))
@@ -767,8 +771,16 @@ func (s *Server) handleAgentIdentity(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 	newSum := sha256.Sum256(req.NewSPKI)
-	err = s.db.RotateAgentIdentity(r.Context(), ar.agent.ID, ar.agent.IdentitySPKISHA256, newSum[:], s.clock().UnixMicro())
+	now := s.clock()
+	err = s.db.RotateAgentIdentity(r.Context(), ar.agent.ID, ar.agent.IdentitySPKISHA256, newSum[:], now.UnixMicro())
 	switch {
+	case errors.Is(err, serverdb.ErrRotationTooSoon):
+		wait := time.UnixMicro(ar.agent.IdentityRotatedAtUS).Add(serverdb.RotationEvery).Sub(now)
+		s.log.Warn("agent identity rotation refused", "agent", agentFingerprint(ar.agent.IdentitySPKISHA256), "reason", serverclient.AgentErrRotationTooSoon,
+			"client", clientAddr(r))
+		w.Header().Set("Retry-After", strconv.FormatInt(max(int64((wait+time.Second-1)/time.Second), 1), 10))
+		s.writeJSON(w, ar.status, http.StatusTooManyRequests, serverclient.APIError{Error: serverclient.AgentErrRotationTooSoon})
+		return
 	case errors.Is(err, serverdb.ErrIdentityInUse):
 		s.writeJSON(w, ar.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AgentErrIdentityInUse})
 		return
