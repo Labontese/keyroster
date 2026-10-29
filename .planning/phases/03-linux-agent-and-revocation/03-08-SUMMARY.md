@@ -19,7 +19,7 @@ provides:
 affects: [03-08b, 03-09, 03-10, 03-12, 03-14, 03-16]
 
 actuals:
-  tokens: 72000
+  tokens: 68038
   tasks: 3
   commits: 8
 plan_head_before: 74504cf98683a7a232ab64e49187d2d1f4963aaf
@@ -99,9 +99,9 @@ PR: **#72** (`p03/08-agent-operations`), opened without auto-merge. AGENT-07 and
 
 ## Owner attention first
 
-1. **A product bug found by the systemd smoke test, and fixed (commit `f3d142f`).** On Ubuntu 24.04's default socket-activated `ssh.service`, `/run/sshd` (sshd's privilege separation directory) exists only once a connection has started sshd, and `sshd -t`/`-T` refuse without it. The applier could not answer the enrollment: `sshd_T_failed: Missing privilege separation directory: /run/sshd`. After a boot it could neither apply nor check, and the first connection would start sshd with the trust files from before the boot, the revocations since then missing. The applier unit now runs `ExecStartPre=+/usr/bin/install -d -m 0755 -o root -g root /run/sshd` (outside its sandbox). The plan does not name this line; please confirm it. An alternative is to have the applier connect to sshd once to start it, which turns the self-test's loopback dial into a trigger. A hand-run `apply --once` on such a host before the unit ever ran still needs `install -d /run/sshd` first (host-setup.md says so).
-2. **Carry-over (b), as decided (D-1).** Forget refuses `host_removal_not_applied` until the host's newest heartbeat shows a committed directory version at or above `removed_dir_version`. `--host-gone` overrides it; the CLI prints the override and the server logs it at warning level with the admin's name. The removal version is the first version the server served the agent in which **no** entry holds its keys (a disabled entry does not count). That is the pre-merge advisor's catch: disabled at v3, applied, then removed at v4 would otherwise pass forget on a v3 heartbeat. `TestHostForgetWaitsForRemoval/disabled_first_then_removed_waits_for_the_removal` pins it. Quorum and the audit leaf are 03-08b's (T-03-282; the todo says "forget half: 03-08b").
-3. **Silence and clock skew follow D-2.** `silent` uses `last_seen_us`. Consequence: `clock_offset_s` (and so `clock_skew`) is the offset carried by the stored heartbeat, the one with the highest seq. Between status writes (up to 15 min) the fetcher's later offsets are in heartbeats the server refuses as stale. The fetcher logs a skew above 300 s at every poll; the server's flag can lag by up to one check period.
+1. **A product bug found by the systemd smoke test, and fixed (commit `f3d142f`).** On Ubuntu 24.04's default socket-activated `ssh.service`, `/run/sshd` (sshd's privilege separation directory) exists only once a connection has started sshd, and `sshd -t`/`-T` refuse without it. The applier could not answer the enrollment: `sshd_T_failed: Missing privilege separation directory: /run/sshd`. After a boot it could neither apply nor check, and the first connection would start sshd with the trust files from before the boot, the revocations since then missing. The applier unit now runs `ExecStartPre=+/usr/bin/install -d -m 0755 -o root -g root /run/sshd` (outside its sandbox). The plan does not name this line. **Fix round 1: kept by the owner (D-R3), an owner-approved deviation; `TestUnits/applier_unit` pins the exact line.** The alternative was to have the applier connect to sshd once to start it, which turns the self-test's loopback dial into a trigger. A hand-run `apply --once` on such a host before the unit ever ran still needs `install -d /run/sshd` first (host-setup.md says so).
+2. **Carry-over (b), as decided (D-1).** Forget refuses `host_removal_not_applied` until the host's newest heartbeat shows a committed directory version at or above `removed_dir_version`. `--host-gone` overrides it; the CLI prints the override and the server logs it at warning level with the admin's name. The removal version is the first version the server served the agent in which **no** entry holds its keys (a disabled entry does not count). It was found in self-review before the first commit: disabled at v3, applied, then removed at v4 would otherwise pass forget on a v3 heartbeat. `TestHostForgetWaitsForRemoval/disabled_first_then_removed_waits_for_the_removal` pins it. Quorum and the audit leaf are 03-08b's (T-03-282; the todo says "forget half: 03-08b").
+3. **Silence and clock skew follow D-2.** `silent` uses `last_seen_us`. Consequence: `clock_offset_s` (and so `clock_skew`) is the offset carried by the stored heartbeat, the one with the highest seq. Between status writes (up to 15 min) the fetcher's later offsets are in heartbeats the server refuses as stale. The fetcher logs a skew above 300 s at every poll; the server's flag can lag by up to one check period. **Fix round 1 (D-R2): superseded. The server now keeps the offset of every heartbeat that parses, stale ones included, so the flag no longer lags.**
 4. **capslock: keyroster-agent-fetch 21 -> 23 pairs, still no EXEC.**
    - New: READ_SYSTEM_STATE for `cmd/keyroster-agent-fetch` and `internal/agent/fetch` (`os.Getenv("JOURNAL_STREAM")` in `journalPrefix`, for the `<3>` priority of the clock_skew line), and REFLECT for `internal/serverclient` (`PostJSON` -> `encoding/json.Marshal`, from `AgentRotateIdentity`).
    - No longer reported: `internal/trust` REFLECT.
@@ -204,7 +204,7 @@ The first systemd run (40784522353) did not build the smoke test, and the second
 **Ran:**
 
 - **WSL (Ubuntu, Go 1.27.3), on copies built from `git ls-files -co --exclude-standard` or from `git archive` of the staged tree and of HEAD, removed afterwards:**
-  - the full gate on `fea5093`'s code: `CGO_ENABLED=1 go test -race -count=1 ./...` (every package passed); `go vet` for linux, windows and darwin, with `-tags e2e`, `-tags "e2e systemdsmoke"` and `-tags e2edistro`; gofmt; golangci-lint 0 issues for three GOOS (after the G703 annotation in `855f65b`); capslock-check (92/37/23); dep-firewall; testonly-firewall; check-pinned-actions;
+  - the full gate on `a1bc84a`'s code: `CGO_ENABLED=1 go test -race -count=1 ./...`; `go vet` for linux, windows and darwin, with `-tags e2e`, `-tags "e2e systemdsmoke"` and `-tags e2edistro`; gofmt; golangci-lint for three GOOS; capslock-check (92/37/23); dep-firewall; testonly-firewall; check-pinned-actions. It had two failures; their fixes were verified in CI, not by a second local run of the gate (corrected in fix round 1);
   - each commit's staged tree: vet and the agent, server and CLI unit tests;
   - the 33 mutants below;
   - `FuzzParseHeartbeat` and `FuzzParseStatus` for 20 s each with `-fuzzminimizetime 5s`: about 1.2 M and 0.9 M executions, no finding.
@@ -316,8 +316,8 @@ None.
 
 ## Open questions for the owner
 
-1. **The `/run/sshd` line** (Owner attention 1): keep the unit's `ExecStartPre=+`, or have the applier start a socket-activated sshd itself?
-2. **The clock-skew flag lags behind the fetcher's log** (Owner attention 3): acceptable, or store the latest offset of every authenticated heartbeat (also the stale ones) beside the body?
+1. **The `/run/sshd` line** (Owner attention 1): answered in fix round 1, D-R3: keep the unit's `ExecStartPre=+`.
+2. **The clock-skew flag lags behind the fetcher's log** (Owner attention 3): answered in fix round 1, D-R2: store the offset of every authenticated, parseable heartbeat.
 3. **Spool pruning** (03-07 open question 3) stays a pending todo by the owner's fix-round-1 decision. The 03-07 readiness line had named 03-08 for it.
 
 ## User Setup Required
@@ -331,6 +331,116 @@ None in this plan. On the homelab (03-16): run `systemctl enable --now` for both
 - **03-12:** the rotation gate reads `pending == null` and the committed versions (`Status.Committed`).
 - **03-16:** every UNVERIFIED item above.
 
+## Fix round 1 (PR #72 pre-merge review)
+
+The review ran at `b95a59f` against base `74504cf`: 18 findings confirmed (2 of 2 skeptics each), one split (S1), two refuted. The owner decided D-R1 to D-R4; every other confirmed finding was fixed without an owner decision, except C18 (a pending todo). Each fix got a test that is RED on the head before it and GREEN after it (evidence below). No Go module was added.
+
+### Owner decisions
+
+- **D-R1, identity rotation (fixes C12): log it and show it.** Every rotation is logged at warning level (`agent identity rotated`) with the host, the old and new identity fingerprints and the client IP. The agents row records `identity_rotated_at_us` and `identity_rotations`. **Migration choice: the columns are added to 0006**, which has never been released: there is no tag, and 0006 is not on `origin/main` (`git log origin/main -- internal/serverdb/migrations/0006_heartbeats.sql` prints nothing). `keyroster host status` shows `identity rotated <age>` for a rotation in the last 7 days, and the JSON carries `identity_rotated_at` and `identity_rotations`. The fetcher logs `unknown_agent` at error level (`<3>` under journald, once, and Run does not log it again). host-setup.md gains "An unexpected identity rotation": the key may be stolen; re-enroll the host and forget the old row.
+- **D-R2, seq bound and clock offset (fixes C3, C11 and open question 2).**
+  - A seq more than an hour (`heartbeat.MaxSeqAhead`) beyond the server's clock is refused 400 `heartbeat_seq_future`, logged at warning level, and leaves the stored status alone.
+  - A lower seq is still 409 `stale_heartbeat`, and is logged as `heartbeat_seq_regressed` at most once an hour per agent. `host status` flags `seq_regressed` while the host is seen and its heartbeats since the stored one were lower. An equal seq stays quiet.
+  - The clock offset of every authenticated, parseable heartbeat is stored on the agents row (`clock_offset_s`), stale and future ones included, and `clock_skew` reads it. `silent` is still `last_seen_us`, and a status is still stored only on a higher seq.
+- **D-R3, `/run/sshd`:** `ExecStartPre=+/usr/bin/install -d -m 0755 -o root -g root /run/sshd` is kept. It is an owner-approved deviation from the plan, and `TestUnits/applier_unit` pins the exact line (a whole-line match, already at `b95a59f`).
+- **D-R4, authenticity of the heartbeat status (S1, split): a known residual, no code change.** Threat row **T-03-284** in 03-08-PLAN.md and the host-setup.md paragraph "What host status rests on" say:
+  - host status rests on the host's own report;
+  - a compromised unprivileged fetcher can report an applied KRL it withheld;
+  - the host still logs `krl_stale` at error level in its journal;
+  - a signed applier status is a possible later plan (pending todo `signed-applier-status`).
+
+### Finding → commit
+
+| Finding | Commit | What changed |
+|---|---|---|
+| C1 (high) | `fc8ce6c` | `requireAgent` refuses 403 `unknown_agent` when `TouchAgent` finds the row gone. `StoreHeartbeat` checks, in its transaction, that the row still exists with the request's identity (403 otherwise). `DeleteAgent` already deleted the heartbeat row in its transaction at `b95a59f`, so that part needed no change. `foreign_keys` stays off. |
+| D-R2 (C3, C11, Q2) | `4c60381` | seq bound, `heartbeat_seq_regressed`, `seq_regressed`, the offset on the agents row (0006: `clock_offset_s`, `seq_regressed_at_us`), and the applier's seq restart (deviation 3) |
+| D-R1 (C12) | `89e525c` | rotation log line, row fields (0006: `identity_rotated_at_us`, `identity_rotations`), host status line, the fetcher's error line, runbook section |
+| C10/C15 (high) | `c9e4ecf` | the agent limiter is keyed by the agents row ID; a row rotates at most once an hour (429 `identity_rotation_too_soon` with `Retry-After`, in the rotation's own conditional UPDATE) |
+| C9/C13 (high) | `6faf573` | `--rotate-identity` never replaces an `identity.next` it finds. It tries that key with a state request and promotes it when the server takes it. On `unknown_agent` it asks again for that same key. On any other failure it keeps the file and returns an error. The poll's recovery also keeps the file on a transient failure. |
+| C14 | `9be781a` | An active entry under the agent's expected name that holds entirely new keys is `keys_changed`, not a removal. No `removed_dir_version` is recorded, and it shows as `host_keys_changed (re-enroll), served until forget`. Forget needs `--host-gone`. |
+| C4/C5 | `89d672e` | Forget's wait requires all three: the reported directory is at or above the removal version, it is not above the current version, and its SHA-256 matches the server's directory under that number (the signer's copy for an older one). hosts/status carries the current SHA-256s. host status counts a host on a version, and marks a difference with `*`, by SHA-256 too. It flags `diverged` for a version above the current one, or the current number with other bytes. `Status.Committed` compares the SHA-256 (03-12's gate), and `Status.Diverged` is new. |
+| C2/C6 | `306dee5` | a STATUS column (the stored status's age); `status_stale` once the stored status is more than 2 × (15 min + 60 s) = 1920 s old while the host is seen |
+| C16 | `ab55814`, `4bf60c1` | a failed drift check writes a status with `last_check.error` (printable, at most 512 bytes, `drift` false), and the KRL's age is still logged; host status shows DRIFT `failed` and `check_failed` with the error |
+| C17 | `d4832e4` | every pending-marker write in `Transition` publishes a status under the apply lock Apply holds (`publishStatus`, `publishPending`). It runs no program, and sshd's version and settings are carried over. The KRL is still the one `current` names. |
+| C7 | `b02f579` | the fetcher's OpenRC script creates its log in `start_pre` (`checkpath -f -o keyroster-agent:keyroster-agent -m 0640 "/var/log/${RC_SVCNAME}.log"`), asserted by `TestUnits/openrc_scripts`; OpenRC stays UNVERIFIED until 03-16 |
+| C8 | `b02f579` | The fetcher unit's comment and the runbook table now say what the unit enforces: IPv4 and IPv6 sockets only, with no destination limit. No `IPAddressAllow` was added. |
+| D-R4 (S1), C18 todo | `79074b9` | T-03-284, host-setup.md paragraph, todos `signed-applier-status` and `page-host-status` |
+| docs, lint | `5ac2b86`, `a6e6e23` | the alert list (`seq_regressed`, `identity rotated <age>`, `clock_skew` from every heartbeat) and the refusal table (`heartbeat_seq_future`); `a6e6e23` clears gosec G115 on the applier's seq bound |
+| SUMMARY corrections | this file's fix-round commit | The "full gate" sentence now names `a1bc84a`, with its two failures and the CI verification. "Pre-merge advisor's catch" now reads "found in self-review before the first commit". `actuals.tokens` is 68038. |
+
+### Tests added (RED before, GREEN after)
+
+The RED runs were made on the head before each fix, with only the test (and, where needed, a new constant or test hook) added:
+
+- `TestHeartbeatAfterForget/in_flight_heartbeat_not_inherited`: `the forgotten agent's heartbeat: 200 {"seq":2}`. `row_gone_after_lookup_refused`: 200, want 403. (Uses the new nil-by-default hook `Server.afterAgentLookup`.)
+- `TestHeartbeatSeq/future_seq_refused`: `seq 9223372036854775807: 200`. `lower_seq_after_reset_flagged`, `equal_seq_not_flagged` and `offset_updates_on_stale`: the fields were missing (`clock_offset_s <nil>` after a stale heartbeat with offset 400). `TestStatus/seq_restarts_from_the_clock_after_running_ahead` (WSL): `seq 1793016000000001 ..., want the clock's 1793008800000000`.
+- `TestIdentityRotationRecorded`: `identity_rotations <nil>`. `TestUnknownAgentLoggedAtError` (WSL): the line was `keyroster-agent-fetch: ERROR state: ...unknown_agent`, without `<3>`. The `TestHostStatus` rotation line was a compile-error RED (new row fields).
+- `TestAgentLimitAcrossRotation`: `the rotated identity's first state request with the row's burst spent: 200, want 429`.
+- `TestIdentityRotation/rotation_answer_lost_then_rotated_again` (WSL): `HTTP 403 unknown_agent`. `rotation_retried_with_the_same_key`: the retry rotated to a new key. `rotation_kept_when_the_server_is_unreachable`: identity.next was replaced.
+- `TestRekeyedHostNotRemoved`: `removed_dir_version 2 for a re-keyed entry, want none`. `TestServedLine` was added GREEN.
+- `TestForgetGateChecksTheDirectory/version_above_current_refused` and `same_number_other_sha_refused`: forget answered 200. `TestHostStatusDiverged`: `directory v5 on 2/3 hosts`, and no `diverged`. `TestCommittedAndDiverged` was added GREEN.
+- `TestStatusStale`: `status_stale <nil>`. `TestHostStatusAge`: no STATUS column and no `status_stale`.
+- `TestRunPublishesFailedCheck` (WSL): no status after the failed check within 10 s. `TestHostStatusCheckFailed`: DRIFT showed `no`. The `TestValidate` `last_check.error` cases were added GREEN.
+- `TestStatus/pending_published_during_the_swap` (WSL): the outbox showed `pending none` at both swaps.
+- `TestUnits/fetcher_unit` and `openrc_scripts` (WSL): the comment claimed "the agent server only", and the script had no `checkpath`.
+
+Expected test changes, not regressions:
+- the forget tests that pass now send the directory's real SHA-256 (`e.hbAt`), not the fake `ab…`;
+- `TestHostStatus`'s answer carries the current SHA-256s;
+- the CLI's clock-skew line reads the row's `clock_offset_s`.
+
+### Deviations (fix round 1)
+
+1. **[Already present] C1, third part.** `DeleteAgent` deleted the heartbeat row in its transaction at `b95a59f`. Nothing changed there; `TestHeartbeatAfterForget` covers it with the other two parts.
+2. **[Interpretation, D-R2] A `heartbeat_seq_future` heartbeat stores its clock offset.** The owner's "every authenticated, parseable heartbeat" includes it, and a host whose clock runs more than an hour ahead is exactly the one whose `clock_skew` must show. Its status, seq and received_at are untouched.
+3. **[Rule 1, D-R2] The applier restarts its seq from its clock when the previous seq is more than `MaxSeqAhead` beyond it.** Without that, a host whose clock once ran ahead and was then corrected would keep sending a future seq, refused, for as long as its clock had been ahead (decades for a typo'd year). The plan's `seq = max(previous + 1, now)` holds within the bound.
+4. **[Design, D-R2] The rate limit uses the database.** `heartbeat_seq_regressed` is logged at most once an hour per agent through `agents.seq_regressed_at_us`, which is set when it is unset, older than the stored heartbeat, or an hour old; that holds across server restarts. `seq_regressed` is "that column is later than the stored heartbeat's `received_at`, and the host is not silent".
+5. **[Interpretation, D-R1] "Unknown or not enrolled (403)" is `unknown_agent`.** `not_approved` stays the fetcher's quiet "waiting for approval" line.
+6. **[Design, C10/C15] The rotation limit is the row's `identity_rotated_at_us`** (one rotation per hour), checked in the same conditional UPDATE as the rotation. It answers 429 `identity_rotation_too_soon` with `Retry-After`.
+7. **[Design, C9] "Ask the server which SPKI it accepts" is a state request with identity.next** (no new route: AGENT-02's operation set is closed, and `TestAgentMuxRoutes` pins four routes). A `not_approved` answer for that key also means the server holds it.
+8. **[Limit, C14] The agent's directory name is its expected name**, the name `host approve` gives its entry. An agent whose entry was added by hand under another name and then fully re-keyed still counts as removed, as before.
+9. **[Design, C4] An older reported version is checked against the signer's copy** (`GetDirectoryVersion`). A signer that cannot answer makes forget refuse with 503; forget never guesses.
+10. **[Design, C5] `diverged` is computed by the CLI** from the answer, which now carries the current SHA-256s, like the convergence counts it belongs to. `silent`, `status_stale` and `seq_regressed` are server flags on the server's clock. `Status.Committed` now takes `heartbeat.Doc`s, and its two e2e callers pass `HostVersions.Docs()`.
+11. **[Schema, C16] `last_check` gains an optional `error`.** It is printable ASCII within 512 bytes, `drift` is never set beside it, and it is validated on both sides, as the closed-struct rule asks.
+12. **[Scope, C17] The one-step (collapsed) swap also publishes its `final` marker.**
+13. **[Test fix] `TestHostStatusAge` (added in `306dee5`) matched "12s ago"**, which a run slower than a second turns into 13s. It failed once on Windows, and `ab55814` loosens the match.
+
+### What ran and what did not (fix round 1)
+
+**Ran:**
+
+- **WSL (Ubuntu, Go 1.27.3), on a `git archive` copy of `5ac2b86`, removed afterwards:**
+  - `CGO_ENABLED=1 go test -race -count=1 ./...`: every package passed, with no data race;
+  - `go vet` for linux, windows and darwin, and with `-tags e2e`, `-tags "e2e systemdsmoke"` and `-tags e2edistro`;
+  - the `e2e systemdsmoke` test binary built (`go test -run XXX_build_only`);
+  - gofmt, dep-firewall, testonly-firewall and check-pinned-actions;
+  - capslock-check: keyroster-signer 92, keyroster-agent 37, keyroster-agent-fetch 23 pairs, all equal to the baseline, and EXEC still leaves the module only through execsite (2 edges). **No capslock delta in fix round 1.**
+  - golangci-lint found one issue, gosec G115 in `status.go`, fixed in `a6e6e23`. On a copy of the tree with that fix it then reported 0 issues for linux, windows and darwin, and `TestStatus` passed again.
+- **WSL, on copies of the working tree, removed afterwards:**
+  - each fix's RED and GREEN runs for `internal/agent/apply` and `internal/agent/fetch`;
+  - `go vet` and `go test ./internal/agent/... ./cmd/keyroster-agent/` on the tree of `d4832e4`: every package passed.
+- **Windows (Go 1.27.1):**
+  - after each commit: `go vet ./...` and the server, serverdb, serverclient, heartbeat and CLI tests;
+  - `go test ./...` on the final tree: every package passed except `internal/agent/paths` `TestAllowed`. It fails on Windows at `b95a59f` too, because its paths are POSIX, and no CI lane runs that package on Windows. It is pre-existing and was not touched.
+- **CI on the new head:** see the handback (the e2e, systemd and required checks).
+
+**Not run here:**
+
+- The e2e tests (`TestAgentStatusEndToEnd`, `TestAgentEnrollEndToEnd`) and the systemd smoke test (`TestAgentSystemdSmoke`) did not run locally: WSL cannot resolve `keyroster.localhost`. They run in CI on the new head. They are the first runs of the SHA-256 convergence (C5) against a real agent: `Committed` now needs the agent's SHA-256 of `accepted/`'s bundle and directory, and of the generation's KRL, to equal the server's of the bytes it serves.
+
+**UNVERIFIED (fix round 1):**
+- the OpenRC `start_pre`/`checkpath` line (OpenRC is UNVERIFIED until 03-16);
+- re-enrolling a host after an unexpected identity rotation, and re-enrolling a re-keyed host (runbook steps; no test runs them, on CI or a host);
+- every fix-round behaviour on a real host (03-16).
+
+### Not fixed in this round
+
+- **C18, `host status` has no paging** (low; it fails loudly above the CLI's 4 MiB cap): pending todo `2026-10-29-page-host-status.md`.
+- **Spool pruning**: still the pending todo of #71's fix round 1.
+- **`TestFetch/more_repolls_immediately`** can flake under WSL load (900 ms bound, Issues Encountered above); it is noted only.
+- **Refuted, so not changed:** "rotation needs no proof of possession of the new key", and "the runbook names a file the agent never writes".
+
 ## Self-Check: PASSED
 
 - **Files.** Every created key file exists; `test/systemd/agent-smoke.sh` is tracked with mode 100755.
@@ -338,3 +448,9 @@ None in this plan. On the homelab (03-16): run `systemctl enable --now` for both
 - **Task 1 acceptance.** TestAgentStatusEndToEnd's log shows `KRL v1793228727 on 1/1 hosts`, silent only past 180 s, and a login while `krl_stale` is set. `grep -n stale_heartbeat internal/server/agent.go` and `grep -n heartbeat_field_invalid internal/server/agent.go` print the refusals. `grep -rn clock_offset_ms internal cmd` prints nothing.
 - **Task 2 acceptance.** Every named case exists and passes. `TestAgentMuxRoutes` lists exactly POST enroll, GET state, POST heartbeat, POST identity.
 - **Task 3 acceptance.** The systemd job's log shows the certificate login, every refused cross-user write with the one allowed spool write, and both `systemd-analyze security` results under their thresholds. `grep -n 'apply --once' docs/runbooks/host-setup.md` prints the Phase 2 adoption step in "Running the agent". The PR is open without auto-merge.
+
+## Fix round 1 self-check: PASSED
+
+- **Commits.** `fc8ce6c`, `4c60381`, `89e525c`, `c9e4ecf`, `6faf573`, `9be781a`, `89d672e`, `306dee5`, `ab55814`, `d4832e4`, `4bf60c1`, `b02f579`, `79074b9`, `5ac2b86` and `a6e6e23` are ancestors of HEAD: 15 commits from `b95a59f`, and this file's commit makes 16. Each is SSH-signed by keyroster-bot (`%G?` = G against the bot's allowed signer) and has no attribution lines.
+- **Files.** `.planning/todos/pending/2026-10-29-signed-applier-status.md` and `2026-10-29-page-host-status.md` exist. T-03-284 is in 03-08-PLAN.md's threat register.
+- **No private address or host name** in any staged diff (checked before each commit).
