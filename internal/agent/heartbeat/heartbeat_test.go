@@ -57,6 +57,8 @@ func TestValidate(t *testing.T) {
 		{"last_apply.detail", func(s *Status) { s.LastApply.Detail = "a:b:c" }},
 		{"last_apply.host_status", func(s *Status) { s.LastApply.HostStatus = "host_gone" }},
 		{"last_check.at", func(s *Status) { s.LastCheck.At = "" }},
+		{"last_check.error", func(s *Status) { s.LastCheck.Error = "sshd_T_failed: \x1b[2J" }},
+		{"last_check.error", func(s *Status) { s.LastCheck.Error, s.LastCheck.Drift = "sshd_T_failed: x", true }},
 		{"pending.step", func(s *Status) { s.Pending.Step = "" }},
 		{"stuck", func(s *Status) { s.Stuck = "stuck" }},
 		{"seq", func(s *Status) { s.Seq = 0 }},
