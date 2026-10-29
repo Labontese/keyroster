@@ -593,13 +593,15 @@ func (e *engine) loadMarker() (*marker, error) {
 // intermediate M is written and checked, the marker {from, to, M,
 // intermediate} written, the narrowing swap to M made at once, the marker
 // rewritten with step final, and the widening swap to to made by
-// swapCurrent's timing rule.
+// swapCurrent's timing rule. Each marker write is followed by a status
+// that shows the swap pending (publishPending, PR #72 review C17).
 func (e *engine) Transition(ctx context.Context, from, to *Generation, mode swapMode) (uint64, error) {
 	m, collapsed := Intermediate(from, to)
 	if collapsed {
 		if err := e.writeMarker(from.N, to.N, 0, "final"); err != nil {
 			return 0, err
 		}
+		e.publishPending(ctx)
 		return 0, e.swapCurrent(ctx, to, mode)
 	}
 	m.N = e.allocGeneration()
@@ -612,12 +614,14 @@ func (e *engine) Transition(ctx context.Context, from, to *Generation, mode swap
 	if err := e.writeMarker(from.N, to.N, m.N, "intermediate"); err != nil {
 		return m.N, err
 	}
+	e.publishPending(ctx)
 	if err := e.swapCurrent(ctx, m, swapChecked); err != nil {
 		return m.N, err
 	}
 	if err := e.writeMarker(from.N, to.N, m.N, "final"); err != nil {
 		return m.N, err
 	}
+	e.publishPending(ctx)
 	return m.N, e.swapCurrent(ctx, to, mode)
 }
 

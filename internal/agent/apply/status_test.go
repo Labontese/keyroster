@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -214,6 +215,48 @@ func TestStatus(t *testing.T) {
 		if s.Generation != from || s.Pending.From != from || s.Pending.Step != heartbeat.StepFinal || s.Directory.Version != 1 {
 			t.Fatalf("mid-swap: generation %d (want the committed %d, not the intermediate %d), pending %+v, directory %d",
 				s.Generation, from, s.Pending.Intermediate, s.Pending, s.Directory.Version)
+		}
+	})
+	t.Run("pending_published_during_the_swap", func(t *testing.T) {
+		// PR #72 review C17: while a two-step swap runs (its widening
+		// wait can last LoginGraceTime), the outbox already says so.
+		h := newTestHost(t, newFixture(t))
+		withOutbox(t, h)
+		h.installed("role:ops")
+		from := h.current()
+		h.publishDir(h.spec("role:web"))
+		var seen []string
+		swaps := 0
+		h.cfg.Fault = func(p string) error {
+			if p == "swap" {
+				swaps++
+				b, err := os.ReadFile(filepath.Join(h.l.Outbox(), heartbeat.StatusFile))
+				if err != nil {
+					return err
+				}
+				s, err := heartbeat.ParseStatus(b)
+				if err != nil {
+					return err
+				}
+				step := "none"
+				if s.Pending != nil {
+					step = s.Pending.Step
+				}
+				seen = append(seen, fmt.Sprintf("swap %d: pending %s, generation %d", swaps, step, s.Generation))
+			}
+			return nil
+		}
+		h.mustApply()
+		h.cfg.Fault = nil
+		want := []string{
+			fmt.Sprintf("swap 1: pending intermediate, generation %d", from),
+			fmt.Sprintf("swap 2: pending final, generation %d", from),
+		}
+		if !slices.Equal(seen, want) {
+			t.Fatalf("the outbox at each swap: %q, want %q", seen, want)
+		}
+		if s := outboxStatus(t, h); s.Pending != nil || s.Generation == from {
+			t.Fatalf("after the apply: pending %+v, generation %d", s.Pending, s.Generation)
 		}
 	})
 	t.Run("stuck_is_reported_and_kept", func(t *testing.T) {

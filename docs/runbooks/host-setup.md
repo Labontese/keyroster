@@ -915,7 +915,9 @@ in the header only when it applied exactly that version, SHA-256 included,
 and no swap is pending. During 03-05's two-step
 swap the row shows `pending: intermediate` (or `final`, `commit`), which is
 not a failure: the versions are still the last committed ones until the
-final step and its self-test. A host removed, disabled or re-keyed in the
+final step and its self-test. The applier writes that status each time it
+writes the pending marker, so the row shows the swap during its widening
+wait too, which can last LoginGraceTime (PR #72 review). A host removed, disabled or re-keyed in the
 directory that is still served shows that on its own row (`removed, served
 until forget`), never as waiting for approval; so does `keyroster host
 pending`. A re-keyed host is one whose active entry under its name now

@@ -48,6 +48,10 @@ type StatusUpdate struct {
 	// CheckErr is the error of a check that failed (Checked set, Drift
 	// nil): the status says so in last_check.error (PR #72 review C16).
 	CheckErr error
+	// Swapping is the status a two-step swap writes at its pending marker
+	// (publishPending): nothing is run, sshd's version and settings are
+	// the previous status's (PR #72 review C17).
+	Swapping bool
 }
 
 // WriteStatus builds the host's status and writes it, under the apply
@@ -86,6 +90,13 @@ func WriteStatus(ctx context.Context, cfg Config, l Layout, u StatusUpdate) (*he
 		return nil, err
 	}
 	defer unlock()
+	return e.publishStatus(ctx, u)
+}
+
+// publishStatus builds the status and writes it to heartbeat.json and the
+// outbox; the caller holds the apply lock and has checked the outbox.
+func (e *engine) publishStatus(ctx context.Context, u StatusUpdate) (*heartbeat.Status, error) {
+	l := e.l
 	s, err := e.buildStatus(ctx, u)
 	if err != nil {
 		return nil, err
@@ -107,6 +118,26 @@ func WriteStatus(ctx context.Context, cfg Config, l Layout, u StatusUpdate) (*he
 		return nil, err
 	}
 	return s, nil
+}
+
+// publishPending writes the status while a two-step swap is in progress,
+// each time its pending marker is written (PR #72 review C17): the
+// widening wait can last LoginGraceTime, and the host must not look idle
+// or converged meanwhile. The versions stay the committed generation's
+// and the KRL the one current names, as for any status. It runs inside
+// Apply, under the apply lock Apply holds, and runs no program: sshd's
+// version and settings are carried from the previous status. A status
+// that cannot be written only delays what the host reports.
+func (e *engine) publishPending(ctx context.Context) {
+	if !e.locked || e.cfg.DryRun || e.stateFd < 0 {
+		return
+	}
+	if _, err := os.Lstat(e.l.Outbox()); err != nil {
+		return
+	}
+	if _, err := e.publishStatus(ctx, StatusUpdate{Swapping: true}); err != nil {
+		e.logf("WARNING writing %s during a swap: %v", filepath.Join(e.l.Outbox(), heartbeat.StatusFile), err)
+	}
 }
 
 // writeOutbox writes name in the outbox (spool.WriteFileAt, 0640).
@@ -239,8 +270,15 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 	if b, err := e.readDropIn(); err == nil && b != nil {
 		s.DropInSHA256 = trust.SHA256Hex(b)
 	}
-	s.SSHDVersion = heartbeat.Sanitize(e.sshdVersion(ctx), heartbeat.MaxText)
-	if d, err := e.sshdDump(ctx, ""); err == nil {
+	switch {
+	case u.Swapping:
+		if prev != nil {
+			s.SSHDVersion, s.Effective = prev.SSHDVersion, prev.Effective
+		}
+	default:
+		s.SSHDVersion = heartbeat.Sanitize(e.sshdVersion(ctx), heartbeat.MaxText)
+	}
+	if d, err := e.sshdDump(ctx, ""); err == nil && !u.Swapping {
 		s.Effective = heartbeat.Effective{
 			TrustedUserCAKeys:        heartbeat.Sanitize(d.One("trustedusercakeys"), heartbeat.MaxText),
 			RevokedKeys:              heartbeat.Sanitize(d.One("revokedkeys"), heartbeat.MaxText),
