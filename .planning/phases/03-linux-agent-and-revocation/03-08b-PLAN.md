@@ -151,7 +151,7 @@ Work on branch `p03/08b-forget-quorum` (Delivery protocol above).
 
 **serverdb.**
 - 0007_forget.sql adds the nullable `removal_confirmed_version INTEGER` and `removal_confirmed_sha256 BLOB` to agents; Agent and scanAgent carry them.
-- `RecordRemovalConfirmed(ctx, id, spki, version, sha)` sets both only while a removal version is recorded and no confirmation is, `WHERE id = ? AND identity_spki_sha256 = ?`.
+- `RecordRemovalConfirmed(ctx, id, spki, removedVersion, version, sha)` sets both only while the removal version the caller validated against is still the recorded one and no confirmation is: `WHERE id = ? AND identity_spki_sha256 = ? AND removed_dir_version = ? AND removal_confirmed_version IS NULL`. A removal re-recorded or cleared between the snapshot and the write (an entry holding the keys again, then a new removal) records nothing; the next heartbeat or `host pending` re-runs the rule. Test: `TestRemovalConfirmation/removal_changed_before_record` (RED if the `removed_dir_version = ?` term is dropped).
 - `SetAgentRemovedVersion(..., 0)` clears both.
 - A `ForgetFacts{ApprovedOnce bool; RemovalVersion uint64; ConfirmedVersion uint64; ConfirmedSHA256 []byte}` struct, and `DeleteAgentIf(ctx, id, spki, facts)`, which replaces DeleteAgent. In one transaction it deletes the heartbeat row and then the agents row with the statement in must_haves (NULL for an absent removal or confirmation; `IS ?` matches NULL). It rolls back and returns ErrNotFound when the agents row was not deleted.
 
