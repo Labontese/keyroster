@@ -120,7 +120,7 @@ func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 			Facts: f, EnrolledAt: time.UnixMicro(a.EnrolledAtUS).UTC().Format(time.RFC3339),
 		}
 		if a.ApprovedAtUS != 0 {
-			_, st := hostState(dv, a.HostKeys)
+			_, st := hostState(dv, a.HostKeys, a.ExpectedName)
 			out.Served = append(out.Served, serverclient.ServedHost{PendingHost: p, State: st})
 			continue
 		}
@@ -229,12 +229,14 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, dv.status, http.StatusOK, out)
 }
 
-// hostState is the directory state of an agent with host keys keys: the
-// name of the entry holding one of them, and HostStateActive when that
-// entry is active with exactly keys, HostStateDisabled when it is
-// disabled, HostStateKeysChanged when it is active with other keys; ""
-// and HostStateRemoved when no entry holds any of them.
-func hostState(dv *directoryView, keys []string) (string, string) {
+// hostState is the directory state of an agent with host keys keys and
+// the expected name name: the name of the entry holding one of them, and
+// HostStateActive when that entry is active with exactly keys,
+// HostStateDisabled when it is disabled, HostStateKeysChanged when it is
+// active with other keys. When no entry holds any of them, an active
+// entry named name was re-keyed (HostStateKeysChanged, PR #72 review
+// C14); otherwise "" and HostStateRemoved.
+func hostState(dv *directoryView, keys []string, name string) (string, string) {
 	if dv.dir == nil {
 		return "", serverclient.HostStateRemoved
 	}
@@ -255,6 +257,9 @@ func hostState(dv *directoryView, keys []string) (string, string) {
 		default:
 			return h.Name, serverclient.HostStateKeysChanged
 		}
+	}
+	if rekeyed(dv, name) {
+		return name, serverclient.HostStateKeysChanged
 	}
 	return "", serverclient.HostStateRemoved
 }
@@ -314,7 +319,7 @@ func (s *Server) handleHostsStatus(w http.ResponseWriter, r *http.Request) {
 		if a.ApprovedAtUS == 0 {
 			continue
 		}
-		name, st := hostState(dv, a.HostKeys)
+		name, st := hostState(dv, a.HostKeys, a.ExpectedName)
 		if name == "" {
 			name = a.ExpectedName
 		}

@@ -325,3 +325,37 @@ func (e *agentEnv) webEntry2(t *testing.T, name string) directory.Host {
 	t.Fatalf("no agent named %s", name)
 	return directory.Host{}
 }
+
+// TestRekeyedHostNotRemoved (PR #72 review C14): an active directory entry
+// under the agent's name that holds entirely new host keys is a re-keyed
+// host, not a removal. The applier keeps last-good's principals for it
+// (host_keys_rotated), so no removal version is recorded, the host shows
+// keys_changed (re-enroll), and forget needs --host-gone.
+func TestRekeyedHostNotRemoved(t *testing.T) {
+	e, id := polledAgent(t)
+	e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(1, 1)})
+	rekeyed := e.webEntry(t)
+	rekeyed.Keys = hostEntry("web1", hostSigners(t, 1)).Keys
+	v2 := e.installDir(t, rekeyed)
+	if rec := e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil); rec.Code != http.StatusOK {
+		t.Fatalf("state under the re-keyed entry: %d %s", rec.Code, rec.Body.String())
+	}
+	if agents, _ := e.s.db.ListAgents(t.Context()); agents[0].RemovedDirVersion != 0 {
+		t.Fatalf("removed_dir_version %d for a re-keyed entry, want none", agents[0].RemovedDirVersion)
+	}
+	if st := e.hostsStatus(t); st.Hosts[0].State != serverclient.HostStateKeysChanged || st.Hosts[0].Name != "web1" {
+		t.Fatalf("hosts/status for a re-keyed entry: %+v", st.Hosts[0])
+	}
+	rec := e.adminDo(t, http.MethodGet, serverclient.AdminPendingHostsPath, nil)
+	var p serverclient.PendingHostsAnswer
+	if json.Unmarshal(rec.Body.Bytes(), &p) != nil || len(p.Served) != 1 || p.Served[0].State != serverclient.HostStateKeysChanged || len(p.Hosts) != 0 {
+		t.Fatalf("host pending for a re-keyed entry: %d %s", rec.Code, rec.Body.String())
+	}
+	e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(2, v2)})
+	if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
+		t.Fatalf("forget of a re-keyed host: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := e.forgetGone(t, "web1"); rec.Code != http.StatusOK {
+		t.Fatalf("forget --host-gone of a re-keyed host: %d %s", rec.Code, rec.Body.String())
+	}
+}

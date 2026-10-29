@@ -916,7 +916,15 @@ not a failure: the versions are still the last committed ones until the
 final step and its self-test. A host removed, disabled or re-keyed in the
 directory that is still served shows that on its own row (`removed, served
 until forget`), never as waiting for approval; so does `keyroster host
-pending`. Convergence is the server's report of what each host said: run
+pending`. A re-keyed host is one whose active entry under its name now
+holds other host keys than the agent enrolled with: it shows
+`host_keys_changed (re-enroll), served until forget`. Its applier keeps
+the last good principals files (`host_keys_rotated`), so the server records
+no removal for it, and `keyroster host forget` needs `--host-gone` (PR #72
+review). To re-enroll it, forget the old agent with `--host-gone`, remove
+the entry (enrollment refuses host keys that are on an entry), and enroll
+the host again with a new join token (UNVERIFIED: no test runs this
+re-enrollment). Convergence is the server's report of what each host said: run
 `keyroster-agent check` on a host to see it there. The CLI refuses an
 answer whose fields do not check out, and prints nothing outside printable
 ASCII. (Run in CI: `TestHostStatus`, `TestHeartbeat`,

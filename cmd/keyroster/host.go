@@ -547,7 +547,7 @@ func servedLine(state string) string {
 	case serverclient.HostStateDisabled:
 		return "disabled, served until forget"
 	case serverclient.HostStateKeysChanged:
-		return "keys changed in the directory, served until forget"
+		return "host_keys_changed (re-enroll), served until forget"
 	}
 	return "removed, served until forget"
 }

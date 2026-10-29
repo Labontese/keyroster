@@ -215,3 +215,17 @@ func TestHostForgetHostGone(t *testing.T) {
 		}
 	})
 }
+
+// TestServedLine (PR #72 review C14): a re-keyed host is shown as one to
+// re-enroll, in host pending and host status alike.
+func TestServedLine(t *testing.T) {
+	for state, want := range map[string]string{
+		serverclient.HostStateKeysChanged: "host_keys_changed (re-enroll), served until forget",
+		serverclient.HostStateRemoved:     "removed, served until forget",
+		serverclient.HostStateDisabled:    "disabled, served until forget",
+	} {
+		if got := servedLine(state); got != want {
+			t.Errorf("servedLine(%s) = %q, want %q", state, got, want)
+		}
+	}
+}

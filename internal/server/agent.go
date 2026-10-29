@@ -185,7 +185,10 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		// removed, not just disabled or re-keyed) is recorded
 		// (removed_dir_version), so keyroster host forget can wait for the
 		// host's heartbeat to show it applied; a directory in which an
-		// entry holds them again clears it.
+		// entry holds them again clears it. An active entry under the
+		// agent's name with entirely new keys is a re-keyed host, not a
+		// removal: the applier keeps last-good's principals for it
+		// (host_keys_rotated), so nothing is recorded (PR #72 review C14).
 		switch {
 		case approved(dv, a.HostKeys):
 			if a.ApprovedAtUS == 0 {
@@ -205,7 +208,7 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		case a.ApprovedAtUS == 0:
 			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrNotApproved})
 			return
-		case hostHolds(dv, a.HostKeys):
+		case hostHolds(dv, a.HostKeys) || rekeyed(dv, a.ExpectedName):
 			if a.RemovedDirVersion != 0 {
 				if err := s.db.SetAgentRemovedVersion(ctx, a.ID, 0); err != nil {
 					s.log.Warn("agent removal version", "err", err)
@@ -252,6 +255,19 @@ func hostHolds(dv *directoryView, keys []string) bool {
 		}
 	}
 	return false
+}
+
+// rekeyed reports whether the directory dv holds an active host entry
+// named name (the agent's expected name, the one keyroster host approve
+// gave its entry): the caller found no entry holding any of the agent's
+// keys, so that entry was re-keyed. The applier, whose last entry is
+// still active, keeps last-good's principals (host_keys_rotated).
+func rekeyed(dv *directoryView, name string) bool {
+	if dv.dir == nil {
+		return false
+	}
+	h, ok := dv.dir.HostByName(name)
+	return ok && h.Status == directory.StatusActive
 }
 
 // approved reports whether the directory dv holds an active host entry
@@ -795,7 +811,7 @@ func (s *Server) handleAgentIdentity(w http.ResponseWriter, r *http.Request, ar 
 	// Owner decision D-R1 (PR #72 review C12): an unexpected rotation means
 	// the identity key may be stolen, so every one is a warning naming the
 	// host, both identities and where it came from; hosts/status shows it.
-	host, _ := hostState(ar.dir, ar.agent.HostKeys)
+	host, _ := hostState(ar.dir, ar.agent.HostKeys, ar.agent.ExpectedName)
 	if host == "" {
 		host = ar.agent.ExpectedName
 	}
