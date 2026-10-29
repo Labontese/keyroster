@@ -272,6 +272,9 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 		refuse(serverclient.AdminErrRemovalNotApplied)
 		return
 	}
+	if s.beforeForgetDelete != nil {
+		s.beforeForgetDelete()
+	}
 	switch err := s.db.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, facts); {
 	case errors.Is(err, serverdb.ErrNotFound):
 		refuse(serverclient.AdminErrForgetStateChanged)

@@ -813,36 +813,57 @@ func sameFingerprints(a, b []string) bool {
 	return slices.Equal(x, y)
 }
 
-// forgetCandidate is an agent host forget can name, from keyroster host
-// pending: a pending agent (never approved), or a served one with its
-// state, removal version and recorded confirmation (03-08b).
+// forgetCandidate is an agent host forget can name (03-08b): from
+// keyroster host pending, a pending agent (never approved) or a served one
+// with its state, removal version and recorded confirmation (Listed);
+// from keyroster host status, an agent the directory approves now, which
+// only makes a name ambiguous and cannot be forgotten before its entry is
+// removed.
 type forgetCandidate struct {
 	servedHostView
 	SPKIHex      string // the identity's SPKI SHA-256, lowercase hex, as the request carries it
 	ApprovedOnce bool
+	Listed       bool // in host pending's answer, with the facts a forget sends
 }
 
 // stateLine is how host forget shows a candidate's state.
 func (c *forgetCandidate) stateLine() string {
-	if !c.ApprovedOnce {
+	switch {
+	case !c.ApprovedOnce:
 		return "pending, never approved"
+	case !c.Listed:
+		return c.State + " in the directory (entry " + c.Name + ")"
 	}
 	return servedLine(c.State) + "; " + confirmationLine(&c.servedHostView)
 }
 
-// forgetCandidates are the agents of host pending's answer that host
-// forget can name: the pending ones and the served ones.
-func forgetCandidates(hosts []serverclient.PendingHost, served []servedHostView) ([]forgetCandidate, error) {
+// forgetCandidates are the agents host forget can name: the pending and
+// served agents of host pending's answer, then each agent of host status
+// that answer does not list (one the directory approves now).
+func forgetCandidates(hosts []serverclient.PendingHost, served []servedHostView, status *serverclient.HostsStatusAnswer) ([]forgetCandidate, error) {
 	var out []forgetCandidate
+	seen := map[string]bool{}
 	for _, h := range hosts {
 		v, err := checkPendingHost(h)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, forgetCandidate{servedHostView: servedHostView{pendingHostView: *v}, SPKIHex: h.IdentitySPKISHA256})
+		out = append(out, forgetCandidate{servedHostView: servedHostView{pendingHostView: *v}, SPKIHex: h.IdentitySPKISHA256, Listed: true})
+		seen[h.IdentitySPKISHA256] = true
 	}
 	for _, v := range served {
-		out = append(out, forgetCandidate{servedHostView: v, SPKIHex: identityHex(v.Identity), ApprovedOnce: true})
+		c := forgetCandidate{servedHostView: v, SPKIHex: identityHex(v.Identity), ApprovedOnce: true, Listed: true}
+		out = append(out, c)
+		seen[c.SPKIHex] = true
+	}
+	for _, r := range status.Hosts {
+		if seen[r.IdentitySPKISHA256] {
+			continue
+		}
+		spki, _ := hex.DecodeString(r.IdentitySPKISHA256) // checkHostsStatus checked it
+		v := pendingHostView{Name: r.ExpectedName, Identity: enroll.IdentityFingerprint(spki)}
+		out = append(out, forgetCandidate{servedHostView: servedHostView{pendingHostView: v, State: r.State}, SPKIHex: r.IdentitySPKISHA256, ApprovedOnce: true})
+		seen[r.IdentitySPKISHA256] = true
 	}
 	return out, nil
 }
@@ -864,10 +885,14 @@ func identityHex(fp string) string {
 // approved once keeps getting signed state after its host entry is
 // removed, so the removal and later revocations reach the host; forget
 // ends that. In order:
-//  1. it reads keyroster host pending (fetchPendingHosts): the pending and
-//     served agents, each checked;
-//  2. it picks the agent by --identity, or by NAME when exactly one agent
-//     has it;
+//  1. it reads keyroster host pending (fetchPendingHosts), the pending and
+//     served agents with the facts it sends, and keyroster host status,
+//     for the agents the directory approves now; each answer checked;
+//  2. it picks the agent by --identity, or by NAME when exactly one of
+//     those agents has it: a name more than one agent has is refused
+//     forget_name_ambiguous, listing each agent with its state and the
+//     --identity command that names it, and nothing is sent. An agent the
+//     directory approves now is refused: remove its entry first;
 //  3. an agent approved once without a recorded removal confirmation (its
 //     host's heartbeat never showed a directory that removed it) is
 //     refused here, host_removal_not_applied, unless --host-gone is given
@@ -910,7 +935,11 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if err != nil {
 		return err
 	}
-	cands, err := forgetCandidates(hosts, served)
+	status, err := fetchHostsStatus(ctx, s, pol)
+	if err != nil {
+		return err
+	}
+	cands, err := forgetCandidates(hosts, served, status)
 	if err != nil {
 		return err
 	}
@@ -983,10 +1012,24 @@ func pickForgetTarget(cands []forgetCandidate, name, id string) (*forgetCandidat
 		}
 	}
 	switch {
-	case len(match) == 1:
+	case len(match) == 1 && match[0].Listed:
 		return match[0], nil
+	case len(match) == 1 && match[0].State == serverclient.HostStateActive:
+		return nil, fmt.Errorf("the directory approves agent %s now (host entry %s): remove the host first (keyroster host remove), wait until the host "+
+			"confirmed that version, then forget it (docs/runbooks/host-setup.md \"Removing a host\"). Nothing was forgotten", match[0].Identity, match[0].Name)
+	case len(match) == 1:
+		return nil, fmt.Errorf("agent %s changed while host pending and host status were read; run the command again. Nothing was forgotten", match[0].Identity)
 	case len(match) > 1:
-		return nil, fmt.Errorf("%d agents are enrolled under the name %s; name one with --identity. Nothing was forgotten", len(match), name)
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s: %d agents are enrolled under the name %s, so the name does not say which one to forget; name it by its identity. Nothing was forgotten:", errForgetNameAmbiguous, len(match), name)
+		for _, c := range match {
+			fmt.Fprintf(&b, "\n  agent %s: %s", c.Identity, c.stateLine())
+			if c.EnrolledAt != "" {
+				fmt.Fprintf(&b, "; enrolled %s", c.EnrolledAt)
+			}
+			fmt.Fprintf(&b, "\n    %s", forgetCommand(c.Identity))
+		}
+		return nil, errors.New(b.String())
 	case id != "":
 		return nil, fmt.Errorf("no pending or served agent has the identity %s%s (keyroster host pending lists them; an agent the directory approves now is "+
 			"forgotten only after keyroster host remove). Nothing was forgotten", id, nameClause(name))
@@ -994,6 +1037,10 @@ func pickForgetTarget(cands []forgetCandidate, name, id string) (*forgetCandidat
 	return nil, fmt.Errorf("no pending or served agent is enrolled under the name %s (keyroster host pending lists them; a host the directory approves now is "+
 		"forgotten only after keyroster host remove). Nothing was forgotten", name)
 }
+
+// errForgetNameAmbiguous is host forget's refusal of a name more than one
+// agent has (03-08b); the CLI refuses it before it sends anything.
+const errForgetNameAmbiguous = "forget_name_ambiguous"
 
 // nameClause is " named NAME" for a given name.
 func nameClause(name string) string {

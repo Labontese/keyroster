@@ -208,7 +208,21 @@ func TestHostForgetHostGone(t *testing.T) {
 			t.Fatalf("exit %d: %s", code, stderr)
 		}
 	})
-	t.Run("host_gone_sent_and_printed", func(t *testing.T) {
+	t.Run("host_gone_dropped_when_confirmed", func(t *testing.T) {
+		confirmed := servedRow("web1", "00", key, true)
+		e := forgetEnv(t, nil, confirmed)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, confirmed.PendingHost), http.StatusOK)
+		code, out, stderr := run(t, "host", "forget", "web1", "--host-gone")
+		if code != 0 || !strings.Contains(stderr, "--host-gone dropped") || strings.Contains(out, "Forgotten with --host-gone") {
+			t.Fatalf("exit %d:\n%s%s", code, out, stderr)
+		}
+		var req serverclient.ForgetHostRequest
+		if json.Unmarshal(e.lastPost, &req) != nil || req.HostGone || req.RemovalConfirmed == nil {
+			t.Fatalf("the request %s", e.lastPost)
+		}
+	})
+	t.Run("host_gone_sent", func(t *testing.T) {
 		e := forgetEnv(t, nil, web1)
 		var called bool
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)

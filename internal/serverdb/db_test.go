@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -553,6 +554,189 @@ func TestWebSignInRows(t *testing.T) {
 		}
 		if _, err := d.DeleteSession(ctx, []byte("fresh")); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("second DeleteSession: %v, want ErrNotFound", err)
+		}
+	})
+}
+
+// enrollTestAgent mints a join token for name and enrolls an agent with
+// the identity SPKI hash spki (32 bytes of b) and the host key key, at
+// nowUS.
+func enrollTestAgent(t *testing.T, d *DB, b byte, name, key string, nowUS int64) *Agent {
+	t.Helper()
+	ctx := context.Background()
+	token := bytes.Repeat([]byte{b}, 32)
+	if err := d.CreateJoinToken(ctx, token, name, "admin", nowUS+3600_000_000); err != nil {
+		t.Fatal(err)
+	}
+	a, err := d.EnrollAgent(ctx, token, Agent{IdentitySPKISHA256: bytes.Repeat([]byte{b}, 32), HostKeys: []string{key}, Facts: "{}"}, nowUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// TestAgentWritesKeyedByIdentity is PR #72 fix-round carry-over (a)
+// (03-08b): agent A is deleted and B enrolls into A's reused row ID; every
+// agents-row writer called with A's ID and A's identity is ErrNotFound
+// and leaves B's row as it was, column for column.
+func TestAgentWritesKeyedByIdentity(t *testing.T) {
+	ctx := context.Background()
+	d, _ := openTemp(t)
+	nowUS := tNow.UnixMicro()
+	enrollTestAgent(t, d, 0x01, "web0", "key-0", nowUS)
+	a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+	if err := d.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, ForgetFacts{}); err != nil {
+		t.Fatalf("delete A: %v", err)
+	}
+	b := enrollTestAgent(t, d, 0x0b, "web1", "key-b", nowUS)
+	if b.ID != a.ID {
+		t.Fatalf("B got row ID %d; the test needs A's %d (SQLite reuses the highest row ID)", b.ID, a.ID)
+	}
+	// B approved, removed at v5 and confirmed at v6, seen.
+	sum := bytes.Repeat([]byte{0xcd}, 32)
+	if err := d.MarkAgentApproved(ctx, b.ID, b.IdentitySPKISHA256, nowUS+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetAgentRemovedVersion(ctx, b.ID, b.IdentitySPKISHA256, 5); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := d.RecordRemovalConfirmed(ctx, b.ID, b.IdentitySPKISHA256, 5, 6, sum); err != nil || !ok {
+		t.Fatalf("record B's confirmation: %t %v", ok, err)
+	}
+	if err := d.TouchAgent(ctx, b.ID, b.IdentitySPKISHA256, nowUS+2); err != nil {
+		t.Fatal(err)
+	}
+	before, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ApprovedAtUS != nowUS+1 || before.RemovedDirVersion != 5 || before.RemovalConfirmedVersion != 6 || !bytes.Equal(before.RemovalConfirmedSHA256, sum) || before.LastSeenUS != nowUS+2 {
+		t.Fatalf("B before the writes: %+v", before)
+	}
+	for _, w := range []struct {
+		name  string
+		write func() error
+	}{
+		{"TouchAgent", func() error { return d.TouchAgent(ctx, a.ID, a.IdentitySPKISHA256, nowUS+9) }},
+		{"MarkAgentApproved", func() error { return d.MarkAgentApproved(ctx, a.ID, a.IdentitySPKISHA256, nowUS+9) }},
+		{"SetAgentRemovedVersion_clear", func() error { return d.SetAgentRemovedVersion(ctx, a.ID, a.IdentitySPKISHA256, 0) }},
+		{"SetAgentRemovedVersion_record", func() error { return d.SetAgentRemovedVersion(ctx, a.ID, a.IdentitySPKISHA256, 9) }},
+		{"RecordRemovalConfirmed", func() error {
+			_, err := d.RecordRemovalConfirmed(ctx, a.ID, a.IdentitySPKISHA256, 5, 9, sum)
+			return err
+		}},
+		{"DeleteAgentIf", func() error { return d.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, before.ForgetFacts()) }},
+	} {
+		if err := w.write(); !errors.Is(err, ErrNotFound) {
+			t.Errorf("%s with A's ID and identity: %v, want ErrNotFound", w.name, err)
+		}
+		after, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
+		if err != nil || !reflect.DeepEqual(after, before) {
+			t.Fatalf("%s with A's ID and identity changed B's row:\n%+v\nwas\n%+v (%v)", w.name, after, before, err)
+		}
+	}
+	t.Run("approved_again_keeps_the_first_time", func(t *testing.T) {
+		if err := d.MarkAgentApproved(ctx, b.ID, b.IdentitySPKISHA256, nowUS+50); err != nil {
+			t.Fatalf("MarkAgentApproved on an approved row: %v", err)
+		}
+		if got, _ := d.AgentBySPKI(ctx, b.IdentitySPKISHA256); got.ApprovedAtUS != nowUS+1 {
+			t.Fatalf("approved_at_us %d, want the first time %d", got.ApprovedAtUS, nowUS+1)
+		}
+		if err := d.SetAgentRemovedVersion(ctx, b.ID, b.IdentitySPKISHA256, 7); err != nil {
+			t.Fatalf("SetAgentRemovedVersion with one recorded: %v", err)
+		}
+		if got, _ := d.AgentBySPKI(ctx, b.IdentitySPKISHA256); got.RemovedDirVersion != 5 {
+			t.Fatalf("removed_dir_version %d, want the first 5", got.RemovedDirVersion)
+		}
+	})
+}
+
+// TestDeleteAgentIf (03-08b, plan check item 1): the delete matches only
+// while every fact equals the row, NULLs included: a never-approved row,
+// a row without a confirmation and a confirmed one.
+func TestDeleteAgentIf(t *testing.T) {
+	ctx := context.Background()
+	sum := bytes.Repeat([]byte{0xcd}, 32)
+	nowUS := tNow.UnixMicro()
+	t.Run("never_approved", func(t *testing.T) {
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, ForgetFacts{ApprovedOnce: true}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("approved_once true for a never-approved row: %v", err)
+		}
+		if err := d.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, ForgetFacts{}); err != nil {
+			t.Fatalf("the row's own facts: %v", err)
+		}
+	})
+	t.Run("removed_unconfirmed_then_confirmed", func(t *testing.T) {
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.MarkAgentApproved(ctx, a.ID, a.IdentitySPKISHA256, nowUS); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.SetAgentRemovedVersion(ctx, a.ID, a.IdentitySPKISHA256, 3); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []ForgetFacts{
+			{ApprovedOnce: true},
+			{ApprovedOnce: false, RemovalVersion: 3},
+			{ApprovedOnce: true, RemovalVersion: 4},
+			{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 3, ConfirmedSHA256: sum},
+		} {
+			if err := d.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, f); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("facts %+v the row does not hold: %v", f, err)
+			}
+		}
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.ID, a.IdentitySPKISHA256, 3, 4, sum); err != nil || !ok {
+			t.Fatalf("record: %t %v", ok, err)
+		}
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.ID, a.IdentitySPKISHA256, 3, 5, sum); err != nil || ok {
+			t.Fatalf("a second record: %t %v, want nothing recorded", ok, err)
+		}
+		other := bytes.Repeat([]byte{0xab}, 32)
+		for _, f := range []ForgetFacts{
+			{ApprovedOnce: true, RemovalVersion: 3},
+			{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: other},
+			{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 5, ConfirmedSHA256: sum},
+		} {
+			if err := d.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, f); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("facts %+v the row does not hold: %v", f, err)
+			}
+		}
+		if err := d.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, ForgetFacts{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: sum}); err != nil {
+			t.Fatalf("the row's own facts: %v", err)
+		}
+		if _, err := d.AgentBySPKI(ctx, a.IdentitySPKISHA256); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("the row after the delete: %v", err)
+		}
+	})
+}
+
+// TestRemovalConfirmation is serverdb's half of carry-over (b) (03-08b):
+// RecordRemovalConfirmed records only for the removal version the caller
+// read.
+func TestRemovalConfirmation(t *testing.T) {
+	ctx := context.Background()
+	sum := bytes.Repeat([]byte{0xcd}, 32)
+	nowUS := tNow.UnixMicro()
+	t.Run("removal_changed_before_record", func(t *testing.T) {
+		// The caller read removal version 3; the removal was cleared and
+		// recorded again at 5 before its write. Nothing is recorded.
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.MarkAgentApproved(ctx, a.ID, a.IdentitySPKISHA256, nowUS); err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range []uint64{3, 0, 5} {
+			if err := d.SetAgentRemovedVersion(ctx, a.ID, a.IdentitySPKISHA256, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.ID, a.IdentitySPKISHA256, 3, 4, sum); err != nil || ok {
+			t.Fatalf("a confirmation of the old removal: %t %v, want nothing recorded", ok, err)
+		}
+		if got, _ := d.AgentBySPKI(ctx, a.IdentitySPKISHA256); got.RemovedDirVersion != 5 || got.RemovalConfirmedVersion != 0 {
+			t.Fatalf("removed_dir_version %d, confirmed %d; want 5, none", got.RemovedDirVersion, got.RemovalConfirmedVersion)
 		}
 	})
 }

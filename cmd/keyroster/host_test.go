@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -535,8 +536,15 @@ func servedRow(name, spkiHex, key string, confirmed bool) serverclient.ServedHos
 	return h
 }
 
+// identityOf is the identity fingerprint of the SPKI hash spkiHex (two
+// hex digits repeated).
+func identityOf(spkiHex string) string {
+	b, _ := hex.DecodeString(strings.Repeat(spkiHex, 32))
+	return enroll.IdentityFingerprint(b)
+}
+
 // forgetEnv is popHostsEnv whose host pending answer lists hosts and
-// served.
+// served, and whose host status lists no host.
 func forgetEnv(t *testing.T, hosts []serverclient.PendingHost, served ...serverclient.ServedHost) *dirEnv {
 	t.Helper()
 	e := popHostsEnv(t)
@@ -549,7 +557,25 @@ func forgetEnv(t *testing.T, hosts []serverclient.PendingHost, served ...serverc
 	}
 	var called bool
 	e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called, string(ans), http.StatusOK)
+	e.hostsStatus(t)
 	return e
+}
+
+// hostsStatus makes e's host status list rows.
+func (e *dirEnv) hostsStatus(t *testing.T, rows ...serverclient.HostStatusRow) {
+	t.Helper()
+	b, err := json.Marshal(serverclient.HostsStatusAnswer{Hosts: append([]serverclient.HostStatusRow{}, rows...)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var called bool
+	e.recordCall(http.MethodGet, serverclient.AdminHostsStatusPath, &called, string(b), http.StatusOK)
+}
+
+// activeRow is host status's row of an agent the directory approves now.
+func activeRow(name, spkiHex string) serverclient.HostStatusRow {
+	return serverclient.HostStatusRow{Name: name, ExpectedName: name, IdentitySPKISHA256: strings.Repeat(spkiHex, 32), State: serverclient.HostStateActive,
+		Silent: true, NeverApplied: true}
 }
 
 // forgetAnswer is the server's answer for forgetting h.
@@ -563,10 +589,10 @@ func forgetAnswer(t *testing.T, h serverclient.PendingHost) string {
 }
 
 // TestHostForget (PR #71 review D-R1, 03-08b): host forget names one
-// agent from host pending, sends its identity and the facts it read,
-// prints the agent the server forgot with its re-derived fingerprints,
-// and turns the server's host_in_directory refusal into the runbook
-// order.
+// agent, by identity or by a name only one agent has, sends its identity
+// and the facts host pending showed, prints the agent the server forgot
+// with its re-derived fingerprints, and turns the server's refusals into
+// the runbook's steps.
 func TestHostForget(t *testing.T) {
 	_, key := writeEntryKey(t, "web1")
 	pub, err := trust.ParseKey(key)
@@ -574,6 +600,9 @@ func TestHostForget(t *testing.T) {
 		t.Fatal(err)
 	}
 	web1 := servedRow("web1", "00", key, true)
+	_, key2 := writeEntryKey(t, "web1b")
+	other := servedRow("web1", "11", key2, true)
+	other.State = serverclient.HostStateKeysChanged
 	t.Run("prints_the_forgotten_agent", func(t *testing.T) {
 		e := forgetEnv(t, nil, web1)
 		var called bool
@@ -592,6 +621,65 @@ func TestHostForget(t *testing.T) {
 			t.Fatalf("the request %s", e.lastPost)
 		}
 	})
+	t.Run("name_ambiguous_refused", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1, other)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "forget_name_ambiguous") {
+			t.Fatalf("an ambiguous name: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+		for _, want := range []string{"keyroster host forget --identity " + identityOf("00"), "keyroster host forget --identity " + identityOf("11"),
+			"host_keys_changed", "removal confirmed at directory v4", "enrolled 2026-10-28T12:00:00Z"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("the refusal lacks %q:\n%s", want, stderr)
+			}
+		}
+	})
+	t.Run("name_ambiguous_with_an_approved_agent", func(t *testing.T) {
+		// The runbook's re-enroll flow: B, approved now under web1, is in
+		// host status only.
+		e := forgetEnv(t, nil, web1)
+		e.hostsStatus(t, activeRow("web1", "22"))
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "forget_name_ambiguous") ||
+			!strings.Contains(stderr, "--identity "+identityOf("00")) || !strings.Contains(stderr, "--identity "+identityOf("22")) {
+			t.Fatalf("a name an approved agent has too: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+	})
+	t.Run("by_identity", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1, other)
+		e.hostsStatus(t, activeRow("web1", "22"))
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, other.PendingHost), http.StatusOK)
+		code, stdout, stderr := run(t, "host", "forget", "--identity", identityOf("11"))
+		var req serverclient.ForgetHostRequest
+		if code != 0 || json.Unmarshal(e.lastPost, &req) != nil || req.IdentitySPKISHA256 != strings.Repeat("11", 32) {
+			t.Fatalf("host forget --identity: exit %d, request %s: %s%s", code, e.lastPost, stdout, stderr)
+		}
+	})
+	t.Run("approved_agent_by_identity_refused", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
+		e.hostsStatus(t, activeRow("web1", "22"))
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "--identity", identityOf("22"))
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "keyroster host remove") {
+			t.Fatalf("forget of an agent the directory approves: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+	})
+	t.Run("not_confirmed_refused_locally", func(t *testing.T) {
+		e := forgetEnv(t, nil, servedRow("web1", "00", key, false))
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "host_removal_not_applied") ||
+			!strings.Contains(stderr, "keyroster host forget --identity "+identityOf("00")+" --host-gone") {
+			t.Fatalf("an unconfirmed removal: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+	})
 	t.Run("in_directory_refused_with_the_runbook_order", func(t *testing.T) {
 		e := forgetEnv(t, nil, web1)
 		var called bool
@@ -600,12 +688,28 @@ func TestHostForget(t *testing.T) {
 			t.Fatalf("host forget of a host still in the directory: exit %d: %s", code, stderr)
 		}
 	})
+	t.Run("state_changed_explained", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"forget_state_changed"}`, http.StatusConflict)
+		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "forget_state_changed") || !strings.Contains(stderr, "run the command again") {
+			t.Fatalf("a forget whose agent changed: exit %d: %s", code, stderr)
+		}
+	})
 	t.Run("answer_for_another_name_refused", func(t *testing.T) {
 		e := forgetEnv(t, nil, web1)
 		var called bool
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, strings.Replace(forgetAnswer(t, web1.PendingHost), `"web1"`, `"web2"`, 1), http.StatusOK)
 		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "does not check out") {
 			t.Fatalf("an answer for another name: exit %d: %s", code, stderr)
+		}
+	})
+	t.Run("answer_names_another_identity_refused", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, other.PendingHost), http.StatusOK)
+		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "does not check out") {
+			t.Fatalf("an answer naming another identity: exit %d: %s", code, stderr)
 		}
 	})
 }

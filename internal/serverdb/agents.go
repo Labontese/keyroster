@@ -238,22 +238,32 @@ func (d *DB) AgentBySPKI(ctx context.Context, spki []byte) (*Agent, error) {
 	return scanAgent(rows)
 }
 
-// TouchAgent sets the agent's last_seen_us to nowUS.
-func (d *DB) TouchAgent(ctx context.Context, id, nowUS int64) error {
-	res, err := d.db.ExecContext(ctx, `UPDATE agents SET last_seen_us = ? WHERE id = ?`, nowUS, id)
+// TouchAgent sets the last_seen_us of the agents row id with the identity
+// spki to nowUS. It is ErrNotFound when no row has both (03-08b): every
+// agents-row writer names the identity, so a request of a forgotten agent
+// never writes a row that reused its ID (PR #72 fix-round carry-over a).
+func (d *DB) TouchAgent(ctx context.Context, id int64, spki []byte, nowUS int64) error {
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET last_seen_us = ? WHERE id = ? AND identity_spki_sha256 = ?`, nowUS, id, spki)
 	if err != nil {
 		return fmt.Errorf("serverdb: touch agent: %w", err)
 	}
 	return oneRow(res)
 }
 
-// MarkAgentApproved records nowUS as the agent's first approved state
-// answer; a later call keeps the first time (PR #71 review D-R1).
-func (d *DB) MarkAgentApproved(ctx context.Context, id, nowUS int64) error {
-	if _, err := d.db.ExecContext(ctx, `UPDATE agents SET approved_at_us = ? WHERE id = ? AND approved_at_us IS NULL`, nowUS, id); err != nil {
+// MarkAgentApproved records nowUS as the first approved state answer of
+// the agents row id with the identity spki; a later call keeps the first
+// time (PR #71 review D-R1). It is ErrNotFound when no row has both id
+// and spki (03-08b).
+func (d *DB) MarkAgentApproved(ctx context.Context, id int64, spki []byte, nowUS int64) error {
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET approved_at_us = ? WHERE id = ? AND identity_spki_sha256 = ? AND approved_at_us IS NULL`, nowUS, id, spki)
+	if err != nil {
 		return fmt.Errorf("serverdb: mark agent approved: %w", err)
 	}
-	return nil
+	if err := oneRow(res); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	// Nothing changed: the row is gone, or it was approved already.
+	return agentExists(ctx, d.db, id, spki)
 }
 
 // ForgetFacts are what the admin saw of an agent in keyroster host
@@ -384,23 +394,34 @@ func agentExists(ctx context.Context, q rowQueryer, id int64, spki []byte) error
 }
 
 // SetAgentRemovedVersion records version as the first directory version
-// that no longer approves the agent, unless one is recorded already. A
-// version of 0 clears it and its recorded confirmation (a directory entry
-// holds the agent's keys again).
-func (d *DB) SetAgentRemovedVersion(ctx context.Context, id int64, version uint64) error {
+// that no longer approves the agents row id with the identity spki,
+// unless one is recorded already. A version of 0 clears it and its
+// recorded confirmation (a directory entry holds the agent's keys again).
+// It is ErrNotFound when no row has both id and spki (03-08b), so a
+// request of a forgotten agent never writes a row that reused its ID.
+func (d *DB) SetAgentRemovedVersion(ctx context.Context, id int64, spki []byte, version uint64) error {
 	if version > math.MaxInt64 {
 		return errors.New("serverdb: directory version above int64")
 	}
-	var err error
+	var (
+		res sql.Result
+		err error
+	)
 	if version == 0 {
-		_, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = NULL, removal_confirmed_version = NULL, removal_confirmed_sha256 = NULL WHERE id = ?`, id)
+		res, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = NULL, removal_confirmed_version = NULL, removal_confirmed_sha256 = NULL
+WHERE id = ? AND identity_spki_sha256 = ?`, id, spki)
 	} else {
-		_, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = ? WHERE id = ? AND removed_dir_version IS NULL`, int64(version), id) //nolint:gosec // G115: checked above
+		res, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = ? WHERE id = ? AND identity_spki_sha256 = ? AND removed_dir_version IS NULL`,
+			int64(version), id, spki) //nolint:gosec // G115: checked above
 	}
 	if err != nil {
 		return fmt.Errorf("serverdb: agent removal version: %w", err)
 	}
-	return nil
+	if err := oneRow(res); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	// Nothing changed: the row is gone, or a removal is recorded already.
+	return agentExists(ctx, d.db, id, spki)
 }
 
 // RotationEvery is how often one agents row may rotate its identity (PR

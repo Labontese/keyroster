@@ -181,52 +181,76 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		// forget deletes the row and ends it.
 		//
 		// 03-08: the first directory version an approved-once agent is
-		// served under in which no entry holds any of its keys (its entry
-		// removed, not just disabled or re-keyed) is recorded
-		// (removed_dir_version), so keyroster host forget can wait for the
-		// host's heartbeat to show it applied; a directory in which an
-		// entry holds them again clears it. An active entry under the
-		// agent's name with entirely new keys is a re-keyed host, not a
-		// removal: the applier keeps last-good's principals for it
-		// (host_keys_rotated), so nothing is recorded (PR #72 review C14).
+		// served under in which no entry holds any of its keys and no
+		// active entry carries its name (its entry removed, not disabled
+		// or re-keyed) is recorded (removed_dir_version), so keyroster host
+		// forget can wait for the host's heartbeat to confirm it applied.
+		// 03-08b: a directory in which an entry holds the agent's keys
+		// again clears the removal and its recorded confirmation. An active
+		// entry under the agent's name with entirely new keys (a re-keyed
+		// host, or another agent enrolled under the name) neither records a
+		// removal nor clears one: the applier keeps last-good's principals
+		// for it (host_keys_rotated, PR #72 review C14), and a removal the
+		// host confirmed before stays confirmed (PR #72 fix-round
+		// carry-over b).
+		//
+		// Every write names the agent's identity as well as its row ID:
+		// when the row went after the lookup (keyroster host forget) and
+		// another agent enrolled into the reused ID, the write finds no
+		// row, and the request is refused 403 unknown_agent (PR #72 review
+		// C1, fix-round carry-over a).
+		gone := func(err error, what string, fatal bool) bool {
+			switch {
+			case err == nil:
+				return false
+			case errors.Is(err, serverdb.ErrNotFound):
+				s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
+				return true
+			case fatal:
+				s.log.Error(what, "err", err)
+				s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+				return true
+			}
+			s.log.Warn(what, "err", err)
+			return false
+		}
+		clearRemoval := func() bool {
+			if a.RemovedDirVersion == 0 && a.RemovalConfirmedVersion == 0 {
+				return false
+			}
+			if gone(s.db.SetAgentRemovedVersion(ctx, a.ID, spki, 0), "agent removal version", false) {
+				return true
+			}
+			a.RemovedDirVersion, a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, 0, nil
+			return false
+		}
 		switch {
 		case approved(dv, a.HostKeys):
 			if a.ApprovedAtUS == 0 {
-				if err := s.db.MarkAgentApproved(ctx, a.ID, s.clock().UnixMicro()); err != nil {
-					s.log.Error("agent approval", "err", err)
-					s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+				if gone(s.db.MarkAgentApproved(ctx, a.ID, spki, s.clock().UnixMicro()), "agent approval", true) {
 					return
 				}
 				s.log.Info("agent approved: first signed state", "expected_name", a.ExpectedName, "agent", agentFingerprint(spki))
 			}
-			if a.RemovedDirVersion != 0 {
-				if err := s.db.SetAgentRemovedVersion(ctx, a.ID, 0); err != nil {
-					s.log.Warn("agent removal version", "err", err)
-				}
-				a.RemovedDirVersion, a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, 0, nil
+			if clearRemoval() {
+				return
 			}
 		case a.ApprovedAtUS == 0:
 			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrNotApproved})
 			return
-		case hostHolds(dv, a.HostKeys) || rekeyed(dv, a.ExpectedName):
-			if a.RemovedDirVersion != 0 {
-				if err := s.db.SetAgentRemovedVersion(ctx, a.ID, 0); err != nil {
-					s.log.Warn("agent removal version", "err", err)
-				}
-				a.RemovedDirVersion, a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, 0, nil
+		case hostHolds(dv, a.HostKeys):
+			if clearRemoval() {
+				return
 			}
+		case rekeyed(dv, a.ExpectedName):
+			// Neither a removal nor a re-approval (03-08b).
 		case a.RemovedDirVersion == 0 && dv.version != 0:
-			if err := s.db.SetAgentRemovedVersion(ctx, a.ID, dv.version); err != nil {
-				s.log.Error("agent removal version", "err", err)
-				s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+			if gone(s.db.SetAgentRemovedVersion(ctx, a.ID, spki, dv.version), "agent removal version", true) {
 				return
 			}
 			a.RemovedDirVersion = dv.version
 		}
-		// The row can go between the lookup and here (keyroster host
-		// forget): the request is then refused, never served for a row
-		// that no longer exists (PR #72 review C1).
-		switch err := s.db.TouchAgent(ctx, a.ID, s.clock().UnixMicro()); {
+		switch err := s.db.TouchAgent(ctx, a.ID, spki, s.clock().UnixMicro()); {
 		case errors.Is(err, serverdb.ErrNotFound):
 			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
 			return

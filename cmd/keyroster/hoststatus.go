@@ -16,6 +16,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // statusFooter ends every keyroster host status table: convergence is the
@@ -112,14 +113,8 @@ func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if err != nil {
 		return err
 	}
-	var ans serverclient.HostsStatusAnswer
-	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminHostsStatusPath, nil, &ans, s.signer); err != nil {
-		if refusal := hostAdminRefusal(err); refusal != nil {
-			return refusal
-		}
-		return adminError(err, s, pol)
-	}
-	if err := checkHostsStatus(&ans); err != nil {
+	ans, err := fetchHostsStatus(ctx, s, pol)
+	if err != nil {
 		return err
 	}
 	if *asJSON {
@@ -130,8 +125,24 @@ func runHostStatus(ctx context.Context, args []string, stdout, stderr io.Writer)
 		_, err = fmt.Fprintf(stdout, "%s\n", b)
 		return err
 	}
-	_, err = io.WriteString(stdout, renderHostsStatus(&ans, time.Now()))
+	_, err = io.WriteString(stdout, renderHostsStatus(ans, time.Now()))
 	return err
+}
+
+// fetchHostsStatus GETs hosts/status through the admin API and checks it
+// (checkHostsStatus); pol is the verified policy for adminError.
+func fetchHostsStatus(ctx context.Context, s *adminSession, pol *trust.Policy) (*serverclient.HostsStatusAnswer, error) {
+	var ans serverclient.HostsStatusAnswer
+	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminHostsStatusPath, nil, &ans, s.signer); err != nil {
+		if refusal := hostAdminRefusal(err); refusal != nil {
+			return nil, refusal
+		}
+		return nil, adminError(err, s, pol)
+	}
+	if err := checkHostsStatus(&ans); err != nil {
+		return nil, err
+	}
+	return &ans, nil
 }
 
 // renderHostsStatus is host status's text output at now.
