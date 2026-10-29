@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/join"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
@@ -615,7 +616,7 @@ func TestBrowserListenerUnchanged(t *testing.T) {
 // keyword.
 func TestAgentMuxRoutes(t *testing.T) {
 	e := newAgentEnv(t, true)
-	want := []string{"POST " + serverclient.AgentEnrollPath, "GET " + serverclient.AgentStatePath}
+	want := []string{"POST " + serverclient.AgentEnrollPath, "GET " + serverclient.AgentStatePath, "POST " + serverclient.AgentHeartbeatPath, "POST " + serverclient.AgentIdentityPath}
 	if !slices.Equal(e.s.agentPatterns, want) {
 		t.Fatalf("agent patterns %q, want %q", e.s.agentPatterns, want)
 	}
@@ -1064,7 +1065,11 @@ func TestAgentRemoval(t *testing.T) {
 	})
 	t.Run("forget_then_reenroll_with_the_same_host_keys", func(t *testing.T) {
 		e, id, hosts := polled(t)
-		e.installDir(t)
+		removal := e.installDir(t)
+		// 03-08: forget waits for the host to report the removal applied.
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 1, removal)}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
 		rec := e.forget(t, "web1")
 		var ans serverclient.ForgetHostAnswer
 		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &ans) != nil || len(ans.Forgotten) != 1 ||

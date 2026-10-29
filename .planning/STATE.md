@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-07-PLAN.md (PR #71 open, merge gate pending)"
-last_updated: "2026-10-28T14:29:42.654Z"
+stopped_at: "Completed 03-08-PLAN.md (PR #72 open, awaiting the merge gate)"
+last_updated: "2026-10-28T23:33:33.322Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 622f8943606ac444893b0874c83cca6fa59c455f
+state_head: 188149839ddd153720e20ef3a7cac71139c2d443
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 54
-  completed_plans: 45
+  completed_plans: 46
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 11 of 19
+Plan: 12 of 19
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -100,6 +100,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P06b | 100min | 4 tasks | 32 files |
 | Phase 03 P06c | 29min | 3 tasks | 8 files |
 | Phase 03 P07 | 110min | 3 tasks | 67 files |
+| Phase 03 P08 | 330min | 3 tasks | 47 files |
 
 ## Accumulated Context
 
@@ -272,6 +273,8 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-07: the join string names the agent listener port the server's mint answer reports, on the host of the admin's keyroster init config (owner to confirm)
 - [Phase 03]: 03-07: approval is the installed directory's active host entry whose keys equal the agent's enrolled host keys
 - [Phase 03]: 03-07: T-03-277 mitigated by the restore cross-check of the kept server KRL copy against keyroster-agent krl-version on the enrolled hosts
+- [Phase 03]: 03-08 D-1: host forget waits for the heartbeat that shows the removal applied (host_removal_not_applied, --host-gone printed and logged); quorum and the forget audit leaf are 03-08b's
+- [Phase 03]: 03-08 D-2: silent is judged from last_seen_us; the server stores a status only on a higher seq; the fetcher treats stale_heartbeat as quiet
 
 ### Pending Todos
 
@@ -310,6 +313,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T14:29:42.247Z
-Stopped at: Completed 03-07-PLAN.md (PR #71 open, merge gate pending)
+Last session: 2026-10-28T23:33:32.905Z
+Stopped at: Completed 03-08-PLAN.md (PR #72 open, awaiting the merge gate)
 Resume file: None

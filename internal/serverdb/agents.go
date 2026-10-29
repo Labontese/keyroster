@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
+	"time"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -86,6 +88,21 @@ type Agent struct {
 	// directory approved it (0: never). An agent approved once keeps
 	// getting state after its host entry goes (PR #71 review D-R1).
 	ApprovedAtUS int64
+	// RemovedDirVersion is, for an agent approved once, the first
+	// directory version it requested state under that no longer approves
+	// it (0: none since it was last approved; 03-08).
+	RemovedDirVersion uint64
+	// ClockOffsetS is the clock offset of the newest heartbeat that
+	// authenticated and parsed, stored or refused (ClockOffsetKnown false:
+	// none yet), and SeqRegressedAtUS when a seq below the stored one was
+	// last refused and logged (0: never; owner decision D-R2).
+	ClockOffsetS     int64
+	ClockOffsetKnown bool
+	SeqRegressedAtUS int64
+	// IdentityRotatedAtUS is when the identity last rotated (0: never),
+	// IdentityRotations how often it has (owner decision D-R1).
+	IdentityRotatedAtUS int64
+	IdentityRotations   int64
 }
 
 // EnrollAgent uses the join token tokenHash and records a as an enrolled
@@ -233,32 +250,249 @@ func (d *DB) MarkAgentApproved(ctx context.Context, id, nowUS int64) error {
 	return nil
 }
 
-// DeleteAgent removes the agent row id, which frees its identity and host
-// keys for a new enrollment (keyroster host forget; PR #71 review D-R1).
-// It is ErrNotFound when no such row exists.
+// DeleteAgent removes the agent row id and its heartbeat, which frees its
+// identity and host keys for a new enrollment (keyroster host forget; PR
+// #71 review D-R1). It is ErrNotFound when no such row exists.
 func (d *DB) DeleteAgent(ctx context.Context, id int64) error {
-	res, err := d.db.ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, id)
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM heartbeats WHERE agent_id = ?`, id); err != nil {
+		return fmt.Errorf("serverdb: delete heartbeat: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("serverdb: delete agent: %w", err)
+	}
+	if err := oneRow(res); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return nil
+}
+
+// SetAgentRemovedVersion records version as the first directory version
+// that no longer approves the agent, unless one is recorded already. A
+// version of 0 clears it (a directory approves the agent again).
+func (d *DB) SetAgentRemovedVersion(ctx context.Context, id int64, version uint64) error {
+	if version > math.MaxInt64 {
+		return errors.New("serverdb: directory version above int64")
+	}
+	var err error
+	if version == 0 {
+		_, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = NULL WHERE id = ?`, id)
+	} else {
+		_, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = ? WHERE id = ? AND removed_dir_version IS NULL`, int64(version), id) //nolint:gosec // G115: checked above
+	}
+	if err != nil {
+		return fmt.Errorf("serverdb: agent removal version: %w", err)
+	}
+	return nil
+}
+
+// RotationEvery is how often one agents row may rotate its identity (PR
+// #72 review C10, C15): a row cannot churn identities.
+const RotationEvery = time.Hour
+
+// ErrRotationTooSoon is a rotation less than RotationEvery after the
+// row's last one.
+var ErrRotationTooSoon = errors.New("identity_rotation_too_soon")
+
+// RotateAgentIdentity replaces agent id's identity SPKI hash oldSPKI by
+// newSPKI (03-08, AGENT-02) and records the rotation at nowUS
+// (identity_rotated_at_us, identity_rotations; owner decision D-R1), in
+// one conditional UPDATE. It is ErrRotationTooSoon within RotationEvery
+// of the row's last rotation, ErrNotFound when the row no longer holds
+// oldSPKI (a concurrent rotation), ErrIdentityInUse when another agent
+// holds newSPKI.
+func (d *DB) RotateAgentIdentity(ctx context.Context, id int64, oldSPKI, newSPKI []byte, nowUS int64) error {
+	if len(newSPKI) != 32 {
+		return errors.New("serverdb: incomplete identity")
+	}
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET identity_spki_sha256 = ?, identity_rotated_at_us = ?, identity_rotations = identity_rotations + 1
+WHERE id = ? AND identity_spki_sha256 = ? AND (identity_rotated_at_us IS NULL OR identity_rotated_at_us <= ?)`,
+		newSPKI, nowUS, id, oldSPKI, nowUS-RotationEvery.Microseconds())
+	if err != nil {
+		var se *sqlite.Error
+		if errors.As(err, &se) && se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+			return ErrIdentityInUse
+		}
+		return fmt.Errorf("serverdb: rotate agent identity: %w", err)
+	}
+	if err := oneRow(res); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	var one int
+	err = d.db.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ? AND identity_spki_sha256 = ?`, id, oldSPKI).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrNotFound
+	case err != nil:
+		return fmt.Errorf("serverdb: agent: %w", err)
+	}
+	return ErrRotationTooSoon
+}
+
+// ErrStaleHeartbeat is a heartbeat whose seq is not above the stored one,
+// and ErrSeqRegressed (which is ErrStaleHeartbeat too) one whose seq is
+// below it.
+var (
+	ErrStaleHeartbeat = errors.New("stale_heartbeat")
+	ErrSeqRegressed   = fmt.Errorf("%w: seq below the stored one", ErrStaleHeartbeat)
+)
+
+// seqRegressedLogEvery is how often a host that keeps sending a seq below
+// the stored one is logged (D-R2).
+const seqRegressedLogEvery = int64(time.Hour / time.Microsecond)
+
+// Heartbeat is one stored heartbeat.
+type Heartbeat struct {
+	AgentID      int64
+	Seq          int64
+	Body         []byte
+	ReceivedAtUS int64
+}
+
+// StoreHeartbeat stores body as agent id's heartbeat when seq is above
+// the stored one, or none is stored, in one transaction that first checks
+// that the agents row id still exists and still has the identity spki: a
+// request the row was forgotten (or rotated) under while its body arrived
+// never writes a heartbeat that a later agent reusing the ID would inherit
+// (ErrNotFound; PR #72 review C1). foreign_keys is off, so 0006's ON
+// DELETE CASCADE does nothing; DeleteAgent deletes the row itself.
+//
+// The clock offset is recorded whatever the seq (owner decision D-R2). An
+// equal seq changes nothing else and is ErrStaleHeartbeat; a lower one is
+// ErrSeqRegressed and records seq_regressed_at_us when it is a new episode
+// (nothing recorded since the stored heartbeat arrived) or an hour has
+// passed since the last record: logIt then tells the caller to log it, so
+// a host that keeps sending lower seqs is logged once an hour.
+func (d *DB) StoreHeartbeat(ctx context.Context, id int64, spki []byte, seq int64, body []byte, offsetS, nowUS int64) (logIt bool, err error) {
+	if seq < 1 || len(body) == 0 || len(spki) != 32 {
+		return false, errors.New("serverdb: incomplete heartbeat")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := agentLive(ctx, tx, id, spki); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE id = ?`, offsetS, id); err != nil {
+		return false, fmt.Errorf("serverdb: clock offset: %w", err)
+	}
+	var stored, receivedUS int64
+	err = tx.QueryRowContext(ctx, `SELECT seq, received_at_us FROM heartbeats WHERE agent_id = ?`, id).Scan(&stored, &receivedUS)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return false, fmt.Errorf("serverdb: heartbeat: %w", err)
+	case seq == stored:
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("serverdb: commit: %w", err)
+		}
+		return false, ErrStaleHeartbeat
+	case seq < stored:
+		res, err := tx.ExecContext(ctx, `UPDATE agents SET seq_regressed_at_us = ? WHERE id = ?
+AND (seq_regressed_at_us IS NULL OR seq_regressed_at_us <= ? OR seq_regressed_at_us <= ?)`, nowUS, id, receivedUS, nowUS-seqRegressedLogEvery)
+		if err != nil {
+			return false, fmt.Errorf("serverdb: seq regressed: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("serverdb: rows affected: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("serverdb: commit: %w", err)
+		}
+		return n == 1, ErrSeqRegressed
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) VALUES (?, ?, ?, ?)
+ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, received_at_us = excluded.received_at_us`, id, seq, body, nowUS); err != nil {
+		return false, fmt.Errorf("serverdb: store heartbeat: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return false, nil
+}
+
+// RecordClockOffset records offsetS as agent id's clock offset, when the
+// row still has the identity spki (else ErrNotFound): a heartbeat refused
+// before StoreHeartbeat (heartbeat_seq_future) still shows its host's
+// clock (D-R2).
+func (d *DB) RecordClockOffset(ctx context.Context, id int64, spki []byte, offsetS int64) error {
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE id = ? AND identity_spki_sha256 = ?`, offsetS, id, spki)
+	if err != nil {
+		return fmt.Errorf("serverdb: clock offset: %w", err)
 	}
 	return oneRow(res)
 }
 
+// agentLive is ErrNotFound unless the agents row id exists with the
+// identity spki.
+func agentLive(ctx context.Context, tx *sql.Tx, id int64, spki []byte) error {
+	var one int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ? AND identity_spki_sha256 = ?`, id, spki).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("serverdb: agent: %w", err)
+	}
+	return nil
+}
+
+// Heartbeats returns every stored heartbeat, by agent ID.
+func (d *DB) Heartbeats(ctx context.Context) (map[int64]Heartbeat, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT agent_id, seq, body, received_at_us FROM heartbeats`)
+	if err != nil {
+		return nil, fmt.Errorf("serverdb: heartbeats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[int64]Heartbeat{}
+	for rows.Next() {
+		var h Heartbeat
+		if err := rows.Scan(&h.AgentID, &h.Seq, &h.Body, &h.ReceivedAtUS); err != nil {
+			return nil, fmt.Errorf("serverdb: heartbeat: %w", err)
+		}
+		out[h.AgentID] = h
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("serverdb: heartbeats: %w", err)
+	}
+	return out, nil
+}
+
 // agentColumns are the columns scanAgent reads, in its order.
-const agentColumns = `id, identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us, last_seen_us, approved_at_us`
+const agentColumns = `id, identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us, last_seen_us, approved_at_us, removed_dir_version,
+clock_offset_s, seq_regressed_at_us, identity_rotated_at_us, identity_rotations`
 
 func scanAgent(rows *sql.Rows) (*Agent, error) {
 	var (
-		a              Agent
-		keys           string
-		seen, approved sql.NullInt64
+		a                       Agent
+		keys                    string
+		seen, approved, removed sql.NullInt64
+		offset, regressed       sql.NullInt64
+		rotated                 sql.NullInt64
 	)
-	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.TokenSHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen, &approved); err != nil {
+	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.TokenSHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen, &approved, &removed,
+		&offset, &regressed, &rotated, &a.IdentityRotations); err != nil {
 		return nil, fmt.Errorf("serverdb: agent: %w", err)
 	}
 	if err := json.Unmarshal([]byte(keys), &a.HostKeys); err != nil {
 		return nil, fmt.Errorf("serverdb: agent %d host keys: %w", a.ID, err)
 	}
 	a.LastSeenUS, a.ApprovedAtUS = seen.Int64, approved.Int64
+	a.ClockOffsetS, a.ClockOffsetKnown, a.SeqRegressedAtUS = offset.Int64, offset.Valid, regressed.Int64
+	a.IdentityRotatedAtUS = rotated.Int64
+	if removed.Valid && removed.Int64 > 0 {
+		a.RemovedDirVersion = uint64(removed.Int64)
+	}
 	return &a, nil
 }

@@ -702,29 +702,27 @@ its parent opened without following links:
 | `/etc/keyroster-agent/fetch.json` | root:keyroster-agent | 0640 | the agent server's URL, TLS roots and pins |
 | `/var/lib/keyroster-agent-fetch` | keyroster-agent | 0700 | the fetcher's identity key |
 | `/var/lib/keyroster-agent-fetch/join-token` | keyroster-agent | 0600 | the token, until the server accepts the enrollment |
+| `/etc/ssh/keyroster` | root:root | 0755 | the agent's generations (created now so the applier's unit can start) |
+| the two units or OpenRC scripts | root:root | 0644 / 0755 | [Running the agent](#running-the-agent) |
 
 The fetcher can write only its own directory and the spool. Everything it
 writes there is data the root applier verifies against its own pins; it
 reads nothing from the fetcher but through a no-follow, non-blocking,
-size-capped open. The ownership of these paths as root is checked in
-03-08 (`agent-smoke.sh`); the e2e run creates them as the test user.
+size-capped open. The ownership of these paths as root, with the real
+users, is run in CI in `agent-smoke.sh` (03-08); the e2e run creates them
+as the test user.
 
-**3. Start the fetcher and the applier.** The systemd and OpenRC units are
-03-08's. Until then, run both by hand, each in its own terminal (or under
-`tmux`):
-
-```
-runuser -u keyroster-agent -- keyroster-agent-fetch
-keyroster-agent run
-```
+**3. Start the fetcher and the applier**:
+`systemctl daemon-reload && systemctl enable --now keyroster-agent
+keyroster-agent-fetch` ([Running the agent](#running-the-agent)).
 
 The fetcher generates its identity (a self-signed Ed25519 TLS client
 certificate) on its first start and writes `identity.pub` into the spool.
 It asks the applier for the proof of possession (`enroll-request.json` in
 the spool); `keyroster-agent run` signs it with every Ed25519 and ECDSA host
 key `sshd -T` names and answers in the outbox; the fetcher posts it. Both
-then wait quietly for the approval. (UNVERIFIED: the hand-run commands on
-a real host; the e2e run uses the same binaries with `--poll 1s` and
+then wait quietly for the approval. (Run in CI under systemd in
+`agent-smoke.sh`; the e2e run uses the same binaries with `--poll 1s` and
 `--interval 1s`.)
 
 **4. Approve the host (admin workstation, then the host).**
@@ -787,17 +785,320 @@ arrive](#how-fast-changes-arrive)).
 | `unknown_agent` | fetcher log | The server has no agent with this identity: never enrolled, or forgotten (`keyroster host forget`) | A new join token, then `keyroster-agent install` again |
 | `rate limited` (429) | fetcher log | The server's limiter refused a state request; the fetcher keeps what it spooled and goes on at the next poll | None; escalate if every poll says it |
 | `host_in_directory`, `host_not_enrolled` | `host forget` | A directory entry still holds the agent's host keys; no agent has the name | Remove the host first and wait for the host to apply it; check the name with `keyroster host pending` |
+| `host_removal_not_applied` | `host forget` | The host has not reported applying the directory version that removed it | Wait for its next heartbeat; `--host-gone` for a host that is gone for good ([Removing a host](#removing-a-host)) |
+| `stale_heartbeat` | server | The heartbeat's seq is not above the stored one: the usual answer between the applier's status writes. A seq below the stored one is also logged by the server as `heartbeat_seq_regressed` (at most once an hour) and flagged `seq_regressed` | None: the fetcher logs nothing for it |
+| `heartbeat_seq_future` | fetcher log, server log | The heartbeat's seq is more than an hour beyond the server's clock: the host's clock runs ahead. Nothing but its clock offset is stored, so `clock_skew` shows it (D-R2) | Fix the host's clock; the applier restarts its seq from its clock once the clock is back |
+| `heartbeat_field_invalid` | fetcher log, server log | A status field broke its rule; the answer names the field | Escalate: the agent wrote, or something changed, a status the server refuses |
+| `fetch_dir_not_owned` | fetcher | The fetcher runs as another user than its directory's owner (root running `--rotate-identity`) | `sudo -u keyroster-agent keyroster-agent-fetch ...` |
+| `identity_rotation_too_soon` (429) | `--rotate-identity` | The agent rotated its identity less than an hour ago; one agent rotates at most once an hour, and its rate limit is the agent's, whatever its identity (PR #72 review) | Wait for `Retry-After`; an unplanned earlier rotation is [An unexpected identity rotation](#running-the-agent) |
+| `install_no_service_manager`, `install_no_sshd_config_d` | install | Neither systemd nor OpenRC found; no `/etc/ssh/sshd_config.d` on a systemd host | [Running the agent](#running-the-agent) |
 | `install_path_unsafe`, `install_pins_differ` | install | See step 2 | Fix the path; for other pins, remove the agent's state first |
+
+## Running the agent
+
+Run in CI: systemd on Ubuntu 24.04, in the `systemd-sandbox` job
+(`test/systemd/agent-smoke.sh` and `TestAgentSystemdSmoke`, 03-08): both
+units under real systemd against the runner's own `ssh.service`, the first
+apply through `systemctl`, a certificate login, the heartbeat in `keyroster
+host status`, an identity rotation as the real `keyroster-agent` user, the
+cross-user writes below, and `systemd-analyze security` for both units.
+OpenRC and the other distributions' service managers are UNVERIFIED until
+03-16; so is every step on the homelab.
+
+`keyroster-agent install` writes the agent's two services (root:root): on
+a systemd host (`/run/systemd/system` exists) the units
+`/etc/systemd/system/keyroster-agent.service` and
+`keyroster-agent-fetch.service` (0644); on an OpenRC host
+(`/sbin/openrc-run` exists) the scripts `/etc/init.d/keyroster-agent` and
+`/etc/init.d/keyroster-agent-fetch` (0755). With neither it refuses
+`install_no_service_manager`, and on a systemd host without
+`/etc/ssh/sshd_config.d` it refuses `install_no_sshd_config_d`, both before
+it writes anything. It creates `/etc/ssh/keyroster` (root:root 0755) before
+the units, because systemd refuses to start a unit whose `ReadWritePaths`
+path does not exist. It neither enables nor starts them. Edit them only
+through drop-ins (`systemctl edit`): a later `install` writes them again.
+
+| Unit | Runs as | May write (`ReadWritePaths`, everything else read-only) | Network |
+|---|---|---|---|
+| `keyroster-agent-fetch.service` | `keyroster-agent`, no capabilities, `NoNewPrivileges` | `/var/lib/keyroster-agent-fetch /var/lib/keyroster-agent/spool`; it reads `/etc/keyroster-agent/fetch.json` and the outbox | IPv4 and IPv6 sockets only (`RestrictAddressFamilies=AF_INET AF_INET6`: no Unix, netlink or packet sockets). The unit does not restrict destinations: the server's address is not known when `install` writes it; a host firewall can restrict them |
+| `keyroster-agent.service` | root, no capabilities, `NoNewPrivileges` | `/etc/ssh/keyroster /etc/ssh/sshd_config.d /var/lib/keyroster-agent` (the spool and the outbox are inside the state directory) | loopback only: `IPAddressDeny=any`, `IPAddressAllow=localhost` (its self-test; the owner's D-05 answer `loopback-only`) |
+
+`/etc/ssh` itself stays read-only to the applier's unit. That is why taking
+over a Phase 2 host is a hand-run step (below), and why the unit's applier
+reports `phase2_adoption_pending` instead of doing it.
+
+`sshd -t` and `sshd -T` refuse to run without sshd's privilege separation
+directory (`Missing privilege separation directory: /run/sshd`). A
+socket-activated `ssh.service`, Ubuntu 24.04's default, creates it only
+once a connection started sshd, so after a boot the applier could neither
+apply nor check, and the first connection would start sshd with the trust
+files from before the boot. The applier's unit therefore creates
+`/run/sshd` (root:root 0755) before it starts (`ExecStartPre=+`, outside its
+sandbox). A hand-run `keyroster-agent apply --once` on such a host before
+the unit ever ran needs `sudo install -d -m 0755 /run/sshd` first. (Found
+and run in CI by `agent-smoke.sh` on the runner's socket-activated sshd.)
+
+**Start them** (as root):
+
+```
+systemctl daemon-reload
+systemctl enable --now keyroster-agent keyroster-agent-fetch
+```
+
+or on OpenRC (UNVERIFIED until 03-16):
+
+```
+rc-update add keyroster-agent default && rc-update add keyroster-agent-fetch default
+rc-service keyroster-agent start && rc-service keyroster-agent-fetch start
+```
+
+The OpenRC scripts have no sandbox: the applier runs as root and the
+fetcher as `keyroster-agent` (`command_user`), and that user is the only
+separation. The fetcher's script creates its log,
+`/var/log/keyroster-agent-fetch.log`, as `keyroster-agent` 0640 before
+the start (`checkpath` in `start_pre`), because `start-stop-daemon` opens
+the log only after it dropped to that user (PR #72 review; UNVERIFIED
+until 03-16 like the rest of OpenRC).
+
+**On a Phase 2 host** ([Moving a Phase 2 host to the agent](#moving-a-phase-2-host-to-the-agent)):
+the units run as usual and the applier reports `phase2_adoption_pending`
+(`keyroster host status` shows it as the last apply's error). After
+approving the host and re-rendering its principals files, run once, from a
+root shell:
+
+```
+sudo keyroster-agent apply --once
+```
+
+The applier's unit cannot remove files in `/etc/ssh`; the hand run can. The
+apply lock serialises it with the unit.
+
+**What the units do.** `keyroster-agent run` looks at the spool every 5 s
+and applies new signed state. It runs the drift check
+([Drift](#drift)) after every apply and every 15 min, with a random 60 s
+either way. After every apply and every check it writes its status to
+`/var/lib/keyroster-agent/outbox/status.json` (root:keyroster-agent 0640,
+written atomically without following links; its own copy is
+`/var/lib/keyroster-agent/heartbeat.json`, 0600). `keyroster-agent-fetch`
+polls every 60 s, with a random 10 s either way. After every poll the
+server answered, it posts that status as a heartbeat, with its clock offset
+(`clock_offset_s`, below). Between the applier's writes the server already
+holds that status and answers `stale_heartbeat`; the fetcher logs nothing
+for it.
+
+The fetcher, as the real `keyroster-agent` user, cannot create a file in
+`/var/lib/keyroster-agent` (where `pending.json` lives), in `accepted/` or
+in the outbox, nor overwrite `pins.json`, `outbox/status.json` or
+`outbox/accepted.json`. It can read the outbox and write the spool. The
+applier never reads the outbox. (Run in CI: `agent-smoke.sh`, with the real
+users.)
+
+**Watch the hosts** (admin workstation):
+
+```
+keyroster host status [--json]
+```
+
+```
+bundle v3 on 2/3 hosts
+directory v7 on 2/3 hosts
+KRL v1793196839 on 3/3 hosts
+
+HOST  DIRECTORY ENTRY               LAST SEEN  STATUS   BUNDLE  DIRECTORY  KRL           GENERATION  DRIFT  LAST APPLY  ALERTS
+web1  active                        12s ago    4m ago   v3      v7         v1793196839   12          no     ok          -
+web2  active                        40s ago    40s ago  v3      v7         v1793196839   9           no     ok          pending: intermediate
+web3  removed, served until forget  5m ago     12m ago  v2*     v6*        v1793196839   4           no     ok          silent
+```
+
+Each row is a host the directory approved once: when it was last seen (any
+request), how old its stored status is (`STATUS`: when the server last
+stored a newer one), the bundle, directory and KRL versions it applied (`*` where they differ from
+the server's current ones, by number or SHA-256), the generation, drift,
+the last apply's result (`ok`, `refused`, `rolled_back` or `error`, with
+its `detail` and `host_status`), and its alerts. A host counts on a version
+in the header only when it applied exactly that version, SHA-256 included,
+and no swap is pending. During 03-05's two-step
+swap the row shows `pending: intermediate` (or `final`, `commit`), which is
+not a failure: the versions are still the last committed ones until the
+final step and its self-test. The applier writes that status each time it
+writes the pending marker, so the row shows the swap during its widening
+wait too, which can last LoginGraceTime (PR #72 review). A host removed, disabled or re-keyed in the
+directory that is still served shows that on its own row (`removed, served
+until forget`), never as waiting for approval; so does `keyroster host
+pending`. A re-keyed host is one whose active entry under its name now
+holds other host keys than the agent enrolled with: it shows
+`host_keys_changed (re-enroll), served until forget`. Its applier keeps
+the last good principals files (`host_keys_rotated`), so the server records
+no removal for it, and `keyroster host forget` needs `--host-gone` (PR #72
+review). To re-enroll it, forget the old agent with `--host-gone`, remove
+the entry (enrollment refuses host keys that are on an entry), and enroll
+the host again with a new join token (UNVERIFIED: no test runs this
+re-enrollment). Convergence is the server's report of what each host said: run
+`keyroster-agent check` on a host to see it there. The CLI refuses an
+answer whose fields do not check out, and prints nothing outside printable
+ASCII. (Run in CI: `TestHostStatus`, `TestHeartbeat`,
+`TestAgentStatusEndToEnd`.)
+
+**What host status rests on** (owner decision D-R4, PR #72 review). Each
+row is the host's own report, and the unprivileged fetcher posts it: it
+reads the root applier's `outbox/status.json` but composes the heartbeat
+itself, and nothing in the body proves that the applier wrote it. A
+compromised fetcher can therefore withhold a new KRL or directory version
+from the spool and report it applied, and `keyroster host status` then
+shows the host as converged. The host still logs `krl_stale` at error
+level in its own journal (journald priority 3) once the KRL in force is
+24 h old, and `keyroster-agent check` on the host shows what is installed
+there. A status signed by the applier is a possible later plan (threat row
+T-03-284, pending todo `signed-applier-status`).
+
+**Alerts.**
+
+- `silent`: the host's last request is more than 180 s old on the server's
+  clock (D-10); one exactly 180 s old is not silent. A stopped fetcher, a
+  network break or a host that is down. (Run in CI:
+  `TestHeartbeat/silent_boundary_180_not_181` and, with real time,
+  `TestAgentStatusEndToEnd`.)
+- `status_stale`: the host is still seen, but its stored status is more
+  than 32 min old (two drift-check periods of 15 min with up to 60 s of
+  jitter; one exactly 32 min old is not flagged). The applier writes a
+  status after every apply and every check, so its unit
+  (`keyroster-agent.service`) has stopped or cannot write while the
+  fetcher keeps polling: nothing checks drift or applies revocations
+  there. (Run in CI: `TestStatusStale`, `TestHostStatusAge`; PR #72
+  review.)
+- `check_failed`: the last drift check could not run, for example because
+  `sshd -T` refuses an `sshd_config` with a syntax error; `DRIFT` shows
+  `failed`, and the error follows the table. The applier writes that
+  status instead of keeping the last healthy one. Fix the configuration
+  on the host; until then neither checks nor applies succeed there. (Run
+  in CI: `TestRunPublishesFailedCheck`, `TestHostStatusCheckFailed`; PR
+  #72 review.)
+- `krl_stale`: the KRL in force was issued 24 h ago or more (its manifest's
+  `issued_at`). The applier logs an error line on every check (journald
+  priority 3), and nothing else changes: the KRL stays installed and no
+  login is refused because of its age. The server re-publishes the KRL every
+  hour (03-03), so this means the host gets no new KRL: a frozen or
+  unreachable server, or a host that cannot apply it. A signer clock
+  stepped back by more than 24 h, or a host clock that far ahead, raises a
+  false `krl_stale`; it only alerts.
+- `clock_skew`: the host's clock is more than 300 s off the server's
+  (|`clock_offset_s`| > 300). `clock_offset_s` is the server's `Date` header
+  minus the host's clock when the poll's answer arrived, in whole seconds
+  (the header's resolution is one second, so the true skew can be up to 1 s
+  more than shown); the fetcher logs it at error level too. The server
+  keeps the offset of every heartbeat that parses, also one it refuses as
+  stale or as `heartbeat_seq_future`, so the flag follows the fetcher's
+  latest measurement (owner decision D-R2, PR #72). Fix the host's
+  clock: the agent's swap timing (03-05's KRL_M = KRL_B) and certificate
+  expiry both rely on it, and a lagging host accepts expired certificates.
+- `seq_regressed`: the host is seen, but its heartbeats since the stored
+  one carry a lower seq: its state was reset (`heartbeat.json` lost) after
+  its clock had run ahead. The status shown is the stored one until the
+  host's seq passes it, at most an hour later, because the server refuses
+  a seq more than an hour beyond its own clock (`heartbeat_seq_future`).
+  The server logs it as `heartbeat_seq_regressed` at most once an hour per
+  agent; an equal seq is the usual quiet `stale_heartbeat`. (Run in CI:
+  `TestHeartbeatSeq`; D-R2.)
+- `identity rotated <age>`: the agent's identity rotated in the last 7
+  days. Expected after `--rotate-identity`; otherwise see [An unexpected
+  identity rotation](#running-the-agent) (D-R1).
+- `stuck: pending_state_unknown`: see [Manual recovery](#manual-recovery).
+- `diverged`: the host reports a bundle, directory or KRL above the
+  server's current version, or the current number with other bytes. That
+  is the sign of a host that accepted a version a signer restore lost
+  (signer-install.md): check its `accepted.json` and reset its directory
+  as that runbook says. It never counts as converged. (Run in CI:
+  `TestHostStatusDiverged`, `TestCommittedAndDiverged`.)
+
+**Rotating the agent's identity.** On the host:
+
+```
+sudo -u keyroster-agent keyroster-agent-fetch --rotate-identity
+```
+
+It makes a new key, writes it to `/var/lib/keyroster-agent-fetch/identity.next`
+(0600) before it asks the server, and asks over mTLS with the current
+identity, signed by the current key. On the server's answer the new key
+becomes `identity.key`; from then on the old certificate gets
+`unknown_agent`. When the answer is lost, the fetcher's next poll gets
+`unknown_agent` with the old key, tries `identity.next`, and keeps it when
+the server accepts it; when the request never reached the server, the old
+key keeps working. Running `--rotate-identity` again after a failed one is
+safe: it never replaces an `identity.next` it finds, because that may be
+the only key the server knows. It tries that key first and finishes the
+earlier rotation when the server takes it, asks again for that same key
+when the server answers `unknown_agent` for it, and stops with an error,
+keeping the file, when it cannot reach the server (PR #72 review). The
+server allows one rotation per agent an hour
+(`identity_rotation_too_soon`). The rotation and the
+polls hold one lock, and the running service picks the new key up at its
+next poll. Run it as `keyroster-agent`: as root it is refused
+`fetch_dir_not_owned`, because the keys must stay the service user's.
+Compare the new identity with `keyroster host status --json`
+(`identity_spki_sha256`) or `keyroster-agent identity`. (Run in CI:
+`TestIdentityRotation`, and with the real users under systemd in
+`agent-smoke.sh`.)
+
+**An unexpected identity rotation.** keyroster-server logs every rotation
+at warning level (`agent identity rotated`, with the host, the old and the
+new identity and the client's address) and records it on the agent's row.
+`keyroster host status` shows `identity rotated <age>` for 7 days, and
+`--json` carries `identity_rotated_at` and `identity_rotations` (owner
+decision D-R1, PR #72). A rotation nobody ran on the host means its
+identity key (`/var/lib/keyroster-agent-fetch/identity.key`) may be
+stolen: whoever holds it can rotate the row to a key of their own, from
+anywhere. The real host then gets `unknown_agent`, which its fetcher logs
+at error level (`ERROR unknown_agent`, journald priority 3), and it gets no
+revocations from then on. Treat the row as lost, and re-enroll the host:
+
+1. On the admin workstation, remove its entry (`keyroster host remove
+   <name>`), then forget the agent with `keyroster host forget <name>
+   --host-gone`. Do not wait for its heartbeat: the key's holder can report
+   anything.
+2. On the host, as root, find out how the key left it. Stop both units,
+   delete `/var/lib/keyroster-agent-fetch/identity.key` (and
+   `identity.next`, if present), so the fetcher makes a new identity at its
+   next start, and enroll the host again with a new join token
+   ([Enrolling a host](#enrolling-a-host)).
+
+(The log line, the row's fields, the `host status` line and the fetcher's
+error line are run in CI: `TestIdentityRotationRecorded`, `TestHostStatus`,
+`TestUnknownAgentLoggedAtError`. The re-enrollment itself is UNVERIFIED: no
+test runs it, on CI or on a real host.)
+
+## Manual recovery
+
+When `keyroster host status` shows `stuck: pending_state_unknown`,
+something other than the agent changed `/etc/ssh/keyroster`: `current` or
+`last-good` is not a link to one of the agent's generations, or one is
+missing. Until it is resolved, the host applies nothing, revocations
+included, which is why the alert exists. On the host, as root:
+
+1. Inspect `/etc/ssh/keyroster/current` and `/etc/ssh/keyroster/last-good`
+   (`ls -l /etc/ssh/keyroster`), and find out what changed them.
+2. Run
+
+   ```
+   sudo keyroster-agent apply --once --recover-to-last-good
+   ```
+
+   It waits the LoginGraceTime bound and points `current` at `last-good`
+   again. The next apply goes on from there.
+
+(UNVERIFIED on a real host until 03-16; the recovery itself is 03-05's,
+run in CI there.)
 
 ## Removing a host
 
 Run in CI: `TestAgentRemoval` (server unit tests: the removed host gets the
 removal version and later KRLs, a never-approved agent is still refused,
 forget is refused while the directory holds the host's keys, and the host
-keys enroll again after it) and `TestAgentEnrollEndToEnd` (e2e: the
-removal reaches the enrolled host and its certificate logins are refused,
-then a later revocation still reaches it). Every step on the homelab is
-UNVERIFIED until 03-16.
+keys enroll again after it), `TestHostForgetWaitsForRemoval` (forget waits
+for the heartbeat that shows the removal applied, `--host-gone`) and
+`TestAgentEnrollEndToEnd` (e2e: the removal reaches the enrolled host and
+its certificate logins are refused, a later revocation still reaches it,
+and forget goes through once the host reported the removal). Every step on
+the homelab is UNVERIFIED until 03-16.
 
 An enrolled agent that the directory approved once keeps receiving signed
 state (directory, bundle and policy, KRL) after its host entry is disabled
@@ -810,15 +1111,12 @@ host can still read every later directory version, as root on any
 enrolled host can (D-03); that is the leak this order accepts.
 
 1. **Remove the entry (admin workstation).** `keyroster host remove <name>`.
-2. **Wait until the host has applied that version.** On the host, as root,
-   the applier's last report in `/var/lib/keyroster-agent/status.json`
-   names the directory version it applied (`last_apply.directory_version`)
-   and `host_status: host_removed` (or `host_disabled`); `keyroster-agent
-   run` prints the same report as a JSON line, and `keyroster-agent
-   krl-version` the KRL in force. (UNVERIFIED on a real host; 03-08's
-   `keyroster host status` will show the applied version from the
-   workstation.) A host you cannot reach any more never applies it; go on
-   only if it is decommissioned.
+2. **Wait until the host has applied that version.** `keyroster host
+   status` shows the host as `removed, served until forget`, with the
+   directory version it applied and `host_removed` in its last apply. On
+   the host, as root, `/var/lib/keyroster-agent/status.json` names the same
+   (`last_apply.directory_version`, `host_status`). A host you cannot reach
+   any more never applies it; go on only if it is decommissioned.
 3. **Forget the agent (admin workstation).**
 
    ```
@@ -828,10 +1126,39 @@ enrolled host can (D-03); that is the leak this order accepts.
    The server deletes every agent enrolled under `<name>` and prints each
    identity and host key it forgot. From then on that identity gets
    `unknown_agent` and receives nothing, and its host keys can enroll again
-   with a new join token (a reinstalled host). The server refuses
-   `host_in_directory` while any directory entry, active or disabled, still
-   holds one of the agent's host keys: forgetting an agent whose host is
-   still in the directory would stop the revocations that host needs.
+   with a new join token (a reinstalled host). The server refuses, forgetting
+   nothing:
+
+   - `host_in_directory` while any directory entry, active or disabled,
+     still holds one of the agent's host keys: forgetting an agent whose
+     host is still in the directory would stop the revocations that host
+     needs;
+   - `host_removal_not_applied` until the host's heartbeat shows a committed
+     directory version at or above the one that removed its entry (owner
+     decision 2026-10-28). The server records that version when it first
+     serves the agent a directory in which no entry holds its keys; a host
+     that never asked since cannot have applied it. The reported directory
+     must also be one the server served: not above its current version, and
+     with the SHA-256 of the server's directory under that number (a host
+     still on a version a signer restore lost does not pass; PR #72
+     review). Forget asks the signer for an older version and refuses when
+     it cannot answer.
+
+   For a host that will never report again (decommissioned, disk wiped):
+
+   ```
+   keyroster host forget <name> --host-gone
+   ```
+
+   It skips the second check only. The CLI prints that it does, and the
+   server logs it at warning level with the admin's name. If the host is
+   still running, it gets no more signed state from then on, revocations
+   included, and keeps enforcing what it applied last.
+
+   Forget is one admin's signed request and leaves a server log line only:
+   it needs no admin quorum and writes no record to the signer's
+   tamper-evident log yet. Plan 03-08b adds both, for forget and for
+   `--host-gone` (owner decision D-1, 2026-10-28).
 
 ## How fast changes arrive
 
@@ -866,9 +1193,9 @@ Run in CI e2e (`TestAgentApplyEndToEnd`, 03-05, and
 ## Moving a Phase 2 host to the agent
 
 Run in CI (`e2e-distro`, `TestDistroAdoptPhase2`, 03-06, on every image
-above, and `TestAdopt`). Step 1 needs the agent's units (03-08), which this
-version does not ship, and the enrollment of [Enrolling a host](#enrolling-a-host),
-so the order below is UNVERIFIED until 03-16.
+above, and `TestAdopt`). The units of step 1 run in CI on Ubuntu 24.04
+([Running the agent](#running-the-agent)); the order below on a Phase 2
+host is UNVERIFIED until 03-16.
 
 The agent takes over a host set up with this runbook only when its layout
 is exactly the runbook's (D-08):
@@ -969,9 +1296,11 @@ Exit status 0 when nothing drifted, 3 on drift, 2 for a tool error (no
 generation installed). The check runs `sshd -T -C` with loopback client
 addresses only. A `Match Address` block that applies only to some remote
 client ranges (for example a tailnet's shared address space, RFC 6598) is
-therefore not checked, and an override there can go unreported. The agent
-runs the check periodically once its units exist (03-08); until then it
-runs only by hand.
+therefore not checked, and an override there can go unreported.
+`keyroster-agent run` (the applier's unit) runs the same check after every
+apply and every 15 min, with a random 60 s either way, and reports its
+result in the heartbeat (`keyroster host status`, DRIFT; AGENT-05, 03-08;
+run in CI: `TestRunChecks`).
 
 ## Windows hosts
 

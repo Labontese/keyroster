@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -35,7 +36,7 @@ func init() {
 }
 
 const installUsage = `usage: keyroster-agent install --join-file FILE [--root DIR] [--state-dir DIR]
-       [--fetch-user NAME]
+       [--fetch-user NAME] [--bin-dir DIR]
 
 Reads the join string an admin made with keyroster host join-token (a 0600
 file, never an argument) and lays out the agent's files, each with its
@@ -53,6 +54,18 @@ links (F2):
                                           server URL, TLS roots and pins)
   <root>/var/lib/keyroster-agent-fetch    keyroster-agent 0700
   .../keyroster-agent-fetch/join-token    keyroster-agent 0600 (the token)
+  <root>/etc/ssh/keyroster                root:root 0755 (before the units:
+                                          systemd refuses a unit whose
+                                          ReadWritePaths path is missing)
+
+and the two services (03-08), root:root 0644: on a systemd host (a
+directory <root>/run/systemd/system) the units
+<root>/etc/systemd/system/keyroster-agent.service and
+keyroster-agent-fetch.service; on an OpenRC host (<root>/sbin/openrc-run)
+the scripts <root>/etc/init.d/keyroster-agent and keyroster-agent-fetch
+(0755). With neither, install refuses (install_no_service_manager) before
+it writes anything. The units run the binaries in --bin-dir (default
+/usr/local/bin); install does not enable or start them.
 
 The fetcher (keyroster-agent-fetch, user keyroster-agent) can write only
 its own directory and the spool. A path that exists already as a symlink,
@@ -64,8 +77,11 @@ that pins something else (install_pins_differ). The system user
 
 // Install refusals.
 var (
-	errInstallPathUnsafe = errors.New("install_path_unsafe")
-	errInstallPinsDiffer = errors.New("install_pins_differ")
+	errInstallPathUnsafe     = errors.New("install_path_unsafe")
+	errInstallPinsDiffer     = errors.New("install_pins_differ")
+	errInstallNoServiceMgr   = errors.New("install_no_service_manager")
+	errInstallNoDropInDir    = errors.New("install_no_sshd_config_d")
+	errInstallBinDirRelative = errors.New("install_bin_dir_not_absolute")
 )
 
 // defaultFetchUser is the fetcher's system user.
@@ -96,6 +112,7 @@ func runInstall(_ context.Context, args []string, stdout, stderr io.Writer) erro
 	root := fset.String("root", "/", "the root of the file system the agent's files are under")
 	stateDir := fset.String("state-dir", defaultStateDir, "the applier's state directory")
 	fetchUser := fset.String("fetch-user", defaultFetchUser, "the fetcher's system user (tests set another)")
+	binDir := fset.String("bin-dir", apply.DefaultBinDir, "the directory the units run keyroster-agent and keyroster-agent-fetch from")
 	if err := fset.Parse(args); err != nil || fset.NArg() != 0 || *joinFile == "" {
 		return errUsage
 	}
@@ -104,6 +121,9 @@ func runInstall(_ context.Context, args []string, stdout, stderr io.Writer) erro
 			_, _ = fmt.Fprintf(stderr, "install: %s must be an absolute path\n", name)
 			return errUsage
 		}
+	}
+	if !filepath.IsAbs(*binDir) {
+		return fmt.Errorf("%w: --bin-dir %q", errInstallBinDirRelative, *binDir)
 	}
 	j, err := readJoinFile(*joinFile)
 	if err != nil {
@@ -127,6 +147,7 @@ func runInstall(_ context.Context, args []string, stdout, stderr io.Writer) erro
 		{path: l.Outbox(), dir: true, uid: ruid, gid: fgid, mode: 0o2750},
 		{path: l.FetchConfigDir(), dir: true, uid: ruid, gid: rgid, mode: 0o755},
 		{path: l.FetchDir(), dir: true, uid: fuid, gid: fgid, mode: 0o700},
+		{path: l.KeyrosterDir(), dir: true, uid: ruid, gid: rgid, mode: 0o755},
 	}
 	fc, err := trust.CanonicalJSON(join.FetchConfigOf(j))
 	if err != nil {
@@ -140,6 +161,11 @@ func runInstall(_ context.Context, args []string, stdout, stderr io.Writer) erro
 		{installPath{path: l.FetchConfig(), uid: ruid, gid: fgid, mode: 0o640}, fc},
 		{installPath{path: l.JoinTokenFile(), uid: fuid, gid: fgid, mode: 0o600}, tok},
 	}
+	services, manager, err := serviceFiles(l, filepath.Clean(*binDir), ruid, rgid)
+	if err != nil {
+		return err
+	}
+	files = append(files, services...)
 	pins := &state.Pins{TrustPins: j.TrustPins, Threshold: j.Threshold, InstallationID: j.InstallationID}
 	wantPins, err := trust.CanonicalJSON(pins)
 	if err != nil {
@@ -181,11 +207,59 @@ func runInstall(_ context.Context, args []string, stdout, stderr io.Writer) erro
 			return err
 		}
 	}
-	_, err = fmt.Fprintf(stdout, "Installed the agent for host %s of installation %s (agent server %s, join token expires %s).\n"+
-		"Next: start keyroster-agent-fetch as %s and keyroster-agent run as root (docs/runbooks/host-setup.md \"Enrolling a host\"),\n"+
+	start := "systemctl daemon-reload && systemctl enable --now keyroster-agent keyroster-agent-fetch"
+	if manager == "openrc" {
+		start = "rc-update add keyroster-agent default && rc-update add keyroster-agent-fetch default && rc-service keyroster-agent start && rc-service keyroster-agent-fetch start"
+	}
+	_, err = fmt.Fprintf(stdout, "Installed the agent for host %s of installation %s (agent server %s, join token expires %s), with its %s services.\n"+
+		"Next: %s (docs/runbooks/host-setup.md \"Running the agent\"),\n"+
 		"then ask an admin to run keyroster host pending and compare with keyroster-agent identity here.\n",
-		j.ExpectedName, j.InstallationID, j.Server, j.ExpiresAt, *fetchUser)
+		j.ExpectedName, j.InstallationID, j.Server, j.ExpiresAt, manager, start)
 	return err
+}
+
+// serviceFiles are the two services install writes: systemd units when
+// <root>/run/systemd/system is a directory, else OpenRC scripts when
+// <root>/sbin/openrc-run exists, else install_no_service_manager. The
+// units name the state directory as the host sees it (below --root
+// without that prefix) and the binaries in binDir.
+func serviceFiles(l apply.Layout, binDir string, uid, gid int) ([]installFile, string, error) {
+	stateDir := l.StateDir
+	if rel, err := filepath.Rel(l.Root, l.StateDir); err == nil && l.Root != "/" && rel != ".." && !strings.HasPrefix(rel, "../") {
+		stateDir = "/" + rel
+	}
+	c := apply.UnitConfig{BinDir: binDir, StateDir: stateDir}
+	type render func(apply.UnitConfig) (string, error)
+	var (
+		manager string
+		units   []render
+		mode    uint32
+		names   []string
+	)
+	all := l.ServiceFiles()
+	if st, err := os.Lstat(filepath.Join(l.Root, "run", "systemd", "system")); err == nil && st.IsDir() {
+		// The applier unit names it in ReadWritePaths, and systemd
+		// refuses a unit whose path is missing; the agent never creates
+		// it (it is sshd's).
+		if st, err := os.Lstat(l.DropInDir()); err != nil || !st.IsDir() {
+			return nil, "", fmt.Errorf("%w: %s is not a directory: sshd here reads no drop-ins, and the applier's unit could not start; nothing was written", errInstallNoDropInDir, l.DropInDir())
+		}
+		manager, units, mode, names = "systemd", []render{apply.ApplierSystemdUnit, apply.FetcherSystemdUnit}, 0o644, all[:2]
+	} else if _, err := os.Lstat(filepath.Join(l.Root, "sbin", "openrc-run")); err == nil {
+		manager, units, mode, names = "openrc", []render{apply.ApplierOpenRCScript, apply.FetcherOpenRCScript}, 0o755, all[2:]
+	} else {
+		return nil, "", fmt.Errorf("%w: neither %s (systemd) nor %s (OpenRC) exists; nothing was written", errInstallNoServiceMgr,
+			filepath.Join(l.Root, "run", "systemd", "system"), filepath.Join(l.Root, "sbin", "openrc-run"))
+	}
+	var out []installFile
+	for i, r := range units {
+		text, err := r(c)
+		if err != nil {
+			return nil, "", err
+		}
+		out = append(out, installFile{installPath{path: names[i], uid: uid, gid: gid, mode: mode}, []byte(text)})
+	}
+	return out, manager, nil
 }
 
 // readJoinFile reads and parses the join file. Its text never reaches an

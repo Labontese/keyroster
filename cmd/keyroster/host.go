@@ -29,12 +29,12 @@ import (
 func init() {
 	register(command{
 		Name:    "host",
-		Summary: "hosts in the directory (add, remove, list), agent enrollment (join-token, pending, approve, forget) and manual host setup (principals: render an account's AuthorizedPrincipalsFile; ca-key: the TrustedUserCAKeys line)",
+		Summary: "hosts in the directory (add, remove, list), agent enrollment and operation (join-token, pending, approve, status, forget) and manual host setup (principals: render an account's AuthorizedPrincipalsFile; ca-key: the TrustedUserCAKeys line)",
 		Run:     runHost,
 	})
 }
 
-const hostSubcommands = "add, remove, list, join-token, pending, approve, forget, principals or ca-key"
+const hostSubcommands = "add, remove, list, join-token, pending, approve, status, forget, principals or ca-key"
 
 func runHost(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -56,6 +56,8 @@ func runHost(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return runHostApprove(ctx, args[1:], stdout, stderr)
 	case "forget":
 		return runHostForget(ctx, args[1:], stdout, stderr)
+	case "status":
+		return runHostStatus(ctx, args[1:], stdout, stderr)
 	case "principals":
 		return runHostPrincipals(ctx, args[1:], stdout, stderr)
 	case "ca-key":
@@ -382,6 +384,10 @@ func hostAdminRefusal(err error) error {
 			"wait until the host has applied that version, then forget it (docs/runbooks/host-setup.md \"Removing a host\"). Nothing was forgotten")
 	case he.APIErrorIs(serverclient.AdminErrHostNotEnrolled):
 		return errors.New("no agent is enrolled under this name; nothing was forgotten")
+	case he.APIErrorIs(serverclient.AdminErrRemovalNotApplied):
+		return errors.New("host_removal_not_applied: the host has not yet reported that it applied the directory version that removed it " +
+			"(keyroster host status shows its directory version); forgetting it now would stop the signed state, revocations included, " +
+			"before the removal reached it. Wait for its next heartbeat; for a host that is gone for good, run keyroster host forget NAME --host-gone. Nothing was forgotten")
 	}
 	return nil
 }
@@ -487,20 +493,63 @@ func joinFileProtection(goos string) (protection, warning string) {
 }
 
 // fetchPendingHosts GETs the pending hosts through the admin API, after
-// requireHostPoP.
-func fetchPendingHosts(ctx context.Context, s *adminSession) ([]serverclient.PendingHost, error) {
+// requireHostPoP: the hosts waiting for approval, and the hosts approved
+// once that the directory no longer approves (served until forget,
+// 03-08 carry-over a), each checked (checkServedHost).
+func fetchPendingHosts(ctx context.Context, s *adminSession) ([]serverclient.PendingHost, []servedHostView, error) {
 	_, pol, err := requireHostPoP(ctx, s)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var ans serverclient.PendingHostsAnswer
 	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminPendingHostsPath, nil, &ans, s.signer); err != nil {
 		if refusal := hostAdminRefusal(err); refusal != nil {
-			return nil, refusal
+			return nil, nil, refusal
 		}
-		return nil, adminError(err, s, pol)
+		return nil, nil, adminError(err, s, pol)
 	}
-	return ans.Hosts, nil
+	var served []servedHostView
+	for _, h := range ans.Served {
+		v, err := checkServedHost(h)
+		if err != nil {
+			return nil, nil, err
+		}
+		served = append(served, *v)
+	}
+	return ans.Hosts, served, nil
+}
+
+// servedHostView is a served host as the CLI shows it.
+type servedHostView struct {
+	pendingHostView
+	State string
+}
+
+// checkServedHost is checkPendingHost for a served host, whose state must
+// be one of removed, disabled or keys_changed.
+func checkServedHost(h serverclient.ServedHost) (*servedHostView, error) {
+	v, err := checkPendingHost(h.PendingHost)
+	if err != nil {
+		return nil, err
+	}
+	switch h.State {
+	case serverclient.HostStateRemoved, serverclient.HostStateDisabled, serverclient.HostStateKeysChanged:
+	default:
+		return nil, errBadPendingHosts
+	}
+	return &servedHostView{pendingHostView: *v, State: h.State}, nil
+}
+
+// servedLine is the line host pending and host status print for a served
+// host's state: removed, disabled or re-keyed, and served until forget.
+func servedLine(state string) string {
+	switch state {
+	case serverclient.HostStateDisabled:
+		return "disabled, served until forget"
+	case serverclient.HostStateKeysChanged:
+		return "host_keys_changed (re-enroll), served until forget"
+	}
+	return "removed, served until forget"
 }
 
 // pendingHostView is a pending host as the CLI shows it: every value
@@ -582,7 +631,7 @@ func runHostPending(ctx context.Context, args []string, stdout, stderr io.Writer
 		return err
 	}
 	defer s.close()
-	hosts, err := fetchPendingHosts(ctx, s)
+	hosts, served, err := fetchPendingHosts(ctx, s)
 	if err != nil {
 		return err
 	}
@@ -599,6 +648,12 @@ func runHostPending(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 	if len(hosts) > 0 {
 		b.WriteString("Compare each fingerprint with `keyroster-agent identity` on the host, then run keyroster host approve NAME --group G --principal P.\n")
+	}
+	if len(served) > 0 {
+		b.WriteString("Approved once and no longer in the directory as active; not waiting for approval (keyroster host forget ends the service):\n")
+		for _, v := range served {
+			fmt.Fprintf(&b, "Host %s: %s (agent identity %s)\n", v.Name, servedLine(v.State), v.Identity)
+		}
 	}
 	_, err = io.WriteString(stdout, b.String())
 	return err
@@ -660,7 +715,7 @@ func runHostApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 		return err
 	}
 	defer s.close()
-	hosts, err := fetchPendingHosts(ctx, s)
+	hosts, served, err := fetchPendingHosts(ctx, s)
 	if err != nil {
 		return err
 	}
@@ -676,6 +731,13 @@ func runHostApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 	switch len(match) {
 	case 0:
+		for _, v := range served {
+			if v.Name == name {
+				return fmt.Errorf("host %s was approved before and is now %s; it never waits for approval again, so it is not approved by name. "+
+					"To give it access again, add its entry back with keyroster host add; to start over, forget it (keyroster host forget %s) and enroll it with a new join token. Nothing was signed",
+					name, servedLine(v.State), name)
+			}
+		}
 		return fmt.Errorf("no enrolled host named %s is waiting for approval (keyroster host pending lists them); nothing was signed", name)
 	case 1:
 	default:
@@ -708,17 +770,22 @@ func sameFingerprints(a, b []string) bool {
 	return slices.Equal(x, y)
 }
 
-// runHostForget is keyroster host forget NAME [--admin-key FP] (PR #71
-// review D-R1): the server deletes every agent enrolled under NAME, so its
-// identity gets 403 unknown_agent from then on and its host keys can
-// enroll again with a new join token. An agent approved once keeps
-// getting signed state after its host entry is removed, so the removal
-// and later revocations reach the host; forget ends that. The server
-// refuses while a directory host entry still holds the agent's host keys.
+// runHostForget is keyroster host forget NAME [--host-gone] [--admin-key
+// FP] (PR #71 review D-R1): the server deletes every agent enrolled under
+// NAME, so its identity gets 403 unknown_agent from then on and its host
+// keys can enroll again with a new join token. An agent approved once
+// keeps getting signed state after its host entry is removed, so the
+// removal and later revocations reach the host; forget ends that. The
+// server refuses while a directory host entry still holds the agent's
+// host keys (host_in_directory), and until the host's heartbeat shows it
+// applied the version that removed it (host_removal_not_applied, 03-08).
+// --host-gone overrides the second for a host that will never report
+// again: this command prints that it does, and the server logs it.
 func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("host forget", flag.ContinueOnError)
 	fset.SetOutput(stderr)
 	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	hostGone := fset.Bool("host-gone", false, "forget even though the host never reported applying its removal (a host that is gone for good); printed and logged")
 	pos, err := parseInterspersed(fset, args)
 	if err != nil {
 		return errUsage
@@ -739,8 +806,12 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if err != nil {
 		return err
 	}
+	if *hostGone {
+		_, _ = fmt.Fprintf(stderr, "host forget --host-gone: forgetting %s without its confirmation that it applied its removal. "+
+			"If the host is still running, it gets no more signed state from now on, revocations included, and keeps enforcing what it applied last. The server logs this override.\n", name)
+	}
 	var ans serverclient.ForgetHostAnswer
-	if err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminForgetHostPath, serverclient.ForgetHostRequest{ExpectedName: name}, &ans, s.signer); err != nil {
+	if err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminForgetHostPath, serverclient.ForgetHostRequest{ExpectedName: name, HostGone: *hostGone}, &ans, s.signer); err != nil {
 		if refusal := hostAdminRefusal(err); refusal != nil {
 			return refusal
 		}
@@ -762,6 +833,9 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 		}
 	}
 	b.WriteString("Its identity gets unknown_agent from now on and receives no more signed state; its host keys can enroll again with a new join token.\n")
+	if *hostGone {
+		b.WriteString("Forgotten with --host-gone: the host never confirmed that it applied its removal.\n")
+	}
 	_, err = io.WriteString(stdout, b.String())
 	return err
 }

@@ -167,6 +167,8 @@ type dirEnv struct {
 	revokeBody []byte
 	// calls is every admin POST, in order, as "POST <path>".
 	calls []string
+	// lastPost is the body of the last admin POST.
+	lastPost []byte
 }
 
 const agentCustody = "user=agent, host=agent, machine=agent, ops=agent, log=agent"
@@ -320,6 +322,7 @@ func (e *dirEnv) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost {
 		e.calls = append(e.calls, r.Method+" "+r.URL.Path)
+		e.lastPost = body
 	}
 	if f := e.override[r.Method+" "+r.URL.Path]; f != nil {
 		f(w)

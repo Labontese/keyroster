@@ -29,6 +29,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/execsite"
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
@@ -305,6 +306,14 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 			}
 		}
 		_ = unix.Close(e.stateFd)
+		// The heartbeat's status after every apply (03-08, AGENT-07);
+		// a status that cannot be written only delays what the host
+		// reports.
+		if e.locked && !cfg.DryRun {
+			if _, serr := WriteStatus(ctx, cfg, l, StatusUpdate{Applied: true, Report: r, ApplyErr: err}); serr != nil {
+				e.logf("WARNING writing %s: %v", filepath.Join(l.Outbox(), heartbeat.StatusFile), serr)
+			}
+		}
 	}
 	return r, err
 }

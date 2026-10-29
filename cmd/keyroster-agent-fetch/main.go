@@ -24,13 +24,23 @@ import (
 )
 
 const usage = `usage: keyroster-agent-fetch [--config FILE] [--dir DIR] [--spool DIR] [--outbox DIR] [--poll D]
+       keyroster-agent-fetch --rotate-identity [--config FILE] [--dir DIR] [--spool DIR] [--outbox DIR]
 
 Runs as keyroster-agent. --config is fetch.json (default
 /etc/keyroster-agent/fetch.json), --dir the fetcher's own directory
 (default /var/lib/keyroster-agent-fetch), --spool and --outbox the
 applier's (default /var/lib/keyroster-agent/spool and .../outbox). --poll
 is the poll interval (default 60s, at least 1s), with a uniform jitter of a
-sixth of it either way.
+sixth of it either way. Every poll ends with a heartbeat: the applier's
+status (outbox/status.json) with this host's clock offset.
+
+--rotate-identity replaces the agent's TLS identity once and exits (run it
+as keyroster-agent, while the service runs or not): a new key is written to
+identity.next, the server is asked to switch, signed by the current key,
+and on its answer identity.next becomes identity.key. When the answer is
+lost, the next poll finishes the rotation, or the next --rotate-identity
+does: it never replaces an identity.next it finds, but tries it first and
+asks again for that same key. The server allows one rotation an hour.
 `
 
 func main() {
@@ -46,6 +56,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	spoolDir := fset.String("spool", "/var/lib/keyroster-agent/spool", "the spool directory")
 	outbox := fset.String("outbox", "/var/lib/keyroster-agent/outbox", "the applier's outbox")
 	poll := fset.Duration("poll", fetch.DefaultPoll, "the poll interval (at least 1s)")
+	rotate := fset.Bool("rotate-identity", false, "rotate the agent's TLS identity once and exit")
 	if err := fset.Parse(args); err != nil || fset.NArg() != 0 {
 		return 2
 	}
@@ -67,6 +78,13 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *rotate {
+		if err := f.RotateIdentity(ctx); err != nil {
+			_, _ = fmt.Fprintf(stderr, "keyroster-agent-fetch: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	if err := f.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintf(stderr, "keyroster-agent-fetch: %v\n", err)
 		return 1

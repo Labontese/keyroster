@@ -103,6 +103,25 @@ func (l Layout) FetchDir() string {
 // JoinTokenFile is <root>/var/lib/keyroster-agent-fetch/join-token.
 func (l Layout) JoinTokenFile() string { return filepath.Join(l.FetchDir(), "join-token") }
 
+// SystemdUnitDir is <root>/etc/systemd/system, where install writes the
+// agent's two systemd units (03-08).
+func (l Layout) SystemdUnitDir() string { return filepath.Join(l.Root, "etc", "systemd", "system") }
+
+// OpenRCScriptDir is <root>/etc/init.d, where install writes the agent's
+// two OpenRC scripts (03-08).
+func (l Layout) OpenRCScriptDir() string { return filepath.Join(l.Root, "etc", "init.d") }
+
+// ServiceFiles are the four unit and script paths install writes (03-08):
+// keyroster-agent.service and keyroster-agent-fetch.service in
+// SystemdUnitDir, keyroster-agent and keyroster-agent-fetch in
+// OpenRCScriptDir.
+func (l Layout) ServiceFiles() []string {
+	return []string{
+		filepath.Join(l.SystemdUnitDir(), "keyroster-agent.service"), filepath.Join(l.SystemdUnitDir(), "keyroster-agent-fetch.service"),
+		filepath.Join(l.OpenRCScriptDir(), "keyroster-agent"), filepath.Join(l.OpenRCScriptDir(), "keyroster-agent-fetch"),
+	}
+}
+
 // within reports whether p is dir or below it; both are clean absolute
 // paths.
 func within(p, dir string) bool {
@@ -111,9 +130,10 @@ func within(p, dir string) bool {
 
 // Allowed returns nil when the applier may write path: the keyroster tree
 // itself or anything below it, the drop-in file exactly, the state
-// directory or anything below it, or exactly one of the four paths
-// install writes outside them (03-07): FetchConfigDir, FetchConfig,
-// FetchDir and JoinTokenFile. The path must be absolute and clean
+// directory or anything below it, exactly one of the four paths install
+// writes outside them (03-07): FetchConfigDir, FetchConfig, FetchDir and
+// JoinTokenFile, or exactly one of the four unit and script paths
+// (ServiceFiles, 03-08). The path must be absolute and clean
 // (no "..", no doubled separators); anything else is ErrNotAllowed. It
 // never touches the file system: the applier opens every path it checked
 // with O_NOFOLLOW relative to a directory it opened the same way.
@@ -134,6 +154,11 @@ func Allowed(l Layout, path string) error {
 	case path == filepath.Clean(l.FetchConfigDir()), path == filepath.Clean(l.FetchConfig()),
 		path == filepath.Clean(l.FetchDir()), path == filepath.Clean(l.JoinTokenFile()):
 		return nil
+	}
+	for _, f := range l.ServiceFiles() {
+		if path == filepath.Clean(f) {
+			return nil
+		}
 	}
 	return fmt.Errorf("%w: %s is outside the agent's paths (%s, %s, %s and install's %s, %s)", ErrNotAllowed, path, l.KeyrosterDir(), l.DropIn(), l.StateDir, l.FetchConfig(), l.JoinTokenFile())
 }
@@ -207,6 +232,7 @@ var ExecSites = []ExecSite{
 	{Func: "sshdTest", Ctor: "SSHDTest", Call: "e.cfg.SSHD e.cfg.SSHDConfig", Args: "-t -f CONFIG"},
 	{Func: "sshdDump", Ctor: "SSHDDump", Call: "e.cfg.SSHD e.cfg.SSHDConfig", Args: "-T -f CONFIG"},
 	{Func: "sshdDump", Ctor: "SSHDDumpFor", Call: "e.cfg.SSHD e.cfg.SSHDConfig spec", Args: "-T -f CONFIG -C SPEC"},
+	{Func: "sshdVersion", Ctor: "SSHDVersion", Call: "e.cfg.SSHD", Args: "-V"},
 	{Func: "keygenFingerprint", Ctor: "KeygenFingerprint", Call: "e.cfg.SSHKeygen file", Args: "-l -f FILE"},
 	{Func: "keygenQuery", Ctor: "KeygenQuery", Call: "e.cfg.SSHKeygen krlFile pub", Args: "-Q -f KRL PUB"},
 	{Func: "reloadSystemd", Ctor: "SystemctlReload", Call: "systemctl unit", Args: "reload UNIT"},

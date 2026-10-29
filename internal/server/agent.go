@@ -3,18 +3,23 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strconv"
 	"time"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/join"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
@@ -27,9 +32,9 @@ const (
 	// maxAgentEnrollBody bounds an enrollment request: eight host keys,
 	// their signatures and the facts fit in a few KiB.
 	maxAgentEnrollBody = 16 << 10
-	// agentPerMinute and agentBurst are the per-identity rate of the state
-	// route for enrolled agents; the global backstop is agentGlobalFactor
-	// times them. The burst is the fetcher's rounds per poll, so a host
+	// agentPerMinute and agentBurst are the per-agent rate (per agents row,
+	// whatever its identity) of the routes of enrolled agents; the global
+	// backstop is agentGlobalFactor times them. The burst is the fetcher's rounds per poll, so a host
 	// catching up through `more` is never refused inside one poll (PR #71
 	// review F4).
 	agentPerMinute    = 30
@@ -45,9 +50,9 @@ const (
 
 // newAgentLimiters returns the two limiter classes of the agent routes
 // (PR #71 review F1/F2). A self-signed identity costs nothing to make, so
-// it buys no budget: only an enrolled agent's state requests are charged
-// to agent, per identity (the client certificate's SPKI hash) with its
-// global backstop; enrollment and state requests from an identity no
+// it buys no budget: only an enrolled agent's requests are charged to
+// agent, per agents row (which an identity rotation keeps, PR #72 review
+// C10) with its global backstop; enrollment and state requests from an identity no
 // agents row names are charged to anon, per client address (clientKey)
 // with a global backstop of its own. No amount of unknown traffic can
 // then spend the budget enrolled agents poll with.
@@ -58,15 +63,17 @@ func newAgentLimiters() (agent, anon *limiter) {
 
 // buildAgentMux registers the closed set of agent routes (AGENT-02) on
 // their own mux, served only by the agent listener (AgentHandler): the
-// enrollment and the state. Each takes the client certificate's identity
-// from the TLS connection (AgentTLSConfig required one at the handshake).
-// Enrollment goes through the anonymous limiter; the state route through
-// requireAgent, which picks the class by whether the identity is
-// enrolled.
+// enrollment, the state, the heartbeat and the identity rotation (03-08).
+// Each takes the client certificate's identity from the TLS connection
+// (AgentTLSConfig required one at the handshake). Enrollment goes through
+// the anonymous limiter; the other routes through requireAgent, which
+// picks the class by whether the identity is enrolled.
 func (s *Server) buildAgentMux() *routeMux {
 	mux := newRouteMux()
 	mux.Handle("POST "+serverclient.AgentEnrollPath, s.agentAnonLimited(http.HandlerFunc(s.handleAgentEnroll)))
 	mux.Handle("GET "+serverclient.AgentStatePath, s.requireAgent(s.handleAgentState))
+	mux.Handle("POST "+serverclient.AgentHeartbeatPath, s.requireAgent(s.handleAgentHeartbeat))
+	mux.Handle("POST "+serverclient.AgentIdentityPath, s.requireAgent(s.handleAgentIdentity))
 	return mux
 }
 
@@ -130,7 +137,7 @@ type agentRequest struct {
 // The agent is looked up before any rate limit is charged (PR #71 review
 // F1/F2): an identity no agents row names is charged to the anonymous
 // class by its client address, and only an enrolled one to the agent
-// class by its identity.
+// class by its agents row.
 func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *agentRequest)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -140,6 +147,9 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 			return
 		}
 		a, err := s.db.AgentBySPKI(ctx, spki)
+		if s.afterAgentLookup != nil {
+			s.afterAgentLookup()
+		}
 		if errors.Is(err, serverdb.ErrNotFound) {
 			if !s.agentAllow(w, r, s.agentAnonLimit, clientKey(r), "client", clientKey(r)) {
 				return
@@ -153,7 +163,9 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 			s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 			return
 		}
-		if !s.agentAllow(w, r, s.agentLimit, hex.EncodeToString(spki), "agent", agentFingerprint(spki)) {
+		// Charged to the row, which an identity rotation keeps, so a
+		// rotation buys no new budget (PR #72 review C10, C15).
+		if !s.agentAllow(w, r, s.agentLimit, strconv.FormatInt(a.ID, 10), "agent", agentFingerprint(spki)) {
 			return
 		}
 		dv, err := s.currentDirectory(ctx)
@@ -167,6 +179,16 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		// itself and every later revocation reach the host; only an agent
 		// never approved is refused (PR #71 review D-R1). keyroster host
 		// forget deletes the row and ends it.
+		//
+		// 03-08: the first directory version an approved-once agent is
+		// served under in which no entry holds any of its keys (its entry
+		// removed, not just disabled or re-keyed) is recorded
+		// (removed_dir_version), so keyroster host forget can wait for the
+		// host's heartbeat to show it applied; a directory in which an
+		// entry holds them again clears it. An active entry under the
+		// agent's name with entirely new keys is a re-keyed host, not a
+		// removal: the applier keeps last-good's principals for it
+		// (host_keys_rotated), so nothing is recorded (PR #72 review C14).
 		switch {
 		case approved(dv, a.HostKeys):
 			if a.ApprovedAtUS == 0 {
@@ -177,15 +199,75 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 				}
 				s.log.Info("agent approved: first signed state", "expected_name", a.ExpectedName, "agent", agentFingerprint(spki))
 			}
+			if a.RemovedDirVersion != 0 {
+				if err := s.db.SetAgentRemovedVersion(ctx, a.ID, 0); err != nil {
+					s.log.Warn("agent removal version", "err", err)
+				}
+				a.RemovedDirVersion = 0
+			}
 		case a.ApprovedAtUS == 0:
 			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrNotApproved})
 			return
+		case hostHolds(dv, a.HostKeys) || rekeyed(dv, a.ExpectedName):
+			if a.RemovedDirVersion != 0 {
+				if err := s.db.SetAgentRemovedVersion(ctx, a.ID, 0); err != nil {
+					s.log.Warn("agent removal version", "err", err)
+				}
+				a.RemovedDirVersion = 0
+			}
+		case a.RemovedDirVersion == 0 && dv.version != 0:
+			if err := s.db.SetAgentRemovedVersion(ctx, a.ID, dv.version); err != nil {
+				s.log.Error("agent removal version", "err", err)
+				s.writeJSON(w, nil, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+				return
+			}
+			a.RemovedDirVersion = dv.version
 		}
-		if err := s.db.TouchAgent(ctx, a.ID, s.clock().UnixMicro()); err != nil {
+		// The row can go between the lookup and here (keyroster host
+		// forget): the request is then refused, never served for a row
+		// that no longer exists (PR #72 review C1).
+		switch err := s.db.TouchAgent(ctx, a.ID, s.clock().UnixMicro()); {
+		case errors.Is(err, serverdb.ErrNotFound):
+			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
+			return
+		case err != nil:
 			s.log.Warn("agent last seen", "err", err)
 		}
 		next(w, r, &agentRequest{agent: a, status: dv.status, dir: dv})
 	})
+}
+
+// hostHolds reports whether any host entry of the directory dv, active or
+// disabled, holds one of keys: the agent's host is still in the
+// directory (host forget's host_in_directory, and why no removal version
+// is recorded yet).
+func hostHolds(dv *directoryView, keys []string) bool {
+	if dv.dir == nil {
+		return false
+	}
+	for _, k := range keys {
+		pub, err := trust.ParseKey(k)
+		if err != nil {
+			continue
+		}
+		if _, ok := dv.dir.HostForKey(pub); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// rekeyed reports whether the directory dv holds an active host entry
+// named name (the agent's expected name, the one keyroster host approve
+// gave its entry): the caller found no entry holding any of the agent's
+// keys, so that entry was re-keyed. The applier, whose last entry is
+// still active, keeps last-good's principals (host_keys_rotated).
+func rekeyed(dv *directoryView, name string) bool {
+	if dv.dir == nil {
+		return false
+	}
+	h, ok := dv.dir.HostByName(name)
+	return ok && h.Status == directory.StatusActive
 }
 
 // approved reports whether the directory dv holds an active host entry
@@ -603,4 +685,145 @@ func encodeAgentState(bundles, dirs [][]byte, k []byte, more bool) []byte {
 	}
 	b.WriteString(`,"more":` + strconv.FormatBool(more) + "}\n")
 	return b.Bytes()
+}
+
+// handleAgentHeartbeat serves POST AgentHeartbeatPath (03-08, AGENT-07):
+// the applier's status and the fetcher's clock offset, from an agent
+// requireAgent admitted. The server treats every field as untrusted even
+// after mTLS:
+//  1. the body is at most heartbeat.MaxBody bytes (413 otherwise);
+//  2. it is decoded strictly and every field checked
+//     (heartbeat.ParseHeartbeat); a violation is 400
+//     heartbeat_field_invalid naming the field, and nothing is stored
+//     (T-03-227);
+//  3. it replaces the stored heartbeat only when its seq is greater; a
+//     lower or equal seq is 409 stale_heartbeat, so a replayed or
+//     reordered heartbeat never replaces a newer one (T-03-52). The
+//     fetcher posts at every poll and the seq changes only when the
+//     applier writes a new status, so stale_heartbeat is the usual answer
+//     between writes (owner decision D-2, 2026-10-28): a host's silence is
+//     judged from its last request (last_seen_us), not from this. A lower
+//     seq is logged as heartbeat_seq_regressed at most once an hour and
+//     flagged seq_regressed in hosts/status (owner decision D-R2);
+//  4. a seq more than heartbeat.MaxSeqAhead beyond the server's clock is
+//     400 heartbeat_seq_future, logged, and stores nothing, so no seq can
+//     freeze the host's status (D-R2, PR #72 review C11).
+//
+// The clock offset of every heartbeat that parsed is recorded, a refused
+// one's too, so clock_skew never lags behind the fetcher (D-R2).
+//
+// A stored heartbeat logs nothing (one row per agent, gemma REVIEWS L1123).
+func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, heartbeat.MaxBody))
+	if err != nil {
+		s.writeJSON(w, ar.status, http.StatusRequestEntityTooLarge, serverclient.APIError{Error: "heartbeat too large"})
+		return
+	}
+	h, err := heartbeat.ParseHeartbeat(body)
+	if err != nil {
+		field := heartbeat.Field(err)
+		s.log.Warn("heartbeat refused", "agent", agentFingerprint(ar.agent.IdentitySPKISHA256), "reason", serverclient.AgentErrHeartbeatField, "field", field)
+		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.HeartbeatRefusal{Error: serverclient.AgentErrHeartbeatField, Field: field})
+		return
+	}
+	ctx, fp := r.Context(), agentFingerprint(ar.agent.IdentitySPKISHA256)
+	nowUS := s.clock().UnixMicro()
+	if limit := nowUS + heartbeat.MaxSeqAhead.Microseconds(); limit < 0 || h.Status.Seq > uint64(limit) {
+		// The offset is the host's clock, which is what is wrong (D-R2).
+		if err := s.db.RecordClockOffset(ctx, ar.agent.ID, ar.agent.IdentitySPKISHA256, h.ClockOffsetS); err != nil && !errors.Is(err, serverdb.ErrNotFound) {
+			s.log.Error("record clock offset", "err", err)
+		}
+		s.log.Warn("heartbeat refused", "agent", fp, "expected_name", ar.agent.ExpectedName, "reason", serverclient.AgentErrHeartbeatSeqFuture,
+			"seq", h.Status.Seq, "server_now_us", nowUS, "clock_offset_s", h.ClockOffsetS)
+		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrHeartbeatSeqFuture})
+		return
+	}
+	logIt, err := s.db.StoreHeartbeat(ctx, ar.agent.ID, ar.agent.IdentitySPKISHA256, int64(h.Status.Seq), body, h.ClockOffsetS, nowUS) //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
+	if logIt {
+		s.log.Warn("heartbeat refused", "agent", fp, "expected_name", ar.agent.ExpectedName, "reason", "heartbeat_seq_regressed",
+			"seq", h.Status.Seq, "detail", "the seq is below the stored one: the host's state was reset after its clock ran ahead; its status stays the stored one until its seq passes it")
+	}
+	switch {
+	case errors.Is(err, serverdb.ErrNotFound):
+		// Forgotten (or rotated away) while the body arrived (PR #72
+		// review C1).
+		s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
+	case errors.Is(err, serverdb.ErrStaleHeartbeat):
+		s.writeJSON(w, ar.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AgentErrStaleHeartbeat})
+	case err != nil:
+		s.log.Error("store heartbeat", "err", err)
+		s.writeJSON(w, ar.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+	default:
+		s.writeJSON(w, ar.status, http.StatusOK, serverclient.HeartbeatAnswer{Seq: h.Status.Seq})
+	}
+}
+
+// handleAgentIdentity serves POST AgentIdentityPath (03-08, AGENT-02):
+// the agent rotates its TLS identity. The request is authenticated by the
+// current identity over mTLS (requireAgent) and carries the new SPKI,
+// which must be an Ed25519 key other than the current one, signed by the
+// current key under serverclient.AgentIdentityDomain (403
+// identity_rotation_invalid otherwise, T-03-55). The agents row then holds
+// the new identity, so the old certificate gets 403 unknown_agent from
+// the next request on; another agent's identity is 409 identity_in_use.
+// Every rotation is logged at warning level and recorded on the row
+// (owner decision D-R1); a row rotates at most once per
+// serverdb.RotationEvery (429 identity_rotation_too_soon with Retry-After,
+// PR #72 review C10, C15).
+func (s *Server) handleAgentIdentity(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
+	var req serverclient.AgentIdentityRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, serverclient.MaxAgentIdentityBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || dec.More() {
+		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	old, ok := r.TLS.PeerCertificates[0].PublicKey.(ed25519.PublicKey)
+	pub, err := x509.ParsePKIXPublicKey(req.NewSPKI)
+	newKey, isEd := pub.(ed25519.PublicKey)
+	if !ok || err != nil || !isEd || newKey.Equal(old) || !ed25519.Verify(old, serverclient.AgentIdentityMessage(req.NewSPKI), req.Sig) {
+		s.log.Warn("agent identity rotation refused", "agent", agentFingerprint(ar.agent.IdentitySPKISHA256), "reason", serverclient.AgentErrIdentitySig)
+		s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrIdentitySig})
+		return
+	}
+	newSum := sha256.Sum256(req.NewSPKI)
+	now := s.clock()
+	err = s.db.RotateAgentIdentity(r.Context(), ar.agent.ID, ar.agent.IdentitySPKISHA256, newSum[:], now.UnixMicro())
+	switch {
+	case errors.Is(err, serverdb.ErrRotationTooSoon):
+		wait := time.UnixMicro(ar.agent.IdentityRotatedAtUS).Add(serverdb.RotationEvery).Sub(now)
+		s.log.Warn("agent identity rotation refused", "agent", agentFingerprint(ar.agent.IdentitySPKISHA256), "reason", serverclient.AgentErrRotationTooSoon,
+			"client", clientAddr(r))
+		w.Header().Set("Retry-After", strconv.FormatInt(max(int64((wait+time.Second-1)/time.Second), 1), 10))
+		s.writeJSON(w, ar.status, http.StatusTooManyRequests, serverclient.APIError{Error: serverclient.AgentErrRotationTooSoon})
+		return
+	case errors.Is(err, serverdb.ErrIdentityInUse):
+		s.writeJSON(w, ar.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AgentErrIdentityInUse})
+		return
+	case errors.Is(err, serverdb.ErrNotFound):
+		s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
+		return
+	case err != nil:
+		s.log.Error("rotate agent identity", "err", err)
+		s.writeJSON(w, ar.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+		return
+	}
+	// Owner decision D-R1 (PR #72 review C12): an unexpected rotation means
+	// the identity key may be stolen, so every one is a warning naming the
+	// host, both identities and where it came from; hosts/status shows it.
+	host, _ := hostState(ar.dir, ar.agent.HostKeys, ar.agent.ExpectedName)
+	if host == "" {
+		host = ar.agent.ExpectedName
+	}
+	s.log.Warn("agent identity rotated", "host", host, "expected_name", ar.agent.ExpectedName, "agent", agentFingerprint(ar.agent.IdentitySPKISHA256),
+		"new_agent", agentFingerprint(newSum[:]), "client", clientAddr(r))
+	s.writeJSON(w, ar.status, http.StatusOK, struct{}{})
+}
+
+// clientAddr is the client's IP address (r.RemoteAddr without its port).
+func clientAddr(r *http.Request) string {
+	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		return ap.Addr().Unmap().WithZone("").String()
+	}
+	return r.RemoteAddr
 }

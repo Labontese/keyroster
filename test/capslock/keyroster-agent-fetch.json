@@ -4,6 +4,7 @@
     "CAPABILITY_FILES",
     "CAPABILITY_MODIFY_SYSTEM_STATE",
     "CAPABILITY_NETWORK",
+    "CAPABILITY_READ_SYSTEM_STATE",
     "CAPABILITY_REFLECT",
     "CAPABILITY_SYSTEM_CALLS",
     "CAPABILITY_UNANALYZED",
@@ -17,6 +18,7 @@
     "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_FILES",
     "CAPABILITY_NETWORK",
+    "CAPABILITY_READ_SYSTEM_STATE",
     "CAPABILITY_REFLECT",
     "CAPABILITY_SYSTEM_CALLS"
   ],
@@ -24,9 +26,7 @@
     "CAPABILITY_FILES"
   ],
   "github.com/Labontese/keyroster/internal/serverclient": [
-    "CAPABILITY_NETWORK"
-  ],
-  "github.com/Labontese/keyroster/internal/trust": [
+    "CAPABILITY_NETWORK",
     "CAPABILITY_REFLECT"
   ],
   "golang.org/x/crypto/ssh": [

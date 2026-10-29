@@ -61,6 +61,25 @@ jobs:
           "KEYROSTER_SECURITY_THRESHOLD=$KEYROSTER_SECURITY_THRESHOLD"
           "KEYROSTER_AGENT_SECURITY_THRESHOLD=$KEYROSTER_AGENT_SECURITY_THRESHOLD"
           bash test/systemd/smoke.sh
+      # 03-08 (PLAT-01, D-05): the host agent's two units under real systemd
+      # against the runner's own ssh.service: install, enrollment, the first
+      # apply through systemctl, a certificate login, the heartbeat, the
+      # cross-user writes as the real keyroster-agent user and
+      # `systemd-analyze security` for both units. The thresholds are
+      # exposure x10, the measured exposure x10 rounded up to the next 5
+      # (plan caps: fetcher 20, applier 50). Measured on PR #72 (run
+      # 40786881636, systemd 255 on ubuntu-24.04): keyroster-agent-fetch.service
+      # 1.2 (OK), so 15; keyroster-agent.service 2.0 (OK), so 20. Lower either
+      # freely; raise one only in a reviewed PR that records the report.
+      - name: Smoke test the agent units
+        env:
+          KEYROSTER_AGENT_FETCH_SECURITY_THRESHOLD: "15"
+          KEYROSTER_AGENT_APPLY_SECURITY_THRESHOLD: "20"
+        run: >-
+          sudo env "PATH=$PATH"
+          "KEYROSTER_AGENT_FETCH_SECURITY_THRESHOLD=$KEYROSTER_AGENT_FETCH_SECURITY_THRESHOLD"
+          "KEYROSTER_AGENT_APPLY_SECURITY_THRESHOLD=$KEYROSTER_AGENT_APPLY_SECURITY_THRESHOLD"
+          bash test/systemd/agent-smoke.sh
       - name: Print the unit journals
         if: failure()
-        run: sudo journalctl --no-pager -u keyroster-signer -u keyroster-signer-agent
+        run: sudo journalctl --no-pager -u keyroster-signer -u keyroster-signer-agent -u keyroster-agent -u keyroster-agent-fetch

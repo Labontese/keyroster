@@ -47,6 +47,13 @@ func SSHDDumpFor(sshd, config, spec string) Cmd {
 	return Cmd{path: sshd, args: []string{sshd, "-T", "-f", config, "-C", spec}}
 }
 
+// SSHDVersion is sshd -V: the service's binary prints its version, for
+// the heartbeat (03-08, AGENT-07). An sshd without -V prints its version
+// in its usage text.
+func SSHDVersion(sshd string) Cmd {
+	return Cmd{path: sshd, args: []string{sshd, "-V"}}
+}
+
 // KeygenFingerprint is ssh-keygen -l -f file: the host's own tools must
 // read a CA key line.
 func KeygenFingerprint(keygen, file string) Cmd {

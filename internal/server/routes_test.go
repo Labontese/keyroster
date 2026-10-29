@@ -53,6 +53,7 @@ var otherRoutes = map[string]string{ //nolint:gosec // G101: route patterns and 
 	"POST /api/v1/admin/join-tokens":         "mints a host join token; requireAdmin (03-07)",
 	"GET /api/v1/admin/hosts/pending":        "lists the enrolled hosts waiting for approval; requireAdmin (03-07)",
 	"POST /api/v1/admin/hosts/forget":        "deletes the agents enrolled under a host name; requireAdmin (PR #71 review D-R1)",
+	"GET /api/v1/admin/hosts/status":         "every approved-once agent with its newest heartbeat and the current versions; requireAdmin (03-08)",
 }
 
 // signInKeywords mark a pattern as a sign-in or session route.

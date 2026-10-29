@@ -8,15 +8,17 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 )
 
 // The agent routes (03-07, AGENT-02). keyroster-server serves them only on
 // its agent listener (--agent-listen), which requires a client
 // certificate; the browser listener registers none of them. The set is
-// closed: enroll and state. No route carries a command, script, path or
-// template.
+// closed: enroll, state, heartbeat and identity (03-08). No route carries
+// a command, script, path or template.
 const (
 	// AgentEnrollPath (POST): the one-time enrollment with the join
 	// token and the host keys' proof of possession (AgentEnrollRequest);
@@ -25,7 +27,38 @@ const (
 	// AgentStatePath (GET): the signed state newer than the versions in
 	// the query (AgentVersions.Query); 200 AgentStateResponse.
 	AgentStatePath = "/api/v1/agent/state"
+	// AgentHeartbeatPath (POST): the applier's status with the fetcher's
+	// clock offset (heartbeat.Heartbeat, at most heartbeat.MaxBody bytes);
+	// 200 HeartbeatAnswer (03-08, AGENT-07).
+	AgentHeartbeatPath = "/api/v1/agent/heartbeat"
+	// AgentIdentityPath (POST): rotate the agent's TLS identity
+	// (AgentIdentityRequest), authenticated by the current identity over
+	// mTLS; 200 (03-08, AGENT-02).
+	AgentIdentityPath = "/api/v1/agent/identity"
 )
+
+// AgentIdentityDomain is the domain the old identity key signs a new
+// identity's SPKI under: the signed message is the domain, one zero byte
+// and the new SPKI's DER bytes.
+const AgentIdentityDomain = "keyroster/agent-identity/v1"
+
+// AgentIdentityMessage is the message the old identity key signs for a
+// rotation to newSPKI.
+func AgentIdentityMessage(newSPKI []byte) []byte {
+	return append(append([]byte(AgentIdentityDomain), 0), newSPKI...)
+}
+
+// AgentIdentityRequest is the body of a POST to AgentIdentityPath: the new
+// identity's SubjectPublicKeyInfo (DER, an Ed25519 key) and the old
+// identity key's Ed25519 signature over AgentIdentityMessage(NewSPKI).
+// Both are standard base64 in JSON.
+type AgentIdentityRequest struct {
+	NewSPKI []byte `json:"new_spki"`
+	Sig     []byte `json:"sig"`
+}
+
+// MaxAgentIdentityBody bounds an identity rotation request.
+const MaxAgentIdentityBody = 4 << 10
 
 // The admin routes of host enrollment (03-07).
 const (
@@ -39,6 +72,10 @@ const (
 	// name, so their identities and host keys are free again
 	// (ForgetHostRequest); 200 ForgetHostAnswer (PR #71 review D-R1).
 	AdminForgetHostPath = "/api/v1/admin/hosts/forget"
+	// AdminHostsStatusPath (GET): every agent the directory approved
+	// once, with its newest heartbeat and the current versions; 200
+	// HostsStatusAnswer (03-08, AGENT-07).
+	AdminHostsStatusPath = "/api/v1/admin/hosts/status"
 )
 
 // MaxAgentStateResponse bounds one encoded state response (F12): the
@@ -84,7 +121,42 @@ const (
 	AdminErrTTL              = "ttl_above_hour"
 	AdminErrHostNotEnrolled  = "host_not_enrolled"
 	AdminErrHostInDirectory  = "host_in_directory"
+	// AdminErrRemovalNotApplied refuses keyroster host forget while the
+	// host's newest heartbeat does not show a committed directory version
+	// at or above the one that removed its entry (03-08, owner decision
+	// 2026-10-28); --host-gone overrides it.
+	AdminErrRemovalNotApplied = "host_removal_not_applied"
+	// AgentErrStaleHeartbeat is a heartbeat whose seq is not above the
+	// stored one (409); the fetcher treats it as quiet.
+	AgentErrStaleHeartbeat = "stale_heartbeat"
+	// AgentErrHeartbeatField is a heartbeat field outside its rule (400);
+	// the answer's field names it.
+	AgentErrHeartbeatField = "heartbeat_field_invalid"
+	// AgentErrHeartbeatSeqFuture is a heartbeat whose seq is more than
+	// heartbeat.MaxSeqAhead beyond the server's clock (400): it stores
+	// nothing but the clock offset (owner decision D-R2, PR #72 review).
+	AgentErrHeartbeatSeqFuture = "heartbeat_seq_future"
+	// AgentErrRotationTooSoon is a rotation within an hour of the row's
+	// last one (429 with Retry-After; PR #72 review C10, C15).
+	AgentErrRotationTooSoon = "identity_rotation_too_soon"
+	// AgentErrIdentitySig is a rotation whose signature does not verify
+	// under the current identity, or whose new SPKI is not an Ed25519
+	// key other than the current one (403).
+	AgentErrIdentitySig = "identity_rotation_invalid"
 )
+
+// HeartbeatAnswer is the 200 answer of AgentHeartbeatPath: the seq the
+// server stored.
+type HeartbeatAnswer struct {
+	Seq uint64 `json:"seq"`
+}
+
+// HeartbeatRefusal is the 400 answer of AgentHeartbeatPath: the refusal
+// and the field that broke its rule.
+type HeartbeatRefusal struct {
+	Error string `json:"error"`
+	Field string `json:"field"`
+}
 
 // ErrStateResponseTooLarge is a state response above
 // MaxAgentStateResponse, refused before decoding (F12).
@@ -114,9 +186,32 @@ type JoinTokenAnswer struct {
 	AgentPort    int    `json:"agent_port"`
 }
 
-// PendingHostsAnswer is the 200 answer of AdminPendingHostsPath.
+// PendingHostsAnswer is the 200 answer of AdminPendingHostsPath: Hosts
+// wait for an approval; Served were approved once and are no longer
+// approved by the directory (removed, disabled, or their entry's keys
+// changed), and keep getting signed state until keyroster host forget
+// (PR #71 review D-R1). A served host never waits for approval, so host
+// approve never picks one (03-08 carry-over a).
 type PendingHostsAnswer struct {
-	Hosts []PendingHost `json:"hosts"`
+	Hosts  []PendingHost `json:"hosts"`
+	Served []ServedHost  `json:"served"`
+}
+
+// The directory states of a served host (ServedHost.State,
+// HostStatusRow.State), and of an approved one.
+const (
+	HostStateActive      = "active"
+	HostStateRemoved     = "removed"
+	HostStateDisabled    = "disabled"
+	HostStateKeysChanged = "keys_changed"
+)
+
+// ServedHost is an agent approved once that the directory no longer
+// approves, with why (HostStateRemoved, HostStateDisabled or
+// HostStateKeysChanged).
+type ServedHost struct {
+	PendingHost
+	State string `json:"state"`
 }
 
 // PendingHost is one enrolled agent that no active directory host entry
@@ -133,9 +228,12 @@ type PendingHost struct {
 }
 
 // ForgetHostRequest is the body of a POST to AdminForgetHostPath: the host
-// name the agents were enrolled under.
+// name the agents were enrolled under. HostGone overrides
+// host_removal_not_applied for a host that will never report again; the
+// server logs it and the CLI prints it.
 type ForgetHostRequest struct {
 	ExpectedName string `json:"expected_name"`
+	HostGone     bool   `json:"host_gone,omitempty"`
 }
 
 // ForgetHostAnswer is its 200 answer: every agent the server deleted, as
@@ -332,16 +430,129 @@ func (c *Client) AgentEnroll(ctx context.Context, req *AgentEnrollRequest) (*Age
 // decoded response must pass CheckSince against v. A refusal is an *HTTPError
 // (AgentErrNotApproved while the host waits for its approval).
 func (c *Client) AgentState(ctx context.Context, v AgentVersions) (*AgentStateResponse, error) {
-	var r AgentStateResponse
-	err := c.send(ctx, http.MethodGet, AgentStatePath+v.Query(), nil, &r, nil, MaxAgentStateResponse)
+	r, _, err := c.AgentStateAt(ctx, v)
+	return r, err
+}
+
+// SilentAfterS is how long the server waits after an agent's last
+// authenticated request before it flags the host silent: a host last seen
+// exactly 180 s ago is not silent, one 181 s ago is (D-10).
+const SilentAfterS = 180
+
+// StatusStaleAfterS is how old a host's stored status may grow while the
+// host is still seen before the server flags status_stale (PR #72 review
+// C2, C6): two drift-check periods, each 15 min with up to 60 s of jitter.
+// The applier writes a status at least once a period, so a status this
+// old means it stopped while the fetcher kept running. One exactly this
+// old is not flagged, one a second older is.
+const StatusStaleAfterS = 2 * (15*60 + 60)
+
+// HostsStatusAnswer is the 200 answer of AdminHostsStatusPath: the
+// server's current bundle, directory and KRL versions, and one row per
+// agent the directory approved once. It is the server's word; the host's
+// own proof is keyroster-agent check there.
+type HostsStatusAnswer struct {
+	Current HostVersions    `json:"current"`
+	Hosts   []HostStatusRow `json:"hosts"`
+}
+
+// HostVersions are the server's current versions (0: none) and the
+// SHA-256 of each ("" with version 0), so a host on a same-numbered
+// version with other bytes does not count as converged (PR #72 review
+// C5).
+type HostVersions struct {
+	Bundle          uint64 `json:"bundle"`
+	Directory       uint64 `json:"directory"`
+	KRL             uint64 `json:"krl"`
+	BundleSHA256    string `json:"bundle_sha256"`
+	DirectorySHA256 string `json:"directory_sha256"`
+	KRLSHA256       string `json:"krl_sha256"`
+}
+
+// Docs are the current bundle, directory and KRL as heartbeat.Doc, as
+// heartbeat.Status.Committed and Diverged take them.
+func (v HostVersions) Docs() (bundle, directory, krl heartbeat.Doc) {
+	return heartbeat.Doc{Version: v.Bundle, SHA256: v.BundleSHA256}, heartbeat.Doc{Version: v.Directory, SHA256: v.DirectorySHA256},
+		heartbeat.Doc{Version: v.KRL, SHA256: v.KRLSHA256}
+}
+
+// HostStatusRow is one host in AdminHostsStatusPath's answer:
+//   - Name is the directory entry's name (ExpectedName, the name the join
+//     token named, when no entry holds the agent's keys);
+//   - State is HostStateActive, or why the directory no longer approves it
+//     (removed, disabled, keys_changed: served until keyroster host
+//     forget);
+//   - LastSeen is the agent's last authenticated request (RFC 3339), and
+//     Silent is set when it is more than SilentAfterS seconds old on the
+//     server's clock (or the agent was never seen);
+//   - ReceivedAt is when the stored heartbeat arrived ("" for none), and
+//     Heartbeat the newest heartbeat by seq (nil for none), every field
+//     validated before it was stored; StatusStale is set while the host is
+//     not silent and its stored status is more than StatusStaleAfterS
+//     seconds old (its applier stopped; PR #72 review C2, C6);
+//   - ClockOffsetS is the clock offset of the agent's newest heartbeat
+//     that parsed, stored or refused (owner decision D-R2), and ClockSkew
+//     |ClockOffsetS| > heartbeat.ClockSkewS; NeverApplied is no heartbeat
+//     or generation 0;
+//   - IdentityRotatedAt is when the agent's identity last rotated (RFC
+//     3339, "" for never) and IdentityRotations how often it has (owner
+//     decision D-R1): host status shows a rotation of the last 7 days;
+//   - SeqRegressed is set while the host is not silent and its heartbeats
+//     since the stored one carry a lower seq (heartbeat_seq_regressed,
+//     D-R2): its status is frozen at the stored one.
+type HostStatusRow struct {
+	Name               string               `json:"name"`
+	ExpectedName       string               `json:"expected_name"`
+	IdentitySPKISHA256 string               `json:"identity_spki_sha256"`
+	State              string               `json:"state"`
+	LastSeen           string               `json:"last_seen"`
+	Silent             bool                 `json:"silent"`
+	ReceivedAt         string               `json:"received_at"`
+	ClockOffsetS       int64                `json:"clock_offset_s"`
+	ClockSkew          bool                 `json:"clock_skew"`
+	SeqRegressed       bool                 `json:"seq_regressed"`
+	StatusStale        bool                 `json:"status_stale"`
+	IdentityRotatedAt  string               `json:"identity_rotated_at"`
+	IdentityRotations  int64                `json:"identity_rotations"`
+	NeverApplied       bool                 `json:"never_applied"`
+	Heartbeat          *heartbeat.Heartbeat `json:"heartbeat"`
+}
+
+// AgentStateAt is AgentState that also returns the response's Date header
+// (the zero time when it is missing or does not parse), from which the
+// fetcher measures its clock offset.
+func (c *Client) AgentStateAt(ctx context.Context, v AgentVersions) (*AgentStateResponse, time.Time, error) {
+	var (
+		r    AgentStateResponse
+		date time.Time
+	)
+	err := c.sendHeader(ctx, http.MethodGet, AgentStatePath+v.Query(), nil, &r, nil, MaxAgentStateResponse, func(h http.Header) {
+		if d, perr := http.ParseTime(h.Get("Date")); perr == nil {
+			date = d
+		}
+	})
 	if errors.Is(err, ErrResponseTooLarge) {
-		return nil, fmt.Errorf("%w: %w", ErrStateResponseTooLarge, err)
+		return nil, date, fmt.Errorf("%w: %w", ErrStateResponseTooLarge, err)
 	}
 	if err != nil {
-		return nil, err
+		return nil, date, err
 	}
 	if err := r.CheckSince(v); err != nil {
-		return nil, err
+		return nil, date, err
 	}
-	return &r, nil
+	return &r, date, nil
+}
+
+// AgentHeartbeat POSTs one heartbeat body (canonical JSON of
+// heartbeat.Heartbeat). A refusal is an *HTTPError: 409
+// AgentErrStaleHeartbeat for a seq the server holds already, 400
+// AgentErrHeartbeatField for a field outside its rule.
+func (c *Client) AgentHeartbeat(ctx context.Context, body []byte) error {
+	return c.send(ctx, http.MethodPost, AgentHeartbeatPath, body, nil, nil, maxResponse)
+}
+
+// AgentRotateIdentity POSTs an identity rotation with the client's
+// current certificate. A refusal is an *HTTPError.
+func (c *Client) AgentRotateIdentity(ctx context.Context, req *AgentIdentityRequest) error {
+	return c.PostJSON(ctx, AgentIdentityPath, req, nil)
 }

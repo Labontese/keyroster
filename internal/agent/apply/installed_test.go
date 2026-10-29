@@ -82,4 +82,24 @@ func TestWriteAccepted(t *testing.T) {
 	if st, err := os.Stat(filepath.Join(h.l.Outbox(), enroll.AcceptedFile)); err != nil || st.Mode().Perm() != 0o640 {
 		t.Fatalf("accepted.json mode %v (%v), want 0640", st.Mode(), err)
 	}
+	// 03-08: the applier never reads the outbox back. A file planted there
+	// with the very bytes it would write does not make it skip the write:
+	// the file is replaced (its mode is the applier's 0640 again).
+	p := filepath.Join(h.l.Outbox(), enroll.AcceptedFile)
+	b, err := os.ReadFile(p) //nolint:gosec // test fixture
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, b, 0o600); err != nil { //nolint:gosec // G703: the test's own outbox
+		t.Fatal(err)
+	}
+	if err := WriteAccepted(h.l); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(p); err != nil || st.Mode().Perm() != 0o640 {
+		t.Fatalf("a planted accepted.json with the same bytes was kept (mode %v, %v): the applier read the outbox", st.Mode(), err)
+	}
 }
