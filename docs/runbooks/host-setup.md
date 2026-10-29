@@ -938,6 +938,18 @@ answer whose fields do not check out, and prints nothing outside printable
 ASCII. (Run in CI: `TestHostStatus`, `TestHeartbeat`,
 `TestAgentStatusEndToEnd`.)
 
+**What host status rests on** (owner decision D-R4, PR #72 review). Each
+row is the host's own report, and the unprivileged fetcher posts it: it
+reads the root applier's `outbox/status.json` but composes the heartbeat
+itself, and nothing in the body proves that the applier wrote it. A
+compromised fetcher can therefore withhold a new KRL or directory version
+from the spool and report it applied, and `keyroster host status` then
+shows the host as converged. The host still logs `krl_stale` at error
+level in its own journal (journald priority 3) once the KRL in force is
+24 h old, and `keyroster-agent check` on the host shows what is installed
+there. A status signed by the applier is a possible later plan (threat row
+T-03-284, pending todo `signed-applier-status`).
+
 **Alerts.**
 
 - `silent`: the host's last request is more than 180 s old on the server's
