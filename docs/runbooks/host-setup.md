@@ -786,7 +786,8 @@ arrive](#how-fast-changes-arrive)).
 | `rate limited` (429) | fetcher log | The server's limiter refused a state request; the fetcher keeps what it spooled and goes on at the next poll | None; escalate if every poll says it |
 | `host_in_directory`, `host_not_enrolled` | `host forget` | A directory entry still holds the agent's host keys; no agent has the name | Remove the host first and wait for the host to apply it; check the name with `keyroster host pending` |
 | `host_removal_not_applied` | `host forget` | The host has not reported applying the directory version that removed it | Wait for its next heartbeat; `--host-gone` for a host that is gone for good ([Removing a host](#removing-a-host)) |
-| `stale_heartbeat` | server | The heartbeat's seq is not above the stored one: the usual answer between the applier's status writes | None: the fetcher logs nothing for it |
+| `stale_heartbeat` | server | The heartbeat's seq is not above the stored one: the usual answer between the applier's status writes. A seq below the stored one is also logged by the server as `heartbeat_seq_regressed` (at most once an hour) and flagged `seq_regressed` | None: the fetcher logs nothing for it |
+| `heartbeat_seq_future` | fetcher log, server log | The heartbeat's seq is more than an hour beyond the server's clock: the host's clock runs ahead. Nothing but its clock offset is stored, so `clock_skew` shows it (D-R2) | Fix the host's clock; the applier restarts its seq from its clock once the clock is back |
 | `heartbeat_field_invalid` | fetcher log, server log | A status field broke its rule; the answer names the field | Escalate: the agent wrote, or something changed, a status the server refuses |
 | `fetch_dir_not_owned` | fetcher | The fetcher runs as another user than its directory's owner (root running `--rotate-identity`) | `sudo -u keyroster-agent keyroster-agent-fetch ...` |
 | `identity_rotation_too_soon` (429) | `--rotate-identity` | The agent rotated its identity less than an hour ago; one agent rotates at most once an hour, and its rate limit is the agent's, whatever its identity (PR #72 review) | Wait for `Retry-After`; an unplanned earlier rotation is [An unexpected identity rotation](#running-the-agent) |
@@ -984,9 +985,23 @@ T-03-284, pending todo `signed-applier-status`).
   (|`clock_offset_s`| > 300). `clock_offset_s` is the server's `Date` header
   minus the host's clock when the poll's answer arrived, in whole seconds
   (the header's resolution is one second, so the true skew can be up to 1 s
-  more than shown); the fetcher logs it at error level too. Fix the host's
+  more than shown); the fetcher logs it at error level too. The server
+  keeps the offset of every heartbeat that parses, also one it refuses as
+  stale or as `heartbeat_seq_future`, so the flag follows the fetcher's
+  latest measurement (owner decision D-R2, PR #72). Fix the host's
   clock: the agent's swap timing (03-05's KRL_M = KRL_B) and certificate
   expiry both rely on it, and a lagging host accepts expired certificates.
+- `seq_regressed`: the host is seen, but its heartbeats since the stored
+  one carry a lower seq: its state was reset (`heartbeat.json` lost) after
+  its clock had run ahead. The status shown is the stored one until the
+  host's seq passes it, at most an hour later, because the server refuses
+  a seq more than an hour beyond its own clock (`heartbeat_seq_future`).
+  The server logs it as `heartbeat_seq_regressed` at most once an hour per
+  agent; an equal seq is the usual quiet `stale_heartbeat`. (Run in CI:
+  `TestHeartbeatSeq`; D-R2.)
+- `identity rotated <age>`: the agent's identity rotated in the last 7
+  days. Expected after `--rotate-identity`; otherwise see [An unexpected
+  identity rotation](#running-the-agent) (D-R1).
 - `stuck: pending_state_unknown`: see [Manual recovery](#manual-recovery).
 - `diverged`: the host reports a bundle, directory or KRL above the
   server's current version, or the current number with other bytes. That
