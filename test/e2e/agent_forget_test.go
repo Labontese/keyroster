@@ -31,13 +31,21 @@ func TestAgentReenrollEndToEnd(t *testing.T) {
 	env := startServerEnv(t, serverOpts{PoPHosts: true, AgentListen: true})
 	login := currentUser(t)
 	admin := adminCLI(t, env, env.Signer.AdminFingerprint)
-	kr := func(args ...string) string {
+	// The admin limiter allows a burst of 20 and 60 a minute per address;
+	// every keyroster command spends one to three. A command it refused
+	// is retried once the bucket refilled.
+	run := func(args ...string) (int, string, string) {
 		t.Helper()
 		code, out, errOut := env.keyroster(t, admin, "", args...)
-		for try := 0; try < 5 && code != 0 && strings.Contains(errOut, "the server is rate-limiting requests from this address"); try++ {
-			time.Sleep(2 * time.Second)
+		for try := 0; try < 10 && code != 0 && strings.Contains(errOut, "the server is rate-limiting requests from this address"); try++ {
+			time.Sleep(3 * time.Second)
 			code, out, errOut = env.keyroster(t, admin, "", args...)
 		}
+		return code, out, errOut
+	}
+	kr := func(args ...string) string {
+		t.Helper()
+		code, out, errOut := run(args...)
 		if code != 0 {
 			t.Fatalf("keyroster %s: exit %d:\nstdout:\n%s\nstderr:\n%s\nserver log:\n%s", strings.Join(args, " "), code, out, errOut, env.Stderr.String())
 		}
@@ -51,7 +59,7 @@ func TestAgentReenrollEndToEnd(t *testing.T) {
 	// 2. web1 removed; wait until host pending shows A's removal confirmed.
 	kr("host", "remove", "web1", "--yes")
 	var pending, idA string
-	for deadline := time.Now().Add(forgetWait); ; time.Sleep(500 * time.Millisecond) {
+	for deadline := time.Now().Add(forgetWait); ; time.Sleep(2 * time.Second) {
 		pending = kr("host", "pending")
 		if m := servedAgentRE.FindStringSubmatch(pending); m != nil && strings.HasPrefix(m[2], "removal confirmed at directory v") {
 			idA = m[1]
@@ -75,7 +83,7 @@ func TestAgentReenrollEndToEnd(t *testing.T) {
 	t.Logf("keyroster host pending after B's approval:\n%s", pending)
 
 	// 4. The name is ambiguous: nothing is sent.
-	code, out, errOut := env.keyroster(t, admin, "", "host", "forget", "web1")
+	code, out, errOut := run("host", "forget", "web1")
 	if code == 0 || !strings.Contains(errOut, "forget_name_ambiguous") || !strings.Contains(errOut, "keyroster host forget --identity "+idA) {
 		t.Fatalf("keyroster host forget web1 with two agents named web1: exit %d:\n%s\n%s", code, out, errOut)
 	}

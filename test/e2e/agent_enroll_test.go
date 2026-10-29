@@ -351,13 +351,17 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	// The wait is twice the fetcher's poll interval plus 30 s (plan check
 	// item 7), and fails with the last answer.
 	var forgot string
-	for deadline := time.Now().Add(2*time.Second + 30*time.Second); ; time.Sleep(time.Second) {
+	// Each attempt spends three admin requests (host pending, host status,
+	// the forget), so it waits 2 s; a refusal of the admin limiter is
+	// retried like host_removal_not_applied.
+	for deadline := time.Now().Add(2*time.Second + 30*time.Second); ; time.Sleep(2 * time.Second) {
 		code, out, errOut := env.keyroster(t, admin, "", "host", "forget", "web1")
 		if code == 0 {
 			forgot = out
 			break
 		}
-		if !strings.Contains(errOut, "host_removal_not_applied") || time.Now().After(deadline) {
+		retry := strings.Contains(errOut, "host_removal_not_applied") || strings.Contains(errOut, "the server is rate-limiting requests from this address")
+		if !retry || time.Now().After(deadline) {
 			t.Fatalf("keyroster host forget web1: exit %d:\n%s\n%s\nfetch log:\n%s\nserver log:\n%s", code, out, errOut, eh.fetch.String(), env.Stderr.String())
 		}
 	}
