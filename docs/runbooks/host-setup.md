@@ -786,6 +786,7 @@ arrive](#how-fast-changes-arrive)).
 | `rate limited` (429) | fetcher log | The server's limiter refused a state request; the fetcher keeps what it spooled and goes on at the next poll | None; escalate if every poll says it |
 | `host_in_directory`, `host_not_enrolled` | `host forget` | A directory entry still holds the agent's host keys; no agent has that identity (forgotten already, or its identity rotated) | Remove the host first and wait for its removal confirmation; check the identity with `keyroster host pending` |
 | `host_removal_not_applied` | `host forget` (CLI and server) | The agent was approved once and the server has no recorded removal confirmation for it: the host's heartbeat never showed a served directory that removes it (`removal confirmed at directory v<N>` is missing in `keyroster host pending`) | Wait for its next heartbeat; `keyroster host forget --identity <identity> --host-gone` for a host that is gone for good ([Removing a host](#removing-a-host)) |
+| `host_swap_pending` | `host forget` (CLI and server) | The agent's removal is confirmed, but its host's newest heartbeat shows a swap it has not finished (`swap pending` in `keyroster host pending`), so the confirmation does not yet speak for what it enforces (03-08c); nothing was forgotten | Wait for its next heartbeat and run the command again; `--host-gone` for a host that is gone for good |
 | `forget_name_ambiguous` | `host forget` (CLI) | More than one agent has the name (a re-enrolled host); nothing was sent | Run one of the `keyroster host forget --identity <identity>` commands the refusal lists ([Removing a host](#removing-a-host)) |
 | `forget_state_changed` | `host forget` | The agent changed since `keyroster host pending` was read (its approval, removal version or confirmation, or its identity rotated); nothing was forgotten | Run the command again |
 | `stale_heartbeat` | server | The heartbeat's seq is not above the stored one: the usual answer between the applier's status writes. A seq below the stored one is also logged by the server as `heartbeat_seq_regressed` (at most once an hour) and flagged `seq_regressed` | None: the fetcher logs nothing for it |
@@ -799,9 +800,10 @@ arrive](#how-fast-changes-arrive)).
 The `host forget` refusals above run in CI (03-08b). The server's: `host_in_directory`
 and `host_not_enrolled` in `TestAgentRemoval`, `host_removal_not_applied` in
 `TestHostForgetWaitsForRemoval` and `TestRemovalConfirmation`, `forget_state_changed`
-in `TestForgetHost`. The CLI's: `forget_name_ambiguous`, `forget_state_changed`,
+in `TestForgetHost`, `host_swap_pending` in `TestRemovalConfirmation` (03-08c). The CLI's: `forget_name_ambiguous`, `forget_state_changed`,
 `host_in_directory` and `host_not_enrolled` in `TestHostForget`, and
-`host_removal_not_applied` in `TestHostForget` and `TestHostForgetHostGone`. On the
+`host_removal_not_applied` in `TestHostForget` and `TestHostForgetHostGone`, and
+`host_swap_pending` in `TestHostForget` (03-08c). On the
 homelab they are UNVERIFIED until 03-16.
 
 ## Running the agent
@@ -1002,10 +1004,11 @@ confirmed its removal before the name was used again, and does need it
 when the old agent never applied the removal (a host that reached the
 re-added name without the removal keeps its last good principals and
 never confirms it; `TestRemovalConfirmation`). A confirmed old agent whose
-host shows principals again, or reports a swap in progress, loses its
-confirmation, and its forget then needs `--host-gone` unless it reports
-the removal again (owner decision D-R1; [Removing a host](#removing-a-host),
-step 2).
+host shows principals again loses its confirmation, and its forget then
+needs `--host-gone` unless it reports the removal again (owner decision
+D-R1). While its host reports a swap in progress, its forget waits
+(`host_swap_pending`) and the confirmation stays (03-08c; [Removing a
+host](#removing-a-host), step 2).
 
 **What host status rests on** (owner decision D-R4, PR #72 review). Each
 row is the host's own report, and the unprivileged fetcher posts it: it
@@ -1222,17 +1225,28 @@ enrolled host can (D-03); that is the leak this order accepts.
    `principals/` file, or an apply that rendered an active entry
    (`host_status` empty), for example after the host was re-keyed and
    re-added under an entry with its new keys. It is also cleared by a
-   heartbeat that cannot tell: a truncated file list, or a swap in
-   progress (`pending`), whose file list is the generation the swap
-   started from while the target's principals may already be live (PR
-   #74 pre-merge review fix round 2). A later heartbeat that reports the
-   removal again (`host_removed` or `host_disabled`) confirms it again;
-   one that reports `host_keys_rotated` does not, so an old agent of the
-   re-enroll flow that goes through a swap (a KRL update) while it waits
-   to be forgotten then needs `--host-gone` (run in CI:
-   `TestRemovalConfirmation`). The server logs `agent removal
+   heartbeat that cannot tell, a truncated file list. A later heartbeat
+   that reports the removal again (`host_removed` or `host_disabled`)
+   confirms it again; one that reports `host_keys_rotated` does not (run
+   in CI: `TestRemovalConfirmation`). The server logs `agent removal
    confirmation cleared` at warning level. An entry that holds
    the agent's keys again clears both the confirmation and the removal.
+
+   A swap in progress (`pending`) neither records nor clears a
+   confirmation: its file list is the generation the swap started from,
+   while the target's principals may already be live (03-08c, owner
+   decision 2026-10-29, in place of PR #74 pre-merge review fix round 2's
+   clear). While the stored heartbeat shows it, `keyroster host pending`
+   prints `swap pending` next to the confirmation, and forget is refused
+   `host_swap_pending`: by the CLI before it signs, by the server before
+   it asks the signer, and again in the delete's own transaction, so a
+   swap the host starts meanwhile still stops it. Wait for the next
+   heartbeat, which shows the swap committed, and run forget again; an old
+   agent of the re-enroll flow that goes through a swap (a KRL update)
+   then needs no `--host-gone`. For a host that is gone for good,
+   `--host-gone` overrides the wait. Run in CI: `TestRemovalConfirmation`
+   (`pending_swap_*`, 03-08c), `TestHostForget` (`swap_pending_*`);
+   UNVERIFIED on the homelab until 03-16.
 
    The confirmation is the host's word: the unprivileged fetcher composes
    the heartbeat, so a fetcher that lies about what was applied gets a

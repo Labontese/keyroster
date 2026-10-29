@@ -143,15 +143,20 @@ func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 			out.Hosts = append(out.Hosts, p)
 			continue
 		}
-		if hb, ok := hbs[a.ID]; ok && a.RemovedDirVersion != 0 {
-			if h, err := heartbeat.ParseHeartbeat(hb.Body); err == nil {
+		swap := false
+		if hb, ok := hbs[a.ID]; ok {
+			h, err := heartbeat.ParseHeartbeat(hb.Body)
+			swap = swapPending(hb.Body) != nil
+			if err == nil && a.RemovedDirVersion != 0 {
 				if err := s.reconcileRemoval(ctx, dv, &a, hb.Seq, &h.Status); err != nil {
 					s.log.Warn("removal confirmation skipped", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "err", err)
 				}
 			}
 		}
 		_, st := hostState(dv, a.HostKeys, a.ExpectedName)
-		out.Served = append(out.Served, servedHost(p, st, &a))
+		h := servedHost(p, st, &a)
+		h.SwapPending = swap
+		out.Served = append(out.Served, h)
 	}
 	s.log.Info("pending hosts listed", "admin", adminName(ctx), "count", len(out.Hosts), "served", len(out.Served))
 	s.writeJSON(w, dv.status, http.StatusOK, out)
@@ -230,7 +235,10 @@ func sameAgent(a *serverdb.Agent, req *wire.ForgetRequest) bool {
 //     its recorded removal confirmation or with host_gone, for a host that
 //     will never report again (03-08 owner decision D-1): a signed request
 //     can express nothing else (wire.ForgetRequest.Validate), and the CLI
-//     refuses host_removal_not_applied before it signs;
+//     refuses host_removal_not_applied before it signs. A forget that
+//     rests on the confirmation is refused while the host's stored
+//     heartbeat shows a swap it has not finished (409 host_swap_pending,
+//     03-08c); host_gone overrides it;
 //  6. the server states its own view of the row in the relay frame,
 //     approved once or not (ServerApprovedOnce, from approved_at_us,
 //     whatever the request says), and asks the signer within
@@ -239,8 +247,10 @@ func sameAgent(a *serverdb.Agent, req *wire.ForgetRequest) bool {
 //     answer 503, with nothing deleted;
 //  7. serverdb.DeleteAgentIf deletes the row and its heartbeat in one
 //     transaction, by one statement that re-checks the identity and every
-//     fact. When the row changed after the signer's answer (a fact, or its
-//     identity rotated), nothing is deleted and the answer is 409
+//     fact, after it checked the stored heartbeat for a pending swap again
+//     (step 5's rule). When the row changed after the signer's answer (a
+//     fact, its identity rotated, or a swap stored), nothing is deleted
+//     and the answer is 409
 //     forget_logged_not_deleted with the entry's leaf, logged at error
 //     level: the log then records an authorization the server did not
 //     carry out, and the agent keeps being served (fail-safe).
@@ -295,6 +305,22 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 		refuse(serverclient.AdminErrHostInDirectory)
 		return
 	}
+	// A forget that rests on the confirmation waits for a pending swap
+	// (03-08c); host_gone overrides it.
+	var hbCheck func([]byte) error
+	if facts.ConfirmedVersion != 0 && !req.HostGone {
+		hbCheck = swapPending
+		hbs, err := s.db.Heartbeats(ctx)
+		if err != nil {
+			s.log.Error("heartbeats", "err", err)
+			s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
+			return
+		}
+		if hb, ok := hbs[a.ID]; ok && swapPending(hb.Body) != nil {
+			refuse(serverclient.AdminErrHostSwapPending)
+			return
+		}
+	}
 	// The server's own statement, outside the signing bytes: the signer
 	// compares it with the signed approved_once (owner decision Q3).
 	req.ServerApprovedOnce = a.ApprovedAtUS != 0
@@ -324,8 +350,8 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 	if s.beforeForgetDelete != nil {
 		s.beforeForgetDelete()
 	}
-	switch err := s.db.DeleteAgentIf(ctx, a.Key(), facts); {
-	case errors.Is(err, serverdb.ErrNotFound):
+	switch err := s.db.DeleteAgentIf(ctx, a.Key(), facts, hbCheck); {
+	case errors.Is(err, serverdb.ErrNotFound), errors.Is(err, errSwapPending):
 		s.log.Error("agent forget logged but not carried out: the agent's row changed after the signer's answer, and it keeps being served",
 			"expected_name", a.ExpectedName, "agent", fp, "admin", adminName(ctx), "leaf", resp.Leaf)
 		s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrForgetLoggedNotDeleted, Leaf: resp.Leaf})
@@ -361,15 +387,16 @@ const (
 // principalsShown reports whether st, a host's status, shows that the
 // host has certificate principals in force (owner decision D-R1, PR #74
 // review fix round 1): its committed generation lists a principals/ file,
-// or it cannot be told: the file list is cut short, or a swap is pending
-// (the list is the generation the swap started from, while the target's
-// principals may already be live; fix round 2), or its last apply
-// succeeded and rendered an active entry under its current host keys
-// (host_status empty). host_keys_rotated and host_keys_disagree keep
+// or it cannot be told because the file list is cut short, or its last
+// apply succeeded and rendered an active entry under its current host
+// keys (host_status empty). host_keys_rotated and host_keys_disagree keep
 // last-good's principals files, which the file list shows; a refused or
-// failed apply changed no file.
+// failed apply changed no file. A pending swap is not counted here (fix
+// round 2's clear is replaced in 03-08c): it keeps a recorded
+// confirmation, never makes one (principalsEmptied), and refuses forget
+// while it is stored (swapPending).
 func principalsShown(st *heartbeat.Status) bool {
-	if st.FilesTruncated || st.Pending != nil || slices.ContainsFunc(st.Files, func(f heartbeat.File) bool { return strings.HasPrefix(f.Path, "principals/") }) {
+	if st.FilesTruncated || slices.ContainsFunc(st.Files, func(f heartbeat.File) bool { return strings.HasPrefix(f.Path, "principals/") }) {
 		return true
 	}
 	la := st.LastApply
@@ -379,13 +406,32 @@ func principalsShown(st *heartbeat.Status) bool {
 // principalsEmptied reports whether st shows that the apply which
 // committed its directory emptied the host's principals (owner decision
 // D-R1): the last apply succeeded without a rollback, reported
-// host_removed or host_disabled, and no principals are shown, which also
-// means no swap is pending (the committed generation is then that
-// apply's).
+// host_removed or host_disabled, no swap is pending (the committed
+// generation is then that apply's; a pending status carries the previous
+// last_apply and the file list of the generation the swap started from),
+// and no principals are shown.
 func principalsEmptied(st *heartbeat.Status) bool {
 	la := st.LastApply
-	return la != nil && la.Result == heartbeat.ResultOK && !la.Rollback &&
+	return la != nil && la.Result == heartbeat.ResultOK && !la.Rollback && st.Pending == nil &&
 		(la.HostStatus == hostStatusRemoved || la.HostStatus == hostStatusDisabled) && !principalsShown(st)
+}
+
+// errSwapPending is a forget refused because the host's stored heartbeat
+// shows a swap it has not finished (03-08c).
+var errSwapPending = errors.New(serverclient.AdminErrHostSwapPending)
+
+// swapPending is the check DeleteAgentIf runs on the stored heartbeat body
+// of a confirmed agent's forget: errSwapPending while it shows a pending
+// swap, or when it does not parse and so cannot tell; nil without one.
+func swapPending(body []byte) error {
+	if body == nil {
+		return nil
+	}
+	h, err := heartbeat.ParseHeartbeat(body)
+	if err != nil || h.Status.Pending != nil {
+		return errSwapPending
+	}
+	return nil
 }
 
 // reconcileRemoval brings agent a's recorded removal confirmation in step
@@ -393,7 +439,7 @@ func principalsEmptied(st *heartbeat.Status) bool {
 // D-R1): when st shows principals again, or cannot tell (principalsShown),
 // a recorded confirmation is cleared, so the host's forget needs
 // --host-gone again (the host resumed service, PR #74 review finding 0);
-// otherwise
+// a pending swap clears nothing (03-08c); otherwise
 // confirmRemoval may record one. Both writes hold only while the stored
 // heartbeat is still the one with seq. It updates a, and an error is the
 // caller's to log and skip.
@@ -409,7 +455,7 @@ func (s *Server) reconcileRemoval(ctx context.Context, dv *directoryView, a *ser
 	if err != nil || !cleared {
 		return err
 	}
-	s.log.Warn("agent removal confirmation cleared: its host reports principals again, or a swap whose outcome it cannot tell yet", "expected_name", a.ExpectedName,
+	s.log.Warn("agent removal confirmation cleared: its host reports principals again", "expected_name", a.ExpectedName,
 		"agent", agentFingerprint(a.IdentitySPKISHA256), "removal_version", a.RemovedDirVersion, "removal_confirmed_version", a.RemovalConfirmedVersion,
 		"directory_version", st.Directory.Version)
 	a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, nil

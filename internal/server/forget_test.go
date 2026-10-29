@@ -140,7 +140,7 @@ func TestInFlightRequestOfForgottenAgent(t *testing.T) {
 			var once sync.Once
 			e.s.afterAgentLookup = func() {
 				once.Do(func() {
-					if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts()); err != nil {
+					if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts(), nil); err != nil {
 						t.Errorf("forget A: %v", err)
 					}
 					if rec := e.enroll(t, b, token, hostsB); rec.Code != http.StatusAccepted {
@@ -201,7 +201,7 @@ func TestReenrolledIdentityKeepsItsRow(t *testing.T) {
 		var once sync.Once
 		e.s.afterAgentLookup = func() {
 			once.Do(func() {
-				if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts()); err != nil {
+				if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts(), nil); err != nil {
 					t.Errorf("forget A --host-gone: %v", err)
 				}
 				reenroll(t, e, a, hosts)
@@ -231,7 +231,7 @@ func TestReenrolledIdentityKeepsItsRow(t *testing.T) {
 		var once sync.Once
 		e.s.beforeForgetDelete = func() {
 			once.Do(func() {
-				if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts()); err != nil {
+				if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts(), nil); err != nil {
 					t.Errorf("forget A: %v", err)
 				}
 				reenroll(t, e, a, hosts)
@@ -252,7 +252,7 @@ func TestReenrolledIdentityKeepsItsRow(t *testing.T) {
 		a, hosts := newAgentID(t), hostSigners(t, 1)
 		reenroll(t, e, a, hosts)
 		rowA := e.agentRow(t, a.spki) // what the CLI read in host pending
-		if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts()); err != nil {
+		if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts(), nil); err != nil {
 			t.Fatalf("forget A: %v", err)
 		}
 		e.clock.set(e.clock.Now().Add(time.Minute))
@@ -493,38 +493,49 @@ func TestRemovalConfirmation(t *testing.T) {
 			t.Fatalf("forget after the no-op apply: %d %s", rec.Code, rec.Body.String())
 		}
 	})
-	// PR #74 pre-merge review fix round 2, fix 3: while a swap is pending
-	// the status lists the generation the swap started from, and the
-	// target's principals may already be live, so a pending swap clears a
-	// recorded confirmation, as a truncated file list does. Once the swap
-	// commits, a status that shows the removal again confirms it again.
-	t.Run("pending_swap_clears_then_commit_confirms_again", func(t *testing.T) {
-		e, id, r := confirmedAgent(t)
-		s := e.hbRemovedAt(t, 3, r)
+	// 03-08c carried item 1 (owner decision, 2026-10-29), in place of PR #74
+	// fix round 2's fix 3: a pending swap no longer clears a recorded
+	// confirmation. While the stored heartbeat shows it, forget is refused
+	// host_swap_pending before the signer is asked (--host-gone aside), and
+	// host pending shows the swap next to the confirmation. A pending status
+	// still never confirms (report_not_emptied_not_confirmed/swap_pending).
+	pending := func(s heartbeat.Status) heartbeat.Status {
 		s.Pending = &heartbeat.Pending{Step: heartbeat.StepFinal, From: s.Generation, To: s.Generation + 1}
+		return s
+	}
+	send := func(t *testing.T, e *agentEnv, id agentID, s heartbeat.Status) {
+		t.Helper()
 		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
-			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+			t.Fatalf("heartbeat %d: %d %s", s.Seq, rec.Code, rec.Body.String())
 		}
-		wantConfirmed(t, e, id, r, 0)
-		if !strings.Contains(e.log.String(), "agent removal confirmation cleared") {
-			t.Errorf("the clear was not logged:\n%s", e.log.String())
+	}
+	swapShown := func(t *testing.T, e *agentEnv, want bool) {
+		t.Helper()
+		ans := e.pendingAnswer(t)
+		if len(ans.Served) != 1 || ans.Served[0].SwapPending != want || ans.Served[0].RemovalConfirmed == nil {
+			t.Fatalf("host pending's served rows %+v; want one, confirmed, swap_pending %t", ans.Served, want)
 		}
-		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
-			t.Fatalf("forget during a swap: %d %s", rec.Code, rec.Body.String())
-		}
-		s = e.hbRemovedAt(t, 4, r)
-		s.Generation++
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
-			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
-		}
+	}
+	t.Run("pending_swap_keeps_the_confirmation", func(t *testing.T) {
+		e, id, r := confirmedAgent(t)
+		send(t, e, id, pending(e.hbRemovedAt(t, 3, r)))
 		wantConfirmed(t, e, id, r, r)
+		if strings.Contains(e.log.String(), "agent removal confirmation cleared") {
+			t.Errorf("a pending swap cleared the confirmation:\n%s", e.log.String())
+		}
+		swapShown(t, e, true)
+		wantConfirmed(t, e, id, r, r)
+		s := e.hbRemovedAt(t, 4, r)
+		s.Generation++
+		send(t, e, id, s)
+		wantConfirmed(t, e, id, r, r)
+		swapShown(t, e, false)
 	})
-	t.Run("pending_swap_clears_keys_rotated_for_good", func(t *testing.T) {
-		// The re-enroll flow's old agent, confirmed and then reporting
-		// host_keys_rotated, goes through a swap (a KRL update): the
-		// pending status clears its confirmation, and host_keys_rotated
-		// never confirms again (owner decision D-R1), so its forget then
-		// needs --host-gone.
+	t.Run("pending_swap_refuses_forget_until_it_commits", func(t *testing.T) {
+		// The re-enroll flow's old agent, confirmed and reporting
+		// host_keys_rotated, goes through a swap (a KRL update): it stays
+		// confirmed, its forget is refused while the swap is pending, and
+		// goes through once it committed, without --host-gone.
 		e, id, r := confirmedAgent(t)
 		v := e.installDir(t, rekeyedWeb1(t))
 		e.state(t, id)
@@ -533,23 +544,52 @@ func TestRemovalConfirmation(t *testing.T) {
 			s.LastApply.HostStatus = "host_keys_rotated"
 			return s
 		}
-		send := func(s heartbeat.Status) {
-			t.Helper()
-			if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
-				t.Fatalf("heartbeat %d: %d %s", s.Seq, rec.Code, rec.Body.String())
-			}
-		}
-		send(rotated(3))
+		send(t, e, id, rotated(3))
 		wantConfirmed(t, e, id, r, r)
-		s := rotated(4)
-		s.Pending = &heartbeat.Pending{Step: heartbeat.StepFinal, From: s.Generation, To: s.Generation + 1}
-		send(s)
-		wantConfirmed(t, e, id, r, 0)
-		s = rotated(5)
+		send(t, e, id, pending(rotated(4)))
+		wantConfirmed(t, e, id, r, r)
+		asked := e.fake.count("ForgetAgent")
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrHostSwapPending {
+			t.Fatalf("forget during a swap: %d %s, want 409 %s", rec.Code, rec.Body.String(), serverclient.AdminErrHostSwapPending)
+		}
+		if e.fake.count("ForgetAgent") != asked || e.agentRow(t, id.spki) == nil {
+			t.Fatal("a forget refused for a pending swap reached the signer or deleted the row")
+		}
+		s := rotated(5)
 		s.Generation++
-		send(s)
-		e.pendingAnswer(t)
-		wantConfirmed(t, e, id, r, 0)
+		send(t, e, id, s)
+		wantConfirmed(t, e, id, r, r)
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
+			t.Fatalf("forget after the swap committed: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("pending_swap_host_gone_overrides", func(t *testing.T) {
+		e, id, r := confirmedAgent(t)
+		send(t, e, id, pending(e.hbRemovedAt(t, 3, r)))
+		req := forgetReqOf(e.agentRow(t, id.spki), false)
+		req.HostGone = true
+		if rec := e.forgetFacts(t, req); rec.Code != http.StatusOK {
+			t.Fatalf("forget --host-gone during a swap: %d %s", rec.Code, rec.Body.String())
+		}
+		if e.agentRow(t, id.spki) != nil {
+			t.Fatal("the row is still present")
+		}
+	})
+	t.Run("pending_swap_after_the_signer_answer", func(t *testing.T) {
+		// The refusal holds at the delete too (DeleteAgentIf reads the
+		// stored heartbeat in its own transaction): a swap stored after
+		// the signer's answer leaves the agent served.
+		e, id, r := confirmedAgent(t)
+		e.s.beforeForgetDelete = func() { send(t, e, id, pending(e.hbRemovedAt(t, 3, r))) }
+		rec := e.forget(t, "web1")
+		e.s.beforeForgetDelete = nil
+		if rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrForgetLoggedNotDeleted {
+			t.Fatalf("forget whose host started a swap after the signer's answer: %d %s, want 409 %s", rec.Code, rec.Body.String(),
+				serverclient.AdminErrForgetLoggedNotDeleted)
+		}
+		if e.agentRow(t, id.spki) == nil {
+			t.Fatal("the row was deleted during a swap")
+		}
 	})
 	t.Run("confirmed_then_readded_kept", func(t *testing.T) {
 		e, id, r := confirmedAgent(t)

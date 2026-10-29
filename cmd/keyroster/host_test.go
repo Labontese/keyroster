@@ -770,6 +770,45 @@ func TestHostForget(t *testing.T) {
 			t.Fatalf("a forget whose agent changed: exit %d: %s", code, stderr)
 		}
 	})
+	t.Run("swap_pending_refused_locally", func(t *testing.T) {
+		// 03-08c carried item 1: a confirmed agent whose host reports a
+		// swap it has not finished is refused before anything is signed;
+		// host pending shows the swap next to the confirmation.
+		swapping := servedRow("web1", "00", key, true)
+		swapping.SwapPending = true
+		e := forgetEnv(t, nil, swapping)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, swapping.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "host_swap_pending") ||
+			!strings.Contains(stderr, "keyroster host forget --identity "+identityOf("00")+" --host-gone") {
+			t.Fatalf("a forget during a swap: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+		code, stdout, stderr := run(t, "host", "pending")
+		if code != 0 || !strings.Contains(stdout, "removal confirmed at directory v4; swap pending") {
+			t.Fatalf("host pending during a swap: exit %d:\n%s%s", code, stdout, stderr)
+		}
+	})
+	t.Run("swap_pending_host_gone_sends_both", func(t *testing.T) {
+		swapping := servedRow("web1", "00", key, true)
+		swapping.SwapPending = true
+		e := forgetEnv(t, nil, swapping)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, swapping.PendingHost), http.StatusOK)
+		code, stdout, stderr := run(t, "host", "forget", "web1", "--host-gone")
+		req := e.postedForget(t)
+		if code != 0 || !identityIs(req, "00") || !req.HostGone || req.ConfirmedVersion != 4 {
+			t.Fatalf("forget --host-gone during a swap: exit %d, request %s:\n%s%s", code, e.lastPost, stdout, stderr)
+		}
+	})
+	t.Run("server_swap_pending_explained", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"host_swap_pending"}`, http.StatusConflict)
+		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "host_swap_pending: the host reports a swap it has not finished") {
+			t.Fatalf("the server's host_swap_pending: exit %d: %s", code, stderr)
+		}
+	})
 	t.Run("logged_not_deleted_printed", func(t *testing.T) {
 		e := forgetEnv(t, nil, web1)
 		var called bool

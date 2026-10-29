@@ -607,7 +607,7 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 		d, _ := openTemp(t)
 		enrollTestAgent(t, d, 0x01, "web0", "key-0", nowUS)
 		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
-		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts()); err != nil {
+		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts(), nil); err != nil {
 			t.Fatalf("delete A: %v", err)
 		}
 		b := enrollTestAgentToken(t, d, 0x0a, 0x1a, "web1", "key-a", nowUS)
@@ -663,7 +663,7 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 			{"TouchAgent", func(d *DB, k AgentKey, _ *Agent) error { return d.TouchAgent(ctx, k, nowUS+9) }},
 			{"MarkAgentApproved", func(d *DB, k AgentKey, _ *Agent) error { return d.MarkAgentApproved(ctx, k, nowUS+9) }},
 			{"SetAgentRemovedVersion_record", func(d *DB, k AgentKey, _ *Agent) error { return d.SetAgentRemovedVersion(ctx, k, 9) }},
-			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts()) }},
+			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts(), nil) }},
 			{"StoreHeartbeat", func(d *DB, k AgentKey, _ *Agent) error {
 				_, err := d.StoreHeartbeat(ctx, k, 1, []byte("{}"), 7, nowUS+9)
 				return err
@@ -681,7 +681,7 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 				_, err := d.RecordRemovalConfirmed(ctx, k, 1, 5, 6, sum)
 				return err
 			}},
-			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts()) }},
+			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts(), nil) }},
 			{"StoreHeartbeat", func(d *DB, k AgentKey, _ *Agent) error {
 				_, err := d.StoreHeartbeat(ctx, k, 2, []byte("{}"), 7, nowUS+9)
 				return err
@@ -694,7 +694,7 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 				_, err := d.ClearRemovalConfirmed(ctx, k, 1)
 				return err
 			}},
-			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts()) }},
+			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts(), nil) }},
 		})
 	})
 	t.Run("seq_regressed", func(t *testing.T) {
@@ -733,7 +733,7 @@ func TestAgentWritesKeyedByIdentity(t *testing.T) {
 	nowUS := tNow.UnixMicro()
 	enrollTestAgent(t, d, 0x01, "web0", "key-0", nowUS)
 	a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
-	if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts()); err != nil {
+	if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts(), nil); err != nil {
 		t.Fatalf("delete A: %v", err)
 	}
 	b := enrollTestAgent(t, d, 0x0b, "web1", "key-b", nowUS)
@@ -778,7 +778,7 @@ func TestAgentWritesKeyedByIdentity(t *testing.T) {
 			_, err := d.ClearRemovalConfirmed(ctx, a.Key(), 1)
 			return err
 		}},
-		{"DeleteAgentIf", func() error { return d.DeleteAgentIf(ctx, a.Key(), before.ForgetFacts()) }},
+		{"DeleteAgentIf", func() error { return d.DeleteAgentIf(ctx, a.Key(), before.ForgetFacts(), nil) }},
 	} {
 		if err := w.write(); !errors.Is(err, ErrNotFound) {
 			t.Errorf("%s with A's ID and identity: %v, want ErrNotFound", w.name, err)
@@ -793,7 +793,7 @@ func TestAgentWritesKeyedByIdentity(t *testing.T) {
 		// would change its row if they matched by ID alone.
 		d, _ := openTemp(t)
 		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
-		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts()); err != nil {
+		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts(), nil); err != nil {
 			t.Fatal(err)
 		}
 		b := enrollTestAgent(t, d, 0x0b, "web1", "key-b", nowUS)
@@ -812,7 +812,7 @@ func TestAgentWritesKeyedByIdentity(t *testing.T) {
 			{"MarkAgentApproved", func() error { return d.MarkAgentApproved(ctx, a.Key(), nowUS+9) }},
 			{"SetAgentRemovedVersion_record", func() error { return d.SetAgentRemovedVersion(ctx, a.Key(), 9) }},
 			{"SetAgentRemovedVersion_clear", func() error { return d.SetAgentRemovedVersion(ctx, a.Key(), 0) }},
-			{"DeleteAgentIf", func() error { return d.DeleteAgentIf(ctx, a.Key(), before.ForgetFacts()) }},
+			{"DeleteAgentIf", func() error { return d.DeleteAgentIf(ctx, a.Key(), before.ForgetFacts(), nil) }},
 		} {
 			if err := w.write(); !errors.Is(err, ErrNotFound) {
 				t.Errorf("%s with A's ID and identity: %v, want ErrNotFound", w.name, err)
@@ -849,11 +849,39 @@ func TestDeleteAgentIf(t *testing.T) {
 	t.Run("never_approved", func(t *testing.T) {
 		d, _ := openTemp(t)
 		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
-		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true}); !errors.Is(err, ErrNotFound) {
+		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true}, nil); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("approved_once true for a never-approved row: %v", err)
 		}
-		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts()); err != nil {
+		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts(), nil); err != nil {
 			t.Fatalf("the row's own facts: %v", err)
+		}
+	})
+	t.Run("heartbeat_check", func(t *testing.T) {
+		// 03-08c: the check sees the row's stored heartbeat in the
+		// delete's own transaction, and its error refuses the delete.
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		var seen [][]byte
+		check := func(body []byte) error { seen = append(seen, body); return nil }
+		refuse := errors.New("refused by the check")
+		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts(), func(body []byte) error { seen = append(seen, body); return refuse }); !errors.Is(err, refuse) {
+			t.Fatalf("a refusing check without a heartbeat: %v", err)
+		}
+		storeTestHB(t, d, a.Key(), 1)
+		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts(), func(body []byte) error { seen = append(seen, body); return refuse }); !errors.Is(err, refuse) {
+			t.Fatalf("a refusing check: %v", err)
+		}
+		if _, err := d.AgentBySPKI(ctx, a.IdentitySPKISHA256); err != nil {
+			t.Fatalf("the row after a refused delete: %v", err)
+		}
+		if hbs, err := d.Heartbeats(ctx); err != nil || len(hbs) != 1 {
+			t.Fatalf("the heartbeat after a refused delete: %v %v", hbs, err)
+		}
+		if err := d.DeleteAgentIf(ctx, a.Key(), a.ForgetFacts(), check); err != nil {
+			t.Fatalf("a passing check: %v", err)
+		}
+		if len(seen) != 3 || seen[0] != nil || string(seen[1]) != "{}" || string(seen[2]) != "{}" {
+			t.Fatalf("the check saw %q; want no heartbeat, then the stored one twice", seen)
 		}
 	})
 	t.Run("removed_unconfirmed_then_confirmed", func(t *testing.T) {
@@ -871,7 +899,7 @@ func TestDeleteAgentIf(t *testing.T) {
 			{ApprovedOnce: true, RemovalVersion: 4},
 			{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 3, ConfirmedSHA256: sum},
 		} {
-			if err := d.DeleteAgentIf(ctx, a.Key(), f); !errors.Is(err, ErrNotFound) {
+			if err := d.DeleteAgentIf(ctx, a.Key(), f, nil); !errors.Is(err, ErrNotFound) {
 				t.Fatalf("facts %+v the row does not hold: %v", f, err)
 			}
 		}
@@ -888,15 +916,15 @@ func TestDeleteAgentIf(t *testing.T) {
 			{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: other},
 			{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 5, ConfirmedSHA256: sum},
 		} {
-			if err := d.DeleteAgentIf(ctx, a.Key(), f); !errors.Is(err, ErrNotFound) {
+			if err := d.DeleteAgentIf(ctx, a.Key(), f, nil); !errors.Is(err, ErrNotFound) {
 				t.Fatalf("facts %+v the row does not hold: %v", f, err)
 			}
 		}
 		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: sum,
-			EnrolledAtUS: nowUS + int64(time.Second/time.Microsecond)}); !errors.Is(err, ErrNotFound) {
+			EnrolledAtUS: nowUS + int64(time.Second/time.Microsecond)}, nil); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("the row's facts with another enrollment time (03-08c): %v", err)
 		}
-		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: sum, EnrolledAtUS: nowUS}); err != nil {
+		if err := d.DeleteAgentIf(ctx, a.Key(), ForgetFacts{ApprovedOnce: true, RemovalVersion: 3, ConfirmedVersion: 4, ConfirmedSHA256: sum, EnrolledAtUS: nowUS}, nil); err != nil {
 			t.Fatalf("the row's own facts: %v", err)
 		}
 		if _, err := d.AgentBySPKI(ctx, a.IdentitySPKISHA256); !errors.Is(err, ErrNotFound) {

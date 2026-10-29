@@ -388,6 +388,8 @@ func hostAdminRefusal(err error) error {
 			"wait until the host has applied that version, then forget it (docs/runbooks/host-setup.md \"Removing a host\"). Nothing was forgotten")
 	case he.APIErrorIs(serverclient.AdminErrHostNotEnrolled):
 		return errors.New("no agent with this identity is enrolled (it was forgotten, or its identity rotated); check keyroster host pending. Nothing was forgotten")
+	case he.APIErrorIs(serverclient.AdminErrHostSwapPending):
+		return errSwapPending("")
 	case he.APIErrorIs(serverclient.AdminErrForgetLoggedNotDeleted):
 		return fmt.Errorf("forget_logged_not_deleted: audit entry %d records an authorization the server did not carry out: the agent changed after "+
 			"keyroster-signer logged the forget, so the server deleted nothing and keeps serving it (keyroster host pending still lists it). "+
@@ -409,6 +411,18 @@ func errRemovalNotApplied(id string) error {
 	return fmt.Errorf("host_removal_not_applied: the host has not yet confirmed, in its heartbeat, that it applied a directory version that removed it "+
 		"(keyroster host pending shows the confirmation once the server recorded it); forgetting it now would stop the signed state, revocations included, "+
 		"before the removal reached it. Wait for its next heartbeat; for a host that is gone for good, run keyroster host forget --identity %s --host-gone. Nothing was forgotten", id)
+}
+
+// errSwapPending is host forget's refusal of a confirmed agent whose host
+// reports a swap it has not finished (03-08c), for the agent with identity
+// fingerprint id ("" when unknown).
+func errSwapPending(id string) error {
+	if id == "" {
+		id = "SHA256:..."
+	}
+	return fmt.Errorf("host_swap_pending: the host reports a swap it has not finished, so its removal confirmation does not yet speak for what it "+
+		"enforces; wait for its next heartbeat (keyroster host pending drops \"swap pending\" once it committed) and run the command again. For a host "+
+		"that is gone for good, run keyroster host forget --identity %s --host-gone. Nothing was forgotten", id)
 }
 
 // runHostJoinToken is keyroster host join-token NAME [--ttl D] --out FILE
@@ -549,13 +563,15 @@ func fetchPendingHosts(ctx context.Context, s *adminSession) (*pendingHosts, err
 }
 
 // servedHostView is a served host as the CLI shows it: its state, its
-// removal version (0: none recorded) and its recorded removal
-// confirmation (nil: none; 03-08b).
+// removal version (0: none recorded), its recorded removal confirmation
+// (nil: none; 03-08b) and whether its host reports a swap it has not
+// finished (03-08c).
 type servedHostView struct {
 	pendingHostView
 	State          string
 	RemovalVersion uint64
 	Confirmed      *serverclient.RemovalConfirmation
+	SwapPending    bool
 }
 
 // checkServedHost is checkPendingHost for a served host, whose state must
@@ -575,7 +591,7 @@ func checkServedHost(h serverclient.ServedHost) (*servedHostView, error) {
 	if c := h.RemovalConfirmed; c != nil && (h.RemovalVersion == 0 || c.Version < h.RemovalVersion || !enroll.IsSHA256Hex(c.SHA256)) {
 		return nil, errBadPendingHosts
 	}
-	return &servedHostView{pendingHostView: *v, State: h.State, RemovalVersion: h.RemovalVersion, Confirmed: h.RemovalConfirmed}, nil
+	return &servedHostView{pendingHostView: *v, State: h.State, RemovalVersion: h.RemovalVersion, Confirmed: h.RemovalConfirmed, SwapPending: h.SwapPending}, nil
 }
 
 // servedLine is the line host pending and host status print for a served
@@ -591,9 +607,12 @@ func servedLine(state string) string {
 }
 
 // confirmationLine is how host pending and host forget show a served
-// host's removal confirmation (03-08b).
+// host's removal confirmation (03-08b), and a swap its host has not
+// finished next to it, while which forget is refused (03-08c).
 func confirmationLine(v *servedHostView) string {
 	switch {
+	case v.Confirmed != nil && v.SwapPending:
+		return fmt.Sprintf("removal confirmed at directory v%d; swap pending, forget waits until the host finishes it", v.Confirmed.Version)
 	case v.Confirmed != nil:
 		return fmt.Sprintf("removal confirmed at directory v%d", v.Confirmed.Version)
 	case v.RemovalVersion != 0:
@@ -925,8 +944,11 @@ func identityHex(fp string) string {
 //  3. an agent approved once without a recorded removal confirmation (its
 //     host's heartbeat never showed a directory that removed it) is
 //     refused here, host_removal_not_applied, unless --host-gone is given
-//     for a host that will never report again; --host-gone for an agent
-//     confirmed or never approved is dropped, with a note;
+//     for a host that will never report again, and so is a confirmed one
+//     whose host reports a swap it has not finished, host_swap_pending
+//     (03-08c), which --host-gone overrides too; --host-gone for an agent
+//     never approved, or confirmed with no swap pending, is dropped, with
+//     a note;
 //  4. it builds the wire.ForgetRequest for the installation of the
 //     root-pinned trust bundle from the row it read (the identity, name,
 //     enrollment time and host keys; approved once, the removal version,
@@ -1001,6 +1023,13 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	gone := *hostGone
 	switch {
+	case gone && c.Confirmed != nil && c.SwapPending:
+		// 03-08c: --host-gone overrides the wait for a pending swap; the
+		// request names the confirmation and the override.
+		_, _ = fmt.Fprintf(stderr, "host forget --host-gone: forgetting %s while its host reports a swap it has not finished. "+
+			"If the host is still running, it gets no more signed state from now on, revocations included. The server logs this override.\n", c.Name)
+	case c.Confirmed != nil && c.SwapPending:
+		return errSwapPending(c.Identity)
 	case gone && (!c.ApprovedOnce || c.Confirmed != nil):
 		why := "it was never approved, so it has no removal to wait for"
 		if c.ApprovedOnce {

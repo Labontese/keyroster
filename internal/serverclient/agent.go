@@ -141,6 +141,12 @@ const (
 	// changed or its identity rotated after the signer's answer; 03-08c).
 	// The agent keeps being served; the answer's leaf names the entry.
 	AdminErrForgetLoggedNotDeleted = "forget_logged_not_deleted"
+	// AdminErrHostSwapPending refuses keyroster host forget of an agent
+	// whose removal is confirmed while its host's stored heartbeat shows a
+	// swap it has not finished, whose outcome the confirmation cannot
+	// speak for (03-08c, owner decision 2026-10-29): wait for the next
+	// heartbeat, or override with --host-gone for a host that is gone.
+	AdminErrHostSwapPending = "host_swap_pending"
 	// AgentErrStaleHeartbeat is a heartbeat whose seq is not above the
 	// stored one (409); the fetcher treats it as quiet.
 	AgentErrStaleHeartbeat = "stale_heartbeat"
@@ -228,11 +234,15 @@ const (
 // none recorded), and RemovalConfirmed the directory the host's own
 // heartbeat confirmed that removal with (omitted: none recorded; 03-08b).
 // keyroster host forget sends both back as the facts the admin saw.
+// SwapPending is set while the host's stored heartbeat shows a swap it has
+// not finished: forget is then refused host_swap_pending, --host-gone
+// aside, until a heartbeat shows the swap committed (03-08c).
 type ServedHost struct {
 	PendingHost
 	State            string               `json:"state"`
 	RemovalVersion   uint64               `json:"removal_version,omitempty"`
 	RemovalConfirmed *RemovalConfirmation `json:"removal_confirmed,omitempty"`
+	SwapPending      bool                 `json:"swap_pending,omitempty"`
 }
 
 // RemovalConfirmation is a recorded removal confirmation: the directory
