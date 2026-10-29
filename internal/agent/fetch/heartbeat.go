@@ -98,7 +98,14 @@ func writeKey(fd int, name string, key ed25519.PrivateKey) error {
 // rewritten. Any failure leaves identity.next: when the server switched
 // but its answer was lost, the next poll gets unknown_agent with the old
 // key and finishes the rotation (recoverRotation); when nothing reached
-// the server, the old key keeps working and the next rotation starts over.
+// the server, the old key keeps working.
+//
+// An identity.next left by an earlier rotation is never replaced, because
+// it may be the only key the server knows (PR #72 review C9, C13): it is
+// tried first with a state request, and promoted when the server takes
+// it; when the server answers unknown_agent for it, the rotation is asked
+// again for that same key. Any other failure of the trial (the server
+// unreachable) is an error, and identity.next stays.
 func (f *Fetcher) RotateIdentity(ctx context.Context) error {
 	unlock, err := lockIdentity(f.cfg.Dir)
 	if err != nil {
@@ -108,17 +115,36 @@ func (f *Fetcher) RotateIdentity(ctx context.Context) error {
 	if err := f.reloadIdentity(); err != nil {
 		return err
 	}
-	_, next, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return err
-	}
 	dfd, err := spool.OpenDir(f.cfg.Dir)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = unix.Close(dfd) }()
-	if err := writeKey(dfd, IdentityNextFile, next); err != nil {
+	next, err := readKey(dfd, IdentityNextFile)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		if _, next, err = ed25519.GenerateKey(rand.Reader); err != nil {
+			return err
+		}
+		if err := writeKey(dfd, IdentityNextFile, next); err != nil {
+			return err
+		}
+	case err != nil:
 		return err
+	default:
+		v, err := f.cursor()
+		if err != nil {
+			return err
+		}
+		switched, err := f.tryNext(ctx, dfd, next, v)
+		if err != nil {
+			return fmt.Errorf("identity rotation: %s from an earlier rotation is kept, and could not be checked with the server: %w", IdentityNextFile, err)
+		}
+		if switched {
+			f.logf("finished an earlier identity rotation whose answer was lost: the agent identity is now %s", f.Fingerprint())
+			return nil
+		}
+		f.logf("the server does not know %s from an earlier rotation; asking again for that key", IdentityNextFile)
 	}
 	if err := f.fault("rotate-before-post"); err != nil {
 		return err
@@ -129,7 +155,7 @@ func (f *Fetcher) RotateIdentity(ctx context.Context) error {
 	}
 	req := &serverclient.AgentIdentityRequest{NewSPKI: spki, Sig: ed25519.Sign(f.key, serverclient.AgentIdentityMessage(spki))}
 	if err := f.client.AgentRotateIdentity(ctx, req); err != nil {
-		return fmt.Errorf("identity rotation (the new key stays in %s; the next poll finishes a rotation the server made): %w", IdentityNextFile, err)
+		return fmt.Errorf("identity rotation (the new key stays in %s; the next poll, or the next --rotate-identity, finishes a rotation the server made): %w", IdentityNextFile, err)
 	}
 	if err := f.promote(dfd); err != nil {
 		return err
@@ -154,9 +180,9 @@ func (f *Fetcher) promote(dfd int) error {
 }
 
 // recoverRotation is called when the current identity got unknown_agent.
-// With an identity.next it builds a client for that key and asks for the
-// state once; a 200 means the server switched in a rotation whose answer
-// was lost, and identity.next is promoted. It reports whether it switched.
+// With an identity.next it tries that key (tryNext); when the server
+// takes it, the server switched in a rotation whose answer was lost, and
+// identity.next is promoted. It reports whether it switched.
 func (f *Fetcher) recoverRotation(ctx context.Context, v serverclient.AgentVersions) (bool, error) {
 	dfd, err := spool.OpenDir(f.cfg.Dir)
 	if err != nil {
@@ -170,17 +196,35 @@ func (f *Fetcher) recoverRotation(ctx context.Context, v serverclient.AgentVersi
 	if err != nil {
 		return false, err
 	}
+	switched, err := f.tryNext(ctx, dfd, next, v)
+	if switched {
+		f.logf("finished an identity rotation whose answer was lost: the agent identity is now %s", f.Fingerprint())
+	}
+	return switched, err
+}
+
+// tryNext asks the server for the state once with the key next (the
+// identity.next in dfd). An answer for that identity (200, or
+// not_approved for a row the admin has not approved) means the server
+// holds it: identity.next is promoted, and tryNext reports true.
+// unknown_agent means the server does not know it (false, nil). Anything
+// else (the server unreachable, a 5xx, a rate limit) is an error: the
+// outcome is unknown, and identity.next must stay (PR #72 review C9).
+func (f *Fetcher) tryNext(ctx context.Context, dfd int, next ed25519.PrivateKey, v serverclient.AgentVersions) (bool, error) {
 	trial := &Fetcher{cfg: f.cfg, fc: f.fc}
 	if err := trial.useKeyOnly(next); err != nil {
 		return false, err
 	}
-	if _, _, err := trial.client.AgentStateAt(ctx, v); err != nil {
-		return false, nil //nolint:nilerr // the old identity's refusal stands; identity.next is not the server's either
+	_, _, err := trial.client.AgentStateAt(ctx, v)
+	switch {
+	case isAPIError(err, serverclient.AgentErrUnknown):
+		return false, nil
+	case err != nil && !isAPIError(err, serverclient.AgentErrNotApproved):
+		return false, fmt.Errorf("trying %s: %w", IdentityNextFile, err)
 	}
 	if err := f.promote(dfd); err != nil {
 		return false, err
 	}
-	f.logf("finished an identity rotation whose answer was lost: the agent identity is now %s", f.Fingerprint())
 	return true, nil
 }
 

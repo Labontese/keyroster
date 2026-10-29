@@ -227,6 +227,7 @@ type rotServer struct {
 	mu       sync.Mutex
 	current  string // hex SHA-256 of the known identity's SPKI
 	dropNext bool   // commit the next rotation and drop its answer
+	down     bool   // answer every state request 503
 	rotated  int
 	refused  int // requests with an unknown identity
 }
@@ -247,6 +248,12 @@ func (s *rotServer) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case serverclient.AgentStatePath:
+		if s.down {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(emptyState))
 	case serverclient.AgentIdentityPath:
 		var req serverclient.AgentIdentityRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -360,6 +367,74 @@ func TestIdentityRotation(t *testing.T) {
 		}
 		if rs.current != ts.f.spkiHex {
 			t.Fatal("the next rotation did not take")
+		}
+	})
+	t.Run("rotation_answer_lost_then_rotated_again", func(t *testing.T) {
+		// PR #72 review C9, C13: the operator runs --rotate-identity again
+		// before any poll. identity.next is the only key the server knows;
+		// it is tried, kept and promoted, never replaced.
+		ts, rs := newRot(t)
+		rs.dropNext = true
+		if err := ts.f.RotateIdentity(t.Context()); err == nil {
+			t.Fatal("a dropped answer reported success")
+		}
+		next := keyFile(t, ts, IdentityNextFile)
+		if err := ts.f.RotateIdentity(t.Context()); err != nil {
+			t.Fatalf("the second --rotate-identity after a lost answer: %v", err)
+		}
+		if !bytes.Equal(keyFile(t, ts, IdentityKeyFile), next) || keyFile(t, ts, IdentityNextFile) != nil || ts.f.spkiHex != rs.current || rs.rotated != 1 {
+			t.Fatalf("after the retry: identity.key is the server's %v, identity.next left %v, rotations %d", ts.f.spkiHex == rs.current, keyFile(t, ts, IdentityNextFile) != nil, rs.rotated)
+		}
+		if err := ts.f.Once(t.Context()); err != nil {
+			t.Fatalf("a poll after the retry: %v", err)
+		}
+	})
+	t.Run("rotation_retried_with_the_same_key", func(t *testing.T) {
+		// The earlier rotation never reached the server: the retry asks
+		// for the key identity.next already holds.
+		ts, rs := newRot(t)
+		ts.f.cfg.Fault = func(p string) error {
+			if p == "rotate-before-post" {
+				return errors.New("stopped before the POST")
+			}
+			return nil
+		}
+		if err := ts.f.RotateIdentity(t.Context()); err == nil {
+			t.Fatal("a rotation stopped before the POST reported success")
+		}
+		ts.f.cfg.Fault = nil
+		next := keyFile(t, ts, IdentityNextFile)
+		if err := ts.f.RotateIdentity(t.Context()); err != nil {
+			t.Fatalf("the retry: %v", err)
+		}
+		if !bytes.Equal(keyFile(t, ts, IdentityKeyFile), next) || rs.current != ts.f.spkiHex || rs.rotated != 1 {
+			t.Fatalf("the retry did not rotate to identity.next's key (rotations %d)", rs.rotated)
+		}
+	})
+	t.Run("rotation_kept_when_the_server_is_unreachable", func(t *testing.T) {
+		ts, rs := newRot(t)
+		rs.dropNext = true
+		if err := ts.f.RotateIdentity(t.Context()); err == nil {
+			t.Fatal("a dropped answer reported success")
+		}
+		next := keyFile(t, ts, IdentityNextFile)
+		rs.mu.Lock()
+		rs.down = true
+		rs.mu.Unlock()
+		if err := ts.f.RotateIdentity(t.Context()); err == nil {
+			t.Fatal("a retry that could not reach the server reported success")
+		}
+		if err := ts.f.Once(t.Context()); err == nil {
+			t.Fatal("a poll that could not reach the server reported success")
+		}
+		if !bytes.Equal(keyFile(t, ts, IdentityNextFile), next) {
+			t.Fatal("identity.next, the server's only key, was replaced or removed")
+		}
+		rs.mu.Lock()
+		rs.down = false
+		rs.mu.Unlock()
+		if err := ts.f.Once(t.Context()); err != nil || !bytes.Equal(keyFile(t, ts, IdentityKeyFile), next) {
+			t.Fatalf("the poll once the server is back: %v; promoted %v", err, bytes.Equal(keyFile(t, ts, IdentityKeyFile), next))
 		}
 	})
 	t.Run("rotation_concurrent_with_poll", func(t *testing.T) {

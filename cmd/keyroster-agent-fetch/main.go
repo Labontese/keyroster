@@ -38,7 +38,9 @@ status (outbox/status.json) with this host's clock offset.
 as keyroster-agent, while the service runs or not): a new key is written to
 identity.next, the server is asked to switch, signed by the current key,
 and on its answer identity.next becomes identity.key. When the answer is
-lost, the next poll finishes the rotation.
+lost, the next poll finishes the rotation, or the next --rotate-identity
+does: it never replaces an identity.next it finds, but tries it first and
+asks again for that same key. The server allows one rotation an hour.
 `
 
 func main() {

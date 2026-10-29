@@ -959,7 +959,14 @@ becomes `identity.key`; from then on the old certificate gets
 `unknown_agent`. When the answer is lost, the fetcher's next poll gets
 `unknown_agent` with the old key, tries `identity.next`, and keeps it when
 the server accepts it; when the request never reached the server, the old
-key keeps working and the next rotation starts over. The rotation and the
+key keeps working. Running `--rotate-identity` again after a failed one is
+safe: it never replaces an `identity.next` it finds, because that may be
+the only key the server knows. It tries that key first and finishes the
+earlier rotation when the server takes it, asks again for that same key
+when the server answers `unknown_agent` for it, and stops with an error,
+keeping the file, when it cannot reach the server (PR #72 review). The
+server allows one rotation per agent an hour
+(`identity_rotation_too_soon`). The rotation and the
 polls hold one lock, and the running service picks the new key up at its
 next poll. Run it as `keyroster-agent`: as root it is refused
 `fetch_dir_not_owned`, because the keys must stay the service user's.
