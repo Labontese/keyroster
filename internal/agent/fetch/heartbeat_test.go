@@ -4,6 +4,7 @@ package fetch
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
@@ -399,4 +400,26 @@ func TestIdentityRotation(t *testing.T) {
 			t.Fatalf("%d requests with an unknown identity, %d rotations", rs.refused, rs.rotated)
 		}
 	})
+}
+
+// TestUnknownAgentLoggedAtError is owner decision D-R1 (PR #72 review
+// C12): when the server no longer knows the agent's identity (rotated
+// away by whoever holds its key, or forgotten), the fetcher logs that at
+// error level, journald priority 3, once, so the host's own journal shows
+// that it has been cut off.
+func TestUnknownAgentLoggedAtError(t *testing.T) {
+	t.Setenv("JOURNAL_STREAM", "8:12345")
+	ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"unknown_agent"}`))
+	})
+	var log bytes.Buffer
+	ts.f.cfg.Log = &log
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	_ = ts.f.Run(ctx)
+	out := log.String()
+	if !strings.HasPrefix(out, "<3>keyroster-agent-fetch: ERROR unknown_agent: ") || strings.Count(out, "unknown_agent") != 1 {
+		t.Fatalf("the fetcher's log for an unknown identity, want one <3> ERROR unknown_agent line:\n%s", out)
+	}
 }

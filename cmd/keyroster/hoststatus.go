@@ -26,6 +26,12 @@ const statusFooter = "Reported by keyroster-server; run `keyroster-agent check` 
 // stuck: pending_state_unknown (03-05).
 const recoveryCommand = "sudo keyroster-agent apply --once --recover-to-last-good"
 
+// identityRotationShown is how long host status shows a host's identity
+// rotation: an unexpected one means its identity key may be stolen
+// (owner decision D-R1; docs/runbooks/host-setup.md "An unexpected
+// identity rotation").
+const identityRotationShown = 7 * 24 * time.Hour
+
 // errBadHostsStatus refuses a hosts/status answer that does not check out;
 // it never repeats the server's text.
 var errBadHostsStatus = errors.New("the server's host status does not check out; refusing to show it")
@@ -45,7 +51,10 @@ func checkHostsStatus(a *serverclient.HostsStatusAnswer) error {
 		default:
 			return errBadHostsStatus
 		}
-		for _, ts := range []string{r.LastSeen, r.ReceivedAt} {
+		if r.IdentityRotations < 0 || (r.IdentityRotations == 0) != (r.IdentityRotatedAt == "") {
+			return errBadHostsStatus
+		}
+		for _, ts := range []string{r.LastSeen, r.ReceivedAt, r.IdentityRotatedAt} {
 			if ts == "" {
 				continue
 			}
@@ -210,6 +219,9 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 		}
 		if r.ClockSkew {
 			alerts = append(alerts, fmt.Sprintf("clock_skew (%+d s)", r.ClockOffsetS))
+		}
+		if t, err := time.Parse(time.RFC3339, r.IdentityRotatedAt); err == nil && now.Sub(t) <= identityRotationShown {
+			alerts = append(alerts, "identity rotated "+age(now.Sub(t))+" ago")
 		}
 		if len(alerts) == 0 {
 			alerts = []string{"-"}

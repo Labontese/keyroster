@@ -71,6 +71,8 @@ func TestHostStatus(t *testing.T) {
 	ans.Hosts[4].NeverApplied = true
 	ans.Hosts[3].ClockSkew, ans.Hosts[3].ClockOffsetS = true, -301
 	ans.Hosts[0].SeqRegressed = true
+	ans.Hosts[1].IdentityRotatedAt, ans.Hosts[1].IdentityRotations = time.Now().Add(-3*time.Hour).UTC().Format(time.RFC3339), 2
+	ans.Hosts[2].IdentityRotatedAt, ans.Hosts[2].IdentityRotations = time.Now().Add(-8*24*time.Hour).UTC().Format(time.RFC3339), 1
 	t.Run("table", func(t *testing.T) {
 		statusEnv(t, ans)
 		code, out, stderr := run(t, "host", "status")
@@ -87,6 +89,9 @@ func TestHostStatus(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Errorf("host status lacks %q:\n%s", want, out)
 			}
+		}
+		if !strings.Contains(out, "identity rotated 3h ago") || strings.Count(out, "identity rotated") != 1 {
+			t.Errorf("host status shows a rotation 3 h ago, and none 8 days ago, as \"identity rotated <age>\":\n%s", out)
 		}
 		if strings.Contains(out, "waiting for approval") || strings.Contains(out, "Pending host") {
 			t.Fatalf("a served host shown as waiting for approval:\n%s", out)

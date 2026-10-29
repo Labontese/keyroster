@@ -99,6 +99,10 @@ type Agent struct {
 	ClockOffsetS     int64
 	ClockOffsetKnown bool
 	SeqRegressedAtUS int64
+	// IdentityRotatedAtUS is when the identity last rotated (0: never),
+	// IdentityRotations how often it has (owner decision D-R1).
+	IdentityRotatedAtUS int64
+	IdentityRotations   int64
 }
 
 // EnrollAgent uses the join token tokenHash and records a as an enrolled
@@ -291,14 +295,16 @@ func (d *DB) SetAgentRemovedVersion(ctx context.Context, id int64, version uint6
 }
 
 // RotateAgentIdentity replaces agent id's identity SPKI hash oldSPKI by
-// newSPKI (03-08, AGENT-02). It is ErrNotFound when the row no longer
-// holds oldSPKI (a concurrent rotation), ErrIdentityInUse when another
-// agent holds newSPKI.
-func (d *DB) RotateAgentIdentity(ctx context.Context, id int64, oldSPKI, newSPKI []byte) error {
+// newSPKI (03-08, AGENT-02) and records the rotation at nowUS
+// (identity_rotated_at_us, identity_rotations; owner decision D-R1). It
+// is ErrNotFound when the row no longer holds oldSPKI (a concurrent
+// rotation), ErrIdentityInUse when another agent holds newSPKI.
+func (d *DB) RotateAgentIdentity(ctx context.Context, id int64, oldSPKI, newSPKI []byte, nowUS int64) error {
 	if len(newSPKI) != 32 {
 		return errors.New("serverdb: incomplete identity")
 	}
-	res, err := d.db.ExecContext(ctx, `UPDATE agents SET identity_spki_sha256 = ? WHERE id = ? AND identity_spki_sha256 = ?`, newSPKI, id, oldSPKI)
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET identity_spki_sha256 = ?, identity_rotated_at_us = ?, identity_rotations = identity_rotations + 1
+WHERE id = ? AND identity_spki_sha256 = ?`, newSPKI, nowUS, id, oldSPKI)
 	if err != nil {
 		var se *sqlite.Error
 		if errors.As(err, &se) && se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
@@ -443,7 +449,7 @@ func (d *DB) Heartbeats(ctx context.Context) (map[int64]Heartbeat, error) {
 
 // agentColumns are the columns scanAgent reads, in its order.
 const agentColumns = `id, identity_spki_sha256, token_hash, expected_name, host_keys, facts, enrolled_at_us, last_seen_us, approved_at_us, removed_dir_version,
-clock_offset_s, seq_regressed_at_us`
+clock_offset_s, seq_regressed_at_us, identity_rotated_at_us, identity_rotations`
 
 func scanAgent(rows *sql.Rows) (*Agent, error) {
 	var (
@@ -451,9 +457,10 @@ func scanAgent(rows *sql.Rows) (*Agent, error) {
 		keys                    string
 		seen, approved, removed sql.NullInt64
 		offset, regressed       sql.NullInt64
+		rotated                 sql.NullInt64
 	)
 	if err := rows.Scan(&a.ID, &a.IdentitySPKISHA256, &a.TokenSHA256, &a.ExpectedName, &keys, &a.Facts, &a.EnrolledAtUS, &seen, &approved, &removed,
-		&offset, &regressed); err != nil {
+		&offset, &regressed, &rotated, &a.IdentityRotations); err != nil {
 		return nil, fmt.Errorf("serverdb: agent: %w", err)
 	}
 	if err := json.Unmarshal([]byte(keys), &a.HostKeys); err != nil {
@@ -461,6 +468,7 @@ func scanAgent(rows *sql.Rows) (*Agent, error) {
 	}
 	a.LastSeenUS, a.ApprovedAtUS = seen.Int64, approved.Int64
 	a.ClockOffsetS, a.ClockOffsetKnown, a.SeqRegressedAtUS = offset.Int64, offset.Valid, regressed.Int64
+	a.IdentityRotatedAtUS = rotated.Int64
 	if removed.Valid && removed.Int64 > 0 {
 		a.RemovedDirVersion = uint64(removed.Int64)
 	}

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strconv"
@@ -747,6 +748,8 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 // identity_rotation_invalid otherwise, T-03-55). The agents row then holds
 // the new identity, so the old certificate gets 403 unknown_agent from
 // the next request on; another agent's identity is 409 identity_in_use.
+// Every rotation is logged at warning level and recorded on the row
+// (owner decision D-R1).
 func (s *Server) handleAgentIdentity(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
 	var req serverclient.AgentIdentityRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, serverclient.MaxAgentIdentityBody))
@@ -764,7 +767,7 @@ func (s *Server) handleAgentIdentity(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 	newSum := sha256.Sum256(req.NewSPKI)
-	err = s.db.RotateAgentIdentity(r.Context(), ar.agent.ID, ar.agent.IdentitySPKISHA256, newSum[:])
+	err = s.db.RotateAgentIdentity(r.Context(), ar.agent.ID, ar.agent.IdentitySPKISHA256, newSum[:], s.clock().UnixMicro())
 	switch {
 	case errors.Is(err, serverdb.ErrIdentityInUse):
 		s.writeJSON(w, ar.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AgentErrIdentityInUse})
@@ -777,6 +780,22 @@ func (s *Server) handleAgentIdentity(w http.ResponseWriter, r *http.Request, ar 
 		s.writeJSON(w, ar.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 		return
 	}
-	s.log.Info("agent identity rotated", "expected_name", ar.agent.ExpectedName, "agent", agentFingerprint(ar.agent.IdentitySPKISHA256), "new_agent", agentFingerprint(newSum[:]))
+	// Owner decision D-R1 (PR #72 review C12): an unexpected rotation means
+	// the identity key may be stolen, so every one is a warning naming the
+	// host, both identities and where it came from; hosts/status shows it.
+	host, _ := hostState(ar.dir, ar.agent.HostKeys)
+	if host == "" {
+		host = ar.agent.ExpectedName
+	}
+	s.log.Warn("agent identity rotated", "host", host, "expected_name", ar.agent.ExpectedName, "agent", agentFingerprint(ar.agent.IdentitySPKISHA256),
+		"new_agent", agentFingerprint(newSum[:]), "client", clientAddr(r))
 	s.writeJSON(w, ar.status, http.StatusOK, struct{}{})
+}
+
+// clientAddr is the client's IP address (r.RemoteAddr without its port).
+func clientAddr(r *http.Request) string {
+	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		return ap.Addr().Unmap().WithZone("").String()
+	}
+	return r.RemoteAddr
 }

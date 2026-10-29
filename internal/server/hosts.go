@@ -319,7 +319,10 @@ func (s *Server) handleHostsStatus(w http.ResponseWriter, r *http.Request) {
 			name = a.ExpectedName
 		}
 		row := serverclient.HostStatusRow{Name: name, ExpectedName: a.ExpectedName, IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256),
-			State: st, Silent: true, NeverApplied: true}
+			State: st, Silent: true, NeverApplied: true, IdentityRotations: a.IdentityRotations}
+		if a.IdentityRotatedAtUS != 0 {
+			row.IdentityRotatedAt = time.UnixMicro(a.IdentityRotatedAtUS).UTC().Format(time.RFC3339)
+		}
 		if a.LastSeenUS != 0 {
 			seen := time.UnixMicro(a.LastSeenUS)
 			row.LastSeen = seen.UTC().Format(time.RFC3339)

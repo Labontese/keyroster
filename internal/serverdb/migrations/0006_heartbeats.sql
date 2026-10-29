@@ -33,3 +33,10 @@ ALTER TABLE agents ADD COLUMN clock_offset_s INTEGER;
 -- later than heartbeats.received_at_us while the host still sends lower
 -- seqs, which keyroster host status flags seq_regressed (D-R2).
 ALTER TABLE agents ADD COLUMN seq_regressed_at_us INTEGER;
+
+-- identity_rotated_at_us and identity_rotations: when the agent's identity
+-- last rotated (NULL: never) and how often it has. keyroster host status
+-- shows a rotation of the last 7 days, because an unexpected one means
+-- the identity key may be stolen (owner decision D-R1, PR #72 review C12).
+ALTER TABLE agents ADD COLUMN identity_rotated_at_us INTEGER;
+ALTER TABLE agents ADD COLUMN identity_rotations INTEGER NOT NULL DEFAULT 0;

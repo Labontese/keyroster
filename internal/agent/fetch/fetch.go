@@ -214,11 +214,30 @@ func (f *Fetcher) logf(format string, args ...any) {
 	_, _ = fmt.Fprintf(f.cfg.Log, "keyroster-agent-fetch: %s\n", msg)
 }
 
+// errorf is logf for an error line: "ERROR " and, under journald, the
+// priority prefix <3>.
+func (f *Fetcher) errorf(format string, args ...any) {
+	msg := "ERROR " + fmt.Sprintf(format, args...)
+	if f.cfg.Log == nil || msg == f.lastLog {
+		return
+	}
+	f.lastLog = msg
+	_, _ = fmt.Fprintf(f.cfg.Log, "%skeyroster-agent-fetch: %s\n", journalPrefix(), msg)
+}
+
+// loggedError is an error Once logged already (errorf), which Run does
+// not log again.
+type loggedError struct{ err error }
+
+func (e *loggedError) Error() string { return e.err.Error() }
+func (e *loggedError) Unwrap() error { return e.err }
+
 // Run polls until ctx ends: Once, then NextPoll(cfg.Poll). Errors are
 // logged and never end the loop.
 func (f *Fetcher) Run(ctx context.Context) error {
 	for {
-		if err := f.Once(ctx); err != nil {
+		var logged *loggedError
+		if err := f.Once(ctx); err != nil && !errors.As(err, &logged) {
 			f.logf("ERROR %v", err)
 		}
 		t := time.NewTimer(NextPoll(f.cfg.Poll))
@@ -419,6 +438,14 @@ func (f *Fetcher) pollState(ctx context.Context) (bool, error) {
 		if isAPIError(err, serverclient.AgentErrNotApproved) {
 			f.logf("enrolled, waiting for an admin's approval (keyroster host approve)")
 			return false, nil
+		}
+		if isAPIError(err, serverclient.AgentErrUnknown) {
+			// Owner decision D-R1 (PR #72 review C12): the host is cut off,
+			// which its own journal must show at error level.
+			f.errorf("unknown_agent: the server does not know this agent's identity %s, so this host gets no bundles, directories or KRLs (revocations) from it. "+
+				"Unless an admin forgot this host, someone holding its identity key may have rotated it away: re-enroll the host "+
+				"(docs/runbooks/host-setup.md \"An unexpected identity rotation\")", f.Fingerprint())
+			return false, &loggedError{fmt.Errorf("state: %w", err)}
 		}
 		var he *serverclient.HTTPError
 		if errors.As(err, &he) {

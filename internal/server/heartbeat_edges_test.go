@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -205,4 +206,50 @@ func TestHeartbeatSeq(t *testing.T) {
 			t.Fatalf("stored seq %d, want 10", got)
 		}
 	})
+}
+
+// logRecord is the first JSON log record whose msg is msg, or nil.
+func (e *agentEnv) logRecord(t *testing.T, msg string) map[string]any {
+	t.Helper()
+	for _, l := range e.log.Lines() {
+		var rec map[string]any
+		if json.Unmarshal([]byte(l), &rec) == nil && rec["msg"] == msg {
+			return rec
+		}
+	}
+	return nil
+}
+
+// rotateIdentity posts a rotation of as to spki, signed by as's key.
+func (e *agentEnv) rotateIdentity(t *testing.T, as agentID, spki []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := json.Marshal(serverclient.AgentIdentityRequest{NewSPKI: spki, Sig: ed25519.Sign(as.key, serverclient.AgentIdentityMessage(spki))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e.agentDo(t, as, http.MethodPost, serverclient.AgentIdentityPath, b)
+}
+
+// TestIdentityRotationRecorded is owner decision D-R1 (PR #72 review
+// C12): every rotation is logged at warning level with the host, both
+// identities and the client address, and recorded on the agents row,
+// where hosts/status shows it.
+func TestIdentityRotationRecorded(t *testing.T) {
+	e, old := polledAgent(t)
+	if row := e.rawHosts(t)[0]; row["identity_rotations"] != float64(0) || row["identity_rotated_at"] != "" {
+		t.Fatalf("before any rotation: identity_rotations %v, identity_rotated_at %v", row["identity_rotations"], row["identity_rotated_at"])
+	}
+	nid, spki := newIdentityKey(t)
+	if rec := e.rotateIdentity(t, old, spki); rec.Code != http.StatusOK {
+		t.Fatalf("rotate: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := e.logRecord(t, "agent identity rotated")
+	if rec == nil || rec["level"] != "WARN" || rec["host"] != "web1" || rec["agent"] != agentFingerprint(old.spki) ||
+		rec["new_agent"] != agentFingerprint(nid.spki) || rec["client"] != "192.0.2.1" {
+		t.Fatalf("the rotation's log record: %v\n%s", rec, e.log.String())
+	}
+	row := e.rawHosts(t)[0]
+	if row["identity_rotations"] != float64(1) || row["identity_rotated_at"] != t0.UTC().Format(time.RFC3339) {
+		t.Fatalf("after a rotation: identity_rotations %v, identity_rotated_at %v", row["identity_rotations"], row["identity_rotated_at"])
+	}
 }

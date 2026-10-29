@@ -468,6 +468,9 @@ type HostVersions struct {
 //     that parsed, stored or refused (owner decision D-R2), and ClockSkew
 //     |ClockOffsetS| > heartbeat.ClockSkewS; NeverApplied is no heartbeat
 //     or generation 0;
+//   - IdentityRotatedAt is when the agent's identity last rotated (RFC
+//     3339, "" for never) and IdentityRotations how often it has (owner
+//     decision D-R1): host status shows a rotation of the last 7 days;
 //   - SeqRegressed is set while the host is not silent and its heartbeats
 //     since the stored one carry a lower seq (heartbeat_seq_regressed,
 //     D-R2): its status is frozen at the stored one.
@@ -482,6 +485,8 @@ type HostStatusRow struct {
 	ClockOffsetS       int64                `json:"clock_offset_s"`
 	ClockSkew          bool                 `json:"clock_skew"`
 	SeqRegressed       bool                 `json:"seq_regressed"`
+	IdentityRotatedAt  string               `json:"identity_rotated_at"`
+	IdentityRotations  int64                `json:"identity_rotations"`
 	NeverApplied       bool                 `json:"never_applied"`
 	Heartbeat          *heartbeat.Heartbeat `json:"heartbeat"`
 }

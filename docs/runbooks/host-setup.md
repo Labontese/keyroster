@@ -967,6 +967,33 @@ Compare the new identity with `keyroster host status --json`
 `TestIdentityRotation`, and with the real users under systemd in
 `agent-smoke.sh`.)
 
+**An unexpected identity rotation.** keyroster-server logs every rotation
+at warning level (`agent identity rotated`, with the host, the old and the
+new identity and the client's address) and records it on the agent's row.
+`keyroster host status` shows `identity rotated <age>` for 7 days, and
+`--json` carries `identity_rotated_at` and `identity_rotations` (owner
+decision D-R1, PR #72). A rotation nobody ran on the host means its
+identity key (`/var/lib/keyroster-agent-fetch/identity.key`) may be
+stolen: whoever holds it can rotate the row to a key of their own, from
+anywhere. The real host then gets `unknown_agent`, which its fetcher logs
+at error level (`ERROR unknown_agent`, journald priority 3), and it gets no
+revocations from then on. Treat the row as lost, and re-enroll the host:
+
+1. On the admin workstation, remove its entry (`keyroster host remove
+   <name>`), then forget the agent with `keyroster host forget <name>
+   --host-gone`. Do not wait for its heartbeat: the key's holder can report
+   anything.
+2. On the host, as root, find out how the key left it. Stop both units,
+   delete `/var/lib/keyroster-agent-fetch/identity.key` (and
+   `identity.next`, if present), so the fetcher makes a new identity at its
+   next start, and enroll the host again with a new join token
+   ([Enrolling a host](#enrolling-a-host)).
+
+(The log line, the row's fields, the `host status` line and the fetcher's
+error line are run in CI: `TestIdentityRotationRecorded`, `TestHostStatus`,
+`TestUnknownAgentLoggedAtError`. The re-enrollment itself is UNVERIFIED: no
+test runs it, on CI or on a real host.)
+
 ## Manual recovery
 
 When `keyroster host status` shows `stuck: pending_state_unknown`,
