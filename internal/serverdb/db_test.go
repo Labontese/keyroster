@@ -566,6 +566,14 @@ func enrollTestAgent(t *testing.T, d *DB, b byte, name, key string, nowUS int64)
 	return enrollTestAgentToken(t, d, b, b, name, key, nowUS)
 }
 
+// storeTestHB stores a heartbeat with seq seq for the agents row k.
+func storeTestHB(t *testing.T, d *DB, k AgentKey, seq int64) {
+	t.Helper()
+	if _, err := d.StoreHeartbeat(context.Background(), k, seq, []byte("{}"), 0, tNow.UnixMicro()); err != nil {
+		t.Fatalf("store heartbeat %d: %v", seq, err)
+	}
+}
+
 // enrollTestAgentToken is enrollTestAgent with the identity of b and the
 // join token of tok (32 bytes of each).
 func enrollTestAgentToken(t *testing.T, d *DB, b, tok byte, name, key string, nowUS int64) *Agent {
@@ -594,7 +602,7 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 	ctx := context.Background()
 	nowUS := tNow.UnixMicro()
 	sum := bytes.Repeat([]byte{0xcd}, 32)
-	reused := func(t *testing.T, approvedRemoved bool) (*DB, AgentKey, *Agent) {
+	reused := func(t *testing.T, approvedRemoved, confirmed bool) (*DB, AgentKey, *Agent) {
 		t.Helper()
 		d, _ := openTemp(t)
 		enrollTestAgent(t, d, 0x01, "web0", "key-0", nowUS)
@@ -613,6 +621,12 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 			if err := d.SetAgentRemovedVersion(ctx, b.Key(), 5); err != nil {
 				t.Fatal(err)
 			}
+			storeTestHB(t, d, b.Key(), 1)
+		}
+		if confirmed {
+			if ok, err := d.RecordRemovalConfirmed(ctx, b.Key(), 1, 5, 6, sum); err != nil || !ok {
+				t.Fatalf("record B's confirmation: %t %v", ok, err)
+			}
 		}
 		before, err := d.AgentBySPKI(ctx, b.IdentitySPKISHA256)
 		if err != nil {
@@ -624,10 +638,14 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 		name  string
 		write func(d *DB, k AgentKey, before *Agent) error
 	}
-	check := func(t *testing.T, approvedRemoved bool, writes []write) {
+	check := func(t *testing.T, approvedRemoved, confirmed bool, writes []write) {
 		t.Helper()
 		for _, w := range writes {
-			d, k, before := reused(t, approvedRemoved)
+			d, k, before := reused(t, approvedRemoved, confirmed)
+			hbsBefore, err := d.Heartbeats(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if err := w.write(d, k, before); !errors.Is(err, ErrNotFound) {
 				t.Errorf("%s with A's key: %v, want ErrNotFound", w.name, err)
 			}
@@ -635,13 +653,13 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(after, before) {
 				t.Errorf("%s with A's key changed B's row:\n%+v\nwas\n%+v (%v)", w.name, after, before, err)
 			}
-			if hbs, err := d.Heartbeats(ctx); err != nil || len(hbs) != 0 {
-				t.Errorf("%s with A's key stored a heartbeat for B: %v %v", w.name, hbs, err)
+			if hbs, err := d.Heartbeats(ctx); err != nil || !reflect.DeepEqual(hbs, hbsBefore) {
+				t.Errorf("%s with A's key changed B's heartbeat: %v, was %v (%v)", w.name, hbs, hbsBefore, err)
 			}
 		}
 	}
 	t.Run("fresh", func(t *testing.T) {
-		check(t, false, []write{
+		check(t, false, false, []write{
 			{"TouchAgent", func(d *DB, k AgentKey, _ *Agent) error { return d.TouchAgent(ctx, k, nowUS+9) }},
 			{"MarkAgentApproved", func(d *DB, k AgentKey, _ *Agent) error { return d.MarkAgentApproved(ctx, k, nowUS+9) }},
 			{"SetAgentRemovedVersion_record", func(d *DB, k AgentKey, _ *Agent) error { return d.SetAgentRemovedVersion(ctx, k, 9) }},
@@ -657,10 +675,23 @@ func TestAgentWritesKeyedByToken(t *testing.T) {
 		})
 	})
 	t.Run("approved_removed", func(t *testing.T) {
-		check(t, true, []write{
+		check(t, true, false, []write{
 			{"SetAgentRemovedVersion_clear", func(d *DB, k AgentKey, _ *Agent) error { return d.SetAgentRemovedVersion(ctx, k, 0) }},
 			{"RecordRemovalConfirmed", func(d *DB, k AgentKey, _ *Agent) error {
-				_, err := d.RecordRemovalConfirmed(ctx, k, 5, 6, sum)
+				_, err := d.RecordRemovalConfirmed(ctx, k, 1, 5, 6, sum)
+				return err
+			}},
+			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts()) }},
+			{"StoreHeartbeat", func(d *DB, k AgentKey, _ *Agent) error {
+				_, err := d.StoreHeartbeat(ctx, k, 2, []byte("{}"), 7, nowUS+9)
+				return err
+			}},
+		})
+	})
+	t.Run("confirmed", func(t *testing.T) {
+		check(t, true, true, []write{
+			{"ClearRemovalConfirmed", func(d *DB, k AgentKey, _ *Agent) error {
+				_, err := d.ClearRemovalConfirmed(ctx, k, 1)
 				return err
 			}},
 			{"DeleteAgentIf", func(d *DB, k AgentKey, b *Agent) error { return d.DeleteAgentIf(ctx, k, b.ForgetFacts()) }},
@@ -693,7 +724,8 @@ func TestAgentWritesKeyedByIdentity(t *testing.T) {
 	if err := d.SetAgentRemovedVersion(ctx, b.Key(), 5); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := d.RecordRemovalConfirmed(ctx, b.Key(), 5, 6, sum); err != nil || !ok {
+	storeTestHB(t, d, b.Key(), 1)
+	if ok, err := d.RecordRemovalConfirmed(ctx, b.Key(), 1, 5, 6, sum); err != nil || !ok {
 		t.Fatalf("record B's confirmation: %t %v", ok, err)
 	}
 	if err := d.TouchAgent(ctx, b.Key(), nowUS+2); err != nil {
@@ -715,7 +747,11 @@ func TestAgentWritesKeyedByIdentity(t *testing.T) {
 		{"SetAgentRemovedVersion_clear", func() error { return d.SetAgentRemovedVersion(ctx, a.Key(), 0) }},
 		{"SetAgentRemovedVersion_record", func() error { return d.SetAgentRemovedVersion(ctx, a.Key(), 9) }},
 		{"RecordRemovalConfirmed", func() error {
-			_, err := d.RecordRemovalConfirmed(ctx, a.Key(), 5, 9, sum)
+			_, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 5, 9, sum)
+			return err
+		}},
+		{"ClearRemovalConfirmed", func() error {
+			_, err := d.ClearRemovalConfirmed(ctx, a.Key(), 1)
 			return err
 		}},
 		{"DeleteAgentIf", func() error { return d.DeleteAgentIf(ctx, a.Key(), before.ForgetFacts()) }},
@@ -815,10 +851,11 @@ func TestDeleteAgentIf(t *testing.T) {
 				t.Fatalf("facts %+v the row does not hold: %v", f, err)
 			}
 		}
-		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 3, 4, sum); err != nil || !ok {
+		storeTestHB(t, d, a.Key(), 1)
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 4, sum); err != nil || !ok {
 			t.Fatalf("record: %t %v", ok, err)
 		}
-		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 3, 5, sum); err != nil || ok {
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 5, sum); err != nil || ok {
 			t.Fatalf("a second record: %t %v, want nothing recorded", ok, err)
 		}
 		other := bytes.Repeat([]byte{0xab}, 32)
@@ -860,11 +897,72 @@ func TestRemovalConfirmation(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 3, 4, sum); err != nil || ok {
+		storeTestHB(t, d, a.Key(), 1)
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 4, sum); err != nil || ok {
 			t.Fatalf("a confirmation of the old removal: %t %v, want nothing recorded", ok, err)
 		}
 		if got, _ := d.AgentBySPKI(ctx, a.IdentitySPKISHA256); got.RemovedDirVersion != 5 || got.RemovalConfirmedVersion != 0 {
 			t.Fatalf("removed_dir_version %d, confirmed %d; want 5, none", got.RemovedDirVersion, got.RemovalConfirmedVersion)
+		}
+	})
+	// Owner decision D-R1 (PR #74 review fix round 1): a confirmation is
+	// recorded or cleared only from the heartbeat that is still stored.
+	removed := func(t *testing.T) (*DB, *Agent) {
+		t.Helper()
+		d, _ := openTemp(t)
+		a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", nowUS)
+		if err := d.MarkAgentApproved(ctx, a.Key(), nowUS); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.SetAgentRemovedVersion(ctx, a.Key(), 3); err != nil {
+			t.Fatal(err)
+		}
+		storeTestHB(t, d, a.Key(), 1)
+		return d, a
+	}
+	confirmedAt := func(t *testing.T, d *DB, a *Agent) uint64 {
+		t.Helper()
+		got, err := d.AgentBySPKI(ctx, a.IdentitySPKISHA256)
+		if err != nil || got.RemovedDirVersion != 3 {
+			t.Fatalf("the row: %+v %v", got, err)
+		}
+		return got.RemovalConfirmedVersion
+	}
+	t.Run("heartbeat_changed_before_record", func(t *testing.T) {
+		// The caller decided from heartbeat 1; heartbeat 2 (which may show
+		// principals again) was stored before its write.
+		d, a := removed(t)
+		storeTestHB(t, d, a.Key(), 2)
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 4, sum); err != nil || ok {
+			t.Fatalf("a confirmation from a replaced heartbeat: %t %v, want nothing recorded", ok, err)
+		}
+		if v := confirmedAt(t, d, a); v != 0 {
+			t.Fatalf("confirmed v%d, want none", v)
+		}
+	})
+	t.Run("cleared_only_from_the_stored_heartbeat", func(t *testing.T) {
+		d, a := removed(t)
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 1, 3, 4, sum); err != nil || !ok {
+			t.Fatalf("record: %t %v", ok, err)
+		}
+		storeTestHB(t, d, a.Key(), 2)
+		if ok, err := d.ClearRemovalConfirmed(ctx, a.Key(), 1); err != nil || ok {
+			t.Fatalf("a clear from a replaced heartbeat: %t %v, want nothing cleared", ok, err)
+		}
+		if v := confirmedAt(t, d, a); v != 4 {
+			t.Fatalf("confirmed v%d, want 4", v)
+		}
+		if ok, err := d.ClearRemovalConfirmed(ctx, a.Key(), 2); err != nil || !ok {
+			t.Fatalf("a clear from the stored heartbeat: %t %v", ok, err)
+		}
+		if v := confirmedAt(t, d, a); v != 0 {
+			t.Fatalf("confirmed v%d after the clear, want none (the removal version stays)", v)
+		}
+		if ok, err := d.ClearRemovalConfirmed(ctx, a.Key(), 2); err != nil || ok {
+			t.Fatalf("a second clear: %t %v, want nothing cleared", ok, err)
+		}
+		if ok, err := d.RecordRemovalConfirmed(ctx, a.Key(), 2, 3, 5, sum); err != nil || !ok {
+			t.Fatalf("a new confirmation after the clear: %t %v", ok, err)
 		}
 	})
 }

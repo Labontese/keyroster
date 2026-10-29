@@ -335,7 +335,7 @@ func TestHostForgetWaitsForRemoval(t *testing.T) {
 	})
 	t.Run("refused_while_the_heartbeat_shows_an_older_directory", func(t *testing.T) {
 		e, id, _ := removed(t)
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(2, 1)}); rec.Code != http.StatusOK {
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, 1)}); rec.Code != http.StatusOK {
 			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
 		}
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
@@ -347,7 +347,7 @@ func TestHostForgetWaitsForRemoval(t *testing.T) {
 	})
 	t.Run("accepted_once_the_removal_is_applied", func(t *testing.T) {
 		e, id, removal := removed(t)
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, removal)}); rec.Code != http.StatusOK {
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, removal)}); rec.Code != http.StatusOK {
 			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
 		}
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
@@ -363,7 +363,7 @@ func TestHostForgetWaitsForRemoval(t *testing.T) {
 		// host's heartbeat at the removal version is enough.
 		e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil)
 		e.installDir(t)
-		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, removal)})
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, removal)})
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
 			t.Fatalf("forget: %d %s", rec.Code, rec.Body.String())
 		}
@@ -389,13 +389,13 @@ func TestHostForgetWaitsForRemoval(t *testing.T) {
 		h.Status = directory.StatusDisabled
 		disabled := e.installDir(t, h)
 		e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil)
-		e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(2, disabled)})
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: asEmptied(e.hbAt(t, 2, disabled), "host_disabled")})
 		removal := e.installDir(t)
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
 			t.Fatalf("forget with the disable applied but not the removal: %d %s", rec.Code, rec.Body.String())
 		}
 		e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil)
-		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 3, removal)})
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 3, removal)})
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
 			t.Fatalf("forget after the removal applied: %d %s", rec.Code, rec.Body.String())
 		}

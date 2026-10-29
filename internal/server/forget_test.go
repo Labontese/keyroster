@@ -68,7 +68,7 @@ func removedAgent(t *testing.T) (*agentEnv, agentID, uint64) {
 func confirmedAgent(t *testing.T) (*agentEnv, agentID, uint64) {
 	t.Helper()
 	e, id, r := removedAgent(t)
-	if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, r)}); rec.Code != http.StatusOK {
+	if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, r)}); rec.Code != http.StatusOK {
 		t.Fatalf("heartbeat at the removal: %d %s", rec.Code, rec.Body.String())
 	}
 	wantConfirmed(t, e, id, r, r)
@@ -238,8 +238,171 @@ func TestReenrolledIdentityKeepsItsRow(t *testing.T) {
 // removal is confirmed once, from the host's own heartbeat, for a
 // directory V the server served at or above the removal in which nothing
 // names the host; a re-use of its name keeps a confirmation and never
-// makes one.
+// makes one. Owner decision D-R1 (PR #74 review fix round 1): the
+// heartbeat must also show that the apply which committed V emptied the
+// host's principals (last_apply ok, host_status host_removed or
+// host_disabled, no principals/ file), and a later heartbeat that shows
+// principals again clears the confirmation.
 func TestRemovalConfirmation(t *testing.T) {
+	t.Run("removed_host_reporting_removed_confirmed", func(t *testing.T) {
+		for _, st := range []string{"host_removed", "host_disabled"} {
+			e, id, r := removedAgent(t)
+			s := e.hbRemovedAt(t, 2, r)
+			s.LastApply.HostStatus = st
+			if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+				t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+			}
+			wantConfirmed(t, e, id, r, r)
+		}
+	})
+	t.Run("report_not_emptied_not_confirmed", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			edit func(s *heartbeat.Status)
+		}{
+			// Finding 10: the host renders an active entry under its
+			// current keys.
+			{"principals_rendered", func(s *heartbeat.Status) {
+				s.LastApply.HostStatus = ""
+				s.Files = append([]heartbeat.File{{Path: "principals/deploy", SHA256: strings.Repeat("ab", 32)}}, s.Files...)
+			}},
+			{"host_status_empty", func(s *heartbeat.Status) { s.LastApply.HostStatus = "" }},
+			{"keys_rotated", func(s *heartbeat.Status) { s.LastApply.HostStatus = "host_keys_rotated" }},
+			{"keys_disagree", func(s *heartbeat.Status) { s.LastApply.HostStatus = "host_keys_disagree" }},
+			{"principals_file", func(s *heartbeat.Status) {
+				s.Files = append([]heartbeat.File{{Path: "principals/deploy", SHA256: strings.Repeat("ab", 32)}}, s.Files...)
+			}},
+			{"files_truncated", func(s *heartbeat.Status) { s.FilesTruncated = true }},
+			{"apply_refused", func(s *heartbeat.Status) { s.LastApply.Result = heartbeat.ResultRefused }},
+			{"apply_rolled_back", func(s *heartbeat.Status) { s.LastApply.Result, s.LastApply.Rollback = heartbeat.ResultRolledBack, true }},
+			{"no_last_apply", func(s *heartbeat.Status) { s.LastApply = nil }},
+			{"swap_pending", func(s *heartbeat.Status) {
+				s.Pending = &heartbeat.Pending{Step: heartbeat.StepIntermediate, From: s.Generation, To: s.Generation + 2, Intermediate: s.Generation + 1}
+			}},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				e, id, r := removedAgent(t)
+				s := e.hbRemovedAt(t, 2, r)
+				c.edit(&s)
+				if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+					t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+				}
+				e.pendingAnswer(t)
+				wantConfirmed(t, e, id, r, 0)
+				if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
+					t.Fatalf("forget of a host whose report did not empty its principals: %d %s", rec.Code, rec.Body.String())
+				}
+			})
+		}
+	})
+	t.Run("renamed_then_rekeyed_not_confirmed", func(t *testing.T) {
+		// Finding 7: the entry is renamed by remove and add with the same
+		// keys (the agent stays approved under web-01, its expected name
+		// still web1), then re-keyed under the new name in one version.
+		// The server records a removal (no entry holds the agent's keys,
+		// none is named web1), but the applier keeps last-good's
+		// principals for web-01 (host_keys_rotated).
+		e, id := polledAgent(t)
+		hosts := e.webEntry(t)
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 1, 1)})
+		renamed := hosts
+		renamed.Name, renamed.Principals = "web-01", []string{"web-01"}
+		e.installDir(t, renamed)
+		if c := e.state(t, id); c != http.StatusOK {
+			t.Fatalf("state under the renamed entry: %d", c)
+		}
+		v := e.installDir(t, hostEntry("web-01", hostSigners(t, 1)))
+		if c := e.state(t, id); c != http.StatusOK {
+			t.Fatalf("state under the re-keyed entry: %d", c)
+		}
+		s := e.hbAt(t, 2, v)
+		s.LastApply.HostStatus = "host_keys_rotated"
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		e.pendingAnswer(t)
+		wantConfirmed(t, e, id, v, 0)
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
+			t.Fatalf("forget of a renamed and re-keyed host: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("principals_again_clears", func(t *testing.T) {
+		// Finding 0: the confirmed host is re-keyed and re-added under an
+		// entry with its new keys, keeping its fetcher identity; it renders
+		// that entry's principals, and its forget needs --host-gone again.
+		e, id, r := confirmedAgent(t)
+		v := e.installDir(t, hostEntry("web1b", hostSigners(t, 1)))
+		if c := e.state(t, id); c != http.StatusOK {
+			t.Fatalf("state under the re-add: %d", c)
+		}
+		s := e.hbAt(t, 3, v) // host_status "", principals/deploy
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		wantConfirmed(t, e, id, r, 0)
+		if !strings.Contains(e.log.String(), "agent removal confirmation cleared") {
+			t.Errorf("the clear was not logged:\n%s", e.log.String())
+		}
+		e.pendingAnswer(t)
+		wantConfirmed(t, e, id, r, 0)
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
+			t.Fatalf("forget of a host that shows principals again: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := e.forgetGone(t, "web1"); rec.Code != http.StatusOK {
+			t.Fatalf("forget --host-gone: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("rendered_entry_without_principals_files_clears", func(t *testing.T) {
+		// The host renders an active entry under its current keys whose
+		// host group maps no account: no principals file, but the host
+		// is in service again (last_apply ok, host_status empty).
+		e, id, r := confirmedAgent(t)
+		v := e.installDir(t, hostEntry("web1b", hostSigners(t, 1)))
+		e.state(t, id)
+		s := e.hbRemovedAt(t, 3, v)
+		s.LastApply.HostStatus = ""
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		wantConfirmed(t, e, id, r, 0)
+	})
+	t.Run("pending_clears_from_the_stored_heartbeat", func(t *testing.T) {
+		// A clear the heartbeat route did not make (the heartbeat stored
+		// by the database itself) is made by host pending.
+		e, id, r := confirmedAgent(t)
+		a := e.agentRow(t, id.spki)
+		body := hbBody(t, heartbeat.Heartbeat{Status: e.hbAt(t, 3, r)})
+		if _, err := e.s.db.StoreHeartbeat(t.Context(), a.Key(), 3, body, 0, e.clock.Now().UnixMicro()); err != nil {
+			t.Fatal(err)
+		}
+		wantConfirmed(t, e, id, r, r)
+		if ans := e.pendingAnswer(t); len(ans.Served) != 1 || ans.Served[0].RemovalConfirmed != nil {
+			t.Fatalf("host pending with a stored heartbeat that shows principals: %+v", ans.Served)
+		}
+		wantConfirmed(t, e, id, r, 0)
+	})
+	t.Run("keys_rotated_without_principals_kept", func(t *testing.T) {
+		// The re-enroll flow: another agent is approved under web1, so the
+		// confirmed host reports host_keys_rotated with last-good's
+		// principals, which are none: it stays confirmed. A report of a
+		// principals file under the same status clears it.
+		e, id, r := confirmedAgent(t)
+		v := e.installDir(t, rekeyedWeb1(t))
+		e.state(t, id)
+		s := e.hbRemovedAt(t, 3, v)
+		s.LastApply.HostStatus = "host_keys_rotated"
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		e.pendingAnswer(t)
+		wantConfirmed(t, e, id, r, r)
+		s.Seq++
+		s.Files = append([]heartbeat.File{{Path: "principals/deploy", SHA256: strings.Repeat("ab", 32)}}, s.Files...)
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: s}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		wantConfirmed(t, e, id, r, 0)
+	})
 	t.Run("confirmed_then_readded_kept", func(t *testing.T) {
 		e, id, r := confirmedAgent(t)
 		e.installDir(t, rekeyedWeb1(t))
@@ -258,7 +421,7 @@ func TestRemovalConfirmation(t *testing.T) {
 		e, id, r := removedAgent(t)
 		e.installDir(t, rekeyedWeb1(t))
 		e.state(t, id)
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, r)}); rec.Code != http.StatusOK {
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, r)}); rec.Code != http.StatusOK {
 			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
 		}
 		wantConfirmed(t, e, id, r, r)
@@ -268,8 +431,11 @@ func TestRemovalConfirmation(t *testing.T) {
 		v := e.installDir(t, rekeyedWeb1(t))
 		e.state(t, id)
 		// The host reached the re-add without applying its removal: it
-		// kept last-good's principals (host_keys_rotated).
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, v)}); rec.Code != http.StatusOK {
+		// kept last-good's principals (host_keys_rotated). The report here
+		// even claims host_removed with no principals, so this pins the
+		// server's own check that directory V removes the host, which the
+		// host's report does not replace (owner decision D-R1).
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, v)}); rec.Code != http.StatusOK {
 			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
 		}
 		e.pendingAnswer(t)
@@ -290,7 +456,7 @@ func TestRemovalConfirmation(t *testing.T) {
 	})
 	t.Run("other_sha_not_confirmed", func(t *testing.T) {
 		e, id, r := removedAgent(t)
-		s := e.hbAt(t, 2, r)
+		s := e.hbRemovedAt(t, 2, r)
 		s.Directory.SHA256 = strings.Repeat("cd", 32)
 		e.heartbeat(t, id, heartbeat.Heartbeat{Status: s})
 		e.pendingAnswer(t)
@@ -304,7 +470,7 @@ func TestRemovalConfirmation(t *testing.T) {
 		saved := e.fake.dirVersions[r]
 		delete(e.fake.dirVersions, r)
 		e.fake.mu.Unlock()
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, r)}); rec.Code != http.StatusOK {
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, r)}); rec.Code != http.StatusOK {
 			t.Fatalf("a heartbeat while the signer cannot answer: %d %s", rec.Code, rec.Body.String())
 		}
 		wantConfirmed(t, e, id, r, 0)
@@ -324,7 +490,7 @@ func TestRemovalConfirmation(t *testing.T) {
 		e, id, r := removedAgent(t)
 		e.installDir(t)
 		e.state(t, id)
-		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, r)})
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, r)})
 		d, err := e.fake.GetDirectoryVersion(t.Context(), r)
 		if err != nil {
 			t.Fatal(err)
@@ -345,7 +511,7 @@ func TestRemovalConfirmation(t *testing.T) {
 		store := func(t *testing.T, e *agentEnv, id agentID, seq, v uint64) {
 			t.Helper()
 			a := e.agentRow(t, id.spki)
-			body := hbBody(t, heartbeat.Heartbeat{Status: e.hbAt(t, seq, v)})
+			body := hbBody(t, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, seq, v)})
 			if _, err := e.s.db.StoreHeartbeat(t.Context(), a.Key(), int64(seq), body, 0, e.clock.Now().UnixMicro()); err != nil { //nolint:gosec // G115: a small test seq
 				t.Fatal(err)
 			}
@@ -435,7 +601,7 @@ func TestForgetHost(t *testing.T) {
 		}{
 			{"confirmation_recorded", func(t *testing.T, e *agentEnv, a *serverdb.Agent, r uint64) {
 				sum := sha256.Sum256(e.dirs[r-1])
-				if ok, err := e.s.db.RecordRemovalConfirmed(t.Context(), a.Key(), r, r, sum[:]); err != nil || !ok {
+				if ok, err := e.s.db.RecordRemovalConfirmed(t.Context(), a.Key(), 1, r, r, sum[:]); err != nil || !ok {
 					t.Errorf("record the confirmation: %t %v", ok, err)
 				}
 			}},

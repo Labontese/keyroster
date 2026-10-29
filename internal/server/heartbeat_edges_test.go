@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -370,6 +371,25 @@ func (e *agentEnv) hbAt(t *testing.T, seq, v uint64) heartbeat.Status {
 	return s
 }
 
+// hbRemovedAt is hbAt as a host reports it after the apply that committed
+// directory v emptied its principals (03-08b fix round 1, owner decision
+// D-R1): last_apply ok with host_status host_removed, and no principals/
+// file in the generation.
+func (e *agentEnv) hbRemovedAt(t *testing.T, seq, v uint64) heartbeat.Status {
+	t.Helper()
+	return asEmptied(e.hbAt(t, seq, v), "host_removed")
+}
+
+// asEmptied is s with last_apply's host_status hostStatus (host_removed
+// or host_disabled) and no principals/ file.
+func asEmptied(s heartbeat.Status, hostStatus string) heartbeat.Status {
+	la := *s.LastApply
+	la.HostStatus = hostStatus
+	s.LastApply = &la
+	s.Files = slices.DeleteFunc(slices.Clone(s.Files), func(f heartbeat.File) bool { return strings.HasPrefix(f.Path, "principals/") })
+	return s
+}
+
 // TestForgetGateChecksTheDirectory (PR #72 review C4): forget's removal
 // wait counts a heartbeat's directory only when it is one the server
 // served: not above the current version, and with the SHA-256 of the
@@ -385,7 +405,7 @@ func TestForgetGateChecksTheDirectory(t *testing.T) {
 	}
 	t.Run("version_above_current_refused", func(t *testing.T) {
 		e, id, removal := removed(t)
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(2, removal+50)}); rec.Code != http.StatusOK {
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: asEmptied(testHBStatus(2, removal+50), "host_removed")}); rec.Code != http.StatusOK {
 			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
 		}
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
@@ -394,7 +414,7 @@ func TestForgetGateChecksTheDirectory(t *testing.T) {
 	})
 	t.Run("same_number_other_sha_refused", func(t *testing.T) {
 		e, id, removal := removed(t)
-		s := e.hbAt(t, 2, removal)
+		s := e.hbRemovedAt(t, 2, removal)
 		s.Directory.SHA256 = strings.Repeat("cd", 32)
 		e.heartbeat(t, id, heartbeat.Heartbeat{Status: s})
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
@@ -404,7 +424,7 @@ func TestForgetGateChecksTheDirectory(t *testing.T) {
 	t.Run("older_served_version_checked_with_the_signer", func(t *testing.T) {
 		e, id, removal := removed(t)
 		e.installDir(t)
-		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, removal)})
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbRemovedAt(t, 2, removal)})
 		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
 			t.Fatalf("forget on the removal version, below the current one: %d %s", rec.Code, rec.Body.String())
 		}

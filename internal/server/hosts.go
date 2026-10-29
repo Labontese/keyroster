@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
@@ -85,13 +86,14 @@ func (s *Server) handleMintJoinToken(w http.ResponseWriter, r *http.Request) {
 // or keys_changed), its removal version and its recorded removal
 // confirmation, and keeps getting signed state until keyroster host
 // forget, so host approve can never pick its identity (03-08 carry-over
-// a, owner decision 2026-10-28). Before it answers, it records the
-// confirmation of each served agent with a removal version and none
-// recorded, from its stored heartbeat (confirmRemoval, 03-08b): that
-// catches the rows from before migration 0007 and the recordings a
-// heartbeat skipped while the signer was unreachable. A signer error
-// there is logged and skipped. The policy must set pop.hosts (409
-// host_pop_not_enabled).
+// a, owner decision 2026-10-28). Before it answers, it brings the
+// recorded confirmation of each served agent with a removal version in
+// step with its stored heartbeat (reconcileRemoval, 03-08b): it records
+// one the rule confirms, which catches the rows from before migration
+// 0007 and the recordings a heartbeat skipped while the signer was
+// unreachable, and clears one whose heartbeat shows principals again
+// (owner decision D-R1). A signer error there is logged and skipped. The
+// policy must set pop.hosts (409 host_pop_not_enabled).
 func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	v, err := s.currentStatus(ctx)
@@ -139,9 +141,9 @@ func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 			out.Hosts = append(out.Hosts, p)
 			continue
 		}
-		if hb, ok := hbs[a.ID]; ok && a.RemovedDirVersion != 0 && a.RemovalConfirmedVersion == 0 {
+		if hb, ok := hbs[a.ID]; ok && a.RemovedDirVersion != 0 {
 			if h, err := heartbeat.ParseHeartbeat(hb.Body); err == nil {
-				if _, err := s.confirmRemoval(ctx, dv, &a, h.Status.Directory); err != nil {
+				if err := s.reconcileRemoval(ctx, dv, &a, hb.Seq, &h.Status); err != nil {
 					s.log.Warn("removal confirmation skipped", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "err", err)
 				}
 			}
@@ -299,28 +301,95 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 	}}})
 }
 
+// Host statuses an apply reports when it installed no principals of the
+// host's own (apply.HostRemoved, apply.HostDisabled; owner decision
+// 2026-10-26).
+const (
+	hostStatusRemoved  = "host_removed"
+	hostStatusDisabled = "host_disabled"
+)
+
+// principalsShown reports whether st, a host's status, shows that the
+// host has certificate principals in force (owner decision D-R1, PR #74
+// review fix round 1): its committed generation lists a principals/ file,
+// or its file list is cut short so that it cannot be told, or its last
+// apply succeeded and rendered an active entry under its current host
+// keys (host_status empty). host_keys_rotated and host_keys_disagree keep
+// last-good's principals files, which the file list shows; a refused or
+// failed apply changed no file.
+func principalsShown(st *heartbeat.Status) bool {
+	if st.FilesTruncated || slices.ContainsFunc(st.Files, func(f heartbeat.File) bool { return strings.HasPrefix(f.Path, "principals/") }) {
+		return true
+	}
+	la := st.LastApply
+	return la != nil && la.Result == heartbeat.ResultOK && !la.Rollback && la.HostStatus == ""
+}
+
+// principalsEmptied reports whether st shows that the apply which
+// committed its directory emptied the host's principals (owner decision
+// D-R1): the last apply succeeded without a rollback, reported
+// host_removed or host_disabled, no swap is pending (the committed
+// generation is then that apply's), and no principals are shown.
+func principalsEmptied(st *heartbeat.Status) bool {
+	la := st.LastApply
+	return la != nil && la.Result == heartbeat.ResultOK && !la.Rollback && st.Pending == nil &&
+		(la.HostStatus == hostStatusRemoved || la.HostStatus == hostStatusDisabled) && !principalsShown(st)
+}
+
+// reconcileRemoval brings agent a's recorded removal confirmation in step
+// with st, its host's stored status with seq seq (03-08b; owner decision
+// D-R1): when st shows principals again (principalsShown) a recorded
+// confirmation is cleared, so the host's forget needs --host-gone again
+// (the host resumed service, PR #74 review finding 0); otherwise
+// confirmRemoval may record one. Both writes hold only while the stored
+// heartbeat is still the one with seq. It updates a, and an error is the
+// caller's to log and skip.
+func (s *Server) reconcileRemoval(ctx context.Context, dv *directoryView, a *serverdb.Agent, seq int64, st *heartbeat.Status) error {
+	if !principalsShown(st) {
+		_, err := s.confirmRemoval(ctx, dv, a, seq, st)
+		return err
+	}
+	if a.RemovedDirVersion == 0 && a.RemovalConfirmedVersion == 0 {
+		return nil
+	}
+	cleared, err := s.db.ClearRemovalConfirmed(ctx, a.Key(), seq)
+	if err != nil || !cleared {
+		return err
+	}
+	s.log.Warn("agent removal confirmation cleared: its host reports principals again", "expected_name", a.ExpectedName,
+		"agent", agentFingerprint(a.IdentitySPKISHA256), "removal_version", a.RemovedDirVersion, "removal_confirmed_version", a.RemovalConfirmedVersion,
+		"directory_version", st.Directory.Version)
+	a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, nil
+	return nil
+}
+
 // confirmRemoval records the confirmation of agent a's removal (03-08b,
-// PR #72 fix-round carry-over b) from reported, the directory its host's
-// stored heartbeat says it committed. It records only when a was
+// PR #72 fix-round carry-over b) from st, its host's stored status with
+// seq seq, which says what the host committed. It records only when a was
 // approved once, has a removal version R and no confirmation yet, and all
 // of these hold:
-//   - R <= reported.Version <= the current version;
-//   - reported.SHA256 is the SHA-256 of the server's directory document
-//     at that version, without its signatures (the current one, or the
-//     signer's GetDirectoryVersion for an older one): the bytes the agent
-//     hashes (apply/status.go) and a directory_install leaf records;
-//   - in that directory, not the current one, no entry holds any of a's
-//     host keys and no active entry carries its expected name (hostState
-//     is removed). A host that reached a re-add of its name without
-//     applying its removal (host_keys_rotated, last-good principals kept)
-//     therefore never confirms it.
+//   - the host's own report shows that the apply which committed its
+//     directory emptied its principals (principalsEmptied; owner decision
+//     D-R1, PR #74 review findings 7 and 10): a host that renders an
+//     active entry, or keeps last-good's principals (host_keys_rotated),
+//     never confirms;
+//   - R <= V <= the current version, V the reported directory version;
+//   - the reported SHA-256 is that of the server's directory document at
+//     V, without its signatures (the current one, or the signer's
+//     GetDirectoryVersion for an older one): the bytes the agent hashes
+//     (apply/status.go) and a directory_install leaf records;
+//   - in directory V, not the current one, no entry holds any of a's host
+//     keys and no active entry carries its expected name (hostState is
+//     removed).
 //
-// It reports whether it recorded, and updates a when it did. A signer
-// that cannot answer is an error, which the caller logs and skips; the
-// next heartbeat or keyroster host pending runs the rule again.
-func (s *Server) confirmRemoval(ctx context.Context, dv *directoryView, a *serverdb.Agent, reported heartbeat.Doc) (bool, error) {
-	removal := a.RemovedDirVersion
-	if a.ApprovedAtUS == 0 || removal == 0 || a.RemovalConfirmedVersion != 0 || reported.Version < removal || reported.Version > dv.version {
+// The report is the host's word: a fetcher that lies about it gets a
+// confirmation recorded (T-03-284, accepted residual). It reports whether
+// it recorded, and updates a when it did. A signer that cannot answer is
+// an error, which the caller logs and skips; the next heartbeat or
+// keyroster host pending runs the rule again.
+func (s *Server) confirmRemoval(ctx context.Context, dv *directoryView, a *serverdb.Agent, seq int64, st *heartbeat.Status) (bool, error) {
+	removal, reported := a.RemovedDirVersion, st.Directory
+	if a.ApprovedAtUS == 0 || removal == 0 || a.RemovalConfirmedVersion != 0 || reported.Version < removal || reported.Version > dv.version || !principalsEmptied(st) {
 		return false, nil
 	}
 	view, doc := dv, dv.doc
@@ -347,7 +416,7 @@ func (s *Server) confirmRemoval(ctx context.Context, dv *directoryView, a *serve
 		return false, nil
 	}
 	sum := sha256.Sum256(doc)
-	recorded, err := s.db.RecordRemovalConfirmed(ctx, a.Key(), removal, reported.Version, sum[:])
+	recorded, err := s.db.RecordRemovalConfirmed(ctx, a.Key(), seq, removal, reported.Version, sum[:])
 	if err != nil || !recorded {
 		return false, err
 	}

@@ -376,25 +376,56 @@ AND removal_confirmed_version IS ? AND removal_confirmed_sha256 IS ? AND (approv
 
 // RecordRemovalConfirmed records {version, sha256} (sha256 raw, 32 bytes)
 // as the confirmation of the removal at removedVersion of the agents row k
-// (03-08b), only while that removal version is still the recorded one and
-// no confirmation is: a removal cleared or re-recorded since the caller
-// read the row records nothing, and the next heartbeat or host pending
-// runs the rule again. It reports whether it recorded; ErrNotFound when no
-// row matches k.
-func (d *DB) RecordRemovalConfirmed(ctx context.Context, k AgentKey, removedVersion, version uint64, sha256 []byte) (bool, error) {
-	if removedVersion == 0 || version < removedVersion || version > math.MaxInt64 || len(sha256) != 32 {
+// (03-08b), decided from the row's stored heartbeat with seq hbSeq. It
+// records only while that removal version is still the recorded one, no
+// confirmation is, and the stored heartbeat is still the one with hbSeq:
+// a removal cleared or re-recorded since the caller read the row, or a
+// newer heartbeat stored meanwhile (which may show principals again,
+// owner decision D-R1), records nothing, and the next heartbeat or host
+// pending runs the rule again. It reports whether it recorded;
+// ErrNotFound when no row matches k.
+func (d *DB) RecordRemovalConfirmed(ctx context.Context, k AgentKey, hbSeq int64, removedVersion, version uint64, sha256 []byte) (bool, error) {
+	if removedVersion == 0 || version < removedVersion || version > math.MaxInt64 || len(sha256) != 32 || hbSeq < 1 {
 		return false, errors.New("serverdb: incomplete removal confirmation")
 	}
 	res, err := d.db.ExecContext(ctx, `UPDATE agents SET removal_confirmed_version = ?, removal_confirmed_sha256 = ?
-WHERE `+agentKeyWhere+` AND removed_dir_version = ? AND removal_confirmed_version IS NULL`,
-		append(keyArgs(k, int64(version), sha256), int64(removedVersion))...) //nolint:gosec // G115: removedVersion <= version <= MaxInt64, checked above
+WHERE `+agentKeyWhere+` AND removed_dir_version = ? AND removal_confirmed_version IS NULL AND `+storedSeqIs,
+		append(keyArgs(k, int64(version), sha256), int64(removedVersion), hbSeq)...) //nolint:gosec // G115: removedVersion <= version <= MaxInt64, checked above
 	if err != nil {
 		return false, fmt.Errorf("serverdb: record removal confirmation: %w", err)
 	}
+	return changedOrExists(ctx, d.db, res, k)
+}
+
+// storedSeqIs is the condition that the agents row's stored heartbeat has
+// the seq it binds (a decision made from that heartbeat still stands).
+const storedSeqIs = `(SELECT seq FROM heartbeats WHERE agent_id = agents.id) = ?`
+
+// ClearRemovalConfirmed clears the recorded removal confirmation of the
+// agents row k (owner decision D-R1, PR #74 review fix round 1), decided
+// from the row's stored heartbeat with seq hbSeq, which shows principals
+// again: the host resumed service, so its forget needs --host-gone again
+// until a later heartbeat confirms a removal anew. The removal version
+// stays. It clears only while a confirmation is recorded and the stored
+// heartbeat is still the one with hbSeq, and reports whether it cleared;
+// ErrNotFound when no row matches k.
+func (d *DB) ClearRemovalConfirmed(ctx context.Context, k AgentKey, hbSeq int64) (bool, error) {
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET removal_confirmed_version = NULL, removal_confirmed_sha256 = NULL
+WHERE `+agentKeyWhere+` AND removal_confirmed_version IS NOT NULL AND `+storedSeqIs, append(k.args(), hbSeq)...)
+	if err != nil {
+		return false, fmt.Errorf("serverdb: clear removal confirmation: %w", err)
+	}
+	return changedOrExists(ctx, d.db, res, k)
+}
+
+// changedOrExists reports whether res changed the agents row k: true when
+// it did, false when it did not and the row exists, ErrNotFound when no
+// row matches k.
+func changedOrExists(ctx context.Context, q rowQueryer, res sql.Result, k AgentKey) (bool, error) {
 	if err := oneRow(res); !errors.Is(err, ErrNotFound) {
 		return err == nil, err
 	}
-	if err := agentExists(ctx, d.db, k); err != nil {
+	if err := agentExists(ctx, q, k); err != nil {
 		return false, err
 	}
 	return false, nil

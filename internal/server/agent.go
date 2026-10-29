@@ -192,7 +192,11 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		// removal nor clears one: the applier keeps last-good's principals
 		// for it (host_keys_rotated, PR #72 review C14), and a removal the
 		// host confirmed before stays confirmed (PR #72 fix-round
-		// carry-over b).
+		// carry-over b) until the host's own heartbeat shows principals
+		// again (reconcileRemoval, owner decision D-R1). A removal recorded
+		// here is confirmed only by the host's report that it emptied its
+		// principals, so a renamed entry re-keyed under its new name
+		// (PR #74 review finding 7) never confirms one.
 		//
 		// Every write names the agent's row ID, identity and join token
 		// (serverdb.AgentKey): when the row went after the lookup
@@ -781,10 +785,12 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 		s.log.Error("store heartbeat", "err", err)
 		s.writeJSON(w, ar.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 	default:
-		// 03-08b: a stored heartbeat may confirm the agent's removal. A
-		// signer error is logged and skipped, and the answer never depends
-		// on it; keyroster host pending runs the rule again.
-		if _, err := s.confirmRemoval(ctx, ar.dir, ar.agent, h.Status.Directory); err != nil {
+		// 03-08b: a stored heartbeat may confirm the agent's removal, or
+		// clear a recorded confirmation when it shows principals again
+		// (owner decision D-R1). A signer error is logged and skipped, and
+		// the answer never depends on it; keyroster host pending runs the
+		// rule again.
+		if err := s.reconcileRemoval(ctx, ar.dir, ar.agent, int64(h.Status.Seq), &h.Status); err != nil { //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
 			s.log.Warn("removal confirmation skipped", "expected_name", ar.agent.ExpectedName, "agent", fp, "err", err)
 		}
 		s.writeJSON(w, ar.status, http.StatusOK, serverclient.HeartbeatAnswer{Seq: h.Status.Seq})

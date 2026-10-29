@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Labontese/keyroster/internal/serverclient"
 )
 
 // forgetWait is the deadline of every wait of the forget e2e tests:
@@ -74,6 +76,29 @@ func TestAgentReenrollEndToEnd(t *testing.T) {
 	// 3. Agent B: a new host layout, with new host keys and a new
 	// identity, enrolls under web1 and is approved.
 	b := joinApproved(t, env, kr, "web1")
+	// A must have applied B's directory before the check below means
+	// anything: it then reports host_keys_rotated with last-good's
+	// principals, which are none, so it stays confirmed (owner decision
+	// D-R1 clears a confirmation only when principals are shown again).
+	var aRow serverclient.HostStatusRow
+	for deadline := time.Now().Add(forgetWait); ; time.Sleep(2 * time.Second) {
+		st := hostsStatusJSON(t, kr)
+		found := false
+		for _, r := range st.Hosts {
+			if r.ExpectedName == "web1" && r.State == serverclient.HostStateKeysChanged && r.Heartbeat != nil {
+				aRow, found = r, true
+			}
+		}
+		if found && aRow.Heartbeat.Status.Directory.Version >= st.Current.Directory {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A never reported B's directory v%d within %s; last row %+v\nA's fetch log:\n%s", st.Current.Directory, forgetWait, aRow, a.fetch.String())
+		}
+	}
+	if la := aRow.Heartbeat.Status.LastApply; la != nil {
+		t.Logf("A after B's approval: directory v%d, last apply %s, host_status %q, %d files", aRow.Heartbeat.Status.Directory.Version, la.Result, la.HostStatus, len(aRow.Heartbeat.Status.Files))
+	}
 	pending = kr("host", "pending")
 	m := servedAgentRE.FindStringSubmatch(pending)
 	if m == nil || m[1] != idA || !strings.Contains(pending, "Host web1: host_keys_changed, served until forget (agent identity "+idA+")") ||

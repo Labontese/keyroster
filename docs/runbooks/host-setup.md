@@ -933,10 +933,22 @@ until forget`), never as waiting for approval; so does `keyroster host
 pending`. A re-keyed host is one whose active entry under its name now
 holds other host keys than the agent enrolled with, whether the host's keys
 were changed or another agent was enrolled and approved under the name: it
-shows `host_keys_changed, served until forget`. Its applier keeps the last
-good principals files (`host_keys_rotated`), so the server records no
-removal for it; a removal the host confirmed before the name was used again
-stays confirmed (03-08b). Convergence is the server's report of what each host said: run
+shows `host_keys_changed, served until forget`, and the server records no
+removal for it. What the host then installs depends on its current sshd
+host keys, not on the keys the agent enrolled with:
+
+- when an active entry, under any name, holds the host's current keys
+  (the host was re-keyed and its entry re-added with the new keys), its
+  applier renders that entry normally, with that entry's principals;
+- when no entry holds its current keys and its last entry's name is still
+  active (another agent was approved under the name), its applier keeps
+  the last good principals files (`host_keys_rotated`): none after an
+  applied removal, the old ones otherwise.
+
+A removal the host confirmed before the name was used again stays
+confirmed until the host's own heartbeat shows principals again (owner
+decision D-R1, 03-08b; see [Removing a host](#removing-a-host), step 2).
+Convergence is the server's report of what each host said: run
 `keyroster-agent check` on a host to see it there. The CLI refuses an
 answer whose fields do not check out, and prints nothing outside printable
 ASCII. (Run in CI: `TestHostStatus`, `TestHeartbeat`,
@@ -978,7 +990,9 @@ In both orders the forget needs no `--host-gone` when the old agent
 confirmed its removal before the name was used again, and does need it
 when the old agent never applied the removal (a host that reached the
 re-added name without the removal keeps its last good principals and
-never confirms it; `TestRemovalConfirmation`).
+never confirms it; `TestRemovalConfirmation`). A confirmed old agent whose
+host shows principals again loses its confirmation, and its forget then
+needs `--host-gone` (owner decision D-R1).
 
 **What host status rests on** (owner decision D-R4, PR #72 review). Each
 row is the host's own report, and the unprivileged fetcher posts it: it
@@ -1171,16 +1185,33 @@ enrolled host can (D-03); that is the leak this order accepts.
 
    The server records the removal version when it first serves the agent a
    directory in which no entry holds its keys and no active entry carries
-   its name. It records the confirmation once, from the host's own
-   heartbeat, when the directory the host reports committing is one the
-   server served and that removes the host: at or above the removal
-   version, not above the current version, with the SHA-256 of the
-   server's directory document under that number, and naming the host
-   nowhere (03-08b). A heartbeat that the server stored while the signer
-   could not answer for an older version is checked again by `keyroster
-   host pending`. The confirmation stays recorded when the name is used
-   again (a re-keyed entry, or another agent approved under it); only an
-   entry that holds the agent's keys again clears it, with the removal.
+   its name. It records the confirmation from the host's own heartbeat,
+   and only when both of these hold (03-08b, owner decision D-R1):
+   - the host reports that the apply which committed its directory
+     emptied its principals: `last_apply` is `ok` with `host_status`
+     `host_removed` or `host_disabled`, no swap is pending, and its
+     generation lists no `principals/` file;
+   - the directory it reports committing is one the server served and
+     that removes the host: at or above the removal version, not above
+     the current version, with the SHA-256 of the server's directory
+     document under that number, and naming the host nowhere.
+
+   A heartbeat that the server stored while the signer could not answer
+   for an older version is checked again by `keyroster host pending`. The
+   confirmation stays recorded when the name is used again (a re-keyed
+   entry, or another agent approved under it) as long as the host shows no
+   principals. It is cleared, and the forget needs `--host-gone` again,
+   when a later heartbeat of the same agent shows principals again: a
+   `principals/` file, or an apply that rendered an active entry
+   (`host_status` empty), for example after the host was re-keyed and
+   re-added under an entry with its new keys. The server logs `agent
+   removal confirmation cleared` at warning level. An entry that holds
+   the agent's keys again clears both the confirmation and the removal.
+
+   The confirmation is the host's word: the unprivileged fetcher composes
+   the heartbeat, so a fetcher that lies about what was applied gets a
+   confirmation recorded (accepted residual, threat row T-03-284; see
+   [What host status rests on](#running-the-agent)).
 
    A row whose removal an older server (03-08) cleared, or whose latest
    stored heartbeat reports a directory that names it again, is not
