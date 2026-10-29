@@ -618,7 +618,42 @@ func (d *DB) RecordClockOffset(ctx context.Context, k AgentKey, offsetS int64) e
 
 // Heartbeats returns every stored heartbeat, by agent ID.
 func (d *DB) Heartbeats(ctx context.Context) (map[int64]Heartbeat, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT agent_id, seq, body, received_at_us FROM heartbeats`)
+	return heartbeats(ctx, d.db)
+}
+
+// AgentsAndHeartbeats is ListAgents and Heartbeats read in one
+// transaction, so an agent's row and its stored heartbeat are from the
+// same moment: a request that marks the agent approved and stores its
+// first heartbeat meanwhile (requireAgent, then StoreHeartbeat) is seen
+// whole or not at all (PR #74 pre-merge review fix round 2), and a
+// heartbeat is never paired with another agent's row under a reused ID.
+// The transaction holds the only connection, so nothing in it may use
+// d.db.
+func (d *DB) AgentsAndHeartbeats(ctx context.Context) ([]Agent, map[int64]Heartbeat, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("serverdb: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	agents, err := listAgents(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if d.afterListAgents != nil {
+		d.afterListAgents()
+	}
+	hbs, err := heartbeats(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("serverdb: commit: %w", err)
+	}
+	return agents, hbs, nil
+}
+
+func heartbeats(ctx context.Context, q queryer) (map[int64]Heartbeat, error) {
+	rows, err := q.QueryContext(ctx, `SELECT agent_id, seq, body, received_at_us FROM heartbeats`)
 	if err != nil {
 		return nil, fmt.Errorf("serverdb: heartbeats: %w", err)
 	}

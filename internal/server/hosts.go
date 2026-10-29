@@ -505,15 +505,12 @@ func (s *Server) handleHostsStatus(w http.ResponseWriter, r *http.Request) {
 		s.signerUnavailable(w, false)
 		return
 	}
-	agents, err := s.db.ListAgents(ctx)
+	// One read: an agent's first request lands between two separate
+	// reads as approved_at_us unset with a heartbeat stored, a row the CLI
+	// refuses (not_yet_polled with a heartbeat).
+	agents, hbs, err := s.db.AgentsAndHeartbeats(ctx)
 	if err != nil {
-		s.log.Error("list agents", "err", err)
-		s.writeJSON(w, v, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
-		return
-	}
-	hbs, err := s.db.Heartbeats(ctx)
-	if err != nil {
-		s.log.Error("heartbeats", "err", err)
+		s.log.Error("list agents and heartbeats", "err", err)
 		s.writeJSON(w, v, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 		return
 	}

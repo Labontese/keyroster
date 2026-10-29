@@ -966,3 +966,61 @@ func TestRemovalConfirmation(t *testing.T) {
 		}
 	})
 }
+
+// TestAgentsAndHeartbeatsOneRead is PR #74 pre-merge review fix round 2,
+// fix 2: host status reads the agents and their heartbeats as one
+// snapshot. A request that marks the agent approved and stores its first
+// heartbeat while the read runs (between the two reads, the hook) is seen
+// whole or not at all: never a row with approved_at_us unset next to a
+// stored heartbeat, which keyroster host status refuses.
+func TestAgentsAndHeartbeatsOneRead(t *testing.T) {
+	ctx := context.Background()
+	d, _ := openTemp(t)
+	a := enrollTestAgent(t, d, 0x0a, "web1", "key-a", tNow.UnixMicro())
+	written := make(chan error, 1)
+	ran := false
+	d.afterListAgents = func() {
+		ran = true
+		waits := d.db.Stats().WaitCount
+		go func() {
+			if err := d.MarkAgentApproved(ctx, a.Key(), tNow.UnixMicro()); err != nil {
+				written <- err
+				return
+			}
+			_, err := d.StoreHeartbeat(ctx, a.Key(), 1, []byte("{}"), 0, tNow.UnixMicro())
+			written <- err
+		}()
+		deadline := time.Now().Add(10 * time.Second)
+		for len(written) == 0 && d.db.Stats().WaitCount == waits {
+			if time.Now().After(deadline) {
+				t.Error("the write neither committed nor waited for the connection")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	agents, hbs, err := d.AgentsAndHeartbeats(ctx)
+	d.afterListAgents = nil
+	if err != nil || !ran {
+		t.Fatalf("AgentsAndHeartbeats = %v (hook ran: %v)", err, ran)
+	}
+	if err := <-written; err != nil {
+		t.Fatalf("the request during the read = %v", err)
+	}
+	check := func(what string, agents []Agent, hbs map[int64]Heartbeat, approved bool) {
+		t.Helper()
+		if len(agents) != 1 {
+			t.Fatalf("%s: %d agents, want 1", what, len(agents))
+		}
+		_, hasHB := hbs[a.ID]
+		if (agents[0].ApprovedAtUS != 0) != approved || hasHB != approved {
+			t.Fatalf("%s: approved_at_us %d, heartbeat stored %v; want approved and a heartbeat both %v", what, agents[0].ApprovedAtUS, hasHB, approved)
+		}
+	}
+	check("read during the request", agents, hbs, false)
+	agents, hbs, err = d.AgentsAndHeartbeats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("read after the request", agents, hbs, true)
+}
