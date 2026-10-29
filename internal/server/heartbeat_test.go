@@ -474,6 +474,31 @@ func TestServedHostsNeverPending(t *testing.T) {
 			}
 		})
 	}
+	t.Run("approved_not_yet_polled_in_status", func(t *testing.T) {
+		// Owner decision D-R2 (PR #74 review findings 1 and 3): an agent
+		// the directory approves now that has not polled since is in
+		// neither host pending (it is approved) nor, before, host status;
+		// host status lists it, marked not yet polled, so a forget by
+		// name sees it.
+		e := newAgentEnv(t, true)
+		id, hosts := newAgentID(t), hostSigners(t, 1)
+		e.enroll(t, id, e.mustMint(t, "web1", 0).Token, hosts)
+		e.installDir(t, hostEntry("web1", hosts))
+		if ans := pending(t, e); len(ans.Hosts) != 0 || len(ans.Served) != 0 {
+			t.Fatalf("host pending lists an approved agent: %+v", ans)
+		}
+		st := e.hostsStatus(t)
+		if len(st.Hosts) != 1 || !st.Hosts[0].NotYetPolled || st.Hosts[0].State != serverclient.HostStateActive || st.Hosts[0].Name != "web1" ||
+			st.Hosts[0].ExpectedName != "web1" || st.Hosts[0].IdentitySPKISHA256 != hex.EncodeToString(id.spki) || st.Hosts[0].Heartbeat != nil {
+			t.Fatalf("hosts/status of an approved agent that has not polled: %+v", st.Hosts)
+		}
+		if c := e.state(t, id); c != http.StatusOK {
+			t.Fatalf("the first state: %d", c)
+		}
+		if st := e.hostsStatus(t); len(st.Hosts) != 1 || st.Hosts[0].NotYetPolled {
+			t.Fatalf("hosts/status after the first state: %+v", st.Hosts)
+		}
+	})
 	t.Run("never_polled_is_still_pending", func(t *testing.T) {
 		e := newAgentEnv(t, true)
 		id, hosts := newAgentID(t), hostSigners(t, 1)

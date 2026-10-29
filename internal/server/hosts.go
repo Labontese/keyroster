@@ -479,7 +479,11 @@ const (
 // clock offset with clock_skew (|clock_offset_s| > 300) and seq_regressed
 // (owner decision D-R2). A removed,
 // disabled or re-keyed agent that is still served shows its state, never
-// as waiting for approval (03-08 carry-over a). Convergence is the
+// as waiting for approval (03-08 carry-over a). An agent the current
+// directory approves that has not got state since (approved_at_us unset)
+// is listed too, marked not_yet_polled (03-08b owner decision D-R2), so
+// keyroster host forget's name resolution sees every agent with a name;
+// host pending lists it in neither of its lists. Convergence is the
 // server's report, the host's own word through its heartbeat; the CLI
 // says so and points to keyroster-agent check on the host.
 func (s *Server) handleHostsStatus(w http.ResponseWriter, r *http.Request) {
@@ -525,15 +529,16 @@ func (s *Server) handleHostsStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.clock()
 	for _, a := range agents {
-		if a.ApprovedAtUS == 0 {
-			continue
+		notPolled := a.ApprovedAtUS == 0
+		if notPolled && !approved(dv, a.HostKeys) {
+			continue // pending: keyroster host pending's
 		}
 		name, st := hostState(dv, a.HostKeys, a.ExpectedName)
 		if name == "" {
 			name = a.ExpectedName
 		}
 		row := serverclient.HostStatusRow{Name: name, ExpectedName: a.ExpectedName, IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256),
-			State: st, Silent: true, NeverApplied: true, IdentityRotations: a.IdentityRotations}
+			State: st, Silent: true, NeverApplied: true, NotYetPolled: notPolled, IdentityRotations: a.IdentityRotations}
 		if a.IdentityRotatedAtUS != 0 {
 			row.IdentityRotatedAt = time.UnixMicro(a.IdentityRotatedAtUS).UTC().Format(time.RFC3339)
 		}

@@ -42,6 +42,15 @@ func enrollApproved(t *testing.T, env *serverEnv, kr func(args ...string) string
 // first apply. Host group lab must exist.
 func joinApproved(t *testing.T, env *serverEnv, kr func(args ...string) string, name string) *enrolledHost {
 	t.Helper()
+	return joinApprovedHeld(t, env, kr, name, nil)
+}
+
+// joinApprovedHeld is joinApproved; with held set, the new host's fetcher
+// is stopped before the approval and started again after held ran, so
+// held sees the agent approved but not yet polled (03-08b owner decision
+// D-R2).
+func joinApprovedHeld(t *testing.T, env *serverEnv, kr func(args ...string) string, name string, held func()) *enrolledHost {
+	t.Helper()
 	login := currentUser(t)
 	joinFile := filepath.Join(t.TempDir(), "join.txt")
 	kr("host", "join-token", name, "--out", joinFile)
@@ -67,7 +76,14 @@ func joinApproved(t *testing.T, env *serverEnv, kr func(args ...string) string, 
 			args = append(args, "--host-key", strings.Fields(fp)[0])
 		}
 	}
+	if held != nil {
+		eh.stopFetch(t)
+	}
 	kr(args...)
+	if held != nil {
+		held()
+		eh.startFetch(t)
+	}
 	waitFor(t, "the first apply", eh.runDone, eh.run, func() bool {
 		r := h.lastApply(t)
 		return r != nil && r.Generation > 0 && r.SelfTest == "pass" && len(r.Errors) == 0

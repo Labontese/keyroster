@@ -121,6 +121,28 @@ func TestHostStatus(t *testing.T) {
 			t.Fatalf("an unknown state: exit %d: %s", code, stderr)
 		}
 	})
+	t.Run("approved_not_yet_polled", func(t *testing.T) {
+		// Owner decision D-R2 (03-08b fix round 1): an agent the directory
+		// approves that has not polled yet.
+		r := statusRow("web7", serverclient.HostStateActive, nil)
+		r.Silent, r.NeverApplied, r.NotYetPolled = true, true, true
+		statusEnv(t, serverclient.HostsStatusAnswer{Current: ans.Current, Hosts: []serverclient.HostStatusRow{r}})
+		code, out, stderr := run(t, "host", "status")
+		if code != 0 || !strings.Contains(out, "approved, not yet polled") {
+			t.Fatalf("an approved agent that has not polled: exit %d: %s%s", code, out, stderr)
+		}
+		for _, bad := range []func(r *serverclient.HostStatusRow){
+			func(r *serverclient.HostStatusRow) { r.State = serverclient.HostStateRemoved },
+			func(r *serverclient.HostStatusRow) { r.Heartbeat = &heartbeat.Heartbeat{Status: hbStatus(5, 100)} },
+		} {
+			b := r
+			bad(&b)
+			statusEnv(t, serverclient.HostsStatusAnswer{Current: ans.Current, Hosts: []serverclient.HostStatusRow{b}})
+			if code, _, stderr := run(t, "host", "status"); code == 0 || !strings.Contains(stderr, "does not check out") {
+				t.Fatalf("a not-yet-polled row that is not active without a heartbeat (%+v): exit %d: %s", b, code, stderr)
+			}
+		}
+	})
 	t.Run("no_hosts", func(t *testing.T) {
 		statusEnv(t, serverclient.HostsStatusAnswer{Current: ans.Current, Hosts: []serverclient.HostStatusRow{}})
 		code, out, _ := run(t, "host", "status")

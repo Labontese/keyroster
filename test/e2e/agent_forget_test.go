@@ -75,7 +75,16 @@ func TestAgentReenrollEndToEnd(t *testing.T) {
 
 	// 3. Agent B: a new host layout, with new host keys and a new
 	// identity, enrolls under web1 and is approved.
-	b := joinApproved(t, env, kr, "web1")
+	// Owner decision D-R2: while B is approved but has not polled yet,
+	// host status lists it and the name is already ambiguous.
+	b := joinApprovedHeld(t, env, kr, "web1", func() {
+		code, out, errOut := run("host", "forget", "web1")
+		if code == 0 || !strings.Contains(errOut, "forget_name_ambiguous") || !strings.Contains(errOut, "approved, not yet polled") ||
+			!strings.Contains(errOut, "keyroster host forget --identity "+idA) {
+			t.Fatalf("keyroster host forget web1 while B is approved but has not polled: exit %d:\n%s\n%s", code, out, errOut)
+		}
+		t.Logf("keyroster host forget web1 before B polled (refused):\n%s", errOut)
+	})
 	// A must have applied B's directory before the check below means
 	// anything: it then reports host_keys_rotated with last-good's
 	// principals, which are none, so it stays confirmed (owner decision

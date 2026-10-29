@@ -23,6 +23,10 @@ import (
 // server's report of what each host said (T-03-51).
 const statusFooter = "Reported by keyroster-server; run `keyroster-agent check` on a host to verify it there.\n"
 
+// notYetPolled is how the CLI shows an agent the directory approves that
+// has not polled since (03-08b owner decision D-R2).
+const notYetPolled = "approved, not yet polled"
+
 // recoveryCommand is what an operator runs on a host whose status says
 // stuck: pending_state_unknown (03-05).
 const recoveryCommand = "sudo keyroster-agent apply --once --recover-to-last-good"
@@ -59,6 +63,11 @@ func checkHostsStatus(a *serverclient.HostsStatusAnswer) error {
 			return errBadHostsStatus
 		}
 		if r.IdentityRotations < 0 || (r.IdentityRotations == 0) != (r.IdentityRotatedAt == "") {
+			return errBadHostsStatus
+		}
+		// Approved, not yet polled (03-08b owner decision D-R2): active in
+		// the directory, and no heartbeat yet.
+		if r.NotYetPolled && (r.State != serverclient.HostStateActive || r.Heartbeat != nil) {
 			return errBadHostsStatus
 		}
 		for _, ts := range []string{r.LastSeen, r.ReceivedAt, r.IdentityRotatedAt} {
@@ -180,7 +189,10 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 	var notes []string
 	for _, r := range a.Hosts {
 		entry := "active"
-		if r.State != serverclient.HostStateActive {
+		switch {
+		case r.NotYetPolled:
+			entry = notYetPolled
+		case r.State != serverclient.HostStateActive:
 			entry = servedLine(r.State)
 		}
 		seen, status := "never", "none"

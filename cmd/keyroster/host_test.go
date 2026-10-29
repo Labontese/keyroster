@@ -649,6 +649,22 @@ func TestHostForget(t *testing.T) {
 			t.Fatalf("a name an approved agent has too: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
 		}
 	})
+	t.Run("name_ambiguous_with_an_approved_not_polled_agent", func(t *testing.T) {
+		// Owner decision D-R2 (03-08b fix round 1): B was approved with
+		// keyroster host approve web1 and has not polled yet; host status
+		// lists it, marked not yet polled, and the name is ambiguous.
+		e := forgetEnv(t, nil, web1)
+		b := activeRow("web1", "22")
+		b.NotYetPolled = true
+		e.hostsStatus(t, b)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "forget_name_ambiguous") ||
+			!strings.Contains(stderr, "--identity "+identityOf("22")) || !strings.Contains(stderr, "approved, not yet polled") {
+			t.Fatalf("a name an approved agent that has not polled has too: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+	})
 	t.Run("by_identity", func(t *testing.T) {
 		e := forgetEnv(t, nil, web1, other)
 		e.hostsStatus(t, activeRow("web1", "22"))

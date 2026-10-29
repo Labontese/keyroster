@@ -930,7 +930,11 @@ writes the pending marker, so the row shows the swap during its widening
 wait too, which can last LoginGraceTime (PR #72 review). A host removed, disabled or re-keyed in the
 directory that is still served shows that on its own row (`removed, served
 until forget`), never as waiting for approval; so does `keyroster host
-pending`. A re-keyed host is one whose active entry under its name now
+pending`. An agent that `keyroster host approve` approved but that has
+not polled since shows `approved, not yet polled` (`not_yet_polled` in
+`--json`; owner decision D-R2, 03-08b; run in CI:
+`TestServedHostsNeverPending/approved_not_yet_polled_in_status`,
+`TestHostStatus/approved_not_yet_polled`). A re-keyed host is one whose active entry under its name now
 holds other host keys than the agent enrolled with, whether the host's keys
 were changed or another agent was enrolled and approved under the name: it
 shows `host_keys_changed, served until forget`, and the server records no
@@ -983,8 +987,10 @@ the order depends on what the new agent keeps:
      --identity <identity>`.
 
   The name alone is then refused as `forget_name_ambiguous`, since two
-  agents have it. Run in CI e2e (`TestAgentReenrollEndToEnd`, 03-08b);
-  on the homelab UNVERIFIED until 03-16.
+  agents have it, also while the new agent is approved but has not polled
+  yet (owner decision D-R2). Run in CI e2e (`TestAgentReenrollEndToEnd`,
+  03-08b, both before and after the new agent's first poll); on the
+  homelab UNVERIFIED until 03-16.
 
 In both orders the forget needs no `--host-gone` when the old agent
 confirmed its removal before the name was used again, and does need it
@@ -1230,7 +1236,8 @@ enrolled host can (D-03); that is the leak this order accepts.
    host](#running-the-agent)), the name is refused `forget_name_ambiguous`:
    the CLI lists each agent with its state and its `--identity` command and
    sends nothing. The CLI reads `keyroster host pending` (and `keyroster
-   host status`, for agents the directory approves now), prints the agent,
+   host status`, for agents the directory approves now, an agent approved
+   but not yet polled included), prints the agent,
    its state and its confirmation, and sends the identity with what it
    read: whether the agent was approved once, its removal version and its
    recorded confirmation. The server deletes that one agent only while all

@@ -529,7 +529,12 @@ func (v HostVersions) Docs() (bundle, directory, krl heartbeat.Doc) {
 //     decision D-R1): host status shows a rotation of the last 7 days;
 //   - SeqRegressed is set while the host is not silent and its heartbeats
 //     since the stored one carry a lower seq (heartbeat_seq_regressed,
-//     D-R2): its status is frozen at the stored one.
+//     D-R2): its status is frozen at the stored one;
+//   - NotYetPolled is set for an agent the current directory approves (an
+//     active entry holds exactly its host keys) that has not got signed
+//     state since (approved, not yet polled; 03-08b owner decision D-R2).
+//     Its State is HostStateActive, and it has no heartbeat yet. Omitted
+//     otherwise, so the other rows read as before.
 type HostStatusRow struct {
 	Name               string               `json:"name"`
 	ExpectedName       string               `json:"expected_name"`
@@ -545,6 +550,7 @@ type HostStatusRow struct {
 	IdentityRotatedAt  string               `json:"identity_rotated_at"`
 	IdentityRotations  int64                `json:"identity_rotations"`
 	NeverApplied       bool                 `json:"never_applied"`
+	NotYetPolled       bool                 `json:"not_yet_polled,omitempty"`
 	Heartbeat          *heartbeat.Heartbeat `json:"heartbeat"`
 }
 
