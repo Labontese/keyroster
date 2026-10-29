@@ -194,11 +194,12 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		// host confirmed before stays confirmed (PR #72 fix-round
 		// carry-over b).
 		//
-		// Every write names the agent's identity as well as its row ID:
-		// when the row went after the lookup (keyroster host forget) and
-		// another agent enrolled into the reused ID, the write finds no
-		// row, and the request is refused 403 unknown_agent (PR #72 review
-		// C1, fix-round carry-over a).
+		// Every write names the agent's row ID, identity and join token
+		// (serverdb.AgentKey): when the row went after the lookup
+		// (keyroster host forget) and another enrollment took the reused
+		// ID, the same identity's included, the write finds no row, and
+		// the request is refused 403 unknown_agent (PR #72 review C1,
+		// fix-round carry-over a; PR #74 review finding 8).
 		gone := func(err error, what string, fatal bool) bool {
 			switch {
 			case err == nil:
@@ -218,7 +219,7 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 			if a.RemovedDirVersion == 0 && a.RemovalConfirmedVersion == 0 {
 				return false
 			}
-			if gone(s.db.SetAgentRemovedVersion(ctx, a.ID, spki, 0), "agent removal version", false) {
+			if gone(s.db.SetAgentRemovedVersion(ctx, a.Key(), 0), "agent removal version", false) {
 				return true
 			}
 			a.RemovedDirVersion, a.RemovalConfirmedVersion, a.RemovalConfirmedSHA256 = 0, 0, nil
@@ -227,7 +228,7 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		switch {
 		case approved(dv, a.HostKeys):
 			if a.ApprovedAtUS == 0 {
-				if gone(s.db.MarkAgentApproved(ctx, a.ID, spki, s.clock().UnixMicro()), "agent approval", true) {
+				if gone(s.db.MarkAgentApproved(ctx, a.Key(), s.clock().UnixMicro()), "agent approval", true) {
 					return
 				}
 				s.log.Info("agent approved: first signed state", "expected_name", a.ExpectedName, "agent", agentFingerprint(spki))
@@ -245,12 +246,12 @@ func (s *Server) requireAgent(next func(http.ResponseWriter, *http.Request, *age
 		case rekeyed(dv, a.ExpectedName):
 			// Neither a removal nor a re-approval (03-08b).
 		case a.RemovedDirVersion == 0 && dv.version != 0:
-			if gone(s.db.SetAgentRemovedVersion(ctx, a.ID, spki, dv.version), "agent removal version", true) {
+			if gone(s.db.SetAgentRemovedVersion(ctx, a.Key(), dv.version), "agent removal version", true) {
 				return
 			}
 			a.RemovedDirVersion = dv.version
 		}
-		switch err := s.db.TouchAgent(ctx, a.ID, spki, s.clock().UnixMicro()); {
+		switch err := s.db.TouchAgent(ctx, a.Key(), s.clock().UnixMicro()); {
 		case errors.Is(err, serverdb.ErrNotFound):
 			s.writeJSON(w, dv.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrUnknown})
 			return
@@ -756,7 +757,7 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 	nowUS := s.clock().UnixMicro()
 	if limit := nowUS + heartbeat.MaxSeqAhead.Microseconds(); limit < 0 || h.Status.Seq > uint64(limit) {
 		// The offset is the host's clock, which is what is wrong (D-R2).
-		if err := s.db.RecordClockOffset(ctx, ar.agent.ID, ar.agent.IdentitySPKISHA256, h.ClockOffsetS); err != nil && !errors.Is(err, serverdb.ErrNotFound) {
+		if err := s.db.RecordClockOffset(ctx, ar.agent.Key(), h.ClockOffsetS); err != nil && !errors.Is(err, serverdb.ErrNotFound) {
 			s.log.Error("record clock offset", "err", err)
 		}
 		s.log.Warn("heartbeat refused", "agent", fp, "expected_name", ar.agent.ExpectedName, "reason", serverclient.AgentErrHeartbeatSeqFuture,
@@ -764,7 +765,7 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrHeartbeatSeqFuture})
 		return
 	}
-	logIt, err := s.db.StoreHeartbeat(ctx, ar.agent.ID, ar.agent.IdentitySPKISHA256, int64(h.Status.Seq), body, h.ClockOffsetS, nowUS) //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
+	logIt, err := s.db.StoreHeartbeat(ctx, ar.agent.Key(), int64(h.Status.Seq), body, h.ClockOffsetS, nowUS) //nolint:gosec // G115: at most math.MaxInt64 (heartbeat.Validate)
 	if logIt {
 		s.log.Warn("heartbeat refused", "agent", fp, "expected_name", ar.agent.ExpectedName, "reason", "heartbeat_seq_regressed",
 			"seq", h.Status.Seq, "detail", "the seq is below the stored one: the host's state was reset after its clock ran ahead; its status stays the stored one until its seq passes it")
@@ -820,7 +821,7 @@ func (s *Server) handleAgentIdentity(w http.ResponseWriter, r *http.Request, ar 
 	}
 	newSum := sha256.Sum256(req.NewSPKI)
 	now := s.clock()
-	err = s.db.RotateAgentIdentity(r.Context(), ar.agent.ID, ar.agent.IdentitySPKISHA256, newSum[:], now.UnixMicro())
+	err = s.db.RotateAgentIdentity(r.Context(), ar.agent.Key(), newSum[:], now.UnixMicro())
 	switch {
 	case errors.Is(err, serverdb.ErrRotationTooSoon):
 		wait := time.UnixMicro(ar.agent.IdentityRotatedAtUS).Add(serverdb.RotationEvery).Sub(now)

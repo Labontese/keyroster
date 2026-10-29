@@ -275,7 +275,7 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 	if s.beforeForgetDelete != nil {
 		s.beforeForgetDelete()
 	}
-	switch err := s.db.DeleteAgentIf(ctx, a.ID, a.IdentitySPKISHA256, facts); {
+	switch err := s.db.DeleteAgentIf(ctx, a.Key(), facts); {
 	case errors.Is(err, serverdb.ErrNotFound):
 		refuse(serverclient.AdminErrForgetStateChanged)
 		return
@@ -347,7 +347,7 @@ func (s *Server) confirmRemoval(ctx context.Context, dv *directoryView, a *serve
 		return false, nil
 	}
 	sum := sha256.Sum256(doc)
-	recorded, err := s.db.RecordRemovalConfirmed(ctx, a.ID, a.IdentitySPKISHA256, removal, reported.Version, sum[:])
+	recorded, err := s.db.RecordRemovalConfirmed(ctx, a.Key(), removal, reported.Version, sum[:])
 	if err != nil || !recorded {
 		return false, err
 	}

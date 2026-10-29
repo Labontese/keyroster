@@ -238,12 +238,38 @@ func (d *DB) AgentBySPKI(ctx context.Context, spki []byte) (*Agent, error) {
 	return scanAgent(rows)
 }
 
-// TouchAgent sets the last_seen_us of the agents row id with the identity
-// spki to nowUS. It is ErrNotFound when no row has both (03-08b): every
-// agents-row writer names the identity, so a request of a forgotten agent
-// never writes a row that reused its ID (PR #72 fix-round carry-over a).
-func (d *DB) TouchAgent(ctx context.Context, id int64, spki []byte, nowUS int64) error {
-	res, err := d.db.ExecContext(ctx, `UPDATE agents SET last_seen_us = ? WHERE id = ? AND identity_spki_sha256 = ?`, nowUS, id, spki)
+// AgentKey names one enrollment of an agents row: its row ID, its
+// identity SPKI hash and the SHA-256 of the join token that enrolled it.
+// Every agents-row writer matches all three (03-08b): SQLite reuses the
+// highest row ID, and the runbook's same-machine re-enrollment keeps the
+// identity, so only the token tells a new enrollment from a forgotten one
+// (PR #74 pre-merge review, finding 8). Each join token enrolls at most
+// one row, and an identity rotation keeps the token (RotateAgentIdentity
+// changes only the identity), so a request of a forgotten agent never
+// writes a row that reused its ID and its identity.
+type AgentKey struct {
+	ID          int64
+	SPKI        []byte
+	TokenSHA256 []byte
+}
+
+// Key is a's AgentKey.
+func (a *Agent) Key() AgentKey {
+	return AgentKey{ID: a.ID, SPKI: a.IdentitySPKISHA256, TokenSHA256: a.TokenSHA256}
+}
+
+// agentKeyWhere is the WHERE terms of an AgentKey, bound by its args.
+const agentKeyWhere = `id = ? AND identity_spki_sha256 = ? AND token_hash = ?`
+
+func (k AgentKey) args() []any { return []any{k.ID, k.SPKI, k.TokenSHA256} }
+
+// keyArgs is first, then k's arguments.
+func keyArgs(k AgentKey, first ...any) []any { return append(first, k.args()...) }
+
+// TouchAgent sets the last_seen_us of the agents row k to nowUS. It is
+// ErrNotFound when no row matches k (03-08b, AgentKey).
+func (d *DB) TouchAgent(ctx context.Context, k AgentKey, nowUS int64) error {
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET last_seen_us = ? WHERE `+agentKeyWhere, keyArgs(k, nowUS)...)
 	if err != nil {
 		return fmt.Errorf("serverdb: touch agent: %w", err)
 	}
@@ -251,11 +277,10 @@ func (d *DB) TouchAgent(ctx context.Context, id int64, spki []byte, nowUS int64)
 }
 
 // MarkAgentApproved records nowUS as the first approved state answer of
-// the agents row id with the identity spki; a later call keeps the first
-// time (PR #71 review D-R1). It is ErrNotFound when no row has both id
-// and spki (03-08b).
-func (d *DB) MarkAgentApproved(ctx context.Context, id int64, spki []byte, nowUS int64) error {
-	res, err := d.db.ExecContext(ctx, `UPDATE agents SET approved_at_us = ? WHERE id = ? AND identity_spki_sha256 = ? AND approved_at_us IS NULL`, nowUS, id, spki)
+// the agents row k; a later call keeps the first time (PR #71 review
+// D-R1). It is ErrNotFound when no row matches k (03-08b).
+func (d *DB) MarkAgentApproved(ctx context.Context, k AgentKey, nowUS int64) error {
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET approved_at_us = ? WHERE `+agentKeyWhere+` AND approved_at_us IS NULL`, keyArgs(k, nowUS)...)
 	if err != nil {
 		return fmt.Errorf("serverdb: mark agent approved: %w", err)
 	}
@@ -263,7 +288,7 @@ func (d *DB) MarkAgentApproved(ctx context.Context, id int64, spki []byte, nowUS
 		return err
 	}
 	// Nothing changed: the row is gone, or it was approved already.
-	return agentExists(ctx, d.db, id, spki)
+	return agentExists(ctx, d.db, k)
 }
 
 // ForgetFacts are what the admin saw of an agent in keyroster host
@@ -304,7 +329,8 @@ func nullBlob(b []byte) any {
 	return b
 }
 
-// DeleteAgentIf removes the agents row id with the identity spki, and its
+// DeleteAgentIf removes the agents row k (AgentKey: a re-enrollment of
+// the same identity into the reused row ID is another row), and its
 // heartbeat, which frees its identity and host keys for a new enrollment
 // (keyroster host forget; PR #71 review D-R1), but only while the row's
 // approval, removal version and recorded confirmation still equal facts
@@ -313,7 +339,7 @@ func nullBlob(b []byte) any {
 // when it deletes no row (the row is gone, its identity rotated, or a fact
 // changed after the caller checked it) nothing is deleted and the answer
 // is ErrNotFound. foreign_keys is off, so the heartbeat is deleted here.
-func (d *DB) DeleteAgentIf(ctx context.Context, id int64, spki []byte, facts ForgetFacts) error {
+func (d *DB) DeleteAgentIf(ctx context.Context, k AgentKey, facts ForgetFacts) error {
 	removal, err := nullVersion(facts.RemovalVersion)
 	if err != nil {
 		return err
@@ -330,12 +356,12 @@ func (d *DB) DeleteAgentIf(ctx context.Context, id int64, spki []byte, facts For
 		return fmt.Errorf("serverdb: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM heartbeats WHERE agent_id = ?`, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM heartbeats WHERE agent_id = ?`, k.ID); err != nil {
 		return fmt.Errorf("serverdb: delete heartbeat: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE id = ? AND identity_spki_sha256 = ? AND removed_dir_version IS ?
+	res, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE `+agentKeyWhere+` AND removed_dir_version IS ?
 AND removal_confirmed_version IS ? AND removal_confirmed_sha256 IS ? AND (approved_at_us IS NULL) = ?`,
-		id, spki, removal, confirmed, nullBlob(facts.ConfirmedSHA256), !facts.ApprovedOnce)
+		append(k.args(), removal, confirmed, nullBlob(facts.ConfirmedSHA256), !facts.ApprovedOnce)...)
 	if err != nil {
 		return fmt.Errorf("serverdb: delete agent: %w", err)
 	}
@@ -349,26 +375,26 @@ AND removal_confirmed_version IS ? AND removal_confirmed_sha256 IS ? AND (approv
 }
 
 // RecordRemovalConfirmed records {version, sha256} (sha256 raw, 32 bytes)
-// as the confirmation of the removal at removedVersion of the agents row
-// id with the identity spki (03-08b), only while that removal version is
-// still the recorded one and no confirmation is: a removal cleared or
-// re-recorded since the caller read the row records nothing, and the next
-// heartbeat or host pending runs the rule again. It reports whether it
-// recorded; ErrNotFound when no row has both id and spki.
-func (d *DB) RecordRemovalConfirmed(ctx context.Context, id int64, spki []byte, removedVersion, version uint64, sha256 []byte) (bool, error) {
+// as the confirmation of the removal at removedVersion of the agents row k
+// (03-08b), only while that removal version is still the recorded one and
+// no confirmation is: a removal cleared or re-recorded since the caller
+// read the row records nothing, and the next heartbeat or host pending
+// runs the rule again. It reports whether it recorded; ErrNotFound when no
+// row matches k.
+func (d *DB) RecordRemovalConfirmed(ctx context.Context, k AgentKey, removedVersion, version uint64, sha256 []byte) (bool, error) {
 	if removedVersion == 0 || version < removedVersion || version > math.MaxInt64 || len(sha256) != 32 {
 		return false, errors.New("serverdb: incomplete removal confirmation")
 	}
 	res, err := d.db.ExecContext(ctx, `UPDATE agents SET removal_confirmed_version = ?, removal_confirmed_sha256 = ?
-WHERE id = ? AND identity_spki_sha256 = ? AND removed_dir_version = ? AND removal_confirmed_version IS NULL`,
-		int64(version), sha256, id, spki, int64(removedVersion)) //nolint:gosec // G115: removedVersion <= version <= MaxInt64, checked above
+WHERE `+agentKeyWhere+` AND removed_dir_version = ? AND removal_confirmed_version IS NULL`,
+		append(keyArgs(k, int64(version), sha256), int64(removedVersion))...) //nolint:gosec // G115: removedVersion <= version <= MaxInt64, checked above
 	if err != nil {
 		return false, fmt.Errorf("serverdb: record removal confirmation: %w", err)
 	}
 	if err := oneRow(res); !errors.Is(err, ErrNotFound) {
 		return err == nil, err
 	}
-	if err := agentExists(ctx, d.db, id, spki); err != nil {
+	if err := agentExists(ctx, d.db, k); err != nil {
 		return false, err
 	}
 	return false, nil
@@ -379,11 +405,10 @@ type rowQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// agentExists is ErrNotFound unless the agents row id exists with the
-// identity spki.
-func agentExists(ctx context.Context, q rowQueryer, id int64, spki []byte) error {
+// agentExists is ErrNotFound unless the agents row k exists.
+func agentExists(ctx context.Context, q rowQueryer, k AgentKey) error {
 	var one int
-	err := q.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ? AND identity_spki_sha256 = ?`, id, spki).Scan(&one)
+	err := q.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE `+agentKeyWhere, k.args()...).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -394,12 +419,11 @@ func agentExists(ctx context.Context, q rowQueryer, id int64, spki []byte) error
 }
 
 // SetAgentRemovedVersion records version as the first directory version
-// that no longer approves the agents row id with the identity spki,
-// unless one is recorded already. A version of 0 clears it and its
-// recorded confirmation (a directory entry holds the agent's keys again).
-// It is ErrNotFound when no row has both id and spki (03-08b), so a
-// request of a forgotten agent never writes a row that reused its ID.
-func (d *DB) SetAgentRemovedVersion(ctx context.Context, id int64, spki []byte, version uint64) error {
+// that no longer approves the agents row k, unless one is recorded
+// already. A version of 0 clears it and its recorded confirmation (a
+// directory entry holds the agent's keys again). It is ErrNotFound when
+// no row matches k (03-08b, AgentKey).
+func (d *DB) SetAgentRemovedVersion(ctx context.Context, k AgentKey, version uint64) error {
 	if version > math.MaxInt64 {
 		return errors.New("serverdb: directory version above int64")
 	}
@@ -409,10 +433,10 @@ func (d *DB) SetAgentRemovedVersion(ctx context.Context, id int64, spki []byte, 
 	)
 	if version == 0 {
 		res, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = NULL, removal_confirmed_version = NULL, removal_confirmed_sha256 = NULL
-WHERE id = ? AND identity_spki_sha256 = ?`, id, spki)
+WHERE `+agentKeyWhere, k.args()...)
 	} else {
-		res, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = ? WHERE id = ? AND identity_spki_sha256 = ? AND removed_dir_version IS NULL`,
-			int64(version), id, spki) //nolint:gosec // G115: checked above
+		res, err = d.db.ExecContext(ctx, `UPDATE agents SET removed_dir_version = ? WHERE `+agentKeyWhere+` AND removed_dir_version IS NULL`,
+			keyArgs(k, int64(version))...) //nolint:gosec // G115: checked above
 	}
 	if err != nil {
 		return fmt.Errorf("serverdb: agent removal version: %w", err)
@@ -421,7 +445,7 @@ WHERE id = ? AND identity_spki_sha256 = ?`, id, spki)
 		return err
 	}
 	// Nothing changed: the row is gone, or a removal is recorded already.
-	return agentExists(ctx, d.db, id, spki)
+	return agentExists(ctx, d.db, k)
 }
 
 // RotationEvery is how often one agents row may rotate its identity (PR
@@ -432,20 +456,21 @@ const RotationEvery = time.Hour
 // row's last one.
 var ErrRotationTooSoon = errors.New("identity_rotation_too_soon")
 
-// RotateAgentIdentity replaces agent id's identity SPKI hash oldSPKI by
-// newSPKI (03-08, AGENT-02) and records the rotation at nowUS
-// (identity_rotated_at_us, identity_rotations; owner decision D-R1), in
-// one conditional UPDATE. It is ErrRotationTooSoon within RotationEvery
-// of the row's last rotation, ErrNotFound when the row no longer holds
-// oldSPKI (a concurrent rotation), ErrIdentityInUse when another agent
-// holds newSPKI.
-func (d *DB) RotateAgentIdentity(ctx context.Context, id int64, oldSPKI, newSPKI []byte, nowUS int64) error {
+// RotateAgentIdentity replaces the identity SPKI hash k.SPKI of the
+// agents row k by newSPKI (03-08, AGENT-02) and records the rotation at
+// nowUS (identity_rotated_at_us, identity_rotations; owner decision
+// D-R1), in one conditional UPDATE that leaves token_hash as it is
+// (AgentKey). It is ErrRotationTooSoon within RotationEvery of the row's
+// last rotation, ErrNotFound when no row matches k (a concurrent
+// rotation, or the row was forgotten), ErrIdentityInUse when another
+// agent holds newSPKI.
+func (d *DB) RotateAgentIdentity(ctx context.Context, k AgentKey, newSPKI []byte, nowUS int64) error {
 	if len(newSPKI) != 32 {
 		return errors.New("serverdb: incomplete identity")
 	}
 	res, err := d.db.ExecContext(ctx, `UPDATE agents SET identity_spki_sha256 = ?, identity_rotated_at_us = ?, identity_rotations = identity_rotations + 1
-WHERE id = ? AND identity_spki_sha256 = ? AND (identity_rotated_at_us IS NULL OR identity_rotated_at_us <= ?)`,
-		newSPKI, nowUS, id, oldSPKI, nowUS-RotationEvery.Microseconds())
+WHERE `+agentKeyWhere+` AND (identity_rotated_at_us IS NULL OR identity_rotated_at_us <= ?)`,
+		append(keyArgs(k, newSPKI, nowUS), nowUS-RotationEvery.Microseconds())...)
 	if err != nil {
 		var se *sqlite.Error
 		if errors.As(err, &se) && se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
@@ -456,13 +481,8 @@ WHERE id = ? AND identity_spki_sha256 = ? AND (identity_rotated_at_us IS NULL OR
 	if err := oneRow(res); !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	var one int
-	err = d.db.QueryRowContext(ctx, `SELECT 1 FROM agents WHERE id = ? AND identity_spki_sha256 = ?`, id, oldSPKI).Scan(&one)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return ErrNotFound
-	case err != nil:
-		return fmt.Errorf("serverdb: agent: %w", err)
+	if err := agentExists(ctx, d.db, k); err != nil {
+		return err
 	}
 	return ErrRotationTooSoon
 }
@@ -487,9 +507,9 @@ type Heartbeat struct {
 	ReceivedAtUS int64
 }
 
-// StoreHeartbeat stores body as agent id's heartbeat when seq is above
-// the stored one, or none is stored, in one transaction that first checks
-// that the agents row id still exists and still has the identity spki: a
+// StoreHeartbeat stores body as the heartbeat of the agents row k when seq
+// is above the stored one, or none is stored, in one transaction that
+// first checks that the row k still exists (AgentKey): a
 // request the row was forgotten (or rotated) under while its body arrived
 // never writes a heartbeat that a later agent reusing the ID would inherit
 // (ErrNotFound; PR #72 review C1). foreign_keys is off, so 0006's ON
@@ -501,8 +521,9 @@ type Heartbeat struct {
 // (nothing recorded since the stored heartbeat arrived) or an hour has
 // passed since the last record: logIt then tells the caller to log it, so
 // a host that keeps sending lower seqs is logged once an hour.
-func (d *DB) StoreHeartbeat(ctx context.Context, id int64, spki []byte, seq int64, body []byte, offsetS, nowUS int64) (logIt bool, err error) {
-	if seq < 1 || len(body) == 0 || len(spki) != 32 {
+func (d *DB) StoreHeartbeat(ctx context.Context, k AgentKey, seq int64, body []byte, offsetS, nowUS int64) (logIt bool, err error) {
+	id := k.ID
+	if seq < 1 || len(body) == 0 || len(k.SPKI) != 32 {
 		return false, errors.New("serverdb: incomplete heartbeat")
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -510,7 +531,7 @@ func (d *DB) StoreHeartbeat(ctx context.Context, id int64, spki []byte, seq int6
 		return false, fmt.Errorf("serverdb: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := agentExists(ctx, tx, id, spki); err != nil {
+	if err := agentExists(ctx, tx, k); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE id = ?`, offsetS, id); err != nil {
@@ -552,12 +573,12 @@ ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, r
 	return false, nil
 }
 
-// RecordClockOffset records offsetS as agent id's clock offset, when the
-// row still has the identity spki (else ErrNotFound): a heartbeat refused
-// before StoreHeartbeat (heartbeat_seq_future) still shows its host's
-// clock (D-R2).
-func (d *DB) RecordClockOffset(ctx context.Context, id int64, spki []byte, offsetS int64) error {
-	res, err := d.db.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE id = ? AND identity_spki_sha256 = ?`, offsetS, id, spki)
+// RecordClockOffset records offsetS as the clock offset of the agents row
+// k (else ErrNotFound, AgentKey): a heartbeat refused before
+// StoreHeartbeat (heartbeat_seq_future) still shows its host's clock
+// (D-R2).
+func (d *DB) RecordClockOffset(ctx context.Context, k AgentKey, offsetS int64) error {
+	res, err := d.db.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE `+agentKeyWhere, keyArgs(k, offsetS)...)
 	if err != nil {
 		return fmt.Errorf("serverdb: clock offset: %w", err)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/serverdb"
 	"github.com/Labontese/keyroster/internal/trust"
+	"golang.org/x/crypto/ssh"
 )
 
 // pendingAnswer GETs host pending as the admin.
@@ -129,7 +130,7 @@ func TestInFlightRequestOfForgottenAgent(t *testing.T) {
 			var once sync.Once
 			e.s.afterAgentLookup = func() {
 				once.Do(func() {
-					if err := e.s.db.DeleteAgentIf(t.Context(), rowA.ID, rowA.IdentitySPKISHA256, rowA.ForgetFacts()); err != nil {
+					if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts()); err != nil {
 						t.Errorf("forget A: %v", err)
 					}
 					if rec := e.enroll(t, b, token, hostsB); rec.Code != http.StatusAccepted {
@@ -151,6 +152,86 @@ func TestInFlightRequestOfForgottenAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReenrolledIdentityKeepsItsRow is the pre-merge review's finding 8
+// on PR #74 (03-08b fix round 1): the runbook's "same machine, keeping its
+// fetcher identity" order re-enrolls the same identity, and SQLite gives
+// the new row the old row's ID, so (ID, identity) no longer tells the two
+// enrollments apart. Every agents-row write is therefore keyed on the join
+// token too (each token enrolls at most one row):
+//   - state_request_in_flight: a state request of removed agent A, looked
+//     up before A was forgotten with --host-gone and the same identity
+//     re-enrolled (same host keys, new token), writes nothing on the new
+//     row and is refused 403 unknown_agent; the new pending row can still
+//     be forgotten;
+//   - forget_in_flight (split finding 2): a forget of pending agent A,
+//     whose facts were checked before A was deleted and the same identity
+//     re-enrolled, deletes nothing (409 forget_state_changed).
+func TestReenrolledIdentityKeepsItsRow(t *testing.T) {
+	reenroll := func(t *testing.T, e *agentEnv, id agentID, hosts []ssh.Signer) {
+		t.Helper()
+		if rec := e.enroll(t, id, e.mustMint(t, "web1", 0).Token, hosts); rec.Code != http.StatusAccepted {
+			t.Errorf("re-enroll the same identity: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	t.Run("state_request_in_flight", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		a, hosts := e.approvedAgent(t)
+		if c := e.state(t, a); c != http.StatusOK {
+			t.Fatalf("the first state: %d", c)
+		}
+		e.installDir(t)
+		rowA := e.agentRow(t, a.spki)
+		var once sync.Once
+		e.s.afterAgentLookup = func() {
+			once.Do(func() {
+				if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts()); err != nil {
+					t.Errorf("forget A --host-gone: %v", err)
+				}
+				reenroll(t, e, a, hosts)
+			})
+		}
+		rec := e.agentDo(t, a, http.MethodGet, serverclient.AgentStatePath, nil)
+		e.s.afterAgentLookup = nil
+		row := e.agentRow(t, a.spki)
+		if row == nil || row.ID != rowA.ID || bytes.Equal(row.TokenSHA256, rowA.TokenSHA256) {
+			t.Fatalf("the new row %+v; the test needs it on A's row ID %d with a new token", row, rowA.ID)
+		}
+		if rec.Code != http.StatusForbidden || apiError(rec) != serverclient.AgentErrUnknown {
+			t.Errorf("A's in-flight request: %d %s, want 403 %s", rec.Code, rec.Body.String(), serverclient.AgentErrUnknown)
+		}
+		if row.ApprovedAtUS != 0 || row.RemovedDirVersion != 0 || row.LastSeenUS != 0 {
+			t.Errorf("A's request wrote the new row: approved_at_us %d, removed_dir_version %d, last_seen_us %d", row.ApprovedAtUS, row.RemovedDirVersion, row.LastSeenUS)
+		}
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
+			t.Errorf("forget of the new pending row: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("forget_in_flight", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		a, hosts := newAgentID(t), hostSigners(t, 1)
+		reenroll(t, e, a, hosts)
+		rowA := e.agentRow(t, a.spki)
+		var once sync.Once
+		e.s.beforeForgetDelete = func() {
+			once.Do(func() {
+				if err := e.s.db.DeleteAgentIf(t.Context(), rowA.Key(), rowA.ForgetFacts()); err != nil {
+					t.Errorf("forget A: %v", err)
+				}
+				reenroll(t, e, a, hosts)
+			})
+		}
+		rec := e.forgetFacts(t, forgetReqOf(rowA, false))
+		e.s.beforeForgetDelete = nil
+		row := e.agentRow(t, a.spki)
+		if rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrForgetStateChanged {
+			t.Errorf("the forget checked against A: %d %s, want 409 %s", rec.Code, rec.Body.String(), serverclient.AdminErrForgetStateChanged)
+		}
+		if row == nil || row.ID != rowA.ID || bytes.Equal(row.TokenSHA256, rowA.TokenSHA256) {
+			t.Fatalf("the new row %+v; want it present on A's row ID %d with a new token", row, rowA.ID)
+		}
+	})
 }
 
 // TestRemovalConfirmation is PR #72 fix-round carry-over (b) (03-08b): a
@@ -265,7 +346,7 @@ func TestRemovalConfirmation(t *testing.T) {
 			t.Helper()
 			a := e.agentRow(t, id.spki)
 			body := hbBody(t, heartbeat.Heartbeat{Status: e.hbAt(t, seq, v)})
-			if _, err := e.s.db.StoreHeartbeat(t.Context(), a.ID, a.IdentitySPKISHA256, int64(seq), body, 0, e.clock.Now().UnixMicro()); err != nil { //nolint:gosec // G115: a small test seq
+			if _, err := e.s.db.StoreHeartbeat(t.Context(), a.Key(), int64(seq), body, 0, e.clock.Now().UnixMicro()); err != nil { //nolint:gosec // G115: a small test seq
 				t.Fatal(err)
 			}
 		}
@@ -274,7 +355,7 @@ func TestRemovalConfirmation(t *testing.T) {
 			store(t, e, id, 2, r)
 			// 03-08 cleared the removal version when the name was re-added.
 			a := e.agentRow(t, id.spki)
-			if err := e.s.db.SetAgentRemovedVersion(t.Context(), a.ID, a.IdentitySPKISHA256, 0); err != nil {
+			if err := e.s.db.SetAgentRemovedVersion(t.Context(), a.Key(), 0); err != nil {
 				t.Fatal(err)
 			}
 			e.installDir(t, rekeyedWeb1(t))
@@ -354,13 +435,13 @@ func TestForgetHost(t *testing.T) {
 		}{
 			{"confirmation_recorded", func(t *testing.T, e *agentEnv, a *serverdb.Agent, r uint64) {
 				sum := sha256.Sum256(e.dirs[r-1])
-				if ok, err := e.s.db.RecordRemovalConfirmed(t.Context(), a.ID, a.IdentitySPKISHA256, r, r, sum[:]); err != nil || !ok {
+				if ok, err := e.s.db.RecordRemovalConfirmed(t.Context(), a.Key(), r, r, sum[:]); err != nil || !ok {
 					t.Errorf("record the confirmation: %t %v", ok, err)
 				}
 			}},
 			{"identity_rotated", func(t *testing.T, e *agentEnv, a *serverdb.Agent, _ uint64) {
 				n := newAgentID(t)
-				if err := e.s.db.RotateAgentIdentity(t.Context(), a.ID, a.IdentitySPKISHA256, n.spki, e.clock.Now().UnixMicro()); err != nil {
+				if err := e.s.db.RotateAgentIdentity(t.Context(), a.Key(), n.spki, e.clock.Now().UnixMicro()); err != nil {
 					t.Errorf("rotate the identity: %v", err)
 				}
 			}},
