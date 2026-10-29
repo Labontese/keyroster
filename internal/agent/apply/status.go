@@ -317,7 +317,7 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 	// that far beyond its own clock (heartbeat_seq_future, owner decision
 	// D-R2), so counting on from it would freeze the host's status.
 	s.Seq = uint64(max(now.UnixMicro(), 1)) //nolint:gosec // G115: positive
-	if prev != nil && prev.Seq >= s.Seq && prev.Seq-s.Seq <= uint64(heartbeat.MaxSeqAhead.Microseconds()) {
+	if prev != nil && prev.Seq >= s.Seq && prev.Seq-s.Seq <= uint64(heartbeat.MaxSeqAhead/time.Microsecond) {
 		s.Seq = prev.Seq + 1
 	}
 	return s, nil
