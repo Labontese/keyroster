@@ -85,8 +85,9 @@ func checkHostsStatus(a *serverclient.HostsStatusAnswer) error {
 func safe(s string) string { return heartbeat.Sanitize(s, len(s)) }
 
 // runHostStatus is keyroster host status [--json] [--admin-key FP]
-// (03-08, AGENT-07): per host the directory approved once, its heartbeat
-// age, the bundle, directory and KRL versions it applied against the
+// (03-08, AGENT-07): per host the directory approved once, when it was
+// last seen and how old its stored status is (with status_stale), the
+// bundle, directory and KRL versions it applied against the
 // current ones, drift, its last apply with detail, a swap in progress, the
 // stuck alert with its recovery command and the silent, krl_stale and
 // clock_skew flags; and the header lines "bundle v<b> on <n>/<m> hosts",
@@ -164,20 +165,31 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 	}
 	b.WriteString("\n")
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "HOST\tDIRECTORY ENTRY\tLAST SEEN\tBUNDLE\tDIRECTORY\tKRL\tGENERATION\tDRIFT\tLAST APPLY\tALERTS")
+	_, _ = fmt.Fprintln(tw, "HOST\tDIRECTORY ENTRY\tLAST SEEN\tSTATUS\tBUNDLE\tDIRECTORY\tKRL\tGENERATION\tDRIFT\tLAST APPLY\tALERTS")
 	var notes []string
 	for _, r := range a.Hosts {
 		entry := "active"
 		if r.State != serverclient.HostStateActive {
 			entry = servedLine(r.State)
 		}
-		seen := "never"
+		seen, status := "never", "none"
 		if t, err := time.Parse(time.RFC3339, r.LastSeen); err == nil {
 			seen = age(now.Sub(t)) + " ago"
+		}
+		// The stored status's age: LAST SEEN is any request, a re-posted
+		// old status included (PR #72 review C2, C6).
+		statusAge := time.Duration(0)
+		if t, err := time.Parse(time.RFC3339, r.ReceivedAt); err == nil {
+			statusAge = now.Sub(t)
+			status = age(statusAge) + " ago"
 		}
 		var alerts []string
 		if r.Silent {
 			alerts = append(alerts, "silent")
+		}
+		if r.StatusStale {
+			alerts = append(alerts, "status_stale")
+			notes = append(notes, fmt.Sprintf("%s: status_stale: its status is %s old while the host is still seen: its applier writes none (on the host: systemctl status keyroster-agent)", r.Name, age(statusAge)))
 		}
 		bundle, dir, krl, gen, drift, last := "v0", "v0", "v0", "0", "-", "never applied"
 		if h := r.Heartbeat; h != nil {
@@ -237,7 +249,7 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 		if len(alerts) == 0 {
 			alerts = []string{"-"}
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safe(r.Name), entry, seen, bundle, dir, krl, gen, drift, safe(last), safe(strings.Join(alerts, ", ")))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safe(r.Name), entry, seen, status, bundle, dir, krl, gen, drift, safe(last), safe(strings.Join(alerts, ", ")))
 	}
 	_ = tw.Flush()
 	for _, n := range notes {

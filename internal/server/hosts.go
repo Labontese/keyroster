@@ -312,8 +312,12 @@ func hostState(dv *directoryView, keys []string, name string) (string, string) {
 	return "", serverclient.HostStateRemoved
 }
 
-// silentAfter is serverclient.SilentAfterS as a duration.
-const silentAfter = serverclient.SilentAfterS * time.Second
+// silentAfter is serverclient.SilentAfterS as a duration, and
+// statusStaleAfter serverclient.StatusStaleAfterS.
+const (
+	silentAfter      = serverclient.SilentAfterS * time.Second
+	statusStaleAfter = serverclient.StatusStaleAfterS * time.Second
+)
 
 // handleHostsStatus serves GET AdminHostsStatusPath (keyroster host
 // status, admin-signed; 03-08, AGENT-07): the server's current bundle,
@@ -321,8 +325,10 @@ const silentAfter = serverclient.SilentAfterS * time.Second
 // (a pending one is keyroster host pending's): its directory name and
 // state, when it was last seen and whether that is more than 180 s ago
 // on the server's clock (silent, D-10), and its newest heartbeat with
-// never_applied, the newest clock offset with clock_skew (|clock_offset_s|
-// > 300) and seq_regressed (owner decision D-R2). A removed,
+// never_applied and status_stale (its status more than two drift-check
+// periods old while the host is seen; PR #72 review C2, C6), the newest
+// clock offset with clock_skew (|clock_offset_s| > 300) and seq_regressed
+// (owner decision D-R2). A removed,
 // disabled or re-keyed agent that is still served shows its state, never
 // as waiting for approval (03-08 carry-over a). Convergence is the
 // server's report, the host's own word through its heartbeat; the CLI
@@ -397,6 +403,7 @@ func (s *Server) handleHostsStatus(w http.ResponseWriter, r *http.Request) {
 				row.ClockOffsetS = h.ClockOffsetS
 				row.NeverApplied = h.Status.Generation == 0
 				row.SeqRegressed = !row.Silent && a.SeqRegressedAtUS > hb.ReceivedAtUS
+				row.StatusStale = !row.Silent && now.Sub(time.UnixMicro(hb.ReceivedAtUS)) > statusStaleAfter
 			}
 		}
 		// The newest offset any heartbeat carried, refused ones too (D-R2).

@@ -899,14 +899,15 @@ bundle v3 on 2/3 hosts
 directory v7 on 2/3 hosts
 KRL v1793196839 on 3/3 hosts
 
-HOST  DIRECTORY ENTRY               LAST SEEN  BUNDLE  DIRECTORY  KRL           GENERATION  DRIFT  LAST APPLY  ALERTS
-web1  active                        12s ago    v3      v7         v1793196839   12          no     ok          -
-web2  active                        40s ago    v3      v7         v1793196839   9           no     ok          pending: intermediate
-web3  removed, served until forget  5m ago     v2*     v6*        v1793196839   4           no     ok          silent
+HOST  DIRECTORY ENTRY               LAST SEEN  STATUS   BUNDLE  DIRECTORY  KRL           GENERATION  DRIFT  LAST APPLY  ALERTS
+web1  active                        12s ago    4m ago   v3      v7         v1793196839   12          no     ok          -
+web2  active                        40s ago    40s ago  v3      v7         v1793196839   9           no     ok          pending: intermediate
+web3  removed, served until forget  5m ago     12m ago  v2*     v6*        v1793196839   4           no     ok          silent
 ```
 
-Each row is a host the directory approved once: when it was last seen, the
-bundle, directory and KRL versions it applied (`*` where they differ from
+Each row is a host the directory approved once: when it was last seen (any
+request), how old its stored status is (`STATUS`: when the server last
+stored a newer one), the bundle, directory and KRL versions it applied (`*` where they differ from
 the server's current ones, by number or SHA-256), the generation, drift,
 the last apply's result (`ok`, `refused`, `rolled_back` or `error`, with
 its `detail` and `host_status`), and its alerts. A host counts on a version
@@ -938,6 +939,14 @@ ASCII. (Run in CI: `TestHostStatus`, `TestHeartbeat`,
   network break or a host that is down. (Run in CI:
   `TestHeartbeat/silent_boundary_180_not_181` and, with real time,
   `TestAgentStatusEndToEnd`.)
+- `status_stale`: the host is still seen, but its stored status is more
+  than 32 min old (two drift-check periods of 15 min with up to 60 s of
+  jitter; one exactly 32 min old is not flagged). The applier writes a
+  status after every apply and every check, so its unit
+  (`keyroster-agent.service`) has stopped or cannot write while the
+  fetcher keeps polling: nothing checks drift or applies revocations
+  there. (Run in CI: `TestStatusStale`, `TestHostStatusAge`; PR #72
+  review.)
 - `krl_stale`: the KRL in force was issued 24 h ago or more (its manifest's
   `issued_at`). The applier logs an error line on every check (journald
   priority 3), and nothing else changes: the KRL stays installed and no

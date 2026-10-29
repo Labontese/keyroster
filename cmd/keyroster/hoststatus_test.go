@@ -268,3 +268,35 @@ func TestHostStatusDiverged(t *testing.T) {
 		t.Fatalf("diverged flags %v, want web2 and web3:\n%s", flagged, out)
 	}
 }
+
+// TestHostStatusAge (PR #72 review C2, C6): host status shows how old each
+// host's stored status is beside LAST SEEN, and the server's status_stale
+// flag as an alert.
+func TestHostStatusAge(t *testing.T) {
+	row := statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: hbStatus(5, 100)})
+	row.ReceivedAt = time.Now().Add(-40 * time.Minute).UTC().Format(time.RFC3339)
+	b, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["status_stale"] = true
+	ab := strings.Repeat("ab", 32)
+	statusEnv(t, map[string]any{
+		"current": map[string]any{"bundle": 1, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
+		"hosts":   []any{m, statusRow("web2", serverclient.HostStateActive, nil)},
+	})
+	code, out, stderr := run(t, "host", "status")
+	if code != 0 {
+		t.Fatalf("host status: exit %d: %s", code, stderr)
+	}
+	t.Logf("keyroster host status:\n%s", out)
+	for _, want := range []string{"LAST SEEN  STATUS", "12s ago    40m ago", "status_stale", "web1: status_stale: its status is 40m old"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("host status lacks %q:\n%s", want, out)
+		}
+	}
+}

@@ -439,6 +439,14 @@ func (c *Client) AgentState(ctx context.Context, v AgentVersions) (*AgentStateRe
 // exactly 180 s ago is not silent, one 181 s ago is (D-10).
 const SilentAfterS = 180
 
+// StatusStaleAfterS is how old a host's stored status may grow while the
+// host is still seen before the server flags status_stale (PR #72 review
+// C2, C6): two drift-check periods, each 15 min with up to 60 s of jitter.
+// The applier writes a status at least once a period, so a status this
+// old means it stopped while the fetcher kept running. One exactly this
+// old is not flagged, one a second older is.
+const StatusStaleAfterS = 2 * (15*60 + 60)
+
 // HostsStatusAnswer is the 200 answer of AdminHostsStatusPath: the
 // server's current bundle, directory and KRL versions, and one row per
 // agent the directory approved once. It is the server's word; the host's
@@ -479,7 +487,9 @@ func (v HostVersions) Docs() (bundle, directory, krl heartbeat.Doc) {
 //     server's clock (or the agent was never seen);
 //   - ReceivedAt is when the stored heartbeat arrived ("" for none), and
 //     Heartbeat the newest heartbeat by seq (nil for none), every field
-//     validated before it was stored;
+//     validated before it was stored; StatusStale is set while the host is
+//     not silent and its stored status is more than StatusStaleAfterS
+//     seconds old (its applier stopped; PR #72 review C2, C6);
 //   - ClockOffsetS is the clock offset of the agent's newest heartbeat
 //     that parsed, stored or refused (owner decision D-R2), and ClockSkew
 //     |ClockOffsetS| > heartbeat.ClockSkewS; NeverApplied is no heartbeat
@@ -501,6 +511,7 @@ type HostStatusRow struct {
 	ClockOffsetS       int64                `json:"clock_offset_s"`
 	ClockSkew          bool                 `json:"clock_skew"`
 	SeqRegressed       bool                 `json:"seq_regressed"`
+	StatusStale        bool                 `json:"status_stale"`
 	IdentityRotatedAt  string               `json:"identity_rotated_at"`
 	IdentityRotations  int64                `json:"identity_rotations"`
 	NeverApplied       bool                 `json:"never_applied"`

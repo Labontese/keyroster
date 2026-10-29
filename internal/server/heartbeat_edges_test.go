@@ -410,3 +410,38 @@ func TestForgetGateChecksTheDirectory(t *testing.T) {
 		}
 	})
 }
+
+// TestStatusStale (PR #72 review C2, C6): the applier stopped while the
+// fetcher keeps running. The host is seen at every poll, so it is not
+// silent, but its stored status grows old: hosts/status flags
+// status_stale once it is more than two drift-check periods old.
+func TestStatusStale(t *testing.T) {
+	e, id := polledAgent(t)
+	e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(1, 1)})
+	stored := e.clock.Now()
+	poll := func(at time.Duration) {
+		t.Helper()
+		e.clock.set(stored.Add(at))
+		e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil)
+		// The fetcher re-posts the dead applier's status.
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(1, 1)}); rec.Code != http.StatusConflict {
+			t.Fatalf("the re-posted status: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	for at := time.Duration(0); at < serverclient.StatusStaleAfterS*time.Second; at += time.Minute {
+		poll(at)
+	}
+	poll(serverclient.StatusStaleAfterS * time.Second)
+	if row := e.rawHosts(t)[0]; row["status_stale"] != false || row["silent"] != false {
+		t.Fatalf("a status exactly %d s old: status_stale %v, silent %v", serverclient.StatusStaleAfterS, row["status_stale"], row["silent"])
+	}
+	poll(serverclient.StatusStaleAfterS*time.Second + time.Second)
+	if row := e.rawHosts(t)[0]; row["status_stale"] != true || row["silent"] != false {
+		t.Fatalf("a status %d s old from a host still seen: status_stale %v, silent %v", serverclient.StatusStaleAfterS+1, row["status_stale"], row["silent"])
+	}
+	// A silent host is silent, not status_stale.
+	e.clock.set(e.clock.Now().Add(181 * time.Second))
+	if row := e.rawHosts(t)[0]; row["status_stale"] != false || row["silent"] != true {
+		t.Fatalf("a silent host: status_stale %v, silent %v", row["status_stale"], row["silent"])
+	}
+}
