@@ -448,11 +448,24 @@ type HostsStatusAnswer struct {
 	Hosts   []HostStatusRow `json:"hosts"`
 }
 
-// HostVersions are the server's current versions (0: none).
+// HostVersions are the server's current versions (0: none) and the
+// SHA-256 of each ("" with version 0), so a host on a same-numbered
+// version with other bytes does not count as converged (PR #72 review
+// C5).
 type HostVersions struct {
-	Bundle    uint64 `json:"bundle"`
-	Directory uint64 `json:"directory"`
-	KRL       uint64 `json:"krl"`
+	Bundle          uint64 `json:"bundle"`
+	Directory       uint64 `json:"directory"`
+	KRL             uint64 `json:"krl"`
+	BundleSHA256    string `json:"bundle_sha256"`
+	DirectorySHA256 string `json:"directory_sha256"`
+	KRLSHA256       string `json:"krl_sha256"`
+}
+
+// Docs are the current bundle, directory and KRL as heartbeat.Doc, as
+// heartbeat.Status.Committed and Diverged take them.
+func (v HostVersions) Docs() (bundle, directory, krl heartbeat.Doc) {
+	return heartbeat.Doc{Version: v.Bundle, SHA256: v.BundleSHA256}, heartbeat.Doc{Version: v.Directory, SHA256: v.DirectorySHA256},
+		heartbeat.Doc{Version: v.KRL, SHA256: v.KRLSHA256}
 }
 
 // HostStatusRow is one host in AdminHostsStatusPath's answer:

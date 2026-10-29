@@ -42,6 +42,12 @@ var errBadHostsStatus = errors.New("the server's host status does not check out;
 // can lie, but never put a byte outside printable ASCII on the admin's
 // terminal (T-03-227).
 func checkHostsStatus(a *serverclient.HostsStatusAnswer) error {
+	for _, d := range [][2]any{{a.Current.Bundle, a.Current.BundleSHA256}, {a.Current.Directory, a.Current.DirectorySHA256}, {a.Current.KRL, a.Current.KRLSHA256}} {
+		v, sum := d[0].(uint64), d[1].(string)
+		if (v == 0) != (sum == "") || sum != "" && !enroll.IsSHA256Hex(sum) {
+			return errBadHostsStatus
+		}
+	}
 	for _, r := range a.Hosts {
 		if !directory.ValidUserName(r.Name) || !directory.ValidUserName(r.ExpectedName) || !enroll.IsSHA256Hex(r.IdentitySPKISHA256) {
 			return errBadHostsStatus
@@ -132,18 +138,19 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 	var b strings.Builder
 	m := len(a.Hosts)
 	var nb, nd, nk int
+	cb, cd, ck := a.Current.Docs()
 	for _, r := range a.Hosts {
 		h := r.Heartbeat
 		if h == nil || h.Status.Pending != nil {
 			continue
 		}
-		if h.Status.Bundle.Version == a.Current.Bundle {
+		if h.Status.Bundle == cb {
 			nb++
 		}
-		if h.Status.Directory.Version == a.Current.Directory {
+		if h.Status.Directory == cd {
 			nd++
 		}
-		if h.Status.KRL.Version == a.Current.KRL {
+		if h.Status.KRLDoc() == ck {
 			nk++
 		}
 	}
@@ -175,7 +182,11 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 		bundle, dir, krl, gen, drift, last := "v0", "v0", "v0", "0", "-", "never applied"
 		if h := r.Heartbeat; h != nil {
 			st := h.Status
-			bundle, dir, krl = mark(st.Bundle.Version, a.Current.Bundle), mark(st.Directory.Version, a.Current.Directory), mark(st.KRL.Version, a.Current.KRL)
+			bundle, dir, krl = mark(st.Bundle, cb), mark(st.Directory, cd), mark(st.KRLDoc(), ck)
+			if st.Diverged(cb, cd, ck) {
+				alerts = append(alerts, "diverged")
+				notes = append(notes, fmt.Sprintf("%s: diverged: it reports a bundle, directory or KRL the server does not hold as current (above the current version, or the current number with other bytes, for example after a signer restore lost versions it had applied)", r.Name))
+			}
 			gen = fmt.Sprint(st.Generation)
 			if c := st.LastCheck; c != nil {
 				drift = "no"
@@ -232,15 +243,15 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 	for _, n := range notes {
 		b.WriteString(safe(n) + "\n")
 	}
-	b.WriteString("Versions marked * differ from the server's current ones; a host counts on a version only with no swap pending.\n")
+	b.WriteString("Versions marked * differ from the server's current ones (number or SHA-256); a host counts on a version only with no swap pending.\n")
 	b.WriteString(statusFooter)
 	return b.String()
 }
 
-// mark is a version, with * when it is not cur.
-func mark(v, cur uint64) string {
-	s := fmt.Sprintf("v%d", v)
-	if v != cur {
+// mark is d's version, with * when d is not cur (version or SHA-256).
+func mark(d, cur heartbeat.Doc) string {
+	s := fmt.Sprintf("v%d", d.Version)
+	if d != cur {
 		s += "*"
 	}
 	return s

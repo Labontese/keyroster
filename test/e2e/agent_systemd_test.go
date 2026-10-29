@@ -151,7 +151,7 @@ func TestAgentSystemdSmoke(t *testing.T) {
 		if err := json.Unmarshal([]byte(kr("host", "status", "--json")), &a); err != nil {
 			t.Fatal(err)
 		}
-		if len(a.Hosts) == 1 && a.Hosts[0].Heartbeat != nil && a.Hosts[0].Heartbeat.Status.Committed(a.Current.Bundle, a.Current.Directory, a.Current.KRL) {
+		if len(a.Hosts) == 1 && a.Hosts[0].Heartbeat != nil && a.Hosts[0].Heartbeat.Status.Committed(a.Current.Docs()) {
 			break
 		}
 		if time.Now().After(deadline) {

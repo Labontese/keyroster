@@ -196,7 +196,7 @@ func TestAgentStatusEndToEnd(t *testing.T) {
 
 	// 1. After the first apply: the host on the current versions.
 	a := waitStatus(t, "the first heartbeat", eh, kr, func(a serverclient.HostsStatusAnswer) bool {
-		return len(a.Hosts) == 1 && a.Hosts[0].Heartbeat != nil && a.Hosts[0].Heartbeat.Status.Committed(a.Current.Bundle, a.Current.Directory, a.Current.KRL)
+		return len(a.Hosts) == 1 && a.Hosts[0].Heartbeat != nil && a.Hosts[0].Heartbeat.Status.Committed(a.Current.Docs())
 	})
 	if a.Hosts[0].Silent || a.Hosts[0].NeverApplied || a.Hosts[0].Name != "web1" || a.Hosts[0].State != serverclient.HostStateActive {
 		t.Fatalf("the first heartbeat: %+v", a.Hosts[0])

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
 	"time"
@@ -142,8 +144,11 @@ func (s *Server) handlePendingHosts(w http.ResponseWriter, r *http.Request) {
 //   - 409 host_removal_not_applied (03-08, owner decision 2026-10-28) for
 //     an agent approved once until its newest heartbeat shows a committed
 //     directory version at or above removed_dir_version, the first
-//     version it was served under that no longer approved it: the host
-//     has then applied its own removal. The request's host_gone overrides
+//     version it was served under that no longer approved it, and that
+//     directory is one the server served: not above the current version,
+//     with the SHA-256 of the server's directory at that number
+//     (removalApplied, PR #72 review C4). The host has then applied its
+//     own removal. The request's host_gone overrides
 //     this for a host that will never report again; the server logs it at
 //     warning level. An agent never approved has no removal to wait for.
 //
@@ -187,15 +192,22 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if a.ApprovedAtUS != 0 && !req.HostGone {
-			reported := uint64(0)
+			var reported heartbeat.Doc
 			if hb, ok := hbs[a.ID]; ok {
 				if h, err := heartbeat.ParseHeartbeat(hb.Body); err == nil {
-					reported = h.Status.Directory.Version
+					reported = h.Status.Directory
 				}
 			}
-			if a.RemovedDirVersion == 0 || reported < a.RemovedDirVersion {
+			why, err := s.removalApplied(ctx, dv, a.RemovedDirVersion, reported)
+			if err != nil {
+				s.log.Warn("forget: directory read failed", "err", err)
+				s.signerUnavailable(w, false)
+				return
+			}
+			if why != "" {
 				s.log.Warn("forget refused", "expected_name", a.ExpectedName, "agent", agentFingerprint(a.IdentitySPKISHA256), "admin", adminName(ctx),
-					"reason", serverclient.AdminErrRemovalNotApplied, "removal_version", a.RemovedDirVersion, "reported_directory_version", reported)
+					"reason", serverclient.AdminErrRemovalNotApplied, "detail", why, "removal_version", a.RemovedDirVersion,
+					"reported_directory_version", reported.Version, "reported_directory_sha256", reported.SHA256)
 				s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrRemovalNotApplied})
 				return
 			}
@@ -227,6 +239,42 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.writeJSON(w, dv.status, http.StatusOK, out)
+}
+
+// removalApplied is forget's removal wait for one agent (PR #72 review
+// C4): "" when the directory the host reported is at or above removal,
+// not above the current version, and has the SHA-256 of the server's
+// directory at that number (the current one, or the signer's
+// GetDirectoryVersion for an older one); otherwise why not. A signer
+// that cannot answer is an error: forget then refuses, it never guesses.
+func (s *Server) removalApplied(ctx context.Context, dv *directoryView, removal uint64, reported heartbeat.Doc) (string, error) {
+	switch {
+	case removal == 0:
+		return "no removal recorded", nil
+	case reported.Version < removal:
+		return "reported directory below the removal version", nil
+	case reported.Version > dv.version:
+		return "reported directory above the current version", nil
+	}
+	want := ""
+	if reported.Version == dv.version {
+		want = trust.SHA256Hex(dv.doc)
+	} else {
+		cctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
+		d, err := s.signer.GetDirectoryVersion(cctx, reported.Version)
+		cancel()
+		if err != nil {
+			return "", fmt.Errorf("directory version %d: %w", reported.Version, err)
+		}
+		if d.Version != reported.Version {
+			return "", fmt.Errorf("the signer answered directory version %d for version %d", d.Version, reported.Version)
+		}
+		want = trust.SHA256Hex(d.Directory)
+	}
+	if reported.SHA256 != want {
+		return "reported directory differs from the server's under that version", nil
+	}
+	return "", nil
 }
 
 // hostState is the directory state of an agent with host keys keys and
@@ -311,8 +359,14 @@ func (s *Server) handleHostsStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := serverclient.HostsStatusAnswer{Current: serverclient.HostVersions{Bundle: v.raw.BundleVersion, Directory: dv.version}, Hosts: []serverclient.HostStatusRow{}}
+	if out.Current.Bundle != 0 {
+		out.Current.BundleSHA256 = trust.SHA256Hex(v.raw.Bundle)
+	}
+	if dv.version != 0 {
+		out.Current.DirectorySHA256 = trust.SHA256Hex(dv.doc)
+	}
 	if k != nil {
-		out.Current.KRL = k.Version
+		out.Current.KRL, out.Current.KRLSHA256 = k.Version, trust.SHA256Hex(k.KRL)
 	}
 	now := s.clock()
 	for _, a := range agents {

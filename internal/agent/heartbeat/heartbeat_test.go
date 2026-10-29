@@ -155,3 +155,37 @@ func FuzzParseStatus(f *testing.F) {
 		}
 	})
 }
+
+// TestCommittedAndDiverged (PR #72 review C5): a host is on a version only
+// with its SHA-256 too, and one above the current version or on the
+// current number with other bytes is diverged.
+func TestCommittedAndDiverged(t *testing.T) {
+	ab, cd := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	cur := Doc{Version: 5, SHA256: ab}
+	one := Doc{Version: 1, SHA256: ab}
+	for _, c := range []struct {
+		name                string
+		dir                 Doc
+		pending             bool
+		committed, diverged bool
+	}{
+		{"same", cur, false, true, false},
+		{"pending", cur, true, false, false},
+		{"older", Doc{Version: 4, SHA256: cd}, false, false, false},
+		{"same_number_other_sha", Doc{Version: 5, SHA256: cd}, false, false, true},
+		{"above_current", Doc{Version: 6, SHA256: cd}, false, false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := Status{Bundle: one, Directory: c.dir, KRL: KRL{Version: 1, SHA256: ab}}
+			if c.pending {
+				s.Pending = &Pending{Step: StepIntermediate}
+			}
+			if got := s.Committed(one, cur, one); got != c.committed {
+				t.Errorf("Committed = %v, want %v", got, c.committed)
+			}
+			if got := s.Diverged(one, cur, one); got != c.diverged {
+				t.Errorf("Diverged = %v, want %v", got, c.diverged)
+			}
+		})
+	}
+}

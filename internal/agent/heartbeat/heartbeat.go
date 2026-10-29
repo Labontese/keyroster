@@ -403,9 +403,28 @@ func Field(err error) string {
 	return "body"
 }
 
-// Committed reports whether s's committed versions are exactly bundle,
-// directory and krl and no swap is pending: what keyroster host status
-// and 03-12's rotation gate count as converged.
-func (s *Status) Committed(bundle, directory, krl uint64) bool {
-	return s.Pending == nil && s.Bundle.Version == bundle && s.Directory.Version == directory && s.KRL.Version == krl
+// KRLDoc is the KRL in force as a Doc (version and SHA-256).
+func (s *Status) KRLDoc() Doc { return Doc{Version: s.KRL.Version, SHA256: s.KRL.SHA256} }
+
+// Committed reports whether s's committed bundle, directory and KRL are
+// exactly bundle, directory and krl, versions and SHA-256 alike, and no
+// swap is pending: what keyroster host status and 03-12's rotation gate
+// count as converged (PR #72 review C5: a same-numbered version with
+// other bytes, for example one a signer restore lost, is not).
+func (s *Status) Committed(bundle, directory, krl Doc) bool {
+	return s.Pending == nil && s.Bundle == bundle && s.Directory == directory && s.KRLDoc() == krl
+}
+
+// Diverged reports whether any of s's bundle, directory and KRL is a
+// version the server never published as current: above the server's
+// current one, or the current number with another SHA-256 (PR #72 review
+// C5). Such a host needs a look (docs/runbooks/host-setup.md "Alerts").
+func (s *Status) Diverged(bundle, directory, krl Doc) bool {
+	for _, p := range [][2]Doc{{s.Bundle, bundle}, {s.Directory, directory}, {s.KRLDoc(), krl}} {
+		got, cur := p[0], p[1]
+		if got.Version > cur.Version || got.Version == cur.Version && got.SHA256 != cur.SHA256 {
+			return true
+		}
+	}
+	return false
 }

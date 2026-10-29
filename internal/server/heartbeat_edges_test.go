@@ -16,6 +16,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 // TestHeartbeatAfterForget (PR #72 review C1): a forgotten agent's
@@ -358,4 +359,54 @@ func TestRekeyedHostNotRemoved(t *testing.T) {
 	if rec := e.forgetGone(t, "web1"); rec.Code != http.StatusOK {
 		t.Fatalf("forget --host-gone of a re-keyed host: %d %s", rec.Code, rec.Body.String())
 	}
+}
+
+// hbAt is testHBStatus at seq with directory version v and its real
+// SHA-256, as a host that applied the server's version v reports it.
+func (e *agentEnv) hbAt(t *testing.T, seq, v uint64) heartbeat.Status {
+	t.Helper()
+	s := testHBStatus(seq, v)
+	s.Directory.SHA256 = trust.SHA256Hex(e.dirs[v-1])
+	return s
+}
+
+// TestForgetGateChecksTheDirectory (PR #72 review C4): forget's removal
+// wait counts a heartbeat's directory only when it is one the server
+// served: not above the current version, and with the SHA-256 of the
+// server's directory at that number.
+func TestForgetGateChecksTheDirectory(t *testing.T) {
+	removed := func(t *testing.T) (*agentEnv, agentID, uint64) {
+		t.Helper()
+		e, id := polledAgent(t)
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(1, 1)})
+		removal := e.installDir(t)
+		e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil)
+		return e, id, removal
+	}
+	t.Run("version_above_current_refused", func(t *testing.T) {
+		e, id, removal := removed(t)
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(2, removal+50)}); rec.Code != http.StatusOK {
+			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
+			t.Fatalf("forget on a heartbeat above the current directory: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("same_number_other_sha_refused", func(t *testing.T) {
+		e, id, removal := removed(t)
+		s := e.hbAt(t, 2, removal)
+		s.Directory.SHA256 = strings.Repeat("cd", 32)
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: s})
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrRemovalNotApplied {
+			t.Fatalf("forget on a heartbeat with another directory under the removal's number: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("older_served_version_checked_with_the_signer", func(t *testing.T) {
+		e, id, removal := removed(t)
+		e.installDir(t)
+		e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 2, removal)})
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusOK {
+			t.Fatalf("forget on the removal version, below the current one: %d %s", rec.Code, rec.Body.String())
+		}
+	})
 }

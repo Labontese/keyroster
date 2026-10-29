@@ -1067,7 +1067,7 @@ func TestAgentRemoval(t *testing.T) {
 		e, id, hosts := polled(t)
 		removal := e.installDir(t)
 		// 03-08: forget waits for the host to report the removal applied.
-		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(1, removal)}); rec.Code != http.StatusOK {
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: e.hbAt(t, 1, removal)}); rec.Code != http.StatusOK {
 			t.Fatalf("heartbeat: %d %s", rec.Code, rec.Body.String())
 		}
 		rec := e.forget(t, "web1")

@@ -905,12 +905,13 @@ web2  active                        40s ago    v3      v7         v1793196839   
 web3  removed, served until forget  5m ago     v2*     v6*        v1793196839   4           no     ok          silent
 ```
 
-Each row is a host the directory approved once: its heartbeat age, the
+Each row is a host the directory approved once: when it was last seen, the
 bundle, directory and KRL versions it applied (`*` where they differ from
-the server's current ones), the generation, drift, the last apply's result
-(`ok`, `refused`, `rolled_back` or `error`, with its `detail` and
-`host_status`), and its alerts. A host counts on a version in the header
-only when it applied it and no swap is pending. During 03-05's two-step
+the server's current ones, by number or SHA-256), the generation, drift,
+the last apply's result (`ok`, `refused`, `rolled_back` or `error`, with
+its `detail` and `host_status`), and its alerts. A host counts on a version
+in the header only when it applied exactly that version, SHA-256 included,
+and no swap is pending. During 03-05's two-step
 swap the row shows `pending: intermediate` (or `final`, `commit`), which is
 not a failure: the versions are still the last committed ones until the
 final step and its self-test. A host removed, disabled or re-keyed in the
@@ -953,6 +954,12 @@ ASCII. (Run in CI: `TestHostStatus`, `TestHeartbeat`,
   clock: the agent's swap timing (03-05's KRL_M = KRL_B) and certificate
   expiry both rely on it, and a lagging host accepts expired certificates.
 - `stuck: pending_state_unknown`: see [Manual recovery](#manual-recovery).
+- `diverged`: the host reports a bundle, directory or KRL above the
+  server's current version, or the current number with other bytes. That
+  is the sign of a host that accepted a version a signer restore lost
+  (signer-install.md): check its `accepted.json` and reset its directory
+  as that runbook says. It never counts as converged. (Run in CI:
+  `TestHostStatusDiverged`, `TestCommittedAndDiverged`.)
 
 **Rotating the agent's identity.** On the host:
 
@@ -1081,7 +1088,12 @@ enrolled host can (D-03); that is the leak this order accepts.
      directory version at or above the one that removed its entry (owner
      decision 2026-10-28). The server records that version when it first
      serves the agent a directory in which no entry holds its keys; a host
-     that never asked since cannot have applied it.
+     that never asked since cannot have applied it. The reported directory
+     must also be one the server served: not above its current version, and
+     with the SHA-256 of the server's directory under that number (a host
+     still on a version a signer restore lost does not pass; PR #72
+     review). Forget asks the signer for an older version and refuses when
+     it cannot answer.
 
    For a host that will never report again (decommissioned, disk wiped):
 

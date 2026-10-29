@@ -61,7 +61,7 @@ func TestHostStatus(t *testing.T) {
 	stale.KRLStale = true
 	silent := statusRow("web6", serverclient.HostStateActive, nil)
 	silent.Silent = true
-	ans := serverclient.HostsStatusAnswer{Current: serverclient.HostVersions{Bundle: 1, Directory: 5, KRL: 100}, Hosts: []serverclient.HostStatusRow{
+	ans := serverclient.HostsStatusAnswer{Current: serverclient.HostVersions{Bundle: 1, Directory: 5, KRL: 100, BundleSHA256: strings.Repeat("ab", 32), DirectorySHA256: strings.Repeat("ab", 32), KRLSHA256: strings.Repeat("ab", 32)}, Hosts: []serverclient.HostStatusRow{
 		statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: probe}),
 		statusRow("web2", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: stuck}),
 		statusRow("web3", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: mid}),
@@ -227,5 +227,44 @@ func TestServedLine(t *testing.T) {
 		if got := servedLine(state); got != want {
 			t.Errorf("servedLine(%s) = %q, want %q", state, got, want)
 		}
+	}
+}
+
+// TestHostStatusDiverged (PR #72 review C5): a host counts on a version
+// only when its SHA-256 is the server's too; one that reports the current
+// number with another SHA-256, or a version above the current one, is
+// flagged diverged.
+func TestHostStatusDiverged(t *testing.T) {
+	ab, cd := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	same := hbStatus(5, 100)
+	other := hbStatus(5, 100)
+	other.Directory.SHA256 = cd
+	ahead := hbStatus(6, 100)
+	ahead.Directory.SHA256 = cd
+	// Built as JSON: the current versions carry their SHA-256.
+	statusEnv(t, map[string]any{
+		"current": map[string]any{"bundle": 1, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
+		"hosts": []serverclient.HostStatusRow{
+			statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: same}),
+			statusRow("web2", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: other}),
+			statusRow("web3", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: ahead}),
+		},
+	})
+	code, out, stderr := run(t, "host", "status")
+	if code != 0 {
+		t.Fatalf("host status: exit %d: %s", code, stderr)
+	}
+	t.Logf("keyroster host status:\n%s", out)
+	if !strings.Contains(out, "directory v5 on 1/3 hosts\n") || !strings.Contains(out, "KRL v100 on 3/3 hosts\n") {
+		t.Fatalf("diverged hosts counted as converged:\n%s", out)
+	}
+	flagged := map[string]bool{}
+	for _, l := range strings.Split(out, "\n") {
+		if f := strings.Fields(l); len(f) > 0 && strings.HasPrefix(f[0], "web") && strings.HasSuffix(l, "diverged") {
+			flagged[f[0]] = true
+		}
+	}
+	if !flagged["web2"] || !flagged["web3"] || flagged["web1"] {
+		t.Fatalf("diverged flags %v, want web2 and web3:\n%s", flagged, out)
 	}
 }
