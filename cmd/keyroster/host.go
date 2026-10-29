@@ -823,21 +823,29 @@ type forgetCandidate struct {
 	servedHostView
 	SPKIHex      string // the identity's SPKI SHA-256, lowercase hex, as the request carries it
 	ApprovedOnce bool
-	Listed       bool // in host pending's answer, with the facts a forget sends
-	NotYetPolled bool // host status: approved by the directory, not polled since (D-R2)
+	Listed       bool   // in host pending's answer, with the facts a forget sends
+	NotYetPolled bool   // host status: approved by the directory, not polled since (D-R2)
+	EntryName    string // host status: the directory entry holding its keys (Name is the name it enrolled as)
 }
 
 // stateLine is how host forget shows a candidate's state.
 func (c *forgetCandidate) stateLine() string {
 	switch {
 	case !c.Listed && c.NotYetPolled:
-		return notYetPolled + " (entry " + c.Name + ")"
+		return notYetPolled + " (" + c.entryClause() + ")"
 	case !c.ApprovedOnce:
 		return "pending, never approved"
 	case !c.Listed:
-		return c.State + " in the directory (entry " + c.Name + ")"
+		return c.State + " in the directory (" + c.entryClause() + ")"
 	}
 	return servedLine(c.State) + "; " + confirmationLine(&c.servedHostView)
+}
+
+// entryClause names the name a host status candidate enrolled as and the
+// directory entry that holds its keys, which can differ (PR #74 review
+// finding 4): `keyroster host remove` takes the entry's name.
+func (c *forgetCandidate) entryClause() string {
+	return "enrolled as " + c.Name + ", directory entry " + c.EntryName
 }
 
 // forgetCandidates are the agents host forget can name: the pending and
@@ -866,7 +874,7 @@ func forgetCandidates(hosts []serverclient.PendingHost, served []servedHostView,
 		spki, _ := hex.DecodeString(r.IdentitySPKISHA256) // checkHostsStatus checked it
 		v := pendingHostView{Name: r.ExpectedName, Identity: enroll.IdentityFingerprint(spki)}
 		out = append(out, forgetCandidate{servedHostView: servedHostView{pendingHostView: v, State: r.State}, SPKIHex: r.IdentitySPKISHA256, ApprovedOnce: true,
-			NotYetPolled: r.NotYetPolled})
+			NotYetPolled: r.NotYetPolled, EntryName: r.Name})
 		seen[r.IdentitySPKISHA256] = true
 	}
 	return out, nil
@@ -1019,8 +1027,9 @@ func pickForgetTarget(cands []forgetCandidate, name, id string) (*forgetCandidat
 	case len(match) == 1 && match[0].Listed:
 		return match[0], nil
 	case len(match) == 1 && match[0].State == serverclient.HostStateActive:
-		return nil, fmt.Errorf("the directory approves agent %s now (host entry %s): remove the host first (keyroster host remove), wait until the host "+
-			"confirmed that version, then forget it (docs/runbooks/host-setup.md \"Removing a host\"). Nothing was forgotten", match[0].Identity, match[0].Name)
+		return nil, fmt.Errorf("the directory approves agent %s now (%s): remove that entry first (keyroster host remove %s), wait until the host "+
+			"confirmed that version, then forget it (docs/runbooks/host-setup.md \"Removing a host\"). Nothing was forgotten",
+			match[0].Identity, match[0].entryClause(), match[0].EntryName)
 	case len(match) == 1:
 		return nil, fmt.Errorf("agent %s changed while host pending and host status were read; run the command again. Nothing was forgotten", match[0].Identity)
 	case len(match) > 1:

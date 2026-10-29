@@ -686,6 +686,28 @@ func TestHostForget(t *testing.T) {
 			t.Fatalf("forget of an agent the directory approves: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
 		}
 	})
+	t.Run("approved_agent_under_another_entry_named", func(t *testing.T) {
+		// PR #74 review finding 4 (03-08b fix round 1): agent B enrolled as
+		// web1, but its host keys sit on the directory entry db1. The
+		// refusal names that entry, not web1, so the admin removes the
+		// right host.
+		e := forgetEnv(t, nil, web1)
+		b := activeRow("db1", "22")
+		b.ExpectedName = "web1"
+		e.hostsStatus(t, b)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "--identity", identityOf("22"))
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "enrolled as web1, directory entry db1") ||
+			!strings.Contains(stderr, "keyroster host remove db1") || strings.Contains(stderr, "entry web1") {
+			t.Fatalf("forget of an agent approved under another entry: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+		code, _, stderr = run(t, "host", "forget", "web1")
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "forget_name_ambiguous") || !strings.Contains(stderr, "directory entry db1") ||
+			strings.Contains(stderr, "entry web1") {
+			t.Fatalf("the ambiguity listing of an agent approved under another entry: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+	})
 	t.Run("not_confirmed_refused_locally", func(t *testing.T) {
 		e := forgetEnv(t, nil, servedRow("web1", "00", key, false))
 		var called bool
