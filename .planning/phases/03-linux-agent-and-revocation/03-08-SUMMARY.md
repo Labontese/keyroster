@@ -362,7 +362,7 @@ The review ran at `b95a59f` against base `74504cf`: 18 findings confirmed (2 of 
 | C4/C5 | `89d672e` | Forget's wait requires all three: the reported directory is at or above the removal version, it is not above the current version, and its SHA-256 matches the server's directory under that number (the signer's copy for an older one). hosts/status carries the current SHA-256s. host status counts a host on a version, and marks a difference with `*`, by SHA-256 too. It flags `diverged` for a version above the current one, or the current number with other bytes. `Status.Committed` compares the SHA-256 (03-12's gate), and `Status.Diverged` is new. |
 | C2/C6 | `306dee5` | a STATUS column (the stored status's age); `status_stale` once the stored status is more than 2 × (15 min + 60 s) = 1920 s old while the host is seen |
 | C16 | `ab55814`, `4bf60c1` | a failed drift check writes a status with `last_check.error` (printable, at most 512 bytes, `drift` false), and the KRL's age is still logged; host status shows DRIFT `failed` and `check_failed` with the error |
-| C17 | `d4832e4` | every pending-marker write in `Transition` publishes a status under the apply lock Apply holds (`publishStatus`, `publishPending`). It runs no program, and sshd's version and settings are carried over. The KRL is still the one `current` names. |
+| C17 | `d4832e4`, `89ffc7b` | every pending-marker write in `Transition` publishes a status under the apply lock Apply holds (`publishStatus`, `publishPending`), and the KRL is still the one `current` names. `d4832e4`'s message says that status runs no program, but `sshd -T` still ran in an if statement's init; `89ffc7b` corrects it (found in the post-commit advisor review), so it now runs nothing and carries sshd's version and settings over. |
 | C7 | `b02f579` | the fetcher's OpenRC script creates its log in `start_pre` (`checkpath -f -o keyroster-agent:keyroster-agent -m 0640 "/var/log/${RC_SVCNAME}.log"`), asserted by `TestUnits/openrc_scripts`; OpenRC stays UNVERIFIED until 03-16 |
 | C8 | `b02f579` | The fetcher unit's comment and the runbook table now say what the unit enforces: IPv4 and IPv6 sockets only, with no destination limit. No `IPAddressAllow` was added. |
 | D-R4 (S1), C18 todo | `79074b9` | T-03-284, host-setup.md paragraph, todos `signed-applier-status` and `page-host-status` |
@@ -382,7 +382,7 @@ The RED runs were made on the head before each fix, with only the test (and, whe
 - `TestForgetGateChecksTheDirectory/version_above_current_refused` and `same_number_other_sha_refused`: forget answered 200. `TestHostStatusDiverged`: `directory v5 on 2/3 hosts`, and no `diverged`. `TestCommittedAndDiverged` was added GREEN.
 - `TestStatusStale`: `status_stale <nil>`. `TestHostStatusAge`: no STATUS column and no `status_stale`.
 - `TestRunPublishesFailedCheck` (WSL): no status after the failed check within 10 s. `TestHostStatusCheckFailed`: DRIFT showed `no`. The `TestValidate` `last_check.error` cases were added GREEN.
-- `TestStatus/pending_published_during_the_swap` (WSL): the outbox showed `pending none` at both swaps.
+- `TestStatus/pending_published_during_the_swap` (WSL): the outbox showed `pending none` at both swaps. `TestStatus/swap_status_runs_nothing` (WSL, before `89ffc7b`): `the swap's status ran ["sshd -T -f .../sshd_config"]`.
 - `TestUnits/fetcher_unit` and `openrc_scripts` (WSL): the comment claimed "the agent server only", and the script had no `checkpath`.
 
 Expected test changes, not regressions:
@@ -404,7 +404,7 @@ Expected test changes, not regressions:
 10. **[Design, C5] `diverged` is computed by the CLI** from the answer, which now carries the current SHA-256s, like the convergence counts it belongs to. `silent`, `status_stale` and `seq_regressed` are server flags on the server's clock. `Status.Committed` now takes `heartbeat.Doc`s, and its two e2e callers pass `HostVersions.Docs()`.
 11. **[Schema, C16] `last_check` gains an optional `error`.** It is printable ASCII within 512 bytes, `drift` is never set beside it, and it is validated on both sides, as the closed-struct rule asks.
 12. **[Scope, C17] The one-step (collapsed) swap also publishes its `final` marker.**
-13. **[Test fix] `TestHostStatusAge` (added in `306dee5`) matched "12s ago"**, which a run slower than a second turns into 13s. It failed once on Windows, and `ab55814` loosens the match.
+13. **[Test fix] `TestHostStatusAge` (added in `306dee5`) matched "12s ago" exactly.** A run slower than a second would turn that into "13s ago". One Windows run of `-run TestHostStatus` failed while `ab55814` was being prepared; which test failed was not captured, so this is the likely cause, not an observed one. `ab55814` loosens the match. Afterwards `go test -count=30 -run TestHostStatus ./cmd/keyroster/` passed 30 of 30 on Windows.
 
 ### What ran and what did not (fix round 1)
 
@@ -419,7 +419,8 @@ Expected test changes, not regressions:
   - golangci-lint found one issue, gosec G115 in `status.go`, fixed in `a6e6e23`. On a copy of the tree with that fix it then reported 0 issues for linux, windows and darwin, and `TestStatus` passed again.
 - **WSL, on copies of the working tree, removed afterwards:**
   - each fix's RED and GREEN runs for `internal/agent/apply` and `internal/agent/fetch`;
-  - `go vet` and `go test ./internal/agent/... ./cmd/keyroster-agent/` on the tree of `d4832e4`: every package passed.
+  - `go vet` and `go test ./internal/agent/... ./cmd/keyroster-agent/` on the tree of `d4832e4`: every package passed;
+  - after `89ffc7b`, on its tree: `go test -run 'TestStatus|TestRun|TestApply' ./internal/agent/apply/`, `CGO_ENABLED=1 go test -race ./internal/agent/apply/` and golangci-lint for linux, windows and darwin on `./internal/agent/...` (0 issues) passed. The full gate ran before `89ffc7b`; CI runs it on the final head.
 - **Windows (Go 1.27.1):**
   - after each commit: `go vet ./...` and the server, serverdb, serverclient, heartbeat and CLI tests;
   - `go test ./...` on the final tree: every package passed except `internal/agent/paths` `TestAllowed`. It fails on Windows at `b95a59f` too, because its paths are POSIX, and no CI lane runs that package on Windows. It is pre-existing and was not touched.
@@ -451,6 +452,6 @@ Expected test changes, not regressions:
 
 ## Fix round 1 self-check: PASSED
 
-- **Commits.** `fc8ce6c`, `4c60381`, `89e525c`, `c9e4ecf`, `6faf573`, `9be781a`, `89d672e`, `306dee5`, `ab55814`, `d4832e4`, `4bf60c1`, `b02f579`, `79074b9`, `5ac2b86` and `a6e6e23` are ancestors of HEAD: 15 commits from `b95a59f`, and this file's commit makes 16. Each is SSH-signed by keyroster-bot (`%G?` = G against the bot's allowed signer) and has no attribution lines.
+- **Commits.** `fc8ce6c`, `4c60381`, `89e525c`, `c9e4ecf`, `6faf573`, `9be781a`, `89d672e`, `306dee5`, `ab55814`, `d4832e4`, `4bf60c1`, `b02f579`, `79074b9`, `5ac2b86`, `a6e6e23`, `6fb5cad` (this section's first version) and `89ffc7b` are ancestors of HEAD: 17 commits from `b95a59f`, and this file's update makes 18. Each is SSH-signed by keyroster-bot (`%G?` = G against the bot's allowed signer) and has no attribution lines.
 - **Files.** `.planning/todos/pending/2026-10-29-signed-applier-status.md` and `2026-10-29-page-host-status.md` exist. T-03-284 is in 03-08-PLAN.md's threat register.
 - **No private address or host name** in any staged diff (checked before each commit).
