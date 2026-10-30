@@ -41,12 +41,14 @@ import (
 //     one of the named host keys (forget_host_in_directory); a stored
 //     directory that does not parse cannot tell, and is refused
 //     (forget_directory_unreadable);
-//  8. a confirmation at or below the installed directory version whose
+//  8. a confirmation at or below the installed directory version (a
+//     version above it is refused before any stored row is read) whose
 //     SHA-256 is that of the signer's stored directory document at that
 //     version, without signatures (forget_confirmation_invalid).
 //
 // Then one transaction: the bundle still the one loaded at start, the
-// host_forget leaf (the policy and directory versions in force, the
+// stored directory version still the one checked in memory
+// (directory_changed, unavailable), the host_forget leaf (the policy and directory versions in force, the
 // resolution time, the signing bytes and the evidence) and the request ID
 // in the request-ID table that revoke and recovery share. The answer
 // leaves the signer only after COMMIT.
@@ -99,6 +101,16 @@ func (s *Signer) ForgetAgent(ctx context.Context, peer Peer, req *wire.ForgetReq
 		// policy loaded at start; commit only while it is still in force.
 		if err := s.checkTrustCurrent(s.db.LatestBundleVersionTx(ctx, tx)); err != nil {
 			return err
+		}
+		// Steps 7 and 8 were checked against the directory loaded in
+		// memory; commit only while it is still the one stored, as a
+		// login does (PR #75 review finding 7).
+		switch v, err := s.db.LatestDirectoryVersionTx(ctx, tx); {
+		case err != nil:
+			return refusalErr(wire.CodeUnavailable, "state_unavailable", err)
+		case v != s.directoryVersion:
+			s.log.Error("directory changed under the running signer", "checked_version", s.directoryVersion, "installed_version", v)
+			return refusalErr(wire.CodeUnavailable, "directory_changed", errDirectoryChanged)
 		}
 		body, err := (&tlog.HostForgetBody{
 			PolicyVersion:     s.policy.Version,
@@ -173,8 +185,12 @@ func (s *Signer) checkForgetDirectoryLocked(ctx context.Context, req *wire.Forge
 	if req.ConfirmedVersion == 0 {
 		return nil
 	}
-	// The stored directories are the installed versions, none above the
-	// one in force, so a version above it has no document and is refused.
+	// A version above the one in force is refused before any stored row
+	// is read: a row above it is not a directory in force (PR #75 review
+	// finding 7), and the commit refuses a forget while one is stored.
+	if req.ConfirmedVersion > s.directoryVersion {
+		return refusalErr(wire.CodeRefused, "forget_confirmation_invalid", nil)
+	}
 	doc := s.directoryRaw
 	if req.ConfirmedVersion != s.directoryVersion {
 		d, err := s.db.DirectoryByVersion(ctx, req.ConfirmedVersion)

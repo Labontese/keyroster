@@ -243,6 +243,20 @@ func TestForgetAgent(t *testing.T) {
 		req.ConfirmedVersion = 3
 		e.refused(e.sign(req, wire.ForgetSSHSIGNamespace, e.fx.Admins[0], e.fx.Admins[1]), "forget_confirmation_invalid")
 	})
+	t.Run("directory_written_behind_the_signer_refused", func(t *testing.T) {
+		// PR #75 review finding 7: a directory row of version 3 reached the
+		// database while the signer still holds v2 (an install whose COMMIT
+		// landed but returned an error, or another process). A confirmation
+		// at v3 is above the version in force, whatever the stored row says;
+		// any other forget is refused at commit, as a login is.
+		e := newForgetEnv(t, 2, testInstallationID)
+		execSQL(t, e.dbPath, `INSERT INTO directory (version, doc, sigs, policy_version, installed_at_us) VALUES (3, 'x', 'x', 1, 1)`)
+		req := e.request()
+		req.RemovalVersion, req.ConfirmedVersion, req.ConfirmedSHA256 = 3, 3, sha256.Sum256([]byte("x"))
+		e.refused(e.sign(req, wire.ForgetSSHSIGNamespace, e.fx.Admins[0], e.fx.Admins[1]), "forget_confirmation_invalid")
+		e.refused(e.request(e.fx.Admins[0], e.fx.Admins[1]), "directory_changed")
+		e.refused(e.neverApproved(e.fx.Admins[0]), "directory_changed")
+	})
 	t.Run("confirmation_sha_mismatch_refused", func(t *testing.T) {
 		e := newForgetEnv(t, 2, testInstallationID)
 		req := e.request()
