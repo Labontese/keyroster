@@ -627,7 +627,10 @@ func certTypeName(t uint32) string {
 //     neither, as the standard base64 of its document and signatures; on a
 //     revocation_recovery line, "import_krl_versions" once, as the KRL
 //     versions of its imports (checkImportVersions); and none of the last
-//     five on a line of another kind
+//     five on a line of another kind. A host_forget line must be byte for
+//     byte the line Export writes for its leaf, so all its decoded fields
+//     are the leaf's own, and no other line may carry "approved_once" or
+//     "host_gone" (checkForgetFields)
 //   - every leaf decodes, records its own index, and leaf times never
 //     decrease
 //   - the first bundle_install entry holds a genesis bundle (version 1,
@@ -772,6 +775,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
 		if err := checkGrepFields(sc.Bytes(), leaf); err != nil {
+			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
+		}
+		if err := checkForgetFields(sc.Bytes(), leaf, raw); err != nil {
 			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
 		if err := revs.before(want, leaf.Kind); err != nil {
@@ -1122,43 +1128,34 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 			return fmt.Errorf("its decoded %s field is not the one of its %s leaf", k, leaf.Kind)
 		}
 	}
-	if err := checkForgetFields(s, leaf); err != nil {
-		return err
-	}
 	return checkImportVersions(s, leaf)
 }
 
-// checkForgetFields checks the "approved_once" and "host_gone" fields of a
-// host_forget line (03-08c), which say whether the forget needed the admin
-// quorum and whether it overrode the host's confirmation: on such a line
-// each must occur exactly once, followed by the leaf's own value, as
-// Export writes them; on a line of any other kind neither may occur. A
-// host_forget leaf whose request does not decode is left to verifyForget,
-// which refuses it.
-func checkForgetFields(s string, leaf tlog.Leaf) error {
-	const keyApproved, keyGone = `"approved_once":`, `"host_gone":`
+// checkForgetFields binds the decoded fields of a host_forget line
+// (03-08c; PR #75 review, owner decision D-1), which the runbook reads to
+// see what was forgotten and who signed: the agent's identity, expected
+// name, enrollment time and host key fingerprints, approved_once,
+// host_gone, the removal and confirmed versions and SHA-256, the request
+// ID and times, the policy and directory versions, the evidence types and
+// admin_fingerprints (rendered from the leaf's own evidence, whose
+// signatures verifyForget checks). Such a line, raw its leaf bytes, must
+// be byte for byte the line Export writes for it (exportLeafLine): no field
+// changed, added, removed, repeated or re-encoded. On a line of any other
+// kind neither "approved_once" nor "host_gone" may occur.
+func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
 	if leaf.Kind != tlog.KindHostForget {
-		if strings.Contains(s, keyApproved) || strings.Contains(s, keyGone) {
+		s := string(text)
+		if strings.Contains(s, `"approved_once":`) || strings.Contains(s, `"host_gone":`) {
 			return fmt.Errorf("its decoded approved_once or host_gone field is not one of a host_forget leaf (%s)", leaf.Kind)
 		}
 		return nil
 	}
-	body, err := tlog.DecodeHostForgetBody(leaf.Body)
+	want, err := exportLeafLine(leaf.Index, raw)
 	if err != nil {
-		return nil // verifyForget refuses the leaf
+		return err
 	}
-	req, err := wire.ParseForgetSigningBytes(body.Request)
-	if err != nil {
-		return nil // verifyForget refuses the leaf
-	}
-	for _, f := range []struct {
-		key string
-		val bool
-	}{{keyApproved, req.ApprovedOnce}, {keyGone, req.HostGone}} {
-		v := f.key + strconv.FormatBool(f.val)
-		if strings.Count(s, f.key) != 1 || !strings.Contains(s, v+",") && !strings.Contains(s, v+"}") {
-			return fmt.Errorf("its decoded %s field is not the one of its host_forget leaf", strings.Trim(f.key, `":`))
-		}
+	if !bytes.Equal(text, want) {
+		return errors.New("its line is not the one export writes for its host_forget leaf: a decoded field is not the leaf's own")
 	}
 	return nil
 }

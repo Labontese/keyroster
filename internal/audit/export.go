@@ -16,13 +16,17 @@
 // leaf line, "bundle_version" on every bundle_install line, and "version",
 // "directory" and "sigs" on a directory_install line that carries them
 // must each occur once, with the leaf's own value, and on no line of
-// another kind (checkGrepFields, checkReplayFields). Exports written
-// before 02-12 have no "version", and those before 03-02 no "directory"
-// or "sigs"; their lines still verify.
+// another kind (checkGrepFields, checkReplayFields). A host_forget line
+// (03-08c) must be byte for byte the line Export writes for its leaf, so
+// every decoded field on it is the leaf's own (checkForgetFields; PR #75
+// review, owner decision D-1). Exports written before 02-12 have no
+// "version", and those before 03-02 no "directory" or "sigs"; their lines
+// still verify.
 package audit
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -62,9 +66,13 @@ func Export(ctx context.Context, w io.Writer, src LogSource) (uint64, error) {
 	enc.SetEscapeHTML(false)
 	var n uint64
 	note, _, err := src.ReadLog(ctx, func(idx uint64, leaf []byte) error {
-		i := idx
 		n++
-		return enc.Encode(ExportLine{Index: &i, Leaf: base64.StdEncoding.EncodeToString(leaf), Decoded: Decode(leaf)})
+		line, err := exportLeafLine(idx, leaf)
+		if err != nil {
+			return err
+		}
+		_, err = bw.Write(append(line, '\n'))
+		return err
 	})
 	if err != nil {
 		return 0, err
@@ -73,6 +81,19 @@ func Export(ctx context.Context, w io.Writer, src LogSource) (uint64, error) {
 		return 0, err
 	}
 	return n, bw.Flush()
+}
+
+// exportLeafLine is the line Export writes for the leaf bytes leaf at index idx,
+// without its newline. Verify requires a host_forget line to be exactly
+// it (checkForgetFields).
+func exportLeafLine(idx uint64, leaf []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(ExportLine{Index: &idx, Leaf: base64.StdEncoding.EncodeToString(leaf), Decoded: Decode(leaf)}); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // Decode renders leaf bytes as an informational JSON object. A leaf that
@@ -342,8 +363,9 @@ func decodeRecovery(m map[string]any, b *tlog.RecoveryBody) {
 // fingerprints of the keys that signed (admin_fingerprints), so the entry
 // names who forgot. It renders no key named "kind" (beyond the line's
 // own), "bundle_version", "version", "directory" or "sigs"
-// (checkGrepFields, checkReplayFields), and Verify binds the rendered
-// approved_once and host_gone to the leaf (checkForgetFields).
+// (checkGrepFields, checkReplayFields), and Verify requires the whole
+// line to be the one Export writes for the leaf, so every field rendered
+// here is bound to it (checkForgetFields).
 func decodeHostForget(m map[string]any, b *tlog.HostForgetBody) {
 	m["policy_version"] = b.PolicyVersion
 	m["directory_version"] = b.DirectoryVersion

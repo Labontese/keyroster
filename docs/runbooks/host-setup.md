@@ -1370,9 +1370,18 @@ enrolled host can (D-03); that is the leak this order accepts.
    `host_forget` entry, which audit verify re-checks with the signer's rule
    (the installation, the number of distinct admin signatures under the
    policy in force, the request ID used once, no host key in the directory
-   in force, the confirmation's directory logged), and whose export line
-   names the agent's `identity`, `approved_once`, `host_gone` and the
-   signing keys' fingerprints (`admin_fingerprints`). Audit verify checks
+   in force, the confirmation's directory logged). Audit verify also
+   refuses the export unless each `host_forget` line is exactly the line
+   the signer's export writes for its verified entry (owner decision D-1
+   of PR #75's review), so every field on it is the entry's own: the
+   agent's `identity`, `expected_name`, `enrolled_at_us` and
+   `host_key_fingerprints`, `approved_once`, `host_gone`,
+   `removal_version`, `confirmed_version` and `confirmed_sha256`,
+   `request_id`, `created_at`, `resolved_at`, the policy and directory
+   versions, `evidence_types`, and `admin_fingerprints`, the fingerprints
+   of the keys whose signatures it checked. Read these fields only from an
+   export that audit verify accepted. They say what the admins signed,
+   not that it was true: audit verify checks
    that the number of signatures fits the signed `approved_once`; it
    cannot tell a false one, because the log records no approvals: one
    admin together with a compromised keyroster-server could forget an

@@ -333,7 +333,8 @@ func TestExportHostForget(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, k := range []string{"identity", "expected_name", "host_key_fingerprints", "approved_once", "host_gone", "removal_version",
-		"confirmed_version", "confirmed_sha256", "policy_version", "directory_version", "evidence_types", "admin_fingerprints"} {
+		"confirmed_version", "confirmed_sha256", "policy_version", "directory_version", "evidence_types", "admin_fingerprints",
+		"enrolled_at_us", "request_id", "created_at", "resolved_at"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("the export line lacks %q: %s", k, line.Decoded)
 		}
@@ -359,15 +360,45 @@ func TestExportHostForget(t *testing.T) {
 	if _, err := ff.verify(join(lines), nil); err != nil {
 		t.Fatalf("the export does not verify: %v", err)
 	}
-	for _, edit := range []func(m map[string]any){
-		func(m map[string]any) { m["host_gone"] = true },
-		func(m map[string]any) { m["approved_once"] = false },
-		func(m map[string]any) { delete(m, "host_gone") },
-	} {
-		if _, err := ff.verify(join(editDecodedLine(t, lines, i, edit)), nil); err == nil || !strings.Contains(err.Error(), "host_forget leaf") {
-			t.Errorf("an edited host_forget line verifies: %v", err)
+	// PR #75 review, owner decision D-1: verify binds every decoded field
+	// of a host_forget line to its leaf. An unedited round trip verifies;
+	// each field changed, each field removed, an added field, a duplicated
+	// key and a re-encoded line are refused.
+	if _, err := ff.verify(join(editDecodedLine(t, lines, i, func(map[string]any) {})), nil); err != nil {
+		t.Fatalf("the host_forget line re-encoded unchanged does not verify: %v", err)
+	}
+	refused := func(what string, l []string) {
+		t.Helper()
+		if _, err := ff.verify(join(l), nil); err == nil || !strings.Contains(err.Error(), "host_forget") {
+			t.Errorf("a host_forget line with %s verifies: %v", what, err)
 		}
 	}
+	for k, v := range m {
+		var changed any
+		switch v := v.(type) {
+		case string:
+			changed = v + "0"
+		case float64:
+			changed = v + 1
+		case bool:
+			changed = !v
+		case []any:
+			changed = append(slices.Clone(v), "SHA256:mallory")
+		default:
+			t.Fatalf("decoded field %q has an unexpected type %T", k, v)
+		}
+		refused(k+" changed", editDecodedLine(t, lines, i, func(m map[string]any) { m[k] = changed }))
+		refused(k+" removed", editDecodedLine(t, lines, i, func(m map[string]any) { delete(m, k) }))
+	}
+	refused("the admins swapped for another", editDecodedLine(t, lines, i, func(m map[string]any) { m["admin_fingerprints"] = []any{"SHA256:mallory"} }))
+	refused("an added field", editDecodedLine(t, lines, i, func(m map[string]any) { m["note"] = "authorized" }))
+	other := "SHA256:" + base64.RawStdEncoding.EncodeToString(make([]byte, 32))
+	dup := strings.Replace(lines[i], `"decoded":{`, `"decoded":{"identity":"`+other+`",`, 1)
+	refused("a duplicated key", append(append(slices.Clone(lines[:i]), dup), lines[i+1:]...))
+	dupObj := strings.TrimSuffix(lines[i], "}") + `,"decoded":` + string(line.Decoded) + "}"
+	dupObj = strings.Replace(dupObj, `"decoded":{"admin_fingerprints":[`, `"decoded":{"admin_fingerprints":["SHA256:mallory",`, 1)
+	refused("a duplicated decoded object", append(append(slices.Clone(lines[:i]), dupObj), lines[i+1:]...))
+	refused("extra white space", append(append(slices.Clone(lines[:i]), strings.Replace(lines[i], `,"decoded":`, `, "decoded":`, 1)), lines[i+1:]...))
 	// Neither key on a line of another kind.
 	if _, err := ff.verify(join(editDecodedLine(t, lines, 0, func(m map[string]any) { m["host_gone"] = false })), nil); err == nil {
 		t.Error("a bundle_install line with host_gone verifies")
