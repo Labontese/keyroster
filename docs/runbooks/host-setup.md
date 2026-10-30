@@ -929,8 +929,11 @@ capture holds, the capture's KRL still lands. The cases:
 
 The applier then installs the capture's KRL alone, verified again against
 the bundle it accepted (during a widening wait, against the pending
-target's), with the CA keys and principals in force, and `last_apply`
-names the refusal. After `reset-directory` a verified successor bundle's
+target's), with the CA keys and principals in force. `last_apply.result`
+is `refused`, and its error names the refusal (`generation_too_large`,
+`ca_line_rejected`, `directory_not_verified` or `host_not_in_directory`,
+for example); `keyroster host status` shows the error as a
+`last apply error` note. After `reset-directory` a verified successor bundle's
 CA keys apply as well, with last-good's principals. A KRL that only the
 refused bundle's ops key signed waits with that bundle, and before the
 first install the refusal stands and nothing is installed. The host keeps

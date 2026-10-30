@@ -332,7 +332,9 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 
 // refusals are the apply errors that are a refusal by design (the signed
 // state, the host's sshd layout or its clock bound refused, nothing
-// changed), as opposed to a tool failure: last_apply.result refused.
+// changed), as opposed to a tool failure: last_apply.result refused. A
+// generation above the caps is refused before anything is written, also
+// when the KRL-alone pass then commits a newer KRL (PR #76 review F4).
 var refusals = []error{
 	state.ErrPins, state.ErrBundleOlder, state.ErrBundleChainGap, state.ErrBundle, state.ErrBundleInstall,
 	state.ErrPolicyMissing, state.ErrNoBundle, state.ErrDirOlder, state.ErrDirChainGap, state.ErrDir,
@@ -340,7 +342,7 @@ var refusals = []error{
 	ErrPhase2Pending, ErrPhase2Differs, ErrHostNotInDirectory, ErrHostKeysDisagree, ErrKRLRollback,
 	ErrForeignTrust, ErrRHEL8, ErrFIPS, ErrHostPoPNotEnabled, ErrConfigUnsafe, ErrSSHKeygenMissing,
 	ErrCALineRejected, ErrKRLInvalid, ErrKRLRejected, ErrKRLDropsKeyEntry, ErrPendingStateUnknown,
-	ErrLoginGraceUnbounded, ErrLoginGraceUnknown, ErrStateDirUnsafe,
+	ErrLoginGraceUnbounded, ErrLoginGraceUnknown, ErrStateDirUnsafe, ErrGenerationTooLarge,
 }
 
 // applyResult is last_apply.result: rolled_back after a rollback, ok
