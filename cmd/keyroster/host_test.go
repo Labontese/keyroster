@@ -923,6 +923,16 @@ func TestHostForget(t *testing.T) {
 			}
 		}
 	})
+	t.Run("no_installation_id_refused_locally", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
+		e.resignBundle(t, func(b *trust.Bundle) { b.InstallationID = "" })
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "forget_no_installation_id") || e.agent.forgetSigns() != 0 {
+			t.Fatalf("a forget under a bundle without an installation ID: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+	})
 	t.Run("logged_not_deleted_printed", func(t *testing.T) {
 		e := forgetEnv(t, nil, web1)
 		var called bool

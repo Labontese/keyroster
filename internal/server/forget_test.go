@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -950,6 +951,12 @@ func TestForgetHost(t *testing.T) {
 			if rec := e.adminDo(t, http.MethodPost, serverclient.AdminForgetHostPath, []byte(body)); rec.Code != http.StatusBadRequest {
 				t.Errorf("%s: %d %s, want 400", name, rec.Code, rec.Body.String())
 			}
+		}
+		// An enrollment time no row can hold (above int64).
+		big := e.wireForget(t, forgetReqOf(e.agentRow(t, a.spki), true))
+		big.EnrolledAtMicros = math.MaxUint64
+		if rec := e.forgetWire(t, big); rec.Code != http.StatusBadRequest {
+			t.Errorf("an enrollment time above int64: %d %s, want 400", rec.Code, rec.Body.String())
 		}
 		if e.agentRow(t, a.spki) == nil || e.fake.count("ForgetAgent") != 0 {
 			t.Fatal("a malformed forget deleted the row or reached the signer")
