@@ -1402,10 +1402,12 @@ enrolled host can (D-03); that is the leak this order accepts.
    `removal_version`, `confirmed_version` and `confirmed_sha256`,
    `request_id`, `created_at`, `resolved_at`, the policy and directory
    versions, `evidence_types`, and `admin_fingerprints`, the fingerprints
-   of the keys whose signatures it checked. Read these fields only from an
-   export that audit verify accepted. They say what the admins signed,
-   not that it was true: audit verify checks
-   that the number of signatures fits the signed `approved_once`; it
+   of the keys whose signatures it checked (each evidence item must be a
+   valid signature by an admin of the policy in force; an admin who signs
+   twice counts once). Read these fields only from an export that audit
+   verify accepted. They say what the admins signed, not that it was
+   true: audit verify checks that the number of signatures fits the
+   signed `approved_once`; it
    cannot tell a false one, because the log records no approvals: one
    admin together with a compromised keyroster-server could forget an
    approved host with one signature, but that server could drop the row

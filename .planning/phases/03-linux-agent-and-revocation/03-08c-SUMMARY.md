@@ -387,6 +387,81 @@ None.
 - **03-09:** depends on this plan; its precondition checks this SUMMARY on origin/main. The leaf kinds 11 to 14 stay reserved, and 0x0A to 0x0C are free. `revoke_request` now holds revoke, recovery and forget request IDs, and audit keeps one set for all three.
 - **03-16:** the forget drill proves every UNVERIFIED homelab item above (owner decision Q4).
 
+## Pre-merge review fix round 1
+
+The review ran at head `ddcc9a2` against base `6dea9f3` in security mode. Daniel decided D-1 to D-4 on 2026-10-30. Findings [3], [4] and [6] were refuted and need no action.
+
+### Owner decisions
+
+- **D-1: audit verify binds the host_forget line (findings [1] and [2], medium).** A `host_forget` export line must now be byte for byte the line the export writes for its verified leaf. Export and verify share one encoder, `exportLeafLine`. Every decoded field is therefore the leaf's own:
+  - identity, expected_name, enrolled_at_us and host_key_fingerprints;
+  - approved_once and host_gone;
+  - removal_version, confirmed_version and confirmed_sha256;
+  - request_id, created_at and resolved_at;
+  - the policy and directory versions;
+  - evidence_types;
+  - admin_fingerprints, rendered from the leaf's own evidence, whose signatures verifyForget checks.
+
+  A changed, added, removed, repeated or re-encoded field is refused. So is a duplicated key or a duplicated `decoded` object, which a map comparison would let through.
+
+  This replaces the round's earlier binding of approved_once and host_gone only. Lines 14 and 139 above describe that earlier state. Lines of other kinds still may not carry approved_once or host_gone.
+
+  The runbook's "Checking that a forget was authorized" now lists exactly these fields, and says that they record what the admins signed, not that it was true (T-03-293 stands).
+- **D-2: the executor's questions 1, 3 and 4 are owner-approved as built.**
+  - host_gone may appear together with a confirmation (deviation 1).
+  - Forget waits out every swap (Owner attention 2).
+  - forget_no_installation_id answers 403 (deviation 12).
+- **D-3: the same-second re-enrollment residual is accepted (Owner attention 3).** It is recorded in threat row T-03-286 of 03-08c-PLAN.md and in host-setup.md's "Removing a host" step 3.
+- **D-4: CI gets no quorum-2 e2e lane (Owner attention 4).** 03-16-PLAN.md's forget drill now records the admin quorum the forget used: a `quorum=` field on the forget line, which must equal the entry's admin_fingerprints count. When the homelab policy has at least two admins, the drill runs the forget at quorum 2. Until then, host-setup.md keeps quorum 2 labelled UNVERIFIED end to end.
+
+### Fixes
+
+| Finding | Commit | Test | RED and mutants (scratchpad `fix75-1/`) |
+|---|---|---|---|
+| [0] a forget could delete a host that resumed service: heartbeat stored, confirmation not yet cleared | `4479225`, then `939b5ef` (the refusal code) | `TestRemovalConfirmation/resumed_{before,after}_the_signer_{principals_file,rendered_entry}`, `resumed_host_gone_overrides`, `no_or_unreadable_heartbeat_refused` | RED: 200 with the row deleted in all four cases. 6 mutants killed: the principalsShown term, the Pending term, a nil body accepted, the pre-signer check, the delete's error mapping, and the delete's predicate reverted to swapPending |
+| [7] the signer's forget trusted the in-memory directory | `9bcd77b` | `TestForgetAgent/directory_written_behind_the_signer_refused` | RED: accepted (`Leaf:5`). With only the guard in place: accepted (`Leaf:6`). 2 mutants killed: the guard, and the transaction check |
+| [5] --host-gone over a pending swap on a confirmed agent was described as "never confirmed" | `2208e33` | `swap_pending_host_gone_sends_both` (CLI), `TestHostForgetHostGone/host_gone_sent` (CLI, the other branch), `pending_swap_host_gone_overrides` and `principals_again_clears` (server log) | RED in both packages. 4 mutants killed: the CLI summary, the CLI closing line, the server branch, and the server's confirmed version |
+| D-1 (findings [1] and [2]) | `3f2caf1` | `TestExportHostForget`: every decoded key changed and removed, admins swapped, a field added, a duplicated key, a duplicated decoded object, extra white space, and an unchanged re-encoding that still verifies | RED: 36 tamper cases verified; the 3 others (kind changed, kind removed, a duplicated decoded object) the kind check already refused. 3 mutants killed: the line equality, the other-kind check, and the call site |
+| Docs for the above, D-3 and D-4 | `c3f5c58` | n/a | n/a |
+
+**[0] in detail.** A forget that rests on the recorded confirmation runs `removalStillApplied` on the stored heartbeat twice: before the signer is asked, and again inside DeleteAgentIf's transaction. It accepts a heartbeat only if the heartbeat parses, shows no pending swap, and shows no principals by `principalsShown`, the rule by which reconcileRemoval clears a confirmation. Both checks use the same rule, so they cannot drift apart.
+
+`principalsEmptied` is deliberately not required: host_keys_rotated keeps a confirmation, and `keys_rotated_noop_apply_kept` forgets such a host without --host-gone. A missing or unreadable heartbeat refuses as well, because a confirmation is only ever recorded from a stored heartbeat.
+
+The two checks answer differently:
+- Before the signer, the answer is 409 forget_state_changed. The CLI's next run reads host pending, which clears the confirmation, and then refuses locally, naming --host-gone. `939b5ef` changed this code from host_removal_not_applied, which the CLI stopped mapping in deviation 9.
+- After the signer, the answer is 409 forget_logged_not_deleted with the leaf.
+
+--host-gone keeps its override.
+
+**[7] in detail.** A confirmation above the version in force is refused forget_confirmation_invalid before any stored row is read; this restores the guard that deviation 13 removed. The forget's transaction also re-reads `LatestDirectoryVersionTx` and refuses directory_changed (unavailable) when it differs, as login does.
+
+**[5] in detail.** With a confirmation in the request, the CLI prints `host_gone: overrides the host's unfinished swap` and closes with "it overrode the host's unfinished swap; the host had confirmed its removal". The server logs `agent forgotten with --host-gone over a pending swap` with removal_confirmed_version.
+
+### Gate and CI
+
+- **Windows (Go 1.27.1):** after each change, the package tests, every RED run, every mutant, and `GOOS=linux go vet -tags e2e ./test/e2e/`.
+- **The local gate in WSL, on a `git archive` copy outside the repository.** It ran three times:
+  - **On `c3f5c58`:** `GATE PASSED`.
+  - **On the final code head `939b5ef`, first run:** failed on `TestFetch/more_repolls_immediately` in `internal/agent/fetch` (`requests ... in 1.10425855s, want two at once`). This package has no diff against the PR's base, and the test passed in the run on `c3f5c58`. It also passed 10 runs out of 10 alone under `-race`. It is recorded in deferred-items.md as a pre-existing timing flake.
+  - **On `939b5ef`, rerun: exit 0 (`GATE PASSED`).** Each of these passed:
+    - gofmt, with its positive control;
+    - `CGO_ENABLED=1 go test -race -count=1 ./...`: 34 packages ok, with no data race;
+    - `go vet`: plain, `e2e`, and `e2e systemdsmoke`;
+    - golangci-lint: 0 issues for linux, windows and darwin;
+    - capslock: 92/37/23, equal to the baseline;
+    - dep-firewall;
+    - testonly-firewall, in 6 combinations;
+    - check-pinned-actions: 47.
+- **CI on `939b5ef`:** E2E run 41021936520 is green on both lanes (9.5p1 and 10.5p1). They include `TestAgentEnrollEndToEnd`, whose audit verify reads a real export through the byte-equal host_forget line. The required checks on the head that carries this section are in the handback.
+
+### UNVERIFIED after this round
+
+- Quorum 2 end to end (D-4), until a 03-16 drill runs it.
+- The homelab steps, as above.
+- The same-second residual (D-3), by construction.
+- The database-error branches listed above. The new `LatestDirectoryVersionTx` error branch (`state_unavailable`) joins them: no test injects a database failure.
+
 ## Self-Check: PASSED
 
 - **Files.** `internal/wire/forget.go`, `internal/signer/forget.go`, `internal/audit/forget.go`, `test/vectors/leaf_host_forget_v1.hex` and `test/vectors/forget_request_signing_v1.hex` exist.

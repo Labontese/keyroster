@@ -12,3 +12,6 @@
 - `internal/signer` `TestSignerConcurrency/sixteen_clients` failed once under `-race` in WSL during the 03-08b fix-round-2 local gate (`client 1: signer unavailable: clock_regression`). It passed on a five-run rerun and on the gate's second full run, and the fix round changed nothing under internal/signer. It is the same class as Phase 2's `TestCheckLogAgainstLiveSigner` flake (deferred-items.md of phase 02): issuances faster than the microsecond wall clock advances.
   status: open
   **What:** pre-existing and outside the fix round; belongs with the Phase 2 entry, to the next plan that edits issuance or these tests.
+- `internal/agent/fetch` `TestFetch/more_repolls_immediately` failed once under `-race` in WSL during PR #75's fix-round-1 local gate on `939b5ef` (`requests [...] in 1.10425855s, want two at once`). It passed in the gate run on `c3f5c58`, 10 runs of 10 alone under `-race`, and the gate's rerun on `939b5ef`. The package has no diff against the PR's base. It is a timing assertion that full-suite load can exceed.
+  status: open
+  **What:** pre-existing and outside the fix round; to the next plan that edits the fetcher or this test.
