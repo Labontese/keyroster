@@ -226,6 +226,7 @@ type engine struct {
 	dropInRepaired bool       // repairDropIn wrote the agent's drop-in (over a trial, or an edit on an adoption resume)
 	preRepaired    bool       // preRepairDropIn wrote the agent's drop-in before the start-of-run sshd -T (it holds the lock)
 	poll           func(ctx context.Context) (*Generation, *state.Verified, error)
+	krlAloneTaken  bool // this run took its one KRL-alone pass (krlAlone; F07 (03-08d))
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
 	// net.Dialer and /proc (tests substitute both).
@@ -693,6 +694,21 @@ func (e *engine) loadStored() (*state.Stored, error) {
 
 // forward verifies one capture and moves current to the generation it
 // renders.
+//
+// A verified KRL never waits for a bundle or directory the host cannot
+// apply (owner decision D-R2, PR #71 review F5, at every stage of the
+// apply; F07 (03-08d)). When the capture changed the bundle or directory
+// and Verify refused nothing, a content refusal of the generation it
+// renders, before current moved, takes the capture once more as KRL-alone
+// (krlAlone, state.KRLAlone against accepted/): the KRL verified again
+// against the accepted bundle, with the bundle, policy and directory in
+// force, through the same render, checks and Transition, and the refusal
+// is returned after the commit, so the report and last_apply name it. A
+// content refusal is a render error or a generation above the caps
+// (candidate). Not a trigger: a preflightApply refusal (the KRL-alone
+// generation meets the same preflight), lock and I/O errors, an injected
+// crash, and every failure once Transition started (a rollback keeps the
+// newest KRL, RollbackTarget).
 func (e *engine) forward(ctx context.Context) error {
 	stored, err := e.loadStored()
 	if err != nil {
@@ -712,27 +728,32 @@ func (e *engine) forward(ctx context.Context) error {
 		e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", v.Refused)
 	}
 	e.report.BundleHeld = v.BundleHeld
-	if !v.Changed() {
-		// A run that replaced a trial drop-in wrote it: not a no-op.
-		e.report.NoOp = !e.dropInRepaired
-		// The KRL in force is current's, which a rollback or crash recovery
-		// may have kept above accepted/'s (PR #67 round-2 carry-over).
-		cur, curLink, err := e.readCurrent()
-		if err != nil || curLink.kind != linkAgent {
-			cur = nil
+	var g, cur *Generation
+	var curLink link
+	for {
+		if !v.Changed() {
+			// A run that replaced a trial drop-in wrote it: not a no-op.
+			e.report.NoOp = !e.dropInRepaired
+			// The KRL in force is current's, which a rollback or crash
+			// recovery may have kept above accepted/'s (PR #67 round-2
+			// carry-over).
+			cur, curLink, err := e.readCurrent()
+			if err != nil || curLink.kind != linkAgent {
+				cur = nil
+			}
+			e.setVersions(v, cur)
+			return v.Refused
 		}
-		e.setVersions(v, cur)
-		return v.Refused
+		if cur, curLink, err = e.readCurrent(); err != nil {
+			return err
+		}
+		if g, err = e.candidate(v, cur, curLink); err == nil {
+			break
+		}
+		if v, err = e.krlAlone(stored, st, v, err); err != nil {
+			return err
+		}
 	}
-	g, err := e.render(v)
-	if err != nil {
-		return err
-	}
-	cur, curLink, err := e.readCurrent()
-	if err != nil {
-		return err
-	}
-	e.keepKRL(g, cur, curLink)
 	if err := e.preflightApply(v, g); err != nil {
 		return err
 	}
@@ -884,6 +905,47 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 	g.HostStatus, e.report.HostStatus = status, status
 	e.logf("WARNING %s: %v; the KRL and CA keys apply, principals are %s", status, err, map[bool]string{true: "kept as last-good's", false: "emptied"}[status == HostKeysRotated || status == HostKeysDisagree])
 	return g, nil
+}
+
+// candidate renders v for this host (render), keeps the KRL in force
+// (keepKRL) and checks the result against cur, the generation current
+// names (checkCandidate), writing nothing. Its errors are render errors
+// and cap refusals: content refusals, for which the KRL-alone pass runs
+// (krlAlone; F07 (03-08d)).
+func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*Generation, error) {
+	g, err := e.render(v)
+	if err != nil {
+		return nil, err
+	}
+	e.keepKRL(g, cur, curLink)
+	if err := checkCandidate(g, cur, curLink); err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+
+// krlAlone is the KRL-alone pass after refusal, a content refusal of the
+// generation rendered from v before current moved (owner decision D-R2 at
+// every stage of the apply; F07 (03-08d)): v's capture in, taken again as
+// state.KRLAlone against prev (accepted/, or during a widening wait the
+// pending target's state), so only its KRL moves on, verified against
+// prev's bundle; never the KRL v verified under a bundle that is not
+// applied. It runs when v changed the bundle or directory, refused nothing
+// and refusal is not an injected crash, once per run; otherwise refusal is
+// returned, joined to v.Refused (a KRL-alone v whose own generation is
+// refused names both refusals).
+func (e *engine) krlAlone(prev *state.Stored, in spool.State, v *state.Verified, refusal error) (*state.Verified, error) {
+	if v.Refused != nil {
+		return nil, errors.Join(v.Refused, refusal)
+	}
+	if e.krlAloneTaken || !v.BundleChanged && !v.DirectoryChanged || isCrash(refusal) {
+		return nil, refusal
+	}
+	e.krlAloneTaken = true
+	e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", refusal)
+	// The report describes the KRL-alone render from here on.
+	e.report.HostStatus, e.report.UnmatchedHostKeys, e.report.KRLKept = "", nil, nil
+	return state.KRLAlone(e.pins, prev, in, refusal)
 }
 
 // discard removes a generation that never became current.

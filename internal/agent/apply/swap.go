@@ -74,6 +74,14 @@ func checkLimits(g *Generation) error {
 	return nil
 }
 
+// checkCandidate refuses the generation g that current is to move to
+// before anything is written (F07 (03-08d)): g must be within the caps
+// readGeneration reads it back with (checkLimits). A refusal here is a
+// content refusal, after which the KRL-alone pass runs (krlAlone).
+func checkCandidate(g, _ *Generation, _ link) error {
+	return checkLimits(g)
+}
+
 // genRecord is <state>/generations/<N>.json: the SHA-256 of each file of
 // generation N, written before the directory is renamed into place. Only
 // a generation with a record is the agent's (03-06's drift check and

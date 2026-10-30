@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
@@ -86,6 +87,49 @@ func TestKRLAlone(t *testing.T) {
 			t.Fatal("a refused KRL was installed")
 		}
 	})
+	t.Run("oversize_principals_file_krl_applied", func(t *testing.T) {
+		t.Parallel()
+		// F07 (03-08d): a verified directory whose principals file renders
+		// above the generation cap is refused before anything is written,
+		// and the capture's KRL, verified again against the accepted
+		// bundle, is applied alone.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.publishKRL(5)
+		h.mustApply()
+		s := h.spec("role:ops")
+		s.bulkRoles = 17
+		h.publishDir(s)
+		h.publishKRL(5, 6)
+		r, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("an oversize principals file: %v, want generation_too_large reported", err)
+		}
+		mustKRLAlone(t, h, r, 6, 1, "generation_too_large")
+	})
+}
+
+// mustKRLAlone checks the end of a KRL-alone apply (F07 (03-08d)): current
+// revokes serial, deploy keeps role:ops, the accepted and reported directory
+// version stays dir, the installed KRL is the newest published one, and the
+// report names the refusal want.
+func mustKRLAlone(t *testing.T, h *testHost, r *Report, serial, dir uint64, want string) {
+	t.Helper()
+	if !h.krlRevokes(h.l.Current(), serial) {
+		t.Fatalf("the newer KRL was not applied alone: current does not revoke %d (%+v)", serial, r)
+	}
+	if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops"}) || r.DirectoryVersion != dir {
+		t.Fatalf("the refused capture changed the principals %v or the reported directory version %d", got, r.DirectoryVersion)
+	}
+	if a, err := h.accepted(); err != nil || a.DirectoryVersion != dir {
+		t.Fatalf("accepted directory after the KRL-alone apply: %+v, %v, want version %d", a, err, dir)
+	}
+	if v, err := InstalledKRLVersion(h.l); err != nil || v != h.f.krlVersion {
+		t.Fatalf("installed KRL version %d (%v), want %d", v, err, h.f.krlVersion)
+	}
+	if !strings.Contains(strings.Join(r.Errors, "; "), want) {
+		t.Fatalf("the report's errors %q do not name %s", r.Errors, want)
+	}
 }
 
 // spoolInState moves h's spool to the production place, <state>/spool,
