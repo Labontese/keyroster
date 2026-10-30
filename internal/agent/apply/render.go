@@ -167,6 +167,13 @@ func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
 	if i < 0 {
 		return nil, fmt.Errorf("%w: host %s names host group %s, which the directory does not define", ErrHostNotInDirectory, host.Name, host.HostGroup)
 	}
+	// A host group above the cap is refused before any file is rendered,
+	// so the render costs at most maxAccounts files whatever the
+	// directory's size (PR #76 review, owner decision D-1). Validate
+	// refuses a repeated account, so each account is one file.
+	if n := len(v.Directory.HostGroups[i].Accounts); n > maxAccounts {
+		return nil, fmt.Errorf("%w: host group %s has %d accounts, above %d", ErrGenerationTooLarge, host.HostGroup, n, maxAccounts)
+	}
 	r := directory.NewPrincipalsRenderer(v.Directory)
 	for _, a := range v.Directory.HostGroups[i].Accounts {
 		file, err := r.File(host.HostGroup, a.Account)

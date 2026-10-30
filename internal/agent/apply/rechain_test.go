@@ -115,7 +115,9 @@ func TestKRLAlone(t *testing.T) {
 	t.Run("too_many_accounts_krl_applied", func(t *testing.T) {
 		t.Parallel()
 		// F07 (03-08d): host group lab maps one account more than a
-		// generation may hold principals files for.
+		// generation may hold principals files for. Render refuses it
+		// before it renders any file (PR #76 review, owner decision D-1),
+		// so a host group of any size costs one count.
 		h := newTestHost(t, newFixture(t))
 		h.installed("role:ops")
 		h.publishKRL(5)
@@ -129,6 +131,9 @@ func TestKRLAlone(t *testing.T) {
 			t.Fatalf("%d accounts: %v, want generation_too_large reported", maxAccounts+1, err)
 		}
 		mustKRLAlone(t, h, r, 6, 1, "generation_too_large")
+		if want := fmt.Sprintf("host group lab has %d accounts, above %d", maxAccounts+1, maxAccounts); !strings.Contains(err.Error(), want) {
+			t.Fatalf("%d accounts: %v, want Render's refusal %q", maxAccounts+1, err, want)
+		}
 	})
 	t.Run("intermediate_union_too_large_krl_applied", func(t *testing.T) {
 		t.Parallel()
