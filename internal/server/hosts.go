@@ -370,10 +370,16 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 		return
 	}
-	if req.HostGone {
+	switch {
+	case req.HostGone && facts.ConfirmedVersion != 0:
+		// The host confirmed; --host-gone overrode the wait for its swap
+		// (PR #75 review finding 5).
+		s.log.Warn("agent forgotten with --host-gone over a pending swap", "expected_name", a.ExpectedName,
+			"agent", fp, "admin", adminName(ctx), "removal_version", a.RemovedDirVersion, "removal_confirmed_version", facts.ConfirmedVersion, "leaf", resp.Leaf)
+	case req.HostGone:
 		s.log.Warn("agent forgotten with --host-gone: the host never confirmed that it applied its removal", "expected_name", a.ExpectedName,
 			"agent", fp, "admin", adminName(ctx), "removal_version", a.RemovedDirVersion, "leaf", resp.Leaf)
-	} else {
+	default:
 		s.log.Info("agent forgotten", "expected_name", a.ExpectedName, "agent", fp, "admin", adminName(ctx),
 			"approved_once", facts.ApprovedOnce, "removal_version", a.RemovedDirVersion, "removal_confirmed_version", a.RemovalConfirmedVersion, "leaf", resp.Leaf)
 	}

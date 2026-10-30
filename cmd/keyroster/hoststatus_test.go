@@ -239,8 +239,9 @@ func TestHostForgetHostGone(t *testing.T) {
 		var called bool
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
 		code, out, stderr := run(t, "host", "forget", "web1", "--host-gone")
-		if code != 0 || !strings.Contains(stderr, "host forget --host-gone: forgetting web1 without its confirmation") || !strings.Contains(out, "Forgotten with --host-gone") ||
-			!strings.Contains(out, "override: --host-gone") {
+		if code != 0 || !strings.Contains(stderr, "host forget --host-gone: forgetting web1 without its confirmation") ||
+			!strings.Contains(out, "Forgotten with --host-gone: the host never confirmed that it applied its removal.") ||
+			!strings.Contains(out, "  host_gone: the host never confirmed its removal\n") || !strings.Contains(out, "override: --host-gone") {
 			t.Fatalf("exit %d:\n%s%s", code, out, stderr)
 		}
 		if req := e.postedForget(t); !identityIs(req, "00") || !req.HostGone || req.ConfirmedVersion != 0 || req.RemovalVersion != 3 {

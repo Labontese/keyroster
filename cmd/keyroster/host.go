@@ -1073,7 +1073,10 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if c.Confirmed != nil {
 		fmt.Fprintf(&b, "  removal confirmed at directory v%d, sha256 %s\n", c.Confirmed.Version, c.Confirmed.SHA256)
 	}
-	if gone {
+	switch {
+	case gone && c.Confirmed != nil:
+		b.WriteString("  host_gone: overrides the host's unfinished swap\n")
+	case gone:
 		b.WriteString("  host_gone: the host never confirmed its removal\n")
 	}
 	for _, k := range keys {
@@ -1121,7 +1124,10 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	fmt.Fprintf(&b, "Forget logged as audit entry %d by keyroster-signer (host_forget; keyroster audit verify checks it).\n", ans.Leaf)
 	b.WriteString("Its identity gets unknown_agent from now on and receives no more signed state; its host keys can enroll again with a new join token.\n")
-	if gone {
+	switch {
+	case gone && c.Confirmed != nil:
+		b.WriteString("Forgotten with --host-gone: it overrode the host's unfinished swap; the host had confirmed its removal.\n")
+	case gone:
 		b.WriteString("Forgotten with --host-gone: the host never confirmed that it applied its removal.\n")
 	}
 	_, err = io.WriteString(stdout, b.String())

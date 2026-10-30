@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -391,6 +392,10 @@ func TestRemovalConfirmation(t *testing.T) {
 		if rec := e.forgetGone(t, "web1"); rec.Code != http.StatusOK {
 			t.Fatalf("forget --host-gone: %d %s", rec.Code, rec.Body.String())
 		}
+		if l := e.log.String(); !strings.Contains(l, "agent forgotten with --host-gone: the host never confirmed that it applied its removal") ||
+			strings.Contains(l, "over a pending swap") {
+			t.Errorf("the log of a --host-gone forget without a confirmation:\n%s", l)
+		}
 	})
 	t.Run("rendered_entry_without_principals_files_clears", func(t *testing.T) {
 		// The host renders an active entry under its current keys whose
@@ -576,6 +581,12 @@ func TestRemovalConfirmation(t *testing.T) {
 		}
 		if e.agentRow(t, id.spki) != nil {
 			t.Fatal("the row is still present")
+		}
+		// PR #75 review finding 5: the host confirmed; the log says what
+		// --host-gone overrode, with the confirmed version.
+		if l := e.log.String(); !strings.Contains(l, "agent forgotten with --host-gone over a pending swap") ||
+			!strings.Contains(l, fmt.Sprintf(`"removal_confirmed_version":%d,`, r)) || strings.Contains(l, "never confirmed") {
+			t.Errorf("the log of a --host-gone forget over a swap:\n%s", l)
 		}
 	})
 	t.Run("pending_swap_after_the_signer_answer", func(t *testing.T) {

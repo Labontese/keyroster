@@ -813,6 +813,13 @@ func TestHostForget(t *testing.T) {
 		if code != 0 || !identityIs(req, "00") || !req.HostGone || req.ConfirmedVersion != 4 {
 			t.Fatalf("forget --host-gone during a swap: exit %d, request %s:\n%s%s", code, e.lastPost, stdout, stderr)
 		}
+		// PR #75 review finding 5: the host did confirm; --host-gone only
+		// overrides the wait for its swap, and the output says so.
+		if !strings.Contains(stdout, "  removal confirmed at directory v4") || !strings.Contains(stdout, "  host_gone: overrides the host's unfinished swap\n") ||
+			!strings.Contains(stdout, "Forgotten with --host-gone: it overrode the host's unfinished swap; the host had confirmed its removal.\n") ||
+			strings.Contains(stdout, "never confirmed") {
+			t.Fatalf("forget --host-gone during a swap printed:\n%s", stdout)
+		}
 	})
 	t.Run("server_swap_pending_explained", func(t *testing.T) {
 		e := forgetEnv(t, nil, web1)
