@@ -296,6 +296,46 @@ func TestKRLAlone(t *testing.T) {
 			t.Fatalf("accepted after the wait: %+v, %v", a, err)
 		}
 	})
+	t.Run("krl_after_a_refused_poll_during_wait_applied", func(t *testing.T) {
+		t.Parallel()
+		// PR #76 review F0 and F1: the KRL-alone pass is bounded per
+		// capture, not per run. During a widening wait one poll reads an
+		// oversize directory and no newer KRL, so its pass finds nothing
+		// to apply; a later poll in the same wait reads a newer KRL with
+		// the same directory, and that capture gets its own pass.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.clock.advance(time.Hour)
+		h.publishKRL(7)
+		h.mustApply() // a swap just now: the widening apply must wait
+		h.publishDir(h.spec("role:ops", "role:q"))
+		sleeps := 0
+		h.clock.onSleep = func(time.Duration) {
+			switch sleeps++; sleeps {
+			case 1:
+				s := h.spec("role:ops", "role:q")
+				s.bulkRoles = 17
+				h.publishDir(s)
+				h.write()
+			case 3:
+				h.publishKRL(7, 99)
+				h.write()
+			}
+		}
+		r, err := h.apply()
+		if sleeps < 3 {
+			t.Fatalf("the wait slept %d times, want the KRL published at the third", sleeps)
+		}
+		if !h.krlRevokes(h.l.Current(), 99) || !slices.Equal(h.principals("deploy"), []string{"role:ops", "role:q"}) || r.DirectoryVersion != 2 || h.lastGood() != h.current() {
+			t.Fatalf("the KRL that arrived later in the wait is not committed: revokes 99 %t, principals %v, %+v", h.krlRevokes(h.l.Current(), 99), h.principals("deploy"), r)
+		}
+		if !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("an oversize directory, then a newer KRL in the same wait: %v, want generation_too_large reported", err)
+		}
+		if a, err := h.accepted(); err != nil || a.DirectoryVersion != 2 || a.KRLVersion != h.f.krlVersion {
+			t.Fatalf("accepted after the wait: %+v, %v", a, err)
+		}
+	})
 	t.Run("selftest_failure_after_swap_keeps_new_krl", func(t *testing.T) {
 		t.Parallel()
 		// After a swap, a rollback already keeps the newest KRL

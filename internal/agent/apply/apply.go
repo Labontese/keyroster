@@ -226,7 +226,6 @@ type engine struct {
 	dropInRepaired bool       // repairDropIn wrote the agent's drop-in (over a trial, or an edit on an adoption resume)
 	preRepaired    bool       // preRepairDropIn wrote the agent's drop-in before the start-of-run sshd -T (it holds the lock)
 	poll           func(ctx context.Context) (*Generation, *state.Verified, error)
-	krlAloneTaken  bool // this run took its one KRL-alone pass (krlAlone; F07 (03-08d))
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
 	// net.Dialer and /proc (tests substitute both).
@@ -956,17 +955,20 @@ func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*G
 // pending target's state), so only its KRL moves on, verified against
 // prev's bundle; never the KRL v verified under a bundle that is not
 // applied. It runs when v changed the bundle or directory, refused nothing
-// and refusal is not an injected crash, once per run; otherwise refusal is
-// returned, joined to v.Refused (a KRL-alone v whose own generation is
-// refused names both refusals).
+// and refusal is not an injected crash; otherwise refusal is returned,
+// joined to v.Refused (a KRL-alone v whose own generation is refused
+// names both refusals). The pass is bounded per capture, not per run (PR
+// #76 review F0 and F1): the KRL-alone Verified carries the refusal and
+// changes neither the bundle nor the directory, so a capture takes at
+// most one pass, and a poll whose pass found no newer KRL leaves a later
+// poll's capture, which brings one, its own pass.
 func (e *engine) krlAlone(prev *state.Stored, in spool.State, v *state.Verified, refusal error) (*state.Verified, error) {
 	if v.Refused != nil {
 		return nil, errors.Join(v.Refused, refusal)
 	}
-	if e.krlAloneTaken || !v.BundleChanged && !v.DirectoryChanged || isCrash(refusal) {
+	if !v.BundleChanged && !v.DirectoryChanged || isCrash(refusal) {
 		return nil, refusal
 	}
-	e.krlAloneTaken = true
 	e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", refusal)
 	// The report describes the KRL-alone render from here on.
 	e.report.HostStatus, e.report.UnmatchedHostKeys, e.report.KRLKept = "", nil, nil
