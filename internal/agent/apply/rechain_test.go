@@ -729,6 +729,47 @@ func TestResetDirectory(t *testing.T) {
 			}
 		}
 	})
+	t.Run("reset_after_host_removed_keeps_status", func(t *testing.T) {
+		t.Parallel()
+		// PR #76 review F3: with no accepted directory the fallback reports
+		// last-good's recorded host status, so a host whose last-good was
+		// committed as host_removed still reports it after a reset and a
+		// newer KRL, and its principals stay empty.
+		h := newTestHost(t, newFixture(t))
+		spoolInState(t, h)
+		h.installed("role:ops")
+		s := h.spec("role:ops")
+		s.noHost = true
+		h.publishDir(s)
+		h.publishKRL(4)
+		if r, err := h.apply(); err != nil || r.HostStatus != HostRemoved || h.lastGood() != h.current() {
+			t.Fatalf("the removal: %+v, %v", r, err)
+		}
+		if _, err := ResetDirectory(h.l, h.spool); err != nil {
+			t.Fatal(err)
+		}
+		h.state.Directories = map[uint64]spool.Doc{}
+		h.publishKRL(4, 5)
+		// The second apply is a no-op: it renders nothing, so its report
+		// names no host status, and last_apply reads the committed
+		// generation's record (03-08b).
+		for i := range 2 {
+			r, err := h.apply()
+			if !errors.Is(err, ErrHostNotInDirectory) || !h.krlRevokes(h.l.Current(), 5) || h.lastGood() != h.current() || r.NoOp != (i == 1) {
+				t.Fatalf("apply %d after the reset: %v, revokes 5 %t, %+v", i, err, h.krlRevokes(h.l.Current(), 5), r)
+			}
+			rec, rerr := h.engine().readRecord(h.current())
+			if i == 0 && r.HostStatus != HostRemoved || rerr != nil || rec.HostStatus != HostRemoved {
+				t.Fatalf("apply %d: host status lost: report %q, record %+v (%v)", i, r.HostStatus, rec, rerr)
+			}
+			if la := outboxStatus(t, h).LastApply; la == nil || la.HostStatus != HostRemoved {
+				t.Fatalf("apply %d: last_apply %+v, want host_status %q", i, la, HostRemoved)
+			}
+			if got := h.principals("deploy"); len(got) != 0 {
+				t.Fatalf("apply %d: principals %v, want none", i, got)
+			}
+		}
+	})
 	t.Run("reset_without_last_good_refusal_stands", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))
