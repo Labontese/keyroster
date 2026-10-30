@@ -744,3 +744,103 @@ func TestRecoveryCaps(t *testing.T) {
 		t.Fatalf("wire.MaxRecoveryRequest %d, MaxRecoveryBody %d, the leaf body cap %d", wire.MaxRecoveryRequest, MaxRecoveryBody, maxBody)
 	}
 }
+
+// hostForgetVector is the fixed host_forget leaf of
+// test/vectors/leaf_host_forget_v1.hex (03-08c): the request is the signing
+// bytes of test/vectors/forget_request_signing_v1.hex, with two evidence
+// items, policy v3 and directory v6 in force.
+func hostForgetVector(t testing.TB) (Leaf, *HostForgetBody) {
+	t.Helper()
+	req, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "forget_request_signing_v1.hex"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &HostForgetBody{
+		PolicyVersion:     3,
+		DirectoryVersion:  6,
+		ResolvedAtSeconds: 1_790_000_100,
+		Request:           req,
+		Evidence: []wire.Evidence{
+			{Type: "admin-sshsig/v1", Blob: []byte("sig one (test vector)")},
+			{Type: "admin-sshsig/v1", Blob: []byte("sig two (test vector)")},
+		},
+	}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 13, TimeMicros: 1_790_000_100_000_001, Kind: KindHostForget, Body: enc}, body
+}
+
+// TestHostForgetLeafVector pins the kind-16 leaf encoding (03-08c).
+func TestHostForgetLeafVector(t *testing.T) {
+	leaf, body := hostForgetVector(t)
+	checkLeafVector(t, "leaf_host_forget_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeHostForgetBody(b) })
+	r, err := wire.ParseForgetSigningBytes(body.Request)
+	if err != nil || r.ExpectedName != "web1" || !r.ApprovedOnce {
+		t.Fatalf("the vector's request = %+v, %v", r, err)
+	}
+}
+
+// TestHostForgetBody (03-08c) covers the kind-16 body: it round-trips, and
+// the encoder and decoder refuse a request above MaxRequest, no request,
+// more than wire.MaxEvidence evidence items, an evidence item without a
+// type and trailing bytes. Kind 16 is of format v1, host_forget; 11 to 14
+// and 17 are not.
+func TestHostForgetBody(t *testing.T) {
+	leaf, body := hostForgetVector(t)
+	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeHostForgetBody(b) })
+	for name, b := range map[string]*HostForgetBody{
+		"request_too_large": {Request: make([]byte, MaxRequest+1)},
+		"no_request":        {},
+		"five_evidence":     {Request: []byte("r"), Evidence: make([]wire.Evidence, wire.MaxEvidence+1)},
+		"evidence_no_type":  {Request: []byte("r"), Evidence: []wire.Evidence{{Blob: []byte("sig")}}},
+	} {
+		if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+			t.Errorf("%s: Encode = %v, want ErrMalformedLeaf", name, err)
+		}
+	}
+	// The decoder refuses what the encoder refuses: five evidence items
+	// written by hand.
+	var c cryptobyte.Builder
+	c.AddUint64(1)
+	c.AddUint64(1)
+	c.AddUint64(1)
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes([]byte("r")) })
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+		for range wire.MaxEvidence + 1 {
+			add16(c, []byte("admin-sshsig/v1"))
+			add16(c, []byte("sig"))
+		}
+	})
+	if raw, err := c.Bytes(); err != nil {
+		t.Fatal(err)
+	} else if _, err := DecodeHostForgetBody(raw); !errors.Is(err, ErrMalformedLeaf) {
+		t.Errorf("DecodeHostForgetBody of five evidence items = %v", err)
+	}
+	t.Run("kinds_are_a_set", func(t *testing.T) {
+		if KindHostForget != 16 || KindHostForget.String() != "host_forget" {
+			t.Fatalf("KindHostForget = %d %q", KindHostForget, KindHostForget)
+		}
+		enc, err := MarshalLeaf(leaf)
+		if err != nil {
+			t.Fatalf("MarshalLeaf refused kind 16: %v", err)
+		}
+		if l, err := DecodeLeaf(enc); err != nil || l.Kind != KindHostForget {
+			t.Fatalf("DecodeLeaf of kind 16 = %+v, %v", l, err)
+		}
+		refusal, err := (&RefusalBody{Reason: ReasonMalformed, Detail: "x"}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []Kind{11, 12, 13, 14, 17} {
+			if _, err := DecodeLeaf(rawKindLeaf(t, Leaf{Kind: k, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
+				t.Fatalf("DecodeLeaf accepted kind %d", k)
+			}
+		}
+		// A kind-16 leaf whose body is not a host_forget body.
+		if _, err := DecodeLeaf(EncodeLeaf(Leaf{Kind: KindHostForget, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
+			t.Fatalf("DecodeLeaf accepted a kind-16 leaf with a refusal body: %v", err)
+		}
+	})
+}

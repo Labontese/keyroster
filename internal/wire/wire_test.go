@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/directory"
 )
 
 // validRequest returns a request within every limit.
@@ -1595,5 +1596,283 @@ func TestRecoveryRequestSigningVector(t *testing.T) {
 	r, err := ParseRecoverySigningBytes(want)
 	if err != nil || len(r.Imports) != 1 || len(r.Certificates) != 1 || !r.Certificates[0].Revoke {
 		t.Fatalf("ParseRecoverySigningBytes(%s) = %+v, %v", path, r, err)
+	}
+}
+
+// forgetVector is the forget request of
+// test/vectors/forget_request_signing_v1.hex (03-08c): installation
+// 0123456789abcdef0123456789abcdef, identity 0x10..0x2f, web1 enrolled at
+// 1790000000 s, two host key digests (0x40.. and 0x60..), approved once,
+// removed at directory v5 and confirmed at v6 with SHA-256 0xa0..0xbf, no
+// host_gone, request ID 0x00..0x0f, created 1790000100. It carries no
+// evidence and ServerApprovedOnce false.
+func forgetVector() *ForgetRequest {
+	r := &ForgetRequest{
+		InstallationID:   "0123456789abcdef0123456789abcdef",
+		ExpectedName:     "web1",
+		EnrolledAtMicros: 1_790_000_000_000_000,
+		ApprovedOnce:     true,
+		RemovalVersion:   5,
+		ConfirmedVersion: 6,
+		CreatedAt:        1_790_000_100,
+	}
+	var a, b [32]byte
+	for i := range 32 {
+		r.AgentIdentity[i] = byte(0x10 + i)
+		a[i], b[i] = byte(0x40+i), byte(0x60+i)
+		r.ConfirmedSHA256[i] = byte(0xa0 + i)
+	}
+	r.HostKeyFingerprints = [][32]byte{a, b}
+	for i := range r.RequestID {
+		r.RequestID[i] = byte(i)
+	}
+	return r
+}
+
+// forgetBody is r's Marshal, failing the test on an error.
+func forgetBody(t testing.TB, r *ForgetRequest) []byte {
+	t.Helper()
+	b, err := r.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestForgetRequest (03-08c) covers the forget request: it round-trips,
+// ServerApprovedOnce included; ServerApprovedOnce is outside the signing
+// bytes; Validate refuses every combination no admin can have seen, and
+// the parsers refuse trailing bytes, a boolean byte other than 0 or 1 and
+// a ninth digest; the signing bytes parse back and re-encode identically;
+// and its namespace is no other request's.
+func TestForgetRequest(t *testing.T) {
+	t.Run("round_trip", func(t *testing.T) {
+		r := forgetVector()
+		r.ServerApprovedOnce = true
+		r.Evidence = []Evidence{{Type: EvidenceAdminSSHSIG, Blob: []byte("sig one")}, {Type: EvidenceAdminSSHSIG, Blob: []byte("sig two")}}
+		body := forgetBody(t, r)
+		got, err := ParseForgetRequest(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, r) {
+			t.Fatalf("ParseForgetRequest = %+v, want %+v", got, r)
+		}
+		if again := forgetBody(t, got); !bytes.Equal(again, body) {
+			t.Fatal("Marshal of the parsed request differs")
+		}
+	})
+	t.Run("server_statement_not_signed", func(t *testing.T) {
+		a, b := forgetVector(), forgetVector()
+		b.ServerApprovedOnce = true
+		b.Evidence = []Evidence{{Type: EvidenceAdminSSHSIG, Blob: []byte("sig")}}
+		if !bytes.Equal(a.SigningBytes(), b.SigningBytes()) {
+			t.Fatal("ServerApprovedOnce or the evidence changed the signing bytes")
+		}
+		if bytes.Equal(forgetBody(t, a), forgetBody(t, forgetVector())) == false {
+			t.Fatal("the encoding is not deterministic")
+		}
+	})
+	t.Run("refused", func(t *testing.T) {
+		var zero [32]byte
+		for name, edit := range map[string]func(r *ForgetRequest){
+			"unsorted_fingerprints": func(r *ForgetRequest) {
+				r.HostKeyFingerprints[0], r.HostKeyFingerprints[1] = r.HostKeyFingerprints[1], r.HostKeyFingerprints[0]
+			},
+			"duplicated_fingerprint":          func(r *ForgetRequest) { r.HostKeyFingerprints[1] = r.HostKeyFingerprints[0] },
+			"no_fingerprint":                  func(r *ForgetRequest) { r.HostKeyFingerprints = nil },
+			"nine_fingerprints":               func(r *ForgetRequest) { r.HostKeyFingerprints = nineDigests() },
+			"never_approved_with_removal":     func(r *ForgetRequest) { r.ApprovedOnce, r.ConfirmedVersion, r.ConfirmedSHA256 = false, 0, zero },
+			"never_approved_with_host_gone":   func(r *ForgetRequest) { *r = *neverApproved(); r.HostGone = true },
+			"never_approved_with_confirmed":   func(r *ForgetRequest) { r.ApprovedOnce, r.RemovalVersion = false, 0 },
+			"approved_without_conf_or_gone":   func(r *ForgetRequest) { r.ConfirmedVersion, r.ConfirmedSHA256 = 0, zero },
+			"confirmed_below_removal":         func(r *ForgetRequest) { r.ConfirmedVersion = 4 },
+			"confirmed_without_removal":       func(r *ForgetRequest) { r.RemovalVersion = 0 },
+			"zero_sha_with_version":           func(r *ForgetRequest) { r.ConfirmedSHA256 = zero },
+			"sha_without_version":             func(r *ForgetRequest) { r.ConfirmedVersion, r.HostGone = 0, true },
+			"installation_id_not_bundle_form": func(r *ForgetRequest) { r.InstallationID = "0123456789ABCDEF0123456789ABCDEF" },
+			"no_installation_id":              func(r *ForgetRequest) { r.InstallationID = "" },
+			"name_outside_grammar":            func(r *ForgetRequest) { r.ExpectedName = "Web1" },
+			"name_too_long":                   func(r *ForgetRequest) { r.ExpectedName = strings.Repeat("a", 65) },
+			"five_evidence_items": func(r *ForgetRequest) {
+				for range 5 {
+					r.Evidence = append(r.Evidence, Evidence{Type: EvidenceAdminSSHSIG, Blob: []byte("sig")})
+				}
+			},
+		} {
+			r := forgetVector()
+			edit(r)
+			if err := r.Validate(); !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s: Validate = %v, want ErrMalformed", name, err)
+			}
+			if _, err := r.Marshal(); !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s: Marshal = %v, want ErrMalformed", name, err)
+			}
+		}
+	})
+	t.Run("accepted_combinations", func(t *testing.T) {
+		var zero [32]byte
+		gone := forgetVector()
+		gone.ConfirmedVersion, gone.ConfirmedSHA256, gone.HostGone = 0, zero, true
+		goneNoRemoval := forgetVector()
+		goneNoRemoval.RemovalVersion, goneNoRemoval.ConfirmedVersion, goneNoRemoval.ConfirmedSHA256, goneNoRemoval.HostGone = 0, 0, zero, true
+		both := forgetVector()
+		both.HostGone = true
+		for name, r := range map[string]*ForgetRequest{
+			"confirmed": forgetVector(), "never_approved": neverApproved(), "host_gone": gone, "host_gone_without_removal": goneNoRemoval,
+			"host_gone_with_confirmation": both,
+		} {
+			if err := r.Validate(); err != nil {
+				t.Errorf("%s: Validate = %v", name, err)
+			}
+		}
+	})
+	t.Run("parsers_strict", func(t *testing.T) {
+		body := forgetBody(t, forgetVector())
+		if _, err := ParseForgetRequest(append(bytes.Clone(body), 0)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("a trailing byte: %v", err)
+		}
+		// The last byte is ServerApprovedOnce.
+		bad := bytes.Clone(body)
+		bad[len(bad)-1] = 2
+		if _, err := ParseForgetRequest(bad); !errors.Is(err, ErrMalformed) {
+			t.Errorf("ServerApprovedOnce 2: %v", err)
+		}
+		sb := forgetVector().SigningBytes()
+		// HostGone is the byte before the request ID and CreatedAt, and
+		// ApprovedOnce the byte after the digests.
+		gone := len(sb) - 8 - 16 - 1
+		approved := len(ForgetRequestDomain) + 2 + 32 + 32 + 2 + 4 + 8 + 1 + 2*32
+		for name, i := range map[string]int{"host_gone": gone, "approved_once": approved} {
+			b := bytes.Clone(sb)
+			if b[i] > 1 {
+				t.Fatalf("%s byte %d at %d", name, b[i], i)
+			}
+			b[i] = 2
+			if _, err := ParseForgetSigningBytes(b); !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s 2: %v", name, err)
+			}
+		}
+		if _, err := ParseForgetSigningBytes(append(bytes.Clone(sb), 0)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("signing bytes with a trailing byte: %v", err)
+		}
+		if _, err := ParseForgetSigningBytes(bytes.Replace(sb, []byte(ForgetRequestDomain), []byte(RevokeRequestDomain), 1)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("signing bytes under another domain: %v", err)
+		}
+		// A count byte of 9 with nine digests (the encoder never writes it).
+		count := len(ForgetRequestDomain) + 2 + 32 + 32 + 2 + 4 + 8
+		if sb[count] != 2 {
+			t.Fatalf("count byte %d at %d", sb[count], count)
+		}
+		nine := append(bytes.Clone(sb[:count]), 9)
+		for _, d := range nineDigests() {
+			nine = append(nine, d[:]...)
+		}
+		nine = append(nine, sb[count+1+2*32:]...)
+		if _, err := ParseForgetSigningBytes(nine); !errors.Is(err, ErrMalformed) {
+			t.Errorf("nine digests: %v", err)
+		}
+	})
+	t.Run("signing_bytes_reencode", func(t *testing.T) {
+		for _, r := range []*ForgetRequest{forgetVector(), neverApproved()} {
+			sb := r.SigningBytes()
+			got, err := ParseForgetSigningBytes(sb)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got.SigningBytes(), sb) || got.Evidence != nil || got.ServerApprovedOnce {
+				t.Fatalf("ParseForgetSigningBytes = %+v", got)
+			}
+			want := *r
+			if !reflect.DeepEqual(got, &want) {
+				t.Fatalf("ParseForgetSigningBytes = %+v, want %+v", got, &want)
+			}
+		}
+	})
+	t.Run("namespace_is_its_own", func(t *testing.T) {
+		if ForgetSSHSIGNamespace != ForgetRequestDomain || ForgetRequestDomain != "keyroster/host-forget-request/v1" {
+			t.Fatalf("ForgetSSHSIGNamespace %q", ForgetSSHSIGNamespace)
+		}
+		for _, other := range []string{AdminSSHSIGNamespace, RevokeSSHSIGNamespace, RevokeSSHSIGNamespaceV1, RecoverySSHSIGNamespace, LoginRequestDomain} {
+			if ForgetSSHSIGNamespace == other || strings.HasPrefix(other, ForgetSSHSIGNamespace) || strings.HasPrefix(ForgetSSHSIGNamespace, other) {
+				t.Errorf("the forget namespace %q overlaps %q", ForgetSSHSIGNamespace, other)
+			}
+		}
+		if TypeForgetAgentRequest != 0x0D || TypeForgetAgentResponse != 0x8D {
+			t.Fatal("the forget message types changed")
+		}
+	})
+	t.Run("grammar_matches_directory", func(t *testing.T) {
+		if MaxForgetHostKeys != directory.MaxHostKeys {
+			t.Fatalf("MaxForgetHostKeys %d, directory.MaxHostKeys %d", MaxForgetHostKeys, directory.MaxHostKeys)
+		}
+		for _, n := range []string{"web1", "a", "a.b-c_d", "Web1", "-web", "", strings.Repeat("a", 64), strings.Repeat("a", 65), "web 1", "wéb"} {
+			if forgetNameRE.MatchString(n) != directory.ValidUserName(n) {
+				t.Errorf("%q: forget grammar %t, directory %t", n, forgetNameRE.MatchString(n), directory.ValidUserName(n))
+			}
+		}
+	})
+}
+
+// neverApproved is a forget request of an agent never approved: no
+// removal, no confirmation, no host_gone.
+func neverApproved() *ForgetRequest {
+	r := forgetVector()
+	r.ApprovedOnce, r.RemovalVersion, r.ConfirmedVersion, r.ConfirmedSHA256 = false, 0, 0, [32]byte{}
+	return r
+}
+
+// nineDigests is nine ascending distinct digests, one above the cap.
+func nineDigests() [][32]byte {
+	out := make([][32]byte, 9)
+	for i := range out {
+		out[i][0] = byte(i + 1)
+	}
+	return out
+}
+
+// TestForgetRequestSigningVector pins the keyroster/host-forget-request/v1
+// signing bytes (test/vectors/forget_request_signing_v1.hex), which every
+// host_forget leaf logs (03-08c).
+func TestForgetRequestSigningVector(t *testing.T) {
+	got := forgetVector().SigningBytes()
+	path := filepath.Join(vectorDir, "forget_request_signing_v1.hex")
+	if *update {
+		if err := os.WriteFile(path, []byte(hex.EncodeToString(got)+"\n"), 0o644); err != nil { //nolint:gosec // G306: public test vector
+			t.Fatal(err)
+		}
+	}
+	file, err := os.ReadFile(path) //nolint:gosec // G304: fixed test vector path
+	if err != nil {
+		t.Fatalf("%v (create it with -update only for a deliberate format change)", err)
+	}
+	want, err := hex.DecodeString(strings.TrimSpace(string(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("forget request signing bytes differ from %s\ngot:  %x\nwant: %x", path, got, want)
+	}
+	if !bytes.HasPrefix(want, []byte(ForgetRequestDomain)) {
+		t.Fatalf("%s does not start with the domain tag %s", path, ForgetRequestDomain)
+	}
+	if r, err := ParseForgetSigningBytes(want); err != nil || !reflect.DeepEqual(r, forgetVector()) {
+		t.Fatalf("ParseForgetSigningBytes(%s) = %+v, %v", path, r, err)
+	}
+}
+
+// TestForgetResponse (03-08c): the answer is exactly the leaf index.
+func TestForgetResponse(t *testing.T) {
+	b, err := (&ForgetResponse{Leaf: 42}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := ParseForgetResponse(b); err != nil || r.Leaf != 42 || len(b) != 8 {
+		t.Fatalf("ParseForgetResponse = %+v, %v (%d bytes)", r, err, len(b))
+	}
+	for name, bad := range map[string][]byte{"empty": nil, "short": b[:7], "trailing": append(bytes.Clone(b), 0)} {
+		if _, err := ParseForgetResponse(bad); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

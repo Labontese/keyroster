@@ -7,7 +7,8 @@ import (
 	"github.com/Labontese/keyroster/internal/tlog"
 )
 
-// FuzzVerifyExport: Verify never panics on arbitrary input, and whatever it
+// FuzzVerifyExport: Verify never panics on arbitrary input (Forget seeds
+// included), and whatever it
 // accepts is a non-empty log whose checkpoint the log key of a bundle signed
 // by the pinned root signed.
 func FuzzVerifyExport(f *testing.F) {
@@ -33,6 +34,17 @@ func FuzzVerifyExport(f *testing.F) {
 	f.Add([]byte(join(login)))
 	f.Add([]byte(join([]string{login[0], login[1], login[2], login[4]})))
 	f.Add([]byte(join([]string{login[0], login[2], login[1], login[3], login[4]})))
+	// A kind 16 entry (03-08c): a log under the same root with two
+	// directory installs and a host_forget entry, which verifies under the
+	// same pins, plus a truncation of it.
+	ff := newForgetFixture(f, 2, fx.root)
+	ff.forget(ff.request(), nil)
+	forget := ff.lines() // bundle_install, 2 directory_install, host_forget, checkpoint
+	if _, err := Verify(strings.NewReader(join(forget)), Options{Pins: pins, Threshold: 1}); err != nil {
+		f.Fatalf("the forget seed does not verify under the pins: %v", err)
+	}
+	f.Add([]byte(join(forget)))
+	f.Add([]byte(join([]string{forget[0], forget[1], forget[3], forget[4]})))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		rep, err := Verify(strings.NewReader(string(data)), Options{Pins: pins, Threshold: 1})
 		if err != nil {

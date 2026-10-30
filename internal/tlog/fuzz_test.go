@@ -18,12 +18,14 @@ func FuzzDecodeLeaf(f *testing.F) {
 	revoke, revokeBody := revokeVector(f)
 	publish, publishBody := krlPublishVector(f)
 	recovery, recoveryBody := recoveryVector(f)
+	forget, forgetBody := hostForgetVector(f)
 	f.Add(EncodeLeaf(issue))
 	f.Add(EncodeLeaf(dirInstall))
 	f.Add(EncodeLeaf(login))
 	f.Add(EncodeLeaf(revoke))
 	f.Add(EncodeLeaf(publish))
 	f.Add(EncodeLeaf(recovery))
+	f.Add(EncodeLeaf(forget))
 	for _, b := range []interface{ Encode() ([]byte, error) }{
 		&RefusalBody{PeerUID: 1, Reason: ReasonMalformed, Detail: "malformed_frame"},
 		&RefusalSummaryBody{WindowEndMicros: 1, Counts: []ReasonCount{{ReasonPeerNotAllowed, 2}}},
@@ -35,13 +37,14 @@ func FuzzDecodeLeaf(f *testing.F) {
 		revokeBody,
 		publishBody,
 		recoveryBody,
+		forgetBody,
 	} {
 		body, err := b.Encode()
 		if err != nil {
 			f.Fatal(err)
 		}
 		for _, k := range []Kind{KindIssue, KindRefusal, KindRefusalSummary, KindClockRegression, KindCAInit, KindBundleInstall,
-			KindDirectoryInstall, KindLoginIssue, KindRevoke, KindKRLPublish, KindRevocationRecovery} {
+			KindDirectoryInstall, KindLoginIssue, KindRevoke, KindKRLPublish, KindRevocationRecovery, KindHostForget} {
 			f.Add(EncodeLeaf(Leaf{Index: 1, TimeMicros: 2, Kind: k, Body: body}))
 		}
 	}
@@ -81,6 +84,8 @@ func FuzzDecodeLeaf(f *testing.F) {
 			body, err = DecodeKRLPublishBody(l.Body)
 		case KindRevocationRecovery:
 			body, err = DecodeRecoveryBody(l.Body)
+		case KindHostForget:
+			body, err = DecodeHostForgetBody(l.Body)
 		default:
 			t.Fatalf("DecodeLeaf accepted kind %d", l.Kind)
 		}
