@@ -1222,7 +1222,11 @@ func (e *engine) failFirstInstall(ctx context.Context, cause error) error {
 
 // undoFirstInstall removes what a first install wrote: the drop-in
 // (restoring a previous one), a reload so sshd forgets it, the listener
-// check against the restored configuration, current, and the marker.
+// check against the restored configuration, current, and the marker. It
+// ends with the retention cleanup a commit runs, as a rollback does (PR
+// #76 review F2): with no last-good nothing else removes the generations
+// failed first installs leave, and by then current, last-good and the
+// marker name none, so cleanup keeps only the newest keepGenerations.
 func (e *engine) undoFirstInstall(ctx context.Context, cur link) error {
 	e.report.Rollback = true
 	if e.dropinChanged {
@@ -1248,7 +1252,11 @@ func (e *engine) undoFirstInstall(ctx context.Context, cur link) error {
 	if err := e.clearMarker(); err != nil {
 		return err
 	}
-	return e.remove(e.l.State(dropinPrevFile))
+	if err := e.remove(e.l.State(dropinPrevFile)); err != nil {
+		return err
+	}
+	e.cleanup()
+	return nil
 }
 
 // recoverToLastGood is --recover-to-last-good, the operator's way out of

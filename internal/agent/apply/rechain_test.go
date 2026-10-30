@@ -376,6 +376,55 @@ func TestKRLAlone(t *testing.T) {
 			t.Fatalf("generations after each failed run %v: want at most %d, and no growth over the last three runs", counts, keepGenerations+2)
 		}
 	})
+	t.Run("failed_first_installs_do_not_grow_gen", func(t *testing.T) {
+		t.Parallel()
+		// PR #76 review F2: a first install that fails, run after run on
+		// an unchanged spool, ends with the retention cleanup as a
+		// rollback does. There is no last-good, so nothing else ever
+		// removes the generations it installed.
+		h := newTestHost(t, newFixture(t))
+		h.cfg.SelfTestTimeout = 200 * time.Millisecond
+		h.sshd.stop()
+		h.publishDir(h.spec("role:ops"))
+		var counts []int
+		for i := range keepGenerations + 3 {
+			if _, err := h.apply(); !errors.Is(err, ErrFirstInstallFailed) || h.exists(h.l.Current()) {
+				t.Fatalf("run %d: %v, current %t; want first_install_failed and no current", i, err, h.exists(h.l.Current()))
+			}
+			counts = append(counts, h.genCount())
+		}
+		n := len(counts)
+		if counts[n-1] > keepGenerations || counts[n-1] > counts[n-4] {
+			t.Fatalf("generations after each failed first install %v: want at most %d, and no growth over the last three runs", counts, keepGenerations)
+		}
+	})
+	t.Run("recovered_first_installs_do_not_grow_gen", func(t *testing.T) {
+		t.Parallel()
+		// PR #76 review F2, the recovery path: each run is cut short
+		// after the first install made its generation current, before the
+		// drop-in is written, and the next run's recovery undoes it
+		// (recover, then undoFirstInstall) before it installs again.
+		h := newTestHost(t, newFixture(t))
+		h.cfg.Fault = func(p string) error {
+			if p == "dropin" {
+				return &crash{point: p}
+			}
+			return nil
+		}
+		h.publishDir(h.spec("role:ops"))
+		var counts []int
+		for i := range keepGenerations + 4 {
+			r, err := h.apply()
+			if !isCrash(err) || i > 0 && !r.Recovered {
+				t.Fatalf("run %d: %v, %+v; want the crash, after a recovery from the second run on", i, err, r)
+			}
+			counts = append(counts, h.genCount())
+		}
+		n := len(counts)
+		if counts[n-1] > keepGenerations+1 || counts[n-1] > counts[n-4] {
+			t.Fatalf("generations after each recovered first install %v: want at most %d, and no growth over the last three runs", counts, keepGenerations+1)
+		}
+	})
 	t.Run("unvalidated_intermediate_discarded", func(t *testing.T) {
 		t.Parallel()
 		// F07 (03-08d): Transition discards an intermediate it installed but

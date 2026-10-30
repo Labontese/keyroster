@@ -940,11 +940,14 @@ first install the refusal stands and nothing is installed. The host keeps
 the directory and principals it had until the server publishes a
 directory it can apply: split the oversize host group or roles and
 publish again. Failed applies no longer pile up generations under `gen/`:
-every rollback ends with the retention cleanup a commit runs. Run in CI (03-08d):
+every rollback, and every undone first install, ends with the retention
+cleanup a commit runs. Run in CI (03-08d):
 `TestKRLAlone` (`oversize_principals_file_krl_applied`,
 `too_many_accounts_krl_applied`, `intermediate_union_too_large_krl_applied`,
 `ca_line_rejected_krl_applied`, `superseded_during_wait_krl_applied`,
-`ops_key_changed_krl_waits`, `failed_runs_do_not_grow_gen`) and
+`ops_key_changed_krl_waits`, `failed_runs_do_not_grow_gen`,
+`failed_first_installs_do_not_grow_gen`,
+`recovered_first_installs_do_not_grow_gen`) and
 `TestResetDirectory` (`reset_then_newer_krl_before_directory_arrives`,
 `reset_then_new_bundle_before_directory`). UNVERIFIED on a real host: no
 03-16 drill provokes these refusals.
