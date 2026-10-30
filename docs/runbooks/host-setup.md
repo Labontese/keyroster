@@ -944,11 +944,11 @@ publish again.
 That does not help a host that is far behind. An apply reads at most 64
 versions of each kind past the ones the host accepted, so when the
 refused version is the newest of those, a fixed version published after
-it never enters a capture. Such a host's report keeps `"spool_more": true`
-under the same `generation_too_large` or `ca_line_rejected` refusal, apply
-after apply (the report is one JSON line per apply in the applier unit's
-journal, or the output of `sudo keyroster-agent apply --once`). Publishing
-again does not move it:
+it never enters a capture. In such a host's report `spool_more` stays
+true under the same `generation_too_large` or `ca_line_rejected` refusal,
+apply after apply (the report is one JSON line per apply in the applier
+unit's journal, or the output of `sudo keyroster-agent apply --once`).
+Publishing again does not move it:
 
 - For a directory, run `keyroster-agent reset-directory` on the host as
   root. The next poll then takes the server's current directory the way a
@@ -965,11 +965,13 @@ cleanup a commit runs. Run in CI (03-08d):
 `TestKRLAlone` (`oversize_principals_file_krl_applied`,
 `too_many_accounts_krl_applied`, `intermediate_union_too_large_krl_applied`,
 `ca_line_rejected_krl_applied`, `superseded_during_wait_krl_applied`,
-`ops_key_changed_krl_waits`, `failed_runs_do_not_grow_gen`,
-`failed_first_installs_do_not_grow_gen`,
-`recovered_first_installs_do_not_grow_gen`) and
-`TestResetDirectory` (`reset_then_newer_krl_before_directory_arrives`,
-`reset_then_new_bundle_before_directory`). UNVERIFIED on a real host: no
+`ops_key_changed_krl_waits`, `krl_after_a_refused_poll_during_wait_applied`,
+`failed_runs_do_not_grow_gen`, `failed_first_installs_do_not_grow_gen`,
+`recovered_first_installs_do_not_grow_gen`), `TestResetDirectory`
+(`reset_then_newer_krl_before_directory_arrives`,
+`reset_then_new_bundle_before_directory`,
+`reset_after_host_removed_keeps_status`) and
+`TestStatus/cap_refusal_is_refused`. UNVERIFIED on a real host: no
 03-16 drill provokes these refusals.
 
 **Watch the hosts** (admin workstation):
