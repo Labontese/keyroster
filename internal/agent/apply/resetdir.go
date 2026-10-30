@@ -51,9 +51,14 @@ var spoolDirectoryRE = regexp.MustCompile(`^directory-[1-9][0-9]{0,19}\.json(\.s
 //     fetcher asks for the server's current directory.
 //
 // It accepts nothing itself, signed or unsigned. Until the fetcher spools
-// the server's current directory an apply has no directory to render: one
-// with nothing new is a no-op, one with a newer KRL fails and changes
-// nothing, and the current generation stays in force either way.
+// the server's current directory, an apply has no directory to render
+// (F08 (03-08d)). One with nothing new is a no-op. One with a newer KRL,
+// or a verified successor bundle, is not held back: the apply
+// installs it with the accepted bundle's CA keys and last-good's principals
+// (RenderFallback). Either way the apply's error names
+// host_not_in_directory until a directory is accepted. A bundle that a
+// signer restore lost is not re-bootstrapped here: while its successor is
+// refused, newer KRLs still apply alone.
 func ResetDirectory(l Layout, spoolDir string) (*ResetReport, error) {
 	if err := CheckStateDirs(l); err != nil {
 		return nil, err

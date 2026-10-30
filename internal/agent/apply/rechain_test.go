@@ -548,6 +548,93 @@ func TestResetDirectory(t *testing.T) {
 			t.Fatalf("reset-directory over an unfinished apply: %v, want reset_apply_unfinished", err)
 		}
 	})
+	// reset is an installed host (directory version 1, role:ops) after
+	// reset-directory, whose fetcher has not spooled a directory yet.
+	reset := func(t *testing.T) *testHost {
+		t.Helper()
+		h := newTestHost(t, newFixture(t))
+		spoolInState(t, h)
+		h.installed("role:ops")
+		if _, err := ResetDirectory(h.l, h.spool); err != nil {
+			t.Fatal(err)
+		}
+		h.state.Directories = map[uint64]spool.Doc{}
+		return h
+	}
+	t.Run("reset_then_newer_krl_before_directory_arrives", func(t *testing.T) {
+		t.Parallel()
+		// F08 (03-08d): with no accepted directory, a newer KRL is installed
+		// with the CA keys in force and last-good's principals.
+		h := reset(t)
+		h.publishKRL(5)
+		r, err := h.apply()
+		if !errors.Is(err, ErrHostNotInDirectory) || !h.krlRevokes(h.l.Current(), 5) || h.lastGood() != h.current() {
+			t.Fatalf("a newer KRL before the directory: %v, revokes 5 %t, %+v", err, h.krlRevokes(h.l.Current(), 5), r)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops"}) || r.HostStatus != "" || r.DirectoryVersion != 0 {
+			t.Fatalf("principals %v, host status %q, directory version %d after the KRL", got, r.HostStatus, r.DirectoryVersion)
+		}
+		if a, err := h.accepted(); err != nil || a.Directory != nil || a.KRLVersion != h.f.krlVersion {
+			t.Fatalf("accepted after the KRL: %+v, %v", a, err)
+		}
+	})
+	t.Run("reset_then_new_bundle_before_directory", func(t *testing.T) {
+		t.Parallel()
+		// F08 (03-08d): a verified successor bundle adds a next user CA; its
+		// CA lines and a newer KRL are installed with last-good's
+		// principals. The KRL change makes the widening a two-step move.
+		h := reset(t)
+		next := seedKey(t, 21)
+		_, b2 := h.f.successorWithNext(h.f.bundle, h.f.bundleDoc, next)
+		h.state.Bundles[2] = b2
+		h.publishKRL(5)
+		r, err := h.apply()
+		if !errors.Is(err, ErrHostNotInDirectory) || r.BundleVersion != 2 || r.Intermediate == 0 {
+			t.Fatalf("a new bundle before the directory: %v, %+v", err, r)
+		}
+		if !strings.Contains(h.file(CAFile), trust.FormatKey(next.PublicKey())) || !h.krlRevokes(h.l.Current(), 5) || !slices.Equal(h.principals("deploy"), []string{"role:ops"}) {
+			t.Fatalf("current after the new bundle: CA file %q, revokes 5 %t, principals %v", h.file(CAFile), h.krlRevokes(h.l.Current(), 5), h.principals("deploy"))
+		}
+	})
+	t.Run("lost_bundle_then_reset_krl_still_applied", func(t *testing.T) {
+		t.Parallel()
+		// F08 (03-08d): the host accepted bundle 2 and directory 2, which a
+		// signer restore lost; the server serves a re-made bundle 3 and
+		// directory 3, built on different versions 2.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		spoolInState(t, h)
+		h.installed("role:ops")
+		_, lost := f.successor(f.bundle, f.bundleDoc, "2026-10-02T00:00:00Z")
+		h.state.Bundles[2] = lost
+		h.publishDir(h.spec("role:ops", "role:lost"))
+		h.mustApply()
+		remadeB, remade := f.successor(f.bundle, f.bundleDoc, "2026-10-03T00:00:00Z")
+		_, b3 := f.successor(remadeB, remade.Body, "2026-10-04T00:00:00Z")
+		h.state.Bundles[3] = b3
+		remadeDir := f.directory(h.dirs[0].Body, h.spec("role:ops", "role:remade"))
+		dir3 := f.directory(remadeDir.Body, h.spec("role:ops", "role:next"))
+		h.state.Directories[3] = dir3
+		h.publishKRL(5)
+		if _, err := h.apply(); !errors.Is(err, state.ErrBundle) || !h.krlRevokes(h.l.Current(), 5) {
+			t.Fatalf("the control apply: %v, want bundle_not_verified and the KRL applied alone", err)
+		}
+		if _, err := ResetDirectory(h.l, h.spool); err != nil {
+			t.Fatal(err)
+		}
+		// The fetcher spools the server's current directory again.
+		h.state.Directories = map[uint64]spool.Doc{3: dir3}
+		h.publishKRL(5, 6)
+		for i := range 4 {
+			r, err := h.apply()
+			if !errors.Is(err, state.ErrBundle) || !h.krlRevokes(h.l.Current(), 6) {
+				t.Fatalf("apply %d after the reset: %v, revokes 6 %t, %+v", i, err, h.krlRevokes(h.l.Current(), 6), r)
+			}
+			if got := h.principals("deploy"); !slices.Equal(got, []string{"role:lost", "role:ops"}) {
+				t.Fatalf("apply %d: principals %v, want last-good's", i, got)
+			}
+		}
+	})
 	t.Run("reset_without_last_good_refusal_stands", func(t *testing.T) {
 		t.Parallel()
 		h := newTestHost(t, newFixture(t))

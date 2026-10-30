@@ -743,7 +743,7 @@ func (e *engine) forward(ctx context.Context) error {
 				cur = nil
 			}
 			e.setVersions(v, cur)
-			return v.Refused
+			return outcome(v)
 		}
 		if cur, curLink, err = e.readCurrent(); err != nil {
 			return err
@@ -756,7 +756,7 @@ func (e *engine) forward(ctx context.Context) error {
 			if e.cfg.DryRun {
 				e.setVersions(v, g)
 				e.report.Diff = diff(cur, g)
-				return v.Refused
+				return outcome(v)
 			}
 			if cur != nil && sameBytes(cur, g) {
 				// The new versions change nothing on disk: store them. The
@@ -771,7 +771,7 @@ func (e *engine) forward(ctx context.Context) error {
 				if err := e.commit(curLink.n, v); err != nil {
 					return err
 				}
-				return v.Refused
+				return outcome(v)
 			}
 			g.N = e.allocGeneration()
 			if err := e.installGeneration(g); err != nil {
@@ -801,7 +801,7 @@ func (e *engine) forward(ctx context.Context) error {
 		if err := e.firstInstall(ctx, g, v); err != nil {
 			return err
 		}
-		return v.Refused
+		return outcome(v)
 	}
 	target, tv := g, v
 	e.poll = func(ctx context.Context) (*Generation, *state.Verified, error) {
@@ -848,7 +848,7 @@ func (e *engine) forward(ctx context.Context) error {
 	if err := e.commit(target.N, tv); err != nil {
 		return err
 	}
-	return tv.Refused
+	return outcome(tv)
 }
 
 // setVersions reports v's versions; the KRL version is g's when g (the
@@ -880,11 +880,12 @@ func (e *engine) keepKRL(g, cur *Generation, curLink link) {
 }
 
 // render is Render for this host. When Render refuses because of the
-// host's entry and the host already has trust files (a last-good of the
-// agent's), the apply goes on with RenderFallback (owner decision
-// 2026-10-26, PR #67): the KRL and CA keys apply, principals are emptied
-// or kept as last-good's, and the report names the host status. Before
-// the first install the refusal stands and nothing is installed.
+// host's entry, or because no directory is accepted (F08 (03-08d)), and
+// the host already has trust files (a last-good of the agent's), the apply
+// goes on with RenderFallback (owner decision 2026-10-26, PR #67): the KRL
+// and CA keys apply, principals are emptied or kept as last-good's, and
+// the report names the host status. Before the first install the refusal
+// stands and nothing is installed.
 func (e *engine) render(v *state.Verified) (*Generation, error) {
 	g, err := Render(v, e.keys)
 	if err == nil {
@@ -904,15 +905,31 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 	}
 	lastHost := ""
 	if rec, rerr := e.readRecord(lg.n); rerr == nil {
-		lastHost = rec.Host
+		lastHost, lgGen.HostStatus = rec.Host, rec.HostStatus
 	}
 	g, status, ferr := RenderFallback(v, e.keys, lastHost, lgGen, err)
 	if ferr != nil {
 		return nil, ferr
 	}
 	g.HostStatus, e.report.HostStatus = status, status
+	if v.Directory == nil {
+		e.logf("WARNING %v; the KRL and CA keys apply, principals are kept as last-good's", err)
+		return g, nil
+	}
 	e.logf("WARNING %s: %v; the KRL and CA keys apply, principals are %s", status, err, map[bool]string{true: "kept as last-good's", false: "emptied"}[status == HostKeysRotated || status == HostKeysDisagree])
 	return g, nil
+}
+
+// outcome is what forward returns once v's state is in force, or found
+// unchanged: v.Refused, and while no directory is accepted also Render's
+// host_not_in_directory refusal (F08 (03-08d)), which RenderFallback went
+// on from with last-good's principals. The apply's error and last_apply
+// then name both until a directory is accepted.
+func outcome(v *state.Verified) error {
+	if v.Directory == nil {
+		return errors.Join(v.Refused, errNoDirectory)
+	}
+	return v.Refused
 }
 
 // candidate renders v for this host (render), keeps the KRL in force
