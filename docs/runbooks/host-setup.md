@@ -785,10 +785,16 @@ arrive](#how-fast-changes-arrive)).
 | `unknown_agent` | fetcher log | The server has no agent with this identity: never enrolled, or forgotten (`keyroster host forget`) | A new join token, then `keyroster-agent install` again |
 | `rate limited` (429) | fetcher log | The server's limiter refused a state request; the fetcher keeps what it spooled and goes on at the next poll | None; escalate if every poll says it |
 | `host_in_directory`, `host_not_enrolled` | `host forget` | A directory entry still holds the agent's host keys; no agent has that identity (forgotten already, or its identity rotated) | Remove the host first and wait for its removal confirmation; check the identity with `keyroster host pending` |
-| `host_removal_not_applied` | `host forget` (CLI and server) | The agent was approved once and the server has no recorded removal confirmation for it: the host's heartbeat never showed a served directory that removes it (`removal confirmed at directory v<N>` is missing in `keyroster host pending`) | Wait for its next heartbeat; `keyroster host forget --identity <identity> --host-gone` for a host that is gone for good ([Removing a host](#removing-a-host)) |
+| `host_removal_not_applied` | `host forget` (CLI) | The agent was approved once and the server has no recorded removal confirmation for it: the host's heartbeat never showed a served directory that removes it (`removal confirmed at directory v<N>` is missing in `keyroster host pending`) | Wait for its next heartbeat; `keyroster host forget --identity <identity> --host-gone` for a host that is gone for good ([Removing a host](#removing-a-host)) |
 | `host_swap_pending` | `host forget` (CLI and server) | The agent's removal is confirmed, but its host's newest heartbeat shows a swap it has not finished (`swap pending` in `keyroster host pending`), so the confirmation does not yet speak for what it enforces (03-08c); nothing was forgotten | Wait for its next heartbeat and run the command again; `--host-gone` for a host that is gone for good |
 | `forget_name_ambiguous` | `host forget` (CLI) | More than one agent has the name (a re-enrolled host); nothing was sent | Run one of the `keyroster host forget --identity <identity>` commands the refusal lists ([Removing a host](#removing-a-host)) |
-| `forget_state_changed` | `host forget` | The agent changed since `keyroster host pending` was read (its approval, removal version or confirmation, or its identity rotated); nothing was forgotten | Run the command again |
+| `forget_state_changed` | `host forget` | The agent changed since `keyroster host pending` was read (its approval, removal version, confirmation or enrollment time, or its identity rotated); nothing was forgotten | Run the command again |
+| `admin_quorum_not_met` | `host forget` (CLI and signer) | Too few distinct admin signatures: one for an agent never approved, the policy's admin quorum for every other (03-08c, owner decision Q3); nothing was signed, or the signer forgot nothing | Give one `--admin-key` per admin, each key in the one ssh-agent ([Removing a host](#removing-a-host), step 3) |
+| `request_time_skew` | `host forget` (CLI and signer) | Signing took more than 240 s, or the request's time is more than 300 s from the signer's clock; nothing was forgotten | Run the command again and confirm each key promptly; check the clocks |
+| `forget_facts_mismatch` | `host forget` (signer) | The admins signed that the agent was never approved, but the server's row says it was (or the reverse); nothing was forgotten | Run `keyroster host pending` again; if it repeats, the server and the signed request disagree: escalate |
+| `forget_host_in_directory` | `host forget` (signer) | The signer's directory still has an entry, active or disabled, with one of the agent's host keys; nothing was forgotten | Remove the host first and wait for its removal confirmation |
+| `forget_confirmation_invalid` | `host forget` (signer) | The confirmation names a directory version the signer never installed, or another document's SHA-256; nothing was forgotten | Run `keyroster host pending` again; if it repeats, escalate |
+| `forget_logged_not_deleted` | `host forget` (server) | The signer logged the forget as audit entry `<N>`, but the agent changed before the server could delete it; the agent is still served | Run `keyroster host pending` and forget it again, which logs a second entry |
 | `stale_heartbeat` | server | The heartbeat's seq is not above the stored one: the usual answer between the applier's status writes. A seq below the stored one is also logged by the server as `heartbeat_seq_regressed` (at most once an hour) and flagged `seq_regressed` | None: the fetcher logs nothing for it |
 | `heartbeat_seq_future` | fetcher log, server log | The heartbeat's seq is more than an hour beyond the server's clock: the host's clock runs ahead. Nothing but its clock offset is stored, so `clock_skew` shows it (D-R2) | Fix the host's clock; the applier restarts its seq from its clock once the clock is back |
 | `heartbeat_field_invalid` | fetcher log, server log | A status field broke its rule; the answer names the field | Escalate: the agent wrote, or something changed, a status the server refuses |
@@ -797,13 +803,14 @@ arrive](#how-fast-changes-arrive)).
 | `install_no_service_manager`, `install_no_sshd_config_d` | install | Neither systemd nor OpenRC found; no `/etc/ssh/sshd_config.d` on a systemd host | [Running the agent](#running-the-agent) |
 | `install_path_unsafe`, `install_pins_differ` | install | See step 2 | Fix the path; for other pins, remove the agent's state first |
 
-The `host forget` refusals above run in CI (03-08b). The server's: `host_in_directory`
-and `host_not_enrolled` in `TestAgentRemoval`, `host_removal_not_applied` in
-`TestHostForgetWaitsForRemoval` and `TestRemovalConfirmation`, `forget_state_changed`
-in `TestForgetHost`, `host_swap_pending` in `TestRemovalConfirmation` (03-08c). The CLI's: `forget_name_ambiguous`, `forget_state_changed`,
+The `host forget` refusals above run in CI (03-08b, 03-08c). The server's: `host_in_directory`
+and `host_not_enrolled` in `TestAgentRemoval`, `forget_state_changed`
+in `TestForgetHost`, `host_swap_pending` in `TestRemovalConfirmation` and `forget_logged_not_deleted` in `TestForgetHost` (03-08c). The signer's (03-08c):
+`admin_quorum_not_met`, `request_time_skew`, `forget_facts_mismatch`, `forget_host_in_directory` and `forget_confirmation_invalid` in
+`TestForgetAgent`. The CLI's: `forget_name_ambiguous`, `forget_state_changed`,
 `host_in_directory` and `host_not_enrolled` in `TestHostForget`, and
 `host_removal_not_applied` in `TestHostForget` and `TestHostForgetHostGone`, and
-`host_swap_pending` in `TestHostForget` (03-08c). On the
+`host_swap_pending`, `admin_quorum_not_met`, `request_time_skew` and `forget_logged_not_deleted` in `TestHostForget` (03-08c). On the
 homelab they are UNVERIFIED until 03-16.
 
 ## Running the agent
@@ -1258,10 +1265,11 @@ enrolled host can (D-03); that is the leak this order accepts.
    confirmed retroactively: its forget needs `--host-gone`. A host you
    cannot reach any more never confirms; go on only if it is
    decommissioned.
-3. **Forget the agent (admin workstation).** Forget names one agent:
+3. **Forget the agent (admin workstation).** Forget names one agent, and
+   the admins sign it:
 
    ```
-   keyroster host forget --identity <identity>
+   keyroster host forget --identity <identity> --admin-key <admin 1> --admin-key <admin 2>
    ```
 
    with the identity `keyroster host pending` printed, or `keyroster host
@@ -1271,40 +1279,111 @@ enrolled host can (D-03); that is the leak this order accepts.
    the CLI lists each agent with its state and its `--identity` command and
    sends nothing. The CLI reads `keyroster host pending` (and `keyroster
    host status`, for agents the directory approves now, an agent approved
-   but not yet polled included), prints the agent,
-   its state and its confirmation, and sends the identity with what it
-   read: whether the agent was approved once, its removal version and its
-   recorded confirmation. The server deletes that one agent only while all
-   of that still equals its row, re-checked by the delete itself, and
-   prints its identity and host keys. From then on that identity gets
-   `unknown_agent` and receives nothing, and its host keys can enroll again
-   with a new join token. The server refuses, forgetting nothing:
+   but not yet polled included) and builds the forget request from the row
+   it read: the agent's identity, name, enrollment time and host keys,
+   whether it was approved once, its removal version and its recorded
+   confirmation, or `--host-gone`. The request names the installation of
+   the root-pinned trust bundle.
+
+   **Who signs** (owner decisions Q2 and Q3, 2026-10-29). An agent that was
+   never approved, and so never received state, is forgotten with one
+   admin signature: one `--admin-key`, or the `admin_key` of `keyroster
+   init`. Every other agent needs the policy's `admin_quorum` of distinct
+   admins, each key given with its own `--admin-key`, all in the one
+   ssh-agent the CLI uses; the first one also signs the request to the
+   server. Too few distinct keys are refused before anything is signed
+   (`admin_quorum_not_met`, with the number needed). The CLI prints what
+   is signed (the identity, name and enrollment time, the host key
+   fingerprints, approved once, the removal version, the confirmation or
+   `host_gone`, and the signing keys), sets the request's time, asks each
+   key to sign, and refuses `request_time_skew`, sending nothing, when
+   signing took more than 240 s (slow touch confirmations): run the command
+   again and confirm promptly.
+
+   **What happens.** The server checks the request against its row and
+   asks keyroster-signer, stating on its own whether its row was approved
+   once. The signer checks the signatures under the rule above and refuses
+   too few (`admin_quorum_not_met`), a signed approved-once that differs
+   from the server's statement (`forget_facts_mismatch`), a host key that
+   any directory entry still holds (`forget_host_in_directory`), and a
+   confirmation that is not a directory it installed
+   (`forget_confirmation_invalid`). It then logs the forget as a
+   `host_forget` audit entry in the same transaction as its decision. The
+   server deletes the agent only after that, by a statement that re-checks
+   every fact, and prints its identity, its host keys and `Forget logged
+   as audit entry <N>`. From then on that identity gets `unknown_agent`
+   and receives nothing, and its host keys can enroll again with a new
+   join token. While the signer cannot be reached or cannot decide, the
+   server answers 503 and forgets nothing.
+
+   The refusals, each forgetting nothing:
 
    - `forget_state_changed` when the agent changed since `host pending`
-     was read (its approval, removal version or confirmation, or its
-     identity rotated): run the command again;
+     was read (its approval, removal version, confirmation or enrollment
+     time, or its identity rotated): run the command again;
    - `host_in_directory` while any directory entry, active or disabled,
      still holds one of the agent's host keys: forgetting an agent whose
      host is still in the directory would stop the revocations that host
      needs;
    - `host_removal_not_applied` for an agent approved once that has no
      recorded confirmation (owner decision 2026-10-28). The CLI refuses it
-     before it sends anything, naming the `--host-gone` command.
+     before it signs, naming the `--host-gone` command;
+   - `host_swap_pending` while the host reports a swap it has not finished
+     (step 2);
+   - the signer's refusals above, answered 403 with the signer's reason.
+
+   `forget_logged_not_deleted` means the signer logged the forget (audit
+   entry `<N>`, which the CLI names), but the agent changed before the
+   server could delete it (a fact, its identity, or a swap it started), so
+   the server deleted nothing and keeps serving it: `keyroster host
+   pending` still lists it. Run `keyroster host pending` and forget it
+   again, which logs a second entry; the first one records an
+   authorization the server did not carry out.
 
    For a host that will never report again (decommissioned, disk wiped):
 
    ```
-   keyroster host forget --identity <identity> --host-gone
+   keyroster host forget --identity <identity> --host-gone --admin-key <admin 1> --admin-key <admin 2>
    ```
 
-   It overrides the confirmation only. The CLI prints that it does, and the
-   server logs it at warning level with the admin's name. If the host is
-   still running, it gets no more signed state from then on, revocations
-   included, and keeps enforcing what it applied last. For a confirmed or a
-   never-approved agent the CLI drops `--host-gone` with a note.
+   It overrides the confirmation, or the wait for a pending swap, only;
+   the admins still sign it, and the entry records `host_gone`. The CLI
+   prints that it does, and the server and the signer log it at warning
+   level. If the host is still running, it gets no more signed state from
+   then on, revocations included, and keeps enforcing what it applied
+   last. For a never-approved agent, or a confirmed one with no swap
+   pending, the CLI drops `--host-gone` with a note.
 
-   Forget is one admin's signed request and leaves a server log line only
-   (owner decisions D-1, 2026-10-28, and Q1, 2026-10-29). Until plan 03-08c, forget needs no admin quorum and leaves no audit entry.
+   Run in CI (03-08c): `TestForgetAgent` (the signer's rule, both sides of
+   Q3, every refusal), `TestVerifyHostForget` (audit verify's rule),
+   `TestForgetHost` (the server relays, deletes only after the signer's
+   answer, and answers 503 or `forget_logged_not_deleted` deleting
+   nothing), `TestHostForget` (the signatures, the local refusals),
+   `TestAgentEnrollEndToEnd` and `TestAgentReenrollEndToEnd` (e2e: the
+   forget is logged as audit entry `<N>` and audit verify accepts it). CI's
+   e2e policy has an admin quorum of 1, so the quorum-2 path runs in the
+   unit tests only. On the homelab UNVERIFIED until 03-16, whose forget
+   drill proves it (owner decision Q4).
+
+   **Checking that a forget was authorized.** Export the signer's log and
+   run `keyroster audit verify` (signer-install.md): every forget is a
+   `host_forget` entry, which audit verify re-checks with the signer's rule
+   (the installation, the number of distinct admin signatures under the
+   policy in force, the request ID used once, no host key in the directory
+   in force, the confirmation's directory logged), and whose export line
+   names the agent's `identity`, `approved_once`, `host_gone` and the
+   signing keys' fingerprints (`admin_fingerprints`). Audit verify checks
+   that the number of signatures fits the signed `approved_once`; it
+   cannot tell a false one, because the log records no approvals: one
+   admin together with a compromised keyroster-server could forget an
+   approved host with one signature, but that server could drop the row
+   without the signer anyway (T-03-293, T-03-285). A host whose fetcher
+   logs `unknown_agent` (at error level, in its journal) while the log has
+   no `host_forget` entry for its identity was dropped by keyroster-server
+   without a forget: treat the server as compromised. This check is
+   detection only, because a server can always stop serving a host. Run in
+   CI: the entry and the fetcher's line in `TestAgentEnrollEndToEnd`; as an
+   operator check UNVERIFIED until 03-16.
 
 ## How fast changes arrive
 
