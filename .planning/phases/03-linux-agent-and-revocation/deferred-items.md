@@ -16,8 +16,10 @@
   status: open
   **What:** pre-existing and outside the fix round; to the next plan that edits the fetcher or this test.
 - 03-08d: rendering costs time that grows with the square of a host group's accounts. `directory.RenderPrincipalsFile` canonicalises and hashes the whole directory once per account for its header line, and `apply.Render` calls it for every account of the host's host group. At the agent's cap of 4096 principals files one render took about 10 s without the race detector on the development machine and about 80 s under `-race`, so 03-08d's cap tests (`too_many_accounts_krl_applied`, `intermediate_union_too_large_krl_applied`, `intermediate_checked_with_the_kept_krl`) add several minutes to the agent apply package under `-race`, and a small host with a large directory pays it on every apply that renders.
-  status: open
+  status: resolved
   **What:** outside 03-08d's files (the directory package). A fix computes the header once per render. The owner chooses the plan, for example the signer-capacity plan (03-08g).
+  **Resolved in 03-08d (PR #76 review fix round 1, owner decision D-1):** `directory.PrincipalsRenderer` canonicalises and hashes a directory once per render, with `RenderPrincipalsFile` as a thin wrapper, and `apply.Render` refuses a host group of more than 4096 accounts with `generation_too_large` before it renders any file.
 - 03-08d: `ErrGenerationTooLarge` is not in status.go's `refusals`, so a KRL-alone commit after an oversize directory reports `last_apply.result = error`, while one after `ca_line_rejected` reports `refused`.
-  status: open
+  status: resolved
   **What:** outside 03-08d's files (status.go). The owner decides whether a cap refusal is a refusal by design.
+  **Resolved in 03-08d (PR #76 review fix round 1):** `ErrGenerationTooLarge` is in `refusals`, so a cap refusal, and the KRL-alone commit after one, reports `refused`.

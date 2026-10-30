@@ -10,11 +10,12 @@ requires:
     provides: "03-08b: the generation record's host_status, buildStatus from the committed generation, the sameBytes record rewrite; 03-08c: forget through the signer (this plan's precondition)"
 provides:
   - "state: KRLAlone, the one implementation of owner decision D-R2's KRL-alone state, used by Verify's refused branch and by the applier"
-  - "apply: candidate (render, keepKRL, checkCandidate) and krlAlone, the KRL-alone pass after a content refusal in forward and pollSpool, one per run"
+  - "apply: candidate (render, keepKRL, checkCandidate) and krlAlone, the KRL-alone pass after a content refusal in forward and pollSpool, one per capture (one per run until fix round 1)"
   - "apply: checkCandidate checks the target and the intermediate Transition would install against the caps before anything is written"
   - "apply: the ErrCALineRejected trigger; rollback ends with cleanup; Transition discards an unvalidated intermediate"
   - "apply: RenderFallback without an accepted directory (last-good's principals and recorded host status), errNoDirectory, outcome"
   - "tests: TestKRLAlone (12 new cases), TestResetDirectory (4 new cases), dirSpec.bare"
+  - "fix round 1: directory.PrincipalsRenderer (one canonical encoding per render); Render's account cap; undoFirstInstall's cleanup; generation_too_large reported as refused"
   - "docs: host-setup.md 'Revocations keep applying'; signer-install.md host selection by bundle version and the KRL sentence"
 affects: [03-08e, 03-08f, 03-09, 03-10, 03-12, 03-13, 03-14]
 
@@ -37,6 +38,11 @@ key-files:
     - .planning/phases/03-linux-agent-and-revocation/03-08d-SUMMARY.md
   modified:
     - internal/agent/state/verify.go
+    - internal/directory/render.go (fix round 1)
+    - internal/directory/render_test.go (fix round 1)
+    - internal/agent/apply/adopt.go (fix round 1)
+    - internal/agent/apply/status.go (fix round 1)
+    - internal/agent/apply/status_test.go (fix round 1)
     - internal/agent/apply/apply.go
     - internal/agent/apply/swap.go
     - internal/agent/apply/render.go
@@ -53,7 +59,7 @@ key-files:
 key-decisions:
   - "F08's fallback without a directory reports last-good's recorded host_status, not the empty string, so the sameBytes record rewrite (03-08b) never replaces a real status with an empty one"
   - "outcome() joins host_not_in_directory on every forward return while no directory is accepted, no-op and dry run included, because every apply rewrites last_apply"
-  - "One KRL-alone pass per run, shared by forward and pollSpool (engine.krlAloneTaken)"
+  - "One KRL-alone pass per capture, not per run (fix round 1, review F0 and F1; the plan's must_have said one per run, which engine.krlAloneTaken implemented until then)"
   - "The checkCandidate-before-keepKRL mutant is not equivalent; intermediate_checked_with_the_kept_krl kills it"
 
 requirements-completed: []
@@ -72,7 +78,7 @@ completed: 2026-10-30
 
 **The mechanism:**
 - One KRL-alone pass through state.KRLAlone, against the accepted (or pending) bundle.
-- Failed runs no longer leave generations behind.
+- Failed runs no longer leave generations behind. Until fix round 1 this held only for rollbacks: a failed first install left one generation per run (review F2).
 
 PR [#76](https://github.com/Labontese/keyroster/pull/76), branch `p03/08d-agent-revocation-flow`, opened by keyroster-bot. Auto-merge is not enabled. It waits for the orchestrator's pre-merge review and the owner's merge gate (Task 4).
 
@@ -113,7 +119,7 @@ The pass runs only when all of these hold:
 - v.Refused is nil;
 - the bundle or directory changed;
 - the error is not an injected crash;
-- the run has not taken its one pass yet.
+- the run has not taken its one pass yet. Fix round 1 removed this condition: the pass is now bounded per capture (review F0 and F1).
 
 Otherwise the refusal is returned, joined to v.Refused. pollSpool uses the same helper, against pending.AsStored(). Every rollback ends with e.cleanup(). Transition discards an intermediate whose validate failed.
 
@@ -238,7 +244,7 @@ Every existing TestKRLAlone, TestResetDirectory, TestApply, TestSwapInterleaving
 - pr-title run 41064103255;
 - pinned-actions run 41064103787.
 
-In build-test, `internal/agent/apply` took 317 s under `-race`. Main's last run took 101 s. The default per-binary timeout is 600 s.
+In build-test, `internal/agent/apply` took 317 s under `-race`. Another CI run of the same code took 477 s. Main's last run took 101 s. The default per-binary timeout is 600 s. Fix round 1 (below) re-measures it.
 
 e2e: CI only. WSL cannot resolve the e2e host name.
 
@@ -283,7 +289,7 @@ None. No Rule 1-3 fix was needed beyond the plan's own work.
 
 ## Deferred Issues
 
-Logged in deferred-items.md:
+Logged in deferred-items.md. Fix round 1 resolved both (owner decision D-1, and review F4):
 
 - **Render cost.** Rendering costs time that grows with the square of a host group's accounts: `directory.RenderPrincipalsFile` canonicalises the whole directory once per account. The three cases at the 4096-file cap cost about 80 s of CPU each under -race, so the agent apply package now runs for several minutes under -race (511 s locally with every package running at once). The directory package is outside this plan's files.
 - **last_apply result.** `ErrGenerationTooLarge` is not in status.go's `refusals`, so a KRL-alone commit after an oversize directory reports `last_apply.result = error`.
@@ -293,7 +299,7 @@ Logged in deferred-items.md:
 | Threat | Mitigation | Tests |
 |--------|-----------|-------|
 | T-03-294 (DoS by a withheld KRL) | Mitigated. | oversize_principals_file_krl_applied, too_many_accounts_krl_applied, intermediate_union_too_large_krl_applied, ca_line_rejected_krl_applied, superseded_during_wait_krl_applied |
-| T-03-295 (gen/ growth) | Mitigated. | failed_runs_do_not_grow_gen, unvalidated_intermediate_discarded |
+| T-03-295 (gen/ growth) | Mitigated after fix round 1. At 449cbd1 the claim was false for a host with no last-good: a failed first install left one generation per run (review F2). | failed_runs_do_not_grow_gen, unvalidated_intermediate_discarded, failed_first_installs_do_not_grow_gen, recovered_first_installs_do_not_grow_gen |
 | T-03-296 (a fallback installs nothing unauthenticated) | KRLAlone takes prev's bundle, policy and directory, and re-runs krl.VerifyManifest against prev's bundle, the pins and prev's KRL version. The no-directory fallback uses the verified bundle's CA keys and last-good's installed principals. Every fallback generation passes checkCandidate, validate and Transition. | ops_key_changed_krl_waits, first_install_refusal_stands, reset_without_last_good_refusal_stands |
 | T-03-297 (reset host stops KRLs) | Mitigated. | lost_bundle_then_reset_krl_still_applied, reset_then_newer_krl_before_directory_arrives, reset_then_new_bundle_before_directory |
 | T-03-SC (dependencies) | No module added. capslock is unchanged. | |
@@ -316,7 +322,73 @@ Each behaviour change has a RED run on the code before it: origin/main for Task 
 - steps B, C and D with the -race set minus the 4096-file cases;
 - step E and HEAD with everything.
 
+## Pre-merge review fix round 1
+
+The review ran at head `449cbd1` against base `98e9e5c` in security mode. Daniel decided D-1 and D-2 on 2026-10-30. Review F7 was refuted; F4 covers it anyway.
+
+### Owner decisions
+
+- **D-1: both render fixes in this PR (review F5 and F6, medium).** They are outside the plan's files_modified, so they are deviations.
+  - **(a)** `apply.Render` refuses a host group of more than maxAccounts (4096) accounts with `generation_too_large: host group <name> has <n> accounts, above 4096`, before it renders any file. candidate treats render errors as content refusals, so `too_many_accounts_krl_applied` keeps its meaning. A render now costs at most 4096 files, whatever the directory's size. Validate refuses a repeated account, so one account is one file.
+  - **(b)** `directory.PrincipalsRenderer` canonicalises and hashes a directory once, for its first file. `RenderPrincipalsFile` is a one-line wrapper around it, so there is still one renderer (D-07), with the same bytes and the same errors in the same order. `apply.Render` and `Adopt` render through one renderer. No account index was added: (a) bounds the linear scan, and the profile below shows that it does not matter.
+- **D-2: the stuck window (review F8, low): the runbook only.** host-setup.md now covers a host whose report keeps `"spool_more": true` under the same `generation_too_large` or `ca_line_rejected` refusal. Publishing a fixed version does not unstick it. It needs `keyroster-agent reset-directory` for a directory, or escalation for a bundle. The paragraph is labelled UNVERIFIED on a real host. By the owner's decision, the applier is unchanged for this.
+
+### Fixes
+
+The evidence is in the scratchpad's `fix76-1/`. Every RED ran on the parent commit, in a `git archive` copy with only the new test file copied in. Every mutant ran in its own copy of the fix's tree, with -run filters and without -race.
+
+| Fix | Commit | Test | RED and mutants |
+|---|---|---|---|
+| D-1(b), canonicalise once | `d8f8b40` | `TestPrincipalsRendererMatchesReference`: one renderer for every file and across errors, against a copy of the old per-file renderer. Two directories, four host groups (one unknown, one invalid), seven accounts (one without an entry, two invalid names), and a nil directory | A performance refactor, so no behavioural RED. The identity test passes, and so do `TestRenderPrincipalsFile`, `TestRenderMatchesAuthorize`, the hosts tests, `cmd/keyroster` (principals) and the adopt tests. 2 mutants killed: the cached sum altered, and the nil-directory error changed |
+| D-1(a), the account cap in Render | `356286a` | `TestKRLAlone/too_many_accounts_krl_applied` now asserts Render's refusal | RED on `d8f8b40`: `4097 accounts: generation_too_large: 4097 principals files, above 4096, want Render's refusal "host group lab has 4097 accounts, above 4096"`. 1 mutant killed: the cap disabled |
+| F4, generation_too_large is a refusal | `7db1557` | `TestStatus/cap_refusal_is_refused`, and a new `apply_result` row | RED on `356286a`: `last_apply after the cap refusal: ... Result:error ...`, and `applyResult(..., generation_too_large: ...) = error, want refused`. 1 mutant killed: the entry removed from `refusals` (both tests fail) |
+| F0 and F1, one KRL-alone pass per capture | `00b4fbb` | `TestKRLAlone/krl_after_a_refused_poll_during_wait_applied` | RED on `7db1557`: `the KRL that arrived later in the wait is not committed: revokes 99 false ... WaitedMS:150000 ... Errors:[]`. 1 mutant killed: the run-wide flag restored |
+| F2, failed first installs leak generations | `8096d2b` | `TestKRLAlone/failed_first_installs_do_not_grow_gen`, `recovered_first_installs_do_not_grow_gen` | RED on `00b4fbb`: `[1 2 3 4 5 6 7 8]: want at most 5`, and for the recovery path `[1 2 3 4 5 6 7 8 9]: want at most 6`. 1 mutant killed: the cleanup removed (both tests fail) |
+| F3, F08's last-good host status untested | `7985cc1` | `TestResetDirectory/reset_after_host_removed_keeps_status` | GREEN on `8096d2b`, as expected, because the code was correct. The evidence is the killed mutant `return g, "", nil` in RenderFallback's no-directory branch: `apply 0: host status lost: report "", record ... HostStatus:}`. As the review found, every other TestResetDirectory, TestKRLAlone, TestStatus, TestApply, TestSwapInterleaving and TestIntermediate case still passes with the mutant |
+| D-2, docs | `4f83041` | n/a | n/a |
+
+**F0 and F1 in detail.** krlAlone's run-wide flag is gone. A KRL-alone Verified carries the refusal and changes neither the bundle nor the directory, so krlAlone's own guards end the loops in forward and pollSpool after one pass per capture. A poll whose pass found no newer KRL therefore leaves its own pass to a later poll's capture that brings one. This replaces the plan's must_have "a run takes at most one KRL-alone pass" and answers the executor's question 4. The plan is left as written.
+
+**F2 in detail.** undoFirstInstall now ends with `e.cleanup()`. Both failFirstInstall and the recovery path (recover, then undoFirstInstall) run it. By then current is removed, there is no last-good and the marker is cleared. cleanup therefore keeps the newest keepGenerations and removes nothing still referenced: it never touches current's, last-good's or a marker's generations, and a foreign or absent current is not in gen/. cleanup was preferred over discarding the current generation, because failFirstInstall can also run before current points at the new generation. The claim "Failed runs no longer leave generations behind" and T-03-295 are corrected above. Both were false at `449cbd1` for a host with no last-good.
+
+**F4 in detail.** Every place that returns ErrGenerationTooLarge does so before anything is written: Render's account cap, and checkLimits through checkCandidate and installGeneration. A rollback that hits it reports rolled_back first. The server reads last_apply only for `== ok` (principalsShown, principalsEmptied), so the 03-08b removal-confirmation rule is unaffected: neither error nor refused counts as ok, and both functions otherwise look at host_status and the file list. The CLI shows the value as it is, with the error as a `last apply error` note. host-setup.md now says that last_apply.result is `refused` and that its error names the refusal. This answers the executor's question 2.
+
+**F3 in detail.** The test also runs a no-op apply after the KRL-alone apply. A no-op renders nothing, so its report names no host status, and last_apply reads the committed generation's record (03-08b). The test asserts the record and last_apply on both applies, and the report on the first. This confirms the executor's question 3.
+
+### Test time of internal/agent/apply
+
+| Where | Code | internal/agent/apply under -race |
+|---|---|---|
+| CI build-test, run 41064103229 | `f31bbde` | 317 s |
+| CI build-test, run 41068409895 | `449cbd1` | 477 s |
+| The review, WSL, the package alone | `449cbd1` | 430 s wall; the three cap cases alone 319 s wall and 449.6 s user CPU |
+| This round, WSL, the package alone (a `-race` test binary run with `-test.v` under `/usr/bin/time`, nothing else running; 16 threads) | `4f83041` | **263 s wall, 111 s user CPU, 56 s system**. Every test passed, with no data race |
+
+The CPU cost of the cap cases is gone. `too_many_accounts_krl_applied` now takes 1.4 s, because Render refuses the host group before rendering. The two intermediate cases still take 113 s and 127 s, but they are no longer CPU-bound. A CPU profile of `intermediate_union_too_large_krl_applied` without -race shows 1.8 s user over 51 s wall, 68 % of the samples in syscalls, with `os.(*File).Sync` and `openat` on top: the writes and fsyncs of the generations of about 4096 files each. Their time therefore depends on the runner's disk, not its CPU. The time in CI on the head that carries this section is in the handback. No `-timeout` was added.
+
+### Gate and CI
+
+- **Windows (Go 1.27.1):** `go test ./internal/directory/ ./cmd/keyroster/`, `go vet` of the changed packages, and `GOOS=linux go vet ./internal/agent/apply/` after each change. The agent packages are Linux-only, so their tests, every RED run and every mutant ran in WSL.
+- **The local gate in WSL, on a `git archive` copy of the code head `4f83041` outside the repository: exit 0 (`GATE PASSED`).** Each of these passed:
+  - gofmt, with its positive control;
+  - `go mod verify`, the static build and the CLI cross-compiles (windows, darwin, freebsd);
+  - `go vet`: plain, `e2e`, and `e2e systemdsmoke`;
+  - `KEYROSTER_REQUIRE_ORACLE=1 KEYROSTER_REQUIRE_SSH_AGENT=1 CGO_ENABLED=1 go test -race -count=1 ./...`: 34 packages ok, with no data race. `internal/agent/apply` took 330 s with every package running at once (511 s at `f31bbde`);
+  - golangci-lint: 0 issues for linux, windows and darwin;
+  - capslock: 23 pairs, equal to the baseline;
+  - dep-firewall;
+  - testonly-firewall, in 6 combinations;
+  - check-pinned-actions: 47.
+- **CI:** the required checks on the head that carries this section are in the handback. WSL cannot resolve keyroster.localhost, so the e2e evidence comes from CI.
+
+### UNVERIFIED after this round
+
+- The D-2 runbook paragraph on a real host. No test or drill runs a host 64 or more versions behind a refused version.
+- e2e: CI only. WSL cannot resolve keyroster.localhost.
+- Everything listed under UNVERIFIED above.
+
 ## Self-Check: PASSED
 
 - The files exist: 03-08d-PLAN.md, 03-08d-SUMMARY.md, state/verify.go, apply/apply.go, apply/swap.go, apply/render.go, apply/resetdir.go, apply/rechain_test.go, apply/harness_test.go, and both runbooks.
 - The commits 06ca554, b51be21, ac065fa, 2f5039e, 78e8ac8, 0823fed, 503e639, f820a86, aca1154 and f31bbde are all ancestors of HEAD.
+- Fix round 1: the commits d8f8b40, 356286a, 7db1557, 00b4fbb, 8096d2b, 7985cc1 and 4f83041 are ancestors of HEAD, each SSH-signed by keyroster-bot with no attribution line. internal/directory/render.go, internal/directory/render_test.go, internal/agent/apply/status.go and internal/agent/apply/status_test.go exist.
