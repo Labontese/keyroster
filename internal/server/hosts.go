@@ -239,8 +239,8 @@ func sameAgent(a *serverdb.Agent, req *wire.ForgetRequest) bool {
 //     rests on the confirmation is refused while the host's stored
 //     heartbeat shows a swap it has not finished (409 host_swap_pending,
 //     03-08c), or shows principals again before reconcileRemoval cleared
-//     the confirmation, or none is stored (409 host_removal_not_applied,
-//     PR #75 review finding 0; removalStillApplied); host_gone overrides
+//     the confirmation, or none is stored (409 forget_state_changed, PR
+//     #75 review finding 0; removalStillApplied); host_gone overrides
 //     both;
 //  6. the server states its own view of the row in the relay frame,
 //     approved once or not (ServerApprovedOnce, from approved_at_us,
@@ -437,8 +437,10 @@ var errSwapPending = errors.New(serverclient.AdminErrHostSwapPending)
 
 // errHostResumed is a forget that rests on the confirmation refused
 // because the host's stored heartbeat no longer reports its removal
-// applied (PR #75 review finding 0): the forget needs --host-gone.
-var errHostResumed = errors.New(serverclient.AdminErrRemovalNotApplied)
+// applied (PR #75 review finding 0). It is answered forget_state_changed:
+// the CLI's next run reads host pending, which clears the confirmation,
+// and then refuses host_removal_not_applied naming --host-gone.
+var errHostResumed = errors.New(serverclient.AdminErrForgetStateChanged)
 
 // removalStillApplied is the check that a forget resting on the recorded
 // confirmation runs on the agent's stored heartbeat body, before the

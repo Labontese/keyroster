@@ -1329,20 +1329,18 @@ enrolled host can (D-03); that is the leak this order accepts.
 
    - `forget_state_changed` when the agent changed since `host pending`
      was read (its approval, removal version, confirmation or enrollment
-     time, or its identity rotated): run the command again;
+     time, or its identity rotated), or when its host's stored heartbeat
+     shows principals again (the host resumed service) before the server
+     cleared the confirmation, or none is stored (PR #75 review;
+     `TestRemovalConfirmation`, `resumed_*`): run the command again, which
+     reads `host pending` anew;
    - `host_in_directory` while any directory entry, active or disabled,
      still holds one of the agent's host keys: forgetting an agent whose
      host is still in the directory would stop the revocations that host
      needs;
    - `host_removal_not_applied` for an agent approved once that has no
      recorded confirmation (owner decision 2026-10-28). The CLI refuses it
-     before it signs, naming the `--host-gone` command. The server also
-     refuses it, before it asks the signer, when the host's stored
-     heartbeat shows principals again (the host resumed service) before
-     the server cleared the confirmation, or when no heartbeat is stored
-     (PR #75 review; `TestRemovalConfirmation`, `resumed_*`): `keyroster
-     host pending` then shows the confirmation cleared, and the forget
-     needs `--host-gone`;
+     before it signs, naming the `--host-gone` command;
    - `host_swap_pending` while the host reports a swap it has not finished
      (step 2);
    - the signer's refusals above, answered 403 with the signer's reason.

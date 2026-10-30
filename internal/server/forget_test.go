@@ -633,12 +633,16 @@ func TestRemovalConfirmation(t *testing.T) {
 			wantConfirmed(t, e, id, r, r)
 			asked := e.fake.count("ForgetAgent")
 			if rec := e.forgetFacts(t, forgetReqOf(e.agentRow(t, id.spki), false)); rec.Code != http.StatusConflict ||
-				apiError(rec) != serverclient.AdminErrRemovalNotApplied {
-				t.Fatalf("forget of a host that resumed service: %d %s, want 409 %s", rec.Code, rec.Body.String(), serverclient.AdminErrRemovalNotApplied)
+				apiError(rec) != serverclient.AdminErrForgetStateChanged {
+				t.Fatalf("forget of a host that resumed service: %d %s, want 409 %s", rec.Code, rec.Body.String(), serverclient.AdminErrForgetStateChanged)
 			}
 			if e.fake.count("ForgetAgent") != asked || e.agentRow(t, id.spki) == nil {
 				t.Fatal("a forget of a host that resumed service reached the signer or deleted the row")
 			}
+			// The CLI's next run reads host pending, which clears the
+			// confirmation: the forget then needs --host-gone.
+			e.pendingAnswer(t)
+			wantConfirmed(t, e, id, r, 0)
 		})
 		t.Run("resumed_after_the_signer_"+name, func(t *testing.T) {
 			e, id, r := confirmedAgent(t)
