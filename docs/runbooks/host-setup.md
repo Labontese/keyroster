@@ -1285,6 +1285,13 @@ enrolled host can (D-03); that is the leak this order accepts.
    confirmation, or `--host-gone`. The request names the installation of
    the root-pinned trust bundle.
 
+   The enrollment time is stored in whole seconds. A forget read before a
+   re-enrollment of the same identity in the same second as the original
+   enrollment cannot be told apart from one for the new row: that needs
+   the `host pending` read, the whole forget and the re-enrollment inside
+   that one second (accepted residual, owner decision D-3 of PR #75's
+   review, threat row T-03-286; not tested, by construction).
+
    **Who signs** (owner decisions Q2 and Q3, 2026-10-29). An agent that was
    never approved, and so never received state, is forgotten with one
    admin signature: one `--admin-key`, or the `admin_key` of `keyroster
@@ -1314,7 +1321,9 @@ enrolled host can (D-03); that is the leak this order accepts.
    as audit entry <N>`. From then on that identity gets `unknown_agent`
    and receives nothing, and its host keys can enroll again with a new
    join token. While the signer cannot be reached or cannot decide, the
-   server answers 503 and forgets nothing.
+   server answers 503 and forgets nothing; so does a signer whose stored
+   directory changed while it decided (`directory_changed`, PR #75
+   review): run the command again.
 
    The refusals, each forgetting nothing:
 
@@ -1327,14 +1336,22 @@ enrolled host can (D-03); that is the leak this order accepts.
      needs;
    - `host_removal_not_applied` for an agent approved once that has no
      recorded confirmation (owner decision 2026-10-28). The CLI refuses it
-     before it signs, naming the `--host-gone` command;
+     before it signs, naming the `--host-gone` command. The server also
+     refuses it, before it asks the signer, when the host's stored
+     heartbeat shows principals again (the host resumed service) before
+     the server cleared the confirmation, or when no heartbeat is stored
+     (PR #75 review; `TestRemovalConfirmation`, `resumed_*`): `keyroster
+     host pending` then shows the confirmation cleared, and the forget
+     needs `--host-gone`;
    - `host_swap_pending` while the host reports a swap it has not finished
      (step 2);
    - the signer's refusals above, answered 403 with the signer's reason.
 
    `forget_logged_not_deleted` means the signer logged the forget (audit
    entry `<N>`, which the CLI names), but the agent changed before the
-   server could delete it (a fact, its identity, or a swap it started), so
+   server could delete it (a fact, its identity, a swap it started, or
+   principals its host shows again; the delete re-checks the stored
+   heartbeat in its own transaction), so
    the server deleted nothing and keeps serving it: `keyroster host
    pending` still lists it. Run `keyroster host pending` and forget it
    again, which logs a second entry; the first one records an
@@ -1349,7 +1366,11 @@ enrolled host can (D-03); that is the leak this order accepts.
    It overrides the confirmation, or the wait for a pending swap, only;
    the admins still sign it, and the entry records `host_gone`. The CLI
    prints that it does, and the server and the signer log it at warning
-   level. If the host is still running, it gets no more signed state from
+   level. Over a pending swap on a confirmed agent, the request also
+   carries the confirmation: the CLI prints `host_gone: overrides the
+   host's unfinished swap`, and the server logs `agent forgotten with
+   --host-gone over a pending swap` with the confirmed version. If the
+   host is still running, it gets no more signed state from
    then on, revocations included, and keeps enforcing what it applied
    last. For a never-approved agent, or a confirmed one with no swap
    pending, the CLI drops `--host-gone` with a note.
@@ -1362,8 +1383,12 @@ enrolled host can (D-03); that is the leak this order accepts.
    `TestAgentEnrollEndToEnd` and `TestAgentReenrollEndToEnd` (e2e: the
    forget is logged as audit entry `<N>` and audit verify accepts it). CI's
    e2e policy has an admin quorum of 1, so the quorum-2 path runs in the
-   unit tests only. On the homelab UNVERIFIED until 03-16, whose forget
-   drill proves it (owner decision Q4).
+   unit tests only, and end to end it is UNVERIFIED (owner decision D-4
+   of PR #75's review: no quorum-2 e2e lane in CI). 03-16's forget drill
+   records the quorum its forget used, and runs it at quorum 2 when the
+   homelab policy has at least two admins; until a drill has, quorum 2
+   stays UNVERIFIED end to end. The other homelab steps are UNVERIFIED
+   until 03-16, whose forget drill proves them (owner decision Q4).
 
    **Checking that a forget was authorized.** Export the signer's log and
    run `keyroster audit verify` (signer-install.md): every forget is a
