@@ -4,11 +4,13 @@ package apply
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/spool"
@@ -107,6 +109,104 @@ func TestKRLAlone(t *testing.T) {
 		}
 		mustKRLAlone(t, h, r, 6, 1, "generation_too_large")
 	})
+	t.Run("too_many_accounts_krl_applied", func(t *testing.T) {
+		t.Parallel()
+		// F07 (03-08d): host group lab maps one account more than a
+		// generation may hold principals files for.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.publishKRL(5)
+		h.mustApply()
+		s := h.spec("role:ops")
+		s.accounts = append(s.accounts, accountNames("u", maxAccounts)...)
+		h.publishDir(s)
+		h.publishKRL(5, 6)
+		r, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("%d accounts: %v, want generation_too_large reported", maxAccounts+1, err)
+		}
+		mustKRLAlone(t, h, r, 6, 1, "generation_too_large")
+	})
+	t.Run("ops_key_changed_krl_waits", func(t *testing.T) {
+		t.Parallel()
+		// F07 (03-08d): the successor bundle replaces the ops key, and the
+		// KRL is signed by the new one. Its generation is refused (an
+		// oversize directory), so the bundle is not applied, and the KRL,
+		// verified again against the accepted bundle, is refused too:
+		// nothing is installed. The fallback never reuses a KRL that only
+		// the refused capture's bundle verifies.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops")
+		newOps := seedKey(t, 22)
+		_, b2, p2 := f.rotationOps(f.bundle, f.bundleDoc, f.policyDoc, f.policy, f.policy.Admins, "2026-10-02T00:00:00Z", newOps)
+		h.state.Bundles[2], h.state.Policies[2] = b2, p2
+		s := h.spec("role:ops")
+		s.bulkRoles = 17
+		h.publishDir(s)
+		f.ops = newOps
+		h.publishKRL(6)
+		gen, gens := h.current(), h.genCount()
+		_, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) || !errors.Is(err, state.ErrKRL) {
+			t.Fatalf("a KRL only the refused bundle verifies: %v, want generation_too_large and krl_not_verified", err)
+		}
+		if h.current() != gen || h.genCount() != gens || h.krlRevokes(h.l.Current(), 6) {
+			t.Fatalf("something was installed: current %d (was %d), %d generations (was %d)", h.current(), gen, h.genCount(), gens)
+		}
+	})
+	t.Run("refusal_without_newer_krl_is_noop", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		gen, gens := h.current(), h.genCount()
+		s := h.spec("role:ops")
+		s.bulkRoles = 17
+		h.publishDir(s)
+		r, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) || !r.NoOp || h.current() != gen || h.genCount() != gens {
+			t.Fatalf("an oversize directory and no newer KRL: %v, %+v, current %d (was %d), %d generations (was %d)", err, r, h.current(), gen, h.genCount(), gens)
+		}
+	})
+	t.Run("selftest_failure_after_swap_keeps_new_krl", func(t *testing.T) {
+		t.Parallel()
+		// After a swap, a rollback already keeps the newest KRL
+		// (RollbackTarget): no KRL-alone pass is needed there.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.setStall(true)
+		h.publishDir(h.spec("role:ops", "role:q"))
+		h.publishKRL(6)
+		r, err := h.apply()
+		if !errors.Is(err, ErrSelfTest) || !r.Rollback {
+			t.Fatalf("self-test failure: %v, %+v", err, r)
+		}
+		if !h.krlRevokes(h.l.Current(), 6) || !slices.Equal(h.principals("deploy"), []string{"role:ops"}) {
+			t.Fatalf("the rollback: revokes 6 %t, principals %v", h.krlRevokes(h.l.Current(), 6), h.principals("deploy"))
+		}
+	})
+	t.Run("first_install_refusal_stands", func(t *testing.T) {
+		t.Parallel()
+		// With nothing accepted there is no bundle to verify a KRL against.
+		h := newTestHost(t, newFixture(t))
+		s := h.spec("role:ops")
+		s.bulkRoles = 17
+		h.publishDir(s)
+		h.publishKRL(6)
+		if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) || h.exists(h.l.Current()) || h.exists(h.l.DropIn()) {
+			t.Fatalf("an oversize first install: %v, current %t", err, h.exists(h.l.Current()))
+		}
+	})
+}
+
+// accountNames is n account names prefix0000, prefix0001, ...
+func accountNames(prefix string, n int) []string {
+	out := make([]string, 0, n)
+	for i := range n {
+		out = append(out, fmt.Sprintf("%s%04d", prefix, i))
+	}
+	return out
 }
 
 // mustKRLAlone checks the end of a KRL-alone apply (F07 (03-08d)): current
@@ -246,6 +346,18 @@ func TestResetDirectory(t *testing.T) {
 		}
 		if _, err := ResetDirectory(h.l, h.spool); !errors.Is(err, ErrResetPending) {
 			t.Fatalf("reset-directory over an unfinished apply: %v, want reset_apply_unfinished", err)
+		}
+	})
+	t.Run("reset_without_last_good_refusal_stands", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHost(t, newFixture(t))
+		spoolInState(t, h)
+		if _, err := ResetDirectory(h.l, h.spool); err != nil {
+			t.Fatal(err)
+		}
+		h.publishKRL(5)
+		if _, err := h.apply(); !errors.Is(err, ErrHostNotInDirectory) || h.exists(h.l.Current()) || h.exists(h.l.DropIn()) {
+			t.Fatalf("no directory and no last-good: %v, current %t", err, h.exists(h.l.Current()))
 		}
 	})
 }
