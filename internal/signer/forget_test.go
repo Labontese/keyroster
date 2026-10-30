@@ -301,6 +301,25 @@ func TestForgetAgent(t *testing.T) {
 		req.InstallationID = testInstallationID
 		e.refused(e.sign(req, wire.ForgetSSHSIGNamespace, e.fx.Admins[0], e.fx.Admins[1]), "forget_no_installation_id")
 	})
+	t.Run("stored_directory_unreadable_refused", func(t *testing.T) {
+		// White-box: a stored directory that does not parse (loadDirectory
+		// keeps its bytes and no parsed directory) cannot tell whether it
+		// holds the host, so the forget is refused; so is a parsed one with
+		// a host key that does not parse. Parse refuses both at install, so
+		// only a stored state reaches them.
+		e := newForgetEnv(t, 2, testInstallationID)
+		e.s.mu.Lock()
+		parsed := e.s.directory
+		e.s.directory = nil
+		e.s.mu.Unlock()
+		e.refused(e.request(e.fx.Admins[0], e.fx.Admins[1]), "forget_directory_unreadable")
+		bad := *parsed
+		bad.Hosts = []directory.Host{{Name: "web2", HostGroup: "lab", Keys: []string{"ssh-ed25519 not-a-key"}, Principals: []string{"web2"}, Status: directory.StatusDisabled}}
+		e.s.mu.Lock()
+		e.s.directory = &bad
+		e.s.mu.Unlock()
+		e.refused(e.request(e.fx.Admins[0], e.fx.Admins[1]), "bad_stored_directory")
+	})
 	t.Run("malformed_refused", func(t *testing.T) {
 		e := newForgetEnv(t, 2, testInstallationID)
 		req := e.request(e.fx.Admins[0], e.fx.Admins[1])
