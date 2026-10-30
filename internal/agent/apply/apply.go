@@ -704,8 +704,9 @@ func (e *engine) loadStored() (*state.Stored, error) {
 // against the accepted bundle, with the bundle, policy and directory in
 // force, through the same render, checks and Transition, and the refusal
 // is returned after the commit, so the report and last_apply name it. A
-// content refusal is a render error or a generation above the caps
-// (candidate). Not a trigger: a preflightApply refusal (the KRL-alone
+// content refusal is a render error, a generation above the caps
+// (candidate) or a CA line the host's ssh-keygen refuses (validate's
+// ErrCALineRejected). Not a trigger: a preflightApply refusal (the KRL-alone
 // generation meets the same preflight), lock and I/O errors, an injected
 // crash, and every failure once Transition started (a rollback keeps the
 // newest KRL, RollbackTarget).
@@ -747,42 +748,49 @@ func (e *engine) forward(ctx context.Context) error {
 		if cur, curLink, err = e.readCurrent(); err != nil {
 			return err
 		}
-		if g, err = e.candidate(v, cur, curLink); err == nil {
-			break
+		var refusal error
+		if g, refusal = e.candidate(v, cur, curLink); refusal == nil {
+			if err := e.preflightApply(v, g); err != nil {
+				return err
+			}
+			if e.cfg.DryRun {
+				e.setVersions(v, g)
+				e.report.Diff = diff(cur, g)
+				return v.Refused
+			}
+			if cur != nil && sameBytes(cur, g) {
+				// The new versions change nothing on disk: store them. The
+				// render's host status is the one in force now (a removed
+				// entry listed again under other keys keeps the same, empty,
+				// principals).
+				e.setVersions(v, g)
+				e.report.Generation = curLink.n
+				if err := e.setHostStatus(curLink.n, g.HostStatus); err != nil {
+					return err
+				}
+				if err := e.commit(curLink.n, v); err != nil {
+					return err
+				}
+				return v.Refused
+			}
+			g.N = e.allocGeneration()
+			if err := e.installGeneration(g); err != nil {
+				return err
+			}
+			if refusal = e.validate(ctx, g, e.l.Gen(g.N), cur); refusal == nil {
+				break
+			}
+			e.discard(g.N)
+			// A CA line the host's ssh-keygen refuses is a content
+			// refusal. validate's KRL refusals are not: the KRL-alone
+			// generation carries the same KRL, so they would only recur.
+			if !errors.Is(refusal, ErrCALineRejected) {
+				return refusal
+			}
 		}
-		if v, err = e.krlAlone(stored, st, v, err); err != nil {
+		if v, err = e.krlAlone(stored, st, v, refusal); err != nil {
 			return err
 		}
-	}
-	if err := e.preflightApply(v, g); err != nil {
-		return err
-	}
-	if e.cfg.DryRun {
-		e.setVersions(v, g)
-		e.report.Diff = diff(cur, g)
-		return v.Refused
-	}
-	if cur != nil && sameBytes(cur, g) {
-		// The new versions change nothing on disk: store them. The
-		// render's host status is the one in force now (a removed entry
-		// listed again under other keys keeps the same, empty, principals).
-		e.setVersions(v, g)
-		e.report.Generation = curLink.n
-		if err := e.setHostStatus(curLink.n, g.HostStatus); err != nil {
-			return err
-		}
-		if err := e.commit(curLink.n, v); err != nil {
-			return err
-		}
-		return v.Refused
-	}
-	g.N = e.allocGeneration()
-	if err := e.installGeneration(g); err != nil {
-		return err
-	}
-	if err := e.validate(ctx, g, e.l.Gen(g.N), cur); err != nil {
-		e.discard(g.N)
-		return err
 	}
 	lg, err := e.resolveLink(e.l.LastGood())
 	if err != nil {

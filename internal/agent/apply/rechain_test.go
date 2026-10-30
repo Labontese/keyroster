@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
@@ -192,6 +194,28 @@ func TestKRLAlone(t *testing.T) {
 			t.Fatalf("a widening that collapses with the kept KRL: %v, %+v, principals %v", err, r, h.principals("deploy"))
 		}
 	})
+	t.Run("ca_line_rejected_krl_applied", func(t *testing.T) {
+		t.Parallel()
+		// F07 (03-08d): a root-signed successor bundle adds a next user CA
+		// whose line the host's ssh-keygen refuses; the KRL-alone
+		// generation keeps the accepted bundle's CA lines.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		next := seedKey(t, 21)
+		_, b2 := h.f.successorWithNext(h.f.bundle, h.f.bundleDoc, next)
+		h.state.Bundles[2] = b2
+		line := trust.FormatKey(next.PublicKey())
+		h.run.rejectCA = func(l string) bool { return l == line }
+		h.publishKRL(6)
+		r, err := h.apply()
+		if !errors.Is(err, ErrCALineRejected) {
+			t.Fatalf("a CA line ssh-keygen refuses: %v, want ca_line_rejected reported", err)
+		}
+		mustKRLAlone(t, h, r, 6, 1, "ca_line_rejected")
+		if a, err := h.accepted(); err != nil || r.BundleVersion != 1 || a.BundleVersion != 1 || strings.Contains(h.file(CAFile), line) {
+			t.Fatalf("the refused bundle was taken: report %d, accepted %+v (%v)", r.BundleVersion, a, err)
+		}
+	})
 	t.Run("ops_key_changed_krl_waits", func(t *testing.T) {
 		t.Parallel()
 		// F07 (03-08d): the successor bundle replaces the ops key, and the
@@ -288,6 +312,22 @@ func genNumbers(t *testing.T, h *testHost) []uint64 {
 		}
 	}
 	return out
+}
+
+// successorWithNext is successor with a next user CA entry for key added.
+func (f *fixture) successorWithNext(prev *trust.Bundle, prevDoc []byte, key ssh.Signer) (*trust.Bundle, spool.Doc) {
+	f.t.Helper()
+	b, err := trust.BuildSuccessor(prev, prevDoc, f.policyDoc, prev.Root.Keys, 1, f.policyDoc, "2026-10-02T00:00:00Z", testInstallation)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	// The entries are ordered by role (user first), then generation.
+	b.CAs = slices.Insert(b.CAs, 1, trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(key.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: 2})
+	doc := mustCanonical(f.t, b)
+	if _, err := trust.ParseBundle(doc); err != nil {
+		f.t.Fatalf("successor bundle with a next CA: %v", err)
+	}
+	return b, spool.Doc{Body: doc, Sigs: f.rootSign(trust.NamespaceBundle, doc)}
 }
 
 // mustKRLAlone checks the end of a KRL-alone apply (F07 (03-08d)): current
