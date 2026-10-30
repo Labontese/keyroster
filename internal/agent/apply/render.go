@@ -138,8 +138,11 @@ func (h *HostError) Unwrap() error { return h.Err }
 // bundle's active and next user and machine CA keys, one trust.FormatKey
 // line each, sorted by role (user, then machine) and generation;
 // principals/<account> is directory.RenderPrincipalsFile for each account
-// of the host's host group, the one renderer; revoked.krl is the
-// verified KRL, or zero bytes when none is published yet.
+// of the host's host group, the one renderer, through one
+// directory.PrincipalsRenderer, which canonicalises and hashes the
+// directory once per render (PR #76 review, owner decision D-1);
+// revoked.krl is the verified KRL, or zero bytes when none is published
+// yet.
 func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
 	if v.Directory == nil {
 		return nil, &HostError{Err: errNoDirectory, Unmatched: fingerprints(hostKeys)}
@@ -164,8 +167,9 @@ func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
 	if i < 0 {
 		return nil, fmt.Errorf("%w: host %s names host group %s, which the directory does not define", ErrHostNotInDirectory, host.Name, host.HostGroup)
 	}
+	r := directory.NewPrincipalsRenderer(v.Directory)
 	for _, a := range v.Directory.HostGroups[i].Accounts {
-		file, err := directory.RenderPrincipalsFile(v.Directory, host.HostGroup, a.Account)
+		file, err := r.File(host.HostGroup, a.Account)
 		if err != nil {
 			return nil, err
 		}

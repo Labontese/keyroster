@@ -71,19 +71,45 @@ func AccountPrincipals(d *Directory, hostGroup, account string) ([]string, error
 // then AccountPrincipals one per line, each ending in a newline. With no
 // principals the file is the two header lines only, and sshd accepts no
 // keyroster certificate for the account. This is the one renderer: the
-// CLI uses it now and the Phase 3 agent will use it (D-07).
+// CLI and the agent use it, the agent through PrincipalsRenderer (D-07).
 func RenderPrincipalsFile(d *Directory, hostGroup, account string) ([]byte, error) {
-	principals, err := AccountPrincipals(d, hostGroup, account)
+	return NewPrincipalsRenderer(d).File(hostGroup, account)
+}
+
+// PrincipalsRenderer renders the principals files of one directory. It
+// canonicalises and hashes the directory once, for its first file, where
+// a RenderPrincipalsFile call per file would do so for every file: a host
+// group of n accounts costs n canonical encodings of the whole directory
+// otherwise. d must not change while the renderer is in use, and the
+// renderer is not safe for concurrent use.
+type PrincipalsRenderer struct {
+	d   *Directory
+	sum string // trust.SHA256Hex(d.Canonical()); "" until the first file
+}
+
+// NewPrincipalsRenderer returns the renderer for d.
+func NewPrincipalsRenderer(d *Directory) *PrincipalsRenderer {
+	return &PrincipalsRenderer{d: d}
+}
+
+// File is RenderPrincipalsFile(d, hostGroup, account), byte for byte, with
+// the same errors in the same order: AccountPrincipals' first, then the
+// canonical encoding's.
+func (r *PrincipalsRenderer) File(hostGroup, account string) ([]byte, error) {
+	principals, err := AccountPrincipals(r.d, hostGroup, account)
 	if err != nil {
 		return nil, err
 	}
-	canonical, err := d.Canonical()
-	if err != nil {
-		return nil, err
+	if r.sum == "" {
+		canonical, err := r.d.Canonical()
+		if err != nil {
+			return nil, err
+		}
+		r.sum = trust.SHA256Hex(canonical)
 	}
 	var b strings.Builder
 	b.WriteString("# keyroster: generated AuthorizedPrincipalsFile; do not edit\n")
-	fmt.Fprintf(&b, "# host group %s, account %s, directory version %d sha256 %s\n", hostGroup, account, d.Version, trust.SHA256Hex(canonical))
+	fmt.Fprintf(&b, "# host group %s, account %s, directory version %d sha256 %s\n", hostGroup, account, r.d.Version, r.sum)
 	for _, p := range principals {
 		b.WriteString(p + "\n")
 	}
