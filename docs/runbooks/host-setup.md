@@ -1405,10 +1405,22 @@ enrolled host can (D-03); that is the leak this order accepts.
    of the keys whose signatures it checked (each evidence item must be a
    valid signature by an admin of the policy in force; an admin who signs
    twice counts once). Read these fields only from an export that audit
-   verify accepted. They say what the admins signed, not that it was
-   true: audit verify checks that the number of signatures fits the
-   signed `approved_once`; it
-   cannot tell a false one, because the log records no approvals: one
+   verify accepted. Audit verify prints counts, not the entries: to find
+   the forgets, read the accepted export with a JSON parser, for example
+   `jq -c 'select(.decoded.kind == "host_forget") | .decoded' export.jsonl`
+   (UNVERIFIED: jq was not run; the same selection with Python's `json`
+   module was run once against a test export, not in CI), and look for
+   the host's identity in `identity`. Audit verify parses
+   every line with its keys unescaped, as such a parser does, and refuses
+   the export if a key occurs twice in one object, a line's decoded `kind`
+   is not its entry's kind, or a line of another kind carries a field only
+   a `host_forget` line has (`identity`, `expected_name`, `enrolled_at_us`,
+   `host_key_fingerprints`, `approved_once`, `host_gone`,
+   `removal_version`, `confirmed_version`, `confirmed_sha256`,
+   `admin_fingerprints`); so the parser lists exactly the verified
+   `host_forget` entries (PR #75 review, fix round 2). The fields say what
+   the admins signed, not that it was true: audit verify checks that the
+   number of signatures fits the signed `approved_once`; it cannot tell a false one, because the log records no approvals: one
    admin together with a compromised keyroster-server could forget an
    approved host with one signature, but that server could drop the row
    without the signer anyway (T-03-293, T-03-285). A host whose fetcher
@@ -1416,8 +1428,9 @@ enrolled host can (D-03); that is the leak this order accepts.
    no `host_forget` entry for its identity was dropped by keyroster-server
    without a forget: treat the server as compromised. This check is
    detection only, because a server can always stop serving a host. Run in
-   CI: the entry and the fetcher's line in `TestAgentEnrollEndToEnd`; as an
-   operator check UNVERIFIED until 03-16.
+   CI: the entry and the fetcher's line in `TestAgentEnrollEndToEnd`, and
+   the refusals in `TestVerifyForgetKeysOnOtherKinds`; as an operator
+   check UNVERIFIED until 03-16.
 
 ## How fast changes arrive
 

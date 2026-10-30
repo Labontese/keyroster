@@ -404,3 +404,85 @@ func TestExportHostForget(t *testing.T) {
 		t.Error("a bundle_install line with host_gone verifies")
 	}
 }
+
+// TestVerifyForgetKeysOnOtherKinds (PR #75 review, fix round 2): a reader
+// that parses an export line as JSON (jq, Python, Go) keeps the last of
+// repeated keys and unescapes them, so verify binds what such a reader
+// sees, not only the raw bytes. Host V's forget is forged on a line of
+// another kind: with an escaped or spaced duplicate "kind" key, an escaped
+// duplicate "decoded" object, or only a host_forget key. Each is refused,
+// and the unedited export still verifies. The last four cases each reach
+// one check only: the parsed kind, a repeated key that is not "kind", a
+// host_forget-only key, and a top-level key in another case.
+func TestVerifyForgetKeysOnOtherKinds(t *testing.T) {
+	ff := newForgetFixture(t, 2, nil)
+	all := ff.lines() // bundle_install, directory_install v1, v2, checkpoint
+	var v [32]byte
+	if _, err := rand.Read(v[:]); err != nil {
+		t.Fatal(err)
+	}
+	identity := "SHA256:" + base64.RawStdEncoding.EncodeToString(v[:])
+	fps := `"` + ssh.FingerprintSHA256(ff.admin.PublicKey()) + `","` + ssh.FingerprintSHA256(ff.bob.PublicKey()) + `"`
+	forged := `"identity":"` + identity + `","admin_fingerprints":[` + fps + `]`
+	// inject appends frag to the decoded object of line i.
+	inject := func(i int, frag string) []string {
+		t.Helper()
+		if !strings.HasSuffix(all[i], "}}") {
+			t.Fatalf("line %d does not end with its decoded object", i)
+		}
+		l := slices.Clone(all)
+		l[i] = strings.TrimSuffix(l[i], "}}") + frag + "}}"
+		return l
+	}
+	raw := func(i int, old, repl string) []string {
+		t.Helper()
+		if !strings.Contains(all[i], old) {
+			t.Fatalf("line %d has no %s", i, old)
+		}
+		l := slices.Clone(all)
+		l[i] = strings.Replace(l[i], old, repl, 1)
+		return l
+	}
+	decodedOf := func(i int) string {
+		t.Helper()
+		var line ExportLine
+		if err := json.Unmarshal([]byte(all[i]), &line); err != nil {
+			t.Fatal(err)
+		}
+		return string(line.Decoded)
+	}
+	cases := []struct {
+		name  string
+		lines []string
+		want  string // "" = must verify
+	}{
+		{"as_exported_ok", all, ""},
+		{"escaped_kind_on_bundle_install_refused", inject(0, `,"\u006bind":"host_forget",`+forged), `its key "kind" occurs twice in one object (bundle_install)`},
+		{"escaped_kind_on_directory_install_refused", inject(1, `,"\u006bind":"host_forget",`+forged), `its key "kind" occurs twice in one object (directory_install)`},
+		{"spaced_duplicate_kind_refused", inject(0, `,"kind" : "host_forget",`+forged), `its key "kind" occurs twice in one object (bundle_install)`},
+		{"escaped_duplicate_decoded_refused", inject(0, `},"d\u0065coded":{"\u006bind":"host_forget",`+forged), `its key "decoded" occurs twice in one object (bundle_install)`},
+		{"identity_on_bundle_install_refused", inject(0, `,"identity":"`+identity+`"`), "its decoded identity field is not one of a host_forget leaf (bundle_install)"},
+		{"escaped_identity_on_directory_install_refused", inject(1, `,"\u0069dentity":"`+identity+`"`), "its decoded identity field is not one of a host_forget leaf (directory_install)"},
+		{"kind_only_refused", raw(0, `"kind":"bundle_install"`, `"\u006bind":"host_forget","x":{"kind":"bundle_install"}`), "its decoded kind is not the kind of its leaf (bundle_install)"},
+		{"duplicate_only_refused", inject(0, `,"\u0062undle_version":1`), `its key "bundle_version" occurs twice in one object (bundle_install)`},
+		{"forget_key_only_refused", inject(0, `,"admin_fingerprints":[`+fps+`]`), "its decoded admin_fingerprints field is not one of a host_forget leaf (bundle_install)"},
+		{"top_level_case_only_refused", raw(0, `,"decoded":`, `,"Decoded":{"x":1},"decoded":`), `its key "Decoded" is not one export writes (bundle_install)`},
+		{"top_level_case_forged_refused", raw(0, `,"decoded":`+decodedOf(0)+`}`, `,"Decoded":`+decodedOf(0)+`,"decoded":{"\u006bind":"host_forget",`+forged+`}}`), `its key "Decoded" is not one export writes (bundle_install)`},
+		{"nested_duplicate_refused", inject(0, `,"x":[{"a":1,"\u0061":2}]`), `its key "a" occurs twice in one object (bundle_install)`},
+		{"checkpoint_key_case_refused", raw(3, `{"checkpoint":`, `{"Checkpoint":"x","checkpoint":`), `its key "Checkpoint" is not one export writes (checkpoint)`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := ff.verify(join(tc.lines), nil)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Verify: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify = %+v, %v; want an error naming %q", rep, err, tc.want)
+			}
+		})
+	}
+}

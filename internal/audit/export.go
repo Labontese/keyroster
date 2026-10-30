@@ -19,9 +19,13 @@
 // another kind (checkGrepFields, checkReplayFields). A host_forget line
 // (03-08c) must be byte for byte the line Export writes for its leaf, so
 // every decoded field on it is the leaf's own (checkForgetFields; PR #75
-// review, owner decision D-1). Exports written before 02-12 have no
-// "version", and those before 03-02 no "directory" or "sigs"; their lines
-// still verify.
+// review, owner decision D-1). On every line Verify also parses the JSON
+// with keys unescaped, as a JSON reader sees it: no key may occur twice
+// in one object, the top-level keys are exactly the ones above, decoded's
+// parsed "kind" is the leaf's, and a key only host_forget renders occurs on
+// no line of another kind (checkLineKeys; PR #75 review, fix round 2).
+// Exports written before 02-12 have no "version", and those before 03-02
+// no "directory" or "sigs"; their lines still verify.
 package audit
 
 import (
@@ -365,7 +369,9 @@ func decodeRecovery(m map[string]any, b *tlog.RecoveryBody) {
 // own), "bundle_version", "version", "directory" or "sigs"
 // (checkGrepFields, checkReplayFields), and Verify requires the whole
 // line to be the one Export writes for the leaf, so every field rendered
-// here is bound to it (checkForgetFields).
+// here is bound to it (checkForgetFields). The keys only it renders
+// (forgetOnlyKeys) are refused on a line of any other kind (checkLineKeys),
+// so no other kind may render them.
 func decodeHostForget(m map[string]any, b *tlog.HostForgetBody) {
 	m["policy_version"] = b.PolicyVersion
 	m["directory_version"] = b.DirectoryVersion

@@ -630,7 +630,11 @@ func certTypeName(t uint32) string {
 //     five on a line of another kind. A host_forget line must be byte for
 //     byte the line Export writes for its leaf, so all its decoded fields
 //     are the leaf's own, and no other line may carry "approved_once" or
-//     "host_gone" (checkForgetFields)
+//     "host_gone" (checkForgetFields). Parsed with keys unescaped, no line
+//     repeats a key in one object or has a top-level key export does not
+//     write, every leaf line's decoded "kind" is its leaf's kind, and no
+//     line of another kind carries a key only host_forget renders
+//     (checkLineKeys)
 //   - every leaf decodes, records its own index, and leaf times never
 //     decrease
 //   - the first bundle_install entry holds a genesis bundle (version 1,
@@ -746,6 +750,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			return nil, fmt.Errorf("audit: line %d: the checkpoint line is not last", lineNo)
 		}
 		if isCheckpoint {
+			if err := checkLineKeys(sc.Bytes(), nil); err != nil {
+				return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
+			}
 			checkpoint = []byte(line.Checkpoint)
 			continue
 		}
@@ -778,6 +785,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
 		if err := checkForgetFields(sc.Bytes(), leaf, raw); err != nil {
+			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
+		}
+		if err := checkLineKeys(sc.Bytes(), &leaf); err != nil {
 			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
 		if err := revs.before(want, leaf.Kind); err != nil {
@@ -1141,7 +1151,9 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 // signatures verifyForget checks). Such a line, raw its leaf bytes, must
 // be byte for byte the line Export writes for it (exportLeafLine): no field
 // changed, added, removed, repeated or re-encoded. On a line of any other
-// kind neither "approved_once" nor "host_gone" may occur.
+// kind neither "approved_once" nor "host_gone" may occur, and checkLineKeys
+// refuses there every key only a host_forget line renders, after
+// unescaping.
 func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
 	if leaf.Kind != tlog.KindHostForget {
 		s := string(text)
@@ -1158,6 +1170,108 @@ func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
 		return errors.New("its line is not the one export writes for its host_forget leaf: a decoded field is not the leaf's own")
 	}
 	return nil
+}
+
+// forgetOnlyKeys are the decoded keys that only a host_forget line carries
+// (decodeHostForget). The other keys of that line, such as request_id,
+// created_at, resolved_at and the versions, are rendered by other kinds
+// too.
+var forgetOnlyKeys = map[string]bool{
+	"identity": true, "expected_name": true, "enrolled_at_us": true, "host_key_fingerprints": true,
+	"approved_once": true, "host_gone": true, "removal_version": true, "confirmed_version": true,
+	"confirmed_sha256": true, "admin_fingerprints": true,
+}
+
+// checkLineKeys checks the keys of an export line as a JSON reader sees
+// them (PR #75 review, fix round 2): a reader such as jq, Python or Go
+// unescapes keys and keeps the last of repeated ones, which the byte checks
+// above do not see. It parses the line with a token decoder and refuses a
+// key that occurs twice in one object at any depth, after unescaping, and
+// a top-level key other than "index", "leaf", "decoded" and "checkpoint"
+// written exactly so (Go's decoder also matches keys in another case). On
+// a leaf line (leaf not nil) decoded must be an object whose "kind" is the
+// name of the leaf's kind, and on a line of another kind than host_forget
+// no key of forgetOnlyKeys may occur at any depth. So a JSON reader reads
+// each line as the kind of its verified leaf, and the fields of a
+// host_forget only on a host_forget line, which checkForgetFields binds.
+func checkLineKeys(text []byte, leaf *tlog.Leaf) error {
+	what := "checkpoint"
+	if leaf != nil {
+		what = leaf.Kind.String()
+	}
+	dec := json.NewDecoder(bytes.NewReader(text))
+	dec.UseNumber()
+	keys := map[string]bool{}
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if err := walkKeys(dec, tok, keys); err != nil {
+		return fmt.Errorf("%w (%s)", err, what)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(text, &top); err != nil {
+		return err
+	}
+	for k := range top {
+		switch k {
+		case "index", "leaf", "decoded", "checkpoint":
+		default:
+			return fmt.Errorf("its key %q is not one export writes (%s)", k, what)
+		}
+	}
+	if leaf == nil {
+		return nil
+	}
+	var decoded map[string]json.RawMessage
+	var kind string
+	if json.Unmarshal(top["decoded"], &decoded) != nil || json.Unmarshal(decoded["kind"], &kind) != nil || kind != what {
+		return fmt.Errorf("its decoded kind is not the kind of its leaf (%s)", what)
+	}
+	if leaf.Kind != tlog.KindHostForget {
+		for k := range keys {
+			if forgetOnlyKeys[k] {
+				return fmt.Errorf("its decoded %s field is not one of a host_forget leaf (%s)", k, what)
+			}
+		}
+	}
+	return nil
+}
+
+// walkKeys reads the rest of the JSON value whose first token is tok,
+// adds every object key in it, at any depth, to keys, and refuses a key
+// that occurs twice in one object.
+func walkKeys(dec *json.Decoder, tok json.Token, keys map[string]bool) error {
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return nil // a scalar
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		if d == '{' {
+			kt, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			k, ok := kt.(string)
+			if !ok {
+				return errors.New("an object key is not a string")
+			}
+			if seen[k] {
+				return fmt.Errorf("its key %q occurs twice in one object", k)
+			}
+			seen[k], keys[k] = true, true
+		}
+		vt, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if err := walkKeys(dec, vt, keys); err != nil {
+			return err
+		}
+	}
+	_, err := dec.Token() // the closing delimiter
+	return err
 }
 
 // checkImportVersions checks the "import_krl_versions" field, which the
