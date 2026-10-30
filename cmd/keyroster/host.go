@@ -1140,39 +1140,27 @@ var forgetNow func() time.Time
 // forgetRequestOf is the wire.ForgetRequest for candidate c, a pending or
 // served agent of host pending's answer, for installation id, with
 // host_gone when gone and a random request ID; the caller sets CreatedAt
-// and the evidence.
+// and the evidence. checkPendingHost and checkServedHost checked every
+// value it takes from c (the identity, the enrollment time, the host keys
+// and the confirmation's SHA-256), and the request's Marshal validates the
+// whole request before it is sent.
 func forgetRequestOf(c *forgetCandidate, id string, gone bool) (*wire.ForgetRequest, error) {
-	spki, err := hex.DecodeString(c.SPKIHex)
-	if err != nil || len(spki) != 32 {
-		return nil, errBadPendingHosts
-	}
-	enrolled, err := time.Parse(time.RFC3339, c.EnrolledAt)
-	if err != nil || enrolled.UnixMicro() < 0 {
-		return nil, errBadPendingHosts
-	}
-	req := &wire.ForgetRequest{InstallationID: id, ExpectedName: c.Name, EnrolledAtMicros: uint64(enrolled.UnixMicro()), //nolint:gosec // G115: >= 0, checked above
+	spki, _ := hex.DecodeString(c.SPKIHex)
+	enrolled, _ := time.Parse(time.RFC3339, c.EnrolledAt)
+	req := &wire.ForgetRequest{InstallationID: id, ExpectedName: c.Name, EnrolledAtMicros: uint64(max(enrolled.UnixMicro(), 0)), //nolint:gosec // G115: >= 0
 		ApprovedOnce: c.ApprovedOnce, RemovalVersion: c.RemovalVersion, HostGone: gone}
 	copy(req.AgentIdentity[:], spki)
 	for _, k := range c.Keys {
-		pub, err := trust.ParseKey(k)
-		if err != nil {
-			return nil, errBadPendingHosts
-		}
+		pub, _ := trust.ParseKey(k)
 		req.HostKeyFingerprints = append(req.HostKeyFingerprints, wire.HostKeyDigest(pub))
 	}
 	slices.SortFunc(req.HostKeyFingerprints, func(x, y [32]byte) int { return bytes.Compare(x[:], y[:]) })
 	if conf := c.Confirmed; conf != nil {
-		sum, err := hex.DecodeString(conf.SHA256)
-		if err != nil || len(sum) != 32 {
-			return nil, errBadPendingHosts
-		}
+		sum, _ := hex.DecodeString(conf.SHA256)
 		req.ConfirmedVersion, req.ConfirmedSHA256 = conf.Version, [32]byte(sum)
 	}
 	if _, err := rand.Read(req.RequestID[:]); err != nil {
 		return nil, fmt.Errorf("request id: %w", err)
-	}
-	if err := req.Validate(); err != nil {
-		return nil, fmt.Errorf("%w: %w", errBadPendingHosts, err)
 	}
 	return req, nil
 }
