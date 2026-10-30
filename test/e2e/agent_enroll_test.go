@@ -420,14 +420,17 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	var forgot string
 	// Each attempt spends three admin requests (host pending, host status,
 	// the forget), so it waits 2 s; a refusal of the admin limiter is
-	// retried like host_removal_not_applied.
+	// retried like host_removal_not_applied. So is host_swap_pending
+	// (03-08c): the revocation above makes the removed host swap in the new
+	// KRL, and a forget waits until a heartbeat shows that swap committed.
 	for deadline := time.Now().Add(2*time.Second + 30*time.Second); ; time.Sleep(2 * time.Second) {
 		code, out, errOut := env.keyroster(t, admin, "", "host", "forget", "web1")
 		if code == 0 {
 			forgot = out
 			break
 		}
-		retry := strings.Contains(errOut, "host_removal_not_applied") || strings.Contains(errOut, "the server is rate-limiting requests from this address")
+		retry := strings.Contains(errOut, "host_removal_not_applied") || strings.Contains(errOut, "host_swap_pending") ||
+			strings.Contains(errOut, "the server is rate-limiting requests from this address")
 		if !retry || time.Now().After(deadline) {
 			t.Fatalf("keyroster host forget web1: exit %d:\n%s\n%s\nfetch log:\n%s\nserver log:\n%s", code, out, errOut, eh.fetch.String(), env.Stderr.String())
 		}
