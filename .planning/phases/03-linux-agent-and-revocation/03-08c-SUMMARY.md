@@ -462,6 +462,58 @@ The two checks answer differently:
 - The same-second residual (D-3), by construction.
 - The database-error branches listed above. The new `LatestDirectoryVersionTx` error branch (`state_unavailable`) joins them: no test injects a database failure.
 
+## Pre-merge review fix round 2
+
+The check of fix round 1 ran at head `24e10d2` against base `ddcc9a2`, with Claude only. Daniel chose this round on 2026-10-30. It found one medium finding (A) and one low docs finding (B).
+
+### Fixes
+
+| Fix | Commit | Test | RED and mutants (scratchpad `fix75-2/`) |
+|---|---|---|---|
+| A (medium): a host_forget could be forged on a line of another kind | `4b861b9` | `TestVerifyForgetKeysOnOtherKinds`: 13 tamper cases and the unedited export | RED: all 13 verified at `24e10d2` (`A-red.txt`, `A-red2.txt`). 6 mutants killed (`A-mutants.txt`): the duplicate check, the kind equality, the forget-only keys, exact top-level names, the call on the checkpoint line, and the call on a leaf line |
+| B (low, docs): 03-16 stated two conditions for the quorum-2 forget | `17515a1` | n/a | n/a |
+| Hardening, docs only: the no-heartbeat case of forget_state_changed | `2b75074` | n/a, labelled UNVERIFIED | n/a |
+
+**A in detail.** checkGrepFields, checkForgetFields and checkReplayFields match raw bytes. They did not see a `kind` key written escaped (`"kind"`) or with a space before its colon. They also did not see a second `decoded` object. jq, Python and Go unescape keys and keep the last of repeated ones. So any bundle_install or directory_install line could carry `"kind":"host_forget"` with an identity and admin fingerprints, and still pass audit verify. A JSON reader then read that line as a forget for a host whose row the server had dropped without one. `json-reader-evidence.txt` shows Python's `json` reading such a line as a host_forget.
+
+The new `checkLineKeys` runs on every line after the byte checks. It parses the line with a token decoder, which unescapes keys, and refuses:
+- a key that occurs twice in one object, at any depth, also inside arrays;
+- a top-level key other than `index`, `leaf`, `decoded` and `checkpoint`, written exactly so. Go's struct decoding also accepts `Decoded`, while jq reads only `decoded`;
+- on a leaf line, a `decoded` that is not an object, or whose parsed `kind` is not the leaf's kind;
+- on a line of any other kind than host_forget, a key that only decodeHostForget renders, at any depth of the line.
+
+The host_forget byte equality from round 1 stays. Lines without `version`, from before 02-12, and lines without `directory` and `sigs`, from before 03-02, still verify: every existing audit test passes, including `version_missing_ok` and `pre_03_02_line_ok`.
+
+**Deviation from the spec.** `request_id` is not in the forget-only set, because revoke and revocation_recovery lines render it too. Refusing it would break those exports. The set is: identity, expected_name, enrolled_at_us, host_key_fingerprints, approved_once, host_gone, removal_version, confirmed_version, confirmed_sha256 and admin_fingerprints. `removal_version` is added, because only host_forget renders it.
+
+**Runbook.** "Checking that a forget was authorized" now says that audit verify prints counts, not entries. To find the forgets, read the accepted export with a JSON parser, for example `jq -c 'select(.decoded.kind == "host_forget") | .decoded'`. The section also states exactly what verify binds. The jq command is labelled UNVERIFIED: jq is not installed where this round ran, on Windows or in WSL. The same selection with Python's `json` was run once against a test export.
+
+**B in detail.** The forget line now records `quorum=` (the policy's admin_quorum) and `signers=` (the count of the entry's admin_fingerprints). The quorum-2 path counts as run end to end only when quorum is at least 2 and signers is at least quorum. The must-have, the action list, the line format, step 7, the acceptance criterion and host-setup.md now all use this one condition. It replaces D-4's wording above ("at least two admins", and quorum equal to the fingerprint count).
+
+**Hardening.** host-setup.md said to run the command again when forget_state_changed comes back because no heartbeat is stored. That answer repeats until the host sends a heartbeat, because the CLI drops `--host-gone` for an agent whose removal is confirmed. Only an edit of the database outside keyroster-server reaches this case. The sentence now says so and is labelled UNVERIFIED. The CLI is unchanged. The optional forget_state_changed wording was not changed.
+
+### Gate and CI
+
+- **Windows (Go 1.27.1):** after each change, `go vet ./...` and `go test ./internal/audit/ ./cmd/...`, every RED run and every mutant. On the final tree, `go test ./cmd/keyroster/` passed again, including the runbook tests. `go test ./...` fails only in `internal/agent/paths` (`TestAllowed`), which uses Linux paths and has no diff in this round. It passes in WSL.
+- **The local gate in WSL, on a `git archive` copy of `193f2f5` outside the repository: exit 0 (`GATE PASSED`).** Each of these passed:
+  - gofmt, with its positive control;
+  - `CGO_ENABLED=1 go test -race -count=1 ./...`: 34 packages ok, with no data race;
+  - `go vet`: plain, `e2e`, and `e2e systemdsmoke`;
+  - golangci-lint: 0 issues for linux, windows and darwin;
+  - capslock: 92/37/23, equal to the baseline;
+  - dep-firewall;
+  - testonly-firewall, in 6 combinations;
+  - check-pinned-actions: 47.
+
+  `193f2f5` is the code head before an autosquash, which folded the jq UNVERIFIED label into `4b861b9`. The pushed commits differ from it only in 6 lines of host-setup.md.
+- **CI:** the required checks on the head that carries this section are in the handback. WSL cannot resolve keyroster.localhost, so the e2e evidence comes from CI.
+
+### UNVERIFIED after this round
+
+- The jq example in "Checking that a forget was authorized".
+- The forget_state_changed answer when no heartbeat is stored. No test runs it.
+- Everything listed under round 1.
+
 ## Self-Check: PASSED
 
 - **Files.** `internal/wire/forget.go`, `internal/signer/forget.go`, `internal/audit/forget.go`, `test/vectors/leaf_host_forget_v1.hex` and `test/vectors/forget_request_signing_v1.hex` exist.
