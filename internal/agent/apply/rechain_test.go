@@ -257,6 +257,40 @@ func TestKRLAlone(t *testing.T) {
 			t.Fatalf("an oversize directory and no newer KRL: %v, %+v, current %d (was %d), %d generations (was %d)", err, r, h.current(), gen, h.genCount(), gens)
 		}
 	})
+	t.Run("superseded_during_wait_krl_applied", func(t *testing.T) {
+		t.Parallel()
+		// F07 (03-08d): during a widening wait the spool gains an oversize
+		// directory and a newer KRL. The superseding generation is the
+		// pending target's directory with the newer KRL, verified against
+		// the pending target's bundle.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.clock.advance(time.Hour)
+		h.publishKRL(7)
+		h.mustApply() // a swap just now: the widening apply must wait
+		h.publishDir(h.spec("role:ops", "role:q"))
+		published := false
+		h.clock.onSleep = func(time.Duration) {
+			if !published {
+				published = true
+				s := h.spec("role:ops", "role:q")
+				s.bulkRoles = 17
+				h.publishDir(s)
+				h.publishKRL(7, 99)
+				h.write()
+			}
+		}
+		r, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("an oversize superseding directory: %v, want generation_too_large reported", err)
+		}
+		if !h.krlRevokes(h.l.Current(), 99) || !slices.Equal(h.principals("deploy"), []string{"role:ops", "role:q"}) || r.DirectoryVersion != 2 || h.lastGood() != h.current() {
+			t.Fatalf("the pending target with the newer KRL is not committed: revokes 99 %t, principals %v, %+v", h.krlRevokes(h.l.Current(), 99), h.principals("deploy"), r)
+		}
+		if a, err := h.accepted(); err != nil || a.DirectoryVersion != 2 || a.KRLVersion != h.f.krlVersion {
+			t.Fatalf("accepted after the wait: %+v, %v", a, err)
+		}
+	})
 	t.Run("selftest_failure_after_swap_keeps_new_krl", func(t *testing.T) {
 		t.Parallel()
 		// After a swap, a rollback already keeps the newest KRL

@@ -965,7 +965,13 @@ func (e *engine) discard(n uint64) {
 
 // pollSpool is the check during a widening wait: a capture newer than
 // the pending target pending, verified against it, rendered, written and
-// checked, is returned as the superseding generation.
+// checked, is returned as the superseding generation. A content refusal
+// of its generation takes the KRL-alone pass as forward's does (krlAlone;
+// F07 (03-08d)), against the pending target's state: the superseding
+// generation is then the pending target's with the newer KRL, and its
+// Verified carries the refusal, which forward returns after the commit. A
+// KRL-alone state with nothing newer returns the refusal, which the wait
+// logs.
 func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target *Generation) (*Generation, *state.Verified, error) {
 	prev := pending.AsStored()
 	st, err := e.capture(prev.Floor())
@@ -976,27 +982,35 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 	if err != nil || !v.Changed() {
 		return nil, nil, err
 	}
-	g, err := e.render(v)
-	if err != nil {
-		return nil, nil, err
+	for {
+		cur, curLink, err := e.readCurrent()
+		if err != nil {
+			return nil, nil, err
+		}
+		g, refusal := e.candidate(v, cur, curLink)
+		if refusal == nil {
+			if sameBytes(g, target) {
+				return nil, nil, nil
+			}
+			g.N = e.allocGeneration()
+			if err := e.installGeneration(g); err != nil {
+				return nil, nil, err
+			}
+			if refusal = e.validate(ctx, g, e.l.Gen(g.N), cur); refusal == nil {
+				return g, v, nil
+			}
+			e.discard(g.N)
+			if !errors.Is(refusal, ErrCALineRejected) {
+				return nil, nil, refusal
+			}
+		}
+		if v, err = e.krlAlone(prev, st, v, refusal); err != nil {
+			return nil, nil, err
+		}
+		if !v.Changed() {
+			return nil, nil, v.Refused
+		}
 	}
-	cur, curLink, err := e.readCurrent()
-	if err != nil {
-		return nil, nil, err
-	}
-	e.keepKRL(g, cur, curLink)
-	if sameBytes(g, target) {
-		return nil, nil, nil
-	}
-	g.N = e.allocGeneration()
-	if err := e.installGeneration(g); err != nil {
-		return nil, nil, err
-	}
-	if err := e.validate(ctx, g, e.l.Gen(g.N), cur); err != nil {
-		e.discard(g.N)
-		return nil, nil, err
-	}
-	return g, v, nil
 }
 
 // isCrash reports an error injected by the Fault hook: the run stops
