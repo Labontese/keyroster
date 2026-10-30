@@ -114,7 +114,7 @@ func TestCAIssueAdminEvidence(t *testing.T) {
 		Principals: []string{"alice"}, ValidForSeconds: 60, CreatedAt: 1, Extensions: []string{"permit-port-forwarding"}}
 
 	t.Run("two_admins_sign_the_signing_bytes", func(t *testing.T) {
-		ev, err := adminEvidence(req, fps)
+		ev, err := adminEvidence(req.SigningBytes(), wire.AdminSSHSIGNamespace, fps)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,7 +138,7 @@ func TestCAIssueAdminEvidence(t *testing.T) {
 		}
 	})
 	t.Run("key_not_in_agent", func(t *testing.T) {
-		if _, err := adminEvidence(req, []string{"SHA256:" + strings.Repeat("A", 43)}); err == nil || !strings.Contains(err.Error(), "does not hold the admin key") {
+		if _, err := adminEvidence(req.SigningBytes(), wire.AdminSSHSIGNamespace, []string{"SHA256:" + strings.Repeat("A", 43)}); err == nil || !strings.Contains(err.Error(), "does not hold the admin key") {
 			t.Fatalf("err = %v, want the agent refusal", err)
 		}
 	})

@@ -295,18 +295,22 @@ func (d *DB) MarkAgentApproved(ctx context.Context, k AgentKey, nowUS int64) err
 // pending, which a forget names and DeleteAgentIf re-checks (03-08b):
 // whether the directory approved it once, its removal version (0: none)
 // and its recorded removal confirmation (ConfirmedVersion 0 and
-// ConfirmedSHA256 nil: none; the SHA-256 is raw, 32 bytes).
+// ConfirmedSHA256 nil: none; the SHA-256 is raw, 32 bytes), and when it
+// enrolled (EnrolledAtUS, 03-08c): a forget is bound to the one enrollment
+// the admin saw, so it never deletes a later enrollment of the same
+// identity with the same facts.
 type ForgetFacts struct {
 	ApprovedOnce     bool
 	RemovalVersion   uint64
 	ConfirmedVersion uint64
 	ConfirmedSHA256  []byte
+	EnrolledAtUS     int64
 }
 
 // ForgetFacts are a's ForgetFacts as the row holds them.
 func (a *Agent) ForgetFacts() ForgetFacts {
 	return ForgetFacts{ApprovedOnce: a.ApprovedAtUS != 0, RemovalVersion: a.RemovedDirVersion,
-		ConfirmedVersion: a.RemovalConfirmedVersion, ConfirmedSHA256: a.RemovalConfirmedSHA256}
+		ConfirmedVersion: a.RemovalConfirmedVersion, ConfirmedSHA256: a.RemovalConfirmedSHA256, EnrolledAtUS: a.EnrolledAtUS}
 }
 
 // nullVersion binds a version, NULL for 0 (IS ? then matches a NULL
@@ -333,13 +337,21 @@ func nullBlob(b []byte) any {
 // the same identity into the reused row ID is another row), and its
 // heartbeat, which frees its identity and host keys for a new enrollment
 // (keyroster host forget; PR #71 review D-R1), but only while the row's
-// approval, removal version and recorded confirmation still equal facts
-// (03-08b, plan check item 1). The heartbeat and the row are deleted in
+// approval, removal version, recorded confirmation and enrollment time
+// still equal facts (03-08b, plan check item 1; 03-08c). The heartbeat and the row are deleted in
 // one transaction, the row by one statement that re-checks every fact;
 // when it deletes no row (the row is gone, its identity rotated, or a fact
 // changed after the caller checked it) nothing is deleted and the answer
 // is ErrNotFound. foreign_keys is off, so the heartbeat is deleted here.
-func (d *DB) DeleteAgentIf(ctx context.Context, k AgentKey, facts ForgetFacts) error {
+//
+// With a non-nil hbCheck, the row's stored heartbeat body (nil when none is
+// stored) is read in the same transaction, before anything is deleted, and
+// a non-nil error from hbCheck refuses the delete with that error: the
+// server refuses a forget while the host reports a swap it has not
+// finished (03-08c), or principals again (PR #75 review finding 0). The transaction holds the database's one connection
+// from its start (_txlock=immediate), so no heartbeat is stored between
+// the check and the delete.
+func (d *DB) DeleteAgentIf(ctx context.Context, k AgentKey, facts ForgetFacts, hbCheck func(body []byte) error) error {
 	removal, err := nullVersion(facts.RemovalVersion)
 	if err != nil {
 		return err
@@ -356,12 +368,25 @@ func (d *DB) DeleteAgentIf(ctx context.Context, k AgentKey, facts ForgetFacts) e
 		return fmt.Errorf("serverdb: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if hbCheck != nil {
+		var body []byte
+		err := tx.QueryRowContext(ctx, `SELECT body FROM heartbeats WHERE agent_id = (SELECT id FROM agents WHERE `+agentKeyWhere+`)`, k.args()...).Scan(&body)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			body = nil
+		case err != nil:
+			return fmt.Errorf("serverdb: heartbeat: %w", err)
+		}
+		if err := hbCheck(body); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM heartbeats WHERE agent_id = ?`, k.ID); err != nil {
 		return fmt.Errorf("serverdb: delete heartbeat: %w", err)
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE `+agentKeyWhere+` AND removed_dir_version IS ?
-AND removal_confirmed_version IS ? AND removal_confirmed_sha256 IS ? AND (approved_at_us IS NULL) = ?`,
-		append(k.args(), removal, confirmed, nullBlob(facts.ConfirmedSHA256), !facts.ApprovedOnce)...)
+AND removal_confirmed_version IS ? AND removal_confirmed_sha256 IS ? AND (approved_at_us IS NULL) = ? AND enrolled_at_us = ?`,
+		append(k.args(), removal, confirmed, nullBlob(facts.ConfirmedSHA256), !facts.ApprovedOnce, facts.EnrolledAtUS)...)
 	if err != nil {
 		return fmt.Errorf("serverdb: delete agent: %w", err)
 	}
@@ -543,8 +568,11 @@ type Heartbeat struct {
 // first checks that the row k still exists (AgentKey): a
 // request the row was forgotten (or rotated) under while its body arrived
 // never writes a heartbeat that a later agent reusing the ID would inherit
-// (ErrNotFound; PR #72 review C1). foreign_keys is off, so 0006's ON
-// DELETE CASCADE does nothing; DeleteAgentIf deletes the row itself.
+// (ErrNotFound; PR #72 review C1). Every write names k itself as well
+// (03-08c), the heartbeat through its agents row, so none of them relies
+// on that first check to miss a row that reused the ID. foreign_keys is
+// off, so 0006's ON DELETE CASCADE does nothing; DeleteAgentIf deletes the
+// row itself.
 //
 // The clock offset is recorded whatever the seq (owner decision D-R2). An
 // equal seq changes nothing else and is ErrStaleHeartbeat; a lower one is
@@ -565,8 +593,12 @@ func (d *DB) StoreHeartbeat(ctx context.Context, k AgentKey, seq int64, body []b
 	if err := agentExists(ctx, tx, k); err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE id = ?`, offsetS, id); err != nil {
+	res, err := tx.ExecContext(ctx, `UPDATE agents SET clock_offset_s = ? WHERE `+agentKeyWhere, keyArgs(k, offsetS)...)
+	if err != nil {
 		return false, fmt.Errorf("serverdb: clock offset: %w", err)
+	}
+	if err := oneRow(res); err != nil {
+		return false, err
 	}
 	var stored, receivedUS int64
 	err = tx.QueryRowContext(ctx, `SELECT seq, received_at_us FROM heartbeats WHERE agent_id = ?`, id).Scan(&stored, &receivedUS)
@@ -580,8 +612,8 @@ func (d *DB) StoreHeartbeat(ctx context.Context, k AgentKey, seq int64, body []b
 		}
 		return false, ErrStaleHeartbeat
 	case seq < stored:
-		res, err := tx.ExecContext(ctx, `UPDATE agents SET seq_regressed_at_us = ? WHERE id = ?
-AND (seq_regressed_at_us IS NULL OR seq_regressed_at_us <= ? OR seq_regressed_at_us <= ?)`, nowUS, id, receivedUS, nowUS-seqRegressedLogEvery)
+		res, err := tx.ExecContext(ctx, `UPDATE agents SET seq_regressed_at_us = ? WHERE `+agentKeyWhere+`
+AND (seq_regressed_at_us IS NULL OR seq_regressed_at_us <= ? OR seq_regressed_at_us <= ?)`, append(keyArgs(k, nowUS), receivedUS, nowUS-seqRegressedLogEvery)...)
 		if err != nil {
 			return false, fmt.Errorf("serverdb: seq regressed: %w", err)
 		}
@@ -594,9 +626,16 @@ AND (seq_regressed_at_us IS NULL OR seq_regressed_at_us <= ? OR seq_regressed_at
 		}
 		return n == 1, ErrSeqRegressed
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) VALUES (?, ?, ?, ?)
-ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, received_at_us = excluded.received_at_us`, id, seq, body, nowUS); err != nil {
+	// The row's ID comes from the agents row k, so the heartbeat is stored
+	// only for that row (the WHERE also keeps SQLite's upsert parse
+	// unambiguous).
+	res, err = tx.ExecContext(ctx, `INSERT INTO heartbeats (agent_id, seq, body, received_at_us) SELECT id, ?, ?, ? FROM agents WHERE `+agentKeyWhere+`
+ON CONFLICT (agent_id) DO UPDATE SET seq = excluded.seq, body = excluded.body, received_at_us = excluded.received_at_us`, keyArgs(k, seq, body, nowUS)...)
+	if err != nil {
 		return false, fmt.Errorf("serverdb: store heartbeat: %w", err)
+	}
+	if err := oneRow(res); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("serverdb: commit: %w", err)

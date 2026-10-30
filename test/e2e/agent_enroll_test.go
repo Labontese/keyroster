@@ -17,6 +17,52 @@ import (
 	"time"
 )
 
+// checkForgetEntry exports sg's log and checks it with keyroster audit
+// verify, which must pass with exactly one host_forget entry (03-08c). That
+// entry must be the audit entry forgot, keyroster host forget's output,
+// names, for the agent identity it printed. It returns the entry's
+// decoded fields.
+func checkForgetEntry(t *testing.T, sg *signerEnv, forgot string) map[string]any {
+	t.Helper()
+	m := regexp.MustCompile(`Forgetting agent (SHA256:[A-Za-z0-9+/]{43}), enrolled as`).FindStringSubmatch(forgot)
+	n := regexp.MustCompile(`logged as audit entry (\d+)`).FindStringSubmatch(forgot)
+	if m == nil || n == nil {
+		t.Fatalf("keyroster host forget printed no identity or audit entry:\n%s", forgot)
+	}
+	export := sg.exportLog(t)
+	code, out := auditVerify(t, sg, export, "--json")
+	if code != 0 {
+		t.Fatalf("keyroster audit verify after the forget exited %d:\n%s", code, out)
+	}
+	var res struct {
+		Kinds map[string]uint64 `json:"kinds"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil || res.Kinds["host_forget"] != 1 {
+		t.Fatalf("audit verify --json after the forget: kinds %v (%v), want exactly one host_forget entry\n%s", res.Kinds, err, out)
+	}
+	t.Logf("keyroster audit verify after the forget: %s", strings.TrimSpace(out))
+	data, err := os.ReadFile(export) //nolint:gosec // G304: the test's own export
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(data), "\n") {
+		var line struct {
+			Index   *uint64        `json:"index"`
+			Decoded map[string]any `json:"decoded"`
+		}
+		if l == "" || json.Unmarshal([]byte(l), &line) != nil || line.Decoded["kind"] != "host_forget" {
+			continue
+		}
+		t.Logf("the host_forget entry: %s", l)
+		if line.Index == nil || strconv.FormatUint(*line.Index, 10) != n[1] || line.Decoded["identity"] != m[1] {
+			t.Fatalf("the host_forget entry is index %v for %v; host forget printed audit entry %s for %s", line.Index, line.Decoded["identity"], n[1], m[1])
+		}
+		return line.Decoded
+	}
+	t.Fatal("the export has no host_forget line")
+	return nil
+}
+
 var (
 	fetchBinOnce sync.Once
 	fetchBinPath string
@@ -374,29 +420,51 @@ func TestAgentEnrollEndToEnd(t *testing.T) {
 	var forgot string
 	// Each attempt spends three admin requests (host pending, host status,
 	// the forget), so it waits 2 s; a refusal of the admin limiter is
-	// retried like host_removal_not_applied.
+	// retried like host_removal_not_applied. So is host_swap_pending
+	// (03-08c): the revocation above makes the removed host swap in the new
+	// KRL, and a forget waits until a heartbeat shows that swap committed.
 	for deadline := time.Now().Add(2*time.Second + 30*time.Second); ; time.Sleep(2 * time.Second) {
 		code, out, errOut := env.keyroster(t, admin, "", "host", "forget", "web1")
 		if code == 0 {
 			forgot = out
 			break
 		}
-		retry := strings.Contains(errOut, "host_removal_not_applied") || strings.Contains(errOut, "the server is rate-limiting requests from this address")
+		retry := strings.Contains(errOut, "host_removal_not_applied") || strings.Contains(errOut, "host_swap_pending") ||
+			strings.Contains(errOut, "the server is rate-limiting requests from this address")
 		if !retry || time.Now().After(deadline) {
 			t.Fatalf("keyroster host forget web1: exit %d:\n%s\n%s\nfetch log:\n%s\nserver log:\n%s", code, out, errOut, eh.fetch.String(), env.Stderr.String())
 		}
 	}
-	if !strings.Contains(forgot, "Forgot the agent enrolled as web1") || !strings.Contains(forgot, "removal confirmed at directory v") {
+	if !strings.Contains(forgot, "Forgot the agent enrolled as web1") || !strings.Contains(forgot, "removal confirmed at directory v") ||
+		!strings.Contains(forgot, "logged as audit entry") {
 		t.Fatalf("keyroster host forget web1:\n%s", forgot)
 	}
 	t.Logf("keyroster host forget web1:\n%s", forgot)
 	// The confirmation the server recorded from the real agent's
 	// heartbeat: the SHA-256 the agent reported is the server's directory
 	// document without signatures (plan check item 8).
+	var confirmed struct {
+		Removal uint64 `json:"removal_version"`
+		Version uint64 `json:"directory_version"`
+		SHA256  string `json:"directory_sha256"`
+	}
 	for _, l := range strings.Split(env.Stderr.String(), "\n") {
 		if strings.Contains(l, "agent removal confirmed") {
 			t.Logf("server: %s", l)
+			if err := json.Unmarshal([]byte(l), &confirmed); err != nil {
+				t.Fatalf("the server's confirmation line: %v", err)
+			}
 		}
+	}
+	// 03-08c: the forget went through the signer, which logged it as one
+	// host_forget entry that keyroster audit verify checks, naming web1's
+	// identity and the confirmation recorded from the real heartbeat.
+	entry := checkForgetEntry(t, env.Signer, forgot)
+	if entry["expected_name"] != "web1" || entry["approved_once"] != true || entry["host_gone"] != false ||
+		entry["removal_version"] != float64(confirmed.Removal) || entry["confirmed_version"] != float64(confirmed.Version) ||
+		entry["confirmed_sha256"] != confirmed.SHA256 || confirmed.Version == 0 {
+		t.Fatalf("the host_forget entry %v; want web1, approved_once, not host_gone, the removal at v%d confirmed at v%d %s",
+			entry, confirmed.Removal, confirmed.Version, confirmed.SHA256)
 	}
 	// The forgotten agent's next poll gets unknown_agent (D-10): its
 	// fetcher logs it.

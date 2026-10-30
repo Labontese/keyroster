@@ -206,7 +206,7 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 		return fmt.Errorf("the request is for installation %s, but trust bundle v%d in force is for %s, and the signer refuses it (revoke_installation_mismatch)",
 			req.InstallationID, a.bundle.Version, a.bundle.InstallationID)
 	}
-	if err := verifyRevokeAdmins(body.Evidence, body.Request, req.Namespace(), a.policy); err != nil {
+	if err := verifyRevokeAdmins(body.Evidence, body.Request, req.Namespace(), 1, a.policy); err != nil {
 		return err
 	}
 	if body.ResolvedAtSeconds > math.MaxUint64/1_000_000 || body.ResolvedAtSeconds*1_000_000 > leafMicros {
@@ -371,18 +371,23 @@ func keyFingerprint(blob []byte) string {
 	return ssh.FingerprintSHA256(pub)
 }
 
-// verifyRevokeAdmins checks a revoke entry's evidence the way the signer
-// authorizes a revocation: every item admin-sshsig/v1, an SSHSIG under
-// namespace (the logged request's: keyroster/revoke-request/v2, or v1 for
-// a 03-01 request) over msg by an admin of pol, and at least one admin.
-func verifyRevokeAdmins(evidence []wire.Evidence, msg []byte, namespace string, pol *trust.Policy) error {
+// verifyRevokeAdmins checks a revoke, recovery or forget entry's evidence
+// the way the signer authorizes the request (verifyAdminSignatures): every
+// item admin-sshsig/v1, an SSHSIG under namespace (the logged request's:
+// keyroster/revoke-request/v2, or v1 for a 03-01 request;
+// keyroster/revoke-recovery/v1; keyroster/host-forget-request/v1) over msg
+// by an admin of pol, and at least quorum distinct admins: 1 for a revoke
+// and a recovery, owner decision Q3's rule for a forget (03-08c). An admin
+// who signed twice counts once.
+func verifyRevokeAdmins(evidence []wire.Evidence, msg []byte, namespace string, quorum int, pol *trust.Policy) error {
 	admins := map[string]bool{}
 	for _, ad := range pol.Admins {
 		admins[ad.Key] = true
 	}
 	if len(evidence) == 0 {
-		return errors.New("the revocation carries no admin evidence")
+		return errors.New("the request carries no admin evidence")
 	}
+	signed := map[string]bool{}
 	for i, ev := range evidence {
 		if ev.Type != wire.EvidenceAdminSSHSIG {
 			return fmt.Errorf("evidence %d has type %q, want %s", i, ev.Type, wire.EvidenceAdminSSHSIG)
@@ -397,6 +402,10 @@ func verifyRevokeAdmins(evidence []wire.Evidence, msg []byte, namespace string, 
 		if err := sig.Verify(namespace, msg); err != nil {
 			return fmt.Errorf("evidence %d does not approve the logged request under %s: %w", i, namespace, err)
 		}
+		signed[trust.FormatKey(sig.PublicKey())] = true
+	}
+	if len(signed) < quorum {
+		return fmt.Errorf("signed by %d distinct admins of policy v%d, but the signer needs %d (admin_quorum_not_met)", len(signed), pol.Version, quorum)
 	}
 	return nil
 }

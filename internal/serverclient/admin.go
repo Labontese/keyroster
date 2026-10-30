@@ -311,6 +311,7 @@ type HTTPError struct {
 	date       string // the response's Date header
 	retryAfter string // the response's Retry-After header
 	api        string // the server's error text
+	leaf       uint64 // the error body's leaf (APIError.Leaf), 0 when none
 	err        error
 }
 
@@ -319,6 +320,10 @@ func (e *HTTPError) Unwrap() error { return e.err }
 
 // APIErrorIs reports whether the server's error text is exactly s.
 func (e *HTTPError) APIErrorIs(s string) bool { return e.api != "" && e.api == s }
+
+// Leaf is the log entry index the error body names (APIError.Leaf), 0
+// when it names none.
+func (e *HTTPError) Leaf() uint64 { return e.leaf }
 
 // RateLimited reports whether e is a 429 whose Retry-After is a whole
 // number of seconds from 1 to an hour, and that number.

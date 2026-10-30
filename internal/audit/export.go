@@ -16,19 +16,28 @@
 // leaf line, "bundle_version" on every bundle_install line, and "version",
 // "directory" and "sigs" on a directory_install line that carries them
 // must each occur once, with the leaf's own value, and on no line of
-// another kind (checkGrepFields, checkReplayFields). Exports written
-// before 02-12 have no "version", and those before 03-02 no "directory"
-// or "sigs"; their lines still verify.
+// another kind (checkGrepFields, checkReplayFields). A host_forget line
+// (03-08c) must be byte for byte the line Export writes for its leaf, so
+// every decoded field on it is the leaf's own (checkForgetFields; PR #75
+// review, owner decision D-1). On every line Verify also parses the JSON
+// with keys unescaped, as a JSON reader sees it: no key may occur twice
+// in one object, the top-level keys are exactly the ones above, decoded's
+// parsed "kind" is the leaf's, and a key only host_forget renders occurs on
+// no line of another kind (checkLineKeys; PR #75 review, fix round 2).
+// Exports written before 02-12 have no "version", and those before 03-02
+// no "directory" or "sigs"; their lines still verify.
 package audit
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 
 	"golang.org/x/crypto/ssh"
 
@@ -61,9 +70,13 @@ func Export(ctx context.Context, w io.Writer, src LogSource) (uint64, error) {
 	enc.SetEscapeHTML(false)
 	var n uint64
 	note, _, err := src.ReadLog(ctx, func(idx uint64, leaf []byte) error {
-		i := idx
 		n++
-		return enc.Encode(ExportLine{Index: &i, Leaf: base64.StdEncoding.EncodeToString(leaf), Decoded: Decode(leaf)})
+		line, err := exportLeafLine(idx, leaf)
+		if err != nil {
+			return err
+		}
+		_, err = bw.Write(append(line, '\n'))
+		return err
 	})
 	if err != nil {
 		return 0, err
@@ -72,6 +85,19 @@ func Export(ctx context.Context, w io.Writer, src LogSource) (uint64, error) {
 		return 0, err
 	}
 	return n, bw.Flush()
+}
+
+// exportLeafLine is the line Export writes for the leaf bytes leaf at index idx,
+// without its newline. Verify requires a host_forget line to be exactly
+// it (checkForgetFields).
+func exportLeafLine(idx uint64, leaf []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(ExportLine{Index: &idx, Leaf: base64.StdEncoding.EncodeToString(leaf), Decoded: Decode(leaf)}); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // Decode renders leaf bytes as an informational JSON object. A leaf that
@@ -197,6 +223,12 @@ func decodeLeaf(data []byte) map[string]any {
 			return map[string]any{"error": err.Error()}
 		}
 		decodeRecovery(m, b)
+	case tlog.KindHostForget:
+		b, err := tlog.DecodeHostForgetBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		decodeHostForget(m, b)
 	case tlog.KindKRLPublish:
 		b, err := tlog.DecodeKRLPublishBody(l.Body)
 		if err != nil {
@@ -323,6 +355,62 @@ func decodeRecovery(m map[string]any, b *tlog.RecoveryBody) {
 		}
 	}
 	m["admins"] = admins
+}
+
+// decodeHostForget renders a host_forget body into m (03-08c): the agent
+// its logged request names (its identity fingerprint, expected name,
+// enrollment time and the SHA256 fingerprints of its host keys), the facts
+// the admins signed (approved_once, host_gone, removal_version, and
+// confirmed_version with confirmed_sha256 for a confirmation, neither
+// without one), the request ID and times, the policy and directory
+// versions in force, the evidence types and the sorted SHA256
+// fingerprints of the keys that signed (admin_fingerprints), so the entry
+// names who forgot. It renders no key named "kind" (beyond the line's
+// own), "bundle_version", "version", "directory" or "sigs"
+// (checkGrepFields, checkReplayFields), and Verify requires the whole
+// line to be the one Export writes for the leaf, so every field rendered
+// here is bound to it (checkForgetFields). The keys only it renders
+// (forgetOnlyKeys) are refused on a line of any other kind (checkLineKeys),
+// so no other kind may render them.
+func decodeHostForget(m map[string]any, b *tlog.HostForgetBody) {
+	m["policy_version"] = b.PolicyVersion
+	m["directory_version"] = b.DirectoryVersion
+	m["resolved_at"] = b.ResolvedAtSeconds
+	if req, err := wire.ParseForgetSigningBytes(b.Request); err != nil {
+		m["request_error"] = err.Error()
+	} else {
+		m["identity"] = "SHA256:" + base64.RawStdEncoding.EncodeToString(req.AgentIdentity[:])
+		m["expected_name"] = req.ExpectedName
+		m["enrolled_at_us"] = req.EnrolledAtMicros
+		fps := make([]string, 0, len(req.HostKeyFingerprints))
+		for _, d := range req.HostKeyFingerprints {
+			fps = append(fps, "SHA256:"+base64.RawStdEncoding.EncodeToString(d[:]))
+		}
+		m["host_key_fingerprints"] = fps
+		m["approved_once"] = req.ApprovedOnce
+		m["host_gone"] = req.HostGone
+		m["removal_version"] = req.RemovalVersion
+		if req.ConfirmedVersion != 0 {
+			m["confirmed_version"] = req.ConfirmedVersion
+			m["confirmed_sha256"] = hex.EncodeToString(req.ConfirmedSHA256[:])
+		}
+		m["request_id"] = hex.EncodeToString(req.RequestID[:])
+		m["created_at"] = req.CreatedAt
+	}
+	types := make([]string, 0, len(b.Evidence))
+	admins := make([]string, 0, len(b.Evidence))
+	for _, e := range b.Evidence {
+		types = append(types, e.Type)
+		if e.Type != wire.EvidenceAdminSSHSIG {
+			continue
+		}
+		if sig, err := sshsig.Parse(e.Blob); err == nil {
+			admins = append(admins, ssh.FingerprintSHA256(sig.PublicKey()))
+		}
+	}
+	slices.Sort(admins)
+	m["evidence_types"] = types
+	m["admin_fingerprints"] = admins
 }
 
 // fingerprint is the SHA256 fingerprint of an SSH wire-format key, or ""

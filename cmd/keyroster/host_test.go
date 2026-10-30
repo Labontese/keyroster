@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // resignBundle serves e's genesis bundle changed by edit, re-signed by
@@ -388,7 +390,14 @@ func TestReadCommandsCheckInstallation(t *testing.T) {
 // popHostsEnv is roleEnv on a genesis policy that sets pop.hosts.
 func popHostsEnv(t *testing.T) *dirEnv {
 	t.Helper()
-	e := newDirEnvPolicy(t, 1, 1, func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true} })
+	return popHostsEnvQuorum(t, 1, 1)
+}
+
+// popHostsEnvQuorum is popHostsEnv with admins admins at admin quorum
+// quorum (03-08c).
+func popHostsEnvQuorum(t *testing.T, admins, quorum int) *dirEnv {
+	t.Helper()
+	e := newDirEnvPolicy(t, admins, quorum, func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true} })
 	e.installDirect(t, buildDir(t, nil, roleBase(t, nil)))
 	return e
 }
@@ -547,7 +556,12 @@ func identityOf(spkiHex string) string {
 // served, and whose host status lists no host.
 func forgetEnv(t *testing.T, hosts []serverclient.PendingHost, served ...serverclient.ServedHost) *dirEnv {
 	t.Helper()
-	e := popHostsEnv(t)
+	return forgetEnvOn(t, popHostsEnv(t), hosts, served...)
+}
+
+// forgetEnvOn is forgetEnv on e.
+func forgetEnvOn(t *testing.T, e *dirEnv, hosts []serverclient.PendingHost, served ...serverclient.ServedHost) *dirEnv {
+	t.Helper()
 	if hosts == nil {
 		hosts = []serverclient.PendingHost{}
 	}
@@ -576,6 +590,29 @@ func (e *dirEnv) hostsStatus(t *testing.T, rows ...serverclient.HostStatusRow) {
 func activeRow(name, spkiHex string) serverclient.HostStatusRow {
 	return serverclient.HostStatusRow{Name: name, ExpectedName: name, IdentitySPKISHA256: strings.Repeat(spkiHex, 32), State: serverclient.HostStateActive,
 		Silent: true, NeverApplied: true}
+}
+
+// postedForget is the wire.ForgetRequest of the last forget e received
+// (03-08c), nil when the body does not parse.
+func (e *dirEnv) postedForget(t *testing.T) *wire.ForgetRequest {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var body serverclient.ForgetHostBody
+	if json.Unmarshal(e.lastPost, &body) != nil {
+		return nil
+	}
+	req, err := wire.ParseForgetRequest(body.Request)
+	if err != nil {
+		return nil
+	}
+	return req
+}
+
+// identityIs reports whether req names the identity spkiHex (two hex
+// digits repeated).
+func identityIs(req *wire.ForgetRequest, spkiHex string) bool {
+	return req != nil && hex.EncodeToString(req.AgentIdentity[:]) == strings.Repeat(spkiHex, 32)
 }
 
 // forgetAnswer is the server's answer for forgetting h.
@@ -615,9 +652,10 @@ func TestHostForget(t *testing.T) {
 			!strings.Contains(stdout, "removal confirmed at directory v4") {
 			t.Fatalf("host forget output:\n%s", stdout)
 		}
-		var req serverclient.ForgetHostRequest
-		if json.Unmarshal(e.lastPost, &req) != nil || req.IdentitySPKISHA256 != strings.Repeat("00", 32) || !req.ApprovedOnce || req.RemovalVersion != 3 ||
-			req.RemovalConfirmed == nil || *req.RemovalConfirmed != *web1.RemovalConfirmed || req.HostGone {
+		req := e.postedForget(t)
+		if !identityIs(req, "00") || !req.ApprovedOnce || req.RemovalVersion != 3 || req.ConfirmedVersion != 4 ||
+			hex.EncodeToString(req.ConfirmedSHA256[:]) != web1.RemovalConfirmed.SHA256 || req.HostGone || req.ExpectedName != "web1" ||
+			len(req.HostKeyFingerprints) != 1 || req.HostKeyFingerprints[0] != wire.HostKeyDigest(pub) || req.InstallationID != e.bundle.InstallationID {
 			t.Fatalf("the request %s", e.lastPost)
 		}
 	})
@@ -671,8 +709,7 @@ func TestHostForget(t *testing.T) {
 		var called bool
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, other.PendingHost), http.StatusOK)
 		code, stdout, stderr := run(t, "host", "forget", "--identity", identityOf("11"))
-		var req serverclient.ForgetHostRequest
-		if code != 0 || json.Unmarshal(e.lastPost, &req) != nil || req.IdentitySPKISHA256 != strings.Repeat("11", 32) {
+		if req := e.postedForget(t); code != 0 || !identityIs(req, "11") {
 			t.Fatalf("host forget --identity: exit %d, request %s: %s%s", code, e.lastPost, stdout, stderr)
 		}
 	})
@@ -744,6 +781,173 @@ func TestHostForget(t *testing.T) {
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"forget_state_changed"}`, http.StatusConflict)
 		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "forget_state_changed") || !strings.Contains(stderr, "run the command again") {
 			t.Fatalf("a forget whose agent changed: exit %d: %s", code, stderr)
+		}
+	})
+	t.Run("swap_pending_refused_locally", func(t *testing.T) {
+		// 03-08c carried item 1: a confirmed agent whose host reports a
+		// swap it has not finished is refused before anything is signed;
+		// host pending shows the swap next to the confirmation.
+		swapping := servedRow("web1", "00", key, true)
+		swapping.SwapPending = true
+		e := forgetEnv(t, nil, swapping)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, swapping.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "host_swap_pending") ||
+			!strings.Contains(stderr, "keyroster host forget --identity "+identityOf("00")+" --host-gone") {
+			t.Fatalf("a forget during a swap: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+		code, stdout, stderr := run(t, "host", "pending")
+		if code != 0 || !strings.Contains(stdout, "removal confirmed at directory v4; swap pending") {
+			t.Fatalf("host pending during a swap: exit %d:\n%s%s", code, stdout, stderr)
+		}
+	})
+	t.Run("swap_pending_host_gone_sends_both", func(t *testing.T) {
+		swapping := servedRow("web1", "00", key, true)
+		swapping.SwapPending = true
+		e := forgetEnv(t, nil, swapping)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, swapping.PendingHost), http.StatusOK)
+		code, stdout, stderr := run(t, "host", "forget", "web1", "--host-gone")
+		req := e.postedForget(t)
+		if code != 0 || !identityIs(req, "00") || !req.HostGone || req.ConfirmedVersion != 4 {
+			t.Fatalf("forget --host-gone during a swap: exit %d, request %s:\n%s%s", code, e.lastPost, stdout, stderr)
+		}
+		// PR #75 review finding 5: the host did confirm; --host-gone only
+		// overrides the wait for its swap, and the output says so.
+		if !strings.Contains(stdout, "  removal confirmed at directory v4") || !strings.Contains(stdout, "  host_gone: overrides the host's unfinished swap\n") ||
+			!strings.Contains(stdout, "Forgotten with --host-gone: it overrode the host's unfinished swap; the host had confirmed its removal.\n") ||
+			strings.Contains(stdout, "never confirmed") {
+			t.Fatalf("forget --host-gone during a swap printed:\n%s", stdout)
+		}
+	})
+	t.Run("server_swap_pending_explained", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"host_swap_pending"}`, http.StatusConflict)
+		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "host_swap_pending: the host reports a swap it has not finished") {
+			t.Fatalf("the server's host_swap_pending: exit %d: %s", code, stderr)
+		}
+	})
+	// 03-08c: the admins' signatures (owner decisions Q2 and Q3), on a
+	// policy with three admins at admin quorum 2.
+	quorumEnv := func(t *testing.T, hosts []serverclient.PendingHost, served ...serverclient.ServedHost) (*dirEnv, *bool) {
+		t.Helper()
+		e := forgetEnvOn(t, popHostsEnvQuorum(t, 3, 2), hosts, served...)
+		answer := web1.PendingHost
+		if len(hosts) > 0 {
+			answer = hosts[0]
+		}
+		called := new(bool)
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, called, forgetAnswer(t, answer), http.StatusOK)
+		return e, called
+	}
+	signedBy := func(t *testing.T, req *wire.ForgetRequest, fps ...string) {
+		t.Helper()
+		var got []string
+		for _, ev := range req.Evidence {
+			sig, err := sshsig.Parse(ev.Blob)
+			if err != nil || ev.Type != wire.EvidenceAdminSSHSIG || sig.Verify(wire.ForgetSSHSIGNamespace, req.SigningBytes()) != nil {
+				t.Fatalf("evidence %s does not verify under %s: %v", ev.Type, wire.ForgetSSHSIGNamespace, err)
+			}
+			got = append(got, ssh.FingerprintSHA256(sig.PublicKey()))
+		}
+		if !sameFingerprints(got, fps) {
+			t.Fatalf("signed by %v, want %v", got, fps)
+		}
+	}
+	t.Run("quorum_two_keys_two_evidence", func(t *testing.T) {
+		e, called := quorumEnv(t, nil, web1)
+		code, stdout, stderr := run(t, "host", "forget", "web1", "--admin-key", e.fps[1], "--admin-key", e.fps[2])
+		if code != 0 || !e.wasCalled(called) {
+			t.Fatalf("host forget with two admin keys: exit %d:\n%s%s", code, stdout, stderr)
+		}
+		req := e.postedForget(t)
+		if !identityIs(req, "00") || !req.ApprovedOnce {
+			t.Fatalf("the request %s", e.lastPost)
+		}
+		signedBy(t, req, e.fps[1], e.fps[2])
+		for _, want := range []string{"Signing the forget (keyroster/host-forget-request/v1)", "approved once: true, removal version: 3",
+			"removal confirmed at directory v4, sha256 " + strings.Repeat("cd", 32), "signed by admin key: " + e.fps[1], "signed by admin key: " + e.fps[2]} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("the output lacks %q:\n%s", want, stdout)
+			}
+		}
+	})
+	t.Run("never_approved_one_key_enough", func(t *testing.T) {
+		pending := servedRow("web9", "33", key2, false).PendingHost
+		e, called := quorumEnv(t, []serverclient.PendingHost{pending})
+		code, stdout, stderr := run(t, "host", "forget", "web9")
+		if code != 0 || !e.wasCalled(called) {
+			t.Fatalf("host forget of a never-approved agent with one key: exit %d:\n%s%s", code, stdout, stderr)
+		}
+		req := e.postedForget(t)
+		if !identityIs(req, "33") || req.ApprovedOnce || req.RemovalVersion != 0 || req.ConfirmedVersion != 0 || req.HostGone {
+			t.Fatalf("the request %s", e.lastPost)
+		}
+		signedBy(t, req, e.fps[0])
+	})
+	t.Run("approved_once_fewer_keys_refused_locally", func(t *testing.T) {
+		e, called := quorumEnv(t, nil, web1)
+		for _, args := range [][]string{
+			{"host", "forget", "web1"},
+			{"host", "forget", "web1", "--admin-key", e.fps[1]},
+			{"host", "forget", "web1", "--admin-key", e.fps[1], "--admin-key", e.fps[1]},
+		} {
+			code, _, stderr := run(t, args...)
+			if code == 0 || e.wasCalled(called) || !strings.Contains(stderr, "admin_quorum_not_met: forgetting an agent that was approved once needs 2 distinct admin signatures") {
+				t.Fatalf("%v: exit %d, sent %t: %s", args, code, e.wasCalled(called), stderr)
+			}
+		}
+		if n := e.agent.forgetSigns(); n != 0 {
+			t.Fatalf("%d forget signatures asked for; a refusal signs nothing", n)
+		}
+	})
+	t.Run("slow_signing_refused_locally", func(t *testing.T) {
+		// Plan check item 9: more than 240 s between CreatedAt and the POST
+		// is refused before anything is sent; 240 s is sent.
+		for _, c := range []struct {
+			took time.Duration
+			sent bool
+		}{{241 * time.Second, false}, {240 * time.Second, true}} {
+			e, called := quorumEnv(t, nil, web1)
+			start := time.Now()
+			calls := 0
+			forgetNow = func() time.Time {
+				calls++
+				if calls == 1 {
+					return start
+				}
+				return start.Add(c.took)
+			}
+			code, _, stderr := run(t, "host", "forget", "web1", "--admin-key", e.fps[0], "--admin-key", e.fps[1])
+			forgetNow = nil
+			if c.sent != (code == 0) || c.sent != e.wasCalled(called) || (!c.sent && !strings.Contains(stderr, "request_time_skew: signing took 4m1s")) {
+				t.Fatalf("signing that took %s: exit %d, sent %t: %s", c.took, code, e.wasCalled(called), stderr)
+			}
+			if req := e.postedForget(t); c.sent && (req == nil || req.CreatedAt != uint64(start.Unix())) { //nolint:gosec // G115: after 1970
+				t.Fatalf("the request's CreatedAt %v, want the time before the first signature %d", req, start.Unix())
+			}
+		}
+	})
+	t.Run("no_installation_id_refused_locally", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
+		e.resignBundle(t, func(b *trust.Bundle) { b.InstallationID = "" })
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, forgetAnswer(t, web1.PendingHost), http.StatusOK)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || e.wasCalled(&called) || !strings.Contains(stderr, "forget_no_installation_id") || e.agent.forgetSigns() != 0 {
+			t.Fatalf("a forget under a bundle without an installation ID: exit %d, sent %t: %s", code, e.wasCalled(&called), stderr)
+		}
+	})
+	t.Run("logged_not_deleted_printed", func(t *testing.T) {
+		e := forgetEnv(t, nil, web1)
+		var called bool
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"forget_logged_not_deleted","leaf":17}`, http.StatusConflict)
+		code, _, stderr := run(t, "host", "forget", "web1")
+		if code == 0 || !strings.Contains(stderr, "forget_logged_not_deleted: audit entry 17 records an authorization the server did not carry out") ||
+			!strings.Contains(stderr, "keyroster host pending still lists it") {
+			t.Fatalf("a forget logged but not carried out: exit %d: %s", code, stderr)
 		}
 	})
 	t.Run("answer_for_another_name_refused", func(t *testing.T) {

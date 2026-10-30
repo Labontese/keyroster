@@ -71,9 +71,12 @@ type KeyCustody struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
-// APIError is the JSON body of a server error response.
+// APIError is the JSON body of a server error response. Leaf is set only
+// on a forget_logged_not_deleted refusal: the index of the host_forget
+// entry that records the forget the server did not carry out (03-08c).
 type APIError struct {
 	Error string `json:"error"`
+	Leaf  uint64 `json:"leaf,omitempty"`
 }
 
 // CustodyHeaderValue formats keys as the CustodyHeader value, in the order
@@ -386,7 +389,7 @@ func (c *Client) sendHeader(ctx context.Context, method, path string, body []byt
 		var apiErr APIError
 		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
 			// The server's own text, as a short delimited excerpt.
-			he.api = apiErr.Error
+			he.api, he.leaf = apiErr.Error, apiErr.Leaf
 			he.err = fmt.Errorf("%s%s: HTTP %d: %w", c.base, path, resp.StatusCode, PeerError(errors.New(apiErr.Error)))
 		} else {
 			he.err = fmt.Errorf("%s%s: HTTP %d", c.base, path, resp.StatusCode)

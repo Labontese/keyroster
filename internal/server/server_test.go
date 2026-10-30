@@ -129,6 +129,12 @@ type fakeSigner struct {
 	bundles     map[uint64]*wire.GetBundleResponse
 	dirVersions map[uint64]*wire.GetDirectoryVersionResponse
 
+	// ForgetAgent's settable result (nil and nil: accepted as leaf 7) and
+	// the last request it got, as relayed (03-08c).
+	forget     *wire.ForgetResponse
+	forgetErr  error
+	lastForget *wire.ForgetRequest
+
 	heldMethod string
 	entered    chan struct{}
 	gate       chan struct{}
@@ -382,6 +388,22 @@ func (f *fakeSigner) Revoke(ctx context.Context, req *wire.RevokeRequest) (*wire
 	f.mu.Unlock()
 	if err := f.enter(ctx, "Revoke"); err != nil {
 		return nil, err
+	}
+	return resp, err
+}
+
+func (f *fakeSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (*wire.ForgetResponse, error) {
+	f.mu.Lock()
+	f.calls["ForgetAgent"]++
+	c := *req
+	f.lastForget = &c
+	resp, err := f.forget, f.forgetErr
+	f.mu.Unlock()
+	if err := f.enter(ctx, "ForgetAgent"); err != nil {
+		return nil, err
+	}
+	if resp == nil && err == nil {
+		resp = &wire.ForgetResponse{Leaf: 7}
 	}
 	return resp, err
 }

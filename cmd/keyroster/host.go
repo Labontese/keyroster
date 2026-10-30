@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -25,6 +27,7 @@ import (
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 func init() {
@@ -385,8 +388,12 @@ func hostAdminRefusal(err error) error {
 			"wait until the host has applied that version, then forget it (docs/runbooks/host-setup.md \"Removing a host\"). Nothing was forgotten")
 	case he.APIErrorIs(serverclient.AdminErrHostNotEnrolled):
 		return errors.New("no agent with this identity is enrolled (it was forgotten, or its identity rotated); check keyroster host pending. Nothing was forgotten")
-	case he.APIErrorIs(serverclient.AdminErrRemovalNotApplied):
-		return errRemovalNotApplied("")
+	case he.APIErrorIs(serverclient.AdminErrHostSwapPending):
+		return errSwapPending("")
+	case he.APIErrorIs(serverclient.AdminErrForgetLoggedNotDeleted):
+		return fmt.Errorf("forget_logged_not_deleted: audit entry %d records an authorization the server did not carry out: the agent changed after "+
+			"keyroster-signer logged the forget, so the server deleted nothing and keeps serving it (keyroster host pending still lists it). "+
+			"Run keyroster host pending and forget it again, which logs a second entry", he.Leaf())
 	case he.APIErrorIs(serverclient.AdminErrForgetStateChanged):
 		return errors.New("forget_state_changed: the agent changed since keyroster host pending was read (its approval, removal version or " +
 			"recorded removal confirmation), so the server forgot nothing; run the command again")
@@ -404,6 +411,18 @@ func errRemovalNotApplied(id string) error {
 	return fmt.Errorf("host_removal_not_applied: the host has not yet confirmed, in its heartbeat, that it applied a directory version that removed it "+
 		"(keyroster host pending shows the confirmation once the server recorded it); forgetting it now would stop the signed state, revocations included, "+
 		"before the removal reached it. Wait for its next heartbeat; for a host that is gone for good, run keyroster host forget --identity %s --host-gone. Nothing was forgotten", id)
+}
+
+// errSwapPending is host forget's refusal of a confirmed agent whose host
+// reports a swap it has not finished (03-08c), for the agent with identity
+// fingerprint id ("" when unknown).
+func errSwapPending(id string) error {
+	if id == "" {
+		id = "SHA256:..."
+	}
+	return fmt.Errorf("host_swap_pending: the host reports a swap it has not finished, so its removal confirmation does not yet speak for what it "+
+		"enforces; wait for its next heartbeat (keyroster host pending drops \"swap pending\" once it committed) and run the command again. For a host "+
+		"that is gone for good, run keyroster host forget --identity %s --host-gone. Nothing was forgotten", id)
 }
 
 // runHostJoinToken is keyroster host join-token NAME [--ttl D] --out FILE
@@ -506,42 +525,53 @@ func joinFileProtection(goos string) (protection, warning string) {
 	return "mode 0600", ""
 }
 
+// pendingHosts is host pending's answer as the CLI checked it, with the
+// trust bundle and policy requireHostPoP verified against the saved pins.
+type pendingHosts struct {
+	hosts  []serverclient.PendingHost
+	served []servedHostView
+	bundle *trust.Bundle
+	pol    *trust.Policy
+}
+
 // fetchPendingHosts GETs the pending hosts through the admin API, after
-// requireHostPoP, whose verified policy it returns: the hosts waiting for
-// approval, and the hosts approved once that the directory no longer
-// approves (served until forget, 03-08 carry-over a), each checked
+// requireHostPoP, whose verified bundle and policy it returns: the hosts
+// waiting for approval, and the hosts approved once that the directory no
+// longer approves (served until forget, 03-08 carry-over a), each checked
 // (checkServedHost).
-func fetchPendingHosts(ctx context.Context, s *adminSession) ([]serverclient.PendingHost, []servedHostView, *trust.Policy, error) {
-	_, pol, err := requireHostPoP(ctx, s)
+func fetchPendingHosts(ctx context.Context, s *adminSession) (*pendingHosts, error) {
+	b, pol, err := requireHostPoP(ctx, s)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	var ans serverclient.PendingHostsAnswer
 	if err := s.client.AdminJSON(ctx, http.MethodGet, serverclient.AdminPendingHostsPath, nil, &ans, s.signer); err != nil {
 		if refusal := hostAdminRefusal(err); refusal != nil {
-			return nil, nil, nil, refusal
+			return nil, refusal
 		}
-		return nil, nil, nil, adminError(err, s, pol)
+		return nil, adminError(err, s, pol)
 	}
-	var served []servedHostView
+	out := &pendingHosts{hosts: ans.Hosts, bundle: b, pol: pol}
 	for _, h := range ans.Served {
 		v, err := checkServedHost(h)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
-		served = append(served, *v)
+		out.served = append(out.served, *v)
 	}
-	return ans.Hosts, served, pol, nil
+	return out, nil
 }
 
 // servedHostView is a served host as the CLI shows it: its state, its
-// removal version (0: none recorded) and its recorded removal
-// confirmation (nil: none; 03-08b).
+// removal version (0: none recorded), its recorded removal confirmation
+// (nil: none; 03-08b) and whether its host reports a swap it has not
+// finished (03-08c).
 type servedHostView struct {
 	pendingHostView
 	State          string
 	RemovalVersion uint64
 	Confirmed      *serverclient.RemovalConfirmation
+	SwapPending    bool
 }
 
 // checkServedHost is checkPendingHost for a served host, whose state must
@@ -561,7 +591,7 @@ func checkServedHost(h serverclient.ServedHost) (*servedHostView, error) {
 	if c := h.RemovalConfirmed; c != nil && (h.RemovalVersion == 0 || c.Version < h.RemovalVersion || !enroll.IsSHA256Hex(c.SHA256)) {
 		return nil, errBadPendingHosts
 	}
-	return &servedHostView{pendingHostView: *v, State: h.State, RemovalVersion: h.RemovalVersion, Confirmed: h.RemovalConfirmed}, nil
+	return &servedHostView{pendingHostView: *v, State: h.State, RemovalVersion: h.RemovalVersion, Confirmed: h.RemovalConfirmed, SwapPending: h.SwapPending}, nil
 }
 
 // servedLine is the line host pending and host status print for a served
@@ -577,9 +607,12 @@ func servedLine(state string) string {
 }
 
 // confirmationLine is how host pending and host forget show a served
-// host's removal confirmation (03-08b).
+// host's removal confirmation (03-08b), and a swap its host has not
+// finished next to it, while which forget is refused (03-08c).
 func confirmationLine(v *servedHostView) string {
 	switch {
+	case v.Confirmed != nil && v.SwapPending:
+		return fmt.Sprintf("removal confirmed at directory v%d; swap pending, forget waits until the host finishes it", v.Confirmed.Version)
 	case v.Confirmed != nil:
 		return fmt.Sprintf("removal confirmed at directory v%d", v.Confirmed.Version)
 	case v.RemovalVersion != 0:
@@ -671,10 +704,11 @@ func runHostPending(ctx context.Context, args []string, stdout, stderr io.Writer
 		return err
 	}
 	defer s.close()
-	hosts, served, _, err := fetchPendingHosts(ctx, s)
+	ph, err := fetchPendingHosts(ctx, s)
 	if err != nil {
 		return err
 	}
+	hosts, served := ph.hosts, ph.served
 	var b strings.Builder
 	if len(hosts) == 0 {
 		b.WriteString("No host is waiting for approval.\n")
@@ -757,10 +791,11 @@ func runHostApprove(ctx context.Context, args []string, stdout, stderr io.Writer
 		return err
 	}
 	defer s.close()
-	hosts, served, _, err := fetchPendingHosts(ctx, s)
+	ph, err := fetchPendingHosts(ctx, s)
 	if err != nil {
 		return err
 	}
+	hosts, served := ph.hosts, ph.served
 	var match []*pendingHostView
 	for _, h := range hosts {
 		v, err := checkPendingHost(h)
@@ -891,12 +926,13 @@ func identityHex(fp string) string {
 }
 
 // runHostForget is keyroster host forget [NAME] [--identity SHA256:...]
-// [--host-gone] [--admin-key FP] (PR #71 review D-R1, 03-08b): the server
-// deletes one agent, so its identity gets 403 unknown_agent from then on
-// and its host keys can enroll again with a new join token. An agent
-// approved once keeps getting signed state after its host entry is
-// removed, so the removal and later revocations reach the host; forget
-// ends that. In order:
+// [--host-gone] [--admin-key FP]... (PR #71 review D-R1, 03-08b, 03-08c):
+// the server deletes one agent, so its identity gets 403 unknown_agent
+// from then on and its host keys can enroll again with a new join token,
+// after keyroster-signer authorized the admins' signed forget and logged
+// it as a host_forget entry. An agent approved once keeps getting signed
+// state after its host entry is removed, so the removal and later
+// revocations reach the host; forget ends that. In order:
 //  1. it reads keyroster host pending (fetchPendingHosts), the pending and
 //     served agents with the facts it sends, and keyroster host status,
 //     for the agents the directory approves now; each answer checked;
@@ -908,20 +944,37 @@ func identityHex(fp string) string {
 //  3. an agent approved once without a recorded removal confirmation (its
 //     host's heartbeat never showed a directory that removed it) is
 //     refused here, host_removal_not_applied, unless --host-gone is given
-//     for a host that will never report again; --host-gone for an agent
-//     confirmed or never approved is dropped, with a note;
-//  4. it prints the agent, its state and the confirmation or the
-//     override, and sends its identity with the facts it read (approved
-//     once, the removal version, the confirmation, host_gone);
-//  5. it checks that the server's answer names exactly that identity.
+//     for a host that will never report again, and so is a confirmed one
+//     whose host reports a swap it has not finished, host_swap_pending
+//     (03-08c), which --host-gone overrides too; --host-gone for an agent
+//     never approved, or confirmed with no swap pending, is dropped, with
+//     a note;
+//  4. it builds the wire.ForgetRequest for the installation of the
+//     root-pinned trust bundle from the row it read (the identity, name,
+//     enrollment time and host keys; approved once, the removal version,
+//     the confirmation, host_gone), and refuses admin_quorum_not_met when
+//     fewer distinct --admin-key keys are given than the signer needs: one
+//     for an agent never approved, the policy's admin_quorum for every
+//     other (owner decision Q3);
+//  5. it prints what is signed, sets CreatedAt and signs with each key from
+//     the one ssh-agent (owner decision Q2), and refuses request_time_skew
+//     when signing took more than forgetMaxSigning, so the signer's ±300 s
+//     window still holds when the request arrives;
+//  6. it sends the request and checks that the server's answer names
+//     exactly that identity, then prints the audit entry's number.
 //
 // The server refuses while a directory host entry still holds the
-// agent's host keys (host_in_directory), and when the agent changed
-// since step 1 (forget_state_changed).
+// agent's host keys (host_in_directory) and when the agent changed since
+// step 1 (forget_state_changed), and the signer refuses what its rule does
+// not admit (403 with its reason). forget_logged_not_deleted means the
+// signer logged the forget but the agent changed before the server could
+// delete it: the entry exists and the agent is still served.
 func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("host forget", flag.ContinueOnError)
 	fset.SetOutput(stderr)
-	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
+	var adminKeys stringList
+	fset.Var(&adminKeys, "admin-key", "SHA256 fingerprint of an admin key in ssh-agent that signs the forget (repeatable: an agent approved once needs the policy's admin quorum, "+
+		"each key from one ssh-agent; the first also signs the request to the server; default: admin_key from keyroster init)")
 	identity := fset.String("identity", "", "the agent identity to forget, SHA256:... as keyroster host pending prints it (needed when more than one agent has the name)")
 	hostGone := fset.Bool("host-gone", false, "forget an agent approved once although its host never confirmed applying its removal (a host that is gone for good); printed and logged")
 	pos, err := parseInterspersed(fset, args)
@@ -938,20 +991,29 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if *identity != "" && (trust.CheckPins([]string{*identity}, 1) != nil || identityHex(*identity) == "") {
 		return fmt.Errorf("--identity %q: want an agent identity fingerprint, SHA256:<base64> as keyroster host pending prints it; nothing was forgotten", *identity)
 	}
-	s, err := openAdminSession(*adminKey, stderr)
+	first := ""
+	if len(adminKeys) > 0 {
+		first = adminKeys[0]
+	}
+	s, err := openAdminSession(first, stderr)
 	if err != nil {
 		return err
 	}
 	defer s.close()
-	hosts, served, pol, err := fetchPendingHosts(ctx, s)
+	keys := []string{s.adminFP}
+	if len(adminKeys) > 0 {
+		keys = slices.Compact(slices.Sorted(slices.Values(adminKeys)))
+	}
+	ph, err := fetchPendingHosts(ctx, s)
 	if err != nil {
 		return err
 	}
+	pol := ph.pol
 	status, err := fetchHostsStatus(ctx, s, pol)
 	if err != nil {
 		return err
 	}
-	cands, err := forgetCandidates(hosts, served, status)
+	cands, err := forgetCandidates(ph.hosts, ph.served, status)
 	if err != nil {
 		return err
 	}
@@ -961,6 +1023,13 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	gone := *hostGone
 	switch {
+	case gone && c.Confirmed != nil && c.SwapPending:
+		// 03-08c: --host-gone overrides the wait for a pending swap; the
+		// request names the confirmation and the override.
+		_, _ = fmt.Fprintf(stderr, "host forget --host-gone: forgetting %s while its host reports a swap it has not finished. "+
+			"If the host is still running, it gets no more signed state from now on, revocations included. The server logs this override.\n", c.Name)
+	case c.Confirmed != nil && c.SwapPending:
+		return errSwapPending(c.Identity)
 	case gone && (!c.ApprovedOnce || c.Confirmed != nil):
 		why := "it was never approved, so it has no removal to wait for"
 		if c.ApprovedOnce {
@@ -974,18 +1043,67 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 		_, _ = fmt.Fprintf(stderr, "host forget --host-gone: forgetting %s without its confirmation that it applied its removal. "+
 			"If the host is still running, it gets no more signed state from now on, revocations included, and keeps enforcing what it applied last. The server logs this override.\n", c.Name)
 	}
+	if ph.bundle.InstallationID == "" {
+		return fmt.Errorf("forget_no_installation_id: trust bundle v%d in force has no installation ID, and keyroster-signer forgets nothing without one. Nothing was forgotten",
+			ph.bundle.Version)
+	}
+	req, err := forgetRequestOf(c, ph.bundle.InstallationID, gone)
+	if err != nil {
+		return err
+	}
+	need := 1
+	if req.ApprovedOnce {
+		need = int(pol.AdminQuorum)
+	}
+	if len(keys) < need {
+		return fmt.Errorf("admin_quorum_not_met: forgetting an agent that was approved once needs %d distinct admin signatures (the policy's admin quorum), "+
+			"and %d --admin-key was given; give one --admin-key per admin, each key in this ssh-agent. Nothing was signed or sent", need, len(keys))
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Forgetting agent %s, enrolled as %s: %s\n", c.Identity, c.Name, c.stateLine())
 	if gone {
 		b.WriteString("  override: --host-gone\n")
 	}
+	b.WriteString("Signing the forget (keyroster/host-forget-request/v1):\n")
+	fmt.Fprintf(&b, "  agent identity: %s\n  enrolled as: %s (enrolled %s)\n", c.Identity, c.Name, c.EnrolledAt)
+	for i, k := range c.Keys {
+		fmt.Fprintf(&b, "  host key: %s %s\n", c.Fingerprint[i], strings.Fields(k)[0])
+	}
+	fmt.Fprintf(&b, "  approved once: %t, removal version: %d\n", req.ApprovedOnce, req.RemovalVersion)
+	if c.Confirmed != nil {
+		fmt.Fprintf(&b, "  removal confirmed at directory v%d, sha256 %s\n", c.Confirmed.Version, c.Confirmed.SHA256)
+	}
+	switch {
+	case gone && c.Confirmed != nil:
+		b.WriteString("  host_gone: overrides the host's unfinished swap\n")
+	case gone:
+		b.WriteString("  host_gone: the host never confirmed its removal\n")
+	}
+	for _, k := range keys {
+		fmt.Fprintf(&b, "  signed by admin key: %s\n", k)
+	}
 	if _, err := io.WriteString(stdout, b.String()); err != nil {
 		return err
 	}
-	req := serverclient.ForgetHostRequest{IdentitySPKISHA256: c.SPKIHex, ApprovedOnce: c.ApprovedOnce, RemovalVersion: c.RemovalVersion,
-		RemovalConfirmed: c.Confirmed, HostGone: gone}
+	now := forgetNow
+	if now == nil {
+		now = time.Now
+	}
+	created := now()
+	req.CreatedAt = uint64(max(created.Unix(), 0)) //nolint:gosec // G115: >= 0
+	if req.Evidence, err = adminEvidence(req.SigningBytes(), wire.ForgetSSHSIGNamespace, keys); err != nil {
+		return err
+	}
+	if took := now().Sub(created); took > forgetMaxSigning {
+		return fmt.Errorf("request_time_skew: signing took %s, more than %s, so keyroster-signer may no longer accept the request's time; "+
+			"run the command again and confirm each key promptly. Nothing was sent", took.Round(time.Second), forgetMaxSigning)
+	}
+	body, err := req.Marshal()
+	if err != nil {
+		return err
+	}
 	var ans serverclient.ForgetHostAnswer
-	if err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminForgetHostPath, req, &ans, s.signer); err != nil {
+	if err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminForgetHostPath, serverclient.ForgetHostBody{Request: body}, &ans, s.signer); err != nil {
 		if refusal := hostAdminRefusal(err); refusal != nil {
 			return refusal
 		}
@@ -1004,12 +1122,53 @@ func runHostForget(ctx context.Context, args []string, stdout, stderr io.Writer)
 	for i, k := range v.Keys {
 		fmt.Fprintf(&b, "  host key: %s %s\n", v.Fingerprint[i], strings.Fields(k)[0])
 	}
+	fmt.Fprintf(&b, "Forget logged as audit entry %d by keyroster-signer (host_forget; keyroster audit verify checks it).\n", ans.Leaf)
 	b.WriteString("Its identity gets unknown_agent from now on and receives no more signed state; its host keys can enroll again with a new join token.\n")
-	if gone {
+	switch {
+	case gone && c.Confirmed != nil:
+		b.WriteString("Forgotten with --host-gone: it overrode the host's unfinished swap; the host had confirmed its removal.\n")
+	case gone:
 		b.WriteString("Forgotten with --host-gone: the host never confirmed that it applied its removal.\n")
 	}
 	_, err = io.WriteString(stdout, b.String())
 	return err
+}
+
+// forgetMaxSigning is how long host forget may take between CreatedAt and
+// sending the signed request (plan check item 9): well inside the
+// signer's ±300 s freshness window (wire.MaxRequestSkewSeconds), so slow
+// touch confirmations end in the CLI's own refusal, not the signer's.
+const forgetMaxSigning = 240 * time.Second
+
+// forgetNow is host forget's clock; nil means time.Now. Tests set it.
+var forgetNow func() time.Time
+
+// forgetRequestOf is the wire.ForgetRequest for candidate c, a pending or
+// served agent of host pending's answer, for installation id, with
+// host_gone when gone and a random request ID; the caller sets CreatedAt
+// and the evidence. checkPendingHost and checkServedHost checked every
+// value it takes from c (the identity, the enrollment time, the host keys
+// and the confirmation's SHA-256), and the request's Marshal validates the
+// whole request before it is sent.
+func forgetRequestOf(c *forgetCandidate, id string, gone bool) (*wire.ForgetRequest, error) {
+	spki, _ := hex.DecodeString(c.SPKIHex)
+	enrolled, _ := time.Parse(time.RFC3339, c.EnrolledAt)
+	req := &wire.ForgetRequest{InstallationID: id, ExpectedName: c.Name, EnrolledAtMicros: uint64(max(enrolled.UnixMicro(), 0)), //nolint:gosec // G115: >= 0
+		ApprovedOnce: c.ApprovedOnce, RemovalVersion: c.RemovalVersion, HostGone: gone}
+	copy(req.AgentIdentity[:], spki)
+	for _, k := range c.Keys {
+		pub, _ := trust.ParseKey(k)
+		req.HostKeyFingerprints = append(req.HostKeyFingerprints, wire.HostKeyDigest(pub))
+	}
+	slices.SortFunc(req.HostKeyFingerprints, func(x, y [32]byte) int { return bytes.Compare(x[:], y[:]) })
+	if conf := c.Confirmed; conf != nil {
+		sum, _ := hex.DecodeString(conf.SHA256)
+		req.ConfirmedVersion, req.ConfirmedSHA256 = conf.Version, [32]byte(sum)
+	}
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		return nil, fmt.Errorf("request id: %w", err)
+	}
+	return req, nil
 }
 
 // pickForgetTarget is the agent host forget names: the one with the

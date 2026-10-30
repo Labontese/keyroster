@@ -309,6 +309,11 @@ type directoryInForce struct {
 	sigs    []byte // the admins' signatures it was installed with
 	dir     *directory.Directory
 	version uint64
+	// shas maps the version of every directory a directory_install entry
+	// installed to the SHA-256 of its document, without signatures
+	// (DirectoryInstallBody.Directory): the basis a heartbeat reports and a
+	// forget's confirmation names (03-08c).
+	shas map[uint64][32]byte
 	// authErr is why the directory is not authorized under the policy in
 	// force (nil: it is). It is the one cached result for the current
 	// (directory, policy) pair: authorizeDirectory runs only when one side
@@ -369,6 +374,10 @@ func (ds *directoryInForce) install(body *tlog.DirectoryInstallBody, a *anchor) 
 		return fmt.Errorf("directory v%d is %w", d.Version, err)
 	}
 	ds.raw, ds.sigs, ds.dir, ds.version, ds.authErr = body.Directory, body.Sigs, d, d.Version, nil
+	if ds.shas == nil {
+		ds.shas = map[uint64][32]byte{}
+	}
+	ds.shas[d.Version] = sha256.Sum256(body.Directory)
 	return nil
 }
 
@@ -618,7 +627,14 @@ func certTypeName(t uint32) string {
 //     neither, as the standard base64 of its document and signatures; on a
 //     revocation_recovery line, "import_krl_versions" once, as the KRL
 //     versions of its imports (checkImportVersions); and none of the last
-//     five on a line of another kind
+//     five on a line of another kind. A host_forget line must be byte for
+//     byte the line Export writes for its leaf, so all its decoded fields
+//     are the leaf's own, and no other line may carry "approved_once" or
+//     "host_gone" (checkForgetFields). Parsed with keys unescaped, no line
+//     repeats a key in one object or has a top-level key export does not
+//     write, every leaf line's decoded "kind" is its leaf's kind, and no
+//     line of another kind carries a key only host_forget renders
+//     (checkLineKeys)
 //   - every leaf decodes, records its own index, and leaf times never
 //     decrease
 //   - the first bundle_install entry holds a genesis bundle (version 1,
@@ -734,6 +750,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			return nil, fmt.Errorf("audit: line %d: the checkpoint line is not last", lineNo)
 		}
 		if isCheckpoint {
+			if err := checkLineKeys(sc.Bytes(), nil); err != nil {
+				return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
+			}
 			checkpoint = []byte(line.Checkpoint)
 			continue
 		}
@@ -763,6 +782,12 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
 		if err := checkGrepFields(sc.Bytes(), leaf); err != nil {
+			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
+		}
+		if err := checkForgetFields(sc.Bytes(), leaf, raw); err != nil {
+			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
+		}
+		if err := checkLineKeys(sc.Bytes(), &leaf); err != nil {
 			return nil, fmt.Errorf("audit: line %d: %w", lineNo, err)
 		}
 		if err := revs.before(want, leaf.Kind); err != nil {
@@ -868,6 +893,14 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			}
 			for _, c := range carried {
 				rep.collect(opts, want, leaf.Kind, c)
+			}
+		case tlog.KindHostForget:
+			body, err := tlog.DecodeHostForgetBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			if err := verifyForget(want, body, leaf.TimeMicros, &trustState, &dirState, revs); err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
 		case tlog.KindRefusalSummary:
 			body, err := tlog.DecodeRefusalSummaryBody(leaf.Body)
@@ -1106,6 +1139,139 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 		}
 	}
 	return checkImportVersions(s, leaf)
+}
+
+// checkForgetFields binds the decoded fields of a host_forget line
+// (03-08c; PR #75 review, owner decision D-1), which the runbook reads to
+// see what was forgotten and who signed: the agent's identity, expected
+// name, enrollment time and host key fingerprints, approved_once,
+// host_gone, the removal and confirmed versions and SHA-256, the request
+// ID and times, the policy and directory versions, the evidence types and
+// admin_fingerprints (rendered from the leaf's own evidence, whose
+// signatures verifyForget checks). Such a line, raw its leaf bytes, must
+// be byte for byte the line Export writes for it (exportLeafLine): no field
+// changed, added, removed, repeated or re-encoded. On a line of any other
+// kind neither "approved_once" nor "host_gone" may occur, and checkLineKeys
+// refuses there every key only a host_forget line renders, after
+// unescaping.
+func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
+	if leaf.Kind != tlog.KindHostForget {
+		s := string(text)
+		if strings.Contains(s, `"approved_once":`) || strings.Contains(s, `"host_gone":`) {
+			return fmt.Errorf("its decoded approved_once or host_gone field is not one of a host_forget leaf (%s)", leaf.Kind)
+		}
+		return nil
+	}
+	want, err := exportLeafLine(leaf.Index, raw)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(text, want) {
+		return errors.New("its line is not the one export writes for its host_forget leaf: a decoded field is not the leaf's own")
+	}
+	return nil
+}
+
+// forgetOnlyKeys are the decoded keys that only a host_forget line carries
+// (decodeHostForget). The other keys of that line, such as request_id,
+// created_at, resolved_at and the versions, are rendered by other kinds
+// too.
+var forgetOnlyKeys = map[string]bool{
+	"identity": true, "expected_name": true, "enrolled_at_us": true, "host_key_fingerprints": true,
+	"approved_once": true, "host_gone": true, "removal_version": true, "confirmed_version": true,
+	"confirmed_sha256": true, "admin_fingerprints": true,
+}
+
+// checkLineKeys checks the keys of an export line as a JSON reader sees
+// them (PR #75 review, fix round 2): a reader such as jq, Python or Go
+// unescapes keys and keeps the last of repeated ones, which the byte checks
+// above do not see. It parses the line with a token decoder and refuses a
+// key that occurs twice in one object at any depth, after unescaping, and
+// a top-level key other than "index", "leaf", "decoded" and "checkpoint"
+// written exactly so (Go's decoder also matches keys in another case). On
+// a leaf line (leaf not nil) decoded must be an object whose "kind" is the
+// name of the leaf's kind, and on a line of another kind than host_forget
+// no key of forgetOnlyKeys may occur at any depth. So a JSON reader reads
+// each line as the kind of its verified leaf, and the fields of a
+// host_forget only on a host_forget line, which checkForgetFields binds.
+func checkLineKeys(text []byte, leaf *tlog.Leaf) error {
+	what := "checkpoint"
+	if leaf != nil {
+		what = leaf.Kind.String()
+	}
+	dec := json.NewDecoder(bytes.NewReader(text))
+	dec.UseNumber()
+	keys := map[string]bool{}
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if err := walkKeys(dec, tok, keys); err != nil {
+		return fmt.Errorf("%w (%s)", err, what)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(text, &top); err != nil {
+		return err
+	}
+	for k := range top {
+		switch k {
+		case "index", "leaf", "decoded", "checkpoint":
+		default:
+			return fmt.Errorf("its key %q is not one export writes (%s)", k, what)
+		}
+	}
+	if leaf == nil {
+		return nil
+	}
+	var decoded map[string]json.RawMessage
+	var kind string
+	if json.Unmarshal(top["decoded"], &decoded) != nil || json.Unmarshal(decoded["kind"], &kind) != nil || kind != what {
+		return fmt.Errorf("its decoded kind is not the kind of its leaf (%s)", what)
+	}
+	if leaf.Kind != tlog.KindHostForget {
+		for k := range keys {
+			if forgetOnlyKeys[k] {
+				return fmt.Errorf("its decoded %s field is not one of a host_forget leaf (%s)", k, what)
+			}
+		}
+	}
+	return nil
+}
+
+// walkKeys reads the rest of the JSON value whose first token is tok,
+// adds every object key in it, at any depth, to keys, and refuses a key
+// that occurs twice in one object.
+func walkKeys(dec *json.Decoder, tok json.Token, keys map[string]bool) error {
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return nil // a scalar
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		if d == '{' {
+			kt, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			k, ok := kt.(string)
+			if !ok {
+				return errors.New("an object key is not a string")
+			}
+			if seen[k] {
+				return fmt.Errorf("its key %q occurs twice in one object", k)
+			}
+			seen[k], keys[k] = true, true
+		}
+		vt, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if err := walkKeys(dec, vt, keys); err != nil {
+			return err
+		}
+	}
+	_, err := dec.Token() // the closing delimiter
+	return err
 }
 
 // checkImportVersions checks the "import_krl_versions" field, which the

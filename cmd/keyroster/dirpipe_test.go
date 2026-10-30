@@ -37,6 +37,7 @@ import (
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/webauthn"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // countingAgent is an in-memory ssh-agent that counts the sign requests
@@ -46,16 +47,27 @@ import (
 // that a refused directory signature reached no agent.
 type countingAgent struct {
 	agent.ExtendedAgent
-	mu   sync.Mutex
-	dirs int
+	mu      sync.Mutex
+	dirs    int
+	forgets int // signatures under the forget namespace (03-08c)
 }
 
 func (c *countingAgent) note(data []byte) {
-	if sshsigNamespace(data) == directory.Namespace {
-		c.mu.Lock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch sshsigNamespace(data) {
+	case directory.Namespace:
 		c.dirs++
-		c.mu.Unlock()
+	case wire.ForgetSSHSIGNamespace:
+		c.forgets++
 	}
+}
+
+// forgetSigns returns the number of forget signatures asked for so far.
+func (c *countingAgent) forgetSigns() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.forgets
 }
 
 func (c *countingAgent) Sign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {

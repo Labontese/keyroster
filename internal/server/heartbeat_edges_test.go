@@ -83,7 +83,7 @@ func TestHeartbeatAfterForget(t *testing.T) {
 		e, id := polledAgent(t)
 		agents, _ := e.s.db.ListAgents(t.Context())
 		e.s.afterAgentLookup = func() {
-			if err := e.s.db.DeleteAgentIf(t.Context(), agents[0].Key(), agents[0].ForgetFacts()); err != nil {
+			if err := e.s.db.DeleteAgentIf(t.Context(), agents[0].Key(), agents[0].ForgetFacts(), nil); err != nil {
 				t.Error(err)
 			}
 		}

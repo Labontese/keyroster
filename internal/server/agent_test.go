@@ -1000,7 +1000,8 @@ func (e *agentEnv) forgetName(t *testing.T, name string, gone bool) *httptest.Re
 	}
 	switch len(match) {
 	case 0:
-		return e.forgetFacts(t, serverclient.ForgetHostRequest{IdentitySPKISHA256: strings.Repeat("ee", 32)})
+		key := trust.FormatKey(hostSigners(t, 1)[0].PublicKey())
+		return e.forgetFacts(t, forgetReq{IdentitySPKISHA256: strings.Repeat("ee", 32), ExpectedName: name, HostKeys: []string{key}})
 	case 1:
 	default:
 		t.Fatalf("%d agents named %s; forget them by identity", len(match), name)
@@ -1008,11 +1009,26 @@ func (e *agentEnv) forgetName(t *testing.T, name string, gone bool) *httptest.Re
 	return e.forgetFacts(t, forgetReqOf(&match[0], gone))
 }
 
+// forgetReq is what a test's forget names, as the CLI builds it from host
+// pending's row (03-08b, 03-08c): the agent (its identity, expected name,
+// host keys and enrollment time) and the facts the admin saw.
+type forgetReq struct {
+	IdentitySPKISHA256 string
+	ExpectedName       string
+	HostKeys           []string
+	EnrolledAtUS       int64
+	ApprovedOnce       bool
+	RemovalVersion     uint64
+	RemovalConfirmed   *serverclient.RemovalConfirmation
+	HostGone           bool
+}
+
 // forgetReqOf is the forget request of agent a with the facts its row
 // holds, and host_gone when gone and a was approved once without a
 // confirmation.
-func forgetReqOf(a *serverdb.Agent, gone bool) serverclient.ForgetHostRequest {
-	req := serverclient.ForgetHostRequest{IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256), ApprovedOnce: a.ApprovedAtUS != 0,
+func forgetReqOf(a *serverdb.Agent, gone bool) forgetReq {
+	req := forgetReq{IdentitySPKISHA256: hex.EncodeToString(a.IdentitySPKISHA256), ExpectedName: a.ExpectedName, HostKeys: a.HostKeys,
+		EnrolledAtUS: a.EnrolledAtUS, ApprovedOnce: a.ApprovedAtUS != 0,
 		RemovalVersion: a.RemovedDirVersion, HostGone: gone && a.ApprovedAtUS != 0 && a.RemovalConfirmedVersion == 0}
 	if a.RemovalConfirmedVersion != 0 {
 		req.RemovalConfirmed = &serverclient.RemovalConfirmation{Version: a.RemovalConfirmedVersion, SHA256: hex.EncodeToString(a.RemovalConfirmedSHA256)}
@@ -1020,10 +1036,64 @@ func forgetReqOf(a *serverdb.Agent, gone bool) serverclient.ForgetHostRequest {
 	return req
 }
 
-// forgetFacts posts the forget request req.
-func (e *agentEnv) forgetFacts(t *testing.T, req serverclient.ForgetHostRequest) *httptest.ResponseRecorder {
+// wireForget is r as the wire.ForgetRequest the CLI signs, for the
+// installation copyInstallation, created at the test clock's time, without
+// evidence: the server relays it, and the fake signer does not check
+// signatures.
+func (e *agentEnv) wireForget(t *testing.T, r forgetReq) *wire.ForgetRequest {
 	t.Helper()
-	body, err := json.Marshal(req)
+	spki, err := hex.DecodeString(r.IdentitySPKISHA256)
+	if err != nil || len(spki) != 32 {
+		t.Fatalf("identity %q", r.IdentitySPKISHA256)
+	}
+	req := &wire.ForgetRequest{InstallationID: copyInstallation, ExpectedName: r.ExpectedName, EnrolledAtMicros: uint64(r.EnrolledAtUS), //nolint:gosec // G115: a test's enrollment time
+		ApprovedOnce: r.ApprovedOnce, RemovalVersion: r.RemovalVersion, HostGone: r.HostGone, CreatedAt: uint64(e.clock.Now().Unix())} //nolint:gosec // G115: the test clock is after 1970
+	copy(req.AgentIdentity[:], spki)
+	for _, k := range r.HostKeys {
+		pub, err := trust.ParseKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.HostKeyFingerprints = append(req.HostKeyFingerprints, wire.HostKeyDigest(pub))
+	}
+	slices.SortFunc(req.HostKeyFingerprints, func(x, y [32]byte) int { return bytes.Compare(x[:], y[:]) })
+	if c := r.RemovalConfirmed; c != nil {
+		sum, err := hex.DecodeString(c.SHA256)
+		if err != nil || len(sum) != 32 {
+			t.Fatalf("confirmation SHA-256 %q", c.SHA256)
+		}
+		req.ConfirmedVersion, req.ConfirmedSHA256 = c.Version, [32]byte(sum)
+	}
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+// forgetFacts posts the forget request r, signed bytes and all. Like the
+// CLI, it sends nothing for an agent approved once without a confirmation
+// and without host_gone, which no signed request can name
+// (wire.ForgetRequest.Validate; 03-08c), and answers the CLI's own
+// refusal, 409 host_removal_not_applied.
+func (e *agentEnv) forgetFacts(t *testing.T, r forgetReq) *httptest.ResponseRecorder {
+	t.Helper()
+	if r.ApprovedOnce && r.RemovalConfirmed == nil && !r.HostGone {
+		rec := httptest.NewRecorder()
+		rec.Code = http.StatusConflict
+		_, _ = rec.Body.WriteString(`{"error":"` + serverclient.AdminErrRemovalNotApplied + `"}`)
+		return rec
+	}
+	return e.forgetWire(t, e.wireForget(t, r))
+}
+
+// forgetWire posts req as the body of AdminForgetHostPath.
+func (e *agentEnv) forgetWire(t *testing.T, req *wire.ForgetRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := req.Marshal()
+	if err != nil {
+		t.Fatalf("marshal the forget request: %v", err)
+	}
+	body, err := json.Marshal(serverclient.ForgetHostBody{Request: b})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1093,14 +1163,17 @@ func TestAgentRemoval(t *testing.T) {
 		}
 	})
 	t.Run("forget_refused_while_in_directory", func(t *testing.T) {
+		// With host_gone: the CLI refuses an approved agent without a
+		// confirmation before it signs, and a signed request names it
+		// only with host_gone (03-08c).
 		e, _, hosts := polled(t)
-		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrHostInDirectory {
+		if rec := e.forgetName(t, "web1", true); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrHostInDirectory {
 			t.Fatalf("forget an active host: %d %s", rec.Code, rec.Body.String())
 		}
 		h := hostEntry("web1", hosts)
 		h.Status = directory.StatusDisabled
 		e.installDir(t, h)
-		if rec := e.forget(t, "web1"); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrHostInDirectory {
+		if rec := e.forgetName(t, "web1", true); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrHostInDirectory {
 			t.Fatalf("forget a disabled host: %d %s", rec.Code, rec.Body.String())
 		}
 		if rec := e.forget(t, "nosuch"); rec.Code != http.StatusNotFound || apiError(rec) != serverclient.AdminErrHostNotEnrolled {

@@ -521,3 +521,80 @@ func TestChainParserCaps(t *testing.T) {
 		}
 	}
 }
+
+// forgetSeeds are the fuzz seeds of the forget request (03-08c): the
+// golden vector's request, one of an agent never approved, and one with
+// host_gone and the server's statement.
+func forgetSeeds() []*ForgetRequest {
+	gone := forgetVector()
+	gone.HostGone, gone.ServerApprovedOnce = true, true
+	return []*ForgetRequest{forgetVector(), neverApproved(), gone}
+}
+
+func FuzzParseForgetRequest(f *testing.F) {
+	for _, r := range forgetSeeds() {
+		r.Evidence = []Evidence{{Type: EvidenceAdminSSHSIG, Blob: []byte("sig")}}
+		data, err := r.Marshal()
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(data)
+		f.Add(data[:len(data)-1])
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		r, err := ParseForgetRequest(data)
+		if err != nil {
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseForgetRequest error = %v, want ErrMalformed", err)
+			}
+			return
+		}
+		again, err := r.Marshal()
+		if err != nil || !bytes.Equal(again, data) {
+			t.Fatalf("Marshal does not reproduce the input (%v):\n in  %x\n out %x", err, data, again)
+		}
+	})
+}
+
+func FuzzParseForgetSigningBytes(f *testing.F) {
+	for _, r := range forgetSeeds() {
+		sb := r.SigningBytes()
+		f.Add(sb)
+		f.Add(sb[:len(sb)-1])
+	}
+	f.Add([]byte(ForgetRequestDomain))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		r, err := ParseForgetSigningBytes(b)
+		if err != nil {
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseForgetSigningBytes error = %v, want ErrMalformed", err)
+			}
+			return
+		}
+		if again := r.SigningBytes(); len(r.Evidence) != 0 || r.ServerApprovedOnce || !bytes.Equal(again, b) {
+			t.Fatalf("SigningBytes does not reproduce the input:\n in  %x\n out %x", b, again)
+		}
+	})
+}
+
+func FuzzParseForgetResponse(f *testing.F) {
+	b, err := (&ForgetResponse{Leaf: 42}).Marshal()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(b)
+	f.Add(b[:7])
+	f.Fuzz(func(t *testing.T, data []byte) {
+		r, err := ParseForgetResponse(data)
+		if err != nil {
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("ParseForgetResponse error = %v, want ErrMalformed", err)
+			}
+			return
+		}
+		again, err := r.Marshal()
+		if err != nil || !bytes.Equal(again, data) {
+			t.Fatalf("Marshal does not reproduce the input (%v):\n in  %x\n out %x", err, data, again)
+		}
+	})
+}
