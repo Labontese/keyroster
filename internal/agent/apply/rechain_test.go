@@ -309,6 +309,51 @@ func TestKRLAlone(t *testing.T) {
 			t.Fatalf("the rollback: revokes 6 %t, principals %v", h.krlRevokes(h.l.Current(), 6), h.principals("deploy"))
 		}
 	})
+	t.Run("failed_runs_do_not_grow_gen", func(t *testing.T) {
+		t.Parallel()
+		// F07 (03-08d): every rollback ends with commit's retention cleanup.
+		// Each failed run leaves its target generation; without the cleanup
+		// gen/ grows by one per run.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.setStall(true)
+		var counts []int
+		for i := range keepGenerations + 3 {
+			h.publishDir(h.spec("role:ops", fmt.Sprintf("role:q%d", i)))
+			if _, err := h.apply(); !errors.Is(err, ErrSelfTest) {
+				t.Fatalf("run %d: %v, want self_test_failed", i, err)
+			}
+			counts = append(counts, h.genCount())
+		}
+		n := len(counts)
+		if counts[n-1] > keepGenerations+2 || counts[n-1] > counts[n-4] {
+			t.Fatalf("generations after each failed run %v: want at most %d, and no growth over the last three runs", counts, keepGenerations+2)
+		}
+	})
+	t.Run("unvalidated_intermediate_discarded", func(t *testing.T) {
+		t.Parallel()
+		// F07 (03-08d): Transition discards an intermediate it installed but
+		// could not validate (here ssh-keygen -Q fails from its second call,
+		// the intermediate's, after the target's passed).
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		gens := h.genCount()
+		queries := 0
+		h.run.onQuery = func() {
+			if queries++; queries >= 2 {
+				h.run.queryCode = 255
+			}
+		}
+		h.publishDir(h.spec("role:q"))
+		h.publishKRL(6)
+		if _, err := h.apply(); !errors.Is(err, ErrKRLRejected) || queries < 2 {
+			t.Fatalf("an intermediate ssh-keygen refuses: %v after %d queries, want krl_rejected_by_ssh_keygen", err, queries)
+		}
+		if h.genCount() != gens+1 {
+			t.Fatalf("%d generations, want %d: the unvalidated intermediate stayed", h.genCount(), gens+1)
+		}
+	})
 	t.Run("first_install_refusal_stands", func(t *testing.T) {
 		t.Parallel()
 		// With nothing accepted there is no bundle to verify a KRL against.

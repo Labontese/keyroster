@@ -1025,7 +1025,9 @@ func isCrash(err error) bool {
 // intermediate (last-good's CA keys and principals, the newest KRL; owner
 // decision 2026-10-26, PR #67), the previous drop-in restored and sshd
 // reloaded when the drop-in had changed, the self-test run again, the
-// marker cleared. It returns cause.
+// marker cleared, and then the retention cleanup a commit runs, so that
+// failed runs never grow gen/ beyond keepGenerations (F07 (03-08d)). It
+// returns cause.
 func (e *engine) rollback(ctx context.Context, cause error, lg link) error {
 	if isCrash(cause) {
 		return cause
@@ -1035,6 +1037,7 @@ func (e *engine) rollback(ctx context.Context, cause error, lg link) error {
 	if err := e.backToLastGood(ctx, lg); err != nil {
 		return errors.Join(cause, err)
 	}
+	e.cleanup()
 	return cause
 }
 

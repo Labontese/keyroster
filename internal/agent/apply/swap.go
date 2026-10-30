@@ -639,10 +639,10 @@ func (e *engine) loadMarker() (*marker, error) {
 // 2026-10-24). It is the only way between two installed generations,
 // rollback and crash recovery included: when Intermediate collapses, one
 // swap to to after the marker {from, to, 0, final}; otherwise the
-// intermediate M is written and checked, the marker {from, to, M,
-// intermediate} written, the narrowing swap to M made at once, the marker
-// rewritten with step final, and the widening swap to to made by
-// swapCurrent's timing rule. Each marker write is followed by a status
+// intermediate M is written and checked (and discarded when the check
+// fails), the marker {from, to, M, intermediate} written, the narrowing
+// swap to M made at once, the marker rewritten with step final, and the
+// widening swap to to made by swapCurrent's timing rule. Each marker write is followed by a status
 // that shows the swap pending (publishPending, PR #72 review C17).
 func (e *engine) Transition(ctx context.Context, from, to *Generation, mode swapMode) (uint64, error) {
 	m, collapsed := Intermediate(from, to)
@@ -658,6 +658,7 @@ func (e *engine) Transition(ctx context.Context, from, to *Generation, mode swap
 		return 0, err
 	}
 	if err := e.validate(ctx, m, e.l.Gen(m.N), nil); err != nil {
+		e.discard(m.N) // F07 (03-08d): an intermediate that never became current
 		return 0, err
 	}
 	if err := e.writeMarker(from.N, to.N, m.N, "intermediate"); err != nil {
