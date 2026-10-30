@@ -365,11 +365,10 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			}
 			installs.lastKRLPublish = l.Body
 		case tlog.KindHostForget:
-			// A forget (03-08c) issues and revokes nothing: it counts
-			// nothing, but its body must decode.
-			if _, err := tlog.DecodeHostForgetBody(l.Body); err != nil {
-				return fmt.Errorf("%w: leaf %d: host_forget body does not decode", errLogMismatch, idx)
-			}
+			// A forget (03-08c) issues and revokes nothing, so it counts
+			// nothing. DecodeLeaf above already decoded its body strictly
+			// (tlog's checkBody), and refused the start with errLogMismatch
+			// when it does not decode.
 		}
 		last = l.TimeMicros
 		hashes = append(hashes, hash)

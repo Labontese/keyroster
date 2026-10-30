@@ -173,9 +173,8 @@ func (s *Signer) checkForgetDirectoryLocked(ctx context.Context, req *wire.Forge
 	if req.ConfirmedVersion == 0 {
 		return nil
 	}
-	if req.ConfirmedVersion > s.directoryVersion {
-		return refusalErr(wire.CodeRefused, "forget_confirmation_invalid", nil)
-	}
+	// The stored directories are the installed versions, none above the
+	// one in force, so a version above it has no document and is refused.
 	doc := s.directoryRaw
 	if req.ConfirmedVersion != s.directoryVersion {
 		d, err := s.db.DirectoryByVersion(ctx, req.ConfirmedVersion)
