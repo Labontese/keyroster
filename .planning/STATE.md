@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: Completed 03-08b-PLAN.md (PR open, awaiting the merge gate)
-last_updated: "2026-10-29T10:45:58.985Z"
+stopped_at: "Completed 03-08c-PLAN.md (PR #75 open, awaiting the merge gate)"
+last_updated: "2026-10-30T00:41:26.174Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 046646f5006159af95394a69fb5b562b1ad6814b
+state_head: 0edc835f4fb16b0a9c13fd90205bc3a072e4dd59
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 56
-  completed_plans: 47
+  completed_plans: 48
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 13 of 21
+Plan: 14 of 21
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -102,6 +102,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P07 | 110min | 3 tasks | 67 files |
 | Phase 03 P08 | 330min | 3 tasks | 47 files |
 | Phase 03 P08b | 58min | 3 tasks | 19 files |
+| Phase 03 P08c | 168min | 4 tasks | 44 files |
 
 ## Accumulated Context
 
@@ -278,6 +279,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08 D-2: silent is judged from last_seen_us; the server stores a status only on a higher seq; the fetcher treats stale_heartbeat as quiet
 - [Phase 03]: 03-08b: host forget also reads keyroster host status, because host pending never lists an agent the directory approves now; such an agent only makes a name ambiguous (forget_name_ambiguous) and is refused as a target
 - [Phase 03]: 03-08b: the removal confirmation's SHA-256 is trust.SHA256Hex of the directory document without signatures, stored raw (32 bytes)
+- [Phase 03]: 03-08c: every forget, --host-gone included, is a keyroster/host-forget-request/v1 request the signer decides under owner decision Q3 and logs as host_forget (leaf kind 16) before the server deletes
+- [Phase 03]: 03-08c carried item 1: a pending swap keeps a recorded confirmation and refuses forget (host_swap_pending) in the CLI, before the signer and inside DeleteAgentIf; --host-gone overrides it
+- [Phase 03]: 03-08c carried item 2: the forget request signs the agent's enrollment time, checked by the relay and DeleteAgentIf
 
 ### Pending Todos
 
@@ -316,6 +320,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T10:45:58.563Z
-Stopped at: Completed 03-08b-PLAN.md (PR open, awaiting the merge gate)
+Last session: 2026-10-30T00:41:25.578Z
+Stopped at: Completed 03-08c-PLAN.md (PR #75 open, awaiting the merge gate)
 Resume file: None

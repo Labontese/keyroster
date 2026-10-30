@@ -20,7 +20,7 @@ Two hardening ideas from PR #71 review fix round 1, kept out of code there.
 
 ## Status
 
-- **Forget half: planned in 03-08b and 03-08c** (owner decision D-1, 2026-10-28; split by owner decision Q1, 2026-10-29: 03-08b-PLAN.md the server half, 03-08c-PLAN.md the signer quorum and leaf kind 16; 03-08c resolves it). 03-08 made forget wait for the host's heartbeat (`host_removal_not_applied`) with an explicit, logged `--host-gone`; 03-08b addresses forget by agent identity and keeps a confirmed removal confirmed; 03-08c adds leaf kind 16, a signer-checked admin quorum for forget, and an audit record for forget and for `--host-gone`.
+- **Forget half: resolved in 03-08b and 03-08c (PR from branch p03/08c-forget-signer; the SUMMARY is pushed before the PR opens).** 03-08 made forget wait for the host's heartbeat (`host_removal_not_applied`) with an explicit, logged `--host-gone`; 03-08b addresses forget by agent identity and keeps a confirmed removal confirmed; 03-08c routes every forget, `--host-gone` included, through keyroster-signer under a signer-checked admin quorum (one admin for an agent never approved, owner decision Q3) and records it as a `host_forget` entry (leaf kind 16) that `keyroster audit verify` re-checks.
 - Reset half (item 2): open.
 
 ## Solution
