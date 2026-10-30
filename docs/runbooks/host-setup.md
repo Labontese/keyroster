@@ -939,7 +939,27 @@ refused bundle's ops key signed waits with that bundle, and before the
 first install the refusal stands and nothing is installed. The host keeps
 the directory and principals it had until the server publishes a
 directory it can apply: split the oversize host group or roles and
-publish again. Failed applies no longer pile up generations under `gen/`:
+publish again.
+
+That does not help a host that is far behind. An apply reads at most 64
+versions of each kind past the ones the host accepted, so when the
+refused version is the newest of those, a fixed version published after
+it never enters a capture. Such a host's report keeps `"spool_more": true`
+under the same `generation_too_large` or `ca_line_rejected` refusal, apply
+after apply (the report is one JSON line per apply in the applier unit's
+journal, or the output of `sudo keyroster-agent apply --once`). Publishing
+again does not move it:
+
+- For a directory, run `keyroster-agent reset-directory` on the host as
+  root. The next poll then takes the server's current directory the way a
+  first install does (signer-install.md, "Re-bootstrap each such host").
+- For a bundle, escalate: `reset-directory` re-bootstraps the directory
+  only.
+
+Revocations keep applying meanwhile. UNVERIFIED on a real host: no test
+or drill runs this case.
+
+Failed applies no longer pile up generations under `gen/`:
 every rollback, and every undone first install, ends with the retention
 cleanup a commit runs. Run in CI (03-08d):
 `TestKRLAlone` (`oversize_principals_file_krl_applied`,
