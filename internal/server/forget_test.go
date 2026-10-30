@@ -594,6 +594,77 @@ func TestRemovalConfirmation(t *testing.T) {
 			t.Fatal("the row was deleted during a swap")
 		}
 	})
+	// PR #75 review finding 0: the heartbeat route stores a heartbeat in
+	// its own transaction and clears the confirmation only after it
+	// (reconcileRemoval). A heartbeat that shows principals again, stored
+	// in between, refuses the forget on its own: before the signer is
+	// asked, and in the delete's transaction after its answer. Here the
+	// database stores it directly, so no reconcileRemoval runs.
+	resumed := map[string]func(t *testing.T, e *agentEnv, r uint64) heartbeat.Status{
+		"principals_file": func(t *testing.T, e *agentEnv, r uint64) heartbeat.Status { return e.hbAt(t, 3, r) },
+		"rendered_entry": func(t *testing.T, e *agentEnv, r uint64) heartbeat.Status {
+			s := e.hbRemovedAt(t, 3, r)
+			s.LastApply.HostStatus = ""
+			return s
+		},
+	}
+	store := func(t *testing.T, e *agentEnv, id agentID, s heartbeat.Status) {
+		t.Helper()
+		a := e.agentRow(t, id.spki)
+		if _, err := e.s.db.StoreHeartbeat(t.Context(), a.Key(), int64(s.Seq), hbBody(t, heartbeat.Heartbeat{Status: s}), 0, e.clock.Now().UnixMicro()); err != nil { //nolint:gosec // G115: test seq
+			t.Fatal(err)
+		}
+	}
+	for name, status := range resumed {
+		t.Run("resumed_before_the_signer_"+name, func(t *testing.T) {
+			e, id, r := confirmedAgent(t)
+			store(t, e, id, status(t, e, r))
+			wantConfirmed(t, e, id, r, r)
+			asked := e.fake.count("ForgetAgent")
+			if rec := e.forgetFacts(t, forgetReqOf(e.agentRow(t, id.spki), false)); rec.Code != http.StatusConflict ||
+				apiError(rec) != serverclient.AdminErrRemovalNotApplied {
+				t.Fatalf("forget of a host that resumed service: %d %s, want 409 %s", rec.Code, rec.Body.String(), serverclient.AdminErrRemovalNotApplied)
+			}
+			if e.fake.count("ForgetAgent") != asked || e.agentRow(t, id.spki) == nil {
+				t.Fatal("a forget of a host that resumed service reached the signer or deleted the row")
+			}
+		})
+		t.Run("resumed_after_the_signer_"+name, func(t *testing.T) {
+			e, id, r := confirmedAgent(t)
+			e.s.beforeForgetDelete = func() { store(t, e, id, status(t, e, r)) }
+			rec := e.forget(t, "web1")
+			e.s.beforeForgetDelete = nil
+			var ans serverclient.APIError
+			_ = json.Unmarshal(rec.Body.Bytes(), &ans)
+			if rec.Code != http.StatusConflict || ans.Error != serverclient.AdminErrForgetLoggedNotDeleted || ans.Leaf == 0 {
+				t.Fatalf("forget whose host resumed service after the signer's answer: %d %s, want 409 %s with the leaf", rec.Code, rec.Body.String(),
+					serverclient.AdminErrForgetLoggedNotDeleted)
+			}
+			if e.agentRow(t, id.spki) == nil {
+				t.Fatal("the row of a host that resumed service was deleted without --host-gone")
+			}
+		})
+	}
+	t.Run("no_or_unreadable_heartbeat_refused", func(t *testing.T) {
+		// A confirmation is recorded only from a stored heartbeat, so a
+		// confirmed row without one cannot tell, nor can a body that does
+		// not parse: both refuse.
+		if err := removalStillApplied(nil); !errors.Is(err, errHostResumed) {
+			t.Errorf("no stored heartbeat: %v, want %v", err, errHostResumed)
+		}
+		if err := removalStillApplied([]byte(`{`)); !errors.Is(err, errSwapPending) {
+			t.Errorf("a heartbeat that does not parse: %v, want %v", err, errSwapPending)
+		}
+	})
+	t.Run("resumed_host_gone_overrides", func(t *testing.T) {
+		e, id, r := confirmedAgent(t)
+		store(t, e, id, e.hbAt(t, 3, r))
+		req := forgetReqOf(e.agentRow(t, id.spki), false)
+		req.HostGone = true
+		if rec := e.forgetFacts(t, req); rec.Code != http.StatusOK {
+			t.Fatalf("forget --host-gone of a host that resumed service: %d %s", rec.Code, rec.Body.String())
+		}
+	})
 	t.Run("confirmed_then_readded_kept", func(t *testing.T) {
 		e, id, r := confirmedAgent(t)
 		e.installDir(t, rekeyedWeb1(t))

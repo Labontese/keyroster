@@ -238,7 +238,10 @@ func sameAgent(a *serverdb.Agent, req *wire.ForgetRequest) bool {
 //     refuses host_removal_not_applied before it signs. A forget that
 //     rests on the confirmation is refused while the host's stored
 //     heartbeat shows a swap it has not finished (409 host_swap_pending,
-//     03-08c); host_gone overrides it;
+//     03-08c), or shows principals again before reconcileRemoval cleared
+//     the confirmation, or none is stored (409 host_removal_not_applied,
+//     PR #75 review finding 0; removalStillApplied); host_gone overrides
+//     both;
 //  6. the server states its own view of the row in the relay frame,
 //     approved once or not (ServerApprovedOnce, from approved_at_us,
 //     whatever the request says), and asks the signer within
@@ -247,9 +250,10 @@ func sameAgent(a *serverdb.Agent, req *wire.ForgetRequest) bool {
 //     answer 503, with nothing deleted;
 //  7. serverdb.DeleteAgentIf deletes the row and its heartbeat in one
 //     transaction, by one statement that re-checks the identity and every
-//     fact, after it checked the stored heartbeat for a pending swap again
-//     (step 5's rule). When the row changed after the signer's answer (a
-//     fact, its identity rotated, or a swap stored), nothing is deleted
+//     fact, after it checked the stored heartbeat again by step 5's rule
+//     (removalStillApplied). When the row changed after the signer's
+//     answer (a fact, its identity rotated, or a heartbeat stored that
+//     shows a swap or principals), nothing is deleted
 //     and the answer is 409
 //     forget_logged_not_deleted with the entry's leaf, logged at error
 //     level: the log then records an authorization the server did not
@@ -306,18 +310,23 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A forget that rests on the confirmation waits for a pending swap
-	// (03-08c); host_gone overrides it.
+	// (03-08c) and needs the host to still report its removal applied (PR
+	// #75 review finding 0); host_gone overrides both.
 	var hbCheck func([]byte) error
 	if facts.ConfirmedVersion != 0 && !req.HostGone {
-		hbCheck = swapPending
+		hbCheck = removalStillApplied
 		hbs, err := s.db.Heartbeats(ctx)
 		if err != nil {
 			s.log.Error("heartbeats", "err", err)
 			s.writeJSON(w, dv.status, http.StatusInternalServerError, serverclient.APIError{Error: "internal error"})
 			return
 		}
-		if hb, ok := hbs[a.ID]; ok && swapPending(hb.Body) != nil {
-			refuse(serverclient.AdminErrHostSwapPending)
+		var body []byte
+		if hb, ok := hbs[a.ID]; ok {
+			body = hb.Body
+		}
+		if err := removalStillApplied(body); err != nil {
+			refuse(err.Error())
 			return
 		}
 	}
@@ -351,8 +360,8 @@ func (s *Server) handleForgetHost(w http.ResponseWriter, r *http.Request) {
 		s.beforeForgetDelete()
 	}
 	switch err := s.db.DeleteAgentIf(ctx, a.Key(), facts, hbCheck); {
-	case errors.Is(err, serverdb.ErrNotFound), errors.Is(err, errSwapPending):
-		s.log.Error("agent forget logged but not carried out: the agent's row changed after the signer's answer, and it keeps being served",
+	case errors.Is(err, serverdb.ErrNotFound), errors.Is(err, errSwapPending), errors.Is(err, errHostResumed):
+		s.log.Error("agent forget logged but not carried out: the agent's row or its host's report changed after the signer's answer, and it keeps being served",
 			"expected_name", a.ExpectedName, "agent", fp, "admin", adminName(ctx), "leaf", resp.Leaf)
 		s.writeJSON(w, dv.status, http.StatusConflict, serverclient.APIError{Error: serverclient.AdminErrForgetLoggedNotDeleted, Leaf: resp.Leaf})
 		return
@@ -394,7 +403,7 @@ const (
 // failed apply changed no file. A pending swap is not counted here (fix
 // round 2's clear is replaced in 03-08c): it keeps a recorded
 // confirmation, never makes one (principalsEmptied), and refuses forget
-// while it is stored (swapPending).
+// while it is stored (removalStillApplied).
 func principalsShown(st *heartbeat.Status) bool {
 	if st.FilesTruncated || slices.ContainsFunc(st.Files, func(f heartbeat.File) bool { return strings.HasPrefix(f.Path, "principals/") }) {
 		return true
@@ -420,9 +429,38 @@ func principalsEmptied(st *heartbeat.Status) bool {
 // shows a swap it has not finished (03-08c).
 var errSwapPending = errors.New(serverclient.AdminErrHostSwapPending)
 
-// swapPending is the check DeleteAgentIf runs on the stored heartbeat body
-// of a confirmed agent's forget: errSwapPending while it shows a pending
-// swap, or when it does not parse and so cannot tell; nil without one.
+// errHostResumed is a forget that rests on the confirmation refused
+// because the host's stored heartbeat no longer reports its removal
+// applied (PR #75 review finding 0): the forget needs --host-gone.
+var errHostResumed = errors.New(serverclient.AdminErrRemovalNotApplied)
+
+// removalStillApplied is the check that a forget resting on the recorded
+// confirmation runs on the agent's stored heartbeat body, before the
+// signer is asked and again in DeleteAgentIf's transaction (03-08c; PR
+// #75 review finding 0): nil only while the body parses, shows no pending
+// swap and shows no principals by principalsShown, the rule by which
+// reconcileRemoval clears a confirmation. A heartbeat stored before
+// reconcileRemoval ran on it is then judged by the same rule.
+// errSwapPending for a pending swap or a body that does not parse;
+// errHostResumed when principals are shown, or no heartbeat is stored (a
+// confirmation is recorded only from a stored one).
+func removalStillApplied(body []byte) error {
+	if body == nil {
+		return errHostResumed
+	}
+	h, err := heartbeat.ParseHeartbeat(body)
+	switch {
+	case err != nil || h.Status.Pending != nil:
+		return errSwapPending
+	case principalsShown(&h.Status):
+		return errHostResumed
+	}
+	return nil
+}
+
+// swapPending reports, as errSwapPending, a stored heartbeat body that
+// shows a pending swap or does not parse and so cannot tell; nil without
+// one (host pending's swap_pending).
 func swapPending(body []byte) error {
 	if body == nil {
 		return nil

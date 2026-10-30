@@ -348,7 +348,7 @@ func nullBlob(b []byte) any {
 // stored) is read in the same transaction, before anything is deleted, and
 // a non-nil error from hbCheck refuses the delete with that error: the
 // server refuses a forget while the host reports a swap it has not
-// finished (03-08c). The transaction holds the database's one connection
+// finished (03-08c), or principals again (PR #75 review finding 0). The transaction holds the database's one connection
 // from its start (_txlock=immediate), so no heartbeat is stored between
 // the check and the delete.
 func (d *DB) DeleteAgentIf(ctx context.Context, k AgentKey, facts ForgetFacts, hbCheck func(body []byte) error) error {
