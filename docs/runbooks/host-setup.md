@@ -1331,9 +1331,15 @@ enrolled host can (D-03); that is the leak this order accepts.
      was read (its approval, removal version, confirmation or enrollment
      time, or its identity rotated), or when its host's stored heartbeat
      shows principals again (the host resumed service) before the server
-     cleared the confirmation, or none is stored (PR #75 review;
-     `TestRemovalConfirmation`, `resumed_*`): run the command again, which
-     reads `host pending` anew;
+     cleared the confirmation (PR #75 review; `TestRemovalConfirmation`,
+     `resumed_*`): run the command again, which reads `host pending`
+     anew. The server answers the same when no heartbeat is stored for an
+     agent with a recorded confirmation. keyroster-server records a
+     confirmation only from a stored heartbeat, so only an edit of its
+     database outside it leads there, and running the command again gets
+     the same answer until the host sends a heartbeat: the CLI drops
+     `--host-gone` for an agent whose removal is confirmed. UNVERIFIED: no
+     test runs that case;
    - `host_in_directory` while any directory entry, active or disabled,
      still holds one of the agent's host keys: forgetting an agent whose
      host is still in the directory would stop the revocations that host
