@@ -1383,10 +1383,11 @@ enrolled host can (D-03); that is the leak this order accepts.
    e2e policy has an admin quorum of 1, so the quorum-2 path runs in the
    unit tests only, and end to end it is UNVERIFIED (owner decision D-4
    of PR #75's review: no quorum-2 e2e lane in CI). 03-16's forget drill
-   records the quorum its forget used, and runs it at quorum 2 when the
-   homelab policy has at least two admins; until a drill has, quorum 2
-   stays UNVERIFIED end to end. The other homelab steps are UNVERIFIED
-   until 03-16, whose forget drill proves them (owner decision Q4).
+   records the policy's `admin_quorum` and the number of admins who signed
+   its forget; quorum 2 stays UNVERIFIED end to end until a drill has run
+   under an `admin_quorum` of at least 2 with at least that many signers.
+   The other homelab steps are UNVERIFIED until 03-16, whose forget drill
+   proves them (owner decision Q4).
 
    **Checking that a forget was authorized.** Export the signer's log and
    run `keyroster audit verify` (signer-install.md): every forget is a
