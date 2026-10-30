@@ -75,11 +75,28 @@ func checkLimits(g *Generation) error {
 }
 
 // checkCandidate refuses the generation g that current is to move to
-// before anything is written (F07 (03-08d)): g must be within the caps
-// readGeneration reads it back with (checkLimits). A refusal here is a
-// content refusal, after which the KRL-alone pass runs (krlAlone).
-func checkCandidate(g, _ *Generation, _ link) error {
-	return checkLimits(g)
+// before anything is written (F07 (03-08d)): g, and when current (cur,
+// named by curLink) is the agent's the intermediate Transition would
+// install between them (Intermediate(cur, g), when it does not collapse),
+// must be within the caps readGeneration reads them back with
+// (checkLimits). The intermediate holds the principals files of both
+// sides, so two generations within the caps can have one above them. With
+// both checked here, Transition can fail only for I/O, never for content.
+// A refusal here is a content refusal, after which the KRL-alone pass runs
+// (krlAlone).
+func checkCandidate(g, cur *Generation, curLink link) error {
+	if err := checkLimits(g); err != nil {
+		return err
+	}
+	if cur == nil || curLink.kind != linkAgent {
+		return nil
+	}
+	if m, collapsed := Intermediate(cur, g); !collapsed {
+		if err := checkLimits(m); err != nil {
+			return fmt.Errorf("%w (the intermediate generation from generation %d)", err, curLink.n)
+		}
+	}
+	return nil
 }
 
 // genRecord is <state>/generations/<N>.json: the SHA-256 of each file of

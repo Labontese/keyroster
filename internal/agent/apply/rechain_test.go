@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,70 @@ func TestKRLAlone(t *testing.T) {
 		}
 		mustKRLAlone(t, h, r, 6, 1, "generation_too_large")
 	})
+	t.Run("intermediate_union_too_large_krl_applied", func(t *testing.T) {
+		t.Parallel()
+		// F07 (03-08d): versions 2 and 3 each hold maxAccounts principals
+		// files, but version 3 renames one account, and the intermediate
+		// Transition would install between them holds the accounts of both
+		// sides. It is refused before anything is written.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		s := h.spec("role:ops")
+		s.accounts = append(s.accounts, accountNames("u", maxAccounts-1)...)
+		h.publishDir(s)
+		h.publishKRL(5)
+		h.mustApply()
+		renamed := h.spec("role:ops")
+		renamed.accounts = append(renamed.accounts, accountNames("u", maxAccounts-2)...)
+		renamed.accounts = append(renamed.accounts, "w0001")
+		h.publishDir(renamed)
+		h.publishKRL(5, 6)
+		gens := h.genCount()
+		r, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("an intermediate above the cap: %v, want generation_too_large reported", err)
+		}
+		mustKRLAlone(t, h, r, 6, 2, "generation_too_large")
+		if h.genCount() != gens+1 {
+			t.Fatalf("%d generations, want %d: only the KRL-alone generation is new", h.genCount(), gens+1)
+		}
+		for _, n := range genNumbers(t, h) {
+			if h.exists(filepath.Join(h.l.Gen(n), PrincipalsDir, "w0001")) {
+				t.Fatalf("generation %d holds version 3's renamed account", n)
+			}
+		}
+	})
+	t.Run("intermediate_checked_with_the_kept_krl", func(t *testing.T) {
+		t.Parallel()
+		// checkCandidate runs after keepKRL, so the intermediate it checks
+		// is the one Transition computes. Here current holds a KRL that a
+		// rollback kept and accepted/ does not, and version 3 renames a
+		// header-only account while widening deploy: with the kept KRL the
+		// move collapses into one widening swap; with the verified (older)
+		// KRL its intermediate would hold the accounts of both sides.
+		h := newTestHost(t, newFixture(t))
+		h.installed("role:ops")
+		s := h.spec("role:ops")
+		s.bare = accountNames("u", maxAccounts-1)
+		h.publishDir(s)
+		h.mustApply()
+		h.cfg.SelfTestTimeout = 300 * time.Millisecond
+		h.sshd.setStall(true)
+		h.publishKRL(7)
+		if _, err := h.apply(); !errors.Is(err, ErrSelfTest) || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("the failed apply of KRL 7: %v", err)
+		}
+		h.sshd.setStall(false)
+		h.resetSpool()
+		h.state.KRLs = map[uint64]spool.KRLFiles{}
+		wider := h.spec("role:ops", "role:q")
+		wider.bare = append(accountNames("u", maxAccounts-2), "w0001")
+		h.publishDir(wider)
+		r, err := h.apply()
+		if err != nil || r.DirectoryVersion != 3 || !slices.Equal(h.principals("deploy"), []string{"role:ops", "role:q"}) || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("a widening that collapses with the kept KRL: %v, %+v, principals %v", err, r, h.principals("deploy"))
+		}
+	})
 	t.Run("ops_key_changed_krl_waits", func(t *testing.T) {
 		t.Parallel()
 		// F07 (03-08d): the successor bundle replaces the ops key, and the
@@ -205,6 +270,22 @@ func accountNames(prefix string, n int) []string {
 	out := make([]string, 0, n)
 	for i := range n {
 		out = append(out, fmt.Sprintf("%s%04d", prefix, i))
+	}
+	return out
+}
+
+// genNumbers is the numbers of the generation directories in gen/.
+func genNumbers(t *testing.T, h *testHost) []uint64 {
+	t.Helper()
+	entries, err := os.ReadDir(h.l.GenDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []uint64
+	for _, e := range entries {
+		if n, err := strconv.ParseUint(e.Name(), 10, 64); err == nil {
+			out = append(out, n)
+		}
 	}
 	return out
 }
