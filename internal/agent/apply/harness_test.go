@@ -141,6 +141,9 @@ type dirSpec struct {
 	signer ssh.Signer
 	// noHost leaves host web1 out of the directory.
 	noHost bool
+	// bare are more accounts of host group lab, mapped to no role: their
+	// principals files hold the header alone.
+	bare []string
 }
 
 // directory signs one version after prev (nil: version 1).
@@ -170,6 +173,9 @@ func (f *fixture) directory(prev []byte, s dirSpec) spool.Doc {
 	var accounts []directory.AccountMap
 	for _, a := range s.accounts {
 		accounts = append(accounts, directory.AccountMap{Account: a, Roles: names})
+	}
+	for _, a := range s.bare {
+		accounts = append(accounts, directory.AccountMap{Account: a, Roles: []string{}})
 	}
 	d := &directory.Directory{Version: 1, Prev: trust.GenesisPrev, Users: []directory.User{}, Groups: []directory.Group{},
 		Roles:          roles,

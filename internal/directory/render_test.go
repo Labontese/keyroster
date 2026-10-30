@@ -3,6 +3,7 @@ package directory
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -199,5 +200,70 @@ func TestRenderMatchesAuthorize(t *testing.T) {
 	ps, err := AccountPrincipals(d, "web", "root")
 	if err != nil || !slices.Equal(ps, g.Principals) {
 		t.Fatalf("rendered %q, Authorize grants %q", ps, g.Principals)
+	}
+}
+
+// referenceRenderPrincipalsFile is RenderPrincipalsFile as it was before
+// PrincipalsRenderer (PR #76 review, owner decision D-1): AccountPrincipals,
+// then the canonical encoding and its SHA-256 for every file.
+func referenceRenderPrincipalsFile(d *Directory, hostGroup, account string) ([]byte, error) {
+	principals, err := AccountPrincipals(d, hostGroup, account)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := d.Canonical()
+	if err != nil {
+		return nil, err
+	}
+	var b strings.Builder
+	b.WriteString("# keyroster: generated AuthorizedPrincipalsFile; do not edit\n")
+	fmt.Fprintf(&b, "# host group %s, account %s, directory version %d sha256 %s\n", hostGroup, account, d.Version, trust.SHA256Hex(canonical))
+	for _, p := range principals {
+		b.WriteString(p + "\n")
+	}
+	return []byte(b.String()), nil
+}
+
+// TestPrincipalsRendererMatchesReference (PR #76 review, owner decision
+// D-1): one PrincipalsRenderer, used for every file of a directory and
+// across errors, renders byte for byte what the per-file renderer did,
+// with the same errors.
+func TestPrincipalsRendererMatchesReference(t *testing.T) {
+	dirs := map[string]*Directory{
+		"one_group": renderDir(t, nil),
+		"two_groups": renderDir(t, func(d *Directory) {
+			d.Version = 9
+			d.HostGroups = append(d.HostGroups, HostGroup{Name: "db", Accounts: []AccountMap{
+				{Account: "postgres", Roles: []string{"b"}},
+				{Account: "root", Roles: []string{"a"}},
+			}})
+		}),
+		"nil": nil,
+	}
+	groups := []string{"web", "db", "nope", "Bad Group"}
+	accounts := []string{"empty", "ops", "root", "postgres", "nobody", "Bad", "a\nb"}
+	for name, d := range dirs {
+		t.Run(name, func(t *testing.T) {
+			r := NewPrincipalsRenderer(d)
+			for range 2 { // the second round reads the cached sum
+				for _, g := range groups {
+					for _, a := range accounts {
+						want, wantErr := referenceRenderPrincipalsFile(d, g, a)
+						got, err := r.File(g, a)
+						if !bytes.Equal(got, want) || fmt.Sprint(err) != fmt.Sprint(wantErr) {
+							t.Fatalf("File(%q, %q) = %q, %v; the reference renders %q, %v", g, a, got, err, want, wantErr)
+						}
+						for _, sentinel := range []error{ErrNoDirectory, ErrUnknownHostGroup, ErrInvalid} {
+							if errors.Is(err, sentinel) != errors.Is(wantErr, sentinel) {
+								t.Fatalf("File(%q, %q): %v, the reference %v (%v)", g, a, err, wantErr, sentinel)
+							}
+						}
+						if wrapped, err := RenderPrincipalsFile(d, g, a); !bytes.Equal(wrapped, want) || fmt.Sprint(err) != fmt.Sprint(wantErr) {
+							t.Fatalf("RenderPrincipalsFile(%q, %q) = %q, %v; want %q, %v", g, a, wrapped, err, want, wantErr)
+						}
+					}
+				}
+			}
+		})
 	}
 }

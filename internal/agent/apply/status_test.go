@@ -295,6 +295,32 @@ func TestStatus(t *testing.T) {
 			t.Fatal("a check-only status dropped stuck")
 		}
 	})
+	t.Run("cap_refusal_is_refused", func(t *testing.T) {
+		// PR #76 review F4: a directory above the generation caps is refused
+		// before anything is written, a refusal by design like
+		// ca_line_rejected. last_apply reports refused, after the KRL-alone
+		// commit of a newer KRL as well as without one.
+		h := newTestHost(t, newFixture(t))
+		withOutbox(t, h)
+		h.installed("role:ops")
+		s := h.spec("role:ops")
+		s.bulkRoles = 17
+		h.publishDir(s)
+		if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("an oversize directory: %v, want generation_too_large", err)
+		}
+		if la := outboxStatus(t, h).LastApply; la == nil || la.Result != heartbeat.ResultRefused || !strings.Contains(la.Error, "generation_too_large") {
+			t.Fatalf("last_apply after the cap refusal: %+v, want refused naming generation_too_large", la)
+		}
+		h.publishKRL(6)
+		if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) || !h.krlRevokes(h.l.Current(), 6) {
+			t.Fatalf("the KRL-alone commit: %v, revokes 6 %t", err, h.krlRevokes(h.l.Current(), 6))
+		}
+		st := outboxStatus(t, h)
+		if la := st.LastApply; la == nil || la.Result != heartbeat.ResultRefused || la.Rollback || !strings.Contains(la.Error, "generation_too_large") || st.KRL.Version != h.f.krlVersion || st.Directory.Version != 1 {
+			t.Fatalf("after the KRL-alone commit: last_apply %+v, KRL %d (want %d), directory %d", la, st.KRL.Version, h.f.krlVersion, st.Directory.Version)
+		}
+	})
 	t.Run("apply_result", func(t *testing.T) {
 		for _, c := range []struct {
 			r    *Report
@@ -305,6 +331,7 @@ func TestStatus(t *testing.T) {
 			{&Report{Rollback: true}, errors.New("self-test failed"), heartbeat.ResultRolledBack},
 			{&Report{}, fmt.Errorf("verify: %w", state.ErrDir), heartbeat.ResultRefused},
 			{&Report{}, ErrPhase2Pending, heartbeat.ResultRefused},
+			{&Report{}, fmt.Errorf("%w: 4097 principals files, above 4096", ErrGenerationTooLarge), heartbeat.ResultRefused},
 			{&Report{}, ErrReload, heartbeat.ResultError},
 		} {
 			if got := applyResult(c.r, c.err); got != c.want {

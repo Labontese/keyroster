@@ -1175,10 +1175,13 @@ structurally (see the warning above).
      this: a host that saw the lost version accepts the same bytes as a
      no-op.
    - **Which hosts saw a lost version.** On each enrolled host, as root,
-     `/var/lib/keyroster-agent/outbox/accepted.json` names the directory
-     version the agent accepted. A host whose `directory` is above the
-     restored signer's version saw a lost one. A host you cannot reach
-     must be assumed to have seen it.
+     `/var/lib/keyroster-agent/outbox/accepted.json` names the bundle and
+     directory versions the agent accepted. A host whose `directory` is
+     above the restored signer's directory version saw a lost directory. A
+     host whose `bundle` is above the restored signer's bundle version saw
+     a lost bundle: escalate for that host, because `reset-directory`
+     re-bootstraps the directory only. A host you cannot reach must be
+     assumed to have seen both.
    - **Re-bootstrap each such host** once the re-made chain is installed,
      as root on the host:
 
@@ -1197,7 +1200,14 @@ structurally (see the warning above).
      that `keyroster directory show` reports on your workstation, and that
      its `errors` are empty; a different version means the server served
      another admin-signed version than the one you installed: escalate.
-     Until the new directory arrives the host keeps the principals it had.
+     Until the new directory arrives the host keeps the principals it had,
+     and newer KRLs keep applying, with the CA keys of the bundle the host
+     accepted (03-08d). That holds on a host that also saw a lost bundle:
+     its KRLs apply alone while you escalate, and `last_apply` names both
+     `bundle_not_verified` and `host_not_in_directory`. Run in CI:
+     `TestResetDirectory/lost_bundle_then_reset_krl_still_applied` and
+     `TestResetDirectory/reset_then_newer_krl_before_directory_arrives`
+     (03-08d); UNVERIFIED on a real host.
    - Run in CI: `TestResetDirectory` and `TestKRLAlone` (the agent's
      apply tests), and `TestInstallLayout` (the command after an install).
      UNVERIFIED: no restore with a re-made version has been run against an

@@ -40,11 +40,14 @@ type Verified struct {
 	BundleHeld bool
 
 	// Refused is set when the capture's bundle or directory step was
-	// refused (owner decision D-R2, PR #71 review F5): the capture then
-	// takes only its KRL, verified against the bundle in force (the
-	// accepted one), and the bundle, policy and directory stay as
-	// accepted. Revocations only narrow what sshd accepts, so they never
-	// wait for a chain that does not verify. The caller reports Refused.
+	// refused (owner decision D-R2, PR #71 review F5), or when the applier
+	// refused the generation rendered from a verified capture for its
+	// content (F07 (03-08d)): the capture then takes only its KRL,
+	// verified against the bundle in force (the accepted one; KRLAlone),
+	// and the bundle, policy and directory stay as accepted. Revocations
+	// only narrow what sshd accepts, so they never wait for a chain that
+	// does not verify, or for a bundle or directory the host cannot apply.
+	// The caller reports Refused.
 	Refused error
 
 	// steps is the bundle chain of this capture: the stored bundle (when
@@ -110,10 +113,10 @@ func (v *Verified) AsStored() *Stored {
 //
 // A refused bundle or directory step does not stop the KRL (owner decision
 // D-R2, PR #71 review F5): with an accepted bundle, the KRL is verified
-// against it and taken alone, everything else stays as accepted, and the
-// refusal is returned in Refused with a nil error. Before any bundle was
-// accepted the refusal stands, and a refused KRL is an error with the
-// earlier refusal joined to it.
+// against it and taken alone (KRLAlone), everything else stays as accepted,
+// and the refusal is returned in Refused with a nil error. Before any
+// bundle was accepted the refusal stands, and a refused KRL is an error
+// with the earlier refusal joined to it.
 //
 // Verify reads only in; the bytes it checks are the bytes it returns in
 // Next.
@@ -130,23 +133,41 @@ func Verify(p *Pins, prev *Stored, in spool.State) (*Verified, error) {
 		refused = v.verifyDirectory(p, prev, in)
 	}
 	if refused != nil {
-		if prev == nil || prev.Bundle == nil {
-			return nil, refused
-		}
-		w, err := storedOnly(prev)
-		if err != nil {
-			return nil, errors.Join(refused, err)
-		}
-		if err := w.verifyKRL(p, prev, in); err != nil {
-			return nil, errors.Join(refused, err)
-		}
-		w.Refused = refused
-		return w, nil
+		return KRLAlone(p, prev, in, refused)
 	}
 	if err := v.verifyKRL(p, prev, in); err != nil {
 		return nil, err
 	}
 	return v, nil
+}
+
+// KRLAlone is owner decision D-R2's KRL-alone state (PR #71 review F5):
+// the capture in takes only its KRL, and refusal, the refused bundle or
+// directory step, or a content refusal of the generation the applier
+// rendered from a verified capture (F07 (03-08d)), is returned in Refused.
+// It uses only prev's bundle, policy and directory, unchanged: prev is the
+// accepted state, or during a widening wait the pending target's state
+// (Verified.AsStored), which Verify accepted in the same run. The KRL is
+// verified again against prev's bundle, the pins and prev's KRL version,
+// never under a bundle a refused Verified carried, so a KRL that only the
+// refused bundle's ops key signed is refused. With no accepted bundle the
+// refusal stands; a refused KRL is an error with the refusal joined to it.
+func KRLAlone(p *Pins, prev *Stored, in spool.State, refusal error) (*Verified, error) {
+	if err := p.Validate(); err != nil {
+		return nil, errors.Join(refusal, err)
+	}
+	if prev == nil || prev.Bundle == nil {
+		return nil, refusal
+	}
+	w, err := storedOnly(prev)
+	if err != nil {
+		return nil, errors.Join(refusal, err)
+	}
+	if err := w.verifyKRL(p, prev, in); err != nil {
+		return nil, errors.Join(refusal, err)
+	}
+	w.Refused = refusal
+	return w, nil
 }
 
 // storedOnly is the Verified of a capture that takes nothing but, later,

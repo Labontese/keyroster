@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08c-PLAN.md (PR #75 open, awaiting the merge gate)"
-last_updated: "2026-10-30T00:41:26.174Z"
+stopped_at: "Completed 03-08d-PLAN.md (PR #76 open, awaiting the merge gate)"
+last_updated: "2026-10-30T14:02:42.147Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 0edc835f4fb16b0a9c13fd90205bc3a072e4dd59
+state_head: f31bbdebcbcd8a88a8be1de5d82345f3017f76c6
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 56
-  completed_plans: 48
+  total_plans: 57
+  completed_plans: 49
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 14 of 21
+Plan: 15 of 22
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -103,6 +103,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08 | 330min | 3 tasks | 47 files |
 | Phase 03 P08b | 58min | 3 tasks | 19 files |
 | Phase 03 P08c | 168min | 4 tasks | 44 files |
+| Phase 03 P08d | 94min | 3 tasks | 20 files |
 
 ## Accumulated Context
 
@@ -282,6 +283,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08c: every forget, --host-gone included, is a keyroster/host-forget-request/v1 request the signer decides under owner decision Q3 and logs as host_forget (leaf kind 16) before the server deletes
 - [Phase 03]: 03-08c carried item 1: a pending swap keeps a recorded confirmation and refuses forget (host_swap_pending) in the CLI, before the signer and inside DeleteAgentIf; --host-gone overrides it
 - [Phase 03]: 03-08c carried item 2: the forget request signs the agent's enrollment time, checked by the relay and DeleteAgentIf
+- [Phase 03]: 03-08d: F08's fallback without a directory reports last-good's recorded host_status, not an empty one
+- [Phase 03]: 03-08d: one KRL-alone pass per run, shared by forward and pollSpool; content refusals are render errors, cap refusals (target and intermediate) and ca_line_rejected
+- [Phase 03]: 03-08d: while no directory is accepted every apply's error joins host_not_in_directory to Verify's refusal
 
 ### Pending Todos
 
@@ -320,6 +324,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-30T00:41:25.578Z
-Stopped at: Completed 03-08c-PLAN.md (PR #75 open, awaiting the merge gate)
+Last session: 2026-10-30T14:02:25.402Z
+Stopped at: Completed 03-08d-PLAN.md (PR #76 open, awaiting the merge gate)
 Resume file: None

@@ -198,6 +198,7 @@ func Adopt(l Layout, v *state.Verified, hostGroup string) (*AdoptPlan, []string)
 		return nil, append(diffs, dir+": "+err.Error())
 	}
 	plan := &AdoptPlan{Remove: []string{l.Phase2DropIn(), ca}}
+	r := directory.NewPrincipalsRenderer(v.Directory)
 	for _, en := range entries {
 		name := en.Name()
 		p := filepath.Join(dir, name)
@@ -205,7 +206,7 @@ func Adopt(l Layout, v *state.Verified, hostGroup string) (*AdoptPlan, []string)
 			diffs = append(diffs, p+" is not a regular file")
 			continue
 		}
-		want, err := directory.RenderPrincipalsFile(v.Directory, hostGroup, name)
+		want, err := r.File(hostGroup, name)
 		if err != nil {
 			diffs = append(diffs, fmt.Sprintf("%s: %v", p, err))
 			continue

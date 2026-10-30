@@ -74,6 +74,31 @@ func checkLimits(g *Generation) error {
 	return nil
 }
 
+// checkCandidate refuses the generation g that current is to move to
+// before anything is written (F07 (03-08d)): g, and when current (cur,
+// named by curLink) is the agent's the intermediate Transition would
+// install between them (Intermediate(cur, g), when it does not collapse),
+// must be within the caps readGeneration reads them back with
+// (checkLimits). The intermediate holds the principals files of both
+// sides, so two generations within the caps can have one above them. With
+// both checked here, Transition can fail only for I/O, never for content.
+// A refusal here is a content refusal, after which the KRL-alone pass runs
+// (krlAlone).
+func checkCandidate(g, cur *Generation, curLink link) error {
+	if err := checkLimits(g); err != nil {
+		return err
+	}
+	if cur == nil || curLink.kind != linkAgent {
+		return nil
+	}
+	if m, collapsed := Intermediate(cur, g); !collapsed {
+		if err := checkLimits(m); err != nil {
+			return fmt.Errorf("%w (the intermediate generation from generation %d)", err, curLink.n)
+		}
+	}
+	return nil
+}
+
 // genRecord is <state>/generations/<N>.json: the SHA-256 of each file of
 // generation N, written before the directory is renamed into place. Only
 // a generation with a record is the agent's (03-06's drift check and
@@ -614,10 +639,10 @@ func (e *engine) loadMarker() (*marker, error) {
 // 2026-10-24). It is the only way between two installed generations,
 // rollback and crash recovery included: when Intermediate collapses, one
 // swap to to after the marker {from, to, 0, final}; otherwise the
-// intermediate M is written and checked, the marker {from, to, M,
-// intermediate} written, the narrowing swap to M made at once, the marker
-// rewritten with step final, and the widening swap to to made by
-// swapCurrent's timing rule. Each marker write is followed by a status
+// intermediate M is written and checked (and discarded when the check
+// fails), the marker {from, to, M, intermediate} written, the narrowing
+// swap to M made at once, the marker rewritten with step final, and the
+// widening swap to to made by swapCurrent's timing rule. Each marker write is followed by a status
 // that shows the swap pending (publishPending, PR #72 review C17).
 func (e *engine) Transition(ctx context.Context, from, to *Generation, mode swapMode) (uint64, error) {
 	m, collapsed := Intermediate(from, to)
@@ -633,6 +658,7 @@ func (e *engine) Transition(ctx context.Context, from, to *Generation, mode swap
 		return 0, err
 	}
 	if err := e.validate(ctx, m, e.l.Gen(m.N), nil); err != nil {
+		e.discard(m.N) // F07 (03-08d): an intermediate that never became current
 		return 0, err
 	}
 	if err := e.writeMarker(from.N, to.N, m.N, "intermediate"); err != nil {

@@ -107,6 +107,10 @@ var (
 	ErrHostKeysDisagree   = errors.New("host_keys_disagree")
 )
 
+// errNoDirectory is Render's refusal while no directory is accepted (a
+// first install before one arrives, or keyroster-agent reset-directory).
+var errNoDirectory = fmt.Errorf("%w: no directory is accepted yet", ErrHostNotInDirectory)
+
 // Host statuses: why a generation holds no principals of its own for
 // this host (owner decision 2026-10-26, PR #67; Report.HostStatus).
 const (
@@ -134,11 +138,14 @@ func (h *HostError) Unwrap() error { return h.Err }
 // bundle's active and next user and machine CA keys, one trust.FormatKey
 // line each, sorted by role (user, then machine) and generation;
 // principals/<account> is directory.RenderPrincipalsFile for each account
-// of the host's host group, the one renderer; revoked.krl is the
-// verified KRL, or zero bytes when none is published yet.
+// of the host's host group, the one renderer, through one
+// directory.PrincipalsRenderer, which canonicalises and hashes the
+// directory once per render (PR #76 review, owner decision D-1);
+// revoked.krl is the verified KRL, or zero bytes when none is published
+// yet.
 func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
 	if v.Directory == nil {
-		return nil, &HostError{Err: fmt.Errorf("%w: no directory is accepted yet", ErrHostNotInDirectory), Unmatched: fingerprints(hostKeys)}
+		return nil, &HostError{Err: errNoDirectory, Unmatched: fingerprints(hostKeys)}
 	}
 	hosts := hostsForKeys(v.Directory, hostKeys)
 	if len(hosts) > 1 {
@@ -160,8 +167,16 @@ func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
 	if i < 0 {
 		return nil, fmt.Errorf("%w: host %s names host group %s, which the directory does not define", ErrHostNotInDirectory, host.Name, host.HostGroup)
 	}
+	// A host group above the cap is refused before any file is rendered,
+	// so the render costs at most maxAccounts files whatever the
+	// directory's size (PR #76 review, owner decision D-1). Validate
+	// refuses a repeated account, so each account is one file.
+	if n := len(v.Directory.HostGroups[i].Accounts); n > maxAccounts {
+		return nil, fmt.Errorf("%w: host group %s has %d accounts, above %d", ErrGenerationTooLarge, host.HostGroup, n, maxAccounts)
+	}
+	r := directory.NewPrincipalsRenderer(v.Directory)
 	for _, a := range v.Directory.HostGroups[i].Accounts {
-		file, err := directory.RenderPrincipalsFile(v.Directory, host.HostGroup, a.Account)
+		file, err := r.File(host.HostGroup, a.Account)
 		if err != nil {
 			return nil, err
 		}
@@ -192,10 +207,28 @@ func hostsForKeys(d *directory.Directory, hostKeys []ssh.PublicKey) []*directory
 // last-good's principals files, unchanged, when the host's identity is
 // uncertain: its sshd host keys match no entry while lastHost is still an
 // active entry (its keys were rotated on either side, or lastHost is not
-// known), or they match two entries. It returns the generation and the
-// host status; a refusal of any other kind is returned as is.
+// known), or they match two entries. With no accepted directory (F08
+// (03-08d): after keyroster-agent reset-directory, until the fetcher spools
+// one), the trust files apply with last-good's principals files unchanged,
+// as current holds them after the reset, for lastHost and with last-good's
+// own host status (lastGood.HostStatus, its record's), so a newer KRL and
+// a verified bundle's CA keys never wait for a directory. It returns the
+// generation and the host status; a refusal of any other kind is returned
+// as is.
 func RenderFallback(v *state.Verified, hostKeys []ssh.PublicKey, lastHost string, lastGood *Generation, refusal error) (*Generation, string, error) {
-	if v.Directory == nil || !errors.Is(refusal, ErrHostNotInDirectory) && !errors.Is(refusal, ErrHostKeysDisagree) {
+	if v.Directory == nil {
+		if lastGood == nil || !errors.Is(refusal, ErrHostNotInDirectory) {
+			return nil, "", refusal
+		}
+		g, err := renderTrust(v)
+		if err != nil {
+			return nil, "", err
+		}
+		g.Host = lastHost
+		keepPrincipals(g, lastGood)
+		return g, lastGood.HostStatus, nil
+	}
+	if !errors.Is(refusal, ErrHostNotInDirectory) && !errors.Is(refusal, ErrHostKeysDisagree) {
 		return nil, "", refusal
 	}
 	hosts := hostsForKeys(v.Directory, hostKeys)
@@ -220,13 +253,19 @@ func RenderFallback(v *state.Verified, hostKeys []ssh.PublicKey, lastHost string
 	}
 	g.Host = name
 	if status == HostKeysRotated || status == HostKeysDisagree {
-		for n, b := range lastGood.Files {
-			if class, ok := ClassOf(n); ok && class == FilePrincipals {
-				g.Files[n] = b
-			}
-		}
+		keepPrincipals(g, lastGood)
 	}
 	return g, status, nil
+}
+
+// keepPrincipals copies every principals-class file of lastGood into g,
+// unchanged.
+func keepPrincipals(g, lastGood *Generation) {
+	for n, b := range lastGood.Files {
+		if class, ok := ClassOf(n); ok && class == FilePrincipals {
+			g.Files[n] = b
+		}
+	}
 }
 
 // renderTrust is the part of a generation that does not depend on the

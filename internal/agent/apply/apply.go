@@ -693,6 +693,22 @@ func (e *engine) loadStored() (*state.Stored, error) {
 
 // forward verifies one capture and moves current to the generation it
 // renders.
+//
+// A verified KRL never waits for a bundle or directory the host cannot
+// apply (owner decision D-R2, PR #71 review F5, at every stage of the
+// apply; F07 (03-08d)). When the capture changed the bundle or directory
+// and Verify refused nothing, a content refusal of the generation it
+// renders, before current moved, takes the capture once more as KRL-alone
+// (krlAlone, state.KRLAlone against accepted/): the KRL verified again
+// against the accepted bundle, with the bundle, policy and directory in
+// force, through the same render, checks and Transition, and the refusal
+// is returned after the commit, so the report and last_apply name it. A
+// content refusal is a render error, a generation above the caps
+// (candidate) or a CA line the host's ssh-keygen refuses (validate's
+// ErrCALineRejected). Not a trigger: a preflightApply refusal (the KRL-alone
+// generation meets the same preflight), lock and I/O errors, an injected
+// crash, and every failure once Transition started (a rollback keeps the
+// newest KRL, RollbackTarget).
 func (e *engine) forward(ctx context.Context) error {
 	stored, err := e.loadStored()
 	if err != nil {
@@ -712,56 +728,68 @@ func (e *engine) forward(ctx context.Context) error {
 		e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", v.Refused)
 	}
 	e.report.BundleHeld = v.BundleHeld
-	if !v.Changed() {
-		// A run that replaced a trial drop-in wrote it: not a no-op.
-		e.report.NoOp = !e.dropInRepaired
-		// The KRL in force is current's, which a rollback or crash recovery
-		// may have kept above accepted/'s (PR #67 round-2 carry-over).
-		cur, curLink, err := e.readCurrent()
-		if err != nil || curLink.kind != linkAgent {
-			cur = nil
+	var g, cur *Generation
+	var curLink link
+	for {
+		if !v.Changed() {
+			// A run that replaced a trial drop-in wrote it: not a no-op.
+			e.report.NoOp = !e.dropInRepaired
+			// The KRL in force is current's, which a rollback or crash
+			// recovery may have kept above accepted/'s (PR #67 round-2
+			// carry-over).
+			cur, curLink, err := e.readCurrent()
+			if err != nil || curLink.kind != linkAgent {
+				cur = nil
+			}
+			e.setVersions(v, cur)
+			return outcome(v)
 		}
-		e.setVersions(v, cur)
-		return v.Refused
-	}
-	g, err := e.render(v)
-	if err != nil {
-		return err
-	}
-	cur, curLink, err := e.readCurrent()
-	if err != nil {
-		return err
-	}
-	e.keepKRL(g, cur, curLink)
-	if err := e.preflightApply(v, g); err != nil {
-		return err
-	}
-	if e.cfg.DryRun {
-		e.setVersions(v, g)
-		e.report.Diff = diff(cur, g)
-		return v.Refused
-	}
-	if cur != nil && sameBytes(cur, g) {
-		// The new versions change nothing on disk: store them. The
-		// render's host status is the one in force now (a removed entry
-		// listed again under other keys keeps the same, empty, principals).
-		e.setVersions(v, g)
-		e.report.Generation = curLink.n
-		if err := e.setHostStatus(curLink.n, g.HostStatus); err != nil {
+		if cur, curLink, err = e.readCurrent(); err != nil {
 			return err
 		}
-		if err := e.commit(curLink.n, v); err != nil {
+		var refusal error
+		if g, refusal = e.candidate(v, cur, curLink); refusal == nil {
+			if err := e.preflightApply(v, g); err != nil {
+				return err
+			}
+			if e.cfg.DryRun {
+				e.setVersions(v, g)
+				e.report.Diff = diff(cur, g)
+				return outcome(v)
+			}
+			if cur != nil && sameBytes(cur, g) {
+				// The new versions change nothing on disk: store them. The
+				// render's host status is the one in force now (a removed
+				// entry listed again under other keys keeps the same, empty,
+				// principals).
+				e.setVersions(v, g)
+				e.report.Generation = curLink.n
+				if err := e.setHostStatus(curLink.n, g.HostStatus); err != nil {
+					return err
+				}
+				if err := e.commit(curLink.n, v); err != nil {
+					return err
+				}
+				return outcome(v)
+			}
+			g.N = e.allocGeneration()
+			if err := e.installGeneration(g); err != nil {
+				return err
+			}
+			if refusal = e.validate(ctx, g, e.l.Gen(g.N), cur); refusal == nil {
+				break
+			}
+			e.discard(g.N)
+			// A CA line the host's ssh-keygen refuses is a content
+			// refusal. validate's KRL refusals are not: the KRL-alone
+			// generation carries the same KRL, so they would only recur.
+			if !errors.Is(refusal, ErrCALineRejected) {
+				return refusal
+			}
+		}
+		if v, err = e.krlAlone(stored, st, v, refusal); err != nil {
 			return err
 		}
-		return v.Refused
-	}
-	g.N = e.allocGeneration()
-	if err := e.installGeneration(g); err != nil {
-		return err
-	}
-	if err := e.validate(ctx, g, e.l.Gen(g.N), cur); err != nil {
-		e.discard(g.N)
-		return err
 	}
 	lg, err := e.resolveLink(e.l.LastGood())
 	if err != nil {
@@ -772,7 +800,7 @@ func (e *engine) forward(ctx context.Context) error {
 		if err := e.firstInstall(ctx, g, v); err != nil {
 			return err
 		}
-		return v.Refused
+		return outcome(v)
 	}
 	target, tv := g, v
 	e.poll = func(ctx context.Context) (*Generation, *state.Verified, error) {
@@ -819,7 +847,7 @@ func (e *engine) forward(ctx context.Context) error {
 	if err := e.commit(target.N, tv); err != nil {
 		return err
 	}
-	return tv.Refused
+	return outcome(tv)
 }
 
 // setVersions reports v's versions; the KRL version is g's when g (the
@@ -851,11 +879,12 @@ func (e *engine) keepKRL(g, cur *Generation, curLink link) {
 }
 
 // render is Render for this host. When Render refuses because of the
-// host's entry and the host already has trust files (a last-good of the
-// agent's), the apply goes on with RenderFallback (owner decision
-// 2026-10-26, PR #67): the KRL and CA keys apply, principals are emptied
-// or kept as last-good's, and the report names the host status. Before
-// the first install the refusal stands and nothing is installed.
+// host's entry, or because no directory is accepted (F08 (03-08d)), and
+// the host already has trust files (a last-good of the agent's), the apply
+// goes on with RenderFallback (owner decision 2026-10-26, PR #67): the KRL
+// and CA keys apply, principals are emptied or kept as last-good's, and
+// the report names the host status. Before the first install the refusal
+// stands and nothing is installed.
 func (e *engine) render(v *state.Verified) (*Generation, error) {
 	g, err := Render(v, e.keys)
 	if err == nil {
@@ -875,15 +904,75 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 	}
 	lastHost := ""
 	if rec, rerr := e.readRecord(lg.n); rerr == nil {
-		lastHost = rec.Host
+		lastHost, lgGen.HostStatus = rec.Host, rec.HostStatus
 	}
 	g, status, ferr := RenderFallback(v, e.keys, lastHost, lgGen, err)
 	if ferr != nil {
 		return nil, ferr
 	}
 	g.HostStatus, e.report.HostStatus = status, status
+	if v.Directory == nil {
+		e.logf("WARNING %v; the KRL and CA keys apply, principals are kept as last-good's", err)
+		return g, nil
+	}
 	e.logf("WARNING %s: %v; the KRL and CA keys apply, principals are %s", status, err, map[bool]string{true: "kept as last-good's", false: "emptied"}[status == HostKeysRotated || status == HostKeysDisagree])
 	return g, nil
+}
+
+// outcome is what forward returns once v's state is in force, or found
+// unchanged: v.Refused, and while no directory is accepted also Render's
+// host_not_in_directory refusal (F08 (03-08d)), which RenderFallback went
+// on from with last-good's principals. The apply's error and last_apply
+// then name both until a directory is accepted.
+func outcome(v *state.Verified) error {
+	if v.Directory == nil {
+		return errors.Join(v.Refused, errNoDirectory)
+	}
+	return v.Refused
+}
+
+// candidate renders v for this host (render), keeps the KRL in force
+// (keepKRL) and checks the result against cur, the generation current
+// names (checkCandidate), writing nothing. Its errors are render errors
+// and cap refusals: content refusals, for which the KRL-alone pass runs
+// (krlAlone; F07 (03-08d)).
+func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*Generation, error) {
+	g, err := e.render(v)
+	if err != nil {
+		return nil, err
+	}
+	e.keepKRL(g, cur, curLink)
+	if err := checkCandidate(g, cur, curLink); err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+
+// krlAlone is the KRL-alone pass after refusal, a content refusal of the
+// generation rendered from v before current moved (owner decision D-R2 at
+// every stage of the apply; F07 (03-08d)): v's capture in, taken again as
+// state.KRLAlone against prev (accepted/, or during a widening wait the
+// pending target's state), so only its KRL moves on, verified against
+// prev's bundle; never the KRL v verified under a bundle that is not
+// applied. It runs when v changed the bundle or directory, refused nothing
+// and refusal is not an injected crash; otherwise refusal is returned,
+// joined to v.Refused (a KRL-alone v whose own generation is refused
+// names both refusals). The pass is bounded per capture, not per run (PR
+// #76 review F0 and F1): the KRL-alone Verified carries the refusal and
+// changes neither the bundle nor the directory, so a capture takes at
+// most one pass, and a poll whose pass found no newer KRL leaves a later
+// poll's capture, which brings one, its own pass.
+func (e *engine) krlAlone(prev *state.Stored, in spool.State, v *state.Verified, refusal error) (*state.Verified, error) {
+	if v.Refused != nil {
+		return nil, errors.Join(v.Refused, refusal)
+	}
+	if !v.BundleChanged && !v.DirectoryChanged || isCrash(refusal) {
+		return nil, refusal
+	}
+	e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", refusal)
+	// The report describes the KRL-alone render from here on.
+	e.report.HostStatus, e.report.UnmatchedHostKeys, e.report.KRLKept = "", nil, nil
+	return state.KRLAlone(e.pins, prev, in, refusal)
 }
 
 // discard removes a generation that never became current.
@@ -895,7 +984,13 @@ func (e *engine) discard(n uint64) {
 
 // pollSpool is the check during a widening wait: a capture newer than
 // the pending target pending, verified against it, rendered, written and
-// checked, is returned as the superseding generation.
+// checked, is returned as the superseding generation. A content refusal
+// of its generation takes the KRL-alone pass as forward's does (krlAlone;
+// F07 (03-08d)), against the pending target's state: the superseding
+// generation is then the pending target's with the newer KRL, and its
+// Verified carries the refusal, which forward returns after the commit. A
+// KRL-alone state with nothing newer returns the refusal, which the wait
+// logs.
 func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target *Generation) (*Generation, *state.Verified, error) {
 	prev := pending.AsStored()
 	st, err := e.capture(prev.Floor())
@@ -906,27 +1001,35 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 	if err != nil || !v.Changed() {
 		return nil, nil, err
 	}
-	g, err := e.render(v)
-	if err != nil {
-		return nil, nil, err
+	for {
+		cur, curLink, err := e.readCurrent()
+		if err != nil {
+			return nil, nil, err
+		}
+		g, refusal := e.candidate(v, cur, curLink)
+		if refusal == nil {
+			if sameBytes(g, target) {
+				return nil, nil, nil
+			}
+			g.N = e.allocGeneration()
+			if err := e.installGeneration(g); err != nil {
+				return nil, nil, err
+			}
+			if refusal = e.validate(ctx, g, e.l.Gen(g.N), cur); refusal == nil {
+				return g, v, nil
+			}
+			e.discard(g.N)
+			if !errors.Is(refusal, ErrCALineRejected) {
+				return nil, nil, refusal
+			}
+		}
+		if v, err = e.krlAlone(prev, st, v, refusal); err != nil {
+			return nil, nil, err
+		}
+		if !v.Changed() {
+			return nil, nil, v.Refused
+		}
 	}
-	cur, curLink, err := e.readCurrent()
-	if err != nil {
-		return nil, nil, err
-	}
-	e.keepKRL(g, cur, curLink)
-	if sameBytes(g, target) {
-		return nil, nil, nil
-	}
-	g.N = e.allocGeneration()
-	if err := e.installGeneration(g); err != nil {
-		return nil, nil, err
-	}
-	if err := e.validate(ctx, g, e.l.Gen(g.N), cur); err != nil {
-		e.discard(g.N)
-		return nil, nil, err
-	}
-	return g, v, nil
 }
 
 // isCrash reports an error injected by the Fault hook: the run stops
@@ -941,7 +1044,9 @@ func isCrash(err error) bool {
 // intermediate (last-good's CA keys and principals, the newest KRL; owner
 // decision 2026-10-26, PR #67), the previous drop-in restored and sshd
 // reloaded when the drop-in had changed, the self-test run again, the
-// marker cleared. It returns cause.
+// marker cleared, and then the retention cleanup a commit runs, so that
+// failed runs never grow gen/ beyond keepGenerations (F07 (03-08d)). It
+// returns cause.
 func (e *engine) rollback(ctx context.Context, cause error, lg link) error {
 	if isCrash(cause) {
 		return cause
@@ -951,6 +1056,7 @@ func (e *engine) rollback(ctx context.Context, cause error, lg link) error {
 	if err := e.backToLastGood(ctx, lg); err != nil {
 		return errors.Join(cause, err)
 	}
+	e.cleanup()
 	return cause
 }
 
@@ -1116,7 +1222,11 @@ func (e *engine) failFirstInstall(ctx context.Context, cause error) error {
 
 // undoFirstInstall removes what a first install wrote: the drop-in
 // (restoring a previous one), a reload so sshd forgets it, the listener
-// check against the restored configuration, current, and the marker.
+// check against the restored configuration, current, and the marker. It
+// ends with the retention cleanup a commit runs, as a rollback does (PR
+// #76 review F2): with no last-good nothing else removes the generations
+// failed first installs leave, and by then current, last-good and the
+// marker name none, so cleanup keeps only the newest keepGenerations.
 func (e *engine) undoFirstInstall(ctx context.Context, cur link) error {
 	e.report.Rollback = true
 	if e.dropinChanged {
@@ -1142,7 +1252,11 @@ func (e *engine) undoFirstInstall(ctx context.Context, cur link) error {
 	if err := e.clearMarker(); err != nil {
 		return err
 	}
-	return e.remove(e.l.State(dropinPrevFile))
+	if err := e.remove(e.l.State(dropinPrevFile)); err != nil {
+		return err
+	}
+	e.cleanup()
+	return nil
 }
 
 // recoverToLastGood is --recover-to-last-good, the operator's way out of

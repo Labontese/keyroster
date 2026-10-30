@@ -912,6 +912,68 @@ in the outbox, nor overwrite `pins.json`, `outbox/status.json` or
 applier never reads the outbox. (Run in CI: `agent-smoke.sh`, with the real
 users.)
 
+**Revocations keep applying** (owner decision D-R2, at every stage of the
+apply; 03-08d). When the applier cannot apply the bundle or directory a
+capture holds, the capture's KRL still lands. The cases:
+
+- the bundle or directory step is refused by verification (a chain gap,
+  or a version a signer restore re-made);
+- the directory renders a generation above the agent's caps: a principals
+  file above 64 KiB, more than 4096 principals files, or an intermediate
+  above them (the swap's intermediate holds the accounts of the generation
+  in force and of the new one);
+- a verified bundle carries a CA line the host's `ssh-keygen` refuses
+  (`ca_line_rejected`);
+- no directory is accepted, after `keyroster-agent reset-directory` and
+  before the fetcher spools one.
+
+The applier then installs the capture's KRL alone, verified again against
+the bundle it accepted (during a widening wait, against the pending
+target's), with the CA keys and principals in force. `last_apply.result`
+is `refused`, and its error names the refusal (`generation_too_large`,
+`ca_line_rejected`, `directory_not_verified` or `host_not_in_directory`,
+for example); `keyroster host status` shows the error as a
+`last apply error` note. After `reset-directory` a verified successor bundle's
+CA keys apply as well, with last-good's principals. A KRL that only the
+refused bundle's ops key signed waits with that bundle, and before the
+first install the refusal stands and nothing is installed. The host keeps
+the directory and principals it had until the server publishes a
+directory it can apply: split the oversize host group or roles and
+publish again.
+
+That does not help a host that is far behind. An apply reads at most 64
+versions of each kind past the ones the host accepted, so when the
+refused version is the newest of those, a fixed version published after
+it never enters a capture. In such a host's report `spool_more` stays
+true under the same `generation_too_large` or `ca_line_rejected` refusal,
+apply after apply (the report is one JSON line per apply in the applier
+unit's journal, or the output of `sudo keyroster-agent apply --once`).
+Publishing again does not move it:
+
+- For a directory, run `keyroster-agent reset-directory` on the host as
+  root. The next poll then takes the server's current directory the way a
+  first install does (signer-install.md, "Re-bootstrap each such host").
+- For a bundle, escalate: `reset-directory` re-bootstraps the directory
+  only.
+
+Revocations keep applying meanwhile. UNVERIFIED on a real host: no test
+or drill runs this case.
+
+Failed applies no longer pile up generations under `gen/`:
+every rollback, and every undone first install, ends with the retention
+cleanup a commit runs. Run in CI (03-08d):
+`TestKRLAlone` (`oversize_principals_file_krl_applied`,
+`too_many_accounts_krl_applied`, `intermediate_union_too_large_krl_applied`,
+`ca_line_rejected_krl_applied`, `superseded_during_wait_krl_applied`,
+`ops_key_changed_krl_waits`, `krl_after_a_refused_poll_during_wait_applied`,
+`failed_runs_do_not_grow_gen`, `failed_first_installs_do_not_grow_gen`,
+`recovered_first_installs_do_not_grow_gen`), `TestResetDirectory`
+(`reset_then_newer_krl_before_directory_arrives`,
+`reset_then_new_bundle_before_directory`,
+`reset_after_host_removed_keeps_status`) and
+`TestStatus/cap_refusal_is_refused`. UNVERIFIED on a real host: no
+03-16 drill provokes these refusals.
+
 **Watch the hosts** (admin workstation):
 
 ```
