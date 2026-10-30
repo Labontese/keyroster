@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -389,7 +390,14 @@ func TestReadCommandsCheckInstallation(t *testing.T) {
 // popHostsEnv is roleEnv on a genesis policy that sets pop.hosts.
 func popHostsEnv(t *testing.T) *dirEnv {
 	t.Helper()
-	e := newDirEnvPolicy(t, 1, 1, func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true} })
+	return popHostsEnvQuorum(t, 1, 1)
+}
+
+// popHostsEnvQuorum is popHostsEnv with admins admins at admin quorum
+// quorum (03-08c).
+func popHostsEnvQuorum(t *testing.T, admins, quorum int) *dirEnv {
+	t.Helper()
+	e := newDirEnvPolicy(t, admins, quorum, func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true} })
 	e.installDirect(t, buildDir(t, nil, roleBase(t, nil)))
 	return e
 }
@@ -548,7 +556,12 @@ func identityOf(spkiHex string) string {
 // served, and whose host status lists no host.
 func forgetEnv(t *testing.T, hosts []serverclient.PendingHost, served ...serverclient.ServedHost) *dirEnv {
 	t.Helper()
-	e := popHostsEnv(t)
+	return forgetEnvOn(t, popHostsEnv(t), hosts, served...)
+}
+
+// forgetEnvOn is forgetEnv on e.
+func forgetEnvOn(t *testing.T, e *dirEnv, hosts []serverclient.PendingHost, served ...serverclient.ServedHost) *dirEnv {
+	t.Helper()
 	if hosts == nil {
 		hosts = []serverclient.PendingHost{}
 	}
@@ -807,6 +820,107 @@ func TestHostForget(t *testing.T) {
 		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, &called, `{"error":"host_swap_pending"}`, http.StatusConflict)
 		if code, _, stderr := run(t, "host", "forget", "web1"); code == 0 || !strings.Contains(stderr, "host_swap_pending: the host reports a swap it has not finished") {
 			t.Fatalf("the server's host_swap_pending: exit %d: %s", code, stderr)
+		}
+	})
+	// 03-08c: the admins' signatures (owner decisions Q2 and Q3), on a
+	// policy with three admins at admin quorum 2.
+	quorumEnv := func(t *testing.T, hosts []serverclient.PendingHost, served ...serverclient.ServedHost) (*dirEnv, *bool) {
+		t.Helper()
+		e := forgetEnvOn(t, popHostsEnvQuorum(t, 3, 2), hosts, served...)
+		answer := web1.PendingHost
+		if len(hosts) > 0 {
+			answer = hosts[0]
+		}
+		called := new(bool)
+		e.recordCall(http.MethodPost, serverclient.AdminForgetHostPath, called, forgetAnswer(t, answer), http.StatusOK)
+		return e, called
+	}
+	signedBy := func(t *testing.T, req *wire.ForgetRequest, fps ...string) {
+		t.Helper()
+		var got []string
+		for _, ev := range req.Evidence {
+			sig, err := sshsig.Parse(ev.Blob)
+			if err != nil || ev.Type != wire.EvidenceAdminSSHSIG || sig.Verify(wire.ForgetSSHSIGNamespace, req.SigningBytes()) != nil {
+				t.Fatalf("evidence %s does not verify under %s: %v", ev.Type, wire.ForgetSSHSIGNamespace, err)
+			}
+			got = append(got, ssh.FingerprintSHA256(sig.PublicKey()))
+		}
+		if !sameFingerprints(got, fps) {
+			t.Fatalf("signed by %v, want %v", got, fps)
+		}
+	}
+	t.Run("quorum_two_keys_two_evidence", func(t *testing.T) {
+		e, called := quorumEnv(t, nil, web1)
+		code, stdout, stderr := run(t, "host", "forget", "web1", "--admin-key", e.fps[1], "--admin-key", e.fps[2])
+		if code != 0 || !e.wasCalled(called) {
+			t.Fatalf("host forget with two admin keys: exit %d:\n%s%s", code, stdout, stderr)
+		}
+		req := e.postedForget(t)
+		if !identityIs(req, "00") || !req.ApprovedOnce {
+			t.Fatalf("the request %s", e.lastPost)
+		}
+		signedBy(t, req, e.fps[1], e.fps[2])
+		for _, want := range []string{"Signing the forget (keyroster/host-forget-request/v1)", "approved once: true, removal version: 3",
+			"removal confirmed at directory v4, sha256 " + strings.Repeat("cd", 32), "signed by admin key: " + e.fps[1], "signed by admin key: " + e.fps[2]} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("the output lacks %q:\n%s", want, stdout)
+			}
+		}
+	})
+	t.Run("never_approved_one_key_enough", func(t *testing.T) {
+		pending := servedRow("web9", "33", key2, false).PendingHost
+		e, called := quorumEnv(t, []serverclient.PendingHost{pending})
+		code, stdout, stderr := run(t, "host", "forget", "web9")
+		if code != 0 || !e.wasCalled(called) {
+			t.Fatalf("host forget of a never-approved agent with one key: exit %d:\n%s%s", code, stdout, stderr)
+		}
+		req := e.postedForget(t)
+		if !identityIs(req, "33") || req.ApprovedOnce || req.RemovalVersion != 0 || req.ConfirmedVersion != 0 || req.HostGone {
+			t.Fatalf("the request %s", e.lastPost)
+		}
+		signedBy(t, req, e.fps[0])
+	})
+	t.Run("approved_once_fewer_keys_refused_locally", func(t *testing.T) {
+		e, called := quorumEnv(t, nil, web1)
+		for _, args := range [][]string{
+			{"host", "forget", "web1"},
+			{"host", "forget", "web1", "--admin-key", e.fps[1]},
+			{"host", "forget", "web1", "--admin-key", e.fps[1], "--admin-key", e.fps[1]},
+		} {
+			code, _, stderr := run(t, args...)
+			if code == 0 || e.wasCalled(called) || !strings.Contains(stderr, "admin_quorum_not_met: forgetting an agent that was approved once needs 2 distinct admin signatures") {
+				t.Fatalf("%v: exit %d, sent %t: %s", args, code, e.wasCalled(called), stderr)
+			}
+		}
+		if n := e.agent.forgetSigns(); n != 0 {
+			t.Fatalf("%d forget signatures asked for; a refusal signs nothing", n)
+		}
+	})
+	t.Run("slow_signing_refused_locally", func(t *testing.T) {
+		// Plan check item 9: more than 240 s between CreatedAt and the POST
+		// is refused before anything is sent; 240 s is sent.
+		for _, c := range []struct {
+			took time.Duration
+			sent bool
+		}{{241 * time.Second, false}, {240 * time.Second, true}} {
+			e, called := quorumEnv(t, nil, web1)
+			start := time.Now()
+			calls := 0
+			forgetNow = func() time.Time {
+				calls++
+				if calls == 1 {
+					return start
+				}
+				return start.Add(c.took)
+			}
+			code, _, stderr := run(t, "host", "forget", "web1", "--admin-key", e.fps[0], "--admin-key", e.fps[1])
+			forgetNow = nil
+			if c.sent != (code == 0) || c.sent != e.wasCalled(called) || (!c.sent && !strings.Contains(stderr, "request_time_skew: signing took 4m1s")) {
+				t.Fatalf("signing that took %s: exit %d, sent %t: %s", c.took, code, e.wasCalled(called), stderr)
+			}
+			if req := e.postedForget(t); c.sent && (req == nil || req.CreatedAt != uint64(start.Unix())) { //nolint:gosec // G115: after 1970
+				t.Fatalf("the request's CreatedAt %v, want the time before the first signature %d", req, start.Unix())
+			}
 		}
 	})
 	t.Run("logged_not_deleted_printed", func(t *testing.T) {

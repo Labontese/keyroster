@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -165,6 +166,15 @@ func TestAgentReenrollEndToEnd(t *testing.T) {
 		t.Fatalf("keyroster host forget --identity %s:\n%s", idA, forgot)
 	}
 	t.Logf("keyroster host forget --identity %s:\n%s", idA, forgot)
+	// 03-08c: the forget is the one host_forget entry of the signer's log,
+	// which keyroster audit verify checks, naming A's identity and the
+	// confirmation recorded from A's own heartbeat.
+	entry := checkForgetEntry(t, env.Signer, forgot)
+	confirmedAt := regexp.MustCompile(`^removal confirmed at directory v(\d+)`).FindStringSubmatch(m[2])
+	if confirmedAt == nil || entry["approved_once"] != true || entry["host_gone"] != false || entry["expected_name"] != "web1" ||
+		fmt.Sprint(entry["confirmed_version"]) != confirmedAt[1] || entry["confirmed_sha256"] == nil {
+		t.Fatalf("the host_forget entry %v; want A's, approved once, not host_gone, confirmed at the version host pending showed (%q)", entry, m[2])
+	}
 
 	// 6. A's fetcher gets unknown_agent; B still applies a revocation.
 	for deadline := time.Now().Add(forgetWait); !strings.Contains(a.fetch.String(), "unknown_agent"); time.Sleep(200 * time.Millisecond) {

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -19,6 +20,7 @@ import (
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/serverdb"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -738,6 +740,10 @@ func TestRemovalConfirmation(t *testing.T) {
 // TestForgetHost is PR #72 fix-round carry-over (c) and plan check item 1
 // (03-08b): forget names one agent by identity and deletes it only while
 // the facts the admin saw still hold, re-checked by the delete itself.
+// Since 03-08c the server relays the admins' signed request to the signer
+// with its own statement of the row, and deletes nothing before the
+// signer's answer, nothing when the signer refuses or cannot answer, and
+// nothing when the row changed after the answer (forget_logged_not_deleted).
 func TestForgetHost(t *testing.T) {
 	t.Run("by_identity_among_two_with_one_name", func(t *testing.T) {
 		e, a, _ := confirmedAgent(t)
@@ -784,38 +790,135 @@ func TestForgetHost(t *testing.T) {
 			t.Fatal("a refused forget deleted the row")
 		}
 	})
-	t.Run("facts_changed_before_delete", func(t *testing.T) {
-		for _, c := range []struct {
-			name   string
-			change func(t *testing.T, e *agentEnv, a *serverdb.Agent, r uint64)
-		}{
-			{"confirmation_recorded", func(t *testing.T, e *agentEnv, a *serverdb.Agent, r uint64) {
-				sum := sha256.Sum256(e.dirs[r-1])
-				if ok, err := e.s.db.RecordRemovalConfirmed(t.Context(), a.Key(), 1, r, r, sum[:]); err != nil || !ok {
-					t.Errorf("record the confirmation: %t %v", ok, err)
-				}
-			}},
-			{"identity_rotated", func(t *testing.T, e *agentEnv, a *serverdb.Agent, _ uint64) {
-				n := newAgentID(t)
-				if err := e.s.db.RotateAgentIdentity(t.Context(), a.Key(), n.spki, e.clock.Now().UnixMicro()); err != nil {
-					t.Errorf("rotate the identity: %v", err)
-				}
-			}},
-		} {
-			t.Run(c.name, func(t *testing.T) {
-				e, id, r := removedAgent(t)
-				a := e.agentRow(t, id.spki)
-				e.s.beforeForgetDelete = func() { c.change(t, e, a, r) }
-				rec := e.forgetFacts(t, forgetReqOf(a, true))
-				e.s.beforeForgetDelete = nil
-				if rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrForgetLoggedNotDeleted || leafOf(rec) != 7 {
-					t.Fatalf("forget whose row changed after the signer's answer: %d %s, want 409 %s with leaf 7", rec.Code, rec.Body.String(),
-						serverclient.AdminErrForgetLoggedNotDeleted)
-				}
-				if agents, err := e.s.db.ListAgents(t.Context()); err != nil || len(agents) != 1 {
-					t.Fatalf("%d agents (%v) after the refusal, want the row still present", len(agents), err)
-				}
-			})
+	// Plan check item 1 (03-08c): the row changes between the signer's
+	// answer and the delete, through the nil-by-default hook there.
+	for _, c := range []struct {
+		name   string
+		change func(t *testing.T, e *agentEnv, a *serverdb.Agent, r uint64)
+	}{
+		{"facts_changed_after_accept", func(t *testing.T, e *agentEnv, a *serverdb.Agent, r uint64) {
+			sum := sha256.Sum256(e.dirs[r-1])
+			if ok, err := e.s.db.RecordRemovalConfirmed(t.Context(), a.Key(), 1, r, r, sum[:]); err != nil || !ok {
+				t.Errorf("record the confirmation: %t %v", ok, err)
+			}
+		}},
+		{"identity_rotated_after_accept", func(t *testing.T, e *agentEnv, a *serverdb.Agent, _ uint64) {
+			n := newAgentID(t)
+			if err := e.s.db.RotateAgentIdentity(t.Context(), a.Key(), n.spki, e.clock.Now().UnixMicro()); err != nil {
+				t.Errorf("rotate the identity: %v", err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, id, r := removedAgent(t)
+			a := e.agentRow(t, id.spki)
+			e.s.beforeForgetDelete = func() { c.change(t, e, a, r) }
+			rec := e.forgetFacts(t, forgetReqOf(a, true))
+			e.s.beforeForgetDelete = nil
+			if rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrForgetLoggedNotDeleted || leafOf(rec) != 7 {
+				t.Fatalf("forget whose row changed after the signer's answer: %d %s, want 409 %s with leaf 7", rec.Code, rec.Body.String(),
+					serverclient.AdminErrForgetLoggedNotDeleted)
+			}
+			if agents, err := e.s.db.ListAgents(t.Context()); err != nil || len(agents) != 1 {
+				t.Fatalf("%d agents (%v) after the refusal, want the row still present", len(agents), err)
+			}
+			if !strings.Contains(e.log.String(), "agent forget logged but not carried out") {
+				t.Errorf("the logged but not carried out forget was not logged:\n%s", e.log.String())
+			}
+		})
+	}
+	t.Run("signer_unavailable_deletes_nothing", func(t *testing.T) {
+		e, id, _ := confirmedAgent(t)
+		e.fake.mu.Lock()
+		e.fake.forgetErr = errors.New("signer socket: connection refused")
+		e.fake.mu.Unlock()
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("forget while the signer cannot answer: %d %s, want 503", rec.Code, rec.Body.String())
+		}
+		if e.agentRow(t, id.spki) == nil || e.fake.count("ForgetAgent") != 1 {
+			t.Fatal("the row was deleted without the signer's answer, or the signer was not asked")
+		}
+		// A refusal the signer could not decide (state_unavailable) is 503 too.
+		e.fake.mu.Lock()
+		e.fake.forgetErr = &wire.ErrorResponse{Code: wire.CodeUnavailable, Message: "state_unavailable"}
+		e.fake.mu.Unlock()
+		if rec := e.forget(t, "web1"); rec.Code != http.StatusServiceUnavailable || e.agentRow(t, id.spki) == nil {
+			t.Fatalf("forget while the signer's state is unavailable: %d %s, want 503 and the row kept", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("signer_refused_deletes_nothing", func(t *testing.T) {
+		e, id, _ := confirmedAgent(t)
+		for code, want := range map[wire.ErrorCode]int{wire.CodeRefused: http.StatusForbidden, wire.CodeMalformed: http.StatusBadRequest} {
+			e.fake.mu.Lock()
+			e.fake.forgetErr = &wire.ErrorResponse{Code: code, Message: "admin_quorum_not_met"}
+			e.fake.mu.Unlock()
+			rec := e.forget(t, "web1")
+			if rec.Code != want || apiError(rec) != "admin_quorum_not_met" {
+				t.Fatalf("forget the signer refused (%s): %d %s, want %d with its reason", code, rec.Code, rec.Body.String(), want)
+			}
+		}
+		if e.agentRow(t, id.spki) == nil {
+			t.Fatal("a forget the signer refused deleted the row")
+		}
+	})
+	t.Run("server_statement_from_the_row", func(t *testing.T) {
+		// The relay sends ServerApprovedOnce from the row's approved_at,
+		// whatever the request carries (owner decision Q3).
+		e := newAgentEnv(t, true)
+		id, hosts := newAgentID(t), hostSigners(t, 1)
+		if rec := e.enroll(t, id, e.mustMint(t, "web1", 0).Token, hosts); rec.Code != http.StatusAccepted {
+			t.Fatalf("enroll: %d %s", rec.Code, rec.Body.String())
+		}
+		req := e.wireForget(t, forgetReqOf(e.agentRow(t, id.spki), false))
+		req.ServerApprovedOnce = true
+		if rec := e.forgetWire(t, req); rec.Code != http.StatusOK {
+			t.Fatalf("forget a never-approved agent: %d %s", rec.Code, rec.Body.String())
+		}
+		e.fake.mu.Lock()
+		relayed := e.fake.lastForget
+		e.fake.mu.Unlock()
+		if relayed == nil || relayed.ServerApprovedOnce || !bytes.Equal(relayed.SigningBytes(), req.SigningBytes()) {
+			t.Fatalf("the relayed request %+v; want the signed bytes unchanged and ServerApprovedOnce false", relayed)
+		}
+		e2, a, _ := confirmedAgent(t)
+		req = e2.wireForget(t, forgetReqOf(e2.agentRow(t, a.spki), false))
+		if rec := e2.forgetWire(t, req); rec.Code != http.StatusOK {
+			t.Fatalf("forget a confirmed agent: %d %s", rec.Code, rec.Body.String())
+		}
+		e2.fake.mu.Lock()
+		relayed = e2.fake.lastForget
+		e2.fake.mu.Unlock()
+		if relayed == nil || !relayed.ServerApprovedOnce {
+			t.Fatalf("the relayed request %+v; want ServerApprovedOnce true for an approved row", relayed)
+		}
+		// A request claiming never approved for an approved row is refused
+		// before the signer is asked (T-03-293).
+		e3, b, _ := confirmedAgent(t)
+		claim := forgetReqOf(e3.agentRow(t, b.spki), false)
+		claim.ApprovedOnce, claim.RemovalVersion, claim.RemovalConfirmed = false, 0, nil
+		if rec := e3.forgetFacts(t, claim); rec.Code != http.StatusConflict || apiError(rec) != serverclient.AdminErrForgetStateChanged {
+			t.Fatalf("forget claiming never approved: %d %s, want 409 %s", rec.Code, rec.Body.String(), serverclient.AdminErrForgetStateChanged)
+		}
+		if e3.fake.count("ForgetAgent") != 0 || e3.agentRow(t, b.spki) == nil {
+			t.Fatal("a forget claiming never approved reached the signer or deleted the row")
+		}
+	})
+	t.Run("accepted_deletes_and_names_the_leaf", func(t *testing.T) {
+		e, id, _ := confirmedAgent(t)
+		e.fake.mu.Lock()
+		e.fake.forget = &wire.ForgetResponse{Leaf: 42}
+		e.fake.mu.Unlock()
+		rec := e.forget(t, "web1")
+		var ans serverclient.ForgetHostAnswer
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &ans) != nil || ans.Leaf != 42 || len(ans.Forgotten) != 1 ||
+			ans.Forgotten[0].IdentitySPKISHA256 != hex.EncodeToString(id.spki) {
+			t.Fatalf("forget: %d %s, want the agent and leaf 42", rec.Code, rec.Body.String())
+		}
+		if e.agentRow(t, id.spki) != nil || e.fake.count("ForgetAgent") != 1 {
+			t.Fatal("the row is still present, or the signer was not asked once")
+		}
+		if !strings.Contains(e.log.String(), `"leaf":42`) {
+			t.Errorf("the forget's log line does not name the leaf:\n%s", e.log.String())
 		}
 	})
 	t.Run("malformed_request_refused", func(t *testing.T) {
