@@ -608,7 +608,7 @@ Only `keyroster-agent apply` reports these two:
 
 | Code | What it means | Fix |
 |---|---|---|
-| `phase2_adoption_pending` | The exact Phase 2 layout, matching the signed state, found by a run that may not take it over (the applier unit's run loop; its sandbox cannot remove files in `/etc/ssh`). Nothing is written or removed | Run `sudo keyroster-agent apply --once` once from a root shell |
+| `phase2_adoption_pending` | The exact Phase 2 layout, matching the signed state, found by a run that may not take it over (the applier unit's run loop; its sandbox cannot remove files in `/etc/ssh`). Before the first install nothing is written or removed. After a takeover whose removal was cut short, the run loop only logs this code as a warning and still installs newer signed state ([Running the agent](#running-the-agent)) | Run `sudo keyroster-agent apply --once` once from a root shell |
 | `phase2_layout_differs` | A Phase 2 style layout that is not exactly the runbook's, or does not match the signed state. Every difference is listed | Fix each difference (below) |
 
 ## Enrolling a host
