@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/Labontese/keyroster/internal/krl"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 func writeTestFile(t *testing.T, path string, data []byte) {
@@ -224,6 +227,51 @@ func TestSpool(t *testing.T) {
 		st, _, _ = Read(dir, Floor{})
 		if _, ok := st.Directories[100]; !ok || len(st.Directories) != MaxVersionsPerKind {
 			t.Fatalf("without a floor: %d read, newest read %t", len(st.Directories), ok)
+		}
+	})
+	t.Run("cap_is_what_read_enforces", func(t *testing.T) {
+		// F01 (03-08e): Cap is the cap Read applies to each recognised name,
+		// so the fetcher can refuse what the applier would. Each file is
+		// written in a complete set, at Cap bytes and at Cap+1.
+		sets := map[string][]string{
+			"bundle":    {"bundle-1.json", "bundle-1.json.sigs"},
+			"policy":    {"policy-1.json", "policy-1.json.sigs"},
+			"directory": {"directory-1.json", "directory-1.json.sigs"},
+			"krl":       {"krl-1.krl", "krl-1.manifest.json", "krl-1.manifest.sig"},
+		}
+		want := map[string]int64{
+			"bundle-1.json": MaxBundle, "bundle-1.json.sigs": MaxBundle,
+			"policy-1.json": MaxBundle, "policy-1.json.sigs": MaxBundle,
+			"directory-1.json": wire.MaxDirectory, "directory-1.json.sigs": wire.MaxDirectorySigs,
+			"krl-1.krl": krl.MaxKRL, "krl-1.manifest.json": krl.MaxManifest, "krl-1.manifest.sig": krl.MaxManifestSig,
+		}
+		for _, set := range sets {
+			for _, name := range set {
+				limit, ok := Cap(name)
+				if !ok || limit != want[name] {
+					t.Fatalf("Cap(%q) = %d, %t, want %d, true", name, limit, ok, want[name])
+				}
+				for _, n := range []int64{limit, limit + 1} {
+					dir := t.TempDir()
+					for _, other := range set {
+						writeTestFile(t, filepath.Join(dir, other), []byte("x"))
+					}
+					writeTestFile(t, filepath.Join(dir, name), bytes.Repeat([]byte{'a'}, int(n)))
+					_, _, err := Read(dir, Floor{})
+					if n == limit && err != nil {
+						t.Fatalf("%s of Cap = %d bytes: %v", name, n, err)
+					}
+					if n > limit && (!errors.Is(err, ErrOversize) || !strings.Contains(err.Error(), name)) {
+						t.Fatalf("%s of Cap+1 = %d bytes: %v, want spool_oversize naming it", name, n, err)
+					}
+				}
+			}
+		}
+		for _, name := range []string{"identity.pub", "enroll-request.json", "policy-0.json", "krl-1.json", "bundle-1.json.tmp",
+			"bundle-99999999999999999999.json", "krl-99999999999999999999.krl"} {
+			if limit, ok := Cap(name); ok {
+				t.Fatalf("Cap(%q) = %d, true for a name Read never reads", name, limit)
+			}
 		}
 	})
 	t.Run("bad_names_refused", func(t *testing.T) {

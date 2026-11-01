@@ -22,7 +22,7 @@ func init() {
 	})
 }
 
-const applyUsage = `usage: keyroster-agent apply --once --spool DIR --state-dir DIR [--root DIR]
+const applyUsage = `usage: keyroster-agent apply --once [--spool DIR] [--state-dir DIR] [--root DIR]
        [--sshd PATH] [--sshd-config PATH] [--ssh-keygen PATH] [--reload STRATEGY]
        [--dry-run] [--recover-to-last-good]
 
@@ -33,6 +33,8 @@ both adds and removes, the sshd drop-in on first install, a self-test over
 loopback, and a rollback to last-good when it fails. The report is printed
 as JSON. The first apply, and every drop-in change, runs the preflight's
 checks first and refuses on any refusal (keyroster-agent preflight).
+
+--spool defaults to <state-dir>/spool, --state-dir to /var/lib/keyroster-agent.
 
 STRATEGY is how sshd is reloaded when the drop-in changes: signal (SIGHUP
 to the PidFile sshd -T names), systemd:<unit>.service (systemctl reload),
@@ -54,31 +56,54 @@ out of "stuck: pending_state_unknown" (a layout the agent did not make),
 run by hand after inspection.
 `
 
-// runApply is keyroster-agent apply --once.
-func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+// applyArgs are keyroster-agent apply's parsed flags.
+type applyArgs struct {
+	once, dryRun, recover bool
+	spool, stateDir       string
+	svc                   serviceFlags
+}
+
+// parseApply parses apply's flags and checks its paths. It detects no
+// service and touches no file; runApply does both.
+func parseApply(args []string, stderr io.Writer) (applyArgs, error) {
 	fset := flag.NewFlagSet("apply", flag.ContinueOnError)
 	fset.SetOutput(stderr)
 	fset.Usage = func() { _, _ = io.WriteString(stderr, applyUsage) }
 	once := fset.Bool("once", false, "apply once and exit (the only mode in this version)")
-	spoolDir := fset.String("spool", "", "the spool directory")
-	stateDir := fset.String("state-dir", "", "the applier's state directory (pins.json, accepted/)")
+	spoolDir := fset.String("spool", "", "the spool directory (default <state-dir>/spool)")
+	stateDir := fset.String("state-dir", defaultStateDir, "the applier's state directory (pins.json, accepted/)")
 	svc := addServiceFlags(fset, true)
 	dryRun := fset.Bool("dry-run", false, "verify and render, print the difference, install nothing")
 	recoverFlag := fset.Bool("recover-to-last-good", false, "leave a layout the agent did not make, back to last-good")
 	if err := fset.Parse(args); err != nil || fset.NArg() != 0 {
-		return errUsage
+		return applyArgs{}, errUsage
 	}
 	if !*once {
 		_, _ = fmt.Fprintln(stderr, "apply: --once is required (the agent has no daemon mode in this version)")
-		return errUsage
+		return applyArgs{}, errUsage
 	}
-	for name, v := range map[string]string{"--spool": *spoolDir, "--state-dir": *stateDir} {
-		if v == "" || !filepath.IsAbs(v) {
-			_, _ = fmt.Fprintf(stderr, "apply: %s must be an absolute path\n", name)
-			return errUsage
-		}
+	// The paths follow run's and identity's rule: --state-dir defaults to
+	// defaultStateDir, --spool to <state-dir>/spool, and each must be
+	// absolute when given.
+	if !filepath.IsAbs(*stateDir) || (*spoolDir != "" && !filepath.IsAbs(*spoolDir)) {
+		_, _ = fmt.Fprintln(stderr, "apply: --state-dir and --spool must be absolute paths")
+		return applyArgs{}, errUsage
 	}
-	sshd, config, keygen, reload, err := svc.resolve(ctx, stderr)
+	l := apply.Layout{StateDir: filepath.Clean(*stateDir)}
+	spool := l.Spool()
+	if *spoolDir != "" {
+		spool = filepath.Clean(*spoolDir)
+	}
+	return applyArgs{once: *once, dryRun: *dryRun, recover: *recoverFlag, spool: spool, stateDir: l.StateDir, svc: svc}, nil
+}
+
+// runApply is keyroster-agent apply --once.
+func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	a, err := parseApply(args, stderr)
+	if err != nil {
+		return err
+	}
+	sshd, config, keygen, reload, err := a.svc.resolve(ctx, stderr)
 	if errors.Is(err, errUsage) {
 		return err
 	}
@@ -90,13 +115,13 @@ func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return errUsage
 	}
 	cfg := apply.Config{
-		Spool: filepath.Clean(*spoolDir), SSHD: sshd, SSHDConfig: config, SSHKeygen: keygen,
-		Reload: reload, DryRun: *dryRun, RecoverToLastGood: *recoverFlag, Log: stderr,
+		Spool: a.spool, SSHD: sshd, SSHDConfig: config, SSHKeygen: keygen,
+		Reload: reload, DryRun: a.dryRun, RecoverToLastGood: a.recover, Log: stderr,
 		// D-08: only this hand run takes a Phase 2 host over; the applier
 		// unit's run loop (03-07) never sets it.
 		AllowAdoption: true,
 	}
-	report, err := apply.Apply(ctx, cfg, apply.Layout{Root: filepath.Clean(*svc.root), StateDir: filepath.Clean(*stateDir)})
+	report, err := apply.Apply(ctx, cfg, apply.Layout{Root: filepath.Clean(*a.svc.root), StateDir: a.stateDir})
 	out, merr := json.MarshalIndent(report, "", "  ")
 	if merr != nil {
 		return merr

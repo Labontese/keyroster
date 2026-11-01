@@ -608,7 +608,7 @@ Only `keyroster-agent apply` reports these two:
 
 | Code | What it means | Fix |
 |---|---|---|
-| `phase2_adoption_pending` | The exact Phase 2 layout, matching the signed state, found by a run that may not take it over (the applier unit's run loop; its sandbox cannot remove files in `/etc/ssh`). Nothing is written or removed | Run `sudo keyroster-agent apply --once` once from a root shell |
+| `phase2_adoption_pending` | The exact Phase 2 layout, matching the signed state, found by a run that may not take it over (the applier unit's run loop; its sandbox cannot remove files in `/etc/ssh`). Before the first install nothing is written or removed. After a takeover whose removal was cut short, the run loop only logs this code as a warning and still installs newer signed state ([Running the agent](#running-the-agent)) | Run `sudo keyroster-agent apply --once` once from a root shell |
 | `phase2_layout_differs` | A Phase 2 style layout that is not exactly the runbook's, or does not match the signed state. Every difference is listed | Fix each difference (below) |
 
 ## Enrolling a host
@@ -784,6 +784,7 @@ arrive](#how-fast-changes-arrive)).
 | `not_approved` | fetcher log | Enrolled, not approved yet | Step 4 |
 | `unknown_agent` | fetcher log | The server has no agent with this identity: never enrolled, or forgotten (`keyroster host forget`) | A new join token, then `keyroster-agent install` again |
 | `rate limited` (429) | fetcher log | The server's limiter refused a state request; the fetcher keeps what it spooled and goes on at the next poll | None; escalate if every poll says it |
+| `state_item_over_cap` | fetcher log | A state answer held an item above what the applier reads, or more items of a kind than the server sends; nothing was written | Check the server; the next poll asks again (03-08e; run in CI: `TestFetch/oversize_policy_answer_refused_nothing_written`, `TestFetch/more_than_per_kind_refused`; UNVERIFIED on a real host) |
 | `host_in_directory`, `host_not_enrolled` | `host forget` | A directory entry still holds the agent's host keys; no agent has that identity (forgotten already, or its identity rotated) | Remove the host first and wait for its removal confirmation; check the identity with `keyroster host pending` |
 | `host_removal_not_applied` | `host forget` (CLI) | The agent was approved once and the server has no recorded removal confirmation for it: the host's heartbeat never showed a served directory that removes it (`removal confirmed at directory v<N>` is missing in `keyroster host pending`) | Wait for its next heartbeat; `keyroster host forget --identity <identity> --host-gone` for a host that is gone for good ([Removing a host](#removing-a-host)) |
 | `host_swap_pending` | `host forget` (CLI and server) | The agent's removal is confirmed, but its host's newest heartbeat shows a swap it has not finished (`swap pending` in `keyroster host pending`), so the confirmation does not yet speak for what it enforces (03-08c); nothing was forgotten | Wait for its next heartbeat and run the command again; `--host-gone` for a host that is gone for good |
@@ -890,7 +891,64 @@ sudo keyroster-agent apply --once
 ```
 
 The applier's unit cannot remove files in `/etc/ssh`; the hand run can. The
-apply lock serialises it with the unit.
+apply lock serialises it with the unit. Like `run`, `apply --once` defaults
+`--state-dir` to `/var/lib/keyroster-agent` and `--spool` to
+`<state-dir>/spool`, so the command above needs no path flags.
+
+If a takeover's removal was cut short (the hand run stopped before it
+removed `50-keyroster.conf`), the units keep installing newer signed
+state, KRLs included, and log `phase2_adoption_pending` as a warning at
+every apply they run. They never finish the removal: the run loop may not
+take a host over. They write a drifted or missing `00-keyroster.conf`
+again only in an apply that installs newer signed state, as on any
+installed host (`dropin_drift`; a preflight trial drop-in, or an edit
+that makes `sshd -T` fail, is replaced at any apply they run). With
+nothing new to install they write nothing, and `keyroster-agent check`
+reports the drift until then. To finish, run once from a root shell:
+
+```
+sudo keyroster-agent apply --once
+```
+
+It writes a drifted or missing `00-keyroster.conf` again first, checks it
+with `sshd -t` and `sshd -T`, reloads sshd and self-tests, then removes
+the Phase 2 files and the plan, with or without new signed state to
+install.
+
+The runbook's two lines are exempt only at the top level of
+`50-keyroster.conf` and only while the takeover's plan
+(`/var/lib/keyroster-agent/phase2-adopt.json`) is there. Any other trust
+setting beside them, either line inside a `Match` block (or in a
+`50-keyroster.conf` that an `Include` inside one reaches), and the two
+lines once the plan is gone are `foreign_trust_setting`:
+`keyroster-agent preflight` and `keyroster-agent check` report them, and
+the units' apply refuses them when it would rewrite `00-keyroster.conf`.
+The hand run `sudo keyroster-agent apply --once` does not check them
+while the plan is there: it rewrites `00-keyroster.conf` without the
+foreign-trust preflight, then removes `50-keyroster.conf` with every line
+in it, and its copy in `/var/lib/keyroster-agent/phase2/` goes once the
+removal has succeeded. So before the hand run, remove from
+`50-keyroster.conf`, or move to a file of your own, any line you added
+there. Run in CI (03-08e): `TestAdopt`
+(`unfinished_removal_edited_dropin_run_loop_applies_krl`,
+`unfinished_removal_missing_dropin_run_loop_applies_krl`,
+`unfinished_removal_foreign_line_still_refused`,
+`missing_dropin_without_adoption_plan_still_refused`,
+`preflight_command_agrees`, `runbook_line_in_match_block_refused`,
+`runbook_file_included_in_match_block_refused`,
+`runbook_lines_without_adoption_plan_refused`,
+`resume_repairs_edited_dropin`, `resume_repairs_missing_dropin`,
+`crash_during_removal_resumes`,
+`hand_run_removes_runbook_file_with_every_line`,
+`check_during_finished_removal_reports_no_runbook_line`) and
+`TestApplyFlags`. UNVERIFIED: the hand run's repair of a missing
+`00-keyroster.conf` with no new signed state to install (the test that
+repairs a missing one publishes a newer KRL first), the units' rewrite in an apply that installs only a newer bundle
+or directory (the tests publish a KRL), the trial and refused-edit
+repairs in this state (tested only on an installed host without a
+takeover: `TestDropInRepair/noop_apply_replaces_trial_on_installed_host`,
+`dropin_sshd_refuses_repaired_by_noop_run`), and every case on a real host
+(no 03-16 drill cuts a takeover short).
 
 **What the units do.** `keyroster-agent run` looks at the spool every 5 s
 and applies new signed state. It runs the drift check
@@ -973,6 +1031,36 @@ cleanup a commit runs. Run in CI (03-08d):
 `reset_after_host_removed_keeps_status`) and
 `TestStatus/cap_refusal_is_refused`. UNVERIFIED on a real host: no
 03-16 drill provokes these refusals.
+
+The fetcher keeps the spool readable too. It refuses a state answer with
+an item above what the applier reads, or with more versions of a kind
+than the server sends (`state_item_over_cap` in its log), and writes
+nothing of it; the next poll asks again. At the start of every poll it
+removes from the spool each file the applier would refuse for its size
+(one an older fetcher wrote), and logs the names at warning level;
+symlinks and names the applier never reads stay. Then it removes what the
+applier does not read, by the versions in `outbox/accepted.json`: of the
+bundles and directories all but the accepted version and up to 1024 above
+it (what one poll can fetch, which also covers what an unfinished swap
+reads), or the newest 64 on a host that accepted nothing yet; of the KRLs
+all but the newest complete one; of the policies all but those a kept
+bundle names, each under the version its own document names. It logs how
+many files went and the first 16 names; symlinks, other non-regular files
+and names the applier never reads stay here too. So whatever a
+compromised server sends, the spool holds at most what this keeps (with
+the caps above, about 5.1 GiB: 1025 bundle, policy and directory versions
+and one KRL) plus one poll's answers (64 of at most 8 MiB each), about
+5.6 GiB in all; an honest spool holds a few versions. Run in CI (03-08e):
+`TestFetch` (`oversize_policy_answer_refused_nothing_written`,
+`high_policy_version_oversize_refused`, `item_at_cap_written`,
+`honest_answers_fit_the_caps`, `more_than_per_kind_refused`,
+`oversize_directory_and_krl_refused`,
+`poisoned_spool_file_removed_at_next_poll`,
+`heal_leaves_symlinks_and_unknown_names`,
+`heal_error_logged_and_poll_continues`), `TestSpoolPrune`
+and `TestSpool/cap_is_what_read_enforces`. UNVERIFIED on a real host: no
+03-16 drill provokes these refusals, and the byte figures are computed
+from the caps, not measured.
 
 **Watch the hosts** (admin workstation):
 

@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08d-PLAN.md (PR #76 open, awaiting the merge gate)"
-last_updated: "2026-10-30T14:02:42.147Z"
+stopped_at: "Completed 03-08e-PLAN.md (PR #77 open, awaiting the merge gate)"
+last_updated: "2026-11-01T08:37:00.000Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: f31bbdebcbcd8a88a8be1de5d82345f3017f76c6
+state_head: 9fab51244fd6febfa415a5be4115c5b4d6084eb4
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 57
-  completed_plans: 49
+  total_plans: 58
+  completed_plans: 50
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 15 of 22
+Plan: 16 of 23
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -104,6 +104,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08b | 58min | 3 tasks | 19 files |
 | Phase 03 P08c | 168min | 4 tasks | 44 files |
 | Phase 03 P08d | 94min | 3 tasks | 20 files |
+| Phase 03 P08e | 40min | 3 tasks | 22 files |
 
 ## Accumulated Context
 
@@ -286,6 +287,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08d: F08's fallback without a directory reports last-good's recorded host_status, not an empty one
 - [Phase 03]: 03-08d: one KRL-alone pass per run, shared by forward and pollSpool; content refusals are render errors, cap refusals (target and intermediate) and ca_line_rejected
 - [Phase 03]: 03-08d: while no directory is accepted every apply's error joins host_not_in_directory to Verify's refusal
+- [Phase 03]: 03-08e: spool.Cap is the one source of the spool's read caps; the fetcher refuses an answer above them or above MaxAgentStatePerKind (state_item_over_cap) before any write, and heals oversize recognised regular files at every poll
+- [Phase 03]: 03-08e: phase2Shadowed is the one Phase 2 leftover filter for Preflight, preflightApply and Check; the runbook's sshd -T values are exempt only while phase2-adopt.json exists, and never in Check
+- [Phase 03]: 03-08e: keyroster-agent apply --once defaults --state-dir and --spool as run does (parseApply)
 
 ### Pending Todos
 

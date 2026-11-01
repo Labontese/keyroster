@@ -94,6 +94,52 @@ var (
 	krlRE = regexp.MustCompile(`^krl-([1-9][0-9]{0,19})\.(krl|manifest\.json|manifest\.sig)$`)
 )
 
+// Cap is the cap Read applies to the file name, with true for a name it
+// recognises: MaxBundle for a bundle or policy and their signatures,
+// wire.MaxDirectory for a directory and wire.MaxDirectorySigs for its
+// signatures, krl.MaxKRL, krl.MaxManifest and krl.MaxManifestSig for a
+// KRL, its manifest and the manifest's signature. A name outside the
+// fixed patterns, or whose version is not a uint64, is false: Read never
+// reads it. Read takes its caps from here, and the fetcher refuses what
+// is above them (F01 (03-08e)).
+func Cap(name string) (int64, bool) {
+	if m := docRE.FindStringSubmatch(name); m != nil {
+		if _, err := strconv.ParseUint(m[2], 10, 64); err != nil {
+			return 0, false
+		}
+		switch {
+		case m[1] == "directory" && m[3] == "":
+			return wire.MaxDirectory, true
+		case m[1] == "directory":
+			return wire.MaxDirectorySigs, true
+		}
+		return MaxBundle, true
+	}
+	if m := krlRE.FindStringSubmatch(name); m != nil {
+		if _, err := strconv.ParseUint(m[1], 10, 64); err != nil {
+			return 0, false
+		}
+		switch m[2] {
+		case "krl":
+			return krl.MaxKRL, true
+		case "manifest.json":
+			return krl.MaxManifest, true
+		}
+		return krl.MaxManifestSig, true
+	}
+	return 0, false
+}
+
+// readCapped is ReadFileAt with the cap Cap gives name. Read calls it
+// only for names it matched, which Cap recognises.
+func readCapped(dirfd int, name string) ([]byte, error) {
+	limit, ok := Cap(name)
+	if !ok {
+		return nil, fmt.Errorf("%w: %q has no cap", ErrBadName, name)
+	}
+	return ReadFileAt(dirfd, name, limit)
+}
+
 // checkName refuses a name that is not one path component.
 func checkName(name string) error {
 	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, '/') || strings.ContainsRune(name, 0) {
@@ -262,8 +308,8 @@ func ListDir(dirfd int) ([]string, error) {
 
 // Read captures the spool at dir: it opens dir with OpenDir (a symlink or
 // non-directory in its place refuses the whole spool), lists it, and
-// reads every recognised name through ReadFileAt with its kind's cap:
-// bundle and policy and their signatures MaxBundle, directory
+// reads every recognised name through ReadFileAt with the cap Cap gives
+// it: bundle and policy and their signatures MaxBundle, directory
 // wire.MaxDirectory with wire.MaxDirectorySigs for its signatures, the
 // KRL krl.MaxKRL, its manifest krl.MaxManifest and the manifest's
 // signature krl.MaxManifestSig. Names outside the fixed patterns, sets
@@ -312,11 +358,6 @@ func Read(dir string, floor Floor) (State, []string, error) {
 		}
 		ignored = append(ignored, n)
 	}
-	caps := map[string][2]int64{
-		"bundle":    {MaxBundle, MaxBundle},
-		"policy":    {MaxBundle, MaxBundle},
-		"directory": {wire.MaxDirectory, wire.MaxDirectorySigs},
-	}
 	targets := map[string]map[uint64]Doc{"bundle": st.Bundles, "policy": st.Policies, "directory": st.Directories}
 	floors := map[string]uint64{"bundle": floor.Bundle, "policy": floor.Policy, "directory": floor.Directory}
 	for _, kind := range []string{"bundle", "policy", "directory"} {
@@ -337,11 +378,11 @@ func Read(dir string, floor Floor) (State, []string, error) {
 				ignored = append(ignored, base+" (outside the versions read this time)")
 				continue
 			}
-			body, err := ReadFileAt(fd, base, caps[kind][0])
+			body, err := readCapped(fd, base)
 			if err != nil {
 				return st, ignored, err
 			}
-			sigs, err := ReadFileAt(fd, base+".sigs", caps[kind][1])
+			sigs, err := readCapped(fd, base+".sigs")
 			if err != nil {
 				return st, ignored, err
 			}
@@ -360,10 +401,9 @@ func Read(dir string, floor Floor) (State, []string, error) {
 		var files KRLFiles
 		for _, f := range []struct {
 			name string
-			max  int64
 			dst  *[]byte
-		}{{base + ".krl", krl.MaxKRL, &files.KRL}, {base + ".manifest.json", krl.MaxManifest, &files.Manifest}, {base + ".manifest.sig", krl.MaxManifestSig, &files.Sig}} {
-			b, err := ReadFileAt(fd, f.name, f.max)
+		}{{base + ".krl", &files.KRL}, {base + ".manifest.json", &files.Manifest}, {base + ".manifest.sig", &files.Sig}} {
+			b, err := readCapped(fd, f.name)
 			if err != nil {
 				return st, ignored, err
 			}
@@ -379,6 +419,22 @@ func Read(dir string, floor Floor) (State, []string, error) {
 // reports versions above floor it left out (with a floor only: without
 // one it takes the newest, and what it leaves out is older).
 func pick(vs []uint64, floor uint64) (map[uint64]bool, bool) {
+	return pickAbove(vs, floor, MaxVersionsPerKind)
+}
+
+// Keep is the versions of vs the fetcher keeps in the spool (F01 (03-08e)
+// fix rounds 1 and 3): Floor's rule, with the lowest above versions above
+// a floor instead of MaxVersionsPerKind, so that the versions a pending
+// swap reads from its own floor, above the accepted one, stay too.
+// Without a floor it is Read's own rule, the newest MaxVersionsPerKind. vs
+// is not changed.
+func Keep(vs []uint64, floor uint64, above int) map[uint64]bool {
+	take, _ := pickAbove(slices.Clone(vs), floor, above)
+	return take
+}
+
+// pickAbove is pick with the lowest above versions above a floor.
+func pickAbove(vs []uint64, floor uint64, above int) (map[uint64]bool, bool) {
 	slices.Sort(vs)
 	take := map[uint64]bool{}
 	if floor == 0 {
@@ -393,7 +449,7 @@ func pick(vs []uint64, floor uint64) (map[uint64]bool, bool) {
 		switch {
 		case v <= floor:
 			below = v
-		case n < MaxVersionsPerKind:
+		case n < above:
 			take[v] = true
 			n++
 		default:

@@ -3,6 +3,7 @@
 package apply
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -405,6 +406,291 @@ func TestAdopt(t *testing.T) {
 			}
 		})
 	}
+	// F09 (03-08e): a takeover by apply --once whose removal crashed at the
+	// first phase2-remove, so before 50-keyroster.conf went; then the run
+	// loop's apply (AllowAdoption false) with a newer KRL. Unlike
+	// crash_during_removal_resumes, which crashes after that file is gone,
+	// this leaves the runbook's two lines in force wherever the agent's
+	// drop-in does not set a keyword.
+	unfinishedRemoval := func(t *testing.T) *testHost {
+		t.Helper()
+		h := adoptHost(t)
+		h.installPhase2(phase2Layout{})
+		n := 0
+		h.cfg.Fault = func(p string) error {
+			if p == "phase2-remove" {
+				if n++; n == 1 {
+					return &crash{point: p}
+				}
+			}
+			return nil
+		}
+		if _, err := h.apply(); !isCrash(err) {
+			t.Fatalf("the takeover: %v, want a crash in its removal", err)
+		}
+		if h.lastGood() == 0 || !h.exists(h.l.State(adoptFile)) || !h.exists(h.l.Phase2DropIn()) || !h.exists(h.l.Phase2CAFile()) || !h.exists(h.l.Phase2PrincipalsDir()) {
+			t.Fatalf("the starting state: last-good %d, plan %t, 50-keyroster.conf %t, CA file %t, principals dir %t", h.lastGood(),
+				h.exists(h.l.State(adoptFile)), h.exists(h.l.Phase2DropIn()), h.exists(h.l.Phase2CAFile()), h.exists(h.l.Phase2PrincipalsDir()))
+		}
+		if h.run.after["trustedusercakeys"] != phase2CAValue || h.run.after["authorizedprincipalsfile"] != phase2PrincipalsVal {
+			t.Fatalf("sshd -T after the agent's drop-in reports %v, want the runbook's values", h.run.after)
+		}
+		h.cfg.Fault = nil
+		h.cfg.AllowAdoption = false
+		return h
+	}
+	editDropIn := func(t *testing.T, h *testHost) {
+		t.Helper()
+		edited := strings.Replace(string(DropIn(h.l)), "TrustedUserCAKeys "+filepath.Join(h.l.Current(), CAFile)+"\n", "", 1)
+		if edited == string(DropIn(h.l)) {
+			t.Fatal("the edit removed no line")
+		}
+		if err := os.WriteFile(h.l.DropIn(), []byte(edited), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+	}
+	removeDropIn := func(t *testing.T, h *testHost) {
+		t.Helper()
+		if err := os.Remove(h.l.DropIn()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	foreignFindingsOf := func(err error) []Finding {
+		var pe *PreflightError
+		if !errors.As(err, &pe) {
+			return nil
+		}
+		var out []Finding
+		for _, f := range pe.Findings {
+			if f.Code == CodeForeignTrust {
+				out = append(out, f)
+			}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, h *testHost)
+	}{
+		{"unfinished_removal_edited_dropin_run_loop_applies_krl", editDropIn},
+		{"unfinished_removal_missing_dropin_run_loop_applies_krl", removeDropIn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := unfinishedRemoval(t)
+			tc.edit(t, h)
+			h.publishKRL(9)
+			var log strings.Builder
+			h.cfg.Log = &log
+			r, err := h.apply()
+			if err != nil {
+				t.Fatalf("the run loop's apply during an unfinished takeover: %v (report %+v)", err, r)
+			}
+			if got := readFile(t, h.l.DropIn()); got != string(DropIn(h.l)) {
+				t.Errorf("00-keyroster.conf was not repaired: %q", got)
+			}
+			if !h.krlRevokes(h.l.Current(), 9) {
+				t.Error("the newer KRL was not installed")
+			}
+			if !strings.Contains(log.String(), "WARNING "+CodePhase2Pending) {
+				t.Errorf("log %q, want the phase2_adoption_pending warning", log.String())
+			}
+			if !h.exists(h.l.Phase2DropIn()) || !h.exists(h.l.State(adoptFile)) {
+				t.Error("the run loop removed the Phase 2 layout or its plan")
+			}
+		})
+	}
+	t.Run("unfinished_removal_foreign_line_still_refused", func(t *testing.T) {
+		t.Parallel()
+		h := unfinishedRemoval(t)
+		appendFile(t, h.l.Phase2DropIn(), "TrustedUserCAKeys /etc/ssh/other.pub\n")
+		editDropIn(t, h)
+		h.publishKRL(9)
+		_, err := h.apply()
+		found := foreignFindingsOf(err)
+		if len(found) == 0 {
+			t.Fatalf("a foreign line beside the runbook's: %v, want foreign_trust_setting", err)
+		}
+		for _, f := range found {
+			if !strings.Contains(f.Message, "/etc/ssh/other.pub") {
+				t.Errorf("a refusal that is not the foreign line's: %s", f.Message)
+			}
+		}
+		if h.krlRevokes(h.l.Current(), 9) {
+			t.Error("the KRL installed despite the refusal")
+		}
+	})
+	t.Run("missing_dropin_without_adoption_plan_still_refused", func(t *testing.T) {
+		t.Parallel()
+		h := unfinishedRemoval(t)
+		removeDropIn(t, h)
+		if err := os.Remove(h.l.State(adoptFile)); err != nil {
+			t.Fatal(err)
+		}
+		h.publishKRL(9)
+		_, err := h.apply()
+		found := foreignFindingsOf(err)
+		// F09 (03-08e) fix round 1: with no takeover in progress the
+		// runbook's lines are not exempt, so the refusal names the line that
+		// sets the value (foreignFindings reports an sshd -T value only for a
+		// keyword no line names).
+		line := false
+		for _, f := range found {
+			line = line || f.File == h.l.Phase2DropIn() && strings.Contains(f.Message, phase2CALine)
+		}
+		if !line {
+			t.Fatalf("the runbook's values in force with no takeover in progress: %v, want the foreign_trust_setting of the runbook's TrustedUserCAKeys line", err)
+		}
+	})
+	t.Run("preflight_command_agrees", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name string
+			edit func(t *testing.T, h *testHost)
+		}{{"edited", editDropIn}, {"missing", removeDropIn}} {
+			h := unfinishedRemoval(t)
+			tc.edit(t, h)
+			r, err := Preflight(context.Background(), h.cfg, h.l)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range r.Findings {
+				if f.Code == CodeForeignTrust {
+					t.Errorf("%s drop-in: keyroster-agent preflight refuses what the apply repairs: %s", tc.name, f.Message)
+				}
+			}
+		}
+	})
+	// F09 (03-08e) fix round 1: the runbook's two lines are exempt only at
+	// the top level of 50-keyroster.conf, outside any Match block, and only
+	// while the takeover's plan is there. A Match block overrides the
+	// agent's drop-in for the connections it matches, so a runbook line in
+	// one, or in a file a Match block includes, is a foreign trust setting;
+	// so are the lines once no takeover is in progress. The run loop's
+	// apply, keyroster-agent preflight and keyroster-agent check all refuse
+	// them through the one filter (phase2Shadowed).
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, h *testHost)
+		line int // the refused line of 50-keyroster.conf
+	}{
+		{"runbook_line_in_match_block_refused", func(t *testing.T, h *testHost) {
+			appendFile(t, h.l.Phase2DropIn(), "Match User deploy\n\t"+phase2PrincipalsLine+"\n")
+		}, 4},
+		{"runbook_file_included_in_match_block_refused", func(t *testing.T, h *testHost) {
+			appendFile(t, h.cfg.SSHDConfig, "Match User deploy\n\tInclude "+h.l.Phase2DropIn()+"\n")
+		}, 1},
+		{"runbook_lines_without_adoption_plan_refused", func(t *testing.T, h *testHost) {
+			if err := os.Remove(h.l.State(adoptFile)); err != nil {
+				t.Fatal(err)
+			}
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			t.Run("apply", func(t *testing.T) {
+				// preflightApply runs when the drop-in would change: here an
+				// edit that leaves the agent's values in force, so only the
+				// runbook's line can refuse.
+				h := unfinishedRemoval(t)
+				tc.edit(t, h)
+				appendFile(t, h.l.DropIn(), "# managed by configuration management\n")
+				h.publishKRL(9)
+				_, err := h.apply()
+				found := foreignFindingsOf(err)
+				if !slices.ContainsFunc(found, func(f Finding) bool { return f.File == h.l.Phase2DropIn() && f.Line == tc.line }) {
+					t.Fatalf("the run loop's apply: %v, want foreign_trust_setting at %s:%d", err, h.l.Phase2DropIn(), tc.line)
+				}
+				if h.krlRevokes(h.l.Current(), 9) {
+					t.Error("the KRL installed despite the refusal")
+				}
+			})
+			t.Run("preflight", func(t *testing.T) {
+				h := unfinishedRemoval(t)
+				tc.edit(t, h)
+				r, err := Preflight(context.Background(), h.cfg, h.l)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if f := slices.IndexFunc(r.Findings, func(f Finding) bool {
+					return f.Code == CodeForeignTrust && f.Refusal && f.File == h.l.Phase2DropIn() && f.Line == tc.line
+				}); f < 0 {
+					t.Fatalf("keyroster-agent preflight: %+v, want foreign_trust_setting at %s:%d", r.Findings, h.l.Phase2DropIn(), tc.line)
+				}
+			})
+			t.Run("check", func(t *testing.T) {
+				h := unfinishedRemoval(t)
+				tc.edit(t, h)
+				d, err := h.check()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if f := slices.IndexFunc(d.Foreign, func(f Finding) bool {
+					return f.Code == CodeForeignTrust && f.File == h.l.Phase2DropIn() && f.Line == tc.line
+				}); f < 0 {
+					t.Fatalf("keyroster-agent check: foreign %+v, want foreign_trust_setting at %s:%d", d.Foreign, h.l.Phase2DropIn(), tc.line)
+				}
+			})
+		})
+	}
+	// F09 (03-08e) fix round 2: keyroster-agent check takes no apply lock,
+	// so a hand run's finishAdoption can remove 50-keyroster.conf and then
+	// the plan while a check runs. Check reads the plan before the
+	// configuration: a plan it finds still exempts lines it may then not
+	// find at all, and no plan means the file was gone already. Here the
+	// removal finishes right after the scan (fix round 3), so any order that
+	// reads the plan after the scan finds it gone and reports the lines.
+	t.Run("check_during_finished_removal_reports_no_runbook_line", func(t *testing.T) {
+		t.Parallel()
+		h := unfinishedRemoval(t)
+		fired := false
+		h.cfg.Fault = func(p string) error {
+			if p == "check-scanned" {
+				fired = true
+				for _, path := range []string{h.l.Phase2DropIn(), h.l.State(adoptFile)} {
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			return nil
+		}
+		d, err := h.check()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fired {
+			t.Fatal("the check-scanned point never ran: the test does not test")
+		}
+		for _, f := range d.Foreign {
+			if f.File == h.l.Phase2DropIn() {
+				t.Errorf("a runbook line the finished removal took away is reported: %s", f.Message)
+			}
+		}
+	})
+	// F09 (03-08e) fix round 2, the runbook's warning: the hand run
+	// (AllowAdoption) finishes an unfinished takeover without the
+	// foreign-trust preflight the units' apply runs. It rewrites the edited
+	// drop-in and removes 50-keyroster.conf with every line in it, a
+	// foreign one and a Match block included, and its copy goes once the
+	// removal succeeds.
+	t.Run("hand_run_removes_runbook_file_with_every_line", func(t *testing.T) {
+		t.Parallel()
+		h := unfinishedRemoval(t)
+		appendFile(t, h.l.Phase2DropIn(), "TrustedUserCAKeys /etc/ssh/other.pub\nMatch User deploy\n\t"+phase2PrincipalsLine+"\n")
+		appendFile(t, h.l.DropIn(), "# managed by configuration management\n")
+		h.cfg.AllowAdoption = true
+		r, err := h.apply()
+		if err != nil {
+			t.Fatalf("the hand run: %v (report %+v)", err, r)
+		}
+		if h.exists(h.l.Phase2DropIn()) || h.exists(h.l.State(adoptBak)) || h.exists(h.l.State(adoptFile)) {
+			t.Fatalf("after the hand run: 50-keyroster.conf %t, phase2/ %t, plan %t", h.exists(h.l.Phase2DropIn()), h.exists(h.l.State(adoptBak)), h.exists(h.l.State(adoptFile)))
+		}
+		if !slices.Contains(r.Phase2Removed, h.l.Phase2DropIn()) || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) {
+			t.Fatalf("removed %v, drop-in %q", r.Phase2Removed, readFile(t, h.l.DropIn()))
+		}
+	})
 	t.Run("marker_write_failure_leaves_no_plan", func(t *testing.T) {
 		t.Parallel()
 		// PR #68 review, F2: the marker write fails (ENOSPC, EIO) at the

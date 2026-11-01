@@ -198,6 +198,9 @@ type settingHit struct {
 	Line    int
 	Keyword string
 	Text    string
+	// InMatch: sshd reads the line as part of a Match block (configLine,
+	// configFile).
+	InMatch bool
 }
 
 // principalsCommand and principalsCommandUser are sshd -T's spelling of
@@ -254,7 +257,7 @@ func trustSettingHits(l Layout, config string, own []byte) ([]settingHit, []Find
 			continue
 		}
 		for _, line := range f.lines {
-			h := settingHit{File: f.path, Line: line.n, Keyword: line.keyword, Text: line.text}
+			h := settingHit{File: f.path, Line: line.n, Keyword: line.keyword, Text: line.text, InMatch: f.inMatch || line.inMatch}
 			switch {
 			case slices.Contains(trustKeywords, h.Keyword):
 				hits = append(hits, h)
@@ -326,7 +329,9 @@ func dumpFindings(d Dump, r *PreflightReport) {
 // 00-keyroster.conf on disk on an installed host: a keyword it sets is
 // not compared with base, because an edited agent drop-in is drift the
 // apply repairs (D-R2), and activateDropIn checks the repaired value.
-func foreignFindings(l Layout, base Dump, hits []settingHit, dropIn []byte, r *PreflightReport) {
+// A base value equal to shadowed[keyword] is not a finding either
+// (phase2Shadowed).
+func foreignFindings(l Layout, base Dump, hits []settingHit, dropIn []byte, shadowed map[string]string, r *PreflightReport) {
 	named := map[string]bool{}
 	for _, h := range hits {
 		named[h.Keyword] = true
@@ -337,7 +342,7 @@ func foreignFindings(l Layout, base Dump, hits []settingHit, dropIn []byte, r *P
 	want := ourValues(l)
 	ownLine := dropInKeywords(dropIn)
 	for _, k := range trustKeywords {
-		if v := base.One(k); !isDefault(v) && v != want[k] && !named[k] && !ownLine[k] {
+		if v := base.One(k); !isDefault(v) && v != want[k] && v != shadowed[k] && !named[k] && !ownLine[k] {
 			r.add(Finding{Code: CodeForeignTrust,
 				Message: fmt.Sprintf("sshd -T reports %s %q, set in no file the agent read (an Include elsewhere, or a command-line option)", k, v),
 				Fix:     "find and remove that setting: sudo grep -rniE '^\\s*" + k + "' /etc/ssh"})
@@ -348,6 +353,42 @@ func foreignFindings(l Layout, base Dump, hits []settingHit, dropIn []byte, r *P
 			Message: fmt.Sprintf("sshd -T reports %s %q, set in no file the agent read; a principals command widens which certificates sshd accepts", principalsCommand, v),
 			Fix:     "find and remove that setting: sudo grep -rniE '^\\s*" + principalsCommand + "' /etc/ssh"})
 	}
+}
+
+// phase2Shadowed is the one filter of the Phase 2 runbook's leftovers on
+// an installed host, for Preflight, preflightApply and Check (F09
+// (03-08e)). While a takeover is in progress (adoptPending: readAdopt
+// returns a plan), rest is hits without the runbook's own two lines
+// (phase2CALine, phase2PrincipalsLine) at the top level of
+// 50-keyroster.conf, which a takeover whose removal is unfinished leaves,
+// and shadowed holds the runbook's two sshd -T values, which
+// foreignFindings then does not report: with 00-keyroster.conf missing or
+// edited, sshd enforces them until the apply rewrites the agent's drop-in.
+// found reports that it dropped any line; when it dropped none, shadowed
+// is nil. With no takeover in progress rest is hits.
+//
+// The exemption is safe because it never decides what sshd trusts in the
+// end: writeDropIn reports the change, and activateDropIn's
+// checkDropInEffective refuses, before the reload counts as done, unless
+// sshd -T shows the agent's values in force. At the top level the agent's
+// 00-keyroster.conf, read first, wins over these lines. A line inside a
+// Match block, or in a 50-keyroster.conf an Include inside one reaches,
+// is never exempt: a Match block overrides the agent's drop-in for the
+// connections it matches. Nor are the lines once no takeover is in
+// progress, and any other line or value still refuses (F09 (03-08e) fix
+// round 1).
+func phase2Shadowed(l Layout, hits []settingHit, adoptPending bool) (rest []settingHit, shadowed map[string]string, found bool) {
+	for _, h := range hits {
+		if adoptPending && h.File == l.Phase2DropIn() && !h.InMatch && (h.Text == phase2CALine || h.Text == phase2PrincipalsLine) {
+			found = true
+			continue
+		}
+		rest = append(rest, h)
+	}
+	if found {
+		shadowed = map[string]string{"trustedusercakeys": phase2CAValue, "authorizedprincipalsfile": phase2PrincipalsVal}
+	}
+	return rest, shadowed, found
 }
 
 // dropInKeywords are the lowercase keywords the lines of a drop-in set,
@@ -474,29 +515,25 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 		}
 		// The Phase 2 runbook's own two lines in 50-keyroster.conf, left by
 		// a takeover whose removal is unfinished, are shadowed by the
-		// agent's drop-in (00- is read first, and sshd -T shows the
-		// agent's values).
-		var rest []settingHit
-		for _, h := range hits {
-			if h.File == l.Phase2DropIn() && (h.Text == phase2CALine || h.Text == phase2PrincipalsLine) {
-				continue
-			}
-			rest = append(rest, h)
-		}
-		if len(rest) < len(hits) {
+		// agent's drop-in (00- is read first), and while the takeover's
+		// plan is there so are their values, which the next apply's
+		// drop-in replaces (phase2Shadowed, as preflightApply does).
+		p, _ := e.readAdopt()
+		rest, shadowed, found := phase2Shadowed(l, hits, p != nil)
+		if found {
 			r.Notes = append(r.Notes, "the Phase 2 layout is still present beside the agent's drop-in; "+adoptCommand+" removes it")
 		}
-		foreignFindings(l, base, rest, existing, r)
+		foreignFindings(l, base, rest, existing, shadowed, r)
 	case existing != nil && !bytes.Equal(existing, DropIn(l)):
 		r.add(Finding{Code: CodeForeignTrust, File: l.DropIn(), Message: l.DropIn() + " exists and is not the agent's drop-in",
 			Fix: "move it away; the agent owns that file name"})
 	case existing != nil:
 		// The agent's own drop-in without a generation of the agent's:
 		// its values must be in force.
-		foreignFindings(l, base, hits, nil, r)
+		foreignFindings(l, base, hits, nil, nil, r)
 	default:
 		if !phase2Findings(l, base, hits, r) {
-			foreignFindings(l, base, hits, nil, r)
+			foreignFindings(l, base, hits, nil, nil, r)
 		}
 		if err := e.trialFindings(ctx, base, r); err != nil {
 			return nil, err
@@ -587,7 +624,7 @@ func (e *engine) preflightApply(v *state.Verified, g *Generation) error {
 		case plan != nil:
 			e.adopt = plan
 		default:
-			foreignFindings(e.l, e.dump, hits, nil, r)
+			foreignFindings(e.l, e.dump, hits, nil, nil, r)
 		}
 	case old == nil || bytes.Equal(old, DropIn(e.l)) || lg.kind != linkNone:
 		// Once a generation of the agent's is last-good, 00-keyroster.conf
@@ -595,7 +632,16 @@ func (e *engine) preflightApply(v *state.Verified, g *Generation) error {
 		// writeDropIn repairs (kept as dropin.prev, sshd -t, the sshd -T
 		// checks, reload, self-test), never a refusal that would hold back a
 		// KRL (owner decision D-R2, PR #68 review F15: "Repair + report").
-		foreignFindings(e.l, e.dump, hits, old, r)
+		// On an installed host the Phase 2 runbook's leftovers of an
+		// unfinished takeover are filtered as Preflight and Check do, so the
+		// run loop repairs the drop-in and installs newer KRLs while it
+		// reports phase2_adoption_pending (F09 (03-08e), phase2Shadowed).
+		rest, shadowed := hits, map[string]string(nil)
+		if lg.kind == linkAgent {
+			p, _ := e.readAdopt()
+			rest, shadowed, _ = phase2Shadowed(e.l, hits, p != nil)
+		}
+		foreignFindings(e.l, e.dump, rest, old, shadowed, r)
 	default:
 		// A first install: a file the agent did not write holds its name.
 		r.add(Finding{Code: CodeForeignTrust, File: e.l.DropIn(), Message: e.l.DropIn() + " exists and is not the agent's drop-in", Fix: "move it away; the agent owns that file name"})

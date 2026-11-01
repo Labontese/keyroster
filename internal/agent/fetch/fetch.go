@@ -25,6 +25,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +78,10 @@ var (
 	ErrConfig      = errors.New("fetch_config_invalid")
 	// ErrDirNotOwned is a fetcher directory another user owns.
 	ErrDirNotOwned = errors.New("fetch_dir_not_owned")
+	// ErrAnswerOverCap is a state answer with an item above the cap
+	// spool.Read applies to its file, or with more items of a kind than the
+	// server sends: nothing of it is written (F01 (03-08e)).
+	ErrAnswerOverCap = errors.New("state_item_over_cap")
 )
 
 // Config is one fetcher.
@@ -416,6 +422,30 @@ func (f *Fetcher) readAnswer() (*enroll.Answer, error) {
 // left by a rotation whose answer was lost finishes that rotation
 // (recoverRotation) and asks again.
 func (f *Fetcher) pollState(ctx context.Context) (bool, error) {
+	// F01 (03-08e): first the files the applier would refuse go (healSpool);
+	// the heal is best effort, and the poll goes on whatever it finds.
+	removed, err := healSpool(f.cfg.Spool)
+	if len(removed) > 0 {
+		f.logf("WARNING removed spool files above the size the applier reads: %s", strings.Join(removed, " "))
+	}
+	if err != nil {
+		f.logf("WARNING could not remove every spool file above the size the applier reads, which refuses the spool until they go; the next poll tries again: %v", err)
+	}
+	// F01 (03-08e) fix round 1: then what the applier's next capture does
+	// not read goes (pruneSpool), so the spool stays bounded across
+	// answers. Best effort too; a cursor error below stops the poll.
+	if a, err := readAccepted(f.cfg.Outbox); err == nil {
+		if a == nil {
+			a = &enroll.Accepted{}
+		}
+		pruned, err := pruneSpool(f.cfg.Spool, *a)
+		if len(pruned) > 0 {
+			f.logf("removed %d spool files the applier does not read (accepted bundle %d, directory %d, KRL %d): %s", len(pruned), a.Bundle, a.Directory, a.KRL, listNames(pruned))
+		}
+		if err != nil {
+			f.logf("WARNING could not prune the spool; the next poll tries again: %v", err)
+		}
+	}
 	v, err := f.cursor()
 	if err != nil {
 		return false, err
@@ -505,29 +535,92 @@ func (f *Fetcher) cursor() (serverclient.AgentVersions, error) {
 	if err != nil {
 		return sv, err
 	}
-	fd, err := spool.OpenDir(f.cfg.Outbox)
-	if err != nil {
+	a, err := readAccepted(f.cfg.Outbox)
+	if err != nil || a == nil {
 		return sv, err
+	}
+	return serverclient.AgentVersions{Bundle: min(a.Bundle, sv.Bundle), Directory: min(a.Directory, sv.Directory), KRL: min(a.KRL, sv.KRL)}, nil
+}
+
+// readAccepted reads enroll.AcceptedFile from the outbox at dir, or nil
+// when there is none yet.
+func readAccepted(dir string) (*enroll.Accepted, error) {
+	fd, err := spool.OpenDir(dir)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = unix.Close(fd) }()
 	b, err := spool.ReadFileAt(fd, enroll.AcceptedFile, enroll.MaxAcceptedFile)
 	if errors.Is(err, unix.ENOENT) {
-		return sv, nil
+		return nil, nil
 	}
 	if err != nil {
-		return sv, err
+		return nil, err
 	}
 	var a enroll.Accepted
 	if err := trust.DecodeStrict(b, &a); err != nil {
-		return sv, fmt.Errorf("%s: %w", enroll.AcceptedFile, err)
+		return nil, fmt.Errorf("%s: %w", enroll.AcceptedFile, err)
 	}
-	return serverclient.AgentVersions{Bundle: min(a.Bundle, sv.Bundle), Directory: min(a.Directory, sv.Directory), KRL: min(a.KRL, sv.KRL)}, nil
+	return &a, nil
+}
+
+// healSpool removes from the spool at dir every file whose name spool.Cap
+// recognises and that fstatat, not following a symlink, shows to be a
+// regular file above that cap, and returns their names (F01 (03-08e)).
+// spool.Read refuses a capture that holds one, so a spool an answer
+// poisoned before checkCaps existed heals at the next poll. Symlinks,
+// other non-regular files and names the applier never reads are left: the
+// applier refuses or ignores them itself (T-03-225). It goes on past a
+// file it cannot remove and returns every such error; pollState logs them
+// and polls on, and the next poll tries again.
+func healSpool(dir string) ([]string, error) {
+	fd, err := spool.OpenDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	names, err := spool.ListDir(fd)
+	if err != nil {
+		return nil, fmt.Errorf("list spool %s: %w", dir, err)
+	}
+	var removed []string
+	var errs []error
+	for _, n := range names {
+		limit, ok := spool.Cap(n)
+		if !ok {
+			continue
+		}
+		var st unix.Stat_t
+		if err := unix.Fstatat(fd, n, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			if !errors.Is(err, unix.ENOENT) {
+				errs = append(errs, fmt.Errorf("stat %s: %w", n, err))
+			}
+			continue
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Size <= limit {
+			continue
+		}
+		if err := unix.Unlinkat(fd, n, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			errs = append(errs, fmt.Errorf("remove %s (%d bytes, above %d): %w", n, st.Size, limit, err))
+			continue
+		}
+		removed = append(removed, n)
+	}
+	if len(removed) > 0 {
+		if err := unix.Fsync(fd); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return removed, errors.Join(errs...)
 }
 
 // dropAbove removes the bundle, directory and KRL files of the spool at
 // dir whose version is above v's for their kind, and returns their names.
 // Policies are left: they are found by their hash, never by a version
-// cursor. Only pollState calls it, after an answer with more: false.
+// cursor. A policy is still replaced by name when an answer names its
+// version again, which is harmless: the applier finds the policy it
+// accepted by its SHA-256 first (F01 (03-08e)). Only pollState calls it,
+// after an answer with more: false.
 func dropAbove(dir string, v serverclient.AgentVersions) ([]string, error) {
 	fd, err := spool.OpenDir(dir)
 	if err != nil {
@@ -568,11 +661,187 @@ func dropAbove(dir string, v serverclient.AgentVersions) ([]string, error) {
 	return nil, nil
 }
 
+// keepAbove is how many bundle and directory versions above the accepted
+// one pruneSpool keeps: as many as one poll writes (MaxRounds answers of
+// serverclient.MaxAgentStatePerKind). Every poll asks from a cursor at or
+// below the accepted version (cursor), so every version the spool can
+// hold while that version stays lies within this window. That covers the
+// pending target a swap's widening wait reads from, which each
+// superseding capture moves up to spool.MaxVersionsPerKind further above
+// the accepted version (pollSpool), and what a host catching up reads
+// when the next poll fails (F01 (03-08e) fix rounds 1 and 3).
+const keepAbove = MaxRounds * serverclient.MaxAgentStatePerKind
+
+// pruneSpool removes from the spool at dir what the applier does not
+// read, given the versions it accepted (a; zero for a kind it accepted
+// nothing of, or when the outbox has no enroll.AcceptedFile), and returns
+// the names it removed (F01 (03-08e) fix rounds 1 to 3). pollState calls
+// it at the start of every poll, so between two polls the spool holds at
+// most what it kept plus what one poll writes. With the read caps that is
+// about 5.1 GiB kept (1025 bundle, policy and directory sets and one KRL
+// set) plus at most MaxRounds answers of
+// serverclient.MaxAgentStateResponse (512 MiB), about 5.6 GiB in all;
+// computed from the caps, not measured. It removes:
+//
+//   - of the bundles and the directories, every version but the complete
+//     ones spool.Keep takes: the newest at or below a's version (the
+//     accepted one, whose policy so stays too) and the lowest keepAbove
+//     above it, or without one the newest spool.MaxVersionsPerKind, which
+//     is all a floor-0 capture reads (and the applier then uses the newest
+//     only). A pending swap reads from a floor above the accepted version,
+//     and only versions the spool holds, which all lie within keepAbove
+//     of it (keepAbove): a superseded pending target is never pruned;
+//   - of the KRLs, every version but the newest complete one, the only one
+//     spool.Read reads;
+//   - of the policies, every version but those whose document names its own
+//     version, as the server's do, and whose SHA-256 a kept bundle names
+//     (policy_sha256, the field the applier finds a bundle's policy by). So
+//     the kept policies are at most one per kept bundle, and without a floor
+//     at most the spool.MaxVersionsPerKind a floor-0 capture reads: junk
+//     policies cannot hide the honest one. A kept bundle that does not
+//     parse names none (the applier refuses it); one that cannot be read
+//     at all (a symlink, which no answer writes) may name any policy, and
+//     then no policy goes.
+//
+// A set is complete by its names, as spool.Read counts it. Only regular
+// files are removed, found by fstatat without following a symlink;
+// symlinks, other non-regular files and names the applier never reads are
+// left, as healSpool leaves them. It goes on past a file it cannot remove
+// and returns every such error.
+func pruneSpool(dir string, a enroll.Accepted) ([]string, error) {
+	fd, err := spool.OpenDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	names, err := spool.ListDir(fd)
+	if err != nil {
+		return nil, fmt.Errorf("list spool %s: %w", dir, err)
+	}
+	present := map[string]bool{}
+	versions := map[string][]uint64{}
+	for _, n := range names {
+		present[n] = true
+		// Every set by its document: the bundle, policy or directory body,
+		// or the KRL itself.
+		if kind, x, ok := spoolSet(n); ok && (kind == "krl" && strings.HasSuffix(n, ".krl") || kind != "krl" && strings.HasSuffix(n, ".json")) {
+			versions[kind] = append(versions[kind], x)
+		}
+	}
+	complete := func(kind string) []uint64 {
+		var out []uint64
+		for _, x := range versions[kind] {
+			base := kind + "-" + strconv.FormatUint(x, 10)
+			if kind == "krl" && present[base+".manifest.json"] && present[base+".manifest.sig"] ||
+				kind != "krl" && present[base+".json.sigs"] {
+				out = append(out, x)
+			}
+		}
+		return out
+	}
+	keep := map[string]map[uint64]bool{
+		"bundle":    spool.Keep(complete("bundle"), a.Bundle, keepAbove),
+		"directory": spool.Keep(complete("directory"), a.Directory, keepAbove),
+		"krl":       {},
+		"policy":    {},
+	}
+	if ks := complete("krl"); len(ks) > 0 {
+		keep["krl"][slices.Max(ks)] = true
+	}
+	named, known := map[string]bool{}, true
+	for x := range keep["bundle"] {
+		b, err := spool.ReadFileAt(fd, "bundle-"+strconv.FormatUint(x, 10)+".json", spool.MaxBundle)
+		if err != nil {
+			known = false
+			break
+		}
+		var lean struct {
+			PolicySHA256 string `json:"policy_sha256"`
+		}
+		if json.Unmarshal(b, &lean) == nil {
+			named[lean.PolicySHA256] = true
+		}
+	}
+	for _, x := range complete("policy") {
+		b, err := spool.ReadFileAt(fd, "policy-"+strconv.FormatUint(x, 10)+".json", spool.MaxBundle)
+		if !known || err != nil {
+			keep["policy"][x] = true
+			continue
+		}
+		var lean struct {
+			Version uint64 `json:"version"`
+		}
+		if json.Unmarshal(b, &lean) == nil && lean.Version == x && named[trust.SHA256Hex(b)] {
+			keep["policy"][x] = true
+		}
+	}
+	var removed []string
+	var errs []error
+	for _, n := range names {
+		kind, x, ok := spoolSet(n)
+		if !ok || keep[kind][x] {
+			continue
+		}
+		var st unix.Stat_t
+		if err := unix.Fstatat(fd, n, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			if !errors.Is(err, unix.ENOENT) {
+				errs = append(errs, fmt.Errorf("stat %s: %w", n, err))
+			}
+			continue
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFREG {
+			continue
+		}
+		if err := unix.Unlinkat(fd, n, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			errs = append(errs, fmt.Errorf("remove %s: %w", n, err))
+			continue
+		}
+		removed = append(removed, n)
+	}
+	if len(removed) > 0 {
+		if err := unix.Fsync(fd); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return removed, errors.Join(errs...)
+}
+
+// spoolSet is the kind and version of a file of a versioned spool set: a
+// bundle, policy or directory and its signatures, or a KRL, its manifest
+// and the manifest's signature.
+func spoolSet(name string) (string, uint64, bool) {
+	kind, digits := "", ""
+	if m := spoolSetDocRE.FindStringSubmatch(name); m != nil {
+		kind, digits = m[1], m[2]
+	} else if m := spoolSetKRLRE.FindStringSubmatch(name); m != nil {
+		kind, digits = "krl", m[1]
+	} else {
+		return "", 0, false
+	}
+	x, err := strconv.ParseUint(digits, 10, 64)
+	return kind, x, err == nil
+}
+
+// listNames is names for a log line: at most 16 of them, then how many
+// more.
+func listNames(names []string) string {
+	if len(names) <= 16 {
+		return strings.Join(names, " ")
+	}
+	return strings.Join(names[:16], " ") + fmt.Sprintf(" and %d more", len(names)-16)
+}
+
 // writeState spools every item of r, one at a time and in the response's
 // order (bundles, then directories, then the KRL), through spool.Write:
 // each file atomically, signatures before the document they complete.
 // The file names come from the item's kind and its uint64 version only.
+//
+// It first refuses, with checkCaps, an answer of which spool.Read would
+// refuse a file, and then writes nothing of it.
 func writeState(dir string, r *serverclient.AgentStateResponse) error {
+	if err := checkCaps(r); err != nil {
+		return err
+	}
 	for _, b := range r.Bundles {
 		if err := spool.Write(dir, spool.State{
 			Bundles:  map[uint64]spool.Doc{b.Version: {Body: b.Bundle, Sigs: b.BundleSigs}},
@@ -594,12 +863,71 @@ func writeState(dir string, r *serverclient.AgentStateResponse) error {
 	return nil
 }
 
+// checkCaps refuses a state answer (ErrAnswerOverCap, naming the kind,
+// the version and the size) that holds a file above the cap spool.Read
+// applies to its name, built as writeState builds it, or more than
+// serverclient.MaxAgentStatePerKind bundles or directories (F01
+// (03-08e)). Such a file would refuse every later spool capture, KRLs
+// included, until someone removed it by hand, so one answer of a
+// compromised server would outlive the compromise. An honest answer never
+// trips it: the server's bundleItems and directoryItems stop at
+// MaxAgentStatePerKind, and the signer bounds every bundle_install
+// document and signature at tlog.MaxDocument (spool.MaxBundle), a
+// directory and its signatures at wire.MaxDirectory and
+// wire.MaxDirectorySigs, and a KRL, its manifest and the manifest's
+// signature at krl.MaxKRL, krl.MaxManifest and krl.MaxManifestSig.
+func checkCaps(r *serverclient.AgentStateResponse) error {
+	for _, c := range []struct {
+		kind string
+		n    int
+	}{{"bundle", len(r.Bundles)}, {"directory", len(r.Directories)}} {
+		if c.n > serverclient.MaxAgentStatePerKind {
+			return fmt.Errorf("%w: %d %s versions in one answer, more than the %d the server sends; nothing of this answer was written",
+				ErrAnswerOverCap, c.n, c.kind, serverclient.MaxAgentStatePerKind)
+		}
+	}
+	type file struct {
+		kind    string
+		version uint64
+		name    string
+		size    int
+	}
+	var files []file
+	for _, b := range r.Bundles {
+		bundle := "bundle-" + strconv.FormatUint(b.Version, 10) + ".json"
+		policy := "policy-" + strconv.FormatUint(b.PolicyVersion, 10) + ".json"
+		files = append(files,
+			file{"bundle", b.Version, bundle, len(b.Bundle)}, file{"bundle", b.Version, bundle + ".sigs", len(b.BundleSigs)},
+			file{"policy", b.PolicyVersion, policy, len(b.Policy)}, file{"policy", b.PolicyVersion, policy + ".sigs", len(b.PolicySigs)})
+	}
+	for _, d := range r.Directories {
+		name := "directory-" + strconv.FormatUint(d.Version, 10) + ".json"
+		files = append(files, file{"directory", d.Version, name, len(d.Directory)}, file{"directory", d.Version, name + ".sigs", len(d.Sigs)})
+	}
+	if k := r.KRL; k != nil {
+		base := "krl-" + strconv.FormatUint(k.Version, 10)
+		files = append(files, file{"KRL", k.Version, base + ".krl", len(k.KRL)}, file{"KRL", k.Version, base + ".manifest.json", len(k.Manifest)},
+			file{"KRL", k.Version, base + ".manifest.sig", len(k.Sig)})
+	}
+	for _, f := range files {
+		if limit, ok := spool.Cap(f.name); ok && int64(f.size) > limit {
+			return fmt.Errorf("%w: %s version %d: %s would be %d bytes, above the %d the applier reads; nothing of this answer was written",
+				ErrAnswerOverCap, f.kind, f.version, f.name, f.size, limit)
+		}
+	}
+	return nil
+}
+
 var (
 	spoolDocRE = regexp.MustCompile(`^(bundle|directory)-([1-9][0-9]{0,19})\.json$`)
 	spoolKRLRE = regexp.MustCompile(`^krl-([1-9][0-9]{0,19})\.krl$`)
 	// spoolFileRE is every file of a versioned bundle, directory or KRL
 	// (dropAbove).
 	spoolFileRE = regexp.MustCompile(`^(bundle|directory|krl)-([1-9][0-9]{0,19})\.(json|json\.sigs|krl|manifest\.json|manifest\.sig)$`)
+	// spoolSetDocRE and spoolSetKRLRE are every file of a versioned bundle,
+	// policy or directory, and of a KRL (pruneSpool).
+	spoolSetDocRE = regexp.MustCompile(`^(bundle|policy|directory)-([1-9][0-9]{0,19})\.json(\.sigs)?$`)
+	spoolSetKRLRE = regexp.MustCompile(`^krl-([1-9][0-9]{0,19})\.(krl|manifest\.json|manifest\.sig)$`)
 )
 
 // spooledVersions are the newest complete bundle, directory and KRL
