@@ -477,6 +477,149 @@ func TestFetch(t *testing.T) {
 			}
 		}
 	})
+	t.Run("more_than_per_kind_refused", func(t *testing.T) {
+		// F01 (03-08e): the server sends at most MaxAgentStatePerKind
+		// versions of a kind per answer; 17 contiguous bundles are refused
+		// and nothing is written, 16 are spooled.
+		bundles := func(n int) []serverclient.AgentBundle {
+			var out []serverclient.AgentBundle
+			for v := uint64(2); v < uint64(2+n); v++ { //nolint:gosec // G115: n is small
+				out = append(out, bundleItem(v, 1, 1))
+			}
+			return out
+		}
+		var n atomic.Int32
+		ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			if n.Add(1) == 1 {
+				_, _ = w.Write(stateBody(t, serverclient.AgentStateResponse{Bundles: bundles(serverclient.MaxAgentStatePerKind + 1)}))
+				return
+			}
+			_, _ = w.Write(stateBody(t, serverclient.AgentStateResponse{Bundles: bundles(serverclient.MaxAgentStatePerKind)}))
+		})
+		ts.seed(t, honestSpool, &enroll.Accepted{Bundle: 1})
+		before := ts.snapshot(t)
+		if err := ts.f.Once(t.Context()); !errors.Is(err, ErrAnswerOverCap) || !strings.Contains(err.Error(), "17 bundle") {
+			t.Errorf("17 bundles in one answer: %v, want state_item_over_cap naming the count", err)
+		}
+		if after := ts.snapshot(t); !maps.Equal(after, before) {
+			t.Errorf("the refused answer changed the spool: %v", slices.Sorted(maps.Keys(after)))
+		}
+		if err := ts.f.Once(t.Context()); err != nil {
+			t.Fatalf("16 bundles in one answer: %v", err)
+		}
+		if v, err := spooledVersions(ts.spool); err != nil || v.Bundle != 17 {
+			t.Fatalf("the spool's newest bundle %d (%v), want 17", v.Bundle, err)
+		}
+	})
+	t.Run("oversize_directory_and_krl_refused", func(t *testing.T) {
+		// F01 (03-08e): every file of a directory and of the KRL is held to
+		// the cap spool.Read applies to it.
+		manifest := func(pad int) []byte {
+			m := `{"krl_version":1}`
+			return []byte(m + strings.Repeat(" ", pad-len(m)))
+		}
+		for _, c := range []struct {
+			name string
+			r    serverclient.AgentStateResponse
+		}{
+			{"directory-1.json", serverclient.AgentStateResponse{Directories: []serverclient.AgentDirectory{{Version: 1, Directory: bytes.Repeat([]byte{'d'}, wire.MaxDirectory+1), Sigs: []byte("s")}}}},
+			{"directory-1.json.sigs", serverclient.AgentStateResponse{Directories: []serverclient.AgentDirectory{{Version: 1, Directory: []byte("d"), Sigs: bytes.Repeat([]byte{'s'}, wire.MaxDirectorySigs+1)}}}},
+			{"krl-1.krl", serverclient.AgentStateResponse{KRL: &serverclient.AgentKRL{Version: 1, KRL: bytes.Repeat([]byte{'k'}, krl.MaxKRL+1), Manifest: manifest(20), Sig: []byte("s")}}},
+			{"krl-1.manifest.json", serverclient.AgentStateResponse{KRL: &serverclient.AgentKRL{Version: 1, KRL: []byte("k"), Manifest: manifest(krl.MaxManifest + 1), Sig: []byte("s")}}},
+			{"krl-1.manifest.sig", serverclient.AgentStateResponse{KRL: &serverclient.AgentKRL{Version: 1, KRL: []byte("k"), Manifest: manifest(20), Sig: bytes.Repeat([]byte{'s'}, krl.MaxManifestSig+1)}}},
+		} {
+			ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(stateBody(t, c.r)) })
+			before := ts.snapshot(t)
+			if err := ts.f.Once(t.Context()); !errors.Is(err, ErrAnswerOverCap) || !strings.Contains(err.Error(), c.name) {
+				t.Errorf("%s one byte above its cap: %v, want state_item_over_cap naming it", c.name, err)
+			}
+			if after := ts.snapshot(t); !maps.Equal(after, before) {
+				t.Errorf("%s: the refused answer changed the spool: %v", c.name, slices.Sorted(maps.Keys(after)))
+			}
+		}
+	})
+	t.Run("poisoned_spool_file_removed_at_next_poll", func(t *testing.T) {
+		// F01 (03-08e): a policy-1.json above the cap, left by an answer from
+		// before the fetcher refused such answers, goes at the next poll, and
+		// the applier's capture reads again.
+		ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(emptyState)) })
+		ts.seed(t, honestSpool, &enroll.Accepted{Bundle: 1})
+		ts.seed(t, map[string]string{"policy-1.json": strings.Repeat("p", spool.MaxBundle+1)}, nil)
+		if _, _, err := spool.Read(ts.spool, spool.Floor{Bundle: 1, Policy: 1}); !errors.Is(err, spool.ErrOversize) {
+			t.Fatalf("the poisoned spool before the poll: %v, want spool_oversize", err)
+		}
+		var log strings.Builder
+		ts.f.cfg.Log = &log
+		if err := ts.f.Once(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(ts.spool, "policy-1.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the oversize policy-1.json is still in the spool: %v", err)
+		}
+		if !strings.Contains(log.String(), "WARNING") || !strings.Contains(log.String(), "policy-1.json") {
+			t.Errorf("log %q, want a warning naming policy-1.json", log.String())
+		}
+		if _, _, err := spool.Read(ts.spool, spool.Floor{Bundle: 1, Policy: 1}); err != nil {
+			t.Fatalf("the applier's capture after the poll: %v", err)
+		}
+	})
+	t.Run("heal_leaves_symlinks_and_unknown_names", func(t *testing.T) {
+		// F01 (03-08e): only recognised regular files are removed. A symlink
+		// is never followed (the applier refuses it, T-03-225), and a name
+		// the applier never reads is not the heal's.
+		ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(emptyState)) })
+		ts.seed(t, honestSpool, &enroll.Accepted{Bundle: 1})
+		big := strings.Repeat("x", spool.MaxBundle+1)
+		target := filepath.Join(t.TempDir(), "target")
+		if err := os.WriteFile(target, []byte(big), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(ts.spool, "policy-2.json")); err != nil {
+			t.Fatal(err)
+		}
+		ts.seed(t, map[string]string{"notes.txt": big, "policy-0.json": big}, nil)
+		if err := ts.f.Once(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []string{"policy-2.json", "notes.txt", "policy-0.json"} {
+			if _, err := os.Lstat(filepath.Join(ts.spool, n)); err != nil {
+				t.Errorf("%s was removed: %v", n, err)
+			}
+		}
+		if b, err := os.ReadFile(target); err != nil || len(b) != len(big) { //nolint:gosec // test fixture
+			t.Errorf("the symlink's target: %d bytes, %v", len(b), err)
+		}
+	})
+	t.Run("heal_error_logged_and_poll_continues", func(t *testing.T) {
+		// F01 (03-08e): the heal is best effort. A spool the fetcher cannot
+		// remove from (read-only here) is logged, the poll still asks the
+		// server, and the oversize file stays refused until a later poll
+		// removes it.
+		if os.Geteuid() == 0 {
+			t.Skip("as root a directory's mode does not block unlink")
+		}
+		ts := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(emptyState)) })
+		ts.seed(t, honestSpool, &enroll.Accepted{Bundle: 1})
+		ts.seed(t, map[string]string{"policy-1.json": strings.Repeat("p", spool.MaxBundle+1)}, nil)
+		if err := os.Chmod(ts.spool, 0o555); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(ts.spool, 0o750) }) //nolint:gosec // test fixture
+		var log strings.Builder
+		ts.f.cfg.Log = &log
+		if err := ts.f.Once(t.Context()); err != nil {
+			t.Fatalf("a poll whose heal failed: %v, want it to go on", err)
+		}
+		if !strings.Contains(log.String(), "WARNING") || !strings.Contains(log.String(), "policy-1.json") || !strings.Contains(log.String(), "permission denied") {
+			t.Errorf("log %q, want a warning naming policy-1.json and the error", log.String())
+		}
+		if len(ts.requests()) == 0 {
+			t.Error("the poll sent no state request")
+		}
+		if _, _, err := spool.Read(ts.spool, spool.Floor{Bundle: 1, Policy: 1}); !errors.Is(err, spool.ErrOversize) {
+			t.Fatalf("the applier's capture: %v, want spool_oversize while the file stays", err)
+		}
+	})
 	t.Run("answer_not_following_the_request_refused", func(t *testing.T) {
 		// PR #71 review F3/F7: a directory far above the requested version
 		// (no chain from it) is refused before anything is spooled.
