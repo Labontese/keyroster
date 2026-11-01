@@ -139,10 +139,9 @@ func TestSpoolPrune(t *testing.T) {
 			"krl-1.krl": "k", "krl-1.manifest.json": `{"krl_version":1}`, "krl-1.manifest.sig": "s",
 		}, &enroll.Accepted{Bundle: 1, Directory: 1, KRL: 1})
 		// The bound: what the prune keeps (with a floor the version at or
-		// below it and spool.MaxVersionsPerKind above it, one policy per kept
-		// bundle, the newest complete KRL) plus what one poll writes.
-		bound := map[string]int{"bundle": 1 + spool.MaxVersionsPerKind + perPoll, "directory": 1 + spool.MaxVersionsPerKind + perPoll,
-			"policy": 1 + spool.MaxVersionsPerKind + perPoll, "krl": 1 + MaxRounds}
+		// below it and perPoll above it, one policy per kept bundle, the
+		// newest complete KRL) plus what one poll writes.
+		bound := map[string]int{"bundle": 1 + 2*perPoll, "directory": 1 + 2*perPoll, "policy": 1 + 2*perPoll, "krl": 1 + MaxRounds}
 		var counts []map[string]int
 		for i := range 8 {
 			if err := ts.f.Once(t.Context()); err != nil {
@@ -409,23 +408,18 @@ func TestSpoolPrune(t *testing.T) {
 			}
 		}
 	})
-	t.Run("honest_catch_up_refetches_past_the_read_window", func(t *testing.T) {
+	t.Run("honest_catch_up_keeps_one_polls_versions", func(t *testing.T) {
 		// A host far behind: one poll spools 199 bundles (13 rounds) with a
 		// policy rotation every 10 versions. The applier accepts 64 of them;
-		// the next poll prunes the spool to the applier's read window (the
-		// accepted version and spool.MaxVersionsPerKind above it, owner
-		// decision of fix round 2) and is then rate limited. The applier
-		// reads to the window's end and waits there; the poll after that
-		// fetches the rest again, and the host reaches the server's current
-		// version.
+		// the next poll is rate limited, after the prune. The applier still
+		// reads its way to the server's current version from the spool, as
+		// it did before the prune: everything one poll can write above the
+		// accepted version stays.
 		const cur = 200
-		pol := func(v uint64) (uint64, string) {
-			pv := 1 + (v-1)/10
-			return pv, prunePolicy(pv, "honest")
-		}
+		pol := func(v uint64) (uint64, string) { pv := 1 + (v-1)/10; return pv, prunePolicy(pv, "honest") }
 		var n atomic.Int32
 		ts := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-			if n.Add(1) == 14 {
+			if n.Add(1) > 13 {
 				w.Header().Set("Retry-After", "2")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_, _ = w.Write([]byte(`{"error":"rate limited"}`))
@@ -458,10 +452,11 @@ func TestSpoolPrune(t *testing.T) {
 			floor = v
 			ts.seed(t, nil, &enroll.Accepted{Bundle: v})
 		}
-		// read is one capture at floor: every bundle it offers must have its
-		// policy, and the first must be floor itself.
-		read := func() []uint64 {
-			t.Helper()
+		accept(1 + spool.MaxVersionsPerKind)
+		if err := ts.f.Once(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		for floor < cur {
 			pv, _ := pol(floor)
 			st, _, err := spool.Read(ts.spool, spool.Floor{Bundle: floor, Policy: pv})
 			if err != nil {
@@ -471,36 +466,76 @@ func TestSpoolPrune(t *testing.T) {
 				t.Fatalf("floor %d: bundles %v name a policy the capture does not offer", floor, missing)
 			}
 			vs := slices.Sorted(maps.Keys(st.Bundles))
-			if len(vs) == 0 || vs[0] != floor {
-				t.Fatalf("floor %d: the capture offers bundles %v", floor, vs)
+			if len(vs) < 2 || vs[0] != floor || vs[1] != floor+1 {
+				t.Fatalf("floor %d: the capture offers bundles %v, not the next version", floor, vs)
 			}
-			return vs
+			accept(vs[len(vs)-1])
 		}
-		// catchUp accepts what each capture offers until one offers nothing
-		// newer.
-		catchUp := func() {
+	})
+	t.Run("superseded_pending_target_kept", func(t *testing.T) {
+		// F01 (03-08e) fix round 3: a swap's widening wait reads the spool
+		// from its pending target's floor, not the accepted one, and a newer
+		// capture supersedes that target. Here accepted.json stays at bundle
+		// 1 while the pending target moves to 65 and then to 129; a poll then
+		// prunes and is rate limited. The capture at floor 129 must still
+		// offer 129 and what follows it: a window of 64 above the accepted
+		// version left it [65], which Verify refuses as older than the
+		// pending target until a later poll succeeds.
+		const cur = 200
+		pol := func(v uint64) (uint64, string) {
+			pv := 1 + (v-1)/10
+			return pv, prunePolicy(pv, "honest")
+		}
+		var n atomic.Int32
+		ts := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if n.Add(1) > 13 {
+				w.Header().Set("Retry-After", "2")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+				return
+			}
+			since, err := strconv.ParseUint(r.URL.Query().Get("bundle"), 10, 64)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			var resp serverclient.AgentStateResponse
+			for v := since + 1; v <= cur && len(resp.Bundles) < serverclient.MaxAgentStatePerKind; v++ {
+				pv, p := pol(v)
+				resp.Bundles = append(resp.Bundles, bundleNaming(v, pv, p))
+			}
+			resp.More = since+uint64(len(resp.Bundles)) < cur //nolint:gosec // G115: a slice length
+			_, _ = w.Write(stateBody(t, resp))
+		})
+		_, p1 := pol(1)
+		ts.seed(t, map[string]string{"bundle-1.json": pruneBundle(1, p1), "bundle-1.json.sigs": "s", "policy-1.json": p1, "policy-1.json.sigs": "s"},
+			&enroll.Accepted{Bundle: 1})
+		if err := ts.f.Once(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		// capture is what a pending target's capture at floor offers.
+		capture := func(floor uint64) []uint64 {
 			t.Helper()
-			for vs := read(); len(vs) > 1; vs = read() {
-				if vs[1] != floor+1 {
-					t.Fatalf("floor %d: the capture offers bundles %v, not the next version", floor, vs)
-				}
-				accept(vs[len(vs)-1])
+			pv, _ := pol(floor)
+			st, _, err := spool.Read(ts.spool, spool.Floor{Bundle: floor, Policy: pv})
+			if err != nil {
+				t.Fatal(err)
 			}
+			if missing := policiesNamed(t, st); len(missing) != 0 {
+				t.Fatalf("floor %d: bundles %v name a policy the capture does not offer", floor, missing)
+			}
+			return slices.Sorted(maps.Keys(st.Bundles))
 		}
-		accept(1 + spool.MaxVersionsPerKind)
+		const p, q = 1 + spool.MaxVersionsPerKind, 1 + 2*spool.MaxVersionsPerKind
+		if vs := capture(p); len(vs) == 0 || vs[0] != p || vs[len(vs)-1] != q {
+			t.Fatalf("before the prune the capture at the pending floor %d offers %v", p, vs)
+		}
 		if err := ts.f.Once(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		catchUp()
-		if want := uint64(1 + 2*spool.MaxVersionsPerKind); floor != want {
-			t.Fatalf("after the rate-limited poll the host read to bundle %d, want the read window's end %d", floor, want)
-		}
-		if err := ts.f.Once(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-		catchUp()
-		if floor != cur {
-			t.Fatalf("after the next poll the host read to bundle %d, want %d", floor, cur)
+		vs := capture(q)
+		if len(vs) < 2 || vs[0] != q || vs[1] != q+1 {
+			t.Fatalf("after the prune the capture at the superseding pending floor %d offers %v, want %d and what follows it", q, vs, q)
 		}
 	})
 }
