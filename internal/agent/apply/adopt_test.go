@@ -633,6 +633,40 @@ func TestAdopt(t *testing.T) {
 			})
 		})
 	}
+	// F09 (03-08e) fix round 2: keyroster-agent check takes no apply lock,
+	// so a hand run's finishAdoption can remove 50-keyroster.conf and then
+	// the plan while a check runs. Check reads the plan before the
+	// configuration: a plan it finds still exempts lines it may then not
+	// find at all, and no plan means the file was gone already. Here the
+	// removal finishes between the two reads.
+	t.Run("check_during_finished_removal_reports_no_runbook_line", func(t *testing.T) {
+		t.Parallel()
+		h := unfinishedRemoval(t)
+		fired := false
+		h.cfg.Fault = func(p string) error {
+			if p == "check-plan-read" {
+				fired = true
+				for _, path := range []string{h.l.Phase2DropIn(), h.l.State(adoptFile)} {
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			return nil
+		}
+		d, err := h.check()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fired {
+			t.Fatal("the check-plan-read point never ran: the test does not test")
+		}
+		for _, f := range d.Foreign {
+			if f.File == h.l.Phase2DropIn() {
+				t.Errorf("a runbook line the finished removal took away is reported: %s", f.Message)
+			}
+		}
+	})
 	t.Run("marker_write_failure_leaves_no_plan", func(t *testing.T) {
 		t.Parallel()
 		// PR #68 review, F2: the marker write fails (ENOSPC, EIO) at the
