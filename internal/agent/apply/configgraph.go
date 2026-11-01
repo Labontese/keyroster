@@ -39,7 +39,9 @@ type configFile struct {
 // arguments and its trimmed text. inMatch is set for a line after a Match
 // line of its file: sshd reads it as part of a Match block, which ends
 // only at the next Match line or at the end of the file (F09 (03-08e) fix
-// round 1).
+// round 1). The Include case of servconf.c restores the Match state after
+// each file it includes, the files one glob matches included (checked in
+// portable 10.2p1), so a Match block never reaches into the next file.
 type configLine struct {
 	n       int
 	keyword string

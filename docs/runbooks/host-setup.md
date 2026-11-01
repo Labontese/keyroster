@@ -936,8 +936,11 @@ an apply that would rewrite `00-keyroster.conf` refuses. Run in CI
 hand run's repair of a drifted or missing `00-keyroster.conf` with no new
 signed state to install (the tests that repair it publish a newer KRL
 first), the units' rewrite in an apply that installs only a newer bundle
-or directory (the tests publish a KRL), and every case on a real host (no
-03-16 drill cuts a takeover short).
+or directory (the tests publish a KRL), the trial and refused-edit
+repairs in this state (tested only on an installed host without a
+takeover: `TestDropInRepair/noop_apply_replaces_trial_on_installed_host`,
+`dropin_sshd_refuses_repaired_by_noop_run`), and every case on a real host
+(no 03-16 drill cuts a takeover short).
 
 **What the units do.** `keyroster-agent run` looks at the spool every 5 s
 and applies new signed state. It runs the drift check
