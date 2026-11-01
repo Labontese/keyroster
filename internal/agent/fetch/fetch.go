@@ -76,6 +76,10 @@ var (
 	ErrConfig      = errors.New("fetch_config_invalid")
 	// ErrDirNotOwned is a fetcher directory another user owns.
 	ErrDirNotOwned = errors.New("fetch_dir_not_owned")
+	// ErrAnswerOverCap is a state answer with an item above the cap
+	// spool.Read applies to its file, or with more items of a kind than the
+	// server sends: nothing of it is written (F01 (03-08e)).
+	ErrAnswerOverCap = errors.New("state_item_over_cap")
 )
 
 // Config is one fetcher.
@@ -572,7 +576,13 @@ func dropAbove(dir string, v serverclient.AgentVersions) ([]string, error) {
 // order (bundles, then directories, then the KRL), through spool.Write:
 // each file atomically, signatures before the document they complete.
 // The file names come from the item's kind and its uint64 version only.
+//
+// It first refuses, with checkCaps, an answer of which spool.Read would
+// refuse a file, and then writes nothing of it.
 func writeState(dir string, r *serverclient.AgentStateResponse) error {
+	if err := checkCaps(r); err != nil {
+		return err
+	}
 	for _, b := range r.Bundles {
 		if err := spool.Write(dir, spool.State{
 			Bundles:  map[uint64]spool.Doc{b.Version: {Body: b.Bundle, Sigs: b.BundleSigs}},
@@ -589,6 +599,38 @@ func writeState(dir string, r *serverclient.AgentStateResponse) error {
 	if k := r.KRL; k != nil {
 		if err := spool.Write(dir, spool.State{KRLs: map[uint64]spool.KRLFiles{k.Version: {KRL: k.KRL, Manifest: k.Manifest, Sig: k.Sig}}}); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// checkCaps refuses a state answer (ErrAnswerOverCap, naming the kind,
+// the version and the size) that holds a file above the cap spool.Read
+// applies to its name, built as writeState builds it (F01 (03-08e)). Such
+// a file would refuse every later spool capture, KRLs included, until
+// someone removed it by hand, so one answer of a compromised server would
+// outlive the compromise. An honest answer never trips it: the signer
+// bounds every bundle_install document and signature at tlog.MaxDocument,
+// which is spool.MaxBundle.
+func checkCaps(r *serverclient.AgentStateResponse) error {
+	type file struct {
+		kind    string
+		version uint64
+		name    string
+		size    int
+	}
+	var files []file
+	for _, b := range r.Bundles {
+		bundle := "bundle-" + strconv.FormatUint(b.Version, 10) + ".json"
+		policy := "policy-" + strconv.FormatUint(b.PolicyVersion, 10) + ".json"
+		files = append(files,
+			file{"bundle", b.Version, bundle, len(b.Bundle)}, file{"bundle", b.Version, bundle + ".sigs", len(b.BundleSigs)},
+			file{"policy", b.PolicyVersion, policy, len(b.Policy)}, file{"policy", b.PolicyVersion, policy + ".sigs", len(b.PolicySigs)})
+	}
+	for _, f := range files {
+		if limit, ok := spool.Cap(f.name); ok && int64(f.size) > limit {
+			return fmt.Errorf("%w: %s version %d: %s would be %d bytes, above the %d the applier reads; nothing of this answer was written",
+				ErrAnswerOverCap, f.kind, f.version, f.name, f.size, limit)
 		}
 	}
 	return nil
