@@ -530,12 +530,16 @@ func TestAdopt(t *testing.T) {
 		h.publishKRL(9)
 		_, err := h.apply()
 		found := foreignFindingsOf(err)
-		value := false
+		// F09 (03-08e) fix round 1: with no takeover in progress the
+		// runbook's lines are not exempt, so the refusal names the line that
+		// sets the value (foreignFindings reports an sshd -T value only for a
+		// keyword no line names).
+		line := false
 		for _, f := range found {
-			value = value || strings.Contains(f.Message, "sshd -T reports trustedusercakeys")
+			line = line || f.File == h.l.Phase2DropIn() && strings.Contains(f.Message, phase2CALine)
 		}
-		if !value {
-			t.Fatalf("the runbook's values in force with no takeover in progress: %v, want the sshd -T foreign_trust_setting", err)
+		if !line {
+			t.Fatalf("the runbook's values in force with no takeover in progress: %v, want the foreign_trust_setting of the runbook's TrustedUserCAKeys line", err)
 		}
 	})
 	t.Run("preflight_command_agrees", func(t *testing.T) {
@@ -557,6 +561,78 @@ func TestAdopt(t *testing.T) {
 			}
 		}
 	})
+	// F09 (03-08e) fix round 1: the runbook's two lines are exempt only at
+	// the top level of 50-keyroster.conf, outside any Match block, and only
+	// while the takeover's plan is there. A Match block overrides the
+	// agent's drop-in for the connections it matches, so a runbook line in
+	// one, or in a file a Match block includes, is a foreign trust setting;
+	// so are the lines once no takeover is in progress. The run loop's
+	// apply, keyroster-agent preflight and keyroster-agent check all refuse
+	// them through the one filter (phase2Shadowed).
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, h *testHost)
+		line int // the refused line of 50-keyroster.conf
+	}{
+		{"runbook_line_in_match_block_refused", func(t *testing.T, h *testHost) {
+			appendFile(t, h.l.Phase2DropIn(), "Match User deploy\n\t"+phase2PrincipalsLine+"\n")
+		}, 4},
+		{"runbook_file_included_in_match_block_refused", func(t *testing.T, h *testHost) {
+			appendFile(t, h.cfg.SSHDConfig, "Match User deploy\n\tInclude "+h.l.Phase2DropIn()+"\n")
+		}, 1},
+		{"runbook_lines_without_adoption_plan_refused", func(t *testing.T, h *testHost) {
+			if err := os.Remove(h.l.State(adoptFile)); err != nil {
+				t.Fatal(err)
+			}
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			t.Run("apply", func(t *testing.T) {
+				// preflightApply runs when the drop-in would change: here an
+				// edit that leaves the agent's values in force, so only the
+				// runbook's line can refuse.
+				h := unfinishedRemoval(t)
+				tc.edit(t, h)
+				appendFile(t, h.l.DropIn(), "# managed by configuration management\n")
+				h.publishKRL(9)
+				_, err := h.apply()
+				found := foreignFindingsOf(err)
+				if !slices.ContainsFunc(found, func(f Finding) bool { return f.File == h.l.Phase2DropIn() && f.Line == tc.line }) {
+					t.Fatalf("the run loop's apply: %v, want foreign_trust_setting at %s:%d", err, h.l.Phase2DropIn(), tc.line)
+				}
+				if h.krlRevokes(h.l.Current(), 9) {
+					t.Error("the KRL installed despite the refusal")
+				}
+			})
+			t.Run("preflight", func(t *testing.T) {
+				h := unfinishedRemoval(t)
+				tc.edit(t, h)
+				r, err := Preflight(context.Background(), h.cfg, h.l)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if f := slices.IndexFunc(r.Findings, func(f Finding) bool {
+					return f.Code == CodeForeignTrust && f.Refusal && f.File == h.l.Phase2DropIn() && f.Line == tc.line
+				}); f < 0 {
+					t.Fatalf("keyroster-agent preflight: %+v, want foreign_trust_setting at %s:%d", r.Findings, h.l.Phase2DropIn(), tc.line)
+				}
+			})
+			t.Run("check", func(t *testing.T) {
+				h := unfinishedRemoval(t)
+				tc.edit(t, h)
+				d, err := h.check()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if f := slices.IndexFunc(d.Foreign, func(f Finding) bool {
+					return f.Code == CodeForeignTrust && f.File == h.l.Phase2DropIn() && f.Line == tc.line
+				}); f < 0 {
+					t.Fatalf("keyroster-agent check: foreign %+v, want foreign_trust_setting at %s:%d", d.Foreign, h.l.Phase2DropIn(), tc.line)
+				}
+			})
+		})
+	}
 	t.Run("marker_write_failure_leaves_no_plan", func(t *testing.T) {
 		t.Parallel()
 		// PR #68 review, F2: the marker write fails (ENOSPC, EIO) at the

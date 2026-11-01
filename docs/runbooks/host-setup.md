@@ -899,14 +899,23 @@ If a takeover's removal was cut short (the hand run stopped before it
 removed `50-keyroster.conf`), the units keep applying: they rewrite a
 drifted or missing `00-keyroster.conf`, install newer KRLs, and report
 `phase2_adoption_pending` until `sudo keyroster-agent apply --once`
-finishes the removal. Any other trust setting beside the runbook's two
-lines still refuses. Run in CI (03-08e): `TestAdopt`
+finishes the removal. The runbook's two lines are exempt only at the top
+level of `50-keyroster.conf` and only while the takeover's plan
+(`/var/lib/keyroster-agent/phase2-adopt.json`) is there. Any other trust
+setting beside them, either line inside a `Match` block (or in a
+`50-keyroster.conf` that an `Include` inside one reaches), and the two
+lines once the plan is gone are `foreign_trust_setting`:
+`keyroster-agent preflight` and `keyroster-agent check` report them, and
+an apply that would rewrite `00-keyroster.conf` refuses. Run in CI
+(03-08e): `TestAdopt`
 (`unfinished_removal_edited_dropin_run_loop_applies_krl`,
 `unfinished_removal_missing_dropin_run_loop_applies_krl`,
 `unfinished_removal_foreign_line_still_refused`,
 `missing_dropin_without_adoption_plan_still_refused`,
-`preflight_command_agrees`) and `TestApplyFlags`. UNVERIFIED on a real
-host: no 03-16 drill cuts a takeover short.
+`preflight_command_agrees`, `runbook_line_in_match_block_refused`,
+`runbook_file_included_in_match_block_refused`,
+`runbook_lines_without_adoption_plan_refused`) and `TestApplyFlags`.
+UNVERIFIED on a real host: no 03-16 drill cuts a takeover short.
 
 **What the units do.** `keyroster-agent run` looks at the spool every 5 s
 and applies new signed state. It runs the drift check

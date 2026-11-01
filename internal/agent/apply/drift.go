@@ -169,14 +169,17 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 		r.Settings = append(r.Settings, SettingDrift{Keyword: principalsCommand, Want: "none", Got: got})
 	}
 	// Every trust setting in what sshd reads but the agent's drop-in
-	// (D-R3); the Phase 2 runbook's own two lines, left by a takeover whose
-	// removal is unfinished, are the takeover's (the agent's drop-in
+	// (D-R3); the Phase 2 runbook's own two lines at the top level of
+	// 50-keyroster.conf, left by a takeover whose removal is unfinished,
+	// are the takeover's while its plan is there (the agent's drop-in
 	// shadows them). Only the lines are filtered (phase2Shadowed, F09
-	// (03-08e)): a runbook value sshd -T reports is setting drift above,
-	// because sshd enforces it until the next apply rewrites the drop-in.
+	// (03-08e) and its fix round 1): a runbook value sshd -T reports is
+	// setting drift above, because sshd enforces it until the next apply
+	// rewrites the drop-in.
 	hits, problems := trustSettingHits(l, cfg.SSHDConfig, nil)
 	r.Foreign = append(r.Foreign, problems...)
-	rest, _, _ := phase2Shadowed(l, hits, false)
+	p, _ := e.readAdopt()
+	rest, _, _ := phase2Shadowed(l, hits, p != nil)
 	for _, h := range rest {
 		r.Foreign = append(r.Foreign, Finding{Code: CodeForeignTrust, Refusal: true, File: h.File, Line: h.Line,
 			Message: fmt.Sprintf("%s:%d sets %q; the agent never merges with or overrides another trust setting", h.File, h.Line, h.Text)})

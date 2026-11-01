@@ -198,6 +198,9 @@ type settingHit struct {
 	Line    int
 	Keyword string
 	Text    string
+	// InMatch: sshd reads the line as part of a Match block (configLine,
+	// configFile).
+	InMatch bool
 }
 
 // principalsCommand and principalsCommandUser are sshd -T's spelling of
@@ -254,7 +257,7 @@ func trustSettingHits(l Layout, config string, own []byte) ([]settingHit, []Find
 			continue
 		}
 		for _, line := range f.lines {
-			h := settingHit{File: f.path, Line: line.n, Keyword: line.keyword, Text: line.text}
+			h := settingHit{File: f.path, Line: line.n, Keyword: line.keyword, Text: line.text, InMatch: f.inMatch || line.inMatch}
 			switch {
 			case slices.Contains(trustKeywords, h.Keyword):
 				hits = append(hits, h)
@@ -354,29 +357,35 @@ func foreignFindings(l Layout, base Dump, hits []settingHit, dropIn []byte, shad
 
 // phase2Shadowed is the one filter of the Phase 2 runbook's leftovers on
 // an installed host, for Preflight, preflightApply and Check (F09
-// (03-08e)). rest is hits without the runbook's own two lines in
-// 50-keyroster.conf (phase2CALine, phase2PrincipalsLine), which a takeover
-// whose removal is unfinished leaves; found reports that it dropped any.
-// When found and adoptPending (readAdopt returns a plan) are both true,
-// shadowed holds the runbook's two sshd -T values, which foreignFindings
-// then does not report: with 00-keyroster.conf missing or edited, sshd
-// enforces them until the apply rewrites the agent's drop-in. Otherwise
-// shadowed is nil.
+// (03-08e)). While a takeover is in progress (adoptPending: readAdopt
+// returns a plan), rest is hits without the runbook's own two lines
+// (phase2CALine, phase2PrincipalsLine) at the top level of
+// 50-keyroster.conf, which a takeover whose removal is unfinished leaves,
+// and shadowed holds the runbook's two sshd -T values, which
+// foreignFindings then does not report: with 00-keyroster.conf missing or
+// edited, sshd enforces them until the apply rewrites the agent's drop-in.
+// found reports that it dropped any line; when it dropped none, shadowed
+// is nil. With no takeover in progress rest is hits.
 //
 // The exemption is safe because it never decides what sshd trusts in the
 // end: writeDropIn reports the change, and activateDropIn's
 // checkDropInEffective refuses, before the reload counts as done, unless
-// sshd -T shows the agent's values in force. Any other line or value
-// still refuses.
+// sshd -T shows the agent's values in force. At the top level the agent's
+// 00-keyroster.conf, read first, wins over these lines. A line inside a
+// Match block, or in a 50-keyroster.conf an Include inside one reaches,
+// is never exempt: a Match block overrides the agent's drop-in for the
+// connections it matches. Nor are the lines once no takeover is in
+// progress, and any other line or value still refuses (F09 (03-08e) fix
+// round 1).
 func phase2Shadowed(l Layout, hits []settingHit, adoptPending bool) (rest []settingHit, shadowed map[string]string, found bool) {
 	for _, h := range hits {
-		if h.File == l.Phase2DropIn() && (h.Text == phase2CALine || h.Text == phase2PrincipalsLine) {
+		if adoptPending && h.File == l.Phase2DropIn() && !h.InMatch && (h.Text == phase2CALine || h.Text == phase2PrincipalsLine) {
 			found = true
 			continue
 		}
 		rest = append(rest, h)
 	}
-	if found && adoptPending {
+	if found {
 		shadowed = map[string]string{"trustedusercakeys": phase2CAValue, "authorizedprincipalsfile": phase2PrincipalsVal}
 	}
 	return rest, shadowed, found

@@ -23,22 +23,30 @@ const maxIncludeDepth = 16
 const maxConfigVisits = 512
 
 // configFile is one sshd configuration file the walk read, tokenised.
+// inMatch is set when an Include line inside a Match block reached it
+// (on any of the walk's visits): sshd then reads every line of it as part
+// of that block.
 type configFile struct {
-	path  string
-	lines []configLine
+	path    string
+	lines   []configLine
+	inMatch bool
 }
 
 // configLine is one line of an sshd configuration file as sshd reads it
 // (sshdTokens): its number, lowercase keyword ("" for a blank line or a
 // comment), the rest of the line after the keyword and its separator
 // (what sshd takes verbatim as an AuthorizedPrincipalsCommand), its
-// arguments and its trimmed text.
+// arguments and its trimmed text. inMatch is set for a line after a Match
+// line of its file: sshd reads it as part of a Match block, which ends
+// only at the next Match line or at the end of the file (F09 (03-08e) fix
+// round 1).
 type configLine struct {
 	n       int
 	keyword string
 	rest    string
 	args    []string
 	text    string
+	inMatch bool
 }
 
 // configGraph reads the sshd configuration the way sshd reads it (PR #68
@@ -62,9 +70,12 @@ type configLine struct {
 // (DropIn, mode 0644), not an edited one the apply replaces (owner
 // decision D-R2; PR #68 review fix round 2, P1). check passes nil: it
 // reports what sshd reads now.
+//
+// A file an Include line inside a Match block reaches is inMatch, and so
+// is every file it includes in turn (F09 (03-08e) fix round 1).
 func configGraph(l Layout, config string, own []byte) ([]configFile, []Finding) {
-	g := &graph{l: l, own: own, seen: map[string]bool{}}
-	g.visit(config, 0, nil, "", 0)
+	g := &graph{l: l, own: own, seen: map[string]int{}}
+	g.visit(config, 0, nil, "", 0, false)
 	return g.files, g.problems
 }
 
@@ -73,7 +84,7 @@ type graph struct {
 	own      []byte
 	files    []configFile
 	problems []Finding
-	seen     map[string]bool
+	seen     map[string]int // the file's index in files
 	visits   int
 }
 
@@ -89,8 +100,9 @@ func configProblem(file string, line int, format string, args ...any) Finding {
 }
 
 // visit reads path (named by from:line; "" for the main configuration)
-// at depth and walks its Include lines.
-func (g *graph) visit(path string, depth int, stack []string, from string, line int) {
+// at depth and walks its Include lines. inMatch is set when from:line is
+// inside a Match block.
+func (g *graph) visit(path string, depth int, stack []string, from string, line int, inMatch bool) {
 	switch {
 	case slices.Contains(stack, path):
 		g.problem(from, line, "Include of %s, which is being read already (a cycle; sshd stops at its nesting limit)", path)
@@ -134,9 +146,11 @@ func (g *graph) visit(path string, depth int, stack []string, from string, line 
 	}
 	lines, bad := parseConfig(path, b)
 	g.problems = append(g.problems, bad...)
-	if !g.seen[path] {
-		g.seen[path] = true
-		g.files = append(g.files, configFile{path: path, lines: lines})
+	if i, ok := g.seen[path]; ok {
+		g.files[i].inMatch = g.files[i].inMatch || inMatch
+	} else {
+		g.seen[path] = len(g.files)
+		g.files = append(g.files, configFile{path: path, lines: lines, inMatch: inMatch})
 	}
 	stack = append(stack, path)
 	for _, l := range lines {
@@ -144,13 +158,14 @@ func (g *graph) visit(path string, depth int, stack []string, from string, line 
 			continue
 		}
 		for _, a := range l.args {
-			g.include(path, l.n, a, depth+1, stack)
+			g.include(path, l.n, a, depth+1, stack, inMatch || l.inMatch)
 		}
 	}
 }
 
-// include walks one Include argument of from:line.
-func (g *graph) include(from string, line int, arg string, depth int, stack []string) {
+// include walks one Include argument of from:line (inMatch: that line is
+// inside a Match block).
+func (g *graph) include(from string, line int, arg string, depth int, stack []string, inMatch bool) {
 	p, why := includePattern(g.l.Root, arg)
 	if why != "" {
 		g.problem(from, line, "%s:%d: Include %q %s", from, line, arg, why)
@@ -170,7 +185,7 @@ func (g *graph) include(from string, line int, arg string, depth int, stack []st
 		return
 	}
 	for _, m := range matches {
-		g.visit(m, depth, stack, from, line)
+		g.visit(m, depth, stack, from, line, inMatch)
 	}
 }
 
@@ -213,17 +228,20 @@ func includePattern(root, arg string) (string, string) {
 }
 
 // parseConfig tokenises every line of an sshd configuration file
-// (sshdTokens); a line it cannot read is a sshd_config_unsafe finding.
+// (sshdTokens), marking every line after its first Match line inMatch; a
+// line it cannot read is a sshd_config_unsafe finding.
 func parseConfig(path string, b []byte) ([]configLine, []Finding) {
 	var lines []configLine
 	var bad []Finding
+	match := false
 	for i, text := range strings.Split(string(b), "\n") {
 		l, err := sshdTokens(text)
 		if err != nil {
 			bad = append(bad, configProblem(path, i+1, "%s:%d: %v (%q)", path, i+1, err, strings.TrimSpace(text)))
 			continue
 		}
-		l.n = i + 1
+		l.n, l.inMatch = i+1, match
+		match = match || l.keyword == "match"
 		lines = append(lines, l)
 	}
 	return lines, bad
