@@ -220,8 +220,11 @@ func bundleItem(v, pv uint64, size int) serverclient.AgentBundle {
 }
 
 // honestSpool is a spool holding bundle 1 with its policy 1, as the
-// applier accepted them.
-var honestSpool = map[string]string{"bundle-1.json": "b", "bundle-1.json.sigs": "s", "policy-1.json": "p", "policy-1.json.sigs": "s"}
+// applier accepted them: the bundle names the policy by its SHA-256, and
+// the policy names its version (F01 (03-08e) fix round 1: the fetcher
+// prunes a policy no kept bundle names).
+var honestSpool = map[string]string{"bundle-1.json": pruneBundle(1, prunePolicy(1, "p")), "bundle-1.json.sigs": "s",
+	"policy-1.json": prunePolicy(1, "p"), "policy-1.json.sigs": "s"}
 
 const emptyState = `{"bundles":[],"directories":[],"krl":null,"more":false}`
 
