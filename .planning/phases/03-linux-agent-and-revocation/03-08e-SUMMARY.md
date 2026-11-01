@@ -34,6 +34,7 @@ tech-stack:
 key-files:
   created:
     - cmd/keyroster-agent/apply_test.go
+    - internal/agent/fetch/prune_test.go (fix round 1)
     - .planning/phases/03-linux-agent-and-revocation/03-08e-PLAN.md
     - .planning/phases/03-linux-agent-and-revocation/03-08e-SUMMARY.md
   modified:
@@ -41,6 +42,8 @@ key-files:
     - internal/agent/spool/spool_test.go
     - internal/agent/fetch/fetch.go
     - internal/agent/fetch/fetch_test.go
+    - internal/agent/apply/configgraph.go (fix round 1)
+    - .planning/todos/pending/2026-10-28-agent-spool-pruning.md (fix round 1)
     - internal/agent/apply/preflight.go
     - internal/agent/apply/drift.go
     - internal/agent/apply/adopt_test.go
@@ -260,11 +263,13 @@ The internal/agent/apply package takes about 500 s under `-race` in WSL, against
 
 ## Threat model
 
-- T-03-299 (F01, medium): mitigated by checkCaps (spool.Cap and the per-kind count) and healSpool. Tests are named above.
-  - Residual: policy files no bundle names are never pruned (todo agent-spool-pruning).
+- T-03-299 (F01, medium): mitigated by checkCaps (spool.Cap and the per-kind count), healSpool and, since fix round 1, pruneSpool. Tests are named above and in "Pre-merge review fix round 1".
+  - Former residual, fixed in fix round 1 (D-1): policy files no bundle names were never pruned. pruneSpool now removes every policy no kept bundle names under its own version, and the spool stays within what it keeps plus one poll's answers.
+  - Residual: the worst-case bound is about 5.6 GiB, computed from the caps and not measured (fix round 1, "D-1").
   - Residual: a compromised fetcher remains T-03-225.
 - T-03-298 (F09, low): mitigated by phase2Shadowed. The value exemption applies only while phase2-adopt.json exists, only on an installed host whose last-good is the agent's, and is proved by activateDropIn.
   - Residual: the run loop still cannot finish the removal; `apply --once` now runs without path flags.
+  - Fix round 1 (D-2): the line exemption also applies only while phase2-adopt.json exists, and only to the two lines at the top level of 50-keyroster.conf, outside any Match block.
 - T-03-SC: no module was added, and the capslock baselines are unchanged.
 
 No new network endpoint, auth path or trust-boundary schema change.
@@ -295,3 +300,119 @@ None.
   - the plan and this SUMMARY.
 - Commits 5a2b4f8, 07170c4, bf6ecea, 9aa8a99, 97f270a and 9fab512 are ancestors of HEAD.
 - The commit count from the ledger (a70c661..9fab512) is 6.
+
+## Pre-merge review fix round 1
+
+The review ran at head `14c5a74` against base `a70c661` in security mode and stopped after the critic. Daniel decided D-1 and D-2 on 2026-11-01. One finding was refuted and needs no action: that the heal lines are logged "at warning level" although they carry no journald priority. The F01 and F09 paragraphs under "What changed" describe the state before this round.
+
+### Owner decisions
+
+- **D-1: policy files in the spool (findings [0] and [1], medium; both predate this PR), fixed as part of F01.** At the start of every poll, after healSpool, `pruneSpool` removes what the applier does not read. It works from the versions in `outbox/accepted.json`, taking zero for a kind with none, or when there is no file:
+  - **Bundles and directories:** every version but the complete ones `spool.Keep` takes. That is Read's Floor rule (`pick`, now through `pickAbove`), with `keepAbove` (MaxRounds × MaxAgentStatePerKind = 1024) in place of 64 above a floor. So it keeps the newest version at or below the accepted one, and the lowest 1024 above it. Without a floor it is Read's own rule: the newest 64.
+  - **KRLs:** every version but the newest complete one, which is the only one Read reads.
+  - **Policies:** every version but those that pass two tests:
+    - the document names its own version, as the server's do (`PolicyVersion` is the parsed policy's version);
+    - a kept bundle names its SHA-256 (`policy_sha256`, the field `findPolicy` uses).
+
+    A kept bundle that does not parse names no policy. A kept bundle that cannot be read at all (a symlink, which no answer writes) might name any policy, so then no policy goes.
+  - **What is removed:** only regular files (fstatat without following a symlink). Symlinks, other non-regular files and unknown names stay, as healSpool leaves them.
+
+  **The bound.**
+  - At a poll's start, after the prune, the spool holds at most:
+    - with a floor: 1025 bundle sets, 1025 directory sets, one policy set per kept bundle (the version rule leaves one name per document) and one KRL set;
+    - without a floor: 64, 64, 64 and 1.
+  - One poll then writes at most MaxRounds answers of at most MaxAgentStateResponse each: 64 × 8 MiB = 512 MiB of base64. The files they carry are smaller.
+  - The read caps per set are:
+    - MaxBundle, 1 MiB, for each bundle, policy and signature file;
+    - 1 MiB + 64 KiB for a directory set;
+    - 4 MiB + 4 KiB + 16 KiB for a KRL set.
+  - So the spool holds at most about 1025 × 5.06 MiB + 4 MiB ≈ 5.1 GiB, plus 512 MiB: about 5.6 GiB in all. Without a floor it is about 0.3 GiB plus 512 MiB.
+  - These figures are computed from the caps, not measured.
+  - Before this round the spool had no bound: each poll could add up to 512 MiB under new names.
+
+  **Why it holds.**
+  - The kept bundles and directories are a superset of what any capture at the accepted floor reads.
+  - They also cover what a pending swap reads: its floor is above the accepted one, and at most 64 versions above it.
+  - The accepted bundle stays (the newest at or below the floor), so its policy stays too.
+  - Without a floor, at most 64 policies are kept, and a floor-0 capture reads 64. So junk can no longer crowd out the honest policy.
+  - On a fresh host, junk bundles, directories and KRLs above the honest versions go through dropAbove:
+    - the applier writes `accepted.json` with zeros after every apply that took the lock, refused ones included;
+    - so the fetcher asks with since 0, and the server answers its current state;
+    - dropAbove then removes what lies above that state (`fresh_host_junk_above_dropped`).
+
+  **What stays the same.**
+  - The applier's verification and Read's rules are unchanged. `pick` keeps its behaviour through `pickAbove`.
+  - The todo 2026-10-28-agent-spool-pruning is covered as far as pruning goes. Two smaller items remain in it: skipping unchanged rewrites, and the repeated download from the accepted versions.
+- **D-2: the Phase 2 line exemption (finding [2]), fixed.**
+  - `parseConfig` marks every line after a Match line of its file `inMatch`.
+  - `configGraph` marks a file `inMatch` when an Include line inside a Match block reaches it (on any visit), and passes that on to the files it includes.
+  - `trustSettingHits` carries this as `settingHit.InMatch`.
+  - `phase2Shadowed` drops the two runbook lines only when `adoptPending` is set and the hit is outside every Match block. `shadowed` is set exactly when it dropped a line.
+  - `Check` now reads the plan (`readAdopt`), as Preflight and preflightApply do, so all three use the one rule.
+
+  **Main's semantics change.** On main (a70c661), preflightApply passed the two lines unfiltered and refused them. Check and Preflight's installed branch dropped them by their text alone, with or without a plan. After this round, on an installed host with no `phase2-adopt.json`:
+  - Check and Preflight report the lines as `foreign_trust_setting`, where main exempted them. In Check this is drift, logged at error level; in Preflight it is a refusal.
+  - preflightApply refuses them, as main did.
+
+  **Why this is safe for an installed host.**
+  - finishAdoption removes `50-keyroster.conf` before the plan, which goes last. So whenever the agent itself leaves the file on disk, the plan is there too.
+  - The lines exist without the plan only after a hand edit: someone re-creates the runbook lines, or removes the plan by hand. sshd still reads those lines, so reporting them is correct.
+  - Check fixes nothing and blocks no apply.
+  - preflightApply still runs only when the drop-in would change. So a host with an intact drop-in keeps installing KRLs while the drift check reports the lines.
+
+### Fixes
+
+| Finding | Commit | Test | RED and mutants (scratchpad `fix77-1/`) |
+|---|---|---|---|
+| D-1 (findings [0], [1]) | `989ae2e` | `TestSpoolPrune`: `spool_stays_bounded_across_polls`, `fresh_host_junk_policies_cannot_hide_the_honest_one`, `fresh_host_junk_bundles_below_cannot_hide_the_honest_policy`, `fresh_host_junk_above_dropped`, `prune_keeps_what_the_applier_reads`, `prune_leaves_symlinks_unknown_names_and_non_regular_files`, `prune_removes_no_policy_when_a_kept_bundle_cannot_be_read`, `honest_catch_up_keeps_one_polls_versions` | RED (`d1-red.txt`) on 14c5a74's fetcher, 5 subtests fail:<br>- between polls 3 and 8, policies grow from 49 to 129 and KRLs from 4 to 9;<br>- the floor-0 capture offers only the junk policies;<br>- the orphaned junk policy stays;<br>- every file the prune should remove stays.<br>The three guards pass on 14c5a74. So does dropAbove's part of `fresh_host_junk_above_dropped`, which shows dropAbove already covers junk above.<br>14 mutants killed (`d1-mutants.txt`; M3 and M13 rerun in `d2-mutants.txt`): the policy prune off; the own-version rule off; every KRL kept; the floor ignored for bundles; the floor ignored for directories; a window of 64 instead of 1024; floor 0 keeping 1024; the newest at or below the floor dropped; non-regular files removed; policies named by every bundle; an unreadable bundle naming nothing; the prune never called; dropAbove never called; incomplete sets kept |
+| D-2 (finding [2]) | `c712f0b` | `TestAdopt/runbook_line_in_match_block_refused`, `runbook_file_included_in_match_block_refused` and `runbook_lines_without_adoption_plan_refused`, each at `apply`, `preflight` and `check` | RED (`d2-red-green.txt`), with the three D-2 sources taken from 14c5a74: all 9 subtests fail. The apply returns nil, and Preflight and Check report nothing. The changed `missing_dropin_without_adoption_plan_still_refused` fails too.<br>GREEN with the fix, together with the other F09 cases.<br>8 mutants killed (`d2-mutants.txt`, `d2-mutants-b.txt`): the filter ignoring Match context; the filter ignoring the plan; no line marked after a Match line; an Include inside a Match block not passed on; a later visit not recorded; Check, preflightApply and Preflight each exempting without a plan |
+| [3] the units do not rewrite 00-keyroster.conf on their own | `a92224c` | n/a (docs) | n/a. The paragraph names `sudo keyroster-agent apply --once`. It labels two cases UNVERIFIED: the hand run's repair with nothing new to install, and the units' rewrite with only a newer bundle or directory |
+| split [0] the phase2_adoption_pending row | `14fbec1` | n/a (docs) | n/a |
+| This section, the threat rows, the todo, deferred-items.md | (this) | n/a | n/a |
+
+### Deviations
+
+1. **[Fixture] honestSpool's bundle now names its policy.**
+   - It was `"b"` with policy `"p"`, a pair no applier can have accepted.
+   - With the prune, three TestFetch cases failed: `oversize_policy_answer_refused_nothing_written`, `high_policy_version_oversize_refused` and `more_than_per_kind_refused`. A bundle that does not parse names no policy, so policy-1 went.
+   - The bundle now holds the `policy_sha256` of a policy document that names version 1. No assertion changed.
+2. **[Assertion] `missing_dropin_without_adoption_plan_still_refused` now expects the refusal of the runbook's TrustedUserCAKeys line, not the sshd -T value refusal.**
+   - With no plan, the line is a hit. foreignFindings reports an sshd -T value only for a keyword that no line names (unchanged since main).
+   - The test still requires a foreign_trust_setting refusal in the same state.
+3. **[Test design] The apply subtests edit 00-keyroster.conf by appending a comment.**
+   - On an installed host whose drop-in is intact, preflightApply returns early (D-R2, as on main). So a first RED run with an intact drop-in did not test the apply site.
+   - The comment leaves the agent's values in force, so only the runbook's line can refuse.
+   - With the trust-line edit the existing cases use, 14c5a74 already refused the no-plan case through the sshd -T value.
+4. **[Scope] An Include inside a Match block counts as inside the block.**
+   - sshd reads every line of a file that such an Include reaches as part of the block.
+   - The spec names Match blocks in 50-keyroster.conf. This round also covers this path, with its own test and two mutants.
+
+### Gate and CI
+
+- **Windows (Go 1.27.1):** gofmt and `GOOS=linux go vet` after each change. Every RED run, GREEN run and mutant ran in WSL (Go 1.27.3) on copies of the working tree outside the repository.
+- **The local gate in WSL, on a `git archive` copy of `14fbec1` outside the repository.** It ran twice:
+  - **First run:** failed on `internal/signer` `TestSignerRestore/restore_older_db` (`signer unavailable: clock_regression`). The fix round changed nothing under internal/signer. The test passed 10 runs of 10 alone under `-race` (`signer-restore-rerun.txt`). It is recorded in deferred-items.md beside the earlier `clock_regression` entry. Every other step of that run passed.
+  - **Rerun: exit 0 (`GATE PASSED`).** Each of these passed:
+    - gofmt, with its positive control;
+    - go mod verify, the static build, and the CLI cross-compiles for windows, darwin and freebsd;
+    - `go vet`: plain, `e2e`, and `e2e systemdsmoke`;
+    - `CGO_ENABLED=1 go test -race -count=1 ./...`: 34 packages ok, with no data race;
+    - golangci-lint: 0 issues for linux, windows and darwin;
+    - capslock: 23 pairs, equal to the baseline;
+    - dep-firewall;
+    - testonly-firewall, in 6 combinations;
+    - check-pinned-actions: 47.
+  - **Package times under `-race`, first run then rerun:**
+    - internal/agent/apply: 380 s and 354 s;
+    - internal/agent/fetch: 28 s and 28 s;
+    - internal/agent/spool: 4 s and 6 s.
+- **CI:** the required checks on the head that carries this section are in the handback.
+
+### UNVERIFIED after this round
+
+- D-1's byte bound: computed from the caps, never measured.
+- The fresh-host heal assumes the applier has written `accepted.json` once. It writes it after every apply that took the lock, refused ones included. If a host's applier never gets that far (no pins.json, or sshd -T failing), the fetcher keeps asking from the spool's newest versions, and junk above them stays until the applier does.
+- Two cut-short-takeover cases, as the runbook says:
+  - the hand run's repair of a drifted or missing 00-keyroster.conf with no new signed state;
+  - the units' rewrite when only a newer bundle or directory arrives.
+- On a real host: the prune, the Match-block refusals and the cut-short takeover. No 03-16 drill provokes them.
