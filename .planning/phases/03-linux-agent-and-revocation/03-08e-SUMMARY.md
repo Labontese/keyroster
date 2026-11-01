@@ -336,7 +336,7 @@ The review ran at head `14c5a74` against base `a70c661` in security mode and sto
   - The accepted bundle stays (the newest at or below the floor), so its policy stays too.
   - Without a floor, at most 64 policies are kept, and a floor-0 capture reads 64. So junk can no longer crowd out the honest policy.
   - On a fresh host, junk bundles, directories and KRLs above the honest versions go through dropAbove:
-    - the applier writes `accepted.json` with zeros after every apply that took the lock, refused ones included;
+    - the applier writes `accepted.json` with zeros after every apply that took the lock, refused ones included. This is read from `Apply` in apply.go, which calls `WriteAccepted` after every locked apply that is not a dry run, whatever its error. UNVERIFIED by a test: `TestWriteAccepted` covers accepted versions only, and `fresh_host_junk_above_dropped` seeds the file by hand;
     - so the fetcher asks with since 0, and the server answers its current state;
     - dropAbove then removes what lies above that state (`fresh_host_junk_above_dropped`).
 
@@ -368,7 +368,9 @@ The review ran at head `14c5a74` against base `a70c661` in security mode and sto
 | D-2 (finding [2]) | `c712f0b` | `TestAdopt/runbook_line_in_match_block_refused`, `runbook_file_included_in_match_block_refused` and `runbook_lines_without_adoption_plan_refused`, each at `apply`, `preflight` and `check` | RED (`d2-red-green.txt`), with the three D-2 sources taken from 14c5a74: all 9 subtests fail. The apply returns nil, and Preflight and Check report nothing. The changed `missing_dropin_without_adoption_plan_still_refused` fails too.<br>GREEN with the fix, together with the other F09 cases.<br>8 mutants killed (`d2-mutants.txt`, `d2-mutants-b.txt`): the filter ignoring Match context; the filter ignoring the plan; no line marked after a Match line; an Include inside a Match block not passed on; a later visit not recorded; Check, preflightApply and Preflight each exempting without a plan |
 | [3] the units do not rewrite 00-keyroster.conf on their own | `a92224c` | n/a (docs) | n/a. The paragraph names `sudo keyroster-agent apply --once`. It labels two cases UNVERIFIED: the hand run's repair with nothing new to install, and the units' rewrite with only a newer bundle or directory |
 | split [0] the phase2_adoption_pending row | `14fbec1` | n/a (docs) | n/a |
-| This section, the threat rows, the todo, deferred-items.md | (this) | n/a | n/a |
+| This section, the threat rows, the todo, deferred-items.md | `83a5764` | n/a | n/a |
+| Follow-up: sshd's per-file Match scope cited, the trial and refused-edit repairs in the cut-short state labelled UNVERIFIED | `8de2d28` | n/a (a comment and docs) | n/a. Source: servconf.c's Include case runs `*activep = oactive` after each file a glob matches (portable 10.2p1) |
+| This update of the section | (this) | n/a | n/a |
 
 ### Deviations
 
@@ -376,9 +378,11 @@ The review ran at head `14c5a74` against base `a70c661` in security mode and sto
    - It was `"b"` with policy `"p"`, a pair no applier can have accepted.
    - With the prune, three TestFetch cases failed: `oversize_policy_answer_refused_nothing_written`, `high_policy_version_oversize_refused` and `more_than_per_kind_refused`. A bundle that does not parse names no policy, so policy-1 went.
    - The bundle now holds the `policy_sha256` of a policy document that names version 1. No assertion changed.
+   - The alternative was to treat a kept bundle that does not parse as naming any policy. That would let a compromised server turn the policy prune off with junk bundle bodies, and the growth would have no bound again.
 2. **[Assertion] `missing_dropin_without_adoption_plan_still_refused` now expects the refusal of the runbook's TrustedUserCAKeys line, not the sshd -T value refusal.**
    - With no plan, the line is a hit. foreignFindings reports an sshd -T value only for a keyword that no line names (unchanged since main).
    - The test still requires a foreign_trust_setting refusal in the same state.
+   - Main's preflightApply passed the hits unfiltered, so `named` suppressed the value finding there too: in this state main refused with this same line refusal. The old assertion matched only 14c5a74's text-only exemption.
 3. **[Test design] The apply subtests edit 00-keyroster.conf by appending a comment.**
    - On an installed host whose drop-in is intact, preflightApply returns early (D-R2, as on main). So a first RED run with an intact drop-in did not test the apply site.
    - The comment leaves the agent's values in force, so only the runbook's line can refuse.
@@ -406,6 +410,7 @@ The review ran at head `14c5a74` against base `a70c661` in security mode and sto
     - internal/agent/apply: 380 s and 354 s;
     - internal/agent/fetch: 28 s and 28 s;
     - internal/agent/spool: 4 s and 6 s.
+- **After the gate:** `83a5764` and `8de2d28` change only docs and one Go comment. gofmt and `GOOS=linux go vet` ran on them on Windows.
 - **CI:** the required checks on the head that carries this section are in the handback.
 
 ### UNVERIFIED after this round
@@ -415,4 +420,6 @@ The review ran at head `14c5a74` against base `a70c661` in security mode and sto
 - Two cut-short-takeover cases, as the runbook says:
   - the hand run's repair of a drifted or missing 00-keyroster.conf with no new signed state;
   - the units' rewrite when only a newer bundle or directory arrives.
+- The trial and refused-edit repairs in the cut-short state: tested only on an installed host without a takeover (`TestDropInRepair/noop_apply_replaces_trial_on_installed_host`, `dropin_sshd_refuses_repaired_by_noop_run`).
+- sshd's per-file Match scope: read in portable 10.2p1's servconf.c only, not in 9.2p1, and not observed on a running sshd.
 - On a real host: the prune, the Match-block refusals and the cut-short takeover. No 03-16 drill provokes them.
