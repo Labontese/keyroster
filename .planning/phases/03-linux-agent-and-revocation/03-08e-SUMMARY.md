@@ -435,7 +435,7 @@ Two lows from the check were fixed as well.
 
 ### Q1: the read window
 
-- `spool.Keep(vs, floor)` is now exactly Read's rule (`pick`). `pickAbove` and the fetcher's `keepAbove` are gone, so spool.go differs from the PR's base only by `Keep`.
+- `spool.Keep(vs, floor)` is now exactly Read's rule (`pick`). `pickAbove` and the fetcher's `keepAbove` are gone, so this round's spool.go differs from round 1's by `Keep` alone; against the PR's base it also carries this PR's `Cap` and `readCapped` (Task 1).
 - The prune keeps the accepted version and the lowest `spool.MaxVersionsPerKind` (64) above it, or the newest 64 with none accepted. That is what the applier's next capture reads.
 - A host more than 64 versions behind reads to the window's end. The next poll fetches the rest again, because it asks from the accepted versions.
 
