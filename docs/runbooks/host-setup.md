@@ -784,6 +784,7 @@ arrive](#how-fast-changes-arrive)).
 | `not_approved` | fetcher log | Enrolled, not approved yet | Step 4 |
 | `unknown_agent` | fetcher log | The server has no agent with this identity: never enrolled, or forgotten (`keyroster host forget`) | A new join token, then `keyroster-agent install` again |
 | `rate limited` (429) | fetcher log | The server's limiter refused a state request; the fetcher keeps what it spooled and goes on at the next poll | None; escalate if every poll says it |
+| `state_item_over_cap` | fetcher log | A state answer held an item above what the applier reads, or more items of a kind than the server sends; nothing was written | Check the server; the next poll asks again (03-08e; run in CI: `TestFetch/oversize_policy_answer_refused_nothing_written`, `TestFetch/more_than_per_kind_refused`; UNVERIFIED on a real host) |
 | `host_in_directory`, `host_not_enrolled` | `host forget` | A directory entry still holds the agent's host keys; no agent has that identity (forgotten already, or its identity rotated) | Remove the host first and wait for its removal confirmation; check the identity with `keyroster host pending` |
 | `host_removal_not_applied` | `host forget` (CLI) | The agent was approved once and the server has no recorded removal confirmation for it: the host's heartbeat never showed a served directory that removes it (`removal confirmed at directory v<N>` is missing in `keyroster host pending`) | Wait for its next heartbeat; `keyroster host forget --identity <identity> --host-gone` for a host that is gone for good ([Removing a host](#removing-a-host)) |
 | `host_swap_pending` | `host forget` (CLI and server) | The agent's removal is confirmed, but its host's newest heartbeat shows a swap it has not finished (`swap pending` in `keyroster host pending`), so the confirmation does not yet speak for what it enforces (03-08c); nothing was forgotten | Wait for its next heartbeat and run the command again; `--host-gone` for a host that is gone for good |
@@ -890,7 +891,22 @@ sudo keyroster-agent apply --once
 ```
 
 The applier's unit cannot remove files in `/etc/ssh`; the hand run can. The
-apply lock serialises it with the unit.
+apply lock serialises it with the unit. Like `run`, `apply --once` defaults
+`--state-dir` to `/var/lib/keyroster-agent` and `--spool` to
+`<state-dir>/spool`, so the command above needs no path flags.
+
+If a takeover's removal was cut short (the hand run stopped before it
+removed `50-keyroster.conf`), the units keep applying: they rewrite a
+drifted or missing `00-keyroster.conf`, install newer KRLs, and report
+`phase2_adoption_pending` until `sudo keyroster-agent apply --once`
+finishes the removal. Any other trust setting beside the runbook's two
+lines still refuses. Run in CI (03-08e): `TestAdopt`
+(`unfinished_removal_edited_dropin_run_loop_applies_krl`,
+`unfinished_removal_missing_dropin_run_loop_applies_krl`,
+`unfinished_removal_foreign_line_still_refused`,
+`missing_dropin_without_adoption_plan_still_refused`,
+`preflight_command_agrees`) and `TestApplyFlags`. UNVERIFIED on a real
+host: no 03-16 drill cuts a takeover short.
 
 **What the units do.** `keyroster-agent run` looks at the spool every 5 s
 and applies new signed state. It runs the drift check
@@ -972,6 +988,23 @@ cleanup a commit runs. Run in CI (03-08d):
 `reset_then_new_bundle_before_directory`,
 `reset_after_host_removed_keeps_status`) and
 `TestStatus/cap_refusal_is_refused`. UNVERIFIED on a real host: no
+03-16 drill provokes these refusals.
+
+The fetcher keeps the spool readable too. It refuses a state answer with
+an item above what the applier reads, or with more versions of a kind
+than the server sends (`state_item_over_cap` in its log), and writes
+nothing of it; the next poll asks again. At the start of every poll it
+removes from the spool each file the applier would refuse for its size
+(one an older fetcher wrote), and logs the names at warning level;
+symlinks and names the applier never reads stay. Run in CI (03-08e):
+`TestFetch` (`oversize_policy_answer_refused_nothing_written`,
+`high_policy_version_oversize_refused`, `item_at_cap_written`,
+`honest_answers_fit_the_caps`, `more_than_per_kind_refused`,
+`oversize_directory_and_krl_refused`,
+`poisoned_spool_file_removed_at_next_poll`,
+`heal_leaves_symlinks_and_unknown_names`,
+`heal_error_logged_and_poll_continues`) and
+`TestSpool/cap_is_what_read_enforces`. UNVERIFIED on a real host: no
 03-16 drill provokes these refusals.
 
 **Watch the hosts** (admin workstation):
