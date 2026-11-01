@@ -667,6 +667,29 @@ func TestAdopt(t *testing.T) {
 			}
 		}
 	})
+	// F09 (03-08e) fix round 2, the runbook's warning: the hand run
+	// (AllowAdoption) finishes an unfinished takeover without the
+	// foreign-trust preflight the units' apply runs. It rewrites the edited
+	// drop-in and removes 50-keyroster.conf with every line in it, a
+	// foreign one and a Match block included, and its copy goes once the
+	// removal succeeds.
+	t.Run("hand_run_removes_runbook_file_with_every_line", func(t *testing.T) {
+		t.Parallel()
+		h := unfinishedRemoval(t)
+		appendFile(t, h.l.Phase2DropIn(), "TrustedUserCAKeys /etc/ssh/other.pub\nMatch User deploy\n\t"+phase2PrincipalsLine+"\n")
+		appendFile(t, h.l.DropIn(), "# managed by configuration management\n")
+		h.cfg.AllowAdoption = true
+		r, err := h.apply()
+		if err != nil {
+			t.Fatalf("the hand run: %v (report %+v)", err, r)
+		}
+		if h.exists(h.l.Phase2DropIn()) || h.exists(h.l.State(adoptBak)) || h.exists(h.l.State(adoptFile)) {
+			t.Fatalf("after the hand run: 50-keyroster.conf %t, phase2/ %t, plan %t", h.exists(h.l.Phase2DropIn()), h.exists(h.l.State(adoptBak)), h.exists(h.l.State(adoptFile)))
+		}
+		if !slices.Contains(r.Phase2Removed, h.l.Phase2DropIn()) || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) {
+			t.Fatalf("removed %v, drop-in %q", r.Phase2Removed, readFile(t, h.l.DropIn()))
+		}
+	})
 	t.Run("marker_write_failure_leaves_no_plan", func(t *testing.T) {
 		t.Parallel()
 		// PR #68 review, F2: the marker write fails (ENOSPC, EIO) at the

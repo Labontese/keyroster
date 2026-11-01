@@ -922,8 +922,14 @@ setting beside them, either line inside a `Match` block (or in a
 `50-keyroster.conf` that an `Include` inside one reaches), and the two
 lines once the plan is gone are `foreign_trust_setting`:
 `keyroster-agent preflight` and `keyroster-agent check` report them, and
-an apply that would rewrite `00-keyroster.conf` refuses. Run in CI
-(03-08e): `TestAdopt`
+the units' apply refuses them when it would rewrite `00-keyroster.conf`.
+The hand run `sudo keyroster-agent apply --once` does not check them
+while the plan is there: it rewrites `00-keyroster.conf` without the
+foreign-trust preflight, then removes `50-keyroster.conf` with every line
+in it, and its copy in `/var/lib/keyroster-agent/phase2/` goes once the
+removal has succeeded. So before the hand run, remove from
+`50-keyroster.conf`, or move to a file of your own, any line you added
+there. Run in CI (03-08e): `TestAdopt`
 (`unfinished_removal_edited_dropin_run_loop_applies_krl`,
 `unfinished_removal_missing_dropin_run_loop_applies_krl`,
 `unfinished_removal_foreign_line_still_refused`,
@@ -932,10 +938,12 @@ an apply that would rewrite `00-keyroster.conf` refuses. Run in CI
 `runbook_file_included_in_match_block_refused`,
 `runbook_lines_without_adoption_plan_refused`,
 `resume_repairs_edited_dropin`, `resume_repairs_missing_dropin`,
-`crash_during_removal_resumes`) and `TestApplyFlags`. UNVERIFIED: the
-hand run's repair of a drifted or missing `00-keyroster.conf` with no new
-signed state to install (the tests that repair it publish a newer KRL
-first), the units' rewrite in an apply that installs only a newer bundle
+`crash_during_removal_resumes`,
+`hand_run_removes_runbook_file_with_every_line`,
+`check_during_finished_removal_reports_no_runbook_line`) and
+`TestApplyFlags`. UNVERIFIED: the hand run's repair of a missing
+`00-keyroster.conf` with no new signed state to install (the test that
+repairs a missing one publishes a newer KRL first), the units' rewrite in an apply that installs only a newer bundle
 or directory (the tests publish a KRL), the trial and refused-edit
 repairs in this state (tested only on an installed host without a
 takeover: `TestDropInRepair/noop_apply_replaces_trial_on_installed_host`,
