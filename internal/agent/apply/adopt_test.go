@@ -638,13 +638,14 @@ func TestAdopt(t *testing.T) {
 	// the plan while a check runs. Check reads the plan before the
 	// configuration: a plan it finds still exempts lines it may then not
 	// find at all, and no plan means the file was gone already. Here the
-	// removal finishes between the two reads.
+	// removal finishes right after the scan (fix round 3), so any order that
+	// reads the plan after the scan finds it gone and reports the lines.
 	t.Run("check_during_finished_removal_reports_no_runbook_line", func(t *testing.T) {
 		t.Parallel()
 		h := unfinishedRemoval(t)
 		fired := false
 		h.cfg.Fault = func(p string) error {
-			if p == "check-plan-read" {
+			if p == "check-scanned" {
 				fired = true
 				for _, path := range []string{h.l.Phase2DropIn(), h.l.State(adoptFile)} {
 					if err := os.Remove(path); err != nil {
@@ -659,7 +660,7 @@ func TestAdopt(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !fired {
-			t.Fatal("the check-plan-read point never ran: the test does not test")
+			t.Fatal("the check-scanned point never ran: the test does not test")
 		}
 		for _, f := range d.Foreign {
 			if f.File == h.l.Phase2DropIn() {

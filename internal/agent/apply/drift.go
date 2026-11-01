@@ -176,16 +176,18 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 	// (03-08e) and its fix round 1): a runbook value sshd -T reports is
 	// setting drift above, because sshd enforces it until the next apply
 	// rewrites the drop-in.
-	// The plan is read first (F09 (03-08e) fix round 2): check takes no
-	// apply lock, and finishAdoption removes 50-keyroster.conf before the
-	// plan, so a plan read first may exempt lines the scan then no longer
-	// finds, while no plan means the file is gone already. Read after the
-	// scan, a plan removed in between would report lines that are gone.
+	// The plan is read before the scan (F09 (03-08e) fix rounds 2 and 3):
+	// check takes no apply lock, and finishAdoption removes
+	// 50-keyroster.conf before the plan, so a plan read first may exempt
+	// lines the scan then no longer finds, while no plan means the file is
+	// gone already. Read after the scan, a plan removed in between would
+	// report lines that are gone. The check-scanned point, right after the
+	// scan, is where a test finishes that removal.
 	p, _ := e.readAdopt()
-	if err := e.fault("check-plan-read"); err != nil {
+	hits, problems := trustSettingHits(l, cfg.SSHDConfig, nil)
+	if err := e.fault("check-scanned"); err != nil {
 		return nil, err
 	}
-	hits, problems := trustSettingHits(l, cfg.SSHDConfig, nil)
 	r.Foreign = append(r.Foreign, problems...)
 	rest, _, _ := phase2Shadowed(l, hits, p != nil)
 	for _, h := range rest {
