@@ -18,7 +18,7 @@ A related cost from F3/F7: the fetcher starts every poll from the applier's acce
 
 ## Status
 
-The pruning is done by 03-08e's pre-merge review fix round 1 (F01, `pruneSpool` and `spool.Keep`). At the start of every poll the fetcher removes, by the versions in `outbox/accepted.json`, every bundle and directory version but the accepted one and up to 1024 above it (the newest 64 with none accepted), every KRL but the newest complete one, and every policy no kept bundle names under its own version. An apply after the prune reads what it read before (`TestSpoolPrune/prune_keeps_what_the_applier_reads`), and the spool stays bounded (`spool_stays_bounded_across_polls`).
+The pruning is done by 03-08e's pre-merge review fix rounds 1 and 2 (F01, `pruneSpool` and `spool.Keep`). At the start of every poll the fetcher removes, by the versions in `outbox/accepted.json`, every bundle and directory version but those the applier's next capture reads (the accepted one and up to 64 above it, or the newest 64 with none accepted), every KRL but the newest complete one, and every policy no kept bundle names under its own version. An apply after the prune reads what it read before (`TestSpoolPrune/prune_keeps_what_the_applier_reads`), and the spool stays bounded (`spool_stays_bounded_across_polls`).
 
 ## Remaining
 

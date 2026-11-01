@@ -265,7 +265,8 @@ The internal/agent/apply package takes about 500 s under `-race` in WSL, against
 
 - T-03-299 (F01, medium): mitigated by checkCaps (spool.Cap and the per-kind count), healSpool and, since fix round 1, pruneSpool. Tests are named above and in "Pre-merge review fix round 1".
   - Former residual, fixed in fix round 1 (D-1): policy files no bundle names were never pruned. pruneSpool now removes every policy no kept bundle names under its own version, and the spool stays within what it keeps plus one poll's answers.
-  - Residual: the worst-case bound is about 5.6 GiB, computed from the caps and not measured (fix round 1, "D-1").
+  - Residual: the worst-case bound is about 845 MiB since fix round 2 (round 1: about 5.6 GiB), computed from the caps and not measured.
+  - Residual: a prune can unlink an orphaned policy between the applier's listing and its open; that capture fails and the apply retries about 5 s later (fix round 2, "Known residual").
   - Residual: a compromised fetcher remains T-03-225.
 - T-03-298 (F09, low): mitigated by phase2Shadowed. The value exemption applies only while phase2-adopt.json exists, only on an installed host whose last-good is the agent's, and is proved by activateDropIn.
   - Residual: the run loop still cannot finish the removal; `apply --once` now runs without path flags.
@@ -307,7 +308,7 @@ The review ran at head `14c5a74` against base `a70c661` in security mode and sto
 
 ### Owner decisions
 
-- **D-1: policy files in the spool (findings [0] and [1], medium; both predate this PR), fixed as part of F01.** At the start of every poll, after healSpool, `pruneSpool` removes what the applier does not read. It works from the versions in `outbox/accepted.json`, taking zero for a kind with none, or when there is no file:
+- **D-1: policy files in the spool (findings [0] and [1], medium; both predate this PR), fixed as part of F01.** Fix round 2 changed the window to 64 and the bound to about 845 MiB; the 1024 figures in this bullet are round 1's. At the start of every poll, after healSpool, `pruneSpool` removes what the applier does not read. It works from the versions in `outbox/accepted.json`, taking zero for a kind with none, or when there is no file:
   - **Bundles and directories:** every version but the complete ones `spool.Keep` takes. That is Read's Floor rule (`pick`, now through `pickAbove`), with `keepAbove` (MaxRounds × MaxAgentStatePerKind = 1024) in place of 64 above a floor. So it keeps the newest version at or below the accepted one, and the lowest 1024 above it. Without a floor it is Read's own rule: the newest 64.
   - **KRLs:** every version but the newest complete one, which is the only one Read reads.
   - **Policies:** every version but those that pass two tests:
@@ -423,3 +424,63 @@ The review ran at head `14c5a74` against base `a70c661` in security mode and sto
 - The trial and refused-edit repairs in the cut-short state: tested only on an installed host without a takeover (`TestDropInRepair/noop_apply_replaces_trial_on_installed_host`, `dropin_sshd_refuses_repaired_by_noop_run`).
 - sshd's per-file Match scope: read in portable 10.2p1's servconf.c only, not in 9.2p1, and not observed on a running sshd.
 - On a real host: the prune, the Match-block refusals and the cut-short takeover. No 03-16 drill provokes them.
+
+## Pre-merge review fix round 2
+
+A narrow check ran at head `ee1bda1` (wf_28c335a5-a91) and found nothing blocking. Daniel decided on 2026-11-01:
+- Q1: the prune window is 64, not 1024.
+- Q2 to Q4 stand as built in round 1: the two changed existing tests, an Include inside a Match block counting as inside, and the spool-pruning todo staying open for its two remaining items.
+
+Two lows from the check were fixed as well.
+
+### Q1: the read window
+
+- `spool.Keep(vs, floor)` is now exactly Read's rule (`pick`). `pickAbove` and the fetcher's `keepAbove` are gone, so spool.go differs from the PR's base only by `Keep`.
+- The prune keeps the accepted version and the lowest `spool.MaxVersionsPerKind` (64) above it, or the newest 64 with none accepted. That is what the applier's next capture reads.
+- A host more than 64 versions behind reads to the window's end. The next poll fetches the rest again, because it asks from the accepted versions.
+
+**The bound, recomputed.**
+- After the prune, at most 65 bundle, 65 policy and 65 directory sets and one KRL set stay: 65 × (2 + 2 + 1.0625) MiB + 4.02 MiB ≈ 333 MiB.
+- One poll adds at most 64 × 8 MiB = 512 MiB.
+- That is about 845 MiB in all, and about 840 MiB with nothing accepted.
+- These are computed from the caps, not measured. The code comment, the runbook, T-03-299 (here and in the PLAN) and the todo say the same. Round 1's 1024 figures above are superseded.
+
+### Fixes
+
+| Fix | Commit | Test | RED | Mutants (scratchpad `fix77-2/`) |
+|---|---|---|---|---|
+| Q1: the read window | `8c749cb` | `TestSpoolPrune/honest_catch_up_refetches_past_the_read_window` (replaces `honest_catch_up_keeps_one_polls_versions`); the bound in `spool_stays_bounded_across_polls` uses the 64 window | Against round 1's 1024 window: the host read to bundle 200 after the rate-limited poll, where the 64 window stops it at 129 (`q1-red.txt`) | 3 killed (`q1-mutants.txt`): every version kept, round 1's 1024 window, the floor ignored |
+| Check reads the takeover plan before it scans the configuration (low) | `72748aa` | `TestAdopt/check_during_finished_removal_reports_no_runbook_line`, through a new `check-plan-read` fault point between the two reads, at which the test removes 50-keyroster.conf and then the plan | Two RED runs (`f2-red.txt`). Without the fault point the test fails as "does not test". With the old order and the fault point (the swap mutant), Check reports both runbook lines after they are gone | The swap mutant, killed (the second RED run) |
+| The runbook: what the hand run does to lines added to 50-keyroster.conf (low) | `fefb2aa` | `TestAdopt/hand_run_removes_runbook_file_with_every_line` (pins existing behaviour, so it is green on `ee1bda1`; `f3-test.txt`) | n/a (docs) | n/a |
+| This section and the threat rows | (this) | n/a | n/a | n/a |
+
+**Check's order.** keyroster-agent check takes no apply lock, so a hand run can finish a takeover while a check runs. finishAdoption removes 50-keyroster.conf before the plan. Check now reads the plan first:
+- a plan found then may exempt lines the scan no longer finds;
+- no plan means the file is gone already.
+
+Before, a plan removed between the scan and the read made check report runbook lines that were already gone. Preflight and preflightApply hold the apply lock, so no finishAdoption runs between their two reads.
+
+**The hand run.**
+- The units' apply refuses these lines when it would rewrite 00-keyroster.conf. The hand run `apply --once` does not check them while the plan is there.
+- It rewrites 00-keyroster.conf through repairDropIn, without the foreign-trust preflight. It then removes 50-keyroster.conf with every line in it, a foreign line and a Match block included. Its copy in `phase2/` goes once the removal succeeds.
+- The runbook now tells the operator to remove or move any added line first.
+- The new test covers the hand run's repair of an edited drop-in with nothing new to install, so that case is no longer UNVERIFIED. A missing drop-in in that case still is.
+
+### Known residual
+
+The prune can unlink a policy file between the applier's listing of the spool and its open of that file, when the policy has become orphaned. That capture then fails with ENOENT, and the apply retries about 5 s later. It is carried as a known residual and not fixed here.
+
+### Gate and CI
+
+- **The local gate in WSL, on a `git archive` copy of `fefb2aa` (the last code commit), outside the repository:** exit 0, `GATE PASSED` on the first run (`gate-fefb2aa.txt`).
+  - gofmt, with its positive control; go mod verify; the static build and the CLI cross-compiles;
+  - `go vet`: plain, `e2e`, and `e2e systemdsmoke`;
+  - `CGO_ENABLED=1 go test -race -count=1 ./...`: 34 packages ok, with no data race. internal/agent/apply took 282 s, internal/agent/fetch 28 s and internal/agent/spool 4 s;
+  - golangci-lint: 0 issues for linux, windows and darwin;
+  - capslock: 23 pairs, equal to the baseline; dep-firewall; testonly-firewall in 6 combinations; check-pinned-actions: 47.
+- **CI:** the required checks on the head that carries this section are in the handback.
+
+### UNVERIFIED after this round
+
+- The bound of about 845 MiB: computed from the caps, never measured.
+- Round 1's other items stand, except that the hand run's repair of an edited drop-in with nothing new to install is now tested. The repair of a missing one is not.
