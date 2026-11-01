@@ -419,20 +419,6 @@ func Read(dir string, floor Floor) (State, []string, error) {
 // reports versions above floor it left out (with a floor only: without
 // one it takes the newest, and what it leaves out is older).
 func pick(vs []uint64, floor uint64) (map[uint64]bool, bool) {
-	return pickAbove(vs, floor, MaxVersionsPerKind)
-}
-
-// Keep is the versions of vs the fetcher keeps in the spool (F01 (03-08e)
-// fix round 1): Floor's rule, with the lowest above versions above a
-// floor instead of MaxVersionsPerKind. Without a floor it is Read's own
-// rule, the newest MaxVersionsPerKind. vs is not changed.
-func Keep(vs []uint64, floor uint64, above int) map[uint64]bool {
-	take, _ := pickAbove(slices.Clone(vs), floor, above)
-	return take
-}
-
-// pickAbove is pick with the lowest above versions above a floor.
-func pickAbove(vs []uint64, floor uint64, above int) (map[uint64]bool, bool) {
 	slices.Sort(vs)
 	take := map[uint64]bool{}
 	if floor == 0 {
@@ -447,7 +433,7 @@ func pickAbove(vs []uint64, floor uint64, above int) (map[uint64]bool, bool) {
 		switch {
 		case v <= floor:
 			below = v
-		case n < above:
+		case n < MaxVersionsPerKind:
 			take[v] = true
 			n++
 		default:
@@ -458,6 +444,15 @@ func pickAbove(vs []uint64, floor uint64, above int) (map[uint64]bool, bool) {
 		take[below] = true
 	}
 	return take, more
+}
+
+// Keep is the versions of vs the fetcher keeps in the spool (F01 (03-08e)
+// fix rounds 1 and 2): exactly the ones Read takes at floor (Floor's
+// rule), so the spool holds no version of a kind that the applier's next
+// capture at that floor does not read. vs is not changed.
+func Keep(vs []uint64, floor uint64) map[uint64]bool {
+	take, _ := pick(slices.Clone(vs), floor)
+	return take
 }
 
 // Write stores s in the spool at dir through WriteFileAt (mode 0644),

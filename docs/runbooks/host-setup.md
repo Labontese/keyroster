@@ -1032,17 +1032,18 @@ removes from the spool each file the applier would refuse for its size
 (one an older fetcher wrote), and logs the names at warning level;
 symlinks and names the applier never reads stay. Then it removes what the
 applier does not read, by the versions in `outbox/accepted.json`: of the
-bundles and directories all but the accepted version and up to 1024 above
-it (what one poll can fetch), or the newest 64 on a host that accepted
-nothing yet; of the KRLs all but the newest complete one; of the policies
-all but those a kept bundle names, each under the version its own document
-names. It logs how many files went and the first 16 names; symlinks,
-other non-regular files and names the applier never reads stay here too.
-So whatever a compromised server sends, the spool holds at most what this
-keeps (with the caps above, about 5.1 GiB: 1025 bundle, policy and
-directory versions and one KRL; about 0.3 GiB on a host that accepted
-nothing yet) plus one poll's answers (64 of at most 8 MiB each); an honest
-spool holds a few versions. Run in CI (03-08e):
+bundles and directories all but the accepted version and up to 64 above
+it, the versions the applier's next capture reads, or the newest 64 on a
+host that accepted nothing yet; of the KRLs all but the newest complete
+one; of the policies all but those a kept bundle names, each under the
+version its own document names. A host more than 64 versions behind reads
+to the end of that window and gets the rest again at a later poll. It
+logs how many files went and the first 16 names; symlinks, other
+non-regular files and names the applier never reads stay here too. So
+whatever a compromised server sends, the spool holds at most what this
+keeps (with the caps above, about 333 MiB: 65 bundle, policy and
+directory versions and one KRL) plus one poll's answers (64 of at most
+8 MiB each), about 845 MiB in all; an honest spool holds a few versions. Run in CI (03-08e):
 `TestFetch` (`oversize_policy_answer_refused_nothing_written`,
 `high_policy_version_oversize_refused`, `item_at_cap_written`,
 `honest_answers_fit_the_caps`, `more_than_per_kind_refused`,

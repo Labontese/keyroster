@@ -661,26 +661,26 @@ func dropAbove(dir string, v serverclient.AgentVersions) ([]string, error) {
 	return nil, nil
 }
 
-// keepAbove is how many bundle and directory versions above the accepted
-// one pruneSpool keeps: as many as one poll writes (MaxRounds answers of
-// serverclient.MaxAgentStatePerKind), so a host catching up reads what a
-// poll spooled even when the next poll fails.
-const keepAbove = MaxRounds * serverclient.MaxAgentStatePerKind
-
 // pruneSpool removes from the spool at dir what the applier does not
 // read, given the versions it accepted (a; zero for a kind it accepted
 // nothing of, or when the outbox has no enroll.AcceptedFile), and returns
-// the names it removed (F01 (03-08e) fix round 1). pollState calls it at
-// the start of every poll, so between two polls the spool holds at most
-// what it kept plus what one poll writes. It removes:
+// the names it removed (F01 (03-08e) fix rounds 1 and 2). pollState calls
+// it at the start of every poll, so between two polls the spool holds at
+// most what it kept plus what one poll writes. With the read caps that is
+// about 333 MiB kept (65 bundle, policy and directory sets and one KRL
+// set) plus at most MaxRounds answers of
+// serverclient.MaxAgentStateResponse (512 MiB), about 845 MiB in all;
+// computed from the caps, not measured. It removes:
 //
 //   - of the bundles and the directories, every version but the complete
-//     ones spool.Keep takes: the newest at or below a's version (the
-//     accepted one, whose policy so stays too) and the lowest keepAbove
-//     above it, or without one the newest spool.MaxVersionsPerKind, which
-//     is all a floor-0 capture reads (and the applier then uses the newest
-//     only). Every version a pending swap reads is above the accepted one
-//     and within that window;
+//     ones spool.Keep takes, which are those spool.Read takes at a's
+//     version: the newest at or below it (the accepted one, whose policy so
+//     stays too) and the lowest spool.MaxVersionsPerKind above it, or
+//     without one the newest MaxVersionsPerKind (the applier then uses the
+//     newest only). Every version a pending swap reads is above the
+//     accepted one and within that window. A host further behind reads to
+//     the window's end and gets the rest again at the next poll, which
+//     asks from the accepted versions;
 //   - of the KRLs, every version but the newest complete one, the only one
 //     spool.Read reads;
 //   - of the policies, every version but those whose document names its own
@@ -730,8 +730,8 @@ func pruneSpool(dir string, a enroll.Accepted) ([]string, error) {
 		return out
 	}
 	keep := map[string]map[uint64]bool{
-		"bundle":    spool.Keep(complete("bundle"), a.Bundle, keepAbove),
-		"directory": spool.Keep(complete("directory"), a.Directory, keepAbove),
+		"bundle":    spool.Keep(complete("bundle"), a.Bundle),
+		"directory": spool.Keep(complete("directory"), a.Directory),
 		"krl":       {},
 		"policy":    {},
 	}
