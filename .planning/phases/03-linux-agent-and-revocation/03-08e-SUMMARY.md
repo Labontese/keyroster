@@ -265,7 +265,7 @@ The internal/agent/apply package takes about 500 s under `-race` in WSL, against
 
 - T-03-299 (F01, medium): mitigated by checkCaps (spool.Cap and the per-kind count), healSpool and, since fix round 1, pruneSpool. Tests are named above and in "Pre-merge review fix round 1".
   - Former residual, fixed in fix round 1 (D-1): policy files no bundle names were never pruned. pruneSpool now removes every policy no kept bundle names under its own version, and the spool stays within what it keeps plus one poll's answers.
-  - Residual: the worst-case bound is about 845 MiB since fix round 2 (round 1: about 5.6 GiB), computed from the caps and not measured.
+  - Residual: the worst-case bound is about 5.6 GiB (round 1's window, restored in fix round 3 after round 2's 64 window pruned a superseded pending target), computed from the caps and not measured.
   - Residual: a prune can unlink an orphaned policy between the applier's listing and its open; that capture fails and the apply retries about 5 s later (fix round 2, "Known residual").
   - Residual: a compromised fetcher remains T-03-225.
 - T-03-298 (F09, low): mitigated by phase2Shadowed. The value exemption applies only while phase2-adopt.json exists, only on an installed host whose last-good is the agent's, and is proved by activateDropIn.
@@ -308,7 +308,7 @@ The review ran at head `14c5a74` against base `a70c661` in security mode and sto
 
 ### Owner decisions
 
-- **D-1: policy files in the spool (findings [0] and [1], medium; both predate this PR), fixed as part of F01.** Fix round 2 changed the window to 64 and the bound to about 845 MiB; the 1024 figures in this bullet are round 1's. At the start of every poll, after healSpool, `pruneSpool` removes what the applier does not read. It works from the versions in `outbox/accepted.json`, taking zero for a kind with none, or when there is no file:
+- **D-1: policy files in the spool (findings [0] and [1], medium; both predate this PR), fixed as part of F01.** Fix round 2 changed the window to 64, and fix round 3 restored this bullet's 1024 window and bound. At the start of every poll, after healSpool, `pruneSpool` removes what the applier does not read. It works from the versions in `outbox/accepted.json`, taking zero for a kind with none, or when there is no file:
   - **Bundles and directories:** every version but the complete ones `spool.Keep` takes. That is Read's Floor rule (`pick`, now through `pickAbove`), with `keepAbove` (MaxRounds × MaxAgentStatePerKind = 1024) in place of 64 above a floor. So it keeps the newest version at or below the accepted one, and the lowest 1024 above it. Without a floor it is Read's own rule: the newest 64.
   - **KRLs:** every version but the newest complete one, which is the only one Read reads.
   - **Policies:** every version but those that pass two tests:
@@ -435,6 +435,9 @@ Two lows from the check were fixed as well.
 
 ### Q1: the read window
 
+Superseded by fix round 3, which restored the 1024 window.
+
+
 - `spool.Keep(vs, floor)` is now exactly Read's rule (`pick`). `pickAbove` and the fetcher's `keepAbove` are gone, so this round's spool.go differs from round 1's by `Keep` alone; against the PR's base it also carries this PR's `Cap` and `readCapped` (Task 1).
 - The prune keeps the accepted version and the lowest `spool.MaxVersionsPerKind` (64) above it, or the newest 64 with none accepted. That is what the applier's next capture reads.
 - A host more than 64 versions behind reads to the window's end. The next poll fetches the rest again, because it asks from the accepted versions.
@@ -484,3 +487,56 @@ The prune can unlink a policy file between the applier's listing of the spool an
 
 - The bound of about 845 MiB: computed from the caps, never measured.
 - Round 1's other items stand, except that the hand run's repair of an edited drop-in with nothing new to install is now tested. The repair of a missing one is not.
+
+## Pre-merge review fix round 3
+
+A narrow check ran at head `7a763f0` (wf_e63ec938-273) and found a regression from `8c749cb`; both skeptics confirmed the mechanism. A window of 64 counted from the accepted version prunes a superseded pending target:
+- pollSpool reads from the pending target's floor, which each superseding capture moves up to 64 versions further: accepted + 64, then + 128, and so on;
+- after a prune at the accepted version, the capture at that floor offers an older bundle;
+- the next applies then return bundle_older (heartbeat result refused) until a fetch poll succeeds.
+
+Daniel decided on 2026-11-01 to go back to round 1's window of 1024 in this PR. Two lows from the check were fixed as well. The 64 window and its bound of about 845 MiB in "Pre-merge review fix round 2" are superseded.
+
+### The window, restored
+
+- `spool.Keep(vs, floor, above)` and `pickAbove` are back as in round 1, and so is the fetcher's `keepAbove` (MaxRounds × MaxAgentStatePerKind = 1024). Round 2's simplification is not kept: Read's own rule of 64 is exactly what failed.
+- **Why 1024 holds.** Every poll asks from a cursor at or below the accepted version, and writes at most 1024 versions above it. So while the accepted version stays, every version the spool can hold lies within the window. That includes every pending target and what a capture at its floor reads.
+- **The comment.** It said every version a pending swap reads is within the window. That was false at 64; it now gives this reason.
+- **The bound.** About 5.6 GiB again: about 5.1 GiB kept plus 512 MiB for one poll, computed from the caps, not measured. The code comment, the runbook, T-03-299 (here and in the PLAN) and the todo say so.
+
+### Fixes
+
+| Fix | Commit | Test | RED | Mutants (scratchpad `fix77-3/`) |
+|---|---|---|---|---|
+| The 1024 window | `890371c` | `TestSpoolPrune/superseded_pending_target_kept` (the check's probe); `honest_catch_up_keeps_one_polls_versions` (round 1's test again; it replaces round 2's `honest_catch_up_refetches_past_the_read_window`) | At `7a763f0` (`r1-red.txt`): the capture at the superseding pending floor 129 offers `[65]`, and the catch-up stops at 129 after the rate-limited poll | 5 killed (`r1-mutants.txt`): a window of 64, a window of 128, the floor ignored, floor 0 keeping the window, the newest at or below the floor dropped. A window of about 200 or more passes these tests; the constant's definition fixes it at 1024 |
+| The check-plan-read point moved after the scan (low) | `982b157` | `TestAdopt/check_during_finished_removal_reports_no_runbook_line`, at the renamed `check-scanned` point right after `trustSettingHits` | The natural revert, the plan read moved back below the scan, survived with the point before the scan, and is killed with it after (`r2-red.txt`) | That revert |
+| The SUMMARY's sentence on spool.go (low) | `c88b400` | n/a (docs) | n/a | n/a |
+| This section, T-03-299, the todo | (this) | n/a | n/a | n/a |
+
+### Known residual, checked at 1024
+
+The ENOENT race stays as fix round 2 describes it, and only for orphaned policies.
+
+- **Bundles and directories.** A pending-floor capture reads its own floor and what lies above it, all inside the window, and nothing below the accepted version. So the prune never removes what that capture reads.
+- **The refetch's writes.** They replace files by rename and never unlink them.
+- **KRLs.** A capture and the prune both take the newest complete KRL of the same listing.
+- **Policies.** A capture's policy pick, at the accepted or the pending floor, can list an orphaned policy that the prune then unlinks. That capture fails with ENOENT, and the apply retries about 5 s later.
+
+These points are read from the code; no test races a capture against a prune.
+
+### Gate and CI
+
+- **The local gate in WSL, on a `git archive` copy of `982b157` (the last code commit), outside the repository:** exit 0, `GATE PASSED` on the first run (`gate-982b157.txt`).
+  - gofmt, with its positive control; go mod verify; the static build and the CLI cross-compiles;
+  - `go vet`: plain, `e2e`, and `e2e systemdsmoke`;
+  - `CGO_ENABLED=1 go test -race -count=1 ./...`: 34 packages ok, with no data race. internal/agent/apply took 290 s, internal/agent/fetch 32 s and internal/agent/spool 4 s;
+  - golangci-lint: 0 issues for linux, windows and darwin;
+  - capslock: 23 pairs, equal to the baseline; dep-firewall; testonly-firewall in 6 combinations; check-pinned-actions: 47.
+- **After the gate:** `c88b400` and this commit change only planning docs.
+- **CI:** the required checks on the head that carries this section are in the handback.
+
+### UNVERIFIED after this round
+
+- The bound of about 5.6 GiB: computed from the caps, never measured.
+- The analysis of the ENOENT residual above: read from the code, not raced in a test.
+- Round 1's and round 2's other items stand.
