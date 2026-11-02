@@ -991,4 +991,30 @@ func TestSpoolWindow(t *testing.T) {
 			t.Fatalf("status with a recorded bundle: unapplied %+v, want %+v", s.Unapplied, want)
 		}
 	})
+	t.Run("passed_record_removed_by_the_next_apply", func(t *testing.T) {
+		t.Parallel()
+		// A record the commit passed but did not remove (a crash between
+		// the commit and dropPassedRecord) is removed by the next apply's
+		// load, with a log line (PR #78 review, fix round 2).
+		h := recordedWindow(t, true)
+		old, err := os.ReadFile(recordFile(h))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.mustApply()
+		if err := os.WriteFile(recordFile(h), old, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var log strings.Builder
+		h.cfg.Log = &log
+		if r, err := h.apply(); err != nil || !r.NoOp {
+			t.Fatalf("apply after the restored record: %v, %+v; want a no-op", err, r)
+		}
+		if recordExists(t, h) {
+			t.Fatalf("the passed record is still there")
+		}
+		if want := "removed " + recordFile(h) + ": no part of it is ahead of the accepted state"; !strings.Contains(log.String(), want) {
+			t.Fatalf("no log line names the removal:\n%s\nwant %s", log.String(), want)
+		}
+	})
 }
