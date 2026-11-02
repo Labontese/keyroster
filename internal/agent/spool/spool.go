@@ -317,7 +317,32 @@ func ListDir(dirfd int) ([]string, error) {
 // newest complete one are not read; they are returned as ignored, for the
 // report. A recognised file that fails the open contract refuses the
 // whole capture.
+//
+// A name the listing returned that is gone at its open (the fetcher's
+// prune, between the two) makes Read capture once more from a fresh
+// listing (F01 (03-08e), 03-08j): one fresh listing covers every kind the
+// race reaches, an orphaned policy and an older KRL the prune drops once
+// a newer one completes. A second such error fails the capture as before,
+// and the apply retries as it always did; the second capture is a whole
+// new listing, never a mix of two. A missing spool directory also takes
+// the one extra attempt, which fails the same way.
 func Read(dir string, floor Floor) (State, []string, error) {
+	return readSpool(dir, floor, nil)
+}
+
+// readSpool is Read with listed, the test seam readOnce calls right after
+// its listing (nil: none). ReadFileAt wraps the open's error with %w, so
+// errors.Is sees the ENOENT.
+func readSpool(dir string, floor Floor, listed func()) (State, []string, error) {
+	st, ignored, err := readOnce(dir, floor, listed)
+	if errors.Is(err, unix.ENOENT) {
+		return readOnce(dir, floor, listed)
+	}
+	return st, ignored, err
+}
+
+// readOnce is one capture: Read's listing and reads.
+func readOnce(dir string, floor Floor, listed func()) (State, []string, error) {
 	st := State{Bundles: map[uint64]Doc{}, Policies: map[uint64]Doc{}, Directories: map[uint64]Doc{}, KRLs: map[uint64]KRLFiles{}}
 	fd, err := OpenDir(dir)
 	if err != nil {
@@ -327,6 +352,9 @@ func Read(dir string, floor Floor) (State, []string, error) {
 	names, err := ListDir(fd)
 	if err != nil {
 		return st, nil, fmt.Errorf("list spool %s: %w", dir, err)
+	}
+	if listed != nil {
+		listed()
 	}
 	present := map[string]bool{}
 	var ignored []string
