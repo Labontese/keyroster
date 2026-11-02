@@ -5,6 +5,7 @@ package apply
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -71,6 +72,11 @@ var spoolDirectoryRE = regexp.MustCompile(`^directory-[1-9][0-9]{0,19}\.json(\.s
 // signer restore lost is not re-bootstrapped here: while its successor is
 // refused, newer KRLs still apply alone.
 func ResetDirectory(l Layout, spoolDir string) (*ResetReport, error) {
+	return resetDirectory(l, spoolDir, os.Stderr)
+}
+
+// resetDirectory is ResetDirectory with its log lines written to log.
+func resetDirectory(l Layout, spoolDir string, log io.Writer) (*ResetReport, error) {
 	if err := CheckStateDirs(l); err != nil {
 		return nil, err
 	}
@@ -83,7 +89,7 @@ func ResetDirectory(l Layout, spoolDir string) (*ResetReport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrStateDirUnsafe, err)
 	}
-	e := &engine{l: l, stateFd: fd, cfg: Config{Log: os.Stderr}}
+	e := &engine{l: l, stateFd: fd, cfg: Config{Log: log}}
 	defer func() { _ = unix.Close(fd) }()
 	if _, err := state.LoadPins(fd); err != nil {
 		return nil, err
@@ -153,18 +159,30 @@ func ResetDirectory(l Layout, spoolDir string) (*ResetReport, error) {
 }
 
 // resetRecord is ResetDirectory's step 0 against stored, accepted/ as it is
-// before the reset (nil: nothing accepted).
+// before the reset (nil: nothing accepted). Every change it makes is
+// logged, with the version and SHA-256 of a recorded directory it drops
+// that was ahead of accepted/ (PR #78 review), and a removal is made
+// durable (the state directory synced) before step 1 changes accepted/.
 func (e *engine) resetRecord(stored *state.Stored) error {
 	path := e.l.State(state.UnappliedFile)
 	base, u, err := loadUnapplied(e.l, stored)
 	if err != nil {
 		if rerr := e.remove(path); rerr != nil {
 			e.logf("WARNING removing %s: %v", path, rerr)
+			return nil
 		}
+		if serr := fsyncDir(e.l.StateDir); serr != nil {
+			e.logf("WARNING syncing %s: %v", e.l.StateDir, serr)
+		}
+		e.logf("WARNING %s removed: %v", path, err)
 		return nil
 	}
 	if u == nil {
 		return nil
+	}
+	dropped := ""
+	if base != nil && base.DirectoryVersion > stored.DirectoryVersion {
+		dropped = fmt.Sprintf(" (it held directory version %d, SHA-256 %s, ahead of the accepted directory version %d)", base.DirectoryVersion, trust.SHA256Hex(base.Directory), stored.DirectoryVersion)
 	}
 	if base != nil && base.BundleVersion > stored.BundleVersion {
 		kept := &state.Unapplied{Bundle: u.Bundle, BundleSigs: u.BundleSigs, Policy: u.Policy, PolicySigs: u.PolicySigs}
@@ -172,7 +190,20 @@ func (e *engine) resetRecord(stored *state.Stored) error {
 		if err != nil {
 			return err
 		}
-		return e.writeState(state.UnappliedFile, b)
+		if err := e.writeState(state.UnappliedFile, b); err != nil {
+			return err
+		}
+		if u.Directory != nil {
+			e.logf("rewrote %s without its directory part%s; its bundle version %d stays recorded", path, dropped, base.BundleVersion)
+		}
+		return nil
 	}
-	return e.remove(path)
+	if err := e.remove(path); err != nil {
+		return err
+	}
+	if err := fsyncDir(e.l.StateDir); err != nil {
+		return err
+	}
+	e.logf("removed %s%s", path, dropped)
+	return nil
 }

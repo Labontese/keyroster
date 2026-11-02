@@ -788,9 +788,15 @@ func TestSpoolWindow(t *testing.T) {
 		t.Parallel()
 		h := recordedWindow(t, true)
 		// A reset that stops after its first steps (a spool that cannot
-		// be opened) stands in for a crash there.
-		if _, err := ResetDirectory(h.l, h.l.State("missing-spool")); err == nil {
+		// be opened) stands in for a crash there. Its log names the
+		// recorded directory it dropped (PR #78 review).
+		var log strings.Builder
+		if _, err := resetDirectory(h.l, h.l.State("missing-spool"), &log); err == nil {
 			t.Fatalf("a reset with a missing spool succeeded")
+		}
+		want := fmt.Sprintf("removed %s (it held directory version 65, SHA-256 %s, ahead of the accepted directory version 1)", recordFile(h), trust.SHA256Hex(h.dirs[64].Body))
+		if !strings.Contains(log.String(), want) {
+			t.Fatalf("the reset's log does not name the dropped record:\n%s\nwant %s", log.String(), want)
 		}
 		if a, err := h.accepted(); err != nil || a.Directory != nil {
 			t.Fatalf("accepted/ after the interrupted reset: %+v (%v), want no directory", a, err)
@@ -817,6 +823,47 @@ func TestSpoolWindow(t *testing.T) {
 		mustRecord(t, h, 2, 0)
 		if a := readAccepted(t, h); a.Bundle != 2 {
 			t.Fatalf("accepted.json %+v after the reset, want the recorded bundle 2", a)
+		}
+	})
+	t.Run("reset_directory_logs_what_it_drops_from_the_record", func(t *testing.T) {
+		t.Parallel()
+		// PR #78 review: a record with both parts is rewritten without its
+		// directory part, and a damaged record is removed, each with a log
+		// line.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		spoolInState(t, h)
+		h.installed("role:ops")
+		_, b2, p2 := f.rotationOps(f.bundle, f.bundleDoc, f.policyDoc, f.policy, f.policy.Admins, "2026-10-02T00:00:00Z", seedKey(t, 22))
+		h.state.Bundles[2], h.state.Policies[2] = b2, p2
+		s := h.spec("role:ops")
+		s.bulkRoles = 17
+		h.publishDir(s)
+		if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("apply 1: %v, want generation_too_large", err)
+		}
+		mustRecord(t, h, 2, 2)
+		var log strings.Builder
+		if _, err := resetDirectory(h.l, h.cfg.Spool, &log); err != nil {
+			t.Fatal(err)
+		}
+		mustRecord(t, h, 2, 0)
+		want := fmt.Sprintf("rewrote %s without its directory part (it held directory version 2, SHA-256 %s, ahead of the accepted directory version 1); its bundle version 2 stays recorded", recordFile(h), trust.SHA256Hex(h.dirs[1].Body))
+		if !strings.Contains(log.String(), want) {
+			t.Fatalf("the reset's log:\n%s\nwant %s", log.String(), want)
+		}
+		if err := os.WriteFile(recordFile(h), []byte(`{"bundle":`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		log.Reset()
+		if _, err := resetDirectory(h.l, h.cfg.Spool, &log); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, ok := readRecord(t, h); ok {
+			t.Fatalf("the reset left the damaged record")
+		}
+		if !strings.Contains(log.String(), "WARNING "+recordFile(h)+" removed: "+state.ErrUnapplied.Error()) {
+			t.Fatalf("no warning names the damaged record the reset removed:\n%s", log.String())
 		}
 	})
 	t.Run("no_record_after_a_verify_refusal_or_a_dry_run", func(t *testing.T) {
