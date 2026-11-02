@@ -20,6 +20,7 @@ DRAFT: completed task by task; Task 4 finishes it.
 |-------|---------------------|-----------------------------|
 | Task 1 base (origin/main 6572649, before any edit) | 355.5 s | 341.2 s |
 | Task 2 (the tree committed as 7cc88f7) | 310.1 s | 317.4 s |
+| Task 3 (the tree committed as 0767bbf) | 285.4 s | 309.6 s |
 
 - CI on origin/main 6572649: 126.1 s (workflow run 41446523949, build-test job 125280885778, "Test (race detector)" step). Read with `scripts/gh-as-bot.sh run view 41446523949 --job 125280885778 --log`, grepping for `internal/agent/apply`.
 - No figure is above its limit, so the stop rule did not apply. The alone base is higher than 03-08j's 280.2 s on the same code; it leaves 44.5 s to the 400 s limit, which is the tighter of Tasks 2 and 3's two bounds (alone base + 120 s = 475.5 s).
@@ -117,3 +118,53 @@ Every named test failed under its mutant. Where a mutant names several tests, ea
 - verifyKRLUnder now returns the verified KRL and assigns nothing of it. `take` assigns the parsed KRL, KRLChanged and Next's four KRL fields together, only for a KRL that lands. The stored KRL's parse still sets Verified.KRL to the KRL in force.
 - Main's held-step wait still applies only to a manifest the bundle does not verify. verifyKRLUnder marks that error (`manifestRefused`), and under BundleHeld krlStep lets only that error wait, so a parse or header error under a held step is still an error, as on main.
 - The krl_signer_retired error names both bundle versions: `KRL version N: its signer, the ops key of bundle version X, is retired by bundle version Y, which names another ops key`.
+
+## Task 3: what the apply knows beyond one capture
+
+Commit 0767bbf `fix(agent): carry the verified bundle into the record's capture and the wait's polls`. Ten cases, three of them wait cases with the subtests `poll` and `forward`, plus the subtest `forward` of Task 1's `record_signed_krl_during_a_wait_lands`.
+
+### RED (on 003adca, Task 2's head, with the tests added, locally in WSL, `go test -race -count=1 -v`)
+
+| Case | Result on Task 2's head |
+|------|-------------------------|
+| successor_from_the_record_after_a_refused_bundle_step_above_it | RED: `bundle_not_verified ... krl_not_verified: KRL version 1793000002: krl: the manifest is not signed by the bundle's ops key` (nothing carried the record's bundle) |
+| record_successor_dropped_by_a_verified_bundle_above_it_is_refused | RED for the code only: `bundle_not_verified ... krl_not_verified` |
+| retired_key_krl_during_a_wait_is_refused/poll | RED: `krl_signer_retired named false, want true: apply <nil>` (the poll took KRL 7) |
+| retired_key_krl_during_a_wait_is_refused/forward | RED: `accepted/ bundle 1, directory 65, KRL 1793000002; want ... 1793000001` (forward refused KRL 7, then a poll took it) |
+| successor_signed_krl_during_a_wait_lands/poll | RED: `accepted/ ... KRL 1793000001; want ... 1793000002` (KRL 8 waited) |
+| successor_signed_krl_during_a_wait_lands/forward | GREEN at once (Task 2's held rule) |
+| retired_key_krl_during_a_wait_above_the_record_is_refused/poll | RED: `krl_signer_retired named false, want true: apply <nil>` |
+| retired_key_krl_during_a_wait_above_the_record_is_refused/forward | RED: `accepted/ bundle 1, directory 2, KRL 1793000002; want ... 1793000001` (forward refused KRL 8, then a poll took it alone) |
+| record_signed_krl_during_a_wait_lands/forward | GREEN at once (the held rule) |
+| retired_key_krl_after_a_krl_alone_supersede_is_refused | RED: `the KRL-alone state never superseded the pending target (30 sleeps)`: the first poll could not land KRL 8 |
+| retired_key_krl_after_the_bundle_is_withheld_lands_as_on_main | GREEN at once: the withholding-server residual's boundary. Once the spool no longer offers bundle 2, the host no longer knows it, and the KRL the retired key signed is taken as on main |
+| krl_other_error_under_changed_bundle_keeps_its_error | GREEN at once |
+| krl_in_force_key_for_another_installation_keeps_the_first_error | GREEN at once: the fallback returns the first error unchanged |
+| TestVerifyManifest/bundle_read_only_for_its_ops_key | GREEN at once |
+
+Each wait subtest's failure line above was taken from a run of that subtest alone, so each line is attributed to its own subtest.
+
+`retired_key_krl_after_a_krl_alone_supersede_is_refused` was built as the plan writes it. The KRL-alone supersede does not end the wait: the superseding generation still carries the held directory, so the wait goes on, and a later poll runs against the KRL-alone pending target. The case therefore needed no deviation. It detects the supersede by the wait's log line `a newer state arrived during the wait` and publishes KRL 9 at the next sleep.
+
+After the change, Task 3's verify set passes for both packages (no FAIL, no DATA RACE), with every line its fails_when lists. The acceptance greps print: `func VerifyAfter(` 1 in verify.go; `func VerifyAheadAfter(` 1 in unapplied.go; `pollCapture(pending *state.Verified)` 1; in apply.go code, `state.VerifyAfter(` 1, `state.VerifyAheadAfter(` 1, `state.Verify(` 1 (forward's), `state.VerifyAhead(` 1 (forward's), and `state.KRLAlone(e.pins, prev, st, nil, v)` 1.
+
+### Mutants (each applied to 0767bbf, run against its named tests, restored, then `git diff --quiet -- internal/`)
+
+| # | Mutant | Killed by |
+|---|--------|-----------|
+| T3a | VerifyAhead passing nil as carried | successor_from_the_record_after_a_refused_bundle_step_above_it |
+| T3b | the retirement check skipped for the successor in KRLAlone | record_successor_dropped_by_a_verified_bundle_above_it_is_refused |
+| T3c | pollCapture's branch without a record keeping state.Verify | retired_key_krl_during_a_wait_is_refused/poll and /forward; successor_signed_krl_during_a_wait_lands/poll (each run on its own) |
+| T3d | pollCapture's record branch keeping state.VerifyAhead | retired_key_krl_during_a_wait_above_the_record_is_refused/poll and /forward (each run on its own) |
+| T3e | KRLAlone's Verified given a nil fullyVerified instead of from's (its own successor still read from from) | retired_key_krl_after_a_krl_alone_supersede_is_refused (`current revokes 8 true, 9 true`: the second poll landed KRL 9) |
+| T3f | the fallback returning the last candidate's error | krl_in_force_key_for_another_installation_keeps_the_first_error (it reported krl.ErrInstallation) |
+
+**Equivalent mutants.** Each was applied and run against all of TestKRLSigner, TestKRLAlone/ops_key_changed_krl_lands_alone, TestSpoolWindow/krl_only_the_recorded_bundle_signs_lands_alone and policy_rotation_below_the_recorded_bundle, TestApply/catch_up_across_policy_rotation and TestSpoolWindowWideningWait. All three survived, as the plan expects:
+
+| # | Mutant | Why it changes no outcome |
+|---|--------|---------------------------|
+| E1 | the krl.ErrSigner restriction removed, in krlStep and in KRLAlone | krl.VerifyManifest reads the bundle only for its ops-key comparison (pinned by `TestVerifyManifest/bundle_read_only_for_its_ops_key`). So a non-signer error under one bundle is the same error, or krl.ErrSigner, under every other bundle, and the fallback returns the first candidate's error unchanged (pinned by `krl_in_force_key_for_another_installation_keeps_the_first_error`) |
+| E2 | the "ops key differs" conditions on S and F removed, in krlStep and in KRLAlone | the same two facts: a bundle with the same ops key gives the same result as the one already tried |
+| E3 | VerifyAheadAfter without the record's half of the higher-of | within one apply the pending capture's fully verified bundle already starts at the record's bundle (forward's VerifyAhead carried it, or forward wrote the record from that capture), and every later poll inherits it. A version tie between the two halves is the same bundle. Only a record rewritten during the wait could differ; the half is kept so that a poll never knows less than the record |
+
+UNVERIFIED: no test supersedes the pending target twice within one wait. `retired_key_krl_after_a_krl_alone_supersede_is_refused` pins the inheritance through one supersede and a later poll.
