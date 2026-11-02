@@ -1022,11 +1022,11 @@ the recorded unapplied state. Run in CI (03-08k):
 
 **An ops-key rotation** (Run in CI (03-08k), `TestKRLSigner`). When a
 verified bundle the host knows names a newer ops key, the old key is
-retired. The host knows a bundle it verified in the current apply (also
-one verified before a refused bundle step, and, during a widening wait,
-every bundle the apply verified in full before the poll, by forward or by
-an earlier poll, whether that poll installed anything or was refused), or
-one it recorded as unapplied. A bundle at the same version as a known one
+retired. The host knows a bundle it verified in the current apply (also,
+within that one capture, a bundle verified before a refused bundle step,
+and, during a widening wait, every bundle the apply verified in full
+before the poll, by forward or by an earlier poll, whether that poll
+installed anything or was refused), or one it recorded as unapplied. A bundle at the same version as a known one
 but with other bytes (a fork of the root-signed chain) does not replace
 it.
 
@@ -1082,7 +1082,12 @@ it.
     (below), so the host keeps knowing its bundle. Removing
     `unapplied.json` forgets the record: the host then reads from the
     accepted state (Run in CI (03-08j):
-    `removed_record_reads_from_accepted`). A server that withholds the
+    `removed_record_reads_from_accepted`). A bundle verified only before a
+    refused bundle step is known only within that capture: a later poll
+    of the same wait does not know it, so when the server withholds it
+    there, a KRL the key it retired signs can land under a fully verified
+    bundle. That is the same withholding risk. UNVERIFIED: no test builds
+    it. A server that withholds the
     newer bundle from the next apply, or before the host ever saw it,
     can still land a KRL the retired key signs on that host, as before
     this change. Run in CI:

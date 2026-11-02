@@ -14,7 +14,7 @@ provides:
   - "state: krlStep (the KRL step's authorisers P, S, F and the retired-key rule), verifyKRLUnder returning the verified KRL, take"
   - "state: ErrKRLSignerRetired (krl_signer_retired), Verified.KRLRefused, VerifyAfter, VerifyAheadAfter"
   - "apply: krlAlone and pollCapture name their capture; pollCapture(pending) routes VerifyAfter and VerifyAheadAfter; outcome joins KRLRefused; refusals lists krl_signer_retired"
-  - "tests: TestKRLSigner (27 cases, five wait cases with subtests poll and forward), TestVerifyManifest/bundle_read_only_for_its_ops_key, four changed tests"
+  - "tests: TestKRLSigner (33 cases after fix round 1, five wait cases with subtests poll and forward), TestVerifyManifest/bundle_read_only_for_its_ops_key, four changed tests"
   - "docs: host-setup.md's successor paragraph, 'An ops-key rotation', and the rewritten stuck-window sentence"
 affects: [03-08f, 03-09, 03-13]
 
@@ -90,7 +90,8 @@ completed: 2026-11-02
 | 4 | 098682a | docs(03-08k): complete agent KRL-signer plan |
 | review fix 1 | be1ff5c | fix(agent): carry what every poll of a widening wait verified in full (PR #80 review) |
 | review fix 1 | a5be99c | docs(agent): say when removing unapplied.json is safe, and what a refused apply records (PR #80 review) |
-| review fix 1 | (this commit) | docs(03-08k): record pre-merge review fix round 1 |
+| review fix 1 | 0f7aba3 | docs(03-08k): record pre-merge review fix round 1 |
+| review fix 1 | (this commit) | docs(03-08k): scope step-only knowledge to its capture (fix round 1) |
 
 Every branch commit is authored by Daniel Gustafsson and committed and SSH-signed by keyroster-bot (`git log origin/main..HEAD --format='%an <%ae> %cn'` prints only `Daniel Gustafsson <121555671+Labontese@users.noreply.github.com> keyroster-bot`). No commit message carries an attribution trailer.
 
@@ -304,7 +305,7 @@ The PR #80 review's owner decisions D-1 and D-2. The two refuted items were not 
 
 | Item | Source (PR #80 review) | Commit |
 |------|------------------------|--------|
-| D-1: the polls of one apply forget what earlier polls verified in full | four review items with one root cause: a bundle a non-superseding poll verified in full is forgotten (a same-bytes poll, a KRL-alone pass with nothing newer); a poll refused on its KRL step shares nothing with later polls; and the two split items on keeping a verified rotation through a non-superseding poll and through a KRL-alone supersede | be1ff5c |
+| D-1: the polls of one apply forget what earlier polls verified in full | four review items with one root cause: a bundle a non-superseding poll verified in full is forgotten (a same-bytes poll, a KRL-alone pass with nothing newer); a poll refused on its KRL step shares nothing with later polls; and the two split items on keeping a verified rotation through a non-superseding poll and through a KRL-alone supersede. be1ff5c carries the fully verified bundle through all of these, a KRL-alone supersede included (`krl_alone_supersede_keeps_what_an_earlier_poll_verified`). The KRL-alone item's step-only shape is unchanged and stays a residual (What the fix does not carry) | be1ff5c |
 | D-2 (a): the runbook called removing `unapplied.json` "always safe" and said "the KRL still lands" | host-setup.md, the paragraph after the stuck-window remedy | a5be99c |
 | D-2 (b): the runbook said "A refused apply records nothing" | host-setup.md, the Limits of "An ops-key rotation" | a5be99c |
 
@@ -326,7 +327,7 @@ The PR #80 review's owner decisions D-1 and D-2. The two refuted items were not 
 - **What the change does to KRLs.** A later poll now decides with what every earlier poll of the wait verified in full:
   - A KRL the retired key signs stays refused.
   - A KRL the newer bundle's key signs now lands as a fully verified successor's. Before, it was krl_not_verified while the spool withheld that bundle. So no revocation waits for knowledge the apply already had (D-R2).
-  - A KRL lands only when the bundle in force or a fully verified successor authorises it, and the bundle and directory rules are untouched, so nothing becomes wider than the plan's rule allows.
+  - Nothing becomes wider than on main: bundle, directory and principal acceptance is the same as on main. A KRL lands only under the bundle in force or a fully verified successor, which is this PR's existing rule. The fix adds no authoriser; it only keeps knowledge the apply had already verified in full.
 
 ### RED (on 098682a with the tests added, locally in WSL, `go test -race -count=1 -v`)
 
@@ -369,7 +370,7 @@ The owner's rule is that knowledge comes only from a bundle that verified in ful
 - that poll's KRL-alone pass lands a KRL signed by K1 and supersedes the target;
 - a later poll, with bundles 2 to 4 withheld, can land a KRL signed by K2 under the carried bundle 2.
 
-Bundle 3 never verified in full, so it is not carried. This corrects the plan's "What a poll does not carry" residual, which calls the uncarried steps harmless: a KRL-alone supersede can keep a widening pending target, so a later poll does run after such a capture. To use this, an attacker needs bundle 2's ops key and control of the spool. That is the accepted withholding-server residual: a server that withheld bundle 3 from the start would land the same KRL in the first poll.
+Bundle 3 never verified in full, so it is not carried. UNVERIFIED: no test builds this shape. This corrects the plan's "What a poll does not carry" residual, which calls the uncarried steps harmless: a KRL-alone supersede can keep a widening pending target, so a later poll does run after such a capture. To use this, an attacker needs bundle 2's ops key and control of the spool. That is the accepted withholding-server residual: a server that withheld bundle 3 from the start would land the same KRL in the first poll.
 
 ### D-2: the runbook
 
@@ -408,6 +409,7 @@ Both limits hold. The full gate passed: `go test -race -count=1 ./...` (no FAIL,
 6. **The runbook's successor text is its own paragraph** after the cases, instead of an inline replacement of the old sentence. The text is the plan's.
 7. **The tracking updates were made by hand**, as in 03-08j, not with gsd-tools, so that no untracked state file is touched. The ROADMAP row is checked, the Plans line reads 17/25 in 24 waves, and STATE.md reads completed_plans 52 and `Plan: 18 of 25`, with the metrics row and decisions. `requirements.mark-complete` was not run (requirements-completed is empty).
 8. **The base is 6572649**, not the plan's anchor ae754a3 (see Base). This is context, not a change of the plan's work.
+9. **[Fix round 1] The gate's gofmt step was vacuous.** `test -z "$(gofmt -l .)"` inside the string handed to scripts/linux.sh is expanded by WSL's outer shell, where gofmt is not on PATH, so it passed without checking, in fix round 1's gate and in Task 4's. gofmt was run on its own inside WSL's login shell and printed nothing (see Pre-merge review fix round 1).
 
 ## Known Stubs
 
@@ -418,6 +420,7 @@ None.
 - The whole runbook text on a real host: no ceremony on main rotates the ops key yet.
 - The end-to-end wait for the new key's KRL (at most about an hour with an honest server), and a signer process started before the bundle install, which publishes nothing.
 - A fork of the root-signed bundle chain at fullyVerified's version outside a widening wait (it resolves to fullyVerified): no test builds one there. In a wait, `fork_at_the_carried_version_does_not_replace_it` pins that a fork at the carried version does not replace the carried bundle (fix round 1).
+- A bundle verified only before a refused bundle step, then withheld from a later poll of the same wait, after a KRL-alone supersede: the later poll can land a KRL its retired key signed under a fully verified bundle (What the fix does not carry). No test builds it; it is part of the withholding-server residual.
 - Removing `unapplied.json` when a bundle up to the recorded one replaced the ops key, with a pruned spool, and the runbook's steps for that case: no test runs them (fix round 1; the order follows the code).
 - Two supersedes within one wait: no test supersedes the pending target twice. `retired_key_krl_after_a_krl_alone_supersede_is_refused` pins one supersede and a later poll.
 - An old-key KRL kept newest in the spool by a server holding the retired key: no test builds it (part of the withholding-server residual).
@@ -443,4 +446,4 @@ Tasks 2 and 3 (tdd="true") and the tracer Task 1 each recorded RED on their base
 
 - Files: internal/agent/apply/krlsigner_test.go, 03-08k-PLAN.md and this SUMMARY exist.
 - Commits: 9c214b3, 7151615, 7cc88f7, 003adca, 0767bbf, 41bc185, 72fbb34, ff7c0e2 and c47f535 are ancestors of HEAD.
-- Fix round 1: be1ff5c and a5be99c are ancestors of HEAD.
+- Fix round 1: be1ff5c, a5be99c and 0f7aba3 are ancestors of HEAD. The -race times were taken on a5be99c's tree; the commits after it change only the runbook and this SUMMARY.
