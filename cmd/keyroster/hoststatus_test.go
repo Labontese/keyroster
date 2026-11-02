@@ -310,6 +310,13 @@ func TestHostStatusDiverged(t *testing.T) {
 	older.Unapplied = &heartbeat.Unapplied{Directory: 5}
 	mixed := hbStatus(5, 100)
 	mixed.Unapplied = &heartbeat.Unapplied{Bundle: 2, BundleSHA256: ab, Directory: 65, DirectorySHA256: cd}
+	// Fix round 3: on the current bundle, with and without a lost
+	// recorded bundle (and directory), so the bundle count is exercised.
+	onBundle := hbStatus(5, 100)
+	onBundle.Bundle = heartbeat.Doc{Version: 2, SHA256: ab}
+	lostBoth := hbStatus(5, 100)
+	lostBoth.Bundle = heartbeat.Doc{Version: 2, SHA256: ab}
+	lostBoth.Unapplied = &heartbeat.Unapplied{Bundle: 3, BundleSHA256: cd, Directory: 5, DirectorySHA256: cd}
 	// Built as JSON: the current versions carry their SHA-256.
 	statusEnv(t, map[string]any{
 		"current": map[string]any{"bundle": 2, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
@@ -322,6 +329,8 @@ func TestHostStatusDiverged(t *testing.T) {
 			statusRow("web6", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: current}),
 			statusRow("web7", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: older}),
 			statusRow("web8", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: mixed}),
+			statusRow("web9", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: onBundle}),
+			statusRow("web10", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: lostBoth}),
 		},
 	})
 	code, out, stderr := run(t, "host", "status")
@@ -329,7 +338,7 @@ func TestHostStatusDiverged(t *testing.T) {
 		t.Fatalf("host status: exit %d: %s", code, stderr)
 	}
 	t.Logf("keyroster host status:\n%s", out)
-	if !strings.Contains(out, "directory v5 on 1/8 hosts\n") || !strings.Contains(out, "KRL v100 on 8/8 hosts\n") {
+	if !strings.Contains(out, "bundle v2 on 1/10 hosts\n") || !strings.Contains(out, "directory v5 on 2/10 hosts\n") || !strings.Contains(out, "KRL v100 on 10/10 hosts\n") {
 		t.Fatalf("diverged hosts counted as converged:\n%s", out)
 	}
 	flagged := map[string]bool{}
@@ -338,13 +347,14 @@ func TestHostStatusDiverged(t *testing.T) {
 			flagged[f[0]] = true
 		}
 	}
-	want := map[string]bool{"web2": true, "web3": true, "web4": true, "web5": true, "web8": true}
+	want := map[string]bool{"web2": true, "web3": true, "web4": true, "web5": true, "web8": true, "web10": true}
 	if !maps.Equal(flagged, want) {
 		t.Fatalf("diverged flags %v, want %v:\n%s", flagged, want, out)
 	}
-	lost := func(host, parts string) string {
-		return host + ": unapplied: it verified " + parts + `, which the server does not hold as current (above its current version, or that number with other bytes), so a signer restore lost it; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md "Enrolled hosts and a re-made version")`
+	lostAs := func(host, parts, it string) string {
+		return host + ": unapplied: it verified " + parts + `, which the server does not hold as current (above its current version, or that number with other bytes), so a signer restore lost ` + it + `; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md "Enrolled hosts and a re-made version")`
 	}
+	lost := func(host, parts string) string { return lostAs(host, parts, "it") }
 	cannot := func(host, parts string) string {
 		return host + ": unapplied: it verified " + parts + " but cannot apply it"
 	}
@@ -357,6 +367,7 @@ func TestHostStatusDiverged(t *testing.T) {
 		{cannot("web7", "directory v5"), lost("web7", "directory v5")},
 		{lost("web8", "directory v65"), "bundle v2 and directory v65"},
 		{cannot("web8", "bundle v2"), lost("web8", "bundle v2")},
+		{lostAs("web10", "bundle v3 and directory v5", "them"), cannot("web10", "bundle v3")},
 	} {
 		if !strings.Contains(out, c.want) || strings.Contains(out, c.not) {
 			t.Errorf("want the note %q and not %q:\n%s", c.want, c.not, out)
