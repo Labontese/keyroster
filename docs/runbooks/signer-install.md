@@ -1183,19 +1183,45 @@ structurally (see the warning above).
      directory version saw a lost directory. A host whose `bundle` is above
      the restored signer's bundle version saw a lost bundle. If that bundle
      is only recorded (the host's status shows `unapplied` with a bundle,
-     or `accepted.json`'s bundle is above the bundle in
-     `/var/lib/keyroster-agent/accepted/`), run
-     `sudo rm /var/lib/keyroster-agent/unapplied.json`, then
-     `sudo keyroster-agent apply --once`: the host then takes the re-made
-     chain from its accepted bundle. Escalate only if the accepted bundle
-     itself was lost, because `reset-directory` re-bootstraps the directory
-     only. For a lost directory, reset the directory as below. A host you
-     cannot reach must be assumed to have seen both. Run in CI (03-08j):
+     and `keyroster host status` flags it `diverged`), clear the record
+     and the lost bundle together, as root on the host:
+     1. Read the host's accepted bundle version: `bundle.version` in
+        `/var/lib/keyroster-agent/outbox/status.json` (the BUNDLE column
+        of `keyroster host status`). `accepted.json` is no guide here: it
+        names the recorded version.
+     2. List `/var/lib/keyroster-agent/spool/` (`sudo ls`) and remove
+        (`sudo rm`) every `bundle-N.json` and `bundle-N.json.sigs` whose N
+        is above that accepted version. Leave the other files alone. Do
+        this before step 3: an apply that runs between the two steps then
+        finds no lost bundle to record again.
+     3. `sudo rm /var/lib/keyroster-agent/unapplied.json`.
+     4. Wait for the fetcher's next poll (60 s): the running service
+        applies the re-made chain it brings from the accepted bundle. Or
+        run `sudo keyroster-agent apply --once` after that poll. An apply
+        in between can report `bundle_older`, `bundle_chain_gap` or
+        `bundle_not_verified`; its KRL still lands.
+
+     Removing only the record does not converge: the spool still holds the
+     lost bundle, so the next apply verifies it, refuses it and records it
+     again, and the fetcher never asks for the re-made version with that
+     number; if the lost bundle has since become applicable, the host
+     installs it instead. Escalate only if the accepted bundle itself was
+     lost, because `reset-directory` re-bootstraps the directory only. For
+     a lost directory, reset the directory as below. A host you cannot
+     reach must be assumed to have seen both. Run in CI (03-08j):
      `fork_after_the_record_refused`, `fetcher_cursor_follows_the_record`,
      and for the remedy `removed_record_takes_the_remade_bundle_chain` (a
-     recorded bundle, a re-made chain refused while the record exists,
-     installed after its removal). UNVERIFIED on a real host: no test runs
-     an actual signer restore.
+     recorded bundle 2 that a restore lost, re-made up to 2' and up to 3',
+     with the spool as the fetcher leaves it: removing only the record
+     brings the lost bundle back or fails to chain; an apply between steps
+     2 and 3 records nothing; the full remedy and a fetch from the accepted
+     bundle install the re-made chain).
+     UNVERIFIED: that the fetcher then asks from the accepted bundle and
+     brings the re-made versions is reasoned from its cursor (the lower of
+     `accepted.json` and the spool's newest version), not run with a real
+     fetcher; that a lost policy file left in the spool is harmless (the
+     applier finds a bundle's policy by its SHA-256) is reasoned, not run;
+     and no test runs an actual signer restore on a real host.
    - **Re-bootstrap each such host** once the re-made chain is installed,
      as root on the host:
 

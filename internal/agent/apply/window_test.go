@@ -745,29 +745,86 @@ func TestSpoolWindow(t *testing.T) {
 	})
 	t.Run("removed_record_takes_the_remade_bundle_chain", func(t *testing.T) {
 		t.Parallel()
-		// signer-install.md's remedy: a re-made chain 2', 3' is refused
-		// while the record holds bundle 2, and installed after root
-		// removes the record.
-		h := bundleRecorded(t)
-		h.run.rejectCA = nil
-		b2r, d2r := h.f.successor(h.f.bundle, h.f.bundleDoc, "2026-10-01T12:00:00Z")
-		_, d3r := h.f.successor(b2r, d2r.Body, "2026-10-03T00:00:00Z")
-		h.state.Bundles[2], h.state.Bundles[3] = d2r, d3r
-		h.publishKRL(6)
-		r, err := h.apply()
-		if !errors.Is(err, state.ErrBundle) {
-			t.Fatalf("apply 2: %v, want bundle_not_verified", err)
-		}
-		mustKRLAlone(t, h, r, 6, 1, "bundle_not_verified")
-		if a, aerr := h.accepted(); aerr != nil || a.BundleVersion != 1 {
-			t.Fatalf("accepted bundle %+v (%v), want 1", a, aerr)
-		}
-		if err := os.Remove(recordFile(h)); err != nil {
-			t.Fatal(err)
-		}
-		r, err = h.apply()
-		if a, aerr := h.accepted(); err != nil || r.BundleVersion != 3 || aerr != nil || a.BundleVersion != 3 {
-			t.Fatalf("apply 3 after removing the record: %v, %+v; want bundle 3' installed", err, r)
+		// signer-install.md's remedy for a recorded bundle 2 that a signer
+		// restore lost, re-made as 2' (and 3'). The spool is left as the
+		// fetcher leaves it (PR #78 review): the original 2 stays until it
+		// is removed, a fetcher asking from bundle 2 receives only what is
+		// above 2, and 2' arrives only from a fetch from bundle 1.
+		for _, top := range []uint64{2, 3} {
+			t.Run(fmt.Sprintf("remade_up_to_%d", top), func(t *testing.T) {
+				t.Parallel()
+				h := bundleRecorded(t)
+				b2r, d2r := h.f.successor(h.f.bundle, h.f.bundleDoc, "2026-10-01T12:00:00Z")
+				_, d3r := h.f.successor(b2r, d2r.Body, "2026-10-03T00:00:00Z")
+				remade := map[uint64]spool.Doc{2: d2r, 3: d3r}
+				if top == 3 {
+					h.state.Bundles[3] = d3r
+				}
+				h.publishKRL(6)
+				// Removing the record alone does not converge.
+				if err := os.Remove(recordFile(h)); err != nil {
+					t.Fatal(err)
+				}
+				r, err := h.apply()
+				if top == 2 {
+					// The original 2 is verified, refused and recorded
+					// again, and accepted.json names it again.
+					mustKRLAlone(t, h, r, 6, 1, "ca_line_rejected")
+					if !errors.Is(err, ErrCALineRejected) {
+						t.Fatalf("apply with the record removed: %v, want ca_line_rejected", err)
+					}
+					mustRecord(t, h, 2, 0)
+					if a := readAccepted(t, h); a.Bundle != 2 {
+						t.Fatalf("accepted.json %+v, want the recorded bundle 2 again", a)
+					}
+				} else {
+					// 3' does not chain onto the original 2.
+					mustKRLAlone(t, h, r, 6, 1, "bundle_not_verified")
+					if !errors.Is(err, state.ErrBundle) {
+						t.Fatalf("apply with the record removed: %v, want bundle_not_verified", err)
+					}
+				}
+				// The remedy: the spool's bundle files above the accepted
+				// bundle 1, then the record. An apply in between finds no
+				// lost bundle to record again.
+				for v := uint64(2); v <= top; v++ {
+					for _, n := range []string{fmt.Sprintf("bundle-%d.json", v), fmt.Sprintf("bundle-%d.json.sigs", v)} {
+						if err := os.Remove(filepath.Join(h.spool, n)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					delete(h.state.Bundles, v)
+				}
+				r, err = h.apply()
+				if top == 2 {
+					if !errors.Is(err, state.ErrBundleOlder) {
+						t.Fatalf("apply between the remedy's steps: %v, want bundle_older", err)
+					}
+					mustRecord(t, h, 2, 0)
+				} else if err != nil || !r.NoOp {
+					t.Fatalf("apply between the remedy's steps: %v, %+v; want a no-op", err, r)
+				}
+				if err := os.Remove(recordFile(h)); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				if r, err := h.apply(); err != nil || !r.NoOp {
+					t.Fatalf("apply before the next poll: %v, %+v; want a no-op", err, r)
+				}
+				if a := readAccepted(t, h); a.Bundle != 1 {
+					t.Fatalf("accepted.json %+v after the remedy, want bundle 1", a)
+				}
+				// The fetch from bundle 1 brings the re-made chain.
+				for v := uint64(2); v <= top; v++ {
+					h.state.Bundles[v] = remade[v]
+				}
+				r, err = h.apply()
+				if a, aerr := h.accepted(); err != nil || aerr != nil || a.BundleVersion != top || !slices.Equal(a.Bundle, remade[top].Body) {
+					t.Fatalf("apply after the fetch: %v, %+v; want the re-made bundle %d installed", err, r, top)
+				}
+				if _, _, ok := readRecord(t, h); ok {
+					t.Fatalf("a record outlived the re-made chain's install")
+				}
+			})
 		}
 	})
 	t.Run("fetcher_cursor_follows_the_record", func(t *testing.T) {
