@@ -123,7 +123,11 @@ Claude works through its own GitHub account, `keyroster-bot`, so that
 required review involves two real identities. The bot is a collaborator with
 write access only: it can push branches and open PRs, but it cannot approve
 its own PRs, bypass a ruleset or administer the repository. It signs its
-commits with its own SSH key.
+commits with its own SSH key. Its commits are authored as the owner
+(`GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`), and keyroster-bot commits,
+SSH-signs and pushes them. The owner therefore stands as author on `main`
+after his squash merge, while the bot still opens and pushes the PR, so
+two-person review is unchanged.
 
 - `scripts/gh-as-bot.sh` runs `gh` as the bot (its own gh config directory,
   with `GH_TOKEN` and `GITHUB_TOKEN` unset so the owner's token never
