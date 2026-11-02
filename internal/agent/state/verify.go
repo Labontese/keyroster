@@ -34,10 +34,17 @@ type Verified struct {
 
 	// BundleHeld is set when the capture offered a newer bundle than the
 	// one in force after it: the newest offered directory verifies only
-	// under an earlier policy of the bundle chain, so the bundle (and a
-	// KRL only its ops key verifies) waits for the next capture (PR #67
-	// review).
+	// under an earlier policy of the bundle chain, so the bundle waits for
+	// the next capture (PR #67 review). A KRL the newer bundle's ops key
+	// signed lands with the held step (03-08k, krlStep).
 	BundleHeld bool
+
+	// KRLRefused is set only under BundleHeld, when the capture's newest
+	// KRL was refused because its authoriser's ops key is retired (03-08k,
+	// krl_signer_retired): the capture's held step is taken, the KRL in
+	// force stays, and the caller reports KRLRefused after the commit. It
+	// is not Refused, which marks a KRL-alone Verified.
+	KRLRefused error
 
 	// Refused is set when the capture's bundle or directory step was
 	// refused (owner decision D-R2, PR #71 review F5), or when the applier
@@ -118,8 +125,15 @@ func (v *Verified) AsStored() *Stored {
 //     an older version krl_older; otherwise krl.VerifyManifest against the
 //     bundle in force, the pinned installation ID and the stored version,
 //     then krl.Parse, and the KRL's header krl_version must be the
-//     manifest's (krl_header_version_mismatch). With BundleHeld, a KRL whose manifest the bundle in
-//     force does not verify waits with the bundle.
+//     manifest's (krl_header_version_mismatch). Its authoriser (03-08k,
+//     krlStep) is the first of the bundle in force after the capture, the
+//     apply's fully verified successor and the accepted bundle that
+//     verifies it. A KRL whose authoriser's ops key a newer known bundle
+//     dropped is refused with krl_signer_retired: under BundleHeld the
+//     held step is taken without it (KRLRefused), and otherwise Verify
+//     returns the refusal. Any other authorised KRL lands with the capture,
+//     a held step included. A KRL no candidate verifies waits under
+//     BundleHeld and is an error otherwise.
 //
 // A refused bundle or directory step does not stop the KRL (owner decision
 // D-R2, PR #71 review F5): with an accepted bundle, the KRL is verified
@@ -164,7 +178,7 @@ func verify(p *Pins, chain, alone *Stored, in spool.State) (*Verified, error) {
 	if refused != nil {
 		return KRLAlone(p, alone, in, refused, v)
 	}
-	if err := v.verifyKRL(p, chain, in); err != nil {
+	if err := v.krlStep(p, chain, alone, in); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -187,11 +201,14 @@ func verify(p *Pins, chain, alone *Stored, in spool.State) (*Verified, error) {
 // is verified again under that successor: its ops key, the pins'
 // installation ID, prev's KRL version and the header check. A bundle that
 // was only offered, and a step verified before a refused bundle step,
-// authorise nothing. Otherwise prev's bundle's error stands. The returned
-// Verified's bundle, policy and directory stay prev's, and it carries
-// from's fully verified bundle. A nil from tries prev's bundle alone. With
-// no accepted bundle the refusal stands; a refused KRL is an error with
-// the refusal joined to it.
+// authorise nothing. Otherwise prev's bundle's error stands. A new KRL
+// whose authoriser's ops key is retired by a bundle from knows (retiredBy:
+// a newer verified bundle names another key) never lands: the refusal is
+// joined to krl_signer_retired, and nothing is installed (03-08k). The
+// returned Verified's bundle, policy and directory stay prev's, and it
+// carries from's fully verified bundle. A nil from tries prev's bundle
+// alone. With no accepted bundle the refusal stands; a refused KRL is an
+// error with the refusal joined to it.
 func KRLAlone(p *Pins, prev *Stored, in spool.State, refusal error, from *Verified) (*Verified, error) {
 	if err := p.Validate(); err != nil {
 		return nil, errors.Join(refusal, err)
@@ -206,14 +223,74 @@ func KRLAlone(p *Pins, prev *Stored, in spool.State, refusal error, from *Verifi
 	if from != nil {
 		w.fullyVerified = from.fullyVerified
 	}
-	if err := w.verifyKRL(p, prev, in); err != nil {
-		s := w.fullyVerified
-		if !errors.Is(err, krl.ErrSigner) || s == nil || s.Version <= prev.bundle.Version || s.OpsKey.Key == prev.bundle.OpsKey.Key || w.verifyKRLUnder(p, prev, in, s) != nil {
+	k, err := w.verifyKRLUnder(p, prev, in, prev.bundle)
+	auth := prev.bundle
+	if err != nil {
+		s := w.successorAbove(prev.bundle)
+		if !errors.Is(err, krl.ErrSigner) || s == nil || s.OpsKey.Key == prev.bundle.OpsKey.Key {
 			return nil, errors.Join(refusal, err)
 		}
+		sk, serr := w.verifyKRLUnder(p, prev, in, s)
+		if serr != nil {
+			return nil, errors.Join(refusal, err)
+		}
+		k, auth = sk, s
+	}
+	if k != nil {
+		if n := from.retiredBy(auth); n != nil {
+			return nil, errors.Join(refusal, retiredError(k, auth, n))
+		}
+		w.take(k)
 	}
 	w.Refused = refusal
 	return w, nil
+}
+
+// successorAbove is the successor of a KRL checked first under x (03-08k):
+// v's fully verified bundle when its version is above x's, nil otherwise.
+func (v *Verified) successorAbove(x *trust.Bundle) *trust.Bundle {
+	if s := v.fullyVerified; s != nil && s.Version > x.Version {
+		return s
+	}
+	return nil
+}
+
+// newestKnown is the newest bundle v knows above x (03-08k): v's bundle
+// steps above x, those verified before a refused bundle step included, and
+// v's fully verified bundle when above x. The newest is the highest
+// version; on a tie, which only a fork of the root-signed chain can cause,
+// the fully verified bundle counts. It is nil when v knows none.
+func (v *Verified) newestKnown(x *trust.Bundle) *trust.Bundle {
+	var n *trust.Bundle
+	for _, st := range v.steps {
+		if st.bundle.Version > x.Version && (n == nil || st.bundle.Version > n.Version) {
+			n = st.bundle
+		}
+	}
+	if s := v.successorAbove(x); s != nil && (n == nil || s.Version >= n.Version) {
+		n = s
+	}
+	return n
+}
+
+// retiredBy returns the newest bundle v knows above x when it names
+// another ops key than x (krl.VerifyManifest's comparison): x's key is then
+// retired (03-08k). A key the newest bundle names again is current (owner
+// answer Q4). A nil v knows nothing.
+func (v *Verified) retiredBy(x *trust.Bundle) *trust.Bundle {
+	if v == nil {
+		return nil
+	}
+	if n := v.newestKnown(x); n != nil && n.OpsKey.Key != x.OpsKey.Key {
+		return n
+	}
+	return nil
+}
+
+// retiredError is the krl_signer_retired refusal of k, authorised only by
+// auth's ops key, which n retired (03-08k).
+func retiredError(k *newKRL, auth, n *trust.Bundle) error {
+	return fmt.Errorf("%w: KRL version %d: its signer, the ops key of bundle version %d, is retired by bundle version %d, which names another ops key", ErrKRLSignerRetired, k.version, auth.Version, n.Version)
 }
 
 // storedOnly is the Verified of a capture that takes nothing but, later,
@@ -463,55 +540,138 @@ func (v *Verified) verifyDirectory(p *Pins, prev *Stored, in spool.State) error 
 	return nil
 }
 
-// verifyKRL is verifyKRLUnder with the bundle the capture puts in force.
-func (v *Verified) verifyKRL(p *Pins, prev *Stored, in spool.State) error {
-	return v.verifyKRLUnder(p, prev, in, v.Bundle)
+// krlStep is verify's KRL step (03-08k). The skip rules come first and
+// try no candidate: a newest KRL byte-equal to the stored one or at its
+// version is no change, an older version krl_older. Otherwise K, the
+// newest KRL, is checked under candidates in order, and the first that
+// verifies it is its authoriser: P, the bundle the capture puts in force
+// (v.Bundle: under BundleHeld the held step, possibly the bundle in
+// force); S, the apply's fully verified successor, when above P; F, the
+// bundle in force (alone's), when alone has a bundle. A later candidate is
+// tried only after krl.ErrSigner, and only when its ops key differs from
+// those tried.
+//
+// The owner's rule: no KRL lands that neither the bundle in force nor a
+// fully verified successor authorises. A KRL whose authoriser's ops key is
+// retired (retiredBy: a newer bundle this capture knows names another key)
+// never lands, because a retired key may be a compromised one: without
+// BundleHeld krlStep returns krl_signer_retired, so nothing of the capture
+// is installed; under BundleHeld it sets KRLRefused and returns nil, so
+// the held step commits with the KRL in force unchanged. F is tried only
+// to name that refusal: reaching it means P or S, a newer known bundle,
+// names another key, so F's key is retired. Any other authorised KRL lands
+// with the capture, a held step included. A KRL no candidate verifies
+// returns P's error unchanged, never a later candidate's; under BundleHeld
+// a manifest P does not verify waits instead, as before.
+func (v *Verified) krlStep(p *Pins, chain, alone *Stored, in spool.State) error {
+	k, err := v.verifyKRLUnder(p, chain, in, v.Bundle)
+	auth := v.Bundle
+	if errors.Is(err, krl.ErrSigner) {
+		tried := []*trust.Bundle{v.Bundle}
+		candidates := []*trust.Bundle{v.successorAbove(v.Bundle)}
+		if alone != nil && alone.Bundle != nil {
+			candidates = append(candidates, alone.bundle)
+		}
+		for _, c := range candidates {
+			if c == nil || slices.ContainsFunc(tried, func(b *trust.Bundle) bool { return b.OpsKey.Key == c.OpsKey.Key }) {
+				continue
+			}
+			tried = append(tried, c)
+			if ck, cerr := v.verifyKRLUnder(p, chain, in, c); cerr == nil {
+				k, err, auth = ck, nil, c
+				break
+			}
+		}
+	}
+	if err != nil {
+		if mr := (manifestRefused{}); v.BundleHeld && errors.As(err, &mr) {
+			// Signed by no known key: it waits for the next capture.
+			return nil
+		}
+		return err
+	}
+	if k == nil {
+		return nil
+	}
+	if n := v.retiredBy(auth); n != nil {
+		refusal := retiredError(k, auth, n)
+		if v.BundleHeld {
+			v.KRLRefused = refusal
+			return nil
+		}
+		return refusal
+	}
+	v.take(k)
+	return nil
 }
 
-// verifyKRLUnder checks the capture's newest KRL as verifyKRL does, with b
-// as the bundle whose ops key must have signed its manifest (03-08k).
-func (v *Verified) verifyKRLUnder(p *Pins, prev *Stored, in spool.State, b *trust.Bundle) error {
+// newKRL is a KRL verifyKRLUnder verified: newer than the stored one,
+// signed by the given bundle's ops key, with its header version its
+// manifest's (03-08k). Nothing of it is in a Verified until take.
+type newKRL struct {
+	parsed  *krl.Parsed
+	files   spool.KRLFiles
+	version uint64
+}
+
+// take puts k in force in v: the parsed KRL, KRLChanged and Next's KRL,
+// manifest, signature and version, all six together (03-08k). It runs
+// only for a KRL that lands, so a refused KRL never reaches accepted/,
+// where the next quiet apply's byte-equal skip would install it.
+func (v *Verified) take(k *newKRL) {
+	v.KRL, v.KRLChanged = k.parsed, true
+	v.Next.KRL, v.Next.KRLManifest, v.Next.KRLSig, v.Next.KRLVersion = k.files.KRL, k.files.Manifest, k.files.Sig, k.version
+}
+
+// manifestRefused marks verifyKRLUnder's refusal of a KRL's signed
+// manifest under the bundle it was given: the one KRL error a held step
+// lets wait (03-08k).
+type manifestRefused struct{ error }
+
+func (e manifestRefused) Unwrap() error { return e.error }
+
+// verifyKRLUnder checks the capture's newest KRL with b as the bundle whose
+// ops key must have signed its manifest (03-08k), and returns it when it
+// is newer and verifies; it is (nil, nil) for the skip rules. It assigns
+// nothing of the KRL it checks (take does); it sets v.KRL to the stored
+// KRL, the KRL in force.
+func (v *Verified) verifyKRLUnder(p *Pins, prev *Stored, in spool.State, b *trust.Bundle) (*newKRL, error) {
 	var storedVersion uint64
 	if prev != nil && prev.KRL != nil {
 		parsed, err := krl.Parse(prev.KRL)
 		if err != nil {
-			return fmt.Errorf("%w: the accepted KRL: %w", ErrStored, err)
+			return nil, fmt.Errorf("%w: the accepted KRL: %w", ErrStored, err)
 		}
 		v.KRL, storedVersion = parsed, prev.KRLVersion
 	}
 	vs := sortedVersions(in.KRLs)
 	if len(vs) == 0 {
-		return nil
+		return nil, nil
 	}
 	ver := vs[len(vs)-1]
 	files := in.KRLs[ver]
 	if prev != nil && bytes.Equal(files.Manifest, prev.KRLManifest) && bytes.Equal(files.KRL, prev.KRL) {
-		return nil
+		return nil, nil
 	}
 	m, err := krl.ParseManifest(files.Manifest)
 	if err != nil {
-		return fmt.Errorf("%w: krl-%d: %w", ErrKRL, ver, err)
+		return nil, fmt.Errorf("%w: krl-%d: %w", ErrKRL, ver, err)
 	}
 	switch {
 	case m.KRLVersion != ver:
-		return fmt.Errorf("%w: krl-%d.manifest.json names KRL version %d", ErrKRL, ver, m.KRLVersion)
+		return nil, fmt.Errorf("%w: krl-%d.manifest.json names KRL version %d", ErrKRL, ver, m.KRLVersion)
 	case m.KRLVersion == storedVersion:
 		// The version stays; a KRL is never replaced at the same version.
-		return nil
+		return nil, nil
 	case m.KRLVersion < storedVersion:
-		return fmt.Errorf("%w: the spool offers KRL version %d, below the accepted version %d", ErrKRLOlder, m.KRLVersion, storedVersion)
+		return nil, fmt.Errorf("%w: the spool offers KRL version %d, below the accepted version %d", ErrKRLOlder, m.KRLVersion, storedVersion)
 	}
 	if _, err := krl.VerifyManifest(files.Manifest, files.Sig, files.KRL, b, p.InstallationID, storedVersion); err != nil {
-		if v.BundleHeld {
-			// Signed by an ops key of a bundle this capture holds back:
-			// it waits for that bundle.
-			return nil
-		}
-		return fmt.Errorf("%w: KRL version %d: %w", ErrKRL, ver, err)
+		return nil, manifestRefused{fmt.Errorf("%w: KRL version %d: %w", ErrKRL, ver, err)}
 	}
 	parsed, err := krl.Parse(files.KRL)
 	if err != nil {
-		return fmt.Errorf("%w: KRL version %d: %w", ErrKRL, ver, err)
+		return nil, fmt.Errorf("%w: KRL version %d: %w", ErrKRL, ver, err)
 	}
 	if parsed.Version != m.KRLVersion {
 		// The manifest's SHA-256 covers these bytes, but the agent orders
@@ -519,9 +679,7 @@ func (v *Verified) verifyKRLUnder(p *Pins, prev *Stored, in spool.State, b *trus
 		// krl_rollback_refused), so a header above the manifest would set a
 		// floor no later KRL could pass, and one below it would let an
 		// older list replace a newer one.
-		return fmt.Errorf("%w: KRL version %d: the KRL's header says krl_version %d, its signed manifest %d", ErrKRLHeader, ver, parsed.Version, m.KRLVersion)
+		return nil, fmt.Errorf("%w: KRL version %d: the KRL's header says krl_version %d, its signed manifest %d", ErrKRLHeader, ver, parsed.Version, m.KRLVersion)
 	}
-	v.KRL, v.KRLChanged = parsed, true
-	v.Next.KRL, v.Next.KRLManifest, v.Next.KRLSig, v.Next.KRLVersion = files.KRL, files.Manifest, files.Sig, m.KRLVersion
-	return nil
+	return &newKRL{parsed: parsed, files: files, version: m.KRLVersion}, nil
 }

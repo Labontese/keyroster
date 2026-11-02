@@ -5,15 +5,16 @@ package apply
 import (
 	"bytes"
 	"errors"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -223,44 +224,462 @@ func TestKRLSigner(t *testing.T) {
 	})
 	t.Run("record_signed_krl_during_a_wait_lands", func(t *testing.T) {
 		t.Parallel()
-		t.Run("poll", func(t *testing.T) {
+		// The record's bundle 3 names K2, and KRL 8 is signed by K2. A poll
+		// reads from the record, and its capture brings nothing beyond it:
+		// its KRL step verifies KRL 8 under bundle 3, and the KRL-alone
+		// pass, which fails under bundle 1, takes it under the capture's
+		// fully verified bundle 3.
+		runWait(t, waitCase{
+			build:   func(t *testing.T) *testHost { return recordBelowWait(t, seedKey(t, 22), nil) },
+			publish: func(h *testHost) { h.f.ops = seedKey(h.t, 22); h.publishKRL(5, 8) },
+			want:    waitWant{bundle: 1, dir: 2, lands: true, revoked: []uint64{5, 8}, record: 3},
+		}, "poll")
+	})
+
+	// --- the KRL step ---
+	t.Run("retired_key_krl_on_the_krl_step_is_refused", func(t *testing.T) {
+		t.Parallel()
+		x := opsRotated(t)
+		h := x.h
+		h.publishDir(h.spec("role:ops", "role:q"))
+		h.publishKRL(5, 6)
+		gen, gens := h.current(), h.genCount()
+		before, err := h.accepted()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i <= 2; i++ {
+			// Apply 2 has no newer KRL: the refused KRL never became the
+			// stored one, so the skip rules do not pass it.
+			_, err := h.apply()
+			if !errors.Is(err, state.ErrKRLSignerRetired) || errors.Is(err, state.ErrKRL) || !strings.Contains(err.Error(), "bundle version 1") || !strings.Contains(err.Error(), "bundle version 2") {
+				t.Fatalf("apply %d: %v, want krl_signer_retired naming bundle versions 1 and 2", i, err)
+			}
+			mustUnchanged(t, h, gen, gens, before)
+			if !h.krlRevokes(h.l.Current(), 5) || h.krlRevokes(h.l.Current(), 6) {
+				t.Fatalf("apply %d: the KRL in force changed", i)
+			}
+			if la := outboxStatus(t, h).LastApply; la == nil || la.Result != heartbeat.ResultRefused {
+				t.Fatalf("apply %d: last_apply %+v, want refused", i, la)
+			}
+			if recordExists(t, h) {
+				t.Fatalf("apply %d recorded the refused capture", i)
+			}
+		}
+		h.f.ops = x.k2
+		h.publishKRL(5, 6, 7)
+		r, err := h.apply()
+		if a, aerr := h.accepted(); err != nil || aerr != nil || a.BundleVersion != 2 || a.DirectoryVersion != 2 || a.KRLVersion != h.f.krlVersion || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("apply 3 with the new key's KRL: %v, %+v, accepted %+v (%v)", err, r, a, aerr)
+		}
+	})
+	t.Run("krl_third_key_under_changed_bundle_not_retired", func(t *testing.T) {
+		t.Parallel()
+		x := opsRotated(t)
+		h := x.h
+		h.f.ops = seedKey(t, 24)
+		h.publishKRL(5, 6)
+		gen, gens := h.current(), h.genCount()
+		before, err := h.accepted()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.apply(); !errors.Is(err, state.ErrKRL) || !errors.Is(err, krl.ErrSigner) || errors.Is(err, state.ErrKRLSignerRetired) {
+			t.Fatalf("a KRL no known key signed: %v, want krl_not_verified for its signer", err)
+		}
+		mustUnchanged(t, h, gen, gens, before)
+	})
+	t.Run("first_install_krl_refusal_unchanged", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHost(t, newFixture(t))
+		h.publishDir(h.spec("role:ops"))
+		h.f.ops = seedKey(t, 24)
+		h.publishKRL(6)
+		if _, err := h.apply(); !errors.Is(err, state.ErrKRL) || !errors.Is(err, krl.ErrSigner) || errors.Is(err, state.ErrKRLSignerRetired) {
+			t.Fatalf("a first install with a KRL no key signed: %v, want krl_not_verified", err)
+		}
+		if h.current() != 0 || h.exists(h.l.LastGood()) {
+			t.Fatalf("a refused first install installed something: current %d, last-good %d", h.current(), h.lastGood())
+		}
+	})
+	t.Run("krl_the_new_bundle_authorises_applies_with_it", func(t *testing.T) {
+		t.Parallel()
+		x := opsRotated(t)
+		h := x.h
+		h.f.ops = x.k2
+		h.publishKRL(5, 6)
+		r, err := h.apply()
+		if a, aerr := h.accepted(); err != nil || aerr != nil || a.BundleVersion != 2 || a.KRLVersion != h.f.krlVersion || !h.krlRevokes(h.l.Current(), 6) {
+			t.Fatalf("bundle 2 with a KRL its ops key signed: %v, %+v, accepted %+v (%v)", err, r, a, aerr)
+		}
+	})
+	t.Run("unchanged_krl_under_a_rotated_bundle_installs", func(t *testing.T) {
+		t.Parallel()
+		// A rotation's usual shape: the spool's newest KRL is the one in
+		// force, signed by the old key. The skip rules come first, so a KRL
+		// the host already accepted is never refused for its signer.
+		x := opsRotated(t)
+		h := x.h
+		r, err := h.apply()
+		if a, aerr := h.accepted(); err != nil || aerr != nil || a.BundleVersion != 2 || a.KRLVersion != x.v5 || !h.krlRevokes(h.l.Current(), 5) {
+			t.Fatalf("bundle 2 with KRL 5 unchanged: %v, %+v, accepted %+v (%v)", err, r, a, aerr)
+		}
+	})
+
+	// --- the KRL-alone pass ---
+	t.Run("retired_key_krl_after_a_refused_directory_is_refused", func(t *testing.T) {
+		t.Parallel()
+		x := opsRotated(t)
+		h := x.h
+		s := h.spec("role:ops")
+		s.signer = seedKey(t, 14)
+		h.publishDir(s)
+		h.publishKRL(6)
+		gen, gens := h.current(), h.genCount()
+		before, err := h.accepted()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.apply(); !errors.Is(err, state.ErrDir) || !errors.Is(err, state.ErrKRLSignerRetired) {
+			t.Fatalf("a refused directory and a retired-key KRL: %v, want directory_not_verified and krl_signer_retired", err)
+		}
+		mustUnchanged(t, h, gen, gens, before)
+		if !h.krlRevokes(h.l.Current(), 5) {
+			t.Fatal("serial 5 is no longer revoked")
+		}
+	})
+	t.Run("retired_key_krl_after_a_refused_bundle_step_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// Bundle 2, verified before the refused bundle 3, is known: it
+		// retired the old key.
+		x := opsRotated(t)
+		h := x.h
+		_, d3 := h.f.successorUnder(x.b2, x.d2.Body, x.p2.Body, "2026-10-03T00:00:00Z")
+		d3.Sigs = x.d2.Sigs
+		h.state.Bundles[3] = d3
+		h.publishKRL(6)
+		gen, gens := h.current(), h.genCount()
+		before, err := h.accepted()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.apply(); !errors.Is(err, state.ErrBundle) || !errors.Is(err, state.ErrKRLSignerRetired) {
+			t.Fatalf("a refused bundle step and a retired-key KRL: %v, want bundle_not_verified and krl_signer_retired", err)
+		}
+		mustUnchanged(t, h, gen, gens, before)
+	})
+	t.Run("rotated_back_key_is_current", func(t *testing.T) {
+		t.Parallel()
+		// Q4: bundle 3 names the original key again.
+		x := opsRotated(t)
+		h := x.h
+		pol2, err := trust.ParsePolicy(x.p2.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, d3, p3 := h.f.rotationOps(x.b2, x.d2.Body, x.p2.Body, pol2, pol2.Admins, "2026-10-03T00:00:00Z", x.k1)
+		h.state.Bundles[3], h.state.Policies[3] = d3, p3
+		s := h.spec("role:ops")
+		s.signer = seedKey(t, 14)
+		h.publishDir(s)
+		h.publishKRL(5, 6)
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrDir) || errors.Is(err, state.ErrKRLSignerRetired) {
+			t.Fatalf("a key named again: %v, want directory_not_verified alone", err)
+		}
+		mustKRLAlone(t, h, r, 6, 1, "directory_not_verified")
+		mustAcceptedBundle1(t, h, 1)
+	})
+
+	// --- held ---
+	t.Run("held_bundle_krl_signed_by_the_newest_key_lands_with_the_held_step", func(t *testing.T) {
+		t.Parallel()
+		x := heldShape(t, false)
+		h := x.h
+		h.f.ops = x.k2
+		h.publishKRL(5, 6)
+		r, err := h.apply()
+		if err != nil || r.BundleVersion != 2 || r.DirectoryVersion != 65 || !r.BundleHeld || !h.krlRevokes(h.l.Current(), 6) {
+			t.Fatalf("apply 1: %v, %+v, revokes 6 %t; want bundle 2, directory 65, held, KRL 6", err, r, h.krlRevokes(h.l.Current(), 6))
+		}
+		r, err = h.apply()
+		if err != nil || r.BundleVersion != 3 || r.DirectoryVersion != 67 || r.KRLVersion != h.f.krlVersion || !h.krlRevokes(h.l.Current(), 6) {
+			t.Fatalf("apply 2: %v, %+v; want bundle 3, directory 67, KRL 6", err, r)
+		}
+	})
+	t.Run("held_step_krl_signed_by_a_retired_key_is_refused", func(t *testing.T) {
+		t.Parallel()
+		x := heldShape(t, false)
+		h := x.h
+		h.publishKRL(6)
+		before, err := h.accepted()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrKRLSignerRetired) || r.BundleVersion != 2 || r.DirectoryVersion != 65 || !r.BundleHeld {
+			t.Fatalf("apply 1: %v, %+v; want the held step (bundle 2, directory 65) and krl_signer_retired", err, r)
+		}
+		mustKRLBytes(t, h, before, x.v5)
+		if la := outboxStatus(t, h).LastApply; la == nil || la.Result != heartbeat.ResultRefused {
+			t.Fatalf("apply 1: last_apply %+v, want refused", la)
+		}
+		if _, err := h.apply(); !errors.Is(err, state.ErrKRLSignerRetired) {
+			t.Fatalf("apply 2 with no newer KRL: %v, want krl_signer_retired", err)
+		}
+		if a, err := h.accepted(); err != nil || a.BundleVersion != 2 {
+			t.Fatalf("apply 2 installed something: accepted %+v (%v)", a, err)
+		}
+		mustKRLBytes(t, h, before, x.v5)
+		h.f.ops = x.k2
+		h.publishKRL(5, 6, 7)
+		r, err = h.apply()
+		if err != nil || r.BundleVersion != 3 || r.DirectoryVersion != 67 || r.KRLVersion != h.f.krlVersion || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("apply 3 with the new key's KRL: %v, %+v; want bundle 3, directory 67, KRL 7", err, r)
+		}
+	})
+	t.Run("retired_in_force_key_krl_under_a_held_step_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// P differs from F: bundle 2 replaced K1 with K2, and bundle 3 keeps
+		// K2 and rotates the admins.
+		x := heldShape(t, true)
+		h := x.h
+		h.publishKRL(5, 6)
+		before, err := h.accepted()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrKRLSignerRetired) || r.BundleVersion != 2 || r.DirectoryVersion != 65 || !r.BundleHeld || r.KRLVersion != x.v5 {
+			t.Fatalf("apply 1: %v, %+v; want the held step (bundle 2, directory 65) with KRL 5 and krl_signer_retired", err, r)
+		}
+		mustKRLBytes(t, h, before, x.v5)
+		if la := outboxStatus(t, h).LastApply; la == nil || la.Result != heartbeat.ResultRefused {
+			t.Fatalf("apply 1: last_apply %+v, want refused", la)
+		}
+		h.f.ops = x.k2
+		h.publishKRL(5, 6, 7)
+		r, err = h.apply()
+		if err != nil || r.BundleVersion != 3 || r.DirectoryVersion != 67 || r.KRLVersion != h.f.krlVersion || !h.krlRevokes(h.l.Current(), 7) {
+			t.Fatalf("apply 2 with the new key's KRL: %v, %+v; want bundle 3, directory 67, KRL 7", err, r)
+		}
+	})
+	t.Run("retired_key_krl_held_at_the_in_force_bundle_below_the_record_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// TestSpoolWindow/policy_rotation_below_the_recorded_bundle's newOps
+		// shape: the record's bundle 3 names K2, and the capture is held at
+		// the bundle in force (P = F = bundle 1), whose key K1 signed KRL 7.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		spoolInState(t, h)
+		h.installed("role:ops")
+		h.publishKRL(5)
+		h.mustApply()
+		v5 := f.krlVersion
+		bob := seedKey(t, 12)
+		b2, d2, p2 := f.rotationOps(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, "2026-10-02T00:00:00Z", seedKey(t, 22))
+		h.state.Bundles[2], h.state.Policies[2] = d2, p2
+		next := seedKey(t, 21)
+		_, d3 := f.successorNextUnder(b2, d2.Body, p2.Body, "2026-10-03T00:00:00Z", next)
+		h.state.Bundles[3] = d3
+		line := trust.FormatKey(next.PublicKey())
+		h.run.rejectCA = func(l string) bool { return l == line }
+		if _, err := h.apply(); !errors.Is(err, ErrCALineRejected) {
+			t.Fatalf("apply 1: %v, want ca_line_rejected", err)
+		}
+		mustRecord(t, h, 3, 0)
+		for range spool.MaxVersionsPerKind {
+			h.publishDir(h.spec("role:ops"))
+		}
+		h.publishKRL(7)
+		before, err := h.accepted()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrKRLSignerRetired) || r.BundleVersion != 1 || r.DirectoryVersion != 65 || !r.BundleHeld {
+			t.Fatalf("apply 2: %v, %+v; want directory 65 held under bundle 1 and krl_signer_retired", err, r)
+		}
+		mustKRLBytes(t, h, before, v5)
+		mustRecord(t, h, 3, 0)
+	})
+
+	// --- a poll from the record ---
+	t.Run("retired_key_krl_during_a_wait_from_the_record_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// The record's bundle 3 names K2, and KRL 8 is signed by the key in
+		// force, K1, which bundle 3 retired. In poll, the KRL step refuses
+		// KRL 8 before the KRL-alone call; in forward, the held step commits
+		// without it.
+		runWait(t, waitCase{
+			build:   func(t *testing.T) *testHost { return recordBelowWait(t, seedKey(t, 22), nil) },
+			publish: func(h *testHost) { h.publishKRL(5, 8) },
+			want:    waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 3, retired: true},
+		}, "poll", "forward")
+	})
+}
+
+// heldShape is TestApply/catch_up_across_policy_rotation's window (03-08k)
+// on a host with KRL 5 (version v5, signed by k1) in force: bundle 2, bundle
+// 3 rotating the admins to bob, directories 2-65 signed by the original
+// admin and two more by bob widening deploy to role:q. The first capture
+// holds at bundle 2 below bundle 3. Without inForceRotated, bundle 2 keeps
+// the policy and k1, and bundle 3 replaces k1 with k2 (P's key k1, which N
+// dropped). With inForceRotated, bundle 2 replaces k1 with k2 under the same
+// admins, and bundle 3 keeps k2 (P differs from F).
+func heldShape(t *testing.T, inForceRotated bool) rotated {
+	t.Helper()
+	f := newFixture(t)
+	h := newTestHost(t, f)
+	withOutbox(t, h)
+	h.installed("role:ops")
+	h.publishKRL(5)
+	h.mustApply()
+	x := rotated{h: h, k1: f.ops, k2: seedKey(t, 22), v5: f.krlVersion}
+	bob := []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(seedKey(t, 12).PublicKey())}}
+	var d3, p3 spool.Doc
+	if inForceRotated {
+		x.b2, x.d2, x.p2 = f.rotationOps(f.bundle, f.bundleDoc, f.policyDoc, f.policy, f.policy.Admins, "2026-10-02T00:00:00Z", x.k2)
+		pol2, err := trust.ParsePolicy(x.p2.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, d3, p3 = f.rotation(x.b2, x.d2.Body, x.p2.Body, pol2, bob, "2026-10-03T00:00:00Z")
+		h.state.Policies[2], h.state.Policies[3] = x.p2, p3
+	} else {
+		x.b2, x.d2 = f.successor(f.bundle, f.bundleDoc, "2026-10-02T00:00:00Z")
+		_, d3, p3 = f.rotationOps(x.b2, x.d2.Body, f.policyDoc, f.policy, bob, "2026-10-03T00:00:00Z", x.k2)
+		h.state.Policies[2] = p3
+	}
+	h.state.Bundles[2], h.state.Bundles[3] = x.d2, d3
+	for range spool.MaxVersionsPerKind {
+		h.publishDir(h.spec("role:ops"))
+	}
+	for range 2 {
+		s := h.spec("role:ops", "role:q")
+		s.signer = seedKey(t, 12)
+		h.publishDir(s)
+	}
+	return x
+}
+
+// mustKRLBytes checks that accepted/'s KRL, manifest and signature are the
+// bytes read before the apply, with KRL version v5, and that current
+// revokes serial 5 and neither 6 nor 7.
+func mustKRLBytes(t *testing.T, h *testHost, before *state.Stored, v5 uint64) {
+	t.Helper()
+	a, err := h.accepted()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(a.KRL, before.KRL) || !bytes.Equal(a.KRLManifest, before.KRLManifest) || !bytes.Equal(a.KRLSig, before.KRLSig) || a.KRLVersion != v5 {
+		t.Fatalf("accepted/'s KRL changed: version %d, want %d with the same bytes", a.KRLVersion, v5)
+	}
+	if !h.krlRevokes(h.l.Current(), 5) || h.krlRevokes(h.l.Current(), 6) || h.krlRevokes(h.l.Current(), 7) {
+		t.Fatalf("the KRL in force changed: revokes 5 %t, 6 %t, 7 %t", h.krlRevokes(h.l.Current(), 5), h.krlRevokes(h.l.Current(), 6), h.krlRevokes(h.l.Current(), 7))
+	}
+}
+
+// waitCase is one wait case of the truth "a poll decides a KRL as forward
+// does" (03-08k). build brings a host to just before its widening apply,
+// publish publishes the case's KRL, and during is the rest of the wait's
+// first-sleep hook, which then empties and rewrites the spool. In subtest
+// poll the KRL is published at the first sleep, so only a poll sees it; in
+// subtest forward it is published before the widening apply, so forward
+// decides it, and it stays in the spool through the wait. Both subtests
+// end under one assertion, mustWaitOutcome.
+type waitCase struct {
+	build   func(t *testing.T) *testHost
+	publish func(h *testHost)
+	during  func(t *testing.T, h *testHost)
+	want    waitWant
+}
+
+// waitWant is a wait case's expected end: accepted/'s bundle and directory
+// versions, whether the case's KRL is in force (otherwise the KRL in force
+// before the apply stays), the serials current revokes and those it does
+// not, the record's bundle part (0: no record), and whether
+// krl_signer_retired is named in the apply's error or the wait's log.
+type waitWant struct {
+	bundle, dir    uint64
+	lands, retired bool
+	revoked, kept  []uint64
+	record         uint64
+}
+
+// runWait runs c's shape once per mode, "poll" and "forward".
+func runWait(t *testing.T, c waitCase, modes ...string) {
+	t.Helper()
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
-			// The record's bundle 3 names K2. A poll reads from the record,
-			// and its capture brings nothing beyond it: its KRL step verifies
-			// KRL 8 under bundle 3, and the KRL-alone pass, which fails under
-			// bundle 1, takes it under the capture's fully verified bundle 3.
-			k2 := seedKey(t, 22)
-			h := recordBelowWait(t, k2, nil)
+			h := c.build(t)
+			before, err := h.accepted()
+			if err != nil {
+				t.Fatal(err)
+			}
 			var log strings.Builder
 			h.cfg.Log = &log
+			if mode == "forward" {
+				c.publish(h)
+			}
 			sleeps := 0
 			h.clock.onSleep = func(time.Duration) {
 				if sleeps++; sleeps != 1 {
 					return
 				}
-				h.f.ops = k2
-				h.publishKRL(5, 8)
+				if mode == "poll" {
+					c.publish(h)
+				}
+				if c.during != nil {
+					c.during(t, h)
+				}
 				h.resetSpool()
 				h.write()
 			}
 			r, err := h.apply()
 			if sleeps == 0 {
-				t.Fatal("apply 2 did not wait")
+				t.Fatalf("the widening apply did not wait: %v (report %+v)", err, r)
 			}
-			if err != nil {
-				t.Fatalf("apply 2: %v (report %+v)\n%s", err, r, log.String())
-			}
-			mustAcceptedBundle1(t, h, 2)
-			if !h.krlRevokes(h.l.Current(), 5) || !h.krlRevokes(h.l.Current(), 8) {
-				t.Fatalf("KRL 8 did not land during the wait: revokes 5 %t, 8 %t\n%s", h.krlRevokes(h.l.Current(), 5), h.krlRevokes(h.l.Current(), 8), log.String())
-			}
-			if a, err := h.accepted(); err != nil || a.KRLVersion != h.f.krlVersion {
-				t.Fatalf("accepted/ KRL version %+v (%v), want %d", a, err, h.f.krlVersion)
-			}
-			if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops", "role:q"}) {
-				t.Fatalf("principals %v, want the widened [role:ops role:q]", got)
-			}
-			mustRecord(t, h, 3, 0)
+			mustWaitOutcome(t, h, err, log.String(), before.KRLVersion, c.want)
 		})
-	})
+	}
+}
+
+// mustWaitOutcome is the one assertion of both subtests of a wait case.
+func mustWaitOutcome(t *testing.T, h *testHost, err error, log string, inForce uint64, w waitWant) {
+	t.Helper()
+	named := err != nil && strings.Contains(err.Error(), "krl_signer_retired") || strings.Contains(log, "krl_signer_retired")
+	if named != w.retired {
+		t.Fatalf("krl_signer_retired named %t, want %t: apply %v\n%s", named, w.retired, err, log)
+	}
+	if err != nil && (!w.retired || !errors.Is(err, state.ErrKRLSignerRetired)) {
+		t.Fatalf("apply: %v, want nil or krl_signer_retired\n%s", err, log)
+	}
+	a, aerr := h.accepted()
+	if aerr != nil {
+		t.Fatal(aerr)
+	}
+	krlVersion := inForce
+	if w.lands {
+		krlVersion = h.f.krlVersion
+	}
+	if a.BundleVersion != w.bundle || a.DirectoryVersion != w.dir || a.KRLVersion != krlVersion {
+		t.Fatalf("accepted/ bundle %d, directory %d, KRL %d; want %d, %d, %d\n%s", a.BundleVersion, a.DirectoryVersion, a.KRLVersion, w.bundle, w.dir, krlVersion, log)
+	}
+	for _, s := range w.revoked {
+		if !h.krlRevokes(h.l.Current(), s) {
+			t.Fatalf("current does not revoke %d\n%s", s, log)
+		}
+	}
+	for _, s := range w.kept {
+		if h.krlRevokes(h.l.Current(), s) {
+			t.Fatalf("current revokes %d\n%s", s, log)
+		}
+	}
+	if w.record != 0 {
+		mustRecord(t, h, w.record, 0)
+	} else if recordExists(t, h) {
+		t.Fatal("an unapplied record exists")
+	}
 }

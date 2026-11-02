@@ -62,6 +62,12 @@ var (
 	// agent orders KRLs by the header version (the KRL floor, RollbackTarget),
 	// the manifest by its own, so the two must be one number.
 	ErrKRLHeader = errors.New("krl_header_version_mismatch")
+	// ErrKRLSignerRetired is a KRL whose only authoriser is an ops key that
+	// a newer verified bundle the host knows dropped (03-08k): a retired key
+	// may be a compromised one. Such a KRL never lands, and nothing else of
+	// its capture is installed with it, except a held step (Verified.
+	// KRLRefused), which commits with the KRL in force unchanged.
+	ErrKRLSignerRetired = errors.New("krl_signer_retired")
 )
 
 // Pins are the applier's trust anchors (pins.json, root 0600): the

@@ -762,6 +762,11 @@ func (e *engine) forward(ctx context.Context) error {
 		// directory step is reported, and only the capture's KRL moves on.
 		e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", v.Refused)
 	}
+	if v.KRLRefused != nil {
+		// 03-08k: a KRL whose ops key a newer verified bundle dropped,
+		// under a held step; outcome reports it after the commit.
+		e.logf("WARNING %v; the held step is applied, and the KRL in force stays", v.KRLRefused)
+	}
 	e.report.BundleHeld = v.BundleHeld
 	var g, cur *Generation
 	var curLink link
@@ -958,15 +963,18 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 }
 
 // outcome is what forward returns once v's state is in force, or found
-// unchanged: v.Refused, and while no directory is accepted also Render's
-// host_not_in_directory refusal (F08 (03-08d)), which RenderFallback went
-// on from with last-good's principals. The apply's error and last_apply
-// then name both until a directory is accepted.
+// unchanged: v.Refused, v.KRLRefused (a held step taken without a KRL whose
+// ops key a newer verified bundle dropped, 03-08k; a superseding poll's
+// included, since forward returns outcome(tv)), and while no directory is
+// accepted also Render's host_not_in_directory refusal (F08 (03-08d)),
+// which RenderFallback went on from with last-good's principals. The
+// apply's error and last_apply then name all of them until a directory is
+// accepted.
 func outcome(v *state.Verified) error {
 	if v.Directory == nil {
-		return errors.Join(v.Refused, errNoDirectory)
+		return errors.Join(v.Refused, v.KRLRefused, errNoDirectory)
 	}
-	return v.Refused
+	return errors.Join(v.Refused, v.KRLRefused)
 }
 
 // candidate renders v for this host (render), keeps the KRL in force

@@ -631,11 +631,10 @@ func TestSpoolWindow(t *testing.T) {
 				if err != nil || r.DirectoryVersion != 65 || r.BundleVersion != 1 || !r.BundleHeld {
 					t.Fatalf("apply 2: %v, %+v; want directory 65 under bundle 1, held", err, r)
 				}
-				if newOps && r.KRLVersion == h.f.krlVersion {
-					t.Fatalf("the KRL the new ops key signed was taken under bundle 1")
-				}
-				if !newOps && !h.krlRevokes(h.l.Current(), 7) {
-					t.Fatalf("KRL 7 was not applied")
+				// With newOps, the KRL is signed by the recorded bundle's
+				// key and lands with the held step (03-08k).
+				if r.KRLVersion != h.f.krlVersion || !h.krlRevokes(h.l.Current(), 7) {
+					t.Fatalf("KRL 7 was not applied: %+v", r)
 				}
 				mustRecord(t, h, 3, 0)
 			})
