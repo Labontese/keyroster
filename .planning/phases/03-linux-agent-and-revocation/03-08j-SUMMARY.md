@@ -15,7 +15,9 @@ provides:
   - "apply: WriteAccepted raised to the record's versions; ResetDirectory's record step (step 0)"
   - "heartbeat: Status.Unapplied and its Validate rule; keyroster host status's unapplied alert and note"
   - "spool: Read's one recapture after an ENOENT (readOnce, readSpool)"
-  - "tests: TestSpoolWindow (22 cases), TestValidate's unapplied row, TestHostStatusUnapplied, TestReadRecapture"
+  - "tests: TestSpoolWindow (23 cases), TestSpoolWindowWideningWait (7 cases), TestValidate's unapplied row, TestHostStatusUnapplied, TestReadRecapture"
+  - "apply: pollCapture, a widening wait's capture chained from the record while it is ahead of the pending target (pre-merge review fix round 1)"
+  - "heartbeat: Status.UnappliedAbove; Committed and Diverged count an unapplied version above current (pre-merge review fix round 1)"
   - "docs: host-setup.md far-behind paragraphs, two sentences after the fetcher paragraph, the unapplied alert; signer-install.md host selection and remedy; the spool-pruning todo's remaining item"
 affects: [03-08k, 03-09, 03-10]
 
@@ -98,7 +100,7 @@ completed: 2026-11-02
 
 - **state.** Verify's body moved into `verify(p, chain, alone, in)`. The bundle, directory and KRL steps run against chain; a refused step returns `KRLAlone(p, alone, ...)`. When alone has a bundle and chain's BundleVersion is above it, alone's bundle step is prepended as `steps[0]`, so `holdBundle` can still hold the capture at the bundle in force. `Verify` is `verify(p, prev, prev, in)`, unchanged in behaviour.
 - **state, unapplied.go.** The record type with its codec (`trust.CanonicalJSON`, `ParseUnapplied` with `trust.DecodeStrict`, per-field caps as spool.Read's, complete parts, never empty). `Verified.Unapplied` records the parts of `Next` ahead of accepted/ (the held step after `holdBundle`). `Base` copies accepted/ and takes each part above accepted/'s version (a bundle part only when the bundle names its policy). `VerifyAhead` is `verify(p, base, accepted, in)` with Changed recomputed against accepted/.
-- **apply.** `loadUnapplied` reads the record without following links. forward drops a damaged record with a warning, removes a passed one silently, reads from the record's floor with `VerifyAhead`, and calls `recordUnapplied` (merging) just before the KRL-alone pass of a content refusal. `finishCommit` removes a record the new accepted/ has passed. Apply's epilogue sets `Report.Unapplied`. pollSpool is unchanged (doc comment only).
+- **apply.** `loadUnapplied` reads the record without following links. forward drops a damaged record with a warning, removes a passed one (with a log line since the pre-merge fix round), reads from the record's floor with `VerifyAhead`, and calls `recordUnapplied` (merging) just before the KRL-alone pass of a content refusal. `finishCommit` removes a record the new accepted/ has passed. Apply's epilogue sets `Report.Unapplied`. pollSpool was unchanged in the plan; the pre-merge fix round chains its captures from the record (below).
 - **installed.go.** `WriteAccepted` raises the bundle and directory to the record's versions where higher; `AcceptedVersions` is unchanged.
 - **resetdir.go.** Step 0 (after the lock and the pending-marker check, before step 1) rewrites the record without its directory part when its bundle part is still ahead, and removes it otherwise.
 - **heartbeat, status, CLI.** `Status.Unapplied {bundle, directory}` (omitempty); Validate refuses only both zero. buildStatus sets it from the record. `keyroster host status` shows `unapplied: bundle vB, directory vD` and a note.
@@ -151,6 +153,110 @@ T2d was run against each row of `policy_rotation_below_the_recorded_bundle` sepa
 - Publish checks: the waves of 03-09 to 03-16 at origin/main + 1, 03-09's depends_on and precondition clause, STATE's total_plans and `of M`, the ROADMAP's Plans line and wave headers (1..23, each "blocked on Wave N-1"), the 03-08j row under Wave 15 and 03-09 under Wave 16: all pass.
 - Test times under -race: internal/agent/apply took 294 s locally in WSL at Task 2's head (with other runs in parallel), beside 290 s locally at 03-08e's last code commit and 164 s in CI at PR #76's head; internal/agent/spool 3.4 s locally. In the full local gate, internal/agent/apply took 310.6 s and internal/agent/spool 4.8 s. In CI (build-test job 125091260620, under -race): internal/agent/apply 160.6 s, internal/agent/spool 2.7 s, internal/agent/fetch 12.5 s, internal/agent/state 1.1 s; all well below the 400 s limit.
 
+## Pre-merge review fix round 1
+
+The PR #78 review's items D-1, D-2, D-3 and L-1 to L-4 are fixed. Every RED below was run locally in WSL on the tree at 21e7135 with the new tests added. Every mutant was applied in a scratch copy and then restored.
+
+| Item | Commit | What changed |
+|------|--------|--------------|
+| D-1 | aeb15e9, 6cf4449 | A widening wait's polls chain from the unapplied record, as forward does |
+| L-1, L-2 | 2d97a92 | reset-directory's step 0: a removal is synced; every drop is logged |
+| D-3 | b8f75e3 | An unapplied version above the server's current one counts as diverged |
+| D-2 | 1b5acb1 | signer-install.md's remedy for a lost recorded bundle converges |
+| L-3, L-4 | 1151aa5 | ROADMAP row encoding; STATE file count |
+
+### D-1: polls during a widening wait
+
+- **The problem.** pollSpool verified each poll's capture against the pending target alone. When forward held that target at the bundle in force, below a recorded bundle, a poll read from the bundle in force again. Three things could then supersede the target: an older bundle below the record (at the 64-version window boundary, or held at an earlier policy), a spool copy at the record's version, or a re-made chain. The commit then removed the record.
+- **pollCapture.**
+  - It lays the record over the pending target (`Unapplied.Base` against it): per kind, the record's part where it is higher, otherwise the pending target's.
+  - While a part is ahead, it reads from that base's floor and verifies with `VerifyAhead`. The pending target is the state for the KRL-alone pass and for the lowest hold step.
+  - A capture that brings nothing beyond the base supersedes the target only with a newer KRL, verified against the pending target (`KRLAlone`). So no poll renders the refused record again.
+  - When no record is ahead, or the record does not load, the poll uses `Verify` against the pending target, as before.
+- **Logging.** dropPassedRecord and forward's load now log the removal of a passed record.
+- **Truths met.** The plan's truth that the record is the only chain base while it exists, and that no capture is verified below it, now holds during a widening wait too. The plan's line "pollSpool is unchanged" is superseded by this fix.
+- **Tests.** TestSpoolWindowWideningWait has seven rows. Each asserts the following:
+  - accepted/ keeps the original bundle 1 bytes;
+  - the record keeps the recorded bundle's bytes;
+  - the CA line the record removed is in no trust file;
+  - the widened principals land;
+  - no poll rendered the record;
+  - the KRL published during the wait lands.
+- **RED at 21e7135: all seven rows.**
+
+  | Row | Result at 21e7135 |
+  |-----|-------------------|
+  | `older_bundle_at_the_window_boundary` | installed bundle 65 |
+  | `record_version_withheld` | installed bundle 2 |
+  | `newer_directory_under_the_policy_in_force` | installed bundle 2 |
+  | `fork_at_the_record_version` | installed 3' |
+  | `remade_chain` | installed 4' |
+  | `remade_chain_under_the_old_policy` | installed 4' |
+  | `nothing_new` | the wait rendered the recorded bundle 60 times |
+
+  GREEN after the fix.
+- **Mutants: all killed.**
+
+  | Mutant | Killed by |
+  |--------|-----------|
+  | No guard | `nothing_new`, `fork_at_the_record_version`, `newer_directory_under_the_policy_in_force`, `older_bundle_at_the_window_boundary` |
+  | `VerifyAhead` with the base as alone | `record_version_withheld`, both re-made rows, `newer_directory_under_the_policy_in_force` |
+  | The guard returning nothing | `fork_at_the_record_version` (the KRL did not land) |
+  | The capture read from the pending target's floor | `remade_chain_under_the_old_policy` |
+  | No log line for a passed record | `refused_window_newest_then_fix_applies` |
+
+### L-1 and L-2: reset-directory's step 0
+
+- **Sync.** resetRecord syncs the state directory after it removes unapplied.json. A failed sync fails the reset for a record that parsed, and is logged for a damaged one.
+- **Log lines.** Every change step 0 makes is logged:
+  - a rewrite without the directory part, and a removal, name the recorded directory version and SHA-256 when it was ahead of accepted/;
+  - a damaged record's removal is a WARNING with the loader's error.
+- **Log seam.** `resetDirectory` takes the log writer, and `ResetDirectory` writes to stderr as before.
+- **Tests.** `reset_directory_drops_the_records_directory` now checks the log line, and `reset_directory_logs_what_it_drops_from_the_record` is new.
+- **Mutants: all killed.** Three mutants, each dropping one log line: removal (killed by the first test), rewrite and damaged record (both killed by the second). L-1 has no RED: no test can lose an unsynced unlink (see Untested paths).
+
+### D-3: an unapplied version above current
+
+- **Status.** `Status.UnappliedAbove` is new. Committed is false and Diverged is true for a host whose unapplied record is above the server's current version.
+- **keyroster host status.** It leaves such a host out of that kind's "on version" count, and its note gives the signer-install.md remedy instead of "applies the next version it can".
+- **host-setup.md.** The `diverged` and `unapplied` alerts, and the counting rule, say so.
+- **Tests.**
+  - Three new TestCommittedAndDiverged rows.
+  - A web4 row in TestHostStatusDiverged.
+  - TestHostStatusUnapplied's server versions are now the recorded ones, and it asserts no `diverged`.
+- **RED.** On hoststatus.go and heartbeat.go at 21e7135, with `UnappliedAbove` as a stub returning false: `TestHostStatusDiverged` (counted as converged) and the two above-current TestCommittedAndDiverged rows.
+- **Mutants: all killed.** Diverged ignoring the record; Committed ignoring the record; the note not switched; the count ignoring the record.
+
+### D-2: the remedy for a lost recorded bundle
+
+- **The remedy.** signer-install.md's remedy now has four steps:
+  1. Read the accepted bundle version from `outbox/status.json`.
+  2. Remove the spool's bundle files above it.
+  3. Remove the record.
+  4. Let the next poll bring the re-made chain.
+
+  The spool files go first, so that an apply between steps 2 and 3 records nothing.
+- **The test.** `removed_record_takes_the_remade_bundle_chain` now leaves the spool as a fetcher does. It has two rows: re-made up to 2', and up to 3'.
+  - Removing only the record does not converge: the lost 2 is recorded again and accepted.json names it again, or the chain refuses to link.
+  - An apply between the remedy's steps records nothing.
+  - After a fetch from the accepted bundle, the re-made chain installs.
+- **No RED.** This is a documentation and test change; the code is unchanged.
+- **UNVERIFIED.** The fetcher side is reasoned, not run (see UNVERIFIED).
+
+### L-3 and L-4
+
+- **ROADMAP.md.** The 03-08j row's Windows-1252 dash byte is now a UTF-8 em dash. Every file the PR changes passes `iconv -f UTF-8 -t UTF-8`.
+- **STATE.md.** The metrics row counts 30 files, which is `git diff --stat 9ac9c12 21e7135`.
+
+### Gate
+
+Run locally in WSL at 1151aa5:
+- `go test -race -count=1 ./...`: passed (392 s). internal/agent/apply took 351.0 s under -race in that run, alongside every other package.
+- vet, gofmt, capslock-check, dep-firewall, testonly-firewall and check-pinned-actions: pass.
+- golangci-lint: reported three unused test parameters, fixed in 6cf4449.
+
+At 6cf4449, run locally in WSL: golangci-lint reports 0 issues and gofmt is clean. internal/agent/apply took 278.9 s under -race when run alone, below its 400 s limit. Under Verification above, the same package took 294 s at Task 2's head (with other runs in parallel) and 310.6 s in the full gate.
+
 ## Deviations from Plan
 
 1. **The tracking updates were made by hand**, not with gsd-tools, so no untracked state file is touched. The plan inserts the 03-08j row unchecked and then runs the tracking updates once; as in 03-08e's PR (whose plan said the same), they check the row and count the plan as executed: the Plans line reads 16/24 in 23 waves, STATE.md total_plans 59, completed_plans 51, `Plan: 17 of 24`, with the metrics row and decisions. `requirements.mark-complete` was not run (requirements-completed is empty). The plan's publish checks pass.
@@ -167,6 +273,7 @@ None.
 ## Untested paths
 
 - ResetDirectory with a record that parses but cannot be rewritten or removed (the reset then fails before step 1): no test makes that write fail.
+- ResetDirectory's sync of the state directory after it removes the record (pre-merge fix round, L-1): no test loses an unsynced unlink, and none makes the sync fail.
 
 ## UNVERIFIED
 
@@ -175,6 +282,7 @@ None.
 - A real capture racing a real prune; the seam stands in for it.
 - The residual (a directory signed only under a policy strictly between the bundle in force and the recorded bundle) and its hand remedy: no test builds two policy rotations in one gap.
 - Mixed server versions during the rollout (server before agents, no rollback).
+- signer-install.md's remedy for a lost recorded bundle (pre-merge fix round, D-2): that the fetcher then asks from the accepted bundle and brings the re-made versions is reasoned from its cursor (the lower of accepted.json and the spool's newest version); the test writes what such a fetch would. That a lost policy file left in the spool is harmless (the applier finds a bundle's policy by its SHA-256) is reasoned, not run.
 - Everything on a real host, and hosts more than 130 versions behind.
 
 ## Threat model
