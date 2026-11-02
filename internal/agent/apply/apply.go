@@ -1236,13 +1236,14 @@ func (e *engine) discard(n uint64) {
 // generation is then the pending target's with the newer KRL, and its
 // Verified carries the refusal, which forward returns after the commit. A
 // KRL-alone state with nothing newer returns the refusal, which the wait
-// logs. The capture is read and verified as forward's is (pollCapture):
-// from the unapplied record while it is ahead of the pending target. It
+// logs. The capture is read and verified as forward's is (pollCapture),
+// with what the pending capture knew (03-08k): from the unapplied record
+// while it is ahead of the pending target. It
 // records no unapplied state: after the target's commit the next forward
 // records a refused state if one remains (PR #76 review F8 (03-08j)).
 func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target *Generation) (*Generation, *state.Verified, error) {
 	prev := pending.AsStored()
-	v, st, err := e.pollCapture(prev)
+	v, st, err := e.pollCapture(pending)
 	if err != nil || v == nil || !v.Changed() {
 		return nil, nil, err
 	}
@@ -1278,8 +1279,8 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 }
 
 // pollCapture is a widening wait's capture and its verification against
-// prev, the pending target's state (PR #78 review, 03-08j). While the
-// unapplied record has a part ahead of prev (Unapplied.Base against prev:
+// prev, the state of pending, the pending target (PR #78 review, 03-08j).
+// While the unapplied record has a part ahead of prev (Unapplied.Base against prev:
 // per kind the record's part when it is higher, prev's otherwise), the
 // record is the chain base, as in forward: the capture is read from that
 // base's floor and verified by VerifyAhead with prev as the state the
@@ -1294,21 +1295,28 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 // rendered again by the next forward, not by every poll. Without such a
 // record, or with one that does not load, the capture is verified against
 // prev (Verify). v is nil when nothing is newer.
-func (e *engine) pollCapture(prev *state.Stored) (*state.Verified, spool.State, error) {
+//
+// Each branch knows what the pending capture knew (03-08k): the branch
+// without a record verifies with state.VerifyAfter, the record branch with
+// state.VerifyAheadAfter, which also knows the record's bundle, and the
+// KRL-alone call names that capture. So a poll decides a KRL as forward
+// does, neither wider nor narrower.
+func (e *engine) pollCapture(pending *state.Verified) (*state.Verified, spool.State, error) {
+	prev := pending.AsStored()
 	base, _, err := loadUnapplied(e.l, prev)
 	if err != nil || base == nil {
 		st, err := e.capture(prev.Floor())
 		if err != nil {
 			return nil, st, err
 		}
-		v, err := state.Verify(e.pins, prev, st)
+		v, err := state.VerifyAfter(e.pins, pending, st)
 		return v, st, err
 	}
 	st, err := e.capture(base.Floor())
 	if err != nil {
 		return nil, st, err
 	}
-	v, err := state.VerifyAhead(e.pins, prev, base, st)
+	v, err := state.VerifyAheadAfter(e.pins, pending, base, st)
 	if err != nil || v.Refused != nil {
 		return v, st, err
 	}

@@ -233,7 +233,7 @@ func TestKRLSigner(t *testing.T) {
 			build:   func(t *testing.T) *testHost { return recordBelowWait(t, seedKey(t, 22), nil) },
 			publish: func(h *testHost) { h.f.ops = seedKey(h.t, 22); h.publishKRL(5, 8) },
 			want:    waitWant{bundle: 1, dir: 2, lands: true, revoked: []uint64{5, 8}, record: 3},
-		}, "poll")
+		}, "poll", "forward")
 	})
 
 	// --- the KRL step ---
@@ -517,6 +517,202 @@ func TestKRLSigner(t *testing.T) {
 			want:    waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 3, retired: true},
 		}, "poll", "forward")
 	})
+
+	// --- the record (03-08j) ---
+	t.Run("successor_from_the_record_after_a_refused_bundle_step_above_it", func(t *testing.T) {
+		t.Parallel()
+		// The record's bundle 2 names K2 and verified in full when it was
+		// recorded; bundle 3 above it is refused, so it authorises KRL 6.
+		x := recordedRotation(t)
+		h := x.h
+		_, d3 := h.f.successorUnder(x.b2, x.d2.Body, x.p2.Body, "2026-10-03T00:00:00Z")
+		d3.Sigs = x.d2.Sigs
+		h.state.Bundles[3] = d3
+		h.f.ops = x.k2
+		h.publishKRL(5, 6)
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrBundle) || errors.Is(err, state.ErrKRL) {
+			t.Fatalf("apply 2: %v, want bundle_not_verified alone", err)
+		}
+		mustKRLAlone(t, h, r, 6, 1, "bundle_not_verified")
+		mustAcceptedBundle1(t, h, 1)
+		mustRecord(t, h, 2, 2)
+	})
+	t.Run("record_successor_dropped_by_a_verified_bundle_above_it_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// Bundle 3 replaces the record's key K2 with K3 and verifies; bundle
+		// 4 is refused. The record's bundle authorises nothing (fail closed).
+		x := recordedRotation(t)
+		h := x.h
+		pol2, err := trust.ParsePolicy(x.p2.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b3, d3, p3 := h.f.rotationOps(x.b2, x.d2.Body, x.p2.Body, pol2, pol2.Admins, "2026-10-03T00:00:00Z", seedKey(t, 23))
+		_, d4 := h.f.successorUnder(b3, d3.Body, p3.Body, "2026-10-04T00:00:00Z")
+		d4.Sigs = d3.Sigs
+		h.state.Bundles[3], h.state.Bundles[4], h.state.Policies[3] = d3, d4, p3
+		h.f.ops = x.k2
+		h.publishKRL(5, 6)
+		gen, gens := h.current(), h.genCount()
+		before, err := h.accepted()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.apply(); !errors.Is(err, state.ErrBundle) || !errors.Is(err, state.ErrKRLSignerRetired) {
+			t.Fatalf("apply 2: %v, want bundle_not_verified and krl_signer_retired", err)
+		}
+		mustUnchanged(t, h, gen, gens, before)
+		mustRecord(t, h, 2, 2)
+	})
+
+	// --- a poll during a widening wait ---
+	t.Run("retired_key_krl_during_a_wait_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// No record. Bundle 2 retired K1, and is known in a poll only from
+		// the pending capture.
+		runWait(t, waitCase{
+			build:   heldWait,
+			publish: func(h *testHost) { h.publishKRL(5, 7) },
+			during:  withholdAbovePending,
+			want:    waitWant{bundle: 1, dir: 1 + spool.MaxVersionsPerKind, revoked: []uint64{5}, kept: []uint64{7}, retired: true},
+		}, "poll", "forward")
+	})
+	t.Run("successor_signed_krl_during_a_wait_lands", func(t *testing.T) {
+		t.Parallel()
+		// No record. KRL 8 is signed by bundle 2's key K2; in a poll, bundle
+		// 2 is the successor carried from the pending capture.
+		runWait(t, waitCase{
+			build:   heldWait,
+			publish: func(h *testHost) { h.f.ops = seedKey(h.t, 22); h.publishKRL(5, 8) },
+			during:  withholdAbovePending,
+			want:    waitWant{bundle: 1, dir: 1 + spool.MaxVersionsPerKind, lands: true, revoked: []uint64{5, 8}},
+		}, "poll", "forward")
+	})
+	t.Run("retired_key_krl_during_a_wait_above_the_record_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// The record's bundle 3 keeps K1, and bundle 4 above it, verified by
+		// the widening apply, names K2. In a poll bundle 4 is known only
+		// from the pending capture: the higher of the record's bundle and
+		// the pending capture's.
+		runWait(t, waitCase{
+			build:   func(t *testing.T) *testHost { return recordBelowWait(t, nil, seedKey(t, 22)) },
+			publish: func(h *testHost) { h.publishKRL(5, 8) },
+			during: func(_ *testing.T, h *testHost) {
+				delete(h.state.Bundles, 4)
+				delete(h.state.Policies, 3)
+			},
+			want: waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 3, retired: true},
+		}, "poll", "forward")
+	})
+	t.Run("retired_key_krl_after_a_krl_alone_supersede_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// KRLAlone's Verified inherits fullyVerified: a poll's generation
+		// is refused for its content, its KRL-alone pass lands KRL 8 under
+		// the carried successor (bundle 2) and supersedes the pending
+		// target, and a later poll, verified against that KRL-alone state,
+		// still knows bundle 2 and refuses KRL 9, which K1 signed.
+		h := heldWait(t)
+		var log strings.Builder
+		h.cfg.Log = &log
+		k1 := h.f.ops
+		sleeps, published9 := 0, false
+		h.clock.onSleep = func(time.Duration) {
+			sleeps++
+			switch {
+			case sleeps == 1:
+				withholdAbovePending(t, h)
+				s := h.spec("role:ops", "role:q")
+				s.bulkRoles = 17
+				h.publishDir(s)
+				h.f.ops = seedKey(t, 22)
+				h.publishKRL(5, 8)
+				h.resetSpool()
+				h.write()
+			case !published9 && strings.Contains(log.String(), "a newer state arrived during the wait"):
+				published9 = true
+				h.f.ops = k1
+				h.publishKRL(5, 8, 9)
+				h.resetSpool()
+				h.write()
+			}
+		}
+		_, err := h.apply()
+		if !published9 {
+			t.Fatalf("the KRL-alone state never superseded the pending target (%d sleeps): %v\n%s", sleeps, err, log.String())
+		}
+		if !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("apply: %v, want generation_too_large\n%s", err, log.String())
+		}
+		if a, aerr := h.accepted(); aerr != nil || a.BundleVersion != 1 || a.DirectoryVersion != 1+spool.MaxVersionsPerKind {
+			t.Fatalf("accepted/ %+v (%v), want bundle 1 and directory %d", a, aerr, 1+spool.MaxVersionsPerKind)
+		}
+		if !h.krlRevokes(h.l.Current(), 8) || h.krlRevokes(h.l.Current(), 9) {
+			t.Fatalf("current revokes 8 %t, 9 %t; want KRL 8, not KRL 9\n%s", h.krlRevokes(h.l.Current(), 8), h.krlRevokes(h.l.Current(), 9), log.String())
+		}
+		if !strings.Contains(log.String(), "krl_signer_retired") {
+			t.Fatalf("the wait did not log krl_signer_retired:\n%s", log.String())
+		}
+	})
+
+	// --- the boundary ---
+	t.Run("retired_key_krl_after_the_bundle_is_withheld_lands_as_on_main", func(t *testing.T) {
+		t.Parallel()
+		// The withholding-server residual's boundary: once the spool no
+		// longer offers bundle 2, the host no longer knows it, and the KRL
+		// the retired key signed is taken as on main.
+		x := opsRotated(t)
+		h := x.h
+		h.publishDir(h.spec("role:ops", "role:q"))
+		h.publishKRL(5, 6)
+		if _, err := h.apply(); !errors.Is(err, state.ErrKRLSignerRetired) || recordExists(t, h) {
+			t.Fatalf("apply 1: %v, want krl_signer_retired and no record", err)
+		}
+		delete(h.state.Bundles, 2)
+		delete(h.state.Policies, 2)
+		delete(h.state.Directories, 2)
+		h.resetSpool()
+		h.write()
+		if _, err := h.apply(); err != nil {
+			t.Fatalf("apply 2 without bundle 2: %v, want nil", err)
+		}
+		if a, err := h.accepted(); err != nil || a.BundleVersion != 1 || a.KRLVersion != h.f.krlVersion || !h.krlRevokes(h.l.Current(), 5) || !h.krlRevokes(h.l.Current(), 6) {
+			t.Fatalf("apply 2: accepted %+v (%v), want bundle 1 with KRL 6", a, err)
+		}
+	})
+
+	// --- the narrow fallback ---
+	t.Run("krl_other_error_under_changed_bundle_keeps_its_error", func(t *testing.T) {
+		t.Parallel()
+		x := opsRotated(t)
+		h := x.h
+		h.f.ops = x.k2
+		v, files := h.f.krl([]uint64{5, 6}, nil, "fedcba9876543210fedcba9876543210")
+		h.state.KRLs = map[uint64]spool.KRLFiles{v: files}
+		_, err := h.apply()
+		if !errors.Is(err, state.ErrKRL) || !errors.Is(err, krl.ErrInstallation) || !strings.Contains(err.Error(), "the manifest is for another installation") || errors.Is(err, krl.ErrSigner) || errors.Is(err, state.ErrKRLSignerRetired) {
+			t.Fatalf("a KRL for another installation: %v, want main's krl_not_verified naming the installation", err)
+		}
+	})
+	t.Run("krl_in_force_key_for_another_installation_keeps_the_first_error", func(t *testing.T) {
+		t.Parallel()
+		// K1 signed it for another installation: F fails for the
+		// installation, and the error stays the one under bundle 2.
+		x := opsRotated(t)
+		h := x.h
+		v, files := h.f.krl([]uint64{5, 6}, nil, "fedcba9876543210fedcba9876543210")
+		h.state.KRLs = map[uint64]spool.KRLFiles{v: files}
+		gen, gens := h.current(), h.genCount()
+		before, err := h.accepted()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = h.apply()
+		if !errors.Is(err, state.ErrKRL) || !errors.Is(err, krl.ErrSigner) || errors.Is(err, krl.ErrInstallation) || errors.Is(err, state.ErrKRLSignerRetired) {
+			t.Fatalf("a K1 KRL for another installation: %v, want krl_not_verified for its signer under bundle 2", err)
+		}
+		mustUnchanged(t, h, gen, gens, before)
+	})
 }
 
 // heldShape is TestApply/catch_up_across_policy_rotation's window (03-08k)
@@ -682,4 +878,73 @@ func mustWaitOutcome(t *testing.T, h *testHost, err error, log string, inForce u
 	} else if recordExists(t, h) {
 		t.Fatal("an unapplied record exists")
 	}
+}
+
+// recordedRotation is opsRotated with the spool in the state directory and
+// a directory 2 above the caps: apply 1 is refused (generation_too_large)
+// with no newer KRL and records {Bundle: 2, Directory: 2} (03-08k).
+func recordedRotation(t *testing.T) rotated {
+	t.Helper()
+	f := newFixture(t)
+	h := newTestHost(t, f)
+	spoolInState(t, h)
+	h.installed("role:ops")
+	h.publishKRL(5)
+	h.mustApply()
+	x := rotated{h: h, k1: f.ops, k2: seedKey(t, 22), v5: f.krlVersion}
+	x.b2, x.d2, x.p2 = f.rotationOps(f.bundle, f.bundleDoc, f.policyDoc, f.policy, f.policy.Admins, "2026-10-02T00:00:00Z", x.k2)
+	h.state.Bundles[2], h.state.Policies[2] = x.d2, x.p2
+	s := h.spec("role:ops")
+	s.bulkRoles = 17
+	h.publishDir(s)
+	if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) {
+		t.Fatalf("apply 1: %v, want generation_too_large", err)
+	}
+	mustRecord(t, h, 2, 2)
+	return x
+}
+
+// heldWait is the window of TestApply/catch_up_across_policy_rotation's
+// newOps=true row with no record, before a widening apply that waits
+// (03-08k). KRL 5, signed by the fixture's ops key K1, is applied first:
+// the swap the widening apply waits after. Directories 2-68, signed by the
+// original admin, widen deploy to role:q; bundle 2 rotates the admins to
+// bob and the ops key to K2; directories 69 and 70 are signed by bob. The
+// capture is held at the bundle in force (directory 65 under bundle 1) and
+// widens, so the apply waits; nothing is refused, so nothing is recorded.
+func heldWait(t *testing.T) *testHost {
+	t.Helper()
+	f := newFixture(t)
+	h := newTestHost(t, f)
+	withOutbox(t, h)
+	h.installed("role:ops")
+	h.clock.advance(time.Hour)
+	h.publishKRL(5)
+	h.mustApply()
+	for range spool.MaxVersionsPerKind + 3 {
+		h.publishDir(h.spec("role:ops", "role:q"))
+	}
+	bob := seedKey(t, 12)
+	_, d2, p2 := f.rotationOps(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, "2026-10-02T00:00:00Z", seedKey(t, 22))
+	h.state.Bundles[2], h.state.Policies[2] = d2, p2
+	for range 2 {
+		s := h.spec("role:ops", "role:q")
+		s.signer = bob
+		h.publishDir(s)
+	}
+	return h
+}
+
+// withholdAbovePending removes bundle 2 and every directory above heldWait's
+// pending target (directory 65) from the offered state, so a poll knows
+// bundle 2 only from the pending capture.
+func withholdAbovePending(_ *testing.T, h *testHost) {
+	delete(h.state.Bundles, 2)
+	delete(h.state.Policies, 2)
+	for v := range h.state.Directories {
+		if v > 1+spool.MaxVersionsPerKind {
+			delete(h.state.Directories, v)
+		}
+	}
+	h.dirs = h.dirs[:1+spool.MaxVersionsPerKind]
 }

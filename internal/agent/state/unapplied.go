@@ -176,8 +176,44 @@ func (u *Unapplied) Base(accepted *Stored) (*Stored, error) {
 // newer than the record renders it again and reports the refusal again,
 // and a capture held at the bundle in force has BundleChanged false, as in
 // Verify.
+//
+// The record's bundle verified in full when it was recorded (03-08k), so it
+// authorises a KRL its ops key signed, also when a bundle offered above it
+// is refused, unless a bundle this capture verified above it retired that
+// key.
 func VerifyAhead(p *Pins, accepted, base *Stored, in spool.State) (*Verified, error) {
-	v, err := verify(p, base, accepted, in)
+	return verifyAhead(p, accepted, base, in, recordBundle(accepted, base))
+}
+
+// VerifyAheadAfter is VerifyAhead for a poll during a widening wait read
+// from the record (03-08k), with pending, the pending target, as accepted.
+// It knows the record's bundle and every bundle the apply verified in full
+// before it (pending's fully verified bundle), so it decides a KRL as
+// forward does. It carries the higher of the two by version, pending's on a
+// tie; the higher is taken here because the fully verified bundle is
+// unexported.
+func VerifyAheadAfter(p *Pins, pending *Verified, base *Stored, in spool.State) (*Verified, error) {
+	accepted := pending.AsStored()
+	carried := pending.fullyVerified
+	if r := recordBundle(accepted, base); r != nil && (carried == nil || r.Version > carried.Version) {
+		carried = r
+	}
+	return verifyAhead(p, accepted, base, in, carried)
+}
+
+// recordBundle is base's bundle when base took the record's bundle part,
+// which Base does only above accepted's version, and nil otherwise.
+func recordBundle(accepted, base *Stored) *trust.Bundle {
+	if accepted == nil || base == nil || base.BundleVersion <= accepted.BundleVersion {
+		return nil
+	}
+	return base.bundle
+}
+
+// verifyAhead is VerifyAhead with carried, a bundle this apply verified in
+// full outside the capture (03-08k), passed to verify.
+func verifyAhead(p *Pins, accepted, base *Stored, in spool.State, carried *trust.Bundle) (*Verified, error) {
+	v, err := verify(p, base, accepted, in, carried)
 	if err != nil || v.Refused != nil || accepted == nil {
 		return v, err
 	}
