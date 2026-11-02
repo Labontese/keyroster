@@ -3,8 +3,8 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08j-PLAN.md (PR #78 open, awaiting the merge gate)"
-last_updated: "2026-11-02T04:10:00.000Z"
+stopped_at: "Completed 03-08k-PLAN.md (PR #80 open, awaiting the merge gate)"
+last_updated: "2026-11-02T15:00:00.000Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
 state_head: 9fab51244fd6febfa415a5be4115c5b4d6084eb4
@@ -12,7 +12,7 @@ progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 60
-  completed_plans: 51
+  completed_plans: 52
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 17 of 25
+Plan: 18 of 25
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -106,6 +106,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08d | 94min | 3 tasks | 20 files |
 | Phase 03 P08e | 40min | 3 tasks | 22 files |
 | Phase 03 P08j | 60min | 5 tasks | 30 files |
+| Phase 03 P08k | 115min | 4 tasks | 24 files |
 
 ## Accumulated Context
 
@@ -295,6 +296,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08j: recordUnapplied merges per kind and never lowers a part; finishCommit removes a passed record, reset-directory drops its directory part first
 - [Phase 03]: 03-08j: outbox accepted.json names the record's versions where higher, so the fetcher's cursor and 03-08e's prune follow the record; the heartbeat status carries unapplied {bundle, directory}
 - [Phase 03]: 03-08j: spool.Read recaptures once after an ENOENT for a listed name (F01 (03-08e) follow-up)
+- [Phase 03]: 03-08k: a KRL's authoriser is the first of the bundle the capture puts in force, the apply's fully verified successor and the bundle in force that verifies it, each tried only after krl.ErrSigner; a successor-signed KRL lands alone after a content refusal or a refused directory with a verified chain
+- [Phase 03]: 03-08k: a KRL whose authoriser's ops key a newer verified bundle the host knows dropped is refused (krl_signer_retired) on every path; a held step commits with the KRL in force unchanged (Verified.KRLRefused)
+- [Phase 03]: 03-08k: the fully verified bundle is carried by VerifyAhead (the record's) and into every poll of a widening wait (VerifyAfter, VerifyAheadAfter), so a poll decides a KRL as forward does
 
 ### Pending Todos
 

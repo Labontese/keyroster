@@ -3,27 +3,97 @@ phase: 03-linux-agent-and-revocation
 plan: 08k
 subsystem: agent
 tags: [agent, apply, state, krl, revocation, ops-key, d-r2]
-status: draft
+status: complete
+
+requires:
+  - phase: 03-linux-agent-and-revocation
+    provides: "03-08j: verify(p, chain, alone, in), the unapplied record and VerifyAhead, the in-force hold step, pollCapture (fix round 1)"
+provides:
+  - "state: Verified.fullyVerified (unexported), carried by verify's new carried bundle; VerifyAhead carries the record's bundle"
+  - "state: KRLAlone(p, prev, in, refusal, from): the fully verified successor on krl.ErrSigner, and the retired-key refusal"
+  - "state: krlStep (the KRL step's authorisers P, S, F and the retired-key rule), verifyKRLUnder returning the verified KRL, take"
+  - "state: ErrKRLSignerRetired (krl_signer_retired), Verified.KRLRefused, VerifyAfter, VerifyAheadAfter"
+  - "apply: krlAlone and pollCapture name their capture; pollCapture(pending) routes VerifyAfter and VerifyAheadAfter; outcome joins KRLRefused; refusals lists krl_signer_retired"
+  - "tests: TestKRLSigner (27 cases, five wait cases with subtests poll and forward), TestVerifyManifest/bundle_read_only_for_its_ops_key, four changed tests"
+  - "docs: host-setup.md's successor paragraph, 'An ops-key rotation', and the rewritten stuck-window sentence"
+affects: [03-08f, 03-09, 03-13]
+
+actuals:
+  tokens: 22800
+  tasks: 4
+  commits: 9
+plan_head_before: 6572649256ce5d1f1dbb3660397da5ef739577ab
+plan_head_after: c47f5359ce6b5c97daa00ad757fb4da67f7bcd87
+
+tech-stack:
+  added: []
+  patterns:
+    - "A KRL's authoriser is the first candidate bundle that verifies it (P, then the fully verified successor, then the bundle in force), tried only after krl.ErrSigner and only for an ops key not yet tried"
+    - "A verified KRL is assigned to a Verified only when it lands (take), so a refused KRL never reaches accepted/"
+    - "A widening wait's poll is verified with what the pending capture knew (VerifyAfter, VerifyAheadAfter)"
+
+key-files:
+  created:
+    - internal/agent/apply/krlsigner_test.go
+    - .planning/phases/03-linux-agent-and-revocation/03-08k-PLAN.md
+    - .planning/phases/03-linux-agent-and-revocation/03-08k-SUMMARY.md
+  modified:
+    - internal/agent/state/state.go
+    - internal/agent/state/verify.go
+    - internal/agent/state/unapplied.go
+    - internal/agent/apply/apply.go
+    - internal/agent/apply/status.go
+    - internal/agent/apply/apply_test.go
+    - internal/agent/apply/rechain_test.go
+    - internal/agent/apply/window_test.go
+    - internal/krl/krl_test.go
+    - test/capslock/keyroster-agent.json
+    - docs/runbooks/host-setup.md
+    - .planning/ROADMAP.md
+    - .planning/STATE.md
+    - .planning/phases/03-linux-agent-and-revocation/03-09-PLAN.md (to 03-16-PLAN.md, the wave lines; 03-09 also depends_on and its precondition)
+
+key-decisions:
+  - "fullyVerified is set right after the bundle step returns nil, from the newest bundle step, before the directory step and holdBundle"
+  - "Under BundleHeld only a manifest the bundle does not verify waits (manifestRefused), as on main; parse and header errors stay errors"
+  - "The krl_signer_retired error names the authoriser's bundle version and the newest known version"
+  - "keyroster-agent's capslock baseline swaps internal/krl for internal/trust on ARBITRARY_EXECUTION's example path; no new capability is reachable"
+
+requirements-completed: []
+
+duration: 115min
+completed: 2026-11-02
 ---
 
-# Phase 3 Plan 08k: KRLs across an ops-key change, Summary (draft)
+# Phase 3 Plan 08k: KRLs across an ops-key change, Summary
 
-DRAFT: completed task by task; Task 4 finishes it.
+**A KRL only a fully verified successor's ops key signed now lands alone after the host refused that successor's capture; a KRL whose ops key a newer verified bundle the host knows dropped is refused with krl_signer_retired on every path (KRL step, KRL-alone pass, record, held step, and every poll of a widening wait), with a held step committing and the KRL in force kept.**
+
+## PR
+
+- PR: #80 (branch `p03/08k-agent-krl-signer`), opened by keyroster-bot without auto-merge.
+- CI on c47f535: every required check green. Workflow runs: 41464489432 (ci: build-test, lint, fuzz, capslock, govulncheck, dependency-firewall, cli-macos, cli-windows; build-test job 125341674589), 41464489340 (e2e-distro, seven distributions), 41464489077 (e2e 9.5p1 and 10.5p1), 41464489177 (systemd-sandbox), 41464489292 (e2e-pkcs11), 41464489783 (e2e-tpm), 41464489750 (build-piv), 41464489345 (CodeQL analyze), 41464489166 (pinned-actions), 41464489386 (pr-title).
+
+## Commits
+
+| Task | Commit | Message |
+|------|--------|---------|
+| 1 (tracer) | 9c214b3 | fix(agent): let a fully verified successor's ops key authorise a KRL |
+| 1 | 7151615 | docs(03-08k): record the successor rule's evidence |
+| 2 | 7cc88f7 | fix(agent): refuse a KRL whose ops key a newer verified bundle dropped |
+| 2 | 003adca | docs(03-08k): record the retired-key rule's evidence |
+| 3 | 0767bbf | fix(agent): carry the verified bundle into the record's capture and the wait's polls |
+| 3 | 41bc185 | docs(03-08k): record the knowledge rule's evidence |
+| 4 | 72fbb34 | docs(agent): describe which KRL lands across an ops-key change (03-08k) |
+| 4 | ff7c0e2 | docs(03-08k): add the plan and move plans 03-09 to 03-16 one wave later |
+| 4 | c47f535 | chore(capslock): follow keyroster-agent's capslock example path (03-08k) |
+| 4 | (this commit) | docs(03-08k): complete agent KRL-signer plan |
+
+Every branch commit is authored by Daniel Gustafsson and committed and SSH-signed by keyroster-bot (`git log origin/main..HEAD --format='%an <%ae> %cn'` prints only `Daniel Gustafsson <121555671+Labontese@users.noreply.github.com> keyroster-bot`). No commit message carries an attribution trailer.
 
 ## Base
 
 - Branch `p03/08k-agent-krl-signer` from origin/main at 6572649 (`chore(scripts): wait for the owner's squash merge in merge-gate.sh (#79)`). The plan was reconciled against ae754a3; 6572649 is ae754a3 plus #79, which changes scripts/merge-gate.sh, CONTRIBUTING.md, 01-SKELETON.md, STATE.md and a quick-task's plan and summary, and no Go code. Every anchor the precondition names was found on 6572649. Because #79 is already on main, Task 5's possible STATE.md conflict with it cannot occur.
-
-## Test time (internal/agent/apply under -race, locally in WSL)
-
-| Point | Alone (limit 400 s) | Under `./...` (limit 480 s) |
-|-------|---------------------|-----------------------------|
-| Task 1 base (origin/main 6572649, before any edit) | 355.5 s | 341.2 s |
-| Task 2 (the tree committed as 7cc88f7) | 310.1 s | 317.4 s |
-| Task 3 (the tree committed as 0767bbf) | 285.4 s | 309.6 s |
-
-- CI on origin/main 6572649: 126.1 s (workflow run 41446523949, build-test job 125280885778, "Test (race detector)" step). Read with `scripts/gh-as-bot.sh run view 41446523949 --job 125280885778 --log`, grepping for `internal/agent/apply`.
-- No figure is above its limit, so the stop rule did not apply. The alone base is higher than 03-08j's 280.2 s on the same code; it leaves 44.5 s to the 400 s limit, which is the tighter of Tasks 2 and 3's two bounds (alone base + 120 s = 475.5 s).
 
 ## Task 1: the successor rule
 
@@ -168,3 +238,111 @@ After the change, Task 3's verify set passes for both packages (no FAIL, no DATA
 | E3 | VerifyAheadAfter without the record's half of the higher-of | within one apply the pending capture's fully verified bundle already starts at the record's bundle (forward's VerifyAhead carried it, or forward wrote the record from that capture), and every later poll inherits it. A version tie between the two halves is the same bundle. Only a record rewritten during the wait could differ; the half is kept so that a poll never knows less than the record |
 
 UNVERIFIED: no test supersedes the pending target twice within one wait. `retired_key_krl_after_a_krl_alone_supersede_is_refused` pins the inheritance through one supersede and a later poll.
+
+## Task 4: runbook, publish edits, gates
+
+- **host-setup.md.** "Revocations keep applying" loses the sentence that a KRL only the refused bundle's ops key signed waits. A new paragraph after the cases names the successor rule. The new paragraph "An ops-key rotation" names the refusal, the held exception, the rotated-back key, the held landing and the limits. 03-08j's stuck-window sentence now says which KRLs land when the recorded bundle replaced the ops key. Every new sentence names its CI tests or says UNVERIFIED on a real host. The runbook check prints 1 for each of the 13 names and 0 for both old sentences.
+- **Publish edits**, from origin/main's values: the ROADMAP Plans line 16/24 in 23 waves became N/25 in 24 waves; Wave 16 holds the 03-08k row; 03-09 to 03-16 moved to Waves 17 to 24, each "blocked on Wave N-1 completion"; STATE.md total_plans 59 → 60 and `of 24` → `of 25`; 03-09 has wave 17, depends_on ["03-08k"] and the 03-08k-SUMMARY clause next to the 03-08j one; 03-10 to 03-16 have waves 18 to 24. origin/main's 03-09 held wave 16 and depends_on ["03-08j"], so the guard did not apply. Both publish checks pass.
+- **Gates**, locally in WSL on c47f535. The alone gate passed (internal/agent/apply 274.1 s). The full gate passed: `go test -race -count=1 ./...` (internal/agent/apply 286.7 s), go vet in its three forms, gofmt, golangci-lint (0 issues), capslock-check, dep-firewall, testonly-firewall and check-pinned-actions. On ff7c0e2 the full gate had stopped at capslock-check (see Deviations 1); its test step had passed, with internal/agent/apply at 310.9 s.
+
+## Test time (internal/agent/apply under -race)
+
+| Point | Alone, locally (limit 400 s) | Under `./...`, locally (limit 480 s) |
+|-------|------------------------------|--------------------------------------|
+| Task 1 base (origin/main 6572649, before any edit) | 355.5 s | 341.2 s |
+| Task 2 (the tree committed as 7cc88f7) | 310.1 s | 317.4 s |
+| Task 3 (the tree committed as 0767bbf) | 285.4 s | 309.6 s |
+| Task 4, ff7c0e2 (the full gate stopped at capslock) | 273.8 s | 310.9 s |
+| Task 4 gates, c47f535 | 274.1 s | 286.7 s |
+
+| CI (build-test, `./...` under -race; limit 480 s) | internal/agent/apply |
+|---------------------------------------------------|----------------------|
+| origin/main 6572649 (run 41446523949, job 125280885778) | 126.1 s |
+| PR #80 at c47f535 (run 41464489432, job 125341674589) | 164.8 s |
+
+No figure is above its limit. The local figures vary with the machine's load: the alone base on unchanged code (355.5 s) is above every later alone run with more tests (273.8 s to 310.1 s), and above 03-08j's 280.2 s on the same code. They are wall-clock figures from one WSL machine, not a benchmark. CI's figure was read with `scripts/gh-as-bot.sh api repos/Labontese/keyroster/actions/jobs/125341674589/logs`, because `run view --log` refuses while the run's fuzz job is still running.
+
+## A poll decides a KRL as forward does
+
+The five wait cases each run their shape twice under one assertion (`mustWaitOutcome`): subtest `poll` publishes the KRL at the wait's first sleep, and subtest `forward` publishes it before the widening apply. Both subtests must leave the same bundle, directory and KRL in force, and both or neither name krl_signer_retired. Every case fails when the widening apply did not sleep.
+
+| Wait case | Record | KRL signer | Expected (both subtests) | poll | forward |
+|-----------|--------|------------|--------------------------|------|---------|
+| retired_key_krl_during_a_wait_is_refused | none | K1, retired by bundle 2 | directory 65 under bundle 1, KRL 5, krl_signer_retired | PASS | PASS |
+| successor_signed_krl_during_a_wait_lands | none | K2 (bundle 2) | directory 65 under bundle 1, KRL 8 lands | PASS | PASS |
+| retired_key_krl_during_a_wait_from_the_record_is_refused | bundle 3 (K2) | K1, retired by the record's bundle | directory 2 under bundle 1, KRL 5, krl_signer_retired, record {Bundle: 3} | PASS | PASS |
+| record_signed_krl_during_a_wait_lands | bundle 3 (K2) | K2 (the record's bundle) | directory 2 under bundle 1, KRL 8 lands, record {Bundle: 3} | PASS | PASS |
+| retired_key_krl_during_a_wait_above_the_record_is_refused | bundle 3 (K1), bundle 4 (K2) above it | K1, retired by bundle 4 | directory 2 under bundle 1, KRL 5, krl_signer_retired, record {Bundle: 3} | PASS | PASS |
+
+- **The nil-from mutant.** Task 1's T1c (pollCapture's KRL-alone call with a nil from) is killed by `record_signed_krl_during_a_wait_lands/poll`, where KRL 8 waits: a nil from narrows the poll. It survives `retired_key_krl_during_a_wait_from_the_record_is_refused/poll` and `/forward` by design (run on 7cc88f7). The poll's KRL step refuses the old-key KRL before the KRL-alone call, because both check against the pending target's KRL floor. This is the evidence that a nil from cannot widen a poll while Unapplied.Base never carries a KRL part.
+- T3c and T3d, which keep state.Verify and state.VerifyAhead in pollCapture, are each killed in both subtests of the case they target, so the poll's knowledge, not forward's, decides there.
+
+## The four changed tests
+
+| Test | Change | Reason |
+|------|--------|--------|
+| TestKRLAlone/ops_key_changed_krl_waits → `ops_key_changed_krl_lands_alone` | the KRL now lands alone with the accepted bundle and directory | the successor rule |
+| TestSpoolWindow/krl_only_the_recorded_bundle_signs_waits → `krl_only_the_recorded_bundle_signs_lands_alone` | the same, on the record's path; the record stays | the successor rule (the record's bundle is a fully verified successor) |
+| TestApply/catch_up_across_policy_rotation, newOps=true row | apply 1 takes the KRL the newest bundle's key signed with the held step | the held rule |
+| TestSpoolWindow/policy_rotation_below_the_recorded_bundle/newOps=true | the KRL the record's bundle's key signed is taken with the held step | the held rule |
+
+## Capslock
+
+capslock-check reported one new pair for keyroster-agent on ff7c0e2: `internal/trust CAPABILITY_ARBITRARY_EXECUTION`, with `internal/krl CAPABILITY_ARBITRARY_EXECUTION` no longer reported. keyroster-signer and keyroster-agent-fetch were unchanged.
+
+- No new capability is reachable. keyroster-agent's ARBITRARY_EXECUTION call graph (`capslock -output graph -capabilities ARBITRARY_EXECUTION`) is the same on origin/main and on the branch, apart from the renamed functions in internal/agent/state. Both internal/trust and internal/krl reach the capability through internal/sshsig's signature verify, which ends in crypto/fips140 in the standard library.
+- capslock's package mode records one example path per capability, and that path now passes through internal/trust.
+- origin/main passes capslock-check locally (go1.27.3, capslock v0.3.3).
+- `capslock-check.sh --update` changed only test/capslock/keyroster-agent.json, by exactly that swap (37 pairs before and after). The check passes again locally and in the PR's capslock job. The update is commit c47f535, for the owner's review.
+
+## Deviations from Plan
+
+1. **[Rule 3] The capslock baseline was updated (c47f535).** The plan expects no new pair and calls one a deviation to review and record. The analysis is under Capslock, and the PR body names it for review.
+2. **Task 2's RED tree had `state.ErrKRLSignerRetired` declared** with no behaviour behind it, so that the tests compile on Task 1's head (03-08j did the same for its R2-1 fields).
+3. **`first_install_krl_refusal_unchanged` had a wrong assertion** in its first form: it required that `accepted/` does not exist before a first install. It now checks that current and last-good do not exist, and it was GREEN on Task 1's head after that fix, as the plan expects.
+4. **Test helpers.**
+   - `successorUnder` builds bundle 3 over bundle 2 under bundle 2's policy, because `f.successor` builds only under the genesis policy.
+   - The shared fixture `opsRotated` installs KRL 5, signed by the original key, before it offers bundle 2, and gives the host an outbox, so the cases can check last_apply and an in-force KRL. `heldShape`, `recordedRotation`, `heldWait` and `withholdAbovePending` build the plan's P-K1 and P≠F shapes, the record shape and the no-record wait shape.
+   - `retired_key_krl_held_at_the_in_force_bundle_below_the_record_is_refused` builds 03-08j's policyRotated shape inline, because that helper is a closure inside TestSpoolWindow.
+5. **Mutant models** where the plan names only an effect:
+   - T2j: the successor branch landing the KRL alone through KRLAlone under BundleHeld;
+   - T2l: a skipped KRL refused when the in-force key is retired;
+   - T2k: krl_signer_retired returned when F's key is retired, before F verifies the KRL;
+   - T3e: KRLAlone's Verified left without from's fully verified bundle, while its own successor is still read from from, so that only the inheritance is removed.
+6. **The runbook's successor text is its own paragraph** after the cases, instead of an inline replacement of the old sentence. The text is the plan's.
+7. **The tracking updates were made by hand**, as in 03-08j, not with gsd-tools, so that no untracked state file is touched. The ROADMAP row is checked, the Plans line reads 17/25 in 24 waves, and STATE.md reads completed_plans 52 and `Plan: 18 of 25`, with the metrics row and decisions. `requirements.mark-complete` was not run (requirements-completed is empty).
+8. **The base is 6572649**, not the plan's anchor ae754a3 (see Base). This is context, not a change of the plan's work.
+
+## Known Stubs
+
+None.
+
+## UNVERIFIED
+
+- The whole runbook text on a real host: no ceremony on main rotates the ops key yet.
+- The end-to-end wait for the new key's KRL (at most about an hour with an honest server), and a signer process started before the bundle install, which publishes nothing.
+- A fork of the root-signed bundle chain at fullyVerified's version (it resolves to fullyVerified): no test builds a forked chain.
+- Two supersedes within one wait: no test supersedes the pending target twice. `retired_key_krl_after_a_krl_alone_supersede_is_refused` pins one supersede and a later poll.
+- An old-key KRL kept newest in the spool by a server holding the retired key: no test builds it (part of the withholding-server residual).
+- A record rewritten during a wait, the only shape in which VerifyAheadAfter's record half (equivalent mutant E3) could matter.
+- A held step in a poll's capture that supersedes the pending target: no test holds a poll's capture. A poll's held capture whose bytes equal the pending target's is dropped by pollSpool's sameBytes return together with its KRLRefused.
+- The equivalent mutants E1 to E3 are equivalent by argument and by surviving the named tests, not by proof over every input.
+
+## Threat model
+
+- **T-03-318** (a KRL a retired ops key signed): mitigated. krl_signer_retired on the KRL step, in the KRL-alone pass, from the record, under a hold, and in every poll of a widening wait; a held step commits with the KRL in force unchanged. Tests: the TestKRLSigner retired_key_* cases (with the three wait cases' `poll` and `forward` subtests), `held_step_krl_signed_by_a_retired_key_is_refused`, `retired_in_force_key_krl_under_a_held_step_is_refused`, `record_successor_dropped_by_a_verified_bundle_above_it_is_refused`. Residuals as the plan states them: the wait for the new key's KRL; no KRL after a bundle step refused above a verified rotation with no record; the withholding server (`retired_key_krl_after_the_bundle_is_withheld_lands_as_on_main` pins the boundary).
+- **T-03-319** (a KRL authorised by a successor's key): mitigated. Only the apply's fully verified bundle is a successor, tried only on krl.ErrSigner and never when a verified bundle above it retired its key. Tests: the successor_* cases, `ops_key_changed_krl_lands_alone`, `krl_only_the_recorded_bundle_signs_lands_alone`, `held_bundle_krl_signed_by_the_newest_key_lands_with_the_held_step`, `successor_signed_krl_during_a_wait_lands`, `record_signed_krl_during_a_wait_lands`, and Task 3's equivalence pins. Residual: the chain fork above (UNVERIFIED).
+- **T-03-SC:** no module added. The capslock baseline swapped one example-path pair, with no new reachable capability (see Capslock).
+
+## Threat Flags
+
+None. No new network endpoint, auth path, file access or schema change: the change is confined to how the applier decides which signed KRL it installs.
+
+## TDD Gate Compliance
+
+Tasks 2 and 3 (tdd="true") and the tracer Task 1 each recorded RED on their base before the implementation, GREEN after it, and their mutants against the committed code. Each task's code and tests were committed together, followed by a docs commit with the evidence, as the plan's Budget prescribes.
+
+## Self-Check: PASSED
+
+- Files: internal/agent/apply/krlsigner_test.go, 03-08k-PLAN.md and this SUMMARY exist.
+- Commits: 9c214b3, 7151615, 7cc88f7, 003adca, 0767bbf, 41bc185, 72fbb34, ff7c0e2 and c47f535 are ancestors of HEAD.
