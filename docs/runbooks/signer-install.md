@@ -1175,13 +1175,27 @@ structurally (see the warning above).
      this: a host that saw the lost version accepts the same bytes as a
      no-op.
    - **Which hosts saw a lost version.** On each enrolled host, as root,
-     `/var/lib/keyroster-agent/outbox/accepted.json` names the bundle and
-     directory versions the agent accepted. A host whose `directory` is
-     above the restored signer's directory version saw a lost directory. A
-     host whose `bundle` is above the restored signer's bundle version saw
-     a lost bundle: escalate for that host, because `reset-directory`
-     re-bootstraps the directory only. A host you cannot reach must be
-     assumed to have seen both.
+     `/var/lib/keyroster-agent/outbox/accepted.json` names, per kind, the
+     bundle and directory version the agent accepted or, when higher, the
+     version it verified but could not apply (its unapplied record,
+     03-08j). Either way the host refuses a different version with that
+     number. A host whose `directory` is above the restored signer's
+     directory version saw a lost directory. A host whose `bundle` is above
+     the restored signer's bundle version saw a lost bundle. If that bundle
+     is only recorded (the host's status shows `unapplied` with a bundle,
+     or `accepted.json`'s bundle is above the bundle in
+     `/var/lib/keyroster-agent/accepted/`), run
+     `sudo rm /var/lib/keyroster-agent/unapplied.json`, then
+     `sudo keyroster-agent apply --once`: the host then takes the re-made
+     chain from its accepted bundle. Escalate only if the accepted bundle
+     itself was lost, because `reset-directory` re-bootstraps the directory
+     only. For a lost directory, reset the directory as below. A host you
+     cannot reach must be assumed to have seen both. Run in CI (03-08j):
+     `fork_after_the_record_refused`, `fetcher_cursor_follows_the_record`,
+     and for the remedy `removed_record_takes_the_remade_bundle_chain` (a
+     recorded bundle, a re-made chain refused while the record exists,
+     installed after its removal). UNVERIFIED on a real host: no test runs
+     an actual signer restore.
    - **Re-bootstrap each such host** once the re-made chain is installed,
      as root on the host:
 
