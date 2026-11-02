@@ -714,7 +714,8 @@ func (e *engine) loadStored() (*state.Stored, error) {
 // and Verify refused nothing, a content refusal of the generation it
 // renders, before current moved, takes the capture once more as KRL-alone
 // (krlAlone, state.KRLAlone against accepted/): the KRL verified again
-// against the accepted bundle, with the bundle, policy and directory in
+// against the accepted bundle or, on krl.ErrSigner, the apply's fully
+// verified successor (03-08k), with the bundle, policy and directory in
 // force, through the same render, checks and Transition, and the refusal
 // is returned after the commit, so the report and last_apply name it. A
 // content refusal is a render error, a generation above the caps
@@ -991,8 +992,10 @@ func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*G
 // state.KRLAlone against prev (accepted/, or during a widening wait the
 // pending target's state), so only its KRL moves on, verified against
 // prev's bundle; never the KRL v verified under a bundle that is not
-// applied. It runs when v changed the bundle or directory, refused nothing
-// and refusal is not an injected crash; otherwise refusal is returned,
+// applied, or, on krl.ErrSigner, the apply's fully verified successor
+// (03-08k; v is the capture KRLAlone takes it from). It runs when v
+// changed the bundle or directory, refused nothing and refusal is not an
+// injected crash; otherwise refusal is returned,
 // joined to v.Refused (a KRL-alone v whose own generation is refused
 // names both refusals). The pass is bounded per capture, not per run (PR
 // #76 review F0 and F1): the KRL-alone Verified carries the refusal and
@@ -1009,7 +1012,7 @@ func (e *engine) krlAlone(prev *state.Stored, in spool.State, v *state.Verified,
 	e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", refusal)
 	// The report describes the KRL-alone render from here on.
 	e.report.HostStatus, e.report.UnmatchedHostKeys, e.report.KRLKept = "", nil, nil
-	return state.KRLAlone(e.pins, prev, in, refusal)
+	return state.KRLAlone(e.pins, prev, in, refusal, v)
 }
 
 // loadUnapplied is the one loader of the unapplied record, <state>/
@@ -1278,7 +1281,8 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 // step, and a chain that does not chain to the record's bytes is refused,
 // its KRL taken alone against prev. A capture that brings no bundle,
 // policy or directory beyond the base supersedes the target only with a
-// newer KRL, verified against prev (KRLAlone): the record itself is
+// newer KRL, verified against prev (KRLAlone) or, on krl.ErrSigner, against
+// that capture's fully verified successor (03-08k): the record itself is
 // rendered again by the next forward, not by every poll. Without such a
 // record, or with one that does not load, the capture is verified against
 // prev (Verify). v is nil when nothing is newer.
@@ -1301,7 +1305,7 @@ func (e *engine) pollCapture(prev *state.Stored) (*state.Verified, spool.State, 
 		return v, st, err
 	}
 	if bytes.Equal(v.Next.Bundle, base.Bundle) && bytes.Equal(v.Next.Policy, base.Policy) && bytes.Equal(v.Next.Directory, base.Directory) {
-		v, err = state.KRLAlone(e.pins, prev, st, nil)
+		v, err = state.KRLAlone(e.pins, prev, st, nil, v)
 	}
 	return v, st, err
 }

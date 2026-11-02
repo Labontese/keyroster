@@ -221,14 +221,14 @@ func TestKRLAlone(t *testing.T) {
 			t.Fatalf("the refused bundle was taken: report %d, accepted %+v (%v)", r.BundleVersion, a, err)
 		}
 	})
-	t.Run("ops_key_changed_krl_waits", func(t *testing.T) {
+	t.Run("ops_key_changed_krl_lands_alone", func(t *testing.T) {
 		t.Parallel()
-		// F07 (03-08d): the successor bundle replaces the ops key, and the
-		// KRL is signed by the new one. Its generation is refused (an
-		// oversize directory), so the bundle is not applied, and the KRL,
-		// verified again against the accepted bundle, is refused too:
-		// nothing is installed. The fallback never reuses a KRL that only
-		// the refused capture's bundle verifies.
+		// F07 (03-08d), 03-08k: the successor bundle replaces the ops key,
+		// and the KRL is signed by the new one. Its generation is refused
+		// (an oversize directory), so the bundle is not applied. The KRL
+		// fails under the accepted bundle for its signer, and is verified
+		// again under the fully verified successor's ops key: it lands
+		// alone, with the accepted bundle and directory.
 		f := newFixture(t)
 		h := newTestHost(t, f)
 		h.installed("role:ops")
@@ -240,14 +240,12 @@ func TestKRLAlone(t *testing.T) {
 		h.publishDir(s)
 		f.ops = newOps
 		h.publishKRL(6)
-		gen, gens := h.current(), h.genCount()
-		_, err := h.apply()
-		if !errors.Is(err, ErrGenerationTooLarge) || !errors.Is(err, state.ErrKRL) {
-			t.Fatalf("a KRL only the refused bundle verifies: %v, want generation_too_large and krl_not_verified", err)
+		r, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) || errors.Is(err, state.ErrKRL) {
+			t.Fatalf("a KRL only the successor's ops key signed: %v, want generation_too_large alone", err)
 		}
-		if h.current() != gen || h.genCount() != gens || h.krlRevokes(h.l.Current(), 6) {
-			t.Fatalf("something was installed: current %d (was %d), %d generations (was %d)", h.current(), gen, h.genCount(), gens)
-		}
+		mustKRLAlone(t, h, r, 6, 1, "generation_too_large")
+		mustAcceptedBundle1(t, h, 1)
 	})
 	t.Run("refusal_without_newer_krl_is_noop", func(t *testing.T) {
 		t.Parallel()

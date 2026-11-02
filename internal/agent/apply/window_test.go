@@ -194,8 +194,9 @@ func (f *fixture) successorWithout(prev *trust.Bundle, prevDoc []byte, issuedAt 
 // rotationDropping is the next bundle after prev, which is under the
 // fixture's policy, rotating the policy to admin bob: it drops every next
 // CA entry of prev and adds one for key (a line the host's ssh-keygen can
-// be made to refuse). It returns the bundle and the rotated policy.
-func (f *fixture) rotationDropping(prev *trust.Bundle, prevDoc []byte, issuedAt string, key ssh.Signer) (bundle, policy spool.Doc) {
+// be made to refuse). With ops, the bundle names ops as its ops key
+// (03-08k). It returns the bundle and the rotated policy.
+func (f *fixture) rotationDropping(prev *trust.Bundle, prevDoc []byte, issuedAt string, key, ops ssh.Signer) (bundle, policy spool.Doc) {
 	f.t.Helper()
 	bob := seedKey(f.t, 12)
 	_, _, p := f.rotationOps(prev, prevDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, issuedAt, nil)
@@ -205,6 +206,9 @@ func (f *fixture) rotationDropping(prev *trust.Bundle, prevDoc []byte, issuedAt 
 	}
 	b.CAs = slices.DeleteFunc(b.CAs, func(c trust.CAEntry) bool { return c.State == "next" })
 	b.CAs = slices.Insert(b.CAs, 1, trust.CAEntry{Role: trust.RoleUser, Key: trust.FormatKey(key.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software", State: "next", Generation: 2})
+	if ops != nil {
+		b.OpsKey = trust.KeyEntry{Key: trust.FormatKey(ops.PublicKey()), Alg: ssh.KeyAlgoED25519, Custody: "software"}
+	}
 	doc := mustCanonical(f.t, b)
 	if _, err := trust.ParseBundle(doc); err != nil {
 		f.t.Fatalf("rotated bundle: %v", err)
@@ -265,7 +269,7 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 		xKey := seedKey(t, 25)
 		b2, d2 = f.successorNextUnder(f.bundle, f.bundleDoc, f.policyDoc, "2026-10-02T00:00:00Z", xKey)
 		rejected := seedKey(t, 21)
-		d3, p2 := f.rotationDropping(b2, d2.Body, "2026-10-03T00:00:00Z", rejected)
+		d3, p2 := f.rotationDropping(b2, d2.Body, "2026-10-03T00:00:00Z", rejected, nil)
 		h.state.Bundles[2], h.state.Bundles[3], h.state.Policies[2] = d2, d3, p2
 		line := trust.FormatKey(rejected.PublicKey())
 		h.run.rejectCA = func(l string) bool { return l == line }
@@ -292,7 +296,7 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 			// on bundle 1 (3' rotates to the same policy 2), and a 4'
 			// under policy 2 without 3''s next CA. All of them render.
 			b2r, d2r := h.f.successor(h.f.bundle, h.f.bundleDoc, "2026-10-04T00:00:00Z")
-			d3r, p2 := h.f.rotationDropping(b2r, d2r.Body, "2026-10-04T01:00:00Z", seedKey(t, 26))
+			d3r, p2 := h.f.rotationDropping(b2r, d2r.Body, "2026-10-04T01:00:00Z", seedKey(t, 26), nil)
 			b3r, err := trust.ParseBundle(d3r.Body)
 			if err != nil {
 				t.Fatal(err)
@@ -383,7 +387,7 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 		xKey := seedKey(t, 25)
 		b65, d65 := f.successorNextUnder(cur, curDoc, f.policyDoc, "2026-10-02T00:00:00Z", xKey)
 		rejected := seedKey(t, 21)
-		d66, p2 := f.rotationDropping(b65, d65.Body, "2026-10-03T00:00:00Z", rejected)
+		d66, p2 := f.rotationDropping(b65, d65.Body, "2026-10-03T00:00:00Z", rejected, nil)
 		h.state.Bundles[65], h.state.Bundles[66], h.state.Policies[2] = d65, d66, p2
 		x := trust.FormatKey(xKey.PublicKey())
 		refuse := map[string]bool{x: true, trust.FormatKey(rejected.PublicKey()): true}
@@ -547,10 +551,12 @@ func TestSpoolWindow(t *testing.T) {
 			t.Fatalf("the record outlived the commit of bundle 2")
 		}
 	})
-	t.Run("krl_only_the_recorded_bundle_signs_waits", func(t *testing.T) {
+	t.Run("krl_only_the_recorded_bundle_signs_lands_alone", func(t *testing.T) {
 		t.Parallel()
 		// The recorded bundle replaces the ops key; a KRL only the new key
-		// signs is verified against the bundle in force, and refused.
+		// signs fails under the bundle in force for its signer and lands
+		// alone under the recorded bundle, which verified in full when it
+		// was recorded (03-08k).
 		f := newFixture(t)
 		h := newTestHost(t, f)
 		spoolInState(t, h)
@@ -567,14 +573,13 @@ func TestSpoolWindow(t *testing.T) {
 		mustRecord(t, h, 2, 2)
 		f.ops = newOps
 		h.publishKRL(6)
-		gen, gens := h.current(), h.genCount()
-		_, err := h.apply()
-		if !errors.Is(err, ErrGenerationTooLarge) || !errors.Is(err, state.ErrKRL) {
-			t.Fatalf("apply 2: %v, want generation_too_large and krl_not_verified", err)
+		r, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) || errors.Is(err, state.ErrKRL) {
+			t.Fatalf("apply 2: %v, want generation_too_large alone", err)
 		}
-		if h.current() != gen || h.genCount() != gens || h.krlRevokes(h.l.Current(), 6) {
-			t.Fatalf("something was installed: current %d (was %d), %d generations (was %d)", h.current(), gen, h.genCount(), gens)
-		}
+		mustKRLAlone(t, h, r, 6, 1, "generation_too_large")
+		mustAcceptedBundle1(t, h, 1)
+		mustRecord(t, h, 2, 2)
 	})
 	// policyRotated is the shape of TestApply/catch_up_across_policy_rotation
 	// below a recorded bundle: bundle 2 rotates the policy (a new admin, and
