@@ -327,6 +327,7 @@ Recent decisions affecting current work:
 | 261021-76k | Make internal/directory TestAuthorizeOneUser robust against one slow wall-clock sample (take the fastest of several Authorize runs; the R1 regression must still fail) | 2026-10-21 | 10ba623 | [261021-76k-make-internal-directory-testauthorizeone](./quick/261021-76k-make-internal-directory-testauthorizeone/) |
 | 261021-8av | Bump the Go toolchain pin to go1.27.3 for GO-2026-6809 (crypto/x509), which fails govulncheck in CI | 2026-10-21 | 2fd917f | [261021-8av-bump-the-go-toolchain-pin-to-go1-27-3-fo](./quick/261021-8av-bump-the-go-toolchain-pin-to-go1-27-3-fo/) |
 | 261102-ayb | Adapt scripts/merge-gate.sh and the process docs to the owner's squash merge in the GitHub UI (no auto-merge; PR #79) | 2026-11-02 | 228d8ad | [261102-ayb-adapt-merge-gate-sh-to-the-owner-s-squas](./quick/261102-ayb-adapt-merge-gate-sh-to-the-owner-s-squas/) |
+| 261102-lwx | Pass scripts/linux.sh's command to WSL with `--exec` so `$(...)` and `$VAR` expand in the login shell, where Go is on PATH (the gofmt step of every local gate passed vacuously before; PR #81) | 2026-11-02 | 5d27383 | [261102-lwx-pass-linux-sh-s-command-to-wsl-with-exec](./quick/261102-lwx-pass-linux-sh-s-command-to-wsl-with-exec/) |
 
 ## Deferred Items
 
