@@ -1078,8 +1078,15 @@ it.
     verification (`bundle_not_verified`, `directory_not_verified` or a
     chain gap, for example) or with `krl_signer_retired` on its KRL step
     records nothing. An apply refused for the content of what it verified
-    (`generation_too_large`, `ca_line_rejected`) records that state
-    (below), so the host keeps knowing its bundle. Removing
+    (`generation_too_large`, `ca_line_rejected`) in its own pass, before
+    any wait, records that state (below), so the host keeps knowing its
+    bundle. A content refusal that a poll finds during a widening wait
+    records nothing in that apply (Run in CI:
+    `krl_alone_supersede_keeps_what_an_earlier_poll_verified`). The next
+    apply records it only if the spool still offers that state, so a
+    server that withholds it then makes the host forget the bundle that
+    poll verified. That is part of the withholding risk below.
+    UNVERIFIED: no test runs the next apply after such a wait. Removing
     `unapplied.json` forgets the record: the host then reads from the
     accepted state (Run in CI (03-08j):
     `removed_record_reads_from_accepted`). A bundle verified only before a
@@ -1132,10 +1139,9 @@ KRLs signed by the recorded bundle's key. Run in CI (03-08k):
 `retired_key_krl_held_at_the_in_force_bundle_below_the_record_is_refused`,
 `krl_only_the_recorded_bundle_signs_lands_alone`. The status shows
 `unapplied`; publishing newer versions does not clear it. On a host whose last apply error is
-`directory_not_verified` while its status shows an unapplied bundle, run
-`sudo rm /var/lib/keyroster-agent/unapplied.json`, then
-`sudo keyroster-agent apply --once`; when the recorded bundle replaced
-the ops key, follow the steps in the next paragraph.
+`directory_not_verified` while its status shows an unapplied bundle,
+remove the record with the steps in the next paragraph: the recorded
+bundle is ahead of the accepted one here, so all four steps apply.
 `keyroster-agent reset-directory` also clears it once the newest
 directory then verifies standalone.
 
@@ -1149,25 +1155,37 @@ from them, and the apply after it verifies the chain again. Until then
 nothing but a KRL is installed, and that KRL is checked against the
 accepted bundle alone.
 
-- When no bundle between the accepted version and the recorded one
-  replaced the ops key, removing the record is safe: KRLs the server
-  signs still land.
-- When one did (an ops-key rotation the server published in that range),
-  it is not. Until the chain verifies again, a KRL the new key signs is
-  refused (`krl_not_verified`), so revocations wait, and a KRL the old,
-  retired key signs can land. An honest server signs no new KRL with the
-  retired key, so with one only revocations wait; a server holding that
-  key can use the window, which is the withholding risk under "An ops-key
-  rotation". Keep the window short: remove the record, run
-  `sudo keyroster-agent apply --once` (it writes the accepted versions),
-  restart the fetcher, which polls at once
-  (`sudo systemctl restart keyroster-agent-fetch`, or
-  `sudo rc-service keyroster-agent-fetch restart`), and run
-  `sudo keyroster-agent apply --once` again. The `last apply error` note
-  no longer names a chain gap once the chain verifies. An apply reads at
-  most 64 versions of each kind past the accepted state, so when the
-  rotation is more than 64 bundle versions above the accepted one, one
-  round does not bring it back.
+Whenever the record's bundle part is ahead of the accepted bundle (the
+status shows an unapplied bundle), remove it with these steps, whether
+or not a bundle in between replaced the ops key:
+
+1. `sudo rm /var/lib/keyroster-agent/unapplied.json`;
+2. `sudo keyroster-agent apply --once` (it writes the accepted versions);
+3. restart the fetcher, which polls at once
+   (`sudo systemctl restart keyroster-agent-fetch`, or
+   `sudo rc-service keyroster-agent-fetch restart`);
+4. `sudo keyroster-agent apply --once` again.
+
+Without the restart in step 3, the `bundle_chain_gap` the next apply
+can report (above) lasts until the fetcher's next scheduled poll and the
+apply after it. That is one poll interval: 60 s by default, with a
+jitter of a sixth either way (50 to 70 s), or the `--poll` interval with
+the same jitter. In that window a KRL signed by an ops key newer than
+the accepted bundle's is refused (`krl_not_verified`), so revocations wait. That includes a key
+that a bundle above the recorded one rotated to, not only one between
+the accepted and the recorded bundle. And when a bundle in that range
+replaced the ops key, a KRL the old, retired key signs can land. An
+honest server signs no new KRL with the retired key, so with one only
+revocations wait; a server holding that key can use the window, which
+is the withholding risk under "An ops-key rotation". UNVERIFIED: no
+test builds a rotation above the recorded bundle with the record
+removed; this follows the code (a refused bundle step verifies no
+successor, so a KRL lands only under the accepted bundle). The steps
+make that window as short as an apply, a poll and an apply. The
+`last apply error` note no longer names a chain gap once the chain
+verifies. An apply reads at most 64 versions of each kind past the
+accepted state, so when the rotation is more than 64 bundle versions
+above the accepted one, one round does not bring it back.
 
 UNVERIFIED: no test combines a removed record with a pruned spool, and
 none runs these steps; the order above follows the code (the applier
