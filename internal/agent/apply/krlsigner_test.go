@@ -772,6 +772,12 @@ func TestKRLSigner(t *testing.T) {
 		if !strings.Contains(log.String(), "krl_signer_retired") {
 			t.Fatalf("the wait did not log krl_signer_retired:\n%s", log.String())
 		}
+		// Poll 2's content refusal (directory 3 above the caps) records
+		// nothing: only forward's own pass, before the wait, records
+		// (recordUnapplied), as host-setup.md says.
+		if recordExists(t, h) {
+			t.Fatalf("a poll's content refusal wrote %s:\n%s", state.UnappliedFile, log.String())
+		}
 	})
 	t.Run("fork_at_the_carried_version_does_not_replace_it", func(t *testing.T) {
 		t.Parallel()
