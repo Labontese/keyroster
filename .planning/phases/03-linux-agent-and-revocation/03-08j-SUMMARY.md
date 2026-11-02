@@ -17,7 +17,7 @@ provides:
   - "spool: Read's one recapture after an ENOENT (readOnce, readSpool)"
   - "tests: TestSpoolWindow (23 cases), TestSpoolWindowWideningWait (7 cases), TestValidate's unapplied row, TestHostStatusUnapplied, TestReadRecapture"
   - "apply: pollCapture, a widening wait's capture chained from the record while it is ahead of the pending target (pre-merge review fix round 1)"
-  - "heartbeat: Status.UnappliedAbove; Committed and Diverged count an unapplied version above current (pre-merge review fix round 1)"
+  - "heartbeat: Unapplied.BundleSHA256 and DirectorySHA256; Status.UnappliedLost (fix round 2, replacing round 1's UnappliedAbove); Committed and Diverged count a lost recorded version (pre-merge review fix rounds 1 and 2)"
   - "docs: host-setup.md far-behind paragraphs, two sentences after the fetcher paragraph, the unapplied alert; signer-install.md host selection and remedy; the spool-pruning todo's remaining item"
 affects: [03-08k, 03-09, 03-10]
 
@@ -256,6 +256,66 @@ Run locally in WSL at 1151aa5:
 - golangci-lint: reported three unused test parameters, fixed in 6cf4449.
 
 At 6cf4449, run locally in WSL: golangci-lint reports 0 issues and gofmt is clean. internal/agent/apply took 278.9 s under -race when run alone, below its 400 s limit. Under Verification above, the same package took 294 s at Task 2's head (with other runs in parallel) and 310.6 s in the full gate.
+
+## Pre-merge review fix round 2
+
+The check of fix round 1 confirmed D-1. Three items are fixed here (R2-1 to R2-3). Every RED was run locally in WSL on the code at 8ee8c1a with the new tests added. For R2-1 the RED tree also got `heartbeat.Unapplied`'s two new fields, with no behaviour behind them, so the tests compile. Every mutant was applied in a scratch copy and then restored.
+
+| Item | Commit | What changed |
+|------|--------|--------------|
+| R2-1, R2-3 | fd0b7c7 | The recorded SHA-256 per kind; a record at current's number with other bytes is lost; the note names only lost parts |
+| R2-2 | fb43f48 | A test reaches forward's removal log for a passed record |
+
+### R2-1: a recorded version re-made with other bytes
+
+- **The problem.** `Status.Unapplied` carried version numbers only. Once a re-made chain reached the recorded number, the host was no longer flagged `diverged`, and its note said it would catch up while it refused the re-made chain.
+- **The fix.**
+  - `heartbeat.Unapplied` gains `bundle_sha256` and `directory_sha256` (optional). Each is the SHA-256 of the recorded document, in the form Status's Doc fields use.
+  - Validate refuses a value that is not 64 lowercase hex characters, or one for a kind with no version.
+  - The agent computes both from the record's own bytes (`unappliedStatus`).
+  - `Status.UnappliedLost` replaces round 1's `UnappliedAbove`. Per kind, a recorded version is lost when it is above the server's current one, or at current's number with another SHA-256. A part without a SHA-256 is judged by its number only.
+  - Committed, Diverged and host status's "on version" count follow `UnappliedLost`.
+- **Docs.**
+  - signer-install.md: the remedy is triggered by accepted.json's bundle above the restored signer's bundle version noted at restore time, with `bundle.version` in outbox/status.json as the accepted one. The `diverged` flag is a second signal, and the text says when the flag shows.
+  - host-setup.md: the `diverged` and `unapplied` alerts and the counting rule are corrected to match.
+- **Tests and RED at 8ee8c1a.**
+  - `TestCommittedAndDiverged`: four new rows. A record at current's number with the same bytes is neither lost nor diverged (it is a current version the host legitimately cannot apply). With other bytes it is diverged and not committed. `unapplied_directory_at_current_other_bytes` and `unapplied_bundle_at_current_other_bytes` were RED.
+  - `TestValidate`: two new refusals, both RED. A status with versions only still passes.
+  - `TestHostStatusDiverged`: now eight hosts. web5 (same number, other bytes) was RED: not flagged. web6 (same number, same bytes) and web7 (no SHA-256) are not flagged.
+  - `status_reports_unapplied` checks the SHA-256 the agent computes for a recorded directory and a recorded bundle. RED: no SHA-256 was sent.
+  - All GREEN after the fix.
+- **Mutants: all killed.**
+
+  | Mutant | Killed by |
+  |--------|-----------|
+  | Numbers only | `TestCommittedAndDiverged`, `TestHostStatusDiverged` |
+  | No SHA-256 check in Validate | `TestValidate` |
+  | The agent sending no directory SHA-256 | `status_reports_unapplied` |
+  | The count ignoring a lost part | `TestHostStatusDiverged` |
+
+### R2-2: forward's removal log
+
+- **The gap.** Forward's load logs when it removes a record that no longer has any part ahead of accepted/ ("removed ... no part of it is ahead of the accepted state"), but no test reached that line.
+- **The test.** `passed_record_removed_by_the_next_apply` puts back a record the commit had passed, as a crash between the commit and dropPassedRecord would leave it. It checks that the next apply removes the record and logs that line.
+- **Evidence.** The test is GREEN at 8ee8c1a, where the line already exists. The mutant that deletes the line fails it.
+
+### R2-3: the note for a mixed record
+
+- **The fix.** The remedy note names only the lost parts. Any other part gets the "cannot apply it" note.
+- **Test.** web8 in `TestHostStatusDiverged` has a mixed record: bundle 2 at current with the same bytes, and directory 65 above current.
+  - Only directory v65 is called lost.
+  - Bundle v2 gets the "cannot apply it" note.
+  - The mutant that treats every part as lost (8ee8c1a's behaviour) is killed.
+
+### Round 1's CI and this round's gate
+
+- **Round 1's CI on 8ee8c1a.** All 27 checks passed.
+  - The first attempt of cli-windows failed in `TestCountPinnedSignersForgedBlocks` (internal/trust, a timing bound: 188.6 ms against 184.1 ms; this PR does not touch that package). Its rerun passed (job 125145233608).
+  - Run 41402367509; build-test job 125136767064, under -race: internal/agent/apply 161.6 s, internal/agent/fetch 13.2 s, internal/agent/spool 1.7 s, internal/agent/state 1.8 s, cmd/keyroster 186.3 s.
+
+- **This round's gate.** Run locally in WSL at fb43f48: `go test -race -count=1 ./...` passed (446 s). internal/agent/apply took 382.7 s under -race in that run, alongside every other package. Run alone, it took 280.2 s, below its 400 s limit.
+  - vet, gofmt, capslock-check, dep-firewall, testonly-firewall and check-pinned-actions: pass.
+  - golangci-lint reported one gosec finding on the new test's write of the restored record. It is marked as a test fixture in 2ed5048, as the harness's other fixture writes are, and the rerun reports 0 issues.
 
 ## Deviations from Plan
 
