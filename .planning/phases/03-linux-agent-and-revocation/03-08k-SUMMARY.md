@@ -91,7 +91,10 @@ completed: 2026-11-02
 | review fix 1 | be1ff5c | fix(agent): carry what every poll of a widening wait verified in full (PR #80 review) |
 | review fix 1 | a5be99c | docs(agent): say when removing unapplied.json is safe, and what a refused apply records (PR #80 review) |
 | review fix 1 | 0f7aba3 | docs(03-08k): record pre-merge review fix round 1 |
-| review fix 1 | (this commit) | docs(03-08k): scope step-only knowledge to its capture (fix round 1) |
+| review fix 1 | 963d84d | docs(03-08k): scope step-only knowledge to its capture (fix round 1) |
+| review fix 2 | 683b2bb | test(agent): pin that a poll's content refusal records nothing (PR #80 review) |
+| review fix 2 | 05d80b5 | docs(agent): scope what a content refusal records, and when to restart the fetcher after removing unapplied.json (PR #80 review) |
+| review fix 2 | (this commit) | docs(03-08k): record pre-merge review fix round 2 |
 
 Every branch commit is authored by Daniel Gustafsson and committed and SSH-signed by keyroster-bot (`git log origin/main..HEAD --format='%an <%ae> %cn'` prints only `Daniel Gustafsson <121555671+Labontese@users.noreply.github.com> keyroster-bot`). No commit message carries an attribution trailer.
 
@@ -392,6 +395,39 @@ Bundle 3 never verified in full, so it is not carried. UNVERIFIED: no test build
 
 Both limits hold. The full gate passed: `go test -race -count=1 ./...` (no FAIL, no DATA RACE), go vet in its three forms, golangci-lint (0 issues), capslock-check (no change to any baseline), dep-firewall, testonly-firewall and check-pinned-actions. The gate's gofmt step, `test -z "$(gofmt -l .)"` inside the string handed to scripts/linux.sh, is expanded by WSL's outer shell, where gofmt is not on PATH. It printed `gofmt: command not found` and passed vacuously, here and in the gate recorded for Task 4. gofmt was therefore run on its own, from a script file inside WSL's login shell (the toolchain's gofmt, go1.27.3): `gofmt -l .` printed nothing.
 
+## Pre-merge review fix round 2
+
+The check of fix round 1 passed the code (D-1). It upheld two low-severity points in the runbook text a5be99c added. The owner decided to fix both, in the docs only, with an optional cheap test for the first.
+
+| Item | Source (fix round 1's check) | Commit |
+|------|------------------------------|--------|
+| R2-1: the runbook said every content-refused apply records its state | host-setup.md, the Limits of "An ops-key rotation" | 683b2bb (test), 05d80b5 (runbook) |
+| R2-2: the runbook called removing `unapplied.json` safe when no bundle up to the recorded one rotated the ops key | host-setup.md, the paragraph after the stuck-window remedy, and the remedy's pointer to it | 05d80b5 |
+
+### R2-1: what a content refusal records
+
+- **What the code does.** recordUnapplied has one call site: forward's content-refusal branch, before its KRL-alone pass and before the widening wait (apply.go). pollSpool takes its own KRL-alone pass on a content refusal and records nothing, as its comment says. So a content refusal that a poll finds records nothing in that apply. The next apply records that state only when its own pass verifies it again, that is, when the spool still offers it.
+- **The runbook** now scopes the recording to forward's own pass, before any wait. It says that a poll's content refusal records nothing in that apply, that the next apply records it only if the spool still offers that state, and that this is part of the withholding risk. The next-apply sentence is labelled UNVERIFIED.
+- **The test.** `krl_alone_supersede_keeps_what_an_earlier_poll_verified` now also asserts `!recordExists` after the apply. That case's poll 2 is refused for content (directory 3 above the caps, `generation_too_large`). The assertion adds no runtime.
+  - GREEN on 05d80b5's tree (locally in WSL, `go test -race -count=1 -v -run '^TestKRLSigner$/^krl_alone_supersede_keeps_what_an_earlier_poll_verified$'`): PASS.
+  - Mutant M1: `if !isCrash(refusal) { e.recordUnapplied(prev, v) }` in pollSpool's content-refusal branch, just before krlAlone. It is killed by the new assertion only: `a poll's content refusal wrote unapplied.json`, with the log line `recorded bundle 0 / directory 3 as unapplied`. So the mutant did write the file. It was restored with `git checkout`, then `git diff --quiet -- internal/agent/apply/apply.go`.
+  - In this shape, poll 2 no longer offers bundle 2, so the record the mutant writes has only a directory part. The test therefore pins that a poll writes no record. It does not build a poll whose content-refused capture holds a newer bundle. The check's probe ran that variant as well, and it also found no record.
+
+### R2-2: removing the record
+
+- **What the code does.**
+  - While a record exists, WriteAccepted raises `outbox/accepted.json`'s bundle and directory to the record's versions (installed.go). pruneSpool keeps the newest version at or below them, plus keepAbove versions above (fetch.go). So once the record's bundle is two or more above `accepted/`, the bundles in between leave the spool.
+  - After the record is removed, the next apply's bundle step is refused with `bundle_chain_gap`. A refused bundle step raises no fully verified bundle, so KRLAlone has no successor, and a KRL signed by any ops key newer than the accepted bundle's is `krl_not_verified`. That includes a key a bundle above the recorded one rotated to.
+  - The gap lasts until the fetcher's next poll refills the spool from the accepted versions, and then the next apply. NextPoll is the base plus a uniform jitter of a sixth either way: 50 to 70 s at DefaultPoll (60 s), or `--poll` with the same jitter. fetch.Run calls Once before its first timer, so a restarted fetcher polls at once.
+- **The runbook** no longer calls the removal safe. Whenever the record's bundle part is ahead of the accepted bundle (the status shows an unapplied bundle), it gives the four steps as a numbered list: remove, apply --once, restart the fetcher, apply --once. It says that without the restart, a KRL signed by a newer key, one rotated above the recorded bundle included, waits for one fetcher poll, and that a KRL the retired key signs can land in that window when a bundle in the range rotated the key. The stuck-window remedy now says that all four steps apply there, because its recorded bundle is always ahead of the accepted one. This corrects fix round 1's D-2 (a) bullets, which are left as recorded above.
+- **UNVERIFIED.** No test builds a rotation above the recorded bundle with the record removed, and none runs the steps. The new wait sentence is labelled UNVERIFIED in the runbook, and the closing UNVERIFIED paragraph still covers the steps.
+
+### Checks
+
+- The plan's Task 4 runbook check prints 1 for each of its 13 names and 0 for both old sentences. "always safe" and "the KRL still lands" print 0.
+- gofmt, run from WSL's login shell inside the command string, printed nothing for `.`. go vet on internal/agent/apply passed.
+- Test time on 05d80b5's tree (locally in WSL), against the limits of 400 s alone and 480 s under `./...`: 350.5 s alone and 316.2 s under `./...`, so both limits hold. The alone figure is above fix round 1's 284.3 s. The added assertion is one Lstat, so the difference is run-to-run variance on this machine (not measured further). `go test -race -count=1 ./...` printed no FAIL and no DATA RACE.
+
 ## Deviations from Plan
 
 1. **[Rule 3] The capslock baseline was updated (c47f535).** The plan expects no new pair and calls one a deviation to review and record. The analysis is under Capslock, and the PR body names it for review.
@@ -421,7 +457,8 @@ None.
 - The end-to-end wait for the new key's KRL (at most about an hour with an honest server), and a signer process started before the bundle install, which publishes nothing.
 - A fork of the root-signed bundle chain at fullyVerified's version outside a widening wait (it resolves to fullyVerified): no test builds one there. In a wait, `fork_at_the_carried_version_does_not_replace_it` pins that a fork at the carried version does not replace the carried bundle (fix round 1).
 - A bundle verified only before a refused bundle step, then withheld from a later poll of the same wait, after a KRL-alone supersede: the later poll can land a KRL its retired key signed under a fully verified bundle (What the fix does not carry). No test builds it; it is part of the withholding-server residual.
-- Removing `unapplied.json` when a bundle up to the recorded one replaced the ops key, with a pruned spool, and the runbook's steps for that case: no test runs them (fix round 1; the order follows the code).
+- Removing `unapplied.json` while the record's bundle part is ahead of `accepted/`, with a pruned spool, and the runbook's four steps: no test runs them (fix rounds 1 and 2; the order follows the code). That includes the one-poll wait without the fetcher restart for a KRL signed by a key rotated above the recorded bundle (fix round 2), which is reasoned from the code only.
+- The apply after a wait whose poll found a content refusal: it records that state only if the spool still offers it (fix round 2). No test runs that next apply; the claim follows forward's single recordUnapplied call.
 - Two supersedes within one wait: no test supersedes the pending target twice. `retired_key_krl_after_a_krl_alone_supersede_is_refused` pins one supersede and a later poll.
 - An old-key KRL kept newest in the spool by a server holding the retired key: no test builds it (part of the withholding-server residual).
 - A record rewritten during a wait, the only shape in which VerifyAheadAfter's record half (equivalent mutant E3) could matter.
