@@ -344,7 +344,7 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 var refusals = []error{
 	state.ErrPins, state.ErrBundleOlder, state.ErrBundleChainGap, state.ErrBundle, state.ErrBundleInstall,
 	state.ErrPolicyMissing, state.ErrNoBundle, state.ErrDirOlder, state.ErrDirChainGap, state.ErrDir,
-	state.ErrDirInstall, state.ErrKRLOlder, state.ErrKRL, state.ErrKRLHeader,
+	state.ErrDirInstall, state.ErrKRLOlder, state.ErrKRL, state.ErrKRLHeader, state.ErrKRLSignerRetired,
 	ErrPhase2Pending, ErrPhase2Differs, ErrHostNotInDirectory, ErrHostKeysDisagree, ErrKRLRollback,
 	ErrForeignTrust, ErrRHEL8, ErrFIPS, ErrHostPoPNotEnabled, ErrConfigUnsafe, ErrSSHKeygenMissing,
 	ErrCALineRejected, ErrKRLInvalid, ErrKRLRejected, ErrKRLDropsKeyEntry, ErrPendingStateUnknown,

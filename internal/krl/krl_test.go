@@ -467,7 +467,7 @@ func TestVerifyManifest(t *testing.T) {
 	})
 	flipped := bytes.Clone(f.krl)
 	flipped[len(flipped)-1] ^= 1
-	for _, tc := range []struct {
+	refusals := []struct {
 		name     string
 		sig, krl []byte
 		manifest []byte
@@ -483,13 +483,38 @@ func TestVerifyManifest(t *testing.T) {
 		{"version_equal_to_stored_refused", f.sig, f.krl, f.manifest, pinnedID, 2, ErrVersion},
 		{"flipped_bit_refused", f.sig, flipped, f.manifest, pinnedID, 1, ErrDigest},
 		{"signature_over_other_bytes_refused", f.sign(t, f.ops, Namespace, []byte("other")), f.krl, f.manifest, pinnedID, 1, ErrSignature},
-	} {
+	}
+	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := VerifyManifest(tc.manifest, tc.sig, tc.krl, f.bundle, tc.id, tc.stored); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("VerifyManifest: %v, want %v", err, tc.wantErr)
 			}
 		})
 	}
+	t.Run("bundle_read_only_for_its_ops_key", func(t *testing.T) {
+		// 03-08k: VerifyManifest reads the bundle only for its ops-key
+		// comparison. Under a bundle that keeps only f.bundle's ops key
+		// (another version, CA set, root set, log key and installation ID),
+		// the accepted case and every refusal give the same result. The
+		// agent's KRL step relies on it: a later candidate bundle with the
+		// same ops key cannot change an outcome.
+		other := &trust.Bundle{
+			Version:        9,
+			OpsKey:         f.bundle.OpsKey,
+			CAs:            []trust.CAEntry{{Role: trust.RoleUser, Key: trust.FormatKey(f.root.PublicKey())}},
+			Root:           trust.RootSet{Keys: []trust.RootKey{{Key: trust.FormatKey(f.ca.PublicKey())}}, Threshold: 1},
+			Log:            trust.LogEntry{Key: trust.FormatKey(f.root.PublicKey())},
+			InstallationID: "ffeeddccbbaa99887766554433221100",
+		}
+		if m, err := VerifyManifest(f.manifest, f.sig, f.krl, other, pinnedID, 1); err != nil || m.KRLVersion != 2 {
+			t.Fatalf("the accepted case under another bundle with the same ops key: %+v, %v", m, err)
+		}
+		for _, tc := range refusals {
+			if _, err := VerifyManifest(tc.manifest, tc.sig, tc.krl, other, tc.id, tc.stored); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("%s under another bundle with the same ops key: %v, want %v", tc.name, err, tc.wantErr)
+			}
+		}
+	})
 	t.Run("non_canonical_manifest_refused", func(t *testing.T) {
 		spaced := append([]byte(" "), f.manifest...)
 		if _, err := VerifyManifest(spaced, f.sign(t, f.ops, Namespace, spaced), f.krl, f.bundle, pinnedID, 1); !errors.Is(err, ErrManifest) {

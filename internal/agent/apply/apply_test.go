@@ -557,7 +557,7 @@ func TestApply(t *testing.T) {
 		// so the bundle waits for the next capture instead of the host
 		// refusing every capture. With newOps the rotation also replaces
 		// the ops key and the newest KRL is signed by the new one: the KRL
-		// waits with the bundle.
+		// lands with the held step (03-08k).
 		for _, newOps := range []bool{false, true} {
 			f := newFixture(t)
 			h := newTestHost(t, f)
@@ -586,8 +586,8 @@ func TestApply(t *testing.T) {
 			if err != nil || r.DirectoryVersion != 1+spool.MaxVersionsPerKind || r.BundleVersion != 1 || !r.BundleHeld {
 				t.Fatalf("newOps %t: first capture: %+v, %v; want directory %d under bundle 1", newOps, r, err, 1+spool.MaxVersionsPerKind)
 			}
-			if newOps && r.KRLVersion == f.krlVersion {
-				t.Fatalf("the KRL signed by the rotated ops key was taken under bundle 1: %+v", r)
+			if newOps && (r.KRLVersion != f.krlVersion || !h.krlRevokes(h.l.Current(), 7)) {
+				t.Fatalf("the KRL signed by the newest bundle's ops key did not land with the held step: %+v", r)
 			}
 			r, err = h.apply()
 			if err != nil || r.DirectoryVersion != total || r.BundleVersion != 2 || r.KRLVersion != f.krlVersion {

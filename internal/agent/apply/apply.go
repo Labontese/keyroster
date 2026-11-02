@@ -714,7 +714,8 @@ func (e *engine) loadStored() (*state.Stored, error) {
 // and Verify refused nothing, a content refusal of the generation it
 // renders, before current moved, takes the capture once more as KRL-alone
 // (krlAlone, state.KRLAlone against accepted/): the KRL verified again
-// against the accepted bundle, with the bundle, policy and directory in
+// against the accepted bundle or, on krl.ErrSigner, the apply's fully
+// verified successor (03-08k), with the bundle, policy and directory in
 // force, through the same render, checks and Transition, and the refusal
 // is returned after the commit, so the report and last_apply name it. A
 // content refusal is a render error, a generation above the caps
@@ -760,6 +761,11 @@ func (e *engine) forward(ctx context.Context) error {
 		// Owner decision D-R2 (PR #71 review F5): the refused bundle or
 		// directory step is reported, and only the capture's KRL moves on.
 		e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", v.Refused)
+	}
+	if v.KRLRefused != nil {
+		// 03-08k: a KRL whose ops key a newer verified bundle dropped,
+		// under a held step; outcome reports it after the commit.
+		e.logf("WARNING %v; the held step is applied, and the KRL in force stays", v.KRLRefused)
 	}
 	e.report.BundleHeld = v.BundleHeld
 	var g, cur *Generation
@@ -957,15 +963,18 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 }
 
 // outcome is what forward returns once v's state is in force, or found
-// unchanged: v.Refused, and while no directory is accepted also Render's
-// host_not_in_directory refusal (F08 (03-08d)), which RenderFallback went
-// on from with last-good's principals. The apply's error and last_apply
-// then name both until a directory is accepted.
+// unchanged: v.Refused, v.KRLRefused (a held step taken without a KRL whose
+// ops key a newer verified bundle dropped, 03-08k; a superseding poll's
+// included, since forward returns outcome(tv)), and while no directory is
+// accepted also Render's host_not_in_directory refusal (F08 (03-08d)),
+// which RenderFallback went on from with last-good's principals. The
+// apply's error and last_apply then name all of them until a directory is
+// accepted.
 func outcome(v *state.Verified) error {
 	if v.Directory == nil {
-		return errors.Join(v.Refused, errNoDirectory)
+		return errors.Join(v.Refused, v.KRLRefused, errNoDirectory)
 	}
-	return v.Refused
+	return errors.Join(v.Refused, v.KRLRefused)
 }
 
 // candidate renders v for this host (render), keeps the KRL in force
@@ -991,8 +1000,10 @@ func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*G
 // state.KRLAlone against prev (accepted/, or during a widening wait the
 // pending target's state), so only its KRL moves on, verified against
 // prev's bundle; never the KRL v verified under a bundle that is not
-// applied. It runs when v changed the bundle or directory, refused nothing
-// and refusal is not an injected crash; otherwise refusal is returned,
+// applied, or, on krl.ErrSigner, the apply's fully verified successor
+// (03-08k; v is the capture KRLAlone takes it from). It runs when v
+// changed the bundle or directory, refused nothing and refusal is not an
+// injected crash; otherwise refusal is returned,
 // joined to v.Refused (a KRL-alone v whose own generation is refused
 // names both refusals). The pass is bounded per capture, not per run (PR
 // #76 review F0 and F1): the KRL-alone Verified carries the refusal and
@@ -1009,7 +1020,7 @@ func (e *engine) krlAlone(prev *state.Stored, in spool.State, v *state.Verified,
 	e.logf("WARNING %v; the KRL is verified against the accepted bundle and applied alone", refusal)
 	// The report describes the KRL-alone render from here on.
 	e.report.HostStatus, e.report.UnmatchedHostKeys, e.report.KRLKept = "", nil, nil
-	return state.KRLAlone(e.pins, prev, in, refusal)
+	return state.KRLAlone(e.pins, prev, in, refusal, v)
 }
 
 // loadUnapplied is the one loader of the unapplied record, <state>/
@@ -1225,13 +1236,15 @@ func (e *engine) discard(n uint64) {
 // generation is then the pending target's with the newer KRL, and its
 // Verified carries the refusal, which forward returns after the commit. A
 // KRL-alone state with nothing newer returns the refusal, which the wait
-// logs. The capture is read and verified as forward's is (pollCapture):
-// from the unapplied record while it is ahead of the pending target. It
+// logs. The capture is read and verified as forward's is (pollCapture),
+// with what the pending capture knew (03-08k), raised by every earlier poll
+// of the wait (PR #80 review): from the unapplied record while it is ahead
+// of the pending target. It
 // records no unapplied state: after the target's commit the next forward
 // records a refused state if one remains (PR #76 review F8 (03-08j)).
 func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target *Generation) (*Generation, *state.Verified, error) {
 	prev := pending.AsStored()
-	v, st, err := e.pollCapture(prev)
+	v, st, err := e.pollCapture(pending)
 	if err != nil || v == nil || !v.Changed() {
 		return nil, nil, err
 	}
@@ -1267,8 +1280,8 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 }
 
 // pollCapture is a widening wait's capture and its verification against
-// prev, the pending target's state (PR #78 review, 03-08j). While the
-// unapplied record has a part ahead of prev (Unapplied.Base against prev:
+// prev, the state of pending, the pending target (PR #78 review, 03-08j).
+// While the unapplied record has a part ahead of prev (Unapplied.Base against prev:
 // per kind the record's part when it is higher, prev's otherwise), the
 // record is the chain base, as in forward: the capture is read from that
 // base's floor and verified by VerifyAhead with prev as the state the
@@ -1278,30 +1291,43 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 // step, and a chain that does not chain to the record's bytes is refused,
 // its KRL taken alone against prev. A capture that brings no bundle,
 // policy or directory beyond the base supersedes the target only with a
-// newer KRL, verified against prev (KRLAlone): the record itself is
+// newer KRL, verified against prev (KRLAlone) or, on krl.ErrSigner, against
+// that capture's fully verified successor (03-08k): the record itself is
 // rendered again by the next forward, not by every poll. Without such a
 // record, or with one that does not load, the capture is verified against
 // prev (Verify). v is nil when nothing is newer.
-func (e *engine) pollCapture(prev *state.Stored) (*state.Verified, spool.State, error) {
+//
+// Each branch knows what the pending capture knew (03-08k): the branch
+// without a record verifies with state.VerifyAfter, the record branch with
+// state.VerifyAheadAfter, which also knows the record's bundle, and the
+// KRL-alone call names that capture. So a poll decides a KRL as forward
+// does, neither wider nor narrower. Both raise pending's fully verified
+// bundle to one the capture verified in full above it, refused or not
+// (PR #80 review). Forward's wait passes pending to every poll and replaces
+// it only with a superseding Verified, which inherits that bundle, so the
+// pending target holds the newest bundle any poll of the wait verified in
+// full.
+func (e *engine) pollCapture(pending *state.Verified) (*state.Verified, spool.State, error) {
+	prev := pending.AsStored()
 	base, _, err := loadUnapplied(e.l, prev)
 	if err != nil || base == nil {
 		st, err := e.capture(prev.Floor())
 		if err != nil {
 			return nil, st, err
 		}
-		v, err := state.Verify(e.pins, prev, st)
+		v, err := state.VerifyAfter(e.pins, pending, st)
 		return v, st, err
 	}
 	st, err := e.capture(base.Floor())
 	if err != nil {
 		return nil, st, err
 	}
-	v, err := state.VerifyAhead(e.pins, prev, base, st)
+	v, err := state.VerifyAheadAfter(e.pins, pending, base, st)
 	if err != nil || v.Refused != nil {
 		return v, st, err
 	}
 	if bytes.Equal(v.Next.Bundle, base.Bundle) && bytes.Equal(v.Next.Policy, base.Policy) && bytes.Equal(v.Next.Directory, base.Directory) {
-		v, err = state.KRLAlone(e.pins, prev, st, nil)
+		v, err = state.KRLAlone(e.pins, prev, st, nil, v)
 	}
 	return v, st, err
 }

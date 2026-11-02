@@ -992,12 +992,119 @@ is `refused`, and its error names the refusal (`generation_too_large`,
 `ca_line_rejected`, `directory_not_verified` or `host_not_in_directory`,
 for example); `keyroster host status` shows the error as a
 `last apply error` note. After `reset-directory` a verified successor bundle's
-CA keys apply as well, with last-good's principals. A KRL that only the
-refused bundle's ops key signed waits with that bundle, and before the
-first install the refusal stands and nothing is installed. The host keeps
+CA keys apply as well, with last-good's principals. The host keeps
 the directory and principals it had until the server publishes a
 directory it can apply: split the oversize host group or roles and
 publish again.
+
+A KRL that only a fully verified successor bundle's ops key signed lands
+as well (Run in CI (03-08k)). That holds after a content refusal of that
+bundle, and after a directory the host refuses while the whole bundle
+chain verified. A fully verified successor is a bundle whose chain from
+the accepted bundle verified to the pinned roots: in that apply, or in
+the recorded unapplied state (below), also when a bundle offered above
+the recorded one is refused. The KRL is checked against that bundle's
+ops key, the pinned installation and the host's KRL version, and lands
+with the accepted bundle and directory. A bundle that only arrived, or
+one verified before a refused bundle step, never authorises a KRL.
+Before the first install the refusal stands, and nothing is installed.
+During a widening wait, a KRL that arrives decides the same way as one
+that was there when the apply started, also while the host reads from
+the recorded unapplied state. Run in CI (03-08k):
+`ops_key_changed_krl_lands_alone`,
+`krl_only_the_recorded_bundle_signs_lands_alone`,
+`successor_signed_krl_after_a_refused_directory_lands_alone`,
+`successor_from_the_record_after_a_refused_bundle_step_above_it`,
+`successor_signed_krl_after_a_refused_bundle_step_is_refused`,
+`successor_signed_krl_needs_a_verified_successor`,
+`record_signed_krl_during_a_wait_lands`,
+`krl_alone_supersede_keeps_what_an_earlier_poll_verified`.
+
+**An ops-key rotation** (Run in CI (03-08k), `TestKRLSigner`). When a
+verified bundle the host knows names a newer ops key, the old key is
+retired. The host knows a bundle it verified in the current apply (also,
+within that one capture, a bundle verified before a refused bundle step,
+and, during a widening wait, every bundle the apply verified in full
+before the poll, by forward or by an earlier poll, whether that poll
+installed anything or was refused), or one it recorded as unapplied. A bundle at the same version as a known one
+but with other bytes (a fork of the root-signed chain) does not replace
+it.
+
+- A KRL a retired key signed never lands (`krl_signer_retired`), and
+  nothing else of that apply is installed with it: the newer bundle and
+  every directory change, access removals included, wait too. The
+  exception is a held bundle (catching up across a policy rotation): the
+  held bundle and directory are installed, the KRL in force stays, so no
+  revocation is lost, and the refusal is reported. Run in CI:
+  `retired_in_force_key_krl_under_a_held_step_is_refused`,
+  `held_step_krl_signed_by_a_retired_key_is_refused`. The host waits for
+  a KRL the new key signs. The signer publishes one at its next
+  revocation, or at its hourly republish once it runs with the newer
+  bundle (signer side: `TestKRLStartupAndRepublish`), so with an honest
+  server the wait is at most about an hour; that end-to-end wait is
+  UNVERIFIED on a real host. Run in CI:
+  `retired_key_krl_on_the_krl_step_is_refused`,
+  `retired_key_krl_after_a_refused_directory_is_refused`,
+  `retired_key_krl_during_a_wait_is_refused`,
+  `retired_key_krl_during_a_wait_from_the_record_is_refused`,
+  `retired_key_krl_during_a_wait_above_the_record_is_refused`,
+  `retired_key_krl_after_a_same_bytes_poll_is_refused`,
+  `retired_key_krl_after_a_krl_alone_poll_with_nothing_newer_is_refused`,
+  `retired_key_krl_after_a_refused_poll_is_refused`,
+  `retired_key_krl_after_a_poll_from_the_record_is_refused`,
+  `fork_at_the_carried_version_does_not_replace_it`.
+- A key a newer bundle names again is current. Run in CI:
+  `rotated_back_key_is_current`.
+- Under a held bundle (catching up across a policy rotation), a KRL the
+  newest verified bundle's ops key signed lands with the held bundle and
+  directory. Run in CI:
+  `held_bundle_krl_signed_by_the_newest_key_lands_with_the_held_step`,
+  `catch_up_across_policy_rotation`.
+- Limits.
+  - The hour counts only once a signer process runs with the newer
+    bundle. One started before the bundle was installed publishes
+    nothing, and the hour runs from the last publish. UNVERIFIED on a
+    real host.
+  - After a bundle step refused above a verified rotation, with no
+    record, no KRL lands until the bundle chain verifies: the old key is
+    retired, and the new key has no successor in that apply. Before this
+    change the last old-key KRL landed there. A fetcher that controls the
+    spool can cause this with one broken bundle, which is the withholding
+    risk below. Run in CI:
+    `successor_signed_krl_after_a_refused_bundle_step_is_refused`,
+    `retired_key_krl_after_a_refused_bundle_step_is_refused`.
+  - The host knows the newer bundle only in the apply that verified it,
+    or while it is recorded as unapplied. An apply refused in
+    verification (`bundle_not_verified`, `directory_not_verified` or a
+    chain gap, for example) or with `krl_signer_retired` on its KRL step
+    records nothing. An apply refused for the content of what it verified
+    (`generation_too_large`, `ca_line_rejected`) in its own pass, before
+    any wait, records that state (below), so the host keeps knowing its
+    bundle. A content refusal that a poll finds during a widening wait
+    records nothing in that apply (Run in CI:
+    `krl_alone_supersede_keeps_what_an_earlier_poll_verified`). The next
+    apply records it only if the spool still offers that state, so a
+    server that withholds it then makes the host forget the bundle that
+    poll verified. That is part of the withholding risk below.
+    UNVERIFIED: no test runs the next apply after such a wait. Removing
+    `unapplied.json` forgets the record: the host then reads from the
+    accepted state (Run in CI (03-08j):
+    `removed_record_reads_from_accepted`). A bundle verified only before a
+    refused bundle step is known only within that capture: a later poll
+    of the same wait does not know it, so when the server withholds it
+    there, a KRL the key it retired signs can land under a fully verified
+    bundle. That is the same withholding risk. UNVERIFIED: no test builds
+    it. A server that withholds the
+    newer bundle from the next apply, or before the host ever saw it,
+    can still land a KRL the retired key signs on that host, as before
+    this change. Run in CI:
+    `retired_key_krl_after_the_bundle_is_withheld_lands_as_on_main` (the
+    case the rule does not reach). A server holding the retired key can
+    also keep such a KRL newest in the spool and hold the host back; that
+    is the same withholding risk. UNVERIFIED: no test keeps an old-key
+    KRL newest in the spool.
+
+UNVERIFIED on a real host: no ceremony on main rotates the ops key yet.
 
 A host that is far behind reads past a version it cannot apply (PR #76
 review F8, 03-08j). An apply reads at most 64 versions of each kind past
@@ -1026,21 +1133,64 @@ enough, and no reset is needed.
 One case needs a hand action (UNVERIFIED: no test builds two policy
 rotations in one gap, and none runs this remedy). A directory signed only
 under a policy strictly between the bundle in force and the recorded
-bundle is refused on every apply. KRLs signed by the in-force ops key
-still land, and the status shows `unapplied`; publishing newer versions
-does not clear it. On a host whose last apply error is
-`directory_not_verified` while its status shows an unapplied bundle, run
-`sudo rm /var/lib/keyroster-agent/unapplied.json`, then
-`sudo keyroster-agent apply --once`. `keyroster-agent reset-directory`
-also clears it once the newest directory then verifies standalone.
+bundle is refused on every apply. KRLs signed by the ops key of the
+bundle in force land, or, when the recorded bundle replaced that key,
+KRLs signed by the recorded bundle's key. Run in CI (03-08k):
+`retired_key_krl_held_at_the_in_force_bundle_below_the_record_is_refused`,
+`krl_only_the_recorded_bundle_signs_lands_alone`. The status shows
+`unapplied`; publishing newer versions does not clear it. On a host whose last apply error is
+`directory_not_verified` while its status shows an unapplied bundle,
+remove the record with the steps in the next paragraph: the recorded
+bundle is ahead of the accepted one here, so all four steps apply.
+`keyroster-agent reset-directory` also clears it once the newest
+directory then verifies standalone.
 
-Removing `unapplied.json` by hand is always safe: the host then reads
-from its accepted state again. While the record existed the fetcher kept
-the spool from the recorded versions, so the next apply can report
-`directory_chain_gap` or `bundle_chain_gap` until the next poll fetches
-the versions just above the accepted state again; the KRL still lands,
-and nothing else is installed. That sentence is UNVERIFIED: no test
-combines a removed record with a pruned spool.
+Removing `unapplied.json` by hand makes the host read from its accepted
+state again and forget the recorded bundle, which only the record kept.
+While the record existed the fetcher kept the spool from the recorded
+versions, so the next apply can report `directory_chain_gap` or
+`bundle_chain_gap`. That apply writes the accepted versions to
+`outbox/accepted.json`, the fetcher's next poll asks the server again
+from them, and the apply after it verifies the chain again. Until then
+nothing but a KRL is installed, and that KRL is checked against the
+accepted bundle alone.
+
+Whenever the record's bundle part is ahead of the accepted bundle (the
+status shows an unapplied bundle), remove it with these steps, whether
+or not a bundle in between replaced the ops key:
+
+1. `sudo rm /var/lib/keyroster-agent/unapplied.json`;
+2. `sudo keyroster-agent apply --once` (it writes the accepted versions);
+3. restart the fetcher, which polls at once
+   (`sudo systemctl restart keyroster-agent-fetch`, or
+   `sudo rc-service keyroster-agent-fetch restart`);
+4. `sudo keyroster-agent apply --once` again.
+
+Without the restart in step 3, the `bundle_chain_gap` the next apply
+can report (above) lasts until the fetcher's next scheduled poll and the
+apply after it. That is one poll interval: 60 s by default, with a
+jitter of a sixth either way (50 to 70 s), or the `--poll` interval with
+the same jitter. In that window a KRL signed by an ops key newer than
+the accepted bundle's is refused (`krl_not_verified`), so revocations wait. That includes a key
+that a bundle above the recorded one rotated to, not only one between
+the accepted and the recorded bundle. And when a bundle in that range
+replaced the ops key, a KRL the old, retired key signs can land. An
+honest server signs no new KRL with the retired key, so with one only
+revocations wait; a server holding that key can use the window, which
+is the withholding risk under "An ops-key rotation". UNVERIFIED: no
+test builds a rotation above the recorded bundle with the record
+removed; this follows the code (a refused bundle step verifies no
+successor, so a KRL lands only under the accepted bundle). The steps
+make that window as short as an apply, a poll and an apply. The
+`last apply error` note no longer names a chain gap once the chain
+verifies. An apply reads at most 64 versions of each kind past the
+accepted state, so when the rotation is more than 64 bundle versions
+above the accepted one, one round does not bring it back.
+
+UNVERIFIED: no test combines a removed record with a pruned spool, and
+none runs these steps; the order above follows the code (the applier
+writes `outbox/accepted.json` after every apply, and the fetcher asks
+from it and polls when it starts).
 
 Run in CI (03-08j): `TestSpoolWindow`
 (`refused_window_newest_then_fix_applies`,
