@@ -3,7 +3,7 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08j-PLAN.md (PR open, awaiting the merge gate)"
+stopped_at: "Completed 03-08j-PLAN.md (PR #78 open, awaiting the merge gate)"
 last_updated: "2026-11-02T04:10:00.000Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started

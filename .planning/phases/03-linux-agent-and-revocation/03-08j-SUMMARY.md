@@ -79,8 +79,8 @@ completed: 2026-11-02
 
 ## PR
 
-- PR: pending (branch `p03/08j-agent-spool-window`), opened without auto-merge after this SUMMARY is pushed.
-- CI: pending.
+- PR: #78 (branch `p03/08j-agent-spool-window`), opened without auto-merge after the SUMMARY was pushed.
+- CI on 43d75c1: every required check green. Workflow runs 41387425820 (ci: build-test, lint, fuzz, capslock, govulncheck, dependency-firewall, cli-macos, cli-windows), 41387425370 (e2e-distro, seven distributions), 41387425600 (e2e 9.5p1 and 10.5p1), 41387425552 (systemd-sandbox), 41387425510 (e2e-pkcs11), 41387425450 (e2e-tpm), 41387425446 (build-piv), 41387425509 (CodeQL analyze), 41387425561 (pinned-actions), 41387425595 (pr-title); build-test job 125091260620.
 
 ## Commits
 
@@ -149,7 +149,7 @@ T2d was run against each row of `policy_rotation_below_the_recorded_bundle` sepa
 - Full gate (locally in WSL, at 3b140be; 41b47fd only splits one test into subtests): `go test -race -count=1 ./...` passed (378 s), `go vet` (plain, `e2e`, `e2e systemdsmoke`), gofmt, golangci-lint (0 issues), capslock-check, dep-firewall, testonly-firewall and check-pinned-actions all pass.
 - Acceptance greps: `func VerifyAhead(` 1 in unapplied.go, `state.VerifyAhead(` 1 in apply.go code, no `json:"krl` in unapplied.go, window_test.go starts with `//go:build linux`; `loadUnapplied(` in installed.go, resetdir.go and status.go code; fetch.go and pop.go changed in comment lines only (0); `json:"unapplied,omitempty"` 1 in heartbeat.go; `^func readSpool(dir string, floor Floor, listed func())` 1.
 - Publish checks: the waves of 03-09 to 03-16 at origin/main + 1, 03-09's depends_on and precondition clause, STATE's total_plans and `of M`, the ROADMAP's Plans line and wave headers (1..23, each "blocked on Wave N-1"), the 03-08j row under Wave 15 and 03-09 under Wave 16: all pass.
-- Test times under -race: internal/agent/apply took 294 s locally in WSL at Task 2's head (with other runs in parallel), beside 290 s locally at 03-08e's last code commit and 164 s in CI at PR #76's head; internal/agent/spool 3.4 s locally. In the full local gate, internal/agent/apply took 310.6 s and internal/agent/spool 4.8 s. CI: pending.
+- Test times under -race: internal/agent/apply took 294 s locally in WSL at Task 2's head (with other runs in parallel), beside 290 s locally at 03-08e's last code commit and 164 s in CI at PR #76's head; internal/agent/spool 3.4 s locally. In the full local gate, internal/agent/apply took 310.6 s and internal/agent/spool 4.8 s. In CI (build-test job 125091260620, under -race): internal/agent/apply 160.6 s, internal/agent/spool 2.7 s, internal/agent/fetch 12.5 s, internal/agent/state 1.1 s; all well below the 400 s limit.
 
 ## Deviations from Plan
 
