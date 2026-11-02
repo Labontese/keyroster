@@ -30,12 +30,12 @@
 # checks that identity before it does anything else. Every git fetch and push
 # uses the same bot login through bot_git, independent of the clone's
 # credential helper. The script never submits
-# a review and never merges with administrator rights: approval belongs to
-# the owner in the GitHub UI, and GitHub's auto-merge does the squash merge
-# once the rulesets are satisfied (D-05).
+# a review, never merges and never enables auto-merge: approval and the
+# squash merge belong to the owner in the GitHub UI, once the rulesets are
+# satisfied (D-05).
 #
-# MERGE_GATE_TIMEOUT (seconds, default 900) bounds the wait for auto-merge
-# after approval.
+# MERGE_GATE_TIMEOUT (seconds, default 900) bounds the wait for the owner's
+# squash merge after approval.
 #
 # The whole body is functions called on the last line, so bash has parsed
 # the complete script before a branch switch replaces this file on disk. That
@@ -159,14 +159,14 @@ main() {
 	fi
 
 	local timeout=${MERGE_GATE_TIMEOUT:-900} waited=0
-	echo "approved; waiting for auto-merge of #$number"
+	echo "approved; waiting for the owner to squash-merge #$number"
 	while [ "$state" != MERGED ]; do
 		if [ "$state" = CLOSED ]; then
 			echo "PR #$number was closed without merge: $url" >&2
 			return 1
 		fi
 		if [ "$waited" -ge "$timeout" ]; then
-			echo "timed out after ${timeout}s; mergeStateStatus=$merge_state: $url" >&2
+			echo "timed out after ${timeout}s waiting for the owner's squash merge; mergeStateStatus=$merge_state: $url" >&2
 			return 1
 		fi
 		sleep 15
@@ -254,17 +254,12 @@ rebase_onto_main() {
 	return "$rc"
 }
 
-# Force-push the rebased BRANCH with a lease on REMOTE_SHA, keep auto-merge
-# enabled and wait for the required checks. Returns 0 when they pass, 1
-# otherwise.
+# Force-push the rebased BRANCH with a lease on REMOTE_SHA and wait for the
+# required checks. Returns 0 when they pass, 1 otherwise. It never enables
+# auto-merge: the owner squash-merges in the GitHub UI.
 push_rebased() {
-	local branch=$1 remote_sha=$2 auto
+	local branch=$1 remote_sha=$2
 	bot_git push --quiet --force-with-lease="refs/heads/$branch:$remote_sha" origin "$branch" || return 1
-
-	auto=$(bot_gh pr view "$branch" --json autoMergeRequest --jq '.autoMergeRequest == null') || return 1
-	if [ "$auto" = true ]; then
-		bot_gh pr merge "$branch" --auto --squash || return 1
-	fi
 
 	wait_for_required_checks "$branch" || return 1
 }

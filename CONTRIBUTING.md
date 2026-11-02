@@ -110,12 +110,12 @@ the ruleset is updated, so job names change only together with
    <branch> origin/main`).
 2. Commit signed commits, push the branch and open a PR with a Conventional
    Commits title.
-3. Enable auto-merge with squash (`gh pr merge --auto --squash`). GitHub
-   merges as soon as every rule is satisfied.
-4. The code owner (`@Labontese`, see `.github/CODEOWNERS`) reviews and
+3. The code owner (`@Labontese`, see `.github/CODEOWNERS`) reviews and
    approves. A new push dismisses an earlier approval, the approval must come
    from someone other than the last pusher, and every review thread must be
    resolved.
+4. Once every rule is satisfied, the code owner squash-merges the PR in the
+   GitHub UI. Do not enable auto-merge.
 
 ### Claude's pull requests (keyroster-bot)
 
@@ -123,7 +123,11 @@ Claude works through its own GitHub account, `keyroster-bot`, so that
 required review involves two real identities. The bot is a collaborator with
 write access only: it can push branches and open PRs, but it cannot approve
 its own PRs, bypass a ruleset or administer the repository. It signs its
-commits with its own SSH key.
+commits with its own SSH key. Its commits are authored as the owner
+(`GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`), and keyroster-bot commits,
+SSH-signs and pushes them. The owner therefore stands as author on `main`
+after his squash merge, while the bot still opens and pushes the PR, so
+two-person review is unchanged.
 
 - `scripts/gh-as-bot.sh` runs `gh` as the bot (its own gh config directory,
   with `GH_TOKEN` and `GITHUB_TOKEN` unset so the owner's token never
@@ -131,9 +135,10 @@ commits with its own SSH key.
 - Each Claude PR carries the code of one plan together with that plan's
   planning documents (SUMMARY and tracking updates), and ends at a merge gate
   driven by `scripts/merge-gate.sh BRANCH`. The script reports whether the
-  owner's approval is pending, waits for auto-merge after approval and then
-  fast-forwards local `main`. It talks to GitHub only as the bot, never
-  submits a review and never merges as administrator. It carries its own
+  owner's approval is pending, waits for the owner's squash merge after
+  approval and then fast-forwards local `main`. It talks to GitHub only as
+  the bot, never submits a review, never merges and never enables
+  auto-merge. It carries its own
   copy of the `gh-as-bot.sh` command, because after switching to the PR
   branch the file on disk is the PR's unreviewed copy, and it stops unless
   `gh api user` answers `keyroster-bot`.
