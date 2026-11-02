@@ -1237,8 +1237,9 @@ func (e *engine) discard(n uint64) {
 // Verified carries the refusal, which forward returns after the commit. A
 // KRL-alone state with nothing newer returns the refusal, which the wait
 // logs. The capture is read and verified as forward's is (pollCapture),
-// with what the pending capture knew (03-08k): from the unapplied record
-// while it is ahead of the pending target. It
+// with what the pending capture knew (03-08k), raised by every earlier poll
+// of the wait (PR #80 review): from the unapplied record while it is ahead
+// of the pending target. It
 // records no unapplied state: after the target's commit the next forward
 // records a refused state if one remains (PR #76 review F8 (03-08j)).
 func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target *Generation) (*Generation, *state.Verified, error) {
@@ -1300,7 +1301,12 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 // without a record verifies with state.VerifyAfter, the record branch with
 // state.VerifyAheadAfter, which also knows the record's bundle, and the
 // KRL-alone call names that capture. So a poll decides a KRL as forward
-// does, neither wider nor narrower.
+// does, neither wider nor narrower. Both raise pending's fully verified
+// bundle to one the capture verified in full above it, refused or not
+// (PR #80 review). Forward's wait passes pending to every poll and replaces
+// it only with a superseding Verified, which inherits that bundle, so the
+// pending target holds the newest bundle any poll of the wait verified in
+// full.
 func (e *engine) pollCapture(pending *state.Verified) (*state.Verified, spool.State, error) {
 	prev := pending.AsStored()
 	base, _, err := loadUnapplied(e.l, prev)

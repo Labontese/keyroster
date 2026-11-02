@@ -655,6 +655,152 @@ func TestKRLSigner(t *testing.T) {
 		}
 	})
 
+	// --- what an earlier poll of the same wait verified (PR #80 review) ---
+	t.Run("retired_key_krl_after_a_same_bytes_poll_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// Poll 1 verifies bundle 2, which only rotates the ops key, so its
+		// generation is the pending target's bytes and it supersedes
+		// nothing. Poll 2 no longer offers bundle 2 and offers KRL 6, which
+		// K1 signed: the wait still knows bundle 2.
+		w := newPollWait(t)
+		h := w.h
+		before := mustAcceptedNow(t, h)
+		log, err := runPolls(t, h,
+			func() { w.offer(true) },
+			func() { w.offer(false); h.publishKRL(5, 6) })
+		mustWaitOutcome(t, h, err, log, before.KRLVersion, waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{6}, retired: true})
+	})
+	t.Run("retired_key_krl_after_a_krl_alone_poll_with_nothing_newer_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// Poll 1 verifies bundle 2 in full, its directory 3 is refused, and
+		// its KRL-alone pass finds no newer KRL, so it supersedes nothing.
+		w := newPollWait(t)
+		h := w.h
+		before := mustAcceptedNow(t, h)
+		log, err := runPolls(t, h,
+			func() {
+				w.offer(true)
+				s := h.spec("role:ops", "role:q")
+				s.signer = seedKey(t, 31)
+				h.publishDir(s)
+			},
+			func() { w.offer(false); w.dropAbove(2); h.publishKRL(5, 6) })
+		// A KRL-alone pass with nothing newer logs nothing; directory 2
+		// staying in force shows that directory 3 was refused.
+		mustWaitOutcome(t, h, err, log, before.KRLVersion, waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{6}, retired: true})
+	})
+	t.Run("retired_key_krl_after_a_refused_poll_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// Poll 1 verifies bundle 2 in full and refuses KRL 6, which K1
+		// signed (krl_signer_retired on the KRL step). Poll 2 no longer
+		// offers bundle 2, and KRL 6 is still the newest.
+		w := newPollWait(t)
+		h := w.h
+		before := mustAcceptedNow(t, h)
+		log, err := runPolls(t, h,
+			func() { w.offer(true); h.publishKRL(5, 6) },
+			func() { w.offer(false) })
+		mustWaitOutcome(t, h, err, log, before.KRLVersion, waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{6}, retired: true})
+		if n := strings.Count(log, "krl_signer_retired"); n < 3 {
+			t.Fatalf("krl_signer_retired logged %d times, want every poll:\n%s", n, log)
+		}
+	})
+	t.Run("retired_key_krl_after_a_poll_from_the_record_is_refused", func(t *testing.T) {
+		t.Parallel()
+		// recordBelowWait's record branch: bundle 4 (K2), above the
+		// record's bundle 3 (K1), is offered only at poll 1, which reads
+		// from the record and supersedes nothing. Poll 2 no longer offers
+		// it and offers KRL 8, which K1 signed.
+		h := recordBelowWait(t, nil, seedKey(t, 22))
+		d4, p3 := h.state.Bundles[4], h.state.Policies[3]
+		delete(h.state.Bundles, 4)
+		delete(h.state.Policies, 3)
+		before := mustAcceptedNow(t, h)
+		log, err := runPolls(t, h,
+			func() { h.state.Bundles[4], h.state.Policies[3] = d4, p3 },
+			func() { delete(h.state.Bundles, 4); delete(h.state.Policies, 3); h.publishKRL(5, 8) })
+		mustWaitOutcome(t, h, err, log, before.KRLVersion, waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{8}, record: 3, retired: true})
+	})
+	t.Run("krl_alone_supersede_keeps_what_an_earlier_poll_verified", func(t *testing.T) {
+		t.Parallel()
+		// Poll 1 learns bundle 2 (K2) as in the same-bytes case. Poll 2
+		// no longer offers it; its directory 3 is above the caps, and KRL
+		// 8 is signed by K2. The KRL lands alone under bundle 2, the
+		// successor an earlier poll verified, and supersedes the pending
+		// target. A later poll, verified against that KRL-alone state,
+		// still knows bundle 2 and refuses KRL 9, which K1 signed.
+		w := newPollWait(t)
+		h := w.h
+		var log strings.Builder
+		h.cfg.Log = &log
+		sleeps, published9 := 0, false
+		h.clock.onSleep = func(time.Duration) {
+			sleeps++
+			switch {
+			case sleeps == 1:
+				w.offer(true)
+			case sleeps == 2:
+				w.offer(false)
+				s := h.spec("role:ops", "role:q")
+				s.bulkRoles = 17
+				h.publishDir(s)
+				h.f.ops = w.k2
+				h.publishKRL(5, 8)
+			case !published9 && strings.Contains(log.String(), "a newer state arrived during the wait"):
+				published9 = true
+				h.f.ops = w.k1
+				h.publishKRL(5, 8, 9)
+			default:
+				return
+			}
+			h.resetSpool()
+			h.write()
+		}
+		_, err := h.apply()
+		if !published9 {
+			t.Fatalf("KRL 8 never superseded the pending target (%d sleeps): %v\n%s", sleeps, err, log.String())
+		}
+		if !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("apply: %v, want generation_too_large\n%s", err, log.String())
+		}
+		if a, aerr := h.accepted(); aerr != nil || a.BundleVersion != 1 || a.DirectoryVersion != 2 {
+			t.Fatalf("accepted/ %+v (%v), want bundle 1 and directory 2", a, aerr)
+		}
+		if !h.krlRevokes(h.l.Current(), 8) || h.krlRevokes(h.l.Current(), 9) {
+			t.Fatalf("current revokes 8 %t, 9 %t; want KRL 8, not KRL 9\n%s", h.krlRevokes(h.l.Current(), 8), h.krlRevokes(h.l.Current(), 9), log.String())
+		}
+		if !strings.Contains(log.String(), "krl_signer_retired") {
+			t.Fatalf("the wait did not log krl_signer_retired:\n%s", log.String())
+		}
+	})
+	t.Run("fork_at_the_carried_version_does_not_replace_it", func(t *testing.T) {
+		t.Parallel()
+		// Poll 1 learns bundle 2 (K2). Poll 2 offers a root-signed fork of
+		// version 2 naming K3 instead, a directory 3 that is refused, so
+		// the KRL is taken alone under bundle 1, and KRL 7, which K3
+		// signed. The fork is at the carried version, so it does not
+		// replace bundle 2, and nothing authorises KRL 7.
+		w := newPollWait(t)
+		h := w.h
+		k3 := seedKey(t, 23)
+		_, fd2, fp2 := h.f.rotationOps(h.f.bundle, h.f.bundleDoc, h.f.policyDoc, h.f.policy, h.f.policy.Admins, "2026-10-05T00:00:00Z", k3)
+		before := mustAcceptedNow(t, h)
+		log, err := runPolls(t, h,
+			func() { w.offer(true) },
+			func() {
+				h.state.Bundles[2], h.state.Policies[2] = fd2, fp2
+				s := h.spec("role:ops", "role:q")
+				s.signer = seedKey(t, 31)
+				h.publishDir(s)
+				h.f.ops = k3
+				h.publishKRL(5, 7)
+			})
+		mustWaitOutcome(t, h, err, log, before.KRLVersion, waitWant{bundle: 1, dir: 2, revoked: []uint64{5}, kept: []uint64{7}})
+		if !strings.Contains(log, "directory_not_verified") || !strings.Contains(log, "krl_not_verified") {
+			t.Fatalf("poll 2 did not refuse directory 3 and KRL 7:\n%s", log)
+		}
+	})
+
 	// --- the boundary ---
 	t.Run("retired_key_krl_after_the_bundle_is_withheld_lands_as_on_main", func(t *testing.T) {
 		t.Parallel()
@@ -947,4 +1093,87 @@ func withholdAbovePending(_ *testing.T, h *testHost) {
 		}
 	}
 	h.dirs = h.dirs[:1+spool.MaxVersionsPerKind]
+}
+
+// pollWait is the wait of the PR #80 review's cases: KRL 5, signed by K1,
+// is applied first, then directory 2 widens deploy to role:q, so the next
+// apply waits with bundle 1 in force and records nothing. Bundle 2 (d2,
+// p2) is a root-signed successor of bundle 1 under the same admins that
+// only replaces the ops key with K2, so directory 2 verifies under it and
+// a capture with it renders the pending target's bytes. It is not offered
+// until a case's poll offers it.
+type pollWait struct {
+	h      *testHost
+	d2, p2 spool.Doc
+	k1, k2 ssh.Signer
+}
+
+func newPollWait(t *testing.T) pollWait {
+	t.Helper()
+	f := newFixture(t)
+	h := newTestHost(t, f)
+	withOutbox(t, h)
+	h.installed("role:ops")
+	h.clock.advance(time.Hour)
+	h.publishKRL(5)
+	h.mustApply()
+	h.publishDir(h.spec("role:ops", "role:q"))
+	w := pollWait{h: h, k1: f.ops, k2: seedKey(t, 22)}
+	_, w.d2, w.p2 = f.rotationOps(f.bundle, f.bundleDoc, f.policyDoc, f.policy, f.policy.Admins, "2026-10-02T00:00:00Z", w.k2)
+	return w
+}
+
+// offer offers bundle 2 and its policy, or withdraws them.
+func (w pollWait) offer(on bool) {
+	if on {
+		w.h.state.Bundles[2], w.h.state.Policies[2] = w.d2, w.p2
+		return
+	}
+	delete(w.h.state.Bundles, 2)
+	delete(w.h.state.Policies, 2)
+}
+
+// dropAbove withdraws every directory above version v.
+func (w pollWait) dropAbove(v uint64) {
+	for d := range w.h.state.Directories {
+		if d > v {
+			delete(w.h.state.Directories, d)
+		}
+	}
+	w.h.dirs = w.h.dirs[:v]
+}
+
+// mustAcceptedNow is accepted/ as it is before the widening apply.
+func mustAcceptedNow(t *testing.T, h *testHost) *state.Stored {
+	t.Helper()
+	a, err := h.accepted()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// runPolls runs the widening apply with steps[i] at the wait's sleep i+1,
+// each followed by a rewrite of the spool, so that poll i+1 sees what step
+// i offers, and returns the apply's log and error. It fails when the apply
+// slept fewer times than there are steps, and requires a later sleep after
+// the last step, so that a poll sees that step's spool.
+func runPolls(t *testing.T, h *testHost, steps ...func()) (string, error) {
+	t.Helper()
+	var log strings.Builder
+	h.cfg.Log = &log
+	sleeps := 0
+	h.clock.onSleep = func(time.Duration) {
+		if sleeps++; sleeps > len(steps) {
+			return
+		}
+		steps[sleeps-1]()
+		h.resetSpool()
+		h.write()
+	}
+	_, err := h.apply()
+	if sleeps <= len(steps) {
+		t.Fatalf("the widening apply slept %d times, want more than %d: %v\n%s", sleeps, len(steps), err, log.String())
+	}
+	return log.String(), err
 }

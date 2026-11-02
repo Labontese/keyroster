@@ -72,7 +72,10 @@ type Verified struct {
 	// step verified before the refusal (owner answer Q2), and a bundle that
 	// was only offered never is one. A fully verified successor, a
 	// fullyVerified above the bundle a KRL is checked under first, may
-	// authorise it (krlStep, KRLAlone).
+	// authorise it (krlStep, KRLAlone). During a widening wait the pending
+	// target's is raised with every raise of a poll's (VerifyAfter,
+	// VerifyAheadAfter; PR #80 review), so it is the newest bundle any
+	// verification of the apply verified in full.
 	fullyVerified *trust.Bundle
 }
 
@@ -150,7 +153,7 @@ func (v *Verified) AsStored() *Stored {
 // Next. VerifyAhead is Verify for a capture read from an unapplied record
 // (PR #76 review F8 (03-08j)).
 func Verify(p *Pins, prev *Stored, in spool.State) (*Verified, error) {
-	return verify(p, prev, prev, in, nil)
+	return verify(p, prev, prev, in, nil, nil)
 }
 
 // VerifyAfter is Verify for a capture during a widening wait (03-08k),
@@ -158,10 +161,14 @@ func Verify(p *Pins, prev *Stored, in spool.State) (*Verified, error) {
 // apply verified in full before it (pending's fully verified bundle), so a
 // poll decides a KRL as forward does. Every Verified it returns, KRLAlone's
 // included, carries that bundle on, so a later poll after a supersede
-// knows it too.
+// knows it too. A bundle the capture verifies in full above it raises
+// pending's as well, before the directory or KRL step can refuse the
+// capture (PR #80 review): a later poll of the same wait knows it whether
+// this poll supersedes the target, renders its bytes, brings nothing new
+// or is refused.
 func VerifyAfter(p *Pins, pending *Verified, in spool.State) (*Verified, error) {
 	prev := pending.AsStored()
-	return verify(p, prev, prev, in, pending.fullyVerified)
+	return verify(p, prev, prev, in, pending.fullyVerified, pending)
 }
 
 // verify is Verify with the bundle, directory and KRL steps run against
@@ -172,8 +179,12 @@ func VerifyAfter(p *Pins, pending *Verified, in spool.State) (*Verified, error) 
 // bundle in force (PR #76 review F8 (03-08j)). Only BundleVersion is
 // compared: with chain's bundle alone's, the steps are exactly Verify's.
 // carried is a bundle this apply verified in full outside the capture
-// (03-08k), the start of v's fully verified bundle.
-func verify(p *Pins, chain, alone *Stored, in spool.State, carried *trust.Bundle) (*Verified, error) {
+// (03-08k), the start of v's fully verified bundle. pending is a widening
+// wait's pending target, nil outside a poll: each raise of v's fully
+// verified bundle raises pending's to the same bundle (PR #80 review).
+// The raise is by version only, so a fork at an equal version raises
+// neither.
+func verify(p *Pins, chain, alone *Stored, in spool.State, carried *trust.Bundle, pending *Verified) (*Verified, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
@@ -185,6 +196,9 @@ func verify(p *Pins, chain, alone *Stored, in spool.State, carried *trust.Bundle
 	if refused == nil && len(v.steps) > 0 {
 		if n := v.steps[len(v.steps)-1].bundle; carried == nil || n.Version > carried.Version {
 			v.fullyVerified = n
+			if pending != nil {
+				pending.fullyVerified = n
+			}
 		}
 	}
 	if refused == nil && alone != nil && alone.Bundle != nil && chain != nil && chain.BundleVersion > alone.BundleVersion {

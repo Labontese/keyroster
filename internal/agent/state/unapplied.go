@@ -182,7 +182,7 @@ func (u *Unapplied) Base(accepted *Stored) (*Stored, error) {
 // is refused, unless a bundle this capture verified above it retired that
 // key.
 func VerifyAhead(p *Pins, accepted, base *Stored, in spool.State) (*Verified, error) {
-	return verifyAhead(p, accepted, base, in, recordBundle(accepted, base))
+	return verifyAhead(p, accepted, base, in, recordBundle(accepted, base), nil)
 }
 
 // VerifyAheadAfter is VerifyAhead for a poll during a widening wait read
@@ -191,14 +191,15 @@ func VerifyAhead(p *Pins, accepted, base *Stored, in spool.State) (*Verified, er
 // before it (pending's fully verified bundle), so it decides a KRL as
 // forward does. It carries the higher of the two by version, pending's on a
 // tie; the higher is taken here because the fully verified bundle is
-// unexported.
+// unexported. As in VerifyAfter, a bundle the capture verifies in full
+// above that raises pending's as well (PR #80 review).
 func VerifyAheadAfter(p *Pins, pending *Verified, base *Stored, in spool.State) (*Verified, error) {
 	accepted := pending.AsStored()
 	carried := pending.fullyVerified
 	if r := recordBundle(accepted, base); r != nil && (carried == nil || r.Version > carried.Version) {
 		carried = r
 	}
-	return verifyAhead(p, accepted, base, in, carried)
+	return verifyAhead(p, accepted, base, in, carried, pending)
 }
 
 // recordBundle is base's bundle when base took the record's bundle part,
@@ -211,9 +212,10 @@ func recordBundle(accepted, base *Stored) *trust.Bundle {
 }
 
 // verifyAhead is VerifyAhead with carried, a bundle this apply verified in
-// full outside the capture (03-08k), passed to verify.
-func verifyAhead(p *Pins, accepted, base *Stored, in spool.State, carried *trust.Bundle) (*Verified, error) {
-	v, err := verify(p, base, accepted, in, carried)
+// full outside the capture (03-08k), and pending, a widening wait's pending
+// target (nil outside a poll; PR #80 review), passed to verify.
+func verifyAhead(p *Pins, accepted, base *Stored, in spool.State, carried *trust.Bundle, pending *Verified) (*Verified, error) {
+	v, err := verify(p, base, accepted, in, carried, pending)
 	if err != nil || v.Refused != nil || accepted == nil {
 		return v, err
 	}
