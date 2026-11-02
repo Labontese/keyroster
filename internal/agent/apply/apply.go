@@ -1087,9 +1087,9 @@ func recordedAhead(l Layout) *Unapplied {
 }
 
 // unappliedBase is the base forward reads a capture from (nil: accepted/).
-// A record that does not load is logged and removed, one with no part
-// ahead of accepted/ (a commit passed it) is removed silently, and so is
-// any record before a first install; none is removed under DryRun.
+// A record that does not load is logged and removed, and one with no part
+// ahead of accepted/ (a commit passed it), or any record before a first
+// install, is removed with a log line; none is removed under DryRun.
 func (e *engine) unappliedBase(stored *state.Stored) *state.Stored {
 	base, u, err := loadUnapplied(e.l, stored)
 	switch {
@@ -1101,8 +1101,11 @@ func (e *engine) unappliedBase(stored *state.Stored) *state.Stored {
 		return base
 	}
 	if !e.cfg.DryRun {
-		if rerr := e.remove(e.l.State(state.UnappliedFile)); rerr != nil {
-			e.logf("WARNING removing %s: %v", e.l.State(state.UnappliedFile), rerr)
+		path := e.l.State(state.UnappliedFile)
+		if rerr := e.remove(path); rerr != nil {
+			e.logf("WARNING removing %s: %v", path, rerr)
+		} else if err == nil {
+			e.logf("removed %s: no part of it is ahead of the accepted state", path)
 		}
 	}
 	return nil
@@ -1176,9 +1179,10 @@ func mergeUnapplied(accepted, oldBase *state.Stored, old, u *state.Unapplied) *s
 
 // dropPassedRecord removes the unapplied record once accepted/ has passed
 // it (Unapplied.Base reports no part ahead), at the end of every commit,
-// recovery's included (PR #76 review F8 (03-08j)). A KRL-alone commit
-// leaves the record ahead, so it stays. A record or accepted/ that does
-// not load is left to forward, and a failed removal is only logged.
+// recovery's included (PR #76 review F8 (03-08j)), and logs the removal
+// (PR #78 review). A KRL-alone commit leaves the record ahead, so it
+// stays. A record or accepted/ that does not load is left to forward, and
+// a failed removal is only logged.
 func (e *engine) dropPassedRecord() {
 	stored, err := e.loadStored()
 	if err != nil || stored == nil {
@@ -1188,9 +1192,12 @@ func (e *engine) dropPassedRecord() {
 	if err != nil || u == nil || base != nil {
 		return
 	}
-	if err := e.remove(e.l.State(state.UnappliedFile)); err != nil {
-		e.logf("WARNING removing %s: %v", e.l.State(state.UnappliedFile), err)
+	path := e.l.State(state.UnappliedFile)
+	if err := e.remove(path); err != nil {
+		e.logf("WARNING removing %s: %v", path, err)
+		return
 	}
+	e.logf("removed %s: the accepted bundle %d and directory %d have passed it", path, stored.BundleVersion, stored.DirectoryVersion)
 }
 
 // discard removes a generation that never became current.
@@ -1208,17 +1215,14 @@ func (e *engine) discard(n uint64) {
 // generation is then the pending target's with the newer KRL, and its
 // Verified carries the refusal, which forward returns after the commit. A
 // KRL-alone state with nothing newer returns the refusal, which the wait
-// logs. It records no unapplied state: it verifies against the pending
-// target, and after that target's commit the next forward records a
-// refused state if one remains (PR #76 review F8 (03-08j)).
+// logs. The capture is read and verified as forward's is (pollCapture):
+// from the unapplied record while it is ahead of the pending target. It
+// records no unapplied state: after the target's commit the next forward
+// records a refused state if one remains (PR #76 review F8 (03-08j)).
 func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target *Generation) (*Generation, *state.Verified, error) {
 	prev := pending.AsStored()
-	st, err := e.capture(prev.Floor())
-	if err != nil {
-		return nil, nil, err
-	}
-	v, err := state.Verify(e.pins, prev, st)
-	if err != nil || !v.Changed() {
+	v, st, err := e.pollCapture(prev)
+	if err != nil || v == nil || !v.Changed() {
 		return nil, nil, err
 	}
 	for {
@@ -1250,6 +1254,46 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 			return nil, nil, v.Refused
 		}
 	}
+}
+
+// pollCapture is a widening wait's capture and its verification against
+// prev, the pending target's state (PR #78 review, 03-08j). While the
+// unapplied record has a part ahead of prev (Unapplied.Base against prev:
+// per kind the record's part when it is higher, prev's otherwise), the
+// record is the chain base, as in forward: the capture is read from that
+// base's floor and verified by VerifyAhead with prev as the state the
+// KRL-alone pass and the lowest hold step use. So a wait holds the record's
+// fork and rollback evidence as forward does: an older bundle below the
+// record is never read, a spool copy at the record's version adds no
+// step, and a chain that does not chain to the record's bytes is refused,
+// its KRL taken alone against prev. A capture that brings no bundle,
+// policy or directory beyond the base supersedes the target only with a
+// newer KRL, verified against prev (KRLAlone): the record itself is
+// rendered again by the next forward, not by every poll. Without such a
+// record, or with one that does not load, the capture is verified against
+// prev (Verify). v is nil when nothing is newer.
+func (e *engine) pollCapture(prev *state.Stored) (*state.Verified, spool.State, error) {
+	base, _, err := loadUnapplied(e.l, prev)
+	if err != nil || base == nil {
+		st, err := e.capture(prev.Floor())
+		if err != nil {
+			return nil, st, err
+		}
+		v, err := state.Verify(e.pins, prev, st)
+		return v, st, err
+	}
+	st, err := e.capture(base.Floor())
+	if err != nil {
+		return nil, st, err
+	}
+	v, err := state.VerifyAhead(e.pins, prev, base, st)
+	if err != nil || v.Refused != nil {
+		return v, st, err
+	}
+	if bytes.Equal(v.Next.Bundle, base.Bundle) && bytes.Equal(v.Next.Policy, base.Policy) && bytes.Equal(v.Next.Directory, base.Directory) {
+		v, err = state.KRLAlone(e.pins, prev, st, nil)
+	}
+	return v, st, err
 }
 
 // isCrash reports an error injected by the Fault hook: the run stops
