@@ -1002,7 +1002,7 @@ func TestSpoolWindow(t *testing.T) {
 			t.Fatal(err)
 		}
 		h.mustApply()
-		if err := os.WriteFile(recordFile(h), old, 0o600); err != nil {
+		if err := os.WriteFile(recordFile(h), old, 0o600); err != nil { //nolint:gosec // test fixture: the record's own earlier bytes
 			t.Fatal(err)
 		}
 		var log strings.Builder
