@@ -15,7 +15,7 @@ provides:
   - "apply: WriteAccepted raised to the record's versions; ResetDirectory's record step (step 0)"
   - "heartbeat: Status.Unapplied and its Validate rule; keyroster host status's unapplied alert and note"
   - "spool: Read's one recapture after an ENOENT (readOnce, readSpool)"
-  - "tests: TestSpoolWindow (23 cases), TestSpoolWindowWideningWait (7 cases), TestValidate's unapplied row, TestHostStatusUnapplied, TestReadRecapture"
+  - "tests: TestSpoolWindow (24 cases), TestSpoolWindowWideningWait (7 cases), TestValidate's unapplied row, TestHostStatusUnapplied, TestReadRecapture"
   - "apply: pollCapture, a widening wait's capture chained from the record while it is ahead of the pending target (pre-merge review fix round 1)"
   - "heartbeat: Unapplied.BundleSHA256 and DirectorySHA256; Status.UnappliedLost (fix round 2, replacing round 1's UnappliedAbove); Committed and Diverged count a lost recorded version (pre-merge review fix rounds 1 and 2)"
   - "docs: host-setup.md far-behind paragraphs, two sentences after the fetcher paragraph, the unapplied alert; signer-install.md host selection and remedy; the spool-pruning todo's remaining item"
@@ -291,7 +291,7 @@ The check of fix round 1 confirmed D-1. Three items are fixed here (R2-1 to R2-3
   | Numbers only | `TestCommittedAndDiverged`, `TestHostStatusDiverged` |
   | No SHA-256 check in Validate | `TestValidate` |
   | The agent sending no directory SHA-256 | `status_reports_unapplied` |
-  | The count ignoring a lost part | `TestHostStatusDiverged` |
+  | The count ignoring a lost directory part | `TestHostStatusDiverged` (the bundle half: fix round 3) |
 
 ### R2-2: forward's removal log
 
@@ -316,6 +316,20 @@ The check of fix round 1 confirmed D-1. Three items are fixed here (R2-1 to R2-3
 - **This round's gate.** Run locally in WSL at fb43f48: `go test -race -count=1 ./...` passed (446 s). internal/agent/apply took 382.7 s under -race in that run, alongside every other package. Run alone, it took 280.2 s, below its 400 s limit.
   - vet, gofmt, capslock-check, dep-firewall, testonly-firewall and check-pinned-actions: pass.
   - golangci-lint reported one gosec finding on the new test's write of the restored record. It is marked as a test fixture in 2ed5048, as the harness's other fixture writes are, and the rerun reports 0 issues.
+
+## Pre-merge review fix round 3
+
+The check of fix round 2 confirmed R2-1 to R2-3. This round adds tests and SUMMARY corrections only; the code is unchanged.
+
+- **The bundle half of the "on version" count.** The bundle half (`&& !bl` in host status) was never exercised: the mutant that drops it survived against 98bb937's test. `TestHostStatusDiverged` gains two hosts on the current bundle v2:
+  - web9 converged, with no record;
+  - web10 with a record whose bundle 3 is above current and whose directory 5 is at current with other bytes, so both of its parts are lost.
+
+  The test now asserts `bundle v2 on 1/10 hosts`.
+  - That mutant fails the new test ("diverged hosts counted as converged").
+  - web10 also renders the plural "lost them" note. The mutant that always writes "it" fails it.
+- **SUMMARY.** TestSpoolWindow has 24 cases (`passed_record_removed_by_the_next_apply` was added in round 2), and round 2's count mutant row names the directory half.
+- **Gate.** Run locally in WSL: `go test ./cmd/keyroster/`, vet, gofmt and golangci-lint (0 issues) pass.
 
 ## Deviations from Plan
 
