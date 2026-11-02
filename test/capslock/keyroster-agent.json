@@ -44,13 +44,11 @@
   "github.com/Labontese/keyroster/internal/directory": [
     "CAPABILITY_ARBITRARY_EXECUTION"
   ],
-  "github.com/Labontese/keyroster/internal/krl": [
-    "CAPABILITY_ARBITRARY_EXECUTION"
-  ],
   "github.com/Labontese/keyroster/internal/sshsig": [
     "CAPABILITY_ARBITRARY_EXECUTION"
   ],
   "github.com/Labontese/keyroster/internal/trust": [
+    "CAPABILITY_ARBITRARY_EXECUTION",
     "CAPABILITY_REFLECT",
     "CAPABILITY_UNSAFE_POINTER"
   ],
