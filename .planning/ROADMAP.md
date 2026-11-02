@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 16/24 plans executed in 23 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 16/25 plans executed in 24 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -210,27 +210,30 @@ Plans:
 - [x] 03-08j-PLAN.md — A host reads past a verified version it cannot apply and reports it (PR #76 review F8): the unapplied record, the fetcher's cursor past it, and the unapplied status
 
 **Wave 16** *(blocked on Wave 15 completion)*
-- [ ] 03-09-PLAN.md — T-03-100 checkpoint (the owner decides who receives the signed directory for host trust), then host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`
+- [ ] 03-08k-PLAN.md — KRLs land across an ops-key change: a fully verified successor's key authorises a KRL, and a KRL only a retired key signed is refused
 
 **Wave 17** *(blocked on Wave 16 completion)*
-- [ ] 03-10-PLAN.md — Probe certificates and the full self-test (D-06)
+- [ ] 03-09-PLAN.md — T-03-100 checkpoint (the owner decides who receives the signed directory for host trust), then host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`
 
 **Wave 18** *(blocked on Wave 17 completion)*
-- [ ] 03-11-PLAN.md — Machine identities by PoP (AUTH-06), `revoke machine`
+- [ ] 03-10-PLAN.md — Probe certificates and the full self-test (D-06)
 
 **Wave 19** *(blocked on Wave 18 completion)*
-- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
+- [ ] 03-11-PLAN.md — Machine identities by PoP (AUTH-06), `revoke machine`
 
 **Wave 20** *(blocked on Wave 19 completion)*
-- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
+- [ ] 03-12-PLAN.md — CA rotation through next and draining generations with no failed logins (D-14)
 
 **Wave 21** *(blocked on Wave 20 completion)*
-- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
+- [ ] 03-13-PLAN.md — Log-key and ops-key rotation, emergency CA replacement
 
 **Wave 22** *(blocked on Wave 21 completion)*
-- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+- [ ] 03-14-PLAN.md — Offline break-glass CA scoped to the emergency account (D-13)
 
 **Wave 23** *(blocked on Wave 22 completion)*
+- [ ] 03-15-PLAN.md — D-01 checkpoint, rehearsal, then the owner's real offline v4 ceremony (closes KEY-07), directory rebind, TEST roots C and D destroyed
+
+**Wave 24** *(blocked on Wave 23 completion)*
 - [ ] 03-16-PLAN.md — Homelab dogfood: enroll the owner's hosts, take over the 02-14 hosts, drills (revocation, no TOFU, corrupt file, break-glass, machine, rotation if chosen, forget and re-enrollment)
 
 **Phase close (after verification):** the README quickstart (install server, signer and agent, first certificate) on branch `p03/close`, per the documentation convention.
