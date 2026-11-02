@@ -30,7 +30,7 @@ tech-stack:
   patterns:
     - "A KRL's authoriser is the first candidate bundle that verifies it (P, then the fully verified successor, then the bundle in force), tried only after krl.ErrSigner and only for an ops key not yet tried"
     - "A verified KRL is assigned to a Verified only when it lands (take), so a refused KRL never reaches accepted/"
-    - "A widening wait's poll is verified with what the pending capture knew (VerifyAfter, VerifyAheadAfter)"
+    - "A widening wait's poll is verified with what the pending capture knew (VerifyAfter, VerifyAheadAfter), and raises the pending target's fully verified bundle with each bundle it verifies in full (PR #80 review)"
 
 key-files:
   created:
@@ -87,7 +87,10 @@ completed: 2026-11-02
 | 4 | 72fbb34 | docs(agent): describe which KRL lands across an ops-key change (03-08k) |
 | 4 | ff7c0e2 | docs(03-08k): add the plan and move plans 03-09 to 03-16 one wave later |
 | 4 | c47f535 | chore(capslock): follow keyroster-agent's capslock example path (03-08k) |
-| 4 | (this commit) | docs(03-08k): complete agent KRL-signer plan |
+| 4 | 098682a | docs(03-08k): complete agent KRL-signer plan |
+| review fix 1 | be1ff5c | fix(agent): carry what every poll of a widening wait verified in full (PR #80 review) |
+| review fix 1 | a5be99c | docs(agent): say when removing unapplied.json is safe, and what a refused apply records (PR #80 review) |
+| review fix 1 | (this commit) | docs(03-08k): record pre-merge review fix round 1 |
 
 Every branch commit is authored by Daniel Gustafsson and committed and SSH-signed by keyroster-bot (`git log origin/main..HEAD --format='%an <%ae> %cn'` prints only `Daniel Gustafsson <121555671+Labontese@users.noreply.github.com> keyroster-bot`). No commit message carries an attribution trailer.
 
@@ -295,6 +298,99 @@ capslock-check reported one new pair for keyroster-agent on ff7c0e2: `internal/t
 - origin/main passes capslock-check locally (go1.27.3, capslock v0.3.3).
 - `capslock-check.sh --update` changed only test/capslock/keyroster-agent.json, by exactly that swap (37 pairs before and after). The check passes again locally and in the PR's capslock job. The update is commit c47f535, for the owner's review.
 
+## Pre-merge review fix round 1
+
+The PR #80 review's owner decisions D-1 and D-2. The two refuted items were not acted on.
+
+| Item | Source (PR #80 review) | Commit |
+|------|------------------------|--------|
+| D-1: the polls of one apply forget what earlier polls verified in full | four review items with one root cause: a bundle a non-superseding poll verified in full is forgotten (a same-bytes poll, a KRL-alone pass with nothing newer); a poll refused on its KRL step shares nothing with later polls; and the two split items on keeping a verified rotation through a non-superseding poll and through a KRL-alone supersede | be1ff5c |
+| D-2 (a): the runbook called removing `unapplied.json` "always safe" and said "the KRL still lands" | host-setup.md, the paragraph after the stuck-window remedy | a5be99c |
+| D-2 (b): the runbook said "A refused apply records nothing" | host-setup.md, the Limits of "An ops-key rotation" | a5be99c |
+
+### D-1: the fix
+
+- **One raise point.** verify raises a capture's fully verified bundle in one place: right after the bundle step returned nil, before the directory step or the KRL step can refuse the capture. verify now takes `pending`, a widening wait's pending target (nil outside a poll). Each raise of the capture's fully verified bundle sets the pending target's to the same bundle. VerifyAfter and VerifyAheadAfter pass their pending; Verify and VerifyAhead pass nil and are unchanged, and so are forward's calls and the preflight's.
+- **Why this covers every case.** Every poll goes through VerifyAfter or VerifyAheadAfter first. So the pending target learns the bundle whether the poll then:
+  - supersedes the target;
+  - renders the target's bytes (sameBytes);
+  - brings nothing new (!Changed);
+  - takes a KRL-alone pass with nothing newer;
+  - is refused on its KRL step (krl_signer_retired or any other KRL error);
+  - or supersedes through a KRL-alone pass. That Verified inherits the bundle from its capture, which started from the raised pending target.
+- **The pending target.** Forward's wait passes it to every poll, and replaces it only with a superseding Verified, which inherits it. It is a local of the one apply, so nothing crosses applies except the record.
+- **Constraints.**
+  - fullyVerified stays unexported and is computed inside state.
+  - Only a bundle whose whole chain verified raises it.
+  - The raise is by version only: a fork at an equal version raises neither the capture's nor the pending target's. The fork and divergence behaviour is unchanged.
+- **What the change does to KRLs.** A later poll now decides with what every earlier poll of the wait verified in full:
+  - A KRL the retired key signs stays refused.
+  - A KRL the newer bundle's key signs now lands as a fully verified successor's. Before, it was krl_not_verified while the spool withheld that bundle. So no revocation waits for knowledge the apply already had (D-R2).
+  - A KRL lands only when the bundle in force or a fully verified successor authorises it, and the bundle and directory rules are untouched, so nothing becomes wider than the plan's rule allows.
+
+### RED (on 098682a with the tests added, locally in WSL, `go test -race -count=1 -v`)
+
+Each case drives only `h.apply()`, so it compiles on 098682a.
+
+| Case | Shape | Result on 098682a |
+|------|-------|-------------------|
+| retired_key_krl_after_a_same_bytes_poll_is_refused | poll 1 verifies bundle 2 (an ops-key-only rotation to K2), whose generation is the target's bytes; poll 2 withholds it and offers KRL 6, signed by K1 | RED: `krl_signer_retired named false, want true: apply <nil>` (KRL 6 landed) |
+| retired_key_krl_after_a_krl_alone_poll_with_nothing_newer_is_refused | poll 1 verifies bundle 2 in full, refuses directory 3 and finds no newer KRL; poll 2 withholds both and offers KRL 6, signed by K1 | RED: `krl_signer_retired named false, want true: apply <nil>` |
+| retired_key_krl_after_a_refused_poll_is_refused | poll 1 verifies bundle 2 in full and refuses KRL 6, signed by K1, on the KRL step; poll 2 withholds bundle 2 | RED: `accepted/ bundle 1, directory 2, KRL 1793000002; want 1, 2, 1793000001` (a later poll took KRL 6) |
+| retired_key_krl_after_a_poll_from_the_record_is_refused | recordBelowWait's record branch: bundle 4 (K2) above the record's bundle 3 (K1) is offered only at poll 1; poll 2 withholds it and offers KRL 8, signed by K1 | RED: `krl_signer_retired named false, want true: apply <nil>` |
+| krl_alone_supersede_keeps_what_an_earlier_poll_verified | poll 1 learns bundle 2 as in the same-bytes case; poll 2 withholds it and offers a directory above the caps and KRL 8, signed by K2, which lands alone under bundle 2 and supersedes; a later poll offers KRL 9, signed by K1 | RED: `KRL 8 never superseded the pending target (30 sleeps)` (KRL 8 was krl_not_verified on every poll) |
+| fork_at_the_carried_version_does_not_replace_it | poll 1 learns bundle 2 (K2); poll 2 offers a root-signed fork of version 2 naming K3, a refused directory 3, and KRL 7, signed by K3 | RED: `apply: directory_not_verified: version 3 ...` (KRL 7 landed alone under the fork and superseded the target) |
+
+The case with a KRL-alone pass that finds nothing newer first also checked for a `directory_not_verified` log line. That pass logs nothing, so the check was removed before the fix. The case's RED above is its `mustWaitOutcome` line. Directory 2 staying in force shows that directory 3 was refused.
+
+### GREEN
+
+After be1ff5c, the six cases pass, and so do TestKRLSigner, TestKRLAlone, TestSpoolWindow, TestSpoolWindowWideningWait and internal/agent/state under -race (no FAIL, no DATA RACE). The full gate is below.
+
+### Mutants (scripted loop: each applied with `git apply` to be1ff5c, run against all of `^TestKRLSigner$` under -race, restored with `git checkout`, then `git diff --quiet -- internal/`)
+
+| # | Mutant | Killed by |
+|---|--------|-----------|
+| F1 | the pending target's raise in verify dropped | all six new cases |
+| F2 | VerifyAfter passing a nil pending | the five cases without a record |
+| F3 | VerifyAheadAfter passing a nil pending | retired_key_krl_after_a_poll_from_the_record_is_refused |
+| F4 | the raise also at an equal version (`>=`) | fork_at_the_carried_version_does_not_replace_it |
+| F5 | a fresh carry per poll: pollCapture verifies against a copy of the pending target | all six new cases |
+| F6 | the pending target raised only after the KRL step accepted the capture | retired_key_krl_after_a_refused_poll_is_refused, retired_key_krl_after_a_krl_alone_poll_with_nothing_newer_is_refused |
+| F7 | the pending target raised only after the directory step verified | retired_key_krl_after_a_krl_alone_poll_with_nothing_newer_is_refused |
+
+No mutant survived.
+
+### What the fix does not carry
+
+The owner's rule is that knowledge comes only from a bundle that verified in full (Q2). One split item's exact shape stays as it was:
+- a pending target knows bundle 2 (K2);
+- a poll verifies bundle 3, which rotates back to K1, only as a step before a refused bundle 4;
+- that poll's KRL-alone pass lands a KRL signed by K1 and supersedes the target;
+- a later poll, with bundles 2 to 4 withheld, can land a KRL signed by K2 under the carried bundle 2.
+
+Bundle 3 never verified in full, so it is not carried. This corrects the plan's "What a poll does not carry" residual, which calls the uncarried steps harmless: a KRL-alone supersede can keep a widening pending target, so a later poll does run after such a capture. To use this, an attacker needs bundle 2's ops key and control of the spool. That is the accepted withholding-server residual: a server that withheld bundle 3 from the start would land the same KRL in the first poll.
+
+### D-2: the runbook
+
+- **(a)** The paragraph on removing `unapplied.json` now says when that is safe.
+  - When no bundle between the accepted version and the recorded one replaced the ops key, it is safe.
+  - When one did, it is not. The bundles between the accepted version and the record have been pruned from the spool, so until the chain verifies again a KRL the new key signs is refused (krl_not_verified) and a KRL the old key signs can land.
+  - It gives steps that keep that window short: remove the record, apply once (which writes `outbox/accepted.json`), restart the fetcher (which polls at once), apply again.
+  - The steps follow the code: WriteAccepted after every locked apply, the fetcher's cursor and prune from accepted.json, and `Run` calling `Once` before its first timer. The steps as a sequence are UNVERIFIED.
+  - The stuck-window remedy points to these steps when the recorded bundle replaced the ops key.
+- **(b)** The Limits bullet now says that verification refusals and krl_signer_retired on the KRL step record nothing, and that content refusals (generation_too_large, ca_line_rejected) record their verified state, as forward's `recordUnapplied` does before its KRL-alone pass.
+- "An ops-key rotation" now says that during a wait the host knows every bundle the apply verified in full before the poll, by forward or by an earlier poll, and that a fork at a known version does not replace it. The new cases are named.
+- The plan's Task 4 runbook check still prints at least 1 for each of its 13 names and 0 for both old sentences. "always safe" and "the KRL still lands" are gone.
+
+### Test time and gates (locally in WSL, on a5be99c's tree)
+
+| Point | Alone (limit 400 s) | Under `./...` (limit 480 s) |
+|-------|---------------------|-----------------------------|
+| fix round 1, a5be99c | 284.3 s | 346.8 s |
+
+Both limits hold. The full gate passed: `go test -race -count=1 ./...` (no FAIL, no DATA RACE), go vet in its three forms, golangci-lint (0 issues), capslock-check (no change to any baseline), dep-firewall, testonly-firewall and check-pinned-actions. The gate's gofmt step, `test -z "$(gofmt -l .)"` inside the string handed to scripts/linux.sh, is expanded by WSL's outer shell, where gofmt is not on PATH. It printed `gofmt: command not found` and passed vacuously, here and in the gate recorded for Task 4. gofmt was therefore run on its own, from a script file inside WSL's login shell (the toolchain's gofmt, go1.27.3): `gofmt -l .` printed nothing.
+
 ## Deviations from Plan
 
 1. **[Rule 3] The capslock baseline was updated (c47f535).** The plan expects no new pair and calls one a deviation to review and record. The analysis is under Capslock, and the PR body names it for review.
@@ -321,7 +417,8 @@ None.
 
 - The whole runbook text on a real host: no ceremony on main rotates the ops key yet.
 - The end-to-end wait for the new key's KRL (at most about an hour with an honest server), and a signer process started before the bundle install, which publishes nothing.
-- A fork of the root-signed bundle chain at fullyVerified's version (it resolves to fullyVerified): no test builds a forked chain.
+- A fork of the root-signed bundle chain at fullyVerified's version outside a widening wait (it resolves to fullyVerified): no test builds one there. In a wait, `fork_at_the_carried_version_does_not_replace_it` pins that a fork at the carried version does not replace the carried bundle (fix round 1).
+- Removing `unapplied.json` when a bundle up to the recorded one replaced the ops key, with a pruned spool, and the runbook's steps for that case: no test runs them (fix round 1; the order follows the code).
 - Two supersedes within one wait: no test supersedes the pending target twice. `retired_key_krl_after_a_krl_alone_supersede_is_refused` pins one supersede and a later poll.
 - An old-key KRL kept newest in the spool by a server holding the retired key: no test builds it (part of the withholding-server residual).
 - A record rewritten during a wait, the only shape in which VerifyAheadAfter's record half (equivalent mutant E3) could matter.
@@ -346,3 +443,4 @@ Tasks 2 and 3 (tdd="true") and the tracer Task 1 each recorded RED on their base
 
 - Files: internal/agent/apply/krlsigner_test.go, 03-08k-PLAN.md and this SUMMARY exist.
 - Commits: 9c214b3, 7151615, 7cc88f7, 003adca, 0767bbf, 41bc185, 72fbb34, ff7c0e2 and c47f535 are ancestors of HEAD.
+- Fix round 1: be1ff5c and a5be99c are ancestors of HEAD.
