@@ -1064,6 +1064,14 @@ func unappliedAhead(base, accepted *state.Stored) *Unapplied {
 	return &u
 }
 
+// status is u as the heartbeat status carries it (nil: none).
+func (u *Unapplied) status() *heartbeat.Unapplied {
+	if u == nil {
+		return nil
+	}
+	return &heartbeat.Unapplied{Bundle: u.Bundle, Directory: u.Directory}
+}
+
 // recordedAhead is unappliedAhead for the record and accepted/ as they
 // are now; nil when either does not load.
 func recordedAhead(l Layout) *Unapplied {

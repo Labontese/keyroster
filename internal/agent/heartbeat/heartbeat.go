@@ -169,7 +169,20 @@ type Status struct {
 	Pending        *Pending   `json:"pending"`
 	Stuck          string     `json:"stuck"`
 	KRLStale       bool       `json:"krl_stale"`
+	Unapplied      *Unapplied `json:"unapplied,omitempty"`
 	Seq            uint64     `json:"seq"`
+}
+
+// Unapplied is Status.Unapplied (PR #76 review F8 (03-08j)): the newest
+// bundle and directory versions the applier verified but could not apply
+// for their content, and now reads past (0: none of that kind). The
+// versions in force stay in Status.Bundle and Status.Directory. Validate
+// refuses only an Unapplied whose two versions are both zero: it has no
+// rule against the versions in force, so a status written while accepted/
+// and the record moved never makes the server refuse the heartbeat.
+type Unapplied struct {
+	Bundle    uint64 `json:"bundle,omitempty"`
+	Directory uint64 `json:"directory,omitempty"`
 }
 
 // Heartbeat is the body of POST /api/v1/agent/heartbeat: the applier's
@@ -344,6 +357,9 @@ func Validate(s *Status) error {
 	}
 	if s.Stuck != "" && s.Stuck != StuckPendingStateUnknown {
 		return bad("stuck")
+	}
+	if s.Unapplied != nil && s.Unapplied.Bundle == 0 && s.Unapplied.Directory == 0 {
+		return bad("unapplied")
 	}
 	if s.Seq == 0 || s.Seq > math.MaxInt64 {
 		return bad("seq")

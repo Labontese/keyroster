@@ -637,4 +637,19 @@ func TestSpoolWindow(t *testing.T) {
 			t.Fatalf("no warning names the record write:\n%s", log.String())
 		}
 	})
+	t.Run("status_reports_unapplied", func(t *testing.T) {
+		t.Parallel()
+		h := refusedWindow(t, true)
+		if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("apply 1: %v, want generation_too_large", err)
+		}
+		s := outboxStatus(t, h)
+		if s.Unapplied == nil || *s.Unapplied != (heartbeat.Unapplied{Directory: 65}) || s.Directory.Version != 1 {
+			t.Fatalf("status after apply 1: unapplied %+v, directory in force %d; want {directory: 65} and 1", s.Unapplied, s.Directory.Version)
+		}
+		h.mustApply()
+		if s := outboxStatus(t, h); s.Unapplied != nil {
+			t.Fatalf("status after the fix: unapplied %+v, want none", s.Unapplied)
+		}
+	})
 }

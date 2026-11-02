@@ -257,6 +257,18 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 				notes = append(notes, fmt.Sprintf("%s: stuck: %s; the host applies nothing, revocations included, until root runs `%s` there (docs/runbooks/host-setup.md \"Manual recovery\")",
 					r.Name, st.Stuck, recoveryCommand))
 			}
+			if u := st.Unapplied; u != nil {
+				// PR #76 review F8 (03-08j).
+				var parts []string
+				if u.Bundle != 0 {
+					parts = append(parts, fmt.Sprintf("bundle v%d", u.Bundle))
+				}
+				if u.Directory != 0 {
+					parts = append(parts, fmt.Sprintf("directory v%d", u.Directory))
+				}
+				alerts = append(alerts, "unapplied: "+strings.Join(parts, ", "))
+				notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s but cannot apply it (its last apply error says why); revocations still apply, and it applies the next version it can (docs/runbooks/host-setup.md \"Revocations keep applying\")", r.Name, strings.Join(parts, " and ")))
+			}
 			if st.KRLStale {
 				alerts = append(alerts, "krl_stale")
 			}

@@ -252,6 +252,12 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 			if st.DirectoryVersion != 0 {
 				s.Directory = heartbeat.Doc{Version: st.DirectoryVersion, SHA256: trust.SHA256Hex(st.Directory)}
 			}
+			// PR #76 review F8 (03-08j): the versions the applier verified
+			// but cannot apply. A record that does not load sets nothing;
+			// forward logs it.
+			if base, _, err := loadUnapplied(e.l, st); err == nil {
+				s.Unapplied = unappliedAhead(base, st).status()
+			}
 			if mf, err := krl.ParseManifest(st.KRLManifest); err == nil && len(st.KRLManifest) > 0 {
 				// The manifest accepted/ holds is the in-force KRL's when
 				// the versions agree. A KRL a rollback kept in current is

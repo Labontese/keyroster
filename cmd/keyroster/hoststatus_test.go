@@ -321,6 +321,49 @@ func TestHostStatusDiverged(t *testing.T) {
 	}
 }
 
+// TestHostStatusUnapplied (PR #76 review F8 (03-08j)): a host that verified
+// a version it cannot apply shows it as the unapplied alert, with a note.
+func TestHostStatusUnapplied(t *testing.T) {
+	ab := strings.Repeat("ab", 32)
+	dir := hbStatus(5, 100)
+	dir.Unapplied = &heartbeat.Unapplied{Directory: 65}
+	both := hbStatus(5, 100)
+	both.Unapplied = &heartbeat.Unapplied{Bundle: 3, Directory: 65}
+	statusEnv(t, map[string]any{
+		"current": map[string]any{"bundle": 1, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
+		"hosts": []serverclient.HostStatusRow{
+			statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: dir}),
+			statusRow("web2", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: both}),
+			statusRow("web3", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: hbStatus(5, 100)}),
+		},
+	})
+	code, out, stderr := run(t, "host", "status")
+	if code != 0 {
+		t.Fatalf("host status: exit %d: %s", code, stderr)
+	}
+	t.Logf("keyroster host status:\n%s", out)
+	row := map[string]string{}
+	for _, l := range strings.Split(out, "\n") {
+		if f := strings.Fields(l); len(f) > 0 && strings.HasPrefix(f[0], "web") && !strings.HasSuffix(f[0], ":") {
+			row[f[0]] = l
+		}
+	}
+	if !strings.Contains(row["web1"], "unapplied: directory v65") || strings.Contains(row["web1"], "bundle v") {
+		t.Errorf("web1's alerts %q, want unapplied: directory v65", row["web1"])
+	}
+	if !strings.Contains(row["web2"], "unapplied: bundle v3, directory v65") {
+		t.Errorf("web2's alerts %q, want unapplied: bundle v3, directory v65", row["web2"])
+	}
+	if strings.Contains(row["web3"], "unapplied") || strings.Contains(out, "web3: unapplied") {
+		t.Errorf("web3 has no unapplied state but shows one:\n%s", out)
+	}
+	for _, want := range []string{"web1: unapplied: it verified directory v65 but cannot apply it", "web2: unapplied: it verified bundle v3 and directory v65 but cannot apply it"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("no note %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestHostStatusAge (PR #72 review C2, C6): host status shows how old each
 // host's stored status is beside LAST SEEN, and the server's status_stale
 // flag as an alert.

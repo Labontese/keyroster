@@ -61,6 +61,7 @@ func TestValidate(t *testing.T) {
 		{"last_check.error", func(s *Status) { s.LastCheck.Error, s.LastCheck.Drift = "sshd_T_failed: x", true }},
 		{"pending.step", func(s *Status) { s.Pending.Step = "" }},
 		{"stuck", func(s *Status) { s.Stuck = "stuck" }},
+		{"unapplied", func(s *Status) { s.Unapplied = &Unapplied{} }},
 		{"seq", func(s *Status) { s.Seq = 0 }},
 		{"seq", func(s *Status) { s.Seq = 1 << 63 }},
 	} {
@@ -77,6 +78,18 @@ func TestValidate(t *testing.T) {
 	h := Heartbeat{Status: full(), ClockOffsetS: MaxClockOffset + 1}
 	if err := ValidateHeartbeat(&h); Field(err) != "clock_offset_s" {
 		t.Errorf("an offset above the bound: %v", err)
+	}
+	// PR #76 review F8 (03-08j): a status naming an unapplied directory
+	// passes and survives the strict round trip.
+	un := full()
+	un.Unapplied = &Unapplied{Directory: 65}
+	if err := Validate(&un); err != nil {
+		t.Errorf("a status with unapplied {directory: 65}: %v", err)
+	}
+	if b, err := trust.CanonicalJSON(&un); err != nil {
+		t.Error(err)
+	} else if back, err := ParseStatus(b); err != nil || back.Unapplied == nil || *back.Unapplied != *un.Unapplied {
+		t.Errorf("unapplied after ParseStatus: %+v, %v", back, err)
 	}
 }
 
