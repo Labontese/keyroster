@@ -165,10 +165,14 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 		if h == nil || h.Status.Pending != nil {
 			continue
 		}
-		if h.Status.Bundle == cb {
+		// A host whose unapplied record is above the current version of a
+		// kind is not on that version (PR #78 review): it refuses what
+		// comes next until root clears the record.
+		u := h.Status.Unapplied
+		if h.Status.Bundle == cb && (u == nil || u.Bundle <= cb.Version) {
 			nb++
 		}
-		if h.Status.Directory == cd {
+		if h.Status.Directory == cd && (u == nil || u.Directory <= cd.Version) {
 			nd++
 		}
 		if h.Status.KRLDoc() == ck {
@@ -267,7 +271,13 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 					parts = append(parts, fmt.Sprintf("directory v%d", u.Directory))
 				}
 				alerts = append(alerts, "unapplied: "+strings.Join(parts, ", "))
-				notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s but cannot apply it (its last apply error says why); revocations still apply, and it applies the next version it can (docs/runbooks/host-setup.md \"Revocations keep applying\")", r.Name, strings.Join(parts, " and ")))
+				if st.UnappliedAbove(cb, cd) {
+					// PR #78 review: a recorded version above the server's
+					// current one is one a signer restore lost.
+					notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s, above the server's current version, so a signer restore lost it; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md \"Enrolled hosts and a re-made version\")", r.Name, strings.Join(parts, " and ")))
+				} else {
+					notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s but cannot apply it (its last apply error says why); revocations still apply, and it applies the next version it can (docs/runbooks/host-setup.md \"Revocations keep applying\")", r.Name, strings.Join(parts, " and ")))
+				}
 			}
 			if st.KRLStale {
 				alerts = append(alerts, "krl_stale")
@@ -295,7 +305,7 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 	for _, n := range notes {
 		b.WriteString(safe(n) + "\n")
 	}
-	b.WriteString("Versions marked * differ from the server's current ones (number or SHA-256); a host counts on a version only with no swap pending.\n")
+	b.WriteString("Versions marked * differ from the server's current ones (number or SHA-256); a host counts on a version only with no swap pending and no unapplied version above it.\n")
 	b.WriteString(statusFooter)
 	return b.String()
 }

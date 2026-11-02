@@ -430,19 +430,35 @@ func Field(err error) string {
 func (s *Status) KRLDoc() Doc { return Doc{Version: s.KRL.Version, SHA256: s.KRL.SHA256} }
 
 // Committed reports whether s's committed bundle, directory and KRL are
-// exactly bundle, directory and krl, versions and SHA-256 alike, and no
-// swap is pending: what keyroster host status and 03-12's rotation gate
+// exactly bundle, directory and krl, versions and SHA-256 alike, no swap
+// is pending and no unapplied version is above the server's current one
+// (UnappliedAbove): what keyroster host status and 03-12's rotation gate
 // count as converged (PR #72 review C5: a same-numbered version with
 // other bytes, for example one a signer restore lost, is not).
 func (s *Status) Committed(bundle, directory, krl Doc) bool {
-	return s.Pending == nil && s.Bundle == bundle && s.Directory == directory && s.KRLDoc() == krl
+	return s.Pending == nil && s.Bundle == bundle && s.Directory == directory && s.KRLDoc() == krl && !s.UnappliedAbove(bundle, directory)
+}
+
+// UnappliedAbove reports whether s's unapplied record names a bundle or
+// directory version above the server's current one (PR #78 review). The
+// record holds only versions the server once served, so that happens only
+// after a signer restore lost them: the host then refuses the re-made
+// chain until root clears the record (docs/runbooks/signer-install.md).
+func (s *Status) UnappliedAbove(bundle, directory Doc) bool {
+	u := s.Unapplied
+	return u != nil && (u.Bundle > bundle.Version || u.Directory > directory.Version)
 }
 
 // Diverged reports whether any of s's bundle, directory and KRL is a
 // version the server never published as current: above the server's
 // current one, or the current number with another SHA-256 (PR #72 review
-// C5). Such a host needs a look (docs/runbooks/host-setup.md "Alerts").
+// C5), or whether its unapplied record is above the current versions
+// (UnappliedAbove). Such a host needs a look (docs/runbooks/host-setup.md
+// "Alerts").
 func (s *Status) Diverged(bundle, directory, krl Doc) bool {
+	if s.UnappliedAbove(bundle, directory) {
+		return true
+	}
 	for _, p := range [][2]Doc{{s.Bundle, bundle}, {s.Directory, directory}, {s.KRLDoc(), krl}} {
 		got, cur := p[0], p[1]
 		if got.Version > cur.Version || got.Version == cur.Version && got.SHA256 != cur.SHA256 {

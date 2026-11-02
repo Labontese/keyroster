@@ -285,7 +285,9 @@ func TestServedLine(t *testing.T) {
 // TestHostStatusDiverged (PR #72 review C5): a host counts on a version
 // only when its SHA-256 is the server's too; one that reports the current
 // number with another SHA-256, or a version above the current one, is
-// flagged diverged.
+// flagged diverged. So is one whose unapplied record is above the current
+// version, a version a signer restore lost (PR #78 review): its note gives
+// the remedy instead of saying it applies the next version it can.
 func TestHostStatusDiverged(t *testing.T) {
 	ab, cd := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	same := hbStatus(5, 100)
@@ -293,6 +295,8 @@ func TestHostStatusDiverged(t *testing.T) {
 	other.Directory.SHA256 = cd
 	ahead := hbStatus(6, 100)
 	ahead.Directory.SHA256 = cd
+	recorded := hbStatus(5, 100)
+	recorded.Unapplied = &heartbeat.Unapplied{Directory: 65}
 	// Built as JSON: the current versions carry their SHA-256.
 	statusEnv(t, map[string]any{
 		"current": map[string]any{"bundle": 1, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
@@ -300,6 +304,7 @@ func TestHostStatusDiverged(t *testing.T) {
 			statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: same}),
 			statusRow("web2", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: other}),
 			statusRow("web3", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: ahead}),
+			statusRow("web4", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: recorded}),
 		},
 	})
 	code, out, stderr := run(t, "host", "status")
@@ -307,17 +312,21 @@ func TestHostStatusDiverged(t *testing.T) {
 		t.Fatalf("host status: exit %d: %s", code, stderr)
 	}
 	t.Logf("keyroster host status:\n%s", out)
-	if !strings.Contains(out, "directory v5 on 1/3 hosts\n") || !strings.Contains(out, "KRL v100 on 3/3 hosts\n") {
+	if !strings.Contains(out, "directory v5 on 1/4 hosts\n") || !strings.Contains(out, "KRL v100 on 4/4 hosts\n") {
 		t.Fatalf("diverged hosts counted as converged:\n%s", out)
 	}
 	flagged := map[string]bool{}
 	for _, l := range strings.Split(out, "\n") {
-		if f := strings.Fields(l); len(f) > 0 && strings.HasPrefix(f[0], "web") && strings.HasSuffix(l, "diverged") {
+		if f := strings.Fields(l); len(f) > 0 && strings.HasPrefix(f[0], "web") && !strings.HasSuffix(f[0], ":") && strings.Contains(l, "diverged") {
 			flagged[f[0]] = true
 		}
 	}
-	if !flagged["web2"] || !flagged["web3"] || flagged["web1"] {
-		t.Fatalf("diverged flags %v, want web2 and web3:\n%s", flagged, out)
+	if !flagged["web2"] || !flagged["web3"] || !flagged["web4"] || flagged["web1"] {
+		t.Fatalf("diverged flags %v, want web2, web3 and web4:\n%s", flagged, out)
+	}
+	if !strings.Contains(out, `web4: unapplied: it verified directory v65, above the server's current version, so a signer restore lost it; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md "Enrolled hosts and a re-made version")`) ||
+		strings.Contains(out, "web4: unapplied: it verified directory v65 but cannot apply it") {
+		t.Fatalf("web4's note does not give the remedy:\n%s", out)
 	}
 }
 
@@ -329,8 +338,10 @@ func TestHostStatusUnapplied(t *testing.T) {
 	dir.Unapplied = &heartbeat.Unapplied{Directory: 65}
 	both := hbStatus(5, 100)
 	both.Unapplied = &heartbeat.Unapplied{Bundle: 3, Directory: 65}
+	// The server's current versions are the recorded ones: the hosts are
+	// behind, not diverged (PR #78 review).
 	statusEnv(t, map[string]any{
-		"current": map[string]any{"bundle": 1, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
+		"current": map[string]any{"bundle": 3, "directory": 65, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
 		"hosts": []serverclient.HostStatusRow{
 			statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: dir}),
 			statusRow("web2", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: both}),
@@ -356,6 +367,9 @@ func TestHostStatusUnapplied(t *testing.T) {
 	}
 	if strings.Contains(row["web3"], "unapplied") || strings.Contains(out, "web3: unapplied") {
 		t.Errorf("web3 has no unapplied state but shows one:\n%s", out)
+	}
+	if strings.Contains(out, "diverged") {
+		t.Errorf("a host behind the current versions is flagged diverged:\n%s", out)
 	}
 	for _, want := range []string{"web1: unapplied: it verified directory v65 but cannot apply it", "web2: unapplied: it verified bundle v3 and directory v65 but cannot apply it"} {
 		if !strings.Contains(out, want) {

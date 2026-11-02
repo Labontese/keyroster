@@ -173,7 +173,8 @@ func FuzzParseStatus(f *testing.F) {
 
 // TestCommittedAndDiverged (PR #72 review C5): a host is on a version only
 // with its SHA-256 too, and one above the current version or on the
-// current number with other bytes is diverged.
+// current number with other bytes is diverged. So is one whose unapplied
+// record is above the current version (PR #78 review).
 func TestCommittedAndDiverged(t *testing.T) {
 	ab, cd := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	cur := Doc{Version: 5, SHA256: ab}
@@ -182,16 +183,20 @@ func TestCommittedAndDiverged(t *testing.T) {
 		name                string
 		dir                 Doc
 		pending             bool
+		unapplied           *Unapplied
 		committed, diverged bool
 	}{
-		{"same", cur, false, true, false},
-		{"pending", cur, true, false, false},
-		{"older", Doc{Version: 4, SHA256: cd}, false, false, false},
-		{"same_number_other_sha", Doc{Version: 5, SHA256: cd}, false, false, true},
-		{"above_current", Doc{Version: 6, SHA256: cd}, false, false, true},
+		{"same", cur, false, nil, true, false},
+		{"pending", cur, true, nil, false, false},
+		{"older", Doc{Version: 4, SHA256: cd}, false, nil, false, false},
+		{"same_number_other_sha", Doc{Version: 5, SHA256: cd}, false, nil, false, true},
+		{"above_current", Doc{Version: 6, SHA256: cd}, false, nil, false, true},
+		{"unapplied_directory_at_current", Doc{Version: 4, SHA256: cd}, false, &Unapplied{Directory: 5}, false, false},
+		{"unapplied_directory_above_current", cur, false, &Unapplied{Directory: 6}, false, true},
+		{"unapplied_bundle_above_current", cur, false, &Unapplied{Bundle: 2}, false, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			s := Status{Bundle: one, Directory: c.dir, KRL: KRL{Version: 1, SHA256: ab}}
+			s := Status{Bundle: one, Directory: c.dir, KRL: KRL{Version: 1, SHA256: ab}, Unapplied: c.unapplied}
 			if c.pending {
 				s.Pending = &Pending{Step: StepIntermediate}
 			}

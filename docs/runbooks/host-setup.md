@@ -1134,7 +1134,8 @@ the server's current ones, by number or SHA-256), the generation, drift,
 the last apply's result (`ok`, `refused`, `rolled_back` or `error`, with
 its `detail` and `host_status`), and its alerts. A host counts on a version
 in the header only when it applied exactly that version, SHA-256 included,
-and no swap is pending. During 03-05's two-step
+no swap is pending, and its unapplied record (below) names no version of
+that kind above the server's current one. During 03-05's two-step
 swap the row shows `pending: intermediate` (or `final`, `commit`), which is
 not a failure: the versions are still the last committed ones until the
 final step and its self-test. The applier writes that status each time it
@@ -1280,15 +1281,20 @@ T-03-284, pending todo `signed-applier-status`).
   identity rotation](#running-the-agent) (D-R1).
 - `stuck: pending_state_unknown`: see [Manual recovery](#manual-recovery).
 - `diverged`: the host reports a bundle, directory or KRL above the
-  server's current version, or the current number with other bytes. That
-  is the sign of a host that accepted a version a signer restore lost
-  (signer-install.md): check its `accepted.json` and reset its directory
-  as that runbook says. It never counts as converged. (Run in CI:
-  `TestHostStatusDiverged`, `TestCommittedAndDiverged`.)
+  server's current version, or the current number with other bytes, or
+  an unapplied version above the server's current one. That is the sign
+  of a host that accepted or recorded a version a signer restore lost
+  (signer-install.md): check its `accepted.json` and follow that
+  runbook's "Enrolled hosts and a re-made version". It never counts as
+  converged. (Run in CI: `TestHostStatusDiverged`,
+  `TestCommittedAndDiverged`.)
 - `unapplied: directory vN` (or `bundle vN`, or both): the host verified
   that version but cannot apply it, and the last apply error says why
   (03-08j). It reads past the version and applies the next one it can,
-  and revocations still apply (see "Revocations keep applying"). Update
+  and revocations still apply (see "Revocations keep applying"). When the
+  version is above the server's current one, the server lost it in a
+  signer restore: the host also shows `diverged`, refuses the re-made
+  chain, and the note points to signer-install.md's remedy instead. Update
   keyroster-server before the agents: a server from before 03-08j refuses
   a heartbeat whose status carries `unapplied` (`heartbeat_field_invalid`).
   The host's stored status then stops moving, and `keyroster host status`
