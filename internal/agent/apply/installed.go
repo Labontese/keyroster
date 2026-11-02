@@ -62,16 +62,49 @@ func AcceptedVersions(l Layout) (enroll.Accepted, error) {
 	return a, nil
 }
 
+// loadAcceptedState is accepted/ as LoadStored reads it (nil: nothing
+// accepted yet).
+func loadAcceptedState(l Layout) (*state.Stored, error) {
+	fd, err := spool.OpenDir(l.State(state.AcceptedDir))
+	if errors.Is(err, unix.ENOENT) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	return state.LoadStored(fd)
+}
+
 // WriteAccepted writes the applier's accepted versions to the outbox's
 // enroll.AcceptedFile (spool.WriteFileAt, mode 0640, so the fetcher can
 // read it through the outbox's group), after every apply. It never reads
 // the outbox (03-08, F2): nothing the fetcher could plant there decides
 // whether it writes. The fetcher bases its state requests on it (PR #71
 // review F3/F7).
+//
+// For the bundle and the directory it writes the higher of accepted/'s
+// version and the unapplied record's (loadUnapplied; PR #76 review F8
+// (03-08j)); on any loader error, accepted/'s, as before. The raise is
+// needed: the fetcher's cursor is min(accepted.json, the spool's newest),
+// and one poll reaches 1024 versions above it, so a host whose accepted/
+// stays put while it reads past a record would otherwise stop spooling
+// about 1024 versions above accepted/. And the fetcher's pruneSpool keeps
+// the versions from accepted.json's, so the raise also keeps the record's
+// version and what a capture from it reads, which a prune counted from
+// accepted/ alone would remove once the record is more than keepAbove
+// above it. It is safe: the server uses the request's versions only to
+// choose what to serve (handleAgentState) and stores none of them, and the
+// KRL cursor stays the KRL in force. AcceptedVersions is unchanged.
 func WriteAccepted(l Layout) error {
 	a, err := AcceptedVersions(l)
 	if err != nil {
 		return err
+	}
+	if stored, err := loadAcceptedState(l); err == nil && stored != nil {
+		if base, _, err := loadUnapplied(l, stored); err == nil && base != nil {
+			a.Bundle, a.Directory = max(a.Bundle, base.BundleVersion), max(a.Directory, base.DirectoryVersion)
+		}
 	}
 	b, err := trust.CanonicalJSON(a)
 	if err != nil {

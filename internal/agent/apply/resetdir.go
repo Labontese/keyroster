@@ -5,6 +5,7 @@ package apply
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 
@@ -37,6 +38,16 @@ var spoolDirectoryRE = regexp.MustCompile(`^directory-[1-9][0-9]{0,19}\.json(\.s
 // version a signer restore lost, so the re-made chain never verifies
 // against it. Under the apply lock, with no apply unfinished, it:
 //
+//  0. drops the directory part of the unapplied record (PR #76 review F8
+//     (03-08j)), before anything else changes: a record whose bundle part
+//     is still ahead of the accepted bundle is rewritten without its
+//     directory part (writeState, 0600, atomic), any other record is
+//     removed. So a crash at any later point never leaves the record's
+//     directory as the chain base over an accepted/ without a directory.
+//     A record that parses but cannot be rewritten or removed fails the
+//     reset with nothing changed; one that does not load is removed where
+//     possible, and a failed removal is only logged (forward drops such a
+//     record, and no capture reads from it);
 //  1. drops the accepted directory from accepted/ (a new snapshot without
 //     it; the bundle, policy and KRL stay), so the next apply takes the
 //     directory as a first install does: the newest one the spool offers,
@@ -72,7 +83,7 @@ func ResetDirectory(l Layout, spoolDir string) (*ResetReport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrStateDirUnsafe, err)
 	}
-	e := &engine{l: l, stateFd: fd}
+	e := &engine{l: l, stateFd: fd, cfg: Config{Log: os.Stderr}}
 	defer func() { _ = unix.Close(fd) }()
 	if _, err := state.LoadPins(fd); err != nil {
 		return nil, err
@@ -93,10 +104,17 @@ func ResetDirectory(l Layout, spoolDir string) (*ResetReport, error) {
 	afd, err := e.acceptedFd()
 	switch {
 	case errors.Is(err, unix.ENOENT):
+		// Nothing accepted: step 0 only.
+		if err := e.resetRecord(nil); err != nil {
+			return nil, err
+		}
 	case err != nil:
 		return nil, err
 	default:
 		stored, err := state.LoadStored(afd)
+		if err == nil {
+			err = e.resetRecord(stored)
+		}
 		if err == nil && stored != nil && stored.Directory != nil {
 			r.Version, r.SHA256 = stored.DirectoryVersion, trust.SHA256Hex(stored.Directory)
 			stored.Directory, stored.DirectorySigs, stored.DirectoryVersion = nil, nil, 0
@@ -132,4 +150,29 @@ func ResetDirectory(l Layout, spoolDir string) (*ResetReport, error) {
 		return r, err
 	}
 	return r, WriteAccepted(l)
+}
+
+// resetRecord is ResetDirectory's step 0 against stored, accepted/ as it is
+// before the reset (nil: nothing accepted).
+func (e *engine) resetRecord(stored *state.Stored) error {
+	path := e.l.State(state.UnappliedFile)
+	base, u, err := loadUnapplied(e.l, stored)
+	if err != nil {
+		if rerr := e.remove(path); rerr != nil {
+			e.logf("WARNING removing %s: %v", path, rerr)
+		}
+		return nil
+	}
+	if u == nil {
+		return nil
+	}
+	if base != nil && base.BundleVersion > stored.BundleVersion {
+		kept := &state.Unapplied{Bundle: u.Bundle, BundleSigs: u.BundleSigs, Policy: u.Policy, PolicySigs: u.PolicySigs}
+		b, err := kept.Encode()
+		if err != nil {
+			return err
+		}
+		return e.writeState(state.UnappliedFile, b)
+	}
+	return e.remove(path)
 }

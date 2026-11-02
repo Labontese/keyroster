@@ -524,7 +524,8 @@ func (f *Fetcher) pollState(ctx context.Context) (bool, error) {
 }
 
 // cursor is where a poll's state requests start: for each kind the
-// version the applier accepted (enroll.AcceptedFile in the outbox), but
+// version the applier accepted, or recorded as unapplied when higher
+// (enroll.AcceptedFile in the outbox; PR #76 review F8 (03-08j)), but
 // never above the spool's newest complete version (a spool that lost files
 // gets them again). Without an AcceptedFile yet, the spool's newest. A
 // version the applier never accepted is so never a reason not to ask:

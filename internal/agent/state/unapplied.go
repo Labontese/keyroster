@@ -3,6 +3,7 @@
 package state
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -101,10 +102,15 @@ func (v *Verified) Unapplied(accepted *Stored) *Unapplied {
 		return nil
 	}
 	u := &Unapplied{}
+	if v.Next.BundleVersion > accepted.BundleVersion {
+		// After holdBundle, Next names the held step: that is what is
+		// recorded.
+		u.Bundle, u.BundleSigs, u.Policy, u.PolicySigs = v.Next.Bundle, v.Next.BundleSigs, v.Next.Policy, v.Next.PolicySigs
+	}
 	if v.Next.Directory != nil && v.Next.DirectoryVersion > accepted.DirectoryVersion {
 		u.Directory, u.DirectorySigs = v.Next.Directory, v.Next.DirectorySigs
 	}
-	if u.Directory == nil {
+	if u.Bundle == nil && u.Directory == nil {
 		return nil
 	}
 	return u
@@ -122,6 +128,24 @@ func (u *Unapplied) Base(accepted *Stored) (*Stored, error) {
 	}
 	base := *accepted
 	taken := false
+	if u.Bundle != nil {
+		b, err := trust.ParseBundle(u.Bundle)
+		if err != nil {
+			return nil, fmt.Errorf("%w: bundle: %w", ErrUnapplied, err)
+		}
+		pol, err := trust.ParsePolicy(u.Policy)
+		if err != nil {
+			return nil, fmt.Errorf("%w: policy: %w", ErrUnapplied, err)
+		}
+		if b.PolicySHA256 != trust.SHA256Hex(u.Policy) {
+			return nil, fmt.Errorf("%w: the recorded bundle %d does not name the recorded policy", ErrUnapplied, b.Version)
+		}
+		if b.Version > accepted.BundleVersion {
+			base.Bundle, base.BundleSigs, base.Policy, base.PolicySigs, base.BundleVersion = u.Bundle, u.BundleSigs, u.Policy, u.PolicySigs, b.Version
+			base.bundle, base.policy = b, pol
+			taken = true
+		}
+	}
 	if u.Directory != nil {
 		d, err := directory.Parse(u.Directory)
 		if err != nil {
@@ -147,6 +171,17 @@ func (u *Unapplied) Base(accepted *Stored) (*Stored, error) {
 // Verify, the versions between the record and the newest one are only
 // chain-checked and never rendered, and the bundle in force stays the
 // lowest hold step (verify).
+//
+// Changed is computed against accepted, not the base: an apply with nothing
+// newer than the record renders it again and reports the refusal again,
+// and a capture held at the bundle in force has BundleChanged false, as in
+// Verify.
 func VerifyAhead(p *Pins, accepted, base *Stored, in spool.State) (*Verified, error) {
-	return verify(p, base, accepted, in)
+	v, err := verify(p, base, accepted, in)
+	if err != nil || v.Refused != nil || accepted == nil {
+		return v, err
+	}
+	v.BundleChanged = !bytes.Equal(v.Next.Bundle, accepted.Bundle) || !bytes.Equal(v.Next.Policy, accepted.Policy)
+	v.DirectoryChanged = !bytes.Equal(v.Next.Directory, accepted.Directory)
+	return v, nil
 }

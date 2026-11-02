@@ -738,7 +738,8 @@ func (e *engine) forward(ctx context.Context) error {
 	}
 	var st spool.State
 	var v *state.Verified
-	if base := e.unappliedBase(stored); base != nil {
+	base := e.unappliedBase(stored)
+	if base != nil {
 		// PR #76 review F8 (03-08j): the capture is read and chained from
 		// the unapplied record; a refused step takes the KRL alone against
 		// accepted/.
@@ -1066,12 +1067,7 @@ func unappliedAhead(base, accepted *state.Stored) *Unapplied {
 // recordedAhead is unappliedAhead for the record and accepted/ as they
 // are now; nil when either does not load.
 func recordedAhead(l Layout) *Unapplied {
-	fd, err := spool.OpenDir(l.State(state.AcceptedDir))
-	if err != nil {
-		return nil
-	}
-	accepted, err := state.LoadStored(fd)
-	_ = unix.Close(fd)
+	accepted, err := loadAcceptedState(l)
 	if err != nil {
 		return nil
 	}
@@ -1107,10 +1103,20 @@ func (e *engine) unappliedBase(stored *state.Stored) *state.Stored {
 // recordUnapplied writes the unapplied record of v (Verified.Unapplied
 // against stored, accepted/) through writeState (0600), in forward's
 // content-refusal branch just before the KRL-alone pass (PR #76 review F8
-// (03-08j)). It writes nothing under DryRun, before a first install, when
-// v.Refused is set, when no part is ahead, or when the file already holds
-// the same bytes. A write that fails is logged, and the run goes on to the
-// KRL-alone pass: a revocation never waits for the record.
+// (03-08j)). It merges per kind and never narrows or lowers the record:
+// each part is the higher of the existing record's, while still ahead of
+// accepted/, and v's, and a part is replaced only by a higher version of
+// the same kind (mergeUnapplied). So a capture held at the bundle in force
+// keeps the record's bundle part. It writes nothing under DryRun, before a
+// first install, when v.Refused is set, when no part is ahead, or when the
+// file already holds the same bytes. A write that fails is logged, and the
+// run goes on to the KRL-alone pass: a revocation never waits for the
+// record.
+//
+// The record changes in exactly four ways: this write, which only raises
+// parts; finishCommit, which removes a record accepted/ has passed
+// (dropPassedRecord); ResetDirectory, which drops its directory part; and
+// forward's load, which drops a damaged or passed record (unappliedBase).
 func (e *engine) recordUnapplied(stored *state.Stored, v *state.Verified) {
 	if e.cfg.DryRun || stored == nil {
 		return
@@ -1118,6 +1124,9 @@ func (e *engine) recordUnapplied(stored *state.Stored, v *state.Verified) {
 	u := v.Unapplied(stored)
 	if u == nil {
 		return
+	}
+	if oldBase, old, err := loadUnapplied(e.l, stored); err == nil && oldBase != nil {
+		u = mergeUnapplied(stored, oldBase, old, u)
 	}
 	b, err := u.Encode()
 	if err == nil {
@@ -1137,6 +1146,24 @@ func (e *engine) recordUnapplied(stored *state.Stored, v *state.Verified) {
 		}
 	}
 	e.logf("recorded bundle %d / directory %d as unapplied: the next apply reads past them", bv, dv)
+}
+
+// mergeUnapplied is the record recordUnapplied writes: per kind the higher
+// of the existing record old (oldBase its base against accepted) and the
+// new record u; at an equal version the existing part stays.
+func mergeUnapplied(accepted, oldBase *state.Stored, old, u *state.Unapplied) *state.Unapplied {
+	nb, err := u.Base(accepted)
+	if err != nil || nb == nil {
+		return u
+	}
+	m := *u
+	if oldBase.BundleVersion > accepted.BundleVersion && oldBase.BundleVersion >= nb.BundleVersion {
+		m.Bundle, m.BundleSigs, m.Policy, m.PolicySigs = old.Bundle, old.BundleSigs, old.Policy, old.PolicySigs
+	}
+	if oldBase.DirectoryVersion > accepted.DirectoryVersion && oldBase.DirectoryVersion >= nb.DirectoryVersion {
+		m.Directory, m.DirectorySigs = old.Directory, old.DirectorySigs
+	}
+	return &m
 }
 
 // dropPassedRecord removes the unapplied record once accepted/ has passed
