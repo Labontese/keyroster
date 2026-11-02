@@ -395,18 +395,21 @@ func TestSpoolWindow(t *testing.T) {
 	t.Run("policy_rotation_below_the_recorded_bundle", func(t *testing.T) {
 		t.Parallel()
 		for _, newOps := range []bool{false, true} {
-			h := policyRotated(t, newOps, false)
-			r, err := h.apply()
-			if err != nil || r.DirectoryVersion != 65 || r.BundleVersion != 1 || !r.BundleHeld {
-				t.Fatalf("newOps %t: apply 2: %v, %+v; want directory 65 under bundle 1, held", newOps, err, r)
-			}
-			if newOps && r.KRLVersion == h.f.krlVersion {
-				t.Fatalf("newOps %t: the KRL the new ops key signed was taken under bundle 1", newOps)
-			}
-			if !newOps && !h.krlRevokes(h.l.Current(), 7) {
-				t.Fatalf("newOps %t: KRL 7 was not applied", newOps)
-			}
-			mustRecord(t, h, 3, 0)
+			t.Run(fmt.Sprintf("newOps=%t", newOps), func(t *testing.T) {
+				t.Parallel()
+				h := policyRotated(t, newOps, false)
+				r, err := h.apply()
+				if err != nil || r.DirectoryVersion != 65 || r.BundleVersion != 1 || !r.BundleHeld {
+					t.Fatalf("apply 2: %v, %+v; want directory 65 under bundle 1, held", err, r)
+				}
+				if newOps && r.KRLVersion == h.f.krlVersion {
+					t.Fatalf("the KRL the new ops key signed was taken under bundle 1")
+				}
+				if !newOps && !h.krlRevokes(h.l.Current(), 7) {
+					t.Fatalf("KRL 7 was not applied")
+				}
+				mustRecord(t, h, 3, 0)
+			})
 		}
 	})
 	t.Run("held_content_refusal_keeps_the_records_bundle", func(t *testing.T) {
