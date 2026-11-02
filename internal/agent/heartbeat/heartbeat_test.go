@@ -62,6 +62,12 @@ func TestValidate(t *testing.T) {
 		{"pending.step", func(s *Status) { s.Pending.Step = "" }},
 		{"stuck", func(s *Status) { s.Stuck = "stuck" }},
 		{"unapplied", func(s *Status) { s.Unapplied = &Unapplied{} }},
+		{"unapplied.bundle_sha256", func(s *Status) {
+			s.Unapplied = &Unapplied{Directory: 65, BundleSHA256: strings.Repeat("0f", 32)}
+		}},
+		{"unapplied.directory_sha256", func(s *Status) {
+			s.Unapplied = &Unapplied{Directory: 65, DirectorySHA256: strings.Repeat("0F", 32)}
+		}},
 		{"seq", func(s *Status) { s.Seq = 0 }},
 		{"seq", func(s *Status) { s.Seq = 1 << 63 }},
 	} {
@@ -82,9 +88,15 @@ func TestValidate(t *testing.T) {
 	// PR #76 review F8 (03-08j): a status naming an unapplied directory
 	// passes and survives the strict round trip.
 	un := full()
-	un.Unapplied = &Unapplied{Directory: 65}
+	un.Unapplied = &Unapplied{Directory: 65, DirectorySHA256: strings.Repeat("0f", 32)}
 	if err := Validate(&un); err != nil {
 		t.Errorf("a status with unapplied {directory: 65}: %v", err)
+	}
+	// An agent from before the SHA-256 fields sends versions only.
+	old := full()
+	old.Unapplied = &Unapplied{Bundle: 2, Directory: 65}
+	if err := Validate(&old); err != nil {
+		t.Errorf("a status with unapplied versions only: %v", err)
 	}
 	if b, err := trust.CanonicalJSON(&un); err != nil {
 		t.Error(err)
@@ -194,6 +206,12 @@ func TestCommittedAndDiverged(t *testing.T) {
 		{"unapplied_directory_at_current", Doc{Version: 4, SHA256: cd}, false, &Unapplied{Directory: 5}, false, false},
 		{"unapplied_directory_above_current", cur, false, &Unapplied{Directory: 6}, false, true},
 		{"unapplied_bundle_above_current", cur, false, &Unapplied{Bundle: 2}, false, true},
+		// PR #78 review, fix round 2: at the current number, the recorded
+		// SHA-256 decides; without one (an older agent) only the number.
+		{"unapplied_directory_at_current_same_bytes", Doc{Version: 4, SHA256: cd}, false, &Unapplied{Directory: 5, DirectorySHA256: ab}, false, false},
+		{"unapplied_directory_at_current_other_bytes", Doc{Version: 4, SHA256: cd}, false, &Unapplied{Directory: 5, DirectorySHA256: cd}, false, true},
+		{"unapplied_bundle_at_current_other_bytes", cur, false, &Unapplied{Bundle: 1, BundleSHA256: cd}, false, true},
+		{"unapplied_bundle_at_current_same_bytes", cur, false, &Unapplied{Bundle: 1, BundleSHA256: ab}, true, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := Status{Bundle: one, Directory: c.dir, KRL: KRL{Version: 1, SHA256: ab}, Unapplied: c.unapplied}

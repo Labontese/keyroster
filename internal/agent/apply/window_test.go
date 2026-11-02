@@ -974,13 +974,21 @@ func TestSpoolWindow(t *testing.T) {
 		if _, err := h.apply(); !errors.Is(err, ErrGenerationTooLarge) {
 			t.Fatalf("apply 1: %v, want generation_too_large", err)
 		}
+		// The record's SHA-256 per kind is computed from its own bytes
+		// (PR #78 review, fix round 2).
 		s := outboxStatus(t, h)
-		if s.Unapplied == nil || *s.Unapplied != (heartbeat.Unapplied{Directory: 65}) || s.Directory.Version != 1 {
-			t.Fatalf("status after apply 1: unapplied %+v, directory in force %d; want {directory: 65} and 1", s.Unapplied, s.Directory.Version)
+		want := heartbeat.Unapplied{Directory: 65, DirectorySHA256: trust.SHA256Hex(h.dirs[64].Body)}
+		if s.Unapplied == nil || *s.Unapplied != want || s.Directory.Version != 1 {
+			t.Fatalf("status after apply 1: unapplied %+v, directory in force %d; want %+v and 1", s.Unapplied, s.Directory.Version, want)
 		}
 		h.mustApply()
 		if s := outboxStatus(t, h); s.Unapplied != nil {
 			t.Fatalf("status after the fix: unapplied %+v, want none", s.Unapplied)
+		}
+		b := bundleRecorded(t)
+		want = heartbeat.Unapplied{Bundle: 2, BundleSHA256: trust.SHA256Hex(b.state.Bundles[2].Body)}
+		if s := outboxStatus(t, b); s.Unapplied == nil || *s.Unapplied != want {
+			t.Fatalf("status with a recorded bundle: unapplied %+v, want %+v", s.Unapplied, want)
 		}
 	})
 }

@@ -256,7 +256,7 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 			// but cannot apply. A record that does not load sets nothing;
 			// forward logs it.
 			if base, _, err := loadUnapplied(e.l, st); err == nil {
-				s.Unapplied = unappliedAhead(base, st).status()
+				s.Unapplied = unappliedStatus(base, st)
 			}
 			if mf, err := krl.ParseManifest(st.KRLManifest); err == nil && len(st.KRLManifest) > 0 {
 				// The manifest accepted/ holds is the in-force KRL's when

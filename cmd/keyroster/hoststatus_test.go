@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"strings"
 	"testing"
@@ -287,7 +288,11 @@ func TestServedLine(t *testing.T) {
 // number with another SHA-256, or a version above the current one, is
 // flagged diverged. So is one whose unapplied record is above the current
 // version, a version a signer restore lost (PR #78 review): its note gives
-// the remedy instead of saying it applies the next version it can.
+// the remedy instead of saying it applies the next version it can. Fix
+// round 2: a record at the current number with other bytes is lost too,
+// one with the same bytes is not, one without a SHA-256 (an older agent)
+// is judged by its number only, and a mixed record's note names only its
+// lost part as lost.
 func TestHostStatusDiverged(t *testing.T) {
 	ab, cd := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	same := hbStatus(5, 100)
@@ -297,14 +302,26 @@ func TestHostStatusDiverged(t *testing.T) {
 	ahead.Directory.SHA256 = cd
 	recorded := hbStatus(5, 100)
 	recorded.Unapplied = &heartbeat.Unapplied{Directory: 65}
+	remade := hbStatus(4, 100)
+	remade.Unapplied = &heartbeat.Unapplied{Directory: 5, DirectorySHA256: cd}
+	current := hbStatus(4, 100)
+	current.Unapplied = &heartbeat.Unapplied{Directory: 5, DirectorySHA256: ab}
+	older := hbStatus(4, 100)
+	older.Unapplied = &heartbeat.Unapplied{Directory: 5}
+	mixed := hbStatus(5, 100)
+	mixed.Unapplied = &heartbeat.Unapplied{Bundle: 2, BundleSHA256: ab, Directory: 65, DirectorySHA256: cd}
 	// Built as JSON: the current versions carry their SHA-256.
 	statusEnv(t, map[string]any{
-		"current": map[string]any{"bundle": 1, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
+		"current": map[string]any{"bundle": 2, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
 		"hosts": []serverclient.HostStatusRow{
 			statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: same}),
 			statusRow("web2", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: other}),
 			statusRow("web3", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: ahead}),
 			statusRow("web4", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: recorded}),
+			statusRow("web5", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: remade}),
+			statusRow("web6", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: current}),
+			statusRow("web7", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: older}),
+			statusRow("web8", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: mixed}),
 		},
 	})
 	code, out, stderr := run(t, "host", "status")
@@ -312,7 +329,7 @@ func TestHostStatusDiverged(t *testing.T) {
 		t.Fatalf("host status: exit %d: %s", code, stderr)
 	}
 	t.Logf("keyroster host status:\n%s", out)
-	if !strings.Contains(out, "directory v5 on 1/4 hosts\n") || !strings.Contains(out, "KRL v100 on 4/4 hosts\n") {
+	if !strings.Contains(out, "directory v5 on 1/8 hosts\n") || !strings.Contains(out, "KRL v100 on 8/8 hosts\n") {
 		t.Fatalf("diverged hosts counted as converged:\n%s", out)
 	}
 	flagged := map[string]bool{}
@@ -321,12 +338,29 @@ func TestHostStatusDiverged(t *testing.T) {
 			flagged[f[0]] = true
 		}
 	}
-	if !flagged["web2"] || !flagged["web3"] || !flagged["web4"] || flagged["web1"] {
-		t.Fatalf("diverged flags %v, want web2, web3 and web4:\n%s", flagged, out)
+	want := map[string]bool{"web2": true, "web3": true, "web4": true, "web5": true, "web8": true}
+	if !maps.Equal(flagged, want) {
+		t.Fatalf("diverged flags %v, want %v:\n%s", flagged, want, out)
 	}
-	if !strings.Contains(out, `web4: unapplied: it verified directory v65, above the server's current version, so a signer restore lost it; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md "Enrolled hosts and a re-made version")`) ||
-		strings.Contains(out, "web4: unapplied: it verified directory v65 but cannot apply it") {
-		t.Fatalf("web4's note does not give the remedy:\n%s", out)
+	lost := func(host, parts string) string {
+		return host + ": unapplied: it verified " + parts + `, which the server does not hold as current (above its current version, or that number with other bytes), so a signer restore lost it; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md "Enrolled hosts and a re-made version")`
+	}
+	cannot := func(host, parts string) string {
+		return host + ": unapplied: it verified " + parts + " but cannot apply it"
+	}
+	for _, c := range []struct {
+		want, not string
+	}{
+		{lost("web4", "directory v65"), cannot("web4", "directory v65")},
+		{lost("web5", "directory v5"), cannot("web5", "directory v5")},
+		{cannot("web6", "directory v5"), lost("web6", "directory v5")},
+		{cannot("web7", "directory v5"), lost("web7", "directory v5")},
+		{lost("web8", "directory v65"), "bundle v2 and directory v65"},
+		{cannot("web8", "bundle v2"), lost("web8", "bundle v2")},
+	} {
+		if !strings.Contains(out, c.want) || strings.Contains(out, c.not) {
+			t.Errorf("want the note %q and not %q:\n%s", c.want, c.not, out)
+		}
 	}
 }
 

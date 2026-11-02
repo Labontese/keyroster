@@ -1181,10 +1181,19 @@ structurally (see the warning above).
      03-08j). Either way the host refuses a different version with that
      number. A host whose `directory` is above the restored signer's
      directory version saw a lost directory. A host whose `bundle` is above
-     the restored signer's bundle version saw a lost bundle. If that bundle
-     is only recorded (the host's status shows `unapplied` with a bundle,
-     and `keyroster host status` flags it `diverged`), clear the record
-     and the lost bundle together, as root on the host:
+     the restored signer's bundle version saw a lost bundle: compare it
+     with the restored signer's bundle version as you noted it at restore
+     time, before anything new was installed. If that bundle is only
+     recorded (`accepted.json`'s bundle is above the restored signer's
+     bundle version, while `bundle.version` in
+     `/var/lib/keyroster-agent/outbox/status.json`, the accepted one, is
+     not), clear the record and the lost bundle together, as root on the
+     host. `keyroster host status` flagging the host `diverged` is a second
+     signal, not the trigger: it shows while the server's current bundle
+     is below the recorded one, or at its number with other bytes. A
+     status whose record carries no SHA-256 (the field is optional) is
+     judged by the number only, so its flag goes once a re-made version
+     reaches the recorded number. The steps:
      1. Read the host's accepted bundle version: `bundle.version` in
         `/var/lib/keyroster-agent/outbox/status.json` (the BUNDLE column
         of `keyroster host status`). `accepted.json` is no guide here: it

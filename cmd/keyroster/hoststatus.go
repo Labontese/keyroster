@@ -165,14 +165,15 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 		if h == nil || h.Status.Pending != nil {
 			continue
 		}
-		// A host whose unapplied record is above the current version of a
-		// kind is not on that version (PR #78 review): it refuses what
-		// comes next until root clears the record.
-		u := h.Status.Unapplied
-		if h.Status.Bundle == cb && (u == nil || u.Bundle <= cb.Version) {
+		// A host whose unapplied record holds a lost version of a kind
+		// (above the current one, or its number with other bytes) is not on
+		// that version (PR #78 review): it refuses what comes next until root
+		// clears the record.
+		bl, dl := h.Status.UnappliedLost(cb, cd)
+		if h.Status.Bundle == cb && !bl {
 			nb++
 		}
-		if h.Status.Directory == cd && (u == nil || u.Directory <= cd.Version) {
+		if h.Status.Directory == cd && !dl {
 			nd++
 		}
 		if h.Status.KRLDoc() == ck {
@@ -262,21 +263,34 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 					r.Name, st.Stuck, recoveryCommand))
 			}
 			if u := st.Unapplied; u != nil {
-				// PR #76 review F8 (03-08j).
-				var parts []string
-				if u.Bundle != 0 {
-					parts = append(parts, fmt.Sprintf("bundle v%d", u.Bundle))
-				}
-				if u.Directory != 0 {
-					parts = append(parts, fmt.Sprintf("directory v%d", u.Directory))
+				// PR #76 review F8 (03-08j). The parts a signer restore lost
+				// get the remedy note, the others the "cannot apply it" note
+				// (PR #78 review).
+				bl, dl := st.UnappliedLost(cb, cd)
+				var parts, lost, kept []string
+				for _, p := range []struct {
+					kind string
+					v    uint64
+					lost bool
+				}{{"bundle", u.Bundle, bl}, {"directory", u.Directory, dl}} {
+					if p.v == 0 {
+						continue
+					}
+					part := fmt.Sprintf("%s v%d", p.kind, p.v)
+					parts = append(parts, part)
+					if p.lost {
+						lost = append(lost, part)
+					} else {
+						kept = append(kept, part)
+					}
 				}
 				alerts = append(alerts, "unapplied: "+strings.Join(parts, ", "))
-				if st.UnappliedAbove(cb, cd) {
-					// PR #78 review: a recorded version above the server's
-					// current one is one a signer restore lost.
-					notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s, above the server's current version, so a signer restore lost it; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md \"Enrolled hosts and a re-made version\")", r.Name, strings.Join(parts, " and ")))
-				} else {
-					notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s but cannot apply it (its last apply error says why); revocations still apply, and it applies the next version it can (docs/runbooks/host-setup.md \"Revocations keep applying\")", r.Name, strings.Join(parts, " and ")))
+				if len(lost) > 0 {
+					it := map[bool]string{true: "them", false: "it"}[len(lost) > 1]
+					notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s, which the server does not hold as current (above its current version, or that number with other bytes), so a signer restore lost %s; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md \"Enrolled hosts and a re-made version\")", r.Name, strings.Join(lost, " and "), it))
+				}
+				if len(kept) > 0 {
+					notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s but cannot apply it (its last apply error says why); revocations still apply, and it applies the next version it can (docs/runbooks/host-setup.md \"Revocations keep applying\")", r.Name, strings.Join(kept, " and ")))
 				}
 			}
 			if st.KRLStale {

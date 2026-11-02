@@ -1064,12 +1064,22 @@ func unappliedAhead(base, accepted *state.Stored) *Unapplied {
 	return &u
 }
 
-// status is u as the heartbeat status carries it (nil: none).
-func (u *Unapplied) status() *heartbeat.Unapplied {
-	if u == nil {
+// unappliedStatus is unappliedAhead as the heartbeat status carries it
+// (nil: none), each part with the SHA-256 of the record's own document
+// bytes, the form Status's Doc fields use (PR #78 review, fix round 2).
+func unappliedStatus(base, accepted *state.Stored) *heartbeat.Unapplied {
+	a := unappliedAhead(base, accepted)
+	if a == nil {
 		return nil
 	}
-	return &heartbeat.Unapplied{Bundle: u.Bundle, Directory: u.Directory}
+	u := &heartbeat.Unapplied{Bundle: a.Bundle, Directory: a.Directory}
+	if a.Bundle != 0 {
+		u.BundleSHA256 = trust.SHA256Hex(base.Bundle)
+	}
+	if a.Directory != 0 {
+		u.DirectorySHA256 = trust.SHA256Hex(base.Directory)
+	}
+	return u
 }
 
 // recordedAhead is unappliedAhead for the record and accepted/ as they
