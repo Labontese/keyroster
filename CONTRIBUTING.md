@@ -110,12 +110,12 @@ the ruleset is updated, so job names change only together with
    <branch> origin/main`).
 2. Commit signed commits, push the branch and open a PR with a Conventional
    Commits title.
-3. Enable auto-merge with squash (`gh pr merge --auto --squash`). GitHub
-   merges as soon as every rule is satisfied.
-4. The code owner (`@Labontese`, see `.github/CODEOWNERS`) reviews and
+3. The code owner (`@Labontese`, see `.github/CODEOWNERS`) reviews and
    approves. A new push dismisses an earlier approval, the approval must come
    from someone other than the last pusher, and every review thread must be
    resolved.
+4. Once every rule is satisfied, the code owner squash-merges the PR in the
+   GitHub UI. Do not enable auto-merge.
 
 ### Claude's pull requests (keyroster-bot)
 
@@ -131,9 +131,10 @@ commits with its own SSH key.
 - Each Claude PR carries the code of one plan together with that plan's
   planning documents (SUMMARY and tracking updates), and ends at a merge gate
   driven by `scripts/merge-gate.sh BRANCH`. The script reports whether the
-  owner's approval is pending, waits for auto-merge after approval and then
-  fast-forwards local `main`. It talks to GitHub only as the bot, never
-  submits a review and never merges as administrator. It carries its own
+  owner's approval is pending, waits for the owner's squash merge after
+  approval and then fast-forwards local `main`. It talks to GitHub only as
+  the bot, never submits a review, never merges and never enables
+  auto-merge. It carries its own
   copy of the `gh-as-bot.sh` command, because after switching to the PR
   branch the file on disk is the PR's unreviewed copy, and it stops unless
   `gh api user` answers `keyroster-bot`.
