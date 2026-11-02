@@ -207,7 +207,7 @@ Plans:
 - [x] 03-08e-PLAN.md — The spool and a cut-short takeover never hold back a KRL (F01, F09): the fetcher refuses answers above the applier's read caps and heals its spool; the run loop repairs the drop-in while a Phase 2 removal is unfinished; apply --once has run's path defaults
 
 **Wave 15** *(blocked on Wave 14 completion)*
-- [x] 03-08j-PLAN.md � A host reads past a verified version it cannot apply and reports it (PR #76 review F8): the unapplied record, the fetcher's cursor past it, and the unapplied status
+- [x] 03-08j-PLAN.md — A host reads past a verified version it cannot apply and reports it (PR #76 review F8): the unapplied record, the fetcher's cursor past it, and the unapplied status
 
 **Wave 16** *(blocked on Wave 15 completion)*
 - [ ] 03-09-PLAN.md — T-03-100 checkpoint (the owner decides who receives the signed directory for host trust), then host certificates by PoP (kr3), CLI-managed @cert-authority and revoked-hosts list, `revoke host`

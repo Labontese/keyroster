@@ -105,7 +105,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08c | 168min | 4 tasks | 44 files |
 | Phase 03 P08d | 94min | 3 tasks | 20 files |
 | Phase 03 P08e | 40min | 3 tasks | 22 files |
-| Phase 03 P08j | 60min | 5 tasks | 31 files |
+| Phase 03 P08j | 60min | 5 tasks | 30 files |
 
 ## Accumulated Context
 
