@@ -306,7 +306,7 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 			d4r := spool.Doc{Body: doc4, Sigs: h.f.rootSign(trust.NamespaceBundle, doc4)}
 			h.state.Bundles[2], h.state.Bundles[3], h.state.Bundles[4] = d2r, d3r, d4r
 		}},
-		{name: "remade_chain_under_the_old_policy", krl: 8, wantErr: state.ErrPolicyMissing, during: func(t *testing.T, h *testHost, _ *trust.Bundle, _ spool.Doc) {
+		{name: "remade_chain_under_the_old_policy", krl: 8, wantErr: state.ErrPolicyMissing, during: func(_ *testing.T, h *testHost, _ *trust.Bundle, _ spool.Doc) {
 			// As remade_chain with 2', 3' and 4' all under bundle 1's
 			// policy, which a capture read from the record's floor (policy
 			// 2) does not hold: 4' is refused before its chain check.
@@ -323,12 +323,12 @@ func TestSpoolWindowWideningWait(t *testing.T) {
 			}
 			delete(h.state.Bundles, 3)
 		}},
-		{name: "fork_at_the_record_version", krl: 8, during: func(t *testing.T, h *testHost, b2 *trust.Bundle, d2 spool.Doc) {
+		{name: "fork_at_the_record_version", krl: 8, during: func(_ *testing.T, h *testHost, b2 *trust.Bundle, d2 spool.Doc) {
 			// The spool's 3 becomes a renderable 3' on the original 2.
 			_, d3r := h.f.successorWithout(b2, d2.Body, "2026-10-04T00:00:00Z")
 			h.state.Bundles[3] = d3r
 		}},
-		{name: "newer_directory_under_the_policy_in_force", dir: 3, krl: 8, during: func(t *testing.T, h *testHost, _ *trust.Bundle, _ spool.Doc) {
+		{name: "newer_directory_under_the_policy_in_force", dir: 3, krl: 8, during: func(_ *testing.T, h *testHost, _ *trust.Bundle, _ spool.Doc) {
 			// Bundle 2 carries the quorum of directory 3 too: the poll
 			// holds at bundle 1 again, never at bundle 2.
 			h.publishDir(h.spec("role:ops", "role:q"))
