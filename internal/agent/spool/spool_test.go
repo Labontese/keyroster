@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -283,6 +284,67 @@ func TestSpool(t *testing.T) {
 			if err := WriteFileAt(fd, n, nil, 0o600); !errors.Is(err, ErrBadName) {
 				t.Fatalf("WriteFileAt(%q): %v", n, err)
 			}
+		}
+	})
+}
+
+// TestReadRecapture (F01 (03-08e), 03-08j): a name Read's listing returned
+// that is gone at its open, as when the fetcher's prune removes it in
+// between, makes Read capture once more from a fresh listing; a second
+// such race fails the capture as before. The seam stands in for the prune.
+func TestReadRecapture(t *testing.T) {
+	doc := Doc{Body: []byte("d"), Sigs: []byte("s")}
+	floor := Floor{Bundle: 3, Policy: 2}
+	setup := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		// Bundle 3 names policy 2; policy 9 is an orphan no bundle names,
+		// inside the policy window of floor.
+		in := State{Bundles: map[uint64]Doc{3: doc}, Policies: map[uint64]Doc{2: doc, 9: doc}}
+		if err := Write(dir, in); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	remove := func(t *testing.T, dir string, v uint64) {
+		t.Helper()
+		for _, n := range []string{"policy-" + strconv.FormatUint(v, 10) + ".json", "policy-" + strconv.FormatUint(v, 10) + ".json.sigs"} {
+			if err := os.Remove(filepath.Join(dir, n)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Run("listed_name_gone_is_recaptured_once", func(t *testing.T) {
+		dir := setup(t)
+		n := 0
+		st, _, err := readSpool(dir, floor, func() {
+			if n++; n == 1 {
+				remove(t, dir, 9)
+			}
+		})
+		if err != nil {
+			t.Fatalf("a capture racing the prune: %v, want a recapture", err)
+		}
+		if _, ok := st.Policies[9]; ok || n != 2 {
+			t.Fatalf("policy 9 read %t, %d listings; want not read and 2", ok, n)
+		}
+		if _, ok := st.Policies[2]; !ok {
+			t.Fatalf("policy 2 was not read")
+		}
+	})
+	t.Run("gone_again_fails_the_capture", func(t *testing.T) {
+		dir := setup(t)
+		n, next := 0, uint64(9)
+		_, _, err := readSpool(dir, floor, func() {
+			n++
+			remove(t, dir, next)
+			next++
+			if err := Write(dir, State{Policies: map[uint64]Doc{next: doc}}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if !errors.Is(err, unix.ENOENT) || n != 2 {
+			t.Fatalf("two races in a row: %v after %d listings, want ENOENT after 2", err, n)
 		}
 	})
 }

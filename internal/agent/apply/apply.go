@@ -187,9 +187,20 @@ type Report struct {
 	// directory versions than this run's capture read (more than
 	// spool.MaxVersionsPerKind behind): keyroster-agent run applies again
 	// at once (PR #71 review F9).
-	SpoolMore bool     `json:"spool_more,omitempty"`
-	Diff      []string `json:"diff,omitempty"`
-	Errors    []string `json:"errors"`
+	SpoolMore bool `json:"spool_more,omitempty"`
+	// Unapplied names the versions of <state>/unapplied.json that are
+	// ahead of accepted/ after this run (state.Unapplied).
+	Unapplied *Unapplied `json:"unapplied,omitempty"`
+	Diff      []string   `json:"diff,omitempty"`
+	Errors    []string   `json:"errors"`
+}
+
+// Unapplied is Report.Unapplied: the bundle and directory versions the
+// applier verified but could not apply for their content, and now reads
+// past (0: no such part).
+type Unapplied struct {
+	Bundle    uint64 `json:"bundle,omitempty"`
+	Directory uint64 `json:"directory,omitempty"`
 }
 
 // KRLKept is Report.KRLKept: the KRL version in force in current (and the
@@ -293,6 +304,9 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 		}
 	}
 	if e.stateFd >= 0 {
+		if e.locked {
+			r.Unapplied = recordedAhead(l)
+		}
 		if e.locked && !cfg.DryRun && !r.NoOp {
 			if serr := e.writeStatus(); serr != nil && err == nil {
 				err = serr
@@ -709,16 +723,36 @@ func (e *engine) loadStored() (*state.Stored, error) {
 // generation meets the same preflight), lock and I/O errors, an injected
 // crash, and every failure once Transition started (a rollback keeps the
 // newest KRL, RollbackTarget).
+//
+// Before that KRL-alone pass, the parts of the refused verified state that
+// are ahead of accepted/ are recorded in <state>/unapplied.json
+// (recordUnapplied; PR #76 review F8 (03-08j)), and the next capture is
+// read and chained from the record (state.VerifyAhead): a host whose read
+// window ends at a version it cannot apply reads past it, and installs the
+// next version it can. Nothing from the record is rendered except as the
+// newest state a capture verified.
 func (e *engine) forward(ctx context.Context) error {
 	stored, err := e.loadStored()
 	if err != nil {
 		return err
 	}
-	st, err := e.capture(stored.Floor())
-	if err != nil {
-		return err
+	var st spool.State
+	var v *state.Verified
+	base := e.unappliedBase(stored)
+	if base != nil {
+		// PR #76 review F8 (03-08j): the capture is read and chained from
+		// the unapplied record; a refused step takes the KRL alone against
+		// accepted/.
+		if st, err = e.capture(base.Floor()); err != nil {
+			return err
+		}
+		v, err = state.VerifyAhead(e.pins, stored, base, st)
+	} else {
+		if st, err = e.capture(stored.Floor()); err != nil {
+			return err
+		}
+		v, err = state.Verify(e.pins, stored, st)
 	}
-	v, err := state.Verify(e.pins, stored, st)
 	if err != nil {
 		return err
 	}
@@ -786,6 +820,9 @@ func (e *engine) forward(ctx context.Context) error {
 			if !errors.Is(refusal, ErrCALineRejected) {
 				return refusal
 			}
+		}
+		if !isCrash(refusal) {
+			e.recordUnapplied(stored, v)
 		}
 		if v, err = e.krlAlone(stored, st, v, refusal); err != nil {
 			return err
@@ -975,6 +1012,204 @@ func (e *engine) krlAlone(prev *state.Stored, in spool.State, v *state.Verified,
 	return state.KRLAlone(e.pins, prev, in, refusal)
 }
 
+// loadUnapplied is the one loader of the unapplied record, <state>/
+// unapplied.json (PR #76 review F8 (03-08j)), read without following links
+// (spool.OpenDir, spool.ReadFileAt with state.MaxUnapplied) and parsed:
+// base is the state a capture is read and chained from (Unapplied.Base
+// against accepted), nil when accepted is nil or no part is ahead of it,
+// and u the record itself. An absent record is nil, nil, nil. Every
+// caller treats an error as no record: no loader error stops an apply, a
+// reset or a status write, and dropping a record only makes the host read
+// from accepted/ again.
+func loadUnapplied(l Layout, accepted *state.Stored) (*state.Stored, *state.Unapplied, error) {
+	fd, err := spool.OpenDir(l.StateDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	b, err := spool.ReadFileAt(fd, state.UnappliedFile, state.MaxUnapplied)
+	if errors.Is(err, unix.ENOENT) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	u, err := state.ParseUnapplied(b)
+	if err != nil {
+		return nil, nil, err
+	}
+	base, err := u.Base(accepted)
+	if err != nil {
+		return nil, nil, err
+	}
+	return base, u, nil
+}
+
+// unappliedAhead is the versions of base that are above accepted's (nil:
+// none), what Report.Unapplied names.
+func unappliedAhead(base, accepted *state.Stored) *Unapplied {
+	if base == nil || accepted == nil {
+		return nil
+	}
+	var u Unapplied
+	if base.BundleVersion > accepted.BundleVersion {
+		u.Bundle = base.BundleVersion
+	}
+	if base.DirectoryVersion > accepted.DirectoryVersion {
+		u.Directory = base.DirectoryVersion
+	}
+	if u == (Unapplied{}) {
+		return nil
+	}
+	return &u
+}
+
+// unappliedStatus is unappliedAhead as the heartbeat status carries it
+// (nil: none), each part with the SHA-256 of the record's own document
+// bytes, the form Status's Doc fields use (PR #78 review, fix round 2).
+func unappliedStatus(base, accepted *state.Stored) *heartbeat.Unapplied {
+	a := unappliedAhead(base, accepted)
+	if a == nil {
+		return nil
+	}
+	u := &heartbeat.Unapplied{Bundle: a.Bundle, Directory: a.Directory}
+	if a.Bundle != 0 {
+		u.BundleSHA256 = trust.SHA256Hex(base.Bundle)
+	}
+	if a.Directory != 0 {
+		u.DirectorySHA256 = trust.SHA256Hex(base.Directory)
+	}
+	return u
+}
+
+// recordedAhead is unappliedAhead for the record and accepted/ as they
+// are now; nil when either does not load.
+func recordedAhead(l Layout) *Unapplied {
+	accepted, err := loadAcceptedState(l)
+	if err != nil {
+		return nil
+	}
+	base, _, err := loadUnapplied(l, accepted)
+	if err != nil {
+		return nil
+	}
+	return unappliedAhead(base, accepted)
+}
+
+// unappliedBase is the base forward reads a capture from (nil: accepted/).
+// A record that does not load is logged and removed, and one with no part
+// ahead of accepted/ (a commit passed it), or any record before a first
+// install, is removed with a log line; none is removed under DryRun.
+func (e *engine) unappliedBase(stored *state.Stored) *state.Stored {
+	base, u, err := loadUnapplied(e.l, stored)
+	switch {
+	case err != nil:
+		e.logf("WARNING %s dropped: %v; reading from the accepted state", state.UnappliedFile, err)
+	case u == nil:
+		return nil
+	case base != nil:
+		return base
+	}
+	if !e.cfg.DryRun {
+		path := e.l.State(state.UnappliedFile)
+		if rerr := e.remove(path); rerr != nil {
+			e.logf("WARNING removing %s: %v", path, rerr)
+		} else if err == nil {
+			e.logf("removed %s: no part of it is ahead of the accepted state", path)
+		}
+	}
+	return nil
+}
+
+// recordUnapplied writes the unapplied record of v (Verified.Unapplied
+// against stored, accepted/) through writeState (0600), in forward's
+// content-refusal branch just before the KRL-alone pass (PR #76 review F8
+// (03-08j)). It merges per kind and never narrows or lowers the record:
+// each part is the higher of the existing record's, while still ahead of
+// accepted/, and v's, and a part is replaced only by a higher version of
+// the same kind (mergeUnapplied). So a capture held at the bundle in force
+// keeps the record's bundle part. It writes nothing under DryRun, before a
+// first install, when v.Refused is set, when no part is ahead, or when the
+// file already holds the same bytes. A write that fails is logged, and the
+// run goes on to the KRL-alone pass: a revocation never waits for the
+// record.
+//
+// The record changes in exactly four ways: this write, which only raises
+// parts; finishCommit, which removes a record accepted/ has passed
+// (dropPassedRecord); ResetDirectory, which drops its directory part; and
+// forward's load, which drops a damaged or passed record (unappliedBase).
+func (e *engine) recordUnapplied(stored *state.Stored, v *state.Verified) {
+	if e.cfg.DryRun || stored == nil {
+		return
+	}
+	u := v.Unapplied(stored)
+	if u == nil {
+		return
+	}
+	if oldBase, old, err := loadUnapplied(e.l, stored); err == nil && oldBase != nil {
+		u = mergeUnapplied(stored, oldBase, old, u)
+	}
+	b, err := u.Encode()
+	if err == nil {
+		if old, rerr := e.readState(state.UnappliedFile, state.MaxUnapplied); rerr == nil && bytes.Equal(old, b) {
+			return
+		}
+		err = e.writeState(state.UnappliedFile, b)
+	}
+	if err != nil {
+		e.logf("WARNING writing %s: %v; the KRL still applies alone", e.l.State(state.UnappliedFile), err)
+		return
+	}
+	var bv, dv uint64
+	if base, berr := u.Base(stored); berr == nil {
+		if a := unappliedAhead(base, stored); a != nil {
+			bv, dv = a.Bundle, a.Directory
+		}
+	}
+	e.logf("recorded bundle %d / directory %d as unapplied: the next apply reads past them", bv, dv)
+}
+
+// mergeUnapplied is the record recordUnapplied writes: per kind the higher
+// of the existing record old (oldBase its base against accepted) and the
+// new record u; at an equal version the existing part stays.
+func mergeUnapplied(accepted, oldBase *state.Stored, old, u *state.Unapplied) *state.Unapplied {
+	nb, err := u.Base(accepted)
+	if err != nil || nb == nil {
+		return u
+	}
+	m := *u
+	if oldBase.BundleVersion > accepted.BundleVersion && oldBase.BundleVersion >= nb.BundleVersion {
+		m.Bundle, m.BundleSigs, m.Policy, m.PolicySigs = old.Bundle, old.BundleSigs, old.Policy, old.PolicySigs
+	}
+	if oldBase.DirectoryVersion > accepted.DirectoryVersion && oldBase.DirectoryVersion >= nb.DirectoryVersion {
+		m.Directory, m.DirectorySigs = old.Directory, old.DirectorySigs
+	}
+	return &m
+}
+
+// dropPassedRecord removes the unapplied record once accepted/ has passed
+// it (Unapplied.Base reports no part ahead), at the end of every commit,
+// recovery's included (PR #76 review F8 (03-08j)), and logs the removal
+// (PR #78 review). A KRL-alone commit leaves the record ahead, so it
+// stays. A record or accepted/ that does not load is left to forward, and
+// a failed removal is only logged.
+func (e *engine) dropPassedRecord() {
+	stored, err := e.loadStored()
+	if err != nil || stored == nil {
+		return
+	}
+	base, u, err := loadUnapplied(e.l, stored)
+	if err != nil || u == nil || base != nil {
+		return
+	}
+	path := e.l.State(state.UnappliedFile)
+	if err := e.remove(path); err != nil {
+		e.logf("WARNING removing %s: %v", path, err)
+		return
+	}
+	e.logf("removed %s: the accepted bundle %d and directory %d have passed it", path, stored.BundleVersion, stored.DirectoryVersion)
+}
+
 // discard removes a generation that never became current.
 func (e *engine) discard(n uint64) {
 	if err := e.removeAll(e.l.Gen(n)); err == nil {
@@ -990,15 +1225,14 @@ func (e *engine) discard(n uint64) {
 // generation is then the pending target's with the newer KRL, and its
 // Verified carries the refusal, which forward returns after the commit. A
 // KRL-alone state with nothing newer returns the refusal, which the wait
-// logs.
+// logs. The capture is read and verified as forward's is (pollCapture):
+// from the unapplied record while it is ahead of the pending target. It
+// records no unapplied state: after the target's commit the next forward
+// records a refused state if one remains (PR #76 review F8 (03-08j)).
 func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target *Generation) (*Generation, *state.Verified, error) {
 	prev := pending.AsStored()
-	st, err := e.capture(prev.Floor())
-	if err != nil {
-		return nil, nil, err
-	}
-	v, err := state.Verify(e.pins, prev, st)
-	if err != nil || !v.Changed() {
+	v, st, err := e.pollCapture(prev)
+	if err != nil || v == nil || !v.Changed() {
 		return nil, nil, err
 	}
 	for {
@@ -1030,6 +1264,46 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 			return nil, nil, v.Refused
 		}
 	}
+}
+
+// pollCapture is a widening wait's capture and its verification against
+// prev, the pending target's state (PR #78 review, 03-08j). While the
+// unapplied record has a part ahead of prev (Unapplied.Base against prev:
+// per kind the record's part when it is higher, prev's otherwise), the
+// record is the chain base, as in forward: the capture is read from that
+// base's floor and verified by VerifyAhead with prev as the state the
+// KRL-alone pass and the lowest hold step use. So a wait holds the record's
+// fork and rollback evidence as forward does: an older bundle below the
+// record is never read, a spool copy at the record's version adds no
+// step, and a chain that does not chain to the record's bytes is refused,
+// its KRL taken alone against prev. A capture that brings no bundle,
+// policy or directory beyond the base supersedes the target only with a
+// newer KRL, verified against prev (KRLAlone): the record itself is
+// rendered again by the next forward, not by every poll. Without such a
+// record, or with one that does not load, the capture is verified against
+// prev (Verify). v is nil when nothing is newer.
+func (e *engine) pollCapture(prev *state.Stored) (*state.Verified, spool.State, error) {
+	base, _, err := loadUnapplied(e.l, prev)
+	if err != nil || base == nil {
+		st, err := e.capture(prev.Floor())
+		if err != nil {
+			return nil, st, err
+		}
+		v, err := state.Verify(e.pins, prev, st)
+		return v, st, err
+	}
+	st, err := e.capture(base.Floor())
+	if err != nil {
+		return nil, st, err
+	}
+	v, err := state.VerifyAhead(e.pins, prev, base, st)
+	if err != nil || v.Refused != nil {
+		return v, st, err
+	}
+	if bytes.Equal(v.Next.Bundle, base.Bundle) && bytes.Equal(v.Next.Policy, base.Policy) && bytes.Equal(v.Next.Directory, base.Directory) {
+		v, err = state.KRLAlone(e.pins, prev, st, nil)
+	}
+	return v, st, err
 }
 
 // isCrash reports an error injected by the Fault hook: the run stops
@@ -1379,7 +1653,8 @@ func (e *engine) commit(n uint64, v *state.Verified) error {
 }
 
 // finishCommit is the end of a commit, and what recovery runs for a
-// commit marker: accepted/ snapshot snap activated (0: none staged),
+// commit marker: accepted/ snapshot snap activated (0: none staged), an
+// unapplied record the new accepted/ has passed removed (dropPassedRecord),
 // last-good to n, the marker cleared, dropin.prev removed, old
 // generations removed.
 func (e *engine) finishCommit(n, snap uint64) error {
@@ -1397,6 +1672,7 @@ func (e *engine) finishCommit(n, snap uint64) error {
 			return err
 		}
 	}
+	e.dropPassedRecord()
 	if err := e.setLastGood(n); err != nil {
 		return err
 	}

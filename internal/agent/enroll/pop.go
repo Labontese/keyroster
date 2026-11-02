@@ -275,7 +275,8 @@ const (
 )
 
 // Accepted is AcceptedFile: per kind, the version the applier has
-// accepted (0: none); KRL is the KRL version the host enforces.
+// accepted, or recorded as unapplied when higher (0: none; PR #76 review F8
+// (03-08j)); KRL is the KRL version the host enforces.
 type Accepted struct {
 	Bundle    uint64 `json:"bundle"`
 	Directory uint64 `json:"directory"`

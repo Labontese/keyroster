@@ -165,10 +165,15 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 		if h == nil || h.Status.Pending != nil {
 			continue
 		}
-		if h.Status.Bundle == cb {
+		// A host whose unapplied record holds a lost version of a kind
+		// (above the current one, or its number with other bytes) is not on
+		// that version (PR #78 review): it refuses what comes next until root
+		// clears the record.
+		bl, dl := h.Status.UnappliedLost(cb, cd)
+		if h.Status.Bundle == cb && !bl {
 			nb++
 		}
-		if h.Status.Directory == cd {
+		if h.Status.Directory == cd && !dl {
 			nd++
 		}
 		if h.Status.KRLDoc() == ck {
@@ -257,6 +262,37 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 				notes = append(notes, fmt.Sprintf("%s: stuck: %s; the host applies nothing, revocations included, until root runs `%s` there (docs/runbooks/host-setup.md \"Manual recovery\")",
 					r.Name, st.Stuck, recoveryCommand))
 			}
+			if u := st.Unapplied; u != nil {
+				// PR #76 review F8 (03-08j). The parts a signer restore lost
+				// get the remedy note, the others the "cannot apply it" note
+				// (PR #78 review).
+				bl, dl := st.UnappliedLost(cb, cd)
+				var parts, lost, kept []string
+				for _, p := range []struct {
+					kind string
+					v    uint64
+					lost bool
+				}{{"bundle", u.Bundle, bl}, {"directory", u.Directory, dl}} {
+					if p.v == 0 {
+						continue
+					}
+					part := fmt.Sprintf("%s v%d", p.kind, p.v)
+					parts = append(parts, part)
+					if p.lost {
+						lost = append(lost, part)
+					} else {
+						kept = append(kept, part)
+					}
+				}
+				alerts = append(alerts, "unapplied: "+strings.Join(parts, ", "))
+				if len(lost) > 0 {
+					it := map[bool]string{true: "them", false: "it"}[len(lost) > 1]
+					notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s, which the server does not hold as current (above its current version, or that number with other bytes), so a signer restore lost %s; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md \"Enrolled hosts and a re-made version\")", r.Name, strings.Join(lost, " and "), it))
+				}
+				if len(kept) > 0 {
+					notes = append(notes, fmt.Sprintf("%s: unapplied: it verified %s but cannot apply it (its last apply error says why); revocations still apply, and it applies the next version it can (docs/runbooks/host-setup.md \"Revocations keep applying\")", r.Name, strings.Join(kept, " and ")))
+				}
+			}
 			if st.KRLStale {
 				alerts = append(alerts, "krl_stale")
 			}
@@ -283,7 +319,7 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 	for _, n := range notes {
 		b.WriteString(safe(n) + "\n")
 	}
-	b.WriteString("Versions marked * differ from the server's current ones (number or SHA-256); a host counts on a version only with no swap pending.\n")
+	b.WriteString("Versions marked * differ from the server's current ones (number or SHA-256); a host counts on a version only with no swap pending and no unapplied version above it.\n")
 	b.WriteString(statusFooter)
 	return b.String()
 }

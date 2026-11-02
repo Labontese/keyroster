@@ -119,23 +119,39 @@ func (v *Verified) AsStored() *Stored {
 // with the earlier refusal joined to it.
 //
 // Verify reads only in; the bytes it checks are the bytes it returns in
-// Next.
+// Next. VerifyAhead is Verify for a capture read from an unapplied record
+// (PR #76 review F8 (03-08j)).
 func Verify(p *Pins, prev *Stored, in spool.State) (*Verified, error) {
+	return verify(p, prev, prev, in)
+}
+
+// verify is Verify with the bundle, directory and KRL steps run against
+// chain, and the KRL-alone pass of a refused step against alone, the
+// accepted state. When chain holds a bundle above alone's (an unapplied
+// record's bundle part, VerifyAhead), alone's bundle stays the lowest hold
+// step, below chain's, so holdBundle can still hold the capture at the
+// bundle in force (PR #76 review F8 (03-08j)). Only BundleVersion is
+// compared: with chain's bundle alone's, the steps are exactly Verify's.
+func verify(p *Pins, chain, alone *Stored, in spool.State) (*Verified, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
 	v := &Verified{}
-	if prev != nil {
-		v.Next = *prev
+	if chain != nil {
+		v.Next = *chain
 	}
-	refused := v.verifyBundle(p, prev, in)
+	refused := v.verifyBundle(p, chain, in)
+	if refused == nil && alone != nil && alone.Bundle != nil && chain != nil && chain.BundleVersion > alone.BundleVersion {
+		inForce := bundleStep{bundle: alone.bundle, policy: alone.policy, doc: spool.Doc{Body: alone.Bundle, Sigs: alone.BundleSigs}, polDoc: spool.Doc{Body: alone.Policy, Sigs: alone.PolicySigs}}
+		v.steps = append([]bundleStep{inForce}, v.steps...)
+	}
 	if refused == nil {
-		refused = v.verifyDirectory(p, prev, in)
+		refused = v.verifyDirectory(p, chain, in)
 	}
 	if refused != nil {
-		return KRLAlone(p, prev, in, refused)
+		return KRLAlone(p, alone, in, refused)
 	}
-	if err := v.verifyKRL(p, prev, in); err != nil {
+	if err := v.verifyKRL(p, chain, in); err != nil {
 		return nil, err
 	}
 	return v, nil

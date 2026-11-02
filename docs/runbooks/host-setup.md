@@ -999,23 +999,61 @@ the directory and principals it had until the server publishes a
 directory it can apply: split the oversize host group or roles and
 publish again.
 
-That does not help a host that is far behind. An apply reads at most 64
-versions of each kind past the ones the host accepted, so when the
-refused version is the newest of those, a fixed version published after
-it never enters a capture. In such a host's report `spool_more` stays
-true under the same `generation_too_large` or `ca_line_rejected` refusal,
-apply after apply (the report is one JSON line per apply in the applier
-unit's journal, or the output of `sudo keyroster-agent apply --once`).
-Publishing again does not move it:
+A host that is far behind reads past a version it cannot apply (PR #76
+review F8, 03-08j). An apply reads at most 64 versions of each kind past
+the ones the host holds. When the newest of those is one the host cannot
+apply (`generation_too_large`, `ca_line_rejected`), the applier records
+that verified state as unapplied, in
+`/var/lib/keyroster-agent/unapplied.json` (root, 0600), and the next apply
+reads past it, so a fixed version published later arrives. While the host
+keeps refusing, the walk moves about 64 versions per retry (60 s), and at
+once when the fetcher brings new versions. Meanwhile only KRLs apply; the
+principals and CA keys stay as they are. The recorded state is installed
+only when an apply can apply it as the newest version it verified, for
+example after `ssh-keygen` is upgraded. `outbox/accepted.json` names the
+recorded versions, so the fetcher asks the server for what comes after
+them, and keeps the spool from them (the fetcher paragraph below).
 
-- For a directory, run `keyroster-agent reset-directory` on the host as
-  root. The next poll then takes the server's current directory the way a
-  first install does (signer-install.md, "Re-bootstrap each such host").
-- For a bundle, escalate: `reset-directory` re-bootstraps the directory
-  only.
+The record counts as an accepted version. A different version with the
+same number, or a chain not built on it, is refused
+(`directory_not_verified` or `bundle_not_verified`), as after a signer
+restore (signer-install.md). A host catching up across a policy rotation
+still holds at its bundle in force and applies the directory, as without
+a record. `keyroster-agent reset-directory` drops the record's directory
+along with the accepted one. Otherwise, publishing a fixed version is
+enough, and no reset is needed.
 
-Revocations keep applying meanwhile. UNVERIFIED on a real host: no test
-or drill runs this case.
+One case needs a hand action (UNVERIFIED: no test builds two policy
+rotations in one gap, and none runs this remedy). A directory signed only
+under a policy strictly between the bundle in force and the recorded
+bundle is refused on every apply. KRLs signed by the in-force ops key
+still land, and the status shows `unapplied`; publishing newer versions
+does not clear it. On a host whose last apply error is
+`directory_not_verified` while its status shows an unapplied bundle, run
+`sudo rm /var/lib/keyroster-agent/unapplied.json`, then
+`sudo keyroster-agent apply --once`. `keyroster-agent reset-directory`
+also clears it once the newest directory then verifies standalone.
+
+Removing `unapplied.json` by hand is always safe: the host then reads
+from its accepted state again. While the record existed the fetcher kept
+the spool from the recorded versions, so the next apply can report
+`directory_chain_gap` or `bundle_chain_gap` until the next poll fetches
+the versions just above the accepted state again; the KRL still lands,
+and nothing else is installed. That sentence is UNVERIFIED: no test
+combines a removed record with a pruned spool.
+
+Run in CI (03-08j): `TestSpoolWindow`
+(`refused_window_newest_then_fix_applies`,
+`refused_run_longer_than_a_window_reaches_fix`,
+`bundle_ca_line_window_newest_then_fixed_bundle_applies`,
+`policy_rotation_below_the_recorded_bundle`,
+`fork_after_the_record_refused`,
+`withheld_record_version_does_not_roll_back`,
+`removed_record_reads_from_accepted`,
+`fetcher_cursor_follows_the_record`,
+`reset_directory_drops_the_records_directory`). UNVERIFIED on a real
+host, and beyond what the tests build (at most 130 versions): no test or
+drill runs a host thousands of versions behind.
 
 Failed applies no longer pile up generations under `gen/`:
 every rollback, and every undone first install, ends with the retention
@@ -1062,6 +1100,16 @@ and `TestSpool/cap_is_what_read_enforces`. UNVERIFIED on a real host: no
 03-16 drill provokes these refusals, and the byte figures are computed
 from the caps, not measured.
 
+While a host holds an unapplied record, `outbox/accepted.json` names the
+recorded versions, so the prune counts its 1024 versions from them, not
+from the accepted state (03-08j). Run in CI:
+`fetcher_cursor_follows_the_record`; that the prune then keeps what the
+record's capture reads is reasoned from the code (UNVERIFIED). An apply
+whose capture finds a listed spool file gone, because the prune removed it
+in between, captures once more, so it no longer fails on that race
+(F01 (03-08e), 03-08j). Run in CI: `TestReadRecapture`; no test races a
+real capture against a real prune (UNVERIFIED).
+
 **Watch the hosts** (admin workstation):
 
 ```
@@ -1086,7 +1134,9 @@ the server's current ones, by number or SHA-256), the generation, drift,
 the last apply's result (`ok`, `refused`, `rolled_back` or `error`, with
 its `detail` and `host_status`), and its alerts. A host counts on a version
 in the header only when it applied exactly that version, SHA-256 included,
-and no swap is pending. During 03-05's two-step
+no swap is pending, and its unapplied record (below) holds no lost
+version of that kind (above the server's current one, or its number with
+other bytes). During 03-05's two-step
 swap the row shows `pending: intermediate` (or `final`, `commit`), which is
 not a failure: the versions are still the last committed ones until the
 final step and its self-test. The applier writes that status each time it
@@ -1232,11 +1282,35 @@ T-03-284, pending todo `signed-applier-status`).
   identity rotation](#running-the-agent) (D-R1).
 - `stuck: pending_state_unknown`: see [Manual recovery](#manual-recovery).
 - `diverged`: the host reports a bundle, directory or KRL above the
-  server's current version, or the current number with other bytes. That
-  is the sign of a host that accepted a version a signer restore lost
-  (signer-install.md): check its `accepted.json` and reset its directory
-  as that runbook says. It never counts as converged. (Run in CI:
-  `TestHostStatusDiverged`, `TestCommittedAndDiverged`.)
+  server's current version, or the current number with other bytes, or
+  an unapplied version that is either. That is the sign
+  of a host that accepted or recorded a version a signer restore lost
+  (signer-install.md): check its `accepted.json` and follow that
+  runbook's "Enrolled hosts and a re-made version". It never counts as
+  converged. (Run in CI: `TestHostStatusDiverged`,
+  `TestCommittedAndDiverged`.)
+- `unapplied: directory vN` (or `bundle vN`, or both): the host verified
+  that version but cannot apply it, and the last apply error says why
+  (03-08j). It reads past the version and applies the next one it can,
+  and revocations still apply (see "Revocations keep applying"). When the
+  version is above the server's current one, or at its number with other
+  bytes (the status carries the recorded SHA-256 per kind), the server lost
+  it in a signer restore: the host also shows `diverged`, refuses the
+  re-made chain, and the note for that part points to signer-install.md's
+  remedy instead; a part the server still holds keeps the note above. A
+  status whose record carries no SHA-256 (the field is optional) is judged
+  by its number only: its flag and remedy note then show only while the
+  server's current version is below the recorded one. Update
+  keyroster-server before the agents: a server from before 03-08j refuses
+  a heartbeat whose status carries `unapplied` (`heartbeat_field_invalid`).
+  The host's stored status then stops moving, and `keyroster host status`
+  shows it with the `status_stale` alert until the server is updated. Do
+  not roll the server back below 03-08j once agents have sent
+  `unapplied`: that server cannot parse the heartbeats it already stored
+  for those hosts. The keyroster CLI ignores fields it does not know, so
+  its version does not matter. (Run in CI: `TestHostStatusUnapplied`,
+  `TestValidate`, `status_reports_unapplied`. The rollout sentences are
+  UNVERIFIED: no test runs mixed server versions.)
 
 **Rotating the agent's identity.** On the host:
 

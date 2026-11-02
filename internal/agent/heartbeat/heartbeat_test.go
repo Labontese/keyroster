@@ -61,6 +61,13 @@ func TestValidate(t *testing.T) {
 		{"last_check.error", func(s *Status) { s.LastCheck.Error, s.LastCheck.Drift = "sshd_T_failed: x", true }},
 		{"pending.step", func(s *Status) { s.Pending.Step = "" }},
 		{"stuck", func(s *Status) { s.Stuck = "stuck" }},
+		{"unapplied", func(s *Status) { s.Unapplied = &Unapplied{} }},
+		{"unapplied.bundle_sha256", func(s *Status) {
+			s.Unapplied = &Unapplied{Directory: 65, BundleSHA256: strings.Repeat("0f", 32)}
+		}},
+		{"unapplied.directory_sha256", func(s *Status) {
+			s.Unapplied = &Unapplied{Directory: 65, DirectorySHA256: strings.Repeat("0F", 32)}
+		}},
 		{"seq", func(s *Status) { s.Seq = 0 }},
 		{"seq", func(s *Status) { s.Seq = 1 << 63 }},
 	} {
@@ -77,6 +84,24 @@ func TestValidate(t *testing.T) {
 	h := Heartbeat{Status: full(), ClockOffsetS: MaxClockOffset + 1}
 	if err := ValidateHeartbeat(&h); Field(err) != "clock_offset_s" {
 		t.Errorf("an offset above the bound: %v", err)
+	}
+	// PR #76 review F8 (03-08j): a status naming an unapplied directory
+	// passes and survives the strict round trip.
+	un := full()
+	un.Unapplied = &Unapplied{Directory: 65, DirectorySHA256: strings.Repeat("0f", 32)}
+	if err := Validate(&un); err != nil {
+		t.Errorf("a status with unapplied {directory: 65}: %v", err)
+	}
+	// An agent from before the SHA-256 fields sends versions only.
+	old := full()
+	old.Unapplied = &Unapplied{Bundle: 2, Directory: 65}
+	if err := Validate(&old); err != nil {
+		t.Errorf("a status with unapplied versions only: %v", err)
+	}
+	if b, err := trust.CanonicalJSON(&un); err != nil {
+		t.Error(err)
+	} else if back, err := ParseStatus(b); err != nil || back.Unapplied == nil || *back.Unapplied != *un.Unapplied {
+		t.Errorf("unapplied after ParseStatus: %+v, %v", back, err)
 	}
 }
 
@@ -160,7 +185,8 @@ func FuzzParseStatus(f *testing.F) {
 
 // TestCommittedAndDiverged (PR #72 review C5): a host is on a version only
 // with its SHA-256 too, and one above the current version or on the
-// current number with other bytes is diverged.
+// current number with other bytes is diverged. So is one whose unapplied
+// record is above the current version (PR #78 review).
 func TestCommittedAndDiverged(t *testing.T) {
 	ab, cd := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	cur := Doc{Version: 5, SHA256: ab}
@@ -169,16 +195,26 @@ func TestCommittedAndDiverged(t *testing.T) {
 		name                string
 		dir                 Doc
 		pending             bool
+		unapplied           *Unapplied
 		committed, diverged bool
 	}{
-		{"same", cur, false, true, false},
-		{"pending", cur, true, false, false},
-		{"older", Doc{Version: 4, SHA256: cd}, false, false, false},
-		{"same_number_other_sha", Doc{Version: 5, SHA256: cd}, false, false, true},
-		{"above_current", Doc{Version: 6, SHA256: cd}, false, false, true},
+		{"same", cur, false, nil, true, false},
+		{"pending", cur, true, nil, false, false},
+		{"older", Doc{Version: 4, SHA256: cd}, false, nil, false, false},
+		{"same_number_other_sha", Doc{Version: 5, SHA256: cd}, false, nil, false, true},
+		{"above_current", Doc{Version: 6, SHA256: cd}, false, nil, false, true},
+		{"unapplied_directory_at_current", Doc{Version: 4, SHA256: cd}, false, &Unapplied{Directory: 5}, false, false},
+		{"unapplied_directory_above_current", cur, false, &Unapplied{Directory: 6}, false, true},
+		{"unapplied_bundle_above_current", cur, false, &Unapplied{Bundle: 2}, false, true},
+		// PR #78 review, fix round 2: at the current number, the recorded
+		// SHA-256 decides; without one (an older agent) only the number.
+		{"unapplied_directory_at_current_same_bytes", Doc{Version: 4, SHA256: cd}, false, &Unapplied{Directory: 5, DirectorySHA256: ab}, false, false},
+		{"unapplied_directory_at_current_other_bytes", Doc{Version: 4, SHA256: cd}, false, &Unapplied{Directory: 5, DirectorySHA256: cd}, false, true},
+		{"unapplied_bundle_at_current_other_bytes", cur, false, &Unapplied{Bundle: 1, BundleSHA256: cd}, false, true},
+		{"unapplied_bundle_at_current_same_bytes", cur, false, &Unapplied{Bundle: 1, BundleSHA256: ab}, true, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			s := Status{Bundle: one, Directory: c.dir, KRL: KRL{Version: 1, SHA256: ab}}
+			s := Status{Bundle: one, Directory: c.dir, KRL: KRL{Version: 1, SHA256: ab}, Unapplied: c.unapplied}
 			if c.pending {
 				s.Pending = &Pending{Step: StepIntermediate}
 			}

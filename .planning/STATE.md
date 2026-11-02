@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08e-PLAN.md (PR #77 open, awaiting the merge gate)"
-last_updated: "2026-11-01T08:37:00.000Z"
+stopped_at: "Completed 03-08j-PLAN.md (PR #78 open, awaiting the merge gate)"
+last_updated: "2026-11-02T04:10:00.000Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
 state_head: 9fab51244fd6febfa415a5be4115c5b4d6084eb4
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 58
-  completed_plans: 50
+  total_plans: 59
+  completed_plans: 51
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 16 of 23
+Plan: 17 of 24
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -105,6 +105,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08c | 168min | 4 tasks | 44 files |
 | Phase 03 P08d | 94min | 3 tasks | 20 files |
 | Phase 03 P08e | 40min | 3 tasks | 22 files |
+| Phase 03 P08j | 60min | 5 tasks | 30 files |
 
 ## Accumulated Context
 
@@ -290,6 +291,10 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08e: spool.Cap is the one source of the spool's read caps; the fetcher refuses an answer above them or above MaxAgentStatePerKind (state_item_over_cap) before any write, and heals oversize recognised regular files at every poll
 - [Phase 03]: 03-08e: phase2Shadowed is the one Phase 2 leftover filter for Preflight, preflightApply and Check; the runbook's sshd -T values are exempt only while phase2-adopt.json exists, and never in Check
 - [Phase 03]: 03-08e: keyroster-agent apply --once defaults --state-dir and --spool as run does (parseApply)
+- [Phase 03]: 03-08j: a verified state refused for its content is recorded in <state>/unapplied.json; while it exists it is the only chain base (state.VerifyAhead), the KRL-alone pass stays on accepted/, and the bundle in force stays the lowest hold step
+- [Phase 03]: 03-08j: recordUnapplied merges per kind and never lowers a part; finishCommit removes a passed record, reset-directory drops its directory part first
+- [Phase 03]: 03-08j: outbox accepted.json names the record's versions where higher, so the fetcher's cursor and 03-08e's prune follow the record; the heartbeat status carries unapplied {bundle, directory}
+- [Phase 03]: 03-08j: spool.Read recaptures once after an ENOENT for a listed name (F01 (03-08e) follow-up)
 
 ### Pending Todos
 

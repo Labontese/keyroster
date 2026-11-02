@@ -169,7 +169,26 @@ type Status struct {
 	Pending        *Pending   `json:"pending"`
 	Stuck          string     `json:"stuck"`
 	KRLStale       bool       `json:"krl_stale"`
+	Unapplied      *Unapplied `json:"unapplied,omitempty"`
 	Seq            uint64     `json:"seq"`
+}
+
+// Unapplied is Status.Unapplied (PR #76 review F8 (03-08j)): the newest
+// bundle and directory versions the applier verified but could not apply
+// for their content, and now reads past (0: none of that kind), each with
+// the SHA-256 of the recorded document, as Status's Doc fields carry it
+// (PR #78 review, fix round 2). The versions in force stay in
+// Status.Bundle and Status.Directory. Validate refuses an Unapplied whose
+// two versions are both zero, and a SHA-256 that is not 64 lowercase hex
+// characters or names a kind without a version; a version without a
+// SHA-256 passes (the field is optional). It has no rule against
+// the versions in force, so a status written while accepted/ and the
+// record moved never makes the server refuse the heartbeat.
+type Unapplied struct {
+	Bundle          uint64 `json:"bundle,omitempty"`
+	BundleSHA256    string `json:"bundle_sha256,omitempty"`
+	Directory       uint64 `json:"directory,omitempty"`
+	DirectorySHA256 string `json:"directory_sha256,omitempty"`
 }
 
 // Heartbeat is the body of POST /api/v1/agent/heartbeat: the applier's
@@ -345,6 +364,20 @@ func Validate(s *Status) error {
 	if s.Stuck != "" && s.Stuck != StuckPendingStateUnknown {
 		return bad("stuck")
 	}
+	if u := s.Unapplied; u != nil {
+		if u.Bundle == 0 && u.Directory == 0 {
+			return bad("unapplied")
+		}
+		for _, p := range []struct {
+			name string
+			v    uint64
+			sum  string
+		}{{"unapplied.bundle_sha256", u.Bundle, u.BundleSHA256}, {"unapplied.directory_sha256", u.Directory, u.DirectorySHA256}} {
+			if p.sum != "" && (p.v == 0 || !hexRE.MatchString(p.sum)) {
+				return bad(p.name)
+			}
+		}
+	}
 	if s.Seq == 0 || s.Seq > math.MaxInt64 {
 		return bad("seq")
 	}
@@ -414,19 +447,48 @@ func Field(err error) string {
 func (s *Status) KRLDoc() Doc { return Doc{Version: s.KRL.Version, SHA256: s.KRL.SHA256} }
 
 // Committed reports whether s's committed bundle, directory and KRL are
-// exactly bundle, directory and krl, versions and SHA-256 alike, and no
-// swap is pending: what keyroster host status and 03-12's rotation gate
-// count as converged (PR #72 review C5: a same-numbered version with
-// other bytes, for example one a signer restore lost, is not).
+// exactly bundle, directory and krl, versions and SHA-256 alike, no swap
+// is pending and no part of its unapplied record is lost (UnappliedLost):
+// what keyroster host status and 03-12's rotation gate count as converged
+// (PR #72 review C5: a same-numbered version with other bytes, for
+// example one a signer restore lost, is not).
 func (s *Status) Committed(bundle, directory, krl Doc) bool {
-	return s.Pending == nil && s.Bundle == bundle && s.Directory == directory && s.KRLDoc() == krl
+	b, d := s.UnappliedLost(bundle, directory)
+	return s.Pending == nil && s.Bundle == bundle && s.Directory == directory && s.KRLDoc() == krl && !b && !d
+}
+
+// UnappliedLost reports, per kind, whether s's unapplied record names a
+// version the server does not hold as current (PR #78 review): above the
+// server's current version, or at its number with another SHA-256. The
+// record holds only versions the server once served, so either happens
+// only after a signer restore lost that version, and the host then
+// refuses the re-made chain until root clears the record
+// (docs/runbooks/signer-install.md). A part without a SHA-256 (the field
+// is optional) is judged by its number only, so once a re-made version
+// reaches its number it is no longer reported lost.
+func (s *Status) UnappliedLost(bundle, directory Doc) (bundleLost, directoryLost bool) {
+	u := s.Unapplied
+	if u == nil {
+		return false, false
+	}
+	return lostPart(u.Bundle, u.BundleSHA256, bundle), lostPart(u.Directory, u.DirectorySHA256, directory)
+}
+
+// lostPart is UnappliedLost for one kind: version v with SHA-256 sum
+// against the current cur.
+func lostPart(v uint64, sum string, cur Doc) bool {
+	return v > cur.Version || v != 0 && v == cur.Version && sum != "" && cur.SHA256 != "" && sum != cur.SHA256
 }
 
 // Diverged reports whether any of s's bundle, directory and KRL is a
 // version the server never published as current: above the server's
 // current one, or the current number with another SHA-256 (PR #72 review
-// C5). Such a host needs a look (docs/runbooks/host-setup.md "Alerts").
+// C5), or whether a part of its unapplied record is lost (UnappliedLost).
+// Such a host needs a look (docs/runbooks/host-setup.md "Alerts").
 func (s *Status) Diverged(bundle, directory, krl Doc) bool {
+	if b, d := s.UnappliedLost(bundle, directory); b || d {
+		return true
+	}
 	for _, p := range [][2]Doc{{s.Bundle, bundle}, {s.Directory, directory}, {s.KRLDoc(), krl}} {
 		got, cur := p[0], p[1]
 		if got.Version > cur.Version || got.Version == cur.Version && got.SHA256 != cur.SHA256 {

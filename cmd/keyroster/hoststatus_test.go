@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"strings"
 	"testing"
@@ -285,7 +286,13 @@ func TestServedLine(t *testing.T) {
 // TestHostStatusDiverged (PR #72 review C5): a host counts on a version
 // only when its SHA-256 is the server's too; one that reports the current
 // number with another SHA-256, or a version above the current one, is
-// flagged diverged.
+// flagged diverged. So is one whose unapplied record is above the current
+// version, a version a signer restore lost (PR #78 review): its note gives
+// the remedy instead of saying it applies the next version it can. Fix
+// round 2: a record at the current number with other bytes is lost too,
+// one with the same bytes is not, one without a SHA-256 (an older agent)
+// is judged by its number only, and a mixed record's note names only its
+// lost part as lost.
 func TestHostStatusDiverged(t *testing.T) {
 	ab, cd := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	same := hbStatus(5, 100)
@@ -293,13 +300,37 @@ func TestHostStatusDiverged(t *testing.T) {
 	other.Directory.SHA256 = cd
 	ahead := hbStatus(6, 100)
 	ahead.Directory.SHA256 = cd
+	recorded := hbStatus(5, 100)
+	recorded.Unapplied = &heartbeat.Unapplied{Directory: 65}
+	remade := hbStatus(4, 100)
+	remade.Unapplied = &heartbeat.Unapplied{Directory: 5, DirectorySHA256: cd}
+	current := hbStatus(4, 100)
+	current.Unapplied = &heartbeat.Unapplied{Directory: 5, DirectorySHA256: ab}
+	older := hbStatus(4, 100)
+	older.Unapplied = &heartbeat.Unapplied{Directory: 5}
+	mixed := hbStatus(5, 100)
+	mixed.Unapplied = &heartbeat.Unapplied{Bundle: 2, BundleSHA256: ab, Directory: 65, DirectorySHA256: cd}
+	// Fix round 3: on the current bundle, with and without a lost
+	// recorded bundle (and directory), so the bundle count is exercised.
+	onBundle := hbStatus(5, 100)
+	onBundle.Bundle = heartbeat.Doc{Version: 2, SHA256: ab}
+	lostBoth := hbStatus(5, 100)
+	lostBoth.Bundle = heartbeat.Doc{Version: 2, SHA256: ab}
+	lostBoth.Unapplied = &heartbeat.Unapplied{Bundle: 3, BundleSHA256: cd, Directory: 5, DirectorySHA256: cd}
 	// Built as JSON: the current versions carry their SHA-256.
 	statusEnv(t, map[string]any{
-		"current": map[string]any{"bundle": 1, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
+		"current": map[string]any{"bundle": 2, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
 		"hosts": []serverclient.HostStatusRow{
 			statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: same}),
 			statusRow("web2", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: other}),
 			statusRow("web3", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: ahead}),
+			statusRow("web4", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: recorded}),
+			statusRow("web5", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: remade}),
+			statusRow("web6", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: current}),
+			statusRow("web7", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: older}),
+			statusRow("web8", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: mixed}),
+			statusRow("web9", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: onBundle}),
+			statusRow("web10", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: lostBoth}),
 		},
 	})
 	code, out, stderr := run(t, "host", "status")
@@ -307,17 +338,88 @@ func TestHostStatusDiverged(t *testing.T) {
 		t.Fatalf("host status: exit %d: %s", code, stderr)
 	}
 	t.Logf("keyroster host status:\n%s", out)
-	if !strings.Contains(out, "directory v5 on 1/3 hosts\n") || !strings.Contains(out, "KRL v100 on 3/3 hosts\n") {
+	if !strings.Contains(out, "bundle v2 on 1/10 hosts\n") || !strings.Contains(out, "directory v5 on 2/10 hosts\n") || !strings.Contains(out, "KRL v100 on 10/10 hosts\n") {
 		t.Fatalf("diverged hosts counted as converged:\n%s", out)
 	}
 	flagged := map[string]bool{}
 	for _, l := range strings.Split(out, "\n") {
-		if f := strings.Fields(l); len(f) > 0 && strings.HasPrefix(f[0], "web") && strings.HasSuffix(l, "diverged") {
+		if f := strings.Fields(l); len(f) > 0 && strings.HasPrefix(f[0], "web") && !strings.HasSuffix(f[0], ":") && strings.Contains(l, "diverged") {
 			flagged[f[0]] = true
 		}
 	}
-	if !flagged["web2"] || !flagged["web3"] || flagged["web1"] {
-		t.Fatalf("diverged flags %v, want web2 and web3:\n%s", flagged, out)
+	want := map[string]bool{"web2": true, "web3": true, "web4": true, "web5": true, "web8": true, "web10": true}
+	if !maps.Equal(flagged, want) {
+		t.Fatalf("diverged flags %v, want %v:\n%s", flagged, want, out)
+	}
+	lostAs := func(host, parts, it string) string {
+		return host + ": unapplied: it verified " + parts + `, which the server does not hold as current (above its current version, or that number with other bytes), so a signer restore lost ` + it + `; the host refuses the re-made chain until root clears its record (docs/runbooks/signer-install.md "Enrolled hosts and a re-made version")`
+	}
+	lost := func(host, parts string) string { return lostAs(host, parts, "it") }
+	cannot := func(host, parts string) string {
+		return host + ": unapplied: it verified " + parts + " but cannot apply it"
+	}
+	for _, c := range []struct {
+		want, not string
+	}{
+		{lost("web4", "directory v65"), cannot("web4", "directory v65")},
+		{lost("web5", "directory v5"), cannot("web5", "directory v5")},
+		{cannot("web6", "directory v5"), lost("web6", "directory v5")},
+		{cannot("web7", "directory v5"), lost("web7", "directory v5")},
+		{lost("web8", "directory v65"), "bundle v2 and directory v65"},
+		{cannot("web8", "bundle v2"), lost("web8", "bundle v2")},
+		{lostAs("web10", "bundle v3 and directory v5", "them"), cannot("web10", "bundle v3")},
+	} {
+		if !strings.Contains(out, c.want) || strings.Contains(out, c.not) {
+			t.Errorf("want the note %q and not %q:\n%s", c.want, c.not, out)
+		}
+	}
+}
+
+// TestHostStatusUnapplied (PR #76 review F8 (03-08j)): a host that verified
+// a version it cannot apply shows it as the unapplied alert, with a note.
+func TestHostStatusUnapplied(t *testing.T) {
+	ab := strings.Repeat("ab", 32)
+	dir := hbStatus(5, 100)
+	dir.Unapplied = &heartbeat.Unapplied{Directory: 65}
+	both := hbStatus(5, 100)
+	both.Unapplied = &heartbeat.Unapplied{Bundle: 3, Directory: 65}
+	// The server's current versions are the recorded ones: the hosts are
+	// behind, not diverged (PR #78 review).
+	statusEnv(t, map[string]any{
+		"current": map[string]any{"bundle": 3, "directory": 65, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab},
+		"hosts": []serverclient.HostStatusRow{
+			statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: dir}),
+			statusRow("web2", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: both}),
+			statusRow("web3", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: hbStatus(5, 100)}),
+		},
+	})
+	code, out, stderr := run(t, "host", "status")
+	if code != 0 {
+		t.Fatalf("host status: exit %d: %s", code, stderr)
+	}
+	t.Logf("keyroster host status:\n%s", out)
+	row := map[string]string{}
+	for _, l := range strings.Split(out, "\n") {
+		if f := strings.Fields(l); len(f) > 0 && strings.HasPrefix(f[0], "web") && !strings.HasSuffix(f[0], ":") {
+			row[f[0]] = l
+		}
+	}
+	if !strings.Contains(row["web1"], "unapplied: directory v65") || strings.Contains(row["web1"], "bundle v") {
+		t.Errorf("web1's alerts %q, want unapplied: directory v65", row["web1"])
+	}
+	if !strings.Contains(row["web2"], "unapplied: bundle v3, directory v65") {
+		t.Errorf("web2's alerts %q, want unapplied: bundle v3, directory v65", row["web2"])
+	}
+	if strings.Contains(row["web3"], "unapplied") || strings.Contains(out, "web3: unapplied") {
+		t.Errorf("web3 has no unapplied state but shows one:\n%s", out)
+	}
+	if strings.Contains(out, "diverged") {
+		t.Errorf("a host behind the current versions is flagged diverged:\n%s", out)
+	}
+	for _, want := range []string{"web1: unapplied: it verified directory v65 but cannot apply it", "web2: unapplied: it verified bundle v3 and directory v65 but cannot apply it"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("no note %q:\n%s", want, out)
+		}
 	}
 }
 
