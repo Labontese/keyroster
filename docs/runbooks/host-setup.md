@@ -1143,9 +1143,13 @@ restore (signer-install.md). While the host's directory is authorized by
 the policy in force, a different directory with the accepted directory's
 number, offered as the newest, is `directory_fork` when the current admin
 quorum signed it, and `directory_not_verified` otherwise; the KRL still
-lands (03-08f). While it is not (`directory_not_authorized`), such a
-directory signed by the new admin quorum is taken standalone instead
-(enroll-user.md). Run in CI for an accepted directory:
+lands (03-08f). While it is not (`directory_not_authorized`), the host
+instead takes, standalone, the newest directory the new admins sign that
+names this installation and fits the policy (at the stored version only
+with other bytes; enroll-user.md). Such a directory that does not fit is
+refused as `directory_fork` or `directory_not_verified`, joined to
+`directory_not_authorized`, and the KRL still lands (reasoned from the
+code; UNVERIFIED: no test offers one). Run in CI for an accepted directory:
 `same_version_other_bytes_refused_as_fork`,
 `same_version_unsigned_bytes_not_verified`. At the record's directory
 version the same check runs on the record's bytes; that is reasoned from
@@ -1361,10 +1365,15 @@ host keys, not on the keys the agent enrolled with:
   active (another agent was approved under the name), its applier keeps
   the last good principals files (`host_keys_rotated`): none after an
   applied removal, the old ones otherwise, as long as the policy in force
-  authorizes the directory they were rendered from. After an admin-set
-  change that no longer does, the host gets the CA keys and the KRL with
-  no principals and still reports `host_keys_rotated` (or
-  `host_keys_disagree`); see enroll-user.md.
+  authorizes the directory they were rendered from. A host that already
+  kept its principals (its last status was `host_keys_rotated` or
+  `host_keys_disagree`) keeps them only while the new policy has the same
+  admin quorum and CA profiles and keeps every admin of the accepted
+  policy, as after `reset-directory`. After an admin-set change that no
+  longer does, the host gets the CA keys and the KRL with no principals
+  and still reports `host_keys_rotated` (or `host_keys_disagree`); see
+  enroll-user.md (Run in CI:
+  `kept_principals_then_admin_removed_keeps_none`).
 
 A removal the host confirmed before the name was used again stays
 confirmed until the host's own heartbeat shows principals again (owner
