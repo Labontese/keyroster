@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -189,6 +190,50 @@ func (s *Stored) DirectoryUnderPolicy() error {
 		return fmt.Errorf("%w: no policy is parsed beside directory version %d", ErrStored, d.Version)
 	}
 	return checkStored(s, d, s.policy)
+}
+
+// PrincipalsUnder checks that last-good's principals, committed with s
+// (accepted/), may be kept under pol, the policy in force after a capture
+// (PR #82 review, D-1): RenderFallback keeps them only when it returns nil.
+// rendered says that last-good rendered them from s's directory (its
+// record names no kept host status). That directory must then carry pol's
+// admin quorum and fit pol (checkStored). Otherwise their source is not at
+// hand: s holds no directory (F08 (03-08d), after reset-directory), or
+// last-good kept them from an earlier directory. That source was authorized
+// under s's policy, so pol must then decide a directory's authorization
+// exactly as s's policy does (sameAuthority). A failure is
+// ErrDirUnauthorized, and so is a nil s, policy or pol.
+func (s *Stored) PrincipalsUnder(pol *trust.Policy, rendered bool) error {
+	if s == nil || s.policy == nil || pol == nil {
+		return fmt.Errorf("%w: no accepted policy to keep last-good's principals under", ErrDirUnauthorized)
+	}
+	if s.Directory != nil {
+		d, err := directory.Parse(s.Directory)
+		if err != nil {
+			return fmt.Errorf("%w: directory: %w", ErrStored, err)
+		}
+		if err := checkStored(s, d, pol); err != nil {
+			return err
+		}
+		if rendered {
+			return nil
+		}
+	}
+	if !sameAuthority(s.policy, pol) {
+		return fmt.Errorf("%w: last-good's principals predate the accepted directory, and policy version %d authorizes directories other than accepted policy version %d", ErrDirUnauthorized, pol.Version, s.policy.Version)
+	}
+	return nil
+}
+
+// sameAuthority reports whether a and b authorize the same directories:
+// the same admin quorum, admins and CA profiles, the only policy fields
+// directory.VerifySignatures and directory.CheckPolicy read.
+func sameAuthority(a, b *trust.Policy) bool {
+	return a.AdminQuorum == b.AdminQuorum && slices.Equal(a.Admins, b.Admins) &&
+		slices.EqualFunc(a.CAProfiles, b.CAProfiles, func(x, y trust.CAProfile) bool {
+			return x.Role == y.Role && x.MaxTTLSeconds == y.MaxTTLSeconds && slices.Equal(x.DefaultExtensions, y.DefaultExtensions) &&
+				slices.Equal(x.AllowedExtensions, y.AllowedExtensions) && slices.Equal(x.AllowedCriticalOptions, y.AllowedCriticalOptions)
+		})
 }
 
 // Floor is what s accepted, for spool.Read (nil s: nothing).

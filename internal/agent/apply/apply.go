@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -243,6 +244,10 @@ type engine struct {
 	dropInRepaired bool       // repairDropIn wrote the agent's drop-in (over a trial, or an edit on an adoption resume)
 	preRepaired    bool       // preRepairDropIn wrote the agent's drop-in before the start-of-run sshd -T (it holds the lock)
 	poll           func(ctx context.Context) (*Generation, *state.Verified, error)
+	// accepted is accepted/ as forward loaded it, the state last-good was
+	// committed with: render keeps last-good's principals only under a
+	// policy that authorizes their source (PR #82 review, D-1).
+	accepted *state.Stored
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
 	// net.Dialer and /proc (tests substitute both).
@@ -743,6 +748,7 @@ func (e *engine) forward(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.accepted = stored
 	var st spool.State
 	var v *state.Verified
 	base := e.unappliedBase(stored)
@@ -957,7 +963,11 @@ func (e *engine) keepKRL(g, cur *Generation, curLink link) {
 // goes on with RenderFallback (owner decision 2026-10-26, PR #67): the KRL
 // and CA keys apply, principals are emptied or kept as last-good's, and
 // the report names the host status. Before the first install the refusal
-// stands and nothing is installed.
+// stands and nothing is installed. Last-good's principals are kept only
+// while v's policy authorizes the directory they were rendered from
+// (state.Stored.PrincipalsUnder against e.accepted, PR #82 review, D-1):
+// otherwise they are dropped first, so a fallback renders the trust files
+// alone and still reports the host status.
 func (e *engine) render(v *state.Verified) (*Generation, error) {
 	g, err := Render(v, e.keys)
 	if err == nil {
@@ -984,20 +994,33 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 	if rerr != nil {
 		return nil, errors.Join(err, rerr)
 	}
-	lastHost := ""
+	lastHost, rendered := "", false
 	if rec, rerr := e.readRecord(lg.n); rerr == nil {
 		lastHost, lgGen.HostStatus = rec.Host, rec.HostStatus
+		rendered = rec.HostStatus != HostKeysRotated && rec.HostStatus != HostKeysDisagree
+	}
+	unauth := e.accepted.PrincipalsUnder(v.Policy, rendered)
+	if unauth != nil {
+		maps.DeleteFunc(lgGen.Files, func(n string, _ []byte) bool {
+			class, ok := ClassOf(n)
+			return ok && class == FilePrincipals
+		})
 	}
 	g, status, ferr := RenderFallback(v, e.keys, lastHost, lgGen, err)
 	if ferr != nil {
 		return nil, ferr
 	}
 	g.HostStatus, e.report.HostStatus = status, status
+	keeps := v.Directory == nil || status == HostKeysRotated || status == HostKeysDisagree
+	if keeps && unauth != nil {
+		e.logf("WARNING last-good's principals are not kept: %v", unauth)
+	}
+	what := map[bool]string{true: "kept as last-good's", false: "emptied"}[keeps && unauth == nil]
 	if v.Directory == nil {
-		e.logf("WARNING %v; the KRL and CA keys apply, principals are kept as last-good's", err)
+		e.logf("WARNING %v; the KRL and CA keys apply, principals are %s", err, what)
 		return g, nil
 	}
-	e.logf("WARNING %s: %v; the KRL and CA keys apply, principals are %s", status, err, map[bool]string{true: "kept as last-good's", false: "emptied"}[status == HostKeysRotated || status == HostKeysDisagree])
+	e.logf("WARNING %s: %v; the KRL and CA keys apply, principals are %s", status, err, what)
 	return g, nil
 }
 
