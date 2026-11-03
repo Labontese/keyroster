@@ -157,7 +157,9 @@ func New(cfg Config) (*Server, error) {
 	return newServer(cfg, socketSigner{socket: cfg.SignerSocket})
 }
 
-// newServer builds a Server on sg; tests pass fakeSigner.
+// newServer builds a Server on sg; tests pass fakeSigner. Every signer
+// goes behind the server's signer-call budget (withSignerBudget, F11
+// (03-08g)), the test double included.
 func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	if cfg.RPID == "" {
 		return nil, errors.New("server: no RP ID")
@@ -175,7 +177,7 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	}
 	lim := cfg.Limits.withDefaults()
 	s := &Server{
-		signer: sg, rpID: cfg.RPID, clock: cfg.Clock, log: cfg.Logger, db: cfg.DB, pages: pages, static: static,
+		signer: withSignerBudget(sg), rpID: cfg.RPID, clock: cfg.Clock, log: cfg.Logger, db: cfg.DB, pages: pages, static: static,
 		adminLimit:  newLimiter(lim.AdminPerMinute, lim.AdminBurst, 0, 0), // per client only (Limits)
 		inviteLimit: newLimiter(lim.InvitePerMinute, lim.InviteBurst, globalFactor*lim.InvitePerMinute, globalFactor*lim.InviteBurst),
 		// Sign-in is its own route class (02-10): per client with the
