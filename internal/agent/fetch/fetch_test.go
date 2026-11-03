@@ -273,7 +273,9 @@ func TestFetch(t *testing.T) {
 		if len(reqs) != 2 || reqs[0] != "GET "+serverclient.AgentStatePath || reqs[1] != "GET "+serverclient.AgentStatePath+"?bundle=1" || time.Since(start) > 900*time.Millisecond {
 			t.Fatalf("requests %q in %s, want two at once, the second with the new bundle version", reqs, time.Since(start))
 		}
-		if got := ts.spooled(t); !slices.Equal(got, []string{"bundle-1.json", "bundle-1.json.sigs", "directory-1.json", "directory-1.json.sigs", "policy-1.json", "policy-1.json.sigs"}) {
+		// F02 (03-08f): the bundle item's policy signatures are spooled per
+		// bundle too.
+		if got := ts.spooled(t); !slices.Equal(got, []string{"bundle-1.json", "bundle-1.json.sigs", "bundle-1.policy.sigs", "directory-1.json", "directory-1.json.sigs", "policy-1.json", "policy-1.json.sigs"}) {
 			t.Fatalf("spooled %v", got)
 		}
 	})
@@ -564,6 +566,74 @@ func TestFetch(t *testing.T) {
 		}
 		if _, _, err := spool.Read(ts.spool, spool.Floor{Bundle: 1, Policy: 1}); err != nil {
 			t.Fatalf("the applier's capture after the poll: %v", err)
+		}
+	})
+	t.Run("per_bundle_policy_sigs_spooled", func(t *testing.T) {
+		// F02 (03-08f): each bundle item's policy signatures are spooled as
+		// bundle-<N>.policy.sigs, under the bundle's version, so they
+		// survive the next item that names the same policy version.
+		dir := t.TempDir()
+		b2, b3 := bundleItem(2, 1, 1), bundleItem(3, 1, 1)
+		b2.PolicySigs, b3.PolicySigs = []byte("p2"), []byte("p3")
+		if err := writeState(dir, &serverclient.AgentStateResponse{Bundles: []serverclient.AgentBundle{b2, b3}}); err != nil {
+			t.Fatal(err)
+		}
+		for n, want := range map[string]string{"bundle-2.policy.sigs": "p2", "bundle-3.policy.sigs": "p3", "policy-1.json.sigs": "p3"} {
+			if b, err := os.ReadFile(filepath.Join(dir, n)); err != nil || string(b) != want { //nolint:gosec // test fixture
+				t.Errorf("%s: %q, %v; want %q", n, b, err, want)
+			}
+		}
+		// Before bundle-<N>.json: a write of bundle-4.json that fails leaves
+		// its policy signatures spooled already.
+		dir = t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "bundle-4.json"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeState(dir, &serverclient.AgentStateResponse{Bundles: []serverclient.AgentBundle{bundleItem(4, 1, 1)}}); err == nil {
+			t.Fatal("writing over a directory bundle-4.json succeeded")
+		}
+		if !exists(t, filepath.Join(dir, "bundle-4.policy.sigs")) {
+			t.Error("bundle-4.policy.sigs was not written before bundle-4.json")
+		}
+	})
+	t.Run("drop_above_removes_per_bundle_policy_sigs", func(t *testing.T) {
+		// F02 (03-08f): dropAbove removes the per-bundle file with its
+		// bundle.
+		dir := t.TempDir()
+		for _, n := range []string{"bundle-2.json", "bundle-2.json.sigs", "bundle-2.policy.sigs", "bundle-3.json", "bundle-3.json.sigs", "bundle-3.policy.sigs"} {
+			if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+		}
+		if _, err := dropAbove(dir, serverclient.AgentVersions{Bundle: 2}); err != nil {
+			t.Fatal(err)
+		}
+		for n, want := range map[string]bool{"bundle-2.policy.sigs": true, "bundle-3.json": false, "bundle-3.policy.sigs": false} {
+			if got := exists(t, filepath.Join(dir, n)); got != want {
+				t.Errorf("%s spooled %t, want %t", n, got, want)
+			}
+		}
+	})
+	t.Run("per_bundle_policy_sigs_over_cap_refused", func(t *testing.T) {
+		// F02 (03-08f): checkCaps names the per-bundle file as writeState
+		// writes it.
+		b := bundleItem(2, 1, 1)
+		b.PolicySigs = bytes.Repeat([]byte{'s'}, spool.MaxBundle+1)
+		err := checkCaps(&serverclient.AgentStateResponse{Bundles: []serverclient.AgentBundle{b}})
+		if !errors.Is(err, ErrAnswerOverCap) || !strings.Contains(err.Error(), "bundle-2.policy.sigs") {
+			t.Fatalf("an oversize per-bundle policy signature file: %v, want state_item_over_cap naming bundle-2.policy.sigs", err)
+		}
+	})
+	t.Run("heal_covers_per_bundle_policy_sigs", func(t *testing.T) {
+		// F02 (03-08f): a per-bundle file above its cap goes at the next
+		// poll, as spool.Read would refuse it.
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "bundle-2.policy.sigs"), bytes.Repeat([]byte{'s'}, spool.MaxBundle+1), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		removed, err := healSpool(dir)
+		if err != nil || !slices.Equal(removed, []string{"bundle-2.policy.sigs"}) || exists(t, filepath.Join(dir, "bundle-2.policy.sigs")) {
+			t.Fatalf("healSpool: %v, %v; want bundle-2.policy.sigs removed", removed, err)
 		}
 	})
 	t.Run("heal_leaves_symlinks_and_unknown_names", func(t *testing.T) {

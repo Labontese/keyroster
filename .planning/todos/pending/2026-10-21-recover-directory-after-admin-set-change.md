@@ -38,3 +38,8 @@ Options to settle in Phase 4 planning:
 - **Break-glass.** A `keyroster-signer` local install command, run on the signer host, for a fully signed directory file.
 
 In every option, reword `errUnsignedBase` to name both causes: a policy change, or a server serving bytes the admins did not sign. Then document the step in root-ceremony.md's successor-policy section.
+
+## Status
+
+- The host-agent side is resolved in 03-08f (branch p03/08f-agent-policy-in-force). Hosts check the directory again under the policy in force, render no principals while it is unauthorized, and take the new admins' first directory at the same version or higher. A host whose stored version is above that needs an explicit `keyroster-agent reset-directory`.
+- Phase 4 variant (owner decision Q-F03b): the re-sign path should let the new admins sign their first directory above the old admins' highest version, so that no host needs the reset. The signer and CLI recovery in Solution stays open for Phase 4.

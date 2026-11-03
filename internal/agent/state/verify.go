@@ -15,6 +15,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -57,6 +58,12 @@ type Verified struct {
 	// chain that does not verify, or for a bundle or directory the host
 	// cannot apply. The caller reports Refused.
 	Refused error
+
+	// DirectoryUnauthorized is set when the stored directory does not carry
+	// the admin quorum of the policy in force, or does not fit it
+	// (ErrDirUnauthorized); derived on every verification, never stored
+	// (F03 (03-08f)).
+	DirectoryUnauthorized error
 
 	// steps is the bundle chain of this capture: the stored bundle (when
 	// there is one), then each successor verified.
@@ -111,7 +118,16 @@ func (v *Verified) AsStored() *Stored {
 //     version by trust.VerifySuccessor, in order (a missing version is
 //     bundle_chain_gap); offering only older versions is bundle_older;
 //     equal is a no-op. Every accepted bundle must name the pinned
-//     installation ID.
+//     installation ID. A successor that carries the policy over is checked
+//     with the stored policy signatures first; only when that fails with
+//     trust.ErrThreshold, as for a rotation to new roots or a raised
+//     threshold, is it retried once with the union of the admitted policy
+//     signature files: the stored ones, those delivered with the bundle
+//     and the offered policy file's (F02 (03-08f), verifyBundle). The
+//     thresholds still come from the bundles, each root counts once and
+//     only for a valid signature over the exact policy bytes, and the
+//     bundle signatures are never united, so the union never lowers a
+//     threshold; accepted/ stores one admitted file, never the union.
 //   - Directory. The newest offered directory above the stored one must
 //     carry the admin quorum of the policy in force, parse, name the pinned installation
 //     (directory.CheckInstallation, strict: agents never accept a
@@ -127,7 +143,16 @@ func (v *Verified) AsStored() *Stored {
 //     bundle is taken only up to that policy (BundleHeld) and the rest
 //     waits for the next capture: what a fetcher withholding the newer
 //     bundles would have shown, so nothing is accepted that could not be
-//     accepted already.
+//     accepted already. The stored directory is checked again under the
+//     policy in force on every verification (F03 (03-08f), verifyDirectory):
+//     while that policy's admin quorum did not sign it, or it does not fit
+//     the policy, DirectoryUnauthorized is set, unless an offered directory
+//     at or above the stored version that the policy authorizes is
+//     accepted standalone; a refusal of the offered directories then joins
+//     DirectoryUnauthorized instead of refusing the capture. While it is
+//     authorized, a newest offered directory at the stored version with
+//     other bytes is directory_fork when the policy's admin quorum signed
+//     it, and directory_not_verified otherwise.
 //   - KRL. The newest complete KRL: equal to the stored one is a no-op,
 //     an older version krl_older; otherwise krl.VerifyManifest against the
 //     bundle in force, the pinned installation ID and the stored version,
@@ -328,6 +353,10 @@ func retiredError(k *newKRL, auth, n *trust.Bundle) error {
 
 // storedOnly is the Verified of a capture that takes nothing but, later,
 // its KRL: the accepted bundle, policy and directory in force, unchanged.
+// F03 (03-08f): the stored directory is checked again under prev's policy
+// (checkStored), so a KRL-alone state carries DirectoryUnauthorized as
+// verify's does, and its generation renders no principals from a directory
+// that policy does not authorize.
 func storedOnly(prev *Stored) (*Verified, error) {
 	w := &Verified{Next: *prev, Bundle: prev.bundle, Policy: prev.policy}
 	w.steps = []bundleStep{{bundle: prev.bundle, policy: prev.policy, doc: spool.Doc{Body: prev.Bundle, Sigs: prev.BundleSigs}, polDoc: spool.Doc{Body: prev.Policy, Sigs: prev.PolicySigs}}}
@@ -336,7 +365,11 @@ func storedOnly(prev *Stored) (*Verified, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: the accepted directory: %w", ErrStored, err)
 		}
+		if prev.policy == nil {
+			return nil, fmt.Errorf("%w: no policy is parsed beside directory version %d", ErrStored, d.Version)
+		}
 		w.Directory = d
+		w.DirectoryUnauthorized = checkStored(prev, d, prev.policy)
 	}
 	return w, nil
 }
@@ -369,6 +402,18 @@ func findPolicy(sum string, prev *Stored, in spool.State) (spool.Doc, bool) {
 	return spool.Doc{}, false
 }
 
+// verifyBundle is verify's bundle step against prev, the chain base. Each
+// successor step is verified with the policy signatures findPolicy returns:
+// the chain base's or the previous step's while the policy is unchanged.
+// F02 (03-08f): only when trust.VerifySuccessor fails with
+// trust.ErrThreshold does the step retry once, with the union of the
+// admitted policy signature files (unitePolicySigs): those signatures, the
+// ones delivered with the bundle (bundle-<N>.policy.sigs) and the offered
+// policy file's. The union cannot widen trust: the thresholds come from
+// the bundles, CountPinnedSigners counts a root once and only for a valid
+// signature over the exact policy bytes, and the bundle signatures are
+// never united. A step stores one admitted file, never the union
+// (storedPolicySigs).
 func (v *Verified) verifyBundle(p *Pins, prev *Stored, in spool.State) error {
 	vs := sortedVersions(in.Bundles)
 	if prev == nil || prev.Bundle == nil {
@@ -408,6 +453,13 @@ func (v *Verified) verifyBundle(p *Pins, prev *Stored, in spool.State) error {
 			return fmt.Errorf("%w: no offered policy has the SHA-256 that bundle version %d names", ErrPolicyMissing, ver)
 		}
 		nb, np, err := trust.VerifySuccessor(cur, curBytes, curPolicy, doc.Body, doc.Sigs, pol.Body, pol.Sigs)
+		if errors.Is(err, trust.ErrThreshold) {
+			// F02 (03-08f): the policy signatures delivered with this bundle
+			// and the offered policy file may carry the new roots' policy
+			// signatures, which the stored ones do not.
+			offered, _ := findPolicy(lean.PolicySHA256, nil, in)
+			nb, np, pol.Sigs, err = unitePolicySigs(cur, curBytes, curPolicy, doc, pol, in.BundlePolicySigs[ver], offered.Sigs, err)
+		}
 		if err != nil {
 			return fmt.Errorf("%w: bundle version %d: %w", ErrBundle, ver, err)
 		}
@@ -420,6 +472,87 @@ func (v *Verified) verifyBundle(p *Pins, prev *Stored, in spool.State) error {
 		v.steps = append(v.steps, bundleStep{bundle: nb, policy: np, doc: doc, polDoc: pol})
 	}
 	return nil
+}
+
+// unitePolicySigs is F02 (03-08f)'s one retry of a successor step whose
+// plain check (trust.VerifySuccessor with pol.Sigs, the chain base's or the
+// previous step's policy signatures) failed with trust.ErrThreshold, plain.
+// The sources are pol.Sigs, delivered (the policy signatures delivered
+// with this bundle, spool.State.BundlePolicySigs) and offered (the offered
+// policy file whose body has the bundle's policy SHA-256). A source is
+// admitted only when sshsig.ParseAll accepts it on its own (it refuses a
+// whole file for one malformed block), and identical files are admitted
+// once; the union is the admitted files concatenated, each ending in a
+// newline. The bundle signatures are never united. When the union is
+// pol.Sigs, plain stands; otherwise VerifySuccessor is retried once with
+// it, and its error, if any, is returned.
+//
+// The union cannot widen trust (internal/trust/verify.go): both thresholds
+// come from the bundles (prev.Root.Threshold and the successor's
+// Root.Threshold); CountPinnedSigners counts each pinned root at most once,
+// and only for a block whose public key is the pinned key and whose SSHSIG
+// verifies over the exact policy bytes under the policy namespace; and
+// every source is a signature file the signer accepted or served, which a
+// spool writer could already present. So the union never refuses a
+// successor the plain check accepts, and accepts only what VerifySuccessor
+// accepts for a file of genuine signatures over those policy bytes.
+//
+// The union is never stored. On success it returns the one file the step
+// stores in Next.PolicySigs (storedPolicySigs), which an unapplied record's
+// bundle part then copies (03-08j).
+func unitePolicySigs(prev *trust.Bundle, prevBytes, prevPolicy []byte, doc, pol spool.Doc, delivered, offered []byte, plain error) (*trust.Bundle, *trust.Policy, []byte, error) {
+	var admitted [][]byte
+	var union []byte
+	for _, src := range [][]byte{pol.Sigs, delivered, offered} {
+		if !admitPolicySigs(src) || slices.ContainsFunc(admitted, func(a []byte) bool { return bytes.Equal(a, src) }) {
+			continue
+		}
+		admitted = append(admitted, src)
+		union = append(union, src...)
+		if !bytes.HasSuffix(src, []byte("\n")) {
+			union = append(union, '\n')
+		}
+	}
+	if bytes.Equal(union, pol.Sigs) {
+		return nil, nil, nil, plain
+	}
+	nb, np, err := trust.VerifySuccessor(prev, prevBytes, prevPolicy, doc.Body, doc.Sigs, pol.Body, union)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return nb, np, storedPolicySigs(prev, prevBytes, prevPolicy, doc, pol, delivered, offered), nil
+}
+
+// storedPolicySigs is the policy signature file a step the union verified
+// stores (F02 (03-08f)): of the admitted delivered and offered files, the
+// first that passes trust.VerifySuccessor alone; otherwise the admitted
+// offered file; otherwise the admitted delivered file. It is never the
+// union, which grows with every hop, and never a file sshsig.ParseAll
+// refused, so the next hop's plain check never fails on a parse error that
+// would keep it from its own retry. Every candidate was read under
+// spool.MaxBundle, so LoadStored's and ParseUnapplied's caps hold.
+func storedPolicySigs(prev *trust.Bundle, prevBytes, prevPolicy []byte, doc, pol spool.Doc, delivered, offered []byte) []byte {
+	for _, src := range [][]byte{delivered, offered} {
+		if !admitPolicySigs(src) {
+			continue
+		}
+		if _, _, err := trust.VerifySuccessor(prev, prevBytes, prevPolicy, doc.Body, doc.Sigs, pol.Body, src); err == nil {
+			return src
+		}
+	}
+	for _, src := range [][]byte{offered, delivered} {
+		if admitPolicySigs(src) {
+			return src
+		}
+	}
+	return pol.Sigs
+}
+
+// admitPolicySigs reports whether sigs is a policy signature file the
+// union admits: sshsig.ParseAll accepts it on its own (F02 (03-08f)).
+func admitPolicySigs(sigs []byte) bool {
+	_, err := sshsig.ParseAll(sigs)
+	return err == nil
 }
 
 // holdBundle takes the bundle chain only up to step k: the bundle,
@@ -498,9 +631,50 @@ type chainHead struct {
 	Prev    string `json:"prev"`
 }
 
+// checkStored checks the stored directory prev holds, parsed as d, again
+// under pol, the policy in force (F03 (03-08f)): directory.VerifySignatures
+// over its stored signatures, then directory.CheckPolicy, as the signer
+// checks its installed directory at start-up (loadDirectory). A failure is
+// ErrDirUnauthorized.
+func checkStored(prev *Stored, d *directory.Directory, pol *trust.Policy) error {
+	if _, err := directory.VerifySignatures(prev.Directory, prev.DirectorySigs, pol); err != nil {
+		return fmt.Errorf("%w: the stored directory version %d is not signed by the admin quorum of policy version %d: %w", ErrDirUnauthorized, d.Version, pol.Version, err)
+	}
+	if err := directory.CheckPolicy(d, pol); err != nil {
+		return fmt.Errorf("%w: the stored directory version %d exceeds policy version %d: %w", ErrDirUnauthorized, d.Version, pol.Version, err)
+	}
+	return nil
+}
+
+// verifyDirectory is verify's directory step against prev, the state the
+// capture chains from: accepted/ for Verify, the unapplied record's base
+// for VerifyAhead and VerifyAheadAfter (the record's directory part when
+// the record holds one, 03-08j), the pending target's state for
+// VerifyAfter.
+//
+// F03 (03-08f): the stored directory is checked again under v.Policy, the
+// newest policy the bundle step reached, before any hold (checkStored).
+// While it is authorized, the offered directories are checked as before
+// (offeredDirectory). While it is not, the newest offered directory at or
+// above the stored version (at the stored version only with other bytes)
+// that carries v.Policy's admin quorum, parses, names the pinned
+// installation and fits v.Policy is accepted standalone, with no chain to
+// the stored bytes (standaloneDirectory); a version below the stored one
+// never is (owner decision Q-F03b). Without one, the offered directories
+// are checked as before, the hold included, and when that accepts none,
+// v.DirectoryUnauthorized names the stored directory's failure. When that
+// check refuses an offered directory (directory_older, directory_chain_gap,
+// directory_installation, or directory_not_verified for any cause), the
+// refusal does not refuse the capture: the bundle part as the bundle step
+// left it is restored, so a hold the refused directory set up is undone,
+// and the refusal is joined to v.DirectoryUnauthorized. The host renders no
+// principals in that state whatever the offered directory's fault, so the
+// newest verified bundle step and the KRL step go on, fail-closed. The
+// stored directory stays in v, so the flag is derived again on every run.
 func (v *Verified) verifyDirectory(p *Pins, prev *Stored, in spool.State) error {
 	var stored []byte
 	var storedVersion uint64
+	var unauth error
 	if prev != nil && prev.Directory != nil {
 		stored, storedVersion = prev.Directory, prev.DirectoryVersion
 		d, err := directory.Parse(stored)
@@ -508,15 +682,81 @@ func (v *Verified) verifyDirectory(p *Pins, prev *Stored, in spool.State) error 
 			return fmt.Errorf("%w: the accepted directory: %w", ErrStored, err)
 		}
 		v.Directory = d
+		unauth = checkStored(prev, d, v.Policy)
 	}
 	vs := sortedVersions(in.Directories)
+	if unauth == nil {
+		return v.offeredDirectory(p, in, vs, stored, storedVersion)
+	}
+	if v.standaloneDirectory(p, in, vs, stored, storedVersion) {
+		return nil
+	}
+	saved := *v // the bundle part as the bundle step left it, before any hold
+	if err := v.offeredDirectory(p, in, vs, stored, storedVersion); err != nil {
+		v.Bundle, v.Policy, v.BundleHeld, v.BundleChanged = saved.Bundle, saved.Policy, saved.BundleHeld, saved.BundleChanged
+		v.Next.Bundle, v.Next.BundleSigs, v.Next.Policy, v.Next.PolicySigs, v.Next.BundleVersion = saved.Next.Bundle, saved.Next.BundleSigs, saved.Next.Policy, saved.Next.PolicySigs, saved.Next.BundleVersion
+		v.DirectoryUnauthorized = errors.Join(unauth, err)
+		return nil
+	}
+	if !v.DirectoryChanged {
+		v.DirectoryUnauthorized = unauth
+	}
+	return nil
+}
+
+// standaloneDirectory is F03 (03-08f)'s recovery while the stored
+// directory is unauthorized: the offered versions vs from the newest down
+// to the stored version, that one only when its bytes differ from stored,
+// and the first that carries v.Policy's admin quorum (no hold), parses
+// with its version, names the pinned installation and fits v.Policy is
+// accepted, with no chain to the stored bytes. A candidate that fails is
+// skipped, not refused. It reports whether one was accepted.
+func (v *Verified) standaloneDirectory(p *Pins, in spool.State, vs []uint64, stored []byte, storedVersion uint64) bool {
+	for i := len(vs) - 1; i >= 0 && vs[i] >= storedVersion; i-- {
+		ver := vs[i]
+		doc := in.Directories[ver]
+		if ver == storedVersion && bytes.Equal(doc.Body, stored) {
+			continue
+		}
+		if _, err := directory.VerifySignatures(doc.Body, doc.Sigs, v.Policy); err != nil {
+			continue
+		}
+		d, err := directory.Parse(doc.Body)
+		if err != nil || d.Version != ver {
+			continue
+		}
+		if directory.CheckInstallation(d, p.InstallationID) != nil || directory.CheckPolicy(d, v.Policy) != nil {
+			continue
+		}
+		v.Directory, v.DirectoryChanged = d, true
+		v.Next.Directory, v.Next.DirectorySigs, v.Next.DirectoryVersion = doc.Body, doc.Sigs, d.Version
+		return true
+	}
+	return false
+}
+
+// offeredDirectory is the offered-directory check of verifyDirectory, with
+// vs the offered versions and stored the stored directory (nil: none) at
+// storedVersion. F03 (03-08f): a newest offered directory at the stored
+// version with other bytes is directory_fork when it carries v.Policy's
+// admin quorum, so both sides are verified by it, and directory_not_verified
+// otherwise; equal bytes are no change. The stored version is the chain
+// base's, so the rule applies at an unapplied record's directory too.
+func (v *Verified) offeredDirectory(p *Pins, in spool.State, vs []uint64, stored []byte, storedVersion uint64) error {
 	if len(vs) == 0 {
 		return nil
 	}
 	newest := vs[len(vs)-1]
 	switch {
 	case stored != nil && newest == storedVersion:
-		return nil
+		doc := in.Directories[newest]
+		if bytes.Equal(doc.Body, stored) {
+			return nil
+		}
+		if _, err := directory.VerifySignatures(doc.Body, doc.Sigs, v.Policy); err != nil {
+			return fmt.Errorf("%w: version %d: other bytes than the stored version %d: %w", ErrDir, newest, storedVersion, err)
+		}
+		return fmt.Errorf("%w: the spool offers other bytes as directory version %d than the stored version %d, signed by the admin quorum of policy version %d", ErrDirFork, newest, storedVersion, v.Policy.Version)
 	case stored != nil && newest < storedVersion:
 		return fmt.Errorf("%w: the spool offers directory version %d, below the accepted version %d", ErrDirOlder, newest, storedVersion)
 	}

@@ -441,3 +441,51 @@ the server's word until you have checked the signer's log on the signer
 host; `keyroster audit verify` prints the trust bundle and policy versions
 it ends at (`trust bundle vN, policy vN`). The CLI keeps no high-water mark
 until Phase 4.
+
+**Enrolled hosts check their directory against the policy in force too**
+(03-08f). After a policy that changes the admins is installed, a host
+checks its stored directory again under that policy on every run. While
+the new policy's admins have not signed it, the host renders no
+certificate principals: certificate logins to it are refused, as the
+signer refuses issuance in the same state, while `authorized_keys` and the
+console are not affected. The host reports `directory_not_authorized`, and
+`last_apply` shows it as `refused`. So **install the new admins' directory
+right after the bundle.** The host takes, standalone, the newest
+directory the new admins sign that names this installation and fits the
+policy, at its stored directory version or higher (at the stored version
+only with other bytes). A host
+whose stored directory version is above anything the new admins have
+signed stays without principals until you run
+`sudo keyroster-agent reset-directory` on it. Installing the new admins'
+directory is the signer and CLI recovery that todo 2026-10-21 (recover the
+directory after an admin-set change) tracks for Phase 4. Run in CI
+(`TestDirectoryUnderPolicyInForce`: `lagging_host_admin_removed_principals_dropped`,
+`new_admins_next_version_accepted_standalone`,
+`stored_version_above_new_admins_needs_reset`, 03-08f); UNVERIFIED on the
+homelab, where Phase 3 runs no admin-set change of enrolled hosts.
+
+A host whose sshd host keys match no entry of the directory it takes
+(`host_keys_rotated`), or two (`host_keys_disagree`), normally keeps its
+last good principals. It keeps them only while the policy in force
+authorizes the directory they were rendered from. A host that already
+kept them (its last status was `host_keys_rotated` or
+`host_keys_disagree`) keeps them only while the new policy has the same
+admin quorum and CA profiles and keeps every admin of the accepted policy,
+as after `reset-directory`. So when the new admins'
+directory lists the host under other keys, the host gets the bundle's CA
+keys and the KRL with no principals, reports the host status, and stays
+so until a directory lists its current keys. The same holds after
+`reset-directory`, before a directory is accepted, when the new policy
+drops an admin or changes the admin quorum or the CA profiles (PR #82
+review). Run in CI
+(`TestLastGoodPrincipalsUnderPolicyInForce`, with
+`kept_principals_then_admin_removed_keeps_none` for an already-kept host);
+UNVERIFIED on the homelab.
+
+A host that already rendered such a directory before this change removes
+its principals at its first run that ends without a verification or KRL
+error (`persisted_unauthorized_state_dropped_on_noop_capture`). A run that
+is refused in verification or for its KRL (`krl_not_verified`, or
+`krl_signer_retired`) installs nothing, so the principals stay until a run
+succeeds. UNVERIFIED: no test builds the state from before this change
+together with a refused KRL.

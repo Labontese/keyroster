@@ -233,15 +233,17 @@ func TestSpool(t *testing.T) {
 	t.Run("cap_is_what_read_enforces", func(t *testing.T) {
 		// F01 (03-08e): Cap is the cap Read applies to each recognised name,
 		// so the fetcher can refuse what the applier would. Each file is
-		// written in a complete set, at Cap bytes and at Cap+1.
+		// written in a complete set, at Cap bytes and at Cap+1. The policy
+		// signatures delivered with a bundle are read with it (F02
+		// (03-08f)).
 		sets := map[string][]string{
-			"bundle":    {"bundle-1.json", "bundle-1.json.sigs"},
+			"bundle":    {"bundle-1.json", "bundle-1.json.sigs", "bundle-1.policy.sigs"},
 			"policy":    {"policy-1.json", "policy-1.json.sigs"},
 			"directory": {"directory-1.json", "directory-1.json.sigs"},
 			"krl":       {"krl-1.krl", "krl-1.manifest.json", "krl-1.manifest.sig"},
 		}
 		want := map[string]int64{
-			"bundle-1.json": MaxBundle, "bundle-1.json.sigs": MaxBundle,
+			"bundle-1.json": MaxBundle, "bundle-1.json.sigs": MaxBundle, "bundle-1.policy.sigs": MaxBundle,
 			"policy-1.json": MaxBundle, "policy-1.json.sigs": MaxBundle,
 			"directory-1.json": wire.MaxDirectory, "directory-1.json.sigs": wire.MaxDirectorySigs,
 			"krl-1.krl": krl.MaxKRL, "krl-1.manifest.json": krl.MaxManifest, "krl-1.manifest.sig": krl.MaxManifestSig,
@@ -273,6 +275,49 @@ func TestSpool(t *testing.T) {
 			if limit, ok := Cap(name); ok {
 				t.Fatalf("Cap(%q) = %d, true for a name Read never reads", name, limit)
 			}
+		}
+	})
+	t.Run("bundle_policy_sigs_read_when_present", func(t *testing.T) {
+		// F02 (03-08f): the policy signatures delivered with a bundle are
+		// read with every bundle version the capture takes, and the file
+		// is not listed as ignored.
+		dir := t.TempDir()
+		for _, n := range []string{"bundle-1.json", "bundle-1.json.sigs", "bundle-2.json", "bundle-2.json.sigs", "bundle-3.json", "bundle-3.json.sigs"} {
+			writeTestFile(t, filepath.Join(dir, n), []byte(n))
+		}
+		writeTestFile(t, filepath.Join(dir, "bundle-1.policy.sigs"), []byte("p1"))
+		writeTestFile(t, filepath.Join(dir, "bundle-3.policy.sigs"), []byte("p3"))
+		st, ignored, err := Read(dir, Floor{Bundle: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(st.Bundles) != 2 || string(st.BundlePolicySigs[3]) != "p3" || len(st.BundlePolicySigs) != 1 {
+			t.Fatalf("bundles %d, per-bundle policy signatures %v; want bundles 2 and 3, bundle 3's file alone", len(st.Bundles), st.BundlePolicySigs)
+		}
+		for _, n := range ignored {
+			if strings.Contains(n, "policy.sigs") {
+				t.Fatalf("ignored %q lists a per-bundle policy signature file", ignored)
+			}
+		}
+		// Write puts it in the spool before the bundle it belongs to.
+		out := t.TempDir()
+		if err := Write(out, State{Bundles: map[uint64]Doc{4: {Body: []byte("b"), Sigs: []byte("s")}}, BundlePolicySigs: map[uint64][]byte{4: []byte("p4")}}); err != nil {
+			t.Fatal(err)
+		}
+		if b, err := os.ReadFile(filepath.Join(out, "bundle-4.policy.sigs")); err != nil || string(b) != "p4" { //nolint:gosec // test fixture
+			t.Fatalf("bundle-4.policy.sigs after Write: %q, %v", b, err)
+		}
+	})
+	t.Run("bundle_policy_sigs_absent_is_allowed", func(t *testing.T) {
+		// F02 (03-08f): a spool written before 03-08f holds no per-bundle
+		// file; its bundles are read as before.
+		dir := t.TempDir()
+		for _, n := range []string{"bundle-1.json", "bundle-1.json.sigs", "bundle-2.json", "bundle-2.json.sigs"} {
+			writeTestFile(t, filepath.Join(dir, n), []byte(n))
+		}
+		st, _, err := Read(dir, Floor{})
+		if err != nil || len(st.Bundles) != 2 || len(st.BundlePolicySigs) != 0 {
+			t.Fatalf("bundles %d, per-bundle policy signatures %d (%v); want 2, 0", len(st.Bundles), len(st.BundlePolicySigs), err)
 		}
 	})
 	t.Run("bad_names_refused", func(t *testing.T) {

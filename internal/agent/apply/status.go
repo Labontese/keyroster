@@ -345,6 +345,7 @@ var refusals = []error{
 	state.ErrPins, state.ErrBundleOlder, state.ErrBundleChainGap, state.ErrBundle, state.ErrBundleInstall,
 	state.ErrPolicyMissing, state.ErrNoBundle, state.ErrDirOlder, state.ErrDirChainGap, state.ErrDir,
 	state.ErrDirInstall, state.ErrKRLOlder, state.ErrKRL, state.ErrKRLHeader, state.ErrKRLSignerRetired,
+	state.ErrDirUnauthorized, state.ErrDirFork,
 	ErrPhase2Pending, ErrPhase2Differs, ErrHostNotInDirectory, ErrHostKeysDisagree, ErrKRLRollback,
 	ErrForeignTrust, ErrRHEL8, ErrFIPS, ErrHostPoPNotEnabled, ErrConfigUnsafe, ErrSSHKeygenMissing,
 	ErrCALineRejected, ErrKRLInvalid, ErrKRLRejected, ErrKRLDropsKeyEntry, ErrPendingStateUnknown,

@@ -646,6 +646,13 @@ func TestSpoolWindow(t *testing.T) {
 		r, err := h.apply()
 		mustRefusedKRLAlone(t, h, r, err, ErrGenerationTooLarge, 7, 1, "role:ops")
 		mustRecord(t, h, 3, 65)
+		// F03 (03-08f), owner decision O-2 (c): the chain base is the record
+		// {3, 65}, whose directory 65 the old admin signed and whose policy
+		// names bob, so accepted.json asks for the server's current
+		// directory, and keeps the record's bundle.
+		if a := readAccepted(t, h); a.Bundle != 3 || a.Directory != 0 {
+			t.Fatalf("accepted.json bundle %d, directory %d; want 3, 0", a.Bundle, a.Directory)
+		}
 	})
 	t.Run("fork_after_the_record_refused", func(t *testing.T) {
 		t.Parallel()

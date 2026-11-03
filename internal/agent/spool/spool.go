@@ -82,6 +82,15 @@ type State struct {
 	Policies    map[uint64]Doc
 	Directories map[uint64]Doc
 	KRLs        map[uint64]KRLFiles
+	// BundlePolicySigs are the policy signatures delivered with each
+	// bundle, by the bundle's version (bundle-<N>.policy.sigs; F02
+	// (03-08f)): Read fills it for every bundle version it takes whose
+	// file is present (a spool written before 03-08f has none), and Write
+	// writes each before its bundle. The file does not decide whether a
+	// bundle set is complete. It keeps each bundle's policy signatures
+	// when several bundles share a policy version, whose single
+	// policy-<v>.json.sigs the last one replaces.
+	BundlePolicySigs map[uint64][]byte
 	// More is set by Read when Floor's rule left out complete versions
 	// above the ones it read (a host more than MaxVersionsPerKind versions
 	// behind): another capture after this one is accepted reads them (PR
@@ -92,10 +101,14 @@ type State struct {
 var (
 	docRE = regexp.MustCompile(`^(bundle|policy|directory)-([1-9][0-9]{0,19})\.json(\.sigs)?$`)
 	krlRE = regexp.MustCompile(`^krl-([1-9][0-9]{0,19})\.(krl|manifest\.json|manifest\.sig)$`)
+	// bundlePolicyRE is the policy signatures delivered with a bundle
+	// (State.BundlePolicySigs; F02 (03-08f)), with docRE's version grammar.
+	bundlePolicyRE = regexp.MustCompile(`^bundle-([1-9][0-9]{0,19})\.policy\.sigs$`)
 )
 
 // Cap is the cap Read applies to the file name, with true for a name it
-// recognises: MaxBundle for a bundle or policy and their signatures,
+// recognises: MaxBundle for a bundle or policy and their signatures, and
+// for the policy signatures delivered with a bundle (F02 (03-08f)),
 // wire.MaxDirectory for a directory and wire.MaxDirectorySigs for its
 // signatures, krl.MaxKRL, krl.MaxManifest and krl.MaxManifestSig for a
 // KRL, its manifest and the manifest's signature. A name outside the
@@ -112,6 +125,12 @@ func Cap(name string) (int64, bool) {
 			return wire.MaxDirectory, true
 		case m[1] == "directory":
 			return wire.MaxDirectorySigs, true
+		}
+		return MaxBundle, true
+	}
+	if m := bundlePolicyRE.FindStringSubmatch(name); m != nil {
+		if _, err := strconv.ParseUint(m[1], 10, 64); err != nil {
+			return 0, false
 		}
 		return MaxBundle, true
 	}
@@ -309,7 +328,9 @@ func ListDir(dirfd int) ([]string, error) {
 // Read captures the spool at dir: it opens dir with OpenDir (a symlink or
 // non-directory in its place refuses the whole spool), lists it, and
 // reads every recognised name through ReadFileAt with the cap Cap gives
-// it: bundle and policy and their signatures MaxBundle, directory
+// it: bundle and policy and their signatures MaxBundle (a bundle's
+// delivered policy signatures too, read with every bundle version taken;
+// F02 (03-08f)), directory
 // wire.MaxDirectory with wire.MaxDirectorySigs for its signatures, the
 // KRL krl.MaxKRL, its manifest krl.MaxManifest and the manifest's
 // signature krl.MaxManifestSig. Names outside the fixed patterns, sets
@@ -373,6 +394,14 @@ func readOnce(dir string, floor Floor, listed func()) (State, []string, error) {
 			}
 			continue
 		}
+		if m := bundlePolicyRE.FindStringSubmatch(n); m != nil {
+			// Read with its bundle below, never listed as ignored (F02
+			// (03-08f)).
+			if _, err := strconv.ParseUint(m[1], 10, 64); err != nil {
+				ignored = append(ignored, n)
+			}
+			continue
+		}
 		if m := krlRE.FindStringSubmatch(n); m != nil {
 			v, err := strconv.ParseUint(m[1], 10, 64)
 			if err != nil {
@@ -415,6 +444,16 @@ func readOnce(dir string, floor Floor, listed func()) (State, []string, error) {
 				return st, ignored, err
 			}
 			targets[kind][v] = Doc{Body: body, Sigs: sigs}
+			if name := "bundle-" + strconv.FormatUint(v, 10) + ".policy.sigs"; kind == "bundle" && present[name] {
+				ps, err := readCapped(fd, name)
+				if err != nil {
+					return st, ignored, err
+				}
+				if st.BundlePolicySigs == nil {
+					st.BundlePolicySigs = map[uint64][]byte{}
+				}
+				st.BundlePolicySigs[v] = ps
+			}
 		}
 	}
 	slices.Sort(krls)
@@ -492,7 +531,8 @@ func pickAbove(vs []uint64, floor uint64, above int) (map[uint64]bool, bool) {
 
 // Write stores s in the spool at dir through WriteFileAt (mode 0644),
 // signatures and manifests before the file that completes a set, so a
-// reader never sees a set without the bytes that complete it. Policies
+// reader never sees a set without the bytes that complete it; a bundle's
+// delivered policy signatures (BundlePolicySigs) come first of its files. Policies
 // are written before bundles, so a bundle in the spool implies the policy
 // it names is there too: a write cut short between them leaves the bundle
 // out, and the fetcher asks for it again (PR #71 review F10/F12). It is
@@ -508,6 +548,12 @@ func Write(dir string, s State) error {
 		docs map[uint64]Doc
 	}{{"policy", s.Policies}, {"bundle", s.Bundles}, {"directory", s.Directories}} {
 		for v, d := range k.docs {
+			if ps, ok := s.BundlePolicySigs[v]; ok && k.kind == "bundle" {
+				// F02 (03-08f): before the files that complete the set.
+				if err := WriteFileAt(fd, "bundle-"+strconv.FormatUint(v, 10)+".policy.sigs", ps, 0o644); err != nil {
+					return err
+				}
+			}
 			base := k.kind + "-" + strconv.FormatUint(v, 10) + ".json"
 			if err := WriteFileAt(fd, base+".sigs", d.Sigs, 0o644); err != nil {
 				return err

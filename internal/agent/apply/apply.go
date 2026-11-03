@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -163,8 +164,14 @@ type Report struct {
 	// BundleHeld: a newer bundle in the spool waits for the next run,
 	// because the newest directory verifies only under an earlier policy
 	// (state.Verified.BundleHeld).
-	BundleHeld bool   `json:"bundle_held,omitempty"`
-	Stuck      string `json:"stuck,omitempty"`
+	BundleHeld bool `json:"bundle_held,omitempty"`
+	// DirectoryUnauthorized: the stored directory does not carry the admin
+	// quorum of the root-signed policy in force, or does not fit it
+	// (state.Verified.DirectoryUnauthorized): the generation holds no
+	// principals, and the error names directory_not_authorized (F03
+	// (03-08f)).
+	DirectoryUnauthorized bool   `json:"directory_unauthorized,omitempty"`
+	Stuck                 string `json:"stuck,omitempty"`
 	// HostStatus is set when the directory does not give this host its
 	// own principals (owner decision 2026-10-26, PR #67): host_disabled
 	// and host_removed install no principals, host_keys_rotated and
@@ -237,6 +244,10 @@ type engine struct {
 	dropInRepaired bool       // repairDropIn wrote the agent's drop-in (over a trial, or an edit on an adoption resume)
 	preRepaired    bool       // preRepairDropIn wrote the agent's drop-in before the start-of-run sshd -T (it holds the lock)
 	poll           func(ctx context.Context) (*Generation, *state.Verified, error)
+	// accepted is accepted/ as forward loaded it, the state last-good was
+	// committed with: render keeps last-good's principals only under a
+	// policy that authorizes their source (PR #82 review, D-1).
+	accepted *state.Stored
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
 	// net.Dialer and /proc (tests substitute both).
@@ -737,6 +748,7 @@ func (e *engine) forward(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.accepted = stored
 	var st spool.State
 	var v *state.Verified
 	base := e.unappliedBase(stored)
@@ -757,6 +769,10 @@ func (e *engine) forward(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// F03 (03-08f): the report names the unauthorized state of the
+	// Verified the run last moved to: v here, after each KRL-alone pass,
+	// and a superseding capture's.
+	e.report.DirectoryUnauthorized = v.DirectoryUnauthorized != nil
 	if v.Refused != nil {
 		// Owner decision D-R2 (PR #71 review F5): the refused bundle or
 		// directory step is reported, and only the capture's KRL moves on.
@@ -771,7 +787,10 @@ func (e *engine) forward(ctx context.Context) error {
 	var g, cur *Generation
 	var curLink link
 	for {
-		if !v.Changed() {
+		// F03 (03-08f): while the stored directory is unauthorized, an
+		// unchanged capture is rendered too, so principals installed before
+		// are removed; a render equal to current is the no-op below.
+		if !v.Changed() && v.DirectoryUnauthorized == nil {
 			// A run that replaced a trial drop-in wrote it: not a no-op.
 			e.report.NoOp = !e.dropInRepaired
 			// The KRL in force is current's, which a rollback or crash
@@ -789,6 +808,17 @@ func (e *engine) forward(ctx context.Context) error {
 		}
 		var refusal error
 		if g, refusal = e.candidate(v, cur, curLink); refusal == nil {
+			if !v.Changed() && cur != nil && sameBytes(cur, g) {
+				// F03 (03-08f): the unauthorized state is already in force.
+				// Nothing is committed, so the idle run stages no accepted/
+				// snapshot, as the no-change branch above.
+				e.report.NoOp = !e.dropInRepaired
+				if curLink.kind != linkAgent {
+					cur = nil
+				}
+				e.setVersions(v, cur)
+				return outcome(v)
+			}
 			if err := e.preflightApply(v, g); err != nil {
 				return err
 			}
@@ -833,6 +863,7 @@ func (e *engine) forward(ctx context.Context) error {
 		if v, err = e.krlAlone(stored, st, v, refusal); err != nil {
 			return err
 		}
+		e.report.DirectoryUnauthorized = v.DirectoryUnauthorized != nil
 	}
 	lg, err := e.resolveLink(e.l.LastGood())
 	if err != nil {
@@ -861,6 +892,25 @@ func (e *engine) forward(ctx context.Context) error {
 		if errors.As(err, &s) {
 			e.logf("a newer state arrived during the wait; moving to generation %d", s.gen.N)
 			target, tv = s.gen, s.verified
+			// F03 (03-08f): a poll's Verified carries the unauthorized state
+			// like forward's own: from VerifyAfter or VerifyAheadAfter, from
+			// pollSpool's KRL-alone pass and from pollCapture's state.KRLAlone
+			// branch (storedOnly).
+			e.report.DirectoryUnauthorized = tv.DirectoryUnauthorized != nil
+			// PR #82 review, D-2 (c), and fix round 2: a superseding
+			// capture that moved the bundle or the directory decided again
+			// whether a newer bundle waits, also when it held at the
+			// target's own bundle (k=0), which leaves BundleChanged false.
+			// One that moved only the KRL decided nothing about the bundle,
+			// so the bundle step's answer stands: a KRL-alone Verified
+			// (state.KRLAlone, storedOnly, krlAlone after a refused
+			// candidate) or a full verification whose capture brings only
+			// a newer KRL over the target's bundle and directory. A hold
+			// needs a newest directory other than the target's: taken, it
+			// moves the directory; refused, the hold is undone.
+			if tv.BundleChanged || tv.DirectoryChanged {
+				e.report.BundleHeld = tv.BundleHeld
+			}
 			continue
 		}
 		if err != nil {
@@ -927,10 +977,23 @@ func (e *engine) keepKRL(g, cur *Generation, curLink link) {
 // goes on with RenderFallback (owner decision 2026-10-26, PR #67): the KRL
 // and CA keys apply, principals are emptied or kept as last-good's, and
 // the report names the host status. Before the first install the refusal
-// stands and nothing is installed.
+// stands and nothing is installed. Last-good's principals are kept only
+// while v's policy authorizes the directory they were rendered from
+// (state.Stored.PrincipalsUnder against e.accepted, PR #82 review, D-1):
+// otherwise they are dropped first, so a fallback renders the trust files
+// alone and still reports the host status.
 func (e *engine) render(v *state.Verified) (*Generation, error) {
 	g, err := Render(v, e.keys)
 	if err == nil {
+		if v.DirectoryUnauthorized != nil {
+			// F03 (03-08f): Render's trust-only generation names no host;
+			// the host stays last-good's, as its record names it.
+			if lg, lerr := e.resolveLink(e.l.LastGood()); lerr == nil && lg.kind == linkAgent {
+				if rec, rerr := e.readRecord(lg.n); rerr == nil {
+					g.Host = rec.Host
+				}
+			}
+		}
 		return g, nil
 	}
 	var he *HostError
@@ -945,20 +1008,33 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 	if rerr != nil {
 		return nil, errors.Join(err, rerr)
 	}
-	lastHost := ""
+	lastHost, rendered := "", false
 	if rec, rerr := e.readRecord(lg.n); rerr == nil {
 		lastHost, lgGen.HostStatus = rec.Host, rec.HostStatus
+		rendered = rec.HostStatus != HostKeysRotated && rec.HostStatus != HostKeysDisagree
+	}
+	unauth := e.accepted.PrincipalsUnder(v.Policy, rendered)
+	if unauth != nil {
+		maps.DeleteFunc(lgGen.Files, func(n string, _ []byte) bool {
+			class, ok := ClassOf(n)
+			return ok && class == FilePrincipals
+		})
 	}
 	g, status, ferr := RenderFallback(v, e.keys, lastHost, lgGen, err)
 	if ferr != nil {
 		return nil, ferr
 	}
 	g.HostStatus, e.report.HostStatus = status, status
+	keeps := v.Directory == nil || status == HostKeysRotated || status == HostKeysDisagree
+	if keeps && unauth != nil {
+		e.logf("WARNING last-good's principals are not kept: %v", unauth)
+	}
+	what := map[bool]string{true: "kept as last-good's", false: "emptied"}[keeps && unauth == nil]
 	if v.Directory == nil {
-		e.logf("WARNING %v; the KRL and CA keys apply, principals are kept as last-good's", err)
+		e.logf("WARNING %v; the KRL and CA keys apply, principals are %s", err, what)
 		return g, nil
 	}
-	e.logf("WARNING %s: %v; the KRL and CA keys apply, principals are %s", status, err, map[bool]string{true: "kept as last-good's", false: "emptied"}[status == HostKeysRotated || status == HostKeysDisagree])
+	e.logf("WARNING %s: %v; the KRL and CA keys apply, principals are %s", status, err, what)
 	return g, nil
 }
 
@@ -969,12 +1045,14 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 // accepted also Render's host_not_in_directory refusal (F08 (03-08d)),
 // which RenderFallback went on from with last-good's principals. The
 // apply's error and last_apply then name all of them until a directory is
-// accepted.
+// accepted. While the policy in force does not authorize the stored
+// directory, it also names v.DirectoryUnauthorized (F03 (03-08f)), so every
+// run that leaves the host without principals for that reason says why.
 func outcome(v *state.Verified) error {
 	if v.Directory == nil {
-		return errors.Join(v.Refused, v.KRLRefused, errNoDirectory)
+		return errors.Join(v.Refused, v.KRLRefused, v.DirectoryUnauthorized, errNoDirectory)
 	}
-	return errors.Join(v.Refused, v.KRLRefused)
+	return errors.Join(v.Refused, v.KRLRefused, v.DirectoryUnauthorized)
 }
 
 // candidate renders v for this host (render), keeps the KRL in force
@@ -1012,7 +1090,7 @@ func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*G
 // poll's capture, which brings one, its own pass.
 func (e *engine) krlAlone(prev *state.Stored, in spool.State, v *state.Verified, refusal error) (*state.Verified, error) {
 	if v.Refused != nil {
-		return nil, errors.Join(v.Refused, refusal)
+		return nil, errors.Join(v.Refused, v.DirectoryUnauthorized, refusal)
 	}
 	if !v.BundleChanged && !v.DirectoryChanged || isCrash(refusal) {
 		return nil, refusal
@@ -1288,7 +1366,9 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 // KRL-alone pass and the lowest hold step use. So a wait holds the record's
 // fork and rollback evidence as forward does: an older bundle below the
 // record is never read, a spool copy at the record's version adds no
-// step, and a chain that does not chain to the record's bytes is refused,
+// step, unless it is the newest offered, which is directory_fork or
+// directory_not_verified (F03 (03-08f)), and a chain that does not chain
+// to the record's bytes is refused,
 // its KRL taken alone against prev. A capture that brings no bundle,
 // policy or directory beyond the base supersedes the target only with a
 // newer KRL, verified against prev (KRLAlone) or, on krl.ErrSigner, against

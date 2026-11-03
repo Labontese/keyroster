@@ -142,8 +142,15 @@ func (h *HostError) Unwrap() error { return h.Err }
 // directory.PrincipalsRenderer, which canonicalises and hashes the
 // directory once per render (PR #76 review, owner decision D-1);
 // revoked.krl is the verified KRL, or zero bytes when none is published
-// yet.
+// yet. While v.DirectoryUnauthorized is set, the policy in force does not
+// authorize the stored directory (F03 (03-08f)): only the trust files are
+// rendered, the bundle's CA keys and the verified KRL, with no principals
+// files and no host, so certificate logins fail closed, as on the signer
+// (T-02-15); authorized_keys and the console are unaffected.
 func Render(v *state.Verified, hostKeys []ssh.PublicKey) (*Generation, error) {
+	if v.DirectoryUnauthorized != nil {
+		return renderTrust(v)
+	}
 	if v.Directory == nil {
 		return nil, &HostError{Err: errNoDirectory, Unmatched: fingerprints(hostKeys)}
 	}

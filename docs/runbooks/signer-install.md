@@ -1179,7 +1179,27 @@ structurally (see the warning above).
      bundle and directory version the agent accepted or, when higher, the
      version it verified but could not apply (its unapplied record,
      03-08j). Either way the host refuses a different version with that
-     number. A host whose `directory` is above the restored signer's
+     number.
+
+     A host's `accepted.json` reports `directory` 0 on purpose while the
+     directory it chains from is not authorized by the policy it is under
+     (03-08f). That directory is the recorded one when the host holds a
+     record, otherwise the accepted one. The fetcher then asks for the
+     server's current directory, and `last_apply` usually names
+     `directory_not_authorized`, or a refusal of the recorded state such as
+     `ca_line_rejected`. The directory version the host actually holds is
+     then named in `last_apply`'s error text, or is `directory.version` in
+     `/var/lib/keyroster-agent/outbox/status.json` (the DIRECTORY column of
+     `keyroster host status`). Use that version, not 0, to decide whether
+     the host saw a lost directory. A host that holds a lost directory
+     version, and is offered the re-made version with that number as its
+     newest, reports `directory_fork`. Run in CI
+     (`lagging_host_admin_removed_principals_dropped`,
+     `recorded_bundle_over_unauthorized_directory_reports_directory_0`,
+     `same_version_other_bytes_refused_as_fork`, 03-08f); UNVERIFIED on the
+     homelab.
+
+     A host whose `directory` is above the restored signer's
      directory version saw a lost directory. A host whose `bundle` is above
      the restored signer's bundle version saw a lost bundle: compare it
      with the restored signer's bundle version as you noted it at restore
@@ -1199,8 +1219,8 @@ structurally (see the warning above).
         of `keyroster host status`). `accepted.json` is no guide here: it
         names the recorded version.
      2. List `/var/lib/keyroster-agent/spool/` (`sudo ls`) and remove
-        (`sudo rm`) every `bundle-N.json` and `bundle-N.json.sigs` whose N
-        is above that accepted version. Leave the other files alone. Do
+        (`sudo rm`) every `bundle-N.json`, `bundle-N.json.sigs` and
+        `bundle-N.policy.sigs` whose N is above that accepted version. Leave the other files alone. Do
         this before step 3: an apply that runs between the two steps then
         finds no lost bundle to record again.
      3. `sudo rm /var/lib/keyroster-agent/unapplied.json`.

@@ -378,6 +378,16 @@ apply the same rule (`trust.VerifySuccessor`):
    A successor takes no `--pin`: `install-bundle` checks it against the
    installed bundle. Compare the SHA-256 that `install-bundle` prints with
    the one you recorded in step 5.
+
+   **Enrolled hosts** take a successor that keeps the policy unchanged
+   (`--policy prev/policy.json`) at their next poll. They verify it with
+   the policy signatures delivered with that bundle, so new roots or a
+   raised threshold need no new policy version. Check that
+   `keyroster host status` shows the new bundle version on every host.
+   Until every host shows it, a retired root still anchors the hosts that
+   have not taken it. Run in CI (`TestRootRotationUnchangedPolicy`,
+   03-08f); UNVERIFIED on the homelab, where Phase 3 runs no root rotation
+   of enrolled hosts.
 7. **Audit.** Export the log and verify it pinned to the **new** roots from
    the paper:
 
