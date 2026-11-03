@@ -304,7 +304,7 @@ func TestSpool(t *testing.T) {
 		if err := Write(out, State{Bundles: map[uint64]Doc{4: {Body: []byte("b"), Sigs: []byte("s")}}, BundlePolicySigs: map[uint64][]byte{4: []byte("p4")}}); err != nil {
 			t.Fatal(err)
 		}
-		if b, err := os.ReadFile(filepath.Join(out, "bundle-4.policy.sigs")); err != nil || string(b) != "p4" {
+		if b, err := os.ReadFile(filepath.Join(out, "bundle-4.policy.sigs")); err != nil || string(b) != "p4" { //nolint:gosec // test fixture
 			t.Fatalf("bundle-4.policy.sigs after Write: %q, %v", b, err)
 		}
 	})

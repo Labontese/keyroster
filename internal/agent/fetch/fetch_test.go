@@ -579,7 +579,7 @@ func TestFetch(t *testing.T) {
 			t.Fatal(err)
 		}
 		for n, want := range map[string]string{"bundle-2.policy.sigs": "p2", "bundle-3.policy.sigs": "p3", "policy-1.json.sigs": "p3"} {
-			if b, err := os.ReadFile(filepath.Join(dir, n)); err != nil || string(b) != want {
+			if b, err := os.ReadFile(filepath.Join(dir, n)); err != nil || string(b) != want { //nolint:gosec // test fixture
 				t.Errorf("%s: %q, %v; want %q", n, b, err, want)
 			}
 		}
