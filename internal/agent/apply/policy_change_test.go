@@ -609,6 +609,50 @@ func TestDirectoryUnderPolicyInForce(t *testing.T) {
 			t.Errorf("status.json (%v) says a bundle is held while bundle 2 is in force: %s", err, b)
 		}
 	})
+	t.Run("widening_wait_superseded_into_a_hold_at_its_bundle", func(t *testing.T) {
+		t.Parallel()
+		// PR #82 fix round 2, R2-1: bob's directory 2 [role:ops, role:new]
+		// widens under bundle 2 (policy 2: alice and bob), so apply waits
+		// at bundle 2, which is not held. The wait's poll brings bundle 3
+		// (policy 3: bob alone) and alice's directory 3, which only
+		// policy 2 authorizes: the poll holds at bundle 2 (k=0, so the
+		// bundle did not change) and supersedes the directory. Bundle 3
+		// waits, and the report and status.json say so.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops")
+		bob := seedKey(t, 11)
+		bobKey := trust.AdminKey{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}
+		b2, d2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, append(slices.Clone(f.policy.Admins), bobKey), "2026-10-02T00:00:00Z")
+		h.state.Bundles[2], h.state.Policies[2] = d2, p2
+		s := h.spec("role:ops", "role:new")
+		s.signer = bob
+		h.publishDir(s)
+		pol2, err := trust.ParsePolicy(p2.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, d3, p3 := f.rotation(b2, d2.Body, p2.Body, pol2, []trust.AdminKey{bobKey}, "2026-10-03T00:00:00Z")
+		polled := false
+		h.clock.onSleep = func(time.Duration) {
+			if !polled {
+				polled = true
+				h.state.Bundles[3], h.state.Policies[3] = d3, p3
+				h.publishDir(h.spec("role:ops"))
+				h.write()
+			}
+		}
+		r, err := h.apply()
+		if err != nil || !polled || r.BundleVersion != 2 || r.DirectoryVersion != 3 {
+			t.Fatalf("apply: %v, %+v (polled %t); want bundle 2 with alice's directory 3 after a widening wait", err, r, polled)
+		}
+		if !r.BundleHeld {
+			t.Errorf("bundle 3 waits (the poll held at bundle 2), but the report says bundle_held false")
+		}
+		if b, err := os.ReadFile(h.l.State(statusFile)); err != nil || !strings.Contains(string(b), `"bundle_held":true`) { //nolint:gosec // test fixture
+			t.Errorf("status.json (%v) does not say a bundle is held while bundle 3 waits: %s", err, b)
+		}
+	})
 }
 
 // holdThenRefused is plan check 3's M-2 shape (PR #82 review, D-2 (a)): an
