@@ -686,8 +686,13 @@ const keepAbove = MaxRounds * serverclient.MaxAgentStatePerKind
 // about 6.1 GiB kept (1025 bundle, policy and directory sets, each kept
 // bundle with its delivered policy signatures, one more file of at most
 // spool.MaxBundle (F02 (03-08f), owner decision O-3 (a)), and one KRL set)
-// plus at most MaxRounds answers of serverclient.MaxAgentStateResponse
-// (512 MiB), about 6.6 GiB in all; computed from the caps, not measured.
+// plus what MaxRounds answers write. An answer is at most
+// serverclient.MaxAgentStateResponse (8 MiB) of JSON, so at most 6 MiB of
+// document bytes once base64 is decoded, and writeState writes each bundle
+// item's policy signatures twice (policy-<v>.json.sigs and
+// bundle-<N>.policy.sigs), so one answer writes at most 12 MiB and one poll
+// at most 768 MiB: about 6.9 GiB in all (PR #82 review, D-3); computed from
+// the caps, not measured.
 // It removes:
 //
 //   - of the bundles and the directories, every version but the complete

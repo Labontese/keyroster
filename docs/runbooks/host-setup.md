@@ -992,7 +992,11 @@ is `refused`, and its error names the refusal (`generation_too_large`,
 `ca_line_rejected`, `directory_not_verified` or `host_not_in_directory`,
 for example); `keyroster host status` shows the error as a
 `last apply error` note. After `reset-directory` a verified successor bundle's
-CA keys apply as well, with last-good's principals. The host keeps
+CA keys apply as well, with last-good's principals while that bundle's
+policy authorizes the same directories as the accepted policy (the same
+admin quorum, admins and CA profiles), and with no principals otherwise
+(Run in CI: `reset_directory_then_rotation_keeps_no_principals`,
+`kept_principals_across_rotations_keeping_admins_stay`). The host keeps
 the directory and principals it had until the server publishes a
 directory it can apply: split the oversize host group or roles and
 publish again.
@@ -1134,10 +1138,13 @@ them, and keeps the spool from them (the fetcher paragraph below).
 The record counts as an accepted version. A different version with the
 same number, or a chain not built on it, is refused
 (`directory_not_verified` or `bundle_not_verified`), as after a signer
-restore (signer-install.md). A different directory with the accepted
-directory's number, offered as the newest, is `directory_fork` when the
-current admin quorum signed it, and `directory_not_verified` otherwise;
-the KRL still lands (03-08f). Run in CI for an accepted directory:
+restore (signer-install.md). While the host's directory is authorized by
+the policy in force, a different directory with the accepted directory's
+number, offered as the newest, is `directory_fork` when the current admin
+quorum signed it, and `directory_not_verified` otherwise; the KRL still
+lands (03-08f). While it is not (`directory_not_authorized`), such a
+directory signed by the new admin quorum is taken standalone instead
+(enroll-user.md). Run in CI for an accepted directory:
 `same_version_other_bytes_refused_as_fork`,
 `same_version_unsigned_bytes_not_verified`. At the record's directory
 version the same check runs on the record's bytes; that is reasoned from
@@ -1256,8 +1263,11 @@ many files went and the first 16 names; symlinks, other non-regular files
 and names the applier never reads stay here too. So whatever a
 compromised server sends, the spool holds at most what this keeps (with
 the caps above, about 6.1 GiB: 1025 bundle, policy and directory
-versions, one policy signature file per kept bundle, and one KRL) plus one
-poll's answers (64 of at most 8 MiB each), about 6.6 GiB in all; an
+versions, one policy signature file per kept bundle, and one KRL) plus what
+one poll writes, about 0.75 GiB: 64 answers of at most 8 MiB each, that is
+at most 6 MiB of documents each once decoded, with each bundle's policy
+signatures written twice (`policy-V.json.sigs` and `bundle-N.policy.sigs`).
+That is about 6.9 GiB in all, computed from the caps, not measured; an
 honest spool holds a few versions. Run in CI (03-08e):
 `TestFetch` (`oversize_policy_answer_refused_nothing_written`,
 `high_policy_version_oversize_refused`, `item_at_cap_written`,
@@ -1349,7 +1359,11 @@ host keys, not on the keys the agent enrolled with:
 - when no entry holds its current keys and its last entry's name is still
   active (another agent was approved under the name), its applier keeps
   the last good principals files (`host_keys_rotated`): none after an
-  applied removal, the old ones otherwise.
+  applied removal, the old ones otherwise, as long as the policy in force
+  authorizes the directory they were rendered from. After an admin-set
+  change that no longer does, the host gets the CA keys and the KRL with
+  no principals and still reports `host_keys_rotated` (or
+  `host_keys_disagree`); see enroll-user.md.
 
 A removal the host confirmed before the name was used again stays
 confirmed until the host's own heartbeat shows principals again (owner
