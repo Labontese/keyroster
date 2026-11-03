@@ -3,21 +3,86 @@ phase: 03-linux-agent-and-revocation
 plan: 08f
 subsystem: agent
 tags: [agent, apply, state, spool, fetch, directory, policy, roots, f02, f03]
-status: draft
+status: complete
 
 requires:
   - phase: 03-linux-agent-and-revocation
     provides: "03-08d (KRLAlone, storedOnly, outcome's errNoDirectory), 03-08e (spool.Cap, checkCaps, healSpool, pruneSpool), 03-08j (verify's chain and alone, the unapplied record, WriteAccepted's raise), 03-08k (krlStep, fullyVerified, VerifyAfter, VerifyAheadAfter, outcome joining Refused and KRLRefused)"
+provides:
+  - "state: checkStored, (s *Stored) DirectoryUnderPolicy, Verified.DirectoryUnauthorized, ErrDirUnauthorized (directory_not_authorized), ErrDirFork (directory_fork)"
+  - "state: verifyDirectory checks the stored directory under the policy in force; standaloneDirectory recovery; refusals converted while unauthorized, with the bundle part restored; the fork rule at the stored version; storedOnly carries the flag"
+  - "state: verifyBundle retries a step once on trust.ErrThreshold with the union of admitted policy-signature files (unitePolicySigs, admitPolicySigs, storedPolicySigs)"
+  - "spool and fetch: bundle-<N>.policy.sigs (State.BundlePolicySigs), in Cap, checkCaps, healSpool, dropAbove and pruneSpool"
+  - "apply: Render's trust-only generation while unauthorized, the forced render with its no-op, outcome joining DirectoryUnauthorized, Report.DirectoryUnauthorized, WriteAccepted's directory 0 by the chain base (O-2 (c)), two refusals in last_apply"
+  - "tests: TestDirectoryUnderPolicyInForce (13 cases), TestRootRotationUnchangedPolicy (11), three TestSpool, four TestFetch and one TestSpoolPrune case"
+  - "docs: root-ceremony.md, enroll-user.md, signer-install.md, host-setup.md; todo 2026-10-21 Status"
 affects: [03-09, 03-10, 03-12, 03-13, 03-14]
+
+requirements-completed: []
+
+actuals:
+  tokens: 89000
+  tasks: 4
+  commits: 9
+plan_head_before: b1ebff3ff9484c02a4f574451fe7848fa95fa451
+plan_head_after: 561542dce63db43e6200df74e593f5f364ff89a2
+
+tech-stack:
+  added: []
+  patterns:
+    - "The stored directory is checked again under the policy in force on every verification and in the KRL-alone state; the flag is derived, never stored"
+    - "While unauthorized, the host renders trust files only, and every refusal of an offered directory joins the unauthorized state instead of refusing the capture"
+    - "A threshold failure of a successor step is retried once with a union of admitted signature files; one admitted file is stored, never the union"
+
+key-files:
+  created:
+    - internal/agent/apply/policy_change_test.go
+    - .planning/phases/03-linux-agent-and-revocation/03-08f-PLAN.md
+    - .planning/phases/03-linux-agent-and-revocation/03-08f-SUMMARY.md
+  modified:
+    - internal/agent/state/state.go
+    - internal/agent/state/verify.go
+    - internal/agent/apply/render.go
+    - internal/agent/apply/apply.go
+    - internal/agent/apply/installed.go
+    - internal/agent/apply/status.go
+    - internal/agent/apply/status_test.go
+    - internal/agent/apply/apply_test.go
+    - internal/agent/apply/window_test.go
+    - internal/agent/spool/spool.go
+    - internal/agent/spool/spool_test.go
+    - internal/agent/fetch/fetch.go
+    - internal/agent/fetch/fetch_test.go
+    - internal/agent/fetch/prune_test.go
+    - docs/runbooks/root-ceremony.md
+    - docs/runbooks/enroll-user.md
+    - docs/runbooks/signer-install.md
+    - docs/runbooks/host-setup.md
+    - .planning/todos/pending/2026-10-21-recover-directory-after-admin-set-change.md
+    - .planning/ROADMAP.md
+    - .planning/STATE.md
+    - .planning/phases/03-linux-agent-and-revocation/03-09-PLAN.md (and the wave lines of 03-10 to 03-16)
+
+key-decisions:
+  - "F03: the flag is derived on every run and the stored directory kept, so 03-08d's no-directory fallback is never reached from the unauthorized state"
+  - "F03: while unauthorized, every refusal of an offered directory is converted, with the bundle part restored (plan check 3, M-2); stored_state_invalid stays an error"
+  - "F03 (O-2 (c)): accepted.json's directory is 0 only while the chain base's directory is unauthorized under the chain base's policy"
+  - "F02: the union is tried only on ErrThreshold, from admitted sources only, bundle signatures never; one admitted file is stored"
+
+metrics:
+  duration: "about 3 h 20 min over two executor runs (Run A 06:08-07:00, Run B 07:05-08:30 local time, 2026-11-03)"
+  completed: 2026-11-03
 ---
 
-# Phase 3 Plan 08f: agent policy in force (DRAFT, Run A: Tasks 1 and 2)
+# Phase 3 Plan 08f: the policy in force decides what a host trusts (F02, F03) Summary
 
-This is the SUMMARY draft. Run A (Tasks 1 and 2) wrote it; Run B (Tasks 3 to 5) completes it. Code comments cite `F02 (03-08f)` and `F03 (03-08f)`.
+**An enrolled host checks its stored directory again under the root-signed policy in force on every verification, including the KRL-alone pass. While the policy's admin quorum has not signed that directory, the host renders trust files only and reports `directory_not_authorized`. It takes the new admins' directory standalone at the same version or higher. A root rotation that carries the policy over verifies with the policy signatures delivered per bundle (`bundle-<N>.policy.sigs`), united only on a threshold failure.**
+
+Run A (Tasks 1 and 2) wrote the draft; Run B (Tasks 3 to 5) completed it. Code comments cite `F02 (03-08f)` and `F03 (03-08f)`. PR: #82 (https://github.com/Labontese/keyroster/pull/82).
 
 ## Branch
 
-`p03/08f-agent-policy-in-force`, created from origin/main b1ebff3. The plan file lies untracked in the phase directory (Task 4 commits it).
+`p03/08f-agent-policy-in-force`, created from origin/main b1ebff3. Task 4 committed the plan file unchanged (4a1e5a5).
 
 ## Base (before any edit, on b1ebff3)
 
@@ -376,7 +441,111 @@ All 15 mutants were killed. Each was restored byte for byte, and `git diff --qui
   - host-setup.md: the outbox row, the I-2 sentence, the fork rule, the prune paragraph with 6.1 and 6.6 GiB, the record paragraph (O-2 (c)) and the `diverged` item.
 - **The todo** stays in pending/ and has a Status section with both lines.
 
-## Deviations so far (Run A)
+## Task 4: the publish edits, the gates, the PR
+
+Commits:
+- 4a1e5a5 `docs(03-08f): add the agent policy-in-force plan at wave 17`, which holds the plan unchanged and the publish edits;
+- 561542d `test(agent): mark the per-bundle policy signature reads as test fixtures for gosec (03-08f)`, deviation 6 below.
+
+**Publish edits** (origin/main's values + 1; the guard found 03-09 at `wave: 17` with `depends_on: ["03-08k"]`, as expected):
+- ROADMAP: `17/26 plans executed in 25 waves`. The new Wave 17 block holds the 03-08f row, and 03-09 to 03-16 moved to Waves 18 to 25, each "blocked on Wave N-1 completion".
+- STATE: `total_plans: 61` and `Plan: 18 of 26`.
+- 03-09: `wave: 18` and `depends_on: ["03-08f"]`, and its Task 1 precondition gains the 03-08f-SUMMARY clause beside the five that stay.
+- 03-10 to 03-16: waves 19 to 25.
+- Both publish checks of Task 4 exited 0.
+
+**Precondition (gofmt).** `grep -q -- '--exec' scripts/linux.sh` exits 0, the normal case since PR #81. Evidence that gofmt runs in WSL's login shell: `command -v gofmt` there prints the Go SDK's gofmt, `gofmt -l . | wc -l` prints 0, and `test -z "$(gofmt -l .)"` exits 0. The gate command ran as written.
+
+**Gates** (the Budget's commands, alone first; session scratch files `gate4-*.txt`):
+
+| Run | Head | internal/agent/apply | Result |
+|---|---|---|---|
+| alone gate, first run | 47fd8ec | 280.220 s | exit 0 |
+| full gate, first run | 4a1e5a5 | 306.832 s | **exit 1**: every test passed, but golangci-lint reported 2 gosec G304 issues in Task 2's test files (deviation 6) |
+| alone gate, after the fix | 561542d | **275.251 s** (limit 400 s) | exit 0 |
+| full gate, after the fix | 561542d | **335.171 s** (limit 480 s) | exit 0: `go test -race ./...`, `go vet` (plain, e2e, e2e systemdsmoke), gofmt, golangci-lint `0 issues.`, capslock, dep-firewall, testonly-firewall and check-pinned-actions all passed |
+
+**capslock:** no new pair. keyroster-agent has 37 pairs against a baseline of 37, keyroster-agent-fetch 23 of 23, and keyroster-signer 92 of 92. keyroster-agent's EXEC still leaves the module only through internal/agent/execsite.
+
+**PR #82**, https://github.com/Labontese/keyroster/pull/82, opened by keyroster-bot through `scripts/gh-as-bot.sh pr create`, without auto-merge.
+- `autoMergeRequest == null` was checked after opening.
+- The body and every branch commit message hold no attribution lines (both greps count 0).
+- Every branch commit is `Daniel Gustafsson <121555671+Labontese@users.noreply.github.com> keyroster-bot`, and SSH-signed.
+- **CI on head 561542d:** all 27 checks pass, `pr checks --required --watch` exited 0. Workflow run IDs: 41593450589, 41593450602, 41593450606, 41593450607, 41593450623, 41593450633, 41593450641, 41593450661, 41593450754, 41593450854.
+- **build-test** (run 41593450606, job 125775250952; `bash scripts/gh-as-bot.sh run view 41593450606 --job 125775250952 --log`): `ok github.com/Labontese/keyroster/internal/agent/apply 226.924s`, below the 480 s margin. No `--- FAIL` in the log.
+
+**Confidentiality.** Before the push, the full diff against origin/main, the commit messages and the PR body were grepped:
+- for private IPs (100.x, 10.x, 192.168.x), the host names of the owner's machines and the private source names: nothing;
+- for local paths: only the public repository name.
+
+## Test time (internal/agent/apply under -race)
+
+| Point | Alone (limit 400 s) | Under `./...` (limit 480 s) |
+|---|---|---|
+| Base, origin/main b1ebff3 | 296.502 s | 330.309 s |
+| Task 1, dff4921's tree | 300.933 s | 318.232 s |
+| Task 2, b55c264's tree | 329.188 s | 346.190 s |
+| Task 3, 941d459's tree (deviation 4) | 291.798 s | 323.579 s |
+| Task 4 gates, 561542d | 275.251 s | 335.171 s |
+
+| CI build-test (`./...`, limit 480 s) | internal/agent/apply |
+|---|---|
+| origin/main b1ebff3 (run 41579130798) | 205.402 s |
+| PR #82 at 561542d (run 41593450606) | 226.924 s |
+
+No figure is above its limit. The stop rule never tripped. The local figures vary with machine load, by about 50 s on unchanged code.
+
+## RED evidence, by task
+
+- **Task 1** (tracer and the held_content_refusal assertion): on b1ebff3 with symbol stubs only. See Task 1.
+- **Task 2** (15 of 19 cases RED, 4 GREEN controls): on 605a99a with the `State.BundlePolicySigs` field only. See Task 2.
+- **Task 3** (11 RED, 1 GREEN control): 4 on origin/main b1ebff3 in a scratch worktree, using no new symbols, and 7 on Task 2's head 06820de in a scratch worktree. See Task 3.
+
+## Mutants
+
+- **Task 2**: 7 mutants. 6 killed, and T2b survives as required: it is equivalent (plan check 3, m-2).
+- **Task 3**: 15 mutants, all killed. T3n is killed by one of its two named tests.
+- **In all**: 22 mutant runs, one equivalent.
+
+## Existing tests the change flipped
+
+| Test | Task | Change and reason |
+|---|---|---|
+| TestApply/torn_accepted_save_never_mixes | 1 | Its rotation keeps `f.policy.Admins`. Under F03, a policy naming bob alone does not authorize directory 1, so the run after the crash would render no principals instead of a byte-equal commit. |
+| TestSpoolWindow/held_content_refusal_keeps_the_records_bundle | 1 | One added assertion: readAccepted is bundle 3, directory 0 (O-2 (c), m-1). Its RED read directory 65. |
+| TestStatus/apply_result | 1 | Two rows: directory_not_authorized and directory_fork read `refused`. |
+| TestSpool/cap_is_what_read_enforces | 2 | `bundle-1.policy.sigs` joins the bundle set. |
+| TestFetch/more_repolls_immediately | 2 | The exact spool listing gains `bundle-1.policy.sigs`. |
+
+Task 3 flipped none: its `./...` run and the gates show no `--- FAIL`.
+
+## The threshold argument, and the stored-sigs rule
+
+- **The threshold argument** rests on internal/trust/verify.go, unchanged (see Task 2):
+  - line 315 takes both thresholds from the bundles;
+  - lines 316 and 319 run requireSigners per namespace;
+  - line 232 is the ErrThreshold comparison;
+  - CountPinnedSigners, lines 29-62, counts each pinned fingerprint once: lines 44 and 48 check for a byte-equal key, and line 51 verifies over the exact digest under the namespace.
+- **The stored-sigs rule.** When the union was needed and neither admitted source passes VerifySuccessor alone, the stored file (the offered one, or the delivered one) may not pass on its own. That is safe. The stored file was admitted by sshsig.ParseAll, so the next hop's plain check fails with ErrThreshold, not with a parse error. It therefore reaches the union with that hop's delivered signatures, and recovers. `malformed_delivered_sigs_not_stored` shows the next hop passing.
+
+## Owner answers to O-1 to O-3, and where they shaped the code
+
+- **O-1 (a), accept the residual.** No code change. Healing is promised only on a run that ends without a Verify or KRL-alone error. enroll-user.md names the residual as UNVERIFIED (T-03-323).
+- **O-2 (c).**
+  - `(s *Stored) DirectoryUnderPolicy()` (state.go) and WriteAccepted (installed.go) take the chain base, which is the record's base when there is a record and accepted/ otherwise, and write directory 0 only while its directory is unauthorized under its own policy.
+  - Pinned by the tracer, `held_content_refusal_keeps_the_records_bundle`, `recorded_authorized_directory_keeps_the_record_raise` and `recorded_bundle_over_unauthorized_directory_reports_directory_0`.
+  - Mutants T3d, T3f (reading (a)), T3g (reading (b)) and T3h.
+- **O-3 (a), accept the bound.** pruneSpool keeps `bundle-<N>.policy.sigs` exactly while it keeps bundle N (spoolSet), and its doc comment and host-setup.md state about 6.1 GiB kept and 6.6 GiB in all. These figures are computed from the caps, not measured.
+
+## Requirements
+
+`requirements-completed` is empty. AGENT-03 and AUTHZ-02 were completed by earlier plans; this plan hardens them.
+
+## Tracking updates
+
+They were applied by hand, in the shape 03-08k's PR used: ROADMAP's 03-08f row is checked and its count is `18/26 plans executed in 25 waves`. STATE gets stopped_at, `completed_plans: 53`, `Plan: 19 of 26`, a metrics row and three decisions. No requirement is marked.
+
+## Deviations (Run A)
 
 1. **[Rule 1, test oracle] TestFetch/more_repolls_immediately changed** (Task 2). This existing test lists the spool exactly, and the per-bundle file is now in that list. The plan's Task 2 named no changed fetch test. The assertion was extended by the one file name, and nothing else changed.
 2. **A stronger tracer check** (Task 1, not a behaviour change). With `f.rotation`, bundle 2 keeps bundle 1's CA set, so "current's user_ca_keys comes from bundle 2" would compare identical files. The tracer therefore uses the test helper `f.rotationNext`, whose bundle 2 adds a next user CA (seedKey 31), and it checks that line in user_ca_keys. The swap is then a mixed one, with principals dropped, a CA added and a new KRL, and it goes through Intermediate and the widening wait.
@@ -393,15 +562,20 @@ Everything else ran as the plan wrote it, and the stop rule never tripped.
 - **storedPolicySigs's last fallback to pol.Sigs.** It is unreachable when the union differed from pol.Sigs, and no test reaches it.
 - **pruneSpool's bound of about 6.1 GiB kept and 6.6 GiB in all.** It is computed from the caps, not measured.
 
-## Deviations (Run B, Task 3)
+## Deviations (Run B)
 
 1. **Test construction: `same_capture_hold_then_dropped` starts from a directory 1 with role:ops and role:evil.** Alice's directory 2 holds only role:evil, so it narrows directory 1. The first draft started from directory 1 with role:ops alone, so directory 2 widened, and apply 1 went into a widening wait. That wait's poll verified the same capture again under the pending target (bundle 1 over alice's 2), took bundle 2 and superseded the target within the same run. It reported BundleVersion 2 with DirectoryUnauthorized, which is fail-closed, but it is not the two-apply shape the plan describes. With a narrowing directory 2, apply 1 holds and renders alice's directory, and apply 2 moves to bundle 2, as written. No code changed for it.
 2. **signer-install.md step 2 of "Which hosts saw a lost version"** now lists `bundle-N.policy.sigs` beside `bundle-N.json` and `bundle-N.json.sigs`. The plan did not name this edit. The step enumerates a lost bundle's spool files, and this plan adds one. A leftover file would be harmless: it holds only signatures, and pruneSpool removes an orphan. The list is now complete.
 3. **T3n is killed by one of its two named tests.** See Task 3's mutants: `rotation_first_then_removed_admin_refused` reaches the same fail-closed outcome through KRLAlone and storedOnly's check.
 4. **The fork messages were reworded while the alone timing run was in progress.** This is text only; see Task 3's test time. The final verify ran on the committed tree.
 5. **The fork error at an equal version says "stored version", not "accepted version",** because the stored version is the chain base's, which is the record's on the record path.
+6. **[Rule 3, lint] Two gosec G304 reports in Task 2's test files** (`fetch_test.go:582` and `spool_test.go:307`, `os.ReadFile` of a path built in the test). Run A's verify ran go vet and gofmt but not golangci-lint, so Task 4's first full gate was the first lint run. Both lines got the repository's convention, `//nolint:gosec // test fixture`, in commit 561542d. Both gates were then run again on 561542d. Only comments changed.
+7. **The tracking updates were made by hand**, in the shape 03-08k's PR used, not through the gsd-tools state verbs. This keeps the publish checks' formats (`N/26 plans executed in 25 waves`, `Plan: N of 26`) exactly as the repository writes them.
+8. **No plan ledger from Run A.** `plan_head_before` is the branch base b1ebff3, origin/main when Task 1 created the branch. `commits: 9` is `git rev-list --count b1ebff3..561542d`, measured before this final docs commit, which is the tenth.
 
-## UNVERIFIED (Run B, Task 3)
+Run A's UNVERIFIED item "CI" no longer holds: PR #82's CI ran all 27 checks green on 561542d.
+
+## UNVERIFIED (Run B)
 
 - **Converted refusals that no case pins.** These take the same step-b branch as the refusals the cases pin, directory_older (`stored_version_above_new_admins_needs_reset`) and the chain refusal (`unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle`):
   - directory_installation;
@@ -414,7 +588,7 @@ Everything else ran as the plan wrote it, and the stop rule never tripped.
 - **A poll during a widening wait that supersedes into the unauthorized state** (deviation 1's first shape). It was observed in the draft run, but no committed test asserts it.
 - **The homelab.** Every runbook note is run in CI only; Phase 3 runs no admin-set change and no root rotation of enrolled hosts.
 
-## Handoff to Task 3
+## Handoff to Task 3 (from Run A to Run B, kept as written)
 
 For Run B, a fresh executor resuming at Task 3 (plan "What to read", Run B).
 
@@ -481,3 +655,10 @@ The local figures vary with machine load (03-08k saw 274 s to 356 s on near-iden
 **Mutant tooling.** The mutant loop is scripted in Run A's session scratch directory, which a fresh run may not have. It takes a patch per mutant (python, from `(path, old, new)` triples: write the mutated file, take `git diff`, restore with `git checkout`). The loop applies each patch with `git apply`, runs `go test -race -count=1 -v -run '<anchored>' <pkg>` through scripts/linux.sh, records killed or survived from `--- FAIL`, `FAIL` or `panic` lines, restores with `git checkout -- <files>`, and requires `git diff --quiet -- internal/`.
 
 **Open questions for the owner.** None from Run A.
+
+## Self-Check: PASSED
+
+- The files exist: internal/agent/apply/policy_change_test.go, the plan, this SUMMARY and the four runbooks.
+- The nine branch commits before this one are ancestors of HEAD: dff4921, 605a99a, b55c264, 06820de, 941d459, 3878169, 47fd8ec, 4a1e5a5 and 561542d.
+- Both of Task 4's publish checks exit 0 after the tracking updates.
+- Task 5, the owner's merge gate, is open. Daniel reviews, approves and squash-merges PR #82. After his "merged", Claude runs merge-gate.sh in its plain form from the main checkout, then `--check`.
