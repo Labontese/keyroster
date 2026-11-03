@@ -901,8 +901,13 @@ func (e *engine) forward(ctx context.Context) error {
 			// capture that moved the bundle or the directory decided again
 			// whether a newer bundle waits, also when it held at the
 			// target's own bundle (k=0), which leaves BundleChanged false.
-			// Only a KRL-alone one (state.KRLAlone, storedOnly) moved
-			// neither, so the bundle step's answer stands.
+			// One that moved only the KRL decided nothing about the bundle,
+			// so the bundle step's answer stands: a KRL-alone Verified
+			// (state.KRLAlone, storedOnly, krlAlone after a refused
+			// candidate) or a full verification whose capture brings only
+			// a newer KRL over the target's bundle and directory. A hold
+			// needs a newest directory other than the target's: taken, it
+			// moves the directory; refused, the hold is undone.
 			if tv.BundleChanged || tv.DirectoryChanged {
 				e.report.BundleHeld = tv.BundleHeld
 			}
