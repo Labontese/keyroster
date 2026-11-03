@@ -148,7 +148,11 @@ func (v *Verified) AsStored() *Stored {
 //     while that policy's admin quorum did not sign it, or it does not fit
 //     the policy, DirectoryUnauthorized is set, unless an offered directory
 //     at or above the stored version that the policy authorizes is
-//     accepted standalone.
+//     accepted standalone; a refusal of the offered directories then joins
+//     DirectoryUnauthorized instead of refusing the capture. While it is
+//     authorized, a newest offered directory at the stored version with
+//     other bytes is directory_fork when the policy's admin quorum signed
+//     it, and directory_not_verified otherwise.
 //   - KRL. The newest complete KRL: equal to the stored one is a no-op,
 //     an older version krl_older; otherwise krl.VerifyManifest against the
 //     bundle in force, the pinned installation ID and the stored version,
@@ -349,6 +353,10 @@ func retiredError(k *newKRL, auth, n *trust.Bundle) error {
 
 // storedOnly is the Verified of a capture that takes nothing but, later,
 // its KRL: the accepted bundle, policy and directory in force, unchanged.
+// F03 (03-08f): the stored directory is checked again under prev's policy
+// (checkStored), so a KRL-alone state carries DirectoryUnauthorized as
+// verify's does, and its generation renders no principals from a directory
+// that policy does not authorize.
 func storedOnly(prev *Stored) (*Verified, error) {
 	w := &Verified{Next: *prev, Bundle: prev.bundle, Policy: prev.policy}
 	w.steps = []bundleStep{{bundle: prev.bundle, policy: prev.policy, doc: spool.Doc{Body: prev.Bundle, Sigs: prev.BundleSigs}, polDoc: spool.Doc{Body: prev.Policy, Sigs: prev.PolicySigs}}}
@@ -357,7 +365,11 @@ func storedOnly(prev *Stored) (*Verified, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: the accepted directory: %w", ErrStored, err)
 		}
+		if prev.policy == nil {
+			return nil, fmt.Errorf("%w: no policy is parsed beside directory version %d", ErrStored, d.Version)
+		}
 		w.Directory = d
+		w.DirectoryUnauthorized = checkStored(prev, d, prev.policy)
 	}
 	return w, nil
 }
@@ -650,8 +662,15 @@ func checkStored(prev *Stored, d *directory.Directory, pol *trust.Policy) error 
 // the stored bytes (standaloneDirectory); a version below the stored one
 // never is (owner decision Q-F03b). Without one, the offered directories
 // are checked as before, the hold included, and when that accepts none,
-// v.DirectoryUnauthorized names the stored directory's failure. The stored
-// directory stays in v, so the flag is derived again on every run.
+// v.DirectoryUnauthorized names the stored directory's failure. When that
+// check refuses an offered directory (directory_older, directory_chain_gap,
+// directory_installation, or directory_not_verified for any cause), the
+// refusal does not refuse the capture: the bundle part as the bundle step
+// left it is restored, so a hold the refused directory set up is undone,
+// and the refusal is joined to v.DirectoryUnauthorized. The host renders no
+// principals in that state whatever the offered directory's fault, so the
+// newest verified bundle step and the KRL step go on, fail-closed. The
+// stored directory stays in v, so the flag is derived again on every run.
 func (v *Verified) verifyDirectory(p *Pins, prev *Stored, in spool.State) error {
 	var stored []byte
 	var storedVersion uint64
@@ -672,8 +691,12 @@ func (v *Verified) verifyDirectory(p *Pins, prev *Stored, in spool.State) error 
 	if v.standaloneDirectory(p, in, vs, stored, storedVersion) {
 		return nil
 	}
+	saved := *v // the bundle part as the bundle step left it, before any hold
 	if err := v.offeredDirectory(p, in, vs, stored, storedVersion); err != nil {
-		return err
+		v.Bundle, v.Policy, v.BundleHeld, v.BundleChanged = saved.Bundle, saved.Policy, saved.BundleHeld, saved.BundleChanged
+		v.Next.Bundle, v.Next.BundleSigs, v.Next.Policy, v.Next.PolicySigs, v.Next.BundleVersion = saved.Next.Bundle, saved.Next.BundleSigs, saved.Next.Policy, saved.Next.PolicySigs, saved.Next.BundleVersion
+		v.DirectoryUnauthorized = errors.Join(unauth, err)
+		return nil
 	}
 	if !v.DirectoryChanged {
 		v.DirectoryUnauthorized = unauth
@@ -714,7 +737,11 @@ func (v *Verified) standaloneDirectory(p *Pins, in spool.State, vs []uint64, sto
 
 // offeredDirectory is the offered-directory check of verifyDirectory, with
 // vs the offered versions and stored the stored directory (nil: none) at
-// storedVersion.
+// storedVersion. F03 (03-08f): a newest offered directory at the stored
+// version with other bytes is directory_fork when it carries v.Policy's
+// admin quorum, so both sides are verified by it, and directory_not_verified
+// otherwise; equal bytes are no change. The stored version is the chain
+// base's, so the rule applies at an unapplied record's directory too.
 func (v *Verified) offeredDirectory(p *Pins, in spool.State, vs []uint64, stored []byte, storedVersion uint64) error {
 	if len(vs) == 0 {
 		return nil
@@ -722,7 +749,14 @@ func (v *Verified) offeredDirectory(p *Pins, in spool.State, vs []uint64, stored
 	newest := vs[len(vs)-1]
 	switch {
 	case stored != nil && newest == storedVersion:
-		return nil
+		doc := in.Directories[newest]
+		if bytes.Equal(doc.Body, stored) {
+			return nil
+		}
+		if _, err := directory.VerifySignatures(doc.Body, doc.Sigs, v.Policy); err != nil {
+			return fmt.Errorf("%w: version %d: other bytes than the stored version %d: %w", ErrDir, newest, storedVersion, err)
+		}
+		return fmt.Errorf("%w: the spool offers other bytes as directory version %d than the stored version %d, signed by the admin quorum of policy version %d", ErrDirFork, newest, storedVersion, v.Policy.Version)
 	case stored != nil && newest < storedVersion:
 		return fmt.Errorf("%w: the spool offers directory version %d, below the accepted version %d", ErrDirOlder, newest, storedVersion)
 	}

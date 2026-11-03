@@ -7,12 +7,14 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
@@ -83,6 +85,81 @@ func adminRemoved(t *testing.T) *adminRemovedHost {
 	return a
 }
 
+// bobDir is a directory of a's policy-2 admin bob after prev, granting
+// principals to deploy (F03 (03-08f)).
+func (a *adminRemovedHost) bobDir(prev []byte, s dirSpec) spool.Doc {
+	a.t.Helper()
+	s.signer = a.bob
+	return a.f.directory(prev, s)
+}
+
+// persistedUnauthorized is the state a host could hold before F03
+// (03-08f), built through the test fixtures: alice's directory 2 (role:evil)
+// is installed under bundle 1, then accepted/'s bundle and policy are
+// replaced with bundle 2's, whose policy 2 names bob alone (seedKey 11),
+// and saved with state.LoadStored and Save. current still renders
+// [role:evil]. The spool offers bundle 2 and policy 2, as the fetcher left
+// them.
+func persistedUnauthorized(t *testing.T) (*testHost, *trust.Bundle, spool.Doc, spool.Doc) {
+	t.Helper()
+	f := newFixture(t)
+	h := newTestHost(t, f)
+	spoolInState(t, h)
+	h.installed("role:ops")
+	h.publishDir(h.spec("role:evil"))
+	h.mustApply()
+	bob := seedKey(t, 11)
+	b2, d2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, "2026-10-02T00:00:00Z")
+	s, err := h.accepted()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Bundle, s.BundleSigs, s.Policy, s.PolicySigs, s.BundleVersion = d2.Body, d2.Sigs, p2.Body, p2.Sigs, 2
+	fd, err := spool.OpenDir(h.l.State(state.AcceptedDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if err := s.Save(h.l, fd, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.state.Bundles[2], h.state.Policies[2] = d2, p2
+	if a, err := h.accepted(); err != nil || a.BundleVersion != 2 || a.DirectoryVersion != 2 {
+		t.Fatalf("the persisted state: accepted/ %+v (%v)", a, err)
+	}
+	if got := h.principals("deploy"); !slices.Equal(got, []string{"role:evil"}) {
+		t.Fatalf("the persisted state renders %v, want [role:evil]", got)
+	}
+	return h, b2, d2, p2
+}
+
+// acceptedSnapshots is the entries of accepted/ with current.json's bytes:
+// a commit stages a new snapshot and renames the pointer (F03 (03-08f)).
+func acceptedSnapshots(t *testing.T, h *testHost) string {
+	t.Helper()
+	es, err := os.ReadDir(h.l.State(state.AcceptedDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range es {
+		names = append(names, e.Name())
+	}
+	ptr, err := os.ReadFile(h.l.State(state.AcceptedDir, "current.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(names, ",") + "|" + string(ptr)
+}
+
+// noPrincipals fails t when current holds a principals file for deploy.
+func noPrincipals(t *testing.T, h *testHost, what string) {
+	t.Helper()
+	if p := filepath.Join(h.l.Current(), PrincipalsDir, "deploy"); h.exists(p) {
+		t.Fatalf("%s: current holds a principals file for deploy: %v", what, h.principals("deploy"))
+	}
+}
+
 // TestDirectoryUnderPolicyInForce is F03 (03-08f): a host checks its
 // stored directory again under the root-signed policy in force on every
 // verification, renders no principals from one that policy's admin quorum
@@ -143,6 +220,343 @@ func TestDirectoryUnderPolicyInForce(t *testing.T) {
 		}
 		if got := readAccepted(t, h); got.Directory != 2 {
 			t.Fatalf("accepted.json names directory %d, want 2", got.Directory)
+		}
+	})
+	t.Run("new_admins_next_version_accepted_standalone", func(t *testing.T) {
+		t.Parallel()
+		// Bob's directory 3 chains to bob's own 2, never to alice's 2, and
+		// is taken standalone: the newest the current quorum signed.
+		a := adminRemoved(t)
+		h := a.testHost
+		bob2 := a.bobDir(h.dirs[0].Body, h.spec("role:bob"))
+		h.state.Directories[3] = a.bobDir(bob2.Body, h.spec("role:bob", "role:three"))
+		r, err := h.apply()
+		if err != nil || r.DirectoryUnauthorized || r.DirectoryVersion != 3 {
+			t.Fatalf("bob's directory 3: %v, %+v; want it accepted standalone", err, r)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:bob", "role:three"}) {
+			t.Fatalf("principals of deploy %v, want bob's directory 3", got)
+		}
+		if got := readAccepted(t, h); got.Directory != 3 {
+			t.Fatalf("accepted.json names directory %d, want 3", got.Directory)
+		}
+	})
+	t.Run("same_capture_hold_then_dropped", func(t *testing.T) {
+		t.Parallel()
+		// PR #67's hold, kept: one capture offers bundle 2 (policy 2: bob)
+		// and alice's directory 2. The first apply holds the bundle at 1 and
+		// renders alice's directory; the second moves to bundle 2, under
+		// which that directory is not authorized. Directory 2 only narrows
+		// directory 1, so apply 1 has no widening wait whose poll would take
+		// bundle 2 in the same run.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops", "role:evil")
+		h.publishDir(h.spec("role:evil"))
+		next := seedKey(t, 31)
+		_, d2, p2 := f.rotationNext(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(seedKey(t, 11).PublicKey())}}, "2026-10-02T00:00:00Z", next)
+		h.state.Bundles[2], h.state.Policies[2] = d2, p2
+		r, err := h.apply()
+		if err != nil || !r.BundleHeld || r.BundleVersion != 1 || r.DirectoryVersion != 2 {
+			t.Fatalf("apply 1: %v, %+v; want the hold at bundle 1 with directory 2", err, r)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:evil"}) {
+			t.Fatalf("apply 1 renders %v, want alice's directory 2 under the held bundle 1", got)
+		}
+		r, err = h.apply()
+		if !errors.Is(err, state.ErrDirUnauthorized) || r.BundleVersion != 2 || !r.DirectoryUnauthorized {
+			t.Fatalf("apply 2: %v, %+v; want bundle 2 with directory_not_authorized", err, r)
+		}
+		noPrincipals(t, h, "apply 2")
+		if ca := h.file(CAFile); !strings.Contains(ca, trust.FormatKey(next.PublicKey())) {
+			t.Fatalf("current's user_ca_keys is not bundle 2's: %q", ca)
+		}
+	})
+	t.Run("rotation_first_then_removed_admin_refused", func(t *testing.T) {
+		t.Parallel()
+		// Bundle 2 (policy 2: bob alone) first: alice's directory 1 is no
+		// longer authorized. Alice's directory 2, signed by the removed
+		// admin, then joins the unauthorized state; nothing of hers renders.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops")
+		_, d2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(seedKey(t, 11).PublicKey())}}, "2026-10-02T00:00:00Z")
+		h.state.Bundles[2], h.state.Policies[2] = d2, p2
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrDirUnauthorized) || r.BundleVersion != 2 {
+			t.Fatalf("apply 1: %v, %+v; want bundle 2 with directory_not_authorized", err, r)
+		}
+		noPrincipals(t, h, "apply 1")
+		h.publishDir(h.spec("role:evil"))
+		h.publishKRL(77)
+		r, err = h.apply()
+		if !errors.Is(err, state.ErrDirUnauthorized) || !errors.Is(err, state.ErrDir) {
+			t.Fatalf("apply 2: %v, want directory_not_authorized joined with directory_not_verified", err)
+		}
+		noPrincipals(t, h, "apply 2")
+		if r.BundleVersion != 2 || !h.krlRevokes(h.l.Current(), 77) {
+			t.Fatalf("apply 2: %+v, revokes 77 %t; want bundle 2 and the KRL landed", r, h.krlRevokes(h.l.Current(), 77))
+		}
+		mustAcceptedBundle(t, h, 2)
+	})
+	t.Run("admin_set_unchanged_rotation_keeps_directory", func(t *testing.T) {
+		t.Parallel()
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops")
+		_, d2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, f.policy.Admins, "2026-10-02T00:00:00Z")
+		h.state.Bundles[2], h.state.Policies[2] = d2, p2
+		r, err := h.apply()
+		if err != nil || r.DirectoryUnauthorized || r.BundleVersion != 2 {
+			t.Fatalf("a rotation that keeps alice: %v, %+v", err, r)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops"}) {
+			t.Fatalf("principals of deploy %v, want [role:ops] kept", got)
+		}
+	})
+	t.Run("persisted_unauthorized_state_dropped_on_noop_capture", func(t *testing.T) {
+		t.Parallel()
+		h, _, _, _ := persistedUnauthorized(t)
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrDirUnauthorized) || !r.DirectoryUnauthorized {
+			t.Fatalf("apply 1 with nothing new: %v, %+v; want directory_not_authorized", err, r)
+		}
+		noPrincipals(t, h, "apply 1 with nothing new")
+		cur, gens, snap := h.current(), h.genCount(), acceptedSnapshots(t, h)
+		r, err = h.apply()
+		if !errors.Is(err, state.ErrDirUnauthorized) || !r.NoOp || !r.DirectoryUnauthorized {
+			t.Fatalf("apply 2 with nothing new: %v, %+v; want directory_not_authorized, a no-op", err, r)
+		}
+		if h.current() != cur || h.genCount() != gens || acceptedSnapshots(t, h) != snap {
+			t.Fatalf("apply 2 committed: current %d (was %d), %d generations (was %d), accepted/ %s (was %s)", h.current(), cur, h.genCount(), gens, acceptedSnapshots(t, h), snap)
+		}
+		noPrincipals(t, h, "apply 2 with nothing new")
+	})
+	t.Run("refused_bundle_step_still_checks_directory", func(t *testing.T) {
+		t.Parallel()
+		// The persisted state with a bundle chain gap (4 without 3) and a
+		// newer KRL: the KRL lands alone (D-R2, KRLAlone), and the KRL-alone
+		// state is checked under the policy in force too.
+		h, b2, d2, p2 := persistedUnauthorized(t)
+		b3, d3 := h.f.successorUnder(b2, d2.Body, p2.Body, "2026-10-03T00:00:00Z")
+		_, d4 := h.f.successorUnder(b3, d3.Body, p2.Body, "2026-10-04T00:00:00Z")
+		h.state.Bundles[4] = d4
+		h.publishKRL(88)
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrBundleChainGap) || !errors.Is(err, state.ErrDirUnauthorized) || !r.DirectoryUnauthorized {
+			t.Fatalf("apply: %v, %+v; want bundle_chain_gap joined with directory_not_authorized", err, r)
+		}
+		noPrincipals(t, h, "the KRL-alone state")
+		if !h.krlRevokes(h.l.Current(), 88) {
+			t.Fatal("the KRL did not land alone")
+		}
+	})
+	t.Run("stored_version_above_new_admins_needs_reset", func(t *testing.T) {
+		t.Parallel()
+		// Owner decision Q-F03b: alice's directory 5 under policy 1. The
+		// spool holds only versions below 5 (the fetcher's dropAbove), so
+		// nothing the new admins sign below 5 is taken until reset-directory.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		spoolInState(t, h)
+		h.installed("role:ops")
+		for range 4 {
+			h.publishDir(h.spec("role:ops", "role:five"))
+		}
+		if r := h.mustApply(); r.DirectoryVersion != 5 {
+			t.Fatalf("alice's directory 5: %+v", r)
+		}
+		bob := seedKey(t, 11)
+		next := seedKey(t, 31)
+		_, d2, p2 := f.rotationNext(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, "2026-10-02T00:00:00Z", next)
+		h.state.Bundles[2], h.state.Policies[2] = d2, p2
+		h.resetSpool()
+		h.state.Directories = map[uint64]spool.Doc{4: h.dirs[3]}
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrDirUnauthorized) || !errors.Is(err, state.ErrDirOlder) || r.BundleVersion != 2 {
+			t.Fatalf("apply 1: %v, %+v; want bundle 2, directory_not_authorized joined with directory_older", err, r)
+		}
+		noPrincipals(t, h, "apply 1")
+		s := h.spec("role:bob")
+		s.signer = bob
+		bob2 := f.directory(h.dirs[0].Body, s)
+		h.resetSpool()
+		h.state.Directories = map[uint64]spool.Doc{2: bob2}
+		if _, err := h.apply(); !errors.Is(err, state.ErrDirUnauthorized) {
+			t.Fatalf("bob's directory 2 below the stored 5: %v, want directory_not_authorized", err)
+		}
+		noPrincipals(t, h, "bob's directory 2 below the stored 5")
+		if _, err := ResetDirectory(h.l, h.spool); err != nil {
+			t.Fatalf("reset-directory: %v", err)
+		}
+		h.state.Directories = map[uint64]spool.Doc{2: bob2}
+		r, err = h.apply()
+		if err != nil || r.DirectoryVersion != 2 || r.DirectoryUnauthorized {
+			t.Fatalf("after reset-directory: %v, %+v; want bob's directory 2", err, r)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:bob"}) {
+			t.Fatalf("principals of deploy %v, want bob's [role:bob]", got)
+		}
+	})
+	t.Run("same_version_other_bytes_refused_as_fork", func(t *testing.T) {
+		t.Parallel()
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops")
+		h.publishDir(h.spec("role:ops", "role:two"))
+		h.mustApply()
+		// Another directory 2 that alice, the current quorum, signed.
+		h.state.Directories[2] = f.directory(h.dirs[0].Body, h.spec("role:ops", "role:other"))
+		h.publishKRL(91)
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrDirFork) || errors.Is(err, state.ErrDirUnauthorized) {
+			t.Fatalf("a same-number directory with other bytes: %v, want directory_fork", err)
+		}
+		if !h.krlRevokes(h.l.Current(), 91) || r.KRLVersion != f.krlVersion {
+			t.Fatalf("the KRL was not applied alone: %+v", r)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops", "role:two"}) {
+			t.Fatalf("principals of deploy %v, want the accepted directory 2's", got)
+		}
+	})
+	t.Run("same_version_unsigned_bytes_not_verified", func(t *testing.T) {
+		t.Parallel()
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops")
+		h.publishDir(h.spec("role:ops", "role:two"))
+		h.mustApply()
+		// Another directory 2, signed by a key that is no admin.
+		s := h.spec("role:ops", "role:other")
+		s.signer = seedKey(t, 41)
+		h.state.Directories[2] = f.directory(h.dirs[0].Body, s)
+		h.publishKRL(92)
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrDir) || errors.Is(err, state.ErrDirFork) {
+			t.Fatalf("a same-number directory without the quorum: %v, want directory_not_verified, not directory_fork", err)
+		}
+		if !h.krlRevokes(h.l.Current(), 92) || r.KRLVersion != f.krlVersion {
+			t.Fatalf("the KRL was not applied alone: %+v", r)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops", "role:two"}) {
+			t.Fatalf("principals of deploy %v, want the accepted directory 2's", got)
+		}
+	})
+	t.Run("recorded_authorized_directory_keeps_the_record_raise", func(t *testing.T) {
+		t.Parallel()
+		// Owner decision O-2 (c): bob's directory 3, above the caps, is
+		// accepted standalone and recorded for its content. The chain base
+		// is the record's directory 3, which policy 2 authorizes, so
+		// accepted.json keeps the record's raise and the chain goes on.
+		a := adminRemoved(t)
+		h := a.testHost
+		s3 := h.spec("role:bob")
+		s3.bulkRoles = 17
+		bob3 := a.bobDir(h.dirs[1].Body, s3)
+		h.dirs = append(h.dirs, bob3)
+		h.state.Directories[3] = bob3
+		h.publishKRL(93)
+		r, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) || !errors.Is(err, state.ErrDirUnauthorized) || !r.DirectoryUnauthorized {
+			t.Fatalf("apply 1: %v, %+v; want generation_too_large joined with directory_not_authorized", err, r)
+		}
+		mustRecord(t, h, 0, 3)
+		noPrincipals(t, h, "the KRL-alone state over accepted/")
+		if !h.krlRevokes(h.l.Current(), 93) {
+			t.Fatal("the KRL did not land alone")
+		}
+		if got := readAccepted(t, h); got.Directory != 3 {
+			t.Fatalf("accepted.json names directory %d, want the record's 3", got.Directory)
+		}
+		d4 := a.bobDir(bob3.Body, h.spec("role:bob4"))
+		d5 := a.bobDir(d4.Body, h.spec("role:bob5"))
+		h.dirs = append(h.dirs, d4, d5)
+		h.state.Directories[4], h.state.Directories[5] = d4, d5
+		r, err = h.apply()
+		if err != nil || r.DirectoryVersion != 5 || r.DirectoryUnauthorized {
+			t.Fatalf("apply 2: %v, %+v; want directory 5 from the record's 3", err, r)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:bob5"}) {
+			t.Fatalf("principals of deploy %v, want directory 5's", got)
+		}
+		if got := readAccepted(t, h); got.Directory != 5 {
+			t.Fatalf("accepted.json names directory %d, want 5", got.Directory)
+		}
+		if recordExists(t, h) {
+			t.Fatal("the unapplied record is still there")
+		}
+	})
+	t.Run("recorded_bundle_over_unauthorized_directory_reports_directory_0", func(t *testing.T) {
+		t.Parallel()
+		// Owner decision O-2 (c): the record's bundle 2 rotates the policy
+		// to bob over alice's directory 2, so the chain base is unauthorized
+		// and accepted.json asks from directory 0. The server's current
+		// directory, bob's 2, then recovers the host from the record.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		spoolInState(t, h)
+		h.installed("role:ops")
+		h.publishDir(h.spec("role:ops"))
+		h.mustApply()
+		key := seedKey(t, 32)
+		d2, p2 := f.rotationDropping(f.bundle, f.bundleDoc, "2026-10-02T00:00:00Z", key, nil)
+		h.state.Bundles[2], h.state.Policies[2] = d2, p2
+		line := trust.FormatKey(key.PublicKey())
+		h.run.rejectCA = func(l string) bool { return l == line }
+		r, err := h.apply()
+		if !errors.Is(err, ErrCALineRejected) || errors.Is(err, state.ErrDirUnauthorized) || r.DirectoryUnauthorized {
+			t.Fatalf("apply 1: %v, %+v; want ca_line_rejected alone", err, r)
+		}
+		mustRecord(t, h, 2, 0)
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops"}) {
+			t.Fatalf("apply 1 renders %v, want alice's [role:ops] under bundle 1", got)
+		}
+		if a := readAccepted(t, h); a.Bundle != 2 || a.Directory != 0 {
+			t.Fatalf("accepted.json bundle %d, directory %d; want 2, 0", a.Bundle, a.Directory)
+		}
+		h.run.rejectCA = nil
+		s := h.spec("role:bob")
+		s.signer = seedKey(t, 12) // rotationDropping's bob
+		bob2 := f.directory(h.dirs[0].Body, s)
+		h.dirs[1], h.state.Directories[2] = bob2, bob2
+		r, err = h.apply()
+		if err != nil || r.BundleVersion != 2 || r.DirectoryVersion != 2 {
+			t.Fatalf("apply 2: %v, %+v; want bundle 2 with bob's directory 2", err, r)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:bob"}) {
+			t.Fatalf("principals of deploy %v, want bob's [role:bob]", got)
+		}
+		if a := readAccepted(t, h); a.Bundle != 2 || a.Directory != 2 {
+			t.Fatalf("accepted.json bundle %d, directory %d; want 2, 2", a.Bundle, a.Directory)
+		}
+		if recordExists(t, h) {
+			t.Fatal("the unapplied record is still there")
+		}
+	})
+	t.Run("unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle", func(t *testing.T) {
+		t.Parallel()
+		// Plan check 3, M-2: alice's directory 2, on a re-made directory 1,
+		// holds the capture at bundle 1 and is then refused for its chain.
+		// The hold is undone: bundle 2 stays, with no principals.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops")
+		_, d2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(seedKey(t, 11).PublicKey())}}, "2026-10-02T00:00:00Z")
+		h.state.Bundles[2], h.state.Policies[2] = d2, p2
+		remade := f.directory(nil, h.spec("role:remade"))
+		h.state.Directories[2] = f.directory(remade.Body, h.spec("role:evil"))
+		h.publishKRL(94)
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrDirUnauthorized) || !errors.Is(err, state.ErrDir) {
+			t.Fatalf("apply: %v, want directory_not_authorized joined with directory_not_verified", err)
+		}
+		if r.BundleVersion != 2 || r.BundleHeld {
+			t.Fatalf("report: bundle %d, held %t; want 2, not held", r.BundleVersion, r.BundleHeld)
+		}
+		noPrincipals(t, h, "apply")
+		mustAcceptedBundle(t, h, 2)
+		if !h.krlRevokes(h.l.Current(), 94) {
+			t.Fatal("the KRL did not land")
 		}
 	})
 }

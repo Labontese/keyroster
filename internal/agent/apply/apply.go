@@ -781,7 +781,10 @@ func (e *engine) forward(ctx context.Context) error {
 	var g, cur *Generation
 	var curLink link
 	for {
-		if !v.Changed() {
+		// F03 (03-08f): while the stored directory is unauthorized, an
+		// unchanged capture is rendered too, so principals installed before
+		// are removed; a render equal to current is the no-op below.
+		if !v.Changed() && v.DirectoryUnauthorized == nil {
 			// A run that replaced a trial drop-in wrote it: not a no-op.
 			e.report.NoOp = !e.dropInRepaired
 			// The KRL in force is current's, which a rollback or crash
@@ -799,6 +802,17 @@ func (e *engine) forward(ctx context.Context) error {
 		}
 		var refusal error
 		if g, refusal = e.candidate(v, cur, curLink); refusal == nil {
+			if !v.Changed() && cur != nil && sameBytes(cur, g) {
+				// F03 (03-08f): the unauthorized state is already in force.
+				// Nothing is committed, so the idle run stages no accepted/
+				// snapshot, as the no-change branch above.
+				e.report.NoOp = !e.dropInRepaired
+				if curLink.kind != linkAgent {
+					cur = nil
+				}
+				e.setVersions(v, cur)
+				return outcome(v)
+			}
 			if err := e.preflightApply(v, g); err != nil {
 				return err
 			}
@@ -1315,7 +1329,9 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 // KRL-alone pass and the lowest hold step use. So a wait holds the record's
 // fork and rollback evidence as forward does: an older bundle below the
 // record is never read, a spool copy at the record's version adds no
-// step, and a chain that does not chain to the record's bytes is refused,
+// step, unless it is the newest offered, which is directory_fork or
+// directory_not_verified (F03 (03-08f)), and a chain that does not chain
+// to the record's bytes is refused,
 // its KRL taken alone against prev. A capture that brings no bundle,
 // policy or directory beyond the base supersedes the target only with a
 // newer KRL, verified against prev (KRLAlone) or, on krl.ErrSigner, against
