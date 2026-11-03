@@ -252,6 +252,12 @@ directory and restarting the server ends the 503, but that remedy is
 UNVERIFIED. Hosts then keep their last KRL. These answers are run in CI
 (internal/server tests, 03-06b).
 
+When the copy was renamed into place but its directory could not be synced,
+the route keeps answering 503 with `KRL not kept: ...`, and rewrites the copy
+at every refresh until a write succeeds. Only then is that version served. A
+failing disk therefore shows as a steady 503, not a single one. Run in CI
+(`TestKRLServedCopy`, 03-08g); UNVERIFIED on a real host.
+
 Network access is limited to IPv4,
 IPv6 and Unix sockets. At start the server asks the signer for its Status,
 retrying for up to 30 s. It then exits non-zero if:
@@ -320,6 +326,32 @@ Run in CI e2e (`TestAgentEnrollEndToEnd`, 03-07), with a server started with
 (`TestAgentListenerRequiresClientCert`, `TestBrowserListenerUnchanged`). The
 drop-in, the restart and the firewall rule on a real host are UNVERIFIED
 until 03-16.
+
+**Signer calls in flight.** The server keeps at most 12 signer calls in
+flight, plus one read of the published KRL, which never waits for the
+others. At most 6 of the 12 are calls made for host agents, such as reads of
+older versions for hosts catching up, so logins and revocations always have
+room. Run in CI (`TestSignerBudget`, `TestKRLDuringFullBudget`, 03-08g);
+UNVERIFIED on a real host.
+
+If the signer's key is on a hardware token that asks for a touch, calls that
+need the signer's lock wait while it waits for the touch. The KRL read is not
+among them. But the KRL route also needs a recent signer status, which waits
+for that lock, so a long wait still makes the route answer 503 after a few
+seconds. Hosts keep the KRL they applied and ask again at their next poll.
+CI runs only the first part, that the KRL route answers while the status is
+recent and every other call is held (`TestKRLDuringFullBudget`, 03-08g). The
+503 during a long touch is UNVERIFIED, in CI and on a real host.
+
+**Requests in flight per host.** One host agent may have at most 2 requests in
+flight on the state and heartbeat routes together. A further one is answered
+429 with `Retry-After: 1`, and the server logs `agent requests in flight` with
+the route and the host's expected name. The fetcher sends one request at a
+time. It meets this limit only while earlier requests of its own are still
+being answered after it gave up on them, and it then continues at the next
+poll. Run in CI (`TestAgentInFlight`, 03-08g, and for the fetcher's state
+poll `TestFetch/rate_limited_continues_next_poll`; the heartbeat's 429 path
+in the fetcher has no test of its own); UNVERIFIED on a real host.
 
 ## Logs
 
