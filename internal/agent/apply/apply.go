@@ -897,6 +897,12 @@ func (e *engine) forward(ctx context.Context) error {
 			// pollSpool's KRL-alone pass and from pollCapture's state.KRLAlone
 			// branch (storedOnly).
 			e.report.DirectoryUnauthorized = tv.DirectoryUnauthorized != nil
+			// PR #82 review, D-2 (c): a superseding capture that moved the
+			// bundle decided again whether a newer one waits. A KRL-alone
+			// one moved nothing, so the bundle step's answer stands.
+			if tv.BundleChanged {
+				e.report.BundleHeld = tv.BundleHeld
+			}
 			continue
 		}
 		if err != nil {

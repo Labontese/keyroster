@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
@@ -537,28 +538,110 @@ func TestDirectoryUnderPolicyInForce(t *testing.T) {
 		t.Parallel()
 		// Plan check 3, M-2: alice's directory 2, on a re-made directory 1,
 		// holds the capture at bundle 1 and is then refused for its chain.
-		// The hold is undone: bundle 2 stays, with no principals.
+		// The hold is undone: bundle 2 stays, with its CA keys and no
+		// principals.
+		holdThenRefused(t, state.ErrDir, func(h *testHost) {
+			remade := h.f.directory(nil, h.spec("role:remade"))
+			h.state.Directories[2] = h.f.directory(remade.Body, h.spec("role:evil"))
+		})
+	})
+	t.Run("unauthorized_hold_then_other_refusals_keep_the_verified_bundle", func(t *testing.T) {
+		t.Parallel()
+		// PR #82 review, D-2 (a): each converted refusal after the hold
+		// undoes it, so bundle 2's CA keys render.
+		t.Run("directory_installation", func(t *testing.T) {
+			t.Parallel()
+			holdThenRefused(t, state.ErrDirInstall, func(h *testHost) {
+				s := h.spec("role:evil")
+				s.install = "fedcba9876543210fedcba9876543210"
+				h.state.Directories[2] = h.f.directory(h.dirs[0].Body, s)
+			})
+		})
+		t.Run("directory_chain_gap", func(t *testing.T) {
+			t.Parallel()
+			holdThenRefused(t, state.ErrDirChainGap, func(h *testHost) {
+				d2 := h.f.directory(h.dirs[0].Body, h.spec("role:evil"))
+				h.state.Directories[3] = h.f.directory(d2.Body, h.spec("role:evil"))
+			})
+		})
+		t.Run("directory_holds_another_version", func(t *testing.T) {
+			t.Parallel()
+			holdThenRefused(t, state.ErrDir, func(h *testHost) {
+				d2 := h.f.directory(h.dirs[0].Body, h.spec("role:evil"))
+				h.state.Directories[2] = h.f.directory(d2.Body, h.spec("role:evil"))
+			})
+		})
+	})
+	t.Run("widening_directory_with_rotation_supersedes_into_bundle_2", func(t *testing.T) {
+		t.Parallel()
+		// PR #82 review, D-2 (c): directory 1 is [role:ops]; one capture
+		// offers alice's directory 2 [role:ops, role:evil], which widens
+		// it, and bundle 2 (policy 2: bob). Apply 1 holds at bundle 1 and
+		// waits to widen; the wait's poll takes bundle 2, under which
+		// alice's directories are not authorized. role:evil never renders,
+		// and the report does not say a bundle is held.
 		f := newFixture(t)
 		h := newTestHost(t, f)
 		h.installed("role:ops")
-		_, d2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(seedKey(t, 11).PublicKey())}}, "2026-10-02T00:00:00Z")
+		next := seedKey(t, 31)
+		_, d2, p2 := f.rotationNext(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(seedKey(t, 11).PublicKey())}}, "2026-10-02T00:00:00Z", next)
 		h.state.Bundles[2], h.state.Policies[2] = d2, p2
-		remade := f.directory(nil, h.spec("role:remade"))
-		h.state.Directories[2] = f.directory(remade.Body, h.spec("role:evil"))
-		h.publishKRL(94)
-		r, err := h.apply()
-		if !errors.Is(err, state.ErrDirUnauthorized) || !errors.Is(err, state.ErrDir) {
-			t.Fatalf("apply: %v, want directory_not_authorized joined with directory_not_verified", err)
+		h.publishDir(h.spec("role:ops", "role:evil"))
+		sleeps := 0
+		h.clock.onSleep = func(time.Duration) {
+			sleeps++
+			if slices.Contains(h.principals("deploy"), "role:evil") {
+				t.Errorf("during the wait current renders %v", h.principals("deploy"))
+			}
 		}
-		if r.BundleVersion != 2 || r.BundleHeld {
-			t.Fatalf("report: bundle %d, held %t; want 2, not held", r.BundleVersion, r.BundleHeld)
+		r, err := h.apply()
+		if !errors.Is(err, state.ErrDirUnauthorized) || r.BundleVersion != 2 || !r.DirectoryUnauthorized || r.Intermediate == 0 || sleeps == 0 {
+			t.Fatalf("apply: %v, %+v (%d sleeps); want bundle 2 with directory_not_authorized after a widening wait", err, r, sleeps)
+		}
+		if r.BundleHeld {
+			t.Errorf("the report says a bundle is held while bundle 2 is in force")
 		}
 		noPrincipals(t, h, "apply")
-		mustAcceptedBundle(t, h, 2)
-		if !h.krlRevokes(h.l.Current(), 94) {
-			t.Fatal("the KRL did not land")
+		if ca := h.file(CAFile); !strings.Contains(ca, trust.FormatKey(next.PublicKey())) {
+			t.Fatalf("current's user_ca_keys is not bundle 2's: %q", ca)
+		}
+		if b, err := os.ReadFile(h.l.State(statusFile)); err != nil || strings.Contains(string(b), `"bundle_held":true`) { //nolint:gosec // test fixture
+			t.Errorf("status.json (%v) says a bundle is held while bundle 2 is in force: %s", err, b)
 		}
 	})
+}
+
+// holdThenRefused is plan check 3's M-2 shape (PR #82 review, D-2 (a)): an
+// installed host offered bundle 2 (policy 2: bob alone, with a next user
+// CA) and, through offer, a newest directory of alice's that holds the
+// capture at bundle 1 and is then refused with want. The refusal joins
+// directory_not_authorized, and the hold is undone: bundle 2 and its CA
+// keys are in force, with no principals, and the KRL lands.
+func holdThenRefused(t *testing.T, want error, offer func(h *testHost)) {
+	t.Helper()
+	f := newFixture(t)
+	h := newTestHost(t, f)
+	h.installed("role:ops")
+	next := seedKey(t, 31)
+	_, d2, p2 := f.rotationNext(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(seedKey(t, 11).PublicKey())}}, "2026-10-02T00:00:00Z", next)
+	h.state.Bundles[2], h.state.Policies[2] = d2, p2
+	offer(h)
+	h.publishKRL(94)
+	r, err := h.apply()
+	if !errors.Is(err, state.ErrDirUnauthorized) || !errors.Is(err, want) {
+		t.Fatalf("apply: %v, want directory_not_authorized joined with %v", err, want)
+	}
+	if r.BundleVersion != 2 || r.BundleHeld {
+		t.Fatalf("report: bundle %d, held %t; want 2, not held", r.BundleVersion, r.BundleHeld)
+	}
+	noPrincipals(t, h, "apply")
+	mustAcceptedBundle(t, h, 2)
+	if ca := h.file(CAFile); !strings.Contains(ca, trust.FormatKey(next.PublicKey())) {
+		t.Fatalf("current's user_ca_keys is not bundle 2's: %q", ca)
+	}
+	if !h.krlRevokes(h.l.Current(), 94) {
+		t.Fatal("the KRL did not land")
+	}
 }
 
 // rootSigs is the concatenated SSHSIG blocks of signers over doc under
@@ -738,6 +821,25 @@ func TestRootRotationUnchangedPolicy(t *testing.T) {
 		_, err := h.apply()
 		if !errors.Is(err, state.ErrBundle) || !strings.Contains(err.Error(), "policy (new roots) signed by 1 of 2 roots, need 2") {
 			t.Fatalf("apply: %v, want bundle_not_verified with policy (new roots) signed by 1 of 2 roots, need 2", err)
+		}
+		mustAcceptedBundle(t, h, 1)
+	})
+	t.Run("bundle_sigs_never_united", func(t *testing.T) {
+		t.Parallel()
+		// PR #82 review, D-2 (b): C's policy signature sits only in
+		// bundle-2.json.sigs, beside A's and C's bundle signatures. The
+		// bundle check skips it, and the policy union never reads that
+		// file, so the rotation to {C} is refused.
+		f := newFixture(t)
+		h := newTestHost(t, f)
+		h.installed("role:ops")
+		c, _, _, _, _ := rootKeys(t)
+		offerHops(t, h, f.bundle, f.bundleDoc, rootHop{roots: []ssh.Signer{c}, threshold: 1, bundleBy: []ssh.Signer{f.root, c}})
+		d2 := h.state.Bundles[2]
+		d2.Sigs = append(slices.Clone(d2.Sigs), rootSigs(t, trust.NamespacePolicy, f.policyDoc, c)...)
+		h.state.Bundles[2] = d2
+		if _, err := h.apply(); !errors.Is(err, state.ErrBundle) || !strings.Contains(err.Error(), "policy (new roots) signed by 0 of 1 roots, need 1") {
+			t.Fatalf("apply: %v, want bundle_not_verified, policy (new roots) signed by 0 of 1", err)
 		}
 		mustAcceptedBundle(t, h, 1)
 	})
