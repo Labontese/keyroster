@@ -620,8 +620,12 @@ func healSpool(dir string) ([]string, error) {
 // Policies are left: they are found by their hash, never by a version
 // cursor. A policy is still replaced by name when an answer names its
 // version again, which is harmless: the applier finds the policy it
-// accepted by its SHA-256 first (F01 (03-08e)). Only pollState calls it,
-// after an answer with more: false.
+// accepted by its SHA-256 first (F01 (03-08e)). That replacement is why
+// each bundle's delivered policy signatures are also kept per bundle
+// (bundle-<N>.policy.sigs), which goes with its bundle here (F02
+// (03-08f)): several bundles share a policy version when a root rotation
+// carries the policy over. Only pollState calls it, after an answer with
+// more: false.
 func dropAbove(dir string, v serverclient.AgentVersions) ([]string, error) {
 	fd, err := spool.OpenDir(dir)
 	if err != nil {
@@ -679,13 +683,17 @@ const keepAbove = MaxRounds * serverclient.MaxAgentStatePerKind
 // the names it removed (F01 (03-08e) fix rounds 1 to 3). pollState calls
 // it at the start of every poll, so between two polls the spool holds at
 // most what it kept plus what one poll writes. With the read caps that is
-// about 5.1 GiB kept (1025 bundle, policy and directory sets and one KRL
-// set) plus at most MaxRounds answers of
-// serverclient.MaxAgentStateResponse (512 MiB), about 5.6 GiB in all;
-// computed from the caps, not measured. It removes:
+// about 6.1 GiB kept (1025 bundle, policy and directory sets, each kept
+// bundle with its delivered policy signatures, one more file of at most
+// spool.MaxBundle (F02 (03-08f), owner decision O-3 (a)), and one KRL set)
+// plus at most MaxRounds answers of serverclient.MaxAgentStateResponse
+// (512 MiB), about 6.6 GiB in all; computed from the caps, not measured.
+// It removes:
 //
 //   - of the bundles and the directories, every version but the complete
-//     ones spool.Keep takes: the newest at or below a's version (the
+//     ones spool.Keep takes (a bundle's delivered policy signatures go
+//     with their bundle, and one whose bundle is not kept goes; F02
+//     (03-08f)): the newest at or below a's version (the
 //     accepted one, whose policy so stays too) and the lowest keepAbove
 //     above it, or without one the newest spool.MaxVersionsPerKind, which
 //     is all a floor-0 capture reads (and the applier then uses the newest
@@ -808,12 +816,15 @@ func pruneSpool(dir string, a enroll.Accepted) ([]string, error) {
 }
 
 // spoolSet is the kind and version of a file of a versioned spool set: a
-// bundle, policy or directory and its signatures, or a KRL, its manifest
-// and the manifest's signature.
+// bundle, policy or directory and its signatures, a bundle's delivered
+// policy signatures (bundle-<N>.policy.sigs, of bundle N's set; F02
+// (03-08f)), or a KRL, its manifest and the manifest's signature.
 func spoolSet(name string) (string, uint64, bool) {
 	kind, digits := "", ""
 	if m := spoolSetDocRE.FindStringSubmatch(name); m != nil {
 		kind, digits = m[1], m[2]
+	} else if m := spoolSetBundlePolicyRE.FindStringSubmatch(name); m != nil {
+		kind, digits = "bundle", m[1]
 	} else if m := spoolSetKRLRE.FindStringSubmatch(name); m != nil {
 		kind, digits = "krl", m[1]
 	} else {
@@ -834,7 +845,12 @@ func listNames(names []string) string {
 
 // writeState spools every item of r, one at a time and in the response's
 // order (bundles, then directories, then the KRL), through spool.Write:
-// each file atomically, signatures before the document they complete.
+// each file atomically, signatures before the document they complete. A
+// bundle item's policy signatures are also written as
+// bundle-<N>.policy.sigs, before its bundle (F02 (03-08f)): the one
+// policy-<v>.json.sigs per policy version holds only the last item's, and
+// several bundles share a policy version when a root rotation carries the
+// policy over.
 // The file names come from the item's kind and its uint64 version only.
 //
 // It first refuses, with checkCaps, an answer of which spool.Read would
@@ -847,6 +863,10 @@ func writeState(dir string, r *serverclient.AgentStateResponse) error {
 		if err := spool.Write(dir, spool.State{
 			Bundles:  map[uint64]spool.Doc{b.Version: {Body: b.Bundle, Sigs: b.BundleSigs}},
 			Policies: map[uint64]spool.Doc{b.PolicyVersion: {Body: b.Policy, Sigs: b.PolicySigs}},
+			// F02 (03-08f): the item's policy signatures under the bundle's
+			// version too, so a later item that names the same policy
+			// version does not replace them.
+			BundlePolicySigs: map[uint64][]byte{b.Version: b.PolicySigs},
 		}); err != nil {
 			return err
 		}
@@ -899,6 +919,8 @@ func checkCaps(r *serverclient.AgentStateResponse) error {
 		policy := "policy-" + strconv.FormatUint(b.PolicyVersion, 10) + ".json"
 		files = append(files,
 			file{"bundle", b.Version, bundle, len(b.Bundle)}, file{"bundle", b.Version, bundle + ".sigs", len(b.BundleSigs)},
+			// F02 (03-08f): PolicySigs again, as writeState names it per bundle.
+			file{"bundle", b.Version, "bundle-" + strconv.FormatUint(b.Version, 10) + ".policy.sigs", len(b.PolicySigs)},
 			file{"policy", b.PolicyVersion, policy, len(b.Policy)}, file{"policy", b.PolicyVersion, policy + ".sigs", len(b.PolicySigs)})
 	}
 	for _, d := range r.Directories {
@@ -923,12 +945,16 @@ var (
 	spoolDocRE = regexp.MustCompile(`^(bundle|directory)-([1-9][0-9]{0,19})\.json$`)
 	spoolKRLRE = regexp.MustCompile(`^krl-([1-9][0-9]{0,19})\.krl$`)
 	// spoolFileRE is every file of a versioned bundle, directory or KRL
-	// (dropAbove).
-	spoolFileRE = regexp.MustCompile(`^(bundle|directory|krl)-([1-9][0-9]{0,19})\.(json|json\.sigs|krl|manifest\.json|manifest\.sig)$`)
+	// (dropAbove), a bundle's delivered policy signatures included (F02
+	// (03-08f)).
+	spoolFileRE = regexp.MustCompile(`^(bundle|directory|krl)-([1-9][0-9]{0,19})\.(json|json\.sigs|policy\.sigs|krl|manifest\.json|manifest\.sig)$`)
 	// spoolSetDocRE and spoolSetKRLRE are every file of a versioned bundle,
 	// policy or directory, and of a KRL (pruneSpool).
 	spoolSetDocRE = regexp.MustCompile(`^(bundle|policy|directory)-([1-9][0-9]{0,19})\.json(\.sigs)?$`)
 	spoolSetKRLRE = regexp.MustCompile(`^krl-([1-9][0-9]{0,19})\.(krl|manifest\.json|manifest\.sig)$`)
+	// spoolSetBundlePolicyRE is a bundle's delivered policy signatures, a
+	// file of that bundle's set (pruneSpool; F02 (03-08f)).
+	spoolSetBundlePolicyRE = regexp.MustCompile(`^bundle-([1-9][0-9]{0,19})\.policy\.sigs$`)
 )
 
 // spooledVersions are the newest complete bundle, directory and KRL

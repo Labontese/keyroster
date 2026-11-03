@@ -15,6 +15,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
+	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -117,7 +118,16 @@ func (v *Verified) AsStored() *Stored {
 //     version by trust.VerifySuccessor, in order (a missing version is
 //     bundle_chain_gap); offering only older versions is bundle_older;
 //     equal is a no-op. Every accepted bundle must name the pinned
-//     installation ID.
+//     installation ID. A successor that carries the policy over is checked
+//     with the stored policy signatures first; only when that fails with
+//     trust.ErrThreshold, as for a rotation to new roots or a raised
+//     threshold, is it retried once with the union of the admitted policy
+//     signature files: the stored ones, those delivered with the bundle
+//     and the offered policy file's (F02 (03-08f), verifyBundle). The
+//     thresholds still come from the bundles, each root counts once and
+//     only for a valid signature over the exact policy bytes, and the
+//     bundle signatures are never united, so the union never lowers a
+//     threshold; accepted/ stores one admitted file, never the union.
 //   - Directory. The newest offered directory above the stored one must
 //     carry the admin quorum of the policy in force, parse, name the pinned installation
 //     (directory.CheckInstallation, strict: agents never accept a
@@ -380,6 +390,18 @@ func findPolicy(sum string, prev *Stored, in spool.State) (spool.Doc, bool) {
 	return spool.Doc{}, false
 }
 
+// verifyBundle is verify's bundle step against prev, the chain base. Each
+// successor step is verified with the policy signatures findPolicy returns:
+// the chain base's or the previous step's while the policy is unchanged.
+// F02 (03-08f): only when trust.VerifySuccessor fails with
+// trust.ErrThreshold does the step retry once, with the union of the
+// admitted policy signature files (unitePolicySigs): those signatures, the
+// ones delivered with the bundle (bundle-<N>.policy.sigs) and the offered
+// policy file's. The union cannot widen trust: the thresholds come from
+// the bundles, CountPinnedSigners counts a root once and only for a valid
+// signature over the exact policy bytes, and the bundle signatures are
+// never united. A step stores one admitted file, never the union
+// (storedPolicySigs).
 func (v *Verified) verifyBundle(p *Pins, prev *Stored, in spool.State) error {
 	vs := sortedVersions(in.Bundles)
 	if prev == nil || prev.Bundle == nil {
@@ -419,6 +441,13 @@ func (v *Verified) verifyBundle(p *Pins, prev *Stored, in spool.State) error {
 			return fmt.Errorf("%w: no offered policy has the SHA-256 that bundle version %d names", ErrPolicyMissing, ver)
 		}
 		nb, np, err := trust.VerifySuccessor(cur, curBytes, curPolicy, doc.Body, doc.Sigs, pol.Body, pol.Sigs)
+		if errors.Is(err, trust.ErrThreshold) {
+			// F02 (03-08f): the policy signatures delivered with this bundle
+			// and the offered policy file may carry the new roots' policy
+			// signatures, which the stored ones do not.
+			offered, _ := findPolicy(lean.PolicySHA256, nil, in)
+			nb, np, pol.Sigs, err = unitePolicySigs(cur, curBytes, curPolicy, doc, pol, in.BundlePolicySigs[ver], offered.Sigs, err)
+		}
 		if err != nil {
 			return fmt.Errorf("%w: bundle version %d: %w", ErrBundle, ver, err)
 		}
@@ -431,6 +460,87 @@ func (v *Verified) verifyBundle(p *Pins, prev *Stored, in spool.State) error {
 		v.steps = append(v.steps, bundleStep{bundle: nb, policy: np, doc: doc, polDoc: pol})
 	}
 	return nil
+}
+
+// unitePolicySigs is F02 (03-08f)'s one retry of a successor step whose
+// plain check (trust.VerifySuccessor with pol.Sigs, the chain base's or the
+// previous step's policy signatures) failed with trust.ErrThreshold, plain.
+// The sources are pol.Sigs, delivered (the policy signatures delivered
+// with this bundle, spool.State.BundlePolicySigs) and offered (the offered
+// policy file whose body has the bundle's policy SHA-256). A source is
+// admitted only when sshsig.ParseAll accepts it on its own (it refuses a
+// whole file for one malformed block), and identical files are admitted
+// once; the union is the admitted files concatenated, each ending in a
+// newline. The bundle signatures are never united. When the union is
+// pol.Sigs, plain stands; otherwise VerifySuccessor is retried once with
+// it, and its error, if any, is returned.
+//
+// The union cannot widen trust (internal/trust/verify.go): both thresholds
+// come from the bundles (prev.Root.Threshold and the successor's
+// Root.Threshold); CountPinnedSigners counts each pinned root at most once,
+// and only for a block whose public key is the pinned key and whose SSHSIG
+// verifies over the exact policy bytes under the policy namespace; and
+// every source is a signature file the signer accepted or served, which a
+// spool writer could already present. So the union never refuses a
+// successor the plain check accepts, and accepts only what VerifySuccessor
+// accepts for a file of genuine signatures over those policy bytes.
+//
+// The union is never stored. On success it returns the one file the step
+// stores in Next.PolicySigs (storedPolicySigs), which an unapplied record's
+// bundle part then copies (03-08j).
+func unitePolicySigs(prev *trust.Bundle, prevBytes, prevPolicy []byte, doc, pol spool.Doc, delivered, offered []byte, plain error) (*trust.Bundle, *trust.Policy, []byte, error) {
+	var admitted [][]byte
+	var union []byte
+	for _, src := range [][]byte{pol.Sigs, delivered, offered} {
+		if !admitPolicySigs(src) || slices.ContainsFunc(admitted, func(a []byte) bool { return bytes.Equal(a, src) }) {
+			continue
+		}
+		admitted = append(admitted, src)
+		union = append(union, src...)
+		if !bytes.HasSuffix(src, []byte("\n")) {
+			union = append(union, '\n')
+		}
+	}
+	if bytes.Equal(union, pol.Sigs) {
+		return nil, nil, nil, plain
+	}
+	nb, np, err := trust.VerifySuccessor(prev, prevBytes, prevPolicy, doc.Body, doc.Sigs, pol.Body, union)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return nb, np, storedPolicySigs(prev, prevBytes, prevPolicy, doc, pol, delivered, offered), nil
+}
+
+// storedPolicySigs is the policy signature file a step the union verified
+// stores (F02 (03-08f)): of the admitted delivered and offered files, the
+// first that passes trust.VerifySuccessor alone; otherwise the admitted
+// offered file; otherwise the admitted delivered file. It is never the
+// union, which grows with every hop, and never a file sshsig.ParseAll
+// refused, so the next hop's plain check never fails on a parse error that
+// would keep it from its own retry. Every candidate was read under
+// spool.MaxBundle, so LoadStored's and ParseUnapplied's caps hold.
+func storedPolicySigs(prev *trust.Bundle, prevBytes, prevPolicy []byte, doc, pol spool.Doc, delivered, offered []byte) []byte {
+	for _, src := range [][]byte{delivered, offered} {
+		if !admitPolicySigs(src) {
+			continue
+		}
+		if _, _, err := trust.VerifySuccessor(prev, prevBytes, prevPolicy, doc.Body, doc.Sigs, pol.Body, src); err == nil {
+			return src
+		}
+	}
+	for _, src := range [][]byte{offered, delivered} {
+		if admitPolicySigs(src) {
+			return src
+		}
+	}
+	return pol.Sigs
+}
+
+// admitPolicySigs reports whether sigs is a policy signature file the
+// union admits: sshsig.ParseAll accepts it on its own (F02 (03-08f)).
+func admitPolicySigs(sigs []byte) bool {
+	_, err := sshsig.ParseAll(sigs)
+	return err == nil
 }
 
 // holdBundle takes the bundle chain only up to step k: the bundle,

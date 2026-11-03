@@ -280,6 +280,50 @@ func TestSpoolPrune(t *testing.T) {
 			t.Error("the junk policy no spooled bundle names is still spooled after the next poll")
 		}
 	})
+	t.Run("per_bundle_policy_sigs_pruned_with_their_bundle", func(t *testing.T) {
+		// F02 (03-08f): bundle-<N>.policy.sigs stays exactly while bundle N
+		// stays, and one without its bundle goes.
+		pol := prunePolicy(1, "p")
+		seed := func(t *testing.T, n uint64) string {
+			t.Helper()
+			dir := t.TempDir()
+			files := map[string]string{"policy-1.json": pol, "policy-1.json.sigs": "s"}
+			for v := uint64(1); v <= n; v++ {
+				base := "bundle-" + strconv.FormatUint(v, 10)
+				files[base+".json"], files[base+".json.sigs"], files[base+".policy.sigs"] = pruneBundle(v, pol), "s", "p"
+			}
+			if n < 9 {
+				files["bundle-9.policy.sigs"] = "orphan"
+			}
+			for name, body := range files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil { //nolint:gosec // test fixture
+					t.Fatal(err)
+				}
+			}
+			return dir
+		}
+		dir := seed(t, 5)
+		if _, err := pruneSpool(dir, enroll.Accepted{Bundle: 3}); err != nil {
+			t.Fatal(err)
+		}
+		for v, want := range map[uint64]bool{1: false, 2: false, 3: true, 4: true, 5: true, 9: false} {
+			if got := exists(t, filepath.Join(dir, "bundle-"+strconv.FormatUint(v, 10)+".policy.sigs")); got != want {
+				t.Errorf("accepted bundle 3: bundle-%d.policy.sigs spooled %t, want %t", v, got, want)
+			}
+		}
+		// No accepted.json: the newest spool.MaxVersionsPerKind bundles
+		// keep theirs.
+		dir = seed(t, 70)
+		if _, err := pruneSpool(dir, enroll.Accepted{}); err != nil {
+			t.Fatal(err)
+		}
+		for v := uint64(1); v <= 70; v++ {
+			want := v > 70-spool.MaxVersionsPerKind
+			if got := exists(t, filepath.Join(dir, "bundle-"+strconv.FormatUint(v, 10)+".policy.sigs")); got != want {
+				t.Errorf("no accepted.json: bundle-%d.policy.sigs spooled %t, want %t", v, got, want)
+			}
+		}
+	})
 	t.Run("prune_keeps_what_the_applier_reads", func(t *testing.T) {
 		// accepted.json: bundle 3, directory 2, KRL 5. The spool also holds
 		// bundles 4 and 5 and directory 3, which a pending swap reads from
