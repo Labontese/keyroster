@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -577,7 +578,10 @@ func (h *heldStates) answered(t *testing.T, n, code int) []*httptest.ResponseRec
 
 // TestAgentInFlight pins F11 (03-08g) on the agent routes: catch-up reads
 // relayed for host agents take at most the agent share of the budget, and
-// leave the server's own reads room.
+// leave the server's own reads room; one agent has at most
+// maxAgentInFlight requests in flight on the state and heartbeat routes
+// together, a further one is answered 429 with Retry-After 1, and the slot
+// is freed when the request ends.
 func TestAgentInFlight(t *testing.T) {
 	t.Run("catch_up_reads_leave_room", func(t *testing.T) {
 		e := newAgentEnv(t, true)
@@ -597,5 +601,75 @@ func TestAgentInFlight(t *testing.T) {
 		}
 		h.release()
 		h.answered(t, 12, http.StatusOK)
+	})
+	t.Run("one_agent_bounded_in_flight", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		ids := agentsAt(t, e, 1, 18)
+		h := holdStates(t, e, ids, 12)
+		h.settleAt(t, maxAgentInFlight)
+		for _, rec := range h.answered(t, 12-maxAgentInFlight, http.StatusTooManyRequests) {
+			if rec.Header().Get("Retry-After") != "1" || apiError(rec) != "rate limited" {
+				t.Fatalf("a refused request: Retry-After %q, %s; want 1, rate limited", rec.Header().Get("Retry-After"), rec.Body.String())
+			}
+		}
+		h.release()
+		h.answered(t, maxAgentInFlight, http.StatusOK)
+	})
+	t.Run("heartbeat_shares_cap", func(t *testing.T) {
+		// As polledAgent, with the agent's host in every later version, so
+		// no removal is recorded and the heartbeat relays no signer call.
+		e := newAgentEnv(t, true)
+		id, _ := e.approvedAgent(t)
+		if rec := e.agentDo(t, id, http.MethodGet, serverclient.AgentStatePath, nil); rec.Code != http.StatusOK {
+			t.Fatalf("the first state: %d %s", rec.Code, rec.Body.String())
+		}
+		for len(e.dirs) < 18 {
+			e.installDir(t, e.webEntry(t))
+		}
+		h := holdStates(t, e, []agentID{id}, maxAgentInFlight)
+		h.settleAt(t, maxAgentInFlight)
+		h.quiet(t)
+		before := e.fake.count("GetDirectoryVersion")
+		rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(10, 18)})
+		if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "1" || apiError(rec) != "rate limited" {
+			t.Fatalf("a heartbeat with 2 state requests in flight = %d, Retry-After %q, %s; want 429, 1, rate limited",
+				rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+		}
+		// A guard only: without a pending removal the heartbeat relays no
+		// call anyway; the 429 is what this case pins.
+		if n := e.fake.count("GetDirectoryVersion"); n != before {
+			t.Fatalf("the refused heartbeat made %d signer calls", n-before)
+		}
+		h.release()
+		h.answered(t, maxAgentInFlight, http.StatusOK)
+		if rec := e.heartbeat(t, id, heartbeat.Heartbeat{Status: testHBStatus(10, 18)}); rec.Code != http.StatusOK {
+			t.Fatalf("the heartbeat after the state requests ended = %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("cap_released_after_answer", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		ids := agentsAt(t, e, 1, 18)
+		for range 2 {
+			h := holdStates(t, e, ids, maxAgentInFlight)
+			h.settleAt(t, maxAgentInFlight)
+			h.quiet(t)
+			h.release()
+			h.answered(t, maxAgentInFlight, http.StatusOK)
+		}
+		e.s.inFlightMu.Lock()
+		n := len(e.s.agentInFlight)
+		e.s.inFlightMu.Unlock()
+		if n != 0 {
+			t.Fatalf("the in-flight map holds %d keys after every request ended, want 0", n)
+		}
+	})
+	t.Run("cap_per_agent", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		ids := agentsAt(t, e, 2, 18)
+		h := holdStates(t, e, ids, maxAgentInFlight)
+		h.settleAt(t, 2*maxAgentInFlight)
+		h.quiet(t)
+		h.release()
+		h.answered(t, 2*maxAgentInFlight, http.StatusOK)
 	})
 }

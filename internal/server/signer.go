@@ -30,7 +30,8 @@ import (
 // call relayed for a host agent takes the agent share (the agent-share
 // rule, owner decision 2026-10-30). A call may skip the budget only if it
 // takes no lock on the signer and is coalesced to one call in flight, as
-// GetKRL is.
+// GetKRL is. An agent route that relays a signer call takes agentSlot
+// after requireAgent, as the state and heartbeat routes do.
 type signerAPI interface {
 	Status(ctx context.Context) (*wire.StatusResponse, error)
 	GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error)
@@ -132,7 +133,11 @@ const (
 // called. Today GetDirectoryVersion has three callers: the state route
 // (directoryItems), the heartbeat route through confirmRemoval, and the
 // admin pending-hosts route through reconcileRemoval; GetBundle has one,
-// the state route (bundleItems).
+// the state route (bundleItems). The route half of the rule: every agent
+// route that relays such a call takes the agent's in-flight slot
+// (agentSlot) after requireAgent, as the state and heartbeat routes do.
+// The admin pending-hosts route is an admin route and takes the share by
+// method only.
 //
 // The one exemption is GetKRL (Q-G5, owner decision 2026-10-30): it takes
 // no lock on the signer, and refreshKRL, its only caller, coalesces it to
