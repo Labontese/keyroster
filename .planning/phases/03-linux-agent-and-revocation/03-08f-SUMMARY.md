@@ -17,6 +17,7 @@ provides:
   - "tests: TestDirectoryUnderPolicyInForce (13 cases), TestRootRotationUnchangedPolicy (11), three TestSpool, four TestFetch and one TestSpoolPrune case"
   - "docs: root-ceremony.md, enroll-user.md, signer-install.md, host-setup.md; todo 2026-10-21 Status"
   - "pre-merge review fix round 1: (*Stored).PrincipalsUnder and coversAuthority, engine.render keeping last-good's principals only under a policy that authorizes their source, bundle_held at the supersede step, TestLastGoodPrincipalsUnderPolicyInForce (8 cases), the M-2, T2b and widening-directory cases, the corrected spool bound"
+  - "pre-merge review fix round 2: bundle_held at the supersede step for a poll that moved only the directory, TestDirectoryUnderPolicyInForce/widening_wait_superseded_into_a_hold_at_its_bundle, the kept-host and standalone-recovery runbook wording, the upgrade residual"
 affects: [03-09, 03-10, 03-12, 03-13, 03-14]
 
 requirements-completed: []
@@ -507,7 +508,8 @@ No figure is above its limit. The stop rule never tripped. The local figures var
 - **Task 2**: 7 mutants. 6 killed. T2b survived and was called equivalent (plan check 3, m-2); it is not, and fix round 1 kills it with `bundle_sigs_never_united`.
 - **Task 3**: 15 mutants, all killed. T3n is killed by one of its two named tests.
 - **In all** (Tasks 2 and 3): 22 mutant runs. T2b survived and is killed in fix round 1.
-- **Fix round 1**: 8 mutants in 11 runs, all killed (see that section).
+- **Fix round 1**: 10 mutants in 13 runs, all killed (see that section).
+- **Fix round 2**: 1 mutant in 1 run, killed (see that section).
 
 ## Existing tests the change flipped
 
@@ -678,7 +680,7 @@ PR #82's pre-merge review confirmed seven findings and refuted none. The owner d
   - every admin key of accepted/'s policy among the policy's admins, compared as key strings, so another spelling of a key fails closed;
   - the same CA profiles.
 
-  Those are the only fields directory.VerifySignatures and directory.CheckPolicy read, and VerifySignatures counts distinct pinned admin keys. So a directory that accepted/'s quorum signed carries the new policy's quorum too. The invariant behind this is that kept principals' source is always authorized under accepted/'s policy. 255b285 first required equal admin lists. That dropped kept principals when an admin was only added, so a77151a relaxes it to the covering rule;
+  Those are the only fields directory.VerifySignatures and directory.CheckPolicy read, and VerifySignatures counts distinct pinned admin keys. So a directory that accepted/'s quorum signed carries the new policy's quorum too. The invariant behind this is that kept principals' source is always authorized under accepted/'s policy, for state this agent version committed (fix round 2, R2-5: a host upgraded from main can carry state it does not hold for). 255b285 first required equal admin lists. That dropped kept principals when an admin was only added, so a77151a relaxes it to the covering rule;
 - a nil accepted/, policy or target policy is a failure, so the fallback keeps nothing.
 
 **Every keepPrincipals path, each RED on dac2244 at the principals assertion** (all the case's earlier assertions passed there). Eight cases are in `TestLastGoodPrincipalsUnderPolicyInForce`:
@@ -714,7 +716,7 @@ The RED run used a scratch worktree at dac2244 holding only the new test file. I
   - neither the report nor status.json says bundle_held.
 
   RED on dac2244, only on the flag: `the report says a bundle is held while bundle 2 is in force`, and status.json had `"bundle_held":true`. Every fail-closed assertion already passed there.
-- **The fix.** At the supersede step, `if tv.BundleChanged { e.report.BundleHeld = tv.BundleHeld }`. A superseding capture that moved the bundle decided again whether a newer one waits. A KRL-alone one moved nothing, so the earlier answer stands.
+- **The fix.** At the supersede step, fix round 1 assigned `e.report.BundleHeld = tv.BundleHeld` only when `tv.BundleChanged`. Its reasoning was that a superseding capture that moved the bundle decided again whether a newer one waits, and that only a KRL-alone one did not. That missed a poll that holds at the pending target's own bundle (k=0). Such a poll moves only the directory and leaves BundleChanged false while a newer bundle waits. Fix round 2 (R2-1) widens the guard to `tv.BundleChanged || tv.DirectoryChanged`. The false side is now a poll that moved only the KRL: a KRL-alone Verified, or a full verification whose capture brings only a newer KRL over the target's bundle and directory. Neither can carry a new hold, because a hold needs a newest directory other than the target's: taken, it moves the directory; refused, the hold is undone. So the earlier answer stands.
 - **The KRL-alone refresh (apply.go, forward's loop) is left unchanged.** There the Verified is KRL-alone over accepted/: the bundle in force is accepted/'s, and a bundle the capture held still waits, so the flag the capture set is still accurate. No case showed a wrong status there.
 
 ### D-3: the spool bound, recomputed from the caps
@@ -778,17 +780,128 @@ No figure is above its limit. The two fix-round runs differ by about 50 s each w
    - removes an admin of the accepted policy;
    - changes the admin quorum or the CA profiles.
 
-   Those are the changes under which the source of those principals cannot be shown to be authorized. A rotation that keeps or only adds admins keeps them (`kept_principals_across_rotations_keeping_or_adding_admins_stay`). The common case keeps today's behaviour: there the principals were rendered from the authorized accepted directory (`authorized_directory_across_rotation_keeps_principals`). No existing test flipped. The owner may prefer the old behaviour for the chained case; that would reopen the `kept_principals_then_admin_removed_keeps_none` shape.
-3. **D-2 (c): the guard at the supersede step, and the KRL-alone refresh left unchanged.** See D-2 above.
+   Those are the changes under which the source of those principals cannot be shown to be authorized. A rotation that keeps or only adds admins keeps them (`kept_principals_across_rotations_keeping_or_adding_admins_stay`). The common case keeps today's behaviour: there the principals were rendered from the authorized accepted directory (`authorized_directory_across_rotation_keeps_principals`). No existing test flipped. **The owner accepted this narrowing on 2026-11-03** (fix round 2), so the chained case keeps the `kept_principals_then_admin_removed_keeps_none` behaviour.
+3. **D-2 (c): the guard at the supersede step, and the KRL-alone refresh left unchanged.** See D-2 above. Fix round 2 widens the guard (R2-1).
 4. **D-1's log line.** The fallback's warning used to say "kept as last-good's" from the host status alone. It now says "emptied" when the check dropped them, and a separate WARNING names the reason.
 
 ### UNVERIFIED (fix round 1)
 
-- **The supersede guard's false side.** When a KRL-alone poll supersedes, the earlier bundle_held stays. No test builds a held pending target superseded by a KRL-alone poll.
+- **The supersede guard's false side.** When a poll that moved only the KRL supersedes, the earlier bundle_held stays. That is a KRL-alone Verified, or a full verification whose capture brings only a newer KRL over the target's bundle and directory. No test builds a held pending target superseded by such a poll. (Corrected in fix round 2. This item first named the KRL-alone poll alone, and round 1's guard also left a poll that moved only the directory on this side; see R2-1.)
 - **PrincipalsUnder's fail-closed edges in render.** No test exercises an unreadable last-good record (treated as kept principals) or a nil accepted/.
 - **coversAuthority for a quorum-only or CA-profile-only change.** The cases remove or add an admin, or keep all three. A change of only the quorum or only the profiles is reasoned from the code.
 - **The D-1 log lines.** No test reads them.
 - The converted refusals still not pinned stay on Run B's list: directory_not_verified for a parse or CheckPolicy cause.
+- **The homelab.** As before, Phase 3 runs no admin-set change of enrolled hosts.
+
+## Pre-merge review fix round 2
+
+The check of fix round 1 judged D-1 correct, with no fail-open path. It upheld four low items, split two and refuted none. The owner accepted fix round 1's deviation 2 and decided R2-1 to R2-5, all in this round, on the branch after 052da53.
+
+| Item | Commit | What changed |
+|---|---|---|
+| R2-1 | 93690d3 `fix(agent): report bundle_held from a superseding poll that moved the directory` | apply.go's supersede guard; the new case in policy_change_test.go |
+| R2-1 | 4722324 `docs(agent): describe the supersede guard's false side as a KRL-only move` | the apply.go comment at that guard |
+| R2-2, R2-3 | dbf8e14 `docs(agent): state the kept-host leg and the standalone-directory conditions` | host-setup.md, enroll-user.md |
+| R2-4, R2-5, the owner's acceptance | the commit that records this section | this SUMMARY. The PR #82 body was edited too; that edit has no commit. |
+
+### The owner's acceptance of fix round 1's deviation 2
+
+Accepted on 2026-11-03. A host whose principals were already kept, because its record says `host_keys_rotated` or `host_keys_disagree` or because it ran reset-directory, drops them on a policy change that does any of these, even when its accepted directory stays authorized:
+
+- removes an admin;
+- changes the admin quorum;
+- changes the CA profiles.
+
+A policy that only adds admins keeps them. Deviation 2 above now records this.
+
+### R2-1: bundle_held after a poll that held at the target's bundle
+
+**The defect.** Fix round 1's guard, `if tv.BundleChanged`, missed a superseding poll that holds at the pending target's own bundle.
+- Forward waits to widen at bundle 2, which is not held. Policy 2 names alice and bob, and bob's directory 2 [role:ops, role:new] widens.
+- The wait's poll brings bundle 3 (policy 3: bob alone) and alice's directory 3 [role:ops].
+- Only policy 2 authorizes alice's directory 3. offeredDirectory therefore holds at step 0 (holdBundle(0)), which sets BundleHeld true and leaves BundleChanged false, and the directory supersedes the target.
+- The report and status.json said bundle_held false, with bundle 2 and directory 3, while bundle 3 waits.
+
+This was operator-visible only: the fail-closed behaviour was intact.
+
+**The case.** `TestDirectoryUnderPolicyInForce/widening_wait_superseded_into_a_hold_at_its_bundle` builds that shape from the existing helpers, `f.rotation` twice. The poll's state is written at the wait's first sleep. The case asserts:
+- the apply returns nil, after a poll, with bundle 2 and directory 3;
+- the report says bundle_held;
+- status.json has `"bundle_held":true`.
+
+**RED on 052da53**, with only the test file changed and apply.go as on the branch head:
+- `policy_change_test.go:650: bundle 3 waits (the poll held at bundle 2), but the report says bundle_held false`;
+- `policy_change_test.go:653: status.json (<nil>) does not say a bundle is held while bundle 3 waits`, with status.json reading bundle 2, directory 3 and no bundle_held.
+
+`widening_directory_with_rotation_supersedes_into_bundle_2` passed in the same run. The output is in the session scratch file `red-r2-1.txt`.
+
+The first draft of the case also asserted `r.Intermediate != 0`, copied from the widening case. On unchanged code that assertion failed first, with Intermediate 0. The last transition, to alice's directory 3 [role:ops], does not widen, so it reports no intermediate. The assertion was dropped before the fix, and `polled` shows that the wait ran. The RED above is the final test's.
+
+**The fix.** The guard is `if tv.BundleChanged || tv.DirectoryChanged`. The comment and D-2 (c)'s fix paragraph above now describe the false side correctly: a poll that moved only the KRL. That is a KRL-alone Verified (state.KRLAlone, storedOnly, or krlAlone after a refused candidate), or a full verification whose capture brings only a newer KRL over the target's bundle and directory. KRL-alone supersedes are unchanged, as decided. The KRL-alone refresh in forward's loop is unchanged too.
+
+**GREEN on 93690d3.** All 16 top-level cases of `TestDirectoryUnderPolicyInForce` pass under -race, `widening_directory_with_rotation_supersedes_into_bundle_2` among them (session scratch file `green-r2-1.txt`).
+
+**Mutant.** The loop is fix round 1's: `git apply`, an anchored `-run` under -race, then `git checkout` and `git diff --quiet -- internal/`.
+
+| Mutant | Run against | Result | Failing lines |
+|---|---|---|---|
+| R2a: the guard reverted to `tv.BundleChanged` only (fix round 1's) | `widening_wait_superseded_into_a_hold_at_its_bundle`, `widening_directory_with_rotation_supersedes_into_bundle_2` | **killed** by the new case; the widening case passes | the two RED lines above |
+
+It was run on 93690d3 and restored byte for byte (session scratch file `mutants.txt`). D2c, the assignment dropped, was not run again. The assignment it removes is unchanged, and the widening case still pins it.
+
+### R2-2 and R2-3: the runbooks
+
+- **R2-2.** The host_keys_rotated bullet in host-setup.md and the kept-principals paragraph in enroll-user.md now give the second leg of the rule. A host that already kept its principals (its last status was `host_keys_rotated` or `host_keys_disagree`) keeps them only while the new policy keeps three things from the accepted policy:
+  - the same admin quorum;
+  - the same CA profiles;
+  - every admin of the accepted policy.
+
+  This matches the reset-directory sentence. Both runbooks name `kept_principals_then_admin_removed_keeps_none`.
+- **R2-3.** Both runbooks now say that standalone recovery takes "the newest directory the new admins sign that names this installation and fits the policy (at the stored version only with other bytes)". host-setup.md adds what happens to such a directory that does not fit: it is refused as `directory_fork` or `directory_not_verified`, joined to `directory_not_authorized`, and the KRL still lands.
+
+These are doc-only, so there is no RED.
+
+### R2-4: counts and the PR body
+
+- The Mutants overview now says 10 mutants in 13 runs for fix round 1, and 1 mutant in 1 run for fix round 2.
+- The PR #82 body was edited with `scripts/gh-as-bot.sh pr edit 82 --body-file`. It keeps its structure and now says:
+  - no mutant survives: T2b is not equivalent, and `bundle_sigs_never_united` kills it;
+  - the current case counts: `TestDirectoryUnderPolicyInForce` 16, `TestRootRotationUnchangedPolicy` 12, `TestLastGoodPrincipalsUnderPolicyInForce` 8;
+  - a short paragraph on the kept-principals rule (D-1) and the corrected spool bound (about 6.9 GiB);
+  - the round-2 changes.
+
+### R2-5: a known residual from an upgrade (not wider than main)
+
+The rule that kept principals' source is authorized under accepted/'s policy holds by induction only for state this code wrote. Every keep is checked, every render comes from a verified directory, and finishCommit moves accepted/ and last-good together. Main has no F03 and keeps principals unconditionally.
+
+So a host upgraded from main can keep principals that main had already chain-kept from a directory the policy in force no longer authorizes. An example:
+- main kept alice's role:evil under `host_keys_rotated`, then committed policy 3 (bob alone) with bob's directory 3, which policy 3 authorizes;
+- after the upgrade, coversAuthority(policy 3, policy 3) holds, so role:evil stays.
+
+The reset-directory variant is the same. accepted/ then has no directory, and the comparison is of the accepted policy with itself.
+
+This is no wider than main, which keeps those principals the same way. No host is known to be in this state, because Phase 3 runs no admin-set change of enrolled hosts. No code changed for it.
+
+**Remedy for an operator:** publish a directory that names the host under its current host keys. Its next run renders from that directory, so the kept principals are replaced. UNVERIFIED: no test builds main-written state and runs this remedy.
+
+### Test time (internal/agent/apply under -race), fix round 2
+
+| Point | Alone (limit 400 s) | Under `./...` (limit 480 s) |
+|---|---|---|
+| Fix round 2, 4722324 (the final code) | 335.093 s | 368.472 s |
+
+No figure is above its limit. The full gate on 4722324 passed in full: go test -race ./..., go vet (with the e2e tags), gofmt (GOFMT_OK), golangci-lint (0 issues), capslock (92, 37 and 23 pairs, each equal to its baseline), dep-firewall, testonly-firewall and check-pinned-actions. Session scratch files `time-alone.txt` and `gate-full.txt`.
+
+### Deviations (fix round 2)
+
+1. **The guard's false side covers more than the KRL-alone Verifieds.** The decision named KRL-alone supersedes as the side that stays unchanged. A full verification whose capture brings only a newer KRL over the target's bundle and directory moves neither flag either, so it is on the false side too. The comment (4722324) and this SUMMARY say so. Such a poll cannot carry a new hold. This is a wording precision, not a code change: the guard is exactly the decided one.
+2. **The test-time gate was restarted.** The first gate run was stopped during the alone run, before it recorded a time, when the comment was corrected (4722324). The figures above are from one complete run on 4722324.
+
+### UNVERIFIED (fix round 2)
+
+- **A standalone candidate that does not fit.** No test offers a directory that the new admins sign but that names another installation or does not fit the policy. host-setup.md labels this sentence UNVERIFIED and says it is reasoned from the code.
+- **R2-5's remedy.** No test builds main-written state.
+- **The supersede guard's false side,** as corrected in fix round 1's UNVERIFIED list above.
 - **The homelab.** As before, Phase 3 runs no admin-set change of enrolled hosts.
 
 ## Self-Check: PASSED
@@ -797,4 +910,5 @@ No figure is above its limit. The two fix-round runs differ by about 50 s each w
 - The nine branch commits before this one are ancestors of HEAD: dff4921, 605a99a, b55c264, 06820de, 941d459, 3878169, 47fd8ec, 4a1e5a5 and 561542d.
 - Both of Task 4's publish checks exit 0 after the tracking updates.
 - Fix round 1: internal/agent/apply/lastgood_test.go exists, and its commits 255b285, ad103cb, 9342e14 and a77151a are ancestors of HEAD (`git merge-base --is-ancestor`).
+- Fix round 2: the commits 93690d3, dbf8e14 and 4722324 are ancestors of HEAD (`git merge-base --is-ancestor`).
 - Task 5, the owner's merge gate, is open. Daniel reviews, approves and squash-merges PR #82. After his "merged", Claude runs merge-gate.sh in its plain form from the main checkout, then `--check`.
