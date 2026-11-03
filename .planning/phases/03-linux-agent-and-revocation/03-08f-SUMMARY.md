@@ -215,7 +215,7 @@ Both runs passed in full, with no `--- FAIL` anywhere under `./...`. internal/ag
 
 Six mutants were killed and one survived, as the plan requires. Each was restored byte for byte, and `git diff --quiet -- internal/` passed after each.
 
-**Why T2b is equivalent (plan check 3, m-2).** CountPinnedSigners (internal/trust/verify.go:29-60) verifies every block over the policy's digest under the policy namespace (`s.VerifyDigest(namespace, digest)`, line 51) and skips a block that does not verify there. A root's bundle signature is a signature over the bundle under the bundle namespace, so it never verifies there and never counts toward the policy threshold. Its blocks are well-formed, so ParseAll accepts the union with them. The mutant therefore changes no outcome, and both tests pass under it.
+**Why T2b is equivalent (plan check 3, m-2).** CountPinnedSigners (internal/trust/verify.go:29-62) verifies every block over the policy's digest under the policy namespace (`s.VerifyDigest(namespace, digest)`, line 51) and skips a block that does not verify there. A root's bundle signature is a signature over the bundle under the bundle namespace, so it never verifies there and never counts toward the policy threshold. Its blocks are well-formed, so ParseAll accepts the union with them. The mutant therefore changes no outcome, and both tests pass under it.
 
 ### The threshold argument, in internal/trust/verify.go (unchanged)
 
@@ -256,6 +256,126 @@ So the union only adds blocks, each counted under the same per-root rule and the
 
 No other existing test flipped. The alone gate and the `./...` run on b55c264 passed in full.
 
+## Task 3: F03's edges (Run B)
+
+Code commit: 941d459 `fix(agent): keep a host fail-closed on every path while its directory is not authorized (F03)`. Docs commit: 3878169 `docs(agent): describe hosts under the policy in force (03-08f)`.
+
+### RED
+
+The REDs were taken in two scratch worktrees outside the checkout (`git worktree add --detach`). Each got only its scratch test file and was removed afterwards with `git worktree remove` and `git worktree prune`.
+
+**On origin/main b1ebff3: four cases.** The scratch file `red_task3_main_test.go` holds copies of the four cases, plus copies of rotationNext and adminRemoved. It uses no symbol this plan adds: the new codes are matched by text (`strings.Contains`), and the report's DirectoryUnauthorized is not read. The command was `go test -race -count=1 -v -run "^TestRedTask3Main$" ./internal/agent/apply/`. All four fail on behaviour:
+
+```
+    red_task3_main_test.go:84: bob's directory 3: directory_not_verified: directory version 3 does not chain to version 2: directory: version or prev hash breaks the chain: prev is not the SHA-256 of the installed version 2, &{...}
+    red_task3_main_test.go:111: apply 2: <nil>, bundle 2; want bundle 2 with directory_not_authorized
+    red_task3_main_test.go:113: apply 2: current holds a principals file for deploy: [role:evil]
+    red_task3_main_test.go:124: apply 1: <nil>, bundle 2; want bundle 2 with directory_not_authorized
+    red_task3_main_test.go:127: apply 1: current holds a principals file for deploy: [role:ops]
+    red_task3_main_test.go:133: apply 2: directory_not_verified: version 2: directory: admin quorum not met: 0 of 1 admin signatures, want directory_not_authorized joined with directory_not_verified
+    red_task3_main_test.go:138: apply 2: current holds a principals file for deploy: [role:ops]
+    red_task3_main_test.go:162: apply 1: accepted.json bundle 2, directory 2; want 2, 0
+    red_task3_main_test.go:174: apply 2: principals of deploy [role:ops], want bob's [role:bob]
+    --- FAIL: TestRedTask3Main/rotation_first_then_removed_admin_refused (0.85s)
+    --- FAIL: TestRedTask3Main/same_capture_hold_then_dropped (0.90s)
+    --- FAIL: TestRedTask3Main/recorded_bundle_over_unauthorized_directory_reports_directory_0 (1.16s)
+    --- FAIL: TestRedTask3Main/new_admins_next_version_accepted_standalone (1.25s)
+```
+
+Each matches the plan:
+- `new_admins_next_version_accepted_standalone` fails with the chain refusal the plan names.
+- `same_capture_hold_then_dropped`: bundle 2 keeps `[role:evil]`. Apply 1's hold passes on main as well.
+- `rotation_first_then_removed_admin_refused`: both applies return without directory_not_authorized and keep `[role:ops]`.
+- `recorded_bundle_over_unauthorized_directory_reports_directory_0`: apply 1's accepted.json names directory 2, and apply 2 keeps alice's principals.
+
+**On Task 2's head 06820de: seven cases.** The branch's committed policy_change_test.go (941d459) was copied in, and every symbol it uses exists at 06820de. The command was the anchored `-run "^TestDirectoryUnderPolicyInForce$/^(...)$"` over the seven cases. All seven fail on behaviour:
+
+```
+    policy_change_test.go:324: apply 1 with nothing new: current holds a principals file for deploy: [role:evil]
+    policy_change_test.go:347: apply: bundle_chain_gap: bundle version 3 is missing between the accepted version 2 and the offered version 4, &{...}
+    policy_change_test.go:377: apply 1: directory_older: the spool offers directory version 4, below the accepted version 5, &{BundleVersion:1 DirectoryVersion:5 ...}
+    policy_change_test.go:413: a same-number directory with other bytes: <nil>, want directory_fork
+    policy_change_test.go:436: a same-number directory without the quorum: <nil>, want directory_not_verified, not directory_fork
+    policy_change_test.go:461: apply 1: generation_too_large: principals/deploy would be 70372 bytes, above 65536, &{...}
+    policy_change_test.go:551: apply: directory_not_verified: directory version 2 does not chain to version 1: ..., want directory_not_authorized joined with directory_not_verified
+    --- FAIL: TestDirectoryUnderPolicyInForce/unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle (0.61s)
+    --- FAIL: TestDirectoryUnderPolicyInForce/stored_version_above_new_admins_needs_reset (0.80s)
+    --- FAIL: TestDirectoryUnderPolicyInForce/same_version_unsigned_bytes_not_verified (0.86s)
+    --- FAIL: TestDirectoryUnderPolicyInForce/same_version_other_bytes_refused_as_fork (0.87s)
+    --- FAIL: TestDirectoryUnderPolicyInForce/persisted_unauthorized_state_dropped_on_noop_capture (0.91s)
+    --- FAIL: TestDirectoryUnderPolicyInForce/refused_bundle_step_still_checks_directory (1.09s)
+    --- FAIL: TestDirectoryUnderPolicyInForce/recorded_authorized_directory_keeps_the_record_raise (3.95s)
+```
+
+Each matches the plan:
+- The persisted state keeps `[role:evil]`, because forward skips the render for an unchanged capture.
+- `refused_bundle_step_still_checks_directory` and `recorded_authorized_directory_keeps_the_record_raise` return no directory_not_authorized, because storedOnly does not check. The test asserts the joined error before the principals.
+- `stored_version_above_new_admins_needs_reset` and `unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle` fail because the directory refusal refuses the capture: bundle 1 stays.
+- The two same-number cases are a silent no-op (`<nil>`).
+
+**GREEN at once: one control.** `admin_set_unchanged_rotation_keeps_directory` is a control, as the plan says. Its RED was not taken anywhere.
+
+### GREEN
+
+Task 3's verify command exited 0, with no FAIL and no DATA RACE, and printed all 17 required PASS lines (`verify-task3.txt`). It was run again on the final tree, the committed 941d459, with TestStatus added and with `test -z "$(gofmt -l internal/)"` and `go vet ./internal/agent/...` in front: exit 0, all 13 TestDirectoryUnderPolicyInForce cases PASS. The docs verify command exited 0, every grep counting 1.
+
+### Test time
+
+| Run | internal/agent/apply `ok` line | Stop rule | Gate exit |
+|---|---|---|---|
+| alone | 291.798 s | above 296.5 + 120 = 416.5 s, or above 400 s | 0 |
+| `./...` | 323.579 s | above 480 s | 0 |
+
+Both runs passed in full, with no `--- FAIL` anywhere under `./...`, so no existing test flipped in Task 3. The timing runs started on the uncommitted Task 3 tree. While the alone run was in progress, the two directory_fork and directory_not_verified messages of the fork rule were reworded ("accepted version" became "stored version", and "both signed" became "signed"). That change touches text only, and no test matches on that text. The final verify above ran on the committed tree.
+
+### Mutants (scripted loop, each applied with `git apply` to 941d459, run against its named test with an anchored `-run` under -race, restored with `git checkout`, then `git diff --quiet -- internal/`)
+
+| Mutant | Run against | Result | Failing lines |
+|---|---|---|---|
+| T3a: the check skipped in storedOnly | `refused_bundle_step_still_checks_directory` | **killed** | `apply: bundle_chain_gap: ... want bundle_chain_gap joined with directory_not_authorized` |
+| T3b: the forced render removed | `persisted_unauthorized_state_dropped_on_noop_capture` | **killed** | `apply 1 with nothing new: current holds a principals file for deploy: [role:evil]` |
+| T3c: the forced render's no-op test removed | `persisted_unauthorized_state_dropped_on_noop_capture`, `lagging_host_admin_removed_principals_dropped` | **killed by both** | `apply 2 with nothing new: directory_not_authorized ..., want ... a no-op` and `the idle run: ... want directory_not_authorized, a no-op` |
+| T3d: WriteAccepted's zero rule removed | the tracer, `recorded_bundle_over_unauthorized_directory_reports_directory_0` | **killed by both** | `accepted.json names directory 2, want 0` and `accepted.json bundle 2, directory 2; want 2, 0` |
+| T3e: Report.DirectoryUnauthorized not set from v right after Verify (m-3) | the tracer | **killed** | `report: bundle 2, directory_unauthorized false; want 2, true` |
+| T3f: O-2 reading (a), directory 0 whenever the run's report is unauthorized | `recorded_authorized_directory_keeps_the_record_raise` | **killed** | `accepted.json names directory 0, want the record's 3` |
+| T3g: O-2 reading (b), the record's raise kept whatever the chain base's directory | `recorded_bundle_over_unauthorized_directory_reports_directory_0` | **killed** | `accepted.json bundle 2, directory 2; want 2, 0` |
+| T3h: WriteAccepted checking accepted/'s directory under accepted/'s policy | both record cases | **killed by both** | `accepted.json names directory 0, want the record's 3` and `accepted.json bundle 2, directory 2; want 2, 0` |
+| T3i: outcome not joining DirectoryUnauthorized | the tracer | **killed** | `apply 3: <nil>, want directory_not_authorized` |
+| T3j: state.ErrDirUnauthorized left out of status.go's refusals | `TestStatus/apply_result` | **killed** | `status_test.go:341: applyResult(...)` |
+| T3k: the fork comparison removed | `same_version_other_bytes_refused_as_fork` | **killed** | `a same-number directory with other bytes: <nil>, want directory_fork` |
+| T3l: the fork reported without the quorum check | `same_version_unsigned_bytes_not_verified` | **killed** | `directory_fork: version 2: ..., want directory_not_verified, not directory_fork` |
+| T3m: the standalone acceptance chained to the stored bytes | `new_admins_next_version_accepted_standalone` | **killed** | `bob's directory 3: directory_not_authorized: ...` |
+| T3n: the unauthorized case returning today's refusal | `stored_version_above_new_admins_needs_reset`, `rotation_first_then_removed_admin_refused` | **killed, by the first only** | `apply 1: directory_older: ... BundleVersion:1 ...`. `rotation_first_then_removed_admin_refused` **passes** under T3n (see below) |
+| T3o: no restore of the saved bundle part (M-2) | `unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle` | **killed** | `report: bundle 1, held true; want 2, not held` |
+
+All 15 mutants were killed. Each was restored byte for byte, and `git diff --quiet -- internal/` passed after each. The loop's output is in the session scratch file `mutants-task3.txt`. Each kill is a test failure, not a build failure: the output has no build error.
+
+**How the WriteAccepted mutants were modelled.** WriteAccepted takes only the layout, so reading (a) cannot be expressed inside it. T3f is therefore a two-file patch. WriteAccepted gains a variadic `unauth ...bool` and writes 0 exactly when it is true. Apply passes `r.DirectoryUnauthorized`, the run's report, so the variadic keeps resetdir.go's call building. T3g writes 0 only when there is no record (`chain == stored`). T3h reads `stored.DirectoryUnderPolicy()` instead of the chain base's.
+
+**Why `rotation_first_then_removed_admin_refused` does not kill T3n.** The plan names it as a second killer. Under T3n its second apply returns alice's directory_not_verified as a refusal, so verify takes KRLAlone over accepted/: bundle 2 over alice's directory 1. storedOnly's new check (T3a's line) then sets the flag there. The outcome is the same one the case asserts: the error joins both codes, no principals render, bundle 2 stays and the KRL lands. The two code paths converge in that shape, and only `stored_version_above_new_admins_needs_reset` tells them apart: there the KRL-alone pass keeps bundle 1. The mutant is still killed.
+
+### What was built
+
+- **verify.go.**
+  - storedOnly (and so KRLAlone) sets `DirectoryUnauthorized = checkStored(prev, d, prev.policy)` for a stored directory. A stored directory without a parsed policy is stored_state_invalid, because checkStored reads the policy's version.
+  - In verifyDirectory's unauthorized branch, after standalone, step b runs `saved := *v` before offeredDirectory. On any error it restores v.Bundle, v.Policy, v.BundleHeld, v.BundleChanged and Next's Bundle, BundleSigs, Policy, PolicySigs and BundleVersion. It then sets `DirectoryUnauthorized = errors.Join(unauth, err)` and returns nil. stored_state_invalid is returned before unauth exists, as before. The authorized branch is unchanged.
+  - The fork rule is in offeredDirectory's `newest == storedVersion` case. Equal bodies are a no-op, compared as standaloneDirectory compares them, so a re-signature changes nothing. Other bodies with v.Policy's quorum return ErrDirFork, and otherwise ErrDir.
+  - The doc comments of Verify, storedOnly, verifyDirectory and offeredDirectory say so.
+- **apply.go.**
+  - The no-change branch is taken only while `v.DirectoryUnauthorized == nil`.
+  - After candidate, `!v.Changed() && cur != nil && sameBytes(cur, g)` is the no-op: NoOp as the no-change branch sets it, setVersions with cur only when current is the agent's, and `return outcome(v)`. That is before preflightApply, the dry run and the committing sameBytes branch. It does not assign Report.DirectoryUnauthorized, so T3e stays killable (m-3).
+  - pollCapture's doc sentence gained "unless it is the newest offered, which is directory_fork or directory_not_verified (F03 (03-08f))".
+  - The comment at forward's supersede step, which Run A noted as ahead of the code, is now true: storedOnly carries the flag.
+- **policy_change_test.go.**
+  - Twelve new TestDirectoryUnderPolicyInForce cases, each with t.Parallel.
+  - The helpers `bobDir`, `persistedUnauthorized` (the pre-fix state through LoadStored and Save, with the spool still offering bundle 2 and policy 2), `acceptedSnapshots` (accepted/'s entries and current.json's bytes) and `noPrincipals`.
+- **Runbooks** (3878169). Every changed paragraph names its CI tests and says UNVERIFIED on the homelab:
+  - enroll-user.md: the hosts' side, install right after the bundle, reset-directory, and the O-1 residual labelled UNVERIFIED;
+  - root-ceremony.md: after "Rotate the roots" step 6;
+  - signer-install.md: the accepted.json directory-0 note and directory_fork;
+  - host-setup.md: the outbox row, the I-2 sentence, the fork rule, the prune paragraph with 6.1 and 6.6 GiB, the record paragraph (O-2 (c)) and the `diverged` item.
+- **The todo** stays in pending/ and has a Status section with both lines.
+
 ## Deviations so far (Run A)
 
 1. **[Rule 1, test oracle] TestFetch/more_repolls_immediately changed** (Task 2). This existing test lists the spool exactly, and the per-bundle file is now in that list. The plan's Task 2 named no changed fetch test. The assertion was extended by the one file name, and nothing else changed.
@@ -272,6 +392,27 @@ Everything else ran as the plan wrote it, and the stop rule never tripped.
 - **The fill of `g.Host` in engine.render while unauthorized.** It runs in the tracer, but no test asserts the host name it fills.
 - **storedPolicySigs's last fallback to pol.Sigs.** It is unreachable when the union differed from pol.Sigs, and no test reaches it.
 - **pruneSpool's bound of about 6.1 GiB kept and 6.6 GiB in all.** It is computed from the caps, not measured.
+
+## Deviations (Run B, Task 3)
+
+1. **Test construction: `same_capture_hold_then_dropped` starts from a directory 1 with role:ops and role:evil.** Alice's directory 2 holds only role:evil, so it narrows directory 1. The first draft started from directory 1 with role:ops alone, so directory 2 widened, and apply 1 went into a widening wait. That wait's poll verified the same capture again under the pending target (bundle 1 over alice's 2), took bundle 2 and superseded the target within the same run. It reported BundleVersion 2 with DirectoryUnauthorized, which is fail-closed, but it is not the two-apply shape the plan describes. With a narrowing directory 2, apply 1 holds and renders alice's directory, and apply 2 moves to bundle 2, as written. No code changed for it.
+2. **signer-install.md step 2 of "Which hosts saw a lost version"** now lists `bundle-N.policy.sigs` beside `bundle-N.json` and `bundle-N.json.sigs`. The plan did not name this edit. The step enumerates a lost bundle's spool files, and this plan adds one. A leftover file would be harmless: it holds only signatures, and pruneSpool removes an orphan. The list is now complete.
+3. **T3n is killed by one of its two named tests.** See Task 3's mutants: `rotation_first_then_removed_admin_refused` reaches the same fail-closed outcome through KRLAlone and storedOnly's check.
+4. **The fork messages were reworded while the alone timing run was in progress.** This is text only; see Task 3's test time. The final verify ran on the committed tree.
+5. **The fork error at an equal version says "stored version", not "accepted version",** because the stored version is the chain base's, which is the record's on the record path.
+
+## UNVERIFIED (Run B, Task 3)
+
+- **Converted refusals that no case pins.** These take the same step-b branch as the refusals the cases pin, directory_older (`stored_version_above_new_admins_needs_reset`) and the chain refusal (`unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle`):
+  - directory_installation;
+  - directory_chain_gap;
+  - directory_not_verified for a parse, version or CheckPolicy cause.
+- **The fork rule at an unapplied record's directory version.** No test offers a same-number directory there; it is reasoned from the code (the stored version is the chain base's).
+- **A KRL signed by a new ops key in the unauthorized shape** (host-setup.md's I-2 sentence). No test builds it; it is reasoned from krlStep.
+- **The O-1 residual** (owner decision O-1 (a)). No test builds the state from before this change together with a refused KRL (enroll-user.md labels it).
+- **The `diverged` item's advice** to read the directory version from status.json while accepted.json reads 0. No test reads status.json for it.
+- **A poll during a widening wait that supersedes into the unauthorized state** (deviation 1's first shape). It was observed in the draft run, but no committed test asserts it.
+- **The homelab.** Every runbook note is run in CI only; Phase 3 runs no admin-set change and no root rotation of enrolled hosts.
 
 ## Handoff to Task 3
 
