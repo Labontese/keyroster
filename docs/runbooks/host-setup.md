@@ -1146,10 +1146,12 @@ quorum signed it, and `directory_not_verified` otherwise; the KRL still
 lands (03-08f). While it is not (`directory_not_authorized`), the host
 instead takes, standalone, the newest directory the new admins sign that
 names this installation and fits the policy (at the stored version only
-with other bytes; enroll-user.md). Such a directory that does not fit is
-refused as `directory_fork` or `directory_not_verified`, joined to
-`directory_not_authorized`, and the KRL still lands (reasoned from the
-code; UNVERIFIED: no test offers one). Run in CI for an accepted directory:
+with other bytes; enroll-user.md). Such a directory that does not fit,
+offered as the newest, is refused, joined to `directory_not_authorized`,
+and the KRL still lands: at the stored version as `directory_fork`; above
+it as `directory_installation` when it names another installation, and as
+`directory_not_verified` when it does not fit the policy (reasoned from
+the code; UNVERIFIED: no test offers one). Run in CI for an accepted directory:
 `same_version_other_bytes_refused_as_fork`,
 `same_version_unsigned_bytes_not_verified`. At the record's directory
 version the same check runs on the record's bytes; that is reasoned from

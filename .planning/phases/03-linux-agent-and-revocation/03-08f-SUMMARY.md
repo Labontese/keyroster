@@ -857,7 +857,7 @@ It was run on 93690d3 and restored byte for byte (session scratch file `mutants.
   - every admin of the accepted policy.
 
   This matches the reset-directory sentence. Both runbooks name `kept_principals_then_admin_removed_keeps_none`.
-- **R2-3.** Both runbooks now say that standalone recovery takes "the newest directory the new admins sign that names this installation and fits the policy (at the stored version only with other bytes)". host-setup.md adds what happens to such a directory that does not fit: it is refused as `directory_fork` or `directory_not_verified`, joined to `directory_not_authorized`, and the KRL still lands.
+- **R2-3.** Both runbooks now say that standalone recovery takes "the newest directory the new admins sign that names this installation and fits the policy (at the stored version only with other bytes)". host-setup.md adds what happens to such a directory that does not fit, offered as the newest: it is refused, joined to `directory_not_authorized`, and the KRL still lands; at the stored version as `directory_fork`, above it as `directory_installation` when it names another installation and as `directory_not_verified` when it does not fit the policy. The first wording named only `directory_fork` or `directory_not_verified`; the round-2 check corrected it.
 
 These are doc-only, so there is no RED.
 
