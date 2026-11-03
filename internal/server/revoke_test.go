@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -711,6 +713,67 @@ func TestKRLServedCopy(t *testing.T) {
 		if res := e.get(t); res.Code != http.StatusServiceUnavailable || !bytes.Equal(e.copyBytes(t), kept) ||
 			!strings.Contains(e.log.String(), "KRL not served: version 150 is below version 200 this server served") {
 			t.Fatalf("GET v150 after the disk copy became v200 = %d, copy replaced %v:\n%s", res.Code, !bytes.Equal(e.copyBytes(t), kept), e.log.String())
+		}
+	})
+	// F13 (03-08g): a version whose copy was renamed into place but whose
+	// directory sync failed is never served. Every refresh redoes the full
+	// write and answers 503 until one succeeds; only then is it served, and
+	// only then does the equal-version shortcut skip the write again.
+	t.Run("dir_sync_failure_never_served", func(t *testing.T) {
+		e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
+		e.fake.setKRL(krlDoc(t, e.ops, copyInstallation, 100, "krl v100"), nil)
+		if res := e.get(t); res.Code != http.StatusOK {
+			t.Fatalf("GET v100 = %d", res.Code)
+		}
+		orig := syncDir
+		var syncs atomic.Int64
+		var failing atomic.Bool
+		failing.Store(true)
+		syncDir = func(dir string) error {
+			syncs.Add(1)
+			if failing.Load() {
+				return errors.New("injected EIO")
+			}
+			return orig(dir)
+		}
+		t.Cleanup(func() { syncDir = orig })
+		e.fake.setKRL(krlDoc(t, e.ops, copyInstallation, 200, "krl v200"), nil)
+		if res := e.get(t); res.Code != http.StatusServiceUnavailable || syncs.Load() != 1 {
+			t.Fatalf("GET 1 of v200 with a failing directory sync = %d after %d syncs; want 503 after 1", res.Code, syncs.Load())
+		}
+		if res := e.get(t); res.Code != http.StatusServiceUnavailable || syncs.Load() != 2 {
+			t.Fatalf("GET 2 of v200, the sync still failing = %d after %d syncs; want 503 after 2 (a full rewrite)", res.Code, syncs.Load())
+		}
+		if _, err := e.s.krlItem(context.Background(), 100); err == nil {
+			t.Fatal("krlItem served v200 to an agent while its copy is not durable")
+		}
+		failing.Store(false)
+		n := syncs.Load()
+		if res := e.get(t); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), base64.StdEncoding.EncodeToString([]byte("krl v200"))) || syncs.Load() != n+1 {
+			t.Fatalf("GET 3 of v200 once the sync works = %d after %d more syncs; want 200 with v200 after 1", res.Code, syncs.Load()-n)
+		}
+		if res := e.get(t); res.Code != http.StatusOK || syncs.Load() != n+1 {
+			t.Fatalf("GET 4 of v200 = %d after %d more syncs; want 200 and no write", res.Code, syncs.Load()-n-1)
+		}
+	})
+	// F13 (03-08g): the copy read back at start is durable, so its own
+	// version is served with no write.
+	t.Run("copy_read_at_start_is_durable", func(t *testing.T) {
+		e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
+		doc := krlDoc(t, e.ops, copyInstallation, 5, "krl v5")
+		e.writeCopy(t, doc)
+		e.restart(t)
+		orig := syncDir
+		var syncs atomic.Int64
+		syncDir = func(dir string) error { syncs.Add(1); return orig(dir) }
+		t.Cleanup(func() { syncDir = orig })
+		// A marker in the file: a write would replace it.
+		if err := os.WriteFile(e.file, []byte("marker"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		e.fake.setKRL(doc, nil)
+		if res := e.get(t); res.Code != http.StatusOK || string(e.copyBytes(t)) != "marker" || syncs.Load() != 0 {
+			t.Fatalf("GET of the copy's own version after a restart = %d after %d syncs, copy %q; want 200, no sync and no write", res.Code, syncs.Load(), e.copyBytes(t))
 		}
 	})
 	// An answer without a KRL after this server served one is the

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -671,5 +672,258 @@ func TestAgentInFlight(t *testing.T) {
 		h.quiet(t)
 		h.release()
 		h.answered(t, 2*maxAgentInFlight, http.StatusOK)
+	})
+}
+
+// countEntered counts, until the test ends, the calls that signal entered
+// (the channel of fakeSigner.hold, whose sends block).
+func countEntered(t *testing.T, entered <-chan struct{}) *atomic.Int64 {
+	t.Helper()
+	n := &atomic.Int64{}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		for {
+			select {
+			case <-entered:
+				n.Add(1)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return n
+}
+
+// dirResult is one currentDirectory answer.
+type dirResult struct {
+	v   *directoryView
+	err error
+}
+
+// goDirectories starts n concurrent currentDirectory calls with ctx.
+func goDirectories(ctx context.Context, e *agentEnv, n int) <-chan dirResult {
+	out := make(chan dirResult, n)
+	for range n {
+		go func() {
+			v, err := e.s.currentDirectory(ctx)
+			out <- dirResult{v, err}
+		}()
+	}
+	return out
+}
+
+// results waits for n answers of goDirectories.
+func results(t *testing.T, ch <-chan dirResult, n int) []dirResult {
+	t.Helper()
+	var out []dirResult
+	for i := range n {
+		select {
+		case r := <-ch:
+			out = append(out, r)
+		case <-time.After(20 * time.Second):
+			t.Fatalf("%d of %d currentDirectory calls never returned", n-i, n)
+		}
+	}
+	return out
+}
+
+// mirrorEnv is newAgentEnv with one directory installed, the status cached
+// and the mirror empty.
+func mirrorEnv(t *testing.T) *agentEnv {
+	t.Helper()
+	e := newAgentEnv(t, true)
+	e.installDir(t, hostEntry("web1", hostSigners(t, 1)))
+	if _, err := e.s.currentStatus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// mirrorEntry returns the mirror's held entry.
+func mirrorEntry(e *agentEnv) *directoryView {
+	e.s.mirror.mu.Lock()
+	defer e.s.mirror.mu.Unlock()
+	return e.s.mirror.entry
+}
+
+// TestDirectoryMirrorFill pins F12 (03-08g): while the mirror holds no
+// entry for the SHA-256 and version Status reports, every concurrent
+// caller of currentDirectory shares one detached GetDirectory fetch for
+// them; each waiter stops at the end of its own ctx, a failed fetch is
+// never cached, a caller whose ctx has ended starts none, a fetch for an
+// older Status never becomes the entry, and a mismatch still drops the
+// status cache.
+func TestDirectoryMirrorFill(t *testing.T) {
+	ctx := context.Background()
+	t.Run("concurrent_misses_one_fetch", func(t *testing.T) {
+		e := mirrorEnv(t)
+		before := e.fake.count("GetDirectory")
+		entered, release := e.fake.hold("GetDirectory")
+		t.Cleanup(release)
+		n := countEntered(t, entered)
+		ch := goDirectories(ctx, e, 24)
+		waitFor(t, "a GetDirectory at the signer", func() bool { return n.Load() >= 1 })
+		time.Sleep(settle)
+		release()
+		want := sha256.Sum256(e.dirs[0])
+		for _, r := range results(t, ch, 24) {
+			if r.err != nil || r.v.version != 1 || r.v.sha256 != want {
+				t.Fatalf("currentDirectory = %+v, %v; want version 1 with the installed SHA-256", r.v, r.err)
+			}
+		}
+		if got := e.fake.count("GetDirectory") - before; got != 1 {
+			t.Fatalf("%d GetDirectory calls for 24 concurrent misses, want 1", got)
+		}
+	})
+	t.Run("failure_not_cached", func(t *testing.T) {
+		e := mirrorEnv(t)
+		e.fake.setDirectory(nil, errors.New("signer down"))
+		entered, release := e.fake.hold("GetDirectory")
+		t.Cleanup(release)
+		n := countEntered(t, entered)
+		ch := goDirectories(ctx, e, 5)
+		waitFor(t, "a GetDirectory at the signer", func() bool { return n.Load() >= 1 })
+		time.Sleep(settle)
+		release()
+		for _, r := range results(t, ch, 5) {
+			if !errors.Is(r.err, errMirrorStale) {
+				t.Fatalf("a waiter of the failed fetch = %v, want errMirrorStale", r.err)
+			}
+		}
+		e.fake.setDirectory(&wire.GetDirectoryResponse{}, nil)
+		before := e.fake.count("GetDirectory")
+		if v, err := e.s.currentDirectory(ctx); err != nil || v.version != 1 {
+			t.Fatalf("the call after the failure = %v; want version 1 (the failure was cached)", err)
+		}
+		if got := e.fake.count("GetDirectory") - before; got != 1 {
+			t.Fatalf("the call after the failure made %d GetDirectory calls, want 1", got)
+		}
+	})
+	t.Run("waiter_ctx_ends_fetch_continues", func(t *testing.T) {
+		e := mirrorEnv(t)
+		entered, release := e.fake.hold("GetDirectory")
+		t.Cleanup(release)
+		first, cancel := context.WithCancel(ctx)
+		defer cancel()
+		a := goDirectories(first, e, 1)
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("no GetDirectory reached the signer")
+		}
+		b := goDirectories(ctx, e, 1)
+		time.Sleep(settle) // the second waiter joins the fetch
+		cancel()
+		if r := results(t, a, 1)[0]; !errors.Is(r.err, context.Canceled) {
+			t.Fatalf("the first caller after its ctx ended = %v, want context.Canceled", r.err)
+		}
+		release()
+		if r := results(t, b, 1)[0]; r.err != nil || r.v.version != 1 {
+			t.Fatalf("the second waiter = %v; want version 1 (the fetch went on)", r.err)
+		}
+		before := e.fake.count("GetDirectory")
+		if m := mirrorEntry(e); m == nil || m.version != 1 {
+			t.Fatal("the mirror holds no entry after the fetch the first caller left")
+		}
+		if _, err := e.s.currentDirectory(ctx); err != nil || e.fake.count("GetDirectory") != before {
+			t.Fatalf("the next call = %v after %d GetDirectory calls; want the held entry and none", err, e.fake.count("GetDirectory")-before)
+		}
+	})
+	t.Run("ended_ctx_starts_no_fetch", func(t *testing.T) {
+		e := mirrorEnv(t)
+		dead, kill := context.WithCancel(ctx)
+		kill()
+		before := e.fake.count("GetDirectory")
+		if _, err := e.s.currentDirectory(dead); !errors.Is(err, context.Canceled) {
+			t.Fatalf("currentDirectory with an ended ctx = %v, want context.Canceled", err)
+		}
+		time.Sleep(settle) // a detached fetch would have reached the signer
+		if got := e.fake.count("GetDirectory") - before; got != 0 {
+			t.Fatalf("a caller with an ended ctx started %d GetDirectory calls, want 0", got)
+		}
+		if v, err := e.s.currentDirectory(ctx); err != nil || v.version != 1 {
+			t.Fatalf("currentDirectory with a live ctx = %v", err)
+		}
+	})
+	t.Run("new_sha_new_fetch", func(t *testing.T) {
+		e := mirrorEnv(t)
+		entered1, release1 := e.fake.hold("GetDirectory")
+		t.Cleanup(release1)
+		a := goDirectories(ctx, e, 1)
+		select {
+		case <-entered1:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the version-1 fetch never reached the signer")
+		}
+		// Version 2 is installed (installDir drops the status cache), and
+		// its fetch is held at a second gate, so the version-1 fetch ends
+		// first, while the version-2 fetch is in flight.
+		e.installDir(t, hostEntry("web2", hostSigners(t, 1)))
+		entered2, release2 := e.fake.hold("GetDirectory")
+		t.Cleanup(release2)
+		b := goDirectories(ctx, e, 1)
+		select {
+		case <-entered2:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the version-2 fetch never reached the signer")
+		}
+		release1()
+		if r := results(t, a, 1)[0]; r.err != nil || r.v.version != 1 {
+			t.Fatalf("the version-1 caller = %v, want the version it was read under", r.err)
+		}
+		if m := mirrorEntry(e); m != nil {
+			t.Fatalf("the mirror holds version %d while the version-2 fetch is in flight, want no entry", m.version)
+		}
+		before := e.fake.count("GetDirectory")
+		c := goDirectories(ctx, e, 1)
+		time.Sleep(settle) // the third caller joins the version-2 fetch
+		if got := e.fake.count("GetDirectory") - before; got != 0 {
+			t.Fatalf("a caller for version 2 started %d GetDirectory calls with the version-2 fetch in flight, want 0", got)
+		}
+		release2()
+		want := sha256.Sum256(e.dirs[1])
+		for _, r := range append(results(t, b, 1), results(t, c, 1)...) {
+			if r.err != nil || r.v.version != 2 || r.v.sha256 != want {
+				t.Fatalf("a version-2 caller = %+v, %v", r.v, r.err)
+			}
+		}
+		if m := mirrorEntry(e); m == nil || m.version != 2 || m.sha256 != want {
+			t.Fatal("the mirror does not hold version 2 after its fetch")
+		}
+	})
+	t.Run("mismatch_drops_status", func(t *testing.T) {
+		e := mirrorEnv(t)
+		// Status keeps reporting version 1 with its SHA-256; the signer's
+		// directory answer has other bytes.
+		e.fake.mu.Lock()
+		st := *e.fake.status
+		st.DirectoryVersion, st.DirectorySHA256, st.DirectoryAuthorized = 1, sha256.Sum256(e.dirs[0]), true
+		e.fake.status, e.fake.chain = &st, false
+		e.fake.dir = &wire.GetDirectoryResponse{Version: 1, Directory: []byte("other bytes"), Sigs: []byte("sigs"), Authorized: true}
+		e.fake.mu.Unlock()
+		e.s.dropStatus()
+		if _, err := e.s.currentStatus(ctx); err != nil {
+			t.Fatal(err)
+		}
+		entered, release := e.fake.hold("GetDirectory")
+		t.Cleanup(release)
+		n := countEntered(t, entered)
+		ch := goDirectories(ctx, e, 5)
+		waitFor(t, "a GetDirectory at the signer", func() bool { return n.Load() >= 1 })
+		time.Sleep(settle)
+		release()
+		for _, r := range results(t, ch, 5) {
+			if !errors.Is(r.err, errMirrorStale) {
+				t.Fatalf("a waiter of the mismatched fetch = %v, want errMirrorStale", r.err)
+			}
+		}
+		st0 := e.fake.count("Status")
+		if _, err := e.s.currentDirectory(ctx); !errors.Is(err, errMirrorStale) {
+			t.Fatalf("the next call = %v, want errMirrorStale", err)
+		}
+		if got := e.fake.count("Status") - st0; got != 1 {
+			t.Fatalf("the next call made %d Status calls with the clock still, want 1 (the mismatch dropped the status cache)", got)
+		}
 	})
 }
