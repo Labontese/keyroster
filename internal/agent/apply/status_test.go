@@ -331,6 +331,9 @@ func TestStatus(t *testing.T) {
 			{&Report{Rollback: true}, errors.New("self-test failed"), heartbeat.ResultRolledBack},
 			{&Report{}, fmt.Errorf("verify: %w", state.ErrDir), heartbeat.ResultRefused},
 			{&Report{}, ErrPhase2Pending, heartbeat.ResultRefused},
+			// F03 (03-08f): the two directory codes are refusals.
+			{&Report{}, fmt.Errorf("verify: %w", state.ErrDirUnauthorized), heartbeat.ResultRefused},
+			{&Report{}, fmt.Errorf("verify: %w", state.ErrDirFork), heartbeat.ResultRefused},
 			{&Report{}, fmt.Errorf("%w: 4097 principals files, above 4096", ErrGenerationTooLarge), heartbeat.ResultRefused},
 			{&Report{}, ErrReload, heartbeat.ResultError},
 		} {

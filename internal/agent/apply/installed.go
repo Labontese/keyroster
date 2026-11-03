@@ -96,14 +96,43 @@ func loadAcceptedState(l Layout) (*state.Stored, error) {
 // above it. It is safe: the server uses the request's versions only to
 // choose what to serve (handleAgentState) and stores none of them, and the
 // KRL cursor stays the KRL in force. AcceptedVersions is unchanged.
+//
+// F03 (03-08f), owner decision O-2 (c): it writes directory 0 while the
+// directory the next capture chains from is unauthorized under its chain
+// base's policy (state.Stored.DirectoryUnderPolicy): the chain base is the
+// record's base when loadUnapplied returns one, else accepted/ (also on a
+// loader error). The bundle and the KRL are never changed by this rule.
+//   - The fetcher then asks from 0, and the server's answer for 0 is its
+//     current directory (internal/server's directoryItems), which the
+//     agent's recovery at the same version needs.
+//   - While the base's directory is authorized, the cursor keeps following
+//     the chain base. A host whose recorded directory is the new admins'
+//     then keeps fetching the versions after the record; with directory 0
+//     it would receive only the server's current directory, which does not
+//     chain to the record once the server is two or more versions ahead.
+//   - A crash between forward's record write (recordUnapplied) and this
+//     write, or between a commit and this write, leaves the previous
+//     accepted.json for one run. The next locked run rewrites it from disk,
+//     and the record holds its own copies, so this costs at most one poll
+//     of extra or fewer directory items, and nothing stalls. DryRun and
+//     unlocked runs skip WriteAccepted, as before.
+//
+// ResetDirectory calls it after dropping the accepted directory and the
+// record's directory part, so its base holds none and the rule changes
+// nothing there.
 func WriteAccepted(l Layout) error {
 	a, err := AcceptedVersions(l)
 	if err != nil {
 		return err
 	}
 	if stored, err := loadAcceptedState(l); err == nil && stored != nil {
+		chain := stored
 		if base, _, err := loadUnapplied(l, stored); err == nil && base != nil {
 			a.Bundle, a.Directory = max(a.Bundle, base.BundleVersion), max(a.Directory, base.DirectoryVersion)
+			chain = base
+		}
+		if chain.DirectoryUnderPolicy() != nil {
+			a.Directory = 0
 		}
 	}
 	b, err := trust.CanonicalJSON(a)

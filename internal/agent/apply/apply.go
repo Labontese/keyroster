@@ -163,8 +163,14 @@ type Report struct {
 	// BundleHeld: a newer bundle in the spool waits for the next run,
 	// because the newest directory verifies only under an earlier policy
 	// (state.Verified.BundleHeld).
-	BundleHeld bool   `json:"bundle_held,omitempty"`
-	Stuck      string `json:"stuck,omitempty"`
+	BundleHeld bool `json:"bundle_held,omitempty"`
+	// DirectoryUnauthorized: the stored directory does not carry the admin
+	// quorum of the root-signed policy in force, or does not fit it
+	// (state.Verified.DirectoryUnauthorized): the generation holds no
+	// principals, and the error names directory_not_authorized (F03
+	// (03-08f)).
+	DirectoryUnauthorized bool   `json:"directory_unauthorized,omitempty"`
+	Stuck                 string `json:"stuck,omitempty"`
 	// HostStatus is set when the directory does not give this host its
 	// own principals (owner decision 2026-10-26, PR #67): host_disabled
 	// and host_removed install no principals, host_keys_rotated and
@@ -757,6 +763,10 @@ func (e *engine) forward(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// F03 (03-08f): the report names the unauthorized state of the
+	// Verified the run last moved to: v here, after each KRL-alone pass,
+	// and a superseding capture's.
+	e.report.DirectoryUnauthorized = v.DirectoryUnauthorized != nil
 	if v.Refused != nil {
 		// Owner decision D-R2 (PR #71 review F5): the refused bundle or
 		// directory step is reported, and only the capture's KRL moves on.
@@ -833,6 +843,7 @@ func (e *engine) forward(ctx context.Context) error {
 		if v, err = e.krlAlone(stored, st, v, refusal); err != nil {
 			return err
 		}
+		e.report.DirectoryUnauthorized = v.DirectoryUnauthorized != nil
 	}
 	lg, err := e.resolveLink(e.l.LastGood())
 	if err != nil {
@@ -861,6 +872,11 @@ func (e *engine) forward(ctx context.Context) error {
 		if errors.As(err, &s) {
 			e.logf("a newer state arrived during the wait; moving to generation %d", s.gen.N)
 			target, tv = s.gen, s.verified
+			// F03 (03-08f): a poll's Verified carries the unauthorized state
+			// like forward's own: from VerifyAfter or VerifyAheadAfter, from
+			// pollSpool's KRL-alone pass and from pollCapture's state.KRLAlone
+			// branch (storedOnly).
+			e.report.DirectoryUnauthorized = tv.DirectoryUnauthorized != nil
 			continue
 		}
 		if err != nil {
@@ -931,6 +947,15 @@ func (e *engine) keepKRL(g, cur *Generation, curLink link) {
 func (e *engine) render(v *state.Verified) (*Generation, error) {
 	g, err := Render(v, e.keys)
 	if err == nil {
+		if v.DirectoryUnauthorized != nil {
+			// F03 (03-08f): Render's trust-only generation names no host;
+			// the host stays last-good's, as its record names it.
+			if lg, lerr := e.resolveLink(e.l.LastGood()); lerr == nil && lg.kind == linkAgent {
+				if rec, rerr := e.readRecord(lg.n); rerr == nil {
+					g.Host = rec.Host
+				}
+			}
+		}
 		return g, nil
 	}
 	var he *HostError
@@ -969,12 +994,14 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 // accepted also Render's host_not_in_directory refusal (F08 (03-08d)),
 // which RenderFallback went on from with last-good's principals. The
 // apply's error and last_apply then name all of them until a directory is
-// accepted.
+// accepted. While the policy in force does not authorize the stored
+// directory, it also names v.DirectoryUnauthorized (F03 (03-08f)), so every
+// run that leaves the host without principals for that reason says why.
 func outcome(v *state.Verified) error {
 	if v.Directory == nil {
-		return errors.Join(v.Refused, v.KRLRefused, errNoDirectory)
+		return errors.Join(v.Refused, v.KRLRefused, v.DirectoryUnauthorized, errNoDirectory)
 	}
-	return errors.Join(v.Refused, v.KRLRefused)
+	return errors.Join(v.Refused, v.KRLRefused, v.DirectoryUnauthorized)
 }
 
 // candidate renders v for this host (render), keeps the KRL in force
@@ -1012,7 +1039,7 @@ func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*G
 // poll's capture, which brings one, its own pass.
 func (e *engine) krlAlone(prev *state.Stored, in spool.State, v *state.Verified, refusal error) (*state.Verified, error) {
 	if v.Refused != nil {
-		return nil, errors.Join(v.Refused, refusal)
+		return nil, errors.Join(v.Refused, v.DirectoryUnauthorized, refusal)
 	}
 	if !v.BundleChanged && !v.DirectoryChanged || isCrash(refusal) {
 		return nil, refusal

@@ -58,6 +58,12 @@ type Verified struct {
 	// cannot apply. The caller reports Refused.
 	Refused error
 
+	// DirectoryUnauthorized is set when the stored directory does not carry
+	// the admin quorum of the policy in force, or does not fit it
+	// (ErrDirUnauthorized); derived on every verification, never stored
+	// (F03 (03-08f)).
+	DirectoryUnauthorized error
+
 	// steps is the bundle chain of this capture: the stored bundle (when
 	// there is one), then each successor verified.
 	steps []bundleStep
@@ -127,7 +133,12 @@ func (v *Verified) AsStored() *Stored {
 //     bundle is taken only up to that policy (BundleHeld) and the rest
 //     waits for the next capture: what a fetcher withholding the newer
 //     bundles would have shown, so nothing is accepted that could not be
-//     accepted already.
+//     accepted already. The stored directory is checked again under the
+//     policy in force on every verification (F03 (03-08f), verifyDirectory):
+//     while that policy's admin quorum did not sign it, or it does not fit
+//     the policy, DirectoryUnauthorized is set, unless an offered directory
+//     at or above the stored version that the policy authorizes is
+//     accepted standalone.
 //   - KRL. The newest complete KRL: equal to the stored one is a no-op,
 //     an older version krl_older; otherwise krl.VerifyManifest against the
 //     bundle in force, the pinned installation ID and the stored version,
@@ -498,9 +509,43 @@ type chainHead struct {
 	Prev    string `json:"prev"`
 }
 
+// checkStored checks the stored directory prev holds, parsed as d, again
+// under pol, the policy in force (F03 (03-08f)): directory.VerifySignatures
+// over its stored signatures, then directory.CheckPolicy, as the signer
+// checks its installed directory at start-up (loadDirectory). A failure is
+// ErrDirUnauthorized.
+func checkStored(prev *Stored, d *directory.Directory, pol *trust.Policy) error {
+	if _, err := directory.VerifySignatures(prev.Directory, prev.DirectorySigs, pol); err != nil {
+		return fmt.Errorf("%w: the stored directory version %d is not signed by the admin quorum of policy version %d: %w", ErrDirUnauthorized, d.Version, pol.Version, err)
+	}
+	if err := directory.CheckPolicy(d, pol); err != nil {
+		return fmt.Errorf("%w: the stored directory version %d exceeds policy version %d: %w", ErrDirUnauthorized, d.Version, pol.Version, err)
+	}
+	return nil
+}
+
+// verifyDirectory is verify's directory step against prev, the state the
+// capture chains from: accepted/ for Verify, the unapplied record's base
+// for VerifyAhead and VerifyAheadAfter (the record's directory part when
+// the record holds one, 03-08j), the pending target's state for
+// VerifyAfter.
+//
+// F03 (03-08f): the stored directory is checked again under v.Policy, the
+// newest policy the bundle step reached, before any hold (checkStored).
+// While it is authorized, the offered directories are checked as before
+// (offeredDirectory). While it is not, the newest offered directory at or
+// above the stored version (at the stored version only with other bytes)
+// that carries v.Policy's admin quorum, parses, names the pinned
+// installation and fits v.Policy is accepted standalone, with no chain to
+// the stored bytes (standaloneDirectory); a version below the stored one
+// never is (owner decision Q-F03b). Without one, the offered directories
+// are checked as before, the hold included, and when that accepts none,
+// v.DirectoryUnauthorized names the stored directory's failure. The stored
+// directory stays in v, so the flag is derived again on every run.
 func (v *Verified) verifyDirectory(p *Pins, prev *Stored, in spool.State) error {
 	var stored []byte
 	var storedVersion uint64
+	var unauth error
 	if prev != nil && prev.Directory != nil {
 		stored, storedVersion = prev.Directory, prev.DirectoryVersion
 		d, err := directory.Parse(stored)
@@ -508,8 +553,59 @@ func (v *Verified) verifyDirectory(p *Pins, prev *Stored, in spool.State) error 
 			return fmt.Errorf("%w: the accepted directory: %w", ErrStored, err)
 		}
 		v.Directory = d
+		unauth = checkStored(prev, d, v.Policy)
 	}
 	vs := sortedVersions(in.Directories)
+	if unauth == nil {
+		return v.offeredDirectory(p, in, vs, stored, storedVersion)
+	}
+	if v.standaloneDirectory(p, in, vs, stored, storedVersion) {
+		return nil
+	}
+	if err := v.offeredDirectory(p, in, vs, stored, storedVersion); err != nil {
+		return err
+	}
+	if !v.DirectoryChanged {
+		v.DirectoryUnauthorized = unauth
+	}
+	return nil
+}
+
+// standaloneDirectory is F03 (03-08f)'s recovery while the stored
+// directory is unauthorized: the offered versions vs from the newest down
+// to the stored version, that one only when its bytes differ from stored,
+// and the first that carries v.Policy's admin quorum (no hold), parses
+// with its version, names the pinned installation and fits v.Policy is
+// accepted, with no chain to the stored bytes. A candidate that fails is
+// skipped, not refused. It reports whether one was accepted.
+func (v *Verified) standaloneDirectory(p *Pins, in spool.State, vs []uint64, stored []byte, storedVersion uint64) bool {
+	for i := len(vs) - 1; i >= 0 && vs[i] >= storedVersion; i-- {
+		ver := vs[i]
+		doc := in.Directories[ver]
+		if ver == storedVersion && bytes.Equal(doc.Body, stored) {
+			continue
+		}
+		if _, err := directory.VerifySignatures(doc.Body, doc.Sigs, v.Policy); err != nil {
+			continue
+		}
+		d, err := directory.Parse(doc.Body)
+		if err != nil || d.Version != ver {
+			continue
+		}
+		if directory.CheckInstallation(d, p.InstallationID) != nil || directory.CheckPolicy(d, v.Policy) != nil {
+			continue
+		}
+		v.Directory, v.DirectoryChanged = d, true
+		v.Next.Directory, v.Next.DirectorySigs, v.Next.DirectoryVersion = doc.Body, doc.Sigs, d.Version
+		return true
+	}
+	return false
+}
+
+// offeredDirectory is the offered-directory check of verifyDirectory, with
+// vs the offered versions and stored the stored directory (nil: none) at
+// storedVersion.
+func (v *Verified) offeredDirectory(p *Pins, in spool.State, vs []uint64, stored []byte, storedVersion uint64) error {
 	if len(vs) == 0 {
 		return nil
 	}

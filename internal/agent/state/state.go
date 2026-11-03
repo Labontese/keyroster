@@ -68,6 +68,15 @@ var (
 	// its capture is installed with it, except a held step (Verified.
 	// KRLRefused), which commits with the KRL in force unchanged.
 	ErrKRLSignerRetired = errors.New("krl_signer_retired")
+	// ErrDirUnauthorized is a stored directory that the root-signed policy
+	// in force does not authorize: it does not carry that policy's admin
+	// quorum, or does not fit it (F03 (03-08f)). The signer refuses logins
+	// in the same state (T-02-15); the agent renders no principals from it.
+	ErrDirUnauthorized = errors.New("directory_not_authorized")
+	// ErrDirFork is an offered directory at the stored version with other
+	// bytes, which both carry the admin quorum of the policy in force (F03
+	// (03-08f)).
+	ErrDirFork = errors.New("directory_fork")
 )
 
 // Pins are the applier's trust anchors (pins.json, root 0600): the
@@ -158,6 +167,28 @@ func (s *Stored) files() []struct {
 		{directoryFile, &s.Directory, wire.MaxDirectory}, {directorySigs, &s.DirectorySigs, wire.MaxDirectorySigs},
 		{krlFile, &s.KRL, krl.MaxKRL}, {krlManifestFile, &s.KRLManifest, krl.MaxManifest}, {krlManifestSig, &s.KRLSig, krl.MaxManifestSig},
 	}
+}
+
+// DirectoryUnderPolicy checks s's directory again under s's own policy, as
+// verify checks the directory a capture chains from (checkStored, F03
+// (03-08f)): nil when s holds no directory, ErrDirUnauthorized when the
+// policy's admin quorum did not sign it or it does not fit the policy, and
+// an error too when the directory does not parse or s has no parsed
+// policy. s's policy is the one LoadStored parses for accepted/, or the
+// record's when Unapplied.Base took the record's bundle part. WriteAccepted
+// reads it (owner decision O-2 (c)).
+func (s *Stored) DirectoryUnderPolicy() error {
+	if s == nil || s.Directory == nil {
+		return nil
+	}
+	d, err := directory.Parse(s.Directory)
+	if err != nil {
+		return fmt.Errorf("%w: directory: %w", ErrStored, err)
+	}
+	if s.policy == nil {
+		return fmt.Errorf("%w: no policy is parsed beside directory version %d", ErrStored, d.Version)
+	}
+	return checkStored(s, d, s.policy)
 }
 
 // Floor is what s accepted, for spool.Read (nil s: nothing).

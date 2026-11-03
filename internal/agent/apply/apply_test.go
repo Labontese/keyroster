@@ -477,12 +477,15 @@ func TestApply(t *testing.T) {
 		t.Parallel()
 		// PR #67 review: a policy rotation whose CA set is unchanged renders
 		// the same bytes and is committed without a swap; a crash between
-		// the accepted/ files must never leave bundle 2 beside policy 1.
+		// the accepted/ files must never leave bundle 2 beside policy 1. The
+		// rotation keeps the fixture's admins, so directory 1 stays
+		// authorized under policy 2 and the render stays byte-equal (F03
+		// (03-08f): a policy whose admins did not sign directory 1 would
+		// render no principals).
 		f := newFixture(t)
 		h := newTestHost(t, f)
 		h.installed("role:ops")
-		bob := seedKey(t, 11)
-		_, b2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, "2026-10-02T00:00:00Z")
+		_, b2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, f.policy.Admins, "2026-10-02T00:00:00Z")
 		h.state.Bundles[2], h.state.Policies[2] = b2, p2
 		h.cfg.Fault = func(point string) error {
 			if point == "accepted:policy.json" {
