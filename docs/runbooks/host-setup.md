@@ -993,10 +993,11 @@ is `refused`, and its error names the refusal (`generation_too_large`,
 for example); `keyroster host status` shows the error as a
 `last apply error` note. After `reset-directory` a verified successor bundle's
 CA keys apply as well, with last-good's principals while that bundle's
-policy authorizes the same directories as the accepted policy (the same
-admin quorum, admins and CA profiles), and with no principals otherwise
-(Run in CI: `reset_directory_then_rotation_keeps_no_principals`,
-`kept_principals_across_rotations_keeping_admins_stay`). The host keeps
+policy authorizes every directory the accepted policy does (the same
+admin quorum and CA profiles, and every admin of the accepted policy), and
+with no principals otherwise (Run in CI:
+`reset_directory_then_rotation_keeps_no_principals`,
+`kept_principals_across_rotations_keeping_or_adding_admins_stay`). The host keeps
 the directory and principals it had until the server publishes a
 directory it can apply: split the oversize host group or roles and
 publish again.

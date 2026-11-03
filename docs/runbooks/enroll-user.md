@@ -470,7 +470,7 @@ directory lists the host under other keys, the host gets the bundle's CA
 keys and the KRL with no principals, reports the host status, and stays
 so until a directory lists its current keys. The same holds after
 `reset-directory`, before a directory is accepted, when the new policy
-has other admins, another admin quorum or other CA profiles (PR #82
+drops an admin or changes the admin quorum or the CA profiles (PR #82
 review). Run in CI
 (`TestLastGoodPrincipalsUnderPolicyInForce`); UNVERIFIED on the homelab.
 

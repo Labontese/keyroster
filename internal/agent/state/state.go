@@ -200,9 +200,9 @@ func (s *Stored) DirectoryUnderPolicy() error {
 // admin quorum and fit pol (checkStored). Otherwise their source is not at
 // hand: s holds no directory (F08 (03-08d), after reset-directory), or
 // last-good kept them from an earlier directory. That source was authorized
-// under s's policy, so pol must then decide a directory's authorization
-// exactly as s's policy does (sameAuthority). A failure is
-// ErrDirUnauthorized, and so is a nil s, policy or pol.
+// under s's policy, so pol must then authorize every directory s's policy
+// does (coversAuthority). A failure is ErrDirUnauthorized, and so is a nil
+// s, policy or pol.
 func (s *Stored) PrincipalsUnder(pol *trust.Policy, rendered bool) error {
 	if s == nil || s.policy == nil || pol == nil {
 		return fmt.Errorf("%w: no accepted policy to keep last-good's principals under", ErrDirUnauthorized)
@@ -219,17 +219,24 @@ func (s *Stored) PrincipalsUnder(pol *trust.Policy, rendered bool) error {
 			return nil
 		}
 	}
-	if !sameAuthority(s.policy, pol) {
-		return fmt.Errorf("%w: last-good's principals predate the accepted directory, and policy version %d authorizes directories other than accepted policy version %d", ErrDirUnauthorized, pol.Version, s.policy.Version)
+	if !coversAuthority(s.policy, pol) {
+		return fmt.Errorf("%w: last-good's principals predate the accepted directory, and policy version %d does not authorize every directory accepted policy version %d does", ErrDirUnauthorized, pol.Version, s.policy.Version)
 	}
 	return nil
 }
 
-// sameAuthority reports whether a and b authorize the same directories:
-// the same admin quorum, admins and CA profiles, the only policy fields
-// directory.VerifySignatures and directory.CheckPolicy read.
-func sameAuthority(a, b *trust.Policy) bool {
-	return a.AdminQuorum == b.AdminQuorum && slices.Equal(a.Admins, b.Admins) &&
+// coversAuthority reports whether b authorizes every directory a does: the
+// same admin quorum, every admin key of a among b's (by its key string, so
+// another spelling of a key fails closed) and the same CA profiles. Those
+// are the only policy fields directory.VerifySignatures and
+// directory.CheckPolicy read, and VerifySignatures counts distinct pinned
+// admin keys, so a directory that a's admin quorum signed and that fits
+// a's profiles carries b's quorum and fits b's profiles too.
+func coversAuthority(a, b *trust.Policy) bool {
+	return a.AdminQuorum == b.AdminQuorum &&
+		!slices.ContainsFunc(a.Admins, func(x trust.AdminKey) bool {
+			return !slices.ContainsFunc(b.Admins, func(y trust.AdminKey) bool { return y.Key == x.Key })
+		}) &&
 		slices.EqualFunc(a.CAProfiles, b.CAProfiles, func(x, y trust.CAProfile) bool {
 			return x.Role == y.Role && x.MaxTTLSeconds == y.MaxTTLSeconds && slices.Equal(x.DefaultExtensions, y.DefaultExtensions) &&
 				slices.Equal(x.AllowedExtensions, y.AllowedExtensions) && slices.Equal(x.AllowedCriticalOptions, y.AllowedCriticalOptions)

@@ -238,12 +238,13 @@ func TestLastGoodPrincipalsUnderPolicyInForce(t *testing.T) {
 		}
 		e.trustOnlyWithNext("policy 3", 100)
 	})
-	t.Run("kept_principals_across_rotations_keeping_admins_stay", func(t *testing.T) {
+	t.Run("kept_principals_across_rotations_keeping_or_adding_admins_stay", func(t *testing.T) {
 		t.Parallel()
 		// The controls of the two cases above: a rotation whose policy
-		// authorizes the same directories keeps principals last-good kept
-		// from an earlier directory (host_keys_rotated), and after
-		// reset-directory (F08 (03-08d)) the principals current holds.
+		// authorizes every directory the accepted one does keeps principals
+		// last-good kept from an earlier directory (host_keys_rotated; policy
+		// 2 adds bob), and after reset-directory (F08 (03-08d)) the
+		// principals current holds (policy 3 keeps alice and bob).
 		f := newFixture(t)
 		h := newTestHost(t, f)
 		spoolInState(t, h)
@@ -254,10 +255,11 @@ func TestLastGoodPrincipalsUnderPolicyInForce(t *testing.T) {
 		if r := h.mustApply(); r.HostStatus != HostKeysRotated || !slices.Equal(h.principals("deploy"), []string{"role:ops"}) {
 			t.Fatalf("directory 2: %+v, principals %v; want host_keys_rotated keeping role:ops", r, h.principals("deploy"))
 		}
-		b2, d2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, f.policy.Admins, "2026-10-02T00:00:00Z")
+		admins := append(slices.Clone(f.policy.Admins), trust.AdminKey{Name: "bob", Key: trust.FormatKey(seedKey(t, 11).PublicKey())})
+		b2, d2, p2 := f.rotation(f.bundle, f.bundleDoc, f.policyDoc, f.policy, admins, "2026-10-02T00:00:00Z")
 		h.state.Bundles[2], h.state.Policies[2] = d2, p2
 		if r, err := h.apply(); err != nil || r.BundleVersion != 2 || r.HostStatus != HostKeysRotated || !slices.Equal(h.principals("deploy"), []string{"role:ops"}) {
-			t.Fatalf("policy 2, alice kept: %v, %+v, principals %v; want role:ops kept", err, r, h.principals("deploy"))
+			t.Fatalf("policy 2, bob added: %v, %+v, principals %v; want role:ops kept", err, r, h.principals("deploy"))
 		}
 		if _, err := ResetDirectory(h.l, h.spool); err != nil {
 			t.Fatalf("reset-directory: %v", err)
@@ -267,7 +269,7 @@ func TestLastGoodPrincipalsUnderPolicyInForce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, d3, p3 := f.rotation(b2, d2.Body, p2.Body, pol2, f.policy.Admins, "2026-10-03T00:00:00Z")
+		_, d3, p3 := f.rotation(b2, d2.Body, p2.Body, pol2, admins, "2026-10-03T00:00:00Z")
 		h.state.Bundles[3], h.state.Policies[3] = d3, p3
 		if r, err := h.apply(); !errors.Is(err, errNoDirectory) || r.BundleVersion != 3 || !slices.Equal(h.principals("deploy"), []string{"role:ops"}) {
 			t.Fatalf("policy 3 after reset-directory: %v, %+v, principals %v; want role:ops kept", err, r, h.principals("deploy"))
