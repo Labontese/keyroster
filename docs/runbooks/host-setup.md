@@ -697,7 +697,7 @@ its parent opened without following links:
 | `/var/lib/keyroster-agent/accepted` | root:root | 0700 | the signed documents the applier accepted |
 | `/var/lib/keyroster-agent/pins.json` | root | 0600 | trust-root pins, threshold, installation ID |
 | `/var/lib/keyroster-agent/spool` | keyroster-agent:root | 0750 | the signed documents the fetcher received |
-| `/var/lib/keyroster-agent/outbox` | root:keyroster-agent | 2750 | the applier's answers to the fetcher (`enroll-pop.json`; `accepted.json`, the versions it accepted, which the fetcher's state requests start from) |
+| `/var/lib/keyroster-agent/outbox` | root:keyroster-agent | 2750 | the applier's answers to the fetcher (`enroll-pop.json`; `accepted.json`, the versions it accepted, which the fetcher's state requests start from; its `directory` is 0 on purpose while the directory the host chains from is not authorized by the policy it is under, so the fetcher asks for the server's current directory, 03-08f; Run in CI: `lagging_host_admin_removed_principals_dropped`) |
 | `/etc/keyroster-agent` | root:root | 0755 | |
 | `/etc/keyroster-agent/fetch.json` | root:keyroster-agent | 0640 | the agent server's URL, TLS roots and pins |
 | `/var/lib/keyroster-agent-fetch` | keyroster-agent | 0700 | the fetcher's identity key |
@@ -1020,6 +1020,16 @@ the recorded unapplied state. Run in CI (03-08k):
 `record_signed_krl_during_a_wait_lands`,
 `krl_alone_supersede_keeps_what_an_earlier_poll_verified`.
 
+While the host's directory is not authorized by the policy in force
+(`directory_not_authorized`, see enroll-user.md), a refused directory does
+not refuse the bundle: the host installs the verified bundle with no
+principals, and the capture's KRL is checked with that bundle, by the
+rules above (03-08f). Run in CI:
+`stored_version_above_new_admins_needs_reset`,
+`unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle`. A KRL
+signed by a new ops key in that shape is UNVERIFIED: no test builds it,
+and it is reasoned from the KRL step's code.
+
 **An ops-key rotation** (Run in CI (03-08k), `TestKRLSigner`). When a
 verified bundle the host knows names a newer ops key, the old key is
 retired. The host knows a bundle it verified in the current apply (also,
@@ -1124,7 +1134,14 @@ them, and keeps the spool from them (the fetcher paragraph below).
 The record counts as an accepted version. A different version with the
 same number, or a chain not built on it, is refused
 (`directory_not_verified` or `bundle_not_verified`), as after a signer
-restore (signer-install.md). A host catching up across a policy rotation
+restore (signer-install.md). A different directory with the accepted
+directory's number, offered as the newest, is `directory_fork` when the
+current admin quorum signed it, and `directory_not_verified` otherwise;
+the KRL still lands (03-08f). Run in CI for an accepted directory:
+`same_version_other_bytes_refused_as_fork`,
+`same_version_unsigned_bytes_not_verified`. At the record's directory
+version the same check runs on the record's bytes; that is reasoned from
+the code (UNVERIFIED: no test offers it there). A host catching up across a policy rotation
 still holds at its bundle in force and applies the directory, as without
 a record. `keyroster-agent reset-directory` drops the record's directory
 along with the accepted one. Otherwise, publishing a fixed version is
@@ -1232,13 +1249,16 @@ bundles and directories all but the accepted version and up to 1024 above
 it (what one poll can fetch, which also covers what an unfinished swap
 reads), or the newest 64 on a host that accepted nothing yet; of the KRLs
 all but the newest complete one; of the policies all but those a kept
-bundle names, each under the version its own document names. It logs how
+bundle names, each under the version its own document names. Each
+bundle's policy signature file (`bundle-N.policy.sigs`, 03-08f) is kept
+exactly while its bundle is, and removed with it. It logs how
 many files went and the first 16 names; symlinks, other non-regular files
 and names the applier never reads stay here too. So whatever a
 compromised server sends, the spool holds at most what this keeps (with
-the caps above, about 5.1 GiB: 1025 bundle, policy and directory versions
-and one KRL) plus one poll's answers (64 of at most 8 MiB each), about
-5.6 GiB in all; an honest spool holds a few versions. Run in CI (03-08e):
+the caps above, about 6.1 GiB: 1025 bundle, policy and directory
+versions, one policy signature file per kept bundle, and one KRL) plus one
+poll's answers (64 of at most 8 MiB each), about 6.6 GiB in all; an
+honest spool holds a few versions. Run in CI (03-08e):
 `TestFetch` (`oversize_policy_answer_refused_nothing_written`,
 `high_policy_version_oversize_refused`, `item_at_cap_written`,
 `honest_answers_fit_the_caps`, `more_than_per_kind_refused`,
@@ -1246,9 +1266,10 @@ and one KRL) plus one poll's answers (64 of at most 8 MiB each), about
 `poisoned_spool_file_removed_at_next_poll`,
 `heal_leaves_symlinks_and_unknown_names`,
 `heal_error_logged_and_poll_continues`), `TestSpoolPrune`
-and `TestSpool/cap_is_what_read_enforces`. UNVERIFIED on a real host: no
-03-16 drill provokes these refusals, and the byte figures are computed
-from the caps, not measured.
+and `TestSpool/cap_is_what_read_enforces`; for the per-bundle policy
+signature file, `TestSpoolPrune/per_bundle_policy_sigs_pruned_with_their_bundle`
+(03-08f). UNVERIFIED on a real host: no 03-16 drill provokes these
+refusals, and the byte figures are computed from the caps, not measured.
 
 While a host holds an unapplied record, `outbox/accepted.json` names the
 recorded versions, so the prune counts its 1024 versions from them, not
@@ -1259,6 +1280,23 @@ whose capture finds a listed spool file gone, because the prune removed it
 in between, captures once more, so it no longer fails on that race
 (F01 (03-08e), 03-08j). Run in CI: `TestReadRecapture`; no test races a
 real capture against a real prune (UNVERIFIED).
+
+`outbox/accepted.json` names the recorded versions only while the
+recorded directory, or the accepted one when the record holds none, is
+authorized by the policy it is under; the fetcher then keeps fetching the
+versions after the record (03-08f). While that directory is not
+authorized, `accepted.json`'s `directory` is 0, so the fetcher asks for
+the server's current directory and the prune keeps the newest 64
+directory versions, as on a host that accepted none. That includes a
+record whose bundle part rotates the policy over a directory part that
+the earlier policy signed: a host catching up across a policy rotation
+records that shape when it holds at its bundle in force and that
+directory is then refused for its content. Its `directory` then reads 0
+while its `bundle` names the recorded version. With an honest server this
+is safe: after the rotation, the server's current directory is the new
+admins'. Run in CI: `recorded_authorized_directory_keeps_the_record_raise`,
+`recorded_bundle_over_unauthorized_directory_reports_directory_0`,
+`held_content_refusal_keeps_the_records_bundle` (the mixed record).
 
 **Watch the hosts** (admin workstation):
 
@@ -1436,7 +1474,10 @@ T-03-284, pending todo `signed-applier-status`).
   an unapplied version that is either. That is the sign
   of a host that accepted or recorded a version a signer restore lost
   (signer-install.md): check its `accepted.json` and follow that
-  runbook's "Enrolled hosts and a re-made version". It never counts as
+  runbook's "Enrolled hosts and a re-made version". When `accepted.json`'s
+  `directory` is 0 on a host that holds a directory, read the directory
+  version from `outbox/status.json` instead (03-08f; UNVERIFIED: no test
+  reads status.json for it). It never counts as
   converged. (Run in CI: `TestHostStatusDiverged`,
   `TestCommittedAndDiverged`.)
 - `unapplied: directory vN` (or `bundle vN`, or both): the host verified
