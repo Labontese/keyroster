@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08f-PLAN.md (PR #82 open, awaiting the merge gate)"
-last_updated: "2026-11-03T07:40:00.000Z"
+stopped_at: "Completed 03-08g-PLAN.md (PR #83 open, awaiting the merge gate)"
+last_updated: "2026-11-03T22:04:20.615Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 9fab51244fd6febfa415a5be4115c5b4d6084eb4
+state_head: 0a0913d7c69aaab987521bde550200237d381cc1
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 62
-  completed_plans: 53
+  completed_plans: 54
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 19 of 27
+Plan: 20 of 27
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -108,6 +108,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08j | 60min | 5 tasks | 30 files |
 | Phase 03 P08k | 115min | 4 tasks | 24 files |
 | Phase 03 P08f | 200min | 4 tasks | 32 files |
+| Phase 03 P08g | 75min | 4 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -303,6 +304,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08f: a host checks its stored directory again under the policy in force on every verification and in the KRL-alone state; while that policy's admin quorum did not sign it, the host renders trust files only and reports directory_not_authorized (refused in last_apply)
 - [Phase 03]: 03-08f: while unauthorized, the newest directory at or above the stored version that the current quorum signed is taken standalone, every refusal of an offered directory joins the unauthorized state with the bundle part restored, and accepted.json's directory is 0 while the chain base's directory is unauthorized (O-2 (c)); an authorized same-number directory with other bytes is directory_fork or directory_not_verified
 - [Phase 03]: 03-08f: a successor step that fails with trust.ErrThreshold is retried once with the union of admitted policy-signature files (stored, delivered per bundle as bundle-<N>.policy.sigs, offered); bundle signatures are never united and accepted/ stores one admitted file
+- [Phase 03]: 03-08g: keyroster-server keeps at most 12 budgeted signer calls in flight (budgetSigner around every signer), at most 6 relayed for host agents (GetBundle, GetDirectoryVersion), which take the agent token first; GetKRL is outside the budget (no signer lock, coalesced), so at most 13 calls
+- [Phase 03]: 03-08g: one enrolled agent has at most 2 requests in flight on the state and heartbeat routes together (agentSlot after requireAgent); a further one is 429 with Retry-After 1 and rate limited
+- [Phase 03]: 03-08g: concurrent directory-mirror misses share one detached GetDirectory fetch per Status SHA-256 and version; a KRL is served only once its krl-served.json copy is durable (servedKRL.durable)
 
 ### Pending Todos
 
@@ -343,6 +347,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-30T14:02:25.402Z
-Stopped at: Completed 03-08d-PLAN.md (PR #76 open, awaiting the merge gate)
+Last session: 2026-11-03T22:04:20.183Z
+Stopped at: Completed 03-08g-PLAN.md (PR #83 open, awaiting the merge gate)
 Resume file: None
