@@ -16,6 +16,7 @@ provides:
   - "apply: Render's trust-only generation while unauthorized, the forced render with its no-op, outcome joining DirectoryUnauthorized, Report.DirectoryUnauthorized, WriteAccepted's directory 0 by the chain base (O-2 (c)), two refusals in last_apply"
   - "tests: TestDirectoryUnderPolicyInForce (13 cases), TestRootRotationUnchangedPolicy (11), three TestSpool, four TestFetch and one TestSpoolPrune case"
   - "docs: root-ceremony.md, enroll-user.md, signer-install.md, host-setup.md; todo 2026-10-21 Status"
+  - "pre-merge review fix round 1: (*Stored).PrincipalsUnder and coversAuthority, engine.render keeping last-good's principals only under a policy that authorizes their source, bundle_held at the supersede step, TestLastGoodPrincipalsUnderPolicyInForce (8 cases), the M-2, T2b and widening-directory cases, the corrected spool bound"
 affects: [03-09, 03-10, 03-12, 03-13, 03-14]
 
 requirements-completed: []
@@ -271,16 +272,16 @@ Both runs passed in full, with no `--- FAIL` anywhere under `./...`. internal/ag
 | Mutant | Run against | Result | Failing lines |
 |---|---|---|---|
 | T2a: the union built from every source, unfiltered, and tried before the plain check | `malformed_delivered_sigs_change_nothing`, `same_roots_unchanged_policy_accepted` | **killed** | `same roots with a malformed delivered file: bundle_not_verified: ... policy (previous roots) signatures: block 2: sshsig: malformed signature` (ParseAll refuses the unfiltered union) and `accepted/'s policy signatures are not the stored ones` |
-| T2b: the bundle signatures added to the union | `union_never_lowers_threshold`, `one_hop_new_roots` | **survived, as required: equivalent** | both PASS |
+| T2b: the bundle signatures added to the union | `union_never_lowers_threshold`, `one_hop_new_roots` | **survived; not equivalent** (corrected below; killed in fix round 1 by `bundle_sigs_never_united`) | both PASS |
 | T2c: Next.PolicySigs set to the union | `stored_policy_sigs_stay_bounded` | **killed** | `accepted/'s policy signatures (2826 bytes) are not bundle-4.policy.sigs (628 bytes)` |
 | T2d: a rejected delivered file stored | `malformed_delivered_sigs_not_stored` | **killed** | `accepted/'s policy signatures are not the offered file` |
 | T2e: the per-bundle file not written by the fetcher | `TestFetch/per_bundle_policy_sigs_spooled` | **killed** | `bundle-2.policy.sigs: "", open ...: no such file or directory; want "p2"` and `bundle-4.policy.sigs was not written before bundle-4.json` |
 | T2f: the offered policy file left out of the union | `spool_without_per_bundle_sigs_one_hop` | **killed** | `the rotation through policy-1.json.sigs: bundle_not_verified: ... policy (new roots) signed by 0 of 1 roots, need 1` |
 | T2g: spoolSet left without the per-bundle name, so pruneSpool keeps every such file | `TestSpoolPrune/per_bundle_policy_sigs_pruned_with_their_bundle` | **killed** | `accepted bundle 3: bundle-1.policy.sigs spooled true, want false` (and bundles 2 and 9, and bundles 1 to 6 without accepted.json) |
 
-Six mutants were killed and one survived, as the plan requires. Each was restored byte for byte, and `git diff --quiet -- internal/` passed after each.
+Six mutants were killed and one survived. The plan required T2b to survive as equivalent, but it is not equivalent (see the correction below), and pre-merge review fix round 1 kills it. Each was restored byte for byte, and `git diff --quiet -- internal/` passed after each.
 
-**Why T2b is equivalent (plan check 3, m-2).** CountPinnedSigners (internal/trust/verify.go:29-62) verifies every block over the policy's digest under the policy namespace (`s.VerifyDigest(namespace, digest)`, line 51) and skips a block that does not verify there. A root's bundle signature is a signature over the bundle under the bundle namespace, so it never verifies there and never counts toward the policy threshold. Its blocks are well-formed, so ParseAll accepts the union with them. The mutant therefore changes no outcome, and both tests pass under it.
+**T2b is not equivalent (correction, PR #82 review, D-2 (b)).** Run A argued it was (plan check 3, m-2): CountPinnedSigners (internal/trust/verify.go:29-62) verifies each block over the policy's digest under the policy namespace and skips a block that does not verify there, so a root's bundle signature never counts toward the policy threshold. That holds for bundle-namespace blocks, but the argument assumed `bundle-N.json.sigs` holds only those. It is a spool file of any well-formed SSHSIG blocks, so it can also carry a root's policy-namespace signature over the exact policy bytes. The bundle check skips such a block, and the real union never reads that file, so a rotation whose new root signed the policy only there is refused. Under T2b that block counts and the rotation is accepted. The outcomes differ, so T2b is killable. Only a genuine root's policy signature can count either way, so there is no security impact, but the plan's "the bundle signatures are never united" (T-03-304) had no test. Fix round 1's `bundle_sigs_never_united` pins it and kills T2b.
 
 ### The threshold argument, in internal/trust/verify.go (unchanged)
 
@@ -303,7 +304,7 @@ So the union only adds blocks, each counted under the same per-root rule and the
   - checkCaps names `bundle-<N>.policy.sigs`, between the bundle's signatures and the policy, so an oversize PolicySigs is refused naming the per-bundle file.
   - spoolFileRE gains `policy\.sigs` (dropAbove).
   - `spoolSetBundlePolicyRE` makes spoolSet return `("bundle", N)` for the file, so pruneSpool keeps it exactly while it keeps bundle N and removes an orphan. A set's completeness is still decided by `bundle-<N>.json` and its `.sigs`.
-  - pruneSpool's doc comment states the bound of about 6.1 GiB kept and 6.6 GiB in all (owner decision O-3 (a)).
+  - pruneSpool's doc comment states the bound of about 6.1 GiB kept and 6.6 GiB in all (owner decision O-3 (a)). Fix round 1 corrects the total to about 6.9 GiB (D-3).
   - dropAbove's and writeState's comments say why the per-bundle file exists.
 - **verify.go.** verifyBundle keeps findPolicy and the plain VerifySuccessor call. On `errors.Is(err, trust.ErrThreshold)` it calls `unitePolicySigs` with `in.BundlePolicySigs[ver]` and the offered policy file whose body has the bundle's policy SHA-256 (`findPolicy(sum, nil, in)`).
   - `admitPolicySigs` (sshsig.ParseAll on the source alone) admits each source; identical files are admitted once, and each is concatenated with a trailing newline.
@@ -438,7 +439,7 @@ All 15 mutants were killed. Each was restored byte for byte, and `git diff --qui
   - enroll-user.md: the hosts' side, install right after the bundle, reset-directory, and the O-1 residual labelled UNVERIFIED;
   - root-ceremony.md: after "Rotate the roots" step 6;
   - signer-install.md: the accepted.json directory-0 note and directory_fork;
-  - host-setup.md: the outbox row, the I-2 sentence, the fork rule, the prune paragraph with 6.1 and 6.6 GiB, the record paragraph (O-2 (c)) and the `diverged` item.
+  - host-setup.md: the outbox row, the I-2 sentence, the fork rule, the prune paragraph with 6.1 and 6.6 GiB (6.9 GiB after fix round 1, D-3), the record paragraph (O-2 (c)) and the `diverged` item.
 - **The todo** stays in pending/ and has a Status section with both lines.
 
 ## Task 4: the publish edits, the gates, the PR
@@ -503,9 +504,10 @@ No figure is above its limit. The stop rule never tripped. The local figures var
 
 ## Mutants
 
-- **Task 2**: 7 mutants. 6 killed, and T2b survives as required: it is equivalent (plan check 3, m-2).
+- **Task 2**: 7 mutants. 6 killed. T2b survived and was called equivalent (plan check 3, m-2); it is not, and fix round 1 kills it with `bundle_sigs_never_united`.
 - **Task 3**: 15 mutants, all killed. T3n is killed by one of its two named tests.
-- **In all**: 22 mutant runs, one equivalent.
+- **In all** (Tasks 2 and 3): 22 mutant runs. T2b survived and is killed in fix round 1.
+- **Fix round 1**: 8 mutants in 11 runs, all killed (see that section).
 
 ## Existing tests the change flipped
 
@@ -535,7 +537,7 @@ Task 3 flipped none: its `./...` run and the gates show no `--- FAIL`.
   - `(s *Stored) DirectoryUnderPolicy()` (state.go) and WriteAccepted (installed.go) take the chain base, which is the record's base when there is a record and accepted/ otherwise, and write directory 0 only while its directory is unauthorized under its own policy.
   - Pinned by the tracer, `held_content_refusal_keeps_the_records_bundle`, `recorded_authorized_directory_keeps_the_record_raise` and `recorded_bundle_over_unauthorized_directory_reports_directory_0`.
   - Mutants T3d, T3f (reading (a)), T3g (reading (b)) and T3h.
-- **O-3 (a), accept the bound.** pruneSpool keeps `bundle-<N>.policy.sigs` exactly while it keeps bundle N (spoolSet), and its doc comment and host-setup.md state about 6.1 GiB kept and 6.6 GiB in all. These figures are computed from the caps, not measured.
+- **O-3 (a), accept the bound.** pruneSpool keeps `bundle-<N>.policy.sigs` exactly while it keeps bundle N (spoolSet), and its doc comment and host-setup.md state about 6.1 GiB kept and 6.6 GiB in all. These figures are computed from the caps, not measured. Fix round 1 corrects the total to about 6.9 GiB: the per-poll term missed the second copy of each bundle item's policy signatures (D-3, arithmetic in that section).
 
 ## Requirements
 
@@ -560,7 +562,7 @@ Everything else ran as the plan wrote it, and the stop rule never tripped.
 - **A crash between forward's record write and WriteAccepted** (WriteAccepted's doc comment, m-5). No test exercises it; the sentence is reasoning from the code.
 - **The fill of `g.Host` in engine.render while unauthorized.** It runs in the tracer, but no test asserts the host name it fills.
 - **storedPolicySigs's last fallback to pol.Sigs.** It is unreachable when the union differed from pol.Sigs, and no test reaches it.
-- **pruneSpool's bound of about 6.1 GiB kept and 6.6 GiB in all.** It is computed from the caps, not measured.
+- **pruneSpool's bound of about 6.1 GiB kept and 6.6 GiB in all** (about 6.9 GiB after fix round 1, D-3). It is computed from the caps, not measured.
 
 ## Deviations (Run B)
 
@@ -577,15 +579,12 @@ Run A's UNVERIFIED item "CI" no longer holds: PR #82's CI ran all 27 checks gree
 
 ## UNVERIFIED (Run B)
 
-- **Converted refusals that no case pins.** These take the same step-b branch as the refusals the cases pin, directory_older (`stored_version_above_new_admins_needs_reset`) and the chain refusal (`unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle`):
-  - directory_installation;
-  - directory_chain_gap;
-  - directory_not_verified for a parse, version or CheckPolicy cause.
+- **Converted refusals that no case pins.** These take the same step-b branch as the refusals the cases pin: directory_older (`stored_version_above_new_admins_needs_reset`), the chain refusal (`unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle`), and since fix round 1 directory_installation, directory_chain_gap and a directory file that holds another version (`unauthorized_hold_then_other_refusals_keep_the_verified_bundle`):
+  - directory_not_verified for a parse or CheckPolicy cause.
 - **The fork rule at an unapplied record's directory version.** No test offers a same-number directory there; it is reasoned from the code (the stored version is the chain base's).
 - **A KRL signed by a new ops key in the unauthorized shape** (host-setup.md's I-2 sentence). No test builds it; it is reasoned from krlStep.
 - **The O-1 residual** (owner decision O-1 (a)). No test builds the state from before this change together with a refused KRL (enroll-user.md labels it).
 - **The `diverged` item's advice** to read the directory version from status.json while accepted.json reads 0. No test reads status.json for it.
-- **A poll during a widening wait that supersedes into the unauthorized state** (deviation 1's first shape). It was observed in the draft run, but no committed test asserts it.
 - **The homelab.** Every runbook note is run in CI only; Phase 3 runs no admin-set change and no root rotation of enrolled hosts.
 
 ## Handoff to Task 3 (from Run A to Run B, kept as written)
@@ -656,9 +655,146 @@ The local figures vary with machine load (03-08k saw 274 s to 356 s on near-iden
 
 **Open questions for the owner.** None from Run A.
 
+## Pre-merge review fix round 1
+
+PR #82's pre-merge review confirmed seven findings and refuted none. The owner decided D-1 to D-4; all four are fixed here, on the branch after dac2244.
+
+| Item | Commit | What changed |
+|---|---|---|
+| D-1 | 255b285 `fix(agent): keep last-good's principals only under a policy that authorizes their source` | state.go `(*Stored).PrincipalsUnder` and its policy comparison; apply.go `engine.accepted` and the check in `engine.render` before RenderFallback; new lastgood_test.go |
+| D-1 | a77151a `fix(agent): keep kept principals across a policy that only adds admins` | the comparison becomes `coversAuthority` (below); the control gains a step that adds an admin; host-setup.md and enroll-user.md follow |
+| D-2 | ad103cb `fix(agent): report bundle_held from a superseding capture that moved the bundle` | apply.go's supersede step; policy_change_test.go's new and changed cases |
+| D-3, D-4 and the D-1 runbook text | 9342e14 `docs(agent): correct the spool bound, the fork rule and the kept-principals rule` | fetch.go's pruneSpool doc comment, host-setup.md, enroll-user.md |
+
+### D-1: last-good's principals and the policy in force
+
+**The defect.** RenderFallback kept last-good's principals for `host_keys_rotated`, `host_keys_disagree` and a host with no accepted directory, whatever the policy in force. After an admin-set change, the host could therefore keep principals rendered from the removed admin's directory, with no error. An example: last-good renders alice's role:evil, and one capture brings policy 2 (bob only) with bob's directory 2 listing the host under another key. Bob's directory is taken standalone, so DirectoryUnauthorized stays nil, and every later idle run keeps role:evil.
+
+**The fix.** Before RenderFallback, engine.render checks accepted/ (`e.accepted`, which forward loads) under v's policy with `(*Stored).PrincipalsUnder`. At rest, accepted/ is the state last-good was committed with, and the commit marker keeps the two together. When the check fails, last-good's principals files are dropped from the generation RenderFallback reads. The fallback then renders the trust files with the KRL, and the host status is still reported. The rule:
+
+- last-good's record names no kept status, so it rendered its principals from accepted/'s directory: kept only while that directory carries the policy's admin quorum and fits it (checkStored);
+- otherwise their source is not at hand. That covers a record with `host_keys_rotated` or `host_keys_disagree`, an unreadable record, and accepted/ without a directory (F08, after reset-directory). Here they are kept only while the policy authorizes every directory accepted/'s policy does (`coversAuthority`). That means:
+  - the same admin quorum;
+  - every admin key of accepted/'s policy among the policy's admins, compared as key strings, so another spelling of a key fails closed;
+  - the same CA profiles.
+
+  Those are the only fields directory.VerifySignatures and directory.CheckPolicy read, and VerifySignatures counts distinct pinned admin keys. So a directory that accepted/'s quorum signed carries the new policy's quorum too. The invariant behind this is that kept principals' source is always authorized under accepted/'s policy. 255b285 first required equal admin lists. That dropped kept principals when an admin was only added, so a77151a relaxes it to the covering rule;
+- a nil accepted/, policy or target policy is a failure, so the fallback keeps nothing.
+
+**Every keepPrincipals path, each RED on dac2244 at the principals assertion** (all the case's earlier assertions passed there). Eight cases are in `TestLastGoodPrincipalsUnderPolicyInForce`:
+
+| Case | Path | RED on dac2244 |
+|---|---|---|
+| `recovery_with_rotated_host_keys_keeps_no_principals` | the reproduced shape: standalone recovery, then host_keys_rotated, then an idle no-op | `apply: current holds a principals file for deploy: [role:evil]` |
+| `recovery_with_disagreeing_host_keys_keeps_no_principals` | the same capture, with host_keys_disagree | `[role:evil]` |
+| `record_path_rotated_host_keys_keeps_no_principals` | VerifyAhead: the record's directory (bob's 3), which policy 2 authorizes, is the chain base, while last-good is alice's | `apply 2: ... [role:evil]` |
+| `widening_wait_supersede_keeps_no_principals` | VerifyAfter: the pending target (bob's 2) is the chain base during the wait, while last-good is alice's | `[role:evil role:ops]` |
+| `reset_directory_then_rotation_keeps_no_principals` | RenderFallback's no-directory keep (F08) after reset-directory | `[role:evil]` |
+| `kept_principals_then_admin_removed_keeps_none` | a chained keep: last-good's principals predate accepted/'s still-authorized directory | `policy 3: ... [role:evil]` |
+| `authorized_directory_across_rotation_keeps_principals` (control) | a rotation that keeps alice, with her directory listing the host under another key | PASS (keeps role:ops) |
+| `kept_principals_across_rotations_keeping_or_adding_admins_stay` (control, added after the RED run) | a chained keep across a rotation that adds bob, then the F08 keep after reset-directory across a rotation that keeps alice and bob | not run on dac2244; passes on 255b285 (then without the added admin) and on a77151a |
+
+The RED run used a scratch worktree at dac2244 holding only the new test file. Its output is in the session scratch file `red-d1.txt`. GREEN: all eight pass on a77151a, and the full local gate passes there (see the test time below), so no existing test flipped.
+
+### D-2: test gaps and the stale flag
+
+- **(a) M-2's restore.**
+  - `unauthorized_hold_then_chain_refusal_keeps_the_verified_bundle` now builds bundle 2 with `f.rotationNext` and checks that user_ca_keys holds bundle 2's next CA, through the new helper `holdThenRefused`.
+  - `unauthorized_hold_then_other_refusals_keep_the_verified_bundle` adds three shapes, each holding the capture at bundle 1 first:
+    - `directory_installation`, with a valid-format foreign ID;
+    - `directory_chain_gap`;
+    - `directory_holds_another_version`.
+  - All four pass on dac2244, as expected, because the production restore is correct. The evidence is mutant D2a below, run against each of the four separately and killed by each.
+- **(b) T2b.** `TestRootRotationUnchangedPolicy/bundle_sigs_never_united` puts C's policy-namespace signature only in `bundle-2.json.sigs` and expects bundle_not_verified, with accepted/ at bundle 1. It passes on dac2244. T2b (mutant D2b) is killed. The Task 2 mutant table and the T2b paragraph are corrected above.
+- **(c) The widening directory 2 in the rotation capture.** `widening_directory_with_rotation_supersedes_into_bundle_2` covers that shape. Directory 1 is [role:ops], and one capture offers alice's [role:ops, role:evil] together with bundle 2 (policy 2: bob). The case asserts:
+  - the apply returns directory_not_authorized;
+  - BundleVersion is 2, with an intermediate and a wait;
+  - there are no principals, and bundle 2's next CA is in user_ca_keys;
+  - role:evil is never in current at any sleep of the wait;
+  - neither the report nor status.json says bundle_held.
+
+  RED on dac2244, only on the flag: `the report says a bundle is held while bundle 2 is in force`, and status.json had `"bundle_held":true`. Every fail-closed assertion already passed there.
+- **The fix.** At the supersede step, `if tv.BundleChanged { e.report.BundleHeld = tv.BundleHeld }`. A superseding capture that moved the bundle decided again whether a newer one waits. A KRL-alone one moved nothing, so the earlier answer stands.
+- **The KRL-alone refresh (apply.go, forward's loop) is left unchanged.** There the Verified is KRL-alone over accepted/: the bundle in force is accepted/'s, and a bundle the capture held still waits, so the flag the capture set is still accurate. No case showed a wrong status there.
+
+### D-3: the spool bound, recomputed from the caps
+
+- **Kept.** 1025 versions per kind: the newest at or below the accepted one, plus keepAbove = 64 x 16 = 1024 above it. Per version:
+  - a bundle set of 3 MiB: `bundle-N.json`, its `.sigs` and `bundle-N.policy.sigs`, each at most spool.MaxBundle, 1 MiB;
+  - a policy set of 2 MiB;
+  - a directory set of 1 MiB + 64 KiB (wire.MaxDirectory, wire.MaxDirectorySigs).
+
+  That is 6.0625 MiB a version, and 1025 x 6.0625 = 6214.1 MiB. One KRL set adds 4 MiB + 4 KiB + 16 KiB. **About 6218 MiB, 6.07 GiB.**
+- **One poll.** 64 answers (MaxAgentStateRounds), each at most 8 MiB of JSON (MaxAgentStateResponse).
+  - Byte fields are base64, so one answer carries at most 6 MiB of document bytes.
+  - writeState writes each bundle item's PolicySigs twice, as `policy-V.json.sigs` and `bundle-N.policy.sigs`, which adds at most another 6 MiB.
+  - So one answer writes at most 12 MiB, and one poll at most 768 MiB, **0.75 GiB**.
+- **In all,** at most 6.07 + 0.75 = 6.82 GiB. The comment and host-setup.md say "about 6.9 GiB", 6.1 + 0.75 rounded up, as an upper bound. The earlier 6.6 GiB counted the poll at 512 MiB, once.
+
+No code changed for D-3. The figure is computed, not measured.
+
+### D-4: the runbook fork rule
+
+- host-setup.md: directory_fork applies while the host's directory is authorized by the policy in force. While it is not (directory_not_authorized), a directory at the same number signed by the new quorum is taken standalone (enroll-user.md).
+- enroll-user.md: "the first directory" now reads "the newest directory", because standaloneDirectory scans from the newest down.
+
+These are doc-only, so there is no RED.
+
+### Mutants (fix round 1; the same scripted loop, each applied with `git apply` to a77151a, the final code, run against its named test with an anchored `-run` under -race, restored with `git checkout`, then `git diff --quiet -- internal/`)
+
+| Mutant | Run against | Result | Failing lines |
+|---|---|---|---|
+| D1a: the PrincipalsUnder check dropped in engine.render | all of `TestLastGoodPrincipalsUnderPolicyInForce` | **killed** | the six D-1 REDs' `current holds a principals file for deploy: [role:evil]` lines |
+| D1b: PrincipalsUnder without checkStored | the four recovery, record and wait cases | **killed by all four** | `[role:evil]` / `[role:evil role:ops]` |
+| D1c: PrincipalsUnder without the coversAuthority check | `reset_directory_then_rotation_keeps_no_principals`, `kept_principals_then_admin_removed_keeps_none` | **killed by both** | `apply: ... [role:evil]`, `policy 3: ... [role:evil]` |
+| D1d: the record's kept status ignored (`rendered = true`) | `kept_principals_then_admin_removed_keeps_none` | **killed** | `policy 3: ... [role:evil]` |
+| D1e: coversAuthority replaced by an equal policy version | `kept_principals_across_rotations_keeping_or_adding_admins_stay` | **killed** | `policy 2, bob added: ...; want role:ops kept` |
+| D1f: the admin subset replaced by equal admin lists (255b285's rule) | `kept_principals_across_rotations_keeping_or_adding_admins_stay` | **killed** | `policy 2, bob added: ...; want role:ops kept` |
+| D1g: the admin subset reversed (the new admins among the accepted ones) | `kept_principals_then_admin_removed_keeps_none` | **killed** | `policy 3: ... [role:evil]` (policy 3's {bob} is a subset of policy 2's {alice, bob}) |
+| D2a: the partial restore (BundleHeld and BundleChanged restored, not v.Bundle and v.Policy) | each of the four M-2 cases, separately | **killed by each** | `current's user_ca_keys is not bundle 2's` |
+| D2b: T2b, the bundle signatures added to the union | `bundle_sigs_never_united` | **killed** | `apply: <nil>, want bundle_not_verified, policy (new roots) signed by 0 of 1` |
+| D2c: the supersede step's bundle_held assignment dropped | `widening_directory_with_rotation_supersedes_into_bundle_2` | **killed** | `the report says a bundle is held while bundle 2 is in force` and the status.json line |
+
+All 10 mutants were killed, in 13 runs on a77151a. D1a to D1e and D2a to D2c were also killed on ad103cb, with D1c and D1e then aimed at 255b285's equality rule. Each was restored byte for byte, and `git diff --quiet -- internal/` passed after each. No kill is a build failure. The loop's output is in the session scratch files `mutants.txt` (ad103cb), `mutants2.txt` and `mutants3.txt` (a77151a).
+
+### Test time (internal/agent/apply under -race)
+
+| Point | Alone (limit 400 s) | Under `./...` (limit 480 s) |
+|---|---|---|
+| Task 4 gates, 561542d | 275.251 s | 335.171 s |
+| Fix round 1, 9342e14 (before a77151a) | 304.566 s | 398.781 s |
+| Fix round 1, a77151a (the final code) | 353.028 s | 318.387 s |
+
+No figure is above its limit. The two fix-round runs differ by about 50 s each way on near-identical code, which is the machine-load variance noted above. The final full gate on a77151a passed in full: go test -race ./..., go vet (with the e2e tags), gofmt (it printed its path, then GOFMT_OK), golangci-lint (0 issues), capslock (92, 37 and 23 pairs, each equal to its baseline), dep-firewall, testonly-firewall and check-pinned-actions.
+
+### Deviations (fix round 1)
+
+1. **D-1's check reads accepted/, not a Verified flag set by verifyDirectory.** The owner suggested recording in Verified that the chain base's directory was unauthorized and skipping the keep when it is set. Two paths make the chain base differ from the state last-good was committed with, and a flag on the chain base misses both:
+   - the unapplied record (VerifyAhead);
+   - a widening wait's poll (VerifyAfter, VerifyAheadAfter).
+
+   `record_path_rotated_host_keys_keeps_no_principals` and `widening_wait_supersede_keeps_no_principals` show both, RED on dac2244. The check is therefore anchored on accepted/ in engine.render, the one place every render passes through: forward's and pollSpool's candidate. In the plain Verify path the chain base is accepted/, so the two rules agree there. The owner's rule is the one applied: last-good's principals are never kept when the target policy does not authorize their source.
+2. **D-1 also covers the F08 keep and the chained keep (owner question, not blocking).** Both were RED on dac2244, and the cover is fail-closed. It narrows one shape the owner's constraint ("a host whose directory stays authorized keeps today's fallback behaviour") might be read to protect: a host whose kept principals predate its accepted directory (record status host_keys_rotated or host_keys_disagree), or a host after reset-directory. Such a host now drops its kept principals on a policy change that does either of these, even when its accepted directory stays authorized:
+   - removes an admin of the accepted policy;
+   - changes the admin quorum or the CA profiles.
+
+   Those are the changes under which the source of those principals cannot be shown to be authorized. A rotation that keeps or only adds admins keeps them (`kept_principals_across_rotations_keeping_or_adding_admins_stay`). The common case keeps today's behaviour: there the principals were rendered from the authorized accepted directory (`authorized_directory_across_rotation_keeps_principals`). No existing test flipped. The owner may prefer the old behaviour for the chained case; that would reopen the `kept_principals_then_admin_removed_keeps_none` shape.
+3. **D-2 (c): the guard at the supersede step, and the KRL-alone refresh left unchanged.** See D-2 above.
+4. **D-1's log line.** The fallback's warning used to say "kept as last-good's" from the host status alone. It now says "emptied" when the check dropped them, and a separate WARNING names the reason.
+
+### UNVERIFIED (fix round 1)
+
+- **The supersede guard's false side.** When a KRL-alone poll supersedes, the earlier bundle_held stays. No test builds a held pending target superseded by a KRL-alone poll.
+- **PrincipalsUnder's fail-closed edges in render.** No test exercises an unreadable last-good record (treated as kept principals) or a nil accepted/.
+- **coversAuthority for a quorum-only or CA-profile-only change.** The cases remove or add an admin, or keep all three. A change of only the quorum or only the profiles is reasoned from the code.
+- **The D-1 log lines.** No test reads them.
+- The converted refusals still not pinned stay on Run B's list: directory_not_verified for a parse or CheckPolicy cause.
+- **The homelab.** As before, Phase 3 runs no admin-set change of enrolled hosts.
+
 ## Self-Check: PASSED
 
 - The files exist: internal/agent/apply/policy_change_test.go, the plan, this SUMMARY and the four runbooks.
 - The nine branch commits before this one are ancestors of HEAD: dff4921, 605a99a, b55c264, 06820de, 941d459, 3878169, 47fd8ec, 4a1e5a5 and 561542d.
 - Both of Task 4's publish checks exit 0 after the tracking updates.
+- Fix round 1: internal/agent/apply/lastgood_test.go exists, and its commits 255b285, ad103cb, 9342e14 and a77151a are ancestors of HEAD (`git merge-base --is-ancestor`).
 - Task 5, the owner's merge gate, is open. Daniel reviews, approves and squash-merges PR #82. After his "merged", Claude runs merge-gate.sh in its plain form from the main checkout, then `--check`.
