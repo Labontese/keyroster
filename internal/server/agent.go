@@ -46,6 +46,12 @@ const (
 	// review F1/F2).
 	agentAnonPerMinute = 30
 	agentAnonBurst     = 10
+	// maxAgentInFlight is the most requests one enrolled agent has in
+	// flight, counted together on every agent route that relays a signer
+	// call for it (agentSlot), F11 (03-08g). The fetcher sends its state
+	// rounds and its heartbeat one after another, so the second slot only
+	// absorbs a handler that outlives a client timeout.
+	maxAgentInFlight = 2
 )
 
 // newAgentLimiters returns the two limiter classes of the agent routes
@@ -106,6 +112,38 @@ func (s *Server) agentAllow(w http.ResponseWriter, r *http.Request, l *limiter, 
 	w.Header().Set("Retry-After", strconv.Itoa(l.retryAfter()))
 	s.writeJSON(w, nil, http.StatusTooManyRequests, serverclient.APIError{Error: "rate limited"})
 	return false
+}
+
+// agentSlot takes one of the maxAgentInFlight in-flight slots of the agent
+// requireAgent admitted, F11 (03-08g). One count, keyed on the agents row
+// ID as the token bucket is, covers every agent route that relays a signer
+// call for the agent (the state and heartbeat routes), so one agent never
+// has more than maxAgentInFlight of them in flight whatever the route. A
+// route takes it right after requireAgent, which has charged the token
+// bucket, so every refusal here was rate-limited first. A refused request
+// gets 429 with Retry-After 1 and the body agentAllow writes, which the
+// fetcher reads as rate limited and continues at its next poll; the log
+// names the route and the agent. release frees the slot, and deletes the
+// key at zero.
+func (s *Server) agentSlot(w http.ResponseWriter, r *http.Request, ar *agentRequest) (release func(), ok bool) {
+	id := ar.agent.ID
+	s.inFlightMu.Lock()
+	if s.agentInFlight[id] >= maxAgentInFlight {
+		s.inFlightMu.Unlock()
+		s.log.Warn("agent requests in flight", "route", r.Pattern, "expected_name", ar.agent.ExpectedName, "agent_row", id)
+		w.Header().Set("Retry-After", "1")
+		s.writeJSON(w, nil, http.StatusTooManyRequests, serverclient.APIError{Error: "rate limited"})
+		return nil, false
+	}
+	s.agentInFlight[id]++
+	s.inFlightMu.Unlock()
+	return func() {
+		s.inFlightMu.Lock()
+		defer s.inFlightMu.Unlock()
+		if s.agentInFlight[id]--; s.agentInFlight[id] <= 0 {
+			delete(s.agentInFlight, id)
+		}
+	}, true
 }
 
 // agentFingerprint is the identity as keyroster-agent identity and
@@ -484,8 +522,15 @@ func parseVersions(r *http.Request) (serverclient.AgentVersions, bool) {
 // (currentStatus, currentDirectory and currentKRL, which keeps every KRL
 // in krl-served.json before any route serves it, 03-06b). With no
 // versions it is the current state only. The answer is filled within
-// s.agentStateBudget (fillAgentState).
+// s.agentStateBudget (fillAgentState). It relays signer calls for the
+// agent (GetBundle, GetDirectoryVersion), so it takes the agent's in-flight
+// slot first (agentSlot, F11 (03-08g)).
 func (s *Server) handleAgentState(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
+	release, ok := s.agentSlot(w, r, ar)
+	if !ok {
+		return
+	}
+	defer release()
 	ctx := r.Context()
 	since, ok := parseVersions(r)
 	if !ok {
@@ -744,7 +789,16 @@ func encodeAgentState(bundles, dirs [][]byte, k []byte, more bool) []byte {
 // A stored heartbeat logs nothing (one row per agent, gemma REVIEWS L1123),
 // unless it confirms the agent's removal (confirmRemoval, 03-08b), which
 // is recorded on the agents row and logged once.
+//
+// confirmRemoval relays GetDirectoryVersion for the agent, so the route
+// takes the agent's in-flight slot first, counted together with the state
+// route's (agentSlot, F11 (03-08g)).
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
+	release, ok := s.agentSlot(w, r, ar)
+	if !ok {
+		return
+	}
+	defer release()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, heartbeat.MaxBody))
 	if err != nil {
 		s.writeJSON(w, ar.status, http.StatusRequestEntityTooLarge, serverclient.APIError{Error: "heartbeat too large"})

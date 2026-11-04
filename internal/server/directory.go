@@ -85,6 +85,49 @@ type directoryView struct {
 type dirMirror struct {
 	mu    sync.Mutex // never held across a signer call or with Server.mu
 	entry *directoryView
+	// pending holds the GetDirectory fetches in flight, one per SHA-256 and
+	// version, each removed when it ends, so it is bounded by the keys in
+	// flight, F12 (03-08g). A caller with another Status never replaces
+	// another key's fetch.
+	pending map[dirKey]*dirFetch
+}
+
+// dirKey is the SHA-256 and version of a directory, as a Status reports
+// them.
+type dirKey struct {
+	sha256  [32]byte
+	version uint64
+}
+
+// statusKey returns the directory key of the Status the server holds now,
+// and false when it holds none. It takes Server.mu, so it is never called
+// with the mirror lock held.
+func (s *Server) statusKey() (dirKey, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status == nil {
+		return dirKey{}, false
+	}
+	return dirKey{s.status.raw.DirectorySHA256, s.status.raw.DirectoryVersion}, true
+}
+
+// obsolete reports whether k is not the directory key of the Status the
+// server holds now. With no Status held, nothing is known to be newer, so
+// k is not obsolete.
+func (s *Server) obsolete(k dirKey) bool {
+	cur, ok := s.statusKey()
+	return ok && cur != k
+}
+
+// dirFetch is one GetDirectory fetch in flight for the SHA-256 and version
+// a Status reported, F12 (03-08g). done closes when it has ended; v and err
+// are its result, set before done closes.
+type dirFetch struct {
+	sha256  [32]byte
+	version uint64
+	done    chan struct{}
+	v       *directoryView
+	err     error
 }
 
 // currentDirectory is the one way a handler reads the installed
@@ -95,13 +138,27 @@ type dirMirror struct {
 //     call;
 //   - a Status whose directory SHA-256 equals the held entry's gives the
 //     held entry;
-//   - otherwise the held entry is dropped first, and GetDirectory is
-//     asked. A failure, or bytes whose SHA-256 (or version) is not what
-//     Status reported, is errMirrorStale with nothing held, never the
-//     previous version. A mismatch also drops the status cache, since that
-//     Status is then known to be out of date, so the next request reads
-//     Status afresh. An install that landed between the Status read and
-//     the fetch therefore fails that one request closed.
+//   - otherwise the held entry is dropped first (unless this caller's
+//     Status is older than the one the server holds now), and GetDirectory
+//     is asked (fetchDirectory). A failure, or bytes whose SHA-256 (or
+//     version) is not what Status reported, is errMirrorStale with nothing
+//     held, never the previous version. A mismatch also drops the status
+//     cache, since that Status is then known to be out of date, so the
+//     next request reads Status afresh. An install that landed between the
+//     Status read and the fetch therefore fails that one request closed.
+//
+// F12 (03-08g): the fetch is coalesced as currentStatus's refresh is. One
+// fetch asks the signer for the SHA-256 and version Status reported, and
+// every caller that arrives for the same SHA-256 and version while it is
+// in flight waits for it and takes its result, a failure included; none
+// starts a second signer call. The fetch is detached from every request,
+// so a caller whose ctx ends stops waiting and the others still get the
+// result; a caller whose ctx has already ended starts no fetch. A failed
+// fetch is never cached. Fetches for different SHA-256s and versions are
+// pending side by side, so a late caller with an older Status never
+// replaces another key's pending fetch; and an obsolete fetch, one whose
+// SHA-256 and version are not those of the Status the server holds when
+// it ends, never becomes the entry (pre-merge review fix round 1).
 //
 // The install handler does not write the mirror. It drops the status
 // cache after every install (dropStatus), and the mirror follows the
@@ -113,36 +170,89 @@ func (s *Server) currentDirectory(ctx context.Context) (*directoryView, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.directoryUnder(ctx, v)
+}
+
+// directoryUnder is currentDirectory for the Status v its caller read.
+func (s *Server) directoryUnder(ctx context.Context, v *statusView) (*directoryView, error) {
 	if v.raw.DirectoryVersion == 0 {
 		return &directoryView{status: v, users: map[string]bool{}, creds: map[string][][]byte{}, credIDs: map[string]bool{}}, nil
 	}
+	k := dirKey{v.raw.DirectorySHA256, v.raw.DirectoryVersion}
+	// Read before the mirror lock: the two locks are never held together.
+	stale := s.obsolete(k)
 	s.mirror.mu.Lock()
 	e := s.mirror.entry
-	if e != nil && e.sha256 == v.raw.DirectorySHA256 && e.version == v.raw.DirectoryVersion {
+	if e != nil && e.sha256 == k.sha256 && e.version == k.version {
 		s.mirror.mu.Unlock()
 		return e.under(v), nil
 	}
-	s.mirror.entry = nil
+	f := s.mirror.pending[k]
+	if f == nil {
+		if err := ctx.Err(); err != nil {
+			s.mirror.mu.Unlock()
+			return nil, err
+		}
+		if !stale {
+			s.mirror.entry = nil
+		}
+		f = &dirFetch{sha256: k.sha256, version: k.version, done: make(chan struct{})}
+		if s.mirror.pending == nil {
+			s.mirror.pending = map[dirKey]*dirFetch{}
+		}
+		s.mirror.pending[k] = f
+		// Detached: a fetch shared by every waiting caller must not end
+		// with this caller's request.
+		go s.fetchDirectory(context.WithoutCancel(ctx), f)
+	}
 	s.mirror.mu.Unlock()
+	select {
+	case <-f.done:
+		if f.err != nil {
+			return nil, f.err
+		}
+		return f.v.under(v), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
-	cctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
-	defer cancel()
-	resp, err := s.signer.GetDirectory(cctx)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errMirrorStale, err)
-	}
-	if resp.Version != v.raw.DirectoryVersion || sha256.Sum256(resp.Directory) != v.raw.DirectorySHA256 {
-		s.dropStatus()
-		return nil, fmt.Errorf("%w: status reports version %d, the signer served version %d with another SHA-256", errMirrorStale, v.raw.DirectoryVersion, resp.Version)
-	}
-	fresh, err := newDirectoryView(resp)
-	if err != nil {
-		return nil, err
-	}
+// fetchDirectory asks the signer for its directory for f, bounded by
+// signerCallTimeout and through the budget like every signer call; ctx
+// must carry no cancellation. A failure is errMirrorStale; bytes of
+// another version or SHA-256 than f's are errMirrorStale too, and drop the
+// status cache (with no lock held). It removes f from the pending fetches,
+// stores a parsed answer as the entry only when f is not obsolete (its
+// SHA-256 and version are those of the Status the server holds now, or it
+// holds none), and hands the result to every caller waiting on f. A
+// failure is never stored. F12 (03-08g).
+func (s *Server) fetchDirectory(ctx context.Context, f *dirFetch) {
+	v, err := func() (*directoryView, error) {
+		cctx, cancel := context.WithTimeout(ctx, signerCallTimeout)
+		defer cancel()
+		resp, err := s.signer.GetDirectory(cctx)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", errMirrorStale, err)
+		}
+		if resp.Version != f.version || sha256.Sum256(resp.Directory) != f.sha256 {
+			s.dropStatus()
+			return nil, fmt.Errorf("%w: status reports version %d, the signer served version %d with another SHA-256", errMirrorStale, f.version, resp.Version)
+		}
+		return newDirectoryView(resp)
+	}()
+	k := dirKey{f.sha256, f.version}
+	// Read before the mirror lock: the two locks are never held together.
+	stale := err == nil && s.obsolete(k)
 	s.mirror.mu.Lock()
-	s.mirror.entry = fresh
+	if s.mirror.pending[k] == f {
+		delete(s.mirror.pending, k)
+	}
+	if err == nil && !stale {
+		s.mirror.entry = v
+	}
+	f.v, f.err = v, err
 	s.mirror.mu.Unlock()
-	return fresh.under(v), nil
+	close(f.done)
 }
 
 // under returns a copy of e checked against the Status v: the lookups are

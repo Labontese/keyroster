@@ -96,6 +96,13 @@ type Server struct {
 	krlFile string
 	served  *servedKRL
 
+	// agentInFlight counts each enrolled agent's requests in flight on the
+	// agent routes that relay a signer call (agentSlot), by agents row ID,
+	// F11 (03-08g). inFlightMu guards only agentInFlight; it is never held
+	// with mu or across a signer call.
+	inFlightMu    sync.Mutex
+	agentInFlight map[int64]int
+
 	// patterns are the patterns registered on the Server's mux, in
 	// registration order, as its routeMux recorded them (03-02). Tests
 	// read them; nothing else does.
@@ -157,7 +164,9 @@ func New(cfg Config) (*Server, error) {
 	return newServer(cfg, socketSigner{socket: cfg.SignerSocket})
 }
 
-// newServer builds a Server on sg; tests pass fakeSigner.
+// newServer builds a Server on sg; tests pass fakeSigner. Every signer
+// goes behind the server's signer-call budget (withSignerBudget, F11
+// (03-08g)), the test double included.
 func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	if cfg.RPID == "" {
 		return nil, errors.New("server: no RP ID")
@@ -175,7 +184,7 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	}
 	lim := cfg.Limits.withDefaults()
 	s := &Server{
-		signer: sg, rpID: cfg.RPID, clock: cfg.Clock, log: cfg.Logger, db: cfg.DB, pages: pages, static: static,
+		signer: withSignerBudget(sg), rpID: cfg.RPID, clock: cfg.Clock, log: cfg.Logger, db: cfg.DB, pages: pages, static: static,
 		adminLimit:  newLimiter(lim.AdminPerMinute, lim.AdminBurst, 0, 0), // per client only (Limits)
 		inviteLimit: newLimiter(lim.InvitePerMinute, lim.InviteBurst, globalFactor*lim.InvitePerMinute, globalFactor*lim.InviteBurst),
 		// Sign-in is its own route class (02-10): per client with the
@@ -194,6 +203,7 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 		// review F1/F2, newAgentLimiters).
 		agentPort:        cfg.AgentPort,
 		agentStateBudget: serverclient.MaxAgentStateResponse,
+		agentInFlight:    map[int64]int{},
 	}
 	s.agentLimit, s.agentAnonLimit = newAgentLimiters()
 	if s.clock == nil {

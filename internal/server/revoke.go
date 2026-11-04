@@ -264,6 +264,11 @@ func (s *Server) dropKRL() {
 // copy loadServedKRL read at start until servedFloor has verified it
 // against the signer's trust bundle; a document keepKRL kept was verified
 // before it was kept.
+//
+// durable, F13 (03-08g), is set when the copy was renamed into place and
+// its directory synced in one keepKRLFile; the copy loadServedKRL read at
+// start is not durable. Only a durable copy lets keepKRL skip the write of
+// an equal answer.
 type servedKRL struct {
 	version  uint64
 	doc      []byte
@@ -271,13 +276,15 @@ type servedKRL struct {
 	manifest []byte
 	sig      []byte
 	verified bool
+	durable  bool
 }
 
 // loadServedKRL reads the durable copy at path at start: nil when there is
 // none yet, an error when it does not parse (strict KRLDocument JSON, then
 // krl.ParseManifest of its manifest), which stops keyroster-server. The
 // copy it returns is not verified yet: its version becomes the floor only
-// once servedFloor has verified it (PR #69 review, F3).
+// once servedFloor has verified it (PR #69 review, F3), and it is not
+// durable: every start rewrites it once before it is served.
 func loadServedKRL(path string) (*servedKRL, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: the operator's state directory
 	if errors.Is(err, fs.ErrNotExist) {
@@ -302,6 +309,11 @@ func loadServedKRL(path string) (*servedKRL, error) {
 	if err != nil {
 		return nil, refuse(err)
 	}
+	// Not durable yet (F13 (03-08g)): reading the copy back proves only that
+	// the page cache holds it. After a restart that followed a failed sync,
+	// its rename may never have reached the disk, and a sync now could still
+	// report success. So the first refresh writes it again in full before it
+	// is served. The floor follows the copy all the same.
 	return &servedKRL{version: m.KRLVersion, doc: enc, krl: doc.KRL, manifest: doc.Manifest, sig: doc.Sig}, nil
 }
 
@@ -377,10 +389,19 @@ func (s *Server) checkNoKRL(ctx context.Context) error {
 // the trust bundle of the signer's status and that bundle's installation
 // ID; then a version above the one this server served (or the first) is
 // written to the durable copy, exactly the KRLDocument JSON handleKRL
-// serves (keepKRLFile), and the same version with the same bytes writes
-// nothing. A lower version, or the same version with other bytes, is
-// refused: hosts keep their last KRL instead (D-10), and the log says why.
-// The copy is never replaced by a lower or equal version.
+// serves (keepKRLFile). A lower version, or the same version with other
+// bytes, is refused: hosts keep their last KRL instead (D-10), and the log
+// says why. The copy is never replaced by a lower version, or by the same
+// version with other bytes.
+//
+// F13 (03-08g): a version is served only once its copy is durable, renamed
+// into place and its directory synced in one successful keepKRLFile. The
+// same version with the same bytes writes nothing only when the copy is
+// durable; otherwise it is written again in full, and the route answers
+// 503 until a write succeeds. So the copy read at start is written again
+// once, at the first refresh, and a failed directory sync is followed by a
+// full rewrite rather than another sync: after a failed fsync, a later one
+// can report success without the data having reached the disk.
 func (s *Server) keepKRL(ctx context.Context, resp *wire.GetKRLResponse) error {
 	b, err := s.signerBundle(ctx, "KRL not served: it does not verify")
 	if err != nil {
@@ -399,23 +420,28 @@ func (s *Server) keepKRL(ctx context.Context, resp *wire.GetKRLResponse) error {
 		return err
 	}
 	if prev != nil {
+		same := m.KRLVersion == prev.version && bytes.Equal(doc, prev.doc)
 		switch {
-		case m.KRLVersion == prev.version && bytes.Equal(doc, prev.doc):
+		case same && prev.durable:
 			return nil
 		case m.KRLVersion < prev.version:
 			return fmt.Errorf("KRL not served: version %d is below version %d this server served (a signer restored without the recovery? signer-install.md)",
 				m.KRLVersion, prev.version)
-		case m.KRLVersion == prev.version:
+		case m.KRLVersion == prev.version && !same:
 			return fmt.Errorf("KRL not served: version %d has other bytes than the version %d this server served", m.KRLVersion, prev.version)
 		}
+		// The same version with the same bytes, not durable yet: written
+		// again in full below (F13 (03-08g)).
 	}
 	renamed, err := keepKRLFile(s.krlFile, append(doc, '\n'))
 	if renamed {
 		// The copy on disk is this version from the rename on, even when
 		// the directory sync after it failed: the floor follows the disk,
-		// so a lower version can never replace it (PR #69 review, F4).
+		// so a lower version can never replace it (PR #69 review, F4). It
+		// is durable, and so served, only when the sync succeeded too
+		// (F13 (03-08g)).
 		s.mu.Lock()
-		s.served = &servedKRL{version: m.KRLVersion, doc: doc, krl: resp.KRL, manifest: resp.Manifest, sig: resp.Sig, verified: true}
+		s.served = &servedKRL{version: m.KRLVersion, doc: doc, krl: resp.KRL, manifest: resp.Manifest, sig: resp.Sig, verified: true, durable: err == nil}
 		s.mu.Unlock()
 	}
 	if err != nil {
