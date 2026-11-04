@@ -199,6 +199,56 @@ func TestMoveByName(t *testing.T) {
 	})
 }
 
+// TestMoveGroupsAndKeys (R-3, pre-merge review of PR #84): a move's union
+// is installed's from group with the offered to group, each as its own
+// version defines it, and every key of both entries counts. h1 moves from
+// lab (3000 accounts) to web unless a case says otherwise.
+func TestMoveGroupsAndKeys(t *testing.T) {
+	lab := moveNames("u", 0, 3000)
+	above := MaxAccounts - 3000 + 1 // web's size that puts the move above MaxAccounts
+	refusedMove := func(t *testing.T, d, installed *Directory, want string) {
+		t.Helper()
+		err := CheckRenderable(d, installed)
+		if !errors.Is(err, ErrUnrenderable) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("CheckRenderable = %v, want ErrUnrenderable with %q", err, want)
+		}
+	}
+	t.Run("target_grown_in_offered_refused", func(t *testing.T) {
+		// web maps 500 accounts in installed (the move would fit) and
+		// 1097 in the offered version, which the agent renders.
+		installed := moveOne(1, []HostGroup{moveGroup("lab", lab), moveGroup("web", moveNames("w", 0, 500))}, "lab", "k1")
+		offered := moveOne(2, []HostGroup{moveGroup("lab", lab), moveGroup("web", moveNames("w", 0, above))}, "web", "k1")
+		refusedMove(t, offered, installed, "host h1 moves from host group lab to web, 4097 accounts")
+	})
+	t.Run("source_shrunk_in_offered_refused", func(t *testing.T) {
+		// The offered lab keeps 2000 of its accounts (the move would fit),
+		// but the agent leaves installed's lab, all 3000 of them.
+		installed := moveOne(1, []HostGroup{moveGroup("lab", lab), moveGroup("web", moveNames("w", 0, 2000))}, "lab", "k1")
+		offered := moveOne(2, []HostGroup{moveGroup("lab", lab[:2000]), moveGroup("web", moveNames("w", 0, 2000))}, "web", "k1")
+		refusedMove(t, offered, installed, "host h1 moves from host group lab to web, 5000 accounts")
+	})
+	groups := func() []HostGroup {
+		return []HostGroup{moveGroup("db", moveNames("d", 0, 10)), moveGroup("lab", lab), moveGroup("web", moveNames("w", 0, above))}
+	}
+	t.Run("shared_key_last_of_four_refused", func(t *testing.T) {
+		// Renamed (so its name finds nothing) and three keys replaced: the
+		// one key both versions list sorts last in both.
+		installed := moveOne(1, groups(), "lab", "k1a", "k1b", "k1c", "k9")
+		offered := moveDir(2, groups(), []Host{{Name: "h2", HostGroup: "web", Keys: []string{"k2a", "k2b", "k2c", "k9"}, Principals: []string{"h2"}, Status: StatusActive}})
+		refusedMove(t, offered, installed, "host h2 moves from host group lab to web, 4097 accounts")
+	})
+	t.Run("second_matching_host_refused", func(t *testing.T) {
+		// h3's first key was x's, in db (the move fits), its second y's,
+		// in lab.
+		installed := moveDir(1, groups(), []Host{
+			{Name: "x", HostGroup: "db", Keys: []string{"ka"}, Principals: []string{"x"}, Status: StatusActive},
+			{Name: "y", HostGroup: "lab", Keys: []string{"kb"}, Principals: []string{"y"}, Status: StatusActive},
+		})
+		offered := moveDir(2, groups(), []Host{{Name: "h3", HostGroup: "web", Keys: []string{"ka", "kb"}, Principals: []string{"h3"}, Status: StatusActive}})
+		refusedMove(t, offered, installed, "host h3 moves from host group lab to web, 4097 accounts")
+	})
+}
+
 // movePair is an installed directory and an offered version for the
 // equivalence check: host groups a to d of sizes around the share and the
 // cap, drawn as runs of one pool of account names so that groups overlap

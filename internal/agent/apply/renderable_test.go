@@ -316,11 +316,9 @@ func TestRenderable(t *testing.T) {
 		roles := sized(t, "p", "web", "root", directory.MaxPrincipalsFile+1)
 		d := rdir(2, roles, rgroup("lab", lab), rgroup("web", []string{"root"}, roleNames(roles)...))
 		d.HostGroups[1].Accounts = append(d.HostGroups[1].Accounts, directory.AccountMap{Account: "zz", Roles: []string{"ops"}})
-		err := directory.CheckRenderable(d, inst)
-		wantUnrenderable(t, err, "web", "root")
-		if errors.Is(err, directory.ErrUnknownHostGroup) {
-			t.Fatalf("CheckRenderable = %v, want no installed-side ErrUnknownHostGroup", err)
-		}
+		// The refusal is web/root's file: installed has no web, so there is
+		// no exception to look up (R-3, pre-merge review of PR #84).
+		wantUnrenderable(t, directory.CheckRenderable(d, inst), "host group web account root", fmt.Sprintf("principals file of %d bytes, above %d", directory.MaxPrincipalsFile+1, directory.MaxPrincipalsFile))
 	})
 	// fileAbove is installed version v whose lab maps the 3000 accounts
 	// and root, root's file size bytes at the widest version.
