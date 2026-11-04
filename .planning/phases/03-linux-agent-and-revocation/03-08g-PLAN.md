@@ -39,7 +39,7 @@ must_haves:
     - "F11. keyroster-server never has more than maxSignerCalls (12, Q-G1) signer calls in flight. At most half of them (maxAgentCalls, 6) are calls relayed for host agents, today the catch-up reads GetBundle and GetDirectoryVersion. Such a call takes its agent token before its total token, so logins, revocations, directory installs, forgets and the coalesced Status and directory reads always have at least 6 calls of room. No caller holds a token across another signer call. GetKRL takes no token (Q-G5): it takes no lock on the signer and is coalesced to one call in flight (refreshKRL), so it never waits behind budgeted calls, and the server holds at most 13 signer calls at once. Historical versions are not cached (Q-G4)"
     - "F11, per agent. One enrolled agent has at most maxAgentInFlight (2, Q-G1) requests in flight, counted together on every agent route that relays a signer call for it: the state route and the heartbeat route (confirmRemoval's GetDirectoryVersion). A further request is answered 429 with `Retry-After: 1` and the body `rate limited`, after the token bucket has charged it. The growth rule (owner decision 2026-10-30): every signer call relayed for a host agent takes the agent share, and every agent route that relays one takes the per-agent slot"
     - "F12. While the directory mirror holds no entry for the SHA-256 and version that Status reports, all concurrent callers of currentDirectory share one detached GetDirectory fetch for that SHA-256 and version, bounded by signerCallTimeout. Each waiter stops at the end of its own ctx. A failed fetch is never cached, a mismatch still drops the status cache, and a caller whose ctx has already ended starts no fetch"
-    - "F13. A KRL version is served (GET /api/v1/krl, krlItem) only after its copy in krl-served.json was written, renamed and directory-synced in one successful keepKRLFile, or was read back from disk at start. Until then every refresh redoes the full write and answers 503. The floor still follows the disk after a rename whose sync failed (PR #69 review F4)"
+    - "F13. A KRL version is served (GET /api/v1/krl, krlItem) only after its copy in krl-served.json was written, renamed and directory-synced in one successful keepKRLFile, or was read back at start and its file and directory synced then, once (pre-merge review fix round 1: a read-back alone proves only that the page cache holds it). Until then every refresh redoes the full write and answers 503. The floor still follows the disk after a rename whose sync failed (PR #69 review F4)"
   artifacts:
     - path: "internal/server/signer.go"
       provides: "the server's signer-call budget with its agent share"
@@ -165,7 +165,7 @@ None open.
 - *Tests that replace e.s.signer after newServer.* Two of them do: admin_test.go `cleanup_survives_client_hangup` and login_test.go's stallSigner. They test a client hang-up and a stalled Status, not capacity. They stay unbudgeted, and their files stay out of this plan.
 - *The server's start-up Status* (cmd/keyroster-server/serve.go) calls signerclient directly, outside the budget. That is fine: it runs, with retries, before the server serves any request, so nothing else is in flight.
 - *F12 copies currentStatus's coalescing.* A detached refresh on `context.WithoutCancel`, a done channel, and a result stored only while the fetch is still the one in flight.
-- *F13 needs a flag, not another syncDir call.* After a failed fsync, a second fsync can report success without the data having been written. So only a full rewrite, or a copy read back from disk at start, counts as durable.
+- *F13 needs a flag, not another syncDir call.* After a failed fsync, a second fsync can report success without the data having been written. So only a full rewrite, or a copy read back at start whose file and directory were synced then, counts as durable. (Pre-merge review fix round 1: the plan first counted a read-back alone, which proves only that the page cache holds the copy, so a restart after a failed directory sync served it. A sync at start that follows a failed sync in the previous process may itself report a false success; that stays UNVERIFIED.)
 
 ## Budget
 
@@ -254,12 +254,14 @@ Create branch `p03/08g-server-capacity` from origin/main. Place this plan file u
 **RED first.** Create internal/server/capacity_test.go with the three tests below. To make TestSignerBudget compile, first add to internal/server/signer.go the constants `maxSignerCalls` and `maxAgentCalls` and `func withSignerBudget(sg signerAPI) signerAPI` returning sg unchanged, so its subtests fail on the peaks. Run the tests on that code, with the same two -run patterns as the verify (go test splits -run at `/` before it reads `|`, so one combined pattern skips the subtests), and record every RED, and every GREEN at once with its reason, in the SUMMARY.
 
 `TestSignerBudget`, on withSignerBudget directly. Its double is `gateSigner`, a test type in capacity_test.go that embeds *fakeSigner. Every method waits on one shared gate, or for the end of its ctx, and records the calls in flight and the peak, both for all methods and for GetBundle plus GetDirectoryVersion. Each subtest waits until the expected count is reached, then settles about 100 ms and checks that the count did not grow.
-- `total_bounded`: 20 goroutines call Login. The peak is maxSignerCalls (12). After release, all 20 return nil.
+- `total_bounded`: 20 goroutines call Login. The peak is maxSignerCalls (12). After release, all 20 return nil. (Pre-merge review fix round 1: a table over every budgeted method, each alone; an interactive method peaks at 12, an agent method at the share, 6.)
 - `catch_up_bounded_interactive_room`:
   1. Start 20 goroutines of GetBundle and GetDirectoryVersion. Wait until 6 (maxAgentCalls) are in flight. Then wait out the settle time (about 100 ms) before step 2, so that the 14 queued calls have reached their token waits first. Only then is the swapped-order mutant killed: under it, those 14 hold total tokens before the interactive calls start (plan check 1).
   2. Start 20 goroutines of Login and Revoke.
   3. Assert: the interactive calls in flight reach maxSignerCalls − maxAgentCalls (6), the agent peak stays 6, and the total peak is 12.
   4. After release, all 40 return nil.
+
+  (Pre-merge review fix round 1: step 2 starts one interactive method at a time, in its own subtest: Login, Revoke, InstallDirectory, ForgetAgent, GetDirectory, Status. Each alone fills the room of 6, and the agent calls stay at 6.)
 - `waiter_ctx_ends`:
   - With the total full, a Status whose ctx ends while it waits returns that ctx's error and never reaches the double (its call count is unchanged).
   - A Status with an already-ended ctx neither waits nor reaches it.
@@ -421,12 +423,14 @@ Run the whole server package. Every existing agent and heartbeat test must keep 
         6. GET 4 of v200 calls syncDir no more: the shortcut is back once the copy is durable.
 
         RED: GET 2 answers 200, and syncDir is not called.
-      - `copy_read_at_start_is_durable`: write a copy of v5 with writeCopy, restart, and serve v5. The answer is 200 with no syncDir call and no write.
+      - `copy_read_at_start_is_durable`: write a copy of v5 with writeCopy, restart, and serve v5. The answer is 200 with no syncDir call and no write. (Pre-merge review fix round 1: the restart syncs the copy's file and directory once, so one syncDir call at start, then none and no write.)
+      - Pre-merge review fix round 1: `copy_read_at_start_not_synced` (the directory sync, or the file sync, fails at start: the first refresh rewrites in full, 503 while that write fails too, then 200) and `restart_after_dir_sync_failure` (serve v100; v200's directory sync fails, 503; restart with the sync still failing: still 503, the floor is v200, then 200 once a sync succeeds).
       - The existing `dir_sync_failure_advances_floor` and `equal_identical_no_write` stay green, with their meaning.
     - F12, in `TestDirectoryMirrorFill` (capacity_test.go, on newAgentEnv with one installed directory):
       - `concurrent_misses_one_fetch`: arm `fake.hold("GetDirectory")`, start 24 concurrent `e.s.currentDirectory` calls, and drain `entered` in a goroutine. Once one call has entered, wait a short settle time, then release. `fake.count("GetDirectory")` is 1, and every caller gets the same version and SHA-256. RED on Task 2's head: the count is 24 after release (the budget queues half of them; each still makes its own call).
       - `failure_not_cached`: GetDirectory fails once (setDirectory with an error). Every waiter of that fetch gets an error for which `errors.Is(err, errMirrorStale)` holds, as today's failure path wraps it. The next call fetches again and succeeds.
-      - `waiter_ctx_ends_fetch_continues`: the first caller's ctx is cancelled while the fetch is held. That caller returns ctx.Err(); a second waiter, and the mirror, still get the result after release.
+      - `waiter_ctx_ends_fetch_continues`: the first caller's ctx is cancelled while the fetch is held. That caller returns ctx.Err(); a second waiter, and the mirror, still get the result after release. (Pre-merge review fix round 1: exactly one GetDirectory call from the start of the subtest, so a late second waiter cannot hide a fetch run on the first caller's ctx.)
+      - Pre-merge review fix round 1: `competing_status_one_fetch_per_key`: callers of versions 1, 2, 1 (a late caller that read the version-1 Status) and 2 make one GetDirectory per version, and the version-2 fetch becomes the entry.
       - `ended_ctx_starts_no_fetch`: a caller whose ctx has already ended makes no GetDirectory call.
       - `new_sha_new_fetch`: a fetch for version 1 is held; version 2 is installed (installDir, which drops the status cache). A caller for version 2 starts its own fetch, and the version-1 result never becomes the entry for version 2.
       - `mismatch_drops_status`: the signer answers another SHA-256 than Status. Every waiter gets errMirrorStale, and Status is read again on the next call (the existing rule, now inside the fetch).
@@ -445,8 +449,8 @@ Write the tests in `<behavior>` first, before any code below. Run them on Task 2
 - for each GREEN at once, why.
 
 **F13 (revoke.go), `F13 (03-08g)`.**
-- Add `durable bool` to servedKRL. Its doc comment: set when the copy was renamed into place and its directory synced in one keepKRLFile, or read back from disk at start; only a durable copy lets keepKRL skip the write.
-- loadServedKRL sets `durable: true`. servedFloor's copy keeps it.
+- Add `durable bool` to servedKRL. Its doc comment: set when the copy was renamed into place and its directory synced in one keepKRLFile, or read back at start and its file and directory synced then; only a durable copy lets keepKRL skip the write.
+- loadServedKRL syncs the copy's file and directory once and sets `durable` only when both syncs succeed (pre-merge review fix round 1; first `durable: true`). servedFloor's copy keeps it.
 - In keepKRL:
   - the equal-version, equal-bytes case returns nil only when prev.durable is true;
   - otherwise it falls through to keepKRLFile, the full sequence (planner decision: a syncDir call alone is not enough);
@@ -472,6 +476,7 @@ Write the tests in `<behavior>` first, before any code below. Run them on Task 2
   - checks version and SHA-256 against f's, calling s.dropStatus() on a mismatch, with no lock held;
   - parses with newDirectoryView;
   - then, under the mirror lock, stores the entry only when the fetch succeeded and `s.mirror.inflight == f`, and clears inflight only when it is still f; it then closes done.
+  - Pre-merge review fix round 1: the single `inflight` pointer let a late caller with an older Status replace another key's pending fetch. dirMirror now holds `pending map[dirKey]*dirFetch`, one per SHA-256 and version, each removed when its fetch ends. A fetch becomes the entry only when its key is that of the Status the server holds when it ends (or it holds none), and a caller with an older Status leaves the entry alone.
   - A failure is never stored.
 - Keep dirMirror's lock rule (never held across a signer call, or together with Server.mu). Extend currentDirectory's doc comment with the coalescing, as currentStatus's says it.
 
@@ -486,7 +491,7 @@ Run the whole server package. Every existing directory, login, agent and KRL tes
     - The SUMMARY lists these mutants, each applied, run against its named test, and restored byte for byte:
       - the shortcut without `prev.durable` (killed by `dir_sync_failure_never_served`);
       - `durable: true` regardless of err (killed by the same test);
-      - loadServedKRL without `durable: true` (killed by `copy_read_at_start_is_durable`);
+      - loadServedKRL without `durable: true` (killed by `copy_read_at_start_is_durable`); since the pre-merge review fix round 1 also `durable: true` whatever the start sync gives, and the start sync skipped (killed by `copy_read_at_start_not_synced` and `restart_after_dir_sync_failure`);
       - each caller fetching for itself, with inflight never reused (killed by `concurrent_misses_one_fetch`);
       - the fetch run on the caller's ctx (killed by `waiter_ctx_ends_fetch_continues`);
       - a failed fetch stored (killed by `failure_not_cached`);
@@ -662,7 +667,7 @@ Then run the tracking updates once, commit `docs(03-08g): complete server-capaci
   - a sync that keeps failing gives a 503 at every refresh;
   - every error path releases its tokens;
 - concurrency: 24 concurrent mirror misses, 12 concurrent state requests from one agent, and 6 agents with 2 requests each;
-- persistence: the copy read at start counts as durable;
+- persistence: the copy read at start counts as durable once its file and directory synced at start;
 - the controls that must not change:
   - the server's own Status and GetKRL get in while agent calls are held;
   - two agents with 2 requests each are both admitted;
