@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -254,11 +255,59 @@ func slotsOf(e *logEnv, uid uint32) int {
 	return e.s.conns.perUID[uid]
 }
 
+// shareLoad has statusCallers goroutines, and one GetKRL caller when krl is
+// set, each make calls one after another for 2 s through the client
+// keyroster-server uses (signerclient.Client with AwaitClose), and
+// requires every call to succeed and no connection to be counted as
+// overloaded (F16 (03-08h)).
+func shareLoad(t *testing.T, statusCallers int, krl bool) {
+	t.Helper()
+	e := newLogEnv(t)
+	e.s.allowUIDs = []uint32{uint32(os.Getuid())} //nolint:gosec // G115: a uid fits uint32
+	sock, stop := serveShare(t, e)
+	c := signerclient.Client{Socket: sock, AwaitClose: true}
+	var calls, failed atomic.Int64
+	var firstErr atomic.Value
+	end := time.Now().Add(2 * time.Second)
+	var wg sync.WaitGroup
+	loop := func(call func(context.Context) error) {
+		defer wg.Done()
+		for time.Now().Before(end) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := call(ctx)
+			cancel()
+			calls.Add(1)
+			if err != nil {
+				failed.Add(1)
+				firstErr.CompareAndSwap(nil, err.Error())
+			}
+		}
+	}
+	for range statusCallers {
+		wg.Add(1)
+		go loop(func(ctx context.Context) error { _, err := c.Status(ctx); return err })
+	}
+	if krl {
+		wg.Add(1)
+		go loop(func(ctx context.Context) error { _, err := c.GetKRL(ctx); return err })
+	}
+	wg.Wait()
+	if err := stop(); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	n := overloadedCount(t, e)
+	t.Logf("%d calls, %d failed, %d overloaded connections counted", calls.Load(), failed.Load(), n)
+	if failed.Load() != 0 || n != 0 {
+		t.Fatalf("%d of %d calls failed (first: %v) and %d connections were counted overloaded; want none", failed.Load(), calls.Load(), firstErr.Load(), n)
+	}
+}
+
 // TestPeerShare (F16 (03-08h)): through the real accept loop, no account
 // (uid) holds more than its share of the signer's connections, another
 // account's full share leaves the test's own answered, the refused uid
-// reaches the operator log at a bounded rate, and a connection's slot is
-// released before the connection closes.
+// reaches the operator log at a bounded rate, a connection's slot is
+// released before the connection closes, and keyroster-server's own load,
+// at its budget and at the share, is never refused.
 func TestPeerShare(t *testing.T) {
 	own := uint32(os.Getuid()) //nolint:gosec // G115: a uid fits uint32
 	t.Run("own_share_full_next_closed", func(t *testing.T) {
@@ -344,6 +393,16 @@ func TestPeerShare(t *testing.T) {
 		if n := overloadedCount(t, e); n != extra {
 			t.Fatalf("refusal summaries count %d overloaded connections, want %d", n, extra)
 		}
+	})
+	t.Run("server_budget_within_share", func(t *testing.T) {
+		// The server's real maximum: its budget, plus its one GetKRL
+		// outside it (Q-G5).
+		shareLoad(t, wire.MaxServerSignerCalls, true)
+	})
+	t.Run("share_exact_never_refused", func(t *testing.T) {
+		// With the release ordering each caller has at most one connection
+		// counted at any time.
+		shareLoad(t, wire.MaxPeerConns, false)
 	})
 	t.Run("slot_released_before_close", func(t *testing.T) {
 		e := newLogEnv(t)

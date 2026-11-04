@@ -5,8 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1030,4 +1033,61 @@ func TestDirectoryMirrorFill(t *testing.T) {
 			t.Fatalf("the next call made %d Status calls with the clock still, want 1 (the mismatch dropped the status cache)", got)
 		}
 	})
+}
+
+// TestSocketSignerAwaitsClose (F16 (03-08h)): socketSigner's calls return
+// only after the signer has closed the connection, so budgetSigner frees a
+// token only once the signer has freed that connection's slot. Its test
+// signer answers a Login and holds the connection open.
+func TestSocketSignerAwaitsClose(t *testing.T) {
+	dir, err := os.MkdirTemp("", "krsw") // t.TempDir can exceed macOS's socket path limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	resp, err := (&wire.IssueResponse{Cert: []byte("cert"), Serial: 7, LeafIndex: 9}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered, release := make(chan time.Time, 1), make(chan struct{})
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, _, err := wire.ReadMessage(conn, wire.RequestCaps); err != nil {
+			return
+		}
+		_ = wire.WriteMessage(conn, wire.TypeIssueResponse, resp)
+		answered <- time.Now()
+		<-release
+	}()
+	type result struct {
+		resp *wire.IssueResponse
+		err  error
+	}
+	got := make(chan result, 1)
+	go func() {
+		r, err := socketSigner{socket: socket}.Login(context.Background(), &wire.LoginIssueRequest{SubjectKey: []byte{1}, Subject: "alice"})
+		got <- result{r, err}
+	}()
+	<-answered
+	select {
+	case r := <-got:
+		close(release)
+		t.Fatalf("Login returned (%+v, %v) while the signer held the connection open, want it to wait for the close", r.resp, r.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(release)
+	r := <-got
+	if r.err != nil || string(r.resp.Cert) != "cert" {
+		t.Fatalf("Login after the close = %+v, %v; want the signer's answer", r.resp, r.err)
+	}
 }
