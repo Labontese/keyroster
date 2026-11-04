@@ -427,10 +427,15 @@ The other three shapes after C-1 are 0.146 s, 0.151 s and 0.112 s.
 | # | Mutant | Result |
 |---|---|---|
 | C1-M1 | the target set rebuilt for every pair | **survived** the 2 s bound (1.53 s under -race) |
-| C1-M2 | no swap, the larger set always walked | **survived** the 2 s bound (1.22 s under -race) |
-| C1-M3 | the count started at the smaller set | killed by TestMoveUnion/per_group_pair and TestCheckRenderableMatchesReference (seed 5) |
+| C1-M2 | swap condition inverted (`<`), so the larger set is always walked | **survived** the 2 s bound (1.22 s under -race) |
+| C1-M2b | swap removed (render.go:453-455 deleted), so the target is always walked against the source | **survived** every test, the timed case included: 0.164 s under -race on the C-1 shape, measured by the fix-round re-check |
+| C1-M3 | the count started at the smaller set | killed by TestMoveUnion/per_group_pair, and by TestCheckRenderableMatchesReference at seed 14 at the head (seed 5 on the generator before C-2) |
 
-C1-M1 and C1-M2 are each one half of the fix taken away. Either half alone keeps this shape under 2 s, so a wall-clock bound cannot tell them apart from the fix. The test still bounds the original cost (3.23 s). They are recorded as survivors, not hidden.
+C1-M1 takes the target-set cache away. C1-M2 makes the walk go over the larger set. Both are slower on the C-1 shape but stay under 2 s, so the wall-clock bound does not kill them. The test still bounds the original cost (3.23 s).
+
+C1-M2b, the swap removed, is not slower on the C-1 shape at all. There the source groups are already the smaller sets, so the timed case cannot sense the swap. The swap matters only for the reverse shape: 3700 hosts moving out of big (4096) into 3700 one-account groups. No test exercises that shape. The fix-round re-check measured it at about 1.20 s under -race with the swap removed, against 0.17 to 0.22 s with it. That is still under the 2 s bound, and the walk direction does not show in the result, so no wall-clock or answer test can kill C1-M2b.
+
+All three survivors are recorded, not hidden.
 
 **C-2 (low): R-2's name match refused moves that do not happen.**
 - **Cases.** In both, installed lab has 3000 accounts (above the share) with x{k1}, and web has 1097 with y{k2}.
@@ -488,6 +493,7 @@ It took 1.86 s under -race and 0.156 s without. Owner decision (2026-11-04), fix
 - That the CLI's error names `directory_unrenderable`. This is reasoned from serverclient's error text; no test runs the CLI against the refusal.
 - The slow-signature pile-up with a real hardware touch (T-03-307 residual). It is reasoned, not tested.
 - A host renamed *and* rekeyed in the same version that also moves group. checkMoves matches by a shared host key or, since R-2 and C-2, by name for a host with a fresh key, and a renamed host has no installed counterpart of its new name, so it does not find that host; enroll-user.md states the limitation. The rekeyed-and-moved case (host_keys_rotated on its agent) is now tested (R-2). A host whose sshd keys match two entries of the offered version (host_keys_disagree on its agent) and that moves: each offered entry is checked against installed on its own, but no test sets that case up.
+- The reverse shape of C-1, one large group spread into many small ones, is untested. The swap in moveUnions.count exists for it, and the swap-removed mutant (C1-M2b) survives.
 
 ## Known Stubs
 
