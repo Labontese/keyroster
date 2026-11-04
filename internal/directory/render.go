@@ -3,14 +3,38 @@ package directory
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
+// Render caps, F07 (03-08h). They are the host agent's generation caps
+// (internal/agent/apply defines its caps as these constants), so the
+// signer, which refuses at install what would break them
+// (CheckRenderable), and the agent cannot drift apart.
+const (
+	// MaxPrincipalsFile is the most bytes one principals file may have as
+	// the host agent renders it. The agent refuses a generation with a
+	// larger file before anything is written, because it could not read
+	// the file back (generation_too_large).
+	MaxPrincipalsFile = 64 << 10
+	// MaxAccounts is the most principals files, one per account of the
+	// host's host group, that one generation of the host agent may hold.
+	MaxAccounts = 4096
+	// MaxHostGroupAccounts is the most accounts one host group may map at
+	// install (Q-G3): half of MaxAccounts, because an intermediate
+	// generation holds the union of two versions' accounts, so the move
+	// between any two accepted versions still fits MaxAccounts.
+	MaxHostGroupAccounts = MaxAccounts / 2
+)
+
 // Errors of the principals renderer.
 var (
+	// ErrUnrenderable is a directory whose principals files host agents
+	// could not render within their caps (CheckRenderable).
+	ErrUnrenderable = errors.New("directory: host agents cannot render it")
 	// ErrUnknownHostGroup is a host group the directory does not define,
 	// most likely a mistyped name.
 	ErrUnknownHostGroup = errors.New("directory: unknown host group")
@@ -108,12 +132,270 @@ func (r *PrincipalsRenderer) File(hostGroup, account string) ([]byte, error) {
 		r.sum = trust.SHA256Hex(canonical)
 	}
 	var b strings.Builder
-	b.WriteString("# keyroster: generated AuthorizedPrincipalsFile; do not edit\n")
-	fmt.Fprintf(&b, "# host group %s, account %s, directory version %d sha256 %s\n", hostGroup, account, r.d.Version, r.sum)
+	b.WriteString(principalsHeader(hostGroup, account, r.d.Version, r.sum))
 	for _, p := range principals {
 		b.WriteString(p + "\n")
 	}
 	return []byte(b.String()), nil
+}
+
+// principalsHeader is the two '#' header lines of the principals file of
+// account in hostGroup, for directory version and the hex SHA-256 sha of
+// its canonical bytes. File writes through it, and CheckRenderable sizes
+// files with it, so the two cannot drift (F07 (03-08h)).
+func principalsHeader(hostGroup, account string, version uint64, sha string) string {
+	return "# keyroster: generated AuthorizedPrincipalsFile; do not edit\n" +
+		fmt.Sprintf("# host group %s, account %s, directory version %d sha256 %s\n", hostGroup, account, version, sha)
+}
+
+// sizer sizes the principals files of one directory without rendering
+// them, F07 (03-08h): each file as RenderPrincipalsFile would write it
+// with the widest version, math.MaxUint64 (20 digits), so a file's size
+// does not change when the version gains a digit (Q-G7). It indexes the
+// roles by name and every distinct principal by number once, so sizing
+// an account costs one pass over its roles' principals, deduplicated by
+// number without sorting, and none over the host group (owner decision
+// (2026-11-04), execution stop at Task 1). It is not safe for concurrent
+// use.
+type sizer struct {
+	sha   string             // trust.SHA256Hex of the directory's canonical bytes
+	roles map[string][]int32 // role name to its principals' numbers
+	plen  []int              // principal number to its length
+	seen  []uint32           // principal number to the stamp of the last account counting it
+	stamp uint32
+}
+
+// newSizer indexes d, whose canonical bytes hash to sha.
+func newSizer(d *Directory, sha string) *sizer {
+	z := &sizer{sha: sha, roles: make(map[string][]int32, len(d.Roles))}
+	number := map[string]int32{}
+	for _, r := range d.Roles {
+		ids := make([]int32, 0, len(r.Principals))
+		for _, p := range r.Principals {
+			id, ok := number[p]
+			if !ok {
+				id = int32(len(z.plen)) //nolint:gosec // G115: a directory's principals number far below 2^31
+				number[p] = id
+				z.plen = append(z.plen, len(p))
+			}
+			ids = append(ids, id)
+		}
+		z.roles[r.Name] = ids
+	}
+	z.seen = make([]uint32, len(z.plen))
+	return z
+}
+
+// fileSize is the size of the principals file of account a in hostGroup:
+// the header principalsHeader writes at the widest version, then each
+// distinct principal of a's roles and its newline, exactly
+// len(RenderPrincipalsFile) at that version. A name outside the
+// directory's grammars, or an unknown role, is ErrInvalid, as
+// AccountPrincipals refuses them.
+func (z *sizer) fileSize(hostGroup string, a AccountMap) (int, error) {
+	if !ValidGroupName(hostGroup) {
+		return 0, fmt.Errorf("%w: host group name %q", ErrInvalid, hostGroup)
+	}
+	if !ValidAccountName(a.Account) {
+		return 0, fmt.Errorf("%w: account name %q", ErrInvalid, a.Account)
+	}
+	z.stamp++
+	if z.stamp == 0 { // wrapped: no stamp may match an older account's
+		clear(z.seen)
+		z.stamp = 1
+	}
+	n := len(principalsHeader(hostGroup, a.Account, math.MaxUint64, z.sha))
+	for _, rn := range a.Roles {
+		ids, ok := z.roles[rn]
+		if !ok {
+			return 0, fmt.Errorf("%w: host group %s account %s maps unknown role %s", ErrInvalid, hostGroup, a.Account, rn)
+		}
+		for _, id := range ids {
+			if z.seen[id] != z.stamp {
+				z.seen[id] = z.stamp
+				n += z.plen[id] + 1
+			}
+		}
+	}
+	return n, nil
+}
+
+// CheckRenderable refuses (ErrUnrenderable) a directory d that host agents
+// could not render within their generation caps, F07 (03-08h). installed
+// is the directory in force where d is offered, nil when none is
+// installed yet. It runs only when a directory is offered for install,
+// never on stored state: a directory installed before this rule stays in
+// force and renders as before.
+//
+// The bounds are the host agent's: every host group maps at most
+// MaxHostGroupAccounts accounts, half of MaxAccounts, so the intermediate
+// generation between two accepted versions, which holds the union of
+// their accounts, still fits; and every account's principals file is at
+// most MaxPrincipalsFile bytes. Files are sized as RenderPrincipalsFile
+// would write them at the widest version, 20 digits, so a file accepted
+// once stays within the cap at every later version. An intermediate
+// principals file is a subset of the target's lines under a header that
+// is not longer than any real header, so it fits too.
+//
+// The non-growth exception (Q-G7): nothing may grow beyond the installed
+// version. A host group above the account bound is accepted when installed
+// has a host group of that name and every one of the group's accounts is
+// in it (a subset, not a count); a principals file above the size bound
+// is accepted when the same host group's and account's file in installed,
+// sized the same way, is at least as large. A host group or account with
+// no installed counterpart always meets the bounds. Hosts at the installed
+// version therefore keep rendering, so disabling and removing users
+// always install; a host further behind can still meet an intermediate
+// above its caps, and relies on the agent's KRL-alone pass (03-08d).
+//
+// A host moved to another host group (owner decision (2026-11-04),
+// execution stop at Task 1): an active host of d that shares a host key
+// with an active host of installed in another host group would move, on
+// its agent, through an intermediate holding the principals files of both
+// groups' accounts, each a subset of its target file under a header that
+// is not longer. Such a move is refused when that union is above
+// MaxAccounts, or when a file of the new group is above MaxPrincipalsFile:
+// the host never rendered the new group, so no exception applies. With
+// both groups within MaxHostGroupAccounts the union always fits; the rule
+// bites only with an above-share installed group (Q-G7).
+func CheckRenderable(d, installed *Directory) error {
+	if d == nil {
+		return ErrNoDirectory
+	}
+	canonical, err := d.Canonical()
+	if err != nil {
+		return err
+	}
+	z := newSizer(d, trust.SHA256Hex(canonical))
+	var iz *sizer // installed's, made on first need
+	installedSizer := func() (*sizer, error) {
+		if iz == nil {
+			c, err := installed.Canonical()
+			if err != nil {
+				return nil, err
+			}
+			iz = newSizer(installed, trust.SHA256Hex(c))
+		}
+		return iz, nil
+	}
+	// aboveBound is, per host group of d, an account whose file is above
+	// MaxPrincipalsFile ("" for none), for the moved-host check.
+	aboveBound := make(map[string]string, len(d.HostGroups))
+	for _, h := range d.HostGroups {
+		// The installed counterpart is looked up first: a group or account
+		// it does not have gets no exception.
+		var was map[string]int // installed account name to its index
+		var old *HostGroup
+		if installed != nil {
+			if i := slices.IndexFunc(installed.HostGroups, func(x HostGroup) bool { return x.Name == h.Name }); i >= 0 {
+				old = &installed.HostGroups[i]
+				was = make(map[string]int, len(old.Accounts))
+				for j, a := range old.Accounts {
+					was[a.Account] = j
+				}
+			}
+		}
+		if n := len(h.Accounts); n > MaxHostGroupAccounts && !subset(h.Accounts, was) {
+			return fmt.Errorf("%w: host group %s maps %d accounts, above %d", ErrUnrenderable, h.Name, n, MaxHostGroupAccounts)
+		}
+		for _, a := range h.Accounts {
+			size, err := z.fileSize(h.Name, a)
+			if err != nil {
+				return fmt.Errorf("directory: host group %s account %s: %w", h.Name, a.Account, err)
+			}
+			if size <= MaxPrincipalsFile {
+				continue
+			}
+			if aboveBound[h.Name] == "" {
+				aboveBound[h.Name] = a.Account
+			}
+			if j, ok := was[a.Account]; ok {
+				iz, err := installedSizer()
+				if err != nil {
+					return err
+				}
+				before, err := iz.fileSize(h.Name, old.Accounts[j])
+				if err != nil {
+					return fmt.Errorf("directory: installed host group %s account %s: %w", h.Name, a.Account, err)
+				}
+				if size <= before {
+					continue
+				}
+			}
+			return fmt.Errorf("%w: host group %s account %s: principals file of %d bytes, above %d", ErrUnrenderable, h.Name, a.Account, size, MaxPrincipalsFile)
+		}
+	}
+	if installed == nil {
+		return nil
+	}
+	return checkMoves(d, installed, aboveBound)
+}
+
+// checkMoves refuses (ErrUnrenderable) a version d that moves a host from
+// its host group in installed to another host group whose move its agent
+// could not make within its caps (CheckRenderable). A host is the same
+// when an active entry of d and an active entry of installed share a host
+// key, as the agent finds its entry by its host keys; a disabled entry
+// renders no principals files on either side.
+func checkMoves(d, installed *Directory, aboveBound map[string]string) error {
+	byKey := map[string]*Host{}
+	for i := range installed.Hosts {
+		if o := &installed.Hosts[i]; o.Status == StatusActive {
+			for _, k := range o.Keys {
+				byKey[k] = o
+			}
+		}
+	}
+	for _, h := range d.Hosts {
+		if h.Status != StatusActive {
+			continue
+		}
+		for _, k := range h.Keys {
+			o, ok := byKey[k]
+			if !ok || o.HostGroup == h.HostGroup {
+				continue
+			}
+			if acc := aboveBound[h.HostGroup]; acc != "" {
+				return fmt.Errorf("%w: host %s moves from host group %s to %s, whose account %s has a principals file above %d bytes", ErrUnrenderable, h.Name, o.HostGroup, h.HostGroup, acc, MaxPrincipalsFile)
+			}
+			if n := unionAccounts(installed, o.HostGroup, d, h.HostGroup); n > MaxAccounts {
+				return fmt.Errorf("%w: host %s moves from host group %s to %s, %d accounts in the move, above %d", ErrUnrenderable, h.Name, o.HostGroup, h.HostGroup, n, MaxAccounts)
+			}
+		}
+	}
+	return nil
+}
+
+// unionAccounts is the number of distinct accounts of host group from in
+// installed and host group to in d: the principals files of the
+// intermediate generation a host moving between them holds.
+func unionAccounts(installed *Directory, from string, d *Directory, to string) int {
+	set := map[string]bool{}
+	for _, dg := range []struct {
+		d    *Directory
+		name string
+	}{{installed, from}, {d, to}} {
+		if i := slices.IndexFunc(dg.d.HostGroups, func(x HostGroup) bool { return x.Name == dg.name }); i >= 0 {
+			for _, a := range dg.d.HostGroups[i].Accounts {
+				set[a.Account] = true
+			}
+		}
+	}
+	return len(set)
+}
+
+// subset reports whether every account of accounts is in was. A nil was
+// (no installed counterpart) holds none.
+func subset(accounts []AccountMap, was map[string]int) bool {
+	if was == nil {
+		return false
+	}
+	for _, a := range accounts {
+		if _, ok := was[a.Account]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // HostPrincipals returns the AuthorizedPrincipalsFile of account on the

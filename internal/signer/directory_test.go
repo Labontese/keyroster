@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -672,5 +674,281 @@ func TestDirectoryInstallationRebind(t *testing.T) {
 		if c := e.mustLogin(t, approve(t, pk.eddsa, e.loginReq(t, "alice"), nil)); !strings.Contains(c.KeyId, "/dir=2/") {
 			t.Fatalf("key ID %q, want dir=2", c.KeyId)
 		}
+	})
+}
+
+// labDirectory is loginDirectory version with prev and host group lab of
+// accounts accounts u0000, u0001, ..., each mapping role ops. When
+// fileBytes is above zero, u0000 maps instead the roles big00, big01, ...,
+// whose principals make its principals file exactly fileBytes long as
+// RenderPrincipalsFile writes it at the widest version, math.MaxUint64
+// (F07 (03-08h)).
+func labDirectory(t *testing.T, pk *passkeys, version uint64, prev string, accounts, fileBytes int) *directory.Directory {
+	t.Helper()
+	d := loginDirectory(pk, version, prev)
+	lab := directory.HostGroup{Name: "lab", Accounts: make([]directory.AccountMap, 0, accounts)}
+	for i := range accounts {
+		lab.Accounts = append(lab.Accounts, directory.AccountMap{Account: fmt.Sprintf("u%04d", i), Roles: []string{"ops"}})
+	}
+	d.HostGroups = []directory.HostGroup{lab}
+	if fileBytes > 0 {
+		lab.Accounts[0].Roles = []string{}
+		header := widestFileSize(t, d, "lab", lab.Accounts[0].Account)
+		roles, shape := sizedRoles(t, "big", fileBytes-header)
+		d.Roles = append(d.Roles, roles...)
+		for _, r := range roles {
+			lab.Accounts[0].Roles = append(lab.Accounts[0].Roles, r.Name)
+		}
+		d.Sort()
+		if got := widestFileSize(t, d, "lab", lab.Accounts[0].Account); got != fileBytes {
+			t.Fatalf("labDirectory: the principals file of u0000 is %d bytes at the widest version, want %d", got, fileBytes)
+		}
+		t.Logf("principals file of lab/u0000: %d bytes at the widest version: header %d bytes, %s", fileBytes, header, shape)
+	}
+	d.Sort()
+	return d
+}
+
+// widestFileSize is the length of the principals file of account in
+// hostGroup as RenderPrincipalsFile writes it with d at the widest
+// version, math.MaxUint64.
+func widestFileSize(t *testing.T, d *directory.Directory, hostGroup, account string) int {
+	t.Helper()
+	widest := *d
+	widest.Version = math.MaxUint64
+	file, err := directory.RenderPrincipalsFile(&widest, hostGroup, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(file)
+}
+
+// sizedRoles returns roles prefix00, prefix01, ... of at most 32
+// principals each, without users, whose principal lines (each principal
+// and its newline) are exactly lineBytes long in all: full principals of
+// 128 characters, and the last one tuned to the remainder. shape describes
+// them.
+func sizedRoles(t *testing.T, prefix string, lineBytes int) ([]directory.Role, string) {
+	t.Helper()
+	const full = 129 // a 128-character principal and its newline
+	var ps []string
+	for rest := lineBytes; rest > 0; {
+		head := fmt.Sprintf("%s%04d", prefix, len(ps))
+		minLine := len(head) + 1
+		n := min(rest, full)
+		if r := rest - n; r > 0 && r < minLine {
+			n = rest - minLine
+		}
+		if n < minLine {
+			t.Fatalf("sizedRoles: %d bytes of principal lines cannot be made from principals of at least %d bytes", lineBytes, minLine)
+		}
+		ps = append(ps, head+strings.Repeat("x", n-1-len(head)))
+		rest -= n
+	}
+	var roles []directory.Role
+	for i := 0; i < len(ps); i += directory.MaxRolePrincipals {
+		roles = append(roles, directory.Role{
+			Name:          fmt.Sprintf("%s%02d", prefix, len(roles)),
+			Principals:    ps[i:min(i+directory.MaxRolePrincipals, len(ps))],
+			MaxTTLSeconds: 3600,
+		})
+	}
+	return roles, fmt.Sprintf("%d principals in %d roles, %d of 128 characters and the last of %d", len(ps), len(roles), len(ps)-1, len(ps[len(ps)-1]))
+}
+
+// seedDirectory stores doc with sigs as the installed directory through
+// the same write InstallDirectory performs after its checks (the row and
+// its directory_install leaf in one log transaction), then reopens the
+// signer on its store, so that loadDirectory loads and verifies it. It is
+// how an upgrade finds a directory installed before CheckRenderable
+// existed (F07 (03-08h), Q-G7).
+func (e *logEnv) seedDirectory(t *testing.T, doc, sigs []byte) {
+	t.Helper()
+	ctx := context.Background()
+	d, err := directory.Parse(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.s.mu.Lock()
+	now := e.s.clock()
+	body, err := (&tlog.DirectoryInstallBody{Version: d.Version, PolicyVersion: e.s.policy.Version, Directory: doc, Sigs: sigs}).Encode()
+	if err == nil {
+		err = e.s.logTx(ctx, func(tx *sql.Tx) error {
+			if err := e.s.db.InsertDirectory(tx, signerdb.StoredDirectory{
+				Version: d.Version, Doc: doc, Sigs: sigs, PolicyVersion: e.s.policy.Version, InstalledAt: now,
+			}); err != nil {
+				return err
+			}
+			_, err := e.s.appendLocked(ctx, tx, tlog.Leaf{TimeMicros: micros(now), Kind: tlog.KindDirectoryInstall, Body: body})
+			return err
+		})
+	}
+	e.s.mu.Unlock()
+	if err != nil {
+		t.Fatalf("seed directory version %d: %v", d.Version, err)
+	}
+	e.close()
+	if err := e.open(); err != nil {
+		t.Fatalf("reopen on the seeded directory: %v", err)
+	}
+	e.wantDirectory(t, d.Version, doc, sigs, true)
+}
+
+// hostDirectory is loginDirectory version with prev, host groups of the
+// given sizes (accounts named by the group's first letter and a number,
+// each mapping role ops, so two groups share no account), and host h1,
+// with host key key, in host group in (owner decision (2026-11-04),
+// execution stop at Task 1).
+func hostDirectory(pk *passkeys, version uint64, prev, key, in string, groups ...struct {
+	name     string
+	accounts int
+},
+) *directory.Directory {
+	d := loginDirectory(pk, version, prev)
+	d.HostGroups = nil
+	for _, g := range groups {
+		h := directory.HostGroup{Name: g.name, Accounts: make([]directory.AccountMap, 0, g.accounts)}
+		for i := range g.accounts {
+			h.Accounts = append(h.Accounts, directory.AccountMap{Account: fmt.Sprintf("%c%04d", g.name[0], i), Roles: []string{"ops"}})
+		}
+		d.HostGroups = append(d.HostGroups, h)
+	}
+	d.Hosts = []directory.Host{{Name: "h1", HostGroup: in, Keys: []string{key}, Principals: []string{"h1"}, Status: directory.StatusActive}}
+	d.Sort()
+	return d
+}
+
+// TestDirectoryUnrenderable (F07 (03-08h)): InstallDirectory refuses,
+// after the signatures, the chain, Parse and CheckPolicy, a directory
+// host agents cannot render (directory_unrenderable): a host group of
+// more than directory.MaxHostGroupAccounts accounts, or a principals file
+// above directory.MaxPrincipalsFile bytes sized at the widest version. Nothing is stored, and the refusal is logged on
+// the install bucket. Controls: a directory at both bounds installs, and
+// under an above-cap installed version (Q-G7) a version that grows
+// nothing installs while one that adds an account is refused.
+func TestDirectoryUnrenderable(t *testing.T) {
+	pk := newPasskeys(t)
+	ctx := context.Background()
+	// refused requires the dispatch path to refuse req with detail and
+	// the installed version to stay, then runs refuseInstall for the leaf
+	// and the class.
+	refused := func(t *testing.T, e *logEnv, req *wire.InstallDirectoryRequest, detail string, version uint64) {
+		t.Helper()
+		resp, er := e.s.installDirectoryOrRefuse(ctx, Peer{UID: 1000}, req)
+		if resp != nil || er == nil || er.Message != detail {
+			t.Fatalf("install: %+v, %+v; want the refusal %s", resp, er, detail)
+		}
+		if got := e.s.GetDirectory().Version; got != version {
+			t.Fatalf("GetDirectory reports version %d after the refusal, want %d", got, version)
+		}
+		e.refuseInstall(t, req, detail)
+	}
+	signed := func(t *testing.T, e *logEnv, d *directory.Directory) *wire.InstallDirectoryRequest {
+		doc, sigs := signDirectory(t, d, e.fx.Admins[0])
+		return &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}
+	}
+	for _, tc := range []struct {
+		name, detail       string
+		accounts, fileSize int
+		outsider           bool
+	}{
+		{"principals_file_above_cap", "directory_unrenderable", 1, directory.MaxPrincipalsFile + 1, false},
+		// Q-G3.
+		{"host_group_above_account_share", "directory_unrenderable", directory.MaxHostGroupAccounts + 1, 0, false},
+		// Within the agent's own cap, above the share.
+		{"host_group_at_agent_cap", "directory_unrenderable", directory.MaxAccounts, 0, false},
+		// The first case's document signed by a non-admin: renderability is
+		// never checked before the signatures (T-02-12).
+		{"unsigned_unrenderable_refused_for_quorum", "directory_quorum_not_met", 1, directory.MaxPrincipalsFile + 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, true)
+			prev := trust.SHA256Hex(e.s.GetDirectory().Directory)
+			d := labDirectory(t, pk, 2, prev, tc.accounts, tc.fileSize)
+			req := signed(t, e, d)
+			if tc.outsider {
+				_, outsider := NewEd25519Key(t)
+				req.Sigs = signDoc(t, req.Directory, outsider)
+			}
+			refused(t, e, req, tc.detail, 1)
+		})
+	}
+	t.Run("at_share_installs", func(t *testing.T) {
+		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, true)
+		prev := trust.SHA256Hex(e.s.GetDirectory().Directory)
+		// Both bounds exactly.
+		req := signed(t, e, labDirectory(t, pk, 2, prev, directory.MaxHostGroupAccounts, directory.MaxPrincipalsFile))
+		e.installDirectory(t, req.Directory, req.Sigs)
+		e.wantDirectory(t, 2, req.Directory, req.Sigs, true)
+	})
+
+	// Q-G7: version 2, installed as an upgrade finds it, maps
+	// directory.MaxHostGroupAccounts + 1 accounts in host group lab.
+	aboveCap := func(t *testing.T) (*logEnv, *directory.Directory) {
+		t.Helper()
+		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, true)
+		v2 := labDirectory(t, pk, 2, trust.SHA256Hex(e.s.GetDirectory().Directory), directory.MaxHostGroupAccounts+1, 0)
+		req := signed(t, e, v2)
+		e.seedDirectory(t, req.Directory, req.Sigs)
+		return e, v2
+	}
+	t.Run("above_cap_installed_disable_accepted", func(t *testing.T) {
+		e, v2 := aboveCap(t)
+		v3 := labDirectory(t, pk, 3, trust.SHA256Hex(e.s.GetDirectory().Directory), directory.MaxHostGroupAccounts+1, 0)
+		i := slices.IndexFunc(v3.Users, func(u directory.User) bool { return u.Name == "carol" })
+		v3.Users[i].Status = directory.StatusDisabled
+		if len(v3.HostGroups[0].Accounts) != len(v2.HostGroups[0].Accounts) {
+			t.Fatal("version 3 changes the accounts")
+		}
+		req := signed(t, e, v3)
+		resp, er := e.s.installDirectoryOrRefuse(ctx, Peer{UID: 1000}, req)
+		if er != nil || resp == nil || resp.Version != 3 {
+			t.Fatalf("install of a disable under an above-cap installed version: %+v, %+v; want version 3 installed", resp, er)
+		}
+		e.wantDirectory(t, 3, req.Directory, req.Sigs, true)
+	})
+	t.Run("above_cap_installed_growth_refused", func(t *testing.T) {
+		e, _ := aboveCap(t)
+		v3 := labDirectory(t, pk, 3, trust.SHA256Hex(e.s.GetDirectory().Directory), directory.MaxHostGroupAccounts+2, 0)
+		refused(t, e, signed(t, e, v3), "directory_unrenderable", 2)
+	})
+
+	// A host moved to another host group (owner decision (2026-11-04),
+	// execution stop at Task 1): its agent's intermediate holds both
+	// groups' accounts, which must fit directory.MaxAccounts.
+	type group = struct {
+		name     string
+		accounts int
+	}
+	key := trust.FormatKey(newEd25519(t).PublicKey())
+	// Version 2, installed as an upgrade finds it: h1 in lab, which maps
+	// 3000 accounts (above the share, within the agent's cap), beside web
+	// at the share and db, whose accounts with lab's make exactly
+	// directory.MaxAccounts.
+	seeded := []group{{"db", directory.MaxAccounts - 3000}, {"lab", 3000}, {"web", directory.MaxHostGroupAccounts}}
+	moved := func(t *testing.T, to string) (*logEnv, *wire.InstallDirectoryRequest) {
+		t.Helper()
+		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, true)
+		req := signed(t, e, hostDirectory(pk, 2, trust.SHA256Hex(e.s.GetDirectory().Directory), key, "lab", seeded...))
+		e.seedDirectory(t, req.Directory, req.Sigs)
+		return e, signed(t, e, hostDirectory(pk, 3, trust.SHA256Hex(e.s.GetDirectory().Directory), key, to, seeded...))
+	}
+	t.Run("host_moved_above_agent_cap_refused", func(t *testing.T) {
+		e, req := moved(t, "web") // 3000 + 2048 accounts in the move
+		refused(t, e, req, "directory_unrenderable", 2)
+	})
+	t.Run("host_moved_union_fits_installs", func(t *testing.T) {
+		e, req := moved(t, "db") // 3000 + 1096 = directory.MaxAccounts
+		e.installDirectory(t, req.Directory, req.Sigs)
+		e.wantDirectory(t, 3, req.Directory, req.Sigs, true)
+	})
+	t.Run("host_moved_within_share_installs", func(t *testing.T) {
+		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, true)
+		share := []group{{"lab", directory.MaxHostGroupAccounts}, {"web", directory.MaxHostGroupAccounts}}
+		v2 := signed(t, e, hostDirectory(pk, 2, trust.SHA256Hex(e.s.GetDirectory().Directory), key, "lab", share...))
+		e.installDirectory(t, v2.Directory, v2.Sigs)
+		v3 := signed(t, e, hostDirectory(pk, 3, trust.SHA256Hex(v2.Directory), key, "web", share...))
+		e.installDirectory(t, v3.Directory, v3.Sigs)
+		e.wantDirectory(t, 3, v3.Directory, v3.Sigs, true)
 	})
 }
