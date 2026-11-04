@@ -281,13 +281,17 @@ func CheckRenderable(d, installed *Directory) error {
 	// aboveBound is, per host group of d, an account whose file is above
 	// MaxPrincipalsFile ("" for none), for the moved-host check.
 	aboveBound := make(map[string]string, len(d.HostGroups))
+	var installedGroups map[string]int // indexed once (R-1, pre-merge review of PR #84)
+	if installed != nil {
+		installedGroups = hostGroupIndex(installed)
+	}
 	for _, h := range d.HostGroups {
 		// The installed counterpart is looked up first: a group or account
 		// it does not have gets no exception.
 		var was map[string]int // installed account name to its index
 		var old *HostGroup
 		if installed != nil {
-			if i := slices.IndexFunc(installed.HostGroups, func(x HostGroup) bool { return x.Name == h.Name }); i >= 0 {
+			if i, ok := installedGroups[h.Name]; ok {
 				old = &installed.HostGroups[i]
 				was = make(map[string]int, len(old.Accounts))
 				for j, a := range old.Accounts {
@@ -328,7 +332,21 @@ func CheckRenderable(d, installed *Directory) error {
 	if installed == nil {
 		return nil
 	}
-	return checkMoves(d, installed, aboveBound)
+	return checkMoves(d, installed, installedGroups, aboveBound)
+}
+
+// hostGroupIndex maps each host group name of d to its index in
+// d.HostGroups: the first index for a repeated name, as slices.IndexFunc
+// finds it (Validate refuses repeated names; CheckRenderable does not
+// rely on it).
+func hostGroupIndex(d *Directory) map[string]int {
+	index := make(map[string]int, len(d.HostGroups))
+	for i, h := range d.HostGroups {
+		if _, ok := index[h.Name]; !ok {
+			index[h.Name] = i
+		}
+	}
+	return index
 }
 
 // checkMoves refuses (ErrUnrenderable) a version d that moves a host from
@@ -336,8 +354,11 @@ func CheckRenderable(d, installed *Directory) error {
 // could not make within its caps (CheckRenderable). A host is the same
 // when an active entry of d and an active entry of installed share a host
 // key, as the agent finds its entry by its host keys; a disabled entry
-// renders no principals files on either side.
-func checkMoves(d, installed *Directory, aboveBound map[string]string) error {
+// renders no principals files on either side. installedGroups is
+// hostGroupIndex(installed). The union of a move is counted once per pair
+// of host groups (R-1, pre-merge review of PR #84).
+func checkMoves(d, installed *Directory, installedGroups map[string]int, aboveBound map[string]string) error {
+	u := moveUnions{installed: installed, d: d, from: installedGroups, to: hostGroupIndex(d), fromSets: map[string]map[string]bool{}, counts: map[[2]string]int{}}
 	byKey := map[string]*Host{}
 	for i := range installed.Hosts {
 		if o := &installed.Hosts[i]; o.Status == StatusActive {
@@ -358,7 +379,7 @@ func checkMoves(d, installed *Directory, aboveBound map[string]string) error {
 			if acc := aboveBound[h.HostGroup]; acc != "" {
 				return fmt.Errorf("%w: host %s moves from host group %s to %s, whose account %s has a principals file above %d bytes", ErrUnrenderable, h.Name, o.HostGroup, h.HostGroup, acc, MaxPrincipalsFile)
 			}
-			if n := unionAccounts(installed, o.HostGroup, d, h.HostGroup); n > MaxAccounts {
+			if n := u.count(o.HostGroup, h.HostGroup); n > MaxAccounts {
 				return fmt.Errorf("%w: host %s moves from host group %s to %s, %d accounts in the move, above %d", ErrUnrenderable, h.Name, o.HostGroup, h.HostGroup, n, MaxAccounts)
 			}
 		}
@@ -366,22 +387,56 @@ func checkMoves(d, installed *Directory, aboveBound map[string]string) error {
 	return nil
 }
 
-// unionAccounts is the number of distinct accounts of host group from in
-// installed and host group to in d: the principals files of the
-// intermediate generation a host moving between them holds.
-func unionAccounts(installed *Directory, from string, d *Directory, to string) int {
-	set := map[string]bool{}
-	for _, dg := range []struct {
-		d    *Directory
-		name string
-	}{{installed, from}, {d, to}} {
-		if i := slices.IndexFunc(dg.d.HostGroups, func(x HostGroup) bool { return x.Name == dg.name }); i >= 0 {
-			for _, a := range dg.d.HostGroups[i].Accounts {
+// moveUnions counts the accounts of host moves, from a host group of
+// installed to a host group of d, once per (from, to) pair: the principals
+// files of the intermediate generation a host moving between them holds.
+// from and to are hostGroupIndex of installed and d; a group either does
+// not define counts no accounts.
+type moveUnions struct {
+	installed, d *Directory
+	from, to     map[string]int
+	fromSets     map[string]map[string]bool // from group name to its account names
+	counts       map[[2]string]int          // (from, to) to count's answer
+}
+
+// count is the number of distinct accounts of host group from in installed
+// and host group to in d when it is above MaxAccounts, and at most
+// MaxAccounts otherwise. When the two groups' lists add up to at most
+// MaxAccounts the union cannot be larger, so nothing is counted; otherwise
+// from's account set is built once and to's accounts not in it are
+// counted, each once.
+func (u *moveUnions) count(from, to string) int {
+	key := [2]string{from, to}
+	if n, ok := u.counts[key]; ok {
+		return n
+	}
+	var fromAccounts, toAccounts []AccountMap
+	if i, ok := u.from[from]; ok {
+		fromAccounts = u.installed.HostGroups[i].Accounts
+	}
+	if i, ok := u.to[to]; ok {
+		toAccounts = u.d.HostGroups[i].Accounts
+	}
+	n := len(fromAccounts) + len(toAccounts)
+	if n > MaxAccounts {
+		set, ok := u.fromSets[from]
+		if !ok {
+			set = make(map[string]bool, len(fromAccounts))
+			for _, a := range fromAccounts {
 				set[a.Account] = true
 			}
+			u.fromSets[from] = set
 		}
+		extra := map[string]bool{}
+		for _, a := range toAccounts {
+			if !set[a.Account] {
+				extra[a.Account] = true
+			}
+		}
+		n = len(set) + len(extra)
 	}
-	return len(set)
+	u.counts[key] = n
+	return n
 }
 
 // subset reports whether every account of accounts is in was. A nil was
