@@ -117,9 +117,18 @@ type Signer struct {
 	// installs, so a flood of other refusals cannot drain it (D-14); what
 	// it does not log is counted in limiter. Guarded by mu.
 	installLimiter *refusalLimiter
-	// overloaded counts connections refused over capacity by the accept
-	// loop, which never takes mu; flushSummaries moves it into the limiter.
+	// overloaded counts connections the accept loop refused over the
+	// global cap or over their account's share (F16 (03-08h)); the loop
+	// never takes mu, and flushSummaries moves the count into the limiter.
 	overloaded atomic.Uint64
+	// conns is the accept loop's slot accounting (F16 (03-08h)), with its
+	// own lock.
+	conns *connSlots
+	// refusalPerMinute and refusalBurst are the rate and burst of limiter
+	// and installLimiter, set once in New and only read afterwards. Serve
+	// builds its acceptLimiter from them: that limiter is never under mu,
+	// and what it does not log is still counted in overloaded.
+	refusalPerMinute, refusalBurst int
 	// clockEpisode is set while the clock is behind the serial high-water
 	// mark and that episode's clock_regression leaf is logged; the next
 	// successful issuance clears it. Guarded by mu.
@@ -199,6 +208,8 @@ func New(cfg Config) (*Signer, error) {
 	}
 	s.limiter = newRefusalLimiter(perMinute, burst, s.clock())
 	s.installLimiter = newRefusalLimiter(perMinute, burst, s.clock())
+	s.refusalPerMinute, s.refusalBurst = perMinute, burst
+	s.conns = newConnSlots()
 	if err := s.initLog(context.Background()); err != nil {
 		return nil, err
 	}

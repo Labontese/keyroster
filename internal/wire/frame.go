@@ -36,6 +36,21 @@ const headerLen = 2
 // Version is the protocol version byte at the start of every payload.
 const Version = 1
 
+// MaxPeerConns is the most connections one account (uid) may hold on the
+// signer socket at once, F16 (03-08h): half of the signer's 32, so after
+// one account holds its share the other half stays free.
+const MaxPeerConns = 16
+
+// MaxServerSignerCalls is the most signer calls keyroster-server has in
+// flight (03-08g's budget), F16 (03-08h). The signer frees a connection's
+// slot before it closes the connection, and keyroster-server's calls
+// return only after that close, so the server never holds more live
+// connections at the signer than calls. With its one GetKRL outside the
+// budget (Q-G5), that is at most MaxServerSignerCalls + 1 = 13 of its
+// share of MaxPeerConns, and the 3 left are margin for other callers under
+// its uid and for calls it abandoned while the signer was stalled.
+const MaxServerSignerCalls = MaxPeerConns - 4
+
 // Message types. A LoginIssueRequest is answered with an IssueResponse
 // (0x81). GetDirectory, Status and GetKRL requests have an empty body.
 const (

@@ -28,7 +28,8 @@ const summaryInterval = time.Minute
 // the rate become individual refusal leaves; the rest are counted per
 // reason and written as one refusal_summary leaf per window, so that
 // logged plus summarized refusals always equal all refusals. Guarded by
-// Signer.mu.
+// Signer.mu, with one exception: Serve's acceptLimiter, a local variable
+// that only the accept loop's goroutine touches (F16 (03-08h)).
 type refusalLimiter struct {
 	perMinute   int
 	burst       int
