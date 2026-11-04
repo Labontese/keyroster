@@ -931,6 +931,15 @@ Three findings at 75620a1. The fixes and owner decisions are recorded as "owner 
 
 Details are in 03-08h-SUMMARY.md, "Pre-merge review fixes (PR #84)".
 
+### Round 6: fix-round check of PR #84 (2026-11-04)
+
+A check of round 5's fixes found three problems. The owner decided all three (owner decision (2026-11-04), fix-round check):
+- **C-1 (medium):** a move's union still cost the target group's size per distinct pair. Fixed by caching each target group's set too and counting through the smaller set.
+- **C-2 (low):** R-2's name match refused name swaps and renames onto a removed name. It now applies only to a host with a key no active installed host holds.
+- **C-3 (low):** a union cache keyed by the source group alone survived every test. Fixed with a new case, and the equivalence check now draws 96 pairs.
+
+Parse's validateHosts (O(hosts × host groups) under s.mu) is deferred to 03-08l (owner decision). Details are in 03-08h-SUMMARY.md, "Fix-round check (C-1 to C-3)".
+
 ### Review Feedback Addressed
 | Concern | Severity | How Addressed |
 |---------|----------|---------------|
