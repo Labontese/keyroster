@@ -98,10 +98,13 @@ func (s *Signer) loadDirectory(ctx context.Context) error {
 // document strictly (directory_invalid), checks that it names the
 // installation of the bundle in force (directory_installation_missing,
 // directory_installation_mismatch, directory_installation_unknown; D-04),
-// checks the chain again on the parsed document, and checks that it fits
-// the policy's CA profiles (directory_exceeds_policy). Then one transaction stores it and
-// appends a directory_install leaf with the document and its signatures,
-// and only after COMMIT does the signer switch to it.
+// checks the chain again on the parsed document, checks that it fits
+// the policy's CA profiles (directory_exceeds_policy), and checks that host
+// agents can render it against the installed directory
+// (directory_unrenderable, directory.CheckRenderable; F07 (03-08h)). Then
+// one transaction stores it and appends a directory_install leaf with the
+// document and its signatures, and only after COMMIT does the signer
+// switch to it.
 func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,6 +142,13 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 	}
 	if err := directory.CheckPolicy(d, s.policy); err != nil {
 		return nil, refusalErr(wire.CodeRefused, "directory_exceeds_policy", err)
+	}
+	// F07 (03-08h): a directory host agents cannot render, alone or in the
+	// intermediate generation of a move from the installed version, is
+	// refused here, never on stored state. s.directory is nil before the
+	// first install.
+	if err := directory.CheckRenderable(d, s.directory); err != nil {
+		return nil, refusalErr(wire.CodeRefused, "directory_unrenderable", err)
 	}
 	now := s.clock()
 	body, err := (&tlog.DirectoryInstallBody{

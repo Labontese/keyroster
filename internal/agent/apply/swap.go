@@ -20,6 +20,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
+	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/trust"
 )
@@ -35,11 +36,14 @@ var ErrSwapNotMonotone = errors.New("swap_not_monotone")
 // besides those current, last-good and the pending marker name.
 const keepGenerations = 5
 
-// Generation file caps for reading a generation back.
+// Generation file caps for reading a generation back. The principals
+// caps are the directory package's, F07 (03-08h): the signer refuses at
+// install a directory whose principals files would break them
+// (directory.CheckRenderable), so the two cannot drift.
 const (
 	maxCAFile         = 1 << 20
-	maxPrincipalsFile = 64 << 10
-	maxAccounts       = 4096
+	maxPrincipalsFile = directory.MaxPrincipalsFile
+	maxAccounts       = directory.MaxAccounts
 )
 
 // ErrGenerationTooLarge is a generation with a file, or a number of

@@ -214,6 +214,37 @@ keyroster ca issue --admin-key SHA256:<alice admin key> \
   --pubkey ~/.ssh/id_ed25519.pub --principal alice --subject u:alice --ttl 1h
 ```
 
+**Connection limits.** The signer handles at most 32 connections at once,
+and at most 16 from one account (uid). No slot is reserved.
+keyroster-server keeps its own calls to 12, plus one read of the published
+KRL, and each of its calls returns only after the signer has freed that
+connection. So outside a slow signature (below), the server alone never
+fills its share.
+
+- A connection over either limit is closed unanswered, and the CLI's
+  receive error names both causes. Retry.
+- The journal shows `refused` with `reason=uid_share_exceeded` or
+  `reason=too_many_connections` and the uid, at most about 10 lines a
+  minute. Every such connection is counted as overloaded in the next
+  `refusal_summary` entry.
+- Two admin accounts together can still fill every slot.
+- Shares are counted per uid. In the shipped layout keyroster-server runs
+  as its own user (deploy/sysusers.d). A deployment that runs it and an
+  admin under one uid gives them a single share of 16 between them.
+
+**During a slow signature**, for example while a hardware key waits for a
+touch, the calls that need the signer's lock wait with it. keyroster-server
+gives up on such a call at its own timeout, but the connection keeps its
+slot until the signature is done. When more than 3 of them pile up, the
+signer can close the server's next calls unanswered, its KRL and catch-up
+reads included, although it could otherwise answer those at once. Hosts
+keep the KRL they applied and ask again at their next poll, and
+distribution resumes once the signature is done. Answer touch prompts
+promptly.
+
+Run in CI (TestPeerShare, TestOverloadDoesNotStallAccept, TestAwaitClose,
+03-08h); UNVERIFIED on a real host.
+
 ## 9. Run doctor
 
 Run `doctor` as the signer's user (as root it fails with

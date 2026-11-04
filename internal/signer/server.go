@@ -26,8 +26,59 @@ const connDeadline = 10 * time.Second
 // frame buffers in all (T-02-12). That is not a bound on the signer's
 // memory: a GetDirectory reply makes three to four short-lived copies of
 // the installed directory, for example. The pre-merge review measured
-// about 34 MiB in steady state with 32 connections.
+// about 34 MiB in steady state with 32 connections. Within it, each
+// account (uid) holds at most maxConnsPerPeer (F16 (03-08h)).
 const maxConns = 32
+
+// maxConnsPerPeer is the share of one account (uid) of the maxConns
+// connection slots, F16 (03-08h): it bounds how much of the pool one
+// account takes, so another account always finds the other half free.
+// keyroster-server keeps its own calls 3 below it: wire.MaxServerSignerCalls
+// plus its one GetKRL, each returning only after the signer has freed its
+// slot. Two accounts at their share together can still hold every slot
+// (Q-G2: no reserved slot).
+const maxConnsPerPeer = wire.MaxPeerConns
+
+// connSlots counts the connections the accept loop has handed to a
+// handler, in all and per uid, F16 (03-08h). Its mutex is its own: it is
+// never held with Signer.mu or across I/O, so the accept loop never waits
+// for an issuance.
+type connSlots struct {
+	mu     sync.Mutex
+	total  int
+	perUID map[uint32]int
+}
+
+func newConnSlots() *connSlots { return &connSlots{perUID: map[uint32]int{}} }
+
+// take takes a slot for uid, or refuses with the detail
+// too_many_connections when all maxConns are taken, or uid_share_exceeded
+// when uid holds its maxConnsPerPeer.
+func (c *connSlots) take(uid uint32) (ok bool, detail string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.total >= maxConns {
+		return false, "too_many_connections"
+	}
+	if c.perUID[uid] >= maxConnsPerPeer {
+		return false, "uid_share_exceeded"
+	}
+	c.total++
+	c.perUID[uid]++
+	return true, ""
+}
+
+// put frees a slot of uid; the uid's key goes when it holds none.
+func (c *connSlots) put(uid uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.total--
+	if n := c.perUID[uid] - 1; n > 0 {
+		c.perUID[uid] = n
+	} else {
+		delete(c.perUID, uid)
+	}
+}
 
 // Peer is the kernel-reported identity of a connected client.
 type Peer struct {
@@ -91,6 +142,17 @@ func Listen(path string, gid int) (*net.UnixListener, error) {
 // at least an hour old publishes the next version; a restarted signer
 // with a fresher KRL publishes nothing. krlLoop repeats the check every
 // minute while serving.
+//
+// The accept loop reads each connection's peer credentials (no lock, no
+// blocking call) and takes a slot from s.conns for its uid, F16 (03-08h):
+// tlog.PeerUnknown when the credentials cannot be read. A connection over
+// maxConns or over its uid's maxConnsPerPeer is closed unanswered and
+// counted in s.overloaded, and the operator log names its uid at the rate
+// of the loop's own acceptLimiter. Every other connection, an allowed peer
+// or not, goes to handle in its own goroutine, which releases the slot and
+// then closes the connection, on every path out of handle: a caller that
+// waits for the close (keyroster-server) may dial its next call the moment
+// it sees it, and finds the slot already free.
 func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 	stop := context.AfterFunc(ctx, func() { _ = l.Close() })
 	defer stop()
@@ -113,7 +175,9 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 		<-krlDone
 		s.flushSummaries(context.WithoutCancel(ctx))
 	}()
-	sem := make(chan struct{}, maxConns)
+	// acceptLimiter is only ever touched by this goroutine, so it needs
+	// no lock, even when two listeners serve one Signer.
+	acceptLimiter := newRefusalLimiter(s.refusalPerMinute, s.refusalBurst, s.clock())
 	for {
 		conn, err := l.AcceptUnix()
 		if err != nil {
@@ -122,24 +186,32 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 			}
 			return fmt.Errorf("signer: accept: %w", err)
 		}
-		select {
-		case sem <- struct{}{}:
-		default:
+		peer, credErr := peerCredentials(conn)
+		if credErr != nil {
+			peer = Peer{UID: tlog.PeerUnknown}
+		}
+		uid := peer.UID
+		if ok, detail := s.conns.take(uid); !ok {
 			// Over capacity. The accept loop must not wait for s.mu, which
 			// an in-flight issuance holds across CA signing: close, count
 			// atomically for the next refusal_summary leaf (flushSummaries),
 			// and keep accepting. Nothing is sent.
 			_ = conn.Close()
 			s.overloaded.Add(1)
-			s.log.Warn("refused", "uid", tlog.PeerUnknown, "pid", 0, "reason", "too_many_connections",
-				"class", tlog.ReasonName(tlog.ReasonOverloaded), "code", codeFor(tlog.ReasonOverloaded).String())
+			if acceptLimiter.allow(s.clock()) {
+				s.log.Warn("refused", "uid", uid, "pid", peer.PID, "reason", detail,
+					"class", tlog.ReasonName(tlog.ReasonOverloaded), "code", codeFor(tlog.ReasonOverloaded).String())
+			}
 			continue
 		}
 		wg.Add(1)
 		go func() {
+			// Deferred calls run in reverse: the slot is released, then
+			// the connection closed (Q-G1's release ordering).
 			defer wg.Done()
-			defer func() { <-sem }()
-			s.handle(ctx, conn)
+			defer func() { _ = conn.Close() }()
+			defer s.conns.put(uid)
+			s.handle(ctx, conn, peer, credErr)
 		}()
 	}
 }
@@ -159,13 +231,15 @@ func (s *Signer) Serve(ctx context.Context, l *net.UnixListener) error {
 // and logs a host_forget entry (03-08c). Every
 // refusal goes through refuse (slog plus the rate-limited audit log,
 // D-14).
-func (s *Signer) handle(ctx context.Context, conn *net.UnixConn) {
-	defer func() { _ = conn.Close() }()
+//
+// peer and credErr are what Serve's accept loop read (F16 (03-08h)). handle
+// leaves the connection open: Serve's goroutine, its only caller, releases
+// the connection's slot and then closes it.
+func (s *Signer) handle(ctx context.Context, conn *net.UnixConn, peer Peer, credErr error) {
 	if err := conn.SetDeadline(time.Now().Add(connDeadline)); err != nil {
 		return
 	}
-	peer, err := peerCredentials(conn)
-	if err != nil {
+	if credErr != nil {
 		_ = s.refuse(ctx, Peer{UID: tlog.PeerUnknown}, [32]byte{}, tlog.ReasonPeerNotAllowed, "peer_credentials_unavailable") // logged; nothing is sent
 		return
 	}

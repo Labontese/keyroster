@@ -214,6 +214,70 @@ Both views are what the server serves. If you suspect the server itself is
 compromised, they prove nothing about the signer: decide on the signer
 host instead ([Confirm on the signer host](#confirm-on-the-signer-host)).
 
+## A directory hosts cannot render is refused at install
+
+Every command that installs a directory version can be refused with
+`directory_unrenderable`: `keyroster directory install`, `user approve`,
+and the other user, role, host and machine commands that sign a new
+version. The CLI's error names that code. That is reasoned from
+serverclient's error text; no test runs the CLI against this refusal
+(UNVERIFIED). The signer refuses the version when:
+
+- a host group maps more than 2048 accounts. While a host moves between
+  two versions it holds both versions' accounts, so the limit is half of
+  the host agent's 4096;
+- or one account's principals file, as the host agent writes it, would be
+  larger than 64 KiB.
+
+Nothing is installed, and the directory keeps its version. Split the host
+group, or map fewer roles to the account, then sign again.
+
+**A directory installed before this release** whose host group maps more
+accounts than that, or whose principals file is larger, stays in force, and
+hosts keep rendering what they rendered.
+
+- A later version that only disables or removes users, roles or accounts
+  installs as usual. That includes `user disable` and the disable step of
+  `keyroster revoke user`.
+- A version that adds an account to that host group, swaps one of its
+  accounts for a new name, or makes a file that is already too large any
+  larger is refused until the group is split.
+- A new host group must meet the limits.
+
+**The 64 KiB limit is measured as if the version number had its largest
+possible length**, so a file accepted once stays within the limit at every
+later version. In practice the limit is up to about 19 bytes below 64 KiB.
+
+**When you split, keep the account names.** A host that moves to the split
+version holds the accounts of both versions for a moment. New, disjoint
+account names can push that set above the agent's 4096, and the host then
+refuses the move (`generation_too_large`). Its KRLs still land
+(host-setup.md, "Revocations keep applying"), but it keeps its old
+principals.
+
+**Moving a host to another host group.** While a host moves, it holds the
+accounts of its old host group and of its new one. A version that moves a
+host is refused with `directory_unrenderable` when those accounts together
+are more than 4096, or when a principals file of the new group is larger
+than 64 KiB. Split the old host group first. With both groups at most 2048
+accounts this never happens.
+
+The signer recognises a moved host by a host key that both versions list.
+It also goes by the host's name, but only when the new version gives the
+host a key that no active host had before (a possible rekey). A version
+that replaces all of a host's keys and moves it is therefore checked the
+same way. Hosts that only swap or take over names, with keys that were
+already listed, are judged by their keys alone.
+
+**Limitation (UNVERIFIED):** a host that is renamed *and* given new keys
+in the same version is not recognised as moved, so the signer does not
+check the move. Its agent may then refuse the move
+(`generation_too_large`) and keep its old principals. Rename a host and
+replace its keys in separate versions.
+
+Run in CI (TestDirectoryUnrenderable, TestRenderable, TestMoveByName and
+TestSizerMatchesRender, 03-08h); UNVERIFIED on a real host.
+
 ## Disabling a user
 
 ```

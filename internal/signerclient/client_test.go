@@ -61,7 +61,7 @@ func TestReadResponseRefusesUnexpectedType(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &countingReader{hdr: frameHeader(tc.length, tc.msgType)}
-			body, err := readResponse(r, tc.want)
+			body, err := readResponse(r, tc.want, false)
 			if !errors.Is(err, wire.ErrUnexpectedType) || body != nil {
 				t.Fatalf("readResponse = %d body bytes, %v; want wire.ErrUnexpectedType", len(body), err)
 			}
@@ -72,7 +72,7 @@ func TestReadResponseRefusesUnexpectedType(t *testing.T) {
 	}
 	t.Run("control_wanted_type_read_whole", func(t *testing.T) {
 		r := &countingReader{hdr: frameHeader(wire.MaxDirectoryFrame, wire.TypeGetDirectoryResponse)}
-		body, err := readResponse(r, wire.TypeGetDirectoryResponse)
+		body, err := readResponse(r, wire.TypeGetDirectoryResponse, false)
 		if err != nil || len(body) != wire.MaxDirectoryFrame-2 {
 			t.Fatalf("readResponse = %d body bytes, %v; want the whole %d-byte body", len(body), err, wire.MaxDirectoryFrame-2)
 		}
@@ -84,7 +84,7 @@ func TestReadResponseRefusesUnexpectedType(t *testing.T) {
 			t.Fatal(err)
 		}
 		r := &countingReader{hdr: append(frameHeader(uint32(2+len(eb)), wire.TypeError), eb...)} //nolint:gosec // G115: a short error body
-		_, err = readResponse(r, wire.TypeIssueResponse)
+		_, err = readResponse(r, wire.TypeIssueResponse, false)
 		var got *wire.ErrorResponse
 		if !errors.As(err, &got) || got.Message != "missing_evidence" {
 			t.Fatalf("readResponse = %v, want the signer's refusal missing_evidence", err)
@@ -222,6 +222,174 @@ func TestLoginSendReadDeadline(t *testing.T) {
 		}
 		if took := time.Since(start); took > 2*time.Second {
 			t.Fatalf("LoginSend took %v, want about the 200 ms read timeout, not ctx's 4 s deadline", took)
+		}
+	})
+}
+
+// holdSigner is a test signer that, for each connection, reads one
+// request frame, writes its frame (an IssueResponse with Serial 7, or a
+// refusal), and then holds the connection open until release is closed.
+// trailing bytes are written after the frame; never makes it hold the
+// connection until the test ends.
+type holdSigner struct {
+	socket  string
+	written chan time.Time // when the frame was written, per connection
+	release chan struct{}
+}
+
+func startHoldSigner(t *testing.T, refuse bool, trailing []byte, never bool) *holdSigner {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "krsa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	s := &holdSigner{socket: filepath.Join(dir, "s.sock"), written: make(chan time.Time, 4), release: make(chan struct{})}
+	l, err := net.Listen("unix", s.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done); _ = l.Close() })
+	msgType := wire.TypeIssueResponse
+	frame, err := (&wire.IssueResponse{Cert: []byte("cert"), Serial: 7, LeafIndex: 9}).Marshal()
+	if refuse {
+		msgType = wire.TypeError
+		frame, err = (&wire.ErrorResponse{Code: wire.CodeRefused, Message: "refused_for_test"}).Marshal()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+				if _, _, err := wire.ReadMessage(conn, wire.RequestCaps); err != nil {
+					return
+				}
+				_ = wire.WriteMessage(conn, msgType, frame)
+				if len(trailing) > 0 {
+					_, _ = conn.Write(trailing)
+				}
+				s.written <- time.Now()
+				if never {
+					<-done
+					return
+				}
+				select {
+				case <-s.release:
+				case <-done:
+				}
+			}()
+		}
+	}()
+	return s
+}
+
+type loginResult struct {
+	resp *wire.IssueResponse
+	err  error
+	at   time.Time
+}
+
+// login runs call in a goroutine and returns its result channel.
+func login(call func() (*wire.IssueResponse, error)) chan loginResult {
+	out := make(chan loginResult, 1)
+	go func() {
+		resp, err := call()
+		out <- loginResult{resp, err, time.Now()}
+	}()
+	return out
+}
+
+// TestAwaitClose (F16 (03-08h)): a Client with AwaitClose returns a call's
+// result only after the signer has closed the connection, bounded by the
+// call's deadline, and never changes what the frame said. The package
+// functions (the CLI's path) return as soon as the frame is read.
+func TestAwaitClose(t *testing.T) {
+	req := &wire.LoginIssueRequest{SubjectKey: []byte{1}, Subject: "alice"}
+	waiting := Client{AwaitClose: true}
+	call := func(s *holdSigner, c Client, readTimeout time.Duration) chan loginResult {
+		c.Socket = s.socket
+		return login(func() (*wire.IssueResponse, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return c.LoginSend(ctx, req, readTimeout)
+		})
+	}
+	// notBefore requires no result within 150 ms of the frame being written.
+	notBefore := func(t *testing.T, s *holdSigner, got chan loginResult) {
+		t.Helper()
+		<-s.written
+		select {
+		case r := <-got:
+			t.Fatalf("the call returned (%+v, %v) while the signer held the connection open, want it to wait for the close", r.resp, r.err)
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+	t.Run("returns_after_close", func(t *testing.T) {
+		s := startHoldSigner(t, false, nil, false)
+		got := call(s, waiting, 5*time.Second)
+		notBefore(t, s, got)
+		close(s.release)
+		r := <-got
+		if r.err != nil || r.resp.Serial != 7 {
+			t.Fatalf("LoginSend after the close = %+v, %v; want the certificate (Serial 7)", r.resp, r.err)
+		}
+	})
+	t.Run("package_function_unchanged", func(t *testing.T) {
+		s := startHoldSigner(t, false, nil, false)
+		got := login(func() (*wire.IssueResponse, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return LoginSend(ctx, s.socket, req, 5*time.Second)
+		})
+		select {
+		case r := <-got:
+			if r.err != nil || r.resp.Serial != 7 {
+				t.Fatalf("LoginSend = %+v, %v; want the certificate (Serial 7)", r.resp, r.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the package function waited for the close, want it to return once the frame is read")
+		}
+		close(s.release)
+	})
+	t.Run("refusal_awaits_close", func(t *testing.T) {
+		s := startHoldSigner(t, true, nil, false)
+		got := call(s, waiting, 5*time.Second)
+		notBefore(t, s, got)
+		close(s.release)
+		r := <-got
+		var refusal *wire.ErrorResponse
+		if !errors.As(r.err, &refusal) || refusal.Message != "refused_for_test" {
+			t.Fatalf("LoginSend after the close = %+v, %v; want the refusal", r.resp, r.err)
+		}
+	})
+	t.Run("deadline_ends_wait", func(t *testing.T) {
+		s := startHoldSigner(t, false, nil, true)
+		got := call(s, waiting, 300*time.Millisecond)
+		start := <-s.written
+		r := <-got
+		if r.err != nil || r.resp.Serial != 7 {
+			t.Fatalf("LoginSend = %+v, %v; want the certificate, not an error, at the read deadline", r.resp, r.err)
+		}
+		if took := r.at.Sub(start); took < 200*time.Millisecond || took > 2*time.Second {
+			t.Fatalf("LoginSend returned %v after the frame, want about the 300 ms read deadline", took)
+		}
+	})
+	t.Run("trailing_bytes_ignored", func(t *testing.T) {
+		s := startHoldSigner(t, false, []byte("trailing"), false)
+		got := call(s, waiting, 5*time.Second)
+		<-s.written
+		close(s.release)
+		r := <-got
+		if r.err != nil || r.resp.Serial != 7 {
+			t.Fatalf("LoginSend = %+v, %v; want the certificate", r.resp, r.err)
 		}
 	})
 }

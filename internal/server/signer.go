@@ -60,50 +60,66 @@ type signerAPI interface {
 	ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (*wire.ForgetResponse, error)
 }
 
-// socketSigner reaches keyroster-signer over its Unix socket.
+// socketSigner reaches keyroster-signer over its Unix socket. Every call
+// goes through s.client(), a signerclient.Client with AwaitClose, so it
+// returns only after the signer has closed the connection, F16 (03-08h):
+// budgetSigner frees a token when the method returns, and the signer
+// frees the connection's slot before it closes, so the server's counted
+// connections at the signer never exceed its tokens (plus its one
+// GetKRL). Growth rule: a later method calls its signerclient Client
+// method through s.client(), never a package function.
 type socketSigner struct{ socket string }
 
+// client is the signerclient Client of every socketSigner call.
+func (s socketSigner) client() signerclient.Client {
+	return signerclient.Client{Socket: s.socket, AwaitClose: true}
+}
+
 func (s socketSigner) Status(ctx context.Context) (*wire.StatusResponse, error) {
-	return signerclient.Status(ctx, s.socket)
+	return s.client().Status(ctx)
 }
 
 func (s socketSigner) GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error) {
-	return signerclient.GetDirectory(ctx, s.socket)
+	return s.client().GetDirectory(ctx)
 }
 
 func (s socketSigner) InstallDirectory(ctx context.Context, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
-	return signerclient.InstallDirectory(ctx, s.socket, req)
+	return s.client().InstallDirectory(ctx, req)
 }
 
 func (s socketSigner) Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error) {
-	return signerclient.LoginSend(ctx, s.socket, req, signerCallTimeout)
+	return s.client().LoginSend(ctx, req, signerCallTimeout)
 }
 
 func (s socketSigner) Revoke(ctx context.Context, req *wire.RevokeRequest) (*wire.RevokeResponse, error) {
-	return signerclient.Revoke(ctx, s.socket, req)
+	return s.client().Revoke(ctx, req)
 }
 
 func (s socketSigner) GetKRL(ctx context.Context) (*wire.GetKRLResponse, error) {
-	return signerclient.GetKRL(ctx, s.socket)
+	return s.client().GetKRL(ctx)
 }
 
 func (s socketSigner) GetBundle(ctx context.Context, v uint64) (*wire.GetBundleResponse, error) {
-	return signerclient.GetBundle(ctx, s.socket, v)
+	return s.client().GetBundle(ctx, v)
 }
 
 func (s socketSigner) GetDirectoryVersion(ctx context.Context, v uint64) (*wire.GetDirectoryVersionResponse, error) {
-	return signerclient.GetDirectoryVersion(ctx, s.socket, v)
+	return s.client().GetDirectoryVersion(ctx, v)
 }
 
 func (s socketSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (*wire.ForgetResponse, error) {
-	return signerclient.ForgetAgent(ctx, s.socket, req)
+	return s.client().ForgetAgent(ctx, req)
 }
 
 const (
 	// maxSignerCalls is the most signer calls keyroster-server has in
-	// flight through its budget (budgetSigner), well inside the signer's 32
-	// connections. F11 (03-08g).
-	maxSignerCalls = 12
+	// flight through its budget (budgetSigner). F11 (03-08g). It is
+	// wire.MaxServerSignerCalls, 4 below the signer's per-account share
+	// (F16 (03-08h)): with the one GetKRL outside the budget the server's
+	// ceiling at the signer is 13, and the 3 left are margin, not a timing
+	// allowance, since each call returns only after the signer has freed
+	// its slot (socketSigner).
+	maxSignerCalls = wire.MaxServerSignerCalls
 	// maxAgentCalls is the most of them relayed for host agents (the agent
 	// share), so that logins, revocations, directory installs, forgets and
 	// the server's own reads always have the other half. F11 (03-08g).

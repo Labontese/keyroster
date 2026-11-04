@@ -28,7 +28,8 @@ const summaryInterval = time.Minute
 // the rate become individual refusal leaves; the rest are counted per
 // reason and written as one refusal_summary leaf per window, so that
 // logged plus summarized refusals always equal all refusals. Guarded by
-// Signer.mu.
+// Signer.mu, with one exception: Serve's acceptLimiter, a local variable
+// that only the accept loop's goroutine touches (F16 (03-08h)).
 type refusalLimiter struct {
 	perMinute   int
 	burst       int
@@ -291,6 +292,8 @@ func classify(detail string) uint8 {
 		"user_verification_missing", "bad_client_data", "type_mismatch", "challenge_mismatch",
 		"origin_mismatch", "cross_origin_refused", "assertion_signature_invalid", "unsupported_algorithm",
 		"directory_version_chain", "directory_quorum_not_met", "directory_exceeds_policy",
+		// F07 (03-08h): a directory host agents cannot render.
+		"directory_unrenderable",
 		// Revocation installation binding (03-03, the T-03-20 rule).
 		"revoke_installation_missing", "revoke_installation_mismatch",
 		// Directory installation binding (03-04, D-04, the same rule).
