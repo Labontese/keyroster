@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08g-PLAN.md (PR #83 open, awaiting the merge gate)"
-last_updated: "2026-11-03T22:04:20.615Z"
+stopped_at: "Completed 03-08h-PLAN.md (PR #84 open, awaiting the merge gate)"
+last_updated: "2026-11-04T11:13:06.756Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 0a0913d7c69aaab987521bde550200237d381cc1
+state_head: 7bdcc2674d738a82b77b5407f1d4a0fd8966bcbc
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 63
-  completed_plans: 54
+  completed_plans: 55
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 20 of 28
+Plan: 21 of 28
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -109,6 +109,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08k | 115min | 4 tasks | 24 files |
 | Phase 03 P08f | 200min | 4 tasks | 32 files |
 | Phase 03 P08g | 75min | 4 tasks | 19 files |
+| Phase 03 P08h | 110min | 4 tasks | 28 files |
 
 ## Accumulated Context
 
@@ -307,6 +308,10 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08g: keyroster-server keeps at most 12 budgeted signer calls in flight (budgetSigner around every signer), at most 6 relayed for host agents (GetBundle, GetDirectoryVersion), which take the agent token first; GetKRL is outside the budget (no signer lock, coalesced), so at most 13 calls
 - [Phase 03]: 03-08g: one enrolled agent has at most 2 requests in flight on the state and heartbeat routes together (agentSlot after requireAgent); a further one is 429 with Retry-After 1 and rate limited
 - [Phase 03]: 03-08g: concurrent directory-mirror misses share one detached GetDirectory fetch per Status SHA-256 and version; a KRL is served only once its krl-served.json copy is durable (servedKRL.durable)
+- [Phase 03]: 03-08h F07: CheckRenderable at install only (after CheckPolicy, against the installed directory): 2048 accounts per host group, 64 KiB per principals file at the widest version; above-cap installed groups may only shrink (subset) and too-large files may not grow
+- [Phase 03]: 03-08h E-1 (owner 2026-11-04): files sized by a sizer indexing roles and principals once, deduplicated without sorting, exactly the rendered sizes; 2 s bound under -race kept
+- [Phase 03]: 03-08h E-2 (owner 2026-11-04): a host moved (shared host key, active entries) to another host group is refused directory_unrenderable when the union of both groups' accounts is above 4096 or a new-group file is above 64 KiB
+- [Phase 03]: 03-08h F16: per-uid shares of 16 of the signer's 32 connections taken in the accept loop without s.mu; slot released before the close; socketSigner waits for the close (signerclient.Client AwaitClose), so the server's live connections stay within its 12 tokens plus GetKRL
 
 ### Pending Todos
 
@@ -347,6 +352,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-03T22:04:20.183Z
-Stopped at: Completed 03-08g-PLAN.md (PR #83 open, awaiting the merge gate)
+Last session: 2026-11-04T11:12:43.730Z
+Stopped at: Completed 03-08h-PLAN.md (PR #84 open, awaiting the merge gate)
 Resume file: None
