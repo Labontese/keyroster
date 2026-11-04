@@ -851,14 +851,10 @@ func TestKRLServedCopy(t *testing.T) {
 		countSyncs(t, &failing)
 		v200 := krlDoc(t, e.ops, copyInstallation, 200, "krl v200")
 		e.fake.setKRL(v200, nil)
-		if res := e.get(t); res.Code != http.StatusServiceUnavailable {
-			t.Fatalf("GET v200 with a failing directory sync = %d, want 503", res.Code)
-		}
+		requireUnavailable(t, "GET v200 with a failing directory sync", e.get(t), false)
 		e.restart(t)
-		for i := range 2 {
-			if res := e.get(t); res.Code != http.StatusServiceUnavailable {
-				t.Fatalf("GET %d of v200 after the restart, the sync still failing = %d; want 503", i+1, res.Code)
-			}
+		for range 2 {
+			requireUnavailable(t, "GET of v200 after the restart, the sync still failing", e.get(t), false)
 		}
 		if _, err := e.s.krlItem(context.Background(), 100); err == nil {
 			t.Fatal("krlItem served v200 to an agent after the restart, with no directory sync of it")

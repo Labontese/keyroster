@@ -58,7 +58,7 @@ key-decisions:
   - "F11: the server's signer budget is a wrapper that newServer installs around whatever signer it gets, so every fakeSigner test runs through it; the share is chosen by method (GetBundle, GetDirectoryVersion), so the heartbeat and admin pending-hosts callers of GetDirectoryVersion take it too"
   - "F11: an agent call takes its agent token before its total token, and gives the agent token back when its ctx ends at the total wait; GetKRL alone skips the budget (no signer lock, coalesced to one call), so the server holds at most 13 signer calls"
   - "F11: one per-agent in-flight count (cap 2) across the state and heartbeat routes, keyed on the agents row ID, taken after requireAgent charged the bucket; its 429 carries Retry-After 1 and rate limited"
-  - "F12: the mirror fill is coalesced per Status SHA-256 and version, detached from every request; a failure is never cached; pending fetches are kept per SHA-256 and version, and only the fetch for the Status the server holds when it ends becomes the entry (pre-merge review fix round 1)"
+  - "F12: the mirror fill is coalesced per Status SHA-256 and version, detached from every request; a failure is never cached; pending fetches are kept per SHA-256 and version, and only the fetch for the Status the server holds when it ends (or any fetch, when it holds no Status) becomes the entry (pre-merge review fix round 1)"
   - "F13: a KRL version is served only once its copy is durable; the equal-version shortcut is taken only for a durable copy, otherwise the full write is redone; the copy read at start is never durable, so every start rewrites it once before it is served (owner decision, pre-merge review fix round 1, owner follow-up; it replaced a sync at start)"
 
 metrics:
@@ -329,6 +329,13 @@ Run in WSL on 5c60311.
 | Full gate's `./...` | ok, 331.743 s | ok, 128.105 s |
 
 The margin run is the slowest of the round: internal/server took 158.8 s, against 120 to 131 s in the other runs. So the machine was loaded during that run, and it still stayed within its limit. The full gate passed: vet three times, gofmt clean, golangci-lint "0 issues.", capslock 92/37/23 (each equal to its baseline), dep-firewall, testonly-firewall, and 47 pinned actions. TestFetch passed in both `./...` runs.
+
+### Fix-round check follow-up
+
+The narrow check of this round found the code correct and three low gaps in the evidence, fixed in one commit:
+- `restart_after_dir_sync_failure` now checks the 503 body (`{"error":"signer unavailable"}`) with requireUnavailable, so the runbook's "503 (signer unavailable)" is run in CI. A mutant that changes that body in handleKRL now fails it.
+- Task 3's verify also requires `copy_read_at_start_served_after_write`, `restart_after_dir_sync_failure` and `competing_status_one_fetch_per_key`.
+- The F12 key decision here and the PR body say that a fetch also becomes the entry when the server holds no Status.
 
 ### Deviations in this round
 
