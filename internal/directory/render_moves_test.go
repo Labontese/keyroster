@@ -1,6 +1,8 @@
 package directory
 
 import (
+	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
+	"golang.org/x/crypto/ssh"
 )
 
 // moveNames is prefix<from>, prefix<from+1>, ... n names of four digits.
@@ -120,6 +123,53 @@ func TestCheckRenderableFastEnough(t *testing.T) {
 		t.Logf("%d host groups, %d bytes", len(d.HostGroups), len(c))
 		timed(t, "30000 host groups in both versions", d, moveDir(1, groups(), nil))
 	})
+	t.Run("hosts_from_many_groups_into_above_share_group", func(t *testing.T) {
+		// C-1 (fix-round check, PR #84): installed (above the share, Q-G7)
+		// has big, 4096 accounts, and 3700 groups of one of big's
+		// accounts, each with one host. The offered version keeps big and
+		// moves every host into it: 3700 pairs of 4097 accounts in the
+		// two groups, 4096 in their union. Valid and within
+		// wire.MaxDirectory.
+		bigNames := moveNames("u", 0, MaxAccounts)
+		groups := []HostGroup{moveGroup("big", bigNames)}
+		var from, to []Host
+		for i := range 3700 {
+			name := fmt.Sprintf("g%05d", i)
+			groups = append(groups, moveGroup(name, bigNames[i:i+1]))
+			h := Host{Name: fmt.Sprintf("h%05d", i), HostGroup: name, Keys: []string{realKey(t, i)}, Principals: []string{fmt.Sprintf("h%05d", i)}, Status: StatusActive}
+			from = append(from, h)
+			h.HostGroup = "big"
+			to = append(to, h)
+		}
+		installed := moveDir(1, groups, from)
+		offered := moveDir(2, slices.Clone(groups), to)
+		for _, d := range []*Directory{installed, offered} {
+			c, err := d.Canonical()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(c) > wire.MaxDirectory {
+				t.Fatalf("version %d is %d bytes, above wire.MaxDirectory (%d)", d.Version, len(c), wire.MaxDirectory)
+			}
+			if _, err := Parse(c); err != nil {
+				t.Fatalf("version %d does not parse: %v", d.Version, err)
+			}
+			t.Logf("version %d: %d bytes", d.Version, len(c))
+		}
+		timed(t, "3700 hosts from 3700 one-account groups into big (4096)", offered, installed)
+	})
+}
+
+// realKey is the trust.FormatKey form of a deterministic Ed25519 key for i.
+func realKey(t *testing.T, i int) string {
+	t.Helper()
+	seed := make([]byte, ed25519.SeedSize)
+	binary.BigEndian.PutUint32(seed, uint32(i)+1) //nolint:gosec // G115: i is small and positive
+	pub, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(seed).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return trust.FormatKey(pub)
 }
 
 // moveOne is a directory of version v with the host groups and host h1

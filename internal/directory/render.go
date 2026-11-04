@@ -364,7 +364,7 @@ func hostGroupIndex(d *Directory) map[string]int {
 // hostGroupIndex(installed). The union of a move is counted once per pair
 // of host groups (R-1, pre-merge review of PR #84).
 func checkMoves(d, installed *Directory, installedGroups map[string]int, aboveBound map[string]string) error {
-	u := moveUnions{installed: installed, d: d, from: installedGroups, to: hostGroupIndex(d), fromSets: map[string]map[string]bool{}, counts: map[[2]string]int{}}
+	u := moveUnions{installed: installed, d: d, from: installedGroups, to: hostGroupIndex(d), fromSets: map[string]map[string]bool{}, toSets: map[string]map[string]bool{}, counts: map[[2]string]int{}}
 	byKey := map[string]*Host{}
 	byName := map[string]*Host{} // the first active entry of a name, as HostByName finds it
 	for i := range installed.Hosts {
@@ -416,15 +416,17 @@ type moveUnions struct {
 	installed, d *Directory
 	from, to     map[string]int
 	fromSets     map[string]map[string]bool // from group name to its account names
+	toSets       map[string]map[string]bool // to group name to its account names
 	counts       map[[2]string]int          // (from, to) to count's answer
 }
 
 // count is the number of distinct accounts of host group from in installed
 // and host group to in d when it is above MaxAccounts, and at most
 // MaxAccounts otherwise. When the two groups' lists add up to at most
-// MaxAccounts the union cannot be larger, so nothing is counted; otherwise
-// from's account set is built once and to's accounts not in it are
-// counted, each once.
+// MaxAccounts the union cannot be larger, so nothing is counted;
+// otherwise each group's account set is built once, for its first pair,
+// and the smaller set's accounts not in the larger are counted (C-1,
+// fix-round check of PR #84), so a pair costs the smaller group's size.
 func (u *moveUnions) count(from, to string) int {
 	key := [2]string{from, to}
 	if n, ok := u.counts[key]; ok {
@@ -439,24 +441,33 @@ func (u *moveUnions) count(from, to string) int {
 	}
 	n := len(fromAccounts) + len(toAccounts)
 	if n > MaxAccounts {
-		set, ok := u.fromSets[from]
-		if !ok {
-			set = make(map[string]bool, len(fromAccounts))
-			for _, a := range fromAccounts {
-				set[a.Account] = true
-			}
-			u.fromSets[from] = set
+		small, large := accountSet(u.fromSets, from, fromAccounts), accountSet(u.toSets, to, toAccounts)
+		if len(small) > len(large) {
+			small, large = large, small
 		}
-		extra := map[string]bool{}
-		for _, a := range toAccounts {
-			if !set[a.Account] {
-				extra[a.Account] = true
+		n = len(large)
+		for a := range small {
+			if !large[a] {
+				n++
 			}
 		}
-		n = len(set) + len(extra)
 	}
 	u.counts[key] = n
 	return n
+}
+
+// accountSet is sets[name], the account names of accounts, built on first
+// use.
+func accountSet(sets map[string]map[string]bool, name string, accounts []AccountMap) map[string]bool {
+	set, ok := sets[name]
+	if !ok {
+		set = make(map[string]bool, len(accounts))
+		for _, a := range accounts {
+			set[a.Account] = true
+		}
+		sets[name] = set
+	}
+	return set
 }
 
 // subset reports whether every account of accounts is in was. A nil was
