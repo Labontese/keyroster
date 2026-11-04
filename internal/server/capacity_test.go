@@ -273,39 +273,66 @@ func TestSignerBudget(t *testing.T) {
 		t.Cleanup(g.open)
 		return g, withSignerBudget(g)
 	}
+	// The owner's rule (Q-G1), not the constant under test: the agent share
+	// is at most half the total, and the other half stays open to
+	// interactive calls.
+	share := maxSignerCalls / 2
+	// Every budgeted method, each alone (pre-merge review fix round 1):
+	// an interactive method fills the whole budget and no more; an agent
+	// method fills its share and no more, so 20 of them alone peak at the
+	// share, not at the total.
 	t.Run("total_bounded", func(t *testing.T) {
-		g, b := setup(t)
-		errs := goCalls(ctx, b, 20, only("Login"))
-		waitFor(t, "the total in flight", func() bool { n, _, _, _ := g.load(); return n >= maxSignerCalls })
-		time.Sleep(settle)
-		if n, peak, _, _ := g.load(); n != maxSignerCalls || peak != maxSignerCalls {
-			t.Fatalf("%d calls in flight, peak %d; want %d", n, peak, maxSignerCalls)
+		for _, tc := range []struct {
+			method string
+			agent  bool
+		}{
+			{"Status", false}, {"GetDirectory", false}, {"InstallDirectory", false}, {"Login", false},
+			{"Revoke", false}, {"ForgetAgent", false}, {"GetBundle", true}, {"GetDirectoryVersion", true},
+		} {
+			t.Run(tc.method, func(t *testing.T) {
+				g, b := setup(t)
+				want, wantAgent := maxSignerCalls, 0
+				if tc.agent {
+					want, wantAgent = share, share
+				}
+				errs := goCalls(ctx, b, 20, only(tc.method))
+				waitFor(t, "the calls in flight", func() bool { n, _, _, _ := g.load(); return n >= want })
+				time.Sleep(settle)
+				if n, peak, _, agentPeak := g.load(); n != want || peak != want || agentPeak != wantAgent {
+					t.Fatalf("20 calls of %s: %d in flight, peak %d, agent peak %d; want %d, %d, %d", tc.method, n, peak, agentPeak, want, want, wantAgent)
+				}
+				g.open()
+				collect(t, errs, 20)
+			})
 		}
-		g.open()
-		collect(t, errs, 20)
 	})
+	// With the agent share held, each interactive method alone fills the
+	// room the share leaves, maxSignerCalls - share, and the agent calls
+	// stay at their share (pre-merge review fix round 1: one method at a
+	// time, so a method that queued behind the agent share, or skipped the
+	// budget, cannot hide behind another).
 	t.Run("catch_up_bounded_interactive_room", func(t *testing.T) {
-		g, b := setup(t)
-		// The owner's rule (Q-G1), not the constant under test: the agent
-		// share is at most half the total, and the other half stays open to
-		// interactive calls.
-		share := maxSignerCalls / 2
-		agents := goCalls(ctx, b, 20, alternate("GetBundle", "GetDirectoryVersion"))
-		waitFor(t, "the agent share in flight", func() bool { _, _, a, _ := g.load(); return a >= share })
-		// The 14 queued agent calls reach their token waits before the
-		// interactive calls start (plan check 1, item 5).
-		time.Sleep(settle)
-		interactive := goCalls(ctx, b, 20, alternate("Login", "Revoke"))
-		waitFor(t, "the interactive room in flight", func() bool { n, _, a, _ := g.load(); return n-a >= maxSignerCalls-share })
-		time.Sleep(settle)
-		n, peak, a, agentPeak := g.load()
-		if n-a != maxSignerCalls-share || agentPeak != share || peak != maxSignerCalls {
-			t.Fatalf("interactive in flight %d, agent peak %d, total peak %d; want %d, %d, %d",
-				n-a, agentPeak, peak, maxSignerCalls-share, share, maxSignerCalls)
+		for _, method := range []string{"Login", "Revoke", "InstallDirectory", "ForgetAgent", "GetDirectory", "Status"} {
+			t.Run(method, func(t *testing.T) {
+				g, b := setup(t)
+				agents := goCalls(ctx, b, 20, alternate("GetBundle", "GetDirectoryVersion"))
+				waitFor(t, "the agent share in flight", func() bool { _, _, a, _ := g.load(); return a >= share })
+				// The 14 queued agent calls reach their token waits before the
+				// interactive calls start (plan check 1, item 5).
+				time.Sleep(settle)
+				interactive := goCalls(ctx, b, 20, only(method))
+				waitFor(t, "the interactive room in flight", func() bool { n, _, a, _ := g.load(); return n-a >= maxSignerCalls-share })
+				time.Sleep(settle)
+				n, peak, a, agentPeak := g.load()
+				if n-a != maxSignerCalls-share || a != share || agentPeak != share || peak != maxSignerCalls {
+					t.Fatalf("%s: interactive in flight %d, agent in flight %d, agent peak %d, total peak %d; want %d, %d, %d, %d",
+						method, n-a, a, agentPeak, peak, maxSignerCalls-share, share, share, maxSignerCalls)
+				}
+				g.open()
+				collect(t, agents, 20)
+				collect(t, interactive, 20)
+			})
 		}
-		g.open()
-		collect(t, agents, 20)
-		collect(t, interactive, 20)
 	})
 	t.Run("waiter_ctx_ends", func(t *testing.T) {
 		g, b := setup(t)
