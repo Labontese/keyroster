@@ -304,7 +304,7 @@ Three findings on PR #84 at 75620a1. All are fixed on the branch, each with its 
 - hosts with 1 to 4 keys from a pool of 12, so keys repeat across hosts;
 - disabled hosts, hosts in a group the other version lacks, and renamed hosts.
 
-The draws reach every kind of answer: 30 accepted, 3 move-union refusals, 10 move-file refusals and 5 others. The test fails if any kind is missing. The draws do not show the counted path (sum above 4096, union within) separately. `hosts_moved_into_overlapping_group` and `overlap_at_cap_accepted` pin that path.
+The draws reach every kind of answer. At f4292a8 (with R-2) they give 28 accepted, 4 move-union refusals, 11 move-file refusals and 5 others; at 4aa3178 (R-1 alone) 30, 3, 10 and 5. The test fails if any kind is missing. The draws do not show the counted path (sum above 4096, union within) separately. `hosts_moved_into_overlapping_group` and `overlap_at_cap_accepted` pin that path.
 
 **Timed cases.** `TestCheckRenderableFastEnough` is in internal/directory, outside apply's budget. It has no t.Parallel and a 2 s bound per shape. Run under -race on this machine:
 
