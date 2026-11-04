@@ -203,6 +203,25 @@ func TestMoveUnion(t *testing.T) {
 			t.Fatalf("CheckRenderable = %v, want h1's move from lab refused with 4097 accounts", err)
 		}
 	})
+	t.Run("same_source_two_targets", func(t *testing.T) {
+		// C-3 (fix-round check of PR #84): h0 moves from lab to db
+		// (3000 + 1096, fits) and h1 from lab to web (3000 + 1097).
+		groups := func() []HostGroup {
+			return []HostGroup{moveGroup("db", moveNames("d", 0, MaxAccounts-3000)), moveGroup("lab", lab), moveGroup("web", moveNames("w", 0, MaxAccounts-3000+1))}
+		}
+		installed := moveDir(1, groups(), []Host{
+			{Name: "h0", HostGroup: "lab", Keys: []string{"k0"}, Principals: []string{"h0"}, Status: StatusActive},
+			{Name: "h1", HostGroup: "lab", Keys: []string{"k1"}, Principals: []string{"h1"}, Status: StatusActive},
+		})
+		offered := moveDir(2, groups(), []Host{
+			{Name: "h0", HostGroup: "db", Keys: []string{"k0"}, Principals: []string{"h0"}, Status: StatusActive},
+			{Name: "h1", HostGroup: "web", Keys: []string{"k1"}, Principals: []string{"h1"}, Status: StatusActive},
+		})
+		err := CheckRenderable(offered, installed)
+		if !errors.Is(err, ErrUnrenderable) || !strings.Contains(err.Error(), "host h1 moves from host group lab to web, 4097 accounts") {
+			t.Fatalf("CheckRenderable = %v, want h1's move to web refused with 4097 accounts", err)
+		}
+	})
 	t.Run("overlap_at_cap_accepted", func(t *testing.T) {
 		// web maps 1097 accounts, one of them lab's: 4097 in the two
 		// groups, MaxAccounts in their union.
@@ -465,7 +484,7 @@ func movePair(seed uint64) (installed, offered *Directory) {
 // reach every kind of answer.
 func TestCheckRenderableMatchesReference(t *testing.T) {
 	kinds := map[string]int{}
-	for seed := range uint64(48) {
+	for seed := range uint64(96) {
 		installed, offered := movePair(seed)
 		for _, d := range []*Directory{installed, offered} {
 			owner := map[string]string{}
