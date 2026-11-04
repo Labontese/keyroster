@@ -247,6 +247,40 @@ func TestMoveByName(t *testing.T) {
 			t.Fatalf("CheckRenderable = %v, want it accepted", err)
 		}
 	})
+	// C-2 (owner decision (2026-11-04), fix-round check of PR #84): the
+	// name counts only for a host with a key no active installed host
+	// holds, a possible rekey. A host whose every key is known is found
+	// by its keys, as its agent finds it. Installed: x (k1) in lab, y (k2)
+	// in web, 4097 accounts together.
+	host := func(name, group string, keys ...string) Host {
+		return Host{Name: name, HostGroup: group, Keys: keys, Principals: []string{name}, Status: StatusActive}
+	}
+	xy := moveDir(1, groups(MaxAccounts-3000+1), []Host{host("x", "lab", "k1"), host("y", "web", "k2")})
+	t.Run("names_swapped_accepted", func(t *testing.T) {
+		// Each host keeps its group and keys under the other's name.
+		offered := moveDir(2, groups(MaxAccounts-3000+1), []Host{host("x", "web", "k2"), host("y", "lab", "k1")})
+		if err := CheckRenderable(offered, xy); err != nil {
+			t.Fatalf("CheckRenderable = %v, want it accepted: no host moves", err)
+		}
+	})
+	t.Run("renamed_onto_removed_name_accepted", func(t *testing.T) {
+		// y is removed, and x takes its name, in lab with k1.
+		offered := moveDir(2, groups(MaxAccounts-3000+1), []Host{host("y", "lab", "k1")})
+		if err := CheckRenderable(offered, xy); err != nil {
+			t.Fatalf("CheckRenderable = %v, want it accepted: no host moves", err)
+		}
+	})
+	t.Run("known_and_fresh_key_refused", func(t *testing.T) {
+		// y now lists x's k1 and a fresh key, in lab. x's agent finds y in
+		// lab, no move. y's agent (sshd k2) finds no entry, keeps web's
+		// files by name (host_keys_rotated), and meets web with lab once
+		// sshd has the fresh key.
+		offered := moveDir(2, groups(MaxAccounts-3000+1), []Host{host("y", "lab", "k1", "k3")})
+		err := CheckRenderable(offered, xy)
+		if !errors.Is(err, ErrUnrenderable) || !strings.Contains(err.Error(), "host y moves from host group web to lab, 4097 accounts") {
+			t.Fatalf("CheckRenderable = %v, want y's move from web refused with 4097 accounts", err)
+		}
+	})
 }
 
 // TestMoveGroupsAndKeys (R-3, pre-merge review of PR #84): a move's union
@@ -303,9 +337,11 @@ func TestMoveGroupsAndKeys(t *testing.T) {
 // equivalence check: host groups a to d of sizes around the share and the
 // cap, drawn as runs of one pool of account names so that groups overlap
 // by varying amounts, a few accounts with a file above MaxPrincipalsFile,
-// and hosts with 1 to 4 keys drawn from a small pool (so keys repeat
-// across hosts), some disabled, some in a group the other version does
-// not define, some renamed. seed varies the draw.
+// and hosts with 1 to 4 keys drawn from a pool of 40, some disabled, some
+// in a group the other version does not define, some renamed. Each
+// version's key sets are as Validate requires them, no key twice in a
+// host or on two hosts (C-2, fix-round check of PR #84); across the
+// versions a key may move to another host. seed varies the draw.
 func movePair(seed uint64) (installed, offered *Directory) {
 	x := seed*6364136223846793005 + 1442695040888963407
 	next := func(n int) int { // a deterministic draw in [0, n)
@@ -357,35 +393,62 @@ func movePair(seed uint64) (installed, offered *Directory) {
 			og = append(og, group(n, sizes[:9], false))
 		}
 	}
-	keyPool := moveNames("ssh-ed25519 k", 0, 12)
+	keyPool := moveNames("ssh-ed25519 k", 0, 40)
+	// keys draws 1 to 4 keys of keyPool that used does not hold, and marks
+	// them used: at most 7 hosts of 4 keys draw from 40.
+	keys := func(used map[string]bool) []string {
+		var out []string
+		for n := 1 + next(4); len(out) < n; {
+			if k := keyPool[next(len(keyPool))]; !used[k] {
+				used[k] = true
+				out = append(out, k)
+			}
+		}
+		return out
+	}
 	host := func(name string) Host {
-		h := Host{Name: name, Principals: []string{"h"}, Status: StatusActive}
+		h := Host{Name: name, Principals: []string{name}, Status: StatusActive}
 		if next(5) == 0 {
 			h.Status = StatusDisabled
 		}
 		h.HostGroup = append(slices.Clone(names), "zz")[next(len(names)+1)]
-		for range 1 + next(4) {
-			h.Keys = append(h.Keys, keyPool[next(len(keyPool))])
-		}
 		return h
 	}
 	var ih, oh []Host
+	installedKeys := map[string]bool{}
 	for i := range 6 {
-		ih = append(ih, host(fmt.Sprintf("h%d", i)))
+		h := host(fmt.Sprintf("h%d", i))
+		h.Keys = keys(installedKeys)
+		ih = append(ih, h)
 	}
-	// Offered: each installed host again, mostly with its keys, some
-	// renamed, in a drawn group, and one more host.
-	for _, o := range ih {
+	// Offered: each installed host again, two in three with its keys
+	// (marked first, so no drawn key takes them), some renamed, in a
+	// drawn group, and one more host.
+	offeredKeys := map[string]bool{}
+	kept := make([]bool, len(ih))
+	for i, o := range ih {
+		if kept[i] = next(3) > 0; kept[i] {
+			for _, k := range o.Keys {
+				offeredKeys[k] = true
+			}
+		}
+	}
+	for i, o := range ih {
 		h := host(o.Name)
 		if next(4) == 0 {
 			h.Name = "r" + o.Name
+			h.Principals = []string{h.Name}
 		}
-		if next(3) > 0 {
+		if kept[i] {
 			h.Keys = slices.Clone(o.Keys)
+		} else {
+			h.Keys = keys(offeredKeys)
 		}
 		oh = append(oh, h)
 	}
-	oh = append(oh, host("h9"))
+	h9 := host("h9")
+	h9.Keys = keys(offeredKeys)
+	oh = append(oh, h9)
 	installed = &Directory{Version: 1, Prev: strings.Repeat("0", 64), Roles: roles, HostGroups: ig, Hosts: ih}
 	offered = &Directory{Version: 2, Prev: strings.Repeat("0", 64), Roles: slices.Clone(roles), HostGroups: og, Hosts: oh}
 	installed.Sort()
@@ -396,13 +459,25 @@ func movePair(seed uint64) (installed, offered *Directory) {
 // TestCheckRenderableMatchesReference (R-1): CheckRenderable gives exactly
 // the answers of checkRenderableRef, the implementation before R-1, which
 // looks host groups up by a scan and counts a move's union once per
-// matching host, with R-2's match by name added: accept or refuse, and
+// matching host, with R-2's match by name added (for a host with a fresh
+// key, C-2): accept or refuse, and
 // the same error text, so the same first failing host. The draws must
 // reach every kind of answer.
 func TestCheckRenderableMatchesReference(t *testing.T) {
 	kinds := map[string]int{}
 	for seed := range uint64(48) {
 		installed, offered := movePair(seed)
+		for _, d := range []*Directory{installed, offered} {
+			owner := map[string]string{}
+			for _, h := range d.Hosts {
+				for _, k := range h.Keys {
+					if o, dup := owner[k]; dup {
+						t.Fatalf("seed %d, version %d: key %s on %s and %s, which Validate refuses", seed, d.Version, k, o, h.Name)
+					}
+					owner[k] = h.Name
+				}
+			}
+		}
 		got, want := CheckRenderable(offered, installed), checkRenderableRef(offered, installed)
 		if (got == nil) != (want == nil) || (got != nil && got.Error() != want.Error()) {
 			t.Fatalf("seed %d: CheckRenderable = %v, the reference %v", seed, got, want)
@@ -428,7 +503,8 @@ func TestCheckRenderableMatchesReference(t *testing.T) {
 
 // checkRenderableRef is CheckRenderable, checkMoves and unionAccounts as
 // they were before R-1 (pre-merge review of PR #84), with R-2's match by
-// name added as a scan, the reference for
+// name added as a scan, for a host with a key no active installed host
+// lists (C-2), the reference for
 // TestCheckRenderableMatchesReference.
 func checkRenderableRef(d, installed *Directory) error {
 	if d == nil {
@@ -528,7 +604,10 @@ func checkRenderableRef(d, installed *Directory) error {
 				olds = append(olds, o)
 			}
 		}
-		if i := slices.IndexFunc(installed.Hosts, func(o Host) bool { return o.Status == StatusActive && o.Name == h.Name }); i >= 0 {
+		fresh := slices.ContainsFunc(h.Keys, func(k string) bool {
+			return !slices.ContainsFunc(installed.Hosts, func(o Host) bool { return o.Status == StatusActive && slices.Contains(o.Keys, k) })
+		})
+		if i := slices.IndexFunc(installed.Hosts, func(o Host) bool { return o.Status == StatusActive && o.Name == h.Name }); fresh && i >= 0 {
 			olds = append(olds, &installed.Hosts[i])
 		}
 		for _, o := range olds {
