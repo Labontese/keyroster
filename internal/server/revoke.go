@@ -266,9 +266,9 @@ func (s *Server) dropKRL() {
 // before it was kept.
 //
 // durable, F13 (03-08g), is set when the copy was renamed into place and
-// its directory synced in one keepKRLFile, or was read back from disk at
-// start. Only a durable copy lets keepKRL skip the write of an equal
-// answer.
+// its directory synced in one keepKRLFile, or was read back at start and
+// its file and directory synced then (loadServedKRL). Only a durable copy
+// lets keepKRL skip the write of an equal answer.
 type servedKRL struct {
 	version  uint64
 	doc      []byte
@@ -283,7 +283,9 @@ type servedKRL struct {
 // none yet, an error when it does not parse (strict KRLDocument JSON, then
 // krl.ParseManifest of its manifest), which stops keyroster-server. The
 // copy it returns is not verified yet: its version becomes the floor only
-// once servedFloor has verified it (PR #69 review, F3).
+// once servedFloor has verified it (PR #69 review, F3). It is durable only
+// when the sync of its file and directory at start succeeded; a failed sync
+// does not stop the start.
 func loadServedKRL(path string) (*servedKRL, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: the operator's state directory
 	if errors.Is(err, fs.ErrNotExist) {
@@ -308,8 +310,14 @@ func loadServedKRL(path string) (*servedKRL, error) {
 	if err != nil {
 		return nil, refuse(err)
 	}
-	// Read back from disk, so durable (F13 (03-08g)).
-	return &servedKRL{version: m.KRLVersion, doc: enc, krl: doc.KRL, manifest: doc.Manifest, sig: doc.Sig, durable: true}, nil
+	// Reading the copy back proves only that the page cache holds it: after
+	// a restart that followed a failed directory sync, its rename may never
+	// have reached the disk. So it is durable only once the file and its
+	// directory are synced here; otherwise the first refresh writes it again
+	// in full before it is served (F13 (03-08g)). The floor follows the copy
+	// either way.
+	durable := syncFile(path) == nil && syncDir(filepath.Dir(path)) == nil
+	return &servedKRL{version: m.KRLVersion, doc: enc, krl: doc.KRL, manifest: doc.Manifest, sig: doc.Sig, durable: durable}, nil
 }
 
 // servedFloor returns the KRL this server served, the floor of every KRL
@@ -391,11 +399,15 @@ func (s *Server) checkNoKRL(ctx context.Context) error {
 //
 // F13 (03-08g): a version is served only once its copy is durable, renamed
 // into place and its directory synced in one successful keepKRLFile, or
-// read back from disk at start. The same version with the same bytes
-// writes nothing only when the copy is durable; otherwise it is written
-// again in full, and the route answers 503 until a write succeeds. A
-// second directory sync alone would not do: after a failed fsync, a later
-// one can report success without the data having reached the disk.
+// read back at start with its file and directory synced then. The same
+// version with the same bytes writes nothing only when the copy is
+// durable; otherwise it is written again in full, and the route answers
+// 503 until a write succeeds. Within one process, after a failed
+// directory sync, the next refresh rewrites in full rather than syncing
+// again: after a failed fsync, a later one can report success without the
+// data having reached the disk. The sync at start is the one exception,
+// one sync per start; a start that follows a failed sync in the previous
+// process can meet the same false success.
 func (s *Server) keepKRL(ctx context.Context, resp *wire.GetKRLResponse) error {
 	b, err := s.signerBundle(ctx, "KRL not served: it does not verify")
 	if err != nil {
@@ -493,4 +505,16 @@ var syncDir = func(dir string) error {
 	}
 	defer func() { _ = d.Close() }()
 	return d.Sync()
+}
+
+// syncFile syncs the file at path, opened for writing because Windows
+// cannot flush a handle opened only for reading; nothing is written to
+// it. It is a variable so that a test can make it fail.
+var syncFile = func(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0) //nolint:gosec // G304: the operator's state directory
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	return f.Sync()
 }
