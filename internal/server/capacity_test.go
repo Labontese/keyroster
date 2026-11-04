@@ -919,6 +919,76 @@ func TestDirectoryMirrorFill(t *testing.T) {
 			t.Fatal("the mirror does not hold version 2 after its fetch")
 		}
 	})
+	// Pre-merge review fix round 1: callers with competing Status snapshots
+	// (old, new, old, new) never replace each other's pending fetch. One
+	// GetDirectory runs per SHA-256 and version, and only the fetch for the
+	// Status the server holds when it ends becomes the entry.
+	t.Run("competing_status_one_fetch_per_key", func(t *testing.T) {
+		e := mirrorEnv(t)
+		oldView, err := e.s.currentStatus(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// late is a caller that read oldView, the version-1 Status, and
+		// reaches the mirror only now.
+		late := func() <-chan dirResult {
+			out := make(chan dirResult, 1)
+			go func() {
+				v, err := e.s.directoryUnder(ctx, oldView)
+				out <- dirResult{v, err}
+			}()
+			return out
+		}
+		before := e.fake.count("GetDirectory")
+		entered1, release1 := e.fake.hold("GetDirectory")
+		t.Cleanup(release1)
+		a := goDirectories(ctx, e, 1)
+		select {
+		case <-entered1:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the version-1 fetch never reached the signer")
+		}
+		e.installDir(t, hostEntry("web2", hostSigners(t, 1)))
+		entered2, release2 := e.fake.hold("GetDirectory")
+		t.Cleanup(release2)
+		b := goDirectories(ctx, e, 1)
+		select {
+		case <-entered2:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the version-2 fetch never reached the signer")
+		}
+		// The server holds the version-2 Status now. A late version-1
+		// caller, then another version-2 caller.
+		c := late()
+		time.Sleep(settle)
+		d := goDirectories(ctx, e, 1)
+		time.Sleep(settle)
+		if got := e.fake.count("GetDirectory") - before; got != 2 {
+			t.Fatalf("%d GetDirectory calls for the callers of versions 1, 2, 1 and 2, want 2 (one per SHA-256 and version)", got)
+		}
+		release1()
+		release2()
+		for want, rs := range map[uint64][]dirResult{1: append(results(t, a, 1), results(t, c, 1)...), 2: append(results(t, b, 1), results(t, d, 1)...)} {
+			sha := sha256.Sum256(e.dirs[want-1])
+			for _, r := range rs {
+				if r.err != nil || r.v.version != want || r.v.sha256 != sha {
+					t.Fatalf("a version-%d caller = %+v, %v", want, r.v, r.err)
+				}
+			}
+		}
+		if m := mirrorEntry(e); m == nil || m.version != 2 {
+			t.Fatal("the mirror does not hold version 2, the version of the Status the server holds")
+		}
+		// A late version-1 caller once that fetch has ended starts a fetch
+		// of its own, which fails closed (the signer serves version 2 now)
+		// and leaves the newer entry alone.
+		if r := <-late(); !errors.Is(r.err, errMirrorStale) {
+			t.Fatalf("the late version-1 caller = %v, want errMirrorStale", r.err)
+		}
+		if m := mirrorEntry(e); m == nil || m.version != 2 {
+			t.Fatal("a caller with the older version-1 Status dropped the version-2 entry")
+		}
+	})
 	t.Run("mismatch_drops_status", func(t *testing.T) {
 		e := mirrorEnv(t)
 		// Status keeps reporting version 1 with its SHA-256; the signer's
