@@ -773,81 +773,67 @@ func TestKRLServedCopy(t *testing.T) {
 			t.Fatalf("GET 4 of v200 = %d after %d more syncs; want 200 and no write", res.Code, syncs.Load()-n-1)
 		}
 	})
-	// F13 (03-08g), pre-merge review fix round 1: reading the copy back at
-	// start proves only that the page cache holds it, so the server syncs
-	// the file and its directory once at start. Only when both succeed is
-	// the copy durable, and its own version served with no write.
-	t.Run("copy_read_at_start_is_durable", func(t *testing.T) {
+	// F13 (03-08g), pre-merge review fix round 1, owner follow-up: reading
+	// the copy back at start proves only that the page cache holds it, and a
+	// sync at start could report success although an earlier rename never
+	// reached the disk. So the copy read at start is not yet durable: the
+	// first refresh writes it again in full, once, and serves it only after
+	// that write and its directory sync; the next refresh writes nothing.
+	t.Run("copy_read_at_start_rewritten_once", func(t *testing.T) {
 		e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
 		doc := krlDoc(t, e.ops, copyInstallation, 5, "krl v5")
-		e.writeCopy(t, doc)
+		kept := e.writeCopy(t, doc)
 		syncs := countSyncs(t, nil)
 		e.restart(t)
-		if syncs.Load() != 1 {
-			t.Fatalf("the start made %d directory syncs, want 1 (the copy read at start is synced once)", syncs.Load())
+		if syncs.Load() != 0 {
+			t.Fatalf("the start made %d directory syncs, want 0 (the copy read at start is rewritten, not synced)", syncs.Load())
 		}
-		// A marker in the file: a write would replace it.
+		// A marker in the file: a write replaces it.
 		if err := os.WriteFile(e.file, []byte("marker"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		e.fake.setKRL(doc, nil)
+		if res := e.get(t); res.Code != http.StatusOK || !bytes.Equal(e.copyBytes(t), kept) || syncs.Load() != 1 {
+			t.Fatalf("GET 1 of the copy's own version after a restart = %d after %d syncs, copy %q; want 200 after one full rewrite and 1 sync", res.Code, syncs.Load(), e.copyBytes(t))
+		}
+		if err := os.WriteFile(e.file, []byte("marker"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if res := e.get(t); res.Code != http.StatusOK || string(e.copyBytes(t)) != "marker" || syncs.Load() != 1 {
-			t.Fatalf("GET of the copy's own version after a restart = %d after %d syncs, copy %q; want 200, no further sync and no write", res.Code, syncs.Load(), e.copyBytes(t))
+			t.Fatalf("GET 2 = %d after %d syncs, copy %q; want 200, no write and no further sync", res.Code, syncs.Load(), e.copyBytes(t))
 		}
 	})
-	// The start sync fails: the copy read at start is not durable, so the
-	// first refresh writes it again in full before its version is served,
-	// and answers 503 while that write fails too. The directory sync and
-	// the file sync are each checked.
-	t.Run("copy_read_at_start_not_synced", func(t *testing.T) {
-		t.Run("dir_sync_fails", func(t *testing.T) {
-			e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
-			doc := krlDoc(t, e.ops, copyInstallation, 5, "krl v5")
-			kept := e.writeCopy(t, doc)
-			var failing atomic.Bool
-			failing.Store(true)
-			syncs := countSyncs(t, &failing)
-			e.restart(t)
-			if err := os.WriteFile(e.file, []byte("marker"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			e.fake.setKRL(doc, nil)
-			if res := e.get(t); res.Code != http.StatusServiceUnavailable || !bytes.Equal(e.copyBytes(t), kept) || syncs.Load() != 2 ||
-				!strings.Contains(e.log.String(), "KRL not kept: injected EIO") {
-				t.Fatalf("GET 1 of the copy's own version, the start sync and this one failing = %d after %d syncs, copy %q; want 503 after 2 syncs and a full rewrite:\n%s",
-					res.Code, syncs.Load(), e.copyBytes(t), e.log.String())
-			}
-			// krlItem refreshes too: one more full write, failing.
-			if _, err := e.s.krlItem(context.Background(), 0); err == nil || syncs.Load() != 3 {
-				t.Fatalf("krlItem = %v after %d syncs; want an error after 3 (v5 is not durable)", err, syncs.Load())
-			}
-			failing.Store(false)
-			if res := e.get(t); res.Code != http.StatusOK || !bytes.Equal(e.copyBytes(t), kept) || syncs.Load() != 4 {
-				t.Fatalf("GET 2 once the sync works = %d after %d syncs; want 200 after 4 (one more full write)", res.Code, syncs.Load())
-			}
-			if res := e.get(t); res.Code != http.StatusOK || syncs.Load() != 4 {
-				t.Fatalf("GET 3 = %d after %d syncs; want 200 and no write", res.Code, syncs.Load())
-			}
-		})
-		t.Run("file_sync_fails", func(t *testing.T) {
-			e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
-			doc := krlDoc(t, e.ops, copyInstallation, 5, "krl v5")
-			kept := e.writeCopy(t, doc)
-			orig := syncFile
-			syncFile = func(string) error { return errors.New("injected EIO") }
-			t.Cleanup(func() { syncFile = orig })
-			syncs := countSyncs(t, nil)
-			e.restart(t)
-			syncFile = orig
-			if err := os.WriteFile(e.file, []byte("marker"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			e.fake.setKRL(doc, nil)
-			if res := e.get(t); res.Code != http.StatusOK || !bytes.Equal(e.copyBytes(t), kept) || syncs.Load() != 1 {
-				t.Fatalf("GET of the copy's own version after a failed file sync at start = %d after %d directory syncs, copy %q; want 200 after a full rewrite and 1 sync",
-					res.Code, syncs.Load(), e.copyBytes(t))
-			}
-		})
+	// The first refresh's write fails at its directory sync: the copy read
+	// at start is not served (503, and not to agents either) until a write
+	// succeeds.
+	t.Run("copy_read_at_start_served_after_write", func(t *testing.T) {
+		e := newCopyEnv(t, filepath.Join(t.TempDir(), "krl-served.json"))
+		doc := krlDoc(t, e.ops, copyInstallation, 5, "krl v5")
+		kept := e.writeCopy(t, doc)
+		var failing atomic.Bool
+		failing.Store(true)
+		syncs := countSyncs(t, &failing)
+		e.restart(t)
+		if err := os.WriteFile(e.file, []byte("marker"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		e.fake.setKRL(doc, nil)
+		if res := e.get(t); res.Code != http.StatusServiceUnavailable || !bytes.Equal(e.copyBytes(t), kept) || syncs.Load() != 1 ||
+			!strings.Contains(e.log.String(), "KRL not kept: injected EIO") {
+			t.Fatalf("GET 1 of the copy's own version, its directory sync failing = %d after %d syncs, copy %q; want 503 after a full rewrite and 1 sync:\n%s",
+				res.Code, syncs.Load(), e.copyBytes(t), e.log.String())
+		}
+		// krlItem refreshes too: one more full write, failing.
+		if _, err := e.s.krlItem(context.Background(), 0); err == nil || syncs.Load() != 2 {
+			t.Fatalf("krlItem = %v after %d syncs; want an error after 2 (v5 is not durable)", err, syncs.Load())
+		}
+		failing.Store(false)
+		if res := e.get(t); res.Code != http.StatusOK || !bytes.Equal(e.copyBytes(t), kept) || syncs.Load() != 3 {
+			t.Fatalf("GET 2 once the sync works = %d after %d syncs; want 200 after 3 (one more full write)", res.Code, syncs.Load())
+		}
+		if res := e.get(t); res.Code != http.StatusOK || syncs.Load() != 3 {
+			t.Fatalf("GET 3 = %d after %d syncs; want 200 and no write", res.Code, syncs.Load())
+		}
 	})
 	// The review's reproduction: v200 is renamed into place but its
 	// directory sync fails, and keyroster-server is restarted while the
