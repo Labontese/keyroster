@@ -922,6 +922,15 @@ No overlap with PRs #77 to #82 in internal/signer, internal/signerclient, intern
 
 The executor stopped on the 2 s bound of `check_renderable_is_fast_enough`. The plan's literal exception shape took 2.25 s under -race and the all-files-above-bound shape 4.84 s. The plan also contradicted itself in that case: a file within the bound never consults the installed version, so ~60 KiB files are not "sized in both versions". The executor also reported that a host moved out of an above-share installed group could meet an intermediate above 4096 accounts. Owner decisions E-1 (a faster sizer with the same sizes, the bound kept) and E-2 (refuse such a move in the signer) are recorded in the owner decisions block, truth 2, Task 1, the mutant list, Edge Coverage and Task 4's enroll-user.md note.
 
+### Round 5: pre-merge review of PR #84 (2026-11-04)
+
+Three findings at 75620a1. The fixes and owner decisions are recorded as "owner decision (2026-11-04), pre-merge review":
+- **R-1 (medium):** the moved-host check counted a move's union once per matching host key, and CheckRenderable scanned the installed host groups once per offered group. Fixed with one name index per directory, and the union counted once per (from, to) pair and skipped while the two groups' sizes add up to at most 4096. The answers are pinned to the previous implementation, and three timed shapes stay under 2 s with -race.
+- **R-2 (low):** a host whose keys are all replaced and that moves was not seen as a move. The owner decided to also match by host name. A host renamed and rekeyed in one version stays a limitation in enroll-user.md (UNVERIFIED).
+- **R-3 (low):** the move tests never changed the groups between versions and used one key per host. Added cases kill the surviving mutants. An assertion on ErrUnknownHostGroup that the shipped code cannot reach was replaced, and M13 was corrected and re-run.
+
+Details are in 03-08h-SUMMARY.md, "Pre-merge review fixes (PR #84)".
+
 ### Review Feedback Addressed
 | Concern | Severity | How Addressed |
 |---------|----------|---------------|

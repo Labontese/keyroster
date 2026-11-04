@@ -15,6 +15,7 @@ provides:
   - "wire: MaxPeerConns (16) and MaxServerSignerCalls (MaxPeerConns - 4)"
   - "signerclient: Client with AwaitClose; package functions are one-line wrappers; the receive error names both causes"
   - "server: socketSigner through s.client() (AwaitClose: true); maxSignerCalls = wire.MaxServerSignerCalls"
+  - "tests (pre-merge review of PR #84): TestCheckRenderableFastEnough (3), TestMoveUnion (2), TestMoveByName (3), TestMoveGroupsAndKeys (4), TestCheckRenderableMatchesReference; TestDirectoryUnrenderable +2, TestRenderable +1"
   - "tests: TestDirectoryUnrenderable (10), TestRenderable (23), TestSizerMatchesRender, TestConnSlots (5), TestPeerShare (6), TestOverloadDoesNotStallAccept (new setup), TestAwaitClose (5), TestSocketSignerAwaitsClose"
   - "docs: enroll-user.md (directories hosts cannot render, with host moves), signer-install.md (connection limits, slow signature)"
   - "planning: the release-ordering sentence in 03-09 and 03-10; 03-08h at wave 19, 03-09 to 03-16 one wave later"
@@ -40,6 +41,7 @@ key-files:
   created:
     - internal/agent/apply/renderable_test.go
     - internal/directory/render_size_test.go
+    - internal/directory/render_moves_test.go
     - .planning/phases/03-linux-agent-and-revocation/03-08h-PLAN.md
     - .planning/phases/03-linux-agent-and-revocation/03-08h-SUMMARY.md
   modified:
@@ -66,7 +68,9 @@ key-files:
 key-decisions:
   - "F07: CheckRenderable runs in InstallDirectory after CheckPolicy against s.directory, never on stored state; files are sized at the widest version (20 digits); above-cap installed groups may only shrink (subset), too-large files may not grow"
   - "E-1 (owner decision 2026-11-04, execution stop at Task 1): files are sized by a sizer that indexes roles and principals once and dedupes by a per-account stamp, without sorting, with exactly the rendered sizes (TestSizerMatchesRender); the 2 s bound under -race is kept"
-  - "E-2 (owner decision 2026-11-04, execution stop at Task 1): a version that moves an active host (matched by a shared host key) to another host group is refused directory_unrenderable when the union of the two groups' accounts is above 4096 or a file of the new group is above 64 KiB"
+  - "E-2 (owner decision 2026-11-04, execution stop at Task 1): a version that moves an active host (matched by a shared host key; since R-2 also by name) to another host group is refused directory_unrenderable when the union of the two groups' accounts is above 4096 or a file of the new group is above 64 KiB"
+  - "R-1 (pre-merge review of PR #84): host groups are looked up through one name index, and a move's union is counted once per (from, to) pair, not at all while the two groups' sizes add up to at most 4096; the answers are those of the previous implementation"
+  - "R-2 (owner decision (2026-11-04), pre-merge review): an active offered host and an active installed host of the same name in different host groups are a move too, checked by the same rules; a host renamed and rekeyed in one version is not found (limitation, UNVERIFIED)"
   - "F16: the accept loop reads peer credentials, then takes a per-uid slot (16 of 32) from connSlots, which has its own mutex and never waits for s.mu; refusals are closed, counted in overloaded, and logged with the uid through the loop's own acceptLimiter"
   - "F16: release ordering: the goroutine defers wg.Done, conn.Close, then conns.put, so the slot is freed before the close; socketSigner's Client waits for the close, so the server's live connections never exceed its 12 tokens plus its GetKRL"
 
@@ -187,7 +191,7 @@ Other readings:
 | M10 | any file accepted on the exception path | above_cap_file_grown_refused |
 | M11 | nil passed as installed in InstallDirectory | above_cap_installed_disable_accepted |
 | M12 | fileSize at the real version | rollover_9_to_10_file_at_cap_accepted and rollover_99_to_100_file_at_cap_accepted ("65537 bytes") |
-| M13 | installed counterpart not looked up first (AccountPrincipals on the installed side) | new_group_file_above_bound_refused (error wrapped ErrUnknownHostGroup, not ErrUnrenderable) |
+| M13 | corrected in the pre-merge review (R-3): as first described, an AccountPrincipals call on the installed side. The shipped CheckRenderable never calls AccountPrincipals (E-1's sizer replaced it) and cannot return ErrUnknownHostGroup, so that was not a mutant of the shipped code. Re-run as one: the file exception granted to a host group with no installed counterpart | new_group_file_above_bound_refused (`CheckRenderable = <nil>, want ErrUnrenderable`) |
 | M14 | E-1: deduplication broken | TestSizerMatchesRender ("sizer 2323 bytes, want 2184") |
 | M15 | E-2: moved-host check skipped | host_moved_above_agent_cap_refused and TestRenderable/host_moved_union_above_cap_refused |
 | M16 | E-2: moved-host file check skipped | host_moved_to_file_above_bound_refused |
@@ -257,7 +261,9 @@ The committed cases go through `Client{AwaitClose: true}`. Under -race they had 
 4. **TestAwaitClose lives in client_test.go**, as the plan names. Its holdSigner is a new helper beside startSlowSigner. `deadline_ends_wait` was also RED on the stub, by its timing assertion.
 5. **Tooling:** the first Task 1 mutant run used a Python subprocess whose `bash` resolved to WSL's bash.exe. Go was not found, so nothing ran and every mutant was reported as surviving. The runner was pointed at Git Bash and every mutant re-run. The table above is from the re-run.
 
-## Open: the moved-host check's time under the signer's lock (owner decision needed)
+## Closed: the moved-host check's time under the signer's lock (R-1, pre-merge review of PR #84)
+
+Closed by R-1 (see "Pre-merge review fixes (PR #84)"): the same shape now takes about 0.15 s under -race. The figures below are from before the fix.
 
 A temporary, uncommitted probe (deleted) timed CheckRenderable under -race. The installed version had host groups lab (3000 accounts) and web (1000), and the offered version moved 5000 active hosts from lab to web:
 
@@ -268,18 +274,145 @@ A temporary, uncommitted probe (deleted) timed CheckRenderable under -race. The 
 
 Both are above the 2 s bound that the owner keeps for the work under s.mu. The cause is checkMoves: it builds the union map of both groups' accounts (unionAccounts) once per matching host key.
 
-The fixes below were not applied, so the full gate and CI above stay valid for this code. Either gives the same answers:
-- compute the union once per (from, to) group pair and reuse it;
-- skip the map when the two groups' sizes add up to at most 4096.
+The two fixes proposed here (the union once per (from, to) pair, and no count while the two groups' sizes add up to at most 4096) were both applied in R-1.
 
 The three shapes of `check_renderable_is_fast_enough` have no host moves and are unaffected.
+
+## Pre-merge review fixes (PR #84)
+
+Three findings on PR #84 at 75620a1. All are fixed on the branch, each with its own commit. The owner decided how (owner decision (2026-11-04), pre-merge review).
+
+| Finding | Commit | Message |
+|---|---|---|
+| R-1 | 4aa3178 | perf(directory): index host groups once and count move unions per group pair (R-1) |
+| R-2 | d5e9b68 | fix(directory): treat a same-named host in another host group as a move (R-2) |
+| R-3 | f4292a8 | test(directory): moved-host cases that change the groups and use several keys (R-3) |
+| all | (this) | docs(03-08h): pre-merge review fixes for PR #84 |
+
+### R-1 (medium): the moved-host check and the host group lookup under s.mu
+
+**Fix.** Changes in internal/directory/render.go:
+- `hostGroupIndex` maps each host group name to its index, once per directory. It keeps the first index for a repeated name, as `slices.IndexFunc` did. CheckRenderable uses it for the installed counterpart, and the moved-host check uses it for both versions.
+- `moveUnions.count` counts a move's union once per (from, to) pair:
+  - It counts nothing while the two groups' list lengths add up to at most 4096. The union cannot exceed that sum, duplicates or not.
+  - Otherwise it builds the installed from-group's account set once per from-group, and counts the target's accounts that are not in it, each once.
+- The target group's file check (`aboveBound`) still runs first, before the count and independently of it.
+
+**Same answers.** `TestCheckRenderableMatchesReference` keeps a test-only copy of the previous CheckRenderable, checkMoves and unionAccounts. For R-2's commit, that copy also gains the match by name, as a scan. On 48 drawn pairs the two give the same accept or refuse, with the same error text, so the same first failing host:
+- host groups of 0 to 4096 accounts, drawn as runs of one name pool so overlaps vary;
+- accounts with a file above the bound;
+- hosts with 1 to 4 keys from a pool of 12, so keys repeat across hosts;
+- disabled hosts, hosts in a group the other version lacks, and renamed hosts.
+
+The draws reach every kind of answer: 30 accepted, 3 move-union refusals, 10 move-file refusals and 5 others. The test fails if any kind is missing. The draws do not show the counted path (sum above 4096, union within) separately. `hosts_moved_into_overlapping_group` and `overlap_at_cap_accepted` pin that path.
+
+**Timed cases.** `TestCheckRenderableFastEnough` is in internal/directory, outside apply's budget. It has no t.Parallel and a 2 s bound per shape. Run under -race on this machine:
+
+| Shape | At 75620a1 (RED) | After R-1 |
+|---|---|---|
+| 5000 hosts with 4 keys each, moved from lab (3000 accounts, above the share) to web (1000), accepted | 14.06 s | 0.157 s |
+| The same hosts moved into web of 1100 accounts, 100 of them lab's (sum 4100, union 4000), accepted | 14.33 s | 0.153 s |
+| 30000 host groups with no accounts in both versions (960235 bytes, within wire.MaxDirectory) | 6.05 s | 0.132 s |
+
+**More tests.** `TestMoveUnion`:
+- `per_group_pair`: h0 moves from db to web, which fits; h1 moves from lab to web, 4097 accounts, refused;
+- `overlap_at_cap_accepted`: lab 3000 and web 1097 with one shared account, a union of exactly 4096.
+
+**Mutants.** Each was applied to the working tree and compiled (`go vet`), then run against its test, then restored. The file's SHA-256 was equal before and after each one.
+
+| # | Mutant | Killed by |
+|---|---|---|
+| R1-M1 | union cached by the target group only | TestMoveUnion/per_group_pair (`CheckRenderable = <nil>`) |
+| R1-M2 | count skipped up to MaxAccounts + 1 | TestMoveUnion/overlap_at_cap_accepted (4097 refused) |
+| R1-M3 | target accounts counted without excluding the from group's | TestCheckRenderableFastEnough/hosts_moved_into_overlapping_group (4100 refused) |
+| R1-M4 | file check only when the union is counted above the cap | TestRenderable/host_moved_to_file_above_bound_refused |
+
+R1-M2 first survived TestMoveUnion's first case. The skip returns the sum, and for two disjoint groups the sum is the union. `overlap_at_cap_accepted` was added for it. The first-index rule of `hostGroupIndex` matters only for repeated names, which Validate refuses. No test pins it, and no mutant was run on it.
+
+### R-2 (low): a host whose keys are all replaced and that moves
+
+**Fix.** Owner decision (2026-11-04), pre-merge review. checkMoves indexes each active installed host by name, once, keeping the first entry of a name, as HostByName does. For each active offered host it checks:
+1. the installed entries of its keys, in key order, as before;
+2. then the entry with its name.
+
+Both are checked with the same rules. Old answers change only where a move is found by name alone.
+
+The doc comments of CheckRenderable and checkMoves say this. enroll-user.md, next to the move note, says that a host renamed *and* rekeyed in the same version is still not recognised as moved. That is labelled as a limitation and UNVERIFIED, with the advice to rename and rekey in separate versions.
+
+**Tests and RED.** Each RED below was run at R-1's head, with the tests in place before the fix:
+
+| Test | RED |
+|---|---|
+| TestMoveByName/rekeyed_and_moved_above_cap_refused | `CheckRenderable = <nil>, want h1's move refused with 4097 accounts` |
+| TestRenderable/host_rekeyed_and_moved_union_above_cap_refused (also checks `agentMove`: Intermediate plus checkLimits gives ErrGenerationTooLarge) | `CheckRenderable = <nil>, want ErrUnrenderable` |
+| TestDirectoryUnrenderable/host_rekeyed_and_moved_above_agent_cap_refused (v3 with a fresh host key, moved to web) | `install: &{Version:3 ...}, <nil>; want the refusal directory_unrenderable` |
+
+Controls, which passed before and after:
+- TestMoveByName/rekeyed_and_moved_at_cap_accepted;
+- TestMoveByName/disabled_installed_host_not_a_move;
+- TestDirectoryUnrenderable/host_rekeyed_and_moved_union_fits_installs (moved to db, 3000 + 1096).
+
+**Mutants.**
+
+| # | Mutant | Killed by |
+|---|---|---|
+| R2-M1 | match by name removed | TestMoveByName/rekeyed_and_moved_above_cap_refused, TestDirectoryUnrenderable/host_rekeyed_and_moved_above_agent_cap_refused and TestRenderable/host_rekeyed_and_moved_union_above_cap_refused (each run separately) |
+| R2-M2 | name index includes disabled installed entries | TestMoveByName/disabled_installed_host_not_a_move |
+
+### R-3 (low): moved-host tests that never change the groups, and an unreachable assertion
+
+**(a) Fix.** `TestMoveGroupsAndKeys` in internal/directory has four cases:
+- `target_grown_in_offered_refused`: web has 500 accounts in installed and 1097 offered;
+- `source_shrunk_in_offered_refused`: the offered lab keeps 2000 of installed's 3000, and web has 2000. The move holds 5000 accounts;
+- `shared_key_last_of_four_refused`: a host renamed with three of four keys replaced. The shared key sorts last in both versions;
+- `second_matching_host_refused`: the first key was a db host's (fits) and the second a lab host's.
+
+These are test-only additions to correct code, so they passed at once. Their RED is the mutants below.
+
+| # | Mutant | Killed by | Pre-existing move tests |
+|---|---|---|---|
+| R3-M1 | target group taken from installed | target_grown_in_offered_refused | survived TestRenderable and TestDirectoryUnrenderable `host_moved*` (the finding) and TestMoveUnion, TestMoveByName and TestCheckRenderableFastEnough |
+| R3-M2 | source group taken from the offered version | source_shrunk_in_offered_refused | not run |
+| R3-M3 | only the offered host's first key | shared_key_last_of_four_refused, second_matching_host_refused | survived TestRenderable and TestDirectoryUnrenderable `host_moved*` (the finding) |
+| R3-M4 | only the installed host's first key indexed | shared_key_last_of_four_refused | not run |
+| R3-M5 | only the first matching installed entry checked | second_matching_host_refused | not run |
+
+The survivor runs were checked to execute their tests. The same `-run` pattern on the unmutated tree ran three TestRenderable and three TestDirectoryUnrenderable `host_moved*` subtests.
+
+**(b) Finding.** `new_group_file_above_bound_refused` also asserted `!errors.Is(err, directory.ErrUnknownHostGroup)`. The shipped CheckRenderable never calls AccountPrincipals, because E-1's sizer replaced that call. None of its paths returns ErrUnknownHostGroup. Its errors wrap a single `%w`, so a refusal that is ErrUnrenderable cannot also be ErrUnknownHostGroup. The assertion could not fail.
+
+**(b) Fix.** The assertion is replaced. The refusal must now name `host group web account root` and `principals file of 65537 bytes, above 65536`: the file refusal, because installed has no web to grant an exception. M13's description in the mutant table above is corrected. M13 was re-run as a mutant of the shipped code (the file exception granted to a host group with no installed counterpart) and was killed by new_group_file_above_bound_refused (`CheckRenderable = <nil>, want ErrUnrenderable`).
+
+### Gates on f4292a8 (before this docs commit)
+
+| Gate | Figure |
+|---|---|
+| Alone gate, internal/agent/apply alone under -race | 317.624 s, exit 0 (limit 400 s) |
+| Margin gate, apply's `ok` line under ./... | 376.394 s, exit 0 (limit 480 s). internal/signer 393.932 s, internal/server 145.255 s, internal/directory 16.461 s |
+| Full gate (Task 4's command) | exit 0. apply 361.464 s, internal/signer 387.606 s, internal/server 124.809 s, internal/directory 16.497 s |
+
+The full gate includes:
+- go vet with the e2e and systemdsmoke tags, and gofmt;
+- golangci-lint, 0 issues;
+- capslock-check: keyroster-signer 92 pairs, keyroster-agent 37 and keyroster-agent-fetch 23, each equal to its baseline;
+- dep-firewall, testonly-firewall (clean, 6 combinations) and check-pinned-actions (47 pinned).
+
+`go list -deps ./cmd/keyroster-signer | grep -c keyroster/internal/agent` prints 0, and `git diff --name-only origin/main...HEAD -- cmd/` is empty.
+
+### Observation, not fixed (outside R-1's scope)
+
+Parse's validateHosts scans the host groups once per host (`slices.ContainsFunc`), O(hosts × host groups), and InstallDirectory parses under s.mu. A temporary probe (uncommitted, deleted) parsed a valid directory of 935245 bytes:
+- 15000 host groups;
+- 2500 hosts with real Ed25519 keys, all in the last group.
+
+It took 1.86 s under -race and 0.156 s without. This is not a finding of this review, and it is left as it is.
 
 ## UNVERIFIED
 
 - Every runbook note on a real host: the render-limit refusal, the above-cap rules, the split advice, the host-move refusal, the connection limits, the journal lines and the slow-signature behaviour. All are run in CI only, through the named tests (owner decision: no 03-16 drill provokes these limits).
 - That the CLI's error names `directory_unrenderable`. This is reasoned from serverclient's error text; no test runs the CLI against the refusal.
 - The slow-signature pile-up with a real hardware touch (T-03-307 residual). It is reasoned, not tested.
-- A host whose last-good principals are kept (host_keys_rotated, host_keys_disagree) and that moves group. checkMoves matches by host key between active entries only, and the case is not tested.
+- A host renamed *and* rekeyed in the same version that also moves group. checkMoves matches by a shared host key or, since R-2, by name, so it does not find that host; enroll-user.md states the limitation. The rekeyed-and-moved case (host_keys_rotated on its agent) is now tested (R-2). A host whose sshd keys match two entries of the offered version (host_keys_disagree on its agent) and that moves: each offered entry is checked against installed on its own, but no test sets that case up.
 
 ## Known Stubs
 
@@ -293,3 +426,4 @@ None. No new endpoint, file access or schema. The new surface is in the plan's t
 
 - Created files exist: internal/agent/apply/renderable_test.go, internal/directory/render_size_test.go, 03-08h-PLAN.md and 03-08h-SUMMARY.md.
 - Commits ca35019, 5a0cf65, 30d40c5 and 7bdcc26 are ancestors of HEAD. `git rev-list --count 71e540d..HEAD` is 4 before this SUMMARY's own commit.
+- Pre-merge review fixes: internal/directory/render_moves_test.go exists, and commits 4aa3178, d5e9b68 and f4292a8 are ancestors of HEAD.
