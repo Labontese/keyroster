@@ -829,6 +829,7 @@ func TestDirectoryMirrorFill(t *testing.T) {
 	})
 	t.Run("waiter_ctx_ends_fetch_continues", func(t *testing.T) {
 		e := mirrorEnv(t)
+		start := e.fake.count("GetDirectory")
 		entered, release := e.fake.hold("GetDirectory")
 		t.Cleanup(release)
 		first, cancel := context.WithCancel(ctx)
@@ -848,6 +849,12 @@ func TestDirectoryMirrorFill(t *testing.T) {
 		release()
 		if r := results(t, b, 1)[0]; r.err != nil || r.v.version != 1 {
 			t.Fatalf("the second waiter = %v; want version 1 (the fetch went on)", r.err)
+		}
+		// One fetch in all: the second waiter shared the first caller's,
+		// also when it joined only after the cancel (pre-merge review fix
+		// round 1).
+		if got := e.fake.count("GetDirectory") - start; got != 1 {
+			t.Fatalf("%d GetDirectory calls for the two waiters, want 1 (the second waiter shared the fetch)", got)
 		}
 		before := e.fake.count("GetDirectory")
 		if m := mirrorEntry(e); m == nil || m.version != 1 {
