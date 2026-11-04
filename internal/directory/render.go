@@ -250,8 +250,9 @@ func (z *sizer) fileSize(hostGroup string, a AccountMap) (int, error) {
 //
 // A host moved to another host group (owner decision (2026-11-04),
 // execution stop at Task 1): an active host of d that shares a host key
-// with an active host of installed in another host group would move, on
-// its agent, through an intermediate holding the principals files of both
+// or its name (R-2, owner decision (2026-11-04), pre-merge review of PR
+// #84) with an active host of installed in another host group would move,
+// on its agent, through an intermediate holding the principals files of both
 // groups' accounts, each a subset of its target file under a header that
 // is not longer. Such a move is refused when that union is above
 // MaxAccounts, or when a file of the new group is above MaxPrincipalsFile:
@@ -353,17 +354,26 @@ func hostGroupIndex(d *Directory) map[string]int {
 // its host group in installed to another host group whose move its agent
 // could not make within its caps (CheckRenderable). A host is the same
 // when an active entry of d and an active entry of installed share a host
-// key, as the agent finds its entry by its host keys; a disabled entry
-// renders no principals files on either side. installedGroups is
+// key, as the agent finds its entry by its host keys, or a name (R-2,
+// owner decision (2026-11-04), pre-merge review of PR #84), as the agent
+// keeps its last host's principals by name when its keys match no entry
+// (RenderFallback, host_keys_rotated): a version that replaces a host's
+// keys and moves it shares no key with installed. A host renamed and
+// rekeyed in one version is not found. A disabled entry renders no
+// principals files on either side. installedGroups is
 // hostGroupIndex(installed). The union of a move is counted once per pair
 // of host groups (R-1, pre-merge review of PR #84).
 func checkMoves(d, installed *Directory, installedGroups map[string]int, aboveBound map[string]string) error {
 	u := moveUnions{installed: installed, d: d, from: installedGroups, to: hostGroupIndex(d), fromSets: map[string]map[string]bool{}, counts: map[[2]string]int{}}
 	byKey := map[string]*Host{}
+	byName := map[string]*Host{} // the first active entry of a name, as HostByName finds it
 	for i := range installed.Hosts {
 		if o := &installed.Hosts[i]; o.Status == StatusActive {
 			for _, k := range o.Keys {
 				byKey[k] = o
+			}
+			if _, ok := byName[o.Name]; !ok {
+				byName[o.Name] = o
 			}
 		}
 	}
@@ -371,9 +381,19 @@ func checkMoves(d, installed *Directory, installedGroups map[string]int, aboveBo
 		if h.Status != StatusActive {
 			continue
 		}
+		// The installed entries of h's keys, in their order, then the one
+		// of h's name.
+		olds := make([]*Host, 0, len(h.Keys)+1)
 		for _, k := range h.Keys {
-			o, ok := byKey[k]
-			if !ok || o.HostGroup == h.HostGroup {
+			if o, ok := byKey[k]; ok {
+				olds = append(olds, o)
+			}
+		}
+		if o, ok := byName[h.Name]; ok {
+			olds = append(olds, o)
+		}
+		for _, o := range olds {
+			if o.HostGroup == h.HostGroup {
 				continue
 			}
 			if acc := aboveBound[h.HostGroup]; acc != "" {

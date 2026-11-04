@@ -165,6 +165,40 @@ func TestMoveUnion(t *testing.T) {
 	})
 }
 
+// TestMoveByName (R-2, owner decision (2026-11-04), pre-merge review of
+// PR #84): an active host of the offered version and an active host of
+// installed with the same name in different host groups are a move, also
+// when no host key is shared: a version that replaces a host's keys and
+// moves it leaves the agent on its last-good principals (host_keys_rotated)
+// until sshd's keys change, and then it meets the intermediate of both
+// groups.
+func TestMoveByName(t *testing.T) {
+	lab := moveNames("u", 0, 3000)
+	groups := func(web int) []HostGroup {
+		return []HostGroup{moveGroup("lab", lab), moveGroup("web", moveNames("w", 0, web))}
+	}
+	t.Run("rekeyed_and_moved_above_cap_refused", func(t *testing.T) {
+		err := CheckRenderable(moveOne(2, groups(MaxAccounts-3000+1), "web", "k2"), moveOne(1, groups(MaxAccounts-3000+1), "lab", "k1"))
+		if !errors.Is(err, ErrUnrenderable) || !strings.Contains(err.Error(), "host h1 moves from host group lab to web, 4097 accounts") {
+			t.Fatalf("CheckRenderable = %v, want h1's move refused with 4097 accounts", err)
+		}
+	})
+	t.Run("rekeyed_and_moved_at_cap_accepted", func(t *testing.T) {
+		if err := CheckRenderable(moveOne(2, groups(MaxAccounts-3000), "web", "k2"), moveOne(1, groups(MaxAccounts-3000), "lab", "k1")); err != nil {
+			t.Fatalf("CheckRenderable = %v, want the move of %d accounts accepted", err, MaxAccounts)
+		}
+	})
+	t.Run("disabled_installed_host_not_a_move", func(t *testing.T) {
+		// A disabled entry renders no principals files, so the agent
+		// holds none of lab's.
+		installed := moveOne(1, groups(MaxAccounts-3000+1), "lab", "k1")
+		installed.Hosts[0].Status = StatusDisabled
+		if err := CheckRenderable(moveOne(2, groups(MaxAccounts-3000+1), "web", "k2"), installed); err != nil {
+			t.Fatalf("CheckRenderable = %v, want it accepted", err)
+		}
+	})
+}
+
 // movePair is an installed directory and an offered version for the
 // equivalence check: host groups a to d of sizes around the share and the
 // cap, drawn as runs of one pool of account names so that groups overlap
@@ -262,8 +296,9 @@ func movePair(seed uint64) (installed, offered *Directory) {
 // TestCheckRenderableMatchesReference (R-1): CheckRenderable gives exactly
 // the answers of checkRenderableRef, the implementation before R-1, which
 // looks host groups up by a scan and counts a move's union once per
-// matching host key: accept or refuse, and the same error text, so the
-// same first failing host. The draws must reach every kind of answer.
+// matching host, with R-2's match by name added: accept or refuse, and
+// the same error text, so the same first failing host. The draws must
+// reach every kind of answer.
 func TestCheckRenderableMatchesReference(t *testing.T) {
 	kinds := map[string]int{}
 	for seed := range uint64(48) {
@@ -292,7 +327,8 @@ func TestCheckRenderableMatchesReference(t *testing.T) {
 }
 
 // checkRenderableRef is CheckRenderable, checkMoves and unionAccounts as
-// they were before R-1 (pre-merge review of PR #84), the reference for
+// they were before R-1 (pre-merge review of PR #84), with R-2's match by
+// name added as a scan, the reference for
 // TestCheckRenderableMatchesReference.
 func checkRenderableRef(d, installed *Directory) error {
 	if d == nil {
@@ -386,9 +422,17 @@ func checkRenderableRef(d, installed *Directory) error {
 		if h.Status != StatusActive {
 			continue
 		}
+		var olds []*Host
 		for _, k := range h.Keys {
-			o, ok := byKey[k]
-			if !ok || o.HostGroup == h.HostGroup {
+			if o, ok := byKey[k]; ok {
+				olds = append(olds, o)
+			}
+		}
+		if i := slices.IndexFunc(installed.Hosts, func(o Host) bool { return o.Status == StatusActive && o.Name == h.Name }); i >= 0 {
+			olds = append(olds, &installed.Hosts[i])
+		}
+		for _, o := range olds {
+			if o.HostGroup == h.HostGroup {
 				continue
 			}
 			if acc := aboveBound[h.HostGroup]; acc != "" {

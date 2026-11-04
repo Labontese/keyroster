@@ -404,6 +404,19 @@ func TestRenderable(t *testing.T) {
 			t.Fatalf("CheckRenderable without the move = %v, want it accepted: the move decides", err)
 		}
 	})
+	t.Run("host_rekeyed_and_moved_union_above_cap_refused", func(t *testing.T) {
+		// R-2 (owner decision (2026-11-04), pre-merge review of PR #84):
+		// the offered version replaces h1's keys and moves it. The agent
+		// keeps lab's files (host_keys_rotated) until sshd's keys change,
+		// and then moves through the same intermediate.
+		to := rgroup("web", rnames("w", directory.MaxAccounts-installedAccounts+1))
+		installed, offered := movedTo(t, to, nil)
+		offered.Hosts[0].Keys = []string{"ssh-ed25519 h1-replaced"}
+		wantUnrenderable(t, directory.CheckRenderable(offered, installed), "h1", "lab", "web", fmt.Sprint(directory.MaxAccounts+1))
+		if err := agentMove(t, installed, offered, "web"); !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("the agent's move = %v, want ErrGenerationTooLarge", err)
+		}
+	})
 	t.Run("host_moved_union_at_cap_accepted", func(t *testing.T) {
 		to := rgroup("web", rnames("w", directory.MaxAccounts-installedAccounts))
 		installed, offered := movedTo(t, to, nil)

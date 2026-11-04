@@ -926,12 +926,18 @@ func TestDirectoryUnrenderable(t *testing.T) {
 	// at the share and db, whose accounts with lab's make exactly
 	// directory.MaxAccounts.
 	seeded := []group{{"db", directory.MaxAccounts - 3000}, {"lab", 3000}, {"web", directory.MaxHostGroupAccounts}}
-	moved := func(t *testing.T, to string) (*logEnv, *wire.InstallDirectoryRequest) {
+	// moved moves h1 to host group to in version 3, with host key key3[0]
+	// there when given (a replaced key) and key otherwise.
+	moved := func(t *testing.T, to string, key3 ...string) (*logEnv, *wire.InstallDirectoryRequest) {
 		t.Helper()
 		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, true)
 		req := signed(t, e, hostDirectory(pk, 2, trust.SHA256Hex(e.s.GetDirectory().Directory), key, "lab", seeded...))
 		e.seedDirectory(t, req.Directory, req.Sigs)
-		return e, signed(t, e, hostDirectory(pk, 3, trust.SHA256Hex(e.s.GetDirectory().Directory), key, to, seeded...))
+		k3 := key
+		if len(key3) > 0 {
+			k3 = key3[0]
+		}
+		return e, signed(t, e, hostDirectory(pk, 3, trust.SHA256Hex(e.s.GetDirectory().Directory), k3, to, seeded...))
 	}
 	t.Run("host_moved_above_agent_cap_refused", func(t *testing.T) {
 		e, req := moved(t, "web") // 3000 + 2048 accounts in the move
@@ -939,6 +945,19 @@ func TestDirectoryUnrenderable(t *testing.T) {
 	})
 	t.Run("host_moved_union_fits_installs", func(t *testing.T) {
 		e, req := moved(t, "db") // 3000 + 1096 = directory.MaxAccounts
+		e.installDirectory(t, req.Directory, req.Sigs)
+		e.wantDirectory(t, 3, req.Directory, req.Sigs, true)
+	})
+	// R-2 (owner decision (2026-11-04), pre-merge review of PR #84): a
+	// version that replaces h1's host key and moves it is a move too, found
+	// by the host's name.
+	rekeyed := trust.FormatKey(newEd25519(t).PublicKey())
+	t.Run("host_rekeyed_and_moved_above_agent_cap_refused", func(t *testing.T) {
+		e, req := moved(t, "web", rekeyed) // 3000 + 2048 accounts in the move
+		refused(t, e, req, "directory_unrenderable", 2)
+	})
+	t.Run("host_rekeyed_and_moved_union_fits_installs", func(t *testing.T) {
+		e, req := moved(t, "db", rekeyed) // 3000 + 1096 = directory.MaxAccounts
 		e.installDirectory(t, req.Directory, req.Sigs)
 		e.wantDirectory(t, 3, req.Directory, req.Sigs, true)
 	})

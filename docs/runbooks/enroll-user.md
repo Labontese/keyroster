@@ -262,7 +262,17 @@ are more than 4096, or when a principals file of the new group is larger
 than 64 KiB. Split the old host group first. With both groups at most 2048
 accounts this never happens.
 
-Run in CI (TestDirectoryUnrenderable, TestRenderable and
+The signer recognises a moved host by a host key that both versions list,
+or by its name. A version that replaces all of a host's keys and moves it
+is therefore checked the same way.
+
+**Limitation (UNVERIFIED):** a host that is renamed *and* given new keys
+in the same version is not recognised as moved, so the signer does not
+check the move. Its agent may then refuse the move
+(`generation_too_large`) and keep its old principals. Rename a host and
+replace its keys in separate versions.
+
+Run in CI (TestDirectoryUnrenderable, TestRenderable, TestMoveByName and
 TestSizerMatchesRender, 03-08h); UNVERIFIED on a real host.
 
 ## Disabling a user
