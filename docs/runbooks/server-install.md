@@ -256,14 +256,11 @@ When the copy was renamed into place but its directory could not be synced,
 the route keeps answering 503 (signer unavailable) and logs `KRL not kept:
 ...` at every refresh until a write succeeds; each refresh rewrites the copy
 in full. Only then is that version served. A failing disk therefore shows as
-a steady 503, not a single one. A restart alone does not end it while the
-disk still fails: at start the server syncs the copy it reads, file and
-directory, once, and the copy counts as durable only if both syncs succeed.
-Otherwise the first refresh rewrites it in full, and the route answers 503
-until a write succeeds. Run in CI (`TestKRLServedCopy`, 03-08g), with the
-failures injected in the test; UNVERIFIED on a real host. Also UNVERIFIED:
-whether a sync at start that follows a failed sync before the restart can
-report success although the copy never reached the disk.
+a steady 503, not a single one. A restart does not end it while the disk
+still fails: the copy read at start counts as not yet durable, so every
+start rewrites it once, in full, before it is served, and the route answers
+503 until that write succeeds. Run in CI (`TestKRLServedCopy`, 03-08g), with
+the failures injected in the test; UNVERIFIED on a real host.
 
 Network access is limited to IPv4,
 IPv6 and Unix sockets. At start the server asks the signer for its Status,

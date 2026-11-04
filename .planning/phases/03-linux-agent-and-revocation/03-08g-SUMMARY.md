@@ -12,9 +12,9 @@ provides:
   - "server: maxSignerCalls (12), maxAgentCalls (6), budgetSigner (named next field, agent token before total token, GetKRL exempt), budgeted and withSignerBudget; newServer wraps every signer"
   - "server: maxAgentInFlight (2), agentSlot, inFlightMu and agentInFlight; the state and heartbeat routes take the slot after requireAgent"
   - "server: dirFetch, dirKey, dirMirror.pending (one pending fetch per SHA-256 and version; first a single inflight pointer, changed in pre-merge review fix round 1), directoryUnder and fetchDirectory; currentDirectory shares one detached fetch per Status SHA-256 and version"
-  - "server: servedKRL.durable; keepKRL's equal-version shortcut only for a durable copy; the copy read at start is durable only once its file and directory synced at start (syncFile, syncDir; pre-merge review fix round 1)"
+  - "server: servedKRL.durable; keepKRL's equal-version shortcut only for a durable copy; the copy read at start is not durable, so every start rewrites it once before it is served (pre-merge review fix round 1, owner follow-up)"
   - "the growth rule in signerAPI's and budgetSigner's comments: new methods go through budgetSigner, agent-relayed calls take the agent share, agent routes that relay take agentSlot"
-  - "tests: TestSignerBudget (5 cases; total_bounded has 8 method rows and catch_up_bounded_interactive_room 6 since pre-merge review fix round 1), TestKRLDuringFullBudget (2), TestAgentInFlight (5), TestDirectoryMirrorFill (7), TestKRLServedCopy (4 new cases: dir_sync_failure_never_served, copy_read_at_start_is_durable, copy_read_at_start_not_synced with 2 subcases, restart_after_dir_sync_failure)"
+  - "tests: TestSignerBudget (5 cases; total_bounded has 8 method rows and catch_up_bounded_interactive_room 6 since pre-merge review fix round 1), TestKRLDuringFullBudget (2), TestAgentInFlight (5), TestDirectoryMirrorFill (7), TestKRLServedCopy (4 new cases: dir_sync_failure_never_served, copy_read_at_start_rewritten_once, copy_read_at_start_served_after_write, restart_after_dir_sync_failure)"
   - "docs: server-install.md, the durable KRL copy, the signer-call budget and the per-host requests in flight"
   - "planning: the agent-share sentence in 03-09 (HostIssue, hostcert) and 03-10 (ProbeIssue, probecert); 03-08g at wave 18, 03-09 to 03-16 one wave later"
 affects: [03-08h, 03-09, 03-10]
@@ -34,7 +34,7 @@ tech-stack:
     - "A signerAPI wrapper with a named (never embedded) next field, so a new signer method does not build until it is budgeted"
     - "Two token channels, agent share first, so queued agent calls hold no total token"
     - "currentStatus's coalescing copied to the directory mirror: a detached fetch per SHA-256 and version Status reported, pending side by side, stored only when its key is that of the Status the server holds when it ends"
-    - "A durable flag instead of a second fsync: only a full write that synced, or a copy read back at start whose file and directory synced then, lets the shortcut skip the write"
+    - "A durable flag instead of a second fsync: only a full write that synced lets the shortcut skip the write, so the copy read at start is rewritten once per start"
 
 key-files:
   created:
@@ -59,7 +59,7 @@ key-decisions:
   - "F11: an agent call takes its agent token before its total token, and gives the agent token back when its ctx ends at the total wait; GetKRL alone skips the budget (no signer lock, coalesced to one call), so the server holds at most 13 signer calls"
   - "F11: one per-agent in-flight count (cap 2) across the state and heartbeat routes, keyed on the agents row ID, taken after requireAgent charged the bucket; its 429 carries Retry-After 1 and rate limited"
   - "F12: the mirror fill is coalesced per Status SHA-256 and version, detached from every request; a failure is never cached; pending fetches are kept per SHA-256 and version, and only the fetch for the Status the server holds when it ends becomes the entry (pre-merge review fix round 1)"
-  - "F13: a KRL version is served only once its copy is durable; the equal-version shortcut is taken only for a durable copy, otherwise the full write is redone; the copy read at start is synced once, file and directory, and is durable only if both succeed (owner decision, pre-merge review fix round 1)"
+  - "F13: a KRL version is served only once its copy is durable; the equal-version shortcut is taken only for a durable copy, otherwise the full write is redone; the copy read at start is never durable, so every start rewrites it once before it is served (owner decision, pre-merge review fix round 1, owner follow-up; it replaced a sync at start)"
 
 metrics:
   duration: "about 1 h 15 min (21:30 to 22:45 local time, 2026-11-03), of which about 35 min are the gate runs"
@@ -132,7 +132,7 @@ Every RED was taken in WSL through `bash scripts/linux.sh`, with the same `-run`
 - `TestKRLDuringFullBudget/krl_route_answers_inside_status_ttl` (Task 1 stub): nothing waits on the stub, and the route only needs a fresh Status and one GetKRL. M7 is its failing run.
 - `TestKRLDuringFullBudget/getkrl_coalesced_one_call` (Task 1 stub and origin/main): currentKRL already coalesced on krlInflight. The test pins the coalescing that the bound of 13 rests on.
 - `TestAgentInFlight/cap_per_agent` (Task 2, on Task 1's head): two agents with 2 requests each make 4 calls, within the agent share of 6.
-- `TestKRLServedCopy/copy_read_at_start_is_durable` (Task 3): before the flag, the equal-version shortcut never wrote, durable or not. P3 is its failing run. (Its expectation changed in pre-merge review fix round 1: one sync at start; RED there.)
+- `TestKRLServedCopy/copy_read_at_start_is_durable` (Task 3): before the flag, the equal-version shortcut never wrote, durable or not. P3 is its failing run. (Renamed `copy_read_at_start_rewritten_once` in pre-merge review fix round 1, owner follow-up; RED there.)
 - `TestDirectoryMirrorFill/failure_not_cached` (Task 3): before coalescing, a failed fetch returned before the store, and each caller fetched for itself. P6 is its failing run.
 - `TestDirectoryMirrorFill/waiter_ctx_ends_fetch_continues` (Task 3): before coalescing, the second waiter made its own call on its own ctx, so the first caller's cancel could not reach it. P5 is its failing run.
 - `TestDirectoryMirrorFill/ended_ctx_starts_no_fetch` (Task 3): Task 1's budget already refuses an ended ctx before the signer. With the detached fetch, the explicit ctx check in currentDirectory keeps this true.
@@ -159,7 +159,7 @@ Each mutant was applied to the committed code, run against its named test, and r
 | N5 | release skipped | TestAgentInFlight/cap_released_after_answer | killed: the second round's 2 calls never reached |
 | P1 | the shortcut without `prev.durable` | TestKRLServedCopy/dir_sync_failure_never_served | killed: GET 2 answered 200 after 1 sync |
 | P2 | `durable: true` whatever err is | TestKRLServedCopy/dir_sync_failure_never_served | killed: GET 2 answered 200 after 1 sync |
-| P3 | loadServedKRL without `durable: true` | TestKRLServedCopy/copy_read_at_start_is_durable | killed: a sync and a rewrite of the marker (rerun after fix round 1, see there) |
+| P3 | loadServedKRL without `durable: true` | TestKRLServedCopy/copy_read_at_start_is_durable | killed: a sync and a rewrite of the marker (at the time; since the owner follow-up a rewrite at start is the intended behaviour, see there) |
 | P4 | each caller fetches for itself (inflight never reused) | TestDirectoryMirrorFill/concurrent_misses_one_fetch | killed: 24 calls, want 1 |
 | P5 | the fetch runs on the caller's ctx | TestDirectoryMirrorFill/waiter_ctx_ends_fetch_continues | killed: the second waiter got context canceled |
 | P6 | a failed fetch kept (stays the fetch in flight, so its error is served again) | TestDirectoryMirrorFill/failure_not_cached | killed: the next call got the cached "signer down" |
@@ -207,7 +207,7 @@ The pre-merge review of PR #83, on head 6bd1324, found four things to fix in thi
 
 | Commit | Message | Change |
 |--------|---------|--------|
-| ddeb8f6 | fix(server): sync the KRL copy read at start before it counts as durable (F13) | loadServedKRL syncs the copy's file (`syncFile`, a new test seam) and its directory (`syncDir`) once at start. The copy is durable only when both syncs succeed. Otherwise the first refresh writes it again in full, and the route answers 503 until a write succeeds. A failed sync does not stop the start. The floor follows the copy read at start, durable or not, as before. Before this commit, a copy read back at start counted as durable with no sync at all. So restarting the process after a failed directory sync served a version that might never have reached the disk. |
+| ddeb8f6 | fix(server): sync the KRL copy read at start before it counts as durable (F13) | Superseded by 5c60311 (owner follow-up, below). loadServedKRL syncs the copy's file (`syncFile`, a new test seam) and its directory (`syncDir`) once at start. The copy is durable only when both syncs succeed. Otherwise the first refresh writes it again in full, and the route answers 503 until a write succeeds. A failed sync does not stop the start. The floor follows the copy read at start, durable or not, as before. Before this commit, a copy read back at start counted as durable with no sync at all. So restarting the process after a failed directory sync served a version that might never have reached the disk. |
 | 43904d6 | fix(server): pin each budgeted signer method's share of the budget (F11) | Test only. `total_bounded` is a table over all 8 budgeted methods, each called alone. `catch_up_bounded_interactive_room` holds the agent share, then runs each interactive method alone, in its own subtest. |
 | 431f698 | fix(server): keep one pending directory fetch per SHA-256 and version (F12) | dirMirror's single `inflight` pointer becomes `pending map[dirKey]*dirFetch`. Each fetch is removed when it ends, so the map is bounded by the keys in flight. A late caller with an older Status no longer replaces another key's pending fetch. A fetch becomes the entry only when its key is that of the Status the server holds when the fetch ends, or when the server holds no Status. A caller with an older Status leaves the held entry alone. The part of currentDirectory after currentStatus is now `directoryUnder(ctx, v)`, so a test can run a caller that read an older Status. |
 | c477169 | fix(server): count the directory fetches of a waiter whose ctx ends (F12) | Test only. `waiter_ctx_ends_fetch_continues` counts GetDirectory calls from the start of the subtest. Once the second waiter returns, it asserts that exactly one call was made. |
@@ -286,12 +286,56 @@ Run in WSL on 1822dad, the last code commit of the round. The plan and SUMMARY e
 - **Full gate:** passed. That covers `go test -race ./...`, `go vet` (plain, `e2e`, and `e2e systemdsmoke`), an empty `gofmt -l .` (scripts/linux.sh uses `--exec`), golangci-lint ("0 issues."), capslock-check, dep-firewall, testonly-firewall and check-pinned-actions (47 pinned).
 - **capslock:** keyroster-signer, keyroster-agent and keyroster-agent-fetch have 92, 37 and 23 pairs, each equal to its baseline. No module was added.
 
+### Owner follow-up: rewrite at start
+
+The round left one question open: a sync at start that follows a failed sync can report success although the earlier rename never reached the disk. After a failed fsync, Linux may mark the pages clean. The owner then decided "Skriv om vid start": a copy read back at start is always `durable: false`, with no sync at start.
+
+| Commit | Message | Change |
+|--------|---------|--------|
+| 5c60311 | fix(server): rewrite the KRL copy read at start before it is served (F13) | `loadServedKRL` returns the copy with `durable` false. The sync at start and the `syncFile` seam are gone. Nothing else in keepKRL changes: the same version with the same bytes and a copy that is not durable falls through to keepKRLFile (write, rename, syncDir). `served` becomes durable only when that write succeeds, and the next refresh takes the shortcut. So every start rewrites the copy exactly once before it is served. The route answers 503 until that write succeeds, and the floor follows the copy read at start as before. Nothing waits longer than one successful write. |
+
+Against 6bd1324, revoke.go's change in this round is now only that `durable: true` is dropped, plus the comments.
+
+**Tests (TestKRLServedCopy):**
+- `copy_read_at_start_rewritten_once` replaces `copy_read_at_start_is_durable`. The restart makes no directory sync. The first GET returns 200 after one full rewrite (the marker is replaced) and one sync. A second GET writes nothing and syncs nothing.
+- `copy_read_at_start_served_after_write` replaces `copy_read_at_start_not_synced`, whose file-sync case went with the seam. The first refresh's directory sync fails: 503, `KRL not kept: injected EIO`, and krlItem refuses. Once the sync works, one more full write, then 200, then no write.
+- `restart_after_dir_sync_failure` is kept unchanged: 503 after the restart until a sync succeeds, and v150 is still refused below v200.
+
+**RED on 7aaf58e:**
+- `copy_read_at_start_rewritten_once`: "the start made 1 directory syncs, want 0 (the copy read at start is rewritten, not synced)".
+- `copy_read_at_start_served_after_write`: "GET 1 of the copy's own version, its directory sync failing = 503 after 2 syncs ...; want 503 after a full rewrite and 1 sync".
+- `restart_after_dir_sync_failure`: GREEN at once on 7aaf58e. Both designs answer 503 there, since the start sync fails too.
+
+**GREEN:** all of TestKRLServedCopy, in WSL under `-race` and natively on Windows.
+
+**Mutants** (applied to 5c60311 and restored byte for byte):
+
+| ID | Mutant | Result |
+|----|--------|--------|
+| T1 | `durable: true` at start | killed by `copy_read_at_start_rewritten_once` ("= 200 after 0 syncs, copy "marker""), `copy_read_at_start_served_after_write` ("= 200 after 0 syncs") and `restart_after_dir_sync_failure` ("GET 1 of v200 after the restart ... = 200") |
+| T2 | the first refresh skips the write when the bytes are the same (`case same:` without `prev.durable`) | killed by `dir_sync_failure_never_served` ("GET 2 ... = 200 after 1 syncs"), and by the same three as T1 |
+
+The runbook paragraph now says the copy read at start counts as not yet durable, so every start rewrites it once before it is served. The plan's F13 must_have, its rationale, the Task 3 test list and verify, the loadServedKRL action, the mutant line, the edge list and T-03-311's tests now say the same, each marked "owner follow-up".
+
+**Gates of the follow-up:**
+
+Run in WSL on 5c60311.
+
+| Run | internal/agent/apply | internal/server |
+|-----|----------------------|-----------------|
+| `go test -race -count=1 -v ./internal/server/` | n/a | ok, 88.723 s; no FAIL, no DATA RACE; the three start-copy cases PASS |
+| Alone gate (limit 400 s) | ok, 313.723 s | n/a |
+| Margin gate (`./...`, limit 480 s) | ok, 395.600 s | ok, 158.797 s |
+| Full gate's `./...` | ok, 331.743 s | ok, 128.105 s |
+
+The margin run is the slowest of the round: internal/server took 158.8 s, against 120 to 131 s in the other runs. So the machine was loaded during that run, and it still stayed within its limit. The full gate passed: vet three times, gofmt clean, golangci-lint "0 issues.", capslock 92/37/23 (each equal to its baseline), dep-firewall, testonly-firewall, and 47 pinned actions. TestFetch passed in both `./...` runs.
+
 ### Deviations in this round
 
 - **`total_bounded` for the two agent methods.** The review asked that 20 calls of every budgeted method peak at maxSignerCalls. For GetBundle and GetDirectoryVersion that cannot hold, because alone they are bounded by the agent share. So those two rows assert a peak of the share (6) and an agent peak of 6. The six interactive rows assert a peak of 12 and an agent peak of 0. The share is the owner's rule (`maxSignerCalls / 2`), not the constant under test, so M4 still fails these rows.
 - **The F12 interleaving uses `directoryUnder`.** A caller that read an older Status cannot be staged through currentDirectory: swapping the server's held Status would make that caller current, not late. So the part after currentStatus became `directoryUnder(ctx, v)`, and the test passes it the version-1 Status while the server holds version 2. Its RED was taken on 6bd1324 with only that extraction.
 - **The F12 store guard.** "An obsolete fetch never replaces a newer entry" first meant a fetch that was no longer the most recently started one. With a map, every pending fetch is the latest for its own key, so that reading no longer tells them apart. It now means a fetch whose key is not that of the Status the server holds when the fetch ends. That Status is read under Server.mu, before the mirror lock is taken, so the two locks are never held together. With no Status held (just after an install drops it), a fetch is not known to be obsolete and is stored, as before.
-- **`copy_read_at_start_is_durable` kept its name.** The review asked to replace that subtest with new cases. The success case keeps the name, because the plan's Task 3 verify greps for it; the other cases are new subtests.
+- **`copy_read_at_start_is_durable` kept its name** in this round, because the plan's Task 3 verify greps for it. The owner follow-up renamed it to `copy_read_at_start_rewritten_once`, since "is durable" no longer holds, and updated the plan's verify to match.
 - **Commit types.** As asked for this round, the two test-only commits use `fix(server)`, one per fix, rather than `test(server)`.
 
 ## UNVERIFIED
@@ -300,8 +344,8 @@ Run in WSL on 1822dad, the last code commit of the round. The plan and SUMMARY e
 - KRL and agent-state delivery during a signer stall past statusTTL. It is expected to answer 503 as today, and no test runs it. It is follow-up plan 03-08i's.
 - The fetcher's handling of a 429 on the heartbeat route. heartbeat.go returns nil on RateLimited, but no test drives that path.
 - Added in pre-merge review fix round 1:
-  - Whether the sync at start of the KRL copy, when it follows a failed sync before the restart, can report success on a real disk although the copy never reached it. Within one process, the server rewrites in full after a failed sync for exactly this reason. The sync at start is the owner's choice. A full rewrite at every start would not depend on it.
-  - Every start-sync failure in the tests is injected through `syncDir` or `syncFile`, so the real-disk behaviour after an I/O error is not run.
+  - (Removed by the owner follow-up: the question whether a sync at start can report a false success. No sync at start remains.)
+  - Every sync failure in the F13 tests is injected through `syncDir`, so the real-disk behaviour after an I/O error is not run.
   - The F12 store guard reads the server's held Status before it takes the mirror lock. If that Status changes between the read and the store, an obsolete entry can be kept, which costs at most one more fetch, since every use checks the entry against its caller's Status. No test drives that window.
 
 ## Known Stubs
@@ -318,4 +362,4 @@ None. No route, endpoint, file path or schema was added. agentSlot and the budge
 - All five plan commits (e12fdac, 64e7c36, 09444d9, 49f7dbb, 0a0913d) are ancestors of HEAD. `git rev-list --count 741e2f6..0a0913d` = 5.
 - The must-have artifacts are present: `func withSignerBudget(`, `func (s *Server) agentSlot(`, `func (s *Server) fetchDirectory(`, `durable` in revoke.go. So are the key links: `withSignerBudget(` in newServer, `s.agentSlot(` twice in agent.go, and `s.dropStatus()` in directory.go's fetch.
 - No forbidden file (`.planning/config.json`, `milestone.lock`, `state.json`, `.review-diagnostics/`) is in the branch's diff.
-- Pre-merge review fix round 1: the five commits ddeb8f6, 43904d6, 431f698, c477169 and 1822dad, and the round's SUMMARY commit, are ancestors of HEAD. They are on 6bd1324 with no rewrite (`git rev-list --count 6bd1324..HEAD` = 6 after the SUMMARY commit). `syncFile`, `dirKey`, `pending map[dirKey]*dirFetch` and `func (s *Server) directoryUnder(` are present, and `inflight` no longer appears in directory.go.
+- Pre-merge review fix round 1: the five commits ddeb8f6, 43904d6, 431f698, c477169 and 1822dad, the SUMMARY commit 7aaf58e, the owner follow-up's 5c60311 and its docs commit are all ancestors of HEAD. They sit on 6bd1324 with no rewrite. `dirKey`, `pending map[dirKey]*dirFetch` and `func (s *Server) directoryUnder(` are present. Neither `inflight` (in directory.go) nor `syncFile` (in internal/server) appears any more.
