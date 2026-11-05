@@ -328,7 +328,7 @@ What it does not cover:
 | `.../api/v1/admin/revoke: admin authentication failed` (HTTP 401) | keyroster-server refused the request's admin signature before the signer saw it: the key is not a policy admin, or your clock differs from the server's by more than 2 minutes (the CLI then adds `your clock differs from the server by Ns`). | Use an admin key from the root-signed policy (`--admin-key SHA256:...`), or fix the clock. |
 | `the signer refused the revocation; nothing was revoked: ... HTTP 403: [peer text: "REASON"]` | The signer refused it for REASON. The one an operator can hit is `request_time_skew`: the request was created more than 5 minutes before the signer saw it (ssh-agent took that long to sign, say while waiting for a touch, or the clocks differ). | Run the command again; for another REASON, read the signer's log (`journalctl -u keyroster-signer`). |
 | `the signer has already accepted a request with this ID` (`duplicate_request`) | The signer saw this request ID before; the CLI picks a fresh random one each run, so only a resent request gets this. | Run the command again. |
-| `the server cannot reach its signer (HTTP 503) ... The signer's log names the reason` | The signer could not decide. Its log names `krl_no_installation_id` (the bundle in force has no installation ID), `krl_too_large` or `revocations_not_logged` (both below). | Read the signer's log (`journalctl -u keyroster-signer`). |
+| `the server cannot reach its signer (HTTP 503) ... The signer's log names the reason` | The signer could not decide. Its log names `krl_no_installation_id` (the bundle in force has no installation ID), `krl_too_large` or `revocations_not_logged` (both below), `ops_key_unavailable` (the ops key could not sign the KRL manifest) or `trust_changed` (another trust bundle was installed under the running signer; restart it). | Read the signer's log (`journalctl -u keyroster-signer`). |
 
 The CLI's text in every row ran in the CLI tests against a stub server
 (`TestRevokeRefusalText`; the two KRL rows in `TestRevokeKRLCheck`), the
@@ -356,10 +356,14 @@ signer call failed, outcome unknown` and answers 503. The CLI then reports
 `the server cannot reach its signer (HTTP 503); try again later; the
 revocation may not have been recorded`. The signer may still revoke after
 that: a revocation waiting behind a slow signature (a hardware key waiting
-for a touch, say) commits once that signature ends, unless that is more
-than 5 minutes (300 s) after the CLI created the request. The signer
-checks the request's time only once it holds its lock, so it then refuses
-it with `request_time_skew`, and nothing is revoked. Since 03-08i the
+for a touch, say) commits once that signature ends, unless by then the
+signer's clock is more than 5 minutes (300 s) past the request's creation
+time. That time is the CLI host's clock when it built the request, so a
+clock offset between the two hosts moves the bound by the offset
+(keyroster-server accepts an admin request whose time is up to 120 s off
+its own clock). The signer checks the request's time only once it holds
+its lock, so it then refuses it with `request_time_skew`, and nothing is
+revoked. Since 03-08i the
 server keeps serving the KRL during such a signature, so a host or a CLI
 that reads the KRL in between can be served the KRL from before the
 revocation for up to 5 s (krlTTL) after the signer commits it. Hosts take
@@ -374,15 +378,23 @@ To confirm the outcome:
   cached KRL on that success, and the CLI exits 0 only when the KRL it
   then reads verifies against your root-pinned bundle and lists the
   target. If the rerun gets the same 503, either the signer is still
-  busy, or it refused for a reason its log names (`krl_too_large`,
-  `revocations_not_logged`: see the table above), which no rerun gets
-  past. Read `journalctl -u keyroster-signer` before you run it again.
+  busy, or it refused for a reason its log names that no rerun gets past
+  until it is fixed: `krl_no_installation_id`, `krl_too_large`,
+  `revocations_not_logged`, `ops_key_unavailable` or `trust_changed`
+  (see the table above), or `state_unavailable` after an `audit log
+  unavailable` line (the signer stopped after a failed transaction;
+  restart it). Read `journalctl -u keyroster-signer` before you run it
+  again.
 - Or, on the signer host, `journalctl -u keyroster-signer` shows a
-  `revoked` line if the signer revoked it. The line names a serial
-  (`target=serial serial=N ca=ROLE`), a key ID (`target=key_id
-  key_id=ID ca=ROLE`) or a user (`target=subject subject=NAME`). For a key
-  it names only `target=key`, not the key, so match it by its time and
-  `admins=`, or run the command again instead.
+  `revoked` line if the signer revoked it. The line carries every field
+  for every target, the unused ones zero or empty, so match `msg=revoked` together
+  with the one field that names your target: `serial=N` for a serial,
+  `key_id=ID` for a key ID, `subject=NAME` for a user. A serial
+  revocation reads, for example, `level=INFO msg=revoked target=serial
+  serial=42 key_id="" subject="" ca=user entries=1 ...`. For a key the
+  line is `msg=revoked target=key serial=0 key_id="" subject=""
+  ca=unknown(0) ...`, which does not name the key, so match it by its
+  time and `admins=`, or run the command again instead.
 
 Run in CI: the server's 503 and dropped KRL cache on an unknown outcome
 (`TestKRLCache/uncertain_outcome_drops_cache`), revoking an already
