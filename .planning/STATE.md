@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08h-PLAN.md (PR #84 open, awaiting the merge gate)"
-last_updated: "2026-11-04T11:13:06.756Z"
+stopped_at: Completed 03-08i-PLAN.md (PR open, awaiting the merge gate)
+last_updated: "2026-11-05T08:25:34.316Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 7bdcc2674d738a82b77b5407f1d4a0fd8966bcbc
+state_head: 8ad8178bf23b97dbb85c91b77cbea0063832effb
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 64
-  completed_plans: 55
+  completed_plans: 56
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 21 of 29
+Plan: 22 of 29
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -110,6 +110,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08f | 200min | 4 tasks | 32 files |
 | Phase 03 P08g | 75min | 4 tasks | 19 files |
 | Phase 03 P08h | 110min | 4 tasks | 28 files |
+| Phase 03 P08i | 65min | 4 tasks | 29 files |
 
 ## Accumulated Context
 
@@ -312,6 +313,8 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08h E-1 (owner 2026-11-04): files sized by a sizer indexing roles and principals once, deduplicated without sorting, exactly the rendered sizes; 2 s bound under -race kept
 - [Phase 03]: 03-08h E-2 (owner 2026-11-04): a host moved (shared host key, active entries) to another host group is refused directory_unrenderable when the union of both groups' accounts is above 4096 or a new-group file is above 64 KiB
 - [Phase 03]: 03-08h F16: per-uid shares of 16 of the signer's 32 connections taken in the accept loop without s.mu; slot released before the close; socketSigner waits for the close (signerclient.Client AwaitClose), so the server's live connections stay within its 12 tokens plus GetKRL
+- [Phase 03]: 03-08i Q-I1 B (owner 2026-11-05): Signer.Status takes no lock and answers from an immutable snapshot (atomic.Pointer) published by setDirectoryLocked after COMMIT; the trust check runs on every call through a read-only handle (Config.StatusDB, signerdb.OpenReadOnly, opened by serve), fail-closed (state_unavailable without a handle, on a read error or a cancelled ctx)
+- [Phase 03]: 03-08i: every Status reply carries the trust_bundle row loaded and checked against the log at start (bundleRow); an emptied trust_bundle table is refused trust_changed; Q-I2 A and Q-I3 A keep Status inside the server budget and GetDirectory under s.mu
 
 ### Pending Todos
 
@@ -352,6 +355,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-04T11:12:43.730Z
-Stopped at: Completed 03-08h-PLAN.md (PR #84 open, awaiting the merge gate)
+Last session: 2026-11-05T08:25:33.876Z
+Stopped at: Completed 03-08i-PLAN.md (PR open, awaiting the merge gate)
 Resume file: None
