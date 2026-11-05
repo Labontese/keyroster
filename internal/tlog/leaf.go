@@ -47,7 +47,8 @@ type Kind uint8
 // the signer authorized before keyroster-server deleted it. Kinds 11 to 14
 // stay reserved for 03-09 to 03-12, which add them to the valid set
 // (valid). A reader that has no check for a kind must refuse it, never
-// skip it (audit verify does).
+// skip it (audit verify does). docs/format-registry.md allocates the
+// numbers; TestFormatRegistry fails when it and these constants disagree.
 const (
 	KindIssue            Kind = 1
 	KindRefusal          Kind = 2

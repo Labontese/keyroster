@@ -53,6 +53,8 @@ const MaxServerSignerCalls = MaxPeerConns - 4
 
 // Message types. A LoginIssueRequest is answered with an IssueResponse
 // (0x81). GetDirectory, Status and GetKRL requests have an empty body.
+// docs/format-registry.md allocates the numbers; TestFormatRegistry
+// (internal/tlog) fails when it and these constants disagree.
 const (
 	TypeIssueRequest      byte = 0x01
 	TypeInstallDirectory  byte = 0x02

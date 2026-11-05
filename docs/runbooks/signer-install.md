@@ -63,9 +63,10 @@ in `go.mod`'s `toolchain` line, and compare the hashes. Set `GOTOOLCHAIN`
 from that line as below: a local Go of an older version would otherwise
 build the binaries too, with a standard library whose fixed
 vulnerabilities they reach. Go builds are designed to be reproducible with
-these flags, so the hashes should match; keyroster has not yet verified
-this itself (release reproducibility is checked in Phase 6). Investigate
-any difference before installing:
+these flags, so the hashes should match. **UNVERIFIED:** no keyroster test
+or CI job builds the same commit on two machines and compares the hashes.
+A CI job that does, on two independent runners, would verify it (Phase 6,
+REPO-05). Investigate any difference before installing:
 
 ```
 export GOTOOLCHAIN=$(awk '$1 == "toolchain" {print $2}' go.mod)
