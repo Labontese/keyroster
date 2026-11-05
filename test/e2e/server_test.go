@@ -61,6 +61,10 @@ type serverOpts struct {
 	// AgentListen starts keyroster-server with --agent-listen on
 	// 127.0.0.1:serverEnv.AgentPort (03-07).
 	AgentListen bool
+	// SignerServe, when set, starts the signer instead of
+	// bootstrapSigner's serve: startServerEnv runs prepareSigner and then
+	// SignerServe (03-08i).
+	SignerServe func(t *testing.T, sg *signerEnv)
 }
 
 // serverEnv is a running signer with a keyroster-server in front of it.
@@ -101,10 +105,14 @@ func startServerEnv(t *testing.T, opts serverOpts) *serverEnv {
 		sg   *signerEnv
 		stop func()
 	)
-	if opts.StoppableSigner {
+	switch {
+	case opts.StoppableSigner:
 		sg = prepareSigner(t, bopts)
 		stop = serveStoppable(t, sg)
-	} else {
+	case opts.SignerServe != nil:
+		sg = prepareSigner(t, bopts)
+		opts.SignerServe(t, sg)
+	default:
 		sg = bootstrapSigner(t, bopts)
 	}
 	ca := newTestCA(t, serverRPID)

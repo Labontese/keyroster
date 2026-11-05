@@ -29,6 +29,20 @@ func (e *logEnv) wantDirectory(t *testing.T, version uint64, doc, sigs []byte, a
 		t.Fatalf("GetDirectory = version %d, directory equal %v, signatures equal %v, authorized %v; want %d, true, true, %v",
 			got.Version, bytes.Equal(got.Directory, doc), bytes.Equal(got.Sigs, sigs), got.Authorized, version, authorized)
 	}
+	// The Status snapshot (03-08i) reports the same directory. It is read
+	// directly, not through Status, which refuses while the trust bundle
+	// changed under the signer.
+	snap := e.s.status.Load()
+	if snap == nil {
+		t.Fatal("no Status snapshot published")
+	}
+	var sum [32]byte
+	if version != 0 {
+		sum = sha256.Sum256(doc)
+	}
+	if r := snap.reply; r.DirectoryVersion != version || r.DirectorySHA256 != sum || r.DirectoryAuthorized != authorized {
+		t.Fatalf("Status snapshot = directory %d %x authorized %v; want %d %x %v", r.DirectoryVersion, r.DirectorySHA256, r.DirectoryAuthorized, version, sum, authorized)
+	}
 }
 
 // refuseInstall runs req through the signer's dispatch path

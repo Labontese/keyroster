@@ -233,17 +233,31 @@ fills its share.
   admin under one uid gives them a single share of 16 between them.
 
 **During a slow signature**, for example while a hardware key waits for a
-touch, the calls that need the signer's lock wait with it. keyroster-server
-gives up on such a call at its own timeout, but the connection keeps its
-slot until the signature is done. When more than 3 of them pile up, the
-signer can close the server's next calls unanswered, its KRL and catch-up
-reads included, although it could otherwise answer those at once. Hosts
-keep the KRL they applied and ask again at their next poll, and
-distribution resumes once the signature is done. Answer touch prompts
-promptly.
+touch, the calls that need the signer's lock wait with it: logins, issues,
+revocations, directory installs and directory reads, forgets, and the
+logging of every refused request. The signer's status is not among them
+(03-08i): it answers from a snapshot of the installed directory and the
+trust state it loaded, and checks the latest bundle version through a
+separate read-only database handle, so keyroster-server keeps a recent
+status. keyroster-server gives up on a call that waits at its own timeout,
+but the connection keeps its slot until the signature is done. When more
+than 3 of them pile up, the signer can close the server's next calls
+unanswered, its KRL and catch-up reads included, although it could
+otherwise answer those at once outside a signature that runs inside the
+signer's database transaction. Hosts keep the KRL they applied and ask
+again at their next poll, and distribution resumes once the signature is
+done.
+
+How long a signature can hold the lock has no fixed cap. With the agent
+backend each signature can take up to twice its 30 s request deadline (one
+retry on a new connection). A PIV key pinned with `--key` and generated with
+a touch policy waits for the card's own timeout. One operation can sign more
+than once while it holds the lock (the CA key and then the log key, or the
+ops key and then the log key). Answer touch prompts promptly.
 
 Run in CI (TestPeerShare, TestOverloadDoesNotStallAccept, TestAwaitClose,
-03-08h); UNVERIFIED on a real host.
+03-08h; TestStatusLockFree, TestStatusSnapshot,
+TestDeliveryDuringHeldSignature, 03-08i); UNVERIFIED on a real host.
 
 ## 9. Run doctor
 
@@ -314,8 +328,9 @@ lock on `signer.lock` in the state directory, so `install-bundle` refuses
 with "the state directory is in use by another keyroster-signer process"
 while the service runs. If a successor is installed under a running signer
 anyway (for example by a process that ignores the lock), that signer
-refuses every request with `trust_changed` until it is restarted; it never
-issues under the superseded policy.
+refuses `trust_changed` for its status and for every request that issues,
+logs in, installs a directory, revokes, forgets or publishes a KRL, until it
+is restarted; it never issues under the superseded policy.
 
 > **UNVERIFIED on the homelab signer.** The lock and the `trust_changed`
 > refusal are exercised by the Go tests only (`TestStateDirLock`,

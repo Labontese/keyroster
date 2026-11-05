@@ -211,8 +211,10 @@ func (s *Signer) Issue(ctx context.Context, peer Peer, req *wire.IssueRequest) (
 // signer loaded at start: install-bundle ran against this state while the
 // signer was serving (keyroster-signer serve holds a lock on the state
 // directory that install-bundle respects, so only a process that bypassed
-// it gets here). The signer refuses every request until it is restarted
-// and loads the new bundle.
+// it gets here). Until it is restarted and loads the new bundle, the
+// signer refuses its status and every request that issues, logs in,
+// installs a directory, revokes, forgets, publishes a KRL or recovers
+// (03-08i).
 var errTrustChanged = errors.New("signer: the installed trust bundle changed since start")
 
 // errNonCanonicalKey means a subject key parses but is not in its canonical
@@ -235,13 +237,14 @@ func parseSubjectKey(blob []byte) (ssh.PublicKey, error) {
 
 // checkTrustCurrent refuses with trust_changed when version, the latest
 // installed bundle version (read with err), is not the one this signer
-// loaded. The caller holds s.mu.
+// loaded. It reads only fields New sets (bundleVersion, log), so Status
+// calls it without s.mu (03-08i); every other caller holds s.mu.
 func (s *Signer) checkTrustCurrent(version uint64, err error) error {
 	if err != nil {
 		return refusalErr(wire.CodeUnavailable, "state_unavailable", err)
 	}
 	if version != s.bundleVersion {
-		s.log.Error("trust bundle changed under the running signer: refusing every request until restart",
+		s.log.Error("trust bundle changed under the running signer: refusing status and every issuing, login, install, revoke, forget, KRL-publish and recovery request until restart",
 			"loaded_version", s.bundleVersion, "installed_version", version)
 		return refusalErr(wire.CodeUnavailable, "trust_changed", errTrustChanged)
 	}

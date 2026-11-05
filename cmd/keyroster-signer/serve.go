@@ -95,6 +95,15 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
+	// The read-only handle Status checks the bundle version through
+	// without the signer's lock (03-08i). It is opened after the main
+	// handle, whose migrations its schema check needs, and closed before
+	// it.
+	sdb, err := signerdb.OpenReadOnly(filepath.Join(*stateDir, "signer.db"))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sdb.Close() }()
 	backend, be, err := openStoredBackend(ctx, db, overrides, *stateDir)
 	if err != nil {
 		return err
@@ -104,6 +113,7 @@ func runServe(ctx context.Context, args []string, _, stderr io.Writer) error {
 	s, err := signer.New(signer.Config{
 		Backend:             be,
 		DB:                  db,
+		StatusDB:            sdb,
 		AllowUIDs:           uids,
 		AllowGIDs:           gids,
 		Logger:              logger,

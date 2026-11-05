@@ -35,8 +35,14 @@ const (
 	// answers (dropKRL), unless the signer refused it as malformed or
 	// refused, which publishes nothing; any other change, such as a
 	// signer restarted on another state database, is served at most
-	// krlTTL late. The value is serverclient's, which the e2e suite
-	// waits out.
+	// krlTTL late. So is a revocation whose outcome is unknown: the
+	// entry is dropped when the call fails, but the signer may commit
+	// later (a revocation waiting behind a slow signature commits once
+	// that signature ends), and since the signer answers Status without
+	// its lock (03-08i) a KRL read in between can cache the KRL from
+	// before it. Readers then see the revocation at most krlTTL after
+	// the signer commits it. The value is serverclient's, which the e2e
+	// suite waits out.
 	krlTTL = serverclient.KRLMaxStale
 )
 

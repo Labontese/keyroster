@@ -339,13 +339,39 @@ room. Run in CI (`TestSignerBudget`, `TestKRLDuringFullBudget`, 03-08g);
 UNVERIFIED on a real host.
 
 If the signer's key is on a hardware token that asks for a touch, calls that
-need the signer's lock wait while it waits for the touch. The KRL read is not
-among them. But the KRL route also needs a recent signer status, which waits
-for that lock, so a long wait still makes the route answer 503 after a few
-seconds. Hosts keep the KRL they applied and ask again at their next poll.
-CI runs only the first part, that the KRL route answers while the status is
-recent and every other call is held (`TestKRLDuringFullBudget`, 03-08g). The
-503 during a long touch is UNVERIFIED, in CI and on a real host.
+need the signer's lock wait while it waits for the touch. Neither the KRL
+read nor the signer's status is among them: the signer answers its status
+from a snapshot without waiting for the lock (03-08i). So the KRL route and
+the host routes keep answering during a long touch, for hosts at the current
+versions. What still stops them:
+
+- Calls that wait for the signer pile up during a signature: those that need
+  its lock, and, while the signature runs inside the signer's database
+  transaction (its audit-log and KRL signatures), the reads of older bundles
+  and directories that hosts catching up need. When they fill the server's 12
+  signer calls (as few as 6 interactive calls beside 6 such reads), or once
+  the signer still holds connections of calls the server gave up on
+  (signer-install.md, "During a slow signature"), the routes answer 503. A
+  host catching up may get 503 until the signature ends. (The waiting
+  catch-up reads are reasoned from the code; no test runs them. UNVERIFIED.)
+- A server started or restarted during a signature now starts. Before
+  03-08i, it exited if the signature lasted longer than its 30 s start-up
+  wait. Its KRL route works at once. Its host routes answer 503 until the
+  signature ends, because the server cannot fill its copy of the directory
+  before that, and the same holds after an install that no request fetched
+  before the signature began. (Reasoned from the code; no test starts a
+  server, or meets a cold mirror, during a signature. UNVERIFIED.)
+- /healthz shows only that the server can read the signer's status. It no
+  longer shows that the signer is free to sign or that its main database
+  connection is free (not held by a signature inside a transaction). Watch
+  for timeouts or 503s on issuing, login and revocation calls. (Reasoned from
+  the code; no test runs /healthz during a signature. UNVERIFIED.)
+
+Hosts keep what they applied and ask again at their next poll. Run in CI
+(03-08i): `TestStatusLockFree` and `TestStatusSnapshot` (the signer),
+`TestRoutesPastStatusTTLWithHeldCall` (the server, against its test double),
+and `TestDeliveryDuringHeldSignature` (e2e: a real server in front of the
+real signer with one signature held). UNVERIFIED on a real host.
 
 **Requests in flight per host.** One host agent may have at most 2 requests in
 flight on the state and heartbeat routes together. A further one is answered

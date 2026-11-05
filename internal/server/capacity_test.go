@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"net"
@@ -1090,4 +1092,99 @@ func TestSocketSignerAwaitsClose(t *testing.T) {
 	if r.err != nil || string(r.resp.Cert) != "cert" {
 		t.Fatalf("Login after the close = %+v, %v; want the signer's answer", r.resp, r.err)
 	}
+}
+
+// serveWithin serves req on h in a goroutine and returns its answer, or
+// fails the test after 10 s with a message naming what.
+func serveWithin(t *testing.T, h http.Handler, req *http.Request, what string) *httptest.ResponseRecorder {
+	t.Helper()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- serve(h, req) }()
+	select {
+	case rec := <-done:
+		return rec
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: no answer within 10 s", what)
+		return nil
+	}
+}
+
+// TestRoutesPastStatusTTLWithHeldCall (03-08i) pins the server's half of
+// delivery during a slow signature, against the test double: fakeSigner's
+// Status never waits and no signature is held, so neither case has a RED
+// on origin/main. With one signer call held, GET /api/v1/krl and an
+// approved agent's state answer 200 past statusTTL from one fresh status
+// refresh. With every budget token held, the refresh waits for a token
+// until statusTimeout and the KRL route answers 503 (Q-I2 A). The whole
+// claim, a real server in front of the real signer during a held
+// signature, is TestDeliveryDuringHeldSignature (test/e2e).
+func TestRoutesPastStatusTTLWithHeldCall(t *testing.T) {
+	setup := func(t *testing.T) (*agentEnv, agentID, func() *http.Request) {
+		t.Helper()
+		e := newAgentEnv(t, true)
+		e.publishKRL(t, 101)
+		id, _ := e.approvedAgent(t)
+		get := func() *http.Request {
+			return signedReq(t, nil, http.MethodGet, serverclient.KRLPath, serverclient.KRLPath, nil, e.clock.Now())
+		}
+		if rec := serve(e.s.Handler(), get()); rec.Code != http.StatusOK {
+			t.Fatalf("the first GET krl = %d %s", rec.Code, rec.Body.String())
+		}
+		if c := e.state(t, id); c != http.StatusOK {
+			t.Fatalf("the first state request = %d", c)
+		}
+		return e, id, get
+	}
+	stateReq := func(id agentID) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "https://"+testRPID+":8443"+serverclient.AgentStatePath, nil)
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{id.cert}}
+		return req
+	}
+	hold := func(t *testing.T, e *agentEnv, n int) (func(), <-chan error) {
+		t.Helper()
+		entered, release := e.fake.hold("Login")
+		t.Cleanup(release)
+		logins := goCalls(context.Background(), e.s.signer, n, only("Login"))
+		for i := range n {
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%d of %d Logins reached the signer", i, n)
+			}
+		}
+		return release, logins
+	}
+	t.Run("krl_and_state_past_status_ttl", func(t *testing.T) {
+		e, id, get := setup(t)
+		release, logins := hold(t, e, 1)
+		e.clock.set(e.clock.Now().Add(statusTTL + time.Second))
+		before := e.fake.count("Status")
+		rec := serveWithin(t, e.s.Handler(), get(), "GET krl past statusTTL with one call held")
+		var doc serverclient.KRLDocument
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &doc) != nil || string(doc.KRL) != "krl version 101" {
+			t.Fatalf("GET krl past statusTTL with one call held = %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := serveWithin(t, e.s.AgentHandler(), stateReq(id), "state past statusTTL with one call held"); rec.Code != http.StatusOK {
+			t.Fatalf("state past statusTTL with one call held = %d %s", rec.Code, rec.Body.String())
+		}
+		if n := e.fake.count("Status") - before; n != 1 {
+			t.Fatalf("%d Status calls past statusTTL, want 1 (one fresh refresh)", n)
+		}
+		release()
+		collect(t, logins, 1)
+	})
+	t.Run("budget_full_status_waits", func(t *testing.T) {
+		e, _, get := setup(t)
+		release, logins := hold(t, e, maxSignerCalls)
+		e.clock.set(e.clock.Now().Add(statusTTL + time.Second))
+		before := e.fake.count("Status")
+		if rec := serveWithin(t, e.s.Handler(), get(), "GET krl past statusTTL with the budget full"); rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("GET krl past statusTTL with the budget full = %d %s; want 503", rec.Code, rec.Body.String())
+		}
+		if n := e.fake.count("Status") - before; n != 0 {
+			t.Fatalf("%d Status calls with the budget full, want 0 (the refresh waits for a token)", n)
+		}
+		release()
+		collect(t, logins, maxSignerCalls)
+	})
 }
