@@ -267,7 +267,13 @@ func (b *budgetSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest)
 const (
 	// statusTTL is how long a signer Status answer is served from the
 	// cache. After that, a failed refresh fails the request; nothing is
-	// rendered from an expired entry.
+	// rendered from an expired entry. A directory install whose outcome
+	// is unknown drops the entry (dropStatus), but the signer may commit
+	// later (an install waiting behind a slow signature commits once that
+	// signature ends), and since the signer answers Status without its
+	// lock (03-08i) a refresh in between can cache the status from before
+	// it. Readers then see the new version at most statusTTL after the
+	// signer commits it.
 	statusTTL = 5 * time.Second
 	// statusTimeout bounds one refresh.
 	statusTimeout = 3 * time.Second

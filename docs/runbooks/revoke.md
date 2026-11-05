@@ -348,6 +348,42 @@ reaches the signer, so the audit log has no entry for it; look in the
 server's log instead (`journalctl -u keyroster-server`, which names
 every admin authentication failure).
 
+### A 503 whose outcome is unknown
+
+When keyroster-server loses the signer's answer to a revocation (its call
+times out after 10 s, or the connection breaks), it logs `revocation:
+signer call failed, outcome unknown` and answers 503. The CLI then reports
+`the server cannot reach its signer (HTTP 503); try again later; the
+revocation may not have been recorded`. The signer may still revoke after
+that: a revocation waiting behind a slow signature (a hardware key waiting
+for a touch, say) commits once that signature ends. Since 03-08i the
+server keeps serving the KRL during such a signature, so a host or a CLI
+that reads the KRL in between can be served the KRL from before the
+revocation for up to 5 s (krlTTL) after the signer commits it. Hosts take
+the new KRL at their next poll after that.
+
+To confirm the outcome:
+
+- Run the same `keyroster revoke` command again once any touch prompt on
+  the signer host is answered. The CLI draws a fresh request ID, and the
+  signer does not refuse a target it has already revoked: it records it
+  again and publishes the next KRL version. keyroster-server drops its
+  cached KRL on that success, and the CLI exits 0 only when the KRL it
+  then reads verifies against your root-pinned bundle and lists the
+  target. If the rerun gets the same 503, the signer is still busy: wait
+  and run it again.
+- Or, on the signer host, `journalctl -u keyroster-signer` shows a
+  `revoked` line for the target if the signer revoked it.
+
+Run in CI: the server's 503 and dropped KRL cache on an unknown outcome
+(`TestKRLCache/uncertain_outcome_drops_cache`), revoking an already
+revoked key again (`TestRevokeSubject/explicit_key_cap_relist_accepted`)
+and a second sweep of a user (`TestRevokeSubject/revoke_user_second_sweep_relists`)
+in the signer's tests, and the CLI's KRL check (`TestRevokeKRLCheck`).
+A second revocation of the same serial or key ID, a rerun after an unknown
+outcome, and the older KRL served during a held signature are reasoned
+from the code: **UNVERIFIED**, in CI and on a real host.
+
 ### `krl_too_large`
 
 A KRL is at most 4 MiB, about half a million revoked serials that are not

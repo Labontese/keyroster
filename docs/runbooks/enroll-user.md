@@ -214,6 +214,21 @@ Both views are what the server serves. If you suspect the server itself is
 compromised, they prove nothing about the signer: decide on the signer
 host instead ([Confirm on the signer host](#confirm-on-the-signer-host)).
 
+The views can also lag the signer. An install waiting behind a slow
+signature (a hardware key waiting for a touch, say) is still installed
+once that signature ends, after the CLI has reported the error. Since
+03-08i the server keeps answering during such a signature, so it can
+serve the version it read before for up to 5 s (statusTTL) after the
+signer commits the new one. Wait until any touch prompt on the signer
+host is answered, then 5 s more, before you read the views. Running the
+command again meanwhile installs nothing twice: the signer installs each
+version only after the one it holds, so a rerun built on the older
+version is refused with `directory_version_chain` once the first install
+committed (the CLI says the directory changed since it was read): read the
+views again then. (Reasoned from the
+code; no test loses an install's answer while a signature is held.
+**UNVERIFIED**, in CI and on a real host.)
+
 ## A directory hosts cannot render is refused at install
 
 Every command that installs a directory version can be refused with
