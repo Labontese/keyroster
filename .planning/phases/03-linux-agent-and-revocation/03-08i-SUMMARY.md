@@ -332,6 +332,34 @@ Tests and lint on the fix round (local, WSL, -race):
 
 The fix round touched only comments, docs, statuswriters_test.go and the plan's wording, so the full `./...` gate was not re-run, as the coordinator's rules allow. CI on the new head is recorded in the handback.
 
+## Follow-up (fix-round check)
+
+The check of review fix round 1 found six lows. C-1 to C-5 were confirmed 2 of 2, and C-6 was split 1 of 1 and verified in code. Owner decision (Daniel, 2026-11-05): A, a small docs and test PR now, before 03-14b. That is PR **#86**, on branch `p03/08i-followup` from origin/main ff865f2 (#85 merged).
+
+**The fixes**
+
+| Item | Fix | Commit |
+|---|---|---|
+| C-1 | In revoke.md, a second 503 on a rerun can also be `krl_too_large` or `revocations_not_logged` (CodeUnavailable, never committed). The admin reads the signer's journal before another rerun. | 537fbbb |
+| C-2 | revoke.md now says the `revoked` journal line names `target=serial serial=N ca=ROLE`, `target=key_id key_id=ID ca=ROLE` or `target=subject subject=NAME`, and only `target=key` for a key, which is matched by time and `admins=` or by a rerun. The line is in the UNVERIFIED sentence. | 537fbbb |
+| C-3 | enroll-user.md quotes what each rerun prints: `user approve` says `the directory changed since it was read (another admin installed a version); re-run this command`, and `directory install` of the same proposal says `The server already serves proposal DIR as directory version N (SHA-256 ...); nothing to do.` (TestDirectoryPipeline/proposal_already_served). | 537fbbb |
+| C-6 | revoke.md and the krlTTL comment: a revocation that waits more than 300 s (wire.MaxRequestSkewSeconds) behind the lock is refused `request_time_skew` once it holds the lock, and revokes nothing. The refusal runs in CI (TestRevoke/stale_request_refused); the wait behind a held signature is UNVERIFIED. | 537fbbb |
+| C-4 | TestStatusWriters refuses a composite-literal key `caKeys` or `bundleRow` outside New, whatever the literal's type. A literal of type Signer stays with the existing Signer rule, so it is reported once. There is no false positive on the head: checkStoredTrust's `&trustState{...}` sets neither key. | 00456fb |
+| C-5 | The failure message, the doc comment and plan truth 4 now say only what the gate checks. Aliases under other names are not followed: callee parameters, loadTrust's locals, trustState.stored and copies of an allowlisted expression. The `ts.caKeys` allowlist reason now says it is the slice New stores. fd374fa's commit message cannot change; PR #86's body says what was overstated. | 00456fb |
+
+**Mutants** (each applied by script, run with `-timeout 120s` against TestStatusWriters, restored with `git checkout`, and `git diff` clean afterwards). All were killed:
+- `_ = []Signer{{caKeys: nil}}` in InstallDirectory: `directory.go:233: InstallDirectory: a composite literal outside New sets the key caKeys`.
+- `type sx = Signer; _ = sx{bundleRow: nil}` in InstallDirectory: `directory.go:234: ... sets the key bundleRow`.
+- Round 1's three mutants still fail the gate, with the new message: the bundleRow alias, the caKeys alias and the sixth directoryState field.
+
+**Tests and lint** (local, WSL, -race):
+- `--- PASS: TestStatusWriters (0.08s)`;
+- `ok github.com/Labontese/keyroster/internal/signer 332.551s`;
+- `ok github.com/Labontese/keyroster/internal/server 131.255s`;
+- `golangci-lint run ./internal/signer/... ./internal/server/...`: `0 issues.`
+
+**Deviation.** `main` is checked out in another worktree, so this checkout could not switch to it to run `git pull --ff-only`. The branch was created with `git switch -c p03/08i-followup --no-track origin/main` after `git fetch`, which is the same commit (ff865f2).
+
 ## Self-Check: PASSED
 
 - The created files exist: internal/signer/statussnapshot_test.go, internal/signer/statuswriters_test.go, test/e2e/stall_test.go, 03-08i-PLAN.md and 03-08i-SUMMARY.md.
