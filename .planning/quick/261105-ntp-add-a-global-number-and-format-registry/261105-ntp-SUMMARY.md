@@ -21,7 +21,7 @@ metrics:
   completed: 2026-11-05
 actuals:
   tasks: 3
-  commits: 4
+  commits: 5
 plan_head_before: f7eb0184bffbbe4bd82e65f852cb1a8ba20aaf96
 ---
 
@@ -34,7 +34,8 @@ docs/format-registry.md now owns every number and tag that the audit log or the 
 - `b7cca53` docs(registry): add a number and format registry pinned to the code
 - `e6c752f` docs(runbooks): label the reproducible-build claims UNVERIFIED
 - `4f081e3` docs(quick-261105-ntp): record the format registry quick task (this PLAN and SUMMARY)
-- the docs commit that states the installation-binding rule as a rule for every new signed format and names the OpenSSH commit checked
+- `2d95fc4` docs(registry): state installation binding as the rule for new formats
+- the review fix round commit (below)
 
 The owner is the author of each commit, and keyroster-bot is the committer, with an SSH signature.
 
@@ -67,5 +68,17 @@ Eleven mutants, each applied alone and undone: a fake leaf constant 17, a fake w
 
 - The 03-09 to 03-11 plans list the HostIssueRequest, ProbeIssueRequest and MachineIssueRequest fields without an installation ID. The registry's installation-binding rule covers them, so they must carry it when those plans are executed.
 - kr2 key IDs with long role lists exceed the budget today. The registry records the numbers; changing the caps or the format needs its own plan.
+
+## Review fix round
+
+A review of PR #87 asked for these changes, all made in one commit:
+
+- The 03-09 to 03-11 requests "must carry" the installation ID (the drafts do not list it yet), and the formats table is introduced as "Formats that carry it today include:".
+- The refusal text names both server answers to an unclassified detail: 503 on revoke, host forget and directory install, 400 "login not redeemable" on login redeem.
+- TestFormatRegistry now also checks each in-use kind's export name against Kind.String, fails a body row without a canonical number, checks that every request's "Answered with" is a response row (in use for an in-use request), fails a byte constant in package wire not named Type*, and reads constants written as conversions (Kind(11)). The registry's description of the test says what it checks and that it does not check which response the signer sends.
+- The key ID budget notes the `, signature count = N` suffix of -SK certificates (up to 30 bytes, left out of the budget) and that auth_log truncates the user name to 100 bytes; checked against auth2-pubkey.c at the same commit.
+- The tag table gains `keyroster tpm key probe` (tpm.probeDigest), and its lead says "Every signed format keyroster defines".
+
+Mutants: the eleven above plus six more (kind 16's export name changed, 0x0D answered with 0x8E, a lowercase 0x0e row, `MsgFake byte = 0x0E` in frame.go, `const kindHostIssue = Kind(11)`, reserved 0x0A answered with 0x85). All seventeen fail the test; the restored tree passes. A request answered with another existing in-use response row still passes: the test cannot know which response the signer sends.
 
 ## Self-Check: PASSED

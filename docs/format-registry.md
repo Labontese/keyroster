@@ -6,10 +6,12 @@ merged, keeps its meaning for as long as a log or a peer can hold it, so two
 plans must never pick the same one.
 
 `TestFormatRegistry` (internal/tlog/registry_test.go) reads the tables of
-leaf kinds and wire message types below, and the next free number each
-names, and fails when they and the code disagree. The other sections are
-not checked by a test. Keep them in step with the code by hand, in the same
-PR as the change.
+leaf kinds and wire message types below and fails when their numbers and
+constant names disagree with the code, when a leaf kind's export name is
+not `Kind.String`, when a request's "Answered with" is not a response row,
+or when a "next free" sentence is stale. It does not check which response
+the signer actually sends. The other sections are not checked by a test.
+Keep them in step with the code by hand, in the same PR as the change.
 
 ## How numbers are allocated
 
@@ -55,11 +57,14 @@ The next free kind is 17.
 
 ## Wire message types
 
-Source: `internal/wire/frame.go` (the `Type*` constants). A request type is
-below 0x80; its response type, when it has its own, is the request type
-plus 0x80. A request that is answered with another request's response
-(for example `TypeLoginIssueRequest`, answered with `TypeIssueResponse`)
-leaves its own response number unused, and that number stays free for it.
+Source: `internal/wire/frame.go`. Every wire message type constant is a
+byte constant in package wire named `Type` followed by a capital letter;
+`TestFormatRegistry` fails on a byte constant there under another name. A
+request type is below 0x80; its response type, when it has its own, is the
+request type plus 0x80. A request that is answered with another request's
+response (for example `TypeLoginIssueRequest`, answered with
+`TypeIssueResponse`) leaves its own response number unused, and that
+number stays free for it.
 
 ### Requests
 
@@ -114,7 +119,7 @@ test. A plan that adds a value lists it here.
 
 ## Domain-separation tags and SSHSIG namespaces
 
-Every signature keyroster makes or checks is bound to one tag. A tag is
+Every signed format keyroster defines is bound to one tag. A tag is
 never shared by two formats, and a format change that verifiers must tell
 apart takes a new version (`/v2`), as the revoke request did. Old versions
 stay listed while audit still reads them.
@@ -141,6 +146,7 @@ both.
 | `keyroster/admin-api/v1` | SSHSIG, admin API request | `adminauth.Namespace` |
 | `keyroster/agent-enroll/v1` | SSHSIG and the PoP `domain` field, host enrollment proof | `enroll.Namespace`, `enroll.Domain` |
 | `keyroster/agent-identity/v1` | domain, agent TLS identity rotation | `serverclient.AgentIdentityDomain` |
+| `keyroster tpm key probe` | digest signed once at start by a TPM CA key, never stored | `tpm.probeDigest` |
 
 Evidence types and other prefixes:
 
@@ -156,10 +162,11 @@ Evidence types and other prefixes:
 The single source is `classify` in `internal/signer/refusal.go`. It maps each
 detail string the signer refuses with to its reason class. Every new detail
 must be added there. The default branch is `ReasonInternal`, which the
-signer answers with `CodeInternal`, and keyroster-server turns that into a
-503 ("signer unavailable"). A detail that is not classified therefore reads
-as a signer failure instead of a refusal, to the client and in the audit
-log's reason class.
+signer answers with `CodeInternal`. On revoke, host forget and directory
+install keyroster-server answers that with 503 ("signer unavailable"); on
+login redeem it answers 400 "login not redeemable". Either way a detail
+that is not classified reads as a signer failure instead of a refusal, to
+the client and in the audit log's reason class.
 
 ## Installation binding
 
@@ -168,7 +175,7 @@ another installation must carry the installation ID of the trust bundle it
 is for, in its signed bytes, and whoever checks the signature must refuse
 one that names another installation. The rule applies to every new signed
 format. The installation ID is `trust.Bundle.InstallationID` (32 lowercase
-hex digits). The formats that carry it today:
+hex digits). Formats that carry it today include:
 
 | Format | Field | Signed by |
 |---|---|---|
@@ -184,8 +191,8 @@ not signed.
 
 The proof-of-possession issue requests planned for 03-09 to 03-11
 (`HostIssueRequest`, `ProbeIssueRequest`, `MachineIssueRequest`) fall under
-this rule and carry the installation ID in their signing bytes. A new
-signed format adds a row here in the PR that adds it.
+this rule: they must carry the installation ID in their signing bytes. A
+new signed format adds a row here in the PR that adds it.
 
 ## Key ID budget
 
@@ -201,8 +208,8 @@ That line is built by `auth_log` and `format_method_key` in OpenSSH's
 (`VIS_CSTYLE|VIS_NL|VIS_TAB|VIS_OCTAL`, which can expand one non-printable
 byte to up to four) and hands it to syslog as `syslog(pri, "%.500s",
 fmtbuf)`. Anything after the first 500 bytes of the escaped line is cut
-off. (Checked against openssh-portable `log.c` and `auth.c` at `master`
-commit f78fc73d3162, on 2026-11-05.)
+off. (Checked against openssh-portable `log.c`, `auth.c` and `auth2-pubkey.c`
+at `master` commit f78fc73d3162, on 2026-11-05.)
 
 Key IDs keyroster issues contain only printable ASCII (the grammar in
 `internal/cert/keyid.go`), so `strnvis` does not expand them.
@@ -219,11 +226,17 @@ What the line costs besides the key ID, at most:
 | Port | 5 |
 | Serial (a uint64 in decimal) | 20 |
 | Address (an IPv6 address in text form, without a zone) | 45 |
-| User name (32 bytes, the usual Linux login name limit; sshd allows up to 100) | 32 |
+| User name (32 bytes, the usual Linux login name limit; `auth_log` truncates it to 100 with `%.100s`) | 32 |
 | **Total besides the key ID** | **289** |
 
+For a security key (`-SK`) certificate, sshd appends
+`, signature count = N` after the CA fingerprint: up to 30 bytes, recorded
+by `auth2_record_info` in `auth2-pubkey.c` and added by
+`format_method_key`. The budget leaves it out, because cutting it loses no
+part of the key ID, the serial or the CA fingerprint.
+
 So the key ID budget is **211 bytes**: 500 minus 289. With a 100-byte user
-name, sshd's own cap, it is 143 bytes.
+name, `auth_log`'s cap, it is 143 bytes.
 
 The project's caps today (`internal/cert/keyid.go`):
 
