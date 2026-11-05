@@ -37,12 +37,18 @@ const (
 	// signer restarted on another state database, is served at most
 	// krlTTL late. So is a revocation whose outcome is unknown: the
 	// entry is dropped when the call fails, but the signer may commit
-	// later (a revocation waiting behind a slow signature commits once
-	// that signature ends), and since the signer answers Status without
-	// its lock (03-08i) a KRL read in between can cache the KRL from
-	// before it. Readers then see the revocation at most krlTTL after
-	// the signer commits it. The value is serverclient's, which the e2e
-	// suite waits out.
+	// later. A revocation waiting behind a slow signature commits once
+	// that signature ends, unless the signer's clock is then more than
+	// wire.MaxRequestSkewSeconds past the request's CreatedAt, which the
+	// CLI host's clock set (a clock offset between the hosts moves that
+	// bound; adminauth.MaxSkew lets the CLI be that far off this
+	// server's clock): the signer checks the request's time only once it
+	// holds its lock, then refuses it request_time_skew and revokes
+	// nothing. Since the signer
+	// answers Status without its lock (03-08i), a KRL read in between can
+	// cache the KRL from before the revocation. Readers then see the
+	// revocation at most krlTTL after the signer commits it. The value is
+	// serverclient's, which the e2e suite waits out.
 	krlTTL = serverclient.KRLMaxStale
 )
 
