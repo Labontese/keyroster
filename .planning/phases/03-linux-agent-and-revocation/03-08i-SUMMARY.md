@@ -77,12 +77,23 @@ The signer answers Status from an immutable snapshot that is published after eve
 
 ## CI
 
-The PR's checks are recorded in a later commit of this SUMMARY. It is pushed before the PR is opened (owner's execution instruction).
+On head a55b82d (everything before this CI note), all 26 required checks passed:
+- build-test 8m58s, with `internal/signer` 244.651 s, `internal/server` 107.710 s and `internal/agent/apply` 199.325 s;
+- fuzz 25m21s, lint, capslock, govulncheck and dependency-firewall;
+- e2e (9.5p1) 10m11s and e2e (10.5p1) 9m52s, seven e2e-distro jobs, two e2e-pkcs11 jobs, e2e-tpm and systemd-sandbox;
+- cli-windows, cli-macos, build-piv, pinned-actions, pr-title and the two CodeQL analyses.
+
+**The e2e GREEN.** The PR's e2e run is 41994732631:
+- e2e (9.5p1): `--- PASS: TestDeliveryDuringHeldSignature (13.52s)`, `the signature was held for 2.001841055s`.
+- e2e (10.5p1): `--- PASS: TestDeliveryDuringHeldSignature (13.55s)`, `the signature was held for 2.000008833s`.
+
+The checks on the commit that adds this note are waited for after its push.
 
 ## Delivery
 
 - Branch `p03/08i-status-snapshot` from origin/main d819904 (03-08h merged as PR #84), created by the owner before execution.
-- The PR is opened by keyroster-bot without auto-merge. Daniel reviews and squash-merges it.
+- PR: **#85**, opened by keyroster-bot without auto-merge. Daniel reviews and squash-merges it.
+- Required check runs on a55b82d: 41994732534, 41994732538, 41994732539, 41994732540, 41994732544, 41994732571, 41994732597, 41994732598, 41994732627 and 41994732631.
 
 ## Commits
 
@@ -96,7 +107,8 @@ The PR's checks are recorded in a later commit of this SUMMARY. It is pushed bef
 | 3 (T3) | 3a93b18 | test(e2e): deliver the KRL and an agent's state during a held signature |
 | 4 | f2ed388 | docs(runbooks): the signer's status during a slow signature, and what a superseded bundle refuses |
 | 4 | 8ad8178 | docs(03-08i): slot the status-snapshot plan into wave 20 and point the landed plans at it |
-| 4 | (this) | docs(03-08i): complete status-snapshot plan |
+| 4 | a55b82d | docs(03-08i): complete status-snapshot plan |
+| 4 | (this) | docs(03-08i): record the PR's checks in the SUMMARY |
 
 ## Test time (03-08k's limits: 400 s alone, 480 s under ./...)
 
