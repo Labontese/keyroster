@@ -587,7 +587,7 @@ func TestStatusLockFree(t *testing.T) {
 		requireStateUnavailable(t, "without StatusDB", st, err)
 		// StatusDB equal to DB.
 		if s, err := New(Config{Backend: e.backend, DB: db, StatusDB: db, AllowUIDs: []uint32{1000}, Logger: slog.New(slog.DiscardHandler)}); s != nil || err == nil {
-			t.Fatalf("New with StatusDB equal to DB = %v, %v; want an error", s, err)
+			t.Fatalf("New with StatusDB equal to DB = a signer %v, %v; want no signer and an error", s != nil, err)
 		}
 		// A cancelled ctx, then a live one.
 		ss := newStatusSigner(t, e, e.backend, false)
