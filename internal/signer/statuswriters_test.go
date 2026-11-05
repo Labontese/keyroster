@@ -49,6 +49,24 @@ var statusWriteAllow = []struct {
 		"trustState.caKeys, a field of the trust state loadTrust returns, not the Signer's; New copies it into its literal"},
 }
 
+// statusRefAllow is the allowlist of references to caKeys or bundleRow
+// outside New and publishStatusLocked, each with its reason (review fix
+// round 1 of PR #85). TestStatusWriters fails when an entry matches
+// nothing.
+var statusRefAllow = []struct {
+	file, fn, expr, reason string
+}{
+	{"trust.go", "loadTrust", "ts.caKeys",
+		"trustState.caKeys, a field of the trust state loadTrust returns, not the Signer's"},
+}
+
+// statusDirectoryStateFields are directoryState's fields as setDirectoryLocked,
+// readDirectory and newStatusSnapshot know them.
+var statusDirectoryStateFields = []string{
+	"directory *directory.Directory", "directoryRaw []uint8", "directorySigs []uint8",
+	"directoryVersion uint64", "directoryAuthorized bool",
+}
+
 // statusRequiredFuncs must each be declared exactly once, so a rename
 // cannot pass the gate silently.
 var statusRequiredFuncs = []string{"setDirectoryLocked", "publishStatusLocked", "readDirectory", "newStatusSnapshot", "Status"}
@@ -65,6 +83,11 @@ var statusReplyFields = []string{
 // non-test files. It matches names, not types (go/types would type-check
 // every dependency from source), so it catches the common write forms, not
 // every possible one: a write through reflection or unsafe would pass.
+// Since review fix round 1 of PR #85 it also refuses every reference, read
+// or write, to the Signer's caKeys and bundleRow outside New and
+// publishStatusLocked, so an alias such as `row := s.bundleRow` cannot
+// carry a write past it, and it pins directoryState's field set as it pins
+// wire.StatusResponse's.
 func TestStatusWriters(t *testing.T) {
 	for _, v := range statusWriterViolations(".") {
 		t.Error(v)
@@ -110,6 +133,7 @@ func statusWriterViolations(dir string) []string {
 
 	decls := map[string]int{}
 	allowUsed := make([]bool, len(statusWriteAllow))
+	refAllowUsed := make([]bool, len(statusRefAllow))
 	calls := map[string]map[string]int{} // callee -> caller -> count
 	statusStores := 0
 	for _, sf := range files {
@@ -148,7 +172,7 @@ func statusWriterViolations(dir string) []string {
 			}
 			ctx := &statusFuncCtx{
 				file: sf.name, fn: fn, locals: locals, calls: calls, stores: &statusStores,
-				allowUsed: allowUsed,
+				allowUsed: allowUsed, refAllowUsed: refAllowUsed,
 			}
 			statusCheckNode(fd.Body, sf.name, fn, report, ctx)
 			switch fn {
@@ -169,6 +193,12 @@ func statusWriterViolations(dir string) []string {
 		if !used {
 			a := statusWriteAllow[i]
 			out = append(out, fmt.Sprintf("allowlist entry %s %s %s matches nothing: remove it from statusWriteAllow", a.file, a.fn, a.expr))
+		}
+	}
+	for i, used := range refAllowUsed {
+		if !used {
+			a := statusRefAllow[i]
+			out = append(out, fmt.Sprintf("allowlist entry %s %s %s matches nothing: remove it from statusRefAllow", a.file, a.fn, a.expr))
 		}
 	}
 	want := map[string]map[string]int{
@@ -201,6 +231,15 @@ func statusWriterViolations(dir string) []string {
 	if !slices.Equal(fields, statusReplyFields) {
 		out = append(out, fmt.Sprintf("wire.StatusResponse has fields %q, want %q: a new or changed reply field must be added to the snapshot (newStatusSnapshot, copyReply) and to this test (03-08i)", fields, statusReplyFields))
 	}
+	var dsFields []string
+	dt := reflect.TypeFor[directoryState]()
+	for i := range dt.NumField() {
+		f := dt.Field(i)
+		dsFields = append(dsFields, f.Name+" "+f.Type.String())
+	}
+	if !slices.Equal(dsFields, statusDirectoryStateFields) {
+		out = append(out, fmt.Sprintf("directoryState has fields %q, want %q: a new or changed directory field must be written through setDirectoryLocked, published by newStatusSnapshot when Status reports it, and added to this test (03-08i)", dsFields, statusDirectoryStateFields))
+	}
 	return out
 }
 
@@ -212,6 +251,8 @@ type statusFuncCtx struct {
 	calls     map[string]map[string]int
 	stores    *int
 	allowUsed []bool
+	// refAllowUsed marks the statusRefAllow entries that matched.
+	refAllowUsed []bool
 }
 
 // statusUnwrap strips ParenExpr, StarExpr, IndexExpr and SliceExpr.
@@ -320,7 +361,7 @@ func statusCheckWrite(e ast.Expr, how string, ctx *statusFuncCtx, report func(st
 // and caller rules to every node under root.
 func statusCheckNode(root ast.Node, file, fn string, report func(string, string, token.Pos, string, ...any), ctx *statusFuncCtx) {
 	if ctx == nil {
-		ctx = &statusFuncCtx{file: file, fn: fn, locals: map[string]bool{}, calls: map[string]map[string]int{}, stores: new(int), allowUsed: make([]bool, len(statusWriteAllow))}
+		ctx = &statusFuncCtx{file: file, fn: fn, locals: map[string]bool{}, calls: map[string]map[string]int{}, stores: new(int), allowUsed: make([]bool, len(statusWriteAllow)), refAllowUsed: make([]bool, len(statusRefAllow))}
 	}
 	var stack []ast.Node
 	ast.Inspect(root, func(n ast.Node) bool {
@@ -384,10 +425,29 @@ func statusCheckNode(root ast.Node, file, fn string, report func(string, string,
 				}
 			case "status":
 				statusCheckPointerUse(x, parent, stack, file, fn, report, ctx)
+			case "caKeys", "bundleRow":
+				statusCheckTrustRef(x, file, fn, report, ctx)
 			}
 		}
 		return true
 	})
+}
+
+// statusCheckTrustRef refuses a reference, read or write, to a caKeys or
+// bundleRow selector outside New and publishStatusLocked, unless
+// statusRefAllow names it (review fix round 1 of PR #85).
+func statusCheckTrustRef(sel *ast.SelectorExpr, file, fn string, report func(string, string, token.Pos, string, ...any), ctx *statusFuncCtx) {
+	if fn == "New" || fn == "publishStatusLocked" {
+		return
+	}
+	expr := statusExprString(sel)
+	for i, a := range statusRefAllow {
+		if a.file == file && a.fn == fn && a.expr == expr {
+			ctx.refAllowUsed[i] = true
+			return
+		}
+	}
+	report(file, fn, sel.Pos(), "a reference to %s: only New sets the trust state Status reports and only publishStatusLocked reads it, so no alias can change it (03-08i)", expr)
 }
 
 // statusParenless strips ParenExpr only.
