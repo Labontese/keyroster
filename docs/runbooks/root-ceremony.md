@@ -59,9 +59,13 @@ tests).
    ```
 
 2. On the **second machine**, check out the same commit, run the same build
-   and compare the SHA-256. Go builds are reproducible, so the two hashes
-   must be identical. If they differ, stop and find out why. Record the hash
-   in the transcript.
+   with the same Go toolchain version and compare the SHA-256. If the hashes
+   differ, stop and find out why. Record the hash in the transcript.
+   **UNVERIFIED:** that the two hashes are identical. Go builds with these
+   flags are designed to be reproducible, but no keyroster test or CI job
+   builds the same commit on two machines and compares the hashes. A CI job
+   that does, on two independent runners, would verify it (Phase 6,
+   REPO-05).
 3. Copy `keyroster` to the transfer USB.
 4. Boot the ceremony machine from the live USB. Unplug the network cable.
    Disable wireless before doing anything else:
