@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -434,13 +435,23 @@ func lockMu(s *Signer) func() {
 	}
 }
 
+// statusSummary renders a Status reply for a failure message: its
+// bundle and directory versions, the directory's SHA-256 and whether it is
+// authorized, or "no reply".
+func statusSummary(st *wire.StatusResponse) string {
+	if st == nil {
+		return "no reply"
+	}
+	return fmt.Sprintf("bundle %d, directory %d %x authorized %v", st.BundleVersion, st.DirectoryVersion, st.DirectorySHA256, st.DirectoryAuthorized)
+}
+
 // requireStateUnavailable requires err to be a state_unavailable refusal
 // (CodeUnavailable) and st no reply.
 func requireStateUnavailable(t *testing.T, what string, st *wire.StatusResponse, err error) {
 	t.Helper()
 	var r *refusal
 	if st != nil || !errors.As(err, &r) || r.code != wire.CodeUnavailable || r.reason != "state_unavailable" {
-		t.Fatalf("%s: Status = %+v, %v; want no reply and a state_unavailable refusal (unavailable)", what, st, err)
+		t.Fatalf("%s: Status = %s, %v; want no reply and a state_unavailable refusal (unavailable)", what, statusSummary(st), err)
 	}
 }
 
@@ -461,7 +472,7 @@ func TestStatusLockFree(t *testing.T) {
 		defer unlock()
 		a := awaitStatus(t, goStatus(func() (*wire.StatusResponse, error) { return e.s.Status(ctx) }), "answers_with_mu_held")
 		if a.err != nil || a.st.BundleVersion != 1 || a.st.DirectoryVersion != 1 || a.st.DirectorySHA256 != sha256.Sum256(d.Directory) || !a.st.DirectoryAuthorized {
-			t.Fatalf("answers_with_mu_held: Status = %+v, %v; want bundle 1, directory 1 with its SHA-256, authorized", a.st, a.err)
+			t.Fatalf("answers_with_mu_held: Status = %s, %v; want bundle 1, directory 1 with its SHA-256, authorized", statusSummary(a.st), a.err)
 		}
 	})
 	for _, tc := range []struct {
@@ -486,10 +497,10 @@ func TestStatusLockFree(t *testing.T) {
 			sock := goStatus(func() (*wire.StatusResponse, error) { return signerclient.Status(ctx, ss.sock) })
 			direct := goStatus(func() (*wire.StatusResponse, error) { return ss.s.Status(ctx) })
 			if a := awaitStatus(t, sock, tc.name+" over the socket"); a.err != nil || a.st.BundleVersion != 1 {
-				t.Fatalf("%s: Status over the socket = %+v, %v; want bundle 1", tc.name, a.st, a.err)
+				t.Fatalf("%s: Status over the socket = %s, %v; want bundle 1", tc.name, statusSummary(a.st), a.err)
 			}
 			if a := awaitStatus(t, direct, tc.name+" direct"); a.err != nil || a.st.BundleVersion != 1 {
-				t.Fatalf("%s: Signer.Status = %+v, %v; want bundle 1", tc.name, a.st, a.err)
+				t.Fatalf("%s: Signer.Status = %s, %v; want bundle 1", tc.name, statusSummary(a.st), a.err)
 			}
 			release()
 			if a := awaitIssue(t, issued, tc.name); a.resp == nil || a.refused != nil {
@@ -505,7 +516,7 @@ func TestStatusLockFree(t *testing.T) {
 		e.close()
 		ss := newStatusSigner(t, e, e.backend, false)
 		if st, err := ss.s.Status(ctx); err != nil || st.BundleVersion != 1 {
-			t.Fatalf("Status before the install = %+v, %v; want bundle 1", st, err)
+			t.Fatalf("Status before the install = %s, %v; want bundle 1", statusSummary(st), err)
 		}
 		other, err := signerdb.Open(e.dbPath)
 		if err != nil {
@@ -517,7 +528,7 @@ func TestStatusLockFree(t *testing.T) {
 		defer unlock()
 		a := awaitStatus(t, goStatus(func() (*wire.StatusResponse, error) { return ss.s.Status(ctx) }), "successor_refused_while_mu_held")
 		if a.st != nil || !errors.Is(a.err, errTrustChanged) {
-			t.Fatalf("successor_refused_while_mu_held: Status = %+v, %v; want no reply and errTrustChanged", a.st, a.err)
+			t.Fatalf("successor_refused_while_mu_held: Status = %s, %v; want no reply and errTrustChanged", statusSummary(a.st), a.err)
 		}
 	})
 	t.Run("successor_refused_during_ca_signature", func(t *testing.T) {
@@ -543,14 +554,14 @@ func TestStatusLockFree(t *testing.T) {
 		sock := goStatus(func() (*wire.StatusResponse, error) { return signerclient.Status(ctx, ss.sock) })
 		direct := awaitStatus(t, goStatus(func() (*wire.StatusResponse, error) { return ss.s.Status(ctx) }), what+" direct")
 		if direct.st != nil || !errors.Is(direct.err, errTrustChanged) {
-			t.Fatalf("%s: Signer.Status before release = %+v, %v; want no reply and errTrustChanged", what, direct.st, direct.err)
+			t.Fatalf("%s: Signer.Status before release = %s, %v; want no reply and errTrustChanged", what, statusSummary(direct.st), direct.err)
 		}
 		release()
 		// The socket refusal is logged under s.mu, so it answers only now.
 		a := awaitStatus(t, sock, what+" over the socket")
 		var er *wire.ErrorResponse
 		if a.st != nil || !errors.As(a.err, &er) || er.Code != wire.CodeUnavailable || er.Message != "trust_changed" {
-			t.Fatalf("%s: Status over the socket = %+v, %v; want the trust_changed ErrorResponse (unavailable)", what, a.st, a.err)
+			t.Fatalf("%s: Status over the socket = %s, %v; want the trust_changed ErrorResponse (unavailable)", what, statusSummary(a.st), a.err)
 		}
 		if i := awaitIssue(t, issued, what); i.resp != nil || i.refused == nil || i.refused.Message != "trust_changed" {
 			t.Fatalf("%s: the issue after release = %+v, %+v; want trust_changed", what, i.resp, i.refused)
@@ -585,7 +596,7 @@ func TestStatusLockFree(t *testing.T) {
 		st, err = ss.s.Status(cctx)
 		requireStateUnavailable(t, "with a cancelled ctx", st, err)
 		if st, err := ss.s.Status(ctx); err != nil || st.BundleVersion != 1 {
-			t.Fatalf("Status with a live ctx after the cancelled one = %+v, %v; want bundle 1", st, err)
+			t.Fatalf("Status with a live ctx after the cancelled one = %s, %v; want bundle 1", statusSummary(st), err)
 		}
 		// The read-only handle closed.
 		if err := ss.sdb.Close(); err != nil {
@@ -598,7 +609,7 @@ func TestStatusLockFree(t *testing.T) {
 		e := newLogEnv(t)
 		execSQL(t, e.dbPath, "DELETE FROM trust_bundle")
 		if st, err := e.s.Status(ctx); st != nil || !errors.Is(err, errTrustChanged) {
-			t.Fatalf("Status with the trust_bundle table emptied = %+v, %v; want no reply and errTrustChanged", st, err)
+			t.Fatalf("Status with the trust_bundle table emptied = %s, %v; want no reply and errTrustChanged", statusSummary(st), err)
 		}
 	})
 	t.Run("reply_carries_loaded_bundle", func(t *testing.T) {
@@ -632,7 +643,7 @@ func TestStatusLockFree(t *testing.T) {
 			}
 			st, err := signerclient.Status(ctx, ss.sock)
 			if err != nil || st.DirectoryVersion != v || st.DirectorySHA256 != sha256.Sum256(doc) || !st.DirectoryAuthorized {
-				t.Fatalf("Status after the install of version %d = %+v, %v; want that version with its SHA-256, authorized", v, st, err)
+				t.Fatalf("Status after the install of version %d = %s, %v; want that version with its SHA-256, authorized", v, statusSummary(st), err)
 			}
 			prev = trust.SHA256Hex(doc)
 		}
@@ -657,7 +668,7 @@ func TestStatusLockFree(t *testing.T) {
 		e.s.mu.Unlock()
 		st, err := e.s.Status(ctx)
 		if err != nil || st.DirectoryVersion != 1 || st.DirectorySHA256 != sha256.Sum256(v1.Directory) || !st.DirectoryAuthorized {
-			t.Fatalf("Status after the failed install = %+v, %v; want version 1 with its SHA-256, authorized", st, err)
+			t.Fatalf("Status after the failed install = %s, %v; want version 1 with its SHA-256, authorized", statusSummary(st), err)
 		}
 	})
 }
