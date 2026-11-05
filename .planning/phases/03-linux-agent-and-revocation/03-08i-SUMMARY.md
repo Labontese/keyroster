@@ -341,7 +341,7 @@ The check of review fix round 1 found six lows. C-1 to C-5 were confirmed 2 of 2
 | Item | Fix | Commit |
 |---|---|---|
 | C-1 | In revoke.md, a second 503 on a rerun can also be `krl_too_large` or `revocations_not_logged` (CodeUnavailable, never committed). The admin reads the signer's journal before another rerun. | 537fbbb |
-| C-2 | revoke.md now says the `revoked` journal line names `target=serial serial=N ca=ROLE`, `target=key_id key_id=ID ca=ROLE` or `target=subject subject=NAME`, and only `target=key` for a key, which is matched by time and `admins=` or by a rerun. The line is in the UNVERIFIED sentence. | 537fbbb |
+| C-2 | revoke.md now says the `revoked` journal line does not name a key: for a key it carries only `target=key`, so it is matched by time and `admins=`, or by a rerun. The line is in the UNVERIFIED sentence. (The quoted field runs in this row were corrected by D-1 below: the line carries every field for every target.) | 537fbbb |
 | C-3 | enroll-user.md quotes what each rerun prints: `user approve` says `the directory changed since it was read (another admin installed a version); re-run this command`, and `directory install` of the same proposal says `The server already serves proposal DIR as directory version N (SHA-256 ...); nothing to do.` (TestDirectoryPipeline/proposal_already_served). | 537fbbb |
 | C-6 | revoke.md and the krlTTL comment: a revocation that waits more than 300 s (wire.MaxRequestSkewSeconds) behind the lock is refused `request_time_skew` once it holds the lock, and revokes nothing. The refusal runs in CI (TestRevoke/stale_request_refused); the wait behind a held signature is UNVERIFIED. | 537fbbb |
 | C-4 | TestStatusWriters refuses a composite-literal key `caKeys` or `bundleRow` outside New, whatever the literal's type. A literal of type Signer stays with the existing Signer rule, so it is reported once. There is no false positive on the head: checkStoredTrust's `&trustState{...}` sets neither key. | 00456fb |
@@ -357,6 +357,18 @@ The check of review fix round 1 found six lows. C-1 to C-5 were confirmed 2 of 2
 - `ok github.com/Labontese/keyroster/internal/signer 332.551s`;
 - `ok github.com/Labontese/keyroster/internal/server 131.255s`;
 - `golangci-lint run ./internal/signer/... ./internal/server/...`: `0 issues.`
+
+**Last fix round (check of PR #86 at 2f0a6d1).** Five lows were confirmed. Owner decision A, with a stop rule: there is no further agent check round, and the coordinator verifies each sentence against the code.
+
+- **D-1.** The signer's `revoked` line carries every field for every target, the unused ones zero or empty, so the quoted runs above never appeared. revoke.md now says to match `msg=revoked` with the one field that names the target. Its examples are what `slog.NewTextHandler` prints for the signer's attribute order (internal/signer/revoke.go `s.log.Info("revoked", ...)`), rendered by a throwaway program outside the repo:
+  - `level=INFO msg=revoked target=serial serial=42 key_id="" subject="" ca=user entries=1 ...`
+  - `level=INFO msg=revoked target=key serial=0 key_id="" subject="" ca=unknown(0) ...`
+- **D-2.** The 300 s bound compares the signer's clock with the request's CreatedAt, which the CLI host sets (cmd/keyroster/revoke.go checkRevokeRequest). A clock offset moves the bound, and adminauth.MaxSkew (120 s) is how far the CLI may be off the server. This is now in revoke.md and the krlTTL comment.
+- **D-3.** The persistent 503s are listed in the bullet and the table row: `krl_no_installation_id`, `krl_too_large`, `revocations_not_logged` and `ops_key_unavailable` (internal/signer/krl.go), `trust_changed` (issue.go checkTrustCurrent, inside Revoke's logTx), and `state_unavailable` after `audit log unavailable` (logstate.go logTx's broken state).
+- **D-4.** `New` joined statusRequiredFuncs. The mutant method `func (s *Signer) New() { ks := s.caKeys; ks[0].Custody = "x" }` in directory.go fails the gate with `New is declared 2 times, want exactly once` and was restored with a clean diff. The reference message now names statusRefAllow.
+- **D-5.** Wording only. The doc comments and plan truth 4 say the literal rule checks caKeys and bundleRow set by key. Elided-type or alias-type literals set by position, or setting the Signer's other keys, are not checked.
+
+Commits: cbb1756 (D-1 to D-3) and 9d59c9e (D-4, D-5). Tests and lint (local, WSL, -race): `--- PASS: TestStatusWriters (0.08s)`; `ok github.com/Labontese/keyroster/internal/signer 308.986s`; `ok github.com/Labontese/keyroster/internal/server 87.432s`; `golangci-lint run ./internal/signer/... ./internal/server/...`: `0 issues.`.
 
 **Deviation.** `main` is checked out in another worktree, so this checkout could not switch to it to run `git pull --ff-only`. The branch was created with `git switch -c p03/08i-followup --no-track origin/main` after `git fetch`, which is the same commit (ff865f2).
 
