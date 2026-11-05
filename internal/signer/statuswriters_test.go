@@ -46,18 +46,19 @@ var statusWriteAllow = []struct {
 	file, fn, expr, reason string
 }{
 	{"trust.go", "loadTrust", "ts.caKeys",
-		"trustState.caKeys, a field of the trust state loadTrust returns, not the Signer's; New copies it into its literal"},
+		"trustState.caKeys, set by loadTrust: the slice New stores as the Signer's caKeys (they share one backing array)"},
 }
 
-// statusRefAllow is the allowlist of references to caKeys or bundleRow
+// statusRefAllow is the allowlist of caKeys or bundleRow selectors
 // outside New and publishStatusLocked, each with its reason (review fix
 // round 1 of PR #85). TestStatusWriters fails when an entry matches
-// nothing.
+// nothing. An entry allows its expression any number of times, and what
+// the allowed expression is copied into is not followed.
 var statusRefAllow = []struct {
 	file, fn, expr, reason string
 }{
 	{"trust.go", "loadTrust", "ts.caKeys",
-		"trustState.caKeys, a field of the trust state loadTrust returns, not the Signer's"},
+		"trustState.caKeys, set by loadTrust: the slice New stores as the Signer's caKeys (they share one backing array)"},
 }
 
 // statusDirectoryStateFields are directoryState's fields as setDirectoryLocked,
@@ -83,10 +84,15 @@ var statusReplyFields = []string{
 // non-test files. It matches names, not types (go/types would type-check
 // every dependency from source), so it catches the common write forms, not
 // every possible one: a write through reflection or unsafe would pass.
-// Since review fix round 1 of PR #85 it also refuses every reference, read
-// or write, to the Signer's caKeys and bundleRow outside New and
-// publishStatusLocked, so an alias such as `row := s.bundleRow` cannot
-// carry a write past it, and it pins directoryState's field set as it pins
+// Since review fix round 1 of PR #85 it also refuses every caKeys or
+// bundleRow selector, read or write, outside New and publishStatusLocked,
+// and every composite-literal key caKeys or bundleRow outside New, whatever
+// the literal's type (elided and alias types included). So an alias taken
+// from such a selector, such as `row := s.bundleRow`, fails it. Aliases
+// under other names are not followed: newStatusSnapshot's and
+// statusResponse's parameters, loadTrust's locals, trustState.stored (the
+// pointer New stores as bundleRow) and copies of an allowlisted
+// expression. It also pins directoryState's field set as it pins
 // wire.StatusResponse's.
 func TestStatusWriters(t *testing.T) {
 	for _, v := range statusWriterViolations(".") {
@@ -412,6 +418,7 @@ func statusCheckNode(root ast.Node, file, fn string, report func(string, string,
 			}
 		case *ast.CompositeLit:
 			statusCheckSignerLit(x, file, fn, report)
+			statusCheckTrustLitKeys(x, file, fn, report)
 		case *ast.SelectorExpr:
 			switch x.Sel.Name {
 			case "setDirectoryLocked", "publishStatusLocked":
@@ -447,7 +454,7 @@ func statusCheckTrustRef(sel *ast.SelectorExpr, file, fn string, report func(str
 			return
 		}
 	}
-	report(file, fn, sel.Pos(), "a reference to %s: only New sets the trust state Status reports and only publishStatusLocked reads it, so no alias can change it (03-08i)", expr)
+	report(file, fn, sel.Pos(), "a reference to %s outside New and publishStatusLocked: only New sets the trust state Status reports and only publishStatusLocked reads it, and the gate refuses every caKeys or bundleRow selector elsewhere (03-08i)", expr)
 }
 
 // statusParenless strips ParenExpr only.
@@ -483,6 +490,30 @@ func statusCheckPointerUse(sel *ast.SelectorExpr, parent ast.Node, stack []ast.N
 		*ctx.stores++
 	default:
 		report(file, fn, sel.Pos(), "%s.%s: only publishStatusLocked stores the snapshot, and everything else only loads it (03-08i)", statusExprString(sel), method.Sel.Name)
+	}
+}
+
+// statusCheckTrustLitKeys refuses a composite-literal key caKeys or
+// bundleRow outside New, whatever the literal's type, so an elided-type
+// (`[]Signer{{caKeys: k}}`) or alias-type literal cannot set the trust
+// state Status reports (follow-up to review fix round 1 of PR #85). A
+// literal of type Signer is left to statusCheckSignerLit, so it is
+// reported once.
+func statusCheckTrustLitKeys(lit *ast.CompositeLit, file, fn string, report func(string, string, token.Pos, string, ...any)) {
+	if fn == "New" {
+		return
+	}
+	if id, ok := lit.Type.(*ast.Ident); ok && id.Name == "Signer" {
+		return
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if key, ok := kv.Key.(*ast.Ident); ok && (key.Name == "caKeys" || key.Name == "bundleRow") {
+			report(file, fn, kv.Pos(), "a composite literal outside New sets the key %s: only New sets the trust state Status reports, whatever the literal's type (03-08i)", key.Name)
+		}
 	}
 }
 
