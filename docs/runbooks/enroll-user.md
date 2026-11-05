@@ -224,10 +224,15 @@ host is answered, then 5 s more, before you read the views. Running the
 command again meanwhile installs nothing twice: the signer installs each
 version only after the one it holds, so a rerun built on the older
 version is refused with `directory_version_chain` once the first install
-committed (the CLI says the directory changed since it was read): read the
-views again then. (Reasoned from the
-code; no test loses an install's answer while a signature is held.
-**UNVERIFIED**, in CI and on a real host.)
+committed. `user approve` then says `the directory changed since it was
+read (another admin installed a version); re-run this command`: read the
+views again first. A rerun of `directory install` with the same proposal
+reads the directory again and says `The server already serves proposal
+DIR as directory version N (SHA-256 ...); nothing to do.` That answer
+runs in the CLI tests against a stub server, after an install whose
+answer was lost (`TestDirectoryPipeline/proposal_already_served`). The
+rest is reasoned from the code; no test loses an install's answer while
+a signature is held. **UNVERIFIED**, in CI and on a real host.
 
 ## A directory hosts cannot render is refused at install
 

@@ -356,7 +356,10 @@ signer call failed, outcome unknown` and answers 503. The CLI then reports
 `the server cannot reach its signer (HTTP 503); try again later; the
 revocation may not have been recorded`. The signer may still revoke after
 that: a revocation waiting behind a slow signature (a hardware key waiting
-for a touch, say) commits once that signature ends. Since 03-08i the
+for a touch, say) commits once that signature ends, unless that is more
+than 5 minutes (300 s) after the CLI created the request. The signer
+checks the request's time only once it holds its lock, so it then refuses
+it with `request_time_skew`, and nothing is revoked. Since 03-08i the
 server keeps serving the KRL during such a signature, so a host or a CLI
 that reads the KRL in between can be served the KRL from before the
 revocation for up to 5 s (krlTTL) after the signer commits it. Hosts take
@@ -370,19 +373,28 @@ To confirm the outcome:
   again and publishes the next KRL version. keyroster-server drops its
   cached KRL on that success, and the CLI exits 0 only when the KRL it
   then reads verifies against your root-pinned bundle and lists the
-  target. If the rerun gets the same 503, the signer is still busy: wait
-  and run it again.
+  target. If the rerun gets the same 503, either the signer is still
+  busy, or it refused for a reason its log names (`krl_too_large`,
+  `revocations_not_logged`: see the table above), which no rerun gets
+  past. Read `journalctl -u keyroster-signer` before you run it again.
 - Or, on the signer host, `journalctl -u keyroster-signer` shows a
-  `revoked` line for the target if the signer revoked it.
+  `revoked` line if the signer revoked it. The line names a serial
+  (`target=serial serial=N ca=ROLE`), a key ID (`target=key_id
+  key_id=ID ca=ROLE`) or a user (`target=subject subject=NAME`). For a key
+  it names only `target=key`, not the key, so match it by its time and
+  `admins=`, or run the command again instead.
 
 Run in CI: the server's 503 and dropped KRL cache on an unknown outcome
 (`TestKRLCache/uncertain_outcome_drops_cache`), revoking an already
 revoked key again (`TestRevokeSubject/explicit_key_cap_relist_accepted`)
 and a second sweep of a user (`TestRevokeSubject/revoke_user_second_sweep_relists`)
-in the signer's tests, and the CLI's KRL check (`TestRevokeKRLCheck`).
-A second revocation of the same serial or key ID, a rerun after an unknown
-outcome, and the older KRL served during a held signature are reasoned
-from the code: **UNVERIFIED**, in CI and on a real host.
+in the signer's tests, the refusal of a request created more than 300 s
+earlier (`TestRevoke/stale_request_refused`), and the CLI's KRL check
+(`TestRevokeKRLCheck`). A second revocation of the same serial or key ID,
+a rerun after an unknown outcome, a revocation refused
+`request_time_skew` after waiting behind a held signature, the older KRL
+served during a held signature, and the signer's `revoked` journal line
+are reasoned from the code: **UNVERIFIED**, in CI and on a real host.
 
 ### `krl_too_large`
 
