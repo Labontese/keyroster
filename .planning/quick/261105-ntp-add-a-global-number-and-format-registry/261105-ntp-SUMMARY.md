@@ -21,7 +21,7 @@ metrics:
   completed: 2026-11-05
 actuals:
   tasks: 3
-  commits: 3
+  commits: 4
 plan_head_before: f7eb0184bffbbe4bd82e65f852cb1a8ba20aaf96
 ---
 
@@ -33,7 +33,8 @@ docs/format-registry.md now owns every number and tag that the audit log or the 
 
 - `b7cca53` docs(registry): add a number and format registry pinned to the code
 - `e6c752f` docs(runbooks): label the reproducible-build claims UNVERIFIED
-- the docs commit carrying this PLAN and this SUMMARY
+- `4f081e3` docs(quick-261105-ntp): record the format registry quick task (this PLAN and SUMMARY)
+- the docs commit that states the installation-binding rule as a rule for every new signed format and names the OpenSSH commit checked
 
 The owner is the author of each commit, and keyroster-bot is the committer, with an SSH signature.
 

@@ -163,11 +163,12 @@ log's reason class.
 
 ## Installation binding
 
-Every signed request or document that could be replayed against another
-installation carries the installation ID of the trust bundle it is for, in
-its signed bytes, and whoever checks the signature refuses one that names
-another installation. The installation ID is `trust.Bundle.InstallationID` (32
-lowercase hex digits). The formats that carry it today:
+The rule: every signed request or document that could be replayed against
+another installation must carry the installation ID of the trust bundle it
+is for, in its signed bytes, and whoever checks the signature must refuse
+one that names another installation. The rule applies to every new signed
+format. The installation ID is `trust.Bundle.InstallationID` (32 lowercase
+hex digits). The formats that carry it today:
 
 | Format | Field | Signed by |
 |---|---|---|
@@ -200,8 +201,8 @@ That line is built by `auth_log` and `format_method_key` in OpenSSH's
 (`VIS_CSTYLE|VIS_NL|VIS_TAB|VIS_OCTAL`, which can expand one non-printable
 byte to up to four) and hands it to syslog as `syslog(pri, "%.500s",
 fmtbuf)`. Anything after the first 500 bytes of the escaped line is cut
-off. (Checked against openssh-portable `master`, `log.c` and `auth.c`, on
-2026-11-05.)
+off. (Checked against openssh-portable `log.c` and `auth.c` at `master`
+commit f78fc73d3162, on 2026-11-05.)
 
 Key IDs keyroster issues contain only printable ASCII (the grammar in
 `internal/cert/keyid.go`), so `strnvis` does not expand them.
