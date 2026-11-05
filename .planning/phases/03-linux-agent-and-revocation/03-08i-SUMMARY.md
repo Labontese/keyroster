@@ -108,7 +108,10 @@ The checks on the commit that adds this note are waited for after its push.
 | 4 | f2ed388 | docs(runbooks): the signer's status during a slow signature, and what a superseded bundle refuses |
 | 4 | 8ad8178 | docs(03-08i): slot the status-snapshot plan into wave 20 and point the landed plans at it |
 | 4 | a55b82d | docs(03-08i): complete status-snapshot plan |
-| 4 | (this) | docs(03-08i): record the PR's checks in the SUMMARY |
+| 4 | e2a09f7 | docs(03-08i): record the PR's checks in the SUMMARY |
+| fix 1 | 79d8e71 | docs(server): name the late commit after an unknown revoke or install outcome |
+| fix 1 | fd374fa | test(signer): refuse aliases of the trust state and pin directoryState's fields |
+| fix 1 | (this) | docs(03-08i): record review fix round 1 |
 
 ## Test time (03-08k's limits: 400 s alone, 480 s under ./...)
 
@@ -275,6 +278,59 @@ None. No new endpoint, route, wire message, stored format or log leaf. The read-
 ## Pre-merge review
 
 The orchestrator runs the pre-merge review on the green PR, as the owner's threat review against T-03-324 to T-03-328. Its findings and any fix rounds are recorded here after it runs.
+
+## Review fix round 1 (pre-merge review of PR #85, head e2a09f7)
+
+The pre-merge review found three low items: R-1 and R-2 (2 of 2 lenses each), and R-3 (split 1 of 1). Codex, the status-lockfree lens and the critic found nothing. Daniel decided all three on 2026-11-05.
+
+**R-1 and R-2. Owner decision A: document only, no server code change (Q-I2 holds).**
+- The cases:
+  - A revocation or directory install whose answer the server lost (its call times out, or the connection breaks) can still commit later, once the signature it waits behind ends.
+  - The server dropped its KRL cache (dropKRL) or status cache (dropStatus) when the call failed.
+  - Because Status is now lock-free, a read during the held signature can refill that cache with the state from before the change: the KRL through GetKRL's atomic load, or the status through the snapshot.
+  - Readers then see the change at most krlTTL or statusTTL (5 s each) after the signer commits. Before 03-08i the same window answered 503.
+- Commit 79d8e71:
+  - the krlTTL comment (internal/server/revoke.go) and the statusTTL comment (internal/server/signer.go) name the case;
+  - revoke.md gets a new section, "A 503 whose outcome is unknown";
+  - enroll-user.md gets a paragraph in "After "the server cannot reach its signer": look before you retry".
+- What a rerun does, from the code:
+  - A rerun of `keyroster revoke` draws a fresh request ID (checkRevokeRequest), so it is not `duplicate_request`.
+  - Signer Revoke has no "already revoked" refusal, and the revocation table has no uniqueness constraint. So a target already revoked is recorded again and the next KRL version is published.
+  - On that success the server calls dropKRL, and the CLI exits 0 only when the KRL it reads verifies (confirmRevokeAnswer) and lists the target.
+  - The revoke.md text says this, and says that the signer host's `revoked` journal line is the other confirmation.
+  - The CLI has no standalone KRL check command, so "wait krlTTL and check with the CLI" is not offered.
+- For directory installs:
+  - A rerun built on the older version is refused `directory_version_chain` (CheckSuccessorBytes) once the first install committed.
+  - The CLI then says the directory changed since it was read (dirpipe.go), or re-reads the directory (afterChainRefusal).
+  - So nothing installs twice, and enroll-user.md says to wait for the touch prompt, then 5 s, before reading the views.
+- Run in CI: TestKRLCache/uncertain_outcome_drops_cache, TestRevokeSubject/explicit_key_cap_relist_accepted and revoke_user_second_sweep_relists, and TestRevokeKRLCheck.
+- UNVERIFIED, in CI and on a real host:
+  - a second revocation of the same serial or key ID;
+  - a rerun after an unknown outcome;
+  - the older KRL or status served during a held signature;
+  - the install-rerun path.
+
+**R-3. Owner decision A: tighten TestStatusWriters now.** Commit fd374fa:
+- Every reference, read or write, to a `caKeys` or `bundleRow` selector outside New and publishStatusLocked fails the gate.
+  - The only allowlist entry is trust.go loadTrust `ts.caKeys`, the trustState field. A stale entry fails the gate.
+  - On the head the only such references are in New (signer.go) and publishStatusLocked (status.go).
+- directoryState is pinned to its five fields, by name and type, through reflect.
+- The test's doc comment says so. Must-have truth 4 in 03-08i-PLAN.md now names the reference rule and the field pin. This is the plan file's only edit since its first commit, so it is no longer byte for byte equal to its source.
+
+Mutants (each applied by script, run with `-timeout 120s` against TestStatusWriters, restored with `git checkout`, and `git diff` clean afterwards). All were killed:
+
+| Mutant | Gate line |
+|---|---|
+| `row := s.bundleRow; row.Version = 9` in InstallDirectory after `sum := sha256.Sum256(req.Directory)` | `directory.go:233: InstallDirectory: a reference to s.bundleRow` |
+| `ks := s.caKeys; ks[0].Custody = "x"` at the same place | `directory.go:233: InstallDirectory: a reference to s.caKeys` |
+| a sixth directoryState field (`mutantExtra uint64`) | `directoryState has fields [... "mutantExtra uint64"], want [the five]` |
+
+Tests and lint on the fix round (local, WSL, -race):
+- `--- PASS: TestStatusWriters (0.08s)`, `ok github.com/Labontese/keyroster/internal/signer 1.113s`;
+- `ok github.com/Labontese/keyroster/internal/server 106.452s`;
+- `golangci-lint run ./internal/signer/... ./internal/server/...`: `0 issues.`
+
+The fix round touched only comments, docs, statuswriters_test.go and the plan's wording, so the full `./...` gate was not re-run, as the coordinator's rules allow. CI on the new head is recorded in the handback.
 
 ## Self-Check: PASSED
 
