@@ -32,7 +32,21 @@ type directoryState struct {
 	directoryAuthorized bool
 }
 
-// loadDirectory reads the installed directory at start. The stored row
+// loadDirectory reads the installed directory at start (readDirectory)
+// and makes it the signer's directory state through setDirectoryLocked,
+// which publishes the Status snapshot (03-08i), also when no directory is
+// stored. It runs in New, before Serve.
+func (s *Signer) loadDirectory(ctx context.Context) error {
+	ds, err := s.readDirectory(ctx)
+	if err != nil {
+		return err
+	}
+	s.setDirectoryLocked(ds)
+	return nil
+}
+
+// readDirectory reads the installed directory at start and returns the
+// directory state it gives. The stored row
 // must be exactly the one the verified log's last directory_install entry
 // records (checkDirectoryLogged), or the signer refuses to start (T-02-14).
 // Then it checks the directory against the policy in force (s.policy): it
@@ -43,30 +57,38 @@ type directoryState struct {
 // failures the signer still starts, because the
 // admin path needs no directory, but refuses every login
 // (directory_not_authorized) until a directory signed under the policy in
-// force is installed (T-02-15).
-func (s *Signer) loadDirectory(ctx context.Context) error {
+// force is installed (T-02-15). It returns the zero state when nothing is
+// stored; the bytes, signatures and version without a parsed directory
+// when the stored document does not parse; a parsed directory that is not
+// authorized when it fails the installation, signature or policy check;
+// and an authorized one only when every check passes (03-08i).
+func (s *Signer) readDirectory(ctx context.Context) (directoryState, error) {
+	var ds directoryState
 	stored, err := s.db.LatestDirectory(ctx)
 	if err != nil {
-		return err
+		return ds, err
 	}
 	if err := checkDirectoryLogged(stored, s.loaded.lastDirectory); err != nil {
-		return err
+		return ds, err
 	}
 	if stored == nil {
-		return nil
+		return ds, nil
 	}
-	s.directoryRaw, s.directorySigs, s.directoryVersion = stored.Doc, stored.Sigs, stored.Version
+	ds.directoryRaw, ds.directorySigs, ds.directoryVersion = stored.Doc, stored.Sigs, stored.Version
 	d, err := directory.Parse(stored.Doc)
 	if err != nil {
+		// UNVERIFIED (03-08i): installs accept only parsed documents and
+		// start-up requires the stored row to match the log, so no stored
+		// state reaches this today.
 		s.log.Error("installed directory does not parse: logins are refused until a valid directory is installed",
 			"directory_version", stored.Version, "error", err.Error())
-		return nil
+		return ds, nil
 	}
-	s.directory = d
+	ds.directory = d
 	if err := directory.CheckStoredInstallation(d, s.installationID); err != nil {
 		s.log.Error("installed directory is bound to another installation than the trust bundle in force: logins are refused until a directory for this installation is installed",
 			"directory_version", stored.Version, "error", err.Error())
-		return nil
+		return ds, nil
 	}
 	if d.InstallationID == "" && s.installationID != "" {
 		// The owner's lenient D-04 answer (03-01): an ID-less directory
@@ -77,16 +99,26 @@ func (s *Signer) loadDirectory(ctx context.Context) error {
 	if _, err := directory.VerifySignatures(stored.Doc, stored.Sigs, s.policy); err != nil {
 		s.log.Error("installed directory is not signed by the admin quorum of the policy in force: logins are refused until a re-signed directory is installed",
 			"directory_version", stored.Version, "policy_version", s.policy.Version, "error", err.Error())
-		return nil
+		return ds, nil
 	}
 	if err := directory.CheckPolicy(d, s.policy); err != nil {
 		s.log.Error("installed directory exceeds the policy in force: logins are refused until a conforming directory is installed",
 			"directory_version", stored.Version, "policy_version", s.policy.Version, "error", err.Error())
-		return nil
+		return ds, nil
 	}
-	s.directoryAuthorized = true
+	ds.directoryAuthorized = true
 	s.log.Info("directory loaded", "directory_version", stored.Version, "policy_version", s.policy.Version)
-	return nil
+	return ds, nil
+}
+
+// setDirectoryLocked makes ds the signer's directory state and publishes
+// the Status snapshot of it (publishStatusLocked), in one call (03-08i). It
+// is the only writer of the directory state (TestStatusWriters). The
+// caller holds s.mu, or runs in New before Serve; InstallDirectory calls it
+// only after its transaction committed.
+func (s *Signer) setDirectoryLocked(ds directoryState) {
+	s.directoryState = ds
+	s.publishStatusLocked()
 }
 
 // InstallDirectory installs a new directory version online, without a
@@ -104,7 +136,8 @@ func (s *Signer) loadDirectory(ctx context.Context) error {
 // (directory_unrenderable, directory.CheckRenderable; F07 (03-08h)). Then
 // one transaction stores it and appends a directory_install leaf with the
 // document and its signatures, and only after COMMIT does the signer
-// switch to it.
+// switch to it and publish the Status snapshot (setDirectoryLocked,
+// 03-08i).
 func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -187,11 +220,15 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 		}
 		return nil, refusalErr(wire.CodeUnavailable, "state_unavailable", err)
 	}
-	s.directory = d
-	s.directoryRaw = append([]byte(nil), req.Directory...)
-	s.directorySigs = append([]byte(nil), req.Sigs...)
-	s.directoryVersion = d.Version
-	s.directoryAuthorized = true
+	// After COMMIT, before the answer (03-08i): a Status after this
+	// install's answer reports it.
+	s.setDirectoryLocked(directoryState{
+		directory:           d,
+		directoryRaw:        append([]byte(nil), req.Directory...),
+		directorySigs:       append([]byte(nil), req.Sigs...),
+		directoryVersion:    d.Version,
+		directoryAuthorized: true,
+	})
 	sum := sha256.Sum256(req.Directory)
 	s.log.Info("directory installed",
 		"directory_version", d.Version,

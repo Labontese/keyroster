@@ -58,6 +58,12 @@ type Config struct {
 	// above the rate are counted in refusal_summary leaves.
 	RefusalLogPerMinute int
 	RefusalLogBurst     int
+	// StatusDB is a read-only handle (signerdb.OpenReadOnly) on the same
+	// database as DB, through which Status checks the latest bundle
+	// version without the signer's lock (03-08i). Under WAL it does not
+	// wait for a transaction on DB. It must not be DB itself. Nil means
+	// every Status refuses state_unavailable.
+	StatusDB *signerdb.DB
 }
 
 // Signer issues certificates.
@@ -101,11 +107,24 @@ type Signer struct {
 	// serves unauthenticated GET /api/v1/krl and must not wait for an
 	// issuance or revocation in flight. A stored state is never modified.
 	krl atomic.Pointer[signerdb.KRLState]
+	// status is the Status snapshot (03-08i). It is written under mu
+	// (publishStatusLocked) and read without it, so Status never waits for
+	// a signature in flight. A stored snapshot is never modified.
+	status atomic.Pointer[statusSnapshot]
+	// statusDB is Config.StatusDB, the read-only handle Status reads the
+	// latest bundle version through (03-08i).
+	statusDB *signerdb.DB
 
 	// caKeys are the ca-init keys as recorded, each opened in the
 	// backend at start with that custody (openRoleKey). Fixed for the
-	// life of the process; Status reports them.
+	// life of the process; Status reports them. Only New sets it, which
+	// TestStatusWriters checks (03-08i).
 	caKeys []signerdb.CAKey
+	// bundleRow is the trust_bundle row this process loaded and
+	// checkBundleLogged checked against the log at start (loadTrust's
+	// stored row, 03-08i). Only New sets it, and it is never modified:
+	// Status reports its bytes.
+	bundleRow *signerdb.StoredBundle
 
 	// mu serializes every state change: serial allocation, issuance and
 	// log appends, each through its commit.
@@ -149,10 +168,15 @@ type Signer struct {
 // revocation rows are not exactly the entries of the revoke leaves
 // (revocations_not_logged). The trust state is
 // loaded only here: once another bundle is installed, the signer refuses
-// every request (trust_changed) until it is restarted and loads it.
+// trust_changed for its status and for every request that issues, logs
+// in, installs a directory, revokes, forgets, publishes a KRL or recovers,
+// until it is restarted and loads it (03-08i).
 func New(cfg Config) (*Signer, error) {
 	if cfg.Backend == nil || cfg.DB == nil {
 		return nil, errors.New("signer: a keystore backend and a state database are required")
+	}
+	if cfg.StatusDB != nil && cfg.StatusDB == cfg.DB {
+		return nil, errors.New("signer: the status handle must be a separate read-only handle (signerdb.OpenReadOnly), not the state database handle")
 	}
 	if len(cfg.AllowUIDs) == 0 && len(cfg.AllowGIDs) == 0 {
 		return nil, errors.New("signer: the peer allowlist is empty, so every client would be refused")
@@ -179,7 +203,9 @@ func New(cfg Config) (*Signer, error) {
 		logKey:    ts.logKey,
 		opsKey:    ts.opsKey,
 		caKeys:    ts.caKeys,
+		bundleRow: ts.stored,
 		db:        cfg.DB,
+		statusDB:  cfg.StatusDB,
 		clock:     cfg.Clock,
 		allowUIDs: slices.Clone(cfg.AllowUIDs),
 		allowGIDs: slices.Clone(cfg.AllowGIDs),

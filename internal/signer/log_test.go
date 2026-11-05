@@ -68,6 +68,7 @@ type logEnv struct {
 	base    uint64           // leaves written by the bootstrap (ca_init, bundle_install)
 	clock   func() time.Time // signer and bootstrap clock; nil means time.Now
 	db      *signerdb.DB
+	sdb     *signerdb.DB // the read-only handle passed as StatusDB (03-08i)
 	s       *Signer
 	// logOut receives the operator log of every signer open starts, as
 	// text; nil discards it.
@@ -129,6 +130,11 @@ func (e *logEnv) open() error {
 	if err != nil {
 		return err
 	}
+	sdb, err := signerdb.OpenReadOnly(e.dbPath)
+	if err != nil {
+		_ = db.Close()
+		return err
+	}
 	out := e.logOut
 	if out == nil {
 		out = io.Discard
@@ -136,20 +142,25 @@ func (e *logEnv) open() error {
 	s, err := New(Config{
 		Backend: e.backend,
 		Clock:   e.clock,
-		DB:      db, AllowUIDs: []uint32{1000}, Logger: slog.New(slog.NewTextHandler(out, nil)),
+		DB:      db, StatusDB: sdb, AllowUIDs: []uint32{1000}, Logger: slog.New(slog.NewTextHandler(out, nil)),
 	})
 	if err != nil {
+		_ = sdb.Close()
 		_ = db.Close()
 		return err
 	}
-	e.db, e.s = db, s
+	e.db, e.sdb, e.s = db, sdb, s
 	return nil
 }
 
+// close closes the read-only handle, then the main one (03-08i).
 func (e *logEnv) close() {
 	if e.db != nil {
+		if e.sdb != nil {
+			_ = e.sdb.Close()
+		}
 		_ = e.db.Close()
-		e.db, e.s = nil, nil
+		e.db, e.sdb, e.s = nil, nil, nil
 	}
 }
 
