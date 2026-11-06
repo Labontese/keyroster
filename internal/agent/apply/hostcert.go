@@ -536,6 +536,12 @@ func (st *hostCertState) answerCheck(pub ssh.PublicKey) hostcert.AnswerCheck {
 	committed := uint64(0)
 	if en := hostcert.Find(st.in.Committed, hostcert.KeySHA256(pub)); en != nil {
 		committed = en.Serial
+		// The committed file is lost or does not match its record: the
+		// signer re-delivers that same certificate inside its window, so
+		// its own serial is accepted again (every other check still holds).
+		if st.certs[en.KeySHA256] == nil && committed > 0 {
+			committed--
+		}
 	}
 	name := ""
 	var principals []string

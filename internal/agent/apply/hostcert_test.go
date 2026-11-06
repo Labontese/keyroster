@@ -1792,3 +1792,49 @@ func TestHostCertDueNotPast(t *testing.T) {
 		}
 	})
 }
+
+// TestHostCertLostFileHealed: a committed certificate file that is lost
+// or edited inside the signer's window is healed by the re-delivered
+// certificate, which carries the same serial (03-09).
+func TestHostCertLostFileHealed(t *testing.T) {
+	for _, damage := range []string{"removed", "edited"} {
+		t.Run(damage, func(t *testing.T) {
+			h := newHostCertHost(t)
+			c := h.one()
+			en := h.record().Committed[0]
+			p := filepath.Join(h.l.HostCertDir(), en.File)
+			if damage == "removed" {
+				_ = os.Remove(p)
+			} else {
+				_ = os.WriteFile(p, []byte("garbage\n"), 0o644) //nolint:gosec // test fixture
+			}
+			if r := h.mustHostCerts(); len(r.Requested) != 1 {
+				t.Fatalf("report %+v, want a request for the damaged key", r)
+			}
+			// The signer re-delivers the certificate it issued in its window.
+			for k, req := range h.outboxRequests() {
+				h.writeAnswer(k, hostcert.Answer{RequestID: hex.EncodeToString(req.RequestID[:]), Certificate: c.Marshal()})
+			}
+			r := h.mustHostCerts()
+			rec := h.record()
+			if len(r.Installed) != 1 || len(rec.Committed) != 1 || rec.Committed[0].Serial != c.Serial || !rec.Committed[0].Served {
+				t.Fatalf("report %+v, record %+v: want the re-delivered certificate installed and served", r, rec)
+			}
+			if got := h.served(c.Type()); got == nil || !bytes.Equal(got.Marshal(), c.Marshal()) {
+				t.Fatal("sshd does not serve the healed certificate")
+			}
+		})
+	}
+	t.Run("intact_file_same_serial_refused", func(t *testing.T) {
+		h := newHostCertHost(t)
+		c := h.one()
+		h.renewDue()
+		h.mustHostCerts()
+		for k, req := range h.outboxRequests() {
+			h.writeAnswer(k, hostcert.Answer{RequestID: hex.EncodeToString(req.RequestID[:]), Certificate: c.Marshal()})
+		}
+		if r := h.mustHostCerts(); len(r.Installed) != 0 || h.attempts().Keys[0].LastCode != "answer_not_newer" {
+			t.Fatalf("report %+v, attempts %+v: want the same serial refused while the file is intact", r, h.attempts())
+		}
+	})
+}
