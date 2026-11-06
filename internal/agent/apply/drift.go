@@ -275,16 +275,21 @@ func recordFiles(m map[string]string) map[string][]byte {
 // readHostCertRecord, and calls no DropIn itself.
 func (e *engine) hostCertDrift(dump Dump, w dropInWant, r *DriftReport) {
 	got := dump[hostCertificateKeyword]
-	for _, p := range w.Spec.HostCertificates {
-		if !slices.Contains(got, p) {
-			r.Settings = append(r.Settings, SettingDrift{Keyword: hostCertificateKeyword, Want: p, Got: strings.Join(got, ",")})
-		}
-	}
 	// The candidate's lines come from InstallBytes, never from the record.
 	var cand []string
 	for _, l := range strings.Split(string(w.InstallBytes), "\n") {
 		if p, ok := strings.CutPrefix(l, "HostCertificate "); ok {
 			cand = append(cand, p)
+		}
+	}
+	for _, p := range w.Spec.HostCertificates {
+		// While an install is in progress, a committed path the candidate
+		// replaces (a renewal or a removal) is rightly out of force.
+		if w.InstallBytes != nil && !slices.Contains(cand, p) {
+			continue
+		}
+		if !slices.Contains(got, p) {
+			r.Settings = append(r.Settings, SettingDrift{Keyword: hostCertificateKeyword, Want: p, Got: strings.Join(got, ",")})
 		}
 	}
 	for _, v := range got {

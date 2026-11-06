@@ -1139,6 +1139,18 @@ func TestPostHostCerts(t *testing.T) {
 			}
 		}
 	})
+	t.Run("oversize_certificate_answered_as_refusal", func(t *testing.T) {
+		s := newHostCertServer(t, certAnswer(make([]byte, hostcert.MaxAnswer)))
+		k, id := s.outboxRequest(t)
+		s.post(t)
+		s.post(t)
+		if a := s.answerOf(t, k); a == nil || a.RequestID != id || a.Refused != "answer_too_large" || len(a.Certificate) != 0 {
+			t.Fatalf("answer %+v, want the answer_too_large refusal", a)
+		}
+		if n := s.posts.Load(); n != 1 {
+			t.Fatalf("%d posts, want the request posted once", n)
+		}
+	})
 	t.Run("answer_mode_0644", func(t *testing.T) {
 		s := newHostCertServer(t, certAnswer(testHostCert(t)))
 		k, _ := s.outboxRequest(t)

@@ -1945,6 +1945,13 @@ func TestHostIssueRequestSigningVector(t *testing.T) {
 // TestHostIssueRequest covers the round trip, the Validate refusals, every
 // field bound and strict parsing (03-09).
 func TestHostIssueRequest(t *testing.T) {
+	t.Run("name_grammar_matches_directory", func(t *testing.T) {
+		for _, n := range []string{"web1", "a", "a.b-c_d", "Web1", "-web", "", strings.Repeat("a", 64), strings.Repeat("a", 65), "web 1", "wéb"} {
+			if hostIssueNameRE.MatchString(n) != directory.ValidUserName(n) {
+				t.Errorf("%q: host issue grammar %t, directory %t", n, hostIssueNameRE.MatchString(n), directory.ValidUserName(n))
+			}
+		}
+	})
 	t.Run("round_trip", func(t *testing.T) {
 		r := hostIssueVector(t)
 		body, err := r.Marshal()

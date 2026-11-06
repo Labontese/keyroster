@@ -181,6 +181,14 @@ func writeHostCertAnswer(dir, k string, a hostcert.Answer) error {
 	if err != nil {
 		return err
 	}
+	// A certificate the applier would not read (above hostcert.MaxAnswer)
+	// is answered as a refusal instead: written as it is it would be
+	// healed away and the request posted again on every poll.
+	if len(b) > hostcert.MaxAnswer {
+		if b, err = trust.CanonicalJSON(hostcert.Answer{RequestID: a.RequestID, Refused: "answer_too_large"}); err != nil {
+			return err
+		}
+	}
 	fd, err := spool.OpenDir(dir)
 	if err != nil {
 		return err

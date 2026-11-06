@@ -948,3 +948,17 @@ func TestHostRefusalBucket(t *testing.T) {
 		}
 	})
 }
+
+// TestHostIssueRedeliverBelowHighWater: inside the window a fresh request
+// is re-delivered the latest certificate also while the clock is below the
+// serial high-water mark, since a re-delivery draws no serial (03-09).
+func TestHostIssueRedeliverBelowHighWater(t *testing.T) {
+	e := newHostEnv(t, 90)
+	c1, _ := e.mustHost(e.hostReq(e.ed, "web1"))
+	before := e.leafCount(tlog.KindHostIssue)
+	e.clock.set(e.clock.Now().Add(-10 * time.Second))
+	c2, _ := e.mustHost(e.hostReq(e.ed, "web1"))
+	if c2.Serial != c1.Serial || e.leafCount(tlog.KindHostIssue) != before {
+		t.Fatalf("serial %d after %d, %d leaves after %d: want the latest certificate re-delivered", c2.Serial, c1.Serial, e.leafCount(tlog.KindHostIssue), before)
+	}
+}

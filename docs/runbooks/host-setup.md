@@ -1644,8 +1644,18 @@ transport error, a 429, a 5xx, any other refusal) is retried with back-off:
 60 s while no valid certificate is installed or it is close to expiry,
 otherwise doubling up to an hour.
 
+`keyroster host status` shows one code per host as `host_cert: <code>`: a
+host-level hold or a record code from the table, `refused:<detail>` for a
+key held by a sticky refusal (for example `refused:cert_revoked`), or
+`backoff` for a key waiting out a transient outcome. The transient codes
+themselves (`host_cert_recent`, `served_cert_mismatch`, a failed install, no
+answer) are in the agent's log (`journalctl -u keyroster-agent`), not in
+host status.
+
 | Code | What it means | What to do |
 |---|---|---|
+| `backoff` | A key waits out a transient outcome (see above) | Read the agent's log for the code; the agent retries |
+| `refused:<detail>` | A key is held by a sticky refusal; the detail is one of the list above | As the detail's row says |
 | `directory_unauthorized` | The stored directory is not signed under the policy in force | Sign the directory again under the policy |
 | `host_disabled`, `host_removed` | The entry is disabled or gone; nothing is renewed | Nothing, or enable the entry again |
 | `host_keys_rotated`, `host_keys_disagree` | sshd's host keys are not the entry's | Update the entry's keys (`keyroster host` commands) |
@@ -1653,9 +1663,9 @@ otherwise doubling up to an hour.
 | `foreign_host_certificate` | A `HostCertificate` line outside the agent's drop-in | Remove that line |
 | `hostcert_in_match` | The drop-in is read inside a `Match` block | Move the `Include` out of the `Match` block |
 | `host_cert_algorithm_disabled` | sshd's `HostKeyAlgorithms` leaves out the certificate algorithm | Allow the certificate algorithm in sshd |
-| `served_cert_mismatch` | After the reload sshd did not serve the new certificate; the agent rolled back to the committed set | Check sshd's log; the agent retries |
+| `served_cert_mismatch` (log) | After the reload sshd did not serve the new certificate; the agent rolled back to the committed set | Check sshd's log; the agent retries |
 | `hostcert_record_invalid`, `hostcert_record_missing` | The record is unreadable or gone; the agent renders no `HostCertificate` line until it is refilled from certificate files that verify | Nothing; an invalid record is set aside as `hostcert.json.invalid` |
-| `host_cert_recent` | Inside the window: the existing certificate is re-delivered | Wait |
+| `host_cert_recent` (log) | Inside the window: the existing certificate is re-delivered | Wait |
 | `host_key_revoked` | The host key is in the KRL | Rotate the host key and update the entry |
 | `signer_too_old` | The signer does not know the host request | Upgrade the signer |
 | `cert_revoked` | The key's latest host certificate is revoked | See below |

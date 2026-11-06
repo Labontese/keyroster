@@ -153,6 +153,24 @@ func hostLifetime(profile cert.Profile) uint64 {
 // high-water mark and the host_issue leaf. The caller holds s.mu.
 func (s *Signer) issueHostLocked(ctx context.Context, peer Peer, req *wire.HostIssueRequest, entry *directory.Host, hostKey ssh.PublicKey,
 	caKey ssh.Signer, profile cert.Profile, lifetime, capInForce uint64) (*wire.IssueResponse, error) {
+	// The issuance bounds per host key (Q-09-2, Q-09-5, D6), from the
+	// in-memory index, before a serial is drawn: a revoked latest
+	// certificate holds the key until a newer directory version; inside the
+	// window the latest certificate is re-delivered instead of re-issued,
+	// also while the clock is below the serial high-water mark (a
+	// re-delivery draws no serial).
+	if latest, ok := s.loaded.hosts.latest[trust.FormatKey(hostKey)]; ok {
+		nowSecs := uint64(max(s.clock().Unix(), 0))
+		switch cert.HostCertRecent(latest.prev(), nowSecs, capInForce, s.directoryVersion, entry.Principals) {
+		case "cert_revoked":
+			return nil, refusalErr(wire.CodeRefused, "cert_revoked", nil)
+		case "host_cert_recent":
+			if !latest.revoked && nowSecs < latest.cert.ValidBefore {
+				return s.redeliverLocked(peer, hostKey, latest, "recent"), nil
+			}
+			return nil, refusalErr(wire.CodeRefused, "host_cert_recent", nil)
+		}
+	}
 	last, err := s.db.LastSerial(ctx)
 	if err != nil {
 		return nil, refusalErr(wire.CodeUnavailable, "state_unavailable", err)
@@ -168,22 +186,6 @@ func (s *Signer) issueHostLocked(ctx context.Context, peer Peer, req *wire.HostI
 	issuedAt := s.clock()
 	if micros(issuedAt) < ser {
 		return nil, refusalErr(wire.CodeUnavailable, "clock_regression", serial.ErrClockRegression)
-	}
-	// The issuance bounds per host key (Q-09-2, Q-09-5, D6), from the
-	// in-memory index, at the instant cert.Build gets: a revoked latest
-	// certificate holds the key until a newer directory version; inside the
-	// window the latest certificate is re-delivered instead of re-issued.
-	if latest, ok := s.loaded.hosts.latest[trust.FormatKey(hostKey)]; ok {
-		nowSecs := uint64(max(issuedAt.Unix(), 0))
-		switch cert.HostCertRecent(latest.prev(), nowSecs, capInForce, s.directoryVersion, entry.Principals) {
-		case "cert_revoked":
-			return nil, refusalErr(wire.CodeRefused, "cert_revoked", nil)
-		case "host_cert_recent":
-			if !latest.revoked && nowSecs < latest.cert.ValidBefore {
-				return s.redeliverLocked(peer, hostKey, latest, "recent"), nil
-			}
-			return nil, refusalErr(wire.CodeRefused, "host_cert_recent", nil)
-		}
 	}
 	dirVersion := s.directoryVersion
 	keyID := cert.KeyID{

@@ -1592,6 +1592,18 @@ func TestHostCertDrift(t *testing.T) {
 			t.Fatalf("settings %+v, want the foreign value", d.Settings)
 		}
 	})
+	t.Run("renewal_candidate_not_drift", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		h.renewDue()
+		h.mustHostCerts()
+		h.answer()
+		h.crashed("hostcert-reload")
+		d := check(t, h)
+		if slices.ContainsFunc(d.Settings, func(s SettingDrift) bool { return s.Keyword == hostCertificateKeyword }) {
+			t.Fatalf("settings %+v: the renewal's candidate in force is reported as drift", d.Settings)
+		}
+	})
 	t.Run("committed_file_missing_reported", func(t *testing.T) {
 		h := newHostCertHost(t)
 		h.both()
