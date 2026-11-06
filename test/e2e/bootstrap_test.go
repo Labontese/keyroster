@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net"
@@ -52,6 +53,22 @@ type bootstrapOpts struct {
 	// it (the policy a host agent needs, 03-05/03-06); genesis-policy
 	// itself has no such flag.
 	PoPHosts bool
+	// HostMaxTTL, when set, is the genesis policy's host certificate cap
+	// (root genesis-policy --host-max-ttl); zero keeps the default (03-09).
+	HostMaxTTL time.Duration
+}
+
+// genesisHostMaxTTL is HostMaxTTL for a signer behind keyroster-server:
+// startServerEnv builds its own bootstrapOpts, so a test sets the cap
+// through withGenesisHostMaxTTL (03-09). The e2e tests run one at a time.
+var genesisHostMaxTTL time.Duration
+
+// withGenesisHostMaxTTL makes every genesis policy signed until t ends
+// carry host cap d.
+func withGenesisHostMaxTTL(t *testing.T, d time.Duration) {
+	t.Helper()
+	genesisHostMaxTTL = d
+	t.Cleanup(func() { genesisHostMaxTTL = 0 })
 }
 
 // signerEnv is a running keyroster-signer under a root-signed genesis
@@ -205,6 +222,9 @@ func (e *signerEnv) signGenesis(t *testing.T, opts bootstrapOpts) {
 	}
 	for _, o := range opts.WebAuthnOrigins {
 		args = append(args, "--webauthn-origin", o)
+	}
+	if ttl := cmp.Or(opts.HostMaxTTL, genesisHostMaxTTL); ttl != 0 {
+		args = append(args, "--host-max-ttl", ttl.String())
 	}
 	if code, out := keyrosterWithAgent(t, "", args...); code != 0 {
 		t.Fatalf("root genesis-policy exited %d:\n%s", code, out)

@@ -107,8 +107,9 @@ type enrolledHost struct {
 // expects to exist (<root>/etc, <root>/var/lib, the sshd configuration
 // directory, and a systemd host's /run/systemd/system and
 // /etc/systemd/system, where install writes the units, 03-08) and starts
-// its sshd; the state directory is created by install.
-func newEnrolledHostLayout(t *testing.T, env *signerEnv) *agentHost {
+// its sshd, with sshdExtra as more sshd_config lines (a second HostKey,
+// 03-09); the state directory is created by install.
+func newEnrolledHostLayout(t *testing.T, env *signerEnv, sshdExtra ...string) *agentHost {
 	t.Helper()
 	base := t.TempDir()
 	h := &agentHost{signer: env, root: filepath.Join(base, "root"), state: filepath.Join(base, "state")}
@@ -126,7 +127,7 @@ func newEnrolledHostLayout(t *testing.T, env *signerEnv) *agentHost {
 	if err := os.Chmod(base, 0o755); err != nil { //nolint:gosec // the state directory's parent
 		t.Fatal(err)
 	}
-	h.sshd = startIncludeSSHD(t, h.root)
+	h.sshd = startIncludeSSHD(t, h.root, sshdExtra...)
 	return h
 }
 
@@ -165,14 +166,19 @@ func (e *enrolledHost) restartRun(t *testing.T) {
 	e.startRun(t)
 }
 
-// startFetch starts e's keyroster-agent-fetch (--poll 1s).
-func (e *enrolledHost) startFetch(t *testing.T) {
+// startFetch starts e's keyroster-agent-fetch, with --poll 1s, or poll
+// when one is given (03-09's host-certificate tests poll every 5 s).
+func (e *enrolledHost) startFetch(t *testing.T, poll ...time.Duration) {
 	t.Helper()
 	h := e.agentHost
+	every := time.Second
+	if len(poll) > 0 {
+		every = poll[0]
+	}
 	e.fetchCmd, e.fetch, e.fetchDn = startDaemon(t, "keyroster-agent-fetch", envWithout("SSH_AUTH_SOCK"), fetchBin(t),
 		"--config", filepath.Join(h.root, "etc", "keyroster-agent", "fetch.json"),
 		"--dir", filepath.Join(h.root, "var", "lib", "keyroster-agent-fetch"),
-		"--spool", filepath.Join(h.state, "spool"), "--outbox", filepath.Join(h.state, "outbox"), "--poll", "1s")
+		"--spool", filepath.Join(h.state, "spool"), "--outbox", filepath.Join(h.state, "outbox"), "--poll", every.String())
 }
 
 // stopFetch stops e's fetcher and waits for it to exit.
