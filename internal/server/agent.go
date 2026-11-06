@@ -895,15 +895,14 @@ func (s *Server) handleAgentHostCert(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 	fp := agentFingerprint(ar.agent.IdentitySPKISHA256)
-	hostKey, err := ssh.ParsePublicKey(req.HostKey)
-	if err != nil || !slices.Contains(ar.agent.HostKeys, trust.FormatKey(hostKey)) {
-		s.log.Warn("host certificate refused", "expected_name", ar.agent.ExpectedName, "agent", fp, "reason", serverclient.AgentErrHostKeyNotEnrolled)
-		s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrHostKeyNotEnrolled})
-		return
-	}
-	if !hostNamed(ar.dir, ar.agent.HostKeys, req.HostName) {
-		s.log.Warn("host certificate refused", "expected_name", ar.agent.ExpectedName, "agent", fp, "reason", serverclient.AgentErrHostNameMismatch)
-		s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrHostNameMismatch})
+	// The signed directory decides (owner decision 2026-11-06): the
+	// requested key must be listed on the entry this agent is admitted
+	// under, found by the requested key itself, never only by the frozen
+	// enrollment row, so a re-keyed host obtains certificates for the keys
+	// its entry lists. The signer still checks possession of that key.
+	if code := hostKeyOfAgent(ar.dir, ar.agent.HostKeys, ar.agent.ExpectedName, req.HostKey, req.HostName); code != "" {
+		s.log.Warn("host certificate refused", "expected_name", ar.agent.ExpectedName, "agent", fp, "reason", code)
+		s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: code})
 		return
 	}
 	cctx, cancel := context.WithTimeout(r.Context(), signerCallTimeout)
@@ -947,19 +946,46 @@ func decodeAgentJSON(body []byte, v any) error {
 	return nil
 }
 
-// hostNamed reports whether the entry of the directory dv that holds the
-// agent's first enrolled key (HostForKey: a key is on at most one host)
-// is named name.
-func hostNamed(dv *directoryView, keys []string, name string) bool {
-	if dv == nil || dv.dir == nil || len(keys) == 0 {
-		return false
+// hostKeyOfAgent checks a host certificate request's key and name
+// against the signed directory dv (03-09): the entry that lists the
+// requested key (HostForKey: a key is on at most one host) must be the
+// entry the agent is admitted under, that is an entry that also lists
+// one of the agent's enrolled keys, or the active entry named the
+// agent's expected name (a fully re-keyed host, as requireAgent admits
+// it), and it must be named name. It returns "" or the refusal detail:
+// host_key_not_enrolled for a key no entry of this agent lists,
+// host_name_mismatch for another name.
+func hostKeyOfAgent(dv *directoryView, enrolled []string, expectedName string, hostKey []byte, name string) string {
+	if dv == nil || dv.dir == nil {
+		return serverclient.AgentErrHostKeyNotEnrolled
 	}
-	pub, err := trust.ParseKey(keys[0])
+	pub, err := ssh.ParsePublicKey(hostKey)
 	if err != nil {
-		return false
+		return serverclient.AgentErrHostKeyNotEnrolled
 	}
 	h, ok := dv.dir.HostForKey(pub)
-	return ok && h.Name == name
+	if !ok || !agentsEntry(dv, h, enrolled, expectedName) {
+		return serverclient.AgentErrHostKeyNotEnrolled
+	}
+	if h.Name != name {
+		return serverclient.AgentErrHostNameMismatch
+	}
+	return ""
+}
+
+// agentsEntry reports whether h is the entry the agent with these
+// enrolled keys and expected name is admitted under.
+func agentsEntry(dv *directoryView, h *directory.Host, enrolled []string, expectedName string) bool {
+	for _, k := range enrolled {
+		pub, err := trust.ParseKey(k)
+		if err != nil {
+			continue
+		}
+		if o, ok := dv.dir.HostForKey(pub); ok && o.Name == h.Name {
+			return true
+		}
+	}
+	return h.Name == expectedName && h.Status == directory.StatusActive && rekeyed(dv, expectedName)
 }
 
 // handleAgentIdentity serves POST AgentIdentityPath (03-08, AGENT-02):

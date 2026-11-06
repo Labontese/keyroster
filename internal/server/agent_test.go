@@ -1274,6 +1274,62 @@ func TestAgentHostCert(t *testing.T) {
 		_, body := hostCertBody(t, hosts[0], "web1")
 		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrHostNameMismatch)
 	})
+	// The signed directory decides (owner decision 2026-11-06): a key the
+	// agent's own entry lists is relayed although enrollment never saw it.
+	relayed := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("host certificate: %d %s, want it relayed", rec.Code, rec.Body.String())
+		}
+	}
+	// approvedOnce makes the agent's first request under the entry it was
+	// approved by, so the server records the approval (requireAgent).
+	approvedOnce := func(t *testing.T, e *agentEnv, id agentID, hosts []ssh.Signer) {
+		t.Helper()
+		_, body := hostCertBody(t, hosts[0], "web1")
+		relayed(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body))
+	}
+	t.Run("rekeyed_host_key_added_obtains_cert", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		approvedOnce(t, e, id, hosts)
+		added := newSigner(t)
+		e.installDir(t, hostEntry("web1", append(slices.Clone(hosts), added)))
+		_, body := hostCertBody(t, added, "web1")
+		relayed(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body))
+	})
+	t.Run("rekeyed_first_enrolled_key_removed_obtains_cert", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		approvedOnce(t, e, id, hosts)
+		// The entry lists a new key and no longer the first enrolled one.
+		added := newSigner(t)
+		e.installDir(t, hostEntry("web1", append(slices.Clone(hosts[1:]), added)))
+		_, body := hostCertBody(t, added, "web1")
+		relayed(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body))
+		if len(hosts) > 1 {
+			_, body := hostCertBody(t, hosts[1], "web1")
+			relayed(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body))
+		}
+	})
+	t.Run("key_not_on_agents_entry_refused", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		e.installDir(t, hostEntry("web1", hosts))
+		// A key no entry lists, under the agent's own name.
+		_, body := hostCertBody(t, newSigner(t), "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrHostKeyNotEnrolled)
+	})
+	t.Run("another_hosts_key_refused", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		other := hostSigners(t, 1)
+		e.installDir(t, hostEntry("web1", hosts), hostEntry("web2", other))
+		for _, name := range []string{"web2", "web1"} {
+			_, body := hostCertBody(t, other[0], name)
+			refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrHostKeyNotEnrolled)
+		}
+	})
 	t.Run("never_approved_refused", func(t *testing.T) {
 		e := newAgentEnv(t, true)
 		id, hosts := newAgentID(t), hostSigners(t, 1)
