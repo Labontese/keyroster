@@ -1081,8 +1081,15 @@ func hostCertStepCases2(t *testing.T) {
 		h := newHostCertHost(t)
 		h.both()
 		h.stripLines()
-		h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
-		h.mustApply()
+		gen := h.current()
+		// A policy rotation with the CA set and admins unchanged renders
+		// the same bytes: the new versions are committed without a swap.
+		_, b2, p2 := h.f.rotation(h.f.bundle, h.f.bundleDoc, h.f.policyDoc, h.f.policy, h.f.policy.Admins, "2026-10-02T00:00:00Z")
+		h.state.Bundles[2], h.state.Policies[2] = b2, p2
+		r := h.mustApply()
+		if h.current() != gen || r.BundleVersion != 2 {
+			t.Fatalf("generation %d -> %d, bundle %d: want bundle 2 stored on the same generation", gen, h.current(), r.BundleVersion)
+		}
 		if !bytes.Equal(h.dropInBytes(), h.committedRender()) {
 			t.Fatal("the commit of unchanged versions did not repair the section")
 		}
@@ -1674,18 +1681,20 @@ func TestHostCertPreflight(t *testing.T) {
 // TestHostCertStatus: status.json carries the host-certificate fields
 // (03-09).
 func TestHostCertStatus(t *testing.T) {
-	h := newHostCertHost(t)
-	h.both()
-	s := h.status()
-	if len(s.HostCerts) != 2 || len(s.HostKeysSkipped) != 1 || s.HostKeysSkipped[0] != (heartbeat.SkippedKey{Type: ssh.KeyAlgoRSA, Reason: "rsa_host_key_skipped"}) {
-		t.Fatalf("status %+v %+v, want both certificates and the RSA key skipped", s.HostCerts, s.HostKeysSkipped)
-	}
-	for _, c := range s.HostCerts {
-		i := slices.IndexFunc(h.record().Committed, func(e hostcert.Entry) bool { return e.KeySHA256 == c.KeySHA256 })
-		if i < 0 || c.Serial == 0 || c.ValidBefore == 0 || len(c.CASHA256) != 64 || !c.Served || c.Type == "" {
-			t.Fatalf("host_certs entry %+v", c)
+	t.Run("fields_from_record_and_attempts", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		s := h.status()
+		if len(s.HostCerts) != 2 || len(s.HostKeysSkipped) != 1 || s.HostKeysSkipped[0] != (heartbeat.SkippedKey{Type: ssh.KeyAlgoRSA, Reason: "rsa_host_key_skipped"}) {
+			t.Fatalf("status %+v %+v, want both certificates and the RSA key skipped", s.HostCerts, s.HostKeysSkipped)
 		}
-	}
+		for _, c := range s.HostCerts {
+			i := slices.IndexFunc(h.record().Committed, func(e hostcert.Entry) bool { return e.KeySHA256 == c.KeySHA256 })
+			if i < 0 || c.Serial == 0 || c.ValidBefore == 0 || len(c.CASHA256) != 64 || !c.Served || c.Type == "" {
+				t.Fatalf("host_certs entry %+v", c)
+			}
+		}
+	})
 	t.Run("served_false_encoded", func(t *testing.T) {
 		h := newHostCertHost(t)
 		h.publishDir(h.hostSpec(h.sshd.pub, h.ed2.PublicKey()))
