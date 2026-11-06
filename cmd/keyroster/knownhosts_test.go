@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // TestMain points ~/.ssh at an error for every test of this package
@@ -814,7 +817,7 @@ func TestKnownHosts(t *testing.T) {
 		k := htKRLDoc(t, 1, issued, f.install, f.ops, krl.Set{})
 		in := f.in(t, web1(t, f, 1), k)
 		in.Now = issued.Add(24*time.Hour - time.Second)
-		if _, stderr := mustRun(t, in, hostTrustFull); stderr != "" {
+		if _, stderr := mustRun(t, in, hostTrustFull); strings.Contains(stderr, "Warning: the KRL") {
 			t.Fatalf("a manifest 24 h minus 1 s old warned: %q", stderr)
 		}
 		in.Now = issued.Add(24*time.Hour + time.Second)
@@ -911,6 +914,9 @@ func TestKnownHosts(t *testing.T) {
 	t.Run("interrupted_write_never_widens_trust", func(t *testing.T) {
 		testInterruptedWrite(t)
 	})
+
+	// The edge rules (Task 4).
+	knownHostsEdgeCases(t)
 }
 
 // mapsEqual reports whether two file maps are equal.
@@ -1099,11 +1105,499 @@ func TestKnownHostsSync(t *testing.T) {
 			t.Fatalf("~/.ssh was created: %v", err)
 		}
 	})
+	t.Run("sync_exit_3_when_partly_refreshed", func(t *testing.T) {
+		seed := func(t *testing.T, e *dirEnv, names []string) {
+			writeSeedState(t, &hostTrustState{Format: 1, InstallationID: e.bundle.InstallationID, BundleVersion: e.bundle.Version, OpsKey: e.bundle.OpsKey.Key, Names: names})
+		}
+		// No directory served, with a valid state: revocations only.
+		e := newDirEnv(t, 1, 1)
+		serveKRL(t, e, 1)
+		useSSHDir(t)
+		seed(t, e, []string{"web1"})
+		if code, stdout, _ := run(t, "known-hosts", "sync"); code != 3 || stdout != "Host trust partly refreshed: revocations only (the server serves no directory).\n" {
+			t.Fatalf("no directory: exit %d, stdout %q", code, stdout)
+		}
+		// A directory signed by no policy admin: revocations only.
+		e, _ = hostEnv(t)
+		serveKRL(t, e, 1)
+		useSSHDir(t)
+		seed(t, e, []string{"web1"})
+		doc, _ := e.installed()
+		e.mu.Lock()
+		e.served = &serverclient.DirectoryAnswer{Version: docVersion(doc), Directory: doc, Sigs: htSign(t, doc, htSigner(t)), Authorized: true}
+		e.mu.Unlock()
+		if code, stdout, _ := run(t, "known-hosts", "sync"); code != 3 || !strings.HasPrefix(stdout, "Host trust partly refreshed: revocations only (") {
+			t.Fatalf("forged directory: exit %d, stdout %q", code, stdout)
+		}
+		// The bound.
+		e, _ = hostEnv(t)
+		serveKRL(t, e, 1)
+		useSSHDir(t)
+		seed(t, e, htNames(maxHostTrustNames/64, 61))
+		if code, stdout, stderr := run(t, "known-hosts", "sync"); code != 3 || !strings.HasPrefix(stdout, "Host trust partly refreshed: ") || !strings.Contains(stderr, "bound") {
+			t.Fatalf("bound: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+	})
 	t.Run("usage_errors", func(t *testing.T) {
 		for _, args := range [][]string{{"known-hosts"}, {"known-hosts", "frob"}, {"known-hosts", "sync", "extra"}, {"known-hosts", "sync", "--bogus"}} {
 			if code, _, _ := run(t, args...); code != 2 {
 				t.Fatalf("%q: exit %d, want 2", args, code)
 			}
+		}
+	})
+}
+
+// htSeed writes a valid state for f with names, directory version 0 and
+// KRL version 0.
+func (f *htFix) htSeed(t *testing.T, names []string) {
+	t.Helper()
+	st := &hostTrustState{Format: 1, InstallationID: f.install, BundleVersion: f.bundle.Version, OpsKey: f.bundle.OpsKey.Key, Names: names}
+	data, err := st.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(f.statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, f.statePath, data)
+}
+
+// htNames returns n sorted names of exactly size bytes: i in base 36,
+// zero-padded (36^4 is 1,679,616 four-byte names).
+func htNames(n, size int) []string {
+	out := make([]string, n)
+	for i := range out {
+		s := strconv.FormatInt(int64(i), 36)
+		out[i] = strings.Repeat("0", size-len(s)) + s
+	}
+	return out
+}
+
+// htRawDir is directory version v with one host whose principals are
+// names, built without Parse (the writer's Parse is replaced by
+// useRawDirectories), signed by f's first admin.
+func (f *htFix) htRawDir(t *testing.T, v uint64, names []string) []byte {
+	t.Helper()
+	d := directory.Directory{Version: v, Prev: strings.Repeat("ab", 32), InstallationID: f.install, Users: []directory.User{}, Groups: []directory.Group{},
+		Roles: []directory.Role{}, HostGroups: []directory.HostGroup{{Name: "web", Accounts: []directory.AccountMap{}}},
+		Hosts: []directory.Host{{Name: "big", HostGroup: "web", Keys: []string{trust.FormatKey(htSigner(t).PublicKey())}, Principals: names, Status: directory.StatusActive}}}
+	doc, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+// useRawDirectories makes the writer decode directories without Parse,
+// so a test can feed it more names than one valid directory holds.
+func useRawDirectories(t *testing.T) {
+	t.Helper()
+	prev := parseHostTrustDirectory
+	parseHostTrustDirectory = func(data []byte) (*directory.Directory, error) {
+		var d directory.Directory
+		return &d, json.Unmarshal(data, &d)
+	}
+	t.Cleanup(func() { parseHostTrustDirectory = prev })
+}
+
+// htStartOver is what every damaged-state refusal must say.
+func htStartOver(t *testing.T, f *htFix, stdout string) {
+	t.Helper()
+	for _, want := range []string{"revocations and names are not refreshed", f.statePath,
+		filepath.Join(f.sshDir, hostTrustKnownHosts), filepath.Join(f.sshDir, hostTrustKRLFile), filepath.Join(f.sshDir, hostTrustSSHConfig)} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("the refusal does not say %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// knownHostsEdgeCases are TestKnownHosts's edge rules (03-09b, Task 4):
+// the bound, damaged state, concurrent runs and the Include placement.
+func knownHostsEdgeCases(t *testing.T) {
+	web := func(t *testing.T, f *htFix, v uint64, principals ...string) []byte {
+		var hosts []directory.Host
+		for _, p := range principals {
+			hosts = append(hosts, htHost(t, p, directory.StatusActive, p))
+		}
+		return f.dirDoc(t, v, "", hosts...)
+	}
+	// atBound seeds a state whose names take exactly the 4 MiB bound
+	// (65,536 names of 61 bytes, 64 encoded bytes each) and refreshes it
+	// once from a directory with no host.
+	atBound := func(t *testing.T) (*htFix, []string) {
+		f := newHTFix(t, 1, 1)
+		names := htNames(maxHostTrustNames/64, 61)
+		f.htSeed(t, names)
+		mustRun(t, f.in(t, f.dirDoc(t, 1, ""), f.krlV(t, 1)), hostTrustFull)
+		return f, names
+	}
+
+	// The bound (QB-1).
+	t.Run("bound_freezes_config_keeps_krl_and_known_hosts", func(t *testing.T) {
+		f, _ := atBound(t)
+		before := f.files(t)
+		k := f.krlV(t, 2)
+		stdout, stderr := mustRun(t, f.in(t, web(t, f, 2, "web1"), k), hostTrustPartial)
+		after := f.files(t)
+		if after[hostTrustSSHConfig] != before[hostTrustSSHConfig] {
+			t.Fatal("the config was rewritten at the bound")
+		}
+		if after[hostTrustKRLFile] != string(k.KRL) || !strings.Contains(after[hostTrustKnownHosts], "@cert-authority web1 ") || f.state(t).DirectoryVersion != 2 || f.state(t).KRLVersion != 2 {
+			t.Fatal("the KRL, known_hosts or the state's versions were not written at the bound")
+		}
+		if !strings.HasPrefix(stdout, "Host trust partly refreshed: ") || !strings.Contains(stderr, "bound") {
+			t.Fatalf("stdout %q, stderr %q", stdout, stderr)
+		}
+		var ee *exitError
+		if err := hostTrustExit(hostTrustPartial); !errors.As(err, &ee) || ee.code != 3 {
+			t.Fatal("known-hosts sync does not exit 3 at the bound")
+		}
+	})
+	t.Run("bound_warning_counts_uncovered_names", func(t *testing.T) {
+		f, _ := atBound(t)
+		_, stderr := mustRun(t, f.in(t, web(t, f, 2, "web1"), f.krlV(t, 2)), hostTrustPartial)
+		if !strings.Contains(stderr, "1 new name(s)") {
+			t.Fatalf("stderr %q", stderr)
+		}
+		_, stderr = mustRun(t, f.in(t, web(t, f, 3, "web1", "web2"), f.krlV(t, 3)), hostTrustPartial)
+		if !strings.Contains(stderr, "2 new name(s)") {
+			t.Fatalf("stderr on the next run %q", stderr)
+		}
+	})
+	t.Run("bound_never_drops_a_name", func(t *testing.T) {
+		f, names := atBound(t)
+		mustRun(t, f.in(t, web(t, f, 2, "web1"), f.krlV(t, 2)), hostTrustPartial)
+		if got := f.state(t).Names; !slices.Equal(got, names) {
+			t.Fatalf("the state holds %d names, want the %d it held", len(got), len(names))
+		}
+		if got := htHostLine(f.file(t, hostTrustSSHConfig)); len(got) != len(names) || got[0] != names[0] || got[len(got)-1] != names[len(names)-1] {
+			t.Fatalf("the Host line holds %d names, want %d", len(got), len(names))
+		}
+	})
+	t.Run("bound_state_at_cap_with_short_names_reads_back", func(t *testing.T) {
+		useRawDirectories(t)
+		f := newHTFix(t, 1, 1)
+		all := htNames(750000, 4)
+		var cfgAtBound string
+		for i := range 3 {
+			names := all[i*250000 : (i+1)*250000]
+			want := hostTrustFull
+			if i == 2 {
+				want = hostTrustPartial
+				cfgAtBound = f.file(t, hostTrustSSHConfig)
+			}
+			mustRun(t, f.in(t, f.htRawDir(t, uint64(i+1), names), f.krlV(t, uint64(i+1))), want) //nolint:gosec // G115: a small loop index
+		}
+		st := f.state(t)
+		if len(st.Names) != 500000 || hostTrustEncodedSize(st.Names) > maxHostTrustNames || st.KRLVersion != 3 {
+			t.Fatalf("state: %d names, %d encoded bytes, KRL v%d", len(st.Names), hostTrustEncodedSize(st.Names), st.KRLVersion)
+		}
+		if fi, err := os.Stat(f.statePath); err != nil || fi.Size() >= maxHostTrustState {
+			t.Fatalf("the state is %v bytes (%v), want under %d", fi.Size(), err, maxHostTrustState)
+		}
+		if f.file(t, hostTrustSSHConfig) != cfgAtBound {
+			t.Fatal("the config changed at the bound")
+		}
+	})
+	t.Run("single_directory_always_fits_the_bound", func(t *testing.T) {
+		// The densest names a directory can carry are principals (at most
+		// 128 bytes each, cert.ValidatePrincipals): each costs
+		// at least its own len+3 bytes of the document, so the names of one
+		// directory of at most wire.MaxDirectory bytes take at most that many
+		// encoded bytes, a quarter of the bound.
+		f := newHTFix(t, 1, 1)
+		label := strings.Repeat("a", 60)
+		build := func(n int) ([]byte, []string) {
+			var hosts []directory.Host
+			var all []string
+			for i := range n {
+				ps := make([]string, directory.MaxHostPrincipals)
+				for j := range ps {
+					ps[j] = fmt.Sprintf("h%04d-%d.", i, j) + label + "." + label[:50]
+				}
+				hosts = append(hosts, htHost(t, fmt.Sprintf("h%04d", i), directory.StatusActive, ps...))
+				all = append(all, ps...)
+			}
+			return f.dirDoc(t, 1, "", hosts...), all
+		}
+		// As many hosts as fit in wire.MaxDirectory bytes, from the size of
+		// one and of two.
+		one, _ := build(1)
+		two, _ := build(2)
+		per := len(two) - len(one)
+		n := (wire.MaxDirectory-len(one))/per + 1
+		doc, all := build(n)
+		for len(doc) > wire.MaxDirectory {
+			n--
+			doc, all = build(n)
+		}
+		if hostTrustEncodedSize(all) > len(doc) || len(doc) > wire.MaxDirectory || hostTrustEncodedSize(all) > maxHostTrustNames {
+			t.Fatalf("%d names take %d encoded bytes in a %d-byte directory", len(all), hostTrustEncodedSize(all), len(doc))
+		}
+	})
+
+	// Damaged state (QB-3).
+	refused := func(t *testing.T, f *htFix) {
+		t.Helper()
+		before := f.files(t)
+		stdout, _ := mustRun(t, f.in(t, web(t, f, 1, "web1"), f.krlV(t, 1)), hostTrustNone)
+		htStartOver(t, f, stdout)
+		if !mapsEqual(before, f.files(t)) {
+			t.Fatal("a refused run wrote a file")
+		}
+	}
+	t.Run("missing_state_with_managed_files_refuses_all_writes", func(t *testing.T) {
+		for _, n := range []string{hostTrustKnownHosts, hostTrustKRLFile, hostTrustSSHConfig} {
+			f := newHTFix(t, 1, 1)
+			if err := os.Mkdir(f.sshDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(f.sshDir, n), []byte("# an earlier run\n"))
+			refused(t, f)
+		}
+	})
+	t.Run("missing_state_no_files_is_first_run", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		mustRun(t, f.in(t, web(t, f, 1, "web1"), f.krlV(t, 1)), hostTrustFull)
+	})
+	corrupt := func(t *testing.T, data []byte) {
+		f := newHTFix(t, 1, 1)
+		if err := os.MkdirAll(filepath.Dir(f.statePath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, f.statePath, data)
+		refused(t, f)
+	}
+	stateJSON := func(f func(m map[string]any)) []byte {
+		m := map[string]any{"format": 1, "installation_id": strings.Repeat("ab", 16), "bundle_version": 1, "ops_key": "x", "directory_version": 0,
+			"directory_sha256": "", "krl_version": 0, "names": []string{"web1"}}
+		f(m)
+		b, _ := json.Marshal(m)
+		return append(b, '\n')
+	}
+	t.Run("corrupt_state_refuses_all_writes", func(t *testing.T) {
+		corrupt(t, []byte("not json\n"))
+	})
+	t.Run("state_unknown_field_refused", func(t *testing.T) {
+		corrupt(t, stateJSON(func(m map[string]any) { m["extra"] = 1 }))
+	})
+	t.Run("state_with_bad_name_refused", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		st := &hostTrustState{Format: 1, InstallationID: f.install, BundleVersion: 1, OpsKey: f.bundle.OpsKey.Key, Names: []string{"Web1"}}
+		data, err := trust.CanonicalJSON(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(f.statePath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, f.statePath, data)
+		refused(t, f)
+	})
+	t.Run("state_with_bad_ops_key_refused", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		for _, key := range []string{"not a key", trust.FormatKey(htSigner(t).PublicKey()) + strings.Repeat(" ", 300)} {
+			st := &hostTrustState{Format: 1, InstallationID: f.install, BundleVersion: 1, OpsKey: key, Names: []string{}}
+			data, err := trust.CanonicalJSON(st)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(f.statePath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, f.statePath, data)
+			refused(t, f)
+		}
+	})
+	t.Run("state_over_bound_refused", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		st := &hostTrustState{Format: 1, InstallationID: f.install, BundleVersion: 1, OpsKey: f.bundle.OpsKey.Key, Names: htNames(maxHostTrustNames/64+1, 61)}
+		data, err := trust.CanonicalJSON(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(f.statePath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, f.statePath, data)
+		refused(t, f)
+	})
+	t.Run("foreign_installation_state_refuses", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		st := &hostTrustState{Format: 1, InstallationID: htInstall(t), BundleVersion: 1, OpsKey: f.bundle.OpsKey.Key, Names: []string{"web9"}}
+		data, err := st.encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(f.statePath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, f.statePath, data)
+		refused(t, f)
+	})
+
+	// Concurrent runs.
+	useMergeHook := func(t *testing.T, hook func()) {
+		prev := hostTrustMergeHook
+		hostTrustMergeHook = hook
+		t.Cleanup(func() { hostTrustMergeHook = prev })
+	}
+	t.Run("merge_unions_names_and_takes_max_versions", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		d1 := web(t, f, 1, "web1")
+		mustRun(t, f.in(t, d1, f.krlV(t, 1)), hostTrustFull)
+		useMergeHook(t, func() {
+			st := f.state(t)
+			st.Names = []string{"web1", "web9"}
+			writeSeedStateAt(t, f.statePath, st)
+		})
+		mustRun(t, f.in(t, d1, f.krlV(t, 2)), hostTrustFull)
+		st := f.state(t)
+		if !slices.Equal(st.Names, []string{"web1", "web9"}) || st.KRLVersion != 2 || st.DirectoryVersion != 1 {
+			t.Fatalf("state %+v, want the union of names and the higher versions", st)
+		}
+		if got := htHostLine(f.file(t, hostTrustSSHConfig)); !slices.Equal(got, []string{"web1", "web9"}) {
+			t.Fatalf("Host line %q", got)
+		}
+	})
+	t.Run("concurrent_newer_state_writes_no_managed_file", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		mustRun(t, f.in(t, web(t, f, 1, "web1"), f.krlV(t, 1)), hostTrustFull)
+		useMergeHook(t, func() {
+			st := f.state(t)
+			st.KRLVersion = 9
+			writeSeedStateAt(t, f.statePath, st)
+		})
+		before := f.files(t)
+		stdout, _ := mustRun(t, f.in(t, web(t, f, 2, "web2"), f.krlV(t, 2)), hostTrustNone)
+		after := f.files(t)
+		delete(before, hostTrustStateFile)
+		delete(after, hostTrustStateFile)
+		if !mapsEqual(before, after) || !strings.Contains(stdout, "another run") {
+			t.Fatalf("a run behind a newer state wrote a managed file, or did not say so: %q", stdout)
+		}
+	})
+	t.Run("concurrent_run_cannot_roll_back_below_floor", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		mustRun(t, f.in(t, web(t, f, 1, "web1"), f.krlV(t, 1)), hostTrustFull)
+		useMergeHook(t, func() {
+			st := f.state(t)
+			st.KRLVersion, st.DirectoryVersion, st.DirectorySHA256 = 9, 5, strings.Repeat("ef", 32)
+			writeSeedStateAt(t, f.statePath, st)
+		})
+		htWrite(f.in(t, web(t, f, 2, "web1"), f.krlV(t, 2)))
+		if st := f.state(t); st.KRLVersion != 9 || st.DirectoryVersion != 5 {
+			t.Fatalf("state %+v rolled back below the floor a concurrent run wrote", st)
+		}
+	})
+
+	// The Include placement.
+	withConfig := func(t *testing.T, cfg string) (string, string) {
+		f := newHTFix(t, 1, 1)
+		if cfg != "" {
+			if err := os.Mkdir(f.sshDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(f.sshDir, "config"), []byte(cfg))
+		}
+		return mustRun(t, f.in(t, web(t, f, 1, "web1"), f.krlV(t, 1)), hostTrustFull)
+	}
+	const inc = "Include ~/.ssh/keyroster_ssh_config"
+	t.Run("include_missing_prints_line_once", func(t *testing.T) {
+		stdout, stderr := withConfig(t, "")
+		if n := strings.Count(stdout+stderr, inc); n != 1 || !strings.Contains(stderr, "before the first Host or Match line") {
+			t.Fatalf("the Include line printed %d times; stderr %q", n, stderr)
+		}
+	})
+	t.Run("include_before_first_host_silent", func(t *testing.T) {
+		if _, stderr := withConfig(t, "# mine\n"+inc+"\nHost web1\n\tPort 2222\n"); stderr != "" {
+			t.Fatalf("stderr %q", stderr)
+		}
+	})
+	t.Run("include_after_host_warned_with_both_line_numbers", func(t *testing.T) {
+		_, stderr := withConfig(t, "Host x\n\tUser y\n"+inc+"\n")
+		if !strings.Contains(stderr, "line 3") || !strings.Contains(stderr, "line 1") || strings.Contains(stderr, "Add this line") {
+			t.Fatalf("stderr %q", stderr)
+		}
+	})
+	t.Run("include_after_match_warned", func(t *testing.T) {
+		if _, stderr := withConfig(t, "Match all\n"+inc+"\n"); !strings.Contains(stderr, "line 2") || !strings.Contains(stderr, "line 1") {
+			t.Fatalf("stderr %q", stderr)
+		}
+	})
+	t.Run("trust_keyword_before_include_warned", func(t *testing.T) {
+		for _, kw := range []string{"StrictHostKeyChecking no", "UserKnownHostsFile /dev/null", "GlobalKnownHostsFile /dev/null", "UpdateHostKeys yes",
+			"VerifyHostKeyDNS yes", "RevokedHostKeys /dev/null", "KnownHostsCommand /bin/true"} {
+			_, stderr := withConfig(t, "Host *\n\t"+kw+"\n"+inc+"\n")
+			if !strings.Contains(stderr, strings.Fields(kw)[0]) || !strings.Contains(stderr, "line 2") {
+				t.Fatalf("%s: stderr %q", kw, stderr)
+			}
+		}
+	})
+	t.Run("include_keyword_case_and_equals_forms", func(t *testing.T) {
+		for _, cfg := range []string{"INCLUDE=~/.ssh/keyroster_ssh_config\n", "  include   ~/.ssh/keyroster_ssh_config\n", "Include = ~/.ssh/keyroster_ssh_config\n"} {
+			if _, stderr := withConfig(t, cfg); stderr != "" {
+				t.Fatalf("%q: stderr %q", cfg, stderr)
+			}
+		}
+		if _, stderr := withConfig(t, "HOST=web1\n"+inc+"\n"); !strings.Contains(stderr, "line 1") {
+			t.Fatalf("Host=... not read as a Host line: %q", stderr)
+		}
+	})
+	t.Run("nested_include_not_inspected", func(t *testing.T) {
+		if _, stderr := withConfig(t, "Include ~/.ssh/other.conf\n"); !strings.Contains(stderr, inc) {
+			t.Fatalf("stderr %q", stderr)
+		}
+	})
+	t.Run("ssh_config_over_1mib_not_scanned", func(t *testing.T) {
+		if _, stderr := withConfig(t, inc+"\n"+strings.Repeat("# padding\n", (1<<20)/10+1)); !strings.Contains(stderr, "not scanned") {
+			t.Fatalf("stderr %q", stderr)
+		}
+	})
+}
+
+// writeSeedStateAt writes st canonically at path.
+func writeSeedStateAt(t *testing.T, path string, st *hostTrustState) {
+	t.Helper()
+	data, err := st.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, data)
+}
+
+// FuzzHostTrustState (03-09b): the strict state decode never panics, and
+// every state it accepts has names that pass hostTrustName and re-encodes
+// to exactly its bytes.
+func FuzzHostTrustState(f *testing.F) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		f.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		f.Fatal(err)
+	}
+	ops := trust.FormatKey(signer.PublicKey())
+	f.Add([]byte(`{"format":1,"installation_id":"0123456789abcdef0123456789abcdef","bundle_version":1,"ops_key":"` + ops +
+		`","directory_version":0,"directory_sha256":"","krl_version":0,"names":[]}` + "\n"))
+	f.Add([]byte(`{"format":1,"installation_id":"0123456789abcdef0123456789abcdef","bundle_version":2,"ops_key":"` + ops +
+		`","directory_version":3,"directory_sha256":"` + strings.Repeat("ab", 32) + `","krl_version":4,"names":["web1","web1.lab"]}` + "\n"))
+	f.Add([]byte(`{"format":1}`))
+	f.Add([]byte("null\n"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		st, err := parseHostTrustState(data)
+		if err != nil {
+			return
+		}
+		for _, n := range st.Names {
+			if !hostTrustName(n) {
+				t.Fatalf("accepted name %q", n)
+			}
+		}
+		enc, err := st.encode()
+		if err != nil || !bytes.Equal(enc, data) {
+			t.Fatalf("an accepted state re-encodes differently: %v", err)
 		}
 	})
 }

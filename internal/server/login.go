@@ -665,9 +665,17 @@ type loginRedeemRequest struct {
 }
 
 // loginRedeemResponse is the 200 answer of a redeem: the certificate's
-// wire bytes, standard base64.
+// wire bytes, standard base64. Directory and DirectorySigs (03-09b, D4,
+// redeem-directory) are the admin-signed directory and its signatures,
+// taken only from the mirror entry for the Status read before the burn
+// (mirroredDirectory); a miss omits both and never the certificate. Every
+// user who completes a login receives them (T-03-100, accepted by the
+// owner); the CLI verifies them itself before it uses them, and an older
+// CLI ignores them.
 type loginRedeemResponse struct {
-	Certificate []byte `json:"certificate"`
+	Certificate   []byte `json:"certificate"`
+	Directory     []byte `json:"directory,omitempty"`
+	DirectorySigs []byte `json:"directory_sigs,omitempty"`
 }
 
 // handleLoginRedeem serves POST /api/v1/login/{id}/redeem, the only
@@ -821,7 +829,16 @@ func (s *Server) handleLoginRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logLogin(slog.LevelInfo, eventLoginRedeem, reasonOK, l.User, id, r)
-	s.writeJSON(w, v, http.StatusOK, loginRedeemResponse{Certificate: resp.Cert})
+	// The directory goes along only from the mirror, under the Status read
+	// before the burn (03-09b, T-03-348): no fetch, no wait, and a miss
+	// costs nothing but the two fields.
+	ans := loginRedeemResponse{Certificate: resp.Cert}
+	if dv := s.mirroredDirectory(v); dv != nil {
+		ans.Directory, ans.DirectorySigs = dv.doc, dv.sigs
+	} else {
+		s.log.Info("cli login: no mirrored directory for the redeem answer; it carries the certificate only", "login_id", id)
+	}
+	s.writeJSON(w, v, http.StatusOK, ans)
 }
 
 // loginInternal answers a login API request that failed on the server's

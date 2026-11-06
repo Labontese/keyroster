@@ -177,15 +177,133 @@ func requireNotRedeemable(t *testing.T, what string, rec *httptest.ResponseRecor
 }
 
 // requireRedeemed fails unless rec is a 200 carrying the fake's
-// certificate and the custody header.
+// certificate and the custody header. Since 03-09b the answer may also
+// carry the mirrored directory (redeemDirectoryCases).
 func requireRedeemed(t *testing.T, what string, rec *httptest.ResponseRecorder) {
 	t.Helper()
-	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"certificate":"`+base64.StdEncoding.EncodeToString(testLoginCert)+`"}` {
+	var ans loginRedeemResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &ans) != nil || string(ans.Certificate) != string(testLoginCert) {
 		t.Fatalf("%s = %d %s, want 200 with the certificate", what, rec.Code, rec.Body)
 	}
 	if rec.Header().Get("Keyroster-Custody") == "" {
 		t.Fatalf("%s: the 200 carries no custody header", what)
 	}
+}
+
+// requireRedeemedBare is requireRedeemed for an answer that carries the
+// certificate and nothing else.
+func requireRedeemedBare(t *testing.T, what string, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"certificate":"`+base64.StdEncoding.EncodeToString(testLoginCert)+`"}` {
+		t.Fatalf("%s = %d %s, want 200 with the certificate only", what, rec.Code, rec.Body)
+	}
+}
+
+// mirrorBumpSigner installs version doc2 at the fake signer during Login,
+// puts it in the server's mirror and moves the clock past statusTTL, so a
+// Status read after the burn would name the mirrored version while the
+// one read before the burn does not.
+type mirrorBumpSigner struct {
+	signerAPI
+	e    *signInEnv
+	t    *testing.T
+	doc2 []byte
+}
+
+func (m *mirrorBumpSigner) Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error) {
+	m.e.fake.setChain(m.doc2, testSigs)
+	v, err := newDirectoryView(&wire.GetDirectoryResponse{Version: chainVersion(m.doc2), Directory: m.doc2, Sigs: testSigs, Authorized: true})
+	if err != nil {
+		m.t.Error(err)
+	}
+	m.e.s.mirror.mu.Lock()
+	m.e.s.mirror.entry = v
+	m.e.s.mirror.mu.Unlock()
+	m.e.advance(6 * time.Second)
+	return m.signerAPI.Login(ctx, req)
+}
+
+// redeemDirectoryCases are TestLoginRedeem's redeem-directory subtests
+// (03-09b, D4, T-03-100, T-03-348): a successful answer carries the signed
+// directory only from the mirror entry for the Status read before the
+// burn, with no fetch and no wait; a miss drops the fields and never the
+// certificate.
+func redeemDirectoryCases(t *testing.T, approved func(t *testing.T, e *signInEnv) (*loginRun, string)) {
+	clearMirror := func(e *signInEnv) {
+		e.s.mirror.mu.Lock()
+		e.s.mirror.entry = nil
+		e.s.mirror.mu.Unlock()
+	}
+	t.Run("answer_carries_directory", func(t *testing.T) {
+		e := newLoginEnv(t, highSignInLimits)
+		l, code := approved(t, e)
+		rec := e.redeem(l, code, l.pkce.verifier, "")
+		var ans loginRedeemResponse
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &ans) != nil {
+			t.Fatalf("redeem = %d %s", rec.Code, rec.Body)
+		}
+		if string(ans.Certificate) != string(testLoginCert) || string(ans.Directory) != string(e.doc) || string(ans.DirectorySigs) != string(testSigs) {
+			t.Fatalf("answer %s, want the certificate, the installed directory and its signatures", rec.Body)
+		}
+	})
+	t.Run("refused_redeem_carries_no_directory", func(t *testing.T) {
+		e := newLoginEnv(t, highSignInLimits)
+		l, code := approved(t, e)
+		e.fake.setLoginRefused("user_disabled")
+		rec := e.redeem(l, code, l.pkce.verifier, "")
+		if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "directory") {
+			t.Fatalf("refused redeem = %d %s, want 403 without a directory", rec.Code, rec.Body)
+		}
+	})
+	t.Run("directory_unavailable_still_returns_certificate", func(t *testing.T) {
+		e := newLoginEnv(t, highSignInLimits)
+		l, code := approved(t, e)
+		clearMirror(e)
+		requireRedeemedBare(t, "redeem with an empty mirror", e.redeem(l, code, l.pkce.verifier, ""))
+		// The Status's version with another SHA-256: a version check alone
+		// would hit.
+		e2 := newLoginEnv(t, highSignInLimits)
+		l2, code2 := approved(t, e2)
+		e2.s.mirror.mu.Lock()
+		other := *e2.s.mirror.entry
+		other.sha256[0] ^= 0xff
+		e2.s.mirror.entry = &other
+		e2.s.mirror.mu.Unlock()
+		requireRedeemedBare(t, "redeem with a mirror of another SHA-256", e2.redeem(l2, code2, l2.pkce.verifier, ""))
+	})
+	t.Run("redeem_never_fetches_directory", func(t *testing.T) {
+		e := newLoginEnv(t, highSignInLimits)
+		l, code := approved(t, e)
+		clearMirror(e)
+		e.fake.mu.Lock()
+		before := e.fake.calls["GetDirectory"]
+		e.fake.mu.Unlock()
+		_, release := e.fake.hold("GetDirectory")
+		defer release()
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() { done <- e.redeem(l, code, l.pkce.verifier, "") }()
+		select {
+		case rec := <-done:
+			requireRedeemedBare(t, "redeem from a cold mirror", rec)
+		case <-time.After(5 * time.Second):
+			release()
+			<-done
+			t.Fatal("the redeem waited for a directory fetch")
+		}
+		e.fake.mu.Lock()
+		after := e.fake.calls["GetDirectory"]
+		e.fake.mu.Unlock()
+		if after != before {
+			t.Fatalf("GetDirectory calls %d -> %d during the redeem, want none", before, after)
+		}
+	})
+	t.Run("mirror_newer_than_status_misses", func(t *testing.T) {
+		e := newLoginEnv(t, highSignInLimits)
+		l, code := approved(t, e)
+		doc2 := successor(t, e.doc, grantRole("ops", "alice", 3600))
+		e.s.signer = &mirrorBumpSigner{signerAPI: e.fake, e: e, t: t, doc2: doc2}
+		requireRedeemedBare(t, "redeem with a mirror newer than the Status read before the burn", e.redeem(l, code, l.pkce.verifier, ""))
+	})
 }
 
 // requireLastLogin fails unless the last "cli login" log line has event
@@ -569,6 +687,7 @@ func TestLoginRedeem(t *testing.T) {
 		l := e.beginLogin(t, loginRequest(t, "alice", e.clock.Now()))
 		return l, e.approve(t, l)
 	}
+	redeemDirectoryCases(t, approved)
 	t.Run("redeem_status_stall", func(t *testing.T) {
 		// A login begun at t0 (its CreatedAt) and approved at t0+200 s has
 		// a code valid to t0+290 s. The redeem reads the signer status,

@@ -173,6 +173,26 @@ func (s *Server) currentDirectory(ctx context.Context) (*directoryView, error) {
 	return s.directoryUnder(ctx, v)
 }
 
+// mirroredDirectory returns the mirror's entry when it is exactly the
+// directory the Status v names (its version, above 0, and its SHA-256),
+// and nil otherwise (03-09b, redeem-directory). v is the Status the caller
+// read earlier (the redeem handler's, before the burn), never a fresh one.
+// It takes only s.mirror.mu: it never calls currentStatus, fetchDirectory
+// or the signer, never waits and never touches pending, so a miss costs
+// nothing but the answer's directory fields (T-03-348).
+func (s *Server) mirroredDirectory(v *statusView) *directoryView {
+	if v == nil || v.raw == nil || v.raw.DirectoryVersion == 0 {
+		return nil
+	}
+	s.mirror.mu.Lock()
+	defer s.mirror.mu.Unlock()
+	e := s.mirror.entry
+	if e == nil || e.version != v.raw.DirectoryVersion || e.sha256 != v.raw.DirectorySHA256 {
+		return nil
+	}
+	return e
+}
+
 // directoryUnder is currentDirectory for the Status v its caller read.
 func (s *Server) directoryUnder(ctx context.Context, v *statusView) (*directoryView, error) {
 	if v.raw.DirectoryVersion == 0 {

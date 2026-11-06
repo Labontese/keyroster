@@ -106,8 +106,15 @@ type loginRedeemBody struct {
 	CodeVerifier string `json:"code_verifier"`
 }
 
+// loginRedeemAnswer is the redeem answer. Directory and DirectorySigs
+// (03-09b, redeem-directory) are the signed directory the server mirrors
+// for the Status it read before the burn, omitted on a miss; the CLI
+// trusts nothing in them until writeHostTrust verified them, and one
+// without the other counts as none.
 type loginRedeemAnswer struct {
-	Certificate []byte `json:"certificate"`
+	Certificate   []byte `json:"certificate"`
+	Directory     []byte `json:"directory,omitempty"`
+	DirectorySigs []byte `json:"directory_sigs,omitempty"`
 }
 
 var (
@@ -154,6 +161,7 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	fset.Var(&roles, "role", "log in with only this role (repeatable; default: all your roles)")
 	ttl := fset.Duration("ttl", 0, "certificate lifetime, at least 2m (default and maximum: the smallest cap of the selected roles)")
 	noBrowser := fset.Bool("no-browser", false, "print the approval URL instead of opening a browser")
+	noKnownHosts := fset.Bool("no-known-hosts", false, "do not refresh the host trust files in ~/.ssh (keyroster_known_hosts, keyroster_revoked_hosts.krl, keyroster_ssh_config)")
 	if err := fset.Parse(args); err != nil {
 		return errUsage
 	}
@@ -180,7 +188,7 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
-	l := &loginRun{client: client, cfg: cfg, policy: policy, ca: ca, stdout: stdout, stderr: stderr}
+	l := &loginRun{client: client, cfg: cfg, bundle: bundle, policy: policy, ca: ca, stdout: stdout, stderr: stderr, hostTrust: !*noKnownHosts}
 	return l.run(ctx, roles, *ttl, *noBrowser)
 }
 
@@ -198,10 +206,14 @@ func activeUserCA(b *trust.Bundle) (ssh.PublicKey, error) {
 type loginRun struct {
 	client *serverclient.Client
 	cfg    *Config
+	bundle *trust.Bundle
 	policy *trust.Policy
-	ca     ssh.PublicKey
-	stdout io.Writer
-	stderr io.Writer
+	// hostTrust refreshes the host trust files after the login (03-09b;
+	// off with --no-known-hosts).
+	hostTrust bool
+	ca        ssh.PublicKey
+	stdout    io.Writer
+	stderr    io.Writer
 }
 
 // loginPlan is what the login asks for, from the checked options.
@@ -345,6 +357,15 @@ func (l *loginRun) run(ctx context.Context, roles []string, ttl time.Duration, n
 		user, strings.Join(c.ValidPrincipals, ", "), c.Serial, c.KeyId, until.Format("2006-01-02 15:04:05 MST"))
 	if hint := loginAgentHint(); hint != "" {
 		_, _ = io.WriteString(l.stdout, hint)
+	}
+	if l.hostTrust {
+		// The certificate is in the agent: nothing below undoes the login,
+		// which exits 0 whatever the host trust outcome (03-09b, T-03-348).
+		dir, sigs := redeemed.Directory, redeemed.DirectorySigs
+		if len(dir) == 0 || len(sigs) == 0 {
+			dir, sigs = nil, nil
+		}
+		refreshHostTrust(ctx, l.client, l.bundle, l.policy, dir, sigs, "the server sent no directory with this login", l.stdout, l.stderr)
 	}
 	return nil
 }

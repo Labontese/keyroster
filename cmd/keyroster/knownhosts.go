@@ -57,6 +57,11 @@ const (
 	hostTrustStateFile  = "host-trust.json"
 	// maxHostTrustState bounds the state file read.
 	maxHostTrustState = 5 << 20
+	// maxHostTrustNames bounds the names of the state, measured as the
+	// state encodes them (hostTrustEncodedSize, QB-1): four times what one
+	// directory of wire.MaxDirectory bytes can carry, and with the header
+	// always under maxHostTrustState.
+	maxHostTrustNames = 4 << 20
 	// maxHostTrustName is the longest name the writer emits (a DNS name).
 	maxHostTrustName = 253
 	// maxHostTrustOpsKey bounds the state's ops key text.
@@ -260,6 +265,8 @@ func (st *hostTrustState) validate() error {
 		return bad("directory_sha256 is not 64 lowercase hex digits")
 	case st.Names == nil:
 		return bad("names must be an array")
+	case hostTrustEncodedSize(st.Names) > maxHostTrustNames:
+		return bad("the names take %d bytes, above the bound of %d", hostTrustEncodedSize(st.Names), maxHostTrustNames)
 	}
 	if _, err := trust.ParseKey(st.OpsKey); err != nil {
 		return bad("ops_key: %v", err)
@@ -308,6 +315,9 @@ func hostTrustStatePath() (string, error) {
 // readHostTrustState reads the state at path: nil and no error when
 // there is none.
 func readHostTrustState(path string) (*hostTrustState, error) {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: it is a symlink", errStateCorrupt)
+	}
 	fh, err := os.Open(path) //nolint:gosec // G304: the CLI's own state file
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -405,8 +415,13 @@ func verifyHostTrustDirectory(in hostTrustInput, st *hostTrustState) (*verifiedH
 // writeHostTrust is the one writer of the host trust files. It verifies
 // everything first, then writes, in this order, the state, the KRL,
 // keyroster_known_hosts and keyroster_ssh_config, each atomically, and
-// prints its outcome line on stdout (warnings on stderr):
+// prints its outcome line on stdout (warnings and the Include advice on
+// stderr):
 //
+//   - a state that is damaged (it does not decode, holds a bad name, is
+//     over the bound, is a symlink or cannot be read), belongs to another
+//     installation, or is missing while a managed file exists refuses
+//     every write until the user deletes the four files (QB-3);
 //   - the KRL is required: no document, a manifest that does not verify
 //     under the bundle's ops key and installation ID with the floor
 //     max(stored, 1) - 1 (an equal version passes, an older one does not),
@@ -416,7 +431,14 @@ func verifyHostTrustDirectory(in hostTrustInput, st *hostTrustState) (*verifiedH
 //     the older bundle's; an equal one must carry the stored ops key;
 //   - a directory that is missing, refused or older leaves the names
 //     unrefreshed: with a state the state's KRL version and the KRL are
-//     written (revocations only), without one nothing is.
+//     written (revocations only), without one nothing is;
+//   - at the bound (QB-1: 4 MiB of names, measured as the state encodes
+//     them) the Host block is frozen: no name is ever dropped, the KRL,
+//     keyroster_known_hosts and the versions are still written, and every
+//     run warns;
+//   - the state is merged with the one on disk just before it is written
+//     (the union of the names, the higher versions); a state on disk newer
+//     than this run's inputs makes the run write nothing.
 func writeHostTrust(in hostTrustInput, stdout, stderr io.Writer) hostTrustResult {
 	none := func(reason string) hostTrustResult {
 		_, _ = fmt.Fprintf(stdout, "Host trust not refreshed: %s.\n", reason)
@@ -435,13 +457,23 @@ func writeHostTrust(in hostTrustInput, stdout, stderr io.Writer) hostTrustResult
 	if err != nil {
 		return none(err.Error())
 	}
+	w := &hostTrustWriter{sshDir: sshDir, statePath: statePath}
 	st, err := readHostTrustState(statePath)
 	if err != nil {
-		return none(fmt.Sprintf("%v (%s)", err, statePath))
+		return none(w.damaged(fmt.Sprintf("%v (%s)", err, statePath)))
+	}
+	if st == nil {
+		if p := w.existingManaged(); p != "" {
+			return none(w.damaged(fmt.Sprintf("the host trust state %s is missing while %s exists", statePath, p)))
+		}
 	}
 	b := in.Bundle
 	if b == nil || b.InstallationID == "" {
 		return none("the trust bundle in force has no installation ID, so no KRL can be verified")
+	}
+	if st != nil && st.InstallationID != b.InstallationID {
+		return none(w.damaged(fmt.Sprintf("the host trust state %s belongs to installation %s, not to %s, the installation of your root-verified trust bundle",
+			statePath, st.InstallationID, b.InstallationID)))
 	}
 
 	// The trust bundle floor (T-03-347).
@@ -492,7 +524,6 @@ func writeHostTrust(in hostTrustInput, stdout, stderr io.Writer) hostTrustResult
 		vd, reason = verifyHostTrustDirectory(in, st)
 	}
 
-	w := &hostTrustWriter{sshDir: sshDir, statePath: statePath}
 	if vd == nil {
 		// Revocations only, which needs a state to hold the floor.
 		if st == nil {
@@ -500,27 +531,230 @@ func writeHostTrust(in hostTrustInput, stdout, stderr io.Writer) hostTrustResult
 		}
 		next := *st
 		next.KRLVersion = max(st.KRLVersion, m.KRLVersion)
-		if err := w.write(&next, in.KRL.KRL, nil, nil); err != nil {
+		merged, _, stop := w.merge(&next)
+		if stop != "" {
+			return none(stop)
+		}
+		if err := w.write(merged, in.KRL.KRL, nil, nil); err != nil {
 			return none(err.Error())
 		}
 		_, _ = fmt.Fprintf(stdout, "Host trust partly refreshed: revocations only (%s).\n", reason)
+		w.includeAdvice(stderr)
 		return hostTrustPartial
 	}
 
 	next := &hostTrustState{Format: 1, InstallationID: b.InstallationID, BundleVersion: b.Version, OpsKey: b.OpsKey.Key,
 		DirectoryVersion: vd.dir.Version, DirectorySHA256: vd.sha, KRLVersion: m.KRLVersion, Names: vd.all}
+	frozen := false
 	if st != nil {
-		// The merge: the names only grow, the versions never go down.
-		next.Names = mergeNames(st.Names, vd.all)
+		// The names only grow, the versions never go down, and at the
+		// bound the block is frozen rather than trimmed (QB-1).
 		next.KRLVersion = max(st.KRLVersion, m.KRLVersion)
+		if next.Names = mergeNames(st.Names, vd.all); hostTrustEncodedSize(next.Names) > maxHostTrustNames {
+			next.Names, frozen = slices.Clone(st.Names), true
+		}
 	}
-	kh := knownHostsFile(in.CAs, vd.active, next)
-	cfg := sshConfigFile(next.Names)
-	if err := w.write(next, in.KRL.KRL, kh, cfg); err != nil {
+	merged, mergeFrozen, stop := w.merge(next)
+	if stop != "" {
+		return none(stop)
+	}
+	frozen = frozen || mergeFrozen
+	kh := knownHostsFile(in.CAs, vd.active, merged)
+	var cfg []byte
+	if !frozen {
+		cfg = sshConfigFile(merged.Names)
+	}
+	if err := w.write(merged, in.KRL.KRL, kh, cfg); err != nil {
 		return none(err.Error())
 	}
-	_, _ = fmt.Fprintf(stdout, "Host trust refreshed (directory v%d, KRL v%d, %d names).\n", next.DirectoryVersion, next.KRLVersion, len(next.Names))
+	if frozen {
+		uncovered := countMissing(vd.all, merged.Names)
+		_, _ = fmt.Fprintf(stderr, "Warning: the host trust state is at its bound (%d MiB of names), so the strict Host block is frozen: %d new name(s) of directory version %d "+
+			"are not in it, and ssh treats them by your own configuration. No name was dropped. To start over, delete %s.\n",
+			maxHostTrustNames>>20, uncovered, merged.DirectoryVersion, w.fileList())
+		_, _ = fmt.Fprintf(stdout, "Host trust partly refreshed: the Host block is at its bound, %d new name(s) not covered (directory v%d, KRL v%d, %d names).\n",
+			uncovered, merged.DirectoryVersion, merged.KRLVersion, len(merged.Names))
+		w.includeAdvice(stderr)
+		return hostTrustPartial
+	}
+	_, _ = fmt.Fprintf(stdout, "Host trust refreshed (directory v%d, KRL v%d, %d names).\n", merged.DirectoryVersion, merged.KRLVersion, len(merged.Names))
+	w.includeAdvice(stderr)
 	return hostTrustFull
+}
+
+// countMissing counts the names of a that b does not hold, in linear time
+// (b can hold the whole bound).
+func countMissing(a, b []string) int {
+	have := make(map[string]bool, len(b))
+	for _, s := range b {
+		have[s] = true
+	}
+	n := 0
+	for _, s := range a {
+		if !have[s] {
+			n++
+		}
+	}
+	return n
+}
+
+// hostTrustEncodedSize is what the state file spends on names: two quotes
+// and a comma per name besides its bytes (QB-1). The bound is measured on
+// it, so a state at the bound always reads back under maxHostTrustState.
+func hostTrustEncodedSize(names []string) int {
+	n := 0
+	for _, s := range names {
+		n += len(s) + 3
+	}
+	return n
+}
+
+// hostTrustMergeHook, when set (tests only), runs right before the state
+// on disk is read again for the merge.
+var hostTrustMergeHook func()
+
+// merge reads the state on disk again just before it is written and
+// merges next into it: the union of the names, the higher versions. stop
+// is set, and nothing may be written, when the state on disk is newer than
+// this run's inputs, or damaged. frozen reports that the union would pass
+// the bound, so the names on disk are kept. There is no lock file:
+// concurrent runs never roll back below the floor the run began with.
+func (w *hostTrustWriter) merge(next *hostTrustState) (*hostTrustState, bool, string) {
+	if hostTrustMergeHook != nil {
+		hostTrustMergeHook()
+	}
+	r, err := readHostTrustState(w.statePath)
+	switch {
+	case err != nil:
+		return nil, false, w.damaged(fmt.Sprintf("%v (%s)", err, w.statePath))
+	case r == nil:
+		return next, false, ""
+	case r.InstallationID != next.InstallationID:
+		return nil, false, w.damaged(fmt.Sprintf("the host trust state %s now belongs to installation %s", w.statePath, r.InstallationID))
+	case r.BundleVersion > next.BundleVersion || r.DirectoryVersion > next.DirectoryVersion || r.KRLVersion > next.KRLVersion ||
+		(r.DirectoryVersion == next.DirectoryVersion && r.DirectorySHA256 != next.DirectorySHA256):
+		return nil, false, fmt.Sprintf("another run wrote a newer host trust state meanwhile (directory v%d, KRL v%d); this run's files would be older, so it wrote none",
+			r.DirectoryVersion, r.KRLVersion)
+	}
+	m := *next
+	m.Names = mergeNames(r.Names, next.Names)
+	if hostTrustEncodedSize(m.Names) > maxHostTrustNames {
+		m.Names = slices.Clone(r.Names)
+		return &m, true, ""
+	}
+	return &m, false, ""
+}
+
+// fileList names the four files a user deletes to start over.
+func (w *hostTrustWriter) fileList() string {
+	return fmt.Sprintf("%s, %s, %s and %s", filepath.Join(w.sshDir, hostTrustKnownHosts), filepath.Join(w.sshDir, hostTrustKRLFile),
+		filepath.Join(w.sshDir, hostTrustSSHConfig), w.statePath)
+}
+
+// damaged is the refusal text of a state that cannot be trusted (QB-3):
+// only local damage causes it, and a silent reset would drop the floor and
+// the names, so every write waits until the user starts over.
+func (w *hostTrustWriter) damaged(reason string) string {
+	return fmt.Sprintf("%s; revocations and names are not refreshed until you start over: delete %s", reason, w.fileList())
+}
+
+// existingManaged returns the path of a managed file that exists, or "".
+func (w *hostTrustWriter) existingManaged() string {
+	for _, n := range []string{hostTrustKnownHosts, hostTrustKRLFile, hostTrustSSHConfig} {
+		p := filepath.Join(w.sshDir, n)
+		if _, err := os.Lstat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// maxSSHConfigScan bounds the ~/.ssh/config the Include check reads.
+const maxSSHConfigScan = 1 << 20
+
+// hostTrustOverrides are the keywords of the managed block, and
+// KnownHostsCommand, lowercased: set before the Include, ssh keeps that
+// value (it keeps the first value it obtains).
+var hostTrustOverrides = map[string]string{
+	"stricthostkeychecking": "StrictHostKeyChecking", "userknownhostsfile": "UserKnownHostsFile", "globalknownhostsfile": "GlobalKnownHostsFile",
+	"updatehostkeys": "UpdateHostKeys", "verifyhostkeydns": "VerifyHostKeyDNS", "revokedhostkeys": "RevokedHostKeys", "knownhostscommand": "KnownHostsCommand",
+}
+
+// includeAdvice reads ~/.ssh/config (at most 1 MiB; it is never written)
+// and says, on w, how keyroster_ssh_config is included: the Include line
+// to add when there is none, and a warning when it comes after a Host or
+// Match line or after a keyword the managed block sets. Keywords match in
+// any letter case, as "Key Value" or "Key=Value"; nested Includes are not
+// inspected.
+func (w *hostTrustWriter) includeAdvice(out io.Writer) {
+	add := "To use these files, add this line to ~/.ssh/config before the first Host or Match line:\n\tInclude ~/.ssh/" + hostTrustSSHConfig + "\n"
+	fh, err := os.Open(filepath.Join(w.sshDir, "config")) //nolint:gosec // G304: the user's own ssh config, read only
+	if errors.Is(err, fs.ErrNotExist) {
+		_, _ = io.WriteString(out, add)
+		return
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "Note: ~/.ssh/config could not be read (%v); make sure it includes ~/.ssh/%s before the first Host or Match line.\n", err, hostTrustSSHConfig)
+		return
+	}
+	defer func() { _ = fh.Close() }()
+	data, err := io.ReadAll(io.LimitReader(fh, maxSSHConfigScan+1))
+	if err != nil || len(data) > maxSSHConfigScan {
+		_, _ = fmt.Fprintf(out, "Note: ~/.ssh/config is larger than 1 MiB (or could not be read) and was not scanned; make sure it includes ~/.ssh/%s "+
+			"before the first Host or Match line.\n", hostTrustSSHConfig)
+		return
+	}
+	var (
+		firstBlock, include int
+		overrides           []string
+	)
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		kw, rest := splitConfigLine(line)
+		lower := strings.ToLower(kw)
+		switch {
+		case lower == "host" || lower == "match":
+			if firstBlock == 0 {
+				firstBlock = i + 1
+			}
+		case lower == "include" && include == 0:
+			for _, arg := range strings.Fields(rest) {
+				if strings.HasSuffix(arg, hostTrustSSHConfig) {
+					include = i + 1
+				}
+			}
+		case include == 0 && hostTrustOverrides[lower] != "":
+			overrides = append(overrides, fmt.Sprintf("%d %s", i+1, hostTrustOverrides[lower]))
+		}
+	}
+	if include == 0 {
+		_, _ = io.WriteString(out, add)
+		return
+	}
+	if firstBlock != 0 && firstBlock < include {
+		_, _ = fmt.Fprintf(out, "Warning: ~/.ssh/config line %d includes %s after the Host or Match line %d: an Include inside a Host or Match block applies only "+
+			"where that block matches, and ssh keeps the first value it obtains. Move it before line %d.\n", include, hostTrustSSHConfig, firstBlock, firstBlock)
+	}
+	for _, o := range overrides {
+		line, kw, _ := strings.Cut(o, " ")
+		_, _ = fmt.Fprintf(out, "Warning: ~/.ssh/config line %s sets %s before the Include on line %d: ssh keeps the first value it obtains, "+
+			"so it overrides the managed block for the names it covers.\n", line, kw, include)
+	}
+}
+
+// splitConfigLine splits an ssh_config line into its keyword and the rest,
+// for "Key Value" and "Key=Value".
+func splitConfigLine(line string) (string, string) {
+	i := strings.IndexAny(line, " \t=")
+	if i < 0 {
+		return line, ""
+	}
+	rest := strings.TrimLeft(line[i:], " \t")
+	rest = strings.TrimPrefix(rest, "=")
+	return line[:i], strings.TrimSpace(rest)
 }
 
 // mergeNames returns the sorted union of two sorted unique name lists.
@@ -571,8 +805,8 @@ type hostTrustWriter struct {
 	sshDir, statePath string
 }
 
-// write writes the state, then the KRL, then (when non-nil) known-hosts
-// and the config, calling hostTrustFault after each step. Unchanged
+// write writes the state, then the KRL, then known-hosts and the config
+// (each when non-nil), calling hostTrustFault after each step. Unchanged
 // bytes are not rewritten.
 func (w *hostTrustWriter) write(st *hostTrustState, krlBytes, knownHosts, config []byte) error {
 	state, err := st.encode()
@@ -585,7 +819,10 @@ func (w *hostTrustWriter) write(st *hostTrustState, krlBytes, knownHosts, config
 	writeConfig := func() error { return w.managed(hostTrustSSHConfig, config) }
 	steps := []hostTrustStep{{"state", writeState}, {"krl", writeKRL}}
 	if knownHosts != nil {
-		steps = append(steps, hostTrustStep{"known_hosts", writeKnownHosts}, hostTrustStep{"config", writeConfig})
+		steps = append(steps, hostTrustStep{"known_hosts", writeKnownHosts})
+	}
+	if config != nil {
+		steps = append(steps, hostTrustStep{"config", writeConfig})
 	}
 	for _, s := range steps {
 		if err := s.do(); err != nil {

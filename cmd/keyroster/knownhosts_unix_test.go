@@ -57,17 +57,21 @@ func TestKnownHostsUnix(t *testing.T) {
 		}
 	})
 	t.Run("symlink_at_managed_name_replaced_not_followed", func(t *testing.T) {
+		// A first run leaves the state (since 03-09b Task 4 a managed name
+		// without a state refuses every write), then the managed name is
+		// made a symlink.
 		f := newHTFix(t, 1, 1)
-		if err := os.Mkdir(f.sshDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+		mustRun(t, web1(t, f), hostTrustFull)
 		target := filepath.Join(t.TempDir(), "target")
 		writeTestFile(t, target, []byte("the target's bytes\n"))
 		link := filepath.Join(f.sshDir, hostTrustKnownHosts)
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
 		}
-		mustRun(t, web1(t, f), hostTrustFull)
+		mustRun(t, f.in(t, f.dirDoc(t, 2, "", htHost(t, "web2", directory.StatusActive, "web2")), f.krlV(t, 2)), hostTrustFull)
 		if fi, err := os.Lstat(link); err != nil || !fi.Mode().IsRegular() {
 			t.Fatalf("%s is not a regular file after the run: %v", link, err)
 		}
@@ -120,6 +124,37 @@ func TestKnownHostsUnix(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(home, ".ssh", hostTrustSSHConfig)); err != nil {
 			t.Fatal(err)
 		}
+	})
+	t.Run("state_symlink_refuses", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		mustRun(t, web1(t, f), hostTrustFull)
+		real := filepath.Join(t.TempDir(), "state.json")
+		writeTestFile(t, real, readTestFile(t, f.statePath))
+		if err := os.Remove(f.statePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, f.statePath); err != nil {
+			t.Fatal(err)
+		}
+		before := f.files(t)
+		stdout, _ := mustRun(t, f.in(t, f.dirDoc(t, 2, "", htHost(t, "web2", directory.StatusActive, "web2")), f.krlV(t, 2)), hostTrustNone)
+		htStartOver(t, f, stdout)
+		if !mapsEqual(before, f.files(t)) {
+			t.Fatal("a run with a symlinked state wrote a file")
+		}
+	})
+	t.Run("state_unreadable_refuses", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a 0000 file")
+		}
+		f := newHTFix(t, 1, 1)
+		mustRun(t, web1(t, f), hostTrustFull)
+		if err := os.Chmod(f.statePath, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(f.statePath, 0o600) })
+		stdout, _ := mustRun(t, f.in(t, f.dirDoc(t, 2, "", htHost(t, "web2", directory.StatusActive, "web2")), f.krlV(t, 2)), hostTrustNone)
+		htStartOver(t, f, stdout)
 	})
 	t.Run("home_symlink_or_trailing_slash_accepted", func(t *testing.T) {
 		for _, kind := range []string{"trailing_slash", "symlink"} {
