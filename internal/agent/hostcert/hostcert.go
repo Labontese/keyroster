@@ -81,9 +81,10 @@ const (
 var (
 	// CertFileRE matches CertFileName: <k>-<serial>-cert.pub.
 	CertFileRE = regexp.MustCompile(`^([0-9a-f]{64})-([1-9][0-9]{0,19})-cert\.pub$`)
-	// RequestFileRE matches RequestFileName, AnswerFileRE AnswerFileName.
+	// RequestFileRE matches RequestFileName.
 	RequestFileRE = regexp.MustCompile(`^hostcert-([0-9a-f]{64})\.req$`)
-	AnswerFileRE  = regexp.MustCompile(`^hostcert-([0-9a-f]{64})\.answer$`)
+	// AnswerFileRE matches AnswerFileName.
+	AnswerFileRE = regexp.MustCompile(`^hostcert-([0-9a-f]{64})\.answer$`)
 
 	hex64RE     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	requestIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -252,7 +253,7 @@ func (e *Entry) validate() error {
 		return errors.New("hostcert: entry serial 0")
 	case e.File != CertFileName(e.KeySHA256, e.Serial):
 		return errors.New("hostcert: entry file is not its CertFileName")
-	case !(e.IssuedAt < e.ValidBefore) || e.RenewAt < e.IssuedAt || e.RenewAt >= e.ValidBefore:
+	case e.IssuedAt >= e.ValidBefore || e.RenewAt < e.IssuedAt || e.RenewAt >= e.ValidBefore:
 		return errors.New("hostcert: entry times")
 	}
 	pub, err := trust.ParseKey(e.Key)

@@ -919,7 +919,7 @@ func TestHostRefusalBucket(t *testing.T) {
 		e := newHostEnv(t, 90)
 		for range 1000 {
 			before := e.leafCount(tlog.KindRefusal)
-			e.s.refuse(context.Background(), Peer{UID: 1000}, [32]byte{}, tlog.ReasonMalformed, "malformed_frame")
+			_ = e.s.refuse(context.Background(), Peer{UID: 1000}, [32]byte{}, tlog.ReasonMalformed, "malformed_frame")
 			if e.leafCount(tlog.KindRefusal) == before {
 				break
 			}
@@ -940,7 +940,7 @@ func TestHostRefusalBucket(t *testing.T) {
 			}
 		}
 		before := e.leafCount(tlog.KindRefusal)
-		e.s.refuse(context.Background(), Peer{UID: 1000}, [32]byte{}, tlog.ReasonMalformed, "malformed_frame")
+		_ = e.s.refuse(context.Background(), Peer{UID: 1000}, [32]byte{}, tlog.ReasonMalformed, "malformed_frame")
 		if e.leafCount(tlog.KindRefusal) != before+1 {
 			t.Fatal("host refusals beyond their burst drained the shared bucket")
 		}

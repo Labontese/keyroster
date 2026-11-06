@@ -4081,11 +4081,11 @@ func TestVerifyHostIssue(t *testing.T) {
 		hf.wantFail(t, "replayed")
 		hf = newHostFixture(t, 90)
 		h = hf.addHost(hf.key, nil, nil, nil)
-		hf.loginFixture.addIssueWithRequest(hex.EncodeToString(h.req.RequestID[:]))
+		hf.addIssueWithRequest(hex.EncodeToString(h.req.RequestID[:]))
 		hf.wantFail(t, "replayed")
 		hf = newHostFixture(t, 90)
 		id := strings.Repeat("5a", 16)
-		hf.loginFixture.addIssueWithRequest(id)
+		hf.addIssueWithRequest(id)
 		hf.addHost(hf.key, func(x *hostIssue) {
 			b, _ := hex.DecodeString(id)
 			copy(x.req.RequestID[:], b)
@@ -4164,7 +4164,7 @@ func TestVerifyHostIssue(t *testing.T) {
 	t.Run("issuance_sequence_counts_kind_11", func(t *testing.T) {
 		hf := newHostFixture(t, 90)
 		hf.addHost(hf.key, nil, nil, nil)
-		hf.loginFixture.addIssueWithRequest(strings.Repeat("cd", 16))
+		hf.addIssueWithRequest(strings.Repeat("cd", 16))
 		if rep := hf.wantPass(t); rep.Counts[tlog.KindHostIssue] != 1 || rep.Counts[tlog.KindIssue] != 1 {
 			t.Fatalf("counts %v", rep.Counts)
 		}
