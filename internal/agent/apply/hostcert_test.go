@@ -1774,3 +1774,21 @@ func TestHostCertAttemptsPruned(t *testing.T) {
 		}
 	})
 }
+
+// TestHostCertDueNotPast: the due time HostCerts returns is never one it
+// reached already, so the run loop does not call it on every iteration
+// for a key it cannot act on (03-09).
+func TestHostCertDueNotPast(t *testing.T) {
+	t.Run("algorithm_disabled_past_renew_at", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.run.hostKeyAlgorithms = ssh.CertAlgoED25519v01 + "," + ssh.KeyAlgoED25519 + "," + ssh.KeyAlgoECDSA256
+		h.renewDue()
+		for i := range 2 {
+			r := h.mustHostCerts()
+			if !r.Due.After(h.clock.Now()) {
+				t.Fatalf("run %d: due %v at %v (report %+v), want a time after now", i, r.Due, h.clock.Now(), r)
+			}
+		}
+	})
+}

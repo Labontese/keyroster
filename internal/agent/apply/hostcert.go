@@ -1046,6 +1046,13 @@ func hostCertDue(st *hostCertState) time.Time {
 	if due == 0 {
 		return time.Time{}
 	}
+	// A time this run has reached already is one it could not act on (a
+	// key deferred by its algorithm or an unreadable host key past its
+	// RenewAt, a back-off it did not clear): look again after the
+	// shortest back-off, never on every loop iteration.
+	if due <= now {
+		due = now + hostcert.BackoffMin
+	}
 	return time.Unix(int64(min(due, uint64(1)<<62)), 0) //nolint:gosec // G115: clamped
 }
 
