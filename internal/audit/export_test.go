@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,5 +194,20 @@ func TestExportHostIssue(t *testing.T) {
 	}
 	if _, err := hf.verifyHosts(); err != nil {
 		t.Fatalf("Verify of the export: %v", err)
+	}
+	// Every decoded field of a host_issue line is bound to its leaf: the
+	// runbook takes a host's serials, name and key fingerprints from them.
+	in := join(hf.lines())
+	for _, mut := range [][2]string{
+		{`"host_name":"web1"`, `"host_name":"db01"`},
+		{`"host_key_fingerprint":"` + ssh.FingerprintSHA256(hf.key.PublicKey()) + `"`, `"host_key_fingerprint":"SHA256:x"`},
+		{`"kind":"host_issue",`, `"kind":"host_issue","note":"x",`},
+	} {
+		if !strings.Contains(in, mut[0]) {
+			t.Fatalf("the export holds no %s", mut[0])
+		}
+		if _, err := hf.verify(strings.Replace(in, mut[0], mut[1], 1), nil); err == nil || !strings.Contains(err.Error(), "host_issue leaf") {
+			t.Errorf("a host_issue line with %s: %v, want it refused", mut[1], err)
+		}
 	}
 }

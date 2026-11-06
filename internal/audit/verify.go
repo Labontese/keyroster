@@ -1191,14 +1191,16 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 // host_gone, the removal and confirmed versions and SHA-256, the request
 // ID and times, the policy and directory versions, the evidence types and
 // admin_fingerprints (rendered from the leaf's own evidence, whose
-// signatures verifyForget checks). Such a line, raw its leaf bytes, must
+// signatures verifyForget checks), and so is every host_issue line (03-09:
+// the host-setup runbook reads its serial, host name and key fingerprint
+// to revoke a host's certificates). Such a line, raw its leaf bytes, must
 // be byte for byte the line Export writes for it (exportLeafLine): no field
 // changed, added, removed, repeated or re-encoded. On a line of any other
 // kind neither "approved_once" nor "host_gone" may occur, and checkLineKeys
 // refuses there every key only a host_forget line renders, after
 // unescaping.
 func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
-	if leaf.Kind != tlog.KindHostForget {
+	if leaf.Kind != tlog.KindHostForget && leaf.Kind != tlog.KindHostIssue {
 		s := string(text)
 		if strings.Contains(s, `"approved_once":`) || strings.Contains(s, `"host_gone":`) {
 			return fmt.Errorf("its decoded approved_once or host_gone field is not one of a host_forget leaf (%s)", leaf.Kind)
@@ -1210,7 +1212,7 @@ func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
 		return err
 	}
 	if !bytes.Equal(text, want) {
-		return errors.New("its line is not the one export writes for its host_forget leaf: a decoded field is not the leaf's own")
+		return fmt.Errorf("its line is not the one export writes for its %s leaf: a decoded field is not the leaf's own", leaf.Kind)
 	}
 	return nil
 }
