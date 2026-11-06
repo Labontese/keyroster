@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -234,7 +235,7 @@ func (e *engine) hostCerts(ctx context.Context, r *HostCertReport) error {
 		return err
 	}
 	if hold != "" {
-		return nil
+		return e.finishHostCerts(ctx, st, r)
 	}
 
 	now := uint64(max(st.now.Unix(), 0))
@@ -259,8 +260,8 @@ func (e *engine) hostCerts(ctx context.Context, r *HostCertReport) error {
 	// failures (one whose outbox file was never written included).
 	for i := range st.attempts.Keys {
 		a := &st.attempts.Keys[i]
-		if n := a.Abandoned(now); n > 0 {
-			e.hostCertFailure(st, a, "no_answer", now)
+		if n, created := a.Abandoned(now); n > 0 {
+			e.hostCertFailure(st, a, "no_answer", min(created, now))
 			changedAttempts = true
 		}
 	}
@@ -284,6 +285,9 @@ func (e *engine) hostCerts(ctx context.Context, r *HostCertReport) error {
 
 	// 6. One install batch.
 	if err := e.installHostCerts(ctx, st, actions, defers, r); err != nil {
+		if isCrash(err) {
+			return err
+		}
 		e.logf("ERROR host certificates: install: %v", err)
 	}
 
@@ -308,6 +312,51 @@ func (e *engine) hostCerts(ctx context.Context, r *HostCertReport) error {
 		}
 	}
 	r.Due = hostCertDue(st)
+	return e.finishHostCerts(ctx, st, r)
+}
+
+// finishHostCerts records the skipped key types and the last code in the
+// attempts file and, whenever the step changed something, writes
+// status.json under the held lock (publishStatus, as publishPending does;
+// never WriteStatus, which would take apply.lock again).
+func (e *engine) finishHostCerts(ctx context.Context, st *hostCertState, r *HostCertReport) error {
+	detail := r.Hold
+	if detail == "" {
+		detail = r.Code
+	}
+	if detail == "" {
+		for _, k := range slices.Sorted(maps.Keys(r.Deferred)) {
+			if c := r.Deferred[k]; c != hostcert.DeferPending {
+				detail = c
+				break
+			}
+		}
+	}
+	if detail != "" && !hostcert.CodeRE.MatchString(detail) {
+		detail = ""
+	}
+	skipped := slices.Clone(r.Skipped)
+	slices.Sort(skipped)
+	skipped = slices.Compact(skipped)
+	if len(skipped) > hostcert.MaxSkipped {
+		skipped = skipped[:hostcert.MaxSkipped]
+	}
+	if st.attempts.Detail != detail || !slices.Equal(st.attempts.Skipped, skipped) {
+		st.attempts.Detail, st.attempts.Skipped = detail, skipped
+		if err := e.saveHostCertAttempts(st.attempts); err != nil {
+			return err
+		}
+		r.Changed = true
+	}
+	if !r.Changed {
+		return nil
+	}
+	if _, err := os.Lstat(filepath.Join(e.l.Outbox())); err != nil {
+		return nil
+	}
+	if _, err := e.publishStatus(ctx, StatusUpdate{}); err != nil {
+		e.logf("WARNING host certificates: status: %v", err)
+	}
 	return nil
 }
 
@@ -636,7 +685,9 @@ func (e *engine) recoverHostCerts(ctx context.Context, st *hostCertState, r *Hos
 // every Remove action, in one candidate.
 func (e *engine) installHostCerts(ctx context.Context, st *hostCertState, actions []hostcert.Action, defers map[string]string, r *HostCertReport) error {
 	if st.rec == nil {
-		return nil
+		if !e.refillHostCertRecord(st, defers) {
+			return nil
+		}
 	}
 	cand := slices.Clone(st.rec.Committed)
 	var installed, removed []string
@@ -685,6 +736,9 @@ func (e *engine) installHostCerts(ctx context.Context, st *hostCertState, action
 	spec := specOf(e.l.HostCertDir(), cand)
 	err := e.activateCandidate(ctx, spec, certs, cand, st)
 	if err != nil {
+		if isCrash(err) {
+			return err
+		}
 		if rerr := e.rollbackHostCerts(ctx, st); rerr != nil {
 			return errors.Join(err, rerr)
 		}
@@ -713,6 +767,52 @@ func (e *engine) installHostCerts(ctx context.Context, st *hostCertState, action
 		}
 	}
 	return nil
+}
+
+// refillHostCertRecord starts a new, empty record under a record code
+// (hostcert_record_missing or hostcert_record_invalid) when adoption found
+// a verified file to install: the empty spec the code left is refilled
+// from files that pass VerifyAnswer (03-09). An invalid record is set
+// aside first, never followed or parsed again. With nothing to install it
+// leaves the record as it is, so the code, and GC's skip, stay.
+func (e *engine) refillHostCertRecord(st *hostCertState, defers map[string]string) bool {
+	if st.code != CodeHostCertRecordMissing && st.code != CodeHostCertRecordInvalid {
+		return false
+	}
+	installable := false
+	for k := range st.served {
+		if at := st.attempts.Lookup(k); at != nil && at.KeptFile != "" && defers[k] != hostcert.DeferAlgorithmDisabled {
+			installable = true
+		}
+	}
+	if !installable {
+		return false
+	}
+	if st.code == CodeHostCertRecordInvalid {
+		if err := e.setAsideHostCertRecord(); err != nil {
+			e.logf("ERROR host certificates: set aside %s: %v", hostcert.RecordFile, err)
+			return false
+		}
+	}
+	st.rec = &hostcert.Record{Version: hostcert.RecordVersion, Committed: []hostcert.Entry{}, Candidate: []hostcert.Entry{}}
+	e.logf("host certificates: %s: refilling the record from verified files", st.code)
+	return true
+}
+
+// setAsideHostCertRecord renames an invalid record (whatever its type: a
+// symlink is renamed, not followed) to hostcert.json.invalid in the state
+// directory, replacing an earlier one.
+func (e *engine) setAsideHostCertRecord() error {
+	aside := hostcert.RecordFile + ".invalid"
+	if err := unix.Unlinkat(e.stateFd, aside, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		if err := unix.Unlinkat(e.stateFd, aside, unix.AT_REMOVEDIR); err != nil {
+			return err
+		}
+	}
+	if err := unix.Renameat(e.stateFd, hostcert.RecordFile, e.stateFd, aside); err != nil {
+		return err
+	}
+	return unix.Fsync(e.stateFd)
 }
 
 // activateCandidate writes the candidate drop-in, checks and reloads it,

@@ -6,19 +6,24 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/agent/enroll"
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	krcert "github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -333,6 +338,8 @@ func TestHostCertStep(t *testing.T) {
 			t.Fatalf("a step with nothing due did %+v", r)
 		}
 	})
+	hostCertStepCases(t)
+	hostCertStepCases2(t)
 }
 
 // record reads the host-certificate record.
@@ -347,4 +354,1148 @@ func (h *hostCertHost) record() *hostcert.Record {
 		h.t.Fatal(err)
 	}
 	return r
+}
+
+// errCrash is the injected crash of the host-certificate fault points.
+var errCrash error = &crash{point: "a host-certificate step"}
+
+// crashAt makes the next HostCerts run stop at point.
+func (h *hostCertHost) crashAt(point string) {
+	h.cfg.Fault = func(p string) error {
+		if p == point {
+			return errCrash
+		}
+		return nil
+	}
+}
+
+// crashed runs HostCerts with a crash at point and requires it.
+func (h *hostCertHost) crashed(point string) {
+	h.t.Helper()
+	h.crashAt(point)
+	_, err := h.hostCerts()
+	h.cfg.Fault = nil
+	if !errors.Is(err, errCrash) {
+		h.t.Fatalf("HostCerts with a crash at %s: %v", point, err)
+	}
+}
+
+// both installs web1's Ed25519 and ECDSA certificates and returns them.
+func (h *hostCertHost) both() map[string]*ssh.Certificate {
+	h.t.Helper()
+	h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
+	h.mustApply()
+	h.mustHostCerts()
+	got := h.answer()
+	if r := h.mustHostCerts(); len(r.Installed) != 2 {
+		h.t.Fatalf("installed %v", r)
+	}
+	return got
+}
+
+// one installs web1's Ed25519 certificate only (the directory lists one
+// key).
+func (h *hostCertHost) one() *ssh.Certificate {
+	h.t.Helper()
+	h.publishDir(h.hostSpec(h.sshd.pub))
+	h.mustApply()
+	h.mustHostCerts()
+	var c *ssh.Certificate
+	for _, x := range h.answer() {
+		c = x
+	}
+	if r := h.mustHostCerts(); len(r.Installed) != 1 {
+		h.t.Fatalf("installed %v", r)
+	}
+	return c
+}
+
+// requested runs to the point where web1's Ed25519 key has an answered
+// request (one key, first install).
+func (h *hostCertHost) requested() {
+	h.t.Helper()
+	h.publishDir(h.hostSpec(h.sshd.pub))
+	h.mustApply()
+	h.mustHostCerts()
+	h.answer()
+}
+
+func (h *hostCertHost) reloadCount() int {
+	h.run.mu.Lock()
+	defer h.run.mu.Unlock()
+	return h.run.reloads
+}
+
+func (h *hostCertHost) attempts() *hostcert.Attempts {
+	h.t.Helper()
+	b, err := os.ReadFile(h.l.State(hostcert.AttemptsFile))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	a, err := hostcert.ParseAttempts(b)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return a
+}
+
+func (h *hostCertHost) dropInBytes() []byte {
+	h.t.Helper()
+	b, _ := os.ReadFile(h.l.DropIn())
+	return b
+}
+
+func (h *hostCertHost) committedRender() []byte {
+	h.t.Helper()
+	return DropIn(h.l, specOf(h.l.HostCertDir(), h.record().Committed))
+}
+
+func (h *hostCertHost) certFiles() []string {
+	h.t.Helper()
+	ents, _ := os.ReadDir(h.l.HostCertDir())
+	var out []string
+	for _, d := range ents {
+		out = append(out, d.Name())
+	}
+	return out
+}
+
+// renewDue moves the clock past every installed certificate's RenewAt.
+func (h *hostCertHost) renewDue() {
+	h.t.Helper()
+	var at uint64
+	for _, en := range h.record().Committed {
+		at = max(at, en.RenewAt)
+	}
+	h.clock.advance(time.Duration(int64(at)+1-h.clock.Now().Unix()) * time.Second) //nolint:gosec // G115: test times
+}
+
+func hostCertStepCases(t *testing.T) {
+	t.Run("crash_after_attempts_before_outbox_abandons", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.crashed("hostcert-request")
+		if len(h.outboxRequests()) != 0 || len(h.attempts().Keys) != 1 {
+			t.Fatal("after the crash: an outbox file, or no pending request")
+		}
+		orphan := h.attempts().Keys[0].Requests[0].ID
+		if r := h.mustHostCerts(); len(r.Requested) != 0 || len(h.outboxRequests()) != 0 {
+			t.Fatal("the orphan request ID was posted or replaced within 330 s")
+		}
+		h.clock.advance(330 * time.Second)
+		h.mustHostCerts()
+		reqs := h.outboxRequests()
+		if len(reqs) != 1 {
+			t.Fatalf("after 330 s %d outbox requests, want a fresh one", len(reqs))
+		}
+		for _, r := range reqs {
+			if hex.EncodeToString(r.RequestID[:]) == orphan {
+				t.Fatal("the orphan request ID was posted")
+			}
+		}
+	})
+	t.Run("crash_after_cert_file_adopts", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.crashed("hostcert-answer-file")
+		if r := h.mustHostCerts(); len(r.Installed) != 1 || len(r.Requested) != 0 {
+			t.Fatalf("after the crash: %+v, want the file installed and no new request", r)
+		}
+	})
+	t.Run("crash_after_cert_file_adopts_first_install", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.crashed("hostcert-answer-file")
+		if r := h.mustHostCerts(); len(r.Installed) != 1 || r.Code != "" {
+			t.Fatalf("after the crash: %+v, want the file installed and no record code", r)
+		}
+	})
+	t.Run("crash_after_answer_consumed_installs_kept", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.crashed("hostcert-answer-attempts")
+		if len(h.outboxRequests()) != 1 {
+			t.Fatal("the outbox request went before the crash point")
+		}
+		if r := h.mustHostCerts(); len(r.Installed) != 1 || len(r.Requested) != 0 || len(h.outboxRequests()) != 0 {
+			t.Fatalf("after the crash: %+v", r)
+		}
+	})
+	t.Run("crash_after_outbox_removed_installs_kept", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.crashed("hostcert-answer-outbox")
+		ents, _ := os.ReadDir(h.spool)
+		for _, d := range ents {
+			if hostcert.AnswerFileRE.MatchString(d.Name()) {
+				_ = os.Remove(filepath.Join(h.spool, d.Name()))
+			}
+		}
+		if r := h.mustHostCerts(); len(r.Installed) != 1 || len(r.Requested) != 0 {
+			t.Fatalf("after the crash: %+v", r)
+		}
+	})
+	for _, point := range []string{"hostcert-candidate", "hostcert-dropin", "hostcert-reload"} {
+		name := map[string]string{"hostcert-candidate": "crash_after_candidate_rolls_back_then_installs",
+			"hostcert-dropin": "crash_after_dropin_rolls_back", "hostcert-reload": "crash_after_reload_rolls_back"}[point]
+		t.Run(name, func(t *testing.T) {
+			h := newHostCertHost(t)
+			h.requested()
+			h.crashed(point)
+			if rec := h.record(); !rec.InProgress || len(rec.Committed) != 0 {
+				t.Fatalf("after the crash the record is %+v, want the candidate in progress and nothing committed", rec)
+			}
+			before := h.reloadCount()
+			r := h.mustHostCerts()
+			if !r.Recovered || h.reloadCount() <= before || len(r.Installed) != 1 || h.record().InProgress {
+				t.Fatalf("the next run: %+v (reloads %d -> %d)", r, before, h.reloadCount())
+			}
+		})
+	}
+	t.Run("crash_after_selftest_rolls_back", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.crashed("hostcert-selftest")
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		h.mustHostCerts()
+		if rec := h.record(); rec.InProgress || len(rec.Committed) != 0 {
+			t.Fatalf("record %+v, want the committed set (empty) kept: an unfinished candidate is never committed", rec)
+		}
+	})
+	t.Run("crash_after_commit_gcs", func(t *testing.T) {
+		h := newHostCertHost(t)
+		old := h.one()
+		h.renewDue()
+		h.mustHostCerts()
+		h.answer()
+		h.crashed("hostcert-commit")
+		h.mustHostCerts()
+		for _, f := range h.certFiles() {
+			if f == hostcert.CertFileName(hostcert.KeySHA256(h.sshd.pub), old.Serial) {
+				t.Fatal("the replaced certificate's file was not collected")
+			}
+		}
+	})
+	t.Run("crash_in_rollback_before_reload_reloads", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		h.crashed("hostcert-rollback-dropin")
+		h.sshd.serveCert(nil)
+		if !bytes.Equal(h.dropInBytes(), h.committedRender()) || !h.record().InProgress {
+			t.Fatal("the rollback did not write the committed set before the crash point")
+		}
+		before := h.reloadCount()
+		if r := h.mustHostCerts(); !r.Recovered || h.reloadCount() <= before {
+			t.Fatalf("the next run did not reload although the drop-in equals the committed set: %+v", r)
+		}
+	})
+	t.Run("crash_in_rollback_before_record_clears", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		h.crashed("hostcert-rollback-reload")
+		h.sshd.serveCert(nil)
+		if r := h.mustHostCerts(); !r.Recovered || h.record().InProgress {
+			t.Fatalf("the next run: %+v, want a recovery that clears InProgress", r)
+		}
+	})
+	t.Run("crash_during_gc_converges", func(t *testing.T) {
+		h := newHostCertHost(t)
+		old := h.one()
+		h.renewDue()
+		h.mustHostCerts()
+		h.answer()
+		h.crashed("hostcert-gc")
+		h.mustHostCerts()
+		if slices.Contains(h.certFiles(), hostcert.CertFileName(hostcert.KeySHA256(h.sshd.pub), old.Serial)) {
+			t.Fatal("the next GC did not finish")
+		}
+	})
+	t.Run("crash_during_removal_converges", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		// A new version lists only the ECDSA key: the Ed25519 line goes.
+		h.publishDir(h.hostSpec(h.ec.PublicKey()))
+		h.mustApply()
+		h.crashed("hostcert-dropin")
+		if rec := h.record(); !rec.InProgress || len(rec.Candidate) != 0 || len(h.dropInCerts()) != 0 {
+			t.Fatalf("after the crash: record %+v, drop-in lines %v; want an empty candidate in progress", rec, h.dropInCerts())
+		}
+		r := h.mustHostCerts()
+		if !r.Recovered || len(h.record().Committed) != 0 || h.record().InProgress || len(h.dropInCerts()) != 0 {
+			t.Fatalf("the next run: %+v, record %+v; want the committed set rendered, reloaded, then the empty set committed", r, h.record())
+		}
+	})
+	for _, point := range []string{"hostcert-candidate", "hostcert-dropin", "hostcert-reload", "hostcert-selftest"} {
+		t.Run("apply_after_crash_renders_committed", func(t *testing.T) {
+			h := newHostCertHost(t)
+			h.requested()
+			h.crashed(point)
+			h.mustApply()
+			if !bytes.Equal(h.dropInBytes(), h.committedRender()) {
+				t.Fatalf("after a crash at %s, Apply left %q, want the committed set's drop-in", point, h.dropInBytes())
+			}
+		})
+	}
+	t.Run("outbox_request_abandoned_after_330s", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.mustHostCerts()
+		first := h.outboxRequests()
+		b1, _ := os.ReadFile(filepath.Join(h.l.Outbox(), hostcert.RequestFileName(hostcert.KeySHA256(h.sshd.pub))))
+		h.clock.advance(329 * time.Second)
+		h.mustHostCerts()
+		b2, _ := os.ReadFile(filepath.Join(h.l.Outbox(), hostcert.RequestFileName(hostcert.KeySHA256(h.sshd.pub))))
+		if !bytes.Equal(b1, b2) || len(h.attempts().Keys[0].Requests) != 1 {
+			t.Fatal("at 329 s the request was replaced")
+		}
+		h.clock.advance(time.Second)
+		h.mustHostCerts()
+		second := h.outboxRequests()
+		for k := range first {
+			if second[k] == nil || second[k].RequestID == first[k].RequestID {
+				t.Fatal("at 330 s the request was not abandoned for a fresh one")
+			}
+		}
+	})
+}
+
+// stateSnapshot hashes every managed path HostCerts may write: the drop-in,
+// the record, the attempts file, the host-certificate directory, the
+// outbox and status.json (apply.lock excluded).
+func (h *hostCertHost) stateSnapshot() string {
+	h.t.Helper()
+	var b strings.Builder
+	for _, p := range []string{h.l.DropIn(), h.l.State(hostcert.RecordFile), h.l.State(hostcert.AttemptsFile)} {
+		x, err := os.ReadFile(p) //nolint:gosec // test fixture
+		fmt.Fprintf(&b, "%s %v %x\n", p, err == nil, sha256.Sum256(x))
+	}
+	for _, d := range []string{h.l.HostCertDir(), h.l.Outbox()} {
+		ents, _ := os.ReadDir(d)
+		for _, e := range ents {
+			x, _ := os.ReadFile(filepath.Join(d, e.Name())) //nolint:gosec // test fixture
+			fmt.Fprintf(&b, "%s/%s %x\n", d, e.Name(), sha256.Sum256(x))
+		}
+	}
+	return b.String()
+}
+
+// treeSnapshot hashes every file under dir (links by their target).
+func treeSnapshot(t *testing.T, dirs ...string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, dir := range dirs {
+		_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				tgt, _ := os.Readlink(p)
+				fmt.Fprintf(&b, "%s -> %s\n", p, tgt)
+				return nil
+			}
+			if d.Type().IsRegular() {
+				x, _ := os.ReadFile(p) //nolint:gosec // test fixture
+				fmt.Fprintf(&b, "%s %x\n", p, sha256.Sum256(x))
+			}
+			return nil
+		})
+	}
+	return b.String()
+}
+
+// editDropInLines writes the drop-in without its HostCertificate lines.
+func (h *hostCertHost) stripLines() {
+	h.t.Helper()
+	if err := os.WriteFile(h.l.DropIn(), DropIn(h.l, DropInSpec{}), 0o644); err != nil { //nolint:gosec // test fixture
+		h.t.Fatal(err)
+	}
+}
+
+func (h *hostCertHost) writeRecord(b []byte, mode os.FileMode) {
+	h.t.Helper()
+	p := h.l.State(hostcert.RecordFile)
+	_ = os.Remove(p)
+	if err := os.WriteFile(p, b, mode); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *hostCertHost) status() *heartbeat.Status {
+	h.t.Helper()
+	b, err := os.ReadFile(filepath.Join(h.l.Outbox(), heartbeat.StatusFile))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	s, err := heartbeat.ParseStatus(b)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return s
+}
+
+// setSSHDConfig replaces the host's sshd_config.
+func (h *hostCertHost) setSSHDConfig(text string) {
+	h.t.Helper()
+	if err := os.WriteFile(h.cfg.SSHDConfig, []byte(text), 0o644); err != nil { //nolint:gosec // test fixture
+		h.t.Fatal(err)
+	}
+}
+
+func (h *hostCertHost) include() string {
+	return "Include " + filepath.Join(h.l.DropInDir(), "*.conf") + "\n"
+}
+
+func hostCertStepCases2(t *testing.T) {
+	ed := func(h *hostCertHost) string { return hostcert.KeySHA256(h.sshd.pub) }
+	t.Run("recovery_without_bundle", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		want := h.committedRender()
+		h.run.rejectDropIn = func(b []byte) bool { return bytes.Contains(b, []byte("garbage")) }
+		if err := os.WriteFile(h.l.DropIn(), []byte("garbage\n"), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		_ = os.RemoveAll(h.l.State("accepted"))
+		_, _ = h.apply()
+		if !bytes.Equal(h.dropInBytes(), want) {
+			t.Fatalf("with accepted/ removed the pre-repair wrote %q, want the record's lines", h.dropInBytes())
+		}
+	})
+	t.Run("record_legacy_migrates", func(t *testing.T) {
+		h := newHostCertHost(t)
+		var log bytes.Buffer
+		h.cfg.Log = &log
+		h.mustHostCerts() // no generation: nothing
+		if _, err := os.Stat(h.l.State(hostcert.RecordFile)); err == nil {
+			t.Fatal("a record was written under no_generation")
+		}
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.mustHostCerts()
+		h.mustHostCerts()
+		if rec := h.record(); len(rec.Committed) != 0 || rec.InProgress || strings.Count(log.String(), "hostcert_record_created") != 1 {
+			t.Fatalf("record %+v, log %q; want the empty record created once", rec, log.String())
+		}
+	})
+	t.Run("record_missing_reported_and_adopted", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		_ = os.Remove(h.l.State(hostcert.RecordFile))
+		r := h.mustHostCerts()
+		if r.Code != CodeHostCertRecordMissing || len(h.record().Committed) != 1 {
+			t.Fatalf("report %+v, want hostcert_record_missing and the file adopted", r)
+		}
+	})
+	t.Run("missing_detected_after_apply_first", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		_ = os.Remove(h.l.State(hostcert.RecordFile))
+		h.mustApply()
+		if r := h.mustHostCerts(); r.Code != CodeHostCertRecordMissing {
+			t.Fatalf("after Apply rendered the empty spec: %+v, want hostcert_record_missing", r)
+		}
+	})
+	t.Run("record_invalid_set_aside_and_adopted", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		h.writeRecord([]byte("garbage"), 0o600)
+		r := h.mustHostCerts()
+		if r.Code != CodeHostCertRecordInvalid || len(h.record().Committed) != 1 {
+			t.Fatalf("report %+v, want hostcert_record_invalid and the file adopted", r)
+		}
+	})
+	t.Run("krl_lands_with_bad_record", func(t *testing.T) {
+		for name, bad := range map[string]func(h *hostCertHost){
+			"symlink": func(h *hostCertHost) {
+				_ = os.Remove(h.l.State(hostcert.RecordFile))
+				_ = os.Symlink("/etc/passwd", h.l.State(hostcert.RecordFile))
+			},
+			"mode_0644": func(h *hostCertHost) { _ = os.Chmod(h.l.State(hostcert.RecordFile), 0o644) }, //nolint:gosec // the bad mode under test
+			"oversize":  func(h *hostCertHost) { h.writeRecord(bytes.Repeat([]byte(" "), hostcert.MaxRecord+1), 0o600) },
+			"directory": func(h *hostCertHost) {
+				_ = os.Remove(h.l.State(hostcert.RecordFile))
+				_ = os.Mkdir(h.l.State(hostcert.RecordFile), 0o700)
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				h := newHostCertHost(t)
+				h.one()
+				bad(h)
+				h.publishKRL(77)
+				r := h.mustApply()
+				if r.KRLVersion == 0 || !h.krlRevokes(h.l.Current(), 77) {
+					t.Fatalf("the newer KRL did not commit: %+v", r)
+				}
+				h.mustHostCerts()
+				if d := h.status().HostCertDetail; d != CodeHostCertRecordInvalid {
+					t.Fatalf("host_cert_detail %q, want hostcert_record_invalid", d)
+				}
+			})
+		}
+	})
+	t.Run("record_symlink_is_invalid_not_error", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		_ = os.Remove(h.l.State(hostcert.RecordFile))
+		_ = os.Symlink("/etc/passwd", h.l.State(hostcert.RecordFile))
+		if r, err := h.hostCerts(); err != nil || r.Code != CodeHostCertRecordInvalid {
+			t.Fatalf("HostCerts = %+v, %v; want the code, not an error", r, err)
+		}
+	})
+	t.Run("check_and_preflight_leave_record_untouched", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		before := h.stateSnapshot()
+		_, _ = Check(context.Background(), h.cfg, h.l)
+		_, _ = Preflight(context.Background(), h.cfg, h.l)
+		dry := h.cfg
+		dry.DryRun = true
+		_, _ = Apply(context.Background(), dry, h.l)
+		if after := h.stateSnapshot(); after != before {
+			t.Fatalf("check, preflight or apply --dry-run changed the host-certificate state:\n%s\nwas:\n%s", after, before)
+		}
+	})
+	t.Run("simultaneous_applies", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(2)
+			go func() { defer wg.Done(); _, _ = Apply(context.Background(), h.cfg, h.l) }()
+			go func() { defer wg.Done(); _, _ = HostCerts(context.Background(), h.cfg, h.l) }()
+		}
+		wg.Wait()
+		if !bytes.Equal(h.dropInBytes(), h.committedRender()) || h.record().InProgress {
+			t.Fatal("after simultaneous runs the drop-in and the record disagree")
+		}
+	})
+	t.Run("renewal_replaces_file", func(t *testing.T) {
+		h := newHostCertHost(t)
+		old := h.one()
+		h.renewDue()
+		h.mustHostCerts()
+		h.answer()
+		h.mustHostCerts()
+		rec := h.record()
+		if len(rec.Committed) != 1 || rec.Committed[0].Serial <= old.Serial || !strings.HasSuffix(h.dropInCerts()[0], rec.Committed[0].File) {
+			t.Fatalf("after the renewal: %+v", rec)
+		}
+	})
+	t.Run("removal_drops_line", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.publishDir(h.hostSpec(h.ec.PublicKey()))
+		h.mustApply()
+		h.mustHostCerts()
+		if len(h.record().Committed) != 1 || len(h.dropInCerts()) != 1 {
+			t.Fatalf("after the removal: %+v", h.record())
+		}
+	})
+	t.Run("remove_last_key_commits_empty_set", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		h.publishDir(h.hostSpec(h.ec.PublicKey()))
+		h.mustApply()
+		h.mustHostCerts()
+		if rec := h.record(); len(rec.Committed) != 0 || rec.InProgress || len(h.dropInCerts()) != 0 {
+			t.Fatalf("after removing the last line: %+v", rec)
+		}
+	})
+	t.Run("two_keys_one_algorithm", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub, h.ed2.PublicKey()))
+		h.mustApply()
+		h.mustHostCerts()
+		h.answer()
+		h.mustHostCerts()
+		rec := h.record()
+		served := map[string]bool{}
+		for _, en := range rec.Committed {
+			served[en.KeySHA256] = en.Served
+		}
+		if len(rec.Committed) != 2 || !served[ed(h)] || served[hostcert.KeySHA256(h.ed2.PublicKey())] {
+			t.Fatalf("record %+v, want both certified, the first key served and the second not", rec)
+		}
+	})
+	t.Run("two_algorithms_each_served", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		for _, en := range h.record().Committed {
+			if !en.Served {
+				t.Fatalf("entry %+v not served", en)
+			}
+		}
+	})
+	t.Run("reload_lag_does_not_roll_back", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.sshd.reloadDelay = 300 * time.Millisecond
+		h.both()
+		if rec := h.record(); len(rec.Committed) != 2 {
+			t.Fatalf("with a 300 ms reload lag: %+v", rec)
+		}
+	})
+	t.Run("repair_keeps_extensions", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.stripLines()
+		h.mustApply()
+		if !bytes.Equal(h.dropInBytes(), h.committedRender()) {
+			t.Fatal("the no-op repair dropped the HostCertificate lines")
+		}
+		if err := os.WriteFile(h.l.DropIn(), trialDropIn(h.l), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		h.mustApply()
+		if !bytes.Equal(h.dropInBytes(), h.committedRender()) {
+			t.Fatal("repairDropIn after a trial dropped the HostCertificate lines")
+		}
+	})
+	t.Run("first_install_rollback_no_lines", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		_, _ = h.hostCerts()
+		if len(h.dropInCerts()) != 0 || len(h.record().Committed) != 0 || h.attempts().Keys[0].KeptFile == "" {
+			t.Fatalf("after a failed first install: lines %v, record %+v", h.dropInCerts(), h.record())
+		}
+	})
+	t.Run("generation_rollback_keeps_section", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		want := h.committedRender()
+		h.stripLines()
+		h.publishKRL(78)
+		h.sshd.setStall(true)
+		_, _ = h.apply()
+		h.sshd.setStall(false)
+		if !bytes.Equal(h.dropInBytes(), want) {
+			t.Fatalf("after a generation rollback the drop-in is %q, want the HostCertificate section", h.dropInBytes())
+		}
+	})
+	t.Run("hostcert_rollback_keeps_trust_files", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		before := treeSnapshot(t, h.l.Current(), h.l.LastGood(), h.l.GenDir(), h.l.State("accepted"))
+		h.renewDue()
+		h.mustHostCerts()
+		h.answer()
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		_, _ = h.hostCerts()
+		if after := treeSnapshot(t, h.l.Current(), h.l.LastGood(), h.l.GenDir(), h.l.State("accepted")); after != before {
+			t.Fatal("a served_cert_mismatch rollback changed current, last-good, gen/ or accepted/")
+		}
+	})
+	t.Run("foreign_cert_before_include", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.setSSHDConfig("HostCertificate /etc/ssh/other-cert.pub\n" + h.include())
+		if r := h.mustHostCerts(); r.Hold != hostcert.HoldForeignHostCertificate || len(h.outboxRequests()) != 0 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("foreign_cert_after_include", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.setSSHDConfig(h.include() + "HostCertificate /etc/ssh/other-cert.pub\n")
+		if r := h.mustHostCerts(); r.Hold != hostcert.HoldForeignHostCertificate || len(h.outboxRequests()) != 0 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("foreign_cert_blocks_adoption_and_answers", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.setSSHDConfig(h.include() + "HostCertificate /etc/ssh/other-cert.pub\n")
+		h.mustHostCerts()
+		if a := h.attempts(); a.Keys[0].KeptFile != "" || a.Keys[0].Requests[0].Consumed || len(h.record().Committed) != 0 {
+			t.Fatalf("under a foreign certificate the answer was read: %+v", a)
+		}
+	})
+	t.Run("include_inside_match", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.setSSHDConfig("Match User nobody\n\t" + h.include())
+		// sshd reads the drop-in only for that user: the global sshd -T
+		// shows none of its lines (the fake's noInclude).
+		h.run.noInclude = true
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		if _, err := h.apply(); err == nil {
+			t.Fatal("the trust apply accepted a drop-in inside a Match block")
+		}
+	})
+	t.Run("include_moved_into_match_after_install_krl_lands", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.setSSHDConfig("Match User nobody\n\t" + h.include())
+		h.run.rejectDropIn = func(b []byte) bool { return bytes.Contains(b, []byte("HostCertificate")) }
+		h.publishKRL(79)
+		before := h.reloadCount()
+		r, _ := h.apply()
+		if r == nil || !h.krlRevokes(h.l.Current(), 79) || len(h.dropInCerts()) != 0 || h.reloadCount()-before != 1 {
+			t.Fatalf("report %+v, lines %v, reloads %d; want the spec-less drop-in, one reload and the KRL", r, h.dropInCerts(), h.reloadCount()-before)
+		}
+	})
+	t.Run("noop_repairs_section", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.stripLines()
+		if r := h.mustApply(); r.NoOp || !bytes.Equal(h.dropInBytes(), h.committedRender()) {
+			t.Fatalf("the no-op run: %+v", r)
+		}
+	})
+	t.Run("unauthorized_noop_repairs_section", func(t *testing.T) {
+		a := adminRemoved(t)
+		h := &hostCertHost{testHost: a.testHost}
+		_ = os.Mkdir(h.l.Outbox(), 0o750)
+		before := h.dropInBytes()
+		if err := os.WriteFile(h.l.DropIn(), append(bytes.Clone(before), []byte("# edited\n")...), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		_, _ = h.apply()
+		if !bytes.Equal(h.dropInBytes(), before) {
+			t.Fatal("the unauthorized no-op did not repair the drop-in")
+		}
+	})
+	t.Run("versions_commit_repairs_section", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.stripLines()
+		h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
+		h.mustApply()
+		if !bytes.Equal(h.dropInBytes(), h.committedRender()) {
+			t.Fatal("the commit of unchanged versions did not repair the section")
+		}
+	})
+	t.Run("dry_run_noop_does_not_repair", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.stripLines()
+		before := h.dropInBytes()
+		dry := h.cfg
+		dry.DryRun = true
+		r, _ := Apply(context.Background(), dry, h.l)
+		if !bytes.Equal(h.dropInBytes(), before) || r == nil || !slices.ContainsFunc(r.Diff, func(s string) bool { return strings.HasPrefix(s, "repair ") }) {
+			t.Fatalf("dry run: %+v", r)
+		}
+	})
+	t.Run("served_cert_mismatch_rolls_back", func(t *testing.T) {
+		h := newHostCertHost(t)
+		old := h.one()
+		h.renewDue()
+		h.mustHostCerts()
+		h.answer()
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		if _, err := h.hostCerts(); err != nil {
+			t.Fatal(err)
+		}
+		if rec := h.record(); rec.InProgress || rec.Committed[0].Serial != old.Serial {
+			t.Fatalf("after served_cert_mismatch: %+v, want the committed set kept", rec)
+		}
+	})
+	t.Run("algorithm_disabled_reported", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.run.hostKeyAlgorithms = ssh.CertAlgoED25519v01 + "," + ssh.KeyAlgoED25519 + "," + ssh.KeyAlgoECDSA256
+		h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
+		h.mustApply()
+		if r := h.mustHostCerts(); r.Deferred[hostcert.KeySHA256(h.ec.PublicKey())] != hostcert.DeferAlgorithmDisabled {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("algorithm_disabled_on_one_key_installs_other", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.run.hostKeyAlgorithms = ssh.CertAlgoED25519v01 + "," + ssh.KeyAlgoED25519 + "," + ssh.KeyAlgoECDSA256
+		h.renewDue()
+		h.mustHostCerts()
+		h.answer()
+		h.mustHostCerts()
+		served := map[string]bool{}
+		var edSerial uint64
+		for _, en := range h.record().Committed {
+			served[en.KeySHA256] = en.Served
+			if en.KeySHA256 == ed(h) {
+				edSerial = en.Serial
+			}
+		}
+		if served[hostcert.KeySHA256(h.ec.PublicKey())] || !served[ed(h)] || edSerial == 0 || h.record().InProgress {
+			t.Fatalf("record %+v, want the Ed25519 renewal committed and the ECDSA key not served", h.record())
+		}
+	})
+	t.Run("answer_for_unknown_request_ignored", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.mustHostCerts()
+		c := h.issue(h.sshd.pub, strings.Repeat("d", 32))
+		h.writeAnswer(ed(h), hostcert.Answer{RequestID: strings.Repeat("d", 32), Certificate: c.Marshal()})
+		h.mustHostCerts()
+		if len(h.record().Committed) != 0 {
+			t.Fatal("an answer for a request ID the applier never issued was installed")
+		}
+	})
+	t.Run("late_answer_within_330s_installed", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.mustHostCerts()
+		h.clock.advance(300 * time.Second)
+		h.answer()
+		if r := h.mustHostCerts(); len(r.Installed) != 1 {
+			t.Fatalf("a late answer: %+v", r)
+		}
+	})
+	t.Run("redelivered_answer_installed", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.mustHostCerts()
+		for k, req := range h.outboxRequests() {
+			c := h.issue(h.sshd.pub, strings.Repeat("c", 32)) // its req names an earlier request
+			h.writeAnswer(k, hostcert.Answer{RequestID: hex.EncodeToString(req.RequestID[:]), Certificate: c.Marshal()})
+		}
+		if r := h.mustHostCerts(); len(r.Installed) != 1 {
+			t.Fatalf("a re-delivered answer: %+v", r)
+		}
+	})
+	t.Run("failed_install_keeps_cert_and_retries", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		_, _ = h.hostCerts()
+		h.sshd.serveCert(nil)
+		if r := h.mustHostCerts(); len(r.Installed) != 1 || len(r.Requested) != 0 {
+			t.Fatalf("the retry: %+v, want the kept certificate installed without a new request", r)
+		}
+	})
+	t.Run("kept_file_revoked_before_retry_not_installed", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		_, _ = h.hostCerts()
+		h.sshd.serveCert(nil)
+		kept := h.attempts().Keys[0].KeptFile
+		m := hostcert.CertFileRE.FindStringSubmatch(kept)
+		serial, _ := strconv.ParseUint(m[2], 10, 64)
+		h.f.krlHostSerials = []uint64{serial}
+		h.publishKRL()
+		h.mustApply()
+		h.mustHostCerts()
+		if len(h.record().Committed) != 0 {
+			t.Fatal("a kept certificate the KRL now revokes was installed")
+		}
+	})
+	t.Run("adopted_file_survives_hold", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		_, _ = h.hostCerts()
+		kept := h.attempts().Keys[0].KeptFile
+		spec := h.hostSpec(h.sshd.pub)
+		spec.status = "disabled"
+		h.publishDir(spec)
+		_, _ = h.apply()
+		h.mustHostCerts()
+		if !slices.Contains(h.certFiles(), kept) {
+			t.Fatal("GC removed a kept file under a hold")
+		}
+	})
+	t.Run("gc_keeps_files_when_record_missing_under_hold", func(t *testing.T) {
+		for _, variant := range []string{"host_disabled", "no_hold_unadoptable"} {
+			t.Run(variant, func(t *testing.T) {
+				h := newHostCertHost(t)
+				h.one()
+				files := h.certFiles()
+				if variant == "host_disabled" {
+					spec := h.hostSpec(h.sshd.pub)
+					spec.status = "disabled"
+					h.publishDir(spec)
+				} else {
+					// Files that fail VerifyAnswer: signed by a CA nobody pins.
+					other := h.issueBy(seedKey(t, 99), h.sshd.pub)
+					name := hostcert.CertFileName(ed(h), other.Serial)
+					if err := os.WriteFile(filepath.Join(h.l.HostCertDir(), name), ssh.MarshalAuthorizedKey(other), 0o644); err != nil { //nolint:gosec // test fixture
+						t.Fatal(err)
+					}
+					files = h.certFiles()
+					for _, f := range files {
+						if f != name {
+							_ = os.Remove(filepath.Join(h.l.HostCertDir(), f))
+						}
+					}
+					files = h.certFiles()
+					a := h.attempts()
+					a.Keys = []hostcert.Attempt{{KeySHA256: ed(h), Requests: []hostcert.PendingRequest{}, NextAt: uint64(h.clock.Now().Unix()) + 3000}} //nolint:gosec // G115
+					b, _ := a.Encode()
+					_ = os.WriteFile(h.l.State(hostcert.AttemptsFile), b, 0o600)
+				}
+				_ = os.Remove(h.l.State(hostcert.RecordFile))
+				_, _ = h.apply()
+				for range 2 {
+					r, _ := h.hostCerts()
+					if r.Code != CodeHostCertRecordMissing {
+						t.Fatalf("report %+v, want hostcert_record_missing", r)
+					}
+				}
+				if got := h.certFiles(); !slices.Equal(got, files) {
+					t.Fatalf("files %v, want %v kept", got, files)
+				}
+			})
+		}
+	})
+	t.Run("gc_leaves_unrelated_files", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		dir := h.l.HostCertDir()
+		_ = os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o644) //nolint:gosec // test fixture
+		_ = os.WriteFile(filepath.Join(dir, "other.pub"), []byte("x"), 0o644) //nolint:gosec // test fixture
+		_ = os.Symlink("/etc/passwd", filepath.Join(dir, hostcert.CertFileName(strings.Repeat("a", 64), 7)))
+		h.renewDue()
+		h.mustHostCerts()
+		h.answer()
+		h.mustHostCerts()
+		for _, f := range []string{"notes.txt", "other.pub", hostcert.CertFileName(strings.Repeat("a", 64), 7)} {
+			if _, err := os.Lstat(filepath.Join(dir, f)); err != nil {
+				t.Fatalf("GC removed %s", f)
+			}
+		}
+	})
+	t.Run("gc_never_removes_file_named_by_dropin", func(t *testing.T) {
+		h := newHostCertHost(t)
+		c := h.one()
+		stray := hostcert.CertFileName(strings.Repeat("b", 64), 5)
+		_ = os.WriteFile(filepath.Join(h.l.HostCertDir(), stray), ssh.MarshalAuthorizedKey(c), 0o644) //nolint:gosec // test fixture
+		b := append(h.dropInBytes(), []byte("HostCertificate "+filepath.Join(h.l.HostCertDir(), stray)+"\n")...)
+		_ = os.WriteFile(h.l.DropIn(), b, 0o644) //nolint:gosec // test fixture
+		e := &engine{cfg: h.cfg, l: h.l, clock: h.cfg.Clock, report: &Report{}, stateFd: -1}
+		st := &hostCertState{rec: h.record(), attempts: h.attempts()}
+		if err := e.gcHostCerts(st); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(h.certFiles(), stray) {
+			t.Fatal("GC removed a file the drop-in names")
+		}
+	})
+	t.Run("cert_file_edited_is_drift", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		en := h.record().Committed[0]
+		other := h.issue(h.sshd.pub, strings.Repeat("f", 32))
+		_ = os.WriteFile(filepath.Join(h.l.HostCertDir(), en.File), ssh.MarshalAuthorizedKey(other), 0o644) //nolint:gosec // test fixture
+		d, err := Check(context.Background(), h.cfg, h.l)
+		if err != nil || !slices.ContainsFunc(d.Files, func(f FileDrift) bool { return strings.HasSuffix(f.File, en.File) }) {
+			t.Fatalf("check %+v, %v: want a FileDrift", d, err)
+		}
+		if r := h.mustHostCerts(); !slices.Contains(r.Requested, en.KeySHA256) {
+			t.Fatalf("%+v: the edited file was treated as installed", r)
+		}
+	})
+	t.Run("check_during_install_not_drift", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.requested()
+		h.crashed("hostcert-reload")
+		d, err := Check(context.Background(), h.cfg, h.l)
+		if err != nil || slices.ContainsFunc(d.Files, func(f FileDrift) bool { return f.File == h.l.DropIn() }) {
+			t.Fatalf("check during an install: %+v, %v", d, err)
+		}
+	})
+	t.Run("rsa_skipped_reported", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		if r := h.mustHostCerts(); !slices.Contains(r.Skipped, ssh.KeyAlgoRSA) {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("no_request_while_directory_unauthorized", func(t *testing.T) {
+		a := adminRemoved(t)
+		h := &hostCertHost{testHost: a.testHost}
+		_ = os.Mkdir(h.l.Outbox(), 0o750)
+		if r := h.mustHostCerts(); r.Hold != hostcert.HoldDirectoryUnauthorized || len(h.outboxRequests()) != 0 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("no_request_when_host_keys_rotated", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		spec := h.hostSpec(seedKey(t, 98).PublicKey())
+		h.publishDir(spec)
+		_, _ = h.apply()
+		if r := h.mustHostCerts(); r.Hold == "" || len(r.Requested) != 0 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("no_request_when_entry_disabled", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		spec := h.hostSpec(h.sshd.pub)
+		spec.status = "disabled"
+		h.publishDir(spec)
+		_, _ = h.apply()
+		if r := h.mustHostCerts(); r.Hold != hostcert.HoldHostDisabled || len(r.Requested) != 0 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	writeNothing := func(t *testing.T, h *hostCertHost, prep func()) {
+		t.Helper()
+		prep()
+		before, reloads := h.stateSnapshot(), h.reloadCount()
+		_, _ = h.hostCerts()
+		if after := h.stateSnapshot(); after != before || h.reloadCount() != reloads {
+			t.Fatalf("HostCerts wrote:\n%s\nwas:\n%s\n(reloads %d -> %d)", after, before, reloads, h.reloadCount())
+		}
+	}
+	pendingMarker := func(h *hostCertHost) {
+		h.t.Helper()
+		h.cfg.Fault = func(p string) error {
+			if p == "swap" {
+				return errCrash
+			}
+			return nil
+		}
+		h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
+		_, _ = h.apply()
+		h.cfg.Fault = nil
+	}
+	t.Run("no_install_while_marker_pending", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		writeNothing(t, h, func() { h.renewDue(); h.mustHostCerts(); h.answer(); pendingMarker(h) })
+	})
+	t.Run("no_install_before_first_lastgood", func(t *testing.T) {
+		h := newHostCertHost(t)
+		writeNothing(t, h, func() {})
+	})
+	t.Run("hold_no_generation_writes_nothing", func(t *testing.T) {
+		for _, foreign := range []bool{false, true} {
+			h := newHostCertHost(t)
+			if foreign {
+				_ = os.WriteFile(h.l.DropIn(), []byte("HostCertificate /etc/ssh/x-cert.pub\n"), 0o644) //nolint:gosec // test fixture
+			}
+			writeNothing(t, h, func() {})
+			if r, _ := h.hostCerts(); r.Hold != hostcert.HoldNoGeneration {
+				t.Fatalf("%+v, want no_generation", r)
+			}
+		}
+	})
+	sshdTFails := func(h *hostCertHost) {
+		h.t.Helper()
+		h.run.rejectDropIn = func(b []byte) bool { return bytes.Contains(b, []byte("# edited")) }
+		b := append(h.dropInBytes(), []byte("# edited\n")...)
+		_ = os.WriteFile(h.l.DropIn(), b, 0o644) //nolint:gosec // test fixture
+	}
+	t.Run("no_install_while_marker_pending_sshd_t_fails", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		pendingMarker(h)
+		writeNothing(t, h, func() { sshdTFails(h) })
+		if _, err := h.hostCerts(); err == nil {
+			t.Fatal("HostCerts did not return sshd -T's error")
+		}
+	})
+	t.Run("no_install_while_stuck_sshd_t_fails", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		// A dangling current with no marker: stuck() is set.
+		older, err := os.Readlink(h.l.Current())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Remove(h.l.Current())
+		if err := os.Symlink(filepath.Join(filepath.Dir(older), "999999"), h.l.Current()); err != nil {
+			t.Fatal(err)
+		}
+		writeNothing(t, h, func() { sshdTFails(h) })
+		if r, err := h.hostCerts(); err == nil {
+			t.Fatalf("HostCerts = %+v, want sshd -T's error", r)
+		}
+	})
+	t.Run("no_install_while_recover_due_sshd_t_fails", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		older, err := os.Readlink(h.l.Current())
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
+		h.mustApply()
+		// current goes back to the older generation, which is not the
+		// rollback target of the newer last-good: Apply's no-marker
+		// recover predicate (apply.go:453) holds.
+		_ = os.Remove(h.l.Current())
+		if err := os.Symlink(older, h.l.Current()); err != nil {
+			t.Fatal(err)
+		}
+		if c, lg := h.current(), h.lastGood(); c == 0 || lg == 0 || c == lg {
+			t.Fatalf("current %d, last-good %d: want both the agent's at different numbers", c, lg)
+		}
+		writeNothing(t, h, func() { sshdTFails(h) })
+		if r, err := h.hostCerts(); err == nil {
+			t.Fatalf("HostCerts = %+v, want sshd -T's error", r)
+		}
+	})
+	t.Run("request_valid_for_is_zero", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.mustHostCerts()
+		for _, r := range h.outboxRequests() {
+			if r.ValidForSeconds != 0 {
+				t.Fatalf("valid_for %d", r.ValidForSeconds)
+			}
+		}
+	})
+	t.Run("backoff_on_one_key_installs_other", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
+		h.mustApply()
+		h.mustHostCerts()
+		for k, req := range h.outboxRequests() {
+			if k == hostcert.KeySHA256(h.ec.PublicKey()) {
+				h.writeAnswer(k, hostcert.Answer{RequestID: hex.EncodeToString(req.RequestID[:]), Refused: "cert_revoked"})
+				continue
+			}
+			c := h.issue(h.sshd.pub, hex.EncodeToString(req.RequestID[:]))
+			h.writeAnswer(k, hostcert.Answer{RequestID: hex.EncodeToString(req.RequestID[:]), Certificate: c.Marshal()})
+		}
+		r := h.mustHostCerts()
+		if len(r.Installed) != 1 || r.Installed[0] != ed(h) || !strings.HasPrefix(r.Deferred[hostcert.KeySHA256(h.ec.PublicKey())], hostcert.DeferRefusedPrefix) {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("krl_lands_while_hostcert_fails", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+		h.renewDue()
+		h.mustHostCerts()
+		h.answer()
+		_, _ = h.hostCerts()
+		h.publishKRL(80)
+		h.mustApply()
+		if !h.krlRevokes(h.l.Current(), 80) {
+			t.Fatal("the KRL did not land while the host-certificate step failed")
+		}
+	})
+}
+
+// issueBy is issue with another CA.
+func (h *hostCertHost) issueBy(ca ssh.Signer, pub ssh.PublicKey) *ssh.Certificate {
+	h.t.Helper()
+	h.serial++
+	c, err := krcert.Build(krcert.Request{
+		Profile: krcert.Profile{CertType: ssh.HostCert, MaxTTL: 30 * 24 * time.Hour}, Subject: pub, Principals: []string{"web1"}, Now: h.clock.Now(),
+		ValidFor: time.Duration(h.lifetime) * time.Second, Serial: h.serial, //nolint:gosec // G115: test lifetimes
+		KeyID: krcert.KeyID{V3: true, CA: "host", Subject: "web1", Request: strings.Repeat("9", 32), Policy: 1, Directory: 1, Serial: h.serial},
+	}, ca, rand.Reader)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return c
 }

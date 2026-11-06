@@ -331,11 +331,20 @@ type Attempt struct {
 	Sticky    *StickyHold      `json:"sticky,omitempty"`
 }
 
-// Attempts is <state>/hostcert-attempts.json.
+// Attempts is <state>/hostcert-attempts.json: the per-key attempts, the
+// host key types the step skipped (RSA) and its last hold or refusal code
+// (Detail, "" for none), which the heartbeat reports.
 type Attempts struct {
 	Version int       `json:"version"`
 	Keys    []Attempt `json:"keys"`
+	Skipped []string  `json:"skipped"`
+	Detail  string    `json:"detail"`
 }
+
+// MaxSkipped bounds Attempts.Skipped.
+const MaxSkipped = 16
+
+var keyTypeRE = regexp.MustCompile(`^[a-z0-9@._-]{1,64}$`)
 
 // ParseAttempts decodes an attempts file strictly and validates it.
 func ParseAttempts(data []byte) (*Attempts, error) {
@@ -361,6 +370,17 @@ func (a *Attempts) Validate() error {
 	}
 	if len(a.Keys) > directory.MaxHostKeys {
 		return fmt.Errorf("hostcert: attempts for more than %d keys", directory.MaxHostKeys)
+	}
+	if len(a.Skipped) > MaxSkipped {
+		return errors.New("hostcert: too many skipped key types")
+	}
+	for _, t := range a.Skipped {
+		if !keyTypeRE.MatchString(t) {
+			return errors.New("hostcert: skipped key type")
+		}
+	}
+	if a.Detail != "" && !CodeRE.MatchString(a.Detail) {
+		return errors.New("hostcert: detail")
 	}
 	for i, k := range a.Keys {
 		if i > 0 && a.Keys[i-1].KeySHA256 >= k.KeySHA256 {
@@ -470,17 +490,20 @@ func (a *Attempt) Answerable(id string, now uint64) *PendingRequest {
 	return nil
 }
 
-// Abandoned returns the unconsumed requests that expired by now (one whose
-// outbox file was never written included), and marks them consumed.
-func (a *Attempt) Abandoned(now uint64) int {
-	n := 0
+// Abandoned marks consumed the unconsumed requests that expired by now (one
+// whose outbox file was never written included) and returns how many, and
+// the newest one's CreatedAt: the back-off of an unanswered request counts
+// from when it was made, so the time it waited is part of the delay.
+func (a *Attempt) Abandoned(now uint64) (int, uint64) {
+	n, created := 0, uint64(0)
 	for i := range a.Requests {
 		if r := &a.Requests[i]; !r.Consumed && !r.Live(now) {
 			r.Consumed = true
 			n++
+			created = max(created, r.CreatedAt)
 		}
 	}
-	return n
+	return n, created
 }
 
 // stickyDetails is Q-09-7's closed list of sticky refusals; every

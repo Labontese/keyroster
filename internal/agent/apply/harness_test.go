@@ -68,6 +68,9 @@ type fixture struct {
 	bundleDoc, bundleSigs              []byte
 	policyDoc, policySigs              []byte
 	krlVersion                         uint64
+	// krlHostSerials are host-CA serials every later KRL also revokes
+	// (03-09).
+	krlHostSerials []uint64
 }
 
 func newFixture(t testing.TB) *fixture {
@@ -241,6 +244,9 @@ func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id strin
 	set := krl.Set{Keys: keys}
 	if len(serials) > 0 {
 		set.Certs = []krl.CertSection{{CAKey: f.user.PublicKey(), Serials: serials}}
+	}
+	if len(f.krlHostSerials) > 0 {
+		set.Certs = append(set.Certs, krl.CertSection{CAKey: f.host.PublicKey(), Serials: f.krlHostSerials})
 	}
 	b, err := krl.Encode(set, header, time.Unix(int64(f.krlVersion), 0)) //nolint:gosec // G115: a test version
 	if err != nil {
@@ -427,21 +433,7 @@ func (s *fakeSSHD) stop() { _ = s.ln.Close() }
 // signer and path. sshd -T lists it only through fakeRunner.extraHostKeys.
 func (s *fakeSSHD) addHostKey(t *testing.T, kind string) (ssh.Signer, string) {
 	t.Helper()
-	var priv any
-	var err error
-	switch kind {
-	case "ed25519":
-		_, priv, err = ed25519.GenerateKey(rand.Reader)
-	case "ecdsa":
-		priv, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	case "rsa":
-		priv, err = rsa.GenerateKey(rand.Reader, 2048)
-	default:
-		t.Fatalf("host key kind %q", kind)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
+	priv := cachedHostKey(t, kind, len(s.keys))
 	signer, err := ssh.NewSignerFromKey(priv)
 	if err != nil {
 		t.Fatal(err)
@@ -461,6 +453,35 @@ func (s *fakeSSHD) addHostKey(t *testing.T, kind string) (ssh.Signer, string) {
 		t.Fatal(err)
 	}
 	return signer, path
+}
+
+// hostKeyCache holds the extra host keys, generated once per kind and
+// position (an RSA key under -race is slow; every host may share them).
+var hostKeyCache sync.Map
+
+func cachedHostKey(t *testing.T, kind string, pos int) any {
+	t.Helper()
+	key := fmt.Sprintf("%s/%d", kind, pos)
+	if v, ok := hostKeyCache.Load(key); ok {
+		return v
+	}
+	var priv any
+	var err error
+	switch kind {
+	case "ed25519":
+		_, priv, err = ed25519.GenerateKey(rand.Reader)
+	case "ecdsa":
+		priv, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case "rsa":
+		priv, err = rsa.GenerateKey(rand.Reader, 2048)
+	default:
+		t.Fatalf("host key kind %q", kind)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, _ := hostKeyCache.LoadOrStore(key, priv)
+	return v
 }
 
 // reload is sshd's reload (SIGHUP): it reads the drop-in on disk (none

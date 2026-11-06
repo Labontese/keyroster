@@ -501,6 +501,14 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 	for _, f := range problems {
 		r.add(f)
 	}
+	// Host certificates (03-09): a HostCertificate outside the agent's
+	// drop-in, and a record problem, are notes, never refusals.
+	if files, _ := configGraph(l, cfg.SSHDConfig, own); foreignHostCertificate(l, files) {
+		r.Notes = append(r.Notes, CodeForeignHostCertificate+": a HostCertificate line outside "+l.DropIn()+" holds the agent's host certificates until it is removed; the agent never edits it")
+	}
+	if w.Code != "" {
+		r.Notes = append(r.Notes, w.Code+": the host-certificate record "+l.State("hostcert.json")+" is missing or unreadable; the agent renders no HostCertificate line until it is refilled")
+	}
 	switch {
 	case installed:
 		switch {
@@ -569,6 +577,10 @@ func DetectRefusal(err error) *PreflightReport {
 		Fix: "start sshd with only -D, -e and -f <file> (set every other option in sshd_config, which the agent checks), or empty the variable in the unit's EnvironmentFile (/etc/default/ssh, /etc/sysconfig/sshd) or /etc/conf.d/sshd; see host-setup.md \"Before the agent: preflight\""})
 	return r
 }
+
+// CodeForeignHostCertificate is the note of a HostCertificate directive
+// outside the agent's drop-in (03-09).
+const CodeForeignHostCertificate = "foreign_host_certificate"
 
 // preflightApply is the preflight of an apply (03-06 key link: the first
 // apply, and every drop-in change, runs it before any write or reload):

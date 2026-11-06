@@ -9,9 +9,12 @@
 // output (T-03-227).
 //
 // Status and Heartbeat are closed structs. Later plans extend both sides
-// under the same rules: 03-09 adds host_certs and host_keys_skipped,
-// 03-14 adds breakglass, and 03-10 reports probe outcomes through
-// last_apply.detail.
+// under the same rules. 03-09 added host_certs, host_keys_skipped and
+// host_cert_detail: each host certificate the drop-in names (its key,
+// type, serial, ValidBefore, CA and whether sshd was seen serving it), the
+// host key types the agent does not certify, and the last host-certificate
+// hold or refusal code, all omitted when empty. 03-14 adds breakglass, and
+// 03-10 reports probe outcomes through last_apply.detail.
 //
 // The package is portable (no build tag): the server and the CLI import
 // it, and so do the Linux-only applier and fetcher. It imports no network
@@ -170,8 +173,43 @@ type Status struct {
 	Stuck          string     `json:"stuck"`
 	KRLStale       bool       `json:"krl_stale"`
 	Unapplied      *Unapplied `json:"unapplied,omitempty"`
-	Seq            uint64     `json:"seq"`
+	// HostCerts, HostKeysSkipped and HostCertDetail are 03-09's (see the
+	// package comment); omitted when empty.
+	HostCerts       []HostCert   `json:"host_certs,omitempty"`
+	HostKeysSkipped []SkippedKey `json:"host_keys_skipped,omitempty"`
+	HostCertDetail  string       `json:"host_cert_detail,omitempty"`
+	Seq             uint64       `json:"seq"`
 }
+
+// HostCert is one host certificate a host's drop-in names (03-09): the
+// lowercase hex SHA-256 of its key's wire encoding, the key type, the
+// serial, ValidBefore, the hex SHA-256 of the CA key and whether the
+// served-certificate self-test saw sshd serve it (always encoded).
+type HostCert struct {
+	KeySHA256   string `json:"key_sha256"`
+	Type        string `json:"type"`
+	Serial      uint64 `json:"serial"`
+	ValidBefore uint64 `json:"valid_before"`
+	CASHA256    string `json:"ca_sha256"`
+	Served      bool   `json:"served"`
+}
+
+// SkippedKey is a host key type the agent does not certify, with why.
+type SkippedKey struct {
+	Type   string `json:"type"`
+	Reason string `json:"reason"`
+}
+
+// Limits of the host-certificate fields (03-09).
+const (
+	MaxHostCerts       = 8
+	MaxHostKeysSkipped = 16
+)
+
+var (
+	keyTypeRE = regexp.MustCompile(`^[a-z0-9@._-]{1,64}$`)
+	reasonRE  = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+)
 
 // Unapplied is Status.Unapplied (PR #76 review F8 (03-08j)): the newest
 // bundle and directory versions the applier verified but could not apply
@@ -377,6 +415,25 @@ func Validate(s *Status) error {
 				return bad(p.name)
 			}
 		}
+	}
+	if len(s.HostCerts) > MaxHostCerts {
+		return bad("host_certs")
+	}
+	for i, c := range s.HostCerts {
+		if !hexRE.MatchString(c.KeySHA256) || !hexRE.MatchString(c.CASHA256) || !keyTypeRE.MatchString(c.Type) || c.Serial == 0 {
+			return bad(fmt.Sprintf("host_certs[%d]", i))
+		}
+	}
+	if len(s.HostKeysSkipped) > MaxHostKeysSkipped {
+		return bad("host_keys_skipped")
+	}
+	for i, k := range s.HostKeysSkipped {
+		if !keyTypeRE.MatchString(k.Type) || !reasonRE.MatchString(k.Reason) {
+			return bad(fmt.Sprintf("host_keys_skipped[%d]", i))
+		}
+	}
+	if d := s.HostCertDetail; d != "" && (len(d) > MaxDetail || !detailRE.MatchString(d)) {
+		return bad("host_cert_detail")
 	}
 	if s.Seq == 0 || s.Seq > math.MaxInt64 {
 		return bad("seq")

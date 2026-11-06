@@ -45,9 +45,11 @@ type RunConfig struct {
 	CheckEvery, CheckJitter time.Duration
 	// Status, when set, receives every status Run writes (tests).
 	Status func(s *heartbeat.Status)
-	// HostCerts, when set, is called before every HostCerts run (tests
-	// count them, 03-09).
+	// HostCerts, when set, is called before every HostCerts run, and
+	// Iteration at the end of every loop iteration (tests count them,
+	// 03-09).
 	HostCerts func()
+	Iteration func()
 }
 
 // Run is the applier's loop (03-07), until ctx ends. Each round:
@@ -240,6 +242,9 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 				hostStarted, hostAnswers = true, answers
 				hostCerts()
 			}
+		}
+		if rc.Iteration != nil {
+			rc.Iteration()
 		}
 		t := time.NewTimer(rc.Interval)
 		select {

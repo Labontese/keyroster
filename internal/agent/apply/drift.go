@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -150,8 +151,12 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 	if err != nil {
 		return nil, err
 	}
+	// While a host-certificate install runs, its candidate drop-in is no
+	// drift (03-09, close-dropin-04).
 	if b, err := e.readDropIn(); err != nil {
 		return nil, err
+	} else if w.InstallBytes != nil && bytes.Equal(b, w.InstallBytes) {
+		e.logf("host-certificate install in progress")
 	} else if want := w.Bytes; !bytes.Equal(b, want) {
 		got := ""
 		if b != nil {
@@ -172,6 +177,7 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 	if got := dump.One(principalsCommand); !isDefault(got) {
 		r.Settings = append(r.Settings, SettingDrift{Keyword: principalsCommand, Want: "none", Got: got})
 	}
+	e.hostCertDrift(dump, w, r)
 	// Every trust setting in what sshd reads but the agent's drop-in
 	// (D-R3); the Phase 2 runbook's own two lines at the top level of
 	// 50-keyroster.conf, left by a takeover whose removal is unfinished,
@@ -258,4 +264,49 @@ func recordFiles(m map[string]string) map[string][]byte {
 		out[n] = nil
 	}
 	return out
+}
+
+// hostCertDrift is the host-certificate part of the check (03-09, D1):
+// every HostCertificate path of the spec must be in sshd -T's whole
+// hostcertificate list, a value there that the spec does not name is
+// foreign drift (unless an install's candidate names it), and every
+// committed certificate file must be present, mode 0644 and of its
+// recorded SHA-256. It reads the record only through wantDropIn and
+// readHostCertRecord, and calls no DropIn itself.
+func (e *engine) hostCertDrift(dump Dump, w dropInWant, r *DriftReport) {
+	got := dump[hostCertificateKeyword]
+	for _, p := range w.Spec.HostCertificates {
+		if !slices.Contains(got, p) {
+			r.Settings = append(r.Settings, SettingDrift{Keyword: hostCertificateKeyword, Want: p, Got: strings.Join(got, ",")})
+		}
+	}
+	// The candidate's lines come from InstallBytes, never from the record.
+	var cand []string
+	for _, l := range strings.Split(string(w.InstallBytes), "\n") {
+		if p, ok := strings.CutPrefix(l, "HostCertificate "); ok {
+			cand = append(cand, p)
+		}
+	}
+	for _, v := range got {
+		if !slices.Contains(w.Spec.HostCertificates, v) && !slices.Contains(cand, v) {
+			r.Settings = append(r.Settings, SettingDrift{Keyword: hostCertificateKeyword, Want: "", Got: v})
+		}
+	}
+	rec, _, err := e.readHostCertRecord()
+	if err != nil || rec == nil {
+		return
+	}
+	for _, en := range rec.Committed {
+		p := filepath.Join(e.l.HostCertDir(), en.File)
+		st, err := os.Lstat(p)
+		gotSum := ""
+		if err == nil && st.Mode().IsRegular() && st.Mode().Perm() == 0o644 {
+			if c := e.readCertFile(en.File, ""); c != nil {
+				gotSum = trust.SHA256Hex(c.Marshal())
+			}
+		}
+		if gotSum != en.CertSHA256 {
+			r.Files = append(r.Files, FileDrift{File: p, WantSHA256: en.CertSHA256, GotSHA256: gotSum})
+		}
+	}
 }
