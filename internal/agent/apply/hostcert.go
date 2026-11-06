@@ -19,6 +19,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
+	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/directory"
@@ -804,6 +805,11 @@ func (e *engine) refillHostCertRecord(st *hostCertState, defers map[string]strin
 // directory, replacing an earlier one.
 func (e *engine) setAsideHostCertRecord() error {
 	aside := hostcert.RecordFile + ".invalid"
+	for _, n := range []string{hostcert.RecordFile, aside} {
+		if err := paths.Allowed(e.l, e.l.State(n)); err != nil {
+			return err
+		}
+	}
 	if err := unix.Unlinkat(e.stateFd, aside, 0); err != nil && !errors.Is(err, unix.ENOENT) {
 		if err := unix.Unlinkat(e.stateFd, aside, unix.AT_REMOVEDIR); err != nil {
 			return err
