@@ -145,7 +145,9 @@ func hostCertLifetime(c *ssh.Certificate) int64 {
 
 // keyscanCert runs ssh-keyscan -c -t typ against the host's sshd (a
 // freshly reloaded sshd may not answer at once, so it tries a few times)
-// and returns the certificate it printed.
+// and returns the certificate it printed. ssh-keyscan prints a
+// certificate without the host field the plain keys carry, so a line is
+// read as a key with and without its first field.
 func keyscanCert(t *testing.T, h *agentHost, typ string) *ssh.Certificate {
 	t.Helper()
 	var last string
@@ -157,15 +159,14 @@ func keyscanCert(t *testing.T, h *agentHost, typ string) *ssh.Certificate {
 		last = fmt.Sprintf("%v: %s", err, out)
 		for _, l := range strings.Split(string(out), "\n") {
 			f := strings.Fields(l)
-			if len(f) < 3 || strings.HasPrefix(l, "#") {
+			if len(f) < 2 || strings.HasPrefix(l, "#") {
 				continue
 			}
-			pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.Join(f[1:], " ")))
-			if err != nil {
-				continue
-			}
-			if c, ok := pub.(*ssh.Certificate); ok {
-				return c
+			for _, cand := range []string{l, strings.Join(f[1:], " ")} {
+				pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(cand))
+				if c, ok := pub.(*ssh.Certificate); err == nil && ok {
+					return c
+				}
 			}
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -328,7 +329,10 @@ func TestHostCertIssueAndServe(t *testing.T) {
 
 	t.Run("other_name_refused", func(t *testing.T) {
 		kh := writeHostKnownHosts(t, caLine)
-		code, out := strictHostLogin(t, h, c, login, kh, net.IPv4(127, 0, 0, 2).String(), "-o", "HostKeyAlias=web2", "-o", "HostKeyAlgorithms=ssh-ed25519-cert-v01@openssh.com")
+		// The plain algorithm is allowed after the certificate's, so the
+		// client gets the certificate, finds no CA for web2, retries the plain
+		// key and refuses it (OpenSSH 10.x drops the retry otherwise).
+		code, out := strictHostLogin(t, h, c, login, kh, net.IPv4(127, 0, 0, 2).String(), "-o", "HostKeyAlias=web2", "-o", "HostKeyAlgorithms=ssh-ed25519-cert-v01@openssh.com,ssh-ed25519")
 		if code == 0 || !strings.Contains(out, "Host key verification failed") {
 			t.Fatalf("ssh under HostKeyAlias web2 exited %d, want a refusal with Host key verification failed:\n%s", code, out)
 		}
@@ -336,7 +340,12 @@ func TestHostCertIssueAndServe(t *testing.T) {
 
 	t.Run("existing_known_hosts_still_accepted", func(t *testing.T) {
 		kh := writeHostKnownHosts(t, "web1 "+readPub(t, h.sshd.hostKey)+"\n")
-		code, out := strictHostLogin(t, h, c, login, kh, "127.0.0.1", "-o", "HostKeyAlias=web1", "-o", "HostKeyAlgorithms=ssh-ed25519-cert-v01@openssh.com")
+		// The certificate algorithm first, so sshd serves the certificate,
+		// and the plain one after it: the client finds no CA, retries the
+		// plain key and accepts it from known_hosts (the plain-key fallback;
+		// OpenSSH 10.x refuses the retry when the plain algorithm is not
+		// listed, 9.5p1 does not).
+		code, out := strictHostLogin(t, h, c, login, kh, "127.0.0.1", "-o", "HostKeyAlias=web1", "-o", "HostKeyAlgorithms=ssh-ed25519-cert-v01@openssh.com,ssh-ed25519")
 		if code != 0 || !strings.Contains(out, "Server host certificate") {
 			t.Fatalf("ssh with the plain key and a forced certificate algorithm exited %d, want 0 with Server host certificate:\n%s", code, out)
 		}
