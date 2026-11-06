@@ -146,9 +146,13 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 	// The drop-in is the agent's own file once a generation is installed
 	// (D-R2, PR #68 review F15): bytes that differ from DropIn are drift,
 	// even when sshd -T still reports the agent's three paths.
+	w, err := e.wantDropIn()
+	if err != nil {
+		return nil, err
+	}
 	if b, err := e.readDropIn(); err != nil {
 		return nil, err
-	} else if want := DropIn(l); !bytes.Equal(b, want) {
+	} else if want := w.Bytes; !bytes.Equal(b, want) {
 		got := ""
 		if b != nil {
 			got = trust.SHA256Hex(b)

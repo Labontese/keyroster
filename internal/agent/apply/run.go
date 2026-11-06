@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -44,6 +45,9 @@ type RunConfig struct {
 	CheckEvery, CheckJitter time.Duration
 	// Status, when set, receives every status Run writes (tests).
 	Status func(s *heartbeat.Status)
+	// HostCerts, when set, is called before every HostCerts run (tests
+	// count them, 03-09).
+	HostCerts func()
 }
 
 // Run is the applier's loop (03-07), until ctx ends. Each round:
@@ -70,6 +74,13 @@ type RunConfig struct {
 //     apply writes the status itself (Apply). The first round writes the
 //     status too, so an enrolled host that never applied reports
 //     generation 0.
+//
+//  5. the host-certificate step (HostCerts, 03-09) runs after the apply
+//     round when it is due: an Apply ran this round, the spool's host
+//     certificate answers changed (by name, size and modification time),
+//     the check ran, or the earliest time HostCerts returned has passed;
+//     and once at start. Its error is logged as a host-certificate error,
+//     never as an apply error.
 //
 // Before approval the spool holds no document, so a round reads only its
 // listing and writes nothing but the status at start. Errors are logged
@@ -107,6 +118,10 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		started    bool
 		nextCheck  time.Time
 		lastStatus string
+		// The host-certificate step's trigger (03-09).
+		hostDue     time.Time
+		hostAnswers string
+		hostStarted bool
 	)
 	status := func(u StatusUpdate) {
 		s, err := WriteStatus(ctx, rc.Config, l, u)
@@ -124,6 +139,21 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			if rc.Status != nil {
 				rc.Status(s)
 			}
+		}
+	}
+	hostCerts := func() {
+		if rc.HostCerts != nil {
+			rc.HostCerts()
+		}
+		r, err := HostCerts(ctx, rc.Config, l)
+		hostDue = time.Time{}
+		if r != nil {
+			hostDue = r.Due
+		}
+		if err != nil {
+			logf("ERROR host certificates: %v", err)
+			// Try again after the shortest back-off.
+			hostDue = rc.Clock.Now().Add(time.Minute)
 		}
 	}
 	check := func() {
@@ -164,6 +194,7 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 				logf("answered the fetcher's enrollment request (%s)", l.Outbox()+"/"+EnrollPoPFile)
 			}
 			names, err := spoolDocuments(rc.Spool)
+			applied, checked := false, false
 			switch {
 			case err != nil:
 				logf("ERROR spool: %v", err)
@@ -172,6 +203,7 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 				// A check after the round's applies, below.
 				nextCheck = time.Time{}
 				var prev *Report
+				applied = true
 				for i := 0; ; i++ {
 					r, err := Apply(ctx, rc.Config, l)
 					if rc.Out != nil && (err != nil || !r.NoOp) {
@@ -201,6 +233,12 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			}
 			if !rc.Clock.Now().Before(nextCheck) {
 				check()
+				checked = true
+			}
+			answers := hostCertAnswers(rc.Spool)
+			if !hostStarted || applied || checked || answers != hostAnswers || (!hostDue.IsZero() && !rc.Clock.Now().Before(hostDue)) {
+				hostStarted, hostAnswers = true, answers
+				hostCerts()
 			}
 		}
 		t := time.NewTimer(rc.Interval)
@@ -251,7 +289,33 @@ func spoolDocuments(dir string) (string, error) {
 		return "", err
 	}
 	names = slices.DeleteFunc(names, func(n string) bool {
-		return strings.HasPrefix(n, ".") || n == EnrollRequestFile || n == IdentityFile
+		return strings.HasPrefix(n, ".") || n == EnrollRequestFile || n == IdentityFile || strings.HasPrefix(n, hostCertPrefix)
 	})
 	return strings.Join(names, "\n"), nil
+}
+
+// hostCertPrefix starts the spool's host certificate answers (03-09),
+// which are no documents.
+const hostCertPrefix = "hostcert-"
+
+// hostCertAnswers is the digest of the spool's host certificate answers:
+// each name with its size and modification time, so an answer replaced
+// under the same name changes it.
+func hostCertAnswers(dir string) string {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, d := range ents {
+		if !strings.HasPrefix(d.Name(), hostCertPrefix) {
+			continue
+		}
+		info, err := d.Info()
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%s %d %d\n", d.Name(), info.Size(), info.ModTime().UnixNano())
+	}
+	return b.String()
 }

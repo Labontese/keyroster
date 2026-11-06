@@ -487,11 +487,15 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 			return nil, err
 		}
 	}
+	w, err := e.wantDropIn()
+	if err != nil {
+		return nil, err
+	}
 	var own []byte
 	if installed {
 		// The drop-in the next apply writes, not an edited one it replaces
 		// (D-R2; PR #68 review fix round 2, P1).
-		own = DropIn(l)
+		own = w.Bytes
 	}
 	hits, problems := trustSettingHits(l, cfg.SSHDConfig, own)
 	for _, f := range problems {
@@ -503,15 +507,15 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 		case existing == nil:
 			r.add(Finding{Code: CodeDropInDrift, File: l.DropIn(),
 				Message: l.DropIn() + " is missing although the agent's generations are installed (" + l.Current() + "): sshd trusts no keyroster certificate until it is back. The preflight writes no trial drop-in here: it would make sshd trust current's CA keys without its KRL",
-				Fix:     "the next keyroster-agent apply that installs a new signed state writes it again (an apply with nothing new writes nothing); keyroster-agent check reports it until then"})
+				Fix:     "the next keyroster-agent apply writes it again; keyroster-agent check reports it until then"})
 		case bytes.Equal(existing, trialDropIn(l)):
 			r.add(Finding{Code: CodeDropInDrift, File: l.DropIn(),
 				Message: l.DropIn() + " holds a preflight trial drop-in, not the agent's own, on a host where the agent's generations are installed: an sshd that re-reads it trusts current's CA keys without the KRL",
 				Fix:     "run sudo keyroster-agent apply --once: it replaces the trial with the agent's drop-in and reloads sshd, even when the signed state has not changed"})
-		case !bytes.Equal(existing, DropIn(l)):
+		case !bytes.Equal(existing, w.Bytes):
 			r.add(Finding{Code: CodeDropInDrift, File: l.DropIn(),
 				Message: l.DropIn() + " differs from the drop-in the agent writes (edited by hand or by configuration management?)",
-				Fix:     "the next keyroster-agent apply that installs a new signed state rewrites it (the old file is kept as dropin.prev until that apply commits); keyroster-agent check reports it until then. Manage sshd settings in another file: the agent owns this one"})
+				Fix:     "the next keyroster-agent apply rewrites it (the old file is kept as dropin.prev until that apply commits); keyroster-agent check reports it until then. Manage sshd settings in another file: the agent owns this one"})
 		}
 		// The Phase 2 runbook's own two lines in 50-keyroster.conf, left by
 		// a takeover whose removal is unfinished, are shadowed by the
@@ -524,7 +528,7 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 			r.Notes = append(r.Notes, "the Phase 2 layout is still present beside the agent's drop-in; "+adoptCommand+" removes it")
 		}
 		foreignFindings(l, base, rest, existing, shadowed, r)
-	case existing != nil && !bytes.Equal(existing, DropIn(l)):
+	case existing != nil && !bytes.Equal(existing, w.Bytes):
 		r.add(Finding{Code: CodeForeignTrust, File: l.DropIn(), Message: l.DropIn() + " exists and is not the agent's drop-in",
 			Fix: "move it away; the agent owns that file name"})
 	case existing != nil:
@@ -589,7 +593,11 @@ func (e *engine) preflightApply(v *state.Verified, g *Generation) error {
 	if err != nil {
 		return err
 	}
-	if lg.kind != linkNone && bytes.Equal(old, DropIn(e.l)) {
+	w, err := e.wantDropIn()
+	if err != nil {
+		return err
+	}
+	if lg.kind != linkNone && bytes.Equal(old, w.Bytes) {
 		return nil
 	}
 	if bytes.Equal(old, trialDropIn(e.l)) {
@@ -609,7 +617,7 @@ func (e *engine) preflightApply(v *state.Verified, g *Generation) error {
 		// and activateDropIn checks the result: the graph evaluates that
 		// file, so the edit is repaired, never refused (D-R2; PR #68 review
 		// fix round 2, P1).
-		own = DropIn(e.l)
+		own = w.Bytes
 	}
 	hits, problems := trustSettingHits(e.l, e.cfg.SSHDConfig, own)
 	for _, f := range problems {
@@ -626,7 +634,7 @@ func (e *engine) preflightApply(v *state.Verified, g *Generation) error {
 		default:
 			foreignFindings(e.l, e.dump, hits, nil, nil, r)
 		}
-	case old == nil || bytes.Equal(old, DropIn(e.l)) || lg.kind != linkNone:
+	case old == nil || bytes.Equal(old, w.Bytes) || lg.kind != linkNone:
 		// Once a generation of the agent's is last-good, 00-keyroster.conf
 		// is the agent's own file: bytes that differ from DropIn are drift
 		// writeDropIn repairs (kept as dropin.prev, sshd -t, the sshd -T

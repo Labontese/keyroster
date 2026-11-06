@@ -1,6 +1,7 @@
 // Package paths is the keyroster agent's on-disk layout and the allowlist
 // of everything the root applier may write (D-07): the keyroster tree
-// under <root>/etc/ssh/keyroster/, the one sshd drop-in
+// under <root>/etc/ssh/keyroster/ (the generations, and since 03-09 the
+// host certificates in <root>/etc/ssh/keyroster/host/), the one sshd drop-in
 // <root>/etc/ssh/sshd_config.d/00-keyroster.conf and the applier's own
 // state directory. Every write in internal/agent goes through Allowed
 // first, and TestPaths checks that statically. ExecSites lists the only
@@ -63,6 +64,11 @@ func (l Layout) Current() string { return filepath.Join(l.KeyrosterDir(), "curre
 
 // LastGood is the link to the last generation that passed its self-test.
 func (l Layout) LastGood() string { return filepath.Join(l.KeyrosterDir(), "last-good") }
+
+// HostCertDir is <root>/etc/ssh/keyroster/host, the host certificates the
+// drop-in's HostCertificate lines name (03-09): immutable files
+// <key sha256>-<serial>-cert.pub, mode 0644 in a 0755 directory.
+func (l Layout) HostCertDir() string { return filepath.Join(l.KeyrosterDir(), "host") }
 
 // DropInDir is <root>/etc/ssh/sshd_config.d.
 func (l Layout) DropInDir() string { return filepath.Join(l.Root, "etc", "ssh", "sshd_config.d") }

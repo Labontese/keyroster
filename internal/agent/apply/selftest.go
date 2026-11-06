@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/Labontese/keyroster/internal/agent/hostcert"
 )
 
 // Self-test refusals.
@@ -197,6 +199,115 @@ func (e *engine) selfTest(ctx context.Context, dump Dump, keys []ssh.PublicKey) 
 		e.logf("self-test skipped %s", strings.Join(skipped, "; "))
 	}
 	return nil
+}
+
+// ErrServedCertMismatch is the served-certificate self-test's failure
+// (03-09): sshd did not serve an installed certificate of an algorithm
+// within SelfTestTimeout.
+var ErrServedCertMismatch = errors.New("served_cert_mismatch")
+
+// CodeHostCertAlgorithmDisabled names a certificate algorithm sshd -T's
+// hostkeyalgorithms leaves out: its keys are not dialled, reported
+// served false, and held (03-09).
+const CodeHostCertAlgorithmDisabled = "host_cert_algorithm_disabled"
+
+// hostCertSelfTest checks that sshd serves the installed host
+// certificates (03-09, D1): for each certificate algorithm installed, it
+// dials the first loopback target with that algorithm alone until a
+// served certificate equals an installed one of that algorithm, retrying
+// every 100 ms (a reloading sshd, or one still negotiating, counts as not
+// yet) until SelfTestTimeout, and fails served_cert_mismatch otherwise. A
+// certificate algorithm sshd -T's hostkeyalgorithms leaves out is never
+// dialled: its keys are reported not served (host_cert_algorithm_disabled)
+// and the batch goes on. The map reports, by KeySHA256, which keys sshd was
+// seen serving. sshd serves, per algorithm, the certificate of the first
+// host key that has one (UNVERIFIED in this repository; the fake sshd
+// models it), so a second key of one algorithm is reported not served.
+func (e *engine) hostCertSelfTest(ctx context.Context, dump Dump, installed []*ssh.Certificate) (map[string]bool, error) {
+	served := map[string]bool{}
+	if len(installed) == 0 {
+		return served, nil
+	}
+	targets, err := loopbackTargets(dump)
+	if err != nil {
+		return nil, err
+	}
+	var offered []string
+	if algs := dump.One("hostkeyalgorithms"); algs != "" {
+		offered = strings.Split(algs, ",")
+	}
+	byAlg := map[string][]*ssh.Certificate{}
+	var algs []string
+	for _, c := range installed {
+		alg := c.Type()
+		if _, ok := byAlg[alg]; !ok {
+			algs = append(algs, alg)
+		}
+		byAlg[alg] = append(byAlg[alg], c)
+	}
+	deadline := time.Now().Add(e.cfg.SelfTestTimeout)
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	dial := e.dial
+	if dial == nil {
+		d := net.Dialer{Deadline: deadline}
+		dial = d.DialContext
+	}
+	for _, alg := range algs {
+		if offered != nil && !slices.Contains(offered, alg) {
+			e.logf("%s: sshd -T hostkeyalgorithms leaves out %s; its certificates are not served", CodeHostCertAlgorithmDisabled, alg)
+			continue
+		}
+		for {
+			got, err := probeCert(ctx, dial, targets[0], deadline, alg)
+			if err == nil {
+				if i := slices.IndexFunc(byAlg[alg], func(c *ssh.Certificate) bool { return bytes.Equal(c.Marshal(), got.Marshal()) }); i >= 0 {
+					served[hostcert.KeySHA256(byAlg[alg][i].Key)] = true
+					break
+				}
+			}
+			if time.Now().Add(100 * time.Millisecond).After(deadline) {
+				return nil, fmt.Errorf("%w: sshd on %s does not serve an installed %s certificate", ErrServedCertMismatch, targets[0], alg)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("%w: sshd on %s does not serve an installed %s certificate", ErrServedCertMismatch, targets[0], alg)
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+	return served, nil
+}
+
+// probeCert is one handshake with addr offering only host key algorithm
+// alg, returning the host certificate sshd served.
+func probeCert(ctx context.Context, dial func(ctx context.Context, network, addr string) (net.Conn, error), addr string, deadline time.Time, alg string) (*ssh.Certificate, error) {
+	conn, err := dial(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, err
+	}
+	var seen ssh.PublicKey
+	cfg := &ssh.ClientConfig{
+		User:              "keyroster-selftest",
+		HostKeyAlgorithms: []string{alg},
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			seen = key
+			return errHostKeySeen
+		},
+	}
+	_, _, _, err = ssh.NewClientConn(conn, addr, cfg)
+	c, ok := seen.(*ssh.Certificate)
+	if !ok {
+		if err == nil {
+			err = errors.New("sshd served no certificate")
+		}
+		return nil, err
+	}
+	return c, nil
 }
 
 // ipv6Disabled reports whether IPv6 is disabled on lo: disable_ipv6 is 1,

@@ -368,9 +368,9 @@ func (e *engine) finishAdoption(ctx context.Context) error {
 	// first install is repaired here, never left to fail the effectiveness
 	// check below on every run (owner decision D-R2; PR #68 review fix
 	// round 2, P2).
-	if old, err := e.readDropIn(); err != nil {
+	if same, err := e.dropInIsWanted(); err != nil {
 		return err
-	} else if !bytes.Equal(old, DropIn(e.l)) {
+	} else if !same {
 		if err := e.repairDropIn(ctx); err != nil {
 			return fmt.Errorf("repairing %s before removing the Phase 2 layout: %w", e.l.DropIn(), err)
 		}
@@ -403,7 +403,11 @@ func (e *engine) finishAdoption(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := e.checkDropInEffective(ctx, dump); err != nil {
+	w, err := e.wantDropIn()
+	if err != nil {
+		return err
+	}
+	if err := e.checkDropInEffective(ctx, dump, w.Spec); err != nil {
 		return err
 	}
 	if err := e.removeAll(e.l.State(adoptBak)); err != nil {

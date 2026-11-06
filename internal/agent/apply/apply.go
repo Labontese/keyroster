@@ -31,6 +31,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
+	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
@@ -503,32 +504,63 @@ func (e *engine) preRepairDropIn() (func(), error) {
 	if err != nil || lg.kind != linkAgent {
 		return nil, err
 	}
-	old, err := e.readDropIn()
-	if err != nil || bytes.Equal(old, DropIn(e.l)) {
+	if same, err := e.dropInIsWanted(); err != nil || same {
 		return nil, err
 	}
 	unlock, err := e.lock()
 	if err != nil {
 		return nil, err
 	}
-	if err := e.fault("pre-repair"); err != nil {
+	if err := e.preRepairDropInLocked(); err != nil {
 		unlock()
 		return nil, err
 	}
-	if err := e.writeFile(e.l.DropInDir(), paths.DropInName, DropIn(e.l), 0o644); err != nil {
-		unlock()
-		return nil, err
+	return unlock, nil
+}
+
+// dropInIsWanted reports whether the drop-in on disk is wantDropIn()'s
+// bytes.
+func (e *engine) dropInIsWanted() (bool, error) {
+	old, err := e.readDropIn()
+	if err != nil {
+		return false, err
+	}
+	w, err := e.wantDropIn()
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(old, w.Bytes), nil
+}
+
+// preRepairDropInLocked is preRepairDropIn's write, with apply.lock held:
+// the pre-repair fault point and the agent's drop-in (wantDropIn's bytes)
+// written back. HostCerts calls it under its own lock after it has
+// checked the same conditions (03-09).
+func (e *engine) preRepairDropInLocked() error {
+	if err := e.fault("pre-repair"); err != nil {
+		return err
+	}
+	w, err := e.wantDropIn()
+	if err != nil {
+		return err
+	}
+	if err := e.writeFile(e.l.DropInDir(), paths.DropInName, w.Bytes, 0o644); err != nil {
+		return err
 	}
 	e.preRepaired = true
 	e.logf("WARNING sshd -T failed while %s was not the agent's drop-in; wrote the agent's drop-in back before reading sshd -T again", e.l.DropIn())
-	return unlock, nil
+	return nil
 }
 
 // activatePreRepair finishes preRepairDropIn under the lock: sshd -t, the
 // sshd -T checks and the reload (activateDropIn), then the self-test. The
 // run is then not a no-op.
 func (e *engine) activatePreRepair(ctx context.Context) error {
-	if err := e.activateDropIn(ctx); err != nil {
+	w, err := e.wantDropIn()
+	if err != nil {
+		return err
+	}
+	if err := e.activateDropIn(ctx, w.Spec); err != nil {
 		return err
 	}
 	e.dropInRepaired = true
@@ -537,7 +569,6 @@ func (e *engine) activatePreRepair(ctx context.Context) error {
 		return err
 	}
 	e.report.SelfTest = "pass"
-	var err error
 	e.dump, err = e.sshdDump(ctx, "")
 	return err
 }
@@ -584,7 +615,7 @@ func (e *engine) repairDropIn(ctx context.Context) error {
 		return err
 	}
 	if changed {
-		if err := e.activateDropIn(ctx); err != nil {
+		if err := e.activateWanted(ctx); err != nil {
 			return err
 		}
 	}
@@ -600,6 +631,35 @@ func (e *engine) repairDropIn(ctx context.Context) error {
 	}
 	e.dump, err = e.sshdDump(ctx, "")
 	return err
+}
+
+// repairNoOp is the drop-in half of the no-op decisions (03-09, D1): on an
+// installed host (last-good is the agent's) whose drop-in differs from
+// wantDropIn (a HostCertificate section lost, an edit), a run that would
+// otherwise be a no-op, or commit versions that change nothing on disk,
+// runs preflightApply and then repairDropIn (writeDropIn, activateDropIn,
+// the self-test), with no new generation; the run is then not a no-op. On
+// --dry-run it only names the repair in the report.
+func (e *engine) repairNoOp(ctx context.Context, v *state.Verified, g *Generation) error {
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil || lg.kind != linkAgent {
+		return err
+	}
+	if same, err := e.dropInIsWanted(); err != nil || same {
+		return err
+	}
+	if e.cfg.DryRun {
+		e.report.Diff = append(e.report.Diff, "repair "+e.l.DropIn()+": it differs from the drop-in the agent writes")
+		return nil
+	}
+	if err := e.preflightApply(v, g); err != nil {
+		return err
+	}
+	if err := e.repairDropIn(ctx); err != nil {
+		return err
+	}
+	e.report.NoOp = false
+	return nil
 }
 
 // atRollbackTarget reports whether current already holds
@@ -791,6 +851,11 @@ func (e *engine) forward(ctx context.Context) error {
 		// unchanged capture is rendered too, so principals installed before
 		// are removed; a render equal to current is the no-op below.
 		if !v.Changed() && v.DirectoryUnauthorized == nil {
+			// The no-op includes the drop-in's spec (03-09, D1): one that
+			// differs from wantDropIn is repaired first.
+			if err := e.repairNoOp(ctx, v, nil); err != nil {
+				return err
+			}
 			// A run that replaced a trial drop-in wrote it: not a no-op.
 			e.report.NoOp = !e.dropInRepaired
 			// The KRL in force is current's, which a rollback or crash
@@ -811,7 +876,11 @@ func (e *engine) forward(ctx context.Context) error {
 			if !v.Changed() && cur != nil && sameBytes(cur, g) {
 				// F03 (03-08f): the unauthorized state is already in force.
 				// Nothing is committed, so the idle run stages no accepted/
-				// snapshot, as the no-change branch above.
+				// snapshot, as the no-change branch above. The drop-in's spec
+				// is repaired first (03-09, D1).
+				if err := e.repairNoOp(ctx, v, g); err != nil {
+					return err
+				}
 				e.report.NoOp = !e.dropInRepaired
 				if curLink.kind != linkAgent {
 					cur = nil
@@ -832,6 +901,11 @@ func (e *engine) forward(ctx context.Context) error {
 				// render's host status is the one in force now (a removed
 				// entry listed again under other keys keeps the same, empty,
 				// principals).
+				// A drop-in that differs from wantDropIn is repaired before
+				// the commit (03-09, D1); a failed repair commits nothing.
+				if err := e.repairNoOp(ctx, v, g); err != nil {
+					return err
+				}
 				e.setVersions(v, g)
 				e.report.Generation = curLink.n
 				if err := e.setHostStatus(curLink.n, g.HostStatus); err != nil {
@@ -925,7 +999,7 @@ func (e *engine) forward(ctx context.Context) error {
 		return e.rollback(ctx, err, lg)
 	}
 	if changed {
-		if err := e.activateDropIn(ctx); err != nil {
+		if err := e.activateWanted(ctx); err != nil {
 			return e.rollback(ctx, err, lg)
 		}
 	}
@@ -1565,7 +1639,7 @@ func (e *engine) firstInstall(ctx context.Context, g *Generation, v *state.Verif
 		return e.failFirstInstall(ctx, err)
 	}
 	if changed {
-		if err := e.activateDropIn(ctx); err != nil {
+		if err := e.activateWanted(ctx); err != nil {
 			return e.failFirstInstall(ctx, err)
 		}
 	}
@@ -1793,15 +1867,127 @@ func (e *engine) finishCommit(n, snap uint64) error {
 	return nil
 }
 
-// DropIn is the agent's sshd drop-in for layout l: a header comment and
-// three lines naming only current/... paths. The agent never writes
-// /etc/ssh/sshd_config (D-07).
-func DropIn(l Layout) []byte {
+// DropInSpec is the persisted content of the drop-in beyond the layout
+// (03-09, D1): the host certificate paths its HostCertificate lines name.
+// 03-14 adds the break-glass Match block.
+type DropInSpec struct {
+	HostCertificates []string
+}
+
+// DropIn is the agent's sshd drop-in for layout l and spec s, its only
+// renderer (D1): a header comment, the three trust lines naming only
+// current/... paths, then one HostCertificate line per path of s, sorted.
+// The empty spec renders the drop-in of 03-05 byte for byte. The agent
+// never writes /etc/ssh/sshd_config (D-07).
+func DropIn(l Layout, s DropInSpec) []byte {
 	cur := l.Current()
-	return []byte(dropInHeader +
+	b := dropInHeader +
 		"TrustedUserCAKeys " + filepath.Join(cur, CAFile) + "\n" +
 		"RevokedKeys " + filepath.Join(cur, KRLFile) + "\n" +
-		"AuthorizedPrincipalsFile " + filepath.Join(cur, PrincipalsDir, "%u") + "\n")
+		"AuthorizedPrincipalsFile " + filepath.Join(cur, PrincipalsDir, "%u") + "\n"
+	for _, p := range slices.Sorted(slices.Values(s.HostCertificates)) {
+		b += "HostCertificate " + p + "\n"
+	}
+	return []byte(b)
+}
+
+// Record codes of wantDropIn (03-09, D1): what is wrong with the
+// host-certificate record. Each leaves the empty spec, never an error, so
+// trust files and KRLs keep landing (D-R2).
+const (
+	CodeHostCertRecordMissing = "hostcert_record_missing"
+	CodeHostCertRecordInvalid = "hostcert_record_invalid"
+	CodeHostCertInMatch       = "hostcert_in_match"
+)
+
+// dropInWant is what wantDropIn derives: the drop-in the committed set
+// renders (Bytes) and its spec, the candidate's render while an install
+// runs (InstallBytes, nil otherwise; only drift's Check reads it), and the
+// record code that made the spec empty ("" for none).
+type dropInWant struct {
+	Bytes        []byte
+	InstallBytes []byte
+	Spec         DropInSpec
+	Code         string
+}
+
+// wantDropIn is the only reader of the persisted spec (D1): the committed
+// set of <state>/hostcert.json. It writes nothing. Every compare site uses
+// Bytes. It returns an error only when the state directory itself cannot
+// be read; every record problem is the empty spec and a code:
+//   - no state directory open (a preflight without one): the empty spec;
+//   - no record: hostcert_record_missing when a certificate file is in the
+//     host-certificate directory, else the legacy empty spec;
+//   - a record that is a symlink, not a regular file, oversize, not 0600,
+//     not owned by the effective uid, or that ParseRecord refuses:
+//     hostcert_record_invalid;
+//   - a committed set while the drop-in is read inside a Match block:
+//     hostcert_in_match (HostCertificate is a global keyword, fatal inside
+//     Match in upstream servconf.c; UNVERIFIED in this repository).
+func (e *engine) wantDropIn() (dropInWant, error) {
+	empty := dropInWant{Bytes: DropIn(e.l, DropInSpec{})}
+	if e.stateFd < 0 {
+		return empty, nil
+	}
+	rec, code, err := e.readHostCertRecord()
+	if err != nil {
+		return dropInWant{}, err
+	}
+	if code != "" || rec == nil {
+		empty.Code = code
+		return empty, nil
+	}
+	if len(rec.Committed) > 0 {
+		files, _ := configGraph(e.l, e.cfg.SSHDConfig, DropIn(e.l, DropInSpec{}))
+		if dropInInMatch(e.l, files) {
+			empty.Code = CodeHostCertInMatch
+			return empty, nil
+		}
+	}
+	spec := specOf(e.l.HostCertDir(), rec.Committed)
+	w := dropInWant{Bytes: DropIn(e.l, spec), Spec: spec}
+	if rec.InProgress {
+		w.InstallBytes = DropIn(e.l, specOf(e.l.HostCertDir(), rec.Candidate))
+	}
+	return w, nil
+}
+
+// specOf is the only builder of a non-empty spec: one HostCertificate
+// path per entry, in dir.
+func specOf(dir string, entries []hostcert.Entry) DropInSpec {
+	s := DropInSpec{}
+	for _, en := range entries {
+		s.HostCertificates = append(s.HostCertificates, filepath.Join(dir, en.File))
+	}
+	return s
+}
+
+// writeDropInSpec writes DropIn(l, s) as the drop-in, for HostCerts'
+// install and rollback (03-09). Unlike writeDropIn it writes no
+// dropin.prev and no marker: the host-certificate record is its journal.
+func (e *engine) writeDropInSpec(s DropInSpec) error {
+	return e.writeFile(e.l.DropInDir(), paths.DropInName, DropIn(e.l, s), 0o644)
+}
+
+// activateWanted is activateDropIn with wantDropIn's spec, the one every
+// Apply path checks.
+func (e *engine) activateWanted(ctx context.Context) error {
+	w, err := e.wantDropIn()
+	if err != nil {
+		return err
+	}
+	return e.activateDropIn(ctx, w.Spec)
+}
+
+// dropInInMatch reports whether the walk reached the agent's drop-in
+// inside a Match block.
+func dropInInMatch(l Layout, files []configFile) bool {
+	for _, f := range files {
+		if f.path == l.DropIn() && f.inMatch {
+			return true
+		}
+	}
+	return false
 }
 
 // readDropIn reads the drop-in now on disk, nil when there is none.
@@ -1827,7 +2013,11 @@ func (e *engine) readDropIn() ([]byte, error) {
 // kept as dropin.prev (none when there was none), the marker records
 // dropin_changed, then the file is written. It reports whether it wrote.
 func (e *engine) writeDropIn() (bool, error) {
-	want := DropIn(e.l)
+	w, err := e.wantDropIn()
+	if err != nil {
+		return false, err
+	}
+	want := w.Bytes
 	old, err := e.readDropIn()
 	if err != nil {
 		return false, err
@@ -1914,16 +2104,27 @@ func principalAccounts(g *Generation) []string {
 	return out
 }
 
+// hostCertificateKeyword is sshd -T's spelling of HostCertificate.
+const hostCertificateKeyword = "hostcertificate"
+
 // checkDropInEffective checks that sshd -T reports the drop-in's three
-// paths and no AuthorizedPrincipalsCommand (D-R3), and so does sshd -T -C
+// paths, every HostCertificate path of spec (03-09), and no
+// AuthorizedPrincipalsCommand (D-R3), and so does sshd -T -C
 // for every account current holds a principals file for (03-06,
 // T-03-34: a Match block that overrides a trust setting for a managed
 // account makes the drop-in not effective for that account).
-func (e *engine) checkDropInEffective(ctx context.Context, dump Dump) error {
+func (e *engine) checkDropInEffective(ctx context.Context, dump Dump, spec DropInSpec) error {
 	want := ourValues(e.l)
 	for _, k := range trustKeywords {
 		if got := dump.One(k); got != want[k] {
 			return fmt.Errorf("%w: sshd -T reports %s %q, want %q; another configuration file sets it first", ErrDropInNotEffective, k, got, want[k])
+		}
+	}
+	// Every HostCertificate line of the spec must be in sshd -T's whole
+	// hostcertificate list (03-09, dropin-01).
+	for _, p := range spec.HostCertificates {
+		if !slices.Contains(dump[hostCertificateKeyword], p) {
+			return fmt.Errorf("%w: sshd -T does not list hostcertificate %s, which the drop-in names", ErrDropInNotEffective, p)
 		}
 	}
 	if got := dump.One(principalsCommand); !isDefault(got) {
@@ -1962,7 +2163,7 @@ func (e *engine) checkDropInEffective(ctx context.Context, dump Dump) error {
 // sshd -T now reports its three paths, globally and for every managed
 // account (a drop-in read after another file that sets them, or a Match
 // block that overrides them, is not effective), and reloads sshd.
-func (e *engine) activateDropIn(ctx context.Context) error {
+func (e *engine) activateDropIn(ctx context.Context, spec DropInSpec) error {
 	if err := e.sshdTest(ctx); err != nil {
 		return err
 	}
@@ -1970,7 +2171,7 @@ func (e *engine) activateDropIn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := e.checkDropInEffective(ctx, dump); err != nil {
+	if err := e.checkDropInEffective(ctx, dump, spec); err != nil {
 		return err
 	}
 	if err := e.fault("reload"); err != nil {
@@ -2005,7 +2206,11 @@ func (e *engine) restoreDropIn(ctx context.Context) error {
 		return err
 	}
 	if lg.kind == linkAgent && prev != nil {
-		prev = DropIn(e.l)
+		w, err := e.wantDropIn()
+		if err != nil {
+			return err
+		}
+		prev = w.Bytes
 	}
 	if prev != nil {
 		err = e.writeFile(e.l.DropInDir(), paths.DropInName, prev, 0o644)
