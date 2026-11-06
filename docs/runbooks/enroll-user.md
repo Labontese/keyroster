@@ -523,6 +523,20 @@ partly refreshed, and 1 when nothing was written. `keyroster login`
 always exits 0 for its certificate, whatever the host trust outcome. Run
 in CI (03-09b): `TestKnownHostsSync`, `TestLoginFlowFakeServer`.
 
+Two refreshes of one user at the same time (a `keyroster login` while a
+`known-hosts sync` runs) take no lock. Right before each file it renames,
+a run reads the state again (and, before the KRL, the KRL on disk), and
+when the other run has recorded newer files it stops without writing
+anything older: `Host trust not refreshed: a concurrent refresh won: ...`.
+A residual remains (owner decision D-R1): a rename right after that check
+can still land behind the other run's, so an older KRL, older CA lines or
+an older Host block can stay in place, and a revocation the newer KRL
+holds is then not enforced, until the next refresh re-verifies and
+rewrites every file. Run in CI (03-09b):
+`TestKnownHosts/concurrent_state_after_state_step_stops_krl`,
+`TestKnownHosts/concurrent_newer_krl_on_disk_stops_krl`; the window
+itself is UNVERIFIED (no test can time it).
+
 **3. What every signed-in user receives (T-03-100).** Every user who
 completes a passkey login receives the whole admin-signed directory with
 the login answer: users, roles, groups and memberships; hosts with their

@@ -1521,6 +1521,72 @@ func knownHostsEdgeCases(t *testing.T) {
 			t.Fatalf("state %+v rolled back below the floor a concurrent run wrote", st)
 		}
 	})
+	// D-R1 (owner decision 2026-11-06): right before each managed file's
+	// rename the state is read again (and the KRL on disk, for the KRL);
+	// a concurrent run that recorded newer files meanwhile stops this one
+	// there. hostTrustFault runs between the steps, so the other run's
+	// write lands deterministically between two renames.
+	for _, tc := range []struct {
+		name, after string
+		// kept are the managed files that must keep their bytes.
+		kept []string
+	}{
+		{"concurrent_state_after_state_step_stops_krl", "state", []string{hostTrustKRLFile, hostTrustKnownHosts, hostTrustSSHConfig}},
+		{"concurrent_state_after_krl_step_stops_known_hosts", "krl", []string{hostTrustKnownHosts, hostTrustSSHConfig}},
+		{"concurrent_state_after_known_hosts_step_stops_config", "known_hosts", []string{hostTrustSSHConfig}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHTFix(t, 1, 1)
+			mustRun(t, f.in(t, web(t, f, 1, "web1"), f.krlV(t, 1)), hostTrustFull)
+			before := f.files(t)
+			var seeded *hostTrustState
+			useFault(t, func(step string) error {
+				if step == tc.after {
+					st := f.state(t)
+					st.KRLVersion, st.DirectoryVersion, st.DirectorySHA256 = 9, 5, strings.Repeat("ef", 32)
+					writeSeedStateAt(t, f.statePath, st)
+					seeded = st
+				}
+				return nil
+			})
+			stdout, _ := mustRun(t, f.in(t, web(t, f, 2, "web2"), f.krlV(t, 2)), hostTrustNone)
+			if !strings.Contains(stdout, "a concurrent refresh won: another run recorded a newer host trust state meanwhile (directory v5, KRL v9)") {
+				t.Fatalf("stdout %q", stdout)
+			}
+			after := f.files(t)
+			for _, n := range tc.kept {
+				if after[n] != before[n] {
+					t.Fatalf("%s was written after a concurrent run recorded a newer state", n)
+				}
+			}
+			if st := f.state(t); st.KRLVersion != seeded.KRLVersion || st.DirectoryVersion != seeded.DirectoryVersion {
+				t.Fatalf("state %+v, want the concurrent run's", st)
+			}
+		})
+	}
+	t.Run("concurrent_newer_krl_on_disk_stops_krl", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		mustRun(t, f.in(t, web(t, f, 1, "web1"), f.krlV(t, 1)), hostTrustFull)
+		before := f.files(t)
+		newer, err := krl.Encode(krl.Set{}, 9, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		useFault(t, func(step string) error {
+			if step == "state" {
+				writeTestFile(t, filepath.Join(f.sshDir, hostTrustKRLFile), newer)
+			}
+			return nil
+		})
+		stdout, _ := mustRun(t, f.in(t, web(t, f, 2, "web2"), f.krlV(t, 2)), hostTrustNone)
+		if !strings.Contains(stdout, "already holds KRL version 9, newer than this run's 2") {
+			t.Fatalf("stdout %q", stdout)
+		}
+		after := f.files(t)
+		if after[hostTrustKRLFile] != string(newer) || after[hostTrustKnownHosts] != before[hostTrustKnownHosts] || after[hostTrustSSHConfig] != before[hostTrustSSHConfig] {
+			t.Fatal("a run wrote a managed file over a newer KRL on disk")
+		}
+	})
 
 	// The Include placement.
 	withConfig := func(t *testing.T, cfg string) (string, string) {

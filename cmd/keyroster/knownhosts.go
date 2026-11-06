@@ -507,9 +507,11 @@ func writeHostTrust(in hostTrustInput, stdout, stderr io.Writer) hostTrustResult
 	if err != nil {
 		return none(fmt.Sprintf("the KRL the server serves does not verify against your root-pinned trust bundle: %v", serverclient.PeerError(err)))
 	}
-	if _, err := krl.Parse(in.KRL.KRL); err != nil {
+	parsed, err := krl.Parse(in.KRL.KRL)
+	if err != nil {
 		return none(fmt.Sprintf("the KRL the server serves (v%d) is signed but does not parse: %v", m.KRLVersion, err))
 	}
+	w.krlVersion = parsed.Version
 	if issued, err := time.Parse(trust.TimeFormat, m.IssuedAt); err == nil && in.Now.Sub(issued) > hostTrustStale {
 		_, _ = fmt.Fprintf(stderr, "Warning: the KRL the server serves (v%d) was issued at %s, %s ago; the server may be withholding newer revocations.\n",
 			m.KRLVersion, m.IssuedAt, in.Now.Sub(issued).Round(time.Second))
@@ -627,7 +629,8 @@ var hostTrustMergeHook func()
 // is set, and nothing may be written, when the state on disk is newer than
 // this run's inputs, or damaged. frozen reports that the union would pass
 // the bound, so the names on disk are kept. There is no lock file:
-// concurrent runs never roll back below the floor the run began with.
+// concurrent runs never roll back below the floor the run began with, and
+// write checks again before each managed file's rename (overtaken).
 func (w *hostTrustWriter) merge(next *hostTrustState) (*hostTrustState, bool, string) {
 	if hostTrustMergeHook != nil {
 		hostTrustMergeHook()
@@ -640,8 +643,7 @@ func (w *hostTrustWriter) merge(next *hostTrustState) (*hostTrustState, bool, st
 		return next, false, ""
 	case r.InstallationID != next.InstallationID:
 		return nil, false, w.damaged(fmt.Sprintf("the host trust state %s now belongs to installation %s", w.statePath, r.InstallationID))
-	case r.BundleVersion > next.BundleVersion || r.DirectoryVersion > next.DirectoryVersion || r.KRLVersion > next.KRLVersion ||
-		(r.DirectoryVersion == next.DirectoryVersion && r.DirectorySHA256 != next.DirectorySHA256):
+	case newerHostTrustState(r, next):
 		return nil, false, fmt.Sprintf("another run wrote a newer host trust state meanwhile (directory v%d, KRL v%d); this run's files would be older, so it wrote none",
 			r.DirectoryVersion, r.KRLVersion)
 	}
@@ -652,6 +654,52 @@ func (w *hostTrustWriter) merge(next *hostTrustState) (*hostTrustState, bool, st
 		return &m, true, ""
 	}
 	return &m, false, ""
+}
+
+// newerHostTrustState reports whether the state r on disk is newer than
+// next, the state a run writes: a higher bundle, directory or KRL version,
+// or another directory at the same version.
+func newerHostTrustState(r, next *hostTrustState) bool {
+	return r.BundleVersion > next.BundleVersion || r.DirectoryVersion > next.DirectoryVersion || r.KRLVersion > next.KRLVersion ||
+		(r.DirectoryVersion == next.DirectoryVersion && r.DirectorySHA256 != next.DirectorySHA256)
+}
+
+// overtakenError stops a run whose files a concurrent run already
+// superseded (owner decision D-R1, 2026-11-06).
+type overtakenError struct {
+	what string
+}
+
+func (e *overtakenError) Error() string {
+	return "a concurrent refresh won: " + e.what + ", so this run stopped without writing anything older; the files are the other run's"
+}
+
+// overtaken is the check right before a managed file's rename (D-R1):
+// the state on disk is read again, and the run stops when another run
+// recorded a newer state than st, the one this run wrote, or, for the
+// KRL, when the KRL on disk parses with a higher version than this run's.
+// A state or KRL that cannot be read here does not stop the run (the
+// next run refuses a damaged state). A rename right after this check can
+// still land behind a concurrent one; the next refresh heals that.
+func (w *hostTrustWriter) overtaken(st *hostTrustState, name string) error {
+	if r, err := readHostTrustState(w.statePath); err == nil && r != nil && r.InstallationID == st.InstallationID && newerHostTrustState(r, st) {
+		return &overtakenError{what: fmt.Sprintf("another run recorded a newer host trust state meanwhile (directory v%d, KRL v%d)", r.DirectoryVersion, r.KRLVersion)}
+	}
+	if name != hostTrustKRLFile {
+		return nil
+	}
+	p := filepath.Join(w.sshDir, name)
+	if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
+	data, err := os.ReadFile(p) //nolint:gosec // G304: a managed file
+	if err != nil {
+		return nil
+	}
+	if k, err := krl.Parse(data); err == nil && k.Version > w.krlVersion {
+		return &overtakenError{what: fmt.Sprintf("%s already holds KRL version %d, newer than this run's %d", p, k.Version, w.krlVersion)}
+	}
+	return nil
 }
 
 // fileList names the four files a user deletes to start over.
@@ -809,23 +857,30 @@ type hostTrustStep struct {
 	do   func() error
 }
 
-// hostTrustWriter writes the state and the managed files.
+// hostTrustWriter writes the state and the managed files. krlVersion is
+// the version in the header of this run's KRL bytes.
 type hostTrustWriter struct {
 	sshDir, statePath string
+	krlVersion        uint64
 }
 
 // write writes the state, then the KRL, then known-hosts and the config
 // (each when non-nil), calling hostTrustFault after each step. Unchanged
-// bytes are not rewritten.
+// bytes are not rewritten. Right before each managed file's rename,
+// overtaken checks for a concurrent run that recorded newer files (D-R1),
+// and the run stops there if one did.
 func (w *hostTrustWriter) write(st *hostTrustState, krlBytes, knownHosts, config []byte) error {
 	state, err := st.encode()
 	if err != nil {
 		return err
 	}
+	managed := func(name string, data []byte) func() error {
+		return func() error { return w.managed(name, data, func() error { return w.overtaken(st, name) }) }
+	}
 	writeState := func() error { return writeStateFile(w.statePath, state) }
-	writeKRL := func() error { return w.managed(hostTrustKRLFile, krlBytes) }
-	writeKnownHosts := func() error { return w.managed(hostTrustKnownHosts, knownHosts) }
-	writeConfig := func() error { return w.managed(hostTrustSSHConfig, config) }
+	writeKRL := managed(hostTrustKRLFile, krlBytes)
+	writeKnownHosts := managed(hostTrustKnownHosts, knownHosts)
+	writeConfig := managed(hostTrustSSHConfig, config)
 	steps := []hostTrustStep{{"state", writeState}, {"krl", writeKRL}}
 	if knownHosts != nil {
 		steps = append(steps, hostTrustStep{"known_hosts", writeKnownHosts})
@@ -835,6 +890,10 @@ func (w *hostTrustWriter) write(st *hostTrustState, krlBytes, knownHosts, config
 	}
 	for _, s := range steps {
 		if err := s.do(); err != nil {
+			var ov *overtakenError
+			if errors.As(err, &ov) {
+				return fmt.Errorf("%w (before the %s)", err, s.name)
+			}
 			return fmt.Errorf("writing the %s failed: %w; the next refresh starts over", s.name, err)
 		}
 		if hostTrustFault != nil {
@@ -849,8 +908,9 @@ func (w *hostTrustWriter) write(st *hostTrustState, krlBytes, knownHosts, config
 // managed writes one managed file in ~/.ssh: ~/.ssh is created 0700 only
 // when absent, the file goes through a temporary file in ~/.ssh, chmod
 // 0644, fsync and rename (a symlink at the name is replaced, never
-// followed), then the directory is fsynced (not on Windows).
-func (w *hostTrustWriter) managed(name string, data []byte) error {
+// followed), then the directory is fsynced (not on Windows). check runs
+// right before the rename; its error stops the write there.
+func (w *hostTrustWriter) managed(name string, data []byte, check func() error) error {
 	if _, err := os.Lstat(w.sshDir); errors.Is(err, fs.ErrNotExist) {
 		if err := os.Mkdir(w.sshDir, 0o700); err != nil {
 			return err
@@ -858,7 +918,7 @@ func (w *hostTrustWriter) managed(name string, data []byte) error {
 	} else if err != nil {
 		return err
 	}
-	return replaceManagedFile(w.sshDir, name, data, 0o644)
+	return replaceManagedFile(w.sshDir, name, data, 0o644, check)
 }
 
 // writeStateFile writes the state 0600 in its 0700 directory (saveConfig's
@@ -868,12 +928,13 @@ func writeStateFile(path string, data []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return replaceManagedFile(dir, filepath.Base(path), data, 0o600)
+	return replaceManagedFile(dir, filepath.Base(path), data, 0o600, nil)
 }
 
 // replaceManagedFile atomically replaces dir/name with data at mode, unless it
-// is a regular file that already holds exactly data.
-func replaceManagedFile(dir, name string, data []byte, mode fs.FileMode) error {
+// is a regular file that already holds exactly data. check (nil: none) runs
+// right before the rename, and its error is returned with nothing renamed.
+func replaceManagedFile(dir, name string, data []byte, mode fs.FileMode, check func() error) error {
 	p := filepath.Join(dir, name)
 	if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
 		if old, err := os.ReadFile(p); err == nil && bytes.Equal(old, data) { //nolint:gosec // G304: a managed file
@@ -899,6 +960,11 @@ func replaceManagedFile(dir, name string, data []byte, mode fs.FileMode) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return err
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			return err
+		}
 	}
 	if err := os.Rename(tmp.Name(), p); err != nil {
 		return err
