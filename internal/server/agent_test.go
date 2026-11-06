@@ -617,7 +617,8 @@ func TestBrowserListenerUnchanged(t *testing.T) {
 // keyword.
 func TestAgentMuxRoutes(t *testing.T) {
 	e := newAgentEnv(t, true)
-	want := []string{"POST " + serverclient.AgentEnrollPath, "GET " + serverclient.AgentStatePath, "POST " + serverclient.AgentHeartbeatPath, "POST " + serverclient.AgentIdentityPath}
+	want := []string{"POST " + serverclient.AgentEnrollPath, "GET " + serverclient.AgentStatePath, "POST " + serverclient.AgentHeartbeatPath, "POST " + serverclient.AgentIdentityPath,
+		"POST " + serverclient.AgentHostCertPath}
 	if !slices.Equal(e.s.agentPatterns, want) {
 		t.Fatalf("agent patterns %q, want %q", e.s.agentPatterns, want)
 	}
@@ -1204,6 +1205,52 @@ func TestAgentRemoval(t *testing.T) {
 		}
 		if rec := state(t, e, id, ""); rec.Code != http.StatusForbidden || apiError(rec) != serverclient.AgentErrNotApproved {
 			t.Fatalf("the re-enrolled agent before its approval: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// hostCertBody is a POST body for AgentHostCertPath: a host request by
+// key for name, valid_for 0, created now, with an (unchecked) evidence
+// item; the signer, not the server, verifies the proof (03-09).
+func hostCertBody(t *testing.T, key ssh.Signer, name string) (*wire.HostIssueRequest, []byte) {
+	t.Helper()
+	req := &wire.HostIssueRequest{InstallationID: copyInstallation, HostName: name, HostKey: key.PublicKey().Marshal(),
+		CreatedAt: uint64(t0.Unix()), Evidence: []wire.Evidence{{Type: wire.EvidenceHostPoP, Blob: []byte("pop")}}} //nolint:gosec // G115: after 1970
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := req.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(serverclient.AgentHostCertRequest{Request: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req, body
+}
+
+// TestAgentHostCert (03-09, AGENT-06): POST AgentHostCertPath relays an
+// approved agent's host request for one of its enrolled keys and its
+// entry's name to the signer unchanged, and answers its certificate.
+func TestAgentHostCert(t *testing.T) {
+	t.Run("relays_for_approved_host", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		req, body := hostCertBody(t, hosts[0], "web1")
+		rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("host certificate: %d %s", rec.Code, rec.Body.String())
+		}
+		var a serverclient.AgentHostCertAnswer
+		if err := json.Unmarshal(rec.Body.Bytes(), &a); err != nil || string(a.Certificate) != "host-certificate" {
+			t.Fatalf("answer %s (%v), want the signer's certificate", rec.Body.String(), err)
+		}
+		e.fake.mu.Lock()
+		got, calls := e.fake.lastHostIssue, e.fake.calls["HostIssue"]
+		e.fake.mu.Unlock()
+		if calls != 1 || got == nil || !bytes.Equal(got.SigningBytes(), req.SigningBytes()) {
+			t.Fatalf("the signer got %d calls, request %+v; want the agent's request once, unchanged", calls, got)
 		}
 	})
 }

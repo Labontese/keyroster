@@ -35,7 +35,56 @@ const (
 	// (AgentIdentityRequest), authenticated by the current identity over
 	// mTLS; 200 (03-08, AGENT-02).
 	AgentIdentityPath = "/api/v1/agent/identity"
+	// AgentHostCertPath (POST): a host certificate request by one of the
+	// agent's enrolled host keys (AgentHostCertRequest, at most
+	// MaxAgentHostCertBody bytes), relayed to the signer; 200
+	// AgentHostCertAnswer (03-09, AGENT-06).
+	AgentHostCertPath = "/api/v1/agent/hostcert"
 )
+
+// MaxAgentHostCertBody bounds a host certificate request (03-09).
+const MaxAgentHostCertBody = 16 << 10
+
+// AgentHostCertRequest is the body of a POST to AgentHostCertPath: the
+// wire.HostIssueRequest bytes (its Marshal), standard base64 in JSON.
+type AgentHostCertRequest struct {
+	Request []byte `json:"request"`
+}
+
+// AgentHostCertAnswer is the 200 answer of AgentHostCertPath: the issued
+// or re-delivered host certificate in SSH wire format.
+type AgentHostCertAnswer struct {
+	Certificate []byte `json:"certificate"`
+}
+
+// Refusal details of AgentHostCertPath beyond the signer's own (03-09).
+const (
+	// AgentErrHostKeyNotEnrolled is a request whose host key is not one of
+	// the agent's enrolled keys (403).
+	AgentErrHostKeyNotEnrolled = "host_key_not_enrolled"
+	// AgentErrHostNameMismatch is a request whose host name is not the
+	// name of the entry that holds the agent's keys (403).
+	AgentErrHostNameMismatch = "host_name_mismatch"
+	// AgentErrSignerTooOld is a signer that does not know the host
+	// request (it answers unknown_message_type): upgrade the signer (403).
+	AgentErrSignerTooOld = "signer_too_old"
+)
+
+// AgentHostCert POSTs a host certificate request with the client's
+// certificate and returns the answer. A refusal is an *HTTPError, whose
+// Detail is the server's error text.
+func (c *Client) AgentHostCert(ctx context.Context, req *AgentHostCertRequest) (*AgentHostCertAnswer, error) {
+	var a AgentHostCertAnswer
+	if err := c.PostJSON(ctx, AgentHostCertPath, req, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// Detail is the server's error text of e ("" for none): on the agent
+// routes a refusal detail, such as a signer refusal relayed by
+// AgentHostCertPath.
+func (e *HTTPError) Detail() string { return e.api }
 
 // AgentIdentityDomain is the domain the old identity key signs a new
 // identity's SPKI under: the signed message is the domain, one zero byte
