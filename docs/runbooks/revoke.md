@@ -377,7 +377,14 @@ another version is installed first, NAME can obtain certificates again
 while it is still active. Once the disable is installed, run `keyroster
 revoke host NAME` again; its second sweep revokes anything issued in
 between. A host key with no certificate yet is not held (T-03-349; the
-signer-side issuance barrier is Phase 4's).
+signer-side issuance barrier is Phase 4's). A repeated revoke only holds
+if the certificate was not already revoked: when a host key's latest
+certificate is already revoked, the signer keeps the directory version
+of the first revoke, so once a newer directory version has been
+installed, running `revoke host` again does not renew the hold (owner
+decision D-R2). The second sweep, or the next `revoke host`, catches a
+certificate issued again in between; the hard barrier is Phase 4's
+issuance barrier.
 
 **Unknown names.** A name that is not in the directory is still swept,
 because the signer resolves the subject from its issuance records. That is

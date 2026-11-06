@@ -777,6 +777,17 @@ reach the host ([Removing a host](#removing-a-host)). The next poll pulls
 the signed state and `keyroster-agent run` applies it ([How fast changes
 arrive](#how-fast-changes-arrive)).
 
+The `--principal` names you approve are the names every user's client
+pins to the organisation's host CA at its next refresh
+([enroll-user.md, "Trusting hosts without TOFU"](enroll-user.md#trusting-hosts-without-tofu)).
+Give only names of this host: an external name (a public service such as
+`git.example.com`) or a wrong one (a mistyped name, an address) affects
+every user, whose ssh then refuses that service's own host key, and since
+the clients' names only grow, it stays refused after you fix or remove the
+entry. A user drops it by starting over (enroll-user.md, item 8). A
+root-signed scope of these names is planned for Phase 4 (owner decision
+D-R3).
+
 **Refusals.**
 
 | Code | Where | What it means | Fix |

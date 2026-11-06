@@ -607,6 +607,18 @@ rm ~/.config/keyroster/host-trust.json   # Linux; the refusal prints the path
 Run in CI (03-09b): `TestKnownHosts/missing_state_with_managed_files_refuses_all_writes`,
 `TestKnownHosts/bound_freezes_config_keeps_krl_and_known_hosts`.
 
+**Which names every client pins.** The Host block and the CA lines hold
+exactly the principals of the host entries in the admin-signed
+directory; the CLI checks their form, not whose names they are. So the
+admins who sign the directory choose which names every user's ssh trusts
+only the organisation's host CA for. An external name (a public service
+such as `git.example.com`) or a wrong one (a mistyped name, an address)
+affects every user at their next refresh: ssh then refuses that service's
+own host key. Names only grow, so a wrong name stays in the block, refused,
+after its entry is fixed or removed. To drop it on one client, start over
+(item 8). A root-signed scope of the names clients pin is planned for
+Phase 4 (owner decision D-R3).
+
 **9. The home ssh reads.** ssh expands `~` from the account's home in the
 account database, never from `$HOME`. So the CLI refuses every write when
 `$HOME` is not the account's home, and says so (QB-5). When the lookup
