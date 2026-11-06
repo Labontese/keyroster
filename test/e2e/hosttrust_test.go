@@ -94,7 +94,8 @@ func requireRealHome(t *testing.T) string {
 }
 
 // hostTrustKR is the keyroster CLI as admin, retrying while the server
-// rate-limits; a failing call is reported with its stdout and stderr.
+// rate-limits; a failing call is reported with its stdout and stderr. It
+// fails t, so each subtest builds its own.
 func hostTrustKR(t *testing.T, env *serverEnv, admin *cliEnv) func(args ...string) string {
 	t.Helper()
 	return func(args ...string) string {
@@ -297,7 +298,7 @@ func TestHostCertNoTOFU(t *testing.T) {
 	src := func(n byte) string { return net.IPv4(127, 0, 0, n).String() }
 	sync := func(t *testing.T) string {
 		t.Helper()
-		out := kr("known-hosts", "sync")
+		out := hostTrustKR(t, env, admin)("known-hosts", "sync")
 		if !strings.Contains(out, "Host trust refreshed (directory v") {
 			t.Fatalf("known-hosts sync printed no refresh line:\n%s", out)
 		}
@@ -351,6 +352,7 @@ func TestHostCertNoTOFU(t *testing.T) {
 	})
 
 	t.Run("user_login_writes_files", func(t *testing.T) {
+		kr := hostTrustKR(t, env, admin)
 		auth, fp := enroll(t, env, admin, "alice", webauthn.AlgES256)
 		kr("user", "approve", "alice", "--fingerprint", fp, "--yes")
 		kr("role", "grant", "ops", "--user", "alice", "--yes")
@@ -388,6 +390,7 @@ func TestHostCertNoTOFU(t *testing.T) {
 	})
 
 	t.Run("revoke_host_exit_0_agent_still_served", func(t *testing.T) {
+		kr := hostTrustKR(t, env, admin)
 		sync(t)
 		wantWeb1(t, "web1 before the revoke (the control)", keyAuth(c))
 		dir := t.TempDir()
@@ -487,7 +490,7 @@ func TestHostTrustLongLines(t *testing.T) {
 	admin.home = home
 	kr := hostTrustKR(t, env, admin)
 	kr("role", "add", "ops", "--max-ttl", "1h", "--yes")
-	hostTrustLongLines(t, env, kr, admin, home)
+	hostTrustLongLines(t, env, admin, home)
 }
 
 // longName is the i-th of the long test names: exactly 61 bytes, which
@@ -502,7 +505,7 @@ func longName(i int) string { return fmt.Sprintf("h%060d", i) }
 // D7 block after the Include leaves every other managed name strict, and
 // the same block above the Include does not (OpenSSH reads an Include
 // inside a non-matching Host block with NEVERMATCH).
-func hostTrustLongLines(t *testing.T, env *serverEnv, kr func(args ...string) string, admin *cliEnv, home string) {
+func hostTrustLongLines(t *testing.T, env *serverEnv, admin *cliEnv, home string) {
 	t.Helper()
 	sshDir := filepath.Join(home, ".ssh")
 	bundle, err := trust.ParseBundle(readFile(t, filepath.Join(env.Signer.BundleDir, "bundle.json")))
@@ -538,7 +541,7 @@ func hostTrustLongLines(t *testing.T, env *serverEnv, kr func(args ...string) st
 	t.Logf("state: %d names of 61 bytes, %d bytes", n, len(state))
 
 	t.Run("a_host_line_read_whole", func(t *testing.T) {
-		out := kr("known-hosts", "sync")
+		out := hostTrustKR(t, env, admin)("known-hosts", "sync")
 		t.Logf("known-hosts sync: %s", out)
 		managed := filepath.Join(sshDir, trustSSHConfig)
 		for _, name := range []string{names[0], names[n-1]} {
