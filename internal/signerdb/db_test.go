@@ -3,6 +3,8 @@ package signerdb
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -13,8 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
+
+	"github.com/Labontese/keyroster/internal/cert"
 )
 
 func openTemp(t *testing.T) (*DB, string) {
@@ -656,4 +661,123 @@ func TestRevocationTables(t *testing.T) {
 	if err != nil || st == nil || st.Version != 2 || string(st.KRL) != "k2" || string(st.Manifest) != "m2" || string(st.Sig) != "s2" {
 		t.Fatalf("KRLState = %+v, %v", st, err)
 	}
+}
+
+// subjectCert is a certificate of type typ with key ID kid (whose serial
+// it carries), signed by ca through cert.Build and valid for a day, in
+// SSH wire format.
+func subjectCert(t *testing.T, ca ssh.Signer, typ uint32, kid cert.KeyID) []byte {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cert.Build(cert.Request{Profile: cert.Profile{CertType: typ, MaxTTL: 48 * time.Hour}, Subject: k, Principals: []string{"p"},
+		Now: time.Now(), ValidFor: 24 * time.Hour, KeyID: kid, Serial: kid.Serial}, ca, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.Marshal()
+}
+
+// TestLiveIssuanceForSubject (03-09b): the subject scan reads kr1, kr2 and
+// kr3 key IDs under the role asked for, with an exact prefix, and still
+// refuses an invalid record.
+func TestLiveIssuanceForSubject(t *testing.T) {
+	_, caKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := ssh.NewSignerFromKey(caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const req = "000102030405060708090a0b0c0d0e0f"
+	at := uint64(time.Now().Unix()) //nolint:gosec // G115: after 1970
+	kr1 := func(role, sub string, ser uint64) cert.KeyID {
+		return cert.KeyID{CA: role, Subject: sub, Request: req, Policy: 1, Serial: ser}
+	}
+	kr2 := func(sub string, ser uint64) cert.KeyID {
+		return cert.KeyID{CA: "user", Subject: sub, Request: req, Policy: 1, Directory: 1, Roles: []string{"ops"}, Serial: ser}
+	}
+	kr3 := func(sub string, ser uint64) cert.KeyID {
+		return cert.KeyID{V3: true, CA: "host", Subject: sub, Request: req, Policy: 1, Directory: 1, Serial: ser}
+	}
+	type row struct {
+		role   string
+		keyID  cert.KeyID
+		serial uint64
+		blob   []byte // nil: a valid certificate
+	}
+	seed := func(t *testing.T, rows ...row) *DB {
+		t.Helper()
+		d, _ := openTemp(t)
+		for i, r := range rows {
+			typ := uint32(ssh.UserCert)
+			if r.role == "host" {
+				typ = ssh.HostCert
+			}
+			blob := r.blob
+			if blob == nil {
+				blob = subjectCert(t, ca, typ, r.keyID)
+			}
+			is := Issuance{Serial: r.serial, CARole: r.role, KeyID: r.keyID.String(), Cert: blob, IssuedAt: time.Now()}
+			is.RequestID[0], is.RequestID[1] = 0xab, byte(i)
+			if err := insert(d, is); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return d
+	}
+	live := func(t *testing.T, d *DB, role, subject string) ([]uint64, error) {
+		t.Helper()
+		var out []uint64
+		err := d.WithTx(context.Background(), func(tx *sql.Tx) error {
+			cs, err := d.LiveIssuanceForSubjectTx(context.Background(), tx, role, subject, at)
+			for _, c := range cs {
+				out = append(out, c.Serial)
+			}
+			return err
+		})
+		return out, err
+	}
+	want := func(t *testing.T, d *DB, role, subject string, serials ...uint64) {
+		t.Helper()
+		got, err := live(t, d, role, subject)
+		if err != nil || fmt.Sprint(got) != fmt.Sprint(serials) {
+			t.Fatalf("LiveIssuanceForSubjectTx(%s, %s) = %v, %v; want %v", role, subject, got, err, serials)
+		}
+	}
+	t.Run("kr3_host", func(t *testing.T) {
+		d := seed(t, row{"host", kr3("web1", 5), 5, nil})
+		want(t, d, "host", "web1", 5)
+	})
+	t.Run("kr1_host_via_ca_issue", func(t *testing.T) {
+		d := seed(t, row{"host", kr1("host", "web1", 6), 6, nil})
+		want(t, d, "host", "web1", 6)
+	})
+	t.Run("kr1_user_with_same_subject_not_found_for_host", func(t *testing.T) {
+		d := seed(t, row{"user", kr1("user", "web1", 7), 7, nil}, row{"host", kr3("web1", 8), 8, nil})
+		want(t, d, "host", "web1", 8)
+		want(t, d, "user", "web1", 7)
+	})
+	t.Run("prefix_exact", func(t *testing.T) {
+		d := seed(t, row{"host", kr3("web1", 9), 9, nil}, row{"host", kr3("web1-old", 10), 10, nil}, row{"host", kr1("host", "web1-old", 11), 11, nil})
+		want(t, d, "host", "web1", 9)
+		want(t, d, "host", "web1-old", 10, 11)
+	})
+	t.Run("user_role_unchanged", func(t *testing.T) {
+		d := seed(t, row{"user", kr1("user", "alice", 12), 12, nil}, row{"user", kr2("alice", 13), 13, nil}, row{"user", kr2("alice-x", 14), 14, nil})
+		want(t, d, "user", "alice", 12, 13)
+	})
+	t.Run("invalid_record_still_refused", func(t *testing.T) {
+		d := seed(t, row{"host", kr3("web1", 15), 15, []byte("not a certificate")})
+		if got, err := live(t, d, "host", "web1"); err == nil || !strings.Contains(err.Error(), "invalid issuance record") {
+			t.Fatalf("LiveIssuanceForSubjectTx = %v, %v; want invalid issuance record", got, err)
+		}
+	})
 }

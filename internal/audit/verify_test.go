@@ -2,6 +2,7 @@ package audit
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -2698,9 +2699,16 @@ func TestVerifyRevocations(t *testing.T) {
 			k := rf.ca.PublicKey().Marshal()
 			rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: k}, []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: k}}, nil)
 		}, "key_is_ca_of_this_installation"},
-		{"revoke_subject_kind_host_refused", func(rf *revokeFixture) {
-			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectHost, Subject: "web1"}, nil, nil)
+		// Host subjects resolve since 03-09b; machine subjects arrive
+		// with 03-11.
+		{"revoke_subject_kind_machine_refused", func(rf *revokeFixture) {
+			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectMachine, Subject: "web1"}, nil, nil)
 		}, "does not resolve"},
+		{"revoke_subject_host_accepted", func(rf *revokeFixture) {
+			c := rf.issueHostKR1("web1")
+			rf.revoke(subjectHost("web1"), []tlog.RevokedEntry{serialEntry(c)}, nil)
+			rf.publish(nil)
+		}, ""},
 		{"revoke_not_admin_refused", func(rf *revokeFixture) {
 			c := rf.issue()
 			req := &wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}
@@ -4201,4 +4209,86 @@ func TestVerifyHostIssueRevokeAndRestore(t *testing.T) {
 	if len(rep.Certificates) != 1 || rep.Certificates[0].Kind != tlog.KindHostIssue || !bytes.Equal(rep.Certificates[0].Cert, h.cert.Marshal()) {
 		t.Fatalf("Certificates %+v, want the host certificate as host_issue", rep.Certificates)
 	}
+}
+
+// subjectHost is a subject revocation of host name.
+func subjectHost(name string) *wire.RevokeRequest {
+	return &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectHost, Subject: name}
+}
+
+// issueHostKR1 logs one kr1 host certificate with subject (keyroster ca
+// issue --ca host --subject S, an hour) and returns it.
+func (rf *revokeFixture) issueHostKR1(subject string) *ssh.Certificate {
+	rf.t.Helper()
+	rf.serial++
+	rf.request++
+	keyID := cert.KeyID{CA: wire.CARoleHost.String(), Subject: subject, Request: strings.Repeat(hex.EncodeToString([]byte{rf.request}), 16), Policy: 1, Serial: rf.serial}
+	c, err := cert.Build(cert.Request{
+		Profile: roleProfile(ssh.HostCert), Subject: newSigner(rf.t, "ed25519").PublicKey(), Principals: []string{subject},
+		Now: issuedAt(rf.serial), ValidFor: time.Hour, KeyID: keyID, Serial: rf.serial,
+	}, rf.hostCA, rand.Reader)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	b, err := (&tlog.IssueBody{CARole: uint8(wire.CARoleHost), Serial: rf.serial, PolicyVersion: 1, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	rf.add(tlog.KindIssue, b)
+	return c
+}
+
+// TestVerifyRevokeHost (03-09b): audit verify re-derives a host subject
+// revocation as the signer resolves it: every live kr1 and kr3 host
+// certificate of the subject, under the host role, and refuses a machine
+// subject.
+func TestVerifyRevokeHost(t *testing.T) {
+	bySerial := func(es ...tlog.RevokedEntry) []tlog.RevokedEntry {
+		slices.SortFunc(es, func(a, b tlog.RevokedEntry) int { return cmp.Compare(a.Serial, b.Serial) })
+		return es
+	}
+	t.Run("subject_host_matches_signer", func(t *testing.T) {
+		hf := newHostFixture(t, 3600)
+		h1, h2 := hf.addHost(hf.key, nil, nil, nil), hf.addHost(hf.key2, nil, nil, nil)
+		rf := hf.rf()
+		rf.revoke(subjectHost("web1"), bySerial(serialEntry(h1.cert), serialEntry(h2.cert)), nil)
+		rf.publish(nil)
+		if rep := hf.wantPass(t); rep.Revocations != 1 || rep.RevokedEntries != 2 {
+			t.Fatalf("report: %d revocations, %d entries; want 1 and 2", rep.Revocations, rep.RevokedEntries)
+		}
+	})
+	t.Run("subject_host_missing_entry_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 3600)
+		h1 := hf.addHost(hf.key, nil, nil, nil)
+		hf.addHost(hf.key2, nil, nil, nil)
+		rf := hf.rf()
+		rf.revoke(subjectHost("web1"), []tlog.RevokedEntry{serialEntry(h1.cert)}, nil)
+		rf.publish(nil)
+		if _, err := hf.verifyHosts(); err == nil {
+			t.Fatal("a host revoke entry listing fewer serials than the live host certificates verified")
+		}
+	})
+	t.Run("subject_machine_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 3600)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.rf().revoke(&wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectMachine, Subject: "web1"}, nil, nil)
+		hf.wantFail(t, "does not resolve")
+	})
+	t.Run("subject_host_kr1_and_kr3_both_listed", func(t *testing.T) {
+		for _, both := range []bool{true, false} {
+			hf := newHostFixture(t, 3600)
+			h := hf.addHost(hf.key, nil, nil, nil)
+			rf := hf.rf()
+			k1 := rf.issueHostKR1("web1")
+			want := []tlog.RevokedEntry{serialEntry(h.cert)}
+			if both {
+				want = append(want, serialEntry(k1))
+			}
+			rf.revoke(subjectHost("web1"), bySerial(want...), nil)
+			rf.publish(nil)
+			if _, err := hf.verifyHosts(); (err == nil) != both {
+				t.Fatalf("listing the kr1 certificate too: %v; verify error %v", both, err)
+			}
+		}
+	})
 }

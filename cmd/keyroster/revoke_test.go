@@ -142,7 +142,7 @@ func TestRevokeRefusalText(t *testing.T) {
 			"docs/runbooks/revoke.md"}},
 		{"key_is_ca_of_this_installation", "403", `{"error":"key_is_ca_of_this_installation"}`, key, []string{"a key of this installation's trust bundle",
 			"emergency CA rotation", "nothing was revoked"}},
-		{"subject_kind_unsupported", "403", `{"error":"subject_kind_unsupported"}`, nil, []string{"revokes user subjects only", "nothing was revoked"}},
+		{"subject_kind_unsupported", "403", `{"error":"subject_kind_unsupported"}`, nil, []string{"revokes user and host subjects only", "nothing was revoked"}},
 		{"revoke_installation_missing", "403", `{"error":"revoke_installation_missing"}`, nil, []string{"revoke_installation_missing",
 			"this CLI always names one", "nothing was revoked"}},
 		{"revoke_installation_mismatch", "403", `{"error":"revoke_installation_mismatch"}`, nil, []string{"revoke_installation_mismatch",
@@ -285,7 +285,8 @@ func TestRevokeSerialConfirm(t *testing.T) {
 		for ca, want := range map[string]string{
 			"user":    "Hosts enforce it once their keyroster agent applies this KRL.\n",
 			"machine": "Hosts enforce it once their keyroster agent applies this KRL.\n",
-			"host":    "A host certificate is checked by SSH clients, not by sshd: the revocation takes effect only on clients whose RevokedHostKeys file holds this KRL.",
+			"host": "A host certificate is checked by SSH clients, not by sshd: clients refuse it once keyroster login or keyroster known-hosts sync " +
+				"has written this KRL to ~/.ssh/keyroster_revoked_hosts.krl.\n",
 		} {
 			code, stdout, stderr := run(t, "revoke", "serial", "1729", "--ca", ca)
 			if code != 0 || !strings.Contains(stdout, want) || (ca == "host" && strings.Contains(stdout, "Hosts enforce")) {
@@ -494,6 +495,30 @@ func TestRevokeUser(t *testing.T) {
 		}
 		if s := e.aliceStatus(t); s != directory.StatusDisabled {
 			t.Fatalf("alice is %s after revoke user, want disabled", s)
+		}
+	})
+	t.Run("sweep_text_unchanged", func(t *testing.T) {
+		// 03-09b made the sweep role-generic; a user's output is exactly
+		// what it was.
+		e := newDirEnv(t, 1, 1)
+		e.installAlice(t, directory.StatusActive)
+		e.serveRevokes(e.userKRLDoc(t, 4, 12, []uint64{5, 6}, nil), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "user", "alice", "--yes")
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		for _, want := range []string{
+			"First revocation of alice: the server reports 2 certificate(s) revoked: KRL v3 published (log entries 8, 9).\nSerials: 5 6\n",
+			"Checked: KRL v4 lists each of the 2 serial(s) the server's answer reports, under a user CA key of your trust bundle. " +
+				"The answer is unsigned, so a certificate it does not report is not checked here; keyroster audit verify on an exported log checks every revocation.\n",
+			"alice is disabled, and the KRL lists every certificate of alice the server reported. Hosts enforce it once their keyroster agent applies this KRL.\n",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("stdout lacks %q:\n%s", want, stdout)
+			}
+		}
+		if strings.Contains(stdout, "host CA key") || strings.Contains(stdout, "signer recovery kept") {
+			t.Fatalf("revoke user printed host text:\n%s", stdout)
 		}
 	})
 	t.Run("revoke_user_partial_directory_failure", func(t *testing.T) {
@@ -789,6 +814,402 @@ func TestRevokeKRLCheck(t *testing.T) {
 		code, stdout, stderr := run(t, "revoke", "serial", "1729")
 		if code == 0 || stdout != "" || !strings.Contains(stderr, "the KRL the server serves (v3) is signed but does not parse, so nothing in it is reported") {
 			t.Fatalf("exit %d, stdout %q, stderr %q; want the parse refusal", code, stdout, stderr)
+		}
+	})
+}
+
+// hostKRLDoc is a served KRL document, version v at log entry logIndex,
+// signed by the bundle's ops key and issued now, listing serials under the
+// host CA key and keys explicitly.
+func (e *dirEnv) hostKRLDoc(t *testing.T, v, logIndex uint64, serials []uint64, keys ...ssh.PublicKey) []byte {
+	t.Helper()
+	set := krl.Set{Keys: keys}
+	if len(serials) > 0 {
+		set.Certs = []krl.CertSection{{CAKey: e.caKey(t, trust.RoleHost), Serials: serials}}
+	}
+	return e.krlDocData(t, v, logIndex, e.bundle.InstallationID, e.ops, time.Now(), e.encodeKRL(t, v, set))
+}
+
+// hostRevokeEnv is a fake server with admins policy admins at quorum,
+// whose directory version 1 holds host web1 (principal web1) with status
+// and nkeys fresh host keys, returned sorted by trust.FormatKey string.
+func hostRevokeEnv(t *testing.T, admins, quorum int, status string, nkeys int) (*dirEnv, []ssh.PublicKey) {
+	t.Helper()
+	e := newDirEnv(t, admins, quorum)
+	var pubs []ssh.PublicKey
+	for range nkeys {
+		pubs = append(pubs, newRevokeKey(t))
+	}
+	slices.SortFunc(pubs, func(a, b ssh.PublicKey) int { return strings.Compare(trust.FormatKey(a), trust.FormatKey(b)) })
+	var keys []string
+	for _, p := range pubs {
+		keys = append(keys, trust.FormatKey(p))
+	}
+	e.installDirect(t, buildDir(t, nil, boundTo(e.bundle.InstallationID, roleBase(t, func(d *directory.Directory) {
+		d.Hosts = []directory.Host{{Name: "web1", HostGroup: "web", Keys: keys, Principals: []string{"web1"}, Status: status}}
+	}))))
+	return e, pubs
+}
+
+// recordRevokes answers the revocations in order with answers (the last
+// one repeats), serves doc as the KRL, and returns a function that lists
+// the requests received so far.
+func (e *dirEnv) recordRevokes(t *testing.T, doc []byte, answers ...func(http.ResponseWriter)) func() []*wire.RevokeRequest {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var reqs []*wire.RevokeRequest
+	// Called with e.mu held (handle), after e.revokeBody is set.
+	e.override["POST "+serverclient.AdminRevokePath] = func(w http.ResponseWriter) {
+		var body serverclient.RevokeBody
+		if err := json.Unmarshal(e.revokeBody, &body); err == nil {
+			if req, err := wire.ParseRevokeRequest(body.Request); err == nil {
+				reqs = append(reqs, req)
+			}
+		}
+		answers[max(0, min(len(reqs)-1, len(answers)-1))](w)
+	}
+	e.override["GET "+serverclient.KRLPath] = func(w http.ResponseWriter) { _, _ = w.Write(doc) }
+	return func() []*wire.RevokeRequest {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return slices.Clone(reqs)
+	}
+}
+
+// keyRequests returns the keys of the TargetKey requests among reqs.
+func keyRequests(reqs []*wire.RevokeRequest) [][]byte {
+	var out [][]byte
+	for _, r := range reqs {
+		if r.Target == wire.TargetKey {
+			out = append(out, r.Key)
+		}
+	}
+	return out
+}
+
+// installFails makes the stub server refuse every directory install.
+func (e *dirEnv) installFails() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.post = func(w http.ResponseWriter, _ serverclient.InstallDirectoryRequest) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":"directory_quorum_not_met"}`)
+	}
+}
+
+// TestRevokeHost (03-09b, D2, D3, REVOKE-01's host subject): keyroster
+// revoke host against a stub server: the order revoke, directory,
+// revoke; the exit codes (0 done, 1 first sweep or setup failed, 3
+// partial, 4 pending; 3 beats 4, 1 beats both); --keys from the verified
+// entry only, a refused key omitted while the next is tried; the hold
+// text; the agent kept served; the recovery notice.
+func TestRevokeHost(t *testing.T) {
+	answer := func(v, leaf uint64, serials ...uint64) serverclient.RevokeAnswer {
+		return serverclient.RevokeAnswer{KRLVersion: v, RevokeLeaf: leaf, PublishLeaf: leaf + 1, SerialCount: uint32(len(serials)), Serials: serials} //nolint:gosec // G115: a few test serials
+	}
+	first, second := answer(3, 8, 5, 6), answer(9, 20, 5, 6, 7)
+	notice := recoveryKeptNotice + "\n"
+	successLine := "The host's agent keeps receiving state, and this KRL, until keyroster host forget.\n"
+	hostStatus := func(t *testing.T, e *dirEnv) string {
+		t.Helper()
+		doc, _ := e.installed()
+		d, err := directory.Parse(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h, ok := d.HostByName("web1"); ok {
+			return h.Status
+		}
+		return ""
+	}
+
+	t.Run("order_sweep_disable_sweep", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory", "revoke"}) {
+			t.Fatalf("requests %v, want revoke, directory, revoke", got)
+		}
+		for _, want := range []string{
+			"First revocation of web1: the server reports 2 certificate(s) revoked: KRL v3 published (log entries 8, 9).\nSerials: 5 6\n",
+			"under a host CA key of your trust bundle",
+			"The server reports directory version 2 installed",
+			"Second revocation (after the disable) of web1: the server reports 3 certificate(s) revoked: KRL v9 published (log entries 20, 21).\nSerials: 5 6 7\n",
+			"web1 is disabled, and the KRL lists every certificate of web1 the server reported.",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("stdout lacks %q:\n%s", want, stdout)
+			}
+		}
+		if i, j, k := strings.Index(stdout, "First revocation"), strings.Index(stdout, "directory version 2 installed"), strings.Index(stdout, "Second revocation"); i > j || j > k {
+			t.Fatalf("stdout is not in the order revoke, disable, revoke:\n%s", stdout)
+		}
+		if s := hostStatus(t, e); s != directory.StatusDisabled {
+			t.Fatalf("web1 is %s, want disabled", s)
+		}
+	})
+	t.Run("already_disabled_sweeps_twice_exit_0", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusDisabled, 1)
+		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 0 || !strings.Contains(stdout, "web1 is disabled in directory version 1, the admin-signed version the server serves: no directory change.\n") ||
+			!strings.Contains(stdout, "Second revocation (after reading the directory) of web1") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "revoke"}) {
+			t.Fatalf("requests %v, want revoke, revoke", got)
+		}
+		requireNotSigned(t, e, 0)
+	})
+	t.Run("unknown_name_sweeps_warns_exit_3", func(t *testing.T) {
+		for _, ans := range []serverclient.RevokeAnswer{first, answer(3, 8)} {
+			e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+			e.serveRevokes(e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(ans))
+			code, stdout, stderr := run(t, "revoke", "host", "web9", "--yes")
+			if code != 3 || !strings.Contains(stdout, "web9 is not in directory version 1 (the version the server serves, verified): there is no entry to disable.\n") ||
+				!strings.Contains(stdout, "Its live certificates are revoked as reported above. If web9 was removed, its agent may still be enrolled and still receives state: end that with keyroster host forget.") {
+				t.Fatalf("%d serials: exit %d, stderr %q, stdout:\n%s", ans.SerialCount, code, stderr, stdout)
+			}
+			if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+				t.Fatalf("requests %v, want one revoke and no directory install", got)
+			}
+		}
+	})
+	t.Run("unknown_name_keys_exit_3", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		reqs := e.recordRevokes(t, e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first))
+		code, _, stderr := run(t, "revoke", "host", "web9", "--yes", "--keys")
+		if code != 3 || !strings.Contains(stderr, "web9 has no entry, so no host keys are known; revoke a key file with keyroster revoke key FILE") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if n := len(keyRequests(reqs())); n != 0 {
+			t.Fatalf("%d key requests, want none", n)
+		}
+	})
+	t.Run("proposal_exit_4_text_names_hold", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 2, 2, directory.StatusActive, 1)
+		e.serveRevokes(e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first))
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes", "--out", filepath.Join(t.TempDir(), "p"))
+		if code != 4 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		for _, want := range []string{"Revoked, disable pending.", "cert_revoked", "ANY newer version releases that hold", "Once it is installed, run keyroster revoke host web1 again",
+			"A host key with no certificate yet is not held"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr lacks %q:\n%s", want, stderr)
+			}
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+			t.Fatalf("requests %v, want one revoke (no second sweep after a proposal)", got)
+		}
+	})
+	t.Run("dir_error_exit_3", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		e.serveRevokes(e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first))
+		e.installFails()
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 3 || !strings.Contains(stderr, "web1 is NOT disabled") || !strings.Contains(stderr, "run keyroster revoke host web1 again") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory"}) {
+			t.Fatalf("requests %v, want revoke, directory and no second sweep", got)
+		}
+	})
+	t.Run("second_sweep_fails_exit_3", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		e.serveRevokes(e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first), revokeRefusedAs(http.StatusForbidden, "request_time_skew"))
+		code, _, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 3 || !strings.Contains(stderr, "the second revocation failed") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+	t.Run("first_sweep_fails_still_disables_exit_1", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		reqs := e.recordRevokes(t, e.hostKRLDoc(t, 3, 9, nil), revokeRefusedAs(http.StatusForbidden, "request_time_skew"))
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes", "--keys")
+		if code != 1 || !strings.Contains(stderr, "nothing is reported revoked") || !strings.Contains(stderr, "run keyroster revoke host web1 again") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory"}) {
+			t.Fatalf("requests %v, want revoke, directory (no key request, no second sweep)", got)
+		}
+		if len(keyRequests(reqs())) != 0 || hostStatus(t, e) != directory.StatusDisabled {
+			t.Fatal("a key was requested, or web1 was not disabled")
+		}
+	})
+
+	// --keys.
+	t.Run("keys_one_request_per_entry_key", func(t *testing.T) {
+		e, pubs := hostRevokeEnv(t, 1, 1, directory.StatusActive, 2)
+		reqs := e.recordRevokes(t, e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}, pubs...),
+			revokeOK(first), revokeOK(answer(4, 10)), revokeOK(answer(5, 12)), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes", "--keys")
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		got := keyRequests(reqs())
+		if len(got) != 2 || !bytes.Equal(got[0], pubs[0].Marshal()) || !bytes.Equal(got[1], pubs[1].Marshal()) {
+			t.Fatalf("%d key requests, want the entry's two keys in FormatKey order", len(got))
+		}
+		if p := e.postCalls(); !slices.Equal(p, []string{"revoke", "directory", "revoke", "revoke", "revoke"}) {
+			t.Fatalf("requests %v", p)
+		}
+		if !strings.Contains(stdout, "The server reports host key "+ssh.FingerprintSHA256(pubs[0])+" revoked as an explicit key") {
+			t.Fatalf("stdout:\n%s", stdout)
+		}
+	})
+	t.Run("keys_from_verified_entry_not_server", func(t *testing.T) {
+		e, pubs := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		other := newRevokeKey(t)
+		served, err := json.Marshal(serverclient.PendingHostsAnswer{Hosts: []serverclient.PendingHost{},
+			Served: []serverclient.ServedHost{{PendingHost: serverclient.PendingHost{ExpectedName: "web1", HostKeys: []string{trust.FormatKey(other)}}, State: serverclient.HostStateDisabled}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var called bool
+		e.recordCall(http.MethodGet, serverclient.AdminPendingHostsPath, &called, string(served), http.StatusOK)
+		reqs := e.recordRevokes(t, e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}, append(slices.Clone(pubs), other)...), revokeOK(first), revokeOK(answer(4, 10)), revokeOK(second))
+		if code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes", "--keys"); code != 0 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := keyRequests(reqs()); len(got) != 1 || !bytes.Equal(got[0], pubs[0].Marshal()) {
+			t.Fatalf("%d key requests, want exactly the verified entry's key", len(got))
+		}
+	})
+	t.Run("keys_cap_revokes_serials_disables_sweeps_exit_3", func(t *testing.T) {
+		e, pubs := hostRevokeEnv(t, 1, 1, directory.StatusActive, 2)
+		reqs := e.recordRevokes(t, e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}, pubs[1]),
+			revokeOK(first), revokeRefusedAs(http.StatusForbidden, "explicit_key_cap_reached"), revokeOK(answer(5, 12)), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes", "--keys")
+		if code != 3 || !strings.Contains(stderr, "host key "+ssh.FingerprintSHA256(pubs[0])+" was not revoked as an explicit key") || !strings.Contains(stderr, "explicit_key_cap_reached") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := keyRequests(reqs()); len(got) != 2 {
+			t.Fatalf("%d key requests, want both keys tried", len(got))
+		}
+		if p := e.postCalls(); !slices.Equal(p, []string{"revoke", "directory", "revoke", "revoke", "revoke"}) || hostStatus(t, e) != directory.StatusDisabled {
+			t.Fatalf("requests %v; want the disable installed and the second sweep sent", p)
+		}
+		if strings.Contains(stdout, successLine) {
+			t.Fatal("full success reported with a key omitted")
+		}
+	})
+	t.Run("keys_cap_with_proposal_prints_both_exit_3", func(t *testing.T) {
+		e, pubs := hostRevokeEnv(t, 2, 2, directory.StatusActive, 1)
+		e.recordRevokes(t, e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first), revokeRefusedAs(http.StatusForbidden, "explicit_key_cap_reached"))
+		code, _, stderr := run(t, "revoke", "host", "web1", "--yes", "--keys", "--out", filepath.Join(t.TempDir(), "p"))
+		if code != 3 || !strings.Contains(stderr, "Revoked, disable pending.") || !strings.Contains(stderr, "host key "+ssh.FingerprintSHA256(pubs[0])+" was not revoked") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+	t.Run("key_is_ca_omitted_exit_3", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		e.recordRevokes(t, e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeRefusedAs(http.StatusForbidden, "key_is_ca_of_this_installation"), revokeOK(second))
+		code, _, stderr := run(t, "revoke", "host", "web1", "--yes", "--keys")
+		if code != 3 || !strings.Contains(stderr, "a key of this installation's trust bundle") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+	t.Run("no_keys_flag_no_key_requests", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 2)
+		reqs := e.recordRevokes(t, e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 0 || len(keyRequests(reqs())) != 0 ||
+			!strings.Contains(stdout, "No host key was revoked as an explicit key (use --keys for a compromised host key; explicit keys never leave the KRL).\n") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+	})
+	t.Run("keys_attempted_after_directory_error", func(t *testing.T) {
+		e, pubs := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		reqs := e.recordRevokes(t, e.hostKRLDoc(t, 9, 21, []uint64{5, 6}, pubs...), revokeOK(first), revokeOK(answer(4, 10)))
+		e.installFails()
+		code, _, stderr := run(t, "revoke", "host", "web1", "--yes", "--keys")
+		if code != 3 || len(keyRequests(reqs())) != 1 || !strings.Contains(stderr, "web1 is NOT disabled") {
+			t.Fatalf("exit %d, %d key requests, stderr %q", code, len(keyRequests(reqs())), stderr)
+		}
+	})
+	t.Run("keys_not_attempted_when_directory_unreadable", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		reqs := e.recordRevokes(t, e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first))
+		var called bool
+		e.recordCall(http.MethodGet, serverclient.AdminDirectoryPath, &called, `{"error":"boom"}`, http.StatusInternalServerError)
+		code, _, stderr := run(t, "revoke", "host", "web1", "--yes", "--keys")
+		if code != 3 || len(keyRequests(reqs())) != 0 || !strings.Contains(stderr, "revoke a key file with keyroster revoke key FILE") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+
+	// The rest.
+	t.Run("serials_checked_under_host_ca", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		e.serveRevokes(e.userKRLDoc(t, 3, 9, []uint64{5, 6}, nil), revokeOK(first))
+		code, _, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 1 || !strings.Contains(stderr, "does not list serial 5, which the server's answer reports, under a host CA key of your trust bundle (not listed)") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+	t.Run("noninteractive_without_yes_refused", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		code, stdout, stderr := run(t, "revoke", "host", "web1")
+		if code != 1 || !strings.Contains(stderr, "refusing to start") || len(e.postCalls()) != 0 || strings.Contains(stdout, "signer recovery kept") {
+			t.Fatalf("exit %d, stdout %q, stderr %q, requests %v", code, stdout, stderr, e.postCalls())
+		}
+	})
+	t.Run("usage_and_name_grammar", func(t *testing.T) {
+		hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		for _, args := range [][]string{{"revoke", "host"}, {"revoke", "host", "a", "b"}, {"revoke", "host", "web1", "--bogus"}} {
+			if code, stdout, _ := run(t, args...); code != 2 || strings.Contains(stdout, "signer recovery kept") {
+				t.Fatalf("%q: exit %d, stdout %q; want 2 and no notice", args, code, stdout)
+			}
+		}
+		if code, _, stderr := run(t, "revoke", "host", "Web_1!", "--yes"); code != 1 || !strings.Contains(stderr, `host name "Web_1!"`) {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+	t.Run("success_line_says_agent_keeps_state", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 0 || !strings.Contains(stdout, successLine) {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		for _, no := range []string{"403", "not_approved"} {
+			if strings.Contains(stdout+stderr, no) {
+				t.Fatalf("output names %q:\n%s%s", no, stdout, stderr)
+			}
+		}
+	})
+	t.Run("enforcement_text_for_host", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		_, stdout, _ := run(t, "revoke", "host", "web1", "--yes")
+		if !strings.Contains(stdout, revokeEnforcement(wire.CARoleHost)) || strings.Contains(stdout, "Hosts enforce") {
+			t.Fatalf("stdout:\n%s", stdout)
+		}
+	})
+	t.Run("recovery_kept_notice_printed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			quorum  int
+			args    []string
+			answers []func(http.ResponseWriter)
+			code    int
+		}{
+			{"exit_0", 1, nil, []func(http.ResponseWriter){revokeOK(first), revokeOK(second)}, 0},
+			{"exit_1", 1, nil, []func(http.ResponseWriter){revokeRefusedAs(http.StatusForbidden, "request_time_skew")}, 1},
+			{"exit_3", 1, []string{"--keys"}, []func(http.ResponseWriter){revokeOK(first), revokeRefusedAs(http.StatusForbidden, "explicit_key_cap_reached"), revokeOK(second)}, 3},
+			{"exit_4", 2, []string{"--out", filepath.Join(t.TempDir(), "p")}, []func(http.ResponseWriter){revokeOK(first)}, 4},
+		} {
+			e, _ := hostRevokeEnv(t, 2, tc.quorum, directory.StatusActive, 1)
+			e.recordRevokes(t, e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), tc.answers...)
+			code, stdout, stderr := run(t, append([]string{"revoke", "host", "web1", "--yes"}, tc.args...)...)
+			if code != tc.code || !strings.HasSuffix(stdout, notice) || strings.Count(stdout, notice) != 1 {
+				t.Fatalf("%s: exit %d, stderr %q, stdout:\n%s; want exit %d ending with the notice", tc.name, code, stderr, stdout, tc.code)
+			}
 		}
 	})
 }
