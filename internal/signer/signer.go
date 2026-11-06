@@ -136,6 +136,11 @@ type Signer struct {
 	// installs, so a flood of other refusals cannot drain it (D-14); what
 	// it does not log is counted in limiter. Guarded by mu.
 	installLimiter *refusalLimiter
+	// hostLimiter is the refusal-log bucket of refused host certificate
+	// requests (03-09): host agents are many, so their refusals never drain
+	// the shared bucket, and a flood of other refusals never drains theirs.
+	// What it does not log is counted in limiter. Guarded by mu.
+	hostLimiter *refusalLimiter
 	// overloaded counts connections the accept loop refused over the
 	// global cap or over their account's share (F16 (03-08h)); the loop
 	// never takes mu, and flushSummaries moves the count into the limiter.
@@ -234,6 +239,7 @@ func New(cfg Config) (*Signer, error) {
 	}
 	s.limiter = newRefusalLimiter(perMinute, burst, s.clock())
 	s.installLimiter = newRefusalLimiter(perMinute, burst, s.clock())
+	s.hostLimiter = newRefusalLimiter(perMinute, burst, s.clock())
 	s.refusalPerMinute, s.refusalBurst = perMinute, burst
 	s.conns = newConnSlots()
 	if err := s.initLog(context.Background()); err != nil {

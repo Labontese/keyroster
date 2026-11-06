@@ -100,6 +100,27 @@ func LoginSend(ctx context.Context, socket string, req *wire.LoginIssueRequest, 
 	return Client{Socket: socket}.LoginSend(ctx, req, readTimeout)
 }
 
+// HostIssue sends a host agent's host certificate request (03-09) to the
+// signer and returns the issued (or re-delivered) certificate. A refusal
+// comes back as a *wire.ErrorResponse error.
+func (c Client) HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error) {
+	body, err := req.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := c.roundTrip(ctx, wire.TypeHostIssueRequest, body, wire.TypeIssueResponse)
+	if err != nil {
+		return nil, err
+	}
+	return wire.ParseIssueResponse(respBody)
+}
+
+// HostIssue is Client{Socket: socket}.HostIssue: the call returns as soon
+// as the response frame is read.
+func HostIssue(ctx context.Context, socket string, req *wire.HostIssueRequest) (*wire.IssueResponse, error) {
+	return Client{Socket: socket}.HostIssue(ctx, req)
+}
+
 // InstallDirectory sends an admin-signed directory version to the signer
 // and returns what it installed. A refusal comes back as a
 // *wire.ErrorResponse error.

@@ -860,6 +860,21 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			}
 			revs.addCert(c, kid)
 			rep.collect(opts, want, leaf.Kind, body.Cert)
+		case tlog.KindHostIssue:
+			body, err := tlog.DecodeHostIssueBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			c, err := verifyHostIssue(want, body, leaf.TimeMicros, &trustState, &dirState, &iss)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			kid, err := hostCertKeyID(c)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			revs.addCert(c, kid)
+			rep.collect(opts, want, leaf.Kind, body.Cert)
 		case tlog.KindRevoke:
 			body, err := tlog.DecodeRevokeBody(leaf.Body)
 			if err != nil {

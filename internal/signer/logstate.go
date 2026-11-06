@@ -340,6 +340,15 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			}
 			issued.count++
 			issued.lastSerial = b.Serial
+		case tlog.KindHostIssue:
+			// A host certificate (03-09) shares the issuance table and the
+			// serial sequence too, so it counts the same way (T-02-116).
+			b, err := tlog.DecodeHostIssueBody(l.Body)
+			if err != nil {
+				return fmt.Errorf("%w: leaf %d: host_issue body does not decode", errLogMismatch, idx)
+			}
+			issued.count++
+			issued.lastSerial = b.Serial
 		case tlog.KindRevoke:
 			// A revocation issues nothing: it must not change issued.
 			b, err := tlog.DecodeRevokeBody(l.Body)
