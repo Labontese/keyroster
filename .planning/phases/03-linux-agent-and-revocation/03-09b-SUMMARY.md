@@ -253,8 +253,102 @@ The tracking update then followed (STATE.md and ROADMAP.md, deviation 4) in the 
 
 ## Pre-merge review
 
-Pending: the orchestrator's full security review of PR #89 against T-03-59, T-03-60, T-03-61, T-03-100, T-03-240, T-03-241 and T-03-345 to T-03-349. Findings and fix rounds will be recorded here.
+Review run wf_be40e37a-21e: the orchestrator's full security review of PR #89, head d156c66 on base 6cde9d0, against T-03-59, T-03-60, T-03-61, T-03-100, T-03-240, T-03-241 and T-03-345 to T-03-349. Two skeptics checked each finding unless noted. Fix round 1 is commits 9fd5556 to a27bfae, on top of d156c66 (no rewrite).
+
+Each RED below was taken locally, with the fix reverted and the new or changed test run, and the fix then restored. Windows paths are left out.
+
+| Finding | Severity | Outcome | Commit |
+|---|---|---|---|
+| F1: the revocations-only path did not record a newer bundle | medium | fixed | dd7da7f |
+| F2: no `KnownHostsCommand none` in the managed block | low | fixed | 5787dc7 |
+| F3: `revoke host` had no directory floor | low | fixed | 1115de2 |
+| F4: `directory install` did not check the installation | low (split 1/2) | fixed | 9b6fbbd |
+| F5: `cited_tests_exist` read its own file | low | fixed | 9fd5556 |
+| F6: STATE.md said 24 of 29 | low | fixed | e499893 |
+| F7: the long-line byte label | low | fixed | e499893 |
+| D-R1: concurrent refreshes | low | narrowed and documented | 39f88ca |
+| D-R2: the re-revoke hold | split | documented | a27bfae |
+| D-R3: host-name scope | design gap | documented, todo | a27bfae |
+| Redeem answer size within the 30 s timeouts | low (split) | no action | none |
+
+**F1 (medium): the revocations-only path did not record a newer bundle.** Where there was no verified directory and the bundle was not older, `writeHostTrust` raised only the KRL version. A KRL that had verified under a newer bundle's ops key therefore left `bundle_version` and `ops_key` at the old bundle, and a server could later serve a bundle between the two as if it were newer.
+- Fix: whenever the bundle is not older, that path now records the bundle's version and ops key too. The older-bundle and equal-version rules are unchanged.
+- The CA lines stay as they are. Plan line 135 settles only `bundle_version` and `ops_key` ("ops_key follows the higher bundle_version"), and without a verified directory there is no active set to write CA lines over. The next verified directory writes them under the newer bundle.
+- Test: `TestKnownHosts/revocations_only_records_newer_bundle`. Bundle v1 is written in full. Then v3, with a rotated ops key and no directory, is partial and must record v3 and its key. Then v2, re-served with a newer directory, must be refused as older, and known_hosts and config must keep their bytes.
+- RED: `knownhosts_test.go:806: state &{... BundleVersion:1 ...}, want bundle version 3 and its ops key recorded on the revocations-only path`.
+
+**F2 (low): no `KnownHostsCommand none` in the managed block.** A `KnownHostsCommand` from later configuration applied to managed names.
+- Fix: `hostTrustBlockOptions` now carries `KnownHostsCommand none`. There is no code-emitted D7 block: it is user-written, with Port and HostKeyAlias only. enroll-user.md item 1 names the option.
+- Tests: `TestKnownHosts/ssh_config_keywords_exact` and `htConfig` now expect it. The e2e `TestHostTrustLongLines` part `c_d7_block_after_include` adds a config that has the Include, the D7 block, then `Host *` with `KnownHostsCommand /bin/true`. `ssh -G` must print no `knownhostscommand` for the first or the last managed name. As a control, it must print `knownhostscommand /bin/true` for `outside-name`.
+- RED, unit: with the option line removed, `--- FAIL: TestKnownHosts/writes_three_files_and_state` and `--- FAIL: TestKnownHosts/ssh_config_keywords_exact`.
+- RED, OpenSSH oracle: on WSL's OpenSSH_9.6p1, `ssh -G` over the block without the option, followed by `Host *` / `KnownHostsCommand /bin/true`, printed `knownhostscommand /bin/true` for the managed name. With the option it printed none for the managed name, and the outside name still got the command. 9.6p1 accepts `none`.
+- On the CI builds (9.5p1 and 10.5p1): see the CI line below.
+
+**F3 (low): `revoke host` had no directory floor.** `fetchVerifiedDirectory` has no version floor, and on the already-disabled branch no install POST is sent, so no `version_chain` refusal comes back either.
+- Fix: `revoke host` now passes `checkHostTrustFloor` as the edit's `CheckBase`. It applies when this user's host-trust.json belongs to the bundle's installation, and it uses the writer's rule: a served version older than the recorded one is refused, and so is an equal version with another SHA-256. A served version 0 under a recorded version above 0 counts as older.
+- A refused base fails the directory step. That is exit 3, per the plan's and revoke.md 4b's row "3: a partial result: the directory step failed (the host is NOT disabled)". It becomes exit 1 when the first sweep failed too ("1 beats both").
+- The first sweep still runs before the check, so a revocation never waits on directory freshness.
+- Both already-disabled lines now state what was observed: `Directory version N, the admin-signed version the server serves, lists NAME as disabled: no directory change. That is the server's word ...`. The final line reads `Directory version N lists NAME as disabled (the server's word), and the KRL lists ...`.
+- A state that cannot be read only warns, and the floor is not checked then. That choice is open for the owner (see below).
+- Tests: the new `TestRevokeHost` subtests are `stale_directory_already_disabled_refused_exit_3`, `stale_directory_active_refused_exit_3`, `equal_version_other_sha_refused_exit_3`, `floor_equal_version_same_sha_exit_0`, `floor_of_another_installation_ignored` and `unreadable_floor_warns`.
+  - The three refusal subtests assert exit 3 and that only the first revoke was posted. They also assert no key request with `--keys`, nothing signed, and no "disabled" claim.
+  - `already_disabled_sweeps_twice_exit_0` asserts the new texts.
+- RED: with revoke.go at d156c66, `already_disabled_sweeps_twice_exit_0`, the three refusal subtests and `unreadable_floor_warns` failed. Without the floor, the stub installed a version built on the stale base and exited 0.
+
+**F4 (low, split 1/2): `directory install` did not check the installation.**
+- Fix: `runDirectoryInstall` now applies `directory.CheckInstallation` right after `checkProposalBase`, as `directory sign` does, before the losses are computed or consent is asked. The refusal ends with "Nothing was revoked or installed".
+- Tests: `TestDirectoryInstallLosses/other_installation_refused_before_losses` and `unbound_refused_before_losses` run on a terminal answering y. They assert exit 1, no loss text, no prompt, no POST and no revoke.
+- RED: both failed with `exit 0, stderr ""`. The stub revoked web1, installed the unbound version and swept again.
+- Deviation (Rule 3): five pipeline fixtures that installed an unbound proposal against the stub now bind it to the stub's installation, as every CLI edit does and as a real signer requires. Their own assertions are unchanged. The fixtures are in `stale_proposal_install_message`, both proposals of `proposal_already_served`, `discarded_credential_install_message`, and `TestDirectoryPeerText/install_answer_mismatch`.
+
+**F5 (low): `cited_tests_exist` read its own file.** The check read every `_test.go` file, its own included, so the subtest names that file quotes as `htrbWant` tokens satisfied it.
+- Fix: it now skips hosttrust_runbook_test.go.
+- RED: `older_bundle_freezes_ca_lines_krl_still_written` was renamed locally in knownhosts_test.go.
+  - With the old check, `cited_tests_exist` passed.
+  - With the fix it failed: `enroll-user.md Trusting hosts without TOFU cites TestKnownHosts/older_bundle_freezes_ca_lines_krl_still_written, but no test names a subtest`.
+  - The rename was restored. With the real names the check passes, so no cite was broken.
+
+**F6 (low): STATE.md said 24 of 29.** It now says "Plan: 24 of 30", which matches ROADMAP's 30 plans.
+
+**F7 (low): the long-line byte label.** UNVERIFIED (Edge Coverage) now gives the Host line 4,128,768 encoded name bytes, per plan line 325. The 4,129,016 bytes are the state file's size.
+
+**Owner decisions, 2026-11-06 (Daniel):**
+- **D-R1: concurrent refreshes (codex, upheld low). Narrowed and documented.** There is no lock file and no new syscall kind (Lstat, ReadFile and Rename, as before).
+  - `replaceManagedFile` takes a check that runs between the temporary file's close and its rename. For each managed file, `write` passes `overtaken`, which reads host-trust.json again. Before the KRL it also reads the KRL on disk and parses its header version.
+  - The run stops, with no further writes, when another run has recorded a newer state, or when the KRL on disk is newer than this run's KRL bytes. It reports `Host trust not refreshed: a concurrent refresh won: ...` (hostTrustNone; `sync` exits 1, as for merge's existing stop).
+  - "Newer" is merge's own predicate, now one function (`newerHostTrustState`): a higher bundle, directory or KRL version, or another SHA-256 at the same directory version.
+  - Test: hostTrustFault seeds the other run's write between two renames, which is deterministic. The subtests are `TestKnownHosts/concurrent_state_after_state_step_stops_krl`, `..._after_krl_step_stops_known_hosts`, `..._after_known_hosts_step_stops_config` and `concurrent_newer_krl_on_disk_stops_krl`.
+  - RED: with the check disabled, all four failed with `writer result 2, want 0`.
+  - Residual, documented in enroll-user.md item 2: a rename right after the check can still land behind the other run's. An older KRL, older CA lines or an older Host block then stays in place, so a revocation the newer KRL holds is not enforced until the next refresh heals it. The window itself is UNVERIFIED.
+  - Residual, the state: the state's own rename has no check (merge's re-read comes just before it), so two runs can swap their state writes. The state then keeps the slower run's floors, never below the ones it began with. The KRL file is still protected by the disk-KRL check. Until a refresh from an honest server raises the floors again, a compromised server could serve a directory version between the two runs' versions (T-03-347). A check before the state rename would need a new hook, and the decision was to narrow and document, so this is documented only.
+- **D-R2: re-revoke hold (split). Documented only, no signer or audit change.** revoke.md 4b ("The hold") now says that a repeated revoke only holds if the certificate was not already revoked: `hostIndex.markRevoked` keeps the first `revokedAtDir`. Once a newer directory version is installed, running `revoke host` again does not renew `cert_revoked`. The second sweep or the next `revoke host` catches a re-issued certificate, and the hard barrier is Phase 4's issuance barrier.
+  - T-03-349 residual, added by this review: a repeated `revoke host` only holds a host key whose latest certificate was not already revoked, so after a newer directory version has been installed it does not renew `cert_revoked`; a certificate re-issued in between is caught by the second sweep or the next `revoke host`, and the hard barrier is Phase 4's issuance barrier.
+- **D-R3: host-name scope (critic). Refuted as a PR defect, kept as a design gap.** No code change.
+  - The todo `.planning/todos/pending/2026-11-06-root-signed-host-name-scope.md` covers a root-signed host-name scope in the trust policy, enforced by the signer and the client, and resolves in Phase 4.
+  - enroll-user.md ("Which names every client pins", before item 9) and host-setup.md (the approval step, after the `host approve` paragraph) now say three things: admins choose the names every client pins, an external or wrong name affects every user, and a user drops one by starting over (item 8).
+  - No gate compares files_modified against the diff: scripts/, cmd/, internal/, test/ and .github/ do not name it. So the todo is not added to the plan's frontmatter.
+
+**No action (recorded):** after the code is burned, the redeem answer can add up to about 1.4 MiB within the 30 s server WriteTimeout and client requestTimeout. This was split, low. D4 accepted the directory in the redeem answer.
+
+**Open for the owner:** F3 lets a host-trust.json that cannot be read (damaged, a symlink) warn and skip the floor, instead of failing the directory step. The fix instruction left this case open, and the review chose the reading that does not block a revocation on local damage. A server cannot cause that damage. The other choice is to fail closed (exit 3) until the user starts over.
+
+**Local gates after the fixes.**
+- Windows: `go vet ./cmd/keyroster/` and `go test -count=1 ./cmd/keyroster/` pass.
+- Linux (scripts/linux.sh): all of these pass.
+  - `go build ./...`, `go vet ./...` and `go vet -tags e2e ./test/e2e/`;
+  - `gofmt -l .` is empty;
+  - `go test -race -count=1 ./cmd/keyroster/`;
+  - golangci-lint v2.14.0 on cmd/keyroster and test/e2e, plus GOOS=windows and GOOS=darwin for cmd/keyroster, with 0 issues.
+- internal/signer was not touched.
+
+CI on the fix head a27bfae:
+- e2e run 42305323004 passed on both lanes with no `--- FAIL:`. `--- PASS: TestHostTrustLongLines (` appears twice, and its part `c_d7_block_after_include` passed on 9.5p1 and 10.5p1, so 9.5p1 accepts `KnownHostsCommand none` and the new assertion holds there. `TestHostCertNoTOFU` passed on both lanes.
+- Go test elapsed: 9.5p1 786.024 s (+51.1 s against the base), 10.5p1 770.000 s (+49.9 s). Both are under the 900 s stop.
+- CI run 42305323153 passed build-test, lint, capslock, govulncheck, cli-windows, cli-macos and fuzz.
+- The e2e-distro, e2e-pkcs11, e2e-tpm, systemd-sandbox, CodeQL, pinned-actions and pr-title checks passed too.
+
+Commit e0fccdf (docs only) added the state-swap residual to enroll-user.md.
 
 ## Self-Check: PASSED
 
-Every created file exists (knownhosts.go and its two test files, hosttrust_runbook_test.go, revoke_host_test.go, test/e2e/hosttrust_test.go, the plan, the moved todo), and each recorded commit (859f99e, f770e17, 669ffaf, 6a56968, 690967a, 7bc39a0, 457a001, 42cf597, bbe9cb2) is an ancestor of HEAD.
+Every created file exists (knownhosts.go and its two test files, hosttrust_runbook_test.go, revoke_host_test.go, test/e2e/hosttrust_test.go, the plan, the moved todo), and each recorded commit (859f99e, f770e17, 669ffaf, 6a56968, 690967a, 7bc39a0, 457a001, 42cf597, bbe9cb2) is an ancestor of HEAD. Pre-merge fix round 1: the todo 2026-11-06-root-signed-host-name-scope.md exists, and 9fd5556, e499893, dd7da7f, 9b6fbbd, 1115de2, 39f88ca, 5787dc7, a27bfae and e0fccdf are ancestors of HEAD.
