@@ -46,7 +46,7 @@ skips it. A kind is in use when it has a constant and `valid` accepts it.
 | 8 | in use | `KindLoginIssue` | `login_issue` | 02-01 |
 | 9 | in use | `KindRevoke` | `revoke` | 03-01 |
 | 10 | in use | `KindKRLPublish` | `krl_publish` | 03-01 |
-| 11 | reserved | | | 03-09 (host certificates by PoP) |
+| 11 | in use | `KindHostIssue` | `host_issue` | 03-09 |
 | 12 | reserved | | | 03-10 (probe certificates) |
 | 13 | reserved | | | 03-11 (machine identities by PoP) |
 | 14 | reserved | | | 03-12 (CA rotation) |
@@ -79,7 +79,7 @@ number stays free for it.
 | 0x07 | in use | `TypeGetKRL` | 0x87 | 03-01 |
 | 0x08 | in use | `TypeGetBundle` | 0x88 | 03-07 |
 | 0x09 | in use | `TypeGetDirectoryVersion` | 0x89 | 03-07 |
-| 0x0A | reserved | | 0x81 | 03-09 (host issue request) |
+| 0x0A | in use | `TypeHostIssueRequest` | 0x81 | 03-09 |
 | 0x0B | reserved | | 0x81 | 03-10 (probe issue request) |
 | 0x0C | reserved | | 0x81 | 03-11 (machine issue request) |
 | 0x0D | in use | `TypeForgetAgentRequest` | 0x8D | 03-08c |
@@ -137,6 +137,7 @@ both.
 | `keyroster/revoke-request/v1` | domain and SSHSIG, 03-01 revoke request; refused since 03-03, still read by audit | `wire.RevokeRequestDomainV1`, `wire.RevokeSSHSIGNamespaceV1` |
 | `keyroster/revoke-recovery/v1` | domain and SSHSIG, revocation recovery | `wire.RecoveryRequestDomain`, `wire.RecoverySSHSIGNamespace` |
 | `keyroster/host-forget-request/v1` | domain and SSHSIG, host forget | `wire.ForgetRequestDomain`, `wire.ForgetSSHSIGNamespace` |
+| `keyroster/host-issue-request/v1` | domain and SSHSIG, host issue request | `wire.HostIssueRequestDomain`, `wire.HostPoPNamespace` |
 | `keyroster/log-leaf/v1` | domain, Merkle log leaf | `tlog.LeafDomain` |
 | `keyroster/log/` | checkpoint origin prefix (plus 16 hex digits of the log key hash) | `tlog.OriginPrefix`, `trust.LogOriginPrefix` |
 | `keyroster/trust-bundle/v1` | SSHSIG, root-signed trust bundle | `trust.NamespaceBundle` |
@@ -154,8 +155,9 @@ Evidence types and other prefixes:
 |---|---|---|
 | `admin-sshsig/v1` | evidence type, an admin's SSHSIG | `wire.EvidenceAdminSSHSIG` |
 | `webauthn-assertion/v1` | evidence type, a passkey assertion | `wire.EvidenceWebAuthnAssertion` |
+| `host-pop/v1` | evidence type, a host key's SSHSIG over a host issue request | `wire.EvidenceHostPoP` |
 | `kr-join-v1:` | join string prefix | `join.Prefix` |
-| `kr1/`, `kr2/` | key ID versions (see the key ID budget below) | `cert` (`keyIDPrefix`, `keyIDPrefixKr2`) |
+| `kr1/`, `kr2/`, `kr3/` | key ID versions (see the key ID budget below) | `cert` (`keyIDPrefix`, `keyIDPrefixKr2`, `keyIDPrefixKr3`) |
 
 ## Refusal detail names
 
@@ -185,14 +187,18 @@ hex digits). Formats that carry it today include:
 | Directory (`directory.Directory`, internal/directory/directory.go) | `installation_id` | policy admins (SSHSIG) |
 | KRL manifest (`krl.Manifest`, internal/krl/manifest.go) | `installation_id` | the ops key (SSHSIG) |
 | Host enrollment proof (`enroll.PoP`, internal/agent/enroll/pop.go) | `installation_id` | each host key (SSHSIG) |
+| Host issue request (`wire.HostIssueRequest`, internal/wire/hostissue.go) | `InstallationID` | the requested host key (SSHSIG) |
 
 The join token (`join.JoinToken`) also names the installation, but it is
 not signed.
 
-The proof-of-possession issue requests planned for 03-09 to 03-11
-(`HostIssueRequest`, `ProbeIssueRequest`, `MachineIssueRequest`) fall under
-this rule: they must carry the installation ID in their signing bytes. A
-new signed format adds a row here in the PR that adds it.
+`HostIssueRequest` (03-09) carries it in its signing bytes, and the signer
+and audit verify refuse a request without one or for another installation
+(`host_issue_no_installation_id`, `host_issue_installation_mismatch`). The
+proof-of-possession issue requests planned for 03-10 and 03-11
+(`ProbeIssueRequest`, `MachineIssueRequest`) fall under this rule too:
+they must carry the installation ID in their signing bytes. A new signed
+format adds a row here in the PR that adds it.
 
 ## Key ID budget
 
@@ -242,6 +248,7 @@ The project's caps today (`internal/cert/keyid.go`):
 
 - The subject is at most 64 bytes (`keyIDSubjectRE`), the request ID exactly
   32 hex digits, and policy, directory and serial at most 20 decimal digits.
+  kr3: 64 bytes, and 70 for ca=machine subjects starting `probe.`.
 - kr2 carries 1 to 16 role names (`MaxKeyIDRoles`) of at most 32 bytes each
   (`keyIDRoleRE`), joined by `+`.
 - `MaxKeyIDLen` is 1024 bytes, the parser's upper bound.
@@ -251,6 +258,18 @@ The project's caps today (`internal/cert/keyid.go`):
 | kr1, `ca=user` or `ca=host` | 167 | yes |
 | kr1, `ca=machine` | 170 | yes |
 | kr2 (`ca=user`), 16 roles of 32 bytes | 726 | no |
+| kr3, `ca=host`, 64-byte subject | 192 | yes |
+| kr3, `ca=machine`, 70-byte `probe.` subject | 201 | yes |
+
+kr3 (03-09) is the key ID of certificates a host or machine obtains by
+proof of possession:
+`kr3/ca={ca}/sub={subject}/req={request id}/pol={policy}/dir={directory}/ser={serial}`,
+with ca host or machine. Its subject is at most 64 bytes, as kr1's and
+kr2's, except a ca=machine subject starting `probe.`, which may be up to 70
+bytes (`probe.` and a 64-byte host name, 03-10's probe certificates). Only
+those exceed 64 bytes, so every other kr3 subject stays revocable by
+subject with wire's 64-byte grammar, and probes are never revoked by
+subject (Q-09-8).
 
 Everything in a kr2 key ID but the role names takes at most 199 bytes, so
 at the longest subject and 20-digit numbers only 12 bytes of role names

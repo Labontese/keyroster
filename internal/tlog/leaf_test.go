@@ -193,7 +193,7 @@ func TestDecodeLeafStrict(t *testing.T) {
 		"trailing_byte":    append(append([]byte(nil), raw...), 0),
 		"truncated":        raw[:len(raw)-1],
 		"wrong_domain":     append([]byte{21}, append([]byte("keyroster/log-leaf/v2"), raw[22:]...)...),
-		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: KindKRLPublish + 1, Body: refusal}),
+		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: KindHostIssue + 1, Body: refusal}),
 		"body_of_another":  EncodeLeaf(Leaf{Kind: KindIssue, Body: refusal}),
 		"summary_no_count": EncodeLeaf(Leaf{Kind: KindRefusalSummary, Body: make([]byte, 18)}),
 	}
@@ -705,7 +705,7 @@ func TestRecoveryBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for k := Kind(11); k <= 14; k++ {
+		for k := Kind(12); k <= 14; k++ {
 			if _, err := MarshalLeaf(Leaf{Kind: k, Body: refusal}); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("MarshalLeaf accepted kind %d", k)
 			}
@@ -833,7 +833,7 @@ func TestHostForgetBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, k := range []Kind{11, 12, 13, 14, 17} {
+		for _, k := range []Kind{12, 13, 14, 17} {
 			if _, err := DecodeLeaf(rawKindLeaf(t, Leaf{Kind: k, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("DecodeLeaf accepted kind %d", k)
 			}
@@ -843,4 +843,29 @@ func TestHostForgetBody(t *testing.T) {
 			t.Fatalf("DecodeLeaf accepted a kind-16 leaf with a refusal body: %v", err)
 		}
 	})
+}
+
+// TestHostIssueKind: kind 11 is host_issue (03-09). MarshalLeaf accepts a
+// host_issue leaf, and DecodeLeaf refuses a kind-11 leaf whose body is
+// not a host_issue body.
+func TestHostIssueKind(t *testing.T) {
+	body, err := (&HostIssueBody{Serial: 1, PolicyVersion: 1, DirectoryVersion: 1, CapSeconds: 90, Request: []byte("r"),
+		Evidence: []wire.Evidence{{Type: wire.EvidenceHostPoP, Blob: []byte("s")}}, Cert: []byte("c"), KeyID: "k"}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := MarshalLeaf(Leaf{Kind: KindHostIssue, Body: body})
+	if err != nil {
+		t.Fatalf("MarshalLeaf refused kind 11: %v", err)
+	}
+	if l, err := DecodeLeaf(enc); err != nil || l.Kind != KindHostIssue || KindHostIssue.String() != "host_issue" {
+		t.Fatalf("DecodeLeaf of kind 11 = %+v, %v", l, err)
+	}
+	refusal, err := (&RefusalBody{Reason: ReasonMalformed, Detail: "x"}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeLeaf(EncodeLeaf(Leaf{Kind: KindHostIssue, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
+		t.Fatalf("DecodeLeaf accepted a kind-11 leaf with a refusal body: %v", err)
+	}
 }
