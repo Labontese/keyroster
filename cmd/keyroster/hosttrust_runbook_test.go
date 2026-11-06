@@ -9,6 +9,9 @@ import (
 	"testing"
 )
 
+// htrbSelf is this file, which cited_tests_exist does not read.
+const htrbSelf = "hosttrust_runbook_test.go"
+
 // htrbDoc reads a runbook under docs/runbooks.
 func htrbDoc(t *testing.T, name string) string {
 	t.Helper()
@@ -175,8 +178,14 @@ func TestHostTrustRunbooks(t *testing.T) {
 		}
 	})
 	t.Run("cited_tests_exist", func(t *testing.T) {
+		// This file quotes cited subtest names itself (htrbWant's tokens),
+		// so it is left out: a renamed subtest must not be found here.
+		self, err := filepath.Abs(htrbSelf)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var src strings.Builder
-		err := filepath.WalkDir(filepath.Join("..", ".."), func(p string, d fs.DirEntry, err error) error {
+		err = filepath.WalkDir(filepath.Join("..", ".."), func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -184,6 +193,9 @@ func TestHostTrustRunbooks(t *testing.T) {
 				return filepath.SkipDir
 			}
 			if !d.IsDir() && strings.HasSuffix(p, "_test.go") {
+				if abs, err := filepath.Abs(p); err == nil && abs == self {
+					return nil
+				}
 				data, err := os.ReadFile(p) //nolint:gosec // G304: a test file of this repository
 				if err != nil {
 					return err
@@ -194,6 +206,9 @@ func TestHostTrustRunbooks(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if strings.Contains(src.String(), "func TestHostTrustRunbooks(") {
+			t.Fatal("the runbook test itself was read: a cited subtest name it quotes would satisfy the check")
 		}
 		all := src.String()
 		cite := regexp.MustCompile("`(Test[A-Za-z0-9_]+)((?:/[a-z0-9_]+)*)`")
