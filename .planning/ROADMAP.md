@@ -228,7 +228,7 @@ Plans:
 - [x] 03-09-PLAN.md — Host certificates by proof of possession (kr3, leaf kind 11, installation-bound requests, re-delivery), the persisted drop-in spec, renewal with signer bounds and agent back-off, the served-certificate self-test; T-03-100 recorded (redeem-directory)
 
 **Wave 22** *(blocked on Wave 21 completion)*
-- [ ] 03-09b-PLAN.md — CLI-managed @cert-authority and revoked-hosts files for every user (T-03-100 redeem-directory), keyroster revoke host (serials and disable, --keys opt-in); split from 03-09, written before its wave starts
+- [ ] 03-09b-PLAN.md — CLI-managed @cert-authority and revoked-hosts files for every user (known-hosts sync and the login refresh, T-03-100 redeem-directory), keyroster revoke host (serials, disable, --keys opt-in), principal and key losses revoked before an install
 
 **Wave 23** *(blocked on Wave 22 completion)*
 - [ ] 03-10-PLAN.md — Probe certificates and the full self-test (D-06)

@@ -32,10 +32,14 @@ ends the issued ones too, on every host that applies the KRL.
 > `RevokedKeys` applies to user authentication only, so no host refuses
 > to present its own revoked host certificate. Only an SSH client refuses
 > it, once the KRL is in the file its `RevokedHostKeys` (ssh_config)
-> points to. Nothing installs it there yet (the known-hosts sync arrives
-> with 03-09b). **UNVERIFIED**: no test revokes a host certificate and
-> checks a client refusing it; the CLI's wording for `--ca host` ran in
-> the CLI tests against a stub server (`TestRevokeSerialConfirm`).
+> points to. `keyroster login` and `keyroster known-hosts sync` write the
+> verified KRL to `~/.ssh/keyroster_revoked_hosts.krl`, which the strict
+> Host block of `~/.ssh/keyroster_ssh_config` names as `RevokedHostKeys`
+> ([enroll-user.md, "Trusting hosts without TOFU"](enroll-user.md#trusting-hosts-without-tofu)).
+> Run in CI e2e (03-09b): `TestHostCertNoTOFU/refused_after_refresh` and
+> `TestHostCertNoTOFU/refused_through_krl_alone` (real ssh refuses the
+> revoked host certificate after a refresh, on OpenSSH 9.5p1 and
+> 10.5p1). **UNVERIFIED** on a real client until 03-16.
 
 > **What is tested and what is not.**
 >
@@ -114,8 +118,9 @@ publishes above every version it lost (03-03). Run in CI e2e
 (`TestRevokeSerialEndToEnd`, 03-01, versions since 03-03).
 
 With `--ca host` the last line instead says that a host certificate is
-checked by SSH clients, through `RevokedHostKeys`, and that nothing
-installs the KRL there yet (see the box at the top).
+checked by SSH clients, not by sshd, and that clients refuse it once
+`keyroster login` or `keyroster known-hosts sync` has written this KRL to
+`~/.ssh/keyroster_revoked_hosts.krl` (see the box at the top).
 
 The server's answer is not signed, and a compromised keyroster-server
 could drop the request and answer success. So the command reads the
@@ -310,7 +315,96 @@ What it does not cover:
   close in Phase 4 (a signer-side issuance barrier and signed install
   receipts). Until then, confirm the install on the signer host and run
   the command again after it.
-- Host and machine subjects arrive with 03-09b and 03-11.
+- Machine subjects arrive with 03-11. Host subjects are section 4b's
+  `keyroster revoke host`.
+
+## 4b. Revoking a host: `keyroster revoke host`
+
+```
+keyroster revoke host web1 --yes
+keyroster revoke host web1 --keys --yes
+```
+
+`keyroster revoke host NAME [--keys] [--yes] [--out DIR] [--reason TEXT]
+[--admin-key FP]` ends a host's certificates, then its entry, in this
+order:
+
+1. **The first sweep.** A subject revocation of NAME under the host CA.
+   The signer resolves it from its own issuance records, not from the
+   directory: every live kr3 certificate of the entry NAME and every kr1
+   certificate issued with `keyroster ca issue --ca host --subject NAME`.
+   Each serial the answer reports is checked in the verified KRL under a
+   host CA key of your trust bundle.
+2. **The directory step**, also after a failed first sweep: NAME is
+   disabled in a signed directory version (installed at admin quorum 1, a
+   proposal otherwise), or it is already disabled, or it is not in the
+   directory.
+3. **`--keys`**, only when the first sweep succeeded and the entry was
+   found: one explicit-key revocation per host key of the verified entry,
+   never the keys the server reports. An explicit key never leaves the KRL,
+   and the signer refuses that key for good (`host_key_revoked`), so use
+   it for a compromised host key only. A key the signer refuses (for
+   example `explicit_key_cap_reached`) is listed as omitted with its
+   reason, and the next key is still tried. Without `--keys` the command
+   says that no host key was revoked as an explicit key.
+4. **The second sweep**, after an installed disable or an entry that was
+   already disabled: it revokes anything issued in between.
+
+| Exit | Meaning |
+|---|---|
+| 0 | The first sweep, the disable (installed, or already in place), every `--keys` key and the second sweep all succeeded. |
+| 1 | The first sweep failed (the directory step still ran; no key and no second sweep was sent), or the setup failed. Run the command again. |
+| 3 | A partial result: the directory step failed (the host is NOT disabled), the second sweep failed, the name is not in the directory, or a key was omitted. |
+| 4 | The disable is only a proposal; nothing else is missing. |
+
+3 beats 4 (both texts print), and 1 beats both.
+
+**The hold.** After the first sweep the signer refuses the host's keys a
+new certificate (`cert_revoked`) until a directory version newer than the
+one it holds is installed. ANY newer version releases that hold. With
+exit 4, install the proposal (which disables NAME) as the next version: if
+another version is installed first, NAME can obtain certificates again
+while it is still active. Once the disable is installed, run `keyroster
+revoke host NAME` again; its second sweep revokes anything issued in
+between. A host key with no certificate yet is not held (T-03-349; the
+signer-side issuance barrier is Phase 4's).
+
+**Unknown names.** A name that is not in the directory is still swept,
+because the signer resolves the subject from its issuance records. That is
+how the certificates of a host removed earlier are retired: `keyroster
+revoke host OLDNAME` (exit 3, also with no certificate). Its agent may still
+be enrolled and still receives state; end that with `keyroster host
+forget`.
+
+**Other subjects.** A kr1 host certificate issued with `keyroster ca issue
+--ca host` under another subject than NAME is not found: revoke it by
+serial or key ID (sections 1 and 2).
+
+**Clients refuse the host only after a refresh.** The KRL and the CA lines
+reach a client at its next `keyroster login` or `keyroster known-hosts
+sync` ([enroll-user.md, "Trusting hosts without TOFU"](enroll-user.md#trusting-hosts-without-tofu)).
+After that, the client refuses the host twice over: through the KRL, and
+because a disabled name has no `@cert-authority` line while it stays in
+the strict Host block.
+
+**The agent keeps receiving state.** `revoke host` changes nothing about
+the agent's enrolment: it keeps receiving signed state, and this KRL,
+until `keyroster host forget` (owner decision D-R1).
+
+> **Warning.** Certificates that a signer recovery kept are not covered
+> by this revoke: revoke each with `keyroster revoke key FILE` (section 3;
+> the recovery summary prints the key, section 7). `--keys` covers a key
+> still in the entry. Every `revoke host` run that sent a request ends
+> with that notice.
+
+Run in CI (03-09b): `TestRevokeHost` (the CLI against a stub server: the
+order, the exit codes, `--keys`, the texts), `TestRevokeHostSubject` (the
+signer: kr1 and kr3, the exact subject, the hold and its release),
+`TestLiveIssuanceForSubject` and `TestVerifyRevokeHost` (audit verify
+re-derives a host subject). Run in CI e2e (03-09b):
+`TestHostCertNoTOFU/revoke_host_exit_0_agent_still_served` (exit 0, the
+agent still served) and the three `refused_*` subtests. **UNVERIFIED until
+03-16**: every step on a real host and client.
 
 ## 5. Refusals
 
@@ -320,7 +414,7 @@ What it does not cover:
 | `the signer has issued no certificate with this key ID under that CA` (`key_id_not_issued`) | The key ID is mistyped, `--ca` names another role, or this signer did not issue it. | Check the key ID and `--ca`; revoke a certificate this signer did not issue by its key (section 3). |
 | `the key is a key of this installation's trust bundle` (`key_is_ca_of_this_installation`) | The key is a CA, ops, log or root key of the bundle in force. An explicit-key entry on a CA key would refuse every certificate it signed. | A compromised CA key is replaced by the emergency CA rotation (03-13); **UNVERIFIED**: that procedure does not exist yet. |
 | `the KRL holds as many explicit keys as it may` (`explicit_key_cap_reached`) | See [below](#explicit_key_cap_reached). | See below. |
-| `this signer revokes user subjects only` (`subject_kind_unsupported`) | The request named a host or machine subject. | `keyroster revoke user` sends user subjects only; host and machine subjects arrive with 03-09b and 03-11. |
+| `this signer revokes user and host subjects only` (`subject_kind_unsupported`) | The request named a machine subject, or a host subject reached a signer older than this version, which refuses every subject but a user. | `keyroster revoke user` and `keyroster revoke host` send user and host subjects; machine subjects arrive with 03-11. For `revoke host` against an older signer, upgrade the signer (keyroster-signer first, then keyroster-server) and run it again. |
 | `... (revoke_installation_missing)` or `... another installation ... (revoke_installation_mismatch)` | The request reached the signer without an installation ID (this CLI always sends one), or for another installation than the signer's. | Check the server URL and root pins `keyroster init` saved; a missing ID means something between the CLI and the signer changed the request. |
 | `the server reports ... revoked, but that could not be confirmed: KRL vN, the one the server serves, does not list ... (not listed)` | The verified KRL does not list the target: the revocation is not effective, or the entry was already pruned (section 6). | Treat it as not revoked. Check the signer's `revoked` line (`journalctl -u keyroster-signer`) and run the command again. |
 | `the KRL the server serves (vN) is signed but does not parse` | The ops key signed bytes that the strict parser refuses. | Treat it as not revoked; read the signer's log. |
@@ -570,7 +664,12 @@ one later, write that public key (the text after `public key`, up to the
 revokes the key plain and in every certificate for it. This path is
 run in CI e2e (03-06c): `TestRestoreRecoversLostRevocations` revokes a
 kept host certificate this way, with the public key read from the
-summary.
+summary. A kept host certificate is in neither the issuance records nor
+audit's subject index, so neither `keyroster revoke host` nor the
+revocations before a directory install that removes a host find it: they
+end with the notice "Certificates that a signer recovery kept are not
+covered by this revoke: revoke each with `keyroster revoke key FILE`"
+(section 4b, T-03-345's residual).
 
 ## 8. On the homelab
 
