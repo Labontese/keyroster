@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math"
 	"math/big"
 	"net/http"
@@ -617,7 +618,8 @@ func TestBrowserListenerUnchanged(t *testing.T) {
 // keyword.
 func TestAgentMuxRoutes(t *testing.T) {
 	e := newAgentEnv(t, true)
-	want := []string{"POST " + serverclient.AgentEnrollPath, "GET " + serverclient.AgentStatePath, "POST " + serverclient.AgentHeartbeatPath, "POST " + serverclient.AgentIdentityPath}
+	want := []string{"POST " + serverclient.AgentEnrollPath, "GET " + serverclient.AgentStatePath, "POST " + serverclient.AgentHeartbeatPath, "POST " + serverclient.AgentIdentityPath,
+		"POST " + serverclient.AgentHostCertPath}
 	if !slices.Equal(e.s.agentPatterns, want) {
 		t.Fatalf("agent patterns %q, want %q", e.s.agentPatterns, want)
 	}
@@ -1204,6 +1206,186 @@ func TestAgentRemoval(t *testing.T) {
 		}
 		if rec := state(t, e, id, ""); rec.Code != http.StatusForbidden || apiError(rec) != serverclient.AgentErrNotApproved {
 			t.Fatalf("the re-enrolled agent before its approval: %d %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// hostCertBody is a POST body for AgentHostCertPath: a host request by
+// key for name, valid_for 0, created now, with an (unchecked) evidence
+// item; the signer, not the server, verifies the proof (03-09).
+func hostCertBody(t *testing.T, key ssh.Signer, name string) (*wire.HostIssueRequest, []byte) {
+	t.Helper()
+	req := &wire.HostIssueRequest{InstallationID: copyInstallation, HostName: name, HostKey: key.PublicKey().Marshal(),
+		CreatedAt: uint64(t0.Unix()), Evidence: []wire.Evidence{{Type: wire.EvidenceHostPoP, Blob: []byte("pop")}}} //nolint:gosec // G115: after 1970
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := req.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(serverclient.AgentHostCertRequest{Request: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req, body
+}
+
+// TestAgentHostCert (03-09, AGENT-06): POST AgentHostCertPath relays an
+// approved agent's host request for one of its enrolled keys and its
+// entry's name to the signer unchanged, and answers its certificate.
+func TestAgentHostCert(t *testing.T) {
+	t.Run("relays_for_approved_host", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		req, body := hostCertBody(t, hosts[0], "web1")
+		rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("host certificate: %d %s", rec.Code, rec.Body.String())
+		}
+		var a serverclient.AgentHostCertAnswer
+		if err := json.Unmarshal(rec.Body.Bytes(), &a); err != nil || string(a.Certificate) != "host-certificate" {
+			t.Fatalf("answer %s (%v), want the signer's certificate", rec.Body.String(), err)
+		}
+		e.fake.mu.Lock()
+		got, calls := e.fake.lastHostIssue, e.fake.calls["HostIssue"]
+		e.fake.mu.Unlock()
+		if calls != 1 || got == nil || !bytes.Equal(got.SigningBytes(), req.SigningBytes()) {
+			t.Fatalf("the signer got %d calls, request %+v; want the agent's request once, unchanged", calls, got)
+		}
+	})
+	refusedWith := func(t *testing.T, rec *httptest.ResponseRecorder, code int, detail string) {
+		t.Helper()
+		if rec.Code != code || apiError(rec) != detail {
+			t.Fatalf("answer %d %q (%s), want %d %q", rec.Code, apiError(rec), rec.Body.String(), code, detail)
+		}
+	}
+	t.Run("host_key_not_enrolled", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, _ := e.approvedAgent(t)
+		_, body := hostCertBody(t, newSigner(t), "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrHostKeyNotEnrolled)
+	})
+	t.Run("host_name_mismatch", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		// Renamed after approval: the entry holding the keys is web7 now.
+		e.installDir(t, hostEntry("web7", hosts))
+		_, body := hostCertBody(t, hosts[0], "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrHostNameMismatch)
+	})
+	// The signed directory decides (owner decision 2026-11-06): a key the
+	// agent's own entry lists is relayed although enrollment never saw it.
+	relayed := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("host certificate: %d %s, want it relayed", rec.Code, rec.Body.String())
+		}
+	}
+	// approvedOnce makes the agent's first request under the entry it was
+	// approved by, so the server records the approval (requireAgent).
+	approvedOnce := func(t *testing.T, e *agentEnv, id agentID, hosts []ssh.Signer) {
+		t.Helper()
+		_, body := hostCertBody(t, hosts[0], "web1")
+		relayed(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body))
+	}
+	t.Run("rekeyed_host_key_added_obtains_cert", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		approvedOnce(t, e, id, hosts)
+		added := newSigner(t)
+		e.installDir(t, hostEntry("web1", append(slices.Clone(hosts), added)))
+		_, body := hostCertBody(t, added, "web1")
+		relayed(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body))
+	})
+	t.Run("rekeyed_first_enrolled_key_removed_obtains_cert", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		approvedOnce(t, e, id, hosts)
+		// The entry lists a new key and no longer the first enrolled one.
+		added := newSigner(t)
+		e.installDir(t, hostEntry("web1", append(slices.Clone(hosts[1:]), added)))
+		_, body := hostCertBody(t, added, "web1")
+		relayed(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body))
+		if len(hosts) > 1 {
+			_, body := hostCertBody(t, hosts[1], "web1")
+			relayed(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body))
+		}
+	})
+	t.Run("key_not_on_agents_entry_refused", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		e.installDir(t, hostEntry("web1", hosts))
+		// A key no entry lists, under the agent's own name.
+		_, body := hostCertBody(t, newSigner(t), "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrHostKeyNotEnrolled)
+	})
+	t.Run("another_hosts_key_refused", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		other := hostSigners(t, 1)
+		e.installDir(t, hostEntry("web1", hosts), hostEntry("web2", other))
+		for _, name := range []string{"web2", "web1"} {
+			_, body := hostCertBody(t, other[0], name)
+			refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrHostKeyNotEnrolled)
+		}
+	})
+	t.Run("never_approved_refused", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := newAgentID(t), hostSigners(t, 1)
+		if rec := e.enroll(t, id, e.mustMint(t, "web1", 0).Token, hosts); rec.Code != http.StatusAccepted {
+			t.Fatalf("enroll: %d", rec.Code)
+		}
+		_, body := hostCertBody(t, hosts[0], "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrNotApproved)
+	})
+	signerSays := func(t *testing.T, err error, code int, detail string) {
+		t.Helper()
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		e.fake.mu.Lock()
+		e.fake.hostIssueErr = err
+		e.fake.mu.Unlock()
+		_, body := hostCertBody(t, hosts[0], "web1")
+		rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body)
+		if rec.Code != code || (detail != "" && apiError(rec) != detail) {
+			t.Fatalf("answer %d %q, want %d %q", rec.Code, apiError(rec), code, detail)
+		}
+	}
+	t.Run("signer_refusal_relayed", func(t *testing.T) {
+		signerSays(t, &wire.ErrorResponse{Code: wire.CodeRefused, Message: "host_cert_recent"}, http.StatusForbidden, "host_cert_recent")
+	})
+	t.Run("old_signer_backs_off", func(t *testing.T) {
+		signerSays(t, &wire.ErrorResponse{Code: wire.CodeMalformed, Message: "unknown_message_type"}, http.StatusForbidden, serverclient.AgentErrSignerTooOld)
+	})
+	t.Run("signer_malformed_relayed_4xx", func(t *testing.T) {
+		signerSays(t, &wire.ErrorResponse{Code: wire.CodeMalformed, Message: "malformed_request"}, http.StatusBadRequest, "malformed_request")
+	})
+	t.Run("signer_unavailable_503", func(t *testing.T) {
+		signerSays(t, &wire.ErrorResponse{Code: wire.CodeUnavailable, Message: "state_unavailable"}, http.StatusServiceUnavailable, "")
+		signerSays(t, errors.New("socket gone"), http.StatusServiceUnavailable, "")
+	})
+	t.Run("body_too_large_413", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, _ := e.approvedAgent(t)
+		body := []byte(`{"request":"` + strings.Repeat("A", serverclient.MaxAgentHostCertBody) + `"}`)
+		if rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body); rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("an oversize body: %d", rec.Code)
+		}
+	})
+	t.Run("malformed_400", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, _ := e.approvedAgent(t)
+		for _, body := range [][]byte{[]byte(`{"request":"AAAA","x":1}`), []byte(`{"request":"AAAA"}`)} {
+			if rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body); rec.Code != http.StatusBadRequest {
+				t.Fatalf("%s: %d", body, rec.Code)
+			}
+		}
+	})
+	t.Run("route_in_closed_set", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		if !slices.Contains(e.s.agentPatterns, "POST "+serverclient.AgentHostCertPath) {
+			t.Fatalf("agent patterns %q", e.s.agentPatterns)
 		}
 	})
 }

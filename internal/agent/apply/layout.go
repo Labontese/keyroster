@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	"github.com/Labontese/keyroster/internal/agent/paths"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 )
@@ -143,6 +144,59 @@ func fsyncDir(path string) error {
 	}
 	defer func() { _ = unix.Close(fd) }()
 	return unix.Fsync(fd)
+}
+
+// readHostCertRecord reads <state>/hostcert.json (03-09, D1): the record
+// and "" when it is valid, nil and "" for a legacy host (no record and no
+// certificate file in the host-certificate directory), and nil with
+// hostcert_record_missing (no record, certificate files present) or
+// hostcert_record_invalid (a symlink, not a regular file, oversize, not
+// mode 0600, not owned by the effective uid, or refused by ParseRecord).
+// The error is only for a state directory that cannot be read.
+func (e *engine) readHostCertRecord() (*hostcert.Record, string, error) {
+	b, info, err := spool.ReadFileAtInfo(e.stateFd, hostcert.RecordFile, hostcert.MaxRecord)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		has, herr := hostCertFilesPresent(e.l)
+		if herr != nil || has {
+			return nil, CodeHostCertRecordMissing, nil
+		}
+		return nil, "", nil
+	case errors.Is(err, spool.ErrSymlink), errors.Is(err, spool.ErrNotRegular), errors.Is(err, spool.ErrOversize),
+		errors.Is(err, unix.ELOOP), errors.Is(err, unix.EISDIR):
+		return nil, CodeHostCertRecordInvalid, nil
+	case errors.Is(err, unix.EBADF):
+		return nil, "", err
+	case err != nil:
+		return nil, CodeHostCertRecordInvalid, nil
+	}
+	if info.Mode != 0o600 || int(info.UID) != os.Geteuid() {
+		return nil, CodeHostCertRecordInvalid, nil
+	}
+	rec, err := hostcert.ParseRecord(b)
+	if err != nil {
+		return nil, CodeHostCertRecordInvalid, nil
+	}
+	return rec, "", nil
+}
+
+// hostCertFilesPresent reports whether the host-certificate directory
+// holds a regular file named as CertFileName names one; an absent
+// directory holds none.
+func hostCertFilesPresent(l Layout) (bool, error) {
+	ents, err := os.ReadDir(l.HostCertDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, d := range ents {
+		if d.Type().IsRegular() && hostcert.CertFileRE.MatchString(d.Name()) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // readState reads a state-directory file of at most max bytes through

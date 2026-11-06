@@ -121,8 +121,21 @@ func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		// unit's run loop (03-07) never sets it.
 		AllowAdoption: true,
 	}
-	report, err := apply.Apply(ctx, cfg, apply.Layout{Root: filepath.Clean(*a.svc.root), StateDir: a.stateDir})
-	out, merr := json.MarshalIndent(report, "", "  ")
+	l := apply.Layout{Root: filepath.Clean(*a.svc.root), StateDir: a.stateDir}
+	report, err := apply.Apply(ctx, cfg, l)
+	// The host-certificate step after the apply (03-09), not on --dry-run;
+	// the exit status stays the apply's.
+	var hc *apply.HostCertReport
+	if !a.dryRun {
+		var herr error
+		if hc, herr = apply.HostCerts(ctx, cfg, l); herr != nil {
+			_, _ = fmt.Fprintf(stderr, "keyroster-agent: ERROR host certificates: %v\n", herr)
+		}
+	}
+	out, merr := json.MarshalIndent(struct {
+		*apply.Report
+		HostCerts *apply.HostCertReport `json:"host_certs,omitempty"`
+	}{report, hc}, "", "  ")
 	if merr != nil {
 		return merr
 	}

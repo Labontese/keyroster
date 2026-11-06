@@ -50,7 +50,7 @@ func TestDropInRepair(t *testing.T) {
 		if h.current() == first || r.SelfTest != "pass" || !r.Reloaded || !h.krlRevokes(h.l.Current(), 7) {
 			t.Fatalf("the KRL apply over an edited drop-in: current %d (first %d), %+v", h.current(), first, r)
 		}
-		if readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || h.exists(h.l.State(dropinPrevFile)) {
+		if readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) || h.exists(h.l.State(dropinPrevFile)) {
 			t.Fatalf("the drop-in was not repaired: %q", readFile(t, h.l.DropIn()))
 		}
 		if d, err := h.check(); err != nil || d.Drift() {
@@ -64,12 +64,12 @@ func TestDropInRepair(t *testing.T) {
 		// made elsewhere, and activateDropIn checks the repaired value.
 		h := newTestHost(t, newFixture(t))
 		h.installed("role:ops")
-		edited := strings.Replace(string(DropIn(h.l)), filepath.Join(h.l.Current(), CAFile), "/etc/ssh/other_ca.pub", 1)
+		edited := strings.Replace(string(DropIn(h.l, DropInSpec{})), filepath.Join(h.l.Current(), CAFile), "/etc/ssh/other_ca.pub", 1)
 		if err := os.WriteFile(h.l.DropIn(), []byte(edited), 0o644); err != nil { //nolint:gosec // test fixture
 			t.Fatal(err)
 		}
 		h.publishKRL(8)
-		if r := h.mustApply(); r.SelfTest != "pass" || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || !h.krlRevokes(h.l.Current(), 8) {
+		if r := h.mustApply(); r.SelfTest != "pass" || readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) || !h.krlRevokes(h.l.Current(), 8) {
 			t.Fatalf("an edited TrustedUserCAKeys line: %+v, drop-in %q", r, readFile(t, h.l.DropIn()))
 		}
 	})
@@ -113,7 +113,7 @@ func TestDropInRepair(t *testing.T) {
 				t.Fatalf("the KRL apply over the edited drop-in: current %d (first %d), %+v", h.current(), first, r)
 			}
 			st, err := os.Stat(h.l.DropIn())
-			if err != nil || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || st.Mode().Perm() != 0o644 {
+			if err != nil || readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) || st.Mode().Perm() != 0o644 {
 				t.Fatalf("the drop-in was not repaired: %q, %v, %v", readFile(t, h.l.DropIn()), st.Mode(), err)
 			}
 		})
@@ -141,7 +141,7 @@ func TestDropInRepair(t *testing.T) {
 			if err != nil || r.NoOp || r.SelfTest != "pass" || h.run.reloads != reloads+1 {
 				t.Fatalf("an apply over a drop-in sshd refuses: %v, %+v, %d reloads (before %d)", err, r, h.run.reloads, reloads)
 			}
-			if readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || h.exists(h.l.State(dropinPrevFile)) {
+			if readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) || h.exists(h.l.State(dropinPrevFile)) {
 				t.Fatalf("the drop-in was not repaired: %q", readFile(t, h.l.DropIn()))
 			}
 			if tc.krl != (h.current() != gen) || (tc.krl && !h.krlRevokes(h.l.Current(), 7)) {
@@ -155,7 +155,7 @@ func TestDropInRepair(t *testing.T) {
 		h := newTestHost(t, newFixture(t))
 		h.installed("role:ops")
 		h.run.rejectDropIn = func([]byte) bool { return true }
-		if _, err := h.apply(); !errors.Is(err, ErrSSHDDump) || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) {
+		if _, err := h.apply(); !errors.Is(err, ErrSSHDDump) || readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) {
 			t.Fatalf("sshd -T failing with the agent's own drop-in: %v", err)
 		}
 	})
@@ -174,7 +174,7 @@ func TestDropInRepair(t *testing.T) {
 		if !errors.Is(err, ErrSelfTest) || !r.Rollback {
 			t.Fatalf("self-test failure after the repair: %+v, %v", r, err)
 		}
-		if got := readFile(t, h.l.DropIn()); got != string(DropIn(h.l)) {
+		if got := readFile(t, h.l.DropIn()); got != string(DropIn(h.l, DropInSpec{})) {
 			t.Fatalf("the rollback restored %q, want the agent's drop-in", got)
 		}
 		if h.exists(h.l.State(dropinPrevFile)) {
@@ -206,7 +206,7 @@ func TestDropInRepair(t *testing.T) {
 		if r.NoOp || !r.Reloaded || r.SelfTest != "pass" || h.run.reloads != reloads+1 || h.current() != gen {
 			t.Fatalf("a no-op apply over a trial: %+v, %d reloads (before %d)", r, h.run.reloads, reloads)
 		}
-		if readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || h.exists(h.l.State(dropinPrevFile)) {
+		if readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) || h.exists(h.l.State(dropinPrevFile)) {
 			t.Fatalf("the trial was not replaced: %q", readFile(t, h.l.DropIn()))
 		}
 	})

@@ -275,7 +275,8 @@ func NextPoll(base time.Duration) time.Duration {
 // the middle of it) and with the identity on disk (a rotation by another
 // process is picked up): while the join token is there, the enrollment
 // step; otherwise the state, asked again at once while the server answers
-// more: true, at most MaxRounds times, and then the heartbeat.
+// more: true, at most MaxRounds times, then the host certificate requests
+// (postHostCerts, 03-09), and then the heartbeat.
 func (f *Fetcher) Once(ctx context.Context) error {
 	unlock, err := lockIdentity(f.cfg.Dir)
 	if err != nil {
@@ -295,6 +296,9 @@ func (f *Fetcher) Once(ctx context.Context) error {
 	approved, err := f.pollState(ctx)
 	if err != nil || !approved {
 		return err
+	}
+	if err := f.postHostCerts(ctx); err != nil {
+		f.logf("ERROR %v", err)
 	}
 	return f.sendHeartbeat(ctx)
 }

@@ -1588,6 +1588,140 @@ error line are run in CI: `TestIdentityRotationRecorded`, `TestHostStatus`,
 `TestUnknownAgentLoggedAtError`. The re-enrollment itself is UNVERIFIED: no
 test runs it, on CI or on a real host.)
 
+## Host certificates
+
+Run in CI (03-09): `TestHostCertIssueAndServe` and
+`TestHostCertRenewAndRestart` (e2e, OpenSSH 9.5p1 and 10.5p1: issued,
+served, renewed and counted by `keyroster audit verify`, through a signer
+restart), `TestHostCertStep` (the agent's step on a fake sshd: every crash
+point, the holds, the record codes, GC), `TestHostIssue` (the signer's
+checks) and `TestHostStatusHostCerts`. Every step below is UNVERIFIED on a
+real host until 03-16.
+
+**What is requested and when.**
+
+- One certificate per Ed25519 or ECDSA host key that sshd serves and the
+  host's directory entry lists. The signer chooses the lifetime: the
+  smaller of 30 days and the policy's host cap in force. The agent asks for
+  none. It renews at two thirds of the certificate's own lifetime, up to an
+  hour early.
+- The signer issues at most one certificate per host key per third of the
+  smaller of the cap at the previous issuance and the cap in force
+  (`host_cert_recent`). An admin's change of the entry's principals is the
+  exception, once per key per directory version. A retry, or a request
+  inside that window, gets the existing certificate back.
+- The certificate's names are the entry's principals, typed at approval.
+  RSA host keys are skipped and listed under `host_keys_skipped`.
+
+**Where it lives.**
+
+- `/etc/ssh/keyroster/host/<key sha256>-<serial>-cert.pub`, with one
+  `HostCertificate` line per certificate in `00-keyroster.conf`, after the
+  three trust lines. The agent's record of what it installed is
+  `<state>/hostcert.json`. Edit none of them by hand.
+- A `HostCertificate` line anywhere else in sshd's configuration is
+  `foreign_host_certificate`: the agent certifies nothing until that line
+  is removed, and never edits it.
+- `00-keyroster.conf` must not be included from inside a `Match` block. If
+  it is, the agent drops its `HostCertificate` lines and reports
+  `hostcert_in_match`. (That sshd refuses `HostCertificate` inside `Match`
+  is upstream behaviour, UNVERIFIED in this repository.)
+
+**How to check.** `ssh-keyscan -c -t ed25519 -p <port> <host>` (and
+`-t ecdsa`) shows the certificate sshd serves. `keyroster host status`
+lists each host's certificates, whether sshd serves each one, and the last
+hold or refusal code (`host_cert: <code>`).
+
+**The codes and what to do.** These refusals hold a key until a new bundle,
+policy or directory version is accepted, or 24 hours pass: `cert_revoked`,
+`host_key_revoked`, `unknown_host`, `host_key_not_listed`, `host_disabled`,
+`host_pop_not_enabled`, `host_issue_no_installation_id`,
+`host_issue_installation_mismatch`, `host_key_not_enrolled`,
+`host_name_mismatch`, `signer_too_old`, `malformed_request`,
+`ttl_exceeds_host_cap`, `host_issue_valid_for_not_zero`, and `http_<status>`
+for a 4xx other than 429. Every other outcome (no answer within 330 s, a
+transport error, a 429, a 5xx, any other refusal) is retried with back-off:
+60 s while no valid certificate is installed or it is close to expiry,
+otherwise doubling up to an hour.
+
+`keyroster host status` shows one code per host as `host_cert: <code>`: a
+host-level hold or a record code from the table, `refused:<detail>` for a
+key held by a sticky refusal (for example `refused:cert_revoked`), or
+`backoff` for a key waiting out a transient outcome. The transient codes
+themselves (`host_cert_recent`, `served_cert_mismatch`, a failed install, no
+answer) are in the agent's log (`journalctl -u keyroster-agent`), not in
+host status.
+
+| Code | What it means | What to do |
+|---|---|---|
+| `backoff` | A key waits out a transient outcome (see above) | Read the agent's log for the code; the agent retries |
+| `refused:<detail>` | A key is held by a sticky refusal; the detail is one of the list above | As the detail's row says |
+| `directory_unauthorized` | The stored directory is not signed under the policy in force | Sign the directory again under the policy |
+| `host_disabled`, `host_removed` | The entry is disabled or gone; nothing is renewed | Nothing, or enable the entry again |
+| `host_keys_rotated`, `host_keys_disagree` | sshd's host keys are not the entry's | Update the entry's keys (`keyroster host` commands) |
+| `no_generation`, `apply_unfinished` | The agent has not installed trust files yet, or an apply is unfinished; the step writes nothing | Let `keyroster-agent run` finish an apply |
+| `foreign_host_certificate` | A `HostCertificate` line outside the agent's drop-in | Remove that line |
+| `hostcert_in_match` | The drop-in is read inside a `Match` block | Move the `Include` out of the `Match` block |
+| `host_cert_algorithm_disabled` | sshd's `HostKeyAlgorithms` leaves out the certificate algorithm | Allow the certificate algorithm in sshd |
+| `served_cert_mismatch` (log) | After the reload sshd did not serve the new certificate; the agent rolled back to the committed set | Check sshd's log; the agent retries |
+| `hostcert_record_invalid`, `hostcert_record_missing` | The record is unreadable or gone; the agent renders no `HostCertificate` line until it is refilled from certificate files that verify | Nothing; an invalid record is set aside as `hostcert.json.invalid` |
+| `host_cert_recent` (log) | Inside the window: the existing certificate is re-delivered | Wait |
+| `host_key_revoked` | The host key is in the KRL | Rotate the host key and update the entry |
+| `signer_too_old` | The signer does not know the host request | Upgrade the signer |
+| `cert_revoked` | The key's latest host certificate is revoked | See below |
+
+**`cert_revoked`:** after a host certificate is revoked, its key gets no new
+certificate until an admin installs a newer directory version. That can be
+the version that disables the host, or any signed edit, which releases the
+hold.
+
+**When a host can still be left without a certificate.**
+
+- While the server or the fetcher withholds every answer.
+- While a `cert_revoked` hold stands.
+- After a lost first answer, when the server never relays the retry.
+- After an entry rename, when the installed certificate is lost inside the
+  window: the re-delivered certificate still names the old entry, so the
+  agent refuses it and waits out the window.
+
+The agent retries every 60 s in the last stretch of a certificate's life. A
+lagging agent bundle does not matter: the signer chooses the lifetime.
+
+**Upgrade order:** keyroster-signer, then keyroster-server, then the agents.
+An older server refuses heartbeats with the new fields, and an older signer
+answers the new request as malformed.
+
+**Ports.** A host certificate names hosts, not ports. A client that reaches
+a host on another port, or by another name, needs `HostKeyAlias` set to the
+certified name. Setting up clients is 03-09b's.
+
+**Disable versus revoke.**
+
+- Disabling the entry stops renewal (`host_disabled`) and leaves the
+  installed certificate valid until it expires.
+- To end a host's certificates now, until 03-09b brings
+  `keyroster revoke host`:
+  1. Take the host's serials from the signer's log, which is
+     authoritative. On the signer host, as in enroll-user.md:
+
+     ```sh
+     runuser -u keyroster-signer -g keyroster-signer -G tss -- \
+       keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/log.jsonl
+     keyroster audit verify --pin SHA256:... --threshold N /tmp/log.jsonl
+     ```
+
+     Take every `host_issue` line with the host's key fingerprints (or its
+     `host_name`) whose certificate is still valid. `keyroster host status`
+     is only a cross-check: a host reports it about itself.
+  2. Revoke each with `keyroster revoke serial --ca host SERIAL`.
+  3. Then install the directory version that disables the host.
+- The revocation reaches no client until 03-09b installs the revoked-hosts
+  KRL.
+- Run in CI at the signer: `TestHostIssue/revoke_serial_of_host_cert` and
+  `TestHostIssue/cert_revoked_until_new_directory`; the export and verify
+  commands by `TestHostCertRenewAndRestart`, without the `runuser` wrapper.
+  UNVERIFIED end to end.
+
 ## Manual recovery
 
 When `keyroster host status` shows `stuck: pending_state_unknown`,
@@ -1626,6 +1760,11 @@ the server records the confirmation from the real agent's heartbeat, and
 forget goes through on it) and `TestAgentReenrollEndToEnd` (e2e: the
 re-enroll flow under one name, 03-08b). Every step on the homelab is
 UNVERIFIED until 03-16, whose forget drill proves them (owner decision Q4).
+
+A host that holds host certificates: revoke them first, as
+[Host certificates](#host-certificates) says under "Disable versus revoke",
+then remove the entry and forget the agent. Disabling or forgetting alone
+leaves its certificates valid until they expire.
 
 An enrolled agent that the directory approved once keeps receiving signed
 state (directory, bundle and policy, KRL) after its host entry is disabled

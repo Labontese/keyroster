@@ -33,7 +33,7 @@ ends the issued ones too, on every host that applies the KRL.
 > to present its own revoked host certificate. Only an SSH client refuses
 > it, once the KRL is in the file its `RevokedHostKeys` (ssh_config)
 > points to. Nothing installs it there yet (the known-hosts sync arrives
-> with 03-09). **UNVERIFIED**: no test revokes a host certificate and
+> with 03-09b). **UNVERIFIED**: no test revokes a host certificate and
 > checks a client refusing it; the CLI's wording for `--ca host` ran in
 > the CLI tests against a stub server (`TestRevokeSerialConfirm`).
 
@@ -310,7 +310,7 @@ What it does not cover:
   close in Phase 4 (a signer-side issuance barrier and signed install
   receipts). Until then, confirm the install on the signer host and run
   the command again after it.
-- Host and machine subjects arrive with 03-09 and 03-11.
+- Host and machine subjects arrive with 03-09b and 03-11.
 
 ## 5. Refusals
 
@@ -320,7 +320,7 @@ What it does not cover:
 | `the signer has issued no certificate with this key ID under that CA` (`key_id_not_issued`) | The key ID is mistyped, `--ca` names another role, or this signer did not issue it. | Check the key ID and `--ca`; revoke a certificate this signer did not issue by its key (section 3). |
 | `the key is a key of this installation's trust bundle` (`key_is_ca_of_this_installation`) | The key is a CA, ops, log or root key of the bundle in force. An explicit-key entry on a CA key would refuse every certificate it signed. | A compromised CA key is replaced by the emergency CA rotation (03-13); **UNVERIFIED**: that procedure does not exist yet. |
 | `the KRL holds as many explicit keys as it may` (`explicit_key_cap_reached`) | See [below](#explicit_key_cap_reached). | See below. |
-| `this signer revokes user subjects only` (`subject_kind_unsupported`) | The request named a host or machine subject. | `keyroster revoke user` sends user subjects only; host and machine subjects arrive with 03-09 and 03-11. |
+| `this signer revokes user subjects only` (`subject_kind_unsupported`) | The request named a host or machine subject. | `keyroster revoke user` sends user subjects only; host and machine subjects arrive with 03-09b and 03-11. |
 | `... (revoke_installation_missing)` or `... another installation ... (revoke_installation_mismatch)` | The request reached the signer without an installation ID (this CLI always sends one), or for another installation than the signer's. | Check the server URL and root pins `keyroster init` saved; a missing ID means something between the CLI and the signer changed the request. |
 | `the server reports ... revoked, but that could not be confirmed: KRL vN, the one the server serves, does not list ... (not listed)` | The verified KRL does not list the target: the revocation is not effective, or the entry was already pruned (section 6). | Treat it as not revoked. Check the signer's `revoked` line (`journalctl -u keyroster-signer`) and run the command again. |
 | `the KRL the server serves (vN) is signed but does not parse` | The ops key signed bytes that the strict parser refuses. | Treat it as not revoked; read the signer's log. |

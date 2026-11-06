@@ -135,6 +135,12 @@ type fakeSigner struct {
 	forgetErr  error
 	lastForget *wire.ForgetRequest
 
+	// HostIssue's settable result (nil and nil: a fixed certificate as
+	// serial 9) and the last request it got, as relayed (03-09).
+	hostIssue     *wire.IssueResponse
+	hostIssueErr  error
+	lastHostIssue *wire.HostIssueRequest
+
 	heldMethod string
 	entered    chan struct{}
 	gate       chan struct{}
@@ -404,6 +410,22 @@ func (f *fakeSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (
 	}
 	if resp == nil && err == nil {
 		resp = &wire.ForgetResponse{Leaf: 7}
+	}
+	return resp, err
+}
+
+func (f *fakeSigner) HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error) {
+	f.mu.Lock()
+	f.calls["HostIssue"]++
+	c := *req
+	f.lastHostIssue = &c
+	resp, err := f.hostIssue, f.hostIssueErr
+	f.mu.Unlock()
+	if err := f.enter(ctx, "HostIssue"); err != nil {
+		return nil, err
+	}
+	if resp == nil && err == nil {
+		resp = &wire.IssueResponse{Cert: []byte("host-certificate"), Serial: 9}
 	}
 	return resp, err
 }

@@ -22,7 +22,8 @@ import (
 // method here, to socketSigner and to fakeSigner, in the commit that adds
 // its first caller (GetDirectory in 02-07, InstallDirectory in 02-09,
 // Login in 02-12, Revoke and GetKRL in 03-01, GetBundle and
-// GetDirectoryVersion in 03-07, ForgetAgent in 03-08c). Nobody adds a second
+// GetDirectoryVersion in 03-07, ForgetAgent in 03-08c, HostIssue in
+// 03-09). Nobody adds a second
 // interface, and no method is added before something calls it.
 //
 // F11 (03-08g): a new method also goes through budgetSigner, in the same
@@ -58,6 +59,11 @@ type signerAPI interface {
 	// alone decides and logs it. A refusal comes back as a
 	// *wire.ErrorResponse.
 	ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (*wire.ForgetResponse, error)
+	// HostIssue relays a host agent's host certificate request (03-09),
+	// after the server checked the agent's enrolled key and entry name;
+	// the signer alone decides, from the admin-signed directory. A
+	// refusal comes back as a *wire.ErrorResponse.
+	HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error)
 }
 
 // socketSigner reaches keyroster-signer over its Unix socket. Every call
@@ -109,6 +115,10 @@ func (s socketSigner) GetDirectoryVersion(ctx context.Context, v uint64) (*wire.
 
 func (s socketSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (*wire.ForgetResponse, error) {
 	return s.client().ForgetAgent(ctx, req)
+}
+
+func (s socketSigner) HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error) {
+	return s.client().HostIssue(ctx, req)
 }
 
 const (
@@ -262,6 +272,11 @@ func (b *budgetSigner) GetDirectoryVersion(ctx context.Context, v uint64) (*wire
 
 func (b *budgetSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (*wire.ForgetResponse, error) {
 	return budgeted(ctx, b, false, func() (*wire.ForgetResponse, error) { return b.next.ForgetAgent(ctx, req) })
+}
+
+// HostIssue is relayed for a host agent and takes the agent share (03-09).
+func (b *budgetSigner) HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error) {
+	return budgeted(ctx, b, true, func() (*wire.IssueResponse, error) { return b.next.HostIssue(ctx, req) })
 }
 
 const (

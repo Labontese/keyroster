@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,4 +170,44 @@ func TestDecodeLoginIssue(t *testing.T) {
 			t.Fatalf("decoded = %v, want cert_error", m)
 		}
 	})
+}
+
+// TestExportHostIssue: a host_issue line names the certificate and the
+// request, under no key Verify binds to another kind (03-09).
+func TestExportHostIssue(t *testing.T) {
+	hf := newHostFixture(t, 90)
+	h := hf.addHost(hf.key, nil, nil, nil)
+	m := decoded(t, hf.leaves[len(hf.leaves)-1])
+	for _, k := range []string{"kind", "serial", "policy_version", "directory_version", "key_id", "host_name", "host_key_fingerprint",
+		"principals", "valid_after", "valid_before", "ca_fingerprint", "evidence_types"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("the host_issue line has no %q: %v", k, m)
+		}
+	}
+	for _, k := range []string{"version", "bundle_version", "directory", "sigs"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("the host_issue line carries %q", k)
+		}
+	}
+	if m["kind"] != "host_issue" || m["host_name"] != "web1" || m["host_key_fingerprint"] != ssh.FingerprintSHA256(hf.key.PublicKey()) || m["key_id"] != h.cert.KeyId {
+		t.Fatalf("the host_issue line: %v", m)
+	}
+	if _, err := hf.verifyHosts(); err != nil {
+		t.Fatalf("Verify of the export: %v", err)
+	}
+	// Every decoded field of a host_issue line is bound to its leaf: the
+	// runbook takes a host's serials, name and key fingerprints from them.
+	in := join(hf.lines())
+	for _, mut := range [][2]string{
+		{`"host_name":"web1"`, `"host_name":"db01"`},
+		{`"host_key_fingerprint":"` + ssh.FingerprintSHA256(hf.key.PublicKey()) + `"`, `"host_key_fingerprint":"SHA256:x"`},
+		{`"kind":"host_issue",`, `"kind":"host_issue","note":"x",`},
+	} {
+		if !strings.Contains(in, mut[0]) {
+			t.Fatalf("the export holds no %s", mut[0])
+		}
+		if _, err := hf.verify(strings.Replace(in, mut[0], mut[1], 1), nil); err == nil || !strings.Contains(err.Error(), "host_issue leaf") {
+			t.Errorf("a host_issue line with %s: %v, want it refused", mut[1], err)
+		}
+	}
 }

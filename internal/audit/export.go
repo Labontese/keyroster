@@ -211,6 +211,12 @@ func decodeLeaf(data []byte) map[string]any {
 			return map[string]any{"error": err.Error()}
 		}
 		decodeLoginIssue(m, b)
+	case tlog.KindHostIssue:
+		b, err := tlog.DecodeHostIssueBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		decodeHostIssue(m, b)
 	case tlog.KindRevoke:
 		b, err := tlog.DecodeRevokeBody(l.Body)
 		if err != nil {
@@ -462,6 +468,43 @@ func decodeLoginIssue(m map[string]any, b *tlog.LoginIssueBody) {
 		if len(a.AuthenticatorData) > 32 {
 			m["authenticator_flags"] = hex.EncodeToString(a.AuthenticatorData[32:33])
 		}
+	}
+}
+
+// decodeHostIssue renders a host_issue body into m (03-09): the serial,
+// versions, key ID, the request's host name and key, the certificate's
+// principals, validity and CA, and the evidence types. No field is named
+// "version", "bundle_version", "directory" or "sigs": Verify binds those
+// names to other kinds (checkGrepFields, checkReplayFields).
+func decodeHostIssue(m map[string]any, b *tlog.HostIssueBody) {
+	types := make([]string, 0, len(b.Evidence))
+	for _, e := range b.Evidence {
+		types = append(types, e.Type)
+	}
+	m["serial"] = b.Serial
+	m["policy_version"] = b.PolicyVersion
+	m["directory_version"] = b.DirectoryVersion
+	m["cap_seconds"] = b.CapSeconds
+	m["key_id"] = b.KeyID
+	m["evidence_types"] = types
+	if req, err := wire.ParseHostIssueSigningBytes(b.Request); err != nil {
+		m["request_error"] = err.Error()
+	} else {
+		m["host_name"] = req.HostName
+		m["request_id"] = hex.EncodeToString(req.RequestID[:])
+		m["created_at"] = req.CreatedAt
+		if pub, err := ssh.ParsePublicKey(req.HostKey); err == nil {
+			m["host_key_fingerprint"] = ssh.FingerprintSHA256(pub)
+		}
+	}
+	if c, err := parseCert(b.Cert); err != nil {
+		m["cert_error"] = err.Error()
+	} else {
+		m["principals"] = c.ValidPrincipals
+		m["valid_after"] = c.ValidAfter
+		m["valid_before"] = c.ValidBefore
+		m["ca_fingerprint"] = ssh.FingerprintSHA256(c.SignatureKey)
+		m["ca_algorithm"] = c.SignatureKey.Type()
 	}
 }
 

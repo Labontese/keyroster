@@ -2,6 +2,7 @@ package tlog
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -11,9 +12,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/cryptobyte"
+	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/wire"
 )
@@ -193,7 +197,7 @@ func TestDecodeLeafStrict(t *testing.T) {
 		"trailing_byte":    append(append([]byte(nil), raw...), 0),
 		"truncated":        raw[:len(raw)-1],
 		"wrong_domain":     append([]byte{21}, append([]byte("keyroster/log-leaf/v2"), raw[22:]...)...),
-		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: KindKRLPublish + 1, Body: refusal}),
+		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: KindHostIssue + 1, Body: refusal}),
 		"body_of_another":  EncodeLeaf(Leaf{Kind: KindIssue, Body: refusal}),
 		"summary_no_count": EncodeLeaf(Leaf{Kind: KindRefusalSummary, Body: make([]byte, 18)}),
 	}
@@ -705,7 +709,7 @@ func TestRecoveryBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for k := Kind(11); k <= 14; k++ {
+		for k := Kind(12); k <= 14; k++ {
 			if _, err := MarshalLeaf(Leaf{Kind: k, Body: refusal}); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("MarshalLeaf accepted kind %d", k)
 			}
@@ -833,7 +837,7 @@ func TestHostForgetBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, k := range []Kind{11, 12, 13, 14, 17} {
+		for _, k := range []Kind{12, 13, 14, 17} {
 			if _, err := DecodeLeaf(rawKindLeaf(t, Leaf{Kind: k, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("DecodeLeaf accepted kind %d", k)
 			}
@@ -843,4 +847,111 @@ func TestHostForgetBody(t *testing.T) {
 			t.Fatalf("DecodeLeaf accepted a kind-16 leaf with a refusal body: %v", err)
 		}
 	})
+}
+
+// TestHostIssueKind: kind 11 is host_issue (03-09). MarshalLeaf accepts a
+// host_issue leaf, and DecodeLeaf refuses a kind-11 leaf whose body is
+// not a host_issue body.
+func TestHostIssueKind(t *testing.T) {
+	body, err := (&HostIssueBody{Serial: 1, PolicyVersion: 1, DirectoryVersion: 1, CapSeconds: 90, Request: []byte("r"),
+		Evidence: []wire.Evidence{{Type: wire.EvidenceHostPoP, Blob: []byte("s")}}, Cert: []byte("c"), KeyID: "k"}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := MarshalLeaf(Leaf{Kind: KindHostIssue, Body: body})
+	if err != nil {
+		t.Fatalf("MarshalLeaf refused kind 11: %v", err)
+	}
+	if l, err := DecodeLeaf(enc); err != nil || l.Kind != KindHostIssue || KindHostIssue.String() != "host_issue" {
+		t.Fatalf("DecodeLeaf of kind 11 = %+v, %v", l, err)
+	}
+	refusal, err := (&RefusalBody{Reason: ReasonMalformed, Detail: "x"}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeLeaf(EncodeLeaf(Leaf{Kind: KindHostIssue, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
+		t.Fatalf("DecodeLeaf accepted a kind-11 leaf with a refusal body: %v", err)
+	}
+}
+
+// zeroReader is a deterministic random source for the vectors.
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+// hostIssueVector is the kind-11 leaf of the vector (03-09): the request of
+// host_issue_request_signing_v1.hex, its evidence, and a 90 s certificate
+// for its key from a fixed host CA, CapSeconds 90.
+func hostIssueVector(t testing.TB) (Leaf, *HostIssueBody) {
+	t.Helper()
+	request, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "host_issue_request_signing_v1.hex"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := wire.ParseHostIssueSigningBytes(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostKey, err := ssh.ParsePublicKey(req.HostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := ssh.NewSignerFromKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, ed25519.SeedSize)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const serial = 1_700_000_000_000_005
+	kid := cert.KeyID{V3: true, CA: "host", Subject: "web1", Request: "000102030405060708090a0b0c0d0e0f", Policy: 2, Directory: 3, Serial: serial}
+	c, err := cert.Build(cert.Request{Profile: cert.Profile{CertType: ssh.HostCert, MaxTTL: 90 * time.Second}, Subject: hostKey,
+		Principals: []string{"web1"}, Now: time.Unix(1_700_000_000, 0), ValidFor: 90 * time.Second, KeyID: kid, Serial: serial}, ca, zeroReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &HostIssueBody{
+		Serial: serial, PolicyVersion: 2, DirectoryVersion: 3, CapSeconds: 90,
+		Request:  request,
+		Evidence: []wire.Evidence{{Type: wire.EvidenceHostPoP, Blob: []byte("host pop (test vector)")}},
+		Cert:     c.Marshal(),
+		KeyID:    c.KeyId,
+	}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 14, TimeMicros: 1_700_000_000_000_006, Kind: KindHostIssue, Body: enc}, body
+}
+
+// TestHostIssueLeafVector pins the kind-11 leaf encoding (03-09); its
+// certificate lives exactly its CapSeconds.
+func TestHostIssueLeafVector(t *testing.T) {
+	leaf, body := hostIssueVector(t)
+	checkLeafVector(t, "leaf_host_issue_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeHostIssueBody(b) })
+	pub, err := ssh.ParsePublicKey(body.Cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := pub.(*ssh.Certificate)
+	if c.ValidBefore-c.ValidAfter-300 != body.CapSeconds {
+		t.Fatalf("the vector's certificate lives %d s, its CapSeconds is %d", c.ValidBefore-c.ValidAfter-300, body.CapSeconds)
+	}
+}
+
+// TestHostIssueBody: the strict decoder refuses trailing bytes, an
+// oversize certificate and an oversize key ID (03-09).
+func TestHostIssueBody(t *testing.T) {
+	leaf, body := hostIssueVector(t)
+	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeHostIssueBody(b) })
+	big := *body
+	big.Cert = make([]byte, MaxCert+1)
+	if _, err := big.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+		t.Fatalf("an oversize certificate encodes: %v", err)
+	}
+	big = *body
+	big.KeyID = strings.Repeat("k", MaxKeyID+1)
+	if _, err := big.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+		t.Fatalf("an oversize key ID encodes: %v", err)
+	}
 }

@@ -279,6 +279,7 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 	if b, err := e.readDropIn(); err == nil && b != nil {
 		s.DropInSHA256 = trust.SHA256Hex(b)
 	}
+	e.hostCertStatus(s)
 	if u.Swapping {
 		// A swap's status runs nothing (publishPending).
 		if prev != nil {
@@ -389,4 +390,37 @@ func krlIssuedAt(s *heartbeat.Status) string {
 		return "an unknown time (no manifest for this version; an older accepted one is 24 h old or more)"
 	}
 	return s.KRL.IssuedAt
+}
+
+// hostCertStatus fills the host-certificate fields of s (03-09) from the
+// record's committed set (Served included) and the attempts file: the
+// certificates, the skipped key types and the last code. A record or
+// attempts file that does not read leaves the fields empty, and the record
+// code is the detail then.
+func (e *engine) hostCertStatus(s *heartbeat.Status) {
+	if e.stateFd < 0 {
+		return
+	}
+	rec, code, err := e.readHostCertRecord()
+	if err != nil {
+		return
+	}
+	if rec != nil {
+		for _, en := range rec.Committed {
+			typ := ""
+			if pub, err := trust.ParseKey(en.Key); err == nil {
+				typ = pub.Type()
+			}
+			s.HostCerts = append(s.HostCerts, heartbeat.HostCert{KeySHA256: en.KeySHA256, Type: typ, Serial: en.Serial,
+				ValidBefore: en.ValidBefore, CASHA256: en.CASHA256, Served: en.Served})
+		}
+	}
+	a, _ := e.readHostCertAttempts()
+	for _, t := range a.Skipped {
+		s.HostKeysSkipped = append(s.HostKeysSkipped, heartbeat.SkippedKey{Type: t, Reason: "rsa_host_key_skipped"})
+	}
+	s.HostCertDetail = a.Detail
+	if code != "" {
+		s.HostCertDetail = code
+	}
 }

@@ -44,8 +44,10 @@ type Kind uint8
 // the revocations a signer restore lost, imported in one admin-signed
 // recovery. Kind 16 joined format v1 in Phase 3 (03-08c), next after 15:
 // HostForget records an admin-signed forget of one enrolled agent, which
-// the signer authorized before keyroster-server deleted it. Kinds 11 to 14
-// stay reserved for 03-09 to 03-12, which add them to the valid set
+// the signer authorized before keyroster-server deleted it. Kind 11
+// joined format v1 in Phase 3 (03-09): HostIssue records a host
+// certificate issued to a host agent by proof of possession. Kinds 12 to
+// 14 stay reserved for 03-10 to 03-12, which add them to the valid set
 // (valid). A reader that has no check for a kind must refuse it, never
 // skip it (audit verify does). docs/format-registry.md allocates the
 // numbers; TestFormatRegistry fails when it and these constants disagree.
@@ -60,10 +62,13 @@ const (
 	KindLoginIssue       Kind = 8
 	KindRevoke           Kind = 9
 	KindKRLPublish       Kind = 10
-	// 15 (03-06b) is the first free number: 11 to 14 belong to 03-09 to
-	// 03-12.
+	// KindHostIssue (03-09) takes its reserved number; 12 to 14 belong to
+	// 03-10 to 03-12.
+	KindHostIssue Kind = 11
+	// 15 (03-06b) was the first free number: 11 to 14 belonged to 03-09
+	// to 03-12.
 	KindRevocationRecovery Kind = 15
-	// 16 (03-08c) comes after 15; 11 to 14 stay 03-09 to 03-12's.
+	// 16 (03-08c) comes after 15; 12 to 14 stay 03-10 to 03-12's.
 	KindHostForget Kind = 16
 )
 
@@ -90,6 +95,8 @@ func (k Kind) String() string {
 		return "revoke"
 	case KindKRLPublish:
 		return "krl_publish"
+	case KindHostIssue:
+		return "host_issue"
 	case KindRevocationRecovery:
 		return "revocation_recovery"
 	case KindHostForget:
@@ -100,9 +107,9 @@ func (k Kind) String() string {
 }
 
 // valid reports whether k is a kind of format v1. It is an explicit set:
-// 1 to 10, 15 and 16. Kinds 11 to 14 are added by 03-09 to 03-12.
+// 1 to 11, 15 and 16. Kinds 12 to 14 are added by 03-10 to 03-12.
 func (k Kind) valid() bool {
-	return (k >= KindIssue && k <= KindKRLPublish) || k == KindRevocationRecovery || k == KindHostForget
+	return (k >= KindIssue && k <= KindHostIssue) || k == KindRevocationRecovery || k == KindHostForget
 }
 
 // Size limits enforced by the encoders and the strict decoders.
@@ -223,6 +230,8 @@ func checkBody(k Kind, body []byte) error {
 		_, err = DecodeRecoveryBody(body)
 	case KindHostForget:
 		_, err = DecodeHostForgetBody(body)
+	case KindHostIssue:
+		_, err = DecodeHostIssueBody(body)
 	default:
 		err = fmt.Errorf("%w: unknown kind %d", ErrMalformedLeaf, k)
 	}
@@ -731,6 +740,99 @@ func DecodeLoginIssueBody(data []byte) (*LoginIssueBody, error) {
 	)
 	if !s.ReadUint64(&b.Serial) || !s.ReadUint64(&b.PolicyVersion) || !s.ReadUint64(&b.DirectoryVersion) ||
 		!s.ReadUint24LengthPrefixed(&request) || !s.ReadUint24LengthPrefixed(&evidence) ||
+		!s.ReadUint24LengthPrefixed(&certB) || !read16(&s, &keyID, MaxKeyID) || !s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	for !evidence.Empty() {
+		if len(b.Evidence) == wire.MaxEvidence {
+			return nil, fmt.Errorf("%w: too many evidence items", ErrMalformedLeaf)
+		}
+		var typ, blob []byte
+		if !read16(&evidence, &typ, wire.MaxEvidenceType) || len(typ) == 0 ||
+			!read16(&evidence, &blob, wire.MaxEvidenceBlob) {
+			return nil, ErrMalformedLeaf
+		}
+		b.Evidence = append(b.Evidence, wire.Evidence{Type: string(typ), Blob: blob})
+	}
+	b.Request = append([]byte(nil), request...)
+	b.Cert = append([]byte(nil), certB...)
+	b.KeyID = string(keyID)
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// HostIssueBody records one host certificate issued to a host agent by
+// proof of possession (kind 11, 03-09): the serial, the policy and
+// directory versions the signer issued it under, CapSeconds (min(2592000,
+// the host max_ttl_seconds of the policy in force) at issuance, which is
+// also the certificate's lifetime ValidBefore - (ValidAfter + 300), the
+// signer's choice, Q-09-6), the request's full signing bytes (at most
+// MaxRequest), the evidence presented (the host-pop/v1 SSHSIG by the host
+// key over those bytes), the full certificate and its key ID. With them an
+// auditor re-proves the issuance from the log alone.
+type HostIssueBody struct {
+	Serial           uint64
+	PolicyVersion    uint64
+	DirectoryVersion uint64
+	CapSeconds       uint64
+	Request          []byte
+	Evidence         []wire.Evidence
+	Cert             []byte
+	KeyID            string
+}
+
+func (b *HostIssueBody) check() error {
+	if len(b.Request) == 0 || len(b.Request) > MaxRequest || len(b.Evidence) > wire.MaxEvidence ||
+		len(b.Cert) == 0 || len(b.Cert) > MaxCert || len(b.KeyID) == 0 || len(b.KeyID) > MaxKeyID {
+		return fmt.Errorf("%w: host_issue body size", ErrMalformedLeaf)
+	}
+	for _, e := range b.Evidence {
+		if len(e.Type) == 0 || len(e.Type) > wire.MaxEvidenceType || len(e.Blob) > wire.MaxEvidenceBlob {
+			return fmt.Errorf("%w: evidence size", ErrMalformedLeaf)
+		}
+	}
+	return nil
+}
+
+// Encode encodes the body: the serial, the policy and directory versions
+// and CapSeconds (uint64 each), the request, the evidence and the
+// certificate (uint24-length prefixed each) and the key ID (uint16).
+func (b *HostIssueBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	c.AddUint64(b.Serial)
+	c.AddUint64(b.PolicyVersion)
+	c.AddUint64(b.DirectoryVersion)
+	c.AddUint64(b.CapSeconds)
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Request) })
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+		for _, e := range b.Evidence {
+			add16(c, []byte(e.Type))
+			add16(c, e.Blob)
+		}
+	})
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Cert) })
+	add16(&c, []byte(b.KeyID))
+	return c.Bytes()
+}
+
+// DecodeHostIssueBody decodes a host_issue body strictly. Every error
+// wraps ErrMalformedLeaf.
+func DecodeHostIssueBody(data []byte) (*HostIssueBody, error) {
+	s := cryptobyte.String(data)
+	var (
+		b        HostIssueBody
+		request  cryptobyte.String
+		evidence cryptobyte.String
+		certB    cryptobyte.String
+		keyID    []byte
+	)
+	if !s.ReadUint64(&b.Serial) || !s.ReadUint64(&b.PolicyVersion) || !s.ReadUint64(&b.DirectoryVersion) ||
+		!s.ReadUint64(&b.CapSeconds) || !s.ReadUint24LengthPrefixed(&request) || !s.ReadUint24LengthPrefixed(&evidence) ||
 		!s.ReadUint24LengthPrefixed(&certB) || !read16(&s, &keyID, MaxKeyID) || !s.Empty() {
 		return nil, ErrMalformedLeaf
 	}

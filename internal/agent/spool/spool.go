@@ -104,7 +104,14 @@ var (
 	// bundlePolicyRE is the policy signatures delivered with a bundle
 	// (State.BundlePolicySigs; F02 (03-08f)), with docRE's version grammar.
 	bundlePolicyRE = regexp.MustCompile(`^bundle-([1-9][0-9]{0,19})\.policy\.sigs$`)
+	// hostCertAnswerRE is a host certificate answer the fetcher writes
+	// (03-09): no document, read only by the host-certificate step.
+	hostCertAnswerRE = regexp.MustCompile(`^hostcert-[0-9a-f]{64}\.answer$`)
 )
+
+// MaxHostCertAnswer caps a host certificate answer in the spool (03-09;
+// hostcert.MaxAnswer).
+const MaxHostCertAnswer = 16 << 10
 
 // Cap is the cap Read applies to the file name, with true for a name it
 // recognises: MaxBundle for a bundle or policy and their signatures, and
@@ -114,8 +121,13 @@ var (
 // KRL, its manifest and the manifest's signature. A name outside the
 // fixed patterns, or whose version is not a uint64, is false: Read never
 // reads it. Read takes its caps from here, and the fetcher refuses what
-// is above them (F01 (03-08e)).
+// is above them (F01 (03-08e)). A host certificate answer
+// (hostcert-<64 hex>.answer, 03-09) is capped at MaxHostCertAnswer, so the
+// fetcher's heal removes an oversize one.
 func Cap(name string) (int64, bool) {
+	if hostCertAnswerRE.MatchString(name) {
+		return MaxHostCertAnswer, true
+	}
 	if m := docRE.FindStringSubmatch(name); m != nil {
 		if _, err := strconv.ParseUint(m[2], 10, 64); err != nil {
 			return 0, false

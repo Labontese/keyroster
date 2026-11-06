@@ -87,6 +87,45 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
+	res := verifyResultOf(rep)
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		return enc.Encode(res)
+	}
+	if err := printVerifyOK(stdout, res, rep); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "anchored: the pinned roots are the root set of trust bundle v%d\n", res.Anchor); err != nil {
+		return err
+	}
+	_, err = io.WriteString(stdout,
+		"not checked: that each issuance was authorized by the policy's admins (the log keeps their evidence, not the signed request it covers)\n")
+	return err
+}
+
+// printVerifyOK prints the OK line and, when the log holds host
+// certificates (03-09), the line "host certificates: N" after it. issued
+// counts admin issuances (issue entries) only; login certificates,
+// directory installs and host certificates are the counts of their own
+// kinds. No JSON field is added: Kinds already carries the count.
+func printVerifyOK(w io.Writer, res verifyResult, rep *audit.Report) error {
+	if _, err := fmt.Fprintf(w, "OK: %d entries, root %s, issued %d (user %d, host %d, machine %d), login certificates %d, directory installs %d, refusals %d, trust bundle v%d, policy v%d, log key %s\n",
+		res.Entries, res.Root, res.Issued, res.ByCA["user"], res.ByCA["host"], res.ByCA["machine"],
+		rep.Counts[tlog.KindLoginIssue], rep.Counts[tlog.KindDirectoryInstall],
+		res.Refusals, res.Bundle, res.Policy, res.LogKey); err != nil {
+		return err
+	}
+	if n := rep.Counts[tlog.KindHostIssue]; n > 0 {
+		if _, err := fmt.Fprintf(w, "host certificates: %d\n", n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyResultOf is the summary of rep that the text and JSON outputs
+// share (the log key is "" when rep has none).
+func verifyResultOf(rep *audit.Report) verifyResult {
 	res := verifyResult{
 		OK:       true,
 		Entries:  rep.Size,
@@ -99,30 +138,15 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 		ByCA:     rep.IssuedByCA,
 		Bundle:   rep.BundleVersion,
 		Policy:   rep.PolicyVersion,
-		LogKey:   ssh.FingerprintSHA256(rep.LogKey),
 		Anchor:   rep.AnchorVersion,
+	}
+	if rep.LogKey != nil {
+		res.LogKey = ssh.FingerprintSHA256(rep.LogKey)
 	}
 	for k, n := range rep.Counts {
 		res.Kinds[k.String()] = n
 	}
-	if *asJSON {
-		enc := json.NewEncoder(stdout)
-		return enc.Encode(res)
-	}
-	// issued counts admin issuances (issue entries) only; login certificates
-	// and directory installs are the counts of their own kinds.
-	if _, err := fmt.Fprintf(stdout, "OK: %d entries, root %s, issued %d (user %d, host %d, machine %d), login certificates %d, directory installs %d, refusals %d, trust bundle v%d, policy v%d, log key %s\n",
-		res.Entries, res.Root, res.Issued, res.ByCA["user"], res.ByCA["host"], res.ByCA["machine"],
-		rep.Counts[tlog.KindLoginIssue], rep.Counts[tlog.KindDirectoryInstall],
-		res.Refusals, res.Bundle, res.Policy, res.LogKey); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(stdout, "anchored: the pinned roots are the root set of trust bundle v%d\n", res.Anchor); err != nil {
-		return err
-	}
-	_, err = io.WriteString(stdout,
-		"not checked: that each issuance was authorized by the policy's admins (the log keeps their evidence, not the signed request it covers)\n")
-	return err
+	return res
 }
 
 // readPrevious returns the signed checkpoint in path: either a checkpoint

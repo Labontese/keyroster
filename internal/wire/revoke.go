@@ -96,9 +96,11 @@ const MaxRevokeKeyID = 1024
 // answer stays inside MaxFrame.
 const MaxRevokeAnswerSerials = 4096
 
-// subjectRE is the subject grammar of a certificate key ID (internal/cert
-// KeyID). A subject never contains "/", so it names exactly the key IDs
-// whose sub field it equals.
+// subjectRE is the subject grammar of a kr1 and kr2 certificate key ID
+// (internal/cert KeyID), and of a kr3 one up to 64 bytes. A subject never
+// contains "/", so it names exactly the key IDs whose sub field it
+// equals. A kr3 subject above 64 bytes is only a ca=machine `probe.`
+// subject (03-09, Q-09-8), and probes are never revoked by subject.
 var subjectRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._@:+-]{0,63}$`)
 
 // MaxRequestSkewSeconds is the signer's freshness window: it refuses an

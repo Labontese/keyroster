@@ -278,6 +278,18 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn, peer Peer, cred
 			return
 		}
 		s.respond(ctx, conn, peer, req.Digest(), wire.TypeIssueResponse, resp, resp.Serial)
+	case wire.TypeHostIssueRequest:
+		req, err := wire.ParseHostIssueRequest(body)
+		if err != nil {
+			s.reply(conn, s.refuse(ctx, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request"))
+			return
+		}
+		resp, refused := s.hostIssueOrRefuse(ctx, peer, req)
+		if refused != nil {
+			s.reply(conn, refused)
+			return
+		}
+		s.respond(ctx, conn, peer, req.Digest(), wire.TypeIssueResponse, resp, resp.Serial)
 	case wire.TypeInstallDirectory:
 		req, err := wire.ParseInstallDirectoryRequest(body)
 		if err != nil {

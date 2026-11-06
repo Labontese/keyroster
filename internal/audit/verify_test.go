@@ -3731,3 +3731,474 @@ func TestVerifyLastKRL(t *testing.T) {
 		t.Fatalf("LastKRL does not list the revoked serial: %v", err)
 	}
 }
+
+// hostFixture is a log for host certificates (03-09): the genesis bundle
+// with an installation ID and a policy with pop.hosts and a host cap,
+// and directory version 1 with web1 (active, keys key and key2,
+// principals web1) and web2 (disabled, key off).
+type hostFixture struct {
+	*loginFixture
+	key, key2, off ssh.Signer
+	hosts          []directory.Host
+}
+
+func newHostFixture(t testing.TB, capSeconds uint64) *hostFixture {
+	t.Helper()
+	f := newBareFixtureAt(t, "ed25519", time.Now().Truncate(time.Second))
+	pol := f.loginPolicy(false)
+	pol.PoP = &trust.PoPPolicy{Hosts: true}
+	pol.CAProfiles[1].MaxTTLSeconds = capSeconds
+	g := f.genesis()
+	g.InstallationID = auditInstallationID
+	lf := &loginFixture{fixture: f, pol: pol}
+	lf.docs = f.signDocs(g, pol, f.root)
+	f.addBundle(lf.docs)
+	var err error
+	if lf.alice, err = webauthntest.New(webauthn.AlgEdDSA); err != nil {
+		t.Fatal(err)
+	}
+	if lf.bob, err = webauthntest.New(webauthn.AlgES256); err != nil {
+		t.Fatal(err)
+	}
+	hf := &hostFixture{loginFixture: lf, key: newSigner(t, "ed25519"), key2: newSigner(t, "p256"), off: newSigner(t, "ed25519")}
+	hf.hosts = []directory.Host{
+		{Name: "web1", HostGroup: "lab", Keys: []string{trust.FormatKey(hf.key.PublicKey()), trust.FormatKey(hf.key2.PublicKey())}, Principals: []string{"web1"}, Status: directory.StatusActive},
+		{Name: "web2", HostGroup: "lab", Keys: []string{trust.FormatKey(hf.off.PublicKey())}, Principals: []string{"web2"}, Status: directory.StatusDisabled},
+	}
+	hf.publish()
+	return hf
+}
+
+// publish logs the next directory version with hf.hosts.
+func (hf *hostFixture) publish() {
+	hf.t.Helper()
+	hosts := slices.Clone(hf.hosts)
+	for i := range hosts {
+		hosts[i].Keys = slices.Sorted(slices.Values(hosts[i].Keys))
+	}
+	hf.addDirectory(hf.directory(func(d *directory.Directory) {
+		d.InstallationID = auditInstallationID
+		d.HostGroups = []directory.HostGroup{{Name: "lab", Accounts: []directory.AccountMap{{Account: "root", Roles: []string{"ops"}}}}}
+		d.Hosts = hosts
+	}), nil)
+}
+
+// rf is hf as a revokeFixture, for revoke, publish and recover entries.
+func (hf *hostFixture) rf() *revokeFixture { return &revokeFixture{fixture: hf.fixture} }
+
+// advance moves the log's clock (leaf times and serials) on by d.
+func (hf *hostFixture) advance(d time.Duration) {
+	hf.micros += uint64(d.Microseconds()) //nolint:gosec // G115: test durations
+	hf.serial = max(hf.serial, hf.micros)
+}
+
+// hostIssue is one host issuance as the fixture builds it, in the order
+// of the signer's steps; pre changes the request before the proof of
+// possession is signed, tamper after, post the certificate and body.
+type hostIssue struct {
+	req        *wire.HostIssueRequest
+	popKey     ssh.Signer
+	evidence   []wire.Evidence
+	ca         ssh.Signer
+	principals []string
+	lifetime   uint64
+	capSeconds uint64
+	keyID      cert.KeyID
+	serial     uint64
+	issued     time.Time
+	dirVersion uint64
+	polVersion uint64
+	cert       *ssh.Certificate
+}
+
+// hostCap is min(2592000, the policy in force's host cap).
+func (hf *hostFixture) hostCap() uint64 { return min(2592000, hf.pol.CAProfiles[1].MaxTTLSeconds) }
+
+// addHost logs a host_issue entry: by default key's request for web1,
+// valid_for 0, created at the entry time, signed by key, and the
+// certificate cert.Build gives the host CA for it with the entry's
+// principals for the cap in force, with the next serial.
+func (hf *hostFixture) addHost(key ssh.Signer, pre, tamper, post func(*hostIssue)) *hostIssue {
+	hf.t.Helper()
+	h := &hostIssue{
+		req:    &wire.HostIssueRequest{InstallationID: auditInstallationID, HostName: "web1", HostKey: key.PublicKey().Marshal(), CreatedAt: hf.leafSecs()},
+		popKey: key, ca: hf.hostCA, principals: []string{"web1"}, lifetime: hf.hostCap(), capSeconds: hf.hostCap(),
+		serial: hf.serial + 1, dirVersion: hf.dirVersion, polVersion: hf.pol.Version,
+	}
+	if _, err := rand.Read(h.req.RequestID[:]); err != nil {
+		hf.t.Fatal(err)
+	}
+	if pre != nil {
+		pre(h)
+	}
+	for _, x := range hf.hosts {
+		if x.Name == h.req.HostName {
+			h.principals = slices.Clone(x.Principals)
+		}
+	}
+	sig, err := sshsig.Sign(rand.Reader, h.popKey, wire.HostPoPNamespace, h.req.SigningBytes())
+	if err != nil {
+		hf.t.Fatal(err)
+	}
+	h.evidence = []wire.Evidence{{Type: wire.EvidenceHostPoP, Blob: sig}}
+	if tamper != nil {
+		tamper(h)
+	}
+	h.keyID = cert.KeyID{V3: true, CA: "host", Subject: h.req.HostName, Request: hex.EncodeToString(h.req.RequestID[:]), Policy: h.polVersion, Directory: h.dirVersion}
+	if post != nil {
+		post(h)
+	}
+	h.keyID.Serial = h.serial
+	issued := h.issued
+	if issued.IsZero() {
+		issued = issuedAt(h.serial)
+	}
+	pub, err := ssh.ParsePublicKey(h.req.HostKey)
+	if err != nil {
+		hf.t.Fatal(err)
+	}
+	c, err := cert.Build(cert.Request{Profile: cert.Profile{CertType: ssh.HostCert, MaxTTL: 2592000 * time.Second}, Subject: pub, Principals: h.principals,
+		Now: issued, ValidFor: time.Duration(h.lifetime) * time.Second, KeyID: h.keyID, Serial: h.serial}, h.ca, rand.Reader) //nolint:gosec // G115: test lifetimes
+	if err != nil {
+		hf.t.Fatal(err)
+	}
+	h.cert = c
+	body, err := (&tlog.HostIssueBody{Serial: h.serial, PolicyVersion: h.polVersion, DirectoryVersion: h.dirVersion, CapSeconds: h.capSeconds,
+		Request: h.req.SigningBytes(), Evidence: h.evidence, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+	if err != nil {
+		hf.t.Fatal(err)
+	}
+	hf.add(tlog.KindHostIssue, body)
+	hf.serial = max(hf.serial, h.serial)
+	return h
+}
+
+func (hf *hostFixture) verifyHosts() (*Report, error) { return hf.verify(join(hf.lines()), nil) }
+
+func (hf *hostFixture) wantFail(t *testing.T, want string) {
+	t.Helper()
+	if _, err := hf.verifyHosts(); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("verify = %v, want an error containing %q", err, want)
+	}
+}
+
+func (hf *hostFixture) wantPass(t *testing.T) *Report {
+	t.Helper()
+	rep, err := hf.verifyHosts()
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	return rep
+}
+
+// TestVerifyHostIssue: audit verify re-proves every host_issue entry from
+// the log alone, with the signer's rules (03-09).
+func TestVerifyHostIssue(t *testing.T) {
+	t.Run("valid_passes", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.addHost(hf.key2, nil, nil, nil)
+		if rep := hf.wantPass(t); rep.Counts[tlog.KindHostIssue] != 2 {
+			t.Fatalf("counts %v", rep.Counts)
+		}
+	})
+	t.Run("principals_differ_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, func(h *hostIssue) { h.principals = []string{"web1", "evil"} })
+		hf.wantFail(t, "principals")
+	})
+	t.Run("key_not_listed_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		other := newSigner(t, "ed25519")
+		hf.addHost(other, nil, nil, nil)
+		hf.wantFail(t, "does not list key")
+	})
+	t.Run("pop_by_other_key_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, func(h *hostIssue) { h.popKey = hf.key2 }, nil, nil)
+		hf.wantFail(t, "proof of possession")
+	})
+	t.Run("lifetime_not_cap_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, func(h *hostIssue) { h.lifetime = 89 })
+		hf.wantFail(t, "lives 89 s")
+	})
+	t.Run("wrong_ca_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, func(h *hostIssue) { h.ca = hf.ca })
+		hf.wantFail(t, "signed by")
+	})
+	t.Run("unknown_host_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, func(h *hostIssue) { h.req.HostName = "web9" }, nil, nil)
+		hf.wantFail(t, "has no host")
+	})
+	t.Run("host_disabled_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.off, func(h *hostIssue) { h.req.HostName = "web2" }, nil, nil)
+		hf.wantFail(t, "not active")
+	})
+	t.Run("pop_hosts_off_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.installPolicy(func(p *trust.Policy) { p.PoP = nil })
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantFail(t, "pop.hosts")
+	})
+	t.Run("installation_mismatch_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, func(h *hostIssue) { h.req.InstallationID = "fedcba9876543210fedcba9876543210" }, nil, nil)
+		hf.wantFail(t, "installation")
+	})
+	t.Run("field_changed_after_signing_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, func(h *hostIssue) { h.req.CreatedAt-- }, nil)
+		hf.wantFail(t, "proof of possession does not verify")
+	})
+	t.Run("revoked_key_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		rf := hf.rf()
+		rf.revoke(&wire.RevokeRequest{Target: wire.TargetKey, Key: hf.key.PublicKey().Marshal()},
+			[]tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: hf.key.PublicKey().Marshal()}}, nil)
+		rf.publish(nil)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantFail(t, "explicitly revoked")
+	})
+	t.Run("recent_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.advance(10 * time.Second)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantFail(t, "host_cert_recent")
+	})
+	t.Run("nonzero_valid_for_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, func(h *hostIssue) { h.req.ValidForSeconds = 90 }, nil, nil)
+		hf.wantFail(t, "valid_for")
+	})
+	t.Run("recent_after_principals_change_passes", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.hosts[0].Principals = []string{"web1", "www"}
+		hf.publish()
+		hf.advance(time.Second)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantPass(t)
+	})
+	t.Run("second_exception_same_version_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.hosts[0].Principals = []string{"web1", "www"}
+		hf.publish()
+		hf.advance(time.Second)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.advance(time.Second)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantFail(t, "host_cert_recent")
+	})
+	t.Run("rename_entry_recent_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.hosts[0].Name = "web1b"
+		hf.publish()
+		hf.advance(time.Second)
+		hf.addHost(hf.key, func(h *hostIssue) { h.req.HostName = "web1b" }, nil, nil)
+		hf.wantFail(t, "host_cert_recent")
+	})
+	t.Run("cert_revoked_hold_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		h := hf.addHost(hf.key, nil, nil, nil)
+		rf := hf.rf()
+		rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleHost, Serial: h.serial}, []tlog.RevokedEntry{serialEntry(h.cert)}, nil)
+		rf.publish(nil)
+		hf.advance(time.Hour)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantFail(t, "cert_revoked")
+	})
+	t.Run("issued_after_new_directory_passes", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		h := hf.addHost(hf.key, nil, nil, nil)
+		rf := hf.rf()
+		rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleHost, Serial: h.serial}, []tlog.RevokedEntry{serialEntry(h.cert)}, nil)
+		rf.publish(nil)
+		hf.publish()
+		hf.advance(time.Second)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantPass(t)
+	})
+	t.Run("restored_lost_revoked_cert_hold_fails", func(t *testing.T) {
+		for _, variant := range []string{"revoke_flag", "krl_entry"} {
+			t.Run(variant, func(t *testing.T) {
+				hf := newHostFixture(t, 90)
+				hf.addHost(hf.key, nil, nil, nil)
+				hf.advance(30 * time.Second)
+				// A certificate the restore lost: issued, not in this log.
+				rf := hf.rf()
+				lostSerial := hf.serial + 1
+				hf.serial = lostSerial
+				lost := rf.lostHostCertFor(hf, lostSerial)
+				var imports []wire.RecoveryImport
+				revoke := variant == "revoke_flag"
+				if !revoke {
+					imports = []wire.RecoveryImport{rf.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: lost.SignatureKey.Marshal(), Serial: lost.Serial, ValidBefore: lost.ValidBefore}},
+						1, hf.ops, auditInstallationID)}
+				}
+				rf.recover(imports, []wire.RecoveredCertificate{{Cert: lost.Marshal(), Revoke: revoke}}, nil)
+				rf.publish(nil)
+				hf.advance(31 * time.Second)
+				hf.addHost(hf.key, nil, nil, nil)
+				hf.wantFail(t, "cert_revoked")
+			})
+		}
+	})
+	t.Run("raised_cap_window_passes", func(t *testing.T) {
+		hf := newHostFixture(t, 86400)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.installPolicy(func(p *trust.Policy) { p.CAProfiles[1].MaxTTLSeconds = 2592000 })
+		hf.advance(16 * time.Hour)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantPass(t)
+	})
+	t.Run("stale_agent_cap_not_stranded", func(t *testing.T) {
+		hf := newHostFixture(t, 86400)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.installPolicy(func(p *trust.Policy) { p.CAProfiles[1].MaxTTLSeconds = 2592000 })
+		hf.advance(16 * time.Hour)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.installPolicy(func(p *trust.Policy) { p.CAProfiles[1].MaxTTLSeconds = 86400 })
+		hf.advance(20 * 24 * time.Hour)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantPass(t)
+	})
+	t.Run("cap_seconds_not_policy_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, func(h *hostIssue) { h.capSeconds = 89 })
+		hf.wantFail(t, "CapSeconds")
+	})
+	t.Run("replayed_request_id_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		h := hf.addHost(hf.key, nil, nil, nil)
+		hf.addHost(hf.key2, func(x *hostIssue) { x.req.RequestID = h.req.RequestID }, nil, nil)
+		hf.wantFail(t, "replayed")
+		hf = newHostFixture(t, 90)
+		h = hf.addHost(hf.key, nil, nil, nil)
+		hf.addIssueWithRequest(hex.EncodeToString(h.req.RequestID[:]))
+		hf.wantFail(t, "replayed")
+		hf = newHostFixture(t, 90)
+		id := strings.Repeat("5a", 16)
+		hf.addIssueWithRequest(id)
+		hf.addHost(hf.key, func(x *hostIssue) {
+			b, _ := hex.DecodeString(id)
+			copy(x.req.RequestID[:], b)
+		}, nil, nil)
+		hf.wantFail(t, "replayed")
+	})
+	t.Run("serial_not_increasing_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		h := hf.addHost(hf.key, nil, nil, nil)
+		hf.addHost(hf.key2, nil, nil, func(x *hostIssue) { x.serial = h.serial })
+		hf.wantFail(t, "serials not strictly increasing")
+	})
+	t.Run("kr1_or_kr2_key_id_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, func(h *hostIssue) { h.keyID.V3 = false; h.keyID.Directory = 0 })
+		hf.wantFail(t, "kr3")
+	})
+	t.Run("kr3_in_issue_entry_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.serial++
+		c, err := cert.Build(cert.Request{Profile: cert.Profile{CertType: ssh.HostCert, MaxTTL: time.Hour}, Subject: hf.key.PublicKey(), Principals: []string{"web1"},
+			Now: issuedAt(hf.serial), ValidFor: 90 * time.Second, Serial: hf.serial,
+			KeyID: cert.KeyID{V3: true, CA: "host", Subject: "web1", Request: strings.Repeat("ab", 16), Policy: 1, Directory: 1, Serial: hf.serial}}, hf.hostCA, rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := (&tlog.IssueBody{CARole: uint8(wire.CARoleHost), Serial: hf.serial, PolicyVersion: 1, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		hf.add(tlog.KindIssue, body)
+		hf.wantFail(t, "kr3")
+	})
+	t.Run("kr3_in_login_entry_fails", func(t *testing.T) {
+		lf := newLoginFixture(t, true)
+		lf.addDirectory(lf.directory(nil), nil)
+		lf.addLogin(nil, func(l *login) { l.keyID.Roles, l.keyID.V3, l.keyID.CA = nil, true, "host" })
+		if _, err := lf.verify(join(lf.lines()), nil); err == nil || !strings.Contains(err.Error(), "key ID") {
+			t.Fatalf("verify = %v, want a refusal of the kr3 key ID", err)
+		}
+	})
+	t.Run("directory_not_authorized_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.installPolicy(func(p *trust.Policy) {
+			p.Admins = append(p.Admins, trust.AdminKey{Name: "bob", Key: trust.FormatKey(newSigner(t, "ed25519").PublicKey())})
+			p.AdminQuorum = 2
+		})
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.wantFail(t, "not authorized")
+	})
+	t.Run("raised_leaf_time_passes", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, nil)
+		// The next entry's time is raised past a clock step; its serial and
+		// certificate keep the signer's own clock.
+		serial := hf.serial + 1
+		hf.micros += 3600 * 1e6
+		hf.addHost(hf.key2, func(h *hostIssue) { h.serial = serial; h.req.CreatedAt = serial / 1e6 }, nil, nil)
+		hf.wantPass(t)
+	})
+	t.Run("issued_long_after_created_fails", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, func(h *hostIssue) { h.req.CreatedAt -= 400 }, nil, nil)
+		hf.wantFail(t, "CreatedAt")
+	})
+	t.Run("recent_judged_by_cert_time_not_leaf_time", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		h := hf.addHost(hf.key, nil, nil, nil)
+		// A raised leaf time far past the window must not hide a second
+		// certificate issued (by its own time) inside it.
+		serial := h.serial + 10e6
+		hf.micros += 3600 * 1e6
+		hf.addHost(hf.key, func(x *hostIssue) { x.serial = serial; x.req.CreatedAt = serial / 1e6 }, nil, nil)
+		hf.wantFail(t, "host_cert_recent")
+	})
+	t.Run("issuance_sequence_counts_kind_11", func(t *testing.T) {
+		hf := newHostFixture(t, 90)
+		hf.addHost(hf.key, nil, nil, nil)
+		hf.addIssueWithRequest(strings.Repeat("cd", 16))
+		if rep := hf.wantPass(t); rep.Counts[tlog.KindHostIssue] != 1 || rep.Counts[tlog.KindIssue] != 1 {
+			t.Fatalf("counts %v", rep.Counts)
+		}
+	})
+}
+
+// lostHostCertFor is a kr3 host certificate for hf's first key with serial
+// that no entry of the log issued, as a restore loses one.
+func (rf *revokeFixture) lostHostCertFor(hf *hostFixture, serial uint64) *ssh.Certificate {
+	rf.t.Helper()
+	c, err := cert.Build(cert.Request{Profile: cert.Profile{CertType: ssh.HostCert, MaxTTL: time.Hour}, Subject: hf.key.PublicKey(), Principals: []string{"web1"},
+		Now: issuedAt(serial), ValidFor: 90 * time.Second, Serial: serial,
+		KeyID: cert.KeyID{V3: true, CA: "host", Subject: "web1", Request: strings.Repeat("ef", 16), Policy: hf.pol.Version, Directory: hf.dirVersion, Serial: serial}}, hf.hostCA, rand.Reader)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	return c
+}
+
+// TestVerifyHostIssueRevokeAndRestore: a revoke by serial of a host
+// certificate verifies, and CertificatesFrom lists the certificate with
+// kind host_issue (03-06b's collection, 03-09).
+func TestVerifyHostIssueRevokeAndRestore(t *testing.T) {
+	hf := newHostFixture(t, 90)
+	from := uint64(len(hf.leaves))
+	h := hf.addHost(hf.key, nil, nil, nil)
+	rf := hf.rf()
+	rf.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleHost, Serial: h.serial}, []tlog.RevokedEntry{serialEntry(h.cert)}, nil)
+	rf.publish(nil)
+	rep, err := Verify(strings.NewReader(join(hf.lines())), Options{Pins: hf.pins(), Threshold: 1, CertificatesFrom: &from})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Certificates) != 1 || rep.Certificates[0].Kind != tlog.KindHostIssue || !bytes.Equal(rep.Certificates[0].Cert, h.cert.Marshal()) {
+		t.Fatalf("Certificates %+v, want the host certificate as host_issue", rep.Certificates)
+	}
+}

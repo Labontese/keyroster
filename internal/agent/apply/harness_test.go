@@ -5,8 +5,12 @@ package apply
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -64,6 +68,9 @@ type fixture struct {
 	bundleDoc, bundleSigs              []byte
 	policyDoc, policySigs              []byte
 	krlVersion                         uint64
+	// krlHostSerials are host-CA serials every later KRL also revokes
+	// (03-09).
+	krlHostSerials []uint64
 }
 
 func newFixture(t testing.TB) *fixture {
@@ -238,6 +245,9 @@ func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id strin
 	if len(serials) > 0 {
 		set.Certs = []krl.CertSection{{CAKey: f.user.PublicKey(), Serials: serials}}
 	}
+	if len(f.krlHostSerials) > 0 {
+		set.Certs = append(set.Certs, krl.CertSection{CAKey: f.host.PublicKey(), Serials: f.krlHostSerials})
+	}
 	b, err := krl.Encode(set, header, time.Unix(int64(f.krlVersion), 0)) //nolint:gosec // G115: a test version
 	if err != nil {
 		f.t.Fatal(err)
@@ -316,6 +326,14 @@ func (c *fakeClock) advance(d time.Duration) {
 // fakeSSHD is an in-process SSH server on a loopback port, with the
 // host's key, that completes key exchange and nothing else; stall makes
 // it accept and never answer, stop closes it.
+//
+// It models sshd's host certificates (03-09) as documented and as
+// upstream servconf.c and sshd.c behave (UNVERIFIED against real sshd
+// beyond the e2e's two algorithms): at every reload, never at a write, it
+// re-reads the drop-in on disk and the files its HostCertificate lines
+// name, and serves, for each certificate algorithm, the certificate of
+// the first host key in HostKey order that has one of that type; a key
+// without one is served plainly, the first key of each plain algorithm.
 type fakeSSHD struct {
 	ln       net.Listener
 	port     int
@@ -324,6 +342,23 @@ type fakeSSHD struct {
 	mu       sync.Mutex
 	stall    bool
 	accepted int
+	dir      string
+	// keys are the host keys in HostKey order, the first keyPath's; cfg
+	// is what the server serves now; forced, set by serveCert, is served
+	// for its algorithm whatever the drop-in names; reloadDelay delays
+	// what a reload serves.
+	keys        []fakeHostKey
+	cfg         *ssh.ServerConfig
+	forced      *ssh.Certificate
+	reloadDelay time.Duration
+	served      []*ssh.Certificate // the certificates the last reload loaded
+}
+
+// fakeHostKey is one host key of the fake sshd: its private key path and
+// signer.
+type fakeHostKey struct {
+	path   string
+	signer ssh.Signer
 }
 
 func startFakeSSHD(t *testing.T) *fakeSSHD {
@@ -357,6 +392,8 @@ func startFakeSSHD(t *testing.T) *fakeSSHD {
 	}
 	cfg := &ssh.ServerConfig{NoClientAuth: true}
 	cfg.AddHostKey(signer)
+	s.dir, s.cfg = dir, cfg
+	s.keys = []fakeHostKey{{path: s.keyPath, signer: signer}}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -366,6 +403,7 @@ func startFakeSSHD(t *testing.T) *fakeSSHD {
 			s.mu.Lock()
 			s.accepted++
 			stall := s.stall
+			cfg := s.cfg
 			s.mu.Unlock()
 			go func() {
 				defer func() { _ = c.Close() }()
@@ -389,6 +427,150 @@ func (s *fakeSSHD) setStall(v bool) {
 }
 
 func (s *fakeSSHD) stop() { _ = s.ln.Close() }
+
+// addHostKey writes a new host key of kind (ed25519, ecdsa or rsa) beside
+// the first, both halves, appends it to the HostKey order and returns its
+// signer and path. sshd -T lists it only through fakeRunner.extraHostKeys.
+func (s *fakeSSHD) addHostKey(t *testing.T, kind string) (ssh.Signer, string) {
+	t.Helper()
+	priv := cachedHostKey(t, kind, len(s.keys))
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	path := filepath.Join(s.dir, fmt.Sprintf("ssh_host_%s_key_%d", kind, len(s.keys)))
+	s.keys = append(s.keys, fakeHostKey{path: path, signer: signer})
+	s.mu.Unlock()
+	block, err := ssh.MarshalPrivateKey(priv.(crypto.PrivateKey), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".pub", ssh.MarshalAuthorizedKey(signer.PublicKey()), 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	return signer, path
+}
+
+// hostKeyCache holds the extra host keys, generated once per kind and
+// position (an RSA key under -race is slow; every host may share them).
+var hostKeyCache sync.Map
+
+func cachedHostKey(t *testing.T, kind string, pos int) any {
+	t.Helper()
+	key := fmt.Sprintf("%s/%d", kind, pos)
+	if v, ok := hostKeyCache.Load(key); ok {
+		return v
+	}
+	var priv any
+	var err error
+	switch kind {
+	case "ed25519":
+		_, priv, err = ed25519.GenerateKey(rand.Reader)
+	case "ecdsa":
+		priv, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case "rsa":
+		priv, err = rsa.GenerateKey(rand.Reader, 2048)
+	default:
+		t.Fatalf("host key kind %q", kind)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, _ := hostKeyCache.LoadOrStore(key, priv)
+	return v
+}
+
+// reload is sshd's reload (SIGHUP): it reads the drop-in on disk (none
+// with noInclude) and the certificate files its HostCertificate lines
+// name, and serves them, after reloadDelay when one is set.
+func (s *fakeSSHD) reload(l Layout, noInclude bool) {
+	var certs []*ssh.Certificate
+	if b, err := os.ReadFile(l.DropIn()); err == nil && !noInclude {
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) != 2 || strings.ToLower(f[0]) != "hostcertificate" {
+				continue
+			}
+			raw, err := os.ReadFile(f[1]) //nolint:gosec // a path the drop-in names
+			if err != nil {
+				continue
+			}
+			pub, _, _, _, err := ssh.ParseAuthorizedKey(raw)
+			if c, ok := pub.(*ssh.Certificate); err == nil && ok {
+				certs = append(certs, c)
+			}
+		}
+	}
+	s.mu.Lock()
+	delay := s.reloadDelay
+	s.mu.Unlock()
+	apply := func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.served = certs
+		s.cfg = s.buildLocked(certs)
+	}
+	if delay > 0 {
+		time.AfterFunc(delay, apply)
+		return
+	}
+	apply()
+}
+
+// serveCert makes the fake serve c for its algorithm from now on,
+// whatever the drop-in names (a wrong certificate, 03-09); nil undoes it.
+func (s *fakeSSHD) serveCert(c *ssh.Certificate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forced = c
+	s.cfg = s.buildLocked(s.served)
+}
+
+// buildLocked is the server configuration for certs: per certificate
+// algorithm the first key in HostKey order with a certificate of that
+// type (forced first), then each key's plain algorithm, first key first.
+func (s *fakeSSHD) buildLocked(certs []*ssh.Certificate) *ssh.ServerConfig {
+	cfg := &ssh.ServerConfig{NoClientAuth: true}
+	have := map[string]bool{}
+	signerFor := func(c *ssh.Certificate) ssh.Signer {
+		for _, k := range s.keys {
+			if bytes.Equal(k.signer.PublicKey().Marshal(), c.Key.Marshal()) {
+				return k.signer
+			}
+		}
+		return nil
+	}
+	if f := s.forced; f != nil {
+		if k := signerFor(f); k != nil {
+			if cs, err := ssh.NewCertSigner(f, k); err == nil {
+				cfg.AddHostKey(cs)
+				have[f.Type()] = true
+			}
+		}
+	}
+	for _, k := range s.keys {
+		for _, c := range certs {
+			if !bytes.Equal(c.Key.Marshal(), k.signer.PublicKey().Marshal()) || have[c.Type()] {
+				continue
+			}
+			if cs, err := ssh.NewCertSigner(c, k.signer); err == nil {
+				cfg.AddHostKey(cs)
+				have[c.Type()] = true
+			}
+		}
+	}
+	for _, k := range s.keys {
+		if t := k.signer.PublicKey().Type(); !have[t] {
+			cfg.AddHostKey(k.signer)
+			have[t] = true
+		}
+	}
+	return cfg
+}
 
 // fakeRunner answers the applier's exec sites by binary and flags,
 // running nothing.
@@ -425,7 +607,20 @@ type fakeRunner struct {
 	// onReload runs at every reload command (rc-service, systemctl), with
 	// the runner's lock held.
 	onReload func(call string)
+	// hostCertBefore and hostCertAfter are HostCertificate values read
+	// before and after the drop-in (03-09); hostKeyAlgorithms is sshd -T's
+	// hostkeyalgorithms ("" for every certificate and plain algorithm).
+	hostCertBefore, hostCertAfter []string
+	hostKeyAlgorithms             string
 }
+
+// defaultHostKeyAlgorithms is every certificate and plain host key
+// algorithm the fake serves.
+var defaultHostKeyAlgorithms = strings.Join([]string{
+	ssh.CertAlgoED25519v01, ssh.CertAlgoECDSA256v01, ssh.CertAlgoECDSA384v01, ssh.CertAlgoECDSA521v01,
+	ssh.CertAlgoRSASHA512v01, ssh.CertAlgoRSASHA256v01,
+	ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256,
+}, ",")
 
 func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
 	r.mu.Lock()
@@ -486,6 +681,9 @@ func (r *fakeRunner) Run(_ context.Context, cmd execsite.Cmd) (Result, error) {
 		return Result{Stdout: []byte(args[3] + ": ok\n")}, nil
 	case filepath.Base(cmd.Path()) == "rc-service" || filepath.Base(cmd.Path()) == "systemctl":
 		r.reloads++
+		// The fake sshd re-reads its host certificates at every reload,
+		// before any per-test hook (03-09).
+		r.h.sshd.reload(r.h.l, r.noInclude)
 		if r.onReload != nil {
 			r.onReload(call)
 		}
@@ -543,6 +741,25 @@ func (r *fakeRunner) dumpFor(spec string) string {
 	for _, k := range append(slices.Clone(trustKeywords), principalsCommand, principalsCommandUser) {
 		fmt.Fprintf(&b, "%s %s\n", k, value(k))
 	}
+	// One hostcertificate line per value, before-files, drop-in, after-files
+	// (03-09), and hostkeyalgorithms.
+	certs := slices.Clone(r.hostCertBefore)
+	if derr == nil && !r.noInclude {
+		for _, l := range strings.Split(string(dropIn), "\n") {
+			if f := strings.Fields(l); len(f) == 2 && strings.ToLower(f[0]) == "hostcertificate" {
+				certs = append(certs, f[1])
+			}
+		}
+	}
+	certs = append(certs, r.hostCertAfter...)
+	for _, c := range certs {
+		fmt.Fprintf(&b, "hostcertificate %s\n", c)
+	}
+	algs := r.hostKeyAlgorithms
+	if algs == "" {
+		algs = defaultHostKeyAlgorithms
+	}
+	fmt.Fprintf(&b, "hostkeyalgorithms %s\n", algs)
 	b.WriteString(r.extra)
 	if user != "" {
 		b.WriteString(r.extraFor[user])

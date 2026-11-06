@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Labontese/keyroster/internal/agent/enroll"
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/join"
@@ -26,6 +28,7 @@ import (
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/serverdb"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 const (
@@ -80,6 +83,7 @@ func (s *Server) buildAgentMux() *routeMux {
 	mux.Handle("GET "+serverclient.AgentStatePath, s.requireAgent(s.handleAgentState))
 	mux.Handle("POST "+serverclient.AgentHeartbeatPath, s.requireAgent(s.handleAgentHeartbeat))
 	mux.Handle("POST "+serverclient.AgentIdentityPath, s.requireAgent(s.handleAgentIdentity))
+	mux.Handle("POST "+serverclient.AgentHostCertPath, s.requireAgent(s.handleAgentHostCert))
 	return mux
 }
 
@@ -849,6 +853,139 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request, ar
 		}
 		s.writeJSON(w, ar.status, http.StatusOK, serverclient.HeartbeatAnswer{Seq: h.Status.Seq})
 	}
+}
+
+// handleAgentHostCert serves POST AgentHostCertPath (03-09, AGENT-06): an
+// approved agent's request for a host certificate for one of its host
+// keys. In order:
+//  1. the agent's in-flight slot (agentSlot), after requireAgent;
+//  2. the body, at most MaxAgentHostCertBody (413), decoded strictly (400);
+//  3. the request parses (400 bad_request);
+//  4. its host key is one of the agent's enrolled keys (403
+//     host_key_not_enrolled);
+//  5. its name is that of the entry HostForKey finds for the agent's first
+//     enrolled key (403 host_name_mismatch);
+//  6. the signer's answer under signerCallTimeout: a refusal is 403 with
+//     its detail; malformed unknown_message_type is 403 signer_too_old (a
+//     signer older than this server); any other malformed answer is 400
+//     with its detail, which the applier holds as http_400 (Q-09-7); any
+//     other failure is 503. Success is 200 with the certificate.
+//
+// The server checks only who asks; what the certificate says (its names,
+// its lifetime) the signer decides from the admin-signed directory alone.
+func (s *Server) handleAgentHostCert(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
+	release, ok := s.agentSlot(w, r, ar)
+	if !ok {
+		return
+	}
+	defer release()
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, serverclient.MaxAgentHostCertBody))
+	if err != nil {
+		s.writeJSON(w, ar.status, http.StatusRequestEntityTooLarge, serverclient.APIError{Error: "request too large"})
+		return
+	}
+	var in serverclient.AgentHostCertRequest
+	if err := decodeAgentJSON(body, &in); err != nil {
+		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	req, err := wire.ParseHostIssueRequest(in.Request)
+	if err != nil {
+		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: "bad_request"})
+		return
+	}
+	fp := agentFingerprint(ar.agent.IdentitySPKISHA256)
+	// The signed directory decides (owner decision 2026-11-06): the
+	// requested key must be listed on the entry this agent is admitted
+	// under, found by the requested key itself, never only by the frozen
+	// enrollment row, so a re-keyed host obtains certificates for the keys
+	// its entry lists. The signer still checks possession of that key.
+	if code := hostKeyOfAgent(ar.dir, ar.agent.HostKeys, ar.agent.ExpectedName, req.HostKey, req.HostName); code != "" {
+		s.log.Warn("host certificate refused", "expected_name", ar.agent.ExpectedName, "agent", fp, "reason", code)
+		s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: code})
+		return
+	}
+	cctx, cancel := context.WithTimeout(r.Context(), signerCallTimeout)
+	resp, err := s.signer.HostIssue(cctx, req)
+	cancel()
+	if err != nil {
+		var refused *wire.ErrorResponse
+		if errors.As(err, &refused) {
+			s.log.Warn("host certificate refused by the signer", "expected_name", ar.agent.ExpectedName, "agent", fp, "reason", refused.Message)
+			switch {
+			case refused.Code == wire.CodeRefused:
+				s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: refused.Message})
+			case refused.Code == wire.CodeMalformed && refused.Message == "unknown_message_type":
+				s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrSignerTooOld})
+			case refused.Code == wire.CodeMalformed:
+				s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: refused.Message})
+			default:
+				s.signerUnavailable(w, false)
+			}
+			return
+		}
+		s.log.Warn("host certificate: signer call failed", "expected_name", ar.agent.ExpectedName, "agent", fp, "err", err)
+		s.signerUnavailable(w, false)
+		return
+	}
+	s.log.Info("host certificate relayed", "expected_name", ar.agent.ExpectedName, "agent", fp, "serial", resp.Serial)
+	s.writeJSON(w, ar.status, http.StatusOK, serverclient.AgentHostCertAnswer{Certificate: resp.Cert})
+}
+
+// decodeAgentJSON decodes body strictly into v: no unknown field and
+// nothing after the value.
+func decodeAgentJSON(body []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("trailing data")
+	}
+	return nil
+}
+
+// hostKeyOfAgent checks a host certificate request's key and name
+// against the signed directory dv (03-09): the entry that lists the
+// requested key (HostForKey: a key is on at most one host) must be the
+// entry the agent is admitted under, that is an entry that also lists
+// one of the agent's enrolled keys, or the active entry named the
+// agent's expected name (a fully re-keyed host, as requireAgent admits
+// it), and it must be named name. It returns "" or the refusal detail:
+// host_key_not_enrolled for a key no entry of this agent lists,
+// host_name_mismatch for another name.
+func hostKeyOfAgent(dv *directoryView, enrolled []string, expectedName string, hostKey []byte, name string) string {
+	if dv == nil || dv.dir == nil {
+		return serverclient.AgentErrHostKeyNotEnrolled
+	}
+	pub, err := ssh.ParsePublicKey(hostKey)
+	if err != nil {
+		return serverclient.AgentErrHostKeyNotEnrolled
+	}
+	h, ok := dv.dir.HostForKey(pub)
+	if !ok || !agentsEntry(dv, h, enrolled, expectedName) {
+		return serverclient.AgentErrHostKeyNotEnrolled
+	}
+	if h.Name != name {
+		return serverclient.AgentErrHostNameMismatch
+	}
+	return ""
+}
+
+// agentsEntry reports whether h is the entry the agent with these
+// enrolled keys and expected name is admitted under.
+func agentsEntry(dv *directoryView, h *directory.Host, enrolled []string, expectedName string) bool {
+	for _, k := range enrolled {
+		pub, err := trust.ParseKey(k)
+		if err != nil {
+			continue
+		}
+		if o, ok := dv.dir.HostForKey(pub); ok && o.Name == h.Name {
+			return true
+		}
+	}
+	return h.Name == expectedName && h.Status == directory.StatusActive && rekeyed(dv, expectedName)
 }
 
 // handleAgentIdentity serves POST AgentIdentityPath (03-08, AGENT-02):

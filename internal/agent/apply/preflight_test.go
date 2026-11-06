@@ -305,7 +305,7 @@ func TestPreflight(t *testing.T) {
 			t.Fatal(err)
 		}
 		r := h.mustApply()
-		if !r.Reloaded || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || h.exists(h.l.State(dropinPrevFile)) {
+		if !r.Reloaded || readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) || h.exists(h.l.State(dropinPrevFile)) {
 			t.Fatalf("the first install over a leftover trial: %+v", r)
 		}
 	})
@@ -317,7 +317,7 @@ func TestPreflight(t *testing.T) {
 		h := newTestHost(t, newFixture(t))
 		h.installed("role:ops")
 		r, err := h.preflight()
-		if err != nil || r.Refused() || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) {
+		if err != nil || r.Refused() || readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) {
 			t.Fatalf("preflight on an installed host: %+v, %v, drop-in present %t", r, err, h.exists(h.l.DropIn()))
 		}
 		if h.run.dumps[""] != 3 { // the apply's start and activation, then the preflight's one: no trial
@@ -374,7 +374,7 @@ func TestPreflight(t *testing.T) {
 	t.Run("installed_host_edited_trust_line_is_drift", func(t *testing.T) {
 		t.Parallel()
 		installedDrift(t, func(h *testHost) {
-			b := strings.Replace(string(DropIn(h.l)), filepath.Join(h.l.Current(), CAFile), "/etc/ssh/other_ca.pub", 1)
+			b := strings.Replace(string(DropIn(h.l, DropInSpec{})), filepath.Join(h.l.Current(), CAFile), "/etc/ssh/other_ca.pub", 1)
 			if err := os.WriteFile(h.l.DropIn(), []byte(b), 0o644); err != nil { //nolint:gosec // test fixture
 				t.Fatal(err)
 			}

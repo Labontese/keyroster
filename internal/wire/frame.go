@@ -67,9 +67,13 @@ const (
 	// or directory by version.
 	TypeGetBundle           byte = 0x08
 	TypeGetDirectoryVersion byte = 0x09
+	// TypeHostIssueRequest carries a host agent's HostIssueRequest
+	// (03-09), answered with an IssueResponse (0x81); capped at MaxFrame.
+	// 0x0B and 0x0C stay 03-10's and 03-11's.
+	TypeHostIssueRequest byte = 0x0A
 	// TypeForgetAgentRequest carries an admin-signed ForgetRequest
 	// (03-08c), answered with a ForgetResponse (0x8D); both are capped at
-	// MaxFrame. 0x0A to 0x0C are 03-09 to 03-11's.
+	// MaxFrame.
 	TypeForgetAgentRequest       byte = 0x0D
 	TypeIssueResponse            byte = 0x81
 	TypeInstallDirectoryResponse byte = 0x82

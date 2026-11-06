@@ -180,3 +180,93 @@ func sixteenRoles() []string {
 	}
 	return out
 }
+
+// TestKeyIDKr3: the kr3 key ID of certificates obtained by proof of
+// possession (03-09), with its subject bounds (Q-09-8).
+func TestKeyIDKr3(t *testing.T) {
+	const host = "kr3/ca=host/sub=web1/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=3/ser=1700000000000005"
+	t.Run("round_trip", func(t *testing.T) {
+		k, err := ParseKeyID(host)
+		if err != nil || !k.V3 || k.CA != "host" || k.Subject != "web1" || k.Policy != 2 || k.Directory != 3 || k.Serial != 1700000000000005 || k.Roles != nil {
+			t.Fatalf("ParseKeyID(%q) = %+v, %v", host, k, err)
+		}
+		if k.String() != host {
+			t.Fatalf("String() = %q", k.String())
+		}
+		if !k.Equal(k) || k.Equal(KeyID{CA: k.CA, Subject: k.Subject, Request: k.Request, Policy: k.Policy, Directory: k.Directory, Serial: k.Serial}) {
+			t.Fatal("Equal does not compare V3")
+		}
+	})
+	probe := "probe." + strings.Repeat("a", 64)
+	t.Run("probe_subject_70", func(t *testing.T) {
+		id := "kr3/ca=machine/sub=" + probe + "/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=3/ser=1"
+		if k, err := ParseKeyID(id); err != nil || k.Subject != probe || k.String() != id {
+			t.Fatalf("a 70-byte probe. subject: %+v, %v", k, err)
+		}
+		if _, err := ParseKeyID("kr3/ca=machine/sub=" + probe + "a/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=3/ser=1"); err == nil {
+			t.Fatal("a 71-byte probe. subject was accepted")
+		}
+	})
+	t.Run("host_subject_65_refused", func(t *testing.T) {
+		long := strings.Repeat("a", 65)
+		for _, ca := range []string{"host", "machine"} {
+			if _, err := ParseKeyID("kr3/ca=" + ca + "/sub=" + long + "/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=3/ser=1"); err == nil {
+				t.Errorf("a 65-byte ca=%s subject was accepted", ca)
+			}
+		}
+		if _, err := ParseKeyID("kr3/ca=host/sub=" + probe + "/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=3/ser=1"); err == nil {
+			t.Error("a 70-byte probe. subject was accepted for ca=host")
+		}
+	})
+	t.Run("kr1_kr2_keep_64", func(t *testing.T) {
+		long := strings.Repeat("a", 65)
+		for _, id := range []string{
+			"kr1/ca=host/sub=" + long + "/req=000102030405060708090a0b0c0d0e0f/pol=2/ser=1",
+			"kr2/ca=user/sub=" + long + "/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=3/roles=ops/ser=1",
+			"kr1/ca=machine/sub=" + probe + "/req=000102030405060708090a0b0c0d0e0f/pol=2/ser=1",
+		} {
+			if _, err := ParseKeyID(id); err == nil {
+				t.Errorf("%q was accepted", id)
+			}
+		}
+	})
+	t.Run("user_and_roles_refused", func(t *testing.T) {
+		for _, id := range []string{
+			"kr3/ca=user/sub=alice/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=3/ser=1",
+			"kr3/ca=host/sub=web1/req=000102030405060708090a0b0c0d0e0f/pol=2/dir=3/roles=ops/ser=1",
+		} {
+			if _, err := ParseKeyID(id); err == nil {
+				t.Errorf("%q was accepted", id)
+			}
+		}
+	})
+}
+
+// FuzzParseKeyIDV3 is FuzzParseKeyID seeded with kr3 key IDs (03-09): a
+// host certificate, a machine probe subject, and the refused user CA,
+// over-long subject and missing directory version. ParseKeyID never
+// panics, refuses only with ErrKeyID, and every kr3 key ID it accepts
+// formats back to exactly the input.
+func FuzzParseKeyIDV3(f *testing.F) {
+	for _, s := range []string{
+		KeyID{V3: true, CA: "host", Subject: "web1", Request: testRequestHex, Policy: 1, Directory: 7, Serial: 9}.String(),
+		KeyID{V3: true, CA: "machine", Subject: "probe." + strings.Repeat("a", 60), Request: testRequestHex, Policy: 1, Directory: 1, Serial: 1}.String(),
+		"kr3/ca=user/sub=alice/req=" + testRequestHex + "/pol=1/dir=1/ser=1",
+		"kr3/ca=host/sub=" + strings.Repeat("a", 71) + "/req=" + testRequestHex + "/pol=1/dir=1/ser=1",
+		"kr3/ca=host/sub=web1/req=" + testRequestHex + "/pol=1/ser=1",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		k, err := ParseKeyID(s)
+		if err != nil {
+			if !errors.Is(err, ErrKeyID) {
+				t.Fatalf("ParseKeyID(%q) = %v, want ErrKeyID", s, err)
+			}
+			return
+		}
+		if got := k.String(); got != s {
+			t.Fatalf("accepted key ID %q formats back as %q", s, got)
+		}
+	})
+}

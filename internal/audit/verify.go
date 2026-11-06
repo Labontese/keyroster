@@ -414,6 +414,9 @@ type issuance struct {
 	// keeps the Phase 1 checks of issue entries unchanged.
 	issueIDs map[string]uint64
 	loginIDs map[string]uint64
+	// hostIDs are the request IDs of host_issue entries (03-09): one
+	// namespace with the other two.
+	hostIDs map[string]uint64
 }
 
 // next records a verified certificate with serial.
@@ -521,8 +524,8 @@ func verifyLoginIssue(index uint64, body *tlog.LoginIssueBody, leafMicros uint64
 	if err != nil {
 		return err
 	}
-	if kid.Roles == nil {
-		return errors.New("a login_issue entry must carry a kr2 key ID, not kr1")
+	if kid.Roles == nil || kid.V3 {
+		return errors.New("a login_issue entry must carry a kr2 key ID, not kr1 or kr3")
 	}
 	if err := a.checkIssue(ib, c, kid, leafMicros); err != nil {
 		return err
@@ -567,6 +570,9 @@ func verifyLoginIssue(index uint64, body *tlog.LoginIssueBody, leafMicros uint64
 	}
 	if prev, used := iss.issueIDs[reqID]; used {
 		return fmt.Errorf("request ID %s replayed: issue entry %d already used it", reqID, prev)
+	}
+	if prev, used := iss.hostIDs[reqID]; used {
+		return fmt.Errorf("request ID %s replayed: host_issue entry %d already used it", reqID, prev)
 	}
 	// The signer refuses a CreatedAt more than 300 s from its clock when the
 	// request arrives, then reads the serial from that clock (serial.Next,
@@ -732,8 +738,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		lineNo     int
 		lastTime   uint64
 	)
-	iss := issuance{issueIDs: map[string]uint64{}, loginIDs: map[string]uint64{}}
+	iss := issuance{issueIDs: map[string]uint64{}, loginIDs: map[string]uint64{}, hostIDs: map[string]uint64{}}
 	revs := newRevocations()
+	hosts := newHostsInForce()
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), maxLine)
 	for sc.Scan() {
@@ -819,11 +826,18 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 				// path's, which an issue leaf must not pass itself off as.
 				return nil, fmt.Errorf("audit: entry %d: an issue entry must carry a kr1 key ID, not kr2", want)
 			}
+			if kid.V3 {
+				// kr3 is the proof-of-possession paths' (03-09).
+				return nil, fmt.Errorf("audit: entry %d: an issue entry must carry a kr1 key ID, not kr3", want)
+			}
 			if err := trustState.checkIssue(body, c, kid, leaf.TimeMicros); err != nil {
 				return nil, fmt.Errorf("audit: entry %d: %w", want, err)
 			}
 			if prev, used := iss.loginIDs[kid.Request]; used {
 				return nil, fmt.Errorf("audit: entry %d: request ID %s replayed: login_issue entry %d already used it", want, kid.Request, prev)
+			}
+			if prev, used := iss.hostIDs[kid.Request]; used {
+				return nil, fmt.Errorf("audit: entry %d: request ID %s replayed: host_issue entry %d already used it", want, kid.Request, prev)
 			}
 			if _, used := iss.issueIDs[kid.Request]; !used {
 				iss.issueIDs[kid.Request] = want
@@ -841,6 +855,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err := dirState.install(body, &trustState); err != nil {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
+			hosts.curDir = body.Version
 		case tlog.KindLoginIssue:
 			body, err := tlog.DecodeLoginIssueBody(leaf.Body)
 			if err != nil {
@@ -860,6 +875,21 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			}
 			revs.addCert(c, kid)
 			rep.collect(opts, want, leaf.Kind, body.Cert)
+		case tlog.KindHostIssue:
+			body, err := tlog.DecodeHostIssueBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			c, err := verifyHostIssue(want, body, leaf.TimeMicros, &trustState, &dirState, &iss, hosts)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			kid, err := hostCertKeyID(c)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			revs.addCert(c, kid)
+			rep.collect(opts, want, leaf.Kind, body.Cert)
 		case tlog.KindRevoke:
 			body, err := tlog.DecodeRevokeBody(leaf.Body)
 			if err != nil {
@@ -868,6 +898,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err := verifyRevoke(want, body, leaf.TimeMicros, &trustState, revs); err != nil {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
+			hosts.revokeEntries(body.Entries)
 		case tlog.KindKRLPublish:
 			body, err := tlog.DecodeKRLPublishBody(leaf.Body)
 			if err != nil {
@@ -894,6 +925,18 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			for _, c := range carried {
 				rep.collect(opts, want, leaf.Kind, c)
 			}
+			// The host index, by the signer's rule and order (03-09): the
+			// carried kr3 host certificates first, paired with their Revoke
+			// flag (verifyRecovery carried every certificate in order), then
+			// the entries.
+			if req, err := wire.ParseRecoverySigningBytes(body.Request); err == nil {
+				for _, rc := range req.Certificates {
+					if c, err := parseCert(rc.Cert); err == nil {
+						hosts.carry(c, rc.Revoke)
+					}
+				}
+			}
+			hosts.revokeEntries(body.Entries)
 		case tlog.KindHostForget:
 			body, err := tlog.DecodeHostForgetBody(leaf.Body)
 			if err != nil {
@@ -1148,14 +1191,16 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 // host_gone, the removal and confirmed versions and SHA-256, the request
 // ID and times, the policy and directory versions, the evidence types and
 // admin_fingerprints (rendered from the leaf's own evidence, whose
-// signatures verifyForget checks). Such a line, raw its leaf bytes, must
+// signatures verifyForget checks), and so is every host_issue line (03-09:
+// the host-setup runbook reads its serial, host name and key fingerprint
+// to revoke a host's certificates). Such a line, raw its leaf bytes, must
 // be byte for byte the line Export writes for it (exportLeafLine): no field
 // changed, added, removed, repeated or re-encoded. On a line of any other
 // kind neither "approved_once" nor "host_gone" may occur, and checkLineKeys
 // refuses there every key only a host_forget line renders, after
 // unescaping.
 func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
-	if leaf.Kind != tlog.KindHostForget {
+	if leaf.Kind != tlog.KindHostForget && leaf.Kind != tlog.KindHostIssue {
 		s := string(text)
 		if strings.Contains(s, `"approved_once":`) || strings.Contains(s, `"host_gone":`) {
 			return fmt.Errorf("its decoded approved_once or host_gone field is not one of a host_forget leaf (%s)", leaf.Kind)
@@ -1167,7 +1212,7 @@ func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
 		return err
 	}
 	if !bytes.Equal(text, want) {
-		return errors.New("its line is not the one export writes for its host_forget leaf: a decoded field is not the leaf's own")
+		return fmt.Errorf("its line is not the one export writes for its %s leaf: a decoded field is not the leaf's own", leaf.Kind)
 	}
 	return nil
 }

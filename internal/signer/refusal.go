@@ -215,6 +215,22 @@ func (s *Signer) revokeOrRefuse(ctx context.Context, peer Peer, req *wire.Revoke
 	return nil, s.refuseErr(ctx, s.limiter, peer, digest, err)
 }
 
+// hostIssueOrRefuse runs HostIssue and records a refusal through
+// refuseErr, with the digest of the exact host request that was refused,
+// on the host bucket (s.hostLimiter, 03-09): host agents are many, so
+// their refusals neither drain the shared bucket nor are drained by it.
+func (s *Signer) hostIssueOrRefuse(ctx context.Context, peer Peer, req *wire.HostIssueRequest) (*wire.IssueResponse, *wire.ErrorResponse) {
+	resp, err := s.HostIssue(ctx, peer, req)
+	if err == nil {
+		return resp, nil
+	}
+	var digest [32]byte
+	if req != nil {
+		digest = req.Digest()
+	}
+	return nil, s.refuseErr(ctx, s.hostLimiter, peer, digest, err)
+}
+
 // forgetOrRefuse runs ForgetAgent and records a refusal through refuseErr,
 // with the digest of the exact forget request that was refused (03-08c).
 func (s *Signer) forgetOrRefuse(ctx context.Context, peer Peer, req *wire.ForgetRequest) (*wire.ForgetResponse, *wire.ErrorResponse) {
@@ -264,11 +280,18 @@ func classify(detail string) uint8 {
 		return tlog.ReasonBadPrincipal
 	case "bad_subject_key":
 		return tlog.ReasonBadSubjectKey
-	case "bad_validity", "ttl_exceeds_role":
+	case "bad_validity", "ttl_exceeds_role",
+		// Host certificates (03-09): the signer chooses the lifetime, so a
+		// request asking for one is refused like a TTL above the cap
+		// (Q-09-6).
+		"host_issue_valid_for_not_zero":
 		return tlog.ReasonTTLExceeded
 	case "request_time_skew":
 		return tlog.ReasonStaleRequest
-	case "duplicate_request":
+	case "duplicate_request",
+		// Host certificates (03-09): one certificate per host key per
+		// window; the latest is re-delivered instead.
+		"host_cert_recent":
 		return tlog.ReasonDuplicateRequest
 	case "clock_regression":
 		return tlog.ReasonClockRegression
@@ -301,7 +324,15 @@ func classify(detail string) uint8 {
 		// Forget (03-08c): the installation binding, the server's statement
 		// and the directory facts.
 		"forget_no_installation_id", "forget_installation_mismatch", "forget_facts_mismatch",
-		"forget_host_in_directory", "forget_confirmation_invalid":
+		"forget_host_in_directory", "forget_confirmation_invalid",
+		// Host certificates (03-09): the installation binding (D5),
+		// pop.hosts, the directory entry and its key, and the proof of
+		// possession.
+		"host_issue_no_installation_id", "host_issue_installation_mismatch", "host_pop_not_enabled",
+		"unknown_host", "host_key_not_listed", "host_disabled", "host_pop_invalid",
+		// An explicitly revoked host key, and a key whose latest host
+		// certificate is revoked until a newer directory version (Q-09-5).
+		"host_key_revoked", "cert_revoked":
 		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal

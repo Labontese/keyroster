@@ -49,6 +49,10 @@ type logState struct {
 	// and revocation_recovery leaves appended in the open transaction,
 	// nil while it appended none. It replaces loaded.revoked only after COMMIT succeeded.
 	pendingRevoked loggedRevocations
+	// pendingHosts is loaded.hosts with the leaves appended in the open
+	// transaction applied, nil while it appended none that change it
+	// (03-09). It replaces loaded.hosts only after COMMIT succeeded.
+	pendingHosts *hostIndex
 
 	// broken is set when a failed commit left the in-memory state unknown
 	// and it could not be reloaded; every later append fails with it.
@@ -110,6 +114,11 @@ type loggedInstalls struct {
 	// publishKRLLocked compares the revocation rows with it before the
 	// ops key signs a KRL built from them.
 	revoked loggedRevocations
+	// hosts is the host index (03-09): the latest host certificate per
+	// host key and the explicitly revoked keys, rebuilt from every leaf by
+	// rebuildLogFrom and, like revoked, following the committed log
+	// (pendingHosts).
+	hosts hostIndex
 }
 
 // add records the bundle_install leaf idx with body.
@@ -315,6 +324,12 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		if !bytes.Equal(tlog.HashLeaf(leaf), hash) {
 			return fmt.Errorf("%w: leaf %d does not match its stored hash", errLogMismatch, idx)
 		}
+		// The host index follows every leaf in order (03-09, T-02-116).
+		if hostRelevant(l.Kind) {
+			if err := installs.hosts.apply(l); err != nil {
+				return err
+			}
+		}
 		switch l.Kind {
 		case tlog.KindBundleInstall:
 			if err := installs.add(idx, l.Body); err != nil {
@@ -337,6 +352,15 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			b, err := tlog.DecodeLoginIssueBody(l.Body)
 			if err != nil {
 				return fmt.Errorf("%w: leaf %d: login_issue body does not decode", errLogMismatch, idx)
+			}
+			issued.count++
+			issued.lastSerial = b.Serial
+		case tlog.KindHostIssue:
+			// A host certificate (03-09) shares the issuance table and the
+			// serial sequence too, so it counts the same way (T-02-116).
+			b, err := tlog.DecodeHostIssueBody(l.Body)
+			if err != nil {
+				return fmt.Errorf("%w: leaf %d: host_issue body does not decode", errLogMismatch, idx)
 			}
 			issued.count++
 			issued.lastSerial = b.Serial
@@ -560,6 +584,15 @@ func (s *Signer) appendLocked(_ context.Context, tx *sql.Tx, leaf tlog.Leaf) (ui
 	if err != nil {
 		return 0, err
 	}
+	if hostRelevant(leaf.Kind) {
+		if s.pendingHosts == nil {
+			c := s.loaded.hosts.clone()
+			s.pendingHosts = &c
+		}
+		if err := s.pendingHosts.apply(leaf); err != nil {
+			return 0, err
+		}
+	}
 	if revokes {
 		if s.pendingRevoked == nil {
 			s.pendingRevoked = maps.Clone(s.loaded.revoked)
@@ -603,16 +636,19 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.broken != nil {
 		return s.broken
 	}
-	s.pending, s.pendingRevoked = nil, nil
+	s.pending, s.pendingRevoked, s.pendingHosts = nil, nil, nil
 	err := s.db.WithTx(ctx, fn)
-	next, nextMicros, nextRevoked := s.pending, s.pendingMicros, s.pendingRevoked
-	s.pending, s.pendingRevoked = nil, nil
+	next, nextMicros, nextRevoked, nextHosts := s.pending, s.pendingMicros, s.pendingRevoked, s.pendingHosts
+	s.pending, s.pendingRevoked, s.pendingHosts = nil, nil, nil
 	if err == nil {
 		if next != nil {
 			s.tree, s.lastMicros = next, nextMicros
 		}
 		if nextRevoked != nil {
 			s.loaded.revoked = nextRevoked
+		}
+		if nextHosts != nil {
+			s.loaded.hosts = *nextHosts
 		}
 		return nil
 	}

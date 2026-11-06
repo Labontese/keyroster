@@ -296,6 +296,17 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 			if st.KRLStale {
 				alerts = append(alerts, "krl_stale")
 			}
+			// Host certificates (03-09): the host's own report, escaped.
+			for _, c := range st.HostCerts {
+				notes = append(notes, fmt.Sprintf("%s: host certificate %s serial %d for key %s, valid before %s, served %t (CA %s)", r.Name,
+					safe(c.Type), c.Serial, safe(c.KeySHA256), time.Unix(int64(min(c.ValidBefore, uint64(1)<<62)), 0).UTC().Format(time.RFC3339), c.Served, safe(c.CASHA256))) //nolint:gosec // G115: clamped
+			}
+			for _, k := range st.HostKeysSkipped {
+				notes = append(notes, fmt.Sprintf("%s: host key %s skipped: %s", r.Name, safe(k.Type), safe(k.Reason)))
+			}
+			if st.HostCertDetail != "" {
+				alerts = append(alerts, "host_cert: "+safe(st.HostCertDetail))
+			}
 			if r.SeqRegressed {
 				alerts = append(alerts, "seq_regressed")
 				notes = append(notes, fmt.Sprintf("%s: seq_regressed: its heartbeats carry a seq below the stored one (its state was reset after its clock ran ahead); the status shown is the stored one until its seq passes it", r.Name))

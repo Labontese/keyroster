@@ -295,7 +295,7 @@ func TestAdopt(t *testing.T) {
 		edit func(t *testing.T, h *testHost)
 	}{
 		{"resume_repairs_edited_dropin", func(t *testing.T, h *testHost) {
-			edited := strings.Replace(string(DropIn(h.l)), filepath.Join(h.l.Current(), CAFile), "/etc/ssh/other_ca.pub", 1)
+			edited := strings.Replace(string(DropIn(h.l, DropInSpec{})), filepath.Join(h.l.Current(), CAFile), "/etc/ssh/other_ca.pub", 1)
 			if err := os.WriteFile(h.l.DropIn(), []byte(edited), 0o644); err != nil { //nolint:gosec // test fixture
 				t.Fatal(err)
 			}
@@ -328,7 +328,7 @@ func TestAdopt(t *testing.T) {
 			h.cfg.Fault = func(p string) error {
 				if p == "phase2-remove" {
 					removals++
-					if got := readFile(t, h.l.DropIn()); got != string(DropIn(h.l)) {
+					if got := readFile(t, h.l.DropIn()); got != string(DropIn(h.l, DropInSpec{})) {
 						t.Errorf("removal %d of the Phase 2 layout ran before the drop-in was repaired: it holds %q", removals, got)
 					}
 				}
@@ -342,7 +342,7 @@ func TestAdopt(t *testing.T) {
 			if err != nil || !h.krlRevokes(h.l.Current(), 9) || h.exists(h.l.State(adoptFile)) || len(r.Phase2Removed) != 4 || !r.Reloaded {
 				t.Fatalf("the resume: %v, %+v, plan %t", err, r, h.exists(h.l.State(adoptFile)))
 			}
-			if readFile(t, h.l.DropIn()) != string(DropIn(h.l)) || h.exists(h.l.State(dropinPrevFile)) {
+			if readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) || h.exists(h.l.State(dropinPrevFile)) {
 				t.Fatalf("the drop-in was not repaired: %q", readFile(t, h.l.DropIn()))
 			}
 		})
@@ -441,8 +441,8 @@ func TestAdopt(t *testing.T) {
 	}
 	editDropIn := func(t *testing.T, h *testHost) {
 		t.Helper()
-		edited := strings.Replace(string(DropIn(h.l)), "TrustedUserCAKeys "+filepath.Join(h.l.Current(), CAFile)+"\n", "", 1)
-		if edited == string(DropIn(h.l)) {
+		edited := strings.Replace(string(DropIn(h.l, DropInSpec{})), "TrustedUserCAKeys "+filepath.Join(h.l.Current(), CAFile)+"\n", "", 1)
+		if edited == string(DropIn(h.l, DropInSpec{})) {
 			t.Fatal("the edit removed no line")
 		}
 		if err := os.WriteFile(h.l.DropIn(), []byte(edited), 0o644); err != nil { //nolint:gosec // test fixture
@@ -486,7 +486,7 @@ func TestAdopt(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the run loop's apply during an unfinished takeover: %v (report %+v)", err, r)
 			}
-			if got := readFile(t, h.l.DropIn()); got != string(DropIn(h.l)) {
+			if got := readFile(t, h.l.DropIn()); got != string(DropIn(h.l, DropInSpec{})) {
 				t.Errorf("00-keyroster.conf was not repaired: %q", got)
 			}
 			if !h.krlRevokes(h.l.Current(), 9) {
@@ -687,7 +687,7 @@ func TestAdopt(t *testing.T) {
 		if h.exists(h.l.Phase2DropIn()) || h.exists(h.l.State(adoptBak)) || h.exists(h.l.State(adoptFile)) {
 			t.Fatalf("after the hand run: 50-keyroster.conf %t, phase2/ %t, plan %t", h.exists(h.l.Phase2DropIn()), h.exists(h.l.State(adoptBak)), h.exists(h.l.State(adoptFile)))
 		}
-		if !slices.Contains(r.Phase2Removed, h.l.Phase2DropIn()) || readFile(t, h.l.DropIn()) != string(DropIn(h.l)) {
+		if !slices.Contains(r.Phase2Removed, h.l.Phase2DropIn()) || readFile(t, h.l.DropIn()) != string(DropIn(h.l, DropInSpec{})) {
 			t.Fatalf("removed %v, drop-in %q", r.Phase2Removed, readFile(t, h.l.DropIn()))
 		}
 	})
