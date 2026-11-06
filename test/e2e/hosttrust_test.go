@@ -313,8 +313,10 @@ func TestHostCertNoTOFU(t *testing.T) {
 		wantNoPrompt(t, what, out)
 	}
 	// The managed known-hosts and KRL as they were before the revoke,
-	// for the two single-cause refusals.
+	// for the two single-cause refusals, in a directory that outlives the
+	// subtest that copies them.
 	var oldKnownHosts, oldKRL string
+	keep := t.TempDir()
 
 	t.Run("admin_sync_no_prompt", func(t *testing.T) {
 		before := snapshot(t, filepath.Join(sshDir, "known_hosts"))
@@ -393,8 +395,7 @@ func TestHostCertNoTOFU(t *testing.T) {
 		kr := hostTrustKR(t, env, admin)
 		sync(t)
 		wantWeb1(t, "web1 before the revoke (the control)", keyAuth(c))
-		dir := t.TempDir()
-		oldKnownHosts, oldKRL = filepath.Join(dir, "old_known_hosts"), filepath.Join(dir, "old_hosts.krl")
+		oldKnownHosts, oldKRL = filepath.Join(keep, "old_known_hosts"), filepath.Join(keep, "old_hosts.krl")
 		copyFile(t, filepath.Join(sshDir, trustKnownHosts), oldKnownHosts, 0o600)
 		copyFile(t, filepath.Join(sshDir, trustKRL), oldKRL, 0o600)
 		before := hostsStatusJSON(t, kr).Current.Directory

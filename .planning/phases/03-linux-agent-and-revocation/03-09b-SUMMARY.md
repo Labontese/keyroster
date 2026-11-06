@@ -28,6 +28,13 @@ RED, before the production code:
 
 GREEN: Task 1's verify 1 (build, vet, e2e vet, windows and darwin vet, the five test functions under -race with every named PASS line) and verify 2 (golangci-lint for linux, windows and darwin, gofmt) pass locally; verify 3 (one os.UserHomeDir call, one TestMain, commands.go unchanged) passes.
 
+Task 1 e2e gate: run 42270936296, exit 0. Both lanes passed `TestHostCertNoTOFU/admin_sync_no_prompt`, `TestHostCertNoTOFU/name_outside_block_refused` and `TestHostTrustLongLines` with all three parts:
+- (a) a Host line of 64,512 names of 61 bytes (a 4,129,016-byte state) read whole by `ssh -G`;
+- (b) one `@cert-authority` line of about 1 MiB found by `ssh-keygen -F` for its first and last name;
+- (c) the D7 block after the Include leaves the last name strict, and the negative control above the Include does not.
+
+So neither CI OpenSSH needs split lines. Only Task 2's and Task 4's subtests failed, each for its own reason: `revoke: unknown subcommand "host"`, and a login that printed no refresh line. Go test elapsed: 9.5p1 742.026 s (+7.1 s against the base), 10.5p1 730.095 s (+10.0 s).
+
 `TestHostCertNoTOFU/name_outside_block_refused` is a control: it shows the unmanaged name keeps the user's own configuration. The wildcard and prefix properties are carried by `TestHostTrustName/rejects_pattern_bytes` and `TestKnownHosts/prefix_names_exact`.
 
 Mutants (each applied alone, run on its named subtest with `-timeout 5m`, killed by that subtest's `--- FAIL:` line, restored with `git checkout` and proven by `git diff --quiet -- cmd/keyroster/knownhosts.go`): all 11 killed.
@@ -47,3 +54,4 @@ Mutants (each applied alone, run on its named subtest with `-timeout 5m`, killed
 
 1. [Rule 1, test bug] test/e2e/hosttrust_test.go after its RED run: the admin CLI wrapper `hostTrustKR` failed the parent test from inside subtests. Each subtest now builds its own wrapper, and `hostTrustLongLines` takes no wrapper. No assertion changed.
 2. The refusal connections (web2, `refused_after_refresh`, both `refused_through_*` subtests) offer `ssh-ed25519-cert-v01@openssh.com,ssh-ed25519` rather than the certificate algorithm alone, and each one uses its own loopback source. Both follow the pattern TestHostCertIssueAndServe already uses: OpenSSH 10.x drops the plain-key retry otherwise, and PerSourcePenalties would otherwise block 127.0.0.1. The positive web1 logins offer the certificate algorithm alone, as the plan says.
+3. [Rule 1, test bug] test/e2e/hosttrust_test.go after the Task 1 gate: the copies of the old known-hosts and KRL were made in the revoke subtest's own temporary directory. That directory is removed when the subtest ends, so the `refused_through_*` subtests found no old KRL. The copies now live in a directory of the parent test. No assertion changed.
