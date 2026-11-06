@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -371,6 +372,9 @@ func runDirectorySign(ctx context.Context, args []string, stdout, stderr io.Writ
 	}
 	printChanges(stdout, vd, p.d.Version, p.doc, directory.Diff(vd.Dir, p.d))
 	_, _ = fmt.Fprintf(stdout, "Signatures so far: %d of %d.\n", len(signed), vd.Policy.AdminQuorum)
+	// The losses are part of what is signed; directory install revokes
+	// them right before it installs (03-09b, QB-2).
+	printLosses(stdout, p.d.Version, hostLosses(vd.Dir, p.d), true)
 	if err := confirmSign(*yes, p.d.Version, stdout); err != nil {
 		return err
 	}
@@ -390,13 +394,20 @@ func runDirectorySign(ctx context.Context, args []string, stdout, stderr io.Writ
 	return err
 }
 
-// runDirectoryInstall is keyroster directory install DIR [--admin-key FP]:
-// it checks that the proposal follows the installed verified directory and
-// posts it; the signer decides whether its signatures meet the quorum. It
-// signs nothing and so asks nothing (02-09-R2-F10).
+// runDirectoryInstall is keyroster directory install DIR [--yes]
+// [--admin-key FP]: it checks that the proposal follows the installed
+// verified directory and posts it; the signer decides whether its
+// signatures meet the quorum. It signs nothing and so asks nothing
+// (02-09-R2-F10), unless the version has host losses (03-09b, QB-2): then
+// it first checks the quorum locally (checkProposalSigs), asks consent
+// (--yes, or a prompt on a terminal), revokes the losing entries' live
+// host certificates, installs, and sweeps each removed entry once more.
+// Nothing is revoked or installed when the quorum is short or consent is
+// refused, and nothing is installed after a failed revoke.
 func runDirectoryInstall(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fset := flag.NewFlagSet("directory install", flag.ContinueOnError)
 	fset.SetOutput(stderr)
+	yes := fset.Bool("yes", false, "revoke the host certificates the version's host losses name without asking (needed when stdin is not a terminal)")
 	adminKey := fset.String("admin-key", "", "SHA256 fingerprint of your admin key in ssh-agent (default: admin_key from keyroster init)")
 	pos, err := parseInterspersed(fset, args)
 	if err != nil || len(pos) != 1 {
@@ -421,8 +432,62 @@ func runDirectoryInstall(ctx context.Context, args []string, stdout, stderr io.W
 	} else if err != nil {
 		return err
 	}
+	losses := hostLosses(vd.Dir, p.d)
+	if len(losses) == 0 {
+		return installProposal(ctx, s, p, vd, stdout)
+	}
+	signed, err := checkProposalSigs(p.doc, p.sigs, vd.Policy)
+	if err != nil {
+		return fmt.Errorf("proposal %s: %w; nothing was revoked or installed", p.dir, err)
+	}
+	if len(signed) < int(vd.Policy.AdminQuorum) {
+		return fmt.Errorf("proposal %s carries signatures by %d of the %d policy admins it needs, so nothing was revoked or installed. "+
+			"Another admin runs keyroster directory sign %s first", p.dir, len(signed), vd.Policy.AdminQuorum, p.dir)
+	}
+	printLosses(stdout, p.d.Version, losses, false)
+	if err := confirmLossRevoke(*yes, p.d.Version, losses, stdout); err != nil {
+		return err
+	}
+	lr := newLossRevoker(s, vd.Bundle, p.d.Version, stdout)
+	defer lr.notice()
+	if err := lr.before(ctx, losses); err != nil {
+		return err
+	}
+	if err := installProposal(ctx, s, p, vd, stdout); err != nil {
+		return lr.failed(losses, err)
+	}
+	lr.after(ctx, losses)
+	return nil
+}
+
+// confirmLossRevoke asks consent for the loss revokes of directory
+// install: with yes it reads nothing; on a terminal it asks and reads one
+// line from ceremonyInput (only y or yes consents); with no terminal and
+// no yes it refuses.
+func confirmLossRevoke(yes bool, version uint64, losses []hostLoss, stdout io.Writer) error {
+	if yes {
+		return nil
+	}
+	if !stdinIsTerminal() {
+		return errors.New("refusing to revoke without confirmation: installing this version first revokes the host certificates listed above, " +
+			"and stdin is not a terminal; check them and re-run with --yes. Nothing was revoked or installed")
+	}
+	if _, err := fmt.Fprintf(stdout, "Revoke the live host certificates of %s and then install directory version %d? [y/N] ", lossNames(losses), version); err != nil {
+		return err
+	}
+	line, _ := bufio.NewReader(ceremonyInput).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return nil
+	}
+	return errors.New("not confirmed; nothing was revoked or installed")
+}
+
+// installProposal posts proposal p through the server and reports the
+// answer, or states the refusal.
+func installProposal(ctx context.Context, s *adminSession, p *proposal, vd *verifiedDirectory, stdout io.Writer) error {
 	var ans serverclient.InstallDirectoryAnswer
-	err = s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminDirectoryPath, serverclient.InstallDirectoryRequest{Directory: p.doc, Sigs: p.sigs}, &ans, s.signer)
+	err := s.client.AdminJSON(ctx, http.MethodPost, serverclient.AdminDirectoryPath, serverclient.InstallDirectoryRequest{Directory: p.doc, Sigs: p.sigs}, &ans, s.signer)
 	if err != nil {
 		var he *serverclient.HTTPError
 		switch {

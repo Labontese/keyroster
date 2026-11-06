@@ -1229,3 +1229,399 @@ func TestDirectorySignInstallation(t *testing.T) {
 		})
 	}
 }
+
+// TestHostLosses (03-09b, threat-03): what a directory version takes from
+// the host entries of the verified base it replaces.
+func TestHostLosses(t *testing.T) {
+	h := func(name, status string, principals, keys []string) directory.Host {
+		return directory.Host{Name: name, HostGroup: "web", Keys: keys, Principals: principals, Status: status}
+	}
+	dir := func(hosts ...directory.Host) *directory.Directory {
+		return &directory.Directory{InstallationID: "aa", Hosts: hosts}
+	}
+	ps, ks := []string{"web1", "web1.lab"}, []string{"ssh-ed25519 AAAAk1", "ssh-ed25519 AAAAk2"}
+	base := dir(h("web1", directory.StatusActive, ps, ks))
+	for _, tc := range []struct {
+		name string
+		base *directory.Directory
+		next *directory.Directory
+		want []hostLoss
+	}{
+		{"removed_entry_loses_all", base, dir(), []hostLoss{{Name: "web1", Removed: true, LostPrincipals: ps, LostKeys: ks}}},
+		{"principal_dropped", base, dir(h("web1", directory.StatusActive, []string{"web1"}, ks)), []hostLoss{{Name: "web1", LostPrincipals: []string{"web1.lab"}}}},
+		{"key_dropped", base, dir(h("web1", directory.StatusActive, ps, []string{"ssh-ed25519 AAAAk2"})), []hostLoss{{Name: "web1", LostKeys: []string{"ssh-ed25519 AAAAk1"}}}},
+		{"principal_and_key_dropped_one_entry", base, dir(h("web1", directory.StatusActive, []string{"web1.lab"}, []string{"ssh-ed25519 AAAAk1"})),
+			[]hostLoss{{Name: "web1", LostPrincipals: []string{"web1"}, LostKeys: []string{"ssh-ed25519 AAAAk2"}}}},
+		{"disable_is_not_a_loss", base, dir(h("web1", directory.StatusDisabled, ps, ks)), nil},
+		{"enable_is_not_a_loss", dir(h("web1", directory.StatusDisabled, ps, ks)), dir(h("web1", directory.StatusActive, ps, ks)), nil},
+		{"rebind_is_not_a_loss", base, &directory.Directory{InstallationID: "bb", Hosts: base.Hosts}, nil},
+		{"principal_added_is_not_a_loss", base, dir(h("web1", directory.StatusActive, append(slices.Clone(ps), "web1.example"), append(slices.Clone(ks), "ssh-ed25519 AAAAk3"))), nil},
+		{"sorted_by_name_sets_sorted", dir(h("zz", directory.StatusActive, []string{"z2", "z1"}, []string{"ssh-ed25519 AAAAz2", "ssh-ed25519 AAAAz1"}), h("aa", directory.StatusActive, []string{"a1"}, []string{"ssh-ed25519 AAAAa1"})), dir(),
+			[]hostLoss{{Name: "aa", Removed: true, LostPrincipals: []string{"a1"}, LostKeys: []string{"ssh-ed25519 AAAAa1"}},
+				{Name: "zz", Removed: true, LostPrincipals: []string{"z1", "z2"}, LostKeys: []string{"ssh-ed25519 AAAAz1", "ssh-ed25519 AAAAz2"}}}},
+		{"nil_base_none", nil, dir(h("web1", directory.StatusActive, ps, ks)), nil},
+		{"renamed_entry_is_removal_of_old_name", base, dir(h("web9", directory.StatusActive, ps, ks)), []hostLoss{{Name: "web1", Removed: true, LostPrincipals: ps, LostKeys: ks}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hostLosses(tc.base, tc.next)
+			if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", tc.want) {
+				t.Fatalf("hostLosses = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// lossEnv is a fake server whose directory version 1 holds host web1
+// (principal web1, one key), at admins/quorum, serving the revocations
+// answers (the last repeats) and a KRL listing serial 5 under the host CA.
+func lossEnv(t *testing.T, admins, quorum int, answers ...func(http.ResponseWriter)) (*dirEnv, []ssh.PublicKey, func() []*wire.RevokeRequest) {
+	t.Helper()
+	e, pubs := hostRevokeEnv(t, admins, quorum, directory.StatusActive, 1)
+	if len(answers) == 0 {
+		answers = []func(http.ResponseWriter){revokeOK(lossAnswer(3, 8, 5)), revokeOK(lossAnswer(4, 11, 5))}
+	}
+	return e, pubs, e.recordRevokes(t, e.hostKRLDoc(t, 4, 12, []uint64{5}), answers...)
+}
+
+// lossAnswer is a revoke answer of KRL version v at leaf leaf with serials.
+func lossAnswer(v, leaf uint64, serials ...uint64) serverclient.RevokeAnswer {
+	return serverclient.RevokeAnswer{KRLVersion: v, RevokeLeaf: leaf, PublishLeaf: leaf + 1, SerialCount: uint32(len(serials)), Serials: serials} //nolint:gosec // G115: a few test serials
+}
+
+// subjectsOf returns the subjects of the host subject requests among reqs.
+func subjectsOf(reqs []*wire.RevokeRequest) []string {
+	var out []string
+	for _, r := range reqs {
+		if r.Target == wire.TargetSubject && r.SubjectKind == wire.SubjectHost {
+			out = append(out, r.Subject)
+		}
+	}
+	return out
+}
+
+// TestEditRevokesLossesBeforeInstall (03-09b, T-03-345, QB-2): a quorum-1
+// edit whose version removes a host entry, or a principal or key of one,
+// revokes the entry's live host certificates by subject, with the edit's
+// consent, after the SSHSIG and before the install POST, and sweeps a
+// removed entry once more after the install; a failed revoke installs
+// nothing. A proposal only prints the losses.
+func TestEditRevokesLossesBeforeInstall(t *testing.T) {
+	notice := recoveryKeptNotice + "\n"
+	t.Run("quorum_1_remove_revokes_then_installs", func(t *testing.T) {
+		e, _, reqs := lossEnv(t, 1, 1)
+		code, stdout, stderr := run(t, "host", "remove", "web1", "--yes")
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory", "revoke"}) {
+			t.Fatalf("requests %v, want revoke, directory, revoke", got)
+		}
+		if got := subjectsOf(reqs()); !slices.Equal(got, []string{"web1", "web1"}) {
+			t.Fatalf("subject requests %v", got)
+		}
+		if _, ok := installedDir(t, e).HostByName("web1"); ok {
+			t.Fatal("web1 is still installed")
+		}
+		if !strings.Contains(stdout, "Revocation before installing version 2 of web1: the server reports 1 certificate(s) revoked") ||
+			!strings.Contains(stdout, "Second revocation (after installing version 2) of web1") {
+			t.Fatalf("stdout:\n%s", stdout)
+		}
+	})
+	t.Run("losses_listed_before_consent", func(t *testing.T) {
+		e, pubs, _ := lossEnv(t, 1, 1)
+		useTerminal(t, true, "n\n")
+		code, stdout, _ := run(t, "host", "remove", "web1")
+		want := "Installing version 2 first revokes every live host certificate of: web1 (removed; principals web1; keys " + ssh.FingerprintSHA256(pubs[0]) + ").\n"
+		if code == 0 || !strings.Contains(stdout, want) {
+			t.Fatalf("exit %d, stdout:\n%s\nwant %q", code, stdout, want)
+		}
+		requireDiffBeforePrompt(t, stdout, want, 2)
+		if got := e.postCalls(); len(got) != 0 {
+			t.Fatalf("requests %v after a declined consent", got)
+		}
+	})
+	t.Run("declined_consent_revokes_nothing", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 1, 1)
+		if code, _, _ := run(t, "host", "remove", "web1"); code == 0 {
+			t.Fatal("host remove without --yes and without a terminal succeeded")
+		}
+		if got := e.postCalls(); len(got) != 0 {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("no_post_after_failed_revoke", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 1, 1, revokeRefusedAs(http.StatusForbidden, "request_time_skew"))
+		code, _, stderr := run(t, "host", "remove", "web1", "--yes")
+		if code == 0 || !strings.Contains(stderr, "Nothing was installed") || !strings.Contains(stderr, "Revoked so far: none") || !strings.Contains(stderr, "Run the command again") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+			t.Fatalf("requests %v, want only the failed revoke", got)
+		}
+	})
+	t.Run("proposal_prints_losses_revokes_nothing", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 1, 1)
+		code, stdout, stderr := run(t, "host", "remove", "web1", "--yes", "--out", filepath.Join(t.TempDir(), "p"))
+		if code != 0 || !strings.Contains(stdout, "Installing version 2 first revokes every live host certificate of: web1 (removed;") ||
+			!strings.Contains(stdout, "keyroster directory install will revoke them first") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); len(got) != 0 || strings.Contains(stdout, notice) {
+			t.Fatalf("requests %v; a proposal must revoke nothing", got)
+		}
+	})
+	t.Run("no_installation_id_warns_and_installs", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		e.resignBundle(t, func(b *trust.Bundle) { b.InstallationID = "" })
+		e.installDirect(t, buildDir(t, nil, roleBase(t, func(d *directory.Directory) {
+			d.Hosts = []directory.Host{{Name: "web1", HostGroup: "web", Keys: []string{trust.FormatKey(newRevokeKey(t))}, Principals: []string{"web1"}, Status: directory.StatusActive}}
+		})))
+		code, stdout, stderr := run(t, "host", "remove", "web1", "--yes")
+		if code != 0 || !strings.Contains(stdout, "has no installation ID, so the signer revokes nothing (krl_no_installation_id): the kr1 host certificates of web1 are not revoked") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"directory"}) {
+			t.Fatalf("requests %v, want the install only", got)
+		}
+	})
+	t.Run("no_losses_no_revoke", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 1, 1)
+		code, stdout, stderr := run(t, "host-group", "add", "db", "--yes")
+		if code != 0 || strings.Contains(stdout, "first revokes") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"directory"}) {
+			t.Fatalf("requests %v, want one install", got)
+		}
+	})
+	t.Run("revoke_by_subject_per_loss", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		e.installDirect(t, buildDir(t, nil, boundTo(e.bundle.InstallationID, roleBase(t, func(d *directory.Directory) {
+			d.Hosts = []directory.Host{
+				{Name: "web1", HostGroup: "web", Keys: []string{trust.FormatKey(newRevokeKey(t))}, Principals: []string{"web1"}, Status: directory.StatusActive},
+				{Name: "web2", HostGroup: "web", Keys: []string{trust.FormatKey(newRevokeKey(t))}, Principals: []string{"web2"}, Status: directory.StatusDisabled},
+			}
+		}))))
+		reqs := e.recordRevokes(t, e.hostKRLDoc(t, 6, 18, []uint64{5}), revokeOK(lossAnswer(3, 8, 5)), revokeOK(lossAnswer(4, 11)), revokeOK(lossAnswer(5, 14, 5)), revokeOK(lossAnswer(6, 17)))
+		s, err := openAdminSession("", io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.close()
+		var stdout strings.Builder
+		outcome, err := editDirectoryOutcome(context.Background(), s, editOpts{Yes: true}, &stdout, func(d *directory.Directory, _ *trust.Policy) error {
+			d.Hosts = nil
+			return nil
+		})
+		if err != nil || outcome != editInstalled {
+			t.Fatalf("outcome %d, %v\n%s", outcome, err, stdout.String())
+		}
+		if got := subjectsOf(reqs()); !slices.Equal(got, []string{"web1", "web2", "web1", "web2"}) {
+			t.Fatalf("subject requests %v, want web1 and web2 before the install and again after it", got)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "revoke", "directory", "revoke", "revoke"}) {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("sweep_checked_against_verified_krl", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
+		e.recordRevokes(t, e.hostKRLDoc(t, 4, 12, nil), revokeOK(lossAnswer(3, 8, 5)))
+		code, _, stderr := run(t, "host", "remove", "web1", "--yes")
+		if code == 0 || !strings.Contains(stderr, "(not listed)") || !strings.Contains(stderr, "Nothing was installed") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+			t.Fatalf("requests %v, want no install after an unconfirmed revoke", got)
+		}
+	})
+	t.Run("install_fails_after_revoke_reports_hold", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 1, 1)
+		e.installFails()
+		code, _, stderr := run(t, "host", "remove", "web1", "--yes")
+		if code == 0 || !strings.Contains(stderr, "The live host certificates of web1 are revoked") || !strings.Contains(stderr, "cert_revoked") ||
+			!strings.Contains(stderr, "install version 2 or any newer version") || !strings.Contains(stderr, "refreshed clients refuse web1") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory"}) {
+			t.Fatalf("requests %v, want no second sweep after a failed install", got)
+		}
+	})
+	t.Run("removed_entry_second_sweep_after_install", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 1, 1, revokeOK(lossAnswer(3, 8, 5)), revokeRefusedAs(http.StatusForbidden, "request_time_skew"))
+		code, stdout, stderr := run(t, "host", "remove", "web1", "--yes")
+		if code != 0 || !strings.Contains(stdout, "Warning: the second revocation of web1 after the install failed") || !strings.Contains(stdout, "run keyroster revoke host web1") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory", "revoke"}) {
+			t.Fatalf("requests %v", got)
+		}
+		if _, ok := installedDir(t, e).HostByName("web1"); ok {
+			t.Fatal("the install did not stand")
+		}
+	})
+	t.Run("recovery_kept_notice_printed", func(t *testing.T) {
+		lossEnv(t, 1, 1)
+		_, stdout, _ := run(t, "host", "remove", "web1", "--yes")
+		if !strings.HasSuffix(stdout, notice) {
+			t.Fatalf("a run that sent a loss revoke does not end with the notice:\n%s", stdout)
+		}
+		_, stdout, _ = run(t, "host-group", "add", "db", "--yes")
+		if strings.Contains(stdout, notice) {
+			t.Fatalf("a run without a loss revoke printed the notice:\n%s", stdout)
+		}
+	})
+}
+
+// lossProposal writes a proposal removing web1 from e's installed
+// directory, signed by the admins idx.
+func lossProposal(t *testing.T, e *dirEnv, idx ...int) string {
+	t.Helper()
+	installed, _ := e.installed()
+	doc := buildDir(t, installed, func(d *directory.Directory) { d.Hosts = nil })
+	return writeProposalDir(t, doc, e.sign(t, doc, idx...))
+}
+
+// TestDirectoryInstallLosses (03-09b, QB-2): keyroster directory install
+// of a version with losses checks the quorum locally, asks consent (--yes
+// or a terminal prompt), revokes, installs, and sweeps a removed entry
+// again; without losses it behaves as before.
+func TestDirectoryInstallLosses(t *testing.T) {
+	notice := recoveryKeptNotice + "\n"
+	t.Run("short_quorum_refused_nothing_revoked", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2)
+		code, _, stderr := run(t, "directory", "install", lossProposal(t, e, 0), "--yes")
+		if code == 0 || !strings.Contains(stderr, "1 of the 2 policy admins") || !strings.Contains(stderr, "nothing was revoked or installed") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if got := e.postCalls(); len(got) != 0 {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("noninteractive_without_yes_refused", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2)
+		code, _, stderr := run(t, "directory", "install", lossProposal(t, e, 0, 1))
+		if code == 0 || !strings.Contains(stderr, "stdin is not a terminal") || !strings.Contains(stderr, "Nothing was revoked or installed") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if got := e.postCalls(); len(got) != 0 {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("prompt_on_terminal_consents", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2)
+		useTerminal(t, true, "y\n")
+		code, stdout, stderr := run(t, "directory", "install", lossProposal(t, e, 0, 1))
+		if code != 0 || !strings.Contains(stdout, "Revoke the live host certificates of web1 and then install directory version 2? [y/N]") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory", "revoke"}) {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("prompt_declined_refuses_nothing_revoked", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2)
+		useTerminal(t, true, "n\n")
+		code, _, stderr := run(t, "directory", "install", lossProposal(t, e, 0, 1))
+		if code == 0 || !strings.Contains(stderr, "not confirmed; nothing was revoked or installed") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if got := e.postCalls(); len(got) != 0 {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("revoke_then_install", func(t *testing.T) {
+		e, _, reqs := lossEnv(t, 2, 2)
+		code, stdout, stderr := run(t, "directory", "install", lossProposal(t, e, 0, 1), "--yes")
+		if code != 0 || !strings.HasSuffix(stdout, notice) || !strings.Contains(stdout, "The server reports directory version 2 installed") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory", "revoke"}) || !slices.Equal(subjectsOf(reqs()), []string{"web1", "web1"}) {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("removed_entry_second_sweep_after_install", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2, revokeOK(lossAnswer(3, 8, 5)), revokeRefusedAs(http.StatusForbidden, "request_time_skew"))
+		code, stdout, stderr := run(t, "directory", "install", lossProposal(t, e, 0, 1), "--yes")
+		if code != 0 || !strings.Contains(stdout, "Warning: the second revocation of web1 after the install failed") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory", "revoke"}) {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("install_fails_after_revoke_reports_hold", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2)
+		e.installFails()
+		code, _, stderr := run(t, "directory", "install", lossProposal(t, e, 0, 1), "--yes")
+		if code == 0 || !strings.Contains(stderr, "The live host certificates of web1 are revoked") || !strings.Contains(stderr, "install version 2 or any newer version") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory"}) {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("revoke_fails_installs_nothing", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2, revokeRefusedAs(http.StatusForbidden, "request_time_skew"))
+		code, _, stderr := run(t, "directory", "install", lossProposal(t, e, 0, 1), "--yes")
+		if code == 0 || !strings.Contains(stderr, "Nothing was installed") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("no_losses_behaves_as_today", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2)
+		installed, _ := e.installed()
+		doc := buildDir(t, installed, func(d *directory.Directory) {
+			d.HostGroups = append(d.HostGroups, directory.HostGroup{Name: "db", Accounts: []directory.AccountMap{}})
+		})
+		code, stdout, stderr := run(t, "directory", "install", writeProposalDir(t, doc, e.sign(t, doc, 0, 1)))
+		if code != 0 || strings.Contains(stdout, "[y/N]") || strings.Contains(stdout, "first revokes") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"directory"}) {
+			t.Fatalf("requests %v, want one install", got)
+		}
+	})
+	t.Run("served_proposal_still_reported", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2)
+		dir := lossProposal(t, e, 0, 1)
+		e.installDirect(t, readTestFile(t, filepath.Join(dir, proposalDoc)))
+		code, stdout, stderr := run(t, "directory", "install", dir, "--yes")
+		if code != 0 || !strings.Contains(stdout, "The server already serves proposal") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); len(got) != 0 {
+			t.Fatalf("requests %v", got)
+		}
+	})
+}
+
+// TestDirectorySignPrintsLosses (03-09b, QB-2): directory sign prints the
+// losses and that directory install revokes them first; it revokes
+// nothing.
+func TestDirectorySignPrintsLosses(t *testing.T) {
+	t.Run("sign_prints_losses_and_install_note", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2)
+		code, stdout, stderr := run(t, "directory", "sign", lossProposal(t, e, 0), "--yes", "--admin-key", e.fps[1])
+		if code != 0 || !strings.Contains(stdout, "Installing version 2 first revokes every live host certificate of: web1 (removed;") ||
+			!strings.Contains(stdout, "keyroster directory install will revoke them first") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); len(got) != 0 {
+			t.Fatalf("requests %v", got)
+		}
+	})
+	t.Run("sign_without_losses_unchanged", func(t *testing.T) {
+		e, _, _ := lossEnv(t, 2, 2)
+		installed, _ := e.installed()
+		doc := buildDir(t, installed, func(d *directory.Directory) {
+			d.HostGroups = append(d.HostGroups, directory.HostGroup{Name: "db", Accounts: []directory.AccountMap{}})
+		})
+		code, stdout, stderr := run(t, "directory", "sign", writeProposalDir(t, doc, e.sign(t, doc, 0)), "--yes", "--admin-key", e.fps[1])
+		if code != 0 || strings.Contains(stdout, "first revokes") || strings.Contains(stdout, "directory install will revoke") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+	})
+}

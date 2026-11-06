@@ -167,8 +167,16 @@ func TestHostCommands(t *testing.T) {
 		if code != 0 || !strings.Contains(stdout, "web1 host_group=web status=active principals=[web1 web1.lab.example]") || !strings.Contains(stdout, "installation "+e.bundle.InstallationID) {
 			t.Fatalf("host list: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
+		// 03-09b: the removal first revokes web1's live host certificates
+		// and sweeps once more after the install.
+		e.serveRevokes(e.hostKRLDoc(t, 4, 12, nil), revokeOK(serverclient.RevokeAnswer{KRLVersion: 3, RevokeLeaf: 8, PublishLeaf: 9}),
+			revokeOK(serverclient.RevokeAnswer{KRLVersion: 4, RevokeLeaf: 11, PublishLeaf: 12}))
+		before := len(e.postCalls())
 		if code, stdout, stderr := run(t, "host", "remove", "web1", "--yes"); code != 0 || !strings.Contains(stdout, "- host web1 ") {
 			t.Fatalf("host remove: exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls()[before:]; !slices.Equal(got, []string{"revoke", "directory", "revoke"}) {
+			t.Fatalf("host remove sent %v, want revoke, directory, revoke", got)
 		}
 		if _, ok := installedDir(t, e).HostByName("web1"); ok {
 			t.Fatal("web1 is still in the installed directory")
