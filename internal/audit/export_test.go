@@ -170,3 +170,28 @@ func TestDecodeLoginIssue(t *testing.T) {
 		}
 	})
 }
+
+// TestExportHostIssue: a host_issue line names the certificate and the
+// request, under no key Verify binds to another kind (03-09).
+func TestExportHostIssue(t *testing.T) {
+	hf := newHostFixture(t, 90)
+	h := hf.addHost(hf.key, nil, nil, nil)
+	m := decoded(t, hf.leaves[len(hf.leaves)-1])
+	for _, k := range []string{"kind", "serial", "policy_version", "directory_version", "key_id", "host_name", "host_key_fingerprint",
+		"principals", "valid_after", "valid_before", "ca_fingerprint", "evidence_types"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("the host_issue line has no %q: %v", k, m)
+		}
+	}
+	for _, k := range []string{"version", "bundle_version", "directory", "sigs"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("the host_issue line carries %q", k)
+		}
+	}
+	if m["kind"] != "host_issue" || m["host_name"] != "web1" || m["host_key_fingerprint"] != ssh.FingerprintSHA256(hf.key.PublicKey()) || m["key_id"] != h.cert.KeyId {
+		t.Fatalf("the host_issue line: %v", m)
+	}
+	if _, err := hf.verifyHosts(); err != nil {
+		t.Fatalf("Verify of the export: %v", err)
+	}
+}

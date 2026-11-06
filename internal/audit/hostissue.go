@@ -34,16 +34,26 @@ const maxHostLifetimeSeconds = 2592000
 //  5. a directory is in force and authorized, at the entry's directory
 //     version, under the entry's policy version;
 //  6. the entry of the request's name is active and lists the key;
+//  7. no earlier explicit-key entry revokes the key;
 //  8. exactly one host-pop/v1 evidence by that key verifies over the
 //     request's signing bytes under the host namespace;
 //  9. valid_for is 0 (the signer chooses the lifetime, Q-09-6), and the
 //     certificate lives exactly min(2592000, the host cap in force);
+//  10. the request ID is new across the issue, login and host entries;
 //  11. the certificate: a host certificate of the request's key, signed by
 //     the active host CA, with exactly the entry's principals, the host
 //     profile's extensions and no critical options, a kr3 key ID equal to
 //     the entry's naming the entry, the request and the directory, and a
-//     rising serial.
-func verifyHostIssue(index uint64, body *tlog.HostIssueBody, leafMicros uint64, a *anchor, ds *directoryInForce, iss *issuance) (*ssh.Certificate, error) {
+//     rising serial;
+//  12. CapSeconds is min(2592000, the host cap in force) and the
+//     certificate's lifetime, and cert.HostCertRecent, the signer's own
+//     rule, with the certificate's issuance second as now, the cap and the
+//     directory version in force and the entry's principals, allows it
+//     (host_cert_recent and cert_revoked, keyed by host key, Q-09-2,
+//     Q-09-5, Q-09-6).
+//
+// It records the certificate in hosts.
+func verifyHostIssue(index uint64, body *tlog.HostIssueBody, leafMicros uint64, a *anchor, ds *directoryInForce, iss *issuance, hosts *hostsInForce) (*ssh.Certificate, error) {
 	req, err := wire.ParseHostIssueSigningBytes(body.Request)
 	if err != nil {
 		return nil, fmt.Errorf("logged request: %w", err)
@@ -79,6 +89,8 @@ func verifyHostIssue(index uint64, body *tlog.HostIssueBody, leafMicros uint64, 
 		return nil, fmt.Errorf("directory v%d host %q does not list key %s", ds.version, entry.Name, ssh.FingerprintSHA256(hostKey))
 	case entry.Status != directory.StatusActive:
 		return nil, fmt.Errorf("directory v%d host %q is %s, not active", ds.version, entry.Name, entry.Status)
+	case hosts.revokedKeys[trust.FormatKey(hostKey)]:
+		return nil, fmt.Errorf("host key %s is explicitly revoked by an earlier entry (host_key_revoked)", ssh.FingerprintSHA256(hostKey))
 	}
 	if err := verifyHostPoPEvidence(body.Evidence, body.Request, hostKey); err != nil {
 		return nil, err
@@ -147,8 +159,29 @@ func verifyHostIssue(index uint64, body *tlog.HostIssueBody, leafMicros uint64, 
 		return nil, fmt.Errorf("request CreatedAt is %d s from the certificate's issuance time (created %d, issued %d s); the signer accepts at most %d s",
 			d, req.CreatedAt, issuedSecs, maxLoginSkewSeconds)
 	}
-	_ = index
+	if prev, used := iss.hostIDs[reqID]; used {
+		return nil, fmt.Errorf("request ID %s replayed: host_issue entry %d already used it", reqID, prev)
+	}
+	if prev, used := iss.issueIDs[reqID]; used {
+		return nil, fmt.Errorf("request ID %s replayed: issue entry %d already used it", reqID, prev)
+	}
+	if prev, used := iss.loginIDs[reqID]; used {
+		return nil, fmt.Errorf("request ID %s replayed: login_issue entry %d already used it", reqID, prev)
+	}
+	rawCap := uint64(profile.MaxTTL / time.Second) //nolint:gosec // G115: the profile cap is positive
+	if body.CapSeconds != capInForce {
+		return nil, fmt.Errorf("entry records CapSeconds %d, but min(%d, the host cap %d s in force) is %d", body.CapSeconds, maxHostLifetimeSeconds, rawCap, capInForce)
+	}
+	switch d := cert.HostCertRecent(hosts.prev(trust.FormatKey(hostKey)), issuedSecs, rawCap, ds.version, entry.Principals); d {
+	case "cert_revoked":
+		return nil, fmt.Errorf("the latest host certificate of key %s is revoked and no newer directory version is installed, so the signer refuses it (cert_revoked)", ssh.FingerprintSHA256(hostKey))
+	case "host_cert_recent":
+		return nil, fmt.Errorf("issued %d s after the previous host certificate of key %s, inside its window of a third of the host cap (host_cert_recent)",
+			issuedSecs-hosts.prev(trust.FormatKey(hostKey)).Cert.ValidAfter-backdateSeconds, ssh.FingerprintSHA256(hostKey))
+	}
+	iss.hostIDs[reqID] = index
 	iss.next(body.Serial)
+	hosts.record(c, body.CapSeconds, body.DirectoryVersion)
 	return c, nil
 }
 
@@ -177,3 +210,110 @@ func verifyHostPoPEvidence(ev []wire.Evidence, signed []byte, key ssh.PublicKey)
 // hostCertKeyID is a host certificate's parsed key ID (kr3, checked by
 // verifyHostIssue).
 func hostCertKeyID(c *ssh.Certificate) (cert.KeyID, error) { return cert.ParseKeyID(c.KeyId) }
+
+// hostLatest is the latest host certificate audit verify knows for one
+// host key (03-09), as the signer's host index keeps it.
+type hostLatest struct {
+	cert           *ssh.Certificate
+	capSeconds     uint64
+	issuedUnderDir uint64
+	revoked        bool
+	revokedAtDir   uint64
+}
+
+// hostsInForce is audit verify's derivation of the signer's host index
+// from the log alone (03-09): per host key the latest host certificate,
+// the serials and key IDs of those latest certificates, the explicitly
+// revoked keys, and the directory version in force. Its rules and their
+// order are the signer's (internal/signer hostIndex.apply), so
+// cert.HostCertRecent sees the same inputs there and here.
+type hostsInForce struct {
+	latest      map[string]hostLatest
+	bySerial    map[uint64]string
+	byKeyID     map[string]string
+	revokedKeys map[string]bool
+	curDir      uint64
+}
+
+func newHostsInForce() *hostsInForce {
+	return &hostsInForce{latest: map[string]hostLatest{}, bySerial: map[uint64]string{}, byKeyID: map[string]string{}, revokedKeys: map[string]bool{}}
+}
+
+// prev is key k's latest certificate as cert.HostCertRecent takes it (the
+// zero HostPrev for none).
+func (h *hostsInForce) prev(k string) cert.HostPrev {
+	l, ok := h.latest[k]
+	if !ok {
+		return cert.HostPrev{}
+	}
+	return cert.HostPrev{Cert: l.cert, CapSeconds: l.capSeconds, IssuedUnderDir: l.issuedUnderDir, Revoked: l.revoked, RevokedAtDir: l.revokedAtDir}
+}
+
+// record makes c, a verified host_issue certificate with cap and dir, the
+// latest of its key.
+func (h *hostsInForce) record(c *ssh.Certificate, capSeconds, dir uint64) {
+	k := trust.FormatKey(c.Key)
+	if old, ok := h.latest[k]; ok {
+		delete(h.bySerial, old.cert.Serial)
+		delete(h.byKeyID, old.cert.KeyId)
+	}
+	h.latest[k] = hostLatest{cert: c, capSeconds: capSeconds, issuedUnderDir: dir}
+	h.bySerial[c.Serial] = k
+	h.byKeyID[c.KeyId] = k
+}
+
+// carry records a recovery's carried kr3 ca=host certificate as the
+// latest of its key when its serial is above the recorded one, and marks
+// it revoked when the recovery revokes it.
+func (h *hostsInForce) carry(c *ssh.Certificate, revoke bool) {
+	if c.CertType != ssh.HostCert {
+		return
+	}
+	kid, err := cert.ParseKeyID(c.KeyId)
+	if err != nil || !kid.V3 || kid.CA != wire.CARoleHost.String() {
+		return
+	}
+	k := trust.FormatKey(c.Key)
+	if cur, ok := h.latest[k]; ok && cur.cert.Serial >= c.Serial {
+		return
+	}
+	life := uint64(0)
+	if c.ValidBefore > c.ValidAfter+backdateSeconds {
+		life = c.ValidBefore - c.ValidAfter - backdateSeconds
+	}
+	h.record(c, life, kid.Directory)
+	if revoke {
+		h.markRevoked(k)
+	}
+}
+
+// revokeEntries applies a revoke or recovery entry list: a serial or key
+// ID that names a latest host certificate under its CA key marks it
+// revoked at the directory version in force; an explicit key is recorded.
+func (h *hostsInForce) revokeEntries(entries []tlog.RevokedEntry) {
+	for _, e := range entries {
+		switch e.Kind {
+		case tlog.RevokedSerial:
+			if k, ok := h.bySerial[e.Serial]; ok && bytes.Equal(h.latest[k].cert.SignatureKey.Marshal(), e.CAKey) {
+				h.markRevoked(k)
+			}
+		case tlog.RevokedKeyID:
+			if k, ok := h.byKeyID[e.KeyID]; ok && bytes.Equal(h.latest[k].cert.SignatureKey.Marshal(), e.CAKey) {
+				h.markRevoked(k)
+			}
+		case tlog.RevokedKey:
+			if pub, err := ssh.ParsePublicKey(e.Key); err == nil {
+				h.revokedKeys[trust.FormatKey(pub)] = true
+			}
+		}
+	}
+}
+
+func (h *hostsInForce) markRevoked(k string) {
+	l, ok := h.latest[k]
+	if !ok || l.revoked {
+		return
+	}
+	l.revoked, l.revokedAtDir = true, h.curDir
+	h.latest[k] = l
+}
