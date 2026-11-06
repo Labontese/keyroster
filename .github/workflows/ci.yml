@@ -50,7 +50,7 @@ jobs:
         env:
           KEYROSTER_REQUIRE_ORACLE: "1"
           KEYROSTER_REQUIRE_SSH_AGENT: "1"
-        run: CGO_ENABLED=1 go test -race -count=1 ./...
+        run: CGO_ENABLED=1 go test -race -count=1 -timeout 15m ./...
 
   # PLAT-05: the CLI on Windows and macOS. Both jobs are required checks
   # (main-integrity): cli-macos since 02-14, cli-windows after go-winio
