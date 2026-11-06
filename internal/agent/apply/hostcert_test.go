@@ -280,6 +280,7 @@ func TestDropInSpec(t *testing.T) {
 			t.Fatalf("DropIn with the empty spec:\n%s\nwant:\n%s", got, want)
 		}
 	})
+	dropInSpecSorted(t)
 }
 
 // TestHostCertStep is the host-certificate step on the fake sshd (03-09).
@@ -982,12 +983,25 @@ func hostCertStepCases2(t *testing.T) {
 	t.Run("hostcert_rollback_keeps_trust_files", func(t *testing.T) {
 		h := newHostCertHost(t)
 		h.one()
+		// current is set apart from last-good: a failed apply with a newer
+		// KRL leaves current at the rollback target (last-good's trust
+		// with the newer KRL), which holds no host-certificate work.
+		h.publishKRL(82)
+		h.sshd.setStall(true)
+		_, _ = h.apply()
+		h.sshd.setStall(false)
+		if c, lg := h.current(), h.lastGood(); c == 0 || c == lg {
+			t.Fatalf("current %d, last-good %d: want current set apart", c, lg)
+		}
 		before := treeSnapshot(t, h.l.Current(), h.l.LastGood(), h.l.GenDir(), h.l.State("accepted"))
 		h.renewDue()
 		h.mustHostCerts()
 		h.answer()
 		h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
 		_, _ = h.hostCerts()
+		if a := h.attempts(); len(a.Keys) == 0 || a.Keys[0].KeptFile == "" || a.Keys[0].LastCode == "" {
+			t.Fatalf("attempts %+v: want a failed install that kept the certificate", a)
+		}
 		if after := treeSnapshot(t, h.l.Current(), h.l.LastGood(), h.l.GenDir(), h.l.State("accepted")); after != before {
 			t.Fatal("a served_cert_mismatch rollback changed current, last-good, gen/ or accepted/")
 		}
@@ -1498,4 +1512,227 @@ func (h *hostCertHost) issueBy(ca ssh.Signer, pub ssh.PublicKey) *ssh.Certificat
 		h.t.Fatal(err)
 	}
 	return c
+}
+
+// dropInSpecSorted: the HostCertificate lines follow the trio, sorted,
+// whatever order the spec lists them in (03-09, D1).
+func dropInSpecSorted(t *testing.T) {
+	t.Run("spec_lines_sorted_after_trio", func(t *testing.T) {
+		l := Layout{Root: "/r", StateDir: "/s"}
+		got := string(DropIn(l, DropInSpec{HostCertificates: []string{"/r/c/b.pub", "/r/c/a.pub"}}))
+		want := string(DropIn(l, DropInSpec{})) + "HostCertificate /r/c/a.pub\nHostCertificate /r/c/b.pub\n"
+		if got != want {
+			t.Fatalf("DropIn:\n%s\nwant:\n%s", got, want)
+		}
+	})
+}
+
+// TestHostCertConfigGraph: a sibling file of the drop-in that ends inside
+// a Match block does not put the next sibling's lines inside Match (sshd
+// ends a Match block at the end of an included file).
+func TestHostCertConfigGraph(t *testing.T) {
+	t.Run("sibling_match_isolated", func(t *testing.T) {
+		h := newHostCertHost(t)
+		rel, err := filepath.Rel(h.l.Root, filepath.Join(filepath.Dir(h.l.DropIn()), "00-a.conf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeRootFile(t, h.testHost, rel, "Match User nobody\n\tPasswordAuthentication no\n")
+		if err := os.WriteFile(h.l.DropIn(), DropIn(h.l, DropInSpec{}), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		files, _ := configGraph(h.l, h.cfg.SSHDConfig, nil)
+		seen := false
+		for _, f := range files {
+			seen = seen || f.path == h.l.DropIn()
+		}
+		if !seen || dropInInMatch(h.l, files) {
+			t.Fatalf("drop-in read %t, in Match %t: want read outside Match", seen, dropInInMatch(h.l, files))
+		}
+	})
+}
+
+// TestHostCertDrift is check's host-certificate part (03-09).
+func TestHostCertDrift(t *testing.T) {
+	check := func(t *testing.T, h *hostCertHost) *DriftReport {
+		t.Helper()
+		d, err := Check(context.Background(), h.cfg, h.l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	t.Run("spec_line_missing_in_sshd_T", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		want := h.dropInCerts()[0]
+		// sshd -T reads no drop-in: none of the spec's lines is in force.
+		h.run.noInclude = true
+		d := check(t, h)
+		if !slices.ContainsFunc(d.Settings, func(s SettingDrift) bool { return s.Keyword == hostCertificateKeyword && s.Want == want }) {
+			t.Fatalf("settings %+v, want %s missing from sshd -T", d.Settings, want)
+		}
+	})
+	t.Run("foreign_hostcertificate_value_reported", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.run.hostCertAfter = []string{"/etc/ssh/other-cert.pub"}
+		d := check(t, h)
+		if !slices.ContainsFunc(d.Settings, func(s SettingDrift) bool {
+			return s.Keyword == hostCertificateKeyword && s.Got == "/etc/ssh/other-cert.pub" && s.Want == ""
+		}) {
+			t.Fatalf("settings %+v, want the foreign value", d.Settings)
+		}
+	})
+	t.Run("committed_file_missing_reported", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		en := h.record().Committed[0]
+		if err := os.Remove(filepath.Join(h.l.HostCertDir(), en.File)); err != nil {
+			t.Fatal(err)
+		}
+		d := check(t, h)
+		if !slices.ContainsFunc(d.Files, func(f FileDrift) bool {
+			return strings.HasSuffix(f.File, en.File) && f.GotSHA256 == "" && f.WantSHA256 == en.CertSHA256
+		}) {
+			t.Fatalf("files %+v, want the missing certificate file", d.Files)
+		}
+	})
+}
+
+// TestHostCertPreflight is preflight's host-certificate part (03-09).
+func TestHostCertPreflight(t *testing.T) {
+	preflight := func(t *testing.T, h *hostCertHost) *PreflightReport {
+		t.Helper()
+		r, err := Preflight(context.Background(), h.cfg, h.l)
+		if err != nil {
+			t.Fatalf("Preflight: %v", err)
+		}
+		return r
+	}
+	hasNote := func(r *PreflightReport, code string) bool {
+		return slices.ContainsFunc(r.Notes, func(n string) bool { return strings.HasPrefix(n, code+":") })
+	}
+	t.Run("foreign_host_certificate_is_a_note", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		appendFile(t, h.cfg.SSHDConfig, "HostCertificate /etc/ssh/other-cert.pub\n")
+		r := preflight(t, h)
+		if !hasNote(r, CodeForeignHostCertificate) || r.Refused() {
+			t.Fatalf("report %+v, want a foreign_host_certificate note and no refusal", r)
+		}
+	})
+	t.Run("invalid_record_is_a_note", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		h.writeRecord([]byte("garbage"), 0o600)
+		r := preflight(t, h)
+		if !hasNote(r, CodeHostCertRecordInvalid) || r.Refused() {
+			t.Fatalf("report %+v, want a hostcert_record_invalid note and no refusal", r)
+		}
+	})
+	t.Run("installed_with_lines_no_drift", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		r := preflight(t, h)
+		if finding(r, CodeDropInDrift) != nil || finding(r, CodeForeignTrust) != nil {
+			t.Fatalf("findings %+v, want neither dropin_drift nor foreign_trust_setting", r.Findings)
+		}
+	})
+	t.Run("preflightApply_skipped_when_equal", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.both()
+		// A missing ssh-keygen is a refusal of preflightApply: with the
+		// drop-in equal to wantDropIn it is never reached.
+		h.cfg.SSHKeygen = filepath.Join(h.l.Root, "no-ssh-keygen")
+		h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
+		if _, err := h.apply(); err != nil {
+			t.Fatalf("an apply with the drop-in as wanted ran preflightApply: %v", err)
+		}
+		h.stripLines()
+		h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
+		if _, err := h.apply(); err == nil || !strings.Contains(err.Error(), CodeSSHKeygenMissing) {
+			t.Fatalf("an apply with a differing drop-in: %v, want preflightApply's ssh_keygen_missing", err)
+		}
+	})
+	t.Run("preflight_no_state_dir_foreign_dropin", func(t *testing.T) {
+		h := newHostCertHost(t)
+		dropIn := "TrustedUserCAKeys /etc/ssh/other_ca.pub\nHostCertificate /etc/ssh/x-cert.pub\n"
+		if err := os.WriteFile(h.l.DropIn(), []byte(dropIn), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(h.l.StateDir); err != nil {
+			t.Fatal(err)
+		}
+		r := preflight(t, h)
+		if finding(r, CodeForeignTrust) == nil {
+			t.Fatalf("findings %+v, want foreign_trust_setting", r.Findings)
+		}
+	})
+}
+
+// TestHostCertStatus: status.json carries the host-certificate fields
+// (03-09).
+func TestHostCertStatus(t *testing.T) {
+	h := newHostCertHost(t)
+	h.both()
+	s := h.status()
+	if len(s.HostCerts) != 2 || len(s.HostKeysSkipped) != 1 || s.HostKeysSkipped[0] != (heartbeat.SkippedKey{Type: ssh.KeyAlgoRSA, Reason: "rsa_host_key_skipped"}) {
+		t.Fatalf("status %+v %+v, want both certificates and the RSA key skipped", s.HostCerts, s.HostKeysSkipped)
+	}
+	for _, c := range s.HostCerts {
+		i := slices.IndexFunc(h.record().Committed, func(e hostcert.Entry) bool { return e.KeySHA256 == c.KeySHA256 })
+		if i < 0 || c.Serial == 0 || c.ValidBefore == 0 || len(c.CASHA256) != 64 || !c.Served || c.Type == "" {
+			t.Fatalf("host_certs entry %+v", c)
+		}
+	}
+	t.Run("served_false_encoded", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub, h.ed2.PublicKey()))
+		h.mustApply()
+		h.mustHostCerts()
+		h.answer()
+		h.mustHostCerts()
+		b, err := os.ReadFile(filepath.Join(h.l.Outbox(), heartbeat.StatusFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(b, []byte(`"served":false`)) || !bytes.Contains(b, []byte(`"served":true`)) {
+			t.Fatalf("status.json %s, want served true and false encoded", b)
+		}
+	})
+	t.Run("status_written_after_install", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		h.mustHostCerts()
+		h.answer()
+		_ = os.Remove(filepath.Join(h.l.Outbox(), heartbeat.StatusFile))
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = HostCerts(context.Background(), h.cfg, h.l)
+		}()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("HostCerts did not return: a self-deadlock on apply.lock")
+		}
+		if s := h.status(); len(s.HostCerts) != 1 {
+			t.Fatalf("status %+v, want the installed certificate", s.HostCerts)
+		}
+	})
+	t.Run("no_certificates_no_fields", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.installed("role:ops")
+		b, err := os.ReadFile(filepath.Join(h.l.Outbox(), heartbeat.StatusFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{"host_certs", "host_keys_skipped", "host_cert_detail"} {
+			if bytes.Contains(b, []byte(`"`+f+`"`)) {
+				t.Fatalf("a host without host certificates writes %s: %s", f, b)
+			}
+		}
+	})
 }

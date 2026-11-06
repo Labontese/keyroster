@@ -9,10 +9,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
+	"github.com/Labontese/keyroster/internal/agent/hostcert"
 )
 
 // TestRunCatchUp (PR #71 review F9): with more directory versions queued
@@ -206,4 +208,153 @@ func (l *syncLog) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.b.String()
+}
+
+// TestRunHostCertsWhenDue: the run loop calls HostCerts once at start,
+// after an Apply, after a check, when the host-certificate answers' digest
+// changes and when the due time it returned has passed, and not otherwise
+// (03-09). The loop is driven iteration by iteration through the
+// Iteration hook and the fake clock; nothing sleeps.
+func TestRunHostCertsWhenDue(t *testing.T) {
+	h := newHostCertHost(t)
+	h.publishDir(h.hostSpec(h.sshd.pub))
+	h.write()
+	var calls atomic.Int32
+	iter := make(chan int32)
+	step := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, RunConfig{Config: h.cfg, Interval: time.Millisecond, Retry: time.Hour, CheckEvery: 10 * time.Minute,
+			HostCerts: func() { calls.Add(1) },
+			Iteration: func() {
+				select {
+				case iter <- calls.Load():
+				case <-ctx.Done():
+					return
+				}
+				select {
+				case <-step:
+				case <-ctx.Done():
+				}
+			}}, h.l)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	// next lets the loop finish one iteration and returns the call count.
+	next := func(t *testing.T) int32 {
+		t.Helper()
+		select {
+		case n := <-iter:
+			return n
+		case <-time.After(30 * time.Second):
+			t.Fatal("no loop iteration within 30 s")
+			return 0
+		}
+	}
+	idle := func(t *testing.T, what string, want int32) {
+		t.Helper()
+		for i := range 10 {
+			step <- struct{}{}
+			if n := next(t); n != want {
+				t.Fatalf("%s: iteration %d called HostCerts (%d calls, want %d)", what, i, n, want)
+			}
+		}
+	}
+	// Once at start (with the round's apply and check).
+	if n := next(t); n != 1 {
+		t.Fatalf("the first iteration called HostCerts %d times, want once", n)
+	}
+	idle(t, "after start", 1)
+
+	// The answers' digest changes.
+	h.answer()
+	step <- struct{}{}
+	if n := next(t); n != 2 {
+		t.Fatalf("a new answer: %d calls, want 2", n)
+	}
+	idle(t, "after the answer", 2)
+
+	t.Run("answer_replaced_under_same_name", func(t *testing.T) {
+		ents, err := os.ReadDir(h.spool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replaced := false
+		for _, d := range ents {
+			if !hostcert.AnswerFileRE.MatchString(d.Name()) {
+				continue
+			}
+			p := filepath.Join(h.spool, d.Name())
+			b, err := os.ReadFile(p) //nolint:gosec // test fixture
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The same name and size, another mtime.
+			if err := os.WriteFile(p, b, 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+			at := time.Unix(1_700_000_000, 0)
+			if err := os.Chtimes(p, at, at); err != nil {
+				t.Fatal(err)
+			}
+			replaced = true
+		}
+		if !replaced {
+			t.Fatal("no answer in the spool to replace")
+		}
+		step <- struct{}{}
+		if n := next(t); n != 3 {
+			t.Fatalf("an answer replaced under its name: %d calls, want 3", n)
+		}
+		idle(t, "after the replaced answer", 3)
+	})
+
+	// A check (the clock passes CheckEvery; the next renewal is days
+	// away) calls it once.
+	h.clock.advance(11 * time.Minute)
+	step <- struct{}{}
+	if n := next(t); n != 4 {
+		t.Fatalf("after a check: %d calls, want 4", n)
+	}
+	idle(t, "after the check", 4)
+
+	// An Apply calls it once.
+	h.publishDir(h.hostSpec(h.sshd.pub))
+	h.write()
+	step <- struct{}{}
+	n := next(t)
+	if n < 5 {
+		t.Fatalf("after an apply: %d calls, want one more", n)
+	}
+	for {
+		// The spool was written file by file: the loop may apply more
+		// than once, each time once more. Wait until it is quiet.
+		step <- struct{}{}
+		m := next(t)
+		if m == n {
+			break
+		}
+		n = m
+	}
+	idle(t, "after the apply", n)
+
+	// The renewal time passes (a check is due as well): one call, which
+	// requests the renewal.
+	h.renewDue()
+	step <- struct{}{}
+	if m := next(t); m != n+1 {
+		t.Fatalf("after RenewAt: %d calls, want %d", m, n+1)
+	}
+	idle(t, "after the renewal request", n+1)
+	// The due time it returned passes (the request's 330 s), before the
+	// next check: one call.
+	h.clock.advance(331 * time.Second)
+	step <- struct{}{}
+	if m := next(t); m != n+2 {
+		t.Fatalf("after the due time: %d calls, want %d", m, n+2)
+	}
+	idle(t, "after the due time", n+2)
 }

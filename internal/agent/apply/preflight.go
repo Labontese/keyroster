@@ -520,7 +520,10 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 			r.add(Finding{Code: CodeDropInDrift, File: l.DropIn(),
 				Message: l.DropIn() + " holds a preflight trial drop-in, not the agent's own, on a host where the agent's generations are installed: an sshd that re-reads it trusts current's CA keys without the KRL",
 				Fix:     "run sudo keyroster-agent apply --once: it replaces the trial with the agent's drop-in and reloads sshd, even when the signed state has not changed"})
-		case !bytes.Equal(existing, w.Bytes):
+		case !bytes.Equal(existing, w.Bytes) && (w.Code == "" || !bytes.Equal(withoutHostCertLines(l, existing), w.Bytes)):
+			// Under a record code (03-09) the drop-in's own HostCertificate
+			// lines are not drift: that is a note above, never a refusal
+			// (T-03-341).
 			r.add(Finding{Code: CodeDropInDrift, File: l.DropIn(),
 				Message: l.DropIn() + " differs from the drop-in the agent writes (edited by hand or by configuration management?)",
 				Fix:     "the next keyroster-agent apply rewrites it (the old file is kept as dropin.prev until that apply commits); keyroster-agent check reports it until then. Manage sshd settings in another file: the agent owns this one"})
@@ -576,6 +579,19 @@ func DetectRefusal(err error) *PreflightReport {
 	r.add(Finding{Code: CodeSSHDCommand, Message: err.Error(),
 		Fix: "start sshd with only -D, -e and -f <file> (set every other option in sshd_config, which the agent checks), or empty the variable in the unit's EnvironmentFile (/etc/default/ssh, /etc/sysconfig/sshd) or /etc/conf.d/sshd; see host-setup.md \"Before the agent: preflight\""})
 	return r
+}
+
+// withoutHostCertLines is b without its HostCertificate lines naming a
+// file of the agent's host-certificate directory.
+func withoutHostCertLines(l Layout, b []byte) []byte {
+	var out []byte
+	for _, line := range bytes.SplitAfter(b, []byte("\n")) {
+		if p, ok := bytes.CutPrefix(line, []byte("HostCertificate ")); ok && filepath.Dir(string(bytes.TrimSuffix(p, []byte("\n")))) == l.HostCertDir() {
+			continue
+		}
+		out = append(out, line...)
+	}
+	return out
 }
 
 // CodeForeignHostCertificate is the note of a HostCertificate directive

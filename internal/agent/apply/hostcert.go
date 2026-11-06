@@ -988,16 +988,36 @@ func hostCertDue(st *hostCertState) time.Time {
 			due = t
 		}
 	}
+	// A key that waits (a live request, a back-off or a sticky hold) is
+	// due when its wait ends, not at a renewal threshold already passed:
+	// otherwise the run loop would call the step every iteration while an
+	// answer is outstanding.
+	now := uint64(max(st.now.Unix(), 0))
+	waiting := map[string]bool{}
+	for _, a := range st.attempts.Keys {
+		w := a.NextAt > now || (a.Sticky != nil && a.Sticky.At+hostcert.StickyRelease > now && a.Sticky.At <= now+3600)
+		for _, p := range a.Requests {
+			w = w || (!p.Consumed && p.CreatedAt+hostcert.RequestTTL > now)
+		}
+		waiting[a.KeySHA256] = w
+	}
 	if st.rec != nil {
 		for _, en := range st.rec.Committed {
-			next(en.RenewAt)
+			threshold := func(t uint64) {
+				if t > now || !waiting[en.KeySHA256] {
+					next(t)
+				}
+			}
+			threshold(en.RenewAt)
 			if c := st.certs[en.KeySHA256]; c != nil {
-				next(c.ValidBefore - hostcert.MissingMargin(hostcert.Lifetime(c)))
+				threshold(c.ValidBefore - hostcert.MissingMargin(hostcert.Lifetime(c)))
 			}
 		}
 	}
 	for _, a := range st.attempts.Keys {
-		next(a.NextAt)
+		if a.NextAt > now || !waiting[a.KeySHA256] {
+			next(a.NextAt)
+		}
 		if a.Sticky != nil {
 			next(a.Sticky.At + hostcert.StickyRelease)
 		}
