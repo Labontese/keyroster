@@ -128,12 +128,12 @@ func TestKnownHostsUnix(t *testing.T) {
 	t.Run("state_symlink_refuses", func(t *testing.T) {
 		f := newHTFix(t, 1, 1)
 		mustRun(t, web1(t, f), hostTrustFull)
-		real := filepath.Join(t.TempDir(), "state.json")
-		writeTestFile(t, real, readTestFile(t, f.statePath))
+		copied := filepath.Join(t.TempDir(), "state.json")
+		writeTestFile(t, copied, readTestFile(t, f.statePath))
 		if err := os.Remove(f.statePath); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(real, f.statePath); err != nil {
+		if err := os.Symlink(copied, f.statePath); err != nil {
 			t.Fatal(err)
 		}
 		before := f.files(t)
