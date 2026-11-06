@@ -305,7 +305,7 @@ Run by the orchestrator on PR #88 at 8a1b040 (wf_505faff6-2d3): 16 findings, eac
 | F16 (medium): the served-certificate self-test dialled only the first loopback address, with no IPv6 skip | 9ef5abb | `TestHostCertSelfTestFamilies` (EADDRNOTAVAIL, EAFNOSUPPORT, IPv6 off on lo; fails with the first address) |
 | F12 (medium): host_issue export fields were not bound by audit verify while the runbook reads them | 1de1c4c | `TestExportHostIssue` (a changed host_name or key fingerprint, or an added field, is refused; without the binding all three pass verify) |
 | F1 (low): re-delivery was decided after the serial draw, so a fresh in-window request was refused clock_regression below the high-water mark | f6ac374 | `TestHostIssueRedeliverBelowHighWater` (RED not separately run; the reviewers reproduced the refusal) |
-| F2 (low): no kr3 fuzz seeds | f6ac374 | `FuzzParseKeyID` with kr3 seeds (10 s fuzz run) |
+| F2 (low): no kr3 fuzz seeds | f6ac374, then the follow-up below | `FuzzParseKeyIDV3` in keyid_test.go (10 s fuzz run): fuzz_test.go is outside files_modified, so the seeds moved to a kr3 target in a listed file and fuzz_test.go is origin/main's again |
 | F3 (low): the claimed grammar-agreement test did not exist | f6ac374 | `TestHostIssueRequest/name_grammar_matches_directory` |
 | F7 (low): check reported a committed path the in-progress candidate replaces | f6ac374 | `TestHostCertDrift/renewal_candidate_not_drift` (fails without the fix) |
 | F11 (low): the fetcher wrote an oversize certificate answer, healed and re-posted every poll | f6ac374 | `TestPostHostCerts/oversize_certificate_answered_as_refusal` |

@@ -1859,7 +1859,7 @@ func TestHostCertSelfTestFamilies(t *testing.T) {
 	h := newHostCertHost(t)
 	c := h.one()
 	port := strconv.Itoa(h.sshd.port)
-	dump := ParseDump([]byte("listenaddress [::]:" + port + "\nlistenaddress 0.0.0.0:" + port + "\n"))
+	dump := ParseDump([]byte("listenaddress [::]:" + port + "\nlistenaddress " + net.JoinHostPort(net.IPv4zero.String(), port) + "\n"))
 	for _, tc := range []struct {
 		name  string
 		errno syscall.Errno

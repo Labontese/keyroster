@@ -241,3 +241,32 @@ func TestKeyIDKr3(t *testing.T) {
 		}
 	})
 }
+
+// FuzzParseKeyIDV3 is FuzzParseKeyID seeded with kr3 key IDs (03-09): a
+// host certificate, a machine probe subject, and the refused user CA,
+// over-long subject and missing directory version. ParseKeyID never
+// panics, refuses only with ErrKeyID, and every kr3 key ID it accepts
+// formats back to exactly the input.
+func FuzzParseKeyIDV3(f *testing.F) {
+	for _, s := range []string{
+		KeyID{V3: true, CA: "host", Subject: "web1", Request: testRequestHex, Policy: 1, Directory: 7, Serial: 9}.String(),
+		KeyID{V3: true, CA: "machine", Subject: "probe." + strings.Repeat("a", 60), Request: testRequestHex, Policy: 1, Directory: 1, Serial: 1}.String(),
+		"kr3/ca=user/sub=alice/req=" + testRequestHex + "/pol=1/dir=1/ser=1",
+		"kr3/ca=host/sub=" + strings.Repeat("a", 71) + "/req=" + testRequestHex + "/pol=1/dir=1/ser=1",
+		"kr3/ca=host/sub=web1/req=" + testRequestHex + "/pol=1/ser=1",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		k, err := ParseKeyID(s)
+		if err != nil {
+			if !errors.Is(err, ErrKeyID) {
+				t.Fatalf("ParseKeyID(%q) = %v, want ErrKeyID", s, err)
+			}
+			return
+		}
+		if got := k.String(); got != s {
+			t.Fatalf("accepted key ID %q formats back as %q", s, got)
+		}
+	})
+}
