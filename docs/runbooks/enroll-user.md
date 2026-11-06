@@ -535,7 +535,12 @@ A residual remains (owner decision D-R1): a rename right after that check
 can still land behind the other run's, so an older KRL, older CA lines or
 an older Host block can stay in place, and a revocation the newer KRL
 holds is then not enforced, until the next refresh re-verifies and
-rewrites every file. Run in CI (03-09b):
+rewrites every file. The state file has no such check before its rename
+(the run read it again just before), so two runs can also swap their
+state writes: the state then keeps the slower run's floors, never below
+the ones that run began with, and until a refresh from an honest server
+raises them again a compromised server could serve a directory version
+between the two runs' versions (T-03-347). Run in CI (03-09b):
 `TestKnownHosts/concurrent_state_after_state_step_stops_krl`,
 `TestKnownHosts/concurrent_newer_krl_on_disk_stops_krl`; the window
 itself is UNVERIFIED (no test can time it).
