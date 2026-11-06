@@ -288,7 +288,10 @@ func classify(detail string) uint8 {
 		return tlog.ReasonTTLExceeded
 	case "request_time_skew":
 		return tlog.ReasonStaleRequest
-	case "duplicate_request":
+	case "duplicate_request",
+		// Host certificates (03-09): one certificate per host key per
+		// window; the latest is re-delivered instead.
+		"host_cert_recent":
 		return tlog.ReasonDuplicateRequest
 	case "clock_regression":
 		return tlog.ReasonClockRegression
@@ -326,7 +329,10 @@ func classify(detail string) uint8 {
 		// pop.hosts, the directory entry and its key, and the proof of
 		// possession.
 		"host_issue_no_installation_id", "host_issue_installation_mismatch", "host_pop_not_enabled",
-		"unknown_host", "host_key_not_listed", "host_disabled", "host_pop_invalid":
+		"unknown_host", "host_key_not_listed", "host_disabled", "host_pop_invalid",
+		// An explicitly revoked host key, and a key whose latest host
+		// certificate is revoked until a newer directory version (Q-09-5).
+		"host_key_revoked", "cert_revoked":
 		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal

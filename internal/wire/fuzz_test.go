@@ -598,3 +598,44 @@ func FuzzParseForgetResponse(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseHostIssueRequest: parse then encode is the identity (03-09).
+func FuzzParseHostIssueRequest(f *testing.F) {
+	valid, err := hostIssueVector(f).Marshal()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(valid)
+	f.Add(append(bytes.Clone(valid), 0))
+	f.Add(valid[:len(valid)/2])
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		r, err := ParseHostIssueRequest(data)
+		if err != nil {
+			return
+		}
+		again, err := r.Marshal()
+		if err != nil || !bytes.Equal(again, data) {
+			t.Fatalf("parse then marshal is not the identity (%v)", err)
+		}
+	})
+}
+
+// FuzzParseHostIssueSigningBytes: parse then encode is the identity
+// (03-09).
+func FuzzParseHostIssueSigningBytes(f *testing.F) {
+	valid := hostIssueVector(f).SigningBytes()
+	f.Add(valid)
+	f.Add(append(bytes.Clone(valid), 0))
+	f.Add(valid[:len(valid)-1])
+	f.Add([]byte(HostIssueRequestDomain))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		r, err := ParseHostIssueSigningBytes(data)
+		if err != nil {
+			return
+		}
+		if !bytes.Equal(r.SigningBytes(), data) {
+			t.Fatal("parse then encode is not the identity")
+		}
+	})
+}

@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/serverclient"
@@ -69,7 +71,7 @@ func newGateSigner() *gateSigner {
 
 // wait is the gate step of every budgeted method.
 func (g *gateSigner) wait(ctx context.Context, method string) error {
-	agent := method == "GetBundle" || method == "GetDirectoryVersion"
+	agent := method == "GetBundle" || method == "GetDirectoryVersion" || method == "HostIssue"
 	g.mu.Lock()
 	g.calls[method]++
 	g.inFlight++
@@ -200,6 +202,13 @@ func (g *gateSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (
 	return g.fakeSigner.ForgetAgent(ctx, req)
 }
 
+func (g *gateSigner) HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error) {
+	if err := g.wait(ctx, "HostIssue"); err != nil {
+		return nil, err
+	}
+	return g.fakeSigner.HostIssue(ctx, req)
+}
+
 // callSigner makes one call of method through sg.
 func callSigner(ctx context.Context, sg signerAPI, method string) error {
 	var err error
@@ -222,6 +231,8 @@ func callSigner(ctx context.Context, sg signerAPI, method string) error {
 		_, err = sg.GetDirectoryVersion(ctx, 1)
 	case "ForgetAgent":
 		_, err = sg.ForgetAgent(ctx, &wire.ForgetRequest{})
+	case "HostIssue":
+		_, err = sg.HostIssue(ctx, &wire.HostIssueRequest{})
 	default:
 		panic("callSigner: unknown method " + method)
 	}
@@ -292,7 +303,7 @@ func TestSignerBudget(t *testing.T) {
 			agent  bool
 		}{
 			{"Status", false}, {"GetDirectory", false}, {"InstallDirectory", false}, {"Login", false},
-			{"Revoke", false}, {"ForgetAgent", false}, {"GetBundle", true}, {"GetDirectoryVersion", true},
+			{"Revoke", false}, {"ForgetAgent", false}, {"GetBundle", true}, {"GetDirectoryVersion", true}, {"HostIssue", true},
 		} {
 			t.Run(tc.method, func(t *testing.T) {
 				g, b := setup(t)
@@ -615,7 +626,80 @@ func (h *heldStates) answered(t *testing.T, n, code int) []*httptest.ResponseRec
 // maxAgentInFlight requests in flight on the state and heartbeat routes
 // together, a further one is answered 429 with Retry-After 1, and the slot
 // is freed when the request ends.
+// hostCertAgent is one approved agent with its host key and name.
+type hostCertAgent struct {
+	id   agentID
+	key  ssh.Signer
+	name string
+}
+
+// hostCertAgents enrolls and approves n agents (web1..webn).
+func hostCertAgents(t *testing.T, e *agentEnv, n int) []hostCertAgent {
+	t.Helper()
+	var out []hostCertAgent
+	var hosts []directory.Host
+	for i := 1; i <= n; i++ {
+		name := "web" + strconv.Itoa(i)
+		id, keys := newAgentID(t), hostSigners(t, 1)
+		if rec := e.enroll(t, id, e.mustMint(t, name, 0).Token, keys); rec.Code != http.StatusAccepted {
+			t.Fatalf("enroll %s: %d %s", name, rec.Code, rec.Body.String())
+		}
+		out = append(out, hostCertAgent{id: id, key: keys[0], name: name})
+		hosts = append(hosts, hostEntry(name, keys))
+	}
+	e.installDir(t, hosts...)
+	return out
+}
+
+// holdHostCerts holds HostIssue at the fake and sends per concurrent host
+// certificate requests as each agent.
+func holdHostCerts(t *testing.T, e *agentEnv, agents []hostCertAgent, per int) *heldStates {
+	t.Helper()
+	entered, release := e.fake.hold("HostIssue")
+	stop := make(chan struct{})
+	t.Cleanup(func() { release(); close(stop) })
+	h := &heldStates{answers: make(chan *httptest.ResponseRecorder, len(agents)*per), release: release}
+	go func() {
+		for {
+			select {
+			case <-entered:
+				h.entered.Add(1)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	for _, a := range agents {
+		for range per {
+			_, body := hostCertBody(t, a.key, a.name)
+			go func() { h.answers <- e.agentDo(t, a.id, http.MethodPost, serverclient.AgentHostCertPath, body) }()
+		}
+	}
+	return h
+}
+
 func TestAgentInFlight(t *testing.T) {
+	t.Run("host_cert_route_takes_agent_slot", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		h := holdHostCerts(t, e, hostCertAgents(t, e, 1), 4)
+		h.settleAt(t, maxAgentInFlight)
+		h.answered(t, 4-maxAgentInFlight, http.StatusTooManyRequests)
+		h.release()
+		h.answered(t, maxAgentInFlight, http.StatusOK)
+	})
+	t.Run("host_cert_burst_leaves_interactive_half", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		h := holdHostCerts(t, e, hostCertAgents(t, e, 6), 2)
+		h.settleAt(t, maxAgentCalls)
+		h.quiet(t)
+		cctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := e.s.signer.Status(cctx); err != nil {
+			t.Fatalf("Status with the agent share held by host certificate requests: %v", err)
+		}
+		h.release()
+		h.answered(t, 12, http.StatusOK)
+	})
 	t.Run("catch_up_reads_leave_room", func(t *testing.T) {
 		e := newAgentEnv(t, true)
 		ids := agentsAt(t, e, 6, 18)

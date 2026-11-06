@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math"
 	"math/big"
 	"net/http"
@@ -1251,6 +1252,84 @@ func TestAgentHostCert(t *testing.T) {
 		e.fake.mu.Unlock()
 		if calls != 1 || got == nil || !bytes.Equal(got.SigningBytes(), req.SigningBytes()) {
 			t.Fatalf("the signer got %d calls, request %+v; want the agent's request once, unchanged", calls, got)
+		}
+	})
+	refusedWith := func(t *testing.T, rec *httptest.ResponseRecorder, code int, detail string) {
+		t.Helper()
+		if rec.Code != code || apiError(rec) != detail {
+			t.Fatalf("answer %d %q (%s), want %d %q", rec.Code, apiError(rec), rec.Body.String(), code, detail)
+		}
+	}
+	t.Run("host_key_not_enrolled", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, _ := e.approvedAgent(t)
+		_, body := hostCertBody(t, newSigner(t), "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrHostKeyNotEnrolled)
+	})
+	t.Run("host_name_mismatch", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		// Renamed after approval: the entry holding the keys is web7 now.
+		e.installDir(t, hostEntry("web7", hosts))
+		_, body := hostCertBody(t, hosts[0], "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrHostNameMismatch)
+	})
+	t.Run("never_approved_refused", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := newAgentID(t), hostSigners(t, 1)
+		if rec := e.enroll(t, id, e.mustMint(t, "web1", 0).Token, hosts); rec.Code != http.StatusAccepted {
+			t.Fatalf("enroll: %d", rec.Code)
+		}
+		_, body := hostCertBody(t, hosts[0], "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body), http.StatusForbidden, serverclient.AgentErrNotApproved)
+	})
+	signerSays := func(t *testing.T, err error, code int, detail string) {
+		t.Helper()
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		e.fake.mu.Lock()
+		e.fake.hostIssueErr = err
+		e.fake.mu.Unlock()
+		_, body := hostCertBody(t, hosts[0], "web1")
+		rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body)
+		if rec.Code != code || (detail != "" && apiError(rec) != detail) {
+			t.Fatalf("answer %d %q, want %d %q", rec.Code, apiError(rec), code, detail)
+		}
+	}
+	t.Run("signer_refusal_relayed", func(t *testing.T) {
+		signerSays(t, &wire.ErrorResponse{Code: wire.CodeRefused, Message: "host_cert_recent"}, http.StatusForbidden, "host_cert_recent")
+	})
+	t.Run("old_signer_backs_off", func(t *testing.T) {
+		signerSays(t, &wire.ErrorResponse{Code: wire.CodeMalformed, Message: "unknown_message_type"}, http.StatusForbidden, serverclient.AgentErrSignerTooOld)
+	})
+	t.Run("signer_malformed_relayed_4xx", func(t *testing.T) {
+		signerSays(t, &wire.ErrorResponse{Code: wire.CodeMalformed, Message: "malformed_request"}, http.StatusBadRequest, "malformed_request")
+	})
+	t.Run("signer_unavailable_503", func(t *testing.T) {
+		signerSays(t, &wire.ErrorResponse{Code: wire.CodeUnavailable, Message: "state_unavailable"}, http.StatusServiceUnavailable, "")
+		signerSays(t, errors.New("socket gone"), http.StatusServiceUnavailable, "")
+	})
+	t.Run("body_too_large_413", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, _ := e.approvedAgent(t)
+		body := []byte(`{"request":"` + strings.Repeat("A", serverclient.MaxAgentHostCertBody) + `"}`)
+		if rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body); rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("an oversize body: %d", rec.Code)
+		}
+	})
+	t.Run("malformed_400", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, _ := e.approvedAgent(t)
+		for _, body := range [][]byte{[]byte(`{"request":"AAAA","x":1}`), []byte(`{"request":"AAAA"}`)} {
+			if rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentHostCertPath, body); rec.Code != http.StatusBadRequest {
+				t.Fatalf("%s: %d", body, rec.Code)
+			}
+		}
+	})
+	t.Run("route_in_closed_set", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		if !slices.Contains(e.s.agentPatterns, "POST "+serverclient.AgentHostCertPath) {
+			t.Fatalf("agent patterns %q", e.s.agentPatterns)
 		}
 	})
 }

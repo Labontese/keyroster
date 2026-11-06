@@ -1876,3 +1876,151 @@ func TestForgetResponse(t *testing.T) {
 		}
 	}
 }
+
+// hostIssueVector is the fixed host issue request of the signing vector
+// (03-09): installation 0123...cdef, host web1, an Ed25519 key of bytes
+// 0x01..0x20, valid_for 0, request ID 00..0f, created at 1700000000.
+func hostIssueVector(t testing.TB) *HostIssueRequest {
+	t.Helper()
+	key := make([]byte, ed25519.PublicKeySize)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	pub, err := ssh.NewPublicKey(ed25519.PublicKey(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &HostIssueRequest{InstallationID: "0123456789abcdef0123456789abcdef", HostName: "web1", HostKey: pub.Marshal(), CreatedAt: 1_700_000_000,
+		Evidence: []Evidence{{Type: EvidenceHostPoP, Blob: []byte("host pop (test vector)")}}}
+	for i := range r.RequestID {
+		r.RequestID[i] = byte(i)
+	}
+	return r
+}
+
+// TestHostIssueRequestSigningVector pins the host issue request signing
+// bytes (03-09) and parses them field by field from the domain offset.
+func TestHostIssueRequestSigningVector(t *testing.T) {
+	r := hostIssueVector(t)
+	got := r.SigningBytes()
+	path := filepath.Join(vectorDir, "host_issue_request_signing_v1.hex")
+	if *update {
+		if err := os.WriteFile(path, []byte(hex.EncodeToString(got)+"\n"), 0o644); err != nil { //nolint:gosec // G306: public test vector
+			t.Fatal(err)
+		}
+	}
+	file, err := os.ReadFile(path) //nolint:gosec // G304: fixed test vector path
+	if err != nil {
+		t.Fatalf("%v (create it with -update only for a deliberate format change)", err)
+	}
+	want, err := hex.DecodeString(strings.TrimSpace(string(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("host issue request signing bytes differ from %s\ngot:  %x\nwant: %x", path, got, want)
+	}
+	rest, ok := bytes.CutPrefix(want, []byte("keyroster/host-issue-request/v1"))
+	if !ok || HostIssueRequestDomain != "keyroster/host-issue-request/v1" || HostPoPNamespace != HostIssueRequestDomain {
+		t.Fatalf("signing bytes do not start with the raw domain tag")
+	}
+	s := cryptobyte.String(rest)
+	var id, name, key, reqID []byte
+	var validFor uint32
+	var created uint64
+	if !s.ReadUint16LengthPrefixed((*cryptobyte.String)(&id)) || !s.ReadUint16LengthPrefixed((*cryptobyte.String)(&name)) ||
+		!s.ReadUint16LengthPrefixed((*cryptobyte.String)(&key)) || !s.ReadUint32(&validFor) || !s.ReadBytes(&reqID, 16) ||
+		!s.ReadUint64(&created) || !s.Empty() {
+		t.Fatal("the vector does not parse field by field")
+	}
+	if string(id) != r.InstallationID || string(name) != "web1" || !bytes.Equal(key, r.HostKey) || validFor != 0 ||
+		!bytes.Equal(reqID, r.RequestID[:]) || created != 1_700_000_000 {
+		t.Fatalf("the vector's fields: %q %q %x %d %x %d", id, name, key, validFor, reqID, created)
+	}
+	if r.Digest() != sha256.Sum256(want) {
+		t.Fatal("Digest is not the SHA-256 of the signing bytes")
+	}
+}
+
+// TestHostIssueRequest covers the round trip, the Validate refusals, every
+// field bound and strict parsing (03-09).
+func TestHostIssueRequest(t *testing.T) {
+	t.Run("round_trip", func(t *testing.T) {
+		r := hostIssueVector(t)
+		body, err := r.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := ParseHostIssueRequest(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if again, err := got.Marshal(); err != nil || !bytes.Equal(again, body) {
+			t.Fatalf("re-marshal differs (%v)", err)
+		}
+		sb, err := ParseHostIssueSigningBytes(r.SigningBytes())
+		if err != nil || !bytes.Equal(sb.SigningBytes(), r.SigningBytes()) || sb.Evidence != nil {
+			t.Fatalf("ParseHostIssueSigningBytes: %+v, %v", sb, err)
+		}
+		if _, err := ParseHostIssueRequest(append(body, 0)); err == nil {
+			t.Fatal("a trailing byte was accepted")
+		}
+	})
+	t.Run("validate_refusals", func(t *testing.T) {
+		rk, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rsaPub, err := ssh.NewPublicKey(&rk.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, edit := range map[string]func(*HostIssueRequest){
+			"installation_id": func(r *HostIssueRequest) { r.InstallationID = "ABC" },
+			"host_name":       func(r *HostIssueRequest) { r.HostName = "Web1" },
+			"host_name_long":  func(r *HostIssueRequest) { r.HostName = strings.Repeat("a", 65) },
+			"no_key":          func(r *HostIssueRequest) { r.HostKey = nil },
+			"rsa_key":         func(r *HostIssueRequest) { r.HostKey = rsaPub.Marshal() },
+			"garbage_key":     func(r *HostIssueRequest) { r.HostKey = []byte("garbage") },
+			"zero_request_id": func(r *HostIssueRequest) { r.RequestID = [16]byte{} },
+			"zero_created_at": func(r *HostIssueRequest) { r.CreatedAt = 0 },
+			"no_evidence":     func(r *HostIssueRequest) { r.Evidence = nil },
+			"two_evidence":    func(r *HostIssueRequest) { r.Evidence = append(r.Evidence, r.Evidence[0]) },
+		} {
+			r := hostIssueVector(t)
+			edit(r)
+			if err := r.Validate(); !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s: Validate = %v, want ErrMalformed", name, err)
+			}
+		}
+		r := hostIssueVector(t)
+		r.ValidForSeconds = 7
+		if err := r.Validate(); err != nil {
+			t.Fatalf("Validate puts a rule on valid_for: %v (the signer refuses it with its own detail)", err)
+		}
+	})
+	t.Run("every_field_bound", func(t *testing.T) {
+		base := hostIssueVector(t).SigningBytes()
+		for name, edit := range map[string]func(*HostIssueRequest){
+			"installation_id": func(r *HostIssueRequest) { r.InstallationID = "fedcba9876543210fedcba9876543210" },
+			"host_name":       func(r *HostIssueRequest) { r.HostName = "web2" },
+			"host_key": func(r *HostIssueRequest) {
+				r.HostKey = append(bytes.Clone(r.HostKey[:len(r.HostKey)-1]), r.HostKey[len(r.HostKey)-1]^1)
+			},
+			"valid_for":  func(r *HostIssueRequest) { r.ValidForSeconds = 1 },
+			"request_id": func(r *HostIssueRequest) { r.RequestID[3] ^= 1 },
+			"created_at": func(r *HostIssueRequest) { r.CreatedAt++ },
+		} {
+			r := hostIssueVector(t)
+			edit(r)
+			if bytes.Equal(r.SigningBytes(), base) {
+				t.Errorf("changing %s does not change the signing bytes", name)
+			}
+		}
+		r := hostIssueVector(t)
+		r.Evidence = []Evidence{{Type: EvidenceHostPoP, Blob: []byte("other")}}
+		if !bytes.Equal(r.SigningBytes(), base) {
+			t.Error("the evidence is part of the signing bytes")
+		}
+	})
+}
