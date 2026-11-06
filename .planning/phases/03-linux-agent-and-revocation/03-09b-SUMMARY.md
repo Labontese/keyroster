@@ -234,7 +234,7 @@ The tracking update then followed (STATE.md and ROADMAP.md, deviation 4) in the 
 
 ## UNVERIFIED (Edge Coverage)
 
-- OpenSSH reading one `@cert-authority` line of about 1 MiB, or one Host line at the 4 MiB bound. `TestHostTrustLongLines` proves the two CI builds only (9.5p1 and 10.5p1), with a Host line of 4,129,016 encoded name bytes and a CA line of 1 MiB.
+- OpenSSH reading one `@cert-authority` line of about 1 MiB, or one Host line at the 4 MiB bound. `TestHostTrustLongLines` proves the two CI builds only (9.5p1 and 10.5p1), with a Host line of 64,512 names (4,128,768 encoded name bytes; the state file holding them is 4,129,016 bytes) and a CA line of 1 MiB.
 - `~` expansion on older OpenSSH, and on any OpenSSH but the two CI builds.
 - The exact OpenSSH wording when a KRL refuses a host certificate. The e2e matched `\brevoked\b` on both lanes, but a passing subtest does not log the text.
 - The Windows OpenSSH client and Windows file modes. cmd/keyroster's unit tests run on the Windows and macOS CI lanes (the unix-only mode, symlink and home tests excluded), but no Windows client used the files.
