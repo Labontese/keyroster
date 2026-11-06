@@ -50,6 +50,30 @@ Mutants (each applied alone, run on its named subtest with `-timeout 5m`, killed
 - a KRL written without VerifyManifest: TestKnownHosts/krl_other_signer_refused
 - keyroster_known_hosts written before the KRL: TestKnownHosts/interrupted_write_never_widens_trust, killed by its own property ("interrupted after krl: n-r/c2/7 is accepted, which neither S nor S' accepts")
 
+T1: 669ffaf
+
+## Task 2 (host subject, revoke host)
+
+RED, before the production code. The new and changed tests were run in a detached worktree at T1 with only the test files copied in:
+- signerdb `TestLiveIssuanceForSubject`: FAIL `kr3_host`, `kr1_user_with_same_subject_not_found_for_host`, `prefix_exact` and `invalid_record_still_refused` (kr3 was not scanned). `kr1_host_via_ca_issue` and `user_role_unchanged` passed, as regression guards should.
+- signer `TestRevokeHostSubject`: FAIL in every subtest but `subject_machine_still_unsupported`, which is a guard.
+- audit: FAIL `TestVerifyRevokeHost/subject_host_matches_signer`, `TestVerifyRevokeHost/subject_host_kr1_and_kr3_both_listed` and `TestVerifyRevocations/revoke_subject_host_accepted`. `subject_host_missing_entry_fails`, `subject_machine_fails` and `revoke_subject_kind_machine_refused` passed, as guards should.
+- cmd/keyroster: a compile failure (`undefined: recoveryKeptNotice`). With TestRevokeHost removed from the copy, the changed rows fail: `TestRevokeRefusalText/subject_kind_unsupported` (the old "revokes user subjects only") and `TestRevokeSerialConfirm/enforcement_by_role` (the old host sentence). `TestRevokeUser/sweep_text_unchanged` passes on T1, so it pins today's user output.
+
+GREEN: verify 1 (the four packages' named tests under -race, every named PASS line) and verify 2 pass locally. In verify 2, `git diff origin/main` over wire, tlog, cert, the format registry, vectors and capslock is empty; vet, e2e vet and golangci-lint for linux, windows and darwin are clean; signer 335.8 s, signerdb, audit 82.1 s, wire, tlog, cert and cmd/keyroster 151.9 s all pass. The first lint run found `c.SignCert` in the new signerdb test (forbidigo: certificates are signed only by cert.Build); the helper now uses cert.Build.
+
+Mutants, all 10 killed (same protocol as Task 1):
+- the signer mapping SubjectHost to RoleUser: TestRevokeHostSubject/subject_host_kr3_and_kr1
+- signerdb scanning only kr1 and kr2: TestLiveIssuanceForSubject/kr3_host
+- the prefix without its closing `/`: TestRevokeHostSubject/subject_host_prefix_exact
+- audit mapping host to user: TestVerifyRevokeHost/subject_host_matches_signer
+- the CLI sweep checking the user CA role: TestRevokeHost/serials_checked_under_host_ca. The first application matched the identical line in runRevokeSerial and survived for that reason. Anchored to the sweep's loop, it was killed.
+- the CLI returning before the directory step on a first-sweep error: TestRevokeHost/first_sweep_fails_still_disables_exit_1
+- exit 4 where 3 applies: TestRevokeHost/keys_cap_with_proposal_prints_both_exit_3
+- the server's keys requested (the served host's keys from the pending-hosts route appended): TestRevokeHost/keys_from_verified_entry_not_server
+- the first omitted key aborting the loop: TestRevokeHost/keys_cap_revokes_serials_disables_sweeps_exit_3
+- the notice dropped from revoke host: TestRevokeHost/recovery_kept_notice_printed
+
 ## Deviations
 
 1. [Rule 1, test bug] test/e2e/hosttrust_test.go after its RED run: the admin CLI wrapper `hostTrustKR` failed the parent test from inside subtests. Each subtest now builds its own wrapper, and `hostTrustLongLines` takes no wrapper. No assertion changed.
