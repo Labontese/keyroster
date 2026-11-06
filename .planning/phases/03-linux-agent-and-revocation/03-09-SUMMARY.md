@@ -292,6 +292,27 @@ The s.db allowlist gate bites (Task 3): on a scratch copy of hostissue.go that c
 
 ## Pre-merge review
 
-Pending: the orchestrator runs it on the green PR.
+Run by the orchestrator on PR #88 at 8a1b040 (wf_505faff6-2d3): 16 findings, each upheld by two reviewers, fixed in round 1 below.
+
+## Pre-merge review fixes
+
+| Finding | Commit | Test |
+|---|---|---|
+| F4, F5, F14 (medium): the host certificate route found the entry by the first enrolled key and accepted only enrolled keys, so a re-keyed host could not obtain certificates. Owner decision 2026-11-06, "the directory decides": the entry is found by the requested key and must be the one the agent is admitted under (it lists an enrolled key, or it is the active entry of the expected name); the signer's proof of possession is unchanged | b6b14c7 | `TestAgentHostCert/rekeyed_host_key_added_obtains_cert`, `rekeyed_first_enrolled_key_removed_obtains_cert`, `key_not_on_agents_entry_refused`, `another_hosts_key_refused` |
+| F6, F10, F15 (medium): attempts of retired keys were never dropped, so a ninth key ever served made every attempts save fail | 245ce1a | `TestHostCertAttemptsPruned/ninth_key_requested` (fails without the prune: "attempts for more than 8 keys") |
+| F9 (medium): hostCertDue could return a time already reached, so the run loop ran the step every iteration | db0535e | `TestHostCertDueNotPast/algorithm_disabled_past_renew_at` (fails without the floor) |
+| F8 (medium): a lost or edited committed file inside the window was not healed: the re-delivered same serial was refused answer_not_newer | bebe3c6 | `TestHostCertLostFileHealed/removed`, `/edited` (fail without the fix), `/intact_file_same_serial_refused` |
+| F16 (medium): the served-certificate self-test dialled only the first loopback address, with no IPv6 skip | 9ef5abb | `TestHostCertSelfTestFamilies` (EADDRNOTAVAIL, EAFNOSUPPORT, IPv6 off on lo; fails with the first address) |
+| F12 (medium): host_issue export fields were not bound by audit verify while the runbook reads them | 1de1c4c | `TestExportHostIssue` (a changed host_name or key fingerprint, or an added field, is refused; without the binding all three pass verify) |
+| F1 (low): re-delivery was decided after the serial draw, so a fresh in-window request was refused clock_regression below the high-water mark | f6ac374 | `TestHostIssueRedeliverBelowHighWater` (RED not separately run; the reviewers reproduced the refusal) |
+| F2 (low): no kr3 fuzz seeds | f6ac374 | `FuzzParseKeyID` with kr3 seeds (10 s fuzz run) |
+| F3 (low): the claimed grammar-agreement test did not exist | f6ac374 | `TestHostIssueRequest/name_grammar_matches_directory` |
+| F7 (low): check reported a committed path the in-progress candidate replaces | f6ac374 | `TestHostCertDrift/renewal_candidate_not_drift` (fails without the fix) |
+| F11 (low): the fetcher wrote an oversize certificate answer, healed and re-posted every poll | f6ac374 | `TestPostHostCerts/oversize_certificate_answered_as_refusal` |
+| F13 (low): the runbook's codes table did not say what host status shows | f6ac374 | runbook gate; text only, UNVERIFIED on a real host |
+
+Owner decision 2026-11-06: capslock "no new pairs" accepted; there is no `chore(capslock)` commit for this plan.
+
+Gate after round 1 (on f6ac374, one run, base not re-measured as the coordinator asked): `go test -race -count=1 -timeout 15m ./...`, `go vet` (plain, e2e, e2e systemdsmoke), gofmt, capslock, dep-firewall and testonly-firewall: exit 0, 35 packages `ok`, no FAIL or DATA RACE; apply 479.245 s and signer 422.258 s under `./...` (apply up from 439.5 s in Task 5, on a machine not checked to be quiet; the new apply tests add about 3 s alone). golangci-lint `0 issues.` for GOOS linux and windows.
 
 requirements-completed: [AGENT-06] (CI-verified, re-checked in 03-16).
