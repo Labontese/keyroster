@@ -655,7 +655,8 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 		entryKeys  []string
 		hostStatus string
 	)
-	outcome, dirErr := editDirectoryOutcome(ctx, r.s, editOpts{Yes: *yes, Out: *out}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
+	floor := func(base *verifiedDirectory) error { return checkHostTrustFloor(base, stderr) }
+	outcome, dirErr := editDirectoryOutcome(ctx, r.s, editOpts{Yes: *yes, Out: *out, CheckBase: floor}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
 		dirRead, served = true, d.Version-1
 		h, ok := d.HostByName(name)
 		if !ok {
@@ -673,7 +674,9 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 	already := errors.Is(dirErr, errHostAlreadyDisabled)
 	switch {
 	case already:
-		_, _ = fmt.Fprintf(stdout, "%s is %s in directory version %d, the admin-signed version the server serves: no directory change.\n", name, hostStatus, served)
+		_, _ = fmt.Fprintf(stdout, "Directory version %d, the admin-signed version the server serves, lists %s as %s: no directory change. "+
+			"That is the server's word: the CLI checks the admins' signatures and the floor of your host trust files, not that the signer holds that version.\n",
+			served, name, hostStatus)
 	case unknown:
 		_, _ = fmt.Fprintf(stdout, "%s is not in directory version %d (the version the server serves, verified): there is no entry to disable.\n", name, served)
 	}
@@ -751,9 +754,43 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 	case pending:
 		return &exitError{code: 4, err: errors.New(hold)}
 	}
-	_, _ = fmt.Fprintf(stdout, "%s is disabled, and the KRL lists every certificate of %s the server reported. %s\n"+
+	state := name + " is disabled"
+	if already {
+		state = fmt.Sprintf("Directory version %d lists %s as disabled (the server's word)", served, name)
+	}
+	_, _ = fmt.Fprintf(stdout, "%s, and the KRL lists every certificate of %s the server reported. %s\n"+
 		"The host's agent keeps receiving state, and this KRL, until keyroster host forget.\n",
-		name, name, revokeEnforcement(wire.CARoleHost))
+		state, name, revokeEnforcement(wire.CARoleHost))
+	return nil
+}
+
+// checkHostTrustFloor is revoke host's base check (pre-merge review,
+// 03-09b): fetchVerifiedDirectory has no version floor, so when this
+// user's host-trust.json belongs to the bundle's installation, a served
+// directory older than the version it records, or an equal version with
+// another SHA-256, is refused (the writer's rule). The directory step then
+// fails: the run neither reports NAME disabled from a stale version nor
+// revokes keys from a stale entry. A state that cannot be read only warns,
+// and the floor is not checked then.
+func checkHostTrustFloor(base *verifiedDirectory, stderr io.Writer) error {
+	path, err := hostTrustStatePath()
+	if err != nil {
+		return err
+	}
+	st, err := readHostTrustState(path)
+	switch {
+	case err != nil:
+		_, _ = fmt.Fprintf(stderr, "Warning: %v (%s), so the directory the server serves is not checked against the version your host trust files hold.\n", err, path)
+		return nil
+	case st == nil || st.InstallationID != base.Bundle.InstallationID:
+		return nil
+	case base.Version < st.DirectoryVersion:
+		return fmt.Errorf("the server serves directory version %d, older than version %d, which your host trust files hold (%s); refusing to build on it",
+			base.Version, st.DirectoryVersion, path)
+	case base.Version == st.DirectoryVersion && base.SHA256 != st.DirectorySHA256:
+		return fmt.Errorf("the server serves directory version %d with another SHA-256 than the version %d your host trust files hold (%s); refusing to build on it",
+			base.Version, base.Version, path)
+	}
 	return nil
 }
 

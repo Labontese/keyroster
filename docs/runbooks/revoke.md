@@ -338,7 +338,17 @@ order:
 2. **The directory step**, also after a failed first sweep: NAME is
    disabled in a signed directory version (installed at admin quorum 1, a
    proposal otherwise), or it is already disabled, or it is not in the
-   directory.
+   directory. That NAME is already disabled or absent is the server's
+   word, and the output says so: the CLI checks the admins' signatures on
+   the directory the server serves, not that the signer holds it. When
+   your host trust state (`host-trust.json`, enroll-user.md) belongs to
+   this installation, a served directory older than the version it
+   holds, or an equal version with another SHA-256, is refused: the
+   directory step fails (exit 3), nothing is reported disabled and
+   `--keys` takes no key from that entry. A state that cannot be read
+   only warns. Run in CI (03-09b):
+   `TestRevokeHost/stale_directory_already_disabled_refused_exit_3`,
+   `TestRevokeHost/equal_version_other_sha_refused_exit_3`.
 3. **`--keys`**, only when the first sweep succeeded and the entry was
    found: one explicit-key revocation per host key of the verified entry,
    never the keys the server reports. An explicit key never leaves the KRL,

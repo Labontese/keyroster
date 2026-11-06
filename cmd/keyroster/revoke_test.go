@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -956,14 +957,105 @@ func TestRevokeHost(t *testing.T) {
 		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusDisabled, 1)
 		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
 		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
-		if code != 0 || !strings.Contains(stdout, "web1 is disabled in directory version 1, the admin-signed version the server serves: no directory change.\n") ||
-			!strings.Contains(stdout, "Second revocation (after reading the directory) of web1") {
+		if code != 0 || !strings.Contains(stdout, "Directory version 1, the admin-signed version the server serves, lists web1 as disabled: no directory change. "+
+			"That is the server's word") ||
+			!strings.Contains(stdout, "Second revocation (after reading the directory) of web1") ||
+			!strings.Contains(stdout, "Directory version 1 lists web1 as disabled (the server's word), and the KRL lists every certificate of web1 the server reported.") ||
+			strings.Contains(stdout, "web1 is disabled") {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
 		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "revoke"}) {
 			t.Fatalf("requests %v, want revoke, revoke", got)
 		}
 		requireNotSigned(t, e, 0)
+	})
+
+	// The host trust floor (pre-merge review, 03-09b): a served directory
+	// older than the version this user's host-trust.json holds, or an
+	// equal version with another SHA-256, fails the directory step (exit
+	// 3): nothing is reported disabled, no key is taken from the stale
+	// entry, and nothing is signed.
+	seedFloor := func(t *testing.T, e *dirEnv, install string, v uint64, sha string) {
+		t.Helper()
+		p, err := hostTrustStatePath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeSeedStateAt(t, p, &hostTrustState{Format: 1, InstallationID: install, BundleVersion: e.bundle.Version, OpsKey: e.bundle.OpsKey.Key,
+			DirectoryVersion: v, DirectorySHA256: sha, KRLVersion: 1, Names: []string{"web1"}})
+	}
+	servedSHA := func(e *dirEnv) string {
+		doc, _ := e.installed()
+		return trust.SHA256Hex(doc)
+	}
+	for _, tc := range []struct {
+		name, status, want string
+		v                  uint64
+		otherSHA           bool
+	}{
+		{"stale_directory_already_disabled_refused_exit_3", directory.StatusDisabled, "the server serves directory version 1, older than version 2, which your host trust files hold", 2, false},
+		{"stale_directory_active_refused_exit_3", directory.StatusActive, "the server serves directory version 1, older than version 2, which your host trust files hold", 2, false},
+		{"equal_version_other_sha_refused_exit_3", directory.StatusDisabled, "the server serves directory version 1 with another SHA-256 than the version 1 your host trust files hold", 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := hostRevokeEnv(t, 1, 1, tc.status, 1)
+			sha := servedSHA(e)
+			if tc.otherSHA || tc.v != 1 {
+				sha = strings.Repeat("ef", 32)
+			}
+			seedFloor(t, e, e.bundle.InstallationID, tc.v, sha)
+			reqs := e.recordRevokes(t, e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+			code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes", "--keys")
+			if code != 3 || !strings.Contains(stderr, tc.want) || !strings.Contains(stderr, "web1 is NOT disabled") ||
+				!strings.Contains(stderr, "--keys: the verified directory could not be read") {
+				t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+			}
+			if strings.Contains(stdout, "lists web1 as disabled") || strings.Contains(stdout, "web1 is disabled") || strings.Contains(stdout, "Second revocation") {
+				t.Fatalf("a stale directory was reported or swept after:\n%s", stdout)
+			}
+			if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+				t.Fatalf("requests %v, want the first revocation only", got)
+			}
+			if n := len(keyRequests(reqs())); n != 0 {
+				t.Fatalf("%d key requests from a stale entry, want none", n)
+			}
+			requireNotSigned(t, e, 0)
+		})
+	}
+	t.Run("floor_equal_version_same_sha_exit_0", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusDisabled, 1)
+		seedFloor(t, e, e.bundle.InstallationID, 1, servedSHA(e))
+		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		if code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes"); code != 0 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+	})
+	t.Run("floor_of_another_installation_ignored", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusDisabled, 1)
+		seedFloor(t, e, htInstall(t), 5, strings.Repeat("ef", 32))
+		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		if code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes"); code != 0 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+	})
+	t.Run("unreadable_floor_warns", func(t *testing.T) {
+		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusDisabled, 1)
+		p, err := hostTrustStatePath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, p, []byte("not json"))
+		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 0 || !strings.Contains(stderr, "is not checked against the version your host trust files hold") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
 	})
 	t.Run("unknown_name_sweeps_warns_exit_3", func(t *testing.T) {
 		for _, ans := range []serverclient.RevokeAnswer{first, answer(3, 8)} {
