@@ -74,9 +74,12 @@ const (
 const hostTrustHeader = "# keyroster: managed file, rewritten by keyroster login and keyroster known-hosts sync. Do not edit.\n"
 
 // hostTrustBlockOptions are the trust options of the managed Host block,
-// in file order.
+// in file order. KnownHostsCommand none keeps a KnownHostsCommand from
+// later configuration from adding plain host keys for a managed name (ssh
+// keeps the first value it obtains).
 const hostTrustBlockOptions = "\tUserKnownHostsFile ~/.ssh/" + hostTrustKnownHosts + "\n" +
 	"\tGlobalKnownHostsFile ~/.ssh/" + hostTrustKnownHosts + "\n" +
+	"\tKnownHostsCommand none\n" +
 	"\tStrictHostKeyChecking yes\n" +
 	"\tUpdateHostKeys no\n" +
 	"\tVerifyHostKeyDNS no\n" +
@@ -729,9 +732,9 @@ func (w *hostTrustWriter) existingManaged() string {
 // maxSSHConfigScan bounds the ~/.ssh/config the Include check reads.
 const maxSSHConfigScan = 1 << 20
 
-// hostTrustOverrides are the keywords of the managed block, and
-// KnownHostsCommand, lowercased: set before the Include, ssh keeps that
-// value (it keeps the first value it obtains).
+// hostTrustOverrides are the keywords of the managed block, lowercased:
+// set before the Include, ssh keeps that value (it keeps the first value
+// it obtains).
 var hostTrustOverrides = map[string]string{
 	"stricthostkeychecking": "StrictHostKeyChecking", "userknownhostsfile": "UserKnownHostsFile", "globalknownhostsfile": "GlobalKnownHostsFile",
 	"updatehostkeys": "UpdateHostKeys", "verifyhostkeydns": "VerifyHostKeyDNS", "revokedhostkeys": "RevokedHostKeys", "knownhostscommand": "KnownHostsCommand",

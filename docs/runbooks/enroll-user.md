@@ -490,7 +490,10 @@ directory:
 - `~/.ssh/keyroster_ssh_config`: one strict `Host` block over every name
   the client ever saw (active, disabled, removed), which trusts only
   `keyroster_known_hosts` (`UserKnownHostsFile` and
-  `GlobalKnownHostsFile`), sets `StrictHostKeyChecking yes` and always
+  `GlobalKnownHostsFile`), sets `KnownHostsCommand none` (so a
+  `KnownHostsCommand` later in your configuration adds no host key for a
+  managed name; run in CI e2e (03-09b), `TestHostTrustLongLines` part
+  `c_d7_block_after_include`), sets `StrictHostKeyChecking yes` and always
   names the KRL as `RevokedHostKeys`;
 - `host-trust.json` in the keyroster config directory (next to
   `config.json`): the floors and the names.

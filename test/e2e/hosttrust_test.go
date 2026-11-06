@@ -606,6 +606,23 @@ func hostTrustLongLines(t *testing.T, env *serverEnv, admin *cliEnv, home string
 		if g := sshG(t, after, first); !strings.Contains(g, "\nport 2222\n") || !strings.Contains(g, "\nstricthostkeychecking true\n") {
 			t.Fatalf("ssh -G %s with the D7 block does not print port 2222 and stricthostkeychecking true", first)
 		}
+		// KnownHostsCommand (pre-merge review, 03-09b): the managed block
+		// sets it to none, so a KnownHostsCommand later in the
+		// configuration adds no plain host key for a managed name. The
+		// control: a name outside the block still gets it, so the oracle
+		// cannot pass vacuously.
+		later := filepath.Join(dir, "later")
+		if err := os.WriteFile(later, []byte("Include ~/.ssh/"+trustSSHConfig+"\n"+block+"Host *\n\tKnownHostsCommand /bin/true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{first, last} {
+			if g := sshG(t, later, name); strings.Contains(g, "\nknownhostscommand ") {
+				t.Fatalf("ssh -G %s prints a knownhostscommand from later configuration for a managed name", name)
+			}
+		}
+		if g := sshG(t, later, "outside-name"); !strings.Contains(g, "\nknownhostscommand /bin/true\n") {
+			t.Fatal("ssh -G for a name outside the block does not print the later knownhostscommand: the oracle does not tell the cases apart")
+		}
 	})
 }
 

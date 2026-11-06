@@ -272,6 +272,7 @@ func htConfig(names ...string) string {
 	return s + "Host " + strings.Join(names, " ") + "\n" +
 		"\tUserKnownHostsFile ~/.ssh/keyroster_known_hosts\n" +
 		"\tGlobalKnownHostsFile ~/.ssh/keyroster_known_hosts\n" +
+		"\tKnownHostsCommand none\n" +
 		"\tStrictHostKeyChecking yes\n" +
 		"\tUpdateHostKeys no\n" +
 		"\tVerifyHostKeyDNS no\n" +
@@ -433,8 +434,8 @@ func TestKnownHosts(t *testing.T) {
 		cfg := f.file(t, hostTrustSSHConfig)
 		lines := strings.Split(strings.TrimSuffix(cfg, "\n"), "\n")
 		want := []string{"Host web1", "\tUserKnownHostsFile ~/.ssh/keyroster_known_hosts", "\tGlobalKnownHostsFile ~/.ssh/keyroster_known_hosts",
-			"\tStrictHostKeyChecking yes", "\tUpdateHostKeys no", "\tVerifyHostKeyDNS no", "\tRevokedHostKeys ~/.ssh/keyroster_revoked_hosts.krl"}
-		if len(lines) != 9 || !slices.Equal(lines[2:], want) {
+			"\tKnownHostsCommand none", "\tStrictHostKeyChecking yes", "\tUpdateHostKeys no", "\tVerifyHostKeyDNS no", "\tRevokedHostKeys ~/.ssh/keyroster_revoked_hosts.krl"}
+		if len(lines) != 10 || !slices.Equal(lines[2:], want) {
 			t.Fatalf("config lines %q", lines)
 		}
 		for _, no := range []string{"HostKeyAlias", "CheckHostIP"} {
