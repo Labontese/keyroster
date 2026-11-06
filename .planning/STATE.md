@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-08i-PLAN.md (PR #85 open, awaiting the merge gate)"
-last_updated: "2026-11-05T08:54:35.688Z"
+stopped_at: Completed 03-09-PLAN.md (PR open, awaiting owner merge)
+last_updated: "2026-11-06T06:38:48.167Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: a55b82d5c5b91f3e4a9d43387e4ac8b18c37f5e0
+state_head: 3f9267559855369d900b30cad2d4c5c0b3d0df19
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 64
-  completed_plans: 56
+  completed_plans: 57
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 22 of 29
+Plan: 23 of 29
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -111,6 +111,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08g | 75min | 4 tasks | 19 files |
 | Phase 03 P08h | 110min | 4 tasks | 28 files |
 | Phase 03 P08i | 65min | 4 tasks | 29 files |
+| Phase 03 P09 | multi-session | 5 tasks | 90 files |
 
 ## Accumulated Context
 
@@ -315,6 +316,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-08h F16: per-uid shares of 16 of the signer's 32 connections taken in the accept loop without s.mu; slot released before the close; socketSigner waits for the close (signerclient.Client AwaitClose), so the server's live connections stay within its 12 tokens plus GetKRL
 - [Phase 03]: 03-08i Q-I1 B (owner 2026-11-05): Signer.Status takes no lock and answers from an immutable snapshot (atomic.Pointer) published by setDirectoryLocked after COMMIT; the trust check runs on every call through a read-only handle (Config.StatusDB, signerdb.OpenReadOnly, opened by serve), fail-closed (state_unavailable without a handle, on a read error or a cancelled ctx)
 - [Phase 03]: 03-08i: every Status reply carries the trust_bundle row loaded and checked against the log at start (bundleRow); an emptied trust_bundle table is refused trust_changed; Q-I2 A and Q-I3 A keep Status inside the server budget and GetDirectory under s.mu
+- [Phase 03]: 03-09: the signer chooses the host certificate lifetime, min(30 days, host cap in force); the agent asks for none (Q-09-6)
+- [Phase 03]: 03-09: host_cert_recent window = min(CapSeconds at issuance, cap in force)/3, keyed by host key (Q-09-2 refined)
+- [Phase 03]: 03-09: a missing or invalid host-certificate record is refilled from verified certificate files; an invalid one is set aside as hostcert.json.invalid
 
 ### Pending Todos
 
@@ -355,6 +359,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-05T08:54:35.226Z
-Stopped at: Completed 03-08i-PLAN.md (PR #85 open, awaiting the merge gate)
+Last session: 2026-11-06T06:38:47.734Z
+Stopped at: Completed 03-09-PLAN.md (PR open, awaiting owner merge)
 Resume file: None
