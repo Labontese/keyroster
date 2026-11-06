@@ -431,7 +431,9 @@ func verifyHostTrustDirectory(in hostTrustInput, st *hostTrustState) (*verifiedH
 //     the older bundle's; an equal one must carry the stored ops key;
 //   - a directory that is missing, refused or older leaves the names
 //     unrefreshed: with a state the state's KRL version and the KRL are
-//     written (revocations only), without one nothing is;
+//     written (revocations only; a newer bundle's version and ops key are
+//     recorded too, so the bundle floor never lags the KRL's key), without
+//     one nothing is;
 //   - at the bound (QB-1: 4 MiB of names, measured as the state encodes
 //     them) the Host block is frozen: no name is ever dropped, the KRL,
 //     keyroster_known_hosts and the versions are still written, and every
@@ -531,6 +533,13 @@ func writeHostTrust(in hostTrustInput, stdout, stderr io.Writer) hostTrustResult
 		}
 		next := *st
 		next.KRLVersion = max(st.KRLVersion, m.KRLVersion)
+		if !older {
+			// The KRL verified under b's ops key, so b is the newest
+			// verified bundle: it is the floor from now on (T-03-347). The
+			// CA lines stay: without a verified directory there are no
+			// active names to write them over.
+			next.BundleVersion, next.OpsKey = b.Version, b.OpsKey.Key
+		}
 		merged, _, stop := w.merge(&next)
 		if stop != "" {
 			return none(stop)

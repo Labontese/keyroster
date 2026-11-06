@@ -791,6 +791,37 @@ func TestKnownHosts(t *testing.T) {
 			t.Fatalf("state %+v", st)
 		}
 	})
+	t.Run("revocations_only_records_newer_bundle", func(t *testing.T) {
+		f := newHTFix(t, 1, 1)
+		mustRun(t, f.in(t, web1(t, f, 1), f.krlV(t, 1)), hostTrustFull)
+		// Bundle version 3 with a rotated ops key, and no directory: the
+		// KRL verifies under version 3's key, so version 3 is the floor.
+		rotated := htSigner(t)
+		v3 := *f.bundle
+		v3.Version, v3.OpsKey.Key = 3, trust.FormatKey(rotated.PublicKey())
+		in := f.in(t, nil, htKRLDoc(t, 2, time.Now(), f.install, rotated, krl.Set{}))
+		in.Bundle = &v3
+		mustRun(t, in, hostTrustPartial)
+		if st := f.state(t); st.BundleVersion != 3 || st.OpsKey != v3.OpsKey.Key || st.KRLVersion != 2 || st.DirectoryVersion != 1 {
+			t.Fatalf("state %+v, want bundle version 3 and its ops key recorded on the revocations-only path", st)
+		}
+		before := f.files(t)
+		// A server now serves version 2, between the stored 1 and the
+		// verified 3, with a newer directory: it is older than 3, so the
+		// CA lines and the Host block stay as they are.
+		v2 := v3
+		v2.Version = 2
+		in = f.in(t, f.dirDoc(t, 2, "", htHost(t, "web2", directory.StatusActive, "web2")), htKRLDoc(t, 3, time.Now(), f.install, rotated, krl.Set{}))
+		in.Bundle, in.CAs = &v2, hostTrustCAs(&v2, time.Now())
+		res, stdout, stderr := htWrite(in)
+		if res != hostTrustPartial || !strings.Contains(stderr, "trust bundle version 2, older than version 3") {
+			t.Fatalf("result %d, stdout %q, stderr %q: the intermediate bundle was not refused as older", res, stdout, stderr)
+		}
+		after := f.files(t)
+		if after[hostTrustKnownHosts] != before[hostTrustKnownHosts] || after[hostTrustSSHConfig] != before[hostTrustSSHConfig] {
+			t.Fatal("an intermediate bundle changed the CA lines or the Host block")
+		}
+	})
 	t.Run("older_directory_refused_equal_accepted", func(t *testing.T) {
 		f := newHTFix(t, 1, 1)
 		d3 := web1(t, f, 3)
