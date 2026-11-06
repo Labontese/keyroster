@@ -815,7 +815,7 @@ func TestDirectoryPipeline(t *testing.T) {
 		e2.installDirect(t, v1)
 		bob, _ := pendingEntry(t, webauthn.AlgES256)
 		carol, _ := pendingEntry(t, webauthn.AlgES256)
-		proposal := buildDir(t, v1, addUser("bob", credOf(bob)))
+		proposal := buildDir(t, v1, boundTo(e2.bundle.InstallationID, addUser("bob", credOf(bob))))
 		other := buildDir(t, v1, addUser("carol", credOf(carol)))
 		otherSigs := e2.sign(t, other, 0)
 		e2.post = func(w http.ResponseWriter, _ serverclient.InstallDirectoryRequest) {
@@ -836,7 +836,7 @@ func TestDirectoryPipeline(t *testing.T) {
 		v1 := buildDir(t, nil, addUser("alice", credOf(alice)))
 		e.installDirect(t, v1)
 		bob, _ := pendingEntry(t, webauthn.AlgES256)
-		proposal := buildDir(t, v1, addUser("bob", credOf(bob)))
+		proposal := buildDir(t, v1, boundTo(e.bundle.InstallationID, addUser("bob", credOf(bob))))
 		dir := writeProposalDir(t, proposal, e.sign(t, proposal, 0))
 		e.post = func(w http.ResponseWriter, req serverclient.InstallDirectoryRequest) {
 			e.doc, e.sigs = req.Directory, req.Sigs // e.mu is held
@@ -866,6 +866,7 @@ func TestDirectoryPipeline(t *testing.T) {
 		// and the post: the 409 is reported as nothing to do as well.
 		e2 := newDirEnv(t, 1, 1)
 		e2.installDirect(t, v1)
+		proposal = buildDir(t, v1, boundTo(e2.bundle.InstallationID, addUser("bob", credOf(bob))))
 		sigs := e2.sign(t, proposal, 0)
 		e2.post = func(w http.ResponseWriter, _ serverclient.InstallDirectoryRequest) {
 			e2.doc, e2.sigs = proposal, sigs // e2.mu is held
@@ -886,7 +887,7 @@ func TestDirectoryPipeline(t *testing.T) {
 			_, _ = io.WriteString(w, `{"error":"credential_not_pending"}`)
 		}
 		bob, fp := pendingEntry(t, webauthn.AlgES256)
-		proposal := buildDir(t, nil, addUser("bob", credOf(bob)))
+		proposal := buildDir(t, nil, boundTo(e.bundle.InstallationID, addUser("bob", credOf(bob))))
 		code, _, stderr := run(t, "directory", "install", writeProposalDir(t, proposal, e.sign(t, proposal, 0)))
 		if code != 1 || !strings.Contains(stderr, "no longer pending") || !strings.Contains(stderr, "Discard") ||
 			!strings.Contains(stderr, "keyroster user approve") || strings.Contains(stderr, "re-run this command") {
@@ -1166,7 +1167,7 @@ func TestDirectoryPeerText(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(serverclient.InstallDirectoryAnswer{Version: 1, SHA256: strings.Repeat("ab", 32), LeafIndex: 1})
 		}
 		bob, _ := pendingEntry(t, webauthn.AlgES256)
-		proposal := buildDir(t, nil, addUser("bob", credOf(bob)))
+		proposal := buildDir(t, nil, boundTo(e.bundle.InstallationID, addUser("bob", credOf(bob))))
 		code, stdout, stderr := run(t, "directory", "install", writeProposalDir(t, proposal, e.sign(t, proposal, 0)))
 		if code != 1 || strings.Contains(stdout+stderr, strings.Repeat("ab", 32)) {
 			t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
@@ -1584,6 +1585,32 @@ func TestDirectoryInstallLosses(t *testing.T) {
 			t.Fatalf("requests %v, want one install", got)
 		}
 	})
+	// The installation binding (pre-merge review, 03-09b): directory install
+	// applies directory sign's CheckInstallation before the losses are
+	// computed, so a proposal for another installation, or for none,
+	// revokes nothing, asks nothing and installs nothing.
+	for _, tc := range []struct{ name, id string }{
+		{"other_installation_refused_before_losses", "ffffffffffffffffffffffffffffffff"},
+		{"unbound_refused_before_losses", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _, reqs := lossEnv(t, 2, 2)
+			useTerminal(t, true, "y\n")
+			installed, _ := e.installed()
+			doc := buildDir(t, installed, boundTo(tc.id, func(d *directory.Directory) { d.Hosts = nil }))
+			code, stdout, stderr := run(t, "directory", "install", writeProposalDir(t, doc, e.sign(t, doc, 0, 1)))
+			want := "is bound to installation " + installationText(tc.id) + ", but the root-verified trust bundle names " + e.bundle.InstallationID
+			if code != 1 || !strings.Contains(stderr, want) || !strings.Contains(stderr, "Nothing was revoked or installed") {
+				t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+			}
+			if strings.Contains(stdout, "[y/N]") || strings.Contains(stdout, "first revokes") {
+				t.Fatalf("the losses were printed or consent was asked:\n%s", stdout)
+			}
+			if got := e.postCalls(); len(got) != 0 || len(reqs()) != 0 {
+				t.Fatalf("requests %v", got)
+			}
+		})
+	}
 	t.Run("served_proposal_still_reported", func(t *testing.T) {
 		e, _, _ := lossEnv(t, 2, 2)
 		dir := lossProposal(t, e, 0, 1)

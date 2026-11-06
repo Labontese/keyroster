@@ -396,7 +396,9 @@ func runDirectorySign(ctx context.Context, args []string, stdout, stderr io.Writ
 
 // runDirectoryInstall is keyroster directory install DIR [--yes]
 // [--admin-key FP]: it checks that the proposal follows the installed
-// verified directory and posts it; the signer decides whether its
+// verified directory and names the root-verified bundle's installation
+// (directory.CheckInstallation, as directory sign) and posts it; the
+// signer decides whether its
 // signatures meet the quorum. It signs nothing and so asks nothing
 // (02-09-R2-F10), unless the version has host losses (03-09b, QB-2): then
 // it first checks the quorum locally (checkProposalSigs), asks consent
@@ -431,6 +433,15 @@ func runDirectoryInstall(ctx context.Context, args []string, stdout, stderr io.W
 		return reportServed(stdout, p)
 	} else if err != nil {
 		return err
+	}
+	// D-04, directory sign's rule (CheckInstallation), before the losses
+	// are computed or consent is asked: a proposal for another
+	// installation, or for none while the bundle has an ID, never installs
+	// here, so nothing is revoked for it.
+	if err := directory.CheckInstallation(p.d, vd.Bundle.InstallationID); err != nil {
+		return &cliError{text: fmt.Sprintf("proposal %s is bound to installation %s, but the root-verified trust bundle names %s; "+
+			"the signer installs no directory for another installation. Nothing was revoked or installed",
+			p.dir, installationText(p.d.InstallationID), installationText(vd.Bundle.InstallationID)), err: err}
 	}
 	losses := hostLosses(vd.Dir, p.d)
 	if len(losses) == 0 {
