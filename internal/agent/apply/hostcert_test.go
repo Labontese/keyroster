@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1837,4 +1838,39 @@ func TestHostCertLostFileHealed(t *testing.T) {
 			t.Fatalf("report %+v, attempts %+v: want the same serial refused while the file is intact", r, h.attempts())
 		}
 	})
+}
+
+// TestHostCertSelfTestFamilies: the served-certificate self-test skips an
+// IPv6 loopback address that is off or unreachable, as selfTest does, and
+// probes the next one sshd listens on (03-09).
+func TestHostCertSelfTestFamilies(t *testing.T) {
+	h := newHostCertHost(t)
+	c := h.one()
+	port := strconv.Itoa(h.sshd.port)
+	dump := ParseDump([]byte("listenaddress [::]:" + port + "\nlistenaddress 0.0.0.0:" + port + "\n"))
+	for _, tc := range []struct {
+		name  string
+		errno syscall.Errno
+		v6off bool
+	}{{"eaddrnotavail", syscall.EADDRNOTAVAIL, false}, {"eafnosupport", syscall.EAFNOSUPPORT, false}, {"ipv6_off_on_lo", 0, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := h.engine()
+			e.cfg.SelfTestTimeout = 500 * time.Millisecond
+			e.ipv6Off = func() bool { return tc.v6off }
+			e.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if strings.HasPrefix(addr, "[::1]") {
+					if tc.errno == 0 {
+						t.Fatalf("dialled %s with IPv6 off on lo", addr)
+					}
+					return nil, &net.OpError{Op: "dial", Net: network, Err: os.NewSyscallError("connect", tc.errno)}
+				}
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			}
+			served, err := e.hostCertSelfTest(context.Background(), dump, []*ssh.Certificate{c})
+			if err != nil || !served[hostcert.KeySHA256(c.Key)] {
+				t.Fatalf("hostCertSelfTest = %v, %v; want the certificate served on 127.0.0.1", served, err)
+			}
+		})
+	}
 }

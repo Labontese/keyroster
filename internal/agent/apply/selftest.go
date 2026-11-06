@@ -253,13 +253,17 @@ func (e *engine) hostCertSelfTest(ctx context.Context, dump Dump, installed []*s
 		d := net.Dialer{Deadline: deadline}
 		dial = d.DialContext
 	}
+	target, err := e.certTarget(ctx, dial, targets)
+	if err != nil {
+		return nil, err
+	}
 	for _, alg := range algs {
 		if offered != nil && !slices.Contains(offered, alg) {
 			e.logf("%s: sshd -T hostkeyalgorithms leaves out %s; its certificates are not served", CodeHostCertAlgorithmDisabled, alg)
 			continue
 		}
 		for {
-			got, err := probeCert(ctx, dial, targets[0], deadline, alg)
+			got, err := probeCert(ctx, dial, target, deadline, alg)
 			if err == nil {
 				if i := slices.IndexFunc(byAlg[alg], func(c *ssh.Certificate) bool { return bytes.Equal(c.Marshal(), got.Marshal()) }); i >= 0 {
 					served[hostcert.KeySHA256(byAlg[alg][i].Key)] = true
@@ -267,16 +271,47 @@ func (e *engine) hostCertSelfTest(ctx context.Context, dump Dump, installed []*s
 				}
 			}
 			if time.Now().Add(100 * time.Millisecond).After(deadline) {
-				return nil, fmt.Errorf("%w: sshd on %s does not serve an installed %s certificate", ErrServedCertMismatch, targets[0], alg)
+				return nil, fmt.Errorf("%w: sshd on %s does not serve an installed %s certificate", ErrServedCertMismatch, target, alg)
 			}
 			select {
 			case <-ctx.Done():
-				return nil, fmt.Errorf("%w: sshd on %s does not serve an installed %s certificate", ErrServedCertMismatch, targets[0], alg)
+				return nil, fmt.Errorf("%w: sshd on %s does not serve an installed %s certificate", ErrServedCertMismatch, target, alg)
 			case <-time.After(100 * time.Millisecond):
 			}
 		}
 	}
 	return served, nil
+}
+
+// certTarget is the loopback address the served-certificate self-test
+// probes: the first of targets that is not an IPv6 address on a host
+// where IPv6 is off on lo or unreachable (EADDRNOTAVAIL, EAFNOSUPPORT),
+// the skip rules of selfTest. Any other dial error keeps the address:
+// the probe's retries wait for sshd's reload.
+func (e *engine) certTarget(ctx context.Context, dial func(ctx context.Context, network, addr string) (net.Conn, error), targets []string) (string, error) {
+	ipv6Off := e.ipv6Off
+	if ipv6Off == nil {
+		ipv6Off = ipv6Disabled
+	}
+	var skipped []string
+	for _, addr := range targets {
+		v6 := strings.HasPrefix(addr, "[")
+		if v6 && ipv6Off() {
+			skipped = append(skipped, addr+": IPv6 is disabled on lo")
+			continue
+		}
+		conn, err := dial(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return addr, nil
+		}
+		if v6 && (errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT)) {
+			skipped = append(skipped, addr+": "+err.Error())
+			continue
+		}
+		return addr, nil
+	}
+	return "", fmt.Errorf("%w: no loopback address sshd listens on could be reached (%s)", ErrServedCertMismatch, strings.Join(skipped, "; "))
 }
 
 // probeCert is one handshake with addr offering only host key algorithm
