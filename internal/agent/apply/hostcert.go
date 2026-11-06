@@ -248,8 +248,18 @@ func (e *engine) hostCerts(ctx context.Context, r *HostCertReport) error {
 		}
 	}
 
-	// 4. Answers, for every key the entry lists and sshd serves.
+	// Attempts of keys sshd no longer serves or the entry no longer lists
+	// are dropped: the file holds at most directory.MaxHostKeys keys, so
+	// retired keys must not use up its room.
 	changedAttempts := false
+	for _, a := range slices.Clone(st.attempts.Keys) {
+		if _, ok := st.served[a.KeySHA256]; !ok {
+			st.attempts.Drop(a.KeySHA256)
+			changedAttempts = true
+		}
+	}
+
+	// 4. Answers, for every key the entry lists and sshd serves.
 	for k, pub := range st.served {
 		ch, err := e.readHostCertAnswer(st, k, pub, now)
 		if err != nil {

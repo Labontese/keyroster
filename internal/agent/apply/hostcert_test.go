@@ -1745,3 +1745,32 @@ func TestHostCertStatus(t *testing.T) {
 		}
 	})
 }
+
+// TestHostCertAttemptsPruned: the attempts of keys sshd no longer serves
+// or the entry no longer lists are dropped, so retired keys never use up
+// the file's room of directory.MaxHostKeys keys (03-09).
+func TestHostCertAttemptsPruned(t *testing.T) {
+	t.Run("ninth_key_requested", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.publishDir(h.hostSpec(h.sshd.pub))
+		h.mustApply()
+		// Eight keys this host served and listed once, all retired now.
+		a := &hostcert.Attempts{Version: hostcert.AttemptsVersion, Keys: []hostcert.Attempt{}, Skipped: []string{}}
+		for i := range 8 {
+			a.Keys = append(a.Keys, hostcert.Attempt{KeySHA256: hostcert.KeySHA256(seedKey(t, byte(40+i)).PublicKey()), Requests: []hostcert.PendingRequest{}})
+		}
+		slices.SortFunc(a.Keys, func(x, y hostcert.Attempt) int { return strings.Compare(x.KeySHA256, y.KeySHA256) })
+		b, err := a.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(h.l.State(hostcert.AttemptsFile), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r := h.mustHostCerts()
+		got := h.attempts()
+		if len(r.Requested) != 1 || len(got.Keys) != 1 || got.Keys[0].KeySHA256 != hostcert.KeySHA256(h.sshd.pub) {
+			t.Fatalf("report %+v, attempts %+v: want the served key requested and only its attempt kept", r, got.Keys)
+		}
+	})
+}
