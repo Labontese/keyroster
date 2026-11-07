@@ -60,3 +60,51 @@ func ForRole(role string, pol *trust.Policy) (cert.Profile, error) {
 	}
 	return p, nil
 }
+
+// The probe certificate's fixed restrictions and lifetime bound (03-10,
+// D-06). A probe certificate carries exactly these two critical options
+// and no extension, whatever the machine profile grants: sshd runs
+// /bin/false for any session and accepts the certificate from loopback
+// only (D-05's answer, loopback-only).
+const (
+	ProbeForceCommand       = "/bin/false"
+	ProbeSourceAddress      = "127.0.0.0/8,::1/128"
+	MaxProbeLifetimeSeconds = 604800
+)
+
+// ProbeCriticalOptions returns a fresh copy of the probe certificate's
+// critical options: force-command ProbeForceCommand and source-address
+// ProbeSourceAddress (03-10).
+func ProbeCriticalOptions() map[string]string {
+	return map[string]string{"force-command": ProbeForceCommand, "source-address": ProbeSourceAddress}
+}
+
+// ProbeProfile returns the profile every probe certificate is built and
+// re-checked under (03-10): a user certificate with the machine role's
+// MaxTTL under pol, no default or allowed extension, and exactly the
+// critical options force-command and source-address allowed. Nothing else
+// of the machine profile carries over, so a machine profile that grants
+// permit-pty or forwarding changes nothing.
+func ProbeProfile(pol *trust.Policy) (cert.Profile, error) {
+	m, err := ForRole(trust.RoleMachine, pol)
+	if err != nil {
+		return cert.Profile{}, err
+	}
+	return cert.Profile{
+		CertType:               m.CertType,
+		MaxTTL:                 m.MaxTTL,
+		DefaultExtensions:      map[string]string{},
+		AllowedCriticalOptions: []string{"force-command", "source-address"},
+	}, nil
+}
+
+// ProbeLifetime is the one place that turns the machine cap into a probe
+// certificate's lifetime L (03-10): min(MaxProbeLifetimeSeconds, the
+// profile's MaxTTL in whole seconds). The signer issues with it and
+// records it as the leaf's CapSeconds; audit re-derives it.
+func ProbeLifetime(profile cert.Profile) uint64 {
+	if profile.MaxTTL <= 0 {
+		return 0
+	}
+	return min(uint64(profile.MaxTTL/time.Second), MaxProbeLifetimeSeconds) //nolint:gosec // G115: MaxTTL > 0, checked above
+}

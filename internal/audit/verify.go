@@ -890,6 +890,19 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			}
 			revs.addCert(c, kid)
 			rep.collect(opts, want, leaf.Kind, body.Cert)
+		case tlog.KindProbeIssue:
+			// A probe certificate (03-10): verifyProbeIssue re-proves it and
+			// records the certificate and, for a negative one, its own
+			// serial entry, which every later krl_publish must list while it
+			// is live; no adjacency rule applies (Q1).
+			body, err := tlog.DecodeProbeIssueBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			if _, err := verifyProbeIssue(want, body, leaf.TimeMicros, &trustState, &dirState, &iss, hosts, revs); err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			rep.collect(opts, want, leaf.Kind, body.Cert)
 		case tlog.KindRevoke:
 			body, err := tlog.DecodeRevokeBody(leaf.Body)
 			if err != nil {
@@ -1200,7 +1213,7 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 // refuses there every key only a host_forget line renders, after
 // unescaping.
 func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
-	if leaf.Kind != tlog.KindHostForget && leaf.Kind != tlog.KindHostIssue {
+	if leaf.Kind != tlog.KindHostForget && leaf.Kind != tlog.KindHostIssue && leaf.Kind != tlog.KindProbeIssue {
 		s := string(text)
 		if strings.Contains(s, `"approved_once":`) || strings.Contains(s, `"host_gone":`) {
 			return fmt.Errorf("its decoded approved_once or host_gone field is not one of a host_forget leaf (%s)", leaf.Kind)

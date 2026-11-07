@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -197,7 +198,7 @@ func TestDecodeLeafStrict(t *testing.T) {
 		"trailing_byte":    append(append([]byte(nil), raw...), 0),
 		"truncated":        raw[:len(raw)-1],
 		"wrong_domain":     append([]byte{21}, append([]byte("keyroster/log-leaf/v2"), raw[22:]...)...),
-		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: KindHostIssue + 1, Body: refusal}),
+		"unknown_kind":     rawKindLeaf(t, Leaf{Kind: Kind(250), Body: refusal}), // a number no plan claims (03-10)
 		"body_of_another":  EncodeLeaf(Leaf{Kind: KindIssue, Body: refusal}),
 		"summary_no_count": EncodeLeaf(Leaf{Kind: KindRefusalSummary, Body: make([]byte, 18)}),
 	}
@@ -709,7 +710,7 @@ func TestRecoveryBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for k := Kind(12); k <= 14; k++ {
+		for k := Kind(13); k <= 14; k++ { // 12 is in use since 03-10
 			if _, err := MarshalLeaf(Leaf{Kind: k, Body: refusal}); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("MarshalLeaf accepted kind %d", k)
 			}
@@ -837,7 +838,7 @@ func TestHostForgetBody(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, k := range []Kind{12, 13, 14, 17} {
+		for _, k := range []Kind{13, 14, 17} { // 12 is in use since 03-10
 			if _, err := DecodeLeaf(rawKindLeaf(t, Leaf{Kind: k, Body: refusal})); !errors.Is(err, ErrMalformedLeaf) {
 				t.Fatalf("DecodeLeaf accepted kind %d", k)
 			}
@@ -954,4 +955,146 @@ func TestHostIssueBody(t *testing.T) {
 	if _, err := big.Encode(); !errors.Is(err, ErrMalformedLeaf) {
 		t.Fatalf("an oversize key ID encodes: %v", err)
 	}
+}
+
+// probeIssueVector is the fixed probe_issue leaf (03-10): the probe
+// request of the wire signing vector (negative, host web1), a probe
+// certificate of the machine-CA test key that lives exactly its
+// CapSeconds, with the two probe options and no extension.
+func probeIssueVector(t testing.TB) (Leaf, *ProbeIssueBody) {
+	t.Helper()
+	request, err := hex.DecodeString(strings.TrimSpace(string(readGolden(t, "probe_issue_request_signing_v1.hex"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := wire.ParseProbeIssueSigningBytes(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeKey, err := ssh.ParsePublicKey(req.ProbeKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := ssh.NewSignerFromKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const serial = 1_700_000_000_000_009
+	kid := cert.KeyID{V3: true, CA: "machine", Subject: "probe.web1", Request: "000102030405060708090a0b0c0d0e0f", Policy: 2, Directory: 3, Serial: serial}
+	opts := map[string]string{"force-command": "/bin/false", "source-address": "127.0.0.0/8,::1/128"}
+	c, err := cert.Build(cert.Request{Profile: cert.Profile{CertType: ssh.UserCert, MaxTTL: 90 * time.Second,
+		AllowedCriticalOptions: []string{"force-command", "source-address"}}, Subject: probeKey,
+		Principals: []string{"keyroster-probe:web1"}, Now: time.Unix(1_700_000_000, 0), ValidFor: 90 * time.Second, KeyID: kid,
+		Serial: serial, CriticalOptions: opts}, ca, zeroReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &ProbeIssueBody{
+		Serial: serial, Negative: req.Negative, PolicyVersion: 2, DirectoryVersion: 3, CapSeconds: 90,
+		Request: request,
+		Evidence: []wire.Evidence{{Type: wire.EvidenceHostPoP, Blob: []byte("host pop (test vector)")},
+			{Type: wire.EvidenceProbePoP, Blob: []byte("probe pop (test vector)")}},
+		Cert:  c.Marshal(),
+		KeyID: c.KeyId,
+	}
+	enc, err := body.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Leaf{Index: 15, TimeMicros: 1_700_000_000_000_010, Kind: KindProbeIssue, Body: enc}, body
+}
+
+// TestProbeIssueLeafVector pins the kind-12 leaf encoding (03-10); its
+// certificate lives exactly its CapSeconds.
+func TestProbeIssueLeafVector(t *testing.T) {
+	leaf, body := probeIssueVector(t)
+	checkLeafVector(t, "leaf_probe_issue_v1.hex", leaf, body, func(b []byte) (any, error) { return DecodeProbeIssueBody(b) })
+	pub, err := ssh.ParsePublicKey(body.Cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := pub.(*ssh.Certificate)
+	if c.ValidBefore-c.ValidAfter-300 != body.CapSeconds || !body.Negative || KindProbeIssue != 12 || KindProbeIssue.String() != "probe_issue" {
+		t.Fatalf("the vector: lifetime %d s, CapSeconds %d, negative %t, kind %d %s", c.ValidBefore-c.ValidAfter-300,
+			body.CapSeconds, body.Negative, KindProbeIssue, KindProbeIssue)
+	}
+}
+
+// TestProbeIssueBody: the strict decoder, the negative flag and the one
+// derivation of the revoked entry (03-10).
+func TestProbeIssueBody(t *testing.T) {
+	leaf, body := probeIssueVector(t)
+	bodyCases(t, leaf, body, func(b []byte) (any, error) { return DecodeProbeIssueBody(b) })
+	t.Run("revoked_entries_negative_only", func(t *testing.T) {
+		pub, err := ssh.ParsePublicKey(body.Cert)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := pub.(*ssh.Certificate)
+		got, err := body.RevokedEntries()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []RevokedEntry{{Kind: RevokedSerial, CAKey: c.SignatureKey.Marshal(), Serial: body.Serial, ValidBeforeSeconds: c.ValidBefore}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("RevokedEntries = %+v, want %+v", got, want)
+		}
+		pos := *body
+		pos.Negative = false
+		if got, err := pos.RevokedEntries(); err != nil || len(got) != 0 {
+			t.Fatalf("a positive body gives %+v, %v; want nothing", got, err)
+		}
+		other := *body
+		other.Serial++
+		if _, err := other.RevokedEntries(); !errors.Is(err, ErrMalformedLeaf) {
+			t.Fatalf("a body whose serial is not its certificate's gives %v", err)
+		}
+	})
+	t.Run("negative_flag_strict", func(t *testing.T) {
+		// The flag is the byte after the 8-byte serial.
+		for _, v := range []byte{0, 1} {
+			b := bytes.Clone(leaf.Body)
+			b[8] = v
+			got, err := DecodeProbeIssueBody(b)
+			if err != nil || got.Negative != (v == 1) {
+				t.Fatalf("flag %d: %+v, %v", v, got, err)
+			}
+		}
+		for _, v := range []byte{2, 0x80, 0xff} {
+			b := bytes.Clone(leaf.Body)
+			b[8] = v
+			if _, err := DecodeProbeIssueBody(b); !errors.Is(err, ErrMalformedLeaf) {
+				t.Errorf("flag %#x decodes: %v", v, err)
+			}
+			l := leaf
+			l.Body = b
+			if _, err := DecodeLeaf(EncodeLeaf(l)); !errors.Is(err, ErrMalformedLeaf) {
+				t.Errorf("a leaf with flag %#x decodes: %v", v, err)
+			}
+		}
+	})
+	t.Run("size_bounds", func(t *testing.T) {
+		for name, edit := range map[string]func(*ProbeIssueBody){
+			"cert_oversize":    func(b *ProbeIssueBody) { b.Cert = make([]byte, MaxCert+1) },
+			"cert_empty":       func(b *ProbeIssueBody) { b.Cert = nil },
+			"key_id_oversize":  func(b *ProbeIssueBody) { b.KeyID = strings.Repeat("k", MaxKeyID+1) },
+			"key_id_empty":     func(b *ProbeIssueBody) { b.KeyID = "" },
+			"request_oversize": func(b *ProbeIssueBody) { b.Request = make([]byte, MaxRequest+1) },
+			"request_empty":    func(b *ProbeIssueBody) { b.Request = nil },
+			"too_much_evidence": func(b *ProbeIssueBody) {
+				b.Evidence = make([]wire.Evidence, wire.MaxEvidence+1)
+				for i := range b.Evidence {
+					b.Evidence[i] = wire.Evidence{Type: "x"}
+				}
+			},
+			"evidence_blob_oversize": func(b *ProbeIssueBody) { b.Evidence[0].Blob = make([]byte, wire.MaxEvidenceBlob+1) },
+		} {
+			b := *body
+			b.Evidence = slices.Clone(body.Evidence)
+			edit(&b)
+			if _, err := b.Encode(); !errors.Is(err, ErrMalformedLeaf) {
+				t.Errorf("%s encodes: %v", name, err)
+			}
+		}
+	})
 }

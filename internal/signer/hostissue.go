@@ -286,7 +286,8 @@ var errHostPoP = errors.New("signer: host proof of possession does not verify")
 
 // verifyHostPoP requires exactly one evidence item of type host-pop/v1, an
 // SSHSIG whose key is key and which verifies under namespace over signed
-// (03-09). 03-10's probes reuse it with their own namespace.
+// (03-09). Probe requests carry two items and have their own verifier,
+// verifyProbePoP (03-10).
 func verifyHostPoP(namespace string, signed []byte, key ssh.PublicKey, ev []wire.Evidence) error {
 	if len(ev) != 1 || ev[0].Type != wire.EvidenceHostPoP {
 		return errHostPoP

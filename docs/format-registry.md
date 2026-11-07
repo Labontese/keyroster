@@ -47,7 +47,7 @@ skips it. A kind is in use when it has a constant and `valid` accepts it.
 | 9 | in use | `KindRevoke` | `revoke` | 03-01 |
 | 10 | in use | `KindKRLPublish` | `krl_publish` | 03-01 |
 | 11 | in use | `KindHostIssue` | `host_issue` | 03-09 |
-| 12 | reserved | | | 03-10 (probe certificates) |
+| 12 | in use | `KindProbeIssue` | `probe_issue` | 03-10 |
 | 13 | reserved | | | 03-11 (machine identities by PoP) |
 | 14 | reserved | | | 03-12 (CA rotation) |
 | 15 | in use | `KindRevocationRecovery` | `revocation_recovery` | 03-06b |
@@ -80,7 +80,7 @@ number stays free for it.
 | 0x08 | in use | `TypeGetBundle` | 0x88 | 03-07 |
 | 0x09 | in use | `TypeGetDirectoryVersion` | 0x89 | 03-07 |
 | 0x0A | in use | `TypeHostIssueRequest` | 0x81 | 03-09 |
-| 0x0B | reserved | | 0x81 | 03-10 (probe issue request) |
+| 0x0B | in use | `TypeProbeIssueRequest` | 0x81 | 03-10 |
 | 0x0C | reserved | | 0x81 | 03-11 (machine issue request) |
 | 0x0D | in use | `TypeForgetAgentRequest` | 0x8D | 03-08c |
 
@@ -138,6 +138,7 @@ both.
 | `keyroster/revoke-recovery/v1` | domain and SSHSIG, revocation recovery | `wire.RecoveryRequestDomain`, `wire.RecoverySSHSIGNamespace` |
 | `keyroster/host-forget-request/v1` | domain and SSHSIG, host forget | `wire.ForgetRequestDomain`, `wire.ForgetSSHSIGNamespace` |
 | `keyroster/host-issue-request/v1` | domain and SSHSIG, host issue request | `wire.HostIssueRequestDomain`, `wire.HostPoPNamespace` |
+| `keyroster/probe-issue-request/v1` | domain and SSHSIG, probe issue request | `wire.ProbeIssueRequestDomain`, `wire.ProbePoPNamespace` |
 | `keyroster/log-leaf/v1` | domain, Merkle log leaf | `tlog.LeafDomain` |
 | `keyroster/log/` | checkpoint origin prefix (plus 16 hex digits of the log key hash) | `tlog.OriginPrefix`, `trust.LogOriginPrefix` |
 | `keyroster/trust-bundle/v1` | SSHSIG, root-signed trust bundle | `trust.NamespaceBundle` |
@@ -155,7 +156,8 @@ Evidence types and other prefixes:
 |---|---|---|
 | `admin-sshsig/v1` | evidence type, an admin's SSHSIG | `wire.EvidenceAdminSSHSIG` |
 | `webauthn-assertion/v1` | evidence type, a passkey assertion | `wire.EvidenceWebAuthnAssertion` |
-| `host-pop/v1` | evidence type, a host key's SSHSIG over a host issue request | `wire.EvidenceHostPoP` |
+| `host-pop/v1` | evidence type, a host key's SSHSIG over a host issue request; also the first evidence item of a probe issue request, under the probe namespace | `wire.EvidenceHostPoP` |
+| `probe-pop/v1` | evidence type, the probe key's SSHSIG over a probe issue request, under the probe namespace | `wire.EvidenceProbePoP` |
 | `kr-join-v1:` | join string prefix | `join.Prefix` |
 | `kr1/`, `kr2/`, `kr3/` | key ID versions (see the key ID budget below) | `cert` (`keyIDPrefix`, `keyIDPrefixKr2`, `keyIDPrefixKr3`) |
 
@@ -188,17 +190,20 @@ hex digits). Formats that carry it today include:
 | KRL manifest (`krl.Manifest`, internal/krl/manifest.go) | `installation_id` | the ops key (SSHSIG) |
 | Host enrollment proof (`enroll.PoP`, internal/agent/enroll/pop.go) | `installation_id` | each host key (SSHSIG) |
 | Host issue request (`wire.HostIssueRequest`, internal/wire/hostissue.go) | `InstallationID` | the requested host key (SSHSIG) |
+| Probe issue request (`wire.ProbeIssueRequest`, internal/wire/probeissue.go) | `InstallationID` | the host key and the probe key (SSHSIG each) |
 
 The join token (`join.JoinToken`) also names the installation, but it is
 not signed.
 
 `HostIssueRequest` (03-09) carries it in its signing bytes, and the signer
 and audit verify refuse a request without one or for another installation
-(`host_issue_no_installation_id`, `host_issue_installation_mismatch`). The
-proof-of-possession issue requests planned for 03-10 and 03-11
-(`ProbeIssueRequest`, `MachineIssueRequest`) fall under this rule too:
-they must carry the installation ID in their signing bytes. A new signed
-format adds a row here in the PR that adds it.
+(`host_issue_no_installation_id`, `host_issue_installation_mismatch`).
+03-10's `ProbeIssueRequest` (landed) and 03-11's `MachineIssueRequest`
+fall under this rule too: the probe request carries the installation ID
+in its signing bytes, and the signer and audit verify refuse one without
+it or for another installation (`probe_issue_no_installation_id`,
+`probe_issue_installation_mismatch`); the machine request must carry it
+as well. A new signed format adds a row here in the PR that adds it.
 
 ## Key ID budget
 
