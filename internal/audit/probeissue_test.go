@@ -97,6 +97,8 @@ type probeIssue struct {
 	options         map[string]string
 	extensions      map[string]string
 	bodyNegative    bool
+	certKey         ssh.PublicKey // the certificate's key; nil: the request's probe key
+	issued          time.Time     // cert.Build's Now; zero: issuedAt(serial)
 	cert            *ssh.Certificate
 	body            *tlog.ProbeIssueBody
 	overrideRequest []byte
@@ -153,9 +155,16 @@ func (pf *probeFixture) addProbe(key ssh.Signer, negative bool, pre, tamper, pos
 	if err != nil {
 		pf.t.Fatal(err)
 	}
+	if p.certKey != nil {
+		subject = p.certKey
+	}
+	now := issuedAt(p.serial)
+	if !p.issued.IsZero() {
+		now = p.issued
+	}
 	prof := cert.Profile{CertType: ssh.UserCert, MaxTTL: 30 * 24 * time.Hour, DefaultExtensions: map[string]string{},
 		AllowedExtensions: slices.Sorted(maps.Keys(p.extensions)), AllowedCriticalOptions: slices.Sorted(maps.Keys(p.options)), ReservedPrincipals: true}
-	c, err := cert.Build(cert.Request{Profile: prof, Subject: subject, Principals: p.principals, Now: issuedAt(p.serial),
+	c, err := cert.Build(cert.Request{Profile: prof, Subject: subject, Principals: p.principals, Now: now,
 		ValidFor: time.Duration(p.lifetime) * time.Second, KeyID: p.keyID, Serial: p.serial, //nolint:gosec // G115: test lifetimes
 		ExtraExtensions: p.extensions, CriticalOptions: p.options}, p.ca, rand.Reader)
 	if err != nil {
@@ -395,6 +404,35 @@ func TestVerifyProbeIssue(t *testing.T) {
 		pf := newProbeFixture(t)
 		pf.addProbe(pf.key, false, nil, nil, func(p *probeIssue) { p.bodyNegative = true })
 		pf.wantFail(t, "negative flag")
+	})
+	// Pre-merge review of PR #90: each case below changes one value only,
+	// with the request, the evidence and every other field genuine.
+	t.Run("cert_key_not_probe_key_fails", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		pf.addProbe(pf.key, false, nil, nil, func(p *probeIssue) { p.certKey = newSigner(t, "ed25519").PublicKey() })
+		pf.wantFail(t, "is not the request's probe key")
+	})
+	t.Run("key_id_policy_fails", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		pf.addProbe(pf.key, false, nil, nil, func(p *probeIssue) { p.keyID.Policy++ })
+		pf.wantFail(t, "key ID pol=")
+	})
+	t.Run("valid_after_outside_issuance_fails", func(t *testing.T) {
+		// Issued 60 s after the leaf time: inside the 300 s CreatedAt skew,
+		// outside the range from the serial to the leaf time.
+		pf := newProbeFixture(t)
+		pf.addProbe(pf.key, false, nil, nil, func(p *probeIssue) {
+			p.issued = time.UnixMicro(int64(pf.micros + 1)).Add(time.Minute) //nolint:gosec // G115: test times
+		})
+		pf.wantFail(t, "outside the probe profile")
+	})
+	t.Run("probe_key_machine_key_fails", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		m := newSigner(t, "ed25519")
+		pf.machines = []directory.Machine{{Name: "ci", Key: trust.FormatKey(m.PublicKey()), Roles: []string{"dev"}, MaxTTLSeconds: 600, Status: directory.StatusActive}}
+		pf.publish()
+		pf.addProbe(pf.key, false, func(p *probeIssue) { p.req.ProbeKey, p.probePoPKey = m.PublicKey().Marshal(), m }, nil, nil)
+		pf.wantFail(t, `machine "ci" (probe_key_unusable)`)
 	})
 	probeBoundsCases(t)
 	probeReservedCases(t)
