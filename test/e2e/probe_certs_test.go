@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -513,4 +515,184 @@ func sshdVersion(t *testing.T) string {
 		t.Fatalf("ssh -V: %v\n%s", err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// factsMaxTries bounds every driving loop of TestProbeSSHDFacts.
+const factsMaxTries = 12
+
+// countingConn keeps the first bytes read from a connection.
+type countingConn struct {
+	net.Conn
+	first []byte
+}
+
+func (c *countingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if room := 64 - len(c.first); room > 0 {
+		c.first = append(c.first, b[:min(n, room)]...)
+	}
+	return n, err
+}
+
+// factQuery is one unsigned query of c from src with a 2 s deadline. It
+// returns the result and whether sshd dropped the source: closed or reset
+// the connection before its SSH banner (an "SSH-" version line). OpenSSH
+// 10.5p1 writes a line such as "Not allowed at this time" to a penalised
+// source and closes; that is a drop, and the detail names it. A timeout
+// or any other failure is inconclusive and not a drop.
+func factQuery(s *sshdRun, hostKey ssh.PublicKey, src, user string, c ssh.PublicKey) (pkResult, bool, string) {
+	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(src)}, Timeout: 2 * time.Second}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(s.port))
+	raw, err := d.Dial("tcp", addr)
+	if err != nil {
+		return pkInconclusive, false, "dial: " + err.Error()
+	}
+	conn := &countingConn{Conn: raw}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	cfg := &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(sentinelSigner{pub: c})},
+		HostKeyCallback: ssh.FixedHostKey(hostKey), Timeout: 2 * time.Second}
+	cc, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	switch {
+	case err == nil:
+		_ = ssh.NewClient(cc, chans, reqs).Close()
+		return pkInconclusive, false, "authenticated without a signature"
+	case errors.Is(err, errProbeSentinel):
+		return pkAccepted, false, ""
+	case strings.Contains(err.Error(), "unable to authenticate"):
+		return pkRefused, false, ""
+	}
+	dropped := !bytes.HasPrefix(conn.first, []byte("SSH-")) && (errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET))
+	return pkInconclusive, dropped, fmt.Sprintf("read %q: %v", conn.first, err)
+}
+
+// queryUntilDropped sends up to factsMaxTries queries of c from src, one
+// connection at a time, each expected to give want, and returns how many
+// did before sshd dropped the source (-1: none within factsMaxTries) and
+// any result other than want or a drop.
+func queryUntilDropped(s *sshdRun, hostKey ssh.PublicKey, src, user string, c ssh.PublicKey, want pkResult, tries int) (int, []string, string) {
+	var odd []string
+	for i := 0; i < tries; i++ {
+		r, dropped, detail := factQuery(s, hostKey, src, user, c)
+		if dropped {
+			return i, odd, detail
+		}
+		if r != want {
+			odd = append(odd, fmt.Sprintf("%s (%s)", r, detail))
+		}
+	}
+	return -1, odd, ""
+}
+
+// countText is a count of queryUntilDropped as the FACT lines write it.
+func countText(n int) string {
+	if n < 0 {
+		return fmt.Sprintf("none within %d", factsMaxTries)
+	}
+	return strconv.Itoa(n)
+}
+
+// atLeast98 reports whether an ssh -V line names OpenSSH 9.8 or later,
+// where sources are penalised (C20).
+func atLeast98(version string) bool {
+	v, ok := strings.CutPrefix(version, "OpenSSH_")
+	if !ok {
+		return false
+	}
+	major, rest, _ := strings.Cut(v, ".")
+	minor := strings.TrimLeftFunc(rest, func(r rune) bool { return r >= '0' && r <= '9' })
+	minor = rest[:len(rest)-len(minor)]
+	ma, err1 := strconv.Atoi(major)
+	mi, err2 := strconv.Atoi(minor)
+	return err1 == nil && err2 == nil && (ma > 9 || (ma == 9 && mi >= 8))
+}
+
+// TestProbeSSHDFacts (03-10, A9, P7) measures, per OpenSSH build, how
+// many refused queries and how many PK_OK-then-abort connections from one
+// source sshd answers before it stops answering that source
+// (PerSourcePenalties), and checks on a build that penalises sources that
+// the listener's own source 127.0.0.1 still gets through after 127.0.0.2
+// was penalised (P7). The counts are facts, logged in one FACT A9 line and
+// never asserted; only P7 (where exercised), the 9.8 guard and the
+// harness rules are. No signer: a throwaway CA the test sshd trusts signs
+// certificates with the probe restrictions through ssh-keygen. Every
+// sshd start and query happens in the parent body, so each subtest passes
+// or fails alone.
+func TestProbeSSHDFacts(t *testing.T) {
+	version := sshdVersion(t)
+	user := currentUser(t)
+	ca := newUserKey(t, "facts_ca")
+	certFor := func(name, principal string) ssh.PublicKey {
+		key := newUserKey(t, name)
+		sshKeygen(t, "-q", "-s", ca, "-I", name, "-n", principal, "-O", "force-command=/bin/false",
+			"-O", "source-address=127.0.0.0/8,::1/128", key+".pub")
+		return pubKey(t, readPub(t, key+"-cert.pub"))
+	}
+	accepted := certFor("id_accepted", "keyroster-probe:web1")
+	refused := certFor("id_refused", "keyroster-probe:web9") // no principals file line names it
+	start := func() *sshdRun {
+		return startSSHDWithLog(t, sshdOptions{UserCAPub: ca + ".pub", Principals: map[string][]string{user: {"keyroster-probe:web1"}}})
+	}
+
+	// refused_queries_until_blocked and pk_ok_then_abort_until_blocked on
+	// one sshd, from two sources of their own.
+	counting := start()
+	countingKey := sshdHostKey(t, counting)
+	refusedCount, refusedOdd, dropText := queryUntilDropped(counting, countingKey, "127.0.0.2", user, refused, pkRefused, factsMaxTries)
+	pkOKCount, pkOKOdd, _ := queryUntilDropped(counting, countingKey, "127.0.0.3", user, accepted, pkAccepted, factsMaxTries)
+
+	// listener_source_unaffected on a fresh sshd: drive 127.0.0.2 until it
+	// is dropped, check it stays dropped, then query from 127.0.0.1.
+	listener := start()
+	listenerKey := sshdHostKey(t, listener)
+	driven, drivenOdd, _ := queryUntilDropped(listener, listenerKey, "127.0.0.2", user, refused, pkRefused, factsMaxTries)
+	exercised := driven >= 0
+	var stillDropped bool
+	if exercised {
+		_, stillDropped, _ = factQuery(listener, listenerKey, "127.0.0.2", user, accepted)
+	}
+	finalSrc := "127.0.0.1"
+	finalResult, finalDropped, finalDetail := factQuery(listener, listenerKey, finalSrc, user, accepted)
+	penaltyLines := 0
+	for _, l := range strings.Split(counting.log.String()+listener.log.String(), "\n") {
+		if strings.Contains(strings.ToLower(l), "penalt") {
+			penaltyLines++
+		}
+	}
+	p7 := "not exercised"
+	if exercised {
+		p7 = "exercised"
+	}
+	t.Logf("FACT A9 %s: refused queries until blocked: %s; PK_OK then abort until blocked: %s; penalty log lines: %d; P7: %s; 127.0.0.1 after the 127.0.0.2 penalty: %s",
+		version, countText(refusedCount), countText(pkOKCount), penaltyLines, p7, finalResult)
+
+	t.Run("refused_queries_until_blocked", func(t *testing.T) {
+		if len(refusedOdd) != 0 {
+			t.Fatalf("refused queries from 127.0.0.2 gave %v; every one must be refused or dropped", refusedOdd)
+		}
+	})
+	t.Run("pk_ok_then_abort_until_blocked", func(t *testing.T) {
+		if len(pkOKOdd) != 0 {
+			t.Fatalf("PK_OK queries from 127.0.0.3 gave %v; every one must be accepted or dropped", pkOKOdd)
+		}
+	})
+	t.Run("listener_source_unaffected", func(t *testing.T) {
+		if len(drivenOdd) != 0 {
+			t.Fatalf("the driving queries from 127.0.0.2 gave %v", drivenOdd)
+		}
+		if !exercised {
+			if atLeast98(version) {
+				t.Fatalf("%s penalises sources (C20), but 127.0.0.2 was not dropped within %d refusals: P7 would pass without being exercised", version, factsMaxTries)
+			}
+			t.Logf("FACT P7 %s: not exercised, no penalty observed within %d refusals", version, factsMaxTries)
+		} else if !stillDropped {
+			t.Fatal("127.0.0.2 was dropped once but answered the next connection: the source is not really penalised")
+		}
+		if finalDropped || finalResult != pkAccepted {
+			t.Fatalf("the PK_OK query from %s after the 127.0.0.2 penalty: %s (dropped %t; %s), want accepted", finalSrc, finalResult, finalDropped, finalDetail)
+		}
+	})
+	t.Run("penalty_lines", func(t *testing.T) {
+		t.Logf("%d sshd log lines mention a penalty; a dropped source got: %s", penaltyLines, dropText)
+	})
 }
