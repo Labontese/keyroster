@@ -743,9 +743,11 @@ var hostTrustOverrides = map[string]string{
 // includeAdvice reads ~/.ssh/config (at most 1 MiB; it is never written)
 // and says, on w, how keyroster_ssh_config is included: the Include line
 // to add when there is none, and a warning when it comes after a Host or
-// Match line or after a keyword the managed block sets. Keywords match in
-// any letter case, as "Key Value" or "Key=Value"; nested Includes are not
-// inspected.
+// Match line or after a keyword the managed block sets, and for each
+// IgnoreUnknown after the Include (each one at all when there is no
+// Include), which the managed file's IgnoreUnknown replaces (D-R5).
+// Keywords match in any letter case, as "Key Value" or "Key=Value";
+// nested Includes are not inspected.
 func (w *hostTrustWriter) includeAdvice(out io.Writer) {
 	add := "To use these files, add this line to ~/.ssh/config at top level, before the first Host or Match line:\n\tInclude ~/.ssh/" + hostTrustSSHConfig + "\n"
 	fh, err := os.Open(filepath.Join(w.sshDir, "config")) //nolint:gosec // G304: the user's own ssh config, read only
@@ -767,6 +769,10 @@ func (w *hostTrustWriter) includeAdvice(out io.Writer) {
 	var (
 		firstBlock, include int
 		overrides           []string
+		// ignores are the IgnoreUnknown lines after the Include (all of
+		// them while no Include was found yet: once it is added, any of
+		// them can come after it).
+		ignores []int
 	)
 	for i, raw := range strings.Split(string(data), "\n") {
 		line := strings.TrimSpace(raw)
@@ -786,13 +792,25 @@ func (w *hostTrustWriter) includeAdvice(out io.Writer) {
 					include = i + 1
 				}
 			}
+		case lower == "ignoreunknown":
+			ignores = append(ignores, i+1)
 		case include == 0 && hostTrustOverrides[lower] != "":
 			overrides = append(overrides, fmt.Sprintf("%d %s", i+1, hostTrustOverrides[lower]))
 		}
 	}
 	if include == 0 {
 		_, _ = io.WriteString(out, add)
+		for _, n := range ignores {
+			_, _ = fmt.Fprintf(out, "Warning: ~/.ssh/config line %d sets IgnoreUnknown: %s once the Include comes before it, and the options your list names become fatal. "+
+				"%s\n", n, hostTrustIgnoreWarning, hostTrustIgnoreMerge)
+		}
 		return
+	}
+	for _, n := range ignores {
+		if n > include {
+			_, _ = fmt.Fprintf(out, "Warning: ~/.ssh/config line %d sets IgnoreUnknown after the Include on line %d: %s, so your list is ignored and the options it names "+
+				"are fatal. %s\n", n, include, hostTrustIgnoreWarning, hostTrustIgnoreMerge)
+		}
 	}
 	if firstBlock != 0 && firstBlock < include {
 		_, _ = fmt.Fprintf(out, "Warning: ~/.ssh/config line %d includes %s after the Host or Match line %d: an Include inside a Host or Match block applies only "+
@@ -863,6 +881,13 @@ func sshConfigFile(names []string) []byte {
 // hence top level, and ssh keeps the first value it obtains, so an earlier
 // IgnoreUnknown of the user's own wins (enroll-user.md).
 const hostTrustIgnoreUnknown = "IgnoreUnknown KnownHostsCommand\n"
+
+// The Include check's warning for a user's own IgnoreUnknown that the
+// managed file's would replace (owner decision D-R5).
+const (
+	hostTrustIgnoreWarning = "ssh keeps only the first IgnoreUnknown it obtains, and the managed file's IgnoreUnknown KnownHostsCommand replaces yours"
+	hostTrustIgnoreMerge   = "Merge your list into one line at top level, before the Include: IgnoreUnknown <your list>,KnownHostsCommand"
+)
 
 // hostTrustStep is one write of a run, by its name for hostTrustFault.
 type hostTrustStep struct {

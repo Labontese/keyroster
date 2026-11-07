@@ -1634,6 +1634,31 @@ func knownHostsEdgeCases(t *testing.T) {
 			}
 		}
 	})
+	// D-R5 (owner decision 2026-11-07): ssh keeps the first IgnoreUnknown
+	// it obtains, so one after the Include is replaced by the managed
+	// file's IgnoreUnknown KnownHostsCommand; the scan warns, on stderr
+	// only, and the outcome line is unchanged.
+	const ignoreWarn = "ssh keeps only the first IgnoreUnknown it obtains"
+	t.Run("ignore_unknown_after_include_warned", func(t *testing.T) {
+		for _, line := range []string{"IgnoreUnknown UseKeychain", "ignoreunknown=UseKeychain", "  IGNOREUNKNOWN = UseKeychain"} {
+			stdout, stderr := withConfig(t, inc+"\nHost *\n\t"+line+"\n\tUseKeychain yes\n")
+			if !strings.Contains(stderr, "line 3 sets IgnoreUnknown after the Include on line 1") || !strings.Contains(stderr, ignoreWarn) ||
+				!strings.Contains(stderr, "IgnoreUnknown <your list>,KnownHostsCommand") || !strings.HasPrefix(stdout, "Host trust refreshed (") {
+				t.Fatalf("%q: stdout %q, stderr %q", line, stdout, stderr)
+			}
+		}
+	})
+	t.Run("ignore_unknown_before_include_silent", func(t *testing.T) {
+		if _, stderr := withConfig(t, "IgnoreUnknown UseKeychain,KnownHostsCommand\n"+inc+"\nHost *\n\tUseKeychain yes\n"); stderr != "" {
+			t.Fatalf("stderr %q", stderr)
+		}
+	})
+	t.Run("ignore_unknown_without_include_warned", func(t *testing.T) {
+		_, stderr := withConfig(t, "Host *\n\tIgnoreUnknown UseKeychain\n")
+		if strings.Count(stderr, inc) != 1 || !strings.Contains(stderr, "line 2 sets IgnoreUnknown") || !strings.Contains(stderr, ignoreWarn) {
+			t.Fatalf("stderr %q", stderr)
+		}
+	})
 	t.Run("include_keyword_case_and_equals_forms", func(t *testing.T) {
 		for _, cfg := range []string{"INCLUDE=~/.ssh/keyroster_ssh_config\n", "  include   ~/.ssh/keyroster_ssh_config\n", "Include = ~/.ssh/keyroster_ssh_config\n"} {
 			if _, stderr := withConfig(t, cfg); stderr != "" {

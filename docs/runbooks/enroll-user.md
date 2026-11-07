@@ -514,11 +514,24 @@ OpenSSH 8.5 does not know `KnownHostsCommand` and refuses an unknown
 keyword even inside a Host block that does not match, so without that line
 every ssh would fail once the Include is added. `IgnoreUnknown` acts only
 where its line is active, which is why the Include must sit at top level.
-ssh also keeps the first `IgnoreUnknown` it obtains: if your own
-`~/.ssh/config` sets `IgnoreUnknown` before the Include, add
-`KnownHostsCommand` to your own list. Run in CI e2e (03-09b) on OpenSSH
+ssh also keeps only the first `IgnoreUnknown` it obtains, which matters
+for your own:
+
+- one **before** the Include wins: add `KnownHostsCommand` to its list;
+- one **after** the Include is replaced by the managed file's, so the
+  options your list names become fatal (`Bad configuration option`, and
+  every ssh stops). Merge your list into one line at top level, before
+  the Include: `IgnoreUnknown <your list>,KnownHostsCommand`. The CLI
+  warns on stderr for each `IgnoreUnknown` after the Include (for each
+  one at all when the Include is missing); the outcome line and the exit
+  code do not change. It scans `~/.ssh/config` only, up to 1 MiB, and
+  does not inspect nested Includes (owner decision D-R5). Run in CI
+  (03-09b): `TestKnownHosts/ignore_unknown_after_include_warned`,
+  `TestKnownHosts/ignore_unknown_without_include_warned`.
+
+Run in CI e2e (03-09b) on OpenSSH
 9.5p1 and 10.5p1: `TestHostTrustLongLines` part `c_d7_block_after_include`
-(the line parses, and changes nothing else `ssh -G` prints for a managed
+(the managed IgnoreUnknown line parses, and changes nothing else `ssh -G` prints for a managed
 name). Clients below OpenSSH 8.5 are UNVERIFIED: no CI lane runs one.
 
 The block never falls back to `~/.ssh/known_hosts`. A name outside it
