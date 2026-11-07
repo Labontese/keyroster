@@ -747,21 +747,21 @@ var hostTrustOverrides = map[string]string{
 // any letter case, as "Key Value" or "Key=Value"; nested Includes are not
 // inspected.
 func (w *hostTrustWriter) includeAdvice(out io.Writer) {
-	add := "To use these files, add this line to ~/.ssh/config before the first Host or Match line:\n\tInclude ~/.ssh/" + hostTrustSSHConfig + "\n"
+	add := "To use these files, add this line to ~/.ssh/config at top level, before the first Host or Match line:\n\tInclude ~/.ssh/" + hostTrustSSHConfig + "\n"
 	fh, err := os.Open(filepath.Join(w.sshDir, "config")) //nolint:gosec // G304: the user's own ssh config, read only
 	if errors.Is(err, fs.ErrNotExist) {
 		_, _ = io.WriteString(out, add)
 		return
 	}
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "Note: ~/.ssh/config could not be read (%v); make sure it includes ~/.ssh/%s before the first Host or Match line.\n", err, hostTrustSSHConfig)
+		_, _ = fmt.Fprintf(out, "Note: ~/.ssh/config could not be read (%v); make sure it includes ~/.ssh/%s at top level, before the first Host or Match line.\n", err, hostTrustSSHConfig)
 		return
 	}
 	defer func() { _ = fh.Close() }()
 	data, err := io.ReadAll(io.LimitReader(fh, maxSSHConfigScan+1))
 	if err != nil || len(data) > maxSSHConfigScan {
 		_, _ = fmt.Fprintf(out, "Note: ~/.ssh/config is larger than 1 MiB (or could not be read) and was not scanned; make sure it includes ~/.ssh/%s "+
-			"before the first Host or Match line.\n", hostTrustSSHConfig)
+			"at top level, before the first Host or Match line.\n", hostTrustSSHConfig)
 		return
 	}
 	var (
@@ -846,13 +846,23 @@ func knownHostsFile(cas []trust.CAEntry, active []string, st *hostTrustState) []
 func sshConfigFile(names []string) []byte {
 	var b strings.Builder
 	b.WriteString(hostTrustHeader)
-	b.WriteString("# Include it from ~/.ssh/config before the first Host or Match line.\n")
+	b.WriteString("# Include it from ~/.ssh/config at top level, before the first Host or Match line.\n")
 	if len(names) > 0 {
+		b.WriteString(hostTrustIgnoreUnknown)
 		b.WriteString("Host " + strings.Join(names, " ") + "\n")
 		b.WriteString(hostTrustBlockOptions)
 	}
 	return []byte(b.String())
 }
+
+// hostTrustIgnoreUnknown is the managed config's first directive, at top
+// level before the Host block (owner decision D-R4): ssh below 8.5 does
+// not know KnownHostsCommand and refuses an unknown keyword even inside a
+// Host block that does not match, so without it every ssh would fail once
+// the Include is added. IgnoreUnknown only acts where its line is active,
+// hence top level, and ssh keeps the first value it obtains, so an earlier
+// IgnoreUnknown of the user's own wins (enroll-user.md).
+const hostTrustIgnoreUnknown = "IgnoreUnknown KnownHostsCommand\n"
 
 // hostTrustStep is one write of a run, by its name for hostTrustFault.
 type hostTrustStep struct {

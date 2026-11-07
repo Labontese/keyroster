@@ -265,11 +265,11 @@ const htKnownHostsHead = "# keyroster: managed file, rewritten by keyroster logi
 
 // htConfig is the exact keyroster_ssh_config over names.
 func htConfig(names ...string) string {
-	s := htKnownHostsHead + "# Include it from ~/.ssh/config before the first Host or Match line.\n"
+	s := htKnownHostsHead + "# Include it from ~/.ssh/config at top level, before the first Host or Match line.\n"
 	if len(names) == 0 {
 		return s
 	}
-	return s + "Host " + strings.Join(names, " ") + "\n" +
+	return s + "IgnoreUnknown KnownHostsCommand\n" + "Host " + strings.Join(names, " ") + "\n" +
 		"\tUserKnownHostsFile ~/.ssh/keyroster_known_hosts\n" +
 		"\tGlobalKnownHostsFile ~/.ssh/keyroster_known_hosts\n" +
 		"\tKnownHostsCommand none\n" +
@@ -433,9 +433,11 @@ func TestKnownHosts(t *testing.T) {
 		mustRun(t, f.in(t, f.dirDoc(t, 1, "", htHost(t, "web1", directory.StatusActive, "web1")), f.krlV(t, 1)), hostTrustFull)
 		cfg := f.file(t, hostTrustSSHConfig)
 		lines := strings.Split(strings.TrimSuffix(cfg, "\n"), "\n")
-		want := []string{"Host web1", "\tUserKnownHostsFile ~/.ssh/keyroster_known_hosts", "\tGlobalKnownHostsFile ~/.ssh/keyroster_known_hosts",
+		// IgnoreUnknown is the first directive, at top level before the
+		// Host block (D-R4).
+		want := []string{"IgnoreUnknown KnownHostsCommand", "Host web1", "\tUserKnownHostsFile ~/.ssh/keyroster_known_hosts", "\tGlobalKnownHostsFile ~/.ssh/keyroster_known_hosts",
 			"\tKnownHostsCommand none", "\tStrictHostKeyChecking yes", "\tUpdateHostKeys no", "\tVerifyHostKeyDNS no", "\tRevokedHostKeys ~/.ssh/keyroster_revoked_hosts.krl"}
-		if len(lines) != 10 || !slices.Equal(lines[2:], want) {
+		if len(lines) != 11 || !slices.Equal(lines[2:], want) {
 			t.Fatalf("config lines %q", lines)
 		}
 		for _, no := range []string{"HostKeyAlias", "CheckHostIP"} {

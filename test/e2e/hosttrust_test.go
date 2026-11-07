@@ -623,6 +623,27 @@ func hostTrustLongLines(t *testing.T, env *serverEnv, admin *cliEnv, home string
 		if g := sshG(t, later, "outside-name"); !strings.Contains(g, "\nknownhostscommand /bin/true\n") {
 			t.Fatal("ssh -G for a name outside the block does not print the later knownhostscommand: the oracle does not tell the cases apart")
 		}
+		// IgnoreUnknown (D-R4): the managed file's top-level
+		// "IgnoreUnknown KnownHostsCommand" parses, and apart from its own
+		// ignoreunknown line ssh -G prints the same for a managed name as
+		// the same file without it.
+		managed := filepath.Join(home, ".ssh", trustSSHConfig)
+		data := string(readFile(t, managed))
+		const ignore = "IgnoreUnknown KnownHostsCommand\n"
+		if !strings.Contains(data, "\n"+ignore+"Host ") {
+			t.Fatalf("%s has no top-level %q right before its Host line", managed, ignore)
+		}
+		without := filepath.Join(dir, "without-ignore")
+		if err := os.WriteFile(without, []byte(strings.Replace(data, ignore, "", 1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{first, last} {
+			with, plain := sshG(t, managed, name), sshG(t, without, name)
+			if !strings.Contains(with, "\nignoreunknown KnownHostsCommand\n") ||
+				strings.Replace(with, "\nignoreunknown KnownHostsCommand\n", "\n", 1) != plain {
+				t.Fatalf("ssh -G %s: the IgnoreUnknown line changes more than its own ignoreunknown line", name)
+			}
+		}
 	})
 }
 

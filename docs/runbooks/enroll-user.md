@@ -498,14 +498,28 @@ directory:
 - `host-trust.json` in the keyroster config directory (next to
   `config.json`): the floors and the names.
 
-Include the managed config from `~/.ssh/config` **before the first Host or
-Match line**: ssh keeps the first value it obtains, and an Include inside
-a Host block is conditional on that block. The CLI prints the line when it
-is missing and warns when it is misplaced:
+Include the managed config from `~/.ssh/config` **at top level, before the
+first Host or Match line** and outside any Host or Match block: ssh keeps
+the first value it obtains, and an Include inside a Host block is
+conditional on that block. The CLI prints the line when it is missing and
+warns when it is misplaced:
 
 ```
 Include ~/.ssh/keyroster_ssh_config
 ```
+
+The managed config's first directive, at top level before its Host block,
+is `IgnoreUnknown KnownHostsCommand` (owner decision D-R4). ssh below
+OpenSSH 8.5 does not know `KnownHostsCommand` and refuses an unknown
+keyword even inside a Host block that does not match, so without that line
+every ssh would fail once the Include is added. `IgnoreUnknown` acts only
+where its line is active, which is why the Include must sit at top level.
+ssh also keeps the first `IgnoreUnknown` it obtains: if your own
+`~/.ssh/config` sets `IgnoreUnknown` before the Include, add
+`KnownHostsCommand` to your own list. Run in CI e2e (03-09b) on OpenSSH
+9.5p1 and 10.5p1: `TestHostTrustLongLines` part `c_d7_block_after_include`
+(the line parses, and changes nothing else `ssh -G` prints for a managed
+name). Clients below OpenSSH 8.5 are UNVERIFIED: no CI lane runs one.
 
 The block never falls back to `~/.ssh/known_hosts`. A name outside it
 keeps your own configuration. Run in CI (03-09b):
