@@ -345,10 +345,17 @@ order:
    this installation, a served directory older than the version it
    holds, or an equal version with another SHA-256, is refused: the
    directory step fails (exit 3), nothing is reported disabled and
-   `--keys` takes no key from that entry. A state that cannot be read
-   only warns. Run in CI (03-09b):
+   `--keys` takes no key from that entry. The line that reports NAME
+   already disabled or absent also says which of three things happened:
+   the served version is not older than the one your host trust files
+   hold (the floor applied, with that version); there is no host trust
+   state of this installation, so no floor was checked; or the state
+   could not be read, so no floor was checked (a warning on stderr names
+   the file). Run in CI (03-09b):
    `TestRevokeHost/stale_directory_already_disabled_refused_exit_3`,
-   `TestRevokeHost/equal_version_other_sha_refused_exit_3`.
+   `TestRevokeHost/equal_version_other_sha_refused_exit_3`,
+   `TestRevokeHost/floor_equal_version_same_sha_exit_0`,
+   `TestRevokeHost/unreadable_floor_warns`.
 3. **`--keys`**, only when the first sweep succeeded and the entry was
    found: one explicit-key revocation per host key of the verified entry,
    never the keys the server reports. An explicit key never leaves the KRL,

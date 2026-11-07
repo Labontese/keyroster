@@ -958,7 +958,7 @@ func TestRevokeHost(t *testing.T) {
 		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
 		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
 		if code != 0 || !strings.Contains(stdout, "Directory version 1, the admin-signed version the server serves, lists web1 as disabled: no directory change. "+
-			"That is the server's word") ||
+			"That is the server's word: the CLI checks the admins' signatures, not that the signer holds that version, and there is no host trust state of this installation, so no version floor was checked.\n") ||
 			!strings.Contains(stdout, "Second revocation (after reading the directory) of web1") ||
 			!strings.Contains(stdout, "Directory version 1 lists web1 as disabled (the server's word), and the KRL lists every certificate of web1 the server reported.") ||
 			strings.Contains(stdout, "web1 is disabled") {
@@ -1029,7 +1029,8 @@ func TestRevokeHost(t *testing.T) {
 		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusDisabled, 1)
 		seedFloor(t, e, e.bundle.InstallationID, 1, servedSHA(e))
 		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
-		if code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes"); code != 0 {
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 0 || !strings.Contains(stdout, "not that the signer holds that version, and it is not older than directory version 1, which your host trust files hold.\n") {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
 	})
@@ -1037,7 +1038,8 @@ func TestRevokeHost(t *testing.T) {
 		e, _ := hostRevokeEnv(t, 1, 1, directory.StatusDisabled, 1)
 		seedFloor(t, e, htInstall(t), 5, strings.Repeat("ef", 32))
 		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
-		if code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes"); code != 0 {
+		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
+		if code != 0 || !strings.Contains(stdout, "and there is no host trust state of this installation, so no version floor was checked.\n") {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
 		}
 	})
@@ -1053,8 +1055,21 @@ func TestRevokeHost(t *testing.T) {
 		writeTestFile(t, p, []byte("not json"))
 		e.serveRevokes(e.hostKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
 		code, stdout, stderr := run(t, "revoke", "host", "web1", "--yes")
-		if code != 0 || !strings.Contains(stderr, "is not checked against the version your host trust files hold") {
+		if code != 0 || !strings.Contains(stderr, "is not checked against the version your host trust files hold") ||
+			!strings.Contains(stdout, "and your host trust state could not be read (see the warning), so no version floor was checked.\n") {
 			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+	})
+	t.Run("no_directory_served_says_so_exit_3", func(t *testing.T) {
+		e := newDirEnv(t, 1, 1)
+		e.serveRevokes(e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first))
+		code, stdout, stderr := run(t, "revoke", "host", "web9", "--yes")
+		if code != 3 || !strings.Contains(stdout, "web9 is in no directory: the server serves none, so there is no entry to disable. "+
+			"That is the server's word: nothing admin-signed shows what the signer holds, and there is no host trust state of this installation, so no version floor was checked.\n") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+			t.Fatalf("requests %v, want one revoke and no directory install", got)
 		}
 	})
 	t.Run("unknown_name_sweeps_warns_exit_3", func(t *testing.T) {
@@ -1062,7 +1077,8 @@ func TestRevokeHost(t *testing.T) {
 			e, _ := hostRevokeEnv(t, 1, 1, directory.StatusActive, 1)
 			e.serveRevokes(e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(ans))
 			code, stdout, stderr := run(t, "revoke", "host", "web9", "--yes")
-			if code != 3 || !strings.Contains(stdout, "web9 is not in directory version 1 (the version the server serves, verified): there is no entry to disable.\n") ||
+			if code != 3 || !strings.Contains(stdout, "web9 is not in directory version 1, the admin-signed version the server serves: there is no entry to disable. "+
+				"That is the server's word: the CLI checks the admins' signatures, not that the signer holds that version, and there is no host trust state of this installation, so no version floor was checked.\n") ||
 				!strings.Contains(stdout, "Its live certificates are revoked as reported above. If web9 was removed, its agent may still be enrolled and still receives state: end that with keyroster host forget.") {
 				t.Fatalf("%d serials: exit %d, stderr %q, stdout:\n%s", ans.SerialCount, code, stderr, stdout)
 			}

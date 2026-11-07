@@ -655,7 +655,11 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 		entryKeys  []string
 		hostStatus string
 	)
-	floor := func(base *verifiedDirectory) error { return checkHostTrustFloor(base, stderr) }
+	var floorNote string
+	floor := func(base *verifiedDirectory) (err error) {
+		floorNote, err = checkHostTrustFloor(base, stderr)
+		return err
+	}
 	outcome, dirErr := editDirectoryOutcome(ctx, r.s, editOpts{Yes: *yes, Out: *out, CheckBase: floor}, stdout, func(d *directory.Directory, _ *trust.Policy) error {
 		dirRead, served = true, d.Version-1
 		h, ok := d.HostByName(name)
@@ -675,10 +679,14 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 	switch {
 	case already:
 		_, _ = fmt.Fprintf(stdout, "Directory version %d, the admin-signed version the server serves, lists %s as %s: no directory change. "+
-			"That is the server's word: the CLI checks the admins' signatures and the floor of your host trust files, not that the signer holds that version.\n",
-			served, name, hostStatus)
+			"That is the server's word: the CLI checks the admins' signatures, not that the signer holds that version, and %s.\n",
+			served, name, hostStatus, floorNote)
+	case unknown && served == 0:
+		_, _ = fmt.Fprintf(stdout, "%s is in no directory: the server serves none, so there is no entry to disable. "+
+			"That is the server's word: nothing admin-signed shows what the signer holds, and %s.\n", name, floorNote)
 	case unknown:
-		_, _ = fmt.Fprintf(stdout, "%s is not in directory version %d (the version the server serves, verified): there is no entry to disable.\n", name, served)
+		_, _ = fmt.Fprintf(stdout, "%s is not in directory version %d, the admin-signed version the server serves: there is no entry to disable. "+
+			"That is the server's word: the CLI checks the admins' signatures, not that the signer holds that version, and %s.\n", name, served, floorNote)
 	}
 	if firstErr != nil {
 		switch {
@@ -771,27 +779,29 @@ func runRevokeHost(ctx context.Context, args []string, stdout, stderr io.Writer)
 // another SHA-256, is refused (the writer's rule). The directory step then
 // fails: the run neither reports NAME disabled from a stale version nor
 // revokes keys from a stale entry. A state that cannot be read only warns,
-// and the floor is not checked then.
-func checkHostTrustFloor(base *verifiedDirectory, stderr io.Writer) error {
+// and the floor is not checked then. note says what was checked, for the lines that report the directory as
+// the server's word: the floor and its version, no state of this
+// installation, or a state that could not be read.
+func checkHostTrustFloor(base *verifiedDirectory, stderr io.Writer) (note string, err error) {
 	path, err := hostTrustStatePath()
 	if err != nil {
-		return err
+		return "", err
 	}
 	st, err := readHostTrustState(path)
 	switch {
 	case err != nil:
 		_, _ = fmt.Fprintf(stderr, "Warning: %v (%s), so the directory the server serves is not checked against the version your host trust files hold.\n", err, path)
-		return nil
+		return "your host trust state could not be read (see the warning), so no version floor was checked", nil
 	case st == nil || st.InstallationID != base.Bundle.InstallationID:
-		return nil
+		return "there is no host trust state of this installation, so no version floor was checked", nil
 	case base.Version < st.DirectoryVersion:
-		return fmt.Errorf("the server serves directory version %d, older than version %d, which your host trust files hold (%s); refusing to build on it",
+		return "", fmt.Errorf("the server serves directory version %d, older than version %d, which your host trust files hold (%s); refusing to build on it",
 			base.Version, st.DirectoryVersion, path)
 	case base.Version == st.DirectoryVersion && base.SHA256 != st.DirectorySHA256:
-		return fmt.Errorf("the server serves directory version %d with another SHA-256 than the version %d your host trust files hold (%s); refusing to build on it",
+		return "", fmt.Errorf("the server serves directory version %d with another SHA-256 than the version %d your host trust files hold (%s); refusing to build on it",
 			base.Version, base.Version, path)
 	}
-	return nil
+	return fmt.Sprintf("it is not older than directory version %d, which your host trust files hold", st.DirectoryVersion), nil
 }
 
 // hostKeyFingerprint is the SHA256 fingerprint of a host key in
