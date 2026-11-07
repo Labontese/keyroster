@@ -212,7 +212,7 @@ mutant killed: the 2 h margin removed (TestProbeIssue/predecessor_expiring_publi
 mutant killed: the published flag ignored (TestProbeIssue/unpublished_predecessor_publishes_now)
 mutant killed: published true for a krl_publish leaf at the same index or below (TestProbeIndex/published_flag_follows_krl_publish_leaf)
 mutant killed: republishIfDue ignoring the prompt flag (TestProbeIssue/flag_published_at_next_tick)
-mutant killed: the flag honoured without an unpublished negative (TestProbeIssue/flag_moot_after_other_publish)
+mutant killed: the flag honoured without an unpublished negative (TestProbeIssue/flag_moot_after_other_publish). Held at d60663a only: since the F4 fix this mutant is equivalent (see "Pre-merge review").
 mutant killed: the window taken from the previous certificate's CapSeconds (TestProbeIssue/cert_recent_window_from_new_lifetime)
 mutant killed: an exact retry accepted for other signing bytes (TestProbeIssue/retry_with_other_bytes_is_duplicate)
 mutant killed: an exact retry that writes a new leaf (TestProbeIssue/exact_retry_redelivers_no_leaf)
@@ -289,4 +289,68 @@ These are taken from the plan's Edge Coverage, plus what this run did not exerci
 - The corrupt-KRL, serial-encoding and source-address behaviour on OpenSSH builds other than 9.5p1 and 10.5p1.
 - Windows: no Windows code or CI changes here.
 - A restart loses the prompt flag. The waiting row then rides the hourly publish; not tested across a restart.
+- The `hasUnpublishedNegative` term of republishIfDue's flag gate, since the F4 fix (see "Pre-merge review"). No test reaches a set flag without an unpublished negative.
+
+## Pre-merge review
+
+Review run wf_7b91fc5b-c8c: four Opus lenses and Codex on PR #90, head d60663a on base 70ac72b, with two Sonnet skeptics per finding and a critic. Nothing high or critical was found. Fix round 1 is commits f5809f7 to ff06edb plus this record, on top of d60663a (no rewrite).
+
+Each RED below was taken locally: the mutant was applied to the committed or staged code, the named subtest alone was run (`-count=1 -timeout 5m`), and the file was restored with `git checkout --` and proved clean with `git diff --quiet`. A kill counts only by that subtest's `--- FAIL:` line, never a build failure.
+
+| Finding | Severity | Outcome | Commit |
+|---|---|---|---|
+| F1: the certificate-key check was unreachable in tests | medium (2/2) | fixed (test) | f5809f7 |
+| F2: the key ID pol= check was unreachable in tests | low (2/2) | fixed (test) | f5809f7 |
+| F3: pos1 == neg1+1000 failed the serial_list case on correct code | low (2/2) | fixed (robustness) | e1be787, ff06edb |
+| F4: a stale probe prompt flag caused an early publish | low (Codex, 2/2) | fixed | 9e249e3 |
+| F5: the probe certificate's ValidAfter window was untested in audit | low (split 1/2) | fixed (test) | f5809f7 |
+| F6: the probe key rule's machine branch was untested in audit | low (split 1/2) | fixed (test) | f5809f7 |
+| D-R1: recovery keeps a lost riding negative probe certificate | owner decision | documented, todo for 03-10c | 2853ce7 |
+| A short machine cap disables the probe throttle (Codex medium, signer-issue low) | refuted | no action | none |
+| The ride rule looks only at the latest negative | refuted | no action | none |
+| Audit refuses older logs that carry keyroster-probe: | refuted | no action | none |
+| The relay test does not check the evidence blobs | refuted | no action | none |
+| The kr3 key ID requirement is unexercised | refuted | no action | none |
+
+**F1 (medium): the check that the certificate's key is the request's probe key could not be reached.** The fixture built the certificate subject from `p.req.ProbeKey`, and the existing probe-key cases changed the request key, the probe-pop key and the subject together.
+- Test: `probeIssue.certKey` overrides the certificate's key only. `TestVerifyProbeIssue/cert_key_not_probe_key_fails` sets it to a fresh key, with the request, the evidence and everything else genuine.
+- mutant killed: `if false && !bytes.Equal(c.Key.Marshal(), probeKey.Marshal())` at internal/audit/probeissue.go:126 (TestVerifyProbeIssue/cert_key_not_probe_key_fails: verify returned nil)
+
+**F2 (low): the check that the key ID's pol= is the policy in force could not be reached.** The cases changed the key ID and the body's policy version together. checkIssue does not compare them, so the check is reachable.
+- Test: `TestVerifyProbeIssue/key_id_policy_fails` changes only `keyID.Policy`.
+- mutant killed: `if false && kid.Policy != a.policy.Version` at internal/audit/probeissue.go:305 (TestVerifyProbeIssue/key_id_policy_fails: verify returned nil)
+
+**F3 (low): the serial_list case could fail on correct code.** That KRL revoked neg1-1000, neg1 and neg1+1000, while the guard only kept pos1 out of neg1 ± 1. Serials are max(last+1, now µs), so a positive issued a millisecond after the negative is neg1+1000.
+- Fix: pos1 is always above neg1, so the list's upper neighbour is now pos1+1000. The range moves to neg1-2..neg1 when pos1 is neg1+1. A guard fails the test if any constructed serial, or any serial inside the range, is pos1, and the range's expected shape comes from the constructed serials.
+- Each case still isolates its encoding. The list KRL holds neg1 between two serials at least 1000 away, so it encodes as a serial list with neg1 alone in its entry. The range KRL holds three consecutive serials with neg1 among them, so it encodes as one range. pos1 is outside both.
+- An unintended line in e1be787: that commit also carried a change this round did not write. In TestProbeSSHDFacts, `finalSrc` went from 127.0.0.1 to 127.0.0.2, which is the Task 4 mutant "the final PK_OK query sent from 127.0.0.2 instead of 127.0.0.1". It was in the working copy when the F3 edit was committed by path; its origin is unknown. e2e-probe (10.5p1) at 2853ce7 failed on it in `TestProbeSSHDFacts/listener_source_unaffected` (run 42386627397, job 128445299238), as the mutant should. ff06edb restores 127.0.0.1. `git diff d60663a ff06edb -- test/e2e/probe_certs_test.go` now holds only the F3 change, and the whole range diff of internal/ and test/ was read hunk by hunk and holds only this round's changes.
+- A robustness fix with no RED mutant, as instructed. It is verified by reasoning and by both e2e-probe CI lanes (below). Locally the package was vetted under `-tags "e2e e2eprobe"` and gofmt is clean. The e2e test itself was not run locally.
+
+**F4 (low, Codex): a stale probe prompt flag caused an early publish.** The flag was set by a coalesced negative and cleared only when republishIfDue published because of it. An admin revoke, a recovery, a probe issuance that published at once, and the hourly republish all carry every waiting negative row too, because each publish encodes the whole revocation table, but they left the flag set. A later riding negative then made the next tick publish early, against the ride rule (Q1).
+- Fix: every committed publish installs its KRL through `publishedLocked`, which stores it and clears the flag under s.mu. That covers revoke.go, recovery.go, probeissue.go and republishIfDue. `lastProbePublish` is still set only by probe-caused publishes, so the one-a-minute gap between them and the ride rule are unchanged.
+- Test: `TestProbeIssue/flag_cleared_by_carrying_publish`, with variants `admin_revoke`, `probe_issuance`, `recovery` and `hourly`. web1's negative publishes at t0. web3's first negative publishes at t0+3601 s. h01's negative at t0+3611 s coalesces and sets the flag. The carrying publish comes at t0+3671 s, or at t0+7202 s for the hourly variant. After it the flag must be clear. web1's renewal 10 s later must ride, and the tick 70 s after the carrying publish must not publish. `flag_moot_after_other_publish`, `coalesced_publishes_at_most_one_per_minute` and the other flag and ride subtests stay green.
+- RED before the fix: `admin_revoke` and `probe_issuance` failed with `probeissue_test.go:1123: the admin_revoke publish carried the waiting negative but left the prompt flag set` and `probeissue_test.go:1132: a stale prompt flag published the riding negative before the hourly republish`, and the same two lines for probe_issuance.
+- mutant killed: revoke.go's `s.publishedLocked(published)` back to `s.krl.Store(published)` (TestProbeIssue/flag_cleared_by_carrying_publish/admin_revoke)
+- mutant killed: probeissue.go's `s.publishedLocked(published)` back to `s.krl.Store(published)` (TestProbeIssue/flag_cleared_by_carrying_publish/probe_issuance)
+- mutant killed: recovery.go's `s.publishedLocked(published)` back to `s.krl.Store(published)` (TestProbeIssue/flag_cleared_by_carrying_publish/recovery)
+- mutant killed: republishIfDue back to the old rule, the flag cleared only by a prompted publish (TestProbeIssue/flag_cleared_by_carrying_publish/hourly)
+- The hourly variant first published at t0+7201 s. The test helpers advance the clock by milliseconds, so the last publish was then just under an hour old, the tick took the prompted path, and the variant did not tell the old code from the fix. Moved to t0+7202 s, it does.
+- Consequence: the mutant "the flag honoured without an unpublished negative" (Task 2, killed by flag_moot_after_other_publish at d60663a) is now equivalent. A flag is set only together with an unpublished negative, and every publish clears it, so no test can reach a set flag without one. The `hasUnpublishedNegative` term stays in the gate as defence in depth and is listed under UNVERIFIED. Rerun at ff06edb (with the four-variant test), the mutant survives `-run '^(TestProbeIssue|TestProbeLog|TestProbeIndex)$'` in internal/signer.
+- Deviation from the plan: plan lines 161 and 434 said the other publishers need no clearing, because any publish clears the flag's cause. That missed a later riding negative, which brings a cause back. The other publishers now clear the flag.
+
+**F5 (low, split 1/2): the probe certificate's ValidAfter window was untested in audit.** The `cert.CheckIssued(c, profile, from, to)` call in checkProbeCert could be removed with every test green.
+- Test: `probeIssue.issued` overrides cert.Build's Now. `TestVerifyProbeIssue/valid_after_outside_issuance_fails` issues 60 s after the leaf time: inside the 300 s CreatedAt skew, outside the range from the serial to the leaf time.
+- mutant killed: `if err := cert.CheckIssued(c, profile, from, to); false && err != nil` at internal/audit/probeissue.go:315 (TestVerifyProbeIssue/valid_after_outside_issuance_fails: verify returned nil)
+
+**F6 (low, split 1/2): the probe key rule's machine branch was untested in audit.** No audit test built a directory with a machine entry.
+- Test: `hostFixture.machines` puts machines into the directory the fixture publishes (nil, the default, keeps none). `TestVerifyProbeIssue/probe_key_machine_key_fails` lists the probe key on machine `ci` (role dev, 600 s). The case expects `machine "ci" (probe_key_unusable)`, so the host branch cannot satisfy it.
+- mutant killed: `if false && m.Key == k` at internal/audit/probeissue.go:280 (TestVerifyProbeIssue/probe_key_machine_key_fails: verify returned nil)
+
+**D-R1 (owner decision, Daniel, 2026-11-07): recovery keeps a lost riding negative probe certificate.** After a signer restore, `keyroster revoke recover` carries such a certificate as `keep`, because cmd/keyroster/recover.go:291 revokes only user-role certificates and named serials. No code change now. It is recorded as R9a under UNVERIFIED, next to R9. The todo `.planning/todos/pending/2026-11-07-recovery-revokes-lost-negative-probe-certificates.md`, owned by 03-10c, asks recovery to revoke lost negative probe certificates automatically, with audit parity through krl.CheckCarriedLost and tests. The plan's files_modified is unchanged: no repo gate compares it with the diff.
+
+**No action (refuted by the skeptics):** a short machine cap disabling the probe throttle (Codex medium and signer-issue low, both refuted); the ride rule looking only at the latest negative; audit refusing older logs that carry keyroster-probe:; the relay test not checking the evidence blobs; the kr3 key ID requirement being unexercised.
+
+**Local gates at 9e249e3:** gofmt clean for internal/audit, internal/signer and test/e2e. `go vet` passed for internal/audit and internal/signer, and `go vet -tags "e2e e2eprobe" ./test/e2e/` passed (and again at ff06edb, with gofmt). `go test -race -count=1` passed for internal/audit (82 s) and internal/signer (389 s), through scripts/linux.sh.
+
+**CI at ff06edb (PR #90 head before this record): every check passed.** The runs were CI 42387236049, E2E 42387236110, E2E distro 42387236045, E2E PKCS#11 42387236013, E2E TPM 42387236024, PIV 42387236040, Systemd 42387236017, CodeQL 42387236050, PR title 42387236011 and Workflow lint 42387236006. The F3 lanes: e2e-probe (10.5p1), job 128447095653, and e2e-probe (9.5p1), job 128447095450. Both ran TestProbeCertsAgainstSSHD and TestProbeSSHDFacts with no `--- FAIL` line. The earlier head 2853ce7 failed e2e-probe (10.5p1) on the stray line described under F3.
 
