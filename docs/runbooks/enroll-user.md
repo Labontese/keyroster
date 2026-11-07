@@ -554,7 +554,12 @@ rewrites every file. The state file has no such check before its rename
 state writes: the state then keeps the slower run's floors, never below
 the ones that run began with, and until a refresh from an honest server
 raises them again a compromised server could serve a directory version
-between the two runs' versions (T-03-347). Run in CI (03-09b):
+between the two runs' versions (T-03-347). The swap can also drop the
+names the faster run added from the state and the Host block. They come
+back when a directory that lists them is served again; a name removed
+from the directory in between does not come back, so it leaves the
+strict block and falls to your own ssh configuration (T-03-346, under
+this race). Run in CI (03-09b):
 `TestKnownHosts/concurrent_state_after_state_step_stops_krl`,
 `TestKnownHosts/concurrent_newer_krl_on_disk_stops_krl`; the window
 itself is UNVERIFIED (no test can time it).
