@@ -352,7 +352,7 @@ Commit e0fccdf (docs only) added the state-swap residual to enroll-user.md.
 
 ### Fix round 2
 
-Fix-round check wf_e48c6ab7-676 on head 66611da: lows only. Round 2 is commits fcb6aef, 38f3231 and 4ad4638, on top of 66611da (no rewrite).
+Fix-round check wf_e48c6ab7-676 on head 66611da: lows only. Round 2 is commits fcb6aef, 38f3231 and 4ad4638, on top of 66611da (no rewrite), plus G4 (addendum, commit 791fbd8).
 
 | Finding | Severity | Outcome | Commit |
 |---|---|---|---|
@@ -360,6 +360,7 @@ Fix-round check wf_e48c6ab7-676 on head 66611da: lows only. Round 2 is commits f
 | G2: revoke host's lines claimed more than was checked | low (2/2) | fixed | 38f3231 |
 | G3: names a state swap can drop | low (split 1/2) | documented | 4ad4638 |
 | Unreadable host-trust.json in `revoke host` | noted | no change | none |
+| G4: the managed IgnoreUnknown replaces the user's own later one | low (orchestrator) | warned per D-R5 | 791fbd8 |
 
 **G1 (low): `KnownHostsCommand` is fatal on ssh below 8.5.** `KnownHostsCommand none` came with OpenSSH 8.5. An older ssh refuses an unknown keyword even inside a Host block that does not match, so once the Include is added, every ssh would fail.
 - Owner decision D-R4 (2026-11-07): an IgnoreUnknown line at the top. When the config has names, its first directive is now `IgnoreUnknown KnownHostsCommand`, at top level after the two header comments and before the Host block. A config without names stays header only. `KnownHostsCommand none` stays.
@@ -385,6 +386,23 @@ Fix-round check wf_e48c6ab7-676 on head 66611da: lows only. Round 2 is commits f
 
 **G3 (low, split 1/2; docs only): names a state swap can drop.** The D-R1 state-swap residual in enroll-user.md item 2 now also covers names. When two runs swap their state writes, the names the faster run added can be missing from the state and the Host block. They come back when a directory that lists them is served again. A name removed from the directory in between does not come back: it leaves the strict block and falls to the user's own ssh configuration (T-03-346 under this race).
 
+**G4 (addendum): the managed IgnoreUnknown replaces the user's own later one.** ssh keeps only the first IgnoreUnknown it obtains, so the managed file's `IgnoreUnknown KnownHostsCommand` also replaces an `IgnoreUnknown` the user sets later in ~/.ssh/config, and the options that list names become fatal.
+- The orchestrator found this with OpenSSH_for_Windows_9.5p2. Reproduced on WSL's 9.6p1: `Include <managed>` followed by `Host *` / `IgnoreUnknown UseKeychain` / `UseKeychain yes` exits 255 (`line 4: Bad configuration option: usekeychain`). Without the Include it exits 0, and with a merged `IgnoreUnknown UseKeychain,KnownHostsCommand` before the Include it exits 0.
+- Owner decision D-R5 (2026-11-07): keep the line and warn.
+- Fix: `includeAdvice`, with the existing scan limits (~/.ssh/config only, up to 1 MiB, any letter case, "Key Value" or "Key=Value", nested Includes not inspected), now warns on stderr for each `IgnoreUnknown` after our Include. The warning says ssh keeps only the first IgnoreUnknown and that the managed file's replaces the user's, so the user's list is ignored and its options are fatal. It tells the user to merge the list into one line at top level, before the Include: `IgnoreUnknown <your list>,KnownHostsCommand`.
+- When our Include is missing, every `IgnoreUnknown` is warned about. Adding the Include may put it before any of them, and the warning says "once the Include comes before it".
+- A misplaced Include (after a Host or Match line) is treated like a present one: only the IgnoreUnknown lines after it are warned about.
+- An `IgnoreUnknown` before the Include stays silent: it wins, and enroll-user.md tells the user to add KnownHostsCommand to it.
+- The stdout outcome line and the exit codes are unchanged.
+- enroll-user.md item 1 describes both cases, the warning and the scan limits.
+- Tests: `TestKnownHosts/ignore_unknown_after_include_warned` covers three spellings and asserts the stdout line unchanged. `ignore_unknown_without_include_warned` checks that the Include line still prints once, plus the warning. `ignore_unknown_before_include_silent` covers the merged line before the Include, with empty stderr.
+- RED: before the code change, `--- FAIL: TestKnownHosts/ignore_unknown_after_include_warned` and `--- FAIL: TestKnownHosts/ignore_unknown_without_include_warned`.
+- Local gates after G4: the same set as above, all green on Windows and Linux. golangci-lint reports 0 issues.
+- CI on 791fbd8: all 27 checks passed.
+  - e2e run 42339582966 passed `TestHostTrustLongLines` and `TestHostCertNoTOFU` on both lanes, with no `--- FAIL:`. Go test elapsed: 9.5p1 745.780 s, 10.5p1 774.940 s, both under 900 s.
+  - CI run 42339582733 passed, fuzz included.
+  - All ten workflows on d9b315c passed too.
+
 **No change, noted:** an unreadable host-trust.json in `revoke host` keeps warn-and-skip. The check's skeptics refuted it as a defect: a missing file skips the floor too, and a server cannot damage the file. The lens that looked at it preferred failing closed; that is noted, not adopted.
 
 **Local gates after round 2.**
@@ -403,4 +421,4 @@ CI on the round-2 head 4ad4638: all 27 checks passed.
 
 ## Self-Check: PASSED
 
-Every created file exists (knownhosts.go and its two test files, hosttrust_runbook_test.go, revoke_host_test.go, test/e2e/hosttrust_test.go, the plan, the moved todo), and each recorded commit (859f99e, f770e17, 669ffaf, 6a56968, 690967a, 7bc39a0, 457a001, 42cf597, bbe9cb2) is an ancestor of HEAD. Pre-merge fix round 1: the todo 2026-11-06-root-signed-host-name-scope.md exists, and 9fd5556, e499893, dd7da7f, 9b6fbbd, 1115de2, 39f88ca, 5787dc7, a27bfae and e0fccdf are ancestors of HEAD. Fix round 2: 66611da, fcb6aef, 38f3231 and 4ad4638 are ancestors of HEAD.
+Every created file exists (knownhosts.go and its two test files, hosttrust_runbook_test.go, revoke_host_test.go, test/e2e/hosttrust_test.go, the plan, the moved todo), and each recorded commit (859f99e, f770e17, 669ffaf, 6a56968, 690967a, 7bc39a0, 457a001, 42cf597, bbe9cb2) is an ancestor of HEAD. Pre-merge fix round 1: the todo 2026-11-06-root-signed-host-name-scope.md exists, and 9fd5556, e499893, dd7da7f, 9b6fbbd, 1115de2, 39f88ca, 5787dc7, a27bfae and e0fccdf are ancestors of HEAD. Fix round 2: 66611da, fcb6aef, 38f3231, 4ad4638, d9b315c and 791fbd8 are ancestors of HEAD.
