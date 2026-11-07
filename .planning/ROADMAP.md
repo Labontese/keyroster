@@ -160,7 +160,7 @@ Plans:
   4. Users connect to enrolled hosts without a TOFU prompt: agents obtain and renew host certificates by proof of possession of the host key, and `sshcm` manages the `@cert-authority` known_hosts line and the revoked host keys list. Machine/automation identities obtain day-scale certificates within role caps.
   5. Admin rotates a CA key with no failed logins (old and new trusted in parallel until heartbeats show every host converged), and with the server down an offline break-glass CA still grants login to the dedicated emergency account and to nothing else.
 
-**Plans:** 23/30 plans executed in 31 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
+**Plans:** 24/30 plans executed in 31 waves. They execute and merge one at a time, each PR through an owner merge gate (01-SKELETON.md "Delivery Protocol", branches `p03/NN-slug`). Plan numbers are identifiers; waves decide order.
 
 Plans:
 **Wave 1**
@@ -231,7 +231,7 @@ Plans:
 - [x] 03-09b-PLAN.md — CLI-managed @cert-authority and revoked-hosts files for every user (known-hosts sync and the login refresh, T-03-100 redeem-directory), keyroster revoke host (serials, disable, --keys opt-in), principal and key losses revoked before an install
 
 **Wave 23** *(blocked on Wave 22 completion)*
-- [ ] 03-10-PLAN.md — Probe certificates by proof of possession: frame 0x0B and leaf kind 12, machine-CA probe certificates with force-command /bin/false and a loopback source-address, the negative probe as a revoked serial, audit re-proof, the agent route and budget, the keyroster-probe: reservation, and the sshd PK_OK e2e test in its own CI job
+- [x] 03-10-PLAN.md — Probe certificates by proof of possession: frame 0x0B and leaf kind 12, machine-CA probe certificates with force-command /bin/false and a loopback source-address, the negative probe as a revoked serial, audit re-proof, the agent route and budget, the keyroster-probe: reservation, and the sshd PK_OK e2e test in its own CI job
 
 **Wave 24** *(blocked on Wave 23 completion)*
 - [ ] 03-10b-PLAN.md — The agent's probe self-test: the probe issuance step and fetcher, PK_OK queries from a dedicated loopback source, the hold-and-retry gate for changes that add access, probe state and budget, status reporting and the test-only seam
@@ -325,7 +325,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Trust Core | 21/21 | In Progress|  |
 | 2. Passkey Login MVP | 14/14 | Complete    | 2026-10-23 |
-| 3. Linux Agent and Revocation | 23/30 | In Progress | - |
+| 3. Linux Agent and Revocation | 24/30 | In Progress | - |
 | 4. Insider Resistance and Web UI | 0/TBD | Not started | - |
 | 5. Visibility and Cross-Platform Agents | 0/TBD | Not started | - |
 | 6. Hardening and Release | 0/TBD | Not started | - |
