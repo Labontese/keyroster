@@ -28,6 +28,8 @@
           { "context": "pr-title", "integration_id": 15368 },
           { "context": "e2e (9.5p1)", "integration_id": 15368 },
           { "context": "e2e (10.5p1)", "integration_id": 15368 },
+          { "context": "e2e-probe (9.5p1)", "integration_id": 15368 },
+          { "context": "e2e-probe (10.5p1)", "integration_id": 15368 },
           { "context": "e2e-distro (debian:12)", "integration_id": 15368 },
           { "context": "e2e-distro (debian:13)", "integration_id": 15368 },
           { "context": "e2e-distro (ubuntu:24.04)", "integration_id": 15368 },

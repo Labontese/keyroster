@@ -3748,6 +3748,7 @@ type hostFixture struct {
 	*loginFixture
 	key, key2, off ssh.Signer
 	hosts          []directory.Host
+	machines       []directory.Machine // nil: the directory has no machines
 }
 
 func newHostFixture(t testing.TB, capSeconds uint64) *hostFixture {
@@ -3777,7 +3778,7 @@ func newHostFixture(t testing.TB, capSeconds uint64) *hostFixture {
 	return hf
 }
 
-// publish logs the next directory version with hf.hosts.
+// publish logs the next directory version with hf.hosts and hf.machines.
 func (hf *hostFixture) publish() {
 	hf.t.Helper()
 	hosts := slices.Clone(hf.hosts)
@@ -3788,6 +3789,7 @@ func (hf *hostFixture) publish() {
 		d.InstallationID = auditInstallationID
 		d.HostGroups = []directory.HostGroup{{Name: "lab", Accounts: []directory.AccountMap{{Account: "root", Roles: []string{"ops"}}}}}
 		d.Hosts = hosts
+		d.Machines = slices.Clone(hf.machines)
 	}), nil)
 }
 

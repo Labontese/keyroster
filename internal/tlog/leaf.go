@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"golang.org/x/crypto/cryptobyte"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/wire"
 )
@@ -46,9 +47,12 @@ type Kind uint8
 // HostForget records an admin-signed forget of one enrolled agent, which
 // the signer authorized before keyroster-server deleted it. Kind 11
 // joined format v1 in Phase 3 (03-09): HostIssue records a host
-// certificate issued to a host agent by proof of possession. Kinds 12 to
-// 14 stay reserved for 03-10 to 03-12, which add them to the valid set
-// (valid). A reader that has no check for a kind must refuse it, never
+// certificate issued to a host agent by proof of possession. Kind 12
+// joined format v1 in Phase 3 (03-10): ProbeIssue records a probe
+// certificate issued to a host agent by proof of possession, and for a
+// negative probe the revocation of its own serial. Kinds 13 and 14 stay
+// reserved for 03-11 and 03-12, which add them to the valid set (valid).
+// A reader that has no check for a kind must refuse it, never
 // skip it (audit verify does). docs/format-registry.md allocates the
 // numbers; TestFormatRegistry fails when it and these constants disagree.
 const (
@@ -62,13 +66,15 @@ const (
 	KindLoginIssue       Kind = 8
 	KindRevoke           Kind = 9
 	KindKRLPublish       Kind = 10
-	// KindHostIssue (03-09) takes its reserved number; 12 to 14 belong to
-	// 03-10 to 03-12.
+	// KindHostIssue (03-09) takes its reserved number.
 	KindHostIssue Kind = 11
+	// KindProbeIssue (03-10) takes its reserved number; 13 and 14 belong
+	// to 03-11 and 03-12.
+	KindProbeIssue Kind = 12
 	// 15 (03-06b) was the first free number: 11 to 14 belonged to 03-09
 	// to 03-12.
 	KindRevocationRecovery Kind = 15
-	// 16 (03-08c) comes after 15; 12 to 14 stay 03-10 to 03-12's.
+	// 16 (03-08c) comes after 15; 13 and 14 stay 03-11 and 03-12's.
 	KindHostForget Kind = 16
 )
 
@@ -97,6 +103,8 @@ func (k Kind) String() string {
 		return "krl_publish"
 	case KindHostIssue:
 		return "host_issue"
+	case KindProbeIssue:
+		return "probe_issue"
 	case KindRevocationRecovery:
 		return "revocation_recovery"
 	case KindHostForget:
@@ -107,9 +115,9 @@ func (k Kind) String() string {
 }
 
 // valid reports whether k is a kind of format v1. It is an explicit set:
-// 1 to 11, 15 and 16. Kinds 12 to 14 are added by 03-10 to 03-12.
+// 1 to 12, 15 and 16. Kinds 13 and 14 are added by 03-11 and 03-12.
 func (k Kind) valid() bool {
-	return (k >= KindIssue && k <= KindHostIssue) || k == KindRevocationRecovery || k == KindHostForget
+	return (k >= KindIssue && k <= KindProbeIssue) || k == KindRevocationRecovery || k == KindHostForget
 }
 
 // Size limits enforced by the encoders and the strict decoders.
@@ -232,6 +240,8 @@ func checkBody(k Kind, body []byte) error {
 		_, err = DecodeHostForgetBody(body)
 	case KindHostIssue:
 		_, err = DecodeHostIssueBody(body)
+	case KindProbeIssue:
+		_, err = DecodeProbeIssueBody(body)
 	default:
 		err = fmt.Errorf("%w: unknown kind %d", ErrMalformedLeaf, k)
 	}
@@ -854,6 +864,142 @@ func DecodeHostIssueBody(data []byte) (*HostIssueBody, error) {
 		return nil, err
 	}
 	return &b, nil
+}
+
+// ProbeIssueBody records one probe certificate issued to a host agent by
+// proof of possession (kind 12, 03-10): the serial, Negative (the request
+// asked for the negative probe, whose own serial the signer revoked in the
+// same transaction), the policy and directory versions the signer issued
+// it under, CapSeconds (min(604800, the machine max_ttl_seconds of the
+// policy in force) at issuance, which is also the certificate's lifetime
+// ValidBefore - (ValidAfter + 300), the signer's choice, Q-09-6), the
+// request's full signing bytes (at most MaxRequest), the evidence
+// presented (host-pop/v1 by the host key, then probe-pop/v1 by the probe
+// key), the full certificate and its key ID. With them an auditor
+// re-proves the issuance, and the revocation of a negative one, from the
+// log alone.
+type ProbeIssueBody struct {
+	Serial           uint64
+	Negative         bool
+	PolicyVersion    uint64
+	DirectoryVersion uint64
+	CapSeconds       uint64
+	Request          []byte
+	Evidence         []wire.Evidence
+	Cert             []byte
+	KeyID            string
+}
+
+func (b *ProbeIssueBody) check() error {
+	if len(b.Request) == 0 || len(b.Request) > MaxRequest || len(b.Evidence) > wire.MaxEvidence ||
+		len(b.Cert) == 0 || len(b.Cert) > MaxCert || len(b.KeyID) == 0 || len(b.KeyID) > MaxKeyID {
+		return fmt.Errorf("%w: probe_issue body size", ErrMalformedLeaf)
+	}
+	for _, e := range b.Evidence {
+		if len(e.Type) == 0 || len(e.Type) > wire.MaxEvidenceType || len(e.Blob) > wire.MaxEvidenceBlob {
+			return fmt.Errorf("%w: evidence size", ErrMalformedLeaf)
+		}
+	}
+	return nil
+}
+
+// Encode encodes the body: the serial (uint64), Negative (one byte, 0 or
+// 1), the policy and directory versions and CapSeconds (uint64 each), the
+// request, the evidence and the certificate (uint24-length prefixed each)
+// and the key ID (uint16).
+func (b *ProbeIssueBody) Encode() ([]byte, error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	var c cryptobyte.Builder
+	c.AddUint64(b.Serial)
+	var neg uint8
+	if b.Negative {
+		neg = 1
+	}
+	c.AddUint8(neg)
+	c.AddUint64(b.PolicyVersion)
+	c.AddUint64(b.DirectoryVersion)
+	c.AddUint64(b.CapSeconds)
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Request) })
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) {
+		for _, e := range b.Evidence {
+			add16(c, []byte(e.Type))
+			add16(c, e.Blob)
+		}
+	})
+	c.AddUint24LengthPrefixed(func(c *cryptobyte.Builder) { c.AddBytes(b.Cert) })
+	add16(&c, []byte(b.KeyID))
+	return c.Bytes()
+}
+
+// DecodeProbeIssueBody decodes a probe_issue body strictly: a Negative
+// byte other than 0 or 1 is refused. Every error wraps ErrMalformedLeaf.
+func DecodeProbeIssueBody(data []byte) (*ProbeIssueBody, error) {
+	s := cryptobyte.String(data)
+	var (
+		b        ProbeIssueBody
+		neg      uint8
+		request  cryptobyte.String
+		evidence cryptobyte.String
+		certB    cryptobyte.String
+		keyID    []byte
+	)
+	if !s.ReadUint64(&b.Serial) || !s.ReadUint8(&neg) || !s.ReadUint64(&b.PolicyVersion) ||
+		!s.ReadUint64(&b.DirectoryVersion) || !s.ReadUint64(&b.CapSeconds) || !s.ReadUint24LengthPrefixed(&request) ||
+		!s.ReadUint24LengthPrefixed(&evidence) || !s.ReadUint24LengthPrefixed(&certB) || !read16(&s, &keyID, MaxKeyID) ||
+		!s.Empty() {
+		return nil, ErrMalformedLeaf
+	}
+	if neg > 1 {
+		return nil, fmt.Errorf("%w: the negative flag is %d, not 0 or 1", ErrMalformedLeaf, neg)
+	}
+	b.Negative = neg == 1
+	for !evidence.Empty() {
+		if len(b.Evidence) == wire.MaxEvidence {
+			return nil, fmt.Errorf("%w: too many evidence items", ErrMalformedLeaf)
+		}
+		var typ, blob []byte
+		if !read16(&evidence, &typ, wire.MaxEvidenceType) || len(typ) == 0 ||
+			!read16(&evidence, &blob, wire.MaxEvidenceBlob) {
+			return nil, ErrMalformedLeaf
+		}
+		b.Evidence = append(b.Evidence, wire.Evidence{Type: string(typ), Blob: blob})
+	}
+	b.Request = append([]byte(nil), request...)
+	b.Cert = append([]byte(nil), certB...)
+	b.KeyID = string(keyID)
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// RevokedEntries returns the revocation a probe_issue leaf records (03-10):
+// for a Negative body exactly one serial entry, the certificate's own
+// serial under the CA key that signed it (its SignatureKey, SSH wire
+// format) with the certificate's valid_before, and nothing for a positive
+// body. It is the one derivation of that entry: the signer's revocation
+// row, its logged revocation set (at issuance and at restart) and audit
+// all take it from here, so rows and leaves cannot disagree. The
+// certificate must parse and carry the body's serial.
+func (b *ProbeIssueBody) RevokedEntries() ([]RevokedEntry, error) {
+	if !b.Negative {
+		return nil, nil
+	}
+	pub, err := ssh.ParsePublicKey(b.Cert)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the probe certificate does not parse: %w", ErrMalformedLeaf, err)
+	}
+	c, ok := pub.(*ssh.Certificate)
+	if !ok || c.SignatureKey == nil || c.Serial != b.Serial {
+		return nil, fmt.Errorf("%w: the probe certificate is not a certificate of serial %d", ErrMalformedLeaf, b.Serial)
+	}
+	e := RevokedEntry{Kind: RevokedSerial, CAKey: c.SignatureKey.Marshal(), Serial: b.Serial, ValidBeforeSeconds: c.ValidBefore}
+	if err := e.check(); err != nil {
+		return nil, err
+	}
+	return []RevokedEntry{e}, nil
 }
 
 // Revoked entry kinds of a RevokedEntry: a certificate serial under a CA

@@ -161,7 +161,7 @@ func (s *Signer) Revoke(ctx context.Context, peer Peer, req *wire.RevokeRequest)
 		}
 		return nil, refusalErr(wire.CodeUnavailable, "state_unavailable", err)
 	}
-	s.krl.Store(published)
+	s.publishedLocked(published)
 	resp := &wire.RevokeResponse{KRLVersion: published.Version, RevokeLeaf: revokeLeaf, PublishLeaf: publishLeaf}
 	if req.Target == wire.TargetSubject {
 		resp.SerialCount = uint32(len(entries)) //nolint:gosec // G115: the issuance table holds far fewer than 2^32 certificates per subject

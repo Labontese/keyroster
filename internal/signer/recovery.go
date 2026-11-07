@@ -262,7 +262,7 @@ func (s *Signer) RecoverRevocations(ctx context.Context, data []byte) (*Recovery
 		}
 		return nil, refusalErr(wire.CodeUnavailable, "state_unavailable", err)
 	}
-	s.krl.Store(published)
+	s.publishedLocked(published)
 	res := &RecoveryResult{
 		RecoveryLeaf: recoveryLeaf, PublishLeaf: publishLeaf, KRLVersion: published.Version,
 		Entries: len(entries), Imports: len(imports), Revoked: revoked, Kept: len(certs) - revoked,

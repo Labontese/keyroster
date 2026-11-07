@@ -64,6 +64,11 @@ type signerAPI interface {
 	// the signer alone decides, from the admin-signed directory. A
 	// refusal comes back as a *wire.ErrorResponse.
 	HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error)
+	// ProbeIssue relays a host agent's probe certificate request (03-10),
+	// after the server checked the agent's own entry and key; the signer
+	// alone decides, from the admin-signed directory and the two proofs of
+	// possession. A refusal comes back as a *wire.ErrorResponse.
+	ProbeIssue(ctx context.Context, req *wire.ProbeIssueRequest) (*wire.IssueResponse, error)
 }
 
 // socketSigner reaches keyroster-signer over its Unix socket. Every call
@@ -119,6 +124,10 @@ func (s socketSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest) 
 
 func (s socketSigner) HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error) {
 	return s.client().HostIssue(ctx, req)
+}
+
+func (s socketSigner) ProbeIssue(ctx context.Context, req *wire.ProbeIssueRequest) (*wire.IssueResponse, error) {
+	return s.client().ProbeIssue(ctx, req)
 }
 
 const (
@@ -277,6 +286,11 @@ func (b *budgetSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest)
 // HostIssue is relayed for a host agent and takes the agent share (03-09).
 func (b *budgetSigner) HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error) {
 	return budgeted(ctx, b, true, func() (*wire.IssueResponse, error) { return b.next.HostIssue(ctx, req) })
+}
+
+// ProbeIssue is relayed for a host agent and takes the agent share (03-10).
+func (b *budgetSigner) ProbeIssue(ctx context.Context, req *wire.ProbeIssueRequest) (*wire.IssueResponse, error) {
+	return budgeted(ctx, b, true, func() (*wire.IssueResponse, error) { return b.next.ProbeIssue(ctx, req) })
 }
 
 const (

@@ -105,6 +105,11 @@ type Report struct {
 	KRLVersion     uint64
 	// Recoveries counts the revocation_recovery entries (03-06b).
 	Recoveries int
+	// PendingNegativeProbes counts the negative probe_issue entries after
+	// the last krl_publish entry of the log: negative probe serials no
+	// published KRL lists yet (03-10, informational; they ride the hourly
+	// republish).
+	PendingNegativeProbes int
 	// Certificates lists, with Options.CertificatesFrom, every
 	// certificate at or after that index, in log order: those of the
 	// issue and login_issue entries and every certificate a
@@ -417,6 +422,10 @@ type issuance struct {
 	// hostIDs are the request IDs of host_issue entries (03-09): one
 	// namespace with the other two.
 	hostIDs map[string]uint64
+	// probeIDs are the request IDs of probe_issue entries (03-10), one
+	// namespace with the other three; probes is audit's probe index.
+	probeIDs map[string]uint64
+	probes   *probesInForce
 }
 
 // next records a verified certificate with serial.
@@ -573,6 +582,9 @@ func verifyLoginIssue(index uint64, body *tlog.LoginIssueBody, leafMicros uint64
 	}
 	if prev, used := iss.hostIDs[reqID]; used {
 		return fmt.Errorf("request ID %s replayed: host_issue entry %d already used it", reqID, prev)
+	}
+	if prev, used := iss.probeIDs[reqID]; used {
+		return fmt.Errorf("request ID %s replayed: probe_issue entry %d already used it", reqID, prev)
 	}
 	// The signer refuses a CreatedAt more than 300 s from its clock when the
 	// request arrives, then reads the serial from that clock (serial.Next,
@@ -738,7 +750,11 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 		lineNo     int
 		lastTime   uint64
 	)
-	iss := issuance{issueIDs: map[string]uint64{}, loginIDs: map[string]uint64{}, hostIDs: map[string]uint64{}}
+	iss := issuance{issueIDs: map[string]uint64{}, loginIDs: map[string]uint64{}, hostIDs: map[string]uint64{},
+		probeIDs: map[string]uint64{}, probes: newProbesInForce()}
+	// pendingNegatives counts the negative probe_issue entries after the
+	// last krl_publish entry (Report.PendingNegativeProbes, 03-10).
+	var pendingNegatives int
 	revs := newRevocations()
 	hosts := newHostsInForce()
 	sc := bufio.NewScanner(r)
@@ -839,6 +855,9 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if prev, used := iss.hostIDs[kid.Request]; used {
 				return nil, fmt.Errorf("audit: entry %d: request ID %s replayed: host_issue entry %d already used it", want, kid.Request, prev)
 			}
+			if prev, used := iss.probeIDs[kid.Request]; used {
+				return nil, fmt.Errorf("audit: entry %d: request ID %s replayed: probe_issue entry %d already used it", want, kid.Request, prev)
+			}
 			if _, used := iss.issueIDs[kid.Request]; !used {
 				iss.issueIDs[kid.Request] = want
 			}
@@ -888,7 +907,28 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err != nil {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
+			// The host request ID must be new to the probe entries too
+			// (03-10); verifyHostIssue checks the other three kinds.
+			if prev, used := iss.probeIDs[kid.Request]; used {
+				return nil, fmt.Errorf("audit: entry %d (%s): request ID %s replayed: probe_issue entry %d already used it", want, leaf.Kind, kid.Request, prev)
+			}
 			revs.addCert(c, kid)
+			rep.collect(opts, want, leaf.Kind, body.Cert)
+		case tlog.KindProbeIssue:
+			// A probe certificate (03-10): verifyProbeIssue re-proves it and
+			// records the certificate and, for a negative one, its own
+			// serial entry, which every later krl_publish must list while it
+			// is live; no adjacency rule applies (Q1).
+			body, err := tlog.DecodeProbeIssueBody(leaf.Body)
+			if err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			if _, err := verifyProbeIssue(want, body, leaf.TimeMicros, &trustState, &dirState, &iss, hosts, revs); err != nil {
+				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
+			}
+			if body.Negative {
+				pendingNegatives++
+			}
 			rep.collect(opts, want, leaf.Kind, body.Cert)
 		case tlog.KindRevoke:
 			body, err := tlog.DecodeRevokeBody(leaf.Body)
@@ -907,6 +947,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 			if err := verifyKRLPublish(want, body, leaf.TimeMicros, &trustState, revs); err != nil {
 				return nil, fmt.Errorf("audit: entry %d (%s): %w", want, leaf.Kind, err)
 			}
+			pendingNegatives = 0
 		case tlog.KindRevocationRecovery:
 			body, err := tlog.DecodeRecoveryBody(leaf.Body)
 			if err != nil {
@@ -1032,6 +1073,7 @@ func Verify(r io.Reader, opts Options) (*Report, error) {
 	rep.BundleVersion, rep.PolicyVersion, rep.LogKey = trustState.bundle.Version, trustState.policy.Version, trustState.logKey
 	rep.AnchorVersion = trustState.anchorVersion
 	rep.Revocations, rep.RevokedEntries, rep.KRLPublishes, rep.KRLVersion = revs.revokes, revs.revokedEntries, revs.publishes, revs.krlVersion
+	rep.PendingNegativeProbes = pendingNegatives
 	rep.Recoveries, rep.LastKRL, rep.Bundle = revs.recoveries, revs.lastKRL, trustState.bundle
 	return rep, nil
 }
@@ -1200,7 +1242,7 @@ func checkGrepFields(text []byte, leaf tlog.Leaf) error {
 // refuses there every key only a host_forget line renders, after
 // unescaping.
 func checkForgetFields(text []byte, leaf tlog.Leaf, raw []byte) error {
-	if leaf.Kind != tlog.KindHostForget && leaf.Kind != tlog.KindHostIssue {
+	if leaf.Kind != tlog.KindHostForget && leaf.Kind != tlog.KindHostIssue && leaf.Kind != tlog.KindProbeIssue {
 		s := string(text)
 		if strings.Contains(s, `"approved_once":`) || strings.Contains(s, `"host_gone":`) {
 			return fmt.Errorf("its decoded approved_once or host_gone field is not one of a host_forget leaf (%s)", leaf.Kind)
