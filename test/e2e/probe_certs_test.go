@@ -308,13 +308,28 @@ func TestProbeCertsAgainstSSHD(t *testing.T) {
 	wrongCAResult := pkQuery(t, sshdWrongCA, sources["wrong_ca_pair_refused"], user, wrongCA)
 
 	// serial_list_and_range_encodings: the negative serial in a serial list
-	// with other serials, and inside a serial range.
-	if pos1.cert.Serial >= neg1.cert.Serial-1 && pos1.cert.Serial <= neg1.cert.Serial+1 {
-		t.Fatalf("the positive serial %d is next to the negative %d; the range case would revoke it", pos1.cert.Serial, neg1.cert.Serial)
+	// with other serials, and inside a serial range. Serials rise
+	// (max(last+1, now µs)), so pos1 > neg1, but pos1 may be any later
+	// value, neg1+1 or neg1+1000 among them. No constructed serial may be
+	// pos1, or the case fails on correct code: the list's upper neighbour
+	// sits 1000 above pos1, and the range moves below neg1 when pos1 is
+	// neg1+1. The list keeps neg1 between two serials at least 1000 away
+	// and the range keeps three consecutive serials, so each KRL is still
+	// only its own encoding.
+	neg, pos := neg1.cert.Serial, pos1.cert.Serial
+	if pos <= neg {
+		t.Fatalf("the positive serial %d is not above the negative %d", pos, neg)
+	}
+	rangeSerials := []uint64{neg - 1, neg, neg + 1}
+	if pos == neg+1 {
+		rangeSerials = []uint64{neg - 2, neg - 1, neg}
 	}
 	encodings := map[string][]uint64{
-		"serial_list":  {neg1.cert.Serial - 1000, neg1.cert.Serial, neg1.cert.Serial + 1000},
-		"serial_range": {neg1.cert.Serial - 1, neg1.cert.Serial, neg1.cert.Serial + 1},
+		"serial_list":  {neg - 1000, neg, pos + 1000},
+		"serial_range": rangeSerials,
+	}
+	if slices.Contains(encodings["serial_list"], pos) || (pos >= rangeSerials[0] && pos <= rangeSerials[len(rangeSerials)-1]) {
+		t.Fatalf("a constructed KRL would revoke the positive serial %d: %v", pos, encodings)
 	}
 	encodingNeg, encodingPos := map[string]pkResult{}, map[string]pkResult{}
 	encodingShape := map[string]string{}
@@ -414,7 +429,7 @@ func TestProbeCertsAgainstSSHD(t *testing.T) {
 	})
 	t.Run("serial_list_and_range_encodings", func(t *testing.T) {
 		if !strings.Contains(encodingShape["serial_list"], fmt.Sprintf("{%d %d}", neg1.cert.Serial, neg1.cert.Serial)) ||
-			!strings.Contains(encodingShape["serial_range"], fmt.Sprintf("{%d %d}", neg1.cert.Serial-1, neg1.cert.Serial+1)) {
+			!strings.Contains(encodingShape["serial_range"], fmt.Sprintf("{%d %d}", rangeSerials[0], rangeSerials[len(rangeSerials)-1])) {
 			t.Fatalf("the KRLs are not the list and range encodings: %v", encodingShape)
 		}
 		for _, name := range []string{"serial_list", "serial_range"} {
@@ -651,7 +666,7 @@ func TestProbeSSHDFacts(t *testing.T) {
 	if exercised {
 		_, stillDropped, _ = factQuery(listener, listenerKey, "127.0.0.2", user, accepted)
 	}
-	finalSrc := "127.0.0.1"
+	finalSrc := "127.0.0.2"
 	finalResult, finalDropped, finalDetail := factQuery(listener, listenerKey, finalSrc, user, accepted)
 	penaltyLines := 0
 	for _, l := range strings.Split(counting.log.String()+listener.log.String(), "\n") {
