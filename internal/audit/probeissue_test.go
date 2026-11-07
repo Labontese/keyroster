@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"maps"
@@ -394,5 +395,202 @@ func TestVerifyProbeIssue(t *testing.T) {
 		pf := newProbeFixture(t)
 		pf.addProbe(pf.key, false, nil, nil, func(p *probeIssue) { p.bodyNegative = true })
 		pf.wantFail(t, "negative flag")
+	})
+	probeBoundsCases(t)
+}
+
+// probeBoundsCases are TestVerifyProbeIssue's window, request-ID, recovery
+// and pending cases (03-10, Task 2).
+func probeBoundsCases(t *testing.T) {
+	t.Run("no_adjacency_needed", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		neg := pf.addProbe(pf.key, true, nil, nil, nil)
+		pf.advance(time.Minute)
+		pf.addProbe(pf.key, false, nil, nil, nil)
+		pf.advance(time.Hour)
+		pf.publishWith(neg)
+		pf.wantPass(t)
+	})
+	t.Run("revoke_without_publish_still_fails", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		c := pf.rev.issue()
+		pf.rev.revoke(&wire.RevokeRequest{Target: wire.TargetSerial, CARole: wire.CARoleUser, Serial: c.Serial}, []tlog.RevokedEntry{serialEntry(c)}, nil)
+		pf.addProbe(pf.key, true, nil, nil, nil)
+		pf.wantFail(t, "is not followed by the krl_publish entry")
+	})
+	t.Run("recent_rederived", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		pf.addProbe(pf.key, true, nil, nil, nil)
+		pf.advance(time.Second)
+		pf.addProbe(pf.key2, true, nil, nil, nil)
+		pf.wantFail(t, "probe_cert_recent")
+	})
+	t.Run("recent_cap_change_both_ways", func(t *testing.T) {
+		setCap := func(pf *probeFixture, secs uint64) {
+			pf.installPolicy(func(p *trust.Policy) { p.CAProfiles[2].MaxTTLSeconds = secs })
+		}
+		pf := newProbeFixture(t)
+		pf.addProbe(pf.key, false, nil, nil, nil)
+		setCap(pf, 90)
+		pf.advance(31 * time.Second)
+		pf.addProbe(pf.key, false, nil, nil, nil)
+		pf.wantPass(t)
+		pf = newProbeFixture(t)
+		setCap(pf, 90)
+		pf.addProbe(pf.key, false, nil, nil, nil)
+		setCap(pf, 86400)
+		pf.advance(31 * time.Second)
+		pf.addProbe(pf.key, false, nil, nil, nil)
+		pf.wantFail(t, "probe_cert_recent")
+	})
+	t.Run("cap_seconds_rederived", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		pf.addProbe(pf.key, false, nil, nil, func(p *probeIssue) { p.capSeconds-- })
+		pf.wantFail(t, "entry records CapSeconds")
+	})
+	t.Run("request_id_replayed_across_kinds", func(t *testing.T) {
+		withID := func(id [16]byte) func(*probeIssue) { return func(p *probeIssue) { p.req.RequestID = id } }
+		hexID := func(id [16]byte) string { return hex.EncodeToString(id[:]) }
+		t.Run("probe_reuses_issue", func(t *testing.T) {
+			pf := newProbeFixture(t)
+			id := [16]byte{1, 2, 3}
+			pf.addIssueWithRequest(hexID(id))
+			pf.addProbe(pf.key, false, withID(id), nil, nil)
+			pf.wantFail(t, "replayed")
+		})
+		withRP := func(pf *probeFixture) {
+			pf.installPolicy(func(p *trust.Policy) { p.WebAuthn = &trust.WebAuthnRP{RPID: auditRPID, Origins: []string{auditOrigin}} })
+			pf.publish()
+		}
+		t.Run("probe_reuses_login", func(t *testing.T) {
+			pf := newProbeFixture(t)
+			withRP(pf)
+			l := pf.addLogin(nil, nil)
+			pf.addProbe(pf.key, false, withID(l.req.RequestID), nil, nil)
+			pf.wantFail(t, "replayed")
+		})
+		t.Run("probe_reuses_host", func(t *testing.T) {
+			pf := newProbeFixture(t)
+			h := pf.addHost(pf.key, nil, nil, nil)
+			pf.addProbe(pf.key, false, withID(h.req.RequestID), nil, nil)
+			pf.wantFail(t, "replayed")
+		})
+		t.Run("probe_reuses_probe", func(t *testing.T) {
+			pf := newProbeFixture(t)
+			p := pf.addProbe(pf.key, false, nil, nil, nil)
+			pf.addProbe(pf.key, true, withID(p.req.RequestID), nil, nil)
+			pf.wantFail(t, "replayed")
+		})
+		t.Run("issue_reuses_probe", func(t *testing.T) {
+			pf := newProbeFixture(t)
+			p := pf.addProbe(pf.key, false, nil, nil, nil)
+			pf.addIssueWithRequest(hexID(p.req.RequestID))
+			pf.wantFail(t, "replayed")
+		})
+		t.Run("login_reuses_probe", func(t *testing.T) {
+			pf := newProbeFixture(t)
+			withRP(pf)
+			p := pf.addProbe(pf.key, false, nil, nil, nil)
+			pf.addLogin(func(l *login) { l.req.RequestID = p.req.RequestID }, nil)
+			pf.wantFail(t, "replayed")
+		})
+		t.Run("host_reuses_probe", func(t *testing.T) {
+			pf := newProbeFixture(t)
+			p := pf.addProbe(pf.key, false, nil, nil, nil)
+			pf.addHost(pf.key, func(h *hostIssue) { h.req.RequestID = p.req.RequestID }, nil, nil)
+			pf.wantFail(t, "replayed")
+		})
+	})
+	t.Run("recovery_lookup_sees_probe_certificate", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		p := pf.addProbe(pf.key, false, nil, nil, nil)
+		pf.advance(time.Minute)
+		ca := p.cert.SignatureKey.Marshal()
+		im := pf.rev.importKRL([]krl.Entry{{Kind: krl.EntrySerial, CAKey: ca, Serial: p.cert.Serial, ValidBefore: p.cert.ValidBefore}}, 1, pf.ops, auditInstallationID)
+		pf.rev.recover([]wire.RecoveryImport{im}, nil, func(o *recoveryOpts) {
+			o.entries = func(es []tlog.RevokedEntry) []tlog.RevokedEntry {
+				for i := range es {
+					if es[i].Serial == p.cert.Serial {
+						es[i].ValidBeforeSeconds = p.cert.ValidBefore // what the log's probe leaf gives
+					}
+				}
+				return es
+			}
+		})
+		pf.rev.publish(nil)
+		pf.wantPass(t)
+	})
+	t.Run("recovery_collects_probe_certificate", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		p := pf.addProbe(pf.key, false, nil, nil, nil)
+		from := uint64(0)
+		rep, err := Verify(strings.NewReader(join(pf.lines())), Options{Pins: pf.pins(), Threshold: 1, CertificatesFrom: &from})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, c := range rep.Certificates {
+			found = found || (c.Kind == tlog.KindProbeIssue && bytes.Equal(c.Cert, p.cert.Marshal()))
+		}
+		if !found {
+			t.Fatalf("Report.Certificates (%d) does not list the probe certificate", len(rep.Certificates))
+		}
+	})
+	t.Run("pending_negatives_counted", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		neg := pf.addProbe(pf.key, true, nil, nil, nil)
+		pf.addProbe(pf.key, false, nil, nil, nil)
+		if rep := pf.wantPass(t); rep.PendingNegativeProbes != 1 {
+			t.Fatalf("PendingNegativeProbes = %d, want 1", rep.PendingNegativeProbes)
+		}
+		pf.publishWith(neg)
+		if rep := pf.wantPass(t); rep.PendingNegativeProbes != 0 {
+			t.Fatalf("PendingNegativeProbes after a publish = %d, want 0", rep.PendingNegativeProbes)
+		}
+	})
+}
+
+// TestExportProbeIssue: a probe_issue line names the certificate and the
+// request, and every decoded field is bound to its leaf (03-10).
+func TestExportProbeIssue(t *testing.T) {
+	t.Run("export_fields_bound", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		p := pf.addProbe(pf.key, true, nil, nil, nil)
+		m := decoded(t, pf.leaves[len(pf.leaves)-1])
+		for _, k := range []string{"kind", "serial", "negative", "policy_version", "directory_version", "cap_seconds", "key_id", "evidence_types",
+			"host_name", "request_id", "created_at", "host_key_fingerprint", "probe_key_fingerprint", "principals", "valid_after", "valid_before",
+			"ca_fingerprint", "ca_algorithm"} {
+			if _, ok := m[k]; !ok {
+				t.Errorf("the probe_issue line has no %q: %v", k, m)
+			}
+		}
+		for _, k := range []string{"version", "bundle_version", "directory", "sigs"} {
+			if _, ok := m[k]; ok {
+				t.Errorf("the probe_issue line carries %q", k)
+			}
+		}
+		if m["kind"] != "probe_issue" || m["negative"] != true || m["host_name"] != "web1" || m["key_id"] != p.cert.KeyId ||
+			m["probe_key_fingerprint"] != ssh.FingerprintSHA256(p.probe.PublicKey()) || m["host_key_fingerprint"] != ssh.FingerprintSHA256(pf.key.PublicKey()) {
+			t.Fatalf("the probe_issue line: %v", m)
+		}
+		pf.wantPass(t)
+	})
+	t.Run("tampered_field_fails_verify", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		pf.addProbe(pf.key, true, nil, nil, nil)
+		in := join(pf.lines())
+		for _, mut := range [][2]string{
+			{`"negative":true`, `"negative":false`},
+			{`"host_name":"web1"`, `"host_name":"web3"`},
+			{`"probe_key_fingerprint":"`, `"probe_key_fingerprint":"x`},
+			{`"kind":"probe_issue",`, `"kind":"probe_issue","note":"x",`},
+		} {
+			if !strings.Contains(in, mut[0]) {
+				t.Fatalf("the export holds no %s", mut[0])
+			}
+			if _, err := pf.verify(strings.Replace(in, mut[0], mut[1], 1), nil); err == nil || !strings.Contains(err.Error(), "probe_issue leaf") {
+				t.Errorf("a probe_issue line with %s: %v, want it refused", mut[1], err)
+			}
+		}
 	})
 }

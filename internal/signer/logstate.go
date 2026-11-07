@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/mod/sumdb/note"
@@ -53,6 +54,18 @@ type logState struct {
 	// transaction applied, nil while it appended none that change it
 	// (03-09). It replaces loaded.hosts only after COMMIT succeeded.
 	pendingHosts *hostIndex
+	// pendingProbes is loaded.probes with the probe_issue and krl_publish
+	// leaves appended in the open transaction applied, nil while it
+	// appended none (03-10). It replaces loaded.probes only after COMMIT.
+	pendingProbes *probeIndex
+	// probePrompt is set by a Negative probe issuance whose row could not
+	// publish at once because the last probe-caused publish is younger
+	// than krlCheckInterval; republishIfDue honours it (03-10).
+	// lastProbePublish is the time of the last probe-caused publish (an
+	// immediate one or one the flag made), zero for none. A restart loses
+	// both: the row then rides the hourly publish. Guarded by s.mu.
+	probePrompt      bool
+	lastProbePublish time.Time
 
 	// broken is set when a failed commit left the in-memory state unknown
 	// and it could not be reloaded; every later append fails with it.
@@ -119,6 +132,9 @@ type loggedInstalls struct {
 	// rebuildLogFrom and, like revoked, following the committed log
 	// (pendingHosts).
 	hosts hostIndex
+	// probes is the probe index (03-10), rebuilt and followed like hosts
+	// (pendingProbes).
+	probes probeIndex
 }
 
 // add records the bundle_install leaf idx with body.
@@ -327,6 +343,11 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 		// The host index follows every leaf in order (03-09, T-02-116).
 		if hostRelevant(l.Kind) {
 			if err := installs.hosts.apply(l); err != nil {
+				return err
+			}
+		}
+		if probeRelevant(l.Kind) {
+			if err := installs.probes.apply(l); err != nil {
 				return err
 			}
 		}
@@ -611,6 +632,15 @@ func (s *Signer) appendLocked(_ context.Context, tx *sql.Tx, leaf tlog.Leaf) (ui
 			return 0, err
 		}
 	}
+	if probeRelevant(leaf.Kind) {
+		if s.pendingProbes == nil {
+			c := s.loaded.probes.clone()
+			s.pendingProbes = &c
+		}
+		if err := s.pendingProbes.apply(leaf); err != nil {
+			return 0, err
+		}
+	}
 	if revokes {
 		if s.pendingRevoked == nil {
 			s.pendingRevoked = maps.Clone(s.loaded.revoked)
@@ -666,10 +696,10 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.broken != nil {
 		return s.broken
 	}
-	s.pending, s.pendingRevoked, s.pendingHosts = nil, nil, nil
+	s.pending, s.pendingRevoked, s.pendingHosts, s.pendingProbes = nil, nil, nil, nil
 	err := s.db.WithTx(ctx, fn)
-	next, nextMicros, nextRevoked, nextHosts := s.pending, s.pendingMicros, s.pendingRevoked, s.pendingHosts
-	s.pending, s.pendingRevoked, s.pendingHosts = nil, nil, nil
+	next, nextMicros, nextRevoked, nextHosts, nextProbes := s.pending, s.pendingMicros, s.pendingRevoked, s.pendingHosts, s.pendingProbes
+	s.pending, s.pendingRevoked, s.pendingHosts, s.pendingProbes = nil, nil, nil, nil
 	if err == nil {
 		if next != nil {
 			s.tree, s.lastMicros = next, nextMicros
@@ -679,6 +709,9 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 		}
 		if nextHosts != nil {
 			s.loaded.hosts = *nextHosts
+		}
+		if nextProbes != nil {
+			s.loaded.probes = *nextProbes
 		}
 		return nil
 	}

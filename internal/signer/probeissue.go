@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -112,13 +113,49 @@ func (s *Signer) ProbeIssue(ctx context.Context, peer Peer, req *wire.ProbeIssue
 	if err := s.checkTrustCurrent(s.db.LatestBundleVersion(ctx)); err != nil {
 		return nil, err
 	}
+	nowSecs := uint64(max(now.Unix(), 0))
+	latest, haveLatest := s.loaded.probes.latest(entry.Name, req.Negative)
 	switch used, err := s.db.RequestIDUsed(ctx, req.RequestID); {
 	case err != nil:
 		return nil, refusalErr(wire.CodeUnavailable, "state_unavailable", err)
 	case used:
+		// An exact retry of the request the latest certificate of its host
+		// and polarity answered (byte-identical signing bytes) gets that
+		// certificate again while it is valid, with no leaf, no row and no
+		// serial (Q-09-4).
+		if haveLatest && latest.reqSHA256 == sha256.Sum256(signed) && nowSecs < latest.cert.ValidBefore {
+			return s.redeliverProbeLocked(peer, entry.Name, latest), nil
+		}
 		return nil, refusalErr(wire.CodeRefused, "duplicate_request", signerdb.ErrDuplicateRequest)
 	}
+	// One new certificate per host name and polarity per min(3600, L/3),
+	// L being the lifetime the new certificate gets (D6, Q-09-4), decided
+	// before a serial is drawn.
+	if haveLatest && certprofile.ProbeCertRecent(latest.issued, lifetime, nowSecs) != "" {
+		return nil, refusalErr(wire.CodeRefused, "probe_cert_recent", nil)
+	}
 	return s.issueProbeLocked(ctx, peer, req, entry, probeKey, caKey, profile, lifetime)
+}
+
+// probePublishMargin is how long the published negative predecessor of a
+// host must stay valid for a new negative row to ride the hourly publish
+// instead of publishing at once (03-10, Q1): one republish interval plus
+// one more hour.
+const probePublishMargin = 2 * time.Hour
+
+// redeliverProbeLocked answers a probe request with the latest probe
+// certificate of its host and polarity, already issued and logged
+// (Q-09-4): no leaf, no row, and the index is unchanged. A journal line
+// records it.
+func (s *Signer) redeliverProbeLocked(peer Peer, host string, l probeLatest) *wire.IssueResponse {
+	s.log.Info("probe certificate re-delivered",
+		"serial", l.serial,
+		"reason", "exact_retry",
+		"host", host,
+		"negative", l.negative,
+		"uid", peer.UID,
+		"pid", peer.PID)
+	return &wire.IssueResponse{Cert: slices.Clone(l.certBytes), Serial: l.serial, LeafIndex: l.leaf}
 }
 
 // issueProbeLocked is ProbeIssue's issuance tail, HostIssue's: a serial,
@@ -192,6 +229,17 @@ func (s *Signer) issueProbeLocked(ctx context.Context, peer Peer, req *wire.Prob
 	if err != nil {
 		return nil, refusalErr(wire.CodeInternal, "log_encoding", err)
 	}
+	// The publish rule (Q1), decided on the committed index before this
+	// issuance: a Negative row rides the hourly republish while the host's
+	// latest negative predecessor is published and valid for
+	// probePublishMargin more; otherwise it waits for the prompt flag while
+	// the last probe-caused publish is younger than krlCheckInterval;
+	// otherwise it publishes at once. Whichever way, the transaction
+	// encodes the whole publish set first (krl_too_large refuses with
+	// nothing written).
+	issuedSecs := uint64(max(issuedAt.Unix(), 0)) //nolint:gosec // G115: >= 0
+	ride := req.Negative && s.loaded.probes.coversUntil(entry.Name, issuedSecs+uint64(probePublishMargin/time.Second))
+	coalesce := req.Negative && !ride && probePublishTooRecent(s.lastProbePublish, issuedAt)
 	var (
 		leafIndex   uint64
 		published   *signerdb.KRLState
@@ -239,6 +287,9 @@ func (s *Signer) issueProbeLocked(ctx context.Context, peer Peer, req *wire.Prob
 				return err
 			}
 		}
+		if ride || coalesce {
+			return s.checkKRLFitsLocked(ctx, tx, issuedAt)
+		}
 		published, publishLeaf, err = s.publishKRLLocked(ctx, tx, issuedAt)
 		return err
 	})
@@ -252,8 +303,12 @@ func (s *Signer) issueProbeLocked(ctx context.Context, peer Peer, req *wire.Prob
 		}
 		return nil, refusalErr(wire.CodeUnavailable, "state_unavailable", err)
 	}
-	if published != nil {
+	switch {
+	case published != nil:
 		s.krl.Store(published)
+		s.lastProbePublish = issuedAt
+	case coalesce:
+		s.probePrompt = true
 	}
 	s.clockEpisode = false
 	// Only now, after COMMIT, does the certificate leave the signer.
@@ -263,6 +318,8 @@ func (s *Signer) issueProbeLocked(ctx context.Context, peer Peer, req *wire.Prob
 		"leaf_index", leafIndex,
 		"negative", req.Negative,
 		"publish_leaf", publishLeaf,
+		"rides", ride,
+		"prompt", coalesce,
 		"host", entry.Name,
 		"probe_key", ssh.FingerprintSHA256(probeKey),
 		"lifetime_s", lifetime,

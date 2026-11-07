@@ -311,7 +311,10 @@ func classify(detail string) uint8 {
 	case "duplicate_request",
 		// Host certificates (03-09): one certificate per host key per
 		// window; the latest is re-delivered instead.
-		"host_cert_recent":
+		"host_cert_recent",
+		// Probe certificates (03-10): one per host name and polarity per
+		// window.
+		"probe_cert_recent":
 		return tlog.ReasonDuplicateRequest
 	case "clock_regression":
 		return tlog.ReasonClockRegression

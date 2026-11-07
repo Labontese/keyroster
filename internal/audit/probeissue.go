@@ -54,7 +54,6 @@ import (
 // krl_publish entry must list while it is live; no adjacency rule applies
 // (owner decision Q1: a renewal rides the hourly republish).
 func verifyProbeIssue(index uint64, body *tlog.ProbeIssueBody, leafMicros uint64, a *anchor, ds *directoryInForce, iss *issuance, hosts *hostsInForce, revs *revocations) (*ssh.Certificate, error) {
-	_ = index
 	req, err := wire.ParseProbeIssueSigningBytes(body.Request)
 	if err != nil {
 		return nil, fmt.Errorf("logged request: %w", err)
@@ -170,14 +169,58 @@ func verifyProbeIssue(index uint64, body *tlog.ProbeIssueBody, leafMicros uint64
 	if body.Negative != req.Negative {
 		return nil, fmt.Errorf("the entry's negative flag %t differs from the request's %t", body.Negative, req.Negative)
 	}
+	for _, used := range []struct {
+		ids  map[string]uint64
+		kind string
+	}{{iss.issueIDs, "issue"}, {iss.loginIDs, "login_issue"}, {iss.hostIDs, "host_issue"}, {iss.probeIDs, "probe_issue"}} {
+		if prev, ok := used.ids[reqID]; ok {
+			return nil, fmt.Errorf("request ID %s replayed: %s entry %d already used it", reqID, used.kind, prev)
+		}
+	}
+	// The signer's window (probe_cert_recent), through the one shared
+	// rule: the latest certificate of this host name and polarity, the new
+	// certificate's issuance second as now and the entry's CapSeconds as
+	// the lifetime the new certificate got. Judged by certificate time,
+	// never the entry time.
+	if prev, ok := iss.probes.latest[probeSlot{entry.Name, req.Negative}]; ok {
+		if certprofile.ProbeCertRecent(prev, body.CapSeconds, issuedSecs) != "" {
+			return nil, fmt.Errorf("issued %d s after the previous %s probe certificate of host %q, inside the window min(3600, CapSeconds/3) (probe_cert_recent)",
+				issuedSecs-prev, polarityName(req.Negative), entry.Name)
+		}
+	}
 	entries, err := body.RevokedEntries()
 	if err != nil {
 		return nil, err
 	}
 	iss.next(body.Serial)
+	iss.probeIDs[reqID] = index
+	iss.probes.latest[probeSlot{entry.Name, req.Negative}] = issuedSecs
 	revs.addCert(c, kid)
 	revs.add(entries)
 	return c, nil
+}
+
+// probeSlot names one host name and polarity.
+type probeSlot struct {
+	host     string
+	negative bool
+}
+
+// probesInForce is audit's derivation of the signer's probe index from
+// the log (03-10): per host name and polarity the issuance second of the
+// latest probe certificate.
+type probesInForce struct {
+	latest map[probeSlot]uint64
+}
+
+func newProbesInForce() *probesInForce { return &probesInForce{latest: map[probeSlot]uint64{}} }
+
+// polarityName names a probe polarity in messages.
+func polarityName(negative bool) string {
+	if negative {
+		return "negative"
+	}
+	return "positive"
 }
 
 // verifyProbeEvidence requires exactly two evidence items, host-pop/v1 by

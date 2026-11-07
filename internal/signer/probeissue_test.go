@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -558,6 +560,7 @@ func TestProbeIssue(t *testing.T) {
 			}
 		}
 	})
+	probeIssueBoundsCases(t)
 }
 
 // publishWithMachine installs the next directory version with e.hosts and
@@ -605,9 +608,19 @@ func TestProbeLog(t *testing.T) {
 		if err != nil || len(rows) != 1 {
 			t.Fatalf("after the restart the logged set does not hold the %d negative rows: %v", len(rows), err)
 		}
-		// A second negative after the restart publishes against the rebuilt set.
-		r2, _ := e.probeReq(e.ec, "web1", true)
+		// A second negative after the restart, for another host, publishes
+		// against the rebuilt set.
+		r2, _ := e.probeReq(e.other, "web3", true)
 		e.mustProbe(r2)
+	})
+	t.Run("restart_keeps_window", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		e.mustProbe(r)
+		e.restart(t)
+		e.tick(time.Second)
+		again, _ := e.probeReq(e.ed, "web1", true)
+		e.refusedProbe(t, again, "probe_cert_recent", wire.CodeRefused)
 	})
 	t.Run("doctor_after_negative_ok", func(t *testing.T) {
 		e := newHostEnv(t, 90)
@@ -640,4 +653,686 @@ func TestProbeLog(t *testing.T) {
 			t.Fatalf("the log rebuild refuses the probe leaves: %v", err)
 		}
 	})
+}
+
+// addActiveHosts appends n active hosts h01.. to e.hosts, each with a fresh
+// Ed25519 key, installs the directory and returns the keys by name (03-10).
+func (e *hostEnv) addActiveHosts(t *testing.T, n int) map[string]ssh.Signer {
+	t.Helper()
+	keys := map[string]ssh.Signer{}
+	for i := 1; i <= n; i++ {
+		name := fmt.Sprintf("h%02d", i)
+		_, k := NewEd25519Key(t)
+		keys[name] = k
+		e.hosts = append(e.hosts, directory.Host{Name: name, HostGroup: "lab", Keys: []string{trust.FormatKey(k.PublicKey())},
+			Principals: []string{name}, Status: directory.StatusActive})
+	}
+	e.publish(t)
+	return keys
+}
+
+// liveProbes is a copy of the signer's committed probe index.
+func liveProbes(e *hostEnv) probeIndex {
+	e.s.mu.Lock()
+	defer e.s.mu.Unlock()
+	return e.s.loaded.probes.clone()
+}
+
+// promptState is the signer's prompt flag and last probe-caused publish.
+func promptState(e *hostEnv) (bool, time.Time) {
+	e.s.mu.Lock()
+	defer e.s.mu.Unlock()
+	return e.s.probePrompt, e.s.lastProbePublish
+}
+
+// publishedAfter reports whether the leaf right after idx is a krl_publish
+// leaf.
+func (e *hostEnv) publishedAfter(t *testing.T, idx uint64) bool {
+	t.Helper()
+	leaves := e.leavesOf()
+	return idx+1 < uint64(len(leaves)) && leaves[idx+1].Kind == tlog.KindKRLPublish
+}
+
+// probeTimes are the leaf times (µs) of the krl_publish leaves after the
+// first probe_issue leaf: the probe-caused and later publishes.
+func (e *hostEnv) publishTimesAfterFirstProbe(t *testing.T) []uint64 {
+	t.Helper()
+	var out []uint64
+	seen := false
+	for _, l := range e.leavesOf() {
+		seen = seen || l.Kind == tlog.KindProbeIssue
+		if seen && l.Kind == tlog.KindKRLPublish {
+			out = append(out, l.TimeMicros)
+		}
+	}
+	return out
+}
+
+func sameProbeIndex(a, b probeIndex) bool {
+	if a.lastPublish != b.lastPublish || a.havePublish != b.havePublish || len(a.byHost) != len(b.byHost) {
+		return false
+	}
+	for k, x := range a.byHost {
+		y, ok := b.byHost[k]
+		if !ok || x.serial != y.serial || x.leaf != y.leaf || x.issued != y.issued || x.capSeconds != y.capSeconds ||
+			x.reqSHA256 != y.reqSHA256 || x.negative != y.negative || !bytes.Equal(x.certBytes, y.certBytes) {
+			return false
+		}
+	}
+	return true
+}
+
+func rebuiltProbes(t *testing.T, e *hostEnv) probeIndex {
+	t.Helper()
+	e.s.mu.Lock()
+	v := e.s.cpVerifier
+	e.s.mu.Unlock()
+	_, _, installs, err := rebuildLogFrom(context.Background(), e.db, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return installs.probes.clone()
+}
+
+func TestProbeCertRecent(t *testing.T) {
+	t.Run("boundary", func(t *testing.T) {
+		for _, c := range []struct {
+			lifetime, at uint64
+			want         string
+		}{{90, 29, "probe_cert_recent"}, {90, 30, ""}, {86400, 3599, "probe_cert_recent"}, {86400, 3600, ""}} {
+			if got := certprofile.ProbeCertRecent(1_000_000, c.lifetime, 1_000_000+c.at); got != c.want {
+				t.Errorf("lifetime %d, +%d s: %q, want %q", c.lifetime, c.at, got, c.want)
+			}
+		}
+	})
+	t.Run("window_table", func(t *testing.T) {
+		for _, l := range []uint64{1, 2, 3, 89, 90, 91, 3600, 10799, 10800, 10801, 86400, 604800, 2592000} {
+			w := min(3600, l/3)
+			if w > 0 && certprofile.ProbeCertRecent(500, l, 500+w-1) != "probe_cert_recent" {
+				t.Errorf("lifetime %d: +%d s is not inside the window %d", l, w-1, w)
+			}
+			if certprofile.ProbeCertRecent(500, l, 500+w) != "" {
+				t.Errorf("lifetime %d: +%d s is inside the window %d", l, w, w)
+			}
+		}
+	})
+}
+
+func TestProbeIndex(t *testing.T) {
+	t.Run("rebuild_matches_incremental", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		for _, c := range []struct {
+			key  ssh.Signer
+			host string
+			neg  bool
+		}{{e.ed, "web1", true}, {e.ed, "web1", false}, {e.other, "web3", true}} {
+			r, _ := e.probeReq(c.key, c.host, c.neg)
+			e.mustProbe(r)
+		}
+		e.tick(61 * time.Second)
+		e.s.republishIfDue(context.Background())
+		if live, rebuilt := liveProbes(e), rebuiltProbes(t, e); !sameProbeIndex(live, rebuilt) || len(live.byHost) != 3 {
+			t.Fatalf("the incremental index (%d entries) differs from the rebuilt one (%d)", len(live.byHost), len(rebuilt.byHost))
+		}
+	})
+	t.Run("published_flag_follows_krl_publish_leaf", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r1, _ := e.probeReq(e.ed, "web1", true)
+		_, a := e.mustProbe(r1)
+		e.tick(10 * time.Second)
+		r3, _ := e.probeReq(e.other, "web3", true)
+		_, b := e.mustProbe(r3) // coalesced: no publish follows it
+		p := liveProbes(e)
+		if !p.published(a.LeafIndex) || p.published(b.LeafIndex) || !p.hasUnpublishedNegative() {
+			t.Fatalf("published(%d) = %t (want true), published(%d) = %t (want false)", a.LeafIndex, p.published(a.LeafIndex), b.LeafIndex, p.published(b.LeafIndex))
+		}
+		e.tick(51 * time.Second)
+		if !e.s.republishIfDue(context.Background()) {
+			t.Fatal("the flagged tick did not publish")
+		}
+		if p := liveProbes(e); !p.published(b.LeafIndex) || p.hasUnpublishedNegative() {
+			t.Fatal("the krl_publish leaf after it does not mark web3's negative published")
+		}
+	})
+	t.Run("pending_copy_discarded_on_failed_commit", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		before := liveProbes(e)
+		if err := e.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+			_, err := tx.Exec(`CREATE TRIGGER fail_revocation BEFORE INSERT ON revocation BEGIN SELECT RAISE(ABORT, 'injected'); END`)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		r, _ := e.probeReq(e.ed, "web1", true)
+		e.clock.set(e.clock.Now().Add(time.Millisecond))
+		if _, er := e.s.probeIssueOrRefuse(context.Background(), Peer{UID: 1000}, r); er == nil {
+			t.Fatal("the negative issuance committed despite the failing revocation insert")
+		}
+		if after := liveProbes(e); !sameProbeIndex(before, after) {
+			t.Fatal("a failed transaction changed the probe index")
+		}
+		e.s.mu.Lock()
+		pending := e.s.pendingProbes
+		e.s.mu.Unlock()
+		if pending != nil {
+			t.Fatal("the pending probe index survived the failed transaction")
+		}
+	})
+}
+
+// probeIssueBoundsCases are TestProbeIssue's issuance bounds, re-delivery
+// and publish rule cases (03-10, Task 2).
+func probeIssueBoundsCases(t *testing.T) {
+	ctx := context.Background()
+	t.Run("cert_recent_per_polarity", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		e.mustProbe(r)
+		e.tick(time.Second)
+		again, _ := e.probeReq(e.ed, "web1", true)
+		e.refusedProbe(t, again, "probe_cert_recent", wire.CodeRefused)
+		pos, _ := e.probeReq(e.ed, "web1", false)
+		e.mustProbe(pos)
+		other, _ := e.probeReq(e.other, "web3", true)
+		e.mustProbe(other)
+	})
+	t.Run("cert_recent_window_from_new_lifetime", func(t *testing.T) {
+		// A first certificate under a 1 d cap, the cap lowered to 90 s: the
+		// window is 30 s, so +31 s is allowed (the old certificate's 3600 s
+		// window would refuse it).
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", false)
+		c1, _ := e.mustProbe(r)
+		e.setMachineCap(t, 90, nil)
+		e.tickTo(issuedSecs(c1) + 31)
+		r2, _ := e.probeReq(e.ed, "web1", false)
+		if c2, _ := e.mustProbe(r2); c2.ValidBefore-c2.ValidAfter-300 != 90 {
+			t.Fatal("the renewal after the lowering is not a 90 s certificate")
+		}
+		// A first under 90 s, the cap raised to 1 d: the window is 3600 s,
+		// so +31 s is refused (the old 30 s window would allow it).
+		e = newHostEnv(t, 90)
+		e.setMachineCap(t, 90, nil)
+		r, _ = e.probeReq(e.ed, "web1", false)
+		c1, _ = e.mustProbe(r)
+		e.setMachineCap(t, 86400, nil)
+		e.tickTo(issuedSecs(c1) + 31)
+		r2, _ = e.probeReq(e.ed, "web1", false)
+		e.refusedProbe(t, r2, "probe_cert_recent", wire.CodeRefused)
+		// No change: 90 s gives a 30 s window, 1 d gives 3600 s.
+		for _, c := range []struct {
+			cap, inside, outside uint64
+		}{{90, 29, 31}, {86400, 3599, 3600}} {
+			e = newHostEnv(t, 90)
+			e.setMachineCap(t, c.cap, nil)
+			r, _ = e.probeReq(e.ed, "web1", false)
+			c1, _ = e.mustProbe(r)
+			e.tickTo(issuedSecs(c1) + c.inside)
+			r2, _ = e.probeReq(e.ed, "web1", false)
+			e.refusedProbe(t, r2, "probe_cert_recent", wire.CodeRefused)
+			e.tickTo(issuedSecs(c1) + c.outside)
+			r3, _ := e.probeReq(e.ed, "web1", false)
+			e.mustProbe(r3)
+		}
+	})
+	t.Run("exact_retry_redelivers_no_leaf", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		c1, resp1 := e.mustProbe(r)
+		leaves, issued, last := e.counts()
+		rows, before := len(e.revocationRows(t)), liveProbes(e)
+		c2, resp2 := e.mustProbe(r)
+		l2, i2, last2 := e.counts()
+		if !bytes.Equal(c1.Marshal(), c2.Marshal()) || resp1.LeafIndex != resp2.LeafIndex || l2 != leaves || i2 != issued || last2 != last ||
+			len(e.revocationRows(t)) != rows || !sameProbeIndex(before, liveProbes(e)) {
+			t.Fatalf("the exact retry: same certificate %t, leaves %d -> %d, issued %d -> %d, serial %d -> %d", bytes.Equal(c1.Marshal(), c2.Marshal()), leaves, l2, issued, i2, last, last2)
+		}
+	})
+	t.Run("retry_with_other_bytes_is_duplicate", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r, probe := e.probeReq(e.ed, "web1", false)
+		e.mustProbe(r)
+		r2 := *r
+		r2.CreatedAt++
+		e.refusedProbe(t, e.probeSign(&r2, e.ed, probe, wire.ProbePoPNamespace, wire.ProbePoPNamespace), "duplicate_request", wire.CodeRefused)
+	})
+	t.Run("older_request_after_newer_is_duplicate", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		e.setMachineCap(t, 90, nil)
+		r1, _ := e.probeReq(e.ed, "web1", false)
+		c1, _ := e.mustProbe(r1)
+		e.tickTo(issuedSecs(c1) + 31)
+		r2, _ := e.probeReq(e.ed, "web1", false)
+		e.mustProbe(r2)
+		e.refusedProbe(t, r1, "duplicate_request", wire.CodeRefused)
+	})
+	t.Run("expired_latest_not_redelivered", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		e.setMachineCap(t, 90, nil)
+		r, _ := e.probeReq(e.ed, "web1", false)
+		c, _ := e.mustProbe(r)
+		e.tickTo(c.ValidBefore)
+		e.refusedProbe(t, r, "duplicate_request", wire.CodeRefused)
+	})
+	t.Run("first_negative_publishes_at_once", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		c, resp := e.mustProbe(r)
+		if !e.publishedAfter(t, resp.LeafIndex) || !e.parsedKRL(t).RevokesSerial(c.SignatureKey.Marshal(), c.Serial) {
+			t.Fatal("the first negative of a host was not published at once")
+		}
+	})
+	renewal := func(t *testing.T) (*hostEnv, *ssh.Certificate) {
+		t.Helper()
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		c1, _ := e.mustProbe(r)
+		e.tickTo(issuedSecs(c1) + 16*3600)
+		r2, _ := e.probeReq(e.ed, "web1", true)
+		c2, resp := e.mustProbe(r2)
+		if e.publishedAfter(t, resp.LeafIndex) {
+			t.Fatal("a renewal whose published predecessor lives 8 h more published at once")
+		}
+		return e, c2
+	}
+	t.Run("renewal_rides_scheduled_publish", func(t *testing.T) {
+		e, c2 := renewal(t)
+		if e.parsedKRL(t).RevokesSerial(c2.SignatureKey.Marshal(), c2.Serial) {
+			t.Fatal("the served KRL lists the riding serial before any publish")
+		}
+		if prompt, _ := promptState(e); prompt {
+			t.Fatal("a riding row set the prompt flag")
+		}
+	})
+	t.Run("scheduled_publish_lists_negative", func(t *testing.T) {
+		e, c2 := renewal(t)
+		e.tick(time.Hour)
+		if !e.s.republishIfDue(ctx) || !e.parsedKRL(t).RevokesSerial(c2.SignatureKey.Marshal(), c2.Serial) {
+			t.Fatal("the hourly republish does not list the riding negative serial")
+		}
+	})
+	t.Run("unpublished_predecessor_publishes_now", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r1, _ := e.probeReq(e.ed, "web1", true)
+		e.mustProbe(r1)
+		e.tick(10 * time.Second)
+		r3, _ := e.probeReq(e.other, "web3", true)
+		c3, resp3 := e.mustProbe(r3) // coalesced, unpublished
+		if e.publishedAfter(t, resp3.LeafIndex) {
+			t.Fatal("setup: web3's first negative published although the last probe publish is 10 s old")
+		}
+		e.tickTo(issuedSecs(c3) + 3601)
+		r4, _ := e.probeReq(e.other, "web3", true)
+		c4, resp4 := e.mustProbe(r4)
+		if !e.publishedAfter(t, resp4.LeafIndex) || !e.parsedKRL(t).RevokesSerial(c4.SignatureKey.Marshal(), c4.Serial) {
+			t.Fatal("a renewal whose predecessor is unpublished did not publish at once")
+		}
+	})
+	t.Run("predecessor_expiring_publishes_now", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		c1, _ := e.mustProbe(r)
+		e.tickTo(c1.ValidBefore - (2*3600 - 60)) // published, 1 h 59 min left
+		r2, _ := e.probeReq(e.ed, "web1", true)
+		if _, resp := e.mustProbe(r2); !e.publishedAfter(t, resp.LeafIndex) {
+			t.Fatal("a renewal whose predecessor has 1 h 59 min left did not publish at once")
+		}
+	})
+	t.Run("short_cap_publishes_each_renewal_once_per_minute", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		e.setMachineCap(t, 3*3600, nil)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		c1, _ := e.mustProbe(r)
+		e.tickTo(issuedSecs(c1) + 2*3600) // after the window; 1 h left
+		r2, _ := e.probeReq(e.ed, "web1", true)
+		if _, resp := e.mustProbe(r2); !e.publishedAfter(t, resp.LeafIndex) {
+			t.Fatal("the renewal under a 3 h cap with 1 h left did not publish at once")
+		}
+		e.tick(20 * time.Second)
+		r3, _ := e.probeReq(e.other, "web3", true)
+		if _, resp := e.mustProbe(r3); e.publishedAfter(t, resp.LeafIndex) {
+			t.Fatal("a second negative inside the minute published at once")
+		}
+		if prompt, _ := promptState(e); !prompt {
+			t.Fatal("the second negative inside the minute did not set the prompt flag")
+		}
+	})
+	t.Run("coalesced_publishes_at_most_one_per_minute", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		keys := e.addActiveHosts(t, 10)
+		e.setMachineCap(t, 3*3600, nil)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		_, resp := e.mustProbe(r)
+		if !e.publishedAfter(t, resp.LeafIndex) {
+			t.Fatal("setup: the first negative did not publish")
+		}
+		t0 := e.clock.Now()
+		e.clock.set(t0.Add(10 * time.Second))
+		r3, _ := e.probeReq(e.other, "web3", true)
+		if _, resp := e.mustProbe(r3); e.publishedAfter(t, resp.LeafIndex) {
+			t.Fatal("a negative 10 s after an immediate publish published at once")
+		}
+		e.clock.set(t0.Add(50 * time.Second))
+		if e.s.republishIfDue(ctx) {
+			t.Fatal("the tick 50 s after the immediate publish published")
+		}
+		if prompt, _ := promptState(e); !prompt {
+			t.Fatal("the early tick cleared the prompt flag")
+		}
+		e.clock.set(t0.Add(61 * time.Second))
+		if !e.s.republishIfDue(ctx) {
+			t.Fatal("the tick 61 s after the immediate publish did not publish")
+		}
+		if prompt, _ := promptState(e); prompt {
+			t.Fatal("the flagged publish did not clear the prompt flag")
+		}
+		// Ten negatives 5 s apart, each for its own host, with a tick every
+		// minute.
+		start := t0.Add(130 * time.Second)
+		lastTick := start
+		for i := 0; i < 10; i++ {
+			now := start.Add(time.Duration(5*i) * time.Second)
+			if now.Sub(lastTick) >= time.Minute {
+				e.clock.set(now)
+				e.s.republishIfDue(ctx)
+				lastTick = now
+			}
+			e.clock.set(now)
+			name := fmt.Sprintf("h%02d", i+1)
+			rq, _ := e.probeReq(keys[name], name, true)
+			e.mustProbe(rq)
+		}
+		for m := 1; m <= 2; m++ {
+			e.clock.set(lastTick.Add(time.Duration(m) * time.Minute))
+			e.s.republishIfDue(ctx)
+		}
+		times := e.publishTimesAfterFirstProbe(t)
+		for i := 1; i < len(times); i++ {
+			if d := times[i] - times[i-1]; d < 60_000_000 {
+				t.Fatalf("two probe-caused KRL versions %d µs apart (leaf times %v)", d, times)
+			}
+		}
+		if len(times) < 4 {
+			t.Fatalf("only %d publishes after the first probe; the test exercised nothing", len(times))
+		}
+	})
+	t.Run("flag_published_at_next_tick", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		e.mustProbe(r)
+		t0 := e.clock.Now()
+		e.clock.set(t0.Add(10 * time.Second))
+		r3, _ := e.probeReq(e.other, "web3", true)
+		c3, _ := e.mustProbe(r3)
+		e.clock.set(t0.Add(61 * time.Second))
+		if !e.s.republishIfDue(ctx) || !e.parsedKRL(t).RevokesSerial(c3.SignatureKey.Marshal(), c3.Serial) {
+			t.Fatal("the flagged tick a minute later did not publish the waiting negative serial")
+		}
+	})
+	t.Run("flag_moot_after_other_publish", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		e.mustProbe(r)
+		t0 := e.clock.Now()
+		e.clock.set(t0.Add(10 * time.Second))
+		r3, _ := e.probeReq(e.other, "web3", true)
+		e.mustProbe(r3)
+		e.clock.set(t0.Add(20 * time.Second))
+		e.revokeHost(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: e.off.PublicKey().Marshal()})
+		e.clock.set(t0.Add(70 * time.Second))
+		if e.s.republishIfDue(ctx) {
+			t.Fatal("the tick after an admin publish published again for a moot prompt flag")
+		}
+	})
+	t.Run("negative_pruned_after_valid_before_plus_300", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		e.setMachineCap(t, 90, nil)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		c, _ := e.mustProbe(r)
+		for _, x := range []struct {
+			at   uint64
+			want bool
+		}{{c.ValidBefore + 299, true}, {c.ValidBefore + 300, false}} {
+			e.tickTo(x.at)
+			e.revokeHost(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: newEd25519(t).PublicKey().Marshal()})
+			if got := e.parsedKRL(t).RevokesSerial(c.SignatureKey.Marshal(), c.Serial); got != x.want {
+				t.Fatalf("a publish at valid_before + %d s lists the serial: %t, want %t", x.at-c.ValidBefore, got, x.want)
+			}
+		}
+	})
+	t.Run("krl_too_large_refuses_issuance", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("fills the KRL to krl.MaxKRL")
+		}
+		for _, mode := range []string{"immediate", "ride", "coalesced"} {
+			t.Run(mode, func(t *testing.T) { probeTooLarge(t, mode) })
+		}
+		t.Run("edge_exact_fits", func(t *testing.T) { probeEdgeFits(t) })
+	})
+	t.Run("classify_wire_codes", func(t *testing.T) {
+		for d, want := range map[string]struct {
+			class uint8
+			code  wire.ErrorCode
+		}{
+			"probe_issue_no_installation_id":    {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"probe_issue_installation_mismatch": {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"probe_pop_invalid":                 {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"probe_key_unusable":                {tlog.ReasonBadSubjectKey, wire.CodeRefused},
+			"probe_issue_valid_for_not_zero":    {tlog.ReasonTTLExceeded, wire.CodeRefused},
+			"probe_cert_recent":                 {tlog.ReasonDuplicateRequest, wire.CodeRefused},
+			"malformed_request":                 {tlog.ReasonMalformed, wire.CodeMalformed},
+			"request_time_skew":                 {tlog.ReasonStaleRequest, wire.CodeRefused},
+			"host_pop_not_enabled":              {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"host_pop_invalid":                  {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"duplicate_request":                 {tlog.ReasonDuplicateRequest, wire.CodeRefused},
+			"krl_too_large":                     {tlog.ReasonUnavailable, wire.CodeUnavailable},
+			"revocations_not_logged":            {tlog.ReasonUnavailable, wire.CodeUnavailable},
+			"bad_principal":                     {tlog.ReasonBadPrincipal, wire.CodeRefused},
+		} {
+			if got := classify(d); got != want.class || codeFor(got) != want.code {
+				t.Errorf("%s: class %d (%s), want %d (%s)", d, got, codeFor(got), want.class, want.code)
+			}
+		}
+	})
+}
+
+// tooLargeSeed stages n key_id rows under caKey in a table bulk, each key
+// ID about 1000 bytes and distinct, by a recursive CTE.
+func tooLargeSeed(t *testing.T, e *hostEnv, caKey []byte, n int) {
+	t.Helper()
+	if err := e.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE bulk (x INTEGER PRIMARY KEY, ca BLOB, key_id TEXT)`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < ?)
+			INSERT INTO bulk (x, ca, key_id) SELECT x, ?, printf('%06d', x) || substr(replace(hex(zeroblob(600)), '0', 'k'), 1, 994) FROM c`, n, caKey)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setTuning sets the key ID of bulk row 1 to length n.
+func setTuning(t *testing.T, e *hostEnv, n int) {
+	t.Helper()
+	if err := e.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE bulk SET key_id = printf('%06d', 1) || substr(replace(hex(zeroblob(8000)), '0', 't'), 1, ?) WHERE x = 1`, n-6)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seededKRLSize is the size of the KRL of the revocation rows, the bulk
+// rows and extra at at, or -1 when it is krl.ErrTooLarge.
+func seededKRLSize(t *testing.T, e *hostEnv, extra krl.Entry, at time.Time) int {
+	t.Helper()
+	entries := revocationEntries(e.revocationRows(t))
+	if err := e.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		rows, err := tx.Query(`SELECT ca, key_id FROM bulk`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var en krl.Entry
+			if err := rows.Scan(&en.CAKey, &en.KeyID); err != nil {
+				return err
+			}
+			en.Kind = krl.EntryKeyID
+			entries = append(entries, en)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entries = append(entries, extra)
+	secs := uint64(at.Unix()) //nolint:gosec // G115: after 1970
+	set, err := krl.PublishSet(entries, secs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := krl.Encode(set, secs, at)
+	if errors.Is(err, krl.ErrTooLarge) {
+		return -1
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(data)
+}
+
+// tuneToEdge sets the tuning row so that the seeded KRL with extra is
+// exactly krl.MaxKRL bytes, and checks that one byte more is too large.
+func tuneToEdge(t *testing.T, e *hostEnv, extra krl.Entry, at time.Time) int {
+	t.Helper()
+	const base = 1000
+	setTuning(t, e, base)
+	size := seededKRLSize(t, e, extra, at)
+	if size < 0 {
+		t.Fatal("the seed is already above krl.MaxKRL")
+	}
+	n := base + (krl.MaxKRL - size) // a key ID is length-prefixed: the size is linear in its length
+	if n < 7 || n > 8000 {
+		t.Fatalf("the tuning row would need %d bytes", n)
+	}
+	setTuning(t, e, n)
+	if got := seededKRLSize(t, e, extra, at); got != krl.MaxKRL {
+		t.Fatalf("the tuned seed encodes to %d bytes, want krl.MaxKRL %d", got, krl.MaxKRL)
+	}
+	setTuning(t, e, n+1)
+	if seededKRLSize(t, e, extra, at) != -1 {
+		t.Fatal("one byte above the edge is not krl.ErrTooLarge")
+	}
+	return n
+}
+
+// probeTooLarge (T-03-366): a Negative issuance whose row would publish
+// (immediate), ride or wait for the flag (coalesced) is refused
+// krl_too_large, with the seed one byte over the edge inside its own
+// transaction, and nothing probe-related is written.
+func probeTooLarge(t *testing.T, mode string) {
+	e := newHostEnv(t, 90)
+	ctx := context.Background()
+	machine := e.fx.Roles[keystore.RoleMachine].PublicKey().Marshal()
+	key, host := e.ed, "web1"
+	switch mode {
+	case "ride":
+		r, _ := e.probeReq(e.ed, "web1", true)
+		c1, _ := e.mustProbe(r)
+		e.tickTo(issuedSecs(c1) + 16*3600)
+	case "coalesced":
+		r, _ := e.probeReq(e.ed, "web1", true)
+		e.mustProbe(r)
+		e.tick(10 * time.Second)
+		key, host = e.other, "web3"
+	}
+	at := e.clock.Now().Add(time.Millisecond)
+	_, _, lastBefore := e.counts()
+	next := max(uint64(at.UnixMicro()), lastBefore+1)                                                               //nolint:gosec // G115: after 1970
+	extra := krl.Entry{Kind: krl.EntrySerial, CAKey: machine, Serial: next, ValidBefore: uint64(at.Unix()) + 86400} //nolint:gosec // G115: after 1970
+	tooLargeSeed(t, e, machine, 4176)
+	n := tuneToEdge(t, e, extra, at)
+	setTuning(t, e, n+1)
+	if err := e.db.WithTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`CREATE TRIGGER bulk_probe AFTER INSERT ON issuance BEGIN
+			INSERT INTO revocation (kind, ca_key, key_id, request_id, leaf_index, revoked_at_us)
+			SELECT 'key_id', ca, key_id, NEW.request_id, 0, 1 FROM bulk; END`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	leaves, issued, last := e.counts()
+	rows, probes, krlBefore := len(e.revocationRows(t)), liveProbes(e), e.s.GetKRL()
+	kinds := func() (p, k, r int) {
+		return e.leafCount(tlog.KindProbeIssue), e.leafCount(tlog.KindKRLPublish), e.leafCount(tlog.KindRefusal)
+	}
+	p0, k0, r0 := kinds()
+	e.clock.set(at)
+	req, _ := e.probeReq(key, host, true)
+	resp, er := e.s.probeIssueOrRefuse(ctx, Peer{UID: 1000}, req)
+	if er == nil || er.Message != "krl_too_large" || er.Code != wire.CodeUnavailable {
+		t.Fatalf("%s: answer %+v, refusal %+v; want krl_too_large (unavailable)", mode, resp, er)
+	}
+	l2, i2, last2 := e.counts()
+	p1, k1, r1 := kinds()
+	if i2 != issued || last2 != last || len(e.revocationRows(t)) != rows || !sameProbeIndex(probes, liveProbes(e)) ||
+		!bytes.Equal(e.s.GetKRL().KRL, krlBefore.KRL) || p1 != p0 || k1 != k0 || r1 != r0+1 || l2 != leaves+1 {
+		t.Fatalf("%s: the refusal wrote: issued %d -> %d, serial %d -> %d, probe leaves %d -> %d, publishes %d -> %d, refusals %d -> %d", mode,
+			issued, i2, last, last2, p0, p1, k0, k1, r0, r1)
+	}
+	if err := e.db.WithTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DROP TRIGGER bulk_probe`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.set(at)
+	again, _ := e.probeReq(key, host, true)
+	resp2, er2 := e.s.probeIssueOrRefuse(ctx, Peer{UID: 1000}, again)
+	if er2 != nil || resp2.Serial != next {
+		t.Fatalf("%s: the next issuance: %+v, %+v; want serial %d", mode, resp2, er2, next)
+	}
+}
+
+// probeEdgeFits: inside one transaction that is rolled back, the tuned
+// seed plus the new certificate's entry is exactly krl.MaxKRL bytes and
+// checkKRLFitsLocked accepts it; one byte more is krl_too_large.
+func probeEdgeFits(t *testing.T) {
+	e := newHostEnv(t, 90)
+	ctx := context.Background()
+	machine := e.fx.Roles[keystore.RoleMachine].PublicKey().Marshal()
+	at := e.clock.Now().Add(time.Millisecond)
+	_, _, last := e.counts()
+	extra := krl.Entry{Kind: krl.EntrySerial, CAKey: machine, Serial: max(uint64(at.UnixMicro()), last+1), ValidBefore: uint64(at.Unix()) + 86400} //nolint:gosec // G115: after 1970
+	tooLargeSeed(t, e, machine, 4176)
+	n := tuneToEdge(t, e, extra, at)
+	setTuning(t, e, n)
+	errRollback := errors.New("roll back")
+	e.s.mu.Lock()
+	defer e.s.mu.Unlock()
+	err := e.db.WithTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT INTO revocation (kind, ca_key, key_id, request_id, leaf_index, revoked_at_us)
+			SELECT 'key_id', ca, key_id, zeroblob(16), 0, 1 FROM bulk`); err != nil {
+			return err
+		}
+		if err := e.db.InsertRevocation(tx, signerdb.Revocation{Kind: signerdb.RevocationSerial, CAKey: machine, Serial: extra.Serial,
+			ValidBeforeMicros: extra.ValidBefore * 1_000_000, LeafIndex: 0, RevokedAt: at}); err != nil {
+			return err
+		}
+		if err := e.s.checkKRLFitsLocked(ctx, tx, at); err != nil {
+			return fmt.Errorf("at the edge: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE revocation SET key_id = key_id || 'x' WHERE key_id LIKE '000001%'`); err != nil {
+			return err
+		}
+		var r *refusal
+		if err := e.s.checkKRLFitsLocked(ctx, tx, at); !errors.As(err, &r) || r.reason != "krl_too_large" {
+			return fmt.Errorf("one byte above the edge: %w, want krl_too_large", err)
+		}
+		return errRollback
+	})
+	if !errors.Is(err, errRollback) {
+		t.Fatal(err)
+	}
 }

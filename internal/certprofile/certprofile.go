@@ -108,3 +108,18 @@ func ProbeLifetime(profile cert.Profile) uint64 {
 	}
 	return min(uint64(profile.MaxTTL/time.Second), MaxProbeLifetimeSeconds) //nolint:gosec // G115: MaxTTL > 0, checked above
 }
+
+// ProbeCertRecent is the one rule for the probe issuance window (03-10,
+// D6): it returns "probe_cert_recent" while now is before prevIssued +
+// min(3600, lifetime/3), else "". prevIssued is the issuance second
+// (ValidAfter + 300) of the latest probe certificate of the same host name
+// and polarity, lifetime the lifetime the new certificate gets
+// (ProbeLifetime of the profile in force, never the previous
+// certificate's). The signer passes its clock, audit the new
+// certificate's issuance second.
+func ProbeCertRecent(prevIssued, lifetime, now uint64) string {
+	if now < prevIssued+min(3600, lifetime/3) {
+		return "probe_cert_recent"
+	}
+	return ""
+}

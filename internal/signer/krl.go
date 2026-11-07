@@ -30,42 +30,25 @@ import (
 // krl.Encode, a manifest {installation ID of the bundle in force, version,
 // SHA-256, issued_at, bundle version, the index the krl_publish leaf
 // takes} signed by the ops key under krl.Namespace, the KRL state row, and
-// the krl_publish leaf. A KRL above krl.MaxKRL is refused krl_too_large,
-// which rolls the whole transaction back, so the revocation table never
-// holds an entry no published KRL carries. Rows that are not exactly the
-// logged revoke entries are refused revocations_not_logged before the ops
-// key signs, and the signer stops. The caller holds s.mu and runs tx
-// through logTx.
+// the krl_publish leaf. A KRL above krl.MaxKRL is refused krl_too_large
+// (buildKRLLocked), which rolls the whole transaction back. Rows that are
+// not exactly the logged revoke entries are refused revocations_not_logged
+// before the ops key signs, and the signer stops. The caller holds s.mu
+// and runs tx through logTx.
+//
+// The invariant kept (03-10): every transaction that writes a revocation
+// row (Revoke, RecoverRevocations and a Negative ProbeIssue) encodes the
+// whole publish set in that transaction, through buildKRLLocked here or
+// checkKRLFitsLocked, so the committed row set always encodes within
+// krl.MaxKRL at the commit's clock. A row that rides waits for the next
+// publish, which carries it because expiry only shrinks the set (a clock
+// that steps back can bring entries back: accepted, untested).
 func (s *Signer) publishKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time) (*signerdb.KRLState, uint64, error) {
-	if s.installationID == "" {
-		return nil, 0, refusalErr(wire.CodeUnavailable, "krl_no_installation_id", nil)
-	}
-	revs, err := s.db.RevocationsTx(ctx, tx)
+	b, err := s.buildKRLLocked(ctx, tx, now)
 	if err != nil {
 		return nil, 0, err
 	}
-	issued := now.UTC().Truncate(time.Second)
-	issuedAt := uint64(max(issued.Unix(), 0)) //nolint:gosec // G115: >= 0
-	set, err := krl.PublishSet(revocationEntries(revs), issuedAt)
-	if err != nil {
-		return nil, 0, refusalErr(wire.CodeInternal, "krl_encoding", err)
-	}
-	prev, err := s.db.KRLStateTx(ctx, tx)
-	if err != nil {
-		return nil, 0, err
-	}
-	var prevVersion uint64
-	if prev != nil {
-		prevVersion = prev.Version
-	}
-	version := max(prevVersion+1, issuedAt)
-	data, err := krl.Encode(set, version, now)
-	if err != nil {
-		if errors.Is(err, krl.ErrTooLarge) {
-			return nil, 0, refusalErr(wire.CodeUnavailable, "krl_too_large", err)
-		}
-		return nil, 0, refusalErr(wire.CodeInternal, "krl_encoding", err)
-	}
+	revs, issued, issuedAt, version, data := b.revs, b.issued, b.issuedAt, b.version, b.data
 	// The start-up check (loggedRevocations.check) does not cover a row
 	// deleted, written or changed through another database handle while
 	// the signer runs: the KRL built from such rows would un-revoke a
@@ -120,6 +103,67 @@ func (s *Signer) publishKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time
 		return nil, 0, fmt.Errorf("signer: krl_publish leaf took index %d, the manifest names %d", idx, m.LogIndex)
 	}
 	return &st, idx, nil
+}
+
+// builtKRL is what buildKRLLocked encodes: the rows it read, the publish
+// time in whole seconds (as a time and as Unix seconds), the version and
+// the KRL bytes.
+type builtKRL struct {
+	revs     []signerdb.Revocation
+	issued   time.Time
+	issuedAt uint64
+	version  uint64
+	data     []byte
+}
+
+// buildKRLLocked is everything publishKRLLocked does before the
+// logged-rows check (03-10): the krl_no_installation_id refusal, the rows
+// read in tx, krl.PublishSet at now in whole seconds, the next version and
+// krl.Encode, with krl.ErrTooLarge mapped to krl_too_large and any other
+// encoding error to krl_encoding. It signs and writes nothing. It is the
+// signer's one size rule: publishKRLLocked and checkKRLFitsLocked both
+// call it. The caller holds s.mu.
+func (s *Signer) buildKRLLocked(ctx context.Context, tx *sql.Tx, now time.Time) (*builtKRL, error) {
+	if s.installationID == "" {
+		return nil, refusalErr(wire.CodeUnavailable, "krl_no_installation_id", nil)
+	}
+	revs, err := s.db.RevocationsTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	issued := now.UTC().Truncate(time.Second)
+	issuedAt := uint64(max(issued.Unix(), 0)) //nolint:gosec // G115: >= 0
+	set, err := krl.PublishSet(revocationEntries(revs), issuedAt)
+	if err != nil {
+		return nil, refusalErr(wire.CodeInternal, "krl_encoding", err)
+	}
+	prev, err := s.db.KRLStateTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	var prevVersion uint64
+	if prev != nil {
+		prevVersion = prev.Version
+	}
+	version := max(prevVersion+1, issuedAt)
+	data, err := krl.Encode(set, version, now)
+	if err != nil {
+		if errors.Is(err, krl.ErrTooLarge) {
+			return nil, refusalErr(wire.CodeUnavailable, "krl_too_large", err)
+		}
+		return nil, refusalErr(wire.CodeInternal, "krl_encoding", err)
+	}
+	return &builtKRL{revs: revs, issued: issued, issuedAt: issuedAt, version: version, data: data}, nil
+}
+
+// checkKRLFitsLocked requires the whole publish set of tx to encode within
+// krl.MaxKRL at now (krl_too_large otherwise), through buildKRLLocked, and
+// discards the result: it signs and writes nothing (03-10). A Negative
+// probe issuance whose row rides the hourly publish or waits for the
+// prompt flag runs it in its own transaction. The caller holds s.mu.
+func (s *Signer) checkKRLFitsLocked(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	_, err := s.buildKRLLocked(ctx, tx, now)
+	return err
 }
 
 // revocationEntries maps the revocation rows to the entries krl.PublishSet
@@ -199,9 +243,19 @@ func (s *Signer) republishIfDue(ctx context.Context) bool {
 	// A negative age (the last publish is dated after the clock: it ran
 	// ahead and was corrected) is due too: waiting until the clock passed
 	// it would keep serving a KRL whose future issued_at looks fresh.
+	// The probe prompt flag (03-10) skips the wait for a young publish
+	// while a negative probe certificate is still unpublished and the last
+	// probe-caused publish is at least krlCheckInterval old (a clock that
+	// went back counts as old enough), so two probe-caused versions are
+	// never closer than a minute. A flagged tick that is too early
+	// publishes nothing and leaves the flag set.
+	prompted := false
 	if st := s.krl.Load(); st != nil {
 		if age := now.Sub(st.PublishedAt); age >= 0 && age < krlRepublishAfter {
-			return false
+			if !s.probePrompt || !s.loaded.probes.hasUnpublishedNegative() || probePublishTooRecent(s.lastProbePublish, now) {
+				return false
+			}
+			prompted = true
 		}
 	}
 	var (
@@ -221,8 +275,22 @@ func (s *Signer) republishIfDue(ctx context.Context) bool {
 		return false
 	}
 	s.krl.Store(published)
-	s.log.Info("KRL published", "krl_version", published.Version, "publish_leaf", leaf)
+	if prompted {
+		s.probePrompt, s.lastProbePublish = false, now
+	}
+	s.log.Info("KRL published", "krl_version", published.Version, "publish_leaf", leaf, "probe_prompt", prompted)
 	return true
+}
+
+// probePublishTooRecent reports whether the last probe-caused publish at
+// last is younger than krlCheckInterval at now; none (zero) and a clock
+// that went back count as old enough (03-10).
+func probePublishTooRecent(last, now time.Time) bool {
+	if last.IsZero() {
+		return false
+	}
+	age := now.Sub(last)
+	return age >= 0 && age < krlCheckInterval
 }
 
 // nextLeafIndexLocked returns the index the next appended leaf takes in
