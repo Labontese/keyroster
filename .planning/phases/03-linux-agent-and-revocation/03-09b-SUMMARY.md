@@ -243,6 +243,7 @@ The tracking update then followed (STATE.md and ROADMAP.md, deviation 4) in the 
 - The account-home check (QB-5): skipped on Windows, and driven through the `accountHome` hook in the unit tests. A failed lookup only warns, so in the CGO_ENABLED=0 Linux release an account known only through NSS or LDAP gets no home check.
 - An ops-key rotation between a restored backup and the newest bundle the client saw stalls the KRL until the bundle catches up (T-03-347 residual; rotations arrive with 03-13).
 - Every runbook claim on a real host or client, until 03-16.
+- OpenSSH clients below 8.5 (for example 8.0p1 on RHEL, Rocky or Alma 8) reading the managed config with its top-level `IgnoreUnknown KnownHostsCommand` (D-R4). No CI lane runs one. On 9.6p1, a keyword ssh does not know stood in for it: it was fatal inside a non-matching Host block and inside the block after an in-block IgnoreUnknown, and the top-level IgnoreUnknown made it parse.
 
 ## Decisions
 
@@ -349,6 +350,57 @@ CI on the fix head a27bfae:
 
 Commit e0fccdf (docs only) added the state-swap residual to enroll-user.md.
 
+### Fix round 2
+
+Fix-round check wf_e48c6ab7-676 on head 66611da: lows only. Round 2 is commits fcb6aef, 38f3231 and 4ad4638, on top of 66611da (no rewrite).
+
+| Finding | Severity | Outcome | Commit |
+|---|---|---|---|
+| G1: `KnownHostsCommand` is fatal on ssh below 8.5 | low (2/2) | fixed per D-R4 | fcb6aef |
+| G2: revoke host's lines claimed more than was checked | low (2/2) | fixed | 38f3231 |
+| G3: names a state swap can drop | low (split 1/2) | documented | 4ad4638 |
+| Unreadable host-trust.json in `revoke host` | noted | no change | none |
+
+**G1 (low): `KnownHostsCommand` is fatal on ssh below 8.5.** `KnownHostsCommand none` came with OpenSSH 8.5. An older ssh refuses an unknown keyword even inside a Host block that does not match, so once the Include is added, every ssh would fail.
+- Owner decision D-R4 (2026-11-07): an IgnoreUnknown line at the top. When the config has names, its first directive is now `IgnoreUnknown KnownHostsCommand`, at top level after the two header comments and before the Host block. A config without names stays header only. `KnownHostsCommand none` stays.
+- The Include advice, the two scan notes and the managed file's header comment now say "at top level, before the first Host or Match line".
+- enroll-user.md item 1 explains three things: the line, that the Include must sit at top level (IgnoreUnknown acts only where its line is active), and that ssh keeps the first IgnoreUnknown, so a user with an earlier IgnoreUnknown of their own adds KnownHostsCommand to that list. Clients below 8.5 are UNVERIFIED, listed above.
+- Tests:
+  - `TestKnownHosts/ssh_config_keywords_exact` and `htConfig` expect the line first.
+  - e2e `TestHostTrustLongLines` part `c_d7_block_after_include` checks that the managed file has the line right before its Host line. For the first and the last managed name, `ssh -G` of the managed file must print `ignoreunknown KnownHostsCommand` and otherwise exactly what the same file without the line prints. Part (a) already requires `ssh -G -F <managed file>` to exit 0.
+- RED, unit: with the line not written, `--- FAIL: TestKnownHosts/writes_three_files_and_state` and `--- FAIL: TestKnownHosts/ssh_config_keywords_exact`.
+- Oracle on WSL's OpenSSH_9.6p1:
+  - With and without the line, the managed file's `ssh -G` output for two managed names and one outside name differs only by the added `ignoreunknown KnownHostsCommand` line, and every run exits 0.
+  - The mechanism, with a keyword 9.6p1 does not know standing in: inside a non-matching Host block it exits 255 (`Bad configuration option`), and with an IgnoreUnknown inside the block it still exits 255. With a top-level IgnoreUnknown it exits 0.
+
+**G2 (low): revoke host's lines claimed more than was checked.** revoke.md step 2 said the output calls an already-disabled or absent NAME the server's word, but the absent line did not say so. The already-disabled line claimed the host-trust floor was checked even when no readable state existed.
+- Fix: `checkHostTrustFloor` now also returns what it checked, and both lines say it is the server's word and end with one of three notes:
+  - `it is not older than directory version N, which your host trust files hold`;
+  - `there is no host trust state of this installation, so no version floor was checked`;
+  - `your host trust state could not be read (see the warning), so no version floor was checked`.
+- A served version 0 now prints `NAME is in no directory: the server serves none ...` instead of naming "directory version 0".
+- revoke.md step 2 lists the three cases.
+- Tests: `already_disabled_sweeps_twice_exit_0`, `unknown_name_sweeps_warns_exit_3`, `floor_equal_version_same_sha_exit_0`, `floor_of_another_installation_ignored` and `unreadable_floor_warns` pin the exact notes. The new `no_directory_served_says_so_exit_3` covers version 0.
+- RED: with revoke.go at 66611da, all six failed.
+
+**G3 (low, split 1/2; docs only): names a state swap can drop.** The D-R1 state-swap residual in enroll-user.md item 2 now also covers names. When two runs swap their state writes, the names the faster run added can be missing from the state and the Host block. They come back when a directory that lists them is served again. A name removed from the directory in between does not come back: it leaves the strict block and falls to the user's own ssh configuration (T-03-346 under this race).
+
+**No change, noted:** an unreadable host-trust.json in `revoke host` keeps warn-and-skip. The check's skeptics refuted it as a defect: a missing file skips the floor too, and a server cannot damage the file. The lens that looked at it preferred failing closed; that is noted, not adopted.
+
+**Local gates after round 2.**
+- Windows: `go vet ./cmd/keyroster/` and `go test -count=1 ./cmd/keyroster/` pass.
+- Linux (scripts/linux.sh): all of these pass.
+  - `go build ./...`, `go vet ./...` and `go vet -tags e2e ./test/e2e/`;
+  - `gofmt -l .` is empty;
+  - `go test -race -count=1 ./cmd/keyroster/`;
+  - golangci-lint v2.14.0 on cmd/keyroster and test/e2e, plus GOOS=windows and GOOS=darwin, with 0 issues.
+
+CI on the round-2 head 4ad4638: all 27 checks passed.
+- e2e run 42336954875 passed on both lanes with no `--- FAIL:`. `TestHostTrustLongLines` passed twice, its part `c_d7_block_after_include` included, so 9.5p1 and 10.5p1 both accept the top-level line, and it changes nothing else `ssh -G` prints for a managed name. `TestHostCertNoTOFU` passed on both lanes.
+- Go test elapsed: 9.5p1 794.451 s (+59.6 s against the base), 10.5p1 801.425 s (+81.3 s). Both are under the 900 s stop and within 6 minutes of the base.
+- CI run 42336954913 passed, fuzz included.
+- The round-1 docs head 66611da was green on every workflow too: CI run 42308744617 and E2E run 42308744450.
+
 ## Self-Check: PASSED
 
-Every created file exists (knownhosts.go and its two test files, hosttrust_runbook_test.go, revoke_host_test.go, test/e2e/hosttrust_test.go, the plan, the moved todo), and each recorded commit (859f99e, f770e17, 669ffaf, 6a56968, 690967a, 7bc39a0, 457a001, 42cf597, bbe9cb2) is an ancestor of HEAD. Pre-merge fix round 1: the todo 2026-11-06-root-signed-host-name-scope.md exists, and 9fd5556, e499893, dd7da7f, 9b6fbbd, 1115de2, 39f88ca, 5787dc7, a27bfae and e0fccdf are ancestors of HEAD.
+Every created file exists (knownhosts.go and its two test files, hosttrust_runbook_test.go, revoke_host_test.go, test/e2e/hosttrust_test.go, the plan, the moved todo), and each recorded commit (859f99e, f770e17, 669ffaf, 6a56968, 690967a, 7bc39a0, 457a001, 42cf597, bbe9cb2) is an ancestor of HEAD. Pre-merge fix round 1: the todo 2026-11-06-root-signed-host-name-scope.md exists, and 9fd5556, e499893, dd7da7f, 9b6fbbd, 1115de2, 39f88ca, 5787dc7, a27bfae and e0fccdf are ancestors of HEAD. Fix round 2: 66611da, fcb6aef, 38f3231 and 4ad4638 are ancestors of HEAD.
