@@ -118,18 +118,22 @@ type LiveCert struct {
 
 // LiveIssuanceForSubjectTx returns, inside tx, every certificate issued
 // under CA role role (as the issuance table stores it) whose key ID names
-// subject (a kr1 or kr2 key ID with that sub field, confirmed with
-// cert.ParseKeyID) and that is live at at (whole seconds) by
+// subject (a kr1, kr2 or kr3 key ID with that sub field, confirmed with
+// cert.ParseKeyID; 03-09b) and that is live at at (whole seconds) by
 // krl.EntryLive, in ascending serial order. The prefix is compared
 // exactly (substr), never with LIKE, in which "_" would match any
 // character. There is no issue-time cutoff: the TTL cap comes from the
 // policy, and a successor policy with a shorter cap must not hide an
 // older, longer-lived certificate. It does not consult the revocation
 // table: a certificate an earlier revocation already lists is returned
-// again (re-listing).
+// again (re-listing). The three prefixes are scanned for every role, with
+// no per-role table: audit's subject index is blind to the key-ID version,
+// and a combination the signer never issues (kr2 under the host role;
+// kr3 under the user role, which ParseKeyID also refuses) finds no row.
 func (d *DB) LiveIssuanceForSubjectTx(ctx context.Context, tx *sql.Tx, role, subject string, at uint64) ([]LiveCert, error) {
 	var out []LiveCert
-	for _, prefix := range []string{"kr1/ca=" + role + "/sub=" + subject + "/", "kr2/ca=" + role + "/sub=" + subject + "/"} {
+	for _, v := range []string{"kr1", "kr2", "kr3"} {
+		prefix := v + "/ca=" + role + "/sub=" + subject + "/"
 		rows, err := tx.QueryContext(ctx, `SELECT serial, key_id, cert FROM issuance WHERE ca_role = ? AND substr(key_id, 1, length(?)) = ? ORDER BY serial`,
 			role, prefix, prefix)
 		if err != nil {

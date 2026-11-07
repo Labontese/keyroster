@@ -37,6 +37,8 @@ import (
 
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/custodytext"
+	"github.com/Labontese/keyroster/internal/directory"
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/trust"
 	"github.com/Labontese/keyroster/internal/wire"
@@ -82,6 +84,15 @@ type loginServer struct {
 	override map[string]func(w http.ResponseWriter)
 	begun    chan *fakeLogin
 	t        *testing.T
+
+	// Host trust (03-09b): the bundle served, its ops key, a policy admin
+	// key, the directory and signatures redeem returns, and the KRL route.
+	bundle               *trust.Bundle
+	ops, admin           ssh.Signer
+	redeemDir, redeemSig []byte
+	krlDoc               []byte // nil: 404 no_krl
+	krlStatus            int    // non-zero: the KRL route answers this status
+	krlGets              int
 }
 
 const loginTestCustody = "user=agent, host=agent, machine=agent, ops=agent, log=agent"
@@ -98,6 +109,17 @@ func newLoginServer(t *testing.T) *loginServer {
 			{Name: "ops", Principals: []string{"role:ops"}, MaxTTLSeconds: 3600, Extensions: []string{}},
 		}}
 	g := newCeremony(t, 1)
+	// The policy names an admin key the test holds, so it can sign the
+	// directory the redeem answer carries (03-09b).
+	e.admin = htSigner(t)
+	adminFile := filepath.Join(g.dir, "admin0.pub")
+	writeTestFile(t, adminFile, ssh.MarshalAuthorizedKey(e.admin.PublicKey()))
+	if err := os.Remove(g.policy); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := run(t, "root", "genesis-policy", "--admin", "admin0="+adminFile, "--out", g.policy); code != 0 {
+		t.Fatalf("genesis-policy exit %d: %s", code, stderr)
+	}
 	cas := &trust.CAPubKeys{}
 	for _, role := range trust.CAPubKeyRoles {
 		priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -110,6 +132,9 @@ func newLoginServer(t *testing.T) *loginServer {
 		}
 		if role == trust.RoleUser {
 			e.ca = s
+		}
+		if role == "ops" {
+			e.ops = s
 		}
 		cas.Keys = append(cas.Keys, trust.CAPubKey{Role: role, Key: trust.FormatKey(s.PublicKey()), Alg: s.PublicKey().Type(), Custody: "tpm"})
 	}
@@ -126,6 +151,9 @@ func newLoginServer(t *testing.T) *loginServer {
 	}
 	dialAgent = prevDial
 	read := func(name string) []byte { return readTestFile(t, filepath.Join(g.out, name)) }
+	if e.bundle, err = trust.ParseBundle(read("bundle.json")); err != nil {
+		t.Fatal(err)
+	}
 	pol, err := trust.ParsePolicy(read("policy.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -198,6 +226,19 @@ func (e *loginServer) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == serverclient.TrustPath:
 		_, _ = w.Write(e.trustDoc)
+	case r.URL.Path == serverclient.KRLPath:
+		e.mu.Lock()
+		e.krlGets++
+		doc, status := e.krlDoc, e.krlStatus
+		e.mu.Unlock()
+		switch {
+		case status != 0:
+			e.writeJSON(w, status, serverclient.APIError{Error: "unavailable"})
+		case doc == nil:
+			e.writeJSON(w, http.StatusNotFound, serverclient.APIError{Error: serverclient.KRLErrNone})
+		default:
+			_, _ = w.Write(doc)
+		}
 	case r.Method == http.MethodGet && r.URL.Path == loginOptionsRoute:
 		e.mu.Lock()
 		roles := e.roles
@@ -277,7 +318,10 @@ func (e *loginServer) handle(w http.ResponseWriter, r *http.Request) {
 		if certFor != nil {
 			raw = certFor(e.t, l)
 		}
-		e.writeJSON(w, http.StatusOK, loginRedeemAnswer{Certificate: raw})
+		e.mu.Lock()
+		dir, sigs := e.redeemDir, e.redeemSig
+		e.mu.Unlock()
+		e.writeJSON(w, http.StatusOK, loginRedeemAnswer{Certificate: raw, Directory: dir, DirectorySigs: sigs})
 	default:
 		http.NotFound(w, r)
 	}
@@ -1193,6 +1237,7 @@ func TestLoginRefusals(t *testing.T) {
 // the issuance (03-02): no usable agent means no begin and no certificate
 // (E-IN-01), and the agent lifetime is computed at the add (E-IN-02).
 func TestLoginFlowFakeServer(t *testing.T) {
+	loginHostTrustCases(t)
 	t.Run("happy_path", func(t *testing.T) {
 		list := startLoginTestAgent(t)
 		e := newLoginServer(t)
@@ -1429,6 +1474,261 @@ func TestLoginPeerText(t *testing.T) {
 		r := wait()
 		if r.code != 0 || !strings.Contains(r.stderr, custodytext.SoftwareCABanner([]string{"user", "host", "machine", "ops", "log"})) {
 			t.Fatalf("exit %d; stderr lacks the software custody banner:\n%s", r.code, r.stderr)
+		}
+	})
+}
+
+// setHostTrust makes redeem answer with doc and sigs, and the KRL route
+// serve k (nil: none published).
+func (e *loginServer) setHostTrust(t *testing.T, doc, sigs []byte, k *serverclient.KRLDocument) {
+	t.Helper()
+	var raw []byte
+	if k != nil {
+		var err error
+		if raw, err = json.Marshal(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.redeemDir, e.redeemSig, e.krlDoc = doc, sigs, raw
+}
+
+// trustDir is directory version v bound to the bundle's installation with
+// host web1 (principal web1), and its signature by the policy admin.
+func (e *loginServer) trustDir(t *testing.T, v uint64) ([]byte, []byte) {
+	t.Helper()
+	d := &directory.Directory{Version: v, Prev: trust.GenesisPrev, InstallationID: e.bundle.InstallationID,
+		HostGroups: []directory.HostGroup{{Name: "web", Accounts: []directory.AccountMap{}}},
+		Hosts:      []directory.Host{{Name: "web1", HostGroup: "web", Keys: []string{trust.FormatKey(htSigner(t).PublicKey())}, Principals: []string{"web1"}, Status: directory.StatusActive}}}
+	if v > 1 {
+		d.Prev = strings.Repeat("ab", 32)
+	}
+	d.Sort()
+	doc, err := d.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc, htSign(t, doc, e.admin)
+}
+
+// trustKRL is an empty KRL of version v for the bundle, by its ops key.
+func (e *loginServer) trustKRL(t *testing.T, v uint64) *serverclient.KRLDocument {
+	t.Helper()
+	return htKRLDoc(t, v, time.Now(), e.bundle.InstallationID, e.ops, krl.Set{})
+}
+
+// seedState writes a valid host trust state for e's bundle with directory
+// version dirVersion (0: none) and KRL version krlVersion.
+func (e *loginServer) seedState(t *testing.T, dirVersion, krlVersion uint64) {
+	t.Helper()
+	st := &hostTrustState{Format: 1, InstallationID: e.bundle.InstallationID, BundleVersion: e.bundle.Version, OpsKey: e.bundle.OpsKey.Key,
+		DirectoryVersion: dirVersion, KRLVersion: krlVersion, Names: []string{"web1"}}
+	if dirVersion > 0 {
+		st.DirectorySHA256 = strings.Repeat("cd", 32)
+	}
+	writeSeedState(t, st)
+}
+
+// writeSeedState writes st as the state file.
+func writeSeedState(t *testing.T, st *hostTrustState) {
+	t.Helper()
+	data, err := st.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := hostTrustStatePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, p, data)
+}
+
+// loginHostTrust runs one keyroster login against e with args and returns
+// its result; the login itself must succeed.
+func loginHostTrust(t *testing.T, e *loginServer, args ...string) loginResult {
+	t.Helper()
+	startLoginTestAgent(t)
+	stderr, wait := e.start(t, args...)
+	e.drive(t, stderr)
+	r := wait()
+	if r.code != 0 || !strings.Contains(r.stdout, "Logged in as alice") {
+		t.Fatalf("keyroster login exit %d:\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
+	}
+	return r
+}
+
+// loginHostTrustCases are TestLoginFlowFakeServer's host trust subtests
+// (03-09b, D4, T-03-348): after the certificate is in the agent, the login
+// refreshes the host trust files from the directory its answer carries
+// and the KRL, with the one writer, and never fails the login over it.
+func loginHostTrustCases(t *testing.T) {
+	sshFiles := func(t *testing.T, dir string) []string {
+		t.Helper()
+		var out []string
+		for _, n := range []string{hostTrustKnownHosts, hostTrustKRLFile, hostTrustSSHConfig} {
+			if _, err := os.Stat(filepath.Join(dir, n)); err == nil {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	t.Run("login_writes_host_trust_files", func(t *testing.T) {
+		sshDir := useSSHDir(t)
+		e := newLoginServer(t)
+		doc, sigs := e.trustDir(t, 1)
+		e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+		r := loginHostTrust(t, e)
+		if !strings.Contains(r.stdout, "Host trust refreshed (directory v1, KRL v1, 1 names).\n") || strings.Index(r.stdout, "Host trust") < strings.Index(r.stdout, "Logged in as") {
+			t.Fatalf("stdout:\n%s", r.stdout)
+		}
+		if got := sshFiles(t, sshDir); len(got) != 3 {
+			t.Fatalf("files %v, want the three managed files", got)
+		}
+		if !strings.Contains(string(readTestFile(t, filepath.Join(sshDir, hostTrustSSHConfig))), "Host web1\n") {
+			t.Fatal("the config does not name web1")
+		}
+	})
+	t.Run("no_known_hosts_flag_skips", func(t *testing.T) {
+		sshDir := useSSHDir(t)
+		e := newLoginServer(t)
+		doc, sigs := e.trustDir(t, 1)
+		e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+		r := loginHostTrust(t, e, "--no-known-hosts")
+		e.mu.Lock()
+		gets := e.krlGets
+		e.mu.Unlock()
+		if strings.Contains(r.stdout, "Host trust") || gets != 0 || len(sshFiles(t, sshDir)) != 0 {
+			t.Fatalf("--no-known-hosts: %d KRL requests, files %v, stdout:\n%s", gets, sshFiles(t, sshDir), r.stdout)
+		}
+	})
+	t.Run("directory_missing_no_state_not_refreshed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			dir, sigs bool
+		}{{"none", false, false}, {"no_signatures", true, false}, {"signatures_only", false, true}} {
+			sshDir := useSSHDir(t)
+			e := newLoginServer(t)
+			doc, sigs := e.trustDir(t, 1)
+			if !tc.dir {
+				doc = nil
+			}
+			if !tc.sigs {
+				sigs = nil
+			}
+			e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+			r := loginHostTrust(t, e)
+			if !strings.Contains(r.stdout, "Host trust not refreshed: the server sent no directory with this login.\n") || len(sshFiles(t, sshDir)) != 0 {
+				t.Fatalf("%s: files %v, stdout:\n%s", tc.name, sshFiles(t, sshDir), r.stdout)
+			}
+		}
+	})
+	t.Run("directory_missing_valid_state_revocations_only", func(t *testing.T) {
+		sshDir := useSSHDir(t)
+		e := newLoginServer(t)
+		e.seedState(t, 0, 0)
+		k := e.trustKRL(t, 1)
+		e.setHostTrust(t, nil, nil, k)
+		r := loginHostTrust(t, e)
+		if !strings.Contains(r.stdout, "Host trust partly refreshed: revocations only (the server sent no directory with this login).\n") {
+			t.Fatalf("stdout:\n%s", r.stdout)
+		}
+		if got := sshFiles(t, sshDir); len(got) != 1 || got[0] != hostTrustKRLFile {
+			t.Fatalf("files %v, want the KRL only", got)
+		}
+	})
+	t.Run("forged_directory_in_answer_refused", func(t *testing.T) {
+		for _, state := range []bool{false, true} {
+			sshDir := useSSHDir(t)
+			e := newLoginServer(t)
+			if state {
+				e.seedState(t, 0, 0)
+			}
+			doc, _ := e.trustDir(t, 1)
+			e.setHostTrust(t, doc, htSign(t, doc, htSigner(t)), e.trustKRL(t, 1))
+			r := loginHostTrust(t, e)
+			switch {
+			case state && !strings.Contains(r.stdout, "Host trust partly refreshed: revocations only (the directory the server sent is not signed by the policy admins"):
+				t.Fatalf("with a state: stdout:\n%s", r.stdout)
+			case !state && (!strings.Contains(r.stdout, "Host trust not refreshed: the directory the server sent is not signed") || len(sshFiles(t, sshDir)) != 0):
+				t.Fatalf("without a state: files %v, stdout:\n%s", sshFiles(t, sshDir), r.stdout)
+			}
+		}
+	})
+	t.Run("older_directory_in_answer_refused", func(t *testing.T) {
+		useSSHDir(t)
+		e := newLoginServer(t)
+		e.seedState(t, 5, 0)
+		doc, sigs := e.trustDir(t, 1)
+		e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+		r := loginHostTrust(t, e)
+		if !strings.Contains(r.stdout, "Host trust partly refreshed: revocations only (the server sent directory version 1, older than version 5") {
+			t.Fatalf("stdout:\n%s", r.stdout)
+		}
+	})
+	t.Run("include_line_printed_once", func(t *testing.T) {
+		useSSHDir(t)
+		e := newLoginServer(t)
+		doc, sigs := e.trustDir(t, 1)
+		e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+		r := loginHostTrust(t, e)
+		if n := strings.Count(r.stdout+r.stderr, "Include ~/.ssh/keyroster_ssh_config"); n != 1 {
+			t.Fatalf("the Include line is printed %d times:\nstdout:\n%s\nstderr:\n%s", n, r.stdout, r.stderr)
+		}
+	})
+	t.Run("redeem_answer_at_max_directory_fits", func(t *testing.T) {
+		useSSHDir(t)
+		e := newLoginServer(t)
+		doc, sigs := bytes.Repeat([]byte("d"), wire.MaxDirectory), bytes.Repeat([]byte("s"), wire.MaxDirectorySigs)
+		e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+		var size int
+		e.mu.Lock()
+		e.certFor = func(t *testing.T, l *fakeLogin) []byte {
+			raw := e.honestCert(t, l)
+			b, err := json.Marshal(loginRedeemAnswer{Certificate: raw, Directory: doc, DirectorySigs: sigs})
+			if err != nil {
+				t.Error(err)
+			}
+			size = len(b)
+			return raw
+		}
+		e.mu.Unlock()
+		r := loginHostTrust(t, e)
+		if size == 0 || size >= 4<<20 {
+			t.Fatalf("the encoded answer is %d bytes, want below %d", size, 4<<20)
+		}
+		if !strings.Contains(r.stdout, "Host trust not refreshed") {
+			t.Fatalf("stdout:\n%s", r.stdout)
+		}
+	})
+	t.Run("krl_unavailable_not_refreshed_login_ok", func(t *testing.T) {
+		sshDir := useSSHDir(t)
+		e := newLoginServer(t)
+		doc, sigs := e.trustDir(t, 1)
+		e.setHostTrust(t, doc, sigs, nil)
+		e.mu.Lock()
+		e.krlStatus = http.StatusInternalServerError
+		e.mu.Unlock()
+		r := loginHostTrust(t, e)
+		if !strings.Contains(r.stdout, "Host trust not refreshed: the server's KRL could not be read") || len(sshFiles(t, sshDir)) != 0 {
+			t.Fatalf("files %v, stdout:\n%s", sshFiles(t, sshDir), r.stdout)
+		}
+	})
+	t.Run("state_missing_with_files_not_refreshed_login_ok", func(t *testing.T) {
+		sshDir := useSSHDir(t)
+		if err := os.Mkdir(sshDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, filepath.Join(sshDir, hostTrustSSHConfig), []byte("# an earlier run's file\n"))
+		e := newLoginServer(t)
+		doc, sigs := e.trustDir(t, 1)
+		e.setHostTrust(t, doc, sigs, e.trustKRL(t, 1))
+		r := loginHostTrust(t, e)
+		if !strings.Contains(r.stdout, "Host trust not refreshed: the host trust state") || len(sshFiles(t, sshDir)) != 1 {
+			t.Fatalf("files %v, stdout:\n%s", sshFiles(t, sshDir), r.stdout)
 		}
 	})
 }

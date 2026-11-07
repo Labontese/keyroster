@@ -22,3 +22,7 @@ PR #71 review fix round 1 (owner decision D-R4) binds `keyroster host approve --
 - `host approve --identity SHA256:...`: refuse unless the re-fetched pending host's identity fingerprint is the given one; required with `--yes` next to `--host-key`.
 - `host forget NAME --identity SHA256:...`: forget only that agent; the server answers `host_name_ambiguous` without it when several agents share the name.
 - Tests: a swapped identity refused with nothing signed; forget of one of two agents.
+
+## Resolution
+
+Resolved in 03-09b (PR from branch `p03/09b-host-trust`), owner decision QB-4. The approve half is settled by documentation, not code: host-setup.md step 4 of "Enrolling a host" now says that the `agent identity:` line `keyroster host approve` prints is informational, and that the approval is bound by the host keys of the entry the admin signs (`--host-key`, the exact set; `TestHostApproveHostKeys`). The forget half shipped earlier as `keyroster host forget --identity`, which forgets exactly one agent (cmd/keyroster/host.go, `TestHostForget`).

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -21,6 +22,7 @@ import (
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/trust"
+	"github.com/Labontese/keyroster/internal/wire"
 )
 
 // stdinIsTerminal reports whether standard input is a terminal, the
@@ -270,7 +272,13 @@ func editDirectoryOutcome(ctx context.Context, s *adminSession, opts editOpts, s
 			return 0, err
 		}
 	}
+	// A version that removes a host entry, or a principal or key of one,
+	// first revokes the entry's live host certificates (03-09b, T-03-345):
+	// the losses are part of what is signed, so the consent below covers
+	// both.
+	losses := hostLosses(base.Dir, next)
 	printChanges(stdout, base, next.Version, doc, changes)
+	printLosses(stdout, next.Version, losses, proposal != "")
 	if err := confirmSign(opts.Yes, next.Version, stdout); err != nil {
 		return 0, err
 	}
@@ -279,9 +287,23 @@ func editDirectoryOutcome(ctx context.Context, s *adminSession, opts editOpts, s
 		return 0, fmt.Errorf("sign directory version %d with %s: %w", next.Version, s.adminFP, err)
 	}
 	if proposal != "" {
+		// Nothing is revoked at propose time: directory install revokes
+		// right before it installs.
 		return editProposed, writeProposal(stdout, proposal, base, next.Version, doc, sig)
 	}
-	return editInstalled, installVersion(ctx, s, base, opts, stdout, next.Version, doc, sig)
+	if len(losses) == 0 {
+		return editInstalled, installVersion(ctx, s, base, opts, stdout, next.Version, doc, sig)
+	}
+	lr := newLossRevoker(s, base.Bundle, next.Version, stdout)
+	defer lr.notice()
+	if err := lr.before(ctx, losses); err != nil {
+		return 0, err
+	}
+	if err := installVersion(ctx, s, base, opts, stdout, next.Version, doc, sig); err != nil {
+		return 0, lr.failed(losses, err)
+	}
+	lr.after(ctx, losses)
+	return editInstalled, nil
 }
 
 // installationText names an installation ID in a message, an empty one as
@@ -453,4 +475,192 @@ func confirmSign(yes bool, version uint64, stdout io.Writer) error {
 		return nil
 	}
 	return errors.New("not confirmed; nothing was signed")
+}
+
+// hostLoss is what a directory version takes from one host entry of the
+// verified base it replaces (03-09b, threat-03, T-03-345): the entry
+// itself (Removed, with every principal and key), or principals or keys it
+// no longer holds.
+type hostLoss struct {
+	Name           string
+	Removed        bool
+	LostPrincipals []string
+	LostKeys       []string
+}
+
+// hostLosses returns the losses of next against the verified base: for
+// each entry h of base (any status), with n the entry of next with h's
+// name, h's principals and keys that n does not hold, all of them when
+// there is no n. Entries with nothing lost are left out; the result is
+// sorted by name and each set is sorted. A nil base, a disable, an
+// enable, an addition and an installation ID change are no loss. A
+// renamed entry is the removal of its old name. Only verified data is
+// read (the base the CLI verified, the version it is about to sign or
+// install).
+func hostLosses(base, next *directory.Directory) []hostLoss {
+	if base == nil {
+		return nil
+	}
+	var out []hostLoss
+	for _, h := range base.Hosts {
+		l := hostLoss{Name: h.Name, Removed: true, LostPrincipals: slices.Sorted(slices.Values(h.Principals)), LostKeys: slices.Sorted(slices.Values(h.Keys))}
+		if next != nil {
+			if n, ok := next.HostByName(h.Name); ok {
+				l = hostLoss{Name: h.Name, LostPrincipals: missingFrom(h.Principals, n.Principals), LostKeys: missingFrom(h.Keys, n.Keys)}
+			}
+		}
+		if len(l.LostPrincipals) > 0 || len(l.LostKeys) > 0 {
+			out = append(out, l)
+		}
+	}
+	slices.SortFunc(out, func(a, b hostLoss) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
+
+// missingFrom returns the sorted members of a that b does not hold.
+func missingFrom(a, b []string) []string {
+	var out []string
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			out = append(out, x)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// lossText describes l: "web1 (removed; principals web1, web1.lab; keys
+// SHA256:...)".
+func lossText(l hostLoss) string {
+	var parts []string
+	if l.Removed {
+		parts = append(parts, "removed")
+	}
+	if len(l.LostPrincipals) > 0 {
+		parts = append(parts, "principals "+strings.Join(l.LostPrincipals, ", "))
+	}
+	if len(l.LostKeys) > 0 {
+		fps := make([]string, len(l.LostKeys))
+		for i, k := range l.LostKeys {
+			fps[i] = hostKeyFingerprint(k)
+		}
+		parts = append(parts, "keys "+strings.Join(fps, ", "))
+	}
+	return l.Name + " (" + strings.Join(parts, "; ") + ")"
+}
+
+// lossNames is the names of losses, comma-separated.
+func lossNames(losses []hostLoss) string {
+	names := make([]string, len(losses))
+	for i, l := range losses {
+		names[i] = l.Name
+	}
+	return strings.Join(names, ", ")
+}
+
+// printLosses prints, as part of what is signed or installed, that
+// installing version first revokes every live host certificate of each
+// losing entry. For a proposal (and keyroster directory sign) nothing is
+// revoked now: keyroster directory install revokes them first.
+func printLosses(stdout io.Writer, version uint64, losses []hostLoss, proposal bool) {
+	var b strings.Builder
+	for _, l := range losses {
+		fmt.Fprintf(&b, "Installing version %d first revokes every live host certificate of: %s.\n", version, lossText(l))
+	}
+	if proposal && len(losses) > 0 {
+		b.WriteString("Nothing is revoked now: keyroster directory install will revoke them first, right before it installs this version.\n")
+	}
+	_, _ = io.WriteString(stdout, b.String())
+}
+
+// lossRevoker revokes the losses of one install (03-09b): right before the
+// install POST, every live host certificate of each losing entry, by
+// subject (the signer resolves its kr1 and kr3 certificates), each checked
+// in the verified KRL under a host CA key; after a successful install,
+// each removed entry once more. Revoking before the install records the
+// cert_revoked hold at the version the signer holds, so the same install
+// releases it for an entry that stays.
+type lossRevoker struct {
+	r       *revocation
+	version uint64
+	stdout  io.Writer
+	skip    bool // the bundle has no installation ID: the signer revokes nothing
+	sent    bool // a revoke request was sent
+}
+
+func newLossRevoker(s *adminSession, b *trust.Bundle, version uint64, stdout io.Writer) *lossRevoker {
+	return &lossRevoker{r: &revocation{s: s, bundle: b}, version: version, stdout: stdout, skip: b.InstallationID == ""}
+}
+
+// sweep sends one host subject revocation of name, headed by label.
+func (lr *lossRevoker) sweep(ctx context.Context, name, label string) error {
+	req := &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectHost, Subject: name}
+	if err := checkRevokeRequest(req, fmt.Sprintf("directory version %d drops host %s", lr.version, name)); err != nil {
+		return err
+	}
+	lr.sent = true
+	_, err := lr.r.sweepSubject(ctx, req, wire.CARoleHost, name, label, lr.stdout, lr.stdout)
+	return err
+}
+
+// before revokes the losses right before the install. A failed revoke
+// installs nothing (installing would leave the old certificates valid for
+// names another host may later be given); the error lists what was
+// revoked and names the re-run.
+func (lr *lossRevoker) before(ctx context.Context, losses []hostLoss) error {
+	if lr.skip {
+		_, _ = fmt.Fprintf(lr.stdout, "Warning: trust bundle v%d in force has no installation ID, so the signer revokes nothing (krl_no_installation_id): "+
+			"the kr1 host certificates of %s are not revoked. Installing anyway.\n", lr.r.bundle.Version, lossNames(losses))
+		return nil
+	}
+	var done []string
+	for _, l := range losses {
+		if err := lr.sweep(ctx, l.Name, fmt.Sprintf("Revocation before installing version %d", lr.version)); err != nil {
+			revoked := "none"
+			if len(done) > 0 {
+				revoked = strings.Join(done, ", ")
+			}
+			return fmt.Errorf("the live host certificates of %s could not be revoked: %w. Nothing was installed: installing would leave them valid "+
+				"for names another host may later be given. Revoked so far: %s. Run the command again (revoking again is harmless)", l.Name, err, revoked)
+		}
+		done = append(done, l.Name)
+	}
+	return nil
+}
+
+// after sweeps each removed entry once more after a successful install: a
+// key with no live certificate may have obtained one in between. A
+// failure warns and keeps the install.
+func (lr *lossRevoker) after(ctx context.Context, losses []hostLoss) {
+	if lr.skip {
+		return
+	}
+	for _, l := range losses {
+		if !l.Removed {
+			continue
+		}
+		if err := lr.sweep(ctx, l.Name, fmt.Sprintf("Second revocation (after installing version %d)", lr.version)); err != nil {
+			_, _ = fmt.Fprintf(lr.stdout, "Warning: the second revocation of %s after the install failed: %v. The install stands; run keyroster revoke host %s "+
+				"(it works after a removal) to revoke anything issued in between.\n", l.Name, err, l.Name)
+		}
+	}
+}
+
+// failed is an install failure after the loss revokes: the hold the
+// revokes left, and how to release it.
+func (lr *lossRevoker) failed(losses []hostLoss, err error) error {
+	if !lr.sent {
+		return err
+	}
+	names := lossNames(losses)
+	return fmt.Errorf("%w. The live host certificates of %s are revoked. The signer refuses their host keys new certificates (cert_revoked) "+
+		"until a directory version newer than the one it holds is installed: install version %d or any newer version. Until then, refreshed clients refuse %s",
+		err, names, lr.version, names)
+}
+
+// notice prints the recovery notice when a revoke request was sent.
+func (lr *lossRevoker) notice() {
+	if lr.sent {
+		_, _ = fmt.Fprintln(lr.stdout, recoveryKeptNotice)
+	}
 }

@@ -1089,10 +1089,10 @@ func TestRevokeSubject(t *testing.T) {
 		e.verifyExport()
 	})
 	t.Run("subject_kind_unsupported", func(t *testing.T) {
+		// Host subjects resolve since 03-09b (TestRevokeHostSubject);
+		// machine subjects arrive with 03-11.
 		e := newSubjectEnv(t)
-		for _, kind := range []wire.SubjectKind{wire.SubjectHost, wire.SubjectMachine} {
-			e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: kind, Subject: "web1"}), "subject_kind_unsupported")
-		}
+		e.refused(t, e.signedRevoke(t, &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectMachine, Subject: "web1"}), "subject_kind_unsupported")
 	})
 	t.Run("key_is_ca_of_this_installation", func(t *testing.T) {
 		e := newSubjectEnv(t)

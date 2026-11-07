@@ -295,10 +295,10 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 		}
 		want = []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: req.Key}}
 	case wire.TargetSubject:
-		if req.SubjectKind != wire.SubjectUser {
+		role, ok := subjectRole(req.SubjectKind)
+		if !ok {
 			return fmt.Errorf("revokes a %s subject, which this version does not resolve", req.SubjectKind)
 		}
-		role := trust.RoleUser
 		for _, serial := range rs.bySubject[role+"/"+req.Subject] {
 			if c := rs.certs[serial]; c.role == role && krl.EntryLive(c.validBefore, body.ResolvedAtSeconds) {
 				want = append(want, tlog.RevokedEntry{Kind: tlog.RevokedSerial, CAKey: c.caKey, Serial: serial, ValidBeforeSeconds: c.validBefore})
@@ -322,6 +322,20 @@ func verifyRevoke(index uint64, body *tlog.RevokeBody, leafMicros uint64, a *anc
 	rs.revokes++
 	rs.add(body.Entries)
 	return nil
+}
+
+// subjectRole maps a subject kind to the CA role whose certificates a
+// subject revocation resolves, as the signer maps it (03-09b): SubjectUser
+// to the user role, SubjectHost to the host role; SubjectMachine does not
+// resolve (03-11).
+func subjectRole(k wire.SubjectKind) (string, bool) {
+	switch k {
+	case wire.SubjectUser:
+		return trust.RoleUser, true
+	case wire.SubjectHost:
+		return trust.RoleHost, true
+	}
+	return "", false
 }
 
 // add records the entries of a verified revoke entry.

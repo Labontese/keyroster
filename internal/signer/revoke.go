@@ -33,14 +33,14 @@ import (
 // (revoke_installation_mismatch: the T-03-20 rule of directories),
 // admin-sshsig/v1 evidence by at least one policy admin over the request's
 // exact signing bytes under keyroster/revoke-request/v2 (one admin
-// suffices whatever admin_quorum says), a subject kind this version resolves
-// (subject_kind_unsupported), then one transaction: the bundle still the
-// one loaded at start, the target resolved to its entries, one revocation
-// row per entry, the revoke leaf (several for a subject above
-// tlog.MaxRevokedEntries certificates), the request ID, the KRL rebuilt
-// from the whole revocation table (krl.Encode, in publishKRLLocked) with
-// its ops-signed manifest, and the krl_publish leaf. The KRL leaves the
-// signer only after COMMIT.
+// suffices whatever admin_quorum says), a subject kind this version
+// resolves (subject_kind_unsupported; user and host, subjectRole), then
+// one transaction: the bundle still the one loaded at start, the target
+// resolved to its entries, one revocation row per entry, the revoke leaf
+// (several for a subject above tlog.MaxRevokedEntries certificates), the
+// request ID, the KRL rebuilt from the whole revocation table
+// (krl.Encode, in publishKRLLocked) with its ops-signed manifest, and the
+// krl_publish leaf. The KRL leaves the signer only after COMMIT.
 //
 // The targets resolve to:
 //   - serial: the certificate with that serial, issued by that CA role
@@ -54,8 +54,9 @@ import (
 //     bundle in force names it (CA-key revocation is 03-13's emergency
 //     path), and explicit_key_cap_reached when the revoked keys with it
 //     would exceed krl.MaxRevokedKeys or krl.MaxRevokedKeyBytes;
-//   - subject user: every certificate this signer issued under the user
-//     CA whose key ID names the subject and that is live at T
+//   - subject user or host (03-09b): every certificate this signer
+//     issued under the subject's CA role (subjectRole) whose kr1, kr2 or
+//     kr3 key ID names the subject and that is live at T
 //     (signerdb.LiveIssuanceForSubjectTx, krl.EntryLive), in ascending
 //     serial order, including those an earlier revocation already lists
 //     (re-listing), split over consecutive revoke leaves of at most
@@ -93,8 +94,8 @@ func (s *Signer) Revoke(ctx context.Context, peer Peer, req *wire.RevokeRequest)
 	if err != nil {
 		return nil, err
 	}
-	if req.Target == wire.TargetSubject && req.SubjectKind != wire.SubjectUser {
-		// Host subjects arrive with 03-09, machine subjects with 03-11.
+	if _, ok := subjectRole(req.SubjectKind); req.Target == wire.TargetSubject && !ok {
+		// Machine subjects arrive with 03-11.
 		return nil, refusalErr(wire.CodeRefused, "subject_kind_unsupported", nil)
 	}
 	resolvedAt := uint64(max(now.Unix(), 0)) //nolint:gosec // G115: >= 0
@@ -251,7 +252,11 @@ func (s *Signer) resolveRevokeLocked(ctx context.Context, tx *sql.Tx, req *wire.
 		}
 		return []tlog.RevokedEntry{{Kind: tlog.RevokedKey, Key: req.Key}}, nil
 	case wire.TargetSubject:
-		live, err := s.db.LiveIssuanceForSubjectTx(ctx, tx, trust.RoleUser, req.Subject, at)
+		role, ok := subjectRole(req.SubjectKind)
+		if !ok {
+			return nil, refusalErr(wire.CodeRefused, "subject_kind_unsupported", nil)
+		}
+		live, err := s.db.LiveIssuanceForSubjectTx(ctx, tx, role, req.Subject, at)
 		if err != nil {
 			return nil, err
 		}
@@ -262,6 +267,21 @@ func (s *Signer) resolveRevokeLocked(ctx context.Context, tx *sql.Tx, req *wire.
 		return out, nil
 	}
 	return nil, refusalErr(wire.CodeMalformed, "malformed_request", nil)
+}
+
+// subjectRole maps a subject kind to the CA role whose certificates a
+// subject revocation resolves (03-09b): SubjectUser to the user role,
+// SubjectHost to the host role. SubjectMachine is not resolved
+// (subject_kind_unsupported) until 03-11. internal/audit applies the same
+// mapping.
+func subjectRole(k wire.SubjectKind) (string, bool) {
+	switch k {
+	case wire.SubjectUser:
+		return trust.RoleUser, true
+	case wire.SubjectHost:
+		return trust.RoleHost, true
+	}
+	return "", false
 }
 
 // revocationRow is the revocation row written with entry e of the revoke

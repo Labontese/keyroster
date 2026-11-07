@@ -375,6 +375,10 @@ keyroster login
 keyroster login --role ops --ttl 30m
 ```
 
+After the certificate is in the agent, `keyroster login` also refreshes
+the host trust files in `~/.ssh` (`--no-known-hosts` skips that): see
+[Trusting hosts without TOFU](#trusting-hosts-without-tofu).
+
 - `keyroster login` makes a new key in memory and prints
   `Key fingerprint: SHA256:...`, the principals and the lifetime. It opens
   the approval page in your browser (`--no-browser` only prints the URL).
@@ -465,6 +469,201 @@ hardware or device-bound authenticator (both runs used one synced
 passkey), web sign-in on Linux, macOS, OpenSSH `ssh-agent` outside CI, the
 browser opener, and the Windows path in which `keyroster login` itself
 starts keyroster agent.
+
+## Trusting hosts without TOFU
+
+Clients reach enrolled hosts with no "authenticity of host" prompt:
+keyroster writes the trust files ssh reads, from the admin-signed
+directory and the KRL, which the CLI verifies itself (03-09b, REVOKE-04).
+Run in CI e2e (03-09b) on OpenSSH 9.5p1 and 10.5p1: `TestHostCertNoTOFU`
+(an admin's sync and a user's login write the files, and real ssh reaches
+the host by `HostKeyAlias` with no prompt) and `TestHostTrustLongLines`
+(the line shapes at their bounds). UNVERIFIED until 03-16 on a real
+client. The Windows client's use of these files is UNVERIFIED.
+
+**1. The files.** Three in `~/.ssh` and a state file in the CLI's config
+directory:
+
+- `~/.ssh/keyroster_known_hosts`: one `@cert-authority` line per trusted
+  host CA, over the principals of the active host entries;
+- `~/.ssh/keyroster_revoked_hosts.krl`: the verified KRL;
+- `~/.ssh/keyroster_ssh_config`: one strict `Host` block over every name
+  the client ever saw (active, disabled, removed), which trusts only
+  `keyroster_known_hosts` (`UserKnownHostsFile` and
+  `GlobalKnownHostsFile`), sets `KnownHostsCommand none` (so a
+  `KnownHostsCommand` later in your configuration adds no host key for a
+  managed name; run in CI e2e (03-09b), `TestHostTrustLongLines` part
+  `c_d7_block_after_include`), sets `StrictHostKeyChecking yes` and always
+  names the KRL as `RevokedHostKeys`;
+- `host-trust.json` in the keyroster config directory (next to
+  `config.json`): the floors and the names.
+
+Include the managed config from `~/.ssh/config` **at top level, before the
+first Host or Match line** and outside any Host or Match block: ssh keeps
+the first value it obtains, and an Include inside a Host block is
+conditional on that block. The CLI prints the line when it is missing and
+warns when it is misplaced:
+
+```
+Include ~/.ssh/keyroster_ssh_config
+```
+
+The managed config's first directive, at top level before its Host block,
+is `IgnoreUnknown KnownHostsCommand` (owner decision D-R4). ssh below
+OpenSSH 8.5 does not know `KnownHostsCommand` and refuses an unknown
+keyword even inside a Host block that does not match, so without that line
+every ssh would fail once the Include is added. `IgnoreUnknown` acts only
+where its line is active, which is why the Include must sit at top level.
+ssh also keeps only the first `IgnoreUnknown` it obtains, which matters
+for your own:
+
+- one **before** the Include wins: add `KnownHostsCommand` to its list;
+- one **after** the Include is replaced by the managed file's, so the
+  options your list names become fatal (`Bad configuration option`, and
+  every ssh stops). Merge your list into one line at top level, before
+  the Include: `IgnoreUnknown <your list>,KnownHostsCommand`. The CLI
+  warns on stderr for each `IgnoreUnknown` after the Include (for each
+  one at all when the Include is missing); the outcome line and the exit
+  code do not change. It scans `~/.ssh/config` only, up to 1 MiB, and
+  does not inspect nested Includes (owner decision D-R5). Run in CI
+  (03-09b): `TestKnownHosts/ignore_unknown_after_include_warned`,
+  `TestKnownHosts/ignore_unknown_without_include_warned`.
+
+Run in CI e2e (03-09b) on OpenSSH
+9.5p1 and 10.5p1: `TestHostTrustLongLines` part `c_d7_block_after_include`
+(the managed IgnoreUnknown line parses, and changes nothing else `ssh -G` prints for a managed
+name). Clients below OpenSSH 8.5 are UNVERIFIED: no CI lane runs one.
+
+The block never falls back to `~/.ssh/known_hosts`. A name outside it
+keeps your own configuration. Run in CI (03-09b):
+`TestKnownHosts/include_missing_prints_line_once`,
+`TestKnownHosts/include_after_host_warned_with_both_line_numbers`.
+
+**2. Refreshing.** Admins run `keyroster known-hosts sync`; every
+`keyroster login` refreshes the files too (`--no-known-hosts` skips that,
+the KRL fetch included). The outcome is one line:
+
+- `Host trust refreshed (directory vN, KRL vK, M names).`
+- `Host trust partly refreshed: revocations only (<reason>).` (or the
+  bound, item 8)
+- `Host trust not refreshed: <reason>.`
+
+`keyroster known-hosts sync` exits 0 when refreshed or unchanged, 3 when
+partly refreshed, and 1 when nothing was written. `keyroster login`
+always exits 0 for its certificate, whatever the host trust outcome. Run
+in CI (03-09b): `TestKnownHostsSync`, `TestLoginFlowFakeServer`.
+
+Two refreshes of one user at the same time (a `keyroster login` while a
+`known-hosts sync` runs) take no lock. Right before each file it renames,
+a run reads the state again (and, before the KRL, the KRL on disk), and
+when the other run has recorded newer files it stops without writing
+anything older: `Host trust not refreshed: a concurrent refresh won: ...`.
+A residual remains (owner decision D-R1): a rename right after that check
+can still land behind the other run's, so an older KRL, older CA lines or
+an older Host block can stay in place, and a revocation the newer KRL
+holds is then not enforced, until the next refresh re-verifies and
+rewrites every file. The state file has no such check before its rename
+(the run read it again just before), so two runs can also swap their
+state writes: the state then keeps the slower run's floors, never below
+the ones that run began with, and until a refresh from an honest server
+raises them again a compromised server could serve a directory version
+between the two runs' versions (T-03-347). The swap can also drop the
+names the faster run added from the state and the Host block. They come
+back when a directory that lists them is served again; a name removed
+from the directory in between does not come back, so it leaves the
+strict block and falls to your own ssh configuration (T-03-346, under
+this race). Run in CI (03-09b):
+`TestKnownHosts/concurrent_state_after_state_step_stops_krl`,
+`TestKnownHosts/concurrent_newer_krl_on_disk_stops_krl`; the window
+itself is UNVERIFIED (no test can time it).
+
+**3. What every signed-in user receives (T-03-100).** Every user who
+completes a passkey login receives the whole admin-signed directory with
+the login answer: users, roles, groups and memberships; hosts with their
+principals and keys; machines and their keys; public credential data. It
+holds no secrets. The owner accepted this while one installation serves
+one organisation. Run in CI (03-09b): `TestLoginRedeem` (the server sends
+it only from the mirror for the status it read before the login, and the
+certificate is always returned).
+
+**4. The refresh lag (T-03-240).** Changes reach a client at its next
+login or sync. After that, a disabled or removed name has no CA line
+while it stays in the block, so it is refused (never prompted), and a
+revoked certificate is refused through the KRL. Run in CI e2e (03-09b):
+`TestHostCertNoTOFU/refused_through_krl_alone` and
+`TestHostCertNoTOFU/refused_through_missing_ca_line_alone`.
+
+**5. The costs.** A managed name is unreachable until its host has a host
+certificate. Disabled and removed names stay refused. Names removed
+before the client's first verified refresh are not covered. Explicit
+host-key entries appear in the KRL only after `keyroster revoke host
+--keys` (revoke.md, section 4b).
+
+**6. Ports (D7).** The managed block covers port 22 by name. For another
+port, add after the Include a block for the exact managed name with `Port
+<n>` and `HostKeyAlias <that same name>`, and nothing else:
+
+```
+Include ~/.ssh/keyroster_ssh_config
+
+Host web1
+	Port 2222
+	HostKeyAlias web1
+```
+
+Placed after the Include, every other managed name stays strict; placed
+above it, the Include becomes conditional on that block (OpenSSH reads it
+with NEVERMATCH) and the other names lose the strict settings (QB-6).
+Run in CI e2e (03-09b): `TestHostTrustLongLines` (its part
+`c_d7_block_after_include`, with the negative control above the Include).
+
+**7. Freshness and rollback.** A KRL manifest older than 24 hours prints a
+warning; the files are still written. An older directory or KRL than the
+client already wrote is refused (an equal one is accepted), and an equal
+directory version with another SHA-256 is refused. After a signer restore,
+older directory versions are refused until the admins re-install up to
+the last version the client wrote, while revocations keep flowing. An
+older trust bundle (a restore brings one back) freezes the CA lines and
+the Host block, with a warning, until its version is back at the one the
+client saw; the KRL, checked with the stored ops key, keeps flowing. Run
+in CI (03-09b): `TestKnownHosts/older_bundle_freezes_ca_lines_krl_still_written`,
+`TestKnownHosts/older_krl_refused_equal_accepted`,
+`TestKnownHosts/stale_manifest_warned_still_written`.
+
+**8. Starting over.** When the CLI refuses because the state file is
+missing (while a managed file exists), damaged or for another
+installation, or when it warns that the names reached their bound (4 MiB
+of names: the Host block is frozen, no name is dropped, and `sync` exits
+3), delete the three files and the state file, then refresh:
+
+```
+rm ~/.ssh/keyroster_known_hosts ~/.ssh/keyroster_revoked_hosts.krl ~/.ssh/keyroster_ssh_config
+rm ~/.config/keyroster/host-trust.json   # Linux; the refusal prints the path
+```
+
+Run in CI (03-09b): `TestKnownHosts/missing_state_with_managed_files_refuses_all_writes`,
+`TestKnownHosts/bound_freezes_config_keeps_krl_and_known_hosts`.
+
+**Which names every client pins.** The Host block and the CA lines hold
+exactly the principals of the host entries in the admin-signed
+directory; the CLI checks their form, not whose names they are. So the
+admins who sign the directory choose which names every user's ssh trusts
+only the organisation's host CA for. An external name (a public service
+such as `git.example.com`) or a wrong one (a mistyped name, an address)
+affects every user at their next refresh: ssh then refuses that service's
+own host key. Names only grow, so a wrong name stays in the block, refused,
+after its entry is fixed or removed. To drop it on one client, start over
+(item 8). A root-signed scope of the names clients pin is planned for
+Phase 4 (owner decision D-R3).
+
+**9. The home ssh reads.** ssh expands `~` from the account's home in the
+account database, never from `$HOME`. So the CLI refuses every write when
+`$HOME` is not the account's home, and says so (QB-5). When the lookup
+fails it only warns and writes. The CGO_ENABLED=0 Linux release's os/user
+reads only `/etc/passwd`, so every account known only through NSS or LDAP
+gets that warning and no home check. Run in CI (03-09b):
+`TestKnownHostsUnix/home_differs_from_account_refuses`,
+`TestKnownHostsUnix/home_lookup_failure_warns_and_continues`.
 
 ## Residual risk
 

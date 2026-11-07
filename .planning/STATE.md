@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: Completed 03-09-PLAN.md (PR open, awaiting owner merge)
-last_updated: "2026-11-06T06:38:48.167Z"
+stopped_at: "Completed 03-09b-PLAN.md (PR #89 open, awaiting owner merge)"
+last_updated: "2026-11-06T20:30:31.316Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 3f9267559855369d900b30cad2d4c5c0b3d0df19
+state_head: bbe9cb24177deb0ba2a9335f17dca3d809f83421
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 64
-  completed_plans: 57
+  total_plans: 65
+  completed_plans: 58
   percent: 17
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 03 (Linux Agent and Revocation) — EXECUTING
-Plan: 23 of 29
+Plan: 24 of 30
 Status: Ready to execute
 Last activity: 2026-10-24 — Phase 03 execution started
 
@@ -112,6 +112,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 03 P08h | 110min | 4 tasks | 28 files |
 | Phase 03 P08i | 65min | 4 tasks | 29 files |
 | Phase 03 P09 | multi-session | 5 tasks | 90 files |
+| Phase 03 P09b | multi-session | 5 tasks | 30 files |
 
 ## Accumulated Context
 
@@ -319,6 +320,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-09: the signer chooses the host certificate lifetime, min(30 days, host cap in force); the agent asks for none (Q-09-6)
 - [Phase 03]: 03-09: host_cert_recent window = min(CapSeconds at issuance, cap in force)/3, keyed by host key (Q-09-2 refined)
 - [Phase 03]: 03-09: a missing or invalid host-certificate record is refilled from verified certificate files; an invalid one is set aside as hostcert.json.invalid
+- [Phase 03]: 03-09b: client host trust is one writer of three ~/.ssh files and a state file; the Host block keeps every name ever seen and freezes at a 4 MiB encoded bound (QB-1)
+- [Phase 03]: 03-09b: a host subject revoke resolves kr1 and kr3 under the host role; losses are revoked before the install that causes them, with consent (QB-2)
+- [Phase 03]: 03-09b: the redeem answer carries the signed directory from the mirror for the Status read before the burn only; the login never fails over host trust
 
 ### Pending Todos
 
@@ -359,6 +363,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-06T06:38:47.734Z
-Stopped at: Completed 03-09-PLAN.md (PR open, awaiting owner merge)
+Last session: 2026-11-06T20:30:30.874Z
+Stopped at: Completed 03-09b-PLAN.md (PR #89 open, awaiting owner merge)
 Resume file: None

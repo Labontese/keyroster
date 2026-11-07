@@ -757,6 +757,14 @@ approve` prints the fingerprints and asks before it signs, and then compare
 them in that output, not in an earlier `host pending`. (Run in CI:
 `TestHostApproveHostKeys` and `TestAgentEnrollEndToEnd`.)
 
+The `agent identity:` line `keyroster host approve` prints is
+informational: it helps you match the pending row to the host, but
+nothing binds the approval to it. What binds the approval are the host
+keys listed in the entry you sign (`--host-key`, the exact set; the check
+is `TestHostApproveHostKeys`). A forget, unlike an approval, is bound to
+one agent: `keyroster host forget --identity <identity>` (run in CI:
+`TestHostForget`). (Owner decision QB-4, 03-09b.)
+
 `host approve` shows the fingerprints again and signs a directory version
 with a host entry `<name>`, the enrolled host keys, the host group and the
 principals you typed: nothing in it comes from the host but its keys,
@@ -768,6 +776,17 @@ disabled or removed, so the removal itself and every later revocation
 reach the host ([Removing a host](#removing-a-host)). The next poll pulls
 the signed state and `keyroster-agent run` applies it ([How fast changes
 arrive](#how-fast-changes-arrive)).
+
+The `--principal` names you approve are the names every user's client
+pins to the organisation's host CA at its next refresh
+([enroll-user.md, "Trusting hosts without TOFU"](enroll-user.md#trusting-hosts-without-tofu)).
+Give only names of this host: an external name (a public service such as
+`git.example.com`) or a wrong one (a mistyped name, an address) affects
+every user, whose ssh then refuses that service's own host key, and since
+the clients' names only grow, it stays refused after you fix or remove the
+entry. A user drops it by starting over (enroll-user.md, item 8). A
+root-signed scope of these names is planned for Phase 4 (owner decision
+D-R3).
 
 **Refusals.**
 
@@ -1693,34 +1712,27 @@ answers the new request as malformed.
 
 **Ports.** A host certificate names hosts, not ports. A client that reaches
 a host on another port, or by another name, needs `HostKeyAlias` set to the
-certified name. Setting up clients is 03-09b's.
+certified name. The client files `keyroster login` and `keyroster
+known-hosts sync` write cover port 22; for another port, add a block for
+the exact name after the Include, as [enroll-user.md, "Trusting hosts
+without TOFU"](enroll-user.md#trusting-hosts-without-tofu) says (D7; run in
+CI e2e (03-09b): `TestHostTrustLongLines`).
 
 **Disable versus revoke.**
 
 - Disabling the entry stops renewal (`host_disabled`) and leaves the
   installed certificate valid until it expires.
-- To end a host's certificates now, until 03-09b brings
-  `keyroster revoke host`:
-  1. Take the host's serials from the signer's log, which is
-     authoritative. On the signer host, as in enroll-user.md:
-
-     ```sh
-     runuser -u keyroster-signer -g keyroster-signer -G tss -- \
-       keyroster-signer export-log --state-dir /var/lib/keyroster-signer --out /tmp/log.jsonl
-     keyroster audit verify --pin SHA256:... --threshold N /tmp/log.jsonl
-     ```
-
-     Take every `host_issue` line with the host's key fingerprints (or its
-     `host_name`) whose certificate is still valid. `keyroster host status`
-     is only a cross-check: a host reports it about itself.
-  2. Revoke each with `keyroster revoke serial --ca host SERIAL`.
-  3. Then install the directory version that disables the host.
-- The revocation reaches no client until 03-09b installs the revoked-hosts
-  KRL.
+- To end a host's certificates now, run `keyroster revoke host <name>`
+  ([revoke.md, section 4b](revoke.md#4b-revoking-a-host-keyroster-revoke-host)):
+  it revokes the host's certificates, disables the entry and sweeps again.
+- The revocation reaches a client at its next `keyroster login` or
+  `keyroster known-hosts sync`, which write the verified KRL to
+  `~/.ssh/keyroster_revoked_hosts.krl`.
 - Run in CI at the signer: `TestHostIssue/revoke_serial_of_host_cert` and
-  `TestHostIssue/cert_revoked_until_new_directory`; the export and verify
-  commands by `TestHostCertRenewAndRestart`, without the `runuser` wrapper.
-  UNVERIFIED end to end.
+  `TestHostIssue/cert_revoked_until_new_directory`. Run in CI (03-09b):
+  `TestRevokeHostSubject` and `TestRevokeHost`. Run in CI e2e (03-09b):
+  `TestHostCertNoTOFU/refused_after_refresh`. UNVERIFIED until 03-16 on a
+  real host and client.
 
 ## Manual recovery
 
@@ -1761,10 +1773,34 @@ forget goes through on it) and `TestAgentReenrollEndToEnd` (e2e: the
 re-enroll flow under one name, 03-08b). Every step on the homelab is
 UNVERIFIED until 03-16, whose forget drill proves them (owner decision Q4).
 
-A host that holds host certificates: revoke them first, as
-[Host certificates](#host-certificates) says under "Disable versus revoke",
-then remove the entry and forget the agent. Disabling or forgetting alone
-leaves its certificates valid until they expire.
+A host that holds host certificates: the removal revokes them first
+(03-09b). Installing the version that removes the entry first revokes
+every live host certificate of the entry, by subject, and the diff says
+so (`Installing version N first revokes every live host certificate of:
+NAME (removed; ...)`); `--yes` or the prompt is consent to both. A removed
+entry is swept once more after the install. A failed revoke installs
+nothing. A proposal (admin quorum above 1) revokes nothing:
+`keyroster directory install` checks the quorum locally, asks (`--yes` or
+a prompt), revokes, installs and sweeps again. Forgetting alone leaves
+the certificates valid until they expire.
+
+- `keyroster revoke host NAME` also works after the removal.
+- Before you give a principal that another host held within the last 30
+  days to a new host, run `keyroster revoke host OLDNAME`: removals
+  installed before this version, by an older CLI or on the signer socket
+  are not seen.
+- kr1 host certificates issued under another subject are revoked by
+  serial.
+- Not seen by any of this: host certificates a signer recovery kept
+  (`keyroster revoke key FILE`, revoke.md section 7), and, for an entry
+  that stays, a key with no live certificate that obtains one between the
+  revoke and the install (revoke that certificate with `keyroster revoke
+  serial` or `keyroster revoke key`; `keyroster revoke host NAME` would
+  also disable the entry and needs quorum).
+
+Run in CI (03-09b): `TestEditRevokesLossesBeforeInstall`,
+`TestDirectoryInstallLosses` and `TestHostLosses`. UNVERIFIED until 03-16
+on a real host.
 
 An enrolled agent that the directory approved once keeps receiving signed
 state (directory, bundle and policy, KRL) after its host entry is disabled
