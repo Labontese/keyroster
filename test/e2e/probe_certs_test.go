@@ -666,7 +666,7 @@ func TestProbeSSHDFacts(t *testing.T) {
 	if exercised {
 		_, stillDropped, _ = factQuery(listener, listenerKey, "127.0.0.2", user, accepted)
 	}
-	finalSrc := "127.0.0.2"
+	finalSrc := "127.0.0.1"
 	finalResult, finalDropped, finalDetail := factQuery(listener, listenerKey, finalSrc, user, accepted)
 	penaltyLines := 0
 	for _, l := range strings.Split(counting.log.String()+listener.log.String(), "\n") {
