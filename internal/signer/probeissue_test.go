@@ -1084,6 +1084,69 @@ func probeIssueBoundsCases(t *testing.T) {
 			t.Fatal("the tick after an admin publish published again for a moot prompt flag")
 		}
 	})
+	// Pre-merge review of PR #90: a publish the flag did not cause still
+	// carries every waiting negative row (each publish encodes the whole
+	// table), so it clears the flag. A stale flag would publish the next
+	// riding row before the hourly republish.
+	t.Run("flag_cleared_by_carrying_publish", func(t *testing.T) {
+		// The carrying publish is at t0+3671 s, a minute after the last
+		// probe publish, or at t0+7202 s (over an hour after it) for the hourly
+		// republish.
+		for _, via := range []string{"admin_revoke", "probe_issuance", "recovery", "hourly"} {
+			t.Run(via, func(t *testing.T) {
+				e := newHostEnv(t, 90)
+				keys := e.addActiveHosts(t, 2)
+				r1, _ := e.probeReq(e.ed, "web1", true)
+				e.mustProbe(r1)
+				t0 := e.clock.Now()
+				e.clock.set(t0.Add(3601 * time.Second))
+				r3, _ := e.probeReq(e.other, "web3", true)
+				if _, resp := e.mustProbe(r3); !e.publishedAfter(t, resp.LeafIndex) {
+					t.Fatal("setup: web3's first negative did not publish at once")
+				}
+				e.clock.set(t0.Add(3611 * time.Second))
+				rh, _ := e.probeReq(keys["h01"], "h01", true)
+				if _, resp := e.mustProbe(rh); e.publishedAfter(t, resp.LeafIndex) {
+					t.Fatal("setup: a negative 10 s after a probe publish published at once")
+				}
+				if prompt, _ := promptState(e); !prompt {
+					t.Fatal("setup: the coalesced negative did not set the prompt flag")
+				}
+				at := t0.Add(3671 * time.Second)
+				if via == "hourly" {
+					at = t0.Add(7202 * time.Second)
+				}
+				e.clock.set(at)
+				switch via {
+				case "admin_revoke":
+					e.revokeHost(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: e.off.PublicKey().Marshal()})
+				case "probe_issuance":
+					r, _ := e.probeReq(keys["h02"], "h02", true)
+					if _, resp := e.mustProbe(r); !e.publishedAfter(t, resp.LeafIndex) {
+						t.Fatal("setup: a first negative a minute after the last probe publish did not publish at once")
+					}
+				case "recovery":
+					e.recover(t, e.recoveryRequest(t, []wire.RecoveryImport{e.served(t)}, nil, nil))
+				case "hourly":
+					if !e.s.republishIfDue(ctx) {
+						t.Fatal("setup: the tick an hour after the last publish did not publish")
+					}
+				}
+				if prompt, _ := promptState(e); prompt {
+					t.Errorf("the %s publish carried the waiting negative but left the prompt flag set", via)
+				}
+				e.clock.set(at.Add(10 * time.Second))
+				r1b, _ := e.probeReq(e.ed, "web1", true)
+				if _, resp := e.mustProbe(r1b); e.publishedAfter(t, resp.LeafIndex) {
+					t.Fatal("setup: web1's renewal did not ride")
+				}
+				e.clock.set(at.Add(70 * time.Second))
+				if e.s.republishIfDue(ctx) {
+					t.Fatal("a stale prompt flag published the riding negative before the hourly republish")
+				}
+			})
+		}
+	})
 	t.Run("negative_pruned_after_valid_before_plus_300", func(t *testing.T) {
 		e := newHostEnv(t, 90)
 		e.setMachineCap(t, 90, nil)

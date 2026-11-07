@@ -305,7 +305,7 @@ func (s *Signer) issueProbeLocked(ctx context.Context, peer Peer, req *wire.Prob
 	}
 	switch {
 	case published != nil:
-		s.krl.Store(published)
+		s.publishedLocked(published)
 		s.lastProbePublish = issuedAt
 	case coalesce:
 		s.probePrompt = true

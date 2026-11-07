@@ -60,7 +60,8 @@ type logState struct {
 	pendingProbes *probeIndex
 	// probePrompt is set by a Negative probe issuance whose row could not
 	// publish at once because the last probe-caused publish is younger
-	// than krlCheckInterval; republishIfDue honours it (03-10).
+	// than krlCheckInterval; republishIfDue honours it (03-10), and every
+	// committed publish clears it (publishedLocked).
 	// lastProbePublish is the time of the last probe-caused publish (an
 	// immediate one or one the flag made), zero for none. A restart loses
 	// both: the row then rides the hourly publish. Guarded by s.mu.

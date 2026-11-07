@@ -274,12 +274,22 @@ func (s *Signer) republishIfDue(ctx context.Context) bool {
 		s.log.Error("KRL publish failed; retrying at the next check", "error", err.Error())
 		return false
 	}
-	s.krl.Store(published)
+	s.publishedLocked(published)
 	if prompted {
-		s.probePrompt, s.lastProbePublish = false, now
+		s.lastProbePublish = now
 	}
 	s.log.Info("KRL published", "krl_version", published.Version, "publish_leaf", leaf, "probe_prompt", prompted)
 	return true
+}
+
+// publishedLocked installs st, the KRL a committed publish wrote, as the
+// one GetKRL serves, and clears the probe prompt flag: every publish
+// encodes the whole revocation table, so it carries every negative row the
+// flag was set for, whichever path published (pre-merge review of PR #90).
+// It leaves lastProbePublish alone. The caller holds s.mu.
+func (s *Signer) publishedLocked(st *signerdb.KRLState) {
+	s.krl.Store(st)
+	s.probePrompt = false
 }
 
 // probePublishTooRecent reports whether the last probe-caused publish at
