@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/mod/sumdb/note"
@@ -45,14 +46,27 @@ type logState struct {
 	// replaces tree only after COMMIT succeeded.
 	pending       *tlog.Log
 	pendingMicros uint64
-	// pendingRevoked is loaded.revoked plus the entries of the revoke
-	// and revocation_recovery leaves appended in the open transaction,
+	// pendingRevoked is loaded.revoked plus the entries of the revoke,
+	// revocation_recovery and probe_issue leaves appended in the open transaction,
 	// nil while it appended none. It replaces loaded.revoked only after COMMIT succeeded.
 	pendingRevoked loggedRevocations
 	// pendingHosts is loaded.hosts with the leaves appended in the open
 	// transaction applied, nil while it appended none that change it
 	// (03-09). It replaces loaded.hosts only after COMMIT succeeded.
 	pendingHosts *hostIndex
+	// pendingProbes is loaded.probes with the probe_issue and krl_publish
+	// leaves appended in the open transaction applied, nil while it
+	// appended none (03-10). It replaces loaded.probes only after COMMIT.
+	pendingProbes *probeIndex
+	// probePrompt is set by a Negative probe issuance whose row could not
+	// publish at once because the last probe-caused publish is younger
+	// than krlCheckInterval; republishIfDue honours it (03-10), and every
+	// committed publish clears it (publishedLocked).
+	// lastProbePublish is the time of the last probe-caused publish (an
+	// immediate one or one the flag made), zero for none. A restart loses
+	// both: the row then rides the hourly publish. Guarded by s.mu.
+	probePrompt      bool
+	lastProbePublish time.Time
 
 	// broken is set when a failed commit left the in-memory state unknown
 	// and it could not be reloaded; every later append fails with it.
@@ -107,8 +121,8 @@ type loggedInstalls struct {
 	// lastKRLPublish is the body of the last krl_publish leaf (nil when
 	// there is none); loadKRL compares the stored KRL state with it.
 	lastKRLPublish []byte
-	// revoked is the exact multiset of the entries of the revoke and
-	// revocation_recovery leaves.
+	// revoked is the exact multiset of the entries of the revoke,
+	// revocation_recovery and negative probe_issue leaves (03-10).
 	// Unlike the other fields it follows the committed log: logTx adds
 	// the entries of every revoke leaf that COMMITs (pendingRevoked), and
 	// publishKRLLocked compares the revocation rows with it before the
@@ -119,6 +133,9 @@ type loggedInstalls struct {
 	// rebuildLogFrom and, like revoked, following the committed log
 	// (pendingHosts).
 	hosts hostIndex
+	// probes is the probe index (03-10), rebuilt and followed like hosts
+	// (pendingProbes).
+	probes probeIndex
 }
 
 // add records the bundle_install leaf idx with body.
@@ -330,6 +347,11 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 				return err
 			}
 		}
+		if probeRelevant(l.Kind) {
+			if err := installs.probes.apply(l); err != nil {
+				return err
+			}
+		}
 		switch l.Kind {
 		case tlog.KindBundleInstall:
 			if err := installs.add(idx, l.Body); err != nil {
@@ -364,6 +386,24 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			}
 			issued.count++
 			issued.lastSerial = b.Serial
+		case tlog.KindProbeIssue:
+			// A probe certificate (03-10) shares the issuance table and the
+			// serial sequence too, so it counts the same way; a negative one
+			// also wrote one revocation row, its own serial, which joins the
+			// logged set through the one derivation (RevokedEntries).
+			b, err := tlog.DecodeProbeIssueBody(l.Body)
+			if err != nil {
+				return fmt.Errorf("%w: leaf %d: probe_issue body does not decode", errLogMismatch, idx)
+			}
+			issued.count++
+			issued.lastSerial = b.Serial
+			entries, err := b.RevokedEntries()
+			if err != nil {
+				return fmt.Errorf("%w: leaf %d: probe_issue revoked entry: %w", errLogMismatch, idx, err)
+			}
+			if err := revoked.add(idx, entries); err != nil {
+				return err
+			}
 		case tlog.KindRevoke:
 			// A revocation issues nothing: it must not change issued.
 			b, err := tlog.DecodeRevokeBody(l.Body)
@@ -593,6 +633,15 @@ func (s *Signer) appendLocked(_ context.Context, tx *sql.Tx, leaf tlog.Leaf) (ui
 			return 0, err
 		}
 	}
+	if probeRelevant(leaf.Kind) {
+		if s.pendingProbes == nil {
+			c := s.loaded.probes.clone()
+			s.pendingProbes = &c
+		}
+		if err := s.pendingProbes.apply(leaf); err != nil {
+			return 0, err
+		}
+	}
 	if revokes {
 		if s.pendingRevoked == nil {
 			s.pendingRevoked = maps.Clone(s.loaded.revoked)
@@ -608,10 +657,22 @@ func (s *Signer) appendLocked(_ context.Context, tx *sql.Tx, leaf tlog.Leaf) (ui
 	return leaf.Index, nil
 }
 
-// revokedEntriesOf returns the revoked entries of a revoke or
-// revocation_recovery leaf, and ok false for a leaf of any other kind.
+// revokedEntriesOf returns the revoked entries of a revoke,
+// revocation_recovery or probe_issue leaf (a negative probe's own serial,
+// none for a positive one, 03-10), and ok false for a leaf of any other
+// kind.
 func revokedEntriesOf(leaf tlog.Leaf) ([]tlog.RevokedEntry, bool, error) {
 	switch leaf.Kind {
+	case tlog.KindProbeIssue:
+		b, err := tlog.DecodeProbeIssueBody(leaf.Body)
+		if err != nil {
+			return nil, false, err
+		}
+		entries, err := b.RevokedEntries()
+		if err != nil {
+			return nil, false, err
+		}
+		return entries, true, nil
 	case tlog.KindRevoke:
 		b, err := tlog.DecodeRevokeBody(leaf.Body)
 		if err != nil {
@@ -636,10 +697,10 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.broken != nil {
 		return s.broken
 	}
-	s.pending, s.pendingRevoked, s.pendingHosts = nil, nil, nil
+	s.pending, s.pendingRevoked, s.pendingHosts, s.pendingProbes = nil, nil, nil, nil
 	err := s.db.WithTx(ctx, fn)
-	next, nextMicros, nextRevoked, nextHosts := s.pending, s.pendingMicros, s.pendingRevoked, s.pendingHosts
-	s.pending, s.pendingRevoked, s.pendingHosts = nil, nil, nil
+	next, nextMicros, nextRevoked, nextHosts, nextProbes := s.pending, s.pendingMicros, s.pendingRevoked, s.pendingHosts, s.pendingProbes
+	s.pending, s.pendingRevoked, s.pendingHosts, s.pendingProbes = nil, nil, nil, nil
 	if err == nil {
 		if next != nil {
 			s.tree, s.lastMicros = next, nextMicros
@@ -649,6 +710,9 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 		}
 		if nextHosts != nil {
 			s.loaded.hosts = *nextHosts
+		}
+		if nextProbes != nil {
+			s.loaded.probes = *nextProbes
 		}
 		return nil
 	}

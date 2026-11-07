@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"strings"
 
+	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/signerdb"
 	"github.com/Labontese/keyroster/internal/tlog"
@@ -167,6 +169,13 @@ func (s *Signer) InstallDirectory(ctx context.Context, peer Peer, req *wire.Inst
 	case err != nil:
 		return nil, refusalErr(wire.CodeRefused, "directory_installation_unknown", err)
 	}
+	// The names reserved for probe certificates (03-10, Q4): a new
+	// directory may not grant the probe principal prefix to a role or map
+	// the probe account. Not in directory.Validate, so a directory already
+	// stored still loads and verifies.
+	if detail := reservedNames(d); detail != "" {
+		return nil, refusalErr(wire.CodeRefused, detail, nil)
+	}
 	// Not reachable today: Parse accepts only canonical bytes, whose
 	// version and prev CheckSuccessorBytes read the same way. Kept so the
 	// chain is checked on the parsed document should that ever change.
@@ -260,4 +269,26 @@ func (s *Signer) GetDirectory() *wire.GetDirectoryResponse {
 		Sigs:       append([]byte(nil), s.directorySigs...),
 		Authorized: s.directoryAuthorized,
 	}
+}
+
+// reservedNames returns principal_reserved for a directory with a role
+// principal that has cert.ReservedPrincipalPrefix, account_reserved for
+// one with a host-group account named cert.ReservedAccountName, and ""
+// otherwise (03-10, Q4).
+func reservedNames(d *directory.Directory) string {
+	for _, r := range d.Roles {
+		for _, p := range r.Principals {
+			if strings.HasPrefix(p, cert.ReservedPrincipalPrefix) {
+				return "principal_reserved"
+			}
+		}
+	}
+	for _, g := range d.HostGroups {
+		for _, a := range g.Accounts {
+			if a.Account == cert.ReservedAccountName {
+				return "account_reserved"
+			}
+		}
+	}
+	return ""
 }

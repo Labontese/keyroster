@@ -231,6 +231,21 @@ func (s *Signer) hostIssueOrRefuse(ctx context.Context, peer Peer, req *wire.Hos
 	return nil, s.refuseErr(ctx, s.hostLimiter, peer, digest, err)
 }
 
+// probeIssueOrRefuse runs ProbeIssue and records a refusal through
+// refuseErr, with the digest of the exact probe request that was refused,
+// on the host bucket (s.hostLimiter, 03-10), as hostIssueOrRefuse does.
+func (s *Signer) probeIssueOrRefuse(ctx context.Context, peer Peer, req *wire.ProbeIssueRequest) (*wire.IssueResponse, *wire.ErrorResponse) {
+	resp, err := s.ProbeIssue(ctx, peer, req)
+	if err == nil {
+		return resp, nil
+	}
+	var digest [32]byte
+	if req != nil {
+		digest = req.Digest()
+	}
+	return nil, s.refuseErr(ctx, s.hostLimiter, peer, digest, err)
+}
+
 // forgetOrRefuse runs ForgetAgent and records a refusal through refuseErr,
 // with the digest of the exact forget request that was refused (03-08c).
 func (s *Signer) forgetOrRefuse(ctx context.Context, peer Peer, req *wire.ForgetRequest) (*wire.ForgetResponse, *wire.ErrorResponse) {
@@ -278,20 +293,28 @@ func classify(detail string) uint8 {
 		return tlog.ReasonCANotConfigured
 	case "bad_principal", "empty_principals", "principals_mismatch":
 		return tlog.ReasonBadPrincipal
-	case "bad_subject_key":
+	case "bad_subject_key",
+		// Probe certificates (03-10): a probe key that is the host key, a
+		// key of the bundle in force or a key the directory lists.
+		"probe_key_unusable":
 		return tlog.ReasonBadSubjectKey
 	case "bad_validity", "ttl_exceeds_role",
 		// Host certificates (03-09): the signer chooses the lifetime, so a
 		// request asking for one is refused like a TTL above the cap
 		// (Q-09-6).
-		"host_issue_valid_for_not_zero":
+		"host_issue_valid_for_not_zero",
+		// Probe certificates (03-10), the same rule.
+		"probe_issue_valid_for_not_zero":
 		return tlog.ReasonTTLExceeded
 	case "request_time_skew":
 		return tlog.ReasonStaleRequest
 	case "duplicate_request",
 		// Host certificates (03-09): one certificate per host key per
 		// window; the latest is re-delivered instead.
-		"host_cert_recent":
+		"host_cert_recent",
+		// Probe certificates (03-10): one per host name and polarity per
+		// window.
+		"probe_cert_recent":
 		return tlog.ReasonDuplicateRequest
 	case "clock_regression":
 		return tlog.ReasonClockRegression
@@ -317,6 +340,8 @@ func classify(detail string) uint8 {
 		"directory_version_chain", "directory_quorum_not_met", "directory_exceeds_policy",
 		// F07 (03-08h): a directory host agents cannot render.
 		"directory_unrenderable",
+		// The names reserved for probe certificates (03-10, Q4).
+		"principal_reserved", "account_reserved",
 		// Revocation installation binding (03-03, the T-03-20 rule).
 		"revoke_installation_missing", "revoke_installation_mismatch",
 		// Directory installation binding (03-04, D-04, the same rule).
@@ -332,7 +357,10 @@ func classify(detail string) uint8 {
 		"unknown_host", "host_key_not_listed", "host_disabled", "host_pop_invalid",
 		// An explicitly revoked host key, and a key whose latest host
 		// certificate is revoked until a newer directory version (Q-09-5).
-		"host_key_revoked", "cert_revoked":
+		"host_key_revoked", "cert_revoked",
+		// Probe certificates (03-10): the installation binding (D5) and the
+		// probe key's proof of possession.
+		"probe_issue_no_installation_id", "probe_issue_installation_mismatch", "probe_pop_invalid":
 		return tlog.ReasonUnauthorized
 	default:
 		return tlog.ReasonInternal

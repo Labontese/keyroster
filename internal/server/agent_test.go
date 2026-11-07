@@ -619,7 +619,7 @@ func TestBrowserListenerUnchanged(t *testing.T) {
 func TestAgentMuxRoutes(t *testing.T) {
 	e := newAgentEnv(t, true)
 	want := []string{"POST " + serverclient.AgentEnrollPath, "GET " + serverclient.AgentStatePath, "POST " + serverclient.AgentHeartbeatPath, "POST " + serverclient.AgentIdentityPath,
-		"POST " + serverclient.AgentHostCertPath}
+		"POST " + serverclient.AgentHostCertPath, "POST " + serverclient.AgentProbeCertPath}
 	if !slices.Equal(e.s.agentPatterns, want) {
 		t.Fatalf("agent patterns %q, want %q", e.s.agentPatterns, want)
 	}
@@ -1386,6 +1386,147 @@ func TestAgentHostCert(t *testing.T) {
 		e := newAgentEnv(t, true)
 		if !slices.Contains(e.s.agentPatterns, "POST "+serverclient.AgentHostCertPath) {
 			t.Fatalf("agent patterns %q", e.s.agentPatterns)
+		}
+	})
+}
+
+// probeCertBody is a POST body for AgentProbeCertPath: a probe request by
+// key for name with a fresh probe key, valid_for 0, created now, with
+// (unchecked) evidence; the signer, not the server, verifies the proofs
+// (03-10).
+func probeCertBody(t *testing.T, key ssh.Signer, name string) (*wire.ProbeIssueRequest, []byte) {
+	t.Helper()
+	req := &wire.ProbeIssueRequest{InstallationID: copyInstallation, HostName: name, HostKey: key.PublicKey().Marshal(),
+		ProbeKey: newEd25519Probe(t).Marshal(), Negative: true, CreatedAt: uint64(t0.Unix()), //nolint:gosec // G115: after 1970
+		Evidence: []wire.Evidence{{Type: wire.EvidenceHostPoP, Blob: []byte("pop")}, {Type: wire.EvidenceProbePoP, Blob: []byte("pop")}}}
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := req.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(serverclient.AgentProbeCertRequest{Request: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req, body
+}
+
+// newEd25519Probe is a fresh plain Ed25519 public key.
+func newEd25519Probe(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+// TestAgentProbeCert (03-10, Q4): POST AgentProbeCertPath relays an
+// approved agent's probe request for its own entry and key to the signer
+// unchanged, on the agent slot and the agent share, and answers the
+// certificate; what the certificate says the signer decides.
+func TestAgentProbeCert(t *testing.T) {
+	refusedWith := func(t *testing.T, rec *httptest.ResponseRecorder, code int, detail string) {
+		t.Helper()
+		if rec.Code != code || apiError(rec) != detail {
+			t.Fatalf("answer %d %q (%s), want %d %q", rec.Code, apiError(rec), rec.Body.String(), code, detail)
+		}
+	}
+	t.Run("relays_for_approved_host", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		req, body := probeCertBody(t, hosts[0], "web1")
+		rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentProbeCertPath, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("probe certificate: %d %s", rec.Code, rec.Body.String())
+		}
+		var a serverclient.AgentProbeCertAnswer
+		if err := json.Unmarshal(rec.Body.Bytes(), &a); err != nil || string(a.Certificate) != "probe-certificate" {
+			t.Fatalf("answer %s (%v), want the signer's certificate", rec.Body.String(), err)
+		}
+		e.fake.mu.Lock()
+		got, calls := e.fake.lastProbeIssue, e.fake.calls["ProbeIssue"]
+		e.fake.mu.Unlock()
+		if calls != 1 || got == nil || !bytes.Equal(got.SigningBytes(), req.SigningBytes()) || len(got.Evidence) != 2 {
+			t.Fatalf("the signer got %d calls, request %+v; want the agent's request once, unchanged", calls, got)
+		}
+	})
+	t.Run("key_not_on_agents_entry_refused", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		other := hostSigners(t, 1)
+		e.installDir(t, hostEntry("web1", hosts), hostEntry("web2", other))
+		for _, c := range []struct {
+			key  ssh.Signer
+			name string
+		}{{newSigner(t), "web1"}, {other[0], "web2"}, {other[0], "web1"}} {
+			_, body := probeCertBody(t, c.key, c.name)
+			refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentProbeCertPath, body), http.StatusForbidden, serverclient.AgentErrHostKeyNotEnrolled)
+		}
+		e.fake.mu.Lock()
+		calls := e.fake.calls["ProbeIssue"]
+		e.fake.mu.Unlock()
+		if calls != 0 {
+			t.Fatalf("a refused request reached the signer %d times", calls)
+		}
+	})
+	t.Run("name_mismatch_refused", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := e.approvedAgent(t)
+		e.installDir(t, hostEntry("web7", hosts))
+		_, body := probeCertBody(t, hosts[0], "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentProbeCertPath, body), http.StatusForbidden, serverclient.AgentErrHostNameMismatch)
+	})
+	t.Run("not_approved_refused", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, hosts := newAgentID(t), hostSigners(t, 1)
+		if rec := e.enroll(t, id, e.mustMint(t, "web1", 0).Token, hosts); rec.Code != http.StatusAccepted {
+			t.Fatalf("enroll: %d", rec.Code)
+		}
+		_, body := probeCertBody(t, hosts[0], "web1")
+		refusedWith(t, e.agentDo(t, id, http.MethodPost, serverclient.AgentProbeCertPath, body), http.StatusForbidden, serverclient.AgentErrNotApproved)
+	})
+	t.Run("refusal_mapping", func(t *testing.T) {
+		for _, c := range []struct {
+			err    error
+			code   int
+			detail string
+		}{
+			{&wire.ErrorResponse{Code: wire.CodeRefused, Message: "probe_cert_recent"}, http.StatusForbidden, "probe_cert_recent"},
+			{&wire.ErrorResponse{Code: wire.CodeMalformed, Message: "unknown_message_type"}, http.StatusForbidden, serverclient.AgentErrSignerTooOld},
+			{&wire.ErrorResponse{Code: wire.CodeMalformed, Message: "malformed_request"}, http.StatusBadRequest, "malformed_request"},
+			{&wire.ErrorResponse{Code: wire.CodeUnavailable, Message: "krl_too_large"}, http.StatusServiceUnavailable, ""},
+			{errors.New("socket gone"), http.StatusServiceUnavailable, ""},
+		} {
+			e := newAgentEnv(t, true)
+			id, hosts := e.approvedAgent(t)
+			e.fake.mu.Lock()
+			e.fake.probeIssueErr = c.err
+			e.fake.mu.Unlock()
+			_, body := probeCertBody(t, hosts[0], "web1")
+			rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentProbeCertPath, body)
+			if rec.Code != c.code || (c.detail != "" && apiError(rec) != c.detail) {
+				t.Fatalf("%v: answer %d %q, want %d %q", c.err, rec.Code, apiError(rec), c.code, c.detail)
+			}
+		}
+	})
+	t.Run("bad_body_and_oversize", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		id, _ := e.approvedAgent(t)
+		for _, body := range [][]byte{[]byte(`{"request":"AAAA","x":1}`), []byte(`{"request":"AAAA"}`), []byte(`not json`)} {
+			if rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentProbeCertPath, body); rec.Code != http.StatusBadRequest {
+				t.Fatalf("%s: %d", body, rec.Code)
+			}
+		}
+		big := []byte(`{"request":"` + strings.Repeat("A", serverclient.MaxAgentProbeCertBody) + `"}`)
+		if rec := e.agentDo(t, id, http.MethodPost, serverclient.AgentProbeCertPath, big); rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("an oversize body: %d", rec.Code)
 		}
 	})
 }

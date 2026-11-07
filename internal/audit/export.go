@@ -217,6 +217,12 @@ func decodeLeaf(data []byte) map[string]any {
 			return map[string]any{"error": err.Error()}
 		}
 		decodeHostIssue(m, b)
+	case tlog.KindProbeIssue:
+		b, err := tlog.DecodeProbeIssueBody(l.Body)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		decodeProbeIssue(m, b)
 	case tlog.KindRevoke:
 		b, err := tlog.DecodeRevokeBody(l.Body)
 		if err != nil {
@@ -495,6 +501,47 @@ func decodeHostIssue(m map[string]any, b *tlog.HostIssueBody) {
 		m["created_at"] = req.CreatedAt
 		if pub, err := ssh.ParsePublicKey(req.HostKey); err == nil {
 			m["host_key_fingerprint"] = ssh.FingerprintSHA256(pub)
+		}
+	}
+	if c, err := parseCert(b.Cert); err != nil {
+		m["cert_error"] = err.Error()
+	} else {
+		m["principals"] = c.ValidPrincipals
+		m["valid_after"] = c.ValidAfter
+		m["valid_before"] = c.ValidBefore
+		m["ca_fingerprint"] = ssh.FingerprintSHA256(c.SignatureKey)
+		m["ca_algorithm"] = c.SignatureKey.Type()
+	}
+}
+
+// decodeProbeIssue renders a probe_issue leaf (03-10): the serial, the
+// negative flag, the versions, CapSeconds, the key ID and the evidence
+// types, the request's host name, request ID, created_at and the host and
+// probe key fingerprints, and the certificate's principals, validity and
+// CA. Verify binds every field of the line to the leaf (checkForgetFields).
+func decodeProbeIssue(m map[string]any, b *tlog.ProbeIssueBody) {
+	types := make([]string, 0, len(b.Evidence))
+	for _, e := range b.Evidence {
+		types = append(types, e.Type)
+	}
+	m["serial"] = b.Serial
+	m["negative"] = b.Negative
+	m["policy_version"] = b.PolicyVersion
+	m["directory_version"] = b.DirectoryVersion
+	m["cap_seconds"] = b.CapSeconds
+	m["key_id"] = b.KeyID
+	m["evidence_types"] = types
+	if req, err := wire.ParseProbeIssueSigningBytes(b.Request); err != nil {
+		m["request_error"] = err.Error()
+	} else {
+		m["host_name"] = req.HostName
+		m["request_id"] = hex.EncodeToString(req.RequestID[:])
+		m["created_at"] = req.CreatedAt
+		if pub, err := ssh.ParsePublicKey(req.HostKey); err == nil {
+			m["host_key_fingerprint"] = ssh.FingerprintSHA256(pub)
+		}
+		if pub, err := ssh.ParsePublicKey(req.ProbeKey); err == nil {
+			m["probe_key_fingerprint"] = ssh.FingerprintSHA256(pub)
 		}
 	}
 	if c, err := parseCert(b.Cert); err != nil {
