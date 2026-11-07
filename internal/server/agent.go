@@ -84,6 +84,7 @@ func (s *Server) buildAgentMux() *routeMux {
 	mux.Handle("POST "+serverclient.AgentHeartbeatPath, s.requireAgent(s.handleAgentHeartbeat))
 	mux.Handle("POST "+serverclient.AgentIdentityPath, s.requireAgent(s.handleAgentIdentity))
 	mux.Handle("POST "+serverclient.AgentHostCertPath, s.requireAgent(s.handleAgentHostCert))
+	mux.Handle("POST "+serverclient.AgentProbeCertPath, s.requireAgent(s.handleAgentProbeCert))
 	return mux
 }
 
@@ -909,27 +910,83 @@ func (s *Server) handleAgentHostCert(w http.ResponseWriter, r *http.Request, ar 
 	resp, err := s.signer.HostIssue(cctx, req)
 	cancel()
 	if err != nil {
-		var refused *wire.ErrorResponse
-		if errors.As(err, &refused) {
-			s.log.Warn("host certificate refused by the signer", "expected_name", ar.agent.ExpectedName, "agent", fp, "reason", refused.Message)
-			switch {
-			case refused.Code == wire.CodeRefused:
-				s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: refused.Message})
-			case refused.Code == wire.CodeMalformed && refused.Message == "unknown_message_type":
-				s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrSignerTooOld})
-			case refused.Code == wire.CodeMalformed:
-				s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: refused.Message})
-			default:
-				s.signerUnavailable(w, false)
-			}
-			return
-		}
-		s.log.Warn("host certificate: signer call failed", "expected_name", ar.agent.ExpectedName, "agent", fp, "err", err)
-		s.signerUnavailable(w, false)
+		s.agentSignerFailed(w, ar, fp, "host certificate", err)
 		return
 	}
 	s.log.Info("host certificate relayed", "expected_name", ar.agent.ExpectedName, "agent", fp, "serial", resp.Serial)
 	s.writeJSON(w, ar.status, http.StatusOK, serverclient.AgentHostCertAnswer{Certificate: resp.Cert})
+}
+
+// agentSignerFailed answers a failed signer call of an agent certificate
+// route (what names it in the log): a refusal is 403 with its detail;
+// malformed unknown_message_type is 403 signer_too_old (a signer older
+// than this server); any other malformed answer is 400 with its detail;
+// any other failure is 503 (03-09, 03-10).
+func (s *Server) agentSignerFailed(w http.ResponseWriter, ar *agentRequest, fp, what string, err error) {
+	var refused *wire.ErrorResponse
+	if errors.As(err, &refused) {
+		s.log.Warn(what+" refused by the signer", "expected_name", ar.agent.ExpectedName, "agent", fp, "reason", refused.Message)
+		switch {
+		case refused.Code == wire.CodeRefused:
+			s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: refused.Message})
+		case refused.Code == wire.CodeMalformed && refused.Message == "unknown_message_type":
+			s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: serverclient.AgentErrSignerTooOld})
+		case refused.Code == wire.CodeMalformed:
+			s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: refused.Message})
+		default:
+			s.signerUnavailable(w, false)
+		}
+		return
+	}
+	s.log.Warn(what+": signer call failed", "expected_name", ar.agent.ExpectedName, "agent", fp, "err", err)
+	s.signerUnavailable(w, false)
+}
+
+// handleAgentProbeCert serves POST AgentProbeCertPath (03-10, D-06): an
+// approved agent's request for a probe certificate, in the order and with
+// the answers of handleAgentHostCert: the agent's in-flight slot, the
+// body (at most MaxAgentProbeCertBody, decoded strictly), the request
+// parses, its host key and name are the agent's own entry's
+// (hostKeyOfAgent), then the signer's answer under signerCallTimeout on
+// the agent share. It logs the relayed serial, never the request bytes.
+// The server checks only who asks; what the certificate says the signer
+// decides.
+func (s *Server) handleAgentProbeCert(w http.ResponseWriter, r *http.Request, ar *agentRequest) {
+	release, ok := s.agentSlot(w, r, ar)
+	if !ok {
+		return
+	}
+	defer release()
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, serverclient.MaxAgentProbeCertBody))
+	if err != nil {
+		s.writeJSON(w, ar.status, http.StatusRequestEntityTooLarge, serverclient.APIError{Error: "request too large"})
+		return
+	}
+	var in serverclient.AgentProbeCertRequest
+	if err := decodeAgentJSON(body, &in); err != nil {
+		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: serverclient.AgentErrMalformed})
+		return
+	}
+	req, err := wire.ParseProbeIssueRequest(in.Request)
+	if err != nil {
+		s.writeJSON(w, ar.status, http.StatusBadRequest, serverclient.APIError{Error: "bad_request"})
+		return
+	}
+	fp := agentFingerprint(ar.agent.IdentitySPKISHA256)
+	if code := hostKeyOfAgent(ar.dir, ar.agent.HostKeys, ar.agent.ExpectedName, req.HostKey, req.HostName); code != "" {
+		s.log.Warn("probe certificate refused", "expected_name", ar.agent.ExpectedName, "agent", fp, "reason", code)
+		s.writeJSON(w, ar.status, http.StatusForbidden, serverclient.APIError{Error: code})
+		return
+	}
+	cctx, cancel := context.WithTimeout(r.Context(), signerCallTimeout)
+	resp, err := s.signer.ProbeIssue(cctx, req)
+	cancel()
+	if err != nil {
+		s.agentSignerFailed(w, ar, fp, "probe certificate", err)
+		return
+	}
+	s.log.Info("probe certificate relayed", "expected_name", ar.agent.ExpectedName, "agent", fp, "serial", resp.Serial, "negative", req.Negative)
+	s.writeJSON(w, ar.status, http.StatusOK, serverclient.AgentProbeCertAnswer{Certificate: resp.Cert})
 }
 
 // decodeAgentJSON decodes body strictly into v: no unknown field and

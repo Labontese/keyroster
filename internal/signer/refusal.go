@@ -340,6 +340,8 @@ func classify(detail string) uint8 {
 		"directory_version_chain", "directory_quorum_not_met", "directory_exceeds_policy",
 		// F07 (03-08h): a directory host agents cannot render.
 		"directory_unrenderable",
+		// The names reserved for probe certificates (03-10, Q4).
+		"principal_reserved", "account_reserved",
 		// Revocation installation binding (03-03, the T-03-20 rule).
 		"revoke_installation_missing", "revoke_installation_mismatch",
 		// Directory installation binding (03-04, D-04, the same rule).

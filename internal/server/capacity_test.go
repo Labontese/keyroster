@@ -71,7 +71,7 @@ func newGateSigner() *gateSigner {
 
 // wait is the gate step of every budgeted method.
 func (g *gateSigner) wait(ctx context.Context, method string) error {
-	agent := method == "GetBundle" || method == "GetDirectoryVersion" || method == "HostIssue"
+	agent := method == "GetBundle" || method == "GetDirectoryVersion" || method == "HostIssue" || method == "ProbeIssue"
 	g.mu.Lock()
 	g.calls[method]++
 	g.inFlight++
@@ -209,6 +209,13 @@ func (g *gateSigner) HostIssue(ctx context.Context, req *wire.HostIssueRequest) 
 	return g.fakeSigner.HostIssue(ctx, req)
 }
 
+func (g *gateSigner) ProbeIssue(ctx context.Context, req *wire.ProbeIssueRequest) (*wire.IssueResponse, error) {
+	if err := g.wait(ctx, "ProbeIssue"); err != nil {
+		return nil, err
+	}
+	return g.fakeSigner.ProbeIssue(ctx, req)
+}
+
 // callSigner makes one call of method through sg.
 func callSigner(ctx context.Context, sg signerAPI, method string) error {
 	var err error
@@ -233,6 +240,8 @@ func callSigner(ctx context.Context, sg signerAPI, method string) error {
 		_, err = sg.ForgetAgent(ctx, &wire.ForgetRequest{})
 	case "HostIssue":
 		_, err = sg.HostIssue(ctx, &wire.HostIssueRequest{})
+	case "ProbeIssue":
+		_, err = sg.ProbeIssue(ctx, &wire.ProbeIssueRequest{})
 	default:
 		panic("callSigner: unknown method " + method)
 	}
@@ -304,6 +313,7 @@ func TestSignerBudget(t *testing.T) {
 		}{
 			{"Status", false}, {"GetDirectory", false}, {"InstallDirectory", false}, {"Login", false},
 			{"Revoke", false}, {"ForgetAgent", false}, {"GetBundle", true}, {"GetDirectoryVersion", true}, {"HostIssue", true},
+			{"ProbeIssue", true},
 		} {
 			t.Run(tc.method, func(t *testing.T) {
 				g, b := setup(t)
@@ -655,7 +665,27 @@ func hostCertAgents(t *testing.T, e *agentEnv, n int) []hostCertAgent {
 // certificate requests as each agent.
 func holdHostCerts(t *testing.T, e *agentEnv, agents []hostCertAgent, per int) *heldStates {
 	t.Helper()
-	entered, release := e.fake.hold("HostIssue")
+	return holdAgentCerts(t, e, agents, per, "HostIssue", serverclient.AgentHostCertPath, func(a hostCertAgent) []byte {
+		_, body := hostCertBody(t, a.key, a.name)
+		return body
+	})
+}
+
+// holdProbeCerts holds ProbeIssue at the fake and sends per concurrent
+// probe certificate requests as each agent (03-10).
+func holdProbeCerts(t *testing.T, e *agentEnv, agents []hostCertAgent, per int) *heldStates {
+	t.Helper()
+	return holdAgentCerts(t, e, agents, per, "ProbeIssue", serverclient.AgentProbeCertPath, func(a hostCertAgent) []byte {
+		_, body := probeCertBody(t, a.key, a.name)
+		return body
+	})
+}
+
+// holdAgentCerts holds method at the fake and sends per concurrent
+// requests to path as each agent, with the body bodyOf gives.
+func holdAgentCerts(t *testing.T, e *agentEnv, agents []hostCertAgent, per int, method, path string, bodyOf func(hostCertAgent) []byte) *heldStates {
+	t.Helper()
+	entered, release := e.fake.hold(method)
 	stop := make(chan struct{})
 	t.Cleanup(func() { release(); close(stop) })
 	h := &heldStates{answers: make(chan *httptest.ResponseRecorder, len(agents)*per), release: release}
@@ -671,8 +701,8 @@ func holdHostCerts(t *testing.T, e *agentEnv, agents []hostCertAgent, per int) *
 	}()
 	for _, a := range agents {
 		for range per {
-			_, body := hostCertBody(t, a.key, a.name)
-			go func() { h.answers <- e.agentDo(t, a.id, http.MethodPost, serverclient.AgentHostCertPath, body) }()
+			body := bodyOf(a)
+			go func() { h.answers <- e.agentDo(t, a.id, http.MethodPost, path, body) }()
 		}
 	}
 	return h
@@ -686,6 +716,27 @@ func TestAgentInFlight(t *testing.T) {
 		h.answered(t, 4-maxAgentInFlight, http.StatusTooManyRequests)
 		h.release()
 		h.answered(t, maxAgentInFlight, http.StatusOK)
+	})
+	t.Run("probe_cert_route_takes_agent_slot", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		h := holdProbeCerts(t, e, hostCertAgents(t, e, 1), 4)
+		h.settleAt(t, maxAgentInFlight)
+		h.answered(t, 4-maxAgentInFlight, http.StatusTooManyRequests)
+		h.release()
+		h.answered(t, maxAgentInFlight, http.StatusOK)
+	})
+	t.Run("probe_cert_burst_leaves_interactive_half", func(t *testing.T) {
+		e := newAgentEnv(t, true)
+		h := holdProbeCerts(t, e, hostCertAgents(t, e, 6), 2)
+		h.settleAt(t, maxAgentCalls)
+		h.quiet(t)
+		cctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := e.s.signer.Status(cctx); err != nil {
+			t.Fatalf("Status with the agent share held by probe certificate requests: %v", err)
+		}
+		h.release()
+		h.answered(t, 12, http.StatusOK)
 	})
 	t.Run("host_cert_burst_leaves_interactive_half", func(t *testing.T) {
 		e := newAgentEnv(t, true)

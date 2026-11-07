@@ -1128,6 +1128,8 @@ func probeIssueBoundsCases(t *testing.T) {
 			"krl_too_large":                     {tlog.ReasonUnavailable, wire.CodeUnavailable},
 			"revocations_not_logged":            {tlog.ReasonUnavailable, wire.CodeUnavailable},
 			"bad_principal":                     {tlog.ReasonBadPrincipal, wire.CodeRefused},
+			"principal_reserved":                {tlog.ReasonUnauthorized, wire.CodeRefused},
+			"account_reserved":                  {tlog.ReasonUnauthorized, wire.CodeRefused},
 		} {
 			if got := classify(d); got != want.class || codeFor(got) != want.code {
 				t.Errorf("%s: class %d (%s), want %d (%s)", d, got, codeFor(got), want.class, want.code)
@@ -1335,4 +1337,135 @@ func probeEdgeFits(t *testing.T) {
 	if !errors.Is(err, errRollback) {
 		t.Fatal(err)
 	}
+}
+
+// nextDirectory is the next directory version after e.docs with e.hosts,
+// changed by edit, signed by the fixture's first admin (03-10).
+func (e *hostEnv) nextDirectory(t *testing.T, edit func(*directory.Directory)) (doc, sigs []byte) {
+	t.Helper()
+	hosts := slices.Clone(e.hosts)
+	for i := range hosts {
+		hosts[i].Keys = slices.Sorted(slices.Values(hosts[i].Keys))
+	}
+	d := &directory.Directory{
+		Version: uint64(len(e.docs) + 1), Prev: trust.SHA256Hex(e.docs[len(e.docs)-1]), InstallationID: e.fx.InstallationID,
+		Roles:      []directory.Role{{Name: "ops", Principals: slices.Clone(loginPrincipals), MaxTTLSeconds: 3600}},
+		HostGroups: []directory.HostGroup{{Name: "lab", Accounts: []directory.AccountMap{{Account: "root", Roles: []string{"ops"}}}}},
+		Hosts:      hosts,
+	}
+	edit(d)
+	d.Sort()
+	return signDirectory(t, d, e.fx.Admins[0])
+}
+
+// TestInstallDirectoryReserved (03-10, Q4): a new directory may not grant
+// the probe principal prefix to a role or map the probe account; a
+// directory already stored with one still loads and verifies.
+func TestInstallDirectoryReserved(t *testing.T) {
+	withPrincipal := func(p string) func(*directory.Directory) {
+		return func(d *directory.Directory) {
+			d.Roles[0].Principals = slices.Sorted(slices.Values(append(d.Roles[0].Principals, p)))
+		}
+	}
+	t.Run("principal_prefix_refused", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		doc, sigs := e.nextDirectory(t, withPrincipal("keyroster-probe:x"))
+		e.refuseInstall(t, &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}, "principal_reserved")
+		if c := classify("principal_reserved"); c != tlog.ReasonUnauthorized || codeFor(c) != wire.CodeRefused {
+			t.Fatalf("principal_reserved: class %d, code %s", c, codeFor(c))
+		}
+	})
+	t.Run("account_name_refused", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		doc, sigs := e.nextDirectory(t, func(d *directory.Directory) {
+			d.HostGroups[0].Accounts = append([]directory.AccountMap{{Account: "keyroster-probe", Roles: []string{"ops"}}}, d.HostGroups[0].Accounts...)
+		})
+		e.refuseInstall(t, &wire.InstallDirectoryRequest{Directory: doc, Sigs: sigs}, "account_reserved")
+		if c := classify("account_reserved"); c != tlog.ReasonUnauthorized || codeFor(c) != wire.CodeRefused {
+			t.Fatalf("account_reserved: class %d, code %s", c, codeFor(c))
+		}
+	})
+	t.Run("other_names_fine", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		doc, sigs := e.nextDirectory(t, func(d *directory.Directory) {
+			withPrincipal("keyroster-probe")(d)
+			withPrincipal("keyroster-probex:a")(d)
+			d.HostGroups[0].Accounts = append([]directory.AccountMap{{Account: "keyroster-probes", Roles: []string{"ops"}}}, d.HostGroups[0].Accounts...)
+		})
+		e.installDirectory(t, doc, sigs)
+	})
+	t.Run("stored_directory_still_loads", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		doc, sigs := e.nextDirectory(t, withPrincipal("keyroster-probe:x"))
+		e.seedDirectory(t, doc, sigs) // stores it as an earlier signer would have, and reopens the signer on it
+		e.restart(t)
+		if got := e.s.GetDirectory(); got.Version != 2 || !got.Authorized {
+			t.Fatalf("the stored directory: version %d, authorized %t; want 2, true", got.Version, got.Authorized)
+		}
+		if rep := e.verifyExport(); rep.Counts[tlog.KindDirectoryInstall] != 2 {
+			t.Fatalf("audit verify counts %d directory_install entries, want 2", rep.Counts[tlog.KindDirectoryInstall])
+		}
+	})
+}
+
+// TestIssueReserved (03-10, Q4, T-03-367): the prefix is refused at the
+// one signing funnel on every issuing path but the probe's.
+func TestIssueReserved(t *testing.T) {
+	t.Run("admin_issue_refused", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		req := e.request()
+		req.Principals = []string{"keyroster-probe:web1"}
+		req.Evidence = SignRequest(t, req, e.fx.Admins...)
+		_, er := e.s.issueOrRefuse(context.Background(), Peer{UID: 1000}, req)
+		if er == nil || er.Message != "bad_principal" || classify(er.Message) != tlog.ReasonBadPrincipal {
+			t.Fatalf("admin issue of the reserved prefix: %+v, want bad_principal", er)
+		}
+	})
+	t.Run("login_refused", func(t *testing.T) {
+		pk := newPasskeys(t)
+		e := newLoginEnv(t, pk, NewFixture(t, 1, 1), true, false)
+		d := loginDirectory(pk, 1, trust.GenesisPrev)
+		for i := range d.Roles {
+			if d.Roles[i].Name == "ops" {
+				d.Roles[i].Principals = slices.Sorted(slices.Values(append(slices.Clone(d.Roles[i].Principals), "keyroster-probe:x")))
+			}
+		}
+		d.Sort()
+		doc, sigs := signDirectory(t, d, e.fx.Admins...)
+		e.seedDirectory(t, doc, sigs) // a stored directory: InstallDirectory would refuse it
+		req := e.loginReq(t, "alice")
+		req.Principals = slices.Sorted(slices.Values(append(slices.Clone(loginPrincipals), "keyroster-probe:x")))
+		e.refuseLogin(t, approve(t, pk.eddsa, req, nil), "bad_principal")
+	})
+	t.Run("host_issue_refused_for_prefix_principal", func(t *testing.T) {
+		// A host entry cannot name the prefix: host principals are DNS names
+		// or IP addresses, and the colon is neither. Should the host
+		// issuance tail ever get one, the signing funnel refuses it under
+		// the host profile in force, as bad_principal.
+		if err := directory.CheckHostPrincipal("keyroster-probe:web1"); err == nil {
+			t.Fatal("a host entry may name the reserved prefix; this case must then go through HostIssue")
+		}
+		e := newHostEnv(t, 90)
+		e.s.mu.Lock()
+		caKey, okCA := e.s.ca[wire.CARoleHost]
+		profile, okProfile := e.s.profiles[wire.CARoleHost]
+		e.s.mu.Unlock()
+		if !okCA || !okProfile {
+			t.Fatal("no host CA or profile")
+		}
+		kid := cert.KeyID{V3: true, CA: "host", Subject: "web1", Request: "000102030405060708090a0b0c0d0e0f", Policy: 1, Directory: 1, Serial: 1}
+		_, err := cert.Build(cert.Request{Profile: profile, Subject: e.ed.PublicKey(), Principals: []string{"keyroster-probe:web1", "web1"},
+			Now: e.clock.Now(), ValidFor: time.Minute, KeyID: kid, Serial: 1}, caKey, rand.Reader)
+		var r *refusal
+		if !errors.Is(err, cert.ErrReservedPrincipal) || !errors.As(buildRefusal(err), &r) || r.reason != "bad_principal" {
+			t.Fatalf("the host profile signs the reserved prefix: %v", err)
+		}
+	})
+	t.Run("probe_issue_still_works", func(t *testing.T) {
+		e := newHostEnv(t, 90)
+		r, _ := e.probeReq(e.ed, "web1", true)
+		if c, _ := e.mustProbe(r); !slices.Equal(c.ValidPrincipals, []string{cert.ReservedPrincipalPrefix + "web1"}) {
+			t.Fatalf("probe principals %v", c.ValidPrincipals)
+		}
+	})
 }

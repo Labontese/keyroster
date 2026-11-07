@@ -197,7 +197,7 @@ func (s *Signer) issueProbeLocked(ctx context.Context, peer Peer, req *wire.Prob
 	c, err := cert.Build(cert.Request{
 		Profile:         profile,
 		Subject:         probeKey,
-		Principals:      []string{"keyroster-probe:" + entry.Name},
+		Principals:      []string{cert.ReservedPrincipalPrefix + entry.Name},
 		Now:             issuedAt,
 		ValidFor:        time.Duration(lifetime) * time.Second, //nolint:gosec // G115: at most MaxProbeLifetimeSeconds
 		KeyID:           keyID,

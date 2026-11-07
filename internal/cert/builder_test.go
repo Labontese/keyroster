@@ -651,3 +651,118 @@ func TestCheckIssued(t *testing.T) {
 		wantErrIs(t, CheckIssued(c, p, at, at), ErrProfile)
 	})
 }
+
+// reservedReq is a valid user certificate request with principals ps
+// under a profile whose ReservedPrincipals flag is flag (03-10).
+func reservedReq(t *testing.T, ps []string, flag bool) (Request, ssh.Signer) {
+	t.Helper()
+	ca := newEd25519Signer(t)
+	subject := newEd25519Signer(t).PublicKey()
+	kid := KeyID{CA: "machine", Subject: "probe.web1", Request: "000102030405060708090a0b0c0d0e0f", Policy: 1, Serial: 7}
+	return Request{
+		Profile: Profile{CertType: ssh.UserCert, MaxTTL: time.Hour, ReservedPrincipals: flag},
+		Subject: subject, Principals: ps, Now: time.Unix(1_700_000_000, 0), ValidFor: time.Minute, KeyID: kid, Serial: 7,
+	}, ca
+}
+
+// TestBuildReserved (03-10, Q4, T-03-367): the principal prefix
+// keyroster-probe: is signed only under a profile with ReservedPrincipals,
+// which only certprofile.ProbeProfile sets, and CheckIssued holds every
+// logged certificate to the same rule.
+func TestBuildReserved(t *testing.T) {
+	if ReservedPrincipalPrefix != "keyroster-probe:" || ReservedAccountName != "keyroster-probe" || !errors.Is(ErrReservedPrincipal, ErrPrincipal) {
+		t.Fatal("the reserved names or the error changed")
+	}
+	t.Run("refused_without_flag", func(t *testing.T) {
+		req, ca := reservedReq(t, []string{"keyroster-probe:web1"}, false)
+		if _, err := Build(req, ca, rand.Reader); !errors.Is(err, ErrReservedPrincipal) || !errors.Is(err, ErrPrincipal) {
+			t.Fatalf("Build = %v, want ErrReservedPrincipal (an ErrPrincipal)", err)
+		}
+	})
+	t.Run("refused_among_others", func(t *testing.T) {
+		req, ca := reservedReq(t, []string{"alice", "keyroster-probe:web1", "ops"}, false)
+		if _, err := Build(req, ca, rand.Reader); !errors.Is(err, ErrReservedPrincipal) {
+			t.Fatalf("Build = %v, want ErrReservedPrincipal", err)
+		}
+	})
+	t.Run("allowed_with_flag", func(t *testing.T) {
+		req, ca := reservedReq(t, []string{"keyroster-probe:web1"}, true)
+		c, err := Build(req, ca, rand.Reader)
+		if err != nil || c.ValidPrincipals[0] != "keyroster-probe:web1" {
+			t.Fatalf("Build under the flag = %v", err)
+		}
+	})
+	t.Run("prefix_is_exact", func(t *testing.T) {
+		for _, p := range []string{"keyroster-probe", "keyroster-probex:a", "xkeyroster-probe:a", "keyroster-prob:a"} {
+			req, ca := reservedReq(t, []string{p}, false)
+			if _, err := Build(req, ca, rand.Reader); err != nil {
+				t.Errorf("%q refused: %v", p, err)
+			}
+		}
+	})
+	t.Run("check_issued_refuses", func(t *testing.T) {
+		req, ca := reservedReq(t, []string{"keyroster-probe:web1"}, true)
+		c, err := Build(req, ca, rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		from, to := req.Now, req.Now
+		without := req.Profile
+		without.ReservedPrincipals = false
+		if err := CheckIssued(c, without, from, to); !errors.Is(err, ErrReservedPrincipal) {
+			t.Fatalf("CheckIssued without the flag = %v, want ErrReservedPrincipal", err)
+		}
+		if err := CheckIssued(c, req.Profile, from, to); err != nil {
+			t.Fatalf("CheckIssued under the flag = %v", err)
+		}
+	})
+}
+
+// TestReservedPrincipalsGuard (03-10): no code outside the probe path can
+// sign the reserved prefix. The identifier ReservedPrincipals appears in
+// no non-test file but internal/cert/builder.go (Build and CheckIssued
+// read it) and internal/certprofile/certprofile.go, exactly once there
+// (ProbeProfile sets it); ProbeProfile appears in no non-test file but
+// certprofile.go and the signer's and audit's probeissue.go. So a later
+// plan cannot sign the prefix by copying the profile or by setting the
+// flag in another profile literal. Each walk asserts that it visited
+// files, as TestSignCertOnlyInBuild does.
+func TestReservedPrincipalsGuard(t *testing.T) {
+	root := moduleRoot(t)
+	t.Run("flag_set_only_in_probe_profile", func(t *testing.T) {
+		inProfile := 0
+		visited := walkGoFiles(t, root, func(rel string, src []byte) {
+			lines := forbiddenRef(src, "ReservedPrincipals", false)
+			switch rel {
+			case "internal/cert/builder.go":
+			case "internal/certprofile/certprofile.go":
+				inProfile = len(lines)
+			default:
+				for _, line := range lines {
+					t.Errorf("%s:%d names ReservedPrincipals; only certprofile.ProbeProfile may set it", rel, line)
+				}
+			}
+		})
+		if visited == 0 || inProfile != 1 {
+			t.Fatalf("visited %d files; certprofile.go names ReservedPrincipals %d times, want exactly 1", visited, inProfile)
+		}
+	})
+	t.Run("probe_profile_used_only_by_probe_issue", func(t *testing.T) {
+		allowed := map[string]bool{"internal/certprofile/certprofile.go": true, "internal/signer/probeissue.go": true, "internal/audit/probeissue.go": true}
+		seen := map[string]bool{}
+		visited := walkGoFiles(t, root, func(rel string, src []byte) {
+			lines := forbiddenRef(src, "ProbeProfile", false)
+			if len(lines) > 0 {
+				seen[rel] = true
+			}
+			if !allowed[rel] {
+				for _, line := range lines {
+					t.Errorf("%s:%d names ProbeProfile; only the probe issuance and its audit may", rel, line)
+				}
+			}
+		})
+		if visited == 0 || len(seen) != 3 {
+			t.Fatalf("visited %d files; ProbeProfile is named in %v, want the three allowed files", visited, seen)
+		}
+	})
+}

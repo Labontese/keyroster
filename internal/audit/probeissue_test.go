@@ -154,7 +154,7 @@ func (pf *probeFixture) addProbe(key ssh.Signer, negative bool, pre, tamper, pos
 		pf.t.Fatal(err)
 	}
 	prof := cert.Profile{CertType: ssh.UserCert, MaxTTL: 30 * 24 * time.Hour, DefaultExtensions: map[string]string{},
-		AllowedExtensions: slices.Sorted(maps.Keys(p.extensions)), AllowedCriticalOptions: slices.Sorted(maps.Keys(p.options))}
+		AllowedExtensions: slices.Sorted(maps.Keys(p.extensions)), AllowedCriticalOptions: slices.Sorted(maps.Keys(p.options)), ReservedPrincipals: true}
 	c, err := cert.Build(cert.Request{Profile: prof, Subject: subject, Principals: p.principals, Now: issuedAt(p.serial),
 		ValidFor: time.Duration(p.lifetime) * time.Second, KeyID: p.keyID, Serial: p.serial, //nolint:gosec // G115: test lifetimes
 		ExtraExtensions: p.extensions, CriticalOptions: p.options}, p.ca, rand.Reader)
@@ -397,6 +397,40 @@ func TestVerifyProbeIssue(t *testing.T) {
 		pf.wantFail(t, "negative flag")
 	})
 	probeBoundsCases(t)
+	probeReservedCases(t)
+}
+
+// probeReservedCases are TestVerifyProbeIssue's reservation cases (03-10,
+// Task 3): audit's cert.CheckIssued refuses the prefix on any certificate
+// not checked under certprofile.ProbeProfile.
+func probeReservedCases(t *testing.T) {
+	t.Run("reserved_principal_in_issue_fails", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		pf.serial++
+		kid := cert.KeyID{CA: "user", Subject: "u:alice", Request: strings.Repeat("cd", 16), Policy: pf.pol.Version, Serial: pf.serial}
+		// Built under a test profile that allows the prefix: what a signer
+		// that skipped the rule would log.
+		c, err := cert.Build(cert.Request{Profile: cert.Profile{CertType: ssh.UserCert, MaxTTL: time.Hour, ReservedPrincipals: true},
+			Subject: newSigner(t, "ed25519").PublicKey(), Principals: []string{"keyroster-probe:web1"}, Now: issuedAt(pf.serial),
+			ValidFor: 10 * time.Minute, KeyID: kid, Serial: pf.serial}, pf.ca, rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := (&tlog.IssueBody{CARole: uint8(wire.CARoleUser), Serial: pf.serial, PolicyVersion: pf.pol.Version, Cert: c.Marshal(), KeyID: c.KeyId}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pf.add(tlog.KindIssue, body)
+		pf.wantFail(t, "reserved for probe certificates")
+	})
+	t.Run("probe_profile_allows", func(t *testing.T) {
+		pf := newProbeFixture(t)
+		p := pf.addProbe(pf.key, false, nil, nil, nil)
+		if !slices.Equal(p.cert.ValidPrincipals, []string{cert.ReservedPrincipalPrefix + "web1"}) {
+			t.Fatalf("principals %v", p.cert.ValidPrincipals)
+		}
+		pf.wantPass(t)
+	})
 }
 
 // probeBoundsCases are TestVerifyProbeIssue's window, request-ID, recovery

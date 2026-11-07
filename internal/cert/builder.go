@@ -11,6 +11,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -27,6 +28,40 @@ type Profile struct {
 	DefaultExtensions      map[string]string
 	AllowedExtensions      []string
 	AllowedCriticalOptions []string
+	// ReservedPrincipals allows principals with ReservedPrincipalPrefix
+	// (03-10). Only certprofile.ProbeProfile sets it
+	// (TestReservedPrincipalsGuard), so Build signs the prefix, and
+	// CheckIssued passes it, for probe certificates alone.
+	ReservedPrincipals bool
+}
+
+// The names reserved for probe certificates (03-10, Q4): the principal
+// prefix of the probe account's principal keyroster-probe:<host>, which
+// Build and CheckIssued refuse unless the profile sets
+// ReservedPrincipals, and the probe account's name, which the signer
+// refuses as a host-group account at directory install.
+const (
+	ReservedPrincipalPrefix = "keyroster-probe:"
+	ReservedAccountName     = "keyroster-probe"
+)
+
+// ErrReservedPrincipal is a principal with ReservedPrincipalPrefix under a
+// profile that does not allow it. It is an ErrPrincipal, so the signer
+// refuses it as bad_principal.
+var ErrReservedPrincipal = fmt.Errorf("%w: the principal prefix %s is reserved for probe certificates", ErrPrincipal, ReservedPrincipalPrefix)
+
+// checkReserved refuses a principal with ReservedPrincipalPrefix unless
+// allowed is set.
+func checkReserved(principals []string, allowed bool) error {
+	if allowed {
+		return nil
+	}
+	for i, p := range principals {
+		if strings.HasPrefix(p, ReservedPrincipalPrefix) {
+			return fmt.Errorf("%w (principal %d)", ErrReservedPrincipal, i)
+		}
+	}
+	return nil
 }
 
 // DefaultUserProfile is the user CA profile: at most 12 hours, permit-pty
@@ -68,6 +103,9 @@ func Build(req Request, ca ssh.Signer, rnd io.Reader) (*ssh.Certificate, error) 
 		return nil, err
 	}
 	if err := ValidatePrincipals(req.Principals); err != nil {
+		return nil, err
+	}
+	if err := checkReserved(req.Principals, req.Profile.ReservedPrincipals); err != nil {
 		return nil, err
 	}
 	if req.Serial == 0 {
@@ -194,6 +232,9 @@ func CheckIssued(c *ssh.Certificate, p Profile, issuedFrom, issuedTo time.Time) 
 		return err
 	}
 	if err := ValidatePrincipals(c.ValidPrincipals); err != nil {
+		return err
+	}
+	if err := checkReserved(c.ValidPrincipals, p.ReservedPrincipals); err != nil {
 		return err
 	}
 	if c.Serial == 0 {

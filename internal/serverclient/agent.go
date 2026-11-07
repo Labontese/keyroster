@@ -40,10 +40,33 @@ const (
 	// MaxAgentHostCertBody bytes), relayed to the signer; 200
 	// AgentHostCertAnswer (03-09, AGENT-06).
 	AgentHostCertPath = "/api/v1/agent/hostcert"
+	// AgentProbeCertPath (POST): a probe certificate request by one of the
+	// agent's own host keys (AgentProbeCertRequest, at most
+	// MaxAgentProbeCertBody bytes), relayed to the signer; 200
+	// AgentProbeCertAnswer (03-10, D-06). Its refusals beyond the
+	// signer's reuse AgentErrHostKeyNotEnrolled, AgentErrHostNameMismatch
+	// and AgentErrSignerTooOld.
+	AgentProbeCertPath = "/api/v1/agent/probecert"
 )
 
 // MaxAgentHostCertBody bounds a host certificate request (03-09).
 const MaxAgentHostCertBody = 16 << 10
+
+// MaxAgentProbeCertBody bounds a probe certificate request (03-10).
+const MaxAgentProbeCertBody = 16 << 10
+
+// AgentProbeCertRequest is the body of a POST to AgentProbeCertPath: the
+// wire.ProbeIssueRequest bytes (its Marshal), standard base64 in JSON
+// (03-10).
+type AgentProbeCertRequest struct {
+	Request []byte `json:"request"`
+}
+
+// AgentProbeCertAnswer is the 200 answer of AgentProbeCertPath: the issued
+// (or re-delivered) probe certificate in SSH wire format (03-10).
+type AgentProbeCertAnswer struct {
+	Certificate []byte `json:"certificate"`
+}
 
 // AgentHostCertRequest is the body of a POST to AgentHostCertPath: the
 // wire.HostIssueRequest bytes (its Marshal), standard base64 in JSON.

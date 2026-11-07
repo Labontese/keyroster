@@ -983,7 +983,7 @@ func probeIssueVector(t testing.TB) (Leaf, *ProbeIssueBody) {
 	kid := cert.KeyID{V3: true, CA: "machine", Subject: "probe.web1", Request: "000102030405060708090a0b0c0d0e0f", Policy: 2, Directory: 3, Serial: serial}
 	opts := map[string]string{"force-command": "/bin/false", "source-address": "127.0.0.0/8,::1/128"}
 	c, err := cert.Build(cert.Request{Profile: cert.Profile{CertType: ssh.UserCert, MaxTTL: 90 * time.Second,
-		AllowedCriticalOptions: []string{"force-command", "source-address"}}, Subject: probeKey,
+		AllowedCriticalOptions: []string{"force-command", "source-address"}, ReservedPrincipals: true}, Subject: probeKey,
 		Principals: []string{"keyroster-probe:web1"}, Now: time.Unix(1_700_000_000, 0), ValidFor: 90 * time.Second, KeyID: kid,
 		Serial: serial, CriticalOptions: opts}, ca, zeroReader{})
 	if err != nil {

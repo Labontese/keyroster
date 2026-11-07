@@ -82,7 +82,8 @@ func ProbeCriticalOptions() map[string]string {
 // ProbeProfile returns the profile every probe certificate is built and
 // re-checked under (03-10): a user certificate with the machine role's
 // MaxTTL under pol, no default or allowed extension, and exactly the
-// critical options force-command and source-address allowed. Nothing else
+// critical options force-command and source-address allowed, and the one
+// profile that may sign cert.ReservedPrincipalPrefix. Nothing else
 // of the machine profile carries over, so a machine profile that grants
 // permit-pty or forwarding changes nothing.
 func ProbeProfile(pol *trust.Policy) (cert.Profile, error) {
@@ -95,6 +96,7 @@ func ProbeProfile(pol *trust.Policy) (cert.Profile, error) {
 		MaxTTL:                 m.MaxTTL,
 		DefaultExtensions:      map[string]string{},
 		AllowedCriticalOptions: []string{"force-command", "source-address"},
+		ReservedPrincipals:     true,
 	}, nil
 }
 
