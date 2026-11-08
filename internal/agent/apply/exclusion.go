@@ -4,6 +4,7 @@ package apply
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -39,36 +40,119 @@ func matchPattern(s, pattern string) bool {
 	}
 }
 
-// matchPatternList is OpenSSH's match_pattern_list: 1 when s matches a
-// pattern of the comma-separated list, -1 when it matches a negated one
-// (!pattern; a negated match wins), 0 when it matches none.
-func matchPatternList(s, list string) int {
-	got := 0
-	for _, p := range strings.Split(list, ",") {
-		neg := strings.HasPrefix(p, "!")
-		if neg {
-			p = p[1:]
-		}
-		if p == "" || !matchPattern(s, p) {
-			continue
-		}
-		if neg {
-			return -1
-		}
-		got = 1
-	}
-	return got
-}
-
 // Excluded applies sshd's AllowUsers, DenyUsers, AllowGroups and
 // DenyGroups (auth.c allowed_user, in its order) from the sshd -T -C dump
 // d for account, and returns why the account is or may be refused, or ""
 // when it is not. A user@host entry depends on the client's address, which
 // the agent does not know, so it "may" exclude. Groups come from
 // root/etc/passwd and root/etc/group; an account they do not list (NSS,
-// LDAP) is reported only when group rules exist. Report only (D-07): the
+// LDAP) is reported only when group rules exist. Each AllowGroups and
+// DenyGroups entry is one pattern, as sshd applies it: a comma
+// is part of the pattern and ! negates nothing (03-10c; measured with
+// sshd 10.5p1 and 9.5p1, where DenyGroups g,x does not refuse a member of
+// g and AllowGroups g,x does not admit one). Report only (D-07): the
 // agent never edits these settings.
 func Excluded(d Dump, account, root string) string {
+	why, _ := ExcludedDefinite(d, account, root)
+	return why
+}
+
+// ExcludedDefinite is Excluded's text (the first hit, unchanged) and
+// whether the exclusion is certain (03-10c, D3), computed over all entries
+// independently of the text, so a definite rule after a user@host entry
+// is still seen: a host-less DenyUsers entry that matches, an AllowUsers
+// list that matches the account in no entry, a DenyGroups entry that
+// matches one of its groups, or an AllowGroups list that matches none
+// while sshd's group lookups see only root/etc/group (groupsFilesOnly).
+// A user@host entry, group rules for an account whose groups are unknown
+// here, and an AllowGroups list that matches none while NSS may add a
+// group are never definite: the positive probe decides those.
+func ExcludedDefinite(d Dump, account, root string) (why string, definite bool) {
+	return excludedWhy(d, account, root), excludedDefinite(d, account, root)
+}
+
+// excludedDefinite is ExcludedDefinite's definite part.
+func excludedDefinite(d Dump, account, root string) bool {
+	for _, e := range d["denyusers"] {
+		if u, _, host := strings.Cut(e, "@"); !host && matchPattern(account, u) {
+			return true
+		}
+	}
+	if allow := d["allowusers"]; len(allow) > 0 && !slices.ContainsFunc(allow, func(e string) bool {
+		u, _, _ := strings.Cut(e, "@")
+		return matchPattern(account, u)
+	}) {
+		return true
+	}
+	deny, allow := d["denygroups"], d["allowgroups"]
+	if len(deny) == 0 && len(allow) == 0 {
+		return false
+	}
+	groups, ok := accountGroups(root, account)
+	if !ok {
+		return false
+	}
+	match := func(list []string) bool {
+		for _, e := range list {
+			for _, g := range groups {
+				if matchPattern(g, e) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if match(deny) {
+		return true
+	}
+	return len(allow) > 0 && !match(allow) && groupsFilesOnly(root)
+}
+
+// groupsFilesOnly reports whether the groups sshd resolves for an account
+// come only from root/etc/group (03-10c): every group: line of
+// root/etc/nsswitch.conf lists files and nothing else but systemd, which
+// adds no group a local account is a member of, and so does every
+// initgroups: line, which glibc's group-list lookup prefers when it is
+// there (a second line for a database counts too, so either reading of
+// a duplicate is covered). Action items ([NOTFOUND=return]) and comments
+// are skipped. A missing or unreadable nsswitch.conf is files only,
+// glibc's default. Any other source (sss, ldap, winbind, compat) may add
+// a group that AllowGroups lists, so a non-match is then only possible.
+// A local DenyGroups match is a refusal whatever NSS adds.
+func groupsFilesOnly(root string) bool {
+	b, err := readSmall(filepath.Join(root, "etc", "nsswitch.conf"), 1<<20)
+	if err != nil {
+		return true
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		l, _, _ = strings.Cut(l, "#")
+		db, services, ok := strings.Cut(l, ":")
+		db = strings.ToLower(strings.TrimSpace(db))
+		if !ok || (db != "group" && db != "initgroups") {
+			continue
+		}
+		files, action := false, false
+		for _, s := range strings.Fields(strings.ToLower(services)) {
+			switch {
+			case action:
+				action = !strings.HasSuffix(s, "]")
+			case strings.HasPrefix(s, "["):
+				action = !strings.HasSuffix(s, "]")
+			case s == "files":
+				files = true
+			case s != "systemd":
+				return false
+			}
+		}
+		if !files {
+			return false
+		}
+	}
+	return true
+}
+
+// excludedWhy is Excluded's text: why account is or may be refused, or "".
+func excludedWhy(d Dump, account, root string) string {
 	user := func(entry string) (bool, bool) { // matches the user part, and has a host part
 		u, _, host := strings.Cut(entry, "@")
 		return matchPattern(account, u), host
@@ -110,7 +194,7 @@ func Excluded(d Dump, account, root string) string {
 	}
 	for _, e := range deny {
 		for _, g := range groups {
-			if matchPatternList(g, e) == 1 {
+			if matchPattern(g, e) {
 				return "DenyGroups " + e + " refuses its group " + g
 			}
 		}
@@ -118,12 +202,16 @@ func Excluded(d Dump, account, root string) string {
 	if len(allow) > 0 {
 		for _, e := range allow {
 			for _, g := range groups {
-				if matchPatternList(g, e) == 1 {
+				if matchPattern(g, e) {
 					return ""
 				}
 			}
 		}
-		return "AllowGroups (" + strings.Join(allow, " ") + ") lists none of its groups (" + strings.Join(groups, ", ") + ")"
+		why := "AllowGroups (" + strings.Join(allow, " ") + ") lists none of its groups (" + strings.Join(groups, ", ") + ")"
+		if !groupsFilesOnly(root) {
+			why += " in " + filepath.Join(root, "etc", "group") + "; " + filepath.Join(root, "etc", "nsswitch.conf") + " takes groups from more than files, so sshd may still admit it"
+		}
+		return why
 	}
 	return ""
 }

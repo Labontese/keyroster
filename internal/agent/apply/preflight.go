@@ -53,6 +53,11 @@ const (
 	// D-R4): the service starts sshd with arguments the agent does not
 	// account for.
 	CodeSSHDCommand = "sshd_command_unknown"
+	// CodeProbeAccount is a probe account that would hold every addition
+	// (03-10c): one finding per failing reason, the reason code first in
+	// its Message. Report only (T-03-387): the gate holds additions, the
+	// preflight never refuses the host for it.
+	CodeProbeAccount = "probe_account"
 )
 
 // Preflight refusals as errors, for errors.Is on an apply refused by its
@@ -88,7 +93,7 @@ var ErrConfigUnsafe = errors.New(CodeConfigUnsafe)
 
 // ReportOnly are the codes that never refuse: keyroster-agent preflight
 // exits 0 with only these (03-16's enrollment gate relies on it).
-var ReportOnly = []string{CodeAccountExcluded, CodePhase2Adoptable}
+var ReportOnly = []string{CodeAccountExcluded, CodePhase2Adoptable, CodeProbeAccount}
 
 // Finding is one preflight result: a stable code, what was found and how
 // to fix it, and where (a file and line, or an account) when known.
@@ -558,6 +563,12 @@ func Preflight(ctx context.Context, cfg Config, l Layout) (*PreflightReport, err
 	if note != "" {
 		r.Notes = append(r.Notes, note)
 	}
+	// The probe account (03-10c) also without a verified state: an
+	// operator creates it before enrolling. The trust settings are
+	// compared once the agent's drop-in or a last-good generation exists.
+	if err := e.probeAccountFindings(ctx, base, v, existing != nil || lg.kind != linkNone, r); err != nil {
+		return nil, err
+	}
 	if v != nil {
 		policyFindings(v.Policy, r)
 		keys, err := hostKeys(base)
@@ -884,6 +895,65 @@ func accountsForHost(d *directory.Directory, keys []ssh.PublicKey) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// probeAccountFix is the Fix sentence of each probe_account reason.
+var probeAccountFix = map[string]string{
+	accountMissing:       "create the probe account as host-setup.md \"The probe account\" says; the check reads <root>/etc/passwd only, so an account only NSS or LDAP knows is missing here",
+	accountUnparsable:    "give the probe account exactly one well-formed line in /etc/passwd and a well-formed, regular /etc/shadow of at most 1 MiB",
+	accountUIDZero:       "give the probe account a uid other than 0",
+	shellMissing:         "give the probe account the distribution's nologin shell (an existing executable file)",
+	shellNotNologin:      "set the probe account's shell to the distribution's nologin",
+	passwordEmpty:        "lock the probe account's password: usermod --password '*' with the account's name",
+	passwordSet:          "remove the probe account's password: usermod --password '*' with the account's name",
+	sshdOverride:         "remove the sshd setting that changes publickey authentication, the trust settings, permitemptypasswords or UsePAM for the probe account (a Match block, an AuthenticationMethods line); the agent log names it",
+	accountExcluded:      "let AllowUsers, AllowGroups, DenyUsers and DenyGroups admit the probe account; the agent never edits them",
+	"account_is_managed": "remove the probe account from every host group of the directory: it is reserved for the probe self-test",
+}
+
+// probeAccountFinding is the report-only finding of one probe account
+// reason (03-10c): the reason code first in the Message, never a password
+// field (only the check's reason and the account name).
+func probeAccountFinding(account, reason string) Finding {
+	return Finding{Code: CodeProbeAccount, Account: account,
+		Message: reason + ": probe account " + account + ": every addition of access is held with probe_held:" + reason + " until it is fixed; removals, revocations and KRLs still land",
+		Fix:     probeAccountFix[reason]}
+}
+
+// probeAccountFindings reports the probe account (03-10c) when the probes
+// are on: the full check against the preflight's dump (compareTrust when
+// the agent's drop-in or a last-good generation exists, so a healthy
+// account before the first install gives no finding), its note, and with
+// a verified state account_is_managed when the host's group maps the
+// probe account. Report only (CodeProbeAccount is in ReportOnly). With no
+// loopback listener it adds nothing and returns nil, as accountFindings
+// does: no_loopback_listener is reported already.
+func (e *engine) probeAccountFindings(ctx context.Context, base Dump, v *state.Verified, compareTrust bool, r *PreflightReport) error {
+	if !e.probesOn() {
+		return nil
+	}
+	if _, err := loopbackTargets(base); err != nil {
+		return nil // no_loopback_listener is reported already
+	}
+	account := e.probeAccount()
+	res := e.checkProbeAccountFull(ctx, account, base, compareTrust)
+	if res.Reason != "" {
+		r.add(probeAccountFinding(account, res.Reason))
+	}
+	for _, n := range res.Notes {
+		r.Notes = append(r.Notes, n+": "+filepath.Join(e.l.Root, "etc", "shadow")+" could not be read, so sshd must refuse empty passwords (permitemptypasswords no) for the probe account; a password set later is not seen")
+	}
+	if v == nil {
+		return nil
+	}
+	keys, err := hostKeys(base)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(accountsForHost(v.Directory, keys), account) {
+		r.add(probeAccountFinding(account, "account_is_managed"))
+	}
+	return nil
 }
 
 // accountFindings evaluates AllowUsers, AllowGroups, DenyUsers and

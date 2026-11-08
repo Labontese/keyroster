@@ -48,6 +48,19 @@ func findingOf(r apply.PreflightReport, code string) *apply.Finding {
 	return nil
 }
 
+// withoutProbeAccount drops the findings of code probe_account (03-10c):
+// preflight always evaluates the probe account, report only, and the
+// images have none, so these counts ignore its account_missing finding.
+func withoutProbeAccount(fs []apply.Finding) []apply.Finding {
+	var out []apply.Finding
+	for _, f := range fs {
+		if f.Code != apply.CodeProbeAccount {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 func prepend(lines string) func(string) string {
 	return func(c string) string { return lines + c }
 }
@@ -147,7 +160,7 @@ func TestDistroRefusals(t *testing.T) {
 			}
 			r := decode[apply.PreflightReport](t, out)
 			if tc.want == "" {
-				if len(r.Findings) != 0 {
+				if len(withoutProbeAccount(r.Findings)) != 0 {
 					t.Fatalf("a clean host: %+v", r.Findings)
 				}
 				return
@@ -210,7 +223,7 @@ func TestDistroAdoptPhase2(t *testing.T) {
 		}
 		// Before enrollment: no pins, an empty spool.
 		code, out, _ := agent(t, preflightArgs(false)...)
-		if r := decode[apply.PreflightReport](t, out); code != 0 || findingOf(r, apply.CodePhase2Adoptable) == nil || len(r.Findings) != 1 {
+		if r := decode[apply.PreflightReport](t, out); code != 0 || findingOf(r, apply.CodePhase2Adoptable) == nil || len(withoutProbeAccount(r.Findings)) != 1 {
 			t.Fatalf("pre-enrollment preflight: exit %d, %+v", code, r.Findings)
 		}
 		nothingWritten(t, "after the preflight")

@@ -6,17 +6,21 @@ set -eu
 
 keygen_package=none
 if command -v apt-get >/dev/null 2>&1; then
+	family=debian
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get update -qq
 	apt-get install -y -qq --no-install-recommends openssh-server >/dev/null
 elif command -v dnf >/dev/null 2>&1; then
+	family=rhel
 	dnf install -y -q openssh-server >/dev/null
 elif command -v apk >/dev/null 2>&1; then
+	family=alpine
 	# openssh-server-common-openrc is Alpine's /etc/init.d/sshd and
 	# /etc/conf.d/sshd: TestDistroDetectStock reads the stock conf.d.
 	apk add -q openssh openssh-keygen openssh-server-common-openrc
 	keygen_package=openssh-keygen
 elif command -v pacman >/dev/null 2>&1; then
+	family=arch
 	# Arch rolls, and the image is frozen by its digest: pacman -Sy of the
 	# live repositories followed by installing only openssh is a partial
 	# upgrade (Arch does not support one), and breaks once the live
@@ -37,4 +41,7 @@ else
 fi
 
 export KEYROSTER_AGENT=/k/keyroster-agent KEYROSTER_KEYGEN_PACKAGE="$keygen_package"
+# 03-10c: the family names the arm of probe-account.sh (the runbook's
+# account command) that the probe tests run.
+export KEYROSTER_FAMILY="$family" KEYROSTER_PROBE_ACCOUNT_SH=/k/probe-account.sh
 exec /k/distro.test -test.v -test.count=1 -test.timeout=20m

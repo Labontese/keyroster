@@ -9,6 +9,10 @@ package distro
 
 import (
 	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +32,9 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/apply"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
+	"github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/certprofile"
+	"github.com/Labontese/keyroster/internal/trust"
 )
 
 const (
@@ -300,10 +307,21 @@ func service() []string {
 	return []string{"--root", "/", "--sshd", sshdBin, "--sshd-config", sshdConfig, "--ssh-keygen", keygen}
 }
 
+func applyBase() []string {
+	return append(append([]string{"apply", "--once", "--spool", spoolDir, "--state-dir", stateDir}, service()...), "--reload", "signal")
+}
+
 // applyArgs switch the probe self-test off (03-10b): the matrix's probe
 // tests are 03-10c's, and run.sh builds the agent as the e2e test build.
 func applyArgs() []string {
-	return append(append([]string{"apply", "--once", "--spool", spoolDir, "--state-dir", stateDir}, service()...), "--reload", "signal", "--probe-self-test", "off")
+	return append(applyBase(), "--probe-self-test", "off")
+}
+
+// probeApplyArgs run the probe self-test as production does, for the
+// probe account the matrix creates (03-10c); a first install is exempt
+// from the probes, so it lands and writes the probe principals file.
+func probeApplyArgs() []string {
+	return append(applyBase(), "--probe-self-test", "required", "--probe-account", probeName)
 }
 
 func preflightArgs(withState bool) []string {
@@ -316,6 +334,238 @@ func preflightArgs(withState bool) []string {
 
 func checkArgs() []string {
 	return append([]string{"check", "--state-dir", stateDir}, service()...)
+}
+
+// The probe account of the matrix (03-10c): the runbook's script creates
+// it under a name of its own, passed in KEYROSTER_PROBE_NAME, so that the
+// script's parameter and --probe-account are both exercised. probeSpec is
+// sshd -T -C for it from the probe's source address.
+const (
+	probeName = "probe1"
+	probeSpec = "user=" + probeName + ",host=127.0.0.2,addr=127.0.0.2,laddr=127.0.0.1,lport=22"
+)
+
+// probeSerial numbers the probe certificates the tests mint.
+var probeSerial uint64 = 1000
+
+// accountFiles are the account databases the probe tests change.
+var accountFiles = []string{"/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow"}
+
+// snapshotAccounts restores the account databases byte for byte when t
+// ends, so that the next test sees the image's accounts (deploy included)
+// whatever useradd, usermod or the test did to them.
+func snapshotAccounts(t *testing.T) {
+	t.Helper()
+	saved := map[string][]byte{}
+	for _, p := range accountFiles {
+		b, err := os.ReadFile(p) //nolint:gosec // G304: the container's account files
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved[p] = b
+	}
+	t.Cleanup(func() {
+		for p, b := range saved {
+			if err := os.WriteFile(p, b, 0o600); err != nil { // an existing file keeps its mode
+				t.Errorf("restore %s: %v", p, err)
+			}
+		}
+	})
+}
+
+// createProbeAccount runs the runbook's account script for the image's
+// family (run-in.sh exports both variables) and restores the accounts at
+// cleanup.
+func createProbeAccount(t *testing.T) {
+	t.Helper()
+	snapshotAccounts(t)
+	script, family := os.Getenv("KEYROSTER_PROBE_ACCOUNT_SH"), os.Getenv("KEYROSTER_FAMILY")
+	if script == "" || family == "" {
+		t.Fatal("KEYROSTER_PROBE_ACCOUNT_SH and KEYROSTER_FAMILY are required (run-in.sh exports them)")
+	}
+	cmd := exec.Command("sh", script, family) //nolint:gosec // G204: the runbook's script under test
+	cmd.Env = append(os.Environ(), "KEYROSTER_PROBE_NAME="+probeName)
+	out, err := cmd.CombinedOutput()
+	t.Logf("sh %s %s:\n%s", script, family, out)
+	if err != nil {
+		t.Fatalf("sh %s %s: %v", script, family, err)
+	}
+}
+
+// probeHost is a host for the probe tests: sshd started with edit, the
+// directory published and enrolled, the probe account created by the
+// runbook's script and a probes-on first install, so that current holds
+// the probe principals file for web1 and the machine CA line.
+func probeHost(t *testing.T, edit hostEdit) *host {
+	t.Helper()
+	h := newHost(t, true, edit)
+	h.w.publish(account, h.hostKey, "role:ops")
+	h.enroll()
+	createProbeAccount(t)
+	code, out, _ := agent(t, probeApplyArgs()...)
+	if r := decode[apply.Report](t, out); code != 0 || r.SelfTest != "pass" {
+		t.Fatalf("probes-on first install: exit %d, %+v", code, r)
+	}
+	b, err := os.ReadFile("/etc/ssh/keyroster/current/principals/" + probeName) //nolint:gosec // G304: the generation under test
+	if err != nil || !strings.Contains(string(b), "\nkeyroster-probe:web1\n") {
+		t.Fatalf("the probe principals file: %v %q", err, b)
+	}
+	return h
+}
+
+// probeCert is a probe certificate the test minted, with its key for a
+// full login.
+type probeCert struct {
+	cert   *ssh.Certificate
+	signer ssh.Signer
+}
+
+// mintProbe makes a certificate with the real probe certificate's shape
+// (internal/signer/probeissue.go): the machine CA, the probe profile, a
+// kr3 key ID ca=machine subject probe.web1, the one principal
+// keyroster-probe:web1, the two critical options, no extension, 600 s.
+func (w *world) mintProbe() probeCert {
+	w.t.Helper()
+	pol, err := trust.ParsePolicy(w.policyDoc)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	profile, err := certprofile.ProbeProfile(pol)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	subject, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	probeSerial++
+	req := make([]byte, 16)
+	if _, err := rand.Read(req); err != nil {
+		w.t.Fatal(err)
+	}
+	kid := cert.KeyID{V3: true, CA: "machine", Subject: "probe.web1", Request: hex.EncodeToString(req), Policy: pol.Version,
+		Directory: uint64(len(w.dirs)), Serial: probeSerial} //nolint:gosec // G115: a small test count
+	c, err := cert.Build(cert.Request{Profile: profile, Subject: subject, Principals: []string{cert.ReservedPrincipalPrefix + "web1"},
+		Now: time.Now(), ValidFor: 600 * time.Second, KeyID: kid, Serial: probeSerial, CriticalOptions: certprofile.ProbeCriticalOptions()}, w.mach, rand.Reader)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	key, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	s, err := ssh.NewCertSigner(c, key)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return probeCert{cert: c, signer: s}
+}
+
+// writeProbeKRL builds a KRL that revokes serials of the machine CA with
+// the image's own ssh-keygen and writes it over the revoked.krl of the
+// generation current names (a test-only replacement; no drift check runs
+// after it).
+func (w *world) writeProbeKRL(t *testing.T, serials ...uint64) {
+	t.Helper()
+	dir := t.TempDir()
+	ca, spec, file := filepath.Join(dir, "machine_ca.pub"), filepath.Join(dir, "krl.spec"), filepath.Join(dir, "revoked.krl")
+	var lines strings.Builder
+	for _, s := range serials {
+		fmt.Fprintf(&lines, "serial: %d\n", s)
+	}
+	if err := os.WriteFile(ca, ssh.MarshalAuthorizedKey(w.mach.PublicKey()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(spec, []byte(lines.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(keygen, "-k", "-f", file, "-s", ca, spec).CombinedOutput(); err != nil { //nolint:gosec // G204: the image's ssh-keygen
+		t.Fatalf("ssh-keygen -k: %v: %s", err, out)
+	}
+	b, err := os.ReadFile(file) //nolint:gosec // G304: the test's own KRL
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("/etc/ssh/keyroster/current/revoked.krl", b, 0o644); err != nil { //nolint:gosec // the generation's KRL, read by sshd
+		t.Fatal(err)
+	}
+}
+
+// hostKeys are the host keys of the container's sshd that x/crypto/ssh
+// parses: the query offers no host key algorithm of its own, so sshd may
+// answer with any of them. A key type it cannot parse (archlinux's
+// OpenSSH writes an ML-DSA hybrid host key) is one it cannot negotiate
+// either, so it is skipped.
+func hostKeys(t *testing.T) []ssh.PublicKey {
+	t.Helper()
+	files, err := filepath.Glob("/etc/ssh/ssh_host_*_key.pub")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("host keys: %v %v", files, err)
+	}
+	var keys []ssh.PublicKey
+	for _, f := range files {
+		b, err := os.ReadFile(f) //nolint:gosec // G304: the container's host keys
+		if err != nil {
+			t.Fatal(err)
+		}
+		if k, _, _, _, err := ssh.ParseAuthorizedKey(b); err == nil {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		t.Fatalf("no host key of %v parses", files)
+	}
+	return keys
+}
+
+// probe is the production PK_OK query (apply.ProbeQuery) of c for the
+// probe account from src.
+func (h *host) probe(src string, c *ssh.Certificate) (apply.ProbeOutcome, error) {
+	h.t.Helper()
+	return apply.ProbeQuery(context.Background(), apply.ProbeTarget{Addr: "127.0.0.1:22", Source: src, Account: probeName, HostKeys: hostKeys(h.t)},
+		c, time.Now().Add(10*time.Second))
+}
+
+// runAs logs in as the probe account from src with s and requests
+// command: it returns the session's output and exit status, or the error
+// of a login or session that did not end with an exit status.
+func (h *host) runAs(src string, s ssh.Signer, command string) (string, int, error) {
+	h.t.Helper()
+	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(src)}, Timeout: 10 * time.Second}
+	conn, err := d.Dial("tcp", "127.0.0.1:22")
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
+	cfg := &ssh.ClientConfig{User: probeName, Auth: []ssh.AuthMethod{ssh.PublicKeys(s)},
+		HostKeyCallback: ssh.FixedHostKey(h.hostKey), HostKeyAlgorithms: []string{ssh.KeyAlgoED25519}}
+	cc, chans, reqs, err := ssh.NewClientConn(conn, "127.0.0.1:22", cfg)
+	if err != nil {
+		return "", 0, fmt.Errorf("login: %w", err)
+	}
+	c := ssh.NewClient(cc, chans, reqs)
+	defer func() { _ = c.Close() }()
+	sess, err := c.NewSession()
+	if err != nil {
+		return "", 0, fmt.Errorf("session: %w", err)
+	}
+	out, err := sess.CombinedOutput(command)
+	var ee *ssh.ExitError
+	switch {
+	case err == nil:
+		return string(out), 0, nil
+	case errors.As(err, &ee):
+		return string(out), ee.ExitStatus(), nil
+	}
+	return string(out), 0, fmt.Errorf("session: %w", err)
 }
 
 // login authenticates as account with signer over loopback; nil is a

@@ -53,6 +53,9 @@ type verifyResult struct {
 	Policy   uint64            `json:"policy_version"`
 	LogKey   string            `json:"log_key"`               // fingerprint, from the root-signed bundle
 	Anchor   uint64            `json:"anchor_bundle_version"` // the trust bundle whose root set the pins name
+	// PendingNegativeProbes counts the negative probe certificates that no
+	// published KRL lists yet (03-10c, owner answer P2); omitted when zero.
+	PendingNegativeProbes int `json:"pending_negative_probes,omitempty"`
 }
 
 func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) error {
@@ -104,10 +107,14 @@ func runAuditVerify(_ context.Context, args []string, stdout, stderr io.Writer) 
 }
 
 // printVerifyOK prints the OK line and, when the log holds host
-// certificates (03-09), the line "host certificates: N" after it. issued
-// counts admin issuances (issue entries) only; login certificates,
-// directory installs and host certificates are the counts of their own
-// kinds. No JSON field is added: Kinds already carries the count.
+// certificates (03-09), the line "host certificates: N" after it, then,
+// when it holds probe certificates (03-10c, owner answer P2), the line
+// "probe certificates: N, negative probes no published KRL lists yet: M".
+// issued counts admin issuances (issue entries) only; login certificates,
+// directory installs, host and probe certificates are the counts of their
+// own kinds. The two certificate counts need no JSON field, since Kinds
+// carries them; the pending negatives do (pending_negative_probes),
+// because no count of Kinds says which negatives a published KRL lists.
 func printVerifyOK(w io.Writer, res verifyResult, rep *audit.Report) error {
 	if _, err := fmt.Fprintf(w, "OK: %d entries, root %s, issued %d (user %d, host %d, machine %d), login certificates %d, directory installs %d, refusals %d, trust bundle v%d, policy v%d, log key %s\n",
 		res.Entries, res.Root, res.Issued, res.ByCA["user"], res.ByCA["host"], res.ByCA["machine"],
@@ -117,6 +124,11 @@ func printVerifyOK(w io.Writer, res verifyResult, rep *audit.Report) error {
 	}
 	if n := rep.Counts[tlog.KindHostIssue]; n > 0 {
 		if _, err := fmt.Fprintf(w, "host certificates: %d\n", n); err != nil {
+			return err
+		}
+	}
+	if n := rep.Counts[tlog.KindProbeIssue]; n > 0 {
+		if _, err := fmt.Fprintf(w, "probe certificates: %d, negative probes no published KRL lists yet: %d\n", n, res.PendingNegativeProbes); err != nil {
 			return err
 		}
 	}
@@ -139,6 +151,8 @@ func verifyResultOf(rep *audit.Report) verifyResult {
 		Bundle:   rep.BundleVersion,
 		Policy:   rep.PolicyVersion,
 		Anchor:   rep.AnchorVersion,
+
+		PendingNegativeProbes: rep.PendingNegativeProbes,
 	}
 	if rep.LogKey != nil {
 		res.LogKey = ssh.FingerprintSHA256(rep.LogKey)

@@ -7,11 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
+	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
 )
 
@@ -30,6 +34,21 @@ func systemctl(t *testing.T, args ...string) string {
 		t.Fatalf("systemctl %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
+}
+
+// sshdProbeLines is sshd's journal since since (the identifiers sshd and,
+// from OpenSSH 9.8 on, sshd-session), only the lines that name account.
+func sshdProbeLines(t *testing.T, since time.Time, account string) []string {
+	t.Helper()
+	out, _ := exec.Command("journalctl", "--no-pager", "-o", "cat", "--since", since.Format("2006-01-02 15:04:05"), //nolint:gosec // test-only, fixed binary
+		"-t", "sshd", "-t", "sshd-session").CombinedOutput()
+	var lines []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.Contains(l, " "+account+" ") {
+			lines = append(lines, l)
+		}
+	}
+	return lines
 }
 
 // journal is the units' journal since the test began.
@@ -201,4 +220,121 @@ func TestAgentSystemdSmoke(t *testing.T) {
 	if j := journal(t, since); strings.Contains(j, "phase2_adoption_pending") {
 		t.Logf("the applier reported phase2_adoption_pending (a Phase 2 layout on the runner)")
 	}
+
+	// 03-10c: with the probe account that agent-smoke.sh created through
+	// the runbook's script, a revocation lands at once, and a role addition
+	// waits for a probe pair and passes both probes under the real units
+	// (the applier's IPAddressAllow=localhost must admit the probe source
+	// 127.0.0.2, T-03-381).
+	if !t.Run("revocation_lands", func(t *testing.T) {
+		// A fresh certificate that logs in first, so that the refused login
+		// after the revocation cannot be an expired certificate.
+		rc := issueAgentCert(t, env.Signer, "smoke-revoked", "role:ops")
+		if code, out := sshLogin(t, loginOptions{Port: 22, Key: rc.key, Cert: rc.cert, User: account, Command: "true"}); code != 0 {
+			t.Fatalf("the certificate to revoke does not log in: exit %d:\n%s", code, out)
+		}
+		serial, err := strconv.ParseUint(rc.serial, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(rc.cert)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, _, _, _, err := ssh.ParseAuthorizedKey(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, ok := pub.(*ssh.Certificate)
+		if !ok {
+			t.Fatal("not a certificate")
+		}
+		ca := cert.SignatureKey.Marshal()
+		start := time.Now()
+		revokeSerial(t, env.Signer, rc.serial)
+		for deadline := time.Now().Add(240 * time.Second); ; time.Sleep(5 * time.Second) {
+			if b, err := os.ReadFile("/etc/ssh/keyroster/current/revoked.krl"); err == nil {
+				if k, err := krl.Parse(b); err == nil && k.RevokesSerial(ca, serial) {
+					break
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("current/revoked.krl does not list serial %d of the user CA within 240 s\njournal:\n%s", serial, journal(t, since))
+			}
+		}
+		t.Logf("the revocation of serial %d landed in %s", serial, time.Since(start).Round(time.Second))
+		if code, out := sshLogin(t, loginOptions{Port: 22, Key: rc.key, Cert: rc.cert, User: account, Command: "true"}); code == 0 {
+			t.Fatalf("the revoked certificate still logs in:\n%s", out)
+		}
+	}) {
+		t.FailNow()
+	}
+	if !t.Run("probe_pair_ready", func(t *testing.T) {
+		var rec struct {
+			Committed struct {
+				Positive, Negative *json.RawMessage
+			} `json:"committed"`
+		}
+		for deadline := time.Now().Add(300 * time.Second); ; time.Sleep(5 * time.Second) {
+			if b, err := os.ReadFile(filepath.Join(smokeState, "probe.json")); err == nil && json.Unmarshal(b, &rec) == nil &&
+				rec.Committed.Positive != nil && rec.Committed.Negative != nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("probe.json holds no committed probe pair within 300 s\njournal:\n%s", journal(t, since))
+			}
+		}
+	}) {
+		t.FailNow()
+	}
+	t.Run("role_addition_passes_probes", func(t *testing.T) {
+		var st struct {
+			LastApply struct {
+				SelfTest      string   `json:"self_test"`
+				Rollback      bool     `json:"rollback"`
+				Detail        string   `json:"detail"`
+				ProbePositive string   `json:"probe_positive"`
+				ProbeNegative string   `json:"probe_negative"`
+				Errors        []string `json:"errors"`
+			} `json:"last_apply"`
+		}
+		start := time.Now()
+		kr("role", "update", "ops", "--principal", "role:ops", "--principal", "role:smoke2", "--yes")
+		for deadline := time.Now().Add(420 * time.Second); ; time.Sleep(5 * time.Second) {
+			b, err := os.ReadFile(filepath.Join(smokeState, "status.json"))
+			p, perr := os.ReadFile("/etc/ssh/keyroster/current/principals/" + account) //nolint:gosec // G304: the generation under test
+			la := &st.LastApply
+			if err == nil && perr == nil && json.Unmarshal(b, &st) == nil && la.ProbePositive == "pass" && la.ProbeNegative == "pass" &&
+				la.Detail == "" && len(la.Errors) == 0 && !la.Rollback && strings.Contains(string(p), "\nrole:smoke2\n") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the role addition did not land with both probes passing within 420 s (last %+v)\njournal:\n%s", st.LastApply, journal(t, since))
+			}
+		}
+		t.Logf("the role addition landed with both probes passing in %s", time.Since(start).Round(time.Second))
+		// The probe source under the real unit (T-03-381): agent-smoke.sh
+		// makes 127.0.0.1:22 sshd's only listen address and sets LogLevel
+		// VERBOSE, so sshd's lines for the probe account must name the
+		// source 127.0.0.2, and none may name ::1.
+		const probeAccount = "keyroster-probe"
+		var lines []string
+		from := func(addr string) bool {
+			return slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, " "+addr+" ") })
+		}
+		for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(2 * time.Second) {
+			if lines = sshdProbeLines(t, start, probeAccount); from("127.0.0.2") || time.Now().After(deadline) {
+				break
+			}
+		}
+		for _, l := range lines {
+			t.Logf("sshd: %s", l)
+		}
+		if !from("127.0.0.2") || from("::1") {
+			t.Fatalf("sshd's lines for %s do not show the probe source 127.0.0.2 alone (%d lines above)", probeAccount, len(lines))
+		}
+		if text := kr("host", "status"); strings.Contains(text, "probe: ") {
+			t.Fatalf("keyroster host status shows a probe alert:\n%s", text)
+		}
+	})
 }

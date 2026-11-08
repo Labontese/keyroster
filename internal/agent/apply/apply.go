@@ -153,6 +153,9 @@ type Config struct {
 	probeQuery  func(ctx context.Context, t ProbeTarget, c *ssh.Certificate, deadline time.Time) (ProbeOutcome, error)
 	probeRand   io.Reader
 	probeKeygen probecert.KeyGen
+	// openShadow is the seam of the probe account check's shadow open
+	// (03-10c; nil: openShadowFile).
+	openShadow func(path string) (*os.File, error)
 }
 
 // Report is what one run did, printed as JSON and kept in status.json.
@@ -1147,7 +1150,7 @@ func (e *engine) forward(ctx context.Context) error {
 		} else if err := e.servedCertCheck(ctx); err != nil {
 			e.logf("WARNING %v", err)
 			if gated {
-				_, line := checkProbeAccount(e.l.Root, e.probeAccount())
+				line := e.accountKeyInput(e.probeAccount())
 				pair, _ := e.probePair(e.readProbeRecord(), target.Host, e.clock.Now().Add(e.cfg.SelfTestTimeout), genKRL(target), genCAKeys(target))
 				st, serr := e.loadProbeState()
 				if serr == nil {

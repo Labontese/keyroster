@@ -16,6 +16,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/spool"
+	certpkg "github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/trust"
 )
 
@@ -51,6 +52,10 @@ type DriftReport struct {
 	Settings   []SettingDrift `json:"settings"`
 	Files      []FileDrift    `json:"files"`
 	Excluded   []Finding      `json:"excluded,omitempty"`
+	// Probe is the probe account's findings (03-10c, code probe_account):
+	// report only, never counted by Drift (T-03-387). A trust setting
+	// overridden for the probe account is still a SettingDrift.
+	Probe []Finding `json:"probe,omitempty"`
 	// Foreign are the trust settings in files sshd reads other than the
 	// agent's drop-in, and the files of that configuration the agent
 	// cannot read safely (configGraph, PR #68 review D-R3): drift.
@@ -222,6 +227,9 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 		}
 	}
 
+	if err := e.probeDrift(ctx, dump, g, rec.Host, r); err != nil {
+		return nil, err
+	}
 	var accounts []string
 	for name := range rec.Files {
 		if a, ok := strings.CutPrefix(name, PrincipalsDir+"/"); ok {
@@ -249,11 +257,43 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 		if got := d.One(principalsCommand); !isDefault(got) {
 			r.Settings = append(r.Settings, SettingDrift{Keyword: principalsCommand, Account: a, Want: "none", Got: got})
 		}
-		if why := Excluded(d, a, l.Root); why != "" {
+		// A definite exclusion of the probe account is in r.Probe already
+		// (03-10c); any other, such as a user@host entry or an AllowGroups
+		// list that NSS may still satisfy, stays here, report only. Its
+		// trust settings stay counted drift above.
+		if why := Excluded(d, a, l.Root); why != "" && !slices.ContainsFunc(r.Probe, func(f Finding) bool {
+			return f.Account == a && strings.HasPrefix(f.Message, accountExcluded+":")
+		}) {
 			r.Excluded = append(r.Excluded, Finding{Code: CodeAccountExcluded, Account: a, Message: "account " + a + ": " + why})
 		}
 	}
 	return r, nil
+}
+
+// probeDrift adds the probe account's findings to r.Probe when the probes
+// are on (03-10c): the full check with probeAccountSpec against the
+// installed host's dump (trust compared), and account_is_managed when g's
+// principals file for the probe account lists principals but not its
+// probe principal for host (the directory maps the account; an
+// intermediate's header-only file is not that). Report only. With no
+// loopback listener it adds nothing.
+func (e *engine) probeDrift(ctx context.Context, dump Dump, g *Generation, host string, r *DriftReport) error {
+	if !e.probesOn() {
+		return nil
+	}
+	if _, err := loopbackTargets(dump); err != nil {
+		return nil // the account loop below reports it when an account is managed
+	}
+	account := e.probeAccount()
+	res := e.checkProbeAccountFull(ctx, account, dump, true)
+	e.noteAccount(account, res)
+	if res.Reason != "" {
+		r.Probe = append(r.Probe, probeAccountFinding(account, res.Reason))
+	}
+	if set := lineSet(g.Files[PrincipalsDir+"/"+account], principalLine); len(set) > 0 && (host == "" || !set[certpkg.ReservedPrincipalPrefix+host]) {
+		r.Probe = append(r.Probe, probeAccountFinding(account, "account_is_managed"))
+	}
+	return nil
 }
 
 // recordFiles turns a record's file names into a Generation's keys, for
