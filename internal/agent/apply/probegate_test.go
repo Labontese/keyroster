@@ -1319,6 +1319,17 @@ func probeGateRuns(t *testing.T) {
 				t.Fatalf("current %d, last-good %d, accepted/ directory %d", h.current(), h.lastGood(), h.acceptedDir())
 			}
 		})
+		t.Run("readd_only_removes_from_last_good", func(t *testing.T) {
+			// T2 re-adds role:a and keeps role:d removed: Intermediate(last-good,
+			// T2) collapses to T2 itself, so the plain rollback would re-grant
+			// role:d. The target settles on itself.
+			h, r, _, err := supersede(t, []string{"role:a", "role:b", "role:d"}, []string{"role:b", "role:c"}, []string{"role:a", "role:b"}, 0, ProbeRefused)
+			mustFailed(t, h, r, err, ErrProbePositiveRefused)
+			mustPrincipals(t, h, "role:a", "role:b")
+			if h.current() != h.lastGood() || h.acceptedDir() != 3 || h.heldNow() != "failure_backoff" {
+				t.Fatalf("current %d, last-good %d, accepted/ directory %d, held %q", h.current(), h.lastGood(), h.acceptedDir(), h.heldNow())
+			}
+		})
 	})
 	t.Run("superseded_to_narrowing_runs_no_probes", func(t *testing.T) {
 		h, r, _, err := supersede(t, []string{"role:a", "role:b"}, []string{"role:a", "role:b", "role:c"}, []string{"role:a"}, 0)
