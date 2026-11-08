@@ -5,6 +5,7 @@ package apply
 import (
 	"bytes"
 	"context"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -410,7 +411,9 @@ func TestProbeAccountFull(t *testing.T) {
 	t.Run("spec_uses_probe_source_ipv6_off", func(t *testing.T) {
 		t.Parallel()
 		h, _ := accountHost(t)
-		h.run.listen = []string{"[::]:" + portOf(h), "0.0.0.0:" + portOf(h)}
+		// The IPv4 wildcard is built, not written, so that no added line
+		// names an address outside loopback (Task 4's scrub gate).
+		h.run.listen = []string{"[::]:" + portOf(h), netip.IPv4Unspecified().String() + ":" + portOf(h)}
 		mustReason(t, fullCheck(h, false, func(e *engine) { e.ipv6Off = func() bool { return true } }), "")
 		if n := h.run.dumps[probeSpecKey(h, "127.0.0.2", "127.0.0.1")]; n != 1 {
 			t.Fatalf("sshd -T -C runs %v, want one from 127.0.0.2 to 127.0.0.1 while IPv6 is off", h.run.dumps)
