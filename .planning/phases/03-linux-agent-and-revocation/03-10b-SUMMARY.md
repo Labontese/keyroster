@@ -3,12 +3,14 @@ phase: 03-linux-agent-and-revocation
 plan: 10b
 subsystem: agent, ci
 tags: [probe-certificates, self-test, d-06, agent-04, e2e]
-status: in-progress
+status: complete
 requires: [03-10]
 requirements-completed: []
 ---
 
-# Phase 3 Plan 10b: The agent's probe self-test Summary (draft)
+# Phase 3 Plan 10b: The agent's probe self-test Summary
+
+The applier gets a verified positive and negative probe pair from the machine CA by proof of possession and holds every addition until both PK_OK probes pass on its own sshd from 127.0.0.2. A failed addition rolls back alone, so removals and KRLs always land and are never re-granted.
 
 Owner answers: Q2 Q5 Q6 P4 planner-defaults
 AGENT-04: open until 03-10c
@@ -117,6 +119,23 @@ gate control: ROADMAP gate exits 1 before the tracking update (the changed-line 
 Q1 state-loss deviation (P4): after an agent-side state loss the first new negative waits for `probe_cert_recent` (up to min(1 h, L/3)) and then for the hourly publish, so additions on that host wait up to about 2 h; revocations and removals are unaffected; no new wire signal is added; here it is a transient with the persisted back-off, never a sticky hold.
 
 The check-1 settle path and the served-certificate change: a failed gated mixed change keeps its removal through `settleFailedAddition` (D13) instead of 03-05's plain rollback, and a served-certificate mismatch is report only for a change that is not a gated addition.
+
+PR: #91 (feat(agent): hold additions until sshd proves it accepts and enforces certificates), opened by keyroster-bot, auto-merge off.
+
+systemd-sandbox at 5f63649 (after the owner-approved 270 s deadline): run 42455139294, success, TestAgentSystemdSmoke 359.65 s (job 06:32:05 to 06:40:58); every other required check of that head passed too (CI 42455139324, E2E 42455139342, E2E distro 42455139322, E2E PKCS#11 42455139288, E2E TPM 42455139287, PIV 42455139401, CodeQL 42455139317, Workflow lint 42455139315, PR title 42455139327).
+
+Test-time readings (the one six-package command, quiet, each from its package's `ok` line; base at=1794117956):
+
+| Package | Base | Reading 1 (9e98687 tests) | Reading 2 (1ee9c73) | Delta (reading 2) |
+|---|---|---|---|---|
+| apply | 379.045 | 538.267 | 420.745 | +41.7 |
+| fetch | 31.888 | 32.247 | 33.104 | +1.2 |
+| heartbeat | 1.049 | 1.053 | 1.061 | +0.0 |
+| serverclient | 4.204 | 4.222 | 4.180 | -0.0 |
+| agentcmd | 2.013 | 1.942 | 1.905 | -0.1 |
+| cmd | 222.893 | 263.172 | 217.063 | -5.8 |
+
+Reading 1 failed the delta gate (apply +159 s). A back-to-back pair confirmed it (origin/main apply 368.021, the branch 514.375), so it was real and not noise. The cause: the probe tests of TestProbeGate, TestForwardServedCerts and TestProbeSites ran serially, about 53 s under `-race` alone, and serial tests add their whole time to the package's wall time. 1ee9c73 makes their subtests `t.Parallel()` (64 + 14 lines, nothing else changed); those three tests then take 13.7 s and pass `-race -count=3`. Reading 2 passes the gate (exit 0). The bound was not raised.
 
 ## For later plans
 
@@ -292,17 +311,21 @@ Running count after Task 4: 104 killed, 1 equivalent, 0 survived (floors 92 kill
 - **Task 4: Report values the plan leaves open.** A refused or inconclusive positive reports probe_negative `skipped:not_ready` (no negative is sent). A pair no longer usable at probe time reports `inconclusive` and `skipped:not_ready`. A required pair whose reservation is refused reports `inconclusive` and `skipped:budget` and settles, which is fail-safe; an opportunistic one reports `skipped:budget`. The failure record's count grows only while its key is unchanged; a new key starts at 1. On a pass, a probe-state.json write that fails is logged and the pass stands.
 - **Task 4: harness_test.go (in files_modified, not in Task 4's files).** `gateOn` installs `sshdProbe`. Without it every gate test that lands an addition ran the real ProbeQuery against the fake sshd and rolled back (Rule 3).
 - **Task 4: TestNegativeProbeBudgetAcrossProcesses** re-runs the test binary as each helper process. The helper takes apply.lock through the production `engine.lock` and reserves through `reserveProbe`; it does not run Apply. B is observed blocked: its marker file exists, it has not exited, and /proc reports state S in three polls in a row. B's lock time must come after A's `releasing` line. The lock mutant makes the flock shared.
+- **Owner-approved (Daniel, 2026-11-08), Task 1 step 8: the systemd smoke's status loop waits 270 s, not 150 s.** Only the deadline of the loop that waits for a heartbeat on the current versions changed (still fatal, the message says 270 s, and a comment gives the reason); every other deadline is unchanged (5f63649). The first probe negative's KRL commits about one fetch poll after the first install, and that poll's heartbeat goes out before the apply, so the 150 s window closed before the next heartbeat (run 42453927360, job 128648794842: no sandbox refusal in the journal).
+- **Owner-approved (Daniel, 2026-11-08, under Q2: probes never roll back a removal): the collapse-to-target settle branch is kept** (the Task 4 bullet on settleFailedAddition above).
+- **Task 5: the probe test subtests run in parallel** (1ee9c73), including Task 3's TestProbeGate subtests (probegate_test.go is in files_modified): the delta gate failed without it, as above. The mutants ran on the serial form; each ran alone on its subtest, where t.Parallel changes nothing.
 
 ## UNVERIFIED
 
 - Local e2e: not run (the namespace wrapper of 03-10 was not used); the e2e results are CI only.
-- `systemd-sandbox` with this branch's KRL activity (a first probe pair publishes a negative): no PR run yet.
 - Every Edge Coverage item of the plan, and everything of Task 5.
 - Task 4: the local 10.5p1 spacing mutant (no local sshd); a crash between the final swap and the commit of a gated addition (the plan's crash bound); a persistent listener-test failure after the move to M (the plan's residual).
 - Task 3 at the e2e level: no e2e run carries Task 3 yet. Every e2e host runs with `--probe-self-test off`, so no gate runs there except TestProbeSelfTestEndToEnd's host; that test's widening steps need Task 4.
 - Task 2 at the e2e level: no e2e run has carried Task 2 yet (the next e2e run is Task 4's); every e2e host now reports `probe_self_test_off` in last_apply.detail and probe_detail and shows a `probe:` alert, which no e2e assertion reads (checked by grep of test/e2e, test/distro and test/systemd).
 
 ## Resume point (for the continuation)
+
+None: the plan is complete and PR #91 waits at the owner merge gate. Daniel answered the two Task 5 questions on 2026-11-08 (the 270 s smoke deadline, the collapse-to-target settle branch kept). The record of the stop, kept for reference:
 
 Task 4 is done and pushed (T4 110181d, e2e green run 42452757354). Task 5 stopped at an owner question.
 
