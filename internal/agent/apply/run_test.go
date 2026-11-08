@@ -572,6 +572,39 @@ func TestRunHeldTrigger(t *testing.T) {
 			t.Fatalf("held %q, principals %v", h.heldNow(), h.principals("deploy"))
 		}
 	})
+	t.Run("held_apply_that_writes_something_prints", func(t *testing.T) {
+		// PR #91 review, F5: a held apply that lands a KRL (a new generation
+		// and KRL version) with the same held message is printed and logged;
+		// the identical retry after it is quiet.
+		h := newProbeHost(t)
+		h.gateOn()
+		h.installed("role:ops")
+		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
+		h.publishDir(h.spec("role:ops", "role:new"))
+		h.write()
+		cr := &countRunner{Runner: h.run}
+		lp := start(t, h, time.Millisecond, cr)
+		next(t, lp)
+		gen := h.current()
+		h.publishKRL(77)
+		h.write()
+		for i := range 2 {
+			time.Sleep(5 * time.Millisecond) // past Retry
+			n := cr.n.Load()
+			lp.step <- struct{}{}
+			next(t, lp)
+			if cr.n.Load() == n {
+				t.Fatalf("round %d did not apply again", i+2)
+			}
+		}
+		if h.current() == gen || !h.krlRevokes(h.l.Current(), 77) {
+			t.Fatalf("the held apply did not land the KRL: current %d (was %d)", h.current(), gen)
+		}
+		logged := strings.Count(lp.log.String(), "ERROR apply: probe_held: account_missing")
+		if n := lp.held.Load(); n != 2 || logged != 2 {
+			t.Fatalf("held applies printed %d times and logged %d times, want 2 and 2:\n%s", n, logged, lp.log.String())
+		}
+	})
 }
 
 // countRunner counts the commands a Runner runs.
@@ -610,8 +643,28 @@ func TestRunHeldNoise(t *testing.T) {
 		{held("budget"), 33 * time.Minute, false},
 		{held("budget"), 34 * time.Minute, true},
 	} {
-		if got := n.quiet(c.err, t0.Add(c.at)); got != c.quiet {
+		if got := n.quiet(c.err, &Report{Generation: 3}, t0.Add(c.at)); got != c.quiet {
 			t.Fatalf("step %d (%v at %s): quiet %t, want %t", i, c.err, c.at, got, c.quiet)
+		}
+	}
+	// PR #91 review, F5: the same message is quiet only when the apply
+	// wrote nothing new; a held retry reports generation 0.
+	var w heldNoise
+	for i, c := range []struct {
+		r     *Report
+		quiet bool
+	}{
+		{&Report{Generation: 4, BundleVersion: 1, DirectoryVersion: 2}, false},
+		{&Report{BundleVersion: 1, DirectoryVersion: 2}, true},
+		{&Report{Generation: 5, BundleVersion: 1, DirectoryVersion: 2, KRLVersion: 7}, false},
+		{&Report{BundleVersion: 1, DirectoryVersion: 2, KRLVersion: 7}, true},
+		{&Report{Generation: 6, BundleVersion: 1, DirectoryVersion: 2, KRLVersion: 7}, false},
+		{&Report{Generation: 6, BundleVersion: 1, DirectoryVersion: 3, KRLVersion: 7}, false},
+		{&Report{Generation: 6, BundleVersion: 2, DirectoryVersion: 3, KRLVersion: 7}, false},
+		{&Report{BundleVersion: 2, DirectoryVersion: 3, KRLVersion: 7}, true},
+	} {
+		if got := w.quiet(held("budget"), c.r, t0.Add(time.Duration(i)*time.Second)); got != c.quiet {
+			t.Fatalf("report step %d (%+v): quiet %t, want %t", i, c.r, got, c.quiet)
 		}
 	}
 }

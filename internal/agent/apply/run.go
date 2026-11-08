@@ -242,7 +242,7 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 				applied = true
 				for i := 0; ; i++ {
 					r, err := Apply(ctx, rc.Config, l)
-					quiet := held.quiet(err, rc.Clock.Now())
+					quiet := held.quiet(err, r, rc.Clock.Now())
 					if rc.Out != nil && (err != nil || !r.NoOp) && !quiet {
 						rc.Out(r, err)
 					}
@@ -324,24 +324,37 @@ func heldPending(l Layout) bool {
 const heldNoiseEvery = 15 * time.Minute
 
 // heldNoise suppresses the log line and the printed report of an apply
-// held by the probe gate whose message repeats the previous held one
-// within heldNoiseEvery (03-10b, D9, T-03-384).
+// held by the probe gate that repeats the previous held one within
+// heldNoiseEvery (03-10b, D9, T-03-384): the same message and nothing new
+// written, that is the same bundle, directory and KRL versions and no
+// other generation (PR #91 review, F5: a held apply that lands a removal,
+// a generation or a KRL is always reported).
 type heldNoise struct {
-	msg string
-	at  time.Time
+	msg                   string
+	gen, bundle, dir, krl uint64
+	at                    time.Time
 }
 
-// quiet reports whether err repeats the previous held error within
-// heldNoiseEvery of its logging; any other result clears the memory.
-func (n *heldNoise) quiet(err error, now time.Time) bool {
+// quiet reports whether err, with the report r of its apply (nil when
+// there is none), repeats the previous held apply within heldNoiseEvery of
+// its logging; any other result clears the memory. A held retry commits
+// nothing and reports generation 0, which is no new generation.
+func (n *heldNoise) quiet(err error, r *Report, now time.Time) bool {
 	if err == nil || !errors.Is(err, ErrProbeHeld) {
-		n.msg, n.at = "", time.Time{}
+		*n = heldNoise{}
 		return false
 	}
-	if msg := err.Error(); msg == n.msg && now.Sub(n.at) < heldNoiseEvery {
+	m := heldNoise{msg: err.Error(), gen: n.gen, at: now}
+	if r != nil {
+		m.bundle, m.dir, m.krl = r.BundleVersion, r.DirectoryVersion, r.KRLVersion
+		if r.Generation != 0 {
+			m.gen = r.Generation
+		}
+	}
+	if m.msg == n.msg && m.gen == n.gen && m.bundle == n.bundle && m.dir == n.dir && m.krl == n.krl && now.Sub(n.at) < heldNoiseEvery {
 		return true
 	}
-	n.msg, n.at = err.Error(), now
+	*n = m
 	return false
 }
 
