@@ -40,34 +40,17 @@ func matchPattern(s, pattern string) bool {
 	}
 }
 
-// matchPatternList is OpenSSH's match_pattern_list: 1 when s matches a
-// pattern of the comma-separated list, -1 when it matches a negated one
-// (!pattern; a negated match wins), 0 when it matches none.
-func matchPatternList(s, list string) int {
-	got := 0
-	for _, p := range strings.Split(list, ",") {
-		neg := strings.HasPrefix(p, "!")
-		if neg {
-			p = p[1:]
-		}
-		if p == "" || !matchPattern(s, p) {
-			continue
-		}
-		if neg {
-			return -1
-		}
-		got = 1
-	}
-	return got
-}
-
 // Excluded applies sshd's AllowUsers, DenyUsers, AllowGroups and
 // DenyGroups (auth.c allowed_user, in its order) from the sshd -T -C dump
 // d for account, and returns why the account is or may be refused, or ""
 // when it is not. A user@host entry depends on the client's address, which
 // the agent does not know, so it "may" exclude. Groups come from
 // root/etc/passwd and root/etc/group; an account they do not list (NSS,
-// LDAP) is reported only when group rules exist. Report only (D-07): the
+// LDAP) is reported only when group rules exist. Each AllowGroups and
+// DenyGroups entry is one pattern, as sshd applies it: a comma
+// is part of the pattern and ! negates nothing (03-10c; measured with
+// sshd 10.5p1 and 9.5p1, where DenyGroups g,x does not refuse a member of
+// g and AllowGroups g,x does not admit one). Report only (D-07): the
 // agent never edits these settings.
 func Excluded(d Dump, account, root string) string {
 	why, _ := ExcludedDefinite(d, account, root)
@@ -110,7 +93,7 @@ func excludedDefinite(d Dump, account, root string) bool {
 	match := func(list []string) bool {
 		for _, e := range list {
 			for _, g := range groups {
-				if matchPatternList(g, e) == 1 {
+				if matchPattern(g, e) {
 					return true
 				}
 			}
@@ -166,7 +149,7 @@ func excludedWhy(d Dump, account, root string) string {
 	}
 	for _, e := range deny {
 		for _, g := range groups {
-			if matchPatternList(g, e) == 1 {
+			if matchPattern(g, e) {
 				return "DenyGroups " + e + " refuses its group " + g
 			}
 		}
@@ -174,7 +157,7 @@ func excludedWhy(d Dump, account, root string) string {
 	if len(allow) > 0 {
 		for _, e := range allow {
 			for _, g := range groups {
-				if matchPatternList(g, e) == 1 {
+				if matchPattern(g, e) {
 					return ""
 				}
 			}

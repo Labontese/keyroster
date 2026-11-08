@@ -438,7 +438,9 @@ func TestExcluded(t *testing.T) {
 		{"allowgroups wheel\n", "lists none of its groups"},
 		{"allowgroups wheel,!adm\n", "lists none of its groups"},
 		{"denygroups adm\n", "DenyGroups adm refuses its group adm"},
-		{"denygroups *,!adm\n", "DenyGroups *,!adm refuses its group deploy"},
+		{"denygroups *,!adm\n", ""},
+		{"denygroups adm,wheel\n", ""},
+		{"allowgroups adm,wheel\n", "lists none of its groups"},
 	} {
 		got := Excluded(ParseDump([]byte(tc.dump)), "deploy", root)
 		if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
@@ -491,7 +493,11 @@ func TestExcludedDefinite(t *testing.T) {
 		{"allowgroups wheel\n", "AllowGroups (wheel) lists none of its groups (deploy, adm)", true},
 		{"allowgroups wheel,!adm\n", "AllowGroups (wheel,!adm) lists none of its groups (deploy, adm)", true},
 		{"denygroups adm\n", "DenyGroups adm refuses its group adm", true},
-		{"denygroups *,!adm\n", "DenyGroups *,!adm refuses its group deploy", true},
+		// One pattern per entry, as sshd applies it: no comma list, no !.
+		{"denygroups *,!adm\n", "", false},
+		{"denygroups adm,wheel\n", "", false},
+		{"allowgroups adm,wheel\n", "AllowGroups (adm,wheel) lists none of its groups (deploy, adm)", true},
+		{"denygroups ad?\n", "DenyGroups ad? refuses its group adm", true},
 	} {
 		check(t, c.dump, "deploy", c.why, c.definite)
 	}
