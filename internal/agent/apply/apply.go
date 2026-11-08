@@ -977,7 +977,14 @@ func (e *engine) forward(ctx context.Context) error {
 					heldReason = reason
 					switch {
 					case collapsed && !v.Changed():
-						// A retry: current is the narrowing part already.
+						// A retry: current is the narrowing part already. The
+						// drop-in's spec is repaired as on a no-op (03-09, D1,
+						// D-R2), so an edited drop-in does not stay edited for
+						// as long as the addition is held (PR #91 review, F6);
+						// a drop-in that is right writes nothing.
+						if err := e.repairNoOp(ctx, v, g); err != nil {
+							return err
+						}
 						e.setVersions(v, cur)
 						return heldOutcome(outcome(v), heldReason)
 					case collapsed:

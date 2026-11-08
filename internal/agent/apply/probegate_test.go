@@ -637,6 +637,41 @@ func TestProbeGate(t *testing.T) {
 			}
 		}
 	})
+	t.Run("held_retry_repairs_edited_dropin", func(t *testing.T) {
+		t.Parallel()
+		// PR #91 review, F6: a held retry on an unchanged capture repairs
+		// an edited drop-in (here with RevokedKeys removed) as a no-op
+		// does (03-09 D1, D-R2), rather than leaving it edited while the
+		// addition is held.
+		h := gateHost(t, "role:a", "role:b")
+		h.publishDir(h.spec("role:a", "role:c"))
+		r, err := h.apply()
+		mustHeld(t, h, r, err, "cert_missing")
+		want := readFile(t, h.l.DropIn())
+		var kept []string
+		for _, l := range strings.SplitAfter(want, "\n") {
+			if !strings.HasPrefix(l, "RevokedKeys ") {
+				kept = append(kept, l)
+			}
+		}
+		edited := strings.Join(kept, "")
+		if edited == want {
+			t.Fatal("the drop-in has no RevokedKeys line to remove")
+		}
+		if err := os.WriteFile(h.l.DropIn(), []byte(edited), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		h.clock.advance(time.Minute)
+		r, err = h.apply()
+		mustHeld(t, h, r, err, "cert_missing")
+		if got := readFile(t, h.l.DropIn()); got != want || h.exists(h.l.State(dropinPrevFile)) {
+			t.Fatalf("the held retry left the drop-in edited:\n%s", got)
+		}
+		mustPrincipals(t, h, "role:a")
+		if r.NoOp {
+			t.Fatal("a held retry that repaired the drop-in is a no-op")
+		}
+	})
 	t.Run("renamed_committed_pair_holds_cert_missing", func(t *testing.T) {
 		t.Parallel()
 		// PR #91 review, F1: a committed pair issued for the entry's old
