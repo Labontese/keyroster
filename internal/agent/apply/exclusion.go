@@ -109,29 +109,28 @@ func excludedDefinite(d Dump, account, root string) bool {
 }
 
 // groupsFilesOnly reports whether the groups sshd resolves for an account
-// come only from root/etc/group (03-10c): the first group: line of
+// come only from root/etc/group (03-10c): every group: line of
 // root/etc/nsswitch.conf lists files and nothing else but systemd, which
-// adds no group a local account is a member of, and so does an
+// adds no group a local account is a member of, and so does every
 // initgroups: line, which glibc's group-list lookup prefers when it is
-// there. Action items ([NOTFOUND=return]) are skipped. A missing or
-// unreadable nsswitch.conf is files only, glibc's default. Any other
-// source (sss, ldap, winbind, compat) may add a group that AllowGroups
-// lists, so a non-match is then only possible. A local DenyGroups match
-// is a refusal whatever NSS adds.
+// there (a second line for a database counts too, so either reading of
+// a duplicate is covered). Action items ([NOTFOUND=return]) and comments
+// are skipped. A missing or unreadable nsswitch.conf is files only,
+// glibc's default. Any other source (sss, ldap, winbind, compat) may add
+// a group that AllowGroups lists, so a non-match is then only possible.
+// A local DenyGroups match is a refusal whatever NSS adds.
 func groupsFilesOnly(root string) bool {
 	b, err := readSmall(filepath.Join(root, "etc", "nsswitch.conf"), 1<<20)
 	if err != nil {
 		return true
 	}
-	seen := map[string]bool{}
 	for _, l := range strings.Split(string(b), "\n") {
 		l, _, _ = strings.Cut(l, "#")
 		db, services, ok := strings.Cut(l, ":")
 		db = strings.ToLower(strings.TrimSpace(db))
-		if !ok || (db != "group" && db != "initgroups") || seen[db] {
+		if !ok || (db != "group" && db != "initgroups") {
 			continue
 		}
-		seen[db] = true
 		files, action := false, false
 		for _, s := range strings.Fields(strings.ToLower(services)) {
 			switch {
