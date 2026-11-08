@@ -81,6 +81,7 @@ type e2eProbeRecord struct {
 // e2eProbeState reads <state>/probe-state.json's budget and hold.
 type e2eProbeState struct {
 	Negatives []uint64 `json:"negatives"`
+	LastPair  uint64   `json:"last_pair"`
 	Held      *struct {
 		Reason string `json:"reason"`
 	} `json:"held"`
@@ -465,7 +466,13 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 	if !t.Run("positive_refused_rolls_back", func(t *testing.T) {
 		// A mixed change: dev is removed and qa added in one directory
 		// version, and DenyUsers makes sshd refuse the probe account, so the
-		// positive is refused once the change is live.
+		// positive is refused once the change is live. The mixed change must
+		// pass the gate on its first pass, so that the failed addition takes
+		// the settle path (D13) on real sshd: published a few seconds after
+		// widening_passes_probes spent a pair, the spacing look-ahead would
+		// hold it, its narrowing would land as last-good, and the retry, a
+		// pure addition, would take 03-05's plain rollback instead (PR #91
+		// review, F3).
 		cfg, err := os.ReadFile(h.sshd.cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -475,8 +482,18 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 		}
 		sshdHUP(t, h)
 		kr("role", "add", "qa", "--max-ttl", "1h", "--yes")
+		spacing := uint64(apply.ProbePairSpacing / time.Second)
+		waitUntil(t, "the last probe pair is ProbePairSpacing old", apply.ProbePairSpacing+30*time.Second, logs, func() bool {
+			last := readProbeState(h).LastPair
+			return last != 0 && uint64(time.Now().Unix()) >= last+spacing //nolint:gosec // G115: after 1970
+		})
+		// last-good before the map grants role:dev (widening_passes_probes'
+		// generation, or a later one of the same content).
+		lgBefore := linkTarget(t, h, "last-good")
+		runFrom := len(eh.run.String())
 		done := make(chan struct{})
 		regranted := make(chan string, 1)
+		heldSeen := make(chan string, 1)
 		go func() {
 			gone := false
 			for {
@@ -494,6 +511,12 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 					default:
 					}
 				}
+				if la := probeStatus(h); la != nil && strings.HasPrefix(la.Detail, "probe_held") {
+					select {
+					case heldSeen <- la.Detail:
+					default:
+					}
+				}
 			}
 		}()
 		kr("host-group", "map", "lab", "krmanaged", "ops", "qa", "--yes")
@@ -502,6 +525,7 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 			return la != nil && la.Rollback && la.Detail == "probe_positive_refused" && la.ProbePositive == "fail" && la.RollbackSelfTest == "pass"
 		})
 		close(done)
+		runLog := eh.run.String()
 		p := currentFile(h, "principals/krmanaged")
 		if strings.Contains(p, "role:dev") || strings.Contains(p, "role:qa") {
 			t.Fatalf("current/principals/krmanaged after the failed mixed change:\n%s", p)
@@ -511,8 +535,30 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 			t.Fatalf("role:dev was granted again after its removal (current named %s)", g)
 		default:
 		}
-		if c, lg := linkTarget(t, h, "current"), linkTarget(t, h, "last-good"); c != lg {
+		// The first pass went through the gate: no apply between the map
+		// and the settle was held, so this is the gated mixed change's
+		// settle and not a retry's plain rollback.
+		select {
+		case d := <-heldSeen:
+			t.Fatalf("an apply between the map and the settle was held (%s)\n%s", d, logs())
+		default:
+		}
+		if strings.Contains(runLog[runFrom:], "probe_held") {
+			t.Fatalf("the run log shows a held apply between the map and the settle:\n%s", runLog[runFrom:])
+		}
+		c, lg := linkTarget(t, h, "current"), linkTarget(t, h, "last-good")
+		if c != lg {
 			t.Fatalf("current names %s and last-good %s", c, lg)
+		}
+		// The settle committed M, the narrowing part, as last-good; 03-05's
+		// plain rollback would have left last-good at the generation that
+		// grants role:dev.
+		lgp, err := os.ReadFile(filepath.Join(h.root, "etc", "ssh", "keyroster", "last-good", "principals", "krmanaged")) //nolint:gosec // test fixture
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lg == lgBefore || strings.Contains(string(lgp), "role:dev") || strings.Contains(string(lgp), "role:qa") {
+			t.Fatalf("last-good names %s (was %s) after the settle, granting:\n%s", lg, lgBefore, lgp)
 		}
 		waitUntil(t, "the host reports the new directory version", 20*time.Second, logs, func() bool {
 			host, current := hostDirectoryVersion(t, kr)
