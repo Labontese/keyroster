@@ -285,7 +285,9 @@ func (e *engine) probeDrift(ctx context.Context, dump Dump, g *Generation, host 
 		return nil // the account loop below reports it when an account is managed
 	}
 	account := e.probeAccount()
-	if res := e.checkProbeAccountFull(ctx, account, dump, true); res.Reason != "" {
+	res := e.checkProbeAccountFull(ctx, account, dump, true)
+	e.noteAccount(account, res)
+	if res.Reason != "" {
 		r.Probe = append(r.Probe, probeAccountFinding(account, res.Reason))
 	}
 	if set := lineSet(g.Files[PrincipalsDir+"/"+account], principalLine); len(set) > 0 && (host == "" || !set[certpkg.ReservedPrincipalPrefix+host]) {

@@ -528,7 +528,9 @@ func unixTime(s uint64) time.Time { return time.Unix(int64(min(s, math.MaxInt64>
 // would run, D7). Nothing in the gate writes a file.
 func (e *engine) probeGate(ctx context.Context, _, g *Generation, _ *state.Verified) string {
 	account := e.probeAccount()
-	if r := e.checkProbeAccountFull(ctx, account, e.dump, true); r.Reason != "" {
+	r := e.checkProbeAccountFull(ctx, account, e.dump, true)
+	e.noteAccount(account, r)
+	if r.Reason != "" {
 		return r.Reason
 	}
 	line := e.accountKeyInput(account)
@@ -898,7 +900,9 @@ func (e *engine) opportunistic(ctx context.Context, g *Generation) {
 			e.report.ProbePositive, e.report.ProbeNegative = v, v
 		}
 	}
-	if r := e.checkProbeAccountFull(ctx, account, e.dump, true); r.Reason != "" || g.Host == "" ||
+	r := e.checkProbeAccountFull(ctx, account, e.dump, true)
+	e.noteAccount(account, r)
+	if r.Reason != "" || g.Host == "" ||
 		!lineSet(g.Files[PrincipalsDir+"/"+account], principalLine)[certpkg.ReservedPrincipalPrefix+g.Host] {
 		skip(probeSkippedNotReady)
 		return

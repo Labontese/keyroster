@@ -1834,7 +1834,10 @@ that exists only in NSS or LDAP holds every addition with
 class reaches a log line, a report or `probe-state.json`.
 
 Where the shadow file cannot be read (a permission error), the agent
-reports the note `probe_shadow_unreadable` and then requires that sshd
+reports the note `probe_shadow_unreadable` (preflight lists it under its
+notes; the running applier logs it once when it first finds the file
+unreadable, and again after the file was readable or the agent
+restarted, not every round) and then requires that sshd
 refuse empty passwords for the account (`permitemptypasswords no`, the
 default). A password that root sets later on such a host goes unseen until
 the shadow file is readable again (owner answer Q3).

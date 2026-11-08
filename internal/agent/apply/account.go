@@ -14,8 +14,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
@@ -277,6 +279,28 @@ type accountResult struct {
 // noteShadowUnreadable is the note of a shadow file that did not open for
 // a permission reason: never a hold by itself (owner decision Q3).
 const noteShadowUnreadable = "probe_shadow_unreadable"
+
+// shadowNoted is, per state directory, whether this process last saw the
+// probe account's shadow file unreadable (03-10c), so that the running
+// applier logs noteShadowUnreadable when shadow becomes unreadable, and
+// again after a restart, but not on every round while it stays so.
+var shadowNoted sync.Map
+
+// noteAccount logs res's shadow note for account once per change of
+// shadowNoted (03-10c): a note, never an error; the gate, the
+// opportunistic pair and the drift check call it, preflight reports the
+// note itself. A result that stopped before the password stage (no
+// class) leaves the memory as it is.
+func (e *engine) noteAccount(account string, res accountResult) {
+	if res.Shadow == "" {
+		return
+	}
+	unreadable := slices.Contains(res.Notes, noteShadowUnreadable)
+	was, _ := shadowNoted.Swap(e.l.StateDir, unreadable)
+	if prev, _ := was.(bool); unreadable && !prev {
+		e.logf("probe: note: %s: %s could not be read, so the password check of the probe account %s is off: sshd must refuse empty passwords (permitemptypasswords no) for it, and a password set later is not seen", noteShadowUnreadable, filepath.Join(e.l.Root, "etc", "shadow"), account)
+	}
+}
 
 // probeAccountSpec is the sshd -T -C connection specification for the
 // probe account from the probe's own source address src to laddr port

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1192,6 +1193,39 @@ func probeGateAccount(t *testing.T) {
 			t.Fatalf("%s: the KRL did not land (%t) or a pair was spent (%d queries)", reason, !h.krlRevokes(h.l.Current(), 5), len(h.probeQueries())-q)
 		}
 	}
+	// 03-10c: the running applier says once that the password check is
+	// off when shadow does not open for a permission reason, not every
+	// round: two held rounds and a check log it once, a readable round
+	// clears it, and the next unreadable one logs it again.
+	t.Run("shadow_unreadable_noted_once", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a", "role:b")
+		var log bytes.Buffer
+		h.cfg.Log = &log
+		h.cfg.openShadow = openErr(syscall.EACCES)
+		h.setFor("pubkeyauthentication no\n")
+		h.publishDir(h.spec("role:a", "role:c"))
+		notes := func() int { return strings.Count(log.String(), "probe: note: "+noteShadowUnreadable+":") }
+		for i := range 2 {
+			r, err := h.apply()
+			mustHeld(t, h, r, err, sshdOverride)
+			if n := notes(); n != 1 {
+				t.Fatalf("held round %d: %d notes in %q", i+1, n, log.String())
+			}
+		}
+		if _, err := h.check(); err != nil || notes() != 1 {
+			t.Fatalf("a check while still unreadable: %v, %d notes", err, notes())
+		}
+		h.cfg.openShadow = nil
+		h.setShadow("*")
+		if _, err := h.check(); err != nil || notes() != 1 {
+			t.Fatalf("a check with shadow readable: %v, %d notes", err, notes())
+		}
+		h.cfg.openShadow = openErr(syscall.EACCES)
+		if _, err := h.check(); err != nil || notes() != 2 {
+			t.Fatalf("unreadable again: %v, %d notes in %q", err, notes(), log.String())
+		}
+	})
 	t.Run("password_set_holds_addition", func(t *testing.T) {
 		t.Parallel()
 		holds(t, passwordSet, func(h *testHost) { h.setShadow("$6$salt$abcdef") })
