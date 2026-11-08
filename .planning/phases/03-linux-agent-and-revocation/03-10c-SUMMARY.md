@@ -176,7 +176,91 @@ T1: 80b0180 (code at 85eae61; 59bd530 spells out the spec the tests expect, e18b
 
 ## Owner questions
 
+- Resolved (Task 2 executor, 2026-11-08): the orchestrator added internal/agent/apply/status_test.go and internal/agent/apply/probe_test.go to the plan's files_modified (now 40 entries) after Task 1, so the question below no longer blocks Task 4's files gate; it is kept as Task 1 recorded it.
+
 - **files_modified (blocks Task 4's files gate only).** The branch changes internal/agent/apply/status_test.go and internal/agent/apply/probe_test.go, which the plan's files_modified does not list (Deviation 10). Either the plan's files_modified gains these two entries when it is committed (then it is no longer byte-identical to the checked plan), or Task 4's files gate is run with them allowed as a recorded exception. Which?
+
+## Task 2
+
+Docker is not available on this workstation (neither in WSL nor on the Windows side), so the matrix and its mutants ran only in CI, through `workflow_dispatch` of e2e-distro.yml on the pushed branch and on throwaway branches (deleted afterwards). shellcheck is not installed locally and no workflow of the repository runs it: `sh -n` (and `dash -n`) of probe-account.sh and run-in.sh and `bash -n` of run.sh passed; shellcheck was NOT run (UNVERIFIED).
+
+RED (CI run 42493109956 at f8b71c3, the tests, the refusals_test.go edit and the run-in.sh exports committed, no probe-account.sh and no copy in run.sh): on all seven images TestDistroProbe, TestDistroProbeAccountBang and TestDistroProbeFacts failed and every other test passed (TestDistroRefusals and TestDistroAdoptPhase2 included, so withoutProbeAccount holds). The literal line per shell: dash (debian:12, debian:13, ubuntu:24.04, ubuntu:26.04) `sh: 0: cannot open /k/probe-account.sh: No such file`; bash as sh (almalinux:9, archlinux) `sh: /k/probe-account.sh: No such file or directory`; busybox (alpine) `sh: can't open '/k/probe-account.sh': No such file or directory`.
+
+First green attempt (CI run 42493591029 at 0c07596): six images passed; archlinux failed every query cell with `probe_test.go:218: /etc/ssh/ssh_host_mldsa44_ed25519_key.pub: ssh: no key found` (archlinux's OpenSSH 10.6p1 writes an ML-DSA hybrid host key that x/crypto/ssh cannot parse or negotiate). 0343fa8 skips such keys (and drops the trailing comma of the version in the FACT line).
+
+distro run: 42494372799
+
+The dispatch gate (Task 2 verify 3) passed on run 42494372799, head 0343fa8 (headSha checked against HEAD): seven jobs, each `success`, each with `--- PASS:` of TestDistroProbe, TestDistroProbeAccountBang and TestDistroProbeFacts and a `FACT probe image=` line. Verify 1 (vet and lint of the tagged package, gofmt, the script syntax) and verify 2 (detect_test.go, world_test.go and e2e-distro.yml unchanged; the tag in its six files) exit 0.
+
+Per-image time of the step "Run the distro tests in the image" (completedAt minus startedAt) against `distro base:`; the cap is +480 s on an image whose FACT shows persourcepenalties=yes, +180 s on the others:
+- e2e-distro (alpine) 332 (base 149, +183, cap +480)
+- e2e-distro (almalinux:9) 378 (base 164, +214, cap +480)
+- e2e-distro (ubuntu:26.04) 368 (base 160, +208, cap +480)
+- e2e-distro (debian:12) 227 (base 156, +71, cap +180)
+- e2e-distro (archlinux) 369 (base 155, +214, cap +480)
+- e2e-distro (debian:13) 364 (base 143, +221, cap +480)
+- e2e-distro (ubuntu:24.04) 228 (base 158, +70, cap +180)
+TestDistroProbeFacts takes about 136 s on a penalty image (two 60 s spacings) and 5 s on the others; TestDistroProbe about 53 s (32 s on alpine, one variant); TestDistroProbeAccountBang 21 s (11 s on alpine, one column).
+
+FACT lines (run 42494372799, verbatim):
+FACT probe image=alpine@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a sshd=OpenSSH_10.3p1 persourcepenalties=yes persourcenetblocksize=32:128 usepam=absent shadow_mode=0640 casignaturealgorithms=ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,webauthn-sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256 control_dropped_after=5 mechanism=exercised spacing=60s,pairs=3,dropped=none
+FACT probe image=almalinux@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16 sshd=OpenSSH_9.9p1 persourcepenalties=yes persourcenetblocksize=32:128 usepam=yes shadow_mode=0000 casignaturealgorithms=ecdsa-sha2-nistp256,sk-ecdsa-sha2-nistp256@openssh.com,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,ssh-ed25519,sk-ssh-ed25519@openssh.com,rsa-sha2-256,rsa-sha2-512 control_dropped_after=5 mechanism=exercised spacing=60s,pairs=3,dropped=none
+FACT probe image=ubuntu@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 sshd=OpenSSH_10.2p1 persourcepenalties=yes persourcenetblocksize=32:128 usepam=yes shadow_mode=0640 casignaturealgorithms=ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256 control_dropped_after=5 mechanism=exercised spacing=60s,pairs=3,dropped=none
+FACT probe image=debian@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 sshd=OpenSSH_9.2 persourcepenalties=no persourcenetblocksize=32:128 usepam=yes shadow_mode=0640 casignaturealgorithms=ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256 control_dropped_after=none mechanism=not_exercised spacing=not_exercised
+FACT probe image=archlinux@sha256:52dfbd5afb23a220d5ee92dafcb4c788d96c026ed04179890c23adef4c897fa0 sshd=OpenSSH_10.6p1 persourcepenalties=yes persourcenetblocksize=32:128 usepam=yes shadow_mode=0600 casignaturealgorithms=ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,webauthn-sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256 control_dropped_after=5 mechanism=exercised spacing=60s,pairs=3,dropped=none
+FACT probe image=debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 sshd=OpenSSH_10.0p2 persourcepenalties=yes persourcenetblocksize=32:128 usepam=yes shadow_mode=0640 casignaturealgorithms=ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256 control_dropped_after=5 mechanism=exercised spacing=60s,pairs=3,dropped=none
+FACT probe image=ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac sshd=OpenSSH_9.6p1 persourcepenalties=no persourcenetblocksize=32:128 usepam=yes shadow_mode=0640 casignaturealgorithms=ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256 control_dropped_after=none mechanism=not_exercised spacing=not_exercised
+
+The `!` cells (run 42494372799, verbatim):
+FACT probe_bang image=alpine@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a usepam=no field=star outcome=accepted
+FACT probe_bang image=alpine@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a usepam=no field=bang outcome=refused
+FACT probe_bang image=almalinux@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16 usepam=yes field=star outcome=accepted
+FACT probe_bang image=almalinux@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16 usepam=yes field=bang outcome=accepted
+FACT probe_bang image=almalinux@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16 usepam=no field=star outcome=accepted
+FACT probe_bang image=almalinux@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16 usepam=no field=bang outcome=refused
+FACT probe_bang image=ubuntu@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 usepam=yes field=star outcome=accepted
+FACT probe_bang image=ubuntu@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 usepam=yes field=bang outcome=accepted
+FACT probe_bang image=ubuntu@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 usepam=no field=star outcome=accepted
+FACT probe_bang image=ubuntu@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 usepam=no field=bang outcome=refused
+FACT probe_bang image=debian@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 usepam=yes field=star outcome=accepted
+FACT probe_bang image=debian@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 usepam=yes field=bang outcome=accepted
+FACT probe_bang image=debian@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 usepam=no field=star outcome=accepted
+FACT probe_bang image=debian@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 usepam=no field=bang outcome=refused
+FACT probe_bang image=archlinux@sha256:52dfbd5afb23a220d5ee92dafcb4c788d96c026ed04179890c23adef4c897fa0 usepam=yes field=star outcome=accepted
+FACT probe_bang image=archlinux@sha256:52dfbd5afb23a220d5ee92dafcb4c788d96c026ed04179890c23adef4c897fa0 usepam=yes field=bang outcome=accepted
+FACT probe_bang image=archlinux@sha256:52dfbd5afb23a220d5ee92dafcb4c788d96c026ed04179890c23adef4c897fa0 usepam=no field=star outcome=accepted
+FACT probe_bang image=archlinux@sha256:52dfbd5afb23a220d5ee92dafcb4c788d96c026ed04179890c23adef4c897fa0 usepam=no field=bang outcome=refused
+FACT probe_bang image=debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 usepam=yes field=star outcome=accepted
+FACT probe_bang image=debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 usepam=yes field=bang outcome=accepted
+FACT probe_bang image=debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 usepam=no field=star outcome=accepted
+FACT probe_bang image=debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 usepam=no field=bang outcome=refused
+FACT probe_bang image=ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac usepam=yes field=star outcome=accepted
+FACT probe_bang image=ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac usepam=yes field=bang outcome=accepted
+FACT probe_bang image=ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac usepam=no field=star outcome=accepted
+FACT probe_bang image=ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac usepam=no field=bang outcome=refused
+
+Matrix facts:
+- Five images have PerSourcePenalties, not four: almalinux:9 ships OpenSSH 9.9p1. On each the control from 127.0.0.3 was dropped after 5 refused queries (mechanism exercised), and the three pairs at the production spacing were never dropped, with the listener handshake from 127.0.0.1 answered each time.
+- `usepam`: sshd -T prints `usepam yes` on the six PAM images and no usepam line at all on alpine (a build without PAM): the fact that Reconcile row 7 left UNVERIFIED. On alpine `TestDistroProbe/usepam_no` was skipped as a duplicate (the packaged variant is the no-PAM case) and TestDistroProbeAccountBang ran the no-PAM column only.
+- D4's premise holds on all seven: a `!` field under UsePAM no is refused at the unsigned query; under UsePAM yes it is accepted on all six PAM images (a fact only). `*` is accepted in every cell.
+- The shadow file's mode: 0640 on debian, ubuntu and alpine, 0600 on archlinux, 0000 on almalinux:9 (root reads it in each; a capability-less root on mode 0000 stays UNVERIFIED, 03-16).
+- The positive probe certificate's login runs no command on every image: with the nologin shell the output is `Could not chdir to home directory /nonexistent: No such file or directory` followed by nologin's message (`This account is currently not available.`, or `This account is not available` on alpine) or by nothing, exit status 1; with /bin/sh the force-command /bin/false gives exit status 1 and no `uid=`.
+
+Task 2 mutants (each on its own throwaway branch from 0343fa8, with run-in.sh narrowed to the named test or subtest by `-test.run`, which is harness, not product; each branch pushed, dispatched, its target job read, then deleted on origin and locally; the worktree removed; `git diff --quiet HEAD -- test/distro` on this branch afterwards):
+mutant killed: the alpine arm leaving the field `!` (TestDistroProbe/usepam_packaged/shadow_line, alpine, run 42494507952 at bf801a1: `probe_test.go:155: the shadow line has 9 fields and the field is "locked", want probe1:*: and the aging fields`)
+mutant killed: the KRL not written (TestDistroProbe/usepam_packaged/positive_accepted_negative_refused, debian:12, run 42494511072 at 735a8c9: `probe_test.go:222: the negative, serial 1002 in the KRL, from 127.0.0.2: accepted (<nil>), want refused`)
+mutant killed: the minted certificate without its force-command (TestDistroProbe/usepam_packaged/positive_has_no_session/sh_shell, debian:12, run 42494513455 at 22706e1: `probe_test.go:235: the requested command ran: exit status 0, output "Could not chdir to home directory /nonexistent: No such file or directory uid=999(probe1) gid=999(probe1) groups=999(probe1)"`, newlines shown as spaces)
+mutant killed: ProbePairSpacing replaced by 2 s in the spacing loop of TestDistroProbeFacts (TestDistroProbeFacts/pairs_at_production_spacing_never_dropped, debian:13, run 42494516329 at 1529b06: `probe_test.go:395: at the production spacing: [pair 3 positive: inconclusive (ssh: handshake failed: read tcp 127.0.0.2:48437->127.0.0.1:22: read: connection reset by peer) pair 3 negative: inconclusive (...)]`; the other penalty images failed the same way, debian:12 and ubuntu:24.04 passed, having no PerSourcePenalties)
+mutant killed: the `!` cell asserted accepted instead of refused (TestDistroProbeAccountBang/usepam_no/bang, debian:12, run 42494518893 at de49a9e: `--- FAIL: TestDistroProbeAccountBang/usepam_no/bang`, its message `probe_test.go:323: the field ! under UsePAM no: refused (<nil>), want refused: ...` being the unchanged text beside the mutated condition)
+
+T2: 0343fa8 (f8b71c3 the tests, 0c07596 the script and run.sh, 0343fa8 the host-key fix)
+
+### Deviations (Task 2)
+
+1. **The matrix's account name is `probe1`**, passed in KEYROSTER_PROBE_NAME, so that the script's parameter and `--probe-account` are both exercised; the systemd smoke (Task 3) uses the default `keyroster-probe`.
+2. **probeHost does each subtest's setup itself** (newHost, enrolment, the script, a probes-on first install), so that each subtest runs alone, as the mutants did; the account databases (/etc/passwd, /etc/shadow, /etc/group, /etc/gshadow) are restored byte for byte at each test's cleanup, since newHost restores only /etc/ssh.
+3. **hostKeys skips host keys that x/crypto/ssh cannot parse** (archlinux's ML-DSA hybrid key; first green attempt above).
+4. **The FACT line carries `mechanism=` and `spacing=`** beside the frozen fields, and `control_dropped_after` counts the refused queries before the first answer that was not a refusal.
 
 ## Resume point
 
