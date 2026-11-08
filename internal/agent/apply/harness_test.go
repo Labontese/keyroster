@@ -1028,17 +1028,12 @@ func (h *testHost) writeRootFile(name string, b []byte, mode os.FileMode) {
 // probeSerial numbers the probe certificates the fixture signs.
 var probeSerial atomic.Uint64
 
-// signProbe signs a probe certificate for host web1 with the fixture's
-// machine CA, as the signer does: certprofile.ProbeProfile, the kr3 key ID
-// of the probe subject, the probe principal and options, backdated five
-// minutes by cert.Build, valid for lifetime from the fake clock's now.
-func (h *testHost) signProbe(lifetime time.Duration, ca ssh.Signer) *ssh.Certificate {
-	h.t.Helper()
-	return h.signProbeFor("web1", lifetime, ca)
-}
-
-// signProbeFor is signProbe for the host named host (a name the directory
-// entry had before a rename, PR #91 review F1).
+// signProbeFor signs a probe certificate for the host named host (web1,
+// or a name the entry had before a rename: PR #91 review F1) with the
+// fixture's machine CA, as the signer does: certprofile.ProbeProfile, the
+// kr3 key ID of the probe subject, the probe principal and options,
+// backdated five minutes by cert.Build, valid for lifetime from the fake
+// clock's now.
 func (h *testHost) signProbeFor(host string, lifetime time.Duration, ca ssh.Signer) *ssh.Certificate {
 	h.t.Helper()
 	prof, err := certprofile.ProbeProfile(h.f.policy)
