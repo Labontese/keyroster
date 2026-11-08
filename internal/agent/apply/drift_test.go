@@ -213,6 +213,37 @@ func TestDriftProbeAccount(t *testing.T) {
 			t.Fatalf("the probe account is in Excluded too: %+v", r.Excluded)
 		}
 	})
+	// 03-10c: an exclusion of the probe account that is possible but not
+	// definite holds nothing and is no drift, but check still shows it.
+	excluded := func(r *DriftReport, part string) bool {
+		return slices.ContainsFunc(r.Excluded, func(f Finding) bool {
+			return f.Account == probeAcct && f.Code == CodeAccountExcluded && strings.Contains(f.Message, part)
+		})
+	}
+	t.Run("possible_exclusion_stays_visible", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a")
+		h.setFor("denyusers " + probeAcct + "@127.0.0.2\n")
+		r, err := h.check()
+		if err != nil || r.Drift() || probes(r, accountExcluded) != 0 || !excluded(r, "from matching client hosts") {
+			t.Fatalf("a user@host DenyUsers entry for the probe account: %+v, %v", r, err)
+		}
+	})
+	t.Run("nss_allowgroups_reported_not_held", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a")
+		h.writeRootFile("etc/group", []byte("wheel:x:10:root\nkeyroster-probe:x:990:\n"), 0o644)
+		h.writeRootFile("etc/nsswitch.conf", []byte("group: files sss\n"), 0o644)
+		h.setFor("allowgroups wheel\n")
+		r, err := h.check()
+		if err != nil || r.Drift() || probes(r, accountExcluded) != 0 || !excluded(r, "so sshd may still admit it") {
+			t.Fatalf("an AllowGroups list NSS may satisfy: %+v, %v", r, err)
+		}
+		h.writeRootFile("etc/nsswitch.conf", []byte("group: files\n"), 0o644)
+		if r, err = h.check(); err != nil || r.Drift() || probes(r, accountExcluded) != 1 || excluded(r, "") {
+			t.Fatalf("an AllowGroups list with files only: %+v, %v", r, err)
+		}
+	})
 	t.Run("probe_trust_override_still_drifts", func(t *testing.T) {
 		t.Parallel()
 		h := gateHost(t, "role:a")

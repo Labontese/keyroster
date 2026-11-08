@@ -387,6 +387,29 @@ func TestProbeAccountFull(t *testing.T) {
 		h.setFor("allowgroups wheel\nallowgroups keyroster-probe\n")
 		mustReason(t, fullCheck(h, false), "")
 	})
+	// 03-10c: an AllowGroups non-match holds only while nsswitch.conf takes
+	// groups from files alone; with another source sshd may admit the
+	// account, so the positive probe decides and the check holds nothing.
+	t.Run("allowgroups_nss_sources", func(t *testing.T) {
+		t.Parallel()
+		h, _ := accountHost(t)
+		h.writeRootFile("etc/group", []byte("wheel:x:10:root\nkeyroster-probe:x:990:\n"), 0o644)
+		h.setFor("allowgroups wheel\n")
+		mustReason(t, fullCheck(h, false), accountExcluded) // no nsswitch.conf
+		for nss, want := range map[string]string{
+			"group: files\n":         accountExcluded,
+			"group: files systemd\n": accountExcluded,
+			"group: files sss\n":     "",
+			"group: files ldap\n":    "",
+		} {
+			h.writeRootFile("etc/nsswitch.conf", []byte(nss), 0o644)
+			if got := fullCheck(h, false); got.Reason != want {
+				t.Fatalf("%q: reason %q, want %q", nss, got.Reason, want)
+			}
+		}
+		h.setFor("denygroups keyroster-probe\n")
+		mustReason(t, fullCheck(h, false), accountExcluded) // a local deny is definite with sss too
+	})
 	t.Run("excluded_user_at_host_does_not_hold", func(t *testing.T) {
 		t.Parallel()
 		h, _ := accountHost(t)

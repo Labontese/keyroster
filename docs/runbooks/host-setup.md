@@ -1747,9 +1747,11 @@ with the account of the debian block: a revocation lands, then a role
 addition passes both probes), `TestProbeAccountFull`, `TestProbeGate` and
 `TestPreflightProbeAccount` (the agent's check on a fake sshd) and
 `TestProbeSelfTestEndToEnd` (the hold reasons one after another on a real
-sshd). UNVERIFIED: an account that exists only in NSS or LDAP, a
-capability-less root on a shadow file of mode 0000, every service manager
-other than systemd on Ubuntu 24.04, and every host that is not a CI image.
+sshd). UNVERIFIED: an account that exists only in NSS or LDAP, an
+AllowGroups list that a group from SSSD or LDAP satisfies on a real host
+(unit-tested only), a capability-less root on a shadow file of mode
+0000, every service manager other than systemd on Ubuntu 24.04, and every
+host that is not a CI image.
 
 **Why it exists.** Before an addition of access goes live, the agent proves
 with the unsigned publickey query that its sshd accepts a certificate of
@@ -1840,7 +1842,18 @@ the shadow file is readable again (owner answer Q3).
 AllowUsers, DenyUsers, AllowGroups and DenyGroups hold an addition with
 `account_excluded` only when they certainly exclude the account. An entry
 with a host part (`user@host`) is left to the probe: the positive probe
-then decides, and a refusal is rolled back.
+then decides, and a refusal is rolled back. Each AllowGroups or DenyGroups
+entry is one pattern, as sshd reads it: `DenyGroups a,b` names one group
+called `a,b`, and `!` negates nothing. A local DenyGroups match is certain.
+An AllowGroups list that names none of the account's groups in
+`<root>/etc/group` is certain only when the `group:` line of
+`<root>/etc/nsswitch.conf` (and an `initgroups:` line, if there is one)
+lists `files` alone, `systemd` beside it at most, or when the file is
+missing. With another source (`sss`, `ldap`, `compat`) sshd may still
+admit the account through a group from NSS, so nothing is held and the
+positive probe decides. `keyroster-agent check` lists every exclusion of
+the probe account that is possible but not certain under its exclusions,
+report only (no drift, exit code unchanged).
 
 **The hold reasons.** The heartbeat and `keyroster host status` show
 `probe_held:<reason>`; an addition waits until the cause is fixed, and the

@@ -257,9 +257,13 @@ func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 		if got := d.One(principalsCommand); !isDefault(got) {
 			r.Settings = append(r.Settings, SettingDrift{Keyword: principalsCommand, Account: a, Want: "none", Got: got})
 		}
-		// The probe account's exclusion is in r.Probe (03-10c); its trust
-		// settings stay counted drift above.
-		if why := Excluded(d, a, l.Root); why != "" && (!e.probesOn() || a != e.probeAccount()) {
+		// A definite exclusion of the probe account is in r.Probe already
+		// (03-10c); any other, such as a user@host entry or an AllowGroups
+		// list that NSS may still satisfy, stays here, report only. Its
+		// trust settings stay counted drift above.
+		if why := Excluded(d, a, l.Root); why != "" && !slices.ContainsFunc(r.Probe, func(f Finding) bool {
+			return f.Account == a && strings.HasPrefix(f.Message, accountExcluded+":")
+		}) {
 			r.Excluded = append(r.Excluded, Finding{Code: CodeAccountExcluded, Account: a, Message: "account " + a + ": " + why})
 		}
 	}

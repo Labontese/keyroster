@@ -509,6 +509,45 @@ func TestExcludedDefinite(t *testing.T) {
 		check(t, "denyusers deploy@remote.example\nallowgroups wheel\n", "deploy", mayDeny, true)
 		check(t, "allowusers deploy@remote.example\ndenygroups adm\n", "deploy", mayAllow, true)
 	})
+	// 03-10c: an AllowGroups non-match is definite only while sshd's group
+	// lookups see root/etc/group alone; a DenyGroups match always is.
+	t.Run("nss_group_sources", func(t *testing.T) {
+		const none = "AllowGroups (wheel) lists none of its groups (deploy, adm)"
+		maybe := none + " in " + filepath.Join(root, "etc", "group") + "; " + filepath.Join(root, "etc", "nsswitch.conf") + " takes groups from more than files, so sshd may still admit it"
+		for _, c := range []struct {
+			name, nss string
+			definite  bool
+		}{
+			{"files", "passwd: files\ngroup: files\n", true},
+			{"files_systemd", "group:          files systemd\n", true},
+			{"files_action_systemd", "group: files [SUCCESS=merge] systemd\n", true},
+			{"files_spaced_action", "group: files [ NOTFOUND=return ] systemd\n", true},
+			{"comment_ignored", "# group: files sss\ngroup: files\n", true},
+			{"files_sss", "group: files sss\n", false},
+			{"sss_first", "group: sss files\n", false},
+			{"compat", "group: compat\n", false},
+			{"systemd_only", "group: systemd\n", false},
+			{"initgroups_sss", "group: files\ninitgroups: files sss\n", false},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				if err := os.WriteFile(filepath.Join(root, "etc", "nsswitch.conf"), []byte(c.nss), 0o644); err != nil { //nolint:gosec // test fixture
+					t.Fatal(err)
+				}
+				why := maybe
+				if c.definite {
+					why = none
+				}
+				check(t, "allowgroups wheel\n", "deploy", why, c.definite)
+				check(t, "denygroups adm\n", "deploy", "DenyGroups adm refuses its group adm", true)
+			})
+		}
+		if err := os.Remove(filepath.Join(root, "etc", "nsswitch.conf")); err != nil {
+			t.Fatal(err)
+		}
+		t.Run("missing_is_files", func(t *testing.T) {
+			check(t, "allowgroups wheel\n", "deploy", none, true)
+		})
+	})
 }
 
 // probeFindings is r's findings of code probe_account.

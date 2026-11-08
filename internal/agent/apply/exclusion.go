@@ -62,9 +62,11 @@ func Excluded(d Dump, account, root string) string {
 // independently of the text, so a definite rule after a user@host entry
 // is still seen: a host-less DenyUsers entry that matches, an AllowUsers
 // list that matches the account in no entry, a DenyGroups entry that
-// matches one of its groups, or an AllowGroups list that matches none.
-// A user@host entry, and group rules for an account whose groups are
-// unknown here, are never definite: the positive probe decides those.
+// matches one of its groups, or an AllowGroups list that matches none
+// while sshd's group lookups see only root/etc/group (groupsFilesOnly).
+// A user@host entry, group rules for an account whose groups are unknown
+// here, and an AllowGroups list that matches none while NSS may add a
+// group are never definite: the positive probe decides those.
 func ExcludedDefinite(d Dump, account, root string) (why string, definite bool) {
 	return excludedWhy(d, account, root), excludedDefinite(d, account, root)
 }
@@ -103,7 +105,51 @@ func excludedDefinite(d Dump, account, root string) bool {
 	if match(deny) {
 		return true
 	}
-	return len(allow) > 0 && !match(allow)
+	return len(allow) > 0 && !match(allow) && groupsFilesOnly(root)
+}
+
+// groupsFilesOnly reports whether the groups sshd resolves for an account
+// come only from root/etc/group (03-10c): the first group: line of
+// root/etc/nsswitch.conf lists files and nothing else but systemd, which
+// adds no group a local account is a member of, and so does an
+// initgroups: line, which glibc's group-list lookup prefers when it is
+// there. Action items ([NOTFOUND=return]) are skipped. A missing or
+// unreadable nsswitch.conf is files only, glibc's default. Any other
+// source (sss, ldap, winbind, compat) may add a group that AllowGroups
+// lists, so a non-match is then only possible. A local DenyGroups match
+// is a refusal whatever NSS adds.
+func groupsFilesOnly(root string) bool {
+	b, err := readSmall(filepath.Join(root, "etc", "nsswitch.conf"), 1<<20)
+	if err != nil {
+		return true
+	}
+	seen := map[string]bool{}
+	for _, l := range strings.Split(string(b), "\n") {
+		l, _, _ = strings.Cut(l, "#")
+		db, services, ok := strings.Cut(l, ":")
+		db = strings.ToLower(strings.TrimSpace(db))
+		if !ok || (db != "group" && db != "initgroups") || seen[db] {
+			continue
+		}
+		seen[db] = true
+		files, action := false, false
+		for _, s := range strings.Fields(strings.ToLower(services)) {
+			switch {
+			case action:
+				action = !strings.HasSuffix(s, "]")
+			case strings.HasPrefix(s, "["):
+				action = !strings.HasSuffix(s, "]")
+			case s == "files":
+				files = true
+			case s != "systemd":
+				return false
+			}
+		}
+		if !files {
+			return false
+		}
+	}
+	return true
 }
 
 // excludedWhy is Excluded's text: why account is or may be refused, or "".
@@ -162,7 +208,11 @@ func excludedWhy(d Dump, account, root string) string {
 				}
 			}
 		}
-		return "AllowGroups (" + strings.Join(allow, " ") + ") lists none of its groups (" + strings.Join(groups, ", ") + ")"
+		why := "AllowGroups (" + strings.Join(allow, " ") + ") lists none of its groups (" + strings.Join(groups, ", ") + ")"
+		if !groupsFilesOnly(root) {
+			why += " in " + filepath.Join(root, "etc", "group") + "; " + filepath.Join(root, "etc", "nsswitch.conf") + " takes groups from more than files, so sshd may still admit it"
+		}
+		return why
 	}
 	return ""
 }
