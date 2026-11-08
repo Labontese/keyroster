@@ -104,6 +104,17 @@ func (c *Client) AgentHostCert(ctx context.Context, req *AgentHostCertRequest) (
 	return &a, nil
 }
 
+// AgentProbeCert POSTs a probe certificate request with the client's
+// certificate and returns the answer (03-10b). A refusal is an
+// *HTTPError, whose Detail is the server's error text.
+func (c *Client) AgentProbeCert(ctx context.Context, req *AgentProbeCertRequest) (*AgentProbeCertAnswer, error) {
+	var a AgentProbeCertAnswer
+	if err := c.PostJSON(ctx, AgentProbeCertPath, req, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
 // Detail is the server's error text of e ("" for none): on the agent
 // routes a refusal detail, such as a signer refusal relayed by
 // AgentHostCertPath.

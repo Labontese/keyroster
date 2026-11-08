@@ -61,6 +61,7 @@ type applyArgs struct {
 	once, dryRun, recover bool
 	spool, stateDir       string
 	svc                   serviceFlags
+	probe                 probeFlags
 }
 
 // parseApply parses apply's flags and checks its paths. It detects no
@@ -75,8 +76,12 @@ func parseApply(args []string, stderr io.Writer) (applyArgs, error) {
 	svc := addServiceFlags(fset, true)
 	dryRun := fset.Bool("dry-run", false, "verify and render, print the difference, install nothing")
 	recoverFlag := fset.Bool("recover-to-last-good", false, "leave a layout the agent did not make, back to last-good")
+	probe := addProbeFlags(fset)
 	if err := fset.Parse(args); err != nil || fset.NArg() != 0 {
 		return applyArgs{}, errUsage
+	}
+	if err := probe.check(stderr); err != nil {
+		return applyArgs{}, err
 	}
 	if !*once {
 		_, _ = fmt.Fprintln(stderr, "apply: --once is required (the agent has no daemon mode in this version)")
@@ -94,7 +99,7 @@ func parseApply(args []string, stderr io.Writer) (applyArgs, error) {
 	if *spoolDir != "" {
 		spool = filepath.Clean(*spoolDir)
 	}
-	return applyArgs{once: *once, dryRun: *dryRun, recover: *recoverFlag, spool: spool, stateDir: l.StateDir, svc: svc}, nil
+	return applyArgs{once: *once, dryRun: *dryRun, recover: *recoverFlag, spool: spool, stateDir: l.StateDir, svc: svc, probe: probe}, nil
 }
 
 // runApply is keyroster-agent apply --once.
@@ -121,6 +126,7 @@ func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		// unit's run loop (03-07) never sets it.
 		AllowAdoption: true,
 	}
+	a.probe.apply(&cfg)
 	l := apply.Layout{Root: filepath.Clean(*a.svc.root), StateDir: a.stateDir}
 	report, err := apply.Apply(ctx, cfg, l)
 	// The host-certificate step after the apply (03-09), not on --dry-run;

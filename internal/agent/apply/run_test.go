@@ -15,6 +15,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
+	probecert "github.com/Labontese/keyroster/internal/agent/probe"
 )
 
 // TestRunCatchUp (PR #71 review F9): with more directory versions queued
@@ -357,4 +358,78 @@ func TestRunHostCertsWhenDue(t *testing.T) {
 		t.Fatalf("after the due time: %d calls, want %d", m, n+2)
 	}
 	idle(t, "after the due time", n+2)
+}
+
+// TestRunProbeTrigger (03-10b): the probe answers are no spool documents
+// and no apply trigger; ProbeCerts runs once at start, once when the
+// probe answers' digest changes, and when its due time passes.
+func TestRunProbeTrigger(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "probecert-positive.answer"), []byte("{}"))
+	if names, err := spoolDocuments(dir); err != nil || names != "" {
+		t.Fatalf("spool documents %q, %v: a probe answer is no document", names, err)
+	}
+	h := newProbeHost(t)
+	h.installed("role:ops")
+	var calls atomic.Int32
+	iter := make(chan int32)
+	step := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, RunConfig{Config: h.cfg, Interval: time.Millisecond, Retry: time.Hour, CheckEvery: 24 * time.Hour,
+			ProbeCerts: func() { calls.Add(1) },
+			Iteration: func() {
+				select {
+				case iter <- calls.Load():
+				case <-ctx.Done():
+					return
+				}
+				select {
+				case <-step:
+				case <-ctx.Done():
+				}
+			}}, h.l)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	next := func() int32 {
+		t.Helper()
+		select {
+		case n := <-iter:
+			return n
+		case <-time.After(30 * time.Second):
+			t.Fatal("no loop iteration within 30 s")
+			return 0
+		}
+	}
+	idle := func(what string, want int32) {
+		t.Helper()
+		for i := range 5 {
+			step <- struct{}{}
+			if n := next(); n != want {
+				t.Fatalf("%s: iteration %d: %d ProbeCerts calls, want %d", what, i, n, want)
+			}
+		}
+	}
+	if n := next(); n != 1 {
+		t.Fatalf("the first iteration: %d calls, want 1", n)
+	}
+	idle("after start", 1)
+	out := h.outbox()
+	c := h.issueFor(out[probecert.Positive], nil)
+	h.writeProbeAnswer(probecert.Positive, hostcert.Answer{RequestID: hexOf(out[probecert.Positive].RequestID[:]), Certificate: c.Marshal()})
+	step <- struct{}{}
+	if n := next(); n != 2 {
+		t.Fatalf("a new probe answer: %d calls, want 2", n)
+	}
+	idle("after the answer", 2)
+	// The negative's request is abandoned after hostcert.RequestTTL: due.
+	h.clock.advance((hostcert.RequestTTL + 1) * time.Second)
+	step <- struct{}{}
+	if n := next(); n != 3 {
+		t.Fatalf("past the due time: %d calls, want 3", n)
+	}
 }

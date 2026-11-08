@@ -71,6 +71,9 @@ type fixture struct {
 	// krlHostSerials are host-CA serials every later KRL also revokes
 	// (03-09).
 	krlHostSerials []uint64
+	// krlMachSerials are machine-CA serials every later KRL also revokes:
+	// negative probe certificates (03-10b).
+	krlMachSerials []uint64
 }
 
 func newFixture(t testing.TB) *fixture {
@@ -247,6 +250,9 @@ func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id strin
 	}
 	if len(f.krlHostSerials) > 0 {
 		set.Certs = append(set.Certs, krl.CertSection{CAKey: f.host.PublicKey(), Serials: f.krlHostSerials})
+	}
+	if len(f.krlMachSerials) > 0 {
+		set.Certs = append(set.Certs, krl.CertSection{CAKey: f.mach.PublicKey(), Serials: f.krlMachSerials})
 	}
 	b, err := krl.Encode(set, header, time.Unix(int64(f.krlVersion), 0)) //nolint:gosec // G115: a test version
 	if err != nil {
@@ -826,6 +832,10 @@ func newTestHostIn(t *testing.T, f *fixture, base string) *testHost {
 	}
 	h.cfg = Config{Spool: h.spool, SSHD: filepath.Join(bin, "sshd"), SSHDConfig: sshdConfig, SSHKeygen: filepath.Join(bin, "ssh-keygen"),
 		Reload: "openrc", SelfTestTimeout: 2 * time.Second, Clock: h.clock, Exec: h.run}
+	// 03-10b: the probe self-test is off for every existing apply test, so
+	// no generation gains a probe file and no widening is gated; the probe
+	// tests switch it on again.
+	h.cfg.probeOff = true
 	h.state = f.genesis()
 	return h
 }

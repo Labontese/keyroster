@@ -33,6 +33,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	"github.com/Labontese/keyroster/internal/agent/paths"
+	probecert "github.com/Labontese/keyroster/internal/agent/probe"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -137,6 +138,21 @@ type Config struct {
 	// Fault is a test hook called before every durable step; an error
 	// from it stops the run there, as a crash would.
 	Fault func(point string) error
+	// ProbeAccount is the probe account of the probe self-test (03-10b,
+	// D-06); empty means cert.ReservedAccountName.
+	ProbeAccount string
+
+	// probeOff switches the probe self-test off. Only the unit-test
+	// harness and DisableProbes, which exists only in the e2e test build,
+	// set it, so the zero value of every default build fails closed
+	// (T-03-243). probeQuery is the seam of every probe query (nil:
+	// ProbeQuery), probeRand the random source of probe requests (nil:
+	// crypto/rand) and probeKeygen their key generator (nil:
+	// ed25519.GenerateKey).
+	probeOff    bool
+	probeQuery  func(ctx context.Context, t ProbeTarget, c *ssh.Certificate, deadline time.Time) (ProbeOutcome, error)
+	probeRand   io.Reader
+	probeKeygen probecert.KeyGen
 }
 
 // Report is what one run did, printed as JSON and kept in status.json.
@@ -350,6 +366,9 @@ func (e *engine) apply(ctx context.Context) error {
 		if !filepath.IsAbs(p) {
 			return fmt.Errorf("%w: %q is not an absolute path", ErrConfig, p)
 		}
+	}
+	if err := checkProbeAccountName(e.cfg.ProbeAccount); err != nil {
+		return err
 	}
 	if err := CheckReload(e.cfg.Reload); err != nil {
 		return err
@@ -1068,6 +1087,11 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 				}
 			}
 		}
+		// 03-10b: an active host's render gains the probe account's file
+		// (never a trust-only render).
+		if v.DirectoryUnauthorized == nil {
+			e.addProbeFile(g)
+		}
 		return g, nil
 	}
 	var he *HostError
@@ -1140,7 +1164,7 @@ func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*G
 		return nil, err
 	}
 	e.keepKRL(g, cur, curLink)
-	if err := checkCandidate(g, cur, curLink); err != nil {
+	if err := checkCandidate(g, cur, curLink, e.fixedPrincipals()); err != nil {
 		return nil, err
 	}
 	return g, nil

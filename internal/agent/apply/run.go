@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
+	probecert "github.com/Labontese/keyroster/internal/agent/probe"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 )
 
@@ -49,7 +50,9 @@ type RunConfig struct {
 	// Iteration at the end of every loop iteration (tests count them,
 	// 03-09).
 	HostCerts func()
-	Iteration func()
+	// ProbeCerts, when set, is called before every ProbeCerts run (03-10b).
+	ProbeCerts func()
+	Iteration  func()
 }
 
 // Run is the applier's loop (03-07), until ctx ends. Each round:
@@ -83,6 +86,11 @@ type RunConfig struct {
 //     the check ran, or the earliest time HostCerts returned has passed;
 //     and once at start. Its error is logged as a host-certificate error,
 //     never as an apply error.
+//
+//  6. the probe-certificate step (ProbeCerts, 03-10b) runs after it under
+//     the same rule with its own trigger: the spool's probe answers (the
+//     probecert- prefix, no spool document) and its own due time. Its error
+//     is logged as a probe-certificate error, never as an apply error.
 //
 // Before approval the spool holds no document, so a round reads only its
 // listing and writes nothing but the status at start. Errors are logged
@@ -124,6 +132,10 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		hostDue     time.Time
 		hostAnswers string
 		hostStarted bool
+		// The probe certificate step's trigger (03-10b).
+		probeDue     time.Time
+		probeAnswers string
+		probeStarted bool
 	)
 	status := func(u StatusUpdate) {
 		s, err := WriteStatus(ctx, rc.Config, l, u)
@@ -156,6 +168,20 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			logf("ERROR host certificates: %v", err)
 			// Try again after the shortest back-off.
 			hostDue = rc.Clock.Now().Add(time.Minute)
+		}
+	}
+	probeCerts := func() {
+		if rc.ProbeCerts != nil {
+			rc.ProbeCerts()
+		}
+		r, err := ProbeCerts(ctx, rc.Config, l)
+		probeDue = time.Time{}
+		if r != nil {
+			probeDue = r.Due
+		}
+		if err != nil {
+			logf("ERROR probe certificates: %v", err)
+			probeDue = rc.Clock.Now().Add(time.Minute)
 		}
 	}
 	check := func() {
@@ -242,6 +268,11 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 				hostStarted, hostAnswers = true, answers
 				hostCerts()
 			}
+			pAnswers := spoolAnswers(rc.Spool, probecert.SpoolPrefix)
+			if !probeStarted || applied || checked || pAnswers != probeAnswers || (!probeDue.IsZero() && !rc.Clock.Now().Before(probeDue)) {
+				probeStarted, probeAnswers = true, pAnswers
+				probeCerts()
+			}
 		}
 		if rc.Iteration != nil {
 			rc.Iteration()
@@ -294,7 +325,7 @@ func spoolDocuments(dir string) (string, error) {
 		return "", err
 	}
 	names = slices.DeleteFunc(names, func(n string) bool {
-		return strings.HasPrefix(n, ".") || n == EnrollRequestFile || n == IdentityFile || strings.HasPrefix(n, hostCertPrefix)
+		return strings.HasPrefix(n, ".") || n == EnrollRequestFile || n == IdentityFile || strings.HasPrefix(n, hostCertPrefix) || strings.HasPrefix(n, probecert.SpoolPrefix)
 	})
 	return strings.Join(names, "\n"), nil
 }
@@ -306,14 +337,18 @@ const hostCertPrefix = "hostcert-"
 // hostCertAnswers is the digest of the spool's host certificate answers:
 // each name with its size and modification time, so an answer replaced
 // under the same name changes it.
-func hostCertAnswers(dir string) string {
+func hostCertAnswers(dir string) string { return spoolAnswers(dir, hostCertPrefix) }
+
+// spoolAnswers is the digest of the spool's answers whose names start with
+// prefix (the host certificate ones, 03-09, and the probe ones, 03-10b).
+func spoolAnswers(dir, prefix string) string {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
 	var b strings.Builder
 	for _, d := range ents {
-		if !strings.HasPrefix(d.Name(), hostCertPrefix) {
+		if !strings.HasPrefix(d.Name(), prefix) {
 			continue
 		}
 		info, err := d.Info()

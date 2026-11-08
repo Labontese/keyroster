@@ -71,6 +71,21 @@ func withGenesisHostMaxTTL(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { genesisHostMaxTTL = 0 })
 }
 
+// genesisMachineMaxTTL is the genesis policy's machine certificate cap for a
+// signer behind keyroster-server (root genesis-policy --machine-max-ttl;
+// zero keeps the default), the pattern of genesisHostMaxTTL (03-10b). Only
+// TestProbeSelfTestEndToEnd sets it, and it is parallel only with
+// TestProbePairSpacing, which starts no server (Planner decisions D12).
+var genesisMachineMaxTTL time.Duration
+
+// withGenesisMachineMaxTTL makes every genesis policy signed until t ends
+// carry machine cap d.
+func withGenesisMachineMaxTTL(t *testing.T, d time.Duration) {
+	t.Helper()
+	genesisMachineMaxTTL = d
+	t.Cleanup(func() { genesisMachineMaxTTL = 0 })
+}
+
 // signerEnv is a running keyroster-signer under a root-signed genesis
 // bundle, and everything a test needs to use and check it.
 type signerEnv struct {
@@ -225,6 +240,9 @@ func (e *signerEnv) signGenesis(t *testing.T, opts bootstrapOpts) {
 	}
 	if ttl := cmp.Or(opts.HostMaxTTL, genesisHostMaxTTL); ttl != 0 {
 		args = append(args, "--host-max-ttl", ttl.String())
+	}
+	if genesisMachineMaxTTL != 0 {
+		args = append(args, "--machine-max-ttl", genesisMachineMaxTTL.String())
 	}
 	if code, out := keyrosterWithAgent(t, "", args...); code != 0 {
 		t.Fatalf("root genesis-policy exited %d:\n%s", code, out)

@@ -44,6 +44,10 @@ const (
 	maxCAFile         = 1 << 20
 	maxPrincipalsFile = directory.MaxPrincipalsFile
 	maxAccounts       = directory.MaxAccounts
+	// fixedPrincipalsFiles is the one principals file a generation holds
+	// beyond the host group's accounts: the probe account's (03-10b, G21),
+	// so a host group of maxAccounts accounts still installs and reads back.
+	fixedPrincipalsFiles = 1
 )
 
 // ErrGenerationTooLarge is a generation with a file, or a number of
@@ -52,10 +56,19 @@ const (
 // refused before anything is written.
 var ErrGenerationTooLarge = errors.New("generation_too_large")
 
-// checkLimits refuses g when readGeneration could not read it back: each
-// file within its class's cap, at most maxAccounts principals files.
-func checkLimits(g *Generation) error {
+// checkLimits is checkLimitsFixed with no fixed file.
+func checkLimits(g *Generation) error { return checkLimitsFixed(g, "") }
+
+// checkLimitsFixed refuses g when readGeneration could not read it back: each
+// file within its class's cap, at most maxAccounts principals files and
+// the probe account's own file, fixed (its path; "" while the probes are
+// off), beyond them (fixedPrincipalsFiles, G21).
+func checkLimitsFixed(g *Generation, fixed string) error {
 	accounts := 0
+	maxFiles := maxAccounts
+	if _, ok := g.Files[fixed]; ok && fixed != "" {
+		maxFiles += fixedPrincipalsFiles
+	}
 	for _, name := range fileNames(g) {
 		class, _ := ClassOf(name)
 		var limit int64
@@ -72,8 +85,8 @@ func checkLimits(g *Generation) error {
 			return fmt.Errorf("%w: %s would be %d bytes, above %d", ErrGenerationTooLarge, name, n, limit)
 		}
 	}
-	if accounts > maxAccounts {
-		return fmt.Errorf("%w: %d principals files, above %d", ErrGenerationTooLarge, accounts, maxAccounts)
+	if accounts > maxFiles {
+		return fmt.Errorf("%w: %d principals files, above %d", ErrGenerationTooLarge, accounts, maxFiles)
 	}
 	return nil
 }
@@ -88,15 +101,15 @@ func checkLimits(g *Generation) error {
 // both checked here, Transition can fail only for I/O, never for content.
 // A refusal here is a content refusal, after which the KRL-alone pass runs
 // (krlAlone).
-func checkCandidate(g, cur *Generation, curLink link) error {
-	if err := checkLimits(g); err != nil {
+func checkCandidate(g, cur *Generation, curLink link, fixed string) error {
+	if err := checkLimitsFixed(g, fixed); err != nil {
 		return err
 	}
 	if cur == nil || curLink.kind != linkAgent {
 		return nil
 	}
 	if m, collapsed := Intermediate(cur, g); !collapsed {
-		if err := checkLimits(m); err != nil {
+		if err := checkLimitsFixed(m, fixed); err != nil {
 			return fmt.Errorf("%w (the intermediate generation from generation %d)", err, curLink.n)
 		}
 	}
@@ -127,7 +140,7 @@ func recordName(n uint64) string { return strconv.FormatUint(n, 10) + ".json" }
 // umask (mkdirMode). A generation readGeneration could not read back is
 // refused first (generation_too_large).
 func (e *engine) installGeneration(g *Generation) error {
-	if err := checkLimits(g); err != nil {
+	if err := checkLimitsFixed(g, e.fixedPrincipals()); err != nil {
 		return err
 	}
 	for _, d := range []string{e.l.KeyrosterDir(), e.l.GenDir()} {
@@ -228,8 +241,8 @@ func readGeneration(dir string) (*Generation, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(names) > maxAccounts {
-		return nil, fmt.Errorf("%s/%s holds %d files, above %d", dir, PrincipalsDir, len(names), maxAccounts)
+	if len(names) > maxAccounts+fixedPrincipalsFiles {
+		return nil, fmt.Errorf("%s/%s holds %d files, above %d", dir, PrincipalsDir, len(names), maxAccounts+fixedPrincipalsFiles)
 	}
 	for _, n := range names {
 		b, err := spool.ReadFileAt(pfd, n, maxPrincipalsFile)
