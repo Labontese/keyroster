@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,8 +29,11 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/Labontese/keyroster/internal/agent/execsite"
+	probecert "github.com/Labontese/keyroster/internal/agent/probe"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
+	certpkg "github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -950,4 +954,113 @@ func (h *testHost) installed(principals ...string) *Report {
 		h.t.Fatalf("after the first install current %d, last-good %d", h.current(), h.lastGood())
 	}
 	return r
+}
+
+// probeLogin is the probe account of the gate tests (03-10b): the default
+// name, a uid that is not 0 and the nologin shell.
+const probeLogin = certpkg.ReservedAccountName + ":x:990:990::/nonexistent:/usr/sbin/nologin"
+
+// gateOn switches h's probe self-test on (03-10b) and writes the passwd
+// fixture with the probe account and an executable nologin under the root.
+func (h *testHost) gateOn() {
+	h.t.Helper()
+	h.cfg.probeOff = false
+	h.cfg.SelfTestTimeout = time.Second
+	h.writePasswd("root:x:0:0:root:/root:/bin/bash\n" + probeLogin + "\n")
+	h.writeRootFile("usr/sbin/nologin", []byte("#!/bin/false\n"), 0o755)
+}
+
+// writePasswd writes <root>/etc/passwd.
+func (h *testHost) writePasswd(content string) {
+	h.t.Helper()
+	h.writeRootFile("etc/passwd", []byte(content), 0o644)
+}
+
+// writeRootFile writes name below the layout root with mode.
+func (h *testHost) writeRootFile(name string, b []byte, mode os.FileMode) {
+	h.t.Helper()
+	p := filepath.Join(h.l.Root, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { //nolint:gosec // test fixture
+		h.t.Fatal(err)
+	}
+	if err := os.WriteFile(p, b, mode); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// probeSerial numbers the probe certificates the fixture signs.
+var probeSerial atomic.Uint64
+
+// signProbe signs a probe certificate for host web1 with the fixture's
+// machine CA, as the signer does: certprofile.ProbeProfile, the kr3 key ID
+// of the probe subject, the probe principal and options, backdated five
+// minutes by cert.Build, valid for lifetime from the fake clock's now.
+func (h *testHost) signProbe(lifetime time.Duration, ca ssh.Signer) *ssh.Certificate {
+	h.t.Helper()
+	prof, err := certprofile.ProbeProfile(h.f.policy)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	key, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	serial := 1_795_000_000_000_000 + probeSerial.Add(1)
+	c, err := certpkg.Build(certpkg.Request{
+		Profile: prof, Subject: key, Principals: []string{certpkg.ReservedPrincipalPrefix + "web1"}, Now: h.clock.Now(),
+		ValidFor: lifetime, Serial: serial,
+		KeyID:           certpkg.KeyID{V3: true, CA: "machine", Subject: "probe.web1", Request: strings.Repeat("ab", 16), Policy: 1, Directory: 1, Serial: serial},
+		CriticalOptions: certprofile.ProbeCriticalOptions()}, ca, rand.Reader)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return c
+}
+
+// seedPair signs a probe pair with the machine CA (lifetime from now) and
+// stores it as <state>/probe.json's committed pair (next when next is
+// set), through the engine's writer. It returns the pair.
+func (h *testHost) seedPair(lifetime time.Duration, next bool) probecert.Pair {
+	h.t.Helper()
+	return h.storePair(probecert.Pair{Positive: h.probeCert(lifetime, h.f.mach), Negative: h.probeCert(lifetime, h.f.mach)}, next)
+}
+
+// probeCert is a signed probe certificate as probe.json keeps it.
+func (h *testHost) probeCert(lifetime time.Duration, ca ssh.Signer) *probecert.Cert {
+	h.t.Helper()
+	c := h.signProbe(lifetime, ca)
+	return probecert.NewCert(c, c.ValidAfter+300+uint64(lifetime/time.Second)*2/3) //nolint:gosec // G115: a positive test lifetime
+}
+
+// storePair writes p as probe.json's committed (or next) pair, keeping the
+// rest of the record.
+func (h *testHost) storePair(p probecert.Pair, next bool) probecert.Pair {
+	h.t.Helper()
+	e := h.engine()
+	e.locked = true
+	rec := e.readProbeRecord()
+	if next {
+		rec.Next = p
+	} else {
+		rec.Committed = p
+	}
+	if err := e.saveProbeRecord(rec); err != nil {
+		h.t.Fatal(err)
+	}
+	return p
+}
+
+// listMach makes every later KRL of the fixture list serials under the
+// machine CA key (negative probe certificates) and offers the next one.
+func (h *testHost) listMach(serials ...uint64) {
+	h.t.Helper()
+	h.f.krlMachSerials = append(h.f.krlMachSerials, serials...)
+	h.publishKRL()
 }

@@ -136,6 +136,9 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		probeDue     time.Time
 		probeAnswers string
 		probeStarted bool
+		// forceApply: a new probe pair arrived while an addition is held
+		// (03-10b, D9), so the next round applies at once.
+		forceApply bool
 		// Identical consecutive held applies log once per 15 min (03-10b).
 		held heldNoise
 	)
@@ -185,6 +188,9 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			logf("ERROR probe certificates: %v", err)
 			probeDue = rc.Clock.Now().Add(time.Minute)
 		}
+		if r != nil && r.PairChanged && heldPending(l) {
+			forceApply = true
+		}
 	}
 	check := func() {
 		nextCheck = rc.Clock.Now().Add(jitter(rc.CheckEvery, rc.CheckJitter))
@@ -228,8 +234,8 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			switch {
 			case err != nil:
 				logf("ERROR spool: %v", err)
-			case names != "" && (!haveNames || names != lastNames || catchUp || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry)):
-				catchUp = false
+			case names != "" && (!haveNames || names != lastNames || catchUp || forceApply || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry)):
+				catchUp, forceApply = false, false
 				// A check after the round's applies, below.
 				nextCheck = time.Time{}
 				var prev *Report
@@ -292,6 +298,26 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		case <-t.C:
 		}
 	}
+}
+
+// heldPending reports, without the apply lock, whether probe-state.json
+// holds a held record or does not read (03-10b): then a new probe pair
+// makes the next round apply at once instead of after Retry.
+func heldPending(l Layout) bool {
+	fd, err := spool.OpenDir(l.StateDir)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = unix.Close(fd) }()
+	b, info, err := spool.ReadFileAtInfo(fd, probeStateFile, maxProbeState)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		return false
+	case err != nil || info.Mode != 0o600 || int(info.UID) != os.Geteuid():
+		return true
+	}
+	st, err := parseProbeState(b)
+	return err != nil || st.Held != nil
 }
 
 // heldNoiseEvery is how often an unchanged held apply is logged again.

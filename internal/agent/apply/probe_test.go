@@ -254,7 +254,11 @@ func TestProbeStep(t *testing.T) {
 		if r := h.mustProbeCerts(); r.Hold != hostcert.HoldApplyUnfinished || h.record() != nil || len(h.outbox()) != 0 {
 			t.Fatalf("an unfinished apply: %+v", r)
 		}
-		h.mustApply()
+		// The addition of role:x waits for the probe gate (Task 3); its
+		// removal part lands.
+		if _, err := h.apply(); err != nil && !errors.Is(err, ErrProbeHeld) {
+			t.Fatalf("apply: %v", err)
+		}
 		// A disabled host holds and writes the hold's detail, no request.
 		s := h.spec("role:ops")
 		s.status = directory.StatusDisabled
@@ -482,7 +486,11 @@ func TestRenderProbeFile(t *testing.T) {
 		spoolInState(t, h)
 		h.installed("role:ops")
 		h.publishDir(h.spec("role:evil"))
-		h.mustApply()
+		// The addition of role:evil waits for the probe gate (Task 3); the
+		// directory is accepted all the same.
+		if _, err := h.apply(); err != nil && !errors.Is(err, ErrProbeHeld) {
+			t.Fatalf("apply: %v", err)
+		}
 		bob, next := seedKey(t, 11), seedKey(t, 31)
 		_, d2, p2 := f.rotationNext(f.bundle, f.bundleDoc, f.policyDoc, f.policy, []trust.AdminKey{{Name: "bob", Key: trust.FormatKey(bob.PublicKey())}}, "2026-10-02T00:00:00Z", next)
 		h.state.Bundles[2], h.state.Policies[2] = d2, p2

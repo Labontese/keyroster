@@ -878,13 +878,27 @@ func (e *engine) forward(ctx context.Context) error {
 		e.logf("WARNING %v; the held step is applied, and the KRL in force stays", v.KRLRefused)
 	}
 	e.report.BundleHeld = v.BundleHeld
+	// 03-10b: last-good is resolved once, for the probe classification and
+	// the first-install check below; a held addition (or a probe-state.json
+	// that does not read) makes an unchanged capture render again.
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil {
+		return err
+	}
+	held := e.heldPresent()
 	var g, cur *Generation
 	var curLink link
+	// heldReason is the gate's hold of this pass's candidate ("" for none);
+	// heldCollapsed: the held candidate's intermediate equals current, so
+	// only its versions are committed.
+	var heldReason string
+	var heldCollapsed bool
 	for {
+		heldReason, heldCollapsed = "", false
 		// F03 (03-08f): while the stored directory is unauthorized, an
 		// unchanged capture is rendered too, so principals installed before
 		// are removed; a render equal to current is the no-op below.
-		if !v.Changed() && v.DirectoryUnauthorized == nil {
+		if !v.Changed() && v.DirectoryUnauthorized == nil && !held {
 			// The no-op includes the drop-in's spec (03-09, D1): one that
 			// differs from wantDropIn is repaired first.
 			if err := e.repairNoOp(ctx, v, nil); err != nil {
@@ -916,6 +930,8 @@ func (e *engine) forward(ctx context.Context) error {
 					return err
 				}
 				e.report.NoOp = !e.dropInRepaired
+				// 03-10b: a held addition that is in force already.
+				e.clearHeld()
 				if curLink.kind != linkAgent {
 					cur = nil
 				}
@@ -930,7 +946,36 @@ func (e *engine) forward(ctx context.Context) error {
 				e.report.Diff = diff(cur, g)
 				return outcome(v)
 			}
-			if cur != nil && sameBytes(cur, g) {
+			// 03-10b (owner decision Q2): an addition waits for the probe
+			// gate before any generation is allocated; a held one lands its
+			// narrowing part and every KRL through the intermediate, with the
+			// held record written first.
+			class := classify(lg, cur, g, e.probeAccount())
+			e.labelExempt(class)
+			if e.probesOn() && needsGate(class) {
+				if reason := e.probeGate(ctx, cur, g, v); reason != "" {
+					m, collapsed := Intermediate(cur, g)
+					if err := e.hold(reason, v); err != nil {
+						return err
+					}
+					heldReason = reason
+					switch {
+					case collapsed && !v.Changed():
+						// A retry: current is the narrowing part already.
+						e.setVersions(v, cur)
+						return heldOutcome(outcome(v), heldReason)
+					case collapsed:
+						heldCollapsed = true
+					default:
+						m.Host, m.HostStatus = g.Host, g.HostStatus
+						g = m
+					}
+				}
+			}
+			if heldReason == "" && cur != nil && sameContent(cur, g) {
+				e.clearHeld()
+			}
+			if cur != nil && (sameBytes(cur, g) || heldCollapsed) {
 				// The new versions change nothing on disk: store them. The
 				// render's host status is the one in force now (a removed
 				// entry listed again under other keys keeps the same, empty,
@@ -948,7 +993,10 @@ func (e *engine) forward(ctx context.Context) error {
 				if err := e.commit(curLink.n, v); err != nil {
 					return err
 				}
-				return outcome(v)
+				if heldReason == "" {
+					e.clearHeld()
+				}
+				return heldOutcome(outcome(v), heldReason)
 			}
 			g.N = e.allocGeneration()
 			if err := e.installGeneration(g); err != nil {
@@ -973,15 +1021,12 @@ func (e *engine) forward(ctx context.Context) error {
 		}
 		e.report.DirectoryUnauthorized = v.DirectoryUnauthorized != nil
 	}
-	lg, err := e.resolveLink(e.l.LastGood())
-	if err != nil {
-		return err
-	}
 	if lg.kind == linkNone {
 		e.setVersions(v, g)
 		if err := e.firstInstall(ctx, g, v); err != nil {
 			return err
 		}
+		e.clearHeld()
 		return outcome(v)
 	}
 	target, tv := g, v
@@ -989,10 +1034,26 @@ func (e *engine) forward(ctx context.Context) error {
 		return e.pollSpool(ctx, tv, target)
 	}
 	defer func() { e.poll = nil }()
+	// substituted: the target is the intermediate a hold landed, not a full
+	// candidate, so its commit leaves the held record (03-10b).
+	substituted, reclassify := heldReason != "", false
 	for {
 		from, _, err := e.readCurrent()
 		if err != nil {
 			return e.rollback(ctx, err, lg)
+		}
+		if reclassify {
+			// 03-10b: a superseding target is classified and gated again,
+			// against the generation current names now (every way back to
+			// the top of the loop is a supersede).
+			t, reason, done, err := e.gateSuperseded(ctx, lg, from, target, tv)
+			if err != nil {
+				return e.rollback(ctx, err, lg)
+			}
+			target, heldReason, substituted = t, reason, reason != ""
+			if done {
+				break
+			}
 		}
 		mid, err := e.Transition(ctx, from, target, swapPolled)
 		e.report.Intermediate = mid
@@ -1019,6 +1080,7 @@ func (e *engine) forward(ctx context.Context) error {
 			if tv.BundleChanged || tv.DirectoryChanged {
 				e.report.BundleHeld = tv.BundleHeld
 			}
+			reclassify = true
 			continue
 		}
 		if err != nil {
@@ -1048,7 +1110,10 @@ func (e *engine) forward(ctx context.Context) error {
 	if err := e.commit(target.N, tv); err != nil {
 		return err
 	}
-	return outcome(tv)
+	if !substituted {
+		e.clearHeld()
+	}
+	return heldOutcome(outcome(tv), heldReason)
 }
 
 // setVersions reports v's versions; the KRL version is g's when g (the

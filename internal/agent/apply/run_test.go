@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	probecert "github.com/Labontese/keyroster/internal/agent/probe"
@@ -434,6 +435,154 @@ func TestRunProbeTrigger(t *testing.T) {
 	if n := next(); n != 3 {
 		t.Fatalf("past the due time: %d calls, want 3", n)
 	}
+}
+
+// TestRunHeldTrigger (03-10b, D9, T-03-384): a new probe pair while a held
+// record exists makes the next round apply at once, without waiting for
+// Retry; with no held record it does not. Identical held applies in a row
+// are printed and logged once.
+func TestRunHeldTrigger(t *testing.T) {
+	type loop struct {
+		applies, held atomic.Int32
+		log           *syncLog
+		step          chan struct{}
+		iter          chan struct{}
+	}
+	start := func(t *testing.T, h *probeHost, retry time.Duration, exec Runner) *loop {
+		t.Helper()
+		lp := &loop{log: &syncLog{}, step: make(chan struct{}), iter: make(chan struct{})}
+		cfg := h.cfg
+		cfg.Log = lp.log
+		if exec != nil {
+			cfg.Exec = exec
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- Run(ctx, RunConfig{Config: cfg, Interval: time.Millisecond, Retry: retry, CheckEvery: 24 * time.Hour,
+				Out: func(_ *Report, err error) {
+					lp.applies.Add(1)
+					if errors.Is(err, ErrProbeHeld) {
+						lp.held.Add(1)
+					}
+				},
+				Iteration: func() {
+					select {
+					case lp.iter <- struct{}{}:
+					case <-ctx.Done():
+						return
+					}
+					select {
+					case <-lp.step:
+					case <-ctx.Done():
+					}
+				}}, h.l)
+		}()
+		t.Cleanup(func() {
+			cancel()
+			<-done
+		})
+		return lp
+	}
+	next := func(t *testing.T, lp *loop) {
+		t.Helper()
+		select {
+		case <-lp.iter:
+		case <-time.After(60 * time.Second):
+			t.Fatal("no loop iteration within 60 s")
+		}
+	}
+	// pairInSpool: the host's probe requests are answered in the spool and
+	// the KRL in force lists the negative, so ProbeCerts makes a usable pair.
+	pairInSpool := func(t *testing.T, h *probeHost) {
+		t.Helper()
+		h.mustProbeCerts()
+		certs := h.answerAll()
+		h.listMach(certs[probecert.Negative].Serial)
+	}
+	t.Run("held_record_applies_at_once", func(t *testing.T) {
+		h := newProbeHost(t)
+		h.gateOn()
+		h.installed("role:ops")
+		pairInSpool(t, h)
+		h.publishDir(h.spec("role:ops", "role:new"))
+		r, err := h.apply()
+		// The pair's requests are live: the gate names them.
+		mustHeld(t, h.testHost, r, err, "issue_unanswered")
+		lp := start(t, h, time.Hour, nil)
+		next(t, lp) // the first round: the held apply, then ProbeCerts keeps the pair
+		if n := lp.applies.Load(); n != 1 {
+			t.Fatalf("the first round: %d applies, want 1", n)
+		}
+		lp.step <- struct{}{}
+		next(t, lp)
+		if n := lp.applies.Load(); n != 2 || !slices.Contains(h.principals("deploy"), "role:new") {
+			t.Fatalf("after the new pair: %d applies, principals %v", n, h.principals("deploy"))
+		}
+		if h.heldNow() != "" {
+			t.Fatalf("held %q after the addition landed", h.heldNow())
+		}
+	})
+	t.Run("no_held_record_waits", func(t *testing.T) {
+		h := newProbeHost(t)
+		h.gateOn()
+		h.installed("role:ops")
+		pairInSpool(t, h)
+		h.mustApply()
+		lp := start(t, h, time.Hour, nil)
+		next(t, lp)
+		for range 3 {
+			lp.step <- struct{}{}
+			next(t, lp)
+		}
+		if n := lp.applies.Load(); n != 0 {
+			t.Fatalf("%d applies without a held record, want 0", n)
+		}
+		if rec := h.record(); rec == nil || rec.Committed.Empty() {
+			t.Fatal("ProbeCerts kept no pair: the trigger was not exercised")
+		}
+	})
+	t.Run("identical_holds_print_and_log_once", func(t *testing.T) {
+		h := newProbeHost(t)
+		h.gateOn()
+		h.installed("role:ops")
+		// account_missing comes first in the gate, so the reason stays the
+		// same while ProbeCerts requests a pair.
+		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
+		h.publishDir(h.spec("role:ops", "role:new"))
+		h.write()
+		// Every apply runs sshd -T: a round whose runner count moved applied.
+		cr := &countRunner{Runner: h.run}
+		lp := start(t, h, time.Millisecond, cr)
+		next(t, lp)
+		for i := range 4 {
+			time.Sleep(5 * time.Millisecond) // past Retry
+			n := cr.n.Load()
+			lp.step <- struct{}{}
+			next(t, lp)
+			if cr.n.Load() == n {
+				t.Fatalf("round %d did not apply again", i+2)
+			}
+		}
+		logged := strings.Count(lp.log.String(), "ERROR apply: probe_held: account_missing")
+		if n := lp.held.Load(); n != 1 || logged != 1 {
+			t.Fatalf("held applies printed %d times and logged %d times, want 1 and 1:\n%s", n, logged, lp.log.String())
+		}
+		if slices.Contains(h.principals("deploy"), "role:new") || h.heldNow() == "" {
+			t.Fatalf("held %q, principals %v", h.heldNow(), h.principals("deploy"))
+		}
+	})
+}
+
+// countRunner counts the commands a Runner runs.
+type countRunner struct {
+	Runner
+	n atomic.Int32
+}
+
+func (c *countRunner) Run(ctx context.Context, cmd execsite.Cmd) (Result, error) {
+	c.n.Add(1)
+	return c.Runner.Run(ctx, cmd)
 }
 
 // TestRunHeldNoise (03-10b, D9, T-03-384): two identical consecutive held
