@@ -605,6 +605,38 @@ func TestRunHeldTrigger(t *testing.T) {
 			t.Fatalf("held applies printed %d times and logged %d times, want 2 and 2:\n%s", n, logged, lp.log.String())
 		}
 	})
+	t.Run("held_retry_that_repairs_the_dropin_prints", func(t *testing.T) {
+		// PR #91 review, F5 with F6: a held retry that repairs an edited
+		// drop-in (and reloads sshd) wrote something, so it is printed and
+		// logged even though its versions and message are unchanged.
+		h := newProbeHost(t)
+		h.gateOn()
+		h.installed("role:ops")
+		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
+		h.publishDir(h.spec("role:ops", "role:new"))
+		h.write()
+		cr := &countRunner{Runner: h.run}
+		lp := start(t, h, time.Millisecond, cr)
+		next(t, lp)
+		want := readFile(t, h.l.DropIn())
+		appendFile(t, h.l.DropIn(), "# edited\n")
+		for i := range 2 {
+			time.Sleep(5 * time.Millisecond) // past Retry
+			n := cr.n.Load()
+			lp.step <- struct{}{}
+			next(t, lp)
+			if cr.n.Load() == n {
+				t.Fatalf("round %d did not apply again", i+2)
+			}
+		}
+		if got := readFile(t, h.l.DropIn()); got != want {
+			t.Fatalf("the held retry did not repair the drop-in:\n%s", got)
+		}
+		logged := strings.Count(lp.log.String(), "ERROR apply: probe_held: account_missing")
+		if n := lp.held.Load(); n != 2 || logged != 2 {
+			t.Fatalf("held applies printed %d times and logged %d times, want 2 and 2:\n%s", n, logged, lp.log.String())
+		}
+	})
 }
 
 // countRunner counts the commands a Runner runs.
@@ -661,6 +693,10 @@ func TestRunHeldNoise(t *testing.T) {
 		{&Report{Generation: 6, BundleVersion: 1, DirectoryVersion: 2, KRLVersion: 7}, false},
 		{&Report{Generation: 6, BundleVersion: 1, DirectoryVersion: 3, KRLVersion: 7}, false},
 		{&Report{Generation: 6, BundleVersion: 2, DirectoryVersion: 3, KRLVersion: 7}, false},
+		{&Report{BundleVersion: 2, DirectoryVersion: 3, KRLVersion: 7}, true},
+		// A held retry that repaired the drop-in (F6) reloaded sshd: it
+		// wrote something, so it is reported.
+		{&Report{BundleVersion: 2, DirectoryVersion: 3, KRLVersion: 7, Reloaded: true}, false},
 		{&Report{BundleVersion: 2, DirectoryVersion: 3, KRLVersion: 7}, true},
 	} {
 		if got := w.quiet(held("budget"), c.r, t0.Add(time.Duration(i)*time.Second)); got != c.quiet {

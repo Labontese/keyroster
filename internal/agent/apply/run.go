@@ -326,9 +326,10 @@ const heldNoiseEvery = 15 * time.Minute
 // heldNoise suppresses the log line and the printed report of an apply
 // held by the probe gate that repeats the previous held one within
 // heldNoiseEvery (03-10b, D9, T-03-384): the same message and nothing new
-// written, that is the same bundle, directory and KRL versions and no
-// other generation (PR #91 review, F5: a held apply that lands a removal,
-// a generation or a KRL is always reported).
+// written, that is the same bundle, directory and KRL versions, no other
+// generation and no sshd reload (PR #91 review, F5: a held apply that
+// lands a removal, a generation or a KRL, or that repaired the drop-in,
+// F6, is always reported).
 type heldNoise struct {
 	msg                   string
 	gen, bundle, dir, krl uint64
@@ -351,7 +352,8 @@ func (n *heldNoise) quiet(err error, r *Report, now time.Time) bool {
 			m.gen = r.Generation
 		}
 	}
-	if m.msg == n.msg && m.gen == n.gen && m.bundle == n.bundle && m.dir == n.dir && m.krl == n.krl && now.Sub(n.at) < heldNoiseEvery {
+	reloaded := r != nil && r.Reloaded
+	if !reloaded && m.msg == n.msg && m.gen == n.gen && m.bundle == n.bundle && m.dir == n.dir && m.krl == n.krl && now.Sub(n.at) < heldNoiseEvery {
 		return true
 	}
 	*n = m
