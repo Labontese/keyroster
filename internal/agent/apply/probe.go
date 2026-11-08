@@ -193,8 +193,8 @@ func ProbeCerts(ctx context.Context, cfg Config, l Layout) (*ProbeReport, error)
 	return r, err
 }
 
-// probeState is what one ProbeCerts run reads before it decides.
-type probeState struct {
+// probeFacts is what one ProbeCerts run reads before it decides.
+type probeFacts struct {
 	now     time.Time
 	rec     *probecert.Record
 	in      probecert.Input
@@ -346,7 +346,7 @@ func issueDetail(code string) string {
 
 // finishProbeCerts records the detail and, when the step changed
 // something, writes the status under the held lock.
-func (e *engine) finishProbeCerts(ctx context.Context, st *probeState, r *ProbeReport, detail string) error {
+func (e *engine) finishProbeCerts(ctx context.Context, st *probeFacts, r *ProbeReport, detail string) error {
 	if detail != "" && !hostcert.CodeRE.MatchString(detail) {
 		detail = ""
 	}
@@ -368,7 +368,7 @@ func (e *engine) finishProbeCerts(ctx context.Context, st *probeState, r *ProbeR
 }
 
 // input is st's Decide input with the record's current pairs.
-func (st *probeState) input() probecert.Input {
+func (st *probeFacts) input() probecert.Input {
 	in := st.in
 	in.Committed, in.Next, in.Attempts = st.rec.Committed, st.rec.Next, &st.rec.Attempts
 	return in
@@ -379,8 +379,8 @@ func (st *probeState) input() probecert.Input {
 // directory entry the served keys name, whether the directory is
 // authorized, the committed generation's host status and the KRL of the
 // generation current names.
-func (e *engine) readProbeFacts(lg link) (*probeState, error) {
-	st := &probeState{now: e.clock.Now(), rec: e.readProbeRecord()}
+func (e *engine) readProbeFacts(lg link) (*probeFacts, error) {
+	st := &probeFacts{now: e.clock.Now(), rec: e.readProbeRecord()}
 	stored, err := e.loadStored()
 	if err != nil {
 		return nil, err
@@ -474,7 +474,7 @@ func (e *engine) saveProbeRecord(r *probecert.Record) error {
 // outbox write left it, nothing can post it, and its probe key no longer
 // exists, so it is requested again at once. It reports whether it
 // changed the attempts.
-func (e *engine) reconcileProbeOutbox(st *probeState, now uint64) bool {
+func (e *engine) reconcileProbeOutbox(st *probeFacts, now uint64) bool {
 	changed := false
 	for _, pol := range probecert.Polarities {
 		p := st.rec.Attempts.Get(pol).Pending(now)
@@ -517,7 +517,7 @@ func outboxProbeID(dir string, pol probecert.Polarity) string {
 // against that request's probe key and the machine CA keys) and kept as
 // Next's member of that polarity, or its refusal recorded; the request is
 // consumed and its outbox file removed. Any other answer is ignored.
-func (e *engine) readProbeAnswer(st *probeState, pol probecert.Polarity, now uint64, r *ProbeReport) (bool, error) {
+func (e *engine) readProbeAnswer(st *probeFacts, pol probecert.Polarity, now uint64, r *ProbeReport) (bool, error) {
 	sfd, err := spool.OpenDir(e.cfg.Spool)
 	if err != nil {
 		return false, nil
@@ -570,7 +570,7 @@ func (e *engine) readProbeAnswer(st *probeState, pol probecert.Polarity, now uin
 // requestProbeCert builds and signs a request for polarity pol and writes
 // it: the record with the new request ID and probe public key first, then
 // the outbox request.
-func (e *engine) requestProbeCert(st *probeState, pol probecert.Polarity, r *ProbeReport) error {
+func (e *engine) requestProbeCert(st *probeFacts, pol probecert.Polarity, r *ProbeReport) error {
 	if st.signer == nil || st.entry == nil || st.install == "" {
 		return nil
 	}
@@ -623,7 +623,7 @@ func (e *engine) removeProbeOutbox(pol probecert.Polarity) error {
 
 // pruneProbeOutbox removes the outbox request of every polarity with no
 // live, unconsumed request.
-func (e *engine) pruneProbeOutbox(st *probeState, now uint64) {
+func (e *engine) pruneProbeOutbox(st *probeFacts, now uint64) {
 	for _, pol := range probecert.Polarities {
 		if st.rec.Attempts.Get(pol).Pending(now) != nil {
 			continue
@@ -638,7 +638,7 @@ func (e *engine) pruneProbeOutbox(st *probeState, now uint64) {
 // committed pair's renewal or missing threshold, a back-off end, a sticky
 // release or a request abandonment, never earlier than now +
 // hostcert.BackoffMin.
-func probeDue(st *probeState) time.Time {
+func probeDue(st *probeFacts) time.Time {
 	now := uint64(max(st.now.Unix(), 0))
 	var due uint64
 	next := func(t uint64) {

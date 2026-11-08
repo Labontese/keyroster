@@ -321,7 +321,7 @@ func TestVerifyCert(t *testing.T) {
 		{code: "signature_invalid", mut: func(c *ssh.Certificate) *ssh.Certificate { c.Nonce = []byte("another nonce"); return c }},
 		{code: "key_id_not_kr3", mut: func(c *ssh.Certificate) *ssh.Certificate { c.KeyId = "probe web1"; return c }},
 		{code: "key_id_ca_not_machine", mut: func(c *ssh.Certificate) *ssh.Certificate {
-			c.KeyId = keyID(c, func(k *cert.KeyID) { k.CA = "host"; k.Subject = "web1" })
+			c.KeyId = keyID(c, func(k *cert.KeyID) { k.CA = "host" })
 			return c
 		}},
 		{code: "key_id_subject_other_host", mut: func(c *ssh.Certificate) *ssh.Certificate {
@@ -344,6 +344,21 @@ func TestVerifyCert(t *testing.T) {
 			c, in := good(), check
 			if tc.mut != nil {
 				c = tc.mut(c)
+				// Every edited defect is signed again by the trusted machine
+				// CA, so that a removed rule shows as an accepted
+				// certificate, not as a signature refusal (03-10b); only
+				// signature_invalid keeps a broken signature and
+				// ca_not_trusted its untrusted one.
+				if tc.code != "signature_invalid" && tc.code != "ca_not_trusted" {
+					if err := c.SignCert(rand.Reader, e.ca); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// signatureValid is false exactly for the broken signature,
+				// so it is not vacuous.
+				if valid := signatureValid(c); valid != (tc.code != "signature_invalid") {
+					t.Fatalf("the defect certificate's signature verifies: %t", valid)
+				}
 			}
 			if tc.in != nil {
 				in = tc.in(in)
@@ -354,6 +369,21 @@ func TestVerifyCert(t *testing.T) {
 			}
 		})
 	}
+}
+
+// signatureValid reports whether c's signature verifies under its own
+// SignatureKey: the signed bytes are the certificate's wire form without
+// its trailing signature field.
+func signatureValid(c *ssh.Certificate) bool {
+	if c.Signature == nil || c.SignatureKey == nil {
+		return false
+	}
+	b := c.Marshal()
+	n := 4 + len(ssh.Marshal(c.Signature))
+	if len(b) < n {
+		return false
+	}
+	return c.SignatureKey.Verify(b[:len(b)-n], c.Signature) == nil
 }
 
 func TestPairUsable(t *testing.T) {
