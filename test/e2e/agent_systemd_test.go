@@ -152,7 +152,9 @@ func TestAgentSystemdSmoke(t *testing.T) {
 	// disagreement that lasts past the deadline still fails.
 	var a serverclient.HostsStatusAnswer
 	var text string
-	for deadline := time.Now().Add(150 * time.Second); ; time.Sleep(5 * time.Second) {
+	// 270 s: the probe negative's first KRL commits about one fetch poll
+	// after the first install, and that poll's heartbeat precedes the apply.
+	for deadline := time.Now().Add(270 * time.Second); ; time.Sleep(5 * time.Second) {
 		if err := json.Unmarshal([]byte(kr("host", "status", "--json")), &a); err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +165,7 @@ func TestAgentSystemdSmoke(t *testing.T) {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no heartbeat on the current versions, with the text status naming them, within 150 s: %+v\nhost status:\n%s\njournal:\n%s", a, text, journal(t, since))
+			t.Fatalf("no heartbeat on the current versions, with the text status naming them, within 270 s: %+v\nhost status:\n%s\njournal:\n%s", a, text, journal(t, since))
 		}
 	}
 	t.Logf("keyroster host status under systemd:\n%s", text)
