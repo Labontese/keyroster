@@ -18,7 +18,15 @@
 # reload, or try-reload-or-restart under socket activation; the log says
 # which), logs in to the runner's own ssh.service on 127.0.0.1 with a
 # certificate, and waits for keyroster host status to show the heartbeat
-# on the current KRL. This script then checks, as the real keyroster-agent
+# on the current KRL. 03-10c: before the test this script creates the probe
+# account keyroster-probe with the runbook's own command
+# (test/distro/probe-account.sh debian) and writes the drop-in
+# /etc/ssh/sshd_config.d/10-smoke.conf with LoginGraceTime 10, so that a
+# widening waits about 40 s; the test then revokes a certificate and waits
+# for the KRL, waits for a probe pair, and adds a principal to the role,
+# which must land with both probes passing under the real units. The Go
+# test's timeout is 35m, so that a stall fails with the unit journals and
+# not with a timeout panic. This script then checks, as the real keyroster-agent
 # user, that it cannot create anything in the state directory (where
 # pending.json lives), accepted/ or the outbox, nor overwrite pins.json,
 # outbox/status.json or outbox/accepted.json, while it can write in the
@@ -53,6 +61,7 @@ work=$(mktemp -d /tmp/keyroster-agent-smoke.XXXXXX)
 chmod 0755 "$work"
 cleanup() {
 	systemctl stop keyroster-agent.service keyroster-agent-fetch.service 2>/dev/null || true
+	rm -f /etc/ssh/sshd_config.d/10-smoke.conf
 }
 trap cleanup EXIT
 
@@ -70,6 +79,11 @@ getent passwd keyroster-agent >/dev/null || useradd --system --user-group --no-c
 getent passwd "$ACCOUNT" >/dev/null || useradd --create-home --shell /bin/sh "$ACCOUNT"
 id keyroster-agent
 id "$ACCOUNT"
+
+step "The probe account, with the runbook's command (03-10c)"
+sh "$repo/test/distro/probe-account.sh" debian
+echo 'LoginGraceTime 10' >/etc/ssh/sshd_config.d/10-smoke.conf
+/usr/sbin/sshd -T | grep -i '^logingracetime' || true
 
 step "Build (CGO_ENABLED=0) as ${SUDO_USER:-root}"
 bin=$work/bin
@@ -90,7 +104,7 @@ modcache=$("${build[@]}" go env GOMODCACHE)
 
 step "TestAgentSystemdSmoke (install, both units, enrollment, apply, login, heartbeat)"
 (cd "$repo/test/e2e" && env GOMODCACHE="$modcache" GOFLAGS=-mod=readonly KEYROSTER_OPENSSH_PREFIX=/usr KEYROSTER_SMOKE_ACCOUNT="$ACCOUNT" \
-	"$bin/agentsmoke.test" -test.run '^TestAgentSystemdSmoke$' -test.v -test.count=1 -test.timeout 15m)
+	"$bin/agentsmoke.test" -test.run '^TestAgentSystemdSmoke$' -test.v -test.count=1 -test.timeout 35m)
 
 step "The units systemd loaded"
 systemctl show -p User -p NoNewPrivileges -p ProtectSystem -p ReadWritePaths -p CapabilityBoundingSet keyroster-agent-fetch.service
