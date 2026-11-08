@@ -1225,6 +1225,36 @@ func probeGateAccount(t *testing.T) {
 		if _, err := h.check(); err != nil || notes() != 2 {
 			t.Fatalf("unreadable again: %v, %d notes in %q", err, notes(), log.String())
 		}
+		// A check that stops at passwd, before shadow, keeps the memory.
+		passwd := filepath.Join(h.l.Root, "etc", "passwd")
+		saved, err := os.ReadFile(passwd) //nolint:gosec // G304: the test root
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
+		if _, err := h.check(); err != nil || notes() != 2 {
+			t.Fatalf("a check without the account: %v, %d notes", err, notes())
+		}
+		h.writePasswd(string(saved))
+		if _, err := h.check(); err != nil || notes() != 2 {
+			t.Fatalf("the account back, shadow still unreadable: %v, %d notes in %q", err, notes(), log.String())
+		}
+	})
+	t.Run("shadow_unreadable_noted_by_opportunistic", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a", "role:b")
+		h.readyFor(time.Hour)
+		var log bytes.Buffer
+		h.cfg.Log = &log
+		h.cfg.openShadow = openErr(syscall.EACCES)
+		h.publishDir(h.spec("role:a"))
+		// Past the account step the pair runs or waits for its budget.
+		if r := h.mustApply(); r.ProbePositive != probePass && r.ProbePositive != probeSkippedBudget {
+			t.Fatalf("a narrowing with a ready pair: probes %q", r.ProbePositive)
+		}
+		if n := strings.Count(log.String(), "probe: note: "+noteShadowUnreadable+":"); n != 1 {
+			t.Fatalf("the opportunistic pair logged %d notes in %q", n, log.String())
+		}
 	})
 	t.Run("password_set_holds_addition", func(t *testing.T) {
 		t.Parallel()
