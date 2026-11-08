@@ -447,6 +447,23 @@ func TestProbeStep(t *testing.T) {
 			t.Fatalf("after a crash at probe-switch: %+v", rec)
 		}
 	})
+	t.Run("answer_saved_before_outbox_removed", func(t *testing.T) {
+		// PR #91 review, F4: a crash after an answer is saved and before its
+		// outbox request is removed keeps the verified certificate.
+		h := newProbeHost(t)
+		h.installed("role:ops")
+		h.mustProbeCerts()
+		h.answerAll()
+		h.probeCrashAt("probe-answer-save")
+		if _, err := h.probeCerts(); !errors.Is(err, errCrash) {
+			t.Fatal(err)
+		}
+		h.cfg.Fault = nil
+		h.mustProbeCerts()
+		if rec := h.record(); !rec.Next.Complete() || len(h.outbox()) != 0 {
+			t.Fatalf("after a crash at probe-answer-save: next %+v, %d outbox requests", rec.Next, len(h.outbox()))
+		}
+	})
 	t.Run("outbox_pruned_without_pending", func(t *testing.T) {
 		h := newProbeHost(t)
 		h.installed("role:ops")

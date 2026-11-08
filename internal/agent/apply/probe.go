@@ -516,7 +516,8 @@ func outboxProbeID(dir string, pol probecert.Polarity) string {
 // unconsumed request ID of its attempt is verified (probecert.VerifyCert
 // against that request's probe key and the machine CA keys) and kept as
 // Next's member of that polarity, or its refusal recorded; the request is
-// consumed and its outbox file removed. Any other answer is ignored.
+// consumed and its outbox file removed (consumeProbeAnswer). Any other
+// answer is ignored.
 func (e *engine) readProbeAnswer(st *probeFacts, pol probecert.Polarity, now uint64, r *ProbeReport) (bool, error) {
 	sfd, err := spool.OpenDir(e.cfg.Spool)
 	if err != nil {
@@ -539,7 +540,7 @@ func (e *engine) readProbeAnswer(st *probeFacts, pol probecert.Polarity, now uin
 	req.Consumed = true
 	if ans.Refused != "" {
 		probecert.Fail(st.input(), pol, ans.Refused)
-		return true, e.removeProbeOutbox(pol)
+		return true, e.consumeProbeAnswer(st, pol)
 	}
 	c, err := hostcert.ParseCert(ans.Certificate)
 	if err == nil {
@@ -555,7 +556,7 @@ func (e *engine) readProbeAnswer(st *probeFacts, pol probecert.Polarity, now uin
 	if err != nil {
 		probecert.Fail(st.input(), pol, probecert.ErrCode(err))
 		e.logf("WARNING %s probe certificate answer refused: %v", pol, err)
-		return true, e.removeProbeOutbox(pol)
+		return true, e.consumeProbeAnswer(st, pol)
 	}
 	renew, err := hostcert.RenewAt(c, e.probeRandom())
 	if err != nil {
@@ -564,7 +565,24 @@ func (e *engine) readProbeAnswer(st *probeFacts, pol probecert.Polarity, now uin
 	st.rec.Next.Set(pol, probecert.NewCert(c, renew))
 	a.Failures, a.NextAt, a.LastCode = 0, 0, ""
 	r.Kept = append(r.Kept, string(pol))
-	return true, e.removeProbeOutbox(pol)
+	return true, e.consumeProbeAnswer(st, pol)
+}
+
+// consumeProbeAnswer saves probe.json, with the consumed request and the
+// kept certificate or recorded refusal, before it removes polarity pol's
+// outbox request. Removed first, a crash before the save would leave a
+// live request with no outbox file, which reconcileProbeOutbox consumes
+// unanswered: a verified certificate would be lost and issuance refused
+// as probe_cert_recent for up to an hour, holding additions (PR #91
+// review, F4).
+func (e *engine) consumeProbeAnswer(st *probeFacts, pol probecert.Polarity) error {
+	if err := e.saveProbeRecord(st.rec); err != nil {
+		return err
+	}
+	if err := e.fault("probe-answer-save"); err != nil {
+		return err
+	}
+	return e.removeProbeOutbox(pol)
 }
 
 // requestProbeCert builds and signs a request for polarity pol and writes
