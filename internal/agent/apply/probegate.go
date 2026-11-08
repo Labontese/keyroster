@@ -793,7 +793,11 @@ func (e *engine) runProbes(ctx context.Context, g *Generation, required bool) er
 
 // probeResult records a failed probe pair with the Report values pos and
 // neg: for a gated addition the failure record and the error, for the
-// opportunistic pair the alarm and Report.Detail, and nil.
+// opportunistic pair the alarm and Report.Detail, and nil. A gated
+// addition whose negative sshd accepted (probe_krl_not_enforced) also sets
+// the alarm, which outranks the failure_backoff hold in probe_detail, so
+// a KRL that sshd does not enforce stays visible while the addition is
+// held; a pass clears it (PR #91 review, F2).
 func (e *engine) probeResult(cause error, key string, required bool, pos, neg string) error {
 	e.report.ProbePositive, e.report.ProbeNegative = pos, neg
 	code := cause.Error()
@@ -810,6 +814,9 @@ func (e *engine) probeResult(cause error, key string, required bool, pos, neg st
 			}
 		}
 		return nil
+	}
+	if errors.Is(cause, ErrProbeKRLNotEnforced) {
+		st.Alarm = code
 	}
 	if err := e.recordFailure(st, code, key); err != nil {
 		return errors.Join(cause, err)

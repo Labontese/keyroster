@@ -1471,6 +1471,32 @@ func probeGateRuns(t *testing.T) {
 		mustFailed(t, h, r, err, ErrProbeKRLNotEnforced)
 		mustPrincipals(t, h, "role:a")
 	})
+	// PR #91 review, F2: a KRL sshd does not enforce stays the probe_detail
+	// (the alarm outranks the hold) while the failed addition is held.
+	t.Run("krl_not_enforced_stays_visible", func(t *testing.T) {
+		t.Parallel()
+		t.Run("mixed", func(t *testing.T) {
+			t.Parallel()
+			h, _ := mixedFail(t, ErrProbeKRLNotEnforced, ProbeAccepted, ProbeAccepted)
+			if d := h.probeDetail(); h.heldNow() != "failure_backoff" || d != ErrProbeKRLNotEnforced.Error() {
+				t.Fatalf("held %q, probe_detail %q", h.heldNow(), d)
+			}
+		})
+		t.Run("pure_addition", func(t *testing.T) {
+			t.Parallel()
+			h := gateHost(t, "role:a")
+			h.ready()
+			h.scriptProbes(ProbeAccepted, ProbeAccepted)
+			h.publishDir(h.spec("role:a", "role:b"))
+			r, err := h.apply()
+			mustFailed(t, h, r, err, ErrProbeKRLNotEnforced)
+			r, err = h.apply()
+			mustHeld(t, h, r, err, "failure_backoff")
+			if d := h.probeDetail(); d != ErrProbeKRLNotEnforced.Error() {
+				t.Fatalf("probe_detail %q while held, want %s", d, ErrProbeKRLNotEnforced)
+			}
+		})
+	})
 	t.Run("widening_inconclusive_rolls_back", func(t *testing.T) {
 		t.Parallel()
 		h := gateHost(t, "role:a")
