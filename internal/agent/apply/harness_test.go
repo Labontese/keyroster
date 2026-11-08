@@ -790,6 +790,10 @@ type testHost struct {
 	cfg   Config
 	dirs  []spool.Doc
 	state spool.State
+	// probeMu guards queries, the probe queries sshdProbe answered
+	// (03-10b).
+	probeMu sync.Mutex
+	queries []ProbeTarget
 }
 
 func newTestHost(t *testing.T, f *fixture) *testHost {
@@ -968,6 +972,36 @@ func (h *testHost) gateOn() {
 	h.cfg.SelfTestTimeout = time.Second
 	h.writePasswd("root:x:0:0:root:/root:/bin/bash\n" + probeLogin + "\n")
 	h.writeRootFile("usr/sbin/nologin", []byte("#!/bin/false\n"), 0o755)
+	h.cfg.probeQuery = h.sshdProbe
+}
+
+// sshdProbe answers a probe query as sshd does against the generation
+// current names (03-10b): accepted when the certificate's principal is in
+// the account's principals file, its CA key is in user_ca_keys and the KRL
+// does not revoke its serial; refused otherwise. It records the query.
+func (h *testHost) sshdProbe(_ context.Context, t ProbeTarget, c *ssh.Certificate, _ time.Time) (ProbeOutcome, error) {
+	h.probeMu.Lock()
+	h.queries = append(h.queries, t)
+	h.probeMu.Unlock()
+	g, _, err := h.engine().readCurrent()
+	if err != nil || g == nil {
+		return ProbeInconclusive, fmt.Errorf("no current generation: %w", err)
+	}
+	if len(c.ValidPrincipals) != 1 || !lineSet(g.Files[PrincipalsDir+"/"+t.Account], principalLine)[c.ValidPrincipals[0]] ||
+		!slices.ContainsFunc(genCAKeys(g), func(k ssh.PublicKey) bool { return bytes.Equal(k.Marshal(), c.SignatureKey.Marshal()) }) {
+		return ProbeRefused, nil
+	}
+	if k := genKRL(g); k != nil && k.RevokesSerial(c.SignatureKey.Marshal(), c.Serial) {
+		return ProbeRefused, nil
+	}
+	return ProbeAccepted, nil
+}
+
+// probeQueries is the probe queries sshdProbe answered so far.
+func (h *testHost) probeQueries() []ProbeTarget {
+	h.probeMu.Lock()
+	defer h.probeMu.Unlock()
+	return slices.Clone(h.queries)
 }
 
 // writePasswd writes <root>/etc/passwd.

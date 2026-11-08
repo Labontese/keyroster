@@ -4,6 +4,7 @@ package apply
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
@@ -1045,6 +1048,518 @@ func TestProbeGate(t *testing.T) {
 		mustPrincipals(t, h, "role:a")
 		if h.acceptedDir() != 3 || h.current() != h.lastGood() {
 			t.Fatalf("accepted/ directory %d, current %d, last-good %d", h.acceptedDir(), h.current(), h.lastGood())
+		}
+	})
+	t.Run("held_pass_then_krl_alone_pass_reports_no_hold", func(t *testing.T) {
+		// The held candidate's intermediate is refused (a CA line), so the
+		// KRL-alone pass commits without a hold: its report carries no
+		// probe_held from the first pass.
+		h := gateHost(t, "role:a", "role:b")
+		machine := trust.FormatKey(h.f.mach.PublicKey())
+		armed := true
+		h.run.rejectCA = func(line string) bool {
+			if armed && line == machine {
+				armed = false
+				return true
+			}
+			return false
+		}
+		h.publishDir(h.spec("role:a", "role:c"))
+		h.publishKRL(9)
+		r, _ := h.apply()
+		if armed || !h.krlRevokes(h.l.Current(), 9) {
+			t.Fatalf("the intermediate was not refused (%t) or the KRL-alone pass did not land", !armed)
+		}
+		if strings.HasPrefix(r.Detail, "probe_held") || r.ProbePositive == probeSkippedNotReady && r.Detail != "" {
+			t.Fatalf("a stale hold in the report: detail %q, probes %q %q", r.Detail, r.ProbePositive, r.ProbeNegative)
+		}
+	})
+	probeGateRuns(t)
+}
+
+// scriptProbes makes h's probe queries answer outs in order and then as
+// sshd does (sshdProbe); every query is recorded.
+func (h *testHost) scriptProbes(outs ...ProbeOutcome) {
+	h.cfg.probeQuery = func(ctx context.Context, t ProbeTarget, c *ssh.Certificate, d time.Time) (ProbeOutcome, error) {
+		h.probeMu.Lock()
+		if len(outs) > 0 {
+			o := outs[0]
+			outs = outs[1:]
+			h.queries = append(h.queries, t)
+			h.probeMu.Unlock()
+			return o, nil
+		}
+		h.probeMu.Unlock()
+		return h.sshdProbe(ctx, t, c, d)
+	}
+}
+
+// readyFor is ready with a pair of the given lifetime.
+func (h *testHost) readyFor(d time.Duration) probecert.Pair {
+	h.t.Helper()
+	p := h.seedPair(d, false)
+	h.listMach(p.Negative.Serial)
+	h.mustApply()
+	return p
+}
+
+// mustFailed requires a run whose probes failed with code: the error, the
+// rollback, the detail and the failure record.
+func mustFailed(t *testing.T, h *testHost, r *Report, err error, code error) {
+	t.Helper()
+	if !errors.Is(err, code) || !r.Rollback || r.Detail != code.Error() {
+		t.Fatalf("want %v rolled back: err %v, rollback %t, detail %q", code, err, r.Rollback, r.Detail)
+	}
+	if st := h.probeStateNow(); st == nil || st.Failure == nil || st.Failure.Code != code.Error() {
+		t.Fatalf("failure record %+v", st)
+	}
+}
+
+// mixedFail runs a mixed change (role:a removed, role:c added, KRL 66)
+// whose probes answer outs on a host with role:a and role:b, recording
+// deploy's principals at every swap, and requires that the removal stayed
+// in force from the narrowing swap on (03-10b, D13).
+func mixedFail(t *testing.T, code error, outs ...ProbeOutcome) (*testHost, *Report) {
+	t.Helper()
+	h := gateHost(t, "role:a", "role:b")
+	h.ready()
+	lg0 := h.lastGood()
+	var swaps [][]string
+	h.cfg.Fault = func(p string) error {
+		if p == "swap" {
+			swaps = append(swaps, h.principals("deploy"))
+		}
+		return nil
+	}
+	h.scriptProbes(outs...)
+	h.publishDir(h.spec("role:b", "role:c"))
+	h.publishKRL(66)
+	r, err := h.apply()
+	h.cfg.Fault = nil
+	mustFailed(t, h, r, err, code)
+	if len(swaps) < 2 {
+		t.Fatalf("swaps %v", swaps)
+	}
+	for i, s := range swaps[1:] {
+		if slices.Contains(s, "role:a") {
+			t.Fatalf("swap %d: role:a was in force again: %v", i+1, s)
+		}
+	}
+	mustPrincipals(t, h, "role:b")
+	if h.current() != h.lastGood() || h.current() == lg0 || h.current() != r.Generation {
+		t.Fatalf("current %d, last-good %d (was %d), report generation %d", h.current(), h.lastGood(), lg0, r.Generation)
+	}
+	if h.acceptedDir() != 2 || !h.krlRevokes(h.l.Current(), 66) {
+		t.Fatalf("accepted/ directory %d, KRL 66 in force %t", h.acceptedDir(), h.krlRevokes(h.l.Current(), 66))
+	}
+	if h.heldNow() != "failure_backoff" {
+		t.Fatalf("held %q", h.heldNow())
+	}
+	return h, r
+}
+
+// probeGateRuns are TestProbeGate's subtests of the probes after a swap
+// (03-10b, Task 4: T-03-66, T-03-67, T-03-374).
+func probeGateRuns(t *testing.T) {
+	t.Run("widening_passes_both_probes", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.publishDir(h.spec("role:a", "role:b"))
+		r, err := h.apply()
+		mustHeld(t, h, r, err, "cert_missing")
+		p := h.seedPair(10*time.Minute, false)
+		h.listMach(p.Negative.Serial)
+		r = h.mustApply()
+		mustPrincipals(t, h, "role:a", "role:b")
+		st := h.probeStateNow()
+		if r.ProbePositive != probePass || r.ProbeNegative != probePass || r.Rollback || h.current() != h.lastGood() {
+			t.Fatalf("report %+v", r)
+		}
+		if st.Held != nil || st.Failure != nil || len(st.Negatives) != 1 || len(h.probeQueries()) != 2 {
+			t.Fatalf("state %+v, %d queries", st, len(h.probeQueries()))
+		}
+	})
+	t.Run("widening_positive_refused_rolls_back", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		cur := h.current()
+		h.scriptProbes(ProbeRefused)
+		h.publishDir(h.spec("role:a", "role:b"))
+		r, err := h.apply()
+		mustFailed(t, h, r, err, ErrProbePositiveRefused)
+		mustPrincipals(t, h, "role:a")
+		if h.current() != cur || h.lastGood() != cur || h.acceptedDir() != 1 || h.heldNow() != "" {
+			t.Fatalf("current %d, last-good %d (was %d), accepted/ directory %d, held %q", h.current(), h.lastGood(), cur, h.acceptedDir(), h.heldNow())
+		}
+		q := len(h.probeQueries())
+		r, err = h.apply()
+		mustHeld(t, h, r, err, "failure_backoff")
+		if len(h.probeQueries()) != q {
+			t.Fatal("the held retry sent a query")
+		}
+	})
+	t.Run("mixed_positive_refused_keeps_removal", func(t *testing.T) {
+		mixedFail(t, ErrProbePositiveRefused, ProbeRefused)
+	})
+	t.Run("mixed_negative_accepted_keeps_removal", func(t *testing.T) {
+		mixedFail(t, ErrProbeKRLNotEnforced, ProbeAccepted, ProbeAccepted)
+	})
+	t.Run("mixed_inconclusive_keeps_removal", func(t *testing.T) {
+		mixedFail(t, ErrProbeInconclusive, ProbeInconclusive)
+	})
+	t.Run("mixed_failure_next_apply_holds_and_writes_nothing", func(t *testing.T) {
+		h, _ := mixedFail(t, ErrProbePositiveRefused, ProbeRefused)
+		before, q := h.diskState(), len(h.probeQueries())
+		h.cfg.Fault = func(p string) error {
+			if p == "marker" || p == "save-state" {
+				t.Errorf("the held retry reached the %s fault point", p)
+			}
+			return nil
+		}
+		r, err := h.apply()
+		mustHeld(t, h, r, err, "failure_backoff")
+		if after := h.diskState(); after != before || len(h.probeQueries()) != q {
+			t.Fatalf("the retry wrote or queried:\n%s\nwas:\n%s", after, before)
+		}
+	})
+	t.Run("addition_with_krl_change_failure_lands_the_krl", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		h.scriptProbes(ProbeRefused)
+		h.publishDir(h.spec("role:a", "role:b"))
+		h.publishKRL(67)
+		r, err := h.apply()
+		mustFailed(t, h, r, err, ErrProbePositiveRefused)
+		mustPrincipals(t, h, "role:a")
+		if !h.krlRevokes(h.l.Current(), 67) || h.current() != h.lastGood() {
+			t.Fatalf("KRL 67 in force %t, current %d, last-good %d", h.krlRevokes(h.l.Current(), 67), h.current(), h.lastGood())
+		}
+	})
+	t.Run("rollback_keeps_newer_krl", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		h.scriptProbes(ProbeInconclusive)
+		h.publishDir(h.spec("role:a", "role:b"))
+		h.publishKRL(68)
+		r, err := h.apply()
+		mustFailed(t, h, r, err, ErrProbeInconclusive)
+		if !h.krlRevokes(h.l.Current(), 68) || !h.krlRevokes(h.l.LastGood(), 68) {
+			t.Fatal("the newer KRL is not in force after the rollback")
+		}
+	})
+	// supersede runs a change from to first on a host with principals
+	// with, publishing then at the first sleep of the widening wait, and
+	// records the generation current names at every swap.
+	supersede := func(t *testing.T, with, first, then []string, krl uint64, outs ...ProbeOutcome) (*testHost, *Report, []uint64, error) {
+		t.Helper()
+		h := gateHost(t, with...)
+		h.ready()
+		h.scriptProbes(outs...)
+		var swaps []uint64
+		h.cfg.Fault = func(p string) error {
+			if p == "swap" {
+				swaps = append(swaps, h.current())
+			}
+			return nil
+		}
+		fired := false
+		h.clock.onSleep = func(time.Duration) {
+			if fired {
+				return
+			}
+			fired = true
+			h.publishDir(h.spec(then...))
+			h.write()
+		}
+		h.publishDir(h.spec(first...))
+		if krl != 0 {
+			h.publishKRL(krl)
+		}
+		r, err := h.apply()
+		h.cfg.Fault, h.clock.onSleep = nil, nil
+		if !fired {
+			t.Fatal("the widening did not wait")
+		}
+		return h, r, swaps, err
+	}
+	t.Run("superseded_mixed_failure_keeps_removal", func(t *testing.T) {
+		h, r, swaps, err := supersede(t, []string{"role:a", "role:b"}, []string{"role:b", "role:c"}, []string{"role:b", "role:c"}, 70, ProbeRefused)
+		mustFailed(t, h, r, err, ErrProbePositiveRefused)
+		mustPrincipals(t, h, "role:b")
+		if len(swaps) < 2 || h.current() != swaps[1] || h.lastGood() != h.current() {
+			t.Fatalf("swaps %v, current %d, last-good %d", swaps, h.current(), h.lastGood())
+		}
+		if h.acceptedDir() != 3 || !h.krlRevokes(h.l.Current(), 70) {
+			t.Fatalf("accepted/ directory %d, KRL 70 %t", h.acceptedDir(), h.krlRevokes(h.l.Current(), 70))
+		}
+		r, err = h.apply()
+		mustHeld(t, h, r, err, "failure_backoff")
+	})
+	t.Run("superseded_readd_failure_keeps_last_good_lines", func(t *testing.T) {
+		t.Run("full_readd", func(t *testing.T) {
+			h, r, _, err := supersede(t, []string{"role:a", "role:b"}, []string{"role:b", "role:c"}, []string{"role:a", "role:b", "role:c"}, 0, ProbeRefused)
+			mustFailed(t, h, r, err, ErrProbePositiveRefused)
+			mustPrincipals(t, h, "role:a", "role:b")
+			if h.current() != h.lastGood() || h.heldNow() != "" {
+				t.Fatalf("current %d, last-good %d, held %q", h.current(), h.lastGood(), h.heldNow())
+			}
+			// The plain rollback leaves accepted/; the next round holds and
+			// stores the newest version.
+			r, err = h.apply()
+			mustHeld(t, h, r, err, "failure_backoff")
+			mustPrincipals(t, h, "role:a", "role:b")
+			if h.acceptedDir() != 3 {
+				t.Fatalf("accepted/ directory %d", h.acceptedDir())
+			}
+		})
+		t.Run("partial_readd", func(t *testing.T) {
+			h, r, _, err := supersede(t, []string{"role:a", "role:b", "role:d"}, []string{"role:b", "role:c"}, []string{"role:a", "role:b", "role:c"}, 70, ProbeRefused)
+			mustFailed(t, h, r, err, ErrProbePositiveRefused)
+			mustPrincipals(t, h, "role:a", "role:b")
+			if h.current() != h.lastGood() || h.acceptedDir() != 3 || !h.krlRevokes(h.l.Current(), 70) {
+				t.Fatalf("current %d, last-good %d, accepted/ directory %d", h.current(), h.lastGood(), h.acceptedDir())
+			}
+		})
+	})
+	t.Run("superseded_to_narrowing_runs_no_probes", func(t *testing.T) {
+		h, r, _, err := supersede(t, []string{"role:a", "role:b"}, []string{"role:a", "role:b", "role:c"}, []string{"role:a"}, 0)
+		if err != nil || r.Rollback {
+			t.Fatalf("apply: %v, rollback %t", err, r.Rollback)
+		}
+		mustPrincipals(t, h, "role:a")
+		if n := len(h.probeQueries()); n != 2 {
+			t.Fatalf("%d queries, want only ready's opportunistic pair", n)
+		}
+	})
+	t.Run("held_clears_after_settle_and_revert", func(t *testing.T) {
+		h, _ := mixedFail(t, ErrProbePositiveRefused, ProbeRefused)
+		h.publishDir(h.spec("role:b"))
+		if _, err := h.apply(); err != nil {
+			t.Fatal(err)
+		}
+		mustPrincipals(t, h, "role:b")
+		if h.heldNow() != "" || strings.HasPrefix(h.probeDetail(), "probe_held") {
+			t.Fatalf("held %q, probe_detail %q", h.heldNow(), h.probeDetail())
+		}
+	})
+	t.Run("settle_listener_failure_falls_back_to_plain_rollback", func(t *testing.T) {
+		h := gateHost(t, "role:a", "role:b")
+		h.ready()
+		h.cfg.probeQuery = func(context.Context, ProbeTarget, *ssh.Certificate, time.Time) (ProbeOutcome, error) {
+			h.sshd.setStall(true) // the listener test fails after the move to M
+			return ProbeRefused, nil
+		}
+		h.publishDir(h.spec("role:b", "role:c"))
+		r, err := h.apply()
+		h.sshd.setStall(false)
+		if !errors.Is(err, ErrProbePositiveRefused) || !r.Rollback || h.heldNow() != "failure_backoff" {
+			t.Fatalf("apply: %v, rollback %t, held %q", err, r.Rollback, h.heldNow())
+		}
+		// The fallback re-granted role:a (the named residual). Its way back
+		// is a widening swap that waits LoginGraceTime + 30 s, longer than
+		// the first back-off, so the next apply either holds or retries the
+		// addition and settles again: role:a is gone either way.
+		mustPrincipals(t, h, "role:a", "role:b")
+		h.scriptProbes(ProbeRefused)
+		_, err = h.apply()
+		if !errors.Is(err, ErrProbeHeld) && !errors.Is(err, ErrProbePositiveRefused) {
+			t.Fatalf("the next apply: %v", err)
+		}
+		mustPrincipals(t, h, "role:b")
+		if h.heldNow() != "failure_backoff" {
+			t.Fatalf("held %q", h.heldNow())
+		}
+	})
+	t.Run("positive_refused_sends_no_negative", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		q := len(h.probeQueries())
+		h.scriptProbes(ProbeRefused)
+		h.publishDir(h.spec("role:a", "role:b"))
+		r, err := h.apply()
+		mustFailed(t, h, r, err, ErrProbePositiveRefused)
+		if n := len(h.probeQueries()) - q; n != 1 || r.ProbePositive != probeFail || r.ProbeNegative != probeSkippedNotReady {
+			t.Fatalf("%d queries, probes %q %q", n, r.ProbePositive, r.ProbeNegative)
+		}
+	})
+	t.Run("widening_negative_accepted_rolls_back", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		h.scriptProbes(ProbeAccepted, ProbeAccepted)
+		h.publishDir(h.spec("role:a", "role:b"))
+		r, err := h.apply()
+		mustFailed(t, h, r, err, ErrProbeKRLNotEnforced)
+		mustPrincipals(t, h, "role:a")
+	})
+	t.Run("widening_inconclusive_rolls_back", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		h.scriptProbes(ProbeAccepted, ProbeInconclusive)
+		h.publishDir(h.spec("role:a", "role:b"))
+		r, err := h.apply()
+		mustFailed(t, h, r, err, ErrProbeInconclusive)
+		mustPrincipals(t, h, "role:a")
+	})
+	t.Run("pair_expired_during_wait_is_inconclusive", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		q := len(h.probeQueries())
+		fired := false
+		h.clock.onSleep = func(time.Duration) {
+			if !fired {
+				fired = true
+				h.clock.advance(10 * time.Minute) // the pair runs out inside the wait
+			}
+		}
+		h.publishDir(h.spec("role:a", "role:b"))
+		r, err := h.apply()
+		h.clock.onSleep = nil
+		mustFailed(t, h, r, err, ErrProbeInconclusive)
+		if !fired || len(h.probeQueries()) != q || r.ProbePositive != probeInconclusive {
+			t.Fatalf("fired %t, %d queries, probe_positive %q", fired, len(h.probeQueries())-q, r.ProbePositive)
+		}
+	})
+	narrow := func(t *testing.T, code error, outs ...ProbeOutcome) {
+		t.Helper()
+		h := gateHost(t, "role:a", "role:b")
+		h.readyFor(time.Hour)
+		h.clock.advance(11 * time.Minute)
+		h.scriptProbes(outs...)
+		h.publishDir(h.spec("role:a"))
+		r := h.mustApply()
+		mustPrincipals(t, h, "role:a")
+		if r.Rollback || r.Detail != code.Error() || h.probeStateNow().Alarm != code.Error() {
+			t.Fatalf("rollback %t, detail %q, alarm %q", r.Rollback, r.Detail, h.probeStateNow().Alarm)
+		}
+		if r := h.mustApply(); !r.NoOp || h.probeDetail() != code.Error() {
+			t.Fatalf("after a no-op apply: noop %t, probe_detail %q", r.NoOp, h.probeDetail())
+		}
+	}
+	t.Run("narrowing_negative_accepted_no_rollback_reports", func(t *testing.T) {
+		narrow(t, ErrProbeKRLNotEnforced, ProbeAccepted, ProbeAccepted)
+	})
+	t.Run("narrowing_positive_refused_reports", func(t *testing.T) {
+		narrow(t, ErrProbePositiveRefused, ProbeRefused)
+	})
+	t.Run("opportunistic_once_per_ten_minutes", func(t *testing.T) {
+		h := gateHost(t, "role:a", "role:b", "role:c")
+		h.readyFor(time.Hour)
+		q := len(h.probeQueries())
+		h.clock.advance(5 * time.Minute)
+		h.publishDir(h.spec("role:a", "role:b"))
+		if r := h.mustApply(); r.ProbePositive != probeSkippedBudget || len(h.probeQueries()) != q {
+			t.Fatalf("5 min later: probes %q, %d queries", r.ProbePositive, len(h.probeQueries())-q)
+		}
+		h.clock.advance(6 * time.Minute)
+		h.publishDir(h.spec("role:a"))
+		if r := h.mustApply(); r.ProbePositive != probePass || len(h.probeQueries()) != q+2 {
+			t.Fatalf("11 min later: probes %q, %d queries", r.ProbePositive, len(h.probeQueries())-q)
+		}
+	})
+	opp := func(t *testing.T, negatives int, want string) {
+		t.Helper()
+		h := gateHost(t, "role:a", "role:b")
+		h.readyFor(time.Hour)
+		now := lockedEngine(h).probeNow()
+		st := newProbeState()
+		for i := range negatives {
+			st.Negatives = append(st.Negatives, now-3000+uint64(i)) //nolint:gosec // G115: a small index
+		}
+		st.LastPair = now - 3000
+		h.setProbeState(st)
+		h.publishDir(h.spec("role:a"))
+		if r := h.mustApply(); r.ProbePositive != want || r.ProbeNegative != want {
+			t.Fatalf("%d negatives: probes %q %q, want %q", negatives, r.ProbePositive, r.ProbeNegative, want)
+		}
+	}
+	t.Run("opportunistic_skips_after_three_negatives_in_the_hour", func(t *testing.T) {
+		opp(t, ProbeOpportunisticNegatives, probeSkippedBudget)
+		opp(t, ProbeOpportunisticNegatives-1, probePass)
+	})
+	t.Run("over_budget_narrowing_skips_negative", func(t *testing.T) {
+		opp(t, ProbeNegativesPerHour, probeSkippedBudget)
+	})
+	t.Run("opportunistic_skipped_when_not_ready", func(t *testing.T) {
+		h := gateHost(t, "role:a", "role:b")
+		h.publishDir(h.spec("role:a"))
+		if r := h.mustApply(); r.ProbePositive != probeSkippedNotReady || len(h.probeQueries()) != 0 {
+			t.Fatalf("probes %q, %d queries", r.ProbePositive, len(h.probeQueries()))
+		}
+	})
+	seeded := func(t *testing.T, set func(st *probeState, now uint64)) *testHost {
+		t.Helper()
+		h := gateHost(t, "role:a")
+		h.readyFor(time.Hour)
+		now := lockedEngine(h).probeNow()
+		st := newProbeState()
+		set(st, now)
+		h.setProbeState(st)
+		h.publishDir(h.spec("role:a", "role:b"))
+		h.mustApply()
+		mustPrincipals(t, h, "role:a", "role:b")
+		return h
+	}
+	t.Run("failure_cleared_by_a_pass", func(t *testing.T) {
+		h := seeded(t, func(st *probeState, now uint64) {
+			st.Failure = &probeFailure{Code: ErrProbeInconclusive.Error(), Key: strings.Repeat("0", 64), At: now - 7200, Count: 1}
+		})
+		if st := h.probeStateNow(); st.Failure != nil {
+			t.Fatalf("failure %+v after a pass", st.Failure)
+		}
+	})
+	t.Run("alarm_cleared_by_a_pass", func(t *testing.T) {
+		h := seeded(t, func(st *probeState, _ uint64) { st.Alarm = ErrProbeKRLNotEnforced.Error() })
+		if st := h.probeStateNow(); st.Alarm != "" {
+			t.Fatalf("alarm %q after a pass", st.Alarm)
+		}
+	})
+	t.Run("reservation_before_send", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		n, q := len(h.probeStateNow().Negatives), len(h.probeQueries())
+		h.cfg.Fault = func(p string) error {
+			if p == "probe-send" {
+				return errCrash
+			}
+			return nil
+		}
+		h.publishDir(h.spec("role:a", "role:b"))
+		if _, err := h.apply(); !errors.Is(err, errCrash) {
+			t.Fatalf("apply: %v, want the crash", err)
+		}
+		if got := len(h.probeStateNow().Negatives); got != n+1 || len(h.probeQueries()) != q {
+			t.Fatalf("negatives %d (were %d), %d queries", got, n, len(h.probeQueries())-q)
+		}
+	})
+	t.Run("probe_sleeps_for_spacing", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.readyFor(time.Hour)
+		h.clock.advance(10 * time.Minute) // no widening wait: the probes run at once
+		now := lockedEngine(h).probeNow()
+		st := newProbeState()
+		st.LastPair = now - 30
+		h.setProbeState(st)
+		var slept []time.Duration
+		h.clock.onSleep = func(d time.Duration) { slept = append(slept, d) }
+		h.publishDir(h.spec("role:a", "role:b"))
+		r := h.mustApply()
+		h.clock.onSleep = nil
+		if r.ProbePositive != probePass || !slices.Contains(slept, 30*time.Second) || h.probeStateNow().LastPair != now+30 {
+			t.Fatalf("probes %q, slept %v, last pair %d (now %d)", r.ProbePositive, slept, h.probeStateNow().LastPair, now)
+		}
+	})
+	t.Run("probe_source_is_not_the_listener_source", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		h.publishDir(h.spec("role:a", "role:b"))
+		h.mustApply()
+		qs := h.probeQueries()
+		if len(qs) < 4 {
+			t.Fatalf("%d queries", len(qs))
+		}
+		for _, q := range qs {
+			if q.Source != ProbeSource {
+				t.Fatalf("a query from %s", q.Source)
+			}
 		}
 	})
 }

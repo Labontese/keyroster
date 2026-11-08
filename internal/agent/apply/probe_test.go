@@ -3,16 +3,20 @@
 package apply
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +25,7 @@ import (
 
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	probecert "github.com/Labontese/keyroster/internal/agent/probe"
+	"github.com/Labontese/keyroster/internal/agent/spool"
 	certpkg "github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/directory"
@@ -693,4 +698,355 @@ func TestDriftIncludesProbeAccount(t *testing.T) {
 	if err != nil || !slices.ContainsFunc(r.Settings, func(s SettingDrift) bool { return s.Account == certpkg.ReservedAccountName }) {
 		t.Fatalf("drift does not evaluate the probe account: %+v, %v", r, err)
 	}
+}
+
+// TestForwardServedCerts (03-10b, Task 4 step 3, Plan check 1
+// sec-served-cert-rollback-any-class): after forward changes the drop-in it
+// checks the served host certificates; a mismatch rolls back a gated
+// addition alone and is report only for any other change.
+func TestForwardServedCerts(t *testing.T) {
+	spec := func(h *hostCertHost, principals ...string) dirSpec {
+		s := h.hostSpec(h.sshd.pub)
+		s.principals = principals
+		return s
+	}
+	served := func(t *testing.T, mismatch bool) *hostCertHost {
+		t.Helper()
+		h := newHostCertHost(t)
+		h.one()
+		h.publishDir(spec(h, "role:ops", "role:x"))
+		h.mustApply()
+		h.gateOn()
+		h.ready()
+		// A drop-in that is not the wanted one: forward rewrites it.
+		if err := os.Remove(h.l.DropIn()); err != nil {
+			t.Fatal(err)
+		}
+		if mismatch {
+			h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
+			t.Cleanup(func() { h.sshd.serveCert(nil) })
+		}
+		return h
+	}
+	t.Run("pass", func(t *testing.T) {
+		h := served(t, false)
+		h.publishDir(spec(h, "role:ops"))
+		if r := h.mustApply(); r.ServedCerts != probePass || r.Detail != "" {
+			t.Fatalf("served_certs %q, detail %q", r.ServedCerts, r.Detail)
+		}
+	})
+	t.Run("fail_narrowing_keeps_removal_and_commits", func(t *testing.T) {
+		h := served(t, true)
+		h.publishDir(spec(h, "role:ops"))
+		r := h.mustApply()
+		if r.ServedCerts != "fail:"+DetailServedCertMismatch || r.Detail != DetailServedCertMismatch || r.Rollback {
+			t.Fatalf("served_certs %q, detail %q, rollback %t", r.ServedCerts, r.Detail, r.Rollback)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops"}) || h.acceptedDir() != 3 || h.current() != h.lastGood() {
+			t.Fatalf("principals %v, accepted/ directory %d, current %d, last-good %d", got, h.acceptedDir(), h.current(), h.lastGood())
+		}
+	})
+	t.Run("fail_widening_rolls_back_addition_only", func(t *testing.T) {
+		h := served(t, true)
+		h.publishDir(spec(h, "role:ops", "role:x", "role:y"))
+		r, err := h.apply()
+		if !errors.Is(err, ErrServedCertMismatch) || !r.Rollback || r.ServedCerts != "fail:"+DetailServedCertMismatch {
+			t.Fatalf("apply: %v, rollback %t, served_certs %q", err, r.Rollback, r.ServedCerts)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops", "role:x"}) {
+			t.Fatalf("principals %v", got)
+		}
+		if st := h.probeStateNow(); st.Failure == nil || st.Failure.Code != DetailServedCertMismatch || st.Held != nil {
+			t.Fatalf("state %+v", st)
+		}
+	})
+	t.Run("fail_mixed_widening_keeps_removal", func(t *testing.T) {
+		h := served(t, true)
+		h.publishDir(spec(h, "role:ops", "role:y"))
+		r, err := h.apply()
+		if !errors.Is(err, ErrServedCertMismatch) || !r.Rollback {
+			t.Fatalf("apply: %v, rollback %t", err, r.Rollback)
+		}
+		if got := h.principals("deploy"); !slices.Equal(got, []string{"role:ops"}) || h.current() != h.lastGood() || h.heldNow() != "failure_backoff" {
+			t.Fatalf("principals %v, current %d, last-good %d, held %q", got, h.current(), h.lastGood(), h.heldNow())
+		}
+	})
+	t.Run("drop_in_unchanged_skips", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.one()
+		h.publishDir(spec(h, "role:ops", "role:x"))
+		h.mustApply()
+		h.gateOn()
+		h.publishDir(spec(h, "role:ops"))
+		if r := h.mustApply(); r.ServedCerts != "skipped:drop_in_unchanged" {
+			t.Fatalf("served_certs %q", r.ServedCerts)
+		}
+	})
+	t.Run("no_certificates_skips", func(t *testing.T) {
+		h := gateHost(t, "role:a", "role:b")
+		if err := os.Remove(h.l.DropIn()); err != nil {
+			t.Fatal(err)
+		}
+		h.publishDir(h.spec("role:a"))
+		if r := h.mustApply(); r.ServedCerts != "skipped:no_certificates" {
+			t.Fatalf("served_certs %q", r.ServedCerts)
+		}
+	})
+}
+
+// TestProbeSites (03-10b, design section 3.6): of the eight self-test
+// sites only forward sends a probe; the other seven leave probe-state.json
+// untouched.
+func TestProbeSites(t *testing.T) {
+	// none runs step on h and requires that no probe query was sent and
+	// probe-state.json did not change.
+	none := func(t *testing.T, h *testHost, site string, step func()) {
+		t.Helper()
+		q := len(h.probeQueries())
+		before, _ := os.ReadFile(h.l.State(probeStateFile))
+		step()
+		after, _ := os.ReadFile(h.l.State(probeStateFile))
+		if len(h.probeQueries()) != q || !bytes.Equal(before, after) {
+			t.Fatalf("%s: %d probe queries, probe-state.json changed %t", site, len(h.probeQueries())-q, !bytes.Equal(before, after))
+		}
+	}
+	t.Run("firstInstall", func(t *testing.T) {
+		h := newTestHost(t, newFixture(t))
+		h.gateOn()
+		none(t, h, "firstInstall", func() { h.installed("role:a") })
+	})
+	t.Run("undoFirstInstall", func(t *testing.T) {
+		h := newTestHost(t, newFixture(t))
+		h.gateOn()
+		h.sshd.setStall(true)
+		h.publishDir(h.spec("role:a"))
+		none(t, h, "undoFirstInstall", func() {
+			if _, err := h.apply(); err == nil {
+				t.Fatal("the first install passed a stalled listener test")
+			}
+		})
+	})
+	t.Run("backToLastGood", func(t *testing.T) {
+		h := gateHost(t, "role:a", "role:b")
+		h.ready()
+		h.sshd.setStall(true)
+		h.publishDir(h.spec("role:a"))
+		none(t, h, "backToLastGood", func() {
+			if r, err := h.apply(); err == nil || !r.Rollback {
+				t.Fatalf("no rollback: %v", err)
+			}
+		})
+	})
+	t.Run("recoverToLastGood", func(t *testing.T) {
+		h := gateHost(t, "role:a", "role:b")
+		h.ready()
+		h.cfg.Fault = func(p string) error {
+			if p == "swap" {
+				return errCrash
+			}
+			return nil
+		}
+		h.publishDir(h.spec("role:a"))
+		if _, err := h.apply(); !errors.Is(err, errCrash) {
+			t.Fatalf("apply: %v, want the crash", err)
+		}
+		h.cfg.Fault = nil
+		none(t, h, "recoverToLastGood", func() {
+			if r, _ := h.apply(); !r.Recovered {
+				t.Fatalf("not recovered: %+v", r)
+			}
+		})
+	})
+	t.Run("repairDropIn", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		if err := os.WriteFile(h.l.DropIn(), []byte("# not the wanted drop-in\n"), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		none(t, h, "repairDropIn", func() {
+			if r := h.mustApply(); r.NoOp {
+				t.Fatal("the drop-in was not repaired")
+			}
+		})
+	})
+	t.Run("activatePreRepair", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		h.run.rejectDropIn = func(b []byte) bool { return bytes.Contains(b, []byte("UNBALANCED")) }
+		if err := os.WriteFile(h.l.DropIn(), []byte("Banner \"UNBALANCED\n"), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		none(t, h, "activatePreRepair", func() {
+			if _, err := h.apply(); err != nil {
+				t.Fatalf("the pre-repair: %v", err)
+			}
+			if b, _ := os.ReadFile(h.l.DropIn()); bytes.Contains(b, []byte("UNBALANCED")) {
+				t.Fatal("the drop-in was not pre-repaired")
+			}
+		})
+	})
+	t.Run("activateCandidate", func(t *testing.T) {
+		h := newHostCertHost(t)
+		h.gateOn()
+		none(t, h.testHost, "activateCandidate", func() { h.one() })
+	})
+	t.Run("forward", func(t *testing.T) {
+		h := gateHost(t, "role:a")
+		h.ready()
+		q := len(h.probeQueries())
+		h.publishDir(h.spec("role:a", "role:b"))
+		h.mustApply()
+		if n := len(h.probeQueries()) - q; n != 2 {
+			t.Fatalf("forward sent %d probe queries, want the pair", n)
+		}
+	})
+}
+
+// TestNegativeProbeBudgetAcrossProcesses (T-03-67): the hour's six
+// negatives hold across processes, each reservation taken under apply.lock.
+// The helper processes are this test binary run again.
+func TestNegativeProbeBudgetAcrossProcesses(t *testing.T) {
+	if dir := os.Getenv("KEYROSTER_PROBE_HELPER"); dir != "" {
+		probeBudgetHelper(dir)
+		return
+	}
+	dir := t.TempDir()
+	t0 := uint64(1_793_000_000)
+	start := func(at uint64, mode string) (*exec.Cmd, io.WriteCloser, *bufio.Scanner) {
+		t.Helper()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestNegativeProbeBudgetAcrossProcesses$") //nolint:gosec // the test binary itself
+		cmd.Env = append(os.Environ(), "KEYROSTER_PROBE_HELPER="+dir, "KEYROSTER_PROBE_AT="+strconv.FormatUint(at, 10), "KEYROSTER_PROBE_MODE="+mode)
+		in, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return cmd, in, bufio.NewScanner(out)
+	}
+	// line reads the helper's next line with the given prefix.
+	line := func(sc *bufio.Scanner, prefix string) []string {
+		t.Helper()
+		for sc.Scan() {
+			if f := strings.Fields(sc.Text()); len(f) > 0 && f[0] == prefix {
+				return f
+			}
+		}
+		t.Fatalf("no %s line", prefix)
+		return nil
+	}
+	plain := func(at uint64) string {
+		t.Helper()
+		cmd, in, sc := start(at, "plain")
+		_ = in.Close()
+		f := line(sc, "result")
+		_ = cmd.Wait()
+		return f[1]
+	}
+	for i := range uint64(5) {
+		if got := plain(t0 + i); got != "ok" {
+			t.Fatalf("reservation %d: %s", i+1, got)
+		}
+	}
+	a, ain, asc := start(t0+5, "hold")
+	line(asc, "locked")
+	b, bin, bsc := start(t0+6, "plain")
+	_ = bin.Close()
+	// B is observed blocked: it marked that it is about to take the lock,
+	// it has not exited, and it sleeps in three polls in a row.
+	marker := filepath.Join(dir, "started-"+strconv.FormatUint(t0+6, 10))
+	for i, asleep := 0, 0; asleep < 3; i++ {
+		if _, err := os.Stat(marker); err == nil && procState(b.Process.Pid) == "S" {
+			asleep++
+		} else {
+			asleep = 0
+		}
+		if i > 200 {
+			t.Fatal("process B was never observed blocked on apply.lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, _ = ain.Write([]byte("go\n"))
+	_ = ain.Close()
+	ares := line(asc, "result")
+	arel := line(asc, "releasing")
+	_ = a.Wait()
+	bres := line(bsc, "result")
+	_ = b.Wait()
+	if ares[1] != "ok" || bres[1] != "refused" {
+		t.Fatalf("the sixth %v, the seventh %v: want ok and refused", ares, bres)
+	}
+	if bt, _ := strconv.ParseInt(bres[2], 10, 64); bt == 0 || arel[1] == "" || bt <= mustInt(t, arel[1]) {
+		t.Fatalf("B reserved at %s, before A released at %s", bres[2], arel[1])
+	}
+	if got := plain(t0 + 3601); got != "ok" {
+		t.Fatalf("the eighth, an hour after the first: %s", got)
+	}
+}
+
+// probeBudgetHelper is one helper process of
+// TestNegativeProbeBudgetAcrossProcesses: it marks that it started, takes
+// apply.lock, prints when it holds it (mode hold, then waits for a line on
+// stdin), reserves a negative at KEYROSTER_PROBE_AT and prints the result
+// with the time it held the lock, then releases.
+func probeBudgetHelper(dir string) {
+	at, _ := strconv.ParseInt(os.Getenv("KEYROSTER_PROBE_AT"), 10, 64)
+	mode := os.Getenv("KEYROSTER_PROBE_MODE")
+	_ = os.WriteFile(filepath.Join(dir, "started-"+os.Getenv("KEYROSTER_PROBE_AT")), nil, 0o600) //nolint:gosec // G703: the test's own temporary directory
+	fd, err := spool.OpenDir(dir)
+	if err != nil {
+		fmt.Println("result error", err)
+		os.Exit(1)
+	}
+	clock := newFakeClock()
+	clock.wall = time.Unix(at, 0)
+	e := &engine{l: Layout{Root: dir, StateDir: dir}, clock: clock, report: &Report{}, stateFd: fd}
+	unlock, err := e.lock()
+	if err != nil {
+		fmt.Println("result error", err)
+		os.Exit(1)
+	}
+	held := time.Now().UnixNano()
+	e.locked = true
+	if mode == "hold" {
+		fmt.Println("locked")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	}
+	res := "ok"
+	if err := e.reserveProbe(); errors.Is(err, errProbeBudget) {
+		res = "refused"
+	} else if err != nil {
+		res = "error"
+	}
+	fmt.Println("result", res, held)
+	fmt.Println("releasing", time.Now().UnixNano())
+	unlock()
+	os.Exit(0)
+}
+
+// mustInt parses a decimal int64.
+func mustInt(t *testing.T, s string) int64 {
+	t.Helper()
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// procState is the state letter of /proc/<pid>/stat ("" when unreadable).
+func procState(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return ""
+	}
+	if i := bytes.LastIndexByte(b, ')'); i >= 0 && i+2 < len(b) {
+		return string(b[i+2])
+	}
+	return ""
 }

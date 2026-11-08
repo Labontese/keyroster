@@ -616,37 +616,41 @@ func (e *engine) hold(reason string, v *state.Verified) error {
 // when that collapses, the target is from itself and done is set, so the
 // caller commits it without another swap. reason is the hold's ("" for
 // none).
-func (e *engine) gateSuperseded(ctx context.Context, lg link, from, t *Generation, tv *state.Verified) (target *Generation, reason string, done bool, err error) {
-	class := classify(lg, from, t, e.probeAccount())
+//
+// class is the superseding target's and gated reports a widening that
+// passed the gate, so its probes run after the final swap (03-10b, Task 4,
+// Fix round 3 r2-6: the flag belongs to the final target alone).
+func (e *engine) gateSuperseded(ctx context.Context, lg link, from, t *Generation, tv *state.Verified) (target *Generation, reason string, class probeClass, gated, done bool, err error) {
+	class = classify(lg, from, t, e.probeAccount())
 	e.labelExempt(class)
 	if !e.probesOn() || !needsGate(class) {
-		return t, "", false, nil
+		return t, "", class, false, false, nil
 	}
 	if reason = e.probeGate(ctx, from, t, tv); reason == "" {
-		return t, "", false, nil
+		return t, "", class, true, false, nil
 	}
 	m, collapsed := Intermediate(from, t)
 	if err := e.hold(reason, tv); err != nil {
-		return nil, "", false, err
+		return nil, "", class, false, false, err
 	}
 	e.discard(t.N)
 	if collapsed {
 		from.Host, from.HostStatus = t.Host, t.HostStatus
 		if err := e.setHostStatus(from.N, t.HostStatus); err != nil {
-			return nil, "", false, err
+			return nil, "", class, false, false, err
 		}
-		return from, reason, true, nil
+		return from, reason, class, false, true, nil
 	}
 	m.Host, m.HostStatus = t.Host, t.HostStatus
 	m.N = e.allocGeneration()
 	if err := e.installGeneration(m); err != nil {
-		return nil, "", false, err
+		return nil, "", class, false, false, err
 	}
 	if err := e.validate(ctx, m, e.l.Gen(m.N), nil); err != nil {
 		e.discard(m.N)
-		return nil, "", false, err
+		return nil, "", class, false, false, err
 	}
-	return m, reason, false, nil
+	return m, reason, class, false, false, nil
 }
 
 // labelExempt sets the probes' Report values for an exempt class while the
@@ -668,4 +672,315 @@ func heldOutcome(err error, reason string) error {
 		return h
 	}
 	return errors.Join(err, h)
+}
+
+// The probes' Report values (03-10b, 'Contracts frozen by this plan').
+const (
+	probePass          = "pass"
+	probeFail          = "fail"
+	probeInconclusive  = "inconclusive"
+	probeSkippedBudget = "skipped:budget"
+)
+
+// errProbeBudget: the sliding hour holds ProbeNegativesPerHour negatives.
+var errProbeBudget = errors.New("the probe budget of the hour is spent")
+
+// reserveProbe reserves a negative probe under apply.lock before the first
+// byte is sent (T-03-67): negatives older than an hour are pruned, a full
+// hour refuses, and now is appended and becomes last_pair. A crash or an
+// abort after it still counts.
+func (e *engine) reserveProbe() error {
+	st, err := e.loadProbeState()
+	if err != nil {
+		return err
+	}
+	now := e.probeNow()
+	keep := make([]uint64, 0, len(st.Negatives)+1)
+	for _, t := range st.Negatives {
+		if t+3600 > now {
+			keep = append(keep, t)
+		}
+	}
+	if len(keep) >= ProbeNegativesPerHour {
+		return errProbeBudget
+	}
+	st.Negatives, st.LastPair = append(keep, now), now
+	return e.writeProbeState(st)
+}
+
+// runProbes runs the probe pair against the generation g current names
+// (03-10b, D-06). The pair is picked as the gate picks it (probePair) and
+// judged again at now + SelfTestTimeout (no longer usable: inconclusive, no
+// query sent); the 60 s spacing since the last pair is waited out on the
+// engine clock; the negative is reserved; then the positive goes out from
+// the probes' own source and, only when it was accepted, the negative. A
+// refused positive is probe_positive_refused, an accepted negative
+// probe_krl_not_enforced, anything inconclusive probe_inconclusive. For a
+// gated addition (required) a failure writes the failure record and
+// returns the error; for the opportunistic pair it sets the alarm and
+// Report.Detail and returns nil. A pass clears the failure and the alarm.
+func (e *engine) runProbes(ctx context.Context, g *Generation, required bool) error {
+	account := e.probeAccount()
+	_, line := checkProbeAccount(e.l.Root, account)
+	pair, reason := e.probePair(e.readProbeRecord(), e.clock.Now().Add(e.cfg.SelfTestTimeout), genKRL(g), genCAKeys(g))
+	key := failureKey(g, pair, line)
+	if reason != "" {
+		e.logf("probe: no usable probe pair at probe time (%s)", reason)
+		return e.probeResult(ErrProbeInconclusive, key, required, probeInconclusive, probeSkippedNotReady)
+	}
+	if st := e.readProbeState(); st.LastPair != 0 {
+		if d := unixTime(st.LastPair).Add(ProbePairSpacing).Sub(e.clock.Now()); d > 0 {
+			if err := e.clock.Sleep(ctx, min(d, ProbePairSpacing)); err != nil {
+				return err
+			}
+		}
+	}
+	if err := e.reserveProbe(); err != nil {
+		e.logf("probe: %v", err)
+		if !required {
+			e.report.ProbePositive, e.report.ProbeNegative = probeSkippedBudget, probeSkippedBudget
+			return nil
+		}
+		return e.probeResult(ErrProbeInconclusive, key, required, probeInconclusive, probeSkippedBudget)
+	}
+	if err := e.fault("probe-send"); err != nil {
+		return err
+	}
+	q := e.probeQueryFunc()
+	addr, err := e.probeAddr(ctx, time.Now().Add(e.cfg.SelfTestTimeout))
+	if err != nil {
+		e.logf("probe: %v", err)
+		return e.probeResult(ErrProbeInconclusive, key, required, probeInconclusive, probeSkippedNotReady)
+	}
+	src, shared, note := probeSource(e.dump, addr)
+	if shared {
+		e.logf("probe: note: %s", note)
+	}
+	t := ProbeTarget{Addr: addr, Source: src, Account: account, HostKeys: e.keys}
+	out, err := q(ctx, t, pair.Positive.Parse(), time.Now().Add(e.cfg.SelfTestTimeout))
+	switch out {
+	case ProbeAccepted:
+	case ProbeRefused:
+		return e.probeResult(ErrProbePositiveRefused, key, required, probeFail, probeSkippedNotReady)
+	default:
+		e.logf("probe: the positive probe is inconclusive: %v", err)
+		return e.probeResult(ErrProbeInconclusive, key, required, probeInconclusive, probeSkippedNotReady)
+	}
+	out, err = q(ctx, t, pair.Negative.Parse(), time.Now().Add(e.cfg.SelfTestTimeout))
+	switch out {
+	case ProbeRefused:
+	case ProbeAccepted:
+		return e.probeResult(ErrProbeKRLNotEnforced, key, required, probePass, probeFail)
+	default:
+		e.logf("probe: the negative probe is inconclusive: %v", err)
+		return e.probeResult(ErrProbeInconclusive, key, required, probePass, probeInconclusive)
+	}
+	e.report.ProbePositive, e.report.ProbeNegative = probePass, probePass
+	// A pass stands: a state that cannot be updated is only logged (the
+	// next pass clears it).
+	st, err := e.loadProbeState()
+	if err != nil || (st.Failure == nil && st.Alarm == "") {
+		return nil
+	}
+	st.Failure, st.Alarm = nil, ""
+	if err := e.writeProbeState(st); err != nil {
+		e.logf("WARNING clearing the probe failure and alarm: %v", err)
+	}
+	return nil
+}
+
+// probeResult records a failed probe pair with the Report values pos and
+// neg: for a gated addition the failure record and the error, for the
+// opportunistic pair the alarm and Report.Detail, and nil.
+func (e *engine) probeResult(cause error, key string, required bool, pos, neg string) error {
+	e.report.ProbePositive, e.report.ProbeNegative = pos, neg
+	code := cause.Error()
+	st, err := e.loadProbeState()
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	if !required {
+		e.report.Detail = code
+		if st.Alarm != code {
+			st.Alarm = code
+			if err := e.writeProbeState(st); err != nil {
+				e.logf("WARNING recording the probe alarm: %v", err)
+			}
+		}
+		return nil
+	}
+	if err := e.recordFailure(st, code, key); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
+// probeFailureCode is the detail code of a probe failure err wraps, "" for
+// none.
+func probeFailureCode(err error) string {
+	for _, c := range []error{ErrProbePositiveRefused, ErrProbeKRLNotEnforced, ErrProbeInconclusive} {
+		if errors.Is(err, c) {
+			return c.Error()
+		}
+	}
+	return ""
+}
+
+// recordFailure writes the failure record of a gated addition into st:
+// {code, key, now, count}, count growing while the key is unchanged, which
+// doubles the gate's back-off (D10).
+func (e *engine) recordFailure(st *probeState, code, key string) error {
+	count := uint64(1)
+	if f := st.Failure; f != nil && f.Key == key {
+		count = f.Count + 1
+	}
+	st.Failure = &probeFailure{Code: code, Key: key, At: e.probeNow(), Count: count}
+	return e.writeProbeState(st)
+}
+
+// servedCertCheck runs the served-certificate self-test on the committed
+// host certificates after forward changed the drop-in (03-10b, Task 4
+// step 3; a gap 03-09 left): Report.ServedCerts is pass,
+// skipped:no_certificates or fail:served_cert_mismatch, and the error is
+// the mismatch. It runs once, in the run that changed the drop-in.
+func (e *engine) servedCertCheck(ctx context.Context) error {
+	rec, _, err := e.readHostCertRecord()
+	if err != nil {
+		return err
+	}
+	var certs []*ssh.Certificate
+	if rec != nil {
+		for _, en := range rec.Committed {
+			if c := e.readCertFile(en.File, en.CertSHA256); c != nil {
+				certs = append(certs, c)
+			}
+		}
+	}
+	if len(certs) == 0 {
+		e.report.ServedCerts = "skipped:no_certificates"
+		return nil
+	}
+	if _, err := e.hostCertSelfTest(ctx, e.dump, certs); err != nil {
+		e.report.ServedCerts = "fail:" + DetailServedCertMismatch
+		e.report.Detail = DetailServedCertMismatch
+		return err
+	}
+	e.report.ServedCerts = probePass
+	return nil
+}
+
+// opportunistic tries the pair after a narrowing or probe-file-only commit
+// whose generation g holds the probe principal (03-10b, D8): only when the
+// account check passes, a pair is usable at now + SelfTestTimeout, the last
+// opportunistic pair is ProbeOpportunisticEvery ago, fewer than
+// ProbeOpportunisticNegatives negatives went out in the last hour and the
+// spacing is met; otherwise the probes report skipped:budget or
+// skipped:not_ready. A failure is an alarm and never rolls anything back.
+func (e *engine) opportunistic(ctx context.Context, g *Generation) {
+	account := e.probeAccount()
+	skip := func(v string) {
+		// An exempt label (a probe-file-only change) says more than the skip.
+		if e.report.ProbePositive == "" {
+			e.report.ProbePositive, e.report.ProbeNegative = v, v
+		}
+	}
+	if r, _ := checkProbeAccount(e.l.Root, account); r != "" || g.Host == "" ||
+		!lineSet(g.Files[PrincipalsDir+"/"+account], principalLine)[certpkg.ReservedPrincipalPrefix+g.Host] {
+		skip(probeSkippedNotReady)
+		return
+	}
+	now := e.clock.Now()
+	if _, r := e.probePair(e.readProbeRecord(), now.Add(e.cfg.SelfTestTimeout), genKRL(g), genCAKeys(g)); r != "" {
+		skip(probeSkippedNotReady)
+		return
+	}
+	st := e.readProbeState()
+	if (st.LastOpportunistic != 0 && unixTime(st.LastOpportunistic).Add(ProbeOpportunisticEvery).After(now)) ||
+		recentNegatives(st, e.probeNow()) >= ProbeOpportunisticNegatives ||
+		(st.LastPair != 0 && unixTime(st.LastPair).Add(ProbePairSpacing).After(now)) {
+		skip(probeSkippedBudget)
+		return
+	}
+	st.LastOpportunistic = e.probeNow()
+	if err := e.writeProbeState(st); err != nil {
+		e.logf("WARNING recording the opportunistic probe: %v", err)
+		return
+	}
+	if err := e.runProbes(ctx, g, false); err != nil {
+		e.logf("WARNING the opportunistic probe: %v", err)
+	}
+}
+
+// settleFailedAddition ends a gated addition whose probes or served
+// certificates failed after it went live (03-10b, D13): it rolls back the
+// addition only. The settled content is Intermediate(last-good, target),
+// every line both grant, with the target's (newest) KRL. When the target
+// removes nothing last-good grants, that is 03-05's plain rollback, which
+// then re-grants nothing. Otherwise current moves to a generation M of that
+// content: the one live just before the widening swap (preN) when its
+// content is that, the target itself when the target only removes from
+// last-good, else one installed afresh. The held record failure_backoff is
+// written after the failure record and before M is committed as last-good,
+// with accepted/ advanced, so the removal stays in force and the next round
+// holds. A listener-test failure after the move falls back to 03-05's
+// rollback (the named residual: it can re-grant the removal until a
+// listener test passes). It returns cause.
+func (e *engine) settleFailedAddition(ctx context.Context, cause error, lg link, target *Generation, tv *state.Verified, preN uint64) error {
+	if isCrash(cause) {
+		return cause
+	}
+	lgGen, err := readGeneration(lg.dir)
+	if err != nil {
+		return e.rollback(ctx, cause, lg)
+	}
+	lgGen.N = lg.n
+	m, collapsed := Intermediate(lgGen, target)
+	if collapsed && isNarrowing(target, lgGen) {
+		// Intermediate collapsed to last-good's content: the target removes
+		// nothing last-good grants, so the plain rollback re-grants nothing.
+		return e.rollback(ctx, cause, lg)
+	}
+	// Otherwise a collapsed Intermediate is the target itself, which then
+	// only removes from last-good.
+	pre, perr := readGeneration(e.l.Gen(preN))
+	switch {
+	case preN != 0 && perr == nil && sameContent(pre, m):
+		pre.N = preN
+		m = pre
+	case m == target:
+	default:
+		m.N = e.allocGeneration()
+		if err := e.installGeneration(m); err != nil {
+			return e.rollback(ctx, errors.Join(cause, err), lg)
+		}
+		if err := e.validate(ctx, m, e.l.Gen(m.N), nil); err != nil {
+			e.discard(m.N)
+			return e.rollback(ctx, errors.Join(cause, err), lg)
+		}
+	}
+	m.Host, m.HostStatus = target.Host, target.HostStatus
+	e.report.Rollback = true
+	e.poll = nil
+	if err := e.writeHeld("failure_backoff", tv); err != nil {
+		return e.rollback(ctx, errors.Join(cause, err), lg)
+	}
+	if m.N != target.N {
+		if _, err := e.Transition(ctx, target, m, swapChecked); err != nil {
+			return e.rollback(ctx, errors.Join(cause, err), lg)
+		}
+	}
+	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
+		e.report.RollbackSelfTest = "fail: " + err.Error()
+		return e.rollback(ctx, errors.Join(cause, err), lg)
+	}
+	e.report.RollbackSelfTest = "pass"
+	if err := e.setHostStatus(m.N, m.HostStatus); err != nil {
+		return errors.Join(cause, err)
+	}
+	e.setVersions(tv, m)
+	e.report.Generation = m.N
+	if err := e.commit(m.N, tv); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
 }
