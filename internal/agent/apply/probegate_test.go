@@ -637,6 +637,25 @@ func TestProbeGate(t *testing.T) {
 			}
 		}
 	})
+	t.Run("renamed_committed_pair_holds_cert_missing", func(t *testing.T) {
+		t.Parallel()
+		// PR #91 review, F1: a committed pair issued for the entry's old
+		// name (oldname, now web1) is no pair for web1. The addition is
+		// held as cert_missing and nothing is probed, rather than going
+		// live, having its positive refused and raising a false alarm.
+		h := gateHost(t, "role:a")
+		old := probecert.Pair{Positive: h.probeCertFor("oldname", 10*time.Minute, h.f.mach), Negative: h.probeCertFor("oldname", 10*time.Minute, h.f.mach)}
+		h.storePair(old, false)
+		h.listMach(old.Negative.Serial)
+		h.mustApply()
+		h.publishDir(h.spec("role:a", "role:b"))
+		r, err := h.apply()
+		mustHeld(t, h, r, err, "cert_missing")
+		mustPrincipals(t, h, "role:a")
+		if q := h.probeQueries(); len(q) != 0 {
+			t.Fatalf("%d probe queries for a pair of another name", len(q))
+		}
+	})
 	t.Run("held_retried_when_ready", func(t *testing.T) {
 		t.Parallel()
 		h := gateHost(t, "role:a")
@@ -937,7 +956,7 @@ func TestProbeGate(t *testing.T) {
 			p := h.seedPair(180*time.Second, false)
 			h.listMach(p.Negative.Serial)
 			h.mustApply()
-			if probecert.PairUsable(p, h.clock.Now(), genKRL(h.genNow()), genCAKeys(h.genNow())) != "" {
+			if probecert.PairUsable(p, "web1", h.clock.Now(), genKRL(h.genNow()), genCAKeys(h.genNow())) != "" {
 				t.Fatal("the pair is not usable now")
 			}
 		})

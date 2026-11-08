@@ -415,17 +415,19 @@ func (e *engine) acceptedVersions() (bundle, policy, dir uint64) {
 	return s.BundleVersion, policy, s.DirectoryVersion
 }
 
-// probePair is the pair the probes use at time at against the KRL k and
-// the CA keys caKeys: Next when PairUsable accepts it, else Committed.
+// probePair is the pair the probes use for the host named host (g.Host)
+// at time at against the KRL k and the CA keys caKeys: Next when
+// PairUsable accepts it, else Committed. A pair issued for another name
+// (a renamed entry) is cert_missing (PR #91 review, F1).
 // With none usable it returns the gate's reason: issue_refused while an
 // attempt holds an unreleased sticky refusal, issue_unanswered while a
 // request is live or the last one went unanswered, else the committed
 // pair's PairUsable reason (the next pair's when there is no committed
 // one), else cert_missing. The gate and the probes after a swap pick the
 // pair this one way, so the failure keys they compute agree.
-func (e *engine) probePair(rec *probecert.Record, at time.Time, k *krl.Parsed, caKeys []ssh.PublicKey) (probecert.Pair, string) {
+func (e *engine) probePair(rec *probecert.Record, host string, at time.Time, k *krl.Parsed, caKeys []ssh.PublicKey) (probecert.Pair, string) {
 	for _, p := range []probecert.Pair{rec.Next, rec.Committed} {
-		if probecert.PairUsable(p, at, k, caKeys) == "" {
+		if probecert.PairUsable(p, host, at, k, caKeys) == "" {
 			return p, ""
 		}
 	}
@@ -445,9 +447,9 @@ func (e *engine) probePair(rec *probecert.Record, at time.Time, k *krl.Parsed, c
 	}
 	switch {
 	case !rec.Committed.Empty():
-		return probecert.Pair{}, probecert.PairUsable(rec.Committed, at, k, caKeys)
+		return probecert.Pair{}, probecert.PairUsable(rec.Committed, host, at, k, caKeys)
 	case !rec.Next.Empty():
-		return probecert.Pair{}, probecert.PairUsable(rec.Next, at, k, caKeys)
+		return probecert.Pair{}, probecert.PairUsable(rec.Next, host, at, k, caKeys)
 	}
 	return probecert.Pair{}, probecert.CertMissing
 }
@@ -530,7 +532,7 @@ func (e *engine) probeGate(_ context.Context, _, g *Generation, _ *state.Verifie
 	}
 	now := e.clock.Now()
 	wait := e.probeWait()
-	pair, reason := e.probePair(e.readProbeRecord(), now.Add(wait+2*e.cfg.SelfTestTimeout), genKRL(g), genCAKeys(g))
+	pair, reason := e.probePair(e.readProbeRecord(), g.Host, now.Add(wait+2*e.cfg.SelfTestTimeout), genKRL(g), genCAKeys(g))
 	if reason != "" {
 		return reason
 	}
@@ -722,7 +724,7 @@ func (e *engine) reserveProbe() error {
 func (e *engine) runProbes(ctx context.Context, g *Generation, required bool) error {
 	account := e.probeAccount()
 	_, line := checkProbeAccount(e.l.Root, account)
-	pair, reason := e.probePair(e.readProbeRecord(), e.clock.Now().Add(e.cfg.SelfTestTimeout), genKRL(g), genCAKeys(g))
+	pair, reason := e.probePair(e.readProbeRecord(), g.Host, e.clock.Now().Add(e.cfg.SelfTestTimeout), genKRL(g), genCAKeys(g))
 	key := failureKey(g, pair, line)
 	if reason != "" {
 		e.logf("probe: no usable probe pair at probe time (%s)", reason)
@@ -890,7 +892,7 @@ func (e *engine) opportunistic(ctx context.Context, g *Generation) {
 		return
 	}
 	now := e.clock.Now()
-	if _, r := e.probePair(e.readProbeRecord(), now.Add(e.cfg.SelfTestTimeout), genKRL(g), genCAKeys(g)); r != "" {
+	if _, r := e.probePair(e.readProbeRecord(), g.Host, now.Add(e.cfg.SelfTestTimeout), genKRL(g), genCAKeys(g)); r != "" {
 		skip(probeSkippedNotReady)
 		return
 	}

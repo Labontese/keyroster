@@ -1034,6 +1034,13 @@ var probeSerial atomic.Uint64
 // minutes by cert.Build, valid for lifetime from the fake clock's now.
 func (h *testHost) signProbe(lifetime time.Duration, ca ssh.Signer) *ssh.Certificate {
 	h.t.Helper()
+	return h.signProbeFor("web1", lifetime, ca)
+}
+
+// signProbeFor is signProbe for the host named host (a name the directory
+// entry had before a rename, PR #91 review F1).
+func (h *testHost) signProbeFor(host string, lifetime time.Duration, ca ssh.Signer) *ssh.Certificate {
+	h.t.Helper()
 	prof, err := certprofile.ProbeProfile(h.f.policy)
 	if err != nil {
 		h.t.Fatal(err)
@@ -1048,9 +1055,9 @@ func (h *testHost) signProbe(lifetime time.Duration, ca ssh.Signer) *ssh.Certifi
 	}
 	serial := 1_795_000_000_000_000 + probeSerial.Add(1)
 	c, err := certpkg.Build(certpkg.Request{
-		Profile: prof, Subject: key, Principals: []string{certpkg.ReservedPrincipalPrefix + "web1"}, Now: h.clock.Now(),
+		Profile: prof, Subject: key, Principals: []string{certpkg.ReservedPrincipalPrefix + host}, Now: h.clock.Now(),
 		ValidFor: lifetime, Serial: serial,
-		KeyID:           certpkg.KeyID{V3: true, CA: "machine", Subject: "probe.web1", Request: strings.Repeat("ab", 16), Policy: 1, Directory: 1, Serial: serial},
+		KeyID:           certpkg.KeyID{V3: true, CA: "machine", Subject: "probe." + host, Request: strings.Repeat("ab", 16), Policy: 1, Directory: 1, Serial: serial},
 		CriticalOptions: certprofile.ProbeCriticalOptions()}, ca, rand.Reader)
 	if err != nil {
 		h.t.Fatal(err)
@@ -1069,7 +1076,13 @@ func (h *testHost) seedPair(lifetime time.Duration, next bool) probecert.Pair {
 // probeCert is a signed probe certificate as probe.json keeps it.
 func (h *testHost) probeCert(lifetime time.Duration, ca ssh.Signer) *probecert.Cert {
 	h.t.Helper()
-	c := h.signProbe(lifetime, ca)
+	return h.probeCertFor("web1", lifetime, ca)
+}
+
+// probeCertFor is probeCert for the host named host.
+func (h *testHost) probeCertFor(host string, lifetime time.Duration, ca ssh.Signer) *probecert.Cert {
+	h.t.Helper()
+	c := h.signProbeFor(host, lifetime, ca)
 	return probecert.NewCert(c, c.ValidAfter+300+uint64(lifetime/time.Second)*2/3) //nolint:gosec // G115: a positive test lifetime
 }
 

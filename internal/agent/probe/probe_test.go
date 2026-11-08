@@ -61,15 +61,31 @@ var probeProfile = cert.Profile{CertType: ssh.UserCert, MaxTTL: 30 * 24 * time.H
 // seconds, by ca, as the signer does (cert.Build backdates five minutes).
 func (e *env) issue(t testing.TB, key ssh.PublicKey, issued, v uint64, ca ssh.Signer) *ssh.Certificate {
 	t.Helper()
+	return e.issueNamed(t, key, issued, v, ca, "web1", "web1")
+}
+
+// issueNamed is issue with the principal for the host named principal and
+// the key ID subject probe.<subject>, so a test can name another host in
+// either alone (PR #91 review, F1).
+func (e *env) issueNamed(t testing.TB, key ssh.PublicKey, issued, v uint64, ca ssh.Signer, principal, subject string) *ssh.Certificate {
+	t.Helper()
 	e.serial++
-	c, err := cert.Build(cert.Request{Profile: probeProfile, Subject: key, Principals: []string{cert.ReservedPrincipalPrefix + "web1"},
+	c, err := cert.Build(cert.Request{Profile: probeProfile, Subject: key, Principals: []string{cert.ReservedPrincipalPrefix + principal},
 		Now: time.Unix(int64(issued), 0), ValidFor: time.Duration(v) * time.Second, Serial: e.serial, //nolint:gosec // G115: test times
-		KeyID:           cert.KeyID{V3: true, CA: "machine", Subject: "probe.web1", Request: strings.Repeat("ab", 16), Policy: 1, Directory: 1, Serial: e.serial},
+		KeyID:           cert.KeyID{V3: true, CA: "machine", Subject: "probe." + subject, Request: strings.Repeat("ab", 16), Policy: 1, Directory: 1, Serial: e.serial},
 		CriticalOptions: certprofile.ProbeCriticalOptions()}, ca, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return c
+}
+
+// named is a probe certificate as probe.json keeps it, issued at issued
+// for v seconds by e's CA, naming principal and subject (issueNamed).
+func (e *env) named(t testing.TB, issued, v uint64, principal, subject string) *Cert {
+	t.Helper()
+	c := e.issueNamed(t, newSigner(t).PublicKey(), issued, v, e.ca, principal, subject)
+	return NewCert(c, hostcert.IssuedAt(c)+2*v/3)
 }
 
 // pair issues a positive and a negative for fresh keys at issued for v
@@ -394,16 +410,16 @@ func TestPairUsable(t *testing.T) {
 	k := e.listing(t, p)
 	now := time.Unix(t0+10, 0)
 	t.Run("usable", func(t *testing.T) {
-		if r := PairUsable(p, now, k, cas); r != "" {
+		if r := PairUsable(p, "web1", now, k, cas); r != "" {
 			t.Fatal(r)
 		}
 	})
 	t.Run("valid_at_future_time", func(t *testing.T) {
 		vb := p.Positive.ValidBefore
-		if r := PairUsable(p, time.Unix(int64(vb-61), 0), k, cas); r != "" { //nolint:gosec // G115: test times
+		if r := PairUsable(p, "web1", time.Unix(int64(vb-61), 0), k, cas); r != "" { //nolint:gosec // G115: test times
 			t.Fatalf("61 s before ValidBefore: %s", r)
 		}
-		if r := PairUsable(p, time.Unix(int64(vb-60), 0), k, cas); r != CertMissing { //nolint:gosec // G115: test times
+		if r := PairUsable(p, "web1", time.Unix(int64(vb-60), 0), k, cas); r != CertMissing { //nolint:gosec // G115: test times
 			t.Fatalf("60 s before ValidBefore: %q, want cert_missing", r)
 		}
 	})
@@ -411,16 +427,16 @@ func TestPairUsable(t *testing.T) {
 		short := e.pair(t, t0, 120, e.ca, zeroReader{}) // V/6 = 20 s
 		ks := e.listing(t, short)
 		vb := short.Positive.ValidBefore
-		if r := PairUsable(short, time.Unix(int64(vb-21), 0), ks, cas); r != "" { //nolint:gosec // G115: test times
+		if r := PairUsable(short, "web1", time.Unix(int64(vb-21), 0), ks, cas); r != "" { //nolint:gosec // G115: test times
 			t.Fatalf("V=120, 21 s before ValidBefore: %s", r)
 		}
-		if r := PairUsable(short, time.Unix(int64(vb-20), 0), ks, cas); r != CertMissing { //nolint:gosec // G115: test times
+		if r := PairUsable(short, "web1", time.Unix(int64(vb-20), 0), ks, cas); r != CertMissing { //nolint:gosec // G115: test times
 			t.Fatalf("V=120, 20 s before ValidBefore: %q", r)
 		}
 	})
 	t.Run("positive_in_krl", func(t *testing.T) {
 		kk := krlOf(t, e.ca.PublicKey(), []uint64{p.Positive.Serial, p.Negative.Serial}, nil)
-		if r := PairUsable(p, now, kk, cas); r != PositiveInKRL {
+		if r := PairUsable(p, "web1", now, kk, cas); r != PositiveInKRL {
 			t.Fatalf("%q", r)
 		}
 	})
@@ -432,7 +448,7 @@ func TestPairUsable(t *testing.T) {
 			"key_id": krlOf(t, e.ca.PublicKey(), nil, []string{neg.KeyId}),
 			"key":    krlOf(t, e.ca.PublicKey(), nil, nil, neg.Key),
 		} {
-			if r := PairUsable(p, now, kk, cas); r != NegativeNotInKRL {
+			if r := PairUsable(p, "web1", now, kk, cas); r != NegativeNotInKRL {
 				t.Fatalf("%s: %q, want negative_not_in_krl", name, r)
 			}
 		}
@@ -443,7 +459,7 @@ func TestPairUsable(t *testing.T) {
 		if p.Positive.Serial >= s-1 && p.Positive.Serial <= s+2 {
 			kk = krlOf(t, e.ca.PublicKey(), []uint64{s, s + 1, s + 2}, nil)
 		}
-		if r := PairUsable(p, now, kk, cas); r != "" {
+		if r := PairUsable(p, "web1", now, kk, cas); r != "" {
 			t.Fatalf("%q", r)
 		}
 	})
@@ -453,18 +469,47 @@ func TestPairUsable(t *testing.T) {
 		c := e.issue(t, newSigner(t).PublicKey(), t0, v, other)
 		mixed.Negative = NewCert(c, hostcert.IssuedAt(c)+400)
 		kk := krlOf(t, other.PublicKey(), []uint64{c.Serial}, nil)
-		if r := PairUsable(mixed, now, kk, []ssh.PublicKey{e.ca.PublicKey(), other.PublicKey()}); r != CAMismatch {
+		if r := PairUsable(mixed, "web1", now, kk, []ssh.PublicKey{e.ca.PublicKey(), other.PublicKey()}); r != CAMismatch {
 			t.Fatalf("two CA keys: %q", r)
 		}
-		if r := PairUsable(p, now, k, []ssh.PublicKey{other.PublicKey()}); r != CAMismatch {
+		if r := PairUsable(p, "web1", now, k, []ssh.PublicKey{other.PublicKey()}); r != CAMismatch {
 			t.Fatalf("an untrusted CA key: %q", r)
 		}
 	})
+	// PR #91 review, F1: a member issued for another host name (an entry
+	// renamed since) makes the pair unusable, by principal or by key ID
+	// subject alone, whichever member it is.
+	t.Run("principal_other_host", func(t *testing.T) {
+		q := Pair{Positive: e.named(t, t0, v, "oldname", "web1"), Negative: e.named(t, t0, v, "oldname", "web1")}
+		if r := PairUsable(q, "web1", now, e.listing(t, q), cas); r != CertMissing {
+			t.Fatalf("both principals for oldname: %q, want cert_missing", r)
+		}
+	})
+	t.Run("subject_other_host", func(t *testing.T) {
+		q := Pair{Positive: e.named(t, t0, v, "web1", "oldname"), Negative: e.named(t, t0, v, "web1", "oldname")}
+		if r := PairUsable(q, "web1", now, e.listing(t, q), cas); r != CertMissing {
+			t.Fatalf("both subjects probe.oldname: %q, want cert_missing", r)
+		}
+	})
+	t.Run("mixed_name_pair", func(t *testing.T) {
+		old := Pair{Positive: e.named(t, t0, v, "oldname", "oldname"), Negative: e.named(t, t0, v, "oldname", "oldname")}
+		for name, q := range map[string]Pair{
+			"old_negative": {Positive: p.Positive, Negative: old.Negative},
+			"old_positive": {Positive: old.Positive, Negative: p.Negative},
+		} {
+			if r := PairUsable(q, "web1", now, e.listing(t, q), cas); r != CertMissing {
+				t.Fatalf("%s: %q, want cert_missing", name, r)
+			}
+		}
+		if r := PairUsable(old, "oldname", now, e.listing(t, old), cas); r != "" {
+			t.Fatalf("the old pair for its own name: %q", r)
+		}
+	})
 	t.Run("half_pair_is_missing", func(t *testing.T) {
-		if r := PairUsable(Pair{Positive: p.Positive}, now, k, cas); r != CertMissing {
+		if r := PairUsable(Pair{Positive: p.Positive}, "web1", now, k, cas); r != CertMissing {
 			t.Fatalf("%q", r)
 		}
-		if r := PairUsable(Pair{}, now, k, cas); r != CertMissing {
+		if r := PairUsable(Pair{}, "web1", now, k, cas); r != CertMissing {
 			t.Fatalf("empty: %q", r)
 		}
 	})
@@ -595,6 +640,34 @@ func TestDecide(t *testing.T) {
 			t.Fatalf("plan %+v, want Next dropped", pl)
 		}
 		wantRequests(t, pl, Positive, Negative)
+	})
+	// PR #91 review, F1: after a rename (entry oldname is now web1, the
+	// same keys) nothing issued for the old name counts.
+	t.Run("half_next_from_before_rename_dropped", func(t *testing.T) {
+		neg := e.named(t, t0, v, "oldname", "oldname")
+		half := Pair{Negative: neg}
+		pl := Decide(e.input(t0+10, Pair{}, half, nil, e.listing(t, half)))
+		if !pl.DropNext || pl.Switch {
+			t.Fatalf("plan %+v, want the old negative dropped", pl)
+		}
+		wantRequests(t, pl, Positive, Negative)
+	})
+	t.Run("complete_next_of_two_names_dropped", func(t *testing.T) {
+		p := e.pair(t, t0, v, e.ca, zeroReader{})
+		mixed := Pair{Positive: p.Positive, Negative: e.named(t, t0, v, "oldname", "oldname")}
+		pl := Decide(e.input(t0+10, Pair{}, mixed, nil, e.listing(t, mixed)))
+		if !pl.DropNext || pl.Switch {
+			t.Fatalf("plan %+v, want the pair of two names dropped", pl)
+		}
+		wantRequests(t, pl, Positive, Negative)
+	})
+	t.Run("committed_pair_after_rename_requests_both", func(t *testing.T) {
+		old := Pair{Positive: e.named(t, t0, v, "oldname", "oldname"), Negative: e.named(t, t0, v, "oldname", "oldname")}
+		pl := Decide(e.input(t0+10, old, Pair{}, nil, e.listing(t, old)))
+		wantRequests(t, pl, Positive, Negative)
+		if pl.Requests[0].Why != "missing" {
+			t.Fatalf("why %q, want missing", pl.Requests[0].Why)
+		}
 	})
 	t.Run("pending_request_defers", func(t *testing.T) {
 		a := &NewRecord().Attempts

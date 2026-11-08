@@ -1141,7 +1141,7 @@ func (e *engine) forward(ctx context.Context) error {
 			e.logf("WARNING %v", err)
 			if gated {
 				_, line := checkProbeAccount(e.l.Root, e.probeAccount())
-				pair, _ := e.probePair(e.readProbeRecord(), e.clock.Now().Add(e.cfg.SelfTestTimeout), genKRL(target), genCAKeys(target))
+				pair, _ := e.probePair(e.readProbeRecord(), target.Host, e.clock.Now().Add(e.cfg.SelfTestTimeout), genKRL(target), genCAKeys(target))
 				st, serr := e.loadProbeState()
 				if serr == nil {
 					serr = e.recordFailure(st, DetailServedCertMismatch, failureKey(target, pair, line))

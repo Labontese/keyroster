@@ -538,17 +538,31 @@ func validAt(c *ssh.Certificate, at uint64) bool {
 	return v > 0 && at >= c.ValidAfter && at+hostcert.MissingMargin(v) < c.ValidBefore
 }
 
-// PairUsable returns "" when p can probe sshd at time at against the KRL k
-// and the CA keys caKeys, else the first failing rule: cert_missing
-// (either member absent, unparsable or not valid at at), positive_in_krl
-// (k revokes the positive), negative_not_in_krl (k does not list the
-// negative's serial under its CA key: a key ID or key entry is not
-// enough), ca_mismatch (the two are not signed by one key, or that key is
-// not in caKeys).
-func PairUsable(p Pair, at time.Time, k *krl.Parsed, caKeys []ssh.PublicKey) string {
+// forHost reports whether c is a probe certificate for the host named
+// host: its one principal is cert.ReservedPrincipalPrefix + host and its
+// kr3 key ID's subject is probe.<host>. VerifyCert checks both when an
+// answer is kept; a pair kept for a name the directory has since renamed
+// must not probe sshd for the new name (PR #91 review, F1).
+func forHost(c *ssh.Certificate, host string) bool {
+	if host == "" || len(c.ValidPrincipals) != 1 || c.ValidPrincipals[0] != cert.ReservedPrincipalPrefix+host {
+		return false
+	}
+	kid, err := cert.ParseKeyID(c.KeyId)
+	return err == nil && kid.Subject == "probe."+host
+}
+
+// PairUsable returns "" when p can probe sshd for the host named host at
+// time at against the KRL k and the CA keys caKeys, else the first failing
+// rule: cert_missing (either member absent, unparsable, not valid at at,
+// or issued for another host name: forHost), positive_in_krl (k revokes
+// the positive), negative_not_in_krl (k does not list the negative's
+// serial under its CA key: a key ID or key entry is not enough),
+// ca_mismatch (the two are not signed by one key, or that key is not in
+// caKeys).
+func PairUsable(p Pair, host string, at time.Time, k *krl.Parsed, caKeys []ssh.PublicKey) string {
 	pos, neg := p.Positive.Parse(), p.Negative.Parse()
 	t := uint64(max(at.Unix(), 0))
-	if pos == nil || neg == nil || !validAt(pos, t) || !validAt(neg, t) {
+	if pos == nil || neg == nil || !validAt(pos, t) || !validAt(neg, t) || !forHost(pos, host) || !forHost(neg, host) {
 		return CertMissing
 	}
 	if hostcert.Revoked(k, pos) {
@@ -565,11 +579,12 @@ func PairUsable(p Pair, at time.Time, k *krl.Parsed, caKeys []ssh.PublicKey) str
 }
 
 // memberUsable reports whether a single member of a pair being collected
-// can still be part of a usable pair at t: valid, not revoked as a
-// positive, and signed by a trusted CA key.
-func memberUsable(pol Polarity, c *Cert, t uint64, k *krl.Parsed, caKeys []ssh.PublicKey) bool {
+// can still be part of a usable pair for the host named host at t: valid,
+// issued for that name (forHost), not revoked as a positive, and signed by
+// a trusted CA key.
+func memberUsable(pol Polarity, c *Cert, host string, t uint64, k *krl.Parsed, caKeys []ssh.PublicKey) bool {
 	sc := c.Parse()
-	if sc == nil || !validAt(sc, t) {
+	if sc == nil || !validAt(sc, t) || !forHost(sc, host) {
 		return false
 	}
 	if pol == Positive && hostcert.Revoked(k, sc) {
@@ -650,6 +665,13 @@ func renewDue(p Pair, now uint64) bool {
 //     for renewal and Next is empty; the missing polarity of a half Next.
 //   - Defers: a polarity with a live request (request_pending), a sticky
 //     refusal not yet released (refused:<code>) or a running back-off.
+//
+// Every pair rule is judged for the entry's current name (in.Entry.Name):
+// after a rename, a Committed or Next member issued for the old name is
+// unusable, so Next is dropped, Committed does not count and both
+// polarities are requested at once (the signer resets probe_cert_recent
+// on a rename). A half Next can then never be completed into a pair of
+// two names (PR #91 review, F1).
 func Decide(in Input) Plan {
 	if code, nothing := in.HostHold(); code != "" {
 		return Plan{Hold: code, WriteNothing: nothing}
@@ -657,9 +679,10 @@ func Decide(in Input) Plan {
 	pl := Plan{Defers: map[Polarity]string{}}
 	now := uint64(max(in.Now.Unix(), 0))
 	committed, next := in.Committed, in.Next
-	committedOK := PairUsable(committed, in.Now, in.KRL, in.CAKeys) == ""
+	host := in.Entry.Name
+	committedOK := PairUsable(committed, host, in.Now, in.KRL, in.CAKeys) == ""
 	if next.Complete() {
-		switch PairUsable(next, in.Now, in.KRL, in.CAKeys) {
+		switch PairUsable(next, host, in.Now, in.KRL, in.CAKeys) {
 		case "":
 			if !committedOK || renewDue(committed, now) {
 				pl.Switch = true
@@ -676,7 +699,7 @@ func Decide(in Input) Plan {
 	// A half pair's member that can no longer be part of a usable pair is
 	// collected again.
 	for _, pol := range Polarities {
-		if c := next.Get(pol); c != nil && !next.Complete() && !memberUsable(pol, c, now, in.KRL, in.CAKeys) {
+		if c := next.Get(pol); c != nil && !next.Complete() && !memberUsable(pol, c, host, now, in.KRL, in.CAKeys) {
 			pl.DropNext = true
 			next = Pair{}
 		}
