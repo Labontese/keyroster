@@ -56,10 +56,12 @@ const (
 )
 
 // probeHoldReasons is the closed list of gate hold reasons (Contracts
-// frozen by 03-10b; 03-10c adds the full account check's reasons).
+// frozen by 03-10b; 03-10c adds the full account check's four reasons,
+// password_empty to account_excluded, in the order of its account step).
 var probeHoldReasons = []string{
 	"cert_missing", "issue_unanswered", "issue_refused", "positive_in_krl", "negative_not_in_krl", "ca_mismatch",
 	"account_missing", "account_unparsable", "account_uid_zero", "shell_missing", "shell_not_nologin",
+	"password_empty", "password_set", "sshd_override", "account_excluded",
 	"account_is_managed", "failure_backoff", "budget",
 }
 
@@ -457,8 +459,10 @@ func (e *engine) probePair(rec *probecert.Record, host string, at time.Time, k *
 // failureKey is the key of a failed addition (D10): SHA-256 over g's
 // classified content (each CA list and principals file as its sorted
 // non-comment lines; no KRL, no comments), both serials of the pair and
-// the probe account's passwd line, each field length-prefixed. The retry
-// backs off while it is unchanged and is immediate when any input changes.
+// the probe account's key input (accountKeyInput, 03-10c: its passwd line
+// and its password class, never a password field), each field
+// length-prefixed. The retry backs off while it is unchanged and is
+// immediate when any input changes.
 func failureKey(g *Generation, p probecert.Pair, line string) string {
 	h := sha256.New()
 	field := func(s string) {
@@ -514,19 +518,20 @@ func unixTime(s uint64) time.Time { return time.Unix(int64(min(s, math.MaxInt64>
 
 // probeGate decides whether an addition may go live (03-10b, Task 3): ""
 // when it may, else the first failing reason of the closed list, in this
-// order: the probe account (checkProbeAccount); the probe principal in g
+// order: the probe account (checkProbeAccountFull against the engine's
+// base dump, 03-10c); the probe principal in g
 // (account_is_managed when the host group renders that account's file);
 // a usable pair at now + the full widening wait + two self-test timeouts
 // against g's KRL and CA keys (probePair); the failure back-off while the
 // failure key is unchanged; and the budget (six negatives in the sliding
 // hour, or the last pair less than ProbePairSpacing before the probes
 // would run, D7). Nothing in the gate writes a file.
-func (e *engine) probeGate(_ context.Context, _, g *Generation, _ *state.Verified) string {
+func (e *engine) probeGate(ctx context.Context, _, g *Generation, _ *state.Verified) string {
 	account := e.probeAccount()
-	reason, line := checkProbeAccount(e.l.Root, account)
-	if reason != "" {
-		return reason
+	if r := e.checkProbeAccountFull(ctx, account, e.dump, true); r.Reason != "" {
+		return r.Reason
 	}
+	line := e.accountKeyInput(account)
 	if g.Host == "" || !lineSet(g.Files[PrincipalsDir+"/"+account], principalLine)[certpkg.ReservedPrincipalPrefix+g.Host] {
 		return "account_is_managed"
 	}
@@ -723,7 +728,7 @@ func (e *engine) reserveProbe() error {
 // Report.Detail and returns nil. A pass clears the failure and the alarm.
 func (e *engine) runProbes(ctx context.Context, g *Generation, required bool) error {
 	account := e.probeAccount()
-	_, line := checkProbeAccount(e.l.Root, account)
+	line := e.accountKeyInput(account)
 	pair, reason := e.probePair(e.readProbeRecord(), g.Host, e.clock.Now().Add(e.cfg.SelfTestTimeout), genKRL(g), genCAKeys(g))
 	key := failureKey(g, pair, line)
 	if reason != "" {
@@ -880,7 +885,7 @@ func (e *engine) servedCertCheck(ctx context.Context) error {
 
 // opportunistic tries the pair after a narrowing or probe-file-only commit
 // whose generation g holds the probe principal (03-10b, D8): only when the
-// account check passes, a pair is usable at now + SelfTestTimeout, the last
+// full account check passes (03-10c: run once here, after the commit), a pair is usable at now + SelfTestTimeout, the last
 // opportunistic pair is ProbeOpportunisticEvery ago, fewer than
 // ProbeOpportunisticNegatives negatives went out in the last hour and the
 // spacing is met; otherwise the probes report skipped:budget or
@@ -893,7 +898,7 @@ func (e *engine) opportunistic(ctx context.Context, g *Generation) {
 			e.report.ProbePositive, e.report.ProbeNegative = v, v
 		}
 	}
-	if r, _ := checkProbeAccount(e.l.Root, account); r != "" || g.Host == "" ||
+	if r := e.checkProbeAccountFull(ctx, account, e.dump, true); r.Reason != "" || g.Host == "" ||
 		!lineSet(g.Files[PrincipalsDir+"/"+account], principalLine)[certpkg.ReservedPrincipalPrefix+g.Host] {
 		skip(probeSkippedNotReady)
 		return

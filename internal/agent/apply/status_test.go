@@ -750,8 +750,10 @@ func TestProbeStatus(t *testing.T) {
 				t.Errorf("%q is not a valid detail", c)
 			}
 		}
-		if len(probeHoldReasons) != 14 {
-			t.Fatalf("%d hold reasons, want the 14 of the closed list", len(probeHoldReasons))
+		// 03-10b's 14 and 03-10c's password_empty, password_set,
+		// sshd_override and account_excluded.
+		if len(probeHoldReasons) != 18 {
+			t.Fatalf("%d hold reasons, want the 18 of the closed list", len(probeHoldReasons))
 		}
 	})
 }

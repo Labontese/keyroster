@@ -110,17 +110,24 @@ func runRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	return err
 }
 
-// probeFlags are run's and apply's probe self-test flags (03-10b, D-06).
+// probeFlags are run's and apply's probe self-test flags (03-10b, D-06);
+// preflight and check have the account alone (03-10c), mode nil.
 type probeFlags struct {
 	account, mode *string
 }
 
+// addProbeAccountFlag registers --probe-account alone (03-10c: preflight
+// and check report the probe account; the self-test switch stays on run
+// and apply).
+func addProbeAccountFlag(fset *flag.FlagSet) probeFlags {
+	return probeFlags{account: fset.String("probe-account", cert.ReservedAccountName, "the probe account the probe self-test authenticates as")}
+}
+
 // addProbeFlags registers --probe-account and --probe-self-test.
 func addProbeFlags(fset *flag.FlagSet) probeFlags {
-	return probeFlags{
-		account: fset.String("probe-account", cert.ReservedAccountName, "the probe account the probe self-test authenticates as"),
-		mode:    fset.String("probe-self-test", "required", "the probe self-test: required (off exists only in the e2e test build)"),
-	}
+	p := addProbeAccountFlag(fset)
+	p.mode = fset.String("probe-self-test", "required", "the probe self-test: required (off exists only in the e2e test build)")
+	return p
 }
 
 // check refuses, right after the flags are parsed and before anything is
@@ -131,6 +138,9 @@ func (p probeFlags) check(stderr io.Writer) error {
 	if !directory.ValidAccountName(*p.account) {
 		_, _ = fmt.Fprintf(stderr, "--probe-account %q is not a valid account name\n", *p.account)
 		return errUsage
+	}
+	if p.mode == nil {
+		return nil
 	}
 	switch *p.mode {
 	case "required":
@@ -145,7 +155,7 @@ func (p probeFlags) check(stderr io.Writer) error {
 // apply copies the checked flags into cfg.
 func (p probeFlags) apply(cfg *apply.Config) {
 	cfg.ProbeAccount = *p.account
-	if *p.mode == "off" {
+	if p.mode != nil && *p.mode == "off" {
 		disableProbes(cfg)
 	}
 }

@@ -3,11 +3,15 @@
 package apply
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -444,4 +448,229 @@ func TestExcluded(t *testing.T) {
 	if got := Excluded(ParseDump([]byte("allowgroups adm\n")), "nobody-here", root); !strings.Contains(got, "groups are unknown") {
 		t.Errorf("an account outside /etc/passwd: %q", got)
 	}
+}
+
+// TestExcludedDefinite (03-10c, D3, sec-06): Excluded's text from origin
+// byte for byte (the main cases of TestExcluded, with host names for the
+// user@host entries), and definite computed over all entries.
+func TestExcludedDefinite(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(root, "etc", "passwd"), []byte("deploy:x:1000:1000::/home/deploy:/bin/sh\n"), 0o644) //nolint:gosec // test fixture
+	_ = os.WriteFile(filepath.Join(root, "etc", "group"), []byte("deploy:x:1000:\nadm:x:4:deploy\n"), 0o644)            //nolint:gosec // test fixture
+	const mayDeny = "DenyUsers deploy@remote.example refuses it from matching client hosts"
+	const mayAllow = "AllowUsers admits it only as deploy@remote.example, from matching client hosts"
+	check := func(t *testing.T, dump, account, why string, definite bool) {
+		t.Helper()
+		d := ParseDump([]byte(dump))
+		gotWhy, gotDef := ExcludedDefinite(d, account, root)
+		if gotWhy != why || gotDef != definite {
+			t.Fatalf("%q: (%q, %v), want (%q, %v)", dump, gotWhy, gotDef, why, definite)
+		}
+		if got := Excluded(d, account, root); got != why {
+			t.Fatalf("%q: Excluded %q, want %q", dump, got, why)
+		}
+	}
+	for _, c := range []struct {
+		dump, why string
+		definite  bool
+	}{
+		{"", "", false},
+		{"allowusers deploy\n", "", false},
+		{"allowusers dep*\n", "", false},
+		{"allowusers d?ploy\n", "", false},
+		{"allowusers alice\n", "AllowUsers (alice) does not list it", true},
+		{"allowusers deploy@remote.example\n", mayAllow, false},
+		{"allowusers alice\nallowusers deploy\n", "", false},
+		{"denyusers deploy\n", "DenyUsers deploy refuses it", true},
+		{"denyusers *\n", "DenyUsers * refuses it", true},
+		{"denyusers deploy@remote.example\n", mayDeny, false},
+		{"allowgroups adm\n", "", false},
+		{"allowgroups wheel\n", "AllowGroups (wheel) lists none of its groups (deploy, adm)", true},
+		{"allowgroups wheel,!adm\n", "AllowGroups (wheel,!adm) lists none of its groups (deploy, adm)", true},
+		{"denygroups adm\n", "DenyGroups adm refuses its group adm", true},
+		{"denygroups *,!adm\n", "DenyGroups *,!adm refuses its group deploy", true},
+	} {
+		check(t, c.dump, "deploy", c.why, c.definite)
+	}
+	t.Run("unknown_groups_not_definite", func(t *testing.T) {
+		check(t, "allowgroups adm\n", "nobody-here", "AllowGroups or DenyGroups is set and nobody-here is not in "+filepath.Join(root, "etc", "passwd")+", so its groups are unknown here", false)
+	})
+	t.Run("definite_after_user_at_host", func(t *testing.T) {
+		check(t, "denyusers deploy@remote.example\ndenyusers dep*\n", "deploy", mayDeny, true)
+		check(t, "denyusers deploy@remote.example\nallowgroups wheel\n", "deploy", mayDeny, true)
+		check(t, "allowusers deploy@remote.example\ndenygroups adm\n", "deploy", mayAllow, true)
+	})
+}
+
+// probeFindings is r's findings of code probe_account.
+func probeFindings(r *PreflightReport) []Finding {
+	var out []Finding
+	for _, f := range r.Findings {
+		if f.Code == CodeProbeAccount {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// TestPreflightProbeAccount (03-10c, T-03-387): preflight reports the probe
+// account's full check report only, also before enrolment, and never
+// refuses an apply for it.
+func TestPreflightProbeAccount(t *testing.T) {
+	mustOne := func(t *testing.T, r *PreflightReport, reason string) {
+		t.Helper()
+		got := probeFindings(r)
+		if len(got) != 1 || !strings.HasPrefix(got[0].Message, reason+":") || got[0].Account != probeAcct || got[0].Refusal || got[0].Fix == "" {
+			t.Fatalf("%s: probe findings %+v", reason, got)
+		}
+		if r.Refused() {
+			t.Fatalf("%s: the preflight refuses: %+v", reason, r.Findings)
+		}
+	}
+	host := func(t *testing.T) *testHost {
+		t.Helper()
+		h := newTestHost(t, newFixture(t))
+		h.gateOn()
+		h.writeRootFile("bin/sh", []byte("#!/bin/false\n"), 0o755)
+		return h
+	}
+	mapped := func(t *testing.T) *testHost {
+		t.Helper()
+		h := host(t)
+		s := h.spec("role:a")
+		s.accounts = []string{"deploy", probeAcct}
+		h.publishDir(s)
+		return h
+	}
+	t.Run("reports_each_reason_report_only", func(t *testing.T) {
+		t.Parallel()
+		for _, c := range []struct {
+			reason string
+			set    func(h *testHost)
+		}{
+			{accountMissing, func(h *testHost) { h.writePasswd("root:x:0:0:root:/root:/bin/bash\n") }},
+			{accountUnparsable, func(h *testHost) { h.writePasswd(probeAcct + ":x:990:990::/nonexistent\n") }},
+			{accountUIDZero, func(h *testHost) { h.writePasswd(probeAcct + ":x:0:0::/nonexistent:/usr/sbin/nologin\n") }},
+			{shellMissing, func(h *testHost) { h.writePasswd(probeLine("x", "/sbin/nologin") + "\n") }},
+			{shellNotNologin, func(h *testHost) { h.writePasswd(probeLine("x", "/bin/sh") + "\n") }},
+			{passwordEmpty, func(h *testHost) { h.setShadow("") }},
+			{passwordSet, func(h *testHost) { h.setShadow("$6$salt$abcdef") }},
+			{sshdOverride, func(h *testHost) { h.setFor("pubkeyauthentication no\n") }},
+			{accountExcluded, func(h *testHost) { h.setFor("denyusers " + probeAcct + "\n") }},
+		} {
+			h := host(t)
+			c.set(h)
+			mustOne(t, h.mustPreflight(), c.reason)
+		}
+		h := mapped(t)
+		mustOne(t, h.mustPreflight(), "account_is_managed")
+	})
+	t.Run("no_verified_state_still_runs", func(t *testing.T) {
+		t.Parallel()
+		h := host(t)
+		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
+		// No h.write(): the spool holds no signed state.
+		r, err := Preflight(context.Background(), h.cfg, h.l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(r.Notes, func(n string) bool { return strings.Contains(n, "the policy and account checks run once") }) {
+			t.Fatalf("notes %q: want the no-verified-state note", r.Notes)
+		}
+		mustOne(t, r, accountMissing)
+	})
+	t.Run("no_loopback_listener_no_finding_no_error", func(t *testing.T) {
+		t.Parallel()
+		h := host(t)
+		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
+		h.run.listen = []string{"remote.example:22"}
+		r, err := h.preflight()
+		if err != nil {
+			t.Fatalf("preflight: %v", err)
+		}
+		if finding(r, CodeNoLoopbackListener) == nil || len(probeFindings(r)) != 0 {
+			t.Fatalf("findings %+v", r.Findings)
+		}
+	})
+	t.Run("healthy_account_before_the_dropin_has_no_finding", func(t *testing.T) {
+		t.Parallel()
+		h := host(t)
+		h.setShadow("*")
+		r := h.mustPreflight()
+		if got := probeFindings(r); len(got) != 0 || r.Refused() {
+			t.Fatalf("a healthy probe account before the first install: %+v", r.Findings)
+		}
+		if h.exists(h.l.LastGood()) || h.exists(h.l.DropIn()) {
+			t.Fatal("the host is installed")
+		}
+	})
+	t.Run("account_is_managed_finding_with_state", func(t *testing.T) {
+		t.Parallel()
+		h := mapped(t)
+		r := h.mustPreflight()
+		mustOne(t, r, "account_is_managed")
+		h = host(t)
+		h.publishDir(h.spec("role:a"))
+		if got := probeFindings(h.mustPreflight()); len(got) != 0 {
+			t.Fatalf("an unmapped probe account: %+v", got)
+		}
+	})
+	t.Run("shadow_unreadable_is_a_note", func(t *testing.T) {
+		t.Parallel()
+		h := host(t)
+		h.cfg.openShadow = openErr(syscall.EACCES)
+		r := h.mustPreflight()
+		if got := probeFindings(r); len(got) != 0 {
+			t.Fatalf("an unreadable shadow holds: %+v", got)
+		}
+		if !slices.ContainsFunc(r.Notes, func(n string) bool { return strings.HasPrefix(n, noteShadowUnreadable+":") }) {
+			t.Fatalf("notes %q", r.Notes)
+		}
+	})
+	t.Run("silent_when_probes_off", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHost(t, newFixture(t))
+		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
+		r := h.mustPreflight()
+		if got := probeFindings(r); len(got) != 0 || h.run.dumps[probeSpecKey(h, ProbeSource, "127.0.0.1")] != 0 {
+			t.Fatalf("probes off: %+v, dumps %v", got, h.run.dumps)
+		}
+	})
+	t.Run("hash_never_in_report", func(t *testing.T) {
+		t.Parallel()
+		// The hash in shadow, then in passwd field 2.
+		const marker = "$6$Zq9MarkerSalt$Zq9MarkerHashValue"
+		for _, inPasswd := range []bool{false, true} {
+			h := host(t)
+			h.setShadow(marker)
+			if inPasswd {
+				h.setShadow("*")
+				h.writePasswd(probeLine(marker, "/usr/sbin/nologin") + "\n")
+			}
+			r := h.mustPreflight()
+			mustOne(t, r, passwordSet)
+			b, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(b, []byte("Zq9Marker")) {
+				t.Fatalf("the report carries the hash (in passwd: %t): %s", inPasswd, b)
+			}
+		}
+	})
+	t.Run("apply_not_refused", func(t *testing.T) {
+		t.Parallel()
+		h := host(t)
+		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
+		h.publishDir(h.spec("role:a"))
+		_, err := h.apply()
+		var pe *PreflightError
+		if err != nil || errors.As(err, &pe) {
+			t.Fatalf("the first apply with a broken probe account: %v", err)
+		}
+		mustPrincipals(t, h, "role:a")
+	})
 }

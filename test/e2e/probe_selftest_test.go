@@ -82,7 +82,10 @@ type e2eProbeRecord struct {
 type e2eProbeState struct {
 	Negatives []uint64 `json:"negatives"`
 	LastPair  uint64   `json:"last_pair"`
-	Held      *struct {
+	// LastOpportunistic is printed with LastPair when the no-held-apply
+	// assertion of positive_refused_rolls_back fails (03-10c, D6).
+	LastOpportunistic uint64 `json:"last_opportunistic"`
+	Held              *struct {
 		Reason string `json:"reason"`
 	} `json:"held"`
 	Failure *struct {
@@ -166,6 +169,62 @@ func writeProbePasswd(t *testing.T, h *agentHost, shell string) {
 	}
 	line := fmt.Sprintf("%s:x:%d:%d::/nonexistent:%s\n", currentUser(t), os.Getuid(), os.Getgid(), shell)
 	if err := os.WriteFile(filepath.Join(h.root, "etc", "passwd"), []byte(line), 0o644); err != nil { //nolint:gosec // passwd's packaged mode
+		t.Fatal(err)
+	}
+}
+
+// writeProbeShadow writes <root>/etc/shadow with the one line of the probe
+// account (the test user) and the password field field (03-10c).
+func writeProbeShadow(t *testing.T, h *agentHost, field string) {
+	t.Helper()
+	line := currentUser(t) + ":" + field + ":20000:0:99999:7:::\n"
+	if err := os.WriteFile(filepath.Join(h.root, "etc", "shadow"), []byte(line), 0o640); err != nil { //nolint:gosec // G306: shadow's packaged mode, read by the unprivileged test agent
+		t.Fatal(err)
+	}
+}
+
+// setSSHDCause adds (on) or removes the sshd_config edit name of the hold
+// chain (03-10c, D7), kept between its own begin and end comment lines so
+// that each cause is removed alone: "denyusers" is a global DenyUsers line
+// for the probe account, placed before the first Match line (after one it
+// would sit inside that block); "match" is a Match User block for the
+// probe account with PubkeyAuthentication no, closed by Match all, at the
+// end. The caller sends sshd its SIGHUP.
+func setSSHDCause(t *testing.T, h *agentHost, name string, on bool) {
+	t.Helper()
+	b, err := os.ReadFile(h.sshd.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	begin, end := "# keyroster-e2e cause "+name+" begin", "# keyroster-e2e cause "+name+" end"
+	var lines []string
+	in := false
+	for _, l := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		switch {
+		case l == begin:
+			in = true
+		case l == end:
+			in = false
+		case !in:
+			lines = append(lines, l)
+		}
+	}
+	if on {
+		login := currentUser(t)
+		switch name {
+		case "denyusers":
+			at := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(strings.ToLower(strings.TrimSpace(l)), "match ") })
+			if at < 0 {
+				at = len(lines)
+			}
+			lines = slices.Insert(lines, at, begin, "DenyUsers "+login, end)
+		case "match":
+			lines = append(lines, begin, "Match User "+login, "\tPubkeyAuthentication no", "Match all", end)
+		default:
+			t.Fatalf("no sshd cause %q", name)
+		}
+	}
+	if err := os.WriteFile(h.sshd.cfg, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil { //nolint:gosec // sshd_config's packaged mode
 		t.Fatal(err)
 	}
 }
@@ -465,8 +524,12 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 
 	if !t.Run("positive_refused_rolls_back", func(t *testing.T) {
 		// A mixed change: dev is removed and qa added in one directory
-		// version, and DenyUsers makes sshd refuse the probe account, so the
-		// positive is refused once the change is live. The mixed change must
+		// version, and PubkeyAcceptedAlgorithms without the Ed25519
+		// certificate algorithm makes sshd refuse the probe certificate, so
+		// the positive is refused once the change is live. The account check
+		// does not read that setting (03-10c, D5: DenyUsers is now
+		// account_excluded, which the gate holds before anything goes live).
+		// The mixed change must
 		// pass the gate on its first pass, so that the failed addition takes
 		// the settle path (D13) on real sshd: published a few seconds after
 		// widening_passes_probes spent a pair, the spacing look-ahead would
@@ -477,11 +540,20 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(h.sshd.cfg, append(slices.Clone(cfg), []byte("DenyUsers "+login+"\n")...), 0o644); err != nil { //nolint:gosec // sshd_config's packaged mode
+		if err := os.WriteFile(h.sshd.cfg, append(slices.Clone(cfg), []byte("PubkeyAcceptedAlgorithms -"+ssh.CertAlgoED25519v01+"\n")...), 0o644); err != nil { //nolint:gosec // sshd_config's packaged mode
 			t.Fatal(err)
 		}
 		sshdHUP(t, h)
 		kr("role", "add", "qa", "--max-ttl", "1h", "--yes")
+		// 03-10c, D6: the apply of `role add qa` (which can start an
+		// opportunistic pair, under the lock) is applied and reported before
+		// the spacing wait, so no apply can spend a pair after the wait and
+		// before the mixed map.
+		waitUntil(t, "the role add qa directory version is applied and reported", 60*time.Second, logs, func() bool {
+			host, current := hostDirectoryVersion(t, kr)
+			la := probeStatus(h)
+			return host == current && la != nil && la.DirectoryVersion == current
+		})
 		spacing := uint64(apply.ProbePairSpacing / time.Second)
 		waitUntil(t, "the last probe pair is ProbePairSpacing old", apply.ProbePairSpacing+30*time.Second, logs, func() bool {
 			last := readProbeState(h).LastPair
@@ -540,7 +612,8 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 		// settle and not a retry's plain rollback.
 		select {
 		case d := <-heldSeen:
-			t.Fatalf("an apply between the map and the settle was held (%s)\n%s", d, logs())
+			st := readProbeState(h)
+			t.Fatalf("an apply between the map and the settle was held (%s; last_pair %d, last_opportunistic %d)\n%s", d, st.LastPair, st.LastOpportunistic, logs())
 		default:
 		}
 		if strings.Contains(runLog[runFrom:], "probe_held") {
@@ -586,7 +659,12 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 	}
 
 	if !t.Run("unusable_account_holds_widening_krl_and_narrowing_land", func(t *testing.T) {
+		// 03-10c, D7: every cause at once, removed in the gate's order.
 		writeProbePasswd(t, h, "/bin/sh")
+		writeProbeShadow(t, h, "$6$e2esalt$e2ehashvalue")
+		setSSHDCause(t, h, "match", true)
+		setSSHDCause(t, h, "denyusers", true)
+		sshdHUP(t, h)
 		before := readProbeState(h).Negatives
 		c := issueAgentCert(t, env.Signer, "held", "role:ops")
 		revokeSerial(t, env.Signer, c.serial)
@@ -612,12 +690,37 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 		if after := readProbeState(h).Negatives; !slices.Equal(before, after) {
 			t.Fatalf("negative probes %v, were %v: a held addition spent a pair", after, before)
 		}
+		// Each removal is followed by a directory change that grants
+		// nothing (a role nobody maps), so the next apply runs at once.
+		for i, step := range []struct {
+			next string
+			fix  func()
+		}{
+			{"password_set", func() { writeProbePasswd(t, h, "/usr/sbin/nologin") }},
+			{"sshd_override", func() { writeProbeShadow(t, h, "*") }},
+			{"account_excluded", func() { setSSHDCause(t, h, "match", false); sshdHUP(t, h) }},
+			{"", func() { setSSHDCause(t, h, "denyusers", false); sshdHUP(t, h) }},
+		} {
+			step.fix()
+			kr("role", "add", "fix"+strconv.Itoa(i+1), "--max-ttl", "1h", "--yes")
+			if step.next == "" {
+				break
+			}
+			waitUntil(t, "the addition is held with probe_held:"+step.next, 90*time.Second, logs, func() bool {
+				la := probeStatus(h)
+				return la != nil && la.Detail == "probe_held:"+step.next
+			})
+			if after := readProbeState(h).Negatives; !slices.Equal(before, after) {
+				t.Fatalf("negative probes %v, were %v: a held addition spent a pair (at %s)", after, before, step.next)
+			}
+		}
 	}) {
 		t.FailNow()
 	}
 
 	if !t.Run("fixing_the_account_lands_the_held_addition", func(t *testing.T) {
-		writeProbePasswd(t, h, "/usr/sbin/nologin")
+		// 03-10c: the hold chain removed every cause; this waits for the
+		// landing.
 		waitUntil(t, "the held addition lands", 300*time.Second, logs, func() bool {
 			la := probeStatus(h)
 			return strings.Contains(currentFile(h, "principals/krmanaged"), "role:ops2") && la != nil &&

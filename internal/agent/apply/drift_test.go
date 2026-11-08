@@ -3,11 +3,14 @@
 package apply
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Labontese/keyroster/internal/agent/paths"
@@ -158,6 +161,107 @@ func TestDrift(t *testing.T) {
 		r, err := h.check()
 		if err != nil || !swapped || r.Generation != second || len(r.Files) != 0 {
 			t.Fatalf("a swap during the check: %+v, %v (swapped %t)", r, err, swapped)
+		}
+	})
+}
+
+// TestDriftProbeAccount (03-10c, T-03-387): check reports the probe
+// account in its own report-only list; a trust setting overridden for the
+// probe account stays drift.
+func TestDriftProbeAccount(t *testing.T) {
+	probes := func(r *DriftReport, reason string) int {
+		n := 0
+		for _, f := range r.Probe {
+			if f.Code == CodeProbeAccount && f.Account == probeAcct && strings.HasPrefix(f.Message, reason+":") && !f.Refusal {
+				n++
+			}
+		}
+		return n
+	}
+	t.Run("probe_spec_address", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a")
+		r, err := h.check()
+		if err != nil || r.Drift() || len(r.Probe) != 0 {
+			t.Fatalf("a clean host: %+v, %v", r, err)
+		}
+		if n := h.run.dumps[probeSpecKey(h, ProbeSource, "127.0.0.1")]; n != 1 {
+			t.Fatalf("sshd -T -C runs %v, want one from the probe source", h.run.dumps)
+		}
+	})
+	t.Run("finding_is_not_drift", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a")
+		h.setShadow("$6$salt$abcdef")
+		r, err := h.check()
+		if err != nil || r.Drift() || probes(r, passwordSet) != 1 {
+			t.Fatalf("a probe account with a password: %+v, %v", r, err)
+		}
+	})
+	t.Run("generic_excluded_not_duplicated", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a")
+		if _, ok := h.genNow().Files[PrincipalsDir+"/"+probeAcct]; !ok {
+			t.Fatal("current holds no probe principals file")
+		}
+		h.setFor("denyusers " + probeAcct + "\n")
+		r, err := h.check()
+		if err != nil || r.Drift() || probes(r, accountExcluded) != 1 {
+			t.Fatalf("an excluded probe account: %+v, %v", r, err)
+		}
+		if slices.ContainsFunc(r.Excluded, func(f Finding) bool { return f.Account == probeAcct }) {
+			t.Fatalf("the probe account is in Excluded too: %+v", r.Excluded)
+		}
+	})
+	t.Run("probe_trust_override_still_drifts", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a")
+		h.run.match = map[string]map[string]string{probeAcct: {"authorizedprincipalsfile": "/etc/ssh/other/%u"}}
+		r, err := h.check()
+		if err != nil || !r.Drift() || !slices.ContainsFunc(r.Settings, func(s SettingDrift) bool {
+			return s.Account == probeAcct && s.Keyword == "authorizedprincipalsfile"
+		}) {
+			t.Fatalf("a Match block overriding the probe account's principals file: %+v, %v", r, err)
+		}
+		if probes(r, sshdOverride) != 1 {
+			t.Fatalf("probe findings %+v", r.Probe)
+		}
+	})
+	t.Run("mapped_probe_account_reported", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHost(t, newFixture(t))
+		h.gateOn()
+		s := h.spec("role:a")
+		s.accounts = []string{"deploy", probeAcct}
+		h.publishDir(s)
+		h.mustApply()
+		r, err := h.check()
+		if err != nil || r.Drift() || probes(r, "account_is_managed") != 1 {
+			t.Fatalf("a mapped probe account: %+v, %v", r, err)
+		}
+	})
+	t.Run("hash_never_in_report", func(t *testing.T) {
+		t.Parallel()
+		// The hash in shadow, then in passwd field 2.
+		const marker = "$6$Zq9MarkerSalt$Zq9MarkerHashValue"
+		h := gateHost(t, "role:a")
+		for _, inPasswd := range []bool{false, true} {
+			h.setShadow(marker)
+			if inPasswd {
+				h.setShadow("*")
+				h.writePasswd(probeLine(marker, "/usr/sbin/nologin") + "\n")
+			}
+			r, err := h.check()
+			if err != nil || probes(r, passwordSet) != 1 {
+				t.Fatalf("%+v, %v", r, err)
+			}
+			b, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(b, []byte("Zq9Marker")) {
+				t.Fatalf("the report carries the hash (in passwd: %t): %s", inPasswd, b)
+			}
 		}
 	})
 }

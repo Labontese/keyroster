@@ -735,10 +735,12 @@ func TestForwardServedCerts(t *testing.T) {
 		h.mustApply()
 		h.gateOn()
 		h.ready()
-		// A drop-in that is not the wanted one: forward rewrites it.
-		if err := os.Remove(h.l.DropIn()); err != nil {
-			t.Fatal(err)
-		}
+		// A drop-in that is not the wanted one: forward rewrites it. It is
+		// edited, not removed (03-10c): without it sshd -T -C would report
+		// none of the agent's trust settings for the probe account, and the
+		// gate's account check would hold the widening as sshd_override
+		// before the rewrite.
+		appendFile(t, h.l.DropIn(), "# edited by hand\n")
 		if mismatch {
 			h.sshd.serveCert(h.issue(h.sshd.pub, strings.Repeat("e", 32)))
 			t.Cleanup(func() { h.sshd.serveCert(nil) })

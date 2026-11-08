@@ -24,7 +24,7 @@ func init() {
 }
 
 const preflightUsage = `usage: keyroster-agent preflight [--root DIR] [--state-dir DIR] [--spool DIR]
-       [--sshd PATH] [--sshd-config PATH] [--ssh-keygen PATH]
+       [--sshd PATH] [--sshd-config PATH] [--ssh-keygen PATH] [--probe-account NAME]
 
 Checks whether the agent can manage this host's sshd without editing
 sshd_config (D-07), and prints the findings as JSON. It changes nothing but
@@ -33,8 +33,8 @@ host with no generation of the agent's installed, and removed before it
 exits, with no reload. On an installed host a missing, trial or edited
 drop-in is reported as dropin_drift.
 
-Exit status: 0 when no finding refuses the host (account_excluded and
-phase2_adoptable are report only), 3 when one does (sshd_command_unknown
+Exit status: 0 when no finding refuses the host (account_excluded,
+phase2_adoptable and probe_account are report only), 3 when one does (sshd_command_unknown
 included: the detected service starts sshd with arguments the agent does
 not account for), 2 for a usage or tool error (an sshd that cannot run,
 an apply holding the lock).
@@ -119,10 +119,14 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	fset.SetOutput(stderr)
 	fset.Usage = func() { _, _ = io.WriteString(stderr, preflightUsage) }
 	svc := addServiceFlags(fset, false)
+	probe := addProbeAccountFlag(fset)
 	stateDir := fset.String("state-dir", defaultStateDir, "the applier's state directory (absent before enrollment)")
 	spoolDir := fset.String("spool", "", "the spool directory (optional)")
 	if err := fset.Parse(args); err != nil || fset.NArg() != 0 {
 		return errUsage
+	}
+	if err := probe.check(stderr); err != nil {
+		return err
 	}
 	for name, v := range map[string]string{"--state-dir": *stateDir, "--spool": *spoolDir} {
 		if (v != "" || name == "--state-dir") && !filepath.IsAbs(v) {
@@ -147,6 +151,7 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	}
 	l := apply.Layout{Root: filepath.Clean(*svc.root), StateDir: filepath.Clean(*stateDir)}
 	cfg := apply.Config{SSHD: sshd, SSHDConfig: config, SSHKeygen: keygen, Log: stderr}
+	probe.apply(&cfg)
 	if *spoolDir != "" {
 		cfg.Spool = filepath.Clean(*spoolDir)
 	}

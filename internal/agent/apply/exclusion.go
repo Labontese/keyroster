@@ -4,6 +4,7 @@ package apply
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -69,6 +70,61 @@ func matchPatternList(s, list string) int {
 // LDAP) is reported only when group rules exist. Report only (D-07): the
 // agent never edits these settings.
 func Excluded(d Dump, account, root string) string {
+	why, _ := ExcludedDefinite(d, account, root)
+	return why
+}
+
+// ExcludedDefinite is Excluded's text (the first hit, unchanged) and
+// whether the exclusion is certain (03-10c, D3), computed over all entries
+// independently of the text, so a definite rule after a user@host entry
+// is still seen: a host-less DenyUsers entry that matches, an AllowUsers
+// list that matches the account in no entry, a DenyGroups entry that
+// matches one of its groups, or an AllowGroups list that matches none.
+// A user@host entry, and group rules for an account whose groups are
+// unknown here, are never definite: the positive probe decides those.
+func ExcludedDefinite(d Dump, account, root string) (why string, definite bool) {
+	return excludedWhy(d, account, root), excludedDefinite(d, account, root)
+}
+
+// excludedDefinite is ExcludedDefinite's definite part.
+func excludedDefinite(d Dump, account, root string) bool {
+	for _, e := range d["denyusers"] {
+		if u, _, host := strings.Cut(e, "@"); !host && matchPattern(account, u) {
+			return true
+		}
+	}
+	if allow := d["allowusers"]; len(allow) > 0 && !slices.ContainsFunc(allow, func(e string) bool {
+		u, _, _ := strings.Cut(e, "@")
+		return matchPattern(account, u)
+	}) {
+		return true
+	}
+	deny, allow := d["denygroups"], d["allowgroups"]
+	if len(deny) == 0 && len(allow) == 0 {
+		return false
+	}
+	groups, ok := accountGroups(root, account)
+	if !ok {
+		return false
+	}
+	match := func(list []string) bool {
+		for _, e := range list {
+			for _, g := range groups {
+				if matchPatternList(g, e) == 1 {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if match(deny) {
+		return true
+	}
+	return len(allow) > 0 && !match(allow)
+}
+
+// excludedWhy is Excluded's text: why account is or may be refused, or "".
+func excludedWhy(d Dump, account, root string) string {
 	user := func(entry string) (bool, bool) { // matches the user part, and has a host part
 		u, _, host := strings.Cut(entry, "@")
 		return matchPattern(account, u), host

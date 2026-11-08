@@ -663,7 +663,10 @@ func TestProbeGate(t *testing.T) {
 		}
 		h.clock.advance(time.Minute)
 		r, err = h.apply()
-		mustHeld(t, h, r, err, "cert_missing")
+		// 03-10c: the gate's account check runs before the repair and sees
+		// the edited drop-in's RevokedKeys in sshd -T -C (sshd_override);
+		// the retry still repairs it, and the next one is cert_missing.
+		mustHeld(t, h, r, err, sshdOverride)
 		if got := readFile(t, h.l.DropIn()); got != want || h.exists(h.l.State(dropinPrevFile)) {
 			t.Fatalf("the held retry left the drop-in edited:\n%s", got)
 		}
@@ -671,6 +674,8 @@ func TestProbeGate(t *testing.T) {
 		if r.NoOp {
 			t.Fatal("a held retry that repaired the drop-in is a no-op")
 		}
+		r, err = h.apply()
+		mustHeld(t, h, r, err, "cert_missing")
 	})
 	t.Run("renamed_committed_pair_holds_cert_missing", func(t *testing.T) {
 		t.Parallel()
@@ -1050,7 +1055,9 @@ func TestProbeGate(t *testing.T) {
 			}
 			cur.Files[PrincipalsDir+"/deploy"] = []byte("role:a\nrole:b\n")
 			st := newProbeState()
-			st.Failure = &probeFailure{Code: ErrProbePositiveRefused.Error(), Key: failureKey(cur, p, probeLogin), At: lockedEngine(h).probeNow(), Count: 1}
+			// 03-10c: the key input is accountKeyInput's (the passwd line, a
+			// NUL byte and the password class), no longer the bare line.
+			st.Failure = &probeFailure{Code: ErrProbePositiveRefused.Error(), Key: failureKey(cur, p, lockedEngine(h).accountKeyInput(probeAcct)), At: lockedEngine(h).probeNow(), Count: 1}
 			h.setProbeState(st)
 			h.publishDir(h.spec("role:a", "role:b"))
 			r, err := h.apply()
@@ -1162,6 +1169,190 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	probeGateRuns(t)
+	probeGateAccount(t)
+}
+
+// probeGateAccount is TestProbeGate's part for the full account check
+// (03-10c, T-03-66, T-03-385, T-03-386): the new reasons hold an addition
+// while its narrowing part and the KRL land, and the check runs only where
+// an addition waits for it and once after a narrowing commit.
+func probeGateAccount(t *testing.T) {
+	holds := func(t *testing.T, reason string, set func(h *testHost)) {
+		t.Helper()
+		h := gateHost(t, "role:a", "role:b")
+		h.ready()
+		q := len(h.probeQueries())
+		set(h)
+		h.publishDir(h.spec("role:a", "role:c"))
+		h.publishKRL(5)
+		r, err := h.apply()
+		mustHeld(t, h, r, err, reason)
+		mustPrincipals(t, h, "role:a")
+		if !h.krlRevokes(h.l.Current(), 5) || len(h.probeQueries()) != q {
+			t.Fatalf("%s: the KRL did not land (%t) or a pair was spent (%d queries)", reason, !h.krlRevokes(h.l.Current(), 5), len(h.probeQueries())-q)
+		}
+	}
+	t.Run("password_set_holds_addition", func(t *testing.T) {
+		t.Parallel()
+		holds(t, passwordSet, func(h *testHost) { h.setShadow("$6$salt$abcdef") })
+	})
+	t.Run("password_empty_holds_addition", func(t *testing.T) {
+		t.Parallel()
+		holds(t, passwordEmpty, func(h *testHost) { h.setShadow("") })
+	})
+	t.Run("sshd_override_holds_addition", func(t *testing.T) {
+		t.Parallel()
+		holds(t, sshdOverride, func(h *testHost) { h.setFor("pubkeyauthentication no\n") })
+	})
+	t.Run("account_excluded_holds_addition", func(t *testing.T) {
+		t.Parallel()
+		holds(t, accountExcluded, func(h *testHost) { h.setFor("denyusers " + probeAcct + "\n") })
+	})
+	t.Run("new_reasons_in_closed_list", func(t *testing.T) {
+		t.Parallel()
+		want := []string{accountMissing, accountUnparsable, accountUIDZero, shellMissing, shellNotNologin, passwordEmpty, passwordSet, sshdOverride, accountExcluded, "account_is_managed"}
+		at := slices.Index(probeHoldReasons, accountMissing)
+		if at < 0 || !slices.Equal(probeHoldReasons[at:at+len(want)], want) {
+			t.Fatalf("probeHoldReasons %v: the account step's reasons are not in the gate's order", probeHoldReasons)
+		}
+		for _, r := range probeHoldReasons {
+			if !heartbeat.ValidDetail(ErrProbeHeld.Error() + ":" + r) {
+				t.Fatalf("probe_held:%s is not a valid probe_detail", r)
+			}
+		}
+	})
+	t.Run("account_key_changes_with_shadow_class", func(t *testing.T) {
+		t.Parallel()
+		// A hash holds password_set before the back-off, so the classes that
+		// reach it are used: locked (UsePAM yes) then star.
+		h := gateHost(t, "role:a")
+		h.setFor("usepam yes\n")
+		h.setShadow("!")
+		p := h.ready()
+		cur := h.genNow()
+		cur.Files[PrincipalsDir+"/deploy"] = []byte("role:a\nrole:b\n")
+		st := newProbeState()
+		st.Failure = &probeFailure{Code: ErrProbePositiveRefused.Error(), Key: failureKey(cur, p, lockedEngine(h).accountKeyInput(probeAcct)), At: lockedEngine(h).probeNow(), Count: 1}
+		h.setProbeState(st)
+		h.publishDir(h.spec("role:a", "role:b"))
+		r, err := h.apply()
+		mustHeld(t, h, r, err, "failure_backoff")
+		h.setShadow("*")
+		h.mustApply()
+		if !slices.Contains(h.principals("deploy"), "role:b") {
+			t.Fatal("the shadow class changed: the addition did not land at once")
+		}
+	})
+	t.Run("held_retry_runs_account_check_each_round", func(t *testing.T) {
+		t.Parallel()
+		// No pair: the account check passes and the addition is held
+		// cert_missing, after one sshd -T -C for the probe account a round.
+		h := gateHost(t, "role:a")
+		h.publishDir(h.spec("role:a", "role:b"))
+		key := probeSpecKey(h, ProbeSource, "127.0.0.1")
+		for round := 1; round <= 3; round++ {
+			before := h.run.dumps[key]
+			r, err := h.apply()
+			mustHeld(t, h, r, err, "cert_missing")
+			if got := h.run.dumps[key] - before; got != 1 {
+				t.Fatalf("round %d: %d probe-account sshd -T -C runs, want 1", round, got)
+			}
+		}
+	})
+	t.Run("gate_path_runs_no_account_check_for_exempt_and_narrowing", func(t *testing.T) {
+		t.Parallel()
+		for _, c := range []struct {
+			name  string
+			after int
+			setup func(t *testing.T) *testHost
+		}{
+			{"first_install", 0, func(t *testing.T) *testHost {
+				h := newTestHost(t, newFixture(t))
+				h.gateOn()
+				h.publishDir(h.spec("role:a"))
+				return h
+			}},
+			{"probe_file_only", 1, func(t *testing.T) *testHost {
+				h := newTestHost(t, newFixture(t))
+				h.installed("role:a")
+				h.gateOn()
+				h.publishDir(h.spec("role:a"))
+				return h
+			}},
+			{"narrowing", 1, func(t *testing.T) *testHost {
+				h := gateHost(t, "role:a", "role:b")
+				h.publishDir(h.spec("role:a"))
+				return h
+			}},
+		} {
+			h := c.setup(t)
+			key := probeSpecKey(h, ProbeSource, "127.0.0.1")
+			base, atCommit := h.run.dumps[key], -1
+			h.cfg.Fault = func(point string) error {
+				if point == "last-good" && atCommit < 0 {
+					atCommit = h.run.dumps[key]
+				}
+				return nil
+			}
+			h.mustApply()
+			if atCommit != base || h.run.dumps[key]-base != c.after {
+				t.Fatalf("%s: %d probe-account runs before the commit, %d in all, want 0 and %d", c.name, atCommit-base, h.run.dumps[key]-base, c.after)
+			}
+		}
+	})
+	t.Run("narrowing_with_password_set_lands_not_held", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a", "role:b")
+		h.setShadow("$6$salt$abcdef")
+		h.publishDir(h.spec("role:a"))
+		r := h.mustApply()
+		mustPrincipals(t, h, "role:a")
+		if r.Detail != "" || h.heldNow() != "" {
+			t.Fatalf("a removal waited: detail %q, held %q", r.Detail, h.heldNow())
+		}
+	})
+	t.Run("opportunistic_skips_on_new_reasons", func(t *testing.T) {
+		t.Parallel()
+		h := gateHost(t, "role:a", "role:b")
+		h.readyFor(time.Hour)
+		h.clock.advance(11 * time.Minute)
+		q := len(h.probeQueries())
+		h.setShadow("$6$salt$abcdef")
+		h.publishDir(h.spec("role:a"))
+		if r := h.mustApply(); r.ProbePositive != probeSkippedNotReady || len(h.probeQueries()) != q {
+			t.Fatalf("probes %q, %d queries", r.ProbePositive, len(h.probeQueries())-q)
+		}
+	})
+	t.Run("hash_never_in_state_or_log", func(t *testing.T) {
+		t.Parallel()
+		const marker = "$6$Zq9MarkerSalt$Zq9MarkerHashValue"
+		h := gateHost(t, "role:a", "role:b")
+		var log bytes.Buffer
+		h.cfg.Log = &log
+		h.ready()
+		h.setShadow(marker)
+		h.publishDir(h.spec("role:a", "role:c"))
+		r, err := h.apply()
+		mustHeld(t, h, r, err, passwordSet)
+		h.setShadow("*")
+		h.writePasswd(probeLine(marker, "/usr/sbin/nologin") + "\n")
+		r, err = h.apply()
+		mustHeld(t, h, r, err, passwordSet)
+		for _, dir := range []string{h.l.StateDir, h.l.Outbox()} {
+			_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+				if err != nil || d.IsDir() {
+					return nil //nolint:nilerr // a vanished entry holds no bytes
+				}
+				if b, _ := os.ReadFile(p); bytes.Contains(b, []byte("Zq9Marker")) { //nolint:gosec // test fixture
+					t.Errorf("%s carries the hash", p)
+				}
+				return nil
+			})
+		}
+		if !h.exists(h.l.State(probeStateFile)) || strings.Contains(log.String(), "Zq9Marker") {
+			t.Fatalf("no probe-state.json, or the log carries the hash: %q", log.String())
+		}
+	})
 }
 
 // scriptProbes makes h's probe queries answer outs in order and then as

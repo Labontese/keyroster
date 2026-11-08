@@ -23,7 +23,7 @@ func init() {
 }
 
 const checkUsage = `usage: keyroster-agent check [--root DIR] [--state-dir DIR]
-       [--sshd PATH] [--sshd-config PATH]
+       [--sshd PATH] [--sshd-config PATH] [--probe-account NAME]
 
 Compares sshd -T, and sshd -T -C for every managed account, with the
 agent's drop-in, and re-hashes the generation current names against its
@@ -31,7 +31,8 @@ record (AGENT-05). It prints the report as JSON and fixes nothing.
 
 Exit status: 0 when nothing drifted, 3 on drift, 2 for a usage or tool
 error (no generation installed, sshd -T failing). Accounts that AllowUsers,
-AllowGroups, DenyUsers or DenyGroups exclude are listed, report only.
+AllowGroups, DenyUsers or DenyGroups exclude are listed, report only, and
+so are the probe account's problems (probe, code probe_account).
 `
 
 // runCheck is keyroster-agent check.
@@ -40,9 +41,13 @@ func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	fset.SetOutput(stderr)
 	fset.Usage = func() { _, _ = io.WriteString(stderr, checkUsage) }
 	svc := addServiceFlags(fset, false)
+	probe := addProbeAccountFlag(fset)
 	stateDir := fset.String("state-dir", defaultStateDir, "the applier's state directory")
 	if err := fset.Parse(args); err != nil || fset.NArg() != 0 || !filepath.IsAbs(*stateDir) {
 		return errUsage
+	}
+	if err := probe.check(stderr); err != nil {
+		return err
 	}
 	sshd, config, keygen, _, err := svc.resolve(ctx, stderr)
 	if errors.Is(err, errUsage) {
@@ -52,6 +57,7 @@ func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return &exitError{code: 2, err: err}
 	}
 	cfg := apply.Config{SSHD: sshd, SSHDConfig: config, SSHKeygen: keygen, Log: stderr}
+	probe.apply(&cfg)
 	report, err := apply.Check(ctx, cfg, apply.Layout{Root: filepath.Clean(*svc.root), StateDir: filepath.Clean(*stateDir)})
 	if err != nil {
 		return &exitError{code: 2, err: err}
