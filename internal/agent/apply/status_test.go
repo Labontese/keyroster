@@ -5,6 +5,7 @@ package apply
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
+	probecert "github.com/Labontese/keyroster/internal/agent/probe"
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/trust"
 )
@@ -573,6 +575,183 @@ func TestStale(t *testing.T) {
 		}
 		if s := outboxStatus(t, h); !s.KRLStale || s.KRL.Version != h.f.krlVersion {
 			t.Fatalf("after the apply: krl_stale %v, KRL %d", s.KRLStale, s.KRL.Version)
+		}
+	})
+}
+
+// TestReportProbeFields (03-10b): the probe fields of Report and what a
+// probes-off run reports in them.
+func TestReportProbeFields(t *testing.T) {
+	keys := []string{`"detail"`, `"probe_positive"`, `"probe_negative"`, `"served_certs"`}
+	b, err := json.Marshal(&Report{Errors: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		if strings.Contains(string(b), k) {
+			t.Fatalf("an empty report encodes %s: %s", k, b)
+		}
+	}
+	b, err = json.Marshal(&Report{Errors: []string{}, Detail: "probe_held:budget", ProbePositive: "pass", ProbeNegative: "fail", ServedCerts: "pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		if !strings.Contains(string(b), k) {
+			t.Fatalf("a report with probe fields lacks %s: %s", k, b)
+		}
+	}
+
+	h := newTestHost(t, newFixture(t))
+	r := h.installed("role:ops")
+	if r.Detail != DetailProbeSelfTestOff || r.ProbePositive != "skipped:off" || r.ProbeNegative != "skipped:off" || r.ServedCerts != "" {
+		t.Fatalf("a probes-off run: detail %q, probes %q %q, served %q", r.Detail, r.ProbePositive, r.ProbeNegative, r.ServedCerts)
+	}
+	r = h.mustApply()
+	if !r.NoOp || r.Detail != DetailProbeSelfTestOff || r.ProbePositive != "skipped:off" || r.ProbeNegative != "skipped:off" {
+		t.Fatalf("a probes-off no-op run: no-op %t, detail %q, probes %q %q", r.NoOp, r.Detail, r.ProbePositive, r.ProbeNegative)
+	}
+}
+
+// TestBuildStatusDetail (03-10b, G09): last_apply.detail carries the
+// report's detail when it is a valid code, and the result of a held or a
+// rolled-back apply.
+func TestBuildStatusDetail(t *testing.T) {
+	applied := func(t *testing.T, r *Report, err error) *heartbeat.LastApply {
+		t.Helper()
+		h := newTestHost(t, newFixture(t))
+		withOutbox(t, h)
+		writeStatus(t, h, StatusUpdate{Applied: true, Report: r, ApplyErr: err})
+		s := outboxStatus(t, h)
+		if s.LastApply == nil {
+			t.Fatal("no last_apply")
+		}
+		return s.LastApply
+	}
+	t.Run("detail_from_report", func(t *testing.T) {
+		if a := applied(t, &Report{Errors: []string{}, Detail: "probe_krl_not_enforced"}, nil); a.Detail != "probe_krl_not_enforced" || a.Result != heartbeat.ResultOK {
+			t.Fatalf("last_apply %+v", a)
+		}
+	})
+	t.Run("invalid_detail_dropped", func(t *testing.T) {
+		for _, d := range []string{"probe_held:a:b", "Probe", strings.Repeat("a", heartbeat.MaxDetail+1), "probe\x1b"} {
+			if a := applied(t, &Report{Errors: []string{}, Detail: d}, nil); a.Detail != "" {
+				t.Fatalf("detail %q reached last_apply as %q", d, a.Detail)
+			}
+		}
+	})
+	t.Run("held_is_refused", func(t *testing.T) {
+		err := fmt.Errorf("%w: %s", ErrProbeHeld, "cert_missing")
+		if a := applied(t, &Report{Errors: []string{err.Error()}, Detail: "probe_held:cert_missing"}, err); a.Result != heartbeat.ResultRefused || a.Detail != "probe_held:cert_missing" {
+			t.Fatalf("last_apply %+v", a)
+		}
+	})
+	t.Run("rollback_is_rolled_back", func(t *testing.T) {
+		err := ErrProbePositiveRefused
+		if a := applied(t, &Report{Errors: []string{err.Error()}, Rollback: true, Detail: "probe_positive_refused"}, err); a.Result != heartbeat.ResultRolledBack || !a.Rollback || a.Detail != "probe_positive_refused" {
+			t.Fatalf("last_apply %+v", a)
+		}
+	})
+	t.Run("no_detail_when_empty", func(t *testing.T) {
+		if a := applied(t, &Report{Errors: []string{}}, nil); a.Detail != "" {
+			t.Fatalf("last_apply %+v", a)
+		}
+	})
+}
+
+// probeCodes is every detail code of 'Contracts frozen by this plan'
+// (03-10b) the applier can emit.
+var probeCodes = func() []string {
+	c := []string{"probe_positive_refused", "probe_krl_not_enforced", "probe_inconclusive", "served_cert_mismatch",
+		DetailProbeStateReset, DetailProbeSelfTestOff, "probe_issue:refused_probe_issue_valid_for_not_zero", "probe_issue:backoff",
+		"probe_issue:request_pending", "probe_issue:no_generation"}
+	for _, r := range probeHoldReasons {
+		c = append(c, "probe_held:"+r)
+	}
+	return c
+}()
+
+// TestProbeStatus (03-10b): probe_detail in the heartbeat status, by
+// priority, kept across a later no-op apply.
+func TestProbeStatus(t *testing.T) {
+	t.Run("priority", func(t *testing.T) {
+		h := newTestHost(t, newFixture(t))
+		h.cfg.probeOff = false
+		e := h.engine()
+		e.locked = true
+		rec := probecert.NewRecord()
+		rec.Detail = "probe_issue:backoff"
+		if err := e.saveProbeRecord(rec); err != nil {
+			t.Fatal(err)
+		}
+		now := uint64(h.clock.Now().Unix()) //nolint:gosec // G115: test clock
+		st := &probeState{Version: 1, Negatives: []uint64{now}, Alarm: "probe_krl_not_enforced",
+			Held:    &probeHeld{Reason: "cert_missing", Bundle: 1, Directory: 2, KRL: 3, At: now},
+			Failure: &probeFailure{Code: "probe_positive_refused", Key: strings.Repeat("ab", 32), At: now, Count: 1}, ResetAt: now}
+		detail := func() string {
+			t.Helper()
+			if err := e.writeProbeState(st); err != nil {
+				t.Fatal(err)
+			}
+			var s heartbeat.Status
+			e.probeStatus(&s)
+			return s.ProbeDetail
+		}
+		for _, step := range []struct {
+			want string
+			next func()
+		}{
+			{"probe_krl_not_enforced", func() { st.Alarm = "" }},
+			{"probe_held:cert_missing", func() { st.Held = nil }},
+			{"probe_positive_refused", func() { st.Failure = nil }},
+			{DetailProbeStateReset, func() { st.ResetAt = now - 3600 }},
+			{"probe_issue:backoff", func() { e.cfg.probeOff = true }},
+			{DetailProbeSelfTestOff, func() {}},
+		} {
+			if got := detail(); got != step.want {
+				t.Fatalf("probe_detail %q, want %q (state %+v)", got, step.want, st)
+			}
+			step.next()
+		}
+	})
+	t.Run("survives_a_later_noop_apply", func(t *testing.T) {
+		h := newTestHost(t, newFixture(t))
+		h.cfg.probeOff = false
+		withOutbox(t, h)
+		h.installed("role:ops")
+		e := h.engine()
+		e.locked = true
+		now := uint64(h.clock.Now().Unix()) //nolint:gosec // G115: test clock
+		if err := e.writeProbeState(&probeState{Version: 1, Negatives: []uint64{now}, Alarm: "probe_krl_not_enforced"}); err != nil {
+			t.Fatal(err)
+		}
+		if r := h.mustApply(); !r.NoOp {
+			t.Fatalf("not a no-op: %+v", r)
+		}
+		s := outboxStatus(t, h)
+		if s.ProbeDetail != "probe_krl_not_enforced" || s.LastApply == nil || s.LastApply.Detail != "" {
+			t.Fatalf("after a no-op apply: probe_detail %q, last_apply %+v", s.ProbeDetail, s.LastApply)
+		}
+	})
+	t.Run("unreadable_state_reports_reset", func(t *testing.T) {
+		h := newTestHost(t, newFixture(t))
+		h.cfg.probeOff = false
+		withOutbox(t, h)
+		if err := os.WriteFile(h.l.State(probeStateFile), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if s := writeStatus(t, h, StatusUpdate{}); s.ProbeDetail != DetailProbeStateReset {
+			t.Fatalf("probe_detail %q with an unreadable probe-state.json", s.ProbeDetail)
+		}
+	})
+	t.Run("every_code_validates", func(t *testing.T) {
+		for _, c := range probeCodes {
+			if !heartbeat.ValidDetail(c) || len(c) > heartbeat.MaxDetail || c == "" {
+				t.Errorf("%q is not a valid detail", c)
+			}
+		}
+		if len(probeHoldReasons) != 14 {
+			t.Fatalf("%d hold reasons, want the 14 of the closed list", len(probeHoldReasons))
 		}
 	})
 }

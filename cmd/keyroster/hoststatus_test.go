@@ -535,3 +535,43 @@ func TestHostStatusHostCerts(t *testing.T) {
 		t.Fatalf("a bad host_cert_detail: exit %d, out %q, stderr %q; want a refusal naming the field and no escape byte", code, out, stderr)
 	}
 }
+
+// TestHostStatusProbeAlert: keyroster host status prints a host's
+// probe_detail as the alert "probe: <detail>" beside host_cert:; a host
+// without one prints none; a detail outside the grammar, as a hostile
+// heartbeat would send it, never reaches the terminal (03-10b).
+func TestHostStatusProbeAlert(t *testing.T) {
+	ab := strings.Repeat("ab", 32)
+	cur := map[string]any{"bundle": 1, "directory": 5, "krl": 100, "bundle_sha256": ab, "directory_sha256": ab, "krl_sha256": ab}
+	held := hbStatus(5, 100)
+	held.ProbeDetail = "probe_held:shell_not_nologin"
+	held.HostCertDetail = "refused:cert_revoked"
+	statusEnv(t, map[string]any{
+		"current": cur,
+		"hosts": []serverclient.HostStatusRow{
+			statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: held}),
+			statusRow("web2", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: hbStatus(5, 100)}),
+		},
+	})
+	code, out, stderr := run(t, "host", "status")
+	if code != 0 {
+		t.Fatalf("host status: exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(out, "host_cert: refused:cert_revoked") || !strings.Contains(out, "probe: probe_held:shell_not_nologin") {
+		t.Fatalf("no probe alert beside host_cert:\n%s", out)
+	}
+	if n := strings.Count(out, "probe: "); n != 1 {
+		t.Fatalf("%d probe alerts, want 1 (web2 has no probe_detail):\n%s", n, out)
+	}
+
+	bad := hbStatus(5, 100)
+	bad.ProbeDetail = "probe_held:\x1b[2J"
+	statusEnv(t, map[string]any{
+		"current": cur,
+		"hosts":   []serverclient.HostStatusRow{statusRow("web1", serverclient.HostStateActive, &heartbeat.Heartbeat{Status: bad})},
+	})
+	code, out, stderr = run(t, "host", "status")
+	if code == 0 || strings.Contains(out+stderr, "\x1b") || !strings.Contains(stderr, "probe_detail") {
+		t.Fatalf("a bad probe_detail: exit %d, out %q, stderr %q; want a refusal naming the field and no escape byte", code, out, stderr)
+	}
+}

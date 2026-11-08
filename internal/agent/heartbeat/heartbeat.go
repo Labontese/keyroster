@@ -14,7 +14,10 @@
 // type, serial, ValidBefore, CA and whether sshd was seen serving it), the
 // host key types the agent does not certify, and the last host-certificate
 // hold or refusal code, all omitted when empty. 03-14 adds breakglass, and
-// 03-10 reports probe outcomes through last_apply.detail.
+// 03-10 reports probe outcomes through last_apply.detail. 03-10b adds
+// probe_detail, the probe self-test's standing code, omitted when empty: a
+// server that predates it refuses a heartbeat that carries it (the decode
+// is strict), so servers are upgraded before agents.
 //
 // The package is portable (no build tag): the server and the CLI import
 // it, and so do the Linux-only applier and fetcher. It imports no network
@@ -178,7 +181,13 @@ type Status struct {
 	HostCerts       []HostCert   `json:"host_certs,omitempty"`
 	HostKeysSkipped []SkippedKey `json:"host_keys_skipped,omitempty"`
 	HostCertDetail  string       `json:"host_cert_detail,omitempty"`
-	Seq             uint64       `json:"seq"`
+	// ProbeDetail is 03-10b's: the probe self-test's standing code (an
+	// unresolved alarm or failure, a held addition, a reset budget, the
+	// switch off, or the issuance step's code), kept in the applier's
+	// probe state so a later no-op apply does not hide it; omitted when
+	// empty.
+	ProbeDetail string `json:"probe_detail,omitempty"`
+	Seq         uint64 `json:"seq"`
 }
 
 // HostCert is one host certificate a host's drop-in names (03-09): the
@@ -258,6 +267,14 @@ var (
 	pathRE   = regexp.MustCompile(`^[a-z0-9_][a-z0-9_.-]*(/[a-z0-9_][a-z0-9_.-]*)*$`)
 	detailRE = regexp.MustCompile(`^[a-z0-9_]+(:[a-z0-9_]+)?$`)
 )
+
+// ValidDetail reports whether s is a detail code: empty (absent), or at
+// most MaxDetail bytes of ^[a-z0-9_]+(:[a-z0-9_]+)?$ (03-10b). Every
+// detail the applier emits passes it first, so a bad code can never make
+// the server refuse a heartbeat.
+func ValidDetail(s string) bool {
+	return s == "" || len(s) <= MaxDetail && detailRE.MatchString(s)
+}
 
 // Printable reports whether s is at most max bytes of printable ASCII
 // (0x20 to 0x7e).
@@ -377,7 +394,7 @@ func Validate(s *Status) error {
 		if !Printable(a.Error, MaxText) {
 			return bad("last_apply.error")
 		}
-		if a.Detail != "" && (len(a.Detail) > MaxDetail || !detailRE.MatchString(a.Detail)) {
+		if !ValidDetail(a.Detail) {
 			return bad("last_apply.detail")
 		}
 		if !contains(hostStatuses, a.HostStatus) {
@@ -432,8 +449,11 @@ func Validate(s *Status) error {
 			return bad(fmt.Sprintf("host_keys_skipped[%d]", i))
 		}
 	}
-	if d := s.HostCertDetail; d != "" && (len(d) > MaxDetail || !detailRE.MatchString(d)) {
+	if !ValidDetail(s.HostCertDetail) {
 		return bad("host_cert_detail")
+	}
+	if !ValidDetail(s.ProbeDetail) {
+		return bad("probe_detail")
 	}
 	if s.Seq == 0 || s.Seq > math.MaxInt64 {
 		return bad("seq")

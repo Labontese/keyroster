@@ -136,6 +136,8 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		probeDue     time.Time
 		probeAnswers string
 		probeStarted bool
+		// Identical consecutive held applies log once per 15 min (03-10b).
+		held heldNoise
 	)
 	status := func(u StatusUpdate) {
 		s, err := WriteStatus(ctx, rc.Config, l, u)
@@ -234,12 +236,17 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 				applied = true
 				for i := 0; ; i++ {
 					r, err := Apply(ctx, rc.Config, l)
-					if rc.Out != nil && (err != nil || !r.NoOp) {
+					quiet := held.quiet(err, rc.Clock.Now())
+					if rc.Out != nil && (err != nil || !r.NoOp) && !quiet {
 						rc.Out(r, err)
 					}
 					failedAt = time.Time{}
 					if err != nil {
-						logf("ERROR apply: %v", err)
+						if !quiet {
+							logf("ERROR apply: %v", err)
+						}
+						// A held apply is retried after Retry like any
+						// failed one (D9), quiet or not.
 						failedAt = time.Now()
 					}
 					lastNames, haveNames = names, true
@@ -285,6 +292,31 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		case <-t.C:
 		}
 	}
+}
+
+// heldNoiseEvery is how often an unchanged held apply is logged again.
+const heldNoiseEvery = 15 * time.Minute
+
+// heldNoise suppresses the log line and the printed report of an apply
+// held by the probe gate whose message repeats the previous held one
+// within heldNoiseEvery (03-10b, D9, T-03-384).
+type heldNoise struct {
+	msg string
+	at  time.Time
+}
+
+// quiet reports whether err repeats the previous held error within
+// heldNoiseEvery of its logging; any other result clears the memory.
+func (n *heldNoise) quiet(err error, now time.Time) bool {
+	if err == nil || !errors.Is(err, ErrProbeHeld) {
+		n.msg, n.at = "", time.Time{}
+		return false
+	}
+	if msg := err.Error(); msg == n.msg && now.Sub(n.at) < heldNoiseEvery {
+		return true
+	}
+	n.msg, n.at = err.Error(), now
+	return false
 }
 
 // jitter is every plus a uniform offset in [-j, +j] from crypto/rand (j

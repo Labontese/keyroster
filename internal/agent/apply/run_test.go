@@ -4,6 +4,8 @@ package apply
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -431,5 +433,36 @@ func TestRunProbeTrigger(t *testing.T) {
 	step <- struct{}{}
 	if n := next(); n != 3 {
 		t.Fatalf("past the due time: %d calls, want 3", n)
+	}
+}
+
+// TestRunHeldNoise (03-10b, D9, T-03-384): two identical consecutive held
+// errors are logged and printed once; a different reason, another
+// result in between, or 15 minutes on the clock log again.
+func TestRunHeldNoise(t *testing.T) {
+	held := func(reason string) error { return fmt.Errorf("%w: %s", ErrProbeHeld, reason) }
+	t0 := time.Unix(1_800_000_000, 0)
+	var n heldNoise
+	for i, c := range []struct {
+		err   error
+		at    time.Duration
+		quiet bool
+	}{
+		{held("cert_missing"), 0, false},
+		{held("cert_missing"), time.Minute, true},
+		{held("cert_missing"), 14 * time.Minute, true},
+		{held("budget"), 14*time.Minute + 30*time.Second, false},
+		{held("budget"), 15 * time.Minute, true},
+		{held("budget"), 29*time.Minute + 30*time.Second, false},
+		{held("budget"), 29*time.Minute + 40*time.Second, true},
+		{nil, 30 * time.Minute, false},
+		{held("budget"), 31 * time.Minute, false},
+		{errors.New("sshd_T_failed"), 32 * time.Minute, false},
+		{held("budget"), 33 * time.Minute, false},
+		{held("budget"), 34 * time.Minute, true},
+	} {
+		if got := n.quiet(c.err, t0.Add(c.at)); got != c.quiet {
+			t.Fatalf("step %d (%v at %s): quiet %t, want %t", i, c.err, c.at, got, c.quiet)
+		}
 	}
 }

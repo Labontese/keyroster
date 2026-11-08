@@ -172,12 +172,22 @@ type Report struct {
 	// review D-R1): "systemctl try-reload-or-restart ssh.service" on a
 	// socket-activated host, where systemd decides whether a running sshd
 	// re-reads.
-	ReloadActions    []string `json:"reload_actions,omitempty"`
-	SelfTest         string   `json:"self_test"`
-	Rollback         bool     `json:"rollback"`
-	RollbackSelfTest string   `json:"rollback_self_test,omitempty"`
-	Recovered        bool     `json:"recovered"`
-	NoOp             bool     `json:"no_op"`
+	ReloadActions []string `json:"reload_actions,omitempty"`
+	SelfTest      string   `json:"self_test"`
+	// Detail is the run's probe self-test code (03-10b): probe_held:<reason>,
+	// a probe failure, served_cert_mismatch or probe_self_test_off;
+	// last_apply.detail carries it when heartbeat.ValidDetail accepts it.
+	Detail string `json:"detail,omitempty"`
+	// ProbePositive and ProbeNegative are the probes' results: pass,
+	// fail, inconclusive or skipped:<why>; ServedCerts the
+	// served-certificate check's (03-10b).
+	ProbePositive    string `json:"probe_positive,omitempty"`
+	ProbeNegative    string `json:"probe_negative,omitempty"`
+	ServedCerts      string `json:"served_certs,omitempty"`
+	Rollback         bool   `json:"rollback"`
+	RollbackSelfTest string `json:"rollback_self_test,omitempty"`
+	Recovered        bool   `json:"recovered"`
+	NoOp             bool   `json:"no_op"`
 	// BundleHeld: a newer bundle in the spool waits for the next run,
 	// because the newest directory verifies only under an earlier policy
 	// (state.Verified.BundleHeld).
@@ -323,6 +333,11 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 		cfg.Exec = execsite.ExecRunner{}
 	}
 	r := &Report{Errors: []string{}}
+	if cfg.probeOff {
+		// 03-10b: a run with the probe self-test off says so, and does
+		// nothing else differently here.
+		r.Detail, r.ProbePositive, r.ProbeNegative = DetailProbeSelfTestOff, probeSkippedOff, probeSkippedOff
+	}
 	e := &engine{cfg: cfg, l: l, clock: cfg.Clock, report: r, stateFd: -1}
 	err := e.apply(ctx)
 	if err != nil {
