@@ -313,7 +313,7 @@ func TestVerifyCert(t *testing.T) {
 		{code: "force_command_value", mut: func(c *ssh.Certificate) *ssh.Certificate { c.CriticalOptions["force-command"] = "/bin/sh"; return c }},
 		{code: "source_address_missing", mut: func(c *ssh.Certificate) *ssh.Certificate { delete(c.CriticalOptions, "source-address"); return c }},
 		{code: "source_address_value", mut: func(c *ssh.Certificate) *ssh.Certificate {
-			c.CriticalOptions["source-address"] = "0.0.0.0/0"
+			c.CriticalOptions["source-address"] = "127.0.0.1/32"
 			return c
 		}},
 		{code: "extra_critical_option", mut: func(c *ssh.Certificate) *ssh.Certificate { c.CriticalOptions["verify-required"] = ""; return c }},
