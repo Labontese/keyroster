@@ -1631,30 +1631,35 @@ func probeGateRuns(t *testing.T) {
 		h, r, swaps, err := supersede(t, []string{"role:a", "role:b"}, []string{"role:b", "role:c"}, []string{"role:b", "role:c"}, 70, ProbeRefused)
 		mustFailed(t, h, r, err, ErrProbePositiveRefused)
 		mustPrincipals(t, h, "role:b")
-		if len(swaps) < 2 || h.current() != swaps[1] || h.lastGood() != h.current() {
+		// 03-10d (D7): the second pass's target only adds to its base, the
+		// first pass's intermediate, so the keeping rollback goes back to
+		// that base; nothing is committed.
+		if len(swaps) < 2 || h.current() != swaps[1] || h.lastGood() != swaps[0] {
 			t.Fatalf("swaps %v, current %d, last-good %d", swaps, h.current(), h.lastGood())
 		}
-		if h.acceptedDir() != 3 || !h.krlRevokes(h.l.Current(), 70) {
+		if h.acceptedDir() != 1 || !h.krlRevokes(h.l.Current(), 70) {
 			t.Fatalf("accepted/ directory %d, KRL 70 %t", h.acceptedDir(), h.krlRevokes(h.l.Current(), 70))
 		}
 		r, err = h.apply()
 		mustHeld(t, h, r, err, "failure_backoff")
 	})
-	t.Run("superseded_readd_failure_keeps_last_good_lines", func(t *testing.T) {
+	t.Run("superseded_readd_failure_keeps_landed_removal", func(t *testing.T) {
 		t.Parallel()
 		t.Run("full_readd", func(t *testing.T) {
 			t.Parallel()
 			h, r, _, err := supersede(t, []string{"role:a", "role:b"}, []string{"role:b", "role:c"}, []string{"role:a", "role:b", "role:c"}, 0, ProbeRefused)
 			mustFailed(t, h, r, err, ErrProbePositiveRefused)
-			mustPrincipals(t, h, "role:a", "role:b")
-			if h.current() != h.lastGood() || h.heldNow() != "" {
+			// 03-10d (D7): the first pass's narrowing removed role:a; the
+			// keeping rollback goes back to that base and keeps it removed.
+			mustPrincipals(t, h, "role:b")
+			if h.current() == h.lastGood() || h.heldNow() != "" {
 				t.Fatalf("current %d, last-good %d, held %q", h.current(), h.lastGood(), h.heldNow())
 			}
-			// The plain rollback leaves accepted/; the next round holds and
+			// The rollback leaves accepted/; the next round holds and
 			// stores the newest version.
 			r, err = h.apply()
 			mustHeld(t, h, r, err, "failure_backoff")
-			mustPrincipals(t, h, "role:a", "role:b")
+			mustPrincipals(t, h, "role:b")
 			if h.acceptedDir() != 3 {
 				t.Fatalf("accepted/ directory %d", h.acceptedDir())
 			}
@@ -1663,20 +1668,22 @@ func probeGateRuns(t *testing.T) {
 			t.Parallel()
 			h, r, _, err := supersede(t, []string{"role:a", "role:b", "role:d"}, []string{"role:b", "role:c"}, []string{"role:a", "role:b", "role:c"}, 70, ProbeRefused)
 			mustFailed(t, h, r, err, ErrProbePositiveRefused)
-			mustPrincipals(t, h, "role:a", "role:b")
-			if h.current() != h.lastGood() || h.acceptedDir() != 3 || !h.krlRevokes(h.l.Current(), 70) {
+			// 03-10d (D7): role:a stays removed (the keeping rollback).
+			mustPrincipals(t, h, "role:b")
+			if h.current() == h.lastGood() || h.acceptedDir() != 1 || !h.krlRevokes(h.l.Current(), 70) {
 				t.Fatalf("current %d, last-good %d, accepted/ directory %d", h.current(), h.lastGood(), h.acceptedDir())
 			}
 		})
 		t.Run("readd_only_removes_from_last_good", func(t *testing.T) {
 			t.Parallel()
-			// T2 re-adds role:a and keeps role:d removed: Intermediate(last-good,
-			// T2) collapses to T2 itself, so the plain rollback would re-grant
-			// role:d. The target settles on itself.
+			// T2 re-adds role:a and keeps role:d removed: against its base,
+			// the first pass's intermediate {role:b}, it only adds, so the
+			// keeping rollback (03-10d, D7) goes back to that base, which
+			// keeps role:a and role:d removed. Nothing is committed.
 			h, r, _, err := supersede(t, []string{"role:a", "role:b", "role:d"}, []string{"role:b", "role:c"}, []string{"role:a", "role:b"}, 0, ProbeRefused)
 			mustFailed(t, h, r, err, ErrProbePositiveRefused)
-			mustPrincipals(t, h, "role:a", "role:b")
-			if h.current() != h.lastGood() || h.acceptedDir() != 3 || h.heldNow() != "failure_backoff" {
+			mustPrincipals(t, h, "role:b")
+			if h.current() == h.lastGood() || h.acceptedDir() != 1 || h.heldNow() != "" {
 				t.Fatalf("current %d, last-good %d, accepted/ directory %d, held %q", h.current(), h.lastGood(), h.acceptedDir(), h.heldNow())
 			}
 		})
@@ -1704,7 +1711,7 @@ func probeGateRuns(t *testing.T) {
 			t.Fatalf("held %q, probe_detail %q", h.heldNow(), h.probeDetail())
 		}
 	})
-	t.Run("settle_listener_failure_falls_back_to_plain_rollback", func(t *testing.T) {
+	t.Run("settle_listener_failure_keeps_removal", func(t *testing.T) {
 		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.ready()
@@ -1718,11 +1725,9 @@ func probeGateRuns(t *testing.T) {
 		if !errors.Is(err, ErrProbePositiveRefused) || !r.Rollback || h.heldNow() != "failure_backoff" {
 			t.Fatalf("apply: %v, rollback %t, held %q", err, r.Rollback, h.heldNow())
 		}
-		// The fallback re-granted role:a (the named residual). Its way back
-		// is a widening swap that waits LoginGraceTime + 30 s, longer than
-		// the first back-off, so the next apply either holds or retries the
-		// addition and settles again: role:a is gone either way.
-		mustPrincipals(t, h, "role:a", "role:b")
+		// 03-10d: the fallback is the keeping rollback, which stays on M:
+		// role:a stays removed (03-10b's named residual re-granted it).
+		mustPrincipals(t, h, "role:b")
 		h.scriptProbes(ProbeRefused)
 		_, err = h.apply()
 		if !errors.Is(err, ErrProbeHeld) && !errors.Is(err, ErrProbePositiveRefused) {

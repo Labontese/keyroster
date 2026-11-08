@@ -93,9 +93,10 @@ func (r *DriftReport) Drift() bool {
 //     LoginGraceTime is a SettingDrift of logingracetime.
 //
 // The record names the generation current names, whether that is
-// last-good or RollbackTarget(current, last-good): neither is drift (03-05
-// pre-merge review). An error is a tool error (exit 2), such as no
-// generation of the agent's installed.
+// last-good, RollbackTarget(current, last-good) or a kept state that a
+// keeping rollback left (03-10d: only lines last-good also holds, with the
+// newest KRL): none is drift (03-05 pre-merge review). An error is a tool
+// error (exit 2), such as no generation of the agent's installed.
 func Check(ctx context.Context, cfg Config, l Layout) (*DriftReport, error) {
 	if cfg.Exec == nil {
 		cfg.Exec = execsite.ExecRunner{}

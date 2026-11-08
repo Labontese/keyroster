@@ -274,6 +274,12 @@ type engine struct {
 	dropInRepaired bool       // repairDropIn wrote the agent's drop-in (over a trial, or an edit on an adoption resume)
 	preRepaired    bool       // preRepairDropIn wrote the agent's drop-in before the start-of-run sshd -T (it holds the lock)
 	poll           func(ctx context.Context) (*Generation, *state.Verified, error)
+	// base is the generation in force at the start of forward's last pass
+	// of the Transition loop, and preN the generation live just before its
+	// final widening swap (03-10d, D7): a rollback keeps only what base,
+	// last-good and current all hold, and reuses preN when it is that.
+	base *Generation
+	preN uint64
 	// accepted is accepted/ as forward loaded it, the state last-good was
 	// committed with: render keeps last-good's principals only under a
 	// policy that authorizes their source (PR #82 review, D-1).
@@ -703,10 +709,14 @@ func (e *engine) repairNoOp(ctx context.Context, v *state.Verified, g *Generatio
 	return nil
 }
 
-// atRollbackTarget reports whether current already holds
-// RollbackTarget(current, last-good): last-good's CA keys and principals
-// with a newer KRL, where a rollback left it. Then there is nothing to
-// recover.
+// atRollbackTarget reports whether current already holds the content
+// RollbackKeeping(current, last-good) gives with no bounds: only lines
+// last-good also holds, with the newest KRL, where a rollback left it
+// (RollbackTarget's content, or a kept state; 03-10d). It compares by
+// classified content, because a reused generation can differ from it in
+// header or comment lines only. A current inside last-good passes; what
+// marks an unfinished move there is the pending marker, which every start
+// check reads first. Then there is nothing to recover.
 func atRollbackTarget(cur, lg link) bool {
 	c, err := readGeneration(cur.dir)
 	if err != nil {
@@ -716,7 +726,7 @@ func atRollbackTarget(cur, lg link) bool {
 	if err != nil {
 		return false
 	}
-	return sameBytes(c, RollbackTarget(c, l))
+	return sameContent(c, RollbackKeeping(c, l, nil))
 }
 
 // lock takes the exclusive flock on <state>/apply.lock, waiting for a
@@ -1011,6 +1021,16 @@ func (e *engine) forward(ctx context.Context) error {
 				if err := e.repairNoOp(ctx, v, g); err != nil {
 					return err
 				}
+				// 03-10d (D5): a current that is not last-good (a kept state)
+				// becomes last-good only after a listener test in this run:
+				// the drop-in repair's, or this one.
+				if curLink.kind == linkAgent && curLink.n != lg.n && !e.dropInRepaired {
+					if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
+						e.report.SelfTest = "fail: " + err.Error()
+						return err
+					}
+					e.report.SelfTest = "pass"
+				}
 				e.setVersions(v, g)
 				e.report.Generation = curLink.n
 				if err := e.setHostStatus(curLink.n, g.HostStatus); err != nil {
@@ -1072,6 +1092,10 @@ func (e *engine) forward(ctx context.Context) error {
 		if err != nil {
 			return e.rollback(ctx, err, lg)
 		}
+		// 03-10d (D7): the base, refreshed on every pass; a supersede leaves
+		// current at the previous pass's intermediate or its from, inside
+		// the previous base.
+		e.base = from
 		if reclassify {
 			// 03-10b: a superseding target is classified and gated again,
 			// against the generation current names now (every way back to
@@ -1090,6 +1114,7 @@ func (e *engine) forward(ctx context.Context) error {
 		if preN = mid; preN == 0 && from != nil {
 			preN = from.N
 		}
+		e.preN = preN
 		var s *superseded
 		if errors.As(err, &s) {
 			e.logf("a newer state arrived during the wait; moving to generation %d", s.gen.N)
@@ -1219,7 +1244,7 @@ func (e *engine) keepKRL(g, cur *Generation, curLink link) {
 // (state.Stored.PrincipalsUnder against e.accepted, PR #82 review, D-1):
 // otherwise they are dropped first, so a fallback renders the trust files
 // alone and still reports the host status.
-func (e *engine) render(v *state.Verified) (*Generation, error) {
+func (e *engine) render(v *state.Verified, cur *Generation, curLink link) (*Generation, error) {
 	g, err := Render(v, e.keys)
 	if err == nil {
 		if v.DirectoryUnauthorized != nil {
@@ -1254,6 +1279,21 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 	if rec, rerr := e.readRecord(lg.n); rerr == nil {
 		lastHost, lgGen.HostStatus = rec.Host, rec.HostStatus
 		rendered = rec.HostStatus != HostKeysRotated && rec.HostStatus != HostKeysDisagree
+	}
+	if curLink.kind == linkAgent && cur != nil && curLink.n != lg.n {
+		// 03-10d (D9, Q2): after a kept rollback the principals in force
+		// are current's, not last-good's; a fallback that kept
+		// last-good's would offer a landed removal again. The host and
+		// its status stay last-good's record's.
+		maps.DeleteFunc(lgGen.Files, func(n string, _ []byte) bool {
+			class, ok := ClassOf(n)
+			return ok && class == FilePrincipals
+		})
+		for n, b := range cur.Files {
+			if class, ok := ClassOf(n); ok && class == FilePrincipals {
+				lgGen.Files[n] = b
+			}
+		}
 	}
 	unauth := e.accepted.PrincipalsUnder(v.Policy, rendered)
 	if unauth != nil {
@@ -1303,7 +1343,7 @@ func outcome(v *state.Verified) error {
 // and cap refusals: content refusals, for which the KRL-alone pass runs
 // (krlAlone; F07 (03-08d)).
 func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*Generation, error) {
-	g, err := e.render(v)
+	g, err := e.render(v, cur, curLink)
 	if err != nil {
 		return nil, err
 	}
@@ -1661,21 +1701,36 @@ func isCrash(err error) bool {
 	return errors.As(err, &c) && c.InjectedCrash()
 }
 
-// rollback moves current back after cause failed the apply:
-// Transition(current, RollbackTarget(current, last-good)) through the
-// intermediate (last-good's CA keys and principals, the newest KRL; owner
-// decision 2026-10-26, PR #67), the previous drop-in restored and sshd
-// reloaded when the drop-in had changed, the self-test run again, the
-// marker cleared, and then the retention cleanup a commit runs, so that
-// failed runs never grow gen/ beyond keepGenerations (F07 (03-08d)). It
-// returns cause.
+// rollback moves current back after cause failed the apply, keeping every
+// removal that landed (03-10d, D1): rollbackAs with the keeping target.
 func (e *engine) rollback(ctx context.Context, cause error, lg link) error {
+	return e.rollbackAs(ctx, cause, lg, true)
+}
+
+// rollbackAs moves current back after cause failed the apply:
+// Transition(current, the target), which is RollbackKeeping(current,
+// last-good, [base]) when keep is set (03-10d: only what the base,
+// last-good and current all hold, the newest KRL) and RollbackTarget(
+// current, last-good) when it is not (last-good's CA keys and principals,
+// the newest KRL; owner decision 2026-10-26, PR #67); the previous drop-in restored and sshd reloaded
+// when the drop-in had changed, the self-test run again, the marker
+// cleared, and then the retention cleanup a commit runs, so that failed
+// runs never grow gen/ beyond keepGenerations (F07 (03-08d)). It returns
+// cause, joined with the rollback's own error when that fails: current
+// then stays where it is and the marker stays, so the next start's
+// recover retries with the keeping target (owner decision Q-D option 1,
+// 2026-11-08).
+func (e *engine) rollbackAs(ctx context.Context, cause error, lg link, keep bool) error {
 	if isCrash(cause) {
 		return cause
 	}
 	e.report.Rollback = true
 	e.poll = nil
-	if err := e.backToLastGood(ctx, lg); err != nil {
+	var bounds []*Generation
+	if e.base != nil {
+		bounds = []*Generation{e.base}
+	}
+	if err := e.backToLastGood(ctx, lg, keep, bounds); err != nil {
 		return errors.Join(cause, err)
 	}
 	e.cleanup()
@@ -1683,9 +1738,10 @@ func (e *engine) rollback(ctx context.Context, cause error, lg link) error {
 }
 
 // backToLastGood is the common end of rollback and crash recovery: it
-// moves current to RollbackTarget(current, last-good), installing that
-// generation when it is neither last-good nor what current names already.
-func (e *engine) backToLastGood(ctx context.Context, lg link) error {
+// moves current to the rollback target (keep: RollbackKeeping(current,
+// last-good, bounds); else RollbackTarget(current, last-good)), installing
+// that generation when no generation on disk holds it already.
+func (e *engine) backToLastGood(ctx context.Context, lg link, keep bool, bounds []*Generation) error {
 	lgGen, err := readGeneration(lg.dir)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrLastGoodInvalid, err)
@@ -1698,7 +1754,7 @@ func (e *engine) backToLastGood(ctx context.Context, lg link) error {
 	if rec, err := e.readRecord(lg.n); err == nil {
 		lgGen.Host, lgGen.HostStatus = rec.Host, rec.HostStatus
 	}
-	to, err := e.rollbackTarget(ctx, from, cur, lgGen)
+	to, err := e.rollbackTarget(ctx, from, cur, lgGen, keep, bounds)
 	if err != nil {
 		return err
 	}
@@ -1725,11 +1781,16 @@ func (e *engine) backToLastGood(ctx context.Context, lg link) error {
 	return e.remove(e.l.State(dropinPrevFile))
 }
 
-// rollbackTarget is RollbackTarget(from, lgGen) on disk: last-good itself
+// rollbackTarget is the rollback target on disk. With keep it is
+// keepingTarget; without (the operator's --recover-to-last-good alone,
+// owner decision Q1 = A) RollbackTarget(from, lgGen): last-good itself
 // when that is its content, current (cur, which names from) when it holds
 // it already (a revocation-only change), else a new generation, installed
 // and validated.
-func (e *engine) rollbackTarget(ctx context.Context, from *Generation, cur link, lgGen *Generation) (*Generation, error) {
+func (e *engine) rollbackTarget(ctx context.Context, from *Generation, cur link, lgGen *Generation, keep bool, bounds []*Generation) (*Generation, error) {
+	if keep {
+		return e.keepingTarget(ctx, from, cur, lgGen, bounds)
+	}
 	to := RollbackTarget(from, lgGen)
 	if to.N != 0 {
 		return to, nil
@@ -1755,8 +1816,13 @@ func (e *engine) rollbackTarget(ctx context.Context, from *Generation, cur link,
 }
 
 // recover finishes a move a previous run left (pending marker): a commit
-// whose generation is current is finished; otherwise back to last-good,
-// or the first-install failure path when there is none.
+// whose generation is current is finished; otherwise back with the
+// keeping target, bounded by every generation the marker names (03-10d,
+// D8: a crash, a failed keeping rollback and an error after a swap that
+// left a marker never re-grant a removal), or the first-install failure
+// path when there is no last-good. A marker generation that does not read
+// fails closed with ErrPendingStateUnknown (T-03-395): the operator's
+// --recover-to-last-good is the way out, never a fallback to last-good.
 func (e *engine) recover(ctx context.Context, m *marker, cur, lg link) error {
 	e.report.Recovered = true
 	if m != nil {
@@ -1775,7 +1841,67 @@ func (e *engine) recover(ctx context.Context, m *marker, cur, lg link) error {
 		return e.clearMarker()
 	}
 	e.report.Rollback = true
-	return e.backToLastGood(ctx, lg)
+	var bounds []*Generation
+	if m != nil {
+		for _, n := range []uint64{m.From, m.To, m.Intermediate} {
+			if n == 0 {
+				continue
+			}
+			g, err := readGeneration(e.l.Gen(n))
+			if err != nil {
+				e.report.Stuck = ErrPendingStateUnknown.Error()
+				return fmt.Errorf("%w: generation %d of the pending marker: %w", ErrPendingStateUnknown, n, err)
+			}
+			g.N = n
+			bounds = append(bounds, g)
+		}
+	}
+	return e.backToLastGood(ctx, lg, true, bounds)
+}
+
+// keepingTarget is RollbackKeeping(from, lgGen, bounds) on disk (03-10d):
+// the first generation whose classified content it is, in this order:
+// last-good, each bound, current (cur, which names from), the generation
+// live before the final widening swap (preN); else a new generation,
+// installed and validated, whose failure is returned (current then stays
+// where it is, owner decision Q-D option 1). A reused generation other
+// than last-good takes last-good's host status.
+func (e *engine) keepingTarget(ctx context.Context, from *Generation, cur link, lgGen *Generation, bounds []*Generation) (*Generation, error) {
+	to := RollbackKeeping(from, lgGen, bounds)
+	if sameContent(lgGen, to) {
+		return lgGen, nil
+	}
+	var cands []uint64
+	for _, b := range bounds {
+		cands = append(cands, b.N)
+	}
+	if from != nil && cur.kind == linkAgent {
+		cands = append(cands, cur.n)
+	}
+	cands = append(cands, e.preN)
+	for _, n := range cands {
+		if n == 0 {
+			continue
+		}
+		g, err := readGeneration(e.l.Gen(n))
+		if err != nil || !sameContent(g, to) {
+			continue
+		}
+		g.N, g.Host, g.HostStatus = n, lgGen.Host, lgGen.HostStatus
+		if err := e.setHostStatus(n, g.HostStatus); err != nil {
+			return nil, err
+		}
+		return g, nil
+	}
+	to.N = e.allocGeneration()
+	if err := e.installGeneration(to); err != nil {
+		return nil, err
+	}
+	if err := e.validate(ctx, to, e.l.Gen(to.N), from); err != nil {
+		e.discard(to.N)
+		return nil, err
+	}
+	return to, nil
 }
 
 // firstInstall installs generation g where no last-good exists yet
@@ -1945,7 +2071,7 @@ func (e *engine) recoverToLastGood(ctx context.Context, m *marker, cur, lg link)
 			if rec, err := e.readRecord(lg.n); err == nil {
 				to.Host, to.HostStatus = rec.Host, rec.HostStatus
 			}
-			if to, err = e.rollbackTarget(ctx, x, cur, to); err != nil {
+			if to, err = e.rollbackTarget(ctx, x, cur, to, false, nil); err != nil {
 				return err
 			}
 		}
