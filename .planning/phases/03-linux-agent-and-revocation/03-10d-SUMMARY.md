@@ -95,36 +95,87 @@ The two probegate_test.go rows the plan did not predict are the Base refinement 
 - `settle_validate_error` and `settle_validate_timeout`: with preN's directory removed during the refused probe, settle took its install-and-validate branch, the first validate failed (CA line refused, or the blocked ssh-keygen with `context.DeadlineExceeded`), and the keeping rollback installed the kept content as a new generation (asserted in `settle_validate_error`: current is neither M, T nor last-good), as stated.
 - `crash_recovery_keeps_removal`: forward's points of a mixed change are 1 marker, 2 swap, 3 marker, 4 swap, 5 self-test, 6 to 14 the `accepted:` files, 15 marker (commit), 16 save-state, 17 last-good, 18 clear-marker; the keeping rollback's after a failed listener test are 6 marker, 7 swap, 8 clear-marker (one collapsed narrowing swap to M). The assertions by range of n hold as the plan states them.
 
-## Owner questions
+## Owner questions (both answered during Task 1)
 
-1. **hostcert_test.go must change, and it is not in files_modified (blocking).** `TestHostCertStep/no_install_while_recover_due_sshd_t_fails` (internal/agent/apply/hostcert_test.go:1441) fails after Task 1: `HostCerts wrote: ... 00-keyroster.conf ... hostcert.json ...`. Its fixture points current back at an older generation with no marker and relies on that not being a rollback target. The older generation lies inside last-good with the same KRL, so the content check that Step 3b(1) (sec-5) requires now accepts it as a kept state, and HostCerts proceeds. Confirmed: with atRollbackTarget put back to `sameBytes(c, RollbackTarget(c, l))` the subtest passes; restored with `git checkout --`, tree clean. The plan judged hostcert_test.go unaffected and says an unlisted file a fix needs is added to files_modified first; that edits the plan, which this executor may not do. Proposed fix: rebuild the fixture so the older current holds a principal last-good lacks (a wider current is still not a rollback target, so recovery stays due and the subtest keeps its intent), with `internal/agent/apply/hostcert_test.go` added to files_modified and to Task 1's `<files>`. Alternative: a stricter start check, which contradicts sec-5; not recommended. Task 2 is independent of this (D4).
+1. **hostcert_test.go had to change and was not in files_modified.** `TestHostCertStep/no_install_while_recover_due_sshd_t_fails` (hostcert_test.go:1441) failed after d8335e7: its fixture pointed current back at an older generation inside last-good with the same KRL, which the content-based start check of sec-5 accepts as a kept state, so HostCerts went on and wrote. Confirmed by putting atRollbackTarget back to a byte comparison (the subtest passed; restored with `git checkout --`, tree clean). Answer (orchestrator, execution addendum of the plan): rebuild the fixture so the older current holds a principal last-good lacks; hostcert_test.go is added to files_modified and Task 1's `<files>`. Done in a37a72c: the newer last-good holds `role:new` instead of `role:ops`; the subtest passes.
+2. **The KRL-alone pass re-granted a kept removal.** Read from the code at d8335e7: after a content refusal forward takes the capture once more as KRL-alone against accepted/, which a keeping rollback leaves at last-good's directory, so the render widened current back to the removed line. Answer: designed in under Q-D as D10 (the plan's addendum): the KRL-alone render takes every file but the KRL from the generation current names when current is the agent's and is not last-good. Done in a37a72c (`krlOnly`, applied in `candidate` when `v.Refused` is set, which marks a KRL-alone Verified).
 
-2. **A content refusal after a kept rollback can widen back through the KRL-alone pass (not blocking; read from the code, not run).** A rollback leaves accepted/ at last-good's directory. When a later capture's candidate is refused as content (a CA line ssh-keygen refuses, or a Render refusal such as `generation_too_large`), forward takes the KRL-alone pass (apply.go, `krlAlone`), which renders accepted/'s directory, the one that still grants the removed line, and the candidate widens current back to it: ungated with probes off, gated (enforcement only) with probes on. This is forward's render of the directory in force, not a rollback, so this plan's rules do not cover it; the Edge Coverage bullet 'a render that Render itself accepts after a kept rollback widens like any other addition' is the closest. Listed UNVERIFIED below; whether a later plan should make the KRL-alone pass keep current's principals is the owner's call.
+### D10 and the hostcert fixture (commit a37a72c)
+
+- RED: `TestRollbackSites/krl_alone_after_kept_rollback_keeps_removal` (a kept rollback, then a capture with KRL 93 and a directory whose render is refused as `generation_too_large`) failed on both lanes before the code: `rollbackkeep_test.go:1220: principals [role:a role:x], want [role:x]` (probes_off and probes_on).
+- GREEN: after `krlOnly`, both lanes pass: current holds role:x only and KRL 93, role:a is in force at no fault point, and last-good is never widened to role:a.
 
 ## UNVERIFIED (Task 1, so far)
 
-- The KRL-alone path of owner question 2.
 - The failure of the keeping rollback's own install of the kept content (Q-D's 'cannot be installed' case) is not injected; its success is exercised by `settle_validate_error`.
 - settle's `m == target` case (probegate.go, the `case m == target:` branch) is not reached in the harness.
 - The sites with no one-shot injector (apply.go:1073 readCurrent, probegate.go:952 the last-good read, :972 install, :983 the held write) are covered structurally only (`every_forward_call_keeps`).
 - A kept state can hold an empty `user_ca_keys` when the base, last-good and current hold disjoint CA lists (plan check sec-8; fail-safe direction, no code).
 - 03-12 and 03-14 read current, which may now differ from last-good at rest (hand-over todo in Task 3).
 
-## Deviations (Task 1, so far)
+## Deviations (Task 1)
+
+- hostcert_test.go was changed (the recovery-due fixture), as the plan's execution addendum adds it to files_modified (owner question 1).
+- D10 is applied wherever the render's Verified has `Refused` set, which marks a KRL-alone Verified (state/verify.go): forward's krlAlone pass and pollSpool's, and also a capture whose bundle or directory step the verifier refused (D-R2), whose contract is likewise that only the KRL moves on. With current at last-good nothing changes.
+- Mutants 5 and 26 were re-run with corrected specs (see Mutants); the first runs are recorded there, not counted.
 
 - `kept_state_start_failure_keeps_removal` uses a validate refusal of the KRL query (`queryCode`, with a new KRL published so validate queries it), which forward returns before its first swap (apply.go:1038-1040). The plan's example, the oversize candidate of rechain_test.go:288, is a Render refusal (`ErrGenerationTooLarge`, render.go:182): candidate refuses it and forward takes the KRL-alone pass instead of returning, so it does not reach :1038.
 - `gate_superseded_error`: the next round is held for the account's reason (`shell_not_nologin`, the superseding passwd that makes the gate hold), not `failure_backoff` as the plan's grouped assertion for the settle and gate sites says; it lands role:b once the input changes (the passwd fixed). Reported, not adjusted.
 - `settle_validate_timeout` runs Apply with a 20 s context: the harness's Apply has no deadline of its own, so "until the context ends" needs one; the blocked ssh-keygen returns `context.DeadlineExceeded` and the keeping rollback still completes (its steps do not depend on the expired context in the harness).
 
-### Gates run so far (Task 1, local, at d8335e7)
+### Gates (Task 1, local, at a37a72c, T1)
+
+- Gate 1: `go build ./... && go vet ./... && go vet -tags keyroster_e2e ./internal/agent/... ./cmd/keyroster-agent/` ok; the test part of gate 1 passed at d8335e7 (below) and the new D10 subtest passes at a37a72c; gate 2's run below covers the whole package at a37a72c.
+- Gate 2: `go test -race -count=1 -timeout 15m ./internal/agent/... ./cmd/keyroster-agent/` ok (internal/agent/apply 403.355 s under the parallel load of the other packages; not a delta reading); the swap.go, selftest.go and interleave_test.go diff against origin/main is empty.
+- Gate 3: `bash scripts/capslock-check.sh` ok (23 pairs, baseline 23); test/capslock, internal/wire, internal/tlog, internal/cert, internal/certprofile and internal/server unchanged; the todo is in completed/ with `## Resolution`; one `func RollbackKeeping(`.
+- Lints: golangci-lint for linux, windows and darwin on `./...`: 0 issues each; `gofmt -l .` empty.
+
+### Gates run earlier (Task 1, local, at d8335e7)
 
 - Gate 1's test part: `go test -race -count=1 -timeout 15m -v -run "^(TestRollbackKeeping|TestRollbackSites|TestAtRollbackTarget|TestProbeGate)$" ./internal/agent/apply/` ok (31.094 s); gate 1's PASS loop over that log printed no missing PASS line and no FAIL, panic or DATA RACE. `go build ./...` and `go vet ./internal/agent/apply/` ok; `gofmt -l internal cmd` empty; golangci-lint (linux) on ./internal/agent/apply/ 0 issues. The full gate 1 command (with `go vet ./...` and the tagged vet) has not been run as one command yet.
 - Gate 2: `go test -race -count=1 -timeout 15m ./internal/agent/... ./cmd/keyroster-agent/` FAILED, only on `TestHostCertStep/no_install_while_recover_due_sshd_t_fails` (owner question 1); every other package ok (internal/agent/apply 438.895 s under the parallel load of the other packages, not a delta reading). `git diff --quiet origin/main -- internal/agent/apply/interleave_test.go internal/agent/apply/swap.go internal/agent/apply/selftest.go` ok.
-- Gate 3 (capslock, frozen packages, the todo move): not run yet.
+
+### Mutants (Task 1)
+
+Each mutant ran with the task's work committed, on its named subtest (`go test -count=1 -timeout 5m -v -run`), restored with `git checkout --` and checked with `git diff --quiet HEAD` per file and for the whole tree (`':!.planning/config.json'`). Two first specs were not valid runs and were re-run: mutant 5's first spec removed the bounds from the intersection only, so the lines were still drawn from the first bound and base_bounds_the_result did not fail (that partial mutant is killed by every_bound_applies, run separately); mutant 26's first spec did not compile (`declared and not used: baseGen`, `[build failed]`, not a kill). The lines below are the valid runs.
+
+mutant killed: 1 RollbackKeeping returns the union instead of the intersection (TestRollbackKeeping/mixed_is_intersection)
+mutant killed: 2 RollbackKeeping returns RollbackTarget always (TestRollbackKeeping/pure_narrowing_stays)
+mutant killed: 3 RollbackKeeping drops the newest-KRL rule (TestRollbackKeeping/newest_krl_kept)
+mutant killed: 4 RollbackKeeping's N always 0 (TestRollbackKeeping/pure_addition_over_last_good_base_is_last_good)
+mutant killed: 5 RollbackKeeping ignores the bounds, in the intersection and the order (TestRollbackKeeping/base_bounds_the_result)
+mutant killed: 6 forward's readCurrent rollback flipped to plain, apply.go:1073 (TestRollbackSites/every_forward_call_keeps)
+mutant killed: 7 gateSuperseded's rollback flipped to plain, apply.go:1081 (TestRollbackSites/gate_superseded_error)
+mutant killed: 8 the Transition-error rollback flipped to plain, apply.go:1120 (TestRollbackSites/transition_error/probes_off and /probes_on)
+mutant killed: 9 the writeDropIn-error rollback flipped to plain, apply.go:1128 (TestRollbackSites/write_dropin_error/probes_off and /probes_on)
+mutant killed: 10 the activation-error rollback flipped to plain, apply.go:1132 (TestRollbackSites/activate_dropin_error/probes_off and /probes_on)
+mutant killed: 11 the listener-test rollback flipped to plain, apply.go:1140 (TestRollbackSites/self_test_failure/probes_off and /probes_on)
+mutant killed: 12 settle's last-good-read rollback flipped to plain, probegate.go:952 (TestRollbackSites/every_forward_call_keeps)
+mutant killed: 13 settle's plain case flipped to plain, probegate.go:959 (TestRollbackSites/kept_state_then_readd_and_add_fails_keeps_readd_out/settle_probe_failure_collapsed)
+mutant killed: 14 settle's install rollback flipped to plain, probegate.go:972 (TestRollbackSites/every_forward_call_keeps)
+mutant killed: 15 settle's validate rollback flipped to plain, probegate.go:976 (TestRollbackSites/settle_validate_error)
+mutant killed: 16 settle's held-write rollback flipped to plain, probegate.go:983 (TestRollbackSites/every_forward_call_keeps)
+mutant killed: 17 settle's Transition rollback flipped to plain, probegate.go:987 (TestRollbackSites/settle_swap_error)
+mutant killed: 18 settle's listener-test rollback flipped to plain, probegate.go:992 (TestProbeGate/settle_listener_failure_keeps_removal)
+mutant killed: 19 recover flipped to the plain variant (TestRollbackSites/crash_recovery_keeps_removal, first at forward_3_marker)
+mutant killed: 20 recoverToLastGood flipped to the keeping variant (TestRollbackSites/operator_recover_still_goes_to_last_good)
+mutant killed: 21 atRollbackTarget compares by bytes (TestAtRollbackTarget/content_equal_but_bytes_differ_counts)
+mutant killed: 22 the equal-content commit without the listener test (TestRollbackSites/kept_state_commit_needs_listener_test)
+mutant killed: 23 the guard runs even when repairDropIn's listener test ran (TestRollbackSites/held_round_runs_one_listener_test/probes_on)
+mutant killed: 24 RenderFallback fed last-good's principals again (TestRollbackSites/keys_rotated_render_after_kept_rollback_keeps_removal/probes_off)
+mutant killed: 25 the base recorded once before the loop instead of on every pass (TestRollbackSites/superseded_readd_fails_keeps_readd_out/settle_probe_failure)
+mutant killed: 26 settleFailedAddition uses Intermediate(lgGen, target) (TestRollbackSites/kept_state_then_readd_and_add_fails_keeps_readd_out/settle_probe_failure)
+mutant killed: 27 recover ignores the marker's To (TestRollbackSites/crash_at_settle_swap_on_kept_base_keeps_readd_out)
+mutant killed: 28 recover falls back to last-good when a marker generation does not read (TestRollbackSites/unreadable_marker_generation_fails_closed)
+mutant killed: 29 the keeping rollback's Transition error swallowed (TestRollbackSites/double_failure_next_start_keeps_removal/transition/probes_off and /probes_on)
+mutant killed: 30 the KRL-alone pass renders accepted/'s principals again after a kept rollback (TestRollbackSites/krl_alone_after_kept_rollback_keeps_removal/probes_off)
+
+No Task 1 mutant is equivalent: the four expected-equivalent flips (apply.go:1073, probegate.go:952, :972, :983) are killed by every_forward_call_keeps. The pairs that run on both lanes (8 to 11, 29) died on both.
+
+T1: a37a72c
 
 ## Where to resume
 
-- Done: Step 0 (32e1fd1); the base; Task 1 Steps 1 to 4 (d8335e7: tests, implementation, existing-test conversions). Task 1's unit gate (gate 1's PASS loop) passes on a log of the same `-run`.
-- Blocked: owner question 1 (hostcert_test.go). After the answer: the fixture fix, then Task 1 gate 2 (`./internal/agent/...` under -race and the swap/selftest/interleave diff).
-- Then Step 5: capslock, the lints for linux, windows and darwin on `./...` (a single-package windows lint excludes every file of this linux-only package by design), the `git mv` of the todo with a `## Resolution` section, and its commit; then the 29 Task 1 mutants (spec and runner prepared outside the repository), then Task 2, then Task 3.
-- The kept-state twin `atKept` is in rollbackkeep_test.go; the injectors and helpers there are reusable for the hostcert fixture.
+- Done: Task 1 complete (T1 a37a72c): Step 0 (32e1fd1, the amended plan 5c78955), the base, Steps 1 to 5, gates 1 to 3, the lints, the todo moved, 30 of 30 mutants killed.
+- Next: Task 2 (the recovery rule: krl.IsProbeKeyID, the `probe` parameter of CheckCarriedLost and ErrLostProbeKept; the signer, audit and CLI callers; the runbook; its 10 mutants; the todo move), then Task 3 (gates, PR, SUMMARY). Read so far for Task 2: krl/recovery.go:25-75, krl_test.go:1277-1312, the call sites at signer/recovery.go:138 (recoveryCert :316-341 holds the role; verifyCarriedCert returns the parsed key ID), audit/recovery.go:130 and cmd/keyroster/recover.go:292; signer/recovery_test.go's makeCert builds kr1 key IDs only, so a probe helper needs a kr3 ca=machine key ID signed by the machine CA.
+- The test-time base expires at epoch 1794263107: re-measure it in place if the delta gate runs later.
