@@ -20,9 +20,11 @@ import (
 const probeAcct = certpkg.ReservedAccountName
 
 // probeSpecKey is the sshd -T -C spec the full check runs for the probe
-// account from src to the default listener 127.0.0.1 (03-10c).
+// account from src to laddr (03-10c), spelled out here rather than built
+// with probeAccountSpec, so that a wrong spec cannot also change what the
+// tests expect.
 func probeSpecKey(h *testHost, src, laddr string) string {
-	return probeAccountSpec(probeAcct, src, laddr, portOf(h))
+	return "user=" + probeAcct + ",host=" + src + ",addr=" + src + ",laddr=" + laddr + ",lport=" + portOf(h)
 }
 
 // accountHost is a host with the probes on (the probe account in passwd,
