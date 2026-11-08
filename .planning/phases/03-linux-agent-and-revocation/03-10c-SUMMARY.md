@@ -3,14 +3,22 @@ phase: 03-linux-agent-and-revocation
 plan: 10c
 subsystem: agent, ci, docs
 tags: [probe-account, shadow, sshd-T, distro-matrix, systemd, runbook, agent-04]
-status: in-progress
+status: complete
 requires: [03-10b]
+provides: [probe-account-full-check, probe-account-runbook, distro-probe-matrix, systemd-probe-smoke, audit-pending-negatives]
 requirements-completed: []
+commits: 15
+plan_head_before: cee452aa4b047d71e2a9c4076ca7363e05712a1e
+plan_head_after: 0309661c3042826c09fd34be399446c58f46e925
+actuals:
+  tokens: 110858  # chars/4 over git diff cee452a..HEAD (the plan files included)
+  tasks: 4
+  commits: 15
 ---
 
 # Phase 3 Plan 10c: The probe account checked completely Summary
 
-DRAFT (Task 1 in progress). The gate's account step becomes the full check of owner answer Q3 (passwd, shadow where readable, `sshd -T -C` from the probe's own source address); preflight and drift report the same result report only.
+The gate's account step is the full check of owner answer Q3 (passwd, shadow where readable, `sshd -T -C` from the probe's own source address, definite Allow and Deny rules), preflight and drift report it report only, the seven distro images and the real systemd units prove the runbook's account, and host-setup.md documents every hold reason, kept equal to what CI runs.
 
 Owner answers: Q2 Q3 Q4 Q-B P1 P2 P4 D-R1 planner-defaults Q-S
 AGENT-04: open until 03-10d
@@ -280,7 +288,7 @@ LoginGraceTime 10: applied, inferred from the timing only. The role addition lan
 
 T-03-381: IPAddressAllow=localhost admitted 127.0.0.2 under the real unit (run 42495385525: probe_positive and probe_negative `pass` with an empty detail, the queries from the probe source 127.0.0.2 under keyroster-agent.service)
 
-Task 3 mutants (each applied to the committed code at a2492f8 by C:/Users/labon/kr-10c-logs/run_mutants.py, run alone on its named subtest with `-timeout 5m` through scripts/linux.sh, killed by the named `--- FAIL:` line, restored with `git checkout --` and proven by `git diff --quiet HEAD --`; the tag mutant joins the tag's two parts in the mutation script, so no literal was written to a committed file):
+Task 3 mutants (each applied to the committed code at a2492f8 by the mutant runner outside the repository, run alone on its named subtest with `-timeout 5m` through scripts/linux.sh, killed by the named `--- FAIL:` line, restored with `git checkout --` and proven by `git diff --quiet HEAD --`; the tag mutant joins the tag's two parts in the mutation script, so no literal was written to a committed file):
 mutant killed: a command line of the debian block edited in host-setup.md (TestProbeAccountRunbook/commands_match_ci: `probeaccount_runbook_test.go:104: the runbook's block probe-account debian: ...`)
 mutant killed: an arm of probe-account.sh edited, the arch arm's useradd line (TestProbeAccountRunbook/commands_match_ci: `probeaccount_runbook_test.go:104: the runbook's block probe-account arch: ...`)
 mutant killed: one hold reason removed from the runbook, probe_held:ca_mismatch (TestProbeHoldReasonsDocumented: `account_test.go:522: docs/runbooks/host-setup.md does not document probe_held:ca_mismatch`)
@@ -297,7 +305,7 @@ T3: a2492f8 (dcd48f9 the audit line, 64617a7 the runbook section and its gates, 
 2. **The runbook section does not cite TestProbeAccountRunbook by name** ("a runbook gate keeps it equal"), since its own cited_tests_exist leaves its file out, as TestHostTrustRunbooks does.
 3. **every_reason_documented** requires each reason as a list item `` - `probe_held:<reason>` `` with a `Fix:` sentence; the item ends at the next item or at a blank line.
 
-## Resume point
+## Resume point after Task 1 (kept as recorded; superseded by Where to resume)
 
 - Branch p03/10c-probe-account, pushed. Task 1 is complete: T1 80b0180 (e2e evidence at e18bf1a), this SUMMARY committed after it (docs only). Tasks 2, 3 and 4 are not started.
 - Commits: 85eae61 (the full check, preflight, drift, flags, the e2e), 59bd530 (test: the spec the tests expect, spelled out), e18bf1a (test(e2e): the DenyUsers cause outside the Match cause block), 80b0180 (test: the IPv4 wildcard built at run time), then the docs commit of this SUMMARY.
@@ -307,3 +315,72 @@ T3: a2492f8 (dcd48f9 the audit line, 64617a7 the runbook section and its gates, 
 - The test-time base was measured at at=1794143318; it expires at 1794229718, after which Task 4 re-measures it in place in the detached worktree outside the repository at origin/main (the same one is still checked out for that).
 - The plan's commit ledger (gsd-plan-head-before-03-10c in the git directory) holds cee452a.
 - Owner question open: files_modified (Deviation 10); it blocks only Task 4's files gate.
+
+## Task 4
+
+Tracking (owner decision Q-S): 635a039 commits this plan (wave 25, depends on 03-10b) and 03-10d-PLAN.md (wave 26, depends on 03-10c), both byte-identical (`cmp`) to the checked plans and LF; the next commit ticks 03-10c in ROADMAP.md, adds the 03-10d row under a new `**Wave 26**` block, renumbers the blocks of 03-11 to 03-16 to waves 27 to 32 with their 'blocked on' headers, and changes only the `wave:` line of 03-11 to 03-16 (27 to 32) and, in 03-11, `depends_on: ["03-10d"]` and its precondition line, which now names 03-10d-SUMMARY.md, so that 03-11 cannot start before 03-10d. GSD's `roadmap.update-plan-progress 3` recomputed the Plans line and the Progress row to 26/33 (33 plan files: 03-10c and 03-10d are now counted); it left the wave count at 31, which was corrected by hand to 32. AGENT-04 is not ticked in REQUIREMENTS.md.
+
+Gates (local through scripts/linux.sh unless named):
+- verify 2 (`go test -race -count=1 -timeout 15m ./...`, every `go vet` build-tag set, gofmt, golangci-lint for linux, windows and darwin, capslock, dep-firewall, testonly-firewall, pinned actions; test/capslock unchanged against origin/main): exit 0. Pass or fail only.
+- verify 3 (the test-time delta): see the readings below and Deviation T4-1.
+- verify 4 (the tag in its six files; the release-built agent refuses `--probe-self-test off` with exit 2, `probe_self_test_off_refused`, and writes no state directory): exit 0.
+- verify 5 (the files gate): exit 0 on the branch, 39 changed files, all in files_modified or the SUMMARY.
+- verify 6 (every commit of origin/main..HEAD authored as Daniel, committed by keyroster-bot, with a gpgsig header): exit 0.
+- verify 7 (waves and dependencies, ROADMAP lines, the Wave 26 row, Waves 27 to 32): exit 0.
+- verify 9 (no address outside 127.0.0.0/8, no private-workspace term, no attribution line in the added diff lines, the commit messages, the PR body, this plan and this SUMMARY): exit 0.
+- verify 11 (no auto-merge on the PR): exit 0.
+
+gate control: files gate exits 0 on the branch as committed
+gate control: files gate exits 1 on a throwaway detached worktree with one commit adding an unlisted file (`unlisted-control.txt`, X printed as that one name; the worktree was removed and its commit was never pushed)
+
+Test-time readings (the command of 'Budget and verify', a separate run after verify 2, no other heavy local job), base, reading and delta per package:
+- apply: base 452.742, reading 432.637, delta -20.105
+- fetch: base 33.632, reading 32.648, delta -0.984
+- heartbeat: base 1.057, reading 1.062, delta +0.005
+- serverclient: base 4.191, reading 4.105, delta -0.086
+- agentcmd (cmd/keyroster-agent): base 1.924, reading 1.848, delta -0.076
+- cmd (cmd/keyroster): base 233.517, reading 222.694, delta -10.823
+The reading ran at 1794153354 (the base at 1794143318, so 2.8 h old, under 24 h); every package stays far below the +90 s stop. The readings are lower than the base although this plan adds tests: load noise on this workstation of about 5 %, not a speed-up.
+
+PR: #92 (https://github.com/Labontese/keyroster/pull/92), opened by keyroster-bot against main, no auto-merge.
+
+### Deviations (Task 4)
+
+T4-1. **The delta gate's parser cannot read the first key of the base line.** Its key pattern is `^test-time base: .* $1=`, which needs a space between `test-time base:` and the key, so `apply=` (which comes first, the format 'Budget and verify' prescribes) parses as empty, and the gate exits 1 before any test runs (observed: `gate3 exit 1`, no `ok` line). The gate was run once more with only that pattern changed to `^test-time base: \(.* \)\{0,1\}$1=` (the six values then parse as the base line says), and its result is recorded above. The plan file is unchanged; the same parser sits in the plan's text for later plans to copy, so this is a question for the owner (below).
+
+## For later plans
+
+- 03-10d: Task 1 Deviation 9's behaviour change (a widening on a host whose drop-in is edited or missing at the start of a run is held one round as `sshd_override`, because the account check compares sshd -T -C's trust settings for the probe account before that run repairs the drop-in) is one of the lines 03-10d reconciles, with the served-certificate site, the gate and the hold reasons (Planner decisions D1).
+- 03-12: a CA rotation waits on a host with a broken probe account (R11), now with the reasons password_empty, password_set, sshd_override and account_excluded as well; 03-12 must say so.
+- 03-14 mirrors account.go (the minimal check and the full check's stages).
+- 03-16 proves a capability-less root on a shadow file of mode 0000 (almalinux:9 ships mode 0000; the matrix runs as root with capabilities), and the other service managers.
+- 03-16's probe-account handling must read the report-only code `probe_account` and the reason at the start of its Message, as a warning that does not block, and not the two refusal codes probe_account_unparsable and probe_account_is_managed that 03-16-PLAN.md:150 and :391 name (03-16 revises its instruction 3 at its own check; cover-7).
+- Older follow-ups of 'Not done here', unchanged: the sshd `Match User` lockdown for the probe account (later, no plan); a live revocation set for fleets above about 1000 hosts (later, no plan); `TestFetch/more_repolls_immediately` under a parallel `-race` load (a one-file chore); the 16 e2e lint issues under build tags CI never lints (a chore); `pop_hosts_off_fails` of 03-09 (owned by 03-10d, conditional).
+- The delta gate's key pattern (Deviation T4-1) is in this plan's text; a later plan that copies the gate copies the defect.
+
+## UNVERIFIED
+
+- shellcheck was not run on probe-account.sh, run-in.sh, run.sh or agent-smoke.sh: it is not installed locally and no workflow of the repository runs it (only `sh -n`, `dash -n` and `bash -n` were).
+- systemd's `IPAddressAllow=localhost` admitting 127.0.0.2 is proven on the ubuntu-24.04 runner's systemd only (run 42495385525); other systemd versions, OpenRC and socket-activated layouts stay UNVERIFIED until 03-16.
+- A shadow file that the unit's root cannot read: the unit has no capabilities; almalinux:9 ships mode 0000 (a FACT now), but the matrix runs as root with capabilities and the real unit read Ubuntu's 0640 file. A password that root sets later on such a host goes unseen (owner answer Q3).
+- Accounts that exist only in NSS or LDAP (`account_missing` by design; the runbook says so; no test uses a real NSS source).
+- `Match Group` evaluated by `sshd -T -C` through the system's NSS, and Match criteria that the specification cannot reproduce (`Match RDomain`, `Match Host` under UseDNS yes); sshd settings the check does not read are left to the positive probe (the T-03-66 residual).
+- Which of passwd field 2 and the shadow file sshd and PAM read in each case is recalled, not verified; neither is trusted over the other.
+- The shadow expiry fields are not read (sec-11): an expired account is refused only by the positive probe, after the addition is live, and `failure_backoff` stops the loop.
+- That sshd -T omits `usepam` on a build without PAM is now a fact on alpine only (the one image without PAM).
+- PerSourcePenalties beyond three pairs at the production spacing; an IPv6-only listener and a `persourcenetblocksize` of /30 or wider (all seven images report 32:128).
+- That the smoke's `LoginGraceTime 10` drop-in applied is inferred from the timing only (Task 3).
+- The flake fix of D6: five green runs (Task 1) lower the odds and prove nothing about the next.
+- The unit override for another account name: the runbook text is gated, no test starts a unit with an override.
+- Every host that is not a CI image.
+
+## Where to resume
+
+- Branch p03/10c-probe-account, pushed; PR #92 open against main, no auto-merge. Tasks 1 to 4 are done up to the owner's merge gate.
+- Next: the pre-merge security review on the green PR (the orchestrator's; Task 4 Publish step 4), then the owner's merge gate. Before the merge only `bash scripts/merge-gate.sh --check p03/10c-probe-account` runs. If main moves first: `git rebase --gpg-sign origin/main`, take origin/main's tracking files, re-apply only this plan's entries, push with lease, and re-run the gates.
+- The test-time base was measured at at=1794143318 and expires at 1794229718; a re-run of the delta gate after that re-measures it first, in the detached worktree outside the repository at origin/main.
+- Owner question: the delta gate's key pattern (Deviation T4-1).
+
+## Self-Check: PASSED
+
+The key files exist (account.go with checkProbeAccountFull, probe_test.go with TestDistroProbeFacts, probeaccount_runbook_test.go with TestProbeAccountRunbook, probe-account.sh, the runbook, both plan files), and every commit this SUMMARY names (85eae61 to 0309661) is an ancestor of HEAD.
