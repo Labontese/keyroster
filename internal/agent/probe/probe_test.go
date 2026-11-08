@@ -350,7 +350,7 @@ func TestVerifyCert(t *testing.T) {
 				// signature_invalid keeps a broken signature and
 				// ca_not_trusted its untrusted one.
 				if tc.code != "signature_invalid" && tc.code != "ca_not_trusted" {
-					if err := c.SignCert(rand.Reader, e.ca); err != nil {
+					if err := c.SignCert(rand.Reader, e.ca); err != nil { //nolint:forbidigo // a defect certificate, a test double signed by the test CA (03-10b)
 						t.Fatal(err)
 					}
 				}
