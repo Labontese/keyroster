@@ -240,7 +240,7 @@ Plans:
 - [x] 03-10c-PLAN.md — Probe account checks, the distro matrix, the systemd test and the runbook
 
 **Wave 26** *(blocked on Wave 25 completion)*
-- [x] 03-10d-PLAN.md — No rollback widens back to last-good after a landed removal; a recovery revokes every lost probe certificate
+- [ ] 03-10d-PLAN.md — No rollback widens back to last-good after a landed removal; a recovery revokes every lost probe certificate
 
 **Wave 27** *(blocked on Wave 26 completion)*
 - [ ] 03-11-PLAN.md — Machine identities by PoP (AUTH-06), `revoke machine`
