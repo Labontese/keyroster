@@ -337,7 +337,7 @@ func TestDistroProbeAccountBang(t *testing.T) {
 func TestDistroProbeFacts(t *testing.T) {
 	h := probeHost(t, hostEdit{})
 	out, _ := exec.Command(sshdBin, "-V").CombinedOutput()
-	version := strings.Fields(strings.TrimSpace(string(out)) + " unknown")[0]
+	version := strings.TrimSuffix(strings.Fields(strings.TrimSpace(string(out)) + " unknown")[0], ",")
 	d := sshdT(t, "")
 	_, penalties := d["persourcepenalties"]
 	value := func(k, absent string) string {

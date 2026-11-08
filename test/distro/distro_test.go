@@ -498,8 +498,11 @@ func (w *world) writeProbeKRL(t *testing.T, serials ...uint64) {
 	}
 }
 
-// hostKeys are every host key of the container's sshd: the query offers
-// no host key algorithm of its own, so sshd may answer with any of them.
+// hostKeys are the host keys of the container's sshd that x/crypto/ssh
+// parses: the query offers no host key algorithm of its own, so sshd may
+// answer with any of them. A key type it cannot parse (archlinux's
+// OpenSSH writes an ML-DSA hybrid host key) is one it cannot negotiate
+// either, so it is skipped.
 func hostKeys(t *testing.T) []ssh.PublicKey {
 	t.Helper()
 	files, err := filepath.Glob("/etc/ssh/ssh_host_*_key.pub")
@@ -512,11 +515,12 @@ func hostKeys(t *testing.T) []ssh.PublicKey {
 		if err != nil {
 			t.Fatal(err)
 		}
-		k, _, _, _, err := ssh.ParseAuthorizedKey(b)
-		if err != nil {
-			t.Fatalf("%s: %v", f, err)
+		if k, _, _, _, err := ssh.ParseAuthorizedKey(b); err == nil {
+			keys = append(keys, k)
 		}
-		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		t.Fatalf("no host key of %v parses", files)
 	}
 	return keys
 }
