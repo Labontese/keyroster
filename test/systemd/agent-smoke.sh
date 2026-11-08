@@ -86,6 +86,9 @@ id "$ACCOUNT"
 step "The probe account, with the runbook's command (03-10c)"
 sh "$repo/test/distro/probe-account.sh" debian
 printf '%s\n' 'LoginGraceTime 10' 'ListenAddress 127.0.0.1' 'LogLevel VERBOSE' >/etc/ssh/sshd_config.d/10-smoke.conf
+# sshd -T needs the privilege separation directory, which ssh.service
+# creates only when socket activation first starts it.
+install -d -m 0755 /run/sshd
 /usr/sbin/sshd -T | grep -iE '^(logingracetime|listenaddress|loglevel) ' || true
 listen=$(/usr/sbin/sshd -T | grep -i '^listenaddress ') || true
 [ "$listen" = 'listenaddress 127.0.0.1:22' ] || fail "sshd -T reports listen addresses ($listen), want 127.0.0.1:22 only"
