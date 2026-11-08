@@ -57,6 +57,32 @@ probe-state.json encoding choices (frozen with this commit): `failure` and `held
 
 ## Task 3
 
+RED (unit, compile failures): with apply.go, probegate.go and run.go reverted to HEAD and account.go moved aside, `go test -run '^(TestProbeClassify|TestProbeAccount|TestProbeGate|TestRunHeldTrigger)$' ./internal/agent/apply/` fails to build with `undefined: classify`, `probeClass`, `classFirstInstall`, `classNarrowing` and `classTrustOnly` (the compiler stops at ten errors). The production code was drafted before the tests and moved aside for this run, as in Task 2; its RED is compile RED only.
+
+What landed:
+- **probegate.go:** `classify` and `needsGate`; `probeGate` (the account, then the probe principal, then the pair, then the back-off, then the budget); `probePair`, the one pair selector (Next, then Committed) that Task 4's probes must reuse so their failure key matches the gate's; `failureKey` (length-prefixed fields: sorted CA and principal lines, both serials, the passwd line; no KRL, no comments); `probeBackoff` (60 s doubling, capped at 1 h without overflow); `heldPresent`; `writeHeld`, which does not write when the reason and versions are unchanged; `clearHeld`, which writes only when a record exists; `gateSuperseded`; `heldOutcome`.
+- **account.go:** `checkProbeAccount` and `parsePasswdLine`.
+- **forward:**
+  - Last-good is resolved once, at the top, where `heldPresent` also runs and rewrites a probe-state.json that does not read (outside a dry run). This is the `loadProbeState` call that every locked apply takes.
+  - The no-op test carries `!held`.
+  - Classification and the gate run after the DryRun return, before the equal-content commit.
+  - A collapsed hold either commits only its versions through that branch (a changed capture) or returns at once (a retry).
+  - A non-collapsed hold replaces g by the intermediate.
+  - Clearing: clause (a) is `sameContent(cur, g)` with no hold; clause (b) is after a commit of the full candidate (`!substituted`), first install included; the idle branch clears too. None of them runs while `heldReason` is set.
+  - A superseding target is classified and gated against the generation current names at the top of the next pass. A hold there installs Intermediate(from, t), or, when that collapses, commits `from` without another swap; the discarded superseding generation is removed.
+- **run.go:** `heldPending` (no lock; a held record, or a file that does not read or is not 0600 of the effective uid) and `forceApply`.
+
+T3: fffc0af (the code, the tests and the harness; the mutants ran on it)
+
+Task 3 gates, local (through scripts/linux.sh), at T3:
+- **Verify block 1**, run verbatim, passes: build, `go vet ./...`, the tagged vet, the named tests with `-race`, every named PASS line, and no FAIL, panic or race.
+- **Verify block 2.** The broad run `go test -race ./internal/agent/... ./cmd/keyroster-agent/` passed once on the tree before the two lint fixes (apply 468.0 s). It passed again at T3 except one subtest (apply 503.2 s; pass or fail only).
+  - `TestFetch/more_repolls_immediately` failed its wall-clock bound: `Once` took 1.03 s against 900 ms while the apply package ran beside it under `-race`.
+  - It passed 5 of 5 times alone (`-race -count=5`) and in a full `-race` run of the fetch package. Task 3 does not touch internal/agent/fetch, and fetch_test.go is outside files_modified, so it stays a load-dependent flake for the review (fetch.go's `Once` gained `postProbeCerts` in Task 1).
+  - FuzzParsePasswdLine ran 30 s (about 2 485 000 executions, after the list check) with no crash and no corpus file left. golangci-lint is clean for linux, windows and darwin, and gofmt is clean.
+- **Gate 3** passes: `git diff --quiet origin/main --` over render.go, selftest.go, hostcert.go, preflight.go and internal/agent/hostcert.
+- **The two lint fixes after the first run:** an ineffectual `reclassify = false`, and a G115 comment in the harness.
+
 ## Task 4
 
 ## Mutants
@@ -119,6 +145,40 @@ mutant equivalent: hoststatus printing probe_detail without safe: keyroster host
 
 Running count after Task 2: 46 killed, 1 equivalent, 0 survived.
 
+Task 3 (29 killed, 0 equivalent, 0 survived; the plan's list has 29 entries, counted as 28 in its floors). They were applied to the committed tree (T3), run by the same runner, with three of them also run on a second subtest:
+
+mutant killed: classify treating a mixed change as narrowing (TestProbeClassify/mixed_is_widening, and again TestProbeGate/widening_held_narrow_part_lands)
+mutant killed: the trust-only exemption removed (TestProbeGate/trust_only_disabled_exempt)
+mutant killed: first install gated (a gate call inserted in forward's first-install branch) (TestProbeGate/first_install_exempt)
+mutant killed: the probe-file-only exemption removed (TestProbeGate/probe_file_only_widening_exempt)
+mutant killed: the probe-file-only exemption widened to any file (TestProbeClassify/probe_file_plus_other_line_is_widening)
+mutant killed: the substitution made without the isProbeFile check on both sides (TestProbeClassify/mapped_probe_account_addition_is_widening, and again TestProbeGate/mapped_probe_account_addition_held)
+mutant killed: isProbeFile accepting a file with an extra line (TestProbeClassify/probe_file_with_foreign_line_is_widening, and again TestProbeClassify/is_probe_file_exact)
+mutant killed: the hold landing g instead of the intermediate (TestProbeGate/widening_held_narrow_part_lands)
+mutant killed: the gate applied to a narrowing change (TestProbeGate/narrowing_lands_without_probes)
+mutant killed: the gate holding a KRL-only change (TestProbeGate/krl_only_lands_while_account_missing)
+mutant killed: the held record written after the commit (TestProbeGate/held_record_written_before_commit)
+mutant killed: the no-op test without !held (TestProbeGate/held_retried_when_ready)
+mutant killed: the held record never cleared (TestProbeGate/held_clears_when_widening_lands)
+mutant killed: the held record cleared on every run (TestProbeGate/held_survives_restart)
+mutant killed: the gate after allocGeneration (TestProbeGate/held_retry_writes_nothing)
+mutant killed: a collapsed hold that commits on a retry (TestProbeGate/held_retry_writes_nothing)
+mutant killed: the held record rewritten on every retry (TestProbeGate/held_retry_writes_nothing)
+mutant killed: pair validity judged at now (TestProbeGate/pair_validity_needs_wait_margin)
+mutant killed: spacing judged at now rather than at now + wait (TestProbeGate/budget_lookahead_spacing)
+mutant killed: the budget with seven negatives allowed (TestProbeGate/over_budget_widening_held)
+mutant killed: the failure key without the passwd line (TestProbeGate/failure_backoff_blocks_until_input_changes)
+mutant killed: checkProbeAccount accepting uid 0 (TestProbeGate/account_reasons_hold)
+mutant killed: checkProbeAccount accepting a shell not named nologin (TestProbeGate/account_reasons_hold)
+mutant killed: a mapped account's file overwritten (TestProbeGate/mapped_account_holds_account_is_managed)
+mutant killed: the superseded target not reclassified (TestProbeGate/superseded_target_reclassified)
+mutant killed: forceApply never set (TestRunHeldTrigger/held_record_applies_at_once)
+mutant killed: clearHeld only in the sameBytes branches (TestProbeGate/held_clears_when_widening_reverted)
+mutant killed: clearHeld also called in the :899 commit of a collapsed hold (TestProbeGate/pure_addition_held_changes_nothing_on_disk)
+mutant killed: cur's side tested with the exact isProbeFile only (TestProbeGate/probe_file_only_after_a_hold)
+
+Running count after Task 3: 75 killed, 1 equivalent, 0 survived (floors: 92 killed, 97 with equivalents; Task 4 lists 27).
+
 ## Deviations
 
 - **Stopped after Task 1 (the plan's context rule).** Budget and verify says that if Task 1 nears half the context, the executor stops after its gates and reports instead of trimming. It did: Tasks 2 to 5 (reporting, the gate and the hold, the probes in forward, the PR) are not started. No PR is open.
@@ -137,17 +197,53 @@ Running count after Task 2: 46 killed, 1 equivalent, 0 survived.
 - **Task 2: heartbeat.go was drafted before its tests**; the RED run moved it aside (reverted to HEAD) and restored it after.
 - **Task 2: the probes-off Report values are set at Apply's start**, so refusal paths carry them too.
 - **Engine seam helper.** `engine.probeQueryFunc` (Config's seam or ProbeQuery) and its test land in Task 1, so the field is used; Task 4's probes call it.
+- **Stopped after Task 3 (the plan's context rule, Budget and verify).** Task 3 is complete and pushed; Tasks 4 and 5 are not started. No PR is open.
+- **Task 3: two Task 1 subtests edited (probe_test.go, in files_modified but not in Task 3's `<files>`).** With the gate in place, `TestProbeStep/host_holds_write_nothing_or_hold` and `TestRenderProbeFile/not_in_trust_only` applied a mixed change with probes on and no pair, so the gate held it. Each now accepts ErrProbeHeld at that one step, with a comment; neither tests the gate, and their own assertions are unchanged (Rule 3).
+- **Task 3: the held record's versions** are the verified candidate's (`v.Next` bundle, directory, KRL). `issue_refused` releases a sticky refusal against accepted/'s bundle, policy and directory versions, as the issuance step reads them.
+- **Task 3: `heldOutcome` joins** an earlier outcome error (v.Refused and the like) with the held error instead of dropping it, so `refusals` and `heldNoise` still see ErrProbeHeld.
+- **Task 3: a collapsed supersede hold** commits the generation current names (`from`), with the superseding target's host status, without a further swap; the superseding generation, which nothing names, is discarded. A non-collapsed one installs and validates Intermediate(from, t) as Transition does.
+- **Task 3: `heldPresent` and `heldPending` ignore the probe switch.** A held record with probes off still makes the round render, so the full candidate commits and clears it; `loadProbeState` (the reset rewrite) is skipped only in a dry run.
+- **Task 3: `budget_lookahead_spacing` uses LoginGraceTime 10** (a widening wait of 40 s). The reader clamps future times to now, so "59 s at probe time" with the harness's 150 s wait would need a pair in the future. The cases are a pair 21 s ago (61 s at probe time: lands) and 19 s ago (59 s: `budget`); the mutant that judges at now is killed by the first.
+- **Task 3: TestRunHeldTrigger** has three subtests. `held_record_applies_at_once`: the first hold is `issue_unanswered`, because the pair's requests are live. `no_held_record_waits`. `identical_holds_print_and_log_once`: the Run-level noise check from the Task 2 handover. It counts Out calls and log lines, proves every round applied through a counting Runner, and holds `account_missing` so the reason stays fixed while ProbeCerts requests a pair.
+- **Task 3: RED was compile RED only.** The production code was drafted first and moved aside for the RED run.
 
 ## UNVERIFIED
 
 - Local e2e: not run (the namespace wrapper of 03-10 was not used); the e2e results are CI only.
 - `systemd-sandbox` with this branch's KRL activity (a first probe pair publishes a negative): no PR run yet.
-- Every Edge Coverage item of the plan; and everything of Tasks 3 to 5.
+- Every Edge Coverage item of the plan; and everything of Tasks 4 and 5.
+- Task 3 at the e2e level: no e2e run carries Task 3 yet. Every e2e host runs with `--probe-self-test off`, so no gate runs there except TestProbeSelfTestEndToEnd's host; that test's widening steps need Task 4.
+- Task 3: a host that runs with probes on before Task 4 lands (none ships: this is one PR) would let a gate-passing addition go live without the probes. That is Task 4's code, and nothing between Task 3 and Task 4 is released.
 - Task 2 at the e2e level: no e2e run has carried Task 2 yet (the next e2e run is Task 4's); every e2e host now reports `probe_self_test_off` in last_apply.detail and probe_detail and shows a `probe:` alert, which no e2e assertion reads (checked by grep of test/e2e, test/distro and test/systemd).
 
 ## Resume point (for the continuation)
 
-- Next: Task 3 (the decision: classify, account.go, probeGate, the hold wiring in forward). Task 2 is done and pushed (T2 fdfb08c). probegate.go already holds the error values, the closed hold reasons, probeState with its reader (`readProbeState`, read-only), `loadProbeState` (rewrites a reset once, locked engines only) and `writeProbeState` (refuses without `e.locked`); `WriteStatus`'s engine takes apply.lock but never sets `e.locked`, so only the engines of Apply (apply.go:435), HostCerts (hostcert.go:151) and ProbeCerts (probe.go:235), which set it, can write.
+Task 3 handover (the current resume point):
+- Next is Task 4 (the probes in forward: reserveProbe, runProbes, settleFailedAddition, opportunistic, the served certificates, TestProbeSites, TestNegativeProbeBudgetAcrossProcesses, TestForwardServedCerts, the e2e), then Task 5. Task 3 is done and pushed (T3 above).
+- **Pair selection.** Pick the pair with `e.probePair(rec, at, k, caKeys)` (probegate.go): Next when PairUsable accepts it, else Committed. Use it in runProbes too, so `failureKey(g, pair, line)` (with `line` from `checkProbeAccount`) matches what the gate compares. runProbes judges at `now + SelfTestTimeout`.
+- **forward state.** forward keeps `heldReason` (this pass's hold), `substituted` (the target is a hold's intermediate) and `reclassify` (set on every supersede).
+  - Task 4's gated flag belongs beside them. Set it where the first pass's gate passes (in the candidate loop, `needsGate(class)` with an empty reason) and in `gateSuperseded`, where the gate passes for the new target. Clear it for a narrowing or exempt target and on a hold (Fix round 3, r2-6). `gateSuperseded` would then return it.
+  - `preN` (D13) is not tracked yet. Set it after each Transition pass to `mid` when non-zero, else `from.N`.
+- **forward anchors at T3** (they moved again):
+  - the no-op test is at apply.go:901 with `!held`;
+  - the gate block starts at `class := classify(` (about :953);
+  - the equal-content commit is `if cur != nil && (sameBytes(cur, g) || heldCollapsed)`;
+  - the Transition loop starts after `substituted, reclassify :=`;
+  - the self-test (`e.report.SelfTest = "pass"`, apply.go:1109) and the commit are at the end of forward, followed by `if !substituted { e.clearHeld() }` and `return heldOutcome(outcome(tv), heldReason)`.
+  - The required probes go between `e.report.SelfTest = "pass"` and `e.commit(target.N, tv)` when the target was gated. On a pass, the existing commit runs and then the clear.
+- **The hold writes `Report.Detail` and both probe fields (`skipped:not_ready`)** through `e.hold`. `e.labelExempt` sets the `skipped:exempt_*` values only while the probes are on.
+- **Fixture helpers in harness_test.go:**
+  - `gateOn` (probes on, the passwd fixture, an executable nologin);
+  - `signProbe`, `probeCert`, `seedPair`, `storePair` (the pair in probe.json);
+  - `listMach` (KRLs list machine-CA serials);
+  - `writePasswd` and `writeRootFile`.
+  - probegate_test.go adds `gateHost`, `ready`, `probeStateNow`, `heldNow`, `setProbeState`, `probeDetail`, `acceptedDir`, `mustHeld`, `mustPrincipals`, `diskState` and `genNow`.
+  - Scripted queries go through `h.cfg.probeQuery`.
+- **The mutant runner** used for Task 3 is a shell script: `m DESC FILE PERL TEST [SUB]` applies a `perl -0pi` substitution that must change the file, runs `-run '^T$/^sub$'` through scripts/linux.sh, and counts only the `--- FAIL: T/sub (` line. It then restores with `git checkout --` and checks `git diff --quiet HEAD --`; `m2` handles a mutant over two files. When writing Go source through a Bash heredoc, the tool layer turns `\n` inside the text into a newline: use the Edit tool for any line with an escape.
+- **The test-time base** (`at=1794104446`) is more than 24 h old by the time Task 5 runs: re-measure it in place first (Task 1 Step 0.2).
+
+Earlier handovers (Tasks 1 and 2), kept for reference:
+- Task 3 (the decision: classify, account.go, probeGate, the hold wiring in forward) was next after Task 2 (T2 fdfb08c). probegate.go already holds the error values, the closed hold reasons, probeState with its reader (`readProbeState`, read-only), `loadProbeState` (rewrites a reset once, locked engines only) and `writeProbeState` (refuses without `e.locked`); `WriteStatus`'s engine takes apply.lock but never sets `e.locked`, so only the engines of Apply (apply.go:435), HostCerts (hostcert.go:151) and ProbeCerts (probe.go:235), which set it, can write.
 - Task 2's verify block 1 was re-run verbatim at fdfb08c (build, `go vet ./...`, the tagged vet, the named tests with `-race` and the PASS loop: all pass), with the final TestRunHeldNoise table.
 - The reset state carries no held record (`Held == nil`, `reset == true`): the plan's `heldPresent` ("a held record, or a file that does not read") must test `st.reset || st.Held != nil`, and read the flag before `loadProbeState`, which clears it after the rewrite.
 - Nothing calls `loadProbeState` yet, so a corrupt probe-state.json is not rewritten until Task 3 calls it on a path every locked apply takes (the `heldPresent` point fits); until then such a host reports probe_state_reset and logs a warning at each status write.
