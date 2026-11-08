@@ -22,7 +22,10 @@
 # account keyroster-probe with the runbook's own command
 # (test/distro/probe-account.sh debian) and writes the drop-in
 # /etc/ssh/sshd_config.d/10-smoke.conf with LoginGraceTime 10, so that a
-# widening waits about 40 s; the test then revokes a certificate and waits
+# widening waits about 40 s, ListenAddress 127.0.0.1, so that the agent's
+# only loopback target is IPv4 and its probes must come from 127.0.0.2,
+# and LogLevel VERBOSE, so that sshd logs the source of each publickey
+# attempt; the test then revokes a certificate and waits
 # for the KRL, waits for a probe pair, and adds a principal to the role,
 # which must land with both probes passing under the real units. The Go
 # test's timeout is 35m, so that a stall fails with the unit journals and
@@ -82,8 +85,10 @@ id "$ACCOUNT"
 
 step "The probe account, with the runbook's command (03-10c)"
 sh "$repo/test/distro/probe-account.sh" debian
-echo 'LoginGraceTime 10' >/etc/ssh/sshd_config.d/10-smoke.conf
-/usr/sbin/sshd -T | grep -i '^logingracetime' || true
+printf '%s\n' 'LoginGraceTime 10' 'ListenAddress 127.0.0.1' 'LogLevel VERBOSE' >/etc/ssh/sshd_config.d/10-smoke.conf
+/usr/sbin/sshd -T | grep -iE '^(logingracetime|listenaddress|loglevel) ' || true
+listen=$(/usr/sbin/sshd -T | grep -i '^listenaddress ') || true
+[ "$listen" = 'listenaddress 127.0.0.1:22' ] || fail "sshd -T reports listen addresses ($listen), want 127.0.0.1:22 only"
 
 step "Build (CGO_ENABLED=0) as ${SUDO_USER:-root}"
 bin=$work/bin

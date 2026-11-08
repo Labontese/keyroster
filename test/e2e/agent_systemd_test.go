@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,6 +34,21 @@ func systemctl(t *testing.T, args ...string) string {
 		t.Fatalf("systemctl %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
+}
+
+// sshdProbeLines is sshd's journal since since (the identifiers sshd and,
+// from OpenSSH 9.8 on, sshd-session), only the lines that name account.
+func sshdProbeLines(t *testing.T, since time.Time, account string) []string {
+	t.Helper()
+	out, _ := exec.Command("journalctl", "--no-pager", "-o", "cat", "--since", since.Format("2006-01-02 15:04:05"), //nolint:gosec // test-only, fixed binary
+		"-t", "sshd", "-t", "sshd-session").CombinedOutput()
+	var lines []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.Contains(l, " "+account+" ") {
+			lines = append(lines, l)
+		}
+	}
+	return lines
 }
 
 // journal is the units' journal since the test began.
@@ -297,6 +313,26 @@ func TestAgentSystemdSmoke(t *testing.T) {
 			}
 		}
 		t.Logf("the role addition landed with both probes passing in %s", time.Since(start).Round(time.Second))
+		// The probe source under the real unit (T-03-381): agent-smoke.sh
+		// makes 127.0.0.1:22 sshd's only listen address and sets LogLevel
+		// VERBOSE, so sshd's lines for the probe account must name the
+		// source 127.0.0.2, and none may name ::1.
+		const probeAccount = "keyroster-probe"
+		var lines []string
+		from := func(addr string) bool {
+			return slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, " "+addr+" ") })
+		}
+		for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(2 * time.Second) {
+			if lines = sshdProbeLines(t, start, probeAccount); from("127.0.0.2") || time.Now().After(deadline) {
+				break
+			}
+		}
+		for _, l := range lines {
+			t.Logf("sshd: %s", l)
+		}
+		if !from("127.0.0.2") || from("::1") {
+			t.Fatalf("sshd's lines for %s do not show the probe source 127.0.0.2 alone (%d lines above)", probeAccount, len(lines))
+		}
 		if text := kr("host", "status"); strings.Contains(text, "probe: ") {
 			t.Fatalf("keyroster host status shows a probe alert:\n%s", text)
 		}
