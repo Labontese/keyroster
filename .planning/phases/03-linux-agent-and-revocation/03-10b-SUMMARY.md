@@ -304,7 +304,47 @@ Running count after Task 4: 104 killed, 1 equivalent, 0 survived (floors 92 kill
 
 ## Resume point (for the continuation)
 
-Task 4 is done and pushed (T4 110181d, e2e green run 42452757354). Task 5 (the gates, the PR, the tracking update and the final SUMMARY) is next; the test-time base was re-measured in place at at=1794117956.
+Task 4 is done and pushed (T4 110181d, e2e green run 42452757354). Task 5 stopped at an owner question.
+
+Done in Task 5:
+- the test-time base re-measured in place (at=1794117956; it expires at 1794204356, after which it is measured again in place first);
+- the four gate controls above (files gate twice, seam gate, ROADMAP gate);
+- the whole-module gate (`go test -race ./...`, the vets, gofmt, golangci-lint for three GOOS, capslock with every baseline unchanged, the dependency and test-only firewalls, pinned actions): pass, at 9e98687 (pass or fail only);
+- PR #91 opened through scripts/gh-as-bot.sh, auto-merge off.
+
+**systemd-sandbox fails (run 42453927360, job 128648794842), and that is the owner question.** The journal shows no sandbox refusal. The probe pair was relayed and issued, the applier committed generation 2 with the KRL that lists the negative, and the self-test passed.
+- **What fails:** the smoke's status loop. Its 150 s window opens after the certificate login (06:19:08).
+- **What is late:** the host's first committed heartbeat on the current versions. The first probe negative adds a KRL version, and the host commits it about three fetch polls after the first install (polls about 60 s apart):
+
+| Time | Event |
+|---|---|
+| 06:19:05 | first install |
+| 06:19:54 | requests posted, negative issued, KRL published |
+| 06:20:53 | KRL spooled, heartbeat sent in the same poll before the apply |
+| 06:20:55 | generation 2 committed |
+| 06:21:38 | deadline |
+| about 06:21:53 | next heartbeat |
+
+- **Why it is the owner's:** the plan keeps the loop inside the existing 150 s deadline (Task 1 step 8). It allows a minimal fix only for a new sandbox refusal. The premise that the re-read loop covers the smoke is false against the code.
+- **Recommendation (test-only, agent_systemd_test.go, in files_modified):** lengthen this one deadline by one fetch cycle (150 s to 270 s) and keep it fatal. The alternative is to keep 150 s and start the window only once the host's KRL lists the probe negative.
+
+PR checks at 9e98687 when stopped:
+- **pass:** capslock, CodeQL, Analyze (go, actions), build-piv, cli-macos, cli-windows, dependency-firewall, the seven e2e-distro images, e2e-pkcs11 (both), e2e-probe (9.5p1 and 10.5p1), e2e-tpm, govulncheck, lint, pinned-actions, pr-title;
+- **fail:** systemd-sandbox;
+- **pending:** build-test, e2e (9.5p1, 10.5p1), fuzz.
+
+Remaining after Daniel's answer:
+1. The fix, if any, with its commit and push.
+2. The required checks green again, systemd-sandbox included.
+3. The six-package delta gate (quiet, on its own).
+4. Gates G1 and G7 to G11 of Task 5.
+5. The tracking update.
+6. The final SUMMARY: status complete, test-time readings, PR check run IDs.
+7. `docs(03-10b): complete probe-selftest plan`, then the checks again.
+
+The pre-merge review is the orchestrator's.
+
+Second owner item, not blocking the PR: the collapse-to-target settle branch (Deviations, Task 4). The plan takes the plain rollback whenever Intermediate(last-good, target) collapses. Intermediate also collapses to the target when the target only removes from last-good, and then the plain rollback would re-grant the removal. The code settles on the target instead; `readd_only_removes_from_last_good` and its mutant cover it. Recommendation: keep it.
 
 Task 3 handover, kept for reference (Task 4 acted on it):
 - Next is Task 4 (the probes in forward: reserveProbe, runProbes, settleFailedAddition, opportunistic, the served certificates, TestProbeSites, TestNegativeProbeBudgetAcrossProcesses, TestForwardServedCerts, the e2e), then Task 5. Task 3 is done and pushed (T3 above).
