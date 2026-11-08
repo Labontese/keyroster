@@ -66,6 +66,7 @@ type lostCert struct {
 	kid    cert.KeyID
 	live   bool
 	revoke bool
+	probe  bool // a probe certificate (krl.IsProbeKeyID), revoked always (03-10d)
 }
 
 // runRevokeRecover is keyroster revoke recover --restored FILE --saved FILE
@@ -287,13 +288,17 @@ func runRevokeRecover(_ context.Context, args []string, stdout, stderr io.Writer
 		if err != nil {
 			return fmt.Errorf("the saved export's entry %d: key ID: %w", lc.Index, err)
 		}
-		user := kid.CA == trust.RoleUser
-		revoke := user || named[c.Serial]
-		if krl.CheckCarriedLost(c.ValidBefore, createdAt, user, revoke) != nil {
+		// Every lost user certificate and every lost probe certificate,
+		// positive or negative, is revoked (03-10d, Q-R option 1: a probe
+		// certificate's polarity is not in its bytes); a host or machine
+		// certificate only when --revoke-lost names it.
+		user, probe := kid.CA == trust.RoleUser, krl.IsProbeKeyID(kid)
+		revoke := user || probe || named[c.Serial]
+		if krl.CheckCarriedLost(c.ValidBefore, createdAt, user, probe, revoke) != nil {
 			expired++
 			continue
 		}
-		certs = append(certs, lostCert{c: c, raw: lc.Cert, kid: kid, live: krl.EntryLive(c.ValidBefore, at), revoke: revoke})
+		certs = append(certs, lostCert{c: c, raw: lc.Cert, kid: kid, live: krl.EntryLive(c.ValidBefore, at), revoke: revoke, probe: probe})
 	}
 	for serial := range named {
 		if !slices.ContainsFunc(certs, func(o lostCert) bool { return o.c.Serial == serial && o.kid.CA != trust.RoleUser }) {
@@ -442,6 +447,15 @@ func printRecoverySummary(w io.Writer, restored, saved *audit.Report, inputs []r
 		}
 		fmt.Fprintf(&b, "keep; public key %s; revoke later with: keyroster revoke key <file with this public key>\n",
 			strings.TrimSpace(string(ssh.MarshalAuthorizedKey(lc.c.Key))))
+	}
+	probes := 0
+	for _, lc := range certs {
+		if lc.probe {
+			probes++
+		}
+	}
+	if probes > 0 {
+		fmt.Fprintf(&b, "lost probe certificates revoked: %d (a recovery revokes every lost probe certificate, positive or negative)\n", probes)
 	}
 	fmt.Fprintf(&b, "entries: %d; the KRL the recovery publishes must be above v%d\n", entries, maxImport)
 	_, _ = io.WriteString(w, b.String())

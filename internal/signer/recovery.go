@@ -73,10 +73,13 @@ var recoveryRoles = map[string]wire.CARole{
 // role its key ID names in the bundle in force, and its key ID names its
 // serial (recovery_certificate_invalid); every certificate is one
 // krl.CheckCarriedLost admits at the request's CreatedAt: revoked, or
-// still live then (recovery_certificate_expired) and not a user
+// still live then (recovery_certificate_expired), not a user
 // certificate (recovery_user_certificate_kept: the owner's answer
 // revoke-users-list-others revokes every lost user certificate, whatever
-// any clock says). Then, inside the transaction: the bundle is
+// any clock says) and not a probe certificate
+// (recovery_probe_certificate_kept: 03-10d, Q-R option 1 revokes every
+// lost probe certificate, both polarities, told apart by its key ID with
+// krl.IsProbeKeyID). Then, inside the transaction: the bundle is
 // still the one loaded at start; every certificate is above the restored
 // serial high-water mark and not in the issuance table
 // (recovery_certificate_not_lost); the entries (krl.RecoveryEntries, with
@@ -135,13 +138,16 @@ func (s *Signer) RecoverRevocations(ctx context.Context, data []byte) (*Recovery
 	resolvedAt := uint64(max(now.Unix(), 0)) //nolint:gosec // G115: >= 0
 	revoked := 0
 	for _, c := range certs {
-		switch err := krl.CheckCarriedLost(c.ValidBefore, req.CreatedAt, c.role == wire.CARoleUser, c.Revoke); {
+		switch err := krl.CheckCarriedLost(c.ValidBefore, req.CreatedAt, c.role == wire.CARoleUser, c.probe, c.Revoke); {
 		case errors.Is(err, krl.ErrLostExpired):
 			return nil, recoveryRefusal("recovery_certificate_expired",
 				fmt.Errorf("lost certificate serial %d expired before the request was created (valid before %d, created at %d) and is not revoked; a recovery carries only the lost certificates it revokes or that are still live then", c.Serial, c.ValidBefore, req.CreatedAt))
 		case errors.Is(err, krl.ErrLostUserKept):
 			return nil, recoveryRefusal("recovery_user_certificate_kept",
 				fmt.Errorf("lost user certificate serial %d is not revoked; a recovery revokes every lost user certificate (revoke-users-list-others)", c.Serial))
+		case errors.Is(err, krl.ErrLostProbeKept):
+			return nil, recoveryRefusal("recovery_probe_certificate_kept",
+				fmt.Errorf("lost probe certificate serial %d is not revoked; a recovery revokes every lost probe certificate, positive or negative, since its polarity is not in its bytes", c.Serial))
 		}
 		if c.Revoke {
 			revoked++
@@ -312,10 +318,12 @@ func (s *Signer) checkRecoveryImports(imports []wire.RecoveryImport) ([]*krl.Par
 }
 
 // recoveryCert is a verified certificate a recovery carries, with its CA
-// role.
+// role and whether its key ID is a probe certificate's
+// (krl.IsProbeKeyID, 03-10d).
 type recoveryCert struct {
 	krl.RecoveredCert
-	role wire.CARole
+	role  wire.CARole
+	probe bool
 }
 
 // checkRecoveryCertificates verifies every certificate a recovery
@@ -338,6 +346,7 @@ func (s *Signer) checkRecoveryCertificates(carried []wire.RecoveredCertificate) 
 		out = append(out, recoveryCert{
 			RecoveredCert: krl.RecoveredCert{CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, KeyID: c.KeyId, ValidBefore: c.ValidBefore, Revoke: rc.Revoke},
 			role:          role,
+			probe:         krl.IsProbeKeyID(kid),
 		})
 	}
 	return out, nil

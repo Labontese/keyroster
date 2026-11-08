@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/Labontese/keyroster/internal/cert"
 )
@@ -22,44 +23,65 @@ const MaxRecoveryEntries = (11 << 20) / 24
 // RecoveryCarrySkew is the skew bound of CheckCarriedLost, in seconds:
 // the signer's request freshness window (wire.MaxRequestSkewSeconds, which
 // a test asserts). It bounds only the lost certificates a recovery does
-// not revoke, which are host and machine certificates: a recovery revokes
-// every lost user certificate whatever any clock says (PR #69 review round
-// 2). With the workstation clock at most 300 s ahead of the signer's, no
-// such certificate the signer still sees as live is left out; with it
-// further ahead, one can be left out of the recovered log and the summary
-// (only counted), but it is not revoked under either outcome, grants no
-// login, and the saved export still holds it.
+// not revoke, which are host certificates and machine certificates that
+// are not probe certificates: a recovery revokes every lost user
+// certificate (PR #69 review round 2) and every lost probe certificate
+// (03-10d) whatever any clock says. With the workstation clock at most
+// 300 s ahead of the signer's, no such certificate the signer still sees
+// as live is left out; with it further ahead, one can be left out of the
+// recovered log and the summary (only counted), but it is not revoked
+// under either outcome, grants no login, and the saved export still holds
+// it.
 const RecoveryCarrySkew = 300
 
-// ErrLostExpired and ErrLostUserKept are the two ways a carried lost
-// certificate breaks CheckCarriedLost; the signer refuses them as
-// recovery_certificate_expired and recovery_user_certificate_kept.
+// ErrLostExpired, ErrLostUserKept and ErrLostProbeKept are the three ways
+// a carried lost certificate breaks CheckCarriedLost; the signer refuses
+// them as recovery_certificate_expired, recovery_user_certificate_kept and
+// recovery_probe_certificate_kept.
 var (
-	ErrLostExpired  = errors.New("krl: a carried lost certificate the recovery does not revoke expired before the request was created")
-	ErrLostUserKept = errors.New("krl: a carried lost user certificate is not revoked")
+	ErrLostExpired   = errors.New("krl: a carried lost certificate the recovery does not revoke expired before the request was created")
+	ErrLostUserKept  = errors.New("krl: a carried lost user certificate is not revoked")
+	ErrLostProbeKept = errors.New("krl: a carried lost probe certificate is not revoked")
 )
 
+// IsProbeKeyID reports whether kid is a probe certificate's key ID: kr3,
+// ca=machine and a subject that starts "probe." (signer/probeissue.go
+// gives every probe certificate one, and cert.ParseKeyID admits that
+// subject only there). It is the only way the signer, keyroster audit
+// verify and keyroster revoke recover can tell a lost probe certificate
+// apart: its polarity is in no byte of the certificate, both polarities
+// have the same options, and its key ID carries a random request ID
+// (03-10d, Q-R option 1).
+func IsProbeKeyID(kid cert.KeyID) bool {
+	return kid.V3 && kid.CA == "machine" && strings.HasPrefix(kid.Subject, "probe.")
+}
+
 // CheckCarriedLost is the one rule for which lost certificates a recovery
-// carries and which it revokes (PR #69 review, D-R2 and round 2); user
-// says whether the certificate is a user certificate, revoke whether the
-// recovery revokes it, and createdAt is the request's CreatedAt (the
-// preparing client's clock in whole seconds). A revoked certificate is
-// always carried. Otherwise the certificate must still be live
-// (EntryLive) at createdAt minus RecoveryCarrySkew (ErrLostExpired), and
-// it must not be a user certificate (ErrLostUserKept): every lost user
-// certificate is revoked (the owner's answer revoke-users-list-others),
-// expired or not, since revoking an expired one is harmless and its entry
-// prunes by its ValidBefore. keyroster revoke recover sets revoke for
-// every lost user certificate and each --revoke-lost serial and carries
-// exactly the certificates this rule admits; the signer and keyroster
-// audit verify refuse a request that carries any other. It reads only the
-// signed request, never the time the recovery is applied, so a request
-// prepared offline and applied hours later is judged as it was prepared.
-// A lost host or machine certificate it leaves out is not revoked and is
-// expired at createdAt minus RecoveryCarrySkew; the imported entries of
-// its serial or key ID then get ValidBefore 0 and are never pruned
-// (RecoveryEntries), the fail-safe outcome.
-func CheckCarriedLost(validBefore, createdAt uint64, user, revoke bool) error {
+// carries and which it revokes (PR #69 review, D-R2 and round 2; 03-10d);
+// user says whether the certificate is a user certificate, probe whether
+// it is a probe certificate (IsProbeKeyID), revoke whether the recovery
+// revokes it, and createdAt is the request's CreatedAt (the preparing
+// client's clock in whole seconds). A revoked certificate is always
+// carried. Otherwise the certificate must still be live (EntryLive) at
+// createdAt minus RecoveryCarrySkew (ErrLostExpired), it must not be a
+// user certificate (ErrLostUserKept): every lost user certificate is
+// revoked (the owner's answer revoke-users-list-others), expired or not,
+// since revoking an expired one is harmless and its entry prunes by its
+// ValidBefore; and it must not be a probe certificate (ErrLostProbeKept):
+// every lost probe certificate is revoked, positive or negative, because
+// its polarity is not in its bytes and a negative left out of the KRL
+// would be accepted by sshd (03-10d, Q-R option 1). keyroster revoke
+// recover sets revoke for every lost user certificate, every lost probe
+// certificate and each --revoke-lost serial and carries exactly the
+// certificates this rule admits; the signer and keyroster audit verify
+// refuse a request that carries any other. It reads only the signed
+// request, never the time the recovery is applied, so a request prepared
+// offline and applied hours later is judged as it was prepared. A lost
+// host or machine certificate it leaves out is not revoked and is expired
+// at createdAt minus RecoveryCarrySkew; the imported entries of its serial
+// or key ID then get ValidBefore 0 and are never pruned (RecoveryEntries),
+// the fail-safe outcome.
+func CheckCarriedLost(validBefore, createdAt uint64, user, probe, revoke bool) error {
 	switch {
 	case revoke:
 		return nil
@@ -67,6 +89,8 @@ func CheckCarriedLost(validBefore, createdAt uint64, user, revoke bool) error {
 		return ErrLostExpired
 	case user:
 		return ErrLostUserKept
+	case probe:
+		return ErrLostProbeKept
 	}
 	return nil
 }
