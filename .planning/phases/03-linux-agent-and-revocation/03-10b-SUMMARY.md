@@ -15,10 +15,10 @@ AGENT-04: open until 03-10c
 
 ## Bases
 
-test-time base: apply=515.806 fetch=39.539 heartbeat=1.069 serverclient=4.333 agentcmd=2.279 cmd=241.507 at=1794104446
+test-time base: apply=379.045 fetch=31.888 heartbeat=1.049 serverclient=4.204 agentcmd=2.013 cmd=222.893 at=1794117956
 e2e base: run 42403955637 9.5p1=779.609 10.5p1=794.258 probe9.5p1=35.006 probe10.5p1=37.983
 
-The test-time base ran on unchanged origin/main 1260b8c in a detached worktree outside the repository, with no other heavy job, through scripts/linux.sh (go1.27.3 linux/amd64 in WSL); each time is that package's `ok` line.
+The test-time base was re-measured in place before Task 5 (the first base, at=1794104446, was over 24 h old; apply was 515.806 then). It ran on unchanged origin/main 1260b8c in a detached worktree outside the repository, with no other heavy job, through scripts/linux.sh (go1.27.3 linux/amd64 in WSL); each time is that package's `ok` line.
 
 ## Task 1
 
@@ -84,6 +84,48 @@ Task 3 gates, local (through scripts/linux.sh), at T3:
 - **The two lint fixes after the first run:** an ineffectual `reclassify = false`, and a G115 comment in the harness.
 
 ## Task 4
+
+RED: none that counts. The production code of Task 4 was written before its tests, so the fail direction rests on the mutants below, each killed on its named subtest. The first run with the probes wired failed nine of Task 3's TestProbeGate subtests and TestRunHeldTrigger with `probe_inconclusive` rollbacks: the harness had no query that models sshd, so the real ProbeQuery ran against the fake sshd. That is why `gateOn` now installs `sshdProbe`; no Task 3 subtest was edited.
+
+What landed:
+- **probegate.go:** `reserveProbe` (prune the hour, refuse at six, append now, set last_pair, write under the lock); `runProbes(ctx, g, required)` (the pair by `probePair` at now + SelfTestTimeout, inconclusive with no query when unusable; the spacing slept on the engine clock, at most 60 s; the reservation; the fault point `probe-send`; the target by `probeAddr`, the source by `probeSource`; positive, then the negative only after an accepted positive); `probeResult` (required: the failure record, whose count grows while the key is unchanged; opportunistic: the alarm and Report.Detail); `servedCertCheck`; `opportunistic`; `settleFailedAddition` (D13). `gateSuperseded` also returns the superseding target's class and whether it passed the gate as a widening.
+- **forward (apply.go):** `gated` and `class` are reset at the top of every candidate pass and recomputed at every supersede (r2-6); the Report's Detail and both probe fields are reset at the top of each candidate pass while the probes are on (Task 3 handover note 1); `preN` is set after every Transition pass (`mid`, else `from.N`); after the listener test, with the probes on: `skipped:drop_in_unchanged` or the served-certificate check (gated: failure record `served_cert_mismatch` and the settle path; otherwise report only), then a gated target's required probes (failure: Detail the code, then `settleFailedAddition`), then the commit and the clear; after the commit of a non-gated, non-held narrowing or probe-file-only target, the opportunistic pair.
+- **The seven other self-test sites** in apply.go carry the comment that only forward runs the probes; HostCerts' activateCandidate (hostcert.go) does not, because hostcert.go is outside files_modified and byte-frozen by Task 3's gate 3. TestProbeSites covers all eight.
+- **harness_test.go:** `gateOn` installs `sshdProbe`, a query that answers as sshd does against current's files (principal line, CA line, KRL serial) and records each query; `probeQueries` reads them.
+
+T4: 110181d (b209331 is the code and the tests, on which the plan's mutants ran; 6aef063 adds the missing `--yes` to the e2e `role update` of `unusable_account_holds_widening_krl_and_narrowing_land`, a Task 1 test defect the first green attempt found; 110181d adds `readd_only_removes_from_last_good`)
+
+e2e green attempt 1: run 42451895581 at b209331, failed in both probe lanes at `unusable_account_holds_widening_krl_and_narrowing_land` (0.03 s): `keyroster role update ops --principal role:ops2: exit 1`, `refusing to sign without confirmation: stdin is not a terminal` (the call lacked `--yes`). Before it, on 9.5p1 and 10.5p1, `pair_issued_and_enforced`, `widening_passes_probes` (71 s on 10.5p1) and `positive_refused_rolls_back` (80 s on 10.5p1, the settle path on real sshd) passed, and TestProbePairSpacing passed again.
+
+Task 4 gates, local (through scripts/linux.sh), at T4 (the pass-path state write made non-fatal before the commit, re-tested):
+- **Verify block 1**, run verbatim: build, `go vet ./...`, the tagged vets (`keyroster_e2e`, `e2e e2eprobe`), the named tests with `-race`, every named PASS line, no FAIL, panic or race: VERIFY1_OK.
+- **Verify block 2:** `go test -race ./internal/agent/... ./internal/serverclient/ ./cmd/keyroster-agent/ ./cmd/keyroster/` passes (apply 525.6 s, cmd/keyroster 240.3 s, fetch 53.8 s; pass or fail only). The first lint run found two issues in the new tests (a G703 on the helper's marker file, an ST1008 on a test closure's result order); both fixed, then golangci-lint for linux, windows and darwin, gofmt and the e2e lint scoped to new and changed files report 0 issues.
+- **Verify block 3:** two `t.Parallel()` in probe_selftest_test.go, and the machine-cap global used by bootstrap_test.go and probe_selftest_test.go only.
+
+Fetch timing (Task 3 handover note 2): `Once` in `TestFetch/more_repolls_immediately`, `-race -count=20`, timed by a temporary `t.Logf` after the call: with the probe post mean 35.4 ms, max 50.3 ms; with the `postProbeCerts` call removed from fetch.go mean 34.6 ms, max 40.9 ms. The probe post adds under 1 ms on average (it reads an absent outbox and lists the spool); the 1.03 s of Task 3 was load from the parallel apply package under `-race`, and the 900 ms bound stays. Both files were restored (`git diff --quiet HEAD -- internal/agent/fetch`).
+
+e2e green run (Task 4): 42452757354 at 110181d. The e2e gate in `green` mode with every probe test in PROBE_PASS and an empty PROBE_ALLOW passed (exit 0): main lanes 9.5p1 752.412 s (base 779.609) and 10.5p1 790.264 s (base 794.258), both successful and with no `=== RUN   TestProbe` line; probe lanes 9.5p1 273.339 s (base 35.006) and 10.5p1 280.299 s (base 37.983), under the 420 s cap. In both probe lanes TestProbeSelfTestEndToEnd passed in full (244 s; `pair_issued_and_enforced` 9 to 12 s, `widening_passes_probes` 70 to 71 s, `positive_refused_rolls_back` 76 to 77 s, `unusable_account_holds_widening_krl_and_narrowing_land` 9 to 11 s, `fixing_the_account_lands_the_held_addition` 63 to 65 s, `private_key_never_on_disk`), with TestProbePairSpacing (120 to 124 s, in parallel), TestProbeCertsAgainstSSHD and TestProbeSSHDFacts. The spacing facts repeat Task 1's: 10.5p1 `pairs=3 spacing=60s dropped=none penalty_lines=6 listener_answered=3/3 control_dropped_after=3 pairs`, 9.5p1 `dropped=none penalty_lines=0 listener_answered=3/3 control_dropped_after=not exercised` and `P7 spacing: not exercised, no PerSourcePenalties`.
+
+## Task 5
+
+Local e2e wrapper: not used. The namespace wrapper of 03-10 was not set up on this machine, so every e2e result here is CI's.
+
+gate control: files gate exits 0 on the branch as committed (at 110181d)
+gate control: files gate exits 1 on a throwaway detached worktree with one commit adding an unlisted file (stray-unlisted.txt; the worktree was removed afterwards)
+gate control: ROADMAP gate exits 1 before the tracking update (the changed-line filter is empty, so `test -n "$R"` fails: the gate bites)
+
+Q1 state-loss deviation (P4): after an agent-side state loss the first new negative waits for `probe_cert_recent` (up to min(1 h, L/3)) and then for the hourly publish, so additions on that host wait up to about 2 h; revocations and removals are unaffected; no new wire signal is added; here it is a transient with the persisted back-off, never a sticky hold.
+
+The check-1 settle path and the served-certificate change: a failed gated mixed change keeps its removal through `settleFailedAddition` (D13) instead of 03-05's plain rollback, and a served-certificate mismatch is report only for a change that is not a gated addition.
+
+## For later plans
+
+- R11, for 03-12: a CA rotation waits on a host with a broken probe account, because the added CA line is an addition; 03-12 must say so.
+- The e2e helpers default to `--probe-self-test off` through `agentHost.probeSelfTest` (`probeMode()`); only `joinProbeHost` sets `required`.
+- The test tag is allowed in six tracked files only (the files gate of Task 1 and Task 5); every other file says 'the e2e test build'.
+- The probe detail codes: `probe_held:<reason>` (the closed list), probe_positive_refused, probe_krl_not_enforced, probe_inconclusive, served_cert_mismatch, probe_state_reset, probe_self_test_off, `probe_issue:<code>`.
+- 03-10c owns the runbook items: the upgrade order (signer, server, then agents, because of `probe_detail`), the probe account's creation commands, the unit override for another account name, and the machine-cap recommendation.
+- `TestFetch/more_repolls_immediately` fails its 900 ms bound under a parallel `-race` load on unchanged origin/main too (6.0 s in the first base attempt of Task 5), so it is a pre-existing flake and not this plan's: a later plan can look at it.
 
 ## Mutants
 
@@ -179,6 +221,42 @@ mutant killed: cur's side tested with the exact isProbeFile only (TestProbeGate/
 
 Running count after Task 3: 75 killed, 1 equivalent, 0 survived (floors: 92 killed, 97 with equivalents; Task 4 lists 27).
 
+Task 4 (29 killed, 0 equivalent, 0 survived: the plan's 27, one for the Task 3 handover's note 1 and one for the collapse-to-target settle branch). Applied to the committed tree (T4), run by the same kind of runner, with the plain-rollback mutant also run on a second subtest:
+
+mutant killed: the rollback absent for a refused positive (TestProbeGate/widening_positive_refused_rolls_back)
+mutant killed: a negative that is accepted counted as a pass (TestProbeGate/widening_negative_accepted_rolls_back)
+mutant killed: an inconclusive negative counted as a pass (TestProbeGate/widening_inconclusive_rolls_back)
+mutant killed: the negative sent after a refused positive (TestProbeGate/positive_refused_sends_no_negative)
+mutant killed: a narrowing change rolled back on a failed probe, its probes run as required (TestProbeGate/narrowing_negative_accepted_no_rollback_reports)
+mutant killed: a failed probe of a mixed change through the plain rollback instead of settleFailedAddition (TestProbeGate/mixed_positive_refused_keeps_removal, and again TestProbeGate/mixed_negative_accepted_keeps_removal)
+mutant killed: settleFailedAddition without the held record (TestProbeGate/mixed_failure_next_apply_holds_and_writes_nothing)
+mutant killed: settleFailedAddition without the commit of M (TestProbeGate/mixed_positive_refused_keeps_removal)
+mutant killed: the settle path taken for a pure addition (TestProbeGate/widening_positive_refused_rolls_back)
+mutant killed: a served-certificate mismatch on a narrowing change rolled back (TestForwardServedCerts/fail_narrowing_keeps_removal_and_commits)
+mutant killed: a served-certificate mismatch on a mixed addition through the plain rollback (TestForwardServedCerts/fail_mixed_widening_keeps_removal)
+mutant killed: the pair not judged again before the probes (TestProbeGate/pair_expired_during_wait_is_inconclusive)
+mutant killed: the failure record not written (TestProbeGate/widening_positive_refused_rolls_back)
+mutant killed: the failure not cleared by a pass (TestProbeGate/failure_cleared_by_a_pass)
+mutant killed: the alarm not cleared by a pass (TestProbeGate/alarm_cleared_by_a_pass)
+mutant killed: the reservation written after the send (TestProbeGate/reservation_before_send)
+mutant killed: the spacing wait removed (TestProbeGate/probe_sleeps_for_spacing)
+mutant killed: the opportunistic cadence removed (TestProbeGate/opportunistic_once_per_ten_minutes)
+mutant killed: the opportunistic three-negative cap removed (TestProbeGate/opportunistic_skips_after_three_negatives_in_the_hour)
+mutant killed: the probe source 127.0.0.1 (TestProbeGate/probe_source_is_not_the_listener_source)
+mutant killed: the budget limit seven (TestNegativeProbeBudgetAcrossProcesses)
+mutant killed: the reservation outside the lock: apply.lock taken shared, so B reserves while A holds it (TestNegativeProbeBudgetAcrossProcesses)
+mutant killed: a probe call added at the rollback's own self-test (TestProbeSites/backToLastGood)
+mutant killed: the served-certificate check removed (TestForwardServedCerts/fail_widening_rolls_back_addition_only)
+mutant killed: the settle predicate read from report.Intermediate instead of the content of Intermediate(lgGen, target) (TestProbeGate/superseded_mixed_failure_keeps_removal)
+mutant killed: the settle always on preN without the content test (TestProbeGate/superseded_readd_failure_keeps_last_good_lines)
+mutant killed: the gated flag kept from the first pass after a supersede (TestProbeGate/superseded_to_narrowing_runs_no_probes)
+mutant killed: the Report's probe fields not reset at the top of a candidate pass (TestProbeGate/held_pass_then_krl_alone_pass_reports_no_hold)
+mutant killed: the plain rollback whenever Intermediate(last-good, target) collapses, also when it collapses to the target (TestProbeGate/superseded_readd_failure_keeps_last_good_lines, run at 110181d)
+
+Not run: the local 10.5p1 mutant (ProbePairSpacing at 2 s, TestProbePairSpacing). This machine's WSL has no sshd, and no local 10.5p1 build or namespace wrapper was set up (UNVERIFIED, not counted). The e2e killer `positive_refused_rolls_back` of the plain-rollback mutant ran only in CI on the unmutated tree.
+
+Running count after Task 4: 104 killed, 1 equivalent, 0 survived (floors 92 killed, 97 with equivalents).
+
 ## Deviations
 
 - **Stopped after Task 1 (the plan's context rule).** Budget and verify says that if Task 1 nears half the context, the executor stops after its gates and reports instead of trimming. It did: Tasks 2 to 5 (reporting, the gate and the hold, the probes in forward, the PR) are not started. No PR is open.
@@ -206,19 +284,29 @@ Running count after Task 3: 75 killed, 1 equivalent, 0 survived (floors: 92 kill
 - **Task 3: `budget_lookahead_spacing` uses LoginGraceTime 10** (a widening wait of 40 s). The reader clamps future times to now, so "59 s at probe time" with the harness's 150 s wait would need a pair in the future. The cases are a pair 21 s ago (61 s at probe time: lands) and 19 s ago (59 s: `budget`); the mutant that judges at now is killed by the first.
 - **Task 3: TestRunHeldTrigger** has three subtests. `held_record_applies_at_once`: the first hold is `issue_unanswered`, because the pair's requests are live. `no_held_record_waits`. `identical_holds_print_and_log_once`: the Run-level noise check from the Task 2 handover. It counts Out calls and log lines, proves every round applied through a counting Runner, and holds `account_missing` so the reason stays fixed while ProbeCerts requests a pair.
 - **Task 3: RED was compile RED only.** The production code was drafted first and moved aside for the RED run.
+- **Task 4: the served-certificate check and the opportunistic pair run only while the probes are on.** TestReportProbeFields requires a probes-off run to carry no probe field but `skipped:off`; the switch is off only in the unit harness and the e2e test build, so a production agent always runs both.
+- **Task 4: the opportunistic pair's skip keeps an exempt label.** After a probe-file-only commit the Report keeps `skipped:exempt_probe_file_only` (Task 3's `probe_file_only_*` subtests) instead of the skip value; after a narrowing commit it reports `skipped:budget` or `skipped:not_ready`.
+- **Task 4: settleFailedAddition when Intermediate(last-good, target) collapses to the target.** The plan takes the plain rollback whenever it collapses, on the premise that a collapse means the target removes nothing last-good grants. Intermediate also collapses when its result equals the target, that is when the target only removes from last-good (possible after a supersede that re-adds part of an earlier removal). The plain rollback would then re-grant what the target removed, so the code takes it only when last-good is covered by the target (`isNarrowing(target, lgGen)`) and otherwise settles on the target itself, which has exactly the invariant's content. `superseded_readd_failure_keeps_last_good_lines/readd_only_removes_from_last_good` (added after T4, 110181d) covers it, with its own mutant.
+- **Task 4: `full_readd` and accepted/.** The plain rollback leaves accepted/ at the previous version (as `widening_positive_refused_rolls_back` asserts), so the subtest asserts the newest version after the next round, which holds `failure_backoff` and stores it, instead of right after the failure.
+- **Task 4: `settle_listener_failure_falls_back_to_plain_rollback`.** The fallback's way back to last-good re-adds role:a, a widening swap that waits LoginGraceTime + 30 s (150 s in the harness), longer than the first back-off of 60 s. The next apply therefore either holds `failure_backoff` or retries the addition through the gate and settles again. The subtest accepts either and asserts that role:a and role:c are absent and `failure_backoff` is held; "through the hold" holds only while the back-off runs.
+- **Task 4: Report values the plan leaves open.** A refused or inconclusive positive reports probe_negative `skipped:not_ready` (no negative is sent). A pair no longer usable at probe time reports `inconclusive` and `skipped:not_ready`. A required pair whose reservation is refused reports `inconclusive` and `skipped:budget` and settles, which is fail-safe; an opportunistic one reports `skipped:budget`. The failure record's count grows only while its key is unchanged; a new key starts at 1. On a pass, a probe-state.json write that fails is logged and the pass stands.
+- **Task 4: harness_test.go (in files_modified, not in Task 4's files).** `gateOn` installs `sshdProbe`. Without it every gate test that lands an addition ran the real ProbeQuery against the fake sshd and rolled back (Rule 3).
+- **Task 4: TestNegativeProbeBudgetAcrossProcesses** re-runs the test binary as each helper process. The helper takes apply.lock through the production `engine.lock` and reserves through `reserveProbe`; it does not run Apply. B is observed blocked: its marker file exists, it has not exited, and /proc reports state S in three polls in a row. B's lock time must come after A's `releasing` line. The lock mutant makes the flock shared.
 
 ## UNVERIFIED
 
 - Local e2e: not run (the namespace wrapper of 03-10 was not used); the e2e results are CI only.
 - `systemd-sandbox` with this branch's KRL activity (a first probe pair publishes a negative): no PR run yet.
-- Every Edge Coverage item of the plan; and everything of Tasks 4 and 5.
+- Every Edge Coverage item of the plan, and everything of Task 5.
+- Task 4: the local 10.5p1 spacing mutant (no local sshd); a crash between the final swap and the commit of a gated addition (the plan's crash bound); a persistent listener-test failure after the move to M (the plan's residual).
 - Task 3 at the e2e level: no e2e run carries Task 3 yet. Every e2e host runs with `--probe-self-test off`, so no gate runs there except TestProbeSelfTestEndToEnd's host; that test's widening steps need Task 4.
-- Task 3: a host that runs with probes on before Task 4 lands (none ships: this is one PR) would let a gate-passing addition go live without the probes. That is Task 4's code, and nothing between Task 3 and Task 4 is released.
 - Task 2 at the e2e level: no e2e run has carried Task 2 yet (the next e2e run is Task 4's); every e2e host now reports `probe_self_test_off` in last_apply.detail and probe_detail and shows a `probe:` alert, which no e2e assertion reads (checked by grep of test/e2e, test/distro and test/systemd).
 
 ## Resume point (for the continuation)
 
-Task 3 handover (the current resume point):
+Task 4 is done and pushed (T4 110181d, e2e green run 42452757354). Task 5 (the gates, the PR, the tracking update and the final SUMMARY) is next; the test-time base was re-measured in place at at=1794117956.
+
+Task 3 handover, kept for reference (Task 4 acted on it):
 - Next is Task 4 (the probes in forward: reserveProbe, runProbes, settleFailedAddition, opportunistic, the served certificates, TestProbeSites, TestNegativeProbeBudgetAcrossProcesses, TestForwardServedCerts, the e2e), then Task 5. Task 3 is done and pushed (T3 above).
 - **Pair selection.** Pick the pair with `e.probePair(rec, at, k, caKeys)` (probegate.go): Next when PairUsable accepts it, else Committed. Use it in runProbes too, so `failureKey(g, pair, line)` (with `line` from `checkProbeAccount`) matches what the gate compares. runProbes judges at `now + SelfTestTimeout`.
 - **forward state.** forward keeps `heldReason` (this pass's hold), `substituted` (the target is a hold's intermediate) and `reclassify` (set on every supersede).
