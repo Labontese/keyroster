@@ -213,7 +213,12 @@ func setSSHDCause(t *testing.T, h *agentHost, name string, on bool) {
 		login := currentUser(t)
 		switch name {
 		case "denyusers":
-			at := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(strings.ToLower(strings.TrimSpace(l)), "match ") })
+			// Before the first Match line, or before the begin line of a
+			// cause block that holds one, so that it never lands inside
+			// another cause's block (and goes when that one is removed).
+			at := slices.IndexFunc(lines, func(l string) bool {
+				return strings.HasPrefix(strings.ToLower(strings.TrimSpace(l)), "match ") || strings.HasPrefix(l, "# keyroster-e2e cause ")
+			})
 			if at < 0 {
 				at = len(lines)
 			}
