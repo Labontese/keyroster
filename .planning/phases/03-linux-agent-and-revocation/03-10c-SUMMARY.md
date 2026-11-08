@@ -262,6 +262,41 @@ T2: 0343fa8 (f8b71c3 the tests, 0c07596 the script and run.sh, 0343fa8 the host-
 3. **hostKeys skips host keys that x/crypto/ssh cannot parse** (archlinux's ML-DSA hybrid key; first green attempt above).
 4. **The FACT line carries `mechanism=` and `spacing=`** beside the frozen fields, and `control_dropped_after` counts the refused queries before the first answer that was not a refusal.
 
+## Task 3
+
+RED (local, through scripts/linux.sh, the tests written before the code, the runbook section and the audit change absent):
+- `TestProbeHoldReasonsDocumented` failed with 18 lines, the first `account_test.go:522: docs/runbooks/host-setup.md does not document probe_held:cert_missing`.
+- `TestProbeAccountRunbook` failed with `probeaccount_runbook_test.go:84: host-setup.md has no section ## The probe account`.
+- `TestAuditVerifyProbeLine/line_counts_probe_certificates_and_pending_negatives` failed with `audit_test.go:59: output ["OK: 0 entries, ... log key " "host certificates: 2"], want the probe certificates line after the host certificate line`, and `TestAuditVerifyProbeLine/json_has_pending_negative_probes` with `audit_test.go:77: --json {"ok":true,...,"kinds":{"probe_issue":7},...}, want pending_negative_probes 3`; `no_line_without_probe_entries` and `existing_output_unchanged` passed already, as they must.
+The smoke edit cannot run locally (it needs a systemd host as root); `go vet -tags "e2e systemdsmoke" ./test/e2e/` and its lint passed.
+
+Task 3 gates, local (through scripts/linux.sh): verify 1 (build, vet, the smoke's vet, the four tests with `-race -v`, every named PASS line, no FAIL, panic or DATA RACE; TestHostTrustRunbooks still passes with the new section inside its 'Ports to Manual recovery' span) exit 0; verify 2 (golangci-lint for linux, windows and darwin, the smoke's lint with `--new-from-rev=origin/main`: 0 issues each; gofmt clean; `bash -n` of agent-smoke.sh; shellcheck not installed, so not run) exit 0; verify 3 (the test-build tag in no document, workflow, command file or smoke script; no address outside 127.0.0.0/8 in the section) exit 0.
+
+systemd run: 42495385525 at a2492f8 (headSha checked against HEAD), conclusion success, the gate (Task 3 verify 4) exit 0: `--- PASS: TestAgentSystemdSmoke (505.63s)`, `--- PASS: TestAgentSystemdSmoke/revocation_lands (60.79s)` (`the revocation of serial 1794152491738350 landed in 1m0s`), `--- PASS: TestAgentSystemdSmoke/probe_pair_ready (0.00s)` (the pair was committed by then), `--- PASS: TestAgentSystemdSmoke/role_addition_passes_probes (55.07s)` (`the role addition landed with both probes passing in 55s`). The script's probe account step printed `keyroster-probe:x:997:983::/nonexistent:/usr/sbin/nologin` and `keyroster-probe: shadow field class star`.
+
+Smoke time: TestAgentSystemdSmoke 505.63 s against its base 339.37 s (run 42472525021), +166 s, inside the 4 to 6 minutes the plan expected and far below the 35m timeout.
+
+LoginGraceTime 10: applied, inferred from the timing only. The role addition landed 55 s after the directory change, fetch poll included, and LoginGraceTime 120 would have imposed a 150 s widening wait. The script's own `sshd -T` line printed `Missing privilege separation directory: /run/sshd` (the runner's ssh.service is socket-activated and had not run yet), so it shows no value. The unit journal, which would name the wait, is printed only on a failure.
+
+T-03-381: IPAddressAllow=localhost admitted 127.0.0.2 under the real unit (run 42495385525: probe_positive and probe_negative `pass` with an empty detail, the queries from the probe source 127.0.0.2 under keyroster-agent.service)
+
+Task 3 mutants (each applied to the committed code at a2492f8 by C:/Users/labon/kr-10c-logs/run_mutants.py, run alone on its named subtest with `-timeout 5m` through scripts/linux.sh, killed by the named `--- FAIL:` line, restored with `git checkout --` and proven by `git diff --quiet HEAD --`; the tag mutant joins the tag's two parts in the mutation script, so no literal was written to a committed file):
+mutant killed: a command line of the debian block edited in host-setup.md (TestProbeAccountRunbook/commands_match_ci: `probeaccount_runbook_test.go:104: the runbook's block probe-account debian: ...`)
+mutant killed: an arm of probe-account.sh edited, the arch arm's useradd line (TestProbeAccountRunbook/commands_match_ci: `probeaccount_runbook_test.go:104: the runbook's block probe-account arch: ...`)
+mutant killed: one hold reason removed from the runbook, probe_held:ca_mismatch (TestProbeHoldReasonsDocumented: `account_test.go:522: docs/runbooks/host-setup.md does not document probe_held:ca_mismatch`)
+mutant killed: the upgrade-order sentence removed (TestProbeAccountRunbook/upgrade_order: `probeaccount_runbook_test.go:133: the upgrade order lacks "the signer first, then the server, then the agents"`)
+mutant killed: the test-build tag name written into the section (TestProbeAccountRunbook/ci_labels: `probeaccount_runbook_test.go:156: the section names the test-build tag`)
+mutant killed: the audit line not printed (TestAuditVerifyProbeLine/line_counts_probe_certificates_and_pending_negatives: `audit_test.go:59: output ["OK: 0 entries, ..." "host certificates: 2"], want the probe certificates line after the host certificate line`)
+mutant killed: the JSON field not omitted when zero (TestAuditVerifyProbeLine/json_has_pending_negative_probes: `audit_test.go:79: --json {"ok":true,...,"pending_negative_probes":0}, want pending_negative_probes omitted when zero`)
+
+T3: a2492f8 (dcd48f9 the audit line, 64617a7 the runbook section and its gates, a2492f8 the smoke)
+
+### Deviations (Task 3)
+
+1. **revocation_lands revokes a fresh certificate**, not the login certificate of the earlier step: that one has a 10-minute lifetime and can expire during the earlier waits (up to about 10 minutes), which would make the refused login after the revocation prove nothing. The fresh one logs in first, is revoked through the signer, and must then appear in current/revoked.krl under the CA key that signed it and fail to log in.
+2. **The runbook section does not cite TestProbeAccountRunbook by name** ("a runbook gate keeps it equal"), since its own cited_tests_exist leaves its file out, as TestHostTrustRunbooks does.
+3. **every_reason_documented** requires each reason as a list item `` - `probe_held:<reason>` `` with a `Fix:` sentence; the item ends at the next item or at a blank line.
+
 ## Resume point
 
 - Branch p03/10c-probe-account, pushed. Task 1 is complete: T1 80b0180 (e2e evidence at e18bf1a), this SUMMARY committed after it (docs only). Tasks 2, 3 and 4 are not started.
