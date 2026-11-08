@@ -97,7 +97,7 @@ What landed:
 
 T4: 110181d (b209331 is the code and the tests, on which the plan's mutants ran; 6aef063 adds the missing `--yes` to the e2e `role update` of `unusable_account_holds_widening_krl_and_narrowing_land`, a Task 1 test defect the first green attempt found; 110181d adds `readd_only_removes_from_last_good`)
 
-e2e green attempt 1: run 42451895581 at b209331, failed in both probe lanes at `unusable_account_holds_widening_krl_and_narrowing_land` (0.03 s): `keyroster role update ops --principal role:ops2: exit 1`, `refusing to sign without confirmation: stdin is not a terminal` (the call lacked `--yes`). Before it, on 9.5p1 and 10.5p1, `pair_issued_and_enforced`, `widening_passes_probes` (71 s on 10.5p1) and `positive_refused_rolls_back` (80 s on 10.5p1, the settle path on real sshd) passed, and TestProbePairSpacing passed again.
+e2e green attempt 1: run 42451895581 at b209331, failed in both probe lanes at `unusable_account_holds_widening_krl_and_narrowing_land` (0.03 s): `keyroster role update ops --principal role:ops2: exit 1`, `refusing to sign without confirmation: stdin is not a terminal` (the call lacked `--yes`). Before it, on 9.5p1 and 10.5p1, `pair_issued_and_enforced`, `widening_passes_probes` (71 s on 10.5p1) and `positive_refused_rolls_back` (80 s on 10.5p1) passed. Correction (pre-merge review round 1, F3): that run did not take the settle path. The mixed map was published a few seconds after `widening_passes_probes` spent a pair, so the gate held it as `budget`, its narrowing landed as last-good, and the retry, a pure addition, took 03-05's plain rollback. Since 685e83f the test waits out the spacing and asserts the settle, and TestProbePairSpacing passed again.
 
 Task 4 gates, local (through scripts/linux.sh), at T4 (the pass-path state write made non-fatal before the commit, re-tested):
 - **Verify block 1**, run verbatim: build, `go vet ./...`, the tagged vets (`keyroster_e2e`, `e2e e2eprobe`), the named tests with `-race`, every named PASS line, no FAIL, panic or race: VERIFY1_OK.
@@ -273,13 +273,13 @@ mutant killed: the gated flag kept from the first pass after a supersede (TestPr
 mutant killed: the Report's probe fields not reset at the top of a candidate pass (TestProbeGate/held_pass_then_krl_alone_pass_reports_no_hold)
 mutant killed: the plain rollback whenever Intermediate(last-good, target) collapses, also when it collapses to the target (TestProbeGate/superseded_readd_failure_keeps_last_good_lines, run at 110181d)
 
-Not run: the local 10.5p1 mutant (ProbePairSpacing at 2 s, TestProbePairSpacing). This machine's WSL has no sshd, and no local 10.5p1 build or namespace wrapper was set up (UNVERIFIED, not counted). The e2e killer `positive_refused_rolls_back` of the plain-rollback mutant ran only in CI on the unmutated tree.
+The local 10.5p1 spacing mutant (ProbePairSpacing at 2 s) and the plain-rollback mutant on real sshd ran in pre-merge review round 1, on the local OpenSSH builds in WSL (the earlier note here, that this machine had no local 10.5p1 build, was wrong): both killed, recorded under 'Pre-merge review round 1'.
 
 Running count after Task 4: 104 killed, 1 equivalent, 0 survived (floors 92 killed, 97 with equivalents).
 
 ## Deviations
 
-- **Stopped after Task 1 (the plan's context rule).** Budget and verify says that if Task 1 nears half the context, the executor stops after its gates and reports instead of trimming. It did: Tasks 2 to 5 (reporting, the gate and the hold, the probes in forward, the PR) are not started. No PR is open.
+- **History: stopped after Task 1 (the plan's context rule).** Superseded: Tasks 2 to 5 ran later and PR #91 is open. Budget and verify says that if Task 1 nears half the context, the executor stops after its gates and reports instead of trimming. It did: at that stop Tasks 2 to 5 (reporting, the gate and the hold, the probes in forward, the PR) were not started, and no PR was open.
 - **Accepted as defaults by the orchestrator (the owner may still veto):** the G21 conditional cap and the e2e `private_key_never_on_disk` exception for the fetcher's own `identity.key`/`identity.next`, both below.
 - **G21 cap, conditional.** checkLimits grants the one extra principals file only when the generation holds the probe account's own file (`checkLimitsFixed(g, fixed)`, fixed `""` while the probes are off); readGeneration reads back up to MaxAccounts + 1. The plan's unconditional form would have let `rechain_test.go`'s `intermediate_union_too_large_krl_applied` intermediate (MaxAccounts + 1 files, probes off) through, and `renderable_test.go` calls `checkLimits(g)`; both files are outside files_modified, so `checkLimits(g)` keeps its signature as `checkLimitsFixed(g, "")`.
 - **Decide's switch.** Next replaces Committed when Next is a complete pair PairUsable accepts and Committed is not usable, absent or at its renewal time. Step 2's parenthetical names only "not usable or absent"; the must_haves truth (kept until a newer pair's negative is listed) and the separate subtests `switch_when_next_negative_listed` and `committed_missing_and_next_usable_switches` read as including the renewal case. Next is only collected at renewal or when no pair is usable, so the two readings differ only for a renewal-due pair.
@@ -295,7 +295,7 @@ Running count after Task 4: 104 killed, 1 equivalent, 0 survived (floors 92 kill
 - **Task 2: heartbeat.go was drafted before its tests**; the RED run moved it aside (reverted to HEAD) and restored it after.
 - **Task 2: the probes-off Report values are set at Apply's start**, so refusal paths carry them too.
 - **Engine seam helper.** `engine.probeQueryFunc` (Config's seam or ProbeQuery) and its test land in Task 1, so the field is used; Task 4's probes call it.
-- **Stopped after Task 3 (the plan's context rule, Budget and verify).** Task 3 is complete and pushed; Tasks 4 and 5 are not started. No PR is open.
+- **History: stopped after Task 3 (the plan's context rule, Budget and verify).** Superseded: Tasks 4 and 5 ran later and PR #91 is open. At the stop, Task 3 was complete and pushed, Tasks 4 and 5 were not started, and no PR was open.
 - **Task 3: two Task 1 subtests edited (probe_test.go, in files_modified but not in Task 3's `<files>`).** With the gate in place, `TestProbeStep/host_holds_write_nothing_or_hold` and `TestRenderProbeFile/not_in_trust_only` applied a mixed change with probes on and no pair, so the gate held it. Each now accepts ErrProbeHeld at that one step, with a comment; neither tests the gate, and their own assertions are unchanged (Rule 3).
 - **Task 3: the held record's versions** are the verified candidate's (`v.Next` bundle, directory, KRL). `issue_refused` releases a sticky refusal against accepted/'s bundle, policy and directory versions, as the issuance step reads them.
 - **Task 3: `heldOutcome` joins** an earlier outcome error (v.Refused and the like) with the held error instead of dropping it, so `refusals` and `heldNoise` still see ErrProbeHeld.
@@ -318,11 +318,107 @@ Running count after Task 4: 104 killed, 1 equivalent, 0 survived (floors 92 kill
 
 ## UNVERIFIED
 
-- Local e2e: not run (the namespace wrapper of 03-10 was not used); the e2e results are CI only.
+- Local e2e: not run in Tasks 1 to 5 (the namespace wrapper of 03-10 was not used). In pre-merge review round 1 the probe tests ran locally on 10.5p1 only; 9.5p1 and the main lanes are CI only.
 - Every Edge Coverage item of the plan, and everything of Task 5.
-- Task 4: the local 10.5p1 spacing mutant (no local sshd); a crash between the final swap and the commit of a gated addition (the plan's crash bound); a persistent listener-test failure after the move to M (the plan's residual).
-- Task 3 at the e2e level: no e2e run carries Task 3 yet. Every e2e host runs with `--probe-self-test off`, so no gate runs there except TestProbeSelfTestEndToEnd's host; that test's widening steps need Task 4.
-- Task 2 at the e2e level: no e2e run has carried Task 2 yet (the next e2e run is Task 4's); every e2e host now reports `probe_self_test_off` in last_apply.detail and probe_detail and shows a `probe:` alert, which no e2e assertion reads (checked by grep of test/e2e, test/distro and test/systemd).
+- Task 4: a crash between the final swap and the commit of a gated addition (the plan's crash bound); a persistent listener-test failure after the move to M (the plan's residual).
+- D-R1 (pre-merge review round 1, the third residual): a transient non-crash local error in the settle or supersede-hold path rolls back to last-good under 03-05's rule; the removal is re-granted for about one round. No test exercises it, and no code changes for it in this plan. The todo for 03-10c is `.planning/todos/pending/2026-11-08-no-rollback-regrants-a-landed-removal.md`.
+- Task 3 at the e2e level: run 42452757354 and every later run carry it, but only on TestProbeSelfTestEndToEnd's one host. Every other e2e, distro and systemd host runs with `--probe-self-test off`. That host proves the account hold (`shell_not_nologin`) with its KRL and narrowing part landing, the held addition landing once the account is fixed, and (since round 1) the `budget` hold in the RED run of F3. The other hold reasons, the supersede holds and the account and passwd edge cases are unit-tested only.
+- Task 2 at the e2e level: run 42452757354 and every later run carry it. TestProbeSelfTestEndToEnd reads last_apply.detail (`probe_held:shell_not_nologin`, `probe_positive_refused`) and the `probe:` alert of `keyroster host status`. Still unverified: every other e2e host reports `probe_self_test_off` in last_apply.detail and probe_detail and shows a `probe:` alert, and no e2e assertion reads that (checked again by grep of test/ in round 1).
+
+## Pre-merge review round 1
+
+The review of head 932d5de found seven items (F1 to F7) and one owner decision (D-R1). Each fix is one commit, with its tests. The fix commit is RED's reference: a mutant that restores 932d5de's behaviour shows RED, then the fix shows GREEN. New tests of F1 and F5 call changed signatures, so they do not compile against 932d5de, and their RED is behavioural: a mutant restores the old behaviour.
+
+The unit mutants ran through the same kind of runner as before. Each one:
+- applied a `perl -0pi` substitution that must change the file;
+- ran alone on its named subtest (`-run '^T$/^sub$'`, without `-race`), and counted only that subtest's own `--- FAIL:` line;
+- restored the file from a byte copy taken before the substitution, proven with `cmp`. The fix was not committed yet, so `git checkout --` would have dropped it.
+
+The local e2e runs (F3's GREEN and RED, the e2e mutants and F7's spacing mutant) ran in a detached worktree outside the repository, removed afterwards. They used the local OpenSSH 10.5p1 build that scripts/build-openssh.sh made in WSL, with `KEYROSTER_OPENSSH_PREFIX=$HOME/.cache/keyroster/openssh-10.5p1 go test -tags "e2e e2eprobe" -run '<regex>' -count=1 -timeout 12m -v ./test/e2e/...`, inside a namespace wrapper:
+- `unshare -rm` bind-mounts a copy of /etc/hosts with keyroster.localhost on loopback;
+- `unshare -U` then maps back to the caller's uid and gid, so the probe account is still not root.
+
+Without the wrapper, `keyroster init` fails with `lookup keyroster.localhost ... no such host`.
+
+**F1 (bind the probe pair to the host's current name).** 103b01e, with 4f6a9f2, which drops the then-unused `signProbe` wrapper that golangci-lint flagged.
+- PairUsable and memberUsable take the host name. `forHost` requires the member's one principal to be keyroster-probe:<host> and its kr3 subject to be probe.<host>. A member that fails is `cert_missing`, checked in the first clause, before the KRL rules.
+- Decide judges by `in.Entry.Name`. After a rename, a half Next for the old name is dropped and both polarities are requested at once.
+- probePair takes the host. probeGate, runProbes and the opportunistic run pass `g.Host`; the served-certificate path passes `target.Host`.
+- New tests: TestPairUsable `principal_other_host`, `subject_other_host` and `mixed_name_pair`; TestDecide `half_next_from_before_rename_dropped`, `complete_next_of_two_names_dropped` and `committed_pair_after_rename_requests_both`; TestProbeGate `renamed_committed_pair_holds_cert_missing`.
+- RED: with `forHost` returning true, each of the seven fails. Examples: `old_negative: "", want cert_missing`; `Requests:[{Polarity:positive Why:half}] ... want the old negative dropped`; and the gate `want held cert_missing: err probe_positive_refused`, which is defect B, the addition going live and its positive refused. GREEN: all pass, and `go test -race` of internal/agent/probe and the probe tests of apply pass.
+
+**F2 (a KRL that sshd does not enforce stays visible).** 911252d.
+- probeResult also sets the alarm when a gated addition fails with `probe_krl_not_enforced`.
+- probe-state.json's format and the priority list are unchanged.
+- New test: TestProbeGate `krl_not_enforced_stays_visible`, with the subtests `mixed` and `pure_addition`. Each asserts the hold `failure_backoff` and probe_detail `probe_krl_not_enforced`.
+- RED: with the alarm dropped, both fail with probe_detail `probe_held:failure_backoff`. GREEN: both pass.
+
+**F3 (the e2e reaches the gated mixed settle).** 685e83f.
+- `positive_refused_rolls_back` waits until probe-state.json's `last_pair` is ProbePairSpacing old before the mixed map.
+- It then asserts that no apply between the map and the settle was held. The check samples status.json every 200 ms and reads the run log from the map on.
+- It also asserts that last-good afterwards is a new generation without role:dev or role:qa.
+- RED, on real sshd (local 10.5p1, the wait removed): `--- FAIL: TestProbeSelfTestEndToEnd/positive_refused_rolls_back (71.28s)` with `an apply between the map and the settle was held (probe_held:budget)`. This is the path the review described.
+- GREEN, locally: the full probe lane passes on 10.5p1. It takes 282 s, with TestProbeSelfTestEndToEnd at 278.6 s and `positive_refused_rolls_back` at 105.6 s.
+- The plain-rollback mutant on real sshd (`true ||` on settleFailedAddition's `collapsed && isNarrowing(target, lgGen)`) is killed: `--- FAIL: TestProbeSelfTestEndToEnd/positive_refused_rolls_back (128.02s)` with `current/principals/krmanaged after the failed mixed change:` (role:dev granted again).
+- CI times are below.
+
+**F4 (save a verified answer before removing its request).** 3807aa5.
+- readProbeAnswer now calls consumeProbeAnswer on all three consuming paths: refused, verify-failed and kept. consumeProbeAnswer saves probe.json, passes a fault point `probe-answer-save`, then removes the outbox request.
+- New test: TestProbeStep `answer_saved_before_outbox_removed`. It crashes at that point, then runs again, and requires a complete Next and an empty outbox.
+- RED, with the fix reverted (the remove first, then the fault point, the save later): `next {Positive:<nil> ...}, 1 outbox requests`. The verified positive is lost and requested again. GREEN: it passes.
+
+**F5 (report a held apply that wrote something new).** 708a096.
+- heldNoise is keyed on the held message plus the report's bundle, directory and KRL versions and its generation.
+- A held retry commits nothing and reports generation 0, which counts as no new generation (deviation below).
+- New tests: TestRunHeldTrigger `held_apply_that_writes_something_prints` (a held apply that lands KRL 77 prints and logs; the identical retry after it is quiet), and a report table in TestRunHeldNoise.
+- RED, keyed on the message only: `held applies printed 1 times and logged 1 times, want 2 and 2`. GREEN: TestRunHeldTrigger and TestRunHeldNoise pass `-race -count=3`.
+
+**F6 (repair an edited drop-in on a held retry).** 24fb8d9.
+- The held retry on an unchanged capture calls `repairNoOp(ctx, v, g)`, which writes nothing when the drop-in is right.
+- New test: TestProbeGate `held_retry_repairs_edited_dropin`. The RevokedKeys line is removed, and the retry restores the drop-in, keeps no dropin.prev and is no no-op.
+- `held_retry_writes_nothing` and `held_survives_restart` still pass.
+- RED, without the call: `the held retry left the drop-in edited`. GREEN: it passes.
+
+**F7 (SUMMARY corrections).**
+- The 10.5p1 spacing mutant ran locally (ProbePairSpacing = 2 s): `--- FAIL: TestProbePairSpacing/pairs_at_production_spacing_never_dropped (0.00s)` with `pairs=3 spacing=2s dropped=2 penalty_lines=5`. The false "no local 10.5p1 build" statement and its UNVERIFIED entry are removed.
+- The two "Stopped after Task N" bullets are marked as history.
+- The Task 2 and Task 3 UNVERIFIED items now say what stays unverified after run 42452757354.
+- The "settle path on real sshd" claim of e2e attempt 1 is corrected: before 685e83f, that step took the plain rollback.
+
+**D-R1 (owner decision 2026-11-08: documentation and a todo, no code).** 8fb75ae.
+- The third UNVERIFIED residual is recorded in the plan's settle bullet (D13), its T-03-374 threat row and its Edge Coverage, and in UNVERIFIED below: a transient non-crash local error in the settle or supersede-hold path rolls back to last-good under 03-05's rule; the removal is re-granted for about one round.
+- The todo for 03-10c is `.planning/todos/pending/2026-11-08-no-rollback-regrants-a-landed-removal.md`. Once a removal has landed, no rollback path widens back to last-good. The todo is added to the plan's files_modified, so the files gate allows it.
+
+mutant killed: forHost without the principal check (TestPairUsable/principal_other_host)
+mutant killed: forHost without the key ID subject check (TestPairUsable/subject_other_host)
+mutant killed: PairUsable without the name check (TestPairUsable/mixed_name_pair, and again TestDecide/complete_next_of_two_names_dropped, TestDecide/committed_pair_after_rename_requests_both and TestProbeGate/renamed_committed_pair_holds_cert_missing)
+mutant killed: PairUsable checking the positive's name only (TestPairUsable/mixed_name_pair)
+mutant killed: memberUsable without the name check (TestDecide/half_next_from_before_rename_dropped)
+mutant killed: the KRL alarm of a gated addition dropped (TestProbeGate/krl_not_enforced_stays_visible/mixed, and again TestProbeGate/krl_not_enforced_stays_visible/pure_addition)
+mutant killed: the outbox request removed before probe.json is saved (TestProbeStep/answer_saved_before_outbox_removed)
+mutant killed: heldNoise keyed on the held message only (TestRunHeldTrigger/held_apply_that_writes_something_prints)
+mutant killed: a held retry's generation 0 compared as a new generation (TestRunHeldTrigger/identical_holds_print_and_log_once)
+mutant killed: the held retry without repairNoOp (TestProbeGate/held_retry_repairs_edited_dropin)
+mutant killed: the plain rollback for every failed gated addition, on real sshd, local 10.5p1 (TestProbeSelfTestEndToEnd/positive_refused_rolls_back)
+mutant killed: ProbePairSpacing at 2 s, on real sshd, local 10.5p1 (TestProbePairSpacing/pairs_at_production_spacing_never_dropped)
+
+Running count after pre-merge review round 1: 116 killed, 1 equivalent, 0 survived.
+
+Deviation (F5): the held message plus the four report fields, compared literally, would have made the first retry after a held commit print once more. The committed apply reports its generation; the retry reports 0. TestRunHeldTrigger's `identical_holds_print_and_log_once` would then have failed (2 prints, want 1). A report generation of 0 therefore keeps the remembered generation. The three versions are compared as they are. "Quiet only when nothing new was written" holds: a retry writes nothing, and any commit names its generation.
+
+Gates at the new head, local (through scripts/linux.sh):
+- `gofmt -l .` is empty.
+- `go vet ./...` passes, and so do the tagged vets (`keyroster_e2e` over the agent packages; `e2e`, `e2e e2eprobe` and `e2e systemdsmoke` over test/e2e).
+- golangci-lint is clean for linux, windows and darwin, and the e2e lint with `--build-tags "e2e e2eprobe" --new-from-rev=origin/main` reports 0 issues.
+- `go test -race -count=1 ./internal/agent/apply/ ./internal/agent/probe/` passes: apply 466.3 s (two packages, pass or fail only).
+- The plan's six-package delta gate, run verbatim and alone (base at=1794117956), exits 0: apply 441.288 (+62.2), fetch 32.494 (+0.6), heartbeat 1.059 (+0.0), serverclient 4.283 (+0.1), agentcmd 1.879 (-0.1), cmd 230.505 (+7.6). It was run because the two-package reading above was 45.6 s over reading 2's 420.7. The new subtests add about 2 s serially.
+
+CI at 4f6a9f2 (the code head of this round). The e2e times are each package's `ok` line:
+- E2E run 42465582660, all four lanes successful:
+  - probe lanes: 9.5p1 310.511 s and 10.5p1 300.235 s, under the 420 s cap. `positive_refused_rolls_back` takes 104.8 to 105.2 s and TestProbeSelfTestEndToEnd 276.8 to 281.5 s.
+  - main lanes: 9.5p1 752.572 s and 10.5p1 774.891 s, both with no `=== RUN   TestProbe` line.
+- The spacing facts repeat Task 1's: 10.5p1 `pairs=3 spacing=60s dropped=none penalty_lines=6 listener_answered=3/3 control_dropped_after=3 pairs`; 9.5p1 `dropped=none penalty_lines=0 ... control_dropped_after=not exercised`.
+- Three jobs first failed on GitHub download errors (HTTP 504), not on the code: lint (golangci-lint-action), build-piv (its lint step) and CodeQL `Analyze (actions)` (the CodeQL bundle). They were re-run with `run rerun --failed`. On re-run, build-piv (run 42465582903) and `Analyze (actions)` (run 42465582684) passed. lint (run 42465582633) failed three times in a row on the same 504 while downloading golangci-lint, and reported no lint finding. golangci-lint v2.14.0 passes locally for linux, windows and darwin. The other 25 required checks of 4f6a9f2 passed on their first run, systemd-sandbox included (run 42465582647). The docs head after this SUMMARY runs every check again.
 
 ## Resume point (for the continuation)
 
