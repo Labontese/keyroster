@@ -549,7 +549,7 @@ func TestProbeSelfTestEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		users := roleCAKeys(t, env.Signer, trust.RoleUser)
-		kr("role", "update", "ops", "--principal", "role:ops2")
+		kr("role", "update", "ops", "--principal", "role:ops2", "--yes")
 		waitUntil(t, "the KRL and the narrowing part land, the addition is held", 240*time.Second, logs, func() bool {
 			k := currentKRL(h)
 			if k == nil || !slices.ContainsFunc(users, func(ca []byte) bool { return k.RevokesSerial(ca, serial) }) {
