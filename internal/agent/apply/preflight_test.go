@@ -652,6 +652,28 @@ func TestPreflightProbeAccount(t *testing.T) {
 			t.Fatal("the host is installed")
 		}
 	})
+	// 03-10c: on an installed host the check compares the trust settings,
+	// so a Match block that overrides one of them, or sets a principals
+	// command, for the probe account is one sshd_override finding, report
+	// only.
+	t.Run("installed_host_compares_trust", func(t *testing.T) {
+		t.Parallel()
+		for _, m := range []map[string]string{
+			{"authorizedprincipalsfile": "/etc/ssh/other/%u"},
+			{principalsCommand: "/usr/local/bin/principals %u"},
+		} {
+			h := gateHost(t, "role:a")
+			if !h.exists(h.l.LastGood()) || !h.exists(h.l.DropIn()) {
+				t.Fatal("the host is not installed")
+			}
+			h.run.match = map[string]map[string]string{probeAcct: m}
+			r, err := h.preflight()
+			if err != nil {
+				t.Fatalf("preflight: %v", err)
+			}
+			mustOne(t, r, sshdOverride)
+		}
+	})
 	t.Run("account_is_managed_finding_with_state", func(t *testing.T) {
 		t.Parallel()
 		h := mapped(t)
