@@ -92,6 +92,18 @@ install -d -m 0755 /run/sshd
 /usr/sbin/sshd -T | grep -iE '^(logingracetime|listenaddress|loglevel) ' || true
 listen=$(/usr/sbin/sshd -T | grep -i '^listenaddress ') || true
 [ "$listen" = 'listenaddress 127.0.0.1:22' ] || fail "sshd -T reports listen addresses ($listen), want 127.0.0.1:22 only"
+# Under socket activation the socket may follow ListenAddress only after
+# a daemon-reload and a restart of the socket (a generator can derive its
+# addresses from sshd's configuration), so the address is bound here,
+# before the agent's own daemon-reload.
+systemctl daemon-reload
+if systemctl is-active --quiet ssh.socket; then
+	systemctl restart ssh.socket
+else
+	systemctl restart ssh.service
+fi
+ss -ltn 'sport = :22' || true
+timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22' || fail "nothing accepts on 127.0.0.1:22 after the restart"
 
 step "Build (CGO_ENABLED=0) as ${SUDO_USER:-root}"
 bin=$work/bin
