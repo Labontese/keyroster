@@ -729,6 +729,7 @@ func TestForwardServedCerts(t *testing.T) {
 		return h
 	}
 	t.Run("pass", func(t *testing.T) {
+		t.Parallel()
 		h := served(t, false)
 		h.publishDir(spec(h, "role:ops"))
 		if r := h.mustApply(); r.ServedCerts != probePass || r.Detail != "" {
@@ -736,6 +737,7 @@ func TestForwardServedCerts(t *testing.T) {
 		}
 	})
 	t.Run("fail_narrowing_keeps_removal_and_commits", func(t *testing.T) {
+		t.Parallel()
 		h := served(t, true)
 		h.publishDir(spec(h, "role:ops"))
 		r := h.mustApply()
@@ -747,6 +749,7 @@ func TestForwardServedCerts(t *testing.T) {
 		}
 	})
 	t.Run("fail_widening_rolls_back_addition_only", func(t *testing.T) {
+		t.Parallel()
 		h := served(t, true)
 		h.publishDir(spec(h, "role:ops", "role:x", "role:y"))
 		r, err := h.apply()
@@ -761,6 +764,7 @@ func TestForwardServedCerts(t *testing.T) {
 		}
 	})
 	t.Run("fail_mixed_widening_keeps_removal", func(t *testing.T) {
+		t.Parallel()
 		h := served(t, true)
 		h.publishDir(spec(h, "role:ops", "role:y"))
 		r, err := h.apply()
@@ -772,6 +776,7 @@ func TestForwardServedCerts(t *testing.T) {
 		}
 	})
 	t.Run("drop_in_unchanged_skips", func(t *testing.T) {
+		t.Parallel()
 		h := newHostCertHost(t)
 		h.one()
 		h.publishDir(spec(h, "role:ops", "role:x"))
@@ -783,6 +788,7 @@ func TestForwardServedCerts(t *testing.T) {
 		}
 	})
 	t.Run("no_certificates_skips", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		if err := os.Remove(h.l.DropIn()); err != nil {
 			t.Fatal(err)
@@ -811,11 +817,13 @@ func TestProbeSites(t *testing.T) {
 		}
 	}
 	t.Run("firstInstall", func(t *testing.T) {
+		t.Parallel()
 		h := newTestHost(t, newFixture(t))
 		h.gateOn()
 		none(t, h, "firstInstall", func() { h.installed("role:a") })
 	})
 	t.Run("undoFirstInstall", func(t *testing.T) {
+		t.Parallel()
 		h := newTestHost(t, newFixture(t))
 		h.gateOn()
 		h.sshd.setStall(true)
@@ -827,6 +835,7 @@ func TestProbeSites(t *testing.T) {
 		})
 	})
 	t.Run("backToLastGood", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.ready()
 		h.sshd.setStall(true)
@@ -838,6 +847,7 @@ func TestProbeSites(t *testing.T) {
 		})
 	})
 	t.Run("recoverToLastGood", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.ready()
 		h.cfg.Fault = func(p string) error {
@@ -858,6 +868,7 @@ func TestProbeSites(t *testing.T) {
 		})
 	})
 	t.Run("repairDropIn", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		if err := os.WriteFile(h.l.DropIn(), []byte("# not the wanted drop-in\n"), 0o644); err != nil { //nolint:gosec // test fixture
@@ -870,6 +881,7 @@ func TestProbeSites(t *testing.T) {
 		})
 	})
 	t.Run("activatePreRepair", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		h.run.rejectDropIn = func(b []byte) bool { return bytes.Contains(b, []byte("UNBALANCED")) }
@@ -886,11 +898,13 @@ func TestProbeSites(t *testing.T) {
 		})
 	})
 	t.Run("activateCandidate", func(t *testing.T) {
+		t.Parallel()
 		h := newHostCertHost(t)
 		h.gateOn()
 		none(t, h.testHost, "activateCandidate", func() { h.one() })
 	})
 	t.Run("forward", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		q := len(h.probeQueries())

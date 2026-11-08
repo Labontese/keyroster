@@ -569,6 +569,7 @@ func (h *testHost) diskState() string {
 // writes nothing.
 func TestProbeGate(t *testing.T) {
 	t.Run("narrowing_lands_without_probes", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.publishDir(h.spec("role:a"))
 		r := h.mustApply()
@@ -578,6 +579,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("krl_only_lands_while_account_missing", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
 		h.publishKRL(77)
@@ -590,6 +592,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("widening_held_narrow_part_lands", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.publishDir(h.spec("role:a", "role:c"))
 		h.publishKRL(5)
@@ -601,6 +604,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("pure_addition_held_changes_nothing_on_disk", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		cur := h.current()
 		h.publishDir(h.spec("role:a", "role:b"))
@@ -612,6 +616,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("held_retry_writes_nothing", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.publishDir(h.spec("role:a", "role:c"))
 		r, err := h.apply()
@@ -633,6 +638,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("held_retried_when_ready", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		p := probecert.Pair{Positive: h.probeCert(10*time.Minute, h.f.mach), Negative: h.probeCert(10*time.Minute, h.f.mach)}
 		h.listMach(p.Negative.Serial)
@@ -648,6 +654,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("held_survives_restart", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.publishDir(h.spec("role:a", "role:b"))
 		r, err := h.apply()
@@ -663,6 +670,7 @@ func TestProbeGate(t *testing.T) {
 		mustPrincipals(t, h, "role:a", "role:b")
 	})
 	t.Run("held_record_written_before_commit", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.publishDir(h.spec("role:a", "role:c"))
 		h.cfg.Fault = func(p string) error {
@@ -686,6 +694,7 @@ func TestProbeGate(t *testing.T) {
 		mustPrincipals(t, h, "role:a", "role:c")
 	})
 	t.Run("held_clears_when_widening_lands", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.publishDir(h.spec("role:a", "role:b"))
 		r, err := h.apply()
@@ -697,6 +706,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("held_clears_when_widening_reverted", func(t *testing.T) {
+		t.Parallel()
 		for _, mixed := range []bool{false, true} {
 			h := gateHost(t, "role:a", "role:b")
 			add := h.spec("role:a", "role:b", "role:c")
@@ -724,6 +734,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("probe_file_only_after_a_hold", func(t *testing.T) {
+		t.Parallel()
 		h := newTestHost(t, newFixture(t))
 		h.installed("role:a", "role:b") // probes off: current has no probe file
 		h.gateOn()
@@ -743,6 +754,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("probe_file_only_widening_exempt", func(t *testing.T) {
+		t.Parallel()
 		h := newTestHost(t, newFixture(t))
 		h.installed("role:a")
 		h.gateOn()
@@ -756,6 +768,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("first_install_exempt", func(t *testing.T) {
+		t.Parallel()
 		h := newTestHost(t, newFixture(t))
 		h.gateOn()
 		r := h.installed("role:a")
@@ -780,6 +793,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	}
 	t.Run("trust_only_disabled_exempt", func(t *testing.T) {
+		t.Parallel()
 		trustOnly(t, func(h *testHost) dirSpec {
 			s := h.spec("role:ops", "role:new")
 			s.status = directory.StatusDisabled
@@ -787,6 +801,7 @@ func TestProbeGate(t *testing.T) {
 		})
 	})
 	t.Run("trust_only_removed_exempt", func(t *testing.T) {
+		t.Parallel()
 		trustOnly(t, func(h *testHost) dirSpec {
 			s := h.spec("role:ops", "role:new")
 			s.noHost = true
@@ -794,6 +809,7 @@ func TestProbeGate(t *testing.T) {
 		})
 	})
 	t.Run("trust_only_unauthorized_exempt", func(t *testing.T) {
+		t.Parallel()
 		f := newFixture(t)
 		h := newTestHost(t, f)
 		h.installed("role:ops") // probes off for the set-up
@@ -812,6 +828,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("account_reasons_hold", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		h.writeRootFile("bin/sh", []byte("#!/bin/false\n"), 0o755)
@@ -844,6 +861,7 @@ func TestProbeGate(t *testing.T) {
 		return h
 	}
 	t.Run("mapped_account_holds_account_is_managed", func(t *testing.T) {
+		t.Parallel()
 		h := mapped(t, "deploy", certpkg.ReservedAccountName)
 		r, err := h.apply()
 		mustHeld(t, h, r, err, "account_is_managed")
@@ -852,6 +870,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("mapped_probe_account_addition_held", func(t *testing.T) {
+		t.Parallel()
 		h := mapped(t, certpkg.ReservedAccountName)
 		r, err := h.apply()
 		mustHeld(t, h, r, err, "account_is_managed")
@@ -869,6 +888,7 @@ func TestProbeGate(t *testing.T) {
 		mustPrincipals(t, h, "role:a")
 	}
 	t.Run("pair_ca_mismatch_holds", func(t *testing.T) {
+		t.Parallel()
 		pairHold(t, probecert.CAMismatch, func(h *testHost) {
 			p := h.storePair(probecert.Pair{Positive: h.probeCert(10*time.Minute, seedKey(t, 41)), Negative: h.probeCert(10*time.Minute, h.f.mach)}, false)
 			h.listMach(p.Negative.Serial)
@@ -876,6 +896,7 @@ func TestProbeGate(t *testing.T) {
 		})
 	})
 	t.Run("positive_in_krl_holds", func(t *testing.T) {
+		t.Parallel()
 		pairHold(t, probecert.PositiveInKRL, func(h *testHost) {
 			p := h.seedPair(10*time.Minute, false)
 			h.listMach(p.Positive.Serial, p.Negative.Serial)
@@ -883,9 +904,11 @@ func TestProbeGate(t *testing.T) {
 		})
 	})
 	t.Run("negative_not_in_krl_holds", func(t *testing.T) {
+		t.Parallel()
 		pairHold(t, probecert.NegativeNotInKRL, func(h *testHost) { h.seedPair(10*time.Minute, false) })
 	})
 	t.Run("issue_refused_names_sticky_refusal", func(t *testing.T) {
+		t.Parallel()
 		pairHold(t, "issue_refused", func(h *testHost) {
 			e := lockedEngine(h)
 			rec := e.readProbeRecord()
@@ -896,6 +919,7 @@ func TestProbeGate(t *testing.T) {
 		})
 	})
 	t.Run("issue_unanswered_names_pending_request", func(t *testing.T) {
+		t.Parallel()
 		pairHold(t, "issue_unanswered", func(h *testHost) {
 			e := lockedEngine(h)
 			rec := e.readProbeRecord()
@@ -906,6 +930,7 @@ func TestProbeGate(t *testing.T) {
 		})
 	})
 	t.Run("pair_validity_needs_wait_margin", func(t *testing.T) {
+		t.Parallel()
 		// Valid now, but not past LoginGraceTime + 30 s and two self-test
 		// timeouts plus the missing margin.
 		pairHold(t, probecert.CertMissing, func(h *testHost) {
@@ -940,12 +965,14 @@ func TestProbeGate(t *testing.T) {
 		mustPrincipals(t, h, "role:a", "role:b")
 	}
 	t.Run("budget_lookahead_spacing", func(t *testing.T) {
+		t.Parallel()
 		// The probes run 40 s from now: a pair 21 s ago is 61 s old then,
 		// one 19 s ago 59 s.
 		budget(t, false, func(st *probeState, now uint64) { st.LastPair = now - 21 })
 		budget(t, true, func(st *probeState, now uint64) { st.LastPair = now - 19 })
 	})
 	t.Run("over_budget_widening_held", func(t *testing.T) {
+		t.Parallel()
 		budget(t, true, func(st *probeState, now uint64) {
 			for i := range ProbeNegativesPerHour {
 				st.Negatives = append(st.Negatives, now-3000+uint64(i)) //nolint:gosec // G115: a small index
@@ -959,6 +986,7 @@ func TestProbeGate(t *testing.T) {
 		})
 	})
 	t.Run("failure_backoff_blocks_until_input_changes", func(t *testing.T) {
+		t.Parallel()
 		for _, change := range []string{"passwd", "pair", "candidate"} {
 			h := gateHost(t, "role:a")
 			p := h.ready()
@@ -989,6 +1017,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("off_never_gates", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.cfg.probeOff = true
 		h.publishDir(h.spec("role:a", "role:b"))
@@ -999,6 +1028,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("dry_run_never_gates", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.publishDir(h.spec("role:a", "role:b"))
 		h.cfg.DryRun = true
@@ -1008,6 +1038,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("krl_alone_pass_is_classified", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.publishDir(h.spec("role:a", "role:c"))
 		r, err := h.apply()
@@ -1026,6 +1057,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("superseded_target_reclassified", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready() // a swap just now: the widening waits
 		h.writeRootFile("bin/sh", []byte("#!/bin/false\n"), 0o755)
@@ -1051,6 +1083,7 @@ func TestProbeGate(t *testing.T) {
 		}
 	})
 	t.Run("held_pass_then_krl_alone_pass_reports_no_hold", func(t *testing.T) {
+		t.Parallel()
 		// The held candidate's intermediate is refused (a CA line), so the
 		// KRL-alone pass commits without a hold: its report carries no
 		// probe_held from the first pass.
@@ -1162,6 +1195,7 @@ func mixedFail(t *testing.T, code error, outs ...ProbeOutcome) (*testHost, *Repo
 // (03-10b, Task 4: T-03-66, T-03-67, T-03-374).
 func probeGateRuns(t *testing.T) {
 	t.Run("widening_passes_both_probes", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.publishDir(h.spec("role:a", "role:b"))
 		r, err := h.apply()
@@ -1179,6 +1213,7 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("widening_positive_refused_rolls_back", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		cur := h.current()
@@ -1198,15 +1233,19 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("mixed_positive_refused_keeps_removal", func(t *testing.T) {
+		t.Parallel()
 		mixedFail(t, ErrProbePositiveRefused, ProbeRefused)
 	})
 	t.Run("mixed_negative_accepted_keeps_removal", func(t *testing.T) {
+		t.Parallel()
 		mixedFail(t, ErrProbeKRLNotEnforced, ProbeAccepted, ProbeAccepted)
 	})
 	t.Run("mixed_inconclusive_keeps_removal", func(t *testing.T) {
+		t.Parallel()
 		mixedFail(t, ErrProbeInconclusive, ProbeInconclusive)
 	})
 	t.Run("mixed_failure_next_apply_holds_and_writes_nothing", func(t *testing.T) {
+		t.Parallel()
 		h, _ := mixedFail(t, ErrProbePositiveRefused, ProbeRefused)
 		before, q := h.diskState(), len(h.probeQueries())
 		h.cfg.Fault = func(p string) error {
@@ -1222,6 +1261,7 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("addition_with_krl_change_failure_lands_the_krl", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		h.scriptProbes(ProbeRefused)
@@ -1235,6 +1275,7 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("rollback_keeps_newer_krl", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		h.scriptProbes(ProbeInconclusive)
@@ -1282,6 +1323,7 @@ func probeGateRuns(t *testing.T) {
 		return h, r, swaps, err
 	}
 	t.Run("superseded_mixed_failure_keeps_removal", func(t *testing.T) {
+		t.Parallel()
 		h, r, swaps, err := supersede(t, []string{"role:a", "role:b"}, []string{"role:b", "role:c"}, []string{"role:b", "role:c"}, 70, ProbeRefused)
 		mustFailed(t, h, r, err, ErrProbePositiveRefused)
 		mustPrincipals(t, h, "role:b")
@@ -1295,7 +1337,9 @@ func probeGateRuns(t *testing.T) {
 		mustHeld(t, h, r, err, "failure_backoff")
 	})
 	t.Run("superseded_readd_failure_keeps_last_good_lines", func(t *testing.T) {
+		t.Parallel()
 		t.Run("full_readd", func(t *testing.T) {
+			t.Parallel()
 			h, r, _, err := supersede(t, []string{"role:a", "role:b"}, []string{"role:b", "role:c"}, []string{"role:a", "role:b", "role:c"}, 0, ProbeRefused)
 			mustFailed(t, h, r, err, ErrProbePositiveRefused)
 			mustPrincipals(t, h, "role:a", "role:b")
@@ -1312,6 +1356,7 @@ func probeGateRuns(t *testing.T) {
 			}
 		})
 		t.Run("partial_readd", func(t *testing.T) {
+			t.Parallel()
 			h, r, _, err := supersede(t, []string{"role:a", "role:b", "role:d"}, []string{"role:b", "role:c"}, []string{"role:a", "role:b", "role:c"}, 70, ProbeRefused)
 			mustFailed(t, h, r, err, ErrProbePositiveRefused)
 			mustPrincipals(t, h, "role:a", "role:b")
@@ -1320,6 +1365,7 @@ func probeGateRuns(t *testing.T) {
 			}
 		})
 		t.Run("readd_only_removes_from_last_good", func(t *testing.T) {
+			t.Parallel()
 			// T2 re-adds role:a and keeps role:d removed: Intermediate(last-good,
 			// T2) collapses to T2 itself, so the plain rollback would re-grant
 			// role:d. The target settles on itself.
@@ -1332,6 +1378,7 @@ func probeGateRuns(t *testing.T) {
 		})
 	})
 	t.Run("superseded_to_narrowing_runs_no_probes", func(t *testing.T) {
+		t.Parallel()
 		h, r, _, err := supersede(t, []string{"role:a", "role:b"}, []string{"role:a", "role:b", "role:c"}, []string{"role:a"}, 0)
 		if err != nil || r.Rollback {
 			t.Fatalf("apply: %v, rollback %t", err, r.Rollback)
@@ -1342,6 +1389,7 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("held_clears_after_settle_and_revert", func(t *testing.T) {
+		t.Parallel()
 		h, _ := mixedFail(t, ErrProbePositiveRefused, ProbeRefused)
 		h.publishDir(h.spec("role:b"))
 		if _, err := h.apply(); err != nil {
@@ -1353,6 +1401,7 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("settle_listener_failure_falls_back_to_plain_rollback", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.ready()
 		h.cfg.probeQuery = func(context.Context, ProbeTarget, *ssh.Certificate, time.Time) (ProbeOutcome, error) {
@@ -1381,6 +1430,7 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("positive_refused_sends_no_negative", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		q := len(h.probeQueries())
@@ -1393,6 +1443,7 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("widening_negative_accepted_rolls_back", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		h.scriptProbes(ProbeAccepted, ProbeAccepted)
@@ -1402,6 +1453,7 @@ func probeGateRuns(t *testing.T) {
 		mustPrincipals(t, h, "role:a")
 	})
 	t.Run("widening_inconclusive_rolls_back", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		h.scriptProbes(ProbeAccepted, ProbeInconclusive)
@@ -1411,6 +1463,7 @@ func probeGateRuns(t *testing.T) {
 		mustPrincipals(t, h, "role:a")
 	})
 	t.Run("pair_expired_during_wait_is_inconclusive", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		q := len(h.probeQueries())
@@ -1446,12 +1499,15 @@ func probeGateRuns(t *testing.T) {
 		}
 	}
 	t.Run("narrowing_negative_accepted_no_rollback_reports", func(t *testing.T) {
+		t.Parallel()
 		narrow(t, ErrProbeKRLNotEnforced, ProbeAccepted, ProbeAccepted)
 	})
 	t.Run("narrowing_positive_refused_reports", func(t *testing.T) {
+		t.Parallel()
 		narrow(t, ErrProbePositiveRefused, ProbeRefused)
 	})
 	t.Run("opportunistic_once_per_ten_minutes", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b", "role:c")
 		h.readyFor(time.Hour)
 		q := len(h.probeQueries())
@@ -1483,13 +1539,16 @@ func probeGateRuns(t *testing.T) {
 		}
 	}
 	t.Run("opportunistic_skips_after_three_negatives_in_the_hour", func(t *testing.T) {
+		t.Parallel()
 		opp(t, ProbeOpportunisticNegatives, probeSkippedBudget)
 		opp(t, ProbeOpportunisticNegatives-1, probePass)
 	})
 	t.Run("over_budget_narrowing_skips_negative", func(t *testing.T) {
+		t.Parallel()
 		opp(t, ProbeNegativesPerHour, probeSkippedBudget)
 	})
 	t.Run("opportunistic_skipped_when_not_ready", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a", "role:b")
 		h.publishDir(h.spec("role:a"))
 		if r := h.mustApply(); r.ProbePositive != probeSkippedNotReady || len(h.probeQueries()) != 0 {
@@ -1510,6 +1569,7 @@ func probeGateRuns(t *testing.T) {
 		return h
 	}
 	t.Run("failure_cleared_by_a_pass", func(t *testing.T) {
+		t.Parallel()
 		h := seeded(t, func(st *probeState, now uint64) {
 			st.Failure = &probeFailure{Code: ErrProbeInconclusive.Error(), Key: strings.Repeat("0", 64), At: now - 7200, Count: 1}
 		})
@@ -1518,12 +1578,14 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("alarm_cleared_by_a_pass", func(t *testing.T) {
+		t.Parallel()
 		h := seeded(t, func(st *probeState, _ uint64) { st.Alarm = ErrProbeKRLNotEnforced.Error() })
 		if st := h.probeStateNow(); st.Alarm != "" {
 			t.Fatalf("alarm %q after a pass", st.Alarm)
 		}
 	})
 	t.Run("reservation_before_send", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		n, q := len(h.probeStateNow().Negatives), len(h.probeQueries())
@@ -1542,6 +1604,7 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("probe_sleeps_for_spacing", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.readyFor(time.Hour)
 		h.clock.advance(10 * time.Minute) // no widening wait: the probes run at once
@@ -1559,6 +1622,7 @@ func probeGateRuns(t *testing.T) {
 		}
 	})
 	t.Run("probe_source_is_not_the_listener_source", func(t *testing.T) {
+		t.Parallel()
 		h := gateHost(t, "role:a")
 		h.ready()
 		h.publishDir(h.spec("role:a", "role:b"))
