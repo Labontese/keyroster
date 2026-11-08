@@ -367,11 +367,12 @@ Without the wrapper, `keyroster init` fails with `lookup keyroster.localhost ...
 - New test: TestProbeStep `answer_saved_before_outbox_removed`. It crashes at that point, then runs again, and requires a complete Next and an empty outbox.
 - RED, with the fix reverted (the remove first, then the fault point, the save later): `next {Positive:<nil> ...}, 1 outbox requests`. The verified positive is lost and requested again. GREEN: it passes.
 
-**F5 (report a held apply that wrote something new).** 708a096.
+**F5 (report a held apply that wrote something new).** 708a096, with 1e40927 (after F6, below).
 - heldNoise is keyed on the held message plus the report's bundle, directory and KRL versions and its generation.
 - A held retry commits nothing and reports generation 0, which counts as no new generation (deviation below).
 - New tests: TestRunHeldTrigger `held_apply_that_writes_something_prints` (a held apply that lands KRL 77 prints and logs; the identical retry after it is quiet), and a report table in TestRunHeldNoise.
 - RED, keyed on the message only: `held applies printed 1 times and logged 1 times, want 2 and 2`. GREEN: TestRunHeldTrigger and TestRunHeldNoise pass `-race -count=3`.
+- 1e40927, found in the self-review after F6: a held retry that repairs an edited drop-in reloads sshd, while its message, its versions and its generation 0 stay the same, so the key above kept it quiet. Nothing in the repair path logs a line of its own. An apply whose report has `Reloaded` set is now never quiet. New: TestRunHeldTrigger `held_retry_that_repairs_the_dropin_prints`, which drives it through Run, and a `Reloaded` row in TestRunHeldNoise. RED, with the reload ignored: `held applies printed 1 times and logged 1 times, want 2 and 2`, and TestRunHeldNoise `report step 8 ... quiet true, want false`. GREEN: both pass `-race -count=2`.
 
 **F6 (repair an edited drop-in on a held retry).** 24fb8d9.
 - The held retry on an unchanged capture calls `repairNoOp(ctx, v, g)`, which writes nothing when the drop-in is right.
@@ -399,21 +400,23 @@ mutant killed: the outbox request removed before probe.json is saved (TestProbeS
 mutant killed: heldNoise keyed on the held message only (TestRunHeldTrigger/held_apply_that_writes_something_prints)
 mutant killed: a held retry's generation 0 compared as a new generation (TestRunHeldTrigger/identical_holds_print_and_log_once)
 mutant killed: the held retry without repairNoOp (TestProbeGate/held_retry_repairs_edited_dropin)
+mutant killed: heldNoise ignoring a reload, so a held retry that repaired the drop-in is quiet (TestRunHeldTrigger/held_retry_that_repairs_the_dropin_prints, and again TestRunHeldNoise)
 mutant killed: the plain rollback for every failed gated addition, on real sshd, local 10.5p1 (TestProbeSelfTestEndToEnd/positive_refused_rolls_back)
 mutant killed: ProbePairSpacing at 2 s, on real sshd, local 10.5p1 (TestProbePairSpacing/pairs_at_production_spacing_never_dropped)
 
-Running count after pre-merge review round 1: 116 killed, 1 equivalent, 0 survived.
+Running count after pre-merge review round 1: 117 killed, 1 equivalent, 0 survived.
 
 Deviation (F5): the held message plus the four report fields, compared literally, would have made the first retry after a held commit print once more. The committed apply reports its generation; the retry reports 0. TestRunHeldTrigger's `identical_holds_print_and_log_once` would then have failed (2 prints, want 1). A report generation of 0 therefore keeps the remembered generation. The three versions are compared as they are. "Quiet only when nothing new was written" holds: a retry writes nothing, and any commit names its generation.
 
-Gates at the new head, local (through scripts/linux.sh):
+Gates at 4f6a9f2, local (through scripts/linux.sh), with 1e40927 checked after them as noted:
 - `gofmt -l .` is empty.
 - `go vet ./...` passes, and so do the tagged vets (`keyroster_e2e` over the agent packages; `e2e`, `e2e e2eprobe` and `e2e systemdsmoke` over test/e2e).
 - golangci-lint is clean for linux, windows and darwin, and the e2e lint with `--build-tags "e2e e2eprobe" --new-from-rev=origin/main` reports 0 issues.
 - `go test -race -count=1 ./internal/agent/apply/ ./internal/agent/probe/` passes: apply 466.3 s (two packages, pass or fail only).
 - The plan's six-package delta gate, run verbatim and alone (base at=1794117956), exits 0: apply 441.288 (+62.2), fetch 32.494 (+0.6), heartbeat 1.059 (+0.0), serverclient 4.283 (+0.1), agentcmd 1.879 (-0.1), cmd 230.505 (+7.6). It was run because the two-package reading above was 45.6 s over reading 2's 420.7. The new subtests add about 2 s serially.
+- 1e40927 changes only run.go and run_test.go. Its tests pass `-race` (TestRunHeldTrigger and TestRunHeldNoise), and gofmt, `go vet` and golangci-lint for linux, windows and darwin over internal/agent are clean. Its new serial subtest takes about 0.4 s.
 
-CI at 4f6a9f2 (the code head of this round). The e2e times are each package's `ok` line:
+CI at 4f6a9f2. The checks of 1e40927 run together with those of the docs head that records it. The e2e times are each package's `ok` line:
 - E2E run 42465582660, all four lanes successful:
   - probe lanes: 9.5p1 310.511 s and 10.5p1 300.235 s, under the 420 s cap. `positive_refused_rolls_back` takes 104.8 to 105.2 s and TestProbeSelfTestEndToEnd 276.8 to 281.5 s.
   - main lanes: 9.5p1 752.572 s and 10.5p1 774.891 s, both with no `=== RUN   TestProbe` line.
