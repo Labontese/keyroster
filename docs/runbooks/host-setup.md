@@ -1734,6 +1734,222 @@ CI e2e (03-09b): `TestHostTrustLongLines`).
   `TestHostCertNoTOFU/refused_after_refresh`. UNVERIFIED until 03-16 on a
   real host and client.
 
+## The probe account
+
+Run in CI (03-10c): `TestDistroProbe`, `TestDistroProbeAccountBang` and
+`TestDistroProbeFacts` on the seven images of the `e2e-distro` matrix (the
+blocks below create the account, sshd accepts the positive probe
+certificate and refuses the negative one that only the KRL revokes, a
+login with the positive runs no command, preflight names each account
+problem, and the `!` and penalty facts are recorded),
+`TestAgentSystemdSmoke` in the `systemd-sandbox` job (under the real units,
+with the account of the debian block: a revocation lands, then a role
+addition passes both probes), `TestProbeAccountFull`, `TestProbeGate` and
+`TestPreflightProbeAccount` (the agent's check on a fake sshd) and
+`TestProbeSelfTestEndToEnd` (the hold reasons one after another on a real
+sshd). UNVERIFIED: an account that exists only in NSS or LDAP, a
+capability-less root on a shadow file of mode 0000, every service manager
+other than systemd on Ubuntu 24.04, and every host that is not a CI image.
+
+**Why it exists.** Before an addition of access goes live, the agent proves
+with the unsigned publickey query that its sshd accepts a certificate of
+the machine CA and refuses one that only the KRL revokes (D-06). It asks as
+the probe account, `keyroster-probe` by default. The probe certificates
+are keyless for any other purpose: each is restricted to the force-command
+`/bin/false` and loopback sources, and its only principal is
+`keyroster-probe:<host>`, which only the probe account's principals file
+on that host lists. Until the account exists and is right, the agent holds
+every addition with `probe_held:<reason>`; removals, revocations and KRLs
+never wait (owner answers Q2 and Q-B, 2026-11-07).
+
+**Create it.** Run the block for the host's family as root. Each block is
+what CI runs (`test/distro/probe-account.sh`, which a runbook gate keeps
+equal to these blocks): a system account with no home and the family's
+nologin shell, then the shadow field set to exactly `*` with `usermod`. To
+use another name, set `KEYROSTER_PROBE_NAME` before the block and see
+"Another account name" below.
+
+probe-account debian
+
+```sh
+name=${KEYROSTER_PROBE_NAME:-keyroster-probe}
+test -x /usr/sbin/nologin
+useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$name"
+usermod --password '*' "$name"
+```
+
+probe-account rhel
+
+```sh
+name=${KEYROSTER_PROBE_NAME:-keyroster-probe}
+test -x /sbin/nologin
+useradd --system --no-create-home --home-dir /nonexistent --shell /sbin/nologin "$name"
+usermod --password '*' "$name"
+```
+
+probe-account alpine
+
+```sh
+name=${KEYROSTER_PROBE_NAME:-keyroster-probe}
+test -x /sbin/nologin
+command -v usermod >/dev/null 2>&1 || apk add -q shadow
+adduser -S -D -H -h /nonexistent -s /sbin/nologin "$name"
+usermod --password '*' "$name"
+```
+
+probe-account arch
+
+```sh
+name=${KEYROSTER_PROBE_NAME:-keyroster-probe}
+test -x /usr/bin/nologin
+useradd --system --no-create-home --home-dir /nonexistent --shell /usr/bin/nologin "$name"
+usermod --password '*' "$name"
+```
+
+Then run `keyroster-agent preflight`: a healthy account gives no finding of
+code `probe_account`.
+
+**Why exactly `*`.** `*` is no usable password and not locked. A field that
+starts with `!` is locked: with UsePAM no, sshd refuses every login of a
+locked account, the probe's query included, so the probes could never
+pass; `TestDistroProbeAccountBang` measures this on every image. The agent
+therefore holds an addition with `sshd_override` when the field starts
+with `!` and sshd does not report UsePAM yes. Any other value is a
+password, which the agent refuses (owner answer Q3, 2026-11-07: no usable
+or empty password, `*` recommended).
+
+**What the agent checks.** Before every addition, and in
+`keyroster-agent preflight` and `keyroster-agent check` (report only:
+neither refuses nor counts as drift because of it), in this order,
+stopping at the first failure: the account's line in `<root>/etc/passwd`
+(it exists once, parses, has a uid other than 0 and a nologin shell); the
+password class of passwd field 2 and of `<root>/etc/shadow`, the worse of
+the two; then `sshd -T -C` for the account from the probe's own source
+address (127.0.0.2, or 127.0.0.3 when sshd listens on 127.0.0.2). The
+agent reads `<root>/etc/passwd` and `<root>/etc/shadow` only: an account
+that exists only in NSS or LDAP holds every addition with
+`account_missing`. The password hash never leaves the check; only its
+class reaches a log line, a report or `probe-state.json`.
+
+Where the shadow file cannot be read (a permission error), the agent
+reports the note `probe_shadow_unreadable` and then requires that sshd
+refuse empty passwords for the account (`permitemptypasswords no`, the
+default). A password that root sets later on such a host goes unseen until
+the shadow file is readable again (owner answer Q3).
+
+AllowUsers, DenyUsers, AllowGroups and DenyGroups hold an addition with
+`account_excluded` only when they certainly exclude the account. An entry
+with a host part (`user@host`) is left to the probe: the positive probe
+then decides, and a refusal is rolled back.
+
+**The hold reasons.** The heartbeat and `keyroster host status` show
+`probe_held:<reason>`; an addition waits until the cause is fixed, and the
+agent retries on every run (each minute) and at once on a directory
+change.
+
+- `probe_held:account_missing`: `<root>/etc/passwd` has no line for the
+  probe account (or no such file). Fix: create the account with the block
+  above; an account in NSS or LDAP only must also exist in the file.
+- `probe_held:account_unparsable`: the passwd line, the passwd file or the
+  shadow file does not parse, is too large or not a regular file, or the
+  account has more than one line. Fix: keep exactly one well-formed line
+  per account in each file.
+- `probe_held:account_uid_zero`: the probe account has uid 0. Fix: give it
+  a system uid of its own (`usermod --uid`), never root's.
+- `probe_held:shell_missing`: the account's shell is not an existing
+  executable file. Fix: `usermod --shell` with the family's nologin path
+  from the block above.
+- `probe_held:shell_not_nologin`: the shell is not called nologin. Fix:
+  `usermod --shell` with the family's nologin path.
+- `probe_held:password_empty`: passwd field 2 or the shadow field is empty.
+  Fix: `usermod --password '*' NAME`.
+- `probe_held:password_set`: the account has a password. Fix:
+  `usermod --password '*' NAME`.
+- `probe_held:sshd_override`: sshd -T -C for the account does not let the
+  probe in as the agent configured it: PubkeyAuthentication is not yes,
+  AuthenticationMethods never offers publickey first, a Match block changes
+  TrustedUserCAKeys, RevokedKeys or AuthorizedPrincipalsFile or adds an
+  AuthorizedPrincipalsCommand for the account, PermitEmptyPasswords is yes
+  while the shadow file is unreadable, the shadow field starts with `!`
+  while UsePAM is not yes, or sshd -T -C itself fails. Fix: remove the
+  setting that applies to the account, or set the field to `*`.
+- `probe_held:account_excluded`: AllowUsers, DenyUsers, AllowGroups or
+  DenyGroups excludes the probe account for certain. Fix: let the account
+  through those rules; it can only log in with its probe certificate from
+  loopback.
+- `probe_held:account_is_managed`: a host group maps the probe account, so
+  the directory renders its principals file. Fix: unmap the account from
+  every host group; the signer refuses `keyroster-probe` as a host-group
+  account.
+- `probe_held:cert_missing`: the agent has no usable probe certificate pair
+  yet (the usual state for a few fetch polls after the first install).
+  Fix: wait; if it lasts, check that the fetcher runs and that the host is
+  approved.
+- `probe_held:issue_unanswered`: a probe certificate request is waiting for
+  the signer or went unanswered. Fix: check the server and the signer; the
+  agent asks again.
+- `probe_held:issue_refused`: the signer refused the probe certificate
+  request, and the refusal holds until a new bundle, policy or directory.
+  Fix: read the refusal in the signer's log.
+- `probe_held:positive_in_krl`: the KRL revokes the positive probe
+  certificate. Fix: none by hand; the agent requests a new pair.
+- `probe_held:negative_not_in_krl`: the KRL does not list the negative
+  probe certificate yet. Fix: wait for the next KRL publish (hourly at
+  most); see the wait after a state loss below.
+- `probe_held:ca_mismatch`: the pair is not signed by one machine CA key of
+  the generation. Fix: none by hand during a CA rotation; the agent
+  requests a pair from the active key.
+- `probe_held:failure_backoff`: the same addition failed its probes
+  before, and the back-off (60 s doubling to one hour) has not run out.
+  Fix: fix the cause the failure reported; a changed directory or account
+  retries at once.
+- `probe_held:budget`: the last pair was less than 60 s ago, or six
+  negative probes ran in the last hour. Fix: wait; the budget protects
+  sshd's per-source penalties.
+
+**Another account name.** The default is `keyroster-probe`. For another
+name, create it with `KEYROSTER_PROBE_NAME=NAME` and the block, then
+override the applier's command line with `systemctl edit keyroster-agent`:
+an empty `ExecStart=` line clears the unit's own, and the next line is the
+original one (as `systemctl cat keyroster-agent` shows it; here with the
+defaults of `install`) with `--probe-account NAME` added:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/keyroster-agent run --state-dir /var/lib/keyroster-agent --probe-account NAME
+```
+
+`keyroster-agent preflight` and `keyroster-agent check` take the same
+`--probe-account NAME`.
+
+**Upgrade order.** Upgrade the signer first, then the server, then the
+agents: the heartbeat carries `probe_detail`, and the server decodes the
+heartbeat strictly.
+
+**Machine cap.** Keep the policy's machine cap at least 6 hours. A probe
+certificate lives min(7 days, the machine cap), and below 6 hours the
+signer publishes up to 60 KRL versions an hour for the negatives, each of
+which every host applies.
+
+**Reserved names and the KRL.** The principal prefix `keyroster-probe:` is
+reserved for probe certificates, and so are machine names that start with
+`probe.` (the probe certificate's subject is `probe.<host>`). The KRL gains
+one negative probe serial entry per host per probe lifetime.
+
+**After an agent-side state loss.** When the agent loses its state on a
+host, additions there wait up to about two hours: the first new negative
+follows the `probe_cert_recent` window, then the hourly publish (owner
+answer P4, 2026-11-07).
+
+**Audit.** `keyroster audit verify` prints, after the host certificate
+line, the line `probe certificates: N, negative probes no published KRL
+lists yet: M` when the log holds probe certificates; `--json` carries M as
+`pending_negative_probes` (omitted when zero; owner answer P2).
+
+The probe self-test can be switched off only in the e2e test build; the
+released agent refuses `--probe-self-test off`.
+
 ## Manual recovery
 
 When `keyroster host status` shows `stuck: pending_state_unknown`,

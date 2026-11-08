@@ -508,3 +508,18 @@ func FuzzParseShadowLine(f *testing.F) {
 		}
 	})
 }
+
+// TestProbeHoldReasonsDocumented (03-10c): every closed hold reason of the
+// gate is written as probe_held:<reason> in the host setup runbook, so a
+// reason added here cannot ship without its meaning and fix.
+func TestProbeHoldReasonsDocumented(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "runbooks", "host-setup.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range probeHoldReasons {
+		if !strings.Contains(string(b), "`probe_held:"+r+"`") {
+			t.Errorf("docs/runbooks/host-setup.md does not document probe_held:%s", r)
+		}
+	}
+}
