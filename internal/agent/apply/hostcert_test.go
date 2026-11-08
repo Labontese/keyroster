@@ -1445,7 +1445,13 @@ func hostCertStepCases2(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h.publishDir(h.hostSpec(h.sshd.pub, h.ec.PublicKey()))
+		// The newer last-good drops role:ops, which the older generation
+		// holds (03-10d): a current inside last-good is a kept state that
+		// needs no recovery, so the older one must hold a line last-good
+		// lacks for the recovery to stay due.
+		s := h.hostSpec(h.sshd.pub, h.ec.PublicKey())
+		s.principals = []string{"role:new"}
+		h.publishDir(s)
 		h.mustApply()
 		// current goes back to the older generation, which is not the
 		// rollback target of the newer last-good: Apply's no-marker

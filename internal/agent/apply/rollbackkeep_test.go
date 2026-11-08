@@ -1193,6 +1193,39 @@ func TestRollbackSites(t *testing.T) {
 		}
 		mustPrincipals(t, h, "role:x")
 	})
+	bothProbes(t, "krl_alone_after_kept_rollback_keeps_removal", func(t *testing.T, probes bool) {
+		// D10: a capture whose directory render is refused as content
+		// (generation_too_large) takes the KRL-alone pass against accepted/,
+		// which still holds last-good's directory; only its KRL moves on.
+		h := keptBase(t, probes, []string{"role:a", "role:x"}, []string{"role:x", "role:b"})
+		lg0 := h.lastGood()
+		s := h.spec("role:a", "role:x")
+		s.bulkRoles = 17
+		h.publishDir(s)
+		h.publishKRL(93)
+		var seen []string
+		h.cfg.Fault = func(string) error {
+			if slices.Contains(h.principals("deploy"), "role:a") {
+				seen = append(seen, "current")
+			}
+			if l, err := readGeneration(h.l.Gen(h.lastGood())); err == nil && slices.Contains(deployLines(l), "role:a") && h.lastGood() != lg0 {
+				seen = append(seen, "last-good")
+			}
+			return nil
+		}
+		_, err := h.apply()
+		h.cfg.Fault = nil
+		if !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("the oversize directory: %v, want generation_too_large reported", err)
+		}
+		mustPrincipals(t, h, "role:x")
+		if !h.krlRevokes(h.l.Current(), 93) || len(seen) != 0 {
+			t.Fatalf("KRL 93 in force %t; role:a in force at %v", h.krlRevokes(h.l.Current(), 93), seen)
+		}
+		if l, err := readGeneration(h.l.Gen(h.lastGood())); err != nil || (h.lastGood() != lg0 && slices.Contains(deployLines(l), "role:a")) {
+			t.Fatalf("last-good %d widened to role:a: %v", h.lastGood(), err)
+		}
+	})
 	t.Run("hostcert_and_probe_steps_not_blocked_by_kept_state", func(t *testing.T) {
 		t.Parallel()
 		h := keptBase(t, true, []string{"role:a", "role:x"}, []string{"role:x", "role:b"})

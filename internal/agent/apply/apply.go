@@ -1337,6 +1337,28 @@ func outcome(v *state.Verified) error {
 	return errors.Join(v.Refused, v.KRLRefused, v.DirectoryUnauthorized)
 }
 
+// krlOnly makes the render of a KRL-alone Verified (v.Refused set: only
+// its KRL moves on) hold every file but the KRL of the generation current
+// names, when current is the agent's and is not last-good (03-10d, D10,
+// under owner decision Q-D): a keeping rollback leaves accepted/ at
+// last-good's directory, whose render would grant a landed removal again.
+// With current at last-good the render is unchanged.
+func (e *engine) krlOnly(g, cur *Generation, curLink link) {
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil || lg.kind != linkAgent || cur == nil || curLink.kind != linkAgent || curLink.n == lg.n {
+		return
+	}
+	maps.DeleteFunc(g.Files, func(n string, _ []byte) bool {
+		class, ok := ClassOf(n)
+		return !ok || class != FileKRL
+	})
+	for n, b := range cur.Files {
+		if class, ok := ClassOf(n); !ok || class != FileKRL {
+			g.Files[n] = b
+		}
+	}
+}
+
 // candidate renders v for this host (render), keeps the KRL in force
 // (keepKRL) and checks the result against cur, the generation current
 // names (checkCandidate), writing nothing. Its errors are render errors
@@ -1346,6 +1368,9 @@ func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*G
 	g, err := e.render(v, cur, curLink)
 	if err != nil {
 		return nil, err
+	}
+	if v.Refused != nil {
+		e.krlOnly(g, cur, curLink)
 	}
 	e.keepKRL(g, cur, curLink)
 	if err := checkCandidate(g, cur, curLink, e.fixedPrincipals()); err != nil {
