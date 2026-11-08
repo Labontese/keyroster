@@ -31,7 +31,9 @@ trap 'rm -rf "$work"' EXIT
 	CGO_ENABLED=0 GOOS=linux go test -c -tags e2edistro -o "$work/distro.test" ./test/distro
 )
 cp "$repo/test/distro/run-in.sh" "$work/run-in.sh"
-chmod 0755 "$work/run-in.sh" "$work/keyroster-agent" "$work/distro.test"
+# 03-10c: the runbook's probe account script, which the probe tests run.
+cp "$repo/test/distro/probe-account.sh" "$work/probe-account.sh"
+chmod 0755 "$work/run-in.sh" "$work/probe-account.sh" "$work/keyroster-agent" "$work/distro.test"
 
 echo "== $image"
 docker run --rm -e KEYROSTER_DISTRO="$image" -v "$work:/k:ro" "$image" /bin/sh /k/run-in.sh
