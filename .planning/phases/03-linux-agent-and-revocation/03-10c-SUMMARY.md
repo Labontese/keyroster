@@ -7,13 +7,13 @@ status: complete
 requires: [03-10b]
 provides: [probe-account-full-check, probe-account-runbook, distro-probe-matrix, systemd-probe-smoke, audit-pending-negatives]
 requirements-completed: []
-commits: 15
+commits: 27
 plan_head_before: cee452aa4b047d71e2a9c4076ca7363e05712a1e
-plan_head_after: 0309661c3042826c09fd34be399446c58f46e925
+plan_head_after: aaa9a9e9133e6713126e303dbe77c1eb43880845
 actuals:
-  tokens: 110858  # chars/4 over git diff cee452a..HEAD (the plan files included)
+  tokens: 118537  # chars/4 over git diff cee452a..aaa9a9e (the plan files included; fix round 1 included)
   tasks: 4
-  commits: 15
+  commits: 27  # git rev-list --count cee452a..aaa9a9e: 15 of Tasks 1 to 4, the SUMMARY commit 48590af, 11 of fix round 1
 ---
 
 # Phase 3 Plan 10c: The probe account checked completely Summary
@@ -286,7 +286,7 @@ Smoke time: TestAgentSystemdSmoke 505.63 s against its base 339.37 s (run 424725
 
 LoginGraceTime 10: applied, inferred from the timing only. The role addition landed 55 s after the directory change, fetch poll included, and LoginGraceTime 120 would have imposed a 150 s widening wait. The script's own `sshd -T` line printed `Missing privilege separation directory: /run/sshd` (the runner's ssh.service is socket-activated and had not run yet), so it shows no value. The unit journal, which would name the wait, is printed only on a failure.
 
-T-03-381: IPAddressAllow=localhost admitted 127.0.0.2 under the real unit (run 42495385525: probe_positive and probe_negative `pass` with an empty detail, the queries from the probe source 127.0.0.2 under keyroster-agent.service)
+T-03-381: IPAddressAllow=localhost admitted 127.0.0.2 under the real unit, observed in run 42506650844 at e14b5b9 (fix round 1): with ListenAddress 127.0.0.1 as sshd's only listen address, sshd's VERBOSE lines name `keyroster-probe from 127.0.0.2` for the positive probe (Postponed publickey) and the negative probe (Failed publickey), and both probes pass under keyroster-agent.service. The first record here (run 42495385525) proved the two passes only; the probe source was not observed then and may have been ::1.
 
 Task 3 mutants (each applied to the committed code at a2492f8 by the mutant runner outside the repository, run alone on its named subtest with `-timeout 5m` through scripts/linux.sh, killed by the named `--- FAIL:` line, restored with `git checkout --` and proven by `git diff --quiet HEAD --`; the tag mutant joins the tag's two parts in the mutation script, so no literal was written to a committed file):
 mutant killed: a command line of the debian block edited in host-setup.md (TestProbeAccountRunbook/commands_match_ci: `probeaccount_runbook_test.go:104: the runbook's block probe-account debian: ...`)
@@ -348,6 +348,113 @@ PR: #92 (https://github.com/Labontese/keyroster/pull/92), opened by keyroster-bo
 
 T4-1. **The delta gate's parser cannot read the first key of the base line.** Its key pattern is `^test-time base: .* $1=`, which needs a space between `test-time base:` and the key, so `apply=` (which comes first, the format 'Budget and verify' prescribes) parses as empty, and the gate exits 1 before any test runs (observed: `gate3 exit 1`, no `ok` line). The gate was run once more with only that pattern changed to `^test-time base: \(.* \)\{0,1\}$1=` (the six values then parse as the base line says), and its result is recorded above. The plan file is unchanged; the same parser sits in the plan's text for later plans to copy, so this is a question for the owner (below).
 
+## Fix round 1 (PR #92 review)
+
+The pre-merge review of head 48590af raised eight points. Each fix below is its own commit (or a small group), authored as Daniel, committed by keyroster-bot and signed; every file is in files_modified.
+
+| Commit | Message | Point |
+|---|---|---|
+| f438a3c | fix(apply): match each AllowGroups and DenyGroups entry as one pattern | group entries as single patterns |
+| 6aad1e1 | fix(apply): report possible probe-account exclusions and read NSS group sources | possible exclusions in check; NSS group sources |
+| b8ba39b | test(apply): prove preflight compares the probe account's trust on an installed host | preflight's trust comparison |
+| e01e45e | test(systemd): prove the probes come from 127.0.0.2 under the real unit | the probe source under the real unit |
+| bc1bc14 | fix(apply): log once that the probe password check is off on an unreadable shadow | the shadow note under the applier |
+| d1f8809 | docs(03-10c): untick the 03-10d plan in the roadmap | the ROADMAP tick |
+| e02eba7 | test(systemd): create sshd's privilege separation directory before sshd -T | the probe source (CI fix) |
+| 32d5469 | fix(apply): read every group and initgroups line of nsswitch.conf | NSS group sources (refined) |
+| 31b5320 | test(apply): cover the shadow note from the opportunistic pair and a passwd stop | the shadow note (two survivors closed) |
+| e14b5b9 | test(systemd): rebind the socket-activated sshd to its new listen address | the probe source (CI fix) |
+| aaa9a9e | test(apply): write the probe account's passwd line back without reading the file | the shadow note (gosec G703 on the test) |
+
+**Group matching (sshd semantics).** Each AllowGroups and DenyGroups entry is now matched as one pattern: a comma is part of the pattern and `!` negates nothing. The OpenSSH sources are not in the local cache (only the install prefixes), so no source line was checked; the behaviour was measured instead by running the locally built sshd unprivileged in WSL and logging in as the WSL user, one connection per variant (`sshd -d`, the user's primary group `g`):
+
+| sshd | Variant | Result |
+|---|---|---|
+| 10.5p1 and 9.5p1 | no rule | login |
+| 10.5p1 and 9.5p1 | `DenyGroups g` | refused, "not allowed because a group is listed in DenyGroups" |
+| 10.5p1 and 9.5p1 | `DenyGroups g,zzz-none` | login |
+| 10.5p1 and 9.5p1 | `DenyGroups *,!g` | login |
+| 10.5p1 and 9.5p1 | `AllowGroups g` | login |
+| 10.5p1 and 9.5p1 | `AllowGroups g,zzz-none` | refused, "not allowed because none of user's groups are listed in AllowGroups" |
+
+`sshd -T` printed the comma entry whole (`allowgroups g,zzz-none`). TestExcluded and TestExcludedDefinite had the old reading (`denygroups *,!adm` refusing `deploy`); both now expect what sshd does, with cells for `DenyGroups adm,wheel` (no refusal), `AllowGroups adm,wheel` (no match) and `DenyGroups ad?`. The unused list matcher is removed.
+
+**NSS group sources.** An AllowGroups list that names none of the account's groups in `<root>/etc/group` is definite only when every `group:` and `initgroups:` line of `<root>/etc/nsswitch.conf` lists `files` and at most `systemd` beside it (action items and comments skipped, names compared in lower case), or when the file is missing or unreadable. Otherwise nothing is held, the positive probe decides, and the reason text adds that sshd may still admit the account. A local DenyGroups match stays definite. Every duplicate line is read, so both readings of a second `group:` line are covered (the stricter one wins, in the no-hold direction).
+
+**Possible exclusions in check (option chosen: keep the generic entry).** check's account loop now keeps the generic `account_excluded` entry for the probe account unless the probe findings already carry `account_excluded` for it. So a `user@host` entry and an AllowGroups list that NSS may satisfy show up under `excluded`, report only; Drift() and the exit code count what they counted before (Drift reads only Settings, Files and Foreign). This was chosen over a new probe-finding note because the field exists, is report only and needs no new wording for later readers (03-16 reads `probe_account` and the reason). preflight still lists no possible exclusion of the probe account, as before this round (see 'For later plans').
+
+**Preflight's trust comparison.** TestPreflightProbeAccount/installed_host_compares_trust: on an installed, gated host a Match override of authorizedprincipalsfile, and in a second host a principals command, for the probe account each give exactly one report-only `probe_account` finding starting `sshd_override:` and no refusal.
+
+**The shadow note under the running applier.** probeGate, the opportunistic pair and the drift check call `noteAccount` after the full check: the note `probe_shadow_unreadable` is logged (`probe: note: ...`, a note, never an error) when the shadow file becomes unreadable, keyed per state directory on change in this process (a package-level `sync.Map`), so a held retry or a periodic check does not repeat it; a readable round clears it, a result that stopped at passwd leaves it, and a restart logs it again. No capability was added to the unit (owner decision Q3), and nothing was added to a report or to the wire. Preflight keeps its own note.
+
+**The probe source under the real unit (T-03-381).** The smoke's drop-in is now `LoginGraceTime 10`, `ListenAddress 127.0.0.1` and `LogLevel VERBOSE`. Before it, sshd listened on the runner's default addresses, so the agent's first loopback target, and with it the probe source, could be `::1` (probeSource returns `::1` for an IPv6 target), and nothing in the smoke showed which. The script creates `/run/sshd` (sshd -T needs it before socket activation has started ssh.service), checks that sshd -T reports `listenaddress 127.0.0.1:22` and nothing else, reloads systemd and restarts ssh.socket (without the restart the first apply's self-test found nothing accepting on 127.0.0.1:22: run 42506010945 at e02eba7), prints `ss -ltn` and fails when 127.0.0.1:22 does not accept. role_addition_passes_probes then requires sshd's journal lines for the probe account (identifiers sshd and sshd-session) to name 127.0.0.2 and never `::1`, and prints them.
+
+Seen in run 42506650844 at e14b5b9 (systemd-sandbox green): `listenaddress 127.0.0.1:22`, `logingracetime 10`, `loglevel VERBOSE`, `LISTEN 0 4096 127.0.0.1:22`, then
+
+```
+sshd: Postponed publickey for keyroster-probe from 127.0.0.2 port 54609 ssh2 [preauth]
+sshd: Connection closed by authenticating user keyroster-probe 127.0.0.2 port 54609 [preauth]
+sshd: Failed publickey for keyroster-probe from 127.0.0.2 port 35751 ssh2: ED25519-CERT SHA256:bSte9Rzmj0v2maQoqpZbiHs6KsuzrgKTUs8/r/9lbsg ID kr3/ca=machine/sub=probe.runner/...
+--- PASS: TestAgentSystemdSmoke/role_addition_passes_probes (70.09s)
+```
+
+The positive probe (Postponed, PK_OK) and the negative probe (Failed, KRL) both came from 127.0.0.2 under keyroster-agent.service with IPAddressAllow=localhost, so T-03-381 is proven by an observed source and stays closed. The earlier record (run 42495385525) proved the passes but not the source; the T-03-381 line in Task 3 is corrected below. CI mutant of the smoke: a throwaway branch (p03/10c-f2-mutant, commit 6f16525, deleted after the run, never part of the PR) put `ListenAddress ::1` before `ListenAddress 127.0.0.1`; workflow_dispatch run 42506871234 showed `listenaddress [::1]:22` first, the probe lines `from ::1`, and died on `--- FAIL: TestAgentSystemdSmoke/role_addition_passes_probes (100.16s)` with `agent_systemd_test.go:334: sshd's lines for keyroster-probe do not show the probe source 127.0.0.2 alone (4 lines above)`. That run also confirms the review's reading: with `::1` listed first the probes do use `::1`.
+
+**The ROADMAP tick.** 03-10d is unticked again. verify 7 (the ROADMAP gate) exits 0 on the fixed branch; it also exited 0 on 48590af with the stray `[x]` (run once more in a throwaway detached worktree at 48590af, removed afterwards), because the gate accepts both `[ ]` and `[x]` on the 03-10d row. A stray tick passes it.
+
+**CodeQL.** The CodeQL alert check (not required) fails on alert #25, go/weak-sensitive-data-hashing at probegate.go:472. It is a false positive: keyLine replaces passwd field 2 with a class constant from ParseShadowLine before the line is hashed, and only class constants are appended, so no password or hash text reaches SHA-256. The review and the orchestrator both confirmed this; the orchestrator dismisses the alert, this round does not.
+
+**Process note.** 0ddb2f2 and 64617a7 were staged with only a partial `git diff --cached` review (the executor's own note in Task 1 and Task 3). This round re-read the committed diffs of both commits (`git show 0ddb2f2 64617a7`) after the fact: 64617a7's two test files (probeaccount_runbook_test.go and the TestProbeHoldReasonsDocumented part of account_test.go) line by line, and its runbook text and 0ddb2f2's SUMMARY text by a scan of the added lines (no address outside 127.0.0.0/8, no workspace term, no attribution line, no TODO or FIXME, no trailing whitespace) and a read-through; nothing needed a fix. Every commit of this round was staged by name and its full `git diff --cached` read before the commit.
+
+Mutants of this round (the mutant runner outside the repository, each applied to the committed code, run alone with `-timeout 5m` through scripts/linux.sh, restored with `git checkout --` per file; numbers 1 to 22 ran at 32d5469, numbers 7, 9, 14, 23 and 24 at 31b5320 after their specifications or tests were fixed). The working tree check after each batch is `git diff --quiet HEAD -- . ':!.planning/config.json'` (exit 0): .planning/config.json was already modified in the working tree before this round, by the owner's tooling, so a plain `git diff --quiet HEAD --` exits 1 regardless and the file is never touched or staged.
+mutant killed: check drops every exclusion of the probe account while the probes are on (the old rule) (round 1, #1; --- FAIL: TestDriftProbeAccount/possible_exclusion_stays_visible: `drift_test.go:229: a user@host DenyUsers entry for the probe account: &{Generation:1 Settings:[] Files:[] Excluded:[] Probe:[] Foreign:[] Lo ...`)
+mutant killed: check lists a definite probe-account exclusion twice (no dedupe against the probe findings) (round 1, #2; --- FAIL: TestDriftProbeAccount/generic_excluded_not_duplicated: `drift_test.go:213: the probe account is in Excluded too: [{Code:account_excluded Refusal:false Message:account keyroster-probe: DenyUsers ke ...`)
+mutant killed: preflight never compares the probe account's trust settings (round 1, #3; --- FAIL: TestPreflightProbeAccount/installed_host_compares_trust: `preflight_test.go:676: sshd_override: probe findings []`)
+mutant killed: an AllowGroups non-match is definite whatever nsswitch.conf says (round 1, #4; --- FAIL: TestExcludedDefinite/nss_group_sources/files_sss: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm) in <tmp>/etc/group; <tmp>/etc/nss ...`)
+mutant killed: a DenyGroups match is only possible while NSS has another source (round 1, #5; --- FAIL: TestExcludedDefinite/nss_group_sources/files_sss: `preflight_test.go:543: "denygroups adm\n": ("DenyGroups adm refuses its group adm", false), want ("DenyGroups adm refuses its group adm", tr ...`)
+mutant killed: systemd beside files makes the non-match only possible (round 1, #6; --- FAIL: TestExcludedDefinite/nss_group_sources/files_systemd: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm) in <tmp>/etc/group; <tmp>/etc/nss ...`)
+mutant killed: action items are read as sources (round 1, #7; --- FAIL: TestExcludedDefinite/nss_group_sources/files_action_systemd: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm) in <tmp>/etc/group; ...`)
+mutant killed: an action item that spans fields ends at its first field (round 1, #8; --- FAIL: TestExcludedDefinite/nss_group_sources/files_spaced_action: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm) in <tmp>/etc/group; <tmp>/etc/nss ...`)
+mutant killed: a missing nsswitch.conf counts as another source (round 1, #9; --- FAIL: TestExcludedDefinite: `preflight_test.go:502: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm) in <tmp>/etc/group; ...`)
+mutant killed: an initgroups: line is ignored (round 1, #10; --- FAIL: TestExcludedDefinite/nss_group_sources/initgroups_sss: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm)", true), want ("AllowGroups (whee ...`)
+mutant killed: comments are not stripped (round 1, #11; --- FAIL: TestExcludedDefinite/nss_group_sources/comment_ignored: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm) in <tmp>/etc/group; <tmp>/etc/nss ...`)
+mutant killed: only the first group: line is read (round 1, #12; --- FAIL: TestExcludedDefinite/nss_group_sources/second_group_line: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm)", true), want ("AllowGroups (whee ...`)
+mutant killed: names are compared case-sensitively (round 1, #13; --- FAIL: TestExcludedDefinite/nss_group_sources/upper_case: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm)", true), want ("AllowGroups (whee ...`)
+mutant killed: a group: line without files counts as files only (round 1, #14; --- FAIL: TestExcludedDefinite/nss_group_sources/systemd_only: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm)", true), want ...`)
+mutant killed: the text of a possible AllowGroups exclusion lacks the NSS clause (round 1, #15; --- FAIL: TestExcludedDefinite/nss_group_sources/files_sss: `preflight_test.go:542: "allowgroups wheel\n": ("AllowGroups (wheel) lists none of its groups (deploy, adm)", false), want ("AllowGroups (whe ...`)
+mutant killed: excludedDefinite splits a group entry on commas again (round 1, #16; --- FAIL: TestExcludedDefinite: `preflight_test.go:502: "denygroups *,!adm\n": ("", true), want ("", false)`)
+mutant killed: the DenyGroups text splits a group entry on commas again (round 1, #17; --- FAIL: TestExcluded: `preflight_test.go:447: "denygroups *,!adm\n": "DenyGroups *,!adm refuses its group deploy", want ""`)
+mutant killed: the AllowGroups text splits a group entry on commas again (round 1, #18; --- FAIL: TestExcluded: `preflight_test.go:447: "allowgroups adm,wheel\n": "", want "lists none of its groups"`)
+mutant killed: the shadow note is logged on every round (round 1, #19; --- FAIL: TestProbeGate/shadow_unreadable_noted_once: `probegate_test.go:1213: held round 2: 2 notes in "keyroster-agent: probe account keyroster-probe: sshd_override: sshd -T -C reports pubkeyau ...`)
+mutant killed: the memory is never cleared when shadow reads again (round 1, #20; --- FAIL: TestProbeGate/shadow_unreadable_noted_once: `probegate_test.go:1226: unreadable again: <nil>, 1 notes in "keyroster-agent: probe account keyroster-probe: sshd_override: sshd -T -C repor ...`)
+mutant killed: the gate does not note (round 1, #21; --- FAIL: TestProbeGate/shadow_unreadable_noted_once: `probegate_test.go:1213: held round 1: 0 notes in "keyroster-agent: probe account keyroster-probe: sshd_override: sshd -T -C reports pubkeyau ...`)
+mutant killed: the drift check does not note (round 1, #22; --- FAIL: TestProbeGate/shadow_unreadable_noted_once: `probegate_test.go:1226: unreadable again: <nil>, 1 notes in "keyroster-agent: probe account keyroster-probe: sshd_override: sshd -T -C repor ...`)
+mutant killed: the opportunistic pair does not note (round 1, #23; --- FAIL: TestProbeGate/shadow_unreadable_noted_by_opportunistic: `probegate_test.go:1256: the opportunistic pair logged 0 notes in "keyroster-agent: ...`)
+mutant killed: a result that stopped before the password stage clears the memory (round 1, #24; --- FAIL: TestProbeGate/shadow_unreadable_noted_once: `probegate_test.go:1235: the account back, shadow still unreadable: <nil>, 3 notes in "keyroster-agent: ... (rerun at aaa9a9e)`)
+mutant killed: the smoke lets the probes use ::1 by listing it first (round 1, #25, CI run 42506871234 on a throwaway branch; --- FAIL: TestAgentSystemdSmoke/role_addition_passes_probes: `agent_systemd_test.go:334: sshd's lines for keyroster-probe do not show the probe source 127.0.0.2 alone (4 lines above)`)
+
+Three specifications were wrong on their first run and were corrected, not counted as survivors: #7 and #14 removed the only use of a variable (a build failure, so no test ran) and now disable the branch with `false &&`; #9 died on the parent `--- FAIL: TestExcludedDefinite` (its table cells fail before the subtest runs) and now names that line. Two mutants survived their first run, #23 (the opportunistic pair's note) and #24 (a passwd-stage result clearing the memory), because no test reached them; 31b5320 added shadow_unreadable_noted_by_opportunistic and the passwd-stop cells, and both then died. 25 mutants in all, 25 killed, none equivalent.
+
+CI of this round, by head:
+- e01e45e: systemd-sandbox run 42505585523 failed in 1m16s: the script's new listen check saw nothing, because sshd -T stopped at `Missing privilege separation directory: /run/sshd` (fixed in e02eba7). The other workflows of that head were superseded.
+- e02eba7: systemd-sandbox run 42506010945 failed: `no first apply under the unit within 150 s`, the self-test found `127.0.0.1:22: connect: connection refused` after ListenAddress 127.0.0.1 (fixed in e14b5b9).
+- e14b5b9: systemd-sandbox run 42506650844 success (TestAgentSystemdSmoke 505.62 s, role_addition_passes_probes 70.09 s; the probe-source lines above).
+- 6f16525 (throwaway mutant branch, not in the PR): systemd-sandbox run 42506871234 failure, as intended (mutant #25).
+- aaa9a9e (the code head of this round), every required check green: CI 42507856048, E2E 42507856056, E2E distro 42507856060, Systemd 42507856051, E2E PKCS#11 42507856054, E2E TPM 42507856087, PIV 42507856093, CodeQL workflow 42507856057, Workflow lint 42507856080, PR title 42507856097. The separate `CodeQL` alert check fails on alert #25 (not required; see CodeQL above).
+- Lanes at aaa9a9e (`go test` elapsed of ./test/e2e): e2e 9.5p1 751.584 s and 10.5p1 773.107 s (cap 900), e2e-probe 9.5p1 279.601 s and 10.5p1 286.412 s (cap 420); systemd-sandbox TestAgentSystemdSmoke 511.30 s (role_addition_passes_probes 60.11 s, the probe lines again `from 127.0.0.2`, none from ::1); e2e-distro jobs 3m58s to 6m33s.
+- The SUMMARY commit that records this round is docs only; its required checks and the e2e gate in `pr` mode on it are reported with the hand-off, not here.
+
+Test-time reading of this round (the command of 'Budget and verify', at 1794160016, after f438a3c..e14b5b9; the base line above is 4.6 h old), base, reading and delta:
+- apply: base 452.742, reading 520.676, delta +67.934
+- fetch: base 33.632, reading 33.494, delta -0.138
+- heartbeat: base 1.057, reading 1.060, delta +0.003
+- serverclient: base 4.191, reading 4.235, delta +0.044
+- agentcmd (cmd/keyroster-agent): base 1.924, reading 1.845, delta -0.079
+- cmd (cmd/keyroster): base 233.517, reading 298.735, delta +65.218
+Both large deltas stay under the +90 s stop, but the reading was not quiet: the tagged `go vet` runs overlapped its first minutes, and a shell wait loop of this round spun one core on the Windows side for about three minutes during it. cmd/keyroster gained no test this round (only the runbook text its gate reads), so its +65 s is load, not cost. apply gained about ten subtests.
+
+Local gates of this round (scripts/linux.sh), on aaa9a9e unless named: `go vet ./internal/agent/apply/`, `go vet` with the tags keyroster_e2e, e2e, `e2e e2eprobe`, `e2e systemdsmoke` and e2edistro, gofmt over the module, golangci-lint for linux, windows and darwin (0 issues each; the first linux run at 31b5320 found gosec G703 in harness_test.go:1020, reached through the new test's read of passwd, which aaa9a9e removed), the e2e lints with `--new-from-rev=origin/main` for `e2e,e2eprobe` and `e2e systemdsmoke` and the distro lint (0 issues), capslock-check, dep-firewall, testonly-firewall and check-pinned-actions (all exit 0), test/capslock unchanged against origin/main, `bash -n test/systemd/agent-smoke.sh`. The `-race` run above (all six packages `ok`, no race) ran at e14b5b9's tree. A second `-race` run at aaa9a9e, with no other local job, of the three packages this round touches: apply 418.155 (base 452.742, delta -34.587), agentcmd 1.726 (delta -0.198), cmd 216.470 (delta -17.047), all `ok`, no race; so the first reading's +68 s and +65 s were load. Plan gates re-run on aaa9a9e: verify 4 (the tag in its six files) exit 0, verify 5 (files gate) exit 0, verify 6 (authors and signatures) exit 0, verify 7 (ROADMAP) exit 0. shellcheck is still not installed (UNVERIFIED as before).
+
 ## For later plans
 
 - 03-10d: Task 1 Deviation 9's behaviour change (a widening on a host whose drop-in is edited or missing at the start of a run is held one round as `sshd_override`, because the account check compares sshd -T -C's trust settings for the probe account before that run repairs the drop-in) is one of the lines 03-10d reconciles, with the served-certificate site, the gate and the hold reasons (Planner decisions D1).
@@ -357,11 +464,13 @@ T4-1. **The delta gate's parser cannot read the first key of the base line.** It
 - 03-16's probe-account handling must read the report-only code `probe_account` and the reason at the start of its Message, as a warning that does not block, and not the two refusal codes probe_account_unparsable and probe_account_is_managed that 03-16-PLAN.md:150 and :391 name (03-16 revises its instruction 3 at its own check; cover-7).
 - Older follow-ups of 'Not done here', unchanged: the sshd `Match User` lockdown for the probe account (later, no plan); a live revocation set for fleets above about 1000 hosts (later, no plan); `TestFetch/more_repolls_immediately` under a parallel `-race` load (a one-file chore); the 16 e2e lint issues under build tags CI never lints (a chore); `pop_hosts_off_fails` of 03-09 (owned by 03-10d, conditional).
 - The delta gate's key pattern (Deviation T4-1) is in this plan's text; a later plan that copies the gate copies the defect.
+- Task 4's ROADMAP gate (verify 7) accepts `[ ]` and `[x]` on the 03-10d row, so a stray tick passes it (fix round 1); a later plan that reuses it should pin the expected box.
+- preflight lists no exclusion of the probe account that is only possible (a `user@host` entry, an AllowGroups list NSS may satisfy); check lists them since fix round 1. 03-10d or 03-16 can add them to preflight as a report-only note.
 
 ## UNVERIFIED
 
 - shellcheck was not run on probe-account.sh, run-in.sh, run.sh or agent-smoke.sh: it is not installed locally and no workflow of the repository runs it (only `sh -n`, `dash -n` and `bash -n` were).
-- systemd's `IPAddressAllow=localhost` admitting 127.0.0.2 is proven on the ubuntu-24.04 runner's systemd only (run 42495385525); other systemd versions, OpenRC and socket-activated layouts stay UNVERIFIED until 03-16.
+- systemd's `IPAddressAllow=localhost` admitting 127.0.0.2 is proven, with the source observed in sshd's log, on the ubuntu-24.04 runner's systemd only (run 42506650844, fix round 1); other systemd versions and OpenRC stay UNVERIFIED until 03-16.
 - A shadow file that the unit's root cannot read: the unit has no capabilities; almalinux:9 ships mode 0000 (a FACT now), but the matrix runs as root with capabilities and the real unit read Ubuntu's 0640 file. A password that root sets later on such a host goes unseen (owner answer Q3).
 - Accounts that exist only in NSS or LDAP (`account_missing` by design; the runbook says so; no test uses a real NSS source).
 - `Match Group` evaluated by `sshd -T -C` through the system's NSS, and Match criteria that the specification cannot reproduce (`Match RDomain`, `Match Host` under UseDNS yes); sshd settings the check does not read are left to the positive probe (the T-03-66 residual).
@@ -369,18 +478,24 @@ T4-1. **The delta gate's parser cannot read the first key of the base line.** It
 - The shadow expiry fields are not read (sec-11): an expired account is refused only by the positive probe, after the addition is live, and `failure_backoff` stops the loop.
 - That sshd -T omits `usepam` on a build without PAM is now a fact on alpine only (the one image without PAM).
 - PerSourcePenalties beyond three pairs at the production spacing; an IPv6-only listener and a `persourcenetblocksize` of /30 or wider (all seven images report 32:128).
-- That the smoke's `LoginGraceTime 10` drop-in applied is inferred from the timing only (Task 3).
+- (No longer UNVERIFIED, fix round 1: the smoke's `LoginGraceTime 10` applied; sshd -T printed `logingracetime 10` in run 42506650844 once `/run/sshd` existed.)
 - The flake fix of D6: five green runs (Task 1) lower the odds and prove nothing about the next.
 - The unit override for another account name: the runbook text is gated, no test starts a unit with an override.
+- An AllowGroups list that a group from SSSD, LDAP or winbind satisfies on a real host (fix round 1): the nsswitch.conf reading is unit-tested only. That glibc's group-list lookup prefers an `initgroups:` line, and how it treats a duplicate `group:` line, is from its documentation, not measured; the check reads every such line and holds only when all list files alone, the no-hold direction. musl hosts (alpine) have no nsswitch.conf and are read as files only.
+- AllowGroups and DenyGroups as single patterns: measured by running the locally built sshd 10.5p1 and 9.5p1 (fix round 1); the OpenSSH source was not available locally, so no source line was checked.
+- The note `probe_shadow_unreadable` from the running applier is unit-tested only: the smoke's Ubuntu shadow file (0640) is readable, so the real unit never logged it (a mode-0000 host is 03-16's).
 - Every host that is not a CI image.
 
 ## Where to resume
 
 - Branch p03/10c-probe-account, pushed; PR #92 open against main, no auto-merge. Tasks 1 to 4 are done up to the owner's merge gate.
-- Next: the pre-merge security review on the green PR (the orchestrator's; Task 4 Publish step 4), then the owner's merge gate. Before the merge only `bash scripts/merge-gate.sh --check p03/10c-probe-account` runs. If main moves first: `git rebase --gpg-sign origin/main`, take origin/main's tracking files, re-apply only this plan's entries, push with lease, and re-run the gates.
+- Fix round 1 of the pre-merge review is done (section 'Fix round 1'); the orchestrator re-reviews and dismisses CodeQL alert #25 (false positive).
+- Next: the owner's merge gate, after the orchestrator's re-review. Before the merge only `bash scripts/merge-gate.sh --check p03/10c-probe-account` runs. If main moves first: `git rebase --gpg-sign origin/main`, take origin/main's tracking files, re-apply only this plan's entries, push with lease, and re-run the gates.
 - The test-time base was measured at at=1794143318 and expires at 1794229718; a re-run of the delta gate after that re-measures it first, in the detached worktree outside the repository at origin/main.
 - Owner question: the delta gate's key pattern (Deviation T4-1).
 
 ## Self-Check: PASSED
 
 The key files exist (account.go with checkProbeAccountFull, probe_test.go with TestDistroProbeFacts, probeaccount_runbook_test.go with TestProbeAccountRunbook, probe-account.sh, the runbook, both plan files), and every commit this SUMMARY names (85eae61 to 0309661) is an ancestor of HEAD.
+
+Fix round 1 self-check: PASSED. The eleven commits of the round (f438a3c to aaa9a9e) are ancestors of HEAD, the throwaway mutant commit 6f16525 is not, its branch is deleted on origin, and the files the round changed exist (exclusion.go with groupsFilesOnly, account.go with noteAccount, drift.go, probegate.go, the four test files, agent_systemd_test.go, agent-smoke.sh, host-setup.md, ROADMAP.md).
