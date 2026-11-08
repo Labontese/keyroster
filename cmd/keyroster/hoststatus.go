@@ -307,6 +307,10 @@ func renderHostsStatus(a *serverclient.HostsStatusAnswer, now time.Time) string 
 			if st.HostCertDetail != "" {
 				alerts = append(alerts, "host_cert: "+safe(st.HostCertDetail))
 			}
+			// The probe self-test's standing code (03-10b), escaped.
+			if st.ProbeDetail != "" {
+				alerts = append(alerts, "probe: "+safe(st.ProbeDetail))
+			}
 			if r.SeqRegressed {
 				alerts = append(alerts, "seq_regressed")
 				notes = append(notes, fmt.Sprintf("%s: seq_regressed: its heartbeats carry a seq below the stored one (its state was reset after its clock ran ahead); the status shown is the stored one until its seq passes it", r.Name))

@@ -280,6 +280,7 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 		s.DropInSHA256 = trust.SHA256Hex(b)
 	}
 	e.hostCertStatus(s)
+	e.probeStatus(s)
 	if u.Swapping {
 		// A swap's status runs nothing (publishPending).
 		if prev != nil {
@@ -304,6 +305,14 @@ func (e *engine) buildStatus(ctx context.Context, u StatusUpdate) (*heartbeat.St
 		a := &heartbeat.LastApply{At: stamp(now), Result: applyResult(u.Report, u.ApplyErr), Rollback: u.Report.Rollback}
 		if len(u.Report.Errors) > 0 {
 			a.Error = heartbeat.Sanitize(u.Report.Errors[0], heartbeat.MaxText)
+		}
+		// 03-10b (G09): the run's probe code, only when it is a valid
+		// detail, so a bad code can never make the server refuse the
+		// heartbeat.
+		if d := u.Report.Detail; heartbeat.ValidDetail(d) {
+			a.Detail = d
+		} else {
+			e.logf("WARNING the apply detail %q is no valid code; it is not sent", d)
 		}
 		// The host status is the committed generation's, not this run's
 		// render's: a no-op apply (the first round after a restart) or a
@@ -351,6 +360,7 @@ var refusals = []error{
 	ErrForeignTrust, ErrRHEL8, ErrFIPS, ErrHostPoPNotEnabled, ErrConfigUnsafe, ErrSSHKeygenMissing,
 	ErrCALineRejected, ErrKRLInvalid, ErrKRLRejected, ErrKRLDropsKeyEntry, ErrPendingStateUnknown,
 	ErrLoginGraceUnbounded, ErrLoginGraceUnknown, ErrStateDirUnsafe, ErrGenerationTooLarge,
+	ErrProbeHeld,
 }
 
 // applyResult is last_apply.result: rolled_back after a rollback, ok

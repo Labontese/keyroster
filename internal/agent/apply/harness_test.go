@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,8 +29,11 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/Labontese/keyroster/internal/agent/execsite"
+	probecert "github.com/Labontese/keyroster/internal/agent/probe"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
+	certpkg "github.com/Labontese/keyroster/internal/cert"
+	"github.com/Labontese/keyroster/internal/certprofile"
 	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -71,6 +75,9 @@ type fixture struct {
 	// krlHostSerials are host-CA serials every later KRL also revokes
 	// (03-09).
 	krlHostSerials []uint64
+	// krlMachSerials are machine-CA serials every later KRL also revokes:
+	// negative probe certificates (03-10b).
+	krlMachSerials []uint64
 }
 
 func newFixture(t testing.TB) *fixture {
@@ -247,6 +254,9 @@ func (f *fixture) krlWithHeader(serials []uint64, keys []ssh.PublicKey, id strin
 	}
 	if len(f.krlHostSerials) > 0 {
 		set.Certs = append(set.Certs, krl.CertSection{CAKey: f.host.PublicKey(), Serials: f.krlHostSerials})
+	}
+	if len(f.krlMachSerials) > 0 {
+		set.Certs = append(set.Certs, krl.CertSection{CAKey: f.mach.PublicKey(), Serials: f.krlMachSerials})
 	}
 	b, err := krl.Encode(set, header, time.Unix(int64(f.krlVersion), 0)) //nolint:gosec // G115: a test version
 	if err != nil {
@@ -780,6 +790,10 @@ type testHost struct {
 	cfg   Config
 	dirs  []spool.Doc
 	state spool.State
+	// probeMu guards queries, the probe queries sshdProbe answered
+	// (03-10b).
+	probeMu sync.Mutex
+	queries []ProbeTarget
 }
 
 func newTestHost(t *testing.T, f *fixture) *testHost {
@@ -826,6 +840,10 @@ func newTestHostIn(t *testing.T, f *fixture, base string) *testHost {
 	}
 	h.cfg = Config{Spool: h.spool, SSHD: filepath.Join(bin, "sshd"), SSHDConfig: sshdConfig, SSHKeygen: filepath.Join(bin, "ssh-keygen"),
 		Reload: "openrc", SelfTestTimeout: 2 * time.Second, Clock: h.clock, Exec: h.run}
+	// 03-10b: the probe self-test is off for every existing apply test, so
+	// no generation gains a probe file and no widening is gated; the probe
+	// tests switch it on again.
+	h.cfg.probeOff = true
 	h.state = f.genesis()
 	return h
 }
@@ -940,4 +958,151 @@ func (h *testHost) installed(principals ...string) *Report {
 		h.t.Fatalf("after the first install current %d, last-good %d", h.current(), h.lastGood())
 	}
 	return r
+}
+
+// probeLogin is the probe account of the gate tests (03-10b): the default
+// name, a uid that is not 0 and the nologin shell.
+const probeLogin = certpkg.ReservedAccountName + ":x:990:990::/nonexistent:/usr/sbin/nologin"
+
+// gateOn switches h's probe self-test on (03-10b) and writes the passwd
+// fixture with the probe account and an executable nologin under the root.
+func (h *testHost) gateOn() {
+	h.t.Helper()
+	h.cfg.probeOff = false
+	h.cfg.SelfTestTimeout = time.Second
+	h.writePasswd("root:x:0:0:root:/root:/bin/bash\n" + probeLogin + "\n")
+	h.writeRootFile("usr/sbin/nologin", []byte("#!/bin/false\n"), 0o755)
+	h.cfg.probeQuery = h.sshdProbe
+}
+
+// sshdProbe answers a probe query as sshd does against the generation
+// current names (03-10b): accepted when the certificate's principal is in
+// the account's principals file, its CA key is in user_ca_keys and the KRL
+// does not revoke its serial; refused otherwise. It records the query.
+func (h *testHost) sshdProbe(_ context.Context, t ProbeTarget, c *ssh.Certificate, _ time.Time) (ProbeOutcome, error) {
+	h.probeMu.Lock()
+	h.queries = append(h.queries, t)
+	h.probeMu.Unlock()
+	g, _, err := h.engine().readCurrent()
+	if err != nil || g == nil {
+		return ProbeInconclusive, fmt.Errorf("no current generation: %w", err)
+	}
+	if len(c.ValidPrincipals) != 1 || !lineSet(g.Files[PrincipalsDir+"/"+t.Account], principalLine)[c.ValidPrincipals[0]] ||
+		!slices.ContainsFunc(genCAKeys(g), func(k ssh.PublicKey) bool { return bytes.Equal(k.Marshal(), c.SignatureKey.Marshal()) }) {
+		return ProbeRefused, nil
+	}
+	if k := genKRL(g); k != nil && k.RevokesSerial(c.SignatureKey.Marshal(), c.Serial) {
+		return ProbeRefused, nil
+	}
+	return ProbeAccepted, nil
+}
+
+// probeQueries is the probe queries sshdProbe answered so far.
+func (h *testHost) probeQueries() []ProbeTarget {
+	h.probeMu.Lock()
+	defer h.probeMu.Unlock()
+	return slices.Clone(h.queries)
+}
+
+// writePasswd writes <root>/etc/passwd.
+func (h *testHost) writePasswd(content string) {
+	h.t.Helper()
+	h.writeRootFile("etc/passwd", []byte(content), 0o644)
+}
+
+// writeRootFile writes name below the layout root with mode.
+func (h *testHost) writeRootFile(name string, b []byte, mode os.FileMode) {
+	h.t.Helper()
+	p := filepath.Join(h.l.Root, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { //nolint:gosec // test fixture
+		h.t.Fatal(err)
+	}
+	if err := os.WriteFile(p, b, mode); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// probeSerial numbers the probe certificates the fixture signs.
+var probeSerial atomic.Uint64
+
+// signProbeFor signs a probe certificate for the host named host (web1,
+// or a name the entry had before a rename: PR #91 review F1) with the
+// fixture's machine CA, as the signer does: certprofile.ProbeProfile, the
+// kr3 key ID of the probe subject, the probe principal and options,
+// backdated five minutes by cert.Build, valid for lifetime from the fake
+// clock's now.
+func (h *testHost) signProbeFor(host string, lifetime time.Duration, ca ssh.Signer) *ssh.Certificate {
+	h.t.Helper()
+	prof, err := certprofile.ProbeProfile(h.f.policy)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	key, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	serial := 1_795_000_000_000_000 + probeSerial.Add(1)
+	c, err := certpkg.Build(certpkg.Request{
+		Profile: prof, Subject: key, Principals: []string{certpkg.ReservedPrincipalPrefix + host}, Now: h.clock.Now(),
+		ValidFor: lifetime, Serial: serial,
+		KeyID:           certpkg.KeyID{V3: true, CA: "machine", Subject: "probe." + host, Request: strings.Repeat("ab", 16), Policy: 1, Directory: 1, Serial: serial},
+		CriticalOptions: certprofile.ProbeCriticalOptions()}, ca, rand.Reader)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return c
+}
+
+// seedPair signs a probe pair with the machine CA (lifetime from now) and
+// stores it as <state>/probe.json's committed pair (next when next is
+// set), through the engine's writer. It returns the pair.
+func (h *testHost) seedPair(lifetime time.Duration, next bool) probecert.Pair {
+	h.t.Helper()
+	return h.storePair(probecert.Pair{Positive: h.probeCert(lifetime, h.f.mach), Negative: h.probeCert(lifetime, h.f.mach)}, next)
+}
+
+// probeCert is a signed probe certificate as probe.json keeps it.
+func (h *testHost) probeCert(lifetime time.Duration, ca ssh.Signer) *probecert.Cert {
+	h.t.Helper()
+	return h.probeCertFor("web1", lifetime, ca)
+}
+
+// probeCertFor is probeCert for the host named host.
+func (h *testHost) probeCertFor(host string, lifetime time.Duration, ca ssh.Signer) *probecert.Cert {
+	h.t.Helper()
+	c := h.signProbeFor(host, lifetime, ca)
+	return probecert.NewCert(c, c.ValidAfter+300+uint64(lifetime/time.Second)*2/3) //nolint:gosec // G115: a positive test lifetime
+}
+
+// storePair writes p as probe.json's committed (or next) pair, keeping the
+// rest of the record.
+func (h *testHost) storePair(p probecert.Pair, next bool) probecert.Pair {
+	h.t.Helper()
+	e := h.engine()
+	e.locked = true
+	rec := e.readProbeRecord()
+	if next {
+		rec.Next = p
+	} else {
+		rec.Committed = p
+	}
+	if err := e.saveProbeRecord(rec); err != nil {
+		h.t.Fatal(err)
+	}
+	return p
+}
+
+// listMach makes every later KRL of the fixture list serials under the
+// machine CA key (negative probe certificates) and offers the next one.
+func (h *testHost) listMach(serials ...uint64) {
+	h.t.Helper()
+	h.f.krlMachSerials = append(h.f.krlMachSerials, serials...)
+	h.publishKRL()
 }

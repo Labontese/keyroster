@@ -316,3 +316,70 @@ func TestValidateHostCerts(t *testing.T) {
 		t.Fatalf("a heartbeat without the fields: %v %+v", err, h)
 	}
 }
+
+// TestValidDetail pins the detail grammar every emitted code passes
+// (03-10b): empty is absent, one optional colon, lowercase, at most
+// MaxDetail bytes.
+func TestValidDetail(t *testing.T) {
+	for _, c := range []struct {
+		s  string
+		ok bool
+	}{
+		{"", true},
+		{"probe_self_test_off", true},
+		{"probe_held:cert_missing", true},
+		{"probe_issue:refused_probe_issue_valid_for_not_zero", true},
+		{strings.Repeat("a", MaxDetail), true},
+		{strings.Repeat("a", MaxDetail+1), false},
+		{"probe_held:a:b", false},
+		{"Probe_held", false},
+		{"probe held", false},
+		{":cert_missing", false},
+		{"probe_held:", false},
+		{"probe\x1b", false},
+	} {
+		if got := ValidDetail(c.s); got != c.ok {
+			t.Errorf("ValidDetail(%q) = %t, want %t", c.s, got, c.ok)
+		}
+	}
+}
+
+// TestValidateProbeDetail: probe_detail is validated like
+// host_cert_detail, round-trips through ParseHeartbeat, is omitted when
+// empty, and an unknown top-level field is still refused (03-10b).
+func TestValidateProbeDetail(t *testing.T) {
+	ok := full()
+	ok.ProbeDetail = "probe_held:shell_not_nologin"
+	if err := Validate(&ok); err != nil {
+		t.Fatalf("a status with probe_detail: %v", err)
+	}
+	for _, bad := range []string{"probe_held:a:b", "Probe_held", strings.Repeat("a", MaxDetail+1), "probe\x1b[2J"} {
+		s := full()
+		s.ProbeDetail = bad
+		if err := Validate(&s); !errors.Is(err, ErrFieldInvalid) || Field(err) != "probe_detail" {
+			t.Errorf("probe_detail %q: %v, want heartbeat_field_invalid naming probe_detail", bad, err)
+		}
+	}
+	bound := full()
+	bound.ProbeDetail = strings.Repeat("a", MaxDetail)
+	if err := Validate(&bound); err != nil {
+		t.Fatalf("a 64-byte probe_detail: %v", err)
+	}
+	b, err := trust.CanonicalJSON(Heartbeat{Status: ok, ClockOffsetS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, err := ParseHeartbeat(b); err != nil || h.Status.ProbeDetail != ok.ProbeDetail {
+		t.Fatalf("round trip: %v %+v", err, h)
+	}
+	b, err = trust.CanonicalJSON(Heartbeat{Status: full(), ClockOffsetS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `"probe_detail"`) {
+		t.Fatalf("an empty probe_detail is encoded: %s", b)
+	}
+	if _, err := ParseHeartbeat([]byte(strings.Replace(string(b), `"clock_offset_s"`, `"probe_extra":"x","clock_offset_s"`, 1))); !errors.Is(err, ErrFieldInvalid) {
+		t.Fatalf("an unknown top-level field: %v", err)
+	}
+}

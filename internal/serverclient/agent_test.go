@@ -1,7 +1,11 @@
 package serverclient
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"testing"
 )
 
@@ -44,5 +48,48 @@ func TestAgentStateCheckSince(t *testing.T) {
 				t.Fatalf("CheckSince(%+v): %v, want ok %t", tc.since, err, tc.ok)
 			}
 		})
+	}
+}
+
+// TestAgentProbeCert (03-10b): the client posts the request bytes as
+// base64 JSON to AgentProbeCertPath, returns the certificate of a 200, and
+// a 403's detail through HTTPError.Detail.
+func TestAgentProbeCert(t *testing.T) {
+	root := newRoot(t, "probe root")
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	refuse := false
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		gotBody = nil
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set(CustodyHeader, agentCustody)
+		w.Header().Set("Content-Type", "application/json")
+		if refuse {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"probe_cert_recent"}` + "\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`{"certificate":"` + base64.StdEncoding.EncodeToString([]byte("cert bytes")) + `"}` + "\n"))
+	})
+	c := clientFor(t, startTLS(t, root.validLeaf(t), h), root, nil)
+	a, err := c.AgentProbeCert(context.Background(), &AgentProbeCertRequest{Request: []byte("request bytes")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != AgentProbeCertPath || gotMethod != http.MethodPost {
+		t.Fatalf("%s %s, want POST %s", gotMethod, gotPath, AgentProbeCertPath)
+	}
+	if gotBody["request"] != base64.StdEncoding.EncodeToString([]byte("request bytes")) || len(gotBody) != 1 {
+		t.Fatalf("body %v", gotBody)
+	}
+	if string(a.Certificate) != "cert bytes" {
+		t.Fatalf("certificate %q", a.Certificate)
+	}
+	refuse = true
+	_, err = c.AgentProbeCert(context.Background(), &AgentProbeCertRequest{Request: []byte("request bytes")})
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Code != http.StatusForbidden || he.Detail() != "probe_cert_recent" {
+		t.Fatalf("a 403: %v", err)
 	}
 }

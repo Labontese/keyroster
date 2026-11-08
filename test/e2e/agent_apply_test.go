@@ -58,7 +58,9 @@ func agentBin(t *testing.T) string {
 			return
 		}
 		agentBinPath = filepath.Join(filepath.Dir(keyrosterBin), "keyroster-agent")
-		cmd := exec.Command("go", "build", "-trimpath", "-o", agentBinPath, "./cmd/keyroster-agent")
+		// 03-10b: the e2e test build, whose --probe-self-test off the harness
+		// passes for every host but the probe tests' own.
+		cmd := exec.Command("go", "build", "-trimpath", "-tags", "keyroster_e2e", "-o", agentBinPath, "./cmd/keyroster-agent") //nolint:gosec // G204: the go tool on a test-chosen output path
 		cmd.Dir = root
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -149,6 +151,29 @@ type agentHost struct {
 	signer               *signerEnv
 	root, state, spoolDr string
 	sshd                 *includeSSHD
+	// probeSelfTest and probeAccount are the applier's probe flags
+	// (03-10b): empty probeSelfTest is off (probeMode), probeAccount empty
+	// leaves the default.
+	probeSelfTest, probeAccount string
+}
+
+// probeMode is the --probe-self-test value for h: off unless a probe test
+// set it (the agentHost literals of newEnrolledHostLayout never go through
+// newAgentHost).
+func (h *agentHost) probeMode() string {
+	if h.probeSelfTest == "" {
+		return "off"
+	}
+	return h.probeSelfTest
+}
+
+// probeArgs are the probe flags of h's apply and run.
+func (h *agentHost) probeArgs() []string {
+	args := []string{"--probe-self-test", h.probeMode()}
+	if h.probeAccount != "" {
+		args = append(args, "--probe-account", h.probeAccount)
+	}
+	return args
 }
 
 func newAgentHost(t *testing.T, env *signerEnv, sshdExtra ...string) *agentHost {
@@ -230,9 +255,9 @@ func (h *agentHost) refreshSpool(t *testing.T) {
 func (h *agentHost) applyArgs(t *testing.T) []string {
 	t.Helper()
 	prefix := opensshPrefix(t)
-	return []string{"apply", "--once", "--spool", h.spoolDr, "--state-dir", h.state, "--root", h.root,
+	return append([]string{"apply", "--once", "--spool", h.spoolDr, "--state-dir", h.state, "--root", h.root,
 		"--sshd", filepath.Join(prefix, "sbin", "sshd"), "--sshd-config", h.sshd.cfg,
-		"--ssh-keygen", filepath.Join(prefix, "bin", "ssh-keygen"), "--reload", "signal"}
+		"--ssh-keygen", filepath.Join(prefix, "bin", "ssh-keygen"), "--reload", "signal"}, h.probeArgs()...)
 }
 
 // agentRun is one keyroster-agent apply --once, started by start.

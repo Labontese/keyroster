@@ -146,21 +146,27 @@ func TestAgentSystemdSmoke(t *testing.T) {
 	}
 	t.Logf("certificate %s (serial %s, role:ops) logs in as %s to the runner's ssh.service on 127.0.0.1:22", c.cert, c.serial, account)
 
+	// 03-10b: a probe negative's first publish can move the KRL between
+	// the JSON read and the text read, so each iteration reads both again
+	// and accepts only a text that names the fresh JSON's KRL version; a
+	// disagreement that lasts past the deadline still fails.
 	var a serverclient.HostsStatusAnswer
-	for deadline := time.Now().Add(150 * time.Second); ; time.Sleep(5 * time.Second) {
+	var text string
+	// 270 s: the probe negative's first KRL commits about one fetch poll
+	// after the first install, and that poll's heartbeat precedes the apply.
+	for deadline := time.Now().Add(270 * time.Second); ; time.Sleep(5 * time.Second) {
 		if err := json.Unmarshal([]byte(kr("host", "status", "--json")), &a); err != nil {
 			t.Fatal(err)
 		}
 		if len(a.Hosts) == 1 && a.Hosts[0].Heartbeat != nil && a.Hosts[0].Heartbeat.Status.Committed(a.Current.Docs()) {
-			break
+			text = kr("host", "status")
+			if strings.Contains(text, "KRL v"+strconv.FormatUint(a.Current.KRL, 10)+" on 1/1 hosts\n") {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no heartbeat on the current versions within 150 s: %+v\njournal:\n%s", a, journal(t, since))
+			t.Fatalf("no heartbeat on the current versions, with the text status naming them, within 270 s: %+v\nhost status:\n%s\njournal:\n%s", a, text, journal(t, since))
 		}
-	}
-	text := kr("host", "status")
-	if !strings.Contains(text, "KRL v"+strconv.FormatUint(a.Current.KRL, 10)+" on 1/1 hosts\n") {
-		t.Fatalf("host status:\n%s", text)
 	}
 	t.Logf("keyroster host status under systemd:\n%s", text)
 	// Identity rotation with the real users, while the unit polls: root

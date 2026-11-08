@@ -300,8 +300,10 @@ func service() []string {
 	return []string{"--root", "/", "--sshd", sshdBin, "--sshd-config", sshdConfig, "--ssh-keygen", keygen}
 }
 
+// applyArgs switch the probe self-test off (03-10b): the matrix's probe
+// tests are 03-10c's, and run.sh builds the agent as the e2e test build.
 func applyArgs() []string {
-	return append(append([]string{"apply", "--once", "--spool", spoolDir, "--state-dir", stateDir}, service()...), "--reload", "signal")
+	return append(append([]string{"apply", "--once", "--spool", spoolDir, "--state-dir", stateDir}, service()...), "--reload", "signal", "--probe-self-test", "off")
 }
 
 func preflightArgs(withState bool) []string {

@@ -300,6 +300,11 @@ func (f *Fetcher) Once(ctx context.Context) error {
 	if err := f.postHostCerts(ctx); err != nil {
 		f.logf("ERROR %v", err)
 	}
+	// The probe certificate requests after the host certificate ones
+	// (03-10b).
+	if err := f.postProbeCerts(ctx); err != nil {
+		f.logf("ERROR %v", err)
+	}
 	return f.sendHeartbeat(ctx)
 }
 

@@ -33,6 +33,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	"github.com/Labontese/keyroster/internal/agent/paths"
+	probecert "github.com/Labontese/keyroster/internal/agent/probe"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -137,6 +138,21 @@ type Config struct {
 	// Fault is a test hook called before every durable step; an error
 	// from it stops the run there, as a crash would.
 	Fault func(point string) error
+	// ProbeAccount is the probe account of the probe self-test (03-10b,
+	// D-06); empty means cert.ReservedAccountName.
+	ProbeAccount string
+
+	// probeOff switches the probe self-test off. Only the unit-test
+	// harness and DisableProbes, which exists only in the e2e test build,
+	// set it, so the zero value of every default build fails closed
+	// (T-03-243). probeQuery is the seam of every probe query (nil:
+	// ProbeQuery), probeRand the random source of probe requests (nil:
+	// crypto/rand) and probeKeygen their key generator (nil:
+	// ed25519.GenerateKey).
+	probeOff    bool
+	probeQuery  func(ctx context.Context, t ProbeTarget, c *ssh.Certificate, deadline time.Time) (ProbeOutcome, error)
+	probeRand   io.Reader
+	probeKeygen probecert.KeyGen
 }
 
 // Report is what one run did, printed as JSON and kept in status.json.
@@ -156,12 +172,22 @@ type Report struct {
 	// review D-R1): "systemctl try-reload-or-restart ssh.service" on a
 	// socket-activated host, where systemd decides whether a running sshd
 	// re-reads.
-	ReloadActions    []string `json:"reload_actions,omitempty"`
-	SelfTest         string   `json:"self_test"`
-	Rollback         bool     `json:"rollback"`
-	RollbackSelfTest string   `json:"rollback_self_test,omitempty"`
-	Recovered        bool     `json:"recovered"`
-	NoOp             bool     `json:"no_op"`
+	ReloadActions []string `json:"reload_actions,omitempty"`
+	SelfTest      string   `json:"self_test"`
+	// Detail is the run's probe self-test code (03-10b): probe_held:<reason>,
+	// a probe failure, served_cert_mismatch or probe_self_test_off;
+	// last_apply.detail carries it when heartbeat.ValidDetail accepts it.
+	Detail string `json:"detail,omitempty"`
+	// ProbePositive and ProbeNegative are the probes' results: pass,
+	// fail, inconclusive or skipped:<why>; ServedCerts the
+	// served-certificate check's (03-10b).
+	ProbePositive    string `json:"probe_positive,omitempty"`
+	ProbeNegative    string `json:"probe_negative,omitempty"`
+	ServedCerts      string `json:"served_certs,omitempty"`
+	Rollback         bool   `json:"rollback"`
+	RollbackSelfTest string `json:"rollback_self_test,omitempty"`
+	Recovered        bool   `json:"recovered"`
+	NoOp             bool   `json:"no_op"`
 	// BundleHeld: a newer bundle in the spool waits for the next run,
 	// because the newest directory verifies only under an earlier policy
 	// (state.Verified.BundleHeld).
@@ -307,6 +333,11 @@ func Apply(ctx context.Context, cfg Config, l Layout) (*Report, error) {
 		cfg.Exec = execsite.ExecRunner{}
 	}
 	r := &Report{Errors: []string{}}
+	if cfg.probeOff {
+		// 03-10b: a run with the probe self-test off says so, and does
+		// nothing else differently here.
+		r.Detail, r.ProbePositive, r.ProbeNegative = DetailProbeSelfTestOff, probeSkippedOff, probeSkippedOff
+	}
 	e := &engine{cfg: cfg, l: l, clock: cfg.Clock, report: r, stateFd: -1}
 	err := e.apply(ctx)
 	if err != nil {
@@ -350,6 +381,9 @@ func (e *engine) apply(ctx context.Context) error {
 		if !filepath.IsAbs(p) {
 			return fmt.Errorf("%w: %q is not an absolute path", ErrConfig, p)
 		}
+	}
+	if err := checkProbeAccountName(e.cfg.ProbeAccount); err != nil {
+		return err
 	}
 	if err := CheckReload(e.cfg.Reload); err != nil {
 		return err
@@ -564,6 +598,8 @@ func (e *engine) activatePreRepair(ctx context.Context) error {
 		return err
 	}
 	e.dropInRepaired = true
+	// The listener test alone: only forward runs the probes (03-10b,
+	// TestProbeSites).
 	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
 		e.report.SelfTest = "fail: " + err.Error()
 		return err
@@ -620,6 +656,8 @@ func (e *engine) repairDropIn(ctx context.Context) error {
 		}
 	}
 	e.dropInRepaired = true
+	// The listener test alone: only forward runs the probes (03-10b,
+	// TestProbeSites).
 	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
 		e.report.SelfTest = "fail: " + err.Error()
 		return err
@@ -844,13 +882,37 @@ func (e *engine) forward(ctx context.Context) error {
 		e.logf("WARNING %v; the held step is applied, and the KRL in force stays", v.KRLRefused)
 	}
 	e.report.BundleHeld = v.BundleHeld
+	// 03-10b: last-good is resolved once, for the probe classification and
+	// the first-install check below; a held addition (or a probe-state.json
+	// that does not read) makes an unchanged capture render again.
+	lg, err := e.resolveLink(e.l.LastGood())
+	if err != nil {
+		return err
+	}
+	held := e.heldPresent()
 	var g, cur *Generation
 	var curLink link
+	// heldReason is the gate's hold of this pass's candidate ("" for none);
+	// heldCollapsed: the held candidate's intermediate equals current, so
+	// only its versions are committed.
+	var heldReason string
+	var heldCollapsed bool
+	// gated: the target passed the probe gate as a widening, so its probes
+	// run after the final swap; class is the final target's (03-10b, Task
+	// 4: both belong to the final target, Fix round 3 r2-6).
+	var gated bool
+	var class probeClass
 	for {
+		heldReason, heldCollapsed, gated = "", false, false
+		if e.probesOn() {
+			// A pass starts with no probe result: a KRL-alone pass after a
+			// held candidate must not report the earlier pass's hold.
+			e.report.Detail, e.report.ProbePositive, e.report.ProbeNegative = "", "", ""
+		}
 		// F03 (03-08f): while the stored directory is unauthorized, an
 		// unchanged capture is rendered too, so principals installed before
 		// are removed; a render equal to current is the no-op below.
-		if !v.Changed() && v.DirectoryUnauthorized == nil {
+		if !v.Changed() && v.DirectoryUnauthorized == nil && !held {
 			// The no-op includes the drop-in's spec (03-09, D1): one that
 			// differs from wantDropIn is repaired first.
 			if err := e.repairNoOp(ctx, v, nil); err != nil {
@@ -882,6 +944,8 @@ func (e *engine) forward(ctx context.Context) error {
 					return err
 				}
 				e.report.NoOp = !e.dropInRepaired
+				// 03-10b: a held addition that is in force already.
+				e.clearHeld()
 				if curLink.kind != linkAgent {
 					cur = nil
 				}
@@ -896,7 +960,45 @@ func (e *engine) forward(ctx context.Context) error {
 				e.report.Diff = diff(cur, g)
 				return outcome(v)
 			}
-			if cur != nil && sameBytes(cur, g) {
+			// 03-10b (owner decision Q2): an addition waits for the probe
+			// gate before any generation is allocated; a held one lands its
+			// narrowing part and every KRL through the intermediate, with the
+			// held record written first.
+			class = classify(lg, cur, g, e.probeAccount())
+			e.labelExempt(class)
+			if e.probesOn() && needsGate(class) {
+				gated = true
+				if reason := e.probeGate(ctx, cur, g, v); reason != "" {
+					gated = false
+					m, collapsed := Intermediate(cur, g)
+					if err := e.hold(reason, v); err != nil {
+						return err
+					}
+					heldReason = reason
+					switch {
+					case collapsed && !v.Changed():
+						// A retry: current is the narrowing part already. The
+						// drop-in's spec is repaired as on a no-op (03-09, D1,
+						// D-R2), so an edited drop-in does not stay edited for
+						// as long as the addition is held (PR #91 review, F6);
+						// a drop-in that is right writes nothing.
+						if err := e.repairNoOp(ctx, v, g); err != nil {
+							return err
+						}
+						e.setVersions(v, cur)
+						return heldOutcome(outcome(v), heldReason)
+					case collapsed:
+						heldCollapsed = true
+					default:
+						m.Host, m.HostStatus = g.Host, g.HostStatus
+						g = m
+					}
+				}
+			}
+			if heldReason == "" && cur != nil && sameContent(cur, g) {
+				e.clearHeld()
+			}
+			if cur != nil && (sameBytes(cur, g) || heldCollapsed) {
 				// The new versions change nothing on disk: store them. The
 				// render's host status is the one in force now (a removed
 				// entry listed again under other keys keeps the same, empty,
@@ -914,7 +1016,10 @@ func (e *engine) forward(ctx context.Context) error {
 				if err := e.commit(curLink.n, v); err != nil {
 					return err
 				}
-				return outcome(v)
+				if heldReason == "" {
+					e.clearHeld()
+				}
+				return heldOutcome(outcome(v), heldReason)
 			}
 			g.N = e.allocGeneration()
 			if err := e.installGeneration(g); err != nil {
@@ -939,15 +1044,12 @@ func (e *engine) forward(ctx context.Context) error {
 		}
 		e.report.DirectoryUnauthorized = v.DirectoryUnauthorized != nil
 	}
-	lg, err := e.resolveLink(e.l.LastGood())
-	if err != nil {
-		return err
-	}
 	if lg.kind == linkNone {
 		e.setVersions(v, g)
 		if err := e.firstInstall(ctx, g, v); err != nil {
 			return err
 		}
+		e.clearHeld()
 		return outcome(v)
 	}
 	target, tv := g, v
@@ -955,13 +1057,36 @@ func (e *engine) forward(ctx context.Context) error {
 		return e.pollSpool(ctx, tv, target)
 	}
 	defer func() { e.poll = nil }()
+	// substituted: the target is the intermediate a hold landed, not a full
+	// candidate, so its commit leaves the held record (03-10b).
+	substituted, reclassify := heldReason != "", false
+	// preN is the generation live just before the final widening swap: the
+	// last pass's intermediate, or its from when that pass collapsed. A
+	// failed gated addition settles on it when its content fits (D13).
+	var preN uint64
 	for {
 		from, _, err := e.readCurrent()
 		if err != nil {
 			return e.rollback(ctx, err, lg)
 		}
+		if reclassify {
+			// 03-10b: a superseding target is classified and gated again,
+			// against the generation current names now (every way back to
+			// the top of the loop is a supersede).
+			t, reason, c, g2, done, err := e.gateSuperseded(ctx, lg, from, target, tv)
+			if err != nil {
+				return e.rollback(ctx, err, lg)
+			}
+			target, heldReason, substituted, class, gated = t, reason, reason != "", c, g2
+			if done {
+				break
+			}
+		}
 		mid, err := e.Transition(ctx, from, target, swapPolled)
 		e.report.Intermediate = mid
+		if preN = mid; preN == 0 && from != nil {
+			preN = from.N
+		}
 		var s *superseded
 		if errors.As(err, &s) {
 			e.logf("a newer state arrived during the wait; moving to generation %d", s.gen.N)
@@ -985,6 +1110,7 @@ func (e *engine) forward(ctx context.Context) error {
 			if tv.BundleChanged || tv.DirectoryChanged {
 				e.report.BundleHeld = tv.BundleHeld
 			}
+			reclassify = true
 			continue
 		}
 		if err != nil {
@@ -1011,10 +1137,44 @@ func (e *engine) forward(ctx context.Context) error {
 		return e.rollback(ctx, err, lg)
 	}
 	e.report.SelfTest = "pass"
+	// 03-10b (D-06, owner decision Q2): the served certificates after a
+	// changed drop-in, then a gated addition's probes. Either failure rolls
+	// back the addition alone (settleFailedAddition); for any other change
+	// the served-certificate result is report only (P6).
+	if e.probesOn() {
+		if !changed {
+			e.report.ServedCerts = "skipped:drop_in_unchanged"
+		} else if err := e.servedCertCheck(ctx); err != nil {
+			e.logf("WARNING %v", err)
+			if gated {
+				_, line := checkProbeAccount(e.l.Root, e.probeAccount())
+				pair, _ := e.probePair(e.readProbeRecord(), target.Host, e.clock.Now().Add(e.cfg.SelfTestTimeout), genKRL(target), genCAKeys(target))
+				st, serr := e.loadProbeState()
+				if serr == nil {
+					serr = e.recordFailure(st, DetailServedCertMismatch, failureKey(target, pair, line))
+				}
+				return e.settleFailedAddition(ctx, errors.Join(err, serr), lg, target, tv, preN)
+			}
+		}
+	}
+	if gated {
+		if err := e.runProbes(ctx, target, true); err != nil {
+			if code := probeFailureCode(err); code != "" {
+				e.report.Detail = code
+			}
+			return e.settleFailedAddition(ctx, err, lg, target, tv, preN)
+		}
+	}
 	if err := e.commit(target.N, tv); err != nil {
 		return err
 	}
-	return outcome(tv)
+	if !substituted {
+		e.clearHeld()
+	}
+	if e.probesOn() && !gated && heldReason == "" && (class == classNarrowing || class == classProbeFileOnly) {
+		e.opportunistic(ctx, target)
+	}
+	return heldOutcome(outcome(tv), heldReason)
 }
 
 // setVersions reports v's versions; the KRL version is g's when g (the
@@ -1067,6 +1227,11 @@ func (e *engine) render(v *state.Verified) (*Generation, error) {
 					g.Host = rec.Host
 				}
 			}
+		}
+		// 03-10b: an active host's render gains the probe account's file
+		// (never a trust-only render).
+		if v.DirectoryUnauthorized == nil {
+			e.addProbeFile(g)
 		}
 		return g, nil
 	}
@@ -1140,7 +1305,7 @@ func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*G
 		return nil, err
 	}
 	e.keepKRL(g, cur, curLink)
-	if err := checkCandidate(g, cur, curLink); err != nil {
+	if err := checkCandidate(g, cur, curLink, e.fixedPrincipals()); err != nil {
 		return nil, err
 	}
 	return g, nil
@@ -1544,6 +1709,8 @@ func (e *engine) backToLastGood(ctx context.Context, lg link) error {
 			return err
 		}
 	}
+	// The listener test alone: only forward runs the probes (03-10b,
+	// TestProbeSites).
 	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
 		e.report.RollbackSelfTest = "fail: " + err.Error()
 	} else {
@@ -1643,6 +1810,8 @@ func (e *engine) firstInstall(ctx context.Context, g *Generation, v *state.Verif
 			return e.failFirstInstall(ctx, err)
 		}
 	}
+	// The listener test alone: only forward runs the probes (03-10b,
+	// TestProbeSites).
 	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
 		e.report.SelfTest = "fail: " + err.Error()
 		return e.failFirstInstall(ctx, err)
@@ -1688,6 +1857,8 @@ func (e *engine) undoFirstInstall(ctx context.Context, cur link) error {
 			return err
 		}
 	}
+	// The listener test alone: only forward runs the probes (03-10b,
+	// TestProbeSites).
 	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
 		e.report.RollbackSelfTest = "fail: " + err.Error()
 	} else {
@@ -1786,6 +1957,8 @@ func (e *engine) recoverToLastGood(ctx context.Context, m *marker, cur, lg link)
 			return err
 		}
 	}
+	// The listener test alone: only forward runs the probes (03-10b,
+	// TestProbeSites).
 	if err := e.selfTest(ctx, e.dump, e.keys); err != nil {
 		e.report.RollbackSelfTest = "fail: " + err.Error()
 	} else {

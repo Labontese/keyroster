@@ -149,6 +149,7 @@ func (e *enrolledHost) startRun(t *testing.T) {
 	runArgs := []string{"run", "--state-dir", h.state, "--root", h.root,
 		"--sshd", filepath.Join(prefix, "sbin", "sshd"), "--sshd-config", h.sshd.cfg,
 		"--ssh-keygen", filepath.Join(prefix, "bin", "ssh-keygen"), "--reload", "signal", "--interval", "1s"}
+	runArgs = append(runArgs, h.probeArgs()...)
 	e.runCmd, e.run, e.runDone = startDaemon(t, "keyroster-agent run", envWithout("SSH_AUTH_SOCK"), agentBin(t), runArgs...)
 }
 

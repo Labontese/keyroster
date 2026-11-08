@@ -26,7 +26,8 @@ trap 'rm -rf "$work"' EXIT
 
 (
 	cd "$repo"
-	CGO_ENABLED=0 GOOS=linux go build -trimpath -o "$work/keyroster-agent" ./cmd/keyroster-agent
+	# 03-10b: the e2e test build, so applyArgs can pass --probe-self-test off.
+	CGO_ENABLED=0 GOOS=linux go build -trimpath -tags keyroster_e2e -o "$work/keyroster-agent" ./cmd/keyroster-agent
 	CGO_ENABLED=0 GOOS=linux go test -c -tags e2edistro -o "$work/distro.test" ./test/distro
 )
 cp "$repo/test/distro/run-in.sh" "$work/run-in.sh"

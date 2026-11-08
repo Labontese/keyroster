@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/Labontese/keyroster/internal/agent/heartbeat"
+	probecert "github.com/Labontese/keyroster/internal/agent/probe"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 )
 
@@ -49,7 +50,9 @@ type RunConfig struct {
 	// Iteration at the end of every loop iteration (tests count them,
 	// 03-09).
 	HostCerts func()
-	Iteration func()
+	// ProbeCerts, when set, is called before every ProbeCerts run (03-10b).
+	ProbeCerts func()
+	Iteration  func()
 }
 
 // Run is the applier's loop (03-07), until ctx ends. Each round:
@@ -83,6 +86,11 @@ type RunConfig struct {
 //     the check ran, or the earliest time HostCerts returned has passed;
 //     and once at start. Its error is logged as a host-certificate error,
 //     never as an apply error.
+//
+//  6. the probe-certificate step (ProbeCerts, 03-10b) runs after it under
+//     the same rule with its own trigger: the spool's probe answers (the
+//     probecert- prefix, no spool document) and its own due time. Its error
+//     is logged as a probe-certificate error, never as an apply error.
 //
 // Before approval the spool holds no document, so a round reads only its
 // listing and writes nothing but the status at start. Errors are logged
@@ -124,6 +132,15 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		hostDue     time.Time
 		hostAnswers string
 		hostStarted bool
+		// The probe certificate step's trigger (03-10b).
+		probeDue     time.Time
+		probeAnswers string
+		probeStarted bool
+		// forceApply: a new probe pair arrived while an addition is held
+		// (03-10b, D9), so the next round applies at once.
+		forceApply bool
+		// Identical consecutive held applies log once per 15 min (03-10b).
+		held heldNoise
 	)
 	status := func(u StatusUpdate) {
 		s, err := WriteStatus(ctx, rc.Config, l, u)
@@ -156,6 +173,23 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			logf("ERROR host certificates: %v", err)
 			// Try again after the shortest back-off.
 			hostDue = rc.Clock.Now().Add(time.Minute)
+		}
+	}
+	probeCerts := func() {
+		if rc.ProbeCerts != nil {
+			rc.ProbeCerts()
+		}
+		r, err := ProbeCerts(ctx, rc.Config, l)
+		probeDue = time.Time{}
+		if r != nil {
+			probeDue = r.Due
+		}
+		if err != nil {
+			logf("ERROR probe certificates: %v", err)
+			probeDue = rc.Clock.Now().Add(time.Minute)
+		}
+		if r != nil && r.PairChanged && heldPending(l) {
+			forceApply = true
 		}
 	}
 	check := func() {
@@ -200,20 +234,25 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 			switch {
 			case err != nil:
 				logf("ERROR spool: %v", err)
-			case names != "" && (!haveNames || names != lastNames || catchUp || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry)):
-				catchUp = false
+			case names != "" && (!haveNames || names != lastNames || catchUp || forceApply || (!failedAt.IsZero() && time.Since(failedAt) >= rc.Retry)):
+				catchUp, forceApply = false, false
 				// A check after the round's applies, below.
 				nextCheck = time.Time{}
 				var prev *Report
 				applied = true
 				for i := 0; ; i++ {
 					r, err := Apply(ctx, rc.Config, l)
-					if rc.Out != nil && (err != nil || !r.NoOp) {
+					quiet := held.quiet(err, r, rc.Clock.Now())
+					if rc.Out != nil && (err != nil || !r.NoOp) && !quiet {
 						rc.Out(r, err)
 					}
 					failedAt = time.Time{}
 					if err != nil {
-						logf("ERROR apply: %v", err)
+						if !quiet {
+							logf("ERROR apply: %v", err)
+						}
+						// A held apply is retried after Retry like any
+						// failed one (D9), quiet or not.
 						failedAt = time.Now()
 					}
 					lastNames, haveNames = names, true
@@ -242,6 +281,11 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 				hostStarted, hostAnswers = true, answers
 				hostCerts()
 			}
+			pAnswers := spoolAnswers(rc.Spool, probecert.SpoolPrefix)
+			if !probeStarted || applied || checked || pAnswers != probeAnswers || (!probeDue.IsZero() && !rc.Clock.Now().Before(probeDue)) {
+				probeStarted, probeAnswers = true, pAnswers
+				probeCerts()
+			}
 		}
 		if rc.Iteration != nil {
 			rc.Iteration()
@@ -254,6 +298,66 @@ func Run(ctx context.Context, rc RunConfig, l Layout) error {
 		case <-t.C:
 		}
 	}
+}
+
+// heldPending reports, without the apply lock, whether probe-state.json
+// holds a held record or does not read (03-10b): then a new probe pair
+// makes the next round apply at once instead of after Retry.
+func heldPending(l Layout) bool {
+	fd, err := spool.OpenDir(l.StateDir)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = unix.Close(fd) }()
+	b, info, err := spool.ReadFileAtInfo(fd, probeStateFile, maxProbeState)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		return false
+	case err != nil || info.Mode != 0o600 || int(info.UID) != os.Geteuid():
+		return true
+	}
+	st, err := parseProbeState(b)
+	return err != nil || st.Held != nil
+}
+
+// heldNoiseEvery is how often an unchanged held apply is logged again.
+const heldNoiseEvery = 15 * time.Minute
+
+// heldNoise suppresses the log line and the printed report of an apply
+// held by the probe gate that repeats the previous held one within
+// heldNoiseEvery (03-10b, D9, T-03-384): the same message and nothing new
+// written, that is the same bundle, directory and KRL versions, no other
+// generation and no sshd reload (PR #91 review, F5: a held apply that
+// lands a removal, a generation or a KRL, or that repaired the drop-in,
+// F6, is always reported).
+type heldNoise struct {
+	msg                   string
+	gen, bundle, dir, krl uint64
+	at                    time.Time
+}
+
+// quiet reports whether err, with the report r of its apply (nil when
+// there is none), repeats the previous held apply within heldNoiseEvery of
+// its logging; any other result clears the memory. A held retry commits
+// nothing and reports generation 0, which is no new generation.
+func (n *heldNoise) quiet(err error, r *Report, now time.Time) bool {
+	if err == nil || !errors.Is(err, ErrProbeHeld) {
+		*n = heldNoise{}
+		return false
+	}
+	m := heldNoise{msg: err.Error(), gen: n.gen, at: now}
+	if r != nil {
+		m.bundle, m.dir, m.krl = r.BundleVersion, r.DirectoryVersion, r.KRLVersion
+		if r.Generation != 0 {
+			m.gen = r.Generation
+		}
+	}
+	reloaded := r != nil && r.Reloaded
+	if !reloaded && m.msg == n.msg && m.gen == n.gen && m.bundle == n.bundle && m.dir == n.dir && m.krl == n.krl && now.Sub(n.at) < heldNoiseEvery {
+		return true
+	}
+	*n = m
+	return false
 }
 
 // jitter is every plus a uniform offset in [-j, +j] from crypto/rand (j
@@ -294,7 +398,7 @@ func spoolDocuments(dir string) (string, error) {
 		return "", err
 	}
 	names = slices.DeleteFunc(names, func(n string) bool {
-		return strings.HasPrefix(n, ".") || n == EnrollRequestFile || n == IdentityFile || strings.HasPrefix(n, hostCertPrefix)
+		return strings.HasPrefix(n, ".") || n == EnrollRequestFile || n == IdentityFile || strings.HasPrefix(n, hostCertPrefix) || strings.HasPrefix(n, probecert.SpoolPrefix)
 	})
 	return strings.Join(names, "\n"), nil
 }
@@ -306,14 +410,18 @@ const hostCertPrefix = "hostcert-"
 // hostCertAnswers is the digest of the spool's host certificate answers:
 // each name with its size and modification time, so an answer replaced
 // under the same name changes it.
-func hostCertAnswers(dir string) string {
+func hostCertAnswers(dir string) string { return spoolAnswers(dir, hostCertPrefix) }
+
+// spoolAnswers is the digest of the spool's answers whose names start with
+// prefix (the host certificate ones, 03-09, and the probe ones, 03-10b).
+func spoolAnswers(dir, prefix string) string {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
 	var b strings.Builder
 	for _, d := range ents {
-		if !strings.HasPrefix(d.Name(), hostCertPrefix) {
+		if !strings.HasPrefix(d.Name(), prefix) {
 			continue
 		}
 		info, err := d.Info()
