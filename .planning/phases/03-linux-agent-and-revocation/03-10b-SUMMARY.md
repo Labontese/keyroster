@@ -148,6 +148,10 @@ Running count after Task 2: 46 killed, 1 equivalent, 0 survived.
 ## Resume point (for the continuation)
 
 - Next: Task 3 (the decision: classify, account.go, probeGate, the hold wiring in forward). Task 2 is done and pushed (T2 fdfb08c). probegate.go already holds the error values, the closed hold reasons, probeState with its reader (`readProbeState`, read-only), `loadProbeState` (rewrites a reset once, locked engines only) and `writeProbeState` (refuses without `e.locked`); `WriteStatus`'s engine takes apply.lock but never sets `e.locked`, so only the engines of Apply (apply.go:435), HostCerts (hostcert.go:151) and ProbeCerts (probe.go:235), which set it, can write.
+- Task 2's verify block 1 was re-run verbatim at fdfb08c (build, `go vet ./...`, the tagged vet, the named tests with `-race` and the PASS loop: all pass), with the final TestRunHeldNoise table.
+- The reset state carries no held record (`Held == nil`, `reset == true`): the plan's `heldPresent` ("a held record, or a file that does not read") must test `st.reset || st.Held != nil`, and read the flag before `loadProbeState`, which clears it after the rewrite.
+- Nothing calls `loadProbeState` yet, so a corrupt probe-state.json is not rewritten until Task 3 calls it on a path every locked apply takes (the `heldPresent` point fits); until then such a host reports probe_state_reset and logs a warning at each status write.
+- The Run-level wiring of `heldNoise` is still to be proved once applies return ErrProbeHeld: count `Out` calls and log lines in TestRunHeldTrigger's harness.
 - forward is at apply.go:840 after Task 2's edits (the plan's anchors moved by about +15 lines): the no-op test, the :876 and :899 branches, allocGeneration and the Transition loop are in that function.
 - The test-time base expires 24 h after `at=1794104446`: re-measure it in place (Task 1 Step 0.2) if Task 5 runs later.
 - The mutant runner used here: a shell function that applies a perl substitution, requires the file to change, runs the one named test through scripts/linux.sh, and counts only the named `--- FAIL:` line; then `git checkout --` and `git diff --quiet HEAD --`.
