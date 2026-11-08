@@ -21,7 +21,7 @@ In settleFailedAddition and gateSuperseded (internal/agent/apply/probegate.go), 
 
 Last-good still grants what the change removed, so the removal is in force again until the next round's hold lands it once more. 03-05's existing rule does the same thing: every non-crash error after a mixed change's narrowing swap rolls back to last-good (forward in apply.go, the error paths after the Transition passes).
 
-Owner decision D-R1 (2026-11-08) makes no code change in 03-10b. The case is recorded as the third UNVERIFIED residual in 03-10b-SUMMARY.md, in the plan's must_haves and in the T-03-374 threat row. Owner: 03-10c.
+Owner decision D-R1 (2026-11-08) makes no code change in 03-10b. The case is recorded as the third UNVERIFIED residual in 03-10b-SUMMARY.md and in the plan's settle bullet (D13), its T-03-374 threat row and its Edge Coverage. Owner: 03-10c.
 
 ## Solution
 
