@@ -1226,16 +1226,11 @@ func probeGateAccount(t *testing.T) {
 			t.Fatalf("unreadable again: %v, %d notes in %q", err, notes(), log.String())
 		}
 		// A check that stops at passwd, before shadow, keeps the memory.
-		passwd := filepath.Join(h.l.Root, "etc", "passwd")
-		saved, err := os.ReadFile(passwd) //nolint:gosec // G304: the test root
-		if err != nil {
-			t.Fatal(err)
-		}
 		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n")
 		if _, err := h.check(); err != nil || notes() != 2 {
 			t.Fatalf("a check without the account: %v, %d notes", err, notes())
 		}
-		h.writePasswd(string(saved))
+		h.writePasswd("root:x:0:0:root:/root:/bin/bash\n" + probeLogin + "\n") // as gateOn writes it
 		if _, err := h.check(); err != nil || notes() != 2 {
 			t.Fatalf("the account back, shadow still unreadable: %v, %d notes in %q", err, notes(), log.String())
 		}
