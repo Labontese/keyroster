@@ -114,6 +114,7 @@ Local e2e wrapper: not used. The namespace wrapper of 03-10 was not set up on th
 
 gate control: files gate exits 0 on the branch as committed (at 110181d)
 gate control: files gate exits 1 on a throwaway detached worktree with one commit adding an unlisted file (stray-unlisted.txt; the worktree was removed afterwards)
+gate control: seam gate exits non-zero with a probeOff literal added to internal/agent/apply/run.go (exit 1 with `var _ = Config{probeOff: true}` appended; exit 0 as committed; run.go restored, `git diff --quiet HEAD --` clean)
 gate control: ROADMAP gate exits 1 before the tracking update (the changed-line filter is empty, so `test -n "$R"` fails: the gate bites)
 
 Q1 state-loss deviation (P4): after an agent-side state loss the first new negative waits for `probe_cert_recent` (up to min(1 h, L/3)) and then for the hourly publish, so additions on that host wait up to about 2 h; revocations and removals are unaffected; no new wire signal is added; here it is a transient with the persisted back-off, never a sticky hold.
