@@ -587,6 +587,137 @@ At 28594ac, the SUMMARY revision that recorded the above, gates 1, 4 to 9 and 11
 
 This SUMMARY's revision is pushed after these runs. Its own checks, and the gates that run against it, are reported with the hand-off.
 
+### Pre-merge review fix round 2
+
+The orchestrator's fix-round check of c46cdc7 upheld two findings, F1 and F2 (two Sonnet lenses, two skeptics each). The plan was amended first, and each amendment was committed on its own:
+- 484a074 records F1 and F2 in the addendum;
+- c1c42d9 records owner decision Q4, which adds swap.go to files_modified and lifts gate 352's freeze of swap.go.
+
+The final plan copy is checked byte-identical to the private plan with `cmp`.
+
+**F1 (Q3 closed only part of the crash path).**
+- After a crash that left a removal in force, the keeping start-up recover kept the removal but wrote no unapplied record.
+- A capture that no longer offered D2 and brought KRL 93 then rendered accepted/'s D1 and granted role:old again, with probes off and on.
+- The code is the same at 30dfcf8.
+
+Why recover cannot write the record: the marker holds only generation numbers, plus the `Accepted` snapshot, and that snapshot exists only at the commit step. Once D2 is withdrawn before the restart, nothing on disk holds D2's verified state. So the record must be written before the removal lands.
+
+A throwaway first tried writing it in apply.go just before forward's Transition. That fixed every case where the removal landed, but it broke the nothing-landed cases:
+- At k01 the `marker` fault fires before the marker is written. No recovery then runs, the record stays, D1 is refused with `directory_older`, and the status names D2.
+- The swapping status that publishPending writes right after the first marker already named D2.
+
+The fixer stopped and reported this, and Daniel chose option 2 (owner decision Q4).
+
+**Fix (4bf838a).**
+- **The write.** Transition (swap.go) calls `recordBeforeRemoval` after the first marker write and its publishPending, just before the swap that lands a removal: the narrowing swap, or the single swap when Intermediate collapses.
+  - It records forward's verified state, `e.swapRecord`, which is set only around forward's own Transition call. It does so only when that swap drops a line current holds.
+  - recordUnapplied writes nothing for a KRL-alone state, or for one with no part ahead of accepted/.
+  - The swap order is unchanged, no fault point is added, and interleave_test.go and selftest.go are byte-unchanged.
+- **The record leaves in three ways.**
+  - A commit passes it (dropPassedRecord).
+  - A keeping rollback that leaves current holding every line of last-good, after this run wrote the record, removes it (`dropRecord`).
+  - `recover` removes it (`dropUnlandedRecord`) when the marker shows the removing swap never ran: current still names the marker's from, the landing generation lacks a line of from, and from holds every line of last-good.
+- **Why the last condition matters.** A from that lacks a line of last-good keeps the record. That covers a kept state, and a keeping rollback's own swap from the failed target. Without the condition, `crash_during_rollback_transition` and `crash_during_recovery_transition` dropped a record whose removal stayed in force.
+- **recordKept is gone.** The in-Transition write covers the keeping rollback, and the code's doc comments say so.
+- **The drop removes the whole record**, an older content-refusal part included. This is liveness only: the next capture that brings that version refuses it and records it again.
+
+**What the server and status now see.** The status, the report and the heartbeat name D2 as unapplied from the narrowing swap on, while a removal of an apply is in force, until the commit passes the record. The swapping status written at the first marker, before anything lands, names nothing, as the test below shows. After a crash that kept a removal, a spool that offers only D1 gives `directory_older`, and only the KRL moves on.
+
+**Tests (4bf838a).**
+- `crash_then_withdrawn_directory_keeps_removal` runs over every fault point of an uncrashed apply, probes_off and probes_on, with `withdraw` and `reoffer` per point:
+  - (a) where the crash left the removal in force: role:old is in force at no point of the next apply, KRL 93 is in force, and the record, the report and the status name D2, or the recovery finished D2's commit;
+  - (b) `reoffer`: D2 lands, unapplied.json is gone, Report.Unapplied is nil and accepted/ is at D2;
+  - (c) where nothing landed (k01 and k02 on both lanes): D1 with KRL 93 applies with no error, and nothing names D2;
+  - (d) the uncrashed apply leaves no record.
+- `failed_swap_before_removal_leaves_no_record`, probes_off and probes_on: a non-crash failure of the narrowing swap. The rollback keeps nothing and removes the record, and D1 with KRL 93 then applies.
+- `swapping_status_names_no_unapplied_before_removal`: the outbox status at the first `swap` fault of a successful mixed apply has a pending marker and no `unapplied`, and the commit passes the record.
+- `dropped_record_heals_on_next_capture`, probes_off and probes_on:
+  - D2 is refused for its size and recorded;
+  - D3 removes role:old and crashes at the swap that would land it;
+  - the recover removes the record, and the next capture, which offers D2 again, refuses and records it again.
+- **Existing tests whose expectation changed** (apply_test.go and rollbackkeep_test.go, both in files_modified). After a crash that left a removal in force, their spool offers only directory 1, and that step is now refused as `directory_older`, with the record naming directory 2:
+  - `crash_at_intermediate_keeps_it`, `crash_after_final_swap_back_to_kept_content` and `crash_between_final_marker_and_swap` (through `keptApply`);
+  - `crash_during_recovery_transition` and `crash_during_rollback_transition`, which also assert that the record names directory 2;
+  - `crash_anywhere_recovers`, which also accepts a run after the recovery that commits the kept content as last-good after its listener test (D5), or that retries the recorded directory, and a nested run that fails that listener test with sshd stopped;
+  - `recoverOnlyAfter`, which accepts `directory_older` as the recovery alone.
+
+**F1 RED and GREEN.**
+- RED at 613f3e5, whose crash path is the same code as c46cdc7. The withdraw lanes fail with `role:old granted again: <nil>, principals [role:old role:ops]`:
+  - `--- FAIL: TestRollbackSites/crash_then_withdrawn_directory_keeps_removal/probes_off/k03_withdraw` to `/k12_withdraw`;
+  - `--- FAIL: .../probes_on/k03_withdraw` to `/k16_withdraw`.
+- Every reoffer case passed at 613f3e5, and so did k01 and k02.
+- The other three new subtests guard the Q4 design rather than reproduce F1, and they pass at 613f3e5 too.
+- GREEN at 4bf838a: all of them pass.
+
+**F2 (low; a damaged probe-state.json dropped the hold; a regression against e22cc06).**
+- heldPresent rewrites a probe-state.json that does not read as the exhausted hour, without its held record, before forward's loop.
+- The bounded KRL-alone pass then found no record, committed as an ordinary candidate and dropped the hold.
+- Measured with a throwaway test: gateHost, D2 {role:a, role:c} held `cert_missing`, garbage written to probe-state.json, then an oversize D3 plus KRL 93, applied three times.
+
+| Tree | Each run | Held record | Principals | Runs 2 and 3 |
+|---|---|---|---|---|
+| e22cc06 | `generation_too_large`, `probe_held: cert_missing` | cert_missing | [role:a], KRL 93 | the same |
+| 484a074 (c46cdc7's code) | `generation_too_large` | "" | [role:a], KRL 93 | NoOp, held "" |
+
+**F2 fix (00381e6, then 613f3e5).** The guard takes the hold forward read before the loop. With a readable record the pass holds again for the record's reason. After a reset, the gate decides the reason on the render before the bound, as it did before D10: here `cert_missing`, the e22cc06 result.
+
+00381e6 ran the gate on the bounded render whenever a reset had happened. On a kept state with no held addition that invented `probe_held: budget`, found by a throwaway test. 613f3e5 fixes this:
+- the gate runs only when the full render holds a line last-good lacks, an addition the bound held out;
+- it runs on that full render;
+- a kept removal, a line last-good holds, never makes a hold.
+
+**F2 tests.**
+- `damaged_probe_state_keeps_held_record/probes_on`: three runs, each held `cert_missing`, with role:a only, KRL 93 and accepted/ at D2.
+  - RED at 484a074 (c46cdc7's code): `want held cert_missing: err generation_too_large: ..., detail ""`.
+  - GREEN at 00381e6 and later.
+- `damaged_probe_state_on_kept_state_holds_nothing/probes_on`: a kept state, a damaged file and a refused capture with KRL 93. Two runs, no hold, KRL 93 in force.
+  - RED at 00381e6: `run 1: generation_too_large: ... probe_held: budget`.
+  - GREEN at 613f3e5.
+
+**Mutants.** They ran with run_mutants.py at 4bf838a, each on its named subtests, and each was restored with `git checkout --`; the tree was clean afterwards.
+- Fix-round mutants 30 to 33 and 36 were re-run on the final text. Mutant 33's text changed with F2.
+- Fix-round mutant 34 is redefined. Its old code, recordKept, was replaced by the in-Transition write, which mutant 35 covers.
+
+fix-round mutant killed: 30 (re-run) the KRL-alone bound removed (TestRollbackSites/krl_alone_after_kept_rollback_keeps_removal/probes_off and /probes_on)
+fix-round mutant killed: 31 (re-run) the early return on current equal to last-good restored (TestRollbackSites/krl_alone_twice_after_kept_rollback_keeps_removal/probes_off and /probes_on)
+fix-round mutant killed: 32 (re-run) pollSpool's reference set back to current (TestRollbackSites/refused_capture_during_wait_lands_addition/probes_off and /probes_on)
+fix-round mutant killed: 33 (re-run, new text) the held-record guard removed (TestRollbackSites/bounded_krl_alone_keeps_held_record/probes_on)
+fix-round mutant killed: 34 (redefined) the rollback's drop of a record whose removal it did not keep removed (TestRollbackSites/failed_swap_before_removal_leaves_no_record/probes_off and /probes_on)
+fix-round mutant killed: 35 the record write in Transition removed (TestRollbackSites/crash_then_withdrawn_directory_keeps_removal/probes_off and /probes_on)
+fix-round mutant killed: 36 the reset path's gate removed, so the guard reads only the reset state (TestRollbackSites/damaged_probe_state_keeps_held_record/probes_on)
+fix-round mutant killed: 37 recover's drop of the record when nothing landed removed (TestRollbackSites/crash_then_withdrawn_directory_keeps_removal/probes_off/k02_withdraw and /probes_on/k02_withdraw)
+
+**Gates at 4bf838a, the final code (local, through scripts/linux.sh).** Gates 2 and 3 ran with this SUMMARY's revision uncommitted in the working tree; that revision changes docs only. Before them, the whole apply package with `-race` passed at 4bf838a in a WSL copy: ok, 481.688 s, no DATA RACE.
+- **Gate 2** (whole module): exit 0, from 1794207660 to 1794208374.
+- **Gate 3** (test-time delta): exit 0. It ran alone after gate 2, from 1794208374 to 1794208896, on the same base line; the base was 31667 s old.
+- **Task 1's freeze** as Q4 restates it: interleave_test.go and selftest.go have no diff against origin/main.
+
+| Package | Base (s) | Reading (s) | Delta (s) | Stop |
+|---|---|---|---|---|
+| apply (internal/agent/apply) | 488.967 | 528.023 | +39.056 | +90 |
+| krl | 7.347 | 7.110 | -0.237 | +90 |
+| signer | 395.214 | 410.528 | +15.314 | +90 |
+| audit | 87.541 | 88.841 | +1.300 | +90 |
+| cmd (cmd/keyroster) | 269.858 | 234.985 | -34.873 | +90 |
+| agentcmd (cmd/keyroster-agent) | 1.811 | 1.757 | -0.054 | +90 |
+
+**CI at 4bf838a** (pushed as a fast-forward). All 29 checks passed. These are the `pull_request` runs, all with headSha 4bf838a:
+
+| Run ID | Workflow | Result |
+|---|---|---|
+| 42576595711 | CI | success |
+| 42576595647 | E2E | success |
+| 42576595650 | E2E distro | success |
+| 42576595804 | Systemd | success |
+| 42576595691 | E2E TPM | success |
+| 42576595743 | E2E PKCS#11 | success |
+| 42576595736 | CodeQL | success |
+| 42576595678 | PIV | success |
+| 42576595744 | PR title | success |
+| 42576595673 | Workflow lint | success |
+
+This SUMMARY's revision is pushed after these runs. Its own checks, and gates 1 and 4 to 11 run against it, are reported with the hand-off.
+
 ### Deviations (Task 3)
 
 - The GSD tracking handlers were not run a second time for the final commit. The tracking update is the one already in 80df5e1. A second `state.advance-plan` would count the plan twice, and a second roadmap update could change lines that gate 7 forbids.
@@ -604,10 +735,13 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
   - **A T inside last-good passes atRollbackTarget by content**, so only its pending marker sends it to recover (`double_failure_after_kept_base_keeps_readd_out`).
 - **The sequences of the drop-in sites and of the held round (D5)** were derived from the code at e22cc06. The run matched them, as 'Sequences derived from the code, as the run showed them' records. One hold reason differed and is reported there: `gate_superseded_error` is held for `shell_not_nologin`.
 - **The fallback render keeps the principals in force** (D9, tested probes off and on). Not covered: a render that Render itself accepts after a kept rollback widens like any other addition, and is gated when probes are on. The gate tests enforcement, not authorization.
-  - Fix round 1's R3(b) check confirmed this with a run. On a kept state, a KRL-only capture and a bundle-only capture, each with the failed directory withdrawn, rendered accepted/'s directory with nothing refused and granted the kept removal again (probes off and on). Owner decision Q3 fixed it (a44c318): the keeping rollback records the directory as unapplied. The residuals:
-    - A run killed after the removal landed and before the record is written, and a kept state left by a build before a44c318, have no record. The next start's keeping recover keeps the removal, but a later capture that withdraws the directory can still render accepted/'s. Not tested.
-    - That a rollback which itself failed (current or last-good unreadable, or a double failure) writes the record follows from the code; no test asserts it.
-    - A capture that offers no directory at all after the withdrawal (rather than D1) would render the recorded directory as the newest verified state. Not tested.
+  - Fix round 1's R3(b) check confirmed this with a run. On a kept state, a KRL-only capture and a bundle-only capture, each with the failed directory withdrawn, rendered accepted/'s directory with nothing refused and granted the kept removal again (probes off and on).
+  - Owner decision Q3 fixed it (a44c318). Fix round 2's F1 then showed that the crash path still re-granted the removal. Owner decision Q4 fixed that (4bf838a): Transition records the directory just before the swap that lands a removal, so a crash at any later point leaves the record. This is tested at every fault point, probes off and on (`crash_then_withdrawn_directory_keeps_removal`), and is no longer a residual. The residuals now:
+    - A kept state left by a build before 4bf838a may have no record.
+    - A keeping rollback that itself fails with a non-crash error keeps the record when current lacks a line of last-good. That follows from the code; only the crash form is asserted (`crash_during_rollback_transition`).
+    - A capture that offers no directory at all after the withdrawal, rather than D1, renders the recorded directory as the newest verified state. A fix-round-1 throwaway showed role:b landing that way. No committed test asserts it.
+    - The drop rule removes the whole record, an older content-refusal part included. This is liveness only: the next capture refuses and records that version again (`dropped_record_heals_on_next_capture`).
+- **A damaged probe-state.json with a bounded KRL-alone pass** (F2). After the reset the gate decides the hold on the full render only when that render holds a line last-good lacks. That holds for a held addition, and not for a kept removal while last-good is the pre-rollback generation. A kept state that is already last-good (after an earlier KRL-alone commit) meets the same condition, so a reset there can still hold the kept removal for the gate's reason. This is the fail-safe direction (a report, no grant), and it is not tested.
 - **A held addition is not gated again while a refused capture persists** (D10 as restated). The bounded KRL-alone pass keeps it out, and the hold stands (`bounded_krl_alone_keeps_held_record`). It is gated again on the first directory that renders. This is accepted under D10 as known behaviour, not a defect.
 - **A kept state can hold an empty `user_ca_keys`** when the base, last-good and current hold disjoint CA lists (plan check sec-8). Certificate logins are then locked out until the keeping recover or the next round moves current. This is the fail-safe direction; there is no code for it.
 - **systemd userdb in nsswitch.conf** (03-10c fix round 1) is not measured. The worst case is a false `account_excluded` hold: liveness only, never fail-open. Handed to 03-16 through the hand-over todo.
@@ -637,6 +771,11 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
   - a live revocation set for fleets above about 1000 hosts;
   - `TestFetch/more_repolls_immediately` under a parallel `-race` load;
   - the 16 e2e lint issues under build tags CI never lints.
+- **The unapplied record's wider meaning (fix rounds 1 and 2, owner decisions Q3 and Q4), outside files_modified:**
+  - docs/runbooks/host-setup.md (around :1143 to :1148, and the alerts text near :1191) still says unapplied.json is written only after `generation_too_large` or `ca_line_rejected`. It is now also written just before the swap that lands a removal, and stays while a failed apply's removal is in force.
+  - The `heartbeat.Unapplied` doc comment (internal/agent/heartbeat/heartbeat.go) says "could not apply for their content".
+  - The comment in internal/agent/apply/installed.go names forward's content-refusal write as the only record write before WriteAccepted.
+  - The server now receives `unapplied` after a failed listener test, and while a removal of a failed apply is kept, as well.
 - **Not planned:** a polarity field in the recovery request (declined by Q-R option 1), and the operator's `--recover-to-last-good` keeping removals (Q1 = A).
 
 ## Where to resume
@@ -644,7 +783,8 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
 - **Done:**
   - Task 1 (T1 a37a72c), Task 2 (T2 7427197) and Task 3 up to the merge gate: tracking commit 80df5e1, gates 1 to 7 and 9 to 11, and this SUMMARY.
   - 40 of 40 mutants killed.
-  - Pre-merge review fix round 1: c0dc912, 039a319, 772df77, 9aa10f6, 28594ac, 388b525, a44c318 and this SUMMARY's revision; fix-round mutants 30 to 34 killed.
+  - Pre-merge review fix round 1: c0dc912, 039a319, 772df77, 9aa10f6, 28594ac, 388b525, a44c318 and c46cdc7; fix-round mutants 30 to 34 killed.
+  - Pre-merge review fix round 2: 484a074, 00381e6, 613f3e5, c1c42d9, 4bf838a and this SUMMARY's revision; fix-round mutants 30 to 37 killed at 4bf838a.
   - PR #93 is open, with auto-merge off.
 - **Next:**
   - The orchestrator's review of the fix round's head.
@@ -657,4 +797,5 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
 
 - Files: internal/agent/apply/rollbackkeep_test.go, the two hand-over todos and both completed todos exist; `func RollbackKeeping(` (render.go) and `func IsProbeKeyID(` (krl/recovery.go) are present.
 - Commits: 32e1fd1, d8335e7, 0f69d51, 5c78955, a37a72c, 28fffc2, ccac467, 7427197, a4b5432 and 80df5e1 are ancestors of HEAD and on origin.
-- Fix round 1 commits: c0dc912, 039a319, 772df77, 9aa10f6, 28594ac, 388b525 and a44c318 are ancestors of HEAD and on origin.
+- Fix round 1 commits: c0dc912, 039a319, 772df77, 9aa10f6, 28594ac, 388b525, a44c318 and c46cdc7 are ancestors of HEAD and on origin.
+- Fix round 2 commits: 484a074, 00381e6, 613f3e5, c1c42d9 and 4bf838a are ancestors of HEAD and on origin.
