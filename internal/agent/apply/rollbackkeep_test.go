@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -22,6 +23,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Labontese/keyroster/internal/agent/execsite"
+	"github.com/Labontese/keyroster/internal/agent/heartbeat"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	"github.com/Labontese/keyroster/internal/agent/spool"
 	"github.com/Labontese/keyroster/internal/agent/state"
@@ -515,7 +517,10 @@ func recoverOnlyAfter(t *testing.T, h *testHost, during, after []string) *Report
 	}
 	r, err := h.apply()
 	h.cfg.Fault = nil
-	if !r.Recovered || (err != nil && !isCrash(err)) {
+	// A spool that offers only an older directory than the record a kept
+	// removal left (owner decision Q4) is refused before any fault point:
+	// still the recovery alone.
+	if !r.Recovered || (err != nil && !isCrash(err) && !errors.Is(err, state.ErrDirOlder)) {
 		t.Fatalf("the next start: recovered %t, %v", r.Recovered, err)
 	}
 	if bad != "" {
@@ -1450,6 +1455,188 @@ func TestRollbackSites(t *testing.T) {
 			mustHeld(t, h, r, err, "cert_missing")
 			mustPrincipals(t, h, "role:a")
 		})
+	})
+	bothProbes(t, "crash_then_withdrawn_directory_keeps_removal", func(t *testing.T, probes bool) {
+		// Owner decision Q3 on the crash path (fix-round check F1): D2
+		// removes role:old from {role:old, role:ops}. A crash at fault
+		// point k, then (withdraw) a capture that no longer offers D2 but
+		// brings a newer KRL, or (reoffer) D2 again. Where the crash left
+		// the removal in force, role:old never comes back and the record
+		// names D2 (or the recovery finished D2's commit); where nothing
+		// landed, the record neither blocks D1 or D2 nor names D2. The
+		// fault points are counted on an apply that does not crash.
+		count := func() int {
+			h := keepHost(t, probes, "role:old", "role:ops")
+			h.publishDir(h.spec("role:ops", "role:q"))
+			fl := &faultLog{}
+			h.cfg.Fault = fl.hook
+			if _, err := h.apply(); err != nil {
+				t.Fatalf("the uncrashed apply: %v", err)
+			}
+			// (d) a successful narrowing apply leaves no record.
+			if h.exists(h.l.State(state.UnappliedFile)) {
+				t.Fatal("a committed apply left an unapplied record")
+			}
+			return len(fl.points)
+		}
+		n := count()
+		for k := 1; k <= n; k++ {
+			for _, seq := range []string{"withdraw", "reoffer"} {
+				t.Run(fmt.Sprintf("k%02d_%s", k, seq), func(t *testing.T) {
+					t.Parallel()
+					h := keepHost(t, probes, "role:old", "role:ops")
+					lg0 := h.lastGood()
+					h.publishDir(h.spec("role:ops", "role:q"))
+					fl := &faultLog{k: k}
+					h.cfg.Fault = fl.hook
+					_, err := h.apply()
+					h.cfg.Fault = nil
+					if !isCrash(err) {
+						t.Fatalf("no crash at fault point %d: %v", k, err)
+					}
+					landed := !slices.Contains(h.principals("deploy"), "role:old")
+					if seq == "withdraw" {
+						delete(h.state.Directories, 2)
+					}
+					h.resetSpool()
+					h.publishKRL(93)
+					var seen []string
+					h.cfg.Fault = func(p string) error {
+						if !landed {
+							return nil
+						}
+						if slices.Contains(h.principals("deploy"), "role:old") {
+							seen = append(seen, "current at "+p)
+						}
+						if l, lerr := readGeneration(h.l.Gen(h.lastGood())); lerr == nil && h.lastGood() != lg0 && slices.Contains(deployLines(l), "role:old") {
+							seen = append(seen, "last-good at "+p)
+						}
+						return nil
+					}
+					r, err := h.apply()
+					h.cfg.Fault = nil
+					st, serr := lockedEngine(h).buildStatus(context.Background(), StatusUpdate{Applied: true, Report: r, ApplyErr: err})
+					if serr != nil {
+						t.Fatalf("status: %v", serr)
+					}
+					if !h.krlRevokes(h.l.Current(), 93) {
+						t.Fatalf("k%d %s (landed %t): KRL 93 not in force: %v", k, seq, landed, err)
+					}
+					switch {
+					case seq == "reoffer":
+						// (b) D2 lands and passes the record.
+						if err != nil || h.acceptedDir() != 2 || r.Unapplied != nil || st.Unapplied != nil || h.exists(h.l.State(state.UnappliedFile)) || len(seen) != 0 {
+							t.Fatalf("k%d reoffer (landed %t): %v, accepted/ directory %d, unapplied %+v, role:old at %v", k, landed, err, h.acceptedDir(), r.Unapplied, seen)
+						}
+						mustPrincipals(t, h, "role:ops", "role:q")
+					case landed:
+						// (a) the removal stays: the record names D2, or the
+						// recovery finished D2's commit.
+						if got := h.principals("deploy"); slices.Contains(got, "role:old") || len(seen) != 0 {
+							t.Fatalf("k%d withdraw: role:old granted again: %v, principals %v, at %v", k, err, got, seen)
+						}
+						if h.acceptedDir() != 2 && (r.Unapplied == nil || r.Unapplied.Directory != 2 || st.Unapplied == nil || st.Unapplied.Directory != 2) {
+							t.Fatalf("k%d withdraw: accepted/ directory %d and the record names %+v; want D2 recorded", k, h.acceptedDir(), r.Unapplied)
+						}
+					default:
+						// (c) nothing landed: D1 with the newer KRL applies, and
+						// nothing names D2 as unapplied.
+						if err != nil || h.acceptedDir() != 1 || r.Unapplied != nil || st.Unapplied != nil || h.exists(h.l.State(state.UnappliedFile)) {
+							t.Fatalf("k%d withdraw (nothing landed): %v, accepted/ directory %d, unapplied %+v / %+v", k, err, h.acceptedDir(), r.Unapplied, st.Unapplied)
+						}
+						mustPrincipals(t, h, "role:old", "role:ops")
+					}
+				})
+			}
+		}
+	})
+	bothProbes(t, "failed_swap_before_removal_leaves_no_record", func(t *testing.T, probes bool) {
+		// Q4: the record written just before the swap that lands a removal
+		// is removed when that swap fails and the rollback keeps nothing, so
+		// a later D1 with a newer KRL applies and nothing names D2.
+		h := keepHost(t, probes, "role:old", "role:ops")
+		lg0 := h.lastGood()
+		f := &failer{point: "swap", n: 1, armed: true}
+		h.cfg.Fault = f.hook
+		h.publishDir(h.spec("role:ops", "role:q"))
+		_, err := h.apply()
+		h.cfg.Fault = nil
+		if !f.didFire() || !errors.Is(err, errInjected) || h.current() != lg0 || h.lastGood() != lg0 {
+			t.Fatalf("the failed narrowing swap: fired %t, %v, current %d, last-good %d (was %d)", f.didFire(), err, h.current(), h.lastGood(), lg0)
+		}
+		if h.exists(h.l.State(state.UnappliedFile)) {
+			t.Fatal("a rollback that kept no removal left the unapplied record")
+		}
+		delete(h.state.Directories, 2)
+		h.resetSpool()
+		h.publishKRL(93)
+		r, err := h.apply()
+		if err != nil || r.Unapplied != nil || h.acceptedDir() != 1 || !h.krlRevokes(h.l.Current(), 93) {
+			t.Fatalf("D1 with KRL 93 after the failed swap: %v, unapplied %+v, accepted/ directory %d", err, r.Unapplied, h.acceptedDir())
+		}
+		mustPrincipals(t, h, "role:old", "role:ops")
+	})
+	t.Run("swapping_status_names_no_unapplied_before_removal", func(t *testing.T) {
+		// Q4: the record is written after the first marker's swapping
+		// status, so that status never names the directory as unapplied
+		// before the removal is in force; the apply's commit passes it.
+		t.Parallel()
+		h := keepHost(t, false, "role:old", "role:ops")
+		withOutbox(t, h)
+		h.publishDir(h.spec("role:ops", "role:q"))
+		var first *heartbeat.Status
+		h.cfg.Fault = func(p string) error {
+			if p == "swap" && first == nil {
+				first = outboxStatus(t, h)
+			}
+			return nil
+		}
+		r, err := h.apply()
+		h.cfg.Fault = nil
+		if err != nil || first == nil || first.Pending == nil {
+			t.Fatalf("the apply: %v, swapping status %+v", err, first)
+		}
+		if first.Unapplied != nil {
+			t.Fatalf("the swapping status before the narrowing swap names %+v as unapplied", first.Unapplied)
+		}
+		if r.Unapplied != nil || h.exists(h.l.State(state.UnappliedFile)) || outboxStatus(t, h).Unapplied != nil {
+			t.Fatalf("after the commit: unapplied %+v, record present %t", r.Unapplied, h.exists(h.l.State(state.UnappliedFile)))
+		}
+	})
+	bothProbes(t, "dropped_record_heals_on_next_capture", func(t *testing.T, probes bool) {
+		// Q4's drop rule removes the record whole, a content refusal's
+		// older part included: liveness only. Here D2 is refused for its
+		// size and recorded; D3 removes role:old and crashes at the swap
+		// that would land it; the recover drops the record, and the next
+		// capture, which offers D2 again, refuses and records it again.
+		h := keepHost(t, probes, "role:old", "role:ops")
+		big := h.spec("role:old", "role:ops")
+		big.bulkRoles = 17
+		h.publishDir(big)
+		r, err := h.apply()
+		if !errors.Is(err, ErrGenerationTooLarge) || r.Unapplied == nil || r.Unapplied.Directory != 2 {
+			t.Fatalf("the refused D2: %v, unapplied %+v", err, r.Unapplied)
+		}
+		h.publishDir(h.spec("role:ops", "role:q"))
+		h.cfg.Fault = func(p string) error {
+			if p == "swap" {
+				return &crash{point: p}
+			}
+			return nil
+		}
+		_, err = h.apply()
+		h.cfg.Fault = nil
+		if !isCrash(err) || readMarker(t, h) == nil {
+			t.Fatalf("the crash at D3's narrowing swap: %v", err)
+		}
+		mustPrincipals(t, h, "role:old", "role:ops")
+		delete(h.state.Directories, 3)
+		h.resetSpool()
+		r, err = h.apply()
+		if !r.Recovered || !errors.Is(err, ErrGenerationTooLarge) || r.Unapplied == nil || r.Unapplied.Directory != 2 || h.acceptedDir() != 1 {
+			t.Fatalf("the next capture: recovered %t, %v, unapplied %+v, accepted/ directory %d", r.Recovered, err, r.Unapplied, h.acceptedDir())
+		}
+		mustPrincipals(t, h, "role:old", "role:ops")
 	})
 	t.Run("damaged_probe_state_keeps_held_record", func(t *testing.T) {
 		t.Parallel()

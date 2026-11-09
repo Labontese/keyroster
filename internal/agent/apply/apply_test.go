@@ -1188,6 +1188,19 @@ func TestApply(t *testing.T) {
 	})
 
 	// --- crash recovery ---
+	// keptApply is the apply after a crash recovery whose spool offers only
+	// directory 1 again: once the crash left a removal in force, the record
+	// written before its swap (owner decision Q4) names directory 2, so
+	// that older directory step is refused (directory_older) and only the
+	// KRL moves on; otherwise the run succeeds.
+	keptApply := func(t *testing.T, h *testHost) *Report {
+		t.Helper()
+		r, err := h.apply()
+		if err != nil && (!errors.Is(err, state.ErrDirOlder) || r.Unapplied == nil || r.Unapplied.Directory != 2) {
+			t.Fatalf("apply: %v (report %+v)", err, r)
+		}
+		return r
+	}
 	crashRun := func(h *testHost, k int) (*Report, error) {
 		fl := &faultLog{k: k}
 		h.cfg.Fault = fl.hook
@@ -1215,7 +1228,7 @@ func TestApply(t *testing.T) {
 		h.resetSpool()
 		h.state = old
 		start := h.clock.Monotonic()
-		r := h.mustApply()
+		r := keptApply(t, h)
 		// 03-10d (D8): M holds the landed removal and is the kept content,
 		// so the recovery stays on it with no swap and no wait.
 		if !r.Recovered || !h.atKept(lg) || h.current() != mid || readMarker(t, h) != nil {
@@ -1250,8 +1263,11 @@ func TestApply(t *testing.T) {
 		if h.current() != b || readMarker(t, h) == nil {
 			t.Fatal("recovery did not stop at its swap")
 		}
+		// The record written before forward's narrowing swap (owner
+		// decision Q4) names directory 2, so the spool's directory 1 is
+		// refused after the recovery and only the KRL moves on.
 		r, err := h.apply()
-		if err != nil || errors.Is(err, ErrPendingStateUnknown) || !h.atKept(lg) || readMarker(t, h) != nil || !r.Recovered {
+		if (err != nil && !errors.Is(err, state.ErrDirOlder)) || r.Unapplied == nil || r.Unapplied.Directory != 2 || !h.atKept(lg) || readMarker(t, h) != nil || !r.Recovered {
 			t.Fatalf("second recovery: %+v, %v, current %d", r, err, h.current())
 		}
 	})
@@ -1275,8 +1291,9 @@ func TestApply(t *testing.T) {
 		h.resetSpool()
 		h.state = h.f.genesis()
 		h.state.Directories[1] = h.dirs[0]
+		// As above: the record (Q4) names directory 2.
 		r, err := h.apply()
-		if err != nil || !h.atKept(lg) || readMarker(t, h) != nil || !r.Recovered {
+		if (err != nil && !errors.Is(err, state.ErrDirOlder)) || r.Unapplied == nil || r.Unapplied.Directory != 2 || !h.atKept(lg) || readMarker(t, h) != nil || !r.Recovered {
 			t.Fatalf("recovery of a crashed rollback: %+v, %v", r, err)
 		}
 	})
@@ -1333,16 +1350,29 @@ func TestApply(t *testing.T) {
 						nested := false
 						if j > 0 {
 							_, err := crashRun(h, j)
-							if err != nil && !isCrash(err) {
+							// After a crash that left a removal in force, the
+							// record (Q4) refuses the spool's directory 1; with
+							// sshd stopped the listener test of the kept state's
+							// commit then fails (D5).
+							kept := h.exists(h.l.State(state.UnappliedFile))
+							allowed := kept && (errors.Is(err, state.ErrDirOlder) || errors.Is(err, ErrSelfTest))
+							if err != nil && !isCrash(err) && !allowed {
 								t.Fatalf("%s k=%d j=%d: second run: %v", seq.name, k, j, err)
 							}
 							nested = isCrash(err)
 						}
+						kept := h.exists(h.l.State(state.UnappliedFile))
 						_, err = h.apply()
 						runs++
 						if errors.Is(err, ErrPendingStateUnknown) {
 							t.Fatalf("%s k=%d j=%d: pending_state_unknown", seq.name, k, j)
 						}
+						// Once the record (Q4) names the target's directory, the
+						// run after the recovery chains from it: a refused
+						// directory-1 step commits the kept content as last-good
+						// after its listener test (D5), and a spool with no
+						// directory retries the recorded one, which lands.
+						keptCommit := kept && h.lastGood() == h.current() && h.lastGood() != lg
 						// Recovery ends at last-good, or at the target once the
 						// crash came after the commit; or, once the new KRL was
 						// in force, at last-good's CA keys and principals with
@@ -1350,7 +1380,7 @@ func TestApply(t *testing.T) {
 						// 2026-10-26, PR #67); or, once a removal had landed,
 						// at the kept content (03-10d, D8), which atKept
 						// covers along with the other two.
-						if readMarker(t, h) != nil || !h.atKept(h.lastGood()) || (h.lastGood() != lg && h.lastGood() != target) {
+						if readMarker(t, h) != nil || !h.atKept(h.lastGood()) || (h.lastGood() != lg && h.lastGood() != target && !keptCommit) {
 							t.Fatalf("%s k=%d j=%d: current %d, last-good %d (was %d, crash target %d), marker %+v, err %v", seq.name, k, j, h.current(), h.lastGood(), lg, target, readMarker(t, h), err)
 						}
 						// accepted/ moves with last-good (PR #67 review): the
@@ -1360,7 +1390,7 @@ func TestApply(t *testing.T) {
 						if h.lastGood() == target && target != lg {
 							want = newKRL
 						}
-						if st, err := h.accepted(); err != nil || st.KRLVersion != want {
+						if st, err := h.accepted(); err != nil || (st.KRLVersion != want && !keptCommit) {
 							t.Fatalf("%s k=%d j=%d: accepted/ %+v, %v; want KRL version %d with last-good %d", seq.name, k, j, st, err, want, h.lastGood())
 						}
 						if j > 0 && !nested {
@@ -1501,7 +1531,7 @@ func TestApply(t *testing.T) {
 		h.state = old
 		start := h.clock.Monotonic()
 		// 03-10d (D8): B -> M, the kept content, one narrowing swap.
-		if r := h.mustApply(); !r.Rollback || !h.atKept(lg) || h.principals("deploy")[0] != "role:ops" || len(h.principals("deploy")) != 1 {
+		if r := keptApply(t, h); !r.Rollback || !h.atKept(lg) || h.principals("deploy")[0] != "role:ops" || len(h.principals("deploy")) != 1 {
 			t.Fatalf("recovery from B: %+v, principals %v", r, h.principals("deploy"))
 		}
 		if got := h.clock.Monotonic() - start; got >= 150*time.Second {
@@ -1525,7 +1555,7 @@ func TestApply(t *testing.T) {
 		h.resetSpool()
 		h.state = old
 		// 03-10d (D8): M is the kept content; the recovery stays on it.
-		if r := h.mustApply(); !r.Recovered || !h.atKept(lg) {
+		if r := keptApply(t, h); !r.Recovered || !h.atKept(lg) {
 			t.Fatalf("recovery from M: %+v", r)
 		}
 	})

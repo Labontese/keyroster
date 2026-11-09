@@ -660,7 +660,11 @@ func (e *engine) loadMarker() (*marker, error) {
 // fails), the marker {from, to, M, intermediate} written, the narrowing
 // swap to M made at once, the marker rewritten with step final, and the
 // widening swap to to made by swapCurrent's timing rule. Each marker write is followed by a status
-// that shows the swap pending (publishPending, PR #72 review C17).
+// that shows the swap pending (publishPending, PR #72 review C17). Just
+// before the swap that lands a removal (the narrowing swap, or the one
+// swap when Intermediate collapses), after the first marker and its
+// status, forward's verified state is recorded as unapplied
+// (recordBeforeRemoval; owner decisions Q3 and Q4, PR #93 fix round 2).
 func (e *engine) Transition(ctx context.Context, from, to *Generation, mode swapMode) (uint64, error) {
 	m, collapsed := Intermediate(from, to)
 	if collapsed {
@@ -668,6 +672,7 @@ func (e *engine) Transition(ctx context.Context, from, to *Generation, mode swap
 			return 0, err
 		}
 		e.publishPending(ctx)
+		e.recordBeforeRemoval(from, to)
 		return 0, e.swapCurrent(ctx, to, mode)
 	}
 	m.N = e.allocGeneration()
@@ -682,6 +687,7 @@ func (e *engine) Transition(ctx context.Context, from, to *Generation, mode swap
 		return m.N, err
 	}
 	e.publishPending(ctx)
+	e.recordBeforeRemoval(from, m)
 	if err := e.swapCurrent(ctx, m, swapChecked); err != nil {
 		return m.N, err
 	}
