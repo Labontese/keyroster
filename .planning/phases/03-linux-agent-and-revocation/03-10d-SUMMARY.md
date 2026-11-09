@@ -174,8 +174,78 @@ No Task 1 mutant is equivalent: the four expected-equivalent flips (apply.go:107
 
 T1: a37a72c
 
+## Task 2
+
+### Preconditions (read-only, at origin/main e22cc06)
+
+`git merge-base --is-ancestor e22cc06 origin/main` 0; `git grep -q 'func CheckCarriedLost(' origin/main -- internal/krl/recovery.go` 0; `git grep -q 'ErrLostProbeKept' origin/main -- internal/krl` 1; the pending todo exists on origin/main. Every hit of `recovery_user_certificate_kept` outside .planning (krl, signer, audit, their tests, the runbook) is in files_modified.
+
+### pop_hosts_off_fails (Step 1)
+
+Before the change the subtest's failure text came from the trust successor rule, not from audit's host-issue rule: `audit: entry 2: bundle_install is not a valid successor of trust bundle v1: trust: pop_hosts_removed: a successor policy may not turn pop.hosts off once a policy set it (policy v1 sets it; v2 clears it)` (shown by a throwaway test, removed before any commit). The fixture now starts from `newProbeFixtureNoPoP` (a genesis policy that never set pop.hosts), and the subtest wants audit's own text `does not set pop.hosts, so no host certificate could be issued`. It passes; a test-only change, no RED expected.
+
+### RED (Task 2)
+
+All tests written before any code (`go test -race -count=1 -timeout 15m -v -run "^(TestIsProbeKeyID|TestCheckCarriedLost|TestRecoverRevocations|TestRevokeRecover|TestVerifyRecovery|TestVerifyHostIssue)$"` over krl, signer, audit and cmd/keyroster):
+- internal/krl `[build failed]`: `krl_test.go:1311:74: undefined: ErrLostProbeKept`, `krl_test.go:1318:76: too many arguments in call to CheckCarriedLost (have (uint64, uint64, bool, bool, bool) want (uint64, uint64, bool, bool))`, `krl_test.go:1347:14: undefined: IsProbeKeyID`.
+- signer: `--- FAIL: TestRecoverRevocations/lost_probe_certificate_kept_is_refused`: `RecoverRevocations = &{... Revoked:0 Kept:1}, <nil>; want the refusal recovery_probe_certificate_kept`.
+- audit: `--- FAIL: TestVerifyRecovery/recovery_probe_certificate_kept`: `Verify = <nil>, want a refusal containing "(recovery_probe_certificate_kept)"`.
+- cmd/keyroster: `--- FAIL` for `lost_negative_probe_revoked_without_flag` (carried true, revoke false), `lost_positive_probe_revoked_too` (the positive kept), `output_says_probe_certificate_revoked` (no `revoke` line and no summary line for the probes) and `revoke_lost_flag_accepts_a_probe_serial` (with the flag the named probe was revoked, without it kept, so the maps differed).
+- Passing already, as they must against the old rule: `lost_probe_certificate_revoked_is_listed`, `lost_machine_certificate_still_keepable`, `recovery_probe_certificate_revoked_verifies`, `recovery_machine_certificate_kept_verifies`, `kept_machine_certificate_unchanged`, and `pop_hosts_off_fails`.
+
+Two faults in my own new signer subtest showed after the code, and were fixed in the test, not the code: the refusal's `Error()` carries only the code (`refused: recovery_probe_certificate_kept`), so the message check now reads the wrapped cause (`errors.Unwrap`); and the second request of that subtest listed its certificates out of serial order (`wire: malformed message: the certificates must be sorted by serial with no serial twice`), so they are now in serial order.
+
+### Implementation (Task 2, commits ccac467 and 7427197)
+
+- internal/krl/recovery.go: `IsProbeKeyID(kid cert.KeyID) bool` (`kid.V3 && kid.CA == "machine" && strings.HasPrefix(kid.Subject, "probe.")`); `ErrLostProbeKept`; `CheckCarriedLost(validBefore, createdAt, user, probe, revoke)`, order revoke, expiry, user, probe; the doc comments of the rule, the errors and RecoveryCarrySkew updated.
+- internal/signer/recovery.go: `recoveryCert.probe` set from `krl.IsProbeKeyID(kid)`; ErrLostProbeKept refused as `recovery_probe_certificate_kept` ("a recovery revokes every lost probe certificate, positive or negative, since its polarity is not in its bytes"); the refusal list of RecoverRevocations' doc names it.
+- internal/audit/recovery.go: passes `krl.IsProbeKeyID(kid)`; the error ends `(recovery_probe_certificate_kept)`.
+- cmd/keyroster/recover.go: `revoke := user || probe || named[c.Serial]`; the summary prints `lost probe certificates revoked: <n> (a recovery revokes every lost probe certificate, positive or negative)` after the per-certificate lines when n > 0 (the per-certificate line is unchanged, `... (live): revoke`).
+- Fixtures: signer `makeProbeCert` and `signTestCert` (makeCert now signs through it); audit `lostProbeCert`, `lostMachineCert`, `lostMachineCertWith`; the CLI `newProbeRecoverScenario` (a pop.hosts policy, a directory_install leaf with host web1, `logBuilder.probe` porting audit's addProbe so audit.Verify accepts the probe_issue leaves, a negative's serial added to the next publish), `installDirectory`, `newRecoverSigner`.
+- docs/runbooks/signer-install.md: the refusal list names `recovery_probe_certificate_kept`; one bullet under the summary lines says every lost probe certificate is revoked, both polarities, and that a host whose positive was revoked finds it in the KRL (`positive_in_krl`) and asks for a new pair, with additions on it waiting up to about two hours (P4).
+- The todo moved with `git mv` to completed/ with `## Resolution` (7427197).
+
+### Gates (Task 2, local)
+
+- Gate 1 (at ccac467's tree): the plan's command passed: `GATE1_PASS`, every named PASS line present, no FAIL, panic or DATA RACE. Package times (not delta readings): krl 1.040 s, signer 96.794 s, audit 1.633 s, cmd/keyroster 4.051 s.
+- Gate 2 (at 7427197): `go test -race -count=1 -timeout 15m ./internal/krl/ ./internal/signer/ ./internal/audit/ ./internal/tlog/ ./internal/wire/ ./cmd/keyroster/` ok (krl 6.891 s, signer 356.071 s, audit 85.624 s, tlog 3.648 s, wire 7.794 s, cmd/keyroster 212.875 s; another package set than the delta command, so not delta readings); the frozen diff empty; `scripts/capslock-check.sh` ok (signer 92 pairs, agent 37, agent-fetch 23, each equal to its baseline); the todo checks ok.
+- Gate 3: golangci-lint for linux, windows and darwin on `./...` 0 issues each and `gofmt -l internal cmd` empty (on the tree committed as ccac467); the runbook names the refusal.
+- Acceptance: `git diff --name-only origin/main -- internal/wire internal/tlog internal/cert internal/certprofile docs/format-registry.md` prints nothing.
+
+### Mutants (Task 2)
+
+Each mutant ran with the task's work committed (7427197) through run_mutants.py on its single named subtest (`go test -count=1 -timeout 5m -v -run`), restored with `git checkout --` and checked with `git diff --quiet HEAD` per file and for the whole tree (`':!.planning/config.json'`), clean before the first and after the last.
+
+mutant killed: 31 IsProbeKeyID matches a non-machine CA (TestIsProbeKeyID/kr3_host_probe_subject)
+mutant killed: 32 IsProbeKeyID matches any machine subject (TestIsProbeKeyID/kr3_machine_other_subject)
+mutant killed: 33 CheckCarriedLost ignores probe (TestCheckCarriedLost/probe_kept_is_refused)
+mutant killed: 34 the probe check placed before the expiry check (TestCheckCarriedLost/probe_expired_and_kept_is_expired_first)
+mutant killed: 35 the signer passes probe=false (TestRecoverRevocations/lost_probe_certificate_kept_is_refused)
+mutant killed: 36 audit passes probe=false (TestVerifyRecovery/recovery_probe_certificate_kept)
+mutant killed: 37 the CLI decides revoke without probe (TestRevokeRecover/lost_negative_probe_revoked_without_flag)
+mutant killed: 38 the CLI revokes only the first probe certificate it meets, a seen flag (TestRevokeRecover/lost_positive_probe_revoked_too)
+mutant killed: 39 the CLI revokes every machine certificate (TestRevokeRecover/kept_machine_certificate_unchanged)
+mutant killed: 40 the signer refuses every kept machine certificate (TestRecoverRevocations/lost_machine_certificate_still_keepable)
+
+Total: 40 killed, 0 equivalent (floors 36 killed, 40 killed or equivalent).
+
+T-03-389 is mitigated as the threat register states; its residual (the restore path is UNVERIFIED end to end, 03-10's R9) stands.
+
+T2: 7427197
+
+## UNVERIFIED (Task 2)
+
+- That an old log holds no recovery which kept a lost probe certificate (such a log would now fail `audit verify`; 03-10 merged days before and no release has shipped).
+- The restore path end to end (03-10's R9). The CLI test proves that `keyroster revoke recover` revokes lost probe certificates from an export audit.Verify accepts, and the signer test that the KRL then lists them; that the host's agent then asks for a new pair after a real restore, and the wait it causes, is not run (the `positive_in_krl` hold and the new-pair request are unit-tested in internal/agent/apply and internal/agent/probe only).
+- A lost probe certificate the saved export cannot show (the export itself lost) is not recoverable by this rule; it expires with its lifetime.
+
+## Deviations (Task 2)
+
+- The CLI's per-certificate line for a probe certificate is unchanged (`... (live): revoke`); the reason is a separate summary line (`lost probe certificates revoked: <n> (...)`), so `summary_lists_kept_with_key`'s exact user line still holds.
+- The runbook bullet does not say that removals and new KRLs still land while a host waits for a new pair: no test here shows that for the `positive_in_krl` route, so it is not claimed.
+
 ## Where to resume
 
-- Done: Task 1 complete (T1 a37a72c): Step 0 (32e1fd1, the amended plan 5c78955), the base, Steps 1 to 5, gates 1 to 3, the lints, the todo moved, 30 of 30 mutants killed.
-- Next: Task 2 (the recovery rule: krl.IsProbeKeyID, the `probe` parameter of CheckCarriedLost and ErrLostProbeKept; the signer, audit and CLI callers; the runbook; its 10 mutants; the todo move), then Task 3 (gates, PR, SUMMARY). Read so far for Task 2: krl/recovery.go:25-75, krl_test.go:1277-1312, the call sites at signer/recovery.go:138 (recoveryCert :316-341 holds the role; verifyCarriedCert returns the parsed key ID), audit/recovery.go:130 and cmd/keyroster/recover.go:292; signer/recovery_test.go's makeCert builds kr1 key IDs only, so a probe helper needs a kr3 ca=machine key ID signed by the machine CA.
-- The test-time base expires at epoch 1794263107: re-measure it in place if the delta gate runs later.
+- Done: Task 1 (T1 a37a72c) and Task 2 (T2 7427197; ccac467 the rule, callers and tests), 40 of 40 mutants killed. Nothing is pushed.
+- Task 3 drafts, not committed: the two hand-over todos are untracked in .planning/todos/pending/ (`2026-11-08-03-16-host-setup-and-preflight-handovers.md`, `2026-11-08-03-12-and-03-14-read-current-after-a-kept-rollback.md`); the ROADMAP tick, the AGENT-04 tick and the STATE.md tracking update are saved outside the repository and were taken out of the tree with `git checkout --` so the mutant runner could prove it clean. Copy them back, check `git diff -U0` (ROADMAP: the 03-10d tick and 26/33 to 27/33 twice; REQUIREMENTS: four lines), then run Task 3's gates. Task 3's gate commands are extracted verbatim from the plan into scripts outside the repository.
+- Next in Task 3: commit the tracking and todos; gates 1, 2 (whole module), 3 (delta, the base expires at epoch 1794263107), 4 to 7 with the gate controls; push; open the PR with the body the plan requires (T-03-395 named as an extension of Q-D); gates 8 to 11 after CI; the final `docs(03-10d): complete rollback-and-recovery plan` commit.
