@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -267,6 +268,30 @@ func makeCert(t *testing.T, ca ssh.Signer, certType uint32, role, subject string
 	c := &ssh.Certificate{Key: key, Serial: serial, CertType: certType, ValidPrincipals: []string{"alice"},
 		KeyId:      cert.KeyID{CA: role, Subject: subject, Request: strings.Repeat("cd", 16), Policy: 1, Serial: keyIDSerial}.String(),
 		ValidAfter: validBefore - 3600, ValidBefore: validBefore, Nonce: make([]byte, 32), SignatureKey: ca.PublicKey()}
+	return signTestCert(t, ca, c)
+}
+
+// makeProbeCert returns a probe certificate as signer/probeissue.go gives
+// one (03-10d): a user certificate for keyroster-probe:<host> whose kr3
+// key ID has ca=machine and subject probe.<host>, with serial, valid
+// before validBefore, signed by ca (the machine CA). Nothing in it says
+// whether it was a positive or a negative probe.
+func makeProbeCert(t *testing.T, ca ssh.Signer, host string, serial, validBefore uint64) *ssh.Certificate {
+	t.Helper()
+	req := make([]byte, 16)
+	if _, err := rand.Read(req); err != nil {
+		t.Fatal(err)
+	}
+	c := &ssh.Certificate{Key: newEd25519(t).PublicKey(), Serial: serial, CertType: ssh.UserCert, ValidPrincipals: []string{cert.ReservedPrincipalPrefix + host},
+		KeyId: cert.KeyID{V3: true, CA: wire.CARoleMachine.String(), Subject: "probe." + host, Request: hex.EncodeToString(req), Policy: 1, Directory: 1,
+			Serial: serial}.String(),
+		ValidAfter: validBefore - 3600, ValidBefore: validBefore, Nonce: make([]byte, 32), SignatureKey: ca.PublicKey()}
+	return signTestCert(t, ca, c)
+}
+
+// signTestCert signs c by ca and returns it.
+func signTestCert(t *testing.T, ca ssh.Signer, c *ssh.Certificate) *ssh.Certificate {
+	t.Helper()
 	// Signed by hand, as audit's forgeCert does: cert.Build refuses the
 	// malformed certificates some cases need (a key ID naming another
 	// serial), and only cert.Build may call SignCert (CA-06).
@@ -974,6 +999,48 @@ func TestRecoverRevocations(t *testing.T) {
 		r.revokeAny(t, &wire.RevokeRequest{Target: wire.TargetKey, Key: host.Key.Marshal()})
 		if !r.parsedKRL(t).RevokesKey(host.Key.Marshal()) {
 			t.Fatal("revoke key of the kept host certificate's key is not listed")
+		}
+		r.verifyExport()
+	})
+	// 03-10d (Q-R option 1): a lost probe certificate cannot be told apart
+	// by polarity from its bytes, so a recovery revokes every one, told
+	// apart by its key ID; one carried unrevoked is refused.
+	t.Run("lost_probe_certificate_kept_is_refused", func(t *testing.T) {
+		_, r := lostSetup(t, nil)
+		machineCA := r.fx.Roles[keystore.RoleMachine]
+		s := uint64(r.clock.Now().UnixMicro()) + 1000 //nolint:gosec // G115: after 1970
+		vb := uint64(r.clock.Now().Unix()) + 3600     //nolint:gosec // G115: after 1970
+		probe := makeProbeCert(t, machineCA, "web1", s, vb)
+		req := r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: probe.Marshal(), Revoke: false}}, nil)
+		err := r.refusedRecoveryErr(t, marshal(t, req), "recovery_probe_certificate_kept")
+		if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), "a recovery revokes every lost probe certificate") {
+			t.Fatalf("refusal %v (%v); want its cause to say that a recovery revokes every lost probe certificate", err, cause)
+		}
+		// Beside a revoked one (sorted by serial), a kept one is still refused.
+		other := makeProbeCert(t, machineCA, "web1", s+1, vb)
+		req = r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: probe.Marshal(), Revoke: false}, {Cert: other.Marshal(), Revoke: true}}, nil)
+		r.refusedRecovery(t, marshal(t, req), "recovery_probe_certificate_kept")
+	})
+	t.Run("lost_probe_certificate_revoked_is_listed", func(t *testing.T) {
+		_, r := lostSetup(t, nil)
+		machineCA := r.fx.Roles[keystore.RoleMachine]
+		s := uint64(r.clock.Now().UnixMicro()) + 1000 //nolint:gosec // G115: after 1970
+		vb := uint64(r.clock.Now().Unix()) + 3600     //nolint:gosec // G115: after 1970
+		positive, negative := makeProbeCert(t, machineCA, "web1", s, vb), makeProbeCert(t, machineCA, "web1", s+1, vb)
+		res := r.recover(t, r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: positive.Marshal(), Revoke: true}, {Cert: negative.Marshal(), Revoke: true}}, nil))
+		p := r.parsedKRL(t)
+		ca := machineCA.PublicKey().Marshal()
+		if res.Revoked != 2 || res.Kept != 0 || !p.RevokesSerial(ca, positive.Serial) || !p.RevokesSerial(ca, negative.Serial) {
+			t.Fatalf("result %+v; want both lost probe certificates revoked and listed under the machine CA key", res)
+		}
+		r.verifyExport()
+	})
+	t.Run("lost_machine_certificate_still_keepable", func(t *testing.T) {
+		var machine *ssh.Certificate
+		_, r := lostSetup(t, func(e *revokeEnv) { machine = e.issueRole(t, wire.CARoleMachine) })
+		res := r.recover(t, r.recoveryRequest(t, nil, []wire.RecoveredCertificate{{Cert: machine.Marshal()}}, nil))
+		if res.Kept != 1 || res.Revoked != 0 || res.Entries != 0 || r.parsedKRL(t).RevokesSerial(machine.SignatureKey.Marshal(), machine.Serial) {
+			t.Fatalf("result %+v; want the lost machine certificate (not a probe) kept, with no entry", res)
 		}
 		r.verifyExport()
 	})

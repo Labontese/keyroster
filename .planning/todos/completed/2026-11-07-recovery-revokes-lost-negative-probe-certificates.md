@@ -32,3 +32,7 @@ Tests:
 - a lost positive probe certificate can still be kept.
 
 Sources: 03-10-PLAN.md (recovery_collects_probe_certificate, R9), 03-10-SUMMARY.md ("Pre-merge review", D-R1).
+
+## Resolution
+
+Resolved in 03-10d (PR from branch `p03/10d-no-regrant-recovery`; owner decisions Q-R option 1 and D-R1, 2026-11-08), by a rule wider than the Solution above. A probe certificate's polarity is in none of its bytes and the signer and `audit verify` see only the certificate, so the recovery revokes every lost probe certificate, positive and negative, recognised by its key ID (`krl.IsProbeKeyID`: kr3, ca=machine, subject `probe.*`). `krl.CheckCarriedLost` gained the `probe` flag and `ErrLostProbeKept`; the signer refuses a carried probe certificate that is not revoked as `recovery_probe_certificate_kept`, `audit verify` fails on it, and `keyroster revoke recover` revokes every lost probe certificate without `--revoke-lost` and counts them in its summary. A lost machine certificate that is not a probe may still be kept. A revoked lost positive makes its host ask for a new pair, so additions on that host wait up to about two hours (owner answer P4). No wire format changed. That an old log holds no recovery which kept a probe certificate is UNVERIFIED. Tests: TestIsProbeKeyID, TestCheckCarriedLost, TestRecoverRevocations/lost_probe_certificate_*, TestVerifyRecovery/recovery_probe_certificate_*, TestRevokeRecover/lost_*_probe_*.

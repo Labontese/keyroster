@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"maps"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"github.com/Labontese/keyroster/internal/audit"
 	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/certprofile"
+	"github.com/Labontese/keyroster/internal/directory"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/serverclient"
 	"github.com/Labontese/keyroster/internal/sshsig"
@@ -396,6 +399,121 @@ type recoverScenario struct {
 	restored, saved string
 	restoredN       int
 	out             string
+	// pos, neg and m are newProbeRecoverScenario's lost positive and
+	// negative probe certificates and its lost machine certificate.
+	pos, neg, m *ssh.Certificate
+}
+
+// installDirectory logs a directory_install entry of doc with sigs.
+func (b *logBuilder) installDirectory(version uint64, doc, sigs []byte) {
+	b.t.Helper()
+	enc, err := (&tlog.DirectoryInstallBody{Version: version, PolicyVersion: b.pol.Version, Directory: doc, Sigs: sigs}).Encode()
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	b.add(tlog.KindDirectoryInstall, enc)
+}
+
+// probe logs a probe_issue entry as the signer writes one (03-10d): host
+// key hostKey's request for host under directory dirVersion, with a fresh
+// probe key, both proofs of possession, and the certificate cert.Build
+// gives the machine CA under the probe profile of the policy in force,
+// with the next serial. A negative probe's own serial joins the entries
+// the next publish lists, as the signer's does.
+func (b *logBuilder) probe(hostKey ssh.Signer, host string, dirVersion uint64, negative bool) *ssh.Certificate {
+	b.t.Helper()
+	probeKey := newRecoverSigner(b.t)
+	req := &wire.ProbeIssueRequest{InstallationID: b.bundle.InstallationID, HostName: host, HostKey: hostKey.PublicKey().Marshal(),
+		ProbeKey: probeKey.PublicKey().Marshal(), Negative: negative, CreatedAt: b.secs()}
+	if _, err := rand.Read(req.RequestID[:]); err != nil {
+		b.t.Fatal(err)
+	}
+	var evidence []wire.Evidence
+	for _, pk := range []struct {
+		kind string
+		key  ssh.Signer
+	}{{wire.EvidenceHostPoP, hostKey}, {wire.EvidenceProbePoP, probeKey}} {
+		sig, err := sshsig.Sign(rand.Reader, pk.key, wire.ProbePoPNamespace, req.SigningBytes())
+		if err != nil {
+			b.t.Fatal(err)
+		}
+		evidence = append(evidence, wire.Evidence{Type: pk.kind, Blob: sig})
+	}
+	profile, err := certprofile.ProbeProfile(b.pol)
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	lifetime := certprofile.ProbeLifetime(profile)
+	serial := b.micros + 1000
+	kid := cert.KeyID{V3: true, CA: trust.RoleMachine, Subject: "probe." + host, Request: hex.EncodeToString(req.RequestID[:]),
+		Policy: b.pol.Version, Directory: dirVersion, Serial: serial}
+	c, err := cert.Build(cert.Request{Profile: profile, Subject: probeKey.PublicKey(), Principals: []string{cert.ReservedPrincipalPrefix + host},
+		Now: time.UnixMicro(int64(serial)), ValidFor: time.Duration(lifetime) * time.Second, KeyID: kid, Serial: serial, //nolint:gosec // G115: a test time and a capped lifetime
+		CriticalOptions: certprofile.ProbeCriticalOptions()}, b.ca[trust.RoleMachine], rand.Reader)
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	body := &tlog.ProbeIssueBody{Serial: serial, Negative: negative, PolicyVersion: b.pol.Version, DirectoryVersion: dirVersion,
+		CapSeconds: lifetime, Request: req.SigningBytes(), Evidence: evidence, Cert: c.Marshal(), KeyID: c.KeyId}
+	enc, err := body.Encode()
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	b.add(tlog.KindProbeIssue, enc)
+	if negative {
+		entries, err := body.RevokedEntries()
+		if err != nil {
+			b.t.Fatal(err)
+		}
+		for _, e := range entries {
+			b.entries = append(b.entries, krl.Entry{Kind: krl.EntrySerial, CAKey: e.CAKey, Serial: e.Serial, ValidBefore: e.ValidBeforeSeconds})
+		}
+	}
+	return c
+}
+
+// newRecoverSigner is a fresh Ed25519 ssh.Signer.
+func newRecoverSigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	_, k, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// newProbeRecoverScenario is newRecoverScenario on a policy that sets
+// pop.hosts and a directory with host web1 (03-10d): after the restored
+// export's end the saved log also holds a positive and a negative probe
+// certificate of web1 (pos, neg) and a machine certificate (m), all lost.
+func newProbeRecoverScenario(t *testing.T) *recoverScenario {
+	t.Helper()
+	e := newDirEnvPolicy(t, 1, 1, func(p *trust.Policy) { p.PoP = &trust.PoPPolicy{Hosts: true} })
+	hostKey := newRecoverSigner(t)
+	doc := buildDir(t, nil, boundTo(e.bundle.InstallationID, roleBase(t, func(d *directory.Directory) {
+		d.Hosts = append(d.Hosts, directory.Host{Name: "web1", HostGroup: "web", Keys: []string{trust.FormatKey(hostKey.PublicKey())},
+			Principals: []string{"web1"}, Status: directory.StatusActive})
+	})))
+	b := newLogBuilder(t, e, nil)
+	b.installDirectory(1, doc, e.sign(t, doc, 0))
+	s := &recoverScenario{e: e, b: b}
+	s.c1 = b.issue(trust.RoleUser)
+	b.publish()
+	s.restoredN = len(b.leaves)
+	s.u = b.issue(trust.RoleUser)
+	s.h = b.issue(trust.RoleHost)
+	s.pos = b.probe(hostKey, "web1", 1, false)
+	s.neg = b.probe(hostKey, "web1", 1, true)
+	s.m = b.issue(trust.RoleMachine)
+	b.revokeSerial(s.c1)
+	b.publish()
+	s.restored, s.saved = b.export(s.restoredN), b.export(-1)
+	s.out = filepath.Join(t.TempDir(), "recovery.req")
+	return s
 }
 
 func newRecoverScenario(t *testing.T) *recoverScenario {
@@ -564,6 +682,67 @@ func TestRevokeRecover(t *testing.T) {
 			if code == 0 || !strings.Contains(errOut, "recovery_revoke_lost_unknown") || fileExists(s.out) {
 				t.Fatalf("--revoke-lost %d: exit %d:\n%s", serial(s), code, errOut)
 			}
+		}
+	})
+	// 03-10d (Q-R option 1): every lost probe certificate is revoked
+	// without a flag, both polarities, told apart by its key ID; a lost
+	// machine certificate that is not a probe is kept as before. Each
+	// case requires the serial to be carried: a certificate that breaks
+	// krl.CheckCarriedLost is left out (counted as expired), not kept.
+	probeRun := func(t *testing.T, extra ...string) (*recoverScenario, map[uint64]bool, string) {
+		t.Helper()
+		s := newProbeRecoverScenario(t)
+		code, out, errOut := s.run(t, extra...)
+		if code != 0 {
+			t.Fatalf("exit %d:\n%s%s", code, out, errOut)
+		}
+		return s, carried(t, s.request(t)), out
+	}
+	carriedAs := func(t *testing.T, got map[uint64]bool, c *ssh.Certificate, revoke bool, what string) {
+		t.Helper()
+		if r, ok := got[c.Serial]; !ok || r != revoke {
+			t.Fatalf("%s (serial %d): carried %t, revoke %t; want carried, revoke %t (all carried: %v)", what, c.Serial, ok, r, revoke, got)
+		}
+	}
+	t.Run("lost_negative_probe_revoked_without_flag", func(t *testing.T) {
+		s, got, _ := probeRun(t)
+		carriedAs(t, got, s.neg, true, "the lost negative probe certificate")
+	})
+	t.Run("lost_positive_probe_revoked_too", func(t *testing.T) {
+		s, got, _ := probeRun(t)
+		carriedAs(t, got, s.pos, true, "the lost positive probe certificate")
+		carriedAs(t, got, s.neg, true, "the lost negative probe certificate")
+	})
+	t.Run("kept_machine_certificate_unchanged", func(t *testing.T) {
+		s, got, _ := probeRun(t)
+		carriedAs(t, got, s.m, false, "the lost machine certificate")
+		carriedAs(t, got, s.h, false, "the lost host certificate")
+		carriedAs(t, got, s.u, true, "the lost user certificate")
+		if len(got) != 5 {
+			t.Fatalf("carried %v, want the five lost certificates", got)
+		}
+	})
+	t.Run("output_says_probe_certificate_revoked", func(t *testing.T) {
+		s, _, out := probeRun(t)
+		for _, c := range []*ssh.Certificate{s.pos, s.neg} {
+			want := "lost certificate: serial " + strconv.FormatUint(c.Serial, 10) + ", machine, subject probe.web1, key " + ssh.FingerprintSHA256(c.Key) +
+				", valid before " + strconv.FormatUint(c.ValidBefore, 10) + " (live): revoke\n"
+			if !strings.Contains(out, want) {
+				t.Errorf("the summary lacks %q:\n%s", want, out)
+			}
+		}
+		if want := "lost probe certificates revoked: 2 (a recovery revokes every lost probe certificate, positive or negative)\n"; !strings.Contains(out, want) {
+			t.Errorf("the summary lacks %q:\n%s", want, out)
+		}
+	})
+	t.Run("revoke_lost_flag_accepts_a_probe_serial", func(t *testing.T) {
+		s, plain, _ := probeRun(t)
+		s.out = filepath.Join(t.TempDir(), "named.req")
+		if code, out, errOut := s.run(t, "--revoke-lost", strconv.FormatUint(s.pos.Serial, 10)); code != 0 {
+			t.Fatalf("--revoke-lost of a probe serial: exit %d:\n%s%s", code, out, errOut)
+		}
+		if got := carried(t, s.request(t)); !maps.Equal(got, plain) {
+			t.Fatalf("--revoke-lost of a probe serial carried %v, without it %v; want the same", got, plain)
 		}
 	})
 	t.Run("summary_lists_kept_with_key", func(t *testing.T) {

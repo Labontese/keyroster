@@ -38,9 +38,12 @@ import (
 //     issue or login_issue entry logged it and its serial is above theirs;
 //   - every carried certificate is one krl.CheckCarriedLost admits at
 //     the request's CreatedAt, as the signer requires: revoked, or still
-//     live then (recovery_certificate_expired) and not a user certificate
+//     live then (recovery_certificate_expired), not a user certificate
 //     (recovery_user_certificate_kept: the owner's answer
-//     revoke-users-list-others revokes every lost user certificate);
+//     revoke-users-list-others revokes every lost user certificate) and
+//     not a probe certificate (recovery_probe_certificate_kept: 03-10d,
+//     Q-R option 1 revokes every lost probe certificate, both polarities,
+//     told apart by its key ID with krl.IsProbeKeyID);
 //   - the entries are exactly krl.RecoveryEntries over the imports and the
 //     carried certificates, with the log's issued certificates as the
 //     lookup, as the signer derives them;
@@ -127,12 +130,14 @@ func verifyRecovery(index uint64, body *tlog.RecoveryBody, leafMicros uint64, ro
 		if _, logged := rs.certs[c.Serial]; logged || (iss.seen && c.Serial <= iss.lastSerial) {
 			return nil, fmt.Errorf("carried certificate %d (serial %d) is not lost: the log issued it, or a later serial (recovery_certificate_not_lost)", i, c.Serial)
 		}
-		switch err := krl.CheckCarriedLost(c.ValidBefore, req.CreatedAt, kid.CA == wire.CARoleUser.String(), rc.Revoke); {
+		switch err := krl.CheckCarriedLost(c.ValidBefore, req.CreatedAt, kid.CA == wire.CARoleUser.String(), krl.IsProbeKeyID(kid), rc.Revoke); {
 		case errors.Is(err, krl.ErrLostExpired):
 			return nil, fmt.Errorf("carried certificate serial %d expired before the request was created (valid before %d, created at %d) and is not revoked (recovery_certificate_expired)",
 				c.Serial, c.ValidBefore, req.CreatedAt)
 		case errors.Is(err, krl.ErrLostUserKept):
 			return nil, fmt.Errorf("carried user certificate serial %d is not revoked; a recovery revokes every lost user certificate (recovery_user_certificate_kept)", c.Serial)
+		case errors.Is(err, krl.ErrLostProbeKept):
+			return nil, fmt.Errorf("carried probe certificate serial %d is not revoked; a recovery revokes every lost probe certificate, positive or negative (recovery_probe_certificate_kept)", c.Serial)
 		}
 		rcs = append(rcs, krl.RecoveredCert{CAKey: c.SignatureKey.Marshal(), Serial: c.Serial, KeyID: c.KeyId, ValidBefore: c.ValidBefore, Revoke: rc.Revoke})
 		carried = append(carried, rc.Cert)
