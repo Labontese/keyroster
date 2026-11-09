@@ -288,10 +288,8 @@ type engine struct {
 	accepted *state.Stored
 	// swapRecord is the verified state forward's own Transition moves to,
 	// set only for that call: the swap that lands a removal records it
-	// first (recordBeforeRemoval, owner decisions Q3 and Q4), and
-	// recordedRemoval says this run did.
-	swapRecord      *state.Verified
-	recordedRemoval bool
+	// first (recordBeforeRemoval, owner decisions Q3 and Q4).
+	swapRecord *state.Verified
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
 	// net.Dialer and /proc (tests substitute both).
@@ -1591,13 +1589,12 @@ func (e *engine) unappliedBase(stored *state.Stored) *state.Stored {
 // KRL-alone pass, or to the swap): a revocation never waits for the
 // record.
 //
-// The record changes in exactly five ways: this write (from either
+// The record changes in exactly four ways: this write (from either
 // caller), which only raises parts; finishCommit, which removes a record
 // accepted/ has passed (dropPassedRecord); ResetDirectory, which drops its
-// directory part; forward's load, which drops a damaged or passed record
-// (unappliedBase); and dropRecord, which removes it whole when the
-// removal it was written for never stayed in force (a rollback that kept
-// none, or a recover whose marker shows the swap never ran).
+// directory part; and forward's load, which drops a damaged or passed
+// record (unappliedBase). No failure or crash removes it (owner decision
+// Q5): a record a failed apply wrote stays until a commit passes it.
 func (e *engine) recordUnapplied(stored *state.Stored, v *state.Verified) {
 	if e.cfg.DryRun || stored == nil {
 		return
@@ -1822,11 +1819,7 @@ func (e *engine) rollbackAs(ctx context.Context, cause error, lg link, keep bool
 	if e.base != nil {
 		bounds = []*Generation{e.base}
 	}
-	err := e.backToLastGood(ctx, lg, keep, bounds)
-	if keep && e.recordedRemoval && !isCrash(err) && e.keptNothing(lg) {
-		e.dropRecord("the rollback kept no removal")
-	}
-	if err != nil {
+	if err := e.backToLastGood(ctx, lg, keep, bounds); err != nil {
 		return errors.Join(cause, err)
 	}
 	e.cleanup()
@@ -1844,45 +1837,20 @@ func (e *engine) rollbackAs(ctx context.Context, cause error, lg link, keep bool
 // newer KRL or bundle, has that directory step refused and only its KRL
 // moves on, bounded by current (D10), and one that offers it again retries
 // it. Written before the removal lands, the record survives a crash at
-// any later point. A commit passes it (dropPassedRecord); a rollback that
-// keeps no removal, and a start-up recover whose marker shows the swap
-// never ran, remove it (dropRecord). Nothing is written for a KRL-alone
-// state, one with no part ahead of accepted/, or a swap outside forward's
-// Transition (a rollback, recover or settle).
+// any later point. Only a commit that passes it removes it
+// (dropPassedRecord); a failure or crash before the removal landed leaves
+// it, so the status names the directory as verified and not applied and an
+// older directory is refused (directory_older) until that directory or a
+// newer one lands (owner decision Q5, PR #93 fix round 3): a record an
+// earlier failed apply wrote, whose removal is kept, is never removed with
+// it. Nothing is written for a KRL-alone state, one with no part ahead of
+// accepted/, or a swap outside forward's Transition (a rollback, recover
+// or settle).
 func (e *engine) recordBeforeRemoval(from, landing *Generation) {
 	if e.swapRecord == nil || e.accepted == nil || from == nil || covers(landing, from) {
 		return
 	}
 	e.recordUnapplied(e.accepted, e.swapRecord)
-	e.recordedRemoval = true
-}
-
-// keptNothing reports whether current holds every line last-good holds
-// after a rollback: no removal is kept. A current or last-good that does
-// not read keeps the record (false).
-func (e *engine) keptNothing(lg link) bool {
-	lgGen, err := readGeneration(lg.dir)
-	if err != nil {
-		return false
-	}
-	cur, _, err := e.readCurrent()
-	return err == nil && cur != nil && covers(cur, lgGen)
-}
-
-// dropRecord removes the unapplied record whole, when the removal it was
-// written for never stayed in force (why): an older part a content refusal
-// recorded goes with it, and the next capture that brings that version
-// refuses and records it again (liveness only). DryRun writes nothing.
-func (e *engine) dropRecord(why string) {
-	if e.cfg.DryRun {
-		return
-	}
-	path := e.l.State(state.UnappliedFile)
-	if err := e.remove(path); err != nil {
-		e.logf("WARNING removing %s: %v", path, err)
-		return
-	}
-	e.logf("removed %s: %s", path, why)
 }
 
 // backToLastGood is the common end of rollback and crash recovery: it
@@ -1976,7 +1944,6 @@ func (e *engine) recover(ctx context.Context, m *marker, cur, lg link) error {
 	if m != nil {
 		e.dropinChanged = m.DropInChanged
 		e.pending = m
-		e.dropUnlandedRecord(m, cur, lg)
 	}
 	if m != nil && m.Step == stepCommit && cur.kind == linkAgent && cur.n == m.To {
 		// The generation passed its self-test: finish its commit; the
@@ -2006,36 +1973,6 @@ func (e *engine) recover(ctx context.Context, m *marker, cur, lg link) error {
 		}
 	}
 	return e.backToLastGood(ctx, lg, true, bounds)
-}
-
-// dropUnlandedRecord is recover's rule for the record recordBeforeRemoval
-// writes (owner decision Q4): when the marker's swap that would land a
-// removal never ran (current still names the marker's from, its
-// intermediate, or to when there is none, lacks a line from holds) and
-// from holds every line last-good holds, no removal is in force and the
-// record is removed whole (dropRecord). A from that lacks a line of
-// last-good (a kept state, or a rollback's swap from the failed target)
-// keeps it, and so does a generation that does not read.
-func (e *engine) dropUnlandedRecord(m *marker, cur, lg link) {
-	if m.From == 0 || cur.kind != linkAgent || cur.n != m.From || m.Step == stepCommit || lg.kind != linkAgent {
-		return
-	}
-	landing := m.Intermediate
-	if landing == 0 {
-		landing = m.To
-	}
-	from, err := readGeneration(e.l.Gen(m.From))
-	if err != nil {
-		return
-	}
-	to, err := readGeneration(e.l.Gen(landing))
-	if err != nil || covers(to, from) {
-		return
-	}
-	if lgGen, err := readGeneration(lg.dir); err != nil || !covers(from, lgGen) {
-		return
-	}
-	e.dropRecord("the pending swap that would land a removal never ran")
 }
 
 // keepingTarget is RollbackKeeping(from, lgGen, bounds) on disk (03-10d):
