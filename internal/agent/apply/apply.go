@@ -947,7 +947,13 @@ func (e *engine) forward(ctx context.Context) error {
 			return err
 		}
 		var refusal error
-		if g, refusal = e.candidate(v, cur, curLink); refusal == nil {
+		// 03-10d (D10): forward's KRL-alone pass is bounded by the
+		// generation current names, when it is the agent's.
+		ref := cur
+		if curLink.kind != linkAgent {
+			ref = nil
+		}
+		if g, refusal = e.candidate(v, cur, curLink, ref); refusal == nil {
 			if !v.Changed() && cur != nil && sameBytes(cur, g) {
 				// F03 (03-08f): the unauthorized state is already in force.
 				// Nothing is committed, so the idle run stages no accepted/
@@ -1337,40 +1343,46 @@ func outcome(v *state.Verified) error {
 	return errors.Join(v.Refused, v.KRLRefused, v.DirectoryUnauthorized)
 }
 
-// krlOnly makes the render of a KRL-alone Verified (v.Refused set: only
-// its KRL moves on) hold every file but the KRL of the generation current
-// names, when current is the agent's and is not last-good (03-10d, D10,
-// under owner decision Q-D): a keeping rollback leaves accepted/ at
-// last-good's directory, whose render would grant a landed removal again.
-// With current at last-good the render is unchanged.
-func (e *engine) krlOnly(g, cur *Generation, curLink link) {
-	lg, err := e.resolveLink(e.l.LastGood())
-	if err != nil || lg.kind != linkAgent || cur == nil || curLink.kind != linkAgent || curLink.n == lg.n {
+// krlOnly bounds g, the render of a KRL-alone Verified (v.Refused set:
+// only its KRL moves on), by ref, its reference generation (03-10d, D10,
+// under owner decision Q-D, restated after the PR #93 review): every file
+// but the KRL is RollbackKeeping(ref, g, nil)'s, the render's CA and
+// principal lines that ref also holds, so the pass never grants a line ref
+// lacks; only the KRL is the render's. A render that ref covers keeps its
+// own bytes. A keeping rollback leaves accepted/ at last-good's directory,
+// and the pass's own commit makes the kept state last-good, so no test on
+// link names carries the rule: every KRL-alone pass is bounded. A nil ref
+// bounds nothing.
+func krlOnly(g, ref *Generation) {
+	if ref == nil {
 		return
 	}
+	t := RollbackKeeping(ref, g, nil)
 	maps.DeleteFunc(g.Files, func(n string, _ []byte) bool {
 		class, ok := ClassOf(n)
 		return !ok || class != FileKRL
 	})
-	for n, b := range cur.Files {
+	for n, b := range t.Files {
 		if class, ok := ClassOf(n); !ok || class != FileKRL {
 			g.Files[n] = b
 		}
 	}
 }
 
-// candidate renders v for this host (render), keeps the KRL in force
+// candidate renders v for this host (render), bounds a KRL-alone render
+// by ref (krlOnly: forward's is the generation current names when it is
+// the agent's, pollSpool's the pending target), keeps the KRL in force
 // (keepKRL) and checks the result against cur, the generation current
 // names (checkCandidate), writing nothing. Its errors are render errors
 // and cap refusals: content refusals, for which the KRL-alone pass runs
 // (krlAlone; F07 (03-08d)).
-func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link) (*Generation, error) {
+func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link, ref *Generation) (*Generation, error) {
 	g, err := e.render(v, cur, curLink)
 	if err != nil {
 		return nil, err
 	}
 	if v.Refused != nil {
-		e.krlOnly(g, cur, curLink)
+		krlOnly(g, ref)
 	}
 	e.keepKRL(g, cur, curLink)
 	if err := checkCandidate(g, cur, curLink, e.fixedPrincipals()); err != nil {
@@ -1618,7 +1630,8 @@ func (e *engine) discard(n uint64) {
 // checked, is returned as the superseding generation. A content refusal
 // of its generation takes the KRL-alone pass as forward's does (krlAlone;
 // F07 (03-08d)), against the pending target's state: the superseding
-// generation is then the pending target's with the newer KRL, and its
+// generation is then the pending target's with the newer KRL (its render
+// bounded by the pending target, krlOnly; 03-10d, D10), and its
 // Verified carries the refusal, which forward returns after the commit. A
 // KRL-alone state with nothing newer returns the refusal, which the wait
 // logs. The capture is read and verified as forward's is (pollCapture),
@@ -1638,7 +1651,9 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 		if err != nil {
 			return nil, nil, err
 		}
-		g, refusal := e.candidate(v, cur, curLink)
+		// 03-10d (D10): a KRL-alone pass here is bounded by the pending
+		// target, never by the intermediate current names during the wait.
+		g, refusal := e.candidate(v, cur, curLink, target)
 		if refusal == nil {
 			if sameBytes(g, target) {
 				return nil, nil, nil

@@ -3,11 +3,13 @@
 package apply
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1224,6 +1226,125 @@ func TestRollbackSites(t *testing.T) {
 		}
 		if l, err := readGeneration(h.l.Gen(h.lastGood())); err != nil || (h.lastGood() != lg0 && slices.Contains(deployLines(l), "role:a")) {
 			t.Fatalf("last-good %d widened to role:a: %v", h.lastGood(), err)
+		}
+	})
+	bothProbes(t, "krl_alone_twice_after_kept_rollback_keeps_removal", func(t *testing.T, probes bool) {
+		// D10, restated after the PR #93 review: the first KRL-alone pass
+		// commits the kept state as last-good while accepted/ keeps
+		// last-good's old directory, so every later KRL-alone pass is
+		// bounded by current too. The refused directory lacks role:a: only
+		// accepted/'s directory could grant it.
+		h := keptBase(t, probes, []string{"role:a", "role:x"}, []string{"role:x", "role:b"})
+		lg0 := h.lastGood()
+		s := h.spec("role:x", "role:b")
+		s.bulkRoles = 17
+		h.publishDir(s)
+		var seen []string
+		h.cfg.Fault = func(p string) error {
+			if slices.Contains(h.principals("deploy"), "role:a") {
+				seen = append(seen, "current at "+p)
+			}
+			if l, err := readGeneration(h.l.Gen(h.lastGood())); err == nil && h.lastGood() != lg0 && slices.Contains(deployLines(l), "role:a") {
+				seen = append(seen, "last-good at "+p)
+			}
+			return nil
+		}
+		for i, krls := range [][]uint64{{93}, {93, 94}, {93, 94, 95}} {
+			h.publishKRL(krls...)
+			_, err := h.apply()
+			newest := krls[len(krls)-1]
+			if !errors.Is(err, ErrGenerationTooLarge) {
+				t.Fatalf("round %d: %v, want generation_too_large reported", i+1, err)
+			}
+			if got := h.principals("deploy"); slices.Contains(got, "role:a") || len(seen) != 0 {
+				t.Fatalf("round %d: role:a re-granted: principals %v, in force at %v", i+1, got, seen)
+			}
+			l, err := readGeneration(h.l.Gen(h.lastGood()))
+			if err != nil || h.lastGood() == lg0 || slices.Contains(deployLines(l), "role:a") {
+				t.Fatalf("round %d: last-good %d (was %d) lines %v: %v", i+1, h.lastGood(), lg0, deployLines(l), err)
+			}
+			if !h.krlRevokes(h.l.Current(), newest) {
+				t.Fatalf("round %d: KRL serial %d not in force", i+1, newest)
+			}
+		}
+		h.cfg.Fault = nil
+		mustPrincipals(t, h, "role:x")
+	})
+	t.Run("krl_alone_bound_equal_render_keeps_bytes", func(t *testing.T) {
+		// D10: a render whose non-KRL files equal the reference's keeps its
+		// own bytes; a wider one loses the lines the reference lacks, CA and
+		// principals alike, and only its KRL is the render's.
+		t.Parallel()
+		ca := caLines(t)
+		render := pureGen(t, 0, renderHeader, 3, ca[:2], "role:a", "role:x")
+		ref := pureGen(t, 6, renderHeader, 2, ca[:2], "role:a", "role:x")
+		before := &Generation{Files: maps.Clone(render.Files)}
+		krlOnly(render, ref)
+		if !sameBytes(render, before) {
+			t.Fatalf("equal content: %q, want the render's own bytes %q", render.Files, before.Files)
+		}
+		wide := pureGen(t, 0, renderHeader, 3, ca, "role:a", "role:x")
+		narrow := pureGen(t, 6, intermediateHeader, 4, ca[1:], "role:x")
+		krlOnly(wide, narrow)
+		if p := deployLines(wide); !slices.Equal(p, []string{"role:x"}) {
+			t.Fatalf("principals %v, want [role:x]", p)
+		}
+		if c := string(wide.Files[CAFile]); c != ca[1]+"\n"+ca[2]+"\n" {
+			t.Fatalf("CA file %q, want the reference's lines", c)
+		}
+		if !bytes.Equal(wide.Files[KRLFile], krlBytes(t, 3)) {
+			t.Fatal("the KRL is not the render's")
+		}
+		nilRef := pureGen(t, 0, renderHeader, 3, ca, "role:a")
+		before = &Generation{Files: maps.Clone(nilRef.Files)}
+		if krlOnly(nilRef, nil); !sameBytes(nilRef, before) {
+			t.Fatal("a nil reference changed the render")
+		}
+	})
+	bothProbes(t, "refused_capture_during_wait_lands_addition", func(t *testing.T, probes bool) {
+		// D10, restated after the PR #93 review: in pollSpool the KRL-alone
+		// pass is bounded by the pending target, never by the intermediate
+		// current names during the wait, so the superseding generation is
+		// the pending target's with the newer KRL (as at e22cc06).
+		h := keepHost(t, probes, "role:a", "role:x")
+		fired := false
+		h.clock.onSleep = func(time.Duration) {
+			if fired {
+				return
+			}
+			fired = true
+			s := h.spec("role:x", "role:b")
+			s.bulkRoles = 17
+			h.publishDir(s)
+			h.publishKRL(93)
+			h.write()
+		}
+		h.publishDir(h.spec("role:x", "role:b"))
+		r, err := h.apply()
+		h.clock.onSleep = nil
+		if !fired || !errors.Is(err, ErrGenerationTooLarge) {
+			t.Fatalf("the refused capture during the wait: fired %t, %v, %+v", fired, err, r)
+		}
+		for i := range 2 {
+			if i > 0 {
+				_, err = h.apply()
+				if !errors.Is(err, ErrGenerationTooLarge) {
+					t.Fatalf("run %d: %v, want generation_too_large reported", i+1, err)
+				}
+			}
+			mustPrincipals(t, h, "role:b", "role:x")
+			// The pending target's own render bytes, not an intersection.
+			b, err := os.ReadFile(filepath.Join(h.l.Current(), PrincipalsDir, "deploy")) //nolint:gosec // test fixture
+			if err != nil || !strings.HasPrefix(string(b), renderHeader) {
+				t.Fatalf("run %d: deploy's file %q, want the render's bytes: %v", i+1, b, err)
+			}
+			if !h.krlRevokes(h.l.Current(), 93) || h.lastGood() != h.current() {
+				t.Fatalf("run %d: KRL 93 in force %t, last-good %d, current %d", i+1, h.krlRevokes(h.l.Current(), 93), h.lastGood(), h.current())
+			}
+			s, err := h.accepted()
+			if err != nil || s.DirectoryVersion != 2 || s.KRLVersion != h.f.krlVersion {
+				t.Fatalf("run %d: accepted/ %+v, %v; want directory 2 and KRL %d", i+1, s, err, h.f.krlVersion)
+			}
 		}
 	})
 	t.Run("hostcert_and_probe_steps_not_blocked_by_kept_state", func(t *testing.T) {
