@@ -959,22 +959,24 @@ func (e *engine) forward(ctx context.Context) error {
 		if curLink.kind != linkAgent {
 			ref = nil
 		}
-		var bounded bool
-		if g, bounded, refusal = e.candidate(v, cur, curLink, ref); refusal == nil {
+		var full *Generation
+		if g, full, refusal = e.candidate(v, cur, curLink, ref); refusal == nil {
 			// 03-10d (D10): a KRL-alone pass whose bound dropped a line of
 			// its render is not a full candidate. A held addition stays out
 			// of it and stays held: the hold stands as a substituted
 			// target's does, so no commit of this pass clears the record.
 			// The hold is the one forward read before the loop (held): a
 			// probe-state.json that did not read was rewritten then as the
-			// exhausted hour, without its record, and the gate decides the
-			// reason again, as it did before D10.
-			if bounded && held && e.probesOn() {
+			// exhausted hour, without its record. The gate then decides the
+			// reason again on the full render, as it did before D10, when
+			// that render holds a line last-good lacks (an addition held
+			// out, not a removal a rollback kept).
+			if full != nil && held && e.probesOn() {
 				reason := ""
 				if st := e.readProbeState(); st.Held != nil && !st.reset {
 					reason = st.Held.Reason
-				} else {
-					reason = e.probeGate(ctx, cur, g, v)
+				} else if lgGen, lerr := readGeneration(lg.dir); lerr == nil && !covers(lgGen, full) {
+					reason = e.probeGate(ctx, cur, full, v)
 				}
 				if reason != "" {
 					if err := e.hold(reason, v); err != nil {
@@ -1409,23 +1411,29 @@ func krlOnly(g, ref *Generation) bool {
 // by ref (krlOnly: forward's is the generation current names when it is
 // the agent's, pollSpool's the pending target), keeps the KRL in force
 // (keepKRL) and checks the result against cur, the generation current
-// names (checkCandidate), writing nothing. bounded reports that the
-// bound dropped a line of the render. Its errors are render errors and
-// cap refusals: content refusals, for which the KRL-alone pass runs
-// (krlAlone; F07 (03-08d)).
-func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link, ref *Generation) (g *Generation, bounded bool, err error) {
+// names (checkCandidate), writing nothing. full is the render before the
+// bound when the bound dropped a line of it (nil otherwise), with the KRL
+// in force kept. Its errors are render errors and cap refusals: content
+// refusals, for which the KRL-alone pass runs (krlAlone; F07 (03-08d)).
+func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link, ref *Generation) (g, full *Generation, err error) {
 	g, err = e.render(v, cur, curLink)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
 	if v.Refused != nil {
-		bounded = krlOnly(g, ref)
+		pre := &Generation{Files: maps.Clone(g.Files), Host: g.Host, HostStatus: g.HostStatus}
+		if krlOnly(g, ref) {
+			full = pre
+			if cur != nil && curLink.kind == linkAgent {
+				keepKRLInForce(full, cur)
+			}
+		}
 	}
 	e.keepKRL(g, cur, curLink)
 	if err := checkCandidate(g, cur, curLink, e.fixedPrincipals()); err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
-	return g, bounded, nil
+	return g, full, nil
 }
 
 // krlAlone is the KRL-alone pass after refusal, a content refusal of the

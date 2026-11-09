@@ -1484,6 +1484,34 @@ func TestRollbackSites(t *testing.T) {
 			}
 		})
 	})
+	t.Run("damaged_probe_state_on_kept_state_holds_nothing", func(t *testing.T) {
+		t.Parallel()
+		t.Run("probes_on", func(t *testing.T) {
+			// The other side of damaged_probe_state_keeps_held_record: on a
+			// kept state with no held addition, the bound drops a line
+			// last-good holds (the kept removal), so the pass invents no
+			// hold after the reset.
+			t.Parallel()
+			h := keptBase(t, true, []string{"role:a", "role:x"}, []string{"role:x", "role:b"})
+			if err := os.WriteFile(h.l.State(probeStateFile), []byte("not json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := h.spec("role:x", "role:b")
+			s.bulkRoles = 17
+			h.publishDir(s)
+			h.publishKRL(93)
+			for i := range 2 {
+				r, err := h.apply()
+				if !errors.Is(err, ErrGenerationTooLarge) || errors.Is(err, ErrProbeHeld) || h.heldNow() != "" {
+					t.Fatalf("run %d: %v, held %q, detail %q; want no hold", i+1, err, h.heldNow(), r.Detail)
+				}
+				mustPrincipals(t, h, "role:x")
+				if !h.krlRevokes(h.l.Current(), 93) {
+					t.Fatalf("run %d: KRL 93 not in force", i+1)
+				}
+			}
+		})
+	})
 	t.Run("withdrawn_directory_after_kept_rollback_keeps_removal", func(t *testing.T) {
 		// Owner decision Q3 (PR #93 review): a keeping rollback that lands
 		// a removal from a verified directory records that directory in the
