@@ -1279,13 +1279,14 @@ func TestRollbackSites(t *testing.T) {
 		render := pureGen(t, 0, renderHeader, 3, ca[:2], "role:a", "role:x")
 		ref := pureGen(t, 6, renderHeader, 2, ca[:2], "role:a", "role:x")
 		before := &Generation{Files: maps.Clone(render.Files)}
-		krlOnly(render, ref)
-		if !sameBytes(render, before) {
+		if krlOnly(render, ref) || !sameBytes(render, before) {
 			t.Fatalf("equal content: %q, want the render's own bytes %q", render.Files, before.Files)
 		}
 		wide := pureGen(t, 0, renderHeader, 3, ca, "role:a", "role:x")
 		narrow := pureGen(t, 6, intermediateHeader, 4, ca[1:], "role:x")
-		krlOnly(wide, narrow)
+		if !krlOnly(wide, narrow) {
+			t.Fatal("the bound dropped lines but reports none dropped")
+		}
 		if p := deployLines(wide); !slices.Equal(p, []string{"role:x"}) {
 			t.Fatalf("principals %v, want [role:x]", p)
 		}
@@ -1297,7 +1298,7 @@ func TestRollbackSites(t *testing.T) {
 		}
 		nilRef := pureGen(t, 0, renderHeader, 3, ca, "role:a")
 		before = &Generation{Files: maps.Clone(nilRef.Files)}
-		if krlOnly(nilRef, nil); !sameBytes(nilRef, before) {
+		if krlOnly(nilRef, nil) || !sameBytes(nilRef, before) {
 			t.Fatal("a nil reference changed the render")
 		}
 	})
@@ -1411,6 +1412,42 @@ func TestRollbackSites(t *testing.T) {
 		t.Run("probes_on", func(t *testing.T) {
 			t.Parallel()
 			heldRounds(t, true)
+		})
+	})
+	t.Run("bounded_krl_alone_keeps_held_record", func(t *testing.T) {
+		t.Parallel()
+		t.Run("probes_on", func(t *testing.T) {
+			// D10 bounds the KRL-alone render of accepted/'s directory by
+			// current, so a held addition stays out of it; that pass is not
+			// a full candidate, and the hold stands as a substituted
+			// target's does. Run 1 brings a newer KRL (a new generation),
+			// run 2 nothing newer (current is the bounded render already).
+			t.Parallel()
+			h := gateHost(t, "role:a", "role:b")
+			h.publishDir(h.spec("role:a", "role:c"))
+			r, err := h.apply()
+			mustHeld(t, h, r, err, "cert_missing")
+			s := h.spec("role:a", "role:c")
+			s.bulkRoles = 17
+			h.publishDir(s)
+			h.publishKRL(93)
+			for i := range 2 {
+				r, err := h.apply()
+				if !errors.Is(err, ErrGenerationTooLarge) {
+					t.Fatalf("run %d: %v, want generation_too_large reported", i+1, err)
+				}
+				mustHeld(t, h, r, err, "cert_missing")
+				mustPrincipals(t, h, "role:a")
+				if !h.krlRevokes(h.l.Current(), 93) {
+					t.Fatalf("run %d: KRL 93 not in force", i+1)
+				}
+			}
+			// A directory that renders again: the held addition is gated
+			// again, and held again without a probe certificate.
+			h.publishDir(h.spec("role:a", "role:c"))
+			r, err = h.apply()
+			mustHeld(t, h, r, err, "cert_missing")
+			mustPrincipals(t, h, "role:a")
 		})
 	})
 }

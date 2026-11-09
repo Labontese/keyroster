@@ -953,7 +953,20 @@ func (e *engine) forward(ctx context.Context) error {
 		if curLink.kind != linkAgent {
 			ref = nil
 		}
-		if g, refusal = e.candidate(v, cur, curLink, ref); refusal == nil {
+		var bounded bool
+		if g, bounded, refusal = e.candidate(v, cur, curLink, ref); refusal == nil {
+			// 03-10d (D10): a KRL-alone pass whose bound dropped a line of
+			// its render is not a full candidate. A held addition stays out
+			// of it and stays held: the hold stands as a substituted
+			// target's does, so no commit of this pass clears the record.
+			if bounded && e.probesOn() {
+				if st := e.readProbeState(); st.Held != nil && !st.reset {
+					if err := e.hold(st.Held.Reason, v); err != nil {
+						return err
+					}
+					heldReason = st.Held.Reason
+				}
+			}
 			if !v.Changed() && cur != nil && sameBytes(cur, g) {
 				// F03 (03-08f): the unauthorized state is already in force.
 				// Nothing is committed, so the idle run stages no accepted/
@@ -963,13 +976,16 @@ func (e *engine) forward(ctx context.Context) error {
 					return err
 				}
 				e.report.NoOp = !e.dropInRepaired
-				// 03-10b: a held addition that is in force already.
-				e.clearHeld()
+				// 03-10b: a held addition that is in force already (not
+				// one a bounded pass left out).
+				if heldReason == "" {
+					e.clearHeld()
+				}
 				if curLink.kind != linkAgent {
 					cur = nil
 				}
 				e.setVersions(v, cur)
-				return outcome(v)
+				return heldOutcome(outcome(v), heldReason)
 			}
 			if err := e.preflightApply(v, g); err != nil {
 				return err
@@ -1352,11 +1368,12 @@ func outcome(v *state.Verified) error {
 // own bytes. A keeping rollback leaves accepted/ at last-good's directory,
 // and the pass's own commit makes the kept state last-good, so no test on
 // link names carries the rule: every KRL-alone pass is bounded. A nil ref
-// bounds nothing.
-func krlOnly(g, ref *Generation) {
+// bounds nothing. It reports whether the bound dropped a line of g.
+func krlOnly(g, ref *Generation) bool {
 	if ref == nil {
-		return
+		return false
 	}
+	dropped := !covers(ref, g)
 	t := RollbackKeeping(ref, g, nil)
 	maps.DeleteFunc(g.Files, func(n string, _ []byte) bool {
 		class, ok := ClassOf(n)
@@ -1367,28 +1384,30 @@ func krlOnly(g, ref *Generation) {
 			g.Files[n] = b
 		}
 	}
+	return dropped
 }
 
 // candidate renders v for this host (render), bounds a KRL-alone render
 // by ref (krlOnly: forward's is the generation current names when it is
 // the agent's, pollSpool's the pending target), keeps the KRL in force
 // (keepKRL) and checks the result against cur, the generation current
-// names (checkCandidate), writing nothing. Its errors are render errors
-// and cap refusals: content refusals, for which the KRL-alone pass runs
+// names (checkCandidate), writing nothing. bounded reports that the
+// bound dropped a line of the render. Its errors are render errors and
+// cap refusals: content refusals, for which the KRL-alone pass runs
 // (krlAlone; F07 (03-08d)).
-func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link, ref *Generation) (*Generation, error) {
-	g, err := e.render(v, cur, curLink)
+func (e *engine) candidate(v *state.Verified, cur *Generation, curLink link, ref *Generation) (g *Generation, bounded bool, err error) {
+	g, err = e.render(v, cur, curLink)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if v.Refused != nil {
-		krlOnly(g, ref)
+		bounded = krlOnly(g, ref)
 	}
 	e.keepKRL(g, cur, curLink)
 	if err := checkCandidate(g, cur, curLink, e.fixedPrincipals()); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return g, nil
+	return g, bounded, nil
 }
 
 // krlAlone is the KRL-alone pass after refusal, a content refusal of the
@@ -1653,7 +1672,7 @@ func (e *engine) pollSpool(ctx context.Context, pending *state.Verified, target 
 		}
 		// 03-10d (D10): a KRL-alone pass here is bounded by the pending
 		// target, never by the intermediate current names during the wait.
-		g, refusal := e.candidate(v, cur, curLink, target)
+		g, _, refusal := e.candidate(v, cur, curLink, target)
 		if refusal == nil {
 			if sameBytes(g, target) {
 				return nil, nil, nil

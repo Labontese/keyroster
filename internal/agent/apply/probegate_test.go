@@ -1106,7 +1106,8 @@ func TestProbeGate(t *testing.T) {
 		r, err := h.apply()
 		mustHeld(t, h, r, err, "cert_missing")
 		// A refused candidate: its KRL-alone pass renders accepted/'s
-		// directory, the held addition included, which is gated again.
+		// directory, bounded by current (03-10d, D10), so the held addition
+		// stays out of it and the hold stands.
 		s := h.spec("role:a", "role:c")
 		s.bulkRoles = 17
 		h.publishDir(s)
