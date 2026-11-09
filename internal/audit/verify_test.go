@@ -3225,6 +3225,47 @@ func (rf *revokeFixture) lostHostCert(serial uint64, now time.Time) *ssh.Certifi
 	return c
 }
 
+// lostProbeCert is a probe certificate as the signer gives one (03-10d):
+// a user certificate for keyroster-probe:web1 under the machine CA, with
+// a kr3 key ID of ca=machine and subject probe.web1, and serial, which the
+// log never logs: a lost probe certificate. Nothing in it says whether it
+// was a positive or a negative probe.
+func (rf *revokeFixture) lostProbeCert(serial uint64) *ssh.Certificate {
+	rf.t.Helper()
+	req := make([]byte, 16)
+	if _, err := rand.Read(req); err != nil {
+		rf.t.Fatal(err)
+	}
+	keyID := cert.KeyID{V3: true, CA: wire.CARoleMachine.String(), Subject: "probe.web1", Request: hex.EncodeToString(req), Policy: 1, Directory: 1, Serial: serial}
+	return rf.lostMachineCertWith(serial, keyID, []string{cert.ReservedPrincipalPrefix + "web1"})
+}
+
+// lostMachineCert is a kr1 machine certificate (m:ci, an hour from now)
+// with serial, which the log never logs: a lost machine certificate that
+// is not a probe certificate.
+func (rf *revokeFixture) lostMachineCert(serial uint64) *ssh.Certificate {
+	rf.t.Helper()
+	rf.request++
+	keyID := cert.KeyID{CA: wire.CARoleMachine.String(), Subject: "m:ci", Request: strings.Repeat(hex.EncodeToString([]byte{rf.request}), 16), Policy: 1, Serial: serial}
+	return rf.lostMachineCertWith(serial, keyID, []string{"ci"})
+}
+
+// lostMachineCertWith is a user certificate under the machine CA with
+// keyID and principals, valid for an hour from now.
+func (rf *revokeFixture) lostMachineCertWith(serial uint64, keyID cert.KeyID, principals []string) *ssh.Certificate {
+	rf.t.Helper()
+	profile := roleProfile(ssh.UserCert)
+	profile.ReservedPrincipals = true
+	c, err := cert.Build(cert.Request{
+		Profile: profile, Subject: newSigner(rf.t, "ed25519").PublicKey(), Principals: principals,
+		Now: time.UnixMicro(int64(rf.micros)), ValidFor: time.Hour, KeyID: keyID, Serial: serial, //nolint:gosec // G115: a test time
+	}, rf.machineCA, rand.Reader)
+	if err != nil {
+		rf.t.Fatal(err)
+	}
+	return c
+}
+
 // treeRoot is the root of the fixture's leaves.
 func (rf *revokeFixture) treeRoot() [32]byte {
 	rf.t.Helper()
@@ -3441,6 +3482,24 @@ func TestVerifyRecovery(t *testing.T) {
 			rf.recover(nil, []wire.RecoveredCertificate{{Cert: rf.lostCert(rf.serial + 1000).Marshal(), Revoke: false}}, nil)
 			rf.publish(nil)
 		}, "recovery_user_certificate_kept"},
+		// 03-10d (Q-R option 1): a recovery revokes every lost probe
+		// certificate, told apart by its key ID, both polarities; a lost
+		// machine certificate that is not a probe may still be kept.
+		{"recovery_probe_certificate_kept", func(rf *revokeFixture) {
+			rf.issue()
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: rf.lostProbeCert(rf.serial + 1000).Marshal(), Revoke: false}}, nil)
+			rf.publish(nil)
+		}, "(recovery_probe_certificate_kept)"},
+		{"recovery_probe_certificate_revoked_verifies", func(rf *revokeFixture) {
+			rf.issue()
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: rf.lostProbeCert(rf.serial + 1000).Marshal(), Revoke: true}}, nil)
+			rf.publish(nil)
+		}, ""},
+		{"recovery_machine_certificate_kept_verifies", func(rf *revokeFixture) {
+			rf.issue()
+			rf.recover(nil, []wire.RecoveredCertificate{{Cert: rf.lostMachineCert(rf.serial + 1000).Marshal(), Revoke: false}}, nil)
+			rf.publish(nil)
+		}, ""},
 		// A recovery carries only the lost certificates krl.CheckCarriedLost
 		// admits at its CreatedAt, as the signer requires (PR #69 review,
 		// D-R2); the resolution time plays no part.
@@ -3948,11 +4007,13 @@ func TestVerifyHostIssue(t *testing.T) {
 		hf.addHost(hf.off, func(h *hostIssue) { h.req.HostName = "web2" }, nil, nil)
 		hf.wantFail(t, "not active")
 	})
+	// 03-10d: under a policy that never set pop.hosts (a successor may not
+	// clear it, so installPolicy cannot), the failure comes from audit's own
+	// host-issue rule, not from the trust rule that refuses clearing it.
 	t.Run("pop_hosts_off_fails", func(t *testing.T) {
-		hf := newHostFixture(t, 90)
-		hf.installPolicy(func(p *trust.Policy) { p.PoP = nil })
+		hf := newProbeFixtureNoPoP(t).hostFixture
 		hf.addHost(hf.key, nil, nil, nil)
-		hf.wantFail(t, "pop.hosts")
+		hf.wantFail(t, "does not set pop.hosts, so no host certificate could be issued")
 	})
 	t.Run("installation_mismatch_fails", func(t *testing.T) {
 		hf := newHostFixture(t, 90)

@@ -448,6 +448,84 @@ func RollbackTarget(cur, lg *Generation) *Generation {
 	return t
 }
 
+// RollbackKeeping is the generation a rollback, or the start-up recovery
+// after one, moves current to from cur once a removal may have landed
+// (03-10d, owner decisions D-R1 and Q-D, 2026-11-08): per CA list and per
+// principals file, the lines of lg that cur and every bound also hold, so
+// it never grants what cur, a bound or last-good lacks. The bounds are
+// the generation in force when forward's last pass started (the base), or
+// every generation a pending marker names. The lines keep the first
+// bound's order (lg's with no bounds), principals under the intermediate
+// header; each revocation-list file is the newest by KRL version among
+// cur, the bounds and lg (the KRL never rolls back), and Host and
+// HostStatus are lg's. When nothing of lg is dropped it is
+// RollbackTarget's content with lg's bytes (with no bounds and a cur that
+// covers lg, RollbackTarget(cur, lg) itself); its N is lg.N when its
+// bytes are lg's, else 0 (not installed yet). With cur nil it is the
+// intersection of the bounds and lg.
+func RollbackKeeping(cur, lg *Generation, bounds []*Generation) *Generation {
+	sets := []*Generation{lg}
+	if cur != nil {
+		sets = append(sets, cur)
+	}
+	sets = append(sets, bounds...)
+	order := lg
+	if len(bounds) > 0 {
+		order = bounds[0]
+	}
+	t := &Generation{Files: map[string][]byte{}, Host: lg.Host, HostStatus: lg.HostStatus}
+	for _, name := range fileNames(sets...) {
+		class, ok := ClassOf(name)
+		if !ok || class == FileKRL {
+			continue
+		}
+		key := keyFunc(class)
+		var have []map[string]bool
+		for _, g := range sets {
+			have = append(have, lineSet(g.Files[name], key))
+		}
+		var out bytes.Buffer
+		if class == FilePrincipals {
+			out.WriteString(intermediateHeader)
+		}
+		for _, l := range lines(order.Files[name]) {
+			k, ok := key(l)
+			if ok && !slices.ContainsFunc(have, func(m map[string]bool) bool { return !m[k] }) {
+				out.WriteString(l + "\n")
+			}
+		}
+		t.Files[name] = out.Bytes()
+	}
+	if covers(t, lg) {
+		// Nothing of last-good is dropped: last-good's own bytes.
+		t.Files = map[string][]byte{}
+		for name, b := range lg.Files {
+			if class, ok := ClassOf(name); !ok || class != FileKRL {
+				t.Files[name] = b
+			}
+		}
+	}
+	t.N = lg.N
+	for _, name := range fileNames(sets...) {
+		if class, ok := ClassOf(name); !ok || class != FileKRL {
+			continue
+		}
+		newest, ok := lg.Files[name]
+		for _, g := range sets[1:] {
+			if newerKRL(g.Files[name], newest) {
+				newest, ok = g.Files[name], true
+			}
+		}
+		if ok {
+			t.Files[name] = newest
+		}
+	}
+	if !sameBytes(t, lg) {
+		t.N = 0
+	}
+	return t
+}
+
 // keepKRLInForce makes the KRL in force the floor of generation g (owner
 // decision 2026-10-26, PR #67: the KRL never rolls back, PR #67 fix
 // round 2): each revocation-list file of g that is older by KRL version

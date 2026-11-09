@@ -931,18 +931,19 @@ func (e *engine) opportunistic(ctx context.Context, g *Generation) {
 
 // settleFailedAddition ends a gated addition whose probes or served
 // certificates failed after it went live (03-10b, D13): it rolls back the
-// addition only. The settled content is Intermediate(last-good, target),
-// every line both grant, with the target's (newest) KRL. When the target
-// removes nothing last-good grants, that is 03-05's plain rollback, which
-// then re-grants nothing. Otherwise current moves to a generation M of that
-// content: the one live just before the widening swap (preN) when its
-// content is that, the target itself when the target only removes from
-// last-good, else one installed afresh. The held record failure_backoff is
-// written after the failure record and before M is committed as last-good,
-// with accepted/ advanced, so the removal stays in force and the next round
-// holds. A listener-test failure after the move falls back to 03-05's
-// rollback (the named residual: it can re-grant the removal until a
-// listener test passes). It returns cause.
+// addition only. The settled content is Intermediate(base, target), every
+// line both grant, with the target's (newest) KRL, where the base is the
+// generation in force when forward's last pass started (03-10d, D7; last-
+// good when there is none). When the target removes nothing the base
+// grants, that is the keeping rollback, which returns to the base.
+// Otherwise current moves to a generation M of that content: the one live
+// just before the widening swap (preN) when its content is that, the
+// target itself when the target only removes from the base, else one
+// installed afresh. The held record failure_backoff is written after the
+// failure record and before M is committed as last-good, with accepted/
+// advanced, so the removal stays in force and the next round holds. Every
+// failure on the way falls back to the keeping rollback, which never
+// re-grants a landed removal (03-10d). It returns cause.
 func (e *engine) settleFailedAddition(ctx context.Context, cause error, lg link, target *Generation, tv *state.Verified, preN uint64) error {
 	if isCrash(cause) {
 		return cause
@@ -952,14 +953,23 @@ func (e *engine) settleFailedAddition(ctx context.Context, cause error, lg link,
 		return e.rollback(ctx, cause, lg)
 	}
 	lgGen.N = lg.n
-	m, collapsed := Intermediate(lgGen, target)
-	if collapsed && isNarrowing(target, lgGen) {
-		// Intermediate collapsed to last-good's content: the target removes
-		// nothing last-good grants, so the plain rollback re-grants nothing.
+	// 03-10d (D7, Base refinement): the settled content is judged against
+	// the base, the generation in force when forward's last pass started,
+	// not against last-good: a kept state or a superseded pass may have
+	// removed lines last-good still holds.
+	baseGen := lgGen
+	if e.base != nil {
+		baseGen = e.base
+	}
+	m, collapsed := Intermediate(baseGen, target)
+	if collapsed && isNarrowing(target, baseGen) {
+		// Intermediate collapsed to the base's content: the target removes
+		// nothing the base grants, so the keeping rollback returns to the
+		// base and re-grants nothing.
 		return e.rollback(ctx, cause, lg)
 	}
 	// Otherwise a collapsed Intermediate is the target itself, which then
-	// only removes from last-good.
+	// only removes from the base.
 	pre, perr := readGeneration(e.l.Gen(preN))
 	switch {
 	case preN != 0 && perr == nil && sameContent(pre, m):

@@ -34,3 +34,7 @@ Tests:
 - a mutant that restores the plain rollback on each path dies on its own subtest.
 
 Sources: 03-10b-PLAN.md (D13, settleFailedAddition, T-03-374), 03-10b-SUMMARY.md ("Pre-merge review round 1", D-R1).
+
+## Resolution
+
+Resolved in 03-10d (PR from branch `p03/10d-no-regrant-recovery`; owner decisions Q-S, Q-D and D-R1, 2026-11-08). Every rollback of an in-flight apply (forward's error paths, settleFailedAddition's fallbacks, gateSuperseded) and the start-up recover take RollbackKeeping: last-good intersect current intersect the base (the generation in force when forward's last pass started) with the newest KRL; recover is bounded by every generation its marker names and fails closed with `pending_state_unknown` when one does not read. settleFailedAddition settles on Intermediate(base, target). A kept state passes the start check by classified content, the equal-content commit runs a listener test before it makes a current that is not last-good into last-good, the fallback render keeps current's principals (D9) and a KRL-alone pass moves only the KRL (D10). Only the operator's `--recover-to-last-good` keeps the plain target (Q1 = A, a named residual). Tests: TestRollbackKeeping, TestRollbackSites, TestAtRollbackTarget, TestProbeGate/settle_listener_failure_keeps_removal.

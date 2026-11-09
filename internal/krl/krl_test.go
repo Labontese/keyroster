@@ -22,6 +22,7 @@ import (
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Labontese/keyroster/internal/cert"
 	"github.com/Labontese/keyroster/internal/sshsig"
 	"github.com/Labontese/keyroster/internal/tlog"
 	"github.com/Labontese/keyroster/internal/trust"
@@ -1278,7 +1279,9 @@ func TestRecoveryEntries(t *testing.T) {
 // carries a lost certificate it revokes; one it does not revoke must be
 // live at the request's CreatedAt minus RecoveryCarrySkew (EntryLive:
 // valid_before + PruneMargin above that) and must not be a user
-// certificate; the time the recovery is applied plays no part.
+// certificate or a probe certificate (03-10d, Q-R option 1: a recovery
+// revokes every lost probe certificate, both polarities); the time the
+// recovery is applied plays no part.
 func TestCheckCarriedLost(t *testing.T) {
 	if RecoveryCarrySkew != wire.MaxRequestSkewSeconds {
 		t.Fatalf("RecoveryCarrySkew = %d, wire.MaxRequestSkewSeconds = %d", RecoveryCarrySkew, wire.MaxRequestSkewSeconds)
@@ -1289,24 +1292,71 @@ func TestCheckCarriedLost(t *testing.T) {
 		validBefore uint64
 		createdAt   uint64
 		user        bool
+		probe       bool
 		revoke      bool
 		want        error
 	}{
-		{"live", created + 3600, created, false, false, nil},
-		{"expired_inside_margins", created - 599, created, false, false, nil},
-		{"expired_at_margins", created - 600, created, false, false, ErrLostExpired},
-		{"expired_long_ago", created - 86400, created, false, false, ErrLostExpired},
-		{"expired_but_revoked", created - 86400, created, false, true, nil},
-		{"infinite", math.MaxUint64, created, false, false, nil},
-		{"created_before_skew_saturates", 1, 10, false, false, nil},
-		{"zero_valid_before", 0, created, false, false, ErrLostExpired},
-		{"user_live_revoked", created + 3600, created, true, true, nil},
-		{"user_expired_revoked", created - 86400, created, true, true, nil},
-		{"user_live_kept", created + 3600, created, true, false, ErrLostUserKept},
-		{"user_expired_kept", created - 86400, created, true, false, ErrLostExpired},
+		{"live", created + 3600, created, false, false, false, nil},
+		{"expired_inside_margins", created - 599, created, false, false, false, nil},
+		{"expired_at_margins", created - 600, created, false, false, false, ErrLostExpired},
+		{"expired_long_ago", created - 86400, created, false, false, false, ErrLostExpired},
+		{"expired_but_revoked", created - 86400, created, false, false, true, nil},
+		{"infinite", math.MaxUint64, created, false, false, false, nil},
+		{"created_before_skew_saturates", 1, 10, false, false, false, nil},
+		{"zero_valid_before", 0, created, false, false, false, ErrLostExpired},
+		{"user_live_revoked", created + 3600, created, true, false, true, nil},
+		{"user_expired_revoked", created - 86400, created, true, false, true, nil},
+		{"user_live_kept", created + 3600, created, true, false, false, ErrLostUserKept},
+		{"user_expired_kept", created - 86400, created, true, false, false, ErrLostExpired},
+		{"probe_kept_is_refused", created + 3600, created, false, true, false, ErrLostProbeKept},
+		{"probe_revoked_ok", created + 3600, created, false, true, true, nil},
+		{"probe_expired_and_revoked_ok", created - 86400, created, false, true, true, nil},
+		{"probe_expired_and_kept_is_expired_first", created - 86400, created, false, true, false, ErrLostExpired},
+		{"machine_non_probe_may_be_kept", created + 3600, created, false, false, false, nil},
 	} {
-		if got := CheckCarriedLost(c.validBefore, c.createdAt, c.user, c.revoke); !errors.Is(got, c.want) {
-			t.Errorf("%s: CheckCarriedLost(%d, %d, %v, %v) = %v, want %v", c.name, c.validBefore, c.createdAt, c.user, c.revoke, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if got := CheckCarriedLost(c.validBefore, c.createdAt, c.user, c.probe, c.revoke); !errors.Is(got, c.want) || (got == nil) != (c.want == nil) {
+				t.Errorf("CheckCarriedLost(%d, %d, user %v, probe %v, revoke %v) = %v, want %v", c.validBefore, c.createdAt, c.user, c.probe, c.revoke, got, c.want)
+			}
+		})
 	}
+}
+
+// TestIsProbeKeyID (03-10d, Q-R option 1): a probe certificate is told
+// apart by its key ID alone, kr3 with ca=machine and a subject that starts
+// "probe." (the key ID signer/probeissue.go gives one); no other key ID
+// is one, a probe-like subject under another CA or version included.
+func TestIsProbeKeyID(t *testing.T) {
+	req := strings.Repeat("ab", 16)
+	for _, c := range []struct {
+		name string
+		kid  cert.KeyID
+		want bool
+	}{
+		{"kr3_machine_probe", cert.KeyID{V3: true, CA: "machine", Subject: "probe.web1", Request: req, Policy: 1, Directory: 2, Serial: 3}, true},
+		{"kr3_machine_probe_parsed_from_string", mustParseKeyID(t, "kr3/ca=machine/sub=probe.web1/req="+req+"/pol=1/dir=2/ser=3"), true},
+		{"kr3_machine_other_subject", cert.KeyID{V3: true, CA: "machine", Subject: "web1", Request: req, Policy: 1, Directory: 2, Serial: 3}, false},
+		{"kr3_machine_probe_without_dot", cert.KeyID{V3: true, CA: "machine", Subject: "probeweb1", Request: req, Policy: 1, Directory: 2, Serial: 3}, false},
+		{"kr3_host_probe_subject", cert.KeyID{V3: true, CA: "host", Subject: "probe.web1", Request: req, Policy: 1, Directory: 2, Serial: 3}, false},
+		{"user_probe_subject", cert.KeyID{V3: true, CA: "user", Subject: "probe.web1", Request: req, Policy: 1, Directory: 2, Serial: 3}, false},
+		{"kr1_machine_probe_subject", cert.KeyID{CA: "machine", Subject: "probe.web1", Request: req, Policy: 1, Serial: 3}, false},
+		{"kr2_machine_probe_subject", cert.KeyID{CA: "machine", Subject: "probe.web1", Request: req, Policy: 1, Directory: 2, Roles: []string{"ops"}, Serial: 3}, false},
+		{"kr1_user", cert.KeyID{CA: "user", Subject: "u:alice", Request: req, Policy: 1, Serial: 3}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsProbeKeyID(c.kid); got != c.want {
+				t.Errorf("IsProbeKeyID(%s) = %v, want %v", c.kid, got, c.want)
+			}
+		})
+	}
+}
+
+// mustParseKeyID is cert.ParseKeyID that fails the test on an error.
+func mustParseKeyID(t *testing.T, s string) cert.KeyID {
+	t.Helper()
+	k, err := cert.ParseKeyID(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }

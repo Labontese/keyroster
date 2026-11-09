@@ -963,6 +963,16 @@ structurally (see the warning above).
         earlier one, which the request carries once.
       - `lost certificate: ... : revoke` lines name the lost user
         certificates, which are always revoked.
+      - `lost probe certificates revoked: <n> (...)` counts the lost probe
+        certificates (ca `machine`, subject `probe.<host>`), which have
+        `revoke` lines too. The recovery revokes every lost probe
+        certificate, positive and negative alike, because nothing in a
+        probe certificate says which it was, and a lost negative left out
+        of the KRL would let sshd accept it. A host whose positive probe
+        certificate was revoked finds it in the KRL (`positive_in_krl`)
+        and asks the signer for a new pair. Until that pair is issued,
+        additions of access on that host wait, up to about two hours
+        (03-10d).
       - `lost certificate: ... : keep; public key ...` lines name lost host
         and machine certificates. Each of these lines prints the
         certificate's public key. Revoke one now by adding `--revoke-lost
@@ -1135,7 +1145,8 @@ structurally (see the warning above).
      Otherwise stop and escalate, as for a fork.
    - `recovery_malformed`, `recovery_installation_mismatch`,
      `duplicate_request`, `recovery_certificate_not_lost`,
-     `recovery_certificate_expired` or `recovery_user_certificate_kept`:
+     `recovery_certificate_expired`, `recovery_user_certificate_kept` or
+     `recovery_probe_certificate_kept`:
      the file is not the request this runbook's `keyroster revoke recover`
      wrote for this restore. Move the refused request aside (below), make
      it again from part 3 on with a current binary, and escalate if the
