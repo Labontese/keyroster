@@ -120,7 +120,7 @@ The two probegate_test.go rows the plan did not predict are the Base refinement 
 ## Owner questions (both answered during Task 1)
 
 1. **hostcert_test.go had to change and was not in files_modified.** `TestHostCertStep/no_install_while_recover_due_sshd_t_fails` (hostcert_test.go:1441) failed after d8335e7: its fixture pointed current back at an older generation inside last-good with the same KRL, which the content-based start check of sec-5 accepts as a kept state, so HostCerts went on and wrote. Confirmed by putting atRollbackTarget back to a byte comparison (the subtest passed; restored with `git checkout --`, tree clean). Answer (orchestrator, execution addendum of the plan): rebuild the fixture so the older current holds a principal last-good lacks; hostcert_test.go is added to files_modified and Task 1's `<files>`. Done in a37a72c: the newer last-good holds `role:new` instead of `role:ops`; the subtest passes.
-2. **The KRL-alone pass re-granted a kept removal.** Read from the code at d8335e7: after a content refusal forward takes the capture once more as KRL-alone against accepted/, which a keeping rollback leaves at last-good's directory, so the render widened current back to the removed line. Answer: designed in under Q-D as D10 (the plan's addendum): the KRL-alone render takes every file but the KRL from the generation current names when current is the agent's and is not last-good. Done in a37a72c (`krlOnly`, applied in `candidate` when `v.Refused` is set, which marks a KRL-alone Verified).
+2. **The KRL-alone pass re-granted a kept removal.** Read from the code at d8335e7: after a content refusal forward takes the capture once more as KRL-alone against accepted/, which a keeping rollback leaves at last-good's directory, so the render widened current back to the removed line. Answer: designed in under Q-D as D10 (the plan's addendum): the KRL-alone render takes every file but the KRL from the generation current names when current is the agent's and is not last-good. Done in a37a72c (`krlOnly`, applied in `candidate` when `v.Refused` is set, which marks a KRL-alone Verified). The pre-merge review showed that this test on link names switches itself off after its own commit, and that pollSpool's use of it dropped a pending addition. D10 is restated in the plan, and the fix is recorded in 'Pre-merge review fix round 1'.
 
 ### D10 and the hostcert fixture (commit a37a72c)
 
@@ -138,7 +138,7 @@ The two probegate_test.go rows the plan did not predict are the Base refinement 
 ## Deviations (Task 1)
 
 - hostcert_test.go was changed (the recovery-due fixture), as the plan's execution addendum adds it to files_modified (owner question 1).
-- D10 is applied wherever the render's Verified has `Refused` set, which marks a KRL-alone Verified (state/verify.go): forward's krlAlone pass and pollSpool's, and also a capture whose bundle or directory step the verifier refused (D-R2), whose contract is likewise that only the KRL moves on. With current at last-good nothing changes.
+- D10 is applied wherever the render's Verified has `Refused` set, which marks a KRL-alone Verified (state/verify.go): forward's krlAlone pass, pollSpool's, and also a capture whose bundle or directory step the verifier refused (D-R2), whose contract is likewise that only the KRL moves on. As first built (a37a72c), pollSpool's pass took the intermediate's files during a widening wait, which dropped the pending target's additions. That was wrong, and the pre-merge review found it. Since fix round 1, forward's pass is bounded by the generation current names and pollSpool's by the pending target.
 - Mutants 5 and 26 were re-run with corrected specs (see Mutants); the first runs are recorded there, not counted.
 
 - `kept_state_start_failure_keeps_removal` uses a validate refusal of the KRL query (`queryCode`, with a new KRL published so validate queries it), which forward returns before its first swap (apply.go:1038-1040). The plan's example, the oversize candidate of rechain_test.go:288, is a Render refusal (`ErrGenerationTooLarge`, render.go:182): candidate refuses it and forward takes the KRL-alone pass instead of returning, so it does not reach :1038.
@@ -381,7 +381,154 @@ The required checks and gates 1 and 5 to 11 on the head that carries this SUMMAR
 
 ### The pre-merge review
 
-The orchestrator runs it on the green PR: a full security review against T-03-374, T-03-388 and T-03-389, with the rollback rule, its two guards and the recovery rule flagged. It also checks the diff for real host names, private addresses and private terms. This executor did not run it, and no fix round has happened. Fix rounds, if any, are recorded here.
+The orchestrator runs it on the green PR: a full security review against T-03-374, T-03-388 and T-03-389, with the rollback rule, its two guards and the recovery rule flagged. It also checks the diff for real host names, private addresses and private terms. This executor did not run it. Fix round 1 is recorded under 'Pre-merge review fix round 1'.
+
+### Pre-merge review fix round 1
+
+The orchestrator's review of head 30dfcf8 confirmed two findings (R1 and R2) and one documentation finding (R4). Two more were refuted:
+- the structural test does not police direct Transition calls; that is test hardening only;
+- old dev logs that kept a lost probe certificate; this is already UNVERIFIED, under Q-R.
+
+Fixing R1 then turned up one more issue, below.
+
+The plan was amended first. D10 and T-03-392 are restated, and a 'Pre-merge review addendum' is added. The amended plan was committed on its own twice:
+- c0dc912, the first amendment;
+- 772df77, when the held-record row was added.
+
+Each copy was checked byte-identical with `cmp`. The plan's `<automated>` lines are unchanged against 30dfcf8.
+
+**R1 (high): D10 switched itself off.**
+- krlOnly decided that a kept state existed from `curLink.n != lg.n`.
+- The D10 pass's own commit made the kept generation last-good, while accepted/ still held last-good's old directory.
+- So the next KRL-alone pass rendered that directory again. role:a was granted again and committed as last-good, with probes off and on. The probe gate tests enforcement, not authorization, so it passed.
+
+Fix (039a319):
+- Every KRL-alone pass is bounded by its reference generation. Every file except the KRL is `RollbackKeeping(ref, render, nil)`'s: the render's CA and principal lines that the reference also holds. Only the KRL comes from the render.
+- In forward, the reference is the generation current names, when it is the agent's.
+- The test on link names is gone.
+- A render that the reference covers keeps its own bytes. `TestRollbackSites/krl_alone_bound_equal_render_keeps_bytes` checks this:
+  - with equal content, the result is sameBytes with the render;
+  - a wider render keeps only the reference's CA and principal lines, with the render's KRL;
+  - a nil reference changes nothing.
+
+**R2 (medium): pollSpool dropped a pending addition.** This was a regression against e22cc06.
+- During a widening wait, current is the intermediate M. pollSpool's KRL-alone pass took M's files, so the superseding generation was M plus the newer KRL.
+- accepted/ then recorded directory 2 while role:b was not in force, and every later apply was a no-op.
+
+Fix (039a319): pollSpool passes the pending target as the reference, explicitly (`candidate(v, cur, curLink, target)`). The superseding generation is again the pending target's render with the newer KRL.
+
+The same test logic passes at e22cc06, probes off and on. It ran as a throwaway copy with keepHost inlined, because keepHost does not exist at e22cc06. The result in both lanes:
+- role:b and role:x are in force, with KRL 93;
+- last-good equals current;
+- accepted/ holds directory 2 and the KRL in force.
+
+The superseding generation's files were hashed in both trees:
+- `user_ca_keys` and the probes_off `revoked.krl` hash the same.
+- The principals bodies are equal except for the per-run directory sha256 in the render header. Both trees give the render header, a directory version 2 line, then `role:b` and `role:x`.
+
+The committed test also asserts that deploy's file starts with the render header, not the intersection's header.
+
+**R1's fix cleared a held addition's record.** The fixer found this; the orchestrator accepted the fix and the addendum row.
+
+With probes on, the bounded KRL-alone pass left the held addition out. It then committed as an ordinary candidate and cleared the held record.
+
+Scenario: gateHost {role:a, role:b}; D2 {role:a, role:c} is held `cert_missing`; then an oversize D3 with KRL 93, applied twice. Measured with a throwaway test:
+
+| Tree | Run 1 error | Held record | Principals | Run 2 |
+|---|---|---|---|---|
+| e22cc06 | generation_too_large, probe_held: cert_missing | cert_missing | [role:a], KRL 93 | held again |
+| 30dfcf8 | generation_too_large, probe_held: cert_missing | cert_missing | [role:a], KRL 93 | held again |
+| 039a319 | generation_too_large only | cleared | [role:a], KRL 93 | no-op, no hold |
+
+RED at 772df77 (the R1-fixed code, with the new subtest added):
+- `--- FAIL: TestRollbackSites/bounded_krl_alone_keeps_held_record/probes_on`, with `want held cert_missing: err generation_too_large: , detail ""`;
+- `--- FAIL: TestProbeGate/krl_alone_pass_is_classified`, an existing subtest, which fails the same way.
+
+The fixer had not run that existing subtest before committing 039a319, so 039a319 alone fails it; 9aa10f6 makes it pass again.
+
+Fix (9aa10f6): a KRL-alone pass whose bound dropped a line of its render is not a full candidate. When it meets a readable held record with probes on, the hold stands, as it does for a substituted target:
+- the record is rewritten with the pass's versions;
+- the run reports `probe_held`;
+- no commit of the pass clears the record;
+- the equal-bytes branch clears the record only when nothing is held.
+
+The error, the record and the detail again match e22cc06 and 30dfcf8. One difference remains: run 2 now reports `NoOp` true, where e22cc06 reports `NoOp` false (it does not write either).
+
+The comment of `krl_alone_pass_is_classified` now says that the bound keeps the held addition out and the hold stands.
+
+**R4 (docs).** T-03-392 is restated in the plan, and this SUMMARY repeated none of its old claims. The D10 text is corrected in 'Owner questions' item 2 and in 'Deviations (Task 1)'.
+
+**RED before the fix**, at 30dfcf8 (WSL, `go test -count=1 -v`):
+- `--- FAIL: TestRollbackSites/krl_alone_twice_after_kept_rollback_keeps_removal/probes_off` and `/probes_on`:
+  - `rollbackkeep_test.go:1258: round 2: role:a re-granted: principals [role:a role:x]`;
+  - role:a was in force from `self-test` to `clear-marker`, and in last-good at `clear-marker`.
+- `--- FAIL: TestRollbackSites/refused_capture_during_wait_lands_addition/probes_off` and `/probes_on`: `rollbackkeep_test.go:1302: principals [role:x], want [role:b role:x]`.
+- `krl_alone_after_kept_rollback_keeps_removal` still passed, because it covers one pass only.
+
+**GREEN:**
+- At 039a319, all of TestRollbackSites passes: the two new subtests on both lanes, and `krl_alone_bound_equal_render_keeps_bytes`.
+- At 9aa10f6:
+  - `go test -count=1 -v ./internal/agent/apply/` ok (384.620 s);
+  - `go test -race -count=1 -timeout 15m -v ./internal/agent/apply/` ok (452.992 s), with no DATA RACE;
+  - `bounded_krl_alone_keeps_held_record/probes_on` and `krl_alone_pass_is_classified` pass.
+
+**Mutants.** They ran with run_mutants.py at 9aa10f6, each on its named subtest. Each was restored with `git checkout --` and checked with `git diff --quiet HEAD`, per file and for the whole tree; the tree was clean afterwards.
+- The numbers are the plan addendum's, not Task 2's 31 to 33 above.
+- Mutant 30 is redefined on the new text: the bound's call is removed. It ran again.
+- The lines are not prefixed `mutant killed:`, so the Task 1 and Task 2 counts stay as recorded.
+
+fix-round mutant killed: 30 (redefined) the KRL-alone bound removed (TestRollbackSites/krl_alone_after_kept_rollback_keeps_removal/probes_off and /probes_on)
+fix-round mutant killed: 31 the early return on current equal to last-good restored (TestRollbackSites/krl_alone_twice_after_kept_rollback_keeps_removal/probes_off and /probes_on)
+fix-round mutant killed: 32 pollSpool's reference set back to current (TestRollbackSites/refused_capture_during_wait_lands_addition/probes_off and /probes_on)
+fix-round mutant killed: 33 the held-record guard removed (TestRollbackSites/bounded_krl_alone_keeps_held_record/probes_on)
+
+**R3 checks** (throwaway tests in WSL copies, not committed).
+
+(a) D9 during a widening wait: safe; D9 is unchanged. Scenario: {role:a, role:x}, then D2 {role:x, role:b}. During the wait, D3 {role:x, role:b} arrives with rotated host keys plus KRL 93, so the fallback renders.
+- e22cc06: principals [role:a role:x]. Last-good's principals bring role:a back, the removal the intermediate had landed. Status host_keys_rotated, accepted/ at directory 3.
+- The fixed head: [role:x], from current M, with the same status and KRL.
+- The fallback is never wider than the reference, and it does not drop an authorized addition the way R2 did. role:b is absent at e22cc06 too, because D3's refused host entry decides, not D2.
+- Once K is last-good, D9's guard returns early with last-good = K, so the fallback takes K's principals (read from the code, not run).
+
+(b) Other renders of accepted/'s stored directory: an owner question, reported and not fixed. Each case starts from a kept state with D2 withdrawn from the spool.
+- A KRL-only capture (KRL 93) re-grants role:a. The capture renders accepted/'s D1 with `Refused` nil, so the D10 bound never applies, and role:a is committed as last-good. Probes off and on; the probe gate passes.
+- A bundle-only capture (a successor bundle) re-grants role:a the same way.
+- An unchanged capture is a no-op and keeps [role:x].
+- A withheld directory (D-R2) gives a Refused Verified, which the bound now covers.
+
+Bounding the KRL-only and bundle-only renders by current would also block a legitimate widening, so the choice is the owner's.
+
+**Gates at 9aa10f6 (local, through scripts/linux.sh).** Gates 2 and 3 ran with this SUMMARY's revision uncommitted in the working tree; that revision changes docs only.
+- **Gate 2** (whole module): exit 0, from 1794194651 to 1794195382.
+- **Gate 3** (test-time delta): exit 0. It ran alone after gate 2, from 1794195394 to 1794195832, on the same base line; the base was 18687 s old.
+
+| Package | Base (s) | Reading (s) | Delta (s) | Stop |
+|---|---|---|---|---|
+| apply (internal/agent/apply) | 488.967 | 441.949 | -47.018 | +90 |
+| krl | 7.347 | 7.066 | -0.281 | +90 |
+| signer | 395.214 | 404.431 | +9.217 | +90 |
+| audit | 87.541 | 88.822 | +1.281 | +90 |
+| cmd (cmd/keyroster) | 269.858 | 229.304 | -40.554 | +90 |
+| agentcmd (cmd/keyroster-agent) | 1.811 | 1.834 | +0.023 | +90 |
+
+The fix round adds five subtest runs to apply. The reading is 47 s under the base. The cause of that difference is not measured, and the reading is recorded as read.
+
+**CI at 9aa10f6** (pushed as a fast-forward). 28 checks passed and one was skipped; no required check failed. These are the `pull_request` runs, all with headSha 9aa10f6:
+
+| Run ID | Workflow | Result |
+|---|---|---|
+| 42556194780 | CI | success |
+| 42556194704 | E2E | success |
+| 42556194873 | E2E distro | success |
+| 42556194853 | Systemd | success |
+| 42556194695 | E2E TPM | success |
+| 42556194710 | E2E PKCS#11 | success |
+| 42556194694 | CodeQL | success |
+| 42556194773 | PIV | success |
+| 42556194909 | PR title | success |
+| 42556194717 | Workflow lint | success |
+
+This SUMMARY's revision is pushed after these runs, so its own checks, and the gates that run against it, are reported with the hand-off.
 
 ### Deviations (Task 3)
 
@@ -400,6 +547,8 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
   - **A T inside last-good passes atRollbackTarget by content**, so only its pending marker sends it to recover (`double_failure_after_kept_base_keeps_readd_out`).
 - **The sequences of the drop-in sites and of the held round (D5)** were derived from the code at e22cc06. The run matched them, as 'Sequences derived from the code, as the run showed them' records. One hold reason differed and is reported there: `gate_superseded_error` is held for `shell_not_nologin`.
 - **The fallback render keeps the principals in force** (D9, tested probes off and on). Not covered: a render that Render itself accepts after a kept rollback widens like any other addition, and is gated when probes are on. The gate tests enforcement, not authorization.
+  - Fix round 1's R3(b) check confirmed this with a run. On a kept state, a KRL-only capture and a bundle-only capture, each with the failed directory withdrawn, render accepted/'s directory with nothing refused, and they grant the kept removal again (probes off and on). This is an open owner question, not fixed here.
+- **A held addition is not gated again while a refused capture persists** (D10 as restated). The bounded KRL-alone pass keeps it out, and the hold stands (`bounded_krl_alone_keeps_held_record`). It is gated again on the first directory that renders. This is accepted under D10 as known behaviour, not a defect.
 - **A kept state can hold an empty `user_ca_keys`** when the base, last-good and current hold disjoint CA lists (plan check sec-8). Certificate logins are then locked out until the keeping recover or the next round moves current. This is the fail-safe direction; there is no code for it.
 - **systemd userdb in nsswitch.conf** (03-10c fix round 1) is not measured. The worst case is a false `account_excluded` hold: liveness only, never fail-open. Handed to 03-16 through the hand-over todo.
 - **The double failure of D1 (Q-D option 1)** leaves current on the failed target until the next Apply's start (T-03-388, T-03-392). For a gated addition, that is a live unproven addition until then.
@@ -435,9 +584,10 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
 - **Done:**
   - Task 1 (T1 a37a72c), Task 2 (T2 7427197) and Task 3 up to the merge gate: tracking commit 80df5e1, gates 1 to 7 and 9 to 11, and this SUMMARY.
   - 40 of 40 mutants killed.
-  - PR #93 is open and green at 80df5e1, with auto-merge off.
+  - Pre-merge review fix round 1: c0dc912, 039a319, 772df77, 9aa10f6 and this SUMMARY's revision; fix-round mutants 30 to 33 killed.
+  - PR #93 is open, with auto-merge off.
 - **Next:**
-  - The orchestrator's pre-merge review.
+  - The orchestrator's review of the fix round's head, and the open owner question of R3(b).
   - Then the owner's merge gate: Daniel reviews, approves and squash-merges in the GitHub web UI.
   - Before the merge, Claude runs only `bash scripts/merge-gate.sh --check p03/10d-no-regrant-recovery`.
 - **If main moves first:** `git rebase --gpg-sign origin/main`, take origin/main's tracking files and re-apply only this plan's entries, push with lease, wait for the checks, re-run the gates (the delta gate's base expires at epoch 1794263107), and ask for a review of the new head.
@@ -447,3 +597,4 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
 
 - Files: internal/agent/apply/rollbackkeep_test.go, the two hand-over todos and both completed todos exist; `func RollbackKeeping(` (render.go) and `func IsProbeKeyID(` (krl/recovery.go) are present.
 - Commits: 32e1fd1, d8335e7, 0f69d51, 5c78955, a37a72c, 28fffc2, ccac467, 7427197, a4b5432 and 80df5e1 are ancestors of HEAD and on origin.
+- Fix round 1 commits: c0dc912, 039a319, 772df77 and 9aa10f6 are ancestors of HEAD and on origin.
