@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 03
 current_phase_name: Linux Agent and Revocation
 status: executing
-stopped_at: "Completed 03-10c-PLAN.md (PR #92 at the owner merge gate)"
-last_updated: "2026-11-08T15:50:48.730Z"
+stopped_at: Completed 03-10d-PLAN.md (PR at the owner merge gate)
+last_updated: "2026-11-08T23:55:19.595Z"
 last_activity: 2026-10-24
 last_activity_desc: Phase 03 execution started
-state_head: 0309661c3042826c09fd34be399446c58f46e925
+state_head: 74271970c658adca82ded21a6f93bd86df273f56
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 68
-  completed_plans: 61
+  completed_plans: 62
   percent: 17
 ---
 
@@ -331,6 +331,7 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-10: keyroster-probe: is reserved at the signing funnel (cert.Build and CheckIssued); install refuses it in role principals and as an account
 - [Phase 03]: 03-10b: a failed gated addition settles on Intermediate(last-good, target) with the newest KRL; plain rollback only when the target removes nothing last-good grants (owner-approved 2026-11-08)
 - [Phase 03]: 03-10c: the probe account is checked completely (passwd, shadow classes, sshd -T -C from the probe source, definite Allow/Deny rules); its preflight and drift findings are report only (probe_account); the runbook's account commands are the script CI runs
+- [Phase 03]: 03-10d: no rollback of an in-flight apply and no start-up recovery re-grants a landed removal (RollbackKeeping: last-good, current and the base intersected, newest KRL; only --recover-to-last-good stays plain, Q1 = A); a signer recovery revokes every lost probe certificate, both polarities, told apart by its key ID (Q-R option 1)
 
 ### Pending Todos
 
@@ -371,6 +372,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-08T15:50:48.246Z
-Stopped at: Completed 03-10c-PLAN.md (PR #92 at the owner merge gate)
+Last session: 2026-11-08T23:55:17.615Z
+Stopped at: Completed 03-10d-PLAN.md (PR at the owner merge gate)
 Resume file: None
