@@ -3,15 +3,25 @@ phase: 03-linux-agent-and-revocation
 plan: 10d
 subsystem: agent, krl, signer, audit, cli, docs
 tags: [rollback, kept-state, recovery, probe-certificates, agent-04]
-status: in-progress
+status: complete
 requires: [03-10c]
 provides: [rollback-keeping, keeping-recover, recovery-revokes-probe-certificates]
-requirements-completed: []
+requirements-completed: [AGENT-04]
+commits: 11
+plan_head_before: e22cc064638bfae97c08f3bd7e347ffdc02b363b
+plan_head_after: 80df5e134b1c2d042edc19f4063229836c1de965
+actuals:
+  tokens: 96230  # chars/4 over git diff e22cc06..80df5e1 (the plan's own reconcile and addendum commits included; this SUMMARY's last revision not included)
+  tasks: 3
+  commits: 11  # git rev-list --count e22cc06..80df5e1 is 10; this SUMMARY's commit, docs(03-10d): complete rollback-and-recovery plan, is the 11th
 ---
 
 # Phase 3 Plan 10d: No rollback re-grants a landed removal; recovery revokes every lost probe certificate Summary
 
-Draft (Task 1 in progress). Completed in Task 3.
+Every rollback of an in-flight apply, the start-up recovery and the fallback and KRL-alone renders now end in the kept content: last-good, current and the base intersected, with the newest KRL (RollbackKeeping). Only the operator's `--recover-to-last-good` keeps the plain target. A signer recovery revokes every lost probe certificate, both polarities, recognised by its key ID, and the signer and `audit verify` refuse a recovery that keeps one.
+
+Owner answers: Q-S Q-R Q-D D-R1 P4
+AGENT-04: complete
 
 ## Bases
 
@@ -31,6 +41,18 @@ Base attempt 2 (the line above; `at` is its start, epoch seconds): every package
 - The reconciled plan was copied over the tracked 03-10d-PLAN.md, checked LF and byte-identical to the checked plan with `cmp` (also the staged blob), and committed alone as 32e1fd1 `docs(03-10d): reconcile the plan with 03-10c`.
 - `git diff --stat e22cc06 origin/main -- internal/agent/apply internal/agent/state internal/krl internal/signer internal/audit cmd/keyroster/recover.go docs/runbooks/signer-install.md` is empty: no file moved since e22cc06, so every path:line of the plan stands.
 - Preconditions checked on origin/main: `checkProbeAccountFull` and `settleFailedAddition` present, `RollbackKeeping` absent, `ErrLostProbeKept` absent, both todos in pending.
+
+The Reconcile table of the plan, as Step 0 found it on the branch base e22cc06. No cited file moved since e22cc06, so every premise stands as the plan cites it.
+
+| # | Premise | At e22cc06 (Step 0) | Covered by |
+|---|---|---|---|
+| 1 | Every rollback in forward ends at last-good | as cited: the forward sites apply.go:1073 to :1140, settle's fallbacks probegate.go:952 to :992, `recover` at :1778, `recoverToLastGood` at :1948 | Task 1 (`rollbackAs`, D8, D9, D10); only `recoverToLastGood` passes the plain flag |
+| 2 | A kept rollback state is stable | as cited: Apply's start recovers a current that is neither last-good nor `atRollbackTarget` (apply.go:491, :706-720) | Task 1: atRollbackTarget by classified content; drift.go comment |
+| 3 | The equal-content commit is safe | as cited: no listener test on the equal-content commit (apply.go:1004-1026) | Task 1: the listener test when current is not last-good and `!dropInRepaired` |
+| 4 | A recovery can tell a lost negative probe certificate | as cited: no polarity in the bytes or key ID | Task 2: Q-R option 1, every lost probe certificate revoked |
+| 5 | The test the todo names flips | as cited: `TestCheckCarriedLost` a bare table at krl_test.go:1282 | Task 2: krl_test.go's table made `t.Run` subtests |
+| 6 | The audit refusal table | as cited: verify_test.go, signer/recovery_test.go:573, signer-install.md:1137-1141 | Task 2: the new refusal beside them |
+| 7 | `pop_hosts_off_fails` passes through trust's rule | as cited (confirmed by a throwaway test, see Task 2 Step 1) | Task 2: the fixture starts from a policy that never set pop.hosts |
 
 ### Step 1: the rollback sites
 
@@ -105,7 +127,7 @@ The two probegate_test.go rows the plan did not predict are the Base refinement 
 - RED: `TestRollbackSites/krl_alone_after_kept_rollback_keeps_removal` (a kept rollback, then a capture with KRL 93 and a directory whose render is refused as `generation_too_large`) failed on both lanes before the code: `rollbackkeep_test.go:1220: principals [role:a role:x], want [role:x]` (probes_off and probes_on).
 - GREEN: after `krlOnly`, both lanes pass: current holds role:x only and KRL 93, role:a is in force at no fault point, and last-good is never widened to role:a.
 
-## UNVERIFIED (Task 1, so far)
+## UNVERIFIED (Task 1, as recorded during the task; the full list is 'UNVERIFIED' below)
 
 - The failure of the keeping rollback's own install of the kept content (Q-D's 'cannot be installed' case) is not injected; its success is exercised by `settle_validate_error`.
 - settle's `m == target` case (probegate.go, the `case m == target:` branch) is not reached in the harness.
@@ -244,8 +266,184 @@ T2: 7427197
 - The CLI's per-certificate line for a probe certificate is unchanged (`... (live): revoke`); the reason is a separate summary line (`lost probe certificates revoked: <n> (...)`), so `summary_lists_kept_with_key`'s exact user line still holds.
 - The runbook bullet does not say that removals and new KRLs still land while a host waits for a new pair: no test here shows that for the `positive_in_krl` route, so it is not claimed.
 
+## Task 3
+
+### Publish
+
+- **The plan file** equals HEAD (verify 1) and the committed copy is byte-identical to the checked plan (`cmp`). It was not edited in Task 3.
+- **80df5e1 `docs(03-10d): tick the plan and AGENT-04, and add the hand-over todos`** holds:
+  - ROADMAP.md: the 03-10d row `- [ ]` to `- [x]`, and 26/33 to 27/33 on the Plans line and on the Progress row;
+  - REQUIREMENTS.md: the AGENT-04 checkbox and its traceability row Pending to Complete (four changed lines);
+  - STATE.md: the tracking update (completed_plans 62, the decision line, the session);
+  - the two hand-over todos, created in the format of the others in pending/.
+
+  `git diff -U0` was checked before the commit. The tracking update ran once, in that edit. The GSD state handlers were not run again, because gate 7 accepts only the one tick and the one Plans and Progress transition.
+- **Capslock:** `scripts/capslock-check.sh` passed inside gate 2 (agent 37 pairs, agent-fetch 23, each equal to its baseline). `test/capslock` is unchanged.
+
+### Gates (local, at 80df5e1, through scripts/linux.sh where they run Go)
+
+- **Gate 1** (todos tracked in HEAD, tracking and phase files committed): exit 0.
+- **Gate 2** (whole module): exit 0, from 1794182653 to 1794183405, pass or fail only. Every package `ok`, with no FAIL, panic or DATA RACE. The run covered:
+  - `go test -race ./...`;
+  - `go vet` default and with the tags keyroster_e2e, e2e, `e2e e2eprobe`, `e2e systemdsmoke` and e2edistro;
+  - gofmt;
+  - golangci-lint for linux, windows and darwin;
+  - capslock, the dependency firewall, the test-only firewall (6 GOOS and tag combinations clean), and the pinned actions (51 `uses:` references pinned).
+- **Gate 3** (test-time delta): exit 0. It ran alone after gate 2, from 1794183435 to 1794183913; the base was 6728 s old.
+- **Gate 4** (the test-build tag in its six files): exit 0.
+- **Gate 5** (files gate): exit 0.
+- **Gate 6** (author, committer, signatures over origin/main..HEAD): exit 0.
+- **Gate 7** (wave, dependency, later plans, ROADMAP and REQUIREMENTS lines): exit 0.
+
+Test-time readings (the one command of 'Budget and verify'), base, reading and delta per package:
+
+| Package | Base (s) | Reading (s) | Delta (s) | Stop |
+|---|---|---|---|---|
+| apply (internal/agent/apply) | 488.967 | 481.805 | -7.162 | +90 |
+| krl | 7.347 | 6.931 | -0.416 | +90 |
+| signer | 395.214 | 407.846 | +12.632 | +90 |
+| audit | 87.541 | 87.303 | -0.238 | +90 |
+| cmd (cmd/keyroster) | 269.858 | 254.028 | -15.830 | +90 |
+| agentcmd (cmd/keyroster-agent) | 1.811 | 1.776 | -0.035 | +90 |
+
+The plan expected apply to grow by 40 to 70 s; it read 7 s under the base. The reading includes Task 1's new tests and the base (origin/main) does not, so the run-to-run variance on this workstation is at least as large as the expected growth. The reading is recorded as it is, not explained away. The whole-module run of gate 2 read apply at 585.887 s under the parallel load of every other package; that is not a delta reading.
+
+### Gate controls
+
+gate control: files gate exits 0 on the branch as committed
+gate control: files gate exits 1 on a throwaway detached worktree with one commit adding an unlisted file (`unlisted-control.txt`, the only name X printed; the worktree was removed and its commit never pushed)
+gate control: key parser reads all six keys (the sample base line `test-time base: apply=1.5 krl=2.5 signer=3.5 audit=4.5 cmd=5.5 agentcmd=6.5 at=1` through the same g() printed 1.5, 2.5, 3.5, 4.5, 5.5 and 6.5)
+gate control: files gate exits 0 on a fixture that moves the two todos with git mv (a throwaway detached worktree at origin/main with this branch's plan file and one commit that moves both todos from pending/ to completed/ with `git mv`; the gate's `--no-renames` diff listed each as D and A, both in files_modified; removed, never pushed)
+
+ROADMAP gate control (gate 7):
+- **On origin/main** (a throwaway detached worktree at e22cc06): exit 1. The changed-line filter is empty (0 changed lines), so `test -n "$R"` fails.
+- **On a commit that ticks 03-11** (a throwaway detached worktree at 80df5e1 with one commit, `- [ ] 03-11-PLAN.md` to `- [x]`): exit 1.
+
+A stray tick no longer passes the gate (03-10c's gate passed one). Both worktrees were removed; neither commit was pushed.
+
+### Push, the PR and CI
+
+- **Branch:** pushed at 80df5e1 with `env -u GITHUB_TOKEN -u GH_TOKEN git push`.
+- **PR:** PR #93 (https://github.com/Labontese/keyroster/pull/93), opened by keyroster-bot through scripts/gh-as-bot.sh with the plan's title. Auto-merge is not enabled.
+- **The PR body** names:
+  - the changes;
+  - the owner decisions Q-S, Q-R, Q-D and D-R1 (and Q1 = A, Q2, the Base refinement);
+  - the deviations;
+  - the UNVERIFIED list;
+  - the new fail-closed stop of `recover` (T-03-395: `stuck: pending_state_unknown`, reachable only when gen/ is damaged, the way out `--recover-to-last-good`) as an extension of Q-D.
+- **Gates on the PR:**
+  - Gate 9 (scrub, the PR body included): exit 0.
+  - Gate 11 (auto-merge off): exit 0.
+- **Gate 10** (`pr checks --required --watch`, then the 03-10b e2e gate in `pr` mode with B as a prefix assignment): exit 0, e2e run 42540126467, headSha 80df5e1 (checked by the gate against HEAD).
+  - Every PROBE_PASS test passed in both probe lanes.
+  - Neither main lane ran a probe test.
+- **Checks at 80df5e1:** 29 of 29 succeeded. That includes the seven `e2e-distro` jobs, both `e2e-probe` lanes and `systemd-sandbox`. The `pull_request` runs:
+
+| Run ID | Workflow | Result |
+|---|---|---|
+| 42540126464 | CI | success |
+| 42540126467 | E2E | success |
+| 42540126461 | E2E distro | success |
+| 42540126471 | Systemd | success |
+| 42540126460 | E2E TPM | success |
+| 42540126462 | E2E PKCS#11 | success |
+| 42540126459 | CodeQL | success |
+| 42540126455 | PIV | success |
+| 42540126466 | PR title | success |
+| 42540126470 | Workflow lint | success |
+
+The e2e lanes of the PR run (`go test` elapsed of ./test/e2e, as the gate reads it), against 03-10c's last head:
+
+| Lane | 03-10c (s) | This PR (s) | Delta (s) | Cap (s) |
+|---|---|---|---|---|
+| e2e (9.5p1) | 751.584 | 758.538 | +6.954 | 900 |
+| e2e (10.5p1) | 773.107 | 777.304 | +4.197 | 900 |
+| e2e-probe (9.5p1) | 279.601 | 285.583 | +5.982 | 420 |
+| e2e-probe (10.5p1) | 286.412 | 271.747 | -14.665 | 420 |
+
+Other CI timings:
+- **systemd-sandbox:** `--- PASS: TestAgentSystemdSmoke (499.99s)` (03-10c's last head: 511.30 s).
+- **e2e-distro job durations:**
+
+| Job | Duration |
+|---|---|
+| almalinux:9 | 6m36s |
+| alpine | 5m45s |
+| archlinux | 6m27s |
+| debian:12 | 4m9s |
+| debian:13 | 6m22s |
+| ubuntu:24.04 | 4m11s |
+| ubuntu:26.04 | 6m25s |
+
+  03-10c's last head ran from 3m58s to 6m33s.
+
+The required checks and gates 1 and 5 to 11 on the head that carries this SUMMARY are reported with the hand-off, not here: a SUMMARY cannot record the checks of its own commit.
+
+### The pre-merge review
+
+The orchestrator runs it on the green PR: a full security review against T-03-374, T-03-388 and T-03-389, with the rollback rule, its two guards and the recovery rule flagged. It also checks the diff for real host names, private addresses and private terms. This executor did not run it, and no fix round has happened. Fix rounds, if any, are recorded here.
+
+### Deviations (Task 3)
+
+- The GSD tracking handlers were not run a second time for the final commit. The tracking update is the one already in 80df5e1. A second `state.advance-plan` would count the plan twice, and a second roadmap update could change lines that gate 7 forbids.
+
+## UNVERIFIED
+
+The plan's Edge Coverage list, item by item, with what the run showed. Nothing named here is claimed as verified.
+
+- **The start-up `recover` keeps removals (D8)**, so a crash, a failed keeping rollback, or a non-crash error after a swap that leaves a marker all end at the kept content at the next start. The marker can come from forward's commit, or from settle's setHostStatus and commit. Tested: `crash_recovery_keeps_removal`, `double_failure_next_start_keeps_removal/*`, `commit_stage_error`, `settle_commit_error`. The residuals:
+  - **`--recover-to-last-good` (`recoverToLastGood`) keeps its plain target** (D6, Q1 = A). It is the only plain path: an operator-invoked re-grant, with the newer KRL kept.
+  - **A marker generation that does not read makes recover fail closed** (`pending_state_unknown`, T-03-395). Cleanup keeps the marker's generations while it is pending (swap.go:723), so this is not expected outside a damaged gen/. A keeping recover that keeps failing blocks Apply at :492 and holds newer KRLs back.
+  - **The failure of the keeping rollback's own install of the kept content** (Q-D's 'cannot be installed' case) is not injected. Its success is exercised by `settle_validate_error`.
+  - **settle's `m == target` case** (probegate.go, the `case m == target:` branch) is not reached in the harness.
+  - **Covered structurally only** (`every_forward_call_keeps`): settleFailedAddition's install at :972 and held write at :983, and the readCurrent and last-good reads at apply.go:1073 and probegate.go:952. They have no one-shot injector.
+  - **A T inside last-good passes atRollbackTarget by content**, so only its pending marker sends it to recover (`double_failure_after_kept_base_keeps_readd_out`).
+- **The sequences of the drop-in sites and of the held round (D5)** were derived from the code at e22cc06. The run matched them, as 'Sequences derived from the code, as the run showed them' records. One hold reason differed and is reported there: `gate_superseded_error` is held for `shell_not_nologin`.
+- **The fallback render keeps the principals in force** (D9, tested probes off and on). Not covered: a render that Render itself accepts after a kept rollback widens like any other addition, and is gated when probes are on. The gate tests enforcement, not authorization.
+- **A kept state can hold an empty `user_ca_keys`** when the base, last-good and current hold disjoint CA lists (plan check sec-8). Certificate logins are then locked out until the keeping recover or the next round moves current. This is the fail-safe direction; there is no code for it.
+- **systemd userdb in nsswitch.conf** (03-10c fix round 1) is not measured. The worst case is a false `account_excluded` hold: liveness only, never fail-open. Handed to 03-16 through the hand-over todo.
+- **The double failure of D1 (Q-D option 1)** leaves current on the failed target until the next Apply's start (T-03-388, T-03-392). For a gated addition, that is a live unproven addition until then.
+- **Current can name a generation that is neither last-good nor last-good's content after a rollback.** Whether 03-12 and 03-14 need to know is not checked (hand-over todo).
+- **The extra listener test of the equal-content guard.** No unit test outside the files_modified failed on it in the whole-module run. Whether an e2e or distro run takes that path is not counted: the PR's e2e lanes passed, see Task 3.
+- **Recovery:**
+  - No old log is checked for a recovery that kept a lost probe certificate. Such a log would now fail `audit verify`; 03-10 merged days before and no release has shipped.
+  - The recovery path is not run end to end (03-10's R9).
+  - A revoked lost positive makes its host ask for a new pair and wait (P4). This is unit-tested only.
+- **A lost probe certificate that the saved export cannot show** is not recoverable by this rule. It expires with its lifetime (at most seven days, min with the machine cap).
+- **Local only, not run here:** Docker is not available in WSL. The distro, systemd and e2e lanes ran in CI only (Task 3).
+
+## For later plans
+
+- **03-12 (CA rotation)** waits on a host with a broken probe account (R11).
+- **03-12 and 03-14 read current**, which can differ from last-good after a kept rollback. 03-12-PLAN.md:371 and 03-14-PLAN.md:324 describe the old target. Hand-over todo: `.planning/todos/pending/2026-11-08-03-12-and-03-14-read-current-after-a-kept-rollback.md`.
+- **03-16, through `.planning/todos/pending/2026-11-08-03-16-host-setup-and-preflight-handovers.md`:**
+  - the `--recover-to-last-good` warning sentence (host-setup.md near :1982);
+  - the rollback contract at host-setup.md:2309-2311, now with the kept state, the keeping start-up recovery and `pending_state_unknown`;
+  - 03-10c's three hand-overs:
+    - preflight's report-only note for possible probe-account exclusions;
+    - the nsswitch.conf sentence of host-setup.md (an unreadable file counts as files only);
+    - the systemd userdb measurement.
+- **The older follow-ups of 'Not done here', unchanged** (later, no plan):
+  - the sshd `Match User` lockdown for the probe account;
+  - a live revocation set for fleets above about 1000 hosts;
+  - `TestFetch/more_repolls_immediately` under a parallel `-race` load;
+  - the 16 e2e lint issues under build tags CI never lints.
+- **Not planned:** a polarity field in the recovery request (declined by Q-R option 1), and the operator's `--recover-to-last-good` keeping removals (Q1 = A).
+
 ## Where to resume
 
-- Done: Task 1 (T1 a37a72c) and Task 2 (T2 7427197; ccac467 the rule, callers and tests), 40 of 40 mutants killed. Nothing is pushed.
-- Task 3 drafts, not committed: the two hand-over todos are untracked in .planning/todos/pending/ (`2026-11-08-03-16-host-setup-and-preflight-handovers.md`, `2026-11-08-03-12-and-03-14-read-current-after-a-kept-rollback.md`); the ROADMAP tick, the AGENT-04 tick and the STATE.md tracking update are saved outside the repository and were taken out of the tree with `git checkout --` so the mutant runner could prove it clean. Copy them back, check `git diff -U0` (ROADMAP: the 03-10d tick and 26/33 to 27/33 twice; REQUIREMENTS: four lines), then run Task 3's gates. Task 3's gate commands are extracted verbatim from the plan into scripts outside the repository.
-- Next in Task 3: commit the tracking and todos; gates 1, 2 (whole module), 3 (delta, the base expires at epoch 1794263107), 4 to 7 with the gate controls; push; open the PR with the body the plan requires (T-03-395 named as an extension of Q-D); gates 8 to 11 after CI; the final `docs(03-10d): complete rollback-and-recovery plan` commit.
+- **Done:**
+  - Task 1 (T1 a37a72c), Task 2 (T2 7427197) and Task 3 up to the merge gate: tracking commit 80df5e1, gates 1 to 7 and 9 to 11, and this SUMMARY.
+  - 40 of 40 mutants killed.
+  - PR #93 is open and green at 80df5e1, with auto-merge off.
+- **Next:**
+  - The orchestrator's pre-merge review.
+  - Then the owner's merge gate: Daniel reviews, approves and squash-merges in the GitHub web UI.
+  - Before the merge, Claude runs only `bash scripts/merge-gate.sh --check p03/10d-no-regrant-recovery`.
+- **If main moves first:** `git rebase --gpg-sign origin/main`, take origin/main's tracking files and re-apply only this plan's entries, push with lease, wait for the checks, re-run the gates (the delta gate's base expires at epoch 1794263107), and ask for a review of the new head.
+- **After "merged":** from the main checkout, `bash scripts/merge-gate.sh p03/10d-no-regrant-recovery`, then the `--check` form.
+
+## Self-Check: PASSED
+
+- Files: internal/agent/apply/rollbackkeep_test.go, the two hand-over todos and both completed todos exist; `func RollbackKeeping(` (render.go) and `func IsProbeKeyID(` (krl/recovery.go) are present.
+- Commits: 32e1fd1, d8335e7, 0f69d51, 5c78955, a37a72c, 28fffc2, ccac467, 7427197, a4b5432 and 80df5e1 are ancestors of HEAD and on origin.
