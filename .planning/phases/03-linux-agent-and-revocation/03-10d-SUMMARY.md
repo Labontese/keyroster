@@ -7,13 +7,13 @@ status: complete
 requires: [03-10c]
 provides: [rollback-keeping, keeping-recover, recovery-revokes-probe-certificates]
 requirements-completed: [AGENT-04]
-commits: 11
+commits: 10
 plan_head_before: e22cc064638bfae97c08f3bd7e347ffdc02b363b
 plan_head_after: 80df5e134b1c2d042edc19f4063229836c1de965
 actuals:
   tokens: 96230  # chars/4 over git diff e22cc06..80df5e1 (the plan's own reconcile and addendum commits included; this SUMMARY's last revision not included)
   tasks: 3
-  commits: 11  # git rev-list --count e22cc06..80df5e1 is 10; this SUMMARY's commit, docs(03-10d): complete rollback-and-recovery plan, is the 11th
+  commits: 10  # git rev-list --count e22cc06..80df5e1; the SUMMARY commit ddfe75c (docs(03-10d): complete rollback-and-recovery plan) and this count's correction follow plan_head_after
 ---
 
 # Phase 3 Plan 10d: No rollback re-grants a landed removal; recovery revokes every lost probe certificate Summary
@@ -306,7 +306,7 @@ Test-time readings (the one command of 'Budget and verify'), base, reading and d
 | cmd (cmd/keyroster) | 269.858 | 254.028 | -15.830 | +90 |
 | agentcmd (cmd/keyroster-agent) | 1.811 | 1.776 | -0.035 | +90 |
 
-The plan expected apply to grow by 40 to 70 s; it read 7 s under the base. The reading includes Task 1's new tests and the base (origin/main) does not, so the run-to-run variance on this workstation is at least as large as the expected growth. The reading is recorded as it is, not explained away. The whole-module run of gate 2 read apply at 585.887 s under the parallel load of every other package; that is not a delta reading.
+The plan expected apply to grow by 40 to 70 s; it read 7 s under the base. The reading includes Task 1's new tests and the base (origin/main) does not; the cause of the difference is not measured, and the reading is recorded as read. The whole-module run of gate 2 read apply at 585.887 s under the parallel load of every other package; that is not a delta reading.
 
 ### Gate controls
 
