@@ -389,11 +389,12 @@ The orchestrator's review of head 30dfcf8 confirmed two findings (R1 and R2) and
 - the structural test does not police direct Transition calls; that is test hardening only;
 - old dev logs that kept a lost probe certificate; this is already UNVERIFIED, under Q-R.
 
-Fixing R1 then turned up one more issue, below.
+Fixing R1 then turned up one more issue, and the R3 check one owner question (Q3); both are below.
 
-The plan was amended first. D10 and T-03-392 are restated, and a 'Pre-merge review addendum' is added. The amended plan was committed on its own twice:
+The plan was amended first. D10 and T-03-392 are restated, and a 'Pre-merge review addendum' is added. The amended plan was committed on its own three times:
 - c0dc912, the first amendment;
-- 772df77, when the held-record row was added.
+- 772df77, when the held-record row was added;
+- 388b525, when owner decision Q3 was added.
 
 Each copy was checked byte-identical with `cmp`. The plan's `<automated>` lines are unchanged against 30dfcf8.
 
@@ -481,6 +482,9 @@ fix-round mutant killed: 30 (redefined) the KRL-alone bound removed (TestRollbac
 fix-round mutant killed: 31 the early return on current equal to last-good restored (TestRollbackSites/krl_alone_twice_after_kept_rollback_keeps_removal/probes_off and /probes_on)
 fix-round mutant killed: 32 pollSpool's reference set back to current (TestRollbackSites/refused_capture_during_wait_lands_addition/probes_off and /probes_on)
 fix-round mutant killed: 33 the held-record guard removed (TestRollbackSites/bounded_krl_alone_keeps_held_record/probes_on)
+fix-round mutant killed: 34 the record write after the keeping rollback removed (TestRollbackSites/withdrawn_directory_after_kept_rollback_keeps_removal/krl_only/probes_off, /krl_only/probes_on, /bundle_only/probes_off and /bundle_only/probes_on)
+
+All five were run again at a44c318, the final code, and each died on the same lines.
 
 **R3 checks** (throwaway tests in WSL copies, not committed).
 
@@ -490,13 +494,36 @@ fix-round mutant killed: 33 the held-record guard removed (TestRollbackSites/bou
 - The fallback is never wider than the reference, and it does not drop an authorized addition the way R2 did. role:b is absent at e22cc06 too, because D3's refused host entry decides, not D2.
 - Once K is last-good, D9's guard returns early with last-good = K, so the fallback takes K's principals (read from the code, not run).
 
-(b) Other renders of accepted/'s stored directory: an owner question, reported and not fixed. Each case starts from a kept state with D2 withdrawn from the spool.
-- A KRL-only capture (KRL 93) re-grants role:a. The capture renders accepted/'s D1 with `Refused` nil, so the D10 bound never applies, and role:a is committed as last-good. Probes off and on; the probe gate passes.
-- A bundle-only capture (a successor bundle) re-grants role:a the same way.
-- An unchanged capture is a no-op and keeps [role:x].
+(b) Other renders of accepted/'s stored directory. Each case starts from a kept state with D2 withdrawn from the spool and D1 still offered. This was reported as an owner question; it is fixed under owner decision Q3, below.
+- A KRL-only capture (KRL 93) re-granted role:a. It rendered accepted/'s D1 with `Refused` nil, so the D10 bound never applied, and role:a was committed as last-good. Probes off and on; the probe gate passed. The code is the same at 30dfcf8.
+- A bundle-only capture (a successor bundle) re-granted role:a the same way.
+- An unchanged capture was a no-op and kept [role:x].
 - A withheld directory (D-R2) gives a Refused Verified, which the bound now covers.
 
-Bounding the KRL-only and bundle-only renders by current would also block a legitimate widening, so the choice is the owner's.
+**Owner decision Q3 (record the directory), a44c318.** A keeping rollback that leaves current without a line last-good holds records e.tv, the verified state the failed apply was moving to, in the existing unapplied record (`recordKept`, through `recordUnapplied` and `Verified.Unapplied`). This is the same path a content refusal takes.
+- `Verified.Unapplied` accepts the state as it is: the state is not refused, and its directory is ahead of accepted/. No format change, no wire change and no file outside files_modified.
+- A rollback whose error is an injected crash writes nothing more. The first version wrote the record there too, and `TestApply/crash_during_rollback_transition` and `crash_anywhere_recovers/rollback` failed, because the next run read a record that a killed process could not have written.
+- Later captures are read and chained from the record. One that offers only D1 with a newer KRL or bundle has that directory step refused (`directory_older`), so only its KRL moves on, bounded by current (D10). The report and the status name directory 2 as unapplied.
+
+RED at 388b525 (the code of 9aa10f6, with the new subtest): `--- FAIL: TestRollbackSites/withdrawn_directory_after_kept_rollback_keeps_removal/krl_only/probes_off`, `/krl_only/probes_on`, `/bundle_only/probes_off` and `/bundle_only/probes_on`, with these messages:
+- `the report names <nil> as unapplied, want directory 2`;
+- `the status: <nil>; want directory 2 named as unapplied`;
+- `role:a granted again: <nil>, principals [role:a role:x]`, in force from `self-test` to `clear-marker`.
+
+The R3(b) throwaway test showed the same re-grant before the subtest was written.
+
+GREEN at a44c318:
+- all four lanes pass;
+- `go test -race -count=1 -timeout 15m -v ./internal/agent/apply/` ok (445.903 s, before a comment-only edit), no DATA RACE;
+- R2 (`refused_capture_during_wait_lands_addition`) and the held-record guard (`bounded_krl_alone_keeps_held_record`, `krl_alone_pass_is_classified`) still pass.
+
+The retry path, checked in the same subtest:
+- with directory 2 offered again, its addition lands once the listener test passes;
+- role:a is in force at no fault point;
+- the commit passes the record: `<state>/unapplied.json` is gone and Report.Unapplied is nil;
+- accepted/ is at directory 2 and last-good = current.
+
+The earlier kept-state subtests that retry with directory 2 still in the spool (for example `mustKeptSite`'s next apply) pass unchanged.
 
 **Gates at 9aa10f6 (local, through scripts/linux.sh).** Gates 2 and 3 ran with this SUMMARY's revision uncommitted in the working tree; that revision changes docs only.
 - **Gate 2** (whole module): exit 0, from 1794194651 to 1794195382.
@@ -528,7 +555,37 @@ The fix round adds five subtest runs to apply. The reading is 47 s under the bas
 | 42556194909 | PR title | success |
 | 42556194717 | Workflow lint | success |
 
-This SUMMARY's revision is pushed after these runs, so its own checks, and the gates that run against it, are reported with the hand-off.
+At 28594ac, the SUMMARY revision that recorded the above, gates 1, 4 to 9 and 11 exited 0. Gate 10 was stopped while it was waiting on CI, when owner decision Q3 arrived. The Q3 fix moved the head past 28594ac.
+
+**Gates at a44c318, the final code (local, through scripts/linux.sh).** Gates 2 and 3 ran with this SUMMARY's revision uncommitted in the working tree; that revision changes docs only.
+- **Gate 2** (whole module): exit 0, from 1794198455 to 1794199148.
+- **Gate 3** (test-time delta): exit 0. It ran alone after gate 2, from 1794199148 to 1794199656, on the same base line; the base was 22441 s old.
+
+| Package | Base (s) | Reading (s) | Delta (s) | Stop |
+|---|---|---|---|---|
+| apply (internal/agent/apply) | 488.967 | 512.945 | +23.978 | +90 |
+| krl | 7.347 | 7.189 | -0.158 | +90 |
+| signer | 395.214 | 418.999 | +23.785 | +90 |
+| audit | 87.541 | 88.648 | +1.107 | +90 |
+| cmd (cmd/keyroster) | 269.858 | 224.476 | -45.382 | +90 |
+| agentcmd (cmd/keyroster-agent) | 1.811 | 1.794 | -0.017 | +90 |
+
+**CI at a44c318** (pushed as a fast-forward). 28 checks passed and one was skipped; no required check failed. These are the `pull_request` runs, all with headSha a44c318:
+
+| Run ID | Workflow | Result |
+|---|---|---|
+| 42561932764 | CI | success |
+| 42561932755 | E2E | success |
+| 42561932778 | E2E distro | success |
+| 42561932759 | Systemd | success |
+| 42561932827 | E2E TPM | success |
+| 42561932793 | E2E PKCS#11 | success |
+| 42561932786 | CodeQL | success |
+| 42561932780 | PIV | success |
+| 42561932795 | PR title | success |
+| 42561932787 | Workflow lint | success |
+
+This SUMMARY's revision is pushed after these runs. Its own checks, and the gates that run against it, are reported with the hand-off.
 
 ### Deviations (Task 3)
 
@@ -547,7 +604,10 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
   - **A T inside last-good passes atRollbackTarget by content**, so only its pending marker sends it to recover (`double_failure_after_kept_base_keeps_readd_out`).
 - **The sequences of the drop-in sites and of the held round (D5)** were derived from the code at e22cc06. The run matched them, as 'Sequences derived from the code, as the run showed them' records. One hold reason differed and is reported there: `gate_superseded_error` is held for `shell_not_nologin`.
 - **The fallback render keeps the principals in force** (D9, tested probes off and on). Not covered: a render that Render itself accepts after a kept rollback widens like any other addition, and is gated when probes are on. The gate tests enforcement, not authorization.
-  - Fix round 1's R3(b) check confirmed this with a run. On a kept state, a KRL-only capture and a bundle-only capture, each with the failed directory withdrawn, render accepted/'s directory with nothing refused, and they grant the kept removal again (probes off and on). This is an open owner question, not fixed here.
+  - Fix round 1's R3(b) check confirmed this with a run. On a kept state, a KRL-only capture and a bundle-only capture, each with the failed directory withdrawn, rendered accepted/'s directory with nothing refused and granted the kept removal again (probes off and on). Owner decision Q3 fixed it (a44c318): the keeping rollback records the directory as unapplied. The residuals:
+    - A run killed after the removal landed and before the record is written, and a kept state left by a build before a44c318, have no record. The next start's keeping recover keeps the removal, but a later capture that withdraws the directory can still render accepted/'s. Not tested.
+    - That a rollback which itself failed (current or last-good unreadable, or a double failure) writes the record follows from the code; no test asserts it.
+    - A capture that offers no directory at all after the withdrawal (rather than D1) would render the recorded directory as the newest verified state. Not tested.
 - **A held addition is not gated again while a refused capture persists** (D10 as restated). The bounded KRL-alone pass keeps it out, and the hold stands (`bounded_krl_alone_keeps_held_record`). It is gated again on the first directory that renders. This is accepted under D10 as known behaviour, not a defect.
 - **A kept state can hold an empty `user_ca_keys`** when the base, last-good and current hold disjoint CA lists (plan check sec-8). Certificate logins are then locked out until the keeping recover or the next round moves current. This is the fail-safe direction; there is no code for it.
 - **systemd userdb in nsswitch.conf** (03-10c fix round 1) is not measured. The worst case is a false `account_excluded` hold: liveness only, never fail-open. Handed to 03-16 through the hand-over todo.
@@ -584,10 +644,10 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
 - **Done:**
   - Task 1 (T1 a37a72c), Task 2 (T2 7427197) and Task 3 up to the merge gate: tracking commit 80df5e1, gates 1 to 7 and 9 to 11, and this SUMMARY.
   - 40 of 40 mutants killed.
-  - Pre-merge review fix round 1: c0dc912, 039a319, 772df77, 9aa10f6 and this SUMMARY's revision; fix-round mutants 30 to 33 killed.
+  - Pre-merge review fix round 1: c0dc912, 039a319, 772df77, 9aa10f6, 28594ac, 388b525, a44c318 and this SUMMARY's revision; fix-round mutants 30 to 34 killed.
   - PR #93 is open, with auto-merge off.
 - **Next:**
-  - The orchestrator's review of the fix round's head, and the open owner question of R3(b).
+  - The orchestrator's review of the fix round's head.
   - Then the owner's merge gate: Daniel reviews, approves and squash-merges in the GitHub web UI.
   - Before the merge, Claude runs only `bash scripts/merge-gate.sh --check p03/10d-no-regrant-recovery`.
 - **If main moves first:** `git rebase --gpg-sign origin/main`, take origin/main's tracking files and re-apply only this plan's entries, push with lease, wait for the checks, re-run the gates (the delta gate's base expires at epoch 1794263107), and ask for a review of the new head.
@@ -597,4 +657,4 @@ The plan's Edge Coverage list, item by item, with what the run showed. Nothing n
 
 - Files: internal/agent/apply/rollbackkeep_test.go, the two hand-over todos and both completed todos exist; `func RollbackKeeping(` (render.go) and `func IsProbeKeyID(` (krl/recovery.go) are present.
 - Commits: 32e1fd1, d8335e7, 0f69d51, 5c78955, a37a72c, 28fffc2, ccac467, 7427197, a4b5432 and 80df5e1 are ancestors of HEAD and on origin.
-- Fix round 1 commits: c0dc912, 039a319, 772df77 and 9aa10f6 are ancestors of HEAD and on origin.
+- Fix round 1 commits: c0dc912, 039a319, 772df77, 9aa10f6, 28594ac, 388b525 and a44c318 are ancestors of HEAD and on origin.
