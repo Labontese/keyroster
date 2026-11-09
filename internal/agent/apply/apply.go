@@ -233,7 +233,9 @@ type Report struct {
 }
 
 // Unapplied is Report.Unapplied: the bundle and directory versions the
-// applier verified but could not apply for their content, and now reads
+// applier verified but could not apply for their content, or whose apply
+// a keeping rollback undid after a removal landed (owner decision Q3,
+// PR #93 review; recordKept), and now reads
 // past (0: no such part).
 type Unapplied struct {
 	Bundle    uint64 `json:"bundle,omitempty"`
@@ -284,6 +286,10 @@ type engine struct {
 	// committed with: render keeps last-good's principals only under a
 	// policy that authorizes their source (PR #82 review, D-1).
 	accepted *state.Stored
+	// tv is the verified state forward's Transition loop is moving to
+	// (nil before it): a keeping rollback that lands a removal records it
+	// (recordKept, owner decision Q3).
+	tv *state.Verified
 
 	// dial and ipv6Off are the self-test's dialer and IPv6 check; nil is
 	// net.Dialer and /proc (tests substitute both).
@@ -1098,6 +1104,7 @@ func (e *engine) forward(ctx context.Context) error {
 		return outcome(v)
 	}
 	target, tv := g, v
+	e.tv = tv
 	e.poll = func(ctx context.Context) (*Generation, *state.Verified, error) {
 		return e.pollSpool(ctx, tv, target)
 	}
@@ -1141,6 +1148,7 @@ func (e *engine) forward(ctx context.Context) error {
 		if errors.As(err, &s) {
 			e.logf("a newer state arrived during the wait; moving to generation %d", s.gen.N)
 			target, tv = s.gen, s.verified
+			e.tv = tv
 			// F03 (03-08f): a poll's Verified carries the unauthorized state
 			// like forward's own: from VerifyAfter or VerifyAheadAfter, from
 			// pollSpool's KRL-alone pass and from pollCapture's state.KRLAlone
@@ -1551,20 +1559,22 @@ func (e *engine) unappliedBase(stored *state.Stored) *state.Stored {
 // recordUnapplied writes the unapplied record of v (Verified.Unapplied
 // against stored, accepted/) through writeState (0600), in forward's
 // content-refusal branch just before the KRL-alone pass (PR #76 review F8
-// (03-08j)). It merges per kind and never narrows or lowers the record:
-// each part is the higher of the existing record's, while still ahead of
-// accepted/, and v's, and a part is replaced only by a higher version of
-// the same kind (mergeUnapplied). So a capture held at the bundle in force
-// keeps the record's bundle part. It writes nothing under DryRun, before a
-// first install, when v.Refused is set, when no part is ahead, or when the
-// file already holds the same bytes. A write that fails is logged, and the
-// run goes on to the KRL-alone pass: a revocation never waits for the
-// record.
+// (03-08j)), and after a keeping rollback that landed a removal
+// (recordKept, owner decision Q3). It merges per kind and never narrows or
+// lowers the record: each part is the higher of the existing record's,
+// while still ahead of accepted/, and v's, and a part is replaced only by
+// a higher version of the same kind (mergeUnapplied). So a capture held at
+// the bundle in force keeps the record's bundle part. It writes nothing
+// under DryRun, before a first install, when v.Refused is set, when no
+// part is ahead, or when the file already holds the same bytes. A write
+// that fails is logged, and the run goes on to the KRL-alone pass: a
+// revocation never waits for the record.
 //
-// The record changes in exactly four ways: this write, which only raises
-// parts; finishCommit, which removes a record accepted/ has passed
-// (dropPassedRecord); ResetDirectory, which drops its directory part; and
-// forward's load, which drops a damaged or passed record (unappliedBase).
+// The record changes in exactly four ways: this write (from either
+// caller), which only raises parts; finishCommit, which removes a record
+// accepted/ has passed (dropPassedRecord); ResetDirectory, which drops its
+// directory part; and forward's load, which drops a damaged or passed
+// record (unappliedBase).
 func (e *engine) recordUnapplied(stored *state.Stored, v *state.Verified) {
 	if e.cfg.DryRun || stored == nil {
 		return
@@ -1789,11 +1799,42 @@ func (e *engine) rollbackAs(ctx context.Context, cause error, lg link, keep bool
 	if e.base != nil {
 		bounds = []*Generation{e.base}
 	}
-	if err := e.backToLastGood(ctx, lg, keep, bounds); err != nil {
+	err := e.backToLastGood(ctx, lg, keep, bounds)
+	if keep && !isCrash(err) {
+		e.recordKept(lg)
+	}
+	if err != nil {
 		return errors.Join(cause, err)
 	}
 	e.cleanup()
 	return cause
+}
+
+// recordKept records e.tv, the verified state the failed apply was moving
+// to, in the unapplied record (recordUnapplied) once a keeping rollback
+// has left current without a line last-good holds (owner decision Q3, PR
+// #93 review): a removal from that state's directory landed, and accepted/
+// still holds the older directory, which grants the removed line. A later
+// capture is then read and chained from the record (Unapplied.Base): one
+// that no longer offers the recorded directory, only accepted/'s older one
+// with a newer KRL or bundle, has that directory step refused, so only its
+// KRL moves on, bounded by current (D10); one that offers the recorded
+// directory again retries it. A current or last-good that does not read,
+// as after a rollback that failed (the next start's keeping recover keeps
+// the removal), is recorded too; a run that crashed (an injected crash, as
+// a killed process) writes nothing more. Nothing is written for a
+// KRL-alone state or one with no part ahead of accepted/; a commit that
+// passes the record removes it (dropPassedRecord).
+func (e *engine) recordKept(lg link) {
+	if e.tv == nil || e.accepted == nil {
+		return
+	}
+	if lgGen, err := readGeneration(lg.dir); err == nil {
+		if cur, _, err := e.readCurrent(); err == nil && cur != nil && covers(cur, lgGen) {
+			return
+		}
+	}
+	e.recordUnapplied(e.accepted, e.tv)
 }
 
 // backToLastGood is the common end of rollback and crash recovery: it

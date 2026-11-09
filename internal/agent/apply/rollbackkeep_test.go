@@ -24,6 +24,7 @@ import (
 	"github.com/Labontese/keyroster/internal/agent/execsite"
 	"github.com/Labontese/keyroster/internal/agent/hostcert"
 	"github.com/Labontese/keyroster/internal/agent/spool"
+	"github.com/Labontese/keyroster/internal/agent/state"
 	"github.com/Labontese/keyroster/internal/krl"
 	"github.com/Labontese/keyroster/internal/trust"
 )
@@ -1449,6 +1450,87 @@ func TestRollbackSites(t *testing.T) {
 			mustHeld(t, h, r, err, "cert_missing")
 			mustPrincipals(t, h, "role:a")
 		})
+	})
+	t.Run("withdrawn_directory_after_kept_rollback_keeps_removal", func(t *testing.T) {
+		// Owner decision Q3 (PR #93 review): a keeping rollback that lands
+		// a removal from a verified directory records that directory in the
+		// unapplied record, so a later capture that no longer offers it
+		// (only a newer KRL, or only a newer bundle) chains from it and
+		// never renders accepted/'s older directory, which still grants
+		// the removed line.
+		t.Parallel()
+		for _, kind := range []string{"krl_only", "bundle_only"} {
+			bothProbes(t, kind, func(t *testing.T, probes bool) {
+				h := keepHost(t, probes, "role:a", "role:x")
+				lg0 := h.lastGood()
+				h.sshd.setStall(true)
+				h.publishDir(h.spec("role:x", "role:b"))
+				r, err := h.apply()
+				h.sshd.setStall(false)
+				if !errors.Is(err, ErrSelfTest) || h.current() == lg0 || !h.atKept(lg0) {
+					t.Fatalf("the kept rollback: %v, current %d, last-good %d", err, h.current(), h.lastGood())
+				}
+				if r.Unapplied == nil || r.Unapplied.Directory != 2 {
+					t.Errorf("the report names %+v as unapplied, want directory 2", r.Unapplied)
+				}
+				if st, serr := lockedEngine(h).buildStatus(context.Background(), StatusUpdate{Applied: true, Report: r, ApplyErr: err}); serr != nil || st.Unapplied == nil || st.Unapplied.Directory != 2 {
+					t.Errorf("the status: %v; want directory 2 named as unapplied", serr)
+				}
+				if b, rerr := os.ReadFile(h.l.State(statusFile)); rerr != nil || !strings.Contains(string(b), `"unapplied":{"directory":2}`) { //nolint:gosec // test fixture
+					t.Errorf("status.json's last apply does not name directory 2 as unapplied: %v", rerr)
+				}
+				// The spool no longer offers directory 2; directory 1 is
+				// still offered.
+				d2 := h.state.Directories[2]
+				delete(h.state.Directories, 2)
+				h.resetSpool()
+				if kind == "krl_only" {
+					h.publishKRL(93)
+				} else {
+					_, b2 := h.f.successor(h.f.bundle, h.f.bundleDoc, "2026-10-02T00:00:00Z")
+					h.state.Bundles[2] = b2
+				}
+				var seen []string
+				h.cfg.Fault = func(p string) error {
+					if slices.Contains(h.principals("deploy"), "role:a") {
+						seen = append(seen, "current at "+p)
+					}
+					if l, err := readGeneration(h.l.Gen(h.lastGood())); err == nil && slices.Contains(deployLines(l), "role:a") && h.lastGood() != lg0 {
+						seen = append(seen, "last-good at "+p)
+					}
+					return nil
+				}
+				r, err = h.apply()
+				if got := h.principals("deploy"); slices.Contains(got, "role:a") || len(seen) != 0 {
+					t.Fatalf("role:a granted again: %v, principals %v, in force at %v", err, got, seen)
+				}
+				if l, lerr := readGeneration(h.l.Gen(h.lastGood())); lerr != nil || (h.lastGood() != lg0 && slices.Contains(deployLines(l), "role:a")) {
+					t.Fatalf("last-good %d widened to role:a: %v", h.lastGood(), lerr)
+				}
+				// Chained from the record, directory 1 is older than the
+				// newest verified directory: that step is refused and only the
+				// KRL moves on, and the record still names directory 2.
+				if !errors.Is(err, state.ErrDirOlder) || r.Unapplied == nil || r.Unapplied.Directory != 2 || h.acceptedDir() != 1 {
+					t.Fatalf("the capture after the withdrawal: %v, unapplied %+v, accepted/ directory %d", err, r.Unapplied, h.acceptedDir())
+				}
+				mustPrincipals(t, h, "role:x")
+				if kind == "krl_only" && !h.krlRevokes(h.l.Current(), 93) {
+					t.Fatal("KRL 93 not in force")
+				}
+				// The retry: directory 2 offered again lands its addition once
+				// the listener test passes, and the commit passes the record.
+				h.state.Directories[2] = d2
+				r, err = h.apply()
+				h.cfg.Fault = nil
+				if len(seen) != 0 {
+					t.Fatalf("role:a in force during the retry at %v", seen)
+				}
+				if err != nil || h.acceptedDir() != 2 || h.lastGood() != h.current() || r.Unapplied != nil || h.exists(h.l.State(state.UnappliedFile)) {
+					t.Fatalf("the retry: %v, accepted/ directory %d, last-good %d, current %d, unapplied %+v", err, h.acceptedDir(), h.lastGood(), h.current(), r.Unapplied)
+				}
+				mustPrincipals(t, h, "role:b", "role:x")
+			})
+		}
 	})
 }
 
