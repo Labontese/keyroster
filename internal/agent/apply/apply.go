@@ -965,12 +965,22 @@ func (e *engine) forward(ctx context.Context) error {
 			// its render is not a full candidate. A held addition stays out
 			// of it and stays held: the hold stands as a substituted
 			// target's does, so no commit of this pass clears the record.
-			if bounded && e.probesOn() {
+			// The hold is the one forward read before the loop (held): a
+			// probe-state.json that did not read was rewritten then as the
+			// exhausted hour, without its record, and the gate decides the
+			// reason again, as it did before D10.
+			if bounded && held && e.probesOn() {
+				reason := ""
 				if st := e.readProbeState(); st.Held != nil && !st.reset {
-					if err := e.hold(st.Held.Reason, v); err != nil {
+					reason = st.Held.Reason
+				} else {
+					reason = e.probeGate(ctx, cur, g, v)
+				}
+				if reason != "" {
+					if err := e.hold(reason, v); err != nil {
 						return err
 					}
-					heldReason = st.Held.Reason
+					heldReason = reason
 				}
 			}
 			if !v.Changed() && cur != nil && sameBytes(cur, g) {

@@ -1451,6 +1451,39 @@ func TestRollbackSites(t *testing.T) {
 			mustPrincipals(t, h, "role:a")
 		})
 	})
+	t.Run("damaged_probe_state_keeps_held_record", func(t *testing.T) {
+		t.Parallel()
+		t.Run("probes_on", func(t *testing.T) {
+			// A probe-state.json that does not read is rewritten as the
+			// exhausted hour by heldPresent before the bounded KRL-alone
+			// pass, so the held record is gone by then: the pass takes the
+			// hold forward read and holds again as the gate decides, as
+			// e22cc06 does (here cert_missing: no probe certificate).
+			t.Parallel()
+			h := gateHost(t, "role:a", "role:b")
+			h.publishDir(h.spec("role:a", "role:c"))
+			r, err := h.apply()
+			mustHeld(t, h, r, err, "cert_missing")
+			if err := os.WriteFile(h.l.State(probeStateFile), []byte("not json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := h.spec("role:a", "role:c")
+			s.bulkRoles = 17
+			h.publishDir(s)
+			h.publishKRL(93)
+			for i := range 3 {
+				r, err := h.apply()
+				if !errors.Is(err, ErrGenerationTooLarge) {
+					t.Fatalf("run %d: %v, want generation_too_large reported", i+1, err)
+				}
+				mustHeld(t, h, r, err, "cert_missing")
+				mustPrincipals(t, h, "role:a")
+				if !h.krlRevokes(h.l.Current(), 93) || h.acceptedDir() != 2 {
+					t.Fatalf("run %d: KRL 93 in force %t, accepted/ directory %d", i+1, h.krlRevokes(h.l.Current(), 93), h.acceptedDir())
+				}
+			}
+		})
+	})
 	t.Run("withdrawn_directory_after_kept_rollback_keeps_removal", func(t *testing.T) {
 		// Owner decision Q3 (PR #93 review): a keeping rollback that lands
 		// a removal from a verified directory records that directory in the
