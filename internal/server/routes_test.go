@@ -31,8 +31,10 @@ var passkeyRoutes = map[string]string{
 }
 
 // otherRoutes are every other registered pattern, each with the reason it
-// signs nobody in and creates no session, login code or certificate for a
-// user who has not passed a passkey ceremony.
+// signs nobody in and creates no session or login code. None of them issues
+// a certificate, except, on its own named route, the machine certificate of
+// POST /api/v1/machine/renew (03-11b), which the signer issues to the holder
+// of a key an admin-signed directory lists, on proof of possession.
 var otherRoutes = map[string]string{ //nolint:gosec // G101: route patterns and reasons, not credentials
 	"GET /{$}":                               "the index page",
 	"GET /static/":                           "the embedded static assets",
@@ -45,6 +47,7 @@ var otherRoutes = map[string]string{ //nolint:gosec // G101: route patterns and 
 	"POST /api/v1/admin/directory":           "installs an admin-signed directory; requireAdmin",
 	"POST /api/v1/admin/revoke":              "an admin-signed revocation; requireAdmin",
 	"GET /api/v1/krl":                        "the published KRL, public",
+	"POST /api/v1/machine/renew":             "issues a machine certificate (an OpenSSH user certificate from the machine CA with only the machine's role principals) to the holder of a key that an admin-signed directory lists, decided by the signer on proof of possession (03-11b); it creates no session and no login code and issues nothing under the user CA",
 	"GET /enroll/{token}":                    "the enrollment page of an invite; it registers a passkey and signs nobody in",
 	"POST /api/v1/enroll/{token}/begin":      "the passkey registration challenge of an invite; it signs nobody in",
 	"POST /api/v1/enroll/{token}/finish":     "stores a pending passkey for an admin to approve; it signs nobody in",

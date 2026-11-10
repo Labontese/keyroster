@@ -181,6 +181,9 @@ type dirEnv struct {
 	calls []string
 	// lastPost is the body of the last admin POST.
 	lastPost []byte
+	// renewBodies is every body posted to MachineRenewPath, in order
+	// (03-11b).
+	renewBodies [][]byte
 }
 
 const agentCustody = "user=agent, host=agent, machine=agent, ops=agent, log=agent"
@@ -311,6 +314,26 @@ func (e *dirEnv) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, `{"error":"`+serverclient.KRLErrNone+`"}`)
+		return
+	}
+	if r.Method == http.MethodPost && r.URL.Path == serverclient.MachineRenewPath {
+		// Anonymous (03-11b, PD12): no admin signature. The body is
+		// recorded before override "POST "+MachineRenewPath answers;
+		// with none set the route is not served.
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		e.mu.Lock()
+		e.renewBodies = append(e.renewBodies, body)
+		f := e.override[r.Method+" "+r.URL.Path]
+		e.mu.Unlock()
+		if f != nil {
+			f(w)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	body, err := io.ReadAll(r.Body)

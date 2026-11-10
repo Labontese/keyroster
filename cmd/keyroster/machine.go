@@ -17,14 +17,14 @@ import (
 func init() {
 	register(command{
 		Name:    "machine",
-		Summary: "machine identities in the directory: an automation's key, roles and max TTL (add, remove, list)",
+		Summary: "machine identities: an automation's key, roles and max TTL in the directory (add, remove, list), and its certificate (renew)",
 		Run:     runMachine,
 	})
 }
 
 func runMachine(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "machine: want a subcommand: add, remove or list")
+		_, _ = fmt.Fprintln(stderr, "machine: want a subcommand: add, remove, list or renew")
 		return errUsage
 	}
 	switch args[0] {
@@ -32,10 +32,12 @@ func runMachine(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return runMachineAdd(ctx, args[1:], stdout, stderr)
 	case "remove":
 		return runMachineRemove(ctx, args[1:], stdout, stderr)
+	case "renew":
+		return runMachineRenew(ctx, args[1:], stdout, stderr)
 	case "list":
 		return runMachineList(ctx, args[1:], stdout, stderr)
 	default:
-		_, _ = fmt.Fprintf(stderr, "machine: unknown subcommand %q; want add, remove or list\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "machine: unknown subcommand %q; want add, remove, list or renew\n", args[0])
 		return errUsage
 	}
 }
