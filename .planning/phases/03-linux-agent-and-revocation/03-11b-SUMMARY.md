@@ -34,7 +34,7 @@ T1 RED: `go vet -tags "e2e e2emachine" ./test/e2e/` on origin/main's harness: `t
 T1: fbec252
 T2: a359def
 
-- T2: key input, `--agent-key`, the full answer check, `--expect-principal`, `--if-due`, one text per refusal and the two fuzz targets, in a359def. Verify gates 1 to 4 passed on 976a1a4, whose code is the same except one fuzz seed, rewritten so that no private-key armor line sits in the source (the pre-push scan refused it); vet, lint and the fuzz target were re-run on a359def.
+- T2: key input, `--agent-key`, the full answer check, `--expect-principal`, `--if-due`, one text per refusal and the two fuzz targets, in a359def. Verify gates 1 to 4 passed on 976a1a4, whose code is the same except one fuzz seed, rewritten so that no private-key armor line sits in the source (the pre-push scan refused it); on a359def itself, verify 1 (85 PASS lines, no FAIL and no SKIP) and verify 2 (both fuzz targets at 20 s, no corpus file) were re-run and pass, as were vet and lint.
 - T1 (tracer): the route, the budget share, the client, the first slice of `machine renew` and the e2e tracer, in fbec252. Verify gates 1 to 6 pass on it.
 
 ## Mutants
@@ -111,7 +111,7 @@ e2e GREEN run: 42821481669 (workflow_dispatch on fbec252): main lanes 788.457 s 
 
 ## Handover (executor run 1 stopped after Task 2, half-context rule)
 
-- Done: Task 1 (fbec252, SUMMARY 64167d7) and Task 2 (a359def); 34 mutants killed, none equivalent. The branch is pushed; no PR is open yet (Task 5 opens it).
+- Done: Task 1 (fbec252, SUMMARY 64167d7) and Task 2 (a359def); 34 mutants killed, none equivalent. The branch is pushed; no PR is open yet (Task 5 opens it). CI 42825986252 (workflow_dispatch on 4668ecc): build-test, cli-windows, cli-macos, lint, govulncheck, dependency-firewall and capslock green; the fuzz job was still running at the handover: check it first (a finding lands in Task 2's files). The CLI lanes do not check PASS lines, so whether `hard_link` ran or skipped there is not known.
 - Next: Task 3 (`revoke machine`, the `machine remove` hint, the audit line; 8 mutants, cumulative floor 42), then Task 4 (the rest of the e2e test and its lane timing) and Task 5 (runbooks, tracking edits, gates, PR, final SUMMARY).
 - The test-time base was measured at epoch 1794313017; Task 5's delta gate wants it under 24 h old, so a later continuation re-measures it in place (the detached base worktree outside the repository, kr-base-11b next to the repository, is still there; check it out at origin/main first).
 - Local e2e works with the namespace wrapper of 03-10b (unshare with a bind-mounted /etc/hosts that maps keyroster.localhost to loopback) on the WSL OpenSSH 10.5p1 build.
