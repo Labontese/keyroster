@@ -135,15 +135,6 @@ func TestRevokeHostSubject(t *testing.T) {
 			t.Fatal("version 3 did not release the hold recorded at version 2")
 		}
 	})
-	t.Run("subject_machine_still_unsupported", func(t *testing.T) {
-		e := newHostEnv(t, 90)
-		req := &wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectMachine, Subject: "web1", InstallationID: e.fx.InstallationID,
-			CreatedAt: uint64(e.clock.Now().Unix()), Reason: "test"} //nolint:gosec // G115: after 1970
-		if _, err := rand.Read(req.RequestID[:]); err != nil {
-			t.Fatal(err)
-		}
-		e.refusedRevoke(e.signed(req, e.fx.Admins[0]), "subject_kind_unsupported")
-	})
 	t.Run("audit_agrees", func(t *testing.T) {
 		e := newHostEnv(t, 3600)
 		e.mustHost(e.hostReq(e.ed, "web1"))

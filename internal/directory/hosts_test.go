@@ -540,3 +540,85 @@ func TestDiffHostsAndMachines(t *testing.T) {
 		t.Fatalf("Diff of equal directories = %q", got)
 	}
 }
+
+// TestMachineGrant covers the one machine grant function of the signer
+// and audit (03-11): sorted unions, the smallest TTL, an unknown role, no
+// status check and no write to the directory.
+func TestMachineGrant(t *testing.T) {
+	grantDir := func(t *testing.T) *Directory {
+		t.Helper()
+		d := hostsFixture(t)
+		d.Roles = []Role{
+			{Name: "ops", Principals: []string{"zeta", "deploy"}, MaxTTLSeconds: 7200, Extensions: []string{"permit-pty", "permit-port-forwarding"}},
+			{Name: "deploy", Principals: []string{"deploy", "alpha"}, MaxTTLSeconds: 5400, Extensions: []string{"permit-pty", "permit-agent-forwarding"}},
+		}
+		d.Machines = []Machine{{Name: "ci", Key: entryKey(t, 0x60), Roles: []string{"ops", "deploy"}, MaxTTLSeconds: 3600, Status: StatusActive}}
+		return d
+	}
+	t.Run("principals_sorted_union", func(t *testing.T) {
+		d := grantDir(t)
+		g, err := d.MachineGrant(&d.Machines[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(g.Principals, ",") != "alpha,deploy,zeta" || strings.Join(g.Roles, ",") != "deploy,ops" {
+			t.Fatalf("principals %v roles %v", g.Principals, g.Roles)
+		}
+	})
+	t.Run("extensions_sorted_union", func(t *testing.T) {
+		d := grantDir(t)
+		g, err := d.MachineGrant(&d.Machines[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(g.Extensions, ",") != "permit-agent-forwarding,permit-port-forwarding,permit-pty" {
+			t.Fatalf("extensions %v", g.Extensions)
+		}
+	})
+	t.Run("max_ttl_is_min_of_entry_and_roles", func(t *testing.T) {
+		for _, tc := range []struct {
+			entry, ops, deploy, want uint64
+		}{{3600, 7200, 5400, 3600}, {9000, 7200, 5400, 5400}, {9000, 4000, 5400, 4000}} {
+			d := grantDir(t)
+			d.Machines[0].MaxTTLSeconds = tc.entry
+			d.Roles[0].MaxTTLSeconds = tc.ops
+			d.Roles[1].MaxTTLSeconds = tc.deploy
+			g, err := d.MachineGrant(&d.Machines[0])
+			if err != nil || g.MaxTTLSeconds != tc.want {
+				t.Errorf("entry %d ops %d deploy %d: TTL %d (%v), want %d", tc.entry, tc.ops, tc.deploy, g.MaxTTLSeconds, err, tc.want)
+			}
+		}
+	})
+	t.Run("unknown_role_is_error", func(t *testing.T) {
+		d := grantDir(t)
+		d.Machines[0].Roles = []string{"ops", "nope"}
+		if _, err := d.MachineGrant(&d.Machines[0]); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("MachineGrant = %v, want ErrInvalid", err)
+		}
+	})
+	t.Run("disabled_machine_still_grants", func(t *testing.T) {
+		d := grantDir(t)
+		d.Machines[0].Status = StatusDisabled
+		if g, err := d.MachineGrant(&d.Machines[0]); err != nil || len(g.Principals) != 3 {
+			t.Fatalf("a disabled machine's grant: %+v, %v", g, err)
+		}
+	})
+	t.Run("does_not_modify_the_directory", func(t *testing.T) {
+		d := grantDir(t)
+		before, err := d.Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.MachineGrant(&d.Machines[0]); err != nil {
+			t.Fatal(err)
+		}
+		after, err := d.Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) || strings.Join(d.Machines[0].Roles, ",") != "ops,deploy" ||
+			strings.Join(d.Roles[0].Principals, ",") != "zeta,deploy" {
+			t.Fatal("MachineGrant wrote the directory")
+		}
+	})
+}

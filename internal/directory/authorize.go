@@ -70,6 +70,40 @@ func (d *Directory) Authorize(user string, roles []string) (Grant, error) {
 	return g, nil
 }
 
+// MachineGrant computes the grant of machine entry m (03-11, D-15): its
+// roles (sorted), the sorted unions of their principals and extensions,
+// and the smallest of m's max TTL and every role's. It is the one grant
+// function of the signer and of audit verify. It does not look at m's
+// status (the signer and audit check that themselves) and never writes d
+// or m: the role list is cloned before it is sorted. A role m names that d
+// does not define is an error wrapping ErrInvalid.
+func (d *Directory) MachineGrant(m *Machine) (Grant, error) {
+	roles := slices.Clone(m.Roles)
+	slices.Sort(roles)
+	roles = slices.Compact(roles)
+	g := Grant{Roles: roles, MaxTTLSeconds: m.MaxTTLSeconds}
+	principals, extensions := map[string]bool{}, map[string]bool{}
+	for _, rn := range roles {
+		i := slices.IndexFunc(d.Roles, func(r Role) bool { return r.Name == rn })
+		if i < 0 {
+			return Grant{}, fmt.Errorf("%w: machine %q names unknown role %q", ErrInvalid, m.Name, rn)
+		}
+		r := d.Roles[i]
+		for _, p := range r.Principals {
+			principals[p] = true
+		}
+		for _, e := range r.Extensions {
+			extensions[e] = true
+		}
+		if r.MaxTTLSeconds < g.MaxTTLSeconds {
+			g.MaxTTLSeconds = r.MaxTTLSeconds
+		}
+	}
+	g.Principals = sortedKeys(principals)
+	g.Extensions = sortedKeys(extensions)
+	return g, nil
+}
+
 // Credential returns the credential with ID id bound to user, if any.
 func (d *Directory) Credential(user string, id []byte) (webauthn.Credential, bool) {
 	idx := slices.IndexFunc(d.Users, func(u User) bool { return u.Name == user })

@@ -58,6 +58,10 @@ type logState struct {
 	// leaves appended in the open transaction applied, nil while it
 	// appended none (03-10). It replaces loaded.probes only after COMMIT.
 	pendingProbes *probeIndex
+	// pendingMachines is loaded.machines with the leaves appended in the
+	// open transaction applied, nil while it appended none that change it
+	// (03-11). It replaces loaded.machines only after COMMIT succeeded.
+	pendingMachines *machineIndex
 	// probePrompt is set by a Negative probe issuance whose row could not
 	// publish at once because the last probe-caused publish is younger
 	// than krlCheckInterval; republishIfDue honours it (03-10), and every
@@ -136,6 +140,9 @@ type loggedInstalls struct {
 	// probes is the probe index (03-10), rebuilt and followed like hosts
 	// (pendingProbes).
 	probes probeIndex
+	// machines is the machine index (03-11), rebuilt and followed like
+	// hosts (pendingMachines).
+	machines machineIndex
 }
 
 // add records the bundle_install leaf idx with body.
@@ -352,6 +359,11 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 				return err
 			}
 		}
+		if machineRelevant(l.Kind) {
+			if err := installs.machines.apply(l); err != nil {
+				return err
+			}
+		}
 		switch l.Kind {
 		case tlog.KindBundleInstall:
 			if err := installs.add(idx, l.Body); err != nil {
@@ -383,6 +395,15 @@ func rebuildLogFrom(ctx context.Context, db *signerdb.DB, v note.Verifier) (*tlo
 			b, err := tlog.DecodeHostIssueBody(l.Body)
 			if err != nil {
 				return fmt.Errorf("%w: leaf %d: host_issue body does not decode", errLogMismatch, idx)
+			}
+			issued.count++
+			issued.lastSerial = b.Serial
+		case tlog.KindMachineIssue:
+			// A machine certificate (03-11) shares the issuance table and
+			// the serial sequence too, so it counts the same way.
+			b, err := tlog.DecodeMachineIssueBody(l.Body)
+			if err != nil {
+				return fmt.Errorf("%w: leaf %d: machine_issue body does not decode", errLogMismatch, idx)
 			}
 			issued.count++
 			issued.lastSerial = b.Serial
@@ -642,6 +663,15 @@ func (s *Signer) appendLocked(_ context.Context, tx *sql.Tx, leaf tlog.Leaf) (ui
 			return 0, err
 		}
 	}
+	if machineRelevant(leaf.Kind) {
+		if s.pendingMachines == nil {
+			c := s.loaded.machines.clone()
+			s.pendingMachines = &c
+		}
+		if err := s.pendingMachines.apply(leaf); err != nil {
+			return 0, err
+		}
+	}
 	if revokes {
 		if s.pendingRevoked == nil {
 			s.pendingRevoked = maps.Clone(s.loaded.revoked)
@@ -697,10 +727,10 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.broken != nil {
 		return s.broken
 	}
-	s.pending, s.pendingRevoked, s.pendingHosts, s.pendingProbes = nil, nil, nil, nil
+	s.pending, s.pendingRevoked, s.pendingHosts, s.pendingProbes, s.pendingMachines = nil, nil, nil, nil, nil
 	err := s.db.WithTx(ctx, fn)
-	next, nextMicros, nextRevoked, nextHosts, nextProbes := s.pending, s.pendingMicros, s.pendingRevoked, s.pendingHosts, s.pendingProbes
-	s.pending, s.pendingRevoked, s.pendingHosts, s.pendingProbes = nil, nil, nil, nil
+	next, nextMicros, nextRevoked, nextHosts, nextProbes, nextMachines := s.pending, s.pendingMicros, s.pendingRevoked, s.pendingHosts, s.pendingProbes, s.pendingMachines
+	s.pending, s.pendingRevoked, s.pendingHosts, s.pendingProbes, s.pendingMachines = nil, nil, nil, nil, nil
 	if err == nil {
 		if next != nil {
 			s.tree, s.lastMicros = next, nextMicros
@@ -713,6 +743,9 @@ func (s *Signer) logTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 		}
 		if nextProbes != nil {
 			s.loaded.probes = *nextProbes
+		}
+		if nextMachines != nil {
+			s.loaded.machines = *nextMachines
 		}
 		return nil
 	}

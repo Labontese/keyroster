@@ -23,6 +23,8 @@ func FuzzDecodeLeaf(f *testing.F) {
 	f.Add(EncodeLeaf(hostIssue))
 	probeIssue, probeIssueBody := probeIssueVector(f)
 	f.Add(EncodeLeaf(probeIssue))
+	machineIssue, machineIssueBody := machineIssueVector(f)
+	f.Add(EncodeLeaf(machineIssue))
 	f.Add(EncodeLeaf(issue))
 	f.Add(EncodeLeaf(dirInstall))
 	f.Add(EncodeLeaf(login))
@@ -44,6 +46,7 @@ func FuzzDecodeLeaf(f *testing.F) {
 		forgetBody,
 		hostIssueBody,
 		probeIssueBody,
+		machineIssueBody,
 	} {
 		body, err := b.Encode()
 		if err != nil {
@@ -51,7 +54,7 @@ func FuzzDecodeLeaf(f *testing.F) {
 		}
 		for _, k := range []Kind{KindIssue, KindRefusal, KindRefusalSummary, KindClockRegression, KindCAInit, KindBundleInstall,
 			KindDirectoryInstall, KindLoginIssue, KindRevoke, KindKRLPublish, KindRevocationRecovery, KindHostForget, KindHostIssue,
-			KindProbeIssue} {
+			KindProbeIssue, KindMachineIssue} {
 			f.Add(EncodeLeaf(Leaf{Index: 1, TimeMicros: 2, Kind: k, Body: body}))
 		}
 	}
@@ -97,6 +100,8 @@ func FuzzDecodeLeaf(f *testing.F) {
 			body, err = DecodeHostIssueBody(l.Body)
 		case KindProbeIssue:
 			body, err = DecodeProbeIssueBody(l.Body)
+		case KindMachineIssue:
+			body, err = DecodeMachineIssueBody(l.Body)
 		default:
 			t.Fatalf("DecodeLeaf accepted kind %d", l.Kind)
 		}

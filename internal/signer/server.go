@@ -303,6 +303,21 @@ func (s *Signer) handle(ctx context.Context, conn *net.UnixConn, peer Peer, cred
 			return
 		}
 		s.respond(ctx, conn, peer, req.Digest(), wire.TypeIssueResponse, resp, resp.Serial)
+	case wire.TypeMachineIssueRequest:
+		// A machine certificate request (03-11). A frame that does not
+		// parse is refused on the machine bucket, not the shared one, so
+		// anonymous garbage cannot drain it (T-03-398).
+		req, err := wire.ParseMachineIssueRequest(body)
+		if err != nil {
+			s.reply(conn, s.refuseLogging(ctx, s.machineLimiter, peer, [32]byte{}, tlog.ReasonMalformed, "malformed_request", nil))
+			return
+		}
+		resp, refused := s.machineIssueOrRefuse(ctx, peer, req)
+		if refused != nil {
+			s.reply(conn, refused)
+			return
+		}
+		s.respond(ctx, conn, peer, req.Digest(), wire.TypeIssueResponse, resp, resp.Serial)
 	case wire.TypeInstallDirectory:
 		req, err := wire.ParseInstallDirectoryRequest(body)
 		if err != nil {

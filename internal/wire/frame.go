@@ -72,8 +72,10 @@ const (
 	TypeHostIssueRequest byte = 0x0A
 	// TypeProbeIssueRequest carries a host agent's ProbeIssueRequest
 	// (03-10), answered with an IssueResponse (0x81); capped at MaxFrame.
-	// 0x0C stays 03-11's.
 	TypeProbeIssueRequest byte = 0x0B
+	// TypeMachineIssueRequest carries a machine's MachineIssueRequest
+	// (03-11), answered with an IssueResponse (0x81); capped at MaxFrame.
+	TypeMachineIssueRequest byte = 0x0C
 	// TypeForgetAgentRequest carries an admin-signed ForgetRequest
 	// (03-08c), answered with a ForgetResponse (0x8D); both are capped at
 	// MaxFrame.

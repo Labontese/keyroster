@@ -48,7 +48,7 @@ skips it. A kind is in use when it has a constant and `valid` accepts it.
 | 10 | in use | `KindKRLPublish` | `krl_publish` | 03-01 |
 | 11 | in use | `KindHostIssue` | `host_issue` | 03-09 |
 | 12 | in use | `KindProbeIssue` | `probe_issue` | 03-10 |
-| 13 | reserved | | | 03-11 (machine identities by PoP) |
+| 13 | in use | `KindMachineIssue` | `machine_issue` | 03-11 |
 | 14 | reserved | | | 03-12 (CA rotation) |
 | 15 | in use | `KindRevocationRecovery` | `revocation_recovery` | 03-06b |
 | 16 | in use | `KindHostForget` | `host_forget` | 03-08c |
@@ -81,7 +81,7 @@ number stays free for it.
 | 0x09 | in use | `TypeGetDirectoryVersion` | 0x89 | 03-07 |
 | 0x0A | in use | `TypeHostIssueRequest` | 0x81 | 03-09 |
 | 0x0B | in use | `TypeProbeIssueRequest` | 0x81 | 03-10 |
-| 0x0C | reserved | | 0x81 | 03-11 (machine issue request) |
+| 0x0C | in use | `TypeMachineIssueRequest` | 0x81 | 03-11 |
 | 0x0D | in use | `TypeForgetAgentRequest` | 0x8D | 03-08c |
 
 The next free request type is 0x0E.
@@ -139,6 +139,7 @@ both.
 | `keyroster/host-forget-request/v1` | domain and SSHSIG, host forget | `wire.ForgetRequestDomain`, `wire.ForgetSSHSIGNamespace` |
 | `keyroster/host-issue-request/v1` | domain and SSHSIG, host issue request | `wire.HostIssueRequestDomain`, `wire.HostPoPNamespace` |
 | `keyroster/probe-issue-request/v1` | domain and SSHSIG, probe issue request | `wire.ProbeIssueRequestDomain`, `wire.ProbePoPNamespace` |
+| `keyroster/machine-issue-request/v1` | domain and SSHSIG, machine issue request | `wire.MachineIssueRequestDomain`, `wire.MachinePoPNamespace` |
 | `keyroster/log-leaf/v1` | domain, Merkle log leaf | `tlog.LeafDomain` |
 | `keyroster/log/` | checkpoint origin prefix (plus 16 hex digits of the log key hash) | `tlog.OriginPrefix`, `trust.LogOriginPrefix` |
 | `keyroster/trust-bundle/v1` | SSHSIG, root-signed trust bundle | `trust.NamespaceBundle` |
@@ -158,6 +159,7 @@ Evidence types and other prefixes:
 | `webauthn-assertion/v1` | evidence type, a passkey assertion | `wire.EvidenceWebAuthnAssertion` |
 | `host-pop/v1` | evidence type, a host key's SSHSIG over a host issue request; also the first evidence item of a probe issue request, under the probe namespace | `wire.EvidenceHostPoP` |
 | `probe-pop/v1` | evidence type, the probe key's SSHSIG over a probe issue request, under the probe namespace | `wire.EvidenceProbePoP` |
+| `machine-pop/v1` | evidence type, the machine key's SSHSIG over a machine issue request, under the machine namespace | `wire.EvidenceMachinePoP` |
 | `kr-join-v1:` | join string prefix | `join.Prefix` |
 | `kr1/`, `kr2/`, `kr3/` | key ID versions (see the key ID budget below) | `cert` (`keyIDPrefix`, `keyIDPrefixKr2`, `keyIDPrefixKr3`) |
 
@@ -191,6 +193,7 @@ hex digits). Formats that carry it today include:
 | Host enrollment proof (`enroll.PoP`, internal/agent/enroll/pop.go) | `installation_id` | each host key (SSHSIG) |
 | Host issue request (`wire.HostIssueRequest`, internal/wire/hostissue.go) | `InstallationID` | the requested host key (SSHSIG) |
 | Probe issue request (`wire.ProbeIssueRequest`, internal/wire/probeissue.go) | `InstallationID` | the host key and the probe key (SSHSIG each) |
+| Machine issue request (`wire.MachineIssueRequest`, internal/wire/machineissue.go) | `InstallationID` | the machine key (SSHSIG) |
 
 The join token (`join.JoinToken`) also names the installation, but it is
 not signed.
@@ -198,12 +201,13 @@ not signed.
 `HostIssueRequest` (03-09) carries it in its signing bytes, and the signer
 and audit verify refuse a request without one or for another installation
 (`host_issue_no_installation_id`, `host_issue_installation_mismatch`).
-03-10's `ProbeIssueRequest` (landed) and 03-11's `MachineIssueRequest`
-fall under this rule too: the probe request carries the installation ID
-in its signing bytes, and the signer and audit verify refuse one without
-it or for another installation (`probe_issue_no_installation_id`,
-`probe_issue_installation_mismatch`); the machine request must carry it
-as well. A new signed format adds a row here in the PR that adds it.
+03-10's `ProbeIssueRequest` and 03-11's `MachineIssueRequest` (both
+landed) fall under this rule too: each carries the installation ID in its
+signing bytes, and the signer and audit verify refuse one without it or
+for another installation (`probe_issue_no_installation_id`,
+`probe_issue_installation_mismatch`; `machine_issue_no_installation_id`,
+`machine_issue_installation_mismatch`). A new signed format adds a row
+here in the PR that adds it.
 
 ## Reserved names
 
@@ -213,7 +217,7 @@ Names reserved for probe certificates (03-10). They are refused everywhere else:
 |---|---|---|
 | `keyroster-probe:` | principal prefix of a probe certificate (`keyroster-probe:<host>`) | `cert.Build` and `cert.CheckIssued` refuse it unless the profile is `certprofile.ProbeProfile` (`cert.ReservedPrincipalPrefix`, `ErrReservedPrincipal`). The signer refuses a new directory with a role principal that has it (`principal_reserved`) |
 | `keyroster-probe` | the probe account on a host | the signer refuses a new directory that maps it as a host-group account (`account_reserved`; `cert.ReservedAccountName`) |
-| `probe.` | key ID subject prefix of a probe certificate under `ca=machine` (`sub=probe.<host>`) | 03-11 refuses it as a machine name |
+| `probe.` | key ID subject prefix of a probe certificate under `ca=machine` (`sub=probe.<host>`) | the signer refuses a new directory with a machine of that name and a machine request for one (`machine_name_reserved`, install and issuance); the signer and audit refuse a machine subject revoke of such a name (`subject_reserved`) (03-11) |
 
 A directory already stored with such a name still loads and verifies. A login that would carry the prefix is refused at issuance.
 

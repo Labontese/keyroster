@@ -2701,9 +2701,6 @@ func TestVerifyRevocations(t *testing.T) {
 		}, "key_is_ca_of_this_installation"},
 		// Host subjects resolve since 03-09b; machine subjects arrive
 		// with 03-11.
-		{"revoke_subject_kind_machine_refused", func(rf *revokeFixture) {
-			rf.revoke(&wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectMachine, Subject: "web1"}, nil, nil)
-		}, "does not resolve"},
 		{"revoke_subject_host_accepted", func(rf *revokeFixture) {
 			c := rf.issueHostKR1("web1")
 			rf.revoke(subjectHost("web1"), []tlog.RevokedEntry{serialEntry(c)}, nil)
@@ -4303,8 +4300,8 @@ func (rf *revokeFixture) issueHostKR1(subject string) *ssh.Certificate {
 
 // TestVerifyRevokeHost (03-09b): audit verify re-derives a host subject
 // revocation as the signer resolves it: every live kr1 and kr3 host
-// certificate of the subject, under the host role, and refuses a machine
-// subject.
+// certificate of the subject, under the host role (machine subjects:
+// TestVerifyRevokeMachine, 03-11).
 func TestVerifyRevokeHost(t *testing.T) {
 	bySerial := func(es ...tlog.RevokedEntry) []tlog.RevokedEntry {
 		slices.SortFunc(es, func(a, b tlog.RevokedEntry) int { return cmp.Compare(a.Serial, b.Serial) })
@@ -4330,12 +4327,6 @@ func TestVerifyRevokeHost(t *testing.T) {
 		if _, err := hf.verifyHosts(); err == nil {
 			t.Fatal("a host revoke entry listing fewer serials than the live host certificates verified")
 		}
-	})
-	t.Run("subject_machine_fails", func(t *testing.T) {
-		hf := newHostFixture(t, 3600)
-		hf.addHost(hf.key, nil, nil, nil)
-		hf.rf().revoke(&wire.RevokeRequest{Target: wire.TargetSubject, SubjectKind: wire.SubjectMachine, Subject: "web1"}, nil, nil)
-		hf.wantFail(t, "does not resolve")
 	})
 	t.Run("subject_host_kr1_and_kr3_both_listed", func(t *testing.T) {
 		for _, both := range []bool{true, false} {

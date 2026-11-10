@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -45,6 +46,17 @@ func FuzzVerifyExport(f *testing.F) {
 	}
 	f.Add([]byte(join(forget)))
 	f.Add([]byte(join([]string{forget[0], forget[1], forget[3], forget[4]})))
+	// A kind 13 entry (03-11): a log under the same root with a directory
+	// that lists machines and a machine_issue entry, which verifies under
+	// the same pins, plus a truncation of it.
+	mf := newMachineFixtureWith(f, true, fx.root)
+	mf.addMachine(mf.mkey, nil, nil, nil)
+	machine := mf.lines()
+	if _, err := Verify(strings.NewReader(join(machine)), Options{Pins: pins, Threshold: 1}); err != nil {
+		f.Fatalf("the machine seed does not verify under the pins: %v", err)
+	}
+	f.Add([]byte(join(machine)))
+	f.Add([]byte(join(append(slices.Clone(machine[:len(machine)-2]), machine[len(machine)-1]))))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		rep, err := Verify(strings.NewReader(string(data)), Options{Pins: pins, Threshold: 1})
 		if err != nil {

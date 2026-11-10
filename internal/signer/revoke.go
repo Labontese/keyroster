@@ -95,8 +95,14 @@ func (s *Signer) Revoke(ctx context.Context, peer Peer, req *wire.RevokeRequest)
 		return nil, err
 	}
 	if _, ok := subjectRole(req.SubjectKind); req.Target == wire.TargetSubject && !ok {
-		// Machine subjects arrive with 03-11.
+		// Every kind the wire decodes resolves since 03-11; kept for a
+		// kind with no role.
 		return nil, refusalErr(wire.CodeRefused, "subject_kind_unsupported", nil)
+	}
+	if req.Target == wire.TargetSubject && req.SubjectKind == wire.SubjectMachine && strings.HasPrefix(req.Subject, reservedMachinePrefix) {
+		// A probe certificate's subject (03-10): never revoked by subject,
+		// so one admin cannot break a host's self-test (03-11, T-03-399).
+		return nil, refusalErr(wire.CodeMalformed, "subject_reserved", nil)
 	}
 	resolvedAt := uint64(max(now.Unix(), 0)) //nolint:gosec // G115: >= 0
 
@@ -270,16 +276,17 @@ func (s *Signer) resolveRevokeLocked(ctx context.Context, tx *sql.Tx, req *wire.
 }
 
 // subjectRole maps a subject kind to the CA role whose certificates a
-// subject revocation resolves (03-09b): SubjectUser to the user role,
-// SubjectHost to the host role. SubjectMachine is not resolved
-// (subject_kind_unsupported) until 03-11. internal/audit applies the same
-// mapping.
+// subject revocation resolves: SubjectUser to the user role, SubjectHost
+// to the host role (03-09b), SubjectMachine to the machine role (03-11).
+// internal/audit applies the same mapping.
 func subjectRole(k wire.SubjectKind) (string, bool) {
 	switch k {
 	case wire.SubjectUser:
 		return trust.RoleUser, true
 	case wire.SubjectHost:
 		return trust.RoleHost, true
+	case wire.SubjectMachine:
+		return trust.RoleMachine, true
 	}
 	return "", false
 }
