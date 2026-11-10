@@ -12,9 +12,9 @@ test-time base: cmd=248.675 rootceremony=26.123 at=1794350937
 
 Measured in Task 1 before any edit, on the tree equal to origin/main b4e6b4c, with no other heavy job running. Both packages read `ok`; the new test files were not in that build.
 
-## Handover (end of Task 1)
+## Handover (end of Task 2)
 
-The first session stopped after Task 1's gates, as the Budget plans. The continuation starts at Task 2. Task 3 must re-measure the base first, in place, on origin/main in a detached worktree: it runs in another session, and the base above was measured on 2026-11-10.
+The first session stopped after Task 1's gates, as the Budget plans. The continuation ran Task 2 and goes on with Task 3. Task 3 must re-measure the base first, in place, on origin/main in a detached worktree: it runs in another session, and the base above was measured on 2026-11-10.
 
 ## Task 1: the policy block, the pop line and the goldens
 
@@ -78,6 +78,44 @@ C is ./cmd/keyroster/ and R is ./internal/rootceremony/. "The successor root_sig
 16. The unchanged form replaced by the changed form. C: successor_unchanged/root_sign and /trust_verify. Killed.
 17. The warning line dropped. C: the four leaves of mutant 10. Killed.
 18. The warning line printed for any CHANGED field. C: successor_rp_only/root_sign, successor_pop/root_sign and successor_pop/trust_verify. Killed.
+
+## Task 2: the durable gates
+
+- **T2** `10bf58f`: `test(root): gate every policy field, the warning rule and the base of the policy block (F04)`. It adds cmd/keyroster/policydiff_test.go and the real-binary pin in test/e2e/audit_login_test.go. No production code and no golden changed; no contract fix was needed.
+- **Every case passed** (Task 2's first verify command, exit 0, no FAIL and no DATA RACE):
+  - TestPolicyFieldsCovered.
+  - TestPolicyChangeFields, all 17: Policy.AdminQuorum, Policy.Admins, AdminKey.Name, AdminKey.Key, CAProfile.MaxTTLSeconds, Policy.CAProfiles, CAProfile.DefaultExtensions, CAProfile.AllowedExtensions, CAProfile.AllowedCriticalOptions, Policy.TimelockSeconds, WebAuthnRP.RPID, WebAuthnRP.Origins, Policy.WebAuthn, PoPPolicy.Hosts, PoPPolicy.Machines, Policy.PoP_added and Policy.PoP_removed.
+  - TestPolicyChangeAdmins: added_only, removed_only, order_only, rename_and_add and all_replaced.
+  - TestPolicyChangeUnchanged: identical and version_bump_only.
+  - TestPolicyChangeDurations and TestPolicyChangeInvalid.
+  - TestPolicyBlockBase/root_sign and /trust_verify.
+  - TestCeremonyGolden, all 11 leaves, unchanged.
+- **TestPolicyBlockBase is GREEN on origin/main.** Run from a detached worktree of R1 (production code equal to origin/main b4e6b4c) with a throwaway test file holding only TestPolicyBlockBase and its two helpers: both subtests pass. There the `Policy in force` assertions pass trivially, since main prints no block; the refusal `prevPolicy is not the previous bundle's policy` comes from checkSuccessorChain in both commands. The worktree was removed.
+- **The e2e pin** (TestAuditLoginAcrossPolicyChange, `(03-14b)`): the wrong-confirmation output of `root sign --prev` and the `trust verify --prev` output must hold `Policy in force: v1, sha256 <sha256 of policy v1>`, `  webauthn: CHANGED (rp_id is one-way)`, `  admins: carried over`, `  pop: carried over` and `  pop: none (host agents and machine renewals are off)`; root sign's output must hold no `WARNING: this successor changes`. `go vet -tags e2e ./test/e2e/` exits 0. Its first run is the PR's e2e workflow.
+- **Other Task 2 checks.** The scope check (second verify command) and the golden-correction bound (third verify command, rerun after T2) pass. gofmt is clean, and golangci-lint reports 0 issues on cmd/keyroster.
+
+### Task 2 mutants (local numbers 1-16)
+
+Every mutant met the mutant rule: the unmutated command passed; `go vet` of the mutated package exited 0; the mutated command printed every listed `--- FAIL:` line, with no `[build failed]`, `[setup failed]` or timeout; the file was restored byte for byte. All commands use ./cmd/keyroster/ unless R (./internal/rootceremony/) is named.
+
+1. The `- admin` line dropped. TestPolicyChangeFields/AdminKey.Key; TestPolicyChangeAdmins/removed_only and /all_replaced. Killed.
+2. Rename detection removed. TestPolicyChangeFields/AdminKey.Name. Killed.
+3. The order line dropped. TestPolicyChangeAdmins/order_only. Killed.
+4. The timelock comparison removed. TestPolicyChangeFields/Policy.TimelockSeconds. Killed.
+5. The allowed_critical_options comparison removed. TestPolicyChangeFields/CAProfile.AllowedCriticalOptions. Killed.
+6. Only rp_id compared, not origins. TestPolicyChangeFields/WebAuthnRP.Origins. Killed.
+7. changedPolicyFields without pop. TestPolicyChangeFields/PoPPolicy.Hosts, /PoPPolicy.Machines, /Policy.PoP_added and /Policy.PoP_removed. Killed.
+8. pop compared only by nil-ness and Hosts. TestPolicyChangeFields/PoPPolicy.Machines. Killed.
+9. The one-way line printed whenever the successor sets hosts. TestPolicyChangeFields/PoPPolicy.Machines. Killed.
+10. The warning line printed for webauthn. TestPolicyChangeFields/WebAuthnRP.RPID. Killed.
+11. The warning line without timelock_seconds in its set. TestPolicyChangeFields/Policy.TimelockSeconds. Killed.
+12. A field `Note string` (`note,omitempty`) added to trust.Policy (go vet of ./internal/trust/ too). TestPolicyFieldsCovered (`no TestPolicyChangeFields case for Policy.Note`, and the field-list mismatch), and R TestSummaryFieldsCovered (`no Summary case for Policy.Note`). Killed.
+13. (a) The pinned map's trust.WebAuthnRP entry deleted in both test files. TestPolicyFieldsCovered and R TestSummaryFieldsCovered, each with `unpinned policy type trust.WebAuthnRP`. Killed. (b) The walk made non-recursive in both test files. The same two tests, each with `pinned type not reached` for trust.AdminKey, trust.CAProfile, trust.WebAuthnRP and trust.PoPPolicy. Killed.
+14. runRootSign writes the block right after successorBuilder returns. TestPolicyBlockBase/root_sign. Killed.
+15. verifySuccessorBundle writes the block right after loadPrev. TestPolicyBlockBase/trust_verify. Killed.
+16. The duration helper's large-value branch removed. TestPolicyChangeDurations. Killed.
+
+Cumulative: 18 of 18 Task 1 mutants and 17 of 17 Task 2 mutant runs (16 numbered, 13 in two parts) killed.
 
 ## Golden corrections
 
