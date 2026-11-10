@@ -125,7 +125,7 @@ func (s *Signer) MachineIssue(ctx context.Context, peer Peer, req *wire.MachineI
 	if err != nil {
 		return nil, refusalErr(wire.CodeInternal, "authorize_failed", err)
 	}
-	if len(grant.Principals) == 0 || len(grant.Principals) > cert.MaxPrincipals {
+	if len(grant.Principals) > cert.MaxPrincipals {
 		return nil, refusalErr(wire.CodeRefused, "bad_principal", nil)
 	}
 	if err := s.checkTrustCurrent(s.db.LatestBundleVersion(ctx)); err != nil {

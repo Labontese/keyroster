@@ -33,11 +33,16 @@ type machineFixture struct {
 	roles            []directory.Role
 }
 
-func newMachineFixture(t testing.TB) *machineFixture { return newMachineFixtureWith(t, true) }
+func newMachineFixture(t testing.TB) *machineFixture { return newMachineFixtureWith(t, true, nil) }
 
-func newMachineFixtureWith(t testing.TB, popMachines bool) *machineFixture {
+// newMachineFixtureWith is newMachineFixture with pop.machines as given and
+// root as the genesis root (nil: a new one).
+func newMachineFixtureWith(t testing.TB, popMachines bool, root ssh.Signer) *machineFixture {
 	t.Helper()
 	f := newBareFixtureAt(t, "ed25519", time.Now().Truncate(time.Second))
+	if root != nil {
+		f.root = root
+	}
 	pol := f.loginPolicy(false)
 	pol.PoP = &trust.PoPPolicy{Hosts: true, Machines: popMachines}
 	pol.CAProfiles[1].MaxTTLSeconds = 90
@@ -246,7 +251,7 @@ func TestVerifyMachineIssue(t *testing.T) {
 		mf.wantFail(t, "but the bundle in force is installation")
 	})
 	t.Run("pop_machines_off_fails", func(t *testing.T) {
-		mf := newMachineFixtureWith(t, false)
+		mf := newMachineFixtureWith(t, false, nil)
 		mf.addMachine(mf.mkey, nil, nil, nil)
 		mf.wantFail(t, "does not set pop.machines")
 	})

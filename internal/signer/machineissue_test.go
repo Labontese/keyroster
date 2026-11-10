@@ -265,7 +265,11 @@ func serveMachineSigner(t *testing.T, e *machineEnv) (sock string, stop func()) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "krmach")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock = filepath.Join(dir, "s.sock")
 	l, err := Listen(sock, -1)
 	if err != nil {
