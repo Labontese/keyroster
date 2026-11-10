@@ -143,7 +143,8 @@ func TestRevokeRefusalText(t *testing.T) {
 			"docs/runbooks/revoke.md"}},
 		{"key_is_ca_of_this_installation", "403", `{"error":"key_is_ca_of_this_installation"}`, key, []string{"a key of this installation's trust bundle",
 			"emergency CA rotation", "nothing was revoked"}},
-		{"subject_kind_unsupported", "403", `{"error":"subject_kind_unsupported"}`, nil, []string{"revokes user and host subjects only", "nothing was revoked"}},
+		{"subject_kind_unsupported", "403", `{"error":"subject_kind_unsupported"}`, nil, []string{"this signer does not revoke this kind of subject (subject_kind_unsupported)", "nothing was revoked"}},
+		{"subject_reserved", "403", `{"error":"subject_reserved"}`, nil, []string{"a subject revocation of a probe. name (subject_reserved)", "nothing was revoked"}},
 		{"revoke_installation_missing", "403", `{"error":"revoke_installation_missing"}`, nil, []string{"revoke_installation_missing",
 			"this CLI always names one", "nothing was revoked"}},
 		{"revoke_installation_mismatch", "403", `{"error":"revoke_installation_mismatch"}`, nil, []string{"revoke_installation_mismatch",
@@ -1319,6 +1320,316 @@ func TestRevokeHost(t *testing.T) {
 			if code != tc.code || !strings.HasSuffix(stdout, notice) || strings.Count(stdout, notice) != 1 {
 				t.Fatalf("%s: exit %d, stderr %q, stdout:\n%s; want exit %d ending with the notice", tc.name, code, stderr, stdout, tc.code)
 			}
+		}
+	})
+}
+
+// machineKRLDoc is hostKRLDoc under the machine CA key (03-11b).
+func (e *dirEnv) machineKRLDoc(t *testing.T, v, logIndex uint64, serials []uint64, keys ...ssh.PublicKey) []byte {
+	t.Helper()
+	set := krl.Set{Keys: keys}
+	if len(serials) > 0 {
+		set.Certs = []krl.CertSection{{CAKey: e.caKey(t, trust.RoleMachine), Serials: serials}}
+	}
+	return e.krlDocData(t, v, logIndex, e.bundle.InstallationID, e.ops, time.Now(), e.encodeKRL(t, v, set))
+}
+
+// machineRevokeEnv is hostRevokeEnv for a machine (03-11b): a fake server
+// with admins policy admins at quorum, whose directory version 1 holds
+// machine ci (role ops, 1 h) with status and a fresh key, returned.
+func machineRevokeEnv(t *testing.T, admins, quorum int, status string) (*dirEnv, ssh.PublicKey) {
+	t.Helper()
+	e := newDirEnv(t, admins, quorum)
+	pub := newRevokeKey(t)
+	e.installDirect(t, buildDir(t, nil, boundTo(e.bundle.InstallationID, roleBase(t, func(d *directory.Directory) {
+		d.Machines = []directory.Machine{{Name: "ci", Key: trust.FormatKey(pub), Roles: []string{"ops"}, MaxTTLSeconds: 3600, Status: status}}
+	}))))
+	return e, pub
+}
+
+// TestRevokeMachine (03-11b, D-09, D-12, REVOKE-01's machine subject):
+// keyroster revoke machine is revoke host driven by the machine kind: the
+// same order, exit codes and base floor, the sweeps under the machine CA,
+// the entry's one key with --keys, the probe. names refused before
+// anything is sent, the exit-4 text naming both holds, and the former-name
+// line and the recovery notice on every run that sent a request.
+func TestRevokeMachine(t *testing.T) {
+	answer := func(v, leaf uint64, serials ...uint64) serverclient.RevokeAnswer {
+		return serverclient.RevokeAnswer{KRLVersion: v, RevokeLeaf: leaf, PublishLeaf: leaf + 1, SerialCount: uint32(len(serials)), Serials: serials} //nolint:gosec // G115: a few test serials
+	}
+	first, second := answer(3, 8, 5, 6), answer(9, 20, 5, 6, 7)
+	notice := recoveryKeptNotice + "\n"
+	renameLine := "Certificates that ci's key obtained under a former machine name are not covered: run keyroster revoke machine OLDNAME for each former name, " +
+		"or use --keys while the key is in ci's entry.\n"
+	machineStatus := func(t *testing.T, e *dirEnv) string {
+		t.Helper()
+		doc, _ := e.installed()
+		d, err := directory.Parse(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m, ok := d.MachineByName("ci"); ok {
+			return m.Status
+		}
+		return ""
+	}
+
+	t.Run("default_no_keys_exit0", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		reqs := e.recordRevokes(t, e.machineKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "machine", "ci", "--yes")
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "directory", "revoke"}) {
+			t.Fatalf("requests %v, want revoke, directory, revoke", got)
+		}
+		for _, r := range reqs() {
+			if r.Target != wire.TargetSubject || r.SubjectKind != wire.SubjectMachine || r.Subject != "ci" {
+				t.Fatalf("request %+v, want a machine subject revocation of ci", r)
+			}
+		}
+		for _, want := range []string{
+			"First revocation of ci: the server reports 2 certificate(s) revoked: KRL v3 published (log entries 8, 9).\nSerials: 5 6\n",
+			"under a machine CA key of your trust bundle",
+			"The server reports directory version 2 installed",
+			"Second revocation (after the disable) of ci: the server reports 3 certificate(s) revoked: KRL v9 published (log entries 20, 21).\nSerials: 5 6 7\n",
+			"No machine key was revoked as an explicit key (use --keys for a compromised machine key; explicit keys never leave the KRL).\n",
+			"ci is disabled, and the KRL lists every certificate of ci the server reported. " + revokeEnforcement(wire.CARoleMachine) + "\n",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("stdout lacks %q:\n%s", want, stdout)
+			}
+		}
+		if s := machineStatus(t, e); s != directory.StatusDisabled {
+			t.Fatalf("ci is %s, want disabled", s)
+		}
+	})
+	t.Run("success_line_has_no_agent_state_sentence", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		e.serveRevokes(e.machineKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "machine", "ci", "--yes")
+		if code != 0 || !strings.Contains(stdout, "ci is disabled, and the KRL lists") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		for _, no := range []string{"agent keeps receiving state", "keyroster host forget", "host key"} {
+			if strings.Contains(stdout+stderr, no) {
+				t.Fatalf("output names %q:\n%s%s", no, stdout, stderr)
+			}
+		}
+	})
+	t.Run("keys_revokes_entry_key", func(t *testing.T) {
+		e, pub := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		reqs := e.recordRevokes(t, e.machineKRLDoc(t, 9, 21, []uint64{5, 6, 7}, pub), revokeOK(first), revokeOK(answer(4, 10)), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "machine", "ci", "--yes", "--keys")
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := keyRequests(reqs()); len(got) != 1 || !bytes.Equal(got[0], pub.Marshal()) {
+			t.Fatalf("%d key requests, want exactly the entry's key", len(got))
+		}
+		if p := e.postCalls(); !slices.Equal(p, []string{"revoke", "directory", "revoke", "revoke"}) {
+			t.Fatalf("requests %v", p)
+		}
+		fp := ssh.FingerprintSHA256(pub)
+		if !strings.Contains(stdout, "The server reports machine key "+fp+" revoked as an explicit key") ||
+			!strings.Contains(stdout, "lists machine key "+fp+" as an explicit key, so it revokes that key plain and in every certificate for it, permanently.\n") {
+			t.Fatalf("stdout:\n%s", stdout)
+		}
+	})
+	t.Run("keys_at_cap_exit3", func(t *testing.T) {
+		for _, detail := range []string{"explicit_key_cap_reached", "key_is_ca_of_this_installation"} {
+			e, pub := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+			reqs := e.recordRevokes(t, e.machineKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeRefusedAs(http.StatusForbidden, detail), revokeOK(second))
+			code, stdout, stderr := run(t, "revoke", "machine", "ci", "--yes", "--keys")
+			if code != 3 || !strings.Contains(stderr, "machine key "+ssh.FingerprintSHA256(pub)+" was not revoked as an explicit key") {
+				t.Fatalf("%s: exit %d, stderr %q, stdout:\n%s", detail, code, stderr, stdout)
+			}
+			if got := keyRequests(reqs()); len(got) != 1 {
+				t.Fatalf("%s: %d key requests, want one", detail, len(got))
+			}
+			if p := e.postCalls(); !slices.Equal(p, []string{"revoke", "directory", "revoke", "revoke"}) || machineStatus(t, e) != directory.StatusDisabled {
+				t.Fatalf("%s: requests %v; want the disable installed and the second sweep sent", detail, p)
+			}
+			if strings.Contains(stdout, "ci is disabled, and the KRL lists") {
+				t.Fatalf("%s: full success reported with the key omitted:\n%s", detail, stdout)
+			}
+		}
+	})
+	t.Run("unknown_name_partial_exit3", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		e.serveRevokes(e.machineKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first))
+		code, stdout, stderr := run(t, "revoke", "machine", "ci9", "--yes")
+		if code != 3 || !strings.Contains(stdout, "ci9 is not in directory version 1, the admin-signed version the server serves: there is no entry to disable.") ||
+			!strings.Contains(stdout, "Its live certificates are revoked as reported above. A machine that is not in the directory obtains no new certificate under this name; "+
+				"if its key is now listed under another name, run keyroster revoke machine OTHERNAME.\n") ||
+			!strings.Contains(stderr, "ci9 is not in the directory, so nothing was disabled") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if strings.Contains(stdout, "host forget") {
+			t.Fatalf("the host's agent text for a machine:\n%s", stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+			t.Fatalf("requests %v, want one revoke and no directory install", got)
+		}
+	})
+	t.Run("already_disabled_second_sweep", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusDisabled)
+		e.serveRevokes(e.machineKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "machine", "ci", "--yes")
+		if code != 0 || !strings.Contains(stdout, "Directory version 1, the admin-signed version the server serves, lists ci as disabled: no directory change.") ||
+			!strings.Contains(stdout, "Second revocation (after reading the directory) of ci") ||
+			!strings.Contains(stdout, "Directory version 1 lists ci as disabled (the server's word), and the KRL lists every certificate of ci the server reported.") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke", "revoke"}) {
+			t.Fatalf("requests %v, want revoke, revoke", got)
+		}
+		requireNotSigned(t, e, 0)
+	})
+	t.Run("pending_proposal_exit4_names_both_holds", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 2, 2, directory.StatusActive)
+		e.serveRevokes(e.machineKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first))
+		code, stdout, stderr := run(t, "revoke", "machine", "ci", "--yes", "--out", filepath.Join(t.TempDir(), "p"))
+		if code != 4 {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		for _, want := range []string{
+			"Revoked, disable pending. The certificates of ci are revoked, and the signer refuses ci new certificates (cert_revoked)",
+			"by its name, whether or not a certificate was live, and on its key's latest certificate",
+			"ANY newer version releases both holds: install this proposal (which disables ci) as the next version",
+			"if another version is installed first, ci can obtain certificates again while still active",
+			"Once it is installed, run keyroster revoke machine ci again: its second sweep revokes anything issued in between",
+			"--keys blocks the key for good (machine_key_revoked)",
+			"After a signer restore, run this command again once the last lost directory version is back (docs/runbooks/revoke.md, section 4c)",
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr lacks %q:\n%s", want, stderr)
+			}
+		}
+		if strings.Contains(stderr, "host key") {
+			t.Fatalf("the host's hold text for a machine:\n%s", stderr)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+			t.Fatalf("requests %v, want one revoke (no second sweep after a proposal)", got)
+		}
+	})
+	t.Run("stale_base_refused_no_key_revoked", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		p, err := hostTrustStatePath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeSeedStateAt(t, p, &hostTrustState{Format: 1, InstallationID: e.bundle.InstallationID, BundleVersion: e.bundle.Version, OpsKey: e.bundle.OpsKey.Key,
+			DirectoryVersion: 2, DirectorySHA256: strings.Repeat("ef", 32), KRLVersion: 1, Names: []string{"web1"}})
+		reqs := e.recordRevokes(t, e.machineKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		code, stdout, stderr := run(t, "revoke", "machine", "ci", "--yes", "--keys")
+		if code != 3 || !strings.Contains(stderr, "the server serves directory version 1, older than version 2, which your host trust files hold") ||
+			!strings.Contains(stderr, "ci is NOT disabled") || !strings.Contains(stderr, "--keys: the verified directory could not be read, so no machine key of ci is known") {
+			t.Fatalf("exit %d, stderr %q, stdout:\n%s", code, stderr, stdout)
+		}
+		if strings.Contains(stdout, "ci is disabled") || strings.Contains(stdout, "Second revocation") {
+			t.Fatalf("a stale directory was reported or swept after:\n%s", stdout)
+		}
+		if got := e.postCalls(); !slices.Equal(got, []string{"revoke"}) {
+			t.Fatalf("requests %v, want the first revocation only", got)
+		}
+		if n := len(keyRequests(reqs())); n != 0 {
+			t.Fatalf("%d key requests from a stale entry, want none", n)
+		}
+		requireNotSigned(t, e, 0)
+	})
+	t.Run("probe_name_refused_nothing_sent", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		e.serveRevokes(e.machineKRLDoc(t, 9, 21, []uint64{5, 6, 7}), revokeOK(first), revokeOK(second))
+		for _, args := range [][]string{{"revoke", "machine", "probe.web1", "--yes"}, {"revoke", "machine", "probe.web1", "--yes", "--keys"}, {"revoke", "machine", "probe.web1"}} {
+			code, stdout, stderr := run(t, args...)
+			if code != 2 || !strings.Contains(stderr, "machine names starting with probe. are reserved for probe certificates, which are never revoked by subject") ||
+				!strings.Contains(stderr, "nothing was revoked") {
+				t.Fatalf("%q: exit %d, stderr %q, stdout %q", args, code, stderr, stdout)
+			}
+			if stdout != "" {
+				t.Fatalf("%q: stdout %q, want nothing (no request, so no notice)", args, stdout)
+			}
+		}
+		if got := e.postCalls(); len(got) != 0 {
+			t.Fatalf("requests %v, want none", got)
+		}
+	})
+	t.Run("recovery_notice_every_run", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			quorum  int
+			args    []string
+			answers []func(http.ResponseWriter)
+			code    int
+		}{
+			{"exit_0", 1, nil, []func(http.ResponseWriter){revokeOK(first), revokeOK(second)}, 0},
+			{"exit_1", 1, nil, []func(http.ResponseWriter){revokeRefusedAs(http.StatusForbidden, "request_time_skew")}, 1},
+			{"exit_3", 1, []string{"--keys"}, []func(http.ResponseWriter){revokeOK(first), revokeRefusedAs(http.StatusForbidden, "explicit_key_cap_reached"), revokeOK(second)}, 3},
+			{"exit_4", 2, []string{"--out", filepath.Join(t.TempDir(), "p")}, []func(http.ResponseWriter){revokeOK(first)}, 4},
+		} {
+			e, _ := machineRevokeEnv(t, 2, tc.quorum, directory.StatusActive)
+			e.recordRevokes(t, e.machineKRLDoc(t, 9, 21, []uint64{5, 6, 7}), tc.answers...)
+			code, stdout, stderr := run(t, append([]string{"revoke", "machine", "ci", "--yes"}, tc.args...)...)
+			if code != tc.code || !strings.HasSuffix(stdout, notice) || strings.Count(stdout, notice) != 1 {
+				t.Fatalf("%s: exit %d, stderr %q, stdout:\n%s; want exit %d ending with the notice", tc.name, code, stderr, stdout, tc.code)
+			}
+		}
+	})
+	t.Run("rename_line_every_run", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, machine string
+			answers       []func(http.ResponseWriter)
+			code          int
+		}{
+			{"exit_0", "ci", []func(http.ResponseWriter){revokeOK(first), revokeOK(second)}, 0},
+			{"exit_1", "ci", []func(http.ResponseWriter){revokeRefusedAs(http.StatusForbidden, "request_time_skew")}, 1},
+			{"exit_3_unknown", "ci9", []func(http.ResponseWriter){revokeOK(first)}, 3},
+		} {
+			e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+			e.recordRevokes(t, e.machineKRLDoc(t, 9, 21, []uint64{5, 6, 7}), tc.answers...)
+			code, stdout, stderr := run(t, "revoke", "machine", tc.machine, "--yes")
+			line := strings.ReplaceAll(renameLine, "ci's", tc.machine+"'s")
+			if code != tc.code || strings.Count(stdout, line) != 1 || !strings.HasSuffix(stdout, line+notice) {
+				t.Fatalf("%s: exit %d, stderr %q, stdout:\n%s; want exit %d with the former-name line before the notice", tc.name, code, stderr, stdout, tc.code)
+			}
+		}
+	})
+	t.Run("serials_checked_under_machine_ca", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		e.serveRevokes(e.hostKRLDoc(t, 3, 9, []uint64{5, 6}), revokeOK(first))
+		code, _, stderr := run(t, "revoke", "machine", "ci", "--yes")
+		if code != 1 || !strings.Contains(stderr, "does not list serial 5, which the server's answer reports, under a machine CA key of your trust bundle (not listed)") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+	t.Run("subject_reserved_text", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		e.serveRevokes(e.machineKRLDoc(t, 3, 9, nil), revokeRefusedAs(http.StatusForbidden, "subject_reserved"))
+		code, _, stderr := run(t, "revoke", "machine", "ci", "--yes")
+		if code != 1 || !strings.Contains(stderr, "the signer refuses a subject revocation of a probe. name (subject_reserved); nothing was revoked") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+	t.Run("subject_kind_unsupported_text", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		e.serveRevokes(e.machineKRLDoc(t, 3, 9, nil), revokeRefusedAs(http.StatusForbidden, "subject_kind_unsupported"))
+		code, _, stderr := run(t, "revoke", "machine", "ci", "--yes")
+		if code != 1 || !strings.Contains(stderr, "this signer does not revoke this kind of subject (subject_kind_unsupported): it is older than this CLI; "+
+			"machine subjects need a signer with machine certificates. Upgrade keyroster-signer, then keyroster-server; nothing was revoked by that request") {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+	})
+	t.Run("refuses_without_yes_when_not_a_terminal", func(t *testing.T) {
+		e, _ := machineRevokeEnv(t, 1, 1, directory.StatusActive)
+		code, stdout, stderr := run(t, "revoke", "machine", "ci")
+		if code != 1 || !strings.Contains(stderr, "refusing to start: disabling the machine signs a directory version, and stdin is not a terminal; re-run with --yes. Nothing was revoked") ||
+			len(e.postCalls()) != 0 || stdout != "" {
+			t.Fatalf("exit %d, stdout %q, stderr %q, requests %v", code, stdout, stderr, e.postCalls())
 		}
 	})
 }

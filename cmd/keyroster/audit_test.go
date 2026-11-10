@@ -88,3 +88,31 @@ func TestAuditVerifyProbeLine(t *testing.T) {
 		}
 	})
 }
+
+// TestVerifyOutputMachineLine (03-11b, b-C12): when the log holds
+// machine_issue entries, "machine certificates: N" follows the host line
+// and comes before the probe line.
+func TestVerifyOutputMachineLine(t *testing.T) {
+	out := func(t *testing.T, rep *audit.Report) string {
+		t.Helper()
+		var b bytes.Buffer
+		if err := printVerifyOK(&b, verifyResultOf(rep), rep); err != nil {
+			t.Fatal(err)
+		}
+		return b.String()
+	}
+	t.Run("line_after_host_before_probe", func(t *testing.T) {
+		rep := &audit.Report{Counts: map[tlog.Kind]uint64{tlog.KindHostIssue: 3, tlog.KindMachineIssue: 2, tlog.KindProbeIssue: 4}, IssuedByCA: map[string]int{}}
+		lines := strings.Split(strings.TrimSuffix(out(t, rep), "\n"), "\n")
+		if len(lines) != 4 || !strings.HasPrefix(lines[0], "OK: ") || lines[1] != "host certificates: 3" || lines[2] != "machine certificates: 2" ||
+			!strings.HasPrefix(lines[3], "probe certificates: 4, ") {
+			t.Fatalf("lines %q, want OK, host, machine, probe", lines)
+		}
+	})
+	t.Run("none_without_machine_entries", func(t *testing.T) {
+		rep := &audit.Report{Counts: map[tlog.Kind]uint64{tlog.KindHostIssue: 3, tlog.KindProbeIssue: 4}, IssuedByCA: map[string]int{}}
+		if s := out(t, rep); strings.Contains(s, "machine certificates") {
+			t.Fatalf("output %q, want no machine certificates line", s)
+		}
+	})
+}

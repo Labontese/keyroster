@@ -147,6 +147,12 @@ type fakeSigner struct {
 	probeIssueErr  error
 	lastProbeIssue *wire.ProbeIssueRequest
 
+	// MachineIssue's settable result (nil and nil: a fixed certificate as
+	// serial 11) and the last request it got, as relayed (03-11b).
+	machineIssue     *wire.IssueResponse
+	machineIssueErr  error
+	lastMachineIssue *wire.MachineIssueRequest
+
 	heldMethod string
 	entered    chan struct{}
 	gate       chan struct{}
@@ -448,6 +454,22 @@ func (f *fakeSigner) ProbeIssue(ctx context.Context, req *wire.ProbeIssueRequest
 	}
 	if resp == nil && err == nil {
 		resp = &wire.IssueResponse{Cert: []byte("probe-certificate"), Serial: 10}
+	}
+	return resp, err
+}
+
+func (f *fakeSigner) MachineIssue(ctx context.Context, req *wire.MachineIssueRequest) (*wire.IssueResponse, error) {
+	f.mu.Lock()
+	f.calls["MachineIssue"]++
+	c := *req
+	f.lastMachineIssue = &c
+	resp, err := f.machineIssue, f.machineIssueErr
+	f.mu.Unlock()
+	if err := f.enter(ctx, "MachineIssue"); err != nil {
+		return nil, err
+	}
+	if resp == nil && err == nil {
+		resp = &wire.IssueResponse{Cert: []byte("machine-certificate"), Serial: 11}
 	}
 	return resp, err
 }

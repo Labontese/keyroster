@@ -23,13 +23,14 @@ import (
 // its first caller (GetDirectory in 02-07, InstallDirectory in 02-09,
 // Login in 02-12, Revoke and GetKRL in 03-01, GetBundle and
 // GetDirectoryVersion in 03-07, ForgetAgent in 03-08c, HostIssue in
-// 03-09). Nobody adds a second
-// interface, and no method is added before something calls it.
+// 03-09, ProbeIssue in 03-10, MachineIssue in 03-11b). Nobody adds a
+// second interface, and no method is added before something calls it.
 //
 // F11 (03-08g): a new method also goes through budgetSigner, in the same
 // commit; budgetSigner's named field makes the build fail until it does. A
-// call relayed for a host agent takes the agent share (the agent-share
-// rule, owner decision 2026-10-30). A call may skip the budget only if it
+// call relayed for a host agent or for an anonymous machine takes the agent
+// share (the agent-share rule, owner decision 2026-10-30, widened to
+// machines by OQ-b1 of 03-11b, 2026-11-10). A call may skip the budget only if it
 // takes no lock on the signer and is coalesced to one call in flight, as
 // GetKRL is. An agent route that relays a signer call takes agentSlot
 // after requireAgent, as the state and heartbeat routes do.
@@ -69,6 +70,11 @@ type signerAPI interface {
 	// alone decides, from the admin-signed directory and the two proofs of
 	// possession. A refusal comes back as a *wire.ErrorResponse.
 	ProbeIssue(ctx context.Context, req *wire.ProbeIssueRequest) (*wire.IssueResponse, error)
+	// MachineIssue relays an anonymous machine's renewal request (03-11b,
+	// D-15) as parsed; the server checks only its form. The signer alone
+	// decides, from the admin-signed directory and the machine's proof of
+	// possession. A refusal comes back as a *wire.ErrorResponse.
+	MachineIssue(ctx context.Context, req *wire.MachineIssueRequest) (*wire.IssueResponse, error)
 }
 
 // socketSigner reaches keyroster-signer over its Unix socket. Every call
@@ -130,6 +136,10 @@ func (s socketSigner) ProbeIssue(ctx context.Context, req *wire.ProbeIssueReques
 	return s.client().ProbeIssue(ctx, req)
 }
 
+func (s socketSigner) MachineIssue(ctx context.Context, req *wire.MachineIssueRequest) (*wire.IssueResponse, error) {
+	return s.client().MachineIssue(ctx, req)
+}
+
 const (
 	// maxSignerCalls is the most signer calls keyroster-server has in
 	// flight through its budget (budgetSigner). F11 (03-08g). It is
@@ -139,16 +149,34 @@ const (
 	// allowance, since each call returns only after the signer has freed
 	// its slot (socketSigner).
 	maxSignerCalls = wire.MaxServerSignerCalls
-	// maxAgentCalls is the most of them relayed for host agents (the agent
-	// share), so that logins, revocations, directory installs, forgets and
-	// the server's own reads always have the other half. F11 (03-08g).
+	// maxAgentCalls is the most of them relayed for host agents and
+	// anonymous machines together (the agent share), so that logins,
+	// revocations, directory installs, forgets and the server's own reads
+	// always have the other half. F11 (03-08g); machines inside it by OQ-b1
+	// (03-11b, 2026-11-10).
 	maxAgentCalls = maxSignerCalls / 2
+	// maxMachineCalls is the most of the agent share that anonymous machine
+	// renewals hold (the machine share, D6 of 03-09), so a flood of them
+	// leaves host agents at least maxAgentCalls - maxMachineCalls (03-11b).
+	maxMachineCalls = 2
+)
+
+// share names the budget share a call takes besides its total token
+// (03-11b).
+type share int
+
+const (
+	shareNone    share = iota // interactive calls and the server's own reads: total only
+	shareAgent                // relayed for a host agent: agent, then total
+	shareMachine              // relayed for an anonymous machine: machine, agent, then total
 )
 
 // budgetSigner is the server's signer-call budget, F11 (03-08g). newServer
 // puts it in front of every signer, the test double included. At most
-// maxSignerCalls calls are in flight through it, and at most maxAgentCalls
-// of them are calls relayed for host agents (the agent share).
+// maxSignerCalls calls are in flight through it, at most maxAgentCalls of
+// them are calls relayed for host agents or anonymous machines (the agent
+// share), and at most maxMachineCalls of those are machine calls (the
+// machine share, 03-11b).
 //
 // A call in the agent share takes its agent token first and its total
 // token second. In the other order, agent calls queued on the agent share
@@ -156,14 +184,21 @@ const (
 // queued agent calls hold nothing, and the other maxSignerCalls -
 // maxAgentCalls tokens stay open to logins, revocations, directory
 // installs, forgets and the server's own Status and directory reads. A
-// call waits for a token only until its ctx ends, takes nothing when its
-// ctx has already ended, and gives back an agent token it took when its
-// ctx ends at the total wait. Each method releases its tokens before it
-// returns, on every path, so no caller holds a token across another
-// signerAPI call.
+// machine call takes its machine token before both, for the same reason:
+// queued machine calls hold no agent and no total token. So machines never
+// hold more than maxMachineCalls, and machines and agents together never
+// more than maxAgentCalls, which leaves the interactive calls their half
+// (Q-G1, D6, OQ-b1 of 03-11b). A call waits for a token only until its ctx
+// ends, takes nothing when its ctx has already ended, and gives back every
+// token it took when its ctx ends at a later wait. Each method releases its
+// tokens before it returns, on every path, so no caller holds a token
+// across another signerAPI call.
 //
-// The agent-share rule (owner decision 2026-10-30): every signer call made
-// on behalf of a host agent takes the agent share. The share is chosen by
+// The agent-share rule (owner decision 2026-10-30, widened by OQ-b1 of
+// 03-11b, 2026-11-10): every signer call made on behalf of a host agent
+// takes the agent share, and so does every call relayed for an anonymous
+// machine (MachineIssue, which takes the machine share first). The share
+// is chosen by
 // method: GetBundle and GetDirectoryVersion take it wherever they are
 // called. Today GetDirectoryVersion has three callers: the state route
 // (directoryItems), the heartbeat route through confirmRemoval, and the
@@ -183,28 +218,47 @@ const (
 // does not build until budgetSigner implements it, and an embedded
 // interface would pass it through unbudgeted.
 type budgetSigner struct {
-	next  signerAPI
-	total chan struct{} // one token per call in flight, maxSignerCalls
-	agent chan struct{} // one token per agent call in flight, maxAgentCalls
+	next    signerAPI
+	total   chan struct{} // one token per call in flight, maxSignerCalls
+	agent   chan struct{} // one token per agent or machine call in flight, maxAgentCalls
+	machine chan struct{} // one token per machine call in flight, maxMachineCalls
 }
 
 // withSignerBudget returns sg behind the server's signer-call budget.
 func withSignerBudget(sg signerAPI) signerAPI {
-	return &budgetSigner{next: sg, total: make(chan struct{}, maxSignerCalls), agent: make(chan struct{}, maxAgentCalls)}
+	return &budgetSigner{
+		next:    sg,
+		total:   make(chan struct{}, maxSignerCalls),
+		agent:   make(chan struct{}, maxAgentCalls),
+		machine: make(chan struct{}, maxMachineCalls),
+	}
 }
 
-// acquire takes the tokens of one call: an agent token first when agent is
-// set, then a total token. It returns ctx's error, holding nothing, when
-// ctx has ended or ends while it waits. release frees the total token,
-// then the agent token.
-func (b *budgetSigner) acquire(ctx context.Context, agent bool) (release func(), err error) {
+// acquire takes the tokens of one call: a machine token first for
+// shareMachine, then an agent token for shareMachine and shareAgent, then
+// a total token. It returns ctx's error, holding nothing, when ctx has
+// ended or ends while it waits. release frees the total token, then the
+// agent token, then the machine token.
+func (b *budgetSigner) acquire(ctx context.Context, sh share) (release func(), err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	machine := sh == shareMachine
+	agent := machine || sh == shareAgent
+	if machine {
+		select {
+		case b.machine <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if agent {
 		select {
 		case b.agent <- struct{}{}:
 		case <-ctx.Done():
+			if machine {
+				<-b.machine
+			}
 			return nil, ctx.Err()
 		}
 	}
@@ -214,12 +268,18 @@ func (b *budgetSigner) acquire(ctx context.Context, agent bool) (release func(),
 		if agent {
 			<-b.agent
 		}
+		if machine {
+			<-b.machine
+		}
 		return nil, ctx.Err()
 	}
 	return func() {
 		<-b.total
 		if agent {
 			<-b.agent
+		}
+		if machine {
+			<-b.machine
 		}
 	}, nil
 }
@@ -228,8 +288,8 @@ func (b *budgetSigner) acquire(ctx context.Context, agent bool) (release func(),
 // call, and releases the budget when call returns, whatever it returned.
 // A budget error is returned as is, so errors.Is(err,
 // context.DeadlineExceeded) still holds for it.
-func budgeted[T any](ctx context.Context, b *budgetSigner, agent bool, call func() (T, error)) (T, error) {
-	release, err := b.acquire(ctx, agent)
+func budgeted[T any](ctx context.Context, b *budgetSigner, sh share, call func() (T, error)) (T, error) {
+	release, err := b.acquire(ctx, sh)
 	if err != nil {
 		var zero T
 		return zero, err
@@ -239,26 +299,26 @@ func budgeted[T any](ctx context.Context, b *budgetSigner, agent bool, call func
 }
 
 func (b *budgetSigner) Status(ctx context.Context) (*wire.StatusResponse, error) {
-	return budgeted(ctx, b, false, func() (*wire.StatusResponse, error) { return b.next.Status(ctx) })
+	return budgeted(ctx, b, shareNone, func() (*wire.StatusResponse, error) { return b.next.Status(ctx) })
 }
 
 func (b *budgetSigner) GetDirectory(ctx context.Context) (*wire.GetDirectoryResponse, error) {
-	return budgeted(ctx, b, false, func() (*wire.GetDirectoryResponse, error) { return b.next.GetDirectory(ctx) })
+	return budgeted(ctx, b, shareNone, func() (*wire.GetDirectoryResponse, error) { return b.next.GetDirectory(ctx) })
 }
 
 func (b *budgetSigner) InstallDirectory(ctx context.Context, req *wire.InstallDirectoryRequest) (*wire.InstallDirectoryResponse, error) {
-	return budgeted(ctx, b, false, func() (*wire.InstallDirectoryResponse, error) { return b.next.InstallDirectory(ctx, req) })
+	return budgeted(ctx, b, shareNone, func() (*wire.InstallDirectoryResponse, error) { return b.next.InstallDirectory(ctx, req) })
 }
 
 // Login waits for the budget as part of the send, so ctx's deadline bounds
 // that wait too; the read after the send stays bounded by
 // signerCallTimeout (socketSigner).
 func (b *budgetSigner) Login(ctx context.Context, req *wire.LoginIssueRequest) (*wire.IssueResponse, error) {
-	return budgeted(ctx, b, false, func() (*wire.IssueResponse, error) { return b.next.Login(ctx, req) })
+	return budgeted(ctx, b, shareNone, func() (*wire.IssueResponse, error) { return b.next.Login(ctx, req) })
 }
 
 func (b *budgetSigner) Revoke(ctx context.Context, req *wire.RevokeRequest) (*wire.RevokeResponse, error) {
-	return budgeted(ctx, b, false, func() (*wire.RevokeResponse, error) { return b.next.Revoke(ctx, req) })
+	return budgeted(ctx, b, shareNone, func() (*wire.RevokeResponse, error) { return b.next.Revoke(ctx, req) })
 }
 
 // GetKRL calls the next signer without a token (Q-G5): it takes no lock on
@@ -270,27 +330,33 @@ func (b *budgetSigner) GetKRL(ctx context.Context) (*wire.GetKRLResponse, error)
 
 // GetBundle is relayed for a host agent and takes the agent share.
 func (b *budgetSigner) GetBundle(ctx context.Context, v uint64) (*wire.GetBundleResponse, error) {
-	return budgeted(ctx, b, true, func() (*wire.GetBundleResponse, error) { return b.next.GetBundle(ctx, v) })
+	return budgeted(ctx, b, shareAgent, func() (*wire.GetBundleResponse, error) { return b.next.GetBundle(ctx, v) })
 }
 
 // GetDirectoryVersion is relayed for a host agent and takes the agent
 // share, from every caller.
 func (b *budgetSigner) GetDirectoryVersion(ctx context.Context, v uint64) (*wire.GetDirectoryVersionResponse, error) {
-	return budgeted(ctx, b, true, func() (*wire.GetDirectoryVersionResponse, error) { return b.next.GetDirectoryVersion(ctx, v) })
+	return budgeted(ctx, b, shareAgent, func() (*wire.GetDirectoryVersionResponse, error) { return b.next.GetDirectoryVersion(ctx, v) })
 }
 
 func (b *budgetSigner) ForgetAgent(ctx context.Context, req *wire.ForgetRequest) (*wire.ForgetResponse, error) {
-	return budgeted(ctx, b, false, func() (*wire.ForgetResponse, error) { return b.next.ForgetAgent(ctx, req) })
+	return budgeted(ctx, b, shareNone, func() (*wire.ForgetResponse, error) { return b.next.ForgetAgent(ctx, req) })
 }
 
 // HostIssue is relayed for a host agent and takes the agent share (03-09).
 func (b *budgetSigner) HostIssue(ctx context.Context, req *wire.HostIssueRequest) (*wire.IssueResponse, error) {
-	return budgeted(ctx, b, true, func() (*wire.IssueResponse, error) { return b.next.HostIssue(ctx, req) })
+	return budgeted(ctx, b, shareAgent, func() (*wire.IssueResponse, error) { return b.next.HostIssue(ctx, req) })
 }
 
 // ProbeIssue is relayed for a host agent and takes the agent share (03-10).
 func (b *budgetSigner) ProbeIssue(ctx context.Context, req *wire.ProbeIssueRequest) (*wire.IssueResponse, error) {
-	return budgeted(ctx, b, true, func() (*wire.IssueResponse, error) { return b.next.ProbeIssue(ctx, req) })
+	return budgeted(ctx, b, shareAgent, func() (*wire.IssueResponse, error) { return b.next.ProbeIssue(ctx, req) })
+}
+
+// MachineIssue is relayed for an anonymous machine: it takes the machine
+// share, then the agent share, then a total token (03-11b, OQ-b1).
+func (b *budgetSigner) MachineIssue(ctx context.Context, req *wire.MachineIssueRequest) (*wire.IssueResponse, error) {
+	return budgeted(ctx, b, shareMachine, func() (*wire.IssueResponse, error) { return b.next.MachineIssue(ctx, req) })
 }
 
 const (

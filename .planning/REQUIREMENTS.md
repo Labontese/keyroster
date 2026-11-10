@@ -36,7 +36,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 - [ ] **AUTH-03**: User can run `sshcm login` and get a short-lived certificate (hours, capped per role) loaded into their ssh-agent with matching lifetime, on Linux, macOS and Windows
 - [x] **AUTH-04**: Login flow shows the public-key fingerprint on both CLI and browser so the user can confirm the request (phishing resistance)
 - [ ] **AUTH-05**: Binding or resetting a user's credential requires admin quorum
-- [ ] **AUTH-06**: Machine/automation identities can obtain longer-lived (day-scale) certificates within role caps
+- [x] **AUTH-06**: Machine/automation identities can obtain longer-lived (day-scale) certificates within role caps
 
 ### Authorization & Insider Resistance (AUTHZ)
 
@@ -60,7 +60,7 @@ Requirements for the first public release. Each maps to roadmap phases.
 
 ### Revocation (REVOKE)
 
-- [ ] **REVOKE-01**: Admin can revoke a certificate (by serial/key ID) or a key, or a person, host or machine, from the CLI (UI moves to Phase 4)
+- [x] **REVOKE-01**: Admin can revoke a certificate (by serial/key ID) or a key, or a person, host or machine, from the CLI (UI moves to Phase 4)
 - [x] **REVOKE-02**: Revocation is distributed as a KRL (own encoder, verified against `ssh-keygen -Q`) to all hosts automatically
 - [x] **REVOKE-03**: KRLs are signed (detached SSHSIG), installed atomically, last-good copy kept, rollback to older versions refused — a broken KRL never locks out the fleet
 - [ ] **REVOKE-04**: Clients trust hosts via a CLI-managed `@cert-authority` known_hosts entry and revoked host keys list (no TOFU)
@@ -187,7 +187,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUTH-03 | Phase 2 | Pending: partially met. Linux and Windows verified end to end (02-14); Windows removal at expiry timed from a cold start on 2026-10-23 (key gone between 3.9 s before and 1.1 s after valid_before, 5 s resolution; Daniel-PC clock against server clock, skew unmeasured); macOS browser leg UNVERIFIED, phase 2 closed without it by owner decision 2026-10-23 (02-VERIFICATION.md override) |
 | AUTH-04 | Phase 2 | Complete |
 | AUTH-05 | Phase 4 | Pending |
-| AUTH-06 | Phase 3 | Pending |
+| AUTH-06 | Phase 3 | Complete |
 | AUTHZ-01 | Phase 2 | Complete |
 | AUTHZ-02 | Phase 3 | Complete |
 | AUTHZ-03 | Phase 4 | Pending |
@@ -202,7 +202,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AGENT-05 | Phase 3 | Complete |
 | AGENT-06 | Phase 3 | Pending |
 | AGENT-07 | Phase 3 | Complete |
-| REVOKE-01 | Phase 3 | Pending (reworded 2026-10-23, Phase 3 D-02/D-04/D-12/D-17/D-18) |
+| REVOKE-01 | Phase 3 | Complete (reworded 2026-10-23, Phase 3 D-02/D-04/D-12/D-17/D-18) |
 | REVOKE-02 | Phase 3 | Complete |
 | REVOKE-03 | Phase 3 | Complete |
 | REVOKE-04 | Phase 3 | Pending |

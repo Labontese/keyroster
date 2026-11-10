@@ -618,15 +618,22 @@ below the copy and with no copy (`TestRestoreCrossCheck`), and
 `krl-served.json`, then against an older genuine copy, which stops the block
 (`TestAgentEnrollEndToEnd`, 03-07). UNVERIFIED on a real host until 03-16.
 
-**Keep users away until the replay is done.** From the moment the
-restored signer starts again until the last lost version is back (step
-3), it serves the restored, older directory: a user disabled in a lost
+**Keep users away until the pending disables at the end of step 3 have
+been revoked again.** From the moment the restored signer starts again
+until the pending disables at the end of step 3 have been revoked again,
+it serves the restored, older directory, then the replayed versions: a
+user disabled in a lost
 version can log in again, and a role removed in a lost version grants
 again. Keep keyroster-server unreachable to users for that time, for
 example with a firewall rule that admits only the admin workstation; set
 it before you release the hold. The admin's `keyroster directory install` goes through the
-server, so stopping it is not an option. (UNVERIFIED: no test blocks user
-access.)
+server, so stopping it is not an option. The rule also stops machines
+from renewing their certificates, because the renew route is on the same
+port. Keep it until the pending disables at the end of step 3 have been
+revoked again. A pending disable counts as revoked again only once its
+disable is installed and confirmed, one name at a time (step 3,
+**Pending disables**); a re-run whose proposal is only written does not
+count. (UNVERIFIED: no test blocks user access.)
 
 **Taking a file backup of `signer.db`.** No other document describes
 it, and keyroster-signer has no backup command. Copy `signer.db` and its
@@ -979,6 +986,12 @@ structurally (see the warning above).
         SERIAL` (repeatable) and running the command again, or later with
         `keyroster revoke key` and that public key (see
         [revoke.md](revoke.md#7-the-audit-log-after-a-revocation)).
+        Name with `--revoke-lost SERIAL` every lost certificate of a
+        machine or host whose disable is still pending (a proposal not yet
+        installed): the recovery otherwise keeps it live (revoke.md,
+        section 7). The recovery summary names each lost certificate's
+        subject and key (`lost certificate: serial S, ROLE, subject NAME,
+        key ...`), so match it by subject against the pending disables.
       - `lost certificates expired before this request, not carried: <n>`
         counts the lost host and machine certificates that had expired.
 
@@ -1216,8 +1229,9 @@ structurally (see the warning above).
    accepted too, and the disablements of the lost version are then gone
    for good.
 
-   Keep users away until the last lost version is back (the firewall
-   rule set before step 1).
+   Keep users away until the pending disables below have been revoked
+   again (the firewall rule set before step 1): each installed and
+   confirmed, as **Pending disables** below says.
 
    **Enrolled hosts and a re-made version (owner decision D-R2, PR #71).**
    An enrolled host whose agent already accepted a lost version refuses a
@@ -1477,6 +1491,59 @@ structurally (see the warning above).
    versions with the lost numbers: escalate first while any host is
    enrolled, and re-bootstrap every enrolled host that saw a lost version
    (**Enrolled hosts and a re-made version**, at the start of this step).
+
+   **Pending disables: revoke them again after the last lost version.**
+   (03-11b; UNVERIFIED: no test runs a restore with a pending disable.) A
+   disable that is still a pending proposal is not in force, and the holds
+   that kept its machine or host from new certificates are released by the
+   versions you reinstall (the reason is below). Revoke them again one
+   name at a time:
+
+   1. Replay every lost directory version, the last one included, as
+      above. If the restore lost none, start right after the release in
+      step 2b.
+   2. Take the first name. For a machine whose disable is still pending,
+      run `keyroster revoke machine NAME --out DIR` with a new DIR; for
+      such a host, `keyroster revoke host NAME --out DIR` (the sweeps and
+      their exit codes are in revoke.md, section 4c for a machine and
+      section 4b for a host).
+   3. The run writes a second disable proposal next to the first: co-sign
+      and install exactly one of the two, because once one is installed
+      the other no longer builds on the installed version and is refused.
+      Only then take the next name and go back to step 2: its re-run then
+      builds on the version you just installed. Do not run the re-runs of
+      several names before installing: they all build on the same version,
+      so once the first is installed every other is refused, and that
+      install releases the other names' holds.
+   4. When every name is done, confirm each: run `keyroster revoke machine
+      NAME` (for a host, `keyroster revoke host NAME`) once more, without
+      `--out`. It must exit 0 and print the line that starts `Directory
+      version V lists NAME as disabled (the server's word), and the KRL
+      lists every certificate of NAME`. Any other result, for example exit
+      3 or exit 4, means that name is not confirmed: read what the run
+      printed, and if its disable is not installed, go back to step 2 for
+      it; then confirm it again.
+   5. Then take the new export (below), and lift the firewall rule only
+      after that.
+
+   Why after the last lost version: the recovery stamps the holds it arms
+   with the restored directory version, and every lost version you
+   reinstall is newer, so each releases them (any newer directory version
+   releases a hold). A revoke run before the replay is released the same
+   way. A `revoke machine` run after the last lost version holds the
+   machine's name until the next version, which should be its disable:
+   that is why each name's disable is installed before the next name's
+   re-run, whose install would release the hold.
+   Hosts have no name hold: the re-run revokes the host's certificates in
+   the signer's records again and holds a host key again only when its
+   latest certificate is one of them and not yet revoked (revoke.md,
+   section 4b); a host key whose latest certificate is one the recovery
+   carried is not held again, so for a compromised host key use `--keys`
+   or install the disable at once (D-R2, accepted). If a lost disable
+   cannot be replayed (the passkey-chain case above), redo it with
+   `keyroster revoke machine NAME` or `keyroster revoke host NAME` after
+   the last replayed version, not with a bare directory edit, so the sweep
+   runs at the right version.
 
    **After the replay, the new export is the baseline.** The replayed
    installs are new log entries with new times, so the log no longer

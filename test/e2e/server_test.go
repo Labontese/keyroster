@@ -58,6 +58,9 @@ type serverOpts struct {
 	// PoPHosts sets pop.hosts in the genesis policy (bootstrapOpts), which
 	// host enrollment needs (03-07).
 	PoPHosts bool
+	// PoPMachines sets pop.machines in the genesis policy (bootstrapOpts),
+	// which machine renewal needs (03-11b).
+	PoPMachines bool
 	// AgentListen starts keyroster-server with --agent-listen on
 	// 127.0.0.1:serverEnv.AgentPort (03-07).
 	AgentListen bool
@@ -96,7 +99,7 @@ func startServerEnv(t *testing.T, opts serverOpts) *serverEnv {
 	t.Helper()
 	port := freePort(t)
 	bopts := bootstrapOpts{WebAuthnRPID: serverRPID, WebAuthnOrigins: []string{"https://" + serverRPID + ":" + strconv.Itoa(port)}, AdminQuorum: opts.AdminQuorum,
-		PoPHosts: opts.PoPHosts}
+		PoPHosts: opts.PoPHosts, PoPMachines: opts.PoPMachines}
 	if opts.Software {
 		bopts.Backend = "software"
 		bopts.BackendOpts = map[string]string{"passphrase-file": passphraseFile(t)}

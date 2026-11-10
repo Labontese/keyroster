@@ -70,6 +70,7 @@ type Server struct {
 	loginLimit      map[string]*limiter // CLI login routes: one per route, per client, with that route's global backstop
 	loginUserLimit  *limiter            // CLI login API routes, per route, user name and client
 	krlLimit        *limiter            // GET /api/v1/krl, per client, with a global backstop
+	machineLimit    *limiter            // POST /api/v1/machine/renew, per client, with a global backstop (03-11b)
 	agentLimit      *limiter            // the state route of enrolled agents, per agent identity, with a global backstop
 	agentAnonLimit  *limiter            // enrollment and unknown identities, per client address, with a global backstop
 	mirror          dirMirror           // the installed directory, as of the last Status that matched
@@ -199,6 +200,10 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 		// The published KRL (03-01) is its own class: per client, with
 		// the global backstop.
 		krlLimit: newLimiter(krlPerMinute, krlBurst, globalFactor*krlPerMinute, globalFactor*krlBurst),
+		// The anonymous machine renew route (03-11b) is its own class: per
+		// client address, with the global backstop, and no per-name limiter,
+		// which would let an anonymous caller lock a machine out.
+		machineLimit: newLimiter(machinePerMinute, machineBurst, globalFactor*machinePerMinute, globalFactor*machineBurst),
 		// The agent routes (03-07) are two classes of their own (PR #71
 		// review F1/F2, newAgentLimiters).
 		agentPort:        cfg.AgentPort,
@@ -237,6 +242,10 @@ func newServer(cfg Config, sg signerAPI) (*Server, error) {
 	// (CLI only, D-12).
 	mux.Handle("POST "+serverclient.AdminRevokePath, s.rateLimited(s.adminLimit, false, s.requireAdminLimit(maxRevokeBody, http.HandlerFunc(s.handleRevoke))))
 	mux.Handle("GET "+serverclient.KRLPath, s.rateLimited(s.krlLimit, false, http.HandlerFunc(s.handleKRL)))
+	// A machine renews its own certificate by proof of possession of its
+	// key (03-11b, D-15): anonymous, on its own limiter; the signer alone
+	// decides.
+	mux.Handle("POST "+serverclient.MachineRenewPath, s.rateLimited(s.machineLimit, false, http.HandlerFunc(s.handleMachineRenew)))
 	// Host enrollment (03-07): the admin mints a join token and lists the
 	// pending hosts. The agents' own routes are on the agent listener
 	// only (AgentHandler), never on this mux.

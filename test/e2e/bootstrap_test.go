@@ -53,6 +53,9 @@ type bootstrapOpts struct {
 	// it (the policy a host agent needs, 03-05/03-06); genesis-policy
 	// itself has no such flag.
 	PoPHosts bool
+	// PoPMachines sets pop.machines in the same edit (03-11b), which
+	// machine renewal needs.
+	PoPMachines bool
 	// HostMaxTTL, when set, is the genesis policy's host certificate cap
 	// (root genesis-policy --host-max-ttl); zero keeps the default (03-09).
 	HostMaxTTL time.Duration
@@ -247,7 +250,7 @@ func (e *signerEnv) signGenesis(t *testing.T, opts bootstrapOpts) {
 	if code, out := keyrosterWithAgent(t, "", args...); code != 0 {
 		t.Fatalf("root genesis-policy exited %d:\n%s", code, out)
 	}
-	if opts.PoPHosts {
+	if opts.PoPHosts || opts.PoPMachines {
 		data, err := os.ReadFile(policy) //nolint:gosec // test fixture
 		if err != nil {
 			t.Fatal(err)
@@ -256,7 +259,7 @@ func (e *signerEnv) signGenesis(t *testing.T, opts bootstrapOpts) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		p.PoP = &trust.PoPPolicy{Hosts: true}
+		p.PoP = &trust.PoPPolicy{Hosts: opts.PoPHosts, Machines: opts.PoPMachines}
 		doc, err := p.Canonical()
 		if err != nil {
 			t.Fatal(err)

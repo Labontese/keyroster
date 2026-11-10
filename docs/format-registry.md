@@ -168,8 +168,9 @@ Evidence types and other prefixes:
 The single source is `classify` in `internal/signer/refusal.go`. It maps each
 detail string the signer refuses with to its reason class. Every new detail
 must be added there. The default branch is `ReasonInternal`, which the
-signer answers with `CodeInternal`. On revoke, host forget and directory
-install keyroster-server answers that with 503 ("signer unavailable"); on
+signer answers with `CodeInternal`. On revoke, host forget, directory
+install and the machine renew route keyroster-server answers that with 503
+("signer unavailable"); on
 login redeem it answers 400 "login not redeemable". Either way a detail
 that is not classified reads as a signer failure instead of a refusal, to
 the client and in the audit log's reason class.

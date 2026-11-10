@@ -53,13 +53,14 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 type gateSigner struct {
 	*fakeSigner
 
-	mu                       sync.Mutex
-	gate                     chan struct{}
-	opened                   bool
-	fail                     error
-	calls                    map[string]int
-	inFlight, peak           int
-	agentInFlight, agentPeak int
+	mu                           sync.Mutex
+	gate                         chan struct{}
+	opened                       bool
+	fail                         error
+	calls                        map[string]int
+	inFlight, peak               int
+	agentInFlight, agentPeak     int
+	machineInFlight, machinePeak int
 }
 
 func newGateSigner() *gateSigner {
@@ -71,7 +72,9 @@ func newGateSigner() *gateSigner {
 
 // wait is the gate step of every budgeted method.
 func (g *gateSigner) wait(ctx context.Context, method string) error {
-	agent := method == "GetBundle" || method == "GetDirectoryVersion" || method == "HostIssue" || method == "ProbeIssue"
+	// A machine call is also an agent call: it holds an agent token (03-11b).
+	machine := method == "MachineIssue"
+	agent := machine || method == "GetBundle" || method == "GetDirectoryVersion" || method == "HostIssue" || method == "ProbeIssue"
 	g.mu.Lock()
 	g.calls[method]++
 	g.inFlight++
@@ -80,6 +83,10 @@ func (g *gateSigner) wait(ctx context.Context, method string) error {
 		g.agentInFlight++
 		g.agentPeak = max(g.agentPeak, g.agentInFlight)
 	}
+	if machine {
+		g.machineInFlight++
+		g.machinePeak = max(g.machinePeak, g.machineInFlight)
+	}
 	gate, fail := g.gate, g.fail
 	g.mu.Unlock()
 	defer func() {
@@ -87,6 +94,9 @@ func (g *gateSigner) wait(ctx context.Context, method string) error {
 		g.inFlight--
 		if agent {
 			g.agentInFlight--
+		}
+		if machine {
+			g.machineInFlight--
 		}
 		g.mu.Unlock()
 	}()
@@ -137,6 +147,13 @@ func (g *gateSigner) load() (inFlight, peak, agentInFlight, agentPeak int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.inFlight, g.peak, g.agentInFlight, g.agentPeak
+}
+
+// machineLoad returns the machine calls in flight and their peak (03-11b).
+func (g *gateSigner) machineLoad() (inFlight, peak int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.machineInFlight, g.machinePeak
 }
 
 func (g *gateSigner) Status(ctx context.Context) (*wire.StatusResponse, error) {
@@ -216,6 +233,13 @@ func (g *gateSigner) ProbeIssue(ctx context.Context, req *wire.ProbeIssueRequest
 	return g.fakeSigner.ProbeIssue(ctx, req)
 }
 
+func (g *gateSigner) MachineIssue(ctx context.Context, req *wire.MachineIssueRequest) (*wire.IssueResponse, error) {
+	if err := g.wait(ctx, "MachineIssue"); err != nil {
+		return nil, err
+	}
+	return g.fakeSigner.MachineIssue(ctx, req)
+}
+
 // callSigner makes one call of method through sg.
 func callSigner(ctx context.Context, sg signerAPI, method string) error {
 	var err error
@@ -242,6 +266,8 @@ func callSigner(ctx context.Context, sg signerAPI, method string) error {
 		_, err = sg.HostIssue(ctx, &wire.HostIssueRequest{})
 	case "ProbeIssue":
 		_, err = sg.ProbeIssue(ctx, &wire.ProbeIssueRequest{})
+	case "MachineIssue":
+		_, err = sg.MachineIssue(ctx, &wire.MachineIssueRequest{})
 	default:
 		panic("callSigner: unknown method " + method)
 	}
@@ -302,24 +328,36 @@ func TestSignerBudget(t *testing.T) {
 	// is at most half the total, and the other half stays open to
 	// interactive calls.
 	share := maxSignerCalls / 2
+	// The machine share (D6 of 03-09, OQ-b1 of 03-11b): machines hold at
+	// most 2, inside the agent share.
+	machineShare := 2
 	// Every budgeted method, each alone (pre-merge review fix round 1):
 	// an interactive method fills the whole budget and no more; an agent
 	// method fills its share and no more, so 20 of them alone peak at the
 	// share, not at the total.
 	t.Run("total_bounded", func(t *testing.T) {
 		for _, tc := range []struct {
-			method string
-			agent  bool
+			method  string
+			agent   bool
+			machine bool
 		}{
-			{"Status", false}, {"GetDirectory", false}, {"InstallDirectory", false}, {"Login", false},
-			{"Revoke", false}, {"ForgetAgent", false}, {"GetBundle", true}, {"GetDirectoryVersion", true}, {"HostIssue", true},
-			{"ProbeIssue", true},
+			{"Status", false, false}, {"GetDirectory", false, false}, {"InstallDirectory", false, false}, {"Login", false, false},
+			{"Revoke", false, false}, {"ForgetAgent", false, false}, {"GetBundle", true, false}, {"GetDirectoryVersion", true, false},
+			{"HostIssue", true, false},
+			{"ProbeIssue", true, false},
+			// A machine call holds a machine and an agent token (03-11b,
+			// OQ-b1): 20 of them peak at the machine share, and the agent
+			// peak reads the same.
+			{"MachineIssue", true, true},
 		} {
 			t.Run(tc.method, func(t *testing.T) {
 				g, b := setup(t)
 				want, wantAgent := maxSignerCalls, 0
 				if tc.agent {
 					want, wantAgent = share, share
+				}
+				if tc.machine {
+					want, wantAgent = machineShare, machineShare
 				}
 				errs := goCalls(ctx, b, 20, only(tc.method))
 				waitFor(t, "the calls in flight", func() bool { n, _, _, _ := g.load(); return n >= want })
@@ -424,6 +462,162 @@ func TestSignerBudget(t *testing.T) {
 				t.Fatalf("%s after %d failing calls = %v", m, 3*maxSignerCalls, err)
 			}
 		}
+	})
+	// The machine share (03-11b, OQ-b1): 20 machine calls alone hold
+	// exactly the machine share.
+	t.Run("machine_share_bounded", func(t *testing.T) {
+		g, b := setup(t)
+		errs := goCalls(ctx, b, 20, only("MachineIssue"))
+		waitFor(t, "the machine share in flight", func() bool { m, _ := g.machineLoad(); return m >= machineShare })
+		time.Sleep(settle)
+		if m, peak := g.machineLoad(); m != machineShare || peak != machineShare {
+			t.Fatalf("20 machine calls: %d in flight, peak %d; want %d", m, peak, machineShare)
+		}
+		g.open()
+		collect(t, errs, 20)
+	})
+	// Machines take the agent share too (OQ-b1): machines and agents
+	// together hold at most the share, in either order of arrival, so 6
+	// interactive calls, an admin Revoke among them, all get a token and a
+	// 7th waits.
+	t.Run("machine_and_agent_leave_interactive_floor", func(t *testing.T) {
+		for _, machinesFirst := range []bool{true, false} {
+			g, b := setup(t)
+			var first, second <-chan error
+			if machinesFirst {
+				first = goCalls(ctx, b, machineShare, only("MachineIssue"))
+				waitFor(t, "the machine calls in flight", func() bool { m, _ := g.machineLoad(); return m >= machineShare })
+				second = goCalls(ctx, b, share, only("GetBundle"))
+			} else {
+				first = goCalls(ctx, b, share, only("GetBundle"))
+				waitFor(t, "the agent calls in flight", func() bool { _, _, a, _ := g.load(); return a >= share })
+				second = goCalls(ctx, b, machineShare, only("MachineIssue"))
+			}
+			waitFor(t, "the agent share in flight", func() bool { _, _, a, _ := g.load(); return a >= share })
+			time.Sleep(settle)
+			if n, _, a, _ := g.load(); n != share || a != share {
+				t.Fatalf("machines first %v: %d calls in flight, %d of them in the agent share; want %d and %d", machinesFirst, n, a, share, share)
+			}
+			interactive := goCalls(ctx, b, maxSignerCalls-share, alternate("Revoke", "Login"))
+			waitFor(t, "the interactive floor in flight", func() bool { n, _, a, _ := g.load(); return n-a >= maxSignerCalls-share })
+			wctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+			err := callSigner(wctx, b, "Revoke")
+			cancel()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("machines first %v: a 7th interactive call = %v, want it to wait", machinesFirst, err)
+			}
+			if n, _, a, _ := g.load(); n-a != maxSignerCalls-share || a != share {
+				t.Fatalf("machines first %v: %d interactive and %d agent-share calls in flight; want %d and %d", machinesFirst, n-a, a, maxSignerCalls-share, share)
+			}
+			g.open()
+			collect(t, first, cap(first))
+			collect(t, second, cap(second))
+			collect(t, interactive, maxSignerCalls-share)
+		}
+	})
+	// Queued machine calls hold no total token (03-11b): with the agent
+	// share held by agents, 20 machine calls wait and the interactive
+	// calls keep their half.
+	t.Run("queued_machine_calls_hold_no_total_token", func(t *testing.T) {
+		g, b := setup(t)
+		bs := b.(*budgetSigner)
+		agents := goCalls(ctx, b, share, only("GetBundle"))
+		waitFor(t, "the agent share in flight", func() bool { _, _, a, _ := g.load(); return a >= share })
+		machines := goCalls(ctx, b, 20, only("MachineIssue"))
+		time.Sleep(settle)
+		if used := len(bs.total); used != share {
+			t.Fatalf("with 20 machine calls queued behind the agent share, %d total tokens are in use; want %d", used, share)
+		}
+		interactive := goCalls(ctx, b, maxSignerCalls-share, only("Login"))
+		waitFor(t, "the interactive floor in flight", func() bool { n, _, a, _ := g.load(); return n-a >= maxSignerCalls-share })
+		if m, _ := g.machineLoad(); m != 0 {
+			t.Fatalf("%d machine calls reached the signer with the agent share held", m)
+		}
+		g.open()
+		collect(t, agents, share)
+		collect(t, machines, 20)
+		collect(t, interactive, maxSignerCalls-share)
+	})
+	// bothMachinesIn starts machineShare machine calls with bounded ctx
+	// behind a shut gate and fails the test unless all of them reach the
+	// signer at once, which they cannot if a machine or agent token leaked;
+	// it never hangs.
+	bothMachinesIn := func(t *testing.T, g *gateSigner, b signerAPI, extraAgents int) {
+		t.Helper()
+		g.shut()
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		machines := goCalls(cctx, b, machineShare, only("MachineIssue"))
+		agents := goCalls(cctx, b, extraAgents, only("GetBundle"))
+		want := machineShare + extraAgents
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			n, _, a, _ := g.load()
+			m, _ := g.machineLoad()
+			if m == machineShare && a == want && n == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				g.open()
+				t.Fatalf("only %d machine calls and %d agent-share calls got in at once; want %d and %d (a token leaked)", m, a, machineShare, want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		g.open()
+		for i := range want {
+			var err error
+			if i < machineShare {
+				err = <-machines
+			} else {
+				err = <-agents
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("call %d of %d: %v (a token leaked)", i+1, want, err)
+			} else if err != nil {
+				t.Fatalf("call %d of %d: %v", i+1, want, err)
+			}
+		}
+	}
+	// A machine call whose ctx ends at the agent wait gives its machine
+	// token back (03-11b).
+	t.Run("machine_token_released_when_agent_wait_ends", func(t *testing.T) {
+		g, b := setup(t)
+		agents := goCalls(ctx, b, share, only("GetBundle"))
+		waitFor(t, "the agent share in flight", func() bool { _, _, a, _ := g.load(); return a >= share })
+		wctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		waiting := goCalls(wctx, b, machineShare, only("MachineIssue"))
+		for i := range machineShare {
+			if err := <-waiting; !errors.Is(err, context.DeadlineExceeded) {
+				cancel()
+				t.Fatalf("machine call %d at the agent wait = %v, want its ctx's error", i+1, err)
+			}
+		}
+		cancel()
+		if n := g.gated("MachineIssue"); n != 0 {
+			t.Fatalf("%d machine calls reached the signer with the agent share held", n)
+		}
+		g.open()
+		collect(t, agents, share)
+		bothMachinesIn(t, g, b, 0)
+	})
+	// A machine call whose ctx ends at the total wait gives its agent and
+	// machine tokens back (03-11b).
+	t.Run("machine_tokens_released_when_total_wait_ends", func(t *testing.T) {
+		g, b := setup(t)
+		logins := goCalls(ctx, b, maxSignerCalls, only("Login"))
+		waitFor(t, "the total in flight", func() bool { n, _, _, _ := g.load(); return n >= maxSignerCalls })
+		wctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		waiting := goCalls(wctx, b, machineShare, only("MachineIssue"))
+		for i := range machineShare {
+			if err := <-waiting; !errors.Is(err, context.DeadlineExceeded) {
+				cancel()
+				t.Fatalf("machine call %d at the total wait = %v, want its ctx's error", i+1, err)
+			}
+		}
+		cancel()
+		g.open()
+		collect(t, logins, maxSignerCalls)
+		bothMachinesIn(t, g, b, share-machineShare)
 	})
 	t.Run("getkrl_outside_budget", func(t *testing.T) {
 		g, b := setup(t)
